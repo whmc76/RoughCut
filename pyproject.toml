@@ -1,0 +1,52 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "fastcut"
+version = "0.1.0"
+description = "Automated video editing and subtitle review for talking-head and unboxing videos"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]",
+    "sqlalchemy[asyncio]>=2.0",
+    "alembic",
+    "asyncpg",
+    "celery[redis]",
+    "redis",
+    "boto3",
+    "openai>=1.0",
+    "anthropic>=0.30",
+    "httpx",
+    "watchdog",
+    "webrtcvad-wheels",
+    "scenedetect[opencv]",
+    "opentimelineio",
+    "pydantic-settings>=2.0",
+    "click",
+    "python-multipart",
+    "aiofiles",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+    "pytest-cov",
+    "httpx",
+    "factory-boy",
+]
+
+[project.scripts]
+fastcut = "fastcut.cli:cli"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/fastcut"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.hatch.envs.default]
+python = "3.11"
