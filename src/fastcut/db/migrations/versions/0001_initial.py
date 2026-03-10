@@ -11,6 +11,8 @@ from alembic import op
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
+TIMESTAMPTZ = sa.TIMESTAMP(timezone=True)
+
 revision: str = "0001"
 down_revision = None
 branch_labels = None
@@ -28,8 +30,8 @@ def upgrade() -> None:
         sa.Column("error_message", sa.Text),
         sa.Column("channel_profile", sa.Text),
         sa.Column("language", sa.Text, server_default="zh-CN"),
-        sa.Column("created_at", postgresql.TIMESTAMPTZ, server_default=sa.func.now()),
-        sa.Column("updated_at", postgresql.TIMESTAMPTZ, server_default=sa.func.now()),
+        sa.Column("created_at", TIMESTAMPTZ, server_default=sa.func.now()),
+        sa.Column("updated_at", TIMESTAMPTZ, server_default=sa.func.now()),
     )
 
     op.create_table(
@@ -39,8 +41,8 @@ def upgrade() -> None:
         sa.Column("step_name", sa.Text, nullable=False),
         sa.Column("status", sa.Text, nullable=False, server_default="pending"),
         sa.Column("attempt", sa.Integer, server_default="0"),
-        sa.Column("started_at", postgresql.TIMESTAMPTZ),
-        sa.Column("finished_at", postgresql.TIMESTAMPTZ),
+        sa.Column("started_at", TIMESTAMPTZ),
+        sa.Column("finished_at", TIMESTAMPTZ),
         sa.Column("error_message", sa.Text),
         sa.Column("metadata", postgresql.JSONB),
     )
@@ -53,7 +55,7 @@ def upgrade() -> None:
         sa.Column("artifact_type", sa.Text, nullable=False),
         sa.Column("storage_path", sa.Text),
         sa.Column("data_json", postgresql.JSONB),
-        sa.Column("created_at", postgresql.TIMESTAMPTZ, server_default=sa.func.now()),
+        sa.Column("created_at", TIMESTAMPTZ, server_default=sa.func.now()),
     )
 
     op.create_table(
@@ -67,7 +69,7 @@ def upgrade() -> None:
         sa.Column("speaker", sa.Text),
         sa.Column("text", sa.Text, nullable=False),
         sa.Column("words_json", postgresql.JSONB),
-        sa.Column("created_at", postgresql.TIMESTAMPTZ, server_default=sa.func.now()),
+        sa.Column("created_at", TIMESTAMPTZ, server_default=sa.func.now()),
     )
 
     op.create_table(
@@ -81,7 +83,7 @@ def upgrade() -> None:
         sa.Column("text_raw", sa.Text, nullable=False),
         sa.Column("text_norm", sa.Text),
         sa.Column("text_final", sa.Text),
-        sa.Column("created_at", postgresql.TIMESTAMPTZ, server_default=sa.func.now()),
+        sa.Column("created_at", TIMESTAMPTZ, server_default=sa.func.now()),
     )
 
     op.create_table(
@@ -98,7 +100,7 @@ def upgrade() -> None:
         sa.Column("human_decision", sa.Text),
         sa.Column("human_override", sa.Text),
         sa.Column("version", sa.Integer, server_default="1"),
-        sa.Column("created_at", postgresql.TIMESTAMPTZ, server_default=sa.func.now()),
+        sa.Column("created_at", TIMESTAMPTZ, server_default=sa.func.now()),
     )
 
     op.create_table(
@@ -113,7 +115,7 @@ def upgrade() -> None:
         sa.Column("suggested_fix", sa.Text),
         sa.Column("confidence", sa.Float),
         sa.Column("human_decision", sa.Text),
-        sa.Column("created_at", postgresql.TIMESTAMPTZ, server_default=sa.func.now()),
+        sa.Column("created_at", TIMESTAMPTZ, server_default=sa.func.now()),
     )
 
     op.create_table(
@@ -125,7 +127,7 @@ def upgrade() -> None:
         sa.Column("snippet", sa.Text),
         sa.Column("supports_claim", sa.Boolean),
         sa.Column("source_rank", sa.Integer),
-        sa.Column("cached_at", postgresql.TIMESTAMPTZ, server_default=sa.func.now()),
+        sa.Column("cached_at", TIMESTAMPTZ, server_default=sa.func.now()),
     )
 
     op.create_table(
@@ -136,7 +138,7 @@ def upgrade() -> None:
         sa.Column("timeline_type", sa.Text, nullable=False),
         sa.Column("data_json", postgresql.JSONB, nullable=False),
         sa.Column("otio_data", sa.Text),
-        sa.Column("created_at", postgresql.TIMESTAMPTZ, server_default=sa.func.now()),
+        sa.Column("created_at", TIMESTAMPTZ, server_default=sa.func.now()),
     )
 
     op.create_table(
@@ -147,7 +149,7 @@ def upgrade() -> None:
         sa.Column("output_path", sa.Text),
         sa.Column("status", sa.Text, server_default="pending"),
         sa.Column("progress", sa.Float, server_default="0"),
-        sa.Column("created_at", postgresql.TIMESTAMPTZ, server_default=sa.func.now()),
+        sa.Column("created_at", TIMESTAMPTZ, server_default=sa.func.now()),
     )
 
     op.create_table(
@@ -158,7 +160,7 @@ def upgrade() -> None:
         sa.Column("target_id", postgresql.UUID(as_uuid=True), nullable=False),
         sa.Column("action", sa.Text, nullable=False),
         sa.Column("override_text", sa.Text),
-        sa.Column("created_at", postgresql.TIMESTAMPTZ, server_default=sa.func.now()),
+        sa.Column("created_at", TIMESTAMPTZ, server_default=sa.func.now()),
     )
 
     op.create_table(
@@ -167,7 +169,7 @@ def upgrade() -> None:
         sa.Column("path", sa.Text, nullable=False, unique=True),
         sa.Column("channel_profile", sa.Text),
         sa.Column("enabled", sa.Boolean, server_default="true"),
-        sa.Column("created_at", postgresql.TIMESTAMPTZ, server_default=sa.func.now()),
+        sa.Column("created_at", TIMESTAMPTZ, server_default=sa.func.now()),
     )
 
     op.create_table(
@@ -177,7 +179,7 @@ def upgrade() -> None:
         sa.Column("correct_form", sa.Text, nullable=False),
         sa.Column("category", sa.Text),
         sa.Column("context_hint", sa.Text),
-        sa.Column("created_at", postgresql.TIMESTAMPTZ, server_default=sa.func.now()),
+        sa.Column("created_at", TIMESTAMPTZ, server_default=sa.func.now()),
     )
 
     op.create_table(
@@ -185,7 +187,7 @@ def upgrade() -> None:
         sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True),
         sa.Column("name", sa.Text, nullable=False, unique=True),
         sa.Column("config_json", postgresql.JSONB, nullable=False),
-        sa.Column("created_at", postgresql.TIMESTAMPTZ, server_default=sa.func.now()),
+        sa.Column("created_at", TIMESTAMPTZ, server_default=sa.func.now()),
     )
 
     # Indexes

@@ -20,6 +20,7 @@ from fastcut.edit.otio_export import export_to_otio
 from fastcut.edit.render_plan import build_render_plan, save_render_plan
 from fastcut.edit.timeline import save_editorial_timeline
 from fastcut.media.audio import extract_audio
+from fastcut.media.output import build_output_name, extract_cover_frame, get_output_dir, write_srt_file
 from fastcut.media.probe import probe, validate_media
 from fastcut.media.render import render_video
 from fastcut.media.silence import detect_silence
@@ -27,6 +28,22 @@ from fastcut.review.glossary_engine import apply_glossary_corrections
 from fastcut.speech.postprocess import save_subtitle_items, split_into_subtitles
 from fastcut.speech.transcribe import transcribe_audio
 from fastcut.storage.s3 import get_storage, job_key
+
+
+async def _resolve_source(job, tmpdir: str) -> Path:
+    """
+    Return a local Path for the job's source file.
+    If source_path is already a local file, return it directly.
+    Otherwise download from S3 to tmpdir.
+    """
+    source_path = Path(job.source_path)
+    if source_path.exists():
+        return source_path
+    # It's an S3 key — download to tmpdir
+    local = Path(tmpdir) / job.source_name
+    storage = get_storage()
+    await storage.async_download_file(job.source_path, local)
+    return local
 
 
 async def _get_job_and_step(job_id: str, step_name: str):
@@ -54,14 +71,13 @@ async def run_probe(job_id: str) -> dict:
         )
         step = step_result.scalar_one()
 
-        source_path = Path(job.source_path)
-        meta = await probe(source_path)
-        validate_media(meta)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source_path = await _resolve_source(job, tmpdir)
+            meta = await probe(source_path)
+            validate_media(meta)
+            file_hash = _hash_file(source_path)
 
-        # Hash the file
-        file_hash = _hash_file(source_path)
         job.file_hash = file_hash
-
         artifact = Artifact(
             job_id=job.id,
             step_id=step.id,
@@ -96,8 +112,8 @@ async def run_extract_audio(job_id: str) -> dict:
         )
         step = step_result.scalar_one()
 
-        source_path = Path(job.source_path)
         with tempfile.TemporaryDirectory() as tmpdir:
+            source_path = await _resolve_source(job, tmpdir)
             audio_path = Path(tmpdir) / "audio.wav"
             await extract_audio(source_path, audio_path)
 
@@ -296,31 +312,55 @@ async def run_render(job_id: str) -> dict:
         await session.commit()
 
     # Render (outside transaction — can be long)
-    source_path = Path(job.source_path)
+    # Build canonical output name: YYYYMMDD_OriginalStem
+    out_name = build_output_name(job.source_name, job.created_at)
+    out_dir = get_output_dir()
+    local_mp4 = out_dir / f"{out_name}.mp4"
+    local_srt = out_dir / f"{out_name}.srt"
+    local_cover = out_dir / f"{out_name}_cover.jpg"
+
     with tempfile.TemporaryDirectory() as tmpdir:
-        output_path = Path(tmpdir) / f"output_{job_id}.mp4"
+        source_path = await _resolve_source(job, tmpdir)
+        tmp_mp4 = Path(tmpdir) / "output.mp4"
         await render_video(
             source_path=source_path,
             render_plan=render_plan_timeline.data_json,
             editorial_timeline=editorial_timeline.data_json,
-            output_path=output_path,
+            output_path=tmp_mp4,
             subtitle_items=subtitle_dicts,
         )
+        import shutil
+        shutil.copy2(tmp_mp4, local_mp4)
 
-        # Upload output
-        storage = get_storage()
-        output_key = job_key(job_id, "output.mp4")
-        await storage.async_upload_file(output_path, output_key)
+        # Write SRT alongside
+        write_srt_file(subtitle_dicts, local_srt)
+
+        # Extract cover frame (source still in tmpdir)
+        try:
+            await extract_cover_frame(source_path, local_cover)
+        except Exception:
+            local_cover = None  # Cover is non-critical
+
+    # Also upload to S3/MinIO for API download endpoint
+    storage = get_storage()
+    output_key = job_key(job_id, "output.mp4")
+    await storage.async_upload_file(local_mp4, output_key)
 
     # Update render output
+    local_paths = {
+        "mp4": str(local_mp4),
+        "srt": str(local_srt),
+        "cover": str(local_cover) if local_cover else None,
+        "output_name": out_name,
+    }
     async with get_session_factory()() as session:
         render_output = await session.get(RenderOutput, render_output_id)
-        render_output.output_path = output_key
+        render_output.output_path = str(local_mp4)
         render_output.status = "done"
         render_output.progress = 1.0
         await session.commit()
 
-    return {"output_key": output_key}
+    return {"output_key": output_key, "local": local_paths}
 
 
 def _hash_file(path: Path, chunk_size: int = 65536) -> str:
@@ -333,6 +373,11 @@ def _hash_file(path: Path, chunk_size: int = 65536) -> str:
 
 def run_step_sync(step_name: str, job_id: str) -> dict:
     """Synchronous entry point for Celery tasks."""
+    # Force-reset engine singleton so asyncpg doesn't reuse connections from a previous event loop
+    import fastcut.db.session as _sess
+    _sess._engine = None
+    _sess._session_factory = None
+
     step_map = {
         "probe": run_probe,
         "extract_audio": run_extract_audio,

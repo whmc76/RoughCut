@@ -45,6 +45,10 @@ class Settings(BaseSettings):
     ffmpeg_timeout_sec: int = 600
     allowed_extensions: list[str] = [".mp4", ".mov", ".mkv", ".avi", ".webm"]
 
+    # Output
+    output_dir: str = "Y:/EDC系列/AI粗剪"
+    output_name_pattern: str = "{date}_{stem}"  # {date}=YYYYMMDD, {stem}=original filename stem
+
     # Feature flags
     fact_check_enabled: bool = False
 
@@ -52,7 +56,10 @@ class Settings(BaseSettings):
     @classmethod
     def parse_extensions(cls, v: object) -> list[str]:
         if isinstance(v, str):
-            return [ext.strip() for ext in v.split(",")]
+            # Handle comma-separated string (legacy) or JSON-like
+            v = v.strip()
+            if not v.startswith("["):
+                return [ext.strip() for ext in v.split(",")]
         return v  # type: ignore[return-value]
 
     @property

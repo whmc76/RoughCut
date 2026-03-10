@@ -5,12 +5,18 @@ from celery import Celery
 from fastcut.config import get_settings
 
 
+def _on_worker_init(**kwargs):
+    from fastcut.db.session import set_worker_mode
+    set_worker_mode(True)
+
+
 def create_celery_app() -> Celery:
     settings = get_settings()
     app = Celery(
         "fastcut",
         broker=settings.celery_broker_url,
         backend=settings.celery_result_backend,
+        include=["fastcut.pipeline.tasks"],
     )
     app.conf.update(
         task_serializer="json",
@@ -25,6 +31,8 @@ def create_celery_app() -> Celery:
         worker_prefetch_multiplier=1,
         task_acks_late=True,
     )
+    from celery.signals import worker_init
+    worker_init.connect(_on_worker_init)
     return app
 
 
