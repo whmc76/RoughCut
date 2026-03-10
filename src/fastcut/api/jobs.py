@@ -22,6 +22,22 @@ from fastcut.storage.s3 import get_storage, job_key
 router = APIRouter(prefix="/jobs", tags=["jobs"])
 
 
+@router.get("", response_model=list[JobOut])
+async def list_jobs(
+    limit: int = 50,
+    offset: int = 0,
+    session: AsyncSession = Depends(get_session),
+):
+    result = await session.execute(
+        select(Job)
+        .options(selectinload(Job.steps))
+        .order_by(Job.created_at.desc())
+        .limit(limit)
+        .offset(offset)
+    )
+    return result.scalars().all()
+
+
 @router.post("", response_model=JobOut, status_code=status.HTTP_201_CREATED)
 async def create_job(
     file: UploadFile = File(...),
