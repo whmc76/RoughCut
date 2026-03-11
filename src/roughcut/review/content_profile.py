@@ -10,6 +10,7 @@ from roughcut.edit.presets import WorkflowPreset, get_workflow_preset, select_pr
 from roughcut.providers.factory import get_reasoning_provider, get_search_provider
 from roughcut.providers.multimodal import complete_with_images
 from roughcut.providers.reasoning.base import Message, extract_json_text
+from roughcut.review.content_profile_memory import summarize_content_profile_user_memory
 
 
 def build_transcript_excerpt(subtitle_items: list[dict], *, max_items: int = 36, max_chars: int = 1400) -> str:
@@ -81,16 +82,20 @@ async def infer_content_profile(
     source_name: str,
     subtitle_items: list[dict],
     channel_profile: str | None,
+    user_memory: dict[str, Any] | None = None,
     include_research: bool = True,
 ) -> dict[str, Any]:
     transcript_excerpt = build_transcript_excerpt(subtitle_items)
     heuristic_profile = _seed_profile_from_subtitles(subtitle_items)
+    memory_profile = _seed_profile_from_user_memory(transcript_excerpt, user_memory)
+    memory_prompt = summarize_content_profile_user_memory(user_memory)
     initial_profile = _fallback_profile(
         source_name=source_name,
         channel_profile=channel_profile,
         transcript_excerpt=transcript_excerpt,
     )
     initial_profile.update(heuristic_profile)
+    initial_profile.update(memory_profile)
 
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -101,20 +106,23 @@ async def infer_content_profile(
                     "请结合图片和口播字幕，判断视频主体是什么。"
                     "如果画面里有产品、软件界面、店招、包装、盒体、logo、英文单词、型号字样，都优先识别。"
                     "尽量给出开箱产品品牌、开箱产品型号/版本、主体类型、视频主题，以及适合的剪辑预设。"
+                    "另外补一个适合评论区互动的问题，要贴合内容，不要总是泛泛地问值不值。"
                     "subject_brand 指视频里被开箱/被讲解的产品或主体品牌，不是频道名、作者名。"
                     "如果不确定，不要乱编，留空即可。\n\n"
                     "输出 JSON："
                     '{"subject_brand":"","subject_model":"","subject_type":"","video_theme":"",'
-                    '"preset_name":"","hook_line":"","visible_text":"","search_queries":[]}'
+                    '"preset_name":"","hook_line":"","visible_text":"","engagement_question":"","search_queries":[]}'
                     "\n要求：preset_name 只能从 unboxing_default、unboxing_limited、unboxing_upgrade、edc_tactical、screen_tutorial、vlog_daily、talking_head_commentary、gameplay_highlight、food_explore 中选择。"
                     "\n如果文件名像时间戳、相机命名或流水号，不要把它当成型号。"
                     "\nsearch_queries 提供 2-3 个适合联网搜索验证的查询词。"
+                    f"\n用户历史偏好（仅作辅助参考，不能压过当前字幕和画面）：\n{memory_prompt or '无'}"
                     f"\n源文件名：{source_name}\n字幕节选：\n{transcript_excerpt}"
                 )
                 content = await complete_with_images(prompt, frame_paths, max_tokens=500, json_mode=True)
                 candidate = json.loads(extract_json_text(content))
                 initial_profile.update({k: v for k, v in candidate.items() if v})
                 _merge_specific_profile_hints(initial_profile, heuristic_profile)
+                _merge_specific_profile_hints(initial_profile, memory_profile)
     except Exception:
         pass
 
@@ -123,12 +131,14 @@ async def infer_content_profile(
         prompt = (
             "你在分析中文短视频的口播内容。视频可能是开箱评测、录屏教学、vlog、口播观点、游戏高光或美食探店。"
             "请根据文件名、字幕节选和已有视觉判断，补全视频主体的开箱产品品牌、开箱产品型号/版本、主体类型、视频主题，并给出适合联网验证的搜索词。"
+            "同时补一个适合评论区互动的问题，要基于视频内容，不要重复泛化问题。"
             "subject_brand 指视频里被开箱/被讲解的产品或主体品牌，不是频道名、作者名。"
             "如果文件名像时间戳、相机命名或流水号，不要把它当成型号。"
             "如果不确定，请留空，不要乱编。"
             "\n输出 JSON："
             '{"subject_brand":"","subject_model":"","subject_type":"","video_theme":"",'
-            '"preset_name":"","hook_line":"","visible_text":"","search_queries":[]}'
+            '"preset_name":"","hook_line":"","visible_text":"","engagement_question":"","search_queries":[]}'
+            f"\n用户历史偏好（仅作辅助参考，不能压过当前字幕和画面）：\n{memory_prompt or '无'}"
             f"\n已有判断：{json.dumps(initial_profile, ensure_ascii=False)}"
             f"\n源文件名：{source_name}\n字幕节选：\n{transcript_excerpt}"
         )
@@ -144,6 +154,7 @@ async def infer_content_profile(
         candidate = response.as_json()
         initial_profile.update({k: v for k, v in candidate.items() if v})
         _merge_specific_profile_hints(initial_profile, heuristic_profile)
+        _merge_specific_profile_hints(initial_profile, memory_profile)
     except Exception:
         pass
 
@@ -152,6 +163,7 @@ async def infer_content_profile(
         source_name=source_name,
         channel_profile=channel_profile,
         transcript_excerpt=transcript_excerpt,
+        user_memory=user_memory,
         include_research=include_research,
     )
 
@@ -231,11 +243,15 @@ async def enrich_content_profile(
     source_name: str,
     channel_profile: str | None,
     transcript_excerpt: str,
+    user_memory: dict[str, Any] | None = None,
     include_research: bool = True,
 ) -> dict[str, Any]:
     enriched = dict(profile or {})
     context_hints = _seed_profile_from_context(enriched, transcript_excerpt)
+    memory_hints = _seed_profile_from_user_memory(transcript_excerpt, user_memory)
+    memory_prompt = summarize_content_profile_user_memory(user_memory)
     _merge_specific_profile_hints(enriched, context_hints)
+    _merge_specific_profile_hints(enriched, memory_hints)
 
     preset = select_preset(
         channel_profile=channel_profile or enriched.get("preset_name"),
@@ -256,6 +272,7 @@ async def enrich_content_profile(
                 prompt = (
                     "你在做短视频字幕与封面前置研究。请把字幕/画面线索与搜索证据做双重校验，"
                     "确认视频主体的开箱产品品牌、开箱产品型号/版本、主体类型、视频主题，并生成适合做封面的三段标题。"
+                    "同时生成一个适合评论区互动的问题，要具体、自然、贴合内容，不要反复使用同一句泛化问题。"
                     "只有当字幕/画面线索与搜索结果能够互相印证时，才提升品牌、型号等关键信息。"
                     "如果搜索结果与字幕线索冲突，优先保守，保留已有可信字段，不要为了补全而乱改。"
                     "优先给出品牌名、系列名或主体名，不要输出泛化标题如“产品开箱与上手体验”。"
@@ -266,6 +283,7 @@ async def enrich_content_profile(
                     '"hook_line":"","visible_text":"","summary":"","engagement_question":"",'
                     '"cover_title":{"top":"","main":"","bottom":""}}'
                     f"\n已有判断：{json.dumps(enriched, ensure_ascii=False)}"
+                    f"\n用户历史偏好（仅作辅助参考，不能压过当前字幕和画面）：\n{memory_prompt or '无'}"
                     f"\n字幕/画面线索：{transcript_excerpt}"
                     f"\n搜索证据：{json.dumps(evidence, ensure_ascii=False)}"
                 )
@@ -281,11 +299,12 @@ async def enrich_content_profile(
                 refined = response.as_json()
                 enriched.update({k: v for k, v in refined.items() if v})
                 _merge_specific_profile_hints(enriched, context_hints)
+                _merge_specific_profile_hints(enriched, memory_hints)
             except Exception:
                 pass
 
     if _is_generic_subject_type(str(enriched.get("subject_type") or "")):
-        hinted = context_hints
+        hinted = memory_hints or context_hints
         if hinted.get("subject_type"):
             enriched["subject_type"] = hinted["subject_type"]
 
@@ -301,8 +320,18 @@ async def enrich_content_profile(
     enriched["cover_title"] = cover_title
     if not enriched.get("summary") or _is_generic_profile_summary(str(enriched.get("summary") or "")):
         enriched["summary"] = _build_profile_summary(enriched)
-    if not enriched.get("engagement_question"):
-        enriched["engagement_question"] = "你觉得这次到手值不值？"
+    if _is_generic_engagement_question(str(enriched.get("engagement_question") or "")):
+        generated_question = await _generate_engagement_question(
+            profile=enriched,
+            transcript_excerpt=transcript_excerpt,
+            evidence=enriched.get("evidence") or [],
+            preset=preset,
+            memory_prompt=memory_prompt,
+        )
+        if generated_question:
+            enriched["engagement_question"] = generated_question
+    if _is_generic_engagement_question(str(enriched.get("engagement_question") or "")):
+        enriched["engagement_question"] = _build_fallback_engagement_question(enriched, preset)
     return enriched
 
 
@@ -613,6 +642,42 @@ def _seed_profile_from_context(profile: dict[str, Any], transcript_excerpt: str)
     return _seed_profile_from_text(text)
 
 
+def _seed_profile_from_user_memory(transcript_excerpt: str, user_memory: dict[str, Any] | None) -> dict[str, Any]:
+    if not user_memory:
+        return {}
+
+    transcript = transcript_excerpt or ""
+    normalized = transcript.upper()
+    seeded: dict[str, Any] = {}
+
+    field_preferences = user_memory.get("field_preferences") or {}
+    for field_name in ("subject_brand", "subject_model", "subject_type", "video_theme"):
+        for item in field_preferences.get(field_name) or []:
+            value = str(item.get("value") or "").strip()
+            if not value:
+                continue
+            if _memory_value_matches_transcript(value, transcript, normalized):
+                seeded[field_name] = value
+                break
+
+    queries: list[str] = []
+    for item in user_memory.get("keyword_preferences") or []:
+        keyword = str(item.get("keyword") or "").strip()
+        if not keyword:
+            continue
+        if _memory_keyword_matches_transcript(keyword, transcript, normalized):
+            queries.append(keyword)
+            _merge_specific_profile_hints(
+                seeded,
+                _seed_profile_from_text(keyword),
+            )
+        if len(queries) >= 4:
+            break
+    if queries:
+        seeded["search_queries"] = queries
+    return seeded
+
+
 def _seed_profile_from_text(transcript: str) -> dict[str, Any]:
     normalized = transcript.upper()
 
@@ -658,6 +723,32 @@ def _seed_profile_from_text(transcript: str) -> dict[str, Any]:
     return seeded
 
 
+def _memory_value_matches_transcript(value: str, transcript: str, normalized: str) -> bool:
+    if not value:
+        return False
+    upper = value.upper()
+    if upper in normalized:
+        return True
+    compact = _clean_line(value)
+    if compact and compact in _clean_line(transcript):
+        return True
+    return False
+
+
+def _memory_keyword_matches_transcript(keyword: str, transcript: str, normalized: str) -> bool:
+    if _memory_value_matches_transcript(keyword, transcript, normalized):
+        return True
+
+    tokens = [token.strip().upper() for token in keyword.split() if len(token.strip()) >= 3]
+    if len(tokens) >= 2 and all(token in normalized for token in tokens[:2]):
+        return True
+    if len(tokens) >= 2 and any(token in normalized for token in tokens[1:]):
+        return True
+    if len(tokens) == 1 and tokens[0] in normalized:
+        return True
+    return False
+
+
 def _merge_specific_profile_hints(profile: dict[str, Any], hints: dict[str, Any]) -> None:
     if hints.get("subject_brand") and not profile.get("subject_brand"):
         profile["subject_brand"] = hints["subject_brand"]
@@ -690,6 +781,61 @@ def _is_generic_profile_summary(text: str) -> bool:
         "适合后续做搜索校验、字幕纠错和剪辑包装",
     )
     return all(fragment in normalized for fragment in generic_fragments)
+
+
+def _is_generic_engagement_question(text: str) -> bool:
+    normalized = _clean_line(text).rstrip("？?")
+    if not normalized:
+        return True
+    generic_questions = {
+        "你觉得这次到手值不值",
+        "你觉得值不值",
+        "这次值不值",
+        "你会买吗",
+        "你会入手吗",
+        "你怎么看",
+    }
+    return normalized in generic_questions
+
+
+async def _generate_engagement_question(
+    *,
+    profile: dict[str, Any],
+    transcript_excerpt: str,
+    evidence: list[dict[str, Any]],
+    preset: WorkflowPreset,
+    memory_prompt: str,
+) -> str | None:
+    try:
+        provider = get_reasoning_provider()
+        prompt = (
+            "你在给中文短视频设计评论区互动问题。"
+            "请基于视频主体、主题、字幕线索和搜索证据，输出 1 条最适合这条视频的问题。"
+            "要求：自然、具体、像真人会问的话，优先围绕升级点、争议点、购买决策、使用体验、教程卡点或口味判断。"
+            "不要重复“你觉得值不值”这类泛化问题，除非视频核心真的就是价格值不值。"
+            "不要输出多条，不要解释。\n"
+            '输出 JSON：{"engagement_question":""}'
+            f"\n当前视频信息：{json.dumps(profile, ensure_ascii=False)}"
+            f"\n用户历史偏好（仅作辅助参考，不能压过当前视频）：\n{memory_prompt or '无'}"
+            f"\n字幕节选：\n{transcript_excerpt or '无'}"
+            f"\n搜索证据：{json.dumps(evidence[:6], ensure_ascii=False)}"
+            f"\n预设：{preset.name} / {preset.label}"
+        )
+        response = await provider.complete(
+            [
+                Message(role="system", content="你是中文短视频互动策划助手。"),
+                Message(role="user", content=prompt),
+            ],
+            temperature=0.3,
+            max_tokens=160,
+            json_mode=True,
+        )
+        question = _normalize_engagement_question(response.as_json().get("engagement_question") or "")
+        if _is_generic_engagement_question(question):
+            return None
+        return question or None
+    except Exception:
+        return None
 
 
 def _extract_reference_frames(source_path: Path, tmpdir: Path, *, count: int) -> list[Path]:
@@ -786,6 +932,58 @@ def _fallback_profile(
             preset,
         ),
     }
+
+
+def _normalize_engagement_question(text: str) -> str:
+    value = str(text or "").strip()
+    if not value:
+        return ""
+    value = re.sub(r"\s+", "", value).strip("，。！!；;：:")
+    if not value:
+        return ""
+    if not value.endswith(("？", "?")):
+        value = f"{value}？"
+    return value
+
+
+def _build_fallback_engagement_question(profile: dict[str, Any], preset: WorkflowPreset) -> str:
+    theme = str(profile.get("video_theme") or "").strip()
+    subject = _build_engagement_subject(profile, preset)
+
+    if preset.name == "screen_tutorial":
+        return "这一步你平时最容易卡在哪？"
+    if preset.name == "vlog_daily":
+        return "这种日常节奏你还想看我拍哪一段？"
+    if preset.name == "talking_head_commentary":
+        return "这个判断你是赞同还是反对？"
+    if preset.name == "gameplay_highlight":
+        return "这波如果换你来打会怎么处理？"
+    if preset.name == "food_explore":
+        return "这家店你会为了这道菜专门跑一趟吗？"
+    if any(token in theme for token in ("对比", "横评", "比较")):
+        return _normalize_engagement_question(f"{subject}和上一版你更站哪边")
+    if any(token in theme for token in ("升级", "改款", "新版", "迭代")):
+        return _normalize_engagement_question(f"{subject}这次升级你最在意哪一项")
+    if any(token in theme for token in ("限定", "联名", "纪念版", "特别版")):
+        return _normalize_engagement_question(f"{subject}这版你会为了限定入手吗")
+    if any(token in theme for token in ("体验", "上手", "实测")):
+        return _normalize_engagement_question(f"{subject}第一眼你最想先看哪处细节")
+    return _normalize_engagement_question(f"{subject}你最想先看哪项细节")
+
+
+def _build_engagement_subject(profile: dict[str, Any], preset: WorkflowPreset) -> str:
+    brand = str(profile.get("subject_brand") or "").strip()
+    model = str(profile.get("subject_model") or "").strip()
+    subject_type = str(profile.get("subject_type") or "").strip()
+    if brand and model:
+        return f"{brand} {model}".strip()[:18]
+    if model:
+        return model[:18]
+    if brand and subject_type and not _is_generic_subject_type(subject_type):
+        return f"{brand}{subject_type}"[:18]
+    if subject_type and not _is_generic_subject_type(subject_type):
+        return subject_type[:18]
+    return preset.label[:18]
 
 
 def _fallback_polish_text(text: str, *, glossary_terms: list[dict[str, Any]]) -> str:

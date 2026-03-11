@@ -196,6 +196,63 @@
     .evidence-snippet { margin-top: 6px; color: var(--text2); font-size: 12px; line-height: 1.6; }
     .evidence-url { margin-top: 6px; color: var(--text3); font-size: 11px; word-break: break-all; }
     .evidence-empty { background: var(--surface2); border: 1px dashed var(--border); border-radius: 10px; padding: 14px; color: var(--text3); font-size: 12px; }
+    .packaging-choice-groups { display: grid; gap: 12px; }
+    .packaging-choice-group {
+      border: 1px solid var(--border); border-radius: 14px;
+      background: linear-gradient(180deg, rgba(29,33,49,0.96), rgba(19,22,34,0.98));
+      overflow: hidden;
+    }
+    .packaging-choice-summary {
+      list-style: none; cursor: pointer; display: flex; align-items: center; justify-content: space-between;
+      gap: 12px; padding: 14px 16px;
+    }
+    .packaging-choice-summary::-webkit-details-marker { display: none; }
+    .packaging-choice-summary::after {
+      content: '展开'; color: var(--text3); font-size: 12px; font-weight: 600; flex-shrink: 0;
+    }
+    .packaging-choice-group[open] .packaging-choice-summary::after { content: '收起'; color: var(--accent2); }
+    .packaging-choice-group-title { display: flex; align-items: center; gap: 8px; font-weight: 700; font-size: 14px; }
+    .packaging-choice-count {
+      display: inline-flex; align-items: center; justify-content: center; min-width: 22px; height: 22px;
+      padding: 0 8px; border-radius: 999px; font-size: 11px; color: var(--accent2);
+      border: 1px solid rgba(79,195,247,0.24); background: rgba(79,195,247,0.1);
+    }
+    .packaging-choice-group-hint { margin-top: 5px; color: var(--text3); font-size: 12px; line-height: 1.45; }
+    .packaging-choice-group-body { padding: 0 16px 16px; }
+    .packaging-choice-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; }
+    .packaging-choice-card { display: block; cursor: pointer; }
+    .packaging-choice-card input { display: none; }
+    .packaging-choice-body {
+      height: 100%; border: 1px solid var(--border); border-radius: 12px; background: linear-gradient(180deg, rgba(34,38,58,0.96), rgba(22,24,35,0.98));
+      padding: 12px; transition: all 0.15s ease; box-shadow: inset 0 1px 0 rgba(255,255,255,0.03);
+    }
+    .packaging-choice-card:hover .packaging-choice-body { border-color: var(--text3); transform: translateY(-1px); }
+    .packaging-choice-card input:checked + .packaging-choice-body { border-color: var(--accent); box-shadow: 0 0 0 1px rgba(108,99,255,0.3), 0 10px 24px rgba(108,99,255,0.12); }
+    .packaging-choice-title { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-weight: 700; font-size: 13px; }
+    .packaging-choice-tag { font-size: 10px; color: var(--accent2); border: 1px solid rgba(79,195,247,0.28); background: rgba(79,195,247,0.1); border-radius: 999px; padding: 2px 6px; }
+    .packaging-choice-hint { margin-top: 6px; color: var(--text3); font-size: 11px; line-height: 1.45; min-height: 32px; }
+    .packaging-preview {
+      margin-top: 10px; height: 90px; border-radius: 10px; overflow: hidden; border: 1px solid rgba(255,255,255,0.05);
+      position: relative; background: radial-gradient(circle at top left, rgba(79,195,247,0.16), transparent 42%), linear-gradient(135deg, #161925, #262c42 60%, #1a1d27);
+    }
+    .packaging-preview-subtitle {
+      position: absolute; left: 12px; right: 12px; bottom: 10px; text-align: center;
+      font-weight: 800; letter-spacing: 0.2px;
+    }
+    .packaging-preview-cover { position: absolute; inset: 0; padding: 12px; display: flex; flex-direction: column; justify-content: space-between; }
+    .packaging-preview-cover .top { font-size: 11px; font-weight: 800; letter-spacing: 0.8px; opacity: 0.92; }
+    .packaging-preview-cover .main { font-size: 20px; font-weight: 900; line-height: 1; max-width: 72%; }
+    .packaging-preview-cover .bottom { font-size: 11px; font-weight: 700; line-height: 1.2; max-width: 78%; }
+    .packaging-preview-cover .shape { position: absolute; right: 8px; bottom: 6px; width: 74px; height: 74px; border-radius: 18px; opacity: 0.92; }
+    .packaging-preview-cover .shape::after { content: ''; position: absolute; inset: 8px; border-radius: 14px; background: rgba(255,255,255,0.2); }
+    .style-template-hero {
+      display: flex; align-items: flex-start; justify-content: space-between; gap: 16px;
+      padding: 16px 18px; border: 1px solid var(--border); border-radius: 14px;
+      background: linear-gradient(135deg, rgba(108,99,255,0.12), rgba(79,195,247,0.08));
+      margin-bottom: 18px;
+    }
+    .style-template-hero-title { font-size: 15px; font-weight: 700; }
+    .style-template-chip-row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
 
     /* Toast */
     .toast-container { position: fixed; bottom: 24px; right: 24px; z-index: 999; display: flex; flex-direction: column; gap: 10px; }
@@ -303,6 +360,12 @@
     </div>
     <div class="nav-item" data-page="packaging" onclick="nav('packaging')">
       <span class="icon">🎬</span> 包装素材
+    </div>
+    <div class="nav-item" data-page="style-templates" onclick="nav('style-templates')">
+      <span class="icon">🎨</span> 风格模板
+    </div>
+    <div class="nav-item" data-page="behavior-memory" onclick="nav('behavior-memory')">
+      <span class="icon">🧠</span> 行为习惯统计
     </div>
     <div class="nav-item" data-page="glossary" onclick="nav('glossary')">
       <span class="icon">📖</span> 术语词表
@@ -496,6 +559,39 @@
 
     <div class="card" id="packaging-assets-card" style="margin-top:16px">
       <div style="color:var(--text2)">正在加载素材清单…</div>
+    </div>
+  </div>
+
+  <div class="page" id="page-style-templates">
+    <div class="page-header">
+      <div>
+        <div class="page-title">风格模板</div>
+        <div class="page-subtitle">封面默认使用精彩帧加标题；这里单独管理字幕、标题字效和取帧标题色板</div>
+      </div>
+      <button class="btn btn-primary" onclick="saveStyleTemplateConfig()">保存风格模板</button>
+    </div>
+
+    <div class="card" id="style-template-card">
+      <div style="color:var(--text2)">正在加载风格模板…</div>
+    </div>
+  </div>
+
+  <div class="page" id="page-behavior-memory">
+    <div class="page-header">
+      <div>
+        <div class="page-title">行为习惯统计</div>
+        <div class="page-subtitle">汇总人工纠正后的品牌、型号、主题和关键词偏好，方便核对系统记住了什么</div>
+      </div>
+      <div style="display:flex;gap:10px;align-items:center">
+        <select id="memory-channel-filter" onchange="loadBehaviorMemoryStats()">
+          <option value="">全部频道配置</option>
+        </select>
+        <button class="btn btn-ghost btn-sm" onclick="loadBehaviorMemoryStats()">↻ 刷新</button>
+      </div>
+    </div>
+
+    <div class="card" id="behavior-memory-card">
+      <div style="color:var(--text2)">正在加载行为习惯统计…</div>
     </div>
   </div>
 
@@ -748,7 +844,7 @@
         <button class="btn btn-danger" id="btn-stop-services" onclick="stopServices()">停止服务</button>
         <button class="btn btn-ghost" onclick="window.open(window.location.origin, '_blank')">打开当前 GUI</button>
       </div>
-      <div class="hint" id="control-hint" style="margin-top:14px">建议在停止后重新启动时继续使用 `start_roughcut.bat`。</div>
+      <div class="hint" id="control-hint" style="margin-top:14px">建议在停止后重新启动时直接使用 `restart_roughcut.bat`。</div>
     </div>
   </div>
 
@@ -763,6 +859,7 @@
         <div style="font-size:12px;color:var(--text3);margin-top:4px" id="drawer-subtitle"></div>
       </div>
       <div class="toolbar-actions">
+        <button class="btn btn-ghost btn-sm" id="btn-open-folder-drawer" onclick="openJobFolder()">打开文件夹</button>
         <button class="btn btn-primary btn-sm" id="btn-open-profile-modal" onclick="openContentProfileModal()">核对信息</button>
         <button class="btn btn-danger btn-sm" id="btn-job-action" onclick="cancelJob()">取消任务</button>
         <button class="drawer-close" onclick="closeJobDrawer()">✕</button>
@@ -883,6 +980,99 @@ let _configOptions = { transcription_models: {} };
 let _profileJobId = null;
 let _packagingLibrary = null;
 let _jobFilters = { query: '', status: 'all', sort: 'updated_desc' };
+const PACKAGING_SUBTITLE_STYLES = [
+  { value: 'bold_yellow_outline', label: '粗黄描边', tag: 'CTR', hint: '大字高对比，适合开箱、测评、强情绪口播。' },
+  { value: 'white_minimal', label: '纯白极简', tag: '教程', hint: '干净克制，适合录屏、知识类和清爽信息流。' },
+  { value: 'neon_green_glow', label: '荧光霓虹', tag: '硬核', hint: '黑字霓虹边，适合 EDC、科技、游戏高光。' },
+  { value: 'cinema_blue', label: '蓝灰电影感', tag: '质感', hint: '冷调轻阴影，适合观点、复盘、偏纪录片内容。' },
+  { value: 'bubble_pop', label: '圆角气泡', tag: '轻松', hint: '更亲和，适合 vlog、探店、聊天感内容。' },
+  { value: 'keyword_highlight', label: '关键词高亮', tag: '信息点', hint: '重点词更醒目，适合教程、参数说明、卖点表达。' },
+  { value: 'amber_news', label: '琥珀资讯', tag: 'INFO', hint: '偏资讯播报感，适合拆解、盘点、轻新闻化内容。' },
+  { value: 'punch_red', label: '爆点红', tag: 'HOT', hint: '更炸、更强提醒，适合争议点、结论点、强情绪表达。' },
+  { value: 'lime_box', label: '荧光框牌', tag: 'CARD', hint: '像标签条幅，适合卖点提炼和关键句压屏。' },
+  { value: 'soft_shadow', label: '柔影轻字', tag: 'SOFT', hint: '存在感更轻，适合人像、生活感和安静口播。' },
+  { value: 'clean_box', label: '极简黑底牌', tag: 'BOX', hint: '白字黑底更稳定，适合复杂背景和教程说明。' },
+  { value: 'midnight_magenta', label: '午夜洋红', tag: 'NIGHT', hint: '夜感更强，适合潮流、游戏、暗调科技画面。' },
+  { value: 'mint_outline', label: '薄荷描边', tag: 'MINT', hint: '清爽偏科技，适合轻评测、桌搭、精致器物展示。' },
+  { value: 'cobalt_pop', label: '钴蓝冲击', tag: 'BLUE', hint: '更利落，适合数码、效率、功能亮点表达。' },
+  { value: 'rose_gold', label: '玫瑰金', tag: 'ROSE', hint: '更柔和精致，适合高颜值、生活方式、礼物向内容。' },
+  { value: 'slate_caption', label: '石板灰', tag: 'DOC', hint: '理性克制，适合说明、访谈、拆解类内容。' },
+  { value: 'ivory_serif', label: '象牙衬线', tag: 'SERIF', hint: '更像专题片字幕，适合故事、回顾、文化感内容。' },
+  { value: 'cyber_orange', label: '赛博橙', tag: 'CYBER', hint: '高能提醒更强，适合机械、改装、科技话题。' },
+  { value: 'streamer_duo', label: '主播双调', tag: 'LIVE', hint: '更像直播切片，适合游戏、reaction、聊天切片。' },
+  { value: 'doc_gray', label: '纪实灰', tag: 'GRAY', hint: '存在感最低，适合纪录、实拍、现场感内容。' },
+  { value: 'sale_banner', label: '促销条幅', tag: 'SALE', hint: '顶部横幅感更强，适合卖货、福利、活动通知。' },
+  { value: 'coupon_green', label: '优惠券绿', tag: 'DEAL', hint: '像优惠信息贴片，适合电商利益点和折扣强调。' },
+  { value: 'luxury_caps', label: '高奢大写', tag: 'LUX', hint: '更贵、更克制，适合精品开箱和品牌调性内容。' },
+  { value: 'film_subtle', label: '电影轻字', tag: 'FILM', hint: '存在感更轻，适合短片、预告、情绪镜头。' },
+  { value: 'archive_type', label: '档案机打', tag: 'ARCH', hint: '像馆藏说明条，适合回顾、历史、纪实资料感内容。' },
+  { value: 'teaser_glow', label: '预告辉光', tag: 'TEASE', hint: '更像片头预告字幕，适合悬念、预告、高潮切片。' },
+];
+const PACKAGING_COVER_STYLES = [
+  { value: 'preset_default', label: '跟随视频类型', tag: 'AUTO', hint: '默认按内容类型自动匹配封面布局。' },
+  { value: 'tech_showcase', label: '科技展示', tag: 'TECH', hint: '主体清晰、信息标签感强，适合数码和工具。' },
+  { value: 'collection_drop', label: '限定收藏', tag: 'DROP', hint: '更像海报，适合联名、限定、收藏向主题。' },
+  { value: 'upgrade_spotlight', label: '升级聚焦', tag: 'UP', hint: '突出变化点，适合改版、升级、对比内容。' },
+  { value: 'tactical_neon', label: '战术霓虹', tag: 'TACT', hint: '高反差冷色，适合 EDC、游戏、硬核装备。' },
+  { value: 'luxury_blackgold', label: '黑金高奢', tag: 'LUX', hint: '贵感更强，适合收藏款、高客单、精品路线。' },
+  { value: 'retro_poster', label: '复古海报', tag: 'RETRO', hint: '更有情绪和年代感，适合故事性、回顾、评述。' },
+  { value: 'creator_vlog', label: '创作者日记', tag: 'VLOG', hint: '更像创作者个人封面，适合日常分享和陪伴感。' },
+  { value: 'bold_review', label: '硬核测评', tag: 'REVIEW', hint: '更强调判断和结论，适合测评、吐槽、横评。' },
+  { value: 'tutorial_card', label: '教程信息卡', tag: 'GUIDE', hint: '信息框更强，适合录屏教学、流程讲解。' },
+  { value: 'food_magazine', label: '美食杂志感', tag: 'FOOD', hint: '更轻盈、更有生活方式感，适合探店和试吃。' },
+  { value: 'street_hype', label: '街头爆款', tag: 'HYPE', hint: '冲击更猛，适合潮流、球鞋、玩具、热点内容。' },
+  { value: 'minimal_white', label: '极简白', tag: 'MIN', hint: '几乎不吵，适合高端展示、静物、品牌感内容。' },
+  { value: 'cyber_grid', label: '赛博网格', tag: 'GRID', hint: '数码味更强，适合科技、AI、效率工具。' },
+  { value: 'premium_silver', label: '银灰高级感', tag: 'SILVER', hint: '冷静高级，适合商务、硬件、高单价内容。' },
+  { value: 'comic_pop', label: '漫画爆字', tag: 'COMIC', hint: '更像封面喊话，适合夸张、娱乐、快节奏内容。' },
+  { value: 'studio_red', label: '影棚红', tag: 'RED', hint: '适合测评、口播、强观点和冲突表达。' },
+  { value: 'documentary_frame', label: '纪录片框', tag: 'DOC', hint: '更像专题封面，适合纪实、故事、访谈。' },
+  { value: 'pastel_lifestyle', label: '粉雾生活感', tag: 'LIFE', hint: '适合 vlog、家居、美学、陪伴型内容。' },
+  { value: 'industrial_orange', label: '工业橙', tag: 'IND', hint: '工具和机械感更强，适合改装、工程、装备。' },
+  { value: 'ecommerce_sale', label: '电商促销', tag: 'SALE', hint: '价格感和促销氛围更强，适合福利、活动、卖点合集。' },
+  { value: 'price_strike', label: '价格对冲', tag: 'PRICE', hint: '强调优惠前后对比，适合降价、性价比、清单型内容。' },
+  { value: 'trailer_dark', label: '暗场预告', tag: 'TRAILER', hint: '更像电影预告主视觉，适合悬念、反转、剧情短片。' },
+  { value: 'festival_redgold', label: '节庆红金', tag: 'FEST', hint: '适合节日活动、开箱礼盒、节点专题内容。' },
+  { value: 'clean_lab', label: '实验室白板', tag: 'LAB', hint: '干净参数化，适合教程、评测、实验演示。' },
+  { value: 'cinema_teaser', label: '影院先导', tag: 'CINE', hint: '强预告感，适合故事短片、纪录短片、先导片。' },
+];
+const PACKAGING_TITLE_STYLES = [
+  { value: 'preset_default', label: '跟随策略自动联动', tag: 'AUTO', hint: '5 张候选封面会按平台策略自动切换标题模板，不再共用同一套字效。' },
+  { value: 'cyber_logo_stack', label: '赛博 Logo 叠层', tag: 'CYBER', hint: '左上品牌字 + 中央巨字 + 底部副标题，接近你发图里的强冲击结构。' },
+  { value: 'chrome_impact', label: '镀铬重击', tag: 'CHROME', hint: '主标题银白厚描边，适合联名、限定、升级、战术版。' },
+  { value: 'festival_badge', label: '红金徽章', tag: 'FEST', hint: '主副标题都更像节庆徽章，适合限定、礼盒、节点内容。' },
+  { value: 'double_banner', label: '双横幅', tag: 'BANNER', hint: '上下一条横幅包裹，适合福利、活动、口号式封面。' },
+  { value: 'comic_boom', label: '漫画爆字', tag: 'BOOM', hint: '黄字黑边更夸张，适合强观点、热点、吐槽。' },
+  { value: 'luxury_gold', label: '高奢金字', tag: 'LUX', hint: '更收敛但显贵，适合高客单、收藏、品牌向内容。' },
+  { value: 'tutorial_blueprint', label: '教程蓝图', tag: 'GUIDE', hint: '左对齐信息卡式排版，适合教程、流程讲解和参数演示。' },
+  { value: 'magazine_clean', label: '杂志极简', tag: 'MAG', hint: '更像杂志封面排字，适合审美、生活方式和静物展示。' },
+  { value: 'documentary_stamp', label: '纪实印记', tag: 'DOC', hint: '更像纪录短片标题条，适合故事、回顾、纪实素材。' },
+  { value: 'neon_night', label: '霓虹夜场', tag: 'NEON', hint: '蓝粉辉光更明显，适合潮流、夜景、游戏、赛博画面。' },
+];
+const PACKAGING_STYLE_GROUPS = {
+  subtitle: [
+    { key: 'basic', label: '基础通用', hint: '最稳妥、覆盖面最大的常用款。', values: ['bold_yellow_outline', 'white_minimal', 'bubble_pop', 'keyword_highlight', 'clean_box'] },
+    { key: 'impact', label: '高对比爆点', hint: '适合强结论、利益点、爆点句和卖货表达。', values: ['amber_news', 'punch_red', 'lime_box', 'sale_banner', 'coupon_green'] },
+    { key: 'tech', label: '科技夜感', hint: '偏数码、赛博、直播切片和高能片段。', values: ['neon_green_glow', 'midnight_magenta', 'mint_outline', 'cobalt_pop', 'cyber_orange', 'streamer_duo', 'teaser_glow'] },
+    { key: 'aesthetic', label: '生活审美', hint: '更柔和、更讲究质感，适合生活方式和品牌调性。', values: ['soft_shadow', 'rose_gold', 'ivory_serif', 'luxury_caps'] },
+    { key: 'film', label: '纪实影视', hint: '克制、叙事、纪录和专题表达优先。', values: ['cinema_blue', 'slate_caption', 'doc_gray', 'film_subtle', 'archive_type'] },
+  ],
+  cover: [
+    { key: 'auto', label: '智能推荐', hint: '保持系统按视频类型自动匹配。', values: ['preset_default'] },
+    { key: 'general', label: '基础通用', hint: '最适合教程、评测、升级点和标准内容页。', values: ['tech_showcase', 'upgrade_spotlight', 'bold_review', 'tutorial_card', 'clean_lab'] },
+    { key: 'premium', label: '品牌高级', hint: '强调质感、收藏感和高客单审美。', values: ['collection_drop', 'luxury_blackgold', 'minimal_white', 'premium_silver'] },
+    { key: 'viral', label: '潮流传播', hint: '更抢眼、更强调点击和传播效率。', values: ['tactical_neon', 'street_hype', 'comic_pop', 'studio_red', 'cyber_grid', 'industrial_orange', 'ecommerce_sale', 'price_strike'] },
+    { key: 'lifestyle', label: '生活内容', hint: '适合 vlog、探店、陪伴感和生活方式类视频。', values: ['creator_vlog', 'food_magazine', 'pastel_lifestyle'] },
+    { key: 'story', label: '影视叙事', hint: '更像预告片、专题或情绪化短片封面。', values: ['retro_poster', 'documentary_frame', 'trailer_dark', 'festival_redgold', 'cinema_teaser'] },
+  ],
+  title: [
+    { key: 'auto', label: '智能跟随', hint: '按 5 种封面策略自动联动标题模板。', values: ['preset_default'] },
+    { key: 'impact', label: '冲击爆款', hint: '大字厚描边、强冲击，更接近短视频爆款封面。', values: ['cyber_logo_stack', 'chrome_impact', 'comic_boom', 'neon_night'] },
+    { key: 'banner', label: '横幅活动', hint: '适合福利、活动、升级、节点话题。', values: ['festival_badge', 'double_banner'] },
+    { key: 'brand', label: '品牌质感', hint: '更克制、更高级，适合品牌和高客单内容。', values: ['luxury_gold', 'magazine_clean'] },
+    { key: 'info', label: '信息纪实', hint: '偏教程、说明、专题和纪录表达。', values: ['tutorial_blueprint', 'documentary_stamp'] },
+  ],
+};
 
 // ── Navigation ───────────────────────────────────────────────────────────────
 function nav(page) {
@@ -894,7 +1084,8 @@ function nav(page) {
   else stopRefresh();
   if (page !== 'folders') stopFolderInventoryPolling();
   if (page === 'folders') loadFolders();
-  if (page === 'packaging') loadPackaging();
+  if (page === 'packaging' || page === 'style-templates') loadPackaging();
+  if (page === 'behavior-memory') loadBehaviorMemoryStats();
   if (page === 'glossary') loadGlossary();
   if (page === 'settings') loadSettings();
   if (page === 'control') loadServiceStatus(false);
@@ -1119,6 +1310,7 @@ function renderJobs(jobs) {
       <td style="color:var(--text2);font-size:12px">${fmtDate(j.created_at)}</td>
       <td>
         <div class="toolbar-actions">
+          <button class="btn btn-ghost btn-sm" onclick="event.stopPropagation();openJobFolder('${j.id}')">打开文件夹</button>
           ${showProfileButton ? `<button class="btn btn-primary btn-sm" onclick="event.stopPropagation();openContentProfileModal('${j.id}')">核对信息</button>` : ''}
           ${j.status === 'cancelled'
             ? `<button class="btn btn-primary btn-sm" onclick="event.stopPropagation();restartJob('${j.id}')">重新开始</button>`
@@ -1491,6 +1683,16 @@ async function downloadOutput() {
   } catch(e) { toast('下载链接不可用：' + e.message, 'error'); }
 }
 
+async function openJobFolder(jobId = _currentJobId) {
+  if (!jobId) return;
+  try {
+    const result = await api('POST', `/jobs/${jobId}/open-folder`);
+    toast(result.kind === 'output' ? '已打开成片所在文件夹' : '已打开源文件所在文件夹');
+  } catch(e) {
+    toast('打开文件夹失败：' + e.message, 'error');
+  }
+}
+
 async function cancelJob(jobId = _currentJobId) {
   if (!jobId) return;
   if (!confirm('确认立即中断并取消这条任务？')) return;
@@ -1741,11 +1943,249 @@ async function loadPackaging() {
     _packagingLibrary = data;
     renderPackagingConfig(data);
     renderPackagingAssets(data);
+    renderStyleTemplateConfig(data);
   } catch(e) {
     document.getElementById('packaging-config-card').innerHTML = `<div class="empty"><div class="empty-icon">⚠️</div><p>包装策略加载失败</p><small>${esc(e.message)}</small></div>`;
     document.getElementById('packaging-assets-card').innerHTML = '';
+    const styleCard = document.getElementById('style-template-card');
+    if (styleCard) styleCard.innerHTML = `<div class="empty"><div class="empty-icon">⚠️</div><p>风格模板加载失败</p><small>${esc(e.message)}</small></div>`;
     toast('包装素材加载失败：' + e.message, 'error');
   }
+}
+
+async function loadBehaviorMemoryStats() {
+  const select = document.getElementById('memory-channel-filter');
+  const channelProfile = select ? select.value.trim() : '';
+  try {
+    const suffix = channelProfile ? `?channel_profile=${encodeURIComponent(channelProfile)}` : '';
+    const data = await api('GET', `/jobs/stats/content-profile-memory${suffix}`);
+    renderBehaviorMemoryStats(data);
+  } catch(e) {
+    document.getElementById('behavior-memory-card').innerHTML = `<div class="empty"><div class="empty-icon">⚠️</div><p>行为习惯统计加载失败</p><small>${esc(e.message)}</small></div>`;
+    toast('行为习惯统计加载失败：' + e.message, 'error');
+  }
+}
+
+function renderBehaviorMemoryStats(data) {
+  const select = document.getElementById('memory-channel-filter');
+  const current = data.channel_profile || '';
+  if (select) {
+    select.innerHTML = `<option value="">全部频道配置</option>` + (data.channel_profiles || []).map(item =>
+      `<option value="${esc(item)}" ${item === current ? 'selected' : ''}>${esc(item)}</option>`
+    ).join('');
+  }
+
+  const fieldPrefs = data.field_preferences || {};
+  const keywordPrefs = data.keyword_preferences || [];
+  const cloudWords = (data.cloud && data.cloud.words) || [];
+  const recentCorrections = data.recent_corrections || [];
+  const topBrand = fieldPrefs.subject_brand?.[0]?.value || '—';
+  const topModel = fieldPrefs.subject_model?.[0]?.value || '—';
+  const topTheme = fieldPrefs.video_theme?.[0]?.value || '—';
+
+  document.getElementById('behavior-memory-card').innerHTML = `
+    <div class="stats" style="margin-bottom:20px">
+      <div class="stat">
+        <div class="stat-val">${data.total_corrections || 0}</div>
+        <div class="stat-label">累计纠正次数</div>
+      </div>
+      <div class="stat">
+        <div class="stat-val">${data.total_keywords || 0}</div>
+        <div class="stat-label">累计关键词使用</div>
+      </div>
+      <div class="stat">
+        <div class="stat-val" style="font-size:18px;line-height:1.3">${esc(topBrand)}</div>
+        <div class="stat-label">最常见品牌</div>
+      </div>
+      <div class="stat">
+        <div class="stat-val" style="font-size:18px;line-height:1.3">${esc(topModel !== '—' ? topModel : topTheme)}</div>
+        <div class="stat-label">${topModel !== '—' ? '最常见型号' : '最常见主题'}</div>
+      </div>
+    </div>
+
+    <div class="card-title">记忆词云</div>
+    ${cloudWords.length ? `<div class="chips" style="gap:10px;margin-bottom:18px">
+      ${cloudWords.map(word => `<span class="chip" style="font-size:${12 + Math.min(8, Number(word.weight || 0))}px">${esc(word.label)} ×${word.count}</span>`).join('')}
+    </div>` : `<div class="empty" style="padding:20px 0"><small>还没有形成可展示的偏好词云</small></div>`}
+
+    <div class="card-title" style="margin-top:8px">字段偏好</div>
+    ${Object.keys(fieldPrefs).length ? `<div style="display:grid;gap:12px;margin-bottom:18px">
+      ${Object.entries(fieldPrefs).map(([field, items]) => `
+        <div class="card" style="padding:14px">
+          <div style="font-weight:700;margin-bottom:8px">${esc(memoryFieldLabel(field))}</div>
+          <div class="chips">
+            ${(items || []).map(item => `<span class="chip">${esc(item.value)} ×${item.count}</span>`).join('')}
+          </div>
+        </div>
+      `).join('')}
+    </div>` : `<div class="empty" style="padding:20px 0"><small>还没有记录到字段纠正习惯</small></div>`}
+
+    <div class="card-title">关键词偏好</div>
+    ${keywordPrefs.length ? `<div class="chips" style="margin-bottom:18px">
+      ${keywordPrefs.map(item => `<span class="chip">${esc(item.keyword)} ×${item.count}</span>`).join('')}
+    </div>` : `<div class="empty" style="padding:20px 0"><small>还没有记录到关键词偏好</small></div>`}
+
+    <div class="card-title">最近纠正</div>
+    ${recentCorrections.length ? `<table><thead><tr><th>字段</th><th>原值</th><th>修正后</th><th>来源任务</th></tr></thead><tbody>
+      ${recentCorrections.map(item => `<tr>
+        <td>${esc(memoryFieldLabel(item.field_name))}</td>
+        <td style="color:var(--text3)">${esc(item.original_value || '空')}</td>
+        <td>${esc(item.corrected_value)}</td>
+        <td>${esc(item.source_name || '—')}</td>
+      </tr>`).join('')}
+    </tbody></table>` : `<div class="empty" style="padding:20px 0"><small>还没有最近纠正记录</small></div>`}
+  `;
+}
+
+function memoryFieldLabel(field) {
+  return {
+    subject_brand: '产品品牌',
+    subject_model: '开箱产品型号',
+    subject_type: '主体类型',
+    video_theme: '视频主题',
+  }[field] || field;
+}
+
+function packagingOptionLabel(options, value) {
+  return options.find(option => option.value === value)?.label || value || '未设置';
+}
+
+function packagingChoiceGroups(previewKind, options) {
+  const configuredGroups = PACKAGING_STYLE_GROUPS[previewKind] || [];
+  const optionsByValue = new Map(options.map(option => [option.value, option]));
+  const groupedValues = new Set();
+  const groups = configuredGroups.map(group => {
+    const groupOptions = group.values.map(value => optionsByValue.get(value)).filter(Boolean);
+    groupOptions.forEach(option => groupedValues.add(option.value));
+    return { ...group, options: groupOptions };
+  }).filter(group => group.options.length);
+  const leftoverOptions = options.filter(option => !groupedValues.has(option.value));
+  if (leftoverOptions.length) {
+    groups.push({ key: 'other', label: '其他', hint: '暂未归组的新样式。', options: leftoverOptions });
+  }
+  return groups;
+}
+
+function renderPackagingChoiceCards(name, currentValue, options, previewKind) {
+  const groups = packagingChoiceGroups(previewKind, options);
+  const selectedGroupKey = groups.find(group => group.options.some(option => option.value === currentValue))?.key || groups[0]?.key || '';
+  return `<div class="packaging-choice-groups">
+    ${groups.map(group => `<details class="packaging-choice-group" ${group.key === selectedGroupKey ? 'open' : ''}>
+      <summary class="packaging-choice-summary">
+        <div>
+          <div class="packaging-choice-group-title">
+            <span>${group.label}</span>
+            <span class="packaging-choice-count">${group.options.length}</span>
+          </div>
+          <div class="packaging-choice-group-hint">${group.hint}</div>
+        </div>
+      </summary>
+      <div class="packaging-choice-group-body">
+        <div class="packaging-choice-grid">
+          ${group.options.map(option => `<label class="packaging-choice-card">
+            <input type="radio" name="${name}" value="${option.value}" ${currentValue === option.value ? 'checked' : ''} />
+            <div class="packaging-choice-body">
+              <div class="packaging-choice-title">
+                <span>${option.label}</span>
+                <span class="packaging-choice-tag">${option.tag}</span>
+              </div>
+              <div class="packaging-choice-hint">${option.hint}</div>
+              <div class="packaging-preview">
+                ${previewKind === 'subtitle' ? renderSubtitleChoicePreview(option.value) : previewKind === 'title' ? renderTitleChoicePreview(option.value) : renderCoverChoicePreview(option.value)}
+              </div>
+            </div>
+          </label>`).join('')}
+        </div>
+      </div>
+    </details>`).join('')}
+  </div>`;
+}
+
+function renderSubtitleChoicePreview(style) {
+  const map = {
+    bold_yellow_outline: `<div class="packaging-preview-subtitle" style="font-size:24px;color:#ffe45c;text-shadow:-2px -2px 0 #111,2px -2px 0 #111,-2px 2px 0 #111,2px 2px 0 #111">这波细节真的到位</div>`,
+    white_minimal: `<div class="packaging-preview-subtitle" style="font-size:22px;color:#fff;text-shadow:0 1px 3px rgba(0,0,0,0.55);font-weight:700">这一步先别点确认</div>`,
+    neon_green_glow: `<div class="packaging-preview-subtitle" style="font-size:23px;color:#090909;text-shadow:0 0 6px rgba(69,255,149,0.8),0 0 1px rgba(69,255,149,1),-1px -1px 0 #45ff95,1px 1px 0 #45ff95">结构真的有点狠</div>`,
+    cinema_blue: `<div class="packaging-preview-subtitle" style="font-size:22px;color:#f5f7ff;text-shadow:0 2px 8px rgba(30,52,96,0.72)">关键判断其实在这里</div>`,
+    bubble_pop: `<div class="packaging-preview-subtitle" style="font-size:21px;color:#fff;background:rgba(46,22,48,0.78);border:2px solid rgba(255,107,158,0.9);border-radius:999px;padding:6px 12px;left:18px;right:18px">今天这家真有点惊喜</div>`,
+    keyword_highlight: `<div class="packaging-preview-subtitle" style="font-size:22px;color:#fff;text-shadow:-1px -1px 0 #121212,1px 1px 0 #121212">先看<span style="color:#ff9a3d">锁定结构</span>再聊手感</div>`,
+    amber_news: `<div class="packaging-preview-subtitle" style="font-size:22px;color:#fff2d6;text-shadow:-1px -1px 0 #4a2c14,1px 1px 0 #4a2c14,0 3px 8px rgba(0,0,0,0.4)">真正关键其实是这一点</div>`,
+    punch_red: `<div class="packaging-preview-subtitle" style="font-size:24px;color:#fff8f8;text-shadow:-2px -2px 0 #ff4b5c,2px 2px 0 #ff4b5c,0 2px 10px rgba(0,0,0,0.45)">这句结论别跳过</div>`,
+    lime_box: `<div class="packaging-preview-subtitle" style="font-size:21px;color:#101010;background:rgba(215,255,92,0.92);border-radius:12px;padding:7px 10px;left:18px;right:18px;box-shadow:0 8px 20px rgba(0,0,0,0.18)">这才是本次升级重点</div>`,
+    soft_shadow: `<div class="packaging-preview-subtitle" style="font-size:21px;color:#f8faff;text-shadow:0 4px 14px rgba(0,0,0,0.42);font-weight:600">其实体验感比参数更重要</div>`,
+    clean_box: `<div class="packaging-preview-subtitle" style="font-size:21px;color:#fff;background:rgba(16,16,16,0.88);border:1px solid rgba(255,255,255,0.12);border-radius:10px;padding:6px 10px;left:18px;right:18px">照着这三步就能搞定</div>`,
+    midnight_magenta: `<div class="packaging-preview-subtitle" style="font-size:23px;color:#fff4ff;text-shadow:-1px -1px 0 #c94cff,1px 1px 0 #c94cff,0 0 12px rgba(201,76,255,0.36)">夜里看更有那个味</div>`,
+    mint_outline: `<div class="packaging-preview-subtitle" style="font-size:22px;color:#f8fff9;text-shadow:-1px -1px 0 #58dfa9,1px 1px 0 #58dfa9,0 0 10px rgba(88,223,169,0.25)">这套搭配非常清爽</div>`,
+    cobalt_pop: `<div class="packaging-preview-subtitle" style="font-size:23px;color:#f8fbff;text-shadow:-1px -1px 0 #3b6bff,1px 1px 0 #3b6bff,0 0 10px rgba(59,107,255,0.28)">这一步效率直接翻倍</div>`,
+    rose_gold: `<div class="packaging-preview-subtitle" style="font-size:22px;color:#fff6f3;text-shadow:-1px -1px 0 #e39a86,1px 1px 0 #e39a86,0 4px 12px rgba(0,0,0,0.24)">这份精致感真能打</div>`,
+    slate_caption: `<div class="packaging-preview-subtitle" style="font-size:21px;color:#f4f7fa;text-shadow:0 2px 8px rgba(32,36,40,0.35)">先把背景逻辑讲清楚</div>`,
+    ivory_serif: `<div class="packaging-preview-subtitle" style="font-size:22px;color:#fff8e9;text-shadow:0 2px 8px rgba(52,37,22,0.38);font-family:SimSun,serif">这一幕其实很有故事感</div>`,
+    cyber_orange: `<div class="packaging-preview-subtitle" style="font-size:23px;color:#fff9f1;text-shadow:-1px -1px 0 #ff8a1f,1px 1px 0 #ff8a1f,0 0 10px rgba(255,138,31,0.32)">改完之后完全不是一个级别</div>`,
+    streamer_duo: `<div class="packaging-preview-subtitle" style="font-size:23px;color:#fdfdff;text-shadow:-1px -1px 0 #7f5bff,1px 1px 0 #7f5bff,0 4px 10px rgba(0,0,0,0.3)">这波操作节目效果拉满</div>`,
+    doc_gray: `<div class="packaging-preview-subtitle" style="font-size:20px;color:#f3f4f6;text-shadow:none;font-weight:500">当时现场情况就是这样</div>`,
+    sale_banner: `<div class="packaging-preview-subtitle" style="font-size:22px;color:#fff7db;background:linear-gradient(90deg, rgba(255,108,60,0.98), rgba(255,165,58,0.98));border-radius:8px;padding:6px 10px;left:16px;right:16px;box-shadow:0 10px 20px rgba(0,0,0,0.18)">今晚福利直接放这</div>`,
+    coupon_green: `<div class="packaging-preview-subtitle" style="font-size:21px;color:#11210f;background:rgba(170,255,135,0.95);border:2px dashed rgba(17,33,15,0.45);border-radius:10px;padding:6px 10px;left:18px;right:18px">这张券现在用最划算</div>`,
+    luxury_caps: `<div class="packaging-preview-subtitle" style="font-size:20px;color:#fff4e2;letter-spacing:1.4px;text-transform:uppercase;text-shadow:0 1px 0 rgba(0,0,0,0.3),0 6px 18px rgba(120,83,41,0.35)">质感先到位再聊别的</div>`,
+    film_subtle: `<div class="packaging-preview-subtitle" style="font-size:20px;color:#f4f1eb;text-shadow:0 2px 10px rgba(0,0,0,0.48);font-weight:500">真正的情绪都藏在后半段</div>`,
+    archive_type: `<div class="packaging-preview-subtitle" style="font-size:19px;color:#f5efd7;background:rgba(38,31,22,0.72);border-left:4px solid rgba(212,186,122,0.92);padding:7px 10px;text-align:left;left:16px;right:16px;font-family:'Courier New',monospace">档案记录编号 07</div>`,
+    teaser_glow: `<div class="packaging-preview-subtitle" style="font-size:23px;color:#fffafc;text-shadow:-1px -1px 0 #ff5aa6,1px 1px 0 #ff5aa6,0 0 14px rgba(110,202,255,0.42)">最后三秒才是真正重点</div>`,
+  };
+  return map[style] || map.bold_yellow_outline;
+}
+
+function renderCoverChoicePreview(style) {
+  const map = {
+    preset_default: { bg: 'linear-gradient(135deg, #1c2030, #29314a 58%, #191c28)', top: 'AUTO', main: '封面', bottom: '跟随内容类型', shape: 'linear-gradient(135deg, #6c63ff, #4fc3f7)' },
+    tech_showcase: { bg: 'linear-gradient(135deg, #111826, #20324e 60%, #161c2a)', top: 'TECH', main: '新款结构', bottom: '细节直接拉满', shape: 'linear-gradient(135deg, #46d5ff, #4f7bff)' },
+    collection_drop: { bg: 'linear-gradient(135deg, #24171a, #4a2321 56%, #1f1417)', top: 'LIMITED', main: '限定版', bottom: '收藏值不值', shape: 'linear-gradient(135deg, #f7b267, #e95f89)' },
+    upgrade_spotlight: { bg: 'linear-gradient(135deg, #171926, #342751 56%, #1d1d31)', top: 'UPGRADE', main: '升级点', bottom: '这次改哪了', shape: 'linear-gradient(135deg, #ff9f43, #ffd166)' },
+    tactical_neon: { bg: 'linear-gradient(135deg, #0e1217, #1a2a2e 52%, #0f1719)', top: 'TACTICAL', main: '战术版', bottom: '硬核感更强', shape: 'linear-gradient(135deg, #2ef0b8, #19a8ff)' },
+    luxury_blackgold: { bg: 'linear-gradient(135deg, #0c0b0b, #2a1d12 56%, #0e0b08)', top: 'LUXURY', main: '黑金版', bottom: '高端感直接拉满', shape: 'linear-gradient(135deg, #f7d07a, #b88a2f)' },
+    retro_poster: { bg: 'linear-gradient(135deg, #2d1c14, #84452f 58%, #21120d)', top: 'RETRO', main: '复古款', bottom: '味道一下就对了', shape: 'linear-gradient(135deg, #f6d17a, #df7a4f)' },
+    creator_vlog: { bg: 'linear-gradient(135deg, #1a1f31, #574a7f 58%, #241b38)', top: 'VLOG', main: '今天', bottom: '就聊这一件事', shape: 'linear-gradient(135deg, #ffd5f6, #9ab8ff)' },
+    bold_review: { bg: 'linear-gradient(135deg, #171717, #553326 58%, #1a1714)', top: 'REVIEW', main: '测评结论', bottom: '到底值不值看这里', shape: 'linear-gradient(135deg, #ffe27a, #ff7f50)' },
+    tutorial_card: { bg: 'linear-gradient(135deg, #13202a, #23516b 58%, #162630)', top: 'GUIDE', main: '三步搞定', bottom: '别在这里翻车', shape: 'linear-gradient(135deg, #d7f3ff, #6ad7ff)' },
+    food_magazine: { bg: 'linear-gradient(135deg, #2c1812, #8b5135 56%, #26150f)', top: 'FOOD', main: '这家店', bottom: '这一口就够了', shape: 'linear-gradient(135deg, #ffd8a8, #ff8b6a)' },
+    street_hype: { bg: 'linear-gradient(135deg, #1b1b1b, #4e241b 58%, #131313)', top: 'HYPE', main: '爆款感', bottom: '一眼就要点进去', shape: 'linear-gradient(135deg, #ffe55b, #ff5c39)' },
+    minimal_white: { bg: 'linear-gradient(135deg, #dfe5ea, #fafcfd 60%, #cfd6db)', top: 'MINIMAL', main: '留白', bottom: '越少越高级', shape: 'linear-gradient(135deg, #ffffff, #bcc7cf)' },
+    cyber_grid: { bg: 'linear-gradient(135deg, #101723, #18365b 58%, #0e1320)', top: 'GRID', main: '系统流', bottom: '科技感更强', shape: 'linear-gradient(135deg, #79f6ff, #4f76ff)' },
+    premium_silver: { bg: 'linear-gradient(135deg, #20242a, #67717c 58%, #1f2328)', top: 'SILVER', main: '银灰版', bottom: '冷静但很贵', shape: 'linear-gradient(135deg, #f5f8fb, #9fa9b4)' },
+    comic_pop: { bg: 'linear-gradient(135deg, #202020, #3b2c80 58%, #151515)', top: 'COMIC', main: '看这里', bottom: '一格一个爆点', shape: 'linear-gradient(135deg, #ffef6b, #ff4dd2)' },
+    studio_red: { bg: 'linear-gradient(135deg, #1d1313, #7b1f1f 58%, #1b1010)', top: 'STUDIO', main: '红场', bottom: '观点直接打脸上', shape: 'linear-gradient(135deg, #ffd6c8, #ff5656)' },
+    documentary_frame: { bg: 'linear-gradient(135deg, #1f2420, #566256 58%, #151915)', top: 'DOC', main: '纪实感', bottom: '像一部短片', shape: 'linear-gradient(135deg, #d8dfd0, #8ba08d)' },
+    pastel_lifestyle: { bg: 'linear-gradient(135deg, #f0dce5, #f7f0f8 58%, #ead4df)', top: 'LIFESTYLE', main: '松弛感', bottom: '今天就拍这个', shape: 'linear-gradient(135deg, #fff7fb, #d3c3eb)' },
+    industrial_orange: { bg: 'linear-gradient(135deg, #211915, #73401f 58%, #18120e)', top: 'IND', main: '工业感', bottom: '硬件味很足', shape: 'linear-gradient(135deg, #ffd18a, #ff7d2f)' },
+    ecommerce_sale: { bg: 'linear-gradient(135deg, #251412, #8b2f24 58%, #1f110f)', top: 'SALE', main: '限时福利', bottom: '现在下手最值', shape: 'linear-gradient(135deg, #fff280, #ff875c)' },
+    price_strike: { bg: 'linear-gradient(135deg, #1b1823, #5b355f 58%, #16131d)', top: 'PRICE', main: '价格线', bottom: '对比一下就懂', shape: 'linear-gradient(135deg, #b8ff7a, #61d7ff)' },
+    trailer_dark: { bg: 'linear-gradient(135deg, #0b0d12, #232935 58%, #090b10)', top: 'TRAILER', main: '别眨眼', bottom: '反转还没开始', shape: 'linear-gradient(135deg, #e6edf7, #67758a)' },
+    festival_redgold: { bg: 'linear-gradient(135deg, #2d0f14, #8c1f33 58%, #250b10)', top: 'FESTIVAL', main: '节庆款', bottom: '礼盒感直接到位', shape: 'linear-gradient(135deg, #ffd977, #ff7f50)' },
+    clean_lab: { bg: 'linear-gradient(135deg, #dce6ec, #fbfdfe 58%, #cfdbe3)', top: 'LAB', main: '实验室', bottom: '结论和数据一起看', shape: 'linear-gradient(135deg, #ffffff, #a7bdcc)' },
+    cinema_teaser: { bg: 'linear-gradient(135deg, #111218, #32233b 58%, #0f1015)', top: 'CINEMA', main: '先导片', bottom: '情绪先推上来', shape: 'linear-gradient(135deg, #ffd6a5, #ff6f91)' },
+  };
+  const cfg = map[style] || map.preset_default;
+  return `<div class="packaging-preview-cover" style="background:${cfg.bg}">
+    <div class="top">${cfg.top}</div>
+    <div class="main">${cfg.main}</div>
+    <div class="bottom">${cfg.bottom}</div>
+    <div class="shape" style="background:${cfg.shape}"></div>
+  </div>`;
+}
+
+function renderTitleChoicePreview(style) {
+  const map = {
+    preset_default: `<div class="packaging-preview-cover" style="background:linear-gradient(135deg,#1b2031,#31213b 58%,#171a28)"><div class="top">AUTO</div><div class="main" style="font-size:18px;color:#fff;text-shadow:0 2px 6px rgba(0,0,0,0.35)">跟随策略联动</div><div class="bottom">5 张图自动切模板</div><div class="shape" style="background:linear-gradient(135deg,#6c63ff,#4fc3f7)"></div></div>`,
+    cyber_logo_stack: `<div class="packaging-preview-cover" style="background:linear-gradient(135deg,#171827,#2e213b 58%,#171923)"><div class="top" style="font-size:16px;color:#78efff;text-shadow:0 0 6px rgba(120,239,255,0.5)">FAS加帕</div><div class="main" style="font-size:24px;color:#f7fbff;text-shadow:-3px -3px 0 #2f44d8,3px 3px 0 #151515">版本限定</div><div class="bottom" style="font-size:13px;color:#ffe38c;text-shadow:-1px -1px 0 #ff5a30,1px 1px 0 #ff5a30">定制化全面升级</div><div class="shape" style="background:linear-gradient(135deg,#61f2ff,#ff5cc7)"></div></div>`,
+    chrome_impact: `<div class="packaging-preview-cover" style="background:linear-gradient(135deg,#1c202c,#42312a 58%,#18191f)"><div class="top" style="font-size:14px;color:#e9f3ff">LIMITED</div><div class="main" style="font-size:25px;color:#fafafa;text-shadow:-3px -3px 0 #242424,3px 3px 0 #4c6dff">联名战术版</div><div class="bottom" style="font-size:13px;color:#ffe7a2;text-shadow:-1px -1px 0 #ff6a2e,1px 1px 0 #ff6a2e">这次升级太狠了</div><div class="shape" style="background:linear-gradient(135deg,#eff4ff,#4a68ff)"></div></div>`,
+    festival_badge: `<div class="packaging-preview-cover" style="background:linear-gradient(135deg,#2d1218,#7a2030 58%,#240f14)"><div class="top" style="font-size:13px;color:#ffe7b1;background:rgba(125,19,19,0.75);padding:2px 8px;border-radius:999px;display:inline-flex;width:max-content">限定款</div><div class="main" style="font-size:24px;color:#fff0d0;text-shadow:-3px -3px 0 #b51c1c,3px 3px 0 #b51c1c">节庆限定版</div><div class="bottom" style="font-size:12px;color:#ffe7aa;background:rgba(151,31,31,0.75);padding:3px 8px;border-radius:999px;display:inline-flex;width:max-content">收藏感直接拉满</div><div class="shape" style="background:linear-gradient(135deg,#ffd36b,#ff8a4d)"></div></div>`,
+    double_banner: `<div class="packaging-preview-cover" style="background:linear-gradient(135deg,#182536,#3c2b2b 58%,#171a23)"><div class="top" style="font-size:13px;color:#fff;background:#27a2ff;padding:3px 8px;border-radius:6px;display:inline-flex;width:max-content">本周福利</div><div class="main" style="font-size:24px;color:#fff;text-shadow:-2px -2px 0 #181818,2px 2px 0 #181818">活动专属版</div><div class="bottom" style="font-size:12px;color:#fff6df;background:#e35d34;padding:4px 8px;border-radius:6px;display:inline-flex;width:max-content">今晚下单更划算</div><div class="shape" style="background:linear-gradient(135deg,#6fe3ff,#ff915d)"></div></div>`,
+    comic_boom: `<div class="packaging-preview-cover" style="background:linear-gradient(135deg,#1b1c25,#4f2940 58%,#181921)"><div class="top" style="font-size:14px;color:#fff2b4;text-shadow:-1px -1px 0 #111,1px 1px 0 #111">别眨眼</div><div class="main" style="font-size:25px;color:#fff35b;text-shadow:-3px -3px 0 #101010,3px 3px 0 #101010">这次真炸了</div><div class="bottom" style="font-size:13px;color:#7ff6ff;text-shadow:-1px -1px 0 #111,1px 1px 0 #111">结论很直接</div><div class="shape" style="background:linear-gradient(135deg,#fff16f,#ff4e65)"></div></div>`,
+    luxury_gold: `<div class="packaging-preview-cover" style="background:linear-gradient(135deg,#16120d,#372412 58%,#14110d)"><div class="top" style="font-size:13px;color:#ffe6b7">COLLECTION</div><div class="main" style="font-size:23px;color:#fff4e3;text-shadow:-2px -2px 0 #7b5317,2px 2px 0 #7b5317">高奢收藏版</div><div class="bottom" style="font-size:12px;color:#ffdca0">质感先行</div><div class="shape" style="background:linear-gradient(135deg,#f7d483,#b9852f)"></div></div>`,
+    tutorial_blueprint: `<div class="packaging-preview-cover" style="background:linear-gradient(135deg,#132537,#29516c 58%,#132331)"><div class="top" style="font-size:12px;color:#dcf6ff;background:rgba(16,62,94,0.78);padding:3px 7px;border-radius:6px;display:inline-flex;width:max-content">教程模板</div><div class="main" style="font-size:22px;color:#fff;text-align:left;max-width:62%;text-shadow:-2px -2px 0 #183a55,2px 2px 0 #183a55">3 步完成设置</div><div class="bottom" style="font-size:12px;color:#e6f8ff;text-align:left;max-width:60%">参数和流程一眼看懂</div><div class="shape" style="background:linear-gradient(135deg,#e1f7ff,#67d6ff)"></div></div>`,
+    magazine_clean: `<div class="packaging-preview-cover" style="background:linear-gradient(135deg,#d9dde4,#f7f7f4 58%,#d4d7de)"><div class="top" style="font-size:12px;color:#4b4b4b">STUDIO</div><div class="main" style="font-size:22px;color:#fff;text-shadow:-2px -2px 0 #444,2px 2px 0 #444">极简杂志感</div><div class="bottom" style="font-size:12px;color:#5c554f">更克制的标题层级</div><div class="shape" style="background:linear-gradient(135deg,#ffffff,#c4cad3)"></div></div>`,
+    documentary_stamp: `<div class="packaging-preview-cover" style="background:linear-gradient(135deg,#20231f,#586058 58%,#171914)"><div class="top" style="font-size:11px;color:#f2ede2;background:rgba(26,28,24,0.7);padding:3px 6px;border-radius:4px;display:inline-flex;width:max-content">ARCHIVE</div><div class="main" style="font-size:20px;color:#f5f1e8;text-align:left;max-width:58%;text-shadow:-1px -1px 0 #23211c,1px 1px 0 #23211c">纪实专题片</div><div class="bottom" style="font-size:11px;color:#ddd6c8;text-align:left;max-width:58%">偏资料、回顾、故事表达</div><div class="shape" style="background:linear-gradient(135deg,#d7dfd1,#8aa08c)"></div></div>`,
+    neon_night: `<div class="packaging-preview-cover" style="background:linear-gradient(135deg,#121523,#332040 58%,#10131d)"><div class="top" style="font-size:13px;color:#ffe7fb;text-shadow:0 0 6px rgba(255,90,166,0.48)">NIGHT MODE</div><div class="main" style="font-size:24px;color:#fff7fc;text-shadow:-3px -3px 0 #ff4ea2,3px 3px 0 #3245ff">夜场霓虹版</div><div class="bottom" style="font-size:12px;color:#ffe49e;text-shadow:-1px -1px 0 #ff6a35,1px 1px 0 #ff6a35">潮流感更强</div><div class="shape" style="background:linear-gradient(135deg,#ff77d6,#5e8bff)"></div></div>`,
+  };
+  return map[style] || map.preset_default;
 }
 
 function renderPackagingConfig(data) {
@@ -1781,8 +2221,9 @@ function renderPackagingConfig(data) {
         <label>背景音乐循环</label>
         <select id="pkg-music-loop">
           <option value="loop_single" ${cfg.music_loop_mode === 'loop_single' ? 'selected' : ''}>单曲循环铺满</option>
-          <option value="none" ${cfg.music_loop_mode === 'none' ? 'selected' : ''}>不循环</option>
+          <option value="loop_all" ${(cfg.music_loop_mode || 'loop_single') === 'loop_all' ? 'selected' : ''}>多曲循环轮播</option>
         </select>
+        <div class="hint">多曲循环会按音乐池顺序轮播拼接，再铺满整条视频。</div>
       </div>
     </div>
     <div class="form-row">
@@ -1809,6 +2250,42 @@ function renderPackagingConfig(data) {
         <label>水印宽度比例</label>
         <input id="pkg-watermark-scale" type="number" min="0.05" max="0.5" step="0.01" value="${cfg.watermark_scale ?? 0.16}" />
       </div>
+    </div>
+  `;
+}
+
+function renderStyleTemplateConfig(data) {
+  const cfg = data.config || {};
+  document.getElementById('style-template-card').innerHTML = `
+    <div class="card-title">可视化模板选择</div>
+    <div class="style-template-hero">
+      <div>
+        <div class="style-template-hero-title">封面默认是精彩帧 + 标题</div>
+        <div class="hint">系统会固定导出 5 张候选封面，分别走小红书吸睛、B站信息流、YouTube开箱、强CTR爆点、品牌高级感 5 种策略。</div>
+        <div class="style-template-chip-row">
+          <span class="chip">小红书吸睛</span>
+          <span class="chip">B站信息流</span>
+          <span class="chip">YouTube开箱</span>
+          <span class="chip">强CTR爆点</span>
+          <span class="chip">品牌高级感</span>
+        </div>
+      </div>
+      <button class="btn btn-ghost btn-sm" onclick="nav('packaging')">返回包装素材</button>
+    </div>
+    <div class="form-group">
+      <label>字幕样式</label>
+      ${renderPackagingChoiceCards('pkg-subtitle-style', cfg.subtitle_style || 'bold_yellow_outline', PACKAGING_SUBTITLE_STYLES, 'subtitle')}
+      <div class="hint">这里的样式会直接用于烧录字幕，保存后即成为包装配置默认值。</div>
+    </div>
+    <div class="form-group">
+      <label>封面风格</label>
+      ${renderPackagingChoiceCards('pkg-cover-style', cfg.cover_style || 'preset_default', PACKAGING_COVER_STYLES, 'cover')}
+      <div class="hint">“跟随视频类型”会继续按预设自动匹配，其余选项会强制覆盖封面风格。</div>
+    </div>
+    <div class="form-group">
+      <label>标题样式</label>
+      ${renderPackagingChoiceCards('pkg-title-style', cfg.title_style || 'preset_default', PACKAGING_TITLE_STYLES, 'title')}
+      <div class="hint">这里控制封面上的大标题字效和排版。若选择“跟随策略自动联动”，5 张候选图会按不同平台打法自动匹配不同标题模板。</div>
     </div>
   `;
 }
@@ -1923,34 +2400,61 @@ function togglePackagingPool(assetType, assetId, checked) {
   renderPackagingAssets(_packagingLibrary);
 }
 
-async function savePackagingConfig() {
+function getPackagingFieldValue(id, fallback) {
+  const el = document.getElementById(id);
+  return el ? el.value : fallback;
+}
+
+function getPackagingCheckedValue(name, fallback) {
+  return document.querySelector(`input[name="${name}"]:checked`)?.value || fallback;
+}
+
+function buildPackagingConfigBody() {
+  if (!_packagingLibrary) return null;
+  const cfg = _packagingLibrary.config || {};
+  return {
+    enabled: getPackagingFieldValue('pkg-enabled', cfg.enabled ? 'true' : 'false') === 'true',
+    intro_asset_id: cfg.intro_asset_id || null,
+    outro_asset_id: cfg.outro_asset_id || null,
+    insert_asset_id: cfg.insert_asset_id || null,
+    insert_asset_ids: cfg.insert_asset_ids || [],
+    insert_selection_mode: getPackagingFieldValue('pkg-insert-mode', cfg.insert_selection_mode || 'manual'),
+    insert_position_mode: 'llm',
+    watermark_asset_id: cfg.watermark_asset_id || null,
+    music_asset_ids: cfg.music_asset_ids || [],
+    music_selection_mode: getPackagingFieldValue('pkg-music-mode', cfg.music_selection_mode || 'random'),
+    music_loop_mode: getPackagingFieldValue('pkg-music-loop', cfg.music_loop_mode || 'loop_single'),
+    subtitle_style: getPackagingCheckedValue('pkg-subtitle-style', cfg.subtitle_style || 'bold_yellow_outline'),
+    cover_style: getPackagingCheckedValue('pkg-cover-style', cfg.cover_style || 'preset_default'),
+    title_style: getPackagingCheckedValue('pkg-title-style', cfg.title_style || 'preset_default'),
+    music_volume: parseFloat(getPackagingFieldValue('pkg-music-volume', String(cfg.music_volume ?? 0.22)) || '0.22'),
+    watermark_position: getPackagingFieldValue('pkg-watermark-position', cfg.watermark_position || 'top_right'),
+    watermark_opacity: parseFloat(getPackagingFieldValue('pkg-watermark-opacity', String(cfg.watermark_opacity ?? 0.82)) || '0.82'),
+    watermark_scale: parseFloat(getPackagingFieldValue('pkg-watermark-scale', String(cfg.watermark_scale ?? 0.16)) || '0.16'),
+  };
+}
+
+async function persistPackagingConfig(successMessage) {
   if (!_packagingLibrary) return;
   try {
-    const body = {
-      enabled: document.getElementById('pkg-enabled').value === 'true',
-      intro_asset_id: _packagingLibrary.config.intro_asset_id || null,
-      outro_asset_id: _packagingLibrary.config.outro_asset_id || null,
-      insert_asset_id: _packagingLibrary.config.insert_asset_id || null,
-      insert_asset_ids: _packagingLibrary.config.insert_asset_ids || [],
-      insert_selection_mode: document.getElementById('pkg-insert-mode').value,
-      insert_position_mode: 'llm',
-      watermark_asset_id: _packagingLibrary.config.watermark_asset_id || null,
-      music_asset_ids: _packagingLibrary.config.music_asset_ids || [],
-      music_selection_mode: document.getElementById('pkg-music-mode').value,
-      music_loop_mode: document.getElementById('pkg-music-loop').value,
-      music_volume: parseFloat(document.getElementById('pkg-music-volume').value || '0.22'),
-      watermark_position: document.getElementById('pkg-watermark-position').value,
-      watermark_opacity: parseFloat(document.getElementById('pkg-watermark-opacity').value || '0.82'),
-      watermark_scale: parseFloat(document.getElementById('pkg-watermark-scale').value || '0.16'),
-    };
+    const body = buildPackagingConfigBody();
     const data = await api('PATCH', '/packaging/config', body);
     _packagingLibrary = data;
     renderPackagingConfig(data);
     renderPackagingAssets(data);
-    toast('包装策略已保存');
+    renderStyleTemplateConfig(data);
+    toast(successMessage);
   } catch(e) {
-    toast('保存包装策略失败：' + e.message, 'error');
+    toast(`${successMessage.replace('已保存', '失败')}：${e.message}`, 'error');
   }
+}
+
+async function savePackagingConfig() {
+  await persistPackagingConfig('包装策略已保存');
+}
+
+async function saveStyleTemplateConfig() {
+  await persistPackagingConfig('风格模板已保存');
 }
 
 async function deletePackagingAsset(assetId) {
@@ -1959,6 +2463,7 @@ async function deletePackagingAsset(assetId) {
     _packagingLibrary = data;
     renderPackagingConfig(data);
     renderPackagingAssets(data);
+    renderStyleTemplateConfig(data);
     toast('素材已删除');
   } catch(e) {
     toast('删除包装素材失败：' + e.message, 'error');
@@ -2320,7 +2825,7 @@ async function stopServices() {
     hint.textContent = '停止指令已发送。几秒后页面断开连接属于正常现象。';
     toast('停止指令已发送');
     setTimeout(() => {
-      hint.textContent = '如果页面已失联，重新启动请双击 start_roughcut.bat。';
+      hint.textContent = '如果页面已失联，重新启动请双击 restart_roughcut.bat。';
     }, 3000);
   } catch(e) {
     btn.disabled = false;

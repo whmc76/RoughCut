@@ -7,9 +7,11 @@ from roughcut.review.content_profile import (
     _build_search_queries,
     _fallback_profile,
     _seed_profile_from_subtitles,
+    _seed_profile_from_user_memory,
     apply_content_profile_feedback,
     build_transcript_excerpt,
     build_cover_title,
+    enrich_content_profile,
 )
 
 
@@ -115,6 +117,23 @@ def test_seed_profile_from_subtitles_handles_edc_asr_aliases():
     assert profile["subject_type"] == "多功能工具钳"
 
 
+def test_seed_profile_from_user_memory_matches_transcript_and_keywords():
+    profile = _seed_profile_from_user_memory(
+        "这次来聊 ARC 这把工具的单手开合和锁点机构",
+        {
+            "field_preferences": {
+                "subject_brand": [{"value": "LEATHERMAN", "count": 3}],
+                "subject_model": [{"value": "ARC", "count": 5}],
+            },
+            "keyword_preferences": [{"keyword": "LEATHERMAN ARC", "count": 4}],
+        },
+    )
+
+    assert profile["subject_brand"] == "LEATHERMAN"
+    assert profile["subject_model"] == "ARC"
+    assert "LEATHERMAN ARC" in profile["search_queries"]
+
+
 @pytest.mark.asyncio
 async def test_apply_content_profile_feedback_prefers_user_values():
     result = await apply_content_profile_feedback(
@@ -138,3 +157,62 @@ async def test_apply_content_profile_feedback_prefers_user_values():
     assert result["summary"] == "这是用户确认后的摘要"
     assert result["search_queries"]
     assert any("FAS" in item for item in result["search_queries"])
+
+
+@pytest.mark.asyncio
+async def test_enrich_content_profile_uses_llm_to_replace_generic_engagement_question(monkeypatch: pytest.MonkeyPatch):
+    from roughcut.review import content_profile as content_profile_module
+
+    class FakeResponse:
+        def as_json(self):
+            return {"engagement_question": "ARC这次升级你最在意单手开合还是钳头？"}
+
+    class FakeProvider:
+        async def complete(self, *args, **kwargs):
+            return FakeResponse()
+
+    monkeypatch.setattr(content_profile_module, "get_reasoning_provider", lambda: FakeProvider())
+
+    result = await enrich_content_profile(
+        profile={
+            "subject_brand": "LEATHERMAN",
+            "subject_model": "ARC",
+            "subject_type": "多功能工具钳",
+            "video_theme": "升级开箱与上手体验",
+            "engagement_question": "你觉得这次到手值不值？",
+        },
+        source_name="arc.mp4",
+        channel_profile=None,
+        transcript_excerpt="这次重点看 ARC 的单手开合和钳头结构。",
+        include_research=False,
+    )
+
+    assert result["engagement_question"] == "ARC这次升级你最在意单手开合还是钳头？"
+
+
+@pytest.mark.asyncio
+async def test_enrich_content_profile_falls_back_to_contextual_question_when_llm_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from roughcut.review import content_profile as content_profile_module
+
+    def raising_provider():
+        raise RuntimeError("provider unavailable")
+
+    monkeypatch.setattr(content_profile_module, "get_reasoning_provider", raising_provider)
+
+    result = await enrich_content_profile(
+        profile={
+            "subject_brand": "LEATHERMAN",
+            "subject_model": "ARC",
+            "subject_type": "多功能工具钳",
+            "video_theme": "升级开箱与上手体验",
+            "engagement_question": "你觉得这次到手值不值？",
+        },
+        source_name="arc.mp4",
+        channel_profile=None,
+        transcript_excerpt="这次重点看 ARC 的单手开合和钳头结构。",
+        include_research=False,
+    )
+
+    assert result["engagement_question"] == "LEATHERMAN ARC这次升级你最在意哪一项？"

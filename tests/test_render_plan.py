@@ -33,9 +33,10 @@ def test_build_render_plan_custom():
         target_lufs=-16.0,
         noise_reduction=False,
         subtitle_style="white_minimal",
+        cover_style="tactical_neon",
     )
     assert plan["workflow_preset"] == "unboxing_upgrade"
     assert plan["loudness"]["target_lufs"] == -16.0
     assert plan["voice_processing"]["noise_reduction"] is False
     assert plan["subtitles"]["style"] == "white_minimal"
-    assert plan["cover"]["style"] == "upgrade_spotlight"
+    assert plan["cover"]["style"] == "tactical_neon"

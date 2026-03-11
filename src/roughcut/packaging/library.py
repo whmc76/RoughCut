@@ -31,6 +31,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "music_asset_ids": [],
     "music_selection_mode": "random",
     "music_loop_mode": "loop_single",
+    "subtitle_style": "bold_yellow_outline",
+    "cover_style": "preset_default",
+    "title_style": "preset_default",
     "music_volume": 0.22,
     "watermark_position": "top_right",
     "watermark_opacity": 0.82,
@@ -38,9 +41,86 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "enabled": True,
 }
 
+SUBTITLE_STYLE_OPTIONS = {
+    "bold_yellow_outline",
+    "white_minimal",
+    "neon_green_glow",
+    "cinema_blue",
+    "bubble_pop",
+    "keyword_highlight",
+    "amber_news",
+    "punch_red",
+    "lime_box",
+    "soft_shadow",
+    "clean_box",
+    "midnight_magenta",
+    "mint_outline",
+    "cobalt_pop",
+    "rose_gold",
+    "slate_caption",
+    "ivory_serif",
+    "cyber_orange",
+    "streamer_duo",
+    "doc_gray",
+    "sale_banner",
+    "coupon_green",
+    "luxury_caps",
+    "film_subtle",
+    "archive_type",
+    "teaser_glow",
+}
+
+COVER_STYLE_OPTIONS = {
+    "preset_default",
+    "tech_showcase",
+    "collection_drop",
+    "upgrade_spotlight",
+    "tactical_neon",
+    "luxury_blackgold",
+    "retro_poster",
+    "creator_vlog",
+    "bold_review",
+    "tutorial_card",
+    "food_magazine",
+    "street_hype",
+    "minimal_white",
+    "cyber_grid",
+    "premium_silver",
+    "comic_pop",
+    "studio_red",
+    "documentary_frame",
+    "pastel_lifestyle",
+    "industrial_orange",
+    "ecommerce_sale",
+    "price_strike",
+    "trailer_dark",
+    "festival_redgold",
+    "clean_lab",
+    "cinema_teaser",
+}
+
+TITLE_STYLE_OPTIONS = {
+    "preset_default",
+    "cyber_logo_stack",
+    "chrome_impact",
+    "festival_badge",
+    "double_banner",
+    "comic_boom",
+    "luxury_gold",
+    "tutorial_blueprint",
+    "magazine_clean",
+    "documentary_stamp",
+    "neon_night",
+}
+
+MUSIC_SELECTION_MODES = {"random", "manual"}
+MUSIC_LOOP_MODES = {"loop_single", "loop_all"}
+
 
 def list_packaging_assets() -> dict[str, Any]:
     state = _load_state()
+    assets_by_id = {item["id"]: item for item in state["assets"]}
+    state["config"] = _normalize_config(dict(state["config"]), assets_by_id)
     assets = sorted(state["assets"], key=lambda item: item.get("created_at", ""), reverse=True)
     by_type = {
         asset_type: [item for item in assets if item.get("asset_type") == asset_type]
@@ -141,22 +221,10 @@ def update_packaging_config(patch: dict[str, Any]) -> dict[str, Any]:
         if asset_id and assets_by_id.get(asset_id, {}).get("asset_type") != asset_type:
             raise ValueError(f"{asset_key} does not reference a valid {asset_type} asset")
 
-    insert_ids = [item for item in (config.get("insert_asset_ids") or []) if assets_by_id.get(item, {}).get("asset_type") == "insert"]
-    config["insert_asset_ids"] = insert_ids
-    config["insert_selection_mode"] = str(config.get("insert_selection_mode") or "manual").strip() or "manual"
-    config["insert_position_mode"] = str(config.get("insert_position_mode") or "llm").strip() or "llm"
-    music_ids = [item for item in (config.get("music_asset_ids") or []) if assets_by_id.get(item, {}).get("asset_type") == "music"]
-    config["music_asset_ids"] = music_ids
-    config["music_selection_mode"] = str(config.get("music_selection_mode") or "random").strip() or "random"
-    config["music_loop_mode"] = str(config.get("music_loop_mode") or "loop_single").strip() or "loop_single"
-    config["music_volume"] = float(config.get("music_volume") or DEFAULT_CONFIG["music_volume"])
-    config["watermark_opacity"] = float(config.get("watermark_opacity") or DEFAULT_CONFIG["watermark_opacity"])
-    config["watermark_scale"] = float(config.get("watermark_scale") or DEFAULT_CONFIG["watermark_scale"])
-    config["watermark_position"] = str(config.get("watermark_position") or "top_right").strip() or "top_right"
-    config["enabled"] = bool(config.get("enabled"))
+    state["config"] = _normalize_config(dict(config), assets_by_id)
 
     _save_state(state)
-    return config
+    return state["config"]
 
 
 def resolve_packaging_plan_for_job(job_id: str) -> dict[str, Any]:
@@ -170,12 +238,16 @@ def resolve_packaging_plan_for_job(job_id: str) -> dict[str, Any]:
             "insert": None,
             "watermark": None,
             "music": None,
+            "subtitle_style": DEFAULT_CONFIG["subtitle_style"],
+            "cover_style": DEFAULT_CONFIG["cover_style"],
+            "title_style": DEFAULT_CONFIG["title_style"],
         }
 
     assets_by_id = {
         item["id"]: item for item in state["assets"]
         if Path(item.get("path") or "").exists()
     }
+    config = _normalize_config(config, assets_by_id)
 
     intro = _resolve_single_asset(assets_by_id, config.get("intro_asset_id"), expected_type="intro")
     outro = _resolve_single_asset(assets_by_id, config.get("outro_asset_id"), expected_type="outro")
@@ -197,6 +269,7 @@ def resolve_packaging_plan_for_job(job_id: str) -> dict[str, Any]:
                 "selection_mode": config["music_selection_mode"],
                 "loop_mode": config["music_loop_mode"],
                 "volume": config["music_volume"],
+                "candidate_paths": [assets_by_id[item]["path"] for item in music.get("candidate_asset_ids", []) if item in assets_by_id],
             }
         )
 
@@ -206,6 +279,9 @@ def resolve_packaging_plan_for_job(job_id: str) -> dict[str, Any]:
         "insert": insert,
         "watermark": watermark,
         "music": music,
+        "subtitle_style": config["subtitle_style"],
+        "cover_style": config["cover_style"],
+        "title_style": config["title_style"],
     }
 
 
@@ -244,17 +320,19 @@ def _resolve_music_asset(
     music_ids = [item for item in config.get("music_asset_ids") or [] if item in assets_by_id]
     if not music_ids:
         return None
-    if config.get("music_selection_mode") == "random" and len(music_ids) > 1:
-        selected_id = random.Random(job_id).choice(music_ids)
+    ordered_ids = list(music_ids)
+    if config.get("music_selection_mode") == "random" and len(ordered_ids) > 1:
+        random.Random(f"music:{job_id}").shuffle(ordered_ids)
+        selected_id = ordered_ids[0]
     else:
-        selected_id = music_ids[0]
+        selected_id = ordered_ids[0]
     asset = assets_by_id[selected_id]
     return {
         "asset_id": asset["id"],
         "asset_type": "music",
         "path": asset["path"],
         "original_name": asset["original_name"],
-        "candidate_asset_ids": music_ids,
+        "candidate_asset_ids": ordered_ids,
     }
 
 
@@ -307,6 +385,59 @@ def _load_state() -> dict[str, Any]:
     state["assets"] = list(raw.get("assets") or [])
     state["config"].update(raw.get("config") or {})
     return state
+
+
+def _normalize_config(config: dict[str, Any], assets_by_id: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    normalized = dict(DEFAULT_CONFIG)
+    normalized.update(config or {})
+
+    insert_ids = [
+        item for item in (normalized.get("insert_asset_ids") or [])
+        if assets_by_id.get(item, {}).get("asset_type") == "insert"
+    ]
+    normalized["insert_asset_ids"] = insert_ids
+    normalized["insert_selection_mode"] = str(normalized.get("insert_selection_mode") or "manual").strip() or "manual"
+    if normalized["insert_selection_mode"] not in {"manual", "random"}:
+        normalized["insert_selection_mode"] = "manual"
+    normalized["insert_position_mode"] = str(normalized.get("insert_position_mode") or "llm").strip() or "llm"
+
+    music_ids = [
+        item for item in (normalized.get("music_asset_ids") or [])
+        if assets_by_id.get(item, {}).get("asset_type") == "music"
+    ]
+    normalized["music_asset_ids"] = music_ids
+    normalized["music_selection_mode"] = str(normalized.get("music_selection_mode") or "random").strip() or "random"
+    if normalized["music_selection_mode"] not in MUSIC_SELECTION_MODES:
+        normalized["music_selection_mode"] = DEFAULT_CONFIG["music_selection_mode"]
+
+    loop_mode = str(normalized.get("music_loop_mode") or "loop_single").strip() or "loop_single"
+    if loop_mode == "none":
+        loop_mode = "loop_all"
+    if loop_mode not in MUSIC_LOOP_MODES:
+        loop_mode = DEFAULT_CONFIG["music_loop_mode"]
+    normalized["music_loop_mode"] = loop_mode
+
+    subtitle_style = str(normalized.get("subtitle_style") or DEFAULT_CONFIG["subtitle_style"]).strip() or DEFAULT_CONFIG["subtitle_style"]
+    if subtitle_style not in SUBTITLE_STYLE_OPTIONS:
+        subtitle_style = DEFAULT_CONFIG["subtitle_style"]
+    normalized["subtitle_style"] = subtitle_style
+
+    cover_style = str(normalized.get("cover_style") or DEFAULT_CONFIG["cover_style"]).strip() or DEFAULT_CONFIG["cover_style"]
+    if cover_style not in COVER_STYLE_OPTIONS:
+        cover_style = DEFAULT_CONFIG["cover_style"]
+    normalized["cover_style"] = cover_style
+
+    title_style = str(normalized.get("title_style") or DEFAULT_CONFIG["title_style"]).strip() or DEFAULT_CONFIG["title_style"]
+    if title_style not in TITLE_STYLE_OPTIONS:
+        title_style = DEFAULT_CONFIG["title_style"]
+    normalized["title_style"] = title_style
+
+    normalized["music_volume"] = float(normalized.get("music_volume") or DEFAULT_CONFIG["music_volume"])
+    normalized["watermark_opacity"] = float(normalized.get("watermark_opacity") or DEFAULT_CONFIG["watermark_opacity"])
+    normalized["watermark_scale"] = float(normalized.get("watermark_scale") or DEFAULT_CONFIG["watermark_scale"])
+    normalized["watermark_position"] = str(normalized.get("watermark_position") or "top_right").strip() or "top_right"
+    normalized["enabled"] = bool(normalized.get("enabled"))
+    return normalized
 
 
 def _save_state(state: dict[str, Any]) -> None:

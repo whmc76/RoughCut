@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import tempfile
 import time
 import uuid
@@ -33,6 +34,7 @@ from roughcut.packaging.library import resolve_packaging_plan_for_job
 from roughcut.providers.factory import get_reasoning_provider
 from roughcut.providers.reasoning.base import Message
 from roughcut.review.content_profile import enrich_content_profile, infer_content_profile, polish_subtitle_items
+from roughcut.review.content_profile_memory import load_content_profile_user_memory
 from roughcut.review.glossary_engine import apply_glossary_corrections
 from roughcut.review.platform_copy import generate_platform_packaging, save_platform_packaging_markdown
 from roughcut.speech.postprocess import save_subtitle_items, split_into_subtitles
@@ -53,6 +55,8 @@ STEP_LABELS = {
     "platform_package": "平台文案",
 }
 
+logger = logging.getLogger(__name__)
+
 
 async def _set_step_progress(
     session,
@@ -66,11 +70,22 @@ async def _set_step_progress(
     metadata = dict(step.metadata_ or {})
     metadata["detail"] = detail
     metadata["label"] = STEP_LABELS.get(step.step_name, step.step_name)
-    metadata["updated_at"] = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(timezone.utc)
+    metadata["updated_at"] = now.isoformat()
     if progress is not None:
         metadata["progress"] = max(0.0, min(1.0, progress))
+    elapsed_seconds = _compute_step_elapsed_seconds(step, now=now)
+    if elapsed_seconds is not None:
+        metadata["elapsed_seconds"] = round(elapsed_seconds, 3)
     step.metadata_ = metadata
     await session.commit()
+
+
+def _compute_step_elapsed_seconds(step: JobStep | None, *, now: datetime | None = None) -> float | None:
+    if step is None or step.started_at is None:
+        return None
+    end_time = step.finished_at or now or datetime.now(timezone.utc)
+    return max(0.0, (end_time - step.started_at).total_seconds())
 
 
 async def _resolve_source(
@@ -228,6 +243,8 @@ async def run_transcribe(job_id: str) -> dict:
 
             progress_loop = asyncio.get_running_loop()
             last_progress = {"progress": 0.0, "ts": 0.0}
+            accept_progress_updates = {"value": True}
+            pending_progress_updates = []
 
             async def _persist_transcribe_progress(progress: float, detail: str) -> None:
                 progress_factory = get_session_factory()
@@ -238,6 +255,8 @@ async def run_transcribe(job_id: str) -> dict:
                     await _set_step_progress(progress_session, step_ref, detail=detail, progress=progress)
 
             def _on_transcribe_progress(payload: dict) -> None:
+                if not accept_progress_updates["value"]:
+                    return
                 total_duration = float(payload.get("total_duration") or 0.0)
                 segment_end = float(payload.get("segment_end") or 0.0)
                 segment_count = int(payload.get("segment_count") or 0)
@@ -249,10 +268,11 @@ async def run_transcribe(job_id: str) -> dict:
                 last_progress["progress"] = scaled_progress
                 last_progress["ts"] = now
                 detail = f"已转写 {segment_count} 段，覆盖 {segment_end:.0f}s / {total_duration:.0f}s"
-                asyncio.run_coroutine_threadsafe(
+                future = asyncio.run_coroutine_threadsafe(
                     _persist_transcribe_progress(scaled_progress, detail),
                     progress_loop,
                 )
+                pending_progress_updates.append(future)
 
             await _set_step_progress(session, step, detail=f"使用 {job.language} 模型执行转写", progress=0.25)
             result = await transcribe_audio(
@@ -263,6 +283,12 @@ async def run_transcribe(job_id: str) -> dict:
                 session,
                 progress_callback=_on_transcribe_progress,
             )
+            accept_progress_updates["value"] = False
+            if pending_progress_updates:
+                await asyncio.gather(
+                    *(asyncio.wrap_future(future) for future in pending_progress_updates),
+                    return_exceptions=True,
+                )
 
         await _set_step_progress(session, step, detail=f"转写完成，共 {len(result.segments)} 段", progress=1.0)
         await session.commit()
@@ -277,6 +303,7 @@ async def run_subtitle_postprocess(job_id: str) -> dict:
             select(JobStep).where(JobStep.job_id == job.id, JobStep.step_name == "subtitle_postprocess")
         )
         step = step_result.scalar_one()
+        started = time.perf_counter()
         await _set_step_progress(session, step, detail="加载转写结果并切分字幕", progress=0.25)
 
         # Load transcript segments
@@ -286,14 +313,42 @@ async def run_subtitle_postprocess(job_id: str) -> dict:
             .order_by(TranscriptSegment.segment_index)
         )
         segments = seg_result.scalars().all()
+        load_elapsed = time.perf_counter() - started
 
+        split_started = time.perf_counter()
         entries = split_into_subtitles(segments)
+        split_elapsed = time.perf_counter() - split_started
         await _set_step_progress(session, step, detail=f"生成字幕条目 {len(entries)} 条", progress=0.7)
+        save_started = time.perf_counter()
         items = await save_subtitle_items(job.id, entries, session)
-        await _set_step_progress(session, step, detail="字幕后处理完成", progress=1.0)
+        save_elapsed = time.perf_counter() - save_started
+        total_elapsed = time.perf_counter() - started
+        await _set_step_progress(
+            session,
+            step,
+            detail=f"字幕后处理完成，{len(segments)} 段 -> {len(items)} 条，用时 {total_elapsed:.1f}s",
+            progress=1.0,
+        )
         await session.commit()
+        logger.info(
+            "subtitle_postprocess finished job=%s segments=%s subtitles=%s elapsed=%.2fs load=%.2fs split=%.2fs save=%.2fs",
+            job_id,
+            len(segments),
+            len(items),
+            total_elapsed,
+            load_elapsed,
+            split_elapsed,
+            save_elapsed,
+        )
 
-        return {"subtitle_count": len(items)}
+        return {
+            "segment_count": len(segments),
+            "subtitle_count": len(items),
+            "elapsed_seconds": round(total_elapsed, 3),
+            "load_seconds": round(load_elapsed, 3),
+            "split_seconds": round(split_elapsed, 3),
+            "save_seconds": round(save_elapsed, 3),
+        }
 
 
 async def run_content_profile(job_id: str) -> dict:
@@ -323,6 +378,7 @@ async def run_content_profile(job_id: str) -> dict:
             }
             for item in subtitle_items
         ]
+        user_memory = await load_content_profile_user_memory(session, channel_profile=job.channel_profile)
 
         with tempfile.TemporaryDirectory() as tmpdir:
             source_path = await _resolve_source(job, tmpdir, expected_hash=job.file_hash)
@@ -332,6 +388,7 @@ async def run_content_profile(job_id: str) -> dict:
                 source_name=job.source_name,
                 subtitle_items=subtitle_dicts,
                 channel_profile=job.channel_profile,
+                user_memory=user_memory,
                 include_research=True,
             )
 
@@ -392,6 +449,7 @@ async def run_glossary_review(job_id: str) -> dict:
             }
             for item in subtitle_items
         ]
+        user_memory = await load_content_profile_user_memory(session, channel_profile=job.channel_profile)
 
         profile_result = await session.execute(
             select(Artifact)
@@ -411,6 +469,7 @@ async def run_glossary_review(job_id: str) -> dict:
                     source_name=job.source_name,
                     subtitle_items=subtitle_dicts,
                     channel_profile=job.channel_profile,
+                    user_memory=user_memory,
                 )
         else:
             content_profile = await enrich_content_profile(
@@ -418,6 +477,7 @@ async def run_glossary_review(job_id: str) -> dict:
                 source_name=job.source_name,
                 channel_profile=job.channel_profile,
                 transcript_excerpt=str(content_profile.get("transcript_excerpt") or ""),
+                user_memory=user_memory,
                 include_research=True,
             )
 
@@ -547,6 +607,13 @@ async def run_edit_plan(job_id: str) -> dict:
         render_plan_dict = build_render_plan(
             editorial_timeline_id=editorial_timeline.id,
             workflow_preset=job.channel_profile or "unboxing_default",
+            subtitle_style=str(packaging_plan.get("subtitle_style") or "bold_yellow_outline"),
+            cover_style=(
+                None
+                if str(packaging_plan.get("cover_style") or "preset_default") == "preset_default"
+                else str(packaging_plan.get("cover_style"))
+            ),
+            title_style=str(packaging_plan.get("title_style") or "preset_default"),
             intro=packaging_plan.get("intro"),
             outro=packaging_plan.get("outro"),
             insert=packaging_plan.get("insert"),
@@ -694,6 +761,8 @@ async def run_render(job_id: str) -> dict:
                 local_cover,
                 seek_sec=meta_result,
                 content_profile=content_profile,
+                cover_style=(render_plan_timeline.data_json.get("cover") or {}).get("style"),
+                title_style=(render_plan_timeline.data_json.get("cover") or {}).get("title_style"),
             )
         except Exception:
             local_cover = None  # Cover is non-critical

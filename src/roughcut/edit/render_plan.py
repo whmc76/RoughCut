@@ -14,6 +14,8 @@ def build_render_plan(
     workflow_preset: str = "unboxing_default",
     subtitle_version: int = 1,
     subtitle_style: str = "bold_yellow_outline",
+    cover_style: str | None = None,
+    title_style: str = "preset_default",
     target_lufs: float = -14.0,
     peak_limit: float = -1.0,
     noise_reduction: bool = True,
@@ -45,7 +47,8 @@ def build_render_plan(
         "watermark": watermark,
         "music": music,
         "cover": {
-            "style": preset.cover_style,
+            "style": cover_style or preset.cover_style,
+            "title_style": title_style,
             "variant_count": preset.cover_variant_count,
         },
     }

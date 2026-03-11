@@ -126,6 +126,7 @@ async def render_video(
             write_ass_file(
                 remapped,
                 ass_path,
+                style_name=str((render_plan.get("subtitles") or {}).get("style") or "bold_yellow_outline"),
                 font_name=settings.subtitle_font,
                 font_size=settings.subtitle_font_size,
                 text_color_rgb=settings.subtitle_color,
@@ -395,9 +396,16 @@ async def _apply_music_and_watermark(
     next_input_index = 1
 
     if music_plan:
-        if music_plan.get("loop_mode") == "loop_single":
+        music_input_path = Path(music_plan["path"])
+        if music_plan.get("loop_mode") == "loop_all":
+            music_input_path = await _prepare_multi_track_music_loop(
+                candidate_paths=[Path(path) for path in music_plan.get("candidate_paths") or [music_plan["path"]]],
+                output_path=output_path.with_name("music.loop_all.m4a"),
+                debug_dir=debug_dir,
+            )
+        if music_plan.get("loop_mode") in {"loop_single", "loop_all"}:
             cmd.extend(["-stream_loop", "-1"])
-        cmd.extend(["-i", str(music_plan["path"])])
+        cmd.extend(["-i", str(music_input_path)])
         volume = float(music_plan.get("volume", 0.22) or 0.22)
         filter_parts.append(f"[{next_input_index}:a]volume={volume}[bgm]")
         filter_parts.append(
@@ -438,6 +446,50 @@ async def _apply_music_and_watermark(
     _write_process_debug(debug_dir, "packaging.music_watermark", result)
     if result.returncode != 0:
         raise RuntimeError(f"ffmpeg music/watermark packaging failed: {result.stderr[-2000:]}")
+    return output_path
+
+
+async def _prepare_multi_track_music_loop(
+    *,
+    candidate_paths: list[Path],
+    output_path: Path,
+    debug_dir: Path | None,
+) -> Path:
+    unique_paths: list[Path] = []
+    seen: set[str] = set()
+    for path in candidate_paths:
+        key = str(path)
+        if key in seen or not path.exists():
+            continue
+        seen.add(key)
+        unique_paths.append(path)
+    if not unique_paths:
+        raise FileNotFoundError("No usable music tracks for loop_all mode")
+    if len(unique_paths) == 1:
+        return unique_paths[0]
+
+    cmd = ["ffmpeg", "-y"]
+    for path in unique_paths:
+        cmd.extend(["-i", str(path)])
+    concat_inputs = "".join(f"[{index}:a]" for index in range(len(unique_paths)))
+    cmd.extend(
+        [
+            "-filter_complex",
+            f"{concat_inputs}concat=n={len(unique_paths)}:v=0:a=1[aout]",
+            "-map",
+            "[aout]",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "192k",
+            str(output_path),
+        ]
+    )
+    _write_debug_text(debug_dir, "packaging.music_loop_all.ffmpeg.txt", _format_command(cmd))
+    result = await _run_process(cmd, timeout=get_settings().ffmpeg_timeout_sec)
+    _write_process_debug(debug_dir, "packaging.music_loop_all", result)
+    if result.returncode != 0 or not output_path.exists():
+        raise RuntimeError(f"ffmpeg multi-track music loop failed: {result.stderr[-2000:]}")
     return output_path
 
 

@@ -91,6 +91,24 @@ class ContentProfileReviewOut(BaseModel):
     review_step_status: str
     draft: dict[str, Any] | None
     final: dict[str, Any] | None
+    memory: dict[str, Any] | None = None
+
+
+class OpenFolderOut(BaseModel):
+    path: str
+    kind: str
+
+
+class ContentProfileMemoryStatsOut(BaseModel):
+    scope: str
+    channel_profile: str | None = None
+    channel_profiles: list[str] = []
+    total_corrections: int = 0
+    total_keywords: int = 0
+    field_preferences: dict[str, list[dict[str, Any]]] = {}
+    keyword_preferences: list[dict[str, Any]] = []
+    recent_corrections: list[dict[str, Any]] = []
+    cloud: dict[str, Any] = {}
 
 
 class ContentProfileConfirmIn(BaseModel):
@@ -129,6 +147,9 @@ class PackagingConfigOut(BaseModel):
     music_asset_ids: list[str] = []
     music_selection_mode: str = "random"
     music_loop_mode: str = "loop_single"
+    subtitle_style: str = "bold_yellow_outline"
+    cover_style: str = "preset_default"
+    title_style: str = "preset_default"
     music_volume: float = 0.22
     watermark_position: str = "top_right"
     watermark_opacity: float = 0.82
@@ -152,6 +173,9 @@ class PackagingConfigPatch(BaseModel):
     music_asset_ids: list[str] | None = None
     music_selection_mode: str | None = None
     music_loop_mode: str | None = None
+    subtitle_style: str | None = None
+    cover_style: str | None = None
+    title_style: str | None = None
     music_volume: float | None = None
     watermark_position: str | None = None
     watermark_opacity: float | None = None
