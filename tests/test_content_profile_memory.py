@@ -1,0 +1,75 @@
+from __future__ import annotations
+
+import uuid
+
+import pytest
+
+from roughcut.db.models import Job
+from roughcut.review.content_profile_memory import (
+    build_content_profile_memory_cloud,
+    load_content_profile_user_memory,
+    record_content_profile_feedback_memory,
+)
+
+
+@pytest.mark.asyncio
+async def test_content_profile_memory_records_corrections_and_keywords(db_session):
+    job = Job(
+        id=uuid.uuid4(),
+        source_path="E:/videos/test.mp4",
+        source_name="test.mp4",
+        status="needs_review",
+        channel_profile="edc_tactical",
+    )
+    db_session.add(job)
+    await db_session.flush()
+
+    await record_content_profile_feedback_memory(
+        db_session,
+        job=job,
+        draft_profile={
+            "subject_brand": "",
+            "subject_model": "",
+            "subject_type": "开箱产品",
+        },
+        final_profile={
+            "subject_brand": "LEATHERMAN",
+            "subject_model": "ARC",
+            "search_queries": ["LEATHERMAN ARC", "LEATHERMAN ARC 开箱"],
+        },
+        user_feedback={
+            "subject_brand": "LEATHERMAN",
+            "subject_model": "ARC",
+            "keywords": ["LEATHERMAN ARC"],
+        },
+    )
+    await db_session.flush()
+
+    memory = await load_content_profile_user_memory(db_session, channel_profile="edc_tactical")
+
+    assert memory["field_preferences"]["subject_brand"][0]["value"] == "LEATHERMAN"
+    assert memory["field_preferences"]["subject_model"][0]["value"] == "ARC"
+    assert memory["keyword_preferences"][0]["keyword"] == "LEATHERMAN ARC"
+    assert memory["recent_corrections"][0]["field_name"] in {"subject_brand", "subject_model"}
+
+
+def test_content_profile_memory_cloud_prioritizes_specific_terms():
+    cloud = build_content_profile_memory_cloud(
+        {
+            "field_preferences": {
+                "subject_brand": [{"value": "LEATHERMAN", "count": 3}],
+                "subject_model": [{"value": "ARC", "count": 2}],
+            },
+            "keyword_preferences": [
+                {"keyword": "LEATHERMAN ARC", "count": 4},
+                {"keyword": "多功能工具钳", "count": 2},
+            ],
+            "recent_corrections": [
+                {"field_name": "subject_model", "original_value": "", "corrected_value": "ARC", "source_name": "demo.mp4"}
+            ],
+        }
+    )
+
+    assert cloud["words"][0]["label"] in {"LEATHERMAN", "LEATHERMAN ARC"}
+    assert any(item["label"] == "ARC" and item["kind"] == "subject_model" for item in cloud["words"])
+    assert cloud["recent_corrections"][0]["corrected_value"] == "ARC"

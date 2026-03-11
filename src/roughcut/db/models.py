@@ -231,6 +231,32 @@ class ReviewAction(Base):
     created_at: Mapped[datetime] = mapped_column(TIMESTAMPTZ, server_default=func.now())
 
 
+class ContentProfileCorrection(Base):
+    __tablename__ = "content_profile_corrections"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID_TYPE, primary_key=True, default=_uuid)
+    job_id: Mapped[uuid.UUID] = mapped_column(UUID_TYPE, ForeignKey("jobs.id", ondelete="CASCADE"))
+    source_name: Mapped[str] = mapped_column(Text, nullable=False)
+    channel_profile: Mapped[str | None] = mapped_column(Text)
+    field_name: Mapped[str] = mapped_column(Text, nullable=False)
+    original_value: Mapped[str | None] = mapped_column(Text)
+    corrected_value: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMPTZ, server_default=func.now())
+
+
+class ContentProfileKeywordStat(Base):
+    __tablename__ = "content_profile_keyword_stats"
+    __table_args__ = (UniqueConstraint("scope_type", "scope_value", "keyword"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID_TYPE, primary_key=True, default=_uuid)
+    scope_type: Mapped[str] = mapped_column(Text, nullable=False, default="global")
+    scope_value: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    keyword: Mapped[str] = mapped_column(Text, nullable=False)
+    usage_count: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMPTZ, server_default=func.now())
+    last_used_at: Mapped[datetime] = mapped_column(TIMESTAMPTZ, server_default=func.now(), onupdate=func.now())
+
+
 class WatchRoot(Base):
     __tablename__ = "watch_roots"
     __table_args__ = (UniqueConstraint("path"),)

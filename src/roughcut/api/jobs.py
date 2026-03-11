@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import hashlib
+import os
+import subprocess
+import sys
 import shutil
 import tempfile
 import uuid
@@ -9,21 +12,25 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 from fastapi.responses import FileResponse
-from sqlalchemy import delete, select
+from sqlalchemy import delete, distinct, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from roughcut.api.schemas import (
+    ContentProfileMemoryStatsOut,
     ContentProfileConfirmIn,
     ContentProfileReviewOut,
     JobActivityOut,
     JobOut,
+    OpenFolderOut,
     ReportOut,
     ReviewApplyRequest,
 )
 from roughcut.config import get_settings
 from roughcut.db.models import (
     Artifact,
+    ContentProfileCorrection,
+    ContentProfileKeywordStat,
     FactClaim,
     FactEvidence,
     Job,
@@ -40,6 +47,14 @@ from roughcut.pipeline.celery_app import celery_app
 from roughcut.pipeline.orchestrator import create_job_steps
 from roughcut.review.content_profile import _extract_reference_frames
 from roughcut.review.content_profile import apply_content_profile_feedback
+from roughcut.review.content_profile_memory import (
+    _build_field_preferences,
+    _build_keyword_preferences,
+    _build_recent_corrections,
+    build_content_profile_memory_cloud,
+    load_content_profile_user_memory,
+    record_content_profile_feedback_memory,
+)
 from roughcut.review.report import generate_report
 from roughcut.storage.s3 import get_storage, job_key
 
@@ -274,6 +289,9 @@ async def get_content_profile(job_id: uuid.UUID, session: AsyncSession = Depends
         select(JobStep).where(JobStep.job_id == job_id, JobStep.step_name == "summary_review")
     )
     review_step = review_step_result.scalar_one_or_none()
+    user_memory = await load_content_profile_user_memory(session, channel_profile=job.channel_profile)
+    memory = dict(user_memory or {})
+    memory["cloud"] = build_content_profile_memory_cloud(user_memory)
 
     return ContentProfileReviewOut(
         job_id=str(job_id),
@@ -281,7 +299,72 @@ async def get_content_profile(job_id: uuid.UUID, session: AsyncSession = Depends
         review_step_status=review_step.status if review_step else "pending",
         draft=draft,
         final=final,
+        memory=memory,
     )
+
+
+@router.get("/stats/content-profile-memory", response_model=ContentProfileMemoryStatsOut)
+async def get_content_profile_memory_stats(
+    channel_profile: str | None = None,
+    session: AsyncSession = Depends(get_session),
+):
+    user_memory = await load_content_profile_user_memory(session, channel_profile=channel_profile)
+    channel_profile_result = await session.execute(
+        select(distinct(ContentProfileCorrection.channel_profile))
+        .where(ContentProfileCorrection.channel_profile.is_not(None))
+        .order_by(ContentProfileCorrection.channel_profile)
+    )
+    channel_profiles = [item for item in channel_profile_result.scalars().all() if item]
+
+    correction_result = await session.execute(
+        select(ContentProfileCorrection).order_by(ContentProfileCorrection.created_at.desc()).limit(240)
+    )
+    corrections = correction_result.scalars().all()
+
+    keyword_result = await session.execute(select(ContentProfileKeywordStat))
+    keyword_stats = keyword_result.scalars().all()
+
+    total_corrections = sum(
+        1
+        for item in corrections
+        if not channel_profile or item.channel_profile in {None, channel_profile}
+    )
+    total_keywords = sum(
+        int(item.usage_count or 0)
+        for item in keyword_stats
+        if item.scope_type == "global"
+        or (channel_profile and item.scope_type == "channel_profile" and item.scope_value == channel_profile)
+    )
+
+    return ContentProfileMemoryStatsOut(
+        scope="channel_profile" if channel_profile else "global",
+        channel_profile=channel_profile,
+        channel_profiles=channel_profiles,
+        total_corrections=total_corrections,
+        total_keywords=total_keywords,
+        field_preferences=_build_field_preferences(corrections, channel_profile=channel_profile, limit=6),
+        keyword_preferences=_build_keyword_preferences(keyword_stats, channel_profile=channel_profile, limit=18),
+        recent_corrections=_build_recent_corrections(corrections, channel_profile=channel_profile, limit=12),
+        cloud=build_content_profile_memory_cloud(user_memory),
+    )
+
+
+@router.post("/{job_id}/open-folder", response_model=OpenFolderOut)
+async def open_job_folder(job_id: uuid.UUID, session: AsyncSession = Depends(get_session)):
+    job = await session.get(Job, job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    target_path, kind = await _resolve_job_open_target(job, session)
+    if target_path is None:
+        raise HTTPException(status_code=409, detail="当前任务没有可打开的本地文件夹")
+
+    try:
+        _open_in_file_manager(target_path)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"打开文件夹失败：{exc}") from exc
+
+    return OpenFolderOut(path=str(target_path), kind=kind)
 
 
 @router.get("/{job_id}/content-profile/thumbnail")
@@ -353,9 +436,20 @@ async def confirm_content_profile(
         data_json=final_profile,
     )
     session.add(artifact)
+    await record_content_profile_feedback_memory(
+        session,
+        job=job,
+        draft_profile=draft_artifact.data_json or {},
+        final_profile=final_profile,
+        user_feedback=user_feedback,
+    )
 
     job.status = "processing"
     job.updated_at = datetime.now(timezone.utc)
+    await session.flush()
+    user_memory = await load_content_profile_user_memory(session, channel_profile=job.channel_profile)
+    memory = dict(user_memory or {})
+    memory["cloud"] = build_content_profile_memory_cloud(user_memory)
     await session.commit()
 
     return ContentProfileReviewOut(
@@ -364,6 +458,7 @@ async def confirm_content_profile(
         review_step_status=review_step.status if review_step else "done",
         draft=draft_artifact.data_json,
         final=final_profile,
+        memory=memory,
     )
 
 
@@ -557,11 +652,16 @@ def _build_current_step(job: Job) -> dict | None:
     running = next((step for step in steps if step.status == "running"), None)
     if running:
         meta = running.metadata_ or {}
+        detail = _decorate_step_detail(
+            meta.get("detail"),
+            _step_elapsed_seconds(running),
+            running=running.status == "running",
+        )
         return {
             "step_name": running.step_name,
             "label": STEP_LABELS.get(running.step_name, running.step_name),
             "status": running.status,
-            "detail": meta.get("detail"),
+            "detail": detail,
             "progress": meta.get("progress"),
             "updated_at": meta.get("updated_at") or _iso_or_none(running.started_at),
         }
@@ -620,7 +720,7 @@ def _build_activity_decisions(
             {
                 "kind": "content_profile",
                 "title": "内容识别",
-                "status": "done" if profile.artifact_type != "content_profile_draft" else "running",
+                "status": "done" if profile.artifact_type != "content_profile_draft" else "needs_review",
                 "summary": subject,
                 "detail": detail,
                 "updated_at": _iso_or_none(profile.created_at),
@@ -711,6 +811,7 @@ def _build_activity_events(
     for step in steps:
         label = STEP_LABELS.get(step.step_name, step.step_name)
         metadata = step.metadata_ or {}
+        elapsed_seconds = _step_elapsed_seconds(step)
         if step.started_at:
             events.append(
                 {
@@ -718,7 +819,7 @@ def _build_activity_events(
                     "type": "step",
                     "status": "running" if step.status == "running" else "started",
                     "title": f"{label}开始",
-                    "detail": metadata.get("detail") or None,
+                    "detail": None,
                 }
             )
         if step.finished_at:
@@ -728,7 +829,11 @@ def _build_activity_events(
                     "type": "step",
                     "status": step.status,
                     "title": f"{label}{'完成' if step.status == 'done' else '结束'}",
-                    "detail": step.error_message or metadata.get("detail"),
+                    "detail": _decorate_step_detail(
+                        step.error_message or metadata.get("detail"),
+                        elapsed_seconds,
+                        running=False,
+                    ),
                 }
             )
         updated_at = metadata.get("updated_at")
@@ -739,7 +844,7 @@ def _build_activity_events(
                     "type": "progress",
                     "status": step.status,
                     "title": label,
-                    "detail": metadata.get("detail"),
+                    "detail": _decorate_step_detail(metadata.get("detail"), elapsed_seconds, running=True),
                 }
             )
 
@@ -812,6 +917,57 @@ def _artifact_event_summary(artifact: Artifact) -> dict | None:
     return None
 
 
+def _step_elapsed_seconds(step: JobStep) -> float | None:
+    metadata = step.metadata_ or {}
+    raw_elapsed = metadata.get("elapsed_seconds")
+    if raw_elapsed is not None:
+        try:
+            return max(0.0, float(raw_elapsed))
+        except (TypeError, ValueError):
+            pass
+    if step.started_at is None:
+        return None
+    start_time = _coerce_utc(step.started_at)
+    end_time = _coerce_utc(step.finished_at) if step.finished_at is not None else datetime.now(timezone.utc)
+    return max(0.0, (end_time - start_time).total_seconds())
+
+
+def _decorate_step_detail(detail: str | None, elapsed_seconds: float | None, *, running: bool) -> str | None:
+    elapsed_text = _format_elapsed(elapsed_seconds)
+    base = (detail or "").strip()
+    if elapsed_text:
+        suffix = f"已运行 {elapsed_text}" if running else f"用时 {elapsed_text}"
+        if base:
+            if suffix in base or "用时 " in base or "已运行 " in base:
+                return base
+            return f"{base} · {suffix}"
+        return suffix
+    return base or None
+
+
+def _format_elapsed(seconds: float | None) -> str | None:
+    if seconds is None:
+        return None
+    if seconds < 1:
+        return f"{seconds:.1f}s"
+    if seconds < 10:
+        return f"{seconds:.1f}s"
+    total_seconds = max(0, int(round(seconds)))
+    minutes, sec = divmod(total_seconds, 60)
+    hours, minute = divmod(minutes, 60)
+    if hours:
+        return f"{hours}h {minute}m {sec}s"
+    if minutes:
+        return f"{minutes}m {sec}s"
+    return f"{sec}s"
+
+
+def _coerce_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
 def _attach_job_previews(jobs: list[Job]) -> None:
     for job in jobs:
         _attach_job_preview(job)
@@ -860,6 +1016,39 @@ def _select_preview_artifact(artifacts: list[Artifact]) -> Artifact | None:
         reverse=True,
     )
     return candidates[0]
+
+
+async def _resolve_job_open_target(job: Job, session: AsyncSession) -> tuple[Path | None, str]:
+    render_result = await session.execute(
+        select(RenderOutput)
+        .where(RenderOutput.job_id == job.id, RenderOutput.output_path.is_not(None))
+        .order_by(RenderOutput.created_at.desc())
+    )
+    for item in render_result.scalars().all():
+        if not item.output_path:
+            continue
+        output_path = Path(item.output_path)
+        if output_path.exists():
+            return output_path, "output"
+
+    source_path = Path(job.source_path)
+    if source_path.exists():
+        return source_path, "source"
+    return None, "none"
+
+
+def _open_in_file_manager(target_path: Path) -> None:
+    if os.name == "nt":
+        if target_path.is_file():
+            subprocess.Popen(["explorer", "/select,", str(target_path)])
+        else:
+            os.startfile(str(target_path))
+        return
+    open_path = target_path.parent if target_path.is_file() else target_path
+    if sys.platform == "darwin":
+        subprocess.Popen(["open", str(open_path)])
+        return
+    subprocess.Popen(["xdg-open", str(open_path)])
 
 
 async def _ensure_content_profile_thumbnail(job: Job, *, index: int) -> Path:

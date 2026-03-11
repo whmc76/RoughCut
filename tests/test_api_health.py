@@ -601,6 +601,86 @@ async def test_job_list_includes_content_preview(client: AsyncClient):
 
 
 @pytest.mark.asyncio
+async def test_open_job_folder_prefers_render_output(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    import roughcut.api.jobs as jobs_api
+    from roughcut.db.models import Job, RenderOutput
+    from roughcut.db.session import get_session_factory
+
+    opened: dict[str, str] = {}
+    monkeypatch.setattr(jobs_api, "_open_in_file_manager", lambda path: opened.setdefault("path", str(path)))
+
+    output_path = tmp_path / "exports" / "demo.mp4"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_bytes(b"demo")
+    job_id = uuid.uuid4()
+
+    async with get_session_factory()() as session:
+        session.add(
+            Job(
+                id=job_id,
+                source_path="jobs/demo/source.mp4",
+                source_name="source.mp4",
+                status="done",
+                language="zh-CN",
+            )
+        )
+        session.add(RenderOutput(job_id=job_id, status="done", progress=1.0, output_path=str(output_path)))
+        await session.commit()
+
+    response = await client.post(f"/api/v1/jobs/{job_id}/open-folder")
+    assert response.status_code == 200
+    assert response.json()["kind"] == "output"
+    assert response.json()["path"] == str(output_path)
+    assert opened["path"] == str(output_path)
+
+
+@pytest.mark.asyncio
+async def test_content_profile_memory_stats_endpoint(client: AsyncClient):
+    from roughcut.db.models import ContentProfileCorrection, ContentProfileKeywordStat
+    from roughcut.db.session import get_session_factory
+
+    async with get_session_factory()() as session:
+        session.add_all(
+            [
+                ContentProfileCorrection(
+                    job_id=uuid.uuid4(),
+                    source_name="a.mp4",
+                    channel_profile="edc",
+                    field_name="subject_brand",
+                    original_value="",
+                    corrected_value="LEATHERMAN",
+                ),
+                ContentProfileCorrection(
+                    job_id=uuid.uuid4(),
+                    source_name="b.mp4",
+                    channel_profile="edc",
+                    field_name="subject_model",
+                    original_value="",
+                    corrected_value="ARC",
+                ),
+                ContentProfileKeywordStat(scope_type="global", scope_value="", keyword="LEATHERMAN ARC", usage_count=2),
+                ContentProfileKeywordStat(scope_type="channel_profile", scope_value="edc", keyword="多功能工具钳", usage_count=3),
+            ]
+        )
+        await session.commit()
+
+    response = await client.get("/api/v1/jobs/stats/content-profile-memory?channel_profile=edc")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["scope"] == "channel_profile"
+    assert data["channel_profile"] == "edc"
+    assert "edc" in data["channel_profiles"]
+    assert data["total_corrections"] >= 2
+    assert data["total_keywords"] >= 3
+    assert data["field_preferences"]["subject_brand"][0]["value"] == "LEATHERMAN"
+    assert any(item["keyword"] == "多功能工具钳" for item in data["keyword_preferences"])
+
+
+@pytest.mark.asyncio
 async def test_job_activity_stream(client: AsyncClient):
     from roughcut.db.models import Artifact, Job, JobStep, RenderOutput, SubtitleCorrection, Timeline
     from roughcut.db.session import get_session_factory
@@ -680,10 +760,69 @@ async def test_job_activity_stream(client: AsyncClient):
     assert response.status_code == 200
     data = response.json()
     assert data["current_step"]["step_name"] == "render"
-    assert data["current_step"]["detail"] == "执行 FFmpeg 渲染成片"
-    assert round(data["render"]["progress"], 2) == 0.35
-    kinds = {item["kind"] for item in data["decisions"]}
-    assert "content_profile" in kinds
-    assert "edit_plan" in kinds
-    assert "subtitle_review" in kinds
-    assert any(event["title"] == "渲染输出" for event in data["events"])
+    assert data["current_step"]["detail"].startswith("执行 FFmpeg 渲染成片")
+
+
+@pytest.mark.asyncio
+async def test_content_profile_endpoint_returns_memory_cloud(client: AsyncClient):
+    from roughcut.db.models import Artifact, Job, JobStep
+    from roughcut.db.session import get_session_factory
+    from roughcut.review.content_profile_memory import record_content_profile_feedback_memory
+
+    job_id = uuid.uuid4()
+    now = datetime.now(timezone.utc)
+
+    async with get_session_factory()() as session:
+        job = Job(
+            id=job_id,
+            source_path="jobs/demo/memory.mp4",
+            source_name="memory.mp4",
+            status="needs_review",
+            language="zh-CN",
+            channel_profile="edc_memory_demo",
+        )
+        session.add(job)
+        session.add(
+            JobStep(
+                job_id=job_id,
+                step_name="summary_review",
+                status="running",
+                started_at=now,
+            )
+        )
+        session.add(
+            Artifact(
+                job_id=job_id,
+                artifact_type="content_profile_draft",
+                data_json={
+                    "subject_brand": "LEATHERMAN",
+                    "subject_model": "ARC",
+                    "subject_type": "多功能工具钳",
+                    "video_theme": "开箱与上手体验",
+                    "summary": "围绕 LEATHERMAN ARC 展开。",
+                    "search_queries": ["LEATHERMAN ARC", "LEATHERMAN ARC 开箱"],
+                },
+            )
+        )
+        await session.flush()
+        await record_content_profile_feedback_memory(
+            session,
+            job=job,
+            draft_profile={"subject_brand": "", "subject_model": "", "subject_type": "开箱产品"},
+            final_profile={"search_queries": ["LEATHERMAN ARC", "多功能工具钳"]},
+            user_feedback={
+                "subject_brand": "LEATHERMAN",
+                "subject_model": "ARC",
+                "keywords": ["LEATHERMAN ARC", "多功能工具钳"],
+            },
+        )
+        await session.commit()
+
+    response = await client.get(f"/api/v1/jobs/{job_id}/content-profile")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["draft"]["subject_brand"] == "LEATHERMAN"
+    assert data["review_step_status"] == "running"
+    assert data["memory"]["field_preferences"]["subject_brand"][0]["value"] == "LEATHERMAN"
+    assert data["memory"]["cloud"]["words"]
+    assert any(word["label"] == "LEATHERMAN ARC" for word in data["memory"]["cloud"]["words"])

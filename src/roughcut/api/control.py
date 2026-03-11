@@ -11,7 +11,7 @@ from pydantic import BaseModel
 router = APIRouter(prefix="/control", tags=["control"])
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
-_STOP_SCRIPT = _REPO_ROOT / "stop_roughcut.ps1"
+_STOP_SCRIPT = _REPO_ROOT / "restart_roughcut.ps1"
 
 
 class StopServicesIn(BaseModel):
@@ -69,7 +69,7 @@ def _launch_stop_script(*, stop_docker: bool) -> None:
 
     shell = _pick_shell()
 
-    command = f"Start-Sleep -Seconds 1; & '{_STOP_SCRIPT}'"
+    command = f"Start-Sleep -Seconds 1; & '{_STOP_SCRIPT}' -StopOnly"
     if stop_docker:
         command += " -StopDocker"
 

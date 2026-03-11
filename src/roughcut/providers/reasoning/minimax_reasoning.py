@@ -9,10 +9,8 @@ from roughcut.providers.reasoning.base import Message, ReasoningProvider, Reason
 class MiniMaxReasoningProvider(ReasoningProvider):
     def __init__(self) -> None:
         settings = get_settings()
-        self._client = openai.AsyncOpenAI(
-            api_key=settings.minimax_api_key,
-            base_url=settings.minimax_base_url.rstrip("/"),
-        )
+        self._api_key = settings.minimax_api_key
+        self._base_url = settings.minimax_base_url.rstrip("/")
         self._model = settings.active_reasoning_model
 
     async def complete(
@@ -32,14 +30,18 @@ class MiniMaxReasoningProvider(ReasoningProvider):
         if json_mode:
             kwargs["response_format"] = {"type": "json_object"}
 
-        response = await self._client.chat.completions.create(**kwargs)
-        choice = response.choices[0]
-        usage = {
-            "prompt_tokens": response.usage.prompt_tokens,
-            "completion_tokens": response.usage.completion_tokens,
-        }
-        return ReasoningResponse(
-            content=choice.message.content or "",
-            usage=usage,
-            model=response.model,
-        )
+        client = openai.AsyncOpenAI(api_key=self._api_key, base_url=self._base_url)
+        try:
+            response = await client.chat.completions.create(**kwargs)
+            choice = response.choices[0]
+            usage = {
+                "prompt_tokens": response.usage.prompt_tokens,
+                "completion_tokens": response.usage.completion_tokens,
+            }
+            return ReasoningResponse(
+                content=choice.message.content or "",
+                usage=usage,
+                model=response.model,
+            )
+        finally:
+            await client.close()
