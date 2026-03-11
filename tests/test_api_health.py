@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 import pytest_asyncio
@@ -283,6 +284,223 @@ async def test_watch_root_inventory_status_uses_cached_snapshot(client: AsyncCli
     assert full.status_code == 200
     assert full.json()["pending_count"] == 1
     assert full.json()["inventory"]["pending"][0]["source_name"] == "a.mp4"
+
+
+@pytest.mark.asyncio
+async def test_watch_root_inventory_enqueue_selected_item(client: AsyncClient, monkeypatch: pytest.MonkeyPatch):
+    import roughcut.api.review as review_api
+    from roughcut.db.models import WatchRoot
+    from roughcut.db.session import get_session_factory
+
+    async def fake_create_jobs_for_inventory_paths(file_paths: list[str], *, channel_profile: str | None = None, language: str = "zh-CN"):
+        assert file_paths == ["/tmp/videos-enqueue/a.mp4"]
+        assert channel_profile == "demo"
+        return [{"path": "/tmp/videos-enqueue/a.mp4", "job_id": "job-123"}]
+
+    monkeypatch.setattr(review_api, "create_jobs_for_inventory_paths", fake_create_jobs_for_inventory_paths)
+
+    created = await client.post(
+        "/api/v1/watch-roots",
+        json={"path": "/tmp/videos-enqueue", "enabled": True, "channel_profile": "demo"},
+    )
+    root_id = created.json()["id"]
+
+    async with get_session_factory()() as session:
+        root = await session.get(WatchRoot, uuid.UUID(root_id))
+        root.inventory_cache_json = {
+            "root_path": "/tmp/videos-enqueue",
+            "scan_mode": "fast",
+            "status": "done",
+            "started_at": "2026-03-11T18:00:00",
+            "updated_at": "2026-03-11T18:00:10",
+            "finished_at": "2026-03-11T18:00:10",
+            "total_files": 2,
+            "processed_files": 2,
+            "pending_count": 2,
+            "deduped_count": 0,
+            "current_file": None,
+            "current_phase": None,
+            "current_file_size_bytes": None,
+            "current_file_processed_bytes": None,
+            "error": None,
+            "inventory": {
+                "pending": [
+                    {
+                        "path": "/tmp/videos-enqueue/a.mp4",
+                        "relative_path": "a.mp4",
+                        "source_name": "a.mp4",
+                        "stem": "a",
+                        "size_bytes": 123,
+                        "modified_at": "2026-03-11T18:00:00",
+                        "duration_sec": 12.5,
+                        "width": 1920,
+                        "height": 1080,
+                        "fps": 30.0,
+                        "status": "pending",
+                        "dedupe_reason": None,
+                        "matched_job_id": None,
+                        "matched_output_path": None,
+                    },
+                    {
+                        "path": "/tmp/videos-enqueue/b.mp4",
+                        "relative_path": "b.mp4",
+                        "source_name": "b.mp4",
+                        "stem": "b",
+                        "size_bytes": 456,
+                        "modified_at": "2026-03-11T18:00:00",
+                        "duration_sec": 23.4,
+                        "width": 1920,
+                        "height": 1080,
+                        "fps": 30.0,
+                        "status": "pending",
+                        "dedupe_reason": None,
+                        "matched_job_id": None,
+                        "matched_output_path": None,
+                    },
+                ],
+                "deduped": [],
+            },
+        }
+        await session.commit()
+
+    response = await client.post(
+        f"/api/v1/watch-roots/{root_id}/inventory/enqueue",
+        json={"relative_paths": ["a.mp4"]},
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["requested_count"] == 1
+    assert data["created_count"] == 1
+    assert data["created_job_ids"] == ["job-123"]
+
+    inventory = await client.get(f"/api/v1/watch-roots/{root_id}/inventory/status?include_inventory=true")
+    assert inventory.status_code == 200
+    payload = inventory.json()["inventory"]
+    assert len(payload["pending"]) == 1
+    assert payload["pending"][0]["relative_path"] == "b.mp4"
+    assert payload["deduped"][-1]["matched_job_id"] == "job-123"
+    assert payload["deduped"][-1]["dedupe_reason"] == "job:pending"
+
+
+@pytest.mark.asyncio
+async def test_watch_root_inventory_enqueue_all(client: AsyncClient, monkeypatch: pytest.MonkeyPatch):
+    import roughcut.api.review as review_api
+    from roughcut.db.models import WatchRoot
+    from roughcut.db.session import get_session_factory
+
+    async def fake_create_jobs_for_inventory_paths(file_paths: list[str], *, channel_profile: str | None = None, language: str = "zh-CN"):
+        assert file_paths == ["/tmp/videos-batch/a.mp4", "/tmp/videos-batch/b.mp4"]
+        return [
+            {"path": "/tmp/videos-batch/a.mp4", "job_id": "job-a"},
+            {"path": "/tmp/videos-batch/b.mp4", "job_id": None},
+        ]
+
+    monkeypatch.setattr(review_api, "create_jobs_for_inventory_paths", fake_create_jobs_for_inventory_paths)
+
+    created = await client.post(
+        "/api/v1/watch-roots",
+        json={"path": "/tmp/videos-batch", "enabled": True},
+    )
+    root_id = created.json()["id"]
+
+    async with get_session_factory()() as session:
+        root = await session.get(WatchRoot, uuid.UUID(root_id))
+        root.inventory_cache_json = {
+            "root_path": "/tmp/videos-batch",
+            "scan_mode": "fast",
+            "status": "done",
+            "started_at": "2026-03-11T18:00:00",
+            "updated_at": "2026-03-11T18:00:10",
+            "finished_at": "2026-03-11T18:00:10",
+            "total_files": 2,
+            "processed_files": 2,
+            "pending_count": 2,
+            "deduped_count": 0,
+            "current_file": None,
+            "current_phase": None,
+            "current_file_size_bytes": None,
+            "current_file_processed_bytes": None,
+            "error": None,
+            "inventory": {
+                "pending": [
+                    {
+                        "path": "/tmp/videos-batch/a.mp4",
+                        "relative_path": "a.mp4",
+                        "source_name": "a.mp4",
+                        "stem": "a",
+                        "size_bytes": 123,
+                        "modified_at": "2026-03-11T18:00:00",
+                        "duration_sec": None,
+                        "width": None,
+                        "height": None,
+                        "fps": None,
+                        "status": "pending",
+                        "dedupe_reason": None,
+                        "matched_job_id": None,
+                        "matched_output_path": None,
+                    },
+                    {
+                        "path": "/tmp/videos-batch/b.mp4",
+                        "relative_path": "b.mp4",
+                        "source_name": "b.mp4",
+                        "stem": "b",
+                        "size_bytes": 456,
+                        "modified_at": "2026-03-11T18:00:00",
+                        "duration_sec": None,
+                        "width": None,
+                        "height": None,
+                        "fps": None,
+                        "status": "pending",
+                        "dedupe_reason": None,
+                        "matched_job_id": None,
+                        "matched_output_path": None,
+                    },
+                ],
+                "deduped": [],
+            },
+        }
+        await session.commit()
+
+    response = await client.post(
+        f"/api/v1/watch-roots/{root_id}/inventory/enqueue",
+        json={"enqueue_all": True},
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["requested_count"] == 2
+    assert data["created_count"] == 1
+    assert data["skipped_count"] == 1
+
+    inventory = await client.get(f"/api/v1/watch-roots/{root_id}/inventory/status?include_inventory=true")
+    payload = inventory.json()["inventory"]
+    assert payload["pending"] == []
+    assert len(payload["deduped"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_watch_root_inventory_thumbnail(client: AsyncClient, monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    import roughcut.api.review as review_api
+
+    preview = tmp_path / "preview.jpg"
+    preview.write_bytes(b"fake-jpeg")
+
+    async def fake_ensure_watch_inventory_thumbnail(watch_path: str, relative_path: str, *, width: int = 320):
+        assert watch_path == "/tmp/videos-thumb"
+        assert relative_path == "a.mp4"
+        return preview
+
+    monkeypatch.setattr(review_api, "ensure_watch_inventory_thumbnail", fake_ensure_watch_inventory_thumbnail)
+
+    created = await client.post(
+        "/api/v1/watch-roots",
+        json={"path": "/tmp/videos-thumb", "enabled": True},
+    )
+    root_id = created.json()["id"]
+
+    response = await client.get(f"/api/v1/watch-roots/{root_id}/inventory/thumbnail?relative_path=a.mp4")
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("image/jpeg")
+    assert response.content == b"fake-jpeg"
 
 
 @pytest.mark.asyncio

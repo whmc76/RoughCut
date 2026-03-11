@@ -27,7 +27,7 @@ def test_local_mode_switches_active_provider():
     s = Settings(_env_file=None, llm_mode="local", local_reasoning_model="qwen3.5:9b")
     assert s.active_reasoning_provider == "ollama"
     assert s.active_reasoning_model == "qwen3.5:9b"
-    assert s.active_search_provider == "searxng"
+    assert s.active_search_provider == "auto"
 
 
 def test_parse_extensions_from_string():

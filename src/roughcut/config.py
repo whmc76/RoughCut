@@ -42,8 +42,8 @@ class Settings(BaseSettings):
     multimodal_fallback_model: str = ""
 
     # Search (Phase 2)
-    search_provider: str = "auto"  # auto | model | searxng
-    search_fallback_provider: str = "searxng"
+    search_provider: str = "auto"  # auto | openai | anthropic | minimax | ollama | model | searxng
+    search_fallback_provider: str = "searxng"  # openai | anthropic | minimax | ollama | model | searxng
     model_search_helper: str = ""
     searxng_url: str = "http://localhost:8080"
 
@@ -58,6 +58,7 @@ class Settings(BaseSettings):
     anthropic_api_key_helper: str = ""
     minimax_api_key: str = ""
     minimax_base_url: str = "https://api.minimaxi.com/v1"
+    ollama_api_key: str = ""
     ollama_base_url: str = "http://localhost:11434"
 
     # Security
@@ -122,7 +123,7 @@ class Settings(BaseSettings):
 
     @property
     def active_search_provider(self) -> str:
-        return self.search_fallback_provider if self.llm_mode == "local" else self.search_provider
+        return self.search_provider
 
 
 _settings: Settings | None = None

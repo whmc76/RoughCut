@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from roughcut.db.models import Artifact, JobStep, TranscriptSegment
 from roughcut.providers.factory import get_transcription_provider
-from roughcut.providers.transcription.base import TranscriptResult
+from roughcut.providers.transcription.base import TranscriptResult, TranscriptionProgressCallback
 
 
 async def transcribe_audio(
@@ -16,13 +16,14 @@ async def transcribe_audio(
     audio_path: Path,
     language: str,
     session: AsyncSession,
+    progress_callback: TranscriptionProgressCallback | None = None,
 ) -> TranscriptResult:
     """
     Transcribe audio using the configured TranscriptionProvider.
     Writes TranscriptSegment rows and an artifact to the DB.
     """
     provider = get_transcription_provider()
-    result = await provider.transcribe(audio_path, language=language)
+    result = await provider.transcribe(audio_path, language=language, progress_callback=progress_callback)
 
     # Persist segments
     for seg in result.segments:

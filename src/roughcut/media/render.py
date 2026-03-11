@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any, Callable
 
@@ -44,6 +45,9 @@ async def render_video(
     settings = get_settings()
     if debug_dir is not None:
         debug_dir.mkdir(parents=True, exist_ok=True)
+
+    packaging_enabled = any(render_plan.get(key) for key in ("intro", "outro", "insert", "watermark", "music"))
+    base_output_path = output_path if not packaging_enabled else output_path.with_name(f"{output_path.stem}.base{output_path.suffix}")
 
     keep_segments = [
         s for s in editorial_timeline.get("segments", [])
@@ -156,7 +160,7 @@ async def render_video(
         "aac",
         "-b:a",
         "192k",
-        str(output_path),
+        str(base_output_path),
     ]
     _write_debug_text(debug_dir, "render.ffmpeg.txt", _format_command(cmd))
 
@@ -166,12 +170,341 @@ async def render_video(
         raise RuntimeError(f"ffmpeg render failed: {result.stderr[-2000:]}")
 
     await _normalize_rendered_output(
-        output_path,
+        base_output_path,
         expected_width=expected_w,
         expected_height=expected_h,
         debug_dir=debug_dir,
     )
+    if packaging_enabled:
+        packaged = await _apply_packaging_plan(
+            base_output_path,
+            render_plan=render_plan,
+            output_path=output_path,
+            expected_width=expected_w,
+            expected_height=expected_h,
+            debug_dir=debug_dir,
+        )
+        await _normalize_rendered_output(
+            packaged,
+            expected_width=expected_w,
+            expected_height=expected_h,
+            debug_dir=debug_dir,
+        )
+    elif base_output_path != output_path:
+        base_output_path.replace(output_path)
     return output_path
+
+
+async def _apply_packaging_plan(
+    source_path: Path,
+    *,
+    render_plan: dict,
+    output_path: Path,
+    expected_width: int,
+    expected_height: int,
+    debug_dir: Path | None,
+) -> Path:
+    current_path = source_path
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        insert_plan = render_plan.get("insert")
+        if insert_plan:
+            current_path = await _apply_insert_clip(
+                current_path,
+                insert_plan=insert_plan,
+                expected_width=expected_width,
+                expected_height=expected_height,
+                output_path=tmp / "inserted.mp4",
+                debug_dir=debug_dir,
+            )
+        if render_plan.get("intro") or render_plan.get("outro"):
+            current_path = await _apply_intro_outro(
+                current_path,
+                intro_plan=render_plan.get("intro"),
+                outro_plan=render_plan.get("outro"),
+                expected_width=expected_width,
+                expected_height=expected_height,
+                output_path=tmp / "with_bookends.mp4",
+                debug_dir=debug_dir,
+            )
+        if render_plan.get("music") or render_plan.get("watermark"):
+            current_path = await _apply_music_and_watermark(
+                current_path,
+                music_plan=render_plan.get("music"),
+                watermark_plan=render_plan.get("watermark"),
+                output_path=tmp / "packaged.mp4",
+                debug_dir=debug_dir,
+            )
+        if current_path != output_path:
+            current_path.replace(output_path)
+    return output_path
+
+
+async def _apply_insert_clip(
+    source_path: Path,
+    *,
+    insert_plan: dict,
+    expected_width: int,
+    expected_height: int,
+    output_path: Path,
+    debug_dir: Path | None,
+) -> Path:
+    insert_after_sec = float(insert_plan.get("insert_after_sec", 0.0) or 0.0)
+    source_duration = _probe_duration(source_path)
+    if source_duration <= 0.0:
+        return source_path
+    insert_after_sec = max(0.0, min(insert_after_sec, max(0.0, source_duration - 0.1)))
+
+    prepared_insert = output_path.with_name("insert_asset.prepared.mp4")
+    await _prepare_packaging_clip(
+        Path(insert_plan["path"]),
+        prepared_insert,
+        expected_width=expected_width,
+        expected_height=expected_height,
+    )
+
+    filter_complex = (
+        "[0:v]split[vpre][vpost];"
+        "[0:a]asplit[apre][apost];"
+        f"[vpre]trim=start=0:end={insert_after_sec},setpts=PTS-STARTPTS[v0];"
+        f"[apre]atrim=start=0:end={insert_after_sec},asetpts=PTS-STARTPTS[a0];"
+        f"[vpost]trim=start={insert_after_sec},setpts=PTS-STARTPTS[v2];"
+        f"[apost]atrim=start={insert_after_sec},asetpts=PTS-STARTPTS[a2];"
+        "[1:v]setpts=PTS-STARTPTS[v1];"
+        "[1:a]asetpts=PTS-STARTPTS[a1];"
+        "[v0][a0][v1][a1][v2][a2]concat=n=3:v=1:a=1[vout][aout]"
+    )
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        str(source_path),
+        "-i",
+        str(prepared_insert),
+        "-filter_complex",
+        filter_complex,
+        "-map",
+        "[vout]",
+        "-map",
+        "[aout]",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "fast",
+        "-crf",
+        "18",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "192k",
+        str(output_path),
+    ]
+    _write_debug_text(debug_dir, "packaging.insert.ffmpeg.txt", _format_command(cmd))
+    result = await _run_process(cmd, timeout=get_settings().ffmpeg_timeout_sec)
+    _write_process_debug(debug_dir, "packaging.insert", result)
+    if result.returncode != 0:
+        raise RuntimeError(f"ffmpeg insert packaging failed: {result.stderr[-2000:]}")
+    return output_path
+
+
+async def _apply_intro_outro(
+    source_path: Path,
+    *,
+    intro_plan: dict | None,
+    outro_plan: dict | None,
+    expected_width: int,
+    expected_height: int,
+    output_path: Path,
+    debug_dir: Path | None,
+) -> Path:
+    prepared_paths: list[Path] = []
+    if intro_plan:
+        intro_prepared = output_path.with_name("intro_asset.prepared.mp4")
+        await _prepare_packaging_clip(
+            Path(intro_plan["path"]),
+            intro_prepared,
+            expected_width=expected_width,
+            expected_height=expected_height,
+        )
+        prepared_paths.append(intro_prepared)
+
+    prepared_paths.append(source_path)
+
+    if outro_plan:
+        outro_prepared = output_path.with_name("outro_asset.prepared.mp4")
+        await _prepare_packaging_clip(
+            Path(outro_plan["path"]),
+            outro_prepared,
+            expected_width=expected_width,
+            expected_height=expected_height,
+        )
+        prepared_paths.append(outro_prepared)
+
+    if len(prepared_paths) == 1:
+        return source_path
+
+    cmd = ["ffmpeg", "-y"]
+    for path in prepared_paths:
+        cmd.extend(["-i", str(path)])
+
+    concat_inputs = "".join(f"[{index}:v][{index}:a]" for index in range(len(prepared_paths)))
+    cmd.extend(
+        [
+            "-filter_complex",
+            f"{concat_inputs}concat=n={len(prepared_paths)}:v=1:a=1[vout][aout]",
+            "-map",
+            "[vout]",
+            "-map",
+            "[aout]",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "fast",
+            "-crf",
+            "18",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "192k",
+            str(output_path),
+        ]
+    )
+    _write_debug_text(debug_dir, "packaging.bookends.ffmpeg.txt", _format_command(cmd))
+    result = await _run_process(cmd, timeout=get_settings().ffmpeg_timeout_sec)
+    _write_process_debug(debug_dir, "packaging.bookends", result)
+    if result.returncode != 0:
+        raise RuntimeError(f"ffmpeg intro/outro packaging failed: {result.stderr[-2000:]}")
+    return output_path
+
+
+async def _apply_music_and_watermark(
+    source_path: Path,
+    *,
+    music_plan: dict | None,
+    watermark_plan: dict | None,
+    output_path: Path,
+    debug_dir: Path | None,
+) -> Path:
+    if not music_plan and not watermark_plan:
+        return source_path
+
+    cmd = ["ffmpeg", "-y", "-i", str(source_path)]
+    filter_parts: list[str] = []
+    video_map = "0:v:0"
+    audio_map = "0:a:0"
+    next_input_index = 1
+
+    if music_plan:
+        if music_plan.get("loop_mode") == "loop_single":
+            cmd.extend(["-stream_loop", "-1"])
+        cmd.extend(["-i", str(music_plan["path"])])
+        volume = float(music_plan.get("volume", 0.22) or 0.22)
+        filter_parts.append(f"[{next_input_index}:a]volume={volume}[bgm]")
+        filter_parts.append(
+            f"[0:a][bgm]amix=inputs=2:duration=first:dropout_transition=2,"
+            "loudnorm=I=-14:TP=-1:LRA=11[aout]"
+        )
+        audio_map = "[aout]"
+        next_input_index += 1
+
+    if watermark_plan:
+        cmd.extend(["-i", str(watermark_plan["path"])])
+        opacity = float(watermark_plan.get("opacity", 0.82) or 0.82)
+        scale = float(watermark_plan.get("scale", 0.16) or 0.16)
+        overlay_x, overlay_y = _watermark_overlay_position(str(watermark_plan.get("position") or "top_right"))
+        filter_parts.append(
+            f"[{next_input_index}:v][0:v]scale2ref=w=main_w*{scale}:h=-1[wm][base]"
+        )
+        filter_parts.append(f"[wm]format=rgba,colorchannelmixer=aa={opacity}[wmfinal]")
+        filter_parts.append(f"[base][wmfinal]overlay=x={overlay_x}:y={overlay_y}:format=auto[vout]")
+        video_map = "[vout]"
+
+    if not filter_parts:
+        return source_path
+
+    cmd.extend(["-filter_complex", ";".join(filter_parts), "-map", video_map, "-map", audio_map])
+    if video_map == "0:v:0":
+        cmd.extend(["-c:v", "copy"])
+    else:
+        cmd.extend(["-c:v", "libx264", "-preset", "fast", "-crf", "18"])
+    if audio_map == "0:a:0":
+        cmd.extend(["-c:a", "copy"])
+    else:
+        cmd.extend(["-c:a", "aac", "-b:a", "192k"])
+    cmd.append(str(output_path))
+
+    _write_debug_text(debug_dir, "packaging.music_watermark.ffmpeg.txt", _format_command(cmd))
+    result = await _run_process(cmd, timeout=get_settings().ffmpeg_timeout_sec)
+    _write_process_debug(debug_dir, "packaging.music_watermark", result)
+    if result.returncode != 0:
+        raise RuntimeError(f"ffmpeg music/watermark packaging failed: {result.stderr[-2000:]}")
+    return output_path
+
+
+async def _prepare_packaging_clip(
+    source_path: Path,
+    output_path: Path,
+    *,
+    expected_width: int,
+    expected_height: int,
+) -> Path:
+    media_info = _ffprobe_json(source_path)
+    has_audio = any(stream.get("codec_type") == "audio" for stream in media_info.get("streams", []))
+    duration = _probe_duration(source_path)
+    scale_filter = (
+        f"scale={expected_width}:{expected_height}:force_original_aspect_ratio=decrease,"
+        f"pad={expected_width}:{expected_height}:(ow-iw)/2:(oh-ih)/2:black,"
+        "setsar=1,format=yuv420p"
+    )
+
+    cmd = ["ffmpeg", "-y", "-i", str(source_path)]
+    if not has_audio:
+        cmd.extend(
+            [
+                "-f",
+                "lavfi",
+                "-t",
+                f"{max(duration, 0.1):.3f}",
+                "-i",
+                "anullsrc=channel_layout=stereo:sample_rate=48000",
+            ]
+        )
+    cmd.extend(
+        [
+            "-vf",
+            scale_filter,
+            "-c:v",
+            "libx264",
+            "-preset",
+            "fast",
+            "-crf",
+            "18",
+            "-c:a",
+            "aac",
+            "-ar",
+            "48000",
+            "-ac",
+            "2",
+        ]
+    )
+    if not has_audio:
+        cmd.extend(["-map", "0:v:0", "-map", "1:a:0", "-shortest"])
+    cmd.append(str(output_path))
+
+    result = await _run_process(cmd, timeout=get_settings().ffmpeg_timeout_sec)
+    if result.returncode != 0:
+        raise RuntimeError(f"ffmpeg packaging clip prepare failed: {result.stderr[-2000:]}")
+    return output_path
+
+
+def _watermark_overlay_position(position: str) -> tuple[str, str]:
+    mapping = {
+        "top_left": ("24", "24"),
+        "top_right": ("main_w-overlay_w-24", "24"),
+        "bottom_left": ("24", "main_h-overlay_h-24"),
+        "bottom_right": ("main_w-overlay_w-24", "main_h-overlay_h-24"),
+    }
+    return mapping.get(position, mapping["top_right"])
 
 
 async def _normalize_rendered_output(
@@ -279,6 +612,11 @@ def _probe_video_stream(path: Path) -> dict[str, Any]:
         {},
     )
     return _describe_stream(stream)
+
+
+def _probe_duration(path: Path) -> float:
+    info = _ffprobe_json(path)
+    return float(info.get("format", {}).get("duration", 0.0) or 0.0)
 
 
 def _ffprobe_json(path: Path) -> dict[str, Any]:

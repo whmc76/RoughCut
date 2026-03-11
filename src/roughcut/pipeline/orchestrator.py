@@ -120,7 +120,13 @@ async def _dispatch_step(step: JobStep, session) -> None:
     step.attempt += 1
 
     # Send to Celery
-    celery_app.send_task(task_name, args=[job_id], queue=queue)
+    async_result = celery_app.send_task(task_name, args=[job_id], queue=queue)
+    step.metadata_ = {
+        **(step.metadata_ or {}),
+        "task_id": async_result.id,
+        "queue": queue,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
     logger.info(f"Dispatched {step.step_name} for job {job_id} → {queue}")
 
     # Update parent job status

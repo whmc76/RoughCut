@@ -50,6 +50,7 @@ class ConfigOut(BaseModel):
     anthropic_auth_mode: str
     anthropic_api_key_helper: str
     minimax_base_url: str
+    ollama_api_key_set: bool
     # Keys (masked)
     openai_api_key_set: bool
     anthropic_api_key_set: bool
@@ -93,6 +94,7 @@ class ConfigPatch(BaseModel):
     anthropic_api_key_helper: str | None = None
     minimax_api_key: str | None = None
     minimax_base_url: str | None = None
+    ollama_api_key: str | None = None
     ollama_base_url: str | None = None
     max_upload_size_mb: int | None = None
     max_video_duration_sec: int | None = None
@@ -125,6 +127,7 @@ def get_config():
         anthropic_auth_mode=s.anthropic_auth_mode,
         anthropic_api_key_helper=s.anthropic_api_key_helper,
         minimax_base_url=s.minimax_base_url,
+        ollama_api_key_set=bool(s.ollama_api_key),
         openai_api_key_set=bool(s.openai_api_key),
         anthropic_api_key_set=bool(s.anthropic_api_key),
         minimax_api_key_set=bool(s.minimax_api_key),

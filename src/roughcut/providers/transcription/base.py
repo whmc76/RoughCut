@@ -3,6 +3,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any, Callable
 
 
 @dataclass
@@ -29,7 +30,16 @@ class TranscriptResult:
     duration: float
 
 
+TranscriptionProgressCallback = Callable[[dict[str, Any]], None]
+
+
 class TranscriptionProvider(ABC):
     @abstractmethod
-    async def transcribe(self, audio_path: Path, *, language: str = "zh-CN") -> TranscriptResult:
+    async def transcribe(
+        self,
+        audio_path: Path,
+        *,
+        language: str = "zh-CN",
+        progress_callback: TranscriptionProgressCallback | None = None,
+    ) -> TranscriptResult:
         """Transcribe audio file and return structured result."""

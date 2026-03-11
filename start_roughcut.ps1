@@ -39,6 +39,18 @@ function Test-ProcessCommandLine {
     } | Select-Object -First 1)
 }
 
+function Get-ProcessMatches {
+    param([string]$Pattern)
+
+    return @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+        $_.Name -eq "python.exe" `
+            -and $_.ExecutablePath `
+            -and [System.StringComparer]::OrdinalIgnoreCase.Equals($_.ExecutablePath, $Python) `
+            -and $_.CommandLine `
+            -and $_.CommandLine -match $Pattern
+    } | Sort-Object ProcessId)
+}
+
 function Start-RoughCutProcess {
     param(
         [string]$Name,
@@ -48,7 +60,19 @@ function Start-RoughCutProcess {
         [string]$StderrPath
     )
 
-    if (Test-ProcessCommandLine -Pattern $MatchPattern) {
+    $matches = @(Get-ProcessMatches -Pattern $MatchPattern)
+    if ($matches.Count -gt 1) {
+        $matches | Select-Object -SkipLast 1 | ForEach-Object {
+            try {
+                Stop-Process -Id $_.ProcessId -Force -ErrorAction Stop
+                Write-Host "Stopped duplicate $Name (PID $($_.ProcessId))." -ForegroundColor Yellow
+            } catch {
+            }
+        }
+        $matches = @(Get-ProcessMatches -Pattern $MatchPattern)
+    }
+
+    if ($matches.Count -eq 1) {
         Write-Host "$Name is already running. Skipping." -ForegroundColor Yellow
         return
     }
@@ -131,7 +155,20 @@ if (-not $SkipMigrate) {
 }
 
 if (Test-PortListening -TestPort $Port) {
-    if ($Port -eq 38471) {
+    $apiPattern = [regex]::Escape("roughcut.cli api --host 127.0.0.1 --port $Port")
+    $apiMatches = @(Get-ProcessMatches -Pattern $apiPattern)
+    if ($apiMatches.Count -gt 0) {
+        if ($apiMatches.Count -gt 1) {
+            $apiMatches | Select-Object -SkipLast 1 | ForEach-Object {
+                try {
+                    Stop-Process -Id $_.ProcessId -Force -ErrorAction Stop
+                    Write-Host "Stopped duplicate API (PID $($_.ProcessId))." -ForegroundColor Yellow
+                } catch {
+                }
+            }
+        }
+        Write-Host "Port $Port already belongs to RoughCut API. Reusing it." -ForegroundColor Yellow
+    } elseif ($Port -eq 38471) {
         Write-Host "Port 38471 is busy. Switching to 38472." -ForegroundColor Yellow
         $Port = 38472
     } else {

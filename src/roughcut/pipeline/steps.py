@@ -9,6 +9,7 @@ import asyncio
 import hashlib
 import json
 import tempfile
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -28,6 +29,9 @@ from roughcut.media.subtitles import remap_subtitles_to_timeline
 from roughcut.media.probe import probe, validate_media
 from roughcut.media.render import render_video
 from roughcut.media.silence import detect_silence
+from roughcut.packaging.library import resolve_packaging_plan_for_job
+from roughcut.providers.factory import get_reasoning_provider
+from roughcut.providers.reasoning.base import Message
 from roughcut.review.content_profile import enrich_content_profile, infer_content_profile, polish_subtitle_items
 from roughcut.review.glossary_engine import apply_glossary_corrections
 from roughcut.review.platform_copy import generate_platform_packaging, save_platform_packaging_markdown
@@ -220,8 +224,45 @@ async def run_transcribe(job_id: str) -> dict:
         with tempfile.TemporaryDirectory() as tmpdir:
             audio_path = Path(tmpdir) / "audio.wav"
             await storage.async_download_file(audio_artifact.storage_path, audio_path)
-            await _set_step_progress(session, step, detail=f"使用 {job.language} 模型执行转写", progress=0.5)
-            result = await transcribe_audio(job.id, step, audio_path, job.language, session)
+            await _set_step_progress(session, step, detail=f"加载 {job.language} 转写模型", progress=0.2)
+
+            progress_loop = asyncio.get_running_loop()
+            last_progress = {"progress": 0.0, "ts": 0.0}
+
+            async def _persist_transcribe_progress(progress: float, detail: str) -> None:
+                progress_factory = get_session_factory()
+                async with progress_factory() as progress_session:
+                    step_ref = await progress_session.get(JobStep, step.id)
+                    if step_ref is None:
+                        return
+                    await _set_step_progress(progress_session, step_ref, detail=detail, progress=progress)
+
+            def _on_transcribe_progress(payload: dict) -> None:
+                total_duration = float(payload.get("total_duration") or 0.0)
+                segment_end = float(payload.get("segment_end") or 0.0)
+                segment_count = int(payload.get("segment_count") or 0)
+                raw_progress = float(payload.get("progress") or 0.0)
+                scaled_progress = 0.25 + (raw_progress * 0.7)
+                now = time.monotonic()
+                if scaled_progress - last_progress["progress"] < 0.03 and now - last_progress["ts"] < 1.5:
+                    return
+                last_progress["progress"] = scaled_progress
+                last_progress["ts"] = now
+                detail = f"已转写 {segment_count} 段，覆盖 {segment_end:.0f}s / {total_duration:.0f}s"
+                asyncio.run_coroutine_threadsafe(
+                    _persist_transcribe_progress(scaled_progress, detail),
+                    progress_loop,
+                )
+
+            await _set_step_progress(session, step, detail=f"使用 {job.language} 模型执行转写", progress=0.25)
+            result = await transcribe_audio(
+                job.id,
+                step,
+                audio_path,
+                job.language,
+                session,
+                progress_callback=_on_transcribe_progress,
+            )
 
         await _set_step_progress(session, step, detail=f"转写完成，共 {len(result.segments)} 段", progress=1.0)
         await session.commit()
@@ -291,7 +332,7 @@ async def run_content_profile(job_id: str) -> dict:
                 source_name=job.source_name,
                 subtitle_items=subtitle_dicts,
                 channel_profile=job.channel_profile,
-                include_research=False,
+                include_research=True,
             )
 
         artifact = Artifact(
@@ -453,9 +494,21 @@ async def run_edit_plan(job_id: str) -> dict:
                 "end_time": si.end_time,
                 "text_raw": si.text_raw,
                 "text_norm": si.text_norm,
+                "text_final": si.text_final,
             }
             for si in subtitle_items
         ]
+
+        profile_result = await session.execute(
+            select(Artifact)
+            .where(
+                Artifact.job_id == job.id,
+                Artifact.artifact_type.in_(["content_profile_final", "content_profile", "content_profile_draft"]),
+            )
+            .order_by(Artifact.created_at.desc())
+        )
+        profile_artifact = profile_result.scalars().first()
+        content_profile = profile_artifact.data_json if profile_artifact else None
 
         storage = get_storage()
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -481,9 +534,24 @@ async def run_edit_plan(job_id: str) -> dict:
         except Exception:
             pass  # OTIO optional
 
+        packaging_plan = resolve_packaging_plan_for_job(str(job.id))
+        keep_segments = [segment for segment in decision.to_dict().get("segments", []) if segment.get("type") == "keep"]
+        remapped_subtitles = remap_subtitles_to_timeline(subtitle_dicts, keep_segments)
+        packaging_plan["insert"] = await _plan_insert_asset_slot(
+            job_id=str(job.id),
+            insert_plan=packaging_plan.get("insert"),
+            subtitle_items=remapped_subtitles,
+            content_profile=content_profile,
+        )
+
         render_plan_dict = build_render_plan(
             editorial_timeline_id=editorial_timeline.id,
             workflow_preset=job.channel_profile or "unboxing_default",
+            intro=packaging_plan.get("intro"),
+            outro=packaging_plan.get("outro"),
+            insert=packaging_plan.get("insert"),
+            watermark=packaging_plan.get("watermark"),
+            music=packaging_plan.get("music"),
         )
         await save_render_plan(job.id, render_plan_dict, session)
 
@@ -514,6 +582,10 @@ async def run_render(job_id: str) -> dict:
             select(Timeline).where(Timeline.job_id == job.id, Timeline.timeline_type == "render_plan")
         )
         render_plan_timeline = render_plan_result.scalar_one()
+        has_packaging = any(
+            render_plan_timeline.data_json.get(key)
+            for key in ("intro", "outro", "insert", "watermark", "music")
+        )
 
         content_profile_result = await session.execute(
             select(Artifact)
@@ -571,7 +643,12 @@ async def run_render(job_id: str) -> dict:
             )
             render_step = step_result.scalar_one_or_none()
             if render_step:
-                await _set_step_progress(session, render_step, detail="执行 FFmpeg 渲染成片", progress=0.35)
+                await _set_step_progress(
+                    session,
+                    render_step,
+                    detail="执行 FFmpeg 渲染与包装" if has_packaging else "执行 FFmpeg 渲染成片",
+                    progress=0.35,
+                )
         source_path = await _resolve_source(
             job,
             tmpdir,
@@ -648,7 +725,12 @@ async def run_render(job_id: str) -> dict:
         )
         render_step = step_result.scalar_one_or_none()
         if render_step:
-            await _set_step_progress(session, render_step, detail="渲染完成，成片与字幕已输出", progress=1.0)
+            await _set_step_progress(
+                session,
+                render_step,
+                detail="渲染与包装完成，成片与字幕已输出" if has_packaging else "渲染完成，成片与字幕已输出",
+                progress=1.0,
+            )
         await session.commit()
 
     return {"output_key": output_key, "local": local_paths}
@@ -753,6 +835,72 @@ async def _get_cover_seek(job_id, tmpdir: str) -> float:
             seek = max(5.0, min(30.0, duration * 0.10))
             return round(seek, 1)
     return 5.0
+
+
+async def _plan_insert_asset_slot(
+    *,
+    job_id: str,
+    insert_plan: dict | None,
+    subtitle_items: list[dict],
+    content_profile: dict | None,
+) -> dict | None:
+    if not insert_plan:
+        return None
+    if not subtitle_items:
+        insert_plan["insert_after_sec"] = 0.0
+        insert_plan["reason"] = "没有可用字幕，默认插入到开头。"
+        return insert_plan
+
+    candidates = [
+        item for item in subtitle_items
+        if float(item.get("end_time", 0.0) or 0.0) > 8.0
+    ]
+    if not candidates:
+        first = subtitle_items[min(len(subtitle_items) - 1, max(0, len(subtitle_items) // 2))]
+        insert_plan["insert_after_sec"] = float(first.get("end_time", 0.0) or 0.0)
+        insert_plan["reason"] = "字幕太短，回退到中间位置插入。"
+        return insert_plan
+
+    transcript_excerpt = "\n".join(
+        f"[{float(item.get('start_time', 0.0)):.1f}-{float(item.get('end_time', 0.0)):.1f}] "
+        f"{item.get('text_final') or item.get('text_norm') or item.get('text_raw') or ''}"
+        for item in candidates[:48]
+    )
+    fallback = candidates[len(candidates) // 2]
+    fallback_sec = float(fallback.get("end_time", 0.0) or 0.0)
+
+    try:
+        provider = get_reasoning_provider()
+        prompt = (
+            "你在给一条中文短视频安排一段植入素材的插入点。"
+            "请根据字幕节奏和内容结构，找一个最自然、不打断关键论点的位置。"
+            "优先选择一句话讲完之后、下一个话题开始之前；不要插在开场 8 秒内，也不要插在结尾收束段。"
+            "如果视频主题是开箱评测，优先放在产品基础介绍讲完、进入细节体验之前。"
+            "输出 JSON："
+            '{"insert_after_sec":0.0,"reason":""}'
+            f"\n视频信息：{json.dumps(content_profile or {}, ensure_ascii=False)}"
+            f"\n候选字幕（已映射到剪后时间轴）：\n{transcript_excerpt}"
+            f"\n如果拿不准，就返回 {fallback_sec:.1f} 附近的自然停顿。"
+        )
+        response = await provider.complete(
+            [
+                Message(role="system", content="你是短视频植入编排助手，只输出 JSON。"),
+                Message(role="user", content=prompt),
+            ],
+            temperature=0.1,
+            max_tokens=300,
+            json_mode=True,
+        )
+        data = response.as_json()
+        chosen = float(data.get("insert_after_sec", fallback_sec) or fallback_sec)
+        max_sec = float(candidates[-1].get("end_time", fallback_sec) or fallback_sec)
+        insert_plan["insert_after_sec"] = max(8.0, min(chosen, max_sec))
+        insert_plan["reason"] = str(data.get("reason") or "").strip() or "LLM 选择了较自然的转场点。"
+        return insert_plan
+    except Exception:
+        insert_plan["insert_after_sec"] = fallback_sec
+        insert_plan["reason"] = "LLM 未返回可靠结果，回退到中间自然停顿。"
+        return insert_plan
 
 
 def _hash_file(path: Path, chunk_size: int = 65536) -> str:

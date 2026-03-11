@@ -7,6 +7,7 @@ import openai
 from roughcut.config import get_settings
 from roughcut.providers.auth import resolve_credential
 from roughcut.providers.transcription.base import (
+    TranscriptionProgressCallback,
     TranscriptResult,
     TranscriptSegment,
     TranscriptionProvider,
@@ -28,7 +29,14 @@ class OpenAIWhisperProvider(TranscriptionProvider):
         )
         self._model = settings.transcription_model
 
-    async def transcribe(self, audio_path: Path, *, language: str = "zh-CN") -> TranscriptResult:
+    async def transcribe(
+        self,
+        audio_path: Path,
+        *,
+        language: str = "zh-CN",
+        progress_callback: TranscriptionProgressCallback | None = None,
+    ) -> TranscriptResult:
+        del progress_callback
         lang_code = language.split("-")[0]  # "zh-CN" → "zh"
 
         with audio_path.open("rb") as f:

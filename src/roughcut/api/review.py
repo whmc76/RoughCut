@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import uuid
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import FileResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from roughcut.api.schemas import (
+    WatchInventoryEnqueueIn,
+    WatchInventoryEnqueueOut,
     WatchInventoryOut,
     WatchInventoryScanIn,
     WatchInventoryScanStatusOut,
@@ -16,7 +20,10 @@ from roughcut.api.schemas import (
 from roughcut.db.models import WatchRoot
 from roughcut.db.session import get_session
 from roughcut.watcher.folder_watcher import (
+    create_jobs_for_inventory_paths,
+    ensure_watch_inventory_thumbnail,
     get_watch_root_inventory_scan_status,
+    replace_watch_root_inventory_scan_snapshot,
     scan_watch_root_inventory,
     start_watch_root_inventory_scan,
 )
@@ -58,6 +65,17 @@ def _cached_status_payload(root: WatchRoot, *, include_inventory: bool, inventor
         "error": None,
         "inventory": {"pending": [], "deduped": []},
     }
+
+
+def _full_inventory_payload(root: WatchRoot) -> dict:
+    payload = get_watch_root_inventory_scan_status(
+        root.path,
+        include_inventory=True,
+        inventory_limit=None,
+    )
+    if payload is not None:
+        return payload
+    return _cached_status_payload(root, include_inventory=True, inventory_limit=None)
 
 
 @router.get("", response_model=list[WatchRootOut])
@@ -163,3 +181,104 @@ async def get_inventory_scan_status(
     if payload is None:
         return _cached_status_payload(root, include_inventory=include_inventory, inventory_limit=inventory_limit)
     return payload
+
+
+@router.post("/{root_id}/inventory/enqueue", response_model=WatchInventoryEnqueueOut)
+async def enqueue_inventory_items(
+    root_id: uuid.UUID,
+    body: WatchInventoryEnqueueIn,
+    session: AsyncSession = Depends(get_session),
+):
+    root = await session.get(WatchRoot, root_id)
+    if not root:
+        raise HTTPException(status_code=404, detail="Watch root not found")
+
+    active_status = get_watch_root_inventory_scan_status(root.path, include_inventory=False)
+    if active_status and active_status.get("status") == "running":
+        raise HTTPException(status_code=409, detail="Inventory scan is still running")
+
+    payload = _full_inventory_payload(root)
+    inventory = payload.get("inventory") or {}
+    pending = list(inventory.get("pending") or [])
+    if not pending:
+        return WatchInventoryEnqueueOut(
+            requested_count=0,
+            created_count=0,
+            skipped_count=0,
+            created_job_ids=[],
+        )
+
+    if body.enqueue_all:
+        selected_items = pending
+    else:
+        selected_paths = {path for path in body.relative_paths if path}
+        if not selected_paths:
+            raise HTTPException(status_code=400, detail="No inventory items selected")
+        selected_items = [item for item in pending if item.get("relative_path") in selected_paths]
+
+    if not selected_items:
+        raise HTTPException(status_code=404, detail="Selected inventory items not found")
+
+    results = await create_jobs_for_inventory_paths(
+        [str(item["path"]) for item in selected_items],
+        channel_profile=root.channel_profile,
+    )
+    job_ids_by_path = {result["path"]: result["job_id"] for result in results}
+    created_job_ids = [job_id for job_id in job_ids_by_path.values() if job_id]
+    selected_path_set = {str(item["path"]) for item in selected_items}
+
+    remaining_pending = [item for item in pending if str(item.get("path")) not in selected_path_set]
+    deduped = list(inventory.get("deduped") or [])
+    for item in selected_items:
+        path = str(item["path"])
+        job_id = job_ids_by_path.get(path)
+        deduped.append(
+            {
+                **item,
+                "status": "deduped",
+                "dedupe_reason": "job:pending" if job_id else "job:existing",
+                "matched_job_id": job_id,
+            }
+        )
+
+    payload["inventory"] = {
+        "pending": remaining_pending,
+        "deduped": deduped,
+    }
+    payload["pending_count"] = len(remaining_pending)
+    payload["deduped_count"] = len(deduped)
+    payload["updated_at"] = datetime.now(timezone.utc).isoformat()
+    if payload.get("status") in {None, "idle"}:
+        payload["status"] = "done"
+
+    root.inventory_cache_json = payload
+    root.inventory_cache_updated_at = datetime.now(timezone.utc)
+    await session.commit()
+    replace_watch_root_inventory_scan_snapshot(root.path, payload)
+
+    return WatchInventoryEnqueueOut(
+        requested_count=len(selected_items),
+        created_count=len(created_job_ids),
+        skipped_count=len(selected_items) - len(created_job_ids),
+        created_job_ids=created_job_ids,
+    )
+
+
+@router.get("/{root_id}/inventory/thumbnail")
+async def get_inventory_thumbnail(
+    root_id: uuid.UUID,
+    relative_path: str,
+    session: AsyncSession = Depends(get_session),
+):
+    root = await session.get(WatchRoot, root_id)
+    if not root:
+        raise HTTPException(status_code=404, detail="Watch root not found")
+    try:
+        thumbnail = await ensure_watch_inventory_thumbnail(root.path, relative_path)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return FileResponse(thumbnail, media_type="image/jpeg")

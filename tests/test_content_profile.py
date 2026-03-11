@@ -3,7 +3,14 @@ from __future__ import annotations
 from roughcut.edit.presets import get_workflow_preset
 import pytest
 
-from roughcut.review.content_profile import apply_content_profile_feedback, build_cover_title
+from roughcut.review.content_profile import (
+    _build_search_queries,
+    _fallback_profile,
+    _seed_profile_from_subtitles,
+    apply_content_profile_feedback,
+    build_transcript_excerpt,
+    build_cover_title,
+)
 
 
 def test_build_cover_title_avoids_generic_main_line():
@@ -40,6 +47,72 @@ def test_build_cover_title_prefers_visible_english_brand():
 
     assert title["top"] == "LEATHERMAN"
     assert title["main"] == "LEATHERMAN战术钳"
+
+
+def test_fallback_profile_does_not_use_timestamp_as_model():
+    profile = _fallback_profile(
+        source_name="20260130-140529.mp4",
+        channel_profile=None,
+        transcript_excerpt="",
+    )
+
+    assert profile["subject_model"] == ""
+    assert "20260130-140529" not in profile["summary"]
+
+
+def test_build_search_queries_ignores_timestamp_filename():
+    queries = _build_search_queries(
+        {
+            "subject_brand": "",
+            "subject_model": "",
+            "subject_type": "开箱产品",
+            "search_queries": [],
+        },
+        "20260130-140529.mp4",
+    )
+
+    assert "20260130-140529" not in queries
+
+
+def test_build_search_queries_uses_transcript_signal_terms_for_proactive_search():
+    queries = _build_search_queries(
+        {
+            "subject_brand": "",
+            "subject_model": "",
+            "subject_type": "多功能工具钳",
+            "search_queries": [],
+        },
+        "20260130-140529.mp4",
+        transcript_excerpt="[220.0-222.0] ARC 这把工具真的很顺手",
+    )
+
+    assert "ARC 开箱" in queries
+    assert "ARC 多功能工具钳" in queries
+
+
+def test_build_transcript_excerpt_pulls_high_signal_items_from_later_segments():
+    subtitle_items = [
+        {"start_time": 0.0, "end_time": 1.0, "text_raw": "开场闲聊"},
+        {"start_time": 2.0, "end_time": 3.0, "text_raw": "继续随便说两句"},
+        {"start_time": 220.0, "end_time": 222.0, "text_raw": "ARC 这把工具真的很顺手"},
+    ]
+
+    excerpt = build_transcript_excerpt(subtitle_items, max_items=3, max_chars=200)
+
+    assert "ARC" in excerpt
+
+
+def test_seed_profile_from_subtitles_handles_edc_asr_aliases():
+    profile = _seed_profile_from_subtitles(
+        [
+            {"text_raw": "来自慢的这个定位上来说是他家最高端的产品"},
+            {"text_raw": "ARC 这把工具的单手开合很舒服"},
+        ]
+    )
+
+    assert profile["subject_brand"] == "LEATHERMAN"
+    assert profile["subject_model"] == "ARC"
+    assert profile["subject_type"] == "多功能工具钳"
 
 
 @pytest.mark.asyncio

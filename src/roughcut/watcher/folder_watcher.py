@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import subprocess
 import uuid
 from dataclasses import asdict, dataclass
 from datetime import datetime
@@ -194,6 +195,103 @@ def get_watch_root_inventory_scan_status(
     if not state:
         return None
     return state.to_dict(include_inventory=include_inventory, inventory_limit=inventory_limit)
+
+
+def replace_watch_root_inventory_scan_snapshot(watch_path: str, payload: dict) -> None:
+    state = _SCAN_STATES.get(watch_path)
+    if state is None:
+        return
+    state.scan_mode = payload.get("scan_mode") or state.scan_mode
+    state.status = payload.get("status") or state.status
+    state.started_at = payload.get("started_at") or state.started_at
+    state.updated_at = payload.get("updated_at") or state.updated_at
+    state.finished_at = payload.get("finished_at")
+    state.total_files = int(payload.get("total_files") or 0)
+    state.processed_files = int(payload.get("processed_files") or 0)
+    state.pending_count = int(payload.get("pending_count") or 0)
+    state.deduped_count = int(payload.get("deduped_count") or 0)
+    state.current_file = payload.get("current_file")
+    state.current_phase = payload.get("current_phase")
+    state.current_file_size_bytes = payload.get("current_file_size_bytes")
+    state.current_file_processed_bytes = payload.get("current_file_processed_bytes")
+    state.error = payload.get("error")
+    inventory = payload.get("inventory") or {}
+    state.pending = list(inventory.get("pending") or [])
+    state.deduped = list(inventory.get("deduped") or [])
+
+
+async def create_jobs_for_inventory_paths(
+    file_paths: list[str],
+    *,
+    channel_profile: str | None = None,
+    language: str = "zh-CN",
+) -> list[dict[str, str | None]]:
+    results: list[dict[str, str | None]] = []
+    for file_path in file_paths:
+        job_id = await _create_job_for_file(Path(file_path), channel_profile, language)
+        results.append({"path": file_path, "job_id": job_id or None})
+    return results
+
+
+async def ensure_watch_inventory_thumbnail(
+    watch_path: str,
+    relative_path: str,
+    *,
+    width: int = 320,
+) -> Path:
+    root = Path(watch_path).resolve()
+    source = (root / relative_path).resolve()
+    source.relative_to(root)
+    if not source.exists() or not source.is_file():
+        raise FileNotFoundError(str(source))
+
+    stat = source.stat()
+    cache_root = Path(".artifacts") / "watch-previews" / hashlib.sha1(str(root).encode("utf-8")).hexdigest()[:12]
+    cache_root.mkdir(parents=True, exist_ok=True)
+    cache_name = hashlib.sha1(
+        f"{relative_path}|{stat.st_mtime_ns}|{stat.st_size}|{width}".encode("utf-8")
+    ).hexdigest()
+    output_path = cache_root / f"{cache_name}.jpg"
+    if output_path.exists():
+        return output_path
+
+    seek_sec = 0.5
+    try:
+        meta = await probe(source)
+        if meta.duration > 0:
+            seek_sec = max(0.0, min(meta.duration * 0.1, max(meta.duration - 0.1, 0.0)))
+    except Exception:
+        pass
+
+    settings = get_settings()
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-ss",
+        f"{seek_sec:.2f}",
+        "-i",
+        str(source),
+        "-frames:v",
+        "1",
+        "-vf",
+        f"scale={width}:-2",
+        str(output_path),
+    ]
+    loop = asyncio.get_running_loop()
+    result = await loop.run_in_executor(
+        None,
+        lambda: subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=settings.ffmpeg_timeout_sec,
+        ),
+    )
+    if result.returncode != 0 or not output_path.exists():
+        raise RuntimeError(f"ffmpeg thumbnail failed: {result.stderr[-500:]}")
+    return output_path
 
 
 async def _run_watch_root_inventory_scan(
@@ -408,7 +506,7 @@ async def _scan_watch_root_inventory_impl(
                 state.current_phase = "cached"
             else:
                 state.current_phase = "probing"
-                state.current_file_processed_bytes = max(1, int((state.current_file_size_bytes or 0) * 0.5))
+                state.current_file_processed_bytes = None
                 state.updated_at = _now_iso()
                 meta = await probe(file_path)
                 item.duration_sec = meta.duration

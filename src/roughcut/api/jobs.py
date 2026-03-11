@@ -4,11 +4,12 @@ import hashlib
 import shutil
 import tempfile
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
-from sqlalchemy import select
+from fastapi.responses import FileResponse
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -21,9 +22,23 @@ from roughcut.api.schemas import (
     ReviewApplyRequest,
 )
 from roughcut.config import get_settings
-from roughcut.db.models import Artifact, Job, JobStep, RenderOutput, ReviewAction, SubtitleCorrection, Timeline
+from roughcut.db.models import (
+    Artifact,
+    FactClaim,
+    FactEvidence,
+    Job,
+    JobStep,
+    RenderOutput,
+    ReviewAction,
+    SubtitleCorrection,
+    SubtitleItem,
+    Timeline,
+    TranscriptSegment,
+)
 from roughcut.db.session import get_session
+from roughcut.pipeline.celery_app import celery_app
 from roughcut.pipeline.orchestrator import create_job_steps
+from roughcut.review.content_profile import _extract_reference_frames
 from roughcut.review.content_profile import apply_content_profile_feedback
 from roughcut.review.report import generate_report
 from roughcut.storage.s3 import get_storage, job_key
@@ -36,7 +51,7 @@ STEP_LABELS = {
     "transcribe": "语音转写",
     "subtitle_postprocess": "字幕后处理",
     "content_profile": "内容摘要",
-    "summary_review": "人工确认",
+    "summary_review": "信息核对",
     "glossary_review": "术语纠错",
     "edit_plan": "剪辑决策",
     "render": "渲染输出",
@@ -136,6 +151,73 @@ async def get_job(job_id: uuid.UUID, session: AsyncSession = Depends(get_session
     return job
 
 
+@router.post("/{job_id}/cancel", response_model=JobOut)
+async def cancel_job(job_id: uuid.UUID, session: AsyncSession = Depends(get_session)):
+    result = await session.execute(
+        select(Job).options(selectinload(Job.steps)).where(Job.id == job_id)
+    )
+    job = result.scalar_one_or_none()
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if job.status in {"done", "failed", "cancelled"}:
+        raise HTTPException(status_code=409, detail=f"Job already {job.status}")
+
+    _revoke_running_steps(job.steps or [])
+
+    now = datetime.now(timezone.utc)
+    job.status = "cancelled"
+    job.error_message = "Cancelled by user"
+    job.updated_at = now
+    for step in job.steps or []:
+        if step.status == "pending":
+            step.status = "skipped"
+            step.finished_at = now
+        elif step.status == "running":
+            step.status = "cancelled"
+            step.error_message = "Cancelled by user"
+            step.finished_at = now
+            step.metadata_ = {
+                **(step.metadata_ or {}),
+                "detail": "任务已取消，后续流程停止。",
+                "updated_at": now.isoformat(),
+            }
+    await session.commit()
+    await session.refresh(job)
+    return job
+
+
+@router.post("/{job_id}/restart", response_model=JobOut)
+async def restart_job(job_id: uuid.UUID, session: AsyncSession = Depends(get_session)):
+    result = await session.execute(
+        select(Job).options(selectinload(Job.steps)).where(Job.id == job_id)
+    )
+    job = result.scalar_one_or_none()
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if job.status not in {"cancelled", "failed"}:
+        raise HTTPException(status_code=409, detail="Only cancelled or failed jobs can be restarted")
+
+    _revoke_running_steps(job.steps or [])
+    await _clear_job_runtime_state(job_id, session)
+
+    now = datetime.now(timezone.utc)
+    job.status = "pending"
+    job.error_message = None
+    job.updated_at = now
+    job.file_hash = None
+    for step in job.steps or []:
+        step.status = "pending"
+        step.attempt = 0
+        step.started_at = None
+        step.finished_at = None
+        step.error_message = None
+        step.metadata_ = None
+
+    await session.commit()
+    await session.refresh(job)
+    return job
+
+
 @router.get("/{job_id}/report", response_model=ReportOut)
 async def get_report(job_id: uuid.UUID, session: AsyncSession = Depends(get_session)):
     job = await session.get(Job, job_id)
@@ -188,6 +270,27 @@ async def get_content_profile(job_id: uuid.UUID, session: AsyncSession = Depends
         draft=draft,
         final=final,
     )
+
+
+@router.get("/{job_id}/content-profile/thumbnail")
+async def get_content_profile_thumbnail(
+    job_id: uuid.UUID,
+    index: int = 0,
+    session: AsyncSession = Depends(get_session),
+):
+    job = await session.get(Job, job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if index < 0 or index > 2:
+        raise HTTPException(status_code=400, detail="Thumbnail index out of range")
+
+    try:
+        thumbnail = await _ensure_content_profile_thumbnail(job, index=index)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return FileResponse(thumbnail, media_type="image/jpeg")
 
 
 @router.post("/{job_id}/content-profile/confirm", response_model=ContentProfileReviewOut)
@@ -277,6 +380,61 @@ async def get_download_url(job_id: uuid.UUID, session: AsyncSession = Depends(ge
 
     url = storage.get_presigned_url(object_key, expires_in=3600)
     return {"url": url, "expires_in": 3600}
+
+
+def _revoke_running_steps(steps: list[JobStep]) -> None:
+    for step in steps:
+        if step.status != "running":
+            continue
+        task_id = (step.metadata_ or {}).get("task_id")
+        if not task_id:
+            continue
+        try:
+            celery_app.control.revoke(task_id, terminate=True, signal="SIGTERM")
+        except Exception:
+            pass
+
+
+async def _clear_job_runtime_state(job_id: uuid.UUID, session: AsyncSession) -> None:
+    packaging_artifacts = await session.execute(
+        select(Artifact).where(Artifact.job_id == job_id)
+    )
+    for artifact in packaging_artifacts.scalars().all():
+        if artifact.storage_path:
+            try:
+                Path(artifact.storage_path).unlink(missing_ok=True)
+            except Exception:
+                pass
+
+    render_outputs = await session.execute(select(RenderOutput).where(RenderOutput.job_id == job_id))
+    for item in render_outputs.scalars().all():
+        if item.output_path:
+            output_path = Path(item.output_path)
+            try:
+                output_path.unlink(missing_ok=True)
+                output_path.with_suffix(".srt").unlink(missing_ok=True)
+            except Exception:
+                pass
+            try:
+                output_path.with_name(f"{output_path.stem}_cover.jpg").unlink(missing_ok=True)
+            except Exception:
+                pass
+            try:
+                output_path.with_name(f"{output_path.stem}_publish.md").unlink(missing_ok=True)
+            except Exception:
+                pass
+
+    await session.execute(
+        delete(FactEvidence).where(FactEvidence.claim_id.in_(select(FactClaim.id).where(FactClaim.job_id == job_id)))
+    )
+    await session.execute(delete(FactClaim).where(FactClaim.job_id == job_id))
+    await session.execute(delete(ReviewAction).where(ReviewAction.job_id == job_id))
+    await session.execute(delete(RenderOutput).where(RenderOutput.job_id == job_id))
+    await session.execute(delete(Timeline).where(Timeline.job_id == job_id))
+    await session.execute(delete(Artifact).where(Artifact.job_id == job_id))
+    await session.execute(delete(SubtitleCorrection).where(SubtitleCorrection.job_id == job_id))
+    await session.execute(delete(SubtitleItem).where(SubtitleItem.job_id == job_id))
+    await session.execute(delete(TranscriptSegment).where(TranscriptSegment.job_id == job_id))
 
 
 @router.post("/{job_id}/review/apply")
@@ -401,7 +559,7 @@ def _build_current_step(job: Job) -> dict | None:
             "step_name": "summary_review",
             "label": STEP_LABELS["summary_review"],
             "status": "needs_review",
-            "detail": "等待人工确认内容摘要后继续。",
+            "detail": "等待核对内容信息后继续。",
             "progress": None,
             "updated_at": _iso_or_none(job.updated_at),
         }
@@ -640,6 +798,33 @@ def _artifact_event_summary(artifact: Artifact) -> dict | None:
             "detail": artifact.storage_path or "发布文案已写入 Markdown",
         }
     return None
+
+
+async def _ensure_content_profile_thumbnail(job: Job, *, index: int) -> Path:
+    cache_dir = Path(tempfile.gettempdir()) / "roughcut_content_profile_frames" / str(job.id)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cached = cache_dir / f"profile_{index:02d}.jpg"
+    if cached.exists():
+        return cached
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        source_path = await _resolve_job_source(job, tmpdir)
+        frames = _extract_reference_frames(source_path, cache_dir, count=3)
+    if not frames:
+        raise RuntimeError("Unable to extract content profile thumbnails")
+    if not cached.exists():
+        raise FileNotFoundError("Requested thumbnail was not generated")
+    return cached
+
+
+async def _resolve_job_source(job: Job, tmpdir: str) -> Path:
+    source_path = Path(job.source_path)
+    if source_path.exists():
+        return source_path
+    local_path = Path(tmpdir) / job.source_name
+    storage = get_storage()
+    await storage.async_download_file(job.source_path, local_path)
+    return local_path
 
 
 def _iso_or_none(value: datetime | None) -> str | None:

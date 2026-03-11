@@ -13,9 +13,10 @@ from roughcut.providers.reasoning.base import Message, extract_json_text
 
 
 def build_transcript_excerpt(subtitle_items: list[dict], *, max_items: int = 36, max_chars: int = 1400) -> str:
+    selected = _select_excerpt_items(subtitle_items, max_items=max_items)
     lines: list[str] = []
     total = 0
-    for item in subtitle_items[:max_items]:
+    for item in selected:
         text = item.get("text_final") or item.get("text_norm") or item.get("text_raw") or ""
         if not text:
             continue
@@ -83,11 +84,13 @@ async def infer_content_profile(
     include_research: bool = True,
 ) -> dict[str, Any]:
     transcript_excerpt = build_transcript_excerpt(subtitle_items)
+    heuristic_profile = _seed_profile_from_subtitles(subtitle_items)
     initial_profile = _fallback_profile(
         source_name=source_name,
         channel_profile=channel_profile,
         transcript_excerpt=transcript_excerpt,
     )
+    initial_profile.update(heuristic_profile)
 
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -97,18 +100,21 @@ async def infer_content_profile(
                     "你在分析一条中文短视频。视频可能是开箱评测、录屏教学、vlog、口播观点、游戏高光或美食探店。"
                     "请结合图片和口播字幕，判断视频主体是什么。"
                     "如果画面里有产品、软件界面、店招、包装、盒体、logo、英文单词、型号字样，都优先识别。"
-                    "尽量给出品牌、型号/版本、主体类型、视频主题，以及适合的剪辑预设。"
+                    "尽量给出开箱产品品牌、开箱产品型号/版本、主体类型、视频主题，以及适合的剪辑预设。"
+                    "subject_brand 指视频里被开箱/被讲解的产品或主体品牌，不是频道名、作者名。"
                     "如果不确定，不要乱编，留空即可。\n\n"
                     "输出 JSON："
                     '{"subject_brand":"","subject_model":"","subject_type":"","video_theme":"",'
                     '"preset_name":"","hook_line":"","visible_text":"","search_queries":[]}'
                     "\n要求：preset_name 只能从 unboxing_default、unboxing_limited、unboxing_upgrade、edc_tactical、screen_tutorial、vlog_daily、talking_head_commentary、gameplay_highlight、food_explore 中选择。"
+                    "\n如果文件名像时间戳、相机命名或流水号，不要把它当成型号。"
                     "\nsearch_queries 提供 2-3 个适合联网搜索验证的查询词。"
                     f"\n源文件名：{source_name}\n字幕节选：\n{transcript_excerpt}"
                 )
                 content = await complete_with_images(prompt, frame_paths, max_tokens=500, json_mode=True)
                 candidate = json.loads(extract_json_text(content))
                 initial_profile.update({k: v for k, v in candidate.items() if v})
+                _merge_specific_profile_hints(initial_profile, heuristic_profile)
     except Exception:
         pass
 
@@ -116,7 +122,9 @@ async def infer_content_profile(
         provider = get_reasoning_provider()
         prompt = (
             "你在分析中文短视频的口播内容。视频可能是开箱评测、录屏教学、vlog、口播观点、游戏高光或美食探店。"
-            "请根据文件名、字幕节选和已有视觉判断，补全视频主体的品牌、型号/版本、主体类型、视频主题，并给出适合联网验证的搜索词。"
+            "请根据文件名、字幕节选和已有视觉判断，补全视频主体的开箱产品品牌、开箱产品型号/版本、主体类型、视频主题，并给出适合联网验证的搜索词。"
+            "subject_brand 指视频里被开箱/被讲解的产品或主体品牌，不是频道名、作者名。"
+            "如果文件名像时间戳、相机命名或流水号，不要把它当成型号。"
             "如果不确定，请留空，不要乱编。"
             "\n输出 JSON："
             '{"subject_brand":"","subject_model":"","subject_type":"","video_theme":"",'
@@ -135,6 +143,7 @@ async def infer_content_profile(
         )
         candidate = response.as_json()
         initial_profile.update({k: v for k, v in candidate.items() if v})
+        _merge_specific_profile_hints(initial_profile, heuristic_profile)
     except Exception:
         pass
 
@@ -184,6 +193,7 @@ async def apply_content_profile_feedback(
             "你在整理一条中文短视频的人工确认摘要。请结合模型草稿和用户修正，"
             "输出一个后续可直接用于搜索、字幕修正和剪辑规划的确认版摘要。"
             "用户修正优先级最高，不要忽略用户手动填写的信息。\n"
+            "subject_brand 指开箱产品品牌，不是频道名；subject_model 指开箱产品名、系列名、型号或版本，不要回填文件名或时间戳。\n"
             "输出 JSON："
             '{"subject_brand":"","subject_model":"","subject_type":"","video_theme":"",'
             '"hook_line":"","visible_text":"","summary":"","engagement_question":"","search_queries":[]}'
@@ -224,6 +234,8 @@ async def enrich_content_profile(
     include_research: bool = True,
 ) -> dict[str, Any]:
     enriched = dict(profile or {})
+    context_hints = _seed_profile_from_context(enriched, transcript_excerpt)
+    _merge_specific_profile_hints(enriched, context_hints)
 
     preset = select_preset(
         channel_profile=channel_profile or enriched.get("preset_name"),
@@ -236,21 +248,25 @@ async def enrich_content_profile(
     enriched["transcript_excerpt"] = transcript_excerpt
 
     if include_research:
-        evidence = await _search_evidence(enriched, source_name)
+        evidence = await _search_evidence(enriched, source_name, transcript_excerpt=transcript_excerpt)
         if evidence:
             enriched["evidence"] = evidence
             try:
                 provider = get_reasoning_provider()
                 prompt = (
-                    "你在做短视频字幕与封面前置研究。请根据已有判断和搜索证据，"
-                    "确认视频主体的品牌、型号/版本、主体类型、视频主题，并生成适合做封面的三段标题。"
+                    "你在做短视频字幕与封面前置研究。请把字幕/画面线索与搜索证据做双重校验，"
+                    "确认视频主体的开箱产品品牌、开箱产品型号/版本、主体类型、视频主题，并生成适合做封面的三段标题。"
+                    "只有当字幕/画面线索与搜索结果能够互相印证时，才提升品牌、型号等关键信息。"
+                    "如果搜索结果与字幕线索冲突，优先保守，保留已有可信字段，不要为了补全而乱改。"
                     "优先给出品牌名、系列名或主体名，不要输出泛化标题如“产品开箱与上手体验”。"
+                    "subject_brand 指开箱产品品牌，不是频道名；不要把文件名、时间戳或相机编号当成开箱产品型号。"
                     "如果证据不足，不要编造，保留已有可信信息。\n\n"
                     "输出 JSON："
                     '{"subject_brand":"","subject_model":"","subject_type":"","video_theme":"",'
                     '"hook_line":"","visible_text":"","summary":"","engagement_question":"",'
                     '"cover_title":{"top":"","main":"","bottom":""}}'
                     f"\n已有判断：{json.dumps(enriched, ensure_ascii=False)}"
+                    f"\n字幕/画面线索：{transcript_excerpt}"
                     f"\n搜索证据：{json.dumps(evidence, ensure_ascii=False)}"
                 )
                 response = await provider.complete(
@@ -264,8 +280,14 @@ async def enrich_content_profile(
                 )
                 refined = response.as_json()
                 enriched.update({k: v for k, v in refined.items() if v})
+                _merge_specific_profile_hints(enriched, context_hints)
             except Exception:
                 pass
+
+    if _is_generic_subject_type(str(enriched.get("subject_type") or "")):
+        hinted = context_hints
+        if hinted.get("subject_type"):
+            enriched["subject_type"] = hinted["subject_type"]
 
     cover_title = enriched.get("cover_title")
     if not isinstance(cover_title, dict) or not _cover_title_is_usable(cover_title):
@@ -277,7 +299,7 @@ async def enrich_content_profile(
             "bottom": _clean_line(cover_title.get("bottom") or "")[:18],
         }
     enriched["cover_title"] = cover_title
-    if not enriched.get("summary"):
+    if not enriched.get("summary") or _is_generic_profile_summary(str(enriched.get("summary") or "")):
         enriched["summary"] = _build_profile_summary(enriched)
     if not enriched.get("engagement_question"):
         enriched["engagement_question"] = "你觉得这次到手值不值？"
@@ -379,8 +401,13 @@ async def polish_subtitle_items(
     return polished_count
 
 
-async def _search_evidence(profile: dict[str, Any], source_name: str) -> list[dict[str, str]]:
-    queries = _build_search_queries(profile, source_name)
+async def _search_evidence(
+    profile: dict[str, Any],
+    source_name: str,
+    *,
+    transcript_excerpt: str = "",
+) -> list[dict[str, str]]:
+    queries = _build_search_queries(profile, source_name, transcript_excerpt=transcript_excerpt)
     if not queries:
         return []
     try:
@@ -410,7 +437,12 @@ async def _search_evidence(profile: dict[str, Any], source_name: str) -> list[di
     return evidence
 
 
-def _build_search_queries(profile: dict[str, Any], source_name: str) -> list[str]:
+def _build_search_queries(
+    profile: dict[str, Any],
+    source_name: str,
+    *,
+    transcript_excerpt: str = "",
+) -> list[str]:
     queries: list[str] = []
     for value in profile.get("search_queries") or []:
         if value:
@@ -419,14 +451,33 @@ def _build_search_queries(profile: dict[str, Any], source_name: str) -> list[str
     brand = str(profile.get("subject_brand") or "").strip()
     model = str(profile.get("subject_model") or "").strip()
     subject_type = str(profile.get("subject_type") or "").strip()
+    visible_text = str(profile.get("visible_text") or "").strip()
     source_stem = Path(source_name).stem
+    signal_terms = _extract_search_signal_terms(transcript_excerpt, visible_text, source_stem)
 
     if brand and model:
         queries.append(f"{brand} {model}")
         queries.append(f"{brand} {model} 开箱")
+    elif brand:
+        for term in signal_terms[:2]:
+            queries.append(f"{brand} {term}")
+            if subject_type:
+                queries.append(f"{brand} {term} {subject_type}")
+    elif model:
+        queries.append(model)
+        queries.append(f"{model} 开箱")
+        if subject_type:
+            queries.append(f"{model} {subject_type}")
     if brand and subject_type:
         queries.append(f"{brand} {subject_type}")
-    if source_stem:
+    if model and subject_type:
+        queries.append(f"{model} {subject_type}")
+    if not brand and not model:
+        for term in signal_terms[:3]:
+            queries.append(f"{term} 开箱")
+            if subject_type and not _is_generic_subject_type(subject_type):
+                queries.append(f"{term} {subject_type}")
+    if _is_informative_source_hint(source_stem):
         queries.append(source_stem)
 
     deduped: list[str] = []
@@ -437,6 +488,208 @@ def _build_search_queries(profile: dict[str, Any], source_name: str) -> list[str
             seen.add(normalized)
             deduped.append(normalized)
     return deduped
+
+
+def _extract_search_signal_terms(*texts: str) -> list[str]:
+    terms: list[str] = []
+    seen: set[str] = set()
+    for text in texts:
+        if not text:
+            continue
+        normalized = text.upper()
+        for match in re.finditer(r"(?<![A-Z0-9])([A-Z][A-Z0-9-]{1,17})(?![A-Z0-9])", normalized):
+            token = match.group(1).strip("-")
+            if not token or token in _SEARCH_SIGNAL_STOPWORDS:
+                continue
+            if re.fullmatch(r"\d+", token) or _looks_like_camera_stem(token):
+                continue
+            if token not in seen:
+                seen.add(token)
+                terms.append(token)
+    return terms
+
+
+def _select_excerpt_items(subtitle_items: list[dict], *, max_items: int) -> list[dict]:
+    if not subtitle_items:
+        return []
+
+    selected: list[dict] = []
+    seen: set[tuple[float, float, str]] = set()
+
+    def _append(item: dict) -> None:
+        text = str(item.get("text_final") or item.get("text_norm") or item.get("text_raw") or "").strip()
+        key = (
+            round(float(item.get("start_time", 0.0) or 0.0), 3),
+            round(float(item.get("end_time", 0.0) or 0.0), 3),
+            text,
+        )
+        if not text or key in seen:
+            return
+        seen.add(key)
+        selected.append(item)
+
+    for item in subtitle_items[: min(18, len(subtitle_items))]:
+        _append(item)
+
+    scored = sorted(
+        subtitle_items,
+        key=lambda item: (_transcript_signal_score(item), float(item.get("start_time", 0.0) or 0.0)),
+        reverse=True,
+    )
+    for item in scored:
+        if len(selected) >= max_items - 4:
+            break
+        if _transcript_signal_score(item) <= 0:
+            continue
+        _append(item)
+
+    for item in subtitle_items[-6:]:
+        _append(item)
+
+    selected.sort(key=lambda item: float(item.get("start_time", 0.0) or 0.0))
+    return selected[:max_items]
+
+
+def _transcript_signal_score(item: dict[str, Any]) -> int:
+    text = str(item.get("text_final") or item.get("text_norm") or item.get("text_raw") or "").strip()
+    if not text:
+        return 0
+
+    normalized = text.upper()
+    score = 0
+    if re.search(r"(?<![A-Z0-9])[A-Z]{2,}[A-Z0-9-]{0,10}(?![A-Z0-9])", normalized):
+        score += 4
+    if re.search(r"(?<![A-Z0-9])(?:[A-Z]+\d+|\d+[A-Z]+)(?![A-Z0-9])", normalized):
+        score += 3
+    if any(keyword in text for keyword in ("型号", "版本", "主刀", "工具", "钳", "刀", "锁", "单手", "开合")):
+        score += 2
+    if any(pattern.search(text) for _, pattern in _BRAND_ALIAS_PATTERNS):
+        score += 2
+    if len(text) >= 10:
+        score += 1
+    return score
+
+
+_BRAND_ALIAS_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
+    ("LEATHERMAN", re.compile(r"(LEATHERMAN|莱[泽着]曼|来[自自泽着]慢|来[自泽着]曼|雷[泽着]曼)", re.IGNORECASE)),
+]
+
+_SEARCH_SIGNAL_STOPWORDS: set[str] = {
+    "ASMR",
+    "DIY",
+    "EDC",
+    "POV",
+    "VLOG",
+}
+
+_MODEL_TO_BRAND: dict[str, str] = {
+    "ARC": "LEATHERMAN",
+}
+
+
+def _seed_profile_from_subtitles(subtitle_items: list[dict]) -> dict[str, Any]:
+    transcript_lines = [
+        str(item.get("text_final") or item.get("text_norm") or item.get("text_raw") or "").strip()
+        for item in subtitle_items
+    ]
+    transcript = "\n".join(line for line in transcript_lines if line)
+    return _seed_profile_from_text(transcript)
+
+
+def _seed_profile_from_transcript_excerpt(transcript_excerpt: str) -> dict[str, Any]:
+    return _seed_profile_from_text(transcript_excerpt)
+
+
+def _seed_profile_from_context(profile: dict[str, Any], transcript_excerpt: str) -> dict[str, Any]:
+    text = "\n".join(
+        part
+        for part in (
+            transcript_excerpt,
+            str(profile.get("visible_text") or "").strip(),
+            str(profile.get("hook_line") or "").strip(),
+        )
+        if part
+    )
+    return _seed_profile_from_text(text)
+
+
+def _seed_profile_from_text(transcript: str) -> dict[str, Any]:
+    normalized = transcript.upper()
+
+    brand = ""
+    for name, pattern in _BRAND_ALIAS_PATTERNS:
+        if pattern.search(transcript):
+            brand = name
+            break
+
+    model = ""
+    if re.search(r"(?<![A-Z0-9])ARC(?![A-Z0-9])", normalized):
+        model = "ARC"
+    elif re.search(r"(?<![A-Z0-9])SURGE(?![A-Z0-9])", normalized):
+        model = "SURGE"
+    elif re.search(r"(?<![A-Z0-9])CHARGE(?![A-Z0-9])", normalized):
+        model = "CHARGE"
+
+    if not brand and model in _MODEL_TO_BRAND:
+        brand = _MODEL_TO_BRAND[model]
+
+    subject_type = ""
+    if brand == "LEATHERMAN" or model in {"ARC", "SURGE", "CHARGE"}:
+        subject_type = "多功能工具钳"
+    elif any(keyword in transcript for keyword in ("工具钳", "主刀", "钳子", "单手开合")):
+        subject_type = "多功能工具钳"
+    elif any(keyword in transcript for keyword in ("折刀", "刀片", "锁定机构", "推刀")):
+        subject_type = "EDC折刀"
+
+    seeded: dict[str, Any] = {}
+    if brand:
+        seeded["subject_brand"] = brand
+    if model:
+        seeded["subject_model"] = model
+    if subject_type:
+        seeded["subject_type"] = subject_type
+    if brand or model:
+        queries = []
+        if brand and model:
+            queries.extend([f"{brand} {model}", f"{brand} {model} 开箱"])
+        elif model:
+            queries.append(f"{model} 开箱")
+        seeded["search_queries"] = queries
+    return seeded
+
+
+def _merge_specific_profile_hints(profile: dict[str, Any], hints: dict[str, Any]) -> None:
+    if hints.get("subject_brand") and not profile.get("subject_brand"):
+        profile["subject_brand"] = hints["subject_brand"]
+    if hints.get("subject_model") and not profile.get("subject_model"):
+        profile["subject_model"] = hints["subject_model"]
+    if hints.get("subject_type") and _is_generic_subject_type(str(profile.get("subject_type") or "")):
+        profile["subject_type"] = hints["subject_type"]
+
+    current_queries = [str(item).strip() for item in profile.get("search_queries") or [] if str(item).strip()]
+    for item in hints.get("search_queries") or []:
+        value = str(item).strip()
+        if value and value not in current_queries:
+            current_queries.append(value)
+    if current_queries:
+        profile["search_queries"] = current_queries
+
+
+def _is_generic_subject_type(text: str) -> bool:
+    normalized = _clean_line(text)
+    return normalized in {"", "开箱产品", "开箱", "开箱评测", "体验", "产品体验", "上手体验", "评测"}
+
+
+def _is_generic_profile_summary(text: str) -> bool:
+    normalized = _clean_line(text)
+    if not normalized:
+        return True
+    generic_fragments = (
+        "围绕开箱产品展开",
+        "偏产品开箱与上手体验",
+        "适合后续做搜索校验、字幕纠错和剪辑包装",
+    )
+    return all(fragment in normalized for fragment in generic_fragments)
 
 
 def _extract_reference_frames(source_path: Path, tmpdir: Path, *, count: int) -> list[Path]:
@@ -506,7 +759,7 @@ def _fallback_profile(
     engagement_question = _default_engagement_question(preset)
     return {
         "subject_brand": "",
-        "subject_model": Path(source_name).stem,
+        "subject_model": "",
         "subject_type": subject_type,
         "video_theme": video_theme,
         "preset_name": preset.name,
@@ -515,7 +768,7 @@ def _fallback_profile(
         "summary": _build_profile_summary(
             {
                 "subject_brand": "",
-                "subject_model": Path(source_name).stem,
+                "subject_model": "",
                 "subject_type": subject_type,
                 "video_theme": video_theme,
                 "preset_name": preset.name,
@@ -525,7 +778,7 @@ def _fallback_profile(
         "cover_title": build_cover_title(
             {
                 "subject_brand": "",
-                "subject_model": Path(source_name).stem,
+                "subject_model": "",
                 "subject_type": subject_type,
                 "video_theme": video_theme,
                 "hook_line": preset.cover_accent,
@@ -562,6 +815,17 @@ def _looks_like_camera_stem(text: str) -> bool:
     )
 
 
+def _is_informative_source_hint(text: str) -> bool:
+    normalized = _clean_line(text)
+    if not normalized:
+        return False
+    if _looks_like_camera_stem(normalized):
+        return False
+    if re.fullmatch(r"[\d_-]+", normalized):
+        return False
+    return True
+
+
 def _cover_title_is_usable(cover_title: dict[str, Any]) -> bool:
     main = _clean_line(cover_title.get("main") or "")
     return bool(main and not _is_generic_cover_line(main))
@@ -572,6 +836,8 @@ def _is_generic_cover_line(text: str) -> bool:
     if not normalized:
         return True
     generic_fragments = (
+        "开箱产品",
+        "开箱评测",
         "产品开箱",
         "上手体验",
         "开箱体验",

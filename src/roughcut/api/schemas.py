@@ -105,6 +105,58 @@ class ContentProfileConfirmIn(BaseModel):
     supplemental_context: str | None = None
 
 
+class PackagingAssetOut(BaseModel):
+    id: str
+    asset_type: str
+    original_name: str
+    stored_name: str
+    path: str
+    size_bytes: int
+    content_type: str
+    created_at: str
+
+
+class PackagingConfigOut(BaseModel):
+    intro_asset_id: str | None = None
+    outro_asset_id: str | None = None
+    insert_asset_id: str | None = None
+    insert_asset_ids: list[str] = []
+    insert_selection_mode: str = "manual"
+    insert_position_mode: str = "llm"
+    watermark_asset_id: str | None = None
+    music_asset_ids: list[str] = []
+    music_selection_mode: str = "random"
+    music_loop_mode: str = "loop_single"
+    music_volume: float = 0.22
+    watermark_position: str = "top_right"
+    watermark_opacity: float = 0.82
+    watermark_scale: float = 0.16
+    enabled: bool = True
+
+
+class PackagingLibraryOut(BaseModel):
+    assets: dict[str, list[PackagingAssetOut]]
+    config: PackagingConfigOut
+
+
+class PackagingConfigPatch(BaseModel):
+    intro_asset_id: str | None = None
+    outro_asset_id: str | None = None
+    insert_asset_id: str | None = None
+    insert_asset_ids: list[str] | None = None
+    insert_selection_mode: str | None = None
+    insert_position_mode: str | None = None
+    watermark_asset_id: str | None = None
+    music_asset_ids: list[str] | None = None
+    music_selection_mode: str | None = None
+    music_loop_mode: str | None = None
+    music_volume: float | None = None
+    watermark_position: str | None = None
+    watermark_opacity: float | None = None
+    watermark_scale: float | None = None
+    enabled: bool | None = None
+
+
 # ── Glossary ──────────────────────────────────────────────────────────────────
 
 class GlossaryTermCreate(BaseModel):
@@ -176,6 +228,18 @@ class WatchInventoryOut(BaseModel):
 
 class WatchInventoryScanIn(BaseModel):
     force: bool = False
+
+
+class WatchInventoryEnqueueIn(BaseModel):
+    relative_paths: list[str] = Field(default_factory=list)
+    enqueue_all: bool = False
+
+
+class WatchInventoryEnqueueOut(BaseModel):
+    requested_count: int
+    created_count: int
+    skipped_count: int
+    created_job_ids: list[str]
 
 
 class WatchInventoryScanStatusOut(BaseModel):

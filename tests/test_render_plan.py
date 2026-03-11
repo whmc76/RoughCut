@@ -20,6 +20,7 @@ def test_build_render_plan_defaults():
     assert plan["cover"]["variant_count"] == 5
     assert plan["intro"] is None
     assert plan["outro"] is None
+    assert plan["insert"] is None
     assert plan["watermark"] is None
     assert plan["music"] is None
 

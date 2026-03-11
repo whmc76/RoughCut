@@ -19,6 +19,7 @@ def build_render_plan(
     noise_reduction: bool = True,
     intro: dict | None = None,
     outro: dict | None = None,
+    insert: dict | None = None,
     watermark: dict | None = None,
     music: dict | None = None,
 ) -> dict:
@@ -40,6 +41,7 @@ def build_render_plan(
         },
         "intro": intro,
         "outro": outro,
+        "insert": insert,
         "watermark": watermark,
         "music": music,
         "cover": {

@@ -88,6 +88,7 @@
     .status-running { color: var(--warn); background: rgba(255,152,0,0.15); animation: pulse-text 2s infinite; }
     .status-needs_review { color: var(--warn); background: rgba(255,193,7,0.18); }
     .status-skipped { color: var(--text3); background: rgba(90,96,128,0.15); }
+    .status-cancelled { color: #ffb74d; background: rgba(255,183,77,0.18); }
     @keyframes pulse-text { 0%,100%{ opacity:1 } 50%{ opacity:0.6 } }
 
     /* Buttons */
@@ -128,6 +129,7 @@
     .step-dot-running { background: rgba(255,152,0,0.2); border: 1px solid var(--warn); color: var(--warn); }
     .step-dot-done { background: rgba(76,175,80,0.2); border: 1px solid var(--success); color: var(--success); }
     .step-dot-failed { background: rgba(244,67,54,0.2); border: 1px solid var(--error); color: var(--error); }
+    .step-dot-cancelled { background: rgba(255,183,77,0.2); border: 1px solid #ffb74d; color: #ffb74d; }
     .step-info { flex: 1; padding-top: 3px; }
     .step-name { font-weight: 600; font-size: 13px; }
     .step-meta { font-size: 11px; color: var(--text3); margin-top: 2px; }
@@ -141,6 +143,28 @@
     .drawer-title { font-size: 18px; font-weight: 700; }
     .drawer-close { background: none; border: none; color: var(--text2); cursor: pointer; font-size: 20px; padding: 4px; }
     .drawer-close:hover { color: var(--text); }
+    .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.68); z-index: 240; display: none; align-items: center; justify-content: center; padding: 24px; }
+    .modal-overlay.open { display: flex; }
+    .modal-panel { width: min(760px, 100%); max-height: calc(100vh - 48px); overflow-y: auto; background: var(--surface); border: 1px solid var(--border); border-radius: 16px; padding: 24px; box-shadow: 0 24px 80px rgba(0,0,0,0.45); }
+    .modal-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 20px; }
+    .modal-title { font-size: 18px; font-weight: 700; }
+    .modal-subtitle { font-size: 12px; color: var(--text3); margin-top: 4px; }
+    .modal-close { background: none; border: none; color: var(--text2); cursor: pointer; font-size: 20px; padding: 4px; }
+    .modal-close:hover { color: var(--text); }
+    .toolbar-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .thumb-strip { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin-bottom: 18px; }
+    .thumb-card { background: var(--surface2); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; min-height: 92px; }
+    .thumb-card img { width: 100%; height: 100%; display: block; object-fit: cover; aspect-ratio: 16 / 9; }
+    .thumb-empty { display: flex; align-items: center; justify-content: center; color: var(--text3); font-size: 12px; min-height: 92px; }
+    .evidence-section { margin-bottom: 18px; }
+    .evidence-list { display: grid; gap: 10px; }
+    .evidence-card { background: var(--surface2); border: 1px solid var(--border); border-radius: 10px; padding: 12px; }
+    .evidence-query { display: inline-flex; align-items: center; gap: 6px; margin-bottom: 8px; padding: 3px 8px; border-radius: 999px; background: rgba(79,195,247,0.12); color: var(--accent2); font-size: 11px; font-weight: 600; }
+    .evidence-title { color: var(--text); font-size: 13px; font-weight: 600; line-height: 1.5; text-decoration: none; }
+    .evidence-title:hover { color: var(--accent2); }
+    .evidence-snippet { margin-top: 6px; color: var(--text2); font-size: 12px; line-height: 1.6; }
+    .evidence-url { margin-top: 6px; color: var(--text3); font-size: 11px; word-break: break-all; }
+    .evidence-empty { background: var(--surface2); border: 1px dashed var(--border); border-radius: 10px; padding: 14px; color: var(--text3); font-size: 12px; }
 
     /* Toast */
     .toast-container { position: fixed; bottom: 24px; right: 24px; z-index: 999; display: flex; flex-direction: column; gap: 10px; }
@@ -211,6 +235,9 @@
     </div>
     <div class="nav-item" data-page="folders" onclick="nav('folders')">
       <span class="icon">📁</span> 监控目录
+    </div>
+    <div class="nav-item" data-page="packaging" onclick="nav('packaging')">
+      <span class="icon">🎬</span> 包装素材
     </div>
     <div class="nav-item" data-page="glossary" onclick="nav('glossary')">
       <span class="icon">📖</span> 术语词表
@@ -284,7 +311,7 @@
               <th>状态</th>
               <th>步骤进度</th>
               <th>创建时间</th>
-              <th></th>
+              <th>操作</th>
             </tr>
           </thead>
           <tbody id="jobs-tbody">
@@ -349,6 +376,24 @@
         <button class="btn btn-primary" onclick="saveFolder()">保存</button>
         <button class="btn btn-ghost" onclick="document.getElementById('folder-form').style.display='none'">取消</button>
       </div>
+    </div>
+  </div>
+
+  <div class="page" id="page-packaging">
+    <div class="page-header">
+      <div>
+        <div class="page-title">包装素材</div>
+        <div class="page-subtitle">管理片头、片尾、植入素材、背景音乐和水印，并设置随机/手动策略</div>
+      </div>
+      <button class="btn btn-primary" onclick="savePackagingConfig()">保存包装策略</button>
+    </div>
+
+    <div class="card" id="packaging-config-card">
+      <div style="color:var(--text2)">正在加载包装策略…</div>
+    </div>
+
+    <div class="card" id="packaging-assets-card" style="margin-top:16px">
+      <div style="color:var(--text2)">正在加载素材清单…</div>
     </div>
   </div>
 
@@ -537,6 +582,11 @@
           <div id="ollama-url-group" class="form-group" style="display:none">
             <label>Ollama Base URL</label>
             <input id="s-ollama-url" type="text" placeholder="http://localhost:11434" />
+            <div style="display:flex;gap:8px;margin-top:8px">
+              <input id="s-ollama-key" type="password" placeholder="Ollama API Key（可选，用于原生 web search）" style="flex:1" />
+              <button type="button" class="btn btn-ghost btn-sm" onclick="toggleVisibility('s-ollama-key')">👁</button>
+            </div>
+            <div class="hint" id="ollama-key-hint">未设置</div>
           </div>
       </div>
 
@@ -610,7 +660,11 @@
         <div class="drawer-title" id="drawer-title">任务详情</div>
         <div style="font-size:12px;color:var(--text3);margin-top:4px" id="drawer-subtitle"></div>
       </div>
-      <button class="drawer-close" onclick="closeJobDrawer()">✕</button>
+      <div class="toolbar-actions">
+        <button class="btn btn-primary btn-sm" id="btn-open-profile-modal" onclick="openContentProfileModal()">核对信息</button>
+        <button class="btn btn-danger btn-sm" id="btn-job-action" onclick="cancelJob()">取消任务</button>
+        <button class="drawer-close" onclick="closeJobDrawer()">✕</button>
+      </div>
     </div>
 
     <div>
@@ -624,51 +678,6 @@
       <div id="drawer-decisions" style="display:grid;gap:10px"></div>
       <div class="card-title" style="margin:16px 0 12px">活动日志</div>
       <div id="drawer-activity-log"></div>
-    </div>
-
-    <div id="drawer-profile-section" style="display:none">
-      <div class="card-title" style="margin-bottom:12px">🧭 内容摘要确认</div>
-      <div class="form-group">
-        <label>品牌</label>
-        <input id="cp-brand" type="text" placeholder="品牌名" />
-      </div>
-      <div class="form-row">
-        <div class="form-group">
-          <label>产品 / 型号</label>
-          <input id="cp-model" type="text" placeholder="型号 / 系列 / 产品名" />
-        </div>
-        <div class="form-group">
-          <label>主体类型</label>
-          <input id="cp-type" type="text" placeholder="例如：工具钳 / 折刀 / 潮玩" />
-        </div>
-      </div>
-      <div class="form-group">
-        <label>视频主题</label>
-        <input id="cp-theme" type="text" placeholder="开箱 / 对比 / 体验 / 吐槽" />
-      </div>
-      <div class="form-group">
-        <label>关键词（逗号分隔）</label>
-        <input id="cp-keywords" type="text" placeholder="品牌词, 型号词, 搜索词" />
-      </div>
-      <div class="form-group">
-        <label>摘要</label>
-        <textarea id="cp-summary" rows="4" placeholder="对视频内容的简明概括"></textarea>
-      </div>
-      <div class="form-group">
-        <label>互动问题</label>
-        <input id="cp-question" type="text" placeholder="例如：你觉得值不值？" />
-      </div>
-      <div class="form-group">
-        <label>补充信息</label>
-        <textarea id="cp-context" rows="3" placeholder="可补充产品名、背景信息、卖点、想强调的内容"></textarea>
-      </div>
-      <div class="form-group">
-        <label>纠正备注</label>
-        <textarea id="cp-notes" rows="3" placeholder="指出模型识别错的地方，或告诉系统后续该怎么理解这条视频"></textarea>
-      </div>
-      <div style="display:flex;gap:8px">
-        <button class="btn btn-primary" id="btn-confirm-profile" onclick="confirmContentProfile()">确认并继续</button>
-      </div>
     </div>
 
     <div id="drawer-report-section" style="display:none">
@@ -688,6 +697,74 @@
   </div>
 </div>
 
+<div class="modal-overlay" id="content-profile-modal" onclick="closeContentProfileModal(event)">
+  <div class="modal-panel" onclick="event.stopPropagation()">
+    <div class="modal-header">
+      <div>
+        <div class="modal-title" id="content-profile-title">核对信息</div>
+        <div class="modal-subtitle" id="content-profile-subtitle">校正开箱对象信息后再继续后续流程</div>
+      </div>
+      <button class="modal-close" onclick="closeContentProfileModal()">✕</button>
+    </div>
+
+    <div class="card-title" style="margin-bottom:10px">视频缩略图</div>
+    <div class="thumb-strip" id="content-profile-frames">
+      <div class="thumb-card"><div class="thumb-empty">加载中</div></div>
+      <div class="thumb-card"><div class="thumb-empty">加载中</div></div>
+      <div class="thumb-card"><div class="thumb-empty">加载中</div></div>
+    </div>
+
+    <div class="form-group">
+      <label>产品品牌</label>
+      <input id="cp-brand" type="text" placeholder="开箱产品的品牌，不是频道名" />
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label>开箱产品型号</label>
+        <input id="cp-model" type="text" placeholder="产品名 / 系列 / 型号，不是文件名或时间戳" />
+      </div>
+      <div class="form-group">
+        <label>主体类型</label>
+        <input id="cp-type" type="text" placeholder="例如：工具钳 / 折刀 / 潮玩" />
+      </div>
+    </div>
+    <div class="form-group">
+      <label>视频主题</label>
+      <input id="cp-theme" type="text" placeholder="开箱 / 对比 / 体验 / 吐槽" />
+    </div>
+    <div class="form-group">
+      <label>关键词（逗号分隔）</label>
+      <input id="cp-keywords" type="text" placeholder="品牌词, 型号词, 搜索词" />
+    </div>
+    <div class="evidence-section">
+      <div class="card-title" style="margin-bottom:10px">搜索校验证据</div>
+      <div id="content-profile-evidence" class="evidence-list">
+        <div class="evidence-empty">正在加载搜索证据…</div>
+      </div>
+    </div>
+    <div class="form-group">
+      <label>摘要</label>
+      <textarea id="cp-summary" rows="4" placeholder="对视频内容的简明概括"></textarea>
+    </div>
+    <div class="form-group">
+      <label>互动问题</label>
+      <input id="cp-question" type="text" placeholder="例如：你觉得值不值？" />
+    </div>
+    <div class="form-group">
+      <label>补充信息</label>
+      <textarea id="cp-context" rows="3" placeholder="可补充产品名、背景信息、卖点、想强调的内容"></textarea>
+    </div>
+    <div class="form-group">
+      <label>纠正备注</label>
+      <textarea id="cp-notes" rows="3" placeholder="指出模型识别错的地方，或告诉系统后续该怎么理解这条视频"></textarea>
+    </div>
+    <div style="display:flex;justify-content:flex-end;gap:8px">
+      <button class="btn btn-ghost" onclick="closeContentProfileModal()">关闭</button>
+      <button class="btn btn-primary" id="btn-confirm-profile" onclick="confirmContentProfile()">确认并继续</button>
+    </div>
+  </div>
+</div>
+
 <!-- Toast container -->
 <div class="toast-container" id="toasts"></div>
 
@@ -701,6 +778,8 @@ let _selectedWatchRootId = null;
 let _folderScanTimer = null;
 let _drawerRefreshTimer = null;
 let _configOptions = { transcription_models: {} };
+let _profileJobId = null;
+let _packagingLibrary = null;
 
 // ── Navigation ───────────────────────────────────────────────────────────────
 function nav(page) {
@@ -712,6 +791,7 @@ function nav(page) {
   else stopRefresh();
   if (page !== 'folders') stopFolderInventoryPolling();
   if (page === 'folders') loadFolders();
+  if (page === 'packaging') loadPackaging();
   if (page === 'glossary') loadGlossary();
   if (page === 'settings') loadSettings();
   if (page === 'control') loadServiceStatus(false);
@@ -769,6 +849,10 @@ function updateBadge(jobs) {
   badge.style.display = n > 0 ? '' : 'none';
 }
 
+function canOpenContentProfile(job) {
+  return !!job && job.status === 'needs_review';
+}
+
 function renderJobs(jobs) {
   const tbody = document.getElementById('jobs-tbody');
   if (!jobs.length) {
@@ -780,6 +864,7 @@ function renderJobs(jobs) {
     const done = steps.filter(s => s.status === 'done').length;
     const total = steps.length;
     const pct = total ? Math.round(done / total * 100) : 0;
+    const showProfileButton = canOpenContentProfile(j);
     return `<tr style="cursor:pointer" onclick="openJobDrawer('${j.id}')">
       <td>
         <div style="font-weight:600;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(j.source_name)}</div>
@@ -792,14 +877,24 @@ function renderJobs(jobs) {
         <div class="progress"><div class="progress-bar" style="width:${pct}%"></div></div>
       </td>
       <td style="color:var(--text2);font-size:12px">${fmtDate(j.created_at)}</td>
-      <td><button class="btn btn-ghost btn-sm" onclick="event.stopPropagation();openJobDrawer('${j.id}')">详情 →</button></td>
+      <td>
+        <div class="toolbar-actions">
+          ${showProfileButton ? `<button class="btn btn-primary btn-sm" onclick="event.stopPropagation();openContentProfileModal('${j.id}')">核对信息</button>` : ''}
+          ${j.status === 'cancelled'
+            ? `<button class="btn btn-primary btn-sm" onclick="event.stopPropagation();restartJob('${j.id}')">重新开始</button>`
+            : ['done','failed'].includes(j.status)
+              ? ''
+              : `<button class="btn btn-danger btn-sm" onclick="event.stopPropagation();cancelJob('${j.id}')">取消任务</button>`}
+          <button class="btn btn-ghost btn-sm" onclick="event.stopPropagation();openJobDrawer('${j.id}')">详情 →</button>
+        </div>
+      </td>
     </tr>`;
   }).join('');
 }
 
 function statusLabel(s) {
   return { pending:'等待中', processing:'处理中', done:'完成', failed:'失败',
-           running:'运行中', skipped:'跳过', needs_review:'待确认' }[s] || s;
+           running:'运行中', skipped:'跳过', needs_review:'待确认', cancelled:'已取消' }[s] || s;
 }
 
 function startRefresh() {
@@ -850,8 +945,8 @@ async function refreshDrawer() {
     const steps = job.steps || [];
     const STEP_ORDER = ['probe','extract_audio','transcribe','subtitle_postprocess','content_profile','summary_review','glossary_review','edit_plan','render','platform_package'];
     const STEP_LABELS = { probe:'探测媒体信息', extract_audio:'提取音频', transcribe:'语音转写',
-      subtitle_postprocess:'字幕后处理', content_profile:'内容摘要', summary_review:'人工确认', glossary_review:'术语纠错', edit_plan:'剪辑决策', render:'渲染输出', platform_package:'平台文案' };
-    const STEP_ICONS = { pending:'○', running:'◎', done:'✓', failed:'✗', skipped:'—' };
+      subtitle_postprocess:'字幕后处理', content_profile:'内容摘要', summary_review:'信息核对', glossary_review:'术语纠错', edit_plan:'剪辑决策', render:'渲染输出', platform_package:'平台文案' };
+    const STEP_ICONS = { pending:'○', running:'◎', done:'✓', failed:'✗', skipped:'—', cancelled:'■' };
 
     stepsEl.innerHTML = STEP_ORDER.map(name => {
       const s = steps.find(x => x.step_name === name) || { status: 'pending', attempt: 0 };
@@ -871,7 +966,21 @@ async function refreshDrawer() {
     }).join('');
 
     renderJobActivity(activity);
-    await renderContentProfileReview(job);
+    document.getElementById('btn-open-profile-modal').style.display = canOpenContentProfile(job) ? '' : 'none';
+    const actionBtn = document.getElementById('btn-job-action');
+    if (job.status === 'cancelled') {
+      actionBtn.style.display = '';
+      actionBtn.textContent = '重新开始';
+      actionBtn.className = 'btn btn-primary btn-sm';
+      actionBtn.onclick = () => restartJob(job.id);
+    } else if (['done', 'failed'].includes(job.status)) {
+      actionBtn.style.display = 'none';
+    } else {
+      actionBtn.style.display = '';
+      actionBtn.textContent = '取消任务';
+      actionBtn.className = 'btn btn-danger btn-sm';
+      actionBtn.onclick = () => cancelJob(job.id);
+    }
 
     // Report (if done)
     const rptSection = document.getElementById('drawer-report-section');
@@ -962,38 +1071,115 @@ function renderJobActivity(activity) {
   }
 }
 
-async function renderContentProfileReview(job) {
-  const section = document.getElementById('drawer-profile-section');
+function setContentProfileFormLocked(locked) {
+  Array.from(document.querySelectorAll('#content-profile-modal input, #content-profile-modal textarea')).forEach(el => {
+    el.disabled = locked;
+  });
+  document.getElementById('btn-confirm-profile').style.display = locked ? 'none' : '';
+}
+
+function clearContentProfileForm() {
+  document.getElementById('cp-brand').value = '';
+  document.getElementById('cp-model').value = '';
+  document.getElementById('cp-type').value = '';
+  document.getElementById('cp-theme').value = '';
+  document.getElementById('cp-keywords').value = '';
+  document.getElementById('cp-summary').value = '';
+  document.getElementById('cp-question').value = '';
+  document.getElementById('cp-context').value = '';
+  document.getElementById('cp-notes').value = '';
+  document.getElementById('content-profile-evidence').innerHTML = `<div class="evidence-empty">暂未加载搜索证据</div>`;
+}
+
+function renderContentProfileFrames(jobId) {
+  const stamp = Date.now();
+  document.getElementById('content-profile-frames').innerHTML = [0, 1, 2].map(index => `
+    <div class="thumb-card">
+      <img src="${API}/jobs/${jobId}/content-profile/thumbnail?index=${index}&t=${stamp}" alt="视频缩略图 ${index + 1}" loading="lazy"
+        onerror="this.parentElement.innerHTML='<div class=&quot;thumb-empty&quot;>暂无缩略图</div>'" />
+    </div>
+  `).join('');
+}
+
+function renderContentProfileEvidence(evidence) {
+  const container = document.getElementById('content-profile-evidence');
+  const items = Array.isArray(evidence) ? evidence.filter(item => item && (item.title || item.url || item.snippet)) : [];
+  if (!items.length) {
+    container.innerHTML = `<div class="evidence-empty">当前还没有可用的搜索校验证据。</div>`;
+    return;
+  }
+
+  container.innerHTML = items.map(item => `
+    <div class="evidence-card">
+      ${item.query ? `<div class="evidence-query">搜索词：${esc(item.query)}</div>` : ''}
+      ${item.url
+        ? `<a class="evidence-title" href="${esc(item.url)}" target="_blank" rel="noopener noreferrer">${esc(item.title || item.url)}</a>`
+        : `<div class="evidence-title">${esc(item.title || '未命名结果')}</div>`}
+      ${item.snippet ? `<div class="evidence-snippet">${esc(item.snippet)}</div>` : ''}
+      ${item.url ? `<div class="evidence-url">${esc(item.url)}</div>` : ''}
+    </div>
+  `).join('');
+}
+
+async function openContentProfileModal(jobId = _currentJobId) {
+  if (!jobId) return;
+  _profileJobId = jobId;
+  document.getElementById('content-profile-modal').classList.add('open');
+  document.getElementById('content-profile-title').textContent = '核对信息';
+  document.getElementById('content-profile-subtitle').textContent = '正在加载内容摘要…';
+  document.getElementById('content-profile-frames').innerHTML = `
+    <div class="thumb-card"><div class="thumb-empty">加载中</div></div>
+    <div class="thumb-card"><div class="thumb-empty">加载中</div></div>
+    <div class="thumb-card"><div class="thumb-empty">加载中</div></div>
+  `;
+  clearContentProfileForm();
+  document.getElementById('content-profile-evidence').innerHTML = `<div class="evidence-empty">正在加载搜索证据…</div>`;
+  setContentProfileFormLocked(true);
+
   try {
-    const payload = await api('GET', `/jobs/${_currentJobId}/content-profile`);
+    const [job, payload] = await Promise.all([
+      api('GET', `/jobs/${jobId}`),
+      api('GET', `/jobs/${jobId}/content-profile`),
+    ]);
     const profile = payload.final || payload.draft;
     if (!profile) {
-      section.style.display = 'none';
-      return;
+      throw new Error('内容摘要还没生成，稍后再试');
     }
 
-    section.style.display = '';
+    document.getElementById('content-profile-title').textContent = `核对信息 · ${job.source_name}`;
+    document.getElementById('content-profile-subtitle').textContent = '请直接确认开箱对象的品牌、型号、主题和补充说明';
+    renderContentProfileFrames(jobId);
     document.getElementById('cp-brand').value = profile.subject_brand || '';
     document.getElementById('cp-model').value = profile.subject_model || '';
     document.getElementById('cp-type').value = profile.subject_type || '';
     document.getElementById('cp-theme').value = profile.video_theme || '';
     document.getElementById('cp-keywords').value = (profile.search_queries || []).join(', ');
+    renderContentProfileEvidence(profile.evidence || []);
     document.getElementById('cp-summary').value = profile.summary || '';
     document.getElementById('cp-question').value = profile.engagement_question || '';
     document.getElementById('cp-context').value = (profile.user_feedback && profile.user_feedback.supplemental_context) || '';
     document.getElementById('cp-notes').value = (profile.user_feedback && profile.user_feedback.correction_notes) || '';
 
-    const confirmBtn = document.getElementById('btn-confirm-profile');
     const locked = payload.review_step_status === 'done' || job.status === 'done';
-    confirmBtn.style.display = locked ? 'none' : '';
-    Array.from(section.querySelectorAll('input, textarea')).forEach(el => { el.disabled = locked; });
+    setContentProfileFormLocked(locked);
+    if (locked) {
+      document.getElementById('content-profile-subtitle').textContent = '这条任务的信息已经确认，当前以只读方式展示';
+    }
   } catch(e) {
-    section.style.display = 'none';
+    closeContentProfileModal();
+    toast('打开核对信息失败：' + e.message, 'error');
   }
+}
+
+function closeContentProfileModal(event) {
+  if (event && event.target && event.target.id !== 'content-profile-modal') return;
+  document.getElementById('content-profile-modal').classList.remove('open');
+  _profileJobId = null;
 }
 
 async function confirmContentProfile() {
   try {
+    if (!_profileJobId) throw new Error('未找到当前任务');
     const body = {
       subject_brand: document.getElementById('cp-brand').value.trim() || null,
       subject_model: document.getElementById('cp-model').value.trim() || null,
@@ -1005,10 +1191,11 @@ async function confirmContentProfile() {
       supplemental_context: document.getElementById('cp-context').value.trim() || null,
       correction_notes: document.getElementById('cp-notes').value.trim() || null,
     };
-    await api('POST', `/jobs/${_currentJobId}/content-profile/confirm`, body);
-    toast('摘要已确认，任务继续执行');
-    refreshDrawer();
-    loadJobs();
+    await api('POST', `/jobs/${_profileJobId}/content-profile/confirm`, body);
+    toast('信息已确认，任务继续执行');
+    closeContentProfileModal();
+    if (_currentJobId === _profileJobId) await refreshDrawer();
+    await loadJobs();
   } catch(e) {
     toast('确认失败：' + e.message, 'error');
   }
@@ -1062,6 +1249,32 @@ async function downloadOutput() {
     const r = await api('GET', `/jobs/${_currentJobId}/download`);
     window.open(r.url, '_blank');
   } catch(e) { toast('下载链接不可用：' + e.message, 'error'); }
+}
+
+async function cancelJob(jobId = _currentJobId) {
+  if (!jobId) return;
+  if (!confirm('确认立即中断并取消这条任务？')) return;
+  try {
+    await api('POST', `/jobs/${jobId}/cancel`);
+    toast('任务已取消');
+    await loadJobs();
+    if (_currentJobId === jobId) await refreshDrawer();
+  } catch(e) {
+    toast('取消任务失败：' + e.message, 'error');
+  }
+}
+
+async function restartJob(jobId = _currentJobId) {
+  if (!jobId) return;
+  if (!confirm('确认重新开始这条任务？会清空当前任务产生的中间结果并从头执行。')) return;
+  try {
+    await api('POST', `/jobs/${jobId}/restart`);
+    toast('任务已重新开始');
+    await loadJobs();
+    if (_currentJobId === jobId) await refreshDrawer();
+  } catch(e) {
+    toast('重新开始失败：' + e.message, 'error');
+  }
 }
 
 function closeJobDrawer() {
@@ -1199,6 +1412,7 @@ function renderFolderInventoryStatus(payload) {
   const fileProcessed = payload.current_file_processed_bytes || 0;
   const fileTotal = payload.current_file_size_bytes || 0;
   const fileProgress = fileTotal > 0 ? Math.min(100, Math.round(fileProcessed / fileTotal * 100)) : 0;
+  const showFileProgress = payload.current_phase === 'hashing' && fileTotal > 0;
   const statusLabel = payload.status === 'running'
     ? '扫描中'
     : payload.status === 'done'
@@ -1222,6 +1436,7 @@ function renderFolderInventoryStatus(payload) {
     const dur = item.duration_sec ? `${Math.round(item.duration_sec)}s` : '—';
     return `${dur} / ${dims} / ${fmtSize(item.size_bytes)}`;
   };
+  const previewUrl = (item) => `/api/v1/watch-roots/${_selectedWatchRootId}/inventory/thumbnail?relative_path=${encodeURIComponent(item.relative_path)}`;
 
   card.innerHTML = `
     <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px">
@@ -1230,6 +1445,7 @@ function renderFolderInventoryStatus(payload) {
         <span class="chip">${folderScanModeLabel(payload.scan_mode)}</span>
       </div>
       <div style="display:flex;gap:8px">
+        ${payload.status !== 'running' && pending.length ? `<button class="btn btn-primary btn-sm" onclick="enqueueAllPending('${_selectedWatchRootId}')">全部加入剪辑任务</button>` : ''}
         <span class="status status-${payload.status === 'failed' ? 'failed' : payload.status === 'done' ? 'done' : payload.status === 'running' ? 'running' : 'pending'}">${statusLabel}</span>
         <button class="btn btn-ghost btn-sm" onclick="loadFolderInventory('${_selectedWatchRootId}', true)">重新扫描</button>
       </div>
@@ -1243,17 +1459,28 @@ function renderFolderInventoryStatus(payload) {
     <div class="progress" style="margin-bottom:10px"><div class="progress-bar" style="width:${progress}%"></div></div>
     <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:14px;font-size:12px;color:var(--text2)">
       <span>状态更新时间：${payload.updated_at ? fmtDate(payload.updated_at) : '—'}</span>
-      ${payload.current_file ? `<span>当前文件进度：${fileTotal ? `${fmtSize(fileProcessed)} / ${fmtSize(fileTotal)} (${fileProgress}%)` : '准备中'}</span>` : ''}
+      ${showFileProgress ? `<span>当前文件进度：${fmtSize(fileProcessed)} / ${fmtSize(fileTotal)} (${fileProgress}%)</span>` : ''}
       ${payload.finished_at ? `<span>完成时间：${fmtDate(payload.finished_at)}</span>` : ''}
       ${payload.error ? `<span style="color:var(--error)">错误：${esc(payload.error)}</span>` : ''}
     </div>
-    ${payload.current_file && fileTotal ? `<div style="margin-bottom:14px"><div style="display:flex;justify-content:space-between;font-size:11px;color:var(--text3);margin-bottom:6px"><span>${esc(phaseLabel(payload.current_phase))}</span><span>${fileProgress}%</span></div><div class="progress"><div class="progress-bar" style="width:${fileProgress}%"></div></div></div>` : ''}
-    ${pending.length ? `<table><thead><tr><th>文件</th><th>基础信息</th><th>修改时间</th><th>状态</th></tr></thead><tbody>
+    ${showFileProgress ? `<div style="margin-bottom:14px"><div style="display:flex;justify-content:space-between;font-size:11px;color:var(--text3);margin-bottom:6px"><span>${esc(phaseLabel(payload.current_phase))}</span><span>${fileProgress}%</span></div><div class="progress"><div class="progress-bar" style="width:${fileProgress}%"></div></div></div>` : ''}
+    ${pending.length ? `<table><thead><tr><th>文件</th><th>基础信息</th><th>修改时间</th><th>状态</th><th></th></tr></thead><tbody>
       ${pending.map(item => `<tr>
-        <td><div style="font-weight:600">${esc(item.source_name)}</div><div class="mono" style="color:var(--text3);font-size:11px;margin-top:2px">${esc(item.relative_path)}</div></td>
+        <td>
+          <div style="display:flex;gap:12px;align-items:center">
+            <div style="width:104px;height:58px;border-radius:8px;overflow:hidden;background:var(--surface2);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;flex-shrink:0">
+              <img src="${previewUrl(item)}" alt="${esc(item.source_name)}" loading="lazy" style="width:100%;height:100%;object-fit:cover" onerror="this.style.display='none'; this.parentElement.innerHTML='<span style=&quot;font-size:11px;color:var(--text3)&quot;>无预览</span>'" />
+            </div>
+            <div>
+              <div style="font-weight:600">${esc(item.source_name)}</div>
+              <div class="mono" style="color:var(--text3);font-size:11px;margin-top:2px">${esc(item.relative_path)}</div>
+            </div>
+          </div>
+        </td>
         <td style="color:var(--text2);font-size:12px">${esc(fmtMeta(item))}</td>
         <td style="color:var(--text2);font-size:12px">${fmtDate(item.modified_at)}</td>
         <td><span class="status status-pending">待剪辑</span></td>
+        <td><button class="btn btn-primary btn-sm" onclick="enqueuePendingItem('${_selectedWatchRootId}', '${encodeURIComponent(item.relative_path)}')">加入剪辑任务</button></td>
       </tr>`).join('')}
     </tbody></table>` : payload.status === 'running'
       ? `<div class="empty"><div class="empty-icon">⏳</div><p>扫描正在进行</p><small>已开始分析文件，结果会持续刷新</small></div>`
@@ -1266,6 +1493,236 @@ function renderFolderInventoryStatus(payload) {
         <td class="mono" style="color:var(--text3);font-size:11px">${esc(item.matched_output_path || item.matched_job_id || '—')}</td>
       </tr>`).join('')}
     </tbody></table>` : ''}`;
+}
+
+async function loadPackaging() {
+  try {
+    const data = await api('GET', '/packaging');
+    _packagingLibrary = data;
+    renderPackagingConfig(data);
+    renderPackagingAssets(data);
+  } catch(e) {
+    document.getElementById('packaging-config-card').innerHTML = `<div class="empty"><div class="empty-icon">⚠️</div><p>包装策略加载失败</p><small>${esc(e.message)}</small></div>`;
+    document.getElementById('packaging-assets-card').innerHTML = '';
+    toast('包装素材加载失败：' + e.message, 'error');
+  }
+}
+
+function renderPackagingConfig(data) {
+  const cfg = data.config || {};
+  document.getElementById('packaging-config-card').innerHTML = `
+    <div class="card-title">包装策略</div>
+    <div class="form-row">
+      <div class="form-group">
+        <label>启用包装</label>
+        <select id="pkg-enabled">
+          <option value="true" ${cfg.enabled ? 'selected' : ''}>启用</option>
+          <option value="false" ${!cfg.enabled ? 'selected' : ''}>停用</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>植入素材方案</label>
+        <select id="pkg-insert-mode">
+          <option value="manual" ${cfg.insert_selection_mode === 'manual' ? 'selected' : ''}>手动指定</option>
+          <option value="random" ${cfg.insert_selection_mode === 'random' ? 'selected' : ''}>随机选取</option>
+        </select>
+        <div class="hint">插入位置默认由 LLM 结合字幕节奏自动分析。</div>
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label>背景音乐方案</label>
+        <select id="pkg-music-mode">
+          <option value="random" ${cfg.music_selection_mode === 'random' ? 'selected' : ''}>随机选取</option>
+          <option value="manual" ${cfg.music_selection_mode === 'manual' ? 'selected' : ''}>按列表首项</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>背景音乐循环</label>
+        <select id="pkg-music-loop">
+          <option value="loop_single" ${cfg.music_loop_mode === 'loop_single' ? 'selected' : ''}>单曲循环铺满</option>
+          <option value="none" ${cfg.music_loop_mode === 'none' ? 'selected' : ''}>不循环</option>
+        </select>
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label>背景音乐音量</label>
+        <input id="pkg-music-volume" type="number" min="0.05" max="1" step="0.01" value="${cfg.music_volume ?? 0.22}" />
+      </div>
+      <div class="form-group">
+        <label>水印位置</label>
+        <select id="pkg-watermark-position">
+          <option value="top_right" ${cfg.watermark_position === 'top_right' ? 'selected' : ''}>右上</option>
+          <option value="top_left" ${cfg.watermark_position === 'top_left' ? 'selected' : ''}>左上</option>
+          <option value="bottom_right" ${cfg.watermark_position === 'bottom_right' ? 'selected' : ''}>右下</option>
+          <option value="bottom_left" ${cfg.watermark_position === 'bottom_left' ? 'selected' : ''}>左下</option>
+        </select>
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label>水印透明度</label>
+        <input id="pkg-watermark-opacity" type="number" min="0.1" max="1" step="0.01" value="${cfg.watermark_opacity ?? 0.82}" />
+      </div>
+      <div class="form-group">
+        <label>水印宽度比例</label>
+        <input id="pkg-watermark-scale" type="number" min="0.05" max="0.5" step="0.01" value="${cfg.watermark_scale ?? 0.16}" />
+      </div>
+    </div>
+  `;
+}
+
+function renderPackagingAssets(data) {
+  const groups = data.assets || {};
+  const cfg = data.config || {};
+  const card = document.getElementById('packaging-assets-card');
+  card.innerHTML = `
+    <div class="card-title">素材仓库</div>
+    ${renderPackagingGroup('intro', '片头', groups.intro || [], cfg, { accept: 'video/*', multiple: false })}
+    ${renderPackagingGroup('outro', '片尾', groups.outro || [], cfg, { accept: 'video/*', multiple: false })}
+    ${renderPackagingGroup('insert', '植入素材', groups.insert || [], cfg, { accept: 'video/*', multiple: true })}
+    ${renderPackagingGroup('music', '背景音乐', groups.music || [], cfg, { accept: 'audio/*', multiple: true })}
+    ${renderPackagingGroup('watermark', '水印', groups.watermark || [], cfg, { accept: 'image/*', multiple: false })}
+  `;
+}
+
+function renderPackagingGroup(assetType, title, assets, cfg, options) {
+  const inputId = `pkg-upload-${assetType}`;
+  const rows = assets.length ? assets.map(asset => renderPackagingAssetRow(assetType, asset, cfg)).join('') : `<div class="empty" style="padding:18px 0"><small>暂无${title}</small></div>`;
+  return `
+    <div style="border-top:1px solid var(--border);padding-top:18px;margin-top:18px">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px">
+        <div style="font-weight:700">${title}</div>
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;color:var(--text2);font-size:13px;text-transform:none;letter-spacing:0;margin:0">
+          <input id="${inputId}" type="file" accept="${options.accept}" ${options.multiple ? 'multiple' : ''} style="display:none" onchange="uploadPackagingAssets('${assetType}', this)" />
+          <button class="btn btn-ghost btn-sm" onclick="document.getElementById('${inputId}').click()">上传${title}</button>
+        </label>
+      </div>
+      <div style="display:grid;gap:10px">${rows}</div>
+    </div>
+  `;
+}
+
+function renderPackagingAssetRow(assetType, asset, cfg) {
+  const isSingleSelected = cfg[`${assetType}_asset_id`] === asset.id;
+  const isMusicChecked = assetType === 'music' && (cfg.music_asset_ids || []).includes(asset.id);
+  const isInsertChecked = assetType === 'insert' && (cfg.insert_asset_ids || []).includes(asset.id);
+  const selector = assetType === 'music'
+    ? `<input type="checkbox" ${isMusicChecked ? 'checked' : ''} onchange="togglePackagingPool('music', '${asset.id}', this.checked)" />`
+    : assetType === 'insert' && cfg.insert_selection_mode === 'random'
+      ? `<input type="checkbox" ${isInsertChecked ? 'checked' : ''} onchange="togglePackagingPool('insert', '${asset.id}', this.checked)" />`
+      : `<input type="radio" name="pkg-${assetType}" ${isSingleSelected ? 'checked' : ''} onchange="selectPackagingSingle('${assetType}', '${asset.id}')" />`;
+  const preview = asset.asset_type === 'watermark' && asset.content_type.startsWith('image/')
+    ? `<img src="${API}/packaging/assets/${asset.id}/file" alt="${esc(asset.original_name)}" style="width:72px;height:48px;object-fit:contain;border:1px solid var(--border);border-radius:8px;background:var(--surface2)" />`
+    : `<div class="chip">${asset.asset_type}</div>`;
+  return `
+    <div class="card" style="padding:14px">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:12px">
+        <div style="display:flex;align-items:center;gap:12px">
+          ${preview}
+          <label style="display:flex;align-items:center;gap:10px;margin:0;color:var(--text);text-transform:none;letter-spacing:0">
+            ${selector}
+            <div>
+              <div style="font-weight:600">${esc(asset.original_name)}</div>
+              <div style="font-size:12px;color:var(--text3);margin-top:4px">${fmtPackagingSize(asset.size_bytes)} · ${fmtDate(asset.created_at)}</div>
+            </div>
+          </label>
+        </div>
+        <div class="toolbar-actions">
+          <a class="btn btn-ghost btn-sm" href="${API}/packaging/assets/${asset.id}/file" target="_blank">查看</a>
+          <button class="btn btn-danger btn-sm" onclick="deletePackagingAsset('${asset.id}')">删除</button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function fmtPackagingSize(bytes) {
+  if (!bytes) return '0 B';
+  if (bytes >= 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`;
+  if (bytes >= 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+  if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${bytes} B`;
+}
+
+async function uploadPackagingAssets(assetType, input) {
+  const files = Array.from(input.files || []);
+  if (!files.length) return;
+  try {
+    for (const file of files) {
+      const fd = new FormData();
+      fd.append('file', file);
+      const r = await fetch(`${API}/packaging/assets/${assetType}`, { method: 'POST', body: fd });
+      if (!r.ok) {
+        const err = await r.json().catch(() => ({ detail: r.statusText }));
+        throw new Error(err.detail || r.statusText);
+      }
+    }
+    toast(`已上传 ${files.length} 个${assetType === 'music' ? '音频' : '素材'}文件`);
+    await loadPackaging();
+  } catch(e) {
+    toast('上传包装素材失败：' + e.message, 'error');
+  }
+  input.value = '';
+}
+
+function selectPackagingSingle(assetType, assetId) {
+  if (!_packagingLibrary) return;
+  _packagingLibrary.config[`${assetType}_asset_id`] = assetId;
+  renderPackagingAssets(_packagingLibrary);
+}
+
+function togglePackagingPool(assetType, assetId, checked) {
+  if (!_packagingLibrary) return;
+  const key = assetType === 'music' ? 'music_asset_ids' : 'insert_asset_ids';
+  const current = new Set(_packagingLibrary.config[key] || []);
+  if (checked) current.add(assetId);
+  else current.delete(assetId);
+  _packagingLibrary.config[key] = Array.from(current);
+  renderPackagingAssets(_packagingLibrary);
+}
+
+async function savePackagingConfig() {
+  if (!_packagingLibrary) return;
+  try {
+    const body = {
+      enabled: document.getElementById('pkg-enabled').value === 'true',
+      intro_asset_id: _packagingLibrary.config.intro_asset_id || null,
+      outro_asset_id: _packagingLibrary.config.outro_asset_id || null,
+      insert_asset_id: _packagingLibrary.config.insert_asset_id || null,
+      insert_asset_ids: _packagingLibrary.config.insert_asset_ids || [],
+      insert_selection_mode: document.getElementById('pkg-insert-mode').value,
+      insert_position_mode: 'llm',
+      watermark_asset_id: _packagingLibrary.config.watermark_asset_id || null,
+      music_asset_ids: _packagingLibrary.config.music_asset_ids || [],
+      music_selection_mode: document.getElementById('pkg-music-mode').value,
+      music_loop_mode: document.getElementById('pkg-music-loop').value,
+      music_volume: parseFloat(document.getElementById('pkg-music-volume').value || '0.22'),
+      watermark_position: document.getElementById('pkg-watermark-position').value,
+      watermark_opacity: parseFloat(document.getElementById('pkg-watermark-opacity').value || '0.82'),
+      watermark_scale: parseFloat(document.getElementById('pkg-watermark-scale').value || '0.16'),
+    };
+    const data = await api('PATCH', '/packaging/config', body);
+    _packagingLibrary = data;
+    renderPackagingConfig(data);
+    renderPackagingAssets(data);
+    toast('包装策略已保存');
+  } catch(e) {
+    toast('保存包装策略失败：' + e.message, 'error');
+  }
+}
+
+async function deletePackagingAsset(assetId) {
+  try {
+    const data = await api('DELETE', `/packaging/assets/${assetId}`);
+    _packagingLibrary = data;
+    renderPackagingConfig(data);
+    renderPackagingAssets(data);
+    toast('素材已删除');
+  } catch(e) {
+    toast('删除包装素材失败：' + e.message, 'error');
+  }
 }
 
 function openFolderForm() {
@@ -1319,6 +1776,36 @@ async function updateFolderScanMode(id, scanMode, encodedState) {
     await loadFolders();
     await loadFolderInventory(id, true);
   } catch(e) { toast('切换扫描模式失败：' + e.message, 'error'); }
+}
+
+async function enqueuePendingItem(rootId, encodedRelativePath) {
+  const relativePath = decodeURIComponent(encodedRelativePath);
+  try {
+    const result = await api('POST', `/watch-roots/${rootId}/inventory/enqueue`, {
+      relative_paths: [relativePath],
+      enqueue_all: false
+    });
+    toast(result.created_count
+      ? `已创建 ${result.created_count} 个剪辑任务`
+      : '该文件已存在任务，已从待剪辑清单移除');
+    await loadFolderInventory(rootId, false);
+    await loadJobs();
+  } catch(e) {
+    toast('加入任务失败：' + e.message, 'error');
+  }
+}
+
+async function enqueueAllPending(rootId) {
+  try {
+    const result = await api('POST', `/watch-roots/${rootId}/inventory/enqueue`, {
+      enqueue_all: true
+    });
+    toast(`已处理 ${result.requested_count} 个文件，创建 ${result.created_count} 个任务`);
+    await loadFolderInventory(rootId, false);
+    await loadJobs();
+  } catch(e) {
+    toast('批量加入任务失败：' + e.message, 'error');
+  }
 }
 
 async function deleteFolder(id) {
@@ -1468,6 +1955,7 @@ async function deleteGlossary(id) {
       document.getElementById('openai-key-hint').textContent = cfg.openai_api_key_set ? '✓ 已设置（留空则保留原值）' : '未设置';
       document.getElementById('anthropic-key-hint').textContent = cfg.anthropic_api_key_set ? '✓ 已设置（留空则保留原值）' : '未设置';
       document.getElementById('minimax-key-hint').textContent = cfg.minimax_api_key_set ? '✓ 已设置（留空则保留原值）' : '未设置';
+      document.getElementById('ollama-key-hint').textContent = cfg.ollama_api_key_set ? '✓ 已设置（留空则保留原值）' : '未设置';
       updateTranscriptionModelOptions(cfg.transcription_provider, cfg.transcription_model);
       onProviderChange();
     } catch(e) { toast('加载配置失败：' + e.message, 'error'); }
@@ -1545,6 +2033,8 @@ async function saveSettings(e) {
     if (minimaxKey) body.minimax_api_key = minimaxKey;
     body.minimax_base_url = document.getElementById('s-minimax-base-url').value;
     if (body.llm_mode === 'local') body.ollama_base_url = document.getElementById('s-ollama-url').value;
+    const ollamaKey = document.getElementById('s-ollama-key').value;
+    if (ollamaKey) body.ollama_api_key = ollamaKey;
     body.max_upload_size_mb = parseInt(document.getElementById('s-max-size').value);
     body.max_video_duration_sec = parseInt(document.getElementById('s-max-duration').value);
     body.ffmpeg_timeout_sec = parseInt(document.getElementById('s-ffmpeg-timeout').value);
@@ -1555,6 +2045,7 @@ async function saveSettings(e) {
       document.getElementById('s-openai-key').value = '';
       document.getElementById('s-anthropic-key').value = '';
       document.getElementById('s-minimax-key').value = '';
+      document.getElementById('s-ollama-key').value = '';
       loadSettings();
     } catch(e) { toast('保存失败：' + e.message, 'error'); }
   }

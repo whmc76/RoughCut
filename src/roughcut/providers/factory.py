@@ -50,17 +50,87 @@ def get_search_provider():
     provider = settings.active_search_provider.lower()
 
     if provider == "auto":
+        native_provider = settings.active_reasoning_provider.lower()
         try:
-            from roughcut.providers.search.model_search import ModelSearchProvider
+            if native_provider == "minimax" and settings.minimax_api_key.strip():
+                from roughcut.providers.search.minimax import MiniMaxSearchProvider
 
-            return ModelSearchProvider()
+                return MiniMaxSearchProvider()
+            if native_provider == "openai":
+                from roughcut.providers.search.openai import OpenAISearchProvider
+
+                return OpenAISearchProvider()
+            if native_provider == "anthropic":
+                from roughcut.providers.search.anthropic import AnthropicSearchProvider
+
+                return AnthropicSearchProvider()
+            if native_provider == "ollama" and settings.ollama_api_key.strip():
+                from roughcut.providers.search.ollama import OllamaSearchProvider
+
+                return OllamaSearchProvider()
         except Exception:
+            pass
+
+        if settings.llm_mode != "local":
+            try:
+                from roughcut.providers.search.model_search import ModelSearchProvider
+
+                return ModelSearchProvider()
+            except Exception:
+                pass
+
+        try:
             fallback = settings.search_fallback_provider.lower()
+            if fallback == "openai":
+                from roughcut.providers.search.openai import OpenAISearchProvider
+
+                return OpenAISearchProvider()
+            if fallback == "anthropic":
+                from roughcut.providers.search.anthropic import AnthropicSearchProvider
+
+                return AnthropicSearchProvider()
+            if fallback == "minimax":
+                from roughcut.providers.search.minimax import MiniMaxSearchProvider
+
+                return MiniMaxSearchProvider()
+            if fallback == "ollama":
+                from roughcut.providers.search.ollama import OllamaSearchProvider
+
+                return OllamaSearchProvider()
             if fallback == "searxng":
                 from roughcut.providers.search.searxng import SearXNGProvider
 
                 return SearXNGProvider()
+            if fallback == "model":
+                from roughcut.providers.search.model_search import ModelSearchProvider
+
+                return ModelSearchProvider()
             raise ValueError(f"Unknown search fallback provider: {fallback}")
+        except Exception:
+            if settings.llm_mode != "local":
+                try:
+                    from roughcut.providers.search.model_search import ModelSearchProvider
+
+                    return ModelSearchProvider()
+                except Exception:
+                    pass
+            raise
+    elif provider == "openai":
+        from roughcut.providers.search.openai import OpenAISearchProvider
+
+        return OpenAISearchProvider()
+    elif provider == "anthropic":
+        from roughcut.providers.search.anthropic import AnthropicSearchProvider
+
+        return AnthropicSearchProvider()
+    elif provider == "minimax":
+        from roughcut.providers.search.minimax import MiniMaxSearchProvider
+
+        return MiniMaxSearchProvider()
+    elif provider == "ollama":
+        from roughcut.providers.search.ollama import OllamaSearchProvider
+
+        return OllamaSearchProvider()
     elif provider == "model":
         from roughcut.providers.search.model_search import ModelSearchProvider
 
