@@ -37,6 +37,7 @@ from roughcut.review.content_profile import enrich_content_profile, infer_conten
 from roughcut.review.content_profile_memory import load_content_profile_user_memory
 from roughcut.review.glossary_engine import apply_glossary_corrections
 from roughcut.review.platform_copy import generate_platform_packaging, save_platform_packaging_markdown
+from roughcut.review.subtitle_memory import build_subtitle_review_memory, build_transcription_prompt
 from roughcut.speech.postprocess import save_subtitle_items, split_into_subtitles
 from roughcut.speech.transcribe import transcribe_audio
 from roughcut.storage.s3 import get_storage, job_key
@@ -140,6 +141,122 @@ async def _get_job_and_step(job_id: str, step_name: str):
     return job, step
 
 
+def _serialize_glossary_terms(terms: list[GlossaryTerm]) -> list[dict[str, str | list[str] | None]]:
+    return [
+        {
+            "wrong_forms": term.wrong_forms,
+            "correct_form": term.correct_form,
+            "category": term.category,
+            "context_hint": term.context_hint,
+        }
+        for term in terms
+    ]
+
+
+async def _load_recent_subtitle_examples(
+    session,
+    *,
+    channel_profile: str | None,
+    exclude_job_id: uuid.UUID,
+    limit: int = 160,
+) -> list[dict[str, str]]:
+    stmt = (
+        select(SubtitleItem, Job.source_name)
+        .join(Job, SubtitleItem.job_id == Job.id)
+        .where(SubtitleItem.version == 1, SubtitleItem.job_id != exclude_job_id)
+        .order_by(SubtitleItem.created_at.desc())
+        .limit(limit)
+    )
+    if channel_profile:
+        stmt = stmt.where(Job.channel_profile == channel_profile)
+
+    result = await session.execute(stmt)
+    return [
+        {
+            "text_raw": subtitle_item.text_raw or "",
+            "text_norm": subtitle_item.text_norm or "",
+            "text_final": subtitle_item.text_final or "",
+            "source_name": source_name or "",
+        }
+        for subtitle_item, source_name in result.all()
+    ]
+
+
+async def _load_related_profile_subtitle_examples(
+    session,
+    *,
+    content_profile: dict | None,
+    exclude_job_id: uuid.UUID,
+    limit: int = 160,
+) -> list[dict[str, str]]:
+    if not content_profile:
+        return []
+
+    artifact_result = await session.execute(
+        select(Artifact)
+        .where(
+            Artifact.job_id != exclude_job_id,
+            Artifact.artifact_type.in_(["content_profile_final", "content_profile", "content_profile_draft"]),
+        )
+        .order_by(Artifact.created_at.desc())
+        .limit(120)
+    )
+    ranked_job_ids: list[uuid.UUID] = []
+    seen_jobs: set[uuid.UUID] = set()
+    for artifact in artifact_result.scalars().all():
+        if artifact.job_id in seen_jobs:
+            continue
+        if _content_profile_similarity_score(content_profile, artifact.data_json or {}) <= 0:
+            continue
+        seen_jobs.add(artifact.job_id)
+        ranked_job_ids.append(artifact.job_id)
+        if len(ranked_job_ids) >= 10:
+            break
+
+    if not ranked_job_ids:
+        return []
+
+    subtitle_result = await session.execute(
+        select(SubtitleItem, Job.source_name)
+        .join(Job, SubtitleItem.job_id == Job.id)
+        .where(SubtitleItem.version == 1, SubtitleItem.job_id.in_(ranked_job_ids))
+        .order_by(SubtitleItem.created_at.desc())
+        .limit(limit)
+    )
+    return [
+        {
+            "text_raw": subtitle_item.text_raw or "",
+            "text_norm": subtitle_item.text_norm or "",
+            "text_final": subtitle_item.text_final or "",
+            "source_name": source_name or "",
+        }
+        for subtitle_item, source_name in subtitle_result.all()
+    ]
+
+
+def _content_profile_similarity_score(current: dict, candidate: dict) -> int:
+    score = 0
+    for key, weight in (
+        ("subject_brand", 4),
+        ("subject_model", 5),
+        ("subject_type", 3),
+        ("video_theme", 2),
+    ):
+        left = _normalize_profile_value(current.get(key))
+        right = _normalize_profile_value(candidate.get(key))
+        if not left or not right:
+            continue
+        if left == right:
+            score += weight
+        elif left in right or right in left:
+            score += max(1, weight - 1)
+    return score
+
+
+def _normalize_profile_value(value: object) -> str:
+    return "".join(str(value or "").strip().upper().split())
+
+
 async def run_probe(job_id: str) -> dict:
     factory = get_session_factory()
     async with factory() as session:
@@ -240,6 +357,25 @@ async def run_transcribe(job_id: str) -> dict:
             audio_path = Path(tmpdir) / "audio.wav"
             await storage.async_download_file(audio_artifact.storage_path, audio_path)
             await _set_step_progress(session, step, detail=f"加载 {job.language} 转写模型", progress=0.2)
+            glossary_result = await session.execute(select(GlossaryTerm))
+            glossary_terms = glossary_result.scalars().all()
+            user_memory = await load_content_profile_user_memory(session, channel_profile=job.channel_profile)
+            recent_subtitles = await _load_recent_subtitle_examples(
+                session,
+                channel_profile=job.channel_profile,
+                exclude_job_id=job.id,
+            )
+            review_memory = build_subtitle_review_memory(
+                channel_profile=job.channel_profile,
+                glossary_terms=_serialize_glossary_terms(glossary_terms),
+                user_memory=user_memory,
+                recent_subtitles=recent_subtitles,
+            )
+            transcription_prompt = build_transcription_prompt(
+                source_name=job.source_name,
+                channel_profile=job.channel_profile,
+                review_memory=review_memory,
+            )
 
             progress_loop = asyncio.get_running_loop()
             last_progress = {"progress": 0.0, "ts": 0.0}
@@ -281,6 +417,7 @@ async def run_transcribe(job_id: str) -> dict:
                 audio_path,
                 job.language,
                 session,
+                prompt=transcription_prompt,
                 progress_callback=_on_transcribe_progress,
             )
             accept_progress_updates["value"] = False
@@ -321,12 +458,40 @@ async def run_subtitle_postprocess(job_id: str) -> dict:
         await _set_step_progress(session, step, detail=f"生成字幕条目 {len(entries)} 条", progress=0.7)
         save_started = time.perf_counter()
         items = await save_subtitle_items(job.id, entries, session)
+        glossary_result = await session.execute(select(GlossaryTerm))
+        glossary_terms = glossary_result.scalars().all()
+        user_memory = await load_content_profile_user_memory(session, channel_profile=job.channel_profile)
+        recent_subtitles = await _load_recent_subtitle_examples(
+            session,
+            channel_profile=job.channel_profile,
+            exclude_job_id=job.id,
+        )
+        review_memory = build_subtitle_review_memory(
+            channel_profile=job.channel_profile,
+            glossary_terms=_serialize_glossary_terms(glossary_terms),
+            user_memory=user_memory,
+            recent_subtitles=[
+                {
+                    "text_raw": item.text_raw,
+                    "text_norm": item.text_norm,
+                    "text_final": item.text_final,
+                    "source_name": job.source_name,
+                }
+                for item in items
+            ] + recent_subtitles,
+        )
+        polished_count = await polish_subtitle_items(
+            items,
+            content_profile={"preset_name": job.channel_profile or "unboxing_default"},
+            glossary_terms=_serialize_glossary_terms(glossary_terms),
+            review_memory=review_memory,
+        )
         save_elapsed = time.perf_counter() - save_started
         total_elapsed = time.perf_counter() - started
         await _set_step_progress(
             session,
             step,
-            detail=f"字幕后处理完成，{len(segments)} 段 -> {len(items)} 条，用时 {total_elapsed:.1f}s",
+            detail=f"字幕后处理完成，{len(segments)} 段 -> {len(items)} 条，纠正 {polished_count} 条，用时 {total_elapsed:.1f}s",
             progress=1.0,
         )
         await session.commit()
@@ -344,6 +509,7 @@ async def run_subtitle_postprocess(job_id: str) -> dict:
         return {
             "segment_count": len(segments),
             "subtitle_count": len(items),
+            "polished_count": polished_count,
             "elapsed_seconds": round(total_elapsed, 3),
             "load_seconds": round(load_elapsed, 3),
             "split_seconds": round(split_elapsed, 3),
@@ -480,18 +646,23 @@ async def run_glossary_review(job_id: str) -> dict:
                 user_memory=user_memory,
                 include_research=True,
             )
+        related_subtitles = await _load_related_profile_subtitle_examples(
+            session,
+            content_profile=content_profile,
+            exclude_job_id=job.id,
+        )
 
         polished_count = await polish_subtitle_items(
             subtitle_items,
             content_profile=content_profile,
-            glossary_terms=[
-                {
-                    "wrong_forms": term.wrong_forms,
-                    "correct_form": term.correct_form,
-                    "category": term.category,
-                }
-                for term in glossary_terms
-            ],
+            glossary_terms=_serialize_glossary_terms(glossary_terms),
+            review_memory=build_subtitle_review_memory(
+                channel_profile=job.channel_profile,
+                glossary_terms=_serialize_glossary_terms(glossary_terms),
+                user_memory=user_memory,
+                recent_subtitles=subtitle_dicts + related_subtitles + recent_subtitles,
+                content_profile=content_profile,
+            ),
         )
 
         artifact = Artifact(

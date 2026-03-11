@@ -11,6 +11,7 @@ from roughcut.providers.factory import get_reasoning_provider, get_search_provid
 from roughcut.providers.multimodal import complete_with_images
 from roughcut.providers.reasoning.base import Message, extract_json_text
 from roughcut.review.content_profile_memory import summarize_content_profile_user_memory
+from roughcut.review.subtitle_memory import apply_domain_term_corrections, summarize_subtitle_review_memory
 
 
 def build_transcript_excerpt(subtitle_items: list[dict], *, max_items: int = 36, max_chars: int = 1400) -> str:
@@ -340,6 +341,7 @@ async def polish_subtitle_items(
     *,
     content_profile: dict[str, Any],
     glossary_terms: list[dict[str, Any]],
+    review_memory: dict[str, Any] | None = None,
     chunk_size: int = 28,
 ) -> int:
     provider = None
@@ -358,6 +360,8 @@ async def polish_subtitle_items(
         f"- {term.get('correct_form')}: 错写可能包括 {', '.join(term.get('wrong_forms') or [])}"
         for term in glossary_terms[:30]
     )
+    review_memory_text = summarize_subtitle_review_memory(review_memory)
+    indexed_items = list(subtitle_items)
 
     for start in range(0, len(subtitle_items), chunk_size):
         chunk = subtitle_items[start:start + chunk_size]
@@ -369,22 +373,35 @@ async def polish_subtitle_items(
                         "index": item.item_index,
                         "start_time": item.start_time,
                         "end_time": item.end_time,
+                        "prev_text": (
+                            indexed_items[position - 1].text_final
+                            or indexed_items[position - 1].text_norm
+                            or indexed_items[position - 1].text_raw
+                        ) if position > 0 else "",
                         "text": item.text_final or item.text_norm or item.text_raw,
+                        "next_text": (
+                            indexed_items[position + 1].text_final
+                            or indexed_items[position + 1].text_norm
+                            or indexed_items[position + 1].text_raw
+                        ) if position + 1 < len(indexed_items) else "",
                     }
-                    for item in chunk
+                    for position, item in enumerate(chunk, start=start)
                 ]
                 prompt = (
                     "你在精修中文短视频字幕。请根据视频主体、主题和搜索证据，"
-                    "把 ASR 错字、品牌型号错写和不顺口的地方修好。"
+                    "把 ASR 错字、品牌型号错写、术语误识别和不顺口的地方修好。"
                     "要求：\n"
                     "1. 不要改变原意，不要凭空添加没说过的参数。\n"
-                    "2. 保持口语感，压缩废词，让字幕更适合烧录。\n"
-                    "3. 单条尽量简洁，避免超过 22 个汉字。\n"
-                    "4. 优先保证品牌、型号、版本名正确。\n"
-                    "5. 输出 JSON：{\"items\":[{\"index\":1,\"text_final\":\"...\"}]}\n\n"
+                    "2. 结合 prev_text / next_text 做邻句交叉校正，把明显不通顺的句子修成能讲通的话。\n"
+                    "3. 允许参考同类视频常用术语和表达习惯，但不能编造事实。\n"
+                    "4. 保持口语感，压缩废词，让字幕更适合烧录。\n"
+                    "5. 单条尽量简洁，避免超过 22 个汉字。\n"
+                    "6. 优先保证品牌、型号、版本名、EDC/工具钳相关术语正确。\n"
+                    "7. 输出 JSON：{\"items\":[{\"index\":1,\"text_final\":\"...\"}]}\n\n"
                     f"视频主体：{json.dumps(content_profile, ensure_ascii=False)}\n"
                     f"预设要求：{preset.subtitle_goal}；风格：{preset.subtitle_tone}\n"
                     f"词表：\n{glossary_text}\n"
+                    f"同类内容记忆：\n{review_memory_text or '无'}\n"
                     f"搜索证据：\n{evidence_text}\n"
                     f"待处理字幕：{json.dumps(payload_items, ensure_ascii=False)}"
                 )
@@ -408,12 +425,14 @@ async def polish_subtitle_items(
                     if polished:
                         polished = _cleanup_polished_text(polished)
                         polished = apply_glossary_terms(polished, glossary_terms)
+                        polished = apply_domain_term_corrections(polished, review_memory)
                         item.text_final = polished
                         polished_count += 1
                         continue
                     item.text_final = _fallback_polish_text(
                         item.text_norm or item.text_raw,
                         glossary_terms=glossary_terms,
+                        review_memory=review_memory,
                     )
                     polished_count += 1
                 continue
@@ -424,6 +443,7 @@ async def polish_subtitle_items(
             item.text_final = _fallback_polish_text(
                 item.text_norm or item.text_raw,
                 glossary_terms=glossary_terms,
+                review_memory=review_memory,
             )
             polished_count += 1
 
@@ -986,8 +1006,14 @@ def _build_engagement_subject(profile: dict[str, Any], preset: WorkflowPreset) -
     return preset.label[:18]
 
 
-def _fallback_polish_text(text: str, *, glossary_terms: list[dict[str, Any]]) -> str:
+def _fallback_polish_text(
+    text: str,
+    *,
+    glossary_terms: list[dict[str, Any]],
+    review_memory: dict[str, Any] | None = None,
+) -> str:
     polished = apply_glossary_terms(text.strip(), glossary_terms)
+    polished = apply_domain_term_corrections(polished, review_memory)
     polished = re.sub(r"(。){2,}", "。", polished)
     polished = re.sub(r"(，){2,}", "，", polished)
     return polished

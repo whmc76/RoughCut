@@ -51,16 +51,18 @@ class LocalWhisperProvider(TranscriptionProvider):
         audio_path: Path,
         *,
         language: str = "zh-CN",
+        prompt: str | None = None,
         progress_callback: TranscriptionProgressCallback | None = None,
     ) -> TranscriptResult:
         lang_code = language.split("-")[0]
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(None, self._transcribe_sync, audio_path, lang_code, progress_callback)
+        return await loop.run_in_executor(None, self._transcribe_sync, audio_path, lang_code, prompt, progress_callback)
 
     def _transcribe_sync(
         self,
         audio_path: Path,
         lang_code: str,
+        prompt: str | None = None,
         progress_callback: TranscriptionProgressCallback | None = None,
     ) -> TranscriptResult:
         model = self._load_model()
@@ -68,6 +70,7 @@ class LocalWhisperProvider(TranscriptionProvider):
             str(audio_path),
             language=lang_code,
             word_timestamps=True,
+            initial_prompt=prompt or None,
         )
         total_duration = float(getattr(info, "duration", 0.0) or 0.0)
 

@@ -40,6 +40,7 @@ class TranscriptionProvider(ABC):
         audio_path: Path,
         *,
         language: str = "zh-CN",
+        prompt: str | None = None,
         progress_callback: TranscriptionProgressCallback | None = None,
     ) -> TranscriptResult:
         """Transcribe audio file and return structured result."""

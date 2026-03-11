@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from roughcut.edit.presets import get_workflow_preset
 import pytest
 
@@ -12,6 +14,7 @@ from roughcut.review.content_profile import (
     build_transcript_excerpt,
     build_cover_title,
     enrich_content_profile,
+    polish_subtitle_items,
 )
 
 
@@ -215,4 +218,47 @@ async def test_enrich_content_profile_falls_back_to_contextual_question_when_llm
         include_research=False,
     )
 
-    assert result["engagement_question"] == "LEATHERMAN ARC这次升级你最在意哪一项？"
+    assert result["engagement_question"] == "LEATHERMANARC这次升级你最在意哪一项？"
+
+
+@pytest.mark.asyncio
+async def test_polish_subtitle_items_fallback_uses_review_memory(monkeypatch: pytest.MonkeyPatch):
+    from roughcut.review import content_profile as content_profile_module
+
+    def raising_provider():
+        raise RuntimeError("provider unavailable")
+
+    monkeypatch.setattr(content_profile_module, "get_reasoning_provider", raising_provider)
+
+    item = SimpleNamespace(
+        item_index=0,
+        start_time=0.0,
+        end_time=2.0,
+        text_raw="来自慢这把多功能工具前的主到和单手开和都不错",
+        text_norm="来自慢这把多功能工具前的主到和单手开和都不错",
+        text_final=None,
+    )
+
+    polished = await polish_subtitle_items(
+        [item],
+        content_profile={"preset_name": "edc_tactical"},
+        glossary_terms=[],
+        review_memory={
+            "terms": [
+                {"term": "LEATHERMAN"},
+                {"term": "多功能工具钳"},
+                {"term": "主刀"},
+                {"term": "单手开合"},
+            ],
+            "aliases": [{"wrong": "来自慢", "correct": "LEATHERMAN"}],
+            "style_examples": [],
+        },
+    )
+
+    assert polished == 1
+    assert "LEATHERMAN" in item.text_final
+    assert "多功能工具钳" in item.text_final
+    assert "主刀" in item.text_final
+    assert "单手开合" in item.text_final
+    assert "来自慢" not in item.text_final
+    assert "主到" not in item.text_final

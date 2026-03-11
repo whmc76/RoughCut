@@ -34,6 +34,7 @@ class OpenAIWhisperProvider(TranscriptionProvider):
         audio_path: Path,
         *,
         language: str = "zh-CN",
+        prompt: str | None = None,
         progress_callback: TranscriptionProgressCallback | None = None,
     ) -> TranscriptResult:
         del progress_callback
@@ -44,6 +45,7 @@ class OpenAIWhisperProvider(TranscriptionProvider):
                 model=self._model,
                 file=f,
                 language=lang_code,
+                prompt=prompt or None,
                 response_format="verbose_json",
                 timestamp_granularities=["word", "segment"],
             )

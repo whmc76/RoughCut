@@ -16,6 +16,7 @@ async def transcribe_audio(
     audio_path: Path,
     language: str,
     session: AsyncSession,
+    prompt: str | None = None,
     progress_callback: TranscriptionProgressCallback | None = None,
 ) -> TranscriptResult:
     """
@@ -23,7 +24,12 @@ async def transcribe_audio(
     Writes TranscriptSegment rows and an artifact to the DB.
     """
     provider = get_transcription_provider()
-    result = await provider.transcribe(audio_path, language=language, progress_callback=progress_callback)
+    result = await provider.transcribe(
+        audio_path,
+        language=language,
+        prompt=prompt,
+        progress_callback=progress_callback,
+    )
 
     # Persist segments
     for seg in result.segments:
