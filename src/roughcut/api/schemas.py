@@ -31,6 +31,8 @@ class JobOut(BaseModel):
 
     id: uuid.UUID
     source_name: str
+    content_subject: str | None = None
+    content_summary: str | None = None
     status: str
     language: str
     channel_profile: str | None

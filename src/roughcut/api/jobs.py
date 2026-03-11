@@ -58,6 +58,12 @@ STEP_LABELS = {
     "platform_package": "平台文案",
 }
 
+PROFILE_ARTIFACT_PRIORITY = {
+    "content_profile_final": 3,
+    "content_profile": 2,
+    "content_profile_draft": 1,
+}
+
 
 @router.get("", response_model=list[JobOut])
 async def list_jobs(
@@ -67,12 +73,14 @@ async def list_jobs(
 ):
     result = await session.execute(
         select(Job)
-        .options(selectinload(Job.steps))
+        .options(selectinload(Job.steps), selectinload(Job.artifacts))
         .order_by(Job.created_at.desc())
         .limit(limit)
         .offset(offset)
     )
-    return result.scalars().all()
+    jobs = result.scalars().all()
+    _attach_job_previews(jobs)
+    return jobs
 
 
 @router.post("", response_model=JobOut, status_code=status.HTTP_201_CREATED)
@@ -130,9 +138,10 @@ async def create_job(
 
         # Reload with steps
         result = await session.execute(
-            select(Job).options(selectinload(Job.steps)).where(Job.id == job_id)
+            select(Job).options(selectinload(Job.steps), selectinload(Job.artifacts)).where(Job.id == job_id)
         )
         job = result.scalar_one()
+        _attach_job_preview(job)
 
     finally:
         tmp_path.unlink(missing_ok=True)
@@ -143,18 +152,19 @@ async def create_job(
 @router.get("/{job_id}", response_model=JobOut)
 async def get_job(job_id: uuid.UUID, session: AsyncSession = Depends(get_session)):
     result = await session.execute(
-        select(Job).options(selectinload(Job.steps)).where(Job.id == job_id)
+        select(Job).options(selectinload(Job.steps), selectinload(Job.artifacts)).where(Job.id == job_id)
     )
     job = result.scalar_one_or_none()
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
+    _attach_job_preview(job)
     return job
 
 
 @router.post("/{job_id}/cancel", response_model=JobOut)
 async def cancel_job(job_id: uuid.UUID, session: AsyncSession = Depends(get_session)):
     result = await session.execute(
-        select(Job).options(selectinload(Job.steps)).where(Job.id == job_id)
+        select(Job).options(selectinload(Job.steps), selectinload(Job.artifacts)).where(Job.id == job_id)
     )
     job = result.scalar_one_or_none()
     if not job:
@@ -183,13 +193,14 @@ async def cancel_job(job_id: uuid.UUID, session: AsyncSession = Depends(get_sess
             }
     await session.commit()
     await session.refresh(job)
+    _attach_job_preview(job)
     return job
 
 
 @router.post("/{job_id}/restart", response_model=JobOut)
 async def restart_job(job_id: uuid.UUID, session: AsyncSession = Depends(get_session)):
     result = await session.execute(
-        select(Job).options(selectinload(Job.steps)).where(Job.id == job_id)
+        select(Job).options(selectinload(Job.steps), selectinload(Job.artifacts)).where(Job.id == job_id)
     )
     job = result.scalar_one_or_none()
     if not job:
@@ -215,6 +226,7 @@ async def restart_job(job_id: uuid.UUID, session: AsyncSession = Depends(get_ses
 
     await session.commit()
     await session.refresh(job)
+    _attach_job_preview(job)
     return job
 
 
@@ -798,6 +810,56 @@ def _artifact_event_summary(artifact: Artifact) -> dict | None:
             "detail": artifact.storage_path or "发布文案已写入 Markdown",
         }
     return None
+
+
+def _attach_job_previews(jobs: list[Job]) -> None:
+    for job in jobs:
+        _attach_job_preview(job)
+
+
+def _attach_job_preview(job: Job) -> None:
+    preview = _resolve_job_content_preview(job.artifacts or [])
+    job.content_subject = preview["subject"]
+    job.content_summary = preview["summary"]
+
+
+def _resolve_job_content_preview(artifacts: list[Artifact]) -> dict[str, str | None]:
+    profile = _select_preview_artifact(artifacts)
+    if not profile or not profile.data_json:
+        return {"subject": None, "summary": None}
+
+    data = profile.data_json
+    product = " ".join(
+        part.strip()
+        for part in [str(data.get("subject_brand") or "").strip(), str(data.get("subject_model") or "").strip()]
+        if part and str(part).strip()
+    ).strip()
+    subject_parts = [
+        product,
+        str(data.get("subject_type") or "").strip(),
+        str(data.get("video_theme") or "").strip(),
+    ]
+    subject = " · ".join(part for part in subject_parts if part).strip() or None
+    summary = str(data.get("summary") or data.get("hook_line") or "").strip() or None
+    return {"subject": subject, "summary": summary}
+
+
+def _select_preview_artifact(artifacts: list[Artifact]) -> Artifact | None:
+    candidates = [
+        artifact
+        for artifact in artifacts
+        if artifact.artifact_type in PROFILE_ARTIFACT_PRIORITY and artifact.data_json
+    ]
+    if not candidates:
+        return None
+    candidates.sort(
+        key=lambda artifact: (
+            PROFILE_ARTIFACT_PRIORITY.get(artifact.artifact_type, 0),
+            artifact.created_at or datetime.min.replace(tzinfo=timezone.utc),
+        ),
+        reverse=True,
+    )
+    return candidates[0]
 
 
 async def _ensure_content_profile_thumbnail(job: Job, *, index: int) -> Path:

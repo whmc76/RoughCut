@@ -548,6 +548,59 @@ async def test_control_status_reports_services(client: AsyncClient, monkeypatch:
 
 
 @pytest.mark.asyncio
+async def test_job_list_includes_content_preview(client: AsyncClient):
+    from roughcut.db.models import Artifact, Job
+    from roughcut.db.session import get_session_factory
+
+    job_id = uuid.uuid4()
+
+    async with get_session_factory()() as session:
+        session.add(
+            Job(
+                id=job_id,
+                source_path="jobs/demo/arc.mp4",
+                source_name="arc.mp4",
+                status="needs_review",
+                language="zh-CN",
+                channel_profile="edc",
+            )
+        )
+        session.add_all(
+            [
+                Artifact(
+                    job_id=job_id,
+                    artifact_type="content_profile_draft",
+                    data_json={
+                        "subject_brand": "LEATHERMAN",
+                        "subject_model": "ARC",
+                        "subject_type": "多功能工具钳",
+                        "video_theme": "开箱",
+                        "summary": "草稿摘要",
+                    },
+                ),
+                Artifact(
+                    job_id=job_id,
+                    artifact_type="content_profile_final",
+                    data_json={
+                        "subject_brand": "LEATHERMAN",
+                        "subject_model": "ARC",
+                        "subject_type": "多功能工具钳",
+                        "video_theme": "开箱与上手体验",
+                        "summary": "围绕 ARC 的刀具配置和实际上手手感展开。",
+                    },
+                ),
+            ]
+        )
+        await session.commit()
+
+    response = await client.get("/api/v1/jobs")
+    assert response.status_code == 200
+    item = next(job for job in response.json() if job["id"] == str(job_id))
+    assert item["content_subject"] == "LEATHERMAN ARC · 多功能工具钳 · 开箱与上手体验"
+    assert item["content_summary"] == "围绕 ARC 的刀具配置和实际上手手感展开。"
+
+
+@pytest.mark.asyncio
 async def test_job_activity_stream(client: AsyncClient):
     from roughcut.db.models import Artifact, Job, JobStep, RenderOutput, SubtitleCorrection, Timeline
     from roughcut.db.session import get_session_factory
