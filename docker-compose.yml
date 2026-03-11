@@ -1,18 +1,20 @@
+name: roughcut
+
 version: "3.9"
 
 services:
   postgres:
     image: postgres:16-alpine
     environment:
-      POSTGRES_USER: fastcut
-      POSTGRES_PASSWORD: fastcut
-      POSTGRES_DB: fastcut
+      POSTGRES_USER: roughcut
+      POSTGRES_PASSWORD: roughcut
+      POSTGRES_DB: roughcut
     ports:
       - "5432:5432"
     volumes:
       - pg_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U fastcut"]
+      test: ["CMD-SHELL", "pg_isready -U roughcut"]
       interval: 5s
       timeout: 5s
       retries: 5

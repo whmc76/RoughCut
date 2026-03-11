@@ -18,8 +18,8 @@ os.environ.setdefault("DATABASE_URL", TEST_DB_URL)
 os.environ.setdefault("OPENAI_API_KEY", "test-key")
 os.environ.setdefault("S3_ENDPOINT_URL", "http://localhost:9000")
 
-from fastcut.db.session import Base
-from fastcut.main import app
+from roughcut.db.session import Base
+from roughcut.main import app
 
 
 @pytest.fixture(scope="session")
@@ -49,6 +49,6 @@ async def db_session(db_engine) -> AsyncGenerator[AsyncSession, None]:
 
 
 @pytest_asyncio.fixture
-async def client() -> AsyncGenerator[AsyncClient, None]:
+async def client(db_engine) -> AsyncGenerator[AsyncClient, None]:
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
         yield c

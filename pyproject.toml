@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "fastcut"
+name = "roughcut"
 version = "0.1.0"
 description = "Automated video editing and subtitle review for talking-head and unboxing videos"
 requires-python = ">=3.11"
@@ -35,14 +35,15 @@ dev = [
     "pytest-asyncio",
     "pytest-cov",
     "httpx",
+    "aiosqlite",
     "factory-boy",
 ]
 
 [project.scripts]
-fastcut = "fastcut.cli:cli"
+roughcut = "roughcut.cli:cli"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/fastcut"]
+packages = ["src/roughcut"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

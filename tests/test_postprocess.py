@@ -1,25 +1,24 @@
 from __future__ import annotations
 
-import pytest
+from types import SimpleNamespace
 
-from fastcut.speech.postprocess import normalize_text, split_into_subtitles
+from roughcut.speech.postprocess import normalize_text, split_into_subtitles
 
 
 def _mock_segment(idx, start, end, text, words=None):
     """Create a mock TranscriptSegment-like object."""
-    class Seg:
-        segment_index = idx
-        start_time = start
-        end_time = end
-        text = text
-        words_json = words
-        speaker = None
-
-    return Seg()
+    return SimpleNamespace(
+        segment_index=idx,
+        start_time=start,
+        end_time=end,
+        text=text,
+        words_json=words,
+        speaker=None,
+    )
 
 
 def test_normalize_text_strips():
-    assert normalize_text("  hello  ") == "hello。"
+    assert normalize_text("  hello  ") == "hello"
 
 
 def test_normalize_text_short_no_punctuation():

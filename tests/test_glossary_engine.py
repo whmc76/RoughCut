@@ -2,18 +2,20 @@ from __future__ import annotations
 
 import pytest
 
-from fastcut.review.glossary_engine import apply_corrections_to_text
-from fastcut.db.models import SubtitleCorrection
+from roughcut.review.glossary_engine import apply_corrections_to_text
+from roughcut.db.models import SubtitleCorrection
 
 
 def _mock_correction(original: str, suggested: str, applied: bool = True, decision: str = "accepted"):
-    c = SubtitleCorrection.__new__(SubtitleCorrection)
-    c.original_span = original
-    c.suggested_span = suggested
-    c.auto_applied = applied
-    c.human_decision = decision
-    c.human_override = None
-    return c
+    return SubtitleCorrection(
+        original_span=original,
+        suggested_span=suggested,
+        change_type="glossary",
+        confidence=1.0,
+        auto_applied=applied,
+        human_decision=decision,
+        human_override=None,
+    )
 
 
 def test_apply_corrections_basic():

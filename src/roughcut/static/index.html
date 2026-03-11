@@ -1,0 +1,1214 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>RoughCut Dashboard</title>
+  <style>
+    :root {
+      --bg: #0f1117;
+      --surface: #1a1d27;
+      --surface2: #22263a;
+      --border: #2e3350;
+      --accent: #6c63ff;
+      --accent2: #4fc3f7;
+      --success: #4caf50;
+      --warn: #ff9800;
+      --error: #f44336;
+      --text: #e0e4ff;
+      --text2: #8b92b8;
+      --text3: #5a6080;
+      --radius: 10px;
+      --font: 'SF Pro Display', 'PingFang SC', system-ui, sans-serif;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: var(--bg); color: var(--text); font-family: var(--font); font-size: 14px; min-height: 100vh; display: flex; }
+
+    /* Sidebar */
+    .sidebar {
+      width: 220px; min-height: 100vh; background: var(--surface);
+      border-right: 1px solid var(--border); display: flex; flex-direction: column;
+      padding: 24px 0; position: fixed; top: 0; left: 0; bottom: 0; z-index: 100;
+    }
+    .logo { padding: 0 20px 28px; display: flex; align-items: center; gap: 10px; }
+    .logo-icon { width: 32px; height: 32px; background: var(--accent); border-radius: 8px;
+      display: flex; align-items: center; justify-content: center; font-size: 18px; }
+    .logo-text { font-size: 18px; font-weight: 700; letter-spacing: -0.5px; }
+    .nav { flex: 1; }
+    .nav-item {
+      display: flex; align-items: center; gap: 12px; padding: 11px 20px;
+      cursor: pointer; color: var(--text2); transition: all 0.15s; font-weight: 500;
+      border-left: 3px solid transparent;
+    }
+    .nav-item:hover { color: var(--text); background: var(--surface2); }
+    .nav-item.active { color: var(--accent); background: rgba(108,99,255,0.1); border-left-color: var(--accent); }
+    .nav-item .icon { font-size: 18px; width: 20px; text-align: center; }
+    .sidebar-footer { padding: 20px; font-size: 12px; color: var(--text3); }
+    .badge { background: var(--accent); color: #fff; border-radius: 10px; padding: 2px 7px; font-size: 11px; font-weight: 700; margin-left: auto; }
+
+    /* Main */
+    .main { margin-left: 220px; flex: 1; padding: 32px; min-height: 100vh; }
+    .page { display: none; }
+    .page.active { display: block; }
+    .page-header { margin-bottom: 24px; display: flex; align-items: center; justify-content: space-between; }
+    .page-title { font-size: 22px; font-weight: 700; }
+    .page-subtitle { color: var(--text2); font-size: 13px; margin-top: 4px; }
+
+    /* Cards */
+    .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px; }
+    .card + .card { margin-top: 16px; }
+    .card-title { font-size: 13px; font-weight: 600; color: var(--text2); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 16px; }
+
+    /* Stats row */
+    .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-bottom: 24px; }
+    .stat { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 18px 20px; }
+    .stat-val { font-size: 28px; font-weight: 700; }
+    .stat-label { color: var(--text2); font-size: 12px; margin-top: 4px; }
+
+    /* Table */
+    .table-wrap { overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; }
+    th { text-align: left; font-size: 11px; color: var(--text3); text-transform: uppercase; letter-spacing: 0.5px; padding: 10px 12px; border-bottom: 1px solid var(--border); font-weight: 600; }
+    td { padding: 12px 12px; border-bottom: 1px solid rgba(46,51,80,0.5); vertical-align: middle; }
+    tr:last-child td { border-bottom: none; }
+    tr:hover td { background: rgba(108,99,255,0.04); }
+    .mono { font-family: 'JetBrains Mono', 'Fira Code', monospace; font-size: 12px; }
+
+    /* Status badge */
+    .status {
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 3px 10px; border-radius: 20px; font-size: 12px; font-weight: 600;
+    }
+    .status::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+    .status-pending { color: var(--text3); background: rgba(90,96,128,0.2); }
+    .status-processing { color: var(--accent2); background: rgba(79,195,247,0.15); animation: pulse-text 2s infinite; }
+    .status-done { color: var(--success); background: rgba(76,175,80,0.15); }
+    .status-failed { color: var(--error); background: rgba(244,67,54,0.15); }
+    .status-running { color: var(--warn); background: rgba(255,152,0,0.15); animation: pulse-text 2s infinite; }
+    .status-needs_review { color: var(--warn); background: rgba(255,193,7,0.18); }
+    .status-skipped { color: var(--text3); background: rgba(90,96,128,0.15); }
+    @keyframes pulse-text { 0%,100%{ opacity:1 } 50%{ opacity:0.6 } }
+
+    /* Buttons */
+    .btn { display: inline-flex; align-items: center; gap: 6px; padding: 8px 16px;
+      border-radius: 8px; border: none; cursor: pointer; font-size: 13px; font-weight: 600;
+      transition: all 0.15s; text-decoration: none; }
+    .btn-primary { background: var(--accent); color: #fff; }
+    .btn-primary:hover { background: #7c75ff; }
+    .btn-ghost { background: transparent; color: var(--text2); border: 1px solid var(--border); }
+    .btn-ghost:hover { color: var(--text); border-color: var(--text3); }
+    .btn-danger { background: rgba(244,67,54,0.15); color: var(--error); border: 1px solid rgba(244,67,54,0.3); }
+    .btn-danger:hover { background: rgba(244,67,54,0.25); }
+    .btn-sm { padding: 5px 11px; font-size: 12px; }
+    .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    /* Forms */
+    .form-group { margin-bottom: 18px; }
+    label { display: block; font-size: 12px; font-weight: 600; color: var(--text2); margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.4px; }
+    input, select, textarea {
+      width: 100%; background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+      color: var(--text); padding: 9px 12px; font-size: 14px; font-family: var(--font);
+      transition: border-color 0.15s; outline: none;
+    }
+    input:focus, select:focus, textarea:focus { border-color: var(--accent); }
+    input[type=password] { font-family: 'JetBrains Mono', monospace; letter-spacing: 2px; }
+    select option { background: var(--surface); }
+    .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    .form-section { margin-bottom: 28px; }
+    .form-section-title { font-size: 15px; font-weight: 700; margin-bottom: 16px; padding-bottom: 10px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 8px; }
+    .hint { font-size: 11px; color: var(--text3); margin-top: 4px; }
+
+    /* Steps timeline */
+    .steps-list { display: flex; flex-direction: column; gap: 0; }
+    .step-item { display: flex; align-items: flex-start; gap: 12px; padding: 10px 0; position: relative; }
+    .step-item:not(:last-child)::after { content: ''; position: absolute; left: 13px; top: 32px; bottom: 0; width: 1px; background: var(--border); }
+    .step-dot { width: 26px; height: 26px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 12px; flex-shrink: 0; z-index: 1; }
+    .step-dot-pending { background: var(--surface2); border: 1px solid var(--border); color: var(--text3); }
+    .step-dot-running { background: rgba(255,152,0,0.2); border: 1px solid var(--warn); color: var(--warn); }
+    .step-dot-done { background: rgba(76,175,80,0.2); border: 1px solid var(--success); color: var(--success); }
+    .step-dot-failed { background: rgba(244,67,54,0.2); border: 1px solid var(--error); color: var(--error); }
+    .step-info { flex: 1; padding-top: 3px; }
+    .step-name { font-weight: 600; font-size: 13px; }
+    .step-meta { font-size: 11px; color: var(--text3); margin-top: 2px; }
+    .step-error { font-size: 11px; color: var(--error); margin-top: 4px; font-family: monospace; background: rgba(244,67,54,0.08); padding: 4px 8px; border-radius: 4px; }
+
+    /* Modal / Drawer */
+    .drawer-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 200; display: none; }
+    .drawer-overlay.open { display: flex; justify-content: flex-end; }
+    .drawer { width: 480px; height: 100vh; background: var(--surface); border-left: 1px solid var(--border); overflow-y: auto; padding: 28px; display: flex; flex-direction: column; gap: 20px; }
+    .drawer-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+    .drawer-title { font-size: 18px; font-weight: 700; }
+    .drawer-close { background: none; border: none; color: var(--text2); cursor: pointer; font-size: 20px; padding: 4px; }
+    .drawer-close:hover { color: var(--text); }
+
+    /* Toast */
+    .toast-container { position: fixed; bottom: 24px; right: 24px; z-index: 999; display: flex; flex-direction: column; gap: 10px; }
+    .toast { background: var(--surface2); border: 1px solid var(--border); border-radius: 10px; padding: 12px 18px; display: flex; align-items: center; gap: 10px; min-width: 280px; animation: slide-in 0.2s ease; font-size: 13px; }
+    .toast.success { border-color: rgba(76,175,80,0.4); }
+    .toast.error { border-color: rgba(244,67,54,0.4); }
+    @keyframes slide-in { from { transform: translateX(100%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
+
+    /* Glossary chips */
+    .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+    .chip { background: rgba(108,99,255,0.15); border: 1px solid rgba(108,99,255,0.3); color: var(--accent); border-radius: 4px; padding: 2px 8px; font-size: 12px; }
+    .chip-wrong { background: rgba(244,67,54,0.1); border-color: rgba(244,67,54,0.3); color: #ff7070; }
+
+    /* Tags input */
+    .tags-input { display: flex; flex-wrap: wrap; gap: 6px; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 6px 8px; cursor: text; min-height: 42px; }
+    .tags-input:focus-within { border-color: var(--accent); }
+    .tags-input .tag { background: rgba(244,67,54,0.15); border: 1px solid rgba(244,67,54,0.3); color: #ff7070; border-radius: 4px; padding: 2px 7px; font-size: 12px; display: flex; align-items: center; gap: 4px; }
+    .tags-input .tag button { background: none; border: none; color: inherit; cursor: pointer; padding: 0; font-size: 14px; line-height: 1; opacity: 0.7; }
+    .tags-input .tag button:hover { opacity: 1; }
+    .tags-input input { border: none; background: transparent; color: var(--text); outline: none; flex: 1; min-width: 80px; font-size: 13px; padding: 2px 4px; }
+
+    /* Refresh dot */
+    .refresh-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--success); display: inline-block; animation: blink 2s infinite; }
+    @keyframes blink { 0%,100%{ opacity:1 } 50%{ opacity:0.3 } }
+
+    /* Empty state */
+    .empty { text-align: center; padding: 48px 24px; color: var(--text2); }
+    .empty-icon { font-size: 40px; margin-bottom: 12px; opacity: 0.4; }
+    .empty p { font-size: 15px; }
+    .empty small { color: var(--text3); font-size: 12px; }
+
+    /* Report section */
+    .correction-item { background: var(--surface2); border-radius: 8px; padding: 12px 14px; margin-bottom: 8px; }
+    .correction-change { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+    .correction-del { color: var(--error); text-decoration: line-through; }
+    .correction-add { color: var(--success); }
+    .arrow { color: var(--text3); }
+    .decision-btns { display: flex; gap: 6px; margin-top: 8px; }
+
+    /* Progress bar */
+    .progress { height: 4px; background: var(--border); border-radius: 2px; overflow: hidden; }
+    .progress-bar { height: 100%; background: var(--accent); border-radius: 2px; transition: width 0.3s; }
+
+    /* Scrollbar */
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+    /* Responsive adjustments */
+    @media (max-width: 900px) {
+      .stats { grid-template-columns: repeat(2, 1fr); }
+      .form-row { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+
+<!-- Sidebar -->
+<aside class="sidebar">
+  <div class="logo">
+    <div class="logo-icon">✂</div>
+    <span class="logo-text">RoughCut</span>
+  </div>
+  <nav class="nav">
+    <div class="nav-item active" data-page="jobs" onclick="nav('jobs')">
+      <span class="icon">📋</span> 任务列表
+      <span class="badge" id="badge-processing" style="display:none">0</span>
+    </div>
+    <div class="nav-item" data-page="folders" onclick="nav('folders')">
+      <span class="icon">📁</span> 监控目录
+    </div>
+    <div class="nav-item" data-page="glossary" onclick="nav('glossary')">
+      <span class="icon">📖</span> 术语词表
+    </div>
+    <div class="nav-item" data-page="settings" onclick="nav('settings')">
+      <span class="icon">⚙️</span> LLM 配置
+    </div>
+  </nav>
+  <div class="sidebar-footer">
+    <span class="refresh-dot"></span> 自动刷新中
+    <div style="margin-top:6px">RoughCut v0.1.0</div>
+  </div>
+</aside>
+
+<!-- Main -->
+<main class="main">
+
+  <!-- ── Jobs ─────────────────────────────────────── -->
+  <div class="page active" id="page-jobs">
+    <div class="page-header">
+      <div>
+        <div class="page-title">任务列表</div>
+        <div class="page-subtitle">所有视频处理任务及当前状态</div>
+      </div>
+      <div style="display:flex;gap:10px;align-items:center">
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;color:var(--text2);font-size:13px;text-transform:none;letter-spacing:0;margin:0">
+          <input type="file" accept="video/*" style="display:none" id="upload-input" onchange="uploadFile(this)" />
+          <button class="btn btn-primary" onclick="document.getElementById('upload-input').click()">
+            ＋ 上传视频
+          </button>
+        </label>
+        <button class="btn btn-ghost btn-sm" onclick="loadJobs()">↻ 刷新</button>
+      </div>
+    </div>
+
+    <div class="stats">
+      <div class="stat">
+        <div class="stat-val" id="stat-total">—</div>
+        <div class="stat-label">总任务数</div>
+      </div>
+      <div class="stat" style="border-color:rgba(79,195,247,0.3)">
+        <div class="stat-val" style="color:var(--accent2)" id="stat-processing">—</div>
+        <div class="stat-label">处理中</div>
+      </div>
+      <div class="stat" style="border-color:rgba(76,175,80,0.3)">
+        <div class="stat-val" style="color:var(--success)" id="stat-done">—</div>
+        <div class="stat-label">已完成</div>
+      </div>
+      <div class="stat" style="border-color:rgba(244,67,54,0.3)">
+        <div class="stat-val" style="color:var(--error)" id="stat-failed">—</div>
+        <div class="stat-label">失败</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>文件名</th>
+              <th>语言</th>
+              <th>状态</th>
+              <th>步骤进度</th>
+              <th>创建时间</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="jobs-tbody">
+            <tr><td colspan="6"><div class="empty"><div class="empty-icon">📭</div><p>暂无任务</p><small>上传视频或配置监控目录后自动入队</small></div></td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Folders ───────────────────────────────────── -->
+  <div class="page" id="page-folders">
+    <div class="page-header">
+      <div>
+        <div class="page-title">监控目录</div>
+        <div class="page-subtitle">Watcher 进程自动扫描这些目录，新文件自动入队</div>
+      </div>
+      <button class="btn btn-primary" onclick="openFolderForm()">＋ 添加目录</button>
+    </div>
+
+    <div class="card" id="folders-card">
+      <div class="empty"><div class="empty-icon">📂</div><p>暂无监控目录</p><small>点击「添加目录」设置自动监听文件夹</small></div>
+    </div>
+
+    <!-- Add folder form -->
+    <div class="card" id="folder-form" style="display:none;margin-top:16px">
+      <div class="card-title">添加监控目录</div>
+      <div class="form-group">
+        <label>目录路径</label>
+        <input id="f-path" type="text" placeholder="/mnt/videos  或  D:\Videos" />
+        <div class="hint">服务器上的绝对路径，Watcher 进程需要有读取权限</div>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label>频道配置（可选）</label>
+          <input id="f-profile" type="text" placeholder="default" />
+        </div>
+        <div class="form-group">
+          <label>启用</label>
+          <select id="f-enabled">
+            <option value="true">是</option>
+            <option value="false">否</option>
+          </select>
+        </div>
+      </div>
+      <div style="display:flex;gap:8px">
+        <button class="btn btn-primary" onclick="saveFolder()">保存</button>
+        <button class="btn btn-ghost" onclick="document.getElementById('folder-form').style.display='none'">取消</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Glossary ──────────────────────────────────── -->
+  <div class="page" id="page-glossary">
+    <div class="page-header">
+      <div>
+        <div class="page-title">术语词表</div>
+        <div class="page-subtitle">品牌名、型号、专业术语纠错规则</div>
+      </div>
+      <button class="btn btn-primary" onclick="openGlossaryForm()">＋ 添加术语</button>
+    </div>
+
+    <div class="card" id="glossary-card">
+      <div class="empty"><div class="empty-icon">📖</div><p>术语词表为空</p><small>添加规则后，字幕审校会自动纠正错误写法</small></div>
+    </div>
+
+    <!-- Add / edit form -->
+    <div class="card" id="glossary-form" style="display:none;margin-top:16px">
+      <div class="card-title" id="glossary-form-title">添加术语</div>
+      <input type="hidden" id="g-id" />
+      <div class="form-group">
+        <label>错误写法（回车添加多个）</label>
+        <div class="tags-input" id="wrong-tags-input" onclick="focusTagInput()">
+          <input id="wrong-tag-field" placeholder="输入错误写法后按回车…" onkeydown="handleTagKey(event)" />
+        </div>
+        <div class="hint">例：gpt4 / GPT4 / gpt-4 → 都映射到正确写法</div>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label>正确写法</label>
+          <input id="g-correct" type="text" placeholder="GPT-4" />
+        </div>
+        <div class="form-group">
+          <label>类别</label>
+          <select id="g-category">
+            <option value="">— 不设置 —</option>
+            <option value="brand">品牌</option>
+            <option value="model">型号</option>
+            <option value="tech_term">技术术语</option>
+            <option value="person">人名</option>
+          </select>
+        </div>
+      </div>
+      <div class="form-group">
+        <label>上下文提示（可选）</label>
+        <input id="g-hint" type="text" placeholder="仅用于科技视频场景" />
+      </div>
+      <div style="display:flex;gap:8px">
+        <button class="btn btn-primary" onclick="saveGlossary()">保存</button>
+        <button class="btn btn-ghost" onclick="closeGlossaryForm()">取消</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Settings ──────────────────────────────────── -->
+  <div class="page" id="page-settings">
+    <div class="page-header">
+      <div>
+        <div class="page-title">LLM 配置</div>
+        <div class="page-subtitle">转写、推理 Provider 及 API Key 设置</div>
+      </div>
+      <button class="btn btn-ghost btn-sm" onclick="resetConfig()" title="清除所有运行时覆盖，恢复环境变量默认值">↺ 重置覆盖</button>
+    </div>
+
+    <form id="settings-form" onsubmit="saveSettings(event)">
+      <!-- Transcription -->
+      <div class="card" style="margin-bottom:16px">
+        <div class="form-section-title">🎙 转写配置</div>
+        <div class="form-row">
+          <div class="form-group">
+            <label>转写 Provider</label>
+            <select id="s-transcription-provider" onchange="onProviderChange()">
+              <option value="openai">OpenAI (gpt-4o-transcribe)</option>
+              <option value="local_whisper">Local Whisper (faster-whisper)</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>模型名称</label>
+            <input id="s-transcription-model" type="text" placeholder="gpt-4o-transcribe" />
+          </div>
+        </div>
+      </div>
+
+      <!-- Reasoning -->
+      <div class="card" style="margin-bottom:16px">
+        <div class="form-section-title">🧠 推理配置</div>
+        <div class="form-row">
+            <div class="form-group">
+              <label>运行模式</label>
+              <select id="s-llm-mode" onchange="onProviderChange()">
+                <option value="performance">高性能模式（API）</option>
+                <option value="local">本地模式（Ollama）</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label>高性能模式 Provider</label>
+              <select id="s-reasoning-provider" onchange="onProviderChange()">
+                <option value="openai">OpenAI</option>
+                <option value="anthropic">Anthropic (Claude)</option>
+                <option value="minimax">MiniMax</option>
+              </select>
+            </div>
+          <div class="form-group">
+            <label>高性能模式模型</label>
+            <input id="s-reasoning-model" type="text" placeholder="gpt-4o-mini" />
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label>本地模式模型</label>
+            <input id="s-local-reasoning-model" type="text" placeholder="qwen3.5:9b" />
+          </div>
+          <div class="form-group">
+            <label>本地视觉模型（可选）</label>
+            <input id="s-local-vision-model" type="text" placeholder="留空则自动探测" />
+          </div>
+        </div>
+      </div>
+
+      <!-- API Keys -->
+        <div class="card" style="margin-bottom:16px">
+          <div class="form-section-title">🔑 API Keys</div>
+          <div id="openai-key-group" class="form-group">
+          <label>OpenAI / Codex 凭证</label>
+          <div class="form-row">
+            <div class="form-group">
+              <label>认证模式</label>
+              <select id="s-openai-auth-mode" onchange="onProviderChange()">
+                <option value="api_key">API Key</option>
+                <option value="codex_compat">Codex 兼容</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label>Base URL</label>
+              <input id="s-openai-base-url" type="text" placeholder="https://api.openai.com/v1" />
+            </div>
+          </div>
+            <div style="display:flex;gap:8px">
+              <input id="s-openai-key" type="password" placeholder="sk-…（留空则不更新）" style="flex:1" />
+              <button type="button" class="btn btn-ghost btn-sm" onclick="toggleVisibility('s-openai-key')">👁</button>
+            </div>
+            <input id="s-openai-helper" type="text" placeholder="Codex 兼容模式：返回凭证的 helper 命令（可选）" style="margin-top:8px" />
+            <div class="hint" id="openai-key-hint"></div>
+          </div>
+          <div id="anthropic-key-group" class="form-group" style="display:none">
+          <label>Anthropic / Claude Code 凭证</label>
+          <div class="form-row">
+            <div class="form-group">
+              <label>认证模式</label>
+              <select id="s-anthropic-auth-mode" onchange="onProviderChange()">
+                <option value="api_key">API Key</option>
+                <option value="claude_code_compat">Claude Code 兼容</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label>Base URL</label>
+              <input id="s-anthropic-base-url" type="text" placeholder="https://api.anthropic.com" />
+            </div>
+          </div>
+            <div style="display:flex;gap:8px">
+              <input id="s-anthropic-key" type="password" placeholder="sk-ant-…（留空则不更新）" style="flex:1" />
+              <button type="button" class="btn btn-ghost btn-sm" onclick="toggleVisibility('s-anthropic-key')">👁</button>
+            </div>
+            <input id="s-anthropic-helper" type="text" placeholder="Claude Code 兼容模式：返回凭证的 helper 命令（可选）" style="margin-top:8px" />
+            <div class="hint" id="anthropic-key-hint"></div>
+          </div>
+          <div id="minimax-key-group" class="form-group" style="display:none">
+            <label>MiniMax API</label>
+            <div class="form-row">
+              <div class="form-group">
+                <label>API Key</label>
+                <div style="display:flex;gap:8px">
+                  <input id="s-minimax-key" type="password" placeholder="留空则不更新" style="flex:1" />
+                  <button type="button" class="btn btn-ghost btn-sm" onclick="toggleVisibility('s-minimax-key')">👁</button>
+                </div>
+                <div class="hint" id="minimax-key-hint"></div>
+              </div>
+              <div class="form-group">
+                <label>Base URL</label>
+                <input id="s-minimax-base-url" type="text" placeholder="https://api.minimaxi.com/v1" />
+              </div>
+            </div>
+          </div>
+          <div id="ollama-url-group" class="form-group" style="display:none">
+            <label>Ollama Base URL</label>
+            <input id="s-ollama-url" type="text" placeholder="http://localhost:11434" />
+          </div>
+      </div>
+
+      <!-- Security -->
+      <div class="card" style="margin-bottom:16px">
+        <div class="form-section-title">🛡 安全限制</div>
+        <div class="form-row">
+          <div class="form-group">
+            <label>最大上传大小 (MB)</label>
+            <input id="s-max-size" type="number" min="1" max="10240" />
+          </div>
+          <div class="form-group">
+            <label>最长视频时长 (秒)</label>
+            <input id="s-max-duration" type="number" min="60" />
+          </div>
+        </div>
+        <div class="form-group">
+          <label>FFmpeg 超时 (秒)</label>
+          <input id="s-ffmpeg-timeout" type="number" min="30" style="max-width:200px" />
+        </div>
+      </div>
+
+      <button type="submit" class="btn btn-primary" style="padding:10px 28px;font-size:15px">保存配置</button>
+      <span style="margin-left:12px;font-size:12px;color:var(--text3)">保存后即时生效，无需重启 API 进程</span>
+    </form>
+  </div>
+
+</main>
+
+<!-- Job Detail Drawer -->
+<div class="drawer-overlay" id="job-drawer" onclick="closeDrawer(event)">
+  <div class="drawer" onclick="event.stopPropagation()">
+    <div class="drawer-header">
+      <div>
+        <div class="drawer-title" id="drawer-title">任务详情</div>
+        <div style="font-size:12px;color:var(--text3);margin-top:4px" id="drawer-subtitle"></div>
+      </div>
+      <button class="drawer-close" onclick="closeJobDrawer()">✕</button>
+    </div>
+
+    <div>
+      <div class="card-title">Pipeline 步骤</div>
+      <div class="steps-list" id="drawer-steps"></div>
+    </div>
+
+    <div id="drawer-profile-section" style="display:none">
+      <div class="card-title" style="margin-bottom:12px">🧭 内容摘要确认</div>
+      <div class="form-group">
+        <label>品牌</label>
+        <input id="cp-brand" type="text" placeholder="品牌名" />
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label>产品 / 型号</label>
+          <input id="cp-model" type="text" placeholder="型号 / 系列 / 产品名" />
+        </div>
+        <div class="form-group">
+          <label>主体类型</label>
+          <input id="cp-type" type="text" placeholder="例如：工具钳 / 折刀 / 潮玩" />
+        </div>
+      </div>
+      <div class="form-group">
+        <label>视频主题</label>
+        <input id="cp-theme" type="text" placeholder="开箱 / 对比 / 体验 / 吐槽" />
+      </div>
+      <div class="form-group">
+        <label>关键词（逗号分隔）</label>
+        <input id="cp-keywords" type="text" placeholder="品牌词, 型号词, 搜索词" />
+      </div>
+      <div class="form-group">
+        <label>摘要</label>
+        <textarea id="cp-summary" rows="4" placeholder="对视频内容的简明概括"></textarea>
+      </div>
+      <div class="form-group">
+        <label>互动问题</label>
+        <input id="cp-question" type="text" placeholder="例如：你觉得值不值？" />
+      </div>
+      <div class="form-group">
+        <label>补充信息</label>
+        <textarea id="cp-context" rows="3" placeholder="可补充产品名、背景信息、卖点、想强调的内容"></textarea>
+      </div>
+      <div class="form-group">
+        <label>纠正备注</label>
+        <textarea id="cp-notes" rows="3" placeholder="指出模型识别错的地方，或告诉系统后续该怎么理解这条视频"></textarea>
+      </div>
+      <div style="display:flex;gap:8px">
+        <button class="btn btn-primary" id="btn-confirm-profile" onclick="confirmContentProfile()">确认并继续</button>
+      </div>
+    </div>
+
+    <div id="drawer-report-section" style="display:none">
+      <div class="card-title" style="margin-bottom:12px">📝 字幕审校报告</div>
+      <div style="display:flex;gap:16px;margin-bottom:14px;font-size:13px">
+        <span>共 <b id="rpt-total-items">0</b> 条字幕</span>
+        <span style="color:var(--warn)">待审 <b id="rpt-pending">0</b></span>
+        <span style="color:var(--success)">已接受 <b id="rpt-accepted">0</b></span>
+      </div>
+      <div id="drawer-report-items"></div>
+    </div>
+
+    <div id="drawer-actions" style="display:flex;gap:8px;flex-wrap:wrap;margin-top:auto">
+      <button class="btn btn-ghost" id="btn-timeline" onclick="openTimeline()" style="display:none">📊 查看 Timeline</button>
+      <button class="btn btn-ghost" id="btn-download" onclick="downloadOutput()" style="display:none">⬇ 下载成片</button>
+    </div>
+  </div>
+</div>
+
+<!-- Toast container -->
+<div class="toast-container" id="toasts"></div>
+
+<script>
+const API = '/api/v1';
+let _jobs = [];
+let _currentJobId = null;
+let _refreshTimer = null;
+let _wrongTags = [];
+
+// ── Navigation ───────────────────────────────────────────────────────────────
+function nav(page) {
+  document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'));
+  document.querySelectorAll('.page').forEach(el => el.classList.remove('active'));
+  document.querySelector(`[data-page="${page}"]`).classList.add('active');
+  document.getElementById(`page-${page}`).classList.add('active');
+  if (page === 'jobs') startRefresh();
+  else stopRefresh();
+  if (page === 'folders') loadFolders();
+  if (page === 'glossary') loadGlossary();
+  if (page === 'settings') loadSettings();
+}
+
+// ── API helpers ───────────────────────────────────────────────────────────────
+async function api(method, path, body) {
+  const opts = { method, headers: {} };
+  if (body) { opts.headers['Content-Type'] = 'application/json'; opts.body = JSON.stringify(body); }
+  const r = await fetch(API + path, opts);
+  if (!r.ok) {
+    const err = await r.json().catch(() => ({ detail: r.statusText }));
+    throw new Error(err.detail || r.statusText);
+  }
+  if (r.status === 204) return null;
+  return r.json();
+}
+
+// ── Toast ────────────────────────────────────────────────────────────────────
+function toast(msg, type = 'success') {
+  const el = document.createElement('div');
+  el.className = `toast ${type}`;
+  el.innerHTML = `<span>${type === 'success' ? '✓' : '✗'}</span><span>${msg}</span>`;
+  document.getElementById('toasts').appendChild(el);
+  setTimeout(() => el.remove(), 3500);
+}
+
+// ── Jobs ─────────────────────────────────────────────────────────────────────
+async function loadJobs() {
+  try {
+    const jobs = await api('GET', '/jobs');
+    _jobs = jobs;
+    renderJobs(jobs);
+    updateStats(jobs);
+    updateBadge(jobs);
+  } catch(e) { /* silently fail on auto-refresh */ }
+}
+
+function updateStats(jobs) {
+  document.getElementById('stat-total').textContent = jobs.length;
+  document.getElementById('stat-processing').textContent = jobs.filter(j => j.status === 'processing').length;
+  document.getElementById('stat-done').textContent = jobs.filter(j => j.status === 'done').length;
+  document.getElementById('stat-failed').textContent = jobs.filter(j => j.status === 'failed').length;
+}
+
+function updateBadge(jobs) {
+  const n = jobs.filter(j => j.status === 'processing' || j.status === 'pending').length;
+  const badge = document.getElementById('badge-processing');
+  badge.textContent = n;
+  badge.style.display = n > 0 ? '' : 'none';
+}
+
+function renderJobs(jobs) {
+  const tbody = document.getElementById('jobs-tbody');
+  if (!jobs.length) {
+    tbody.innerHTML = `<tr><td colspan="6"><div class="empty"><div class="empty-icon">📭</div><p>暂无任务</p><small>上传视频或配置监控目录后自动入队</small></div></td></tr>`;
+    return;
+  }
+  tbody.innerHTML = jobs.map(j => {
+    const steps = j.steps || [];
+    const done = steps.filter(s => s.status === 'done').length;
+    const total = steps.length;
+    const pct = total ? Math.round(done / total * 100) : 0;
+    return `<tr style="cursor:pointer" onclick="openJobDrawer('${j.id}')">
+      <td>
+        <div style="font-weight:600;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(j.source_name)}</div>
+        <div class="mono" style="color:var(--text3);font-size:11px;margin-top:2px">${j.id.slice(0,8)}…</div>
+      </td>
+      <td><span style="color:var(--text2)">${j.language}</span></td>
+      <td><span class="status status-${j.status}">${statusLabel(j.status)}</span></td>
+      <td style="min-width:140px">
+        <div style="font-size:11px;color:var(--text3);margin-bottom:4px">${done}/${total} 步骤</div>
+        <div class="progress"><div class="progress-bar" style="width:${pct}%"></div></div>
+      </td>
+      <td style="color:var(--text2);font-size:12px">${fmtDate(j.created_at)}</td>
+      <td><button class="btn btn-ghost btn-sm" onclick="event.stopPropagation();openJobDrawer('${j.id}')">详情 →</button></td>
+    </tr>`;
+  }).join('');
+}
+
+function statusLabel(s) {
+  return { pending:'等待中', processing:'处理中', done:'完成', failed:'失败',
+           running:'运行中', skipped:'跳过', needs_review:'待确认' }[s] || s;
+}
+
+function startRefresh() {
+  loadJobs();
+  _refreshTimer = setInterval(loadJobs, 5000);
+}
+function stopRefresh() {
+  clearInterval(_refreshTimer);
+}
+
+// Job upload
+async function uploadFile(input) {
+  const file = input.files[0];
+  if (!file) return;
+  const lang = prompt('视频语言（默认 zh-CN）:', 'zh-CN') || 'zh-CN';
+  const fd = new FormData();
+  fd.append('file', file);
+  fd.append('language', lang);
+  try {
+    const r = await fetch(API + '/jobs', { method: 'POST', body: fd });
+    if (!r.ok) { const e = await r.json(); throw new Error(e.detail); }
+    toast(`任务创建成功：${file.name}`);
+    loadJobs();
+  } catch(e) { toast('上传失败：' + e.message, 'error'); }
+  input.value = '';
+}
+
+// ── Job Drawer ────────────────────────────────────────────────────────────────
+async function openJobDrawer(jobId) {
+  _currentJobId = jobId;
+  document.getElementById('job-drawer').classList.add('open');
+  await refreshDrawer();
+}
+
+async function refreshDrawer() {
+  if (!_currentJobId) return;
+  try {
+    const job = await api('GET', `/jobs/${_currentJobId}`);
+    document.getElementById('drawer-title').textContent = job.source_name;
+    document.getElementById('drawer-subtitle').textContent = `${job.id} · ${job.language} · ${statusLabel(job.status)}`;
+
+    // Steps
+    const stepsEl = document.getElementById('drawer-steps');
+    const steps = job.steps || [];
+    const STEP_ORDER = ['probe','extract_audio','transcribe','subtitle_postprocess','content_profile','summary_review','glossary_review','edit_plan','render','platform_package'];
+    const STEP_LABELS = { probe:'探测媒体信息', extract_audio:'提取音频', transcribe:'语音转写',
+      subtitle_postprocess:'字幕后处理', content_profile:'内容摘要', summary_review:'人工确认', glossary_review:'术语纠错', edit_plan:'剪辑决策', render:'渲染输出', platform_package:'平台文案' };
+    const STEP_ICONS = { pending:'○', running:'◎', done:'✓', failed:'✗', skipped:'—' };
+
+    stepsEl.innerHTML = STEP_ORDER.map(name => {
+      const s = steps.find(x => x.step_name === name) || { status: 'pending', attempt: 0 };
+      const icon = STEP_ICONS[s.status] || '○';
+      const dotCls = `step-dot step-dot-${s.status}`;
+      const meta = s.started_at ? `开始于 ${fmtDate(s.started_at)}` : '';
+      const errEl = s.error_message ? `<div class="step-error">✗ ${esc(s.error_message)}</div>` : '';
+      return `<div class="step-item">
+        <div class="${dotCls}">${icon}</div>
+        <div class="step-info">
+          <div class="step-name">${STEP_LABELS[name] || name}</div>
+          <div class="step-meta">${meta}${s.attempt > 0 ? ` · 第${s.attempt}次尝试` : ''}</div>
+          ${errEl}
+        </div>
+        <span class="status status-${s.status}" style="flex-shrink:0">${statusLabel(s.status)}</span>
+      </div>`;
+    }).join('');
+
+    await renderContentProfileReview(job);
+
+    // Report (if done)
+    const rptSection = document.getElementById('drawer-report-section');
+    if (job.status === 'done') {
+      rptSection.style.display = '';
+      try {
+        const rpt = await api('GET', `/jobs/${_currentJobId}/report`);
+        document.getElementById('rpt-total-items').textContent = rpt.total_subtitle_items;
+        document.getElementById('rpt-pending').textContent = rpt.pending_count;
+        document.getElementById('rpt-accepted').textContent = rpt.accepted_count;
+        renderReportItems(rpt.items);
+      } catch(e) {}
+      document.getElementById('btn-timeline').style.display = '';
+      document.getElementById('btn-download').style.display = '';
+    } else {
+      rptSection.style.display = 'none';
+      document.getElementById('btn-timeline').style.display = 'none';
+      document.getElementById('btn-download').style.display = 'none';
+    }
+  } catch(e) { toast('加载任务详情失败', 'error'); }
+}
+
+async function renderContentProfileReview(job) {
+  const section = document.getElementById('drawer-profile-section');
+  try {
+    const payload = await api('GET', `/jobs/${_currentJobId}/content-profile`);
+    const profile = payload.final || payload.draft;
+    if (!profile) {
+      section.style.display = 'none';
+      return;
+    }
+
+    section.style.display = '';
+    document.getElementById('cp-brand').value = profile.subject_brand || '';
+    document.getElementById('cp-model').value = profile.subject_model || '';
+    document.getElementById('cp-type').value = profile.subject_type || '';
+    document.getElementById('cp-theme').value = profile.video_theme || '';
+    document.getElementById('cp-keywords').value = (profile.search_queries || []).join(', ');
+    document.getElementById('cp-summary').value = profile.summary || '';
+    document.getElementById('cp-question').value = profile.engagement_question || '';
+    document.getElementById('cp-context').value = (profile.user_feedback && profile.user_feedback.supplemental_context) || '';
+    document.getElementById('cp-notes').value = (profile.user_feedback && profile.user_feedback.correction_notes) || '';
+
+    const confirmBtn = document.getElementById('btn-confirm-profile');
+    const locked = payload.review_step_status === 'done' || job.status === 'done';
+    confirmBtn.style.display = locked ? 'none' : '';
+    Array.from(section.querySelectorAll('input, textarea')).forEach(el => { el.disabled = locked; });
+  } catch(e) {
+    section.style.display = 'none';
+  }
+}
+
+async function confirmContentProfile() {
+  try {
+    const body = {
+      subject_brand: document.getElementById('cp-brand').value.trim() || null,
+      subject_model: document.getElementById('cp-model').value.trim() || null,
+      subject_type: document.getElementById('cp-type').value.trim() || null,
+      video_theme: document.getElementById('cp-theme').value.trim() || null,
+      keywords: document.getElementById('cp-keywords').value.split(',').map(s => s.trim()).filter(Boolean),
+      summary: document.getElementById('cp-summary').value.trim() || null,
+      engagement_question: document.getElementById('cp-question').value.trim() || null,
+      supplemental_context: document.getElementById('cp-context').value.trim() || null,
+      correction_notes: document.getElementById('cp-notes').value.trim() || null,
+    };
+    await api('POST', `/jobs/${_currentJobId}/content-profile/confirm`, body);
+    toast('摘要已确认，任务继续执行');
+    refreshDrawer();
+    loadJobs();
+  } catch(e) {
+    toast('确认失败：' + e.message, 'error');
+  }
+}
+
+function renderReportItems(items) {
+  const el = document.getElementById('drawer-report-items');
+  const withCorrections = items.filter(i => i.corrections && i.corrections.length > 0);
+  if (!withCorrections.length) {
+    el.innerHTML = `<div style="color:var(--text3);font-size:13px;padding:12px 0">✓ 未发现术语错误</div>`;
+    return;
+  }
+  el.innerHTML = withCorrections.slice(0, 20).map(item =>
+    item.corrections.map(c => `
+      <div class="correction-item">
+        <div style="font-size:11px;color:var(--text3);margin-bottom:6px">${fmtTime(item.start)} – ${fmtTime(item.end)}  ${esc(item.text_norm || item.text_raw)}</div>
+        <div class="correction-change">
+          <span class="correction-del">${esc(c.original)}</span>
+          <span class="arrow">→</span>
+          <span class="correction-add">${esc(c.suggested)}</span>
+          <span style="margin-left:auto;font-size:11px;color:var(--text3)">${Math.round(c.confidence*100)}%</span>
+        </div>
+        <div class="decision-btns">
+          <button class="btn btn-ghost btn-sm" onclick="applyDecision('${c.id}','accepted')" ${c.decision==='accepted'?'style="border-color:var(--success);color:var(--success)"':''}>✓ 接受</button>
+          <button class="btn btn-ghost btn-sm" onclick="applyDecision('${c.id}','rejected')" ${c.decision==='rejected'?'style="border-color:var(--error);color:var(--error)"':''}>✗ 拒绝</button>
+        </div>
+      </div>`).join('')
+  ).join('');
+}
+
+async function applyDecision(correctionId, action) {
+  try {
+    await api('POST', `/jobs/${_currentJobId}/review/apply`, {
+      actions: [{ target_type: 'subtitle_correction', target_id: correctionId, action }]
+    });
+    toast(action === 'accepted' ? '已接受纠错' : '已拒绝纠错');
+    refreshDrawer();
+  } catch(e) { toast('操作失败：' + e.message, 'error'); }
+}
+
+async function openTimeline() {
+  try {
+    const tl = await api('GET', `/jobs/${_currentJobId}/timeline`);
+    const w = window.open('', '_blank');
+    w.document.write(`<pre style="background:#0f1117;color:#e0e4ff;padding:24px;font-family:monospace;font-size:13px">${JSON.stringify(tl, null, 2)}</pre>`);
+  } catch(e) { toast('Timeline 不可用', 'error'); }
+}
+
+async function downloadOutput() {
+  try {
+    const r = await api('GET', `/jobs/${_currentJobId}/download`);
+    window.open(r.url, '_blank');
+  } catch(e) { toast('下载链接不可用：' + e.message, 'error'); }
+}
+
+function closeJobDrawer() {
+  document.getElementById('job-drawer').classList.remove('open');
+  _currentJobId = null;
+}
+function closeDrawer(e) {
+  if (e.target.id === 'job-drawer') closeJobDrawer();
+}
+
+// ── Folders ───────────────────────────────────────────────────────────────────
+async function loadFolders() {
+  const folders = await api('GET', '/watch-roots');
+  const card = document.getElementById('folders-card');
+  if (!folders.length) {
+    card.innerHTML = `<div class="empty"><div class="empty-icon">📂</div><p>暂无监控目录</p><small>点击「添加目录」设置自动监听文件夹</small></div>`;
+    return;
+  }
+  card.innerHTML = `<table><thead><tr><th>路径</th><th>频道配置</th><th>状态</th><th></th></tr></thead><tbody>
+    ${folders.map(f => `<tr>
+      <td><span class="mono">${esc(f.path)}</span></td>
+      <td>${f.channel_profile ? `<span class="chip">${esc(f.channel_profile)}</span>` : '<span style="color:var(--text3)">—</span>'}</td>
+      <td><span class="status status-${f.enabled ? 'done' : 'pending'}">${f.enabled ? '监控中' : '已禁用'}</span></td>
+      <td style="display:flex;gap:6px">
+        <button class="btn btn-ghost btn-sm" onclick="toggleFolder('${f.id}', ${!f.enabled}, '${esc(f.path)}', '${f.channel_profile||''}')">
+          ${f.enabled ? '禁用' : '启用'}
+        </button>
+        <button class="btn btn-danger btn-sm" onclick="deleteFolder('${f.id}')">删除</button>
+      </td>
+    </tr>`).join('')}
+  </tbody></table>`;
+}
+
+function openFolderForm() {
+  document.getElementById('folder-form').style.display = '';
+  document.getElementById('f-path').focus();
+}
+
+async function saveFolder() {
+  const path = document.getElementById('f-path').value.trim();
+  if (!path) { toast('请输入目录路径', 'error'); return; }
+  try {
+    await api('POST', '/watch-roots', {
+      path, enabled: document.getElementById('f-enabled').value === 'true',
+      channel_profile: document.getElementById('f-profile').value || null
+    });
+    toast('监控目录添加成功');
+    document.getElementById('folder-form').style.display = 'none';
+    document.getElementById('f-path').value = '';
+    loadFolders();
+  } catch(e) { toast('添加失败：' + e.message, 'error'); }
+}
+
+async function toggleFolder(id, enabled, path, profile) {
+  try {
+    await api('PATCH', `/watch-roots/${id}`, { path, enabled, channel_profile: profile || null });
+    loadFolders();
+  } catch(e) { toast('操作失败：' + e.message, 'error'); }
+}
+
+async function deleteFolder(id) {
+  if (!confirm('确认删除此监控目录？')) return;
+  try {
+    await api('DELETE', `/watch-roots/${id}`);
+    toast('已删除');
+    loadFolders();
+  } catch(e) { toast('删除失败：' + e.message, 'error'); }
+}
+
+// ── Glossary ───────────────────────────────────────────────────────────────────
+async function loadGlossary() {
+  const terms = await api('GET', '/glossary');
+  const card = document.getElementById('glossary-card');
+  if (!terms.length) {
+    card.innerHTML = `<div class="empty"><div class="empty-icon">📖</div><p>术语词表为空</p><small>添加规则后，字幕审校会自动纠正错误写法</small></div>`;
+    return;
+  }
+  const CAT = { brand:'品牌', model:'型号', tech_term:'技术', person:'人名' };
+  card.innerHTML = `<table><thead><tr><th>错误写法</th><th>正确写法</th><th>类别</th><th></th></tr></thead><tbody>
+    ${terms.map(t => `<tr>
+      <td><div class="chips">${(t.wrong_forms||[]).map(w => `<span class="chip chip-wrong">${esc(w)}</span>`).join('')}</div></td>
+      <td><span class="chip">${esc(t.correct_form)}</span></td>
+      <td>${t.category ? `<span style="color:var(--text2);font-size:12px">${CAT[t.category]||t.category}</span>` : '<span style="color:var(--text3)">—</span>'}</td>
+      <td style="display:flex;gap:6px">
+        <button class="btn btn-ghost btn-sm" onclick="editGlossary(${JSON.stringify(t).replace(/"/g,'&quot;')})">编辑</button>
+        <button class="btn btn-danger btn-sm" onclick="deleteGlossary('${t.id}')">删除</button>
+      </td>
+    </tr>`).join('')}
+  </tbody></table>`;
+}
+
+function openGlossaryForm() {
+  _wrongTags = [];
+  document.getElementById('g-id').value = '';
+  document.getElementById('g-correct').value = '';
+  document.getElementById('g-category').value = '';
+  document.getElementById('g-hint').value = '';
+  document.getElementById('glossary-form-title').textContent = '添加术语';
+  renderTagsInput();
+  document.getElementById('glossary-form').style.display = '';
+  document.getElementById('wrong-tag-field').focus();
+}
+
+function editGlossary(term) {
+  _wrongTags = [...(term.wrong_forms || [])];
+  document.getElementById('g-id').value = term.id;
+  document.getElementById('g-correct').value = term.correct_form;
+  document.getElementById('g-category').value = term.category || '';
+  document.getElementById('g-hint').value = term.context_hint || '';
+  document.getElementById('glossary-form-title').textContent = '编辑术语';
+  renderTagsInput();
+  document.getElementById('glossary-form').style.display = '';
+  document.getElementById('g-correct').focus();
+}
+
+function closeGlossaryForm() {
+  document.getElementById('glossary-form').style.display = 'none';
+}
+
+function renderTagsInput() {
+  const container = document.getElementById('wrong-tags-input');
+  container.innerHTML = _wrongTags.map((t, i) =>
+    `<span class="tag">${esc(t)}<button onclick="removeTag(${i})">×</button></span>`
+  ).join('') + `<input id="wrong-tag-field" placeholder="${_wrongTags.length?'再加一个…':'输入错误写法后按回车…'}" onkeydown="handleTagKey(event)" />`;
+}
+
+function handleTagKey(e) {
+  if (e.key === 'Enter' || e.key === ',') {
+    e.preventDefault();
+    const val = e.target.value.trim();
+    if (val && !_wrongTags.includes(val)) { _wrongTags.push(val); renderTagsInput(); }
+    else if (val) { toast('该词已存在', 'error'); }
+  } else if (e.key === 'Backspace' && !e.target.value && _wrongTags.length) {
+    _wrongTags.pop(); renderTagsInput();
+  }
+}
+
+function removeTag(i) { _wrongTags.splice(i, 1); renderTagsInput(); }
+function focusTagInput() { document.getElementById('wrong-tag-field')?.focus(); }
+
+async function saveGlossary() {
+  // Collect any remaining text in input
+  const fieldVal = document.getElementById('wrong-tag-field')?.value.trim();
+  if (fieldVal && !_wrongTags.includes(fieldVal)) _wrongTags.push(fieldVal);
+
+  if (!_wrongTags.length) { toast('请至少输入一个错误写法', 'error'); return; }
+  const correct = document.getElementById('g-correct').value.trim();
+  if (!correct) { toast('请输入正确写法', 'error'); return; }
+
+  const id = document.getElementById('g-id').value;
+  const body = {
+    wrong_forms: _wrongTags,
+    correct_form: correct,
+    category: document.getElementById('g-category').value || null,
+    context_hint: document.getElementById('g-hint').value || null,
+  };
+  try {
+    if (id) {
+      await api('PATCH', `/glossary/${id}`, body);
+      toast('术语已更新');
+    } else {
+      await api('POST', '/glossary', body);
+      toast('术语已添加');
+    }
+    closeGlossaryForm();
+    loadGlossary();
+  } catch(e) { toast('保存失败：' + e.message, 'error'); }
+}
+
+async function deleteGlossary(id) {
+  if (!confirm('确认删除此术语规则？')) return;
+  try {
+    await api('DELETE', `/glossary/${id}`);
+    toast('已删除');
+    loadGlossary();
+  } catch(e) { toast('删除失败：' + e.message, 'error'); }
+}
+
+// ── Settings ──────────────────────────────────────────────────────────────────
+  async function loadSettings() {
+    try {
+      const cfg = await api('GET', '/config');
+      document.getElementById('s-transcription-provider').value = cfg.transcription_provider;
+      document.getElementById('s-transcription-model').value = cfg.transcription_model;
+      document.getElementById('s-llm-mode').value = cfg.llm_mode;
+      document.getElementById('s-reasoning-provider').value = cfg.reasoning_provider;
+      document.getElementById('s-reasoning-model').value = cfg.reasoning_model;
+      document.getElementById('s-local-reasoning-model').value = cfg.local_reasoning_model || '';
+      document.getElementById('s-local-vision-model').value = cfg.local_vision_model || '';
+      document.getElementById('s-openai-base-url').value = cfg.openai_base_url;
+      document.getElementById('s-openai-auth-mode').value = cfg.openai_auth_mode;
+      document.getElementById('s-openai-helper').value = cfg.openai_api_key_helper || '';
+      document.getElementById('s-anthropic-base-url').value = cfg.anthropic_base_url;
+      document.getElementById('s-anthropic-auth-mode').value = cfg.anthropic_auth_mode;
+      document.getElementById('s-anthropic-helper').value = cfg.anthropic_api_key_helper || '';
+      document.getElementById('s-minimax-base-url').value = cfg.minimax_base_url;
+      document.getElementById('s-ollama-url').value = cfg.ollama_base_url;
+      document.getElementById('s-max-size').value = cfg.max_upload_size_mb;
+      document.getElementById('s-max-duration').value = cfg.max_video_duration_sec;
+      document.getElementById('s-ffmpeg-timeout').value = cfg.ffmpeg_timeout_sec;
+      document.getElementById('openai-key-hint').textContent = cfg.openai_api_key_set ? '✓ 已设置（留空则保留原值）' : '未设置';
+      document.getElementById('anthropic-key-hint').textContent = cfg.anthropic_api_key_set ? '✓ 已设置（留空则保留原值）' : '未设置';
+      document.getElementById('minimax-key-hint').textContent = cfg.minimax_api_key_set ? '✓ 已设置（留空则保留原值）' : '未设置';
+      onProviderChange();
+    } catch(e) { toast('加载配置失败：' + e.message, 'error'); }
+  }
+
+  function onProviderChange() {
+    const mode = document.getElementById('s-llm-mode').value;
+    const tp = document.getElementById('s-transcription-provider').value;
+    const rp = document.getElementById('s-reasoning-provider').value;
+    const needsOpenAI = tp === 'openai' || (mode === 'performance' && rp === 'openai');
+    const needsAnthropic = mode === 'performance' && rp === 'anthropic';
+    const needsMiniMax = mode === 'performance' && rp === 'minimax';
+    const needsOllama = mode === 'local';
+  
+    document.getElementById('openai-key-group').style.display = needsOpenAI ? '' : 'none';
+    document.getElementById('anthropic-key-group').style.display = needsAnthropic ? '' : 'none';
+    document.getElementById('minimax-key-group').style.display = needsMiniMax ? '' : 'none';
+    document.getElementById('ollama-url-group').style.display = needsOllama ? '' : 'none';
+  
+    // Model placeholder hints
+    const modelHints = {
+      openai: { transcription: 'gpt-4o-transcribe', reasoning: 'gpt-4o-mini' },
+      local_whisper: { transcription: 'large-v3', reasoning: '' },
+      anthropic: { transcription: '', reasoning: 'claude-haiku-4-5-20251001' },
+      minimax: { transcription: '', reasoning: 'MiniMax-M2.5' },
+      ollama: { transcription: '', reasoning: 'llama3.2' },
+    };
+    document.getElementById('s-transcription-model').placeholder = modelHints[tp]?.transcription || '';
+    document.getElementById('s-reasoning-model').placeholder = modelHints[rp]?.reasoning || '';
+  }
+
+async function saveSettings(e) {
+  e.preventDefault();
+  const body = {};
+  const tp = document.getElementById('s-transcription-provider').value;
+  const rp = document.getElementById('s-reasoning-provider').value;
+    body.transcription_provider = tp;
+    body.transcription_model = document.getElementById('s-transcription-model').value;
+    body.llm_mode = document.getElementById('s-llm-mode').value;
+    body.reasoning_provider = rp;
+    body.reasoning_model = document.getElementById('s-reasoning-model').value;
+    body.local_reasoning_model = document.getElementById('s-local-reasoning-model').value;
+    body.local_vision_model = document.getElementById('s-local-vision-model').value;
+    body.openai_base_url = document.getElementById('s-openai-base-url').value;
+    body.openai_auth_mode = document.getElementById('s-openai-auth-mode').value;
+    body.openai_api_key_helper = document.getElementById('s-openai-helper').value;
+    const openaiKey = document.getElementById('s-openai-key').value;
+    if (openaiKey) body.openai_api_key = openaiKey;
+    body.anthropic_base_url = document.getElementById('s-anthropic-base-url').value;
+    body.anthropic_auth_mode = document.getElementById('s-anthropic-auth-mode').value;
+    body.anthropic_api_key_helper = document.getElementById('s-anthropic-helper').value;
+    const anthropicKey = document.getElementById('s-anthropic-key').value;
+    if (anthropicKey) body.anthropic_api_key = anthropicKey;
+    const minimaxKey = document.getElementById('s-minimax-key').value;
+    if (minimaxKey) body.minimax_api_key = minimaxKey;
+    body.minimax_base_url = document.getElementById('s-minimax-base-url').value;
+    if (body.llm_mode === 'local') body.ollama_base_url = document.getElementById('s-ollama-url').value;
+    body.max_upload_size_mb = parseInt(document.getElementById('s-max-size').value);
+    body.max_video_duration_sec = parseInt(document.getElementById('s-max-duration').value);
+    body.ffmpeg_timeout_sec = parseInt(document.getElementById('s-ffmpeg-timeout').value);
+
+  try {
+      await api('PATCH', '/config', body);
+      toast('配置已保存，即时生效');
+      document.getElementById('s-openai-key').value = '';
+      document.getElementById('s-anthropic-key').value = '';
+      document.getElementById('s-minimax-key').value = '';
+      loadSettings();
+    } catch(e) { toast('保存失败：' + e.message, 'error'); }
+  }
+
+async function resetConfig() {
+  if (!confirm('确认重置所有运行时覆盖？将恢复环境变量默认值。')) return;
+  try {
+    await api('DELETE', '/config/overrides');
+    toast('已重置配置覆盖');
+    loadSettings();
+  } catch(e) { toast('重置失败：' + e.message, 'error'); }
+}
+
+function toggleVisibility(id) {
+  const el = document.getElementById(id);
+  el.type = el.type === 'password' ? 'text' : 'password';
+}
+
+// ── Utils ─────────────────────────────────────────────────────────────────────
+function esc(s) { return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function fmtDate(iso) {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  return d.toLocaleString('zh-CN', { month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit', second:'2-digit' });
+}
+function fmtTime(sec) {
+  const m = Math.floor(sec/60), s = Math.floor(sec%60);
+  return `${m}:${String(s).padStart(2,'0')}`;
+}
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+startRefresh();
+</script>
+</body>
+</html>

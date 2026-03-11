@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import pytest
 
-from fastcut.edit.decisions import build_edit_decision
-from fastcut.media.silence import SilenceSegment
+from roughcut.edit.decisions import build_edit_decision
+from roughcut.media.silence import SilenceSegment
 
 
 def test_build_edit_decision_basic():

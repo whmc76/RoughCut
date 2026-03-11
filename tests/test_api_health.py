@@ -20,6 +20,19 @@ async def test_glossary_empty_list(client: AsyncClient):
 
 
 @pytest.mark.asyncio
+async def test_config_has_extended_provider_fields(client: AsyncClient):
+    response = await client.get("/api/v1/config")
+    assert response.status_code == 200
+    data = response.json()
+    assert "openai_base_url" in data
+    assert "anthropic_base_url" in data
+    assert "minimax_base_url" in data
+    assert "openai_auth_mode" in data
+    assert "anthropic_auth_mode" in data
+    assert "minimax_api_key_set" in data
+
+
+@pytest.mark.asyncio
 async def test_glossary_crud(client: AsyncClient):
     # Create
     resp = await client.post(
