@@ -47,7 +47,7 @@ def build_cover_title(profile: dict[str, Any], preset: WorkflowPreset) -> dict[s
     hook = _clean_line(profile.get("hook_line") or "")
     visible_text = str(profile.get("visible_text") or "").strip()
 
-    top = _pick_cover_top(brand=brand, subject_type=subject_type, visible_text=visible_text)
+    top = _pick_cover_top(brand=brand, subject_type=subject_type, visible_text=visible_text, preset=preset)
     main = _pick_cover_main(
         brand=brand,
         model=model,
@@ -94,14 +94,16 @@ async def infer_content_profile(
             frame_paths = _extract_reference_frames(source_path, Path(tmpdir), count=3)
             if frame_paths:
                 prompt = (
-                    "你在分析一条中文开箱/评测视频。请结合图片和口播字幕，判断视频主体是什么，"
-                    "优先识别包装、盒体、产品本体上的品牌 logo、英文单词、型号字样。"
-                    "尽量给出品牌、型号/版本、主体类型、视频主题，以及适合的开箱预设。"
+                    "你在分析一条中文短视频。视频可能是开箱评测、录屏教学、vlog、口播观点、游戏高光或美食探店。"
+                    "请结合图片和口播字幕，判断视频主体是什么。"
+                    "如果画面里有产品、软件界面、店招、包装、盒体、logo、英文单词、型号字样，都优先识别。"
+                    "尽量给出品牌、型号/版本、主体类型、视频主题，以及适合的剪辑预设。"
                     "如果不确定，不要乱编，留空即可。\n\n"
                     "输出 JSON："
                     '{"subject_brand":"","subject_model":"","subject_type":"","video_theme":"",'
                     '"preset_name":"","hook_line":"","visible_text":"","search_queries":[]}'
-                    "\n要求：search_queries 提供 2-3 个适合联网搜索验证的查询词。"
+                    "\n要求：preset_name 只能从 unboxing_default、unboxing_limited、unboxing_upgrade、edc_tactical、screen_tutorial、vlog_daily、talking_head_commentary、gameplay_highlight、food_explore 中选择。"
+                    "\nsearch_queries 提供 2-3 个适合联网搜索验证的查询词。"
                     f"\n源文件名：{source_name}\n字幕节选：\n{transcript_excerpt}"
                 )
                 content = await complete_with_images(prompt, frame_paths, max_tokens=500, json_mode=True)
@@ -113,8 +115,8 @@ async def infer_content_profile(
     try:
         provider = get_reasoning_provider()
         prompt = (
-            "你在分析中文开箱/评测视频的口播内容。请根据文件名、字幕节选和已有视觉判断，"
-            "补全视频主体的品牌、型号/版本、主体类型、视频主题，并给出适合联网验证的搜索词。"
+            "你在分析中文短视频的口播内容。视频可能是开箱评测、录屏教学、vlog、口播观点、游戏高光或美食探店。"
+            "请根据文件名、字幕节选和已有视觉判断，补全视频主体的品牌、型号/版本、主体类型、视频主题，并给出适合联网验证的搜索词。"
             "如果不确定，请留空，不要乱编。"
             "\n输出 JSON："
             '{"subject_brand":"","subject_model":"","subject_type":"","video_theme":"",'
@@ -124,7 +126,7 @@ async def infer_content_profile(
         )
         response = await provider.complete(
             [
-                Message(role="system", content="你是中文开箱/EDC 视频内容策划助手。"),
+                Message(role="system", content="你是中文短视频内容策划助手。"),
                 Message(role="user", content=prompt),
             ],
             temperature=0.1,
@@ -179,7 +181,7 @@ async def apply_content_profile_feedback(
     try:
         provider = get_reasoning_provider()
         prompt = (
-            "你在整理一条开箱/EDC 视频的人工确认摘要。请结合模型草稿和用户修正，"
+            "你在整理一条中文短视频的人工确认摘要。请结合模型草稿和用户修正，"
             "输出一个后续可直接用于搜索、字幕修正和剪辑规划的确认版摘要。"
             "用户修正优先级最高，不要忽略用户手动填写的信息。\n"
             "输出 JSON："
@@ -240,7 +242,7 @@ async def enrich_content_profile(
             try:
                 provider = get_reasoning_provider()
                 prompt = (
-                    "你在做开箱视频字幕与封面前置研究。请根据已有判断和搜索证据，"
+                    "你在做短视频字幕与封面前置研究。请根据已有判断和搜索证据，"
                     "确认视频主体的品牌、型号/版本、主体类型、视频主题，并生成适合做封面的三段标题。"
                     "优先给出品牌名、系列名或主体名，不要输出泛化标题如“产品开箱与上手体验”。"
                     "如果证据不足，不要编造，保留已有可信信息。\n\n"
@@ -253,7 +255,7 @@ async def enrich_content_profile(
                 )
                 response = await provider.complete(
                     [
-                        Message(role="system", content="你是中文 EDC/开箱内容策划与字幕审校助手。"),
+                        Message(role="system", content="你是中文短视频内容策划与字幕审校助手。"),
                         Message(role="user", content=prompt),
                     ],
                     temperature=0.1,
@@ -321,7 +323,7 @@ async def polish_subtitle_items(
                     for item in chunk
                 ]
                 prompt = (
-                    "你在精修中文开箱视频字幕。请根据视频主体、主题和搜索证据，"
+                    "你在精修中文短视频字幕。请根据视频主体、主题和搜索证据，"
                     "把 ASR 错字、品牌型号错写和不顺口的地方修好。"
                     "要求：\n"
                     "1. 不要改变原意，不要凭空添加没说过的参数。\n"
@@ -337,7 +339,7 @@ async def polish_subtitle_items(
                 )
                 response = await provider.complete(
                     [
-                        Message(role="system", content="你是严谨的中文开箱视频字幕审校助手。"),
+                        Message(role="system", content="你是严谨的中文短视频字幕审校助手。"),
                         Message(role="user", content=prompt),
                     ],
                     temperature=0.1,
@@ -499,21 +501,33 @@ def _fallback_profile(
         channel_profile=channel_profile,
         transcript_hint=transcript_excerpt,
     )
+    subject_type = _default_subject_type_for_preset(preset)
+    video_theme = _default_video_theme_for_preset(preset)
+    engagement_question = _default_engagement_question(preset)
     return {
         "subject_brand": "",
         "subject_model": Path(source_name).stem,
-        "subject_type": "开箱产品",
-        "video_theme": "产品开箱与上手体验",
+        "subject_type": subject_type,
+        "video_theme": video_theme,
         "preset_name": preset.name,
         "preset": preset.to_dict(),
         "hook_line": preset.cover_accent,
-        "summary": "视频以开箱和上手体验为主，重点看产品本体、细节和到手感受。",
-        "engagement_question": "你觉得这次到手值不值？",
+        "summary": _build_profile_summary(
+            {
+                "subject_brand": "",
+                "subject_model": Path(source_name).stem,
+                "subject_type": subject_type,
+                "video_theme": video_theme,
+                "preset_name": preset.name,
+            }
+        ),
+        "engagement_question": engagement_question,
         "cover_title": build_cover_title(
             {
                 "subject_brand": "",
                 "subject_model": Path(source_name).stem,
-                "video_theme": "产品开箱与上手体验",
+                "subject_type": subject_type,
+                "video_theme": video_theme,
                 "hook_line": preset.cover_accent,
             },
             preset,
@@ -570,12 +584,22 @@ def _is_generic_cover_line(text: str) -> bool:
     return any(fragment in normalized for fragment in generic_fragments)
 
 
-def _pick_cover_top(*, brand: str, subject_type: str, visible_text: str) -> str:
+def _pick_cover_top(*, brand: str, subject_type: str, visible_text: str, preset: WorkflowPreset) -> str:
     compact_brand = _compact_brand_name(brand, visible_text=visible_text)
     if compact_brand:
         return compact_brand
     if subject_type:
         return subject_type[:14]
+    if preset.name == "screen_tutorial":
+        return "教程"
+    if preset.name == "vlog_daily":
+        return "VLOG"
+    if preset.name == "talking_head_commentary":
+        return "观点"
+    if preset.name == "gameplay_highlight":
+        return "高能"
+    if preset.name == "food_explore":
+        return "探店"
     return "开箱"
 
 
@@ -633,8 +657,60 @@ def _pick_visible_brand(visible_text: str) -> str:
 def _build_profile_summary(profile: dict[str, Any]) -> str:
     brand = str(profile.get("subject_brand") or "").strip()
     model = str(profile.get("subject_model") or "").strip()
-    subject_type = str(profile.get("subject_type") or "开箱产品").strip()
-    theme = str(profile.get("video_theme") or "开箱体验").strip()
+    preset_name = str(profile.get("preset_name") or "").strip()
+    subject_type = str(profile.get("subject_type") or _default_subject_type_by_name(preset_name)).strip()
+    theme = str(profile.get("video_theme") or _default_video_theme_by_name(preset_name)).strip()
     parts = [part for part in (brand, model or subject_type) if part]
     product = " ".join(parts).strip() or subject_type
+    if preset_name == "screen_tutorial":
+        return f"这条视频主要围绕{product}的操作演示展开，内容方向偏{theme}，重点是步骤清晰、术语准确，方便后续剪成可跟做的教程。"
+    if preset_name == "vlog_daily":
+        return f"这条视频主要围绕{product}展开，内容方向偏{theme}，重点是保留生活感、场景切换和真实情绪。"
+    if preset_name == "talking_head_commentary":
+        return f"这条视频主要围绕{product}展开表达，内容方向偏{theme}，重点是观点钩子、论点节奏和结论清晰。"
+    if preset_name == "gameplay_highlight":
+        return f"这条视频主要围绕{product}展开，内容方向偏{theme}，重点是高能操作、关键节点和结果反馈。"
+    if preset_name == "food_explore":
+        return f"这条视频主要围绕{product}展开，内容方向偏{theme}，重点是店名菜名、口感描述和是否值得去。"
     return f"这条视频主要围绕{product}展开，内容方向偏{theme}，适合后续做搜索校验、字幕纠错和剪辑包装。"
+
+
+def _default_subject_type_for_preset(preset: WorkflowPreset) -> str:
+    return _default_subject_type_by_name(preset.name)
+
+
+def _default_subject_type_by_name(preset_name: str) -> str:
+    mapping = {
+        "screen_tutorial": "录屏教学",
+        "vlog_daily": "Vlog日常",
+        "talking_head_commentary": "口播观点",
+        "gameplay_highlight": "游戏实况",
+        "food_explore": "探店试吃",
+    }
+    return mapping.get(preset_name, "开箱产品")
+
+
+def _default_video_theme_for_preset(preset: WorkflowPreset) -> str:
+    return _default_video_theme_by_name(preset.name)
+
+
+def _default_video_theme_by_name(preset_name: str) -> str:
+    mapping = {
+        "screen_tutorial": "软件流程演示与步骤讲解",
+        "vlog_daily": "日常记录与生活分享",
+        "talking_head_commentary": "观点表达与信息拆解",
+        "gameplay_highlight": "高能操作与对局复盘",
+        "food_explore": "探店试吃与性价比判断",
+    }
+    return mapping.get(preset_name, "产品开箱与上手体验")
+
+
+def _default_engagement_question(preset: WorkflowPreset) -> str:
+    mapping = {
+        "screen_tutorial": "这套流程你会直接照着做吗？",
+        "vlog_daily": "你最想看我下次拍哪种日常？",
+        "talking_head_commentary": "这件事你同意这个判断吗？",
+        "gameplay_highlight": "这波操作你会怎么打？",
+        "food_explore": "这家店你会专门去吃一次吗？",
+    }
+    return mapping.get(preset.name, "你觉得这次到手值不值？")

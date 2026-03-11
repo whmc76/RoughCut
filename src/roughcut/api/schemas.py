@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -39,6 +39,48 @@ class JobOut(BaseModel):
     created_at: datetime
     updated_at: datetime
     steps: list[JobStepOut] = []
+
+
+class JobActivityCurrentStepOut(BaseModel):
+    step_name: str
+    label: str
+    status: str
+    detail: str | None = None
+    progress: float | None = None
+    updated_at: str | None = None
+
+
+class JobActivityDecisionOut(BaseModel):
+    kind: str
+    title: str
+    status: str
+    summary: str
+    detail: str | None = None
+    updated_at: str | None = None
+
+
+class JobActivityEventOut(BaseModel):
+    timestamp: str
+    type: str
+    status: str
+    title: str
+    detail: str | None = None
+
+
+class JobActivityRenderOut(BaseModel):
+    status: str
+    progress: float
+    output_path: str | None = None
+    updated_at: str | None = None
+
+
+class JobActivityOut(BaseModel):
+    job_id: str
+    status: str
+    current_step: JobActivityCurrentStepOut | None = None
+    render: JobActivityRenderOut | None = None
+    decisions: list[JobActivityDecisionOut]
+    events: list[JobActivityEventOut]
 
 
 class ContentProfileReviewOut(BaseModel):
@@ -96,6 +138,7 @@ class WatchRootCreate(BaseModel):
     path: str
     channel_profile: str | None = None
     enabled: bool = True
+    scan_mode: Literal["fast", "precise"] = "fast"
 
 
 class WatchRootOut(BaseModel):
@@ -105,7 +148,53 @@ class WatchRootOut(BaseModel):
     path: str
     channel_profile: str | None
     enabled: bool
+    scan_mode: Literal["fast", "precise"]
     created_at: datetime
+
+
+class WatchInventoryItemOut(BaseModel):
+    path: str
+    relative_path: str
+    source_name: str
+    stem: str
+    size_bytes: int
+    modified_at: str
+    duration_sec: float | None
+    width: int | None
+    height: int | None
+    fps: float | None
+    status: str
+    dedupe_reason: str | None = None
+    matched_job_id: str | None = None
+    matched_output_path: str | None = None
+
+
+class WatchInventoryOut(BaseModel):
+    pending: list[WatchInventoryItemOut]
+    deduped: list[WatchInventoryItemOut]
+
+
+class WatchInventoryScanIn(BaseModel):
+    force: bool = False
+
+
+class WatchInventoryScanStatusOut(BaseModel):
+    root_path: str
+    scan_mode: Literal["fast", "precise"]
+    status: str
+    started_at: str
+    updated_at: str
+    finished_at: str | None = None
+    total_files: int
+    processed_files: int
+    pending_count: int
+    deduped_count: int
+    current_file: str | None = None
+    current_phase: str | None = None
+    current_file_size_bytes: int | None = None
+    current_file_processed_bytes: int | None = None
+    error: str | None = None
+    inventory: WatchInventoryOut
 
 
 # ── Review ────────────────────────────────────────────────────────────────────

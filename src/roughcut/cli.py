@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 
 import click
 import uvicorn
@@ -58,17 +59,24 @@ def watcher(path: str, channel_profile: str | None, language: str):
 @cli.command()
 @click.option("--queue", required=True, type=click.Choice(["media_queue", "llm_queue", "all"]))
 @click.option("--concurrency", default=2, type=int)
-def worker(queue: str, concurrency: int):
+@click.option(
+    "--pool",
+    default="solo" if os.name == "nt" else "prefork",
+    type=click.Choice(["solo", "prefork"]),
+    show_default=True,
+)
+def worker(queue: str, concurrency: int, pool: str):
     """Start a Celery worker for the specified queue."""
     from roughcut.pipeline.celery_app import celery_app
 
     queues = ["media_queue", "llm_queue"] if queue == "all" else [queue]
-    click.echo(f"Starting worker for queues: {queues}")
+    click.echo(f"Starting worker for queues: {queues} (pool={pool}, concurrency={concurrency})")
     celery_app.worker_main(
         argv=[
             "worker",
             f"--queues={','.join(queues)}",
             f"--concurrency={concurrency}",
+            f"--pool={pool}",
             "--loglevel=info",
         ]
     )

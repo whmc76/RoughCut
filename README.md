@@ -283,6 +283,32 @@ ruff format src/
 ruff check src/
 ```
 
+### 项目改名或目录迁移后的环境修复
+
+如果你把仓库从 `FastCut` 改名为 `RoughCut`，或直接移动了项目目录，记得重新安装 editable package。否则虚拟环境里的 `.pth` 和 pytest 缓存可能仍指向旧路径，表现为：
+
+- `ModuleNotFoundError: No module named 'roughcut'`
+- pytest 报错路径仍显示旧目录，例如 `E:/WorkSpace/FastCut/...`
+
+建议执行：
+
+```bash
+python -m pip uninstall -y fastcut roughcut
+python -m pip install -e ".[dev]"
+```
+
+如果 pytest 仍命中旧路径，再清理缓存后重跑：
+
+```bash
+# Windows
+for /d /r %d in (__pycache__) do @if exist "%d" rd /s /q "%d"
+if exist .pytest_cache rd /s /q .pytest_cache
+
+# Linux / macOS
+find . -type d -name "__pycache__" -prune -exec rm -rf {} +
+rm -rf .pytest_cache
+```
+
 ---
 
 ## 渲染排查

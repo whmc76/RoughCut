@@ -66,6 +66,10 @@ class ConfigOut(BaseModel):
     overrides: dict
 
 
+class ConfigOptionsOut(BaseModel):
+    transcription_models: dict[str, list[str]]
+
+
 class ConfigPatch(BaseModel):
     transcription_provider: str | None = None
     transcription_model: str | None = None
@@ -131,6 +135,25 @@ def get_config():
         allowed_extensions=s.allowed_extensions,
         fact_check_enabled=s.fact_check_enabled,
         overrides=overrides,
+    )
+
+
+@router.get("/options", response_model=ConfigOptionsOut)
+def get_config_options():
+    return ConfigOptionsOut(
+        transcription_models={
+            "openai": [
+                "gpt-4o-transcribe",
+            ],
+            "local_whisper": [
+                "tiny",
+                "base",
+                "small",
+                "medium",
+                "large-v3",
+                "distil-large-v3",
+            ],
+        }
     )
 
 

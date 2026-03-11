@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from roughcut.api.config import get_config
+from roughcut.api.config import get_config, get_config_options
 from roughcut.config import get_settings
 
 
@@ -34,3 +34,12 @@ def test_get_config_exposes_extended_provider_fields(tmp_path, monkeypatch):
     assert cfg.search_fallback_provider == "searxng"
     assert cfg.openai_auth_mode == "api_key"
     assert cfg.anthropic_auth_mode == "api_key"
+
+
+def test_get_config_options_exposes_transcription_model_lists():
+    options = get_config_options()
+
+    assert "openai" in options.transcription_models
+    assert options.transcription_models["openai"] == ["gpt-4o-transcribe"]
+    assert "local_whisper" in options.transcription_models
+    assert "base" in options.transcription_models["local_whisper"]

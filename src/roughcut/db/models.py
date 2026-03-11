@@ -239,6 +239,9 @@ class WatchRoot(Base):
     path: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
     channel_profile: Mapped[str | None] = mapped_column(Text)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    scan_mode: Mapped[str] = mapped_column(Text, nullable=False, default="fast", server_default="fast")
+    inventory_cache_json: Mapped[dict | None] = mapped_column(JSON_TYPE)
+    inventory_cache_updated_at: Mapped[datetime | None] = mapped_column(TIMESTAMPTZ)
     created_at: Mapped[datetime] = mapped_column(TIMESTAMPTZ, server_default=func.now())
 
 

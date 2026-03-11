@@ -10,6 +10,7 @@ import hashlib
 import json
 import tempfile
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 from sqlalchemy import select
@@ -33,6 +34,39 @@ from roughcut.review.platform_copy import generate_platform_packaging, save_plat
 from roughcut.speech.postprocess import save_subtitle_items, split_into_subtitles
 from roughcut.speech.transcribe import transcribe_audio
 from roughcut.storage.s3 import get_storage, job_key
+
+
+STEP_LABELS = {
+    "probe": "探测媒体信息",
+    "extract_audio": "提取音频",
+    "transcribe": "语音转写",
+    "subtitle_postprocess": "字幕后处理",
+    "content_profile": "内容摘要",
+    "summary_review": "人工确认",
+    "glossary_review": "术语纠错",
+    "edit_plan": "剪辑决策",
+    "render": "渲染输出",
+    "platform_package": "平台文案",
+}
+
+
+async def _set_step_progress(
+    session,
+    step: JobStep | None,
+    *,
+    detail: str,
+    progress: float | None = None,
+) -> None:
+    if step is None:
+        return
+    metadata = dict(step.metadata_ or {})
+    metadata["detail"] = detail
+    metadata["label"] = STEP_LABELS.get(step.step_name, step.step_name)
+    metadata["updated_at"] = datetime.now(timezone.utc).isoformat()
+    if progress is not None:
+        metadata["progress"] = max(0.0, min(1.0, progress))
+    step.metadata_ = metadata
+    await session.commit()
 
 
 async def _resolve_source(
@@ -95,9 +129,11 @@ async def run_probe(job_id: str) -> dict:
             select(JobStep).where(JobStep.job_id == job.id, JobStep.step_name == "probe")
         )
         step = step_result.scalar_one()
+        await _set_step_progress(session, step, detail="下载源视频并准备探测媒体参数", progress=0.1)
 
         with tempfile.TemporaryDirectory() as tmpdir:
             source_path = await _resolve_source(job, tmpdir)
+            await _set_step_progress(session, step, detail="读取分辨率、时长、编码与文件哈希", progress=0.45)
             meta = await probe(source_path)
             validate_media(meta)
             file_hash = _hash_file(source_path)
@@ -123,6 +159,7 @@ async def run_probe(job_id: str) -> dict:
             },
         )
         session.add(artifact)
+        await _set_step_progress(session, step, detail="已写入媒体信息", progress=1.0)
         await session.commit()
 
         return {"duration": meta.duration, "file_hash": file_hash}
@@ -136,15 +173,18 @@ async def run_extract_audio(job_id: str) -> dict:
             select(JobStep).where(JobStep.job_id == job.id, JobStep.step_name == "extract_audio")
         )
         step = step_result.scalar_one()
+        await _set_step_progress(session, step, detail="下载源视频", progress=0.1)
 
         with tempfile.TemporaryDirectory() as tmpdir:
             source_path = await _resolve_source(job, tmpdir)
             audio_path = Path(tmpdir) / "audio.wav"
+            await _set_step_progress(session, step, detail="提取音频轨道", progress=0.45)
             await extract_audio(source_path, audio_path)
 
             # Upload to S3
             storage = get_storage()
             key = job_key(job_id, "audio.wav")
+            await _set_step_progress(session, step, detail="上传音频到对象存储", progress=0.8)
             await storage.async_upload_file(audio_path, key)
 
         artifact = Artifact(
@@ -154,6 +194,7 @@ async def run_extract_audio(job_id: str) -> dict:
             storage_path=key,
         )
         session.add(artifact)
+        await _set_step_progress(session, step, detail="音频已就绪", progress=1.0)
         await session.commit()
 
         return {"audio_key": key}
@@ -167,6 +208,7 @@ async def run_transcribe(job_id: str) -> dict:
             select(JobStep).where(JobStep.job_id == job.id, JobStep.step_name == "transcribe")
         )
         step = step_result.scalar_one()
+        await _set_step_progress(session, step, detail="加载音频并准备转写", progress=0.1)
 
         # Get audio artifact key
         audio_result = await session.execute(
@@ -178,9 +220,10 @@ async def run_transcribe(job_id: str) -> dict:
         with tempfile.TemporaryDirectory() as tmpdir:
             audio_path = Path(tmpdir) / "audio.wav"
             await storage.async_download_file(audio_artifact.storage_path, audio_path)
-
+            await _set_step_progress(session, step, detail=f"使用 {job.language} 模型执行转写", progress=0.5)
             result = await transcribe_audio(job.id, step, audio_path, job.language, session)
 
+        await _set_step_progress(session, step, detail=f"转写完成，共 {len(result.segments)} 段", progress=1.0)
         await session.commit()
         return {"segment_count": len(result.segments), "duration": result.duration}
 
@@ -189,6 +232,11 @@ async def run_subtitle_postprocess(job_id: str) -> dict:
     factory = get_session_factory()
     async with factory() as session:
         job = await session.get(Job, uuid.UUID(job_id))
+        step_result = await session.execute(
+            select(JobStep).where(JobStep.job_id == job.id, JobStep.step_name == "subtitle_postprocess")
+        )
+        step = step_result.scalar_one()
+        await _set_step_progress(session, step, detail="加载转写结果并切分字幕", progress=0.25)
 
         # Load transcript segments
         seg_result = await session.execute(
@@ -199,7 +247,9 @@ async def run_subtitle_postprocess(job_id: str) -> dict:
         segments = seg_result.scalars().all()
 
         entries = split_into_subtitles(segments)
+        await _set_step_progress(session, step, detail=f"生成字幕条目 {len(entries)} 条", progress=0.7)
         items = await save_subtitle_items(job.id, entries, session)
+        await _set_step_progress(session, step, detail="字幕后处理完成", progress=1.0)
         await session.commit()
 
         return {"subtitle_count": len(items)}
@@ -213,6 +263,7 @@ async def run_content_profile(job_id: str) -> dict:
             select(JobStep).where(JobStep.job_id == job.id, JobStep.step_name == "content_profile")
         )
         step = step_result.scalar_one()
+        await _set_step_progress(session, step, detail="整理字幕上下文并识别视频类型", progress=0.15)
 
         item_result = await session.execute(
             select(SubtitleItem)
@@ -234,6 +285,7 @@ async def run_content_profile(job_id: str) -> dict:
 
         with tempfile.TemporaryDirectory() as tmpdir:
             source_path = await _resolve_source(job, tmpdir, expected_hash=job.file_hash)
+            await _set_step_progress(session, step, detail="抽取画面并分析主题、主体与剪辑预设", progress=0.55)
             content_profile = await infer_content_profile(
                 source_path=source_path,
                 source_name=job.source_name,
@@ -249,6 +301,13 @@ async def run_content_profile(job_id: str) -> dict:
             data_json=content_profile,
         )
         session.add(artifact)
+        subject = " / ".join(
+            part for part in [
+                content_profile.get("subject_type"),
+                content_profile.get("video_theme"),
+            ] if part
+        ).strip()
+        await _set_step_progress(session, step, detail=f"已生成内容摘要：{subject or '待人工确认'}", progress=1.0)
         await session.commit()
 
         return {
@@ -263,6 +322,11 @@ async def run_glossary_review(job_id: str) -> dict:
     factory = get_session_factory()
     async with factory() as session:
         job = await session.get(Job, uuid.UUID(job_id))
+        step_result = await session.execute(
+            select(JobStep).where(JobStep.job_id == job.id, JobStep.step_name == "glossary_review")
+        )
+        step = step_result.scalar_one()
+        await _set_step_progress(session, step, detail="应用术语词表并收集字幕上下文", progress=0.15)
 
         item_result = await session.execute(
             select(SubtitleItem)
@@ -274,6 +338,7 @@ async def run_glossary_review(job_id: str) -> dict:
         corrections = await apply_glossary_corrections(job.id, subtitle_items, session)
         glossary_result = await session.execute(select(GlossaryTerm))
         glossary_terms = glossary_result.scalars().all()
+        await _set_step_progress(session, step, detail=f"已识别 {len(corrections)} 处术语纠错候选", progress=0.45)
 
         subtitle_dicts = [
             {
@@ -335,6 +400,7 @@ async def run_glossary_review(job_id: str) -> dict:
             data_json=content_profile,
         )
         session.add(artifact)
+        await _set_step_progress(session, step, detail=f"字幕润色完成，更新 {polished_count} 条", progress=1.0)
         await session.commit()
 
         return {
@@ -354,6 +420,11 @@ async def run_edit_plan(job_id: str) -> dict:
     factory = get_session_factory()
     async with factory() as session:
         job = await session.get(Job, uuid.UUID(job_id))
+        step_result = await session.execute(
+            select(JobStep).where(JobStep.job_id == job.id, JobStep.step_name == "edit_plan")
+        )
+        step = step_result.scalar_one()
+        await _set_step_progress(session, step, detail="加载媒体参数、字幕与音频", progress=0.15)
 
         # Get media meta for duration
         meta_result = await session.execute(
@@ -390,6 +461,7 @@ async def run_edit_plan(job_id: str) -> dict:
         with tempfile.TemporaryDirectory() as tmpdir:
             audio_path = Path(tmpdir) / "audio.wav"
             await storage.async_download_file(audio_artifact.storage_path, audio_path)
+            await _set_step_progress(session, step, detail="检测静音和明显废话段", progress=0.5)
             silences = detect_silence(audio_path)
 
         decision = build_edit_decision(
@@ -398,6 +470,7 @@ async def run_edit_plan(job_id: str) -> dict:
             silence_segments=silences,
             subtitle_items=subtitle_dicts,
         )
+        await _set_step_progress(session, step, detail="生成剪辑时间线与渲染计划", progress=0.85)
 
         editorial_timeline = await save_editorial_timeline(job.id, decision, session)
 
@@ -414,6 +487,7 @@ async def run_edit_plan(job_id: str) -> dict:
         )
         await save_render_plan(job.id, render_plan_dict, session)
 
+        await _set_step_progress(session, step, detail="剪辑决策已生成", progress=1.0)
         await session.commit()
         return {"timeline_id": str(editorial_timeline.id)}
 
@@ -424,6 +498,11 @@ async def run_render(job_id: str) -> dict:
         from roughcut.db.models import RenderOutput, Timeline
 
         job = await session.get(Job, uuid.UUID(job_id))
+        step_result = await session.execute(
+            select(JobStep).where(JobStep.job_id == job.id, JobStep.step_name == "render")
+        )
+        step = step_result.scalar_one()
+        await _set_step_progress(session, step, detail="准备时间线、字幕和输出目录", progress=0.05)
 
         # Get timelines
         editorial_result = await session.execute(
@@ -467,6 +546,7 @@ async def run_render(job_id: str) -> dict:
             job_id=job.id,
             timeline_id=editorial_timeline.id,
             status="running",
+            progress=0.05,
         )
         session.add(render_output)
         await session.flush()
@@ -485,6 +565,13 @@ async def run_render(job_id: str) -> dict:
     local_cover = out_dir / f"{out_name}_cover.jpg"
 
     with tempfile.TemporaryDirectory() as tmpdir:
+        async with get_session_factory()() as session:
+            step_result = await session.execute(
+                select(JobStep).where(JobStep.job_id == uuid.UUID(job_id), JobStep.step_name == "render")
+            )
+            render_step = step_result.scalar_one_or_none()
+            if render_step:
+                await _set_step_progress(session, render_step, detail="执行 FFmpeg 渲染成片", progress=0.35)
         source_path = await _resolve_source(
             job,
             tmpdir,
@@ -502,6 +589,17 @@ async def run_render(job_id: str) -> dict:
         )
         import shutil
         shutil.copy2(tmp_mp4, local_mp4)
+        async with get_session_factory()() as session:
+            step_result = await session.execute(
+                select(JobStep).where(JobStep.job_id == uuid.UUID(job_id), JobStep.step_name == "render")
+            )
+            render_step = step_result.scalar_one_or_none()
+            render_output = await session.get(RenderOutput, render_output_id)
+            if render_step:
+                await _set_step_progress(session, render_step, detail="生成字幕文件与封面图", progress=0.75)
+            if render_output:
+                render_output.progress = 0.75
+                await session.commit()
 
         # Write SRT with remapped timestamps (matches the edited video)
         keep_segments = [
@@ -545,6 +643,12 @@ async def run_render(job_id: str) -> dict:
         render_output.output_path = str(local_mp4)
         render_output.status = "done"
         render_output.progress = 1.0
+        step_result = await session.execute(
+            select(JobStep).where(JobStep.job_id == uuid.UUID(job_id), JobStep.step_name == "render")
+        )
+        render_step = step_result.scalar_one_or_none()
+        if render_step:
+            await _set_step_progress(session, render_step, detail="渲染完成，成片与字幕已输出", progress=1.0)
         await session.commit()
 
     return {"output_key": output_key, "local": local_paths}
@@ -561,6 +665,7 @@ async def run_platform_package(job_id: str) -> dict:
             select(JobStep).where(JobStep.job_id == job.id, JobStep.step_name == "platform_package")
         )
         step = step_result.scalar_one_or_none()
+        await _set_step_progress(session, step, detail="整理成片信息并生成平台文案", progress=0.2)
 
         content_profile_result = await session.execute(
             select(Artifact)
@@ -608,14 +713,20 @@ async def run_platform_package(job_id: str) -> dict:
     save_platform_packaging_markdown(output_md, packaging)
 
     async with get_session_factory()() as session:
+        step_result = await session.execute(
+            select(JobStep).where(JobStep.job_id == job.id, JobStep.step_name == "platform_package")
+        )
+        current_step = step_result.scalar_one_or_none()
         artifact = Artifact(
             job_id=job.id,
-            step_id=step.id if step else None,
+            step_id=current_step.id if current_step else None,
             artifact_type="platform_packaging_md",
             storage_path=str(output_md),
             data_json=packaging,
         )
         session.add(artifact)
+        if current_step is not None:
+            await _set_step_progress(session, current_step, detail="平台文案已生成", progress=1.0)
         await session.commit()
 
     return {"markdown": str(output_md)}

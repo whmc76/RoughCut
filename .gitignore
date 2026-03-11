@@ -1,3 +1,5 @@
+.venv/
+.pytest_cache/
 roughcut_config.json
 test.db
 logs/llm-benchmarks/

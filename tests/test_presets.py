@@ -39,3 +39,23 @@ def test_apply_glossary_terms_replaces_wrong_forms():
         [{"wrong_forms": ["法斯刀帕"], "correct_form": "FAS刀帕"}],
     )
     assert text == "今天开箱FAS刀帕战术版"
+
+
+def test_select_preset_for_screen_tutorial():
+    preset = select_preset(
+        channel_profile=None,
+        subject_model="Premiere 自动字幕流程",
+        subject_type="录屏教学",
+        transcript_hint="这期我演示一下完整操作步骤和参数设置",
+    )
+    assert preset.name == "screen_tutorial"
+
+
+def test_select_preset_for_vlog():
+    preset = select_preset(
+        channel_profile=None,
+        subject_model="周末 citywalk",
+        subject_type="Vlog 日常",
+        transcript_hint="今天带你们看我一天怎么过",
+    )
+    assert preset.name == "vlog_daily"
