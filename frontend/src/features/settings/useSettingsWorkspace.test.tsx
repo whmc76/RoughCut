@@ -1,0 +1,98 @@
+import { act, waitFor } from "@testing-library/react";
+
+import { renderHookWithQueryClient } from "../../test/renderWithQueryClient";
+import type { Config, ConfigOptions } from "../../types";
+import { useSettingsWorkspace } from "./useSettingsWorkspace";
+
+const mockApi = vi.hoisted(() => ({
+  getConfig: vi.fn(),
+  getConfigOptions: vi.fn(),
+  patchConfig: vi.fn(),
+  resetConfig: vi.fn(),
+}));
+
+vi.mock("../../api", () => ({
+  api: mockApi,
+}));
+
+const SAMPLE_CONFIG: Config = {
+  transcription_provider: "openai",
+  transcription_model: "gpt-4o-transcribe",
+  llm_mode: "performance",
+  reasoning_provider: "openai",
+  reasoning_model: "gpt-4.1",
+  local_reasoning_model: "qwen3:8b",
+  local_vision_model: "qwen2.5vl:7b",
+  multimodal_fallback_provider: "openai",
+  multimodal_fallback_model: "gpt-4.1-mini",
+  search_provider: "serpapi",
+  search_fallback_provider: "openai",
+  model_search_helper: "gpt-4.1-mini",
+  openai_base_url: "https://api.openai.com/v1",
+  openai_auth_mode: "api_key",
+  openai_api_key_helper: "",
+  anthropic_base_url: "https://api.anthropic.com",
+  anthropic_auth_mode: "api_key",
+  anthropic_api_key_helper: "",
+  minimax_base_url: "https://api.minimax.chat",
+  ollama_base_url: "http://127.0.0.1:11434",
+  openai_api_key_set: true,
+  anthropic_api_key_set: false,
+  minimax_api_key_set: false,
+  ollama_api_key_set: false,
+  max_upload_size_mb: 2048,
+  max_video_duration_sec: 7200,
+  ffmpeg_timeout_sec: 600,
+  allowed_extensions: [".mp4"],
+  output_dir: "data/output",
+  fact_check_enabled: true,
+  overrides: {},
+};
+
+const SAMPLE_OPTIONS: ConfigOptions = {
+  transcription_models: {
+    openai: ["gpt-4o-transcribe"],
+    local_whisper: ["large-v3"],
+  },
+};
+
+describe("useSettingsWorkspace", () => {
+  beforeEach(() => {
+    mockApi.getConfig.mockResolvedValue(SAMPLE_CONFIG);
+    mockApi.getConfigOptions.mockResolvedValue(SAMPLE_OPTIONS);
+    mockApi.patchConfig.mockResolvedValue({});
+    mockApi.resetConfig.mockResolvedValue({});
+  });
+
+  afterEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("hydrates form from config and strips empty secret fields on save", async () => {
+    const { result } = renderHookWithQueryClient(() => useSettingsWorkspace());
+
+    await waitFor(() => expect(result.current.config.data).toEqual(SAMPLE_CONFIG));
+    await waitFor(() => expect(result.current.form.output_dir).toBe("data/output"));
+
+    act(() => {
+      result.current.setForm((prev) => ({
+        ...prev,
+        output_dir: "D:/RoughCut/output",
+        openai_api_key: "  ",
+        anthropic_api_key: "",
+      }));
+    });
+
+    await act(async () => {
+      await result.current.save.mutateAsync();
+    });
+
+    expect(mockApi.patchConfig).toHaveBeenCalledWith(
+      expect.objectContaining({
+        output_dir: "D:/RoughCut/output",
+      }),
+    );
+    expect(mockApi.patchConfig.mock.calls[0][0]).not.toHaveProperty("openai_api_key");
+    expect(mockApi.patchConfig.mock.calls[0][0]).not.toHaveProperty("anthropic_api_key");
+  });
+});
