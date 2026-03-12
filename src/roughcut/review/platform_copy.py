@@ -93,7 +93,7 @@ def normalize_platform_packaging(
     highlights = raw.get("highlights") if isinstance(raw.get("highlights"), dict) else {}
     normalized: dict[str, Any] = {
         "highlights": {
-            "product": str(highlights.get("product") or _fallback_product(content_profile)).strip(),
+            "product": _normalize_highlight_product(highlights.get("product"), content_profile),
             "video_type": str(highlights.get("video_type") or _fallback_video_type(content_profile)).strip(),
             "strongest_selling_point": str(highlights.get("strongest_selling_point") or "").strip(),
             "strongest_emotion": str(highlights.get("strongest_emotion") or "").strip(),
@@ -178,16 +178,22 @@ def _normalize_tags(value: Any, content_profile: dict[str, Any] | None) -> list[
     if tags:
         return tags
 
-    subject = str((content_profile or {}).get("subject_type") or "开箱").strip()
     brand = str((content_profile or {}).get("subject_brand") or "").strip()
+    subject = _specific_subject_type(content_profile)
     theme = str((content_profile or {}).get("video_theme") or "").strip()
-    fallback = [brand, subject, theme, "EDC", "开箱", "玩家分享", "工具"]
-    return [item for item in fallback if item][:8]
+    fallback = [brand, subject, theme]
+    if _profile_mentions_edc(content_profile):
+        fallback.append("EDC")
+    fallback.extend(["开箱", "上手体验", "玩家分享"])
+    return _dedupe_non_empty(fallback)[:8]
 
 
 def build_fallback_titles(*, label: str, content_profile: dict[str, Any] | None) -> list[str]:
+    if not _has_specific_subject_identity(content_profile):
+        return _build_neutral_fallback_titles(label=label)
+
     brand = str((content_profile or {}).get("subject_brand") or "").strip() or "这把"
-    subject = str((content_profile or {}).get("subject_type") or "工具").strip()
+    subject = _specific_subject_type(content_profile) or str((content_profile or {}).get("subject_type") or "").strip() or "产品"
     hook = str((content_profile or {}).get("hook_line") or "这次升级到位吗").strip()
 
     if label == "B站":
@@ -232,9 +238,20 @@ def build_fallback_titles(*, label: str, content_profile: dict[str, Any] | None)
 
 
 def build_fallback_description(*, label: str, content_profile: dict[str, Any] | None) -> str:
-    brand = str((content_profile or {}).get("subject_brand") or "").strip() or "这把"
-    subject = str((content_profile or {}).get("subject_type") or "工具").strip()
     question = _fallback_question(content_profile)
+    if not _has_specific_subject_identity(content_profile):
+        if label == "小红书":
+            return f"这期先看开箱过程、外观细节和真实上手感受。不硬写产品名，只聊这次到手后最值得看的部分。{question}"
+        if label == "抖音":
+            return f"这次就把开箱细节和真实体验放在一条视频里，不先下死结论，先把重点看清楚。{question}"
+        if label == "快手":
+            return f"这期不瞎补产品信息，直接看开箱细节、做工表现和真实上手感受。{question}"
+        if label == "视频号":
+            return f"这次分享一条开箱上手视频，重点放在外观细节、质感和真实体验。{question}"
+        return f"这期先看开箱过程、细节表现和真实上手感受，不编产品名，只说视频里能确认的内容。{question}"
+
+    brand = str((content_profile or {}).get("subject_brand") or "").strip() or "这把"
+    subject = _specific_subject_type(content_profile) or str((content_profile or {}).get("subject_type") or "").strip() or "产品"
     if label == "小红书":
         return f"{brand}{subject}终于到手，重点看外观、细节和上手感受。不是硬广，就是玩家视角的真实开箱分享。{question}"
     if label == "抖音":
@@ -249,8 +266,14 @@ def build_fallback_description(*, label: str, content_profile: dict[str, Any] | 
 def _fallback_product(content_profile: dict[str, Any] | None) -> str:
     brand = str((content_profile or {}).get("subject_brand") or "").strip()
     model = str((content_profile or {}).get("subject_model") or "").strip()
-    subject = str((content_profile or {}).get("subject_type") or "开箱产品").strip()
+    subject = _specific_subject_type(content_profile)
     return " ".join(part for part in (brand, model or subject) if part).strip()
+
+
+def _normalize_highlight_product(value: Any, content_profile: dict[str, Any] | None) -> str:
+    if not _has_specific_subject_identity(content_profile):
+        return ""
+    return str(value or _fallback_product(content_profile)).strip()
 
 
 def _fallback_video_type(content_profile: dict[str, Any] | None) -> str:
@@ -261,6 +284,102 @@ def _fallback_video_type(content_profile: dict[str, Any] | None) -> str:
 def _fallback_question(content_profile: dict[str, Any] | None) -> str:
     question = str((content_profile or {}).get("engagement_question") or "").strip()
     return question or "你觉得这次到手值不值？"
+
+
+def _has_specific_subject_identity(content_profile: dict[str, Any] | None) -> bool:
+    profile = content_profile or {}
+    if str(profile.get("subject_brand") or "").strip():
+        return True
+    if str(profile.get("subject_model") or "").strip():
+        return True
+    return bool(_specific_subject_type(profile))
+
+
+def _specific_subject_type(content_profile: dict[str, Any] | None) -> str:
+    subject = str((content_profile or {}).get("subject_type") or "").strip()
+    if not subject:
+        return ""
+    generic_subjects = {
+        "开箱",
+        "开箱产品",
+        "产品",
+        "工具",
+        "东西",
+        "玩意",
+        "单品",
+        "EDC",
+        "刀具",
+        "装备",
+        "物件",
+    }
+    normalized = subject.replace(" ", "")
+    if normalized in generic_subjects or normalized.startswith("开箱"):
+        return ""
+    return subject
+
+
+def _profile_mentions_edc(content_profile: dict[str, Any] | None) -> bool:
+    profile = content_profile or {}
+    fields = (
+        profile.get("subject_type"),
+        profile.get("video_theme"),
+        profile.get("summary"),
+    )
+    return any("EDC" in str(value or "").upper() for value in fields)
+
+
+def _build_neutral_fallback_titles(*, label: str) -> list[str]:
+    if label == "B站":
+        return [
+            "这期开箱重点看哪些细节",
+            "到手先别下结论，先看做工和外观",
+            "这次上手体验到底怎么样",
+            "不开脑补，只聊视频里能确认的内容",
+            "这期开箱值不值得继续深挖",
+        ]
+    if label == "小红书":
+        return [
+            "这期开箱先看外观和细节",
+            "到手第一眼先看做工表现",
+            "不瞎补产品名，只聊这次上手感受",
+            "这期开箱的质感和细节我先拍给你看",
+            "先把细节看清，再聊值不值",
+        ]
+    if label == "抖音":
+        return [
+            "这期开箱先看细节",
+            "到手先看做工表现",
+            "不先下结论，先上手",
+            "这次开箱重点都在这里",
+            "先把外观和手感看清",
+        ]
+    if label == "快手":
+        return [
+            "这期开箱先看真细节",
+            "不瞎补名字，先看上手表现",
+            "到手先把做工看明白",
+            "这次开箱我只说能确认的",
+            "先看细节，再聊值不值",
+        ]
+    return [
+        "这期开箱先看细节",
+        "到手先看外观和做工",
+        "这次上手体验到底怎么样",
+        "不编产品名，只聊真实表现",
+        "先把重点细节看清楚",
+    ]
+
+
+def _dedupe_non_empty(items: list[str]) -> list[str]:
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for item in items:
+        value = str(item or "").strip()
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        deduped.append(value)
+    return deduped
 
 
 def _hashify_tags(tags: list[str]) -> list[str]:

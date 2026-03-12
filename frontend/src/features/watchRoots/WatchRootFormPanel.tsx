@@ -3,10 +3,12 @@ import { CheckboxField } from "../../components/forms/CheckboxField";
 import { FormActions } from "../../components/forms/FormActions";
 import { SelectField } from "../../components/forms/SelectField";
 import { TextField } from "../../components/forms/TextField";
+import type { SelectOption } from "../../types";
 import { PanelHeader } from "../../components/ui/PanelHeader";
 
 type WatchRootFormPanelProps = {
   form: RootForm;
+  channelProfileOptions: SelectOption[];
   isEditing: boolean;
   isSaving: boolean;
   isDeleting: boolean;
@@ -17,6 +19,7 @@ type WatchRootFormPanelProps = {
 
 export function WatchRootFormPanel({
   form,
+  channelProfileOptions,
   isEditing,
   isSaving,
   isDeleting,
@@ -35,11 +38,11 @@ export function WatchRootFormPanel({
         }}
       >
         <TextField label="目录路径" value={form.path} onChange={(event) => onChange({ ...form, path: event.target.value })} />
-        <TextField
+        <SelectField
           label="频道配置"
           value={form.channel_profile}
           onChange={(event) => onChange({ ...form, channel_profile: event.target.value })}
-          placeholder="如 edc_tactical"
+          options={channelProfileOptions}
         />
         <div className="field-row">
           <SelectField

@@ -3,10 +3,13 @@ from __future__ import annotations
 import json
 import mimetypes
 import random
+import re
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from roughcut.config import get_settings
 
 
 PACKAGING_ROOT = Path(".artifacts/packaging")
@@ -115,6 +118,34 @@ TITLE_STYLE_OPTIONS = {
 
 MUSIC_SELECTION_MODES = {"random", "manual"}
 MUSIC_LOOP_MODES = {"loop_single", "loop_all"}
+INSERT_SELECTION_MODES = {"manual", "random"}
+
+PRESET_HINT_KEYWORDS: dict[str, set[str]] = {
+    "unboxing_default": {"UNBOX", "BOX", "PACKAGE", "PRODUCT", "DETAIL", "MACRO", "SHOWCASE", "开箱", "包装", "细节"},
+    "unboxing_limited": {"LIMITED", "SPECIAL", "COLLECT", "EDITION", "限定", "联名", "收藏", "纪念"},
+    "unboxing_upgrade": {"UPGRADE", "V2", "NEW", "DETAIL", "COMPARE", "升级", "新版", "改版", "对比"},
+    "edc_tactical": {"EDC", "TACTICAL", "KNIFE", "TOOL", "GEAR", "MACRO", "战术", "工具", "钳", "刀"},
+    "screen_tutorial": {"SCREEN", "UI", "FLOW", "STEP", "GUIDE", "TUTORIAL", "教程", "录屏", "步骤", "操作"},
+    "vlog_daily": {"VLOG", "DAILY", "CITY", "TRAVEL", "LIFESTYLE", "日常", "出行", "生活"},
+    "talking_head_commentary": {"COMMENTARY", "TALK", "ANALYSIS", "观点", "口播", "分析"},
+    "gameplay_highlight": {"GAME", "GAMEPLAY", "HIGHLIGHT", "ACE", "CLUTCH", "REPLAY", "游戏", "高光", "对局"},
+    "food_explore": {"FOOD", "DISH", "STORE", "MENU", "CAFE", "RESTAURANT", "探店", "试吃", "美食", "菜"},
+}
+
+MUSIC_MOOD_KEYWORDS: dict[str, set[str]] = {
+    "screen_tutorial": {"CALM", "CLEAN", "LIGHT", "AMBIENT", "FOCUS", "LOFI", "PIANO", "教程", "轻松"},
+    "vlog_daily": {"CHILL", "LOFI", "SUNNY", "SOFT", "WARM", "TRAVEL", "VLOG", "日常", "轻快"},
+    "talking_head_commentary": {"CLEAN", "MINIMAL", "DOCUMENTARY", "AMBIENT", "NEWS", "分析", "简洁"},
+    "gameplay_highlight": {"HYPE", "EPIC", "BATTLE", "ENERGY", "BASS", "TRAP", "高能", "热血"},
+    "food_explore": {"COZY", "JAZZ", "FUNK", "WARM", "CAFE", "LIFESTYLE", "美食", "轻松"},
+    "edc_tactical": {"TACTICAL", "DARK", "INDUSTRIAL", "METAL", "BASS", "战术", "硬核"},
+    "unboxing_upgrade": {"TECH", "UPBEAT", "CLEAN", "FUTURE", "ENERGY", "科技", "升级"},
+    "unboxing_limited": {"LUXURY", "PREMIUM", "SHINE", "COLLECT", "高级", "限定"},
+    "unboxing_default": {"TECH", "UPBEAT", "CLEAN", "SHOWCASE", "科技", "展示"},
+}
+
+GENERIC_MUSIC_TOKENS = {"BGM", "MUSIC", "LOOP", "TRACK", "BEAT", "INSTRUMENTAL", "AMBIENT"}
+GENERIC_INSERT_TOKENS = {"BROLL", "DETAIL", "MACRO", "CLOSEUP", "BOX", "PACKAGE", "PRODUCT", "SHOT", "INSERT", "CUTAWAY", "细节", "特写", "包装"}
 
 
 def list_packaging_assets() -> dict[str, Any]:
@@ -227,7 +258,7 @@ def update_packaging_config(patch: dict[str, Any]) -> dict[str, Any]:
     return state["config"]
 
 
-def resolve_packaging_plan_for_job(job_id: str) -> dict[str, Any]:
+def resolve_packaging_plan_for_job(job_id: str, *, content_profile: dict[str, Any] | None = None) -> dict[str, Any]:
     state = _load_state()
     config = dict(DEFAULT_CONFIG)
     config.update(state["config"])
@@ -251,9 +282,9 @@ def resolve_packaging_plan_for_job(job_id: str) -> dict[str, Any]:
 
     intro = _resolve_single_asset(assets_by_id, config.get("intro_asset_id"), expected_type="intro")
     outro = _resolve_single_asset(assets_by_id, config.get("outro_asset_id"), expected_type="outro")
-    insert = _resolve_insert_asset(assets_by_id, config, job_id)
+    insert = _resolve_insert_asset(assets_by_id, config, job_id, content_profile=content_profile)
     watermark = _resolve_single_asset(assets_by_id, config.get("watermark_asset_id"), expected_type="watermark")
-    music = _resolve_music_asset(assets_by_id, config, job_id)
+    music = _resolve_music_asset(assets_by_id, config, job_id, content_profile=content_profile)
 
     if watermark:
         watermark.update(
@@ -316,16 +347,35 @@ def _resolve_music_asset(
     assets_by_id: dict[str, dict[str, Any]],
     config: dict[str, Any],
     job_id: str,
+    *,
+    content_profile: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     music_ids = [item for item in config.get("music_asset_ids") or [] if item in assets_by_id]
     if not music_ids:
         return None
     ordered_ids = list(music_ids)
-    if config.get("music_selection_mode") == "random" and len(ordered_ids) > 1:
-        random.Random(f"music:{job_id}").shuffle(ordered_ids)
+    if config.get("music_selection_mode") == "manual":
+        rankings = _rank_packaging_assets(
+            [assets_by_id[item] for item in ordered_ids],
+            asset_type="music",
+            content_profile=content_profile,
+        )
         selected_id = ordered_ids[0]
+        if selected_id not in ordered_ids:
+            selected_id = rankings[0]["asset_id"] if rankings else None
+        selection_summary = None
     else:
-        selected_id = ordered_ids[0]
+        rankings = _rank_packaging_assets(
+            [assets_by_id[item] for item in ordered_ids],
+            asset_type="music",
+            content_profile=content_profile,
+            random_seed=f"music:{job_id}",
+        )
+        ordered_ids = [item["asset_id"] for item in rankings]
+        selected_id = ordered_ids[0] if ordered_ids else None
+        selection_summary = _build_packaging_selection_summary(rankings)
+    if not selected_id:
+        return None
     asset = assets_by_id[selected_id]
     return {
         "asset_id": asset["id"],
@@ -333,6 +383,8 @@ def _resolve_music_asset(
         "path": asset["path"],
         "original_name": asset["original_name"],
         "candidate_asset_ids": ordered_ids,
+        "selection_strategy": "manual_override" if config.get("music_selection_mode") == "manual" else "auto_ranked_pool",
+        "selection_summary": selection_summary,
     }
 
 
@@ -340,6 +392,8 @@ def _resolve_insert_asset(
     assets_by_id: dict[str, dict[str, Any]],
     config: dict[str, Any],
     job_id: str,
+    *,
+    content_profile: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     insert_ids = [item for item in config.get("insert_asset_ids") or [] if item in assets_by_id]
     if config.get("insert_selection_mode") == "manual":
@@ -348,8 +402,17 @@ def _resolve_insert_asset(
             insert_ids = [selected_id]
         if not selected_id:
             selected_id = insert_ids[0] if insert_ids else None
+        selection_summary = None
     else:
-        selected_id = random.Random(f"insert:{job_id}").choice(insert_ids) if insert_ids else None
+        rankings = _rank_packaging_assets(
+            [assets_by_id[item] for item in insert_ids],
+            asset_type="insert",
+            content_profile=content_profile,
+            random_seed=f"insert:{job_id}",
+        )
+        insert_ids = [item["asset_id"] for item in rankings]
+        selected_id = insert_ids[0] if insert_ids else None
+        selection_summary = _build_packaging_selection_summary(rankings)
     if not selected_id:
         return None
     asset = assets_by_id[selected_id]
@@ -361,6 +424,8 @@ def _resolve_insert_asset(
         "candidate_asset_ids": insert_ids,
         "selection_mode": config.get("insert_selection_mode") or "manual",
         "position_mode": config.get("insert_position_mode") or "llm",
+        "selection_strategy": "manual_override" if config.get("insert_selection_mode") == "manual" else "auto_ranked_pool",
+        "selection_summary": selection_summary,
     }
 
 
@@ -397,7 +462,7 @@ def _normalize_config(config: dict[str, Any], assets_by_id: dict[str, dict[str, 
     ]
     normalized["insert_asset_ids"] = insert_ids
     normalized["insert_selection_mode"] = str(normalized.get("insert_selection_mode") or "manual").strip() or "manual"
-    if normalized["insert_selection_mode"] not in {"manual", "random"}:
+    if normalized["insert_selection_mode"] not in INSERT_SELECTION_MODES:
         normalized["insert_selection_mode"] = "manual"
     normalized["insert_position_mode"] = str(normalized.get("insert_position_mode") or "llm").strip() or "llm"
 
@@ -443,3 +508,133 @@ def _normalize_config(config: dict[str, Any], assets_by_id: dict[str, dict[str, 
 def _save_state(state: dict[str, Any]) -> None:
     PACKAGING_ROOT.mkdir(parents=True, exist_ok=True)
     MANIFEST_PATH.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _rank_packaging_assets(
+    assets: list[dict[str, Any]],
+    *,
+    asset_type: str,
+    content_profile: dict[str, Any] | None,
+    random_seed: str | None = None,
+) -> list[dict[str, Any]]:
+    scored = [
+        _score_packaging_asset(asset, asset_type=asset_type, content_profile=content_profile)
+        for asset in assets
+    ]
+    if random_seed:
+        random.Random(random_seed).shuffle(scored)
+    scored.sort(
+        key=lambda item: (
+            -float(item["score"]),
+            str(item["asset"].get("created_at") or ""),
+            str(item["asset"].get("original_name") or ""),
+        ),
+        reverse=False,
+    )
+    return [
+        {
+            "asset_id": item["asset"]["id"],
+            "score": item["score"],
+            "reasons": item["reasons"],
+        }
+        for item in scored
+    ]
+
+
+def _score_packaging_asset(
+    asset: dict[str, Any],
+    *,
+    asset_type: str,
+    content_profile: dict[str, Any] | None,
+) -> dict[str, Any]:
+    profile = content_profile or {}
+    preset_name = str(profile.get("preset_name") or "").strip()
+    asset_tokens = _tokenize_packaging_text(
+        " ".join(
+            [
+                str(asset.get("original_name") or ""),
+                str(Path(str(asset.get("original_name") or "")).stem),
+            ]
+        )
+    )
+    profile_tokens = _tokenize_packaging_text(
+        " ".join(
+            str(profile.get(key) or "")
+            for key in ("subject_brand", "subject_model", "subject_type", "video_theme", "summary")
+        )
+    )
+    preset_tokens = PRESET_HINT_KEYWORDS.get(preset_name, set())
+    reasons: list[str] = []
+    score = 0.28
+
+    if asset_type == "music":
+        mood_tokens = MUSIC_MOOD_KEYWORDS.get(preset_name, set())
+        mood_matches = asset_tokens & mood_tokens
+        preset_matches = asset_tokens & preset_tokens
+        if mood_matches:
+            score += min(0.3, 0.1 * len(mood_matches))
+            reasons.append("BGM 气质匹配视频风格")
+        if asset_tokens & GENERIC_MUSIC_TOKENS:
+            score += 0.08
+            reasons.append("文件命名明确为背景音乐")
+        if preset_matches:
+            score += 0.12
+            reasons.append("文件命名直接命中内容预设")
+        if mood_matches and preset_matches:
+            score += 0.08
+            reasons.append("风格和内容类型同时命中")
+    else:
+        subject_matches = asset_tokens & profile_tokens
+        if subject_matches:
+            score += min(0.34, 0.12 * len(subject_matches))
+            reasons.append("插入素材命中视频主体信息")
+        if asset_tokens & GENERIC_INSERT_TOKENS:
+            score += 0.12
+            reasons.append("文件命名表明是可插入 B-roll")
+        if asset_tokens & preset_tokens:
+            score += 0.14
+            reasons.append("文件命名贴合当前内容类型")
+
+    if not reasons and asset_tokens:
+        score += 0.04
+        reasons.append("候选文件名包含可用线索")
+
+    score = round(min(score, 0.99), 3)
+    return {"asset": asset, "score": score, "reasons": reasons}
+
+
+def _build_packaging_selection_summary(rankings: list[dict[str, Any]]) -> dict[str, Any] | None:
+    if not rankings:
+        return None
+    settings = get_settings()
+    primary = rankings[0]
+    runner_up = rankings[1] if len(rankings) > 1 else None
+    primary_score = float(primary.get("score") or 0.0)
+    runner_up_score = float(runner_up.get("score") or 0.0) if runner_up else 0.0
+    score_gap = round(max(0.0, primary_score - runner_up_score), 3)
+    review_recommended = bool(
+        primary_score < float(settings.packaging_selection_min_score)
+        or (runner_up is not None and score_gap <= float(settings.packaging_selection_review_gap))
+    )
+    return {
+        "selected_asset_id": primary.get("asset_id"),
+        "selected_score": round(primary_score, 3),
+        "runner_up_asset_id": runner_up.get("asset_id") if runner_up else None,
+        "runner_up_score": round(runner_up_score, 3),
+        "score_gap": score_gap,
+        "review_recommended": review_recommended,
+        "review_reason": (
+            "候选分差过小或匹配信号不足，建议确认首选素材。"
+            if review_recommended
+            else ""
+        ),
+    }
+
+
+def _tokenize_packaging_text(text: str) -> set[str]:
+    tokens: set[str] = set()
+    for raw in re.findall(r"[A-Za-z0-9]+|[\u3400-\u9fff]{2,}", str(text or "")):
+        token = str(raw).strip().upper()
+        if len(token) >= 2:
+            tokens.add(token)
+    return tokens

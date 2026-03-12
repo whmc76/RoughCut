@@ -89,9 +89,17 @@ class Settings(BaseSettings):
     cover_output_variants: int = 5              # export multiple cover variants for manual selection
     cover_title: str = ""                        # manual cover title override; empty = auto-generate
     cover_title_font_path: str = "C:/Windows/Fonts/msyhbd.ttc"
+    auto_select_cover_variant: bool = True
+    cover_selection_review_gap: float = 0.08
+    packaging_selection_review_gap: float = 0.08
+    packaging_selection_min_score: float = 0.6
 
     # Feature flags
     fact_check_enabled: bool = False
+    auto_confirm_content_profile: bool = True
+    content_profile_review_threshold: float = 0.72
+    auto_accept_glossary_corrections: bool = True
+    glossary_correction_review_threshold: float = 0.9
 
     @field_validator("allowed_extensions", mode="before")
     @classmethod

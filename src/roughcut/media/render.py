@@ -203,19 +203,21 @@ def _build_segment_filter_chain(
     editing_accents: dict[str, Any],
 ) -> tuple[list[str], str, str]:
     parts: list[str] = []
+    transition_map = _resolve_transition_map(
+        keep_segments,
+        editing_accents.get("transitions") or {},
+    )
+    needs_constant_fps = bool(transition_map)
+    video_timing_suffix = f"{transpose_suffix},fps=30000/1001" if needs_constant_fps else transpose_suffix
     segment_durations: list[float] = []
     for index, segment in enumerate(keep_segments):
         start = float(segment["start"])
         end = float(segment["end"])
         duration = max(0.0, end - start)
         segment_durations.append(duration)
-        parts.append(f"[0:v]trim=start={start}:end={end},setpts=PTS-STARTPTS{transpose_suffix}[v{index}]")
+        parts.append(f"[0:v]trim=start={start}:end={end},setpts=PTS-STARTPTS{video_timing_suffix}[v{index}]")
         parts.append(f"[0:a]atrim=start={start}:end={end},asetpts=PTS-STARTPTS[a{index}]")
 
-    transition_map = _resolve_transition_map(
-        keep_segments,
-        editing_accents.get("transitions") or {},
-    )
     current_video = "v0"
     current_audio = "a0"
     current_duration = segment_durations[0]
@@ -556,7 +558,12 @@ async def _apply_music_and_watermark(
             cmd.extend(["-stream_loop", "-1"])
         cmd.extend(["-i", str(music_input_path)])
         volume = float(music_plan.get("volume", 0.22) or 0.22)
-        filter_parts.append(f"[{next_input_index}:a]volume={volume}[bgm]")
+        enter_sec = max(0.0, float(music_plan.get("enter_sec", 0.0) or 0.0))
+        if enter_sec > 0:
+            delay_ms = int(round(enter_sec * 1000))
+            filter_parts.append(f"[{next_input_index}:a]volume={volume},adelay={delay_ms}|{delay_ms}[bgm]")
+        else:
+            filter_parts.append(f"[{next_input_index}:a]volume={volume}[bgm]")
         filter_parts.append(
             f"[0:a][bgm]amix=inputs=2:duration=first:dropout_transition=2,"
             "loudnorm=I=-14:TP=-1:LRA=11[aout]"

@@ -209,6 +209,11 @@ export type Report = {
   }>;
 };
 
+export type SelectOption = {
+  value: string;
+  label: string;
+};
+
 export type Config = {
   transcription_provider: string;
   transcription_model: string;
@@ -240,11 +245,24 @@ export type Config = {
   allowed_extensions: string[];
   output_dir: string;
   fact_check_enabled: boolean;
+  auto_confirm_content_profile: boolean;
+  content_profile_review_threshold: number;
+  auto_accept_glossary_corrections: boolean;
+  glossary_correction_review_threshold: number;
+  auto_select_cover_variant: boolean;
+  cover_selection_review_gap: number;
+  packaging_selection_review_gap: number;
+  packaging_selection_min_score: number;
   overrides: Record<string, unknown>;
 };
 
 export type ConfigOptions = {
+  job_languages: SelectOption[];
+  channel_profiles: SelectOption[];
   transcription_models: Record<string, string[]>;
+  multimodal_fallback_providers: SelectOption[];
+  search_providers: SelectOption[];
+  search_fallback_providers: SelectOption[];
 };
 
 export type ServiceStatus = {

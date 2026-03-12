@@ -11,6 +11,7 @@ export function useWatchRootWorkspace() {
   const [selectedPending, setSelectedPending] = useState<string[]>([]);
 
   const roots = useQuery({ queryKey: ["watch-roots"], queryFn: api.listWatchRoots });
+  const options = useQuery({ queryKey: ["config-options"], queryFn: api.getConfigOptions });
   const selectedRoot = roots.data?.find((root) => root.id === selectedRootId) ?? null;
   const inventory = useQuery({
     queryKey: ["watch-root-inventory", selectedRootId],
@@ -88,6 +89,7 @@ export function useWatchRootWorkspace() {
     selectedPending,
     setSelectedPending,
     roots,
+    options,
     selectedRoot,
     inventory,
     refreshRoots,

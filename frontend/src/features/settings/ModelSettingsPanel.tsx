@@ -13,6 +13,9 @@ type ModelSettingsPanelProps = {
 
 export function ModelSettingsPanel({ form, options, onChange }: ModelSettingsPanelProps) {
   const transcriptionModels = options?.transcription_models?.[String(form.transcription_provider)] ?? [];
+  const multimodalFallbackProviders = options?.multimodal_fallback_providers ?? [{ value: "ollama", label: "Ollama" }];
+  const searchProviders = options?.search_providers ?? [{ value: "auto", label: "自动选择" }];
+  const searchFallbackProviders = options?.search_fallback_providers ?? [{ value: "searxng", label: "SearXNG" }];
 
   return (
     <section className="panel">
@@ -45,21 +48,28 @@ export function ModelSettingsPanel({ form, options, onChange }: ModelSettingsPan
         <TextField label="推理模型" value={String(form.reasoning_model ?? "")} onChange={(event) => onChange("reasoning_model", event.target.value)} />
         <TextField label="本地推理模型" value={String(form.local_reasoning_model ?? "")} onChange={(event) => onChange("local_reasoning_model", event.target.value)} />
         <TextField label="本地视觉模型" value={String(form.local_vision_model ?? "")} onChange={(event) => onChange("local_vision_model", event.target.value)} />
-        <TextField
+        <SelectField
           label="视觉回退 Provider"
           value={String(form.multimodal_fallback_provider ?? "")}
           onChange={(event) => onChange("multimodal_fallback_provider", event.target.value)}
+          options={multimodalFallbackProviders}
         />
         <TextField
           label="视觉回退模型"
           value={String(form.multimodal_fallback_model ?? "")}
           onChange={(event) => onChange("multimodal_fallback_model", event.target.value)}
         />
-        <TextField label="搜索 Provider" value={String(form.search_provider ?? "")} onChange={(event) => onChange("search_provider", event.target.value)} />
-        <TextField
+        <SelectField
+          label="搜索 Provider"
+          value={String(form.search_provider ?? "")}
+          onChange={(event) => onChange("search_provider", event.target.value)}
+          options={searchProviders}
+        />
+        <SelectField
           label="搜索回退 Provider"
           value={String(form.search_fallback_provider ?? "")}
           onChange={(event) => onChange("search_fallback_provider", event.target.value)}
+          options={searchFallbackProviders}
         />
         <TextField
           label="搜索辅助模型"

@@ -55,31 +55,8 @@ async def load_content_profile_user_memory(
 
 
 def summarize_content_profile_user_memory(user_memory: dict[str, Any] | None) -> str:
-    if not user_memory:
-        return ""
-
-    lines: list[str] = []
-    field_preferences = user_memory.get("field_preferences") or {}
-    for field_name, items in field_preferences.items():
-        if not items:
-            continue
-        values = " / ".join(f"{item['value']} x{item['count']}" for item in items[:3])
-        lines.append(f"- {field_name}: {values}")
-
-    keyword_preferences = user_memory.get("keyword_preferences") or []
-    if keyword_preferences:
-        values = " / ".join(f"{item['keyword']} x{item['count']}" for item in keyword_preferences[:8])
-        lines.append(f"- 关键词偏好: {values}")
-
-    recent_corrections = user_memory.get("recent_corrections") or []
-    if recent_corrections:
-        examples = " / ".join(
-            f"{item['field_name']}:{item['original_value'] or '空'}→{item['corrected_value']}"
-            for item in recent_corrections[:5]
-        )
-        lines.append(f"- 最近纠错: {examples}")
-
-    return "\n".join(lines)
+    del user_memory
+    return ""
 
 
 def build_content_profile_memory_cloud(user_memory: dict[str, Any] | None) -> dict[str, Any]:

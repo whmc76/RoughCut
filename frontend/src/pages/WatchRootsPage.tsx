@@ -6,6 +6,7 @@ import { useWatchRootWorkspace } from "../features/watchRoots/useWatchRootWorksp
 
 export function WatchRootsPage() {
   const workspace = useWatchRootWorkspace();
+  const channelProfileOptions = workspace.options.data?.channel_profiles ?? [{ value: "", label: "自动匹配" }];
 
   return (
     <section>
@@ -15,6 +16,7 @@ export function WatchRootsPage() {
         <WatchRootList roots={workspace.roots.data ?? []} selectedRootId={workspace.selectedRootId} onSelect={workspace.setSelectedRootId} onCreateNew={() => workspace.setSelectedRootId(null)} />
         <WatchRootFormPanel
           form={workspace.form}
+          channelProfileOptions={channelProfileOptions}
           isEditing={Boolean(workspace.selectedRootId)}
           isSaving={workspace.createRoot.isPending || workspace.updateRoot.isPending}
           isDeleting={workspace.deleteRoot.isPending}

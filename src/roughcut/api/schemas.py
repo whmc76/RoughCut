@@ -4,7 +4,9 @@ import uuid
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from roughcut.api.options import normalize_channel_profile, normalize_job_language
 
 
 # ── Jobs ──────────────────────────────────────────────────────────────────────
@@ -12,6 +14,16 @@ from pydantic import BaseModel, ConfigDict, Field
 class JobCreate(BaseModel):
     language: str = "zh-CN"
     channel_profile: str | None = None
+
+    @field_validator("language", mode="before")
+    @classmethod
+    def validate_language(cls, value: Any) -> str:
+        return normalize_job_language(value)
+
+    @field_validator("channel_profile", mode="before")
+    @classmethod
+    def validate_channel_profile(cls, value: Any) -> str | None:
+        return normalize_channel_profile(value)
 
 
 class JobStepOut(BaseModel):
@@ -217,6 +229,11 @@ class WatchRootCreate(BaseModel):
     channel_profile: str | None = None
     enabled: bool = True
     scan_mode: Literal["fast", "precise"] = "fast"
+
+    @field_validator("channel_profile", mode="before")
+    @classmethod
+    def validate_channel_profile(cls, value: Any) -> str | None:
+        return normalize_channel_profile(value)
 
 
 class WatchRootOut(BaseModel):

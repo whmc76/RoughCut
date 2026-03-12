@@ -6,6 +6,7 @@ import { useWatchRootWorkspace } from "./useWatchRootWorkspace";
 
 const mockApi = vi.hoisted(() => ({
   listWatchRoots: vi.fn(),
+  getConfigOptions: vi.fn(),
   getInventoryStatus: vi.fn(),
   createWatchRoot: vi.fn(),
   updateWatchRoot: vi.fn(),
@@ -62,6 +63,14 @@ const SAMPLE_INVENTORY: WatchInventoryStatus = {
 describe("useWatchRootWorkspace", () => {
   beforeEach(() => {
     mockApi.listWatchRoots.mockResolvedValue(SAMPLE_ROOTS);
+    mockApi.getConfigOptions.mockResolvedValue({
+      job_languages: [{ value: "zh-CN", label: "简体中文" }],
+      channel_profiles: [{ value: "", label: "自动匹配" }, { value: "edc_tactical", label: "EDC 战术版 (edc_tactical)" }],
+      transcription_models: {},
+      multimodal_fallback_providers: [],
+      search_providers: [],
+      search_fallback_providers: [],
+    });
     mockApi.getInventoryStatus.mockResolvedValue(SAMPLE_INVENTORY);
     mockApi.createWatchRoot.mockResolvedValue(SAMPLE_ROOTS[0]);
     mockApi.updateWatchRoot.mockResolvedValue(SAMPLE_ROOTS[0]);

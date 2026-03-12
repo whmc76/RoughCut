@@ -18,17 +18,17 @@ def test_packaging_library_saves_and_resolves_assets(tmp_path, monkeypatch):
     )
     music_a = library.save_packaging_asset(
         asset_type="music",
-        filename="a.mp3",
+        filename="tutorial_clean_bgm.mp3",
         payload=b"a",
     )
     music_b = library.save_packaging_asset(
         asset_type="music",
-        filename="b.mp3",
+        filename="battle_hype_bgm.mp3",
         payload=b"b",
     )
     insert = library.save_packaging_asset(
         asset_type="insert",
-        filename="insert.mp4",
+        filename="screen_step_demo_insert.mp4",
         payload=b"insert",
     )
 
@@ -46,12 +46,21 @@ def test_packaging_library_saves_and_resolves_assets(tmp_path, monkeypatch):
         }
     )
 
-    plan = library.resolve_packaging_plan_for_job(str(uuid.uuid4()))
+    plan = library.resolve_packaging_plan_for_job(
+        str(uuid.uuid4()),
+        content_profile={
+            "preset_name": "screen_tutorial",
+            "subject_type": "剪映字幕工作流",
+            "video_theme": "批量字幕样式调整步骤讲解",
+        },
+    )
     assert plan["intro"]["asset_id"] == intro["id"]
     assert plan["insert"]["asset_id"] == insert["id"]
-    assert plan["music"]["asset_id"] in {music_a["id"], music_b["id"]}
+    assert plan["music"]["asset_id"] == music_a["id"]
     assert plan["music"]["loop_mode"] == "loop_all"
     assert len(plan["music"]["candidate_paths"]) == 2
+    assert plan["music"]["selection_strategy"] == "auto_ranked_pool"
+    assert plan["music"]["selection_summary"]["review_recommended"] is False
     assert plan["subtitle_style"] == "cinema_blue"
     assert plan["cover_style"] == "tactical_neon"
 
@@ -86,3 +95,35 @@ def test_packaging_library_migrates_legacy_none_loop_mode(tmp_path, monkeypatch)
     payload = library.list_packaging_assets()
 
     assert payload["config"]["music_loop_mode"] == "loop_all"
+
+
+def test_packaging_library_flags_review_for_low_confidence_pool(tmp_path, monkeypatch):
+    monkeypatch.setattr(library, "PACKAGING_ROOT", tmp_path)
+    monkeypatch.setattr(library, "MANIFEST_PATH", tmp_path / "manifest.json")
+
+    music_a = library.save_packaging_asset(
+        asset_type="music",
+        filename="track_alpha.mp3",
+        payload=b"a",
+    )
+    music_b = library.save_packaging_asset(
+        asset_type="music",
+        filename="track_beta.mp3",
+        payload=b"b",
+    )
+
+    library.update_packaging_config(
+        {
+            "music_asset_ids": [music_a["id"], music_b["id"]],
+            "music_selection_mode": "random",
+        }
+    )
+
+    plan = library.resolve_packaging_plan_for_job(
+        str(uuid.uuid4()),
+        content_profile={"preset_name": "screen_tutorial"},
+    )
+
+    assert plan["music"]["asset_id"] in {music_a["id"], music_b["id"]}
+    assert plan["music"]["selection_summary"]["review_recommended"] is True
+    assert plan["music"]["selection_summary"]["review_reason"]

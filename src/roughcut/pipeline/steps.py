@@ -14,6 +14,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from sqlalchemy import select
 
@@ -30,7 +31,13 @@ from roughcut.edit.render_plan import (
 )
 from roughcut.edit.timeline import save_editorial_timeline
 from roughcut.media.audio import extract_audio
-from roughcut.media.output import build_output_name, extract_cover_frame, get_output_project_dir, write_srt_file
+from roughcut.media.output import (
+    build_output_name,
+    extract_cover_frame,
+    get_output_project_dir,
+    load_cover_selection_summary,
+    write_srt_file,
+)
 from roughcut.media.subtitles import remap_subtitles_to_timeline
 from roughcut.media.probe import probe, validate_media
 from roughcut.media.render import render_video
@@ -38,7 +45,12 @@ from roughcut.media.silence import detect_silence
 from roughcut.packaging.library import resolve_packaging_plan_for_job
 from roughcut.providers.factory import get_reasoning_provider
 from roughcut.providers.reasoning.base import Message
-from roughcut.review.content_profile import enrich_content_profile, infer_content_profile, polish_subtitle_items
+from roughcut.review.content_profile import (
+    assess_content_profile_automation,
+    enrich_content_profile,
+    infer_content_profile,
+    polish_subtitle_items,
+)
 from roughcut.review.content_profile_memory import load_content_profile_user_memory
 from roughcut.review.glossary_engine import apply_glossary_corrections
 from roughcut.review.platform_copy import generate_platform_packaging, save_platform_packaging_markdown
@@ -63,6 +75,8 @@ STEP_LABELS = {
 
 logger = logging.getLogger(__name__)
 
+_CONTENT_PROFILE_ARTIFACT_TYPES = ("content_profile_final", "content_profile", "content_profile_draft")
+
 
 async def _set_step_progress(
     session,
@@ -85,6 +99,28 @@ async def _set_step_progress(
         metadata["elapsed_seconds"] = round(elapsed_seconds, 3)
     step.metadata_ = metadata
     await session.commit()
+
+
+def _content_profile_artifact_priority(artifact_type: str) -> int:
+    priorities = {
+        "content_profile_final": 3,
+        "content_profile": 2,
+        "content_profile_draft": 1,
+    }
+    return priorities.get(str(artifact_type or "").strip(), 0)
+
+
+def _select_preferred_content_profile_artifact(artifacts: list[Artifact]) -> Artifact | None:
+    if not artifacts:
+        return None
+    epoch = datetime.min.replace(tzinfo=timezone.utc)
+    return max(
+        artifacts,
+        key=lambda artifact: (
+            _content_profile_artifact_priority(artifact.artifact_type),
+            artifact.created_at or epoch,
+        ),
+    )
 
 
 def _compute_step_elapsed_seconds(step: JobStep | None, *, now: datetime | None = None) -> float | None:
@@ -551,6 +587,7 @@ async def run_subtitle_postprocess(job_id: str) -> dict:
 async def run_content_profile(job_id: str) -> dict:
     factory = get_session_factory()
     async with factory() as session:
+        settings = get_settings()
         job = await session.get(Job, uuid.UUID(job_id))
         step_result = await session.execute(
             select(JobStep).where(JobStep.job_id == job.id, JobStep.step_name == "content_profile")
@@ -589,6 +626,13 @@ async def run_content_profile(job_id: str) -> dict:
                 include_research=True,
             )
 
+        automation = assess_content_profile_automation(
+            content_profile,
+            subtitle_items=subtitle_dicts,
+            auto_confirm_enabled=settings.auto_confirm_content_profile,
+            threshold=settings.content_profile_review_threshold,
+        )
+        content_profile["automation_review"] = automation
         artifact = Artifact(
             job_id=job.id,
             step_id=step.id,
@@ -596,13 +640,54 @@ async def run_content_profile(job_id: str) -> dict:
             data_json=content_profile,
         )
         session.add(artifact)
+        review_step_result = await session.execute(
+            select(JobStep).where(JobStep.job_id == job.id, JobStep.step_name == "summary_review")
+        )
+        review_step = review_step_result.scalar_one_or_none()
+
+        auto_confirmed = bool(automation.get("auto_confirm"))
+        if auto_confirmed:
+            now = datetime.now(timezone.utc)
+            final_profile = dict(content_profile)
+            final_profile["review_mode"] = "auto_confirmed"
+            session.add(
+                Artifact(
+                    job_id=job.id,
+                    step_id=review_step.id if review_step else None,
+                    artifact_type="content_profile_final",
+                    data_json=final_profile,
+                )
+            )
+            if review_step is not None:
+                review_step.status = "done"
+                review_step.started_at = review_step.started_at or now
+                review_step.finished_at = now
+                review_step.error_message = None
+                review_step.metadata_ = {
+                    **(review_step.metadata_ or {}),
+                    "label": STEP_LABELS.get("summary_review", "summary_review"),
+                    "detail": f"已自动确认内容摘要（置信度 {automation['score']:.2f}）",
+                    "progress": 1.0,
+                    "updated_at": now.isoformat(),
+                    "auto_confirmed": True,
+                    "confidence_score": automation["score"],
+                    "threshold": automation["threshold"],
+                    "review_reasons": automation["review_reasons"],
+                    "blocking_reasons": automation["blocking_reasons"],
+                }
+            job.status = "processing"
+
         subject = " / ".join(
             part for part in [
                 content_profile.get("subject_type"),
                 content_profile.get("video_theme"),
             ] if part
         ).strip()
-        await _set_step_progress(session, step, detail=f"已生成内容摘要：{subject or '待人工确认'}", progress=1.0)
+        if auto_confirmed:
+            detail = f"已自动确认内容摘要：{subject or '自动识别完成'}"
+        else:
+            detail = f"已生成内容摘要：{subject or '待人工确认'}"
+        await _set_step_progress(session, step, detail=detail, progress=1.0)
         await session.commit()
 
         return {
@@ -610,6 +695,8 @@ async def run_content_profile(job_id: str) -> dict:
             "subject_model": content_profile.get("subject_model"),
             "subject_type": content_profile.get("subject_type"),
             "video_theme": content_profile.get("video_theme"),
+            "auto_confirmed": auto_confirmed,
+            "automation_score": automation["score"],
         }
 
 
@@ -631,9 +718,20 @@ async def run_glossary_review(job_id: str) -> dict:
         subtitle_items = item_result.scalars().all()
 
         corrections = await apply_glossary_corrections(job.id, subtitle_items, session)
+        auto_accepted_corrections = sum(
+            1 for item in corrections if item.auto_applied or item.human_decision == "accepted"
+        )
+        pending_corrections = sum(
+            1 for item in corrections if item.human_decision not in {"accepted", "rejected"}
+        )
         glossary_result = await session.execute(select(GlossaryTerm))
         glossary_terms = glossary_result.scalars().all()
-        await _set_step_progress(session, step, detail=f"已识别 {len(corrections)} 处术语纠错候选", progress=0.45)
+        await _set_step_progress(
+            session,
+            step,
+            detail=f"已识别 {len(corrections)} 处术语纠错候选，自动接受 {auto_accepted_corrections} 条",
+            progress=0.45,
+        )
 
         subtitle_dicts = [
             {
@@ -710,11 +808,21 @@ async def run_glossary_review(job_id: str) -> dict:
             data_json=content_profile,
         )
         session.add(artifact)
-        await _set_step_progress(session, step, detail=f"字幕润色完成，更新 {polished_count} 条", progress=1.0)
+        await _set_step_progress(
+            session,
+            step,
+            detail=(
+                f"字幕润色完成，更新 {polished_count} 条；"
+                f"术语自动接受 {auto_accepted_corrections} 条，待确认 {pending_corrections} 条"
+            ),
+            progress=1.0,
+        )
         await session.commit()
 
         return {
             "correction_count": len(corrections),
+            "auto_accepted_correction_count": auto_accepted_corrections,
+            "pending_correction_count": pending_corrections,
             "polished_count": polished_count,
             "preset": content_profile.get("preset_name"),
             "subject": " ".join(
@@ -766,11 +874,11 @@ async def run_edit_plan(job_id: str) -> dict:
             select(Artifact)
             .where(
                 Artifact.job_id == job.id,
-                Artifact.artifact_type.in_(["content_profile_final", "content_profile", "content_profile_draft"]),
+                Artifact.artifact_type.in_(_CONTENT_PROFILE_ARTIFACT_TYPES),
             )
             .order_by(Artifact.created_at.desc())
         )
-        profile_artifact = profile_result.scalars().first()
+        profile_artifact = _select_preferred_content_profile_artifact(profile_result.scalars().all())
         content_profile = profile_artifact.data_json if profile_artifact else None
 
         storage = get_storage()
@@ -797,12 +905,17 @@ async def run_edit_plan(job_id: str) -> dict:
         except Exception:
             pass  # OTIO optional
 
-        packaging_plan = resolve_packaging_plan_for_job(str(job.id))
+        packaging_plan = resolve_packaging_plan_for_job(str(job.id), content_profile=content_profile)
         keep_segments = [segment for segment in decision.to_dict().get("segments", []) if segment.get("type") == "keep"]
         remapped_subtitles = remap_subtitles_to_timeline(subtitle_dicts, keep_segments)
         packaging_plan["insert"] = await _plan_insert_asset_slot(
             job_id=str(job.id),
             insert_plan=packaging_plan.get("insert"),
+            subtitle_items=remapped_subtitles,
+            content_profile=content_profile,
+        )
+        packaging_plan["music"] = await _plan_music_entry(
+            music_plan=packaging_plan.get("music"),
             subtitle_items=remapped_subtitles,
             content_profile=content_profile,
         )
@@ -861,10 +974,13 @@ async def run_render(job_id: str) -> dict:
 
         content_profile_result = await session.execute(
             select(Artifact)
-            .where(Artifact.job_id == job.id, Artifact.artifact_type == "content_profile")
+            .where(
+                Artifact.job_id == job.id,
+                Artifact.artifact_type.in_(_CONTENT_PROFILE_ARTIFACT_TYPES),
+            )
             .order_by(Artifact.created_at.desc())
         )
-        content_profile_artifact = content_profile_result.scalars().first()
+        content_profile_artifact = _select_preferred_content_profile_artifact(content_profile_result.scalars().all())
         content_profile = content_profile_artifact.data_json if content_profile_artifact else None
 
         # Get subtitle items
@@ -1007,9 +1123,11 @@ async def run_render(job_id: str) -> dict:
                 cover_style=(render_plan_timeline.data_json.get("cover") or {}).get("style"),
                 title_style=(render_plan_timeline.data_json.get("cover") or {}).get("title_style"),
             )
+            cover_selection = load_cover_selection_summary(local_cover)
         except Exception:
             local_cover = None  # Cover is non-critical
             cover_variants = []
+            cover_selection = None
 
     # Also upload to S3/MinIO for API download endpoint (non-critical — local file is primary)
     packaged_output_key = job_key(job_id, "output.mp4")
@@ -1031,6 +1149,7 @@ async def run_render(job_id: str) -> dict:
         "plain_srt": str(local_plain_srt),
         "cover": str(local_cover) if local_cover else None,
         "cover_variants": [str(path) for path in cover_variants] if local_cover else [],
+        "cover_selection": cover_selection,
         "output_name": out_name,
     }
     async with get_session_factory()() as session:
@@ -1054,17 +1173,27 @@ async def run_render(job_id: str) -> dict:
                     "packaged_srt": str(local_packaged_srt),
                     "packaged_output_key": packaged_output_key,
                     "plain_output_key": plain_output_key,
+                    "cover": str(local_cover) if local_cover else None,
+                    "cover_variants": [str(path) for path in cover_variants] if local_cover else [],
+                    "cover_selection": cover_selection,
                 },
             )
         )
         if render_step:
+            cover_detail = ""
+            if cover_selection:
+                cover_detail = (
+                    "，封面分差接近，可确认首选"
+                    if cover_selection.get("review_recommended")
+                    else "，封面已自动选优"
+                )
             await _set_step_progress(
                 session,
                 render_step,
                 detail=(
-                    "素版与包装版均已输出"
+                    f"素版与包装版均已输出{cover_detail}"
                     if (has_packaging or has_editing_accents)
-                    else "渲染完成，成片与字幕已输出"
+                    else f"渲染完成，成片与字幕已输出{cover_detail}"
                 ),
                 progress=1.0,
             )
@@ -1088,10 +1217,13 @@ async def run_platform_package(job_id: str) -> dict:
 
         content_profile_result = await session.execute(
             select(Artifact)
-            .where(Artifact.job_id == job.id, Artifact.artifact_type == "content_profile")
+            .where(
+                Artifact.job_id == job.id,
+                Artifact.artifact_type.in_(_CONTENT_PROFILE_ARTIFACT_TYPES),
+            )
             .order_by(Artifact.created_at.desc())
         )
-        content_profile_artifact = content_profile_result.scalars().first()
+        content_profile_artifact = _select_preferred_content_profile_artifact(content_profile_result.scalars().all())
         content_profile = content_profile_artifact.data_json if content_profile_artifact else None
 
         item_result = await session.execute(
@@ -1159,19 +1291,145 @@ async def _get_cover_seek(job_id, tmpdir: str) -> float:
     """
     factory = get_session_factory()
     async with factory() as session:
-        from roughcut.db.models import Artifact
-        result = await session.execute(
-            select(Artifact).where(
-                Artifact.job_id == job_id,
-                Artifact.artifact_type == "media_meta",
-            )
-        )
-        artifact = result.scalar_one_or_none()
+        try:
+            artifact = await _load_latest_artifact(session, job_id, "media_meta")
+        except ValueError:
+            artifact = None
         if artifact and artifact.data_json:
             duration = artifact.data_json.get("duration", 60.0)
             seek = max(5.0, min(30.0, duration * 0.10))
             return round(seek, 1)
     return 5.0
+
+
+def _subtitle_text(item: dict[str, Any]) -> str:
+    return str(item.get("text_final") or item.get("text_norm") or item.get("text_raw") or "").strip()
+
+
+def _score_music_entry_candidates(
+    subtitle_items: list[dict],
+    *,
+    content_profile: dict | None,
+) -> list[dict[str, Any]]:
+    preset_name = str((content_profile or {}).get("preset_name") or "").strip()
+    scored: list[dict[str, Any]] = []
+    for index, item in enumerate(subtitle_items):
+        end_time = float(item.get("end_time", 0.0) or 0.0)
+        if end_time < 1.5 or end_time > 18.0:
+            continue
+        text = _subtitle_text(item)
+        next_item = subtitle_items[index + 1] if index + 1 < len(subtitle_items) else None
+        next_start = float(next_item.get("start_time", end_time) or end_time) if next_item else end_time
+        gap = max(0.0, next_start - end_time)
+
+        score = 0.28
+        reasons: list[str] = []
+        if 3.0 <= end_time <= 8.5:
+            score += 0.24
+            reasons.append("位于开场钩子之后的自然进入区间")
+        elif 2.0 <= end_time <= 12.0:
+            score += 0.12
+        if gap >= 0.35:
+            score += 0.2
+            reasons.append("后面有明显停顿")
+        elif gap >= 0.18:
+            score += 0.1
+        if text.endswith(("。", "！", "？", "；", ".", "!", "?", ";")):
+            score += 0.14
+            reasons.append("句子在这里收束")
+        if len(text) >= 10:
+            score += 0.08
+        if preset_name in {"unboxing_default", "unboxing_limited", "unboxing_upgrade", "edc_tactical"} and 5.0 <= end_time <= 14.0:
+            score += 0.08
+            reasons.append("适合在主体介绍后进入 BGM")
+
+        scored.append(
+            {
+                "index": index,
+                "enter_sec": round(end_time, 2),
+                "score": round(min(score, 0.99), 3),
+                "reasons": reasons,
+            }
+        )
+
+    scored.sort(key=lambda item: (-float(item["score"]), float(item["enter_sec"])))
+    return scored
+
+
+def _build_timing_summary(
+    rankings: list[dict[str, Any]],
+    *,
+    review_gap: float,
+    min_score: float,
+    low_confidence_reason: str,
+) -> dict[str, Any]:
+    if not rankings:
+        return {
+            "selected_score": 0.0,
+            "runner_up_score": 0.0,
+            "score_gap": 0.0,
+            "review_recommended": True,
+            "review_reason": low_confidence_reason,
+        }
+    primary = rankings[0]
+    runner_up = rankings[1] if len(rankings) > 1 else None
+    primary_score = float(primary.get("score") or 0.0)
+    runner_up_score = float(runner_up.get("score") or 0.0) if runner_up else 0.0
+    score_gap = round(max(0.0, primary_score - runner_up_score), 3)
+    review_recommended = primary_score < min_score or (runner_up is not None and score_gap <= review_gap)
+    return {
+        "selected_score": round(primary_score, 3),
+        "runner_up_score": round(runner_up_score, 3),
+        "score_gap": score_gap,
+        "review_recommended": review_recommended,
+        "review_reason": low_confidence_reason if review_recommended else "",
+    }
+
+
+async def _plan_music_entry(
+    *,
+    music_plan: dict | None,
+    subtitle_items: list[dict],
+    content_profile: dict | None,
+) -> dict | None:
+    if not music_plan:
+        return None
+    if not subtitle_items:
+        music_plan["enter_sec"] = 0.0
+        music_plan["entry_reason"] = "没有可用字幕，背景音乐从开头进入。"
+        music_plan["timing_summary"] = {
+            "selected_score": 0.0,
+            "runner_up_score": 0.0,
+            "score_gap": 0.0,
+            "review_recommended": True,
+            "review_reason": "缺少字幕节奏信息，建议确认 BGM 进入点。",
+        }
+        return music_plan
+
+    settings = get_settings()
+    rankings = _score_music_entry_candidates(subtitle_items, content_profile=content_profile)
+    if not rankings:
+        fallback_sec = round(float(subtitle_items[0].get("end_time", 0.0) or 0.0), 2)
+        music_plan["enter_sec"] = max(0.0, fallback_sec)
+        music_plan["entry_reason"] = "缺少可靠停顿点，回退到第一句结束后进入背景音乐。"
+        music_plan["timing_summary"] = _build_timing_summary(
+            [],
+            review_gap=float(settings.packaging_selection_review_gap),
+            min_score=float(settings.packaging_selection_min_score),
+            low_confidence_reason="缺少可靠停顿点，建议确认 BGM 进入点。",
+        )
+        return music_plan
+
+    chosen = rankings[0]
+    music_plan["enter_sec"] = float(chosen["enter_sec"])
+    music_plan["entry_reason"] = "；".join(chosen.get("reasons") or []) or "选择了最自然的语义停顿点进入背景音乐。"
+    music_plan["timing_summary"] = _build_timing_summary(
+        rankings,
+        review_gap=float(settings.packaging_selection_review_gap),
+        min_score=float(settings.packaging_selection_min_score),
+        low_confidence_reason="BGM 候选进入点分差过小或信号不足，建议确认。",
+    )
+    return music_plan
 
 
 async def _plan_insert_asset_slot(
@@ -1183,9 +1441,16 @@ async def _plan_insert_asset_slot(
 ) -> dict | None:
     if not insert_plan:
         return None
+    settings = get_settings()
     if not subtitle_items:
         insert_plan["insert_after_sec"] = 0.0
         insert_plan["reason"] = "没有可用字幕，默认插入到开头。"
+        insert_plan["timing_summary"] = _build_timing_summary(
+            [],
+            review_gap=float(settings.packaging_selection_review_gap),
+            min_score=float(settings.packaging_selection_min_score),
+            low_confidence_reason="缺少字幕节奏信息，建议确认插入位置。",
+        )
         return insert_plan
 
     candidates = [
@@ -1196,11 +1461,17 @@ async def _plan_insert_asset_slot(
         first = subtitle_items[min(len(subtitle_items) - 1, max(0, len(subtitle_items) // 2))]
         insert_plan["insert_after_sec"] = float(first.get("end_time", 0.0) or 0.0)
         insert_plan["reason"] = "字幕太短，回退到中间位置插入。"
+        insert_plan["timing_summary"] = _build_timing_summary(
+            [],
+            review_gap=float(settings.packaging_selection_review_gap),
+            min_score=float(settings.packaging_selection_min_score),
+            low_confidence_reason="字幕太短，建议确认插入位置。",
+        )
         return insert_plan
 
     transcript_excerpt = "\n".join(
         f"[{float(item.get('start_time', 0.0)):.1f}-{float(item.get('end_time', 0.0)):.1f}] "
-        f"{item.get('text_final') or item.get('text_norm') or item.get('text_raw') or ''}"
+        f"{_subtitle_text(item)}"
         for item in candidates[:48]
     )
     fallback = candidates[len(candidates) // 2]
@@ -1233,10 +1504,26 @@ async def _plan_insert_asset_slot(
         max_sec = float(candidates[-1].get("end_time", fallback_sec) or fallback_sec)
         insert_plan["insert_after_sec"] = max(8.0, min(chosen, max_sec))
         insert_plan["reason"] = str(data.get("reason") or "").strip() or "LLM 选择了较自然的转场点。"
+        rankings = [
+            {"score": 0.78, "enter_sec": insert_plan["insert_after_sec"]},
+            {"score": 0.7, "enter_sec": fallback_sec},
+        ]
+        insert_plan["timing_summary"] = _build_timing_summary(
+            rankings,
+            review_gap=float(settings.packaging_selection_review_gap),
+            min_score=float(settings.packaging_selection_min_score),
+            low_confidence_reason="插入点候选分差过小或语义证据不足，建议确认。",
+        )
         return insert_plan
     except Exception:
         insert_plan["insert_after_sec"] = fallback_sec
         insert_plan["reason"] = "LLM 未返回可靠结果，回退到中间自然停顿。"
+        insert_plan["timing_summary"] = _build_timing_summary(
+            [],
+            review_gap=float(settings.packaging_selection_review_gap),
+            min_score=float(settings.packaging_selection_min_score),
+            low_confidence_reason="插入点回退到默认停顿，建议确认。",
+        )
         return insert_plan
 
 

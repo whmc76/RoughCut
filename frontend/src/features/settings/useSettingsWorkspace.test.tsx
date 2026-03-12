@@ -25,7 +25,7 @@ const SAMPLE_CONFIG: Config = {
   local_vision_model: "qwen2.5vl:7b",
   multimodal_fallback_provider: "openai",
   multimodal_fallback_model: "gpt-4.1-mini",
-  search_provider: "serpapi",
+  search_provider: "auto",
   search_fallback_provider: "openai",
   model_search_helper: "gpt-4.1-mini",
   openai_base_url: "https://api.openai.com/v1",
@@ -46,14 +46,36 @@ const SAMPLE_CONFIG: Config = {
   allowed_extensions: [".mp4"],
   output_dir: "data/output",
   fact_check_enabled: true,
+  auto_confirm_content_profile: true,
+  content_profile_review_threshold: 0.72,
+  auto_accept_glossary_corrections: true,
+  glossary_correction_review_threshold: 0.9,
+  auto_select_cover_variant: true,
+  cover_selection_review_gap: 0.08,
+  packaging_selection_review_gap: 0.08,
+  packaging_selection_min_score: 0.6,
   overrides: {},
 };
 
 const SAMPLE_OPTIONS: ConfigOptions = {
+  job_languages: [{ value: "zh-CN", label: "简体中文" }],
+  channel_profiles: [{ value: "", label: "自动匹配" }],
   transcription_models: {
     openai: ["gpt-4o-transcribe"],
     local_whisper: ["large-v3"],
   },
+  multimodal_fallback_providers: [
+    { value: "openai", label: "OpenAI" },
+    { value: "ollama", label: "Ollama" },
+  ],
+  search_providers: [
+    { value: "auto", label: "自动选择" },
+    { value: "openai", label: "OpenAI" },
+  ],
+  search_fallback_providers: [
+    { value: "openai", label: "OpenAI" },
+    { value: "searxng", label: "SearXNG" },
+  ],
 };
 
 describe("useSettingsWorkspace", () => {

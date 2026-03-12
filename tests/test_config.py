@@ -21,6 +21,14 @@ def test_default_settings():
     assert ".mp4" in s.allowed_extensions
     assert s.render_debug_dir == "logs/render-debug"
     assert s.cover_output_variants == 5
+    assert s.auto_confirm_content_profile is True
+    assert s.content_profile_review_threshold == 0.72
+    assert s.auto_accept_glossary_corrections is True
+    assert s.glossary_correction_review_threshold == 0.9
+    assert s.auto_select_cover_variant is True
+    assert s.cover_selection_review_gap == 0.08
+    assert s.packaging_selection_review_gap == 0.08
+    assert s.packaging_selection_min_score == 0.6
     assert s.active_reasoning_provider == "openai"
 
 

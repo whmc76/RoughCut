@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from roughcut.media.render import (
+    _build_segment_filter_chain,
     _can_bake_rotation,
     _describe_stream,
     _is_expected_output,
@@ -99,3 +100,32 @@ def test_rotation_filter_for_cw():
 
     with pytest.raises(ValueError):
         _rotation_filter_for_cw(0)
+
+
+def test_build_segment_filter_chain_normalizes_fps_for_xfade():
+    parts, video_label, audio_label = _build_segment_filter_chain(
+        [
+            {"start": 0.0, "end": 3.0},
+            {"start": 3.0, "end": 6.0},
+        ],
+        transpose_suffix="",
+        editing_accents={"transitions": {"enabled": True, "boundary_indexes": [0], "duration_sec": 0.12}},
+    )
+
+    assert any("fps=30000/1001" in part for part in parts)
+    assert any("xfade=transition=fade" in part for part in parts)
+    assert video_label == "vout"
+    assert audio_label == "achain1"
+
+
+def test_build_segment_filter_chain_skips_fps_normalization_without_xfade():
+    parts, _, _ = _build_segment_filter_chain(
+        [
+            {"start": 0.0, "end": 3.0},
+            {"start": 3.0, "end": 6.0},
+        ],
+        transpose_suffix="",
+        editing_accents={"transitions": {"enabled": False, "boundary_indexes": [0], "duration_sec": 0.12}},
+    )
+
+    assert all("fps=30000/1001" not in part for part in parts)

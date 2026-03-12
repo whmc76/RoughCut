@@ -134,20 +134,30 @@ async def extract_cover_frame(
         if not candidates:
             candidates = [{"seek": seek_sec, "preview": None}]
 
-        ranked_indices = await _rank_cover_candidates(
+        ranked_candidates = await _rank_cover_candidates(
             candidates,
             content_profile=content_profile,
             variant_count=variant_count,
         )
-        selected = [candidates[idx] for idx in ranked_indices[:variant_count] if idx < len(candidates)]
+        selected_rankings = [item for item in ranked_candidates[:variant_count] if int(item.get("index", -1)) < len(candidates)]
+        selected = [candidates[int(item["index"])] for item in selected_rankings]
         if not selected:
+            selected_rankings = [{"index": 0, "score": 0.0, "reason": "", "source": "fallback"}]
             selected = [candidates[0]]
         if len(selected) < variant_count:
-            chosen_ids = {id(candidate) for candidate in selected}
-            for candidate in candidates:
-                if id(candidate) in chosen_ids:
+            chosen_indices = {int(item.get("index", -1)) for item in selected_rankings}
+            for idx, candidate in enumerate(candidates):
+                if idx in chosen_indices:
                     continue
                 selected.append(candidate)
+                selected_rankings.append(
+                    {
+                        "index": idx,
+                        "score": 0.0,
+                        "reason": "",
+                        "source": "fallback_fill",
+                    }
+                )
                 if len(selected) >= variant_count:
                     break
 
@@ -183,7 +193,15 @@ async def extract_cover_frame(
             outputs.append(target)
         if outputs:
             shutil.copy2(outputs[0], output_path)
-        _write_cover_variant_manifest(output_path, selected, title_variants, outputs)
+        selection_summary = _build_cover_selection_summary(selected_rankings)
+        _write_cover_variant_manifest(
+            output_path,
+            selected,
+            title_variants,
+            outputs,
+            rankings=selected_rankings,
+            selection_summary=selection_summary,
+        )
 
     return outputs
 
@@ -243,7 +261,7 @@ async def _rank_cover_candidates(
     *,
     content_profile: dict[str, Any] | None,
     variant_count: int,
-) -> list[int]:
+) -> list[dict[str, Any]]:
     preview_paths = [candidate["preview"] for candidate in candidates if candidate.get("preview")]
     if preview_paths:
         try:
@@ -254,22 +272,82 @@ async def _rank_cover_candidates(
                 "优先选产品正面、包装正面、logo/型号能看出来的画面。"
                 "避免只看到手、主体太小、糊帧、无重点、文字会挡住主体的画面。"
                 f"\n视频主题参考：{profile_text}"
-                f"\n输出 JSON：{{\"best_indices\":[0,1,2]}}，最多返回 {variant_count} 个索引，按优先级排序。"
+                "\n输出 JSON："
+                "{\"ranked\":[{\"index\":0,\"score\":0.91,\"reason\":\"主体最完整\"}]}"
+                f"，最多返回 {max(variant_count, 2)} 个结果，按优先级排序。score 范围 0-1。"
             )
             content = await complete_with_images(prompt, preview_paths, max_tokens=220, json_mode=True)
             data = json.loads(extract_json_text(content))
-            ordered = []
-            for raw in data.get("best_indices", []):
-                idx = int(raw)
-                if 0 <= idx < len(candidates) and idx not in ordered:
-                    ordered.append(idx)
+            ordered: list[dict[str, Any]] = []
+            seen_indices: set[int] = set()
+            for raw in data.get("ranked", []):
+                idx = int(raw.get("index", -1))
+                if not 0 <= idx < len(candidates) or idx in seen_indices:
+                    continue
+                ordered.append(
+                    {
+                        "index": idx,
+                        "score": _normalize_cover_score(raw.get("score"), fallback=0.0),
+                        "reason": str(raw.get("reason") or "").strip(),
+                        "source": "llm_rank",
+                    }
+                )
+                seen_indices.add(idx)
             if ordered:
                 return ordered
         except Exception:
             pass
 
-    fallback = list(range(len(candidates)))
-    return fallback[:variant_count]
+    fallback: list[dict[str, Any]] = []
+    for idx in range(len(candidates)):
+        score = max(0.0, round(0.82 - (idx * 0.06), 3))
+        fallback.append({"index": idx, "score": score, "reason": "", "source": "fallback_rank"})
+    return fallback[: max(variant_count, 2)]
+
+
+def _normalize_cover_score(value: Any, *, fallback: float) -> float:
+    try:
+        return round(max(0.0, min(1.0, float(value))), 3)
+    except Exception:
+        return round(max(0.0, min(1.0, float(fallback))), 3)
+
+
+def _build_cover_selection_summary(rankings: list[dict[str, Any]]) -> dict[str, Any]:
+    settings = get_settings()
+    if not rankings:
+        return {
+            "enabled": settings.auto_select_cover_variant,
+            "review_gap": round(float(settings.cover_selection_review_gap), 3),
+            "review_recommended": False,
+            "selected_variant_index": None,
+            "selected_score": 0.0,
+            "runner_up_index": None,
+            "runner_up_score": 0.0,
+            "score_gap": 0.0,
+            "review_reason": "",
+        }
+
+    primary = rankings[0]
+    runner_up = rankings[1] if len(rankings) > 1 else None
+    primary_score = _normalize_cover_score(primary.get("score"), fallback=0.0)
+    runner_up_score = _normalize_cover_score(runner_up.get("score"), fallback=0.0) if runner_up else 0.0
+    score_gap = round(max(0.0, primary_score - runner_up_score), 3)
+    review_gap = round(max(0.0, min(1.0, float(settings.cover_selection_review_gap))), 3)
+    review_recommended = bool(
+        settings.auto_select_cover_variant and runner_up is not None and score_gap <= review_gap
+    )
+    review_reason = "前两张封面分差过小，建议确认首选图。" if review_recommended else ""
+    return {
+        "enabled": settings.auto_select_cover_variant,
+        "review_gap": review_gap,
+        "review_recommended": review_recommended,
+        "selected_variant_index": 1,
+        "selected_score": primary_score,
+        "runner_up_index": 2 if runner_up is not None else None,
+        "runner_up_score": runner_up_score,
+        "score_gap": score_gap,
+        "review_reason": review_reason,
+    }
 
 
 async def _generate_cover_title_variants(
@@ -384,12 +462,18 @@ def _write_cover_variant_manifest(
     selected: list[dict[str, Any]],
     title_variants: list[dict[str, Any] | None],
     outputs: list[Path],
+    *,
+    rankings: list[dict[str, Any]] | None = None,
+    selection_summary: dict[str, Any] | None = None,
 ) -> None:
     manifest_path = get_cover_manifest_path(output_path)
     legacy_manifest_path = get_legacy_cover_manifest_path(output_path)
     payload: list[dict[str, Any]] = []
+    rankings = rankings or []
+    selection_summary = selection_summary or {}
     for idx, target in enumerate(outputs):
         plan = title_variants[idx] if idx < len(title_variants) and isinstance(title_variants[idx], dict) else {}
+        ranking = rankings[idx] if idx < len(rankings) and isinstance(rankings[idx], dict) else {}
         payload.append(
             {
                 "index": idx + 1,
@@ -400,11 +484,38 @@ def _write_cover_variant_manifest(
                 "reason": plan.get("reason") or "",
                 "title_style": plan.get("title_style") or "",
                 "title": plan.get("title") or None,
+                "score": _normalize_cover_score(ranking.get("score"), fallback=0.0),
+                "rank": idx + 1,
+                "is_primary": idx == 0,
+                "review_recommended": bool(selection_summary.get("review_recommended")) if idx == 0 else False,
+                "score_gap_to_next": selection_summary.get("score_gap") if idx == 0 else None,
+                "review_reason": selection_summary.get("review_reason") if idx == 0 else "",
             }
         )
     manifest_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     if legacy_manifest_path != manifest_path:
         legacy_manifest_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def load_cover_selection_summary(output_path: Path) -> dict[str, Any] | None:
+    manifest_path = get_cover_manifest_path(output_path)
+    if not manifest_path.exists():
+        return None
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if not isinstance(payload, list) or not payload:
+        return None
+    primary = next((item for item in payload if item.get("is_primary")), payload[0])
+    return {
+        "enabled": get_settings().auto_select_cover_variant,
+        "review_recommended": bool(primary.get("review_recommended")),
+        "selected_variant_index": int(primary.get("index") or 1),
+        "selected_score": _normalize_cover_score(primary.get("score"), fallback=0.0),
+        "score_gap": _normalize_cover_score(primary.get("score_gap_to_next"), fallback=0.0),
+        "review_reason": str(primary.get("review_reason") or "").strip(),
+    }
 
 
 async def _extract_frame(video_path: Path, output_path: Path, seek_sec: float) -> None:
@@ -541,7 +652,7 @@ async def _overlay_title_layout(
 ) -> None:
     settings = get_settings()
     style = _title_style_tokens(title_style, title_lines=title_lines, cover_style=cover_style)
-    layers: list[str] = []
+    layers = _build_cover_safe_area_layers(title_lines)
 
     fontfile = settings.cover_title_font_path.replace("\\", "/").replace(":", "\\:")
     for line_key in ("top", "main", "bottom"):
@@ -585,6 +696,15 @@ async def _overlay_title_layout(
     )
     if result.returncode == 0 and tmp.exists():
         tmp.replace(cover_path)
+
+
+def _build_cover_safe_area_layers(title_lines: dict[str, str]) -> list[str]:
+    if not str(title_lines.get("bottom") or "").strip():
+        return []
+    return [
+        "drawbox=x=0:y=ih*0.74:w=iw:h=ih*0.26:color=0x0B0C0FB8:t=fill",
+        "drawbox=x=0:y=ih*0.86:w=iw:h=ih*0.14:color=0x080808D8:t=fill",
+    ]
 
 
 def _drawtext(

@@ -56,3 +56,36 @@ def test_normalize_platform_packaging_backfills_missing_titles():
     assert len(packaging["platforms"]["bilibili"]["titles"]) == 5
     assert packaging["platforms"]["bilibili"]["description"]
     assert packaging["platforms"]["bilibili"]["tags"]
+
+
+def test_normalize_platform_packaging_keeps_product_blank_when_identity_is_uncertain():
+    packaging = normalize_platform_packaging(
+        {
+            "highlights": {"product": "LEATHERMAN ARC"},
+            "platforms": {
+                "bilibili": {"titles": [], "description": "", "tags": []},
+                "xiaohongshu": {"titles": [], "description": "", "tags": []},
+                "douyin": {"titles": [], "description": "", "tags": []},
+                "kuaishou": {"titles": [], "description": "", "tags": []},
+                "wechat_channels": {"titles": [], "description": "", "tags": []},
+            },
+        },
+        content_profile={"subject_brand": "", "subject_model": "", "subject_type": "开箱产品", "video_theme": "开箱体验"},
+    )
+
+    assert packaging["highlights"]["product"] == ""
+    assert packaging["platforms"]["bilibili"]["titles"][0] == "这期开箱重点看哪些细节"
+    assert "不编产品名" in packaging["platforms"]["bilibili"]["description"]
+    assert "工具" not in packaging["platforms"]["bilibili"]["description"]
+    assert packaging["platforms"]["bilibili"]["tags"] == ["开箱体验", "开箱", "上手体验", "玩家分享"]
+
+
+def test_normalize_platform_packaging_preserves_specific_identity_when_available():
+    packaging = normalize_platform_packaging(
+        {"highlights": {}, "platforms": {"bilibili": {"titles": [], "description": "", "tags": []}}},
+        content_profile={"subject_brand": "REATE", "subject_type": "EDC折刀", "video_theme": "折刀雕刻开箱"},
+    )
+
+    assert packaging["highlights"]["product"] == "REATE EDC折刀"
+    assert packaging["platforms"]["bilibili"]["titles"][0].startswith("REATEEDC折刀开箱")
+    assert packaging["platforms"]["bilibili"]["tags"][:4] == ["REATE", "EDC折刀", "折刀雕刻开箱", "EDC"]

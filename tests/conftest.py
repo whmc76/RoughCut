@@ -22,6 +22,19 @@ from roughcut.db.session import Base
 from roughcut.main import app
 
 
+@pytest.fixture(autouse=True)
+def isolate_runtime_override_file(tmp_path, monkeypatch):
+    import roughcut.api.config as config_api
+    import roughcut.config as config_mod
+
+    override_file = tmp_path / "roughcut_config.json"
+    monkeypatch.setattr(config_api, "_CONFIG_FILE", override_file)
+    monkeypatch.setattr(config_mod, "_OVERRIDES_FILE", override_file)
+    config_mod._settings = None
+    yield
+    config_mod._settings = None
+
+
 @pytest.fixture(scope="session")
 def event_loop():
     loop = asyncio.new_event_loop()

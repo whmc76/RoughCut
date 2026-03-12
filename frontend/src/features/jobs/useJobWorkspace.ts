@@ -14,6 +14,7 @@ export function useJobWorkspace() {
   const [contentDraft, setContentDraft] = useState<Record<string, unknown>>({});
 
   const jobs = useQuery({ queryKey: ["jobs"], queryFn: api.listJobs, refetchInterval: 8_000 });
+  const options = useQuery({ queryKey: ["config-options"], queryFn: api.getConfigOptions });
   const detail = useQuery({
     queryKey: ["job", selectedJobId],
     queryFn: () => api.getJob(selectedJobId!),
@@ -123,6 +124,7 @@ export function useJobWorkspace() {
     report,
     timeline,
     contentProfile,
+    options,
     refreshAll,
     openFolder,
     cancelJob,

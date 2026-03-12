@@ -6,6 +6,7 @@ import { useJobWorkspace } from "./useJobWorkspace";
 
 const mockApi = vi.hoisted(() => ({
   listJobs: vi.fn(),
+  getConfigOptions: vi.fn(),
   getJob: vi.fn(),
   getJobActivity: vi.fn(),
   getJobReport: vi.fn(),
@@ -99,6 +100,14 @@ const SAMPLE_PROFILE: ContentProfileReview = {
 describe("useJobWorkspace", () => {
   beforeEach(() => {
     mockApi.listJobs.mockResolvedValue(SAMPLE_JOBS);
+    mockApi.getConfigOptions.mockResolvedValue({
+      job_languages: [{ value: "zh-CN", label: "简体中文" }],
+      channel_profiles: [{ value: "", label: "自动匹配" }],
+      transcription_models: {},
+      multimodal_fallback_providers: [],
+      search_providers: [],
+      search_fallback_providers: [],
+    });
     mockApi.getJob.mockResolvedValue(SAMPLE_JOBS[0]);
     mockApi.getJobActivity.mockResolvedValue(SAMPLE_ACTIVITY);
     mockApi.getJobReport.mockResolvedValue(SAMPLE_REPORT);

@@ -16,6 +16,7 @@ from sqlalchemy import delete, distinct, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from roughcut.api.options import normalize_channel_profile, normalize_job_language
 from roughcut.api.schemas import (
     ContentProfileMemoryStatsOut,
     ContentProfileConfirmIn,
@@ -106,6 +107,11 @@ async def create_job(
     session: AsyncSession = Depends(get_session),
 ):
     settings = get_settings()
+    try:
+        language = normalize_job_language(language)
+        channel_profile = normalize_channel_profile(channel_profile)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     # Validate extension
     suffix = Path(file.filename or "").suffix.lower()
@@ -759,15 +765,15 @@ def _build_activity_decisions(
         )
 
     if corrections:
-        accepted = sum(1 for item in corrections if item.human_decision == "accepted")
-        pending = sum(1 for item in corrections if not item.human_decision)
+        accepted = sum(1 for item in corrections if item.auto_applied or item.human_decision == "accepted")
+        pending = sum(1 for item in corrections if item.human_decision not in {"accepted", "rejected"})
         decisions.append(
             {
                 "kind": "subtitle_review",
                 "title": "字幕与术语",
                 "status": "done",
                 "summary": f"识别出 {len(corrections)} 处术语/字幕纠错候选",
-                "detail": f"待审 {pending} 条，已接受 {accepted} 条",
+                "detail": f"待审 {pending} 条，自动/已接受 {accepted} 条",
                 "updated_at": _iso_or_none(max((item.created_at for item in corrections), default=None)),
             }
         )

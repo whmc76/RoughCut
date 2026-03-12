@@ -8,6 +8,13 @@ from typing import Any
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from roughcut.api.options import (
+    JOB_LANGUAGE_OPTIONS,
+    MULTIMODAL_FALLBACK_PROVIDER_OPTIONS,
+    SEARCH_FALLBACK_PROVIDER_OPTIONS,
+    SEARCH_PROVIDER_OPTIONS,
+    build_channel_profile_options,
+)
 from roughcut.config import get_settings
 
 router = APIRouter(prefix="/config", tags=["config"])
@@ -64,12 +71,25 @@ class ConfigOut(BaseModel):
     output_dir: str
     # Feature flags
     fact_check_enabled: bool
+    auto_confirm_content_profile: bool
+    content_profile_review_threshold: float
+    auto_accept_glossary_corrections: bool
+    glossary_correction_review_threshold: float
+    auto_select_cover_variant: bool
+    cover_selection_review_gap: float
+    packaging_selection_review_gap: float
+    packaging_selection_min_score: float
     # Overrides currently stored
     overrides: dict
 
 
 class ConfigOptionsOut(BaseModel):
+    job_languages: list[dict[str, str]]
+    channel_profiles: list[dict[str, str]]
     transcription_models: dict[str, list[str]]
+    multimodal_fallback_providers: list[dict[str, str]]
+    search_providers: list[dict[str, str]]
+    search_fallback_providers: list[dict[str, str]]
 
 
 class ConfigPatch(BaseModel):
@@ -103,6 +123,14 @@ class ConfigPatch(BaseModel):
     allowed_extensions: list[str] | None = None
     output_dir: str | None = None
     fact_check_enabled: bool | None = None
+    auto_confirm_content_profile: bool | None = None
+    content_profile_review_threshold: float | None = None
+    auto_accept_glossary_corrections: bool | None = None
+    glossary_correction_review_threshold: float | None = None
+    auto_select_cover_variant: bool | None = None
+    cover_selection_review_gap: float | None = None
+    packaging_selection_review_gap: float | None = None
+    packaging_selection_min_score: float | None = None
 
 
 @router.get("", response_model=ConfigOut)
@@ -140,6 +168,14 @@ def get_config():
         allowed_extensions=s.allowed_extensions,
         output_dir=s.output_dir,
         fact_check_enabled=s.fact_check_enabled,
+        auto_confirm_content_profile=s.auto_confirm_content_profile,
+        content_profile_review_threshold=s.content_profile_review_threshold,
+        auto_accept_glossary_corrections=s.auto_accept_glossary_corrections,
+        glossary_correction_review_threshold=s.glossary_correction_review_threshold,
+        auto_select_cover_variant=s.auto_select_cover_variant,
+        cover_selection_review_gap=s.cover_selection_review_gap,
+        packaging_selection_review_gap=s.packaging_selection_review_gap,
+        packaging_selection_min_score=s.packaging_selection_min_score,
         overrides=overrides,
     )
 
@@ -147,6 +183,8 @@ def get_config():
 @router.get("/options", response_model=ConfigOptionsOut)
 def get_config_options():
     return ConfigOptionsOut(
+        job_languages=JOB_LANGUAGE_OPTIONS,
+        channel_profiles=build_channel_profile_options(),
         transcription_models={
             "local_whisper": [
                 "base",
@@ -158,7 +196,10 @@ def get_config_options():
             "openai": [
                 "gpt-4o-transcribe",
             ],
-        }
+        },
+        multimodal_fallback_providers=MULTIMODAL_FALLBACK_PROVIDER_OPTIONS,
+        search_providers=SEARCH_PROVIDER_OPTIONS,
+        search_fallback_providers=SEARCH_FALLBACK_PROVIDER_OPTIONS,
     )
 
 
@@ -173,6 +214,31 @@ def patch_config(body: ConfigPatch):
             raise HTTPException(status_code=400, detail="output_dir cannot be empty")
         Path(output_dir).mkdir(parents=True, exist_ok=True)
         updates["output_dir"] = output_dir
+    if "content_profile_review_threshold" in updates:
+        updates["content_profile_review_threshold"] = max(
+            0.0,
+            min(1.0, float(updates["content_profile_review_threshold"])),
+        )
+    if "glossary_correction_review_threshold" in updates:
+        updates["glossary_correction_review_threshold"] = max(
+            0.0,
+            min(1.0, float(updates["glossary_correction_review_threshold"])),
+        )
+    if "cover_selection_review_gap" in updates:
+        updates["cover_selection_review_gap"] = max(
+            0.0,
+            min(1.0, float(updates["cover_selection_review_gap"])),
+        )
+    if "packaging_selection_review_gap" in updates:
+        updates["packaging_selection_review_gap"] = max(
+            0.0,
+            min(1.0, float(updates["packaging_selection_review_gap"])),
+        )
+    if "packaging_selection_min_score" in updates:
+        updates["packaging_selection_min_score"] = max(
+            0.0,
+            min(1.0, float(updates["packaging_selection_min_score"])),
+        )
     overrides.update(updates)
     _save_overrides(overrides)
 

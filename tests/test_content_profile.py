@@ -10,6 +10,7 @@ from roughcut.review.content_profile import (
     _fallback_profile,
     _seed_profile_from_subtitles,
     _seed_profile_from_user_memory,
+    assess_content_profile_automation,
     apply_content_profile_feedback,
     build_transcript_excerpt,
     build_cover_title,
@@ -52,6 +53,23 @@ def test_build_cover_title_prefers_visible_english_brand():
 
     assert title["top"] == "LEATHERMAN"
     assert title["main"] == "LEATHERMAN战术钳"
+
+
+def test_build_cover_title_drops_edc_prefix_from_subject_type():
+    preset = get_workflow_preset("edc_tactical")
+    title = build_cover_title(
+        {
+            "subject_brand": "REATE",
+            "subject_model": "",
+            "subject_type": "EDC折刀",
+            "video_theme": "折刀雕刻开箱",
+            "hook_line": "REATE 这把雕刻折刀终于来了",
+        },
+        preset,
+    )
+
+    assert title["top"] == "REATE"
+    assert title["main"] == "REATE折刀"
 
 
 def test_fallback_profile_does_not_use_timestamp_as_model():
@@ -120,7 +138,19 @@ def test_seed_profile_from_subtitles_handles_edc_asr_aliases():
     assert profile["subject_type"] == "多功能工具钳"
 
 
-def test_seed_profile_from_user_memory_matches_transcript_and_keywords():
+def test_seed_profile_from_subtitles_detects_reate_folding_knife_signals():
+    profile = _seed_profile_from_subtitles(
+        [
+            {"text_raw": "这把锐特折刀的梯片手感不错"},
+            {"text_raw": "柄身细节和锁片结构这次都做了调整"},
+        ]
+    )
+
+    assert profile["subject_brand"] == "REATE"
+    assert profile["subject_type"] == "EDC折刀"
+
+
+def test_seed_profile_from_user_memory_is_disabled_to_avoid_cross_episode_contamination():
     profile = _seed_profile_from_user_memory(
         "这次来聊 ARC 这把工具的单手开合和锁点机构",
         {
@@ -132,9 +162,33 @@ def test_seed_profile_from_user_memory_matches_transcript_and_keywords():
         },
     )
 
-    assert profile["subject_brand"] == "LEATHERMAN"
-    assert profile["subject_model"] == "ARC"
-    assert "LEATHERMAN ARC" in profile["search_queries"]
+    assert profile == {}
+
+
+def test_assess_content_profile_automation_blocks_product_profile_without_identity():
+    assessment = assess_content_profile_automation(
+        {
+            "preset_name": "unboxing_upgrade",
+            "subject_type": "多功能工具钳",
+            "video_theme": "升级结构与上手体验",
+            "summary": "这条视频主要围绕多功能工具钳的升级结构和上手体验展开，重点看开合手感和锁定机构。",
+            "engagement_question": "这次升级你最在意开合还是锁定机构？",
+            "search_queries": ["工具钳 升级 开箱", "工具钳 锁定机构"],
+            "cover_title": {"top": "工具钳", "main": "升级结构开箱", "bottom": "锁定机构细看"},
+            "evidence": [{"title": "demo"}],
+        },
+        subtitle_items=[
+            {"text_raw": "这次先看升级后的锁定机构"},
+            {"text_raw": "后面再看实际开合手感"},
+            {"text_raw": "整体结构变化比较明显"},
+            {"text_raw": "握持和受力也有变化"},
+            {"text_raw": "我会重点看耐用度"},
+            {"text_raw": "最后聊聊值不值得升级"},
+        ],
+    )
+
+    assert assessment["auto_confirm"] is False
+    assert "开箱类视频未识别出可验证主体" in assessment["blocking_reasons"]
 
 
 @pytest.mark.asyncio
@@ -150,16 +204,24 @@ async def test_apply_content_profile_feedback_prefers_user_values():
         source_name="video.mp4",
         channel_profile=None,
         user_feedback={
+            "subject_brand": "REATE",
             "subject_model": "马年限定版",
+            "subject_type": "EDC折刀",
+            "hook_line": "REATE 这把雕刻折刀终于来了",
+            "engagement_question": "这把 REATE 折刀你最想先看雕刻细节还是开合手感？",
             "summary": "这是用户确认后的摘要",
-            "keywords": ["FAS", "马年限定版", "工具钳"],
+            "keywords": ["REATE 折刀", "马年限定版", "EDC折刀"],
         },
     )
 
+    assert result["subject_brand"] == "REATE"
     assert result["subject_model"] == "马年限定版"
+    assert result["subject_type"] == "EDC折刀"
     assert result["summary"] == "这是用户确认后的摘要"
+    assert result["engagement_question"] == "这把 REATE 折刀你最想先看雕刻细节还是开合手感？"
     assert result["search_queries"]
-    assert any("FAS" in item for item in result["search_queries"])
+    assert any("REATE" in item for item in result["search_queries"])
+    assert any(token in result["cover_title"]["main"] for token in ("REATE", "马年限定版"))
 
 
 @pytest.mark.asyncio
@@ -219,6 +281,89 @@ async def test_enrich_content_profile_falls_back_to_contextual_question_when_llm
     )
 
     assert result["engagement_question"] == "LEATHERMANARC这次升级你最在意哪一项？"
+
+
+@pytest.mark.asyncio
+async def test_enrich_content_profile_clears_unverified_brand_model(monkeypatch: pytest.MonkeyPatch):
+    from roughcut.review import content_profile as content_profile_module
+
+    def raising_provider():
+        raise RuntimeError("provider unavailable")
+
+    monkeypatch.setattr(content_profile_module, "get_reasoning_provider", raising_provider)
+
+    result = await enrich_content_profile(
+        profile={
+            "subject_brand": "LEATHERMAN 莱泽曼",
+            "subject_model": "ARC",
+            "subject_type": "工具钳",
+            "video_theme": "开箱评测",
+            "visible_text": "LEATHERMAN ARC",
+            "summary": "这次莱泽曼 ARC 的开箱主要看整体结构。",
+            "engagement_question": "这把莱泽曼 ARC 值不值入手？",
+            "search_queries": ["LEATHERMAN ARC", "LEATHERMAN ARC 开箱"],
+            "cover_title": {
+                "top": "莱泽曼ARC",
+                "main": "旗舰工具钳开箱",
+                "bottom": "360°彩合金结构+双咔哒开合",
+            },
+        },
+        source_name="20260211-120947.mp4",
+        channel_profile=None,
+        transcript_excerpt="这次先看彩钛结构和组装细节，后面再看开合手感。",
+        include_research=False,
+    )
+
+    assert result["subject_brand"] == ""
+    assert result["subject_model"] == ""
+    assert result["visible_text"] == ""
+    assert not result["search_queries"]
+    assert "ARC" not in result["cover_title"]["top"]
+    assert "莱泽曼" not in result["summary"]
+    assert "ARC" not in result["engagement_question"]
+
+
+@pytest.mark.asyncio
+async def test_enrich_content_profile_preserves_confirmed_user_feedback(monkeypatch: pytest.MonkeyPatch):
+    from roughcut.review import content_profile as content_profile_module
+
+    def raising_provider():
+        raise RuntimeError("provider unavailable")
+
+    monkeypatch.setattr(content_profile_module, "get_reasoning_provider", raising_provider)
+
+    result = await enrich_content_profile(
+        profile={
+            "subject_brand": "LEATHERMAN",
+            "subject_model": "ARC",
+            "subject_type": "工具钳",
+            "video_theme": "开箱评测",
+            "visible_text": "LEATHERMAN ARC",
+            "summary": "这期是 REATE 折刀雕刻开箱，不是工具钳节目。",
+            "engagement_question": "这把 REATE 折刀你最想先看雕刻细节还是开合手感？",
+            "user_feedback": {
+                "subject_brand": "REATE",
+                "subject_type": "EDC折刀",
+                "video_theme": "折刀雕刻开箱",
+                "summary": "这期是 REATE 折刀雕刻开箱，不是工具钳节目。",
+                "engagement_question": "这把 REATE 折刀你最想先看雕刻细节还是开合手感？",
+                "hook_line": "REATE 这把雕刻折刀终于来了",
+                "keywords": ["REATE 折刀", "折刀雕刻开箱"],
+            },
+        },
+        source_name="20260211-120947.mp4",
+        channel_profile=None,
+        transcript_excerpt="这次先看柄身雕刻和组装细节，后面再看开合手感。",
+        include_research=False,
+    )
+
+    assert result["subject_brand"] == "REATE"
+    assert result["subject_type"] == "EDC折刀"
+    assert result["video_theme"] == "折刀雕刻开箱"
+    assert result["summary"] == "这期是 REATE 折刀雕刻开箱，不是工具钳节目。"
+    assert result["engagement_question"] == "这把 REATE 折刀你最想先看雕刻细节还是开合手感？"
+    assert any("REATE" in item for item in result["search_queries"])
+    assert result["cover_title"]["top"] == "REATE"
 
 
 @pytest.mark.asyncio

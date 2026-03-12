@@ -81,6 +81,356 @@ def build_cover_title(profile: dict[str, Any], preset: WorkflowPreset) -> dict[s
     }
 
 
+def assess_content_profile_automation(
+    profile: dict[str, Any],
+    *,
+    subtitle_items: list[dict[str, Any]] | None = None,
+    auto_confirm_enabled: bool = True,
+    threshold: float = 0.72,
+) -> dict[str, Any]:
+    normalized_threshold = max(0.0, min(1.0, float(threshold)))
+    subtitle_items = subtitle_items or []
+    transcript_excerpt = str(profile.get("transcript_excerpt") or "").strip()
+    if not transcript_excerpt and subtitle_items:
+        transcript_excerpt = build_transcript_excerpt(subtitle_items, max_items=24, max_chars=900)
+
+    subtitle_count = sum(
+        1
+        for item in subtitle_items
+        if _clean_line(item.get("text_final") or item.get("text_norm") or item.get("text_raw") or "")
+    )
+    preset_name = str(profile.get("preset_name") or "").strip()
+    product_like_presets = {"unboxing_default", "unboxing_limited", "unboxing_upgrade", "edc_tactical"}
+
+    score = 0.0
+    reasons: list[str] = []
+    review_reasons: list[str] = []
+    blocking_reasons: list[str] = []
+
+    subject_type = str(profile.get("subject_type") or "").strip()
+    if subject_type and not _is_generic_subject_type(subject_type):
+        score += 0.18
+        reasons.append("主体类型明确")
+    else:
+        review_reasons.append("主体类型仍然偏泛化")
+
+    video_theme = str(profile.get("video_theme") or "").strip()
+    if _is_specific_video_theme(video_theme, preset_name=preset_name):
+        score += 0.14
+        reasons.append("视频主题有足够区分度")
+    else:
+        review_reasons.append("视频主题还不够具体")
+
+    summary = str(profile.get("summary") or "").strip()
+    if summary and not _is_generic_profile_summary(summary):
+        score += 0.16
+        reasons.append("摘要可直接用于后续步骤")
+    else:
+        review_reasons.append("摘要仍像默认模板")
+
+    cover_title = profile.get("cover_title")
+    if isinstance(cover_title, dict) and _cover_title_is_usable(cover_title):
+        score += 0.12
+        reasons.append("封面标题可用")
+    else:
+        review_reasons.append("封面标题还不够稳定")
+
+    engagement_question = str(profile.get("engagement_question") or "").strip()
+    if engagement_question and not _is_generic_engagement_question(engagement_question):
+        score += 0.08
+        reasons.append("互动问题贴合内容")
+    else:
+        review_reasons.append("互动问题偏泛化")
+
+    search_queries = []
+    seen_queries: set[str] = set()
+    for item in profile.get("search_queries") or []:
+        value = str(item).strip()
+        normalized = _normalize_profile_value(value)
+        if value and normalized and normalized not in seen_queries:
+            seen_queries.add(normalized)
+            search_queries.append(value)
+    if len(search_queries) >= 2:
+        score += 0.12
+        reasons.append("搜索校验关键词充足")
+    elif len(search_queries) == 1:
+        score += 0.06
+        review_reasons.append("搜索校验关键词偏少")
+    else:
+        review_reasons.append("缺少搜索校验关键词")
+
+    evidence = profile.get("evidence") or []
+    if isinstance(evidence, list) and evidence:
+        score += 0.08
+        reasons.append("已有外部证据用于交叉校验")
+    else:
+        review_reasons.append("缺少外部证据")
+
+    transcript_length = len(_clean_line(transcript_excerpt))
+    if subtitle_count >= 6 or transcript_length >= 120:
+        score += 0.12
+        reasons.append("字幕上下文足够")
+    elif subtitle_count >= 3 or transcript_length >= 60:
+        score += 0.06
+        review_reasons.append("字幕上下文偏少")
+    else:
+        review_reasons.append("字幕上下文不足")
+
+    subject_brand = str(profile.get("subject_brand") or "").strip()
+    subject_model = str(profile.get("subject_model") or "").strip()
+    if subject_brand or subject_model:
+        score += 0.10 if preset_name in product_like_presets else 0.06
+        reasons.append("识别出可验证主体")
+    elif preset_name in product_like_presets:
+        blocking_reasons.append("开箱类视频未识别出可验证主体")
+    else:
+        review_reasons.append("主体身份信息不完整")
+
+    score = round(min(score, 1.0), 3)
+    review_reasons = list(dict.fromkeys(review_reasons))
+    blocking_reasons = list(dict.fromkeys(blocking_reasons))
+    auto_confirm = auto_confirm_enabled and score >= normalized_threshold and not blocking_reasons
+
+    return {
+        "enabled": auto_confirm_enabled,
+        "threshold": normalized_threshold,
+        "score": score,
+        "auto_confirm": auto_confirm,
+        "reasons": reasons,
+        "review_reasons": review_reasons,
+        "blocking_reasons": blocking_reasons,
+        "subtitle_count": subtitle_count,
+        "transcript_excerpt_length": transcript_length,
+    }
+
+
+def _sanitize_profile_identity(
+    profile: dict[str, Any],
+    *,
+    transcript_excerpt: str,
+    source_name: str,
+    memory_hints: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    sanitized = dict(profile or {})
+    transcript_hints = _seed_profile_from_transcript_excerpt(transcript_excerpt)
+    visual_hints = _seed_profile_from_text(str(sanitized.get("visible_text") or "").strip())
+    source_hints = _seed_profile_from_text(Path(source_name).stem) if _is_informative_source_hint(Path(source_name).stem) else {}
+    confirmed_fields = _extract_confirmed_profile_fields(sanitized)
+
+    confirmed_brand = str(confirmed_fields.get("subject_brand") or "").strip()
+    confirmed_model = str(confirmed_fields.get("subject_model") or "").strip()
+
+    if confirmed_model:
+        verified_model = confirmed_model
+    else:
+        verified_model = _supported_identity_value(
+            sanitized.get("subject_model"),
+            transcript_hints.get("subject_model"),
+            visual_hints.get("subject_model"),
+            source_hints.get("subject_model"),
+        )
+
+    if confirmed_brand:
+        verified_brand = confirmed_brand
+    else:
+        verified_brand = _supported_identity_value(
+            sanitized.get("subject_brand"),
+            transcript_hints.get("subject_brand"),
+            visual_hints.get("subject_brand"),
+            source_hints.get("subject_brand"),
+        )
+        if not verified_brand and verified_model:
+            mapped_brand = _MODEL_TO_BRAND.get(_normalize_profile_value(verified_model))
+            current_brand = str(sanitized.get("subject_brand") or "").strip()
+            if mapped_brand and (
+                not current_brand or _normalize_profile_value(current_brand) == _normalize_profile_value(mapped_brand)
+            ):
+                verified_brand = mapped_brand
+
+    if not verified_brand:
+        sanitized["subject_brand"] = ""
+    else:
+        sanitized["subject_brand"] = verified_brand
+
+    if not verified_model:
+        sanitized["subject_model"] = ""
+    else:
+        sanitized["subject_model"] = verified_model
+
+    if not sanitized.get("subject_brand") and not sanitized.get("subject_model"):
+        for key in ("visible_text", "hook_line", "summary", "engagement_question"):
+            if key in confirmed_fields:
+                continue
+            value = str(sanitized.get(key) or "").strip()
+            if value and _text_has_unsupported_identity(
+                value,
+                transcript_hints=transcript_hints,
+                memory_hints=memory_hints,
+                source_hints=source_hints,
+            ):
+                sanitized[key] = ""
+
+        search_queries = [
+            str(item).strip()
+            for item in sanitized.get("search_queries") or []
+            if str(item).strip()
+        ]
+        if "search_queries" not in confirmed_fields:
+            sanitized["search_queries"] = [
+                query for query in search_queries
+                if _query_is_identity_supported(query, transcript_excerpt=transcript_excerpt, source_name=source_name)
+            ]
+        cover_title = sanitized.get("cover_title")
+        if isinstance(cover_title, dict):
+            title_text = " ".join(str(cover_title.get(key) or "") for key in ("top", "main", "bottom"))
+            title_tokens = _extract_guard_tokens(
+                title_text
+            )
+            if title_tokens or _text_has_unsupported_identity(
+                title_text,
+                transcript_hints=transcript_hints,
+                memory_hints=memory_hints,
+                source_hints=source_hints,
+            ):
+                sanitized["cover_title"] = {}
+        evidence = []
+        for item in sanitized.get("evidence") or []:
+            evidence_text = " ".join(
+                str(item.get(key) or "")
+                for key in ("query", "title", "snippet")
+            )
+            if _text_has_unsupported_identity(
+                evidence_text,
+                transcript_hints=transcript_hints,
+                memory_hints=memory_hints,
+                source_hints=source_hints,
+            ):
+                continue
+            evidence.append(item)
+        sanitized["evidence"] = evidence
+
+    return sanitized
+
+
+def _first_supported_identity_value(primary: Any, *candidates: Any) -> str:
+    normalized_candidates = {
+        _normalize_profile_value(candidate): str(candidate).strip()
+        for candidate in candidates
+        if _normalize_profile_value(candidate)
+    }
+    primary_key = _normalize_profile_value(primary)
+    if primary_key and primary_key in normalized_candidates:
+        return normalized_candidates[primary_key]
+    return ""
+
+
+def _supported_identity_value(primary: Any, *candidates: Any) -> str:
+    primary_value = str(primary or "").strip()
+    if not primary_value:
+        return ""
+    if _identity_support_count(primary_value, *candidates) >= 2:
+        return primary_value
+    return ""
+
+
+def _identity_support_count(primary: Any, *candidates: Any) -> int:
+    primary_key = _normalize_profile_value(primary)
+    if not primary_key:
+        return 0
+    count = 0
+    for candidate in candidates:
+        if _normalize_profile_value(candidate) == primary_key:
+            count += 1
+    return count
+
+
+def _query_is_identity_supported(query: str, *, transcript_excerpt: str, source_name: str) -> bool:
+    normalized_query = _normalize_profile_value(query)
+    if not normalized_query:
+        return False
+    transcript_norm = _normalize_profile_value(transcript_excerpt)
+    if transcript_norm and normalized_query in transcript_norm:
+        return True
+    source_stem = Path(source_name).stem
+    if _is_informative_source_hint(source_stem) and normalized_query in _normalize_profile_value(source_stem):
+        return True
+    return False
+
+
+def _normalize_profile_value(value: object) -> str:
+    return "".join(str(value or "").strip().upper().split())
+
+
+def _text_has_unsupported_identity(
+    text: str,
+    *,
+    transcript_hints: dict[str, Any],
+    memory_hints: dict[str, Any] | None,
+    source_hints: dict[str, Any],
+) -> bool:
+    seeded = _seed_profile_from_text(text)
+    seeded_brand = str(seeded.get("subject_brand") or "").strip()
+    seeded_model = str(seeded.get("subject_model") or "").strip()
+    if not seeded_brand and not seeded_model:
+        return False
+    if seeded_brand and not _first_supported_identity_value(
+        seeded_brand,
+        transcript_hints.get("subject_brand"),
+        (memory_hints or {}).get("subject_brand"),
+        source_hints.get("subject_brand"),
+    ):
+        return True
+    if seeded_model and not _first_supported_identity_value(
+        seeded_model,
+        transcript_hints.get("subject_model"),
+        (memory_hints or {}).get("subject_model"),
+        source_hints.get("subject_model"),
+    ):
+        return True
+    return False
+
+
+def _extract_confirmed_profile_fields(profile: dict[str, Any] | None) -> dict[str, Any]:
+    feedback = (profile or {}).get("user_feedback")
+    if not isinstance(feedback, dict):
+        return {}
+
+    confirmed: dict[str, Any] = {}
+    for key in (
+        "subject_brand",
+        "subject_model",
+        "subject_type",
+        "video_theme",
+        "hook_line",
+        "visible_text",
+        "summary",
+        "engagement_question",
+    ):
+        value = str(feedback.get(key) or "").strip()
+        if value:
+            confirmed[key] = value
+
+    manual_queries: list[str] = []
+    for item in feedback.get("keywords") or []:
+        value = str(item).strip()
+        if value and value not in manual_queries:
+            manual_queries.append(value)
+    if manual_queries:
+        confirmed["search_queries"] = manual_queries
+
+    return confirmed
+
+
+def _apply_confirmed_profile_fields(profile: dict[str, Any], confirmed_fields: dict[str, Any]) -> None:
+    if not confirmed_fields:
+        return
+    for key, value in confirmed_fields.items():
+        if key == "search_queries":
+            profile[key] = list(value)
+        else:
+            profile[key] = value
+
+
 async def infer_content_profile(
     *,
     source_path: Path,
@@ -181,6 +531,7 @@ async def apply_content_profile_feedback(
     user_feedback: dict[str, Any],
 ) -> dict[str, Any]:
     merged = dict(draft_profile or {})
+    merged["user_feedback"] = dict(user_feedback or {})
     for key in (
         "subject_brand",
         "subject_model",
@@ -233,13 +584,49 @@ async def apply_content_profile_feedback(
         pass
 
     transcript_excerpt = str(merged.get("transcript_excerpt") or "")
-    return await enrich_content_profile(
+    result = await enrich_content_profile(
         profile=merged,
         source_name=source_name,
         channel_profile=channel_profile,
         transcript_excerpt=transcript_excerpt,
         include_research=False,
     )
+    result["user_feedback"] = dict(user_feedback or {})
+    for key in (
+        "subject_brand",
+        "subject_model",
+        "subject_type",
+        "video_theme",
+        "hook_line",
+        "visible_text",
+        "summary",
+        "engagement_question",
+    ):
+        value = user_feedback.get(key)
+        if value:
+            result[key] = str(value).strip()
+    if user_feedback.get("keywords"):
+        manual_queries: list[str] = []
+        for item in user_feedback["keywords"]:
+            query = str(item).strip()
+            if query and query not in manual_queries:
+                manual_queries.append(query)
+        if manual_queries:
+            result["search_queries"] = manual_queries
+    if any(
+        user_feedback.get(key)
+        for key in (
+            "subject_brand",
+            "subject_model",
+            "subject_type",
+            "video_theme",
+            "hook_line",
+            "visible_text",
+        )
+    ):
+        preset = get_workflow_preset(str(result.get("preset_name") or channel_profile or "unboxing_default"))
+        result["cover_title"] = build_cover_title(result, preset)
+    return result
 
 
 async def enrich_content_profile(
@@ -252,8 +639,16 @@ async def enrich_content_profile(
     include_research: bool = True,
 ) -> dict[str, Any]:
     enriched = dict(profile or {})
-    context_hints = _seed_profile_from_context(enriched, transcript_excerpt)
+    confirmed_fields = _extract_confirmed_profile_fields(enriched)
+    _apply_confirmed_profile_fields(enriched, confirmed_fields)
     memory_hints = _seed_profile_from_user_memory(transcript_excerpt, user_memory)
+    enriched = _sanitize_profile_identity(
+        enriched,
+        transcript_excerpt=transcript_excerpt,
+        source_name=source_name,
+        memory_hints=memory_hints,
+    )
+    context_hints = _seed_profile_from_context(enriched, transcript_excerpt)
     memory_prompt = summarize_content_profile_user_memory(user_memory)
     _merge_specific_profile_hints(enriched, context_hints)
     _merge_specific_profile_hints(enriched, memory_hints)
@@ -267,6 +662,12 @@ async def enrich_content_profile(
     enriched["preset_name"] = preset.name
     enriched["preset"] = preset.to_dict()
     enriched["transcript_excerpt"] = transcript_excerpt
+    enriched = _sanitize_profile_identity(
+        enriched,
+        transcript_excerpt=transcript_excerpt,
+        source_name=source_name,
+        memory_hints=memory_hints,
+    )
 
     if include_research:
         evidence = await _search_evidence(enriched, source_name, transcript_excerpt=transcript_excerpt)
@@ -305,8 +706,16 @@ async def enrich_content_profile(
                 enriched.update({k: v for k, v in refined.items() if v})
                 _merge_specific_profile_hints(enriched, context_hints)
                 _merge_specific_profile_hints(enriched, memory_hints)
+                enriched = _sanitize_profile_identity(
+                    enriched,
+                    transcript_excerpt=transcript_excerpt,
+                    source_name=source_name,
+                    memory_hints=memory_hints,
+                )
             except Exception:
                 pass
+
+    _apply_confirmed_profile_fields(enriched, confirmed_fields)
 
     if _is_generic_subject_type(str(enriched.get("subject_type") or "")):
         hinted = memory_hints or context_hints
@@ -337,6 +746,12 @@ async def enrich_content_profile(
             enriched["engagement_question"] = generated_question
     if _is_generic_engagement_question(str(enriched.get("engagement_question") or "")):
         enriched["engagement_question"] = _build_fallback_engagement_question(enriched, preset)
+    _apply_confirmed_profile_fields(enriched, confirmed_fields)
+    if confirmed_fields and any(
+        key in confirmed_fields
+        for key in ("subject_brand", "subject_model", "subject_type", "video_theme", "hook_line", "visible_text")
+    ):
+        enriched["cover_title"] = build_cover_title(enriched, preset)
     return enriched
 
 
@@ -656,6 +1071,7 @@ def _transcript_signal_score(item: dict[str, Any]) -> int:
 
 _BRAND_ALIAS_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("LEATHERMAN", re.compile(r"(LEATHERMAN|莱[泽着]曼|来[自自泽着]慢|来[自泽着]曼|雷[泽着]曼)", re.IGNORECASE)),
+    ("REATE", re.compile(r"(REATE|锐特|瑞特|睿特)", re.IGNORECASE)),
 ]
 
 _SEARCH_SIGNAL_STOPWORDS: set[str] = {
@@ -698,47 +1114,8 @@ def _seed_profile_from_context(profile: dict[str, Any], transcript_excerpt: str)
 
 
 def _seed_profile_from_user_memory(transcript_excerpt: str, user_memory: dict[str, Any] | None) -> dict[str, Any]:
-    if not user_memory:
-        return {}
-
-    transcript = transcript_excerpt or ""
-    normalized = transcript.upper()
-    seeded: dict[str, Any] = {}
-
-    field_preferences = user_memory.get("field_preferences") or {}
-    for field_name in ("subject_brand", "subject_model", "subject_type", "video_theme"):
-        for item in field_preferences.get(field_name) or []:
-            value = str(item.get("value") or "").strip()
-            if not value:
-                continue
-            if _memory_value_matches_transcript(value, transcript, normalized):
-                seeded[field_name] = value
-                break
-
-    queries: list[str] = []
-    for item in user_memory.get("keyword_preferences") or []:
-        keyword = str(item.get("keyword") or "").strip()
-        if not keyword:
-            continue
-        if _memory_keyword_matches_transcript(keyword, transcript, normalized):
-            queries.append(keyword)
-            _merge_specific_profile_hints(
-                seeded,
-                _seed_profile_from_text(keyword),
-            )
-        if len(queries) >= 4:
-            break
-    if queries:
-        seeded["search_queries"] = queries
-    if not seeded.get("subject_brand"):
-        mapped_brand = _MODEL_TO_BRAND.get(str(seeded.get("subject_model") or "").upper())
-        if mapped_brand:
-            seeded["subject_brand"] = mapped_brand
-    if seeded.get("subject_brand") and seeded.get("subject_model") and not seeded.get("search_queries"):
-        brand = str(seeded["subject_brand"]).strip()
-        model = str(seeded["subject_model"]).strip()
-        seeded["search_queries"] = [f"{brand} {model}", f"{brand} {model} 开箱"]
-    return seeded
+    del transcript_excerpt, user_memory
+    return {}
 
 
 def _seed_profile_from_text(transcript: str) -> dict[str, Any]:
@@ -762,12 +1139,15 @@ def _seed_profile_from_text(transcript: str) -> dict[str, Any]:
         brand = _MODEL_TO_BRAND[model]
 
     subject_type = ""
+    knife_keywords = ("折刀", "刀片", "锁定机构", "推刀", "梯片", "锁片", "刀柄", "柄身", "开刃")
+    plier_keywords = ("工具钳", "钳子", "尖嘴钳", "钢丝钳")
+
     if brand == "LEATHERMAN" or model in {"ARC", "SURGE", "CHARGE"}:
         subject_type = "多功能工具钳"
-    elif any(keyword in transcript for keyword in ("工具钳", "主刀", "钳子", "单手开合")):
-        subject_type = "多功能工具钳"
-    elif any(keyword in transcript for keyword in ("折刀", "刀片", "锁定机构", "推刀")):
+    elif brand == "REATE" or any(keyword in transcript for keyword in knife_keywords):
         subject_type = "EDC折刀"
+    elif any(keyword in transcript for keyword in plier_keywords):
+        subject_type = "多功能工具钳"
 
     seeded: dict[str, Any] = {}
     if brand:
@@ -857,6 +1237,21 @@ def _is_generic_engagement_question(text: str) -> bool:
         "你怎么看",
     }
     return normalized in generic_questions
+
+
+def _is_specific_video_theme(text: str, *, preset_name: str) -> bool:
+    normalized = _clean_line(text)
+    if not normalized:
+        return False
+    if normalized in {"产品开箱与上手体验", "开箱评测", "开箱体验", "上手体验", "产品体验", "评测"}:
+        return False
+    default_theme = _clean_line(_default_video_theme_by_name(preset_name))
+    if default_theme and normalized == default_theme:
+        return False
+    return len(normalized) >= 6 or any(
+        token in normalized
+        for token in ("升级", "限定", "联名", "教程", "步骤", "观点", "复盘", "高光", "探店", "试吃", "对比")
+    )
 
 
 async def _generate_engagement_question(
@@ -1233,13 +1628,14 @@ def _pick_cover_main(
         return candidate_model
 
     compact_brand = _compact_brand_name(brand, visible_text=visible_text)
-    if compact_brand and subject_type:
-        return f"{compact_brand}{subject_type}"[:18]
+    display_subject_type = _cover_subject_type_label(subject_type)
+    if compact_brand and display_subject_type:
+        return f"{compact_brand}{display_subject_type}"[:18]
 
-    if subject_type:
-        if "工具钳" in subject_type:
+    if display_subject_type:
+        if "工具钳" in display_subject_type:
             return "高价工具钳开箱"
-        return subject_type[:18]
+        return display_subject_type[:18]
 
     if theme and not _is_generic_cover_line(theme):
         return theme[:18]
@@ -1261,6 +1657,15 @@ def _compact_brand_name(brand: str, *, visible_text: str) -> str:
         if outside:
             return outside[:14]
     return value[:14]
+
+
+def _cover_subject_type_label(subject_type: str) -> str:
+    value = _clean_line(subject_type)
+    if not value:
+        return ""
+    if value.startswith("EDC") and len(value) > 3:
+        value = value[3:]
+    return value
 
 
 def _pick_visible_brand(visible_text: str) -> str:

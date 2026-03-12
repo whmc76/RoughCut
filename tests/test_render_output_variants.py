@@ -59,3 +59,37 @@ async def test_map_subtitles_to_packaged_timeline_offsets_intro_and_insert(monke
     assert mapped[1]["end_time"] == 5.3
     assert mapped[2]["start_time"] == 6.1
     assert mapped[2]["end_time"] == 6.3
+
+
+@pytest.mark.asyncio
+async def test_plan_music_entry_prefers_natural_pause_after_hook():
+    plan = await steps_mod._plan_music_entry(
+        music_plan={"path": "bgm.mp3"},
+        subtitle_items=[
+            {"start_time": 0.0, "end_time": 2.2, "text_final": "先抛一个结论。"},
+            {"start_time": 2.4, "end_time": 5.6, "text_final": "这里把整个剪映批量字幕流程先讲完整。"},
+            {"start_time": 6.1, "end_time": 8.2, "text_final": "接下来再看怎么统一字号和描边。"},
+        ],
+        content_profile={"preset_name": "screen_tutorial"},
+    )
+
+    assert plan is not None
+    assert plan["enter_sec"] == 5.6
+    assert plan["timing_summary"]["review_recommended"] is False
+
+
+@pytest.mark.asyncio
+async def test_plan_insert_asset_slot_marks_short_transcript_for_review():
+    plan = await steps_mod._plan_insert_asset_slot(
+        job_id="demo",
+        insert_plan={"path": "insert.mp4"},
+        subtitle_items=[
+            {"start_time": 0.0, "end_time": 2.0, "text_final": "开头一句"},
+            {"start_time": 2.1, "end_time": 6.5, "text_final": "后面很快就结束"},
+        ],
+        content_profile={"preset_name": "screen_tutorial"},
+    )
+
+    assert plan is not None
+    assert plan["timing_summary"]["review_recommended"] is True
+    assert "建议确认" in plan["timing_summary"]["review_reason"]

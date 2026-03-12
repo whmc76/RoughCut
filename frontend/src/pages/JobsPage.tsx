@@ -6,6 +6,8 @@ import { useJobWorkspace } from "../features/jobs/useJobWorkspace";
 
 export function JobsPage() {
   const workspace = useJobWorkspace();
+  const languageOptions = workspace.options.data?.job_languages ?? [{ value: "zh-CN", label: "简体中文" }];
+  const channelProfileOptions = workspace.options.data?.channel_profiles ?? [{ value: "", label: "自动匹配" }];
 
   return (
     <section>
@@ -23,7 +25,14 @@ export function JobsPage() {
         }
       />
 
-      <JobUploadPanel upload={workspace.upload} onChange={workspace.setUpload} onSubmit={() => workspace.uploadJob.mutate()} isSubmitting={workspace.uploadJob.isPending} />
+      <JobUploadPanel
+        upload={workspace.upload}
+        languageOptions={languageOptions}
+        channelProfileOptions={channelProfileOptions}
+        onChange={workspace.setUpload}
+        onSubmit={() => workspace.uploadJob.mutate()}
+        isSubmitting={workspace.uploadJob.isPending}
+      />
 
       <div className="panel-grid jobs-grid top-gap">
         <JobQueueTable

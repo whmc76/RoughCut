@@ -53,9 +53,37 @@ async def test_config_options_exposes_transcription_models(client: AsyncClient):
     response = await client.get("/api/v1/config/options")
     assert response.status_code == 200
     data = response.json()
+    assert data["job_languages"][0]["value"] == "zh-CN"
+    assert data["channel_profiles"][0]["value"] == ""
     assert data["transcription_models"]["local_whisper"][0] == "base"
     assert data["transcription_models"]["openai"] == ["gpt-4o-transcribe"]
     assert "large-v3" in data["transcription_models"]["local_whisper"]
+    assert any(item["value"] == "edc_tactical" for item in data["channel_profiles"])
+    assert any(item["value"] == "ollama" for item in data["multimodal_fallback_providers"])
+    assert any(item["value"] == "auto" for item in data["search_providers"])
+
+
+@pytest.mark.asyncio
+async def test_watch_root_rejects_unknown_channel_profile(client: AsyncClient):
+    response = await client.post(
+        "/api/v1/watch-roots",
+        json={"path": "/tmp/videos-invalid", "enabled": True, "channel_profile": "free_text_profile"},
+    )
+
+    assert response.status_code == 422
+    assert "Unsupported channel_profile" in response.text
+
+
+@pytest.mark.asyncio
+async def test_job_upload_rejects_unknown_language(client: AsyncClient):
+    response = await client.post(
+        "/api/v1/jobs",
+        files={"file": ("demo.mp4", b"video", "video/mp4")},
+        data={"language": "zh_cn_free_text"},
+    )
+
+    assert response.status_code == 422
+    assert "Unsupported language" in response.text
 
 
 @pytest.mark.asyncio
@@ -307,14 +335,14 @@ async def test_watch_root_inventory_enqueue_selected_item(client: AsyncClient, m
 
     async def fake_create_jobs_for_inventory_paths(file_paths: list[str], *, channel_profile: str | None = None, language: str = "zh-CN"):
         assert file_paths == ["/tmp/videos-enqueue/a.mp4"]
-        assert channel_profile == "demo"
+        assert channel_profile == "edc_tactical"
         return [{"path": "/tmp/videos-enqueue/a.mp4", "job_id": "job-123"}]
 
     monkeypatch.setattr(review_api, "create_jobs_for_inventory_paths", fake_create_jobs_for_inventory_paths)
 
     created = await client.post(
         "/api/v1/watch-roots",
-        json={"path": "/tmp/videos-enqueue", "enabled": True, "channel_profile": "demo"},
+        json={"path": "/tmp/videos-enqueue", "enabled": True, "channel_profile": "edc_tactical"},
     )
     root_id = created.json()["id"]
 
@@ -794,6 +822,8 @@ async def test_job_activity_stream(client: AsyncClient):
     data = response.json()
     assert data["current_step"]["step_name"] == "render"
     assert data["current_step"]["detail"].startswith("执行 FFmpeg 渲染成片")
+    subtitle_decision = next(item for item in data["decisions"] if item["kind"] == "subtitle_review")
+    assert subtitle_decision["detail"] == "待审 1 条，自动/已接受 0 条"
 
 
 @pytest.mark.asyncio

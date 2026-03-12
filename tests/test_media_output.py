@@ -46,6 +46,12 @@ def test_write_cover_variant_manifest_writes_canonical_and_legacy_names(tmp_path
             }
         ],
         outputs=[variant_path],
+        rankings=[{"index": 3, "score": 0.92, "reason": "主体最完整", "source": "llm_rank"}],
+        selection_summary={
+            "review_recommended": False,
+            "score_gap": 0.12,
+            "review_reason": "",
+        },
     )
 
     canonical = output_mod.get_cover_manifest_path(output_path)
@@ -54,6 +60,66 @@ def test_write_cover_variant_manifest_writes_canonical_and_legacy_names(tmp_path
     assert canonical.exists()
     assert legacy.exists()
     assert json.loads(canonical.read_text(encoding="utf-8")) == json.loads(legacy.read_text(encoding="utf-8"))
+    payload = json.loads(canonical.read_text(encoding="utf-8"))
+    assert payload[0]["score"] == 0.92
+    assert payload[0]["is_primary"] is True
+
+
+def test_build_cover_selection_summary_requests_review_when_gap_is_small(monkeypatch):
+    monkeypatch.setattr(
+        output_mod,
+        "get_settings",
+        lambda: SimpleNamespace(auto_select_cover_variant=True, cover_selection_review_gap=0.08),
+    )
+
+    summary = output_mod._build_cover_selection_summary(
+        [
+            {"index": 4, "score": 0.91},
+            {"index": 7, "score": 0.86},
+        ]
+    )
+
+    assert summary["selected_variant_index"] == 1
+    assert summary["runner_up_index"] == 2
+    assert summary["review_recommended"] is True
+    assert summary["score_gap"] == 0.05
+
+
+def test_load_cover_selection_summary_reads_primary_metadata(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(
+        output_mod,
+        "get_settings",
+        lambda: SimpleNamespace(auto_select_cover_variant=True, cover_selection_review_gap=0.08),
+    )
+    output_path = tmp_path / "demo_cover.jpg"
+    output_mod.get_cover_manifest_path(output_path).write_text(
+        json.dumps(
+            [
+                {
+                    "index": 1,
+                    "path": str(tmp_path / "demo_cover_v1.jpg"),
+                    "score": 0.88,
+                    "is_primary": True,
+                    "review_recommended": True,
+                    "score_gap_to_next": 0.03,
+                    "review_reason": "前两张封面分差过小，建议确认首选图。",
+                }
+            ],
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    summary = output_mod.load_cover_selection_summary(output_path)
+
+    assert summary == {
+        "enabled": True,
+        "review_recommended": True,
+        "selected_variant_index": 1,
+        "selected_score": 0.88,
+        "score_gap": 0.03,
+        "review_reason": "前两张封面分差过小，建议确认首选图。",
+    }
 
 
 def test_sanitize_generated_cover_title_rejects_foreign_brand():
@@ -64,3 +130,17 @@ def test_sanitize_generated_cover_title_rejects_foreign_brand():
     )
 
     assert sanitized == {"top": "REATE", "main": "折刀雕刻开箱", "bottom": "先看柄身细节"}
+
+
+def test_build_cover_safe_area_layers_adds_bottom_mask_when_bottom_title_exists():
+    layers = output_mod._build_cover_safe_area_layers({"top": "REATE", "main": "折刀", "bottom": "先看雕刻细节"})
+
+    assert len(layers) == 2
+    assert all(layer.startswith("drawbox=") for layer in layers)
+    assert "y=ih*0.74" in layers[0]
+
+
+def test_build_cover_safe_area_layers_skips_mask_without_bottom_title():
+    layers = output_mod._build_cover_safe_area_layers({"top": "REATE", "main": "折刀", "bottom": ""})
+
+    assert layers == []
