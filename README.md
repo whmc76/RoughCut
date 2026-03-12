@@ -40,6 +40,12 @@ api          — FastAPI API + 生产环境静态托管 frontend/dist
 - 术语词表
 - 系统设置与服务控制
 
+当前项目仍处于原型开发阶段，默认策略是：
+
+- 新需求直接重构，不为旧页面/旧配置保留兼容层
+- 优先保证结构收敛、代码可维护，再考虑迁移成本
+- 只有确认进入正式版后，才开始补兼容策略
+
 后台仍由 4 个长期进程推进任务，通过数据库协调状态：
 
 ```
@@ -62,7 +68,8 @@ probe → extract_audio → transcribe → subtitle_postprocess
 ## 环境要求
 
 - Python 3.11+
-- `uv`（推荐）或 `pip`
+- `pnpm`
+- `uv`（项目内部 Python 依赖与 CLI 仍使用它）
 - FFmpeg（需在 PATH 中，支持 libx264 / libass）
 - Docker / Docker Compose（推荐用于基础服务或完整部署）
 - LLM 后端之一：Ollama（本地）或 OpenAI API Key
@@ -71,22 +78,37 @@ probe → extract_audio → transcribe → subtitle_postprocess
 
 ## 快速开始
 
-推荐使用 `uv` 管理 Python 侧，使用 `npm` 管理 React + Vite 前端。当前原型阶段前端已经彻底切换为 React，不再维护旧静态单文件 Dashboard。
+现在推荐只把 `pnpm` 当作统一入口。Python 侧依然由 `uv` 负责，但日常命令统一从根目录执行 `pnpm ...`。
 
-### 1. 安装 uv
+### 1. 安装 pnpm 和 uv
 
 ```bash
-# Windows (PowerShell)
+# 安装 pnpm
+corepack enable
+corepack prepare pnpm@latest --activate
+
+# Windows (PowerShell) 安装 uv
 powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
 
-# macOS / Linux
+# macOS / Linux 安装 uv
 curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
-### 2. 初始化项目目录
+### 2. 安装依赖
 
 ```bash
-uv run roughcut init
+pnpm bootstrap
+```
+
+这一步会：
+
+- 用 `uv sync --extra dev --extra local-asr` 安装 Python 依赖
+- 用 `pnpm install` 安装根工作区和 `frontend/` 的前端依赖
+
+### 3. 初始化项目目录
+
+```bash
+pnpm setup
 ```
 
 这一步会创建：
@@ -96,34 +118,13 @@ uv run roughcut init
 - `watch`
 - `.env`（若不存在且 `.env.example` 存在）
 
-### 3. 启动基础服务
+### 4. 启动基础服务
 
 ```bash
-docker-compose up -d
+pnpm docker:up
 ```
 
 启动 PostgreSQL（5432）、Redis（6379）、MinIO（9000/9001）。
-
-### 4. 安装依赖
-
-推荐使用 `uv`：
-
-```bash
-uv sync --extra dev --extra local-asr
-```
-
-兼容 `pip`：
-
-```bash
-pip install -e ".[dev,local-asr]"
-```
-
-前端依赖：
-
-```bash
-cd frontend
-npm install
-```
 
 ### 5. 配置环境变量
 
@@ -142,6 +143,14 @@ TRANSCRIPTION_PROVIDER=local_whisper
 TRANSCRIPTION_MODEL=base
 
 OUTPUT_DIR=D:/output               # 成片输出目录
+AUTO_CONFIRM_CONTENT_PROFILE=true
+CONTENT_PROFILE_REVIEW_THRESHOLD=0.72
+AUTO_ACCEPT_GLOSSARY_CORRECTIONS=true
+GLOSSARY_CORRECTION_REVIEW_THRESHOLD=0.9
+AUTO_SELECT_COVER_VARIANT=true
+COVER_SELECTION_REVIEW_GAP=0.08
+PACKAGING_SELECTION_REVIEW_GAP=0.08
+PACKAGING_SELECTION_MIN_SCORE=0.6
 ```
 
 OpenAI 配置：
@@ -157,7 +166,7 @@ TRANSCRIPTION_MODEL=gpt-4o-transcribe
 ### 6. 运行自检
 
 ```bash
-uv run roughcut doctor
+pnpm doctor
 ```
 
 如果缺少 `ffmpeg`、`ffprobe` 或 Python 版本不满足要求，命令会直接失败并给出原因。
@@ -165,55 +174,70 @@ uv run roughcut doctor
 ### 7. 初始化数据库
 
 ```bash
-uv run roughcut migrate
+pnpm migrate
 ```
 
-### 8. 启动各进程
+### 8. 本地开发
 
-开发前端：
+一条命令启动前端 + API + orchestrator + 两个 worker：
 
 ```bash
-cd frontend
-npm run dev
+pnpm dev
 ```
 
-默认 Vite 开发地址是 `http://127.0.0.1:5173`，并代理到本地 FastAPI `http://127.0.0.1:8000`。
+默认：
 
-构建前端静态产物：
+- Vite 开发地址 `http://127.0.0.1:5173`
+- FastAPI 地址 `http://127.0.0.1:8000`
+
+如果只想启动单个进程：
 
 ```bash
-cd frontend
-npm run build
+pnpm dev:web
+pnpm dev:api
+pnpm dev:orchestrator
+pnpm dev:worker:media
+pnpm dev:worker:llm
+pnpm dev:watcher
 ```
 
-构建后 FastAPI 会直接托管 `frontend/dist`。
-
-### 9. 启动后端服务
+### 9. 测试与构建
 
 ```bash
-# API 服务
-uv run roughcut api
-
-# 编排器（单独终端）
-uv run roughcut orchestrator
-
-# 媒体处理 Worker（单独终端）
-uv run roughcut worker --queue media_queue
-
-# LLM Worker（单独终端）
-uv run roughcut worker --queue llm_queue
-
-# 目录监听（可选）
-uv run roughcut watcher D:/录像
+pnpm test
+pnpm build
+pnpm lint
 ```
+
+细分命令：
+
+```bash
+pnpm test:frontend
+pnpm test:backend
+pnpm build:frontend
+pnpm build:backend
+```
+
+构建前端后，FastAPI 会直接托管 `frontend/dist`。
 
 ### 10. 一键本地启动（Windows）
 
 ```powershell
-./restart_roughcut.ps1
+./restart_roughcut.bat
 ```
 
-如果 `.venv` 不存在，脚本会优先用 `uv sync --extra dev --extra local-asr` 自动初始化环境。前端需要单独执行 `npm install && npm run build` 或运行 `npm run dev`。
+Windows 下当前建议把 [restart_roughcut.bat](E:/WorkSpace/RoughCut/restart_roughcut.bat) 作为用户入口：
+
+- `restart_roughcut.bat`
+  一键启动包模式，后台拉起 API / orchestrator / workers，并自动打开浏览器
+- `restart_roughcut.bat dev`
+  直接运行统一入口 `pnpm dev`
+- `restart_roughcut.bat test`
+  运行 `pnpm test`
+- `restart_roughcut.bat build`
+  运行 `pnpm build`
+
+`restart_roughcut.ps1` 仍保留，但现在主要作为 `.bat` 的内部实现脚本和高级参数入口。
 
 ---
 
@@ -265,7 +289,7 @@ docker compose logs -f worker-media
 ### 5. 说明
 
 - Docker 镜像默认内置 `uv`、`ffmpeg` 和 `Noto Sans CJK` 中文字体。
-- Docker 镜像会在构建阶段自动执行 `frontend/` 下的 `npm ci && npm run build`。
+- Docker 镜像会在构建阶段自动执行 `frontend/` 下的前端依赖安装和构建。
 - 默认镜像已包含 CPU 版 `faster-whisper`，可直接用于 `TRANSCRIPTION_PROVIDER=local_whisper`。
 - 当前项目默认 ASR 方案为 `local_whisper + base`；如果要启用 GPU 加速 ASR，建议基于当前 `Dockerfile` 再做专用镜像。
 - 推荐本地开发使用 `uv + npm`，容器部署使用 `docker compose`，不要混用系统级 `pip` 和容器内运行时配置。
@@ -354,6 +378,14 @@ curl http://localhost:8000/api/v1/jobs/{job_id}/report
 | `FFMPEG_TIMEOUT_SEC` | `600` | FFmpeg 单次执行超时（秒） |
 | `MAX_UPLOAD_SIZE_MB` | `2048` | 上传文件大小上限（MB） |
 | `FACT_CHECK_ENABLED` | `false` | 事实核验开关（Phase 2） |
+| `AUTO_CONFIRM_CONTENT_PROFILE` | `true` | 高置信度内容摘要自动确认，避免任务卡在人工核对 |
+| `CONTENT_PROFILE_REVIEW_THRESHOLD` | `0.72` | 内容摘要自动确认阈值，范围 `0.0` 到 `1.0` |
+| `AUTO_ACCEPT_GLOSSARY_CORRECTIONS` | `true` | 高置信度术语纠错自动接受，只保留风险项待确认 |
+| `GLOSSARY_CORRECTION_REVIEW_THRESHOLD` | `0.9` | 术语纠错自动接受阈值，范围 `0.0` 到 `1.0` |
+| `AUTO_SELECT_COVER_VARIANT` | `true` | 自动选择首选封面，默认只在候选分差接近时提醒确认 |
+| `COVER_SELECTION_REVIEW_GAP` | `0.08` | 首选封面与次优封面的最小安全分差，范围 `0.0` 到 `1.0` |
+| `PACKAGING_SELECTION_REVIEW_GAP` | `0.08` | BGM/插入素材首选与次优的最小安全分差，过近时建议确认 |
+| `PACKAGING_SELECTION_MIN_SCORE` | `0.6` | BGM/插入素材最低自动通过分，低于该值建议确认 |
 
 ---
 
@@ -420,15 +452,20 @@ src/roughcut/
 ## 开发
 
 ```bash
-# 运行测试
-uv run pytest
+# 初始化依赖
+pnpm bootstrap
 
-# 带覆盖率
-uv run pytest --cov=roughcut
+# 启动全套本地开发
+pnpm dev
 
-# 代码格式化
-uv run ruff format src/
-uv run ruff check src/
+# 前后端测试
+pnpm test
+
+# 前端构建
+pnpm build
+
+# 后端 lint
+pnpm lint:backend
 ```
 
 ### 项目改名或目录迁移后的环境修复

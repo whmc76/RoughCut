@@ -1,0 +1,33 @@
+{
+  "name": "roughcut-workspace",
+  "private": true,
+  "packageManager": "pnpm@10.27.0",
+  "scripts": {
+    "bootstrap": "uv sync --extra dev --extra local-asr && pnpm install",
+    "setup": "uv run roughcut init",
+    "doctor": "uv run roughcut doctor",
+    "migrate": "uv run roughcut migrate",
+    "dev": "concurrently -k -n web,api,orchestrator,media,llm -c magenta,cyan,yellow,green,blue \"pnpm dev:web\" \"pnpm dev:api\" \"pnpm dev:orchestrator\" \"pnpm dev:worker:media\" \"pnpm dev:worker:llm\"",
+    "dev:web": "pnpm --dir frontend dev",
+    "dev:api": "uv run roughcut api --reload",
+    "dev:orchestrator": "uv run roughcut orchestrator",
+    "dev:worker:media": "uv run roughcut worker --queue media_queue",
+    "dev:worker:llm": "uv run roughcut worker --queue llm_queue",
+    "dev:watcher": "uv run roughcut watcher watch",
+    "test": "pnpm run test:frontend && pnpm run test:backend",
+    "test:frontend": "pnpm --dir frontend test",
+    "test:backend": "uv run pytest",
+    "build": "pnpm run build:frontend",
+    "build:frontend": "pnpm --dir frontend build",
+    "build:backend": "uv run python -m py_compile src/roughcut/main.py src/roughcut/cli.py",
+    "lint": "pnpm run lint:frontend && pnpm run lint:backend",
+    "lint:frontend": "pnpm --dir frontend typecheck",
+    "lint:backend": "uv run ruff check src tests",
+    "docker:up": "docker compose up -d --build",
+    "docker:down": "docker compose down",
+    "docker:logs": "docker compose logs -f"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1"
+  }
+}

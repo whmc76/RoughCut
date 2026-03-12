@@ -16,7 +16,7 @@ Set-Location $RepoRoot
 $Python = Join-Path $RepoRoot ".venv\Scripts\python.exe"
 $Uv = Get-Command uv -ErrorAction SilentlyContinue
 $SystemPython = Get-Command python -ErrorAction SilentlyContinue
-$Npm = Get-Command npm -ErrorAction SilentlyContinue
+$Pnpm = Get-Command pnpm -ErrorAction SilentlyContinue
 $FrontendDir = Join-Path $RepoRoot "frontend"
 $FrontendDist = Join-Path $FrontendDir "dist\index.html"
 
@@ -55,21 +55,17 @@ function Ensure-RoughCutFrontend {
         return
     }
 
-    if ($null -eq $Npm) {
-        throw "npm is required to build the React frontend. Install Node.js 22+ and rerun."
+    if ($null -eq $Pnpm) {
+        throw "pnpm is required to build the React frontend. Enable Corepack or install pnpm, then rerun."
     }
 
-    Write-Host "Frontend build not found. Installing and building React app..." -ForegroundColor Yellow
-    Push-Location $FrontendDir
+    Write-Host "Frontend build not found. Installing and building React app with pnpm..." -ForegroundColor Yellow
+    Push-Location $RepoRoot
     try {
-        if (-not (Test-Path (Join-Path $FrontendDir "node_modules"))) {
-            if (Test-Path (Join-Path $FrontendDir "package-lock.json")) {
-                & $Npm.Source ci
-            } else {
-                & $Npm.Source install
-            }
+        if (-not (Test-Path (Join-Path $RepoRoot "node_modules"))) {
+            & $Pnpm.Source install
         }
-        & $Npm.Source run build
+        & $Pnpm.Source build
     } finally {
         Pop-Location
     }

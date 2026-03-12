@@ -2,10 +2,13 @@ FROM node:22-bookworm-slim AS frontend-builder
 
 WORKDIR /frontend
 
-COPY frontend/package.json frontend/package-lock.json* ./
-RUN npm ci
-COPY frontend ./
-RUN npm run build
+RUN corepack enable
+
+COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
+COPY frontend/package.json ./frontend/package.json
+RUN pnpm install --frozen-lockfile --filter roughcut-frontend...
+COPY frontend ./frontend
+RUN pnpm --dir frontend build
 
 
 FROM ghcr.io/astral-sh/uv:python3.11-bookworm-slim
