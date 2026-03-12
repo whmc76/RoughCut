@@ -7,7 +7,8 @@ from roughcut.config import Settings
 
 def test_default_settings():
     s = Settings(_env_file=None)
-    assert s.transcription_provider == "openai"
+    assert s.transcription_provider == "local_whisper"
+    assert s.transcription_model == "base"
     assert s.llm_mode == "performance"
     assert s.reasoning_provider == "openai"
     assert s.local_reasoning_model == "qwen3.5:9b"

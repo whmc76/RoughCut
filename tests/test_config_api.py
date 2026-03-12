@@ -21,6 +21,7 @@ def test_get_config_exposes_extended_provider_fields(tmp_path, monkeypatch):
     object.__setattr__(settings, "multimodal_fallback_provider", "ollama")
     object.__setattr__(settings, "search_provider", "auto")
     object.__setattr__(settings, "search_fallback_provider", "searxng")
+    object.__setattr__(settings, "output_dir", "data/output")
 
     cfg = get_config()
 
@@ -32,6 +33,7 @@ def test_get_config_exposes_extended_provider_fields(tmp_path, monkeypatch):
     assert cfg.multimodal_fallback_provider == "ollama"
     assert cfg.search_provider == "auto"
     assert cfg.search_fallback_provider == "searxng"
+    assert cfg.output_dir == "data/output"
     assert cfg.openai_auth_mode == "api_key"
     assert cfg.anthropic_auth_mode == "api_key"
 
@@ -39,7 +41,8 @@ def test_get_config_exposes_extended_provider_fields(tmp_path, monkeypatch):
 def test_get_config_options_exposes_transcription_model_lists():
     options = get_config_options()
 
+    assert "local_whisper" in options.transcription_models
+    assert options.transcription_models["local_whisper"][0] == "base"
     assert "openai" in options.transcription_models
     assert options.transcription_models["openai"] == ["gpt-4o-transcribe"]
-    assert "local_whisper" in options.transcription_models
     assert "base" in options.transcription_models["local_whisper"]

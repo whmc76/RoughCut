@@ -29,8 +29,8 @@ class Settings(BaseSettings):
     s3_region: str = "us-east-1"
 
     # Transcription
-    transcription_provider: str = "openai"  # openai | local_whisper
-    transcription_model: str = "gpt-4o-transcribe"
+    transcription_provider: str = "local_whisper"  # openai | local_whisper
+    transcription_model: str = "base"
 
     # Reasoning
     llm_mode: str = "performance"  # performance | local
@@ -68,7 +68,7 @@ class Settings(BaseSettings):
     allowed_extensions: list[str] = [".mp4", ".mov", ".mkv", ".avi", ".webm"]
 
     # Output
-    output_dir: str = "Y:/EDC系列/AI粗剪"
+    output_dir: str = "data/output"
     output_name_pattern: str = "{date}_{stem}"  # {date}=YYYYMMDD, {stem}=original filename stem
     render_debug_dir: str = "logs/render-debug"
 

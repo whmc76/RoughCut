@@ -4,21 +4,30 @@ from roughcut.config import get_settings
 from roughcut.providers.reasoning.base import ReasoningProvider
 from roughcut.providers.transcription.base import TranscriptionProvider
 
+_TRANSCRIPTION_PROVIDER_CACHE: dict[tuple[str, str], TranscriptionProvider] = {}
+
 
 def get_transcription_provider() -> TranscriptionProvider:
     settings = get_settings()
     provider = settings.transcription_provider.lower()
+    model = settings.transcription_model
+    cache_key = (provider, model)
+    cached = _TRANSCRIPTION_PROVIDER_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
 
     if provider == "openai":
         from roughcut.providers.transcription.openai_whisper import OpenAIWhisperProvider
 
-        return OpenAIWhisperProvider()
+        instance = OpenAIWhisperProvider()
     elif provider == "local_whisper":
         from roughcut.providers.transcription.local_whisper import LocalWhisperProvider
 
-        return LocalWhisperProvider(model_size=settings.transcription_model)
+        instance = LocalWhisperProvider(model_size=model)
     else:
         raise ValueError(f"Unknown transcription provider: {provider}")
+    _TRANSCRIPTION_PROVIDER_CACHE[cache_key] = instance
+    return instance
 
 
 def get_reasoning_provider() -> ReasoningProvider:

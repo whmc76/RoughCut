@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 class LocalWhisperProvider(TranscriptionProvider):
     """Uses faster-whisper or whisper.cpp via subprocess/local Python package."""
 
-    def __init__(self, model_size: str = "large-v3") -> None:
+    def __init__(self, model_size: str = "base") -> None:
         self._model_size = model_size
         self._model = None
 

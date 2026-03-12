@@ -61,6 +61,7 @@ class ConfigOut(BaseModel):
     max_video_duration_sec: int
     ffmpeg_timeout_sec: int
     allowed_extensions: list[str]
+    output_dir: str
     # Feature flags
     fact_check_enabled: bool
     # Overrides currently stored
@@ -100,6 +101,7 @@ class ConfigPatch(BaseModel):
     max_video_duration_sec: int | None = None
     ffmpeg_timeout_sec: int | None = None
     allowed_extensions: list[str] | None = None
+    output_dir: str | None = None
     fact_check_enabled: bool | None = None
 
 
@@ -136,6 +138,7 @@ def get_config():
         max_video_duration_sec=s.max_video_duration_sec,
         ffmpeg_timeout_sec=s.ffmpeg_timeout_sec,
         allowed_extensions=s.allowed_extensions,
+        output_dir=s.output_dir,
         fact_check_enabled=s.fact_check_enabled,
         overrides=overrides,
     )
@@ -145,16 +148,15 @@ def get_config():
 def get_config_options():
     return ConfigOptionsOut(
         transcription_models={
-            "openai": [
-                "gpt-4o-transcribe",
-            ],
             "local_whisper": [
-                "tiny",
                 "base",
                 "small",
                 "medium",
                 "large-v3",
                 "distil-large-v3",
+            ],
+            "openai": [
+                "gpt-4o-transcribe",
             ],
         }
     )
@@ -165,6 +167,12 @@ def patch_config(body: ConfigPatch):
     overrides = _load_overrides()
 
     updates = body.model_dump(exclude_none=True)
+    if "output_dir" in updates:
+        output_dir = str(updates["output_dir"]).strip()
+        if not output_dir:
+            raise HTTPException(status_code=400, detail="output_dir cannot be empty")
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
+        updates["output_dir"] = output_dir
     overrides.update(updates)
     _save_overrides(overrides)
 

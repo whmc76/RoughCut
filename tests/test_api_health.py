@@ -34,6 +34,18 @@ async def test_config_has_extended_provider_fields(client: AsyncClient):
     assert "openai_auth_mode" in data
     assert "anthropic_auth_mode" in data
     assert "minimax_api_key_set" in data
+    assert "output_dir" in data
+
+
+@pytest.mark.asyncio
+async def test_config_patch_updates_output_dir(client: AsyncClient, tmp_path: Path):
+    output_dir = tmp_path / "exports"
+
+    response = await client.patch("/api/v1/config", json={"output_dir": str(output_dir)})
+
+    assert response.status_code == 200
+    assert response.json()["output_dir"] == str(output_dir)
+    assert output_dir.exists()
 
 
 @pytest.mark.asyncio
@@ -41,6 +53,7 @@ async def test_config_options_exposes_transcription_models(client: AsyncClient):
     response = await client.get("/api/v1/config/options")
     assert response.status_code == 200
     data = response.json()
+    assert data["transcription_models"]["local_whisper"][0] == "base"
     assert data["transcription_models"]["openai"] == ["gpt-4o-transcribe"]
     assert "large-v3" in data["transcription_models"]["local_whisper"]
 
@@ -545,6 +558,26 @@ async def test_control_status_reports_services(client: AsyncClient, monkeypatch:
     assert data["postgres"] is True
     assert data["redis"] is True
     assert data["minio"] is False
+
+
+def test_control_running_container_names_handles_missing_docker(monkeypatch: pytest.MonkeyPatch):
+    import roughcut.api.control as control_api
+
+    def fake_run(*args, **kwargs):
+        raise FileNotFoundError("docker not found")
+
+    monkeypatch.setattr(control_api.subprocess, "run", fake_run)
+    assert control_api._running_container_names() == set()
+
+
+def test_control_has_process_handles_missing_shell(monkeypatch: pytest.MonkeyPatch):
+    import roughcut.api.control as control_api
+
+    def fake_pick_shell():
+        raise RuntimeError("shell not available")
+
+    monkeypatch.setattr(control_api, "_pick_shell", fake_pick_shell)
+    assert control_api._has_process("roughcut") is False
 
 
 @pytest.mark.asyncio
