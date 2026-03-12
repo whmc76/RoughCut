@@ -360,7 +360,7 @@ async def _scan_watch_root_inventory_impl(
     output_dir = get_output_dir()
     existing_outputs = {
         path.stem: str(path)
-        for path in output_dir.glob("*.mp4")
+        for path in output_dir.rglob("*.mp4")
     }
 
     from sqlalchemy import select

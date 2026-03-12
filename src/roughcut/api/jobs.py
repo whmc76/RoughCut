@@ -463,7 +463,11 @@ async def confirm_content_profile(
 
 
 @router.get("/{job_id}/download")
-async def get_download_url(job_id: uuid.UUID, session: AsyncSession = Depends(get_session)):
+async def get_download_url(
+    job_id: uuid.UUID,
+    variant: str = "packaged",
+    session: AsyncSession = Depends(get_session),
+):
     result = await session.execute(
         select(RenderOutput)
         .where(RenderOutput.job_id == job_id, RenderOutput.status == "done")
@@ -473,11 +477,30 @@ async def get_download_url(job_id: uuid.UUID, session: AsyncSession = Depends(ge
     if not render_output:
         raise HTTPException(status_code=404, detail="Rendered output not found")
 
+    variant_value = str(variant or "packaged").strip().lower()
+    if variant_value not in {"packaged", "plain"}:
+        raise HTTPException(status_code=400, detail="variant must be 'packaged' or 'plain'")
+
+    artifact_result = await session.execute(
+        select(Artifact)
+        .where(Artifact.job_id == job_id, Artifact.artifact_type == "render_outputs")
+        .order_by(Artifact.created_at.desc())
+    )
+    outputs_artifact = artifact_result.scalars().first()
+    outputs_data = outputs_artifact.data_json if outputs_artifact and outputs_artifact.data_json else {}
+
     storage = get_storage()
-    candidates = [
-        job_key(str(job_id), "output.mp4"),
-        render_output.output_path,
-    ]
+    if variant_value == "plain":
+        candidates = [
+            str(outputs_data.get("plain_output_key") or ""),
+            job_key(str(job_id), "output_plain.mp4"),
+        ]
+    else:
+        candidates = [
+            str(outputs_data.get("packaged_output_key") or ""),
+            job_key(str(job_id), "output.mp4"),
+            render_output.output_path,
+        ]
     object_key = next(
         (key for key in candidates if key and storage.object_exists(key)),
         None,
@@ -517,15 +540,23 @@ async def _clear_job_runtime_state(job_id: uuid.UUID, session: AsyncSession) -> 
     for item in render_outputs.scalars().all():
         if item.output_path:
             output_path = Path(item.output_path)
+            output_dir = output_path.parent
+            if output_dir.name == output_path.stem:
+                try:
+                    shutil.rmtree(output_dir, ignore_errors=True)
+                    continue
+                except Exception:
+                    pass
             try:
                 output_path.unlink(missing_ok=True)
                 output_path.with_suffix(".srt").unlink(missing_ok=True)
             except Exception:
                 pass
-            try:
-                output_path.with_name(f"{output_path.stem}_cover.jpg").unlink(missing_ok=True)
-            except Exception:
-                pass
+            for candidate in output_dir.glob(f"{output_path.stem}_cover*"):
+                try:
+                    candidate.unlink(missing_ok=True)
+                except Exception:
+                    pass
             try:
                 output_path.with_name(f"{output_path.stem}_publish.md").unlink(missing_ok=True)
             except Exception:

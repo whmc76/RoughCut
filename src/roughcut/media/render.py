@@ -85,33 +85,25 @@ async def render_video(
     )
 
     filter_parts: list[str] = []
-    inputs: list[str] = []
-    for i, seg in enumerate(keep_segments):
-        start = seg["start"]
-        end = seg["end"]
-        filter_parts.append(
-            f"[0:v]trim=start={start}:end={end},setpts=PTS-STARTPTS"
-            f"{transpose_suffix}[v{i}];"
-        )
-        filter_parts.append(
-            f"[0:a]atrim=start={start}:end={end},asetpts=PTS-STARTPTS[a{i}];"
-        )
-        inputs.append(f"[v{i}][a{i}]")
-
-    concat_filter = "".join(filter_parts)
-    concat_filter += (
-        f"{''.join(inputs)}concat=n={len(keep_segments)}:v=1:a=1[vtmp][aout];"
-        "[vtmp]sidedata=mode=delete:type=DISPLAYMATRIX[vout]"
+    editing_accents = render_plan.get("editing_accents") or {}
+    segment_filters, video_label, audio_label = _build_segment_filter_chain(
+        keep_segments,
+        transpose_suffix=transpose_suffix,
+        editing_accents=editing_accents,
     )
+    filter_parts.extend(segment_filters)
+
+    if (editing_accents.get("sound_effects") or []):
+        sfx_filters, audio_label = _build_sound_effect_filters(audio_label, editing_accents)
+        filter_parts.extend(sfx_filters)
 
     vp = render_plan.get("voice_processing", {})
-    audio_filter = "[aout]"
+    audio_filter = f"[{audio_label}]"
     if vp.get("noise_reduction"):
         audio_filter += "anlmdn,"
     audio_filter += "loudnorm=I=-14:TP=-1:LRA=11[afinal]"
-
-    filter_complex = concat_filter + ";" + audio_filter
-    video_map = "[vout]"
+    filter_parts.append(audio_filter)
+    video_map = f"[{video_label}]"
 
     if subtitle_items and render_plan.get("subtitles"):
         from roughcut.media.subtitles import (
@@ -136,8 +128,16 @@ async def render_video(
                 play_res_y=expected_h,
             )
             escaped = escape_path_for_ffmpeg_filter(ass_path)
-            filter_complex += f";[vout]subtitles='{escaped}'[vfinal]"
-            video_map = "[vfinal]"
+            filter_parts.append(f"[{video_label}]subtitles='{escaped}'[vsub]")
+            video_label = "vsub"
+            video_map = f"[{video_label}]"
+
+    if editing_accents.get("emphasis_overlays"):
+        overlay_filters, video_label = _build_emphasis_overlay_filters(video_label, editing_accents)
+        filter_parts.extend(overlay_filters)
+        video_map = f"[{video_label}]"
+
+    filter_complex = ";".join(filter_parts)
 
     cmd = [
         "ffmpeg",
@@ -194,6 +194,155 @@ async def render_video(
     elif base_output_path != output_path:
         base_output_path.replace(output_path)
     return output_path
+
+
+def _build_segment_filter_chain(
+    keep_segments: list[dict[str, Any]],
+    *,
+    transpose_suffix: str,
+    editing_accents: dict[str, Any],
+) -> tuple[list[str], str, str]:
+    parts: list[str] = []
+    segment_durations: list[float] = []
+    for index, segment in enumerate(keep_segments):
+        start = float(segment["start"])
+        end = float(segment["end"])
+        duration = max(0.0, end - start)
+        segment_durations.append(duration)
+        parts.append(f"[0:v]trim=start={start}:end={end},setpts=PTS-STARTPTS{transpose_suffix}[v{index}]")
+        parts.append(f"[0:a]atrim=start={start}:end={end},asetpts=PTS-STARTPTS[a{index}]")
+
+    transition_map = _resolve_transition_map(
+        keep_segments,
+        editing_accents.get("transitions") or {},
+    )
+    current_video = "v0"
+    current_audio = "a0"
+    current_duration = segment_durations[0]
+
+    for index in range(1, len(keep_segments)):
+        next_video = f"v{index}"
+        next_audio = f"a{index}"
+        next_duration = segment_durations[index]
+        boundary_index = index - 1
+        output_video = f"vchain{index}"
+        output_audio = f"achain{index}"
+        transition_duration = transition_map.get(boundary_index)
+        if transition_duration is not None:
+            offset = max(0.0, current_duration - transition_duration)
+            parts.append(
+                f"[{current_video}][{next_video}]xfade=transition=fade:duration={transition_duration}:offset={offset}[{output_video}]"
+            )
+            parts.append(
+                f"[{current_audio}][{next_audio}]acrossfade=d={transition_duration}:c1=tri:c2=tri[{output_audio}]"
+            )
+            current_duration = current_duration + next_duration - transition_duration
+        else:
+            parts.append(
+                f"[{current_video}][{current_audio}][{next_video}][{next_audio}]concat=n=2:v=1:a=1[{output_video}][{output_audio}]"
+            )
+            current_duration += next_duration
+        current_video = output_video
+        current_audio = output_audio
+
+    parts.append(f"[{current_video}]sidedata=mode=delete:type=DISPLAYMATRIX[vout]")
+    return parts, "vout", current_audio
+
+
+def _resolve_transition_map(
+    keep_segments: list[dict[str, Any]],
+    transitions: dict[str, Any],
+) -> dict[int, float]:
+    if not transitions.get("enabled"):
+        return {}
+    raw_duration = float(transitions.get("duration_sec") or 0.12)
+    requested_indexes = [
+        int(index)
+        for index in transitions.get("boundary_indexes") or []
+        if 0 <= int(index) < len(keep_segments) - 1
+    ]
+    resolved: dict[int, float] = {}
+    for index in requested_indexes:
+        current = keep_segments[index]
+        following = keep_segments[index + 1]
+        current_duration = float(current["end"]) - float(current["start"])
+        next_duration = float(following["end"]) - float(following["start"])
+        transition_duration = min(max(raw_duration, 0.08), current_duration / 4, next_duration / 4, 0.18)
+        if transition_duration < 0.08:
+            continue
+        resolved[index] = round(transition_duration, 3)
+    return resolved
+
+
+def _build_sound_effect_filters(
+    audio_label: str,
+    editing_accents: dict[str, Any],
+) -> tuple[list[str], str]:
+    parts: list[str] = []
+    current_audio = audio_label
+    for index, event in enumerate(editing_accents.get("sound_effects") or []):
+        start_time = max(0.0, float(event.get("start_time") or 0.0))
+        duration = max(0.05, min(float(event.get("duration_sec") or 0.08), 0.18))
+        frequency = int(event.get("frequency") or 960)
+        volume = max(0.01, min(float(event.get("volume") or 0.045), 0.08))
+        delay_ms = int(start_time * 1000)
+        fx_label = f"fx{index}"
+        mixed_label = f"amix{index}"
+        fade_out_start = max(duration - 0.04, 0.0)
+        parts.append(
+            f"sine=frequency={frequency}:sample_rate=48000:duration={duration},"
+            f"volume={volume},afade=t=out:st={fade_out_start}:d=0.04,"
+            f"adelay={delay_ms}|{delay_ms}[{fx_label}]"
+        )
+        parts.append(f"[{current_audio}][{fx_label}]amix=inputs=2:duration=first:dropout_transition=0[{mixed_label}]")
+        current_audio = mixed_label
+    return parts, current_audio
+
+
+def _build_emphasis_overlay_filters(
+    video_label: str,
+    editing_accents: dict[str, Any],
+) -> tuple[list[str], str]:
+    parts: list[str] = []
+    current_video = video_label
+    font_name = _escape_drawtext_value(get_settings().subtitle_font)
+    for index, overlay in enumerate(editing_accents.get("emphasis_overlays") or []):
+        text = _escape_drawtext_value(str(overlay.get("text") or ""))
+        if not text:
+            continue
+        start_time = max(0.0, float(overlay.get("start_time") or 0.0))
+        end_time = max(start_time + 0.2, float(overlay.get("end_time") or start_time + 1.0))
+        fade_duration = min(0.12, max((end_time - start_time) / 3, 0.06))
+        alpha_expr = (
+            f"if(lt(t\\,{start_time})\\,0\\,"
+            f"if(lt(t\\,{start_time + fade_duration})\\,(t-{start_time})/{fade_duration}*0.96\\,"
+            f"if(lt(t\\,{end_time - fade_duration})\\,0.96\\,"
+            f"if(lt(t\\,{end_time})\\,({end_time}-t)/{fade_duration}*0.96\\,0))))"
+        )
+        output_label = f"vfx{index}"
+        parts.append(
+            f"[{current_video}]drawtext="
+            f"font='{font_name}':"
+            f"text='{text}':"
+            f"fontsize=72:"
+            f"fontcolor=white:"
+            f"alpha='{alpha_expr}':"
+            f"box=1:boxcolor=black@0.45:boxborderw=18:"
+            f"borderw=2:bordercolor=black@0.25:"
+            f"x=(w-text_w)/2:y=h*0.18"
+            f"[{output_label}]"
+        )
+        current_video = output_label
+    return parts, current_video
+
+
+def _escape_drawtext_value(value: str) -> str:
+    escaped = value.replace("\\", r"\\")
+    escaped = escaped.replace(":", r"\:")
+    escaped = escaped.replace("'", r"\'")
+    escaped = escaped.replace("%", r"\%")
+    escaped = escaped.replace(",", r"\,")
+    return escaped
 
 
 async def _apply_packaging_plan(

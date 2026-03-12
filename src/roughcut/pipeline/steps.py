@@ -18,14 +18,19 @@ from pathlib import Path
 from sqlalchemy import select
 
 from roughcut.config import get_settings
-from roughcut.db.models import Artifact, GlossaryTerm, Job, JobStep, RenderOutput, SubtitleItem, TranscriptSegment
+from roughcut.db.models import Artifact, GlossaryTerm, Job, JobStep, RenderOutput, SubtitleItem, Timeline, TranscriptSegment
 from roughcut.db.session import get_session_factory
 from roughcut.edit.decisions import build_edit_decision
 from roughcut.edit.otio_export import export_to_otio
-from roughcut.edit.render_plan import build_render_plan, save_render_plan
+from roughcut.edit.render_plan import (
+    build_plain_render_plan,
+    build_render_plan,
+    build_restrained_editing_accents,
+    save_render_plan,
+)
 from roughcut.edit.timeline import save_editorial_timeline
 from roughcut.media.audio import extract_audio
-from roughcut.media.output import build_output_name, extract_cover_frame, get_output_dir, write_srt_file
+from roughcut.media.output import build_output_name, extract_cover_frame, get_output_project_dir, write_srt_file
 from roughcut.media.subtitles import remap_subtitles_to_timeline
 from roughcut.media.probe import probe, validate_media
 from roughcut.media.render import render_video
@@ -139,6 +144,30 @@ async def _get_job_and_step(job_id: str, step_name: str):
         if not step:
             raise ValueError(f"Step {step_name} not found for job {job_id}")
     return job, step
+
+
+async def _load_latest_artifact(session, job_id: uuid.UUID, artifact_type: str) -> Artifact:
+    result = await session.execute(
+        select(Artifact)
+        .where(Artifact.job_id == job_id, Artifact.artifact_type == artifact_type)
+        .order_by(Artifact.created_at.desc(), Artifact.id.desc())
+    )
+    artifact = result.scalars().first()
+    if artifact is None:
+        raise ValueError(f"Artifact not found: {artifact_type}")
+    return artifact
+
+
+async def _load_latest_timeline(session, job_id: uuid.UUID, timeline_type: str) -> Timeline:
+    result = await session.execute(
+        select(Timeline)
+        .where(Timeline.job_id == job_id, Timeline.timeline_type == timeline_type)
+        .order_by(Timeline.version.desc(), Timeline.created_at.desc(), Timeline.id.desc())
+    )
+    timeline = result.scalars().first()
+    if timeline is None:
+        raise ValueError(f"Timeline not found: {timeline_type}")
+    return timeline
 
 
 def _serialize_glossary_terms(terms: list[GlossaryTerm]) -> list[dict[str, str | list[str] | None]]:
@@ -347,10 +376,7 @@ async def run_transcribe(job_id: str) -> dict:
         await _set_step_progress(session, step, detail="加载音频并准备转写", progress=0.1)
 
         # Get audio artifact key
-        audio_result = await session.execute(
-            select(Artifact).where(Artifact.job_id == job.id, Artifact.artifact_type == "audio_wav")
-        )
-        audio_artifact = audio_result.scalar_one()
+        audio_artifact = await _load_latest_artifact(session, job.id, "audio_wav")
 
         storage = get_storage()
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -370,6 +396,8 @@ async def run_transcribe(job_id: str) -> dict:
                 glossary_terms=_serialize_glossary_terms(glossary_terms),
                 user_memory=user_memory,
                 recent_subtitles=recent_subtitles,
+                include_recent_terms=False,
+                include_recent_examples=False,
             )
             transcription_prompt = build_transcription_prompt(
                 source_name=job.source_name,
@@ -478,13 +506,16 @@ async def run_subtitle_postprocess(job_id: str) -> dict:
                     "source_name": job.source_name,
                 }
                 for item in items
-            ] + recent_subtitles,
+            ],
+            include_recent_terms=False,
+            include_recent_examples=False,
         )
         polished_count = await polish_subtitle_items(
             items,
             content_profile={"preset_name": job.channel_profile or "unboxing_default"},
             glossary_terms=_serialize_glossary_terms(glossary_terms),
             review_memory=review_memory,
+            allow_llm=False,
         )
         save_elapsed = time.perf_counter() - save_started
         total_elapsed = time.perf_counter() - started
@@ -646,6 +677,11 @@ async def run_glossary_review(job_id: str) -> dict:
                 user_memory=user_memory,
                 include_research=True,
             )
+        recent_subtitles = await _load_recent_subtitle_examples(
+            session,
+            channel_profile=job.channel_profile,
+            exclude_job_id=job.id,
+        )
         related_subtitles = await _load_related_profile_subtitle_examples(
             session,
             content_profile=content_profile,
@@ -662,6 +698,8 @@ async def run_glossary_review(job_id: str) -> dict:
                 user_memory=user_memory,
                 recent_subtitles=subtitle_dicts + related_subtitles + recent_subtitles,
                 content_profile=content_profile,
+                include_recent_terms=False,
+                include_recent_examples=False,
             ),
         )
 
@@ -699,17 +737,11 @@ async def run_edit_plan(job_id: str) -> dict:
         await _set_step_progress(session, step, detail="加载媒体参数、字幕与音频", progress=0.15)
 
         # Get media meta for duration
-        meta_result = await session.execute(
-            select(Artifact).where(Artifact.job_id == job.id, Artifact.artifact_type == "media_meta")
-        )
-        meta_artifact = meta_result.scalar_one()
+        meta_artifact = await _load_latest_artifact(session, job.id, "media_meta")
         duration = meta_artifact.data_json["duration"]
 
         # Get audio for silence detection
-        audio_result = await session.execute(
-            select(Artifact).where(Artifact.job_id == job.id, Artifact.artifact_type == "audio_wav")
-        )
-        audio_artifact = audio_result.scalar_one()
+        audio_artifact = await _load_latest_artifact(session, job.id, "audio_wav")
 
         # Get subtitle items for filler detection
         item_result = await session.execute(
@@ -790,6 +822,10 @@ async def run_edit_plan(job_id: str) -> dict:
             insert=packaging_plan.get("insert"),
             watermark=packaging_plan.get("watermark"),
             music=packaging_plan.get("music"),
+            editing_accents=build_restrained_editing_accents(
+                keep_segments=keep_segments,
+                subtitle_items=remapped_subtitles,
+            ),
         )
         await save_render_plan(job.id, render_plan_dict, session)
 
@@ -811,18 +847,16 @@ async def run_render(job_id: str) -> dict:
         await _set_step_progress(session, step, detail="准备时间线、字幕和输出目录", progress=0.05)
 
         # Get timelines
-        editorial_result = await session.execute(
-            select(Timeline).where(Timeline.job_id == job.id, Timeline.timeline_type == "editorial")
-        )
-        editorial_timeline = editorial_result.scalar_one()
-
-        render_plan_result = await session.execute(
-            select(Timeline).where(Timeline.job_id == job.id, Timeline.timeline_type == "render_plan")
-        )
-        render_plan_timeline = render_plan_result.scalar_one()
+        editorial_timeline = await _load_latest_timeline(session, job.id, "editorial")
+        render_plan_timeline = await _load_latest_timeline(session, job.id, "render_plan")
         has_packaging = any(
             render_plan_timeline.data_json.get(key)
             for key in ("intro", "outro", "insert", "watermark", "music")
+        )
+        has_editing_accents = bool(
+            (render_plan_timeline.data_json.get("editing_accents") or {}).get("transitions", {}).get("boundary_indexes")
+            or (render_plan_timeline.data_json.get("editing_accents") or {}).get("emphasis_overlays")
+            or (render_plan_timeline.data_json.get("editing_accents") or {}).get("sound_effects")
         )
 
         content_profile_result = await session.execute(
@@ -867,11 +901,13 @@ async def run_render(job_id: str) -> dict:
     # Render (outside transaction — can be long)
     # Build canonical output name: YYYYMMDD_OriginalStem
     out_name = build_output_name(job.source_name, job.created_at)
-    out_dir = get_output_dir()
+    out_dir = get_output_project_dir(job.source_name, job.created_at)
     debug_dir = Path(get_settings().render_debug_dir) / f"{job_id}_{out_name}"
     debug_dir.mkdir(parents=True, exist_ok=True)
-    local_mp4 = out_dir / f"{out_name}.mp4"
-    local_srt = out_dir / f"{out_name}.srt"
+    local_packaged_mp4 = out_dir / f"{out_name}.mp4"
+    local_plain_mp4 = out_dir / f"{out_name}_plain.mp4"
+    local_packaged_srt = out_dir / f"{out_name}.srt"
+    local_plain_srt = out_dir / f"{out_name}_plain.srt"
     local_cover = out_dir / f"{out_name}_cover.jpg"
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -884,7 +920,11 @@ async def run_render(job_id: str) -> dict:
                 await _set_step_progress(
                     session,
                     render_step,
-                    detail="执行 FFmpeg 渲染与包装" if has_packaging else "执行 FFmpeg 渲染成片",
+                    detail=(
+                        "先渲染素版，再生成包装版"
+                        if (has_packaging or has_editing_accents)
+                        else "执行 FFmpeg 渲染成片"
+                    ),
                     progress=0.35,
                 )
         source_path = await _resolve_source(
@@ -893,17 +933,44 @@ async def run_render(job_id: str) -> dict:
             expected_hash=job.file_hash,
             debug_dir=debug_dir,
         )
-        tmp_mp4 = Path(tmpdir) / "output.mp4"
+        tmp_plain_mp4 = Path(tmpdir) / "output_plain.mp4"
+        tmp_packaged_mp4 = Path(tmpdir) / "output_packaged.mp4"
+        plain_render_plan = build_plain_render_plan(render_plan_timeline.data_json)
+        await render_video(
+            source_path=source_path,
+            render_plan=plain_render_plan,
+            editorial_timeline=editorial_timeline.data_json,
+            output_path=tmp_plain_mp4,
+            subtitle_items=subtitle_dicts,
+            debug_dir=debug_dir / "plain",
+        )
+        async with get_session_factory()() as session:
+            step_result = await session.execute(
+                select(JobStep).where(JobStep.job_id == uuid.UUID(job_id), JobStep.step_name == "render")
+            )
+            render_step = step_result.scalar_one_or_none()
+            render_output = await session.get(RenderOutput, render_output_id)
+            if render_step:
+                await _set_step_progress(
+                    session,
+                    render_step,
+                    detail="素版已完成，开始生成包装版",
+                    progress=0.55,
+                )
+            if render_output:
+                render_output.progress = 0.55
+                await session.commit()
         await render_video(
             source_path=source_path,
             render_plan=render_plan_timeline.data_json,
             editorial_timeline=editorial_timeline.data_json,
-            output_path=tmp_mp4,
+            output_path=tmp_packaged_mp4,
             subtitle_items=subtitle_dicts,
-            debug_dir=debug_dir,
+            debug_dir=debug_dir / "packaged",
         )
         import shutil
-        shutil.copy2(tmp_mp4, local_mp4)
+        shutil.copy2(tmp_plain_mp4, local_plain_mp4)
+        shutil.copy2(tmp_packaged_mp4, local_packaged_mp4)
         async with get_session_factory()() as session:
             step_result = await session.execute(
                 select(JobStep).where(JobStep.job_id == uuid.UUID(job_id), JobStep.step_name == "render")
@@ -922,13 +989,18 @@ async def run_render(job_id: str) -> dict:
             if s.get("type") == "keep"
         ]
         remapped_subtitles = remap_subtitles_to_timeline(subtitle_dicts, keep_segments)
-        write_srt_file(remapped_subtitles, local_srt)
+        packaged_subtitles = await _map_subtitles_to_packaged_timeline(
+            remapped_subtitles,
+            render_plan_timeline.data_json,
+        )
+        write_srt_file(packaged_subtitles, local_packaged_srt)
+        write_srt_file(remapped_subtitles, local_plain_srt)
 
         # Extract cover frame: use 10% into video duration for a representative shot
         try:
             meta_result = await _get_cover_seek(job.id, tmpdir)
             cover_variants = await extract_cover_frame(
-                tmp_mp4,
+                tmp_packaged_mp4,
                 local_cover,
                 seek_sec=meta_result,
                 content_profile=content_profile,
@@ -940,40 +1012,65 @@ async def run_render(job_id: str) -> dict:
             cover_variants = []
 
     # Also upload to S3/MinIO for API download endpoint (non-critical — local file is primary)
-    output_key = job_key(job_id, "output.mp4")
+    packaged_output_key = job_key(job_id, "output.mp4")
+    plain_output_key = job_key(job_id, "output_plain.mp4")
     try:
         storage = get_storage()
-        await storage.async_upload_file(local_mp4, output_key)
+        await storage.async_upload_file(local_packaged_mp4, packaged_output_key)
+        await storage.async_upload_file(local_plain_mp4, plain_output_key)
     except Exception:
         pass  # Local file is the primary delivery; S3 is for the download API
 
     # Update render output
     local_paths = {
-        "mp4": str(local_mp4),
-        "srt": str(local_srt),
+        "mp4": str(local_packaged_mp4),
+        "srt": str(local_packaged_srt),
+        "packaged_mp4": str(local_packaged_mp4),
+        "plain_mp4": str(local_plain_mp4),
+        "packaged_srt": str(local_packaged_srt),
+        "plain_srt": str(local_plain_srt),
         "cover": str(local_cover) if local_cover else None,
         "cover_variants": [str(path) for path in cover_variants] if local_cover else [],
         "output_name": out_name,
     }
     async with get_session_factory()() as session:
         render_output = await session.get(RenderOutput, render_output_id)
-        render_output.output_path = str(local_mp4)
+        render_output.output_path = str(local_packaged_mp4)
         render_output.status = "done"
         render_output.progress = 1.0
         step_result = await session.execute(
             select(JobStep).where(JobStep.job_id == uuid.UUID(job_id), JobStep.step_name == "render")
         )
         render_step = step_result.scalar_one_or_none()
+        session.add(
+            Artifact(
+                job_id=uuid.UUID(job_id),
+                step_id=render_step.id if render_step else None,
+                artifact_type="render_outputs",
+                data_json={
+                    "plain_mp4": str(local_plain_mp4),
+                    "packaged_mp4": str(local_packaged_mp4),
+                    "plain_srt": str(local_plain_srt),
+                    "packaged_srt": str(local_packaged_srt),
+                    "packaged_output_key": packaged_output_key,
+                    "plain_output_key": plain_output_key,
+                },
+            )
+        )
         if render_step:
             await _set_step_progress(
                 session,
                 render_step,
-                detail="渲染与包装完成，成片与字幕已输出" if has_packaging else "渲染完成，成片与字幕已输出",
+                detail=(
+                    "素版与包装版均已输出"
+                    if (has_packaging or has_editing_accents)
+                    else "渲染完成，成片与字幕已输出"
+                ),
                 progress=1.0,
             )
         await session.commit()
 
-    return {"output_key": output_key, "local": local_paths}
+    return {"output_key": packaged_output_key, "local": local_paths}
 
 
 async def run_platform_package(job_id: str) -> dict:
@@ -1141,6 +1238,77 @@ async def _plan_insert_asset_slot(
         insert_plan["insert_after_sec"] = fallback_sec
         insert_plan["reason"] = "LLM 未返回可靠结果，回退到中间自然停顿。"
         return insert_plan
+
+
+async def _map_subtitles_to_packaged_timeline(
+    subtitle_items: list[dict],
+    render_plan: dict,
+) -> list[dict]:
+    if not subtitle_items:
+        return []
+
+    mapped = [dict(item) for item in subtitle_items]
+    leading_offset = 0.0
+
+    intro_plan = render_plan.get("intro")
+    if intro_plan and intro_plan.get("path"):
+        intro_duration = await _probe_media_duration(Path(intro_plan["path"]))
+        if intro_duration > 0:
+            leading_offset += intro_duration
+            for item in mapped:
+                item["start_time"] = float(item["start_time"]) + intro_duration
+                item["end_time"] = float(item["end_time"]) + intro_duration
+
+    insert_plan = render_plan.get("insert")
+    if insert_plan and insert_plan.get("path"):
+        insert_duration = await _probe_media_duration(Path(insert_plan["path"]))
+        insert_after_sec = float(insert_plan.get("insert_after_sec", 0.0) or 0.0) + leading_offset
+        if insert_duration > 0:
+            mapped = _shift_subtitles_for_insert(
+                mapped,
+                insert_after_sec=insert_after_sec,
+                insert_duration=insert_duration,
+            )
+
+    return mapped
+
+
+async def _probe_media_duration(path: Path) -> float:
+    try:
+        return max(0.0, float((await probe(path)).duration or 0.0))
+    except Exception:
+        return 0.0
+
+
+def _shift_subtitles_for_insert(
+    subtitle_items: list[dict],
+    *,
+    insert_after_sec: float,
+    insert_duration: float,
+) -> list[dict]:
+    shifted: list[dict] = []
+    for item in subtitle_items:
+        start_time = float(item.get("start_time", 0.0) or 0.0)
+        end_time = float(item.get("end_time", 0.0) or 0.0)
+        if end_time <= insert_after_sec:
+            shifted.append(dict(item))
+            continue
+        if start_time >= insert_after_sec:
+            shifted_item = dict(item)
+            shifted_item["start_time"] = start_time + insert_duration
+            shifted_item["end_time"] = end_time + insert_duration
+            shifted.append(shifted_item)
+            continue
+
+        head = dict(item)
+        head["start_time"] = start_time
+        head["end_time"] = insert_after_sec
+
+        tail = dict(item)
+        tail["start_time"] = insert_after_sec + insert_duration
+        tail["end_time"] = end_time + insert_duration
+        shifted.extend([head, tail])
+    return shifted
 
 
 def _hash_file(path: Path, chunk_size: int = 65536) -> str:

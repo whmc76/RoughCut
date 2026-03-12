@@ -1,6 +1,6 @@
 """
-Output package: MP4 + SRT + cover image — one complete set per job.
-Naming: {YYYYMMDD}_{original_stem}.{ext}
+Output package: one project folder per job, containing MP4 + SRT + cover assets.
+Naming: {output_root}/{YYYYMMDD}_{original_stem}/{YYYYMMDD}_{original_stem}.{ext}
 
 Cover generation:
 - rank multiple candidate frames from the edited video
@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import shutil
 import subprocess
 import tempfile
 from datetime import datetime
@@ -75,6 +76,26 @@ def get_output_dir() -> Path:
     p = Path(settings.output_dir)
     p.mkdir(parents=True, exist_ok=True)
     return p
+
+
+def get_output_project_dir(source_name: str, created_at: datetime | None = None) -> Path:
+    project_name = build_output_name(source_name, created_at)
+    project_dir = get_output_dir() / project_name
+    project_dir.mkdir(parents=True, exist_ok=True)
+    return project_dir
+
+
+def get_cover_manifest_path(output_path: Path) -> Path:
+    return output_path.with_name(f"{output_path.stem}_cover_plans.json")
+
+
+def get_legacy_cover_manifest_path(output_path: Path) -> Path:
+    return output_path.with_name(f"{output_path.stem}_plans.json")
+
+
+def build_cover_variant_output_path(output_path: Path, index: int, strategy_key: str | None = None) -> Path:
+    safe_strategy = _sanitize((strategy_key or "generic").lower()).replace(" ", "_") or "generic"
+    return output_path.with_name(f"{output_path.stem}_v{index + 1}_{safe_strategy}{output_path.suffix}")
 
 
 async def extract_cover_frame(
@@ -146,9 +167,10 @@ async def extract_cover_frame(
 
         outputs: list[Path] = []
         for i, candidate in enumerate(selected):
-            target = output_path if i == 0 else output_path.with_name(f"{output_path.stem}_v{i + 1}{output_path.suffix}")
-            await _extract_frame(video_path, target, candidate["seek"])
             plan = title_variants[i] if i < len(title_variants) else None
+            strategy_key = plan.get("strategy_key") if isinstance(plan, dict) else None
+            target = build_cover_variant_output_path(output_path, i, strategy_key)
+            await _extract_frame(video_path, target, candidate["seek"])
             title_lines = plan.get("title") if isinstance(plan, dict) else fallback_title
             resolved_variant_title_style = resolved_title_style
             if resolved_variant_title_style == "preset_default" and isinstance(plan, dict):
@@ -159,6 +181,8 @@ async def extract_cover_frame(
                 except Exception:
                     pass
             outputs.append(target)
+        if outputs:
+            shutil.copy2(outputs[0], output_path)
         _write_cover_variant_manifest(output_path, selected, title_variants, outputs)
 
     return outputs
@@ -310,6 +334,11 @@ async def _generate_cover_title_variants(
                     "main": str(raw.get("main") or "").strip(),
                     "bottom": str(raw.get("bottom") or "").strip(),
                 }
+                refined = _sanitize_generated_cover_title(
+                    refined,
+                    fallback_plan=fallback_plan,
+                    content_profile=content_profile,
+                )
                 if _cover_title_is_usable(refined):
                     indexed_plans[idx] = {
                         "strategy_key": strategy["key"],
@@ -356,7 +385,8 @@ def _write_cover_variant_manifest(
     title_variants: list[dict[str, Any] | None],
     outputs: list[Path],
 ) -> None:
-    manifest_path = output_path.with_name(f"{output_path.stem}_plans.json")
+    manifest_path = get_cover_manifest_path(output_path)
+    legacy_manifest_path = get_legacy_cover_manifest_path(output_path)
     payload: list[dict[str, Any]] = []
     for idx, target in enumerate(outputs):
         plan = title_variants[idx] if idx < len(title_variants) and isinstance(title_variants[idx], dict) else {}
@@ -373,6 +403,8 @@ def _write_cover_variant_manifest(
             }
         )
     manifest_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    if legacy_manifest_path != manifest_path:
+        legacy_manifest_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 async def _extract_frame(video_path: Path, output_path: Path, seek_sec: float) -> None:
@@ -448,6 +480,57 @@ def _cover_title_is_usable(title_lines: dict[str, str] | None) -> bool:
         "简单开箱",
     )
     return not any(fragment in main for fragment in generic_fragments)
+
+
+def _sanitize_generated_cover_title(
+    title_lines: dict[str, str] | None,
+    *,
+    fallback_plan: dict[str, str] | None,
+    content_profile: dict[str, Any] | None,
+) -> dict[str, str] | None:
+    if not title_lines:
+        return fallback_plan
+
+    normalized = {
+        "top": str(title_lines.get("top") or "").strip()[:14],
+        "main": str(title_lines.get("main") or "").strip()[:18],
+        "bottom": str(title_lines.get("bottom") or "").strip()[:18],
+    }
+    if not _cover_title_is_usable(normalized):
+        return fallback_plan
+
+    allowed_tokens = _collect_cover_guard_tokens(content_profile, fallback_plan)
+    if allowed_tokens:
+        introduced = _extract_cover_guard_tokens(" ".join(normalized.values())) - allowed_tokens
+        if introduced:
+            return fallback_plan
+
+    if fallback_plan:
+        normalized["top"] = normalized["top"] or str(fallback_plan.get("top") or "").strip()[:14]
+        normalized["main"] = normalized["main"] or str(fallback_plan.get("main") or "").strip()[:18]
+        normalized["bottom"] = normalized["bottom"] or str(fallback_plan.get("bottom") or "").strip()[:18]
+
+    return normalized
+
+
+def _collect_cover_guard_tokens(
+    content_profile: dict[str, Any] | None,
+    fallback_plan: dict[str, str] | None,
+) -> set[str]:
+    tokens: set[str] = set()
+    for key in ("subject_brand", "subject_model", "visible_text"):
+        tokens.update(_extract_cover_guard_tokens(str((content_profile or {}).get(key) or "")))
+    for value in (fallback_plan or {}).values():
+        tokens.update(_extract_cover_guard_tokens(str(value or "")))
+    return tokens
+
+
+def _extract_cover_guard_tokens(text: str) -> set[str]:
+    return {
+        token.strip().upper()
+        for token in re.findall(r"(?<![A-Za-z0-9])([A-Za-z][A-Za-z0-9+-]{1,23})(?![A-Za-z0-9])", str(text or ""))
+        if len(token.strip()) >= 2
+    }
 
 
 async def _overlay_title_layout(

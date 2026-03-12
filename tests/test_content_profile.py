@@ -262,3 +262,52 @@ async def test_polish_subtitle_items_fallback_uses_review_memory(monkeypatch: py
     assert "单手开合" in item.text_final
     assert "来自慢" not in item.text_final
     assert "主到" not in item.text_final
+
+
+@pytest.mark.asyncio
+async def test_polish_subtitle_items_rejects_cross_episode_rewrite(monkeypatch: pytest.MonkeyPatch):
+    from roughcut.review import content_profile as content_profile_module
+
+    class FakeResponse:
+        def as_json(self):
+            return {
+                "items": [
+                    {"index": 0, "text_final": "LEATHERMAN ARC深雕版，360度无死角钛合金雕刻"}
+                ]
+            }
+
+    class FakeProvider:
+        async def complete(self, *args, **kwargs):
+            return FakeResponse()
+
+    monkeypatch.setattr(content_profile_module, "get_reasoning_provider", lambda: FakeProvider())
+
+    item = SimpleNamespace(
+        item_index=0,
+        start_time=0.0,
+        end_time=2.0,
+        text_raw="这把 Reate 折刀先看手柄雕刻细节",
+        text_norm="这把 Reate 折刀先看手柄雕刻细节",
+        text_final=None,
+    )
+
+    polished = await polish_subtitle_items(
+        [item],
+        content_profile={
+            "preset_name": "edc_tactical",
+            "subject_brand": "REATE",
+            "subject_model": "",
+            "subject_type": "EDC折刀",
+        },
+        glossary_terms=[],
+        review_memory={
+            "terms": [{"term": "REATE"}],
+            "aliases": [],
+            "style_examples": [],
+        },
+    )
+
+    assert polished == 1
+    assert item.text_final == "这把 REATE 折刀先看手柄雕刻细节"
+    assert "LEATHERMAN" not in item.text_final
+    assert "ARC" not in item.text_final

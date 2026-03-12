@@ -14,6 +14,70 @@ $RepoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $RepoRoot
 
 $Python = Join-Path $RepoRoot ".venv\Scripts\python.exe"
+$Uv = Get-Command uv -ErrorAction SilentlyContinue
+$SystemPython = Get-Command python -ErrorAction SilentlyContinue
+$Npm = Get-Command npm -ErrorAction SilentlyContinue
+$FrontendDir = Join-Path $RepoRoot "frontend"
+$FrontendDist = Join-Path $FrontendDir "dist\index.html"
+
+function Initialize-RoughCutEnvironment {
+    if (Test-Path $Python) {
+        return
+    }
+
+    Write-Host "Python virtual environment not found. Bootstrapping RoughCut..." -ForegroundColor Yellow
+
+    if ($null -ne $Uv) {
+        Write-Host "Using uv to create and sync .venv" -ForegroundColor Cyan
+        & $Uv.Source sync --extra dev --extra local-asr
+    } elseif ($null -ne $SystemPython) {
+        Write-Host "uv not found. Falling back to python -m venv + pip install." -ForegroundColor Yellow
+        & $SystemPython.Source -m venv .venv
+        if (-not (Test-Path $Python)) {
+            throw "Failed to create virtual environment: $Python"
+        }
+        & $Python -m pip install -e ".[dev,local-asr]"
+    } else {
+        throw "Neither uv nor python is available. Install uv, then run 'uv sync --extra dev --extra local-asr'."
+    }
+
+    if (-not (Test-Path $Python)) {
+        throw "Virtual environment Python not found after bootstrap: $Python"
+    }
+}
+
+function Ensure-RoughCutFrontend {
+    if (-not (Test-Path $FrontendDir)) {
+        return
+    }
+
+    if (Test-Path $FrontendDist) {
+        return
+    }
+
+    if ($null -eq $Npm) {
+        throw "npm is required to build the React frontend. Install Node.js 22+ and rerun."
+    }
+
+    Write-Host "Frontend build not found. Installing and building React app..." -ForegroundColor Yellow
+    Push-Location $FrontendDir
+    try {
+        if (-not (Test-Path (Join-Path $FrontendDir "node_modules"))) {
+            if (Test-Path (Join-Path $FrontendDir "package-lock.json")) {
+                & $Npm.Source ci
+            } else {
+                & $Npm.Source install
+            }
+        }
+        & $Npm.Source run build
+    } finally {
+        Pop-Location
+    }
+
+    if (-not (Test-Path $FrontendDist)) {
+        throw "Frontend build failed: $FrontendDist not found."
+    }
+}
 
 function Test-PortListening {
     param([int]$TestPort)
@@ -141,9 +205,8 @@ if ($StopOnly) {
     exit 0
 }
 
-if (-not (Test-Path $Python)) {
-    throw "Virtual environment Python not found: $Python"
-}
+Initialize-RoughCutEnvironment
+Ensure-RoughCutFrontend
 
 Stop-RoughCutServices
 

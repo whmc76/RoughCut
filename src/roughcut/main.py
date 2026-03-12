@@ -6,12 +6,14 @@ from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
 from roughcut.api.router import api_router
 from roughcut.config import get_settings
 
-_STATIC_DIR = Path(__file__).parent / "static"
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_FRONTEND_DIST = _REPO_ROOT / "frontend" / "dist"
 
 
 @asynccontextmanager
@@ -50,9 +52,31 @@ def create_app() -> FastAPI:
     async def health():
         return {"status": "ok"}
 
-    # Serve frontend
-    if _STATIC_DIR.exists():
-        app.mount("/", StaticFiles(directory=str(_STATIC_DIR), html=True), name="static")
+    if (_FRONTEND_DIST / "assets").exists():
+        app.mount("/assets", StaticFiles(directory=str(_FRONTEND_DIST / "assets")), name="frontend-assets")
+
+    @app.get("/", include_in_schema=False)
+    async def frontend_root():
+        if (_FRONTEND_DIST / "index.html").exists():
+            return FileResponse(_FRONTEND_DIST / "index.html")
+        return HTMLResponse(
+            "<h1>RoughCut frontend not built</h1><p>Run <code>npm install && npm run build</code> in <code>frontend/</code>.</p>",
+            status_code=503,
+        )
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    async def frontend_app(full_path: str):
+        if full_path.startswith("api/") or full_path == "health":
+            return HTMLResponse(status_code=404, content="Not Found")
+        candidate = (_FRONTEND_DIST / full_path).resolve()
+        if (_FRONTEND_DIST.exists() and _FRONTEND_DIST in candidate.parents and candidate.is_file()):
+            return FileResponse(candidate)
+        if (_FRONTEND_DIST / "index.html").exists():
+            return FileResponse(_FRONTEND_DIST / "index.html")
+        return HTMLResponse(
+            "<h1>RoughCut frontend not built</h1><p>Run <code>npm install && npm run build</code> in <code>frontend/</code>.</p>",
+            status_code=503,
+        )
 
     return app
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from difflib import SequenceMatcher
 import json
 import re
 import tempfile
@@ -11,7 +12,10 @@ from roughcut.providers.factory import get_reasoning_provider, get_search_provid
 from roughcut.providers.multimodal import complete_with_images
 from roughcut.providers.reasoning.base import Message, extract_json_text
 from roughcut.review.content_profile_memory import summarize_content_profile_user_memory
-from roughcut.review.subtitle_memory import apply_domain_term_corrections, summarize_subtitle_review_memory
+from roughcut.review.subtitle_memory import (
+    apply_domain_term_corrections,
+    summarize_subtitle_review_memory_for_polish,
+)
 
 
 def build_transcript_excerpt(subtitle_items: list[dict], *, max_items: int = 36, max_chars: int = 1400) -> str:
@@ -343,12 +347,14 @@ async def polish_subtitle_items(
     glossary_terms: list[dict[str, Any]],
     review_memory: dict[str, Any] | None = None,
     chunk_size: int = 28,
+    allow_llm: bool = True,
 ) -> int:
     provider = None
-    try:
-        provider = get_reasoning_provider()
-    except Exception:
-        provider = None
+    if allow_llm:
+        try:
+            provider = get_reasoning_provider()
+        except Exception:
+            provider = None
 
     polished_count = 0
     preset = get_workflow_preset(content_profile.get("preset_name"))
@@ -360,11 +366,15 @@ async def polish_subtitle_items(
         f"- {term.get('correct_form')}: 错写可能包括 {', '.join(term.get('wrong_forms') or [])}"
         for term in glossary_terms[:30]
     )
-    review_memory_text = summarize_subtitle_review_memory(review_memory)
+    review_memory_text = summarize_subtitle_review_memory_for_polish(review_memory)
     indexed_items = list(subtitle_items)
 
     for start in range(0, len(subtitle_items), chunk_size):
         chunk = subtitle_items[start:start + chunk_size]
+        chunk_positions = {
+            item.item_index: position
+            for position, item in enumerate(chunk, start=start)
+        }
 
         if provider is not None:
             try:
@@ -389,13 +399,13 @@ async def polish_subtitle_items(
                 ]
                 prompt = (
                     "你在精修中文短视频字幕。请根据视频主体、主题和搜索证据，"
-                    "把 ASR 错字、品牌型号错写、术语误识别和不顺口的地方修好。"
+                    "只做最小必要的字幕纠错。"
                     "要求：\n"
-                    "1. 不要改变原意，不要凭空添加没说过的参数。\n"
-                    "2. 结合 prev_text / next_text 做邻句交叉校正，把明显不通顺的句子修成能讲通的话。\n"
-                    "3. 允许参考同类视频常用术语和表达习惯，但不能编造事实。\n"
-                    "4. 保持口语感，压缩废词，让字幕更适合烧录。\n"
-                    "5. 单条尽量简洁，避免超过 22 个汉字。\n"
+                    "1. 只允许修正 ASR 错字、同音词、品牌型号、行业术语、明显断句问题。\n"
+                    "2. 禁止总结、改写、扩写、缩写、换说法、重排信息、添加没说过的品牌型号或参数。\n"
+                    "3. 如果原句基本可用，就保持原句，只修正错别字即可。\n"
+                    "4. 结合 prev_text / next_text 只做邻句消歧，不要借邻句重写本句。\n"
+                    "5. 单条输出必须和原句表达同一件事，禁止写成标题、摘要、卖点文案。\n"
                     "6. 优先保证品牌、型号、版本名、EDC/工具钳相关术语正确。\n"
                     "7. 输出 JSON：{\"items\":[{\"index\":1,\"text_final\":\"...\"}]}\n\n"
                     f"视频主体：{json.dumps(content_profile, ensure_ascii=False)}\n"
@@ -424,9 +434,34 @@ async def polish_subtitle_items(
                     polished = updates.get(item.item_index)
                     if polished:
                         polished = _cleanup_polished_text(polished)
-                        polished = apply_glossary_terms(polished, glossary_terms)
-                        polished = apply_domain_term_corrections(polished, review_memory)
-                        item.text_final = polished
+                        original = item.text_final or item.text_norm or item.text_raw or ""
+                        current_position = chunk_positions.get(item.item_index, start)
+                        if _is_safe_subtitle_polish(
+                            original_text=original,
+                            polished_text=polished,
+                            prev_text=(
+                                indexed_items[current_position - 1].text_final
+                                or indexed_items[current_position - 1].text_norm
+                                or indexed_items[current_position - 1].text_raw
+                            ) if current_position > 0 else "",
+                            next_text=(
+                                indexed_items[current_position + 1].text_final
+                                or indexed_items[current_position + 1].text_norm
+                                or indexed_items[current_position + 1].text_raw
+                            ) if current_position + 1 < len(indexed_items) else "",
+                            glossary_terms=glossary_terms,
+                            review_memory=review_memory,
+                            content_profile=content_profile,
+                        ):
+                            polished = apply_glossary_terms(polished, glossary_terms)
+                            polished = apply_domain_term_corrections(polished, review_memory)
+                            item.text_final = polished
+                        else:
+                            item.text_final = _fallback_polish_text(
+                                original,
+                                glossary_terms=glossary_terms,
+                                review_memory=review_memory,
+                            )
                         polished_count += 1
                         continue
                     item.text_final = _fallback_polish_text(
@@ -695,6 +730,14 @@ def _seed_profile_from_user_memory(transcript_excerpt: str, user_memory: dict[st
             break
     if queries:
         seeded["search_queries"] = queries
+    if not seeded.get("subject_brand"):
+        mapped_brand = _MODEL_TO_BRAND.get(str(seeded.get("subject_model") or "").upper())
+        if mapped_brand:
+            seeded["subject_brand"] = mapped_brand
+    if seeded.get("subject_brand") and seeded.get("subject_model") and not seeded.get("search_queries"):
+        brand = str(seeded["subject_brand"]).strip()
+        model = str(seeded["subject_model"]).strip()
+        seeded["search_queries"] = [f"{brand} {model}", f"{brand} {model} 开箱"]
     return seeded
 
 
@@ -761,8 +804,6 @@ def _memory_keyword_matches_transcript(keyword: str, transcript: str, normalized
 
     tokens = [token.strip().upper() for token in keyword.split() if len(token.strip()) >= 3]
     if len(tokens) >= 2 and all(token in normalized for token in tokens[:2]):
-        return True
-    if len(tokens) >= 2 and any(token in normalized for token in tokens[1:]):
         return True
     if len(tokens) == 1 and tokens[0] in normalized:
         return True
@@ -1025,6 +1066,91 @@ def _cleanup_polished_text(text: str) -> str:
     text = re.sub(r"[!！]{2,}", "！", text)
     text = re.sub(r"[?？]{2,}", "？", text)
     return text
+
+
+def _is_safe_subtitle_polish(
+    *,
+    original_text: str,
+    polished_text: str,
+    prev_text: str,
+    next_text: str,
+    glossary_terms: list[dict[str, Any]],
+    review_memory: dict[str, Any] | None,
+    content_profile: dict[str, Any],
+) -> bool:
+    original = _cleanup_polished_text(original_text)
+    polished = _cleanup_polished_text(polished_text)
+    if not original or not polished:
+        return False
+    if polished == original:
+        return True
+
+    if len(original) >= 8:
+        if len(polished) > max(len(original) + 10, int(len(original) * 1.6)):
+            return False
+        if len(polished) < max(2, int(len(original) * 0.45)):
+            return False
+
+    similarity = SequenceMatcher(None, _subtitle_guard_text(original), _subtitle_guard_text(polished)).ratio()
+    if similarity < 0.42:
+        return False
+
+    allowed_tokens = _collect_allowed_subtitle_tokens(
+        original_text=original,
+        prev_text=prev_text,
+        next_text=next_text,
+        glossary_terms=glossary_terms,
+        review_memory=review_memory,
+        content_profile=content_profile,
+    )
+    introduced_tokens = [
+        token for token in _extract_guard_tokens(polished)
+        if token not in allowed_tokens and token not in _extract_guard_tokens(original)
+    ]
+    return len(introduced_tokens) < 2
+
+
+def _collect_allowed_subtitle_tokens(
+    *,
+    original_text: str,
+    prev_text: str,
+    next_text: str,
+    glossary_terms: list[dict[str, Any]],
+    review_memory: dict[str, Any] | None,
+    content_profile: dict[str, Any],
+) -> set[str]:
+    allowed: set[str] = set()
+    for text in (original_text, prev_text, next_text):
+        allowed.update(_extract_guard_tokens(text))
+
+    for key in ("subject_brand", "subject_model", "subject_type", "video_theme", "visible_text"):
+        allowed.update(_extract_guard_tokens(str(content_profile.get(key) or "")))
+
+    for term in glossary_terms:
+        allowed.update(_extract_guard_tokens(str(term.get("correct_form") or "")))
+        for wrong_form in term.get("wrong_forms") or []:
+            allowed.update(_extract_guard_tokens(str(wrong_form or "")))
+
+    for item in (review_memory or {}).get("aliases") or []:
+        allowed.update(_extract_guard_tokens(str(item.get("wrong") or "")))
+        allowed.update(_extract_guard_tokens(str(item.get("correct") or "")))
+
+    for item in (review_memory or {}).get("terms") or []:
+        allowed.update(_extract_guard_tokens(str(item.get("term") or "")))
+
+    return allowed
+
+
+def _subtitle_guard_text(text: str) -> str:
+    return re.sub(r"[，。！？、,.!?\s]+", "", str(text or "").strip())
+
+
+def _extract_guard_tokens(text: str) -> set[str]:
+    return {
+        token.strip().upper()
+        for token in re.findall(r"(?<![A-Za-z0-9])([A-Za-z][A-Za-z0-9+-]{1,23})(?![A-Za-z0-9])", str(text or ""))
+        if len(token.strip()) >= 2
+    }
 
 
 def _clean_line(text: str) -> str:

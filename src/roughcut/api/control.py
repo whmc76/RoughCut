@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from datetime import datetime, timezone
@@ -26,41 +27,64 @@ def _pick_shell() -> str:
 
 
 def _has_process(substring: str) -> bool:
-    shell = _pick_shell()
-    script = (
-        "$needle = @'\n"
-        f"{substring}\n"
-        "'@;"
-        " $proc = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | "
-        "Where-Object { $_.CommandLine -and $_.CommandLine.Contains($needle) } | "
-        "Select-Object -First 1;"
-        " if ($null -ne $proc) { '1' }"
-    )
-    result = subprocess.run(
-        [shell, "-NoProfile", "-Command", script],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=10,
-        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-    )
-    return result.returncode == 0 and result.stdout.strip() == "1"
+    try:
+        if os.name == "nt":
+            shell = _pick_shell()
+            script = (
+                "$needle = @'\n"
+                f"{substring}\n"
+                "'@;"
+                " $proc = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | "
+                "Where-Object { $_.CommandLine -and $_.CommandLine.Contains($needle) } | "
+                "Select-Object -First 1;"
+                " if ($null -ne $proc) { '1' }"
+            )
+            result = subprocess.run(
+                [shell, "-NoProfile", "-Command", script],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=10,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            return result.returncode == 0 and result.stdout.strip() == "1"
+
+        result = subprocess.run(
+            ["ps", "-eo", "command="],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=10,
+        )
+        if result.returncode != 0:
+            return False
+        return any(substring in line for line in result.stdout.splitlines())
+    except Exception:
+        return False
 
 
 def _running_container_names() -> set[str]:
-    result = subprocess.run(
-        ["docker", "ps", "--format", "{{.Names}}"],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=10,
-        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-    )
+    try:
+        result = subprocess.run(
+            ["docker", "ps", "--format", "{{.Names}}"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=10,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except Exception:
+        return set()
     if result.returncode != 0:
         return set()
     return {line.strip() for line in result.stdout.splitlines() if line.strip()}
+
+
+def _has_container(containers: set[str], name: str) -> bool:
+    return any(container == name or container.startswith(f"{name}-") for container in containers)
 
 
 def _launch_stop_script(*, stop_docker: bool) -> None:
@@ -115,8 +139,8 @@ async def service_status():
             "llm_worker": _has_process(
                 "celery -A roughcut.pipeline.celery_app:celery_app worker --queues=llm_queue"
             ),
-            "postgres": "roughcut-postgres-1" in containers,
-            "redis": "roughcut-redis-1" in containers,
-            "minio": "roughcut-minio-1" in containers,
+            "postgres": _has_container(containers, "roughcut-postgres"),
+            "redis": _has_container(containers, "roughcut-redis"),
+            "minio": _has_container(containers, "roughcut-minio"),
         },
     }

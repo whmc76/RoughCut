@@ -30,6 +30,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+local-asr = [
+    "faster-whisper>=1.0",
+]
 dev = [
     "pytest",
     "pytest-asyncio",

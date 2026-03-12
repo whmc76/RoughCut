@@ -9,7 +9,7 @@
 ## 功能
 
 - **自动剪辑** — 检测静音段和语气词，生成剪辑时间轴，保留有效内容
-- **转写** — 支持 OpenAI gpt-4o-transcribe 或本地 faster-whisper
+- **转写** — 默认使用本地 faster-whisper `base`，也可切换到 OpenAI gpt-4o-transcribe
 - **字幕** — 字幕时间戳重映射至剪辑后时间轴，烧录荧光描边样式（黑字 + 绿色发光）
 - **封面选帧** — 视觉模型从多个候选帧中挑选最佳封面，可选标题文字叠加
 - **旋转修正** — 视觉模型识别实际画面方向，正确处理 iPhone 横屏/竖屏及错误元数据
@@ -23,10 +23,26 @@
 
 ## 架构
 
-5 个独立进程，通过数据库协调状态：
+前后端现在拆成两层：
 
 ```
-api          — FastAPI，上传/查询/下载
+frontend     — React + Vite 控制台
+api          — FastAPI API + 生产环境静态托管 frontend/dist
+```
+
+当前 React 控制台已接管：
+
+- 任务列表 / 上传建任务 / 内容核对 / 字幕报告
+- 监控目录扫描与入队
+- 包装素材管理
+- 风格模板选择
+- 行为记忆统计
+- 术语词表
+- 系统设置与服务控制
+
+后台仍由 4 个长期进程推进任务，通过数据库协调状态：
+
+```
 orchestrator — 状态机，轮询 job_steps 推进流水线
 worker-media — FFmpeg 媒体处理（Celery）
 worker-llm   — 转写后处理 / LLM 推理（Celery）
@@ -46,15 +62,41 @@ probe → extract_audio → transcribe → subtitle_postprocess
 ## 环境要求
 
 - Python 3.11+
+- `uv`（推荐）或 `pip`
 - FFmpeg（需在 PATH 中，支持 libx264 / libass）
-- Docker（运行 PostgreSQL、Redis、MinIO）
+- Docker / Docker Compose（推荐用于基础服务或完整部署）
 - LLM 后端之一：Ollama（本地）或 OpenAI API Key
 
 ---
 
 ## 快速开始
 
-### 1. 启动基础服务
+推荐使用 `uv` 管理 Python 侧，使用 `npm` 管理 React + Vite 前端。当前原型阶段前端已经彻底切换为 React，不再维护旧静态单文件 Dashboard。
+
+### 1. 安装 uv
+
+```bash
+# Windows (PowerShell)
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+
+# macOS / Linux
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+### 2. 初始化项目目录
+
+```bash
+uv run roughcut init
+```
+
+这一步会创建：
+
+- `data/output`
+- `logs/render-debug`
+- `watch`
+- `.env`（若不存在且 `.env.example` 存在）
+
+### 3. 启动基础服务
 
 ```bash
 docker-compose up -d
@@ -62,13 +104,28 @@ docker-compose up -d
 
 启动 PostgreSQL（5432）、Redis（6379）、MinIO（9000/9001）。
 
-### 2. 安装依赖
+### 4. 安装依赖
+
+推荐使用 `uv`：
 
 ```bash
-pip install -e ".[dev]"
+uv sync --extra dev --extra local-asr
 ```
 
-### 3. 配置环境变量
+兼容 `pip`：
+
+```bash
+pip install -e ".[dev,local-asr]"
+```
+
+前端依赖：
+
+```bash
+cd frontend
+npm install
+```
+
+### 5. 配置环境变量
 
 复制 `.env.example` 为 `.env` 并按需修改：
 
@@ -76,13 +133,13 @@ pip install -e ".[dev]"
 cp .env.example .env
 ```
 
-最小配置（本地 Ollama）：
+最小配置（本地 Ollama + 本地 ASR）：
 
 ```env
 REASONING_PROVIDER=ollama
 REASONING_MODEL=qwen3.5:9b        # 需支持视觉
 TRANSCRIPTION_PROVIDER=local_whisper
-TRANSCRIPTION_MODEL=medium
+TRANSCRIPTION_MODEL=base
 
 OUTPUT_DIR=D:/output               # 成片输出目录
 ```
@@ -97,30 +154,121 @@ TRANSCRIPTION_PROVIDER=openai
 TRANSCRIPTION_MODEL=gpt-4o-transcribe
 ```
 
-### 4. 初始化数据库
+### 6. 运行自检
 
 ```bash
-roughcut migrate
+uv run roughcut doctor
 ```
 
-### 5. 启动各进程
+如果缺少 `ffmpeg`、`ffprobe` 或 Python 版本不满足要求，命令会直接失败并给出原因。
+
+### 7. 初始化数据库
+
+```bash
+uv run roughcut migrate
+```
+
+### 8. 启动各进程
+
+开发前端：
+
+```bash
+cd frontend
+npm run dev
+```
+
+默认 Vite 开发地址是 `http://127.0.0.1:5173`，并代理到本地 FastAPI `http://127.0.0.1:8000`。
+
+构建前端静态产物：
+
+```bash
+cd frontend
+npm run build
+```
+
+构建后 FastAPI 会直接托管 `frontend/dist`。
+
+### 9. 启动后端服务
 
 ```bash
 # API 服务
-roughcut api
+uv run roughcut api
 
 # 编排器（单独终端）
-roughcut orchestrator
+uv run roughcut orchestrator
 
 # 媒体处理 Worker（单独终端）
-roughcut worker --queue media_queue
+uv run roughcut worker --queue media_queue
 
 # LLM Worker（单独终端）
-roughcut worker --queue llm_queue
+uv run roughcut worker --queue llm_queue
 
 # 目录监听（可选）
-roughcut watcher D:/录像
+uv run roughcut watcher D:/录像
 ```
+
+### 10. 一键本地启动（Windows）
+
+```powershell
+./restart_roughcut.ps1
+```
+
+如果 `.venv` 不存在，脚本会优先用 `uv sync --extra dev --extra local-asr` 自动初始化环境。前端需要单独执行 `npm install && npm run build` 或运行 `npm run dev`。
+
+---
+
+## Docker 部署
+
+仓库现在支持两种 Docker 用法：
+
+- `docker compose up -d`：基础设施 + RoughCut 全部服务
+- `docker compose --profile watcher up -d`：额外启动目录监听容器
+
+### 1. 准备配置
+
+```bash
+cp .env.example .env
+```
+
+在 `.env` 中填写你的模型配置和 API Key。容器内的 PostgreSQL / Redis / MinIO 地址由 `docker-compose.yml` 自动覆盖为容器服务名，无需手动改成 `postgres` / `redis` / `minio`。
+
+### 2. 构建并启动
+
+```bash
+docker compose up -d --build
+```
+
+启动后默认包含：
+
+- `api`：FastAPI + 内置静态面板，访问 `http://localhost:8000`
+- `orchestrator`
+- `worker-media`
+- `worker-llm`
+- `postgres`
+- `redis`
+- `minio`
+
+### 3. 查看日志
+
+```bash
+docker compose logs -f api
+docker compose logs -f orchestrator
+docker compose logs -f worker-media
+```
+
+### 4. 数据目录
+
+- `./data/output`：成片输出
+- `./logs`：运行日志与 render debug
+- `./watch`：可选目录监听挂载点（启用 `watcher` profile 时使用）
+
+### 5. 说明
+
+- Docker 镜像默认内置 `uv`、`ffmpeg` 和 `Noto Sans CJK` 中文字体。
+- Docker 镜像会在构建阶段自动执行 `frontend/` 下的 `npm ci && npm run build`。
+- 默认镜像已包含 CPU 版 `faster-whisper`，可直接用于 `TRANSCRIPTION_PROVIDER=local_whisper`。
+- 当前项目默认 ASR 方案为 `local_whisper + base`；如果要启用 GPU 加速 ASR，建议基于当前 `Dockerfile` 再做专用镜像。
+- 推荐本地开发使用 `uv + npm`，容器部署使用 `docker compose`，不要混用系统级 `pip` 和容器内运行时配置。
 
 ---
 
@@ -175,7 +323,7 @@ curl http://localhost:8000/api/v1/jobs/{job_id}/report
 
 | 配置项 | 默认值 | 说明 |
 |--------|--------|------|
-| `OUTPUT_DIR` | `Y:/EDC系列/AI粗剪` | 成片输出目录 |
+| `OUTPUT_DIR` | `data/output` | 成片输出目录 |
 | `OUTPUT_NAME_PATTERN` | `{date}_{stem}` | 输出文件名模板 |
 | `RENDER_DEBUG_DIR` | `logs/render-debug` | render 调试产物目录 |
 | `REASONING_PROVIDER` | `openai` | 推理后端：`openai` / `anthropic` / `minimax` / `ollama` |
@@ -194,8 +342,8 @@ curl http://localhost:8000/api/v1/jobs/{job_id}/report
 | `MINIMAX_API_KEY` | `""` | MiniMax API Key |
 | `MINIMAX_BASE_URL` | `https://api.minimaxi.com/v1` | MiniMax OpenAI 兼容接口地址 |
 | `VISION_MODEL` | `""` | 视觉模型（空 = 使用 reasoning_model） |
-| `TRANSCRIPTION_PROVIDER` | `openai` | 转写后端：`openai` / `local_whisper` |
-| `TRANSCRIPTION_MODEL` | `gpt-4o-transcribe` | 转写模型 |
+| `TRANSCRIPTION_PROVIDER` | `local_whisper` | 转写后端：`local_whisper` / `openai` |
+| `TRANSCRIPTION_MODEL` | `base` | 转写模型 |
 | `SUBTITLE_FONT` | `Microsoft YaHei` | 字幕字体 |
 | `SUBTITLE_FONT_SIZE` | `80` | 字幕字号（pt，相对 PlayResY） |
 | `SUBTITLE_COLOR` | `000000` | 字幕文字颜色（RGB hex，黑色） |
@@ -273,14 +421,14 @@ src/roughcut/
 
 ```bash
 # 运行测试
-pytest
+uv run pytest
 
 # 带覆盖率
-pytest --cov=roughcut
+uv run pytest --cov=roughcut
 
 # 代码格式化
-ruff format src/
-ruff check src/
+uv run ruff format src/
+uv run ruff check src/
 ```
 
 ### 项目改名或目录迁移后的环境修复

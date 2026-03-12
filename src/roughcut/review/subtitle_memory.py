@@ -53,6 +53,8 @@ def build_subtitle_review_memory(
     user_memory: dict[str, Any] | None,
     recent_subtitles: list[dict[str, Any]] | None,
     content_profile: dict[str, Any] | None = None,
+    include_recent_terms: bool = True,
+    include_recent_examples: bool = True,
     term_limit: int = 24,
     example_limit: int = 6,
 ) -> dict[str, Any]:
@@ -100,9 +102,10 @@ def build_subtitle_review_memory(
         )
         if not text:
             continue
-        for token in _extract_domain_terms(text):
-            remember_term(token, 2)
-        if _text_has_domain_signal(text) and text not in seen_examples:
+        if include_recent_terms:
+            for token in _extract_domain_terms(text):
+                remember_term(token, 2)
+        if include_recent_examples and _text_has_domain_signal(text) and text not in seen_examples:
             seen_examples.add(text)
             examples.append(
                 {
@@ -134,6 +137,18 @@ def build_subtitle_review_memory(
 
 
 def summarize_subtitle_review_memory(review_memory: dict[str, Any] | None) -> str:
+    return _summarize_subtitle_review_memory(review_memory, include_examples=True)
+
+
+def summarize_subtitle_review_memory_for_polish(review_memory: dict[str, Any] | None) -> str:
+    return _summarize_subtitle_review_memory(review_memory, include_examples=False)
+
+
+def _summarize_subtitle_review_memory(
+    review_memory: dict[str, Any] | None,
+    *,
+    include_examples: bool,
+) -> str:
     if not review_memory:
         return ""
 
@@ -155,7 +170,7 @@ def summarize_subtitle_review_memory(review_memory: dict[str, Any] | None) -> st
             lines.append(f"- 常见错写归一: {values}")
 
     examples = review_memory.get("style_examples") or []
-    if examples:
+    if include_examples and examples:
         values = " / ".join(str(item.get("text") or "") for item in examples[:4] if item.get("text"))
         if values:
             lines.append(f"- 同类视频常见表达: {values}")
