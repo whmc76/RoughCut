@@ -9,6 +9,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import subprocess
 import tempfile
 import time
 import uuid
@@ -18,7 +19,15 @@ from typing import Any
 
 from sqlalchemy import select
 
+from roughcut.avatar import list_avatar_material_profiles
 from roughcut.config import get_settings
+from roughcut.creative import (
+    ai_director_mode_enabled,
+    avatar_mode_enabled,
+    build_ai_director_plan,
+    build_avatar_commentary_plan,
+    build_job_creative_profile,
+)
 from roughcut.db.models import Artifact, GlossaryTerm, Job, JobStep, RenderOutput, SubtitleItem, Timeline, TranscriptSegment
 from roughcut.db.session import get_session_factory
 from roughcut.edit.decisions import build_edit_decision
@@ -26,7 +35,7 @@ from roughcut.edit.otio_export import export_to_otio
 from roughcut.edit.render_plan import (
     build_plain_render_plan,
     build_render_plan,
-    build_restrained_editing_accents,
+    build_smart_editing_accents,
     save_render_plan,
 )
 from roughcut.edit.timeline import save_editorial_timeline
@@ -42,8 +51,8 @@ from roughcut.media.subtitles import remap_subtitles_to_timeline
 from roughcut.media.probe import probe, validate_media
 from roughcut.media.render import render_video
 from roughcut.media.silence import detect_silence
-from roughcut.packaging.library import resolve_packaging_plan_for_job
-from roughcut.providers.factory import get_reasoning_provider
+from roughcut.packaging.library import list_packaging_assets, resolve_packaging_plan_for_job
+from roughcut.providers.factory import get_avatar_provider, get_reasoning_provider, get_voice_provider
 from roughcut.providers.reasoning.base import Message
 from roughcut.review.content_profile import (
     assess_content_profile_automation,
@@ -52,6 +61,7 @@ from roughcut.review.content_profile import (
     polish_subtitle_items,
 )
 from roughcut.review.content_profile_memory import load_content_profile_user_memory
+from roughcut.review.domain_glossaries import merge_glossary_terms, resolve_builtin_glossary_terms
 from roughcut.review.glossary_engine import apply_glossary_corrections
 from roughcut.review.platform_copy import generate_platform_packaging, save_platform_packaging_markdown
 from roughcut.review.subtitle_memory import build_subtitle_review_memory, build_transcription_prompt
@@ -68,6 +78,8 @@ STEP_LABELS = {
     "content_profile": "内容摘要",
     "summary_review": "人工确认",
     "glossary_review": "术语纠错",
+    "ai_director": "AI导演",
+    "avatar_commentary": "数字人解说",
     "edit_plan": "剪辑决策",
     "render": "渲染输出",
     "platform_package": "平台文案",
@@ -76,6 +88,13 @@ STEP_LABELS = {
 logger = logging.getLogger(__name__)
 
 _CONTENT_PROFILE_ARTIFACT_TYPES = ("content_profile_final", "content_profile", "content_profile_draft")
+
+
+def _job_creative_profile(job: Job) -> dict[str, object]:
+    return build_job_creative_profile(
+        workflow_mode=str(getattr(job, "workflow_mode", "") or "standard_edit"),
+        enhancement_modes=list(getattr(job, "enhancement_modes", []) or []),
+    )
 
 
 async def _set_step_progress(
@@ -206,6 +225,26 @@ async def _load_latest_timeline(session, job_id: uuid.UUID, timeline_type: str) 
     return timeline
 
 
+async def _load_latest_optional_artifact(
+    session,
+    *,
+    job_id: uuid.UUID,
+    artifact_types: tuple[str, ...] | list[str],
+) -> Artifact | None:
+    result = await session.execute(
+        select(Artifact)
+        .where(
+            Artifact.job_id == job_id,
+            Artifact.artifact_type.in_(list(artifact_types)),
+        )
+        .order_by(Artifact.created_at.desc(), Artifact.id.desc())
+    )
+    artifacts = result.scalars().all()
+    if set(artifact_types).issuperset(_CONTENT_PROFILE_ARTIFACT_TYPES):
+        return _select_preferred_content_profile_artifact(artifacts)
+    return artifacts[0] if artifacts else None
+
+
 def _serialize_glossary_terms(terms: list[GlossaryTerm]) -> list[dict[str, str | list[str] | None]]:
     return [
         {
@@ -216,6 +255,62 @@ def _serialize_glossary_terms(terms: list[GlossaryTerm]) -> list[dict[str, str |
         }
         for term in terms
     ]
+
+
+def _build_effective_glossary_terms(
+    *,
+    glossary_terms: list[GlossaryTerm] | list[dict[str, Any]],
+    channel_profile: str | None,
+    content_profile: dict[str, Any] | None = None,
+    subtitle_items: list[dict[str, Any]] | None = None,
+    source_name: str | None = None,
+) -> list[dict[str, str | list[str] | None]]:
+    serialized = [
+        item
+        if isinstance(item, dict)
+        else {
+            "wrong_forms": item.wrong_forms,
+            "correct_form": item.correct_form,
+            "category": item.category,
+            "context_hint": item.context_hint,
+        }
+        for item in glossary_terms
+    ]
+    builtin = resolve_builtin_glossary_terms(
+        channel_profile=channel_profile,
+        content_profile=content_profile,
+        subtitle_items=subtitle_items,
+        source_name=source_name,
+    )
+    return merge_glossary_terms(serialized, builtin)
+
+
+def _merge_execution_into_segments(
+    segments: list[dict[str, Any]],
+    execution_segments: list[dict[str, Any]] | None,
+    *,
+    media_key: str,
+) -> list[dict[str, Any]]:
+    if not segments or not execution_segments:
+        return segments
+    execution_by_id = {
+        str(item.get("segment_id") or ""): item
+        for item in execution_segments
+        if str(item.get("segment_id") or "").strip()
+    }
+    merged: list[dict[str, Any]] = []
+    for segment in segments:
+        segment_copy = dict(segment)
+        execution = execution_by_id.get(str(segment.get("segment_id") or ""))
+        if execution:
+            segment_copy[f"{media_key}_status"] = execution.get("status")
+            if media_key == "audio":
+                segment_copy["audio_url"] = execution.get("audio_url")
+            elif media_key == "video":
+                segment_copy["video_result"] = execution.get("result")
+                segment_copy["video_local_path"] = execution.get("local_result_path")
+        merged.append(segment_copy)
+    return merged
 
 
 async def _load_recent_subtitle_examples(
@@ -427,9 +522,15 @@ async def run_transcribe(job_id: str) -> dict:
                 channel_profile=job.channel_profile,
                 exclude_job_id=job.id,
             )
+            effective_glossary_terms = _build_effective_glossary_terms(
+                glossary_terms=glossary_terms,
+                channel_profile=job.channel_profile,
+                subtitle_items=recent_subtitles,
+                source_name=job.source_name,
+            )
             review_memory = build_subtitle_review_memory(
                 channel_profile=job.channel_profile,
-                glossary_terms=_serialize_glossary_terms(glossary_terms),
+                glossary_terms=effective_glossary_terms,
                 user_memory=user_memory,
                 recent_subtitles=recent_subtitles,
                 include_recent_terms=False,
@@ -525,14 +626,23 @@ async def run_subtitle_postprocess(job_id: str) -> dict:
         glossary_result = await session.execute(select(GlossaryTerm))
         glossary_terms = glossary_result.scalars().all()
         user_memory = await load_content_profile_user_memory(session, channel_profile=job.channel_profile)
-        recent_subtitles = await _load_recent_subtitle_examples(
-            session,
+        effective_glossary_terms = _build_effective_glossary_terms(
+            glossary_terms=glossary_terms,
             channel_profile=job.channel_profile,
-            exclude_job_id=job.id,
+            subtitle_items=[
+                {
+                    "text_raw": item.text_raw,
+                    "text_norm": item.text_norm,
+                    "text_final": item.text_final,
+                    "source_name": job.source_name,
+                }
+                for item in items
+            ],
+            source_name=job.source_name,
         )
         review_memory = build_subtitle_review_memory(
             channel_profile=job.channel_profile,
-            glossary_terms=_serialize_glossary_terms(glossary_terms),
+            glossary_terms=effective_glossary_terms,
             user_memory=user_memory,
             recent_subtitles=[
                 {
@@ -549,7 +659,7 @@ async def run_subtitle_postprocess(job_id: str) -> dict:
         polished_count = await polish_subtitle_items(
             items,
             content_profile={"preset_name": job.channel_profile or "unboxing_default"},
-            glossary_terms=_serialize_glossary_terms(glossary_terms),
+            glossary_terms=effective_glossary_terms,
             review_memory=review_memory,
             allow_llm=False,
         )
@@ -613,6 +723,7 @@ async def run_content_profile(job_id: str) -> dict:
             for item in subtitle_items
         ]
         user_memory = await load_content_profile_user_memory(session, channel_profile=job.channel_profile)
+        packaging_config = (list_packaging_assets().get("config") or {})
 
         with tempfile.TemporaryDirectory() as tmpdir:
             source_path = await _resolve_source(job, tmpdir, expected_hash=job.file_hash)
@@ -624,7 +735,9 @@ async def run_content_profile(job_id: str) -> dict:
                 channel_profile=job.channel_profile,
                 user_memory=user_memory,
                 include_research=True,
+                copy_style=str(packaging_config.get("copy_style") or "attention_grabbing"),
             )
+        content_profile["creative_profile"] = _job_creative_profile(job)
 
         automation = assess_content_profile_automation(
             content_profile,
@@ -717,22 +830,6 @@ async def run_glossary_review(job_id: str) -> dict:
         )
         subtitle_items = item_result.scalars().all()
 
-        corrections = await apply_glossary_corrections(job.id, subtitle_items, session)
-        auto_accepted_corrections = sum(
-            1 for item in corrections if item.auto_applied or item.human_decision == "accepted"
-        )
-        pending_corrections = sum(
-            1 for item in corrections if item.human_decision not in {"accepted", "rejected"}
-        )
-        glossary_result = await session.execute(select(GlossaryTerm))
-        glossary_terms = glossary_result.scalars().all()
-        await _set_step_progress(
-            session,
-            step,
-            detail=f"已识别 {len(corrections)} 处术语纠错候选，自动接受 {auto_accepted_corrections} 条",
-            progress=0.45,
-        )
-
         subtitle_dicts = [
             {
                 "index": item.item_index,
@@ -744,6 +841,32 @@ async def run_glossary_review(job_id: str) -> dict:
             }
             for item in subtitle_items
         ]
+        glossary_result = await session.execute(select(GlossaryTerm))
+        glossary_terms = glossary_result.scalars().all()
+        effective_glossary_terms = _build_effective_glossary_terms(
+            glossary_terms=glossary_terms,
+            channel_profile=job.channel_profile,
+            subtitle_items=subtitle_dicts,
+            source_name=job.source_name,
+        )
+        corrections = await apply_glossary_corrections(
+            job.id,
+            subtitle_items,
+            session,
+            glossary_terms=effective_glossary_terms,
+        )
+        auto_accepted_corrections = sum(
+            1 for item in corrections if item.auto_applied or item.human_decision == "accepted"
+        )
+        pending_corrections = sum(
+            1 for item in corrections if item.human_decision not in {"accepted", "rejected"}
+        )
+        await _set_step_progress(
+            session,
+            step,
+            detail=f"已识别 {len(corrections)} 处术语纠错候选，自动接受 {auto_accepted_corrections} 条",
+            progress=0.45,
+        )
         user_memory = await load_content_profile_user_memory(session, channel_profile=job.channel_profile)
 
         profile_result = await session.execute(
@@ -759,14 +882,22 @@ async def run_glossary_review(job_id: str) -> dict:
         if not content_profile:
             with tempfile.TemporaryDirectory() as tmpdir:
                 source_path = await _resolve_source(job, tmpdir, expected_hash=job.file_hash)
+                packaging_config = (list_packaging_assets().get("config") or {})
                 content_profile = await infer_content_profile(
                     source_path=source_path,
                     source_name=job.source_name,
                     subtitle_items=subtitle_dicts,
                     channel_profile=job.channel_profile,
                     user_memory=user_memory,
+                    copy_style=str(packaging_config.get("copy_style") or "attention_grabbing"),
                 )
         else:
+            packaging_config = (list_packaging_assets().get("config") or {})
+            content_profile["copy_style"] = str(
+                packaging_config.get("copy_style")
+                or content_profile.get("copy_style")
+                or "attention_grabbing"
+            )
             content_profile = await enrich_content_profile(
                 profile=content_profile,
                 source_name=job.source_name,
@@ -775,6 +906,7 @@ async def run_glossary_review(job_id: str) -> dict:
                 user_memory=user_memory,
                 include_research=True,
             )
+        content_profile["creative_profile"] = _job_creative_profile(job)
         recent_subtitles = await _load_recent_subtitle_examples(
             session,
             channel_profile=job.channel_profile,
@@ -789,16 +921,17 @@ async def run_glossary_review(job_id: str) -> dict:
         polished_count = await polish_subtitle_items(
             subtitle_items,
             content_profile=content_profile,
-            glossary_terms=_serialize_glossary_terms(glossary_terms),
+            glossary_terms=effective_glossary_terms,
             review_memory=build_subtitle_review_memory(
                 channel_profile=job.channel_profile,
-                glossary_terms=_serialize_glossary_terms(glossary_terms),
+                glossary_terms=effective_glossary_terms,
                 user_memory=user_memory,
                 recent_subtitles=subtitle_dicts + related_subtitles + recent_subtitles,
                 content_profile=content_profile,
                 include_recent_terms=False,
                 include_recent_examples=False,
             ),
+            allow_llm=False,
         )
 
         artifact = Artifact(
@@ -831,6 +964,268 @@ async def run_glossary_review(job_id: str) -> dict:
                     content_profile.get("subject_model"),
                 ] if part
             ).strip(),
+        }
+
+
+async def run_ai_director(job_id: str) -> dict:
+    factory = get_session_factory()
+    async with factory() as session:
+        job = await session.get(Job, uuid.UUID(job_id))
+        step_result = await session.execute(
+            select(JobStep).where(JobStep.job_id == job.id, JobStep.step_name == "ai_director")
+        )
+        step = step_result.scalar_one()
+
+        if not ai_director_mode_enabled(getattr(job, "enhancement_modes", [])):
+            await _set_step_progress(session, step, detail="未启用 AI 导演模式，跳过。", progress=1.0)
+            await session.commit()
+            return {"enabled": False, "skipped": True}
+
+        await _set_step_progress(session, step, detail="加载字幕与内容画像，准备导演分析", progress=0.18)
+        item_result = await session.execute(
+            select(SubtitleItem)
+            .where(SubtitleItem.job_id == job.id, SubtitleItem.version == 1)
+            .order_by(SubtitleItem.item_index)
+        )
+        subtitle_items = item_result.scalars().all()
+        subtitle_dicts = [
+            {
+                "index": item.item_index,
+                "start_time": item.start_time,
+                "end_time": item.end_time,
+                "text_raw": item.text_raw,
+                "text_norm": item.text_norm,
+                "text_final": item.text_final,
+            }
+            for item in subtitle_items
+        ]
+        profile_artifact = await _load_latest_optional_artifact(
+            session,
+            job_id=job.id,
+            artifact_types=_CONTENT_PROFILE_ARTIFACT_TYPES,
+        )
+        content_profile = profile_artifact.data_json if profile_artifact and profile_artifact.data_json else {}
+
+        await _set_step_progress(session, step, detail="生成导演建议稿与重配音计划", progress=0.68)
+        plan = await build_ai_director_plan(
+            job_id=str(job.id),
+            source_name=job.source_name,
+            subtitle_items=subtitle_dicts,
+            content_profile=content_profile,
+        )
+        voice_execution: dict[str, Any] | None = None
+        voice_segments = list(plan.get("voiceover_segments") or [])
+        if voice_segments:
+            try:
+                await _set_step_progress(session, step, detail="上传参考音频并执行 AI 导演重配音", progress=0.84)
+                audio_artifact = await _load_latest_artifact(session, job.id, "audio_wav")
+                storage = get_storage()
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    reference_audio_path = Path(tmpdir) / "director_reference.wav"
+                    await storage.async_download_file(audio_artifact.storage_path, reference_audio_path)
+                    voice_execution = await asyncio.to_thread(
+                        get_voice_provider().execute_dubbing,
+                        job_id=str(job.id),
+                        request=dict(plan.get("dubbing_request") or {}),
+                        reference_audio_path=reference_audio_path,
+                    )
+                plan["dubbing_execution"] = voice_execution
+                plan["voiceover_segments"] = _merge_execution_into_segments(
+                    voice_segments,
+                    voice_execution.get("segments") if voice_execution else None,
+                    media_key="audio",
+                )
+            except Exception as exc:
+                plan["dubbing_execution"] = {
+                    "provider": plan.get("voice_provider"),
+                    "status": "failed",
+                    "error": str(exc),
+                }
+        session.add(
+            Artifact(
+                job_id=job.id,
+                step_id=step.id,
+                artifact_type="ai_director_plan",
+                data_json=plan,
+            )
+        )
+        await _set_step_progress(session, step, detail="AI 导演建议已生成", progress=1.0)
+        await session.commit()
+        return {
+            "enabled": True,
+            "voiceover_segment_count": len(plan.get("voiceover_segments") or []),
+            "voice_provider": plan.get("voice_provider"),
+            "dubbing_status": (voice_execution or plan.get("dubbing_execution") or {}).get("status"),
+        }
+
+
+async def run_avatar_commentary(job_id: str) -> dict:
+    factory = get_session_factory()
+    async with factory() as session:
+        job = await session.get(Job, uuid.UUID(job_id))
+        step_result = await session.execute(
+            select(JobStep).where(JobStep.job_id == job.id, JobStep.step_name == "avatar_commentary")
+        )
+        step = step_result.scalar_one()
+
+        if not avatar_mode_enabled(getattr(job, "enhancement_modes", [])):
+            await _set_step_progress(session, step, detail="未启用数字人解说模式，跳过。", progress=1.0)
+            await session.commit()
+            return {"enabled": False, "skipped": True}
+
+        await _set_step_progress(session, step, detail="整理解说脚本和时间轴插槽", progress=0.2)
+        item_result = await session.execute(
+            select(SubtitleItem)
+            .where(SubtitleItem.job_id == job.id, SubtitleItem.version == 1)
+            .order_by(SubtitleItem.item_index)
+        )
+        subtitle_items = item_result.scalars().all()
+        subtitle_dicts = [
+            {
+                "index": item.item_index,
+                "start_time": item.start_time,
+                "end_time": item.end_time,
+                "text_raw": item.text_raw,
+                "text_norm": item.text_norm,
+                "text_final": item.text_final,
+            }
+            for item in subtitle_items
+        ]
+        profile_artifact = await _load_latest_optional_artifact(
+            session,
+            job_id=job.id,
+            artifact_types=_CONTENT_PROFILE_ARTIFACT_TYPES,
+        )
+        director_artifact = await _load_latest_optional_artifact(
+            session,
+            job_id=job.id,
+            artifact_types=("ai_director_plan",),
+        )
+        content_profile = profile_artifact.data_json if profile_artifact and profile_artifact.data_json else {}
+        ai_director_plan = director_artifact.data_json if director_artifact and director_artifact.data_json else {}
+
+        await _set_step_progress(session, step, detail="生成数字人解说分镜与 provider 请求体", progress=0.72)
+        plan = build_avatar_commentary_plan(
+            job_id=str(job.id),
+            source_name=job.source_name,
+            subtitle_items=subtitle_dicts,
+            content_profile=content_profile,
+            ai_director_plan=ai_director_plan,
+        )
+        packaging_config = dict((list_packaging_assets().get("config") or {}))
+        voice_execution: dict[str, Any] | None = None
+        render_execution: dict[str, Any] | None = None
+        avatar_segments = list(plan.get("segments") or [])
+        if plan.get("mode") == "full_track_audio_passthrough":
+            avatar_profile = _select_default_avatar_profile()
+            avatar_video_path = _pick_avatar_profile_speaking_video_path(avatar_profile)
+            if avatar_profile and avatar_video_path:
+                plan["integration_mode"] = "picture_in_picture"
+                plan["avatar_profile_id"] = str(avatar_profile.get("id") or "")
+                plan["avatar_profile_name"] = str(avatar_profile.get("display_name") or "")
+                plan["presenter_id"] = str(avatar_video_path)
+                plan["overlay_position"] = str(packaging_config.get("avatar_overlay_position") or "bottom_right")
+                plan["overlay_scale"] = float(
+                    packaging_config.get("avatar_overlay_scale") or plan.get("overlay_scale") or 0.28
+                )
+                plan["overlay_corner_radius"] = int(packaging_config.get("avatar_overlay_corner_radius") or 26)
+                plan["overlay_border_width"] = int(packaging_config.get("avatar_overlay_border_width") or 4)
+                plan["overlay_border_color"] = str(packaging_config.get("avatar_overlay_border_color") or "#F4E4B8")
+                plan["overlay_margin"] = 28
+            plan["dubbing_execution"] = {
+                "provider": "passthrough",
+                "status": "skipped",
+                "reason": "full_track_audio_passthrough",
+            }
+            plan["render_execution"] = {
+                "provider": plan.get("provider"),
+                "status": "deferred_to_render",
+                "reason": "full_track_audio_passthrough",
+            }
+        elif avatar_segments:
+            try:
+                await _set_step_progress(session, step, detail="为数字人段落生成配音", progress=0.82)
+                audio_artifact = await _load_latest_artifact(session, job.id, "audio_wav")
+                storage = get_storage()
+                avatar_dubbing_request = get_voice_provider().build_dubbing_request(
+                    job_id=str(job.id),
+                    segments=[
+                        {
+                            "segment_id": segment.get("segment_id"),
+                            "rewritten_text": segment.get("script"),
+                            "target_duration_sec": segment.get("duration_sec"),
+                            "purpose": segment.get("purpose"),
+                        }
+                        for segment in avatar_segments
+                    ],
+                    metadata={
+                        "source_name": job.source_name,
+                        "mode": "avatar_commentary",
+                    },
+                )
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    reference_audio_path = Path(tmpdir) / "avatar_reference.wav"
+                    await storage.async_download_file(audio_artifact.storage_path, reference_audio_path)
+                    voice_execution = await asyncio.to_thread(
+                        get_voice_provider().execute_dubbing,
+                        job_id=str(job.id),
+                        request=avatar_dubbing_request,
+                        reference_audio_path=reference_audio_path,
+                    )
+                plan["dubbing_request"] = avatar_dubbing_request
+                plan["dubbing_execution"] = voice_execution
+                plan["segments"] = _merge_execution_into_segments(
+                    avatar_segments,
+                    voice_execution.get("segments") if voice_execution else None,
+                    media_key="audio",
+                )
+            except Exception as exc:
+                plan["dubbing_execution"] = {
+                    "provider": get_settings().voice_provider,
+                    "status": "failed",
+                    "error": str(exc),
+                }
+
+        render_request = dict(plan.get("render_request") or {})
+        render_request["segments"] = list(plan.get("segments") or [])
+        if render_request.get("segments"):
+            try:
+                await _set_step_progress(session, step, detail="调用数字人 provider 生成解说画中画", progress=0.92)
+                render_execution = await asyncio.to_thread(
+                    get_avatar_provider().execute_render,
+                    job_id=str(job.id),
+                    request=render_request,
+                )
+                plan["render_execution"] = render_execution
+                plan["segments"] = _merge_execution_into_segments(
+                    list(plan.get("segments") or []),
+                    render_execution.get("segments") if render_execution else None,
+                    media_key="video",
+                )
+                plan["render_request"] = render_request
+            except Exception as exc:
+                plan["render_execution"] = {
+                    "provider": plan.get("provider"),
+                    "status": "failed",
+                    "error": str(exc),
+                }
+        session.add(
+            Artifact(
+                job_id=job.id,
+                step_id=step.id,
+                artifact_type="avatar_commentary_plan",
+                data_json=plan,
+            )
+        )
+        await _set_step_progress(session, step, detail="数字人解说计划已生成", progress=1.0)
+        await session.commit()
+        return {
+            "enabled": True,
+            "segment_count": len(plan.get("segments") or []),
+            "mode": plan.get("mode"),
+            "provider": plan.get("provider"),
+            "dubbing_status": (voice_execution or plan.get("dubbing_execution") or {}).get("status"),
+            "render_status": (render_execution or plan.get("render_execution") or {}).get("status"),
         }
 
 
@@ -880,6 +1275,16 @@ async def run_edit_plan(job_id: str) -> dict:
         )
         profile_artifact = _select_preferred_content_profile_artifact(profile_result.scalars().all())
         content_profile = profile_artifact.data_json if profile_artifact else None
+        ai_director_artifact = await _load_latest_optional_artifact(
+            session,
+            job_id=job.id,
+            artifact_types=("ai_director_plan",),
+        )
+        avatar_artifact = await _load_latest_optional_artifact(
+            session,
+            job_id=job.id,
+            artifact_types=("avatar_commentary_plan",),
+        )
 
         storage = get_storage()
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -924,6 +1329,8 @@ async def run_edit_plan(job_id: str) -> dict:
             editorial_timeline_id=editorial_timeline.id,
             workflow_preset=job.channel_profile or "unboxing_default",
             subtitle_style=str(packaging_plan.get("subtitle_style") or "bold_yellow_outline"),
+            subtitle_motion_style=str(packaging_plan.get("subtitle_motion_style") or "motion_static"),
+            smart_effect_style=str(packaging_plan.get("smart_effect_style") or "smart_effect_rhythm"),
             cover_style=(
                 None
                 if str(packaging_plan.get("cover_style") or "preset_default") == "preset_default"
@@ -935,10 +1342,14 @@ async def run_edit_plan(job_id: str) -> dict:
             insert=packaging_plan.get("insert"),
             watermark=packaging_plan.get("watermark"),
             music=packaging_plan.get("music"),
-            editing_accents=build_restrained_editing_accents(
+            editing_accents=build_smart_editing_accents(
                 keep_segments=keep_segments,
                 subtitle_items=remapped_subtitles,
+                style=str(packaging_plan.get("smart_effect_style") or "smart_effect_rhythm"),
             ),
+            creative_profile=_job_creative_profile(job),
+            ai_director_plan=ai_director_artifact.data_json if ai_director_artifact else None,
+            avatar_commentary_plan=avatar_artifact.data_json if avatar_artifact else None,
         )
         await save_render_plan(job.id, render_plan_dict, session)
 
@@ -950,7 +1361,7 @@ async def run_edit_plan(job_id: str) -> dict:
 async def run_render(job_id: str) -> dict:
     factory = get_session_factory()
     async with factory() as session:
-        from roughcut.db.models import RenderOutput, Timeline
+        from roughcut.db.models import RenderOutput
 
         job = await session.get(Job, uuid.UUID(job_id))
         step_result = await session.execute(
@@ -1060,6 +1471,84 @@ async def run_render(job_id: str) -> dict:
             subtitle_items=subtitle_dicts,
             debug_dir=debug_dir / "plain",
         )
+        keep_segments = [
+            s for s in editorial_timeline.data_json.get("segments", [])
+            if s.get("type") == "keep"
+        ]
+        remapped_subtitles = remap_subtitles_to_timeline(subtitle_dicts, keep_segments)
+        avatar_plan = render_plan_timeline.data_json.get("avatar_commentary") or {}
+        avatar_result: dict[str, Any] | None = None
+        packaged_source_path = tmp_plain_mp4
+        packaged_editorial_timeline = editorial_timeline.data_json
+        packaged_subtitle_items = subtitle_dicts
+        if (
+            "avatar_commentary" in set(getattr(job, "enhancement_modes", []) or [])
+            and str(avatar_plan.get("mode") or "") == "full_track_audio_passthrough"
+        ):
+            avatar_result = {
+                "enabled": True,
+                "status": "pending",
+                "mode": str(avatar_plan.get("mode") or ""),
+                "integration_mode": str(avatar_plan.get("integration_mode") or ""),
+                "provider": str(avatar_plan.get("provider") or ""),
+                "detail": "等待渲染阶段处理数字人口播。",
+            }
+            try:
+                avatar_rendered_path = await _render_full_track_avatar_video(
+                    job_id=str(job.id),
+                    avatar_plan=avatar_plan,
+                    source_plain_video_path=tmp_plain_mp4,
+                    debug_dir=debug_dir / "avatar_full_track",
+                )
+                if avatar_rendered_path is not None and avatar_rendered_path.exists():
+                    pip_output_path = Path(tmpdir) / "output_plain.avatar_pip.mp4"
+                    await _overlay_avatar_picture_in_picture(
+                        base_video_path=tmp_plain_mp4,
+                        avatar_video_path=avatar_rendered_path,
+                        output_path=pip_output_path,
+                        position=str(avatar_plan.get("overlay_position") or "bottom_right"),
+                        scale=float(avatar_plan.get("overlay_scale") or 0.28),
+                        margin=int(avatar_plan.get("overlay_margin") or 28),
+                        safe_margin_ratio=float(avatar_plan.get("safe_margin") or 0.08),
+                        corner_radius=int(avatar_plan.get("overlay_corner_radius") or 0),
+                        border_width=int(avatar_plan.get("overlay_border_width") or 0),
+                        border_color=str(avatar_plan.get("overlay_border_color") or "#F4E4B8"),
+                    )
+                    tmp_plain_mp4 = pip_output_path
+                    packaged_source_path = pip_output_path
+                    pip_duration = float((await probe(pip_output_path)).duration or 0.0)
+                    packaged_editorial_timeline = {
+                        "segments": [
+                            {
+                                "type": "keep",
+                                "start": 0.0,
+                                "end": pip_duration,
+                            }
+                        ]
+                    }
+                    packaged_subtitle_items = remapped_subtitles
+                    avatar_result = {
+                        **(avatar_result or {}),
+                        "status": "done",
+                        "detail": "数字人口播已作为画中画写入成片。",
+                        "profile_name": str(avatar_plan.get("avatar_profile_name") or ""),
+                        "output_path": str(pip_output_path),
+                    }
+                else:
+                    avatar_result = {
+                        **(avatar_result or {}),
+                        "status": "degraded",
+                        "reason": "missing_avatar_render",
+                        "detail": "没有拿到可用数字人视频，已自动回退普通成片。",
+                    }
+            except Exception as exc:
+                logger.exception("Avatar overlay degraded to plain render for job %s", job_id)
+                avatar_result = {
+                    **(avatar_result or {}),
+                    "status": "degraded",
+                    "reason": "avatar_render_failed",
+                    "detail": f"数字人渲染失败，已自动回退普通成片：{exc}",
+                }
         async with get_session_factory()() as session:
             step_result = await session.execute(
                 select(JobStep).where(JobStep.job_id == uuid.UUID(job_id), JobStep.step_name == "render")
@@ -1077,11 +1566,11 @@ async def run_render(job_id: str) -> dict:
                 render_output.progress = 0.55
                 await session.commit()
         await render_video(
-            source_path=source_path,
+            source_path=packaged_source_path,
             render_plan=render_plan_timeline.data_json,
-            editorial_timeline=editorial_timeline.data_json,
+            editorial_timeline=packaged_editorial_timeline,
             output_path=tmp_packaged_mp4,
-            subtitle_items=subtitle_dicts,
+            subtitle_items=packaged_subtitle_items,
             debug_dir=debug_dir / "packaged",
         )
         import shutil
@@ -1100,11 +1589,6 @@ async def run_render(job_id: str) -> dict:
                 await session.commit()
 
         # Write SRT with remapped timestamps (matches the edited video)
-        keep_segments = [
-            s for s in editorial_timeline.data_json.get("segments", [])
-            if s.get("type") == "keep"
-        ]
-        remapped_subtitles = remap_subtitles_to_timeline(subtitle_dicts, keep_segments)
         packaged_subtitles = await _map_subtitles_to_packaged_timeline(
             remapped_subtitles,
             render_plan_timeline.data_json,
@@ -1112,11 +1596,12 @@ async def run_render(job_id: str) -> dict:
         write_srt_file(packaged_subtitles, local_packaged_srt)
         write_srt_file(remapped_subtitles, local_plain_srt)
 
-        # Extract cover frame: use 10% into video duration for a representative shot
+        # Extract cover frame from the plain render so burned subtitles never leak into thumbnails.
         try:
             meta_result = await _get_cover_seek(job.id, tmpdir)
+            cover_source_path = _select_cover_source_video(tmp_plain_mp4, tmp_packaged_mp4)
             cover_variants = await extract_cover_frame(
-                tmp_packaged_mp4,
+                cover_source_path,
                 local_cover,
                 seek_sec=meta_result,
                 content_profile=content_profile,
@@ -1176,6 +1661,7 @@ async def run_render(job_id: str) -> dict:
                     "cover": str(local_cover) if local_cover else None,
                     "cover_variants": [str(path) for path in cover_variants] if local_cover else [],
                     "cover_selection": cover_selection,
+                    "avatar_result": avatar_result,
                 },
             )
         )
@@ -1253,10 +1739,16 @@ async def run_platform_package(job_id: str) -> dict:
         if not render_output or not render_output.output_path:
             raise ValueError("Rendered output not found; platform package requires a finished render")
 
+    packaging_config = (list_packaging_assets().get("config") or {})
     packaging = await generate_platform_packaging(
         source_name=job.source_name,
         content_profile=content_profile,
         subtitle_items=subtitle_dicts,
+        copy_style=str(
+            packaging_config.get("copy_style")
+            or (content_profile or {}).get("copy_style")
+            or "attention_grabbing"
+        ),
     )
 
     output_mp4 = Path(render_output.output_path)
@@ -1286,9 +1778,10 @@ async def run_platform_package(job_id: str) -> dict:
 async def _get_cover_seek(job_id, tmpdir: str) -> float:
     """
     Determine a good seek time for cover frame extraction.
-    Uses ~10% of video duration, with 5s minimum and 30s maximum.
-    Falls back to 5.0s if no media_meta artifact found.
+    Uses ~18% of video duration, with 6s minimum and 45s maximum.
+    Falls back to 6.0s if no media_meta artifact found.
     """
+    del tmpdir
     factory = get_session_factory()
     async with factory() as session:
         try:
@@ -1297,9 +1790,15 @@ async def _get_cover_seek(job_id, tmpdir: str) -> float:
             artifact = None
         if artifact and artifact.data_json:
             duration = artifact.data_json.get("duration", 60.0)
-            seek = max(5.0, min(30.0, duration * 0.10))
+            seek = max(6.0, min(45.0, duration * 0.18))
             return round(seek, 1)
-    return 5.0
+    return 6.0
+
+
+def _select_cover_source_video(plain_video_path: Path, packaged_video_path: Path) -> Path:
+    if plain_video_path.exists():
+        return plain_video_path
+    return packaged_video_path
 
 
 def _subtitle_text(item: dict[str, Any]) -> str:
@@ -1560,11 +2059,183 @@ async def _map_subtitles_to_packaged_timeline(
     return mapped
 
 
+async def _render_full_track_avatar_video(
+    *,
+    job_id: str,
+    avatar_plan: dict[str, Any],
+    source_plain_video_path: Path,
+    debug_dir: Path | None,
+) -> Path | None:
+    presenter_id = str(avatar_plan.get("presenter_id") or "").strip()
+    if not presenter_id:
+        return None
+
+    audio_drive_path = source_plain_video_path.with_name(f"{source_plain_video_path.stem}.avatar_drive.wav")
+    await extract_audio(source_plain_video_path, audio_drive_path)
+    duration = float((await probe(source_plain_video_path)).duration or 0.0)
+    if duration <= 0:
+        return None
+
+    render_request = {
+        "provider": avatar_plan.get("provider") or get_settings().avatar_provider,
+        "base_url": get_settings().avatar_api_base_url.rstrip("/"),
+        "submit_endpoint": get_settings().avatar_api_base_url.rstrip("/") + "/easy/submit",
+        "query_endpoint": get_settings().avatar_api_base_url.rstrip("/") + "/easy/query",
+        "job_id": job_id,
+        "presenter_id": presenter_id,
+        "layout_template": avatar_plan.get("layout_template") or get_settings().avatar_layout_template,
+        "segments": [
+            {
+                "segment_id": "avatar_full_track",
+                "script": "",
+                "start_time": 0.0,
+                "duration_sec": round(duration, 3),
+                "audio_url": str(audio_drive_path),
+            }
+        ],
+    }
+    render_execution = await asyncio.to_thread(
+        get_avatar_provider().execute_render,
+        job_id=job_id,
+        request=render_request,
+    )
+    segments = list(render_execution.get("segments") or [])
+    result_path = Path(str((segments[0] or {}).get("local_result_path") or "")) if segments else Path()
+    if not result_path.exists():
+        if debug_dir is not None:
+            debug_dir.mkdir(parents=True, exist_ok=True)
+            (debug_dir / "avatar.render_execution.json").write_text(
+                json.dumps(render_execution, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        return None
+    return result_path
+
+
+async def _overlay_avatar_picture_in_picture(
+    *,
+    base_video_path: Path,
+    avatar_video_path: Path,
+    output_path: Path,
+    position: str,
+    scale: float,
+    margin: int,
+    safe_margin_ratio: float = 0.08,
+    corner_radius: int = 0,
+    border_width: int = 0,
+    border_color: str = "#F4E4B8",
+) -> Path:
+    base_probe = await probe(base_video_path)
+    base_width = max(1, int(getattr(base_probe, "width", 0) or 0))
+    base_height = max(1, int(getattr(base_probe, "height", 0) or 0))
+    if base_width <= 1:
+        raise RuntimeError("Unable to determine base video width for avatar picture-in-picture overlay")
+    avatar_probe = await probe(avatar_video_path)
+    avatar_width = max(1, int(getattr(avatar_probe, "width", 0) or 1))
+    avatar_height = max(1, int(getattr(avatar_probe, "height", 0) or 1))
+
+    overlay_width = max(180, int(round(base_width * max(0.12, min(scale, 0.45)))))
+    overlay_height = max(180, int(round(overlay_width * (avatar_height / avatar_width))))
+    resolved_margin = max(margin, int(round(min(base_width, base_height) * max(0.02, min(safe_margin_ratio, 0.2)))))
+    resolved_border_width = max(0, min(12, int(border_width)))
+    frame_width = overlay_width + resolved_border_width * 2
+    frame_height = overlay_height + resolved_border_width * 2
+    resolved_corner_radius = max(0, min(int(corner_radius), min(frame_width, frame_height) // 2))
+    safe_border_color = str(border_color or "#F4E4B8").strip()
+    if not safe_border_color.startswith("#"):
+        safe_border_color = f"#{safe_border_color}"
+    border_rgb = f"0x{safe_border_color.lstrip('#')}"
+    position_map = {
+        "top_left": (str(resolved_margin), str(resolved_margin)),
+        "top_right": (f"main_w-overlay_w-{resolved_margin}", str(resolved_margin)),
+        "bottom_left": (str(resolved_margin), f"main_h-overlay_h-{resolved_margin}"),
+        "bottom_right": (f"main_w-overlay_w-{resolved_margin}", f"main_h-overlay_h-{resolved_margin}"),
+    }
+    overlay_x, overlay_y = position_map.get(position, position_map["bottom_right"])
+
+    if resolved_corner_radius > 0:
+        avatar_radius = max(0, resolved_corner_radius - resolved_border_width)
+        frame_mask = (
+            f"if(lte(pow(max(abs(X-W/2)-(W/2-{resolved_corner_radius}),0),2)"
+            f"+pow(max(abs(Y-H/2)-(H/2-{resolved_corner_radius}),0),2),pow({resolved_corner_radius},2)),255,0)"
+        )
+        avatar_mask = (
+            f"if(lte(pow(max(abs(X-W/2)-(W/2-{avatar_radius}),0),2)"
+            f"+pow(max(abs(Y-H/2)-(H/2-{avatar_radius}),0),2),pow({avatar_radius},2)),255,0)"
+        )
+        filter_chain = (
+            f"color=c={border_rgb}:s={frame_width}x{frame_height},format=rgba,"
+            f"geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='{frame_mask}'[pipbg];"
+            f"[1:v]scale={overlay_width}:{overlay_height},format=rgba,"
+            f"geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='{avatar_mask}'[pipfg];"
+            f"[pipbg][pipfg]overlay={resolved_border_width}:{resolved_border_width}:format=auto[pip];"
+            f"[0:v][pip]overlay=x={overlay_x}:y={overlay_y}:eof_action=pass:format=auto[vout]"
+        )
+    else:
+        filter_chain = (
+            f"[1:v]scale={overlay_width}:{overlay_height},format=rgba[pip];"
+            f"[0:v][pip]overlay=x={overlay_x}:y={overlay_y}:eof_action=pass:format=auto[vout]"
+        )
+
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        str(base_video_path),
+        "-i",
+        str(avatar_video_path),
+        "-filter_complex",
+        filter_chain,
+        "-map",
+        "[vout]",
+        "-map",
+        "0:a:0",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "fast",
+        "-crf",
+        "18",
+        "-c:a",
+        "copy",
+        str(output_path),
+    ]
+    result = await asyncio.to_thread(
+        subprocess.run,
+        cmd,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="ignore",
+        check=False,
+        timeout=get_settings().ffmpeg_timeout_sec,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"ffmpeg avatar picture-in-picture overlay failed: {result.stderr[-2000:]}")
+    return output_path
+
+
 async def _probe_media_duration(path: Path) -> float:
     try:
         return max(0.0, float((await probe(path)).duration or 0.0))
     except Exception:
         return 0.0
+
+
+async def _wait_for_media_ready(path: Path, *, timeout_sec: float = 20.0) -> Path:
+    started = time.monotonic()
+    last_error: Exception | None = None
+    while time.monotonic() - started < timeout_sec:
+        if path.exists() and path.stat().st_size > 0:
+            try:
+                await probe(path)
+                return path
+            except Exception as exc:
+                last_error = exc
+        await asyncio.sleep(0.5)
+    if last_error is not None:
+        raise last_error
+    raise FileNotFoundError(path)
 
 
 def _shift_subtitles_for_insert(
@@ -1596,6 +2267,41 @@ def _shift_subtitles_for_insert(
         tail["end_time"] = end_time + insert_duration
         shifted.extend([head, tail])
     return shifted
+
+
+def _select_default_avatar_profile() -> dict[str, Any] | None:
+    profiles = list_avatar_material_profiles()
+    if not profiles:
+        return None
+    candidates = []
+    for profile in profiles:
+        files = list(profile.get("files") or [])
+        has_speaking_video = any(str(item.get("role") or "") == "speaking_video" for item in files)
+        if not has_speaking_video:
+            continue
+        capability = profile.get("capability_status") or {}
+        score = 0
+        if str(capability.get("preview") or "") == "ready":
+            score += 2
+        if str(capability.get("heygem_avatar") or "") == "ready":
+            score += 1
+        candidates.append((score, str(profile.get("created_at") or ""), profile))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    return candidates[0][2]
+
+
+def _pick_avatar_profile_speaking_video_path(profile: dict[str, Any] | None) -> Path | None:
+    if not profile:
+        return None
+    for file_record in profile.get("files") or []:
+        if str(file_record.get("role") or "") != "speaking_video":
+            continue
+        path = Path(str(file_record.get("path") or ""))
+        if path.exists():
+            return path
+    return None
 
 
 def _hash_file(path: Path, chunk_size: int = 65536) -> str:
@@ -1650,6 +2356,8 @@ def run_step_sync(step_name: str, job_id: str) -> dict:
         "subtitle_postprocess": run_subtitle_postprocess,
         "content_profile": run_content_profile,
         "glossary_review": run_glossary_review,
+        "ai_director": run_ai_director,
+        "avatar_commentary": run_avatar_commentary,
         "edit_plan": run_edit_plan,
         "render": run_render,
         "platform_package": run_platform_package,

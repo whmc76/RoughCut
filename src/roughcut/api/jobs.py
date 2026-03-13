@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import os
 import subprocess
 import sys
@@ -28,6 +27,8 @@ from roughcut.api.schemas import (
     ReviewApplyRequest,
 )
 from roughcut.config import get_settings
+from roughcut.config import apply_runtime_overrides
+from roughcut.creative.modes import normalize_enhancement_modes, normalize_workflow_mode
 from roughcut.db.models import (
     Artifact,
     ContentProfileCorrection,
@@ -69,6 +70,8 @@ STEP_LABELS = {
     "content_profile": "内容摘要",
     "summary_review": "信息核对",
     "glossary_review": "术语纠错",
+    "ai_director": "AI导演",
+    "avatar_commentary": "数字人解说",
     "edit_plan": "剪辑决策",
     "render": "渲染输出",
     "platform_package": "平台文案",
@@ -90,7 +93,7 @@ async def list_jobs(
     result = await session.execute(
         select(Job)
         .options(selectinload(Job.steps), selectinload(Job.artifacts))
-        .order_by(Job.created_at.desc())
+        .order_by(Job.updated_at.desc(), Job.created_at.desc())
         .limit(limit)
         .offset(offset)
     )
@@ -104,12 +107,18 @@ async def create_job(
     file: UploadFile = File(...),
     language: str = Form("zh-CN"),
     channel_profile: str | None = Form(None),
+    workflow_mode: str | None = Form(None),
+    enhancement_modes: list[str] | None = Form(None),
     session: AsyncSession = Depends(get_session),
 ):
     settings = get_settings()
     try:
         language = normalize_job_language(language)
         channel_profile = normalize_channel_profile(channel_profile)
+        workflow_mode = normalize_workflow_mode(workflow_mode or settings.default_job_workflow_mode)
+        enhancement_modes = normalize_enhancement_modes(
+            enhancement_modes if enhancement_modes is not None else settings.default_job_enhancement_modes,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -146,6 +155,8 @@ async def create_job(
             status="pending",
             language=language,
             channel_profile=channel_profile,
+            workflow_mode=workflow_mode,
+            enhancement_modes=enhancement_modes,
         )
         session.add(job)
 
@@ -226,8 +237,8 @@ async def restart_job(job_id: uuid.UUID, session: AsyncSession = Depends(get_ses
     job = result.scalar_one_or_none()
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    if job.status not in {"cancelled", "failed"}:
-        raise HTTPException(status_code=409, detail="Only cancelled or failed jobs can be restarted")
+    if job.status not in {"done", "cancelled", "failed"}:
+        raise HTTPException(status_code=409, detail="Only completed, cancelled, or failed jobs can be restarted")
 
     _revoke_running_steps(job.steps or [])
     await _clear_job_runtime_state(job_id, session)
@@ -249,6 +260,22 @@ async def restart_job(job_id: uuid.UUID, session: AsyncSession = Depends(get_ses
     await session.refresh(job)
     _attach_job_preview(job)
     return job
+
+
+@router.delete("/{job_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_job(job_id: uuid.UUID, session: AsyncSession = Depends(get_session)):
+    result = await session.execute(
+        select(Job).options(selectinload(Job.steps), selectinload(Job.artifacts)).where(Job.id == job_id)
+    )
+    job = result.scalar_one_or_none()
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    _revoke_running_steps(job.steps or [])
+    await _clear_job_runtime_state(job_id, session)
+    await session.execute(delete(JobStep).where(JobStep.job_id == job_id))
+    await session.execute(delete(Job).where(Job.id == job_id))
+    await session.commit()
 
 
 @router.get("/{job_id}/report", response_model=ReportOut)
@@ -303,6 +330,8 @@ async def get_content_profile(job_id: uuid.UUID, session: AsyncSession = Depends
         job_id=str(job_id),
         status=job.status,
         review_step_status=review_step.status if review_step else "pending",
+        workflow_mode=str(getattr(job, "workflow_mode", "") or "standard_edit"),
+        enhancement_modes=list(getattr(job, "enhancement_modes", []) or []),
         draft=draft,
         final=final,
         memory=memory,
@@ -418,6 +447,8 @@ async def confirm_content_profile(
         raise HTTPException(status_code=404, detail="Content profile draft not found")
 
     user_feedback = body.model_dump(exclude_none=True)
+    workflow_mode = str(user_feedback.pop("workflow_mode", "") or getattr(job, "workflow_mode", "standard_edit"))
+    enhancement_modes = list(user_feedback.pop("enhancement_modes", None) or getattr(job, "enhancement_modes", []) or [])
     final_profile = await apply_content_profile_feedback(
         draft_profile=draft_artifact.data_json or {},
         source_name=job.source_name,
@@ -450,9 +481,17 @@ async def confirm_content_profile(
         user_feedback=user_feedback,
     )
 
+    job.workflow_mode = normalize_workflow_mode(workflow_mode)
+    job.enhancement_modes = normalize_enhancement_modes(enhancement_modes)
     job.status = "processing"
     job.updated_at = datetime.now(timezone.utc)
     await session.flush()
+    apply_runtime_overrides(
+        {
+            "default_job_workflow_mode": job.workflow_mode,
+            "default_job_enhancement_modes": list(job.enhancement_modes or []),
+        }
+    )
     user_memory = await load_content_profile_user_memory(session, channel_profile=job.channel_profile)
     memory = dict(user_memory or {})
     memory["cloud"] = build_content_profile_memory_cloud(user_memory)
@@ -462,6 +501,8 @@ async def confirm_content_profile(
         job_id=str(job_id),
         status=job.status,
         review_step_status=review_step.status if review_step else "done",
+        workflow_mode=job.workflow_mode,
+        enhancement_modes=list(job.enhancement_modes or []),
         draft=draft_artifact.data_json,
         final=final_profile,
         memory=memory,
@@ -635,6 +676,9 @@ async def get_job_activity(job_id: uuid.UUID, session: AsyncSession = Depends(ge
                     "content_profile_draft",
                     "content_profile_final",
                     "content_profile",
+                    "ai_director_plan",
+                    "avatar_commentary_plan",
+                    "render_outputs",
                     "platform_packaging_md",
                 ]
             ),
@@ -734,6 +778,8 @@ def _build_activity_decisions(
     render_output: RenderOutput | None,
 ) -> list[dict]:
     decisions: list[dict] = []
+    render_outputs_artifact = next((artifact for artifact in artifacts if artifact.artifact_type == "render_outputs"), None)
+    render_outputs = render_outputs_artifact.data_json if render_outputs_artifact and render_outputs_artifact.data_json else {}
 
     profile = next(
         (
@@ -810,6 +856,36 @@ def _build_activity_decisions(
                 "summary": f"成片输出进度 {round(float(render_output.progress or 0.0) * 100)}%",
                 "detail": render_output.output_path or "正在生成输出文件",
                 "updated_at": _iso_or_none(render_output.created_at),
+            }
+        )
+
+    ai_director = next((artifact for artifact in artifacts if artifact.artifact_type == "ai_director_plan"), None)
+    if ai_director and ai_director.data_json:
+        plan = ai_director.data_json
+        decisions.append(
+            {
+                "kind": "ai_director",
+                "title": "AI导演",
+                "status": "done",
+                "summary": f"生成 {len(plan.get('voiceover_segments') or [])} 段导演重配音建议",
+                "detail": str(plan.get("opening_hook") or plan.get("bridge_line") or "已输出导演建议稿"),
+                "updated_at": _iso_or_none(ai_director.created_at),
+            }
+        )
+
+    avatar_plan = next((artifact for artifact in artifacts if artifact.artifact_type == "avatar_commentary_plan"), None)
+    if avatar_plan and avatar_plan.data_json:
+        plan = avatar_plan.data_json
+        avatar_result = render_outputs.get("avatar_result") if isinstance(render_outputs, dict) else None
+        avatar_status = _resolve_avatar_activity_status(plan, avatar_result)
+        decisions.append(
+            {
+                "kind": "avatar_commentary",
+                "title": "数字人解说",
+                "status": avatar_status["status"],
+                "summary": avatar_status["summary"],
+                "detail": avatar_status["detail"],
+                "updated_at": avatar_status["updated_at"] or _iso_or_none(avatar_plan.created_at),
             }
         )
 
@@ -951,7 +1027,75 @@ def _artifact_event_summary(artifact: Artifact) -> dict | None:
             "title": "平台文案已生成",
             "detail": artifact.storage_path or "发布文案已写入 Markdown",
         }
+    if artifact.artifact_type == "ai_director_plan":
+        return {
+            "title": "AI 导演建议已生成",
+            "detail": str(data.get("opening_hook") or "已输出改写与重配音计划"),
+        }
+    if artifact.artifact_type == "avatar_commentary_plan":
+        return {
+            "title": "数字人解说计划已生成",
+            "detail": f"{len(data.get('segments') or [])} 段解说位待渲染",
+        }
+    if artifact.artifact_type == "render_outputs":
+        avatar_result = data.get("avatar_result") if isinstance(data, dict) else None
+        if isinstance(avatar_result, dict) and avatar_result.get("status"):
+            return {
+                "title": "数字人成片结果已回写",
+                "detail": str(avatar_result.get("detail") or avatar_result.get("status") or "数字人结果已更新"),
+            }
     return None
+
+
+def _resolve_avatar_activity_status(
+    plan: dict,
+    avatar_result: dict | None,
+) -> dict[str, str | None]:
+    if avatar_result:
+        status_value = str(avatar_result.get("status") or "").strip().lower()
+        if status_value == "done":
+            summary = "数字人口播已合成进成片"
+            detail = str(
+                avatar_result.get("detail")
+                or avatar_result.get("profile_name")
+                or plan.get("layout_template")
+                or plan.get("provider")
+                or "数字人画中画已完成"
+            )
+            return {"status": "done", "summary": summary, "detail": detail, "updated_at": None}
+        if status_value in {"degraded", "failed"}:
+            summary = "数字人未写入成片，已回退普通成片"
+            detail = str(
+                avatar_result.get("detail")
+                or avatar_result.get("reason")
+                or plan.get("provider")
+                or "数字人渲染失败，已自动降级"
+            )
+            return {"status": "failed", "summary": summary, "detail": detail, "updated_at": None}
+
+    render_execution = plan.get("render_execution") if isinstance(plan, dict) else None
+    render_status = str((render_execution or {}).get("status") or "").strip().lower()
+    if render_status in {"success", "partial"}:
+        return {
+            "status": "done",
+            "summary": "数字人素材已生成，等待合成进成片",
+            "detail": str(plan.get("layout_template") or plan.get("provider") or "数字人素材已准备完成"),
+            "updated_at": None,
+        }
+    if render_status in {"failed"}:
+        return {
+            "status": "failed",
+            "summary": "数字人素材生成失败",
+            "detail": str((render_execution or {}).get("error") or plan.get("provider") or "数字人生成失败"),
+            "updated_at": None,
+        }
+
+    return {
+        "status": "done",
+        "summary": f"规划 {len(plan.get('segments') or [])} 段数字人口播插入位",
+        "detail": str(plan.get("layout_template") or plan.get("provider") or "已生成数字人解说计划"),
+        "updated_at": None,
+    }
 
 
 def _step_elapsed_seconds(step: JobStep) -> float | None:
@@ -1014,6 +1158,29 @@ def _attach_job_preview(job: Job) -> None:
     preview = _resolve_job_content_preview(job.artifacts or [])
     job.content_subject = preview["subject"]
     job.content_summary = preview["summary"]
+    avatar_preview = _resolve_job_avatar_preview(job)
+    job.avatar_delivery_status = avatar_preview["status"]
+    job.avatar_delivery_summary = avatar_preview["summary"]
+    job.progress_percent = _calculate_job_progress_percent(job)
+
+
+def _calculate_job_progress_percent(job: Job) -> int:
+    steps = list(job.steps or [])
+    if not steps:
+        return 0
+
+    total = len(steps)
+    done_count = sum(1 for step in steps if step.status in {"done", "skipped"})
+    running_count = sum(1 for step in steps if step.status == "running")
+    base_progress = done_count / total
+    running_bonus = (0.5 / total) if running_count else 0.0
+    progress = max(0.0, min(1.0, base_progress + running_bonus))
+
+    if job.status == "done":
+        return 100
+    if job.status in {"failed", "cancelled"}:
+        return round(base_progress * 100)
+    return round(progress * 100)
 
 
 def _resolve_job_content_preview(artifacts: list[Artifact]) -> dict[str, str | None]:
@@ -1035,6 +1202,53 @@ def _resolve_job_content_preview(artifacts: list[Artifact]) -> dict[str, str | N
     subject = " · ".join(part for part in subject_parts if part).strip() or None
     summary = str(data.get("summary") or data.get("hook_line") or "").strip() or None
     return {"subject": subject, "summary": summary}
+
+
+def _resolve_job_avatar_preview(job: Job) -> dict[str, str | None]:
+    enabled_modes = set(getattr(job, "enhancement_modes", []) or [])
+    if "avatar_commentary" not in enabled_modes:
+        return {"status": None, "summary": None}
+
+    artifacts = list(job.artifacts or [])
+    render_outputs_artifact = next(
+        (artifact for artifact in artifacts if artifact.artifact_type == "render_outputs" and artifact.data_json),
+        None,
+    )
+    render_outputs = render_outputs_artifact.data_json if render_outputs_artifact else {}
+    avatar_result = render_outputs.get("avatar_result") if isinstance(render_outputs, dict) else None
+    if isinstance(avatar_result, dict):
+        status = str(avatar_result.get("status") or "").strip().lower()
+        if status == "done":
+            return {
+                "status": "done",
+                "summary": str(avatar_result.get("detail") or "数字人口播已写入成片"),
+            }
+        if status in {"degraded", "failed"}:
+            return {
+                "status": "failed",
+                "summary": str(avatar_result.get("detail") or "数字人未写入成片，已回退普通成片"),
+            }
+
+    avatar_plan = next(
+        (artifact for artifact in artifacts if artifact.artifact_type == "avatar_commentary_plan" and artifact.data_json),
+        None,
+    )
+    if avatar_plan is None:
+        if job.status in {"failed", "cancelled"}:
+            return {"status": "failed", "summary": "数字人流程未完成"}
+        return {"status": "pending", "summary": "等待生成数字人计划"}
+
+    plan = avatar_plan.data_json or {}
+    render_execution = plan.get("render_execution") if isinstance(plan, dict) else None
+    render_status = str((render_execution or {}).get("status") or "").strip().lower()
+    if render_status in {"success", "partial"}:
+        return {"status": "running", "summary": "数字人素材已生成，等待合成进成片"}
+    if render_status == "failed":
+        return {
+            "status": "failed",
+            "summary": str((render_execution or {}).get("error") or "数字人素材生成失败"),
+        }
+    return {"status": "running", "summary": "数字人计划已生成，等待渲染落地"}
 
 
 def _select_preview_artifact(artifacts: list[Artifact]) -> Artifact | None:

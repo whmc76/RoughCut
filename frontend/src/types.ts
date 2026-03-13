@@ -13,11 +13,16 @@ export type Job = {
   source_name: string;
   content_subject?: string | null;
   content_summary?: string | null;
+  avatar_delivery_status?: string | null;
+  avatar_delivery_summary?: string | null;
   status: string;
   language: string;
   channel_profile?: string | null;
+  workflow_mode: string;
+  enhancement_modes: string[];
   file_hash?: string | null;
   error_message?: string | null;
+  progress_percent?: number;
   created_at: string;
   updated_at: string;
   steps: JobStep[];
@@ -72,6 +77,20 @@ export type GlossaryTerm = {
   created_at: string;
 };
 
+export type BuiltinGlossaryTerm = {
+  correct_form: string;
+  wrong_forms: string[];
+  category?: string | null;
+  context_hint?: string | null;
+};
+
+export type BuiltinGlossaryPack = {
+  domain: string;
+  presets: string[];
+  term_count: number;
+  terms: BuiltinGlossaryTerm[];
+};
+
 export type WatchRoot = {
   id: string;
   path: string;
@@ -120,6 +139,17 @@ export type WatchInventoryStatus = {
   };
 };
 
+export type WatchInventorySmartMergeGroup = {
+  relative_paths: string[];
+  score: number;
+  reasons: string[];
+};
+
+export type WatchInventorySmartMerge = {
+  source_count: number;
+  groups: WatchInventorySmartMergeGroup[];
+};
+
 export type PackagingAsset = {
   id: string;
   asset_type: string;
@@ -128,6 +158,7 @@ export type PackagingAsset = {
   path: string;
   size_bytes: number;
   content_type: string;
+  watermark_preprocessed?: boolean | null;
   created_at: string;
 };
 
@@ -143,12 +174,20 @@ export type PackagingConfig = {
   music_selection_mode: string;
   music_loop_mode: string;
   subtitle_style: string;
+  subtitle_motion_style: string;
+  smart_effect_style: string;
   cover_style: string;
   title_style: string;
+  copy_style: string;
   music_volume: number;
   watermark_position: string;
   watermark_opacity: number;
   watermark_scale: number;
+  avatar_overlay_position: string;
+  avatar_overlay_scale: number;
+  avatar_overlay_corner_radius: number;
+  avatar_overlay_border_width: number;
+  avatar_overlay_border_color: string;
   enabled: boolean;
 };
 
@@ -157,10 +196,86 @@ export type PackagingLibrary = {
   config: PackagingConfig;
 };
 
+export type AvatarMaterialRule = {
+  severity: string;
+  title: string;
+  detail: string;
+};
+
+export type AvatarMaterialSection = {
+  title: string;
+  rules: AvatarMaterialRule[];
+};
+
+export type AvatarMaterialFile = {
+  id: string;
+  original_name: string;
+  stored_name: string;
+  kind: string;
+  role: string;
+  role_label: string;
+  pipeline_target: string;
+  content_type: string;
+  size_bytes: number;
+  path: string;
+  created_at: string;
+  probe?: Record<string, unknown> | null;
+  artifacts?: Record<string, unknown> | null;
+  checks: Array<{ level: string; message: string }>;
+};
+
+export type AvatarMaterialPreviewRun = {
+  id: string;
+  status: string;
+  script: string;
+  task_code?: string | null;
+  source_voice_file_id?: string | null;
+  source_video_file_id?: string | null;
+  output_path?: string | null;
+  output_size_bytes?: number | null;
+  duration_sec?: number | null;
+  width?: number | null;
+  height?: number | null;
+  preview_mode?: string | null;
+  fallback_reason?: string | null;
+  error_message?: string | null;
+  created_at: string;
+};
+
+export type AvatarMaterialProfile = {
+  id: string;
+  display_name: string;
+  presenter_alias?: string | null;
+  notes?: string | null;
+  profile_dir: string;
+  training_status: string;
+  training_provider: string;
+  training_api_available: boolean;
+  next_action: string;
+  capability_status: Record<string, string>;
+  blocking_issues: string[];
+  warnings: string[];
+  created_at: string;
+  files: AvatarMaterialFile[];
+  preview_runs: AvatarMaterialPreviewRun[];
+};
+
+export type AvatarMaterialLibrary = {
+  provider: string;
+  training_api_available: boolean;
+  preview_service_available?: boolean;
+  intake_mode: string;
+  summary: string;
+  sections: AvatarMaterialSection[];
+  profiles: AvatarMaterialProfile[];
+};
+
 export type ContentProfileReview = {
   job_id: string;
   status: string;
   review_step_status: string;
+  workflow_mode: string;
+  enhancement_modes: string[];
   draft: Record<string, any> | null;
   final: Record<string, any> | null;
   memory: Record<string, any> | null;
@@ -214,6 +329,20 @@ export type SelectOption = {
   label: string;
 };
 
+export type CreativeModeDefinition = {
+  key: string;
+  kind: "workflow" | "enhancement";
+  status: string;
+  title: string;
+  tagline: string;
+  summary: string;
+  suitable_for: string[];
+  pipeline_outline: string[];
+  providers?: string[];
+  delivery_scope?: string;
+  default_delivery?: string;
+};
+
 export type Config = {
   transcription_provider: string;
   transcription_model: string;
@@ -230,10 +359,23 @@ export type Config = {
   openai_base_url: string;
   openai_auth_mode: string;
   openai_api_key_helper: string;
+  avatar_provider: string;
+  avatar_api_base_url: string;
+  avatar_training_api_base_url: string;
+  avatar_api_key_set: boolean;
+  avatar_presenter_id: string;
+  avatar_layout_template: string;
+  avatar_safe_margin: number;
+  avatar_overlay_scale: number;
   anthropic_base_url: string;
   anthropic_auth_mode: string;
   anthropic_api_key_helper: string;
   minimax_base_url: string;
+  voice_provider: string;
+  voice_clone_api_base_url: string;
+  voice_clone_api_key_set: boolean;
+  voice_clone_voice_id: string;
+  director_rewrite_strength: number;
   ollama_api_key_set: boolean;
   openai_api_key_set: boolean;
   anthropic_api_key_set: boolean;
@@ -244,6 +386,8 @@ export type Config = {
   ffmpeg_timeout_sec: number;
   allowed_extensions: string[];
   output_dir: string;
+  default_job_workflow_mode: string;
+  default_job_enhancement_modes: string[];
   fact_check_enabled: boolean;
   auto_confirm_content_profile: boolean;
   content_profile_review_threshold: number;
@@ -259,6 +403,14 @@ export type Config = {
 export type ConfigOptions = {
   job_languages: SelectOption[];
   channel_profiles: SelectOption[];
+  workflow_modes: SelectOption[];
+  enhancement_modes: SelectOption[];
+  avatar_providers: SelectOption[];
+  voice_providers: SelectOption[];
+  creative_mode_catalog: {
+    workflow_modes: CreativeModeDefinition[];
+    enhancement_modes: CreativeModeDefinition[];
+  };
   transcription_models: Record<string, string[]>;
   multimodal_fallback_providers: SelectOption[];
   search_providers: SelectOption[];

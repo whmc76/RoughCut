@@ -6,6 +6,11 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from roughcut.creative.modes import (
+    DEFAULT_WORKFLOW_MODE,
+    normalize_enhancement_modes,
+    normalize_workflow_mode,
+)
 from roughcut.api.options import normalize_channel_profile, normalize_job_language
 
 
@@ -14,6 +19,8 @@ from roughcut.api.options import normalize_channel_profile, normalize_job_langua
 class JobCreate(BaseModel):
     language: str = "zh-CN"
     channel_profile: str | None = None
+    workflow_mode: str = DEFAULT_WORKFLOW_MODE
+    enhancement_modes: list[str] = Field(default_factory=list)
 
     @field_validator("language", mode="before")
     @classmethod
@@ -24,6 +31,22 @@ class JobCreate(BaseModel):
     @classmethod
     def validate_channel_profile(cls, value: Any) -> str | None:
         return normalize_channel_profile(value)
+
+    @field_validator("workflow_mode", mode="before")
+    @classmethod
+    def validate_workflow_mode(cls, value: Any) -> str:
+        return normalize_workflow_mode(str(value or DEFAULT_WORKFLOW_MODE))
+
+    @field_validator("enhancement_modes", mode="before")
+    @classmethod
+    def validate_enhancement_modes(cls, value: Any) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            return normalize_enhancement_modes([item for item in value.split(",") if item.strip()])
+        if isinstance(value, (list, tuple, set)):
+            return normalize_enhancement_modes(list(value))
+        raise ValueError("enhancement_modes must be a list of strings")
 
 
 class JobStepOut(BaseModel):
@@ -45,11 +68,16 @@ class JobOut(BaseModel):
     source_name: str
     content_subject: str | None = None
     content_summary: str | None = None
+    avatar_delivery_status: str | None = None
+    avatar_delivery_summary: str | None = None
     status: str
     language: str
     channel_profile: str | None
+    workflow_mode: str
+    enhancement_modes: list[str] = Field(default_factory=list)
     file_hash: str | None
     error_message: str | None
+    progress_percent: int = 0
     created_at: datetime
     updated_at: datetime
     steps: list[JobStepOut] = []
@@ -101,6 +129,8 @@ class ContentProfileReviewOut(BaseModel):
     job_id: str
     status: str
     review_step_status: str
+    workflow_mode: str
+    enhancement_modes: list[str] = Field(default_factory=list)
     draft: dict[str, Any] | None
     final: dict[str, Any] | None
     memory: dict[str, Any] | None = None
@@ -124,6 +154,9 @@ class ContentProfileMemoryStatsOut(BaseModel):
 
 
 class ContentProfileConfirmIn(BaseModel):
+    workflow_mode: str | None = None
+    enhancement_modes: list[str] | None = None
+    copy_style: str | None = None
     subject_brand: str | None = None
     subject_model: str | None = None
     subject_type: str | None = None
@@ -136,6 +169,24 @@ class ContentProfileConfirmIn(BaseModel):
     correction_notes: str | None = None
     supplemental_context: str | None = None
 
+    @field_validator("workflow_mode", mode="before")
+    @classmethod
+    def validate_optional_workflow_mode(cls, value: Any) -> str | None:
+        if value is None:
+            return None
+        return normalize_workflow_mode(str(value or DEFAULT_WORKFLOW_MODE))
+
+    @field_validator("enhancement_modes", mode="before")
+    @classmethod
+    def validate_optional_enhancement_modes(cls, value: Any) -> list[str] | None:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            return normalize_enhancement_modes([item for item in value.split(",") if item.strip()])
+        if isinstance(value, (list, tuple, set)):
+            return normalize_enhancement_modes(list(value))
+        raise ValueError("enhancement_modes must be a list of strings")
+
 
 class PackagingAssetOut(BaseModel):
     id: str
@@ -145,6 +196,7 @@ class PackagingAssetOut(BaseModel):
     path: str
     size_bytes: int
     content_type: str
+    watermark_preprocessed: bool | None = None
     created_at: str
 
 
@@ -160,12 +212,20 @@ class PackagingConfigOut(BaseModel):
     music_selection_mode: str = "random"
     music_loop_mode: str = "loop_single"
     subtitle_style: str = "bold_yellow_outline"
+    subtitle_motion_style: str = "motion_static"
+    smart_effect_style: str = "smart_effect_rhythm"
     cover_style: str = "preset_default"
     title_style: str = "preset_default"
+    copy_style: str = "attention_grabbing"
     music_volume: float = 0.22
     watermark_position: str = "top_right"
     watermark_opacity: float = 0.82
     watermark_scale: float = 0.16
+    avatar_overlay_position: str = "bottom_right"
+    avatar_overlay_scale: float = 0.28
+    avatar_overlay_corner_radius: int = 26
+    avatar_overlay_border_width: int = 4
+    avatar_overlay_border_color: str = "#F4E4B8"
     enabled: bool = True
 
 
@@ -186,13 +246,97 @@ class PackagingConfigPatch(BaseModel):
     music_selection_mode: str | None = None
     music_loop_mode: str | None = None
     subtitle_style: str | None = None
+    subtitle_motion_style: str | None = None
+    smart_effect_style: str | None = None
     cover_style: str | None = None
     title_style: str | None = None
+    copy_style: str | None = None
     music_volume: float | None = None
     watermark_position: str | None = None
     watermark_opacity: float | None = None
     watermark_scale: float | None = None
+    avatar_overlay_position: str | None = None
+    avatar_overlay_scale: float | None = None
+    avatar_overlay_corner_radius: int | None = None
+    avatar_overlay_border_width: int | None = None
+    avatar_overlay_border_color: str | None = None
     enabled: bool | None = None
+
+
+# ── Avatar Materials ──────────────────────────────────────────────────────────
+
+class AvatarMaterialRuleOut(BaseModel):
+    severity: str
+    title: str
+    detail: str
+
+
+class AvatarMaterialSectionOut(BaseModel):
+    title: str
+    rules: list[AvatarMaterialRuleOut]
+
+
+class AvatarMaterialFileOut(BaseModel):
+    id: str
+    original_name: str
+    stored_name: str
+    kind: str
+    role: str
+    role_label: str
+    pipeline_target: str
+    content_type: str
+    size_bytes: int
+    path: str
+    created_at: str
+    probe: dict[str, Any] | None = None
+    artifacts: dict[str, Any] | None = None
+    checks: list[dict[str, str]] = []
+
+
+class AvatarMaterialPreviewRunOut(BaseModel):
+    id: str
+    status: str
+    script: str
+    task_code: str | None = None
+    source_voice_file_id: str | None = None
+    source_video_file_id: str | None = None
+    output_path: str | None = None
+    output_size_bytes: int | None = None
+    duration_sec: float | None = None
+    width: int | None = None
+    height: int | None = None
+    preview_mode: str | None = None
+    fallback_reason: str | None = None
+    error_message: str | None = None
+    created_at: str
+
+
+class AvatarMaterialProfileOut(BaseModel):
+    id: str
+    display_name: str
+    presenter_alias: str | None = None
+    notes: str | None = None
+    profile_dir: str
+    training_status: str
+    training_provider: str
+    training_api_available: bool
+    next_action: str
+    capability_status: dict[str, str] = {}
+    blocking_issues: list[str] = []
+    warnings: list[str] = []
+    created_at: str
+    files: list[AvatarMaterialFileOut] = []
+    preview_runs: list[AvatarMaterialPreviewRunOut] = []
+
+
+class AvatarMaterialLibraryOut(BaseModel):
+    provider: str
+    training_api_available: bool
+    preview_service_available: bool = True
+    intake_mode: str
+    summary: str
+    sections: list[AvatarMaterialSectionOut]
+    profiles: list[AvatarMaterialProfileOut]
 
 
 # ── Glossary ──────────────────────────────────────────────────────────────────
@@ -220,6 +364,20 @@ class GlossaryTermUpdate(BaseModel):
     correct_form: str | None = None
     category: str | None = None
     context_hint: str | None = None
+
+
+class BuiltinGlossaryTermOut(BaseModel):
+    correct_form: str
+    wrong_forms: list[str] = []
+    category: str | None = None
+    context_hint: str | None = None
+
+
+class BuiltinGlossaryPackOut(BaseModel):
+    domain: str
+    presets: list[str] = []
+    term_count: int
+    terms: list[BuiltinGlossaryTermOut] = []
 
 
 # ── Watch Roots ───────────────────────────────────────────────────────────────
@@ -278,11 +436,26 @@ class WatchInventoryEnqueueIn(BaseModel):
     enqueue_all: bool = False
 
 
+class WatchInventoryMergeIn(BaseModel):
+    relative_paths: list[str] = Field(default_factory=list)
+
+
 class WatchInventoryEnqueueOut(BaseModel):
     requested_count: int
     created_count: int
     skipped_count: int
     created_job_ids: list[str]
+
+
+class WatchInventorySmartMergeGroupOut(BaseModel):
+    relative_paths: list[str]
+    score: float
+    reasons: list[str] = []
+
+
+class WatchInventorySmartMergeOut(BaseModel):
+    source_count: int
+    groups: list[WatchInventorySmartMergeGroupOut]
 
 
 class WatchInventoryScanStatusOut(BaseModel):

@@ -5,7 +5,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
-import pytest_asyncio
 from httpx import AsyncClient
 
 
@@ -24,11 +23,30 @@ async def test_glossary_empty_list(client: AsyncClient):
 
 
 @pytest.mark.asyncio
+async def test_glossary_builtin_packs_endpoint(client: AsyncClient):
+    response = await client.get("/api/v1/glossary/builtin-packs")
+    assert response.status_code == 200
+    data = response.json()
+    domains = {item["domain"] for item in data}
+    assert {"gear", "tech", "ai", "travel", "food", "finance", "news", "sports"}.issubset(domains)
+    gear_pack = next(item for item in data if item["domain"] == "gear")
+    assert gear_pack["term_count"] >= 20
+    assert any(term["correct_form"] == "EDC" for term in gear_pack["terms"])
+    assert any(term["correct_form"] == "潮玩" for term in gear_pack["terms"])
+    assert any(term["correct_form"] == "户外" for term in gear_pack["terms"])
+
+
+@pytest.mark.asyncio
 async def test_config_has_extended_provider_fields(client: AsyncClient):
     response = await client.get("/api/v1/config")
     assert response.status_code == 200
     data = response.json()
     assert "openai_base_url" in data
+    assert "avatar_provider" in data
+    assert "avatar_api_base_url" in data
+    assert "avatar_training_api_base_url" in data
+    assert "voice_provider" in data
+    assert "voice_clone_api_base_url" in data
     assert "anthropic_base_url" in data
     assert "minimax_base_url" in data
     assert "openai_auth_mode" in data
@@ -55,12 +73,258 @@ async def test_config_options_exposes_transcription_models(client: AsyncClient):
     data = response.json()
     assert data["job_languages"][0]["value"] == "zh-CN"
     assert data["channel_profiles"][0]["value"] == ""
+    assert data["workflow_modes"][0]["value"] == "standard_edit"
+    assert any(item["value"] == "avatar_commentary" for item in data["enhancement_modes"])
+    assert any(item["value"] == "heygem" for item in data["avatar_providers"])
+    assert any(item["value"] == "edge" for item in data["voice_providers"])
+    assert any(item["key"] == "long_text_to_video" and item["status"] == "planned" for item in data["creative_mode_catalog"]["workflow_modes"])
     assert data["transcription_models"]["local_whisper"][0] == "base"
     assert data["transcription_models"]["openai"] == ["gpt-4o-transcribe"]
     assert "large-v3" in data["transcription_models"]["local_whisper"]
     assert any(item["value"] == "edc_tactical" for item in data["channel_profiles"])
     assert any(item["value"] == "ollama" for item in data["multimodal_fallback_providers"])
     assert any(item["value"] == "auto" for item in data["search_providers"])
+
+
+@pytest.mark.asyncio
+async def test_avatar_materials_endpoint_exposes_requirements(client: AsyncClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    import roughcut.api.avatar_materials as avatar_materials_api
+    import roughcut.avatar.materials as avatar_materials_mod
+
+    monkeypatch.setattr(avatar_materials_mod, "_AVATAR_MATERIALS_ROOT", tmp_path / "avatar_materials")
+    async def fake_training_available():
+        return False
+
+    monkeypatch.setattr(avatar_materials_api, "is_heygem_training_available", fake_training_available)
+
+    response = await client.get("/api/v1/avatar-materials")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["provider"] == "heygem"
+    assert data["training_api_available"] is False
+    assert any(section["title"] == "上传类型与用途" for section in data["sections"])
+    assert any(section["title"] == "必须满足" for section in data["sections"])
+    assert data["profiles"] == []
+
+
+@pytest.mark.asyncio
+async def test_avatar_materials_upload_creates_profile(client: AsyncClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    import roughcut.api.avatar_materials as avatar_materials_api
+    import roughcut.avatar.materials as avatar_materials_mod
+
+    monkeypatch.setattr(avatar_materials_mod, "_AVATAR_MATERIALS_ROOT", tmp_path / "avatar_materials")
+
+    async def fake_probe(path: Path):
+        class Meta:
+            duration = 24.0 if path.suffix.lower() == ".mp4" else 12.0
+            width = 1920
+            height = 1080
+            fps = 30.0
+            video_codec = "h264"
+            audio_codec = "aac"
+            audio_sample_rate = 48000
+            audio_channels = 2
+            format_name = "mov,mp4,m4a,3gp,3g2,mj2"
+            bit_rate = 128000
+
+        assert path.suffix.lower() in {".mp4", ".wav"}
+        return Meta()
+
+    monkeypatch.setattr(avatar_materials_api, "probe", fake_probe)
+    async def fake_training_available():
+        return True
+
+    async def fake_prepare_voice_sample_artifacts(
+        file_record: dict[str, object],
+        *,
+        attempt_preprocess: bool = True,
+        require_preprocess: bool = False,
+    ):
+        assert attempt_preprocess is True
+        assert require_preprocess is False
+        file_record["artifacts"] = {
+            "normalized_wav_path": str(tmp_path / "voice.wav"),
+            "training_reference_name": "voice.wav",
+            "training_preprocess": {
+                "code": 0,
+                "reference_audio_text": "测试参考文本",
+                "asr_format_audio_url": "/tmp/voice.wav",
+            },
+        }
+        return file_record
+
+    monkeypatch.setattr(avatar_materials_api, "is_heygem_training_available", fake_training_available)
+    monkeypatch.setattr(avatar_materials_api, "prepare_voice_sample_artifacts", fake_prepare_voice_sample_artifacts)
+
+    response = await client.post(
+        "/api/v1/avatar-materials/profiles",
+        data={"display_name": "测试数字人"},
+        files=[
+            ("speaking_videos", ("presenter.mp4", b"fake-video", "video/mp4")),
+            ("portrait_photos", ("portrait.jpg", b"fake-image", "image/jpeg")),
+            ("voice_samples", ("voice.wav", b"fake-audio", "audio/wav")),
+        ],
+    )
+
+    assert response.status_code == 201
+    data = response.json()
+    assert len(data["profiles"]) == 1
+    profile = data["profiles"][0]
+    assert profile["display_name"] == "测试数字人"
+    assert profile["training_status"] == "ready_for_manual_training"
+    assert profile["capability_status"]["heygem_avatar"] == "ready"
+    assert profile["capability_status"]["voice_clone"] == "ready"
+    assert profile["capability_status"]["portrait_reference"] == "ready"
+    assert profile["capability_status"]["preview"] == "ready"
+    assert profile["training_api_available"] is True
+    assert any(item["role"] == "speaking_video" for item in profile["files"])
+    assert any(item["role"] == "portrait_photo" for item in profile["files"])
+    assert any(item["role"] == "voice_sample" for item in profile["files"])
+    voice_file = next(item for item in profile["files"] if item["role"] == "voice_sample")
+    assert voice_file["artifacts"]["training_preprocess"]["reference_audio_text"] == "测试参考文本"
+
+
+@pytest.mark.asyncio
+async def test_avatar_materials_upload_preview_ready_without_training_api(
+    client: AsyncClient,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import roughcut.api.avatar_materials as avatar_materials_api
+    import roughcut.avatar.materials as avatar_materials_mod
+
+    monkeypatch.setattr(avatar_materials_mod, "_AVATAR_MATERIALS_ROOT", tmp_path / "avatar_materials")
+
+    async def fake_probe(path: Path):
+        class Meta:
+            duration = 24.0 if path.suffix.lower() == ".mp4" else 12.0
+            width = 1920
+            height = 1080
+            fps = 30.0
+            video_codec = "h264"
+            audio_codec = "aac"
+            audio_sample_rate = 48000
+            audio_channels = 2
+            format_name = "mov,mp4,m4a,3gp,3g2,mj2"
+            bit_rate = 128000
+
+        return Meta()
+
+    async def fake_training_available():
+        return False
+
+    async def fake_prepare_voice_sample_artifacts(
+        file_record: dict[str, object],
+        *,
+        attempt_preprocess: bool = True,
+        require_preprocess: bool = False,
+    ):
+        assert attempt_preprocess is False
+        assert require_preprocess is False
+        file_record["artifacts"] = {
+            "normalized_wav_path": str(tmp_path / "voice_fallback.wav"),
+            "training_reference_name": "voice_fallback.wav",
+        }
+        return file_record
+
+    monkeypatch.setattr(avatar_materials_api, "probe", fake_probe)
+    monkeypatch.setattr(avatar_materials_api, "is_heygem_training_available", fake_training_available)
+    monkeypatch.setattr(avatar_materials_api, "prepare_voice_sample_artifacts", fake_prepare_voice_sample_artifacts)
+
+    response = await client.post(
+        "/api/v1/avatar-materials/profiles",
+        data={"display_name": "无训练接口预览"},
+        files=[
+            ("speaking_videos", ("presenter.mp4", b"fake-video", "video/mp4")),
+            ("voice_samples", ("voice.wav", b"fake-audio", "audio/wav")),
+        ],
+    )
+
+    assert response.status_code == 201
+    profile = response.json()["profiles"][0]
+    assert profile["training_api_available"] is False
+    assert profile["capability_status"]["preview"] == "ready"
+    assert "原始声音样本" in profile["next_action"]
+
+
+@pytest.mark.asyncio
+async def test_avatar_material_preview_creates_run(client: AsyncClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    import roughcut.api.avatar_materials as avatar_materials_api
+    import roughcut.avatar.materials as avatar_materials_mod
+
+    monkeypatch.setattr(avatar_materials_mod, "_AVATAR_MATERIALS_ROOT", tmp_path / "avatar_materials")
+
+    profile_dir = tmp_path / "avatar_materials" / "profiles" / "demo_profile"
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    preview_path = profile_dir / "previews" / "preview.mp4"
+    preview_path.parent.mkdir(parents=True, exist_ok=True)
+    preview_path.write_bytes(b"fake-preview")
+
+    avatar_materials_mod.save_avatar_material_profile(
+        {
+            "id": "profile-1",
+            "display_name": "测试数字人",
+            "presenter_alias": None,
+            "notes": None,
+            "profile_dir": str(profile_dir),
+            "training_status": "ready_for_manual_training",
+            "training_provider": "heygem",
+            "training_api_available": True,
+            "next_action": "ready",
+            "capability_status": {
+                "heygem_avatar": "ready",
+                "voice_clone": "ready",
+                "portrait_reference": "ready",
+                "preview": "ready",
+            },
+            "blocking_issues": [],
+            "warnings": [],
+            "created_at": "2026-03-12T00:00:00Z",
+            "files": [],
+            "preview_runs": [],
+        }
+    )
+
+    async def fake_generate_avatar_preview(*, profile: dict[str, object], script: str):
+        assert profile["id"] == "profile-1"
+        return {
+            "id": "preview-1",
+            "status": "completed",
+            "script": script,
+            "task_code": "task-1",
+            "output_path": str(preview_path),
+            "output_size_bytes": len(b"fake-preview"),
+            "duration_sec": 3.2,
+            "width": 1080,
+            "height": 1920,
+            "preview_mode": "source_audio_fallback",
+            "fallback_reason": "training_preprocess_unavailable",
+            "created_at": "2026-03-12T00:00:05Z",
+        }
+
+    async def fake_training_available():
+        return True
+
+    monkeypatch.setattr(avatar_materials_api, "generate_avatar_preview", fake_generate_avatar_preview)
+    monkeypatch.setattr(avatar_materials_api, "is_heygem_training_available", fake_training_available)
+
+    response = await client.post(
+        "/api/v1/avatar-materials/profiles/profile-1/preview",
+        json={"script": "这是一条测试预览"},
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    profile = data["profiles"][0]
+    assert profile["preview_runs"][0]["id"] == "preview-1"
+    assert profile["preview_runs"][0]["status"] == "completed"
+    assert profile["preview_runs"][0]["preview_mode"] == "source_audio_fallback"
+    assert profile["preview_runs"][0]["fallback_reason"] == "training_preprocess_unavailable"
+
+    file_response = await client.get("/api/v1/avatar-materials/profiles/profile-1/preview-runs/preview-1/file")
+    assert file_response.status_code == 200
+    assert file_response.content == b"fake-preview"
 
 
 @pytest.mark.asyncio
@@ -84,6 +348,30 @@ async def test_job_upload_rejects_unknown_language(client: AsyncClient):
 
     assert response.status_code == 422
     assert "Unsupported language" in response.text
+
+
+@pytest.mark.asyncio
+async def test_job_upload_rejects_unavailable_workflow_mode(client: AsyncClient):
+    response = await client.post(
+        "/api/v1/jobs",
+        files={"file": ("demo.mp4", b"video", "video/mp4")},
+        data={"workflow_mode": "long_text_to_video"},
+    )
+
+    assert response.status_code == 422
+    assert "workflow_mode not available yet" in response.text
+
+
+@pytest.mark.asyncio
+async def test_job_upload_rejects_unknown_enhancement_mode(client: AsyncClient):
+    response = await client.post(
+        "/api/v1/jobs",
+        files={"file": ("demo.mp4", b"video", "video/mp4")},
+        data={"enhancement_modes": "director_plus"},
+    )
+
+    assert response.status_code == 422
+    assert "Unsupported enhancement_mode" in response.text
 
 
 @pytest.mark.asyncio
@@ -624,6 +912,7 @@ async def test_job_list_includes_content_preview(client: AsyncClient):
                 status="needs_review",
                 language="zh-CN",
                 channel_profile="edc",
+                enhancement_modes=["avatar_commentary"],
             )
         )
         session.add_all(
@@ -650,6 +939,16 @@ async def test_job_list_includes_content_preview(client: AsyncClient):
                         "summary": "围绕 ARC 的刀具配置和实际上手手感展开。",
                     },
                 ),
+                Artifact(
+                    job_id=job_id,
+                    artifact_type="render_outputs",
+                    data_json={
+                        "avatar_result": {
+                            "status": "done",
+                            "detail": "数字人口播已作为画中画写入成片。",
+                        },
+                    },
+                ),
             ]
         )
         await session.commit()
@@ -659,6 +958,55 @@ async def test_job_list_includes_content_preview(client: AsyncClient):
     item = next(job for job in response.json() if job["id"] == str(job_id))
     assert item["content_subject"] == "LEATHERMAN ARC · 多功能工具钳 · 开箱与上手体验"
     assert item["content_summary"] == "围绕 ARC 的刀具配置和实际上手手感展开。"
+    assert item["avatar_delivery_status"] == "done"
+    assert item["avatar_delivery_summary"] == "数字人口播已作为画中画写入成片。"
+
+
+@pytest.mark.asyncio
+async def test_job_restart_allows_done_jobs(client: AsyncClient):
+    from roughcut.db.models import Artifact, Job, JobStep
+    from roughcut.db.session import get_session_factory
+
+    job_id = uuid.uuid4()
+    now = datetime.now(timezone.utc)
+
+    async with get_session_factory()() as session:
+        session.add(
+            Job(
+                id=job_id,
+                source_path="jobs/demo/restart.mp4",
+                source_name="restart.mp4",
+                status="done",
+                language="zh-CN",
+                file_hash="hash-demo",
+            )
+        )
+        session.add(
+            JobStep(
+                job_id=job_id,
+                step_name="render",
+                status="done",
+                attempt=1,
+                started_at=now,
+                finished_at=now,
+            )
+        )
+        session.add(
+            Artifact(
+                job_id=job_id,
+                artifact_type="platform_packaging_md",
+                data_json={"title": "demo"},
+            )
+        )
+        await session.commit()
+
+    response = await client.post(f"/api/v1/jobs/{job_id}/restart")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "pending"
+    assert data["file_hash"] is None
+    assert data["steps"][0]["status"] == "pending"
+    assert data["steps"][0]["attempt"] == 0
 
 
 @pytest.mark.asyncio
@@ -827,6 +1175,62 @@ async def test_job_activity_stream(client: AsyncClient):
 
 
 @pytest.mark.asyncio
+async def test_job_activity_reports_avatar_final_delivery_result(client: AsyncClient):
+    from roughcut.db.models import Artifact, Job, RenderOutput
+    from roughcut.db.session import get_session_factory
+
+    job_id = uuid.uuid4()
+
+    async with get_session_factory()() as session:
+        session.add(
+            Job(
+                id=job_id,
+                source_path="jobs/demo/avatar.mp4",
+                source_name="avatar.mp4",
+                status="done",
+                language="zh-CN",
+                enhancement_modes=["avatar_commentary"],
+            )
+        )
+        session.add_all(
+            [
+                Artifact(
+                    job_id=job_id,
+                    artifact_type="avatar_commentary_plan",
+                    data_json={
+                        "mode": "full_track_audio_passthrough",
+                        "provider": "heygem",
+                        "layout_template": "picture_in_picture_right",
+                    },
+                ),
+                Artifact(
+                    job_id=job_id,
+                    artifact_type="render_outputs",
+                    data_json={
+                        "packaged_mp4": "data/output/avatar.mp4",
+                        "avatar_result": {
+                            "status": "done",
+                            "detail": "数字人口播已作为画中画写入成片。",
+                            "profile_name": "店播数字人A",
+                        },
+                    },
+                ),
+            ]
+        )
+        session.add(RenderOutput(job_id=job_id, status="done", progress=1.0, output_path="data/output/avatar.mp4"))
+        await session.commit()
+
+    response = await client.get(f"/api/v1/jobs/{job_id}/activity")
+    assert response.status_code == 200
+    data = response.json()
+    avatar_decision = next(item for item in data["decisions"] if item["kind"] == "avatar_commentary")
+    assert avatar_decision["status"] == "done"
+    assert avatar_decision["summary"] == "数字人口播已合成进成片"
+    assert "画中画写入成片" in avatar_decision["detail"]
+    assert any(event["title"] == "数字人成片结果已回写" for event in data["events"])
+
+
+@pytest.mark.asyncio
 async def test_content_profile_endpoint_returns_memory_cloud(client: AsyncClient):
     from roughcut.db.models import Artifact, Job, JobStep
     from roughcut.db.session import get_session_factory
@@ -843,6 +1247,8 @@ async def test_content_profile_endpoint_returns_memory_cloud(client: AsyncClient
             status="needs_review",
             language="zh-CN",
             channel_profile="edc_memory_demo",
+            workflow_mode="standard_edit",
+            enhancement_modes=["avatar_commentary"],
         )
         session.add(job)
         session.add(
@@ -886,6 +1292,8 @@ async def test_content_profile_endpoint_returns_memory_cloud(client: AsyncClient
     data = response.json()
     assert data["draft"]["subject_brand"] == "LEATHERMAN"
     assert data["review_step_status"] == "running"
+    assert data["workflow_mode"] == "standard_edit"
+    assert data["enhancement_modes"] == ["avatar_commentary"]
     assert data["memory"]["field_preferences"]["subject_brand"][0]["value"] == "LEATHERMAN"
     assert data["memory"]["cloud"]["words"]
     assert any(word["label"] == "LEATHERMAN ARC" for word in data["memory"]["cloud"]["words"])

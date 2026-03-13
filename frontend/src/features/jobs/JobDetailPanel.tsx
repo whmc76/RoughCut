@@ -1,113 +1,232 @@
-import type { ContentProfileReview, Job, JobActivity, JobTimeline, Report } from "../../types";
+import type { AvatarMaterialLibrary, Config, ConfigOptions, ContentProfileReview, Job, JobActivity, JobTimeline, PackagingLibrary, Report } from "../../types";
 import { EmptyState } from "../../components/ui/EmptyState";
 import { PanelHeader } from "../../components/ui/PanelHeader";
-import { formatDate, statusLabel } from "../../utils";
+import { useI18n } from "../../i18n";
+import { classNames, formatDate, statusLabel } from "../../utils";
 import { JobContentProfileSection } from "./JobContentProfileSection";
 import { JobSubtitleReportSection } from "./JobSubtitleReportSection";
-import { stepLabel } from "./constants";
+import { JobReviewConfigSection } from "./JobReviewConfigSection";
+import { enhancementModeLabel, stepLabel, workflowModeLabel } from "./constants";
 
 type JobDetailPanelProps = {
   selectedJobId: string | null;
+  className?: string;
   selectedJob?: Job;
   isLoading: boolean;
   activity?: JobActivity;
   report?: Report;
   timeline?: JobTimeline;
   contentProfile?: ContentProfileReview;
+  config?: Config;
+  options?: ConfigOptions;
+  packaging?: PackagingLibrary;
+  avatarMaterials?: AvatarMaterialLibrary;
   contentSource: Record<string, unknown> | null;
   contentDraft: Record<string, unknown>;
   contentKeywords: string;
+  reviewWorkflowMode: string;
+  reviewEnhancementModes: string[];
+  reviewCopyStyle: string;
   isConfirmingProfile: boolean;
   isApplyingReview: boolean;
   isCancelling: boolean;
   isRestarting: boolean;
+  isDeleting: boolean;
   onContentFieldChange: (field: string, value: string) => void;
   onKeywordsChange: (value: string) => void;
+  onReviewWorkflowModeChange: (value: string) => void;
+  onReviewEnhancementModesChange: (value: string[]) => void;
+  onReviewCopyStyleChange: (value: string) => void;
   onConfirmProfile: () => void;
   onOpenFolder: () => void;
   onCancel: () => void;
   onRestart: () => void;
+  onDelete: () => void;
   onApplyReview: (targetId: string, action: "accepted" | "rejected") => void;
 };
 
 export function JobDetailPanel({
   selectedJobId,
+  className,
   selectedJob,
   isLoading,
   activity,
   report,
   timeline,
   contentProfile,
+  config,
+  options,
+  packaging,
+  avatarMaterials,
   contentSource,
   contentDraft,
   contentKeywords,
+  reviewWorkflowMode,
+  reviewEnhancementModes,
+  reviewCopyStyle,
   isConfirmingProfile,
   isApplyingReview,
   isCancelling,
   isRestarting,
+  isDeleting,
   onContentFieldChange,
   onKeywordsChange,
+  onReviewWorkflowModeChange,
+  onReviewEnhancementModesChange,
+  onReviewCopyStyleChange,
   onConfirmProfile,
   onOpenFolder,
   onCancel,
   onRestart,
+  onDelete,
   onApplyReview,
 }: JobDetailPanelProps) {
+  const { t } = useI18n();
+  const isReviewMode = selectedJob?.status === "needs_review";
+  const avatarDecision = activity?.decisions?.find((item) => item.kind === "avatar_commentary");
+  const avatarHeadlineStatus = avatarDecision?.status ?? selectedJob?.avatar_delivery_status ?? null;
+  const avatarHeadlineSummary = avatarDecision?.summary ?? selectedJob?.avatar_delivery_summary ?? null;
+  const avatarEnabled = Boolean(selectedJob?.enhancement_modes.includes("avatar_commentary"));
+  const downloadLabel = avatarEnabled
+    ? avatarHeadlineStatus === "done"
+      ? t("jobs.actions.downloadVideo.avatarIncluded")
+      : avatarHeadlineStatus === "failed"
+      ? t("jobs.actions.downloadVideo.avatarFallback")
+      : t("jobs.actions.downloadVideo")
+    : t("jobs.actions.downloadVideo");
+  const downloadHint = avatarEnabled
+    ? avatarHeadlineStatus === "done"
+      ? t("jobs.actions.downloadHint.avatarIncluded")
+      : avatarHeadlineStatus === "failed"
+      ? t("jobs.actions.downloadHint.avatarFallback")
+      : avatarHeadlineSummary || t("jobs.actions.downloadHint.standard")
+    : t("jobs.actions.downloadHint.standard");
+
   return (
-    <aside className="panel detail-panel">
-      {!selectedJobId && <EmptyState message="选择一条任务后显示详情" />}
-      {selectedJobId && isLoading && <EmptyState message="加载详情中..." />}
+    <aside className={classNames("panel detail-panel", className)}>
+      {!selectedJobId && <EmptyState message={t("jobs.detail.empty")} />}
+      {selectedJobId && isLoading && <EmptyState message={t("jobs.detail.loading")} />}
       {selectedJob && (
         <>
-          <PanelHeader title={selectedJob.source_name} description={selectedJob.id} actions={<span className={`status-chip ${selectedJob.status}`}>{statusLabel(selectedJob.status)}</span>} />
+          <PanelHeader
+            title={selectedJob.source_name}
+            description={selectedJob.id}
+            actions={
+              <div className="form-stack compact-top">
+                <span className={`status-chip ${selectedJob.status}`}>{statusLabel(selectedJob.status)}</span>
+                {avatarHeadlineSummary ? (
+                  <span className={`status-pill ${avatarHeadlineStatus || "pending"}`}>
+                    数字人：{avatarHeadlineSummary}
+                  </span>
+                ) : null}
+              </div>
+            }
+          />
 
           <div className="detail-actions">
             <button className="button ghost" onClick={onOpenFolder}>
-              打开文件夹
+              {t("jobs.actions.openFolder")}
             </button>
             <a className="button ghost" href={`/api/v1/jobs/${selectedJob.id}/download`} target="_blank" rel="noreferrer">
-              下载成片
+              {downloadLabel}
             </a>
             <button
               className="button ghost"
               disabled={selectedJob.status === "done" || selectedJob.status === "failed" || selectedJob.status === "cancelled" || isCancelling}
               onClick={onCancel}
             >
-              {isCancelling ? "取消中..." : "取消"}
+              {isCancelling ? t("jobs.actions.cancelling") : t("jobs.actions.cancel")}
             </button>
             <button className="button primary" onClick={onRestart} disabled={isRestarting}>
-              {isRestarting ? "重启中..." : "重新开始"}
+              {isRestarting ? t("jobs.actions.restarting") : t("jobs.actions.restart")}
+            </button>
+            <button className="button danger" onClick={onDelete} disabled={isDeleting}>
+              {isDeleting ? t("jobs.actions.deleting") : t("jobs.actions.delete")}
             </button>
           </div>
+          <div className="muted compact-top">{downloadHint}</div>
 
           <section className="detail-block">
-            <div className="detail-key">当前活动</div>
-            {activity?.current_step ? (
-              <div className="activity-card">
-                <strong>{activity.current_step.label}</strong>
-                <div className="muted">{activity.current_step.detail || "—"}</div>
-                {typeof activity.current_step.progress === "number" && (
-                  <div className="progress-bar">
-                    <span style={{ width: `${Math.round(activity.current_step.progress * 100)}%` }} />
-                  </div>
-                )}
-              </div>
-            ) : (
-              <div className="muted">暂无活动步骤</div>
-            )}
-          </section>
-
-          <section className="detail-block">
-            <div className="detail-key">步骤状态</div>
-            <div className="steps-list">
-              {selectedJob.steps.map((step) => (
-                <div key={step.id} className="step-row">
-                  <span>{stepLabel(step.step_name)}</span>
-                  <span className={`status-chip ${step.status}`}>{statusLabel(step.status)}</span>
-                </div>
-              ))}
+            <div className="detail-key">{t("jobs.detail.creativeMode")}</div>
+            <div className="mode-chip-list">
+              <span className="mode-chip">{workflowModeLabel(isReviewMode ? reviewWorkflowMode : selectedJob.workflow_mode)}</span>
+              {(isReviewMode ? reviewEnhancementModes : selectedJob.enhancement_modes).length ? (
+                (isReviewMode ? reviewEnhancementModes : selectedJob.enhancement_modes).map((mode) => (
+                  <span key={mode} className="mode-chip subtle">
+                    {enhancementModeLabel(mode)}
+                  </span>
+                ))
+              ) : (
+                <span className="muted">{t("jobs.detail.noEnhancements")}</span>
+              )}
             </div>
           </section>
+
+          {isReviewMode ? (
+            <JobReviewConfigSection
+              selectedJob={selectedJob}
+              config={config}
+              packaging={packaging}
+              avatarMaterials={avatarMaterials}
+              workflowMode={reviewWorkflowMode}
+              enhancementModes={reviewEnhancementModes}
+              copyStyle={reviewCopyStyle}
+              workflowOptions={options?.workflow_modes ?? []}
+              enhancementOptions={options?.enhancement_modes ?? []}
+              onWorkflowModeChange={onReviewWorkflowModeChange}
+              onEnhancementModesChange={onReviewEnhancementModesChange}
+              onCopyStyleChange={onReviewCopyStyleChange}
+            />
+          ) : (
+            <>
+              <section className="detail-block">
+                <div className="detail-key">{t("jobs.detail.currentActivity")}</div>
+                {activity?.current_step ? (
+                  <div className="activity-card">
+                    <strong>{activity.current_step.label}</strong>
+                    <div className="muted">{activity.current_step.detail || "—"}</div>
+                    {typeof activity.current_step.progress === "number" && (
+                      <div className="progress-bar">
+                        <span style={{ width: `${Math.round(activity.current_step.progress * 100)}%` }} />
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <div className="muted">{t("jobs.detail.noActivity")}</div>
+                )}
+              </section>
+
+              {!!activity?.decisions?.length && (
+                <section className="detail-block">
+                  <div className="detail-key">{t("jobs.detail.decisions")}</div>
+                  <div className="timeline-list">
+                    {activity.decisions.map((decision, index) => (
+                      <div key={`${decision.kind}-${index}`} className="timeline-item">
+                        <div className="toolbar">
+                          <strong>{decision.title}</strong>
+                          <span className={`status-pill ${decision.status}`}>{statusLabel(decision.status)}</span>
+                        </div>
+                        <div>{decision.summary}</div>
+                        {decision.detail && <div className="muted">{decision.detail}</div>}
+                      </div>
+                    ))}
+                  </div>
+                </section>
+              )}
+
+              <section className="detail-block">
+                <div className="detail-key">{t("jobs.detail.stepStatus")}</div>
+                <div className="steps-list">
+                  {selectedJob.steps.map((step) => (
+                    <div key={step.id} className="step-row">
+                      <span>{stepLabel(step.step_name)}</span>
+                      <span className={`status-chip ${step.status}`}>{statusLabel(step.status)}</span>
+                    </div>
+                  ))}
+                </div>
+              </section>
+            </>
+          )}
 
           <JobContentProfileSection
             jobId={selectedJob.id}
@@ -116,29 +235,34 @@ export function JobDetailPanel({
             contentDraft={contentDraft}
             contentKeywords={contentKeywords}
             isSaving={isConfirmingProfile}
+            reviewMode={isReviewMode}
             onFieldChange={onContentFieldChange}
             onKeywordsChange={onKeywordsChange}
             onConfirm={onConfirmProfile}
           />
 
-          <JobSubtitleReportSection report={report} isApplying={isApplyingReview} onApplyReview={onApplyReview} />
+          {!isReviewMode && (
+            <>
+              <JobSubtitleReportSection report={report} isApplying={isApplyingReview} onApplyReview={onApplyReview} />
 
-          <section className="detail-block">
-            <div className="detail-key">时间线与事件</div>
-            <div className="timeline-list">
-              {activity?.events?.slice(0, 8).map((event, index) => (
-                <div key={`${event.timestamp}-${index}`} className="timeline-item">
-                  <div className="muted">{formatDate(event.timestamp)}</div>
-                  <strong>{event.title}</strong>
-                  <div className="muted">{event.detail || event.status}</div>
+              <section className="detail-block">
+                <div className="detail-key">{t("jobs.detail.timeline")}</div>
+                <div className="timeline-list">
+                  {activity?.events?.slice(0, 8).map((event, index) => (
+                    <div key={`${event.timestamp}-${index}`} className="timeline-item">
+                      <div className="muted">{formatDate(event.timestamp)}</div>
+                      <strong>{event.title}</strong>
+                      <div className="muted">{event.detail || event.status}</div>
+                    </div>
+                  ))}
                 </div>
-              ))}
-            </div>
-            <details className="top-gap">
-              <summary>查看剪辑时间线 JSON</summary>
-              <pre className="json-preview">{JSON.stringify(timeline?.data ?? {}, null, 2)}</pre>
-            </details>
-          </section>
+                <details className="top-gap">
+                  <summary>{t("jobs.detail.timelineJson")}</summary>
+                  <pre className="json-preview">{JSON.stringify(timeline?.data ?? {}, null, 2)}</pre>
+                </details>
+              </section>
+            </>
+          )}
         </>
       )}
     </aside>
