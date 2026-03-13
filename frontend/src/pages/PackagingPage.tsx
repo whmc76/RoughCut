@@ -8,8 +8,9 @@ import { ListCard } from "../components/ui/ListCard";
 import { PageHeader } from "../components/ui/PageHeader";
 import { PanelHeader } from "../components/ui/PanelHeader";
 import { usePackagingWorkspace } from "../features/packaging/usePackagingWorkspace";
-import { coverStylePresets, styleLabel, subtitleStylePresets, titleStylePresets } from "../stylePresets";
+import { useI18n } from "../i18n";
 import { formatBytes, formatDate } from "../utils";
+import type { PackagingAsset } from "../types";
 
 const ASSET_TYPES = [
   { key: "intro", label: "片头", accept: "video/*", multiple: false },
@@ -20,37 +21,26 @@ const ASSET_TYPES = [
 ] as const;
 
 export function PackagingPage() {
+  const { t } = useI18n();
   const workspace = usePackagingWorkspace(ASSET_TYPES);
   const config = workspace.packaging.data?.config;
   const assets = workspace.packaging.data?.assets ?? {};
 
   return (
     <section>
-      <PageHeader eyebrow="Packaging" title="包装素材" description="这里只管理素材池和渲染策略。字幕、封面、标题样式已经拆到独立的风格模板页。" actions={<Link className="button primary" to="/style-templates">打开风格模板</Link>} />
+      <PageHeader
+        eyebrow={t("packaging.page.eyebrow")}
+        title={t("packaging.page.title")}
+        description={t("packaging.page.description")}
+        actions={<Link className="button primary" to="/style-templates">{t("packaging.page.openStyles")}</Link>}
+      />
 
-      {!config && workspace.packaging.isLoading && <div className="panel">正在加载包装配置...</div>}
+      {!config && workspace.packaging.isLoading && <div className="panel">{t("packaging.page.loading")}</div>}
 
       {config && (
         <>
           <section className="panel">
-            <PanelHeader title="包装策略" description="原型阶段直接按能力域拆分页面，不再把素材管理和风格选择挤在一起。" />
-            <div className="template-summary-grid compact-gap">
-              <article className="template-summary-card">
-                <span className="stat-label">字幕样式</span>
-                <strong>{styleLabel(subtitleStylePresets, config.subtitle_style)}</strong>
-                <p className="muted">影响成片字幕阅读气质。</p>
-              </article>
-              <article className="template-summary-card">
-                <span className="stat-label">封面风格</span>
-                <strong>{styleLabel(coverStylePresets, config.cover_style)}</strong>
-                <p className="muted">决定封面底图的包装方向。</p>
-              </article>
-              <article className="template-summary-card">
-                <span className="stat-label">标题样式</span>
-                <strong>{styleLabel(titleStylePresets, config.title_style)}</strong>
-                <p className="muted">决定大字布局、条幅结构和字效层级。</p>
-              </article>
-            </div>
+            <PanelHeader title={t("packaging.strategy.title")} description={t("packaging.strategy.description")} />
             <div className="form-grid three-up">
               <SelectField
                 label="启用包装"
@@ -142,8 +132,8 @@ export function PackagingPage() {
           <div className="panel-grid two-up">
             {ASSET_TYPES.map((assetType) => (
               <section key={assetType.key} className="panel">
-                <PanelHeader title={assetType.label} description={`${(assets[assetType.key] ?? []).length} 个素材`} actions={<label className="button ghost">
-                    上传
+                <PanelHeader title={assetType.label} description={`${(assets[assetType.key] ?? []).length} ${t("packaging.assets.count")}`} actions={<label className="button ghost">
+                    {t("packaging.assets.upload")}
                     <input
                       type="file"
                       accept={assetType.accept}
@@ -153,7 +143,7 @@ export function PackagingPage() {
                     />
                   </label>} />
                 <div className="list-stack">
-                  {(assets[assetType.key] ?? []).map((asset) => {
+                    {(assets[assetType.key] ?? []).map((asset) => {
                     const singleSelected = config[`${assetType.key}_asset_id` as keyof typeof config] === asset.id;
                     const poolSelected =
                       assetType.key === "insert"
@@ -161,14 +151,22 @@ export function PackagingPage() {
                         : assetType.key === "music"
                           ? config.music_asset_ids.includes(asset.id)
                           : false;
-                    return (
+                    const watermarkPreprocessed = assetType.key === "watermark" && asset.watermark_preprocessed;
+                        return (
                       <ListCard key={asset.id}>
                         <div>
                           <div className="row-title">{asset.original_name}</div>
                           <div className="muted">
                             {formatBytes(asset.size_bytes)} · {formatDate(asset.created_at)}
                           </div>
+                          {watermarkPreprocessed ? (
+                            <div className="mode-chip-list top-gap">
+                              <span className="mode-chip">抠图结果</span>
+                              <span className="mode-chip subtle">背景已去除</span>
+                            </div>
+                          ) : null}
                         </div>
+                        <div className="packaging-asset-preview">{renderPackagingAssetPreview(asset, assetType.key)}</div>
                         <ListActions>
                           {assetType.key === "insert" || assetType.key === "music" ? (
                             <label className="checkbox-row">
@@ -179,27 +177,27 @@ export function PackagingPage() {
                                   workspace.togglePool(assetType.key === "insert" ? "insert_asset_ids" : "music_asset_ids", asset.id, event.target.checked)
                                 }
                               />
-                              <span>加入池</span>
+                              <span>{t("packaging.assets.addToPool")}</span>
                             </label>
                           ) : (
                             <button
                               className={singleSelected ? "button primary" : "button ghost"}
                               onClick={() => workspace.saveConfig.mutate({ [`${assetType.key}_asset_id`]: asset.id })}
                             >
-                              {singleSelected ? "已选中" : "设为默认"}
+                              {singleSelected ? t("packaging.assets.selected") : t("packaging.assets.setDefault")}
                             </button>
                           )}
                           <a className="button ghost" href={api.packagingAssetUrl(asset.id)} target="_blank" rel="noreferrer">
-                            查看
+                            {t("packaging.assets.view")}
                           </a>
                           <button className="button danger" onClick={() => workspace.deleteAsset.mutate(asset.id)}>
-                            删除
+                            {t("packaging.assets.delete")}
                           </button>
                         </ListActions>
                       </ListCard>
                     );
                   })}
-                  {!assets[assetType.key]?.length && <EmptyState message="暂无素材" />}
+                  {!assets[assetType.key]?.length && <EmptyState message={t("packaging.assets.empty")} />}
                 </div>
               </section>
             ))}
@@ -208,4 +206,36 @@ export function PackagingPage() {
       )}
     </section>
   );
+}
+
+function renderPackagingAssetPreview(asset: PackagingAsset, assetType: string) {
+  if (assetType === "watermark") {
+    return (
+      <div className="packaging-watermark-preview">
+        <img
+          src={api.packagingAssetUrl(asset.id)}
+          className="packaging-image-preview"
+          alt={asset.original_name}
+        />
+      </div>
+    );
+  }
+
+  if (assetType === "music") {
+    return <audio className="packaging-audio-player" src={api.packagingAssetUrl(asset.id)} controls />;
+  }
+
+  if (assetType === "intro" || assetType === "outro" || assetType === "insert") {
+    return (
+      <video
+        className="packaging-video-preview"
+        src={api.packagingAssetUrl(asset.id)}
+        controls
+        playsInline
+        preload="metadata"
+      />
+    );
+  }
+
+  return null;
 }

@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import uuid
 
-import pytest
-
 from roughcut.edit.render_plan import build_plain_render_plan, build_render_plan, build_restrained_editing_accents
 
 
@@ -23,6 +21,9 @@ def test_build_render_plan_defaults():
     assert plan["insert"] is None
     assert plan["watermark"] is None
     assert plan["music"] is None
+    assert plan["creative_profile"] is None
+    assert plan["ai_director"] is None
+    assert plan["avatar_commentary"] is None
     assert plan["editing_accents"]["style"] == "restrained"
     assert plan["editing_accents"]["emphasis_overlays"] == []
 
@@ -36,12 +37,18 @@ def test_build_render_plan_custom():
         noise_reduction=False,
         subtitle_style="white_minimal",
         cover_style="tactical_neon",
+        creative_profile={"workflow_mode": "standard_edit", "enhancement_modes": ["ai_director"]},
+        ai_director_plan={"voiceover_segments": [{"segment_id": "director_hook"}]},
+        avatar_commentary_plan={"segments": [{"segment_id": "avatar_1"}]},
     )
     assert plan["workflow_preset"] == "unboxing_upgrade"
     assert plan["loudness"]["target_lufs"] == -16.0
     assert plan["voice_processing"]["noise_reduction"] is False
     assert plan["subtitles"]["style"] == "white_minimal"
     assert plan["cover"]["style"] == "tactical_neon"
+    assert plan["creative_profile"]["enhancement_modes"] == ["ai_director"]
+    assert plan["ai_director"]["voiceover_segments"][0]["segment_id"] == "director_hook"
+    assert plan["avatar_commentary"]["segments"][0]["segment_id"] == "avatar_1"
 
 
 def test_build_restrained_editing_accents_limits_count_and_prefers_strong_lines():
@@ -92,5 +99,6 @@ def test_build_plain_render_plan_disables_packaging_and_accents():
     assert plan["insert"] is None
     assert plan["watermark"] is None
     assert plan["music"] is None
+    assert plan["subtitles"] is None
     assert plan["editing_accents"]["transitions"]["enabled"] is False
     assert plan["editing_accents"]["emphasis_overlays"] == []

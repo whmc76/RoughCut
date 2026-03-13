@@ -13,9 +13,13 @@ from roughcut.db.models import Artifact, Job, JobStep, SubtitleItem, Timeline
 from roughcut.pipeline.steps import (
     _get_cover_seek,
     _load_latest_artifact,
+    _load_latest_optional_artifact,
     _load_latest_timeline,
     _record_source_integrity,
+    _select_cover_source_video,
     _select_preferred_content_profile_artifact,
+    run_ai_director,
+    run_avatar_commentary,
     run_content_profile,
     run_glossary_review,
 )
@@ -130,6 +134,7 @@ async def test_run_glossary_review_loads_recent_subtitles_without_name_error(db_
 
     async def fake_polish_subtitle_items(*args, **kwargs):
         assert kwargs["review_memory"]["recent_subtitles_count"] == 3
+        assert kwargs["allow_llm"] is False
         return 1
 
     monkeypatch.setattr(steps_mod, "build_subtitle_review_memory", fake_build_subtitle_review_memory)
@@ -229,6 +234,8 @@ async def test_run_content_profile_auto_confirms_high_confidence_profile(db_engi
         draft = artifact_map["content_profile_draft"]
         final = artifact_map["content_profile_final"]
         assert draft["automation_review"]["auto_confirm"] is True
+        assert draft["creative_profile"]["workflow_mode"] == "standard_edit"
+        assert draft["creative_profile"]["enhancement_modes"] == []
         assert final["review_mode"] == "auto_confirmed"
 
         review_step_result = await session.execute(
@@ -237,6 +244,158 @@ async def test_run_content_profile_auto_confirms_high_confidence_profile(db_engi
         review_step = review_step_result.scalar_one()
         assert review_step.status == "done"
         assert review_step.metadata_["auto_confirmed"] is True
+
+
+@pytest.mark.asyncio
+async def test_run_ai_director_generates_plan_for_enabled_job(db_engine, monkeypatch):
+    import roughcut.pipeline.steps as steps_mod
+
+    factory = async_sessionmaker(db_engine, expire_on_commit=False)
+    job_id = uuid.uuid4()
+
+    async with factory() as session:
+        session.add(
+            Job(
+                id=job_id,
+                source_path="jobs/demo/director.mp4",
+                source_name="director.mp4",
+                status="processing",
+                language="zh-CN",
+                enhancement_modes=["ai_director"],
+            )
+        )
+        session.add(JobStep(job_id=job_id, step_name="ai_director", status="running"))
+        session.add(
+            Artifact(
+                job_id=job_id,
+                artifact_type="content_profile_final",
+                data_json={
+                    "subject_type": "科普讲解",
+                    "summary": "讲清楚一个复杂概念的关键判断路径。",
+                    "engagement_question": "你会怎么解释给第一次接触的人？",
+                },
+            )
+        )
+        for index, text in enumerate(["先说结论", "中间补背景", "最后抛问题"]):
+            session.add(
+                SubtitleItem(
+                    job_id=job_id,
+                    version=1,
+                    item_index=index,
+                    start_time=float(index) * 3,
+                    end_time=float(index) * 3 + 2.0,
+                    text_raw=text,
+                    text_norm=text,
+                    text_final=text,
+                )
+            )
+        await session.commit()
+
+    monkeypatch.setattr(steps_mod, "get_session_factory", lambda: factory)
+
+    async def fake_build_ai_director_plan(**kwargs):
+        return {
+            "opening_hook": "这条内容最该先讲清楚的结论，我先替你拎出来。",
+            "bridge_line": "这里应该补一层背景说明。",
+            "voice_provider": "edge",
+            "voiceover_segments": [{"segment_id": "director_hook", "rewritten_text": "新钩子"}],
+            "dubbing_request": {"provider": "edge"},
+        }
+
+    monkeypatch.setattr(steps_mod, "build_ai_director_plan", fake_build_ai_director_plan)
+
+    result = await run_ai_director(str(job_id))
+
+    assert result["enabled"] is True
+    assert result["voiceover_segment_count"] == 1
+
+    async with factory() as session:
+        artifact = await _load_latest_optional_artifact(session, job_id=job_id, artifact_types=("ai_director_plan",))
+        assert artifact is not None
+        assert artifact.data_json["voice_provider"] == "edge"
+
+
+@pytest.mark.asyncio
+async def test_run_avatar_commentary_generates_plan_for_enabled_job(db_engine, monkeypatch):
+    import roughcut.pipeline.steps as steps_mod
+
+    factory = async_sessionmaker(db_engine, expire_on_commit=False)
+    job_id = uuid.uuid4()
+
+    async with factory() as session:
+        session.add(
+            Job(
+                id=job_id,
+                source_path="jobs/demo/avatar.mp4",
+                source_name="avatar.mp4",
+                status="processing",
+                language="zh-CN",
+                enhancement_modes=["avatar_commentary", "ai_director"],
+            )
+        )
+        session.add(JobStep(job_id=job_id, step_name="avatar_commentary", status="running"))
+        session.add(
+            Artifact(
+                job_id=job_id,
+                artifact_type="content_profile_final",
+                data_json={
+                    "summary": "这是对复杂信息的拆解。",
+                    "engagement_question": "你最想让数字人补哪一段？",
+                },
+            )
+        )
+        session.add(
+            Artifact(
+                job_id=job_id,
+                artifact_type="ai_director_plan",
+                data_json={
+                    "voiceover_segments": [
+                        {
+                            "purpose": "hook",
+                            "rewritten_text": "我先替你抓重点。",
+                            "suggested_start_time": 0.4,
+                            "target_duration_sec": 3.2,
+                        }
+                    ]
+                },
+            )
+        )
+        for index, text in enumerate(["开头", "中段", "结尾"]):
+            session.add(
+                SubtitleItem(
+                    job_id=job_id,
+                    version=1,
+                    item_index=index,
+                    start_time=float(index) * 4,
+                    end_time=float(index) * 4 + 2.5,
+                    text_raw=text,
+                    text_norm=text,
+                    text_final=text,
+                )
+            )
+        await session.commit()
+
+    monkeypatch.setattr(steps_mod, "get_session_factory", lambda: factory)
+
+    def fake_build_avatar_commentary_plan(**kwargs):
+        return {
+            "provider": "mock",
+            "layout_template": "picture_in_picture_right",
+            "segments": [{"segment_id": "avatar_1", "script": "我先替你抓重点。"}],
+            "render_request": {"provider": "mock"},
+        }
+
+    monkeypatch.setattr(steps_mod, "build_avatar_commentary_plan", fake_build_avatar_commentary_plan)
+
+    result = await run_avatar_commentary(str(job_id))
+
+    assert result["enabled"] is True
+    assert result["segment_count"] == 1
+
+    async with factory() as session:
+        artifact = await _load_latest_optional_artifact(session, job_id=job_id, artifact_types=("avatar_commentary_plan",))
+        assert artifact is not None
+        assert artifact.data_json["layout_template"] == "picture_in_picture_right"
 
 
 @pytest.mark.asyncio
@@ -331,7 +490,28 @@ async def test_get_cover_seek_uses_latest_media_meta_when_multiple_rows_exist(db
 
     seek = await _get_cover_seek(job_id, "unused")
 
-    assert seek == 25.0
+    assert seek == 45.0
+
+
+def test_select_cover_source_video_prefers_plain_render(tmp_path: Path):
+    plain = tmp_path / "output_plain.mp4"
+    packaged = tmp_path / "output.mp4"
+    plain.write_bytes(b"plain")
+    packaged.write_bytes(b"packaged")
+
+    selected = _select_cover_source_video(plain, packaged)
+
+    assert selected == plain
+
+
+def test_select_cover_source_video_falls_back_to_packaged_render(tmp_path: Path):
+    plain = tmp_path / "output_plain.mp4"
+    packaged = tmp_path / "output.mp4"
+    packaged.write_bytes(b"packaged")
+
+    selected = _select_cover_source_video(plain, packaged)
+
+    assert selected == packaged
 
 
 def test_select_preferred_content_profile_artifact_prefers_final_over_newer_working_copy():

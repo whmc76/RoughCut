@@ -5,6 +5,7 @@ import { SelectField } from "../../components/forms/SelectField";
 import { TextField } from "../../components/forms/TextField";
 import type { SelectOption } from "../../types";
 import { PanelHeader } from "../../components/ui/PanelHeader";
+import { useI18n } from "../../i18n";
 
 type WatchRootFormPanelProps = {
   form: RootForm;
@@ -12,6 +13,8 @@ type WatchRootFormPanelProps = {
   isEditing: boolean;
   isSaving: boolean;
   isDeleting: boolean;
+  autosaveState?: "idle" | "saving" | "saved" | "error";
+  autosaveError?: string | null;
   onChange: (next: RootForm) => void;
   onSubmit: () => void;
   onDelete: () => void;
@@ -23,13 +26,31 @@ export function WatchRootFormPanel({
   isEditing,
   isSaving,
   isDeleting,
+  autosaveState,
+  autosaveError,
   onChange,
   onSubmit,
   onDelete,
 }: WatchRootFormPanelProps) {
+  const { t } = useI18n();
+  const autosaveTone =
+    autosaveState === "saving" ? "running" : autosaveState === "error" ? "failed" : autosaveState === "saved" ? "done" : "";
+  const autosaveLabel =
+    autosaveState === "saving"
+      ? t("autosave.saving")
+      : autosaveState === "error"
+        ? t("autosave.error")
+        : autosaveState === "saved"
+          ? t("autosave.saved")
+          : t("autosave.idle");
+
   return (
     <section className="panel">
-      <PanelHeader title={isEditing ? "编辑目录" : "创建目录"} description="支持直接切换快速扫描 / 精确扫描。" />
+      <PanelHeader
+        title={isEditing ? t("watch.form.editTitle") : t("watch.form.createTitle")}
+        description={t("watch.form.description")}
+        actions={isEditing ? <span className={`status-pill ${autosaveTone}`}>{autosaveLabel}</span> : undefined}
+      />
       <form
         className="form-stack"
         onSubmit={(event) => {
@@ -37,35 +58,39 @@ export function WatchRootFormPanel({
           onSubmit();
         }}
       >
-        <TextField label="目录路径" value={form.path} onChange={(event) => onChange({ ...form, path: event.target.value })} />
+        <TextField label={t("watch.form.path")} value={form.path} onChange={(event) => onChange({ ...form, path: event.target.value })} />
         <SelectField
-          label="频道配置"
+          label={t("watch.form.channelProfile")}
           value={form.channel_profile}
           onChange={(event) => onChange({ ...form, channel_profile: event.target.value })}
           options={channelProfileOptions}
         />
         <div className="field-row">
           <SelectField
-            label="扫描模式"
+            label={t("watch.form.scanMode")}
             value={form.scan_mode}
             onChange={(event) => onChange({ ...form, scan_mode: event.target.value as RootForm["scan_mode"] })}
             options={[
-              { value: "fast", label: "fast" },
-              { value: "precise", label: "precise" },
+              { value: "fast", label: t("watch.form.fast") },
+              { value: "precise", label: t("watch.form.precise") },
             ]}
           />
-          <CheckboxField label="启用监听" checked={form.enabled} onChange={(event) => onChange({ ...form, enabled: event.target.checked })} />
+          <CheckboxField label={t("watch.form.enabled")} checked={form.enabled} onChange={(event) => onChange({ ...form, enabled: event.target.checked })} />
         </div>
-        <FormActions>
-          <button className="button primary" type="submit" disabled={isSaving}>
-            {isSaving ? "保存中..." : isEditing ? "保存修改" : "创建目录"}
-          </button>
-          {isEditing && (
+        {autosaveError && isEditing && <div className="notice">{autosaveError}</div>}
+        {isEditing ? (
+          <FormActions>
             <button className="button danger" type="button" onClick={onDelete} disabled={isDeleting}>
-              {isDeleting ? "删除中..." : "删除"}
+              {isDeleting ? t("watch.form.deleting") : t("watch.form.delete")}
             </button>
-          )}
-        </FormActions>
+          </FormActions>
+        ) : (
+          <FormActions>
+            <button className="button primary" type="submit" disabled={isSaving}>
+              {isSaving ? t("watch.form.saving") : t("watch.form.create")}
+            </button>
+          </FormActions>
+        )}
       </form>
     </section>
   );

@@ -2,12 +2,17 @@ from __future__ import annotations
 
 import json
 import mimetypes
+import math
 import random
 import re
+from collections import Counter
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from io import BytesIO
+
+import numpy as np
 
 from roughcut.config import get_settings
 
@@ -37,10 +42,18 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "subtitle_style": "bold_yellow_outline",
     "cover_style": "preset_default",
     "title_style": "preset_default",
+    "copy_style": "attention_grabbing",
+    "subtitle_motion_style": "motion_static",
+    "smart_effect_style": "smart_effect_rhythm",
     "music_volume": 0.22,
     "watermark_position": "top_right",
     "watermark_opacity": 0.82,
     "watermark_scale": 0.16,
+    "avatar_overlay_position": "bottom_right",
+    "avatar_overlay_scale": 0.28,
+    "avatar_overlay_corner_radius": 26,
+    "avatar_overlay_border_width": 4,
+    "avatar_overlay_border_color": "#F4E4B8",
     "enabled": True,
 }
 
@@ -71,6 +84,26 @@ SUBTITLE_STYLE_OPTIONS = {
     "film_subtle",
     "archive_type",
     "teaser_glow",
+}
+
+SUBTITLE_MOTION_OPTIONS = {
+    "motion_static",
+    "motion_typewriter",
+    "motion_pop",
+    "motion_wave",
+    "motion_slide",
+    "motion_glitch",
+    "motion_ripple",
+    "motion_strobe",
+    "motion_echo",
+}
+
+SMART_EFFECT_STYLE_OPTIONS = {
+    "smart_effect_rhythm",
+    "smart_effect_punch",
+    "smart_effect_glitch",
+    "smart_effect_cinematic",
+    "smart_effect_minimal",
 }
 
 COVER_STYLE_OPTIONS = {
@@ -116,9 +149,19 @@ TITLE_STYLE_OPTIONS = {
     "neon_night",
 }
 
+COPY_STYLE_OPTIONS = {
+    "attention_grabbing",
+    "balanced",
+    "premium_editorial",
+    "trusted_expert",
+    "playful_meme",
+    "emotional_story",
+}
+
 MUSIC_SELECTION_MODES = {"random", "manual"}
 MUSIC_LOOP_MODES = {"loop_single", "loop_all"}
 INSERT_SELECTION_MODES = {"manual", "random"}
+AVATAR_OVERLAY_POSITION_OPTIONS = {"top_left", "top_right", "bottom_left", "bottom_right"}
 
 PRESET_HINT_KEYWORDS: dict[str, set[str]] = {
     "unboxing_default": {"UNBOX", "BOX", "PACKAGE", "PRODUCT", "DETAIL", "MACRO", "SHOWCASE", "开箱", "包装", "细节"},
@@ -169,6 +212,15 @@ def save_packaging_asset(*, asset_type: str, filename: str, payload: bytes) -> d
     if suffix not in ASSET_EXTENSIONS[asset_type]:
         raise ValueError(f"Unsupported {asset_type} file type: {suffix or 'unknown'}")
 
+    watermark_preprocessed = False
+    if asset_type == "watermark":
+        payload, suffix, content_type, watermark_preprocessed = _maybe_remove_watermark_solid_background(
+            payload=payload,
+            source_suffix=suffix,
+        )
+    else:
+        content_type = mimetypes.guess_type(f"dummy{suffix}")[0] or "application/octet-stream"
+
     PACKAGING_ROOT.mkdir(parents=True, exist_ok=True)
     asset_id = uuid.uuid4().hex
     stored_name = f"{asset_id}{suffix}"
@@ -184,7 +236,8 @@ def save_packaging_asset(*, asset_type: str, filename: str, payload: bytes) -> d
         "stored_name": stored_name,
         "path": str(target.resolve()),
         "size_bytes": len(payload),
-        "content_type": mimetypes.guess_type(target.name)[0] or "application/octet-stream",
+        "content_type": content_type,
+        "watermark_preprocessed": watermark_preprocessed if asset_type == "watermark" else None,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -211,6 +264,86 @@ def save_packaging_asset(*, asset_type: str, filename: str, payload: bytes) -> d
 
     _save_state(state)
     return item
+
+
+def _maybe_remove_watermark_solid_background(payload: bytes, source_suffix: str) -> tuple[bytes, str, str, bool]:
+    source_content_type = mimetypes.guess_type(f"dummy{source_suffix}")[0] or "application/octet-stream"
+
+    try:
+        from PIL import Image
+    except Exception:  # pragma: no cover
+        return payload, source_suffix, source_content_type, False
+
+    try:
+        image = Image.open(BytesIO(payload))
+        if image.mode in {"RGBA", "LA"}:
+            alpha_channel = np.array(image.getchannel("A"), dtype=np.uint8) if image.mode == "RGBA" else np.array(image.getchannel("A"), dtype=np.uint8)
+            if alpha_channel.mean() < 250:
+                return payload, source_suffix, source_content_type, False
+        if image.mode not in {"RGB", "RGBA", "LA", "P", "CMYK", "L"}:
+            image = image.convert("RGB")
+    except Exception:
+        return payload, source_suffix, source_content_type, False
+
+    if image.width == 0 or image.height == 0:
+        return payload, source_suffix, source_content_type, False
+
+    detected = _detect_pure_background_color(image)
+    if detected is None:
+        return payload, source_suffix, source_content_type, False
+
+    rgb = np.array(image.convert("RGB"), dtype=np.int16)
+    bg = np.array(detected, dtype=np.int16)
+    diff = np.abs(rgb - bg).max(axis=2)
+    alpha = np.where(diff <= 22, 0, 255).astype(np.uint8)
+    if alpha.mean() > 252:
+        return payload, source_suffix, source_content_type, False
+
+    out = np.concatenate([rgb.astype(np.uint8), alpha[:, :, None]], axis=2)
+    out_image = Image.fromarray(out, mode="RGBA")
+    out_bytes = BytesIO()
+    out_image.save(out_bytes, format="PNG", optimize=True)
+    output = out_bytes.getvalue()
+    return output, ".png", "image/png", True
+
+
+def _detect_pure_background_color(image: "Image.Image") -> tuple[int, int, int] | None:
+    from PIL import Image
+
+    preview = image.convert("RGB")
+    target_width = max(1, min(128, int(preview.width)))
+    scale = max(1, math.ceil(preview.width / 128))
+    target_height = max(1, min(128, int(preview.height / scale)))
+    small = preview.resize((target_width, target_height), Image.Resampling.BILINEAR)
+    arr = np.array(small, dtype=np.uint8)
+    if arr.shape[0] == 0 or arr.shape[1] == 0:
+        return None
+    edges = np.concatenate(
+        [
+            arr[0, :, :],
+            arr[-1, :, :],
+            arr[:, 0, :],
+            arr[:, -1, :],
+        ],
+        axis=0,
+    )
+    if edges.shape[0] == 0:
+        return None
+
+    quantized = (edges // 16) * 16
+    quantized_tuples = [tuple(pixel) for pixel in quantized.reshape(-1, 3)]
+    bg_candidate, count = Counter(quantized_tuples).most_common(1)[0]
+    ratio = count / max(1, len(quantized_tuples))
+    if ratio < 0.78:
+        return None
+
+    mask = np.abs(arr.astype(np.int16) - np.array(bg_candidate, dtype=np.int16)).max(axis=2) <= 28
+    bg_area_ratio = mask.mean()
+    if bg_area_ratio < 0.42:
+        return None
+    if bg_area_ratio > 0.97:
+        return None
+    return bg_candidate
 
 
 def delete_packaging_asset(asset_id: str) -> None:
@@ -272,6 +405,9 @@ def resolve_packaging_plan_for_job(job_id: str, *, content_profile: dict[str, An
             "subtitle_style": DEFAULT_CONFIG["subtitle_style"],
             "cover_style": DEFAULT_CONFIG["cover_style"],
             "title_style": DEFAULT_CONFIG["title_style"],
+            "copy_style": DEFAULT_CONFIG["copy_style"],
+            "subtitle_motion_style": DEFAULT_CONFIG["subtitle_motion_style"],
+            "smart_effect_style": DEFAULT_CONFIG["smart_effect_style"],
         }
 
     assets_by_id = {
@@ -311,8 +447,16 @@ def resolve_packaging_plan_for_job(job_id: str, *, content_profile: dict[str, An
         "watermark": watermark,
         "music": music,
         "subtitle_style": config["subtitle_style"],
+        "subtitle_motion_style": config["subtitle_motion_style"],
+        "smart_effect_style": config["smart_effect_style"],
         "cover_style": config["cover_style"],
         "title_style": config["title_style"],
+        "copy_style": config["copy_style"],
+        "avatar_overlay_position": config["avatar_overlay_position"],
+        "avatar_overlay_scale": config["avatar_overlay_scale"],
+        "avatar_overlay_corner_radius": config["avatar_overlay_corner_radius"],
+        "avatar_overlay_border_width": config["avatar_overlay_border_width"],
+        "avatar_overlay_border_color": config["avatar_overlay_border_color"],
     }
 
 
@@ -496,6 +640,61 @@ def _normalize_config(config: dict[str, Any], assets_by_id: dict[str, dict[str, 
     if title_style not in TITLE_STYLE_OPTIONS:
         title_style = DEFAULT_CONFIG["title_style"]
     normalized["title_style"] = title_style
+
+    copy_style = str(normalized.get("copy_style") or DEFAULT_CONFIG["copy_style"]).strip() or DEFAULT_CONFIG["copy_style"]
+    if copy_style not in COPY_STYLE_OPTIONS:
+        copy_style = DEFAULT_CONFIG["copy_style"]
+    normalized["copy_style"] = copy_style
+
+    subtitle_motion_style = str(
+        normalized.get("subtitle_motion_style") or DEFAULT_CONFIG["subtitle_motion_style"]
+    ).strip() or DEFAULT_CONFIG["subtitle_motion_style"]
+    if subtitle_motion_style not in SUBTITLE_MOTION_OPTIONS:
+        subtitle_motion_style = DEFAULT_CONFIG["subtitle_motion_style"]
+    normalized["subtitle_motion_style"] = subtitle_motion_style
+
+    smart_effect_style = str(
+        normalized.get("smart_effect_style") or DEFAULT_CONFIG["smart_effect_style"]
+    ).strip() or DEFAULT_CONFIG["smart_effect_style"]
+    if smart_effect_style not in SMART_EFFECT_STYLE_OPTIONS:
+        smart_effect_style = DEFAULT_CONFIG["smart_effect_style"]
+    normalized["smart_effect_style"] = smart_effect_style
+
+    avatar_overlay_position = str(
+        normalized.get("avatar_overlay_position") or DEFAULT_CONFIG["avatar_overlay_position"]
+    ).strip() or DEFAULT_CONFIG["avatar_overlay_position"]
+    if avatar_overlay_position not in AVATAR_OVERLAY_POSITION_OPTIONS:
+        avatar_overlay_position = DEFAULT_CONFIG["avatar_overlay_position"]
+    normalized["avatar_overlay_position"] = avatar_overlay_position
+
+    try:
+        avatar_overlay_scale = float(normalized.get("avatar_overlay_scale") or DEFAULT_CONFIG["avatar_overlay_scale"])
+    except Exception:
+        avatar_overlay_scale = float(DEFAULT_CONFIG["avatar_overlay_scale"])
+    normalized["avatar_overlay_scale"] = round(max(0.16, min(0.42, avatar_overlay_scale)), 3)
+
+    try:
+        avatar_overlay_corner_radius = int(
+            normalized.get("avatar_overlay_corner_radius") or DEFAULT_CONFIG["avatar_overlay_corner_radius"]
+        )
+    except Exception:
+        avatar_overlay_corner_radius = int(DEFAULT_CONFIG["avatar_overlay_corner_radius"])
+    normalized["avatar_overlay_corner_radius"] = max(0, min(64, avatar_overlay_corner_radius))
+
+    try:
+        avatar_overlay_border_width = int(
+            normalized.get("avatar_overlay_border_width") or DEFAULT_CONFIG["avatar_overlay_border_width"]
+        )
+    except Exception:
+        avatar_overlay_border_width = int(DEFAULT_CONFIG["avatar_overlay_border_width"])
+    normalized["avatar_overlay_border_width"] = max(0, min(12, avatar_overlay_border_width))
+
+    avatar_overlay_border_color = str(
+        normalized.get("avatar_overlay_border_color") or DEFAULT_CONFIG["avatar_overlay_border_color"]
+    ).strip().upper()
+    if not re.fullmatch(r"#[0-9A-F]{6}", avatar_overlay_border_color):
+        avatar_overlay_border_color = str(DEFAULT_CONFIG["avatar_overlay_border_color"])
+    normalized["avatar_overlay_border_color"] = avatar_overlay_border_color
 
     normalized["music_volume"] = float(normalized.get("music_volume") or DEFAULT_CONFIG["music_volume"])
     normalized["watermark_opacity"] = float(normalized.get("watermark_opacity") or DEFAULT_CONFIG["watermark_opacity"])

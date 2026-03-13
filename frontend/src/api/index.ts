@@ -1,3 +1,4 @@
+import { avatarMaterialsApi } from "./avatarMaterials";
 import { configApi } from "./config";
 import { controlApi } from "./control";
 import { glossaryApi } from "./glossary";
@@ -7,6 +8,7 @@ import { packagingApi } from "./packaging";
 import { watchRootsApi } from "./watchRoots";
 
 export const api = {
+  ...avatarMaterialsApi,
   ...jobsApi,
   ...watchRootsApi,
   ...glossaryApi,

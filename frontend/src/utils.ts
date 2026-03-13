@@ -1,7 +1,9 @@
+import { getCurrentUiLocale } from "./i18n";
+
 export function formatDate(value?: string | null): string {
   if (!value) return "—";
   try {
-    return new Date(value).toLocaleString("zh-CN", {
+    return new Date(value).toLocaleString(getCurrentUiLocale(), {
       year: "numeric",
       month: "2-digit",
       day: "2-digit",
@@ -39,15 +41,28 @@ export function classNames(...parts: Array<string | false | null | undefined>): 
 }
 
 export function statusLabel(status: string): string {
-  const labels: Record<string, string> = {
-    pending: "待处理",
-    running: "进行中",
-    done: "已完成",
-    failed: "失败",
-    cancelled: "已取消",
-    skipped: "已跳过",
-    processing: "处理中",
-    needs_review: "待核对",
+  const locale = getCurrentUiLocale();
+  const labels: Record<string, Record<string, string>> = {
+    "zh-CN": {
+      pending: "待处理",
+      running: "进行中",
+      done: "已完成",
+      failed: "失败",
+      cancelled: "已取消",
+      skipped: "已跳过",
+      processing: "处理中",
+      needs_review: "待核对",
+    },
+    "en-US": {
+      pending: "Pending",
+      running: "Running",
+      done: "Done",
+      failed: "Failed",
+      cancelled: "Cancelled",
+      skipped: "Skipped",
+      processing: "Processing",
+      needs_review: "Needs Review",
+    },
   };
-  return labels[status] ?? status;
+  return labels[locale]?.[status] ?? labels["zh-CN"][status] ?? status;
 }

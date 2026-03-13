@@ -132,15 +132,104 @@ def test_sanitize_generated_cover_title_rejects_foreign_brand():
     assert sanitized == {"top": "REATE", "main": "折刀雕刻开箱", "bottom": "先看柄身细节"}
 
 
-def test_build_cover_safe_area_layers_adds_bottom_mask_when_bottom_title_exists():
+def test_sanitize_generated_cover_title_rejects_missing_required_ai_topic():
+    sanitized = output_mod._sanitize_generated_cover_title(
+        {"top": "教程", "main": "软件工具", "bottom": "这功能太强了"},
+        fallback_plan={"top": "RUNNINGHUB", "main": "无限画布", "bottom": "新功能刚上线"},
+        content_profile={
+            "subject_brand": "RunningHub",
+            "subject_model": "无限画布",
+            "video_theme": "RunningHub 无限画布新功能上线与实操演示",
+        },
+    )
+
+    assert sanitized == {"top": "RUNNINGHUB", "main": "无限画布", "bottom": "新功能刚上线"}
+
+
+def test_adapt_cover_title_for_strategy_applies_platform_bias_to_bottom():
+    fallback = {"top": "RUNNINGHUB", "main": "无限画布", "bottom": "这功能强得离谱"}
+    profile = {
+        "subject_brand": "RunningHub",
+        "subject_model": "无限画布",
+        "subject_type": "AI工作流创作平台",
+        "copy_style": "attention_grabbing",
+    }
+
+    bilibili = output_mod._adapt_cover_title_for_strategy(fallback, strategy_key="bilibili", content_profile=profile)
+    xiaohongshu = output_mod._adapt_cover_title_for_strategy(fallback, strategy_key="xiaohongshu", content_profile=profile)
+    ctr = output_mod._adapt_cover_title_for_strategy(fallback, strategy_key="ctr", content_profile=profile)
+    brand = output_mod._adapt_cover_title_for_strategy(fallback, strategy_key="brand", content_profile=profile)
+
+    assert bilibili == {"top": "RUNNINGHUB", "main": "无限画布", "bottom": "无限画布一口气讲透"}
+    assert xiaohongshu == {"top": "RUNNINGHUB", "main": "无限画布", "bottom": "无限画布细节直接封神"}
+    assert ctr == {"top": "RUNNINGHUB", "main": "无限画布", "bottom": "无限画布这次太炸了"}
+    assert brand == {"top": "RUNNINGHUB", "main": "无限画布", "bottom": "无限画布高级感拉满"}
+
+
+def test_build_cover_safe_area_layers_keeps_cover_clean_even_with_bottom_title():
     layers = output_mod._build_cover_safe_area_layers({"top": "REATE", "main": "折刀", "bottom": "先看雕刻细节"})
 
-    assert len(layers) == 2
-    assert all(layer.startswith("drawbox=") for layer in layers)
-    assert "y=ih*0.74" in layers[0]
+    assert layers == []
 
 
 def test_build_cover_safe_area_layers_skips_mask_without_bottom_title():
     layers = output_mod._build_cover_safe_area_layers({"top": "REATE", "main": "折刀", "bottom": ""})
 
     assert layers == []
+
+
+def test_build_cover_candidate_seeks_biases_sampling_away_from_intro():
+    seeks = output_mod._build_cover_candidate_seeks(120.0, candidate_count=5, anchor_seek=8.0)
+
+    assert len(seeks) == 5
+    assert seeks == sorted(seeks)
+    assert min(seeks) >= 18.0
+    assert max(seeks) <= 105.6
+
+
+def test_title_style_tokens_clamp_text_into_cross_platform_safe_zone():
+    style = output_mod._title_style_tokens(
+        "double_banner",
+        title_lines={"top": "REATE", "main": "彩雕折刀", "bottom": "先看细节"},
+        cover_style="tech_showcase",
+    )
+
+    assert style["top"]["x"].startswith("max(max(w*0.289062")
+    assert "min(70," in style["top"]["x"]
+    assert style["main"]["x"].startswith("max(max(w*0.289062")
+    assert style["bottom"]["y"].startswith("max(max(h*0.120")
+    assert "h-max(h*0.140" in style["bottom"]["y"]
+
+
+def test_fit_cover_text_to_safe_zone_shrinks_long_main_title():
+    fitted = output_mod._fit_cover_text_to_safe_zone(
+        "这把折刀的彩雕细节真的太夸张了",
+        170,
+        min_size=72,
+    )
+
+    assert fitted < 170
+    assert fitted >= 72
+
+
+def test_fit_cover_text_to_safe_zone_accounts_for_box_padding():
+    plain = output_mod._fit_cover_text_to_safe_zone("REATE", 84, min_size=56)
+    boxed = output_mod._fit_cover_text_to_safe_zone("REATE", 84, min_size=56, box_padding=20)
+
+    assert boxed <= plain
+
+
+def test_drawtext_escapes_commas_in_safe_zone_expressions():
+    layer = output_mod._drawtext(
+        text="REATE",
+        fontfile="C\\:/Windows/Fonts/msyhbd.ttc",
+        fontsize=84,
+        fontcolor="0xFFFFFFFF",
+        bordercolor="0x111111FF",
+        borderw=6,
+        x="max(370,min((w-text_w)/2,910-text_w))",
+        y="max(86,min(h-text_h-84,620-text_h))",
+    )
+
+    assert ":x=max(370\\,min((w-text_w)/2\\,910-text_w))" in layer
+    assert ":y=max(86\\,min(h-text_h-84\\,620-text_h))" in layer

@@ -6,6 +6,7 @@ import { useGlossaryWorkspace } from "./useGlossaryWorkspace";
 
 const mockApi = vi.hoisted(() => ({
   listGlossary: vi.fn(),
+  listBuiltinGlossaryPacks: vi.fn(),
   createGlossary: vi.fn(),
   updateGlossary: vi.fn(),
   deleteGlossary: vi.fn(),
@@ -27,8 +28,14 @@ const SAMPLE_TERM: GlossaryTerm = {
 describe("useGlossaryWorkspace", () => {
   beforeEach(() => {
     mockApi.listGlossary.mockResolvedValue([SAMPLE_TERM]);
+    mockApi.listBuiltinGlossaryPacks.mockResolvedValue([]);
     mockApi.createGlossary.mockResolvedValue(SAMPLE_TERM);
-    mockApi.updateGlossary.mockResolvedValue(SAMPLE_TERM);
+    mockApi.updateGlossary.mockImplementation(async (termId: string, payload: Record<string, unknown>) => ({
+      ...SAMPLE_TERM,
+      id: termId,
+      ...payload,
+      wrong_forms: (payload.wrong_forms as string[]) ?? SAMPLE_TERM.wrong_forms,
+    }));
     mockApi.deleteGlossary.mockResolvedValue({});
   });
 
@@ -72,6 +79,113 @@ describe("useGlossaryWorkspace", () => {
         correct_form: "Leatherman ARC",
         category: "model",
         context_hint: undefined,
+      }),
+    );
+  });
+
+  it("autosaves edits for the selected glossary term", async () => {
+    const { result } = renderHookWithQueryClient(() => useGlossaryWorkspace());
+
+    await waitFor(() => expect(result.current.glossary.data).toEqual([SAMPLE_TERM]));
+
+    act(() => {
+      result.current.startEdit(SAMPLE_TERM);
+      result.current.setForm({
+        wrong_forms: "GPT4, gpt4, gpt-4",
+        correct_form: "GPT-4",
+        category: "model",
+        context_hint: "数码开箱",
+      });
+    });
+
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 600));
+    });
+
+    await waitFor(() =>
+      expect(mockApi.updateGlossary).toHaveBeenCalledWith("term_1", {
+        wrong_forms: ["GPT4", "gpt4", "gpt-4"],
+        correct_form: "GPT-4",
+        category: "model",
+        context_hint: "数码开箱",
+      }),
+    );
+    await waitFor(() => expect(result.current.saveState).toBe("saved"));
+  });
+
+  it("imports builtin glossary terms into custom glossary", async () => {
+    mockApi.listBuiltinGlossaryPacks.mockResolvedValue([
+      {
+        domain: "gear",
+        presets: ["edc_tactical"],
+        term_count: 1,
+        terms: [
+          {
+            correct_form: "FAS",
+            wrong_forms: ["法斯", "发斯"],
+            category: "term",
+            context_hint: "圈内缩写",
+          },
+        ],
+      },
+    ]);
+
+    const { result } = renderHookWithQueryClient(() => useGlossaryWorkspace());
+
+    await waitFor(() => expect(result.current.builtinPacks.data?.[0].domain).toBe("gear"));
+
+    await act(async () => {
+      await result.current.importOneBuiltinTerm({
+        correct_form: "FAS",
+        wrong_forms: ["法斯", "发斯"],
+        category: "term",
+        context_hint: "圈内缩写",
+      });
+    });
+
+    await waitFor(() =>
+      expect(mockApi.createGlossary).toHaveBeenCalledWith({
+        wrong_forms: ["法斯", "发斯"],
+        correct_form: "FAS",
+        category: "term",
+        context_hint: "圈内缩写",
+      }),
+    );
+  });
+
+  it("syncs aliases into existing glossary terms when sync mode is enabled", async () => {
+    const existingTerm: GlossaryTerm = {
+      id: "term_fas",
+      wrong_forms: ["老错写"],
+      correct_form: "FAS",
+      category: "term",
+      context_hint: "旧提示",
+      created_at: "2026-03-12T10:00:00Z",
+    };
+    mockApi.listGlossary.mockResolvedValue([existingTerm]);
+
+    const { result } = renderHookWithQueryClient(() => useGlossaryWorkspace());
+
+    await waitFor(() => expect(result.current.glossary.data?.[0].correct_form).toBe("FAS"));
+
+    act(() => {
+      result.current.setBuiltinImportMode("sync_aliases");
+    });
+
+    await act(async () => {
+      await result.current.importOneBuiltinTerm({
+        correct_form: "FAS",
+        wrong_forms: ["法斯", "发斯"],
+        category: "term",
+        context_hint: "圈内缩写",
+      });
+    });
+
+    await waitFor(() =>
+      expect(mockApi.updateGlossary).toHaveBeenCalledWith("term_fas", {
+        wrong_forms: ["法斯", "发斯"],
+        category: "term",
+        context_hint: "圈内缩写",
       }),
     );
   });

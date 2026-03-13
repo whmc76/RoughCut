@@ -124,6 +124,12 @@ async def render_video(
                 text_color_rgb=settings.subtitle_color,
                 outline_color_rgb=settings.subtitle_outline_color,
                 outline_width=settings.subtitle_outline_width,
+                margin_v_override=await _resolve_subtitle_margin_with_avatar(
+                    expected_width=expected_w,
+                    expected_height=expected_h,
+                    avatar_plan=render_plan.get("avatar_commentary") or {},
+                ),
+                motion_style=str((render_plan.get("subtitles") or {}).get("motion_style") or "motion_static"),
                 play_res_x=expected_w,
                 play_res_y=expected_h,
             )
@@ -135,6 +141,14 @@ async def render_video(
     if editing_accents.get("emphasis_overlays"):
         overlay_filters, video_label = _build_emphasis_overlay_filters(video_label, editing_accents)
         filter_parts.extend(overlay_filters)
+        video_map = f"[{video_label}]"
+        smart_effect_filters, video_label = _build_smart_effect_video_filters(
+            video_label,
+            editing_accents,
+            expected_width=expected_w,
+            expected_height=expected_h,
+        )
+        filter_parts.extend(smart_effect_filters)
         video_map = f"[{video_label}]"
 
     filter_complex = ";".join(filter_parts)
@@ -208,7 +222,7 @@ def _build_segment_filter_chain(
         editing_accents.get("transitions") or {},
     )
     needs_constant_fps = bool(transition_map)
-    video_timing_suffix = f"{transpose_suffix},fps=30000/1001" if needs_constant_fps else transpose_suffix
+    video_timing_suffix = f"{transpose_suffix},fps=30000/1001,settb=AVTB" if needs_constant_fps else transpose_suffix
     segment_durations: list[float] = []
     for index, segment in enumerate(keep_segments):
         start = float(segment["start"])
@@ -232,8 +246,9 @@ def _build_segment_filter_chain(
         transition_duration = transition_map.get(boundary_index)
         if transition_duration is not None:
             offset = max(0.0, current_duration - transition_duration)
+            transition_name = str((editing_accents.get("transitions") or {}).get("transition") or "fade").strip() or "fade"
             parts.append(
-                f"[{current_video}][{next_video}]xfade=transition=fade:duration={transition_duration}:offset={offset}[{output_video}]"
+                f"[{current_video}][{next_video}]xfade=transition={transition_name}:duration={transition_duration}:offset={offset}[{output_video}]"
             )
             parts.append(
                 f"[{current_audio}][{next_audio}]acrossfade=d={transition_duration}:c1=tri:c2=tri[{output_audio}]"
@@ -308,6 +323,7 @@ def _build_emphasis_overlay_filters(
     parts: list[str] = []
     current_video = video_label
     font_name = _escape_drawtext_value(get_settings().subtitle_font)
+    style_tokens = _resolve_effect_overlay_tokens(str(editing_accents.get("style") or "smart_effect_rhythm"))
     for index, overlay in enumerate(editing_accents.get("emphasis_overlays") or []):
         text = _escape_drawtext_value(str(overlay.get("text") or ""))
         if not text:
@@ -326,16 +342,179 @@ def _build_emphasis_overlay_filters(
             f"[{current_video}]drawtext="
             f"font='{font_name}':"
             f"text='{text}':"
-            f"fontsize=72:"
-            f"fontcolor=white:"
+            f"fontsize={style_tokens['fontsize']}:"
+            f"fontcolor={style_tokens['fontcolor']}:"
             f"alpha='{alpha_expr}':"
-            f"box=1:boxcolor=black@0.45:boxborderw=18:"
-            f"borderw=2:bordercolor=black@0.25:"
-            f"x=(w-text_w)/2:y=h*0.18"
+            f"box=1:boxcolor={style_tokens['boxcolor']}:boxborderw={style_tokens['boxborderw']}:"
+            f"borderw={style_tokens['borderw']}:bordercolor={style_tokens['bordercolor']}:"
+            f"x=(w-text_w)/2:y=h*{style_tokens['y_ratio']}"
             f"[{output_label}]"
         )
         current_video = output_label
     return parts, current_video
+
+
+def _build_smart_effect_video_filters(
+    video_label: str,
+    editing_accents: dict[str, Any],
+    *,
+    expected_width: int,
+    expected_height: int,
+) -> tuple[list[str], str]:
+    overlays = list(editing_accents.get("emphasis_overlays") or [])
+    if not overlays:
+        return [], video_label
+
+    style = str(editing_accents.get("style") or "smart_effect_rhythm")
+    tokens = _resolve_smart_effect_video_tokens(style)
+    zoom_size = f"{expected_width}x{expected_height}"
+    parts: list[str] = []
+    current_video = video_label
+
+    for index, overlay in enumerate(overlays):
+        start_time = max(0.0, float(overlay.get("start_time") or 0.0))
+        end_time = max(start_time + 0.24, float(overlay.get("end_time") or start_time + 1.0))
+        attack_end = min(end_time, start_time + max(0.08, (end_time - start_time) * 0.38))
+        enable_expr = f"between(t\\,{start_time}\\,{end_time})"
+        zoom_expr = (
+            f"if(lte(in_time\\,{start_time})\\,1\\,"
+            f"if(lte(in_time\\,{attack_end})\\,1+((in_time-{start_time})/{max(attack_end - start_time, 0.01)})*{tokens['zoom_peak']}\\,"
+            f"1+(({end_time}-in_time)/{max(end_time - attack_end, 0.01)})*{tokens['zoom_decay']}))"
+        )
+        output_label = f"vsmart{index}"
+        parts.append(
+            f"[{current_video}]scale=iw*{tokens['pre_scale']}:ih*{tokens['pre_scale']},"
+            f"crop=w=iw/{tokens['pre_scale']}:h=ih/{tokens['pre_scale']}:"
+            f"x='(iw-iw/{tokens['pre_scale']})/2':y='(ih-ih/{tokens['pre_scale']})/2',"
+            f"zoompan=z='{zoom_expr}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':"
+            f"d=1:s={zoom_size}:fps=30000/1001,"
+            f"eq=contrast={tokens['contrast']}:saturation={tokens['saturation']}:brightness={tokens['brightness']},"
+            f"unsharp={tokens['unsharp']},"
+            f"drawbox=x=0:y=0:w=iw:h=ih:color={tokens['flash_color']}:t=fill:enable='{enable_expr}':replace=0"
+            f"[{output_label}]"
+        )
+        current_video = output_label
+    return parts, current_video
+
+
+def _resolve_effect_overlay_tokens(style: str) -> dict[str, Any]:
+    mapping: dict[str, dict[str, Any]] = {
+        "smart_effect_rhythm": {
+            "fontsize": 72,
+            "fontcolor": "white",
+            "boxcolor": "black@0.45",
+            "boxborderw": 18,
+            "borderw": 2,
+            "bordercolor": "black@0.25",
+            "y_ratio": 0.18,
+        },
+        "smart_effect_punch": {
+            "fontsize": 86,
+            "fontcolor": "white",
+            "boxcolor": "0x3a0505@0.58",
+            "boxborderw": 24,
+            "borderw": 3,
+            "bordercolor": "0xff874d@0.52",
+            "y_ratio": 0.16,
+        },
+        "smart_effect_glitch": {
+            "fontsize": 78,
+            "fontcolor": "0xeef2ff",
+            "boxcolor": "0x11162f@0.6",
+            "boxborderw": 20,
+            "borderw": 2,
+            "bordercolor": "0x6f7fff@0.48",
+            "y_ratio": 0.17,
+        },
+        "smart_effect_cinematic": {
+            "fontsize": 68,
+            "fontcolor": "0xfff4e8",
+            "boxcolor": "0x120d08@0.4",
+            "boxborderw": 16,
+            "borderw": 1,
+            "bordercolor": "0xe2b471@0.34",
+            "y_ratio": 0.2,
+        },
+        "smart_effect_minimal": {
+            "fontsize": 62,
+            "fontcolor": "white",
+            "boxcolor": "black@0.28",
+            "boxborderw": 12,
+            "borderw": 1,
+            "bordercolor": "white@0.12",
+            "y_ratio": 0.2,
+        },
+    }
+    return mapping.get(style, mapping["smart_effect_rhythm"])
+
+
+def _resolve_smart_effect_video_tokens(style: str) -> dict[str, Any]:
+    base = {
+        "pre_scale": 1.18,
+        "zoom_peak": 0.08,
+        "zoom_decay": 0.04,
+        "contrast": 1.04,
+        "saturation": 1.08,
+        "brightness": 0.015,
+        "unsharp": "5:5:0.8:3:3:0.0",
+        "flash_color": "white@0.08",
+    }
+    mapping: dict[str, dict[str, Any]] = {
+        "smart_effect_rhythm": {
+            **base,
+            "pre_scale": 1.14,
+            "zoom_peak": 0.05,
+            "zoom_decay": 0.025,
+            "contrast": 1.025,
+            "saturation": 1.04,
+            "brightness": 0.01,
+            "flash_color": "white@0.06",
+        },
+        "smart_effect_punch": {
+            **base,
+            "pre_scale": 1.22,
+            "zoom_peak": 0.12,
+            "zoom_decay": 0.08,
+            "contrast": 1.08,
+            "saturation": 1.14,
+            "brightness": 0.024,
+            "unsharp": "5:5:1.1:3:3:0.0",
+            "flash_color": "white@0.16",
+        },
+        "smart_effect_glitch": {
+            **base,
+            "pre_scale": 1.17,
+            "zoom_peak": 0.09,
+            "zoom_decay": 0.05,
+            "contrast": 1.06,
+            "saturation": 1.18,
+            "brightness": 0.008,
+            "flash_color": "0x8d7bff@0.12",
+        },
+        "smart_effect_cinematic": {
+            **base,
+            "pre_scale": 1.1,
+            "zoom_peak": 0.04,
+            "zoom_decay": 0.02,
+            "contrast": 1.02,
+            "saturation": 1.02,
+            "brightness": 0.004,
+            "unsharp": "5:5:0.45:3:3:0.0",
+            "flash_color": "0xf2c07a@0.035",
+        },
+        "smart_effect_minimal": {
+            **base,
+            "pre_scale": 1.08,
+            "zoom_peak": 0.02,
+            "zoom_decay": 0.012,
+            "contrast": 1.01,
+            "saturation": 1.01,
+            "brightness": 0.0,
+            "unsharp": "5:5:0.25:3:3:0.0",
+            "flash_color": "white@0.02",
+        },
+    }
+    return mapping.get(style, mapping["smart_effect_rhythm"])
 
 
 def _escape_drawtext_value(value: str) -> str:
@@ -345,6 +524,47 @@ def _escape_drawtext_value(value: str) -> str:
     escaped = escaped.replace("%", r"\%")
     escaped = escaped.replace(",", r"\,")
     return escaped
+
+
+async def _resolve_subtitle_margin_with_avatar(
+    *,
+    expected_width: int,
+    expected_height: int,
+    avatar_plan: dict[str, Any],
+) -> int | None:
+    if str(avatar_plan.get("integration_mode") or "") != "picture_in_picture":
+        return None
+    position = str(avatar_plan.get("overlay_position") or "bottom_right").strip() or "bottom_right"
+    if not position.startswith("bottom_"):
+        return None
+
+    scale = max(0.16, min(0.42, float(avatar_plan.get("overlay_scale") or 0.28)))
+    safe_margin = max(0.02, min(0.2, float(avatar_plan.get("safe_margin") or 0.08)))
+    border_width = max(0, int(avatar_plan.get("overlay_border_width") or 0))
+    presenter_id = str(avatar_plan.get("presenter_id") or "").strip()
+
+    aspect_ratio = 0.75
+    if presenter_id:
+        try:
+            presenter_info = _probe_video_stream(Path(presenter_id))
+            if presenter_info["width"] > 0 and presenter_info["height"] > 0:
+                aspect_ratio = presenter_info["height"] / presenter_info["width"]
+        except Exception:
+            pass
+
+    overlay_width = max(180, int(round(expected_width * scale)))
+    overlay_height = int(round(overlay_width * aspect_ratio))
+    margin_px = max(18, int(round(min(expected_width, expected_height) * safe_margin)))
+
+    face_protect_ratio = 0.58
+    chin_overlap_ratio = 0.18
+    protected_height = int(round(overlay_height * face_protect_ratio))
+    allowed_overlap = int(round(overlay_height * chin_overlap_ratio))
+    clearance = max(
+        48,
+        protected_height - allowed_overlap + margin_px + border_width * 2 + 20,
+    )
+    return min(expected_height - 48, clearance)
 
 
 async def _apply_packaging_plan(
@@ -384,6 +604,8 @@ async def _apply_packaging_plan(
                 current_path,
                 music_plan=render_plan.get("music"),
                 watermark_plan=render_plan.get("watermark"),
+                expected_width=expected_width,
+                expected_height=expected_height,
                 output_path=tmp / "packaged.mp4",
                 debug_dir=debug_dir,
             )
@@ -534,6 +756,8 @@ async def _apply_music_and_watermark(
     *,
     music_plan: dict | None,
     watermark_plan: dict | None,
+    expected_width: int,
+    expected_height: int,
     output_path: Path,
     debug_dir: Path | None,
 ) -> Path:
@@ -576,11 +800,11 @@ async def _apply_music_and_watermark(
         opacity = float(watermark_plan.get("opacity", 0.82) or 0.82)
         scale = float(watermark_plan.get("scale", 0.16) or 0.16)
         overlay_x, overlay_y = _watermark_overlay_position(str(watermark_plan.get("position") or "top_right"))
+        watermark_width = max(1, int(round(expected_width * scale)))
         filter_parts.append(
-            f"[{next_input_index}:v][0:v]scale2ref=w=main_w*{scale}:h=-1[wm][base]"
+            f"[{next_input_index}:v]scale={watermark_width}:-1,format=rgba,colorchannelmixer=aa={opacity}[wmfinal]"
         )
-        filter_parts.append(f"[wm]format=rgba,colorchannelmixer=aa={opacity}[wmfinal]")
-        filter_parts.append(f"[base][wmfinal]overlay=x={overlay_x}:y={overlay_y}:format=auto[vout]")
+        filter_parts.append(f"[0:v][wmfinal]overlay=x={overlay_x}:y={overlay_y}:format=auto[vout]")
         video_map = "[vout]"
 
     if not filter_parts:

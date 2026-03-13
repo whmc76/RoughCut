@@ -3,48 +3,77 @@ import { FormActions } from "../../components/forms/FormActions";
 import { SelectField } from "../../components/forms/SelectField";
 import { TextField } from "../../components/forms/TextField";
 import { PanelHeader } from "../../components/ui/PanelHeader";
+import { useI18n } from "../../i18n";
 import type { TermForm } from "./constants";
 
 type GlossaryFormPanelProps = {
   editing: GlossaryTerm | null;
   form: TermForm;
   isSaving: boolean;
+  autosaveState?: "idle" | "saving" | "saved" | "error";
+  autosaveError?: string | null;
   onChange: (next: TermForm) => void;
   onSubmit: () => void;
   onReset: () => void;
 };
 
-export function GlossaryFormPanel({ editing, form, isSaving, onChange, onSubmit, onReset }: GlossaryFormPanelProps) {
+export function GlossaryFormPanel({ editing, form, isSaving, autosaveState, autosaveError, onChange, onSubmit, onReset }: GlossaryFormPanelProps) {
+  const { t } = useI18n();
+  const autosaveTone =
+    autosaveState === "saving" ? "running" : autosaveState === "error" ? "failed" : autosaveState === "saved" ? "done" : "";
+  const autosaveLabel =
+    autosaveState === "saving"
+      ? t("autosave.saving")
+      : autosaveState === "error"
+        ? t("autosave.error")
+        : autosaveState === "saved"
+          ? t("autosave.saved")
+          : t("autosave.idle");
+
   return (
     <section className="panel">
-      <PanelHeader title={editing ? "编辑术语" : "新增术语"} description="错误写法用逗号分隔。" actions={editing ? <button className="button ghost" onClick={onReset}>取消编辑</button> : undefined} />
+      <PanelHeader
+        title={editing ? t("glossary.form.editTitle") : t("glossary.form.createTitle")}
+        description={t("glossary.form.description")}
+        actions={
+          editing ? (
+            <div className="toolbar">
+              <span className={`status-pill ${autosaveTone}`}>{autosaveLabel}</span>
+              <button className="button ghost" onClick={onReset}>{t("glossary.form.cancelEdit")}</button>
+            </div>
+          ) : undefined
+        }
+      />
 
       <div className="form-stack">
-        <TextField label="错误写法" value={form.wrong_forms} onChange={(event) => onChange({ ...form, wrong_forms: event.target.value })} placeholder="GPT4, gpt4" />
-        <TextField label="正确写法" value={form.correct_form} onChange={(event) => onChange({ ...form, correct_form: event.target.value })} placeholder="GPT-4" />
+        <TextField label={t("glossary.form.wrongForms")} value={form.wrong_forms} onChange={(event) => onChange({ ...form, wrong_forms: event.target.value })} placeholder="GPT4, gpt4" />
+        <TextField label={t("glossary.form.correctForm")} value={form.correct_form} onChange={(event) => onChange({ ...form, correct_form: event.target.value })} placeholder="GPT-4" />
         <SelectField
-          label="类别"
+          label={t("glossary.form.category")}
           value={form.category}
           onChange={(event) => onChange({ ...form, category: event.target.value })}
           options={[
-            { value: "", label: "未设置" },
-            { value: "brand", label: "品牌" },
-            { value: "model", label: "型号" },
-            { value: "tech_term", label: "技术术语" },
-            { value: "person", label: "人名" },
+            { value: "", label: t("glossary.form.unset") },
+            { value: "brand", label: t("glossary.form.brand") },
+            { value: "model", label: t("glossary.form.model") },
+            { value: "tech_term", label: t("glossary.form.techTerm") },
+            { value: "person", label: t("glossary.form.person") },
           ]}
         />
         <TextField
-          label="上下文提示"
+          label={t("glossary.form.contextHint")}
           value={form.context_hint}
           onChange={(event) => onChange({ ...form, context_hint: event.target.value })}
           placeholder="只在数码开箱里使用"
         />
-        <FormActions>
-          <button className="button primary" onClick={onSubmit} disabled={isSaving}>
-            {isSaving ? "保存中..." : editing ? "保存修改" : "新增术语"}
-          </button>
-        </FormActions>
+        {autosaveError && editing && <div className="notice">{autosaveError}</div>}
+        {!editing && (
+          <FormActions>
+            <button className="button primary" onClick={onSubmit} disabled={isSaving}>
+              {isSaving ? t("glossary.form.saving") : t("glossary.form.create")}
+            </button>
+          </FormActions>
+        )}
       </div>
     </section>
   );

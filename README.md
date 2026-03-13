@@ -223,21 +223,21 @@ pnpm build:backend
 ### 10. 一键本地启动（Windows）
 
 ```powershell
-./restart_roughcut.bat
+./start_roughcut.bat
 ```
 
-Windows 下当前建议把 [restart_roughcut.bat](E:/WorkSpace/RoughCut/restart_roughcut.bat) 作为用户入口：
+Windows 下当前建议把 [start_roughcut.bat](E:/WorkSpace/RoughCut/start_roughcut.bat) 作为用户入口：
 
-- `restart_roughcut.bat`
-  一键启动包模式，后台拉起 API / orchestrator / workers，并自动打开浏览器
-- `restart_roughcut.bat dev`
+- `start_roughcut.bat`
+  一键启动包模式，后台拉起 API / orchestrator / workers，并自动打开浏览器；这个终端窗口本身就是托管器，直接关窗即可停掉整套服务
+- `start_roughcut.bat dev`
   直接运行统一入口 `pnpm dev`
-- `restart_roughcut.bat test`
+- `start_roughcut.bat test`
   运行 `pnpm test`
-- `restart_roughcut.bat build`
+- `start_roughcut.bat build`
   运行 `pnpm build`
 
-`restart_roughcut.ps1` 仍保留，但现在主要作为 `.bat` 的内部实现脚本和高级参数入口。
+`start_roughcut.ps1` 是当前主脚本，也是一键启动的实际实现。
 
 ---
 

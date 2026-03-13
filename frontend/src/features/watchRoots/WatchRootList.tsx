@@ -2,6 +2,7 @@ import type { WatchRoot } from "../../types";
 import { EmptyState } from "../../components/ui/EmptyState";
 import { ListCard } from "../../components/ui/ListCard";
 import { PanelHeader } from "../../components/ui/PanelHeader";
+import { useI18n } from "../../i18n";
 
 type WatchRootListProps = {
   roots: WatchRoot[];
@@ -11,9 +12,15 @@ type WatchRootListProps = {
 };
 
 export function WatchRootList({ roots, selectedRootId, onSelect, onCreateNew }: WatchRootListProps) {
+  const { t } = useI18n();
+
   return (
     <section className="panel">
-      <PanelHeader title="目录列表" description={`${roots.length} 个监控目录`} actions={<button className="button ghost" onClick={onCreateNew}>新建</button>} />
+      <PanelHeader
+        title={t("watch.list.title")}
+        description={`${roots.length} ${t("watch.list.count")}`}
+        actions={<button className="button ghost" onClick={onCreateNew}>{t("watch.list.new")}</button>}
+      />
 
       <div className="list-stack">
         {roots.map((root) => (
@@ -26,15 +33,15 @@ export function WatchRootList({ roots, selectedRootId, onSelect, onCreateNew }: 
           >
             <div>
               <div className="row-title">{root.path}</div>
-              <div className="muted">{root.channel_profile || "未设置频道配置"}</div>
+              <div className="muted">{root.channel_profile || t("watch.list.unsetProfile")}</div>
             </div>
             <div className="row-meta">
-              <span className={`status-chip ${root.enabled ? "done" : "cancelled"}`}>{root.enabled ? "启用" : "停用"}</span>
+              <span className={`status-chip ${root.enabled ? "done" : "cancelled"}`}>{root.enabled ? t("watch.list.enabled") : t("watch.list.disabled")}</span>
               <span>{root.scan_mode}</span>
             </div>
           </ListCard>
         ))}
-        {!roots.length && <EmptyState message="暂无监控目录" />}
+        {!roots.length && <EmptyState message={t("watch.list.empty")} />}
       </div>
     </section>
   );

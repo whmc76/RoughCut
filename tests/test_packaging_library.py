@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import uuid
-from pathlib import Path
 
 from roughcut.packaging import library
 
@@ -43,6 +42,7 @@ def test_packaging_library_saves_and_resolves_assets(tmp_path, monkeypatch):
             "music_loop_mode": "loop_all",
             "subtitle_style": "cinema_blue",
             "cover_style": "tactical_neon",
+            "copy_style": "trusted_expert",
         }
     )
 
@@ -63,6 +63,7 @@ def test_packaging_library_saves_and_resolves_assets(tmp_path, monkeypatch):
     assert plan["music"]["selection_summary"]["review_recommended"] is False
     assert plan["subtitle_style"] == "cinema_blue"
     assert plan["cover_style"] == "tactical_neon"
+    assert plan["copy_style"] == "trusted_expert"
 
 
 def test_packaging_library_delete_clears_selected_ids(tmp_path, monkeypatch):

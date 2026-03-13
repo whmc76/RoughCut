@@ -1,7 +1,6 @@
 """Runtime config API — read/write roughcut_config.json to override env vars."""
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any
 
@@ -13,26 +12,28 @@ from roughcut.api.options import (
     MULTIMODAL_FALLBACK_PROVIDER_OPTIONS,
     SEARCH_FALLBACK_PROVIDER_OPTIONS,
     SEARCH_PROVIDER_OPTIONS,
+    build_avatar_provider_options,
     build_channel_profile_options,
+    build_enhancement_mode_options,
+    build_voice_provider_options,
+    build_workflow_mode_options,
 )
-from roughcut.config import get_settings
+from roughcut.config import (
+    AVATAR_PROVIDER_OPTIONS,
+    DEFAULT_TRANSCRIPTION_PROVIDER,
+    TRANSCRIPTION_MODEL_OPTIONS,
+    VOICE_PROVIDER_OPTIONS,
+    apply_runtime_overrides,
+    get_settings,
+    load_runtime_overrides,
+    normalize_transcription_settings,
+)
+from roughcut.creative.modes import normalize_enhancement_modes, normalize_workflow_mode
+from roughcut.creative.modes import build_mode_catalog
 
 router = APIRouter(prefix="/config", tags=["config"])
 
 _CONFIG_FILE = Path("roughcut_config.json")
-
-
-def _load_overrides() -> dict:
-    if _CONFIG_FILE.exists():
-        try:
-            return json.loads(_CONFIG_FILE.read_text(encoding="utf-8"))
-        except Exception:
-            return {}
-    return {}
-
-
-def _save_overrides(data: dict) -> None:
-    _CONFIG_FILE.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
 class ConfigOut(BaseModel):
@@ -53,10 +54,23 @@ class ConfigOut(BaseModel):
     openai_base_url: str
     openai_auth_mode: str
     openai_api_key_helper: str
+    avatar_provider: str
+    avatar_api_base_url: str
+    avatar_training_api_base_url: str
+    avatar_api_key_set: bool
+    avatar_presenter_id: str
+    avatar_layout_template: str
+    avatar_safe_margin: float
+    avatar_overlay_scale: float
     anthropic_base_url: str
     anthropic_auth_mode: str
     anthropic_api_key_helper: str
     minimax_base_url: str
+    voice_provider: str
+    voice_clone_api_base_url: str
+    voice_clone_api_key_set: bool
+    voice_clone_voice_id: str
+    director_rewrite_strength: float
     ollama_api_key_set: bool
     # Keys (masked)
     openai_api_key_set: bool
@@ -69,6 +83,8 @@ class ConfigOut(BaseModel):
     ffmpeg_timeout_sec: int
     allowed_extensions: list[str]
     output_dir: str
+    default_job_workflow_mode: str
+    default_job_enhancement_modes: list[str]
     # Feature flags
     fact_check_enabled: bool
     auto_confirm_content_profile: bool
@@ -86,6 +102,11 @@ class ConfigOut(BaseModel):
 class ConfigOptionsOut(BaseModel):
     job_languages: list[dict[str, str]]
     channel_profiles: list[dict[str, str]]
+    workflow_modes: list[dict[str, str]]
+    enhancement_modes: list[dict[str, str]]
+    avatar_providers: list[dict[str, str]]
+    voice_providers: list[dict[str, str]]
+    creative_mode_catalog: dict[str, list[dict[str, Any]]]
     transcription_models: dict[str, list[str]]
     multimodal_fallback_providers: list[dict[str, str]]
     search_providers: list[dict[str, str]]
@@ -109,12 +130,25 @@ class ConfigPatch(BaseModel):
     openai_base_url: str | None = None
     openai_auth_mode: str | None = None
     openai_api_key_helper: str | None = None
+    avatar_provider: str | None = None
+    avatar_api_base_url: str | None = None
+    avatar_training_api_base_url: str | None = None
+    avatar_api_key: str | None = None
+    avatar_presenter_id: str | None = None
+    avatar_layout_template: str | None = None
+    avatar_safe_margin: float | None = None
+    avatar_overlay_scale: float | None = None
     anthropic_api_key: str | None = None
     anthropic_base_url: str | None = None
     anthropic_auth_mode: str | None = None
     anthropic_api_key_helper: str | None = None
     minimax_api_key: str | None = None
     minimax_base_url: str | None = None
+    voice_provider: str | None = None
+    voice_clone_api_base_url: str | None = None
+    voice_clone_api_key: str | None = None
+    voice_clone_voice_id: str | None = None
+    director_rewrite_strength: float | None = None
     ollama_api_key: str | None = None
     ollama_base_url: str | None = None
     max_upload_size_mb: int | None = None
@@ -122,6 +156,8 @@ class ConfigPatch(BaseModel):
     ffmpeg_timeout_sec: int | None = None
     allowed_extensions: list[str] | None = None
     output_dir: str | None = None
+    default_job_workflow_mode: str | None = None
+    default_job_enhancement_modes: list[str] | None = None
     fact_check_enabled: bool | None = None
     auto_confirm_content_profile: bool | None = None
     content_profile_review_threshold: float | None = None
@@ -136,7 +172,7 @@ class ConfigPatch(BaseModel):
 @router.get("", response_model=ConfigOut)
 def get_config():
     s = get_settings()
-    overrides = _load_overrides()
+    overrides = load_runtime_overrides()
     return ConfigOut(
         transcription_provider=s.transcription_provider,
         transcription_model=s.transcription_model,
@@ -153,10 +189,23 @@ def get_config():
         openai_base_url=s.openai_base_url,
         openai_auth_mode=s.openai_auth_mode,
         openai_api_key_helper=s.openai_api_key_helper,
+        avatar_provider=s.avatar_provider,
+        avatar_api_base_url=s.avatar_api_base_url,
+        avatar_training_api_base_url=s.avatar_training_api_base_url,
+        avatar_api_key_set=bool(s.avatar_api_key),
+        avatar_presenter_id=s.avatar_presenter_id,
+        avatar_layout_template=s.avatar_layout_template,
+        avatar_safe_margin=s.avatar_safe_margin,
+        avatar_overlay_scale=s.avatar_overlay_scale,
         anthropic_base_url=s.anthropic_base_url,
         anthropic_auth_mode=s.anthropic_auth_mode,
         anthropic_api_key_helper=s.anthropic_api_key_helper,
         minimax_base_url=s.minimax_base_url,
+        voice_provider=s.voice_provider,
+        voice_clone_api_base_url=s.voice_clone_api_base_url,
+        voice_clone_api_key_set=bool(s.voice_clone_api_key),
+        voice_clone_voice_id=s.voice_clone_voice_id,
+        director_rewrite_strength=s.director_rewrite_strength,
         ollama_api_key_set=bool(s.ollama_api_key),
         openai_api_key_set=bool(s.openai_api_key),
         anthropic_api_key_set=bool(s.anthropic_api_key),
@@ -167,6 +216,8 @@ def get_config():
         ffmpeg_timeout_sec=s.ffmpeg_timeout_sec,
         allowed_extensions=s.allowed_extensions,
         output_dir=s.output_dir,
+        default_job_workflow_mode=s.default_job_workflow_mode,
+        default_job_enhancement_modes=s.default_job_enhancement_modes,
         fact_check_enabled=s.fact_check_enabled,
         auto_confirm_content_profile=s.auto_confirm_content_profile,
         content_profile_review_threshold=s.content_profile_review_threshold,
@@ -185,18 +236,12 @@ def get_config_options():
     return ConfigOptionsOut(
         job_languages=JOB_LANGUAGE_OPTIONS,
         channel_profiles=build_channel_profile_options(),
-        transcription_models={
-            "local_whisper": [
-                "base",
-                "small",
-                "medium",
-                "large-v3",
-                "distil-large-v3",
-            ],
-            "openai": [
-                "gpt-4o-transcribe",
-            ],
-        },
+        workflow_modes=build_workflow_mode_options(),
+        enhancement_modes=build_enhancement_mode_options(),
+        avatar_providers=build_avatar_provider_options(),
+        voice_providers=build_voice_provider_options(),
+        creative_mode_catalog=build_mode_catalog(),
+        transcription_models=TRANSCRIPTION_MODEL_OPTIONS,
         multimodal_fallback_providers=MULTIMODAL_FALLBACK_PROVIDER_OPTIONS,
         search_providers=SEARCH_PROVIDER_OPTIONS,
         search_fallback_providers=SEARCH_FALLBACK_PROVIDER_OPTIONS,
@@ -205,20 +250,65 @@ def get_config_options():
 
 @router.patch("", response_model=ConfigOut)
 def patch_config(body: ConfigPatch):
-    overrides = _load_overrides()
+    overrides = load_runtime_overrides()
 
     updates = body.model_dump(exclude_none=True)
+    if "transcription_provider" in updates:
+        provider = str(updates["transcription_provider"]).strip().lower()
+        if provider not in TRANSCRIPTION_MODEL_OPTIONS:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Unsupported transcription_provider. "
+                    f"Use one of: {', '.join(sorted(TRANSCRIPTION_MODEL_OPTIONS))}"
+                ),
+            )
+        updates["transcription_provider"] = provider
+    if "avatar_provider" in updates:
+        avatar_provider = str(updates["avatar_provider"]).strip().lower()
+        if avatar_provider not in AVATAR_PROVIDER_OPTIONS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unsupported avatar_provider. Use one of: {', '.join(AVATAR_PROVIDER_OPTIONS)}",
+            )
+        updates["avatar_provider"] = avatar_provider
+    if "voice_provider" in updates:
+        voice_provider = str(updates["voice_provider"]).strip().lower()
+        if voice_provider not in VOICE_PROVIDER_OPTIONS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unsupported voice_provider. Use one of: {', '.join(VOICE_PROVIDER_OPTIONS)}",
+            )
+        updates["voice_provider"] = voice_provider
     if "output_dir" in updates:
         output_dir = str(updates["output_dir"]).strip()
         if not output_dir:
             raise HTTPException(status_code=400, detail="output_dir cannot be empty")
         Path(output_dir).mkdir(parents=True, exist_ok=True)
         updates["output_dir"] = output_dir
+    if "default_job_workflow_mode" in updates:
+        try:
+            updates["default_job_workflow_mode"] = normalize_workflow_mode(str(updates["default_job_workflow_mode"] or ""))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if "default_job_enhancement_modes" in updates:
+        try:
+            updates["default_job_enhancement_modes"] = normalize_enhancement_modes(
+                list(updates["default_job_enhancement_modes"] or []),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
     if "content_profile_review_threshold" in updates:
         updates["content_profile_review_threshold"] = max(
             0.0,
             min(1.0, float(updates["content_profile_review_threshold"])),
         )
+    if "avatar_safe_margin" in updates:
+        updates["avatar_safe_margin"] = max(0.0, min(0.4, float(updates["avatar_safe_margin"])))
+    if "avatar_overlay_scale" in updates:
+        updates["avatar_overlay_scale"] = max(0.08, min(0.5, float(updates["avatar_overlay_scale"])))
+    if "director_rewrite_strength" in updates:
+        updates["director_rewrite_strength"] = max(0.0, min(1.0, float(updates["director_rewrite_strength"])))
     if "glossary_correction_review_threshold" in updates:
         updates["glossary_correction_review_threshold"] = max(
             0.0,
@@ -239,14 +329,16 @@ def patch_config(body: ConfigPatch):
             0.0,
             min(1.0, float(updates["packaging_selection_min_score"])),
         )
-    overrides.update(updates)
-    _save_overrides(overrides)
+    current_provider = updates.get(
+        "transcription_provider",
+        overrides.get("transcription_provider", DEFAULT_TRANSCRIPTION_PROVIDER),
+    )
+    current_model = updates.get("transcription_model", overrides.get("transcription_model"))
+    provider, model = normalize_transcription_settings(current_provider, current_model)
+    updates["transcription_provider"] = provider
+    updates["transcription_model"] = model
 
-    # Apply to current settings object so it takes effect without restart
-    s = get_settings()
-    for k, v in updates.items():
-        if hasattr(s, k):
-            object.__setattr__(s, k, v)
+    apply_runtime_overrides(updates)
 
     return get_config()
 

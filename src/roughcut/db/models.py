@@ -16,13 +16,12 @@ from sqlalchemy import (
 )
 from sqlalchemy import TIMESTAMP
 from sqlalchemy.dialects.postgresql import JSONB
-
-TIMESTAMPTZ = TIMESTAMP(timezone=True)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.sql import func
 
 from roughcut.db.session import Base
 
+TIMESTAMPTZ = TIMESTAMP(timezone=True)
 
 UUID_TYPE = Uuid(as_uuid=True)
 JSON_TYPE = JSON().with_variant(JSONB(), "postgresql")
@@ -44,6 +43,8 @@ class Job(Base):
     error_message: Mapped[str | None] = mapped_column(Text)
     channel_profile: Mapped[str | None] = mapped_column(Text)
     language: Mapped[str] = mapped_column(Text, default="zh-CN")
+    workflow_mode: Mapped[str] = mapped_column(Text, nullable=False, default="standard_edit", server_default="standard_edit")
+    enhancement_modes: Mapped[list[str]] = mapped_column(JSON_TYPE, nullable=False, default=list, server_default="[]")
     created_at: Mapped[datetime] = mapped_column(TIMESTAMPTZ, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(TIMESTAMPTZ, server_default=func.now(), onupdate=func.now())
 

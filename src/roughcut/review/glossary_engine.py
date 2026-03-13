@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 import uuid
 from dataclasses import dataclass
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -88,14 +89,19 @@ async def apply_glossary_corrections(
     job_id: uuid.UUID,
     subtitle_items: list[SubtitleItem],
     session: AsyncSession,
+    *,
+    glossary_terms: list[GlossaryTerm | dict[str, Any]] | None = None,
 ) -> list[SubtitleCorrection]:
     """
     Match all glossary terms against subtitle text.
     Returns created SubtitleCorrection rows.
     """
     # Load all glossary terms
-    result = await session.execute(select(GlossaryTerm))
-    terms = result.scalars().all()
+    if glossary_terms is None:
+        result = await session.execute(select(GlossaryTerm))
+        terms: list[GlossaryTerm | dict[str, Any]] = result.scalars().all()
+    else:
+        terms = list(glossary_terms)
     settings = get_settings()
 
     corrections: list[SubtitleCorrection] = []
@@ -104,18 +110,22 @@ async def apply_glossary_corrections(
         text = item.text_norm or item.text_raw
 
         for term in terms:
-            for wrong_form in term.wrong_forms:
+            correct_form = str(term.correct_form if isinstance(term, GlossaryTerm) else term.get("correct_form") or "").strip()
+            wrong_forms = term.wrong_forms if isinstance(term, GlossaryTerm) else list(term.get("wrong_forms") or [])
+            if not correct_form:
+                continue
+            for wrong_form in wrong_forms:
                 # Case-insensitive match
                 pattern = re.compile(re.escape(wrong_form), re.IGNORECASE | re.UNICODE)
                 for match in pattern.finditer(text):
                     original = match.group(0)
-                    if original == term.correct_form:
+                    if original == correct_form:
                         continue  # Already correct
 
                     automation = assess_glossary_correction_automation(
                         full_text=text,
                         original_span=original,
-                        suggested_span=term.correct_form,
+                        suggested_span=correct_form,
                         match_start=match.start(),
                         match_end=match.end(),
                         confidence=0.95,
@@ -126,7 +136,7 @@ async def apply_glossary_corrections(
                         job_id=job_id,
                         subtitle_item_id=item.id,
                         original_span=original,
-                        suggested_span=term.correct_form,
+                        suggested_span=correct_form,
                         change_type="glossary",
                         confidence=float(automation["score"]),
                         source="glossary_match",

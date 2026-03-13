@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-import pytest
-
-from roughcut.config import Settings
+import roughcut.config as config_mod
+from roughcut.config import Settings, get_settings
 
 
 def test_default_settings():
@@ -20,6 +19,8 @@ def test_default_settings():
     assert s.minimax_base_url == "https://api.minimaxi.com/v1"
     assert ".mp4" in s.allowed_extensions
     assert s.render_debug_dir == "logs/render-debug"
+    assert s.default_job_workflow_mode == "standard_edit"
+    assert s.default_job_enhancement_modes == []
     assert s.cover_output_variants == 5
     assert s.auto_confirm_content_profile is True
     assert s.content_profile_review_threshold == 0.72
@@ -47,3 +48,20 @@ def test_parse_extensions_from_string():
 def test_max_upload_size_bytes():
     s = Settings(_env_file=None, max_upload_size_mb=100)
     assert s.max_upload_size_bytes == 100 * 1024 * 1024
+
+
+def test_get_settings_sanitizes_invalid_transcription_override(tmp_path, monkeypatch):
+    overrides_file = tmp_path / "roughcut_config.json"
+    overrides_file.write_text(
+        '{"transcription_provider":"qwen_asr","transcription_model":"Qwen/Qwen3-ASR-1.7B"}',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(config_mod, "_OVERRIDES_FILE", overrides_file)
+    config_mod._settings = None
+
+    settings = get_settings()
+
+    assert settings.transcription_provider == "local_whisper"
+    assert settings.transcription_model == "base"
+    assert settings.default_job_workflow_mode == "standard_edit"
+    assert settings.default_job_enhancement_modes == []

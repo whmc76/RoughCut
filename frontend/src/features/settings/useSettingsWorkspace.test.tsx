@@ -31,10 +31,23 @@ const SAMPLE_CONFIG: Config = {
   openai_base_url: "https://api.openai.com/v1",
   openai_auth_mode: "api_key",
   openai_api_key_helper: "",
+  avatar_provider: "mock",
+  avatar_api_base_url: "https://api.heygem.com",
+  avatar_training_api_base_url: "http://127.0.0.1:18180",
+  avatar_api_key_set: false,
+  avatar_presenter_id: "presenter_demo",
+  avatar_layout_template: "picture_in_picture_right",
+  avatar_safe_margin: 0.08,
+  avatar_overlay_scale: 0.24,
   anthropic_base_url: "https://api.anthropic.com",
   anthropic_auth_mode: "api_key",
   anthropic_api_key_helper: "",
   minimax_base_url: "https://api.minimax.chat",
+  voice_provider: "edge",
+  voice_clone_api_base_url: "https://www.runninghub.cn",
+  voice_clone_api_key_set: false,
+  voice_clone_voice_id: "voice_demo",
+  director_rewrite_strength: 0.55,
   ollama_base_url: "http://127.0.0.1:11434",
   openai_api_key_set: true,
   anthropic_api_key_set: false,
@@ -45,6 +58,8 @@ const SAMPLE_CONFIG: Config = {
   ffmpeg_timeout_sec: 600,
   allowed_extensions: [".mp4"],
   output_dir: "data/output",
+  default_job_workflow_mode: "standard_edit",
+  default_job_enhancement_modes: ["avatar_commentary"],
   fact_check_enabled: true,
   auto_confirm_content_profile: true,
   content_profile_review_threshold: 0.72,
@@ -60,6 +75,23 @@ const SAMPLE_CONFIG: Config = {
 const SAMPLE_OPTIONS: ConfigOptions = {
   job_languages: [{ value: "zh-CN", label: "简体中文" }],
   channel_profiles: [{ value: "", label: "自动匹配" }],
+  workflow_modes: [{ value: "standard_edit", label: "标准成片" }],
+  enhancement_modes: [
+    { value: "avatar_commentary", label: "数字人解说" },
+    { value: "ai_director", label: "AI 导演" },
+  ],
+  avatar_providers: [
+    { value: "mock", label: "mock" },
+    { value: "heygem", label: "heygem" },
+  ],
+  voice_providers: [
+    { value: "edge", label: "edge" },
+    { value: "runninghub", label: "runninghub" },
+  ],
+  creative_mode_catalog: {
+    workflow_modes: [],
+    enhancement_modes: [],
+  },
   transcription_models: {
     openai: ["gpt-4o-transcribe"],
     local_whisper: ["large-v3"],
@@ -82,7 +114,10 @@ describe("useSettingsWorkspace", () => {
   beforeEach(() => {
     mockApi.getConfig.mockResolvedValue(SAMPLE_CONFIG);
     mockApi.getConfigOptions.mockResolvedValue(SAMPLE_OPTIONS);
-    mockApi.patchConfig.mockResolvedValue({});
+    mockApi.patchConfig.mockImplementation(async (payload: Record<string, unknown>) => ({
+      ...SAMPLE_CONFIG,
+      ...payload,
+    }));
     mockApi.resetConfig.mockResolvedValue({});
   });
 
@@ -90,7 +125,7 @@ describe("useSettingsWorkspace", () => {
     vi.clearAllMocks();
   });
 
-  it("hydrates form from config and strips empty secret fields on save", async () => {
+  it("hydrates form from config and strips empty secret fields during autosave", async () => {
     const { result } = renderHookWithQueryClient(() => useSettingsWorkspace());
 
     await waitFor(() => expect(result.current.config.data).toEqual(SAMPLE_CONFIG));
@@ -106,15 +141,18 @@ describe("useSettingsWorkspace", () => {
     });
 
     await act(async () => {
-      await result.current.save.mutateAsync();
+      await new Promise((resolve) => setTimeout(resolve, 700));
     });
 
-    expect(mockApi.patchConfig).toHaveBeenCalledWith(
-      expect.objectContaining({
-        output_dir: "D:/RoughCut/output",
-      }),
+    await waitFor(() =>
+      expect(mockApi.patchConfig).toHaveBeenCalledWith(
+        expect.objectContaining({
+          output_dir: "D:/RoughCut/output",
+        }),
+      ),
     );
     expect(mockApi.patchConfig.mock.calls[0][0]).not.toHaveProperty("openai_api_key");
     expect(mockApi.patchConfig.mock.calls[0][0]).not.toHaveProperty("anthropic_api_key");
+    await waitFor(() => expect(result.current.saveState).toBe("saved"));
   });
 });

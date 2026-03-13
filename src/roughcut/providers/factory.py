@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 from roughcut.config import get_settings
+from roughcut.providers.avatar.base import AvatarProvider
 from roughcut.providers.reasoning.base import ReasoningProvider
 from roughcut.providers.transcription.base import TranscriptionProvider
+from roughcut.providers.voice.base import VoiceProvider
 
 _TRANSCRIPTION_PROVIDER_CACHE: dict[tuple[str, str], TranscriptionProvider] = {}
+_AVATAR_PROVIDER_CACHE: dict[str, AvatarProvider] = {}
+_VOICE_PROVIDER_CACHE: dict[str, VoiceProvider] = {}
 
 
 def get_transcription_provider() -> TranscriptionProvider:
@@ -52,6 +56,50 @@ def get_reasoning_provider() -> ReasoningProvider:
         return OllamaReasoningProvider()
     else:
         raise ValueError(f"Unknown reasoning provider: {provider}")
+
+
+def get_avatar_provider() -> AvatarProvider:
+    settings = get_settings()
+    provider = settings.avatar_provider.lower()
+    cached = _AVATAR_PROVIDER_CACHE.get(provider)
+    if cached is not None:
+        return cached
+
+    if provider == "mock":
+        from roughcut.providers.avatar.mock import MockAvatarProvider
+
+        instance = MockAvatarProvider()
+    elif provider == "heygem":
+        from roughcut.providers.avatar.heygem import HeyGemAvatarProvider
+
+        instance = HeyGemAvatarProvider()
+    else:
+        raise ValueError(f"Unknown avatar provider: {provider}")
+
+    _AVATAR_PROVIDER_CACHE[provider] = instance
+    return instance
+
+
+def get_voice_provider() -> VoiceProvider:
+    settings = get_settings()
+    provider = settings.voice_provider.lower()
+    cached = _VOICE_PROVIDER_CACHE.get(provider)
+    if cached is not None:
+        return cached
+
+    if provider == "edge":
+        from roughcut.providers.voice.edge import EdgeTtsVoiceProvider
+
+        instance = EdgeTtsVoiceProvider()
+    elif provider == "runninghub":
+        from roughcut.providers.voice.runninghub import RunningHubVoiceProvider
+
+        instance = RunningHubVoiceProvider()
+    else:
+        raise ValueError(f"Unknown voice provider: {provider}")
+
+    _VOICE_PROVIDER_CACHE[provider] = instance
+    return instance
 
 
 def get_search_provider():

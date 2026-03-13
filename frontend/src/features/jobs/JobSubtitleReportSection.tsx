@@ -1,5 +1,6 @@
 import type { Report } from "../../types";
 import { StatCard } from "../../components/ui/StatCard";
+import { useI18n } from "../../i18n";
 
 type JobSubtitleReportSectionProps = {
   report?: Report;
@@ -8,15 +9,17 @@ type JobSubtitleReportSectionProps = {
 };
 
 export function JobSubtitleReportSection({ report, isApplying, onApplyReview }: JobSubtitleReportSectionProps) {
+  const { t } = useI18n();
+
   return (
     <section className="detail-block">
-      <div className="detail-key">字幕报告</div>
+      <div className="detail-key">{t("jobs.subtitleReport.title")}</div>
       {report ? (
         <>
           <div className="stats-grid compact">
-            <StatCard label="总字幕" value={report.total_subtitle_items} />
-            <StatCard label="纠错候选" value={report.total_corrections} />
-            <StatCard label="待审" value={report.pending_count} />
+            <StatCard label={t("jobs.subtitleReport.total")} value={report.total_subtitle_items} />
+            <StatCard label={t("jobs.subtitleReport.corrections")} value={report.total_corrections} />
+            <StatCard label={t("jobs.subtitleReport.pending")} value={report.pending_count} />
           </div>
           <div className="list-stack">
             {report.items
@@ -28,7 +31,7 @@ export function JobSubtitleReportSection({ report, isApplying, onApplyReview }: 
                     <div className="row-title">
                       #{item.index} {item.text_final || item.text_norm || item.text_raw}
                     </div>
-                    <div className="muted">原文：{item.text_raw}</div>
+                    <div className="muted">{t("jobs.subtitleReport.original")}：{item.text_raw}</div>
                   </div>
                   {item.corrections.map((correction) => (
                     <div key={correction.id} className="correction-row">
@@ -42,10 +45,10 @@ export function JobSubtitleReportSection({ report, isApplying, onApplyReview }: 
                       </div>
                       <div className="toolbar">
                         <button className="button ghost" onClick={() => onApplyReview(correction.id, "accepted")} disabled={isApplying}>
-                          接受
+                          {t("jobs.subtitleReport.accept")}
                         </button>
                         <button className="button danger" onClick={() => onApplyReview(correction.id, "rejected")} disabled={isApplying}>
-                          拒绝
+                          {t("jobs.subtitleReport.reject")}
                         </button>
                       </div>
                     </div>
@@ -55,7 +58,7 @@ export function JobSubtitleReportSection({ report, isApplying, onApplyReview }: 
           </div>
         </>
       ) : (
-        <div className="muted">暂无字幕报告</div>
+        <div className="muted">{t("jobs.subtitleReport.empty")}</div>
       )}
     </section>
   );

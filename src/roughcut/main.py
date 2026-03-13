@@ -55,14 +55,22 @@ def create_app() -> FastAPI:
     if (_FRONTEND_DIST / "assets").exists():
         app.mount("/assets", StaticFiles(directory=str(_FRONTEND_DIST / "assets")), name="frontend-assets")
 
+    def _index_response():
+        if not (_FRONTEND_DIST / "index.html").exists():
+            return HTMLResponse(
+                "<h1>RoughCut frontend not built</h1><p>Run <code>npm install && npm run build</code> in <code>frontend/</code>.</p>",
+                status_code=503,
+            )
+
+        response = FileResponse(_FRONTEND_DIST / "index.html")
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+        return response
+
     @app.get("/", include_in_schema=False)
     async def frontend_root():
-        if (_FRONTEND_DIST / "index.html").exists():
-            return FileResponse(_FRONTEND_DIST / "index.html")
-        return HTMLResponse(
-            "<h1>RoughCut frontend not built</h1><p>Run <code>npm install && npm run build</code> in <code>frontend/</code>.</p>",
-            status_code=503,
-        )
+        return _index_response()
 
     @app.get("/{full_path:path}", include_in_schema=False)
     async def frontend_app(full_path: str):
@@ -72,7 +80,7 @@ def create_app() -> FastAPI:
         if (_FRONTEND_DIST.exists() and _FRONTEND_DIST in candidate.parents and candidate.is_file()):
             return FileResponse(candidate)
         if (_FRONTEND_DIST / "index.html").exists():
-            return FileResponse(_FRONTEND_DIST / "index.html")
+            return _index_response()
         return HTMLResponse(
             "<h1>RoughCut frontend not built</h1><p>Run <code>npm install && npm run build</code> in <code>frontend/</code>.</p>",
             status_code=503,

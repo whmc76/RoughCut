@@ -9,10 +9,14 @@ import hashlib
 import logging
 import subprocess
 import uuid
-from dataclasses import asdict, dataclass
+import json
+import tempfile
+import re
+from difflib import SequenceMatcher
 from datetime import datetime
+from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 from watchdog.events import FileSystemEvent, FileSystemEventHandler
 from watchdog.observers import Observer
@@ -597,8 +601,6 @@ async def _create_job_for_file(
     language: str = "zh-CN",
 ) -> str:
     """Upload file to S3, create job + steps in DB. Returns job_id."""
-    settings = get_settings()
-
     # Compute hash first for dedup
     file_hash = _hash_file(file_path)
     if await _file_already_processed(file_hash):
@@ -615,6 +617,7 @@ async def _create_job_for_file(
 
     factory = get_session_factory()
     async with factory() as session:
+        settings = get_settings()
         job = Job(
             id=job_id,
             source_path=s3_key,
@@ -623,6 +626,8 @@ async def _create_job_for_file(
             status="pending",
             language=language,
             channel_profile=channel_profile,
+            workflow_mode=settings.default_job_workflow_mode,
+            enhancement_modes=list(settings.default_job_enhancement_modes or []),
         )
         session.add(job)
         for step in create_job_steps(job_id):
@@ -631,6 +636,399 @@ async def _create_job_for_file(
 
     logger.info(f"Created job {job_id} for {file_path.name}")
     return str(job_id)
+
+
+def _concat_list_entry(path: Path) -> str:
+    normalized = str(path).replace("\\", "/")
+    escaped = normalized.replace("'", "\\'")
+    return f"file '{escaped}'"
+
+
+async def _run_concat_ffmpeg(
+    list_file: Path,
+    output_path: Path,
+    *,
+    transcode: bool,
+) -> subprocess.CompletedProcess[str]:
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-f",
+        "concat",
+        "-safe",
+        "0",
+        "-i",
+        str(list_file),
+        "-movflags",
+        "+faststart",
+    ]
+    if transcode:
+        cmd.extend(
+            [
+                "-c:v",
+                "libx264",
+                "-preset",
+                "fast",
+                "-crf",
+                "18",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "192k",
+            ]
+        )
+    else:
+        cmd.extend(["-c", "copy"])
+    cmd.append(str(output_path))
+    settings = get_settings()
+
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        None,
+        lambda: subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=settings.ffmpeg_timeout_sec,
+        ),
+    )
+
+
+async def _merge_videos_for_job(file_paths: list[Path], *, output_path: Path) -> Path:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        list_file = Path(tmpdir) / "files.txt"
+        with list_file.open("w", encoding="utf-8") as handle:
+            for path in file_paths:
+                handle.write(_concat_list_entry(path))
+                handle.write("\n")
+
+        result = await _run_concat_ffmpeg(list_file, output_path, transcode=False)
+        if result.returncode != 0:
+            logger.warning("Video merge with stream copy failed, fallback to transcode: %s", result.stderr[-400:])
+            if output_path.exists():
+                output_path.unlink()
+            result = await _run_concat_ffmpeg(list_file, output_path, transcode=True)
+
+    if result.returncode != 0 or not output_path.exists():
+        raise RuntimeError(f"ffmpeg concat merge failed: {result.stderr[-500:]}")
+    return output_path
+
+
+async def create_merged_job_for_inventory_paths(
+    file_paths: list[str],
+    *,
+    channel_profile: str | None = None,
+    language: str = "zh-CN",
+) -> str | None:
+    if len(file_paths) < 2:
+        raise ValueError("At least two files are required to create a merged job")
+
+    resolved_paths = [Path(file_path).resolve() for file_path in file_paths]
+    for path in resolved_paths:
+        if not path.exists() or not path.is_file():
+            raise FileNotFoundError(str(path))
+
+    output_dir = get_output_dir() / "watch-merged"
+    output_path = output_dir / f"watch_merge_{uuid.uuid4().hex}.mp4"
+
+    merged_path = await _merge_videos_for_job(resolved_paths, output_path=output_path)
+    try:
+        return await _create_job_for_file(merged_path, channel_profile, language)
+    finally:
+        if merged_path.exists():
+            merged_path.unlink()
+
+
+def _to_unix_timestamp(value: str | None) -> float:
+    if not value:
+        return 0.0
+    try:
+        return datetime.fromisoformat(str(value)).timestamp()
+    except ValueError:
+        return 0.0
+
+
+def _safe_parse_summary(path: Path) -> str:
+    candidates = [
+        path.with_name(f"{path.stem}.summary.txt"),
+        path.with_name(f"{path.stem}.summary"),
+        path.with_name(f"{path.stem}.txt"),
+        path.with_name(f"{path.stem}.meta.json"),
+    ]
+    for candidate in candidates:
+        if not candidate.exists() or not candidate.is_file():
+            continue
+        try:
+            if candidate.suffix.lower() == ".json":
+                text = candidate.read_text(encoding="utf-8").strip()
+                if not text:
+                    continue
+                data = json.loads(text)
+                if not isinstance(data, dict):
+                    continue
+                for key in ("summary", "desc", "description", "caption", "notes"):
+                    value = data.get(key)
+                    if isinstance(value, str) and value.strip():
+                        return value.strip()
+            else:
+                text = candidate.read_text(encoding="utf-8").strip()
+                if text:
+                    return text
+        except Exception:
+            continue
+    return ""
+
+
+def _file_timestamp_metrics(path: Path) -> tuple[float, float]:
+    stat = path.stat()
+    # Windows 中 st_ctime 通常接近文件创建时间；Linux 环境常作为元数据修改时间，
+    # 这里保留作为二级时间特征使用。
+    return float(stat.st_ctime), float(stat.st_mtime)
+
+
+def _extract_name_tokens(value: str) -> set[str]:
+    normalized = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", " ", Path(value).stem.lower())
+    tokens = {token for token in normalized.split(" ") if len(token) >= 2}
+    return tokens
+
+
+def _reason_tags(scores: dict[str, float]) -> list[str]:
+    reasons: list[str] = []
+    if scores["time"] >= 0.55:
+        reasons.append("拍摄时间接近")
+    if scores["name"] >= 0.35:
+        reasons.append("文件名关键词相似")
+    if scores["duration"] >= 0.55:
+        reasons.append("时长接近")
+    if scores["summary"] >= 0.30:
+        reasons.append("摘要文本相似")
+    if not reasons:
+        reasons.append("整体特征接近")
+    return reasons
+
+
+async def _extract_visual_signature(path: Path) -> str | None:
+    settings = get_settings()
+    cmd = [
+        "ffmpeg",
+        "-v",
+        "error",
+        "-y",
+        "-ss",
+        "0.5",
+        "-i",
+        str(path),
+        "-vf",
+        "scale=16:16,format=gray",
+        "-frames:v",
+        "1",
+        "-f",
+        "rawvideo",
+        "-pix_fmt",
+        "gray",
+        "pipe:1",
+    ]
+    loop = asyncio.get_running_loop()
+    result = await loop.run_in_executor(
+        None,
+        lambda: subprocess.run(
+            cmd,
+            capture_output=True,
+            text=False,
+            timeout=min(settings.ffmpeg_timeout_sec, 120),
+        ),
+    )
+    if result.returncode != 0 or not result.stdout:
+        return None
+
+    raw = result.stdout
+    if len(raw) < 128:
+        return None
+    payload = raw[:256]
+    average = sum(payload) / len(payload)
+    return "".join("1" if value >= average else "0" for value in payload)
+
+
+def _signature_similarity(a: str | None, b: str | None) -> float:
+    if not a or not b or len(a) != len(b):
+        return 0.0
+    distance = sum(1 for ch_a, ch_b in zip(a, b) if ch_a != ch_b)
+    return 1.0 - distance / max(len(a), 1)
+
+
+def _token_similarity(left: set[str], right: set[str]) -> float:
+    if not left and not right:
+        return 0.0
+    if not left or not right:
+        return 0.0
+    return len(left & right) / len(left | right)
+
+
+def _summary_similarity(left: str, right: str) -> float:
+    if not left or not right:
+        return 0.0
+    return SequenceMatcher(None, left.lower(), right.lower()).ratio()
+
+
+def _find(parent: list[int], index: int) -> int:
+    while parent[index] != index:
+        parent[index] = parent[parent[index]]
+        index = parent[index]
+    return index
+
+
+def _union(parent: list[int], left: int, right: int) -> None:
+    left_root = _find(parent, left)
+    right_root = _find(parent, right)
+    if left_root != right_root:
+        parent[right_root] = left_root
+
+
+async def suggest_merge_groups_for_inventory_items(
+    items: list[dict],
+    *,
+    time_window_seconds: int = 480,
+    min_score: float = 0.62,
+    min_group_size: int = 2,
+    max_groups: int = 8,
+) -> list[dict[str, Any]]:
+    if len(items) < min_group_size:
+        return []
+
+    prepared: list[dict[str, Any]] = []
+    for item in items:
+        path = Path(str(item.get("path")))
+        if not path.exists():
+            continue
+        created_at, modified_at = _file_timestamp_metrics(path)
+        prepared.append(
+            {
+                "path": str(path),
+                "relative_path": str(item.get("relative_path") or item.get("source_name")),
+                "created_at": created_at,
+                "modified": _to_unix_timestamp(str(item.get("modified_at"))) or modified_at,
+                "duration": float(item.get("duration_sec") or 0.0),
+                "size": int(item.get("size_bytes") or 0),
+                "source_name": str(item.get("source_name") or path.name),
+                "summary": _safe_parse_summary(path),
+                "signature": None,
+                "name_tokens": _extract_name_tokens(str(item.get("source_name") or path.name)),
+            }
+        )
+
+    signatures = await asyncio.gather(
+        *(
+            _extract_visual_signature(Path(item["path"]))
+            for item in prepared
+        ),
+        return_exceptions=True,
+    )
+    for index, signature in enumerate(signatures):
+        if isinstance(signature, Exception):
+            logger.warning("Failed to extract visual signature for %s: %s", prepared[index]["path"], signature)
+            prepared[index]["signature"] = None
+        else:
+            prepared[index]["signature"] = signature
+
+    if len(prepared) < 2:
+        return []
+
+    prepared.sort(key=lambda item: item["modified"])
+
+    filtered = [item for item in prepared if item["relative_path"]]
+    if len(filtered) < min_group_size:
+        return []
+
+    parent = list(range(len(filtered)))
+    pair_scores: dict[tuple[int, int], float] = {}
+    pair_reasons: dict[tuple[int, int], list[str]] = {}
+
+    for left in range(len(filtered)):
+        for right in range(left + 1, len(filtered)):
+            left_item = filtered[left]
+            right_item = filtered[right]
+
+            created_gap = abs(left_item["created_at"] - right_item["created_at"])
+            modified_gap = abs(left_item["modified"] - right_item["modified"])
+            nearest_time_gap = min(created_gap, modified_gap)
+            if nearest_time_gap > time_window_seconds * 2:
+                continue
+
+            created_score = max(0.0, 1 - (created_gap / max(time_window_seconds, 1)))
+            modified_score = max(0.0, 1 - (modified_gap / max(time_window_seconds, 1)))
+            time_score = max(created_score, modified_score)
+            duration_gap = abs(left_item["duration"] - right_item["duration"])
+            duration_score = 1 - min(duration_gap / 90.0, 1.0)
+            name_score = _token_similarity(left_item["name_tokens"], right_item["name_tokens"])
+            summary_score = _summary_similarity(left_item["summary"], right_item["summary"])
+            visual_score = _signature_similarity(left_item["signature"], right_item["signature"])
+
+            score = (
+                time_score * 0.46
+                + summary_score * 0.24
+                + visual_score * 0.2
+                + name_score * 0.06
+                + duration_score * 0.04
+            )
+            if score < min_score:
+                continue
+
+            pair = (left, right)
+            pair_scores[pair] = score
+            pair_reasons[pair] = _reason_tags(
+                {
+                    "time": time_score,
+                    "name": name_score,
+                    "duration": duration_score,
+                    "summary": summary_score,
+                    "visual": visual_score,
+                }
+            )
+            _union(parent, left, right)
+
+    groups: dict[int, list[int]] = {}
+    for index in range(len(filtered)):
+        groups.setdefault(_find(parent, index), []).append(index)
+
+    results: list[dict[str, Any]] = []
+    for indexes in groups.values():
+        if len(indexes) < min_group_size:
+            continue
+
+        scores: list[float] = []
+        reason_set: set[str] = set()
+        for left in range(len(indexes)):
+            for right in range(left + 1, len(indexes)):
+                pair = (indexes[left], indexes[right])
+                pair_score = pair_scores.get(pair)
+                if pair_score is None:
+                    continue
+                scores.append(pair_score)
+                reason_set.update(pair_reasons.get(pair, []))
+        if not scores:
+            continue
+
+        candidate_score = sum(scores) / len(scores)
+        if candidate_score < min_score:
+            continue
+
+        relative_paths = [filtered[index]["relative_path"] for index in indexes]
+        if len(relative_paths) < min_group_size:
+            continue
+
+        results.append(
+            {
+                "relative_paths": relative_paths,
+                "score": candidate_score,
+                "reasons": sorted(reason_set),
+            }
+        )
+
+    results.sort(key=lambda entry: (entry["score"], len(entry["relative_paths"])), reverse=True)
+    return results[:max_groups]
 
 
 class VideoFileHandler(FileSystemEventHandler):
@@ -645,17 +1043,34 @@ class VideoFileHandler(FileSystemEventHandler):
         self._loop = loop
         self._settings = get_settings()
 
+    def _submit_job(self, file_path: Path) -> None:
+        if file_path.suffix.lower() not in self._settings.allowed_extensions:
+            return
+        logger.info(f"New file detected: {file_path}")
+        future = asyncio.run_coroutine_threadsafe(
+            _create_job_for_file(file_path, self._channel_profile, self._language),
+            self._loop,
+        )
+
+        def _done_callback(task: asyncio.Future[None]) -> None:
+            try:
+                job_id = task.result()
+                if job_id:
+                    logger.info(f"Created watch job: {file_path} -> {job_id}")
+            except Exception:
+                logger.exception(f"Failed to create watch job: {file_path}")
+
+        future.add_done_callback(_done_callback)
+
     def on_created(self, event: FileSystemEvent) -> None:
         if event.is_directory:
             return
-        path = Path(str(event.src_path))
-        if path.suffix.lower() not in self._settings.allowed_extensions:
+        self._submit_job(Path(str(event.src_path)))
+
+    def on_moved(self, event: FileSystemEvent) -> None:
+        if event.is_directory:
             return
-        logger.info(f"New file detected: {path}")
-        asyncio.run_coroutine_threadsafe(
-            _create_job_for_file(path, self._channel_profile, self._language),
-            self._loop,
-        )
+        self._submit_job(Path(str(event.dest_path)))
 
 
 async def watch_directory(
@@ -689,7 +1104,7 @@ async def watch_from_db() -> None:
     factory = get_session_factory()
     async with factory() as session:
         result = await session.execute(
-            select(WatchRoot).where(WatchRoot.enabled == True)
+            select(WatchRoot).where(WatchRoot.enabled.is_(True))
         )
         roots = result.scalars().all()
 

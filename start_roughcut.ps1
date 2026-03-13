@@ -1,0 +1,808 @@
+param(
+    [int]$Port = 38471,
+    [switch]$SkipDocker,
+    [switch]$SkipMigrate,
+    [switch]$CleanupLegacyDocker,
+    [switch]$StopOnly,
+    [switch]$StopDocker,
+    [switch]$NoPause,
+    [switch]$NoWatcher
+)
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = "Stop"
+
+$RepoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+Set-Location $RepoRoot
+
+$Python = Join-Path $RepoRoot ".venv\Scripts\python.exe"
+$Uv = Get-Command uv -ErrorAction SilentlyContinue
+$SystemPython = Get-Command python -ErrorAction SilentlyContinue
+$Pnpm = Get-Command pnpm -ErrorAction SilentlyContinue
+$FrontendDir = Join-Path $RepoRoot "frontend"
+$FrontendSrcDir = Join-Path $FrontendDir "src"
+$FrontendDist = Join-Path $FrontendDir "dist\index.html"
+$WatchDir = Join-Path $RepoRoot "watch"
+$script:ManagedProcesses = @()
+
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+
+public static class RoughCutJobObject
+{
+    private const int JobObjectExtendedLimitInformation = 9;
+    private const uint JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct JOBOBJECT_BASIC_LIMIT_INFORMATION
+    {
+        public long PerProcessUserTimeLimit;
+        public long PerJobUserTimeLimit;
+        public uint LimitFlags;
+        public UIntPtr MinimumWorkingSetSize;
+        public UIntPtr MaximumWorkingSetSize;
+        public uint ActiveProcessLimit;
+        public UIntPtr Affinity;
+        public uint PriorityClass;
+        public uint SchedulingClass;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct IO_COUNTERS
+    {
+        public ulong ReadOperationCount;
+        public ulong WriteOperationCount;
+        public ulong OtherOperationCount;
+        public ulong ReadTransferCount;
+        public ulong WriteTransferCount;
+        public ulong OtherTransferCount;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct JOBOBJECT_EXTENDED_LIMIT_INFORMATION
+    {
+        public JOBOBJECT_BASIC_LIMIT_INFORMATION BasicLimitInformation;
+        public IO_COUNTERS IoInfo;
+        public UIntPtr ProcessMemoryLimit;
+        public UIntPtr JobMemoryLimit;
+        public UIntPtr PeakProcessMemoryUsed;
+        public UIntPtr PeakJobMemoryUsed;
+    }
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+    private static extern IntPtr CreateJobObject(IntPtr lpJobAttributes, string lpName);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool SetInformationJobObject(
+        IntPtr hJob,
+        int infoType,
+        IntPtr lpJobObjectInfo,
+        uint cbJobObjectInfoLength
+    );
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
+
+    public static IntPtr CreateKillOnCloseJob()
+    {
+        IntPtr handle = CreateJobObject(IntPtr.Zero, null);
+        if (handle == IntPtr.Zero)
+        {
+            throw new InvalidOperationException("CreateJobObject failed.");
+        }
+
+        var info = new JOBOBJECT_EXTENDED_LIMIT_INFORMATION();
+        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        int length = Marshal.SizeOf<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>();
+        IntPtr pointer = Marshal.AllocHGlobal(length);
+        try
+        {
+            Marshal.StructureToPtr(info, pointer, false);
+            if (!SetInformationJobObject(handle, JobObjectExtendedLimitInformation, pointer, (uint)length))
+            {
+                throw new InvalidOperationException("SetInformationJobObject failed.");
+            }
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(pointer);
+        }
+
+        return handle;
+    }
+
+    public static void Assign(IntPtr job, IntPtr process)
+    {
+        if (!AssignProcessToJobObject(job, process))
+        {
+            throw new InvalidOperationException("AssignProcessToJobObject failed.");
+        }
+    }
+}
+"@
+
+$script:ProcessJob = [RoughCutJobObject]::CreateKillOnCloseJob()
+
+function Initialize-RoughCutEnvironment {
+    if (Test-Path $Python) {
+        return
+    }
+
+    Write-Host "Python virtual environment not found. Bootstrapping RoughCut..." -ForegroundColor Yellow
+
+    if ($null -ne $Uv) {
+        Write-Host "Using uv to create and sync .venv" -ForegroundColor Cyan
+        & $Uv.Source sync --extra dev --extra local-asr
+    } elseif ($null -ne $SystemPython) {
+        Write-Host "uv not found. Falling back to python -m venv + pip install." -ForegroundColor Yellow
+        & $SystemPython.Source -m venv .venv
+        if (-not (Test-Path $Python)) {
+            throw "Failed to create virtual environment: $Python"
+        }
+        & $Python -m pip install -e ".[dev,local-asr]"
+    } else {
+        throw "Neither uv nor python is available. Install uv, then run 'uv sync --extra dev --extra local-asr'."
+    }
+
+    if (-not (Test-Path $Python)) {
+        throw "Virtual environment Python not found after bootstrap: $Python"
+    }
+}
+
+function Ensure-RoughCutFrontend {
+    if (-not (Test-Path $FrontendDir)) {
+        return
+    }
+
+    if ($null -eq $Pnpm) {
+        throw "pnpm is required to build the React frontend. Enable Corepack or install pnpm, then rerun."
+    }
+
+    $needsBuild = -not (Test-Path $FrontendDist)
+    if (-not $needsBuild) {
+        $distTime = (Get-Item $FrontendDist).LastWriteTimeUtc
+        $frontendInputs = @(
+            (Join-Path $FrontendDir "package.json")
+            (Join-Path $FrontendDir "vite.config.ts")
+            (Join-Path $FrontendDir "tsconfig.app.json")
+            (Join-Path $FrontendDir "tsconfig.node.json")
+            (Join-Path $FrontendDir "tsconfig.json")
+        ) | Where-Object { Test-Path $_ }
+
+        $inputItems = @()
+        $inputItems += $frontendInputs | ForEach-Object { Get-Item $_ }
+        $inputItems += Get-ChildItem -Path $FrontendSrcDir -File -Recurse -ErrorAction SilentlyContinue
+        $latestInput = $inputItems | Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
+
+        if ($latestInput -and $latestInput.LastWriteTimeUtc -gt $distTime) {
+            $needsBuild = $true
+        }
+    }
+
+    if (-not $needsBuild) {
+        return
+    }
+
+    Write-Host "Frontend build missing or stale. Installing and building React app with pnpm..." -ForegroundColor Yellow
+    Push-Location $RepoRoot
+    try {
+        if (-not (Test-Path (Join-Path $RepoRoot "node_modules"))) {
+            & $Pnpm.Source install
+        }
+        & $Pnpm.Source build
+    } finally {
+        Pop-Location
+    }
+
+    if (-not (Test-Path $FrontendDist)) {
+        throw "Frontend build failed: $FrontendDist not found."
+    }
+}
+
+function Test-PortListening {
+    param([int]$TestPort)
+    try {
+        $conn = Get-NetTCPConnection -State Listen -LocalPort $TestPort -ErrorAction Stop | Select-Object -First 1
+        return $null -ne $conn
+    } catch {
+        return $false
+    }
+}
+
+function Is-TcpPortAvailable {
+    param([int]$TestPort)
+    try {
+        $listener = New-Object System.Net.Sockets.TcpListener([System.Net.IPAddress]::Any, $TestPort)
+        $listener.Start()
+        $listener.Stop()
+        return $true
+    } catch {
+        return $false
+    }
+}
+
+function Get-LocalDotEnvValue {
+    param([string]$Key)
+
+    $dotEnvPath = Join-Path $RepoRoot ".env"
+    if (-not (Test-Path $dotEnvPath)) {
+        return $null
+    }
+
+    $escapedKey = [regex]::Escape($Key)
+    foreach ($line in Get-Content $dotEnvPath) {
+        if ($line -match "^\s*$escapedKey\s*=\s*([^#]*?)(\s+#.*)?$") {
+            $raw = $Matches[1].Trim()
+            if (($raw.StartsWith('"') -and $raw.EndsWith('"')) -or ($raw.StartsWith("'") -and $raw.EndsWith("'"))) {
+                return $raw.Substring(1, $raw.Length - 2)
+            }
+            return $raw
+        }
+    }
+    return $null
+}
+
+function Resolve-StandalonePort {
+    param(
+        [string]$EnvVarName,
+        [int[]]$PreferredPorts,
+        [hashtable]$UsedPorts
+    )
+
+    $candidateSources = @()
+    $envEntry = Get-Item "env:$EnvVarName" -ErrorAction SilentlyContinue
+    if ($envEntry) {
+        $candidateSources += $envEntry.Value
+    }
+
+    $dotEnvValue = Get-LocalDotEnvValue -Key $EnvVarName
+    if ($dotEnvValue) {
+        $candidateSources += $dotEnvValue
+    }
+
+    foreach ($candidateSource in $candidateSources) {
+        $candidate = Parse-PortValue -Value $candidateSource
+        if ($null -eq $candidate) {
+            continue
+        }
+        $candidateIsFree = Is-TcpPortAvailable -TestPort $candidate
+        if (-not $UsedPorts.ContainsKey($candidate) -and $candidateIsFree) {
+            $UsedPorts[$candidate] = $true
+            return $candidate
+        }
+    }
+
+    foreach ($candidate in $PreferredPorts) {
+        $candidateIsFree = Is-TcpPortAvailable -TestPort $candidate
+        if (-not $UsedPorts.ContainsKey($candidate) -and $candidateIsFree) {
+            $UsedPorts[$candidate] = $true
+            return $candidate
+        }
+    }
+
+    for ($i = 0; $i -lt 4000; $i++) {
+        $candidate = Get-Random -Minimum 42000 -Maximum 49150
+        if ($UsedPorts.ContainsKey($candidate)) {
+            continue
+        }
+        if (Is-TcpPortAvailable -TestPort $candidate) {
+            $UsedPorts[$candidate] = $true
+            return $candidate
+        }
+    }
+
+    throw "Failed to allocate a free host port for $EnvVarName."
+}
+
+function Resolve-ContainerMappedPort {
+    param(
+        [string]$ContainerName,
+        [int]$ContainerPort
+    )
+
+    try {
+        $mapping = docker port $ContainerName "$ContainerPort/tcp" 2>$null | Select-Object -First 1
+        if (-not $mapping) {
+            return $null
+        }
+        if ($mapping -match ":(\d+)$") {
+            return [int]$Matches[1]
+        }
+    } catch {
+    }
+    return $null
+}
+
+function Resolve-ServicePort {
+    param(
+        [string]$ContainerName,
+        [int]$ContainerPort,
+        [string]$EnvVarName,
+        [int[]]$PreferredPorts,
+        [hashtable]$UsedPorts
+    )
+
+    $mapped = Resolve-ContainerMappedPort -ContainerName $ContainerName -ContainerPort $ContainerPort
+    if ($null -ne $mapped) {
+        $UsedPorts[$mapped] = $true
+        return $mapped
+    }
+
+    return Resolve-StandalonePort -EnvVarName $EnvVarName -PreferredPorts $PreferredPorts -UsedPorts $UsedPorts
+}
+
+function Parse-PortValue {
+    param([string]$Value)
+
+    if ([string]::IsNullOrWhiteSpace($Value)) {
+        return $null
+    }
+
+    $candidate = 0
+    if (-not [int]::TryParse($Value.Trim(), [ref]$candidate)) {
+        return $null
+    }
+    if ($candidate -lt 1 -or $candidate -gt 65535) {
+        return $null
+    }
+    return $candidate
+}
+
+function Resolve-PortSet {
+    param(
+        [hashtable]$UsedPorts
+    )
+
+    $postgresPort = Resolve-ServicePort -ContainerName "roughcut-postgres-1" -ContainerPort 5432 -EnvVarName "ROUGHCUT_POSTGRES_PORT" -PreferredPorts @(25432,25434,25436,25438,25440,25442,25444,25446) -UsedPorts $UsedPorts
+    $redisPort = Resolve-ServicePort -ContainerName "roughcut-redis-1" -ContainerPort 6379 -EnvVarName "ROUGHCUT_REDIS_PORT" -PreferredPorts @(26379,26380,26381,26382,26383,26384,26385) -UsedPorts $UsedPorts
+    $minioApiPort = Resolve-ServicePort -ContainerName "roughcut-minio-1" -ContainerPort 9000 -EnvVarName "MINIO_API_PORT" -PreferredPorts @(39000,39002,39004,39006,39008,39010,39012) -UsedPorts $UsedPorts
+    $minioApiPortRaw = if ($minioApiPort -is [array]) { $minioApiPort[0] } else { $minioApiPort }
+    $minioApiPortInt = 0
+    if (-not [int]::TryParse("$minioApiPortRaw", [ref]$minioApiPortInt)) {
+        throw "Failed to parse MINIO_API_PORT value: $minioApiPortRaw"
+    }
+    $minioApiPort = $minioApiPortInt
+    $minioConsoleCandidates = @(
+        ($minioApiPort + 1),
+        39001, 39003, 39005, 39007, 39009, 39011
+    )
+    $minioConsolePort = Resolve-ServicePort -ContainerName "roughcut-minio-1" -ContainerPort 9001 -EnvVarName "MINIO_CONSOLE_PORT" -PreferredPorts $minioConsoleCandidates -UsedPorts $UsedPorts
+
+    if ($minioConsolePort -eq $minioApiPort) {
+        $UsedPorts.Remove($minioConsolePort)
+        $minioConsolePort = Resolve-StandalonePort -EnvVarName "MINIO_CONSOLE_PORT" -PreferredPorts @(39001,39003,39005,39007,39009,39011) -UsedPorts $UsedPorts
+    }
+
+    $heygemApiPort = Resolve-StandalonePort -EnvVarName "HEYGEM_API_PORT" -PreferredPorts @(49202,49212,49222,49232,49242,49252,49262) -UsedPorts $UsedPorts
+    $heygemTrainingPort = Resolve-StandalonePort -EnvVarName "HEYGEM_TRAINING_API_PORT" -PreferredPorts @(49203,49213,49223,49233,49243,49253,49263) -UsedPorts $UsedPorts
+    if ($heygemTrainingPort -eq $heygemApiPort) {
+        $UsedPorts.Remove($heygemTrainingPort)
+            $heygemTrainingPort = Resolve-StandalonePort -EnvVarName "HEYGEM_TRAINING_API_PORT" -PreferredPorts @(18384,18386,18387,18388,18389,18390,18391,18392) -UsedPorts $UsedPorts
+    }
+
+    return @{
+        Postgres = $postgresPort
+        Redis = $redisPort
+        MinioApi = $minioApiPort
+        MinioConsole = $minioConsolePort
+        HeygemApi = $heygemApiPort
+        HeygemTraining = $heygemTrainingPort
+    }
+}
+
+function Resolve-ApiPort {
+    param(
+        [hashtable]$UsedPorts,
+        [int]$RequestedPort = 0
+    )
+
+    if ($RequestedPort -gt 0) {
+        $candidate = Parse-PortValue -Value "$RequestedPort"
+        $candidateIsFree = $false
+        if ($null -ne $candidate) {
+            $candidateIsFree = Is-TcpPortAvailable -TestPort $candidate
+        }
+        if ($null -ne $candidate -and -not $UsedPorts.ContainsKey($candidate) -and $candidateIsFree) {
+            $UsedPorts[$candidate] = $true
+            return $candidate
+        }
+    }
+
+    $envCandidates = @()
+    if ($env:ROUGHCUT_API_PORT) {
+        $envCandidates += $env:ROUGHCUT_API_PORT
+    }
+    $dotEnvValue = Get-LocalDotEnvValue -Key "ROUGHCUT_API_PORT"
+    if ($dotEnvValue) {
+        $envCandidates += $dotEnvValue
+    }
+
+    foreach ($candidateSource in $envCandidates) {
+        $candidate = Parse-PortValue -Value $candidateSource
+        if ($null -eq $candidate) {
+            continue
+        }
+        $candidateIsFree = Is-TcpPortAvailable -TestPort $candidate
+        if (-not $UsedPorts.ContainsKey($candidate) -and $candidateIsFree) {
+            $UsedPorts[$candidate] = $true
+            return $candidate
+        }
+    }
+
+    return Resolve-StandalonePort -EnvVarName "ROUGHCUT_API_PORT" -PreferredPorts @(38471, 38472, 38473, 38474, 38475, 38476, 38477) -UsedPorts $UsedPorts
+}
+
+function Update-LocalServiceEnv {
+    param(
+        [int]$PostgresPort,
+        [int]$RedisPort,
+        [int]$MinioApiPort,
+        [int]$MinioConsolePort,
+        [int]$HeygemApiPort,
+        [int]$HeygemTrainingPort,
+        [int]$ApiPort
+    )
+
+    $defaultHeygemRoot = "D:/duix_avatar_data/face2face"
+    $heygemSharedRoot = if ($env:HEYGEM_SHARED_ROOT -and -not [string]::IsNullOrWhiteSpace($env:HEYGEM_SHARED_ROOT)) {
+        [System.IO.Path]::GetFullPath($env:HEYGEM_SHARED_ROOT).Replace('\\', '/')
+    } else {
+        $defaultHeygemRoot
+    }
+    if (-not (Test-Path $heygemSharedRoot)) {
+        New-Item -ItemType Directory -Force -Path $heygemSharedRoot | Out-Null
+    }
+
+    $env:ROUGHCUT_POSTGRES_PORT = "$PostgresPort"
+    $env:ROUGHCUT_REDIS_PORT = "$RedisPort"
+    $env:MINIO_API_PORT = "$MinioApiPort"
+    $env:MINIO_CONSOLE_PORT = "$MinioConsolePort"
+    $env:HEYGEM_API_PORT = "$HeygemApiPort"
+    $env:HEYGEM_TRAINING_API_PORT = "$HeygemTrainingPort"
+    $env:HEYGEM_SHARED_HOST_DIR = $heygemSharedRoot
+    $env:HEYGEM_SHARED_ROOT = $heygemSharedRoot
+    $voiceRoot = if ($env:HEYGEM_VOICE_ROOT -and -not [string]::IsNullOrWhiteSpace($env:HEYGEM_VOICE_ROOT)) {
+        [System.IO.Path]::GetFullPath($env:HEYGEM_VOICE_ROOT).Replace('\\', '/')
+    } else {
+        "D:/duix_avatar_data/voice/data"
+    }
+    if (-not (Test-Path $voiceRoot)) {
+        New-Item -ItemType Directory -Force -Path $voiceRoot | Out-Null
+    }
+    $env:HEYGEM_VOICE_ROOT = $voiceRoot
+    $env:AVATAR_API_BASE_URL = "http://127.0.0.1:$HeygemApiPort"
+    $env:AVATAR_TRAINING_API_BASE_URL = "http://127.0.0.1:$HeygemTrainingPort"
+
+    $dbEnv = Get-LocalDotEnvValue -Key "DATABASE_URL"
+    if ($dbEnv -match "^(?<prefix>postgresql\+asyncpg://[^@]+@[^:]+:)(?<port>\d+)(?<suffix>/[A-Za-z0-9_-]+)$") {
+        $env:DATABASE_URL = "$($Matches['prefix'])$PostgresPort$($Matches['suffix'])"
+    } else {
+        $env:DATABASE_URL = "postgresql+asyncpg://roughcut:roughcut@localhost:$PostgresPort/roughcut"
+    }
+
+    $redisEnv = Get-LocalDotEnvValue -Key "REDIS_URL"
+    if ($redisEnv -match "^(?<prefix>redis://[^:]+:)(?<port>\d+)(?<suffix>/\d+)$") {
+        $env:REDIS_URL = "$($Matches['prefix'])$RedisPort$($Matches['suffix'])"
+    } else {
+        $env:REDIS_URL = "redis://localhost:$RedisPort/0"
+    }
+    $env:CELERY_BROKER_URL = "redis://localhost:$RedisPort/0"
+    $env:CELERY_RESULT_BACKEND = "redis://localhost:$RedisPort/1"
+
+    $s3Endpoint = Get-LocalDotEnvValue -Key "S3_ENDPOINT_URL"
+    $shouldRewriteS3Endpoint = $true
+    if (-not [string]::IsNullOrWhiteSpace($s3Endpoint)) {
+        try {
+            $s3Uri = [uri]$s3Endpoint
+            if ($s3Uri.Host -and $s3Uri.Host -notin @("localhost", "127.0.0.1")) {
+                $shouldRewriteS3Endpoint = $false
+            }
+        } catch {
+            $shouldRewriteS3Endpoint = $true
+        }
+    }
+    if ($shouldRewriteS3Endpoint) {
+        $env:S3_ENDPOINT_URL = "http://127.0.0.1:$MinioApiPort"
+    }
+    $env:ROUGHCUT_API_PORT = "$ApiPort"
+    Write-Host "Allocated ports -> PostgreSQL:$PostgresPort Redis:$RedisPort MinIO API:$MinioApiPort MinIO Console:$MinioConsolePort External HeyGem:$HeygemApiPort/$HeygemTrainingPort API:$ApiPort" -ForegroundColor Cyan
+}
+
+function Get-ProcessMatches {
+    param([string]$Pattern)
+
+    return @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+        $_.Name -eq "python.exe" `
+            -and $_.ExecutablePath `
+            -and (Test-Path $Python) `
+            -and [System.StringComparer]::OrdinalIgnoreCase.Equals($_.ExecutablePath, $Python) `
+            -and $_.CommandLine `
+            -and $_.CommandLine -match $Pattern
+    } | Sort-Object ProcessId)
+}
+
+function Stop-RoughCutProcess {
+    param(
+        [string]$Name,
+        [string]$Pattern
+    )
+
+    $processes = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+        $_.CommandLine -and $_.CommandLine -match $Pattern
+    })
+
+    if ($processes.Count -eq 0) {
+        Write-Host "$Name is not running." -ForegroundColor Yellow
+        return
+    }
+
+    foreach ($proc in $processes) {
+        try {
+            $alive = Get-Process -Id $proc.ProcessId -ErrorAction SilentlyContinue
+            if (-not $alive) {
+                Write-Host "$Name already exited (PID $($proc.ProcessId))." -ForegroundColor Yellow
+                continue
+            }
+
+            Stop-Process -Id $proc.ProcessId -Force -ErrorAction Stop
+            Write-Host "$Name stopped (PID $($proc.ProcessId))." -ForegroundColor Green
+        } catch {
+            $message = $_.Exception.Message
+            if ($message -match "Cannot find a process with the process identifier") {
+                Write-Host "$Name already exited (PID $($proc.ProcessId))." -ForegroundColor Yellow
+            } else {
+                Write-Host "Failed to stop $Name (PID $($proc.ProcessId)): $message" -ForegroundColor Red
+            }
+        }
+    }
+}
+
+function Stop-RoughCutServices {
+    param([switch]$StopDockerServices)
+
+    Write-Host "Stopping existing RoughCut services..." -ForegroundColor Cyan
+    Stop-RoughCutProcess -Name "API" -Pattern "roughcut\.cli api --host 127\.0\.0\.1 --port"
+    Stop-RoughCutProcess -Name "Orchestrator" -Pattern "roughcut\.cli orchestrator --poll-interval"
+    Stop-RoughCutProcess -Name "Media worker" -Pattern "celery -A roughcut\.pipeline\.celery_app:celery_app worker --queues=media_queue"
+    Stop-RoughCutProcess -Name "LLM worker" -Pattern "celery -A roughcut\.pipeline\.celery_app:celery_app worker --queues=llm_queue"
+    Stop-RoughCutProcess -Name "Watcher" -Pattern "roughcut\.cli watcher"
+
+    if ($StopDockerServices) {
+        Write-Host "Stopping docker compose services..." -ForegroundColor Cyan
+        docker compose stop | Out-Host
+    }
+}
+
+function Start-RoughCutProcess {
+    param(
+        [string]$Name,
+        [string[]]$Arguments,
+        [string]$MatchPattern,
+        [string]$StdoutPath,
+        [string]$StderrPath
+    )
+
+    $matches = @(Get-ProcessMatches -Pattern $MatchPattern)
+    if ($matches.Count -gt 1) {
+        $matches | Select-Object -SkipLast 1 | ForEach-Object {
+            try {
+                Stop-Process -Id $_.ProcessId -Force -ErrorAction Stop
+                Write-Host "Stopped duplicate $Name (PID $($_.ProcessId))." -ForegroundColor Yellow
+            } catch {
+            }
+        }
+        $matches = @(Get-ProcessMatches -Pattern $MatchPattern)
+    }
+
+    if ($matches.Count -eq 1) {
+        Write-Host "$Name is already running. Skipping." -ForegroundColor Yellow
+        return
+    }
+
+    $process = Start-Process `
+        -FilePath $Python `
+        -ArgumentList $Arguments `
+        -WorkingDirectory $RepoRoot `
+        -NoNewWindow `
+        -PassThru `
+        -RedirectStandardOutput $StdoutPath `
+        -RedirectStandardError $StderrPath
+
+    [RoughCutJobObject]::Assign($script:ProcessJob, $process.Handle)
+    $script:ManagedProcesses += [pscustomobject]@{
+        Name = $Name
+        Process = $process
+    }
+
+    Write-Host "$Name started (PID $($process.Id))." -ForegroundColor Green
+}
+
+function Wait-ApiReady {
+    param(
+        [int]$TestPort,
+        [int]$TimeoutSec = 90
+    )
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    $url = "http://127.0.0.1:$TestPort/health"
+    while ((Get-Date) -lt $deadline) {
+        try {
+            $response = Invoke-WebRequest -Uri $url -Method Get -TimeoutSec 2 -UseBasicParsing
+            if ($response.StatusCode -ne 200) {
+                Start-Sleep -Milliseconds 500
+                continue
+            }
+            if ($response.Content -match '"status"\s*:\s*"ok"') {
+                return $true
+            }
+        } catch {
+        }
+        Start-Sleep -Milliseconds 500
+    }
+    return $false
+}
+
+function Wait-LocalPortListening {
+    param(
+        [int]$TestPort,
+        [string]$ServiceName,
+        [int]$TimeoutSec = 30
+    )
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    while ((Get-Date) -lt $deadline) {
+        if (Test-PortListening -TestPort $TestPort) {
+            Write-Host "$ServiceName is listening on port $TestPort." -ForegroundColor Green
+            return $true
+        }
+        Start-Sleep -Milliseconds 500
+    }
+
+    Write-Host "$ServiceName did not start on port $TestPort within $TimeoutSec seconds." -ForegroundColor Red
+    return $false
+}
+
+function Wait-LauncherClose {
+    if ($StopOnly) {
+        return
+    }
+
+    Write-Host ""
+    if ($NoPause) {
+        Write-Host "-NoPause is ignored because this launcher window now owns the RoughCut processes." -ForegroundColor Yellow
+    }
+    Write-Host "This launcher window owns the running RoughCut services." -ForegroundColor DarkGray
+    Write-Host "Close this terminal window to stop API / orchestrator / workers together." -ForegroundColor DarkGray
+    Write-Host "Logs stay in .\logs\*.out.log / .\logs\*.err.log" -ForegroundColor DarkGray
+
+    $notified = @{}
+    while ($true) {
+        foreach ($entry in $script:ManagedProcesses) {
+            if ($entry.Process.HasExited -and -not $notified.ContainsKey($entry.Process.Id)) {
+                $notified[$entry.Process.Id] = $true
+                Write-Host "$($entry.Name) exited with code $($entry.Process.ExitCode)." -ForegroundColor Yellow
+            }
+        }
+        Start-Sleep -Seconds 2
+    }
+}
+
+if ($StopOnly) {
+    Stop-RoughCutServices -StopDockerServices:$StopDocker
+    exit 0
+}
+
+Initialize-RoughCutEnvironment
+Ensure-RoughCutFrontend
+
+Stop-RoughCutServices
+
+    if (-not $SkipDocker) {
+        Write-Host "Checking Docker services..." -ForegroundColor Cyan
+    $dockerContainers = @("roughcut-postgres-1", "roughcut-redis-1", "roughcut-minio-1")
+    $dockerServices = @("postgres", "redis", "minio")
+        $legacyDockerNames = @("fastcut-postgres-1", "fastcut-redis-1", "fastcut-minio-1")
+    $usedPorts = @{}
+    try {
+        $running = docker ps -a --format "{{.Names}}"
+    } catch {
+        throw "Failed to run docker. Make sure Docker Desktop is running."
+    }
+
+    $legacy = @($legacyDockerNames | Where-Object { $_ -in $running })
+    if ($legacy.Count -gt 0) {
+        if (-not $CleanupLegacyDocker) {
+            throw "Legacy FastCut containers detected: $($legacy -join ', '). Run 'docker rm -f $($legacy -join ' ')' or rerun with -CleanupLegacyDocker."
+        }
+        Write-Host "Removing legacy FastCut containers..." -ForegroundColor Yellow
+        docker rm -f $legacy | Out-Host
+    }
+
+    $servicePorts = Resolve-PortSet -UsedPorts $usedPorts
+    $requestedApiPort = if ($PSBoundParameters.ContainsKey("Port")) { $Port } else { 0 }
+    $resolvedApiPort = Resolve-ApiPort -UsedPorts $usedPorts -RequestedPort $requestedApiPort
+
+    Update-LocalServiceEnv -PostgresPort $servicePorts.Postgres -RedisPort $servicePorts.Redis -MinioApiPort $servicePorts.MinioApi -MinioConsolePort $servicePorts.MinioConsole -HeygemApiPort $servicePorts.HeygemApi -HeygemTrainingPort $servicePorts.HeygemTraining -ApiPort $resolvedApiPort
+    $Port = $resolvedApiPort
+
+    Write-Host "Starting docker compose services..." -ForegroundColor Yellow
+    docker compose up -d $dockerServices | Out-Host
+
+    if (-not (Wait-LocalPortListening -TestPort $servicePorts.Postgres -ServiceName "PostgreSQL" -TimeoutSec 60)) {
+        throw "PostgreSQL failed to start in time."
+    }
+    if (-not (Wait-LocalPortListening -TestPort $servicePorts.Redis -ServiceName "Redis" -TimeoutSec 60)) {
+        throw "Redis failed to start in time."
+    }
+    if (-not (Wait-LocalPortListening -TestPort $servicePorts.MinioApi -ServiceName "MinIO API" -TimeoutSec 90)) {
+        throw "MinIO failed to start in time."
+    }
+    if (-not (Wait-LocalPortListening -TestPort $servicePorts.MinioConsole -ServiceName "MinIO Console" -TimeoutSec 90)) {
+        throw "MinIO Console failed to start in time."
+    }
+    if (-not (Wait-LocalPortListening -TestPort $servicePorts.HeygemApi -ServiceName "HeyGem API (external)" -TimeoutSec 10)) {
+        throw "External HeyGem preview service is not listening on port $($servicePorts.HeygemApi)."
+    }
+    if (-not (Wait-LocalPortListening -TestPort $servicePorts.HeygemTraining -ServiceName "HeyGem Training (external)" -TimeoutSec 10)) {
+        throw "External HeyGem training service is not listening on port $($servicePorts.HeygemTraining)."
+    }
+
+    Write-Host "Docker services are ready." -ForegroundColor Green
+}
+
+if (-not $SkipMigrate) {
+    Write-Host "Running database migrations..." -ForegroundColor Cyan
+    & $Python -m roughcut.cli migrate
+}
+
+New-Item -ItemType Directory -Force -Path (Join-Path $RepoRoot "logs") | Out-Null
+New-Item -ItemType Directory -Force -Path $WatchDir | Out-Null
+
+Write-Host "Starting RoughCut services..." -ForegroundColor Cyan
+if (-not $NoWatcher) {
+    Start-RoughCutProcess `
+        -Name "Watcher" `
+        -Arguments @("-m", "roughcut.cli", "watcher", $WatchDir, "--language", "zh-CN") `
+        -MatchPattern ([regex]::Escape("roughcut.cli watcher $WatchDir --language zh-CN")) `
+        -StdoutPath (Join-Path $RepoRoot "logs\watcher.out.log") `
+        -StderrPath (Join-Path $RepoRoot "logs\watcher.err.log")
+}
+Start-RoughCutProcess `
+    -Name "API" `
+    -Arguments @("-m", "roughcut.cli", "api", "--host", "127.0.0.1", "--port", "$Port") `
+    -MatchPattern ([regex]::Escape("roughcut.cli api --host 127.0.0.1 --port $Port")) `
+    -StdoutPath (Join-Path $RepoRoot "logs\api.out.log") `
+    -StderrPath (Join-Path $RepoRoot "logs\api.err.log")
+Start-RoughCutProcess `
+    -Name "Orchestrator" `
+    -Arguments @("-m", "roughcut.cli", "orchestrator", "--poll-interval", "2") `
+    -MatchPattern ([regex]::Escape("roughcut.cli orchestrator --poll-interval 2")) `
+    -StdoutPath (Join-Path $RepoRoot "logs\orchestrator.out.log") `
+    -StderrPath (Join-Path $RepoRoot "logs\orchestrator.err.log")
+Start-RoughCutProcess `
+    -Name "Media worker" `
+    -Arguments @("-m", "celery", "-A", "roughcut.pipeline.celery_app:celery_app", "worker", "--queues=media_queue", "--pool=solo", "--concurrency=1", "--loglevel=info") `
+    -MatchPattern ([regex]::Escape("celery -A roughcut.pipeline.celery_app:celery_app worker --queues=media_queue --pool=solo --concurrency=1 --loglevel=info")) `
+    -StdoutPath (Join-Path $RepoRoot "logs\media-worker.out.log") `
+    -StderrPath (Join-Path $RepoRoot "logs\media-worker.err.log")
+Start-RoughCutProcess `
+    -Name "LLM worker" `
+    -Arguments @("-m", "celery", "-A", "roughcut.pipeline.celery_app:celery_app", "worker", "--queues=llm_queue", "--pool=solo", "--concurrency=1", "--loglevel=info") `
+    -MatchPattern ([regex]::Escape("celery -A roughcut.pipeline.celery_app:celery_app worker --queues=llm_queue --pool=solo --concurrency=1 --loglevel=info")) `
+    -StdoutPath (Join-Path $RepoRoot "logs\llm-worker.out.log") `
+    -StderrPath (Join-Path $RepoRoot "logs\llm-worker.err.log")
+
+Write-Host ""
+Write-Host "RoughCut started." -ForegroundColor Green
+Write-Host "API URL: http://127.0.0.1:$Port" -ForegroundColor Green
+Write-Host "Logs: .\logs\*.out.log / .\logs\*.err.log" -ForegroundColor DarkGray
+
+if (Wait-ApiReady -TestPort $Port) {
+    Start-Process "http://127.0.0.1:$Port/" | Out-Null
+    Write-Host "GUI opened in your default browser." -ForegroundColor Green
+} else {
+    Write-Host "API did not become ready in time. Check logs if the GUI does not open." -ForegroundColor Yellow
+}
+
+Wait-LauncherClose

@@ -72,6 +72,56 @@ def test_build_cover_title_drops_edc_prefix_from_subject_type():
     assert title["main"] == "REATE折刀"
 
 
+def test_build_cover_title_prefers_specific_ai_feature_anchor():
+    preset = get_workflow_preset("screen_tutorial")
+    title = build_cover_title(
+        {
+            "subject_brand": "RunningHub",
+            "subject_model": "无限画布",
+            "subject_type": "AI工作流创作平台",
+            "video_theme": "RunningHub 无限画布新功能上线与实操演示",
+            "hook_line": "RunningHub 刚上线无限画布，漫剧工作流终于顺了",
+        },
+        preset,
+    )
+
+    assert title["top"] == "RUNNINGHUB"
+    assert title["main"] == "无限画布"
+    assert title["bottom"] == "这功能强得离谱"
+
+
+def test_build_cover_title_upgrades_software_hook_to_more_explosive_copy():
+    preset = get_workflow_preset("screen_tutorial")
+    title = build_cover_title(
+        {
+            "subject_brand": "RunningHub",
+            "subject_model": "工作流",
+            "subject_type": "AI工作流创作平台",
+            "video_theme": "RunningHub 工作流搭建与节点编排教程",
+            "hook_line": "RunningHub 工作流教程",
+        },
+        preset,
+    )
+
+    assert title["bottom"] == "核心流程直接起飞"
+
+
+def test_build_cover_title_respects_global_copy_style():
+    preset = get_workflow_preset("screen_tutorial")
+    title = build_cover_title(
+        {
+            "subject_brand": "RunningHub",
+            "subject_model": "无限画布",
+            "subject_type": "AI工作流创作平台",
+            "video_theme": "RunningHub 无限画布新功能上线与实操演示",
+            "copy_style": "trusted_expert",
+        },
+        preset,
+    )
+
+    assert title["bottom"] == "无限画布关键差异讲明白"
+
+
 def test_fallback_profile_does_not_use_timestamp_as_model():
     profile = _fallback_profile(
         source_name="20260130-140529.mp4",
@@ -113,6 +163,23 @@ def test_build_search_queries_uses_transcript_signal_terms_for_proactive_search(
     assert "ARC 多功能工具钳" in queries
 
 
+def test_build_search_queries_prefers_ai_feature_anchor_for_software_topics():
+    queries = _build_search_queries(
+        {
+            "subject_brand": "RunningHub",
+            "subject_model": "无限画布",
+            "subject_type": "AI工作流创作平台",
+            "search_queries": [],
+        },
+        "RH无限画布 快速漫剧.mp4",
+        transcript_excerpt="[12.0-18.0] 今天 RunningHub 上线了无限画布功能，拿来做漫剧工作流。",
+    )
+
+    assert "RunningHub 无限画布" in queries
+    assert "RunningHub 无限画布 教程" in queries
+    assert "RunningHub 无限画布 漫剧" in queries
+
+
 def test_build_transcript_excerpt_pulls_high_signal_items_from_later_segments():
     subtitle_items = [
         {"start_time": 0.0, "end_time": 1.0, "text_raw": "开场闲聊"},
@@ -148,6 +215,33 @@ def test_seed_profile_from_subtitles_detects_reate_folding_knife_signals():
 
     assert profile["subject_brand"] == "REATE"
     assert profile["subject_type"] == "EDC折刀"
+
+
+def test_seed_profile_from_subtitles_detects_runninghub_infinite_canvas_theme():
+    profile = _seed_profile_from_subtitles(
+        [
+            {"text_raw": "今天 RunningHub 上线了一个全新的功能叫无限画布"},
+            {"text_raw": "这个功能很适合拿来搭漫剧工作流和节点编排"},
+        ]
+    )
+
+    assert profile["subject_brand"] == "RunningHub"
+    assert profile["subject_model"] == "无限画布"
+    assert profile["subject_type"] == "AI工作流创作平台"
+    assert "无限画布" in profile["video_theme"]
+    assert any("RunningHub 无限画布" in item for item in profile["search_queries"])
+
+
+def test_seed_profile_from_subtitles_prefers_runninghub_from_rh_alias_over_later_model_names():
+    profile = _seed_profile_from_subtitles(
+        [
+            {"text_raw": "今天那个 RH 上线了一个全新的功能，叫无限画布。"},
+            {"text_raw": "后面这个工作流里也能接 Gemini 和 OpenAI。"},
+        ]
+    )
+
+    assert profile["subject_brand"] == "RunningHub"
+    assert profile["subject_model"] == "无限画布"
 
 
 def test_seed_profile_from_user_memory_is_disabled_to_avoid_cross_episode_contamination():

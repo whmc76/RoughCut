@@ -10,8 +10,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from roughcut.api.schemas import (
     WatchInventoryEnqueueIn,
+    WatchInventoryMergeIn,
     WatchInventoryEnqueueOut,
     WatchInventoryOut,
+    WatchInventorySmartMergeOut,
     WatchInventoryScanIn,
     WatchInventoryScanStatusOut,
     WatchRootCreate,
@@ -21,6 +23,8 @@ from roughcut.db.models import WatchRoot
 from roughcut.db.session import get_session
 from roughcut.watcher.folder_watcher import (
     create_jobs_for_inventory_paths,
+    create_merged_job_for_inventory_paths,
+    suggest_merge_groups_for_inventory_items,
     ensure_watch_inventory_thumbnail,
     get_watch_root_inventory_scan_status,
     replace_watch_root_inventory_scan_snapshot,
@@ -261,6 +265,112 @@ async def enqueue_inventory_items(
         created_count=len(created_job_ids),
         skipped_count=len(selected_items) - len(created_job_ids),
         created_job_ids=created_job_ids,
+    )
+
+
+@router.post("/{root_id}/inventory/merge", response_model=WatchInventoryEnqueueOut)
+async def merge_inventory_items(
+    root_id: uuid.UUID,
+    body: WatchInventoryMergeIn,
+    session: AsyncSession = Depends(get_session),
+):
+    root = await session.get(WatchRoot, root_id)
+    if not root:
+        raise HTTPException(status_code=404, detail="Watch root not found")
+
+    active_status = get_watch_root_inventory_scan_status(root.path, include_inventory=False)
+    if active_status and active_status.get("status") == "running":
+        raise HTTPException(status_code=409, detail="Inventory scan is still running")
+
+    payload = _full_inventory_payload(root)
+    inventory = payload.get("inventory") or {}
+    pending = list(inventory.get("pending") or [])
+    if not pending:
+        return WatchInventoryEnqueueOut(
+            requested_count=0,
+            created_count=0,
+            skipped_count=0,
+            created_job_ids=[],
+        )
+
+    selected_set = {path for path in body.relative_paths if path}
+    if len(selected_set) < 2:
+        raise HTTPException(status_code=400, detail="At least two inventory items are required to merge")
+
+    pending_map = {str(item.get("relative_path")): item for item in pending if item.get("relative_path") is not None}
+    selected_items = [pending_map[path] for path in body.relative_paths if path in pending_map]
+    if len(selected_items) < 2:
+        raise HTTPException(status_code=404, detail="Selected inventory items not found")
+
+    file_paths = [str(item["path"]) for item in selected_items]
+    job_id = await create_merged_job_for_inventory_paths(file_paths, channel_profile=root.channel_profile)
+    merged_job_ids = [job_id] if job_id else []
+
+    selected_path_set = {str(item["path"]) for item in selected_items}
+    remaining_pending = [item for item in pending if str(item.get("path")) not in selected_path_set]
+    deduped = list(inventory.get("deduped") or [])
+    for item in selected_items:
+        deduped.append(
+            {
+                **item,
+                "status": "deduped",
+                "dedupe_reason": "job:merged" if job_id else "job:existing",
+                "matched_job_id": job_id,
+            }
+        )
+
+    payload["inventory"] = {
+        "pending": remaining_pending,
+        "deduped": deduped,
+    }
+    payload["pending_count"] = len(remaining_pending)
+    payload["deduped_count"] = len(deduped)
+    payload["updated_at"] = datetime.now(timezone.utc).isoformat()
+    if payload.get("status") in {None, "idle"}:
+        payload["status"] = "done"
+
+    root.inventory_cache_json = payload
+    root.inventory_cache_updated_at = datetime.now(timezone.utc)
+    await session.commit()
+    replace_watch_root_inventory_scan_snapshot(root.path, payload)
+
+    return WatchInventoryEnqueueOut(
+        requested_count=len(selected_items),
+        created_count=len(merged_job_ids),
+        skipped_count=len(selected_items) - len(merged_job_ids),
+        created_job_ids=merged_job_ids,
+    )
+
+
+@router.get("/{root_id}/inventory/smart-groups", response_model=WatchInventorySmartMergeOut)
+async def suggest_inventory_merge_groups(
+    root_id: uuid.UUID,
+    time_window_seconds: int = 480,
+    min_score: float = 0.62,
+    min_group_size: int = 2,
+    max_groups: int = 8,
+    session: AsyncSession = Depends(get_session),
+):
+    root = await session.get(WatchRoot, root_id)
+    if not root:
+        raise HTTPException(status_code=404, detail="Watch root not found")
+
+    active_status = get_watch_root_inventory_scan_status(root.path, include_inventory=False)
+    if active_status and active_status.get("status") == "running":
+        raise HTTPException(status_code=409, detail="Inventory scan is still running")
+
+    payload = _full_inventory_payload(root)
+    pending = list((payload.get("inventory") or {}).get("pending") or [])
+    groups = await suggest_merge_groups_for_inventory_items(
+        pending,
+        time_window_seconds=time_window_seconds,
+        min_score=min_score,
+        min_group_size=min_group_size,
+        max_groups=max_groups,
+    )
+    return WatchInventorySmartMergeOut(
+        source_count=len(pending),
+        groups=groups,
     )
 
 

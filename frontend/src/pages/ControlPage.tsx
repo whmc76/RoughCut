@@ -1,37 +1,42 @@
 import { PageHeader } from "../components/ui/PageHeader";
 import { PanelHeader } from "../components/ui/PanelHeader";
 import { useControlWorkspace } from "../features/control/useControlWorkspace";
+import { useI18n } from "../i18n";
 import { formatDate } from "../utils";
 
 export function ControlPage() {
+  const { t } = useI18n();
   const workspace = useControlWorkspace();
+  const lastChecked = workspace.status.data
+    ? t("control.services.lastChecked").replace("{time}", formatDate(workspace.status.data.checked_at))
+    : t("control.services.unavailable");
 
   return (
     <section>
-      <PageHeader eyebrow="Runtime" title="服务控制" description="保留最需要的操作：看状态、停止后台服务。" />
+      <PageHeader eyebrow={t("control.page.eyebrow")} title={t("control.page.title")} description={t("control.page.description")} />
 
       <div className="panel-grid two-up">
         <section className="panel">
-          <PanelHeader title="服务状态" description={workspace.status.data ? `最后检查：${formatDate(workspace.status.data.checked_at)}` : "尚未获取状态"} />
+          <PanelHeader title={t("control.services.title")} description={lastChecked} />
           <div className="service-grid">
             {Object.entries(workspace.status.data?.services ?? {}).map(([key, online]) => (
               <article key={key} className="service-card">
                 <span>{key}</span>
-                <strong className={online ? "status-ok" : "status-off"}>{online ? "在线" : "离线"}</strong>
+                <strong className={online ? "status-ok" : "status-off"}>{online ? t("control.services.online") : t("control.services.offline")}</strong>
               </article>
             ))}
           </div>
         </section>
 
         <section className="panel">
-          <PanelHeader title="停止服务" description="停止后当前控制台可能会断开连接。" />
+          <PanelHeader title={t("control.stop.title")} description={t("control.stop.description")} />
           <label className="checkbox-row">
             <input type="checkbox" checked={workspace.stopDocker} onChange={(event) => workspace.setStopDocker(event.target.checked)} />
-            <span>同时停止 Docker 基础服务</span>
+            <span>{t("control.stop.withDocker")}</span>
           </label>
           <div className="top-gap">
             <button className="button danger" onClick={() => workspace.stop.mutate()}>
-              停止服务
+              {t("control.stop.action")}
             </button>
           </div>
           {workspace.stop.data && (

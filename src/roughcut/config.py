@@ -2,12 +2,32 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-
 _OVERRIDES_FILE = Path("roughcut_config.json")
+DEFAULT_JOB_WORKFLOW_MODE = "standard_edit"
+TRANSCRIPTION_MODEL_OPTIONS: dict[str, list[str]] = {
+    "local_whisper": [
+        "base",
+        "small",
+        "medium",
+        "large-v3",
+        "distil-large-v3",
+    ],
+    "openai": [
+        "gpt-4o-transcribe",
+    ],
+}
+DEFAULT_TRANSCRIPTION_PROVIDER = "local_whisper"
+DEFAULT_TRANSCRIPTION_MODELS: dict[str, str] = {
+    "local_whisper": "base",
+    "openai": "gpt-4o-transcribe",
+}
+AVATAR_PROVIDER_OPTIONS: tuple[str, ...] = ("mock", "heygem")
+VOICE_PROVIDER_OPTIONS: tuple[str, ...] = ("edge", "runninghub")
 
 
 class Settings(BaseSettings):
@@ -29,8 +49,8 @@ class Settings(BaseSettings):
     s3_region: str = "us-east-1"
 
     # Transcription
-    transcription_provider: str = "local_whisper"  # openai | local_whisper
-    transcription_model: str = "base"
+    transcription_provider: str = DEFAULT_TRANSCRIPTION_PROVIDER  # openai | local_whisper
+    transcription_model: str = DEFAULT_TRANSCRIPTION_MODELS[DEFAULT_TRANSCRIPTION_PROVIDER]
 
     # Reasoning
     llm_mode: str = "performance"  # performance | local
@@ -61,6 +81,23 @@ class Settings(BaseSettings):
     ollama_api_key: str = ""
     ollama_base_url: str = "http://localhost:11434"
 
+    # Avatar / Digital Human
+    avatar_provider: str = "mock"
+    avatar_api_base_url: str = "http://127.0.0.1:49202"
+    avatar_training_api_base_url: str = "http://127.0.0.1:49203"
+    avatar_api_key: str = ""
+    avatar_presenter_id: str = ""
+    avatar_layout_template: str = "picture_in_picture_right"
+    avatar_safe_margin: float = 0.08
+    avatar_overlay_scale: float = 0.24
+
+    # Voice / AI Director dubbing
+    voice_provider: str = "edge"
+    voice_clone_api_base_url: str = "https://www.runninghub.cn"
+    voice_clone_api_key: str = ""
+    voice_clone_voice_id: str = ""
+    director_rewrite_strength: float = 0.55
+
     # Security
     max_upload_size_mb: int = 2048
     max_video_duration_sec: int = 7200
@@ -71,6 +108,8 @@ class Settings(BaseSettings):
     output_dir: str = "data/output"
     output_name_pattern: str = "{date}_{stem}"  # {date}=YYYYMMDD, {stem}=original filename stem
     render_debug_dir: str = "logs/render-debug"
+    default_job_workflow_mode: str = DEFAULT_JOB_WORKFLOW_MODE
+    default_job_enhancement_modes: list[str] = []
 
     # Vision model (for rotation detection, cover selection)
     # Set to a vision-capable model name, e.g. "llava:13b" or "moondream" for Ollama,
@@ -137,6 +176,19 @@ class Settings(BaseSettings):
 _settings: Settings | None = None
 
 
+def normalize_transcription_settings(provider: object, model: object) -> tuple[str, str]:
+    provider_value = str(provider or DEFAULT_TRANSCRIPTION_PROVIDER).strip().lower() or DEFAULT_TRANSCRIPTION_PROVIDER
+    if provider_value not in TRANSCRIPTION_MODEL_OPTIONS:
+        provider_value = DEFAULT_TRANSCRIPTION_PROVIDER
+
+    model_value = str(model or "").strip()
+    allowed_models = TRANSCRIPTION_MODEL_OPTIONS[provider_value]
+    if model_value not in allowed_models:
+        model_value = DEFAULT_TRANSCRIPTION_MODELS[provider_value]
+
+    return provider_value, model_value
+
+
 def get_settings() -> Settings:
     global _settings
     if _settings is None:
@@ -149,4 +201,77 @@ def get_settings() -> Settings:
             for key, value in overrides.items():
                 if hasattr(_settings, key):
                     object.__setattr__(_settings, key, value)
+        provider, model = normalize_transcription_settings(
+            _settings.transcription_provider,
+            _settings.transcription_model,
+        )
+        object.__setattr__(_settings, "transcription_provider", provider)
+        object.__setattr__(_settings, "transcription_model", model)
+        object.__setattr__(
+            _settings,
+            "default_job_workflow_mode",
+            _normalize_default_workflow_mode(getattr(_settings, "default_job_workflow_mode", DEFAULT_JOB_WORKFLOW_MODE)),
+        )
+        object.__setattr__(
+            _settings,
+            "default_job_enhancement_modes",
+            _normalize_default_enhancement_modes(getattr(_settings, "default_job_enhancement_modes", []) or []),
+        )
     return _settings
+
+
+def load_runtime_overrides() -> dict[str, Any]:
+    if _OVERRIDES_FILE.exists():
+        try:
+            payload = json.loads(_OVERRIDES_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+        return payload if isinstance(payload, dict) else {}
+    return {}
+
+
+def save_runtime_overrides(data: dict[str, Any]) -> None:
+    _OVERRIDES_FILE.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def apply_runtime_overrides(updates: dict[str, Any]) -> Settings:
+    overrides = load_runtime_overrides()
+    overrides.update(updates)
+    save_runtime_overrides(overrides)
+
+    settings = get_settings()
+    for key, value in updates.items():
+        if hasattr(settings, key):
+            object.__setattr__(settings, key, value)
+
+    provider, model = normalize_transcription_settings(
+        settings.transcription_provider,
+        settings.transcription_model,
+    )
+    object.__setattr__(settings, "transcription_provider", provider)
+    object.__setattr__(settings, "transcription_model", model)
+    object.__setattr__(
+        settings,
+        "default_job_workflow_mode",
+        _normalize_default_workflow_mode(getattr(settings, "default_job_workflow_mode", DEFAULT_JOB_WORKFLOW_MODE)),
+    )
+    object.__setattr__(
+        settings,
+        "default_job_enhancement_modes",
+        _normalize_default_enhancement_modes(getattr(settings, "default_job_enhancement_modes", []) or []),
+    )
+    return settings
+
+
+def _normalize_default_workflow_mode(value: object) -> str:
+    from roughcut.creative.modes import normalize_workflow_mode
+
+    return normalize_workflow_mode(str(value or DEFAULT_JOB_WORKFLOW_MODE))
+
+
+def _normalize_default_enhancement_modes(value: object) -> list[str]:
+    from roughcut.creative.modes import normalize_enhancement_modes
+
+    if isinstance(value, (list, tuple, set)):
+        return normalize_enhancement_modes(list(value))
+    return normalize_enhancement_modes([])

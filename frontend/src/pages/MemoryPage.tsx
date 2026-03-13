@@ -4,19 +4,21 @@ import { MemoryFieldPreferencesPanel } from "../features/memory/MemoryFieldPrefe
 import { MemoryOverviewStats } from "../features/memory/MemoryOverviewStats";
 import { MemoryRecentCorrectionsPanel } from "../features/memory/MemoryRecentCorrectionsPanel";
 import { useMemoryWorkspace } from "../features/memory/useMemoryWorkspace";
+import { useI18n } from "../i18n";
 
 export function MemoryPage() {
+  const { t } = useI18n();
   const workspace = useMemoryWorkspace();
 
   return (
     <section>
       <PageHeader
-        eyebrow="Feedback Loop"
-        title="行为记忆统计"
-        description="页面层只负责加载和过滤，记忆概览、词云、字段偏好和最近纠正都拆成独立区块。"
+        eyebrow={t("memory.page.eyebrow")}
+        title={t("memory.page.title")}
+        description={t("memory.page.description")}
         actions={
           <select className="input" value={workspace.channelProfile} onChange={(event) => workspace.setChannelProfile(event.target.value)}>
-            <option value="">全部频道</option>
+            <option value="">{t("memory.page.allChannels")}</option>
             {workspace.stats.data?.channel_profiles.map((item) => (
               <option key={item} value={item}>
                 {item}

@@ -3,6 +3,7 @@ import { EmptyState } from "../../components/ui/EmptyState";
 import { ListActions } from "../../components/ui/ListActions";
 import { ListCard } from "../../components/ui/ListCard";
 import { PanelHeader } from "../../components/ui/PanelHeader";
+import { useI18n } from "../../i18n";
 import { formatDate } from "../../utils";
 
 type GlossaryListPanelProps = {
@@ -13,9 +14,11 @@ type GlossaryListPanelProps = {
 };
 
 export function GlossaryListPanel({ terms, isDeleting, onEdit, onDelete }: GlossaryListPanelProps) {
+  const { t } = useI18n();
+
   return (
     <section className="panel">
-      <PanelHeader title="规则列表" description={`${terms.length} 条规则`} />
+      <PanelHeader title={t("glossary.list.title")} description={`${terms.length} ${t("glossary.list.count")}`} />
       <div className="list-stack">
         {terms.map((term) => (
           <ListCard key={term.id}>
@@ -23,20 +26,20 @@ export function GlossaryListPanel({ terms, isDeleting, onEdit, onDelete }: Gloss
               <div className="row-title">{term.correct_form}</div>
               <div className="muted">{term.wrong_forms.join(" / ")}</div>
               <div className="muted compact-top">
-                {term.category || "未分类"} · {formatDate(term.created_at)}
+                {term.category || t("glossary.list.uncategorized")} · {formatDate(term.created_at)}
               </div>
             </div>
             <ListActions>
               <button className="button ghost" onClick={() => onEdit(term)}>
-                编辑
+                {t("glossary.list.edit")}
               </button>
               <button className="button danger" onClick={() => onDelete(term.id)} disabled={isDeleting}>
-                删除
+                {t("glossary.list.delete")}
               </button>
             </ListActions>
           </ListCard>
         ))}
-        {!terms.length && <EmptyState message="暂无术语规则" />}
+        {!terms.length && <EmptyState message={t("glossary.list.empty")} />}
       </div>
     </section>
   );

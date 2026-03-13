@@ -70,6 +70,8 @@ def _update_step_status(
                 }
                 if error:
                     step.error_message = error
+                elif status in ("running", "done"):
+                    step.error_message = None
                 await session.commit()
                 return True
             return False
@@ -155,6 +157,16 @@ def llm_content_profile(self, job_id: str):
 @celery_app.task(name="roughcut.pipeline.tasks.llm_glossary_review", bind=True, max_retries=3)
 def llm_glossary_review(self, job_id: str):
     return _run_task_step(self, job_id, "glossary_review", retry_countdown=10)
+
+
+@celery_app.task(name="roughcut.pipeline.tasks.llm_ai_director", bind=True, max_retries=2)
+def llm_ai_director(self, job_id: str):
+    return _run_task_step(self, job_id, "ai_director", retry_countdown=20)
+
+
+@celery_app.task(name="roughcut.pipeline.tasks.llm_avatar_commentary", bind=True, max_retries=2)
+def llm_avatar_commentary(self, job_id: str):
+    return _run_task_step(self, job_id, "avatar_commentary", retry_countdown=20)
 
 
 @celery_app.task(name="roughcut.pipeline.tasks.media_edit_plan", bind=True, max_retries=3)

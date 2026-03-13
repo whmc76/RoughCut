@@ -1,7 +1,8 @@
 import { api } from "../../api";
 import { PanelHeader } from "../../components/ui/PanelHeader";
 import { StatCard } from "../../components/ui/StatCard";
-import type { WatchInventoryStatus, WatchRoot } from "../../types";
+import { useI18n } from "../../i18n";
+import type { WatchInventorySmartMergeGroup, WatchInventoryStatus, WatchRoot } from "../../types";
 import { formatBytes, formatDate, formatDuration, statusLabel } from "../../utils";
 
 type WatchRootInventoryPanelProps = {
@@ -10,8 +11,15 @@ type WatchRootInventoryPanelProps = {
   selectedPending: string[];
   isScanning: boolean;
   isEnqueueing: boolean;
+  isMerging: boolean;
+  isSuggesting: boolean;
   onScan: (force: boolean) => void;
   onEnqueue: (enqueueAll: boolean) => void;
+  onMerge: () => void;
+  onSmartMergeSuggest: () => void;
+  isSmartGroupMerging: boolean;
+  smartGroups: WatchInventorySmartMergeGroup[];
+  onMergeSmartGroup: (relativePaths: string[]) => void;
   onTogglePending: (relativePath: string, checked: boolean) => void;
 };
 
@@ -21,25 +29,42 @@ export function WatchRootInventoryPanel({
   selectedPending,
   isScanning,
   isEnqueueing,
+  isMerging,
+  isSuggesting,
   onScan,
   onEnqueue,
+  onMerge,
+  onSmartMergeSuggest,
+  isSmartGroupMerging,
+  smartGroups,
+  onMergeSmartGroup,
   onTogglePending,
 }: WatchRootInventoryPanelProps) {
+  const { t } = useI18n();
+  const description = inventory
+    ? t("watch.inventory.descriptionReady")
+        .replace("{pending}", String(inventory.pending_count))
+        .replace("{deduped}", String(inventory.deduped_count))
+    : t("watch.inventory.description");
+
   return (
     <section className="panel inventory-panel">
       <PanelHeader
-        title="待剪辑清单"
-        description={inventory ? `${inventory.pending_count} 待剪辑 / ${inventory.deduped_count} 已去重` : "尚未扫描"}
+        title={t("watch.inventory.title")}
+        description={description}
         actions={
           <div className="toolbar">
             <button className="button ghost" onClick={() => onScan(false)} disabled={isScanning}>
-              {isScanning ? "扫描中..." : "开始扫描"}
+              {isScanning ? t("watch.inventory.scanning") : t("watch.inventory.scan")}
             </button>
             <button className="button ghost" onClick={() => onScan(true)} disabled={isScanning}>
-              强制重扫
+              {t("watch.inventory.forceScan")}
             </button>
-            <button className="button primary" onClick={() => onEnqueue(true)} disabled={!inventory?.inventory.pending.length || isEnqueueing}>
-              全部入队
+            <button className="button primary" onClick={() => onEnqueue(true)} disabled={!inventory?.inventory.pending.length || isEnqueueing || isMerging}>
+              {t("watch.inventory.enqueueAll")}
+            </button>
+            <button className="button ghost" onClick={onSmartMergeSuggest} disabled={!inventory?.inventory.pending.length || isScanning || isSuggesting}>
+              {t("watch.inventory.smartMerge")}
             </button>
           </div>
         }
@@ -48,19 +73,59 @@ export function WatchRootInventoryPanel({
       {inventory && (
         <>
           <div className="stats-grid compact">
-            <StatCard label="扫描状态" value={statusLabel(inventory.status)} />
-            <StatCard label="进度" value={`${inventory.processed_files} / ${inventory.total_files}`} />
-            <StatCard label="当前文件" value={inventory.current_file || "—"} compact />
+            <StatCard label={t("watch.inventory.scanStatus")} value={statusLabel(inventory.status)} />
+            <StatCard label={t("watch.inventory.progress")} value={`${inventory.processed_files} / ${inventory.total_files}`} />
+            <StatCard label={t("watch.inventory.currentFile")} value={inventory.current_file || "—"} compact />
           </div>
+
+          {smartGroups.length > 0 && (
+            <div className="top-gap">
+              <div style={{ marginBottom: 8 }}>
+                <strong>{t("watch.inventory.smartSuggestions")}</strong>{" "}
+                <span className="muted">({smartGroups.length})</span>
+              </div>
+              {smartGroups.map((group, index) => (
+                <div className="panel" key={`${group.relative_paths.join("|")}-${index}`} style={{ marginBottom: 8 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
+                    <div>
+                      <div>{group.relative_paths.join(" + ")}</div>
+                      <div className="muted">
+                        {t("watch.inventory.smartScore").replace("{score}", `${(group.score * 100).toFixed(0)}%`)}
+                      </div>
+                      <div className="chip-wrap compact" style={{ marginTop: 8 }}>
+                        {group.reasons.map((reason) => (
+                          <span key={reason} className="muted">{reason}</span>
+                        ))}
+                      </div>
+                    </div>
+                      <button className="button ghost" onClick={() => onMergeSmartGroup(group.relative_paths)} disabled={isSmartGroupMerging || isMerging}>
+                      {t("watch.inventory.mergeSuggested")}
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {!!smartGroups.length && (
+            <div className="toolbar top-gap">
+              <button className="button ghost" onClick={onSmartMergeSuggest} disabled={isSuggesting || isSmartGroupMerging}>
+                {t("watch.inventory.refreshSmartSuggestions")}
+              </button>
+              <button className="button primary" onClick={() => onMergeSmartGroup(smartGroups[0].relative_paths)} disabled={isSmartGroupMerging || isMerging}>
+                {t("watch.inventory.mergeTopSuggestion")}
+              </button>
+            </div>
+          )}
 
           <div className="table-wrap">
             <table className="data-table">
               <thead>
                 <tr>
                   <th></th>
-                  <th>文件</th>
-                  <th>信息</th>
-                  <th>修改时间</th>
+                  <th>{t("watch.inventory.file")}</th>
+                  <th>{t("watch.inventory.info")}</th>
+                  <th>{t("watch.inventory.modifiedAt")}</th>
                 </tr>
               </thead>
               <tbody>
@@ -94,9 +159,12 @@ export function WatchRootInventoryPanel({
           {!!selectedPending.length && (
             <div className="toolbar top-gap">
               <button className="button primary" onClick={() => onEnqueue(false)} disabled={isEnqueueing}>
-                将选中项加入剪辑任务
+                {t("watch.inventory.enqueueSelected")}
               </button>
-              <span className="muted">已选 {selectedPending.length} 项</span>
+              <button className="button primary" onClick={onMerge} disabled={selectedPending.length < 2 || isMerging}>
+                {t("watch.inventory.mergeSelected")}
+              </button>
+              <span className="muted">{t("watch.inventory.selectedCount").replace("{count}", String(selectedPending.length))}</span>
             </div>
           )}
         </>

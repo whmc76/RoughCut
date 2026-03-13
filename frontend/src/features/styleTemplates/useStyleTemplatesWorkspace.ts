@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { api } from "../../api";
 
-type SectionKind = "subtitle" | "cover" | "title";
+type SectionKind = "subtitle" | "subtitleMotion" | "cover" | "title" | "copy";
 
 export function useStyleTemplatesWorkspace() {
   const queryClient = useQueryClient();

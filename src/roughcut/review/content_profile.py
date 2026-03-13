@@ -53,6 +53,7 @@ def build_cover_title(profile: dict[str, Any], preset: WorkflowPreset) -> dict[s
     theme = _clean_line(profile.get("video_theme") or "")
     hook = _clean_line(profile.get("hook_line") or "")
     visible_text = str(profile.get("visible_text") or "").strip()
+    copy_style = str(profile.get("copy_style") or "attention_grabbing").strip() or "attention_grabbing"
 
     top = _pick_cover_top(brand=brand, subject_type=subject_type, visible_text=visible_text, preset=preset)
     main = _pick_cover_main(
@@ -64,15 +65,15 @@ def build_cover_title(profile: dict[str, Any], preset: WorkflowPreset) -> dict[s
         preset=preset,
     )
 
-    if not hook or _is_generic_cover_line(hook):
-        if preset.name == "unboxing_limited":
-            hook = "限定细节值不值"
-        elif preset.name == "unboxing_upgrade":
-            hook = "这次升级够不够狠"
-        elif preset.name == "edc_tactical":
-            hook = "做工结构直接看"
-        else:
-            hook = preset.cover_accent
+    hook = _build_cover_hook(
+        hook=hook,
+        brand=brand,
+        model=model,
+        subject_type=subject_type,
+        theme=theme,
+        copy_style=copy_style,
+        preset=preset,
+    )
 
     return {
         "top": top[:14],
@@ -439,6 +440,7 @@ async def infer_content_profile(
     channel_profile: str | None,
     user_memory: dict[str, Any] | None = None,
     include_research: bool = True,
+    copy_style: str = "attention_grabbing",
 ) -> dict[str, Any]:
     transcript_excerpt = build_transcript_excerpt(subtitle_items)
     heuristic_profile = _seed_profile_from_subtitles(subtitle_items)
@@ -451,6 +453,7 @@ async def infer_content_profile(
     )
     initial_profile.update(heuristic_profile)
     initial_profile.update(memory_profile)
+    initial_profile["copy_style"] = str(copy_style or "attention_grabbing").strip() or "attention_grabbing"
 
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -460,7 +463,8 @@ async def infer_content_profile(
                     "你在分析一条中文短视频。视频可能是开箱评测、录屏教学、vlog、口播观点、游戏高光或美食探店。"
                     "请结合图片和口播字幕，判断视频主体是什么。"
                     "如果画面里有产品、软件界面、店招、包装、盒体、logo、英文单词、型号字样，都优先识别。"
-                    "尽量给出开箱产品品牌、开箱产品型号/版本、主体类型、视频主题，以及适合的剪辑预设。"
+                    "如果是软件/AI/科技类视频，优先识别软件名、平台名、功能名、版本名和当前演示的核心主题，不要退化成“软件工具”。"
+                    "尽量给出开箱产品品牌、开箱产品型号/版本，或软件品牌、功能名/模块名、主体类型、视频主题，以及适合的剪辑预设。"
                     "另外补一个适合评论区互动的问题，要贴合内容，不要总是泛泛地问值不值。"
                     "subject_brand 指视频里被开箱/被讲解的产品或主体品牌，不是频道名、作者名。"
                     "如果不确定，不要乱编，留空即可。\n\n"
@@ -485,9 +489,10 @@ async def infer_content_profile(
         provider = get_reasoning_provider()
         prompt = (
             "你在分析中文短视频的口播内容。视频可能是开箱评测、录屏教学、vlog、口播观点、游戏高光或美食探店。"
-            "请根据文件名、字幕节选和已有视觉判断，补全视频主体的开箱产品品牌、开箱产品型号/版本、主体类型、视频主题，并给出适合联网验证的搜索词。"
+            "请根据文件名、字幕节选和已有视觉判断，补全视频主体的开箱产品品牌、开箱产品型号/版本，或软件品牌、功能名/模块名、主体类型、视频主题，并给出适合联网验证的搜索词。"
             "同时补一个适合评论区互动的问题，要基于视频内容，不要重复泛化问题。"
             "subject_brand 指视频里被开箱/被讲解的产品或主体品牌，不是频道名、作者名。"
+            "如果是软件/AI/科技类内容，subject_brand 应该是软件/平台名，subject_model 优先填功能名、模块名或版本名，video_theme 必须点明真实主题，比如某个新功能上线、某个工作流实操，而不是泛泛写“软件功能演示与教程”。"
             "如果文件名像时间戳、相机命名或流水号，不要把它当成型号。"
             "如果不确定，请留空，不要乱编。"
             "\n输出 JSON："
@@ -550,6 +555,8 @@ async def apply_content_profile_feedback(
         merged["summary"] = str(user_feedback["summary"]).strip()
     if user_feedback.get("engagement_question"):
         merged["engagement_question"] = str(user_feedback["engagement_question"]).strip()
+    if user_feedback.get("copy_style"):
+        merged["copy_style"] = str(user_feedback["copy_style"]).strip()
     if user_feedback.get("correction_notes"):
         merged["correction_notes"] = str(user_feedback["correction_notes"]).strip()
     if user_feedback.get("supplemental_context"):
@@ -601,6 +608,7 @@ async def apply_content_profile_feedback(
         "visible_text",
         "summary",
         "engagement_question",
+        "copy_style",
     ):
         value = user_feedback.get(key)
         if value:
@@ -678,6 +686,7 @@ async def enrich_content_profile(
                 prompt = (
                     "你在做短视频字幕与封面前置研究。请把字幕/画面线索与搜索证据做双重校验，"
                     "确认视频主体的开箱产品品牌、开箱产品型号/版本、主体类型、视频主题，并生成适合做封面的三段标题。"
+                    "如果是软件/AI/科技视频，必须锁定软件名和功能名，封面标题不能再写成“软件工具”“功能演示”这种泛词。"
                     "同时生成一个适合评论区互动的问题，要具体、自然、贴合内容，不要反复使用同一句泛化问题。"
                     "只有当字幕/画面线索与搜索结果能够互相印证时，才提升品牌、型号等关键信息。"
                     "如果搜索结果与字幕线索冲突，优先保守，保留已有可信字段，不要为了补全而乱改。"
@@ -953,10 +962,16 @@ def _build_search_queries(
     visible_text = str(profile.get("visible_text") or "").strip()
     source_stem = Path(source_name).stem
     signal_terms = _extract_search_signal_terms(transcript_excerpt, visible_text, source_stem)
+    topic_terms = _extract_topic_terms("\n".join(part for part in (transcript_excerpt, visible_text, source_stem) if part))
+    software_like = _is_software_like_subject(subject_type, brand=brand, model=model, topic_terms=topic_terms)
 
     if brand and model:
         queries.append(f"{brand} {model}")
-        queries.append(f"{brand} {model} 开箱")
+        if software_like:
+            queries.append(f"{brand} {model} 教程")
+            queries.append(f"{brand} {model} 功能")
+        else:
+            queries.append(f"{brand} {model} 开箱")
     elif brand:
         for term in signal_terms[:2]:
             queries.append(f"{brand} {term}")
@@ -971,9 +986,17 @@ def _build_search_queries(
         queries.append(f"{brand} {subject_type}")
     if model and subject_type:
         queries.append(f"{model} {subject_type}")
+    if software_like and brand and model and any(term in {"无限画布", "漫剧工作流", "工作流", "节点编排", "智能体"} for term in topic_terms):
+        for topic in topic_terms[:3]:
+            if topic != model:
+                queries.append(f"{brand} {topic}")
+            queries.append(f"{brand} {topic} 教程")
+        if "无限画布" in topic_terms or model == "无限画布":
+            queries.append(f"{brand} 无限画布 漫剧")
     if not brand and not model:
         for term in signal_terms[:3]:
-            queries.append(f"{term} 开箱")
+            suffix = "教程" if software_like else "开箱"
+            queries.append(f"{term} {suffix}")
             if subject_type and not _is_generic_subject_type(subject_type):
                 queries.append(f"{term} {subject_type}")
     if _is_informative_source_hint(source_stem):
@@ -987,6 +1010,23 @@ def _build_search_queries(
             seen.add(normalized)
             deduped.append(normalized)
     return deduped
+
+
+def _is_software_like_subject(
+    subject_type: str,
+    *,
+    brand: str,
+    model: str,
+    topic_terms: list[str],
+) -> bool:
+    normalized = _clean_line(subject_type)
+    if any(token in normalized for token in ("软件", "工作流", "AI", "教程", "智能体", "画布")):
+        return True
+    if brand in _TECH_BRAND_DEFAULT_SUBJECT_TYPES:
+        return True
+    if model in {"无限画布", "工作流", "漫剧工作流", "节点编排", "智能体"}:
+        return True
+    return any(term in {"无限画布", "工作流", "漫剧工作流", "节点编排", "智能体"} for term in topic_terms)
 
 
 def _extract_search_signal_terms(*texts: str) -> list[str]:
@@ -1074,6 +1114,36 @@ _BRAND_ALIAS_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("REATE", re.compile(r"(REATE|锐特|瑞特|睿特)", re.IGNORECASE)),
 ]
 
+_TECH_BRAND_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
+    ("RunningHub", re.compile(r"(RUNNINGHUB|RunningHub|runninghub|(?<![A-Za-z0-9])RH(?![A-Za-z0-9]))", re.IGNORECASE)),
+    ("ComfyUI", re.compile(r"(COMFYUI|ComfyUI|comfyui)", re.IGNORECASE)),
+    ("OpenClaw", re.compile(r"(OPENCLAW|OpenClaw|openclaw)", re.IGNORECASE)),
+    ("OpenAI", re.compile(r"(OPENAI|OpenAI|openai)", re.IGNORECASE)),
+    ("Claude", re.compile(r"(?<![A-Za-z])(CLAUDE|Claude|claude)(?![A-Za-z])", re.IGNORECASE)),
+    ("Gemini", re.compile(r"(?<![A-Za-z])(GEMINI|Gemini|gemini)(?![A-Za-z])", re.IGNORECASE)),
+]
+
+_TECH_BRAND_DEFAULT_SUBJECT_TYPES: dict[str, str] = {
+    "RunningHub": "AI工作流创作平台",
+    "ComfyUI": "AI图像工作流工具",
+    "OpenClaw": "AI Agent 框架",
+    "OpenAI": "AI模型平台",
+    "Claude": "AI模型工具",
+    "Gemini": "AI模型工具",
+}
+
+_TECH_TOPIC_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
+    ("无限画布", re.compile(r"(无限画布|无边画布|无限画板|无限canvas|infinite\s+canvas)", re.IGNORECASE)),
+    ("工作流", re.compile(r"(工作流|workflow|节点流|流程编排)", re.IGNORECASE)),
+    ("节点编排", re.compile(r"(节点编排|节点连接|节点搭建|节点串联)", re.IGNORECASE)),
+    ("漫剧工作流", re.compile(r"(漫剧工作流|漫剧制作|漫画剧|短剧工作流|剧情工作流)", re.IGNORECASE)),
+    ("智能体", re.compile(r"(智能体|agent mode|agents?|multi-agent|多智能体)", re.IGNORECASE)),
+    ("提示词", re.compile(r"(提示词|prompt)", re.IGNORECASE)),
+    ("LoRA", re.compile(r"(lora|罗拉)", re.IGNORECASE)),
+    ("RAG", re.compile(r"(?<![A-Za-z])(rag|RAG)(?![A-Za-z])", re.IGNORECASE)),
+    ("工作流编排", re.compile(r"(工作流编排|流程编排)", re.IGNORECASE)),
+]
+
 _SEARCH_SIGNAL_STOPWORDS: set[str] = {
     "ASMR",
     "DIY",
@@ -1149,6 +1219,21 @@ def _seed_profile_from_text(transcript: str) -> dict[str, Any]:
     elif any(keyword in transcript for keyword in plier_keywords):
         subject_type = "多功能工具钳"
 
+    topic_terms = _extract_topic_terms(transcript)
+    tech_brand = _detect_primary_tech_brand(transcript, topic_terms=topic_terms)
+    feature = topic_terms[0] if topic_terms else ""
+    tech_subject_type = _infer_tech_subject_type(
+        transcript=transcript,
+        tech_brand=tech_brand,
+        topic_terms=topic_terms,
+    )
+    if tech_brand and not brand:
+        brand = tech_brand
+    if tech_subject_type:
+        subject_type = tech_subject_type
+    if feature and not model:
+        model = feature
+
     seeded: dict[str, Any] = {}
     if brand:
         seeded["subject_brand"] = brand
@@ -1156,14 +1241,155 @@ def _seed_profile_from_text(transcript: str) -> dict[str, Any]:
         seeded["subject_model"] = model
     if subject_type:
         seeded["subject_type"] = subject_type
+    video_theme = _build_seeded_video_theme(
+        transcript=transcript,
+        brand=brand,
+        model=model,
+        subject_type=subject_type,
+        topic_terms=topic_terms,
+    )
+    if video_theme:
+        seeded["video_theme"] = video_theme
     if brand or model:
-        queries = []
-        if brand and model:
-            queries.extend([f"{brand} {model}", f"{brand} {model} 开箱"])
-        elif model:
-            queries.append(f"{model} 开箱")
+        queries = _build_seeded_search_queries(
+            brand=brand,
+            model=model,
+            subject_type=subject_type,
+            topic_terms=topic_terms,
+        )
         seeded["search_queries"] = queries
     return seeded
+
+
+def _extract_topic_terms(text: str) -> list[str]:
+    terms: list[str] = []
+    seen: set[str] = set()
+    for label, pattern in _TECH_TOPIC_PATTERNS:
+        if pattern.search(text) and label not in seen:
+            seen.add(label)
+            terms.append(label)
+    return terms
+
+
+def _detect_primary_tech_brand(transcript: str, *, topic_terms: list[str]) -> str:
+    workflow_topics = {"无限画布", "工作流", "工作流编排", "节点编排", "漫剧工作流", "智能体"}
+    best_brand = ""
+    best_score = 0
+    for brand, pattern in _TECH_BRAND_PATTERNS:
+        matches = list(pattern.finditer(transcript))
+        if not matches:
+            continue
+        score = len(matches) * 2
+        first_pos = matches[0].start()
+        if first_pos < 220:
+            score += 2
+        if brand in {"RunningHub", "ComfyUI", "OpenClaw"} and any(topic in workflow_topics for topic in topic_terms):
+            score += 4
+        if brand == "RunningHub" and (
+            "无限画布" in topic_terms
+            or "漫剧工作流" in topic_terms
+            or re.search(r"(?<![A-Za-z0-9])RH(?![A-Za-z0-9])", transcript, re.IGNORECASE)
+        ):
+            score += 4
+        if brand in {"Gemini", "Claude", "OpenAI"} and any(topic in workflow_topics for topic in topic_terms):
+            score -= 1
+        if score > best_score:
+            best_brand = brand
+            best_score = score
+    return best_brand
+
+
+def _infer_tech_subject_type(
+    *,
+    transcript: str,
+    tech_brand: str,
+    topic_terms: list[str],
+) -> str:
+    if tech_brand in _TECH_BRAND_DEFAULT_SUBJECT_TYPES:
+        if tech_brand == "OpenClaw":
+            return _TECH_BRAND_DEFAULT_SUBJECT_TYPES[tech_brand]
+        if any(term in {"无限画布", "工作流", "工作流编排", "节点编排", "漫剧工作流"} for term in topic_terms):
+            return _TECH_BRAND_DEFAULT_SUBJECT_TYPES[tech_brand]
+    normalized = transcript.upper()
+    if any(term in topic_terms for term in ("智能体",)) or "AGENT" in normalized:
+        return "AI Agent 框架"
+    if any(term in topic_terms for term in ("无限画布", "工作流", "工作流编排", "节点编排", "漫剧工作流")):
+        return "AI工作流创作平台"
+    if "COMFYUI" in normalized:
+        return "AI图像工作流工具"
+    if any(keyword in transcript for keyword in ("录屏", "教程", "演示", "实操", "节点", "画布", "工作流")):
+        return "AI创作工具"
+    return ""
+
+
+def _build_seeded_video_theme(
+    *,
+    transcript: str,
+    brand: str,
+    model: str,
+    subject_type: str,
+    topic_terms: list[str],
+) -> str:
+    lowered = transcript.lower()
+    feature = model if model in topic_terms else (topic_terms[0] if topic_terms else "")
+    if feature == "工作流" and "漫剧工作流" in topic_terms:
+        feature = "漫剧工作流"
+
+    if feature == "无限画布":
+        if any(keyword in transcript for keyword in ("上线", "更新", "新功能", "刚出", "发布")):
+            return f"{brand or '这款工具'}无限画布新功能上线与实操演示"
+        if any(keyword in transcript for keyword in ("漫剧", "短剧", "漫画剧")):
+            return f"{brand or '这款工具'}无限画布漫剧工作流演示"
+        return f"{brand or '这款工具'}无限画布功能实测与教程"
+    if feature == "漫剧工作流":
+        return f"{brand or '这款工具'}漫剧工作流搭建与实操演示"
+    if feature == "工作流" or feature == "工作流编排":
+        return f"{brand or '这款工具'}工作流搭建与节点编排教程"
+    if feature == "节点编排":
+        return f"{brand or '这款工具'}节点编排与工作流搭建演示"
+    if feature == "智能体":
+        return f"{brand or '这款工具'}智能体工作流搭建与能力演示"
+    if feature == "提示词":
+        return f"{brand or '这款工具'}提示词工作流实操"
+    if brand and any(keyword in transcript for keyword in ("教程", "演示", "实操", "录屏", "怎么用")):
+        return f"{brand}{subject_type or '功能'}实操教程"
+    if brand and subject_type and "software" not in lowered:
+        return f"{brand}{subject_type}功能演示"
+    return ""
+
+
+def _build_seeded_search_queries(
+    *,
+    brand: str,
+    model: str,
+    subject_type: str,
+    topic_terms: list[str],
+) -> list[str]:
+    queries: list[str] = []
+    if brand and model:
+        queries.extend(
+            [
+                f"{brand} {model}",
+                f"{brand} {model} 教程",
+                f"{brand} {model} 功能",
+            ]
+        )
+        if "漫剧工作流" in topic_terms or model == "无限画布":
+            queries.append(f"{brand} {model} 漫剧")
+    elif brand:
+        queries.extend([brand, f"{brand} 教程"])
+    elif model:
+        queries.extend([model, f"{model} 教程"])
+    if brand and subject_type and "开箱" not in subject_type:
+        queries.append(f"{brand} {subject_type}")
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for query in queries:
+        normalized = query.strip()
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            deduped.append(normalized)
+    return deduped
 
 
 def _memory_value_matches_transcript(value: str, transcript: str, normalized: str) -> bool:
@@ -1209,7 +1435,21 @@ def _merge_specific_profile_hints(profile: dict[str, Any], hints: dict[str, Any]
 
 def _is_generic_subject_type(text: str) -> bool:
     normalized = _clean_line(text)
-    return normalized in {"", "开箱产品", "开箱", "开箱评测", "体验", "产品体验", "上手体验", "评测"}
+    return normalized in {
+        "",
+        "开箱产品",
+        "开箱",
+        "开箱评测",
+        "体验",
+        "产品体验",
+        "上手体验",
+        "评测",
+        "软件工具",
+        "AI工具",
+        "AI软件",
+        "创作软件",
+        "软件功能演示与教程",
+    }
 
 
 def _is_generic_profile_summary(text: str) -> bool:
@@ -1250,7 +1490,26 @@ def _is_specific_video_theme(text: str, *, preset_name: str) -> bool:
         return False
     return len(normalized) >= 6 or any(
         token in normalized
-        for token in ("升级", "限定", "联名", "教程", "步骤", "观点", "复盘", "高光", "探店", "试吃", "对比")
+        for token in (
+            "升级",
+            "限定",
+            "联名",
+            "教程",
+            "步骤",
+            "观点",
+            "复盘",
+            "高光",
+            "探店",
+            "试吃",
+            "对比",
+            "无限画布",
+            "工作流",
+            "节点",
+            "新功能",
+            "上线",
+            "漫剧",
+            "智能体",
+        )
     )
 
 
@@ -1591,6 +1850,10 @@ def _is_generic_cover_line(text: str) -> bool:
         "简单开箱",
         "工具钳具体型号未知",
         "具体型号未知",
+        "软件工具",
+        "AI工具",
+        "软件教程",
+        "功能演示",
     )
     return any(fragment in normalized for fragment in generic_fragments)
 
@@ -1638,9 +1901,164 @@ def _pick_cover_main(
         return display_subject_type[:18]
 
     if theme and not _is_generic_cover_line(theme):
+        specific_topic = _extract_specific_cover_topic(theme)
+        if specific_topic:
+            return specific_topic[:18]
         return theme[:18]
 
     return preset.label[:18]
+
+
+def _extract_specific_cover_topic(theme: str) -> str:
+    normalized = _clean_line(theme)
+    for label, pattern in _TECH_TOPIC_PATTERNS:
+        if pattern.search(normalized):
+            return label
+    if "新功能" in normalized and "上线" in normalized:
+        return "新功能上线"
+    return ""
+
+
+def _build_cover_hook(
+    *,
+    hook: str,
+    brand: str,
+    model: str,
+    subject_type: str,
+    theme: str,
+    copy_style: str,
+    preset: WorkflowPreset,
+) -> str:
+    cleaned_hook = _clean_line(hook)
+    if cleaned_hook and not _is_generic_cover_line(cleaned_hook):
+        explosive = _upgrade_cover_hook(
+            cleaned_hook,
+            brand=brand,
+            model=model,
+            subject_type=subject_type,
+            theme=theme,
+            copy_style=copy_style,
+            preset=preset,
+        )
+        if explosive:
+            return explosive
+
+    fallback = ""
+    if preset.name == "screen_tutorial":
+        fallback = _build_screen_tutorial_cover_hook(
+            brand=brand,
+            model=model,
+            subject_type=subject_type,
+            theme=theme,
+            copy_style=copy_style,
+        )
+    elif preset.name == "unboxing_limited":
+        fallback = "限定细节值不值"
+    elif preset.name == "unboxing_upgrade":
+        fallback = "这次升级够不够狠"
+    elif preset.name == "edc_tactical":
+        fallback = "做工结构直接看"
+    else:
+        fallback = preset.cover_accent
+    return _apply_copy_style_to_hook(
+        fallback,
+        copy_style=copy_style,
+        brand=brand,
+        model=model,
+        subject_type=subject_type,
+    )
+
+
+def _upgrade_cover_hook(
+    hook: str,
+    *,
+    brand: str,
+    model: str,
+    subject_type: str,
+    theme: str,
+    copy_style: str,
+    preset: WorkflowPreset,
+) -> str:
+    if preset.name == "screen_tutorial":
+        boosted = _build_screen_tutorial_cover_hook(
+            brand=brand,
+            model=model,
+            subject_type=subject_type,
+            theme=theme,
+            copy_style=copy_style,
+            raw_hook=hook,
+        )
+        if boosted:
+            return boosted
+    return _apply_copy_style_to_hook(
+        hook,
+        copy_style=copy_style,
+        brand=brand,
+        model=model,
+        subject_type=subject_type,
+    )
+
+
+def _build_screen_tutorial_cover_hook(
+    *,
+    brand: str,
+    model: str,
+    subject_type: str,
+    theme: str,
+    copy_style: str,
+    raw_hook: str = "",
+) -> str:
+    theme_text = _clean_line(theme)
+    if model == "无限画布" or "无限画布" in theme_text:
+        if any(token in theme_text for token in ("上线", "新功能", "更新")):
+            return _apply_copy_style_to_hook("这功能强得离谱", copy_style=copy_style, brand=brand, model=model, subject_type=subject_type)
+        if any(token in theme_text for token in ("漫剧", "短剧")):
+            return _apply_copy_style_to_hook("漫剧产能直接拉满", copy_style=copy_style, brand=brand, model=model, subject_type=subject_type)
+        return _apply_copy_style_to_hook("这功能太变态了", copy_style=copy_style, brand=brand, model=model, subject_type=subject_type)
+    if "节点编排" in theme_text or "工作流" in theme_text:
+        if any(token in theme_text for token in ("实操", "教程", "演示")):
+            return _apply_copy_style_to_hook("核心流程直接起飞", copy_style=copy_style, brand=brand, model=model, subject_type=subject_type)
+        return _apply_copy_style_to_hook("工作流直接封神", copy_style=copy_style, brand=brand, model=model, subject_type=subject_type)
+    if "智能体" in theme_text:
+        return _apply_copy_style_to_hook("这套编排太狠了", copy_style=copy_style, brand=brand, model=model, subject_type=subject_type)
+    if raw_hook:
+        raw = _clean_line(raw_hook)
+        if any(token in raw for token in ("终于", "直接", "真能", "讲透", "上手", "离谱", "炸裂", "封神", "起飞", "太狠")):
+            return _apply_copy_style_to_hook(raw, copy_style=copy_style, brand=brand, model=model, subject_type=subject_type)
+        if brand and model:
+            return _apply_copy_style_to_hook(f"{model}这次太炸了", copy_style=copy_style, brand=brand, model=model, subject_type=subject_type)[:18]
+    if brand and model:
+        return _apply_copy_style_to_hook(f"{model}这次太炸了", copy_style=copy_style, brand=brand, model=model, subject_type=subject_type)[:18]
+    if subject_type and not _is_generic_subject_type(subject_type):
+        return _apply_copy_style_to_hook(f"{subject_type}太狠了", copy_style=copy_style, brand=brand, model=model, subject_type=subject_type)[:18]
+    return _apply_copy_style_to_hook("这波效果太夸张", copy_style=copy_style, brand=brand, model=model, subject_type=subject_type)
+
+
+def _apply_copy_style_to_hook(
+    hook: str,
+    *,
+    copy_style: str,
+    brand: str,
+    model: str,
+    subject_type: str,
+) -> str:
+    base = _clean_line(hook)
+    subject = _clean_line(model or brand or subject_type)
+    if copy_style == "balanced":
+        if "离谱" in base or "变态" in base or "炸" in base or "封神" in base:
+            return "这次重点讲透了"
+        if "拉满" in base or "起飞" in base:
+            return "核心流程讲清了"
+        return base or "这次重点说清楚"
+    if copy_style == "premium_editorial":
+        return "这次细节很值得看" if not subject else f"{subject}这次很值得看"[:18]
+    if copy_style == "trusted_expert":
+        return "关键差异讲明白" if not subject else f"{subject}关键差异讲明白"[:18]
+    if copy_style == "playful_meme":
+        return "这波真的杀疯了" if not subject else f"{subject}直接杀疯了"[:18]
+    if copy_style == "emotional_story":
+        return "这次真的等太久了" if not subject else f"为了{subject}我真等很久"[:18]
+    return base or "这波效果太夸张"
 
 
 def _compact_brand_name(brand: str, *, visible_text: str) -> str:

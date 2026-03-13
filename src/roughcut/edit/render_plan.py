@@ -17,6 +17,8 @@ def build_render_plan(
     workflow_preset: str = "unboxing_default",
     subtitle_version: int = 1,
     subtitle_style: str = "bold_yellow_outline",
+    subtitle_motion_style: str = "motion_static",
+    smart_effect_style: str = "smart_effect_rhythm",
     cover_style: str | None = None,
     title_style: str = "preset_default",
     target_lufs: float = -14.0,
@@ -28,6 +30,9 @@ def build_render_plan(
     watermark: dict | None = None,
     music: dict | None = None,
     editing_accents: dict | None = None,
+    creative_profile: dict[str, Any] | None = None,
+    ai_director_plan: dict[str, Any] | None = None,
+    avatar_commentary_plan: dict[str, Any] | None = None,
 ) -> dict:
     preset = get_workflow_preset(workflow_preset)
     return {
@@ -43,6 +48,7 @@ def build_render_plan(
         },
         "subtitles": {
             "style": subtitle_style,
+            "motion_style": subtitle_motion_style,
             "version": subtitle_version,
         },
         "intro": intro,
@@ -50,8 +56,11 @@ def build_render_plan(
         "insert": insert,
         "watermark": watermark,
         "music": music,
+        "creative_profile": creative_profile,
+        "ai_director": ai_director_plan,
+        "avatar_commentary": avatar_commentary_plan,
         "editing_accents": editing_accents or {
-            "style": "restrained",
+            "style": smart_effect_style,
             "transitions": {
                 "enabled": True,
                 "transition": "fade",
@@ -69,28 +78,30 @@ def build_render_plan(
     }
 
 
-def build_restrained_editing_accents(
+def build_smart_editing_accents(
     *,
     keep_segments: list[dict[str, Any]],
     subtitle_items: list[dict[str, Any]],
+    style: str = "smart_effect_rhythm",
 ) -> dict[str, Any]:
+    tokens = _smart_effect_tokens(style)
     transition_boundaries = _select_transition_boundaries(keep_segments)
     emphasis_overlays = _select_emphasis_overlays(subtitle_items)
     sound_effects = [
         {
             "start_time": overlay["start_time"],
-            "duration_sec": 0.08,
-            "frequency": 960,
-            "volume": 0.045,
+            "duration_sec": tokens["sound_duration_sec"],
+            "frequency": tokens["sound_frequency"],
+            "volume": tokens["sound_volume"],
         }
         for overlay in emphasis_overlays
     ]
     return {
-        "style": "restrained",
+        "style": style,
         "transitions": {
             "enabled": bool(transition_boundaries),
-            "transition": "fade",
-            "duration_sec": 0.12,
+            "transition": tokens["transition"],
+            "duration_sec": tokens["transition_duration_sec"],
             "boundary_indexes": transition_boundaries,
         },
         "emphasis_overlays": emphasis_overlays,
@@ -102,17 +113,25 @@ def build_plain_render_plan(render_plan: dict[str, Any]) -> dict[str, Any]:
     plain_plan = copy.deepcopy(render_plan)
     for key in ("intro", "outro", "insert", "watermark", "music"):
         plain_plan[key] = None
-    plain_plan["editing_accents"] = {
-        "style": "plain",
-        "transitions": {
-            "enabled": False,
-            "transition": "none",
-            "duration_sec": 0.0,
-            "boundary_indexes": [],
-        },
-        "emphasis_overlays": [],
-        "sound_effects": [],
-    }
+    plain_plan["subtitles"] = None
+    if plain_plan.get("editing_accents"):
+        plain_plan["editing_accents"] = {
+            **copy.deepcopy(plain_plan["editing_accents"]),
+            "emphasis_overlays": [],
+            "sound_effects": [],
+        }
+    else:
+        plain_plan["editing_accents"] = {
+            "style": "plain",
+            "transitions": {
+                "enabled": False,
+                "transition": "none",
+                "duration_sec": 0.0,
+                "boundary_indexes": [],
+            },
+            "emphasis_overlays": [],
+            "sound_effects": [],
+        }
     return plain_plan
 
 
@@ -131,6 +150,47 @@ def _select_transition_boundaries(keep_segments: list[dict[str, Any]]) -> list[i
         candidates.append((removed_gap, idx))
     selected = sorted(idx for _gap, idx in sorted(candidates, reverse=True)[:2])
     return selected
+
+
+def _smart_effect_tokens(style: str) -> dict[str, Any]:
+    mapping: dict[str, dict[str, Any]] = {
+        "smart_effect_rhythm": {
+            "transition": "fade",
+            "transition_duration_sec": 0.12,
+            "sound_duration_sec": 0.08,
+            "sound_frequency": 960,
+            "sound_volume": 0.045,
+        },
+        "smart_effect_punch": {
+            "transition": "fadeblack",
+            "transition_duration_sec": 0.16,
+            "sound_duration_sec": 0.11,
+            "sound_frequency": 820,
+            "sound_volume": 0.06,
+        },
+        "smart_effect_glitch": {
+            "transition": "pixelize",
+            "transition_duration_sec": 0.14,
+            "sound_duration_sec": 0.09,
+            "sound_frequency": 1320,
+            "sound_volume": 0.05,
+        },
+        "smart_effect_cinematic": {
+            "transition": "fade",
+            "transition_duration_sec": 0.18,
+            "sound_duration_sec": 0.07,
+            "sound_frequency": 640,
+            "sound_volume": 0.028,
+        },
+        "smart_effect_minimal": {
+            "transition": "fade",
+            "transition_duration_sec": 0.1,
+            "sound_duration_sec": 0.06,
+            "sound_frequency": 900,
+            "sound_volume": 0.018,
+        },
+    }
+    return mapping.get(style, mapping["smart_effect_rhythm"])
 
 
 def _select_emphasis_overlays(subtitle_items: list[dict[str, Any]]) -> list[dict[str, Any]]:

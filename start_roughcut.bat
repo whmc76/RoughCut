@@ -1,6 +1,7 @@
 @echo off
 setlocal
 set SCRIPT_DIR=%~dp0
+cd /d "%SCRIPT_DIR%"
 
 if /I "%~1"=="dev" goto pnpm_dev
 if /I "%~1"=="build" goto pnpm_build
@@ -10,6 +11,9 @@ if /I "%~1"=="doctor" goto pnpm_doctor
 if /I "%~1"=="migrate" goto pnpm_migrate
 if /I "%~1"=="docker-up" goto pnpm_docker_up
 if /I "%~1"=="docker-down" goto pnpm_docker_down
+if /I "%~1"=="StopOnly" goto powershell_stoponly
+if /I "%~1"=="--StopOnly" goto powershell_stoponly
+if /I "%~1"=="/StopOnly" goto powershell_stoponly
 if /I "%~1"=="help" goto usage
 
 goto powershell_start
@@ -79,11 +83,22 @@ set EXIT_CODE=%ERRORLEVEL%
 goto finish
 
 :powershell_start
+set "POWER_ARGS=%*"
 where pwsh >nul 2>nul
 if %ERRORLEVEL%==0 (
-  pwsh -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%restart_roughcut.ps1"
+  pwsh -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%start_roughcut.ps1" %POWER_ARGS%
 ) else (
-  powershell -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%restart_roughcut.ps1"
+  powershell -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%start_roughcut.ps1" %POWER_ARGS%
+)
+set EXIT_CODE=%ERRORLEVEL%
+goto finish
+
+:powershell_stoponly
+where pwsh >nul 2>nul
+if %ERRORLEVEL%==0 (
+  pwsh -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%start_roughcut.ps1" -StopOnly
+) else (
+  powershell -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%start_roughcut.ps1" -StopOnly
 )
 set EXIT_CODE=%ERRORLEVEL%
 goto finish
@@ -92,21 +107,21 @@ goto finish
 echo.
 echo RoughCut Windows entrypoint
 echo.
-echo   restart_roughcut.bat            One-click detached startup package
-echo   restart_roughcut.bat dev        Run unified pnpm dev
-echo   restart_roughcut.bat build      Run pnpm build
-echo   restart_roughcut.bat test       Run pnpm test
-echo   restart_roughcut.bat setup      Run pnpm setup
-echo   restart_roughcut.bat doctor     Run pnpm doctor
-echo   restart_roughcut.bat migrate    Run pnpm migrate
-echo   restart_roughcut.bat docker-up  Run pnpm docker:up
-echo   restart_roughcut.bat docker-down Run pnpm docker:down
+echo   start_roughcut.bat             One-click startup package
+echo   start_roughcut.bat dev         Run unified pnpm dev
+echo   start_roughcut.bat build       Run pnpm build
+echo   start_roughcut.bat test        Run pnpm test
+echo   start_roughcut.bat setup       Run pnpm setup
+echo   start_roughcut.bat doctor      Run pnpm doctor
+echo   start_roughcut.bat migrate     Run pnpm migrate
+echo   start_roughcut.bat docker-up   Run pnpm docker:up
+echo   start_roughcut.bat docker-down Run pnpm docker:down
 set EXIT_CODE=0
 
 :finish
 if not "%EXIT_CODE%"=="0" (
   echo.
-  echo restart_roughcut failed with exit code %EXIT_CODE%.
+  echo start_roughcut failed with exit code %EXIT_CODE%.
   pause
 )
 endlocal

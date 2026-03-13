@@ -6,9 +6,10 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from roughcut.api.schemas import GlossaryTermCreate, GlossaryTermOut, GlossaryTermUpdate
+from roughcut.api.schemas import BuiltinGlossaryPackOut, GlossaryTermCreate, GlossaryTermOut, GlossaryTermUpdate
 from roughcut.db.models import GlossaryTerm
 from roughcut.db.session import get_session
+from roughcut.review.domain_glossaries import list_builtin_glossary_packs
 
 router = APIRouter(prefix="/glossary", tags=["glossary"])
 
@@ -17,6 +18,11 @@ router = APIRouter(prefix="/glossary", tags=["glossary"])
 async def list_terms(session: AsyncSession = Depends(get_session)):
     result = await session.execute(select(GlossaryTerm).order_by(GlossaryTerm.created_at.desc()))
     return result.scalars().all()
+
+
+@router.get("/builtin-packs", response_model=list[BuiltinGlossaryPackOut])
+async def list_builtin_packs():
+    return list_builtin_glossary_packs()
 
 
 @router.post("", response_model=GlossaryTermOut, status_code=status.HTTP_201_CREATED)

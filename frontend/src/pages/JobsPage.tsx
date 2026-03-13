@@ -1,25 +1,30 @@
 import { PageHeader } from "../components/ui/PageHeader";
+import { useI18n } from "../i18n";
 import { JobDetailPanel } from "../features/jobs/JobDetailPanel";
+import { JobDetailModal } from "../features/jobs/JobDetailModal";
 import { JobQueueTable } from "../features/jobs/JobQueueTable";
 import { JobUploadPanel } from "../features/jobs/JobUploadPanel";
 import { useJobWorkspace } from "../features/jobs/useJobWorkspace";
 
 export function JobsPage() {
+  const { t } = useI18n();
   const workspace = useJobWorkspace();
   const languageOptions = workspace.options.data?.job_languages ?? [{ value: "zh-CN", label: "简体中文" }];
-  const channelProfileOptions = workspace.options.data?.channel_profiles ?? [{ value: "", label: "自动匹配" }];
+  const channelProfileOptions = workspace.options.data?.channel_profiles ?? [{ value: "", label: t("watch.page.autoMatch") }];
+  const workflowModeOptions = workspace.options.data?.workflow_modes ?? [{ value: "standard_edit", label: t("creative.workflow.standard_edit") }];
+  const enhancementOptions = workspace.options.data?.enhancement_modes ?? [];
 
   return (
     <section>
       <PageHeader
-        eyebrow="Pipeline"
-        title="任务列表"
-        description="页面层只做查询编排，详情区块已经拆成独立组件，后续继续加功能不会再堆成一个大文件。"
+        eyebrow={t("jobs.page.eyebrow")}
+        title={t("jobs.page.title")}
+        description={t("jobs.page.description")}
         actions={
           <>
-            <input className="input" value={workspace.keyword} onChange={(event) => workspace.setKeyword(event.target.value)} placeholder="搜索文件名、摘要、状态" />
+            <input className="input" value={workspace.keyword} onChange={(event) => workspace.setKeyword(event.target.value)} placeholder={t("jobs.page.searchPlaceholder")} />
             <button className="button ghost" onClick={workspace.refreshAll}>
-              刷新
+              {t("jobs.page.refresh")}
             </button>
           </>
         }
@@ -29,21 +34,38 @@ export function JobsPage() {
         upload={workspace.upload}
         languageOptions={languageOptions}
         channelProfileOptions={channelProfileOptions}
+        workflowModeOptions={workflowModeOptions}
+        enhancementOptions={enhancementOptions}
         onChange={workspace.setUpload}
         onSubmit={() => workspace.uploadJob.mutate()}
         isSubmitting={workspace.uploadJob.isPending}
       />
 
-      <div className="panel-grid jobs-grid top-gap">
+      <div className="top-gap">
         <JobQueueTable
           jobs={workspace.filteredJobs}
           selectedJobId={workspace.selectedJobId}
           isLoading={workspace.jobs.isLoading}
           errorMessage={workspace.jobs.isError ? (workspace.jobs.error as Error).message : undefined}
+          isOpeningFolder={workspace.openFolder.isPending}
+          isCancelling={workspace.cancelJob.isPending}
+          isRestarting={workspace.restartJob.isPending}
+          isDeleting={workspace.deleteJob.isPending}
           onSelect={workspace.setSelectedJobId}
+          onOpenFolder={(jobId) => workspace.openFolder.mutate(jobId)}
+          onCancel={(jobId) => workspace.cancelJob.mutate(jobId)}
+          onRestart={(jobId) => workspace.restartJob.mutate(jobId)}
+          onDelete={(jobId) => workspace.deleteJob.mutate(jobId)}
         />
+      </div>
 
+      <JobDetailModal
+        open={Boolean(workspace.selectedJobId)}
+        title={workspace.selectedJob?.source_name}
+        onClose={() => workspace.setSelectedJobId(null)}
+      >
         <JobDetailPanel
+          className="detail-panel-modal"
           selectedJobId={workspace.selectedJobId}
           selectedJob={workspace.selectedJob}
           isLoading={workspace.detail.isLoading}
@@ -51,13 +73,21 @@ export function JobsPage() {
           report={workspace.report.data}
           timeline={workspace.timeline.data}
           contentProfile={workspace.contentProfile.data}
+          config={workspace.config.data}
+          options={workspace.options.data}
+          packaging={workspace.packaging.data}
+          avatarMaterials={workspace.avatarMaterials.data}
           contentSource={workspace.contentSource}
           contentDraft={workspace.contentDraft}
           contentKeywords={workspace.contentKeywords}
+          reviewWorkflowMode={workspace.reviewWorkflowMode}
+          reviewEnhancementModes={workspace.reviewEnhancementModes}
+          reviewCopyStyle={workspace.reviewCopyStyle}
           isConfirmingProfile={workspace.confirmProfile.isPending}
           isApplyingReview={workspace.applyReview.isPending}
           isCancelling={workspace.cancelJob.isPending}
           isRestarting={workspace.restartJob.isPending}
+          isDeleting={workspace.deleteJob.isPending}
           onContentFieldChange={(field, value) => workspace.setContentDraft((prev) => ({ ...prev, [field]: value }))}
           onKeywordsChange={(value) =>
             workspace.setContentDraft((prev) => ({
@@ -68,13 +98,17 @@ export function JobsPage() {
                 .filter(Boolean),
             }))
           }
+          onReviewWorkflowModeChange={workspace.setReviewWorkflowMode}
+          onReviewEnhancementModesChange={workspace.setReviewEnhancementModes}
+          onReviewCopyStyleChange={workspace.setReviewCopyStyle}
           onConfirmProfile={() => workspace.confirmProfile.mutate()}
           onOpenFolder={() => workspace.selectedJob && workspace.openFolder.mutate(workspace.selectedJob.id)}
           onCancel={() => workspace.selectedJob && workspace.cancelJob.mutate(workspace.selectedJob.id)}
           onRestart={() => workspace.selectedJob && workspace.restartJob.mutate(workspace.selectedJob.id)}
+          onDelete={() => workspace.selectedJob && workspace.deleteJob.mutate(workspace.selectedJob.id)}
           onApplyReview={(targetId, action) => workspace.applyReview.mutate({ targetId, action })}
         />
-      </div>
+      </JobDetailModal>
     </section>
   );
 }

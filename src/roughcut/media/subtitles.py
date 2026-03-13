@@ -349,6 +349,18 @@ SUBTITLE_STYLE_PRESETS: dict[str, dict[str, object]] = {
     },
 }
 
+SUBTITLE_MOTION_PRESETS = {
+    "motion_static",
+    "motion_typewriter",
+    "motion_pop",
+    "motion_wave",
+    "motion_slide",
+    "motion_glitch",
+    "motion_ripple",
+    "motion_strobe",
+    "motion_echo",
+}
+
 
 def remap_subtitles_to_timeline(
     subtitle_items: list[dict],
@@ -411,6 +423,8 @@ def write_ass_file(
     outline_color_rgb: str = "00FF00",   # outline/glow color: neon green
     outline_width: int = 5,              # thick outline = fluorescent glow
     margin_v: int = 30,
+    margin_v_override: int | None = None,
+    motion_style: str = "motion_static",
     play_res_x: int = 1920,
     play_res_y: int = 1080,
 ) -> Path:
@@ -426,8 +440,11 @@ def write_ass_file(
     font_size = int(style.get("font_size") or font_size)
     text_color_rgb = str(style.get("text_color_rgb") or text_color_rgb)
     outline_color_rgb = str(style.get("outline_color_rgb") or outline_color_rgb)
+    motion_style = _normalize_motion_style(motion_style)
     outline_width = int(style.get("outline_width") or outline_width)
     margin_v = int(style.get("margin_v") or margin_v)
+    if margin_v_override is not None:
+        margin_v = max(margin_v, int(margin_v_override))
     bold_flag = -1 if style.get("bold", True) else 0
     shadow = int(style.get("shadow") or 0)
     border_style = int(style.get("border_style") or 1)
@@ -481,10 +498,63 @@ def write_ass_file(
             or item.get("text_raw", "")
         )
         text = text.replace("{", r"\{").replace("\n", r"\N")
-        lines.append(f"Dialogue: 0,{start},{end},Default,,0,0,0,,{text}")
+        lines.append(f"Dialogue: 0,{start},{end},Default,,0,0,0,,{_build_motion_tag(text, motion_style)}")
 
     ass_path.write_text("\n".join(lines), encoding="utf-8-sig")
     return ass_path
+
+
+def _normalize_motion_style(value: str) -> str:
+    normalized = str(value or "motion_static").strip().lower()
+    if normalized in SUBTITLE_MOTION_PRESETS:
+        return normalized
+    return "motion_static"
+
+
+def _build_motion_tag(text: str, motion_style: str) -> str:
+    if motion_style == "motion_static":
+        return text
+    if motion_style == "motion_typewriter":
+        return (
+            "{\\an2\\move(0,22,0,0)\\t(0,220,\\fscx118\\fscy118)\\t(220,420,\\fscx100\\fscy100)}"
+            f"{text}"
+        )
+    if motion_style == "motion_pop":
+        return (
+            "{\\an2\\t(0,120,\\fscx122\\fscy122\\bord2)\\t(120,240,\\fscx100\\fscy100\\bord1)\\t(240,420,\\bord1)}"
+            f"{text}"
+        )
+    if motion_style == "motion_wave":
+        return (
+            "{\\an2\\t(0,140,\\fscx102\\fscy98)\\t(140,280,\\fscx100\\fscy102)\\t(280,420,\\fscx98\\fscy102)\\t(420,520,\\fscx100\\fscy100)}"
+            f"{text}"
+        )
+    if motion_style == "motion_slide":
+        return (
+            "{\\an2\\move(280,120,0,2)\\t(0,360,\\fad(220,0))\\t(360,520,\\move(0,2,0,2))}"
+            f"{text}"
+        )
+    if motion_style == "motion_glitch":
+        return (
+            "{\\an2\\t(0,100,\\frz8)\\t(100,220,\\frz-8\\fscx102\\fscy102)\\t(220,340,\\frz0\\fscx100\\fscy100)}"
+            f"{text}"
+        )
+    if motion_style == "motion_ripple":
+        return (
+            "{\\an2\\t(0,110,\\fscx105\\fscy105\\frz0)\\t(110,220,\\fscx130\\fscy100\\bord0)\\t(220,340,\\bord2\\frz0)}"
+            f"{text}"
+        )
+    if motion_style == "motion_strobe":
+        return (
+            "{\\an2\\t(0,40,\\fscx90\\fscy90\\bord1\\alpha&H88&)\\t(40,100,\\fscx100\\fscy100\\bord2\\alpha&H00&)\\t(100,160,\\fscx108\\fscy108\\alpha&H44&)\\t(160,260,\\fscx100\\fscy100\\alpha&H00&)}"
+            f"{text}"
+        )
+    if motion_style == "motion_echo":
+        return (
+            "{\\an2\\t(0,110,\\move(-10,2,-4,0)\\fscx102\\fscy98)\\t(110,220,\\move(-4,0,0,0)\\fscx100\\fscy100)\\t(220,360,\\move(0,0,6,-1)\\fscx99\\fscy99)}"
+            f"{text}"
+        )
+    return text
 
 
 def escape_path_for_ffmpeg_filter(path: Path) -> str:

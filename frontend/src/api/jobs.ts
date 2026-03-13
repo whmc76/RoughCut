@@ -3,11 +3,19 @@ import { apiPath, request, requestForm } from "./core";
 
 export const jobsApi = {
   listJobs: () => request<Job[]>("/jobs"),
-  createJob: async (file: File, language: string, channelProfile?: string) => {
+  createJob: async (
+    file: File,
+    language: string,
+    channelProfile?: string,
+    workflowMode?: string,
+    enhancementModes: string[] = [],
+  ) => {
     const formData = new FormData();
     formData.append("file", file);
     formData.append("language", language);
     if (channelProfile) formData.append("channel_profile", channelProfile);
+    if (workflowMode) formData.append("workflow_mode", workflowMode);
+    enhancementModes.forEach((mode) => formData.append("enhancement_modes", mode));
     return requestForm<Job>("/jobs", formData);
   },
   getJob: (jobId: string) => request<Job>(`/jobs/${jobId}`),
@@ -22,5 +30,6 @@ export const jobsApi = {
   contentProfileThumbnailUrl: (jobId: string, index: number) => apiPath(`/jobs/${jobId}/content-profile/thumbnail?index=${index}`),
   cancelJob: (jobId: string) => request<Job>(`/jobs/${jobId}/cancel`, { method: "POST" }),
   restartJob: (jobId: string) => request<Job>(`/jobs/${jobId}/restart`, { method: "POST" }),
+  deleteJob: (jobId: string) => request<void>(`/jobs/${jobId}`, { method: "DELETE" }),
   openJobFolder: (jobId: string) => request<{ path: string; kind: string }>(`/jobs/${jobId}/open-folder`, { method: "POST" }),
 };

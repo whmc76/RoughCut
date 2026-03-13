@@ -2,6 +2,11 @@ from __future__ import annotations
 
 from typing import Final
 
+from roughcut.creative.modes import (
+    build_active_enhancement_mode_options,
+    build_active_workflow_mode_options,
+)
+from roughcut.config import AVATAR_PROVIDER_OPTIONS, VOICE_PROVIDER_OPTIONS
 from roughcut.edit.presets import PRESETS
 
 DEFAULT_JOB_LANGUAGE: Final[str] = "zh-CN"
@@ -50,6 +55,22 @@ def build_channel_profile_options() -> list[dict[str, str]]:
             for preset in PRESETS.values()
         ],
     ]
+
+
+def build_workflow_mode_options() -> list[dict[str, str]]:
+    return build_active_workflow_mode_options()
+
+
+def build_enhancement_mode_options() -> list[dict[str, str]]:
+    return build_active_enhancement_mode_options()
+
+
+def build_avatar_provider_options() -> list[dict[str, str]]:
+    return [{"value": item, "label": item} for item in AVATAR_PROVIDER_OPTIONS]
+
+
+def build_voice_provider_options() -> list[dict[str, str]]:
+    return [{"value": item, "label": item} for item in VOICE_PROVIDER_OPTIONS]
 
 
 def normalize_job_language(value: str | None) -> str:

@@ -56,6 +56,12 @@ COVER_TITLE_STRATEGIES = [
     },
 ]
 
+_COVER_SAFE_HORIZONTAL_MARGIN_RATIO = 37 / 128
+_COVER_SAFE_VERTICAL_TOP_RATIO = 0.12
+_COVER_SAFE_VERTICAL_BOTTOM_RATIO = 0.14
+_COVER_SAFE_MIN_INNER_PADDING = 18
+_COVER_SAFE_TEXT_WIDTH_RATIO = 27 / 64
+
 
 def _sanitize(name: str) -> str:
     """Remove chars not safe for filenames."""
@@ -125,6 +131,7 @@ async def extract_cover_frame(
             candidates = _sample_cover_candidates(
                 video_path,
                 duration=duration,
+                anchor_seek=seek_sec,
                 candidate_count=max(settings.cover_candidate_count, variant_count),
                 tmpdir=tmp,
             )
@@ -223,12 +230,18 @@ def _sample_cover_candidates(
     video_path: Path,
     *,
     duration: float,
+    anchor_seek: float,
     candidate_count: int,
     tmpdir: Path,
 ) -> list[dict[str, Any]]:
     candidates: list[dict[str, Any]] = []
-    for i in range(candidate_count):
-        seek = duration * (i + 1) / (candidate_count + 1)
+    for i, seek in enumerate(
+        _build_cover_candidate_seeks(
+            duration,
+            candidate_count=candidate_count,
+            anchor_seek=anchor_seek,
+        )
+    ):
         out = tmpdir / f"cand_{i:02d}.jpg"
         result = subprocess.run(
             [
@@ -256,6 +269,36 @@ def _sample_cover_candidates(
     return candidates
 
 
+def _build_cover_candidate_seeks(
+    duration: float,
+    *,
+    candidate_count: int,
+    anchor_seek: float,
+) -> list[float]:
+    if duration <= 0 or candidate_count <= 0:
+        return []
+
+    max_seek = max(0.0, duration - 0.2)
+    if max_seek <= 0:
+        return [0.0]
+
+    start = max(duration * 0.18, anchor_seek)
+    start = min(max_seek, max(0.0, start))
+
+    end = min(duration * 0.88, max_seek)
+    preferred_span = max(duration * 0.18, 6.0)
+    if end - start < 1.2:
+        start = min(max_seek, max(0.0, duration * 0.25))
+        end = min(max_seek, max(start + min(preferred_span, max_seek - start), duration * 0.72))
+
+    if end - start < 0.6:
+        fallback_seek = round(min(max_seek, max(0.0, anchor_seek)), 2)
+        return [fallback_seek]
+
+    step = (end - start) / (candidate_count + 1)
+    return [round(start + step * (index + 1), 2) for index in range(candidate_count)]
+
+
 async def _rank_cover_candidates(
     candidates: list[dict[str, Any]],
     *,
@@ -276,7 +319,10 @@ async def _rank_cover_candidates(
                 "{\"ranked\":[{\"index\":0,\"score\":0.91,\"reason\":\"主体最完整\"}]}"
                 f"，最多返回 {max(variant_count, 2)} 个结果，按优先级排序。score 范围 0-1。"
             )
-            content = await complete_with_images(prompt, preview_paths, max_tokens=220, json_mode=True)
+            content = await asyncio.wait_for(
+                complete_with_images(prompt, preview_paths, max_tokens=220, json_mode=True),
+                timeout=12,
+            )
             data = json.loads(extract_json_text(content))
             ordered: list[dict[str, Any]] = []
             seen_indices: set[int] = set()
@@ -366,7 +412,11 @@ async def _generate_cover_title_variants(
                 "strategy_key": strategy["key"],
                 "strategy_label": strategy["label"],
                 "title_style": strategy["default_title_style"],
-                "title": fallback_plan,
+                "title": _adapt_cover_title_for_strategy(
+                    fallback_plan,
+                    strategy_key=strategy["key"],
+                    content_profile=content_profile,
+                ),
             }
             for strategy in strategies[: max(1, len(candidates))]
         ]
@@ -379,22 +429,26 @@ async def _generate_cover_title_variants(
                 for idx, strategy in enumerate(strategies)
             )
             prompt = (
-                "你在给中文开箱/EDC 视频制作封面候选。现在有多张候选画面，请输出 5 套具有明确传播策略差异的封面标题方案。"
+                "你在给中文短视频制作封面候选。现在有多张候选画面，请输出 5 套具有明确传播策略差异的封面标题方案。"
                 "每套方案不是简单换词，而是针对不同平台/传播目标单独设计。"
                 "要求：\n"
                 "1. 每套方案绑定一个 strategy_key 和一个 match_index。\n"
                 "2. 请优先让不同策略匹配不同镜头；只有实在不合适才允许复用同一镜头。\n"
                 "3. top 优先品牌或系列，长度 2-12 字。\n"
                 "4. main 必须是主体名或产品类型，不要写“产品开箱与上手体验”“升级对比版”这类泛词。\n"
-                "5. bottom 是钩子句，长度 6-12 字。\n"
+                "5. bottom 是钩子句，长度 6-12 字，必须有爆点、结果感、反差感或新鲜感，不能只是平铺直叙复述主题。\n"
                 "6. 如果画面里出现英文品牌，请直接保留品牌英文。\n"
+                "6.1 如果是软件/AI/科技教程，bottom 可以更浮夸，优先使用“强得离谱/直接封神/太炸了/太变态了/直接起飞/产能拉满”这类高点击表达。\n"
                 "7. 五套方案必须体现不同风格倾向，不允许只是排列组合。\n"
                 f"策略定义：\n{strategy_text}"
                 f"\n已有上下文：{json.dumps(content_profile or {}, ensure_ascii=False)}"
                 "\n输出 JSON："
                 "{\"plans\":[{\"strategy_key\":\"xiaohongshu\",\"match_index\":0,\"top\":\"\",\"main\":\"\",\"bottom\":\"\",\"reason\":\"\"}]}"
             )
-            content = await complete_with_images(prompt, preview_paths[:variant_count], max_tokens=700, json_mode=True)
+            content = await asyncio.wait_for(
+                complete_with_images(prompt, preview_paths[:variant_count], max_tokens=700, json_mode=True),
+                timeout=15,
+            )
             data = json.loads(extract_json_text(content))
             indexed_plans: dict[int, dict[str, Any]] = {}
             used_strategies: set[str] = set()
@@ -423,7 +477,11 @@ async def _generate_cover_title_variants(
                         "strategy_label": strategy["label"],
                         "reason": str(raw.get("reason") or "").strip(),
                         "title_style": strategy["default_title_style"],
-                        "title": refined,
+                        "title": _adapt_cover_title_for_strategy(
+                            refined,
+                            strategy_key=strategy["key"],
+                            content_profile=content_profile,
+                        ),
                     }
                     used_strategies.add(strategy_key)
             if indexed_plans:
@@ -439,7 +497,11 @@ async def _generate_cover_title_variants(
                             "strategy_label": strategy["label"],
                             "reason": "",
                             "title_style": strategy["default_title_style"],
-                            "title": fallback_plan,
+                            "title": _adapt_cover_title_for_strategy(
+                                fallback_plan,
+                                strategy_key=strategy["key"],
+                                content_profile=content_profile,
+                            ),
                         }
                     )
                 return plans_by_candidate
@@ -451,10 +513,101 @@ async def _generate_cover_title_variants(
             "strategy_label": strategy["label"],
             "reason": "",
             "title_style": strategy["default_title_style"],
-            "title": fallback_plan,
+            "title": _adapt_cover_title_for_strategy(
+                fallback_plan,
+                strategy_key=strategy["key"],
+                content_profile=content_profile,
+            ),
         }
         for strategy in strategies[: max(1, len(candidates))]
     ]
+
+
+def _adapt_cover_title_for_strategy(
+    title_lines: dict[str, str] | None,
+    *,
+    strategy_key: str,
+    content_profile: dict[str, Any] | None,
+) -> dict[str, str] | None:
+    if not _cover_title_is_usable(title_lines):
+        return title_lines
+
+    adapted = {
+        "top": str((title_lines or {}).get("top") or "").strip()[:14],
+        "main": str((title_lines or {}).get("main") or "").strip()[:18],
+        "bottom": str((title_lines or {}).get("bottom") or "").strip()[:18],
+    }
+    bottom = adapted["bottom"]
+    if not bottom:
+        return adapted
+
+    copy_style = str((content_profile or {}).get("copy_style") or "attention_grabbing").strip() or "attention_grabbing"
+    subject = str((content_profile or {}).get("subject_model") or (content_profile or {}).get("subject_type") or adapted["main"]).strip()
+    if strategy_key == "bilibili":
+        adapted["bottom"] = _cover_strategy_bilibili(bottom, subject=subject, copy_style=copy_style)[:18]
+    elif strategy_key == "xiaohongshu":
+        adapted["bottom"] = _cover_strategy_xiaohongshu(bottom, subject=subject, copy_style=copy_style)[:18]
+    elif strategy_key == "ctr":
+        adapted["bottom"] = _cover_strategy_ctr(bottom, subject=subject, copy_style=copy_style)[:18]
+    elif strategy_key == "brand":
+        adapted["bottom"] = _cover_strategy_brand(bottom, subject=subject, copy_style=copy_style)[:18]
+    return adapted
+
+
+def _cover_strategy_bilibili(bottom: str, *, subject: str, copy_style: str) -> str:
+    if copy_style == "trusted_expert":
+        return f"{subject}重点讲明白" if subject else "重点一次讲明白"
+    if copy_style == "premium_editorial":
+        return f"{subject}变化拆开看" if subject else "这次变化拆开看"
+    if copy_style == "playful_meme":
+        return f"{subject}这次真有料" if subject else "这次内容真有料"
+    if copy_style == "emotional_story":
+        return f"{subject}这次真值吗" if subject else "这次到底值不值"
+    if copy_style == "balanced":
+        return f"{subject}关键点讲清楚" if subject else "关键点讲清楚"
+    return f"{subject}一口气讲透" if subject else "这次一口气讲透"
+
+
+def _cover_strategy_xiaohongshu(bottom: str, *, subject: str, copy_style: str) -> str:
+    if copy_style == "trusted_expert":
+        return f"{subject}这几点最值" if subject else "这几点最值得看"
+    if copy_style == "premium_editorial":
+        return f"{subject}质感太对了" if subject else "这次质感太对了"
+    if copy_style == "playful_meme":
+        return f"{subject}太会拿捏了" if subject else "这次真的太会了"
+    if copy_style == "emotional_story":
+        return f"{subject}越看越上头" if subject else "越看越容易上头"
+    if copy_style == "balanced":
+        return f"{subject}细节很加分" if subject else "细节真的很加分"
+    return f"{subject}细节直接封神" if subject else "细节直接封神"
+
+
+def _cover_strategy_ctr(bottom: str, *, subject: str, copy_style: str) -> str:
+    if copy_style == "trusted_expert":
+        return f"{subject}先看结论" if subject else "这次先看结论"
+    if copy_style == "premium_editorial":
+        return f"{subject}这次很能打" if subject else "这次真的很能打"
+    if copy_style == "playful_meme":
+        return f"{subject}强到离谱" if subject else "这波强到离谱"
+    if copy_style == "emotional_story":
+        return f"{subject}终于等到了" if subject else "终于等到这一刻"
+    if copy_style == "balanced":
+        return f"{subject}这次很顶" if subject else "这次真的很顶"
+    return f"{subject}这次太炸了" if subject else "这次太炸了"
+
+
+def _cover_strategy_brand(bottom: str, *, subject: str, copy_style: str) -> str:
+    if copy_style == "trusted_expert":
+        return f"{subject}判断更稳了" if subject else "这次判断更稳了"
+    if copy_style == "premium_editorial":
+        return f"{subject}气质拉满" if subject else "整体气质拉满"
+    if copy_style == "playful_meme":
+        return f"{subject}真有那味了" if subject else "这次真有那味了"
+    if copy_style == "emotional_story":
+        return f"{subject}很有感觉" if subject else "这次真的很有感觉"
+    if copy_style == "balanced":
+        return f"{subject}整体更顺眼" if subject else "整体更顺眼了"
+    return f"{subject}高级感拉满" if subject else "高级感直接拉满"
 
 
 def _write_cover_variant_manifest(
@@ -589,6 +742,10 @@ def _cover_title_is_usable(title_lines: dict[str, str] | None) -> bool:
         "开箱体验",
         "产品体验",
         "简单开箱",
+        "软件工具",
+        "软件教程",
+        "功能演示",
+        "AI工具",
     )
     return not any(fragment in main for fragment in generic_fragments)
 
@@ -615,6 +772,9 @@ def _sanitize_generated_cover_title(
         introduced = _extract_cover_guard_tokens(" ".join(normalized.values())) - allowed_tokens
         if introduced:
             return fallback_plan
+    required_topics = _collect_cover_required_topics(content_profile, fallback_plan)
+    if required_topics and not _cover_title_mentions_required_topic(normalized, required_topics):
+        return fallback_plan
 
     if fallback_plan:
         normalized["top"] = normalized["top"] or str(fallback_plan.get("top") or "").strip()[:14]
@@ -642,6 +802,34 @@ def _extract_cover_guard_tokens(text: str) -> set[str]:
         for token in re.findall(r"(?<![A-Za-z0-9])([A-Za-z][A-Za-z0-9+-]{1,23})(?![A-Za-z0-9])", str(text or ""))
         if len(token.strip()) >= 2
     }
+
+
+def _collect_cover_required_topics(
+    content_profile: dict[str, Any] | None,
+    fallback_plan: dict[str, str] | None,
+) -> set[str]:
+    topics: set[str] = set()
+    for key in ("subject_brand", "subject_model", "visible_text", "video_theme"):
+        value = str((content_profile or {}).get(key) or "").strip()
+        topics.update(_extract_cover_topic_terms(value))
+    for value in (fallback_plan or {}).values():
+        topics.update(_extract_cover_topic_terms(str(value or "")))
+    return topics
+
+
+def _extract_cover_topic_terms(text: str) -> set[str]:
+    topics: set[str] = set()
+    raw = str(text or "")
+    for token in ("RunningHub", "ComfyUI", "OpenClaw", "无限画布", "工作流", "节点编排", "智能体", "漫剧"):
+        if token.lower() in raw.lower():
+            topics.add(token)
+    return topics
+
+
+def _cover_title_mentions_required_topic(title_lines: dict[str, str], required_topics: set[str]) -> bool:
+    haystack = " ".join(str(value or "") for value in title_lines.values())
+    lowered = haystack.lower()
+    return any(topic.lower() in lowered for topic in required_topics)
 
 
 async def _overlay_title_layout(
@@ -699,12 +887,8 @@ async def _overlay_title_layout(
 
 
 def _build_cover_safe_area_layers(title_lines: dict[str, str]) -> list[str]:
-    if not str(title_lines.get("bottom") or "").strip():
-        return []
-    return [
-        "drawbox=x=0:y=ih*0.74:w=iw:h=ih*0.26:color=0x0B0C0FB8:t=fill",
-        "drawbox=x=0:y=ih*0.86:w=iw:h=ih*0.14:color=0x080808D8:t=fill",
-    ]
+    del title_lines
+    return []
 
 
 def _drawtext(
@@ -725,6 +909,8 @@ def _drawtext(
     boxborderw: int = 16,
 ) -> str:
     safe_text = _escape_drawtext(text)
+    safe_x = str(x).replace(",", "\\,")
+    safe_y = str(y).replace(",", "\\,")
     parts = [
         f"drawtext=text='{safe_text}'"
         f":fontfile='{fontfile}'",
@@ -734,7 +920,7 @@ def _drawtext(
         f":bordercolor={bordercolor}",
         f":shadowcolor={shadowcolor}",
         f":shadowx={shadowx}:shadowy={shadowy}",
-        f":x={x}:y={y}",
+        f":x={safe_x}:y={safe_y}",
     ]
     if box:
         parts.extend(
@@ -755,7 +941,8 @@ def _title_style_tokens(
 ) -> dict[str, dict[str, Any]]:
     if style_name == "preset_default":
         legacy = _cover_style_tokens(cover_style, title_lines=title_lines)
-        return {
+        return _apply_cross_platform_safe_zone(
+            {
             "top": {
                 "size": legacy["top_size"],
                 "fill": legacy["top_fill"],
@@ -780,7 +967,9 @@ def _title_style_tokens(
                 "x": "(w-text_w)/2",
                 "y": "h-text_h-70",
             },
-        }
+        },
+            title_lines=title_lines,
+        )
 
     top_small = _fit_font_size(title_lines.get("top", ""), 102, min_size=72)
     main_huge = _fit_font_size(title_lines.get("main", ""), 170, min_size=106)
@@ -788,66 +977,173 @@ def _title_style_tokens(
     bottom_mid = _fit_font_size(title_lines.get("bottom", ""), 110, min_size=78)
 
     if style_name == "cyber_logo_stack":
-        return {
+        return _apply_cross_platform_safe_zone(
+            {
             "top": {"size": top_small, "fill": "0x68F3FFFF", "border": "0x15131EFF", "borderw": 12, "x": "80", "y": "52", "shadowcolor": "0x1C5DFFFF", "shadowx": 6, "shadowy": 6},
             "main": {"size": main_huge, "fill": "0xF3F5FFFF", "border": "0x2539C4FF", "borderw": 18, "x": "(w-text_w)/2", "y": "(h-text_h)/2-28", "shadowcolor": "0x071018FF", "shadowx": 8, "shadowy": 8},
             "bottom": {"size": bottom_mid, "fill": "0xFFE28AFF", "border": "0xE05A2AFF", "borderw": 10, "x": "(w-text_w)/2", "y": "h-text_h-74", "shadowcolor": "0x00000099", "shadowx": 5, "shadowy": 5},
-        }
+        },
+            title_lines=title_lines,
+        )
     if style_name == "chrome_impact":
-        return {
+        return _apply_cross_platform_safe_zone(
+            {
             "top": {"size": _fit_font_size(title_lines.get("top", ""), 94, min_size=68), "fill": "0xF2F9FFFF", "border": "0x111111FF", "borderw": 10, "x": "70", "y": "54", "shadowcolor": "0x3852E5FF", "shadowx": 5, "shadowy": 5},
             "main": {"size": main_huge, "fill": "0xF9F9F9FF", "border": "0x2A2017FF", "borderw": 20, "x": "(w-text_w)/2", "y": "(h-text_h)/2-10", "shadowcolor": "0x4B69FFFF", "shadowx": 6, "shadowy": 6},
             "bottom": {"size": bottom_mid, "fill": "0xFFF3B6FF", "border": "0xFF6A2BFF", "borderw": 10, "x": "(w-text_w)/2", "y": "h-text_h-82", "shadowcolor": "0x00000088", "shadowx": 4, "shadowy": 4},
-        }
+        },
+            title_lines=title_lines,
+        )
     if style_name == "festival_badge":
-        return {
+        return _apply_cross_platform_safe_zone(
+            {
             "top": {"size": _fit_font_size(title_lines.get("top", ""), 88, min_size=66), "fill": "0xFFEAB8FF", "border": "0x8A1A1AFF", "borderw": 8, "x": "(w-text_w)/2", "y": "56", "box": True, "boxcolor": "0x7E1515CC", "boxborderw": 20},
             "main": {"size": main_large, "fill": "0xFFF5D7FF", "border": "0xB31616FF", "borderw": 18, "x": "(w-text_w)/2", "y": "(h-text_h)/2-10", "shadowcolor": "0x00000077", "shadowx": 5, "shadowy": 5},
             "bottom": {"size": bottom_mid, "fill": "0xFFE59BFF", "border": "0xC94717FF", "borderw": 10, "x": "(w-text_w)/2", "y": "h-text_h-82", "box": True, "boxcolor": "0x8E2020B8", "boxborderw": 14},
-        }
+        },
+            title_lines=title_lines,
+        )
     if style_name == "double_banner":
-        return {
+        return _apply_cross_platform_safe_zone(
+            {
             "top": {"size": _fit_font_size(title_lines.get("top", ""), 84, min_size=64), "fill": "0xFFFDF7FF", "border": "0x111111FF", "borderw": 6, "x": "70", "y": "62", "box": True, "boxcolor": "0x1E8FE2CC", "boxborderw": 18},
             "main": {"size": main_large, "fill": "0xFFFFFFFF", "border": "0x131313FF", "borderw": 16, "x": "(w-text_w)/2", "y": "(h-text_h)/2-20"},
             "bottom": {"size": bottom_mid, "fill": "0xFFF7DDFF", "border": "0xA92918FF", "borderw": 8, "x": "(w-text_w)/2", "y": "h-text_h-84", "box": True, "boxcolor": "0xE4552CDD", "boxborderw": 18},
-        }
+        },
+            title_lines=title_lines,
+        )
     if style_name == "comic_boom":
-        return {
+        return _apply_cross_platform_safe_zone(
+            {
             "top": {"size": _fit_font_size(title_lines.get("top", ""), 96, min_size=68), "fill": "0xFFFACBFF", "border": "0x0F0F0FFF", "borderw": 9, "x": "78", "y": "48"},
             "main": {"size": main_huge, "fill": "0xFFF45AFF", "border": "0x0E0E0EFF", "borderw": 22, "x": "(w-text_w)/2", "y": "(h-text_h)/2-18", "shadowcolor": "0xFF4D5CFF", "shadowx": 6, "shadowy": 6},
             "bottom": {"size": bottom_mid, "fill": "0x7CF7FFFF", "border": "0x111111FF", "borderw": 10, "x": "(w-text_w)/2", "y": "h-text_h-82"},
-        }
+        },
+            title_lines=title_lines,
+        )
     if style_name == "luxury_gold":
-        return {
+        return _apply_cross_platform_safe_zone(
+            {
             "top": {"size": _fit_font_size(title_lines.get("top", ""), 84, min_size=64), "fill": "0xFFF2D8FF", "border": "0x3F2A11FF", "borderw": 6, "x": "(w-text_w)/2", "y": "64"},
             "main": {"size": _fit_font_size(title_lines.get("main", ""), 150, min_size=96), "fill": "0xFFF7EAFF", "border": "0x7B5417FF", "borderw": 16, "x": "(w-text_w)/2", "y": "(h-text_h)/2-16", "shadowcolor": "0x30200AFF", "shadowx": 4, "shadowy": 4},
             "bottom": {"size": _fit_font_size(title_lines.get("bottom", ""), 100, min_size=74), "fill": "0xFFE2A2FF", "border": "0x6B4212FF", "borderw": 8, "x": "(w-text_w)/2", "y": "h-text_h-80"},
-        }
+        },
+            title_lines=title_lines,
+        )
     if style_name == "tutorial_blueprint":
-        return {
+        return _apply_cross_platform_safe_zone(
+            {
             "top": {"size": _fit_font_size(title_lines.get("top", ""), 82, min_size=62), "fill": "0xDDF4FFFF", "border": "0x15486AFF", "borderw": 6, "x": "72", "y": "58", "box": True, "boxcolor": "0x103E5ECC", "boxborderw": 14},
             "main": {"size": _fit_font_size(title_lines.get("main", ""), 142, min_size=92), "fill": "0xFFFFFFFF", "border": "0x143952FF", "borderw": 14, "x": "72", "y": "(h-text_h)/2-16"},
             "bottom": {"size": _fit_font_size(title_lines.get("bottom", ""), 88, min_size=68), "fill": "0xE6F8FFFF", "border": "0x236A91FF", "borderw": 6, "x": "72", "y": "h-text_h-88"},
-        }
+        },
+            title_lines=title_lines,
+        )
     if style_name == "magazine_clean":
-        return {
+        return _apply_cross_platform_safe_zone(
+            {
             "top": {"size": _fit_font_size(title_lines.get("top", ""), 76, min_size=58), "fill": "0xFFFFFFFF", "border": "0x2B2B2BFF", "borderw": 4, "x": "(w-text_w)/2", "y": "66", "shadowcolor": "0x00000055", "shadowx": 2, "shadowy": 2},
             "main": {"size": _fit_font_size(title_lines.get("main", ""), 136, min_size=90), "fill": "0xFFFFFFFF", "border": "0x2B2B2BFF", "borderw": 8, "x": "(w-text_w)/2", "y": "(h-text_h)/2-12", "shadowcolor": "0x00000066", "shadowx": 3, "shadowy": 3},
             "bottom": {"size": _fit_font_size(title_lines.get("bottom", ""), 86, min_size=66), "fill": "0xFFF6F0FF", "border": "0x504842FF", "borderw": 4, "x": "(w-text_w)/2", "y": "h-text_h-82", "shadowcolor": "0x00000055", "shadowx": 2, "shadowy": 2},
-        }
+        },
+            title_lines=title_lines,
+        )
     if style_name == "documentary_stamp":
-        return {
+        return _apply_cross_platform_safe_zone(
+            {
             "top": {"size": _fit_font_size(title_lines.get("top", ""), 72, min_size=56), "fill": "0xF6F1E7FF", "border": "0x3A362DFF", "borderw": 4, "x": "60", "y": "60", "box": True, "boxcolor": "0x20231FB8", "boxborderw": 10},
             "main": {"size": _fit_font_size(title_lines.get("main", ""), 124, min_size=84), "fill": "0xF5F2EAFF", "border": "0x23211CFF", "borderw": 10, "x": "60", "y": "h*0.58-text_h", "shadowcolor": "0x00000066", "shadowx": 3, "shadowy": 3},
             "bottom": {"size": _fit_font_size(title_lines.get("bottom", ""), 76, min_size=58), "fill": "0xE6E1D6FF", "border": "0x4B463EFF", "borderw": 4, "x": "60", "y": "h-text_h-74"},
-        }
+        },
+            title_lines=title_lines,
+        )
     if style_name == "neon_night":
-        return {
+        return _apply_cross_platform_safe_zone(
+            {
             "top": {"size": _fit_font_size(title_lines.get("top", ""), 90, min_size=66), "fill": "0xFFE8F8FF", "border": "0x9324B8FF", "borderw": 9, "x": "78", "y": "50", "shadowcolor": "0x16C7FFFF", "shadowx": 6, "shadowy": 6},
             "main": {"size": main_large, "fill": "0xFFF7FCFF", "border": "0xFF4EA2FF", "borderw": 18, "x": "(w-text_w)/2", "y": "(h-text_h)/2-16", "shadowcolor": "0x283CFFFF", "shadowx": 8, "shadowy": 8},
             "bottom": {"size": bottom_mid, "fill": "0xFFF1A0FF", "border": "0xFF6A35FF", "borderw": 9, "x": "(w-text_w)/2", "y": "h-text_h-82"},
-        }
+        },
+            title_lines=title_lines,
+        )
     return _title_style_tokens("preset_default", title_lines=title_lines, cover_style=cover_style)
+
+
+def _apply_cross_platform_safe_zone(
+    layout: dict[str, dict[str, Any]],
+    *,
+    title_lines: dict[str, str],
+) -> dict[str, dict[str, Any]]:
+    safe_layout: dict[str, dict[str, Any]] = {}
+    for line_key, line_style in layout.items():
+        style = dict(line_style)
+        text = str(title_lines.get(line_key) or "").strip()
+        box_padding = int(style.get("boxborderw", 0)) if style.get("box") else 0
+        min_size = _cover_min_font_size(line_key)
+        style["size"] = _fit_cover_text_to_safe_zone(
+            text,
+            int(style.get("size", min_size)),
+            min_size=min_size,
+            box_padding=box_padding,
+        )
+        style["x"] = _clamp_cover_title_x(str(style.get("x") or "(w-text_w)/2"), box_padding=box_padding)
+        style["y"] = _clamp_cover_title_y(str(style.get("y") or "(h-text_h)/2"), box_padding=box_padding)
+        safe_layout[line_key] = style
+    return safe_layout
+
+
+def _cover_min_font_size(line_key: str) -> int:
+    if line_key == "main":
+        return 72
+    if line_key == "bottom":
+        return 36
+    return 42
+
+
+def _fit_cover_text_to_safe_zone(
+    text: str,
+    base_size: int,
+    *,
+    min_size: int,
+    box_padding: int = 0,
+) -> int:
+    cleaned = str(text or "").strip()
+    if not cleaned:
+        return max(min_size, base_size)
+    estimated_units = _estimate_cover_text_units(cleaned)
+    usable_width = max(220, int(1280 * _COVER_SAFE_TEXT_WIDTH_RATIO) - (box_padding * 2) - (_COVER_SAFE_MIN_INNER_PADDING * 2))
+    estimated_size = int(usable_width / max(estimated_units, 1.0))
+    return max(min_size, min(base_size, estimated_size))
+
+
+def _estimate_cover_text_units(text: str) -> float:
+    total = 0.0
+    for ch in str(text or ""):
+        if ch.isspace():
+            total += 0.3
+        elif ch.isascii():
+            total += 0.62 if ch.isalnum() else 0.45
+        else:
+            total += 1.0
+    return max(total, 1.0)
+
+
+def _clamp_cover_title_x(x_expr: str, *, box_padding: int = 0) -> str:
+    safe_left = f"max(w*{_COVER_SAFE_HORIZONTAL_MARGIN_RATIO:.6f},{_COVER_SAFE_MIN_INNER_PADDING})"
+    safe_right = f"w-max(w*{_COVER_SAFE_HORIZONTAL_MARGIN_RATIO:.6f},{_COVER_SAFE_MIN_INNER_PADDING})"
+    width_expr = "text_w"
+    if box_padding > 0:
+        width_expr = f"(text_w+{box_padding * 2})"
+    return f"max({safe_left},min({x_expr},{safe_right}-{width_expr}))"
+
+
+def _clamp_cover_title_y(y_expr: str, *, box_padding: int = 0) -> str:
+    safe_top = f"max(h*{_COVER_SAFE_VERTICAL_TOP_RATIO:.3f},42)"
+    safe_bottom = f"h-max(h*{_COVER_SAFE_VERTICAL_BOTTOM_RATIO:.3f},46)"
+    height_expr = "text_h"
+    if box_padding > 0:
+        height_expr = f"(text_h+{box_padding * 2})"
+    return f"max({safe_top},min({y_expr},{safe_bottom}-{height_expr}))"
 
 
 def _cover_style_tokens(style_name: str, *, title_lines: dict[str, str]) -> dict[str, Any]:

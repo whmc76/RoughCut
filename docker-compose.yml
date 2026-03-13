@@ -14,6 +14,10 @@ x-app-env: &app-env
   RENDER_DEBUG_DIR: /app/logs/render-debug
   SUBTITLE_FONT: Noto Sans CJK SC
   COVER_TITLE_FONT_PATH: /usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc
+  HEYGEM_SHARED_ROOT: /code/data
+  HEYGEM_VOICE_ROOT: /code/data/voice/data
+  AVATAR_API_BASE_URL: ${AVATAR_API_BASE_URL:-http://host.docker.internal:49202}
+  AVATAR_TRAINING_API_BASE_URL: ${AVATAR_TRAINING_API_BASE_URL:-http://host.docker.internal:49203}
 
 x-app-common: &app-common
   build:
@@ -28,6 +32,7 @@ x-app-common: &app-common
     - ./data/output:/app/data/output
     - ./logs:/app/logs
     - ./watch:/app/watch
+    - ${HEYGEM_SHARED_HOST_DIR:-./data/heygem}:/code/data
   depends_on:
     postgres:
       condition: service_healthy
@@ -47,7 +52,7 @@ services:
       POSTGRES_PASSWORD: roughcut
       POSTGRES_DB: roughcut
     ports:
-      - "5432:5432"
+      - "${ROUGHCUT_POSTGRES_PORT:-25432}:5432"
     volumes:
       - pg_data:/var/lib/postgresql/data
     healthcheck:
@@ -59,7 +64,7 @@ services:
   redis:
     image: redis:7-alpine
     ports:
-      - "6379:6379"
+      - "${ROUGHCUT_REDIS_PORT:-26379}:6379"
     volumes:
       - redis_data:/data
     healthcheck:
@@ -75,8 +80,8 @@ services:
       MINIO_ROOT_USER: minioadmin
       MINIO_ROOT_PASSWORD: minioadmin
     ports:
-      - "9000:9000"
-      - "9001:9001"
+      - "${MINIO_API_PORT:-39000}:9000"
+      - "${MINIO_CONSOLE_PORT:-39001}:9001"
     volumes:
       - minio_data:/data
     healthcheck:
@@ -108,7 +113,7 @@ services:
     <<: *app-common
     command: ["roughcut", "api", "--host", "0.0.0.0", "--port", "8000"]
     ports:
-      - "8000:8000"
+      - "${ROUGHCUT_API_PORT:-38471}:8000"
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
       interval: 10s

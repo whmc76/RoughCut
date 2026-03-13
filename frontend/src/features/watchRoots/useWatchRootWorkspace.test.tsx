@@ -13,6 +13,8 @@ const mockApi = vi.hoisted(() => ({
   deleteWatchRoot: vi.fn(),
   startInventoryScan: vi.fn(),
   enqueueInventory: vi.fn(),
+  mergeInventory: vi.fn(),
+  getSmartMergeGroups: vi.fn(),
 }));
 
 vi.mock("../../api", () => ({
@@ -66,6 +68,9 @@ describe("useWatchRootWorkspace", () => {
     mockApi.getConfigOptions.mockResolvedValue({
       job_languages: [{ value: "zh-CN", label: "简体中文" }],
       channel_profiles: [{ value: "", label: "自动匹配" }, { value: "edc_tactical", label: "EDC 战术版 (edc_tactical)" }],
+      workflow_modes: [{ value: "standard_edit", label: "标准成片" }],
+      enhancement_modes: [],
+      creative_mode_catalog: { workflow_modes: [], enhancement_modes: [] },
       transcription_models: {},
       multimodal_fallback_providers: [],
       search_providers: [],
@@ -73,10 +78,15 @@ describe("useWatchRootWorkspace", () => {
     });
     mockApi.getInventoryStatus.mockResolvedValue(SAMPLE_INVENTORY);
     mockApi.createWatchRoot.mockResolvedValue(SAMPLE_ROOTS[0]);
-    mockApi.updateWatchRoot.mockResolvedValue(SAMPLE_ROOTS[0]);
+    mockApi.updateWatchRoot.mockImplementation(async (rootId: string, body: Partial<WatchRoot>) => ({
+      ...SAMPLE_ROOTS.find((root) => root.id === rootId)!,
+      ...body,
+    }));
     mockApi.deleteWatchRoot.mockResolvedValue({});
     mockApi.startInventoryScan.mockResolvedValue({});
     mockApi.enqueueInventory.mockResolvedValue({});
+    mockApi.mergeInventory.mockResolvedValue({});
+    mockApi.getSmartMergeGroups.mockResolvedValue({ source_count: 0, groups: [] });
   });
 
   afterEach(() => {
@@ -110,5 +120,47 @@ describe("useWatchRootWorkspace", () => {
 
     expect(mockApi.enqueueInventory).toHaveBeenCalledWith("root_1", ["a.mp4", "b.mp4"], false);
     expect(result.current.selectedPending).toEqual([]);
+  });
+
+  it("merges selected pending items for the active root and clears selection", async () => {
+    const { result } = renderHookWithQueryClient(() => useWatchRootWorkspace());
+
+    await waitFor(() => expect(result.current.selectedRootId).toBe("root_1"));
+
+    act(() => {
+      result.current.setSelectedPending(["a.mp4", "b.mp4"]);
+    });
+
+    await act(async () => {
+      await result.current.merge.mutateAsync();
+    });
+
+    expect(mockApi.mergeInventory).toHaveBeenCalledWith("root_1", ["a.mp4", "b.mp4"]);
+    expect(result.current.selectedPending).toEqual([]);
+  });
+
+  it("autosaves edits for the selected root", async () => {
+    const { result } = renderHookWithQueryClient(() => useWatchRootWorkspace());
+
+    await waitFor(() => expect(result.current.selectedRootId).toBe("root_1"));
+
+    act(() => {
+      result.current.setForm((prev) => ({
+        ...prev,
+        path: "D:/videos/source-updated",
+      }));
+    });
+
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 600));
+    });
+
+    await waitFor(() =>
+      expect(mockApi.updateWatchRoot).toHaveBeenCalledWith(
+        "root_1",
+        expect.objectContaining({ path: "D:/videos/source-updated" }),
+      ),
+    );
+    await waitFor(() => expect(result.current.updateState).toBe("saved"));
   });
 });

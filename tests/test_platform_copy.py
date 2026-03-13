@@ -8,9 +8,13 @@ def test_platform_package_step_appended_to_pipeline():
     steps = create_job_steps(__import__("uuid").uuid4())
     assert "content_profile" in PIPELINE_STEPS
     assert "summary_review" in PIPELINE_STEPS
+    assert "ai_director" in PIPELINE_STEPS
+    assert "avatar_commentary" in PIPELINE_STEPS
     assert PIPELINE_STEPS[-1] == "platform_package"
     assert any(step.step_name == "content_profile" for step in steps)
     assert any(step.step_name == "summary_review" for step in steps)
+    assert any(step.step_name == "ai_director" for step in steps)
+    assert any(step.step_name == "avatar_commentary" for step in steps)
     assert steps[-1].step_name == "platform_package"
 
 
@@ -74,7 +78,7 @@ def test_normalize_platform_packaging_keeps_product_blank_when_identity_is_uncer
     )
 
     assert packaging["highlights"]["product"] == ""
-    assert packaging["platforms"]["bilibili"]["titles"][0] == "这期开箱重点看哪些细节"
+    assert packaging["platforms"]["bilibili"]["titles"][0] == "先说重点，这期开箱重点看哪些细节"
     assert "不编产品名" in packaging["platforms"]["bilibili"]["description"]
     assert "工具" not in packaging["platforms"]["bilibili"]["description"]
     assert packaging["platforms"]["bilibili"]["tags"] == ["开箱体验", "开箱", "上手体验", "玩家分享"]
@@ -87,5 +91,40 @@ def test_normalize_platform_packaging_preserves_specific_identity_when_available
     )
 
     assert packaging["highlights"]["product"] == "REATE EDC折刀"
-    assert packaging["platforms"]["bilibili"]["titles"][0].startswith("REATEEDC折刀开箱")
+    assert packaging["platforms"]["bilibili"]["titles"][0].startswith("REATEEDC折刀：")
     assert packaging["platforms"]["bilibili"]["tags"][:4] == ["REATE", "EDC折刀", "折刀雕刻开箱", "EDC"]
+
+
+def test_normalize_platform_packaging_applies_global_copy_style_to_fallbacks():
+    packaging = normalize_platform_packaging(
+        {"highlights": {}, "platforms": {"bilibili": {"titles": [], "description": "", "tags": []}}},
+        content_profile={"subject_brand": "RunningHub", "subject_model": "无限画布", "subject_type": "AI工作流创作平台", "hook_line": "这功能强得离谱"},
+        copy_style="trusted_expert",
+    )
+
+    assert "关键差异" in packaging["platforms"]["bilibili"]["titles"][0]
+    assert packaging["platforms"]["bilibili"]["description"].startswith("先把核心判断放前面，")
+
+
+def test_normalize_platform_packaging_applies_platform_bias_to_descriptions():
+    packaging = normalize_platform_packaging(
+        {
+            "highlights": {},
+            "platforms": {
+                "bilibili": {"titles": [], "description": "", "tags": []},
+                "xiaohongshu": {"titles": [], "description": "", "tags": []},
+                "douyin": {"titles": [], "description": "", "tags": []},
+                "kuaishou": {"titles": [], "description": "", "tags": []},
+                "wechat_channels": {"titles": [], "description": "", "tags": []},
+            },
+        },
+        content_profile={"subject_brand": "RunningHub", "subject_model": "无限画布", "subject_type": "AI工作流创作平台"},
+        copy_style="attention_grabbing",
+    )
+
+    assert "核心判断" in packaging["platforms"]["bilibili"]["description"]
+    assert "真实开箱分享" not in packaging["platforms"]["bilibili"]["description"]
+    assert "真实开箱分享" in packaging["platforms"]["xiaohongshu"]["description"]
+    assert "压进这一条里了" in packaging["platforms"]["douyin"]["description"]
+    assert "按实话给你讲" in packaging["platforms"]["kuaishou"]["description"]
+    assert "方便快速做判断" in packaging["platforms"]["wechat_channels"]["description"]

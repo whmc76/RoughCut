@@ -113,6 +113,7 @@ def test_build_segment_filter_chain_normalizes_fps_for_xfade():
     )
 
     assert any("fps=30000/1001" in part for part in parts)
+    assert any("settb=AVTB" in part for part in parts)
     assert any("xfade=transition=fade" in part for part in parts)
     assert video_label == "vout"
     assert audio_label == "achain1"

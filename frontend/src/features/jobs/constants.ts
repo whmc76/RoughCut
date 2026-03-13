@@ -1,3 +1,5 @@
+import { getCurrentUiLocale, translate } from "../../i18n";
+
 export const STEP_LABELS: Record<string, string> = {
   probe: "探测",
   extract_audio: "提音频",
@@ -6,14 +8,14 @@ export const STEP_LABELS: Record<string, string> = {
   content_profile: "摘要",
   summary_review: "核对",
   glossary_review: "纠错",
+  ai_director: "导演",
+  avatar_commentary: "数字人",
   edit_plan: "剪辑",
   render: "渲染",
   platform_package: "文案",
 };
 
 export const CONTENT_FIELDS = [
-  "subject_brand",
-  "subject_model",
   "subject_type",
   "video_theme",
   "hook_line",
@@ -24,12 +26,57 @@ export const CONTENT_FIELDS = [
   "supplemental_context",
 ] as const;
 
+export const CONTENT_FIELD_LABELS: Record<(typeof CONTENT_FIELDS)[number] | "keywords", string> = {
+  subject_type: "视频类型",
+  video_theme: "视频主题",
+  hook_line: "标题钩子",
+  visible_text: "画面文字",
+  summary: "内容摘要",
+  engagement_question: "互动提问",
+  correction_notes: "校对备注",
+  supplemental_context: "补充上下文",
+  keywords: "关键词",
+};
+
 export type UploadForm = {
   file: File | null;
   language: string;
   channelProfile: string;
+  workflowMode: string;
+  enhancementModes: string[];
+};
+
+export const WORKFLOW_MODE_LABELS: Record<string, string> = {
+  standard_edit: "标准成片",
+  long_text_to_video: "长文本转视频",
+};
+
+export const ENHANCEMENT_MODE_LABELS: Record<string, string> = {
+  avatar_commentary: "数字人解说",
+  ai_effects: "智能剪辑特效",
+  ai_director: "AI 导演",
 };
 
 export function stepLabel(stepName: string): string {
-  return STEP_LABELS[stepName] ?? stepName;
+  const key = `jobs.steps.${stepName}`;
+  const translated = translate(getCurrentUiLocale(), key);
+  return translated === key ? STEP_LABELS[stepName] ?? stepName : translated;
+}
+
+export function contentFieldLabel(field: (typeof CONTENT_FIELDS)[number] | "keywords"): string {
+  const key = `jobs.fields.${field}`;
+  const translated = translate(getCurrentUiLocale(), key);
+  return translated === key ? CONTENT_FIELD_LABELS[field] ?? field : translated;
+}
+
+export function workflowModeLabel(mode: string): string {
+  const key = `creative.workflow.${mode}`;
+  const translated = translate(getCurrentUiLocale(), key);
+  return translated === key ? WORKFLOW_MODE_LABELS[mode] ?? mode : translated;
+}
+
+export function enhancementModeLabel(mode: string): string {
+  const key = `creative.enhancement.${mode}`;
+  const translated = translate(getCurrentUiLocale(), key);
+  return translated === key ? ENHANCEMENT_MODE_LABELS[mode] ?? mode : translated;
 }

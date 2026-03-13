@@ -24,6 +24,18 @@ export const subtitleStyleGroups: StyleGroup[] = [
   { id: "campaign", label: "促销活动", description: "价格、优惠、活动提醒更强，适合卖货和节点推广。" },
 ];
 
+export const subtitleMotionGroups: StyleGroup[] = [
+  { id: "timing", label: "时间动效", description: "入场/退场更明显，强调节奏感和视觉记忆。"},
+  { id: "word", label: "逐词动效", description: "同一行里出现不同的节奏变化，适合情绪口播。"},
+  { id: "scene", label: "场景冲击", description: "更夸张的缩放、抖动和跳剪风格，适合强视觉风格内容。"},
+];
+
+export const smartEffectGroups: StyleGroup[] = [
+  { id: "rhythm", label: "节奏强化", description: "优先卡点、镜头切换和轻强调，适合大多数短视频。" },
+  { id: "impact", label: "爆点冲击", description: "更强的缩放、震动和击打感，适合高能片段。" },
+  { id: "texture", label: "氛围质感", description: "更偏氛围、暗角、光晕和电影式推进。" },
+];
+
 export const coverStyleGroups: StyleGroup[] = [
   { id: "adaptive", label: "平台联动", description: "由平台策略和内容主题自动决定封面包装方向。" },
   { id: "product", label: "产品展示", description: "围绕主体和卖点构图，适合开箱、升级、测评。" },
@@ -40,6 +52,13 @@ export const titleStyleGroups: StyleGroup[] = [
   { id: "banner", label: "横幅条幅", description: "更像剪映热门模板，层级强、横幅感明显。" },
   { id: "premium", label: "高级海报", description: "偏收藏、精品、质感表达，少一点喧闹。" },
   { id: "editorial", label: "编辑纪实", description: "像专题封面或纪录片标题，强调信息秩序。" },
+];
+
+export const copyStyleGroups: StyleGroup[] = [
+  { id: "growth", label: "增长导向", description: "优先点击率、爆点感和传播性，适合默认全局策略。" },
+  { id: "balanced", label: "平衡稳妥", description: "兼顾吸引力和自然度，不容易显得过火。" },
+  { id: "brand", label: "品牌表达", description: "更像编辑和品牌文案，克制但有质感。" },
+  { id: "persona", label: "人设表达", description: "按专家感、玩梗感、情绪叙事区分口吻。" },
 ];
 
 export const subtitleStylePresets: StylePreset[] = [
@@ -69,6 +88,26 @@ export const subtitleStylePresets: StylePreset[] = [
   { key: "film_subtle", label: "胶片低调", groupId: "premium", summary: "存在感低，更偏情绪表达。", accent: "#c6b7a5", badge: "胶片", sampleTop: "真正吸引人的", sampleBottom: "是质感", sampleFoot: "适合细腻镜头" },
   { key: "neon_green_glow", label: "荧绿霓虹", groupId: "campaign", summary: "适合高能科技和夜感画面。", accent: "#59f4b0", badge: "霓虹", sampleTop: "这次联名", sampleBottom: "够炸", sampleFoot: "更偏潮流表达" },
   { key: "teaser_glow", label: "预告辉光", groupId: "campaign", summary: "像预告片字幕，适合悬念导向。", accent: "#8de7ff", badge: "预告", sampleTop: "真正的大招", sampleBottom: "还在后面", sampleFoot: "悬念感更强" },
+];
+
+export const subtitleMotionPresets: StylePreset[] = [
+  { key: "motion_static", label: "静态基准", groupId: "timing", summary: "不做额外动效，适合说明型内容。", accent: "#f5f7fb", badge: "静态", sampleTop: "不做花里胡哨", sampleBottom: "更稳重", sampleFoot: "默认阅读节奏" },
+  { key: "motion_typewriter", label: "逐字打字", groupId: "word", summary: "按顺序点亮字符，适合强信息输出。", accent: "#f8c94b", badge: "打字", sampleTop: "每个词都", sampleBottom: "有节奏出现", sampleFoot: "适合硬核口播" },
+  { key: "motion_pop", label: "弹跳出现", groupId: "scene", summary: "主语先大后稳，爆点更抓眼。", accent: "#5bd5ff", badge: "弹跳", sampleTop: "这一句先", sampleBottom: "跳进来", sampleFoot: "适合短视频钩子" },
+  { key: "motion_wave", label: "波形起伏", groupId: "word", summary: "字形像波浪起伏，信息层次更强。", accent: "#9eff9e", badge: "波形", sampleTop: "节奏起起", sampleBottom: "落落", sampleFoot: "适合评论/观点" },
+  { key: "motion_slide", label: "滑入滑出", groupId: "timing", summary: "下方入场上浮消失，适合转场联动。", accent: "#ff84ff", badge: "滑入", sampleTop: "上一秒先", sampleBottom: "后退位，后上", sampleFoot: "适合动态镜头" },
+  { key: "motion_glitch", label: "故障闪烁", groupId: "scene", summary: "轻微抖动与色偏，突出爆点。", accent: "#ff6f6f", badge: "故障", sampleTop: "别轻信", sampleBottom: "太平静", sampleFoot: "适合电竞/硬核内容" },
+  { key: "motion_ripple", label: "破浪扩散", groupId: "timing", summary: "首词抬头后逐渐回弹，字幕有扩散扩张感。", accent: "#8de8ff", badge: "扩散", sampleTop: "这一下", sampleBottom: "先冲", sampleFoot: "适合观点反转" },
+  { key: "motion_strobe", label: "断续闪耀", groupId: "word", summary: "强烈闪烁后回稳，适合制造突刺刺激。", accent: "#fbe45f", badge: "闪耀", sampleTop: "别眨眼", sampleBottom: "马上后悔", sampleFoot: "适合强烈提醒" },
+  { key: "motion_echo", label: "重影回响", groupId: "scene", summary: "核心词有明显残影，读段更有记忆点。", accent: "#ff8de3", badge: "重影", sampleTop: "这件事", sampleBottom: "你别错过", sampleFoot: "适合复盘型结论" },
+];
+
+export const smartEffectPresets: StylePreset[] = [
+  { key: "smart_effect_rhythm", label: "节奏卡点", groupId: "rhythm", summary: "优先在切点、重音和字幕节拍上做轻强化。", accent: "#66d4ff", badge: "推荐", sampleTop: "切点更准", sampleBottom: "节奏更顺", sampleFoot: "默认通用型" },
+  { key: "smart_effect_punch", label: "爆点冲击", groupId: "impact", summary: "遇到强结论和高能镜头时强化缩放、闪白和击打感。", accent: "#ff7b5f", badge: "爆点", sampleTop: "重点来了", sampleBottom: "镜头更炸", sampleFoot: "适合短视频高能段" },
+  { key: "smart_effect_glitch", label: "故障赛博", groupId: "impact", summary: "轻故障、色偏和抖动，适合科技、电竞和硬核内容。", accent: "#7d89ff", badge: "赛博", sampleTop: "故障切换", sampleBottom: "记忆更强", sampleFoot: "适合数码和潮流" },
+  { key: "smart_effect_cinematic", label: "电影推进", groupId: "texture", summary: "更偏暗场、呼吸感和镜头推进，不走夸张抖动。", accent: "#f2b56b", badge: "电影", sampleTop: "情绪铺垫", sampleBottom: "更有层次", sampleFoot: "适合预告和氛围片" },
+  { key: "smart_effect_minimal", label: "克制轻特效", groupId: "rhythm", summary: "只保留必要的切点强化和轻提示，避免太花。", accent: "#b6c3d9", badge: "克制", sampleTop: "少一点动效", sampleBottom: "更干净", sampleFoot: "适合说明和教程" },
 ];
 
 export const coverStylePresets: StylePreset[] = [
@@ -112,6 +151,15 @@ export const titleStylePresets: StylePreset[] = [
   { key: "magazine_clean", label: "杂志清排", groupId: "premium", summary: "标题更克制，像编辑式封面。", accent: "#f1d9bb", badge: "杂志", sampleTop: "不是堆料", sampleBottom: "是设计统一", sampleFoot: "适合审美向" },
   { key: "documentary_stamp", label: "纪录印章", groupId: "editorial", summary: "像专题片标题和档案印章。", accent: "#d8ccb4", badge: "纪录", sampleTop: "这次改版", sampleBottom: "真正变了什么", sampleFoot: "专题感更强" },
   { key: "neon_night", label: "夜霓虹", groupId: "impact", summary: "夜感、潮流和发光字效。", accent: "#8f7cff", badge: "夜感", sampleTop: "夜场质感", sampleBottom: "直接拉满", sampleFoot: "适合赛博和潮流画面" },
+];
+
+export const copyStylePresets: StylePreset[] = [
+  { key: "attention_grabbing", label: "吸引眼球", groupId: "growth", summary: "默认推荐。爆点、反差、结果感更强。", accent: "#ff7a59", badge: "默认", sampleTop: "这功能强得离谱", sampleBottom: "点击欲最强", sampleFoot: "适合大多数短视频" },
+  { key: "balanced", label: "平衡稳妥", groupId: "balanced", summary: "有吸引力但不过火，适合泛用内容。", accent: "#7fb6ff", badge: "稳", sampleTop: "核心流程讲清了", sampleBottom: "信息和情绪都在线", sampleFoot: "泛用性最好" },
+  { key: "premium_editorial", label: "高级编辑感", groupId: "brand", summary: "像编辑和品牌文案，更克制、更有质感。", accent: "#f0c77d", badge: "编辑", sampleTop: "这次很值得看", sampleBottom: "更像杂志导语", sampleFoot: "适合品牌和精品" },
+  { key: "trusted_expert", label: "专业可信", groupId: "persona", summary: "像经验分享和专家拆解，强调判断和方法。", accent: "#86d6c3", badge: "专业", sampleTop: "关键差异讲明白", sampleBottom: "更像可靠建议", sampleFoot: "适合教程和评测" },
+  { key: "playful_meme", label: "轻松玩梗", groupId: "persona", summary: "更网感、更口语、更有梗。", accent: "#d777ff", badge: "玩梗", sampleTop: "这波真的杀疯了", sampleBottom: "更像会玩的账号", sampleFoot: "适合年轻化内容" },
+  { key: "emotional_story", label: "情绪叙事", groupId: "persona", summary: "强调等待、惊喜、失望、情绪弧线。", accent: "#ff9cb4", badge: "情绪", sampleTop: "这次真的等太久了", sampleBottom: "更像个人故事", sampleFoot: "适合经历型表达" },
 ];
 
 export function findStylePreset(presets: StylePreset[], key: string): StylePreset | undefined {

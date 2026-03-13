@@ -12,7 +12,7 @@ from pydantic import BaseModel
 router = APIRouter(prefix="/control", tags=["control"])
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
-_STOP_SCRIPT = _REPO_ROOT / "restart_roughcut.ps1"
+_STOP_SCRIPT = _REPO_ROOT / "start_roughcut.ps1"
 
 
 class StopServicesIn(BaseModel):
