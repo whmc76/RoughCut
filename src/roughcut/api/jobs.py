@@ -57,6 +57,7 @@ from roughcut.review.content_profile_memory import (
     load_content_profile_user_memory,
     record_content_profile_feedback_memory,
 )
+from roughcut.review.domain_glossaries import detect_glossary_domains
 from roughcut.review.report import generate_report
 from roughcut.storage.s3 import get_storage, job_key
 
@@ -651,10 +652,75 @@ async def apply_review(
                 correction.human_decision = action.action
                 if action.override_text:
                     correction.human_override = action.override_text
+                if action.action == "accepted":
+                    await _persist_reviewed_glossary_term(
+                        session,
+                        job=job,
+                        correction=correction,
+                    )
                 applied += 1
 
     await session.commit()
     return {"applied": applied}
+
+
+async def _persist_reviewed_glossary_term(
+    session: AsyncSession,
+    *,
+    job: Job,
+    correction: SubtitleCorrection,
+) -> None:
+    suggested = str(correction.human_override or correction.suggested_span or "").strip()
+    original = str(correction.original_span or "").strip()
+    if not suggested or not original or suggested == original:
+        return
+
+    profile_artifact = await _load_latest_artifact(
+        session,
+        job.id,
+        _CONTENT_PROFILE_ARTIFACT_TYPES,
+    )
+    content_profile = {}
+    if profile_artifact and isinstance(profile_artifact.payload_json, dict):
+        content_profile = dict(profile_artifact.payload_json)
+
+    detected_domains = detect_glossary_domains(
+        channel_profile=job.channel_profile,
+        content_profile=content_profile,
+    )
+    scopes: list[tuple[str, str]] = []
+    for domain in detected_domains:
+        pair = ("domain", domain)
+        if pair not in scopes:
+            scopes.append(pair)
+    if job.channel_profile:
+        scopes.append(("channel_profile", job.channel_profile))
+
+    for scope_type, scope_value in scopes:
+        result = await session.execute(
+            select(GlossaryTerm).where(
+                GlossaryTerm.scope_type == scope_type,
+                GlossaryTerm.scope_value == scope_value,
+                GlossaryTerm.correct_form == suggested,
+            )
+        )
+        term = result.scalar_one_or_none()
+        if term is None:
+            session.add(
+                GlossaryTerm(
+                    scope_type=scope_type,
+                    scope_value=scope_value,
+                    wrong_forms=[original],
+                    correct_form=suggested,
+                    category=correction.change_type,
+                    context_hint=f"reviewed_from_job:{job.channel_profile or 'uncategorized'}",
+                )
+            )
+            continue
+        wrong_forms = [str(item or "").strip() for item in (term.wrong_forms or []) if str(item or "").strip()]
+        if original not in wrong_forms and original != suggested:
+            wrong_forms.append(original)
+            term.wrong_forms = wrong_forms
 
 
 @router.get("/{job_id}/activity", response_model=JobActivityOut)
@@ -1033,9 +1099,13 @@ def _artifact_event_summary(artifact: Artifact) -> dict | None:
             "detail": str(data.get("opening_hook") or "已输出改写与重配音计划"),
         }
     if artifact.artifact_type == "avatar_commentary_plan":
+        placement = str(data.get("overlay_position") or data.get("layout_template") or "").strip()
         return {
             "title": "数字人解说计划已生成",
-            "detail": f"{len(data.get('segments') or [])} 段解说位待渲染",
+            "detail": (
+                f"{len(data.get('segments') or [])} 段解说位待渲染"
+                + (f" · {placement}" if placement else "")
+            ),
         }
     if artifact.artifact_type == "render_outputs":
         avatar_result = data.get("avatar_result") if isinstance(data, dict) else None
@@ -1051,6 +1121,7 @@ def _resolve_avatar_activity_status(
     plan: dict,
     avatar_result: dict | None,
 ) -> dict[str, str | None]:
+    placement = str(plan.get("overlay_position") or plan.get("layout_template") or plan.get("provider") or "").strip()
     if avatar_result:
         status_value = str(avatar_result.get("status") or "").strip().lower()
         if status_value == "done":
@@ -1058,8 +1129,7 @@ def _resolve_avatar_activity_status(
             detail = str(
                 avatar_result.get("detail")
                 or avatar_result.get("profile_name")
-                or plan.get("layout_template")
-                or plan.get("provider")
+                or placement
                 or "数字人画中画已完成"
             )
             return {"status": "done", "summary": summary, "detail": detail, "updated_at": None}
@@ -1079,7 +1149,7 @@ def _resolve_avatar_activity_status(
         return {
             "status": "done",
             "summary": "数字人素材已生成，等待合成进成片",
-            "detail": str(plan.get("layout_template") or plan.get("provider") or "数字人素材已准备完成"),
+            "detail": str(placement or "数字人素材已准备完成"),
             "updated_at": None,
         }
     if render_status in {"failed"}:
@@ -1093,7 +1163,7 @@ def _resolve_avatar_activity_status(
     return {
         "status": "done",
         "summary": f"规划 {len(plan.get('segments') or [])} 段数字人口播插入位",
-        "detail": str(plan.get("layout_template") or plan.get("provider") or "已生成数字人解说计划"),
+        "detail": str(placement or "已生成数字人解说计划"),
         "updated_at": None,
     }
 

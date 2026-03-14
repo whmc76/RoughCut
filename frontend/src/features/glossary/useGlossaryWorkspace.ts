@@ -9,6 +9,8 @@ function normalizeTermForm(form: TermForm) {
   return {
     wrong_forms: form.wrong_forms.split(",").map((item) => item.trim()).filter(Boolean),
     correct_form: form.correct_form.trim(),
+    scope_type: form.scope_type || "global",
+    scope_value: form.scope_value.trim(),
     category: form.category || undefined,
     context_hint: form.context_hint || undefined,
   };
@@ -18,6 +20,8 @@ function serializeTermForm(form: TermForm): string {
   return JSON.stringify({
     wrong_forms: form.wrong_forms,
     correct_form: form.correct_form,
+    scope_type: form.scope_type,
+    scope_value: form.scope_value,
     category: form.category,
     context_hint: form.context_hint,
   });
@@ -34,13 +38,23 @@ export function useGlossaryWorkspace() {
   const [saveState, setSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [saveError, setSaveError] = useState<string | null>(null);
   const [builtinFilter, setBuiltinFilter] = useState<string>("all");
+  const [scopeFilter, setScopeFilter] = useState<string>("all");
   const [builtinImportMode, setBuiltinImportMode] = useState<"add_only" | "sync_aliases">("add_only");
   const [importingPackDomain, setImportingPackDomain] = useState<string | null>(null);
   const [importingTerms, setImportingTerms] = useState<string[]>([]);
   const lastPersistedRef = useRef<string>(serializeTermForm(EMPTY_TERM_FORM));
   const updateVersionRef = useRef(0);
 
-  const glossary = useQuery({ queryKey: ["glossary"], queryFn: api.listGlossary });
+  const glossary = useQuery({
+    queryKey: ["glossary", scopeFilter],
+    queryFn: () => {
+      if (scopeFilter === "all") return api.listGlossary();
+      if (scopeFilter === "global") return api.listGlossary({ scope_type: "global", scope_value: "" });
+      if (scopeFilter.startsWith("domain:")) return api.listGlossary({ scope_type: "domain", scope_value: scopeFilter.slice("domain:".length) });
+      if (scopeFilter.startsWith("channel_profile:")) return api.listGlossary({ scope_type: "channel_profile", scope_value: scopeFilter.slice("channel_profile:".length) });
+      return api.listGlossary();
+    },
+  });
   const builtinPacks = useQuery({ queryKey: ["glossary", "builtin-packs"], queryFn: api.listBuiltinGlossaryPacks });
 
   const resetForm = () => {
@@ -73,6 +87,8 @@ export function useGlossaryWorkspace() {
       api.createGlossary({
         wrong_forms: term.wrong_forms,
         correct_form: term.correct_form,
+        scope_type: "global",
+        scope_value: "",
         category: term.category || undefined,
         context_hint: term.context_hint || undefined,
       }),
@@ -94,6 +110,8 @@ export function useGlossaryWorkspace() {
     const nextForm = {
       wrong_forms: term.wrong_forms.join(", "),
       correct_form: term.correct_form,
+      scope_type: term.scope_type || "global",
+      scope_value: term.scope_value || "",
       category: term.category || "",
       context_hint: term.context_hint || "",
     };
@@ -122,6 +140,8 @@ export function useGlossaryWorkspace() {
           const nextForm = {
             wrong_forms: updatedTerm.wrong_forms.join(", "),
             correct_form: updatedTerm.correct_form,
+            scope_type: updatedTerm.scope_type || "global",
+            scope_value: updatedTerm.scope_value || "",
             category: updatedTerm.category || "",
             context_hint: updatedTerm.context_hint || "",
           };
@@ -201,6 +221,8 @@ export function useGlossaryWorkspace() {
     builtinPacksFiltered,
     builtinFilter,
     setBuiltinFilter,
+    scopeFilter,
+    setScopeFilter,
     builtinImportMode,
     setBuiltinImportMode,
     resetForm,

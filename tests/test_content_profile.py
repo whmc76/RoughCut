@@ -6,7 +6,9 @@ from roughcut.edit.presets import get_workflow_preset
 import pytest
 
 from roughcut.review.content_profile import (
+    _apply_visual_subject_guard,
     _build_search_queries,
+    _filter_evidence_by_visual_subject,
     _fallback_profile,
     _seed_profile_from_subtitles,
     _seed_profile_from_user_memory,
@@ -122,6 +124,42 @@ def test_build_cover_title_respects_global_copy_style():
     assert title["bottom"] == "无限画布关键差异讲明白"
 
 
+def test_build_cover_title_clears_duplicate_top_when_main_already_contains_model():
+    preset = get_workflow_preset("edc_tactical")
+    title = build_cover_title(
+        {
+            "subject_brand": "",
+            "subject_model": "",
+            "subject_type": "EDC折刀",
+            "visible_text": "MT33",
+            "video_theme": "MT33折刀细节展示与镜面板评测",
+            "hook_line": "EDC折刀这次太炸了",
+        },
+        preset,
+    )
+
+    assert title["top"] == ""
+    assert title["main"] == "MT33折刀"
+
+
+def test_build_cover_title_prefers_theme_entity_anchor_for_product_titles():
+    preset = get_workflow_preset("edc_tactical")
+    title = build_cover_title(
+        {
+            "subject_brand": "",
+            "subject_model": "",
+            "subject_type": "EDC折刀",
+            "video_theme": "NOC MT-33折刀细节展示与磁顶配镜面板评测",
+            "visible_text": "MT33",
+            "hook_line": "EDC折刀这次太炸了",
+        },
+        preset,
+    )
+
+    assert title["top"] == "NOC"
+    assert title["main"] == "NOC MT-33折刀"
+
+
 def test_fallback_profile_does_not_use_timestamp_as_model():
     profile = _fallback_profile(
         source_name="20260130-140529.mp4",
@@ -180,6 +218,23 @@ def test_build_search_queries_prefers_ai_feature_anchor_for_software_topics():
     assert "RunningHub 无限画布 漫剧" in queries
 
 
+def test_build_search_queries_anchors_model_only_product_with_subject_type():
+    queries = _build_search_queries(
+        {
+            "subject_brand": "",
+            "subject_model": "MT33",
+            "subject_type": "EDC折刀",
+            "search_queries": [],
+        },
+        "VID_20260112_122408.mp4",
+        transcript_excerpt="[12.0-18.0] 这次主要看 MT33 这把折刀的结构和反光细节。",
+    )
+
+    assert "MT33 EDC折刀" in queries
+    assert "MT33 折刀" in queries
+    assert "MT33 开箱" not in queries
+
+
 def test_build_transcript_excerpt_pulls_high_signal_items_from_later_segments():
     subtitle_items = [
         {"start_time": 0.0, "end_time": 1.0, "text_raw": "开场闲聊"},
@@ -215,6 +270,33 @@ def test_seed_profile_from_subtitles_detects_reate_folding_knife_signals():
 
     assert profile["subject_brand"] == "REATE"
     assert profile["subject_type"] == "EDC折刀"
+
+
+def test_apply_visual_subject_guard_overrides_conflicting_subject_type():
+    profile = {
+        "subject_type": "智能灯具",
+        "visual_hints": {
+            "subject_type": "EDC折刀",
+            "visible_text": "MT33",
+        },
+    }
+
+    _apply_visual_subject_guard(profile)
+
+    assert profile["subject_type"] == "EDC折刀"
+    assert profile["visible_text"] == "MT33"
+
+
+def test_filter_evidence_by_visual_subject_drops_conflicting_lighting_results():
+    evidence = [
+        {"query": "MT33 开箱", "title": "某某智能台灯评测", "snippet": "这款台灯的光线很舒服"},
+        {"query": "MT33 折刀", "title": "MT33 折刀开箱", "snippet": "这把折刀的刀柄和锁片细节不错"},
+    ]
+
+    filtered = _filter_evidence_by_visual_subject(evidence, visual_subject_type="EDC折刀")
+
+    assert len(filtered) == 1
+    assert filtered[0]["title"] == "MT33 折刀开箱"
 
 
 def test_seed_profile_from_subtitles_detects_runninghub_infinite_canvas_theme():
@@ -283,6 +365,36 @@ def test_assess_content_profile_automation_blocks_product_profile_without_identi
 
     assert assessment["auto_confirm"] is False
     assert "开箱类视频未识别出可验证主体" in assessment["blocking_reasons"]
+
+
+@pytest.mark.asyncio
+async def test_apply_content_profile_feedback_accepts_draft_without_reenrichment(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from roughcut.review import content_profile as content_profile_module
+
+    async def fail_enrich(*args, **kwargs):
+        raise AssertionError("empty confirm should not re-enrich draft")
+
+    monkeypatch.setattr(content_profile_module, "enrich_content_profile", fail_enrich)
+
+    draft = {
+        "subject_brand": "RunningHub",
+        "subject_model": "无限画布",
+        "summary": "现有草稿摘要",
+        "transcript_excerpt": "测试字幕",
+    }
+    result = await apply_content_profile_feedback(
+        draft_profile=draft,
+        source_name="video.mp4",
+        channel_profile=None,
+        user_feedback={},
+    )
+
+    assert result["subject_brand"] == "RunningHub"
+    assert result["summary"] == "现有草稿摘要"
+    assert result["review_mode"] == "manual_confirmed"
+    assert result["user_feedback"] == {}
 
 
 @pytest.mark.asyncio
@@ -504,6 +616,107 @@ async def test_polish_subtitle_items_fallback_uses_review_memory(monkeypatch: py
 
 
 @pytest.mark.asyncio
+async def test_polish_subtitle_items_fallback_uses_phrase_preferences(monkeypatch: pytest.MonkeyPatch):
+    from roughcut.review import content_profile as content_profile_module
+
+    def raising_provider():
+        raise RuntimeError("provider unavailable")
+
+    monkeypatch.setattr(content_profile_module, "get_reasoning_provider", raising_provider)
+
+    item = SimpleNamespace(
+        item_index=0,
+        start_time=0.0,
+        end_time=2.0,
+        text_raw="这个次定配静面看起来会更亮一点",
+        text_norm="这个次定配静面看起来会更亮一点",
+        text_final=None,
+    )
+
+    polished = await polish_subtitle_items(
+        [item],
+        content_profile={"preset_name": "edc_tactical"},
+        glossary_terms=[],
+        review_memory={
+            "terms": [{"term": "次顶配"}, {"term": "镜面"}],
+            "aliases": [],
+            "style_examples": [],
+            "phrase_preferences": [{"phrase": "次顶配镜面", "count": 5}],
+        },
+    )
+
+    assert polished == 1
+    assert item.text_final == "这个次顶配镜面看起来会更亮一点"
+
+
+@pytest.mark.asyncio
+async def test_polish_subtitle_items_fallback_rewrites_sentence_slot_with_learned_phrase(monkeypatch: pytest.MonkeyPatch):
+    from roughcut.review import content_profile as content_profile_module
+
+    def raising_provider():
+        raise RuntimeError("provider unavailable")
+
+    monkeypatch.setattr(content_profile_module, "get_reasoning_provider", raising_provider)
+
+    item = SimpleNamespace(
+        item_index=0,
+        start_time=0.0,
+        end_time=2.0,
+        text_raw="首先,还是这个自定配顶面吧。",
+        text_norm="首先,还是这个自定配顶面吧。",
+        text_final=None,
+    )
+
+    polished = await polish_subtitle_items(
+        [item],
+        content_profile={"preset_name": "edc_tactical"},
+        glossary_terms=[],
+        review_memory={
+            "terms": [{"term": "次顶配"}, {"term": "镜面"}, {"term": "次顶配镜面"}],
+            "aliases": [],
+            "style_examples": [],
+            "phrase_preferences": [{"phrase": "次顶配镜面", "count": 5}],
+        },
+    )
+
+    assert polished == 1
+    assert item.text_final == "首先,还是这个次顶配镜面吧。"
+
+
+@pytest.mark.asyncio
+async def test_polish_subtitle_items_fallback_repairs_collapsed_predicate_clause(monkeypatch: pytest.MonkeyPatch):
+    from roughcut.review import content_profile as content_profile_module
+
+    def raising_provider():
+        raise RuntimeError("provider unavailable")
+
+    monkeypatch.setattr(content_profile_module, "get_reasoning_provider", raising_provider)
+
+    item = SimpleNamespace(
+        item_index=0,
+        start_time=0.0,
+        end_time=2.0,
+        text_raw="光线会更加精归。",
+        text_norm="光线会更加精归。",
+        text_final=None,
+    )
+
+    polished = await polish_subtitle_items(
+        [item],
+        content_profile={"preset_name": "edc_tactical"},
+        glossary_terms=[],
+        review_memory={
+            "terms": [{"term": "光线"}],
+            "aliases": [],
+            "style_examples": [],
+        },
+    )
+
+    assert polished == 1
+    assert item.text_final == "光线会更好。"
+
+
+@pytest.mark.asyncio
 async def test_polish_subtitle_items_rejects_cross_episode_rewrite(monkeypatch: pytest.MonkeyPatch):
     from roughcut.review import content_profile as content_profile_module
 
@@ -550,3 +763,45 @@ async def test_polish_subtitle_items_rejects_cross_episode_rewrite(monkeypatch: 
     assert item.text_final == "这把 REATE 折刀先看手柄雕刻细节"
     assert "LEATHERMAN" not in item.text_final
     assert "ARC" not in item.text_final
+
+
+@pytest.mark.asyncio
+async def test_polish_subtitle_items_llm_result_still_runs_cleanup_pipeline(monkeypatch: pytest.MonkeyPatch):
+    from roughcut.review import content_profile as content_profile_module
+
+    class FakeResponse:
+        def as_json(self):
+            return {
+                "items": [
+                    {"index": 0, "text_final": "光线会更加精归。"}
+                ]
+            }
+
+    class FakeProvider:
+        async def complete(self, *args, **kwargs):
+            return FakeResponse()
+
+    monkeypatch.setattr(content_profile_module, "get_reasoning_provider", lambda: FakeProvider())
+
+    item = SimpleNamespace(
+        item_index=0,
+        start_time=0.0,
+        end_time=2.0,
+        text_raw="光线会更加精归。",
+        text_norm="光线会更加精归。",
+        text_final=None,
+    )
+
+    polished = await polish_subtitle_items(
+        [item],
+        content_profile={"preset_name": "edc_tactical"},
+        glossary_terms=[],
+        review_memory={
+            "terms": [{"term": "光线"}],
+            "aliases": [],
+            "style_examples": [],
+        },
+    )
+
+    assert polished == 1
+    assert item.text_final == "光线会更好。"

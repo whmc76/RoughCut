@@ -49,11 +49,13 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "watermark_position": "top_right",
     "watermark_opacity": 0.82,
     "watermark_scale": 0.16,
-    "avatar_overlay_position": "bottom_right",
-    "avatar_overlay_scale": 0.28,
+    "avatar_overlay_position": "top_left",
+    "avatar_overlay_scale": 0.22,
     "avatar_overlay_corner_radius": 26,
     "avatar_overlay_border_width": 4,
     "avatar_overlay_border_color": "#F4E4B8",
+    "export_resolution_mode": "source",
+    "export_resolution_preset": "1080p",
     "enabled": True,
 }
 
@@ -105,6 +107,9 @@ SMART_EFFECT_STYLE_OPTIONS = {
     "smart_effect_cinematic",
     "smart_effect_minimal",
 }
+
+EXPORT_RESOLUTION_MODE_OPTIONS = {"source", "specified"}
+EXPORT_RESOLUTION_PRESET_OPTIONS = {"1080p", "1440p", "2160p"}
 
 COVER_STYLE_OPTIONS = {
     "preset_default",
@@ -408,6 +413,8 @@ def resolve_packaging_plan_for_job(job_id: str, *, content_profile: dict[str, An
             "copy_style": DEFAULT_CONFIG["copy_style"],
             "subtitle_motion_style": DEFAULT_CONFIG["subtitle_motion_style"],
             "smart_effect_style": DEFAULT_CONFIG["smart_effect_style"],
+            "export_resolution_mode": DEFAULT_CONFIG["export_resolution_mode"],
+            "export_resolution_preset": DEFAULT_CONFIG["export_resolution_preset"],
         }
 
     assets_by_id = {
@@ -457,6 +464,8 @@ def resolve_packaging_plan_for_job(job_id: str, *, content_profile: dict[str, An
         "avatar_overlay_corner_radius": config["avatar_overlay_corner_radius"],
         "avatar_overlay_border_width": config["avatar_overlay_border_width"],
         "avatar_overlay_border_color": config["avatar_overlay_border_color"],
+        "export_resolution_mode": config["export_resolution_mode"],
+        "export_resolution_preset": config["export_resolution_preset"],
     }
 
 
@@ -671,7 +680,7 @@ def _normalize_config(config: dict[str, Any], assets_by_id: dict[str, dict[str, 
         avatar_overlay_scale = float(normalized.get("avatar_overlay_scale") or DEFAULT_CONFIG["avatar_overlay_scale"])
     except Exception:
         avatar_overlay_scale = float(DEFAULT_CONFIG["avatar_overlay_scale"])
-    normalized["avatar_overlay_scale"] = round(max(0.16, min(0.42, avatar_overlay_scale)), 3)
+    normalized["avatar_overlay_scale"] = round(max(0.16, min(0.32, avatar_overlay_scale)), 3)
 
     try:
         avatar_overlay_corner_radius = int(
@@ -695,6 +704,20 @@ def _normalize_config(config: dict[str, Any], assets_by_id: dict[str, dict[str, 
     if not re.fullmatch(r"#[0-9A-F]{6}", avatar_overlay_border_color):
         avatar_overlay_border_color = str(DEFAULT_CONFIG["avatar_overlay_border_color"])
     normalized["avatar_overlay_border_color"] = avatar_overlay_border_color
+
+    export_resolution_mode = str(
+        normalized.get("export_resolution_mode") or DEFAULT_CONFIG["export_resolution_mode"]
+    ).strip() or DEFAULT_CONFIG["export_resolution_mode"]
+    if export_resolution_mode not in EXPORT_RESOLUTION_MODE_OPTIONS:
+        export_resolution_mode = DEFAULT_CONFIG["export_resolution_mode"]
+    normalized["export_resolution_mode"] = export_resolution_mode
+
+    export_resolution_preset = str(
+        normalized.get("export_resolution_preset") or DEFAULT_CONFIG["export_resolution_preset"]
+    ).strip() or DEFAULT_CONFIG["export_resolution_preset"]
+    if export_resolution_preset not in EXPORT_RESOLUTION_PRESET_OPTIONS:
+        export_resolution_preset = DEFAULT_CONFIG["export_resolution_preset"]
+    normalized["export_resolution_preset"] = export_resolution_preset
 
     normalized["music_volume"] = float(normalized.get("music_volume") or DEFAULT_CONFIG["music_volume"])
     normalized["watermark_opacity"] = float(normalized.get("watermark_opacity") or DEFAULT_CONFIG["watermark_opacity"])

@@ -5,7 +5,7 @@ import { api } from "../../api";
 export function useOverviewWorkspace() {
   const jobs = useQuery({ queryKey: ["jobs"], queryFn: api.listJobs });
   const watchRoots = useQuery({ queryKey: ["watch-roots"], queryFn: api.listWatchRoots });
-  const glossary = useQuery({ queryKey: ["glossary"], queryFn: api.listGlossary });
+  const glossary = useQuery({ queryKey: ["glossary"], queryFn: () => api.listGlossary() });
   const services = useQuery({ queryKey: ["control-status"], queryFn: api.getControlStatus, refetchInterval: 10_000 });
 
   const stats = {

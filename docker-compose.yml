@@ -17,7 +17,7 @@ x-app-env: &app-env
   HEYGEM_SHARED_ROOT: /code/data
   HEYGEM_VOICE_ROOT: /code/data/voice/data
   AVATAR_API_BASE_URL: ${AVATAR_API_BASE_URL:-http://host.docker.internal:49202}
-  AVATAR_TRAINING_API_BASE_URL: ${AVATAR_TRAINING_API_BASE_URL:-http://host.docker.internal:49203}
+  AVATAR_TRAINING_API_BASE_URL: ${AVATAR_TRAINING_API_BASE_URL:-http://host.docker.internal:49204}
 
 x-app-common: &app-common
   build:
@@ -32,7 +32,7 @@ x-app-common: &app-common
     - ./data/output:/app/data/output
     - ./logs:/app/logs
     - ./watch:/app/watch
-    - ${HEYGEM_SHARED_HOST_DIR:-./data/heygem}:/code/data
+    - ${HEYGEM_SHARED_HOST_DIR:-E:/WorkSpace/heygem/data}:/code/data
   depends_on:
     postgres:
       condition: service_healthy

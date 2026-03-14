@@ -438,6 +438,11 @@ def write_ass_file(
     style = dict(SUBTITLE_STYLE_PRESETS.get(style_name, SUBTITLE_STYLE_PRESETS["bold_yellow_outline"]))
     font_name = str(style.get("font_name") or font_name)
     font_size = int(style.get("font_size") or font_size)
+    font_size = _resolve_subtitle_font_size(
+        play_res_x=play_res_x,
+        play_res_y=play_res_y,
+        font_size=font_size,
+    )
     text_color_rgb = str(style.get("text_color_rgb") or text_color_rgb)
     outline_color_rgb = str(style.get("outline_color_rgb") or outline_color_rgb)
     motion_style = _normalize_motion_style(motion_style)
@@ -445,6 +450,7 @@ def write_ass_file(
     margin_v = int(style.get("margin_v") or margin_v)
     if margin_v_override is not None:
         margin_v = max(margin_v, int(margin_v_override))
+    margin_h = _resolve_subtitle_horizontal_margin(play_res_x=play_res_x)
     bold_flag = -1 if style.get("bold", True) else 0
     shadow = int(style.get("shadow") or 0)
     border_style = int(style.get("border_style") or 1)
@@ -482,7 +488,7 @@ def write_ass_file(
         # Bold=-1, Alignment=2 (bottom center)
         f"Style: Default,{font_name},{font_size},"
         f"{primary},{secondary},{outline},{back},"
-        f"{bold_flag},0,0,0,100,100,0,0,{border_style},{outline_width},{shadow},2,10,10,{margin_v},1\n"
+        f"{bold_flag},0,0,0,100,100,0,0,{border_style},{outline_width},{shadow},2,{margin_h},{margin_h},{margin_v},1\n"
         "\n"
         "[Events]\n"
         "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text"
@@ -496,6 +502,13 @@ def write_ass_file(
             item.get("text_final")
             or item.get("text_norm")
             or item.get("text_raw", "")
+        )
+        text = _wrap_subtitle_text(
+            str(text),
+            max_chars_per_line=_estimate_subtitle_line_capacity(
+                play_res_x=play_res_x,
+                font_size=font_size,
+            ),
         )
         text = text.replace("{", r"\{").replace("\n", r"\N")
         lines.append(f"Dialogue: 0,{start},{end},Default,,0,0,0,,{_build_motion_tag(text, motion_style)}")
@@ -555,6 +568,65 @@ def _build_motion_tag(text: str, motion_style: str) -> str:
             f"{text}"
         )
     return text
+
+
+def _estimate_subtitle_line_capacity(*, play_res_x: int, font_size: int) -> int:
+    safe_margin = _resolve_subtitle_horizontal_margin(play_res_x=play_res_x)
+    usable_width = max(220, int(play_res_x) - (safe_margin * 2))
+    estimated_char_width = max(24.0, float(font_size) * 0.92)
+    return max(8, min(18, int(usable_width / estimated_char_width)))
+
+
+def _resolve_subtitle_font_size(*, play_res_x: int, play_res_y: int, font_size: int) -> int:
+    portrait = int(play_res_y) > int(play_res_x)
+    if portrait:
+        width_limit = int(play_res_x * 0.09)
+        height_limit = int(play_res_y * 0.065)
+        min_size = max(54, int(min(play_res_x, play_res_y) * 0.074))
+    else:
+        width_limit = int(play_res_x * 0.07)
+        height_limit = int(play_res_y * 0.054)
+        min_size = 40
+    return max(min_size, min(int(font_size), width_limit, height_limit))
+
+
+def _resolve_subtitle_horizontal_margin(*, play_res_x: int) -> int:
+    return max(28, int(play_res_x * 0.06))
+
+
+def _wrap_subtitle_text(text: str, *, max_chars_per_line: int, max_lines: int = 4) -> str:
+    raw = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
+    if "\n" in raw:
+        return "\n".join(
+            _wrap_subtitle_text(part, max_chars_per_line=max_chars_per_line, max_lines=max_lines)
+            for part in raw.split("\n")
+        )
+    compact = raw.strip()
+    if len(compact) <= max_chars_per_line:
+        return compact
+
+    segments: list[str] = []
+    remaining = compact
+    while len(remaining) > max_chars_per_line and len(segments) < max_lines - 1:
+        split_at = _find_subtitle_wrap_index(remaining, max_chars_per_line)
+        if split_at <= 0 or split_at >= len(remaining):
+            break
+        segments.append(remaining[:split_at].strip())
+        remaining = remaining[split_at:].strip()
+
+    if remaining:
+        segments.append(remaining)
+    return "\n".join(part for part in segments if part)
+
+
+def _find_subtitle_wrap_index(text: str, target: int) -> int:
+    punctuation = "，。！？；：,.!?、）)]】》> "
+    lower = max(1, target - 4)
+    upper = min(len(text), target + 2)
+    for index in range(upper, lower - 1, -1):
+        if text[index - 1] in punctuation:
+            return index
+    return min(len(text), target)
 
 
 def escape_path_for_ffmpeg_filter(path: Path) -> str:

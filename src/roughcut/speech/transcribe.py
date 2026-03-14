@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from roughcut.db.models import Artifact, JobStep, TranscriptSegment
 from roughcut.providers.factory import get_transcription_provider
 from roughcut.providers.transcription.base import TranscriptResult, TranscriptionProgressCallback
+from roughcut.review.subtitle_memory import apply_domain_term_corrections
 
 
 async def transcribe_audio(
@@ -18,6 +19,8 @@ async def transcribe_audio(
     session: AsyncSession,
     prompt: str | None = None,
     progress_callback: TranscriptionProgressCallback | None = None,
+    glossary_terms: list[dict] | None = None,
+    review_memory: dict | None = None,
 ) -> TranscriptResult:
     """
     Transcribe audio using the configured TranscriptionProvider.
@@ -29,6 +32,12 @@ async def transcribe_audio(
         language=language,
         prompt=prompt,
         progress_callback=progress_callback,
+    )
+
+    result = _normalize_transcript_result(
+        result,
+        glossary_terms=glossary_terms or [],
+        review_memory=review_memory,
     )
 
     # Persist segments
@@ -59,4 +68,27 @@ async def transcribe_audio(
     session.add(artifact)
     await session.flush()
 
+    return result
+
+
+def _normalize_transcript_result(
+    result: TranscriptResult,
+    *,
+    glossary_terms: list[dict],
+    review_memory: dict | None,
+) -> TranscriptResult:
+    for seg in result.segments:
+        text = str(seg.text or "").strip()
+        if not text:
+            continue
+        for term in glossary_terms:
+            correct_form = str(term.get("correct_form") or "").strip()
+            if not correct_form:
+                continue
+            for wrong_form in term.get("wrong_forms") or []:
+                wrong = str(wrong_form or "").strip()
+                if wrong and wrong != correct_form:
+                    text = text.replace(wrong, correct_form)
+        text = apply_domain_term_corrections(text, review_memory)
+        seg.text = text
     return result

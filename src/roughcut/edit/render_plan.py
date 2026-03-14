@@ -33,6 +33,8 @@ def build_render_plan(
     creative_profile: dict[str, Any] | None = None,
     ai_director_plan: dict[str, Any] | None = None,
     avatar_commentary_plan: dict[str, Any] | None = None,
+    export_resolution_mode: str = "source",
+    export_resolution_preset: str = "1080p",
 ) -> dict:
     preset = get_workflow_preset(workflow_preset)
     return {
@@ -74,6 +76,10 @@ def build_render_plan(
             "style": cover_style or preset.cover_style,
             "title_style": title_style,
             "variant_count": preset.cover_variant_count,
+        },
+        "delivery": {
+            "resolution_mode": export_resolution_mode,
+            "resolution_preset": export_resolution_preset,
         },
     }
 

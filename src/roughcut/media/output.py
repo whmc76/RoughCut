@@ -25,6 +25,12 @@ from roughcut.providers.reasoning.base import extract_json_text
 
 COVER_TITLE_STRATEGIES = [
     {
+        "key": "ctr",
+        "label": "强CTR爆点",
+        "instruction": "优先点击率，强结论、强冲突、强升级感，适合短视频封面。",
+        "default_title_style": "comic_boom",
+    },
+    {
         "key": "xiaohongshu",
         "label": "小红书吸睛",
         "instruction": "二极管表达，情绪和反差更强，适合种草、惊喜、收藏欲、冲动点击。",
@@ -43,12 +49,6 @@ COVER_TITLE_STRATEGIES = [
         "default_title_style": "chrome_impact",
     },
     {
-        "key": "ctr",
-        "label": "强CTR爆点",
-        "instruction": "优先点击率，强结论、强冲突、强升级感，适合短视频封面。",
-        "default_title_style": "comic_boom",
-    },
-    {
         "key": "brand",
         "label": "品牌高级感",
         "instruction": "更克制、更像品牌视觉或精品海报，强调审美和质感。",
@@ -56,11 +56,11 @@ COVER_TITLE_STRATEGIES = [
     },
 ]
 
-_COVER_SAFE_HORIZONTAL_MARGIN_RATIO = 37 / 128
+_COVER_SAFE_HORIZONTAL_MARGIN_RATIO = 30 / 128
 _COVER_SAFE_VERTICAL_TOP_RATIO = 0.12
 _COVER_SAFE_VERTICAL_BOTTOM_RATIO = 0.14
 _COVER_SAFE_MIN_INNER_PADDING = 18
-_COVER_SAFE_TEXT_WIDTH_RATIO = 27 / 64
+_COVER_SAFE_TEXT_WIDTH_RATIO = 31 / 64
 
 
 def _sanitize(name: str) -> str:
@@ -181,6 +181,14 @@ async def extract_cover_frame(
             else (content_profile or {}).get("preset", {}).get("cover_style", "tech_showcase")
         )
         resolved_title_style = str(title_style or "preset_default").strip() or "preset_default"
+        dimensions = _probe_video_dimensions(video_path)
+        is_portrait = bool(dimensions and dimensions[1] > dimensions[0])
+        selected, selected_rankings, title_variants = _prioritize_cover_variants(
+            selected,
+            selected_rankings,
+            title_variants,
+            is_portrait=is_portrait,
+        )
 
         outputs: list[Path] = []
         for i, candidate in enumerate(selected):
@@ -224,6 +232,86 @@ def _probe_duration(video_path: Path) -> float:
         return float(data.get("format", {}).get("duration", 0))
     except Exception:
         return 0.0
+
+
+def _probe_video_dimensions(video_path: Path) -> tuple[int, int] | None:
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "quiet",
+                "-print_format",
+                "json",
+                "-show_streams",
+                str(video_path),
+            ],
+            capture_output=True,
+            timeout=10,
+        )
+        data = json.loads(result.stdout.decode("utf-8", errors="replace"))
+        for stream in data.get("streams", []):
+            if str(stream.get("codec_type") or "").lower() != "video":
+                continue
+            width = int(stream.get("width") or 0)
+            height = int(stream.get("height") or 0)
+            if width > 0 and height > 0:
+                return width, height
+    except Exception:
+        return None
+    return None
+
+
+def _portrait_cover_strategy_boost(strategy_key: str) -> float:
+    boosts = {
+        "ctr": 0.22,
+        "xiaohongshu": 0.0,
+        "bilibili": 0.03,
+    }
+    return boosts.get(str(strategy_key or "").strip().lower(), 0.0)
+
+
+def _prioritize_cover_variants(
+    selected: list[dict[str, Any]],
+    selected_rankings: list[dict[str, Any]],
+    title_variants: list[dict[str, Any] | None],
+    *,
+    is_portrait: bool,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any] | None]]:
+    entries: list[dict[str, Any]] = []
+    strategy_order = {strategy["key"]: idx for idx, strategy in enumerate(COVER_TITLE_STRATEGIES)}
+    for idx, candidate in enumerate(selected):
+        ranking = dict(selected_rankings[idx]) if idx < len(selected_rankings) else {"index": idx, "score": 0.0, "reason": ""}
+        plan = title_variants[idx] if idx < len(title_variants) else None
+        strategy_key = str((plan or {}).get("strategy_key") or "").strip().lower()
+        base_score = _normalize_cover_score(ranking.get("score"), fallback=0.0)
+        boosted_score = base_score
+        if is_portrait:
+            boosted_score = _normalize_cover_score(base_score + _portrait_cover_strategy_boost(strategy_key), fallback=base_score)
+        ranking["score"] = boosted_score
+        entries.append(
+            {
+                "candidate": candidate,
+                "ranking": ranking,
+                "plan": plan,
+                "sort_score": boosted_score,
+                "strategy_rank": strategy_order.get(strategy_key, 999),
+                "original_index": idx,
+            }
+        )
+
+    entries.sort(
+        key=lambda item: (
+            -float(item["sort_score"]),
+            int(item["strategy_rank"]),
+            int(item["original_index"]),
+        )
+    )
+    return (
+        [item["candidate"] for item in entries],
+        [item["ranking"] for item in entries],
+        [item["plan"] for item in entries],
+    )
 
 
 def _sample_cover_candidates(
@@ -311,12 +399,14 @@ async def _rank_cover_candidates(
             profile_text = json.dumps(content_profile or {}, ensure_ascii=False)
             prompt = (
                 "你在为中文开箱/评测视频挑封面。请从候选帧里选出最适合做封面的前几名，"
-                "优先级标准：主体完整清晰、品牌或盒体信息可见、构图紧凑、情绪强、适合后续叠加大字。"
-                "优先选产品正面、包装正面、logo/型号能看出来的画面。"
-                "避免只看到手、主体太小、糊帧、无重点、文字会挡住主体的画面。"
+                "第一优先级是吸引点击：画面要有冲击力、反差感、情绪张力、主体够大、第一眼就想点开。"
+                "第二优先级才是图片内容表达：品牌、盒体、logo、型号、软件界面核心区域要尽量可读。"
+                "优先选产品正面、包装正面、logo/型号能看出来、主体占画面足够大的画面。"
+                "强烈避免任何带大面积字幕条、底部成句字幕、口播字幕、大片说明文案、直播条幅、贴纸文案、烧录文字的画面。"
+                "避免只看到手、主体太小、糊帧、无重点、信息虽全但不抓眼、文字会挡住主体的画面。"
                 f"\n视频主题参考：{profile_text}"
                 "\n输出 JSON："
-                "{\"ranked\":[{\"index\":0,\"score\":0.91,\"reason\":\"主体最完整\"}]}"
+                "{\"ranked\":[{\"index\":0,\"score\":0.91,\"reason\":\"第一眼最抓人，主体也足够清楚\"}]}"
                 f"，最多返回 {max(variant_count, 2)} 个结果，按优先级排序。score 范围 0-1。"
             )
             content = await asyncio.wait_for(
@@ -431,6 +521,7 @@ async def _generate_cover_title_variants(
             prompt = (
                 "你在给中文短视频制作封面候选。现在有多张候选画面，请输出 5 套具有明确传播策略差异的封面标题方案。"
                 "每套方案不是简单换词，而是针对不同平台/传播目标单独设计。"
+                "总原则：封面优先吸引眼球，第二优先才是让图片内容表达更清楚。"
                 "要求：\n"
                 "1. 每套方案绑定一个 strategy_key 和一个 match_index。\n"
                 "2. 请优先让不同策略匹配不同镜头；只有实在不合适才允许复用同一镜头。\n"
@@ -1086,18 +1177,26 @@ def _apply_cross_platform_safe_zone(
             min_size=min_size,
             box_padding=box_padding,
         )
-        style["x"] = _clamp_cover_title_x(str(style.get("x") or "(w-text_w)/2"), box_padding=box_padding)
-        style["y"] = _clamp_cover_title_y(str(style.get("y") or "(h-text_h)/2"), box_padding=box_padding)
+        style["x"] = _clamp_cover_title_x("(w-text_w)/2", box_padding=box_padding)
+        style["y"] = _clamp_cover_title_y(_cover_focus_line_y(line_key), box_padding=box_padding)
         safe_layout[line_key] = style
     return safe_layout
 
 
+def _cover_focus_line_y(line_key: str) -> str:
+    if line_key == "top":
+        return "max(h*0.135,54)"
+    if line_key == "bottom":
+        return "h-text_h-max(h*0.145,82)"
+    return "(h-text_h)/2"
+
+
 def _cover_min_font_size(line_key: str) -> int:
     if line_key == "main":
-        return 72
+        return 96
     if line_key == "bottom":
-        return 36
-    return 42
+        return 58
+    return 64
 
 
 def _fit_cover_text_to_safe_zone(

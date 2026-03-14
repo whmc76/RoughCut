@@ -250,18 +250,19 @@ export function buildReviewChecks({
   }
 
   if (enhancementModes.includes("ai_director")) {
+    const indexTtsReady = config?.voice_provider === "indextts2"
+      && Boolean(String(config.voice_clone_api_base_url ?? "").trim());
     const runningHubReady = config?.voice_provider === "runninghub"
       && config.voice_clone_api_key_set
       && Boolean(String(config.voice_clone_voice_id ?? "").trim());
-    const edgeReady = config?.voice_provider === "edge";
     checks.push({
       key: "ai_director",
       label: "AI 导演重配音",
-      status: runningHubReady || edgeReady ? "ready" : "warning",
-      detail: runningHubReady
+      status: indexTtsReady || runningHubReady ? "ready" : "warning",
+      detail: indexTtsReady
+        ? `当前走 IndexTTS2 accel 主实例，本地服务：${config?.voice_clone_api_base_url}；会自动做情绪文本和强度控制。`
+        : runningHubReady
         ? `当前走 RunningHub，工作流 / voice id：${config?.voice_clone_voice_id}`
-        : edgeReady
-        ? "当前走 Edge TTS，可快速重配音，但不会保留严格一致的克隆音色。"
         : "已启用 AI 导演，但语音 provider 配置还不完整，缺少可用的 TTS / 语音克隆执行入口。",
     });
   }

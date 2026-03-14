@@ -4,7 +4,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../../api";
 import type { SettingsForm } from "./constants";
 
-const EMPTY_SECRET_KEYS = ["openai_api_key", "anthropic_api_key", "minimax_api_key", "ollama_api_key"] as const;
+const EMPTY_SECRET_KEYS = ["openai_api_key", "anthropic_api_key", "minimax_api_key", "minimax_coding_plan_api_key", "ollama_api_key"] as const;
 const CREATIVE_SECRET_KEYS = ["avatar_api_key", "voice_clone_api_key"] as const;
 
 function buildSettingsForm(config: NonNullable<ReturnType<typeof api.getConfig> extends Promise<infer T> ? T : never>): SettingsForm {
@@ -35,6 +35,7 @@ function buildSettingsForm(config: NonNullable<ReturnType<typeof api.getConfig> 
     anthropic_auth_mode: config.anthropic_auth_mode,
     anthropic_api_key_helper: config.anthropic_api_key_helper,
     minimax_base_url: config.minimax_base_url,
+    minimax_api_host: config.minimax_api_host,
     voice_provider: config.voice_provider,
     voice_clone_api_base_url: config.voice_clone_api_base_url,
     voice_clone_voice_id: config.voice_clone_voice_id,
@@ -44,6 +45,7 @@ function buildSettingsForm(config: NonNullable<ReturnType<typeof api.getConfig> 
     avatar_api_key: "",
     anthropic_api_key: "",
     minimax_api_key: "",
+    minimax_coding_plan_api_key: "",
     ollama_api_key: "",
     voice_clone_api_key: "",
     max_upload_size_mb: config.max_upload_size_mb,

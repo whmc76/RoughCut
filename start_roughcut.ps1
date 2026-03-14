@@ -11,6 +11,9 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+if ($PSVersionTable.PSVersion.Major -ge 7) {
+    $PSNativeCommandUseErrorActionPreference = $true
+}
 
 $RepoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $RepoRoot
@@ -24,6 +27,22 @@ $FrontendSrcDir = Join-Path $FrontendDir "src"
 $FrontendDist = Join-Path $FrontendDir "dist\index.html"
 $WatchDir = Join-Path $RepoRoot "watch"
 $script:ManagedProcesses = @()
+
+function Invoke-NativeCommandChecked {
+    param(
+        [string]$FilePath,
+        [string[]]$Arguments = @(),
+        [string]$FailureMessage
+    )
+
+    & $FilePath @Arguments
+    if ($LASTEXITCODE -ne 0) {
+        if ($FailureMessage) {
+            throw "$FailureMessage (exit code $LASTEXITCODE)."
+        }
+        throw "Command failed: $FilePath $($Arguments -join ' ') (exit code $LASTEXITCODE)."
+    }
+}
 
 Add-Type @"
 using System;
@@ -133,14 +152,14 @@ function Initialize-RoughCutEnvironment {
 
     if ($null -ne $Uv) {
         Write-Host "Using uv to create and sync .venv" -ForegroundColor Cyan
-        & $Uv.Source sync --extra dev --extra local-asr
+        Invoke-NativeCommandChecked -FilePath $Uv.Source -Arguments @("sync", "--extra", "dev", "--extra", "local-asr") -FailureMessage "uv sync failed"
     } elseif ($null -ne $SystemPython) {
         Write-Host "uv not found. Falling back to python -m venv + pip install." -ForegroundColor Yellow
-        & $SystemPython.Source -m venv .venv
+        Invoke-NativeCommandChecked -FilePath $SystemPython.Source -Arguments @("-m", "venv", ".venv") -FailureMessage "python -m venv failed"
         if (-not (Test-Path $Python)) {
             throw "Failed to create virtual environment: $Python"
         }
-        & $Python -m pip install -e ".[dev,local-asr]"
+        Invoke-NativeCommandChecked -FilePath $Python -Arguments @("-m", "pip", "install", "-e", ".[dev,local-asr]") -FailureMessage "Backend dependency installation failed"
     } else {
         throw "Neither uv nor python is available. Install uv, then run 'uv sync --extra dev --extra local-asr'."
     }
@@ -188,9 +207,9 @@ function Ensure-RoughCutFrontend {
     Push-Location $RepoRoot
     try {
         if (-not (Test-Path (Join-Path $RepoRoot "node_modules"))) {
-            & $Pnpm.Source install
+            Invoke-NativeCommandChecked -FilePath $Pnpm.Source -Arguments @("install") -FailureMessage "pnpm install failed"
         }
-        & $Pnpm.Source build
+        Invoke-NativeCommandChecked -FilePath $Pnpm.Source -Arguments @("build") -FailureMessage "Frontend build failed"
     } finally {
         Pop-Location
     }
@@ -332,6 +351,27 @@ function Resolve-ServicePort {
     return Resolve-StandalonePort -EnvVarName $EnvVarName -PreferredPorts $PreferredPorts -UsedPorts $UsedPorts
 }
 
+function Test-IndexTTS2AccelHealthy {
+    param(
+        [int]$Port,
+        [int]$TimeoutSec = 30
+    )
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    do {
+        try {
+            $response = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/health" -TimeoutSec 5
+            if ($response.status -eq "ok" -and $response.service -eq "indextts2-service" -and $response.use_accel -eq $true) {
+                return $true
+            }
+        } catch {
+        }
+        Start-Sleep -Seconds 2
+    } while ((Get-Date) -lt $deadline)
+
+    return $false
+}
+
 function Parse-PortValue {
     param([string]$Value)
 
@@ -374,12 +414,10 @@ function Resolve-PortSet {
         $minioConsolePort = Resolve-StandalonePort -EnvVarName "MINIO_CONSOLE_PORT" -PreferredPorts @(39001,39003,39005,39007,39009,39011) -UsedPorts $UsedPorts
     }
 
-    $heygemApiPort = Resolve-StandalonePort -EnvVarName "HEYGEM_API_PORT" -PreferredPorts @(49202,49212,49222,49232,49242,49252,49262) -UsedPorts $UsedPorts
-    $heygemTrainingPort = Resolve-StandalonePort -EnvVarName "HEYGEM_TRAINING_API_PORT" -PreferredPorts @(49203,49213,49223,49233,49243,49253,49263) -UsedPorts $UsedPorts
-    if ($heygemTrainingPort -eq $heygemApiPort) {
-        $UsedPorts.Remove($heygemTrainingPort)
-            $heygemTrainingPort = Resolve-StandalonePort -EnvVarName "HEYGEM_TRAINING_API_PORT" -PreferredPorts @(18384,18386,18387,18388,18389,18390,18391,18392) -UsedPorts $UsedPorts
-    }
+    $configuredHeygemApiPort = Parse-PortValue -Value $(if ($env:HEYGEM_API_PORT) { $env:HEYGEM_API_PORT } else { Get-LocalDotEnvValue -Key "HEYGEM_API_PORT" })
+    $configuredHeygemTrainingPort = Parse-PortValue -Value $(if ($env:HEYGEM_TRAINING_API_PORT) { $env:HEYGEM_TRAINING_API_PORT } else { Get-LocalDotEnvValue -Key "HEYGEM_TRAINING_API_PORT" })
+    $heygemApiPort = if ($null -ne $configuredHeygemApiPort) { $configuredHeygemApiPort } else { 49202 }
+    $heygemTrainingPort = if ($null -ne $configuredHeygemTrainingPort) { $configuredHeygemTrainingPort } else { 49204 }
 
     return @{
         Postgres = $postgresPort
@@ -444,7 +482,7 @@ function Update-LocalServiceEnv {
         [int]$ApiPort
     )
 
-    $defaultHeygemRoot = "D:/duix_avatar_data/face2face"
+    $defaultHeygemRoot = "E:/WorkSpace/heygem/data"
     $heygemSharedRoot = if ($env:HEYGEM_SHARED_ROOT -and -not [string]::IsNullOrWhiteSpace($env:HEYGEM_SHARED_ROOT)) {
         [System.IO.Path]::GetFullPath($env:HEYGEM_SHARED_ROOT).Replace('\\', '/')
     } else {
@@ -465,7 +503,7 @@ function Update-LocalServiceEnv {
     $voiceRoot = if ($env:HEYGEM_VOICE_ROOT -and -not [string]::IsNullOrWhiteSpace($env:HEYGEM_VOICE_ROOT)) {
         [System.IO.Path]::GetFullPath($env:HEYGEM_VOICE_ROOT).Replace('\\', '/')
     } else {
-        "D:/duix_avatar_data/voice/data"
+        "E:/WorkSpace/RoughCut/data/voice_refs"
     }
     if (-not (Test-Path $voiceRoot)) {
         New-Item -ItemType Directory -Force -Path $voiceRoot | Out-Null
@@ -571,6 +609,15 @@ function Stop-RoughCutServices {
     if ($StopDockerServices) {
         Write-Host "Stopping docker compose services..." -ForegroundColor Cyan
         docker compose stop | Out-Host
+    }
+}
+
+function Remove-LegacyHeygemMockContainer {
+    $legacyContainer = "roughcut-heygem-1"
+    $exists = docker ps -a --filter "name=^${legacyContainer}$" --format "{{.Names}}"
+    if (-not [string]::IsNullOrWhiteSpace($exists)) {
+        Write-Host "Removing legacy mock container $legacyContainer..." -ForegroundColor Yellow
+        docker rm -f $legacyContainer | Out-Host
     }
 }
 
@@ -689,7 +736,8 @@ function Wait-LauncherClose {
 }
 
 if ($StopOnly) {
-    Stop-RoughCutServices -StopDockerServices:$StopDocker
+Stop-RoughCutServices -StopDockerServices:$StopDocker
+Remove-LegacyHeygemMockContainer
     exit 0
 }
 
@@ -744,8 +792,11 @@ Stop-RoughCutServices
     if (-not (Wait-LocalPortListening -TestPort $servicePorts.HeygemApi -ServiceName "HeyGem API (external)" -TimeoutSec 10)) {
         throw "External HeyGem preview service is not listening on port $($servicePorts.HeygemApi)."
     }
-    if (-not (Wait-LocalPortListening -TestPort $servicePorts.HeygemTraining -ServiceName "HeyGem Training (external)" -TimeoutSec 10)) {
-        throw "External HeyGem training service is not listening on port $($servicePorts.HeygemTraining)."
+    if (-not (Wait-LocalPortListening -TestPort $servicePorts.HeygemTraining -ServiceName "IndexTTS2 / Voice Synthesis (external)" -TimeoutSec 10)) {
+        throw "External IndexTTS2 voice synthesis service is not listening on port $($servicePorts.HeygemTraining)."
+    }
+    if (-not (Test-IndexTTS2AccelHealthy -Port $servicePorts.HeygemTraining -TimeoutSec 20)) {
+        throw "External IndexTTS2 service on port $($servicePorts.HeygemTraining) is reachable, but it is not the expected accel primary instance."
     }
 
     Write-Host "Docker services are ready." -ForegroundColor Green
@@ -753,7 +804,7 @@ Stop-RoughCutServices
 
 if (-not $SkipMigrate) {
     Write-Host "Running database migrations..." -ForegroundColor Cyan
-    & $Python -m roughcut.cli migrate
+    Invoke-NativeCommandChecked -FilePath $Python -Arguments @("-m", "roughcut.cli", "migrate") -FailureMessage "Database migrations failed"
 }
 
 New-Item -ItemType Directory -Force -Path (Join-Path $RepoRoot "logs") | Out-Null

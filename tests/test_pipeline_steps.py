@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -14,6 +15,7 @@ from roughcut.pipeline.steps import (
     _get_cover_seek,
     _load_latest_artifact,
     _load_latest_optional_artifact,
+    _resolve_subtitle_split_profile,
     _load_latest_timeline,
     _record_source_integrity,
     _select_cover_source_video,
@@ -23,6 +25,15 @@ from roughcut.pipeline.steps import (
     run_content_profile,
     run_glossary_review,
 )
+
+
+def test_resolve_subtitle_split_profile_prefers_faster_portrait_subtitles():
+    portrait = _resolve_subtitle_split_profile(width=1080, height=1920)
+    landscape = _resolve_subtitle_split_profile(width=1920, height=1080)
+
+    assert portrait["orientation"] == "portrait"
+    assert portrait["max_duration"] < landscape["max_duration"]
+    assert portrait["max_chars"] < landscape["max_chars"]
 
 
 def test_record_source_integrity_writes_debug_report(tmp_path: Path):
@@ -134,7 +145,7 @@ async def test_run_glossary_review_loads_recent_subtitles_without_name_error(db_
 
     async def fake_polish_subtitle_items(*args, **kwargs):
         assert kwargs["review_memory"]["recent_subtitles_count"] == 3
-        assert kwargs["allow_llm"] is False
+        assert kwargs["allow_llm"] is True
         return 1
 
     monkeypatch.setattr(steps_mod, "build_subtitle_review_memory", fake_build_subtitle_review_memory)
@@ -297,9 +308,9 @@ async def test_run_ai_director_generates_plan_for_enabled_job(db_engine, monkeyp
         return {
             "opening_hook": "这条内容最该先讲清楚的结论，我先替你拎出来。",
             "bridge_line": "这里应该补一层背景说明。",
-            "voice_provider": "edge",
+            "voice_provider": "indextts2",
             "voiceover_segments": [{"segment_id": "director_hook", "rewritten_text": "新钩子"}],
-            "dubbing_request": {"provider": "edge"},
+            "dubbing_request": {"provider": "indextts2"},
         }
 
     monkeypatch.setattr(steps_mod, "build_ai_director_plan", fake_build_ai_director_plan)
@@ -312,7 +323,7 @@ async def test_run_ai_director_generates_plan_for_enabled_job(db_engine, monkeyp
     async with factory() as session:
         artifact = await _load_latest_optional_artifact(session, job_id=job_id, artifact_types=("ai_director_plan",))
         assert artifact is not None
-        assert artifact.data_json["voice_provider"] == "edge"
+        assert artifact.data_json["voice_provider"] == "indextts2"
 
 
 @pytest.mark.asyncio
@@ -379,10 +390,10 @@ async def test_run_avatar_commentary_generates_plan_for_enabled_job(db_engine, m
 
     def fake_build_avatar_commentary_plan(**kwargs):
         return {
-            "provider": "mock",
+            "provider": "heygem",
             "layout_template": "picture_in_picture_right",
             "segments": [{"segment_id": "avatar_1", "script": "我先替你抓重点。"}],
-            "render_request": {"provider": "mock"},
+            "render_request": {"provider": "heygem"},
         }
 
     monkeypatch.setattr(steps_mod, "build_avatar_commentary_plan", fake_build_avatar_commentary_plan)
@@ -396,6 +407,338 @@ async def test_run_avatar_commentary_generates_plan_for_enabled_job(db_engine, m
         artifact = await _load_latest_optional_artifact(session, job_id=job_id, artifact_types=("avatar_commentary_plan",))
         assert artifact is not None
         assert artifact.data_json["layout_template"] == "picture_in_picture_right"
+
+
+@pytest.mark.asyncio
+async def test_run_avatar_commentary_segmented_passthrough_renders_only_once(db_engine, monkeypatch, tmp_path: Path):
+    import roughcut.pipeline.steps as steps_mod
+
+    factory = async_sessionmaker(db_engine, expire_on_commit=False)
+    job_id = uuid.uuid4()
+    audio_source = tmp_path / "source.wav"
+    audio_source.write_bytes(b"wav")
+    provider_calls: list[dict] = []
+
+    async with factory() as session:
+        session.add(
+            Job(
+                id=job_id,
+                source_path="jobs/demo/avatar.mp4",
+                source_name="avatar.mp4",
+                status="processing",
+                language="zh-CN",
+                enhancement_modes=["avatar_commentary"],
+            )
+        )
+        session.add(JobStep(job_id=job_id, step_name="avatar_commentary", status="running"))
+        session.add(
+            Artifact(
+                job_id=job_id,
+                artifact_type="audio_wav",
+                storage_path="jobs/demo/source.wav",
+                data_json={},
+            )
+        )
+        session.add(
+            Artifact(
+                job_id=job_id,
+                artifact_type="content_profile_final",
+                data_json={"summary": "数字人解说测试"},
+            )
+        )
+        session.add(
+            SubtitleItem(
+                job_id=job_id,
+                version=1,
+                item_index=0,
+                start_time=0.0,
+                end_time=2.0,
+                text_raw="测试字幕",
+                text_norm="测试字幕",
+                text_final="测试字幕",
+            )
+        )
+        await session.commit()
+
+    monkeypatch.setattr(steps_mod, "get_session_factory", lambda: factory)
+
+    def fake_build_avatar_commentary_plan(**kwargs):
+        return {
+            "provider": "heygem",
+            "mode": "segmented_audio_passthrough",
+            "layout_template": "picture_in_picture_right",
+            "segments": [
+                {
+                    "segment_id": "avatar_seg_001",
+                    "script": "测试字幕",
+                    "start_time": 0.0,
+                    "end_time": 2.0,
+                    "duration_sec": 2.0,
+                    "purpose": "commentary",
+                }
+            ],
+            "render_request": {"provider": "heygem"},
+        }
+
+    class FakeStorage:
+        async def async_download_file(self, storage_path, local_path):
+            Path(local_path).write_bytes(audio_source.read_bytes())
+
+    async def fake_extract_audio_clip(source_audio_path, clip_path, start_time, end_time):
+        Path(clip_path).write_bytes(b"clip")
+
+    def fake_select_default_avatar_profile():
+        return {"id": "profile-1", "display_name": "测试数字人"}
+
+    def fake_pick_avatar_profile_speaking_video_path(profile):
+        presenter_path = tmp_path / "presenter.mp4"
+        presenter_path.write_bytes(b"video")
+        return presenter_path
+
+    class FakeAvatarProvider:
+        def execute_render(self, *, job_id, request):
+            provider_calls.append(request)
+            return {
+                "provider": "heygem",
+                "status": "success",
+                "segments": [
+                    {
+                        "segment_id": "avatar_seg_001",
+                        "status": "success",
+                        "result": "/avatar_seg_001.mp4",
+                        "local_result_path": str(tmp_path / "avatar_seg_001.mp4"),
+                    }
+                ],
+            }
+
+    monkeypatch.setattr(steps_mod, "build_avatar_commentary_plan", fake_build_avatar_commentary_plan)
+    monkeypatch.setattr(steps_mod, "get_storage", lambda: FakeStorage())
+    monkeypatch.setattr(steps_mod, "extract_audio_clip", fake_extract_audio_clip)
+    monkeypatch.setattr(steps_mod, "_select_default_avatar_profile", fake_select_default_avatar_profile)
+    monkeypatch.setattr(steps_mod, "_pick_avatar_profile_speaking_video_path", fake_pick_avatar_profile_speaking_video_path)
+    monkeypatch.setattr(steps_mod, "get_avatar_provider", lambda: FakeAvatarProvider())
+
+    result = await run_avatar_commentary(str(job_id))
+
+    assert result["render_status"] == "success"
+    assert len(provider_calls) == 1
+    assert provider_calls[0]["segments"][0]["audio_url"].endswith("avatar_seg_001.wav")
+
+    async with factory() as session:
+        artifact = await _load_latest_optional_artifact(session, job_id=job_id, artifact_types=("avatar_commentary_plan",))
+        assert artifact is not None
+        assert artifact.data_json["render_execution"]["status"] == "success"
+        assert artifact.data_json["segments"][0]["video_status"] == "success"
+        assert artifact.data_json["segments"][0]["video_local_path"].endswith("avatar_seg_001.mp4")
+
+
+@pytest.mark.asyncio
+async def test_overlay_avatar_picture_in_picture_keeps_video_visible_without_corner_mask(tmp_path: Path):
+    import roughcut.pipeline.steps as steps_mod
+
+    base_video = tmp_path / "base.mp4"
+    avatar_video = tmp_path / "avatar.mp4"
+    output_video = tmp_path / "output.mp4"
+
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=black:s=360x640:d=1",
+            "-f",
+            "lavfi",
+            "-i",
+            "anullsrc=r=16000:cl=mono",
+            "-shortest",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            str(base_video),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=red:s=120x160:d=1",
+            "-f",
+            "lavfi",
+            "-i",
+            "anullsrc=r=16000:cl=mono",
+            "-shortest",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            str(avatar_video),
+        ],
+        check=True,
+        capture_output=True,
+    )
+
+    await steps_mod._overlay_avatar_picture_in_picture(
+        base_video_path=base_video,
+        avatar_video_path=avatar_video,
+        output_path=output_video,
+        position="bottom_right",
+        scale=0.28,
+        margin=20,
+        corner_radius=26,
+        border_width=4,
+        border_color="#F4E4B8",
+    )
+
+    frame_path = tmp_path / "frame.png"
+    subprocess.run(
+        ["ffmpeg", "-y", "-i", str(output_video), "-frames:v", "1", str(frame_path)],
+        check=True,
+        capture_output=True,
+    )
+
+    probe = subprocess.run(
+        [
+            "ffmpeg",
+            "-v",
+            "error",
+            "-i",
+            str(frame_path),
+            "-vf",
+            "crop=100:140:240:460,format=rgb24",
+            "-frames:v",
+            "1",
+            "-f",
+            "rawvideo",
+            "-",
+        ],
+        capture_output=True,
+        check=False,
+    )
+
+    assert output_video.exists()
+    assert probe.returncode == 0
+    assert any(channel > 0 for channel in probe.stdout)
+
+
+def _read_png_pixel(path: Path, x: int, y: int) -> tuple[int, int, int]:
+    probe = subprocess.run(
+        [
+            "ffmpeg",
+            "-v",
+            "error",
+            "-i",
+            str(path),
+            "-vf",
+            f"crop=1:1:{x}:{y},format=rgb24",
+            "-frames:v",
+            "1",
+            "-f",
+            "rawvideo",
+            "-",
+        ],
+        capture_output=True,
+        check=True,
+    )
+    pixel = probe.stdout[:3]
+    assert len(pixel) == 3
+    return pixel[0], pixel[1], pixel[2]
+
+
+@pytest.mark.asyncio
+async def test_overlay_avatar_picture_in_picture_applies_rounded_corners_and_border(tmp_path: Path):
+    import roughcut.pipeline.steps as steps_mod
+
+    base_video = tmp_path / "base.mp4"
+    avatar_video = tmp_path / "avatar.mp4"
+    output_video = tmp_path / "output.mp4"
+
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=black:s=360x640:d=1",
+            "-f",
+            "lavfi",
+            "-i",
+            "anullsrc=r=16000:cl=mono",
+            "-shortest",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            str(base_video),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=red:s=120x160:d=1",
+            "-f",
+            "lavfi",
+            "-i",
+            "anullsrc=r=16000:cl=mono",
+            "-shortest",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            str(avatar_video),
+        ],
+        check=True,
+        capture_output=True,
+    )
+
+    await steps_mod._overlay_avatar_picture_in_picture(
+        base_video_path=base_video,
+        avatar_video_path=avatar_video,
+        output_path=output_video,
+        position="bottom_right",
+        scale=0.28,
+        margin=20,
+        corner_radius=26,
+        border_width=4,
+        border_color="#F4E4B8",
+    )
+
+    frame_path = tmp_path / "frame.png"
+    subprocess.run(
+        ["ffmpeg", "-y", "-i", str(output_video), "-frames:v", "1", str(frame_path)],
+        check=True,
+        capture_output=True,
+    )
+
+    masked_corner_pixel = _read_png_pixel(frame_path, 145, 365)
+    border_pixel = _read_png_pixel(frame_path, 158, 378)
+    avatar_pixel = _read_png_pixel(frame_path, 170, 390)
+
+    assert masked_corner_pixel == (0, 0, 0)
+    assert border_pixel != (0, 0, 0)
+    assert avatar_pixel[0] > 150 and avatar_pixel[1] < 80 and avatar_pixel[2] < 80
 
 
 @pytest.mark.asyncio
@@ -504,14 +847,13 @@ def test_select_cover_source_video_prefers_plain_render(tmp_path: Path):
     assert selected == plain
 
 
-def test_select_cover_source_video_falls_back_to_packaged_render(tmp_path: Path):
+def test_select_cover_source_video_requires_plain_render(tmp_path: Path):
     plain = tmp_path / "output_plain.mp4"
     packaged = tmp_path / "output.mp4"
     packaged.write_bytes(b"packaged")
 
-    selected = _select_cover_source_video(plain, packaged)
-
-    assert selected == packaged
+    with pytest.raises(FileNotFoundError, match="Plain render is required for cover extraction"):
+        _select_cover_source_video(plain, packaged)
 
 
 def test_select_preferred_content_profile_artifact_prefers_final_over_newer_working_copy():

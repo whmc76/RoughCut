@@ -1170,27 +1170,30 @@ function PresetPreview({
 
 function PresetMeta({ section, preset }: { section: SectionKind; preset: StylePreset }) {
   const descriptor = SECTION_DESCRIPTORS[section];
-  const labels = {
+  if (section === "copy") {
+    return null;
+  }
+
+  const labelMap: Record<Exclude<SectionKind, "copy">, [string, string, string]> = {
     subtitle: ["字幕形态", "读屏行为", "信息权重"],
     subtitleMotion: ["动效偏好", "节奏方式", "视觉识别"],
     cover: ["封面构图", "标题钩子", "转化目标"],
     title: ["标题层级", "策略联动", "字效强度"],
     effects: ["镜头强化", "节奏方式", "整体取向"],
-    copy: ["文案节奏", "情绪语态", "信息密度"],
-  }[section];
+    avatar: ["出镜形态", "布局重点", "避让关系"],
+  };
 
-  const values = {
+  const valueMap: Record<Exclude<SectionKind, "copy">, [string, string, string]> = {
     subtitle: [preset.badge, preset.summary, preset.sampleFoot],
     subtitleMotion: [preset.badge, descriptor.cue, preset.summary],
     cover: [preset.sampleTop, preset.sampleBottom, preset.summary],
     title: [preset.label, descriptor.cue, preset.badge],
     effects: [preset.label, preset.sampleBottom, preset.sampleFoot],
-    copy: [],
-  }[section];
+    avatar: [preset.label, descriptor.cue, descriptor.angle],
+  };
 
-  if (section === "copy") {
-    return null;
-  }
+  const labels = labelMap[section];
+  const values = valueMap[section];
 
   return (
     <div className="preset-meta-grid">

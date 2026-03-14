@@ -26,6 +26,8 @@ export function GlossaryPage() {
         />
         <GlossaryListPanel
           terms={workspace.glossary.data ?? []}
+          scopeFilter={workspace.scopeFilter}
+          onScopeFilterChange={workspace.setScopeFilter}
           isDeleting={workspace.deleteTerm.isPending}
           onEdit={workspace.startEdit}
           onDelete={(termId) => workspace.deleteTerm.mutate(termId)}

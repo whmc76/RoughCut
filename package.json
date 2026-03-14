@@ -23,8 +23,8 @@
     "lint": "pnpm run lint:frontend && pnpm run lint:backend",
     "lint:frontend": "pnpm --dir frontend typecheck",
     "lint:backend": "uv run ruff check src tests",
-    "docker:up": "docker compose up -d --build",
-    "docker:down": "docker compose down",
+    "docker:up": "docker compose up -d --build --remove-orphans",
+    "docker:down": "docker compose down --remove-orphans",
     "docker:logs": "docker compose logs -f"
   },
   "devDependencies": {

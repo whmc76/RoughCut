@@ -142,3 +142,36 @@ def test_split_merges_short_continuation_even_with_longer_duration():
 
     assert len(entries) == 1
     assert entries[0].text_raw == "然后主体使用了彩雕激光彩雕"
+
+
+def test_split_into_subtitles_drops_zero_duration_and_collapses_repeated_duplicates():
+    words = [
+        {"word": "这些", "start": 0.0, "end": 0.5},
+        {"word": "配置", "start": 0.5, "end": 1.0},
+        {"word": "尽量", "start": 1.0, "end": 1.4},
+        {"word": "这些", "start": 1.42, "end": 1.8},
+        {"word": "配置", "start": 1.8, "end": 2.2},
+        {"word": "尽量", "start": 2.2, "end": 2.6},
+        {"word": "", "start": 2.6, "end": 2.6},
+    ]
+    segs = [_mock_segment(0, 0.0, 2.6, "这些配置尽量这些配置尽量", words=words)]
+
+    entries = split_into_subtitles(segs, max_chars=6, max_duration=1.4)
+
+    assert len(entries) == 1
+    assert entries[0].text_raw == "这些配置尽量"
+    assert entries[0].end > entries[0].start
+
+
+def test_split_into_subtitles_collapses_adjacent_near_duplicates():
+    segs = [
+        _mock_segment(0, 0.0, 0.9, "其实也算一个呼应"),
+        _mock_segment(1, 0.96, 1.9, "其实也算上是一个呼应"),
+    ]
+
+    entries = split_into_subtitles(segs, max_chars=20, max_duration=4.0)
+
+    assert len(entries) == 1
+    assert entries[0].text_raw == "其实也算上是一个呼应"
+    assert entries[0].start == 0.0
+    assert entries[0].end == 1.9

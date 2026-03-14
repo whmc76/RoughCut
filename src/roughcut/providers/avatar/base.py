@@ -21,9 +21,4 @@ class AvatarProvider(ABC):
         request: dict[str, Any],
     ) -> dict[str, Any]:
         """Execute a provider-specific render request."""
-        return {
-            "provider": request.get("provider"),
-            "job_id": job_id,
-            "status": "planning_only",
-            "segments": [],
-        }
+        raise NotImplementedError(f"Avatar provider {request.get('provider')} must implement execute_render()")

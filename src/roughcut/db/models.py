@@ -276,6 +276,8 @@ class GlossaryTerm(Base):
     __tablename__ = "glossary_terms"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID_TYPE, primary_key=True, default=_uuid)
+    scope_type: Mapped[str] = mapped_column(Text, nullable=False, default="global")
+    scope_value: Mapped[str] = mapped_column(Text, nullable=False, default="")
     wrong_forms: Mapped[list[str]] = mapped_column(STRING_LIST_TYPE, nullable=False)
     correct_form: Mapped[str] = mapped_column(Text, nullable=False)
     category: Mapped[str | None] = mapped_column(Text)

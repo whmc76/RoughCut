@@ -80,6 +80,8 @@ const SAMPLE_ROOTS: WatchRoot[] = [
 const SAMPLE_GLOSSARY: GlossaryTerm[] = [
   {
     id: "term_1",
+    scope_type: "global",
+    scope_value: "",
     wrong_forms: ["gpt4"],
     correct_form: "GPT-4",
     category: "model",
@@ -88,6 +90,8 @@ const SAMPLE_GLOSSARY: GlossaryTerm[] = [
   },
   {
     id: "term_2",
+    scope_type: "domain",
+    scope_value: "gear",
     wrong_forms: ["fas"],
     correct_form: "FAS",
     category: "brand",

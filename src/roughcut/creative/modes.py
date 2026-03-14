@@ -82,9 +82,9 @@ _ENHANCEMENT_MODES: Final[dict[str, dict[str, object]]] = {
         "pipeline_outline": [
             "识别原台词结构、镜头节奏和视频题材",
             "生成改写建议、补充信息点和情绪桥段",
-            "用 Edge TTS 或语音克隆完成重配音并回贴时间线",
+            "用 IndexTTS2、RunningHub 或其他真实语音克隆服务完成重配音并回贴时间线",
         ],
-        "providers": ["Edge TTS", "RunningHub API", "其他语音克隆 API"],
+        "providers": ["IndexTTS2", "RunningHub API", "其他语音克隆 API"],
         "default_delivery": "先完成模式建模、任务挂载和后续提示词上下文注入",
     },
 }
@@ -157,7 +157,7 @@ def build_job_creative_profile(*, workflow_mode: str, enhancement_modes: list[st
         "implementation_notes": [
             "长文本转视频当前只保留方案与接口占位，不进入现有已有视频主流程。",
             "数字人解说、智能剪辑特效与 AI 导演当前作为通用增强能力挂载到标准成片任务。",
-            "TTS 方案优先支持 Edge TTS，后续再扩展到语音克隆 API。",
+            "TTS 方案优先支持 IndexTTS2 与 RunningHub 这类真实服务。",
             "素材库策略要求走较新素材，不使用老旧缓存素材。",
         ],
     }

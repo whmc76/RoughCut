@@ -24,6 +24,10 @@ def get_transcription_provider() -> TranscriptionProvider:
         from roughcut.providers.transcription.openai_whisper import OpenAIWhisperProvider
 
         instance = OpenAIWhisperProvider()
+    elif provider == "funasr":
+        from roughcut.providers.transcription.funasr_provider import FunASRProvider
+
+        instance = FunASRProvider(model_name=model)
     elif provider == "local_whisper":
         from roughcut.providers.transcription.local_whisper import LocalWhisperProvider
 
@@ -65,14 +69,12 @@ def get_avatar_provider() -> AvatarProvider:
     if cached is not None:
         return cached
 
-    if provider == "mock":
-        from roughcut.providers.avatar.mock import MockAvatarProvider
-
-        instance = MockAvatarProvider()
-    elif provider == "heygem":
+    if provider == "heygem":
         from roughcut.providers.avatar.heygem import HeyGemAvatarProvider
 
         instance = HeyGemAvatarProvider()
+    elif provider == "mock":
+        raise ValueError("Mock avatar provider is disabled in runtime. Use HeyGem for real jobs.")
     else:
         raise ValueError(f"Unknown avatar provider: {provider}")
 
@@ -87,10 +89,10 @@ def get_voice_provider() -> VoiceProvider:
     if cached is not None:
         return cached
 
-    if provider == "edge":
-        from roughcut.providers.voice.edge import EdgeTtsVoiceProvider
+    if provider == "indextts2":
+        from roughcut.providers.voice.indextts2 import IndexTTS2VoiceProvider
 
-        instance = EdgeTtsVoiceProvider()
+        instance = IndexTTS2VoiceProvider()
     elif provider == "runninghub":
         from roughcut.providers.voice.runninghub import RunningHubVoiceProvider
 

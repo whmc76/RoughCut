@@ -27,8 +27,9 @@ def test_get_config_exposes_extended_provider_fields(tmp_path, monkeypatch):
     object.__setattr__(settings, "avatar_overlay_scale", 0.24)
     object.__setattr__(settings, "anthropic_base_url", "https://api.anthropic.com")
     object.__setattr__(settings, "minimax_base_url", "https://api.minimaxi.com/v1")
-    object.__setattr__(settings, "voice_provider", "edge")
-    object.__setattr__(settings, "voice_clone_api_base_url", "https://www.runninghub.cn")
+    object.__setattr__(settings, "minimax_api_host", "https://api.minimaxi.com")
+    object.__setattr__(settings, "voice_provider", "indextts2")
+    object.__setattr__(settings, "voice_clone_api_base_url", "http://127.0.0.1:49204")
     object.__setattr__(settings, "voice_clone_voice_id", "voice_demo")
     object.__setattr__(settings, "director_rewrite_strength", 0.55)
     object.__setattr__(settings, "local_reasoning_model", "qwen3.5:9b")
@@ -60,8 +61,9 @@ def test_get_config_exposes_extended_provider_fields(tmp_path, monkeypatch):
     assert cfg.avatar_overlay_scale == 0.24
     assert cfg.anthropic_base_url == "https://api.anthropic.com"
     assert cfg.minimax_base_url == "https://api.minimaxi.com/v1"
-    assert cfg.voice_provider == "edge"
-    assert cfg.voice_clone_api_base_url == "https://www.runninghub.cn"
+    assert cfg.minimax_api_host == "https://api.minimaxi.com"
+    assert cfg.voice_provider == "indextts2"
+    assert cfg.voice_clone_api_base_url == "http://127.0.0.1:49204"
     assert cfg.voice_clone_voice_id == "voice_demo"
     assert cfg.director_rewrite_strength == 0.55
     assert cfg.local_reasoning_model == "qwen3.5:9b"
@@ -91,7 +93,7 @@ def test_get_config_options_exposes_transcription_model_lists():
     assert options.workflow_modes[0]["value"] == "standard_edit"
     assert any(item["value"] == "avatar_commentary" for item in options.enhancement_modes)
     assert any(item["value"] == "heygem" for item in options.avatar_providers)
-    assert any(item["value"] == "edge" for item in options.voice_providers)
+    assert any(item["value"] == "indextts2" for item in options.voice_providers)
     assert any(item["key"] == "long_text_to_video" and item["status"] == "planned" for item in options.creative_mode_catalog["workflow_modes"])
     assert any(item["key"] == "ai_director" and item["status"] == "active" for item in options.creative_mode_catalog["enhancement_modes"])
     assert "local_whisper" in options.transcription_models
@@ -161,3 +163,22 @@ def test_patch_config_accepts_creative_provider_fields(tmp_path, monkeypatch):
     assert cfg.director_rewrite_strength == 0.88
     assert cfg.default_job_workflow_mode == "standard_edit"
     assert cfg.default_job_enhancement_modes == ["avatar_commentary", "ai_director"]
+
+
+def test_patch_config_accepts_indextts2_voice_provider(tmp_path, monkeypatch):
+    import roughcut.api.config as config_api
+    import roughcut.config as config_mod
+
+    monkeypatch.setattr(config_api, "_CONFIG_FILE", tmp_path / "roughcut_config.json")
+    monkeypatch.setattr(config_mod, "_OVERRIDES_FILE", tmp_path / "roughcut_config.json")
+    config_mod._settings = None
+
+    cfg = patch_config(
+        ConfigPatch(
+            voice_provider="indextts2",
+            voice_clone_api_base_url="http://127.0.0.1:49204",
+        )
+    )
+
+    assert cfg.voice_provider == "indextts2"
+    assert cfg.voice_clone_api_base_url == "http://127.0.0.1:49204"

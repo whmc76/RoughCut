@@ -8,17 +8,34 @@ import { formatDate } from "../../utils";
 
 type GlossaryListPanelProps = {
   terms: GlossaryTerm[];
+  scopeFilter: string;
+  onScopeFilterChange: (value: string) => void;
   isDeleting: boolean;
   onEdit: (term: GlossaryTerm) => void;
   onDelete: (termId: string) => void;
 };
 
-export function GlossaryListPanel({ terms, isDeleting, onEdit, onDelete }: GlossaryListPanelProps) {
+export function GlossaryListPanel({ terms, scopeFilter, onScopeFilterChange, isDeleting, onEdit, onDelete }: GlossaryListPanelProps) {
   const { t } = useI18n();
 
   return (
     <section className="panel">
-      <PanelHeader title={t("glossary.list.title")} description={`${terms.length} ${t("glossary.list.count")}`} />
+      <PanelHeader
+        title={t("glossary.list.title")}
+        description={`${terms.length} ${t("glossary.list.count")}`}
+        actions={
+          <select className="input" value={scopeFilter} onChange={(event) => onScopeFilterChange(event.target.value)}>
+            <option value="all">{t("glossary.list.scope.all")}</option>
+            <option value="global">{t("glossary.list.scope.global")}</option>
+            <option value="domain:gear">{t("glossary.list.scope.domainGear")}</option>
+            <option value="domain:tech">{t("glossary.list.scope.domainTech")}</option>
+            <option value="domain:ai">{t("glossary.list.scope.domainAi")}</option>
+            <option value="domain:coding">{t("glossary.list.scope.domainCoding")}</option>
+            <option value="channel_profile:edc_tactical">{t("glossary.list.scope.channelEdc")}</option>
+            <option value="channel_profile:screen_tutorial">{t("glossary.list.scope.channelScreen")}</option>
+          </select>
+        }
+      />
       <div className="list-stack">
         {terms.map((term) => (
           <ListCard key={term.id}>
@@ -26,7 +43,7 @@ export function GlossaryListPanel({ terms, isDeleting, onEdit, onDelete }: Gloss
               <div className="row-title">{term.correct_form}</div>
               <div className="muted">{term.wrong_forms.join(" / ")}</div>
               <div className="muted compact-top">
-                {term.category || t("glossary.list.uncategorized")} · {formatDate(term.created_at)}
+                {term.scope_type}:{term.scope_value || "global"} · {term.category || t("glossary.list.uncategorized")} · {formatDate(term.created_at)}
               </div>
             </div>
             <ListActions>

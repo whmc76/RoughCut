@@ -13,6 +13,7 @@ from roughcut.providers.multimodal import complete_with_images
 from roughcut.providers.reasoning.base import Message, extract_json_text
 from roughcut.review.content_profile_memory import summarize_content_profile_user_memory
 from roughcut.review.subtitle_memory import (
+    _extract_compound_components,
     apply_domain_term_corrections,
     summarize_subtitle_review_memory_for_polish,
 )
@@ -50,12 +51,26 @@ def build_cover_title(profile: dict[str, Any], preset: WorkflowPreset) -> dict[s
     brand = _clean_line(profile.get("subject_brand") or profile.get("brand") or "")
     model = _clean_line(profile.get("subject_model") or profile.get("model") or "")
     subject_type = _clean_line(profile.get("subject_type") or "")
-    theme = _clean_line(profile.get("video_theme") or "")
+    raw_theme = str(profile.get("video_theme") or "").strip()
+    theme = _clean_line(raw_theme)
     hook = _clean_line(profile.get("hook_line") or "")
     visible_text = str(profile.get("visible_text") or "").strip()
     copy_style = str(profile.get("copy_style") or "attention_grabbing").strip() or "attention_grabbing"
+    anchor = _extract_cover_entity_anchor(
+        brand=brand,
+        model=model,
+        subject_type=subject_type,
+        theme=raw_theme,
+        visible_text=visible_text,
+    )
 
-    top = _pick_cover_top(brand=brand, subject_type=subject_type, visible_text=visible_text, preset=preset)
+    top = _pick_cover_top(
+        brand=brand,
+        subject_type=subject_type,
+        visible_text=visible_text,
+        preset=preset,
+        anchor=anchor,
+    )
     main = _pick_cover_main(
         brand=brand,
         model=model,
@@ -63,6 +78,7 @@ def build_cover_title(profile: dict[str, Any], preset: WorkflowPreset) -> dict[s
         theme=theme,
         visible_text=visible_text,
         preset=preset,
+        anchor=anchor,
     )
 
     hook = _build_cover_hook(
@@ -75,11 +91,20 @@ def build_cover_title(profile: dict[str, Any], preset: WorkflowPreset) -> dict[s
         preset=preset,
     )
 
-    return {
+    title = {
         "top": top[:14],
         "main": main[:18],
         "bottom": hook[:18],
     }
+    visible_brand_hint = _compact_brand_name(brand, visible_text=visible_text)
+    return _dedupe_cover_title_lines(
+        title,
+        preserve_top=bool(
+            brand
+            or (anchor or {}).get("brand")
+            or _is_brand_like_cover_label(visible_brand_hint)
+        ),
+    )
 
 
 def assess_content_profile_automation(
@@ -458,6 +483,11 @@ async def infer_content_profile(
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
             frame_paths = _extract_reference_frames(source_path, Path(tmpdir), count=3)
+            visual_hints = await _infer_visual_profile_hints(frame_paths)
+            if visual_hints:
+                initial_profile["visual_hints"] = dict(visual_hints)
+            _merge_specific_profile_hints(initial_profile, visual_hints)
+            _apply_visual_subject_guard(initial_profile)
             if frame_paths:
                 prompt = (
                     "你在分析一条中文短视频。视频可能是开箱评测、录屏教学、vlog、口播观点、游戏高光或美食探店。"
@@ -474,6 +504,7 @@ async def infer_content_profile(
                     "\n要求：preset_name 只能从 unboxing_default、unboxing_limited、unboxing_upgrade、edc_tactical、screen_tutorial、vlog_daily、talking_head_commentary、gameplay_highlight、food_explore 中选择。"
                     "\n如果文件名像时间戳、相机命名或流水号，不要把它当成型号。"
                     "\nsearch_queries 提供 2-3 个适合联网搜索验证的查询词。"
+                    f"\n视觉粗分类（优先级高于脏字幕和错误搜索）：{json.dumps(visual_hints, ensure_ascii=False)}"
                     f"\n用户历史偏好（仅作辅助参考，不能压过当前字幕和画面）：\n{memory_prompt or '无'}"
                     f"\n源文件名：{source_name}\n字幕节选：\n{transcript_excerpt}"
                 )
@@ -482,6 +513,8 @@ async def infer_content_profile(
                 initial_profile.update({k: v for k, v in candidate.items() if v})
                 _merge_specific_profile_hints(initial_profile, heuristic_profile)
                 _merge_specific_profile_hints(initial_profile, memory_profile)
+                _merge_specific_profile_hints(initial_profile, visual_hints)
+                _apply_visual_subject_guard(initial_profile)
     except Exception:
         pass
 
@@ -498,6 +531,7 @@ async def infer_content_profile(
             "\n输出 JSON："
             '{"subject_brand":"","subject_model":"","subject_type":"","video_theme":"",'
             '"preset_name":"","hook_line":"","visible_text":"","engagement_question":"","search_queries":[]}'
+            f"\n视觉粗分类（优先级高于脏字幕和错误搜索）：{json.dumps(initial_profile.get('visual_hints') or {}, ensure_ascii=False)}"
             f"\n用户历史偏好（仅作辅助参考，不能压过当前字幕和画面）：\n{memory_prompt or '无'}"
             f"\n已有判断：{json.dumps(initial_profile, ensure_ascii=False)}"
             f"\n源文件名：{source_name}\n字幕节选：\n{transcript_excerpt}"
@@ -515,6 +549,7 @@ async def infer_content_profile(
         initial_profile.update({k: v for k, v in candidate.items() if v})
         _merge_specific_profile_hints(initial_profile, heuristic_profile)
         _merge_specific_profile_hints(initial_profile, memory_profile)
+        _apply_visual_subject_guard(initial_profile)
     except Exception:
         pass
 
@@ -537,6 +572,9 @@ async def apply_content_profile_feedback(
 ) -> dict[str, Any]:
     merged = dict(draft_profile or {})
     merged["user_feedback"] = dict(user_feedback or {})
+    if not any(value for value in (user_feedback or {}).values()):
+        merged["review_mode"] = "manual_confirmed"
+        return merged
     for key in (
         "subject_brand",
         "subject_model",
@@ -679,6 +717,10 @@ async def enrich_content_profile(
 
     if include_research:
         evidence = await _search_evidence(enriched, source_name, transcript_excerpt=transcript_excerpt)
+        evidence = _filter_evidence_by_visual_subject(
+            evidence,
+            visual_subject_type=str(((enriched.get("visual_hints") or {}).get("subject_type") or "")),
+        )
         if evidence:
             enriched["evidence"] = evidence
             try:
@@ -697,6 +739,7 @@ async def enrich_content_profile(
                     '{"subject_brand":"","subject_model":"","subject_type":"","video_theme":"",'
                     '"hook_line":"","visible_text":"","summary":"","engagement_question":"",'
                     '"cover_title":{"top":"","main":"","bottom":""}}'
+                    f"\n视觉粗分类（优先级高于脏字幕和错误搜索）：{json.dumps(enriched.get('visual_hints') or {}, ensure_ascii=False)}"
                     f"\n已有判断：{json.dumps(enriched, ensure_ascii=False)}"
                     f"\n用户历史偏好（仅作辅助参考，不能压过当前字幕和画面）：\n{memory_prompt or '无'}"
                     f"\n字幕/画面线索：{transcript_excerpt}"
@@ -721,10 +764,12 @@ async def enrich_content_profile(
                     source_name=source_name,
                     memory_hints=memory_hints,
                 )
+                _apply_visual_subject_guard(enriched)
             except Exception:
                 pass
 
     _apply_confirmed_profile_fields(enriched, confirmed_fields)
+    _apply_visual_subject_guard(enriched)
 
     if _is_generic_subject_type(str(enriched.get("subject_type") or "")):
         hinted = memory_hints or context_hints
@@ -762,6 +807,86 @@ async def enrich_content_profile(
     ):
         enriched["cover_title"] = build_cover_title(enriched, preset)
     return enriched
+
+
+async def _infer_visual_profile_hints(frame_paths: list[Path]) -> dict[str, Any]:
+    if not frame_paths:
+        return {}
+    try:
+        prompt = (
+            "只看这组视频画面，不参考字幕。"
+            "请判断画面里被重点展示或被手持操作的主体属于哪一类。"
+            "优先在这些类型中选择：EDC折刀、多功能工具钳、智能灯具、软件界面、人物口播、食品饮品、游戏画面、其他产品。"
+            "如果画面里能直接看到型号、品牌字样，也提取出来。"
+            "不要因为背景海报、桌垫、摆件或贴纸误判主体。"
+            "输出 JSON："
+            '{"subject_type":"","visible_text":"","reason":""}'
+        )
+        content = await complete_with_images(prompt, frame_paths, max_tokens=220, json_mode=True)
+        data = json.loads(extract_json_text(content))
+        subject_type = str(data.get("subject_type") or "").strip()
+        visible_text = str(data.get("visible_text") or "").strip()
+        if not subject_type and not visible_text:
+            return {}
+        return {
+            "subject_type": subject_type,
+            "visible_text": visible_text[:24],
+            "reason": str(data.get("reason") or "").strip(),
+        }
+    except Exception:
+        return {}
+
+
+def _subject_type_family(subject_type: str) -> str:
+    normalized = _clean_line(subject_type)
+    if not normalized:
+        return ""
+    if any(token in normalized for token in ("折刀", "刀具", "刀", "工具钳", "钳", "EDC", "战术")):
+        return "edc"
+    if any(token in normalized for token in ("灯具", "台灯", "灯", "照明")):
+        return "lighting"
+    if any(token in normalized for token in ("软件", "工作流", "界面", "AI", "智能体", "画布")):
+        return "software"
+    if any(token in normalized for token in ("口播", "解说", "人物")):
+        return "talking_head"
+    return "product"
+
+
+def _apply_visual_subject_guard(profile: dict[str, Any]) -> None:
+    visual_hints = profile.get("visual_hints") or {}
+    visual_subject_type = str(visual_hints.get("subject_type") or "").strip()
+    if not visual_subject_type:
+        return
+    current_subject_type = str(profile.get("subject_type") or "").strip()
+    visual_family = _subject_type_family(visual_subject_type)
+    current_family = _subject_type_family(current_subject_type)
+    if not current_subject_type or _is_generic_subject_type(current_subject_type):
+        profile["subject_type"] = visual_subject_type
+    elif visual_family and current_family and visual_family != current_family:
+        profile["subject_type"] = visual_subject_type
+    visible_text = str(visual_hints.get("visible_text") or "").strip()
+    if visible_text and not profile.get("visible_text"):
+        profile["visible_text"] = visible_text
+
+
+def _filter_evidence_by_visual_subject(
+    evidence: list[dict[str, str]],
+    *,
+    visual_subject_type: str,
+) -> list[dict[str, str]]:
+    visual_family = _subject_type_family(visual_subject_type)
+    if not evidence or not visual_family:
+        return evidence
+    filtered: list[dict[str, str]] = []
+    for item in evidence:
+        text = " ".join(
+            str(item.get(key) or "")
+            for key in ("query", "title", "snippet")
+        )
+        family = _subject_type_family(text)
+        if not family or family == "product" or family == visual_family:
+            filtered.append(item)
+    return filtered
 
 
 async def polish_subtitle_items(
@@ -877,14 +1002,37 @@ async def polish_subtitle_items(
                             review_memory=review_memory,
                             content_profile=content_profile,
                         ):
-                            polished = apply_glossary_terms(polished, glossary_terms)
-                            polished = apply_domain_term_corrections(polished, review_memory)
+                            polished = _fallback_polish_text(
+                                polished,
+                                glossary_terms=glossary_terms,
+                                review_memory=review_memory,
+                                prev_text=(
+                                    indexed_items[current_position - 1].text_final
+                                    or indexed_items[current_position - 1].text_norm
+                                    or indexed_items[current_position - 1].text_raw
+                                ) if current_position > 0 else "",
+                                next_text=(
+                                    indexed_items[current_position + 1].text_final
+                                    or indexed_items[current_position + 1].text_norm
+                                    or indexed_items[current_position + 1].text_raw
+                                ) if current_position + 1 < len(indexed_items) else "",
+                            )
                             item.text_final = polished
                         else:
                             item.text_final = _fallback_polish_text(
                                 original,
                                 glossary_terms=glossary_terms,
                                 review_memory=review_memory,
+                                prev_text=(
+                                    indexed_items[current_position - 1].text_final
+                                    or indexed_items[current_position - 1].text_norm
+                                    or indexed_items[current_position - 1].text_raw
+                                ) if current_position > 0 else "",
+                                next_text=(
+                                    indexed_items[current_position + 1].text_final
+                                    or indexed_items[current_position + 1].text_norm
+                                    or indexed_items[current_position + 1].text_raw
+                                ) if current_position + 1 < len(indexed_items) else "",
                             )
                         polished_count += 1
                         continue
@@ -892,17 +1040,37 @@ async def polish_subtitle_items(
                         item.text_norm or item.text_raw,
                         glossary_terms=glossary_terms,
                         review_memory=review_memory,
+                        prev_text=(
+                            indexed_items[chunk_positions.get(item.item_index, start) - 1].text_final
+                            or indexed_items[chunk_positions.get(item.item_index, start) - 1].text_norm
+                            or indexed_items[chunk_positions.get(item.item_index, start) - 1].text_raw
+                        ) if chunk_positions.get(item.item_index, start) > 0 else "",
+                        next_text=(
+                            indexed_items[chunk_positions.get(item.item_index, start) + 1].text_final
+                            or indexed_items[chunk_positions.get(item.item_index, start) + 1].text_norm
+                            or indexed_items[chunk_positions.get(item.item_index, start) + 1].text_raw
+                        ) if chunk_positions.get(item.item_index, start) + 1 < len(indexed_items) else "",
                     )
                     polished_count += 1
                 continue
             except Exception:
                 pass
 
-        for item in chunk:
+        for position, item in enumerate(chunk, start=start):
             item.text_final = _fallback_polish_text(
                 item.text_norm or item.text_raw,
                 glossary_terms=glossary_terms,
                 review_memory=review_memory,
+                prev_text=(
+                    indexed_items[position - 1].text_final
+                    or indexed_items[position - 1].text_norm
+                    or indexed_items[position - 1].text_raw
+                ) if position > 0 else "",
+                next_text=(
+                    indexed_items[position + 1].text_final
+                    or indexed_items[position + 1].text_norm
+                    or indexed_items[position + 1].text_raw
+                ) if position + 1 < len(indexed_items) else "",
             )
             polished_count += 1
 
@@ -978,8 +1146,14 @@ def _build_search_queries(
             if subject_type:
                 queries.append(f"{brand} {term} {subject_type}")
     elif model:
-        queries.append(model)
-        queries.append(f"{model} 开箱")
+        if subject_type and not _is_generic_subject_type(subject_type):
+            queries.append(f"{model} {subject_type}")
+            compact_subject = _subject_type_search_anchor(subject_type)
+            if compact_subject:
+                queries.append(f"{model} {compact_subject}")
+        else:
+            queries.append(model)
+            queries.append(f"{model} 开箱")
         if subject_type:
             queries.append(f"{model} {subject_type}")
     if brand and subject_type:
@@ -1392,6 +1566,17 @@ def _build_seeded_search_queries(
     return deduped
 
 
+def _subject_type_search_anchor(subject_type: str) -> str:
+    normalized = _clean_line(subject_type)
+    if any(token in normalized for token in ("EDC", "折刀")):
+        return "折刀"
+    if "工具钳" in normalized:
+        return "工具钳"
+    if any(token in normalized for token in ("潮玩", "手办", "盲盒")):
+        return "潮玩"
+    return normalized[:8]
+
+
 def _memory_value_matches_transcript(value: str, transcript: str, normalized: str) -> bool:
     if not value:
         return False
@@ -1706,8 +1891,21 @@ def _fallback_polish_text(
     *,
     glossary_terms: list[dict[str, Any]],
     review_memory: dict[str, Any] | None = None,
+    prev_text: str = "",
+    next_text: str = "",
 ) -> str:
-    polished = apply_glossary_terms(text.strip(), glossary_terms)
+    polished = _apply_learned_phrase_preferences(text.strip(), review_memory)
+    polished = _repair_common_intro_slot(polished)
+    polished = _repair_collapsed_predicate_clause(polished, review_memory=review_memory)
+    polished = _apply_contextual_phrase_rewrite(
+        polished,
+        review_memory=review_memory,
+        prev_text=prev_text,
+        next_text=next_text,
+    )
+    polished = _dedupe_repeated_domain_terms(polished, review_memory=review_memory)
+    polished = _prune_low_signal_clauses(polished, review_memory=review_memory)
+    polished = apply_glossary_terms(polished, glossary_terms)
     polished = apply_domain_term_corrections(polished, review_memory)
     polished = re.sub(r"(。){2,}", "。", polished)
     polished = re.sub(r"(，){2,}", "，", polished)
@@ -1720,6 +1918,209 @@ def _cleanup_polished_text(text: str) -> str:
     text = re.sub(r"[!！]{2,}", "！", text)
     text = re.sub(r"[?？]{2,}", "？", text)
     return text
+
+
+def _apply_learned_phrase_preferences(text: str, review_memory: dict[str, Any] | None) -> str:
+    result = str(text or "").strip()
+    if not result:
+        return result
+    phrases = [
+        str(item.get("phrase") or "").strip()
+        for item in (review_memory or {}).get("phrase_preferences") or []
+        if item.get("phrase")
+    ]
+    for phrase in phrases:
+        result = apply_domain_term_corrections(
+            result,
+            {
+                "terms": [{"term": phrase}],
+                "aliases": [],
+                "style_examples": [],
+            },
+        )
+    return result
+
+
+def _repair_common_intro_slot(text: str) -> str:
+    result = str(text or "").strip()
+    if not result:
+        return result
+    match = re.match(r"^这[\u4e00-\u9fff]{1,4}在(?P<rest>.+给大家(?:单独)?看[下看]?)", result)
+    if match and "一期" not in result[:6]:
+        return f"这一期在{match.group('rest')}"
+    return result
+
+
+def _repair_collapsed_predicate_clause(text: str, *, review_memory: dict[str, Any] | None) -> str:
+    result = str(text or "").strip()
+    if not result:
+        return result
+    match = re.match(r"^(?P<subject>[\u4e00-\u9fffA-Za-z0-9-]{2,8})(?P<predicate>会更加|会更)(?P<tail>[\u4e00-\u9fff]{1,4})(?P<suffix>[。！？，,]?.*)$", result)
+    if not match:
+        return result
+    tail = match.group("tail")
+    if _clause_has_learned_signal(tail, review_memory=review_memory):
+        return result
+    if any(token in tail for token in ("镜面", "顶配", "次顶配", "折刀", "钢马", "MT-33", "LEATHERMAN", "NOC", "REATE")):
+        return result
+    if len(tail) <= 4:
+        return f"{match.group('subject')}会更好{match.group('suffix')}"
+    return result
+
+
+def _apply_contextual_phrase_rewrite(
+    text: str,
+    *,
+    review_memory: dict[str, Any] | None,
+    prev_text: str,
+    next_text: str,
+) -> str:
+    result = str(text or "").strip()
+    if not result:
+        return result
+    phrase_items = list((review_memory or {}).get("phrase_preferences") or [])
+    if not phrase_items:
+        return result
+
+    slot_match = re.match(r"^(?P<prefix>.*?(?:还是这个|先看这个|先看这把|先看这款))(?P<body>.*?)(?P<suffix>[吧啊呢了。！？，,]*)$", result)
+    if not slot_match:
+        return result
+
+    body = slot_match.group("body").strip("，,。！？!?. ")
+    if not body or len(body) > 12:
+        return result
+
+    for item in phrase_items:
+        phrase = str(item.get("phrase") or "").strip()
+        if not phrase or len(phrase) < 4 or len(phrase) > 18:
+            continue
+        if _phrase_can_fill_sentence_slot(phrase, body, prev_text=prev_text, next_text=next_text):
+            prefix = slot_match.group("prefix")
+            suffix = slot_match.group("suffix") or ""
+            return f"{prefix}{phrase}{suffix or '。'}"
+    return result
+
+
+def _prune_low_signal_clauses(text: str, *, review_memory: dict[str, Any] | None) -> str:
+    result = str(text or "").strip()
+    if not result:
+        return result
+    if ",我是来看" in result:
+        result = result.split(",我是来看", 1)[0]
+    if "，我是来看" in result:
+        result = result.split("，我是来看", 1)[0]
+    clauses = [part.strip() for part in re.split(r"([，。！？!?])", result) if part.strip()]
+    if len(clauses) <= 1:
+        return result
+
+    rebuilt: list[str] = []
+    current = ""
+    for part in clauses:
+        if re.fullmatch(r"[，。！？!?]", part):
+            if current:
+                rebuilt.append(current + part)
+                current = ""
+            continue
+        current = part
+    if current:
+        rebuilt.append(current)
+
+    kept = [clause for clause in rebuilt if not _looks_like_low_signal_clause(clause, review_memory=review_memory)]
+    if not kept:
+        kept = [rebuilt[0]]
+    pruned = "".join(kept)
+    if ",我是来看" in pruned:
+        pruned = pruned.split(",我是来看", 1)[0]
+    if "，我是来看" in pruned:
+        pruned = pruned.split("，我是来看", 1)[0]
+    pruned = re.sub(r"[，,](?:其实|也算|我是来看|我来看|见)[^。！？!?]*$", "", pruned)
+    pruned = re.sub(r"[，,](?:其实|也算|我是来看|我来看|见)[^，。！？!?]*", "", pruned)
+    pruned = re.sub(r"[，,](?:这就是|就是这个|就是这样)[^，。！？!?]*", "", pruned)
+    pruned = re.sub(r"(?:^|[。！？!?])(?:其实|也算|见)[^。！？!?]*[。！？!?]?", lambda m: "" if m.start() > 0 else m.group(0), pruned)
+    return pruned or "".join(kept)
+
+
+def _phrase_can_fill_sentence_slot(phrase: str, body: str, *, prev_text: str, next_text: str) -> bool:
+    components = _extract_compound_components(phrase)
+    if len(components) < 2:
+        return False
+    joined_context = f"{prev_text} {body} {next_text}"
+    hits = 0
+    for component in components:
+        if component in joined_context:
+            hits += 1
+            continue
+        normalized = apply_domain_term_corrections(
+            body,
+            {
+                "terms": [{"term": component}],
+                "aliases": [],
+                "style_examples": [],
+            },
+        )
+        if component in normalized:
+            hits += 1
+    return hits >= 1
+
+
+def _looks_like_low_signal_clause(text: str, *, review_memory: dict[str, Any] | None) -> bool:
+    clause = _cleanup_polished_text(text)
+    if not clause:
+        return True
+    if len(clause) <= 1:
+        return True
+    if clause in {"见。", "见", "这个。", "这个", "一期。", "一期"}:
+        return True
+    if clause.count("其实") >= 1 and len(clause) <= 10:
+        return True
+    if clause.count("也算") >= 1 and len(clause) <= 12:
+        return True
+    if _is_repetitive_fragment(clause):
+        return True
+    if len(clause) <= 8 and not _clause_has_learned_signal(clause, review_memory=review_memory):
+        filler_hits = sum(1 for token in ("这个", "那个", "其实", "就是", "然后", "一个", "一期", "一下", "也算", "来看") if token in clause)
+        if filler_hits >= 2:
+            return True
+    return False
+
+
+def _is_repetitive_fragment(text: str) -> bool:
+    compact = _cleanup_polished_text(text)
+    if len(compact) < 6:
+        return False
+    tokens = [token for token in re.findall(r"[\u4e00-\u9fff]{1,4}|[A-Za-z0-9-]{2,}", compact) if token]
+    if len(tokens) < 3:
+        return False
+    unique = set(tokens)
+    return len(unique) <= max(1, len(tokens) // 2)
+
+
+def _clause_has_learned_signal(text: str, *, review_memory: dict[str, Any] | None) -> bool:
+    clause = str(text or "")
+    for item in (review_memory or {}).get("terms") or []:
+        term = str(item.get("term") or "").strip()
+        if term and term in clause:
+            return True
+    for item in (review_memory or {}).get("phrase_preferences") or []:
+        phrase = str(item.get("phrase") or "").strip()
+        if phrase and any(component in clause for component in _extract_compound_components(phrase)):
+            return True
+    return False
+
+
+def _dedupe_repeated_domain_terms(text: str, *, review_memory: dict[str, Any] | None) -> str:
+    result = str(text or "").strip()
+    if not result:
+        return result
+    candidates: list[str] = []
+    for item in (review_memory or {}).get("terms") or []:
+        term = str(item.get("term") or "").strip()
+        if 2 <= len(term) <= 8:
+            candidates.append(term)
+    for term in sorted(set(candidates), key=len, reverse=True):
+        pattern = re.compile(rf"({re.escape(term)})(?:和这个|这个|和|跟)+({re.escape(term)})")
+        result = pattern.sub(term, result)
+    return result
 
 
 def _is_safe_subtitle_polish(
@@ -1835,6 +2236,47 @@ def _cover_title_is_usable(cover_title: dict[str, Any]) -> bool:
     return bool(main and not _is_generic_cover_line(main))
 
 
+def _dedupe_cover_title_lines(
+    cover_title: dict[str, str],
+    *,
+    preserve_top: bool = False,
+) -> dict[str, str]:
+    top = " ".join(str(cover_title.get("top") or "").strip().split())
+    main = " ".join(str(cover_title.get("main") or "").strip().split())
+    bottom = " ".join(str(cover_title.get("bottom") or "").strip().split())
+
+    top_norm = _normalize_cover_line(top)
+    main_norm = _normalize_cover_line(main)
+    bottom_norm = _normalize_cover_line(bottom)
+
+    if (
+        not preserve_top
+        and top_norm
+        and main_norm
+        and (main_norm == top_norm or main_norm.startswith(top_norm))
+    ):
+        top = ""
+    if bottom_norm and main_norm and (bottom_norm == main_norm or bottom_norm.startswith(main_norm)):
+        bottom = ""
+
+    return {
+        "top": top[:14],
+        "main": main[:18],
+        "bottom": bottom[:18],
+    }
+
+
+def _normalize_cover_line(text: str) -> str:
+    return "".join(ch for ch in _clean_line(text).upper() if ch.isalnum() or "\u4e00" <= ch <= "\u9fff")
+
+
+def _is_brand_like_cover_label(text: str) -> bool:
+    normalized = _clean_line(text)
+    if not normalized:
+        return False
+    return bool(re.fullmatch(r"[A-Z]{2,14}", normalized))
+
+
 def _is_generic_cover_line(text: str) -> bool:
     normalized = _clean_line(text)
     if not normalized:
@@ -1854,11 +2296,30 @@ def _is_generic_cover_line(text: str) -> bool:
         "AI工具",
         "软件教程",
         "功能演示",
+        "软件功能演示",
+        "体验分享",
+        "详细介绍",
+        "教程演示",
+        "使用教程",
+        "新功能介绍",
+        "功能介绍",
+        "内容分享",
+        "流程演示",
     )
     return any(fragment in normalized for fragment in generic_fragments)
 
 
-def _pick_cover_top(*, brand: str, subject_type: str, visible_text: str, preset: WorkflowPreset) -> str:
+def _pick_cover_top(
+    *,
+    brand: str,
+    subject_type: str,
+    visible_text: str,
+    preset: WorkflowPreset,
+    anchor: dict[str, str] | None = None,
+) -> str:
+    anchor_brand = _clean_line((anchor or {}).get("brand") or "")
+    if anchor_brand:
+        return anchor_brand[:14]
     compact_brand = _compact_brand_name(brand, visible_text=visible_text)
     if compact_brand:
         return compact_brand
@@ -1885,7 +2346,12 @@ def _pick_cover_main(
     theme: str,
     visible_text: str,
     preset: WorkflowPreset,
+    anchor: dict[str, str] | None = None,
 ) -> str:
+    anchor_main = " ".join(str((anchor or {}).get("main") or "").strip().split())
+    if anchor_main:
+        return anchor_main[:18]
+
     candidate_model = _clean_line(model)
     if candidate_model and not _looks_like_camera_stem(candidate_model) and not _is_generic_cover_line(candidate_model):
         return candidate_model
@@ -1907,6 +2373,72 @@ def _pick_cover_main(
         return theme[:18]
 
     return preset.label[:18]
+
+
+def _extract_cover_entity_anchor(
+    *,
+    brand: str,
+    model: str,
+    subject_type: str,
+    theme: str,
+    visible_text: str,
+) -> dict[str, str]:
+    cleaned_brand = _clean_line(brand)
+    cleaned_model = _clean_line(model)
+    display_subject_type = _cover_subject_type_label(subject_type)
+
+    if cleaned_brand and cleaned_model and display_subject_type:
+        return {
+            "brand": _compact_brand_name(cleaned_brand, visible_text=visible_text),
+            "main": f"{cleaned_brand} {cleaned_model}{display_subject_type}".replace("  ", " ").strip(),
+        }
+    if cleaned_brand and cleaned_model:
+        return {
+            "brand": _compact_brand_name(cleaned_brand, visible_text=visible_text),
+            "main": f"{cleaned_brand} {cleaned_model}".replace("  ", " ").strip(),
+        }
+
+    if not theme or not display_subject_type:
+        return {}
+
+    prefix = _extract_theme_prefix_before_subject(theme, display_subject_type)
+    if not prefix:
+        return {}
+
+    normalized_prefix = " ".join(str(prefix).strip().split()).strip(" -")
+    if not normalized_prefix:
+        return {}
+
+    brand_hint = _extract_anchor_brand(normalized_prefix)
+    return {
+        "brand": brand_hint,
+        "main": f"{normalized_prefix}{display_subject_type}".strip()[:18],
+    }
+
+
+def _extract_theme_prefix_before_subject(theme: str, subject_type_label: str) -> str:
+    theme_text = str(theme or "").strip().strip("，。！？：:;；、")
+    subject_clean = _clean_line(subject_type_label)
+    if not theme_text or not subject_clean:
+        return ""
+    match = re.search(rf"(.{{1,20}}?){re.escape(subject_clean)}", theme_text, re.IGNORECASE)
+    if not match:
+        return ""
+    prefix = match.group(1)
+    prefix = re.split(r"(细节展示|开箱详解|开箱评测|评测|测评|体验|上手|展示)", prefix)[0]
+    prefix = prefix.strip(" ·-_")
+    if not prefix:
+        return ""
+    if len(prefix) > 16:
+        return ""
+    return prefix
+
+
+def _extract_anchor_brand(prefix: str) -> str:
+    match = re.match(r"([A-Za-z]{2,12})(?=$|[\s-])", prefix)
+    if not match:
+        return ""
+    return match.group(1).upper()[:14]
 
 
 def _extract_specific_cover_topic(theme: str) -> str:
@@ -2044,6 +2576,7 @@ def _apply_copy_style_to_hook(
 ) -> str:
     base = _clean_line(hook)
     subject = _clean_line(model or brand or subject_type)
+    base = _boost_cover_click_phrase(base, subject=subject)
     if copy_style == "balanced":
         if "离谱" in base or "变态" in base or "炸" in base or "封神" in base:
             return "这次重点讲透了"
@@ -2059,6 +2592,36 @@ def _apply_copy_style_to_hook(
     if copy_style == "emotional_story":
         return "这次真的等太久了" if not subject else f"为了{subject}我真等很久"[:18]
     return base or "这波效果太夸张"
+
+
+def _boost_cover_click_phrase(text: str, *, subject: str) -> str:
+    normalized = _clean_line(text)
+    if not normalized:
+        return normalized
+
+    boring_to_hot = {
+        "先看结论": "结论太炸了",
+        "重点讲清楚": "重点直接讲透",
+        "重点讲明白": "重点一把讲透",
+        "关键点讲清楚": "关键点直接拉满",
+        "这次很能打": "这次强得离谱",
+        "这次很顶": "这次直接起飞",
+        "高级感拉满": "高级感直接封神",
+        "细节很加分": "细节直接封神",
+        "整体更顺眼": "这次顺眼到离谱",
+        "关键差异讲明白": "差异一眼炸出来",
+    }
+    for old, new in boring_to_hot.items():
+        if old in normalized:
+            return normalized.replace(old, new)[:18]
+
+    hot_tokens = ("离谱", "封神", "炸", "炸裂", "起飞", "拉满", "太狠", "变态", "绝了", "上头", "杀疯")
+    if any(token in normalized for token in hot_tokens):
+        return normalized[:18]
+
+    if subject:
+        return (f"{subject}强得离谱" if len(subject) <= 8 else f"{subject}太炸了")[:18]
+    return "这次太炸了"
 
 
 def _compact_brand_name(brand: str, *, visible_text: str) -> str:

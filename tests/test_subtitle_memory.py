@@ -406,3 +406,16 @@ def test_apply_domain_term_corrections_prefers_compound_domain_phrase_when_avail
     assert "次顶配镜面" in corrected
     assert "次定配" not in corrected
     assert "静面" not in corrected
+
+
+def test_apply_domain_term_corrections_repairs_truncated_latin_brand_token():
+    corrected = apply_domain_term_corrections(
+        "折刀开箱,FAS,LEATHER",
+        {
+            "terms": [{"term": "LEATHERMAN"}],
+            "aliases": [],
+            "style_examples": [],
+        },
+    )
+
+    assert corrected == "折刀开箱,FAS,LEATHERMAN"

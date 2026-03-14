@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import difflib
 import re
 import uuid
 from dataclasses import dataclass
@@ -126,7 +127,8 @@ def split_into_subtitles(
                     char_offset += len(chunk)
                     idx += 1
 
-    return _merge_continuation_entries(subtitles, max_chars=max_chars, max_duration=max_duration)
+    merged = _merge_continuation_entries(subtitles, max_chars=max_chars, max_duration=max_duration)
+    return _cleanup_subtitle_entries(merged)
 
 
 def _split_with_words(
@@ -303,6 +305,50 @@ def _merge_continuation_entries(
     return [SubtitleEntry(i, item.start, item.end, item.text_raw, item.text_norm) for i, item in enumerate(merged)]
 
 
+def _cleanup_subtitle_entries(entries: list[SubtitleEntry]) -> list[SubtitleEntry]:
+    cleaned: list[SubtitleEntry] = []
+    for entry in entries:
+        duration = float(entry.end) - float(entry.start)
+        if duration <= 0.08:
+            continue
+        normalized_text = normalize_text(entry.text_raw)
+        if not normalized_text.strip("，。！？!?、,.；;：:\"'()（）[]【】"):
+            continue
+        if cleaned:
+            previous = cleaned[-1]
+            previous_norm = normalize_text(previous.text_raw)
+            gap = float(entry.start) - float(previous.end)
+            if normalized_text == previous_norm and gap <= 0.18:
+                cleaned[-1] = SubtitleEntry(
+                    previous.index,
+                    previous.start,
+                    max(previous.end, entry.end),
+                    previous.text_raw,
+                    previous_norm,
+                )
+                continue
+            if gap <= 0.35 and _are_near_duplicate_subtitles(previous.text_raw, entry.text_raw):
+                merged_text = _pick_clearer_duplicate_text(previous.text_raw, entry.text_raw)
+                cleaned[-1] = SubtitleEntry(
+                    previous.index,
+                    previous.start,
+                    max(previous.end, entry.end),
+                    merged_text,
+                    normalize_text(merged_text),
+                )
+                continue
+        cleaned.append(
+            SubtitleEntry(
+                len(cleaned),
+                entry.start,
+                entry.end,
+                entry.text_raw,
+                normalized_text,
+            )
+        )
+    return cleaned
+
+
 def _should_merge_subtitle_pair(left: str, right: str) -> bool:
     left_text = str(left or "").strip()
     right_text = str(right or "").strip()
@@ -358,6 +404,40 @@ def _starts_with_attached_fragment(text: str) -> bool:
     if token in _GOOD_BREAK_PREFIXES or token in _NO_SPLIT_PREFIXES:
         return False
     return True
+
+
+def _compact_compare_text(text: str) -> str:
+    compact = re.sub(r"[，。！？!?、；;：:,.\-\"'()\[\]（）【】\s]+", "", str(text or "").strip())
+    compact = re.sub(r"(其实|就是|然后|那个|这个|当然|的话|一下|一下子|也算|算是|上是|吧)+", "", compact)
+    return compact
+
+
+def _are_near_duplicate_subtitles(left: str, right: str) -> bool:
+    left_compact = _compact_compare_text(left)
+    right_compact = _compact_compare_text(right)
+    if not left_compact or not right_compact:
+        return False
+    if left_compact == right_compact:
+        return True
+    shorter, longer = sorted((left_compact, right_compact), key=len)
+    if len(shorter) >= 4 and shorter in longer:
+        return True
+    ratio = difflib.SequenceMatcher(a=left_compact, b=right_compact).ratio()
+    return ratio >= 0.8
+
+
+def _pick_clearer_duplicate_text(left: str, right: str) -> str:
+    left_text = normalize_text(left).rstrip("。！？!?")
+    right_text = normalize_text(right).rstrip("。！？!?")
+    left_compact = _compact_compare_text(left_text)
+    right_compact = _compact_compare_text(right_text)
+    if len(right_compact) > len(left_compact):
+        return right_text
+    if len(left_compact) > len(right_compact):
+        return left_text
+    if len(right_text) > len(left_text):
+        return right_text
+    return left_text
 
 
 def _words_to_text(words: list[dict]) -> str:

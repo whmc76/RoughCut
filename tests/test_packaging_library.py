@@ -43,6 +43,8 @@ def test_packaging_library_saves_and_resolves_assets(tmp_path, monkeypatch):
             "subtitle_style": "cinema_blue",
             "cover_style": "tactical_neon",
             "copy_style": "trusted_expert",
+            "export_resolution_mode": "specified",
+            "export_resolution_preset": "1080p",
         }
     )
 
@@ -64,6 +66,8 @@ def test_packaging_library_saves_and_resolves_assets(tmp_path, monkeypatch):
     assert plan["subtitle_style"] == "cinema_blue"
     assert plan["cover_style"] == "tactical_neon"
     assert plan["copy_style"] == "trusted_expert"
+    assert plan["export_resolution_mode"] == "specified"
+    assert plan["export_resolution_preset"] == "1080p"
 
 
 def test_packaging_library_delete_clears_selected_ids(tmp_path, monkeypatch):

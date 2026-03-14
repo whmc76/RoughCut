@@ -1,0 +1,47 @@
+name: heygem-shared
+
+services:
+  fish-speech:
+    image: ${HEYGEM_FISH_IMAGE:-guiji2025/fish-speech-5090:latest}
+    container_name: heygem-fish-speech
+    restart: unless-stopped
+    runtime: nvidia
+    working_dir: /code
+    environment:
+      NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-0}
+      NVIDIA_DRIVER_CAPABILITIES: ${NVIDIA_DRIVER_CAPABILITIES:-compute,graphics,utility,video,display}
+    ports:
+      - "${HEYGEM_TRAINING_API_PORT:-49203}:8080"
+    volumes:
+      - "${HEYGEM_VOICE_HOST_DIR:-D:/heygem-shared/voice/data}:/code/data"
+    command: /bin/bash -c "python tools/api_server.py --listen 0.0.0.0:8080"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/v1/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+  heygem:
+    image: ${HEYGEM_VIDEO_IMAGE:-guiji2025/duix.avatar-5090:latest}
+    container_name: heygem-video
+    restart: unless-stopped
+    runtime: nvidia
+    privileged: true
+    environment:
+      PYTORCH_CUDA_ALLOC_CONF: ${PYTORCH_CUDA_ALLOC_CONF:-max_split_size_mb:512}
+    ports:
+      - "${HEYGEM_API_PORT:-49202}:8383"
+    volumes:
+      - "${HEYGEM_SHARED_HOST_DIR:-D:/heygem-shared/face2face}:/code/data"
+    shm_size: "8g"
+    command: python /code/app_local.py
+    depends_on:
+      fish-speech:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8383/easy/query?code=healthcheck', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s

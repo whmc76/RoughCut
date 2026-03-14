@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -15,8 +15,17 @@ router = APIRouter(prefix="/glossary", tags=["glossary"])
 
 
 @router.get("", response_model=list[GlossaryTermOut])
-async def list_terms(session: AsyncSession = Depends(get_session)):
-    result = await session.execute(select(GlossaryTerm).order_by(GlossaryTerm.created_at.desc()))
+async def list_terms(
+    scope_type: str | None = Query(default=None),
+    scope_value: str | None = Query(default=None),
+    session: AsyncSession = Depends(get_session),
+):
+    stmt = select(GlossaryTerm)
+    if scope_type:
+        stmt = stmt.where(GlossaryTerm.scope_type == scope_type)
+    if scope_value is not None:
+        stmt = stmt.where(GlossaryTerm.scope_value == scope_value)
+    result = await session.execute(stmt.order_by(GlossaryTerm.created_at.desc()))
     return result.scalars().all()
 
 
@@ -31,6 +40,8 @@ async def create_term(
     session: AsyncSession = Depends(get_session),
 ):
     term = GlossaryTerm(
+        scope_type=body.scope_type,
+        scope_value=body.scope_value,
         wrong_forms=body.wrong_forms,
         correct_form=body.correct_form,
         category=body.category,
@@ -62,6 +73,10 @@ async def update_term(
 
     if body.wrong_forms is not None:
         term.wrong_forms = body.wrong_forms
+    if body.scope_type is not None:
+        term.scope_type = body.scope_type
+    if body.scope_value is not None:
+        term.scope_value = body.scope_value
     if body.correct_form is not None:
         term.correct_form = body.correct_form
     if body.category is not None:

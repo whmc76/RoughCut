@@ -70,6 +70,8 @@ export type JobActivity = {
 
 export type GlossaryTerm = {
   id: string;
+  scope_type: string;
+  scope_value: string;
   wrong_forms: string[];
   correct_form: string;
   category?: string | null;
@@ -188,6 +190,8 @@ export type PackagingConfig = {
   avatar_overlay_corner_radius: number;
   avatar_overlay_border_width: number;
   avatar_overlay_border_color: string;
+  export_resolution_mode?: string;
+  export_resolution_preset?: string;
   enabled: boolean;
 };
 
@@ -371,6 +375,7 @@ export type Config = {
   anthropic_auth_mode: string;
   anthropic_api_key_helper: string;
   minimax_base_url: string;
+  minimax_api_host: string;
   voice_provider: string;
   voice_clone_api_base_url: string;
   voice_clone_api_key_set: boolean;
@@ -380,6 +385,7 @@ export type Config = {
   openai_api_key_set: boolean;
   anthropic_api_key_set: boolean;
   minimax_api_key_set: boolean;
+  minimax_coding_plan_api_key_set: boolean;
   ollama_base_url: string;
   max_upload_size_mb: number;
   max_video_duration_sec: number;

@@ -9,7 +9,7 @@
 ## 功能
 
 - **自动剪辑** — 检测静音段和语气词，生成剪辑时间轴，保留有效内容
-- **转写** — 默认使用本地 faster-whisper `base`，也可切换到 OpenAI gpt-4o-transcribe
+- **转写** — 默认使用 OpenAI `gpt-4o-transcribe`，本地可切换到 `FunASR SenseVoice` 或 `faster-whisper`
 - **字幕** — 字幕时间戳重映射至剪辑后时间轴，烧录荧光描边样式（黑字 + 绿色发光）
 - **封面选帧** — 视觉模型从多个候选帧中挑选最佳封面，可选标题文字叠加
 - **旋转修正** — 视觉模型识别实际画面方向，正确处理 iPhone 横屏/竖屏及错误元数据
@@ -126,6 +126,13 @@ pnpm docker:up
 
 启动 PostgreSQL（5432）、Redis（6379）、MinIO（9000/9001）。
 
+数字人相关服务现在默认走独立共享服务，不再依赖 RoughCut 内部 Docker：
+
+- HeyGem: `http://127.0.0.1:49202`
+- IndexTTS2 accel 主实例: `http://127.0.0.1:49204`
+- HeyGem 数据根: `E:/WorkSpace/heygem/data`
+- 参考音频缓存目录: `E:/WorkSpace/RoughCut/data/voice_refs`
+
 ### 5. 配置环境变量
 
 复制 `.env.example` 为 `.env` 并按需修改：
@@ -139,8 +146,8 @@ cp .env.example .env
 ```env
 REASONING_PROVIDER=ollama
 REASONING_MODEL=qwen3.5:9b        # 需支持视觉
-TRANSCRIPTION_PROVIDER=local_whisper
-TRANSCRIPTION_MODEL=base
+TRANSCRIPTION_PROVIDER=funasr
+TRANSCRIPTION_MODEL=sensevoice-small
 
 OUTPUT_DIR=D:/output               # 成片输出目录
 AUTO_CONFIRM_CONTENT_PROFILE=true
@@ -151,7 +158,16 @@ AUTO_SELECT_COVER_VARIANT=true
 COVER_SELECTION_REVIEW_GAP=0.08
 PACKAGING_SELECTION_REVIEW_GAP=0.08
 PACKAGING_SELECTION_MIN_SCORE=0.6
+AVATAR_PROVIDER=heygem
+AVATAR_API_BASE_URL=http://127.0.0.1:49202
+AVATAR_TRAINING_API_BASE_URL=http://127.0.0.1:49204
+HEYGEM_SHARED_ROOT=E:/WorkSpace/heygem/data
+HEYGEM_VOICE_ROOT=E:/WorkSpace/RoughCut/data/voice_refs
+VOICE_PROVIDER=indextts2
+VOICE_CLONE_API_BASE_URL=http://127.0.0.1:49204
 ```
+
+其中 `49204` 当前约定为独立 `IndexTTS2 accel` 正式入口。不要再并行常驻 `baseline / sage / accel` 多个实例去争抢同一块 GPU。
 
 OpenAI 配置：
 
@@ -161,6 +177,13 @@ REASONING_PROVIDER=openai
 REASONING_MODEL=gpt-4o-mini
 TRANSCRIPTION_PROVIDER=openai
 TRANSCRIPTION_MODEL=gpt-4o-transcribe
+```
+
+更强本地中文 ASR 建议：
+
+```env
+TRANSCRIPTION_PROVIDER=funasr
+TRANSCRIPTION_MODEL=sensevoice-small
 ```
 
 ### 6. 运行自检
@@ -290,8 +313,8 @@ docker compose logs -f worker-media
 
 - Docker 镜像默认内置 `uv`、`ffmpeg` 和 `Noto Sans CJK` 中文字体。
 - Docker 镜像会在构建阶段自动执行 `frontend/` 下的前端依赖安装和构建。
-- 默认镜像已包含 CPU 版 `faster-whisper`，可直接用于 `TRANSCRIPTION_PROVIDER=local_whisper`。
-- 当前项目默认 ASR 方案为 `local_whisper + base`；如果要启用 GPU 加速 ASR，建议基于当前 `Dockerfile` 再做专用镜像。
+- 默认镜像已包含 `local-asr` 额外依赖；本地可选 `FunASR SenseVoice` 或 `faster-whisper`。
+- 当前项目默认 ASR 方案为 `openai + gpt-4o-transcribe`；离线中文口播优先建议 `funasr + sensevoice-small`。
 - 推荐本地开发使用 `uv + npm`，容器部署使用 `docker compose`，不要混用系统级 `pip` 和容器内运行时配置。
 
 ---
@@ -363,11 +386,13 @@ curl http://localhost:8000/api/v1/jobs/{job_id}/report
 | `ANTHROPIC_BASE_URL` | `https://api.anthropic.com` | Anthropic/Claude Code 兼容接口地址 |
 | `ANTHROPIC_AUTH_MODE` | `api_key` | `api_key` / `claude_code_compat` |
 | `ANTHROPIC_API_KEY_HELPER` | `""` | Claude Code 兼容模式下返回凭证的本地命令 |
-| `MINIMAX_API_KEY` | `""` | MiniMax API Key |
+| `MINIMAX_API_KEY` | `""` | MiniMax 普通推理 API Key（OpenAI 兼容） |
 | `MINIMAX_BASE_URL` | `https://api.minimaxi.com/v1` | MiniMax OpenAI 兼容接口地址 |
+| `MINIMAX_API_HOST` | `https://api.minimaxi.com` | MiniMax Coding Plan / MCP API Host |
+| `MINIMAX_CODING_PLAN_API_KEY` | `""` | MiniMax Coding Plan Key；留空时搜索/MCP 默认回退 `MINIMAX_API_KEY` |
 | `VISION_MODEL` | `""` | 视觉模型（空 = 使用 reasoning_model） |
-| `TRANSCRIPTION_PROVIDER` | `local_whisper` | 转写后端：`local_whisper` / `openai` |
-| `TRANSCRIPTION_MODEL` | `base` | 转写模型 |
+| `TRANSCRIPTION_PROVIDER` | `openai` | 转写后端：`openai` / `funasr` / `local_whisper` |
+| `TRANSCRIPTION_MODEL` | `gpt-4o-transcribe` | 转写模型 |
 | `SUBTITLE_FONT` | `Microsoft YaHei` | 字幕字体 |
 | `SUBTITLE_FONT_SIZE` | `80` | 字幕字号（pt，相对 PlayResY） |
 | `SUBTITLE_COLOR` | `000000` | 字幕文字颜色（RGB hex，黑色） |
@@ -399,7 +424,7 @@ src/roughcut/
 ├── db/                  # 数据库模型 + Alembic 迁移
 ├── api/                 # REST API 路由
 ├── providers/           # LLM/转写后端抽象层
-│   ├── transcription/   # OpenAI Whisper / local faster-whisper
+│   ├── transcription/   # OpenAI / FunASR / local faster-whisper
 │   ├── reasoning/       # OpenAI / Anthropic / Ollama
 │   └── factory.py       # 按配置实例化 provider
 ├── media/               # 媒体处理

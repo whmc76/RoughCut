@@ -194,11 +194,35 @@ def test_title_style_tokens_clamp_text_into_cross_platform_safe_zone():
         cover_style="tech_showcase",
     )
 
-    assert style["top"]["x"].startswith("max(max(w*0.289062")
-    assert "min(70," in style["top"]["x"]
-    assert style["main"]["x"].startswith("max(max(w*0.289062")
+    assert style["top"]["x"].startswith("max(max(w*0.234375")
+    assert "min((w-text_w)/2" in style["top"]["x"]
+    assert style["main"]["x"].startswith("max(max(w*0.234375")
+    assert "min((w-text_w)/2" in style["main"]["x"]
+    assert style["main"]["y"].startswith("max(max(h*0.120")
+    assert "min((h-text_h)/2" in style["main"]["y"]
     assert style["bottom"]["y"].startswith("max(max(h*0.120")
     assert "h-max(h*0.140" in style["bottom"]["y"]
+
+
+def test_prioritize_cover_variants_promotes_ctr_for_portrait():
+    selected, rankings, plans = output_mod._prioritize_cover_variants(
+        selected=[{"seek": 12.0}, {"seek": 22.0}, {"seek": 32.0}],
+        selected_rankings=[
+            {"index": 0, "score": 0.82},
+            {"index": 1, "score": 0.76},
+            {"index": 2, "score": 0.64},
+        ],
+        title_variants=[
+            {"strategy_key": "xiaohongshu"},
+            {"strategy_key": "bilibili"},
+            {"strategy_key": "ctr"},
+        ],
+        is_portrait=True,
+    )
+
+    assert selected[0]["seek"] == 32.0
+    assert rankings[0]["score"] == 0.86
+    assert plans[0]["strategy_key"] == "ctr"
 
 
 def test_fit_cover_text_to_safe_zone_shrinks_long_main_title():

@@ -25,9 +25,4 @@ class VoiceProvider(ABC):
     ) -> dict[str, Any]:
         """Execute a provider-specific dubbing request."""
         del reference_audio_path
-        return {
-            "provider": request.get("provider"),
-            "job_id": job_id,
-            "status": "planning_only",
-            "segments": [],
-        }
+        raise NotImplementedError(f"Voice provider {request.get('provider')} must implement execute_dubbing()")

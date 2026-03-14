@@ -18,6 +18,8 @@ vi.mock("../../api", () => ({
 
 const SAMPLE_TERM: GlossaryTerm = {
   id: "term_1",
+  scope_type: "global",
+  scope_value: "",
   wrong_forms: ["GPT4", "gpt4"],
   correct_form: "GPT-4",
   category: "model",
@@ -55,6 +57,8 @@ describe("useGlossaryWorkspace", () => {
     expect(result.current.form).toEqual({
       wrong_forms: "GPT4, gpt4",
       correct_form: "GPT-4",
+      scope_type: "global",
+      scope_value: "",
       category: "model",
       context_hint: "数码开箱",
     });
@@ -64,6 +68,8 @@ describe("useGlossaryWorkspace", () => {
       result.current.setForm({
         wrong_forms: " ARC ,  leatherman arc ",
         correct_form: "Leatherman ARC",
+        scope_type: "domain",
+        scope_value: "gear",
         category: "model",
         context_hint: "",
       });
@@ -77,6 +83,8 @@ describe("useGlossaryWorkspace", () => {
       expect(mockApi.createGlossary).toHaveBeenCalledWith({
         wrong_forms: ["ARC", "leatherman arc"],
         correct_form: "Leatherman ARC",
+        scope_type: "domain",
+        scope_value: "gear",
         category: "model",
         context_hint: undefined,
       }),
@@ -93,6 +101,8 @@ describe("useGlossaryWorkspace", () => {
       result.current.setForm({
         wrong_forms: "GPT4, gpt4, gpt-4",
         correct_form: "GPT-4",
+        scope_type: "global",
+        scope_value: "",
         category: "model",
         context_hint: "数码开箱",
       });
@@ -106,6 +116,8 @@ describe("useGlossaryWorkspace", () => {
       expect(mockApi.updateGlossary).toHaveBeenCalledWith("term_1", {
         wrong_forms: ["GPT4", "gpt4", "gpt-4"],
         correct_form: "GPT-4",
+        scope_type: "global",
+        scope_value: "",
         category: "model",
         context_hint: "数码开箱",
       }),
@@ -147,6 +159,8 @@ describe("useGlossaryWorkspace", () => {
       expect(mockApi.createGlossary).toHaveBeenCalledWith({
         wrong_forms: ["法斯", "发斯"],
         correct_form: "FAS",
+        scope_type: "global",
+        scope_value: "",
         category: "term",
         context_hint: "圈内缩写",
       }),
@@ -156,6 +170,8 @@ describe("useGlossaryWorkspace", () => {
   it("syncs aliases into existing glossary terms when sync mode is enabled", async () => {
     const existingTerm: GlossaryTerm = {
       id: "term_fas",
+      scope_type: "global",
+      scope_value: "",
       wrong_forms: ["老错写"],
       correct_form: "FAS",
       category: "term",

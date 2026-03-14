@@ -76,7 +76,7 @@ async def test_config_options_exposes_transcription_models(client: AsyncClient):
     assert data["workflow_modes"][0]["value"] == "standard_edit"
     assert any(item["value"] == "avatar_commentary" for item in data["enhancement_modes"])
     assert any(item["value"] == "heygem" for item in data["avatar_providers"])
-    assert any(item["value"] == "edge" for item in data["voice_providers"])
+    assert any(item["value"] == "indextts2" for item in data["voice_providers"])
     assert any(item["key"] == "long_text_to_video" and item["status"] == "planned" for item in data["creative_mode_catalog"]["workflow_modes"])
     assert data["transcription_models"]["local_whisper"][0] == "base"
     assert data["transcription_models"]["openai"] == ["gpt-4o-transcribe"]

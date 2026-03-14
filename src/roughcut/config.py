@@ -10,6 +10,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 _OVERRIDES_FILE = Path("roughcut_config.json")
 DEFAULT_JOB_WORKFLOW_MODE = "standard_edit"
 TRANSCRIPTION_MODEL_OPTIONS: dict[str, list[str]] = {
+    "funasr": [
+        "sensevoice-small",
+    ],
     "local_whisper": [
         "base",
         "small",
@@ -19,15 +22,17 @@ TRANSCRIPTION_MODEL_OPTIONS: dict[str, list[str]] = {
     ],
     "openai": [
         "gpt-4o-transcribe",
+        "gpt-4o-mini-transcribe",
     ],
 }
-DEFAULT_TRANSCRIPTION_PROVIDER = "local_whisper"
+DEFAULT_TRANSCRIPTION_PROVIDER = "openai"
 DEFAULT_TRANSCRIPTION_MODELS: dict[str, str] = {
+    "funasr": "sensevoice-small",
     "local_whisper": "base",
     "openai": "gpt-4o-transcribe",
 }
-AVATAR_PROVIDER_OPTIONS: tuple[str, ...] = ("mock", "heygem")
-VOICE_PROVIDER_OPTIONS: tuple[str, ...] = ("edge", "runninghub")
+AVATAR_PROVIDER_OPTIONS: tuple[str, ...] = ("heygem",)
+VOICE_PROVIDER_OPTIONS: tuple[str, ...] = ("indextts2", "runninghub")
 
 
 class Settings(BaseSettings):
@@ -49,7 +54,7 @@ class Settings(BaseSettings):
     s3_region: str = "us-east-1"
 
     # Transcription
-    transcription_provider: str = DEFAULT_TRANSCRIPTION_PROVIDER  # openai | local_whisper
+    transcription_provider: str = DEFAULT_TRANSCRIPTION_PROVIDER  # openai | local_whisper | funasr
     transcription_model: str = DEFAULT_TRANSCRIPTION_MODELS[DEFAULT_TRANSCRIPTION_PROVIDER]
 
     # Reasoning
@@ -78,13 +83,15 @@ class Settings(BaseSettings):
     anthropic_api_key_helper: str = ""
     minimax_api_key: str = ""
     minimax_base_url: str = "https://api.minimaxi.com/v1"
+    minimax_api_host: str = "https://api.minimaxi.com"
+    minimax_coding_plan_api_key: str = ""
     ollama_api_key: str = ""
     ollama_base_url: str = "http://localhost:11434"
 
     # Avatar / Digital Human
-    avatar_provider: str = "mock"
+    avatar_provider: str = "heygem"
     avatar_api_base_url: str = "http://127.0.0.1:49202"
-    avatar_training_api_base_url: str = "http://127.0.0.1:49203"
+    avatar_training_api_base_url: str = "http://127.0.0.1:49204"
     avatar_api_key: str = ""
     avatar_presenter_id: str = ""
     avatar_layout_template: str = "picture_in_picture_right"
@@ -92,8 +99,8 @@ class Settings(BaseSettings):
     avatar_overlay_scale: float = 0.24
 
     # Voice / AI Director dubbing
-    voice_provider: str = "edge"
-    voice_clone_api_base_url: str = "https://www.runninghub.cn"
+    voice_provider: str = "indextts2"
+    voice_clone_api_base_url: str = "http://127.0.0.1:49204"
     voice_clone_api_key: str = ""
     voice_clone_voice_id: str = ""
     director_rewrite_strength: float = 0.55

@@ -14,6 +14,7 @@ from roughcut.config import get_settings
 from roughcut.providers.avatar.base import AvatarProvider
 
 _DEFAULT_SHARED_ROOTS = (
+    Path("E:/WorkSpace/heygem/data"),
     Path("D:/duix_avatar_data/face2face"),
     Path("d:/duix_avatar_data/face2face"),
     Path("data/heygem"),
@@ -171,6 +172,7 @@ class HeyGemAvatarProvider(AvatarProvider):
             )
         last_error: Exception | None = None
         for endpoints in submit_endpoints:
+            task_started = False
             try:
                 response = client.post(endpoints["submit"], headers=headers, json=payload)
                 response.raise_for_status()
@@ -185,6 +187,7 @@ class HeyGemAvatarProvider(AvatarProvider):
                         "response": submit_payload,
                     }
 
+                task_started = True
                 query_payload = self._poll_task(
                     client=client,
                     headers=headers,
@@ -206,6 +209,10 @@ class HeyGemAvatarProvider(AvatarProvider):
                     "raw": query_payload,
                 }
             except Exception as exc:
+                if task_started:
+                    raise RuntimeError(
+                        f"heygem task failed from {endpoints['submit']}->{endpoints['query']}: {exc}"
+                    ) from exc
                 last_error = exc
                 continue
 
@@ -230,6 +237,20 @@ class HeyGemAvatarProvider(AvatarProvider):
             response = client.get(query_endpoint, headers=headers, params={"code": task_code})
             response.raise_for_status()
             payload = response.json()
+            payload_code = int(payload.get("code") or 0)
+            if payload_code == 10004:
+                completed_result = _resolve_completed_task_result(task_code)
+                if completed_result:
+                    return {
+                        "code": 10000,
+                        "msg": payload.get("msg") or "任务已完成",
+                        "data": {
+                            "status": 2,
+                            "result": f"/{Path(completed_result).name}",
+                        },
+                    }
+            if payload_code not in (0, 10000):
+                raise RuntimeError(payload.get("msg") or f"HeyGem task failed: {task_code}")
             data = payload.get("data") or {}
             status_value = int(data.get("status") or 0)
             if status_value == 2:
@@ -404,6 +425,12 @@ def _resolve_local_result_path(result_value: str) -> str | None:
         if candidate.exists():
             return str(candidate)
     return None
+
+
+def _resolve_completed_task_result(task_code: str) -> str | None:
+    if not task_code:
+        return None
+    return _resolve_local_result_path(f"/{task_code}-r.mp4")
 
 
 def _resolve_audio_source(audio_value: str) -> str | None:

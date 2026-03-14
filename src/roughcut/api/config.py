@@ -66,6 +66,7 @@ class ConfigOut(BaseModel):
     anthropic_auth_mode: str
     anthropic_api_key_helper: str
     minimax_base_url: str
+    minimax_api_host: str
     voice_provider: str
     voice_clone_api_base_url: str
     voice_clone_api_key_set: bool
@@ -76,6 +77,7 @@ class ConfigOut(BaseModel):
     openai_api_key_set: bool
     anthropic_api_key_set: bool
     minimax_api_key_set: bool
+    minimax_coding_plan_api_key_set: bool
     ollama_base_url: str
     # Security
     max_upload_size_mb: int
@@ -144,6 +146,8 @@ class ConfigPatch(BaseModel):
     anthropic_api_key_helper: str | None = None
     minimax_api_key: str | None = None
     minimax_base_url: str | None = None
+    minimax_api_host: str | None = None
+    minimax_coding_plan_api_key: str | None = None
     voice_provider: str | None = None
     voice_clone_api_base_url: str | None = None
     voice_clone_api_key: str | None = None
@@ -201,6 +205,7 @@ def get_config():
         anthropic_auth_mode=s.anthropic_auth_mode,
         anthropic_api_key_helper=s.anthropic_api_key_helper,
         minimax_base_url=s.minimax_base_url,
+        minimax_api_host=s.minimax_api_host,
         voice_provider=s.voice_provider,
         voice_clone_api_base_url=s.voice_clone_api_base_url,
         voice_clone_api_key_set=bool(s.voice_clone_api_key),
@@ -210,6 +215,7 @@ def get_config():
         openai_api_key_set=bool(s.openai_api_key),
         anthropic_api_key_set=bool(s.anthropic_api_key),
         minimax_api_key_set=bool(s.minimax_api_key),
+        minimax_coding_plan_api_key_set=bool(s.minimax_coding_plan_api_key),
         ollama_base_url=s.ollama_base_url,
         max_upload_size_mb=s.max_upload_size_mb,
         max_video_duration_sec=s.max_video_duration_sec,

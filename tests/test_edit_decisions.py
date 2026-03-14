@@ -57,6 +57,81 @@ def test_build_edit_decision_filler_detection():
     assert filler_cuts[0].start == 3.0
 
 
+def test_build_edit_decision_removes_low_signal_repeated_subtitles():
+    subtitle_items = [
+        {
+            "index": 0,
+            "start_time": 3.0,
+            "end_time": 4.2,
+            "text_raw": "这些自顶配尽量这些自顶配尽量",
+            "text_norm": "这些自顶配尽量这些自顶配尽量",
+            "text_final": "这些自顶配尽量这些自顶配尽量",
+        }
+    ]
+    decision = build_edit_decision(
+        source_path="test.mp4",
+        duration=8.0,
+        silence_segments=[],
+        subtitle_items=subtitle_items,
+    )
+
+    remove_segments = [s for s in decision.segments if s.type == "remove"]
+    assert len(remove_segments) == 1
+    assert remove_segments[0].reason == "low_signal_subtitle"
+
+
+def test_build_edit_decision_removes_short_hedge_heavy_subtitles():
+    subtitle_items = [
+        {
+            "index": 0,
+            "start_time": 1.0,
+            "end_time": 2.2,
+            "text_raw": "其实也算上是一个呼应",
+            "text_norm": "其实也算上是一个呼应",
+            "text_final": "其实也算上是一个呼应",
+        }
+    ]
+    decision = build_edit_decision(
+        source_path="test.mp4",
+        duration=5.0,
+        silence_segments=[],
+        subtitle_items=subtitle_items,
+    )
+
+    remove_segments = [s for s in decision.segments if s.type == "remove"]
+    assert len(remove_segments) == 1
+    assert remove_segments[0].reason == "low_signal_subtitle"
+
+
+def test_build_edit_decision_removes_subject_conflict_short_subtitle():
+    subtitle_items = [
+        {
+            "index": 0,
+            "start_time": 1.0,
+            "end_time": 2.4,
+            "text_raw": "这两个MT-33光线",
+            "text_norm": "这两个MT-33光线",
+            "text_final": "这两个MT-33光线",
+        }
+    ]
+    decision = build_edit_decision(
+        source_path="test.mp4",
+        duration=5.0,
+        silence_segments=[],
+        subtitle_items=subtitle_items,
+        content_profile={
+            "subject_brand": "NOC",
+            "subject_model": "MT-33",
+            "subject_type": "EDC折刀",
+            "visible_text": "MT33、磁顶配镜面板、液压杆螺丝、钢码",
+        },
+    )
+
+    remove_segments = [s for s in decision.segments if s.type == "remove"]
+    assert len(remove_segments) == 1
+    assert remove_segments[0].reason == "low_signal_subtitle"
+
+
 def test_edit_decision_to_dict():
     silences = [SilenceSegment(start=2.0, end=3.0)]
     decision = build_edit_decision("test.mp4", 5.0, silences)

@@ -49,6 +49,22 @@ export function GlossaryFormPanel({ editing, form, isSaving, autosaveState, auto
         <TextField label={t("glossary.form.wrongForms")} value={form.wrong_forms} onChange={(event) => onChange({ ...form, wrong_forms: event.target.value })} placeholder="GPT4, gpt4" />
         <TextField label={t("glossary.form.correctForm")} value={form.correct_form} onChange={(event) => onChange({ ...form, correct_form: event.target.value })} placeholder="GPT-4" />
         <SelectField
+          label={t("glossary.form.scopeType")}
+          value={form.scope_type}
+          onChange={(event) => onChange({ ...form, scope_type: event.target.value })}
+          options={[
+            { value: "global", label: t("glossary.form.scope.global") },
+            { value: "domain", label: t("glossary.form.scope.domain") },
+            { value: "channel_profile", label: t("glossary.form.scope.channelProfile") },
+          ]}
+        />
+        <TextField
+          label={t("glossary.form.scopeValue")}
+          value={form.scope_value}
+          onChange={(event) => onChange({ ...form, scope_value: event.target.value })}
+          placeholder="gear / ai / edc_tactical"
+        />
+        <SelectField
           label={t("glossary.form.category")}
           value={form.category}
           onChange={(event) => onChange({ ...form, category: event.target.value })}

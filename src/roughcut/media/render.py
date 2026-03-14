@@ -13,6 +13,12 @@ from roughcut.config import get_settings
 
 logger = logging.getLogger(__name__)
 
+_EXPORT_RESOLUTION_PRESETS: dict[str, tuple[int, int]] = {
+    "1080p": (1920, 1080),
+    "1440p": (2560, 1440),
+    "2160p": (3840, 2160),
+}
+
 _TRANSPOSE_MAP = {
     90: ",transpose=1",
     180: ",hflip,vflip",
@@ -70,6 +76,11 @@ async def render_video(
         expected_w, expected_h = raw_h, raw_w
     else:
         expected_w, expected_h = raw_w, raw_h
+    render_w, render_h = _resolve_delivery_resolution(
+        expected_width=expected_w,
+        expected_height=expected_h,
+        delivery=render_plan.get("delivery") or {},
+    )
 
     _write_debug_json(
         debug_dir,
@@ -125,13 +136,13 @@ async def render_video(
                 outline_color_rgb=settings.subtitle_outline_color,
                 outline_width=settings.subtitle_outline_width,
                 margin_v_override=await _resolve_subtitle_margin_with_avatar(
-                    expected_width=expected_w,
-                    expected_height=expected_h,
+                    expected_width=render_w,
+                    expected_height=render_h,
                     avatar_plan=render_plan.get("avatar_commentary") or {},
                 ),
                 motion_style=str((render_plan.get("subtitles") or {}).get("motion_style") or "motion_static"),
-                play_res_x=expected_w,
-                play_res_y=expected_h,
+                play_res_x=render_w,
+                play_res_y=render_h,
             )
             escaped = escape_path_for_ffmpeg_filter(ass_path)
             filter_parts.append(f"[{video_label}]subtitles='{escaped}'[vsub]")
@@ -142,13 +153,22 @@ async def render_video(
         overlay_filters, video_label = _build_emphasis_overlay_filters(video_label, editing_accents)
         filter_parts.extend(overlay_filters)
         video_map = f"[{video_label}]"
-        smart_effect_filters, video_label = _build_smart_effect_video_filters(
-            video_label,
-            editing_accents,
-            expected_width=expected_w,
-            expected_height=expected_h,
+        if _should_apply_smart_effect_video_transforms(render_plan.get("avatar_commentary") or {}):
+            smart_effect_filters, video_label = _build_smart_effect_video_filters(
+                video_label,
+                editing_accents,
+                expected_width=render_w,
+                expected_height=render_h,
+            )
+            filter_parts.extend(smart_effect_filters)
+            video_map = f"[{video_label}]"
+
+    if (render_w, render_h) != (expected_w, expected_h):
+        filter_parts.append(
+            f"[{video_label}]scale={render_w}:{render_h}:force_original_aspect_ratio=decrease,"
+            f"pad={render_w}:{render_h}:(ow-iw)/2:(oh-ih)/2:color=black[vscaled]"
         )
-        filter_parts.extend(smart_effect_filters)
+        video_label = "vscaled"
         video_map = f"[{video_label}]"
 
     filter_complex = ";".join(filter_parts)
@@ -186,8 +206,8 @@ async def render_video(
 
     await _normalize_rendered_output(
         base_output_path,
-        expected_width=expected_w,
-        expected_height=expected_h,
+        expected_width=render_w,
+        expected_height=render_h,
         debug_dir=debug_dir,
     )
     if packaging_enabled:
@@ -195,14 +215,14 @@ async def render_video(
             base_output_path,
             render_plan=render_plan,
             output_path=output_path,
-            expected_width=expected_w,
-            expected_height=expected_h,
+            expected_width=render_w,
+            expected_height=render_h,
             debug_dir=debug_dir,
         )
         await _normalize_rendered_output(
             packaged,
-            expected_width=expected_w,
-            expected_height=expected_h,
+            expected_width=render_w,
+            expected_height=render_h,
             debug_dir=debug_dir,
         )
     elif base_output_path != output_path:
@@ -517,6 +537,34 @@ def _resolve_smart_effect_video_tokens(style: str) -> dict[str, Any]:
     return mapping.get(style, mapping["smart_effect_rhythm"])
 
 
+def _should_apply_smart_effect_video_transforms(avatar_plan: dict[str, Any]) -> bool:
+    integration_mode = str(avatar_plan.get("integration_mode") or "").strip().lower()
+    # Once a picture-in-picture avatar has been merged into the plain render, any
+    # full-frame crop/zoom will also crop the avatar and subtitle safe area.
+    return integration_mode != "picture_in_picture"
+
+
+def _resolve_delivery_resolution(
+    *,
+    expected_width: int,
+    expected_height: int,
+    delivery: dict[str, Any],
+) -> tuple[int, int]:
+    mode = str(delivery.get("resolution_mode") or "source").strip().lower()
+    if mode != "specified":
+        return expected_width, expected_height
+
+    preset = str(delivery.get("resolution_preset") or "1080p").strip().lower()
+    target = _EXPORT_RESOLUTION_PRESETS.get(preset)
+    if target is None:
+        return expected_width, expected_height
+
+    landscape_w, landscape_h = target
+    if expected_height > expected_width:
+        return landscape_h, landscape_w
+    return landscape_w, landscape_h
+
+
 def _escape_drawtext_value(value: str) -> str:
     escaped = value.replace("\\", r"\\")
     escaped = escaped.replace(":", r"\:")
@@ -801,9 +849,12 @@ async def _apply_music_and_watermark(
         scale = float(watermark_plan.get("scale", 0.16) or 0.16)
         overlay_x, overlay_y = _watermark_overlay_position(str(watermark_plan.get("position") or "top_right"))
         watermark_width = max(1, int(round(expected_width * scale)))
-        filter_parts.append(
-            f"[{next_input_index}:v]scale={watermark_width}:-1,format=rgba,colorchannelmixer=aa={opacity}[wmfinal]"
-        )
+        watermark_filters = [f"[{next_input_index}:v]scale={watermark_width}:-1", "format=rgba"]
+        if not bool(watermark_plan.get("watermark_preprocessed")):
+            # Uploaded logo assets are often flattened onto white backgrounds; key near-white tones out at render time.
+            watermark_filters.append("colorkey=0xF8F8F8:0.20:0.08")
+        watermark_filters.append(f"colorchannelmixer=aa={opacity}[wmfinal]")
+        filter_parts.append(",".join(watermark_filters))
         filter_parts.append(f"[0:v][wmfinal]overlay=x={overlay_x}:y={overlay_y}:format=auto[vout]")
         video_map = "[vout]"
 

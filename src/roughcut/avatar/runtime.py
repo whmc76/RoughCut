@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import json
 import os
@@ -16,8 +17,8 @@ import httpx
 from roughcut.config import get_settings
 from roughcut.media.probe import probe
 
-_DEFAULT_HEYGEM_ROOT = Path("D:/duix_avatar_data/face2face")
-_DEFAULT_VOICE_ROOT = Path("D:/duix_avatar_data/voice/data")
+_DEFAULT_HEYGEM_ROOT = Path("E:/WorkSpace/heygem/data")
+_DEFAULT_VOICE_ROOT = Path("data/voice_refs")
 _CONTAINER_DATA_ROOT = Path("/code/data")
 _POLL_INTERVAL_SECONDS = 2.0
 _POLL_TIMEOUT_SECONDS = 600.0
@@ -61,14 +62,17 @@ async def is_heygem_training_available() -> bool:
         return False
 
     timeout = httpx.Timeout(10.0, connect=3.0)
-    try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            response = await client.post(f"{base_url}/v1/health")
-            response.raise_for_status()
-            payload = response.json()
-    except Exception:
-        return False
-    return str(payload.get("status") or "").lower() == "ok"
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        for method, path in (("GET", "/health"), ("GET", "/healthz"), ("POST", "/v1/health")):
+            try:
+                response = await client.request(method, f"{base_url}{path}")
+                response.raise_for_status()
+                payload = response.json()
+            except Exception:
+                continue
+            if str(payload.get("status") or "").lower() == "ok":
+                return True
+    return False
 
 
 async def is_heygem_preview_available() -> bool:
@@ -141,7 +145,7 @@ async def prepare_voice_sample_artifacts(
     artifacts["training_reference_name"] = staged_name
     if attempt_preprocess:
         try:
-            preprocess_result = await preprocess_voice_sample(staged_name)
+            preprocess_result = await preprocess_voice_sample(staged_name, normalized_path=normalized_path)
         except Exception as exc:
             artifacts["training_preprocess_error"] = str(exc)
             artifacts.pop("training_preprocess", None)
@@ -155,35 +159,26 @@ async def prepare_voice_sample_artifacts(
     return file_record
 
 
-async def preprocess_voice_sample(reference_name: str, *, lang: str = "zh") -> dict[str, Any]:
+async def preprocess_voice_sample(
+    reference_name: str,
+    *,
+    lang: str = "zh",
+    normalized_path: Path | None = None,
+) -> dict[str, Any]:
     settings = get_settings()
     base_url = str(settings.avatar_training_api_base_url or "").strip().rstrip("/")
     if not base_url:
         raise RuntimeError("avatar_training_api_base_url is not configured")
-
-    timeout = httpx.Timeout(180.0, connect=10.0)
-    last_error = "preprocess failed"
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        for delay_seconds in (0.0, 1.0, 3.0, 5.0):
-            if delay_seconds:
-                await asyncio.sleep(delay_seconds)
-            try:
-                response = await client.post(
-                    f"{base_url}/v1/preprocess_and_tran",
-                    json={"reference_audio": reference_name, "lang": lang},
-                )
-                response.raise_for_status()
-                payload = response.json()
-            except httpx.HTTPError as exc:
-                last_error = str(exc)
-                continue
-            if payload.get("reference_audio_text") and payload.get("asr_format_audio_url"):
-                return payload
-            if int(payload.get("code") or -1) == 0:
-                return payload
-            last_error = str(payload.get("msg") or "preprocess failed")
-
-    raise RuntimeError(last_error)
+    if not await is_heygem_training_available():
+        raise RuntimeError(f"voice synthesis service unavailable: {base_url}")
+    return {
+        "provider": "indextts2",
+        "reference_audio": reference_name,
+        "reference_audio_text": "",
+        "lang": lang,
+        "mode": "direct_reference_upload",
+        "normalized_wav_path": str(normalized_path) if normalized_path else "",
+    }
 
 
 async def synthesize_preview_audio(
@@ -200,27 +195,40 @@ async def synthesize_preview_audio(
         raise RuntimeError("avatar_training_api_base_url is not configured")
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    reference_audio_path = _resolve_indextts_reference_path(
+        preprocess_result=preprocess_result,
+        training_reference_name=training_reference_name,
+    )
+    if reference_audio_path is None or not reference_audio_path.exists():
+        raise RuntimeError("indextts2 reference audio is missing")
+
+    emotion_text, emotion_strength = _infer_indextts2_preview_emotion(script)
     payload = {
-        "text": script,
-        "format": "wav",
-        "reference_audio": _resolve_training_reference_audio(
-            preprocess_result=preprocess_result,
-            training_reference_name=training_reference_name,
-        ),
-        "reference_text": _resolve_training_reference_text(preprocess_result),
-        "lang": lang,
-        "normalize": True,
-        "latency": "normal",
-        "top_p": 0.7,
-        "repetition_penalty": 1.2,
-        "temperature": 0.7,
+        "input": script,
+        "voice": "default",
+        "model": "indextts2",
+        "response_format": "wav",
+        "provider_options": {
+            "output_mode": "base64",
+            "speaker_audio_base64": base64.b64encode(reference_audio_path.read_bytes()).decode("utf-8"),
+            "emo_text": emotion_text,
+            "use_emo_text": True,
+            "auto_mix_emotion": True,
+            "emotion_strength": emotion_strength,
+            "interval_silence": 120,
+            "max_text_tokens_per_segment": 120,
+        },
     }
 
     timeout = httpx.Timeout(300.0, connect=10.0)
     async with httpx.AsyncClient(timeout=timeout) as client:
-        response = await client.post(f"{base_url}/v1/invoke", json=payload)
+        response = await client.post(f"{base_url}/v1/audio/speech", json=payload)
         response.raise_for_status()
-        output_path.write_bytes(response.content)
+        body = response.json()
+        audio_b64 = str(body.get("audio_base64") or "").strip()
+        if not audio_b64:
+            raise RuntimeError("indextts2 did not return audio_base64")
+        output_path.write_bytes(base64.b64decode(audio_b64))
     return output_path
 
 
@@ -236,54 +244,26 @@ async def generate_avatar_preview(
     if video_file is None:
         raise RuntimeError("missing_speaking_video")
 
-    voice_file = await _ensure_voice_prepared(voice_file)
+    voice_file = await _ensure_voice_prepared(voice_file, attempt_training_preprocess=False)
     voice_artifacts = dict(voice_file.get("artifacts") or {})
-    preprocess_result = dict(voice_artifacts.get("training_preprocess") or {})
-    training_reference_name = str(voice_artifacts.get("training_reference_name") or "").strip()
     normalized_audio_path = Path(str(voice_artifacts.get("normalized_wav_path") or ""))
     if not normalized_audio_path.exists():
         raise RuntimeError("missing_normalized_voice_sample")
-    await _ensure_audio_duration(normalized_audio_path, script)
 
     preview_id = uuid.uuid4().hex
     source_video_path = Path(str(video_file.get("path") or ""))
     if not source_video_path.exists():
         raise RuntimeError(f"preview source video missing: {source_video_path}")
-    staged_video_url = _stage_video_for_heygem(source_video_path, preview_id=preview_id)
-    if not preprocess_result:
-        raise RuntimeError("missing_training_preprocess_for_voice_sample")
 
+    staged_video_url = _stage_video_for_heygem(source_video_path, preview_id=preview_id)
     shared_root = heygem_shared_root()
-    staged_audio_path = shared_root / "inputs" / "audio" / f"{preview_id}.wav"
-    try:
-        await synthesize_preview_audio(
-            script=script,
-            preprocess_result=preprocess_result,
-            output_path=staged_audio_path,
-            training_reference_name=training_reference_name,
-        )
-    except httpx.HTTPStatusError as exc:
-        response_text = exc.response.text if exc.response is not None else ""
-        if (
-            exc.response is not None
-            and exc.response.status_code >= 500
-            and training_reference_name
-            and _looks_like_stale_training_preprocess(preprocess_result, response_text=response_text)
-        ):
-            refreshed_preprocess = await preprocess_voice_sample(training_reference_name)
-            voice_artifacts["training_preprocess"] = refreshed_preprocess
-            voice_artifacts.pop("training_preprocess_error", None)
-            voice_file["artifacts"] = voice_artifacts
-            preprocess_result = dict(refreshed_preprocess)
-            await synthesize_preview_audio(
-                script=script,
-                preprocess_result=preprocess_result,
-                output_path=staged_audio_path,
-                training_reference_name=training_reference_name,
-            )
-        else:
-            raise
-    await _ensure_audio_duration(staged_audio_path, script)
+    staged_audio_path = shared_root / "inputs" / "audio" / f"{preview_id}.source.wav"
+    await _prepare_direct_preview_audio(
+        source_audio_path=normalized_audio_path,
+        output_path=staged_audio_path,
+        script=script,
+        source_video_path=source_video_path,
+    )
     task_code, result_payload = await _run_heygem_preview_with_retry(
         audio_name=staged_audio_path.name,
         video_url=staged_video_url,
@@ -304,7 +284,7 @@ async def generate_avatar_preview(
         task_code=task_code,
         result_payload=result_payload,
         local_result_path=local_result_path,
-        preview_mode="scripted_tts",
+        preview_mode="source_audio_direct",
         fallback_reason=None,
     )
 
@@ -320,6 +300,72 @@ def _estimate_min_preview_audio_seconds(script: str) -> float:
     normalized = "".join(ch for ch in str(script or "") if ch.isalnum() or ch.isspace()).strip()
     chars = max(1, len(normalized))
     return max(_MIN_PREVIEW_AUDIO_SECONDS, min(chars * 0.18, _MAX_PREVIEW_AUDIO_SECONDS))
+
+
+async def _prepare_direct_preview_audio(
+    *,
+    source_audio_path: Path,
+    output_path: Path,
+    script: str,
+    source_video_path: Path,
+) -> Path:
+    if not source_audio_path.exists():
+        raise RuntimeError(f"preview audio missing: {source_audio_path}")
+    if not source_video_path.exists():
+        raise RuntimeError(f"preview source video missing: {source_video_path}")
+
+    audio_meta = await probe(source_audio_path)
+    audio_duration = float(audio_meta.duration or 0.0)
+    if audio_duration <= 0:
+        raise RuntimeError(f"preview audio invalid: duration is zero for {source_audio_path.name}")
+
+    video_meta = await probe(source_video_path)
+    video_duration = float(video_meta.duration or 0.0)
+    if video_duration <= 0:
+        raise RuntimeError(f"preview source video invalid: duration is zero for {source_video_path.name}")
+
+    # HeyGem preview is unstable when fed a long reference track, especially when it
+    # exceeds the presenter clip length. Keep preview audio short and bounded by video.
+    target_duration = min(audio_duration, video_duration, _MAX_PREVIEW_AUDIO_SECONDS)
+    min_duration = min(_estimate_min_preview_audio_seconds(script), video_duration, _MAX_PREVIEW_AUDIO_SECONDS)
+    target_duration = max(min_duration, target_duration)
+    if target_duration <= 0:
+        raise RuntimeError("preview audio target duration is invalid")
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        str(source_audio_path),
+        "-af",
+        f"apad=pad_dur={max(0.0, target_duration - audio_duration):.3f}",
+        "-acodec",
+        "pcm_s16le",
+        "-ar",
+        "16000",
+        "-ac",
+        "1",
+        "-t",
+        f"{target_duration:.3f}",
+        str(output_path),
+    ]
+    loop = asyncio.get_running_loop()
+    result = await loop.run_in_executor(
+        None,
+        lambda: subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        ),
+    )
+    if result.returncode != 0:
+        if output_path.exists():
+            output_path.unlink()
+        raise RuntimeError(f"preview audio trim failed: {result.stderr[-1000:]}")
+    return output_path
 
 
 async def _ensure_audio_duration(audio_path: Path, script: str) -> None:
@@ -372,18 +418,20 @@ async def _ensure_audio_duration(audio_path: Path, script: str) -> None:
     temp_output.replace(audio_path)
 
 
-async def _ensure_voice_prepared(file_record: dict[str, Any]) -> dict[str, Any]:
+async def _ensure_voice_prepared(
+    file_record: dict[str, Any],
+    *,
+    attempt_training_preprocess: bool = True,
+) -> dict[str, Any]:
     artifacts = dict(file_record.get("artifacts") or {})
     normalized_path = Path(str(artifacts.get("normalized_wav_path") or ""))
-    if normalized_path.exists() and (
-        artifacts.get("training_preprocess")
-        or artifacts.get("training_preprocess_error")
-        or artifacts.get("training_reference_name")
-    ):
+    if normalized_path.exists() and artifacts.get("training_preprocess"):
+        return file_record
+    if normalized_path.exists() and not attempt_training_preprocess:
         return file_record
     return await prepare_voice_sample_artifacts(
         file_record,
-        attempt_preprocess=await is_heygem_training_available(),
+        attempt_preprocess=attempt_training_preprocess and await is_heygem_training_available(),
         require_preprocess=False,
     )
 
@@ -417,6 +465,32 @@ def _resolve_training_reference_audio(
 
     first_segment = session_audio.split("|||", 1)[0].strip()
     return first_segment or session_audio
+
+
+def _resolve_indextts_reference_path(
+    *,
+    preprocess_result: dict[str, Any],
+    training_reference_name: str,
+) -> Path | None:
+    normalized = Path(str(preprocess_result.get("normalized_wav_path") or "")).expanduser()
+    if normalized.exists():
+        return normalized
+
+    reference_name = Path(training_reference_name).name.strip()
+    if reference_name:
+        candidate = heygem_voice_root() / reference_name
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _infer_indextts2_preview_emotion(script: str) -> tuple[str, float]:
+    text = str(script or "").strip()
+    if any(token in text for token in ("欢迎", "大家好", "今天", "快速看看")):
+        return "自然亲切，带一点开场吸引力。", 0.32
+    if any(token in text for token in ("终于", "惊喜", "太强", "震撼")):
+        return "轻微兴奋但保持自然，重点词更有精神。", 0.36
+    return "自然口语化，语气稳定，轻微强调重点。", 0.28
 
 
 def _resolve_training_reference_text(preprocess_result: dict[str, Any]) -> str:
@@ -531,6 +605,7 @@ async def _submit_heygem_preview_to_base(
         last_error: Exception | None = None
         endpoint_candidates = _build_heygem_submit_endpoints(base_url)
         for endpoints in endpoint_candidates:
+            task_started = False
             try:
                 response = await client.post(endpoints["submit"], json=submit_payload)
                 response.raise_for_status()
@@ -540,11 +615,20 @@ async def _submit_heygem_preview_to_base(
                         str(submit_result.get("msg") or f"heygem submit failed from {endpoints['submit']}")
                     )
 
+                task_started = True
                 started_at = time.monotonic()
                 while time.monotonic() - started_at < _POLL_TIMEOUT_SECONDS:
                     query_response = await client.get(endpoints["query"], params={"code": task_code})
                     query_response.raise_for_status()
                     payload = query_response.json()
+                    payload_code = int(payload.get("code") or 0)
+                    if payload_code == 10004:
+                        completed_result = _resolve_completed_task_result(task_code)
+                        if completed_result is not None:
+                            return {
+                                "status": 2,
+                                "result": f"/{completed_result.name}",
+                            }
                     data = payload.get("data") or {}
                     status_value = int(data.get("status") or 0)
                     if status_value == 2:
@@ -553,6 +637,10 @@ async def _submit_heygem_preview_to_base(
                         raise RuntimeError(str(data.get("msg") or f"heygem preview failed from {endpoints['query']}"))
                     await asyncio.sleep(_POLL_INTERVAL_SECONDS)
             except Exception as exc:
+                if task_started:
+                    raise RuntimeError(
+                        f"heygem preview task failed from {endpoints['submit']}->{endpoints['query']}: {exc}"
+                    ) from exc
                 last_error = exc
                 continue
         if last_error is None:
@@ -1112,6 +1200,12 @@ def _resolve_local_result_path(result_value: str) -> Path | None:
         if candidate.exists():
             return candidate
     return None
+
+
+def _resolve_completed_task_result(task_code: str) -> Path | None:
+    if not task_code:
+        return None
+    return _resolve_local_result_path(f"/{task_code}-r.mp4")
 
 
 def _is_exact_file_duplicate(left: Path, right: Path) -> bool:

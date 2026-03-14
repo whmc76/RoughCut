@@ -481,7 +481,11 @@ function AvatarProfileCard({
                 <div className="muted compact-top">{run.script}</div>
                 {run.preview_mode ? (
                   <div className="muted compact-top">
-                    {run.preview_mode === "scripted_tts" ? "脚本 TTS 预览" : "原始声音样本回退预览"}
+                    {run.preview_mode === "scripted_tts"
+                      ? "脚本 TTS 预览"
+                      : run.preview_mode === "source_audio_direct"
+                        ? "HeyGem 直连预览"
+                        : "原始声音样本回退预览"}
                   </div>
                 ) : null}
                 {run.fallback_reason ? <div className="muted compact-top">已回退到原始声音样本</div> : null}

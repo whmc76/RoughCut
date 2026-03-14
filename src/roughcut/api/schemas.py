@@ -221,11 +221,13 @@ class PackagingConfigOut(BaseModel):
     watermark_position: str = "top_right"
     watermark_opacity: float = 0.82
     watermark_scale: float = 0.16
-    avatar_overlay_position: str = "bottom_right"
-    avatar_overlay_scale: float = 0.28
+    avatar_overlay_position: str = "top_left"
+    avatar_overlay_scale: float = 0.22
     avatar_overlay_corner_radius: int = 26
     avatar_overlay_border_width: int = 4
     avatar_overlay_border_color: str = "#F4E4B8"
+    export_resolution_mode: str = "source"
+    export_resolution_preset: str = "1080p"
     enabled: bool = True
 
 
@@ -260,6 +262,8 @@ class PackagingConfigPatch(BaseModel):
     avatar_overlay_corner_radius: int | None = None
     avatar_overlay_border_width: int | None = None
     avatar_overlay_border_color: str | None = None
+    export_resolution_mode: str | None = None
+    export_resolution_preset: str | None = None
     enabled: bool | None = None
 
 
@@ -344,6 +348,8 @@ class AvatarMaterialLibraryOut(BaseModel):
 class GlossaryTermCreate(BaseModel):
     wrong_forms: list[str] = Field(min_length=1)
     correct_form: str
+    scope_type: str = "global"
+    scope_value: str = ""
     category: str | None = None
     context_hint: str | None = None
 
@@ -352,6 +358,8 @@ class GlossaryTermOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: uuid.UUID
+    scope_type: str
+    scope_value: str
     wrong_forms: list[str]
     correct_form: str
     category: str | None
@@ -360,6 +368,8 @@ class GlossaryTermOut(BaseModel):
 
 
 class GlossaryTermUpdate(BaseModel):
+    scope_type: str | None = None
+    scope_value: str | None = None
     wrong_forms: list[str] | None = None
     correct_form: str | None = None
     category: str | None = None

@@ -355,6 +355,7 @@ def build_subtitle_review_memory(
         "terms": ranked_terms,
         "aliases": alias_pairs[:120],
         "style_examples": examples[:example_limit],
+        "phrase_preferences": list((user_memory or {}).get("phrase_preferences") or [])[:12],
         "style_preferences": list((user_memory or {}).get("style_preferences") or [])[:8],
     }
 
@@ -391,6 +392,26 @@ def _summarize_subtitle_review_memory(
         )
         if values:
             lines.append(f"- 常见错写归一: {values}")
+
+    phrases = review_memory.get("phrase_preferences") or []
+    if phrases:
+        values = " / ".join(
+            str(item.get("phrase") or "")
+            for item in phrases[:8]
+            if item.get("phrase")
+        )
+        if values:
+            lines.append(f"- 已学习短语: {values}")
+
+    styles = review_memory.get("style_preferences") or []
+    if styles:
+        values = " / ".join(
+            str(item.get("tag") or "")
+            for item in styles[:6]
+            if item.get("tag")
+        )
+        if values:
+            lines.append(f"- 表达风格偏好: {values}")
 
     examples = review_memory.get("style_examples") or []
     if include_examples and examples:
@@ -442,6 +463,14 @@ def apply_domain_term_corrections(text: str, review_memory: dict[str, Any] | Non
     if not review_memory:
         return result
 
+    compound_terms = [
+        str(item.get("term") or "").strip()
+        for item in review_memory.get("terms") or []
+        if _is_compound_domain_term(str(item.get("term") or "").strip())
+    ]
+    for term in compound_terms:
+        result = _replace_compound_phrase_match(result, term)
+
     for item in review_memory.get("aliases") or []:
         wrong = str(item.get("wrong") or "").strip()
         correct = str(item.get("correct") or "").strip()
@@ -452,9 +481,11 @@ def apply_domain_term_corrections(text: str, review_memory: dict[str, Any] | Non
     terms = [str(item.get("term") or "").strip() for item in review_memory.get("terms") or []]
     for term in terms:
         aliases = _DEFAULT_TERM_ALIASES.get(term, ())
+        if re.fullmatch(r"[A-Za-z][A-Za-z0-9 .+-]{1,24}", term):
+            result = re.sub(re.escape(term), term, result, flags=re.IGNORECASE)
         for wrong in aliases:
             result = re.sub(re.escape(wrong), term, result, flags=re.IGNORECASE)
-        if not aliases:
+        if not aliases or re.fullmatch(r"[A-Za-z][A-Za-z0-9 .+-]{1,24}", term):
             result = _replace_near_match(result, term)
     return result
 
@@ -563,6 +594,17 @@ def _split_compound_candidate(text: str) -> list[str]:
     return [candidate]
 
 
+def _extract_compound_components(text: str) -> list[str]:
+    candidate = str(text or "").strip()
+    components: list[str] = []
+    for anchor in sorted(_DOMAIN_ANCHORS, key=len, reverse=True):
+        if len(anchor) < 2:
+            continue
+        if anchor in candidate and anchor not in components:
+            components.append(anchor)
+    return components
+
+
 def _normalize_term(value: Any) -> str:
     text = " ".join(str(value or "").strip().split())
     if not text:
@@ -594,7 +636,7 @@ def _replace_near_match(text: str, term: str) -> str:
     if re.search(re.escape(term), text, re.IGNORECASE):
         return re.sub(re.escape(term), term, text, flags=re.IGNORECASE)
     if not re.search(r"[\u4e00-\u9fff]", term):
-        return text
+        return _replace_near_latin_token(text, term)
 
     candidates: list[tuple[float, int, int]] = []
     term_len = len(term)
@@ -617,6 +659,42 @@ def _replace_near_match(text: str, term: str) -> str:
     score, start, end = max(candidates, key=lambda item: (item[0], -(item[2] - item[1])))
     if score < 0.6:
         return text
+    return f"{text[:start]}{term}{text[end:]}"
+
+
+def _replace_near_latin_token(text: str, term: str) -> str:
+    best: tuple[float, str] | None = None
+    for token in re.findall(r"(?<![A-Za-z0-9])([A-Za-z][A-Za-z0-9+-]{2,23})(?![A-Za-z0-9])", text):
+        score = SequenceMatcher(None, token.upper(), term.upper()).ratio()
+        if best is None or score > best[0]:
+            best = (score, token)
+    if not best or best[0] < 0.72:
+        return text
+    return re.sub(re.escape(best[1]), term, text, count=1, flags=re.IGNORECASE)
+
+
+def _replace_compound_phrase_match(text: str, term: str) -> str:
+    if not text or not term or term in text:
+        return text
+    components = [part for part in _extract_compound_components(term) if len(part) >= 2]
+    if len(components) < 2:
+        return text
+
+    best: tuple[float, int, int] | None = None
+    term_len = len(term)
+    min_len = max(3, term_len - 2)
+    max_len = min(len(text), term_len + 2)
+    for size in range(min_len, max_len + 1):
+        for start in range(0, len(text) - size + 1):
+            span = text[start:start + size]
+            if not _compound_window_can_match(span, components):
+                continue
+            score = SequenceMatcher(None, span, term).ratio()
+            if best is None or score > best[0]:
+                best = (score, start, start + size)
+    if not best or best[0] < 0.58:
+        return text
+    _, start, end = best
     return f"{text[:start]}{term}{text[end:]}"
 
 
@@ -659,6 +737,37 @@ def _window_can_match(span: str, term: str) -> bool:
     if shared:
         return True
     return any(anchor in span and anchor in term for anchor in _DOMAIN_ANCHORS if len(anchor) >= 2)
+
+
+def _compound_window_can_match(span: str, components: list[str]) -> bool:
+    hits = 0
+    for component in components:
+        if component in span:
+            hits += 1
+            continue
+        if _span_has_component_like(span, component):
+            hits += 1
+    return hits >= 2
+
+
+def _span_has_component_like(span: str, component: str) -> bool:
+    if not span or not component:
+        return False
+    if component in span:
+        return True
+    comp_len = len(component)
+    min_len = max(2, comp_len - 1)
+    max_len = min(len(span), comp_len + 1)
+    for size in range(min_len, max_len + 1):
+        for start in range(0, len(span) - size + 1):
+            candidate = span[start:start + size]
+            if not _window_can_match(candidate, component):
+                continue
+            score = SequenceMatcher(None, candidate, component).ratio()
+            threshold = 0.72 if comp_len >= 4 else 0.64
+            if score >= threshold:
+                return True
+    return False
 
 
 def _source_name_is_informative(source_name: str) -> bool:

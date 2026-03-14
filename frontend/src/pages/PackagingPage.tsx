@@ -126,6 +126,25 @@ export function PackagingPage() {
                 value={String(config.watermark_scale)}
                 onChange={(event) => workspace.saveConfig.mutate({ watermark_scale: Number(event.target.value) })}
               />
+              <SelectField
+                label="导出分辨率模式"
+                value={config.export_resolution_mode ?? "source"}
+                onChange={(event) => workspace.saveConfig.mutate({ export_resolution_mode: event.target.value })}
+                options={[
+                  { value: "source", label: "保留原分辨率" },
+                  { value: "specified", label: "指定分辨率" },
+                ]}
+              />
+              <SelectField
+                label="指定分辨率"
+                value={config.export_resolution_preset ?? "1080p"}
+                onChange={(event) => workspace.saveConfig.mutate({ export_resolution_preset: event.target.value })}
+                options={[
+                  { value: "1080p", label: "1080p" },
+                  { value: "1440p", label: "2K" },
+                  { value: "2160p", label: "4K" },
+                ]}
+              />
             </div>
           </section>
 

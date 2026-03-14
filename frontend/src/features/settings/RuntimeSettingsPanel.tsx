@@ -52,12 +52,20 @@ export function RuntimeSettingsPanel({ form, config, onChange }: RuntimeSettings
           placeholder={config?.anthropic_api_key_set ? "已设置，留空则不更新" : "留空则不更新"}
         />
         <TextField label="MiniMax Base URL" value={String(form.minimax_base_url ?? "")} onChange={(event) => onChange("minimax_base_url", event.target.value)} />
+        <TextField label="MiniMax API Host" value={String(form.minimax_api_host ?? "")} onChange={(event) => onChange("minimax_api_host", event.target.value)} />
         <TextField
           label="MiniMax API Key"
           type="password"
           value={String(form.minimax_api_key ?? "")}
           onChange={(event) => onChange("minimax_api_key", event.target.value)}
           placeholder={config?.minimax_api_key_set ? "已设置，留空则不更新" : "留空则不更新"}
+        />
+        <TextField
+          label="MiniMax Coding Plan Key"
+          type="password"
+          value={String(form.minimax_coding_plan_api_key ?? "")}
+          onChange={(event) => onChange("minimax_coding_plan_api_key", event.target.value)}
+          placeholder={config?.minimax_coding_plan_api_key_set ? "已设置，留空则不更新" : "留空则不更新；默认回退 MiniMax API Key"}
         />
         <TextField label="Ollama Base URL" value={String(form.ollama_base_url ?? "")} onChange={(event) => onChange("ollama_base_url", event.target.value)} />
         <TextField

@@ -8,28 +8,30 @@ from roughcut.config import get_settings
 from roughcut.providers.search.base import SearchProvider, SearchResult
 
 
-def _normalize_minimax_api_host(base_url: str) -> str:
-    value = (base_url or "").strip().rstrip("/")
+def _normalize_minimax_api_host(api_host: str) -> str:
+    value = (api_host or "").strip().rstrip("/")
     if not value:
-        raise ValueError("MiniMax base URL is not configured")
+        raise ValueError("MiniMax API host is not configured")
 
     parts = urlsplit(value)
     path = parts.path.rstrip("/")
     if path.endswith("/v1"):
         path = path[:-3]
+    if path.endswith("/anthropic"):
+        path = path[:-10]
     normalized = urlunsplit((parts.scheme, parts.netloc, path, parts.query, parts.fragment)).rstrip("/")
     if not normalized:
-        raise ValueError("MiniMax base URL is invalid")
+        raise ValueError("MiniMax API host is invalid")
     return normalized
 
 
 class MiniMaxSearchProvider(SearchProvider):
     def __init__(self) -> None:
         settings = get_settings()
-        self._api_key = settings.minimax_api_key.strip()
+        self._api_key = settings.minimax_coding_plan_api_key.strip() or settings.minimax_api_key.strip()
         if not self._api_key:
-            raise ValueError("MiniMax API key is not configured")
-        self._api_host = _normalize_minimax_api_host(settings.minimax_base_url)
+            raise ValueError("MiniMax Coding Plan API key is not configured")
+        self._api_host = _normalize_minimax_api_host(settings.minimax_api_host)
 
     async def search(self, query: str, *, max_results: int = 5) -> list[SearchResult]:
         if not query.strip():
