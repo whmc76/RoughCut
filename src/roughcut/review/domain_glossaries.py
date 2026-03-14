@@ -12,6 +12,22 @@ _DOMAIN_TERM_LIBRARY: dict[str, tuple[GlossaryTermLike, ...]] = {
     "gear": (
         {"correct_form": "EDC", "wrong_forms": ["一滴西", "诶滴西", "E D C"], "category": "term", "context_hint": "Everyday Carry"},
         {"correct_form": "FAS", "wrong_forms": ["法斯", "发斯", "F A S"], "category": "term", "context_hint": "圈内缩写"},
+        {"correct_form": "NOC", "wrong_forms": ["N O C"], "category": "edc_brand", "context_hint": "EDC 品牌"},
+        {"correct_form": "REATE", "wrong_forms": ["锐特", "瑞特", "睿特"], "category": "edc_brand", "context_hint": "EDC 品牌"},
+        {"correct_form": "LEATHERMAN", "wrong_forms": ["莱泽曼", "来泽曼", "来着曼", "来泽慢", "来自慢", "雷泽曼"], "category": "edc_brand", "context_hint": "EDC 品牌"},
+        {"correct_form": "OLIGHT", "wrong_forms": ["傲雷", "O LIGHT"], "category": "edc_brand", "context_hint": "EDC 品牌"},
+        {"correct_form": "ZIPPO", "wrong_forms": ["芝宝", "Z I P P O"], "category": "edc_brand", "context_hint": "EDC 品牌"},
+        {"correct_form": "顶配", "wrong_forms": [], "category": "gear", "context_hint": "配置层级"},
+        {"correct_form": "次顶配", "wrong_forms": [], "category": "gear", "context_hint": "配置层级"},
+        {"correct_form": "标配", "wrong_forms": [], "category": "gear", "context_hint": "配置层级"},
+        {"correct_form": "高配", "wrong_forms": [], "category": "gear", "context_hint": "配置层级"},
+        {"correct_form": "低配", "wrong_forms": [], "category": "gear", "context_hint": "配置层级"},
+        {"correct_form": "钢马", "wrong_forms": [], "category": "gear", "context_hint": "EDC圈内简称"},
+        {"correct_form": "锆马", "wrong_forms": [], "category": "gear", "context_hint": "EDC圈内简称"},
+        {"correct_form": "钛马", "wrong_forms": [], "category": "gear", "context_hint": "EDC圈内简称"},
+        {"correct_form": "铜马", "wrong_forms": [], "category": "gear", "context_hint": "EDC圈内简称"},
+        {"correct_form": "大马", "wrong_forms": [], "category": "gear", "context_hint": "EDC圈内简称"},
+        {"correct_form": "大马士革", "wrong_forms": [], "category": "gear", "context_hint": "钢材/纹理表达"},
         {"correct_form": "潮玩", "wrong_forms": ["朝玩"], "category": "gear", "context_hint": "收藏向内容"},
         {"correct_form": "户外", "wrong_forms": ["户外儿"], "category": "gear", "context_hint": "户外装备"},
         {"correct_form": "战术", "wrong_forms": ["站术"], "category": "gear", "context_hint": "战术风格"},
@@ -29,6 +45,7 @@ _DOMAIN_TERM_LIBRARY: dict[str, tuple[GlossaryTermLike, ...]] = {
             "context_hint": "固定表达",
         },
         {"correct_form": "阳极", "wrong_forms": ["阳节"], "category": "process", "context_hint": "阳极氧化"},
+        {"correct_form": "镜面", "wrong_forms": ["静面", "净面"], "category": "visual", "context_hint": "表面质感"},
         {"correct_form": "雾面", "wrong_forms": ["屋面"], "category": "visual", "context_hint": "表面质感"},
         {"correct_form": "涂装", "wrong_forms": ["图装"], "category": "process", "context_hint": "表面工艺"},
         {"correct_form": "盒损", "wrong_forms": ["合损"], "category": "gear", "context_hint": "包装状态"},
@@ -48,6 +65,22 @@ _DOMAIN_TERM_LIBRARY: dict[str, tuple[GlossaryTermLike, ...]] = {
         {"correct_form": "背夹", "wrong_forms": ["背甲"], "category": "gear", "context_hint": "折刀/工具配件"},
     ),
     "edc": (
+        {"correct_form": "NOC", "wrong_forms": ["N O C"], "category": "edc_brand", "context_hint": "EDC 品牌"},
+        {"correct_form": "REATE", "wrong_forms": ["锐特", "瑞特", "睿特"], "category": "edc_brand", "context_hint": "EDC 品牌"},
+        {"correct_form": "LEATHERMAN", "wrong_forms": ["莱泽曼", "来泽曼", "来着曼", "来泽慢", "来自慢", "雷泽曼"], "category": "edc_brand", "context_hint": "EDC 品牌"},
+        {"correct_form": "OLIGHT", "wrong_forms": ["傲雷", "O LIGHT"], "category": "edc_brand", "context_hint": "EDC 品牌"},
+        {"correct_form": "ZIPPO", "wrong_forms": ["芝宝", "Z I P P O"], "category": "edc_brand", "context_hint": "EDC 品牌"},
+        {"correct_form": "顶配", "wrong_forms": [], "category": "gear", "context_hint": "配置层级"},
+        {"correct_form": "次顶配", "wrong_forms": [], "category": "gear", "context_hint": "配置层级"},
+        {"correct_form": "标配", "wrong_forms": [], "category": "gear", "context_hint": "配置层级"},
+        {"correct_form": "高配", "wrong_forms": [], "category": "gear", "context_hint": "配置层级"},
+        {"correct_form": "低配", "wrong_forms": [], "category": "gear", "context_hint": "配置层级"},
+        {"correct_form": "钢马", "wrong_forms": [], "category": "gear", "context_hint": "EDC圈内简称"},
+        {"correct_form": "锆马", "wrong_forms": [], "category": "gear", "context_hint": "EDC圈内简称"},
+        {"correct_form": "钛马", "wrong_forms": [], "category": "gear", "context_hint": "EDC圈内简称"},
+        {"correct_form": "铜马", "wrong_forms": [], "category": "gear", "context_hint": "EDC圈内简称"},
+        {"correct_form": "大马", "wrong_forms": [], "category": "gear", "context_hint": "EDC圈内简称"},
+        {"correct_form": "大马士革", "wrong_forms": [], "category": "gear", "context_hint": "钢材/纹理表达"},
         {"correct_form": "大佬", "wrong_forms": ["大老"], "category": "slang", "context_hint": "口播称呼"},
         {"correct_form": "贴片", "wrong_forms": ["揭片", "接片"], "category": "process", "context_hint": "装饰件/镶片"},
         {"correct_form": "电镀", "wrong_forms": ["电路", "电渡", "店镀"], "category": "process", "context_hint": "表面处理"},
@@ -64,6 +97,7 @@ _DOMAIN_TERM_LIBRARY: dict[str, tuple[GlossaryTermLike, ...]] = {
             "context_hint": "固定表达",
         },
         {"correct_form": "阳极", "wrong_forms": ["阳节"], "category": "process", "context_hint": "阳极氧化"},
+        {"correct_form": "镜面", "wrong_forms": ["静面", "净面"], "category": "visual", "context_hint": "表面质感"},
         {"correct_form": "雾面", "wrong_forms": ["屋面"], "category": "visual", "context_hint": "表面质感"},
     ),
     "tech": (
@@ -105,6 +139,18 @@ _DOMAIN_TERM_LIBRARY: dict[str, tuple[GlossaryTermLike, ...]] = {
         {"correct_form": "ComfyUI", "wrong_forms": ["comfy ui", "康菲UI", "康飞UI", "咖啡外"], "category": "tech_brand", "context_hint": "AI工作流工具"},
         {"correct_form": "无限画布", "wrong_forms": ["无边画布", "无限画板"], "category": "tech_feature", "context_hint": "创作功能"},
         {"correct_form": "节点编排", "wrong_forms": ["节点排布"], "category": "tech_feature", "context_hint": "工作流设计"},
+    ),
+    "coding": (
+        {"correct_form": "编程", "wrong_forms": ["边程"], "category": "coding", "context_hint": "软件开发"},
+        {"correct_form": "代码", "wrong_forms": ["带码"], "category": "coding", "context_hint": "软件开发"},
+        {"correct_form": "函数", "wrong_forms": ["分数"], "category": "coding", "context_hint": "编程概念"},
+        {"correct_form": "接口", "wrong_forms": ["借口"], "category": "coding", "context_hint": "编程概念"},
+        {"correct_form": "仓库", "wrong_forms": ["仓苦"], "category": "coding", "context_hint": "Git 仓库"},
+        {"correct_form": "提交", "wrong_forms": ["题交"], "category": "coding", "context_hint": "代码提交"},
+        {"correct_form": "分支", "wrong_forms": ["分之"], "category": "coding", "context_hint": "Git 分支"},
+        {"correct_form": "调试", "wrong_forms": ["调事"], "category": "coding", "context_hint": "开发流程"},
+        {"correct_form": "报错", "wrong_forms": ["爆错"], "category": "coding", "context_hint": "开发流程"},
+        {"correct_form": "部署", "wrong_forms": ["布署"], "category": "coding", "context_hint": "开发流程"},
     ),
     "travel": (
         {"correct_form": "citywalk", "wrong_forms": ["city walk", "city沃克"], "category": "travel", "context_hint": "旅行方式"},
@@ -184,13 +230,56 @@ _DOMAIN_TERM_LIBRARY: dict[str, tuple[GlossaryTermLike, ...]] = {
         {"correct_form": "可动", "wrong_forms": ["可洞"], "category": "toy", "context_hint": "玩具结构"},
         {"correct_form": "盒损", "wrong_forms": ["合损"], "category": "toy", "context_hint": "包装状态"},
     ),
+    "knife": (
+        {"correct_form": "折刀", "wrong_forms": ["折到"], "category": "knife", "context_hint": "刀具品类"},
+        {"correct_form": "主刀", "wrong_forms": ["主到", "主导"], "category": "knife", "context_hint": "刀具结构"},
+        {"correct_form": "副刀", "wrong_forms": ["辅刀"], "category": "knife", "context_hint": "刀具结构"},
+        {"correct_form": "锁定", "wrong_forms": ["所定"], "category": "knife", "context_hint": "刀具结构"},
+        {"correct_form": "开合", "wrong_forms": ["开和", "开盒"], "category": "knife", "context_hint": "刀具动作"},
+        {"correct_form": "背夹", "wrong_forms": ["背甲"], "category": "knife", "context_hint": "刀具配件"},
+    ),
+    "flashlight": (
+        {"correct_form": "手电", "wrong_forms": ["手店"], "category": "flashlight", "context_hint": "照明品类"},
+        {"correct_form": "筒身", "wrong_forms": ["桶身"], "category": "flashlight", "context_hint": "手电结构"},
+        {"correct_form": "灯珠", "wrong_forms": ["灯株"], "category": "flashlight", "context_hint": "照明术语"},
+        {"correct_form": "色温", "wrong_forms": ["色文"], "category": "flashlight", "context_hint": "照明术语"},
+        {"correct_form": "泛光", "wrong_forms": ["反光"], "category": "flashlight", "context_hint": "照明术语"},
+        {"correct_form": "聚光", "wrong_forms": ["具光"], "category": "flashlight", "context_hint": "照明术语"},
+    ),
+    "lighter": (
+        {"correct_form": "打火机", "wrong_forms": ["打火鸡"], "category": "lighter", "context_hint": "点火品类"},
+        {"correct_form": "火轮", "wrong_forms": ["货轮"], "category": "lighter", "context_hint": "打火机结构"},
+        {"correct_form": "内胆", "wrong_forms": ["内单"], "category": "lighter", "context_hint": "打火机结构"},
+        {"correct_form": "煤油", "wrong_forms": ["没油"], "category": "lighter", "context_hint": "打火机燃料"},
+    ),
+    "tactical": (
+        {"correct_form": "战术", "wrong_forms": ["站术"], "category": "tactical", "context_hint": "战术风格"},
+        {"correct_form": "胸挂", "wrong_forms": ["胸卦"], "category": "tactical", "context_hint": "战术挂载"},
+        {"correct_form": "模组", "wrong_forms": ["模块"], "category": "tactical", "context_hint": "战术扩展"},
+        {"correct_form": "快拆", "wrong_forms": ["快差"], "category": "tactical", "context_hint": "战术结构"},
+        {"correct_form": "尼龙", "wrong_forms": ["泥龙"], "category": "tactical", "context_hint": "战术材质"},
+    ),
+    "outdoor": (
+        {"correct_form": "户外", "wrong_forms": ["户外儿"], "category": "outdoor", "context_hint": "户外领域"},
+        {"correct_form": "露营", "wrong_forms": ["路营"], "category": "outdoor", "context_hint": "户外活动"},
+        {"correct_form": "徒步", "wrong_forms": ["图步"], "category": "outdoor", "context_hint": "户外活动"},
+        {"correct_form": "营地", "wrong_forms": ["迎地"], "category": "outdoor", "context_hint": "户外场景"},
+        {"correct_form": "炉头", "wrong_forms": ["驴头"], "category": "outdoor", "context_hint": "户外装备"},
+        {"correct_form": "天幕", "wrong_forms": ["天木"], "category": "outdoor", "context_hint": "户外装备"},
+    ),
+    "functional_wear": (
+        {"correct_form": "机能", "wrong_forms": ["肌能"], "category": "wear", "context_hint": "机能风格"},
+        {"correct_form": "机能装备", "wrong_forms": ["机能装被"], "category": "wear", "context_hint": "机能穿搭"},
+        {"correct_form": "战术裤", "wrong_forms": ["站术裤"], "category": "wear", "context_hint": "机能穿搭"},
+        {"correct_form": "通勤包", "wrong_forms": ["通情包"], "category": "wear", "context_hint": "装备穿搭"},
+    ),
 }
 
 _CHANNEL_PROFILE_DOMAINS: dict[str, tuple[str, ...]] = {
-    "edc_tactical": ("gear",),
-    "screen_tutorial": ("tech", "ai"),
+    "edc_tactical": ("gear", "knife", "tactical", "outdoor", "flashlight", "lighter", "functional_wear", "toy"),
+    "screen_tutorial": ("tech", "ai", "coding"),
     "vlog_daily": ("travel",),
-    "talking_head_commentary": ("tech", "ai"),
+    "talking_head_commentary": ("tech", "ai", "coding"),
     "gameplay_highlight": ("tech",),
     "food_explore": ("food",),
     "unboxing_default": ("gear", "tech"),
@@ -204,28 +293,51 @@ _CHANNEL_PROFILE_DOMAINS: dict[str, tuple[str, ...]] = {
 _DOMAIN_KEYWORDS: dict[str, tuple[str, ...]] = {
     "gear": (
         "EDC", "FAS", "折刀", "刀", "钛", "柄材", "钢材", "背夹", "工具钳", "彩雕", "深雕",
-        "潮玩", "盲盒", "隐藏款", "官图", "原型", "涂装", "素体", "关节", "可动", "盒损", "手办",
+        "NOC", "REATE", "LEATHERMAN", "OLIGHT", "ZIPPO",
+        "顶配", "次顶配", "标配", "高配", "低配", "钢马", "锆马", "钛马", "铜马", "大马", "大马士革",
+        "镜面", "雾面", "潮玩", "盲盒", "隐藏款", "官图", "原型", "涂装", "素体", "关节", "可动", "盒损", "手办",
         "户外", "战术", "露营", "徒步", "营地", "快挂", "鞘套", "战术笔",
     ),
-    "edc": ("EDC", "FAS", "折刀", "刀", "钛", "柄材", "钢材", "背夹", "工具钳", "彩雕", "深雕"),
+    "edc": ("EDC", "FAS", "NOC", "REATE", "LEATHERMAN", "OLIGHT", "ZIPPO", "折刀", "刀", "钛", "柄材", "钢材", "背夹", "工具钳", "彩雕", "深雕", "顶配", "次顶配", "标配", "高配", "低配", "钢马", "锆马", "钛马", "铜马", "大马", "大马士革", "镜面", "雾面"),
     "tech": ("芯片", "显卡", "处理器", "续航", "屏幕", "相机", "手机", "笔记本", "耳机", "快充", "固件", "RunningHub", "ComfyUI", "OpenClaw", "无限画布", "节点编排"),
     "ai": ("AI", "提示词", "工作流", "模型", "微调", "推理", "多模态", "智能体", "RAG", "LoRA", "Agent", "MCP", "Checkpoint", "ControlNet", "Flux", "RunningHub", "ComfyUI", "OpenClaw", "无限画布", "节点编排"),
+    "coding": ("编程", "代码", "函数", "接口", "仓库", "提交", "分支", "调试", "报错", "部署", "脚本", "API"),
     "travel": ("旅行", "出行", "机票", "酒店", "民宿", "值机", "citywalk", "攻略", "景点", "登机"),
     "food": ("探店", "试吃", "口感", "锅气", "回甘", "拉花", "挂耳", "熟成", "奶茶", "火锅", "甜品", "烧烤"),
     "finance": ("财经", "金融", "利率", "汇率", "通胀", "降息", "加息", "美联储", "纳斯达克", "标普", "财报", "市盈率"),
     "news": ("国际新闻", "外媒", "局势", "停火", "制裁", "峰会", "外交", "联合国", "北约", "欧盟", "总统", "总理"),
     "sports": ("体育", "赛事", "比分", "加时", "绝杀", "点球", "越位", "三分", "篮板", "助攻", "季后赛", "世界杯"),
     "toy": ("潮玩", "盲盒", "隐藏款", "官图", "原型", "涂装", "素体", "关节", "可动", "盒损", "手办"),
+    "knife": ("折刀", "主刀", "副刀", "锁定", "开合", "背夹", "刃型", "柄材", "钢材", "轴锁", "线锁"),
+    "flashlight": ("手电", "灯珠", "色温", "泛光", "聚光", "流明", "筒身", "尾按"),
+    "lighter": ("打火机", "内胆", "火轮", "煤油", "直冲", "火焰"),
+    "tactical": ("战术", "胸挂", "快拆", "模组", "尼龙", "挂载"),
+    "outdoor": ("户外", "露营", "徒步", "营地", "炉头", "天幕", "野营"),
+    "functional_wear": ("机能", "机能装备", "战术裤", "通勤包", "工装", "穿搭"),
 }
 
-_DOMAIN_BUNDLES: dict[str, tuple[str, ...]] = {
-    "gear": ("gear", "edc", "toy"),
+_DOMAIN_COMPATIBILITY: dict[str, tuple[str, ...]] = {
+    "gear": ("edc", "knife", "flashlight", "lighter", "tactical", "outdoor", "functional_wear", "toy"),
+    "edc": ("gear", "knife", "flashlight", "lighter", "tactical", "outdoor", "functional_wear", "toy"),
+    "knife": ("gear", "edc", "tactical", "outdoor"),
+    "flashlight": ("gear", "edc", "outdoor", "tactical"),
+    "lighter": ("gear", "edc", "outdoor"),
+    "tactical": ("gear", "edc", "knife", "outdoor", "functional_wear"),
+    "outdoor": ("gear", "edc", "flashlight", "lighter", "tactical", "functional_wear"),
+    "functional_wear": ("gear", "edc", "tactical", "outdoor"),
+    "toy": ("gear", "edc"),
+    "tech": ("ai", "coding"),
+    "ai": ("tech", "coding"),
+    "coding": ("tech", "ai"),
+    "finance": ("news",),
+    "news": ("finance",),
 }
 
 _VISIBLE_DOMAIN_PACKS: tuple[str, ...] = (
     "gear",
     "tech",
     "ai",
+    "coding",
     "travel",
     "food",
     "finance",
@@ -248,11 +360,42 @@ def resolve_builtin_glossary_terms(
         source_name=source_name,
     )
     merged: list[GlossaryTermLike] = []
-    for domain in domains:
-        expanded_domains = _DOMAIN_BUNDLES.get(domain, (domain,))
-        for expanded in expanded_domains:
-            merged.extend(_DOMAIN_TERM_LIBRARY.get(expanded, ()))
+    for domain in _expand_compatible_domains(domains):
+        for term in _DOMAIN_TERM_LIBRARY.get(domain, ()):
+            merged.append({**term, "domain": domain})
     return merge_glossary_terms([], merged)
+
+
+def filter_scoped_glossary_terms(
+    terms: list[GlossaryTermLike] | None,
+    *,
+    channel_profile: str | None,
+    content_profile: dict[str, Any] | None = None,
+    subtitle_items: list[dict[str, Any]] | None = None,
+    source_name: str | None = None,
+) -> list[GlossaryTermLike]:
+    detected_domains = set(
+        detect_glossary_domains(
+            channel_profile=channel_profile,
+            content_profile=content_profile,
+            subtitle_items=subtitle_items,
+            source_name=source_name,
+        )
+    )
+    filtered: list[GlossaryTermLike] = []
+    for term in terms or []:
+        scope_type = str(term.get("scope_type") or "global").strip() or "global"
+        scope_value = str(term.get("scope_value") or "").strip()
+        if scope_type == "global":
+            filtered.append(term)
+            continue
+        if scope_type == "channel_profile" and channel_profile and scope_value == channel_profile:
+            filtered.append(term)
+            continue
+        if scope_type == "domain" and scope_value in detected_domains:
+            filtered.append(term)
+            continue
+    return filtered
 
 
 def merge_glossary_terms(
@@ -278,6 +421,8 @@ def merge_glossary_terms(
                 current["category"] = raw.get("category")
             if raw.get("context_hint") and not current.get("context_hint"):
                 current["context_hint"] = raw.get("context_hint")
+            if raw.get("domain") and not current.get("domain"):
+                current["domain"] = raw.get("domain")
             merged[correct_form] = current
     return list(merged.values())
 
@@ -302,13 +447,24 @@ def detect_glossary_domains(
     for item in subtitle_items or []:
         haystacks.append(str(item.get("text_final") or item.get("text_norm") or item.get("text_raw") or ""))
     joined = " ".join(haystacks).upper()
-
+    scores: dict[str, int] = {}
     for domain, keywords in _DOMAIN_KEYWORDS.items():
-        if any(keyword.upper() in joined for keyword in keywords) and domain not in domains:
+        score = 0
+        for keyword in keywords:
+            if keyword.upper() in joined:
+                score += 1 if len(keyword) <= 2 else 2
+        if score > 0:
+            scores[domain] = score
+
+    for domain, score in sorted(scores.items(), key=lambda item: (-item[1], item[0])):
+        threshold = 1 if domain in {"gear", "edc"} else 2
+        if score >= threshold and domain not in domains:
             domains.append(domain)
 
-    if any(domain in domains for domain in ("gear", "edc", "toy")):
-        domains = ["gear", *[domain for domain in domains if domain not in {"gear", "edc", "toy"}]]
+    if any(domain in domains for domain in ("gear", "edc", "toy", "knife", "flashlight", "lighter", "tactical", "outdoor", "functional_wear")):
+        domains = ["gear", *[domain for domain in domains if domain != "gear"]]
+    if any(domain in domains for domain in ("tech", "ai", "coding")) and "tech" not in domains:
+        domains = ["tech", *domains]
 
     if not domains:
         domains.append("tech")
@@ -327,12 +483,11 @@ def has_cjk(text: str) -> bool:
 def list_builtin_glossary_packs() -> list[dict[str, Any]]:
     packs: list[dict[str, Any]] = []
     for domain in _VISIBLE_DOMAIN_PACKS:
-        expanded_domains = _DOMAIN_BUNDLES.get(domain, (domain,))
         terms = merge_glossary_terms(
             [],
             [
                 term
-                for expanded in expanded_domains
+                for expanded in _expand_compatible_domains([domain])
                 for term in _DOMAIN_TERM_LIBRARY.get(expanded, ())
             ],
         )
@@ -350,3 +505,19 @@ def list_builtin_glossary_packs() -> list[dict[str, Any]]:
             }
         )
     return packs
+
+
+def _expand_compatible_domains(domains: list[str]) -> list[str]:
+    ordered: list[str] = []
+    seen: set[str] = set()
+    queue = [domain for domain in domains if domain]
+    while queue:
+        domain = queue.pop(0)
+        if domain in seen:
+            continue
+        seen.add(domain)
+        ordered.append(domain)
+        for related in _DOMAIN_COMPATIBILITY.get(domain, ()):
+            if related not in seen:
+                queue.append(related)
+    return ordered

@@ -51,6 +51,7 @@ async def test_content_profile_memory_records_corrections_and_keywords(db_sessio
     assert memory["field_preferences"]["subject_model"][0]["value"] == "ARC"
     assert memory["keyword_preferences"][0]["keyword"] == "LEATHERMAN ARC"
     assert memory["recent_corrections"][0]["field_name"] in {"subject_brand", "subject_model"}
+    assert any(item["phrase"] == "LEATHERMAN ARC" for item in memory["phrase_preferences"])
 
 
 def test_content_profile_memory_cloud_prioritizes_specific_terms():
@@ -67,9 +68,18 @@ def test_content_profile_memory_cloud_prioritizes_specific_terms():
             "recent_corrections": [
                 {"field_name": "subject_model", "original_value": "", "corrected_value": "ARC", "source_name": "demo.mp4"}
             ],
+            "phrase_preferences": [
+                {"phrase": "次顶配镜面", "count": 4},
+            ],
+            "style_preferences": [
+                {"tag": "detail_focused", "count": 3, "example": "细节和工艺这次都拉满"},
+            ],
         }
     )
 
     assert cloud["words"][0]["label"] in {"LEATHERMAN", "LEATHERMAN ARC"}
     assert any(item["label"] == "ARC" and item["kind"] == "subject_model" for item in cloud["words"])
     assert cloud["recent_corrections"][0]["corrected_value"] == "ARC"
+    assert any(item["label"] == "次顶配镜面" and item["kind"] == "phrase" for item in cloud["words"])
+    assert cloud["phrases"][0]["phrase"] == "次顶配镜面"
+    assert cloud["styles"][0]["tag"] == "detail_focused"

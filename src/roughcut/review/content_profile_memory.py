@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
+import re
 from typing import Any
 
 from sqlalchemy import select
@@ -44,13 +45,22 @@ async def load_content_profile_user_memory(
     field_preferences = _build_field_preferences(corrections, channel_profile=channel_profile, limit=field_limit)
     recent_corrections = _build_recent_corrections(corrections, channel_profile=channel_profile, limit=recent_limit)
     keyword_preferences = _build_keyword_preferences(keyword_stats, channel_profile=channel_profile, limit=keyword_limit)
+    phrase_preferences = _build_phrase_preferences(
+        corrections,
+        keyword_stats,
+        channel_profile=channel_profile,
+        limit=keyword_limit,
+    )
+    style_preferences = _build_style_preferences(corrections, channel_profile=channel_profile, limit=6)
 
-    if not any([field_preferences, recent_corrections, keyword_preferences]):
+    if not any([field_preferences, recent_corrections, keyword_preferences, phrase_preferences, style_preferences]):
         return {}
     return {
         "field_preferences": field_preferences,
         "recent_corrections": recent_corrections,
         "keyword_preferences": keyword_preferences,
+        "phrase_preferences": phrase_preferences,
+        "style_preferences": style_preferences,
     }
 
 
@@ -97,6 +107,22 @@ def build_content_profile_memory_cloud(user_memory: dict[str, Any] | None) -> di
             hint="高频关键词",
         )
 
+    phrase_preferences = user_memory.get("phrase_preferences") or []
+    for index, item in enumerate(phrase_preferences):
+        label = _normalize_keyword(item.get("phrase"))
+        if not label:
+            continue
+        count = max(1, int(item.get("count") or 0))
+        weight = min(10, count + 3 - min(index, 4))
+        _remember_cloud_word(
+            words,
+            label=label,
+            count=count,
+            weight=weight,
+            kind="phrase",
+            hint="已学习短语",
+        )
+
     ranked_words = sorted(
         words.values(),
         key=lambda item: (-int(item["weight"]), -int(item["count"]), item["label"]),
@@ -104,6 +130,8 @@ def build_content_profile_memory_cloud(user_memory: dict[str, Any] | None) -> di
     return {
         "words": ranked_words[:18],
         "recent_corrections": list(user_memory.get("recent_corrections") or [])[:6],
+        "phrases": phrase_preferences[:8],
+        "styles": list(user_memory.get("style_preferences") or [])[:6],
     }
 
 
@@ -220,6 +248,57 @@ def _build_keyword_preferences(
     ]
 
 
+def _build_phrase_preferences(
+    corrections: list[ContentProfileCorrection],
+    stats: list[ContentProfileKeywordStat],
+    *,
+    channel_profile: str | None,
+    limit: int,
+) -> list[dict[str, Any]]:
+    counts: Counter[str] = Counter()
+    for item in corrections:
+        if channel_profile and item.channel_profile not in {None, channel_profile}:
+            continue
+        for phrase in _extract_learning_phrases(item.corrected_value):
+            counts[phrase] += 2 if channel_profile and item.channel_profile == channel_profile else 1
+
+    for item in stats:
+        weight = 0
+        if item.scope_type == "global":
+            weight = max(1, int(item.usage_count or 0))
+        elif channel_profile and item.scope_type == "channel_profile" and item.scope_value == channel_profile:
+            weight = max(1, int(item.usage_count or 0)) * 2
+        if weight <= 0:
+            continue
+        for phrase in _extract_learning_phrases(item.keyword):
+            counts[phrase] += weight
+
+    return [{"phrase": phrase, "count": count} for phrase, count in counts.most_common(limit)]
+
+
+def _build_style_preferences(
+    corrections: list[ContentProfileCorrection],
+    *,
+    channel_profile: str | None,
+    limit: int,
+) -> list[dict[str, Any]]:
+    counts: Counter[str] = Counter()
+    examples: dict[str, str] = {}
+    for item in corrections:
+        if item.field_name not in {"video_theme"}:
+            continue
+        if channel_profile and item.channel_profile not in {None, channel_profile}:
+            continue
+        value = _clean_memory_value(item.corrected_value)
+        for tag in _infer_style_tags(value):
+            counts[tag] += 2 if channel_profile and item.channel_profile == channel_profile else 1
+            examples.setdefault(tag, value)
+    return [
+        {"tag": tag, "count": count, "example": examples.get(tag, "")}
+        for tag, count in counts.most_common(limit)
+    ]
+
+
 async def _increment_keyword_stat(
     session: AsyncSession,
     *,
@@ -270,6 +349,53 @@ def _field_word_bonus(field_name: str) -> int:
     if field_name == "video_theme":
         return 2
     return 1
+
+
+def _extract_learning_phrases(value: Any) -> list[str]:
+    text = _normalize_keyword(value)
+    if not text:
+        return []
+    phrases: list[str] = []
+    seen: set[str] = set()
+    for fragment in text.replace("/", " ").replace("｜", " ").split():
+        cleaned = fragment.strip(" ,，。；;：:")
+        if len(cleaned) < 4 or len(cleaned) > 18:
+            continue
+        if cleaned in seen:
+            continue
+        if _looks_like_learning_phrase(cleaned):
+            seen.add(cleaned)
+            phrases.append(cleaned)
+    if not phrases and _looks_like_learning_phrase(text):
+        phrases.append(text[:18])
+    return phrases
+
+
+def _looks_like_learning_phrase(text: str) -> bool:
+    compact = str(text or "").strip()
+    if len(compact) < 4:
+        return False
+    if re.search(r"[A-Z]{2,}[A-Z0-9-]*\s+[A-Z0-9-]{2,}", compact):
+        return True
+    hits = 0
+    for token in ("顶配", "次顶配", "标配", "高配", "低配", "镜面", "雾面", "折刀", "工具钳", "手电", "打火机", "工作流", "提示词", "节点", "接口", "代码", "部署"):
+        if token in compact:
+            hits += 1
+    return hits >= 2
+
+
+def _infer_style_tags(value: Any) -> list[str]:
+    text = _clean_memory_value(value)
+    tags: list[str] = []
+    if any(token in text for token in ("开箱", "评测", "上手", "对比")):
+        tags.append("review")
+    if any(token in text for token in ("教程", "流程", "讲解", "实战")):
+        tags.append("tutorial")
+    if any(token in text for token in ("炸", "拉满", "真香", "太狠", "离谱")):
+        tags.append("high_energy")
+    if any(token in text for token in ("细节", "质感", "做工", "工艺")):
+        tags.append("detail_focused")
+    return tags
 
 
 def _remember_cloud_word(

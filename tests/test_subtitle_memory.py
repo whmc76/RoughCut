@@ -117,6 +117,49 @@ def test_apply_domain_term_corrections_fixes_edc_phrase_typos():
     assert "华丽历" not in corrected
 
 
+def test_apply_domain_term_corrections_does_not_overcorrect_long_config_terms():
+    corrected = apply_domain_term_corrections(
+        "首先还是这个自定配顶面吧",
+        {
+          "terms": [{"term": "顶配"}, {"term": "次顶配"}],
+          "aliases": [],
+          "style_examples": [],
+        },
+    )
+
+    assert "次顶配" not in corrected
+
+
+def test_build_transcription_prompt_includes_new_edc_visual_hotword():
+    prompt = build_transcription_prompt(
+        source_name="mirror_finish.mp4",
+        channel_profile="edc_tactical",
+        review_memory={
+            "terms": [{"term": "镜面"}, {"term": "雾面"}],
+            "aliases": [{"wrong": "静面", "correct": "镜面"}],
+            "style_examples": [],
+        },
+    )
+
+    assert "镜面" in prompt
+    assert "静面=镜面" in prompt
+
+
+def test_apply_domain_term_corrections_fixes_jingmian_typos():
+    corrected = apply_domain_term_corrections(
+        "这个静面效果确实更亮，净面处理也更显质感。",
+        {
+            "terms": [{"term": "镜面"}],
+            "aliases": [],
+            "style_examples": [],
+        },
+    )
+
+    assert "静面" not in corrected
+    assert "净面" not in corrected
+    assert corrected.count("镜面") == 2
+
+
 def test_build_subtitle_review_memory_injects_default_edc_glossary():
     memory = build_subtitle_review_memory(
         channel_profile="edc_tactical",
@@ -134,6 +177,23 @@ def test_build_subtitle_review_memory_injects_default_edc_glossary():
     assert any(item["correct"] == "极致华丽" for item in memory["aliases"])
 
 
+def test_build_subtitle_review_memory_expands_edc_subdomains():
+    memory = build_subtitle_review_memory(
+        channel_profile="edc_tactical",
+        glossary_terms=[],
+        user_memory={},
+        recent_subtitles=[{"text_final": "这个手电的泛光和色温更稳，旁边那把折刀背夹也做得更细。"}],
+        content_profile={"video_theme": "EDC手电和折刀开箱评测"},
+    )
+
+    terms = [item["term"] for item in memory["terms"]]
+
+    assert "手电" in terms
+    assert "泛光" in terms
+    assert "折刀" in terms
+    assert "背夹" in terms
+
+
 def test_build_subtitle_review_memory_injects_ai_and_tech_glossary():
     memory = build_subtitle_review_memory(
         channel_profile="screen_tutorial",
@@ -148,6 +208,24 @@ def test_build_subtitle_review_memory_injects_ai_and_tech_glossary():
     assert "提示词" in terms
     assert "RAG" in terms
     assert "工作流" in terms
+    assert "RunningHub" in terms
+
+
+def test_build_subtitle_review_memory_injects_coding_with_adjacent_ai_tech_terms():
+    memory = build_subtitle_review_memory(
+        channel_profile="screen_tutorial",
+        glossary_terms=[],
+        user_memory={},
+        recent_subtitles=[{"text_final": "这个接口调试完之后，再把代码提交到仓库。"}],
+        content_profile={"video_theme": "AI 编程工作流实战"},
+    )
+
+    terms = [item["term"] for item in memory["terms"]]
+
+    assert "接口" in terms
+    assert "代码" in terms
+    assert "工作流" in terms
+    assert "提示词" in terms
 
 
 def test_build_subtitle_review_memory_injects_ai_creator_hotwords():
@@ -250,3 +328,81 @@ def test_build_subtitle_review_memory_prioritizes_aliases_for_ranked_terms():
 
     assert ("法斯", "FAS") in alias_map
     assert any(correct == "极致华丽" for _, correct in alias_map)
+
+
+def test_build_subtitle_review_memory_promotes_recent_edc_correction_aliases():
+    memory = build_subtitle_review_memory(
+        channel_profile="edc_tactical",
+        glossary_terms=[],
+        user_memory={
+            "recent_corrections": [
+                {
+                    "field_name": "video_theme",
+                    "original_value": "刚马镜面折刀开箱",
+                    "corrected_value": "钢马镜面折刀开箱",
+                    "source_name": "demo.mp4",
+                }
+            ],
+            "field_preferences": {},
+            "keyword_preferences": [],
+        },
+        recent_subtitles=[],
+        content_profile={"subject_type": "EDC折刀"},
+    )
+
+    alias_map = {(item["wrong"], item["correct"]) for item in memory["aliases"]}
+    terms = [item["term"] for item in memory["terms"]]
+
+    assert ("刚马镜面折刀开箱", "钢马镜面折刀开箱") in alias_map
+    assert "钢马镜面折刀开箱" in terms
+
+
+def test_build_subtitle_review_memory_uses_phrase_preferences_as_learning_memory():
+    memory = build_subtitle_review_memory(
+        channel_profile="edc_tactical",
+        glossary_terms=[],
+        user_memory={
+            "phrase_preferences": [
+                {"phrase": "次顶配镜面", "count": 5},
+            ],
+            "style_preferences": [
+                {"tag": "detail_focused", "count": 2, "example": "细节和工艺这次都拉满"},
+            ],
+        },
+        recent_subtitles=[],
+        content_profile={"subject_type": "EDC折刀"},
+    )
+
+    terms = [item["term"] for item in memory["terms"]]
+
+    assert "次顶配镜面" in terms
+    assert memory["style_preferences"][0]["tag"] == "detail_focused"
+
+
+def test_build_subtitle_review_memory_promotes_compound_domain_phrases_from_context():
+    memory = build_subtitle_review_memory(
+        channel_profile="edc_tactical",
+        glossary_terms=[],
+        user_memory={},
+        recent_subtitles=[{"text_final": "这次顶配镜面和雾面版本放一起看差别更明显。"}],
+        content_profile={"subject_type": "EDC折刀", "summary": "次顶配镜面更亮"},
+    )
+
+    terms = [item["term"] for item in memory["terms"]]
+
+    assert "次顶配镜面" in terms
+
+
+def test_apply_domain_term_corrections_prefers_compound_domain_phrase_when_available():
+    corrected = apply_domain_term_corrections(
+        "这个次定配静面看起来会更亮一点",
+        {
+            "terms": [{"term": "次顶配镜面"}, {"term": "次顶配"}, {"term": "镜面"}],
+            "aliases": [],
+            "style_examples": [],
+        },
+    )
+
+    assert "次顶配镜面" in corrected
+    assert "次定配" not in corrected
+    assert "静面" not in corrected

@@ -5,12 +5,17 @@ from difflib import SequenceMatcher
 import re
 from typing import Any
 
-from roughcut.review.domain_glossaries import merge_glossary_terms, resolve_builtin_glossary_terms
+from roughcut.review.domain_glossaries import detect_glossary_domains, merge_glossary_terms, resolve_builtin_glossary_terms
 
 
 _DOMAIN_ANCHORS = (
     "EDC",
     "FAS",
+    "NOC",
+    "REATE",
+    "LEATHERMAN",
+    "OLIGHT",
+    "ZIPPO",
     "工具钳",
     "多功能工具钳",
     "工具",
@@ -30,12 +35,24 @@ _DOMAIN_ANCHORS = (
     "电镀",
     "渐变",
     "图纸",
+    "顶配",
+    "次顶配",
+    "标配",
+    "高配",
+    "低配",
+    "钢马",
+    "锆马",
+    "钛马",
+    "铜马",
+    "大马",
+    "大马士革",
     "美中不足",
     "极致",
     "华丽",
     "彩雕",
     "深雕",
     "阳极",
+    "镜面",
     "拉丝",
     "雾面",
     "开箱",
@@ -51,6 +68,13 @@ _DOMAIN_ANCHORS = (
     "MCP",
     "RAG",
     "LoRA",
+    "潮玩",
+    "手电",
+    "打火机",
+    "机能",
+    "户外",
+    "露营",
+    "战术",
 )
 
 _DEFAULT_TERM_ALIASES: dict[str, tuple[str, ...]] = {
@@ -76,7 +100,11 @@ _DEFAULT_TERM_ALIASES: dict[str, tuple[str, ...]] = {
     "渐变": ("键变", "间变", "见变"),
     "图纸": ("图指", "图址", "图子"),
     "FAS": ("法斯", "发斯", "F A S"),
+    "NOC": ("N O C",),
+    "REATE": ("锐特", "瑞特", "睿特"),
     "EDC": ("一滴西", "诶滴西", "E D C"),
+    "OLIGHT": ("傲雷", "O LIGHT"),
+    "ZIPPO": ("芝宝", "Z I P P O"),
     "RunningHub": ("running hub", "瑞宁哈布", "润宁哈布", "RH"),
     "ComfyUI": ("comfy ui", "康菲UI", "康飞UI", "咖啡外"),
     "OpenClaw": ("open claw", "欧喷扣", "欧喷爪"),
@@ -88,6 +116,21 @@ _DEFAULT_TERM_ALIASES: dict[str, tuple[str, ...]] = {
     "MCP": ("M C P",),
     "美中不足": ("美中部组", "美中不组", "美中布足"),
     "极致华丽": ("经质的华历", "经质华历", "经致的华历", "精质的华历", "经质的华丽", "经致的华丽"),
+    "镜面": ("静面", "净面"),
+    "顶配": ("定配", "顶陪"),
+    "次顶配": ("次定配", "次顶陪"),
+    "标配": ("表配",),
+    "高配": ("高陪",),
+    "低配": ("低陪",),
+    "钢马": ("刚马",),
+    "锆马": ("告马", "造马"),
+    "钛马": ("太马",),
+    "铜马": ("同马",),
+    "大马士革": ("大马是个", "大马事革"),
+    "潮玩": ("朝玩",),
+    "手电": ("手店",),
+    "打火机": ("打火鸡",),
+    "机能": ("肌能",),
 }
 
 _GENERIC_SAFE_REPLACEMENTS: tuple[tuple[re.Pattern[str], str], ...] = (
@@ -99,7 +142,11 @@ _GENERIC_SAFE_REPLACEMENTS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"(?:揭片|接片)(?=(?:是|都|也|做|用|件|片|,|，|。|$))"), "贴片"),
     (re.compile(r"(?:图指|图址|图子)(?=(?:稿|方案|设计|修改|确认|看|,|，|。|$))"), "图纸"),
     (re.compile(r"(?:法斯|发斯)(?![A-Za-z])", re.IGNORECASE), "FAS"),
+    (re.compile(r"N\s*O\s*C", re.IGNORECASE), "NOC"),
     (re.compile(r"(?:一滴西|诶滴西)(?![A-Za-z])", re.IGNORECASE), "EDC"),
+    (re.compile(r"(?:锐特|瑞特|睿特)(?![A-Za-z])", re.IGNORECASE), "REATE"),
+    (re.compile(r"(?:傲雷|O\s*LIGHT)(?![A-Za-z])", re.IGNORECASE), "OLIGHT"),
+    (re.compile(r"(?:芝宝|Z\s*I\s*P\s*P\s*O)(?![A-Za-z])", re.IGNORECASE), "ZIPPO"),
     (re.compile(r"running\s*hub|(?<![A-Za-z0-9])RH(?![A-Za-z0-9])", re.IGNORECASE), "RunningHub"),
     (re.compile(r"comfy\s*ui|咖啡外", re.IGNORECASE), "ComfyUI"),
     (re.compile(r"open\s*claw", re.IGNORECASE), "OpenClaw"),
@@ -112,6 +159,7 @@ _GENERIC_SAFE_REPLACEMENTS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"(?:经质的华历|经质华历|经致的华历|精质的华历|经质的华丽|经致的华丽)"), "极致华丽"),
     (re.compile(r"极致的华历"), "极致华丽"),
     (re.compile(r"极致华历"), "极致华丽"),
+    (re.compile(r"(?:静面|净面)(?=(?:处理|效果|质感|工艺|版|板|层|一下|了|的|,|，|。|$))"), "镜面"),
     (re.compile(r"华丽历(?=(?:很|也|都|更|,|，|。|$))"), "华丽"),
     (re.compile(r"华历(?=(?:感|风格|路线|效果|,|，|。|$))"), "华丽"),
 )
@@ -139,7 +187,7 @@ def build_subtitle_review_memory(
     content_profile: dict[str, Any] | None = None,
     include_recent_terms: bool = True,
     include_recent_examples: bool = True,
-    term_limit: int = 24,
+    term_limit: int = 30,
     example_limit: int = 6,
 ) -> dict[str, Any]:
     term_scores: Counter[str] = Counter()
@@ -152,9 +200,23 @@ def build_subtitle_review_memory(
         content_profile=content_profile,
         subtitle_items=recent_subtitles,
     )
+    direct_domains = set(
+        detect_glossary_domains(
+            channel_profile=channel_profile,
+            content_profile=content_profile,
+            subtitle_items=recent_subtitles,
+        )
+    )
     effective_glossary_terms = merge_glossary_terms(
         glossary_terms or [],
         builtin_glossary_terms,
+    )
+    context_text = " ".join(
+        str(item or "")
+        for item in [
+            *((content_profile or {}).get(key) or "" for key in ("subject_brand", "subject_model", "subject_type", "video_theme", "summary", "hook_line")),
+            *(row.get("text_final") or row.get("text_norm") or row.get("text_raw") or "" for row in (recent_subtitles or [])),
+        ]
     )
 
     def remember_term(term: Any, weight: int) -> None:
@@ -170,16 +232,55 @@ def build_subtitle_review_memory(
         remember_term(item.get("keyword"), 4)
         for token in _extract_domain_terms(str(item.get("keyword") or "")):
             remember_term(token, 3)
+        for token in _extract_hotword_candidates(str(item.get("keyword") or "")):
+            remember_term(token, 2)
+        for token in _extract_compound_domain_terms(str(item.get("keyword") or "")):
+            remember_term(token, 8)
+
+    for item in (user_memory or {}).get("phrase_preferences") or []:
+        remember_term(item.get("phrase"), 5)
+        for token in _extract_compound_domain_terms(str(item.get("phrase") or "")):
+            remember_term(token, 10)
 
     field_preferences = (user_memory or {}).get("field_preferences") or {}
     for key in ("subject_brand", "subject_model", "subject_type", "video_theme"):
         for item in field_preferences.get(key) or []:
             remember_term(item.get("value"), 4)
+            for token in _extract_compound_domain_terms(str(item.get("value") or "")):
+                remember_term(token, 8)
+
+    for key in ("subject_brand", "subject_model", "subject_type", "video_theme", "summary", "hook_line"):
+        value = (content_profile or {}).get(key)
+        remember_term(value, 4 if key in {"subject_brand", "subject_model", "subject_type"} else 3)
+        for token in _extract_compound_domain_terms(str(value or "")):
+            remember_term(token, 10 if key in {"video_theme", "summary", "hook_line"} else 8)
+
+    for item in (user_memory or {}).get("recent_corrections") or []:
+        corrected_value = item.get("corrected_value")
+        original_value = item.get("original_value")
+        remember_term(corrected_value, 4)
+        for token in _extract_hotword_candidates(str(corrected_value or "")):
+            remember_term(token, 3)
+        for token in _extract_compound_domain_terms(str(corrected_value or "")):
+            remember_term(token, 10)
+        if _should_promote_correction_alias(original_value, corrected_value):
+            wrong = _normalize_alias_value(original_value)
+            correct = _normalize_alias_value(corrected_value)
+            if wrong and correct and wrong != correct and (wrong, correct) not in seen_aliases:
+                seen_aliases.add((wrong, correct))
+                alias_pairs.append({"wrong": wrong, "correct": correct})
 
     for term in effective_glossary_terms:
         correct_form = _normalize_term(term.get("correct_form"))
         if correct_form:
-            remember_term(correct_form, 6)
+            term_domain = str(term.get("domain") or "").strip()
+            context_bonus = 2 if _term_matches_context(term, context_text) else 0
+            if not term_domain:
+                remember_term(correct_form, 6 + context_bonus)
+            elif term_domain in direct_domains:
+                remember_term(correct_form, 6 + context_bonus)
+            else:
+                remember_term(correct_form, 3 + context_bonus)
 
     for row in recent_subtitles or []:
         text = _clean_example_text(
@@ -190,6 +291,10 @@ def build_subtitle_review_memory(
         if include_recent_terms:
             for token in _extract_domain_terms(text):
                 remember_term(token, 2)
+            for token in _extract_hotword_candidates(text):
+                remember_term(token, 1)
+            for token in _extract_compound_domain_terms(text):
+                remember_term(token, 8)
         if include_recent_examples and _text_has_domain_signal(text) and text not in seen_examples:
             seen_examples.add(text)
             examples.append(
@@ -242,13 +347,15 @@ def build_subtitle_review_memory(
                 seen_aliases.add(pair)
                 alias_pairs.append({"wrong": wrong, "correct": term})
 
-    append_aliases(builtin_glossary_terms, only_ranked_terms=True)
+    append_aliases(builtin_glossary_terms, only_ranked_terms=False)
+    ranked_terms.sort(key=lambda item: (-_is_compound_domain_term(item["term"]), -int(item.get("count") or 0), item["term"]))
 
     return {
         "channel_profile": channel_profile or "",
         "terms": ranked_terms,
-        "aliases": alias_pairs[:24],
+        "aliases": alias_pairs[:120],
         "style_examples": examples[:example_limit],
+        "style_preferences": list((user_memory or {}).get("style_preferences") or [])[:8],
     }
 
 
@@ -305,22 +412,23 @@ def build_transcription_prompt(
         snippets.append(f"频道类型：{channel_profile}")
 
     terms = [str(item.get("term") or "").strip() for item in (review_memory or {}).get("terms") or []]
-    terms = [item for item in terms if item][:18]
+    terms = [item for item in terms if item][:12]
     if terms:
-        snippets.append(f"请优先识别这些术语并保持原词：{', '.join(terms)}")
+        snippets.append(f"热词：{', '.join(terms)}")
+        snippets.append("请保持品牌、型号、圈内术语原词")
 
     alias_pairs = [
         f"{item['wrong']}={item['correct']}"
         for item in (review_memory or {}).get("aliases") or []
         if item.get("wrong") and item.get("correct")
-    ][:10]
+    ][:8]
     if alias_pairs:
-        snippets.append(f"常见错写请归一：{'; '.join(alias_pairs)}")
+        snippets.append(f"错写归一：{'; '.join(alias_pairs)}")
 
     if _source_name_is_informative(source_name):
         snippets.append(f"源文件名参考：{source_name}")
 
-    return "。".join(snippets)[:500]
+    return "。".join(snippets)[:320]
 
 
 def apply_domain_term_corrections(text: str, review_memory: dict[str, Any] | None) -> str:
@@ -343,9 +451,11 @@ def apply_domain_term_corrections(text: str, review_memory: dict[str, Any] | Non
 
     terms = [str(item.get("term") or "").strip() for item in review_memory.get("terms") or []]
     for term in terms:
-        for wrong in _DEFAULT_TERM_ALIASES.get(term, ()):
+        aliases = _DEFAULT_TERM_ALIASES.get(term, ())
+        for wrong in aliases:
             result = re.sub(re.escape(wrong), term, result, flags=re.IGNORECASE)
-        result = _replace_near_match(result, term)
+        if not aliases:
+            result = _replace_near_match(result, term)
     return result
 
 
@@ -370,11 +480,87 @@ def _extract_domain_terms(text: str) -> list[str]:
     return terms
 
 
+def _extract_hotword_candidates(text: str) -> list[str]:
+    compact = str(text or "").strip()
+    if not compact:
+        return []
+    seen: set[str] = set()
+    tokens: list[str] = []
+    for token in re.findall(r"[A-Za-z0-9+-]{2,24}|[\u4e00-\u9fff]{2,10}", compact):
+        normalized = _normalize_term(token)
+        if not normalized:
+            continue
+        if len(normalized) < 2:
+            continue
+        if normalized in seen:
+            continue
+        if normalized.isdigit():
+            continue
+        if _text_has_domain_signal(normalized) or normalized in _DEFAULT_TERM_ALIASES:
+            seen.add(normalized)
+            tokens.append(normalized)
+    return tokens
+
+
+def _extract_compound_domain_terms(text: str) -> list[str]:
+    compact = re.sub(r"\s+", "", str(text or "").strip())
+    if not compact:
+        return []
+    seen: set[str] = set()
+    phrases: list[str] = []
+    for fragment in re.split(r"[，。,\.、；;：:\-—\(\)（）\[\]【】\s]+", compact):
+        candidate = _trim_to_anchor_span(fragment)
+        for part in _split_compound_candidate(candidate):
+            normalized = _normalize_term(part)
+            if not normalized:
+                continue
+            if len(normalized) < 4 or len(normalized) > 18:
+                continue
+            if normalized in seen:
+                continue
+            if _count_domain_anchor_hits(normalized) < 2:
+                continue
+            seen.add(normalized)
+            phrases.append(normalized)
+    return phrases
+
+
 def _text_has_domain_signal(text: str) -> bool:
     upper = text.upper()
     if re.search(r"(?<![A-Z0-9])[A-Z]{2,}[A-Z0-9-]{0,12}(?![A-Z0-9])", upper):
         return True
     return any(anchor in text for anchor in _DOMAIN_ANCHORS)
+
+
+def _count_domain_anchor_hits(text: str) -> int:
+    return sum(1 for anchor in _DOMAIN_ANCHORS if anchor in text)
+
+
+def _trim_to_anchor_span(text: str) -> str:
+    fragment = str(text or "").strip()
+    if not fragment:
+        return ""
+    spans: list[tuple[int, int]] = []
+    for anchor in _DOMAIN_ANCHORS:
+        start = fragment.find(anchor)
+        if start >= 0:
+            spans.append((start, start + len(anchor)))
+    if len(spans) < 2:
+        return fragment
+    left = min(start for start, _ in spans)
+    right = max(end for _, end in spans)
+    return fragment[left:right]
+
+
+def _split_compound_candidate(text: str) -> list[str]:
+    candidate = str(text or "").strip()
+    if not candidate:
+        return []
+    parts = [part.strip() for part in re.split(r"[和与及]", candidate) if part.strip()]
+    enriched = [part for part in parts if _count_domain_anchor_hits(part) >= 2]
+    if enriched:
+        return enriched
+    return [candidate]
 
 
 def _normalize_term(value: Any) -> str:
@@ -386,6 +572,15 @@ def _normalize_term(value: Any) -> str:
     if re.fullmatch(r"[A-Za-z][A-Za-z0-9 .+-]{1,24}", text):
         return text.upper()
     return text[:40]
+
+
+def _is_compound_domain_term(value: str) -> int:
+    text = str(value or "").strip()
+    return 1 if len(text) >= 4 and _count_domain_anchor_hits(text) >= 2 else 0
+
+
+def _normalize_alias_value(value: Any) -> str:
+    return " ".join(str(value or "").strip().split())[:40]
 
 
 def _clean_example_text(value: Any) -> str:
@@ -425,9 +620,41 @@ def _replace_near_match(text: str, term: str) -> str:
     return f"{text[:start]}{term}{text[end:]}"
 
 
+def _should_promote_correction_alias(original_value: Any, corrected_value: Any) -> bool:
+    original = _normalize_alias_value(original_value)
+    corrected = _normalize_alias_value(corrected_value)
+    if not original or not corrected or original == corrected:
+        return False
+    if len(original) < 2 or len(corrected) < 2:
+        return False
+    if len(original) > 20 or len(corrected) > 20:
+        return False
+    if _text_has_domain_signal(original) or _text_has_domain_signal(corrected):
+        return True
+    score = SequenceMatcher(None, original, corrected).ratio()
+    return score >= 0.45
+
+
+def _term_matches_context(term: dict[str, Any], context_text: str) -> bool:
+    context = str(context_text or "").strip()
+    if not context:
+        return False
+    correct_form = str(term.get("correct_form") or "").strip()
+    if correct_form and re.search(re.escape(correct_form), context, re.IGNORECASE):
+        return True
+    for wrong_form in term.get("wrong_forms") or []:
+        wrong = str(wrong_form or "").strip()
+        if wrong and re.search(re.escape(wrong), context, re.IGNORECASE):
+            return True
+    return False
+
+
 def _window_can_match(span: str, term: str) -> bool:
     if not span or span.isdigit():
         return False
+    if re.search(r"[\u4e00-\u9fff]", term) and len(term) >= 4:
+        if span[0] != term[0]:
+            return False
     shared = set(span) & set(term)
     if shared:
         return True
