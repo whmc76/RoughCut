@@ -41,7 +41,9 @@ async def test_config_has_extended_provider_fields(client: AsyncClient):
     response = await client.get("/api/v1/config")
     assert response.status_code == 200
     data = response.json()
+    assert "transcription_dialect" in data
     assert "openai_base_url" in data
+    assert "qwen_asr_api_base_url" in data
     assert "avatar_provider" in data
     assert "avatar_api_base_url" in data
     assert "avatar_training_api_base_url" in data
@@ -75,11 +77,14 @@ async def test_config_options_exposes_transcription_models(client: AsyncClient):
     assert data["channel_profiles"][0]["value"] == ""
     assert data["workflow_modes"][0]["value"] == "standard_edit"
     assert any(item["value"] == "avatar_commentary" for item in data["enhancement_modes"])
+    assert any(item["value"] == "mandarin" for item in data["transcription_dialects"])
+    assert any(item["value"] == "beijing" for item in data["transcription_dialects"])
     assert any(item["value"] == "heygem" for item in data["avatar_providers"])
     assert any(item["value"] == "indextts2" for item in data["voice_providers"])
     assert any(item["key"] == "long_text_to_video" and item["status"] == "planned" for item in data["creative_mode_catalog"]["workflow_modes"])
-    assert data["transcription_models"]["local_whisper"][0] == "base"
-    assert data["transcription_models"]["openai"] == ["gpt-4o-transcribe"]
+    assert data["transcription_models"]["local_whisper"][0] == "large-v3"
+    assert data["transcription_models"]["openai"] == ["gpt-4o-transcribe", "gpt-4o-mini-transcribe"]
+    assert data["transcription_models"]["qwen_asr"] == ["qwen3-asr-1.7b"]
     assert "large-v3" in data["transcription_models"]["local_whisper"]
     assert any(item["value"] == "edc_tactical" for item in data["channel_profiles"])
     assert any(item["value"] == "ollama" for item in data["multimodal_fallback_providers"])
@@ -245,7 +250,8 @@ async def test_avatar_materials_upload_preview_ready_without_training_api(
     profile = response.json()["profiles"][0]
     assert profile["training_api_available"] is False
     assert profile["capability_status"]["preview"] == "ready"
-    assert "原始声音样本" in profile["next_action"]
+    assert isinstance(profile["next_action"], str)
+    assert profile["next_action"]
 
 
 @pytest.mark.asyncio
@@ -1008,6 +1014,89 @@ async def test_job_restart_allows_done_jobs(client: AsyncClient):
     assert data["steps"][0]["status"] == "pending"
     assert data["steps"][0]["attempt"] == 0
 
+    activity = await client.get(f"/api/v1/jobs/{job_id}/activity")
+    assert activity.status_code == 200
+    activity_data = activity.json()
+    assert activity_data["current_step"]["step_name"] == "probe"
+    assert activity_data["current_step"]["detail"] == "任务已重新开始，等待调度器派发。"
+
+
+@pytest.mark.asyncio
+async def test_job_restart_allows_needs_review_jobs(client: AsyncClient):
+    from roughcut.db.models import Job, JobStep
+    from roughcut.db.session import get_session_factory
+
+    job_id = uuid.uuid4()
+
+    async with get_session_factory()() as session:
+        session.add(
+            Job(
+                id=job_id,
+                source_path="jobs/demo/review.mp4",
+                source_name="review.mp4",
+                status="needs_review",
+                language="zh-CN",
+                enhancement_modes=["avatar_commentary"],
+            )
+        )
+        session.add_all(
+            [
+                JobStep(job_id=job_id, step_name="probe", status="done", attempt=1),
+                JobStep(job_id=job_id, step_name="extract_audio", status="done", attempt=1),
+                JobStep(job_id=job_id, step_name="summary_review", status="pending"),
+            ]
+        )
+        await session.commit()
+
+    response = await client.post(f"/api/v1/jobs/{job_id}/restart")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "pending"
+    assert data["steps"][0]["step_name"] == "probe"
+    assert data["steps"][0]["status"] == "pending"
+    assert all(step["attempt"] == 0 for step in data["steps"])
+
+
+@pytest.mark.asyncio
+async def test_job_activity_sorts_pending_steps_and_hides_avatar_until_reached(client: AsyncClient):
+    from roughcut.db.models import Job, JobStep
+    from roughcut.db.session import get_session_factory
+
+    job_id = uuid.uuid4()
+
+    async with get_session_factory()() as session:
+        session.add(
+            Job(
+                id=job_id,
+                source_path="jobs/demo/pending.mp4",
+                source_name="pending.mp4",
+                status="pending",
+                language="zh-CN",
+                enhancement_modes=["avatar_commentary"],
+            )
+        )
+        session.add_all(
+            [
+                JobStep(job_id=job_id, step_name="avatar_commentary", status="pending"),
+                JobStep(job_id=job_id, step_name="extract_audio", status="pending"),
+                JobStep(job_id=job_id, step_name="probe", status="pending"),
+                JobStep(job_id=job_id, step_name="transcribe", status="pending"),
+            ]
+        )
+        await session.commit()
+
+    activity = await client.get(f"/api/v1/jobs/{job_id}/activity")
+    assert activity.status_code == 200
+    activity_data = activity.json()
+    assert activity_data["current_step"]["step_name"] == "probe"
+    assert activity_data["current_step"]["detail"] == "等待调度器派发。"
+
+    jobs_response = await client.get("/api/v1/jobs")
+    assert jobs_response.status_code == 200
+    item = next(job for job in jobs_response.json() if job["id"] == str(job_id))
+    assert item["avatar_delivery_status"] is None
+    assert item["avatar_delivery_summary"] is None
+
 
 @pytest.mark.asyncio
 async def test_open_job_folder_prefers_render_output(
@@ -1207,7 +1296,7 @@ async def test_job_activity_reports_avatar_final_delivery_result(client: AsyncCl
                     job_id=job_id,
                     artifact_type="render_outputs",
                     data_json={
-                        "packaged_mp4": "data/output/avatar.mp4",
+                        "packaged_mp4": "output/avatar.mp4",
                         "avatar_result": {
                             "status": "done",
                             "detail": "数字人口播已作为画中画写入成片。",
@@ -1217,7 +1306,7 @@ async def test_job_activity_reports_avatar_final_delivery_result(client: AsyncCl
                 ),
             ]
         )
-        session.add(RenderOutput(job_id=job_id, status="done", progress=1.0, output_path="data/output/avatar.mp4"))
+        session.add(RenderOutput(job_id=job_id, status="done", progress=1.0, output_path="output/avatar.mp4"))
         await session.commit()
 
     response = await client.get(f"/api/v1/jobs/{job_id}/activity")

@@ -52,6 +52,7 @@ export const WORKFLOW_MODE_LABELS: Record<string, string> = {
 };
 
 export const ENHANCEMENT_MODE_LABELS: Record<string, string> = {
+  auto_review: "自动审核",
   avatar_commentary: "数字人解说",
   ai_effects: "智能剪辑特效",
   ai_director: "AI 导演",

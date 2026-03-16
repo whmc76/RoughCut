@@ -23,6 +23,7 @@ from roughcut.avatar import list_avatar_material_profiles
 from roughcut.config import get_settings
 from roughcut.creative import (
     ai_director_mode_enabled,
+    auto_review_mode_enabled,
     avatar_mode_enabled,
     build_ai_director_plan,
     build_avatar_commentary_plan,
@@ -56,6 +57,7 @@ from roughcut.providers.factory import get_avatar_provider, get_reasoning_provid
 from roughcut.providers.reasoning.base import Message
 from roughcut.review.content_profile import (
     assess_content_profile_automation,
+    build_transcript_excerpt,
     enrich_content_profile,
     infer_content_profile,
     polish_subtitle_items,
@@ -563,10 +565,12 @@ async def run_transcribe(job_id: str) -> dict:
                 include_recent_terms=False,
                 include_recent_examples=False,
             )
+            settings = get_settings()
             transcription_prompt = build_transcription_prompt(
                 source_name=job.source_name,
                 channel_profile=job.channel_profile,
                 review_memory=review_memory,
+                dialect_profile=settings.transcription_dialect,
             )
 
             progress_loop = asyncio.get_running_loop()
@@ -674,6 +678,12 @@ async def run_subtitle_postprocess(job_id: str) -> dict:
         glossary_result = await session.execute(select(GlossaryTerm))
         glossary_terms = glossary_result.scalars().all()
         user_memory = await load_content_profile_user_memory(session, channel_profile=job.channel_profile)
+        profile_artifact = await _load_latest_optional_artifact(
+            session,
+            job_id=job.id,
+            artifact_types=_CONTENT_PROFILE_ARTIFACT_TYPES,
+        )
+        content_profile = profile_artifact.data_json if profile_artifact and profile_artifact.data_json else {}
         effective_glossary_terms = _build_effective_glossary_terms(
             glossary_terms=glossary_terms,
             channel_profile=job.channel_profile,
@@ -701,15 +711,16 @@ async def run_subtitle_postprocess(job_id: str) -> dict:
                 }
                 for item in items
             ],
+            content_profile=content_profile,
             include_recent_terms=False,
             include_recent_examples=False,
         )
         polished_count = await polish_subtitle_items(
             items,
-            content_profile={"preset_name": job.channel_profile or "unboxing_default"},
+            content_profile=content_profile or {"preset_name": job.channel_profile or "unboxing_default"},
             glossary_terms=effective_glossary_terms,
             review_memory=review_memory,
-            allow_llm=True,
+            allow_llm=False,
         )
         save_elapsed = time.perf_counter() - save_started
         total_elapsed = time.perf_counter() - started
@@ -773,25 +784,54 @@ async def run_content_profile(job_id: str) -> dict:
         ]
         user_memory = await load_content_profile_user_memory(session, channel_profile=job.channel_profile)
         packaging_config = (list_packaging_assets().get("config") or {})
+        seeded_profile_artifact = await _load_latest_optional_artifact(
+            session,
+            job_id=job.id,
+            artifact_types=_CONTENT_PROFILE_ARTIFACT_TYPES,
+        )
+        seeded_profile = (
+            dict(seeded_profile_artifact.data_json or {})
+            if seeded_profile_artifact and isinstance(seeded_profile_artifact.data_json, dict)
+            else {}
+        )
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            source_path = await _resolve_source(job, tmpdir, expected_hash=job.file_hash)
-            await _set_step_progress(session, step, detail="抽取画面并分析主题、主体与剪辑预设", progress=0.55)
-            content_profile = await infer_content_profile(
-                source_path=source_path,
-                source_name=job.source_name,
-                subtitle_items=subtitle_dicts,
-                channel_profile=job.channel_profile,
-                user_memory=user_memory,
-                include_research=True,
-                copy_style=str(packaging_config.get("copy_style") or "attention_grabbing"),
+        if seeded_profile:
+            await _set_step_progress(session, step, detail="基于前置校正结果补强内容画像", progress=0.55)
+            seeded_profile["copy_style"] = str(
+                packaging_config.get("copy_style")
+                or seeded_profile.get("copy_style")
+                or "attention_grabbing"
             )
+            content_profile = await enrich_content_profile(
+                profile=seeded_profile,
+                source_name=job.source_name,
+                channel_profile=job.channel_profile,
+                transcript_excerpt=build_transcript_excerpt(subtitle_dicts),
+                user_memory=user_memory,
+                include_research=False,
+            )
+        else:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                source_path = await _resolve_source(job, tmpdir, expected_hash=job.file_hash)
+                await _set_step_progress(session, step, detail="抽取画面并分析主题、主体与剪辑预设", progress=0.55)
+                content_profile = await infer_content_profile(
+                    source_path=source_path,
+                    source_name=job.source_name,
+                    subtitle_items=subtitle_dicts,
+                    channel_profile=job.channel_profile,
+                    user_memory=user_memory,
+                    include_research=False,
+                    copy_style=str(packaging_config.get("copy_style") or "attention_grabbing"),
+                )
         content_profile["creative_profile"] = _job_creative_profile(job)
 
+        auto_review_enabled = bool(settings.auto_confirm_content_profile) and auto_review_mode_enabled(
+            getattr(job, "enhancement_modes", [])
+        )
         automation = assess_content_profile_automation(
             content_profile,
             subtitle_items=subtitle_dicts,
-            auto_confirm_enabled=settings.auto_confirm_content_profile,
+            auto_confirm_enabled=auto_review_enabled,
             threshold=settings.content_profile_review_threshold,
         )
         content_profile["automation_review"] = automation
@@ -938,6 +978,7 @@ async def run_glossary_review(job_id: str) -> dict:
                     subtitle_items=subtitle_dicts,
                     channel_profile=job.channel_profile,
                     user_memory=user_memory,
+                    include_research=False,
                     copy_style=str(packaging_config.get("copy_style") or "attention_grabbing"),
                 )
         else:
@@ -953,7 +994,7 @@ async def run_glossary_review(job_id: str) -> dict:
                 channel_profile=job.channel_profile,
                 transcript_excerpt=str(content_profile.get("transcript_excerpt") or ""),
                 user_memory=user_memory,
-                include_research=True,
+                include_research=False,
             )
         content_profile["creative_profile"] = _job_creative_profile(job)
         recent_subtitles = await _load_recent_subtitle_examples(
@@ -980,7 +1021,7 @@ async def run_glossary_review(job_id: str) -> dict:
                 include_recent_terms=False,
                 include_recent_examples=False,
             ),
-            allow_llm=True,
+            allow_llm=False,
         )
 
         artifact = Artifact(
@@ -1556,7 +1597,11 @@ async def run_render(job_id: str) -> dict:
     # Render (outside transaction — can be long)
     # Build canonical output name: YYYYMMDD_OriginalStem
     out_name = build_output_name(job.source_name, job.created_at)
-    out_dir = get_output_project_dir(job.source_name, job.created_at)
+    out_dir = get_output_project_dir(
+        job.source_name,
+        job.created_at,
+        content_profile=content_profile,
+    )
     debug_dir = Path(get_settings().render_debug_dir) / f"{job_id}_{out_name}"
     debug_dir.mkdir(parents=True, exist_ok=True)
     local_packaged_mp4 = out_dir / f"{out_name}.mp4"
@@ -1964,6 +2009,16 @@ async def run_platform_package(job_id: str) -> dict:
             select(JobStep).where(JobStep.job_id == job.id, JobStep.step_name == "platform_package")
         )
         current_step = step_result.scalar_one_or_none()
+        fact_sheet = packaging.get("fact_sheet") if isinstance(packaging, dict) else None
+        if isinstance(fact_sheet, dict):
+            session.add(
+                Artifact(
+                    job_id=job.id,
+                    step_id=current_step.id if current_step else None,
+                    artifact_type="product_fact_sheet",
+                    data_json=fact_sheet,
+                )
+            )
         artifact = Artifact(
             job_id=job.id,
             step_id=current_step.id if current_step else None,
@@ -2508,9 +2563,16 @@ async def _overlay_avatar_picture_in_picture(
     avatar_probe = await probe(avatar_video_path)
     avatar_width = max(1, int(getattr(avatar_probe, "width", 0) or 1))
     avatar_height = max(1, int(getattr(avatar_probe, "height", 0) or 1))
-
     overlay_width = max(180, int(round(base_width * max(0.12, min(scale, 0.45)))))
     overlay_height = max(180, int(round(overlay_width * (avatar_height / avatar_width))))
+    avatar_extra_filters = _build_avatar_picture_in_picture_filters(
+        base_duration=float(getattr(base_probe, "duration", 0.0) or 0.0),
+        base_fps=float(getattr(base_probe, "fps", 0.0) or 0.0),
+        avatar_duration=float(getattr(avatar_probe, "duration", 0.0) or 0.0),
+        avatar_fps=float(getattr(avatar_probe, "fps", 0.0) or 0.0),
+        overlay_width=overlay_width,
+        overlay_height=overlay_height,
+    )
     resolved_margin = max(margin, int(round(min(base_width, base_height) * max(0.02, min(safe_margin_ratio, 0.2)))))
     resolved_border_width = max(0, min(12, int(border_width)))
     frame_width = overlay_width + resolved_border_width * 2
@@ -2540,13 +2602,13 @@ async def _overlay_avatar_picture_in_picture(
     if resolved_border_width > 0:
         filter_chain = (
             f"{_build_rounded_color_filter(output_label='pipbg', color=border_rgb, width=frame_width, height=frame_height, corner_radius=resolved_corner_radius)};"
-            f"{_build_rounded_rgba_filter(input_label='1:v', output_label='pipfg', width=overlay_width, height=overlay_height, corner_radius=avatar_corner_radius, extra_filters=f'scale={overlay_width}:{overlay_height}')};"
+            f"{_build_rounded_rgba_filter(input_label='1:v', output_label='pipfg', width=overlay_width, height=overlay_height, corner_radius=avatar_corner_radius, extra_filters=avatar_extra_filters)};"
             f"[pipbg][pipfg]overlay={resolved_border_width}:{resolved_border_width}:format=auto:alpha=straight[pip];"
             f"[0:v][pip]overlay=x={overlay_x}:y={overlay_y}:eof_action=pass:format=auto:alpha=straight[vout]"
         )
     else:
         filter_chain = (
-            f"{_build_rounded_rgba_filter(input_label='1:v', output_label='pip', width=overlay_width, height=overlay_height, corner_radius=avatar_corner_radius, extra_filters=f'scale={overlay_width}:{overlay_height}')};"
+            f"{_build_rounded_rgba_filter(input_label='1:v', output_label='pip', width=overlay_width, height=overlay_height, corner_radius=avatar_corner_radius, extra_filters=avatar_extra_filters)};"
             f"[0:v][pip]overlay=x={overlay_x}:y={overlay_y}:eof_action=pass:format=auto:alpha=straight[vout]"
         )
 
@@ -2590,6 +2652,53 @@ async def _overlay_avatar_picture_in_picture(
 
 def _resolve_overlay_corner_radius(*, corner_radius: int, width: int, height: int) -> int:
     return max(0, min(int(corner_radius or 0), max(0, width // 2), max(0, height // 2)))
+
+
+def _build_avatar_picture_in_picture_filters(
+    *,
+    base_duration: float,
+    base_fps: float,
+    avatar_duration: float,
+    avatar_fps: float,
+    overlay_width: int,
+    overlay_height: int,
+) -> str:
+    filters = [f"scale={overlay_width}:{overlay_height}"]
+    if avatar_duration > 0 and base_duration > 0:
+        duration_ratio = max(0.5, min(2.0, base_duration / avatar_duration))
+        if abs(duration_ratio - 1.0) >= 0.0005:
+            filters.append(f"setpts=PTS*{duration_ratio:.8f}")
+        filters.append(f"trim=duration={base_duration:.6f}")
+    if base_fps > 0:
+        fps_expr = _ffmpeg_fps_expr(base_fps)
+        fps_gap = abs(base_fps - avatar_fps)
+        if avatar_fps > 0 and fps_gap >= 0.5 and avatar_fps < base_fps:
+            filters.append(
+                f"settb=AVTB,framerate=fps={fps_expr}:interp_start=15:interp_end=240:scene=100"
+            )
+        else:
+            filters.append(f"fps={fps_expr}")
+    return ",".join(filters)
+
+
+def _ffmpeg_fps_expr(fps: float) -> str:
+    canonical = (
+        (23.976, "24000/1001"),
+        (24.0, "24"),
+        (25.0, "25"),
+        (29.97, "30000/1001"),
+        (30.0, "30"),
+        (50.0, "50"),
+        (59.94, "60000/1001"),
+        (60.0, "60"),
+    )
+    for target, expr in canonical:
+        if abs(fps - target) < 0.05:
+            return expr
+    rounded = round(fps)
+    if abs(fps - rounded) < 0.01 and rounded > 0:
+        return str(int(rounded))
+    return f"{fps:.6f}"
 
 
 def _build_rounded_color_filter(

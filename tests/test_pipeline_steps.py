@@ -145,7 +145,7 @@ async def test_run_glossary_review_loads_recent_subtitles_without_name_error(db_
 
     async def fake_polish_subtitle_items(*args, **kwargs):
         assert kwargs["review_memory"]["recent_subtitles_count"] == 3
-        assert kwargs["allow_llm"] is True
+        assert kwargs["allow_llm"] is False
         return 1
 
     monkeypatch.setattr(steps_mod, "build_subtitle_review_memory", fake_build_subtitle_review_memory)
@@ -177,6 +177,7 @@ async def test_run_content_profile_auto_confirms_high_confidence_profile(db_engi
                 status="processing",
                 language="zh-CN",
                 channel_profile="screen_tutorial",
+                enhancement_modes=["auto_review"],
             )
         )
         session.add(JobStep(job_id=job_id, step_name="content_profile", status="running"))
@@ -246,7 +247,7 @@ async def test_run_content_profile_auto_confirms_high_confidence_profile(db_engi
         final = artifact_map["content_profile_final"]
         assert draft["automation_review"]["auto_confirm"] is True
         assert draft["creative_profile"]["workflow_mode"] == "standard_edit"
-        assert draft["creative_profile"]["enhancement_modes"] == []
+        assert draft["creative_profile"]["enhancement_modes"] == ["auto_review"]
         assert final["review_mode"] == "auto_confirmed"
 
         review_step_result = await session.execute(
@@ -255,6 +256,177 @@ async def test_run_content_profile_auto_confirms_high_confidence_profile(db_engi
         review_step = review_step_result.scalar_one()
         assert review_step.status == "done"
         assert review_step.metadata_["auto_confirmed"] is True
+
+
+@pytest.mark.asyncio
+async def test_run_content_profile_keeps_manual_review_when_auto_review_mode_disabled(db_engine, monkeypatch, tmp_path: Path):
+    import roughcut.pipeline.steps as steps_mod
+
+    factory = async_sessionmaker(db_engine, expire_on_commit=False)
+    job_id = uuid.uuid4()
+    source_path = tmp_path / "source.mp4"
+    source_path.write_bytes(b"video")
+
+    async with factory() as session:
+        session.add(
+            Job(
+                id=job_id,
+                source_path="jobs/demo/source.mp4",
+                source_name="source.mp4",
+                status="processing",
+                language="zh-CN",
+                channel_profile="screen_tutorial",
+                enhancement_modes=[],
+            )
+        )
+        session.add(JobStep(job_id=job_id, step_name="content_profile", status="running"))
+        session.add(JobStep(job_id=job_id, step_name="summary_review", status="pending"))
+        for index, text in enumerate(
+            [
+                "这期演示剪映里怎么批量处理字幕样式",
+                "先导入字幕模板再统一调整字号",
+                "第二步要把描边和阴影一起改掉",
+                "第三步检查时间轴里有没有错位",
+                "最后导出预设方便下次复用",
+                "这样整个流程就能稳定复现",
+            ]
+        ):
+            session.add(
+                SubtitleItem(
+                    job_id=job_id,
+                    version=1,
+                    item_index=index,
+                    start_time=float(index),
+                    end_time=float(index) + 1.0,
+                    text_raw=text,
+                    text_norm=text,
+                    text_final=text,
+                )
+            )
+        await session.commit()
+
+    monkeypatch.setattr(steps_mod, "get_session_factory", lambda: factory)
+
+    async def fake_load_content_profile_user_memory(*args, **kwargs):
+        return {}
+
+    async def fake_resolve_source(*args, **kwargs):
+        return source_path
+
+    async def fake_infer_content_profile(**kwargs):
+        return {
+            "preset_name": "screen_tutorial",
+            "subject_type": "剪映字幕工作流",
+            "video_theme": "批量字幕样式调整步骤讲解",
+            "summary": "这条视频主要围绕剪映字幕工作流展开，重点讲清批量调样式、检查错位和复用预设的完整步骤。",
+            "engagement_question": "你做批量字幕时最容易卡在样式统一还是时间轴检查？",
+            "search_queries": ["剪映 批量字幕 样式", "剪映 字幕 预设 导出"],
+            "cover_title": {"top": "剪映", "main": "批量字幕流程", "bottom": "样式统一教程"},
+            "evidence": [{"title": "剪映字幕文档"}],
+        }
+
+    monkeypatch.setattr(steps_mod, "load_content_profile_user_memory", fake_load_content_profile_user_memory)
+    monkeypatch.setattr(steps_mod, "_resolve_source", fake_resolve_source)
+    monkeypatch.setattr(steps_mod, "infer_content_profile", fake_infer_content_profile)
+
+    result = await run_content_profile(str(job_id))
+
+    assert result["auto_confirmed"] is False
+    assert result["automation_score"] >= 0.72
+
+    async with factory() as session:
+        artifact_result = await session.execute(
+            select(Artifact).where(Artifact.job_id == job_id).order_by(Artifact.created_at.asc())
+        )
+        artifacts = artifact_result.scalars().all()
+        artifact_map = {item.artifact_type: item.data_json for item in artifacts}
+        assert set(artifact_map) == {"content_profile_draft"}
+        assert artifact_map["content_profile_draft"]["automation_review"]["auto_confirm"] is False
+
+        review_step_result = await session.execute(
+            select(JobStep).where(JobStep.job_id == job_id, JobStep.step_name == "summary_review")
+        )
+        review_step = review_step_result.scalar_one()
+        assert review_step.status == "pending"
+        assert review_step.metadata_ is None
+
+
+@pytest.mark.asyncio
+async def test_run_content_profile_prefers_seeded_profile_from_early_glossary(db_engine, monkeypatch):
+    import roughcut.pipeline.steps as steps_mod
+
+    factory = async_sessionmaker(db_engine, expire_on_commit=False)
+    job_id = uuid.uuid4()
+
+    async with factory() as session:
+        session.add(
+            Job(
+                id=job_id,
+                source_path="E:/videos/source.mp4",
+                source_name="source.mp4",
+                status="processing",
+                language="zh-CN",
+                channel_profile="edc_tactical",
+            )
+        )
+        session.add(JobStep(job_id=job_id, step_name="content_profile", status="running"))
+        session.add(JobStep(job_id=job_id, step_name="summary_review", status="pending"))
+        session.add(
+            Artifact(
+                job_id=job_id,
+                artifact_type="content_profile",
+                data_json={
+                    "subject_brand": "Loop露普",
+                    "subject_model": "SK05二代Pro UV版",
+                    "subject_type": "手电",
+                    "video_theme": "手电开箱评测",
+                    "preset_name": "edc_tactical",
+                },
+            )
+        )
+        session.add(
+            SubtitleItem(
+                job_id=job_id,
+                version=1,
+                item_index=0,
+                start_time=0.0,
+                end_time=1.0,
+                text_raw="Loop露普SK05二代Pro UV版",
+                text_norm="Loop露普SK05二代Pro UV版",
+                text_final="Loop露普SK05二代Pro UV版",
+            )
+        )
+        await session.commit()
+
+    monkeypatch.setattr(steps_mod, "get_session_factory", lambda: factory)
+
+    async def fake_load_content_profile_user_memory(*args, **kwargs):
+        return {}
+
+    async def fail_infer_content_profile(**kwargs):
+        raise AssertionError("infer_content_profile should not run when a seeded profile exists")
+
+    async def fake_enrich_content_profile(**kwargs):
+        profile = dict(kwargs["profile"])
+        profile["engagement_question"] = "你更看重 UV 还是主灯？"
+        return profile
+
+    monkeypatch.setattr(steps_mod, "load_content_profile_user_memory", fake_load_content_profile_user_memory)
+    monkeypatch.setattr(steps_mod, "infer_content_profile", fail_infer_content_profile)
+    monkeypatch.setattr(steps_mod, "enrich_content_profile", fake_enrich_content_profile)
+
+    result = await run_content_profile(str(job_id))
+
+    assert result["subject_brand"] == "Loop露普"
+    assert result["subject_model"] == "SK05二代Pro UV版"
+
+    async with factory() as session:
+        artifact_result = await session.execute(
+            select(Artifact).where(Artifact.job_id == job_id, Artifact.artifact_type == "content_profile_draft")
+        )
+        draft = artifact_result.scalar_one()
+        assert draft.data_json["subject_brand"] == "Loop露普"
+        assert draft.data_json["engagement_question"] == "你更看重 UV 还是主灯？"
 
 
 @pytest.mark.asyncio
@@ -739,6 +911,24 @@ async def test_overlay_avatar_picture_in_picture_applies_rounded_corners_and_bor
     assert masked_corner_pixel == (0, 0, 0)
     assert border_pixel != (0, 0, 0)
     assert avatar_pixel[0] > 150 and avatar_pixel[1] < 80 and avatar_pixel[2] < 80
+
+
+def test_build_avatar_picture_in_picture_filters_retunes_duration_and_fps():
+    import roughcut.pipeline.steps as steps_mod
+
+    filters = steps_mod._build_avatar_picture_in_picture_filters(
+        base_duration=700.59,
+        base_fps=29.97,
+        avatar_duration=699.403,
+        avatar_fps=25.0,
+        overlay_width=320,
+        overlay_height=320,
+    )
+
+    assert filters.startswith("scale=320:320")
+    assert "setpts=PTS*" in filters
+    assert "trim=duration=700.590000" in filters
+    assert "settb=AVTB,framerate=fps=30000/1001:interp_start=15:interp_end=240:scene=100" in filters
 
 
 @pytest.mark.asyncio

@@ -6,7 +6,11 @@ from roughcut.edit.presets import get_workflow_preset
 import pytest
 
 from roughcut.review.content_profile import (
+    _merge_specific_profile_hints,
     _apply_visual_subject_guard,
+    _sanitize_profile_identity,
+    _seed_profile_from_text,
+    _seed_profile_from_user_memory,
     _build_search_queries,
     _filter_evidence_by_visual_subject,
     _fallback_profile,
@@ -14,6 +18,7 @@ from roughcut.review.content_profile import (
     _seed_profile_from_user_memory,
     assess_content_profile_automation,
     apply_content_profile_feedback,
+    build_reviewed_transcript_excerpt,
     build_transcript_excerpt,
     build_cover_title,
     enrich_content_profile,
@@ -37,6 +42,120 @@ def test_build_cover_title_avoids_generic_main_line():
     assert title["top"] == "MAN"
     assert title["main"] == "MAN多功能工具钳"
     assert title["bottom"] == "这次升级够不够狠"
+
+
+def test_build_reviewed_transcript_excerpt_applies_accepted_corrections():
+    excerpt = build_reviewed_transcript_excerpt(
+        [
+            {
+                "index": 0,
+                "start_time": 0.0,
+                "end_time": 1.0,
+                "text_raw": "这次开箱的是锐特的旧型号",
+                "text_norm": "这次开箱的是锐特的旧型号",
+                "text_final": "这次开箱的是锐特的旧型号",
+            },
+            {
+                "index": 1,
+                "start_time": 1.0,
+                "end_time": 2.0,
+                "text_raw": "后面重点看开合手感",
+                "text_norm": "后面重点看开合手感",
+                "text_final": "后面重点看开合手感",
+            },
+        ],
+        [
+            {"item_index": 0, "original": "锐特", "accepted": "REATE"},
+            {"item_index": 0, "original": "旧型号", "accepted": "EXO-M"},
+        ],
+    )
+
+    assert "REATE" in excerpt
+    assert "EXO-M" in excerpt
+    assert "锐特" not in excerpt
+
+
+def test_seed_profile_from_text_extracts_flashlight_brand_and_model():
+    seeded = _seed_profile_from_text("陆虎SK零五二代Pro UV版手电筒开箱，对比一代的变化。")
+
+    assert seeded["subject_brand"] == "Loop露普"
+    assert seeded["subject_model"] == "SK05二代ProUV版"
+    assert seeded["subject_type"] == "EDC手电"
+    assert seeded["video_theme"] == "Loop露普SK05二代ProUV版开箱与一代对比评测"
+    assert any("SK05" in item for item in seeded["search_queries"])
+
+
+def test_sanitize_profile_identity_backfills_supported_transcript_brand_and_model():
+    sanitized = _sanitize_profile_identity(
+        {
+            "subject_brand": "",
+            "subject_model": "",
+            "subject_type": "EDC手电",
+            "video_theme": "Loop露普EDC手电功能演示",
+        },
+        transcript_excerpt="[22.6-25.0] 陆虎SK零五二代。\n[47.4-51.5] UV版其实我用的是相当多的。",
+        source_name="20260225-153519.mp4",
+        memory_hints=None,
+    )
+
+    assert sanitized["subject_brand"] == "Loop露普"
+    assert sanitized["subject_model"] == "SK05二代UV版"
+
+
+def test_sanitize_profile_identity_backfills_brand_model_from_specific_theme():
+    sanitized = _sanitize_profile_identity(
+        {
+            "subject_brand": "",
+            "subject_model": "",
+            "subject_type": "EDC手电",
+            "video_theme": "Loop露普SK05二代UV版开箱与一代对比评测",
+        },
+        transcript_excerpt="这次主要还是讲二代版本的变化。",
+        source_name="20260225-153519.mp4",
+        memory_hints=None,
+    )
+
+    assert sanitized["subject_brand"] == "Loop露普"
+    assert sanitized["subject_model"] == "SK05二代UV版"
+
+
+def test_merge_specific_profile_hints_upgrades_generic_video_theme():
+    profile = {
+        "preset_name": "edc_tactical",
+        "video_theme": "新品开箱评测",
+    }
+
+    _merge_specific_profile_hints(
+        profile,
+        {
+            "video_theme": "Loop露普SK05二代UV版开箱与一代对比评测",
+            "search_queries": ["Loop露普 SK05二代UV版"],
+        },
+    )
+
+    assert profile["video_theme"] == "Loop露普SK05二代UV版开箱与一代对比评测"
+
+
+def test_seed_profile_from_user_memory_uses_recent_brand_model_corrections():
+    seeded = _seed_profile_from_user_memory(
+        "这次重点看 Loop露普 SK05二代Pro UV版 的泛光和 UV 效果。",
+        {
+            "field_preferences": {
+                "subject_brand": [{"value": "Loop露普", "count": 6}],
+                "subject_model": [{"value": "SK05二代Pro UV版", "count": 8}],
+                "subject_type": [{"value": "EDC手电", "count": 3}],
+            },
+            "recent_corrections": [
+                {"field_name": "subject_brand", "corrected_value": "Loop露普"},
+                {"field_name": "subject_model", "corrected_value": "SK05二代Pro UV版"},
+            ],
+            "phrase_preferences": [],
+        },
+    )
+
+    assert seeded["subject_brand"] == "Loop露普"
+    assert seeded["subject_model"] == "SK05二代Pro UV版"
+    assert seeded["subject_type"] == "EDC手电"
 
 
 def test_build_cover_title_prefers_visible_english_brand():
@@ -326,7 +445,7 @@ def test_seed_profile_from_subtitles_prefers_runninghub_from_rh_alias_over_later
     assert profile["subject_model"] == "无限画布"
 
 
-def test_seed_profile_from_user_memory_is_disabled_to_avoid_cross_episode_contamination():
+def test_seed_profile_from_user_memory_only_returns_supported_hits():
     profile = _seed_profile_from_user_memory(
         "这次来聊 ARC 这把工具的单手开合和锁点机构",
         {
@@ -338,7 +457,8 @@ def test_seed_profile_from_user_memory_is_disabled_to_avoid_cross_episode_contam
         },
     )
 
-    assert profile == {}
+    assert profile["subject_model"] == "ARC"
+    assert "subject_brand" not in profile
 
 
 def test_assess_content_profile_automation_blocks_product_profile_without_identity():
@@ -428,6 +548,53 @@ async def test_apply_content_profile_feedback_prefers_user_values():
     assert result["search_queries"]
     assert any("REATE" in item for item in result["search_queries"])
     assert any(token in result["cover_title"]["main"] for token in ("REATE", "马年限定版"))
+    assert result["review_mode"] == "manual_confirmed"
+
+
+@pytest.mark.asyncio
+async def test_apply_content_profile_feedback_prefers_reviewed_subtitle_excerpt(monkeypatch: pytest.MonkeyPatch):
+    from roughcut.review import content_profile as content_profile_module
+
+    captured: dict[str, str] = {}
+
+    def raising_provider():
+        raise RuntimeError("provider unavailable")
+
+    async def fake_enrich_content_profile(*, profile, source_name, channel_profile, transcript_excerpt, include_research, user_memory=None):
+        captured["transcript_excerpt"] = transcript_excerpt
+        return {
+            **profile,
+            "summary": "交叉校对后的摘要",
+            "search_queries": ["REATE EXO-M 开箱"],
+            "cover_title": {"top": "REATE", "main": "EXO-M开箱", "bottom": "开合手感"},
+        }
+
+    monkeypatch.setattr(content_profile_module, "get_reasoning_provider", raising_provider)
+    monkeypatch.setattr(content_profile_module, "enrich_content_profile", fake_enrich_content_profile)
+
+    result = await apply_content_profile_feedback(
+        draft_profile={
+            "subject_brand": "锐特",
+            "subject_model": "旧型号",
+            "transcript_excerpt": "旧字幕摘录",
+        },
+        source_name="video.mp4",
+        channel_profile=None,
+        user_feedback={
+            "subject_brand": "REATE",
+            "subject_model": "EXO-M",
+        },
+        reviewed_subtitle_excerpt="更正后的字幕提到 REATE EXO-M 和开合手感。",
+        accepted_corrections=[
+            {"original": "锐特", "accepted": "REATE"},
+            {"original": "旧型号", "accepted": "EXO-M"},
+        ],
+    )
+
+    assert captured["transcript_excerpt"] == "更正后的字幕提到 REATE EXO-M 和开合手感。"
+    assert result["subject_brand"] == "REATE"
+    assert result["subject_model"] == "EXO-M"
+    assert result["review_mode"] == "manual_confirmed"
 
 
 @pytest.mark.asyncio
@@ -805,3 +972,135 @@ async def test_polish_subtitle_items_llm_result_still_runs_cleanup_pipeline(monk
 
     assert polished == 1
     assert item.text_final == "光线会更好。"
+
+
+@pytest.mark.asyncio
+async def test_polish_subtitle_items_fallback_removes_leading_filler_words(monkeypatch: pytest.MonkeyPatch):
+    from roughcut.review import content_profile as content_profile_module
+
+    def raising_provider():
+        raise RuntimeError("provider unavailable")
+
+    class DummySettings:
+        subtitle_filler_cleanup_enabled = True
+
+    monkeypatch.setattr(content_profile_module, "get_reasoning_provider", raising_provider)
+    monkeypatch.setattr(content_profile_module, "get_settings", lambda: DummySettings())
+
+    item = SimpleNamespace(
+        item_index=0,
+        start_time=0.0,
+        end_time=2.0,
+        text_raw="呃然后这个包装小了一圈。",
+        text_norm="呃然后这个包装小了一圈。",
+        text_final=None,
+    )
+
+    polished = await polish_subtitle_items(
+        [item],
+        content_profile={"preset_name": "edc_tactical"},
+        glossary_terms=[],
+        review_memory={"terms": [], "aliases": [], "style_examples": []},
+    )
+
+    assert polished == 1
+    assert item.text_final == "然后这个包装小了一圈。"
+
+
+@pytest.mark.asyncio
+async def test_polish_subtitle_items_fallback_can_disable_filler_cleanup(monkeypatch: pytest.MonkeyPatch):
+    from roughcut.review import content_profile as content_profile_module
+
+    def raising_provider():
+        raise RuntimeError("provider unavailable")
+
+    class DummySettings:
+        subtitle_filler_cleanup_enabled = False
+
+    monkeypatch.setattr(content_profile_module, "get_reasoning_provider", raising_provider)
+    monkeypatch.setattr(content_profile_module, "get_settings", lambda: DummySettings())
+
+    item = SimpleNamespace(
+        item_index=0,
+        start_time=0.0,
+        end_time=2.0,
+        text_raw="呃然后这个包装小了一圈。",
+        text_norm="呃然后这个包装小了一圈。",
+        text_final=None,
+    )
+
+    polished = await polish_subtitle_items(
+        [item],
+        content_profile={"preset_name": "edc_tactical"},
+        glossary_terms=[],
+        review_memory={"terms": [], "aliases": [], "style_examples": []},
+    )
+
+    assert polished == 1
+    assert item.text_final == "呃然后这个包装小了一圈。"
+
+
+@pytest.mark.asyncio
+async def test_polish_subtitle_items_fallback_removes_trailing_filler_words(monkeypatch: pytest.MonkeyPatch):
+    from roughcut.review import content_profile as content_profile_module
+
+    def raising_provider():
+        raise RuntimeError("provider unavailable")
+
+    class DummySettings:
+        subtitle_filler_cleanup_enabled = True
+
+    monkeypatch.setattr(content_profile_module, "get_reasoning_provider", raising_provider)
+    monkeypatch.setattr(content_profile_module, "get_settings", lambda: DummySettings())
+
+    item = SimpleNamespace(
+        item_index=0,
+        start_time=0.0,
+        end_time=2.0,
+        text_raw="这个尾绳孔做得非常好啊。",
+        text_norm="这个尾绳孔做得非常好啊。",
+        text_final=None,
+    )
+
+    polished = await polish_subtitle_items(
+        [item],
+        content_profile={"preset_name": "edc_tactical"},
+        glossary_terms=[],
+        review_memory={"terms": [], "aliases": [], "style_examples": []},
+    )
+
+    assert polished == 1
+    assert item.text_final == "这个尾绳孔做得非常好。"
+
+
+@pytest.mark.asyncio
+async def test_polish_subtitle_items_fallback_keeps_short_clause_particle(monkeypatch: pytest.MonkeyPatch):
+    from roughcut.review import content_profile as content_profile_module
+
+    def raising_provider():
+        raise RuntimeError("provider unavailable")
+
+    class DummySettings:
+        subtitle_filler_cleanup_enabled = True
+
+    monkeypatch.setattr(content_profile_module, "get_reasoning_provider", raising_provider)
+    monkeypatch.setattr(content_profile_module, "get_settings", lambda: DummySettings())
+
+    item = SimpleNamespace(
+        item_index=0,
+        start_time=0.0,
+        end_time=2.0,
+        text_raw="尾按呢。",
+        text_norm="尾按呢。",
+        text_final=None,
+    )
+
+    polished = await polish_subtitle_items(
+        [item],
+        content_profile={"preset_name": "edc_tactical"},
+        glossary_terms=[],
+        review_memory={"terms": [], "aliases": [], "style_examples": []},
+    )
+
+    assert polished == 1
+    assert item.text_final == "尾按呢。"

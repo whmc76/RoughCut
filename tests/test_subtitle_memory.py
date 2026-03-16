@@ -47,6 +47,30 @@ def test_build_subtitle_review_memory_collects_terms_and_examples():
     assert "同类视频常见表达" in summary
 
 
+def test_build_subtitle_review_memory_includes_confirmed_feedback_entities():
+    memory = build_subtitle_review_memory(
+        channel_profile="edc_tactical",
+        glossary_terms=[],
+        user_memory={},
+        recent_subtitles=[],
+        content_profile={
+            "subject_brand": "Loop露普",
+            "subject_model": "SK05二代Pro UV版",
+            "user_feedback": {
+                "subject_brand": "Loop 露普",
+                "subject_model": "SK05二代Pro UV版",
+                "keywords": ["Loop 露普 SK05二代Pro UV版"],
+            },
+        },
+    )
+
+    confirmed = memory["confirmed_entities"][0]
+    assert confirmed["brand"] == "Loop露普"
+    assert confirmed["model"] == "SK05二代ProUV版"
+    assert any(item["wrong"] == "SK零五二代" and item["correct"] == "SK05二代" for item in confirmed["model_aliases"])
+    assert any(item["wrong"] == "五眼版" and item["correct"] == "UV版" for item in confirmed["model_aliases"])
+
+
 def test_build_transcription_prompt_includes_terms_and_aliases():
     prompt = build_transcription_prompt(
         source_name="arc_review.mp4",
@@ -62,6 +86,25 @@ def test_build_transcription_prompt_includes_terms_and_aliases():
     assert "LEATHERMAN" in prompt
     assert "多功能工具钳" in prompt
     assert "来自慢=LEATHERMAN" in prompt
+
+
+def test_build_transcription_prompt_includes_beijing_dialect_guidance():
+    prompt = build_transcription_prompt(
+        source_name="cyberdicklang.mp4",
+        channel_profile="edc_tactical",
+        review_memory={
+            "terms": [{"term": "赛博迪克朗"}],
+            "aliases": [],
+            "style_examples": [],
+        },
+        dialect_profile="beijing",
+    )
+
+    assert "识别口音：北京话" in prompt
+    assert "赛博迪克朗" in prompt
+    assert "倍儿" in prompt
+    assert "甭" in prompt
+    assert "儿化音" in prompt
 
 
 def test_apply_domain_term_corrections_fixes_edc_aliases_and_near_matches():
@@ -81,7 +124,7 @@ def test_apply_domain_term_corrections_fixes_edc_aliases_and_near_matches():
         },
     )
 
-    assert "LEATHERMAN" in corrected
+    assert "来自慢" in corrected
     assert "多功能工具钳" in corrected
     assert "单手开合" in corrected
     assert "主刀" in corrected
@@ -160,6 +203,41 @@ def test_apply_domain_term_corrections_fixes_jingmian_typos():
     assert corrected.count("镜面") == 2
 
 
+def test_apply_domain_term_corrections_fixes_edc_flashlight_terms():
+    corrected = apply_domain_term_corrections(
+        "这期手机评测里我会聊K线、背针孔、胶丝，还有即ed的玩法，黑金好，最后拿起来提高山山。",
+        {
+            "terms": [
+                {"term": "手电评测"},
+                {"term": "K鞘"},
+                {"term": "尾绳孔"},
+                {"term": "胶塞儿"},
+                {"term": "即EDC"},
+                {"term": "非常好"},
+                {"term": "金光闪闪"},
+            ],
+            "aliases": [
+                {"wrong": "手机评测", "correct": "手电评测"},
+                {"wrong": "K线", "correct": "K鞘"},
+                {"wrong": "背针孔", "correct": "尾绳孔"},
+                {"wrong": "胶丝", "correct": "胶塞儿"},
+                {"wrong": "即ed", "correct": "即EDC"},
+                {"wrong": "黑金好", "correct": "非常好"},
+                {"wrong": "提高山山", "correct": "金光闪闪"},
+            ],
+            "style_examples": [],
+        },
+    )
+
+    assert "手电评测" in corrected
+    assert "K鞘" in corrected
+    assert "尾绳孔" in corrected
+    assert "胶塞儿" in corrected
+    assert "即EDC" in corrected
+    assert "非常好" in corrected
+    assert "金光闪闪" in corrected
+
+
 def test_build_subtitle_review_memory_injects_default_edc_glossary():
     memory = build_subtitle_review_memory(
         channel_profile="edc_tactical",
@@ -192,6 +270,142 @@ def test_build_subtitle_review_memory_expands_edc_subdomains():
     assert "泛光" in terms
     assert "折刀" in terms
     assert "背夹" in terms
+
+
+def test_build_subtitle_review_memory_includes_edc_flashlight_variant_alias():
+    memory = build_subtitle_review_memory(
+        channel_profile="edc_tactical",
+        glossary_terms=[],
+        user_memory={},
+        recent_subtitles=[{"text_final": "这个手电的V湖眼版和UV版我都拿到了。"}],
+        content_profile={"video_theme": "EDC手电开箱评测"},
+    )
+
+    assert any(item["term"] == "微弧版" for item in memory["terms"])
+    assert any(item["wrong"] == "V湖眼版" and item["correct"] == "微弧版" for item in memory["aliases"])
+
+
+def test_build_subtitle_review_memory_includes_new_flashlight_aliases():
+    memory = build_subtitle_review_memory(
+        channel_profile="edc_tactical",
+        glossary_terms=[],
+        user_memory={},
+        recent_subtitles=[{"text_final": "这期手机评测里我顺手讲一下K线、背针孔和胶丝。"}],
+        content_profile={"video_theme": "EDC手电开箱评测"},
+    )
+
+    alias_map = {(item["wrong"], item["correct"]) for item in memory["aliases"]}
+
+    assert ("手机评测", "手电评测") in alias_map
+    assert ("K线", "K鞘") in alias_map
+    assert ("背针孔", "尾绳孔") in alias_map
+    assert ("胶丝", "胶塞儿") in alias_map
+
+
+def test_build_subtitle_review_memory_includes_vhu_variants_for_flashlight_context():
+    memory = build_subtitle_review_memory(
+        channel_profile="edc_tactical",
+        glossary_terms=[],
+        user_memory={},
+        recent_subtitles=[{"text_final": "之前那个V湖的包括现在这个二代我都拿到了。"}],
+        content_profile={"video_theme": "EDC手电开箱评测"},
+    )
+
+    alias_map = {(item["wrong"], item["correct"]) for item in memory["aliases"]}
+
+    assert ("V湖的", "微弧版") in alias_map
+
+
+def test_build_subtitle_review_memory_includes_domestic_edc_brand_clusters():
+    memory = build_subtitle_review_memory(
+        channel_profile="edc_tactical",
+        glossary_terms=[],
+        user_memory={},
+        recent_subtitles=[{"text_final": "这期从 tomtoc 机能包、纳拓工具钳、菲尼克斯手电到 Kizer 折刀都一起聊一下。"}],
+        content_profile={"video_theme": "EDC机能包手电工具钳折刀开箱评测"},
+    )
+
+    terms = {item["term"] for item in memory["terms"]}
+    alias_map = {(item["wrong"], item["correct"]) for item in memory["aliases"]}
+
+    assert "TOMTOC" in terms
+    assert "NEXTOOL" in terms
+    assert "FENIX" in terms
+    assert "KIZER" in terms
+    assert ("纳拓", "NEXTOOL") in alias_map
+    assert ("菲尼克斯", "FENIX") in alias_map
+    assert ("Kizer", "KIZER") in alias_map
+
+
+def test_build_subtitle_review_memory_includes_bag_domain_keywords():
+    memory = build_subtitle_review_memory(
+        channel_profile="unboxing_default",
+        glossary_terms=[],
+        user_memory={},
+        recent_subtitles=[{"text_final": "这个胸包和快取包我最近在 tomtoc 和 PGYTECH 之间纠结。"}],
+        content_profile={"video_theme": "机能包开箱评测"},
+    )
+
+    terms = {item["term"] for item in memory["terms"]}
+
+    assert "机能包" in terms
+    assert "胸包" in terms
+    assert "TOMTOC" in terms
+    assert "PGYTECH" in terms
+
+
+def test_build_subtitle_review_memory_includes_new_mainstream_edc_brand_clusters():
+    memory = build_subtitle_review_memory(
+        channel_profile="edc_tactical",
+        glossary_terms=[],
+        user_memory={},
+        recent_subtitles=[
+            {
+                "text_final": "这期把 FOXBAT、FIRST WOLF、psiger、LiiGear、SOG、华尔纳、顺全、Maxace、世界 mundus 和 Microtech 一起聊了。"
+            }
+        ],
+        content_profile={"video_theme": "EDC机能包工具钳折刀开箱评测"},
+    )
+
+    terms = {item["term"] for item in memory["terms"]}
+    alias_map = {(item["wrong"], item["correct"]) for item in memory["aliases"]}
+
+    assert "FOXBAT狐蝠工业" in terms
+    assert "头狼工业" in terms
+    assert "PSIGEAR" in terms
+    assert "LIIGEAR" in terms
+    assert "SOG" in terms
+    assert "WARNA" in terms
+    assert "SQT顺全作" in terms
+    assert "MAXACE" in terms
+    assert "MUNDUS" in terms
+    assert "MICROTECH" in terms
+    assert ("FIRST WOLF", "头狼工业") in alias_map
+    assert ("psiger", "PSIGEAR") in alias_map
+    assert ("华尔纳", "WARNA") in alias_map
+    assert ("顺全", "SQT顺全作") in alias_map
+    assert ("世界 mundus", "MUNDUS") in alias_map
+    assert ("Microtech", "MICROTECH") in alias_map
+
+
+def test_build_subtitle_review_memory_includes_discovered_flashlight_and_tool_brands():
+    memory = build_subtitle_review_memory(
+        channel_profile="edc_tactical",
+        glossary_terms=[],
+        user_memory={},
+        recent_subtitles=[{"text_final": "这回顺手对比了凯瑞兹、务本和戈博。"}],
+        content_profile={"video_theme": "EDC手电工具开箱评测"},
+    )
+
+    terms = {item["term"] for item in memory["terms"]}
+    alias_map = {(item["wrong"], item["correct"]) for item in memory["aliases"]}
+
+    assert "KLARUS" in terms
+    assert "WUBEN" in terms
+    assert "GERBER" in terms
+    assert ("凯瑞兹", "KLARUS") in alias_map
+    assert ("务本", "WUBEN") in alias_map
+    assert ("戈博", "GERBER") in alias_map
 
 
 def test_build_subtitle_review_memory_injects_ai_and_tech_glossary():
@@ -418,4 +632,96 @@ def test_apply_domain_term_corrections_repairs_truncated_latin_brand_token():
         },
     )
 
-    assert corrected == "折刀开箱,FAS,LEATHERMAN"
+    assert corrected == "折刀开箱,FAS,LEATHER"
+
+
+def test_apply_domain_term_corrections_does_not_force_brand_to_canonical_name():
+    corrected = apply_domain_term_corrections(
+        "莱德曼这个工具钳手感还行，纳拓那把之前也买过。",
+        {
+            "terms": [{"term": "LEATHERMAN"}, {"term": "OLIGHT"}],
+            "aliases": [
+                {"wrong": "傲雷", "correct": "OLIGHT", "category": "edc_brand"},
+                {"wrong": "来自慢", "correct": "LEATHERMAN", "category": "edc_brand"},
+            ],
+            "style_examples": [],
+        },
+    )
+
+    assert "LEATHERMAN" not in corrected
+    assert "OLIGHT" not in corrected
+    assert "莱德曼" in corrected
+    assert "纳拓" in corrected
+
+
+def test_apply_domain_term_corrections_uses_confirmed_feedback_anchor_for_current_episode():
+    corrected = apply_domain_term_corrections(
+        "呃陆虎SK零五二代。全新的二代啊五眼版。",
+        {
+            "terms": [{"term": "Loop露普"}, {"term": "SK05二代"}],
+            "aliases": [],
+            "style_examples": [],
+            "confirmed_entities": [
+                {
+                    "brand": "Loop露普",
+                    "model": "SK05二代ProUV版",
+                    "model_aliases": [
+                        {"wrong": "SK零五二代", "correct": "SK05二代"},
+                        {"wrong": "五眼版", "correct": "UV版"},
+                    ],
+                }
+            ],
+        },
+        prev_text="呃Loop露普SK05二代。",
+    )
+
+    assert "陆虎" not in corrected
+    assert "Loop露普SK05二代" in corrected
+    assert "UV版" in corrected
+
+
+def test_apply_domain_term_corrections_repairs_wrong_brand_before_canonical_model_anchor():
+    corrected = apply_domain_term_corrections(
+        "这个是陆虎SK05二代。",
+        {
+            "terms": [{"term": "Loop露普"}, {"term": "SK05二代"}],
+            "aliases": [],
+            "style_examples": [],
+            "confirmed_entities": [
+                {
+                    "brand": "Loop露普",
+                    "model": "SK05二代ProUV版",
+                    "model_aliases": [
+                        {"wrong": "SK零五二代", "correct": "SK05二代"},
+                    ],
+                }
+            ],
+        },
+    )
+
+    assert corrected == "这个是Loop露普SK05二代。"
+
+
+def test_apply_domain_term_corrections_keeps_wuyanban_without_local_context_support():
+    corrected = apply_domain_term_corrections(
+        "全新的二代啊五眼版。",
+        {
+            "terms": [{"term": "Loop露普"}, {"term": "SK05二代"}],
+            "aliases": [],
+            "style_examples": [],
+            "confirmed_entities": [
+                {
+                    "brand": "Loop露普",
+                    "model": "SK05二代ProUV版",
+                    "model_aliases": [
+                        {"wrong": "五眼版", "correct": "UV版"},
+                    ],
+                }
+            ],
+        },
+        prev_text="这玩意儿刚到手。",
+        next_text="包装小了一圈。",
+    )
+
+    assert "五眼版" in corrected
+    assert "UV版" not in corrected

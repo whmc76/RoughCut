@@ -3,16 +3,18 @@ Orchestrator: single-process loop that reads job_steps and advances the state ma
 State in DB, Celery only executes individual steps.
 
 Pipeline: probe → extract_audio → transcribe → subtitle_postprocess
-        → glossary_review → ai_director → avatar_commentary → edit_plan → render → platform_package
+        → glossary_review → content_profile → summary_review → ai_director
+        → avatar_commentary → edit_plan → render → platform_package
 """
 from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from roughcut.db.models import Job, JobStep
 from roughcut.db.session import get_session_factory
@@ -25,9 +27,9 @@ PIPELINE_STEPS = [
     "extract_audio",
     "transcribe",
     "subtitle_postprocess",
+    "glossary_review",
     "content_profile",
     "summary_review",
-    "glossary_review",
     "ai_director",
     "avatar_commentary",
     "edit_plan",
@@ -64,6 +66,7 @@ STEP_QUEUES = {
 }
 
 MAX_ATTEMPTS = 3
+_GPU_SENSITIVE_STEPS = {"transcribe", "avatar_commentary", "render"}
 
 
 async def tick() -> None:
@@ -75,6 +78,24 @@ async def tick() -> None:
         )
         for job in jobs_result.scalars().all():
             await _ensure_job_steps(job, session)
+
+        try:
+            from roughcut.watcher.folder_watcher import run_watch_root_auto_duty
+
+            duty_summary = await run_watch_root_auto_duty()
+            if any(int(duty_summary.get(key) or 0) > 0 for key in ("scan_started", "auto_merged_jobs", "auto_enqueued_jobs")):
+                logger.info(
+                    "watch duty tick roots=%s scan_started=%s auto_merged_jobs=%s auto_enqueued_jobs=%s idle_slots=%s",
+                    duty_summary.get("roots_total"),
+                    duty_summary.get("scan_started"),
+                    duty_summary.get("auto_merged_jobs"),
+                    duty_summary.get("auto_enqueued_jobs"),
+                    duty_summary.get("idle_slots"),
+                )
+        except Exception:
+            logger.exception("Watch auto duty tick failed")
+
+        running_gpu_steps = await _count_running_gpu_steps(session)
 
         # Find all pending steps
         result = await session.execute(
@@ -89,13 +110,84 @@ async def tick() -> None:
         pending_steps = result.scalars().all()
 
         for step in pending_steps:
+            retry_wait_remaining = _step_retry_wait_remaining(step)
+            if retry_wait_remaining > 0:
+                _set_step_waiting_metadata(
+                    step,
+                    detail=f"资源等待中，约 {retry_wait_remaining}s 后自动重试。",
+                    retry_after_sec=retry_wait_remaining,
+                )
+                continue
+
             ready = await _is_step_ready(step, session)
-            if ready:
-                await _dispatch_step(step, session)
+            if not ready:
+                continue
+
+            gpu_wait_reason = _gpu_dispatch_wait_reason(step.step_name, running_gpu_steps=running_gpu_steps)
+            if gpu_wait_reason:
+                _set_step_waiting_metadata(step, detail=gpu_wait_reason)
+                continue
+
+            await _dispatch_step(step, session)
+            if step.step_name in _GPU_SENSITIVE_STEPS:
+                running_gpu_steps += 1
 
         # Check for failed jobs (all steps failed)
         await _update_job_statuses(session)
         await session.commit()
+
+
+def _step_retry_wait_remaining(step: JobStep) -> int:
+    metadata = step.metadata_ or {}
+    retry_wait_until = metadata.get("retry_wait_until")
+    if retry_wait_until in (None, "", 0):
+        return 0
+    try:
+        wait_until = float(retry_wait_until)
+    except (TypeError, ValueError):
+        return 0
+    remaining = wait_until - datetime.now(timezone.utc).timestamp()
+    return max(0, int(math.ceil(remaining)))
+
+
+async def _count_running_gpu_steps(session) -> int:
+    result = await session.execute(
+        select(func.count(JobStep.id)).where(
+            JobStep.status == "running",
+            JobStep.step_name.in_(sorted(_GPU_SENSITIVE_STEPS)),
+        )
+    )
+    return int(result.scalar() or 0)
+
+
+def _gpu_dispatch_wait_reason(step_name: str, *, running_gpu_steps: int) -> str | None:
+    if step_name not in _GPU_SENSITIVE_STEPS:
+        return None
+    if running_gpu_steps > 0:
+        return "检测到 RoughCut 仍有 GPU 步骤运行，当前步骤等待空闲后再派发。"
+    try:
+        from roughcut.pipeline.tasks import _probe_local_gpu_pressure
+
+        busy_reason = _probe_local_gpu_pressure(step_name)
+    except Exception:
+        return None
+    if not busy_reason:
+        return None
+    return f"{busy_reason} 调度器暂不派发新的 GPU 任务。"
+
+
+def _set_step_waiting_metadata(
+    step: JobStep,
+    *,
+    detail: str,
+    retry_after_sec: int | None = None,
+) -> None:
+    metadata = dict(step.metadata_ or {})
+    metadata["detail"] = detail
+    metadata["updated_at"] = datetime.now(timezone.utc).isoformat()
+    if retry_after_sec is not None:
+        metadata["retry_after_sec"] = retry_after_sec
+    step.metadata_ = metadata
 
 
 async def _recover_incomplete_jobs() -> None:

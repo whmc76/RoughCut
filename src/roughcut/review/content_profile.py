@@ -7,6 +7,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from roughcut.config import get_settings
 from roughcut.edit.presets import WorkflowPreset, get_workflow_preset, select_preset
 from roughcut.providers.factory import get_reasoning_provider, get_search_provider
 from roughcut.providers.multimodal import complete_with_images
@@ -33,6 +34,37 @@ def build_transcript_excerpt(subtitle_items: list[dict], *, max_items: int = 36,
             break
         lines.append(line)
     return "\n".join(lines)
+
+
+def build_reviewed_transcript_excerpt(
+    subtitle_items: list[dict[str, Any]],
+    accepted_corrections: list[dict[str, Any]] | None = None,
+    *,
+    max_items: int = 36,
+    max_chars: int = 1400,
+) -> str:
+    corrections_by_index: dict[int, list[dict[str, Any]]] = {}
+    for item in accepted_corrections or []:
+        try:
+            index = int(item.get("item_index"))
+        except (TypeError, ValueError):
+            continue
+        corrections_by_index.setdefault(index, []).append(item)
+
+    reviewed_items: list[dict[str, Any]] = []
+    for subtitle in subtitle_items:
+        item = dict(subtitle)
+        text = str(item.get("text_final") or item.get("text_norm") or item.get("text_raw") or "")
+        for correction in corrections_by_index.get(int(item.get("index", -1)), []):
+            original = str(correction.get("original") or "").strip()
+            accepted = str(correction.get("accepted") or "").strip()
+            if not original or not accepted or original == accepted:
+                continue
+            if original in text:
+                text = text.replace(original, accepted)
+        item["text_final"] = text
+        reviewed_items.append(item)
+    return build_transcript_excerpt(reviewed_items, max_items=max_items, max_chars=max_chars)
 
 
 def apply_glossary_terms(text: str, glossary_terms: list[dict[str, Any]]) -> str:
@@ -240,6 +272,7 @@ def _sanitize_profile_identity(
     sanitized = dict(profile or {})
     transcript_hints = _seed_profile_from_transcript_excerpt(transcript_excerpt)
     visual_hints = _seed_profile_from_text(str(sanitized.get("visible_text") or "").strip())
+    theme_hints = _seed_profile_from_text(str(sanitized.get("video_theme") or "").strip())
     source_hints = _seed_profile_from_text(Path(source_name).stem) if _is_informative_source_hint(Path(source_name).stem) else {}
     confirmed_fields = _extract_confirmed_profile_fields(sanitized)
 
@@ -253,6 +286,7 @@ def _sanitize_profile_identity(
             sanitized.get("subject_model"),
             transcript_hints.get("subject_model"),
             visual_hints.get("subject_model"),
+            theme_hints.get("subject_model"),
             source_hints.get("subject_model"),
         )
 
@@ -263,6 +297,7 @@ def _sanitize_profile_identity(
             sanitized.get("subject_brand"),
             transcript_hints.get("subject_brand"),
             visual_hints.get("subject_brand"),
+            theme_hints.get("subject_brand"),
             source_hints.get("subject_brand"),
         )
         if not verified_brand and verified_model:
@@ -353,6 +388,23 @@ def _first_supported_identity_value(primary: Any, *candidates: Any) -> str:
 def _supported_identity_value(primary: Any, *candidates: Any) -> str:
     primary_value = str(primary or "").strip()
     if not primary_value:
+        normalized_candidates: dict[str, str] = {}
+        candidate_counts: dict[str, int] = {}
+        for candidate in candidates:
+            candidate_value = str(candidate or "").strip()
+            candidate_key = _normalize_profile_value(candidate_value)
+            if not candidate_key:
+                continue
+            normalized_candidates.setdefault(candidate_key, candidate_value)
+            candidate_counts[candidate_key] = candidate_counts.get(candidate_key, 0) + 1
+        if not candidate_counts:
+            return ""
+        if len(candidate_counts) == 1:
+            only_key = next(iter(candidate_counts))
+            return normalized_candidates[only_key]
+        supported_keys = [key for key, count in candidate_counts.items() if count >= 2]
+        if len(supported_keys) == 1:
+            return normalized_candidates[supported_keys[0]]
         return ""
     if _identity_support_count(primary_value, *candidates) >= 2:
         return primary_value
@@ -569,6 +621,8 @@ async def apply_content_profile_feedback(
     source_name: str,
     channel_profile: str | None,
     user_feedback: dict[str, Any],
+    reviewed_subtitle_excerpt: str | None = None,
+    accepted_corrections: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     merged = dict(draft_profile or {})
     merged["user_feedback"] = dict(user_feedback or {})
@@ -602,6 +656,15 @@ async def apply_content_profile_feedback(
 
     try:
         provider = get_reasoning_provider()
+        accepted_examples = [
+            {
+                "original": str(item.get("original") or "").strip(),
+                "accepted": str(item.get("accepted") or "").strip(),
+            }
+            for item in (accepted_corrections or [])
+            if str(item.get("original") or "").strip() and str(item.get("accepted") or "").strip()
+        ]
+        reviewed_excerpt = str(reviewed_subtitle_excerpt or merged.get("transcript_excerpt") or "").strip()
         prompt = (
             "你在整理一条中文短视频的人工确认摘要。请结合模型草稿和用户修正，"
             "输出一个后续可直接用于搜索、字幕修正和剪辑规划的确认版摘要。"
@@ -614,6 +677,10 @@ async def apply_content_profile_feedback(
             f"\n用户修正：{json.dumps(user_feedback, ensure_ascii=False)}"
             f"\n源文件名：{source_name}"
         )
+        if reviewed_excerpt:
+            prompt += f"\n人工复检后的字幕摘录：{reviewed_excerpt}"
+        if accepted_examples:
+            prompt += f"\n已接受的字幕校对：{json.dumps(accepted_examples[:12], ensure_ascii=False)}"
         response = await provider.complete(
             [
                 Message(role="system", content="你是严谨的中文视频内容摘要整理助手。"),
@@ -628,7 +695,7 @@ async def apply_content_profile_feedback(
     except Exception:
         pass
 
-    transcript_excerpt = str(merged.get("transcript_excerpt") or "")
+    transcript_excerpt = str(reviewed_subtitle_excerpt or merged.get("transcript_excerpt") or "")
     result = await enrich_content_profile(
         profile=merged,
         source_name=source_name,
@@ -637,6 +704,7 @@ async def apply_content_profile_feedback(
         include_research=False,
     )
     result["user_feedback"] = dict(user_feedback or {})
+    result["review_mode"] = "manual_confirmed"
     for key in (
         "subject_brand",
         "subject_model",
@@ -1286,6 +1354,7 @@ def _transcript_signal_score(item: dict[str, Any]) -> int:
 _BRAND_ALIAS_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("LEATHERMAN", re.compile(r"(LEATHERMAN|莱[泽着]曼|来[自自泽着]慢|来[自泽着]曼|雷[泽着]曼)", re.IGNORECASE)),
     ("REATE", re.compile(r"(REATE|锐特|瑞特|睿特)", re.IGNORECASE)),
+    ("Loop露普", re.compile(r"(LOOP|露普|陆虎|路普|鲁普)", re.IGNORECASE)),
 ]
 
 _TECH_BRAND_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
@@ -1328,6 +1397,12 @@ _SEARCH_SIGNAL_STOPWORDS: set[str] = {
 
 _MODEL_TO_BRAND: dict[str, str] = {
     "ARC": "LEATHERMAN",
+    "SK05二代ProUV版": "Loop露普",
+    "SK05二代Pro UV版": "Loop露普",
+    "SK05二代UV版": "Loop露普",
+    "SK05二代 UV版": "Loop露普",
+    "SK05UV版": "Loop露普",
+    "SK05 UV版": "Loop露普",
 }
 
 
@@ -1358,12 +1433,68 @@ def _seed_profile_from_context(profile: dict[str, Any], transcript_excerpt: str)
 
 
 def _seed_profile_from_user_memory(transcript_excerpt: str, user_memory: dict[str, Any] | None) -> dict[str, Any]:
-    del transcript_excerpt, user_memory
-    return {}
+    transcript_norm = _normalize_profile_value(transcript_excerpt)
+    if not transcript_norm or not user_memory:
+        return {}
+
+    seeded: dict[str, Any] = {}
+    field_preferences = user_memory.get("field_preferences") or {}
+    recent_corrections = user_memory.get("recent_corrections") or []
+    phrase_preferences = user_memory.get("phrase_preferences") or []
+
+    for item in recent_corrections:
+        corrected = str(item.get("corrected_value") or "").strip()
+        if corrected and _normalize_profile_value(corrected) in transcript_norm:
+            field_name = str(item.get("field_name") or "").strip()
+            if field_name in {"subject_brand", "subject_model", "subject_type", "video_theme"} and field_name not in seeded:
+                seeded[field_name] = corrected
+
+    for field_name in ("subject_brand", "subject_model", "subject_type"):
+        if field_name in seeded:
+            continue
+        for item in field_preferences.get(field_name) or []:
+            value = str(item.get("value") or "").strip()
+            if value and _normalize_profile_value(value) in transcript_norm:
+                seeded[field_name] = value
+                break
+
+    if "video_theme" not in seeded:
+        for item in field_preferences.get("video_theme") or []:
+            value = str(item.get("value") or "").strip()
+            if not value:
+                continue
+            tokens = [token for token in re.split(r"[\s/·\-]+", value) if token]
+            hit_count = sum(1 for token in tokens if _normalize_profile_value(token) and _normalize_profile_value(token) in transcript_norm)
+            if hit_count >= 2:
+                seeded["video_theme"] = value
+                break
+
+    if "subject_brand" not in seeded:
+        for item in phrase_preferences:
+            phrase = str(item.get("phrase") or "").strip()
+            if not phrase or _normalize_profile_value(phrase) not in transcript_norm:
+                continue
+            phrase_seed = _seed_profile_from_text(phrase)
+            if phrase_seed.get("subject_brand"):
+                seeded["subject_brand"] = phrase_seed["subject_brand"]
+            if phrase_seed.get("subject_model") and "subject_model" not in seeded:
+                seeded["subject_model"] = phrase_seed["subject_model"]
+            if seeded.get("subject_brand"):
+                break
+
+    if "subject_type" not in seeded:
+        transcript_seed = _seed_profile_from_text(transcript_excerpt)
+        if transcript_seed.get("subject_type"):
+            seeded["subject_type"] = transcript_seed["subject_type"]
+        elif seeded.get("subject_brand") == "Loop露普" or str(seeded.get("subject_model") or "").startswith("SK05"):
+            seeded["subject_type"] = "EDC手电"
+
+    return seeded
 
 
 def _seed_profile_from_text(transcript: str) -> dict[str, Any]:
     normalized = transcript.upper()
+    canon = _canonicalize_spoken_identity_text(transcript)
 
     brand = ""
     for name, pattern in _BRAND_ALIAS_PATTERNS:
@@ -1378,6 +1509,8 @@ def _seed_profile_from_text(transcript: str) -> dict[str, Any]:
         model = "SURGE"
     elif re.search(r"(?<![A-Z0-9])CHARGE(?![A-Z0-9])", normalized):
         model = "CHARGE"
+    else:
+        model = _extract_edc_flashlight_model(canon)
 
     if not brand and model in _MODEL_TO_BRAND:
         brand = _MODEL_TO_BRAND[model]
@@ -1385,11 +1518,14 @@ def _seed_profile_from_text(transcript: str) -> dict[str, Any]:
     subject_type = ""
     knife_keywords = ("折刀", "刀片", "锁定机构", "推刀", "梯片", "锁片", "刀柄", "柄身", "开刃")
     plier_keywords = ("工具钳", "钳子", "尖嘴钳", "钢丝钳")
+    flashlight_keywords = ("手电", "电筒", "筒身", "紫光", "UV", "流明", "泛光", "照射")
 
     if brand == "LEATHERMAN" or model in {"ARC", "SURGE", "CHARGE"}:
         subject_type = "多功能工具钳"
     elif brand == "REATE" or any(keyword in transcript for keyword in knife_keywords):
         subject_type = "EDC折刀"
+    elif brand == "Loop露普" or model.startswith("SK05") or any(keyword in canon.upper() for keyword in flashlight_keywords):
+        subject_type = "EDC手电"
     elif any(keyword in transcript for keyword in plier_keywords):
         subject_type = "多功能工具钳"
 
@@ -1433,6 +1569,43 @@ def _seed_profile_from_text(transcript: str) -> dict[str, Any]:
         )
         seeded["search_queries"] = queries
     return seeded
+
+
+def _canonicalize_spoken_identity_text(text: str) -> str:
+    normalized = str(text or "").upper()
+    replacements = {
+        "零": "0",
+        "〇": "0",
+        "Ｏ": "0",
+        "一": "1",
+        "二": "2",
+        "两": "2",
+        "三": "3",
+        "四": "4",
+        "五": "5",
+        "六": "6",
+        "七": "7",
+        "八": "8",
+        "九": "9",
+        "Ⅱ": "II",
+    }
+    for source, target in replacements.items():
+        normalized = normalized.replace(source, target)
+    return normalized
+
+
+def _extract_edc_flashlight_model(text: str) -> str:
+    normalized = _canonicalize_spoken_identity_text(text)
+    if "SK05" not in normalized:
+        return ""
+    suffixes: list[str] = ["SK05"]
+    if "2代" in normalized or "二代" in text or "II" in normalized:
+        suffixes.append("二代")
+    if "PRO" in normalized:
+        suffixes.append("Pro")
+    if "UV" in normalized:
+        suffixes.append("UV版")
+    return " ".join(suffixes[:1]).replace(" ", "") if len(suffixes) == 1 else f"{suffixes[0]}{''.join(suffixes[1:])}"
 
 
 def _extract_topic_terms(text: str) -> list[str]:
@@ -1508,6 +1681,26 @@ def _build_seeded_video_theme(
     feature = model if model in topic_terms else (topic_terms[0] if topic_terms else "")
     if feature == "工作流" and "漫剧工作流" in topic_terms:
         feature = "漫剧工作流"
+    product_anchor = f"{brand}{model}".strip() or brand or model
+
+    if product_anchor and "software" not in lowered:
+        has_unboxing = any(keyword in transcript for keyword in ("开箱", "包装"))
+        has_review = any(keyword in transcript for keyword in ("评测", "测评", "上手", "体验"))
+        has_compare = any(keyword in transcript for keyword in ("对比", "比较", "横评"))
+        has_gen_comparison = "一代" in transcript and any(
+            keyword in transcript for keyword in ("二代", "2代", "Ⅱ代", "II")
+        )
+        if has_unboxing or has_review or has_compare or has_gen_comparison:
+            if has_compare or has_gen_comparison:
+                if "一代" in transcript:
+                    return f"{product_anchor}开箱与一代对比评测"
+                return f"{product_anchor}开箱对比评测"
+            if has_unboxing and has_review:
+                return f"{product_anchor}开箱与上手评测"
+            if has_unboxing:
+                return f"{product_anchor}开箱与功能实测"
+            if has_review:
+                return f"{product_anchor}上手评测"
 
     if feature == "无限画布":
         if any(keyword in transcript for keyword in ("上线", "更新", "新功能", "刚出", "发布")):
@@ -1608,6 +1801,12 @@ def _merge_specific_profile_hints(profile: dict[str, Any], hints: dict[str, Any]
         profile["subject_model"] = hints["subject_model"]
     if hints.get("subject_type") and _is_generic_subject_type(str(profile.get("subject_type") or "")):
         profile["subject_type"] = hints["subject_type"]
+    hinted_theme = str(hints.get("video_theme") or "").strip()
+    current_theme = str(profile.get("video_theme") or "").strip()
+    preset_name = str(profile.get("preset_name") or "").strip()
+    if hinted_theme and _is_specific_video_theme(hinted_theme, preset_name=preset_name):
+        if not _is_specific_video_theme(current_theme, preset_name=preset_name):
+            profile["video_theme"] = hinted_theme
 
     current_queries = [str(item).strip() for item in profile.get("search_queries") or [] if str(item).strip()]
     for item in hints.get("search_queries") or []:
@@ -1668,7 +1867,7 @@ def _is_specific_video_theme(text: str, *, preset_name: str) -> bool:
     normalized = _clean_line(text)
     if not normalized:
         return False
-    if normalized in {"产品开箱与上手体验", "开箱评测", "开箱体验", "上手体验", "产品体验", "评测"}:
+    if normalized in {"产品开箱与上手体验", "产品开箱评测", "新品开箱评测", "开箱评测", "开箱体验", "上手体验", "产品体验", "评测"}:
         return False
     default_theme = _clean_line(_default_video_theme_by_name(preset_name))
     if default_theme and normalized == default_theme:
@@ -1906,7 +2105,19 @@ def _fallback_polish_text(
     polished = _dedupe_repeated_domain_terms(polished, review_memory=review_memory)
     polished = _prune_low_signal_clauses(polished, review_memory=review_memory)
     polished = apply_glossary_terms(polished, glossary_terms)
-    polished = apply_domain_term_corrections(polished, review_memory)
+    polished = _apply_explicit_review_aliases_for_polish(polished, review_memory=review_memory)
+    polished = apply_domain_term_corrections(
+        polished,
+        review_memory,
+        prev_text=prev_text,
+        next_text=next_text,
+    )
+    if get_settings().subtitle_filler_cleanup_enabled:
+        polished = _remove_subtitle_filler_words(
+            polished,
+            prev_text=prev_text,
+            next_text=next_text,
+        )
     polished = re.sub(r"(。){2,}", "。", polished)
     polished = re.sub(r"(，){2,}", "，", polished)
     return polished
@@ -1918,6 +2129,62 @@ def _cleanup_polished_text(text: str) -> str:
     text = re.sub(r"[!！]{2,}", "！", text)
     text = re.sub(r"[?？]{2,}", "？", text)
     return text
+
+
+def _apply_explicit_review_aliases_for_polish(text: str, *, review_memory: dict[str, Any] | None) -> str:
+    result = str(text or "").strip()
+    if not result:
+        return result
+    for item in (review_memory or {}).get("aliases") or []:
+        wrong = str(item.get("wrong") or "").strip()
+        correct = str(item.get("correct") or "").strip()
+        category = str(item.get("category") or "").strip()
+        if not wrong or not correct:
+            continue
+        if category and category != "confirmed_subject":
+            continue
+        result = re.sub(re.escape(wrong), correct, result, flags=re.IGNORECASE)
+    return result
+
+
+_LEADING_FILLER_RE = re.compile(
+    r"^(?:(?:呃|嗯|啊|诶|欸|哎)(?:[，,\s]*))+",
+)
+_PURE_FILLER_CLAUSE_RE = re.compile(r"^(?:呃|嗯|啊|诶|欸|哎)+$")
+_TRAILING_FILLER_RE = re.compile(r"(?:啊|呀|哈|哦)+$")
+
+
+def _remove_subtitle_filler_words(text: str, *, prev_text: str = "", next_text: str = "") -> str:
+    result = str(text or "").strip()
+    if not result:
+        return result
+
+    pieces = [piece for piece in re.split(r"([，,。！？!?；;])", result) if piece != ""]
+    cleaned: list[str] = []
+    for piece in pieces:
+        if piece in "，,。！？!?；;":
+            cleaned.append(piece)
+            continue
+        clause = piece.strip()
+        if not clause:
+            continue
+        clause = _LEADING_FILLER_RE.sub("", clause).strip()
+        if not clause:
+            continue
+        if _PURE_FILLER_CLAUSE_RE.fullmatch(clause):
+            continue
+        trimmed_clause = _TRAILING_FILLER_RE.sub("", clause).strip()
+        if trimmed_clause and trimmed_clause != clause and len(trimmed_clause) >= 4:
+            clause = trimmed_clause
+        cleaned.append(clause)
+
+    collapsed = "".join(cleaned).strip("，,")
+    collapsed = re.sub(r"([，,]){2,}", r"\1", collapsed)
+    collapsed = re.sub(r"^[，,]+", "", collapsed)
+    collapsed = re.sub(r"[，,]+([。！？!?；;])", r"\1", collapsed)
+    if not collapsed:
+        return str(text or "").strip()
+    return collapsed or str(text or "").strip()
 
 
 def _apply_learned_phrase_preferences(text: str, review_memory: dict[str, Any] | None) -> str:
@@ -2256,7 +2523,7 @@ def _dedupe_cover_title_lines(
         and (main_norm == top_norm or main_norm.startswith(top_norm))
     ):
         top = ""
-    if bottom_norm and main_norm and (bottom_norm == main_norm or bottom_norm.startswith(main_norm)):
+    if bottom_norm and main_norm and bottom_norm == main_norm:
         bottom = ""
 
     return {
@@ -2348,13 +2615,13 @@ def _pick_cover_main(
     preset: WorkflowPreset,
     anchor: dict[str, str] | None = None,
 ) -> str:
-    anchor_main = " ".join(str((anchor or {}).get("main") or "").strip().split())
-    if anchor_main:
-        return anchor_main[:18]
-
     candidate_model = _clean_line(model)
     if candidate_model and not _looks_like_camera_stem(candidate_model) and not _is_generic_cover_line(candidate_model):
         return candidate_model
+
+    anchor_main = " ".join(str((anchor or {}).get("main") or "").strip().split())
+    if anchor_main and not _is_generic_cover_line(anchor_main):
+        return anchor_main[:18]
 
     compact_brand = _compact_brand_name(brand, visible_text=visible_text)
     display_subject_type = _cover_subject_type_label(subject_type)
@@ -2385,6 +2652,8 @@ def _extract_cover_entity_anchor(
 ) -> dict[str, str]:
     cleaned_brand = _clean_line(brand)
     cleaned_model = _clean_line(model)
+    if _is_generic_cover_line(cleaned_model):
+        cleaned_model = ""
     display_subject_type = _cover_subject_type_label(subject_type)
 
     if cleaned_brand and cleaned_model and display_subject_type:
@@ -2575,7 +2844,10 @@ def _apply_copy_style_to_hook(
     subject_type: str,
 ) -> str:
     base = _clean_line(hook)
-    subject = _clean_line(model or brand or subject_type)
+    normalized_model = _clean_line(model)
+    if normalized_model and _is_generic_cover_line(normalized_model):
+        normalized_model = ""
+    subject = _clean_line(normalized_model or brand or subject_type)
     base = _boost_cover_click_phrase(base, subject=subject)
     if copy_style == "balanced":
         if "离谱" in base or "变态" in base or "炸" in base or "封神" in base:
@@ -2598,6 +2870,8 @@ def _boost_cover_click_phrase(text: str, *, subject: str) -> str:
     normalized = _clean_line(text)
     if not normalized:
         return normalized
+    if any(token in normalized for token in ("升级", "够不够", "值不值", "重点", "细节", "讲透")):
+        return normalized[:18]
 
     boring_to_hot = {
         "先看结论": "结论太炸了",

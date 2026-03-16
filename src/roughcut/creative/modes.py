@@ -39,6 +39,22 @@ _WORKFLOW_MODES: Final[dict[str, dict[str, object]]] = {
 }
 
 _ENHANCEMENT_MODES: Final[dict[str, dict[str, object]]] = {
+    "auto_review": {
+        "key": "auto_review",
+        "kind": "enhancement",
+        "status": "active",
+        "title": "自动审核",
+        "tagline": "在内容画像置信度足够高时自动通过摘要核对，减少人工停顿。",
+        "summary": "仅在系统允许自动确认且当前任务显式启用该模式时生效，低置信度任务仍会停在人工核对。",
+        "suitable_for": ["稳定栏目", "高重复结构任务", "批量值班自动剪辑", "夜间无人值守任务"],
+        "pipeline_outline": [
+            "完成内容画像后评估摘要置信度与阻塞原因",
+            "高置信度时自动确认摘要并续跑后续步骤",
+            "低置信度或命中阻塞原因时保留人工核对入口",
+        ],
+        "providers": ["内置摘要审核规则"],
+        "default_delivery": "作为显式增强模式启用，不默认替代人工审核",
+    },
     "avatar_commentary": {
         "key": "avatar_commentary",
         "kind": "enhancement",
@@ -140,6 +156,10 @@ def normalize_enhancement_modes(values: list[str] | tuple[str, ...] | None) -> l
         seen.add(normalized)
         normalized_items.append(normalized)
     return normalized_items
+
+
+def auto_review_mode_enabled(enhancement_modes: list[str] | tuple[str, ...] | None) -> bool:
+    return "auto_review" in set(enhancement_modes or [])
 
 
 def build_job_creative_profile(*, workflow_mode: str, enhancement_modes: list[str]) -> dict[str, object]:

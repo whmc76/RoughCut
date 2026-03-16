@@ -13,7 +13,7 @@ import json
 import tempfile
 import re
 from difflib import SequenceMatcher
-from datetime import datetime
+from datetime import datetime, timezone
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -42,6 +42,7 @@ class WatchInventoryItem:
     relative_path: str
     source_name: str
     stem: str
+    summary_hint: str | None
     size_bytes: int
     modified_at: str
     duration_sec: float | None
@@ -250,7 +251,7 @@ async def ensure_watch_inventory_thumbnail(
         raise FileNotFoundError(str(source))
 
     stat = source.stat()
-    cache_root = Path(".artifacts") / "watch-previews" / hashlib.sha1(str(root).encode("utf-8")).hexdigest()[:12]
+    cache_root = Path("output/test/watch-previews") / hashlib.sha1(str(root).encode("utf-8")).hexdigest()[:12]
     cache_root.mkdir(parents=True, exist_ok=True)
     cache_name = hashlib.sha1(
         f"{relative_path}|{stat.st_mtime_ns}|{stat.st_size}|{width}".encode("utf-8")
@@ -403,6 +404,7 @@ async def _scan_watch_root_inventory_impl(
             relative_path=str(file_path.relative_to(root)),
             source_name=file_path.name,
             stem=stem,
+            summary_hint=_build_inventory_summary_hint(file_path),
             size_bytes=stat.st_size,
             modified_at=datetime.fromtimestamp(stat.st_mtime).isoformat(),
             duration_sec=None,
@@ -731,7 +733,7 @@ async def create_merged_job_for_inventory_paths(
         if not path.exists() or not path.is_file():
             raise FileNotFoundError(str(path))
 
-    output_dir = get_output_dir() / "watch-merged"
+    output_dir = Path("output/test/watch-merged")
     output_path = output_dir / f"watch_merge_{uuid.uuid4().hex}.mp4"
 
     merged_path = await _merge_videos_for_job(resolved_paths, output_path=output_path)
@@ -780,6 +782,17 @@ def _safe_parse_summary(path: Path) -> str:
         except Exception:
             continue
     return ""
+
+
+def _build_inventory_summary_hint(path: Path) -> str:
+    summary = _safe_parse_summary(path)
+    if summary:
+        return re.sub(r"\s+", " ", summary).strip()[:140]
+    stem = Path(path).stem
+    normalized = re.sub(r"[_\-]+", " ", stem)
+    normalized = re.sub(r"\b\d{6,}\b", " ", normalized)
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    return normalized[:80]
 
 
 def _file_timestamp_metrics(path: Path) -> tuple[float, float]:
@@ -1029,6 +1042,294 @@ async def suggest_merge_groups_for_inventory_items(
 
     results.sort(key=lambda entry: (entry["score"], len(entry["relative_paths"])), reverse=True)
     return results[:max_groups]
+
+
+_GPU_INTENSIVE_PIPELINE_STEPS = {"transcribe", "avatar_commentary", "render"}
+
+
+def _parse_iso_datetime(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def _is_inventory_item_settled(item: dict[str, Any], *, settle_seconds: int) -> bool:
+    path = Path(str(item.get("path") or ""))
+    if not path.exists():
+        return False
+    now = datetime.now(timezone.utc).timestamp()
+    stat = path.stat()
+    modified_at = max(float(stat.st_mtime), _to_unix_timestamp(str(item.get("modified_at") or "")))
+    return (now - modified_at) >= max(5, int(settle_seconds))
+
+
+def _normalize_inventory_payload_status(payload: dict[str, Any]) -> dict[str, Any]:
+    inventory = payload.get("inventory") or {}
+    payload["inventory"] = {
+        "pending": list(inventory.get("pending") or []),
+        "deduped": list(inventory.get("deduped") or []),
+    }
+    payload["pending_count"] = len(payload["inventory"]["pending"])
+    payload["deduped_count"] = len(payload["inventory"]["deduped"])
+    payload["updated_at"] = datetime.now(timezone.utc).isoformat()
+    if payload.get("status") in {None, "", "idle"}:
+        payload["status"] = "done"
+    return payload
+
+
+def _mark_inventory_items_as_dispatched(
+    payload: dict[str, Any],
+    selected_items: list[dict[str, Any]],
+    *,
+    job_ids_by_path: dict[str, str | None],
+    dedupe_reason: str,
+) -> tuple[dict[str, Any], list[str]]:
+    inventory = payload.get("inventory") or {}
+    pending = list(inventory.get("pending") or [])
+    deduped = list(inventory.get("deduped") or [])
+    selected_path_set = {str(item.get("path") or "") for item in selected_items}
+    remaining_pending = [item for item in pending if str(item.get("path") or "") not in selected_path_set]
+    created_job_ids: list[str] = []
+    seen_job_ids: set[str] = set()
+    for item in selected_items:
+        path = str(item.get("path") or "")
+        job_id = job_ids_by_path.get(path)
+        if job_id and job_id not in seen_job_ids:
+            seen_job_ids.add(job_id)
+            created_job_ids.append(job_id)
+        deduped.append(
+            {
+                **item,
+                "status": "deduped",
+                "dedupe_reason": dedupe_reason if job_id else "job:existing",
+                "matched_job_id": job_id,
+            }
+        )
+    payload["inventory"] = {
+        "pending": remaining_pending,
+        "deduped": deduped,
+    }
+    return _normalize_inventory_payload_status(payload), created_job_ids
+
+
+async def _load_auto_scheduler_state(session) -> dict[str, int]:
+    from sqlalchemy import func, select
+    from roughcut.db.models import JobStep
+
+    active_jobs_result = await session.execute(
+        select(func.count(Job.id)).where(Job.status.in_(["pending", "processing"]))
+    )
+    gpu_steps_result = await session.execute(
+        select(func.count(JobStep.id)).where(
+            JobStep.status == "running",
+            JobStep.step_name.in_(sorted(_GPU_INTENSIVE_PIPELINE_STEPS)),
+        )
+    )
+    return {
+        "active_jobs": int(active_jobs_result.scalar() or 0),
+        "running_gpu_steps": int(gpu_steps_result.scalar() or 0),
+    }
+
+
+def _available_auto_slots(state: dict[str, int], settings) -> int:
+    if int(state.get("running_gpu_steps") or 0) > 0:
+        return 0
+    return max(0, int(getattr(settings, "watch_auto_max_active_jobs", 2)) - int(state.get("active_jobs") or 0))
+
+
+def _should_auto_scan_root(root: WatchRoot, *, settings) -> bool:
+    active = get_watch_root_inventory_scan_status(root.path, include_inventory=False)
+    if active and active.get("status") == "running":
+        return False
+    if root.inventory_cache_updated_at is None:
+        return True
+    age = datetime.now(timezone.utc) - root.inventory_cache_updated_at.replace(tzinfo=timezone.utc)
+    return age.total_seconds() >= max(15, int(getattr(settings, "watch_auto_scan_interval_sec", 45)))
+
+
+def _get_cached_inventory_payload(root: WatchRoot) -> dict[str, Any]:
+    cached = root.inventory_cache_json if isinstance(root.inventory_cache_json, dict) else {}
+    payload = {
+        "root_path": root.path,
+        "scan_mode": root.scan_mode or "fast",
+        "status": cached.get("status") or "idle",
+        "started_at": cached.get("started_at") or "",
+        "updated_at": cached.get("updated_at") or "",
+        "finished_at": cached.get("finished_at"),
+        "total_files": int(cached.get("total_files") or 0),
+        "processed_files": int(cached.get("processed_files") or 0),
+        "pending_count": int(cached.get("pending_count") or 0),
+        "deduped_count": int(cached.get("deduped_count") or 0),
+        "current_file": cached.get("current_file"),
+        "current_phase": cached.get("current_phase"),
+        "current_file_size_bytes": cached.get("current_file_size_bytes"),
+        "current_file_processed_bytes": cached.get("current_file_processed_bytes"),
+        "error": cached.get("error"),
+        "inventory": cached.get("inventory") or {"pending": [], "deduped": []},
+    }
+    return _normalize_inventory_payload_status(payload)
+
+
+async def _persist_inventory_payload(root: WatchRoot, session, payload: dict[str, Any]) -> None:
+    root.inventory_cache_json = payload
+    root.inventory_cache_updated_at = datetime.now(timezone.utc)
+    await session.flush()
+    replace_watch_root_inventory_scan_snapshot(root.path, payload)
+
+
+def _pick_non_overlapping_merge_groups(groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    selected: list[dict[str, Any]] = []
+    used_paths: set[str] = set()
+    for group in groups:
+        paths = [str(item) for item in group.get("relative_paths") or [] if str(item)]
+        if len(paths) < 2:
+            continue
+        if any(path in used_paths for path in paths):
+            continue
+        selected.append({**group, "relative_paths": paths})
+        used_paths.update(paths)
+    return selected
+
+
+async def run_watch_root_auto_duty() -> dict[str, Any]:
+    from sqlalchemy import select
+
+    settings = get_settings()
+    factory = get_session_factory()
+    summary = {
+        "roots_total": 0,
+        "scan_started": 0,
+        "auto_merged_jobs": 0,
+        "auto_enqueued_jobs": 0,
+        "idle_slots": 0,
+    }
+    async with factory() as session:
+        result = await session.execute(
+            select(WatchRoot).where(WatchRoot.enabled.is_(True)).order_by(WatchRoot.created_at.asc())
+        )
+        roots = result.scalars().all()
+        summary["roots_total"] = len(roots)
+        scheduler_state = await _load_auto_scheduler_state(session)
+        summary["idle_slots"] = _available_auto_slots(scheduler_state, settings)
+
+        for root in roots:
+            try:
+                if _should_auto_scan_root(root, settings=settings):
+                    try:
+                        start_watch_root_inventory_scan(root.path, scan_mode=root.scan_mode or "fast", force=False)
+                        summary["scan_started"] += 1
+                    except Exception as exc:
+                        logger.warning("auto duty failed to start scan for %s: %s", root.path, exc)
+                    continue
+
+                active_status = get_watch_root_inventory_scan_status(root.path, include_inventory=False)
+                if active_status and active_status.get("status") == "running":
+                    continue
+
+                payload = _get_cached_inventory_payload(root)
+                pending = list((payload.get("inventory") or {}).get("pending") or [])
+                if not pending:
+                    continue
+
+                settled_pending = [
+                    item for item in pending
+                    if _is_inventory_item_settled(item, settle_seconds=int(getattr(settings, "watch_auto_settle_seconds", 45)))
+                ]
+                if not settled_pending:
+                    continue
+
+                idle_slots = _available_auto_slots(scheduler_state, settings)
+                if idle_slots <= 0:
+                    continue
+
+                max_jobs_per_root = max(1, int(getattr(settings, "watch_auto_max_jobs_per_root", 1)))
+
+                if bool(getattr(settings, "watch_auto_merge_enabled", True)) and idle_slots > 0:
+                    merge_groups = await suggest_merge_groups_for_inventory_items(
+                        settled_pending,
+                        min_score=float(getattr(settings, "watch_auto_merge_min_score", 0.72)),
+                        max_groups=max_jobs_per_root,
+                    )
+                    for group in _pick_non_overlapping_merge_groups(merge_groups)[: min(idle_slots, max_jobs_per_root)]:
+                        selected_items = [
+                            item for item in settled_pending
+                            if str(item.get("relative_path") or "") in set(group.get("relative_paths") or [])
+                        ]
+                        if len(selected_items) < 2:
+                            continue
+                        job_id = await create_merged_job_for_inventory_paths(
+                            [str(item.get("path") or "") for item in selected_items],
+                            channel_profile=root.channel_profile,
+                        )
+                        payload, created_ids = _mark_inventory_items_as_dispatched(
+                            payload,
+                            selected_items,
+                            job_ids_by_path={str(item.get("path") or ""): job_id for item in selected_items},
+                            dedupe_reason="job:auto_merged",
+                        )
+                        if created_ids:
+                            summary["auto_merged_jobs"] += len(created_ids)
+                            scheduler_state["active_jobs"] += len(created_ids)
+                            idle_slots -= len(created_ids)
+                            settled_pending = [
+                                item for item in settled_pending
+                                if str(item.get("path") or "") not in {str(sel.get("path") or "") for sel in selected_items}
+                            ]
+                        logger.info(
+                            "auto duty merged root=%s score=%.2f files=%s job_ids=%s",
+                            root.path,
+                            float(group.get("score") or 0.0),
+                            ",".join(group.get("relative_paths") or []),
+                            ",".join(created_ids),
+                        )
+                        if idle_slots <= 0:
+                            break
+
+                if (
+                    bool(getattr(settings, "watch_auto_enqueue_enabled", True))
+                    and idle_slots > 0
+                    and settled_pending
+                ):
+                    eligible = sorted(
+                        settled_pending,
+                        key=lambda item: _to_unix_timestamp(str(item.get("modified_at") or "")),
+                    )
+                    selected_items = eligible[: min(idle_slots, max_jobs_per_root)]
+                    if selected_items:
+                        results = await create_jobs_for_inventory_paths(
+                            [str(item.get("path") or "") for item in selected_items],
+                            channel_profile=root.channel_profile,
+                        )
+                        job_ids_by_path = {result["path"]: result["job_id"] for result in results}
+                        payload, created_ids = _mark_inventory_items_as_dispatched(
+                            payload,
+                            selected_items,
+                            job_ids_by_path=job_ids_by_path,
+                            dedupe_reason="job:auto_enqueued",
+                        )
+                        if created_ids:
+                            summary["auto_enqueued_jobs"] += len(created_ids)
+                            scheduler_state["active_jobs"] += len(created_ids)
+                            logger.info(
+                                "auto duty enqueued root=%s files=%s job_ids=%s",
+                                root.path,
+                                ",".join(str(item.get("relative_path") or "") for item in selected_items),
+                                ",".join(created_ids),
+                            )
+
+                await _persist_inventory_payload(root, session, payload)
+            except Exception as exc:
+                logger.exception("auto duty root failed root=%s error=%s", root.path, exc)
+
+        await session.commit()
+
+    return summary
 
 
 class VideoFileHandler(FileSystemEventHandler):

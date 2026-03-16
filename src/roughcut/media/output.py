@@ -68,6 +68,78 @@ def _sanitize(name: str) -> str:
     return re.sub(r'[\\/:*?"<>|]', "_", name).strip()
 
 
+def _normalize_output_component(value: str, *, max_length: int = 48) -> str:
+    cleaned = _sanitize(str(value or "").strip())
+    cleaned = re.sub(r"\s+", "_", cleaned)
+    cleaned = re.sub(r"_+", "_", cleaned).strip("._- ")
+    if not cleaned:
+        return ""
+    return cleaned[:max_length].rstrip("._- ")
+
+
+def _normalize_compare_key(value: str) -> str:
+    return re.sub(r"[\W_]+", "", str(value or "").lower())
+
+
+def _looks_generated_stem(stem: str) -> bool:
+    normalized = _normalize_compare_key(stem)
+    if not normalized:
+        return True
+    if normalized.isdigit():
+        return True
+    if re.fullmatch(r"(img|dji|vid|video|clip|mv|pxl)?\d{5,}", normalized):
+        return True
+    parts = [part for part in re.split(r"[_\-\s]+", str(stem or "").lower()) if part]
+    return bool(parts) and all(part.isdigit() for part in parts)
+
+
+def _resolve_output_title_hint(
+    source_name: str,
+    *,
+    content_profile: dict[str, Any] | None = None,
+    title_hint: str | None = None,
+) -> str:
+    stem = Path(source_name).stem
+    brand = str((content_profile or {}).get("subject_brand") or "").strip()
+    model = str((content_profile or {}).get("subject_model") or "").strip()
+    subject_type = str((content_profile or {}).get("subject_type") or "").strip()
+    video_theme = str((content_profile or {}).get("video_theme") or "").strip()
+    summary = str((content_profile or {}).get("summary") or (content_profile or {}).get("hook_line") or "").strip()
+    cover_title = (content_profile or {}).get("cover_title") if isinstance(content_profile, dict) else None
+    cover_title_text = ""
+    if isinstance(cover_title, dict):
+        cover_title_text = " ".join(
+            str(cover_title.get(key) or "").strip()
+            for key in ("top", "main", "bottom")
+            if str(cover_title.get(key) or "").strip()
+        ).strip()
+
+    subject = " ".join(part for part in (brand, model) if part).strip()
+    themed_subject = " ".join(part for part in (subject, video_theme) if part).strip()
+    subject_fallback = " ".join(part for part in (subject_type, video_theme) if part).strip()
+    source_key = _normalize_compare_key(stem)
+    generic_keys = {
+        "shipin",
+        "chengpian",
+        "cujian",
+        "zidongjianji",
+        "luping",
+        "thiscontent",
+        "zhetiaoneirong",
+    }
+    for candidate in (title_hint, themed_subject, subject, subject_fallback, cover_title_text, summary, stem):
+        normalized = _normalize_output_component(candidate, max_length=56)
+        compare_key = _normalize_compare_key(normalized)
+        if not normalized or not compare_key:
+            continue
+        if compare_key == source_key and _looks_generated_stem(stem):
+            continue
+        if compare_key.isdigit() or compare_key in generic_keys:
+            continue
+        return normalized
+    return _normalize_output_component(stem, max_length=56) or "output"
+
+
 def build_output_name(source_name: str, created_at: datetime | None = None) -> str:
     settings = get_settings()
     dt = created_at or datetime.now()
@@ -79,13 +151,47 @@ def build_output_name(source_name: str, created_at: datetime | None = None) -> s
 
 def get_output_dir() -> Path:
     settings = get_settings()
-    p = Path(settings.output_dir)
+    configured = str(settings.output_dir or "").strip()
+    p = Path(configured or "output")
     p.mkdir(parents=True, exist_ok=True)
     return p
 
 
-def get_output_project_dir(source_name: str, created_at: datetime | None = None) -> Path:
-    project_name = build_output_name(source_name, created_at)
+def build_output_project_name(
+    source_name: str,
+    created_at: datetime | None = None,
+    *,
+    content_profile: dict[str, Any] | None = None,
+    title_hint: str | None = None,
+) -> str:
+    dt = created_at or datetime.now()
+    stem = _normalize_output_component(Path(source_name).stem, max_length=40) or "output"
+    title = _resolve_output_title_hint(
+        source_name,
+        content_profile=content_profile,
+        title_hint=title_hint,
+    )
+    title_key = _normalize_compare_key(title)
+    stem_key = _normalize_compare_key(stem)
+    label = title or stem
+    if stem and stem_key != title_key and _looks_generated_stem(stem):
+        label = f"{title}_{stem}" if title else stem
+    return _sanitize(f"{dt.strftime('%Y%m%d')}_{label}")
+
+
+def get_output_project_dir(
+    source_name: str,
+    created_at: datetime | None = None,
+    *,
+    content_profile: dict[str, Any] | None = None,
+    title_hint: str | None = None,
+) -> Path:
+    project_name = build_output_project_name(
+        source_name,
+        created_at,
+        content_profile=content_profile,
+        title_hint=title_hint,
+    )
     project_dir = get_output_dir() / project_name
     project_dir.mkdir(parents=True, exist_ok=True)
     return project_dir

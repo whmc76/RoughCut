@@ -13,6 +13,7 @@ type ModelSettingsPanelProps = {
 
 export function ModelSettingsPanel({ form, options, onChange }: ModelSettingsPanelProps) {
   const transcriptionModels = options?.transcription_models?.[String(form.transcription_provider)] ?? [];
+  const transcriptionDialects = options?.transcription_dialects ?? [{ value: "mandarin", label: "普通话" }];
   const multimodalFallbackProviders = options?.multimodal_fallback_providers ?? [{ value: "ollama", label: "Ollama" }];
   const searchProviders = options?.search_providers ?? [{ value: "auto", label: "自动选择" }];
   const searchFallbackProviders = options?.search_fallback_providers ?? [{ value: "searxng", label: "SearXNG" }];
@@ -32,6 +33,12 @@ export function ModelSettingsPanel({ form, options, onChange }: ModelSettingsPan
           value={String(form.transcription_model ?? "")}
           onChange={(event) => onChange("transcription_model", event.target.value)}
           options={transcriptionModels.map((model) => ({ value: model, label: model }))}
+        />
+        <SelectField
+          label="转写方言"
+          value={String(form.transcription_dialect ?? "mandarin")}
+          onChange={(event) => onChange("transcription_dialect", event.target.value)}
+          options={transcriptionDialects}
         />
         <SelectField
           label="LLM 模式"

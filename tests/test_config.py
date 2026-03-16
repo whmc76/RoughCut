@@ -19,7 +19,8 @@ def test_default_settings():
     assert s.anthropic_auth_mode == "api_key"
     assert s.minimax_base_url == "https://api.minimaxi.com/v1"
     assert ".mp4" in s.allowed_extensions
-    assert s.render_debug_dir == "logs/render-debug"
+    assert s.output_dir == "output"
+    assert s.render_debug_dir == "output/test/render-debug"
     assert s.default_job_workflow_mode == "standard_edit"
     assert s.default_job_enhancement_modes == []
     assert s.cover_output_variants == 5

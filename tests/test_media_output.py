@@ -22,6 +22,28 @@ def test_get_output_project_dir_creates_per_job_folder(tmp_path: Path, monkeypat
     assert project_dir.is_dir()
 
 
+def test_get_output_project_dir_uses_content_title_for_numeric_source_name(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(
+        output_mod,
+        "get_settings",
+        lambda: SimpleNamespace(output_dir=str(tmp_path), output_name_pattern="{date}_{stem}"),
+    )
+
+    project_dir = output_mod.get_output_project_dir(
+        "1742112233445.mp4",
+        datetime(2026, 3, 12, 8, 0, 0),
+        content_profile={
+            "subject_brand": "Leatherman",
+            "subject_model": "ARC",
+            "video_theme": "这次升级到位吗",
+        },
+    )
+
+    assert project_dir == tmp_path / "20260312_Leatherman_ARC_这次升级到位吗_1742112233445"
+    assert project_dir.exists()
+    assert project_dir.is_dir()
+
+
 def test_build_cover_variant_output_path_includes_version_and_strategy(tmp_path: Path):
     path = output_mod.build_cover_variant_output_path(tmp_path / "demo_cover.jpg", 1, "bilibili")
 

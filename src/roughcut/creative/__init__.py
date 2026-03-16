@@ -2,6 +2,7 @@ from .avatar import avatar_mode_enabled, build_avatar_commentary_plan
 from .director import ai_director_mode_enabled, build_ai_director_plan
 from .modes import (
     DEFAULT_WORKFLOW_MODE,
+    auto_review_mode_enabled,
     build_active_enhancement_mode_options,
     build_active_workflow_mode_options,
     build_job_creative_profile,
@@ -12,6 +13,7 @@ from .modes import (
 
 __all__ = [
     "ai_director_mode_enabled",
+    "auto_review_mode_enabled",
     "avatar_mode_enabled",
     "build_ai_director_plan",
     "build_avatar_commentary_plan",

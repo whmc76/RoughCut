@@ -38,7 +38,7 @@ def test_get_config_exposes_extended_provider_fields(tmp_path, monkeypatch):
     object.__setattr__(settings, "multimodal_fallback_provider", "ollama")
     object.__setattr__(settings, "search_provider", "auto")
     object.__setattr__(settings, "search_fallback_provider", "searxng")
-    object.__setattr__(settings, "output_dir", "data/output")
+    object.__setattr__(settings, "output_dir", "output")
     object.__setattr__(settings, "default_job_workflow_mode", "standard_edit")
     object.__setattr__(settings, "default_job_enhancement_modes", ["ai_director"])
     object.__setattr__(settings, "auto_confirm_content_profile", True)
@@ -75,7 +75,7 @@ def test_get_config_exposes_extended_provider_fields(tmp_path, monkeypatch):
     assert cfg.multimodal_fallback_provider == "ollama"
     assert cfg.search_provider == "auto"
     assert cfg.search_fallback_provider == "searxng"
-    assert cfg.output_dir == "data/output"
+    assert cfg.output_dir == "output"
     assert cfg.default_job_workflow_mode == "standard_edit"
     assert cfg.default_job_enhancement_modes == ["ai_director"]
     assert cfg.auto_confirm_content_profile is True
@@ -97,6 +97,7 @@ def test_get_config_options_exposes_transcription_model_lists():
     assert options.job_languages[0]["value"] == "zh-CN"
     assert options.channel_profiles[0]["value"] == ""
     assert options.workflow_modes[0]["value"] == "standard_edit"
+    assert any(item["value"] == "auto_review" for item in options.enhancement_modes)
     assert any(item["value"] == "avatar_commentary" for item in options.enhancement_modes)
     assert any(item["value"] == "mandarin" for item in options.transcription_dialects)
     assert any(item["value"] == "beijing" for item in options.transcription_dialects)
@@ -104,6 +105,7 @@ def test_get_config_options_exposes_transcription_model_lists():
     assert any(item["value"] == "indextts2" for item in options.voice_providers)
     assert any(item["key"] == "long_text_to_video" and item["status"] == "planned" for item in options.creative_mode_catalog["workflow_modes"])
     assert any(item["key"] == "ai_director" and item["status"] == "active" for item in options.creative_mode_catalog["enhancement_modes"])
+    assert any(item["key"] == "auto_review" and item["status"] == "active" for item in options.creative_mode_catalog["enhancement_modes"])
     assert "local_whisper" in options.transcription_models
     assert options.transcription_models["local_whisper"][0] == "large-v3"
     assert "openai" in options.transcription_models

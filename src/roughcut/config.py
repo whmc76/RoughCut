@@ -151,9 +151,9 @@ class Settings(BaseSettings):
     allowed_extensions: list[str] = [".mp4", ".mov", ".mkv", ".avi", ".webm"]
 
     # Output
-    output_dir: str = "data/output"
+    output_dir: str = "output"
     output_name_pattern: str = "{date}_{stem}"  # {date}=YYYYMMDD, {stem}=original filename stem
-    render_debug_dir: str = "logs/render-debug"
+    render_debug_dir: str = "output/test/render-debug"
     default_job_workflow_mode: str = DEFAULT_JOB_WORKFLOW_MODE
     default_job_enhancement_modes: list[str] = []
 

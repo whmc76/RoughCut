@@ -46,9 +46,10 @@ from roughcut.db.models import (
 )
 from roughcut.db.session import get_session
 from roughcut.pipeline.celery_app import celery_app
-from roughcut.pipeline.orchestrator import create_job_steps
+from roughcut.pipeline.orchestrator import PIPELINE_STEPS, create_job_steps
 from roughcut.review.content_profile import _extract_reference_frames
 from roughcut.review.content_profile import apply_content_profile_feedback
+from roughcut.review.content_profile import build_reviewed_transcript_excerpt
 from roughcut.review.content_profile_memory import (
     _build_field_preferences,
     _build_keyword_preferences,
@@ -77,6 +78,8 @@ STEP_LABELS = {
     "render": "渲染输出",
     "platform_package": "平台文案",
 }
+
+STEP_ORDER = {step_name: index for index, step_name in enumerate(PIPELINE_STEPS)}
 
 PROFILE_ARTIFACT_PRIORITY = {
     "content_profile_final": 3,
@@ -238,8 +241,8 @@ async def restart_job(job_id: uuid.UUID, session: AsyncSession = Depends(get_ses
     job = result.scalar_one_or_none()
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    if job.status not in {"done", "cancelled", "failed"}:
-        raise HTTPException(status_code=409, detail="Only completed, cancelled, or failed jobs can be restarted")
+    if job.status not in {"done", "cancelled", "failed", "needs_review"}:
+        raise HTTPException(status_code=409, detail="Only completed, review-paused, cancelled, or failed jobs can be restarted")
 
     _revoke_running_steps(job.steps or [])
     await _clear_job_runtime_state(job_id, session)
@@ -249,16 +252,33 @@ async def restart_job(job_id: uuid.UUID, session: AsyncSession = Depends(get_ses
     job.error_message = None
     job.updated_at = now
     job.file_hash = None
-    for step in job.steps or []:
+    existing_step_names = {step.step_name for step in job.steps or []}
+    for step_name in PIPELINE_STEPS:
+        if step_name in existing_step_names:
+            continue
+        step = JobStep(job_id=job.id, step_name=step_name, status="pending")
+        session.add(step)
+        (job.steps or []).append(step)
+
+    ordered_steps = _ordered_steps(job.steps or [])
+    for step in ordered_steps:
         step.status = "pending"
         step.attempt = 0
         step.started_at = None
         step.finished_at = None
         step.error_message = None
         step.metadata_ = None
+    if ordered_steps:
+        ordered_steps[0].metadata_ = {
+            "detail": "任务已重新开始，等待调度器派发。",
+            "updated_at": now.isoformat(),
+        }
 
     await session.commit()
-    await session.refresh(job)
+    result = await session.execute(
+        select(Job).options(selectinload(Job.steps), selectinload(Job.artifacts)).where(Job.id == job_id)
+    )
+    job = result.scalar_one()
     _attach_job_preview(job)
     return job
 
@@ -447,6 +467,46 @@ async def confirm_content_profile(
     if not draft_artifact:
         raise HTTPException(status_code=404, detail="Content profile draft not found")
 
+    subtitle_item_result = await session.execute(
+        select(SubtitleItem)
+        .where(SubtitleItem.job_id == job_id, SubtitleItem.version == 1)
+        .order_by(SubtitleItem.item_index)
+    )
+    subtitle_items = subtitle_item_result.scalars().all()
+    correction_result = await session.execute(
+        select(SubtitleCorrection).where(SubtitleCorrection.job_id == job_id)
+    )
+    accepted_corrections = [
+        {
+            "item_index": next(
+                (
+                    item.item_index
+                    for item in subtitle_items
+                    if correction.subtitle_item_id and item.id == correction.subtitle_item_id
+                ),
+                None,
+            ),
+            "original": correction.original_span,
+            "accepted": str(correction.human_override or correction.suggested_span or "").strip(),
+        }
+        for correction in correction_result.scalars().all()
+        if correction.human_decision == "accepted"
+    ]
+    reviewed_subtitle_excerpt = build_reviewed_transcript_excerpt(
+        [
+            {
+                "index": item.item_index,
+                "start_time": item.start_time,
+                "end_time": item.end_time,
+                "text_raw": item.text_raw,
+                "text_norm": item.text_norm,
+                "text_final": item.text_final,
+            }
+            for item in subtitle_items
+        ],
+        accepted_corrections,
+    )
+
     user_feedback = body.model_dump(exclude_none=True)
     workflow_mode = str(user_feedback.pop("workflow_mode", "") or getattr(job, "workflow_mode", "standard_edit"))
     enhancement_modes = list(user_feedback.pop("enhancement_modes", None) or getattr(job, "enhancement_modes", []) or [])
@@ -455,6 +515,8 @@ async def confirm_content_profile(
         source_name=job.source_name,
         channel_profile=job.channel_profile,
         user_feedback=user_feedback,
+        reviewed_subtitle_excerpt=reviewed_subtitle_excerpt,
+        accepted_corrections=accepted_corrections,
     )
     final_profile["user_feedback"] = user_feedback
 
@@ -795,7 +857,7 @@ async def get_job_activity(job_id: uuid.UUID, session: AsyncSession = Depends(ge
 
 
 def _build_current_step(job: Job) -> dict | None:
-    steps = list(job.steps or [])
+    steps = _ordered_steps(job.steps or [])
     running = next((step for step in steps if step.status == "running"), None)
     if running:
         meta = running.metadata_ or {}
@@ -825,13 +887,17 @@ def _build_current_step(job: Job) -> dict | None:
 
     next_pending = next((step for step in steps if step.status == "pending"), None)
     if next_pending:
+        meta = next_pending.metadata_ or {}
+        detail = meta.get("detail")
+        if not detail:
+            detail = "等待调度器派发。" if _are_previous_steps_complete(steps, next_pending.step_name) else "等待前序步骤完成。"
         return {
             "step_name": next_pending.step_name,
             "label": STEP_LABELS.get(next_pending.step_name, next_pending.step_name),
             "status": next_pending.status,
-            "detail": "等待前序步骤完成。",
+            "detail": detail,
             "progress": None,
-            "updated_at": _iso_or_none(job.updated_at),
+            "updated_at": meta.get("updated_at") or _iso_or_none(job.updated_at),
         }
 
     return None
@@ -1225,6 +1291,8 @@ def _attach_job_previews(jobs: list[Job]) -> None:
 
 
 def _attach_job_preview(job: Job) -> None:
+    if job.steps:
+        job.steps.sort(key=_step_sort_key)
     preview = _resolve_job_content_preview(job.artifacts or [])
     job.content_subject = preview["subject"]
     job.content_summary = preview["summary"]
@@ -1251,6 +1319,45 @@ def _calculate_job_progress_percent(job: Job) -> int:
     if job.status in {"failed", "cancelled"}:
         return round(base_progress * 100)
     return round(progress * 100)
+
+
+def _ordered_steps(steps: list[JobStep]) -> list[JobStep]:
+    return sorted(steps, key=_step_sort_key)
+
+
+def _step_sort_key(step: JobStep) -> tuple[int, datetime]:
+    created = step.started_at or step.finished_at or datetime.min.replace(tzinfo=timezone.utc)
+    return (STEP_ORDER.get(step.step_name, len(STEP_ORDER)), created)
+
+
+def _find_step(steps: list[JobStep], step_name: str) -> JobStep | None:
+    return next((step for step in steps if step.step_name == step_name), None)
+
+
+def _are_previous_steps_complete(steps: list[JobStep], step_name: str) -> bool:
+    step_index = STEP_ORDER.get(step_name, len(STEP_ORDER))
+    for step in _ordered_steps(steps):
+        if STEP_ORDER.get(step.step_name, len(STEP_ORDER)) >= step_index:
+            break
+        if step.status not in {"done", "skipped"}:
+            return False
+    return True
+
+
+def _has_reached_step(job: Job, step_name: str) -> bool:
+    steps = list(job.steps or [])
+    target = _find_step(steps, step_name)
+    if target is None:
+        return False
+    if target.status in {"running", "done", "failed", "skipped"}:
+        return True
+    if target.attempt > 0 or target.started_at is not None or target.finished_at is not None:
+        return True
+    return any(
+        STEP_ORDER.get(step.step_name, -1) > STEP_ORDER.get(step_name, -1)
+        and step.status in {"running", "done", "failed", "skipped"}
+        for step in steps
+    )
 
 
 def _resolve_job_content_preview(artifacts: list[Artifact]) -> dict[str, str | None]:
@@ -1304,7 +1411,15 @@ def _resolve_job_avatar_preview(job: Job) -> dict[str, str | None]:
         None,
     )
     if avatar_plan is None:
-        if job.status in {"failed", "cancelled"}:
+        if not _has_reached_step(job, "avatar_commentary"):
+            return {"status": None, "summary": None}
+        avatar_step = _find_step(job.steps or [], "avatar_commentary")
+        if avatar_step and avatar_step.status == "running":
+            return {
+                "status": "running",
+                "summary": str((avatar_step.metadata_ or {}).get("detail") or "正在生成数字人计划"),
+            }
+        if job.status in {"failed", "cancelled"} or (avatar_step and avatar_step.status == "failed"):
             return {"status": "failed", "summary": "数字人流程未完成"}
         return {"status": "pending", "summary": "等待生成数字人计划"}
 
