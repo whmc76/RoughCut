@@ -17,7 +17,9 @@ def test_get_config_exposes_extended_provider_fields(tmp_path, monkeypatch):
 
     settings = get_settings()
     object.__setattr__(settings, "llm_mode", "performance")
+    object.__setattr__(settings, "transcription_dialect", "beijing")
     object.__setattr__(settings, "openai_base_url", "https://api.openai.com/v1")
+    object.__setattr__(settings, "qwen_asr_api_base_url", "http://127.0.0.1:18096")
     object.__setattr__(settings, "avatar_provider", "heygem")
     object.__setattr__(settings, "avatar_api_base_url", "https://api.heygem.com")
     object.__setattr__(settings, "avatar_training_api_base_url", "http://127.0.0.1:18180")
@@ -47,11 +49,14 @@ def test_get_config_exposes_extended_provider_fields(tmp_path, monkeypatch):
     object.__setattr__(settings, "cover_selection_review_gap", 0.08)
     object.__setattr__(settings, "packaging_selection_review_gap", 0.08)
     object.__setattr__(settings, "packaging_selection_min_score", 0.6)
+    object.__setattr__(settings, "subtitle_filler_cleanup_enabled", True)
 
     cfg = get_config()
 
     assert cfg.llm_mode == "performance"
+    assert cfg.transcription_dialect == "beijing"
     assert cfg.openai_base_url == "https://api.openai.com/v1"
+    assert cfg.qwen_asr_api_base_url == "http://127.0.0.1:18096"
     assert cfg.avatar_provider == "heygem"
     assert cfg.avatar_api_base_url == "https://api.heygem.com"
     assert cfg.avatar_training_api_base_url == "http://127.0.0.1:18180"
@@ -81,6 +86,7 @@ def test_get_config_exposes_extended_provider_fields(tmp_path, monkeypatch):
     assert cfg.cover_selection_review_gap == 0.08
     assert cfg.packaging_selection_review_gap == 0.08
     assert cfg.packaging_selection_min_score == 0.6
+    assert cfg.subtitle_filler_cleanup_enabled is True
     assert cfg.openai_auth_mode == "api_key"
     assert cfg.anthropic_auth_mode == "api_key"
 
@@ -92,15 +98,18 @@ def test_get_config_options_exposes_transcription_model_lists():
     assert options.channel_profiles[0]["value"] == ""
     assert options.workflow_modes[0]["value"] == "standard_edit"
     assert any(item["value"] == "avatar_commentary" for item in options.enhancement_modes)
+    assert any(item["value"] == "mandarin" for item in options.transcription_dialects)
+    assert any(item["value"] == "beijing" for item in options.transcription_dialects)
     assert any(item["value"] == "heygem" for item in options.avatar_providers)
     assert any(item["value"] == "indextts2" for item in options.voice_providers)
     assert any(item["key"] == "long_text_to_video" and item["status"] == "planned" for item in options.creative_mode_catalog["workflow_modes"])
     assert any(item["key"] == "ai_director" and item["status"] == "active" for item in options.creative_mode_catalog["enhancement_modes"])
     assert "local_whisper" in options.transcription_models
-    assert options.transcription_models["local_whisper"][0] == "base"
+    assert options.transcription_models["local_whisper"][0] == "large-v3"
     assert "openai" in options.transcription_models
-    assert options.transcription_models["openai"] == ["gpt-4o-transcribe"]
-    assert "base" in options.transcription_models["local_whisper"]
+    assert options.transcription_models["openai"] == ["gpt-4o-transcribe", "gpt-4o-mini-transcribe"]
+    assert options.transcription_models["qwen_asr"] == ["qwen3-asr-1.7b"]
+    assert "large-v3" in options.transcription_models["local_whisper"]
     assert any(item["value"] == "edc_tactical" for item in options.channel_profiles)
     assert any(item["value"] == "ollama" for item in options.multimodal_fallback_providers)
     assert any(item["value"] == "auto" for item in options.search_providers)
@@ -116,7 +125,19 @@ def test_patch_config_rejects_unknown_transcription_provider(tmp_path, monkeypat
     config_mod._settings = None
 
     with pytest.raises(HTTPException, match="Unsupported transcription_provider"):
-        patch_config(ConfigPatch(transcription_provider="qwen_asr"))
+        patch_config(ConfigPatch(transcription_provider="unknown_provider"))
+
+
+def test_patch_config_rejects_unknown_transcription_dialect(tmp_path, monkeypatch):
+    import roughcut.api.config as config_api
+    import roughcut.config as config_mod
+
+    monkeypatch.setattr(config_api, "_CONFIG_FILE", tmp_path / "roughcut_config.json")
+    monkeypatch.setattr(config_mod, "_OVERRIDES_FILE", tmp_path / "roughcut_config.json")
+    config_mod._settings = None
+
+    with pytest.raises(HTTPException, match="Unsupported transcription_dialect"):
+        patch_config(ConfigPatch(transcription_dialect="unknown_dialect"))
 
 
 def test_patch_config_normalizes_invalid_transcription_model_for_provider(tmp_path, monkeypatch):
@@ -136,6 +157,29 @@ def test_patch_config_normalizes_invalid_transcription_model_for_provider(tmp_pa
 
     assert cfg.transcription_provider == "openai"
     assert cfg.transcription_model == "gpt-4o-transcribe"
+
+
+def test_patch_config_accepts_qwen_asr_provider(tmp_path, monkeypatch):
+    import roughcut.api.config as config_api
+    import roughcut.config as config_mod
+
+    monkeypatch.setattr(config_api, "_CONFIG_FILE", tmp_path / "roughcut_config.json")
+    monkeypatch.setattr(config_mod, "_OVERRIDES_FILE", tmp_path / "roughcut_config.json")
+    config_mod._settings = None
+
+    cfg = patch_config(
+        ConfigPatch(
+            transcription_provider="qwen_asr",
+            transcription_model="qwen3-asr-1.7b",
+            transcription_dialect="beijing",
+            qwen_asr_api_base_url="http://127.0.0.1:18096",
+        )
+    )
+
+    assert cfg.transcription_provider == "qwen_asr"
+    assert cfg.transcription_model == "qwen3-asr-1.7b"
+    assert cfg.transcription_dialect == "beijing"
+    assert cfg.qwen_asr_api_base_url == "http://127.0.0.1:18096"
 
 
 def test_patch_config_accepts_creative_provider_fields(tmp_path, monkeypatch):
@@ -163,6 +207,23 @@ def test_patch_config_accepts_creative_provider_fields(tmp_path, monkeypatch):
     assert cfg.director_rewrite_strength == 0.88
     assert cfg.default_job_workflow_mode == "standard_edit"
     assert cfg.default_job_enhancement_modes == ["avatar_commentary", "ai_director"]
+
+
+def test_patch_config_accepts_subtitle_filler_cleanup_toggle(tmp_path, monkeypatch):
+    import roughcut.api.config as config_api
+    import roughcut.config as config_mod
+
+    monkeypatch.setattr(config_api, "_CONFIG_FILE", tmp_path / "roughcut_config.json")
+    monkeypatch.setattr(config_mod, "_OVERRIDES_FILE", tmp_path / "roughcut_config.json")
+    config_mod._settings = None
+
+    cfg = patch_config(
+        ConfigPatch(
+            subtitle_filler_cleanup_enabled=False,
+        )
+    )
+
+    assert cfg.subtitle_filler_cleanup_enabled is False
 
 
 def test_patch_config_accepts_indextts2_voice_provider(tmp_path, monkeypatch):

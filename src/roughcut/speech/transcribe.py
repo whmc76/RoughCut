@@ -3,12 +3,18 @@ from __future__ import annotations
 import uuid
 from pathlib import Path
 
+from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from roughcut.db.models import Artifact, JobStep, TranscriptSegment
+from roughcut.db.models import Artifact, FactClaim, JobStep, SubtitleCorrection, SubtitleItem, TranscriptSegment
 from roughcut.providers.factory import get_transcription_provider
 from roughcut.providers.transcription.base import TranscriptResult, TranscriptionProgressCallback
 from roughcut.review.subtitle_memory import apply_domain_term_corrections
+
+
+def _is_brand_like_term(term: dict) -> bool:
+    category = str(term.get("category") or "").strip().lower()
+    return bool(category and "brand" in category)
 
 
 async def transcribe_audio(
@@ -39,6 +45,13 @@ async def transcribe_audio(
         glossary_terms=glossary_terms or [],
         review_memory=review_memory,
     )
+
+    # Replace the previous transcript-derived rows on rerun instead of appending
+    # another copy with the same indexes and stale downstream references.
+    await session.execute(delete(SubtitleCorrection).where(SubtitleCorrection.job_id == job_id))
+    await session.execute(delete(FactClaim).where(FactClaim.job_id == job_id))
+    await session.execute(delete(SubtitleItem).where(SubtitleItem.job_id == job_id, SubtitleItem.version == 1))
+    await session.execute(delete(TranscriptSegment).where(TranscriptSegment.job_id == job_id, TranscriptSegment.version == 1))
 
     # Persist segments
     for seg in result.segments:
@@ -82,6 +95,8 @@ def _normalize_transcript_result(
         if not text:
             continue
         for term in glossary_terms:
+            if _is_brand_like_term(term):
+                continue
             correct_form = str(term.get("correct_form") or "").strip()
             if not correct_form:
                 continue

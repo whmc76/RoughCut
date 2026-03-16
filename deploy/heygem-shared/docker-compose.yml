@@ -1,9 +1,13 @@
+# Legacy compatibility stack.
+# Default RoughCut runtime now points to:
+# - E:/WorkSpace/heygem/docker-compose.yml
+# - E:/WorkSpace/indextts2-service/docker-compose.yml
 name: heygem-shared
 
 services:
-  fish-speech:
-    image: ${HEYGEM_FISH_IMAGE:-guiji2025/fish-speech-5090:latest}
-    container_name: heygem-fish-speech
+  indextts2:
+    image: ${INDEXTTS2_IMAGE:-guiji2025/indextts2-5090:latest}
+    container_name: indextts2-service
     restart: unless-stopped
     runtime: nvidia
     working_dir: /code
@@ -11,7 +15,7 @@ services:
       NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-0}
       NVIDIA_DRIVER_CAPABILITIES: ${NVIDIA_DRIVER_CAPABILITIES:-compute,graphics,utility,video,display}
     ports:
-      - "${HEYGEM_TRAINING_API_PORT:-49203}:8080"
+      - "${INDEXTTS2_API_PORT:-49204}:8080"
     volumes:
       - "${HEYGEM_VOICE_HOST_DIR:-D:/heygem-shared/voice/data}:/code/data"
     command: /bin/bash -c "python tools/api_server.py --listen 0.0.0.0:8080"
@@ -37,7 +41,7 @@ services:
     shm_size: "8g"
     command: python /code/app_local.py
     depends_on:
-      fish-speech:
+      indextts2:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8383/easy/query?code=healthcheck', timeout=5)"]

@@ -15,6 +15,7 @@ from typing import Any
 import httpx
 
 from roughcut.config import get_settings
+from roughcut.docker_gpu_guard import hold_managed_gpu_services_async
 from roughcut.media.probe import probe
 
 _DEFAULT_HEYGEM_ROOT = Path("E:/WorkSpace/heygem/data")
@@ -169,16 +170,20 @@ async def preprocess_voice_sample(
     base_url = str(settings.avatar_training_api_base_url or "").strip().rstrip("/")
     if not base_url:
         raise RuntimeError("avatar_training_api_base_url is not configured")
-    if not await is_heygem_training_available():
-        raise RuntimeError(f"voice synthesis service unavailable: {base_url}")
-    return {
-        "provider": "indextts2",
-        "reference_audio": reference_name,
-        "reference_audio_text": "",
-        "lang": lang,
-        "mode": "direct_reference_upload",
-        "normalized_wav_path": str(normalized_path) if normalized_path else "",
-    }
+    async with hold_managed_gpu_services_async(
+        required_urls=[base_url],
+        reason="heygem_training_preprocess",
+    ):
+        if not await is_heygem_training_available():
+            raise RuntimeError(f"voice synthesis service unavailable: {base_url}")
+        return {
+            "provider": "indextts2",
+            "reference_audio": reference_name,
+            "reference_audio_text": "",
+            "lang": lang,
+            "mode": "direct_reference_upload",
+            "normalized_wav_path": str(normalized_path) if normalized_path else "",
+        }
 
 
 async def synthesize_preview_audio(
@@ -221,14 +226,18 @@ async def synthesize_preview_audio(
     }
 
     timeout = httpx.Timeout(300.0, connect=10.0)
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        response = await client.post(f"{base_url}/v1/audio/speech", json=payload)
-        response.raise_for_status()
-        body = response.json()
-        audio_b64 = str(body.get("audio_base64") or "").strip()
-        if not audio_b64:
-            raise RuntimeError("indextts2 did not return audio_base64")
-        output_path.write_bytes(base64.b64decode(audio_b64))
+    async with hold_managed_gpu_services_async(
+        required_urls=[base_url],
+        reason="heygem_preview_voice",
+    ):
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.post(f"{base_url}/v1/audio/speech", json=payload)
+            response.raise_for_status()
+            body = response.json()
+            audio_b64 = str(body.get("audio_base64") or "").strip()
+            if not audio_b64:
+                raise RuntimeError("indextts2 did not return audio_base64")
+            output_path.write_bytes(base64.b64decode(audio_b64))
     return output_path
 
 
@@ -264,11 +273,15 @@ async def generate_avatar_preview(
         script=script,
         source_video_path=source_video_path,
     )
-    task_code, result_payload = await _run_heygem_preview_with_retry(
-        audio_name=staged_audio_path.name,
-        video_url=staged_video_url,
-        preview_id=preview_id,
-    )
+    async with hold_managed_gpu_services_async(
+        required_urls=[str(get_settings().avatar_api_base_url or "")],
+        reason="heygem_preview_render",
+    ):
+        task_code, result_payload = await _run_heygem_preview_with_retry(
+            audio_name=staged_audio_path.name,
+            video_url=staged_video_url,
+            preview_id=preview_id,
+        )
     local_result_path = _resolve_local_result_path(str(result_payload.get("result") or ""))
     local_result_path = _require_generated_preview_output(
         local_result_path=local_result_path,

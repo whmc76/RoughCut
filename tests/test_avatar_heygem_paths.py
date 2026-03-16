@@ -5,7 +5,11 @@ from pathlib import Path
 import pytest
 
 from roughcut.avatar.runtime import _stage_video_for_heygem
-from roughcut.providers.avatar.heygem import HeyGemAvatarProvider, _resolve_presenter_source
+from roughcut.providers.avatar.heygem import (
+    HeyGemAvatarProvider,
+    _resolve_presenter_source,
+    _resolve_task_timeout_seconds,
+)
 
 
 def test_stage_video_for_heygem_returns_container_video_url(tmp_path: Path, monkeypatch):
@@ -137,3 +141,9 @@ def test_heygem_execute_segment_does_not_fallback_to_wrong_submit_endpoint_after
         )
 
     assert calls == ["http://127.0.0.1:49202/easy/submit"]
+
+
+def test_resolve_task_timeout_seconds_scales_for_long_audio():
+    assert _resolve_task_timeout_seconds({"duration_sec": 30}) == 600.0
+    assert _resolve_task_timeout_seconds({"duration_sec": 300}) == 1080.0
+    assert _resolve_task_timeout_seconds({"duration_sec": 2000}) == 3600.0

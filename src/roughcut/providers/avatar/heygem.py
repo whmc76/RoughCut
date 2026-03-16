@@ -11,6 +11,7 @@ from typing import Any
 import httpx
 
 from roughcut.config import get_settings
+from roughcut.docker_gpu_guard import hold_managed_gpu_services
 from roughcut.providers.avatar.base import AvatarProvider
 
 _DEFAULT_SHARED_ROOTS = (
@@ -21,7 +22,10 @@ _DEFAULT_SHARED_ROOTS = (
 )
 _CONTAINER_VIDEO_ROOT = Path("/code/data/inputs/video")
 _POLL_INTERVAL_SECONDS = 2.0
-_TASK_TIMEOUT_SECONDS = 600.0
+_TASK_TIMEOUT_MIN_SECONDS = 600.0
+_TASK_TIMEOUT_MAX_SECONDS = 3600.0
+_TASK_TIMEOUT_AUDIO_RATIO = 3.0
+_TASK_TIMEOUT_BUFFER_SECONDS = 180.0
 _HEYGEM_TRAINING_PROBE_TIMEOUT_SECONDS = 2.0
 _HEYGEM_PREVIEW_SERVICE_CACHE: dict[str, bool] = {}
 
@@ -98,27 +102,34 @@ class HeyGemAvatarProvider(AvatarProvider):
             }
 
         timeout = httpx.Timeout(30.0, connect=10.0)
-        with httpx.Client(timeout=timeout, follow_redirects=True) as client:
-            results = []
-            for segment in segments:
-                try:
-                    results.append(
-                        self._execute_segment(
-                            client=client,
-                            headers=headers,
-                            request=request,
-                            presenter_source=presenter_source,
-                            segment=segment,
+        with hold_managed_gpu_services(
+            required_urls=[
+                str(request.get("submit_endpoint") or ""),
+                str(request.get("query_endpoint") or ""),
+            ],
+            reason="heygem_render",
+        ):
+            with httpx.Client(timeout=timeout, follow_redirects=True) as client:
+                results = []
+                for segment in segments:
+                    try:
+                        results.append(
+                            self._execute_segment(
+                                client=client,
+                                headers=headers,
+                                request=request,
+                                presenter_source=presenter_source,
+                                segment=segment,
+                            )
                         )
-                    )
-                except Exception as exc:
-                    results.append(
-                        {
-                            "segment_id": segment.get("segment_id"),
-                            "status": "failed",
-                            "error": str(exc),
-                        }
-                    )
+                    except Exception as exc:
+                        results.append(
+                            {
+                                "segment_id": segment.get("segment_id"),
+                                "status": "failed",
+                                "error": str(exc),
+                            }
+                        )
 
         success_count = sum(1 for item in results if item.get("status") == "success")
         failed_count = sum(1 for item in results if item.get("status") == "failed")
@@ -193,6 +204,7 @@ class HeyGemAvatarProvider(AvatarProvider):
                     headers=headers,
                     query_endpoint=str(endpoints["query"]),
                     task_code=task_code,
+                    timeout_seconds=_resolve_task_timeout_seconds(segment),
                 )
                 data = query_payload.get("data") or {}
                 result_value = str(data.get("result") or "").strip()
@@ -231,9 +243,12 @@ class HeyGemAvatarProvider(AvatarProvider):
         headers: dict[str, str],
         query_endpoint: str,
         task_code: str,
+        timeout_seconds: float | None = None,
     ) -> dict[str, Any]:
         started_at = time.monotonic()
-        while time.monotonic() - started_at < _TASK_TIMEOUT_SECONDS:
+        resolved_timeout = max(_TASK_TIMEOUT_MIN_SECONDS, float(timeout_seconds or _TASK_TIMEOUT_MIN_SECONDS))
+        resolved_timeout = min(resolved_timeout, _TASK_TIMEOUT_MAX_SECONDS)
+        while time.monotonic() - started_at < resolved_timeout:
             response = client.get(query_endpoint, headers=headers, params={"code": task_code})
             response.raise_for_status()
             payload = response.json()
@@ -259,6 +274,12 @@ class HeyGemAvatarProvider(AvatarProvider):
                 raise RuntimeError(payload.get("msg") or data.get("msg") or f"HeyGem task failed: {task_code}")
             time.sleep(_POLL_INTERVAL_SECONDS)
         raise TimeoutError(f"HeyGem task timed out: {task_code}")
+
+
+def _resolve_task_timeout_seconds(segment: dict[str, Any]) -> float:
+    duration_sec = max(0.0, float(segment.get("duration_sec") or 0.0))
+    scaled_timeout = duration_sec * _TASK_TIMEOUT_AUDIO_RATIO + _TASK_TIMEOUT_BUFFER_SECONDS
+    return min(_TASK_TIMEOUT_MAX_SECONDS, max(_TASK_TIMEOUT_MIN_SECONDS, scaled_timeout))
 
 
 def _build_heygem_endpoints(submit_like_url: str) -> list[dict[str, str]]:

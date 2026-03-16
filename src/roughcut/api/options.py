@@ -8,6 +8,7 @@ from roughcut.creative.modes import (
 )
 from roughcut.config import AVATAR_PROVIDER_OPTIONS, VOICE_PROVIDER_OPTIONS
 from roughcut.edit.presets import PRESETS
+from roughcut.speech.dialects import TRANSCRIPTION_DIALECT_OPTIONS
 
 DEFAULT_JOB_LANGUAGE: Final[str] = "zh-CN"
 
@@ -71,6 +72,10 @@ def build_avatar_provider_options() -> list[dict[str, str]]:
 
 def build_voice_provider_options() -> list[dict[str, str]]:
     return [{"value": item, "label": item} for item in VOICE_PROVIDER_OPTIONS]
+
+
+def build_transcription_dialect_options() -> list[dict[str, str]]:
+    return list(TRANSCRIPTION_DIALECT_OPTIONS)
 
 
 def normalize_job_language(value: str | None) -> str:

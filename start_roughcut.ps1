@@ -351,7 +351,7 @@ function Resolve-ServicePort {
     return Resolve-StandalonePort -EnvVarName $EnvVarName -PreferredPorts $PreferredPorts -UsedPorts $UsedPorts
 }
 
-function Test-IndexTTS2AccelHealthy {
+function Test-IndexTTS2ServiceHealthy {
     param(
         [int]$Port,
         [int]$TimeoutSec = 30
@@ -361,7 +361,7 @@ function Test-IndexTTS2AccelHealthy {
     do {
         try {
             $response = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/health" -TimeoutSec 5
-            if ($response.status -eq "ok" -and $response.service -eq "indextts2-service" -and $response.use_accel -eq $true) {
+            if ($response.status -eq "ok" -and $response.service -eq "indextts2-service") {
                 return $true
             }
         } catch {
@@ -415,9 +415,12 @@ function Resolve-PortSet {
     }
 
     $configuredHeygemApiPort = Parse-PortValue -Value $(if ($env:HEYGEM_API_PORT) { $env:HEYGEM_API_PORT } else { Get-LocalDotEnvValue -Key "HEYGEM_API_PORT" })
-    $configuredHeygemTrainingPort = Parse-PortValue -Value $(if ($env:HEYGEM_TRAINING_API_PORT) { $env:HEYGEM_TRAINING_API_PORT } else { Get-LocalDotEnvValue -Key "HEYGEM_TRAINING_API_PORT" })
+    $configuredIndexTtsPort = Parse-PortValue -Value $(if ($env:INDEXTTS2_API_PORT) { $env:INDEXTTS2_API_PORT } else { Get-LocalDotEnvValue -Key "INDEXTTS2_API_PORT" })
+    if ($null -eq $configuredIndexTtsPort) {
+        $configuredIndexTtsPort = Parse-PortValue -Value $(if ($env:HEYGEM_TRAINING_API_PORT) { $env:HEYGEM_TRAINING_API_PORT } else { Get-LocalDotEnvValue -Key "HEYGEM_TRAINING_API_PORT" })
+    }
     $heygemApiPort = if ($null -ne $configuredHeygemApiPort) { $configuredHeygemApiPort } else { 49202 }
-    $heygemTrainingPort = if ($null -ne $configuredHeygemTrainingPort) { $configuredHeygemTrainingPort } else { 49204 }
+    $heygemTrainingPort = if ($null -ne $configuredIndexTtsPort) { $configuredIndexTtsPort } else { 49204 }
 
     return @{
         Postgres = $postgresPort
@@ -497,7 +500,7 @@ function Update-LocalServiceEnv {
     $env:MINIO_API_PORT = "$MinioApiPort"
     $env:MINIO_CONSOLE_PORT = "$MinioConsolePort"
     $env:HEYGEM_API_PORT = "$HeygemApiPort"
-    $env:HEYGEM_TRAINING_API_PORT = "$HeygemTrainingPort"
+    $env:INDEXTTS2_API_PORT = "$HeygemTrainingPort"
     $env:HEYGEM_SHARED_HOST_DIR = $heygemSharedRoot
     $env:HEYGEM_SHARED_ROOT = $heygemSharedRoot
     $voiceRoot = if ($env:HEYGEM_VOICE_ROOT -and -not [string]::IsNullOrWhiteSpace($env:HEYGEM_VOICE_ROOT)) {
@@ -789,14 +792,17 @@ Stop-RoughCutServices
     if (-not (Wait-LocalPortListening -TestPort $servicePorts.MinioConsole -ServiceName "MinIO Console" -TimeoutSec 90)) {
         throw "MinIO Console failed to start in time."
     }
-    if (-not (Wait-LocalPortListening -TestPort $servicePorts.HeygemApi -ServiceName "HeyGem API (external)" -TimeoutSec 10)) {
-        throw "External HeyGem preview service is not listening on port $($servicePorts.HeygemApi)."
+    if (Wait-LocalPortListening -TestPort $servicePorts.HeygemApi -ServiceName "HeyGem API (external)" -TimeoutSec 2) {
+        Write-Host "External HeyGem preview service is already running." -ForegroundColor Green
+    } else {
+        Write-Host "External HeyGem preview service is currently stopped; RoughCut will start the managed Docker stack on first demand." -ForegroundColor Yellow
     }
-    if (-not (Wait-LocalPortListening -TestPort $servicePorts.HeygemTraining -ServiceName "IndexTTS2 / Voice Synthesis (external)" -TimeoutSec 10)) {
-        throw "External IndexTTS2 voice synthesis service is not listening on port $($servicePorts.HeygemTraining)."
-    }
-    if (-not (Test-IndexTTS2AccelHealthy -Port $servicePorts.HeygemTraining -TimeoutSec 20)) {
-        throw "External IndexTTS2 service on port $($servicePorts.HeygemTraining) is reachable, but it is not the expected accel primary instance."
+    if (Wait-LocalPortListening -TestPort $servicePorts.HeygemTraining -ServiceName "IndexTTS2 / Voice Synthesis" -TimeoutSec 2) {
+        if (-not (Test-IndexTTS2ServiceHealthy -Port $servicePorts.HeygemTraining -TimeoutSec 20)) {
+            Write-Host "External IndexTTS2 port is open but health payload is not ready yet; RoughCut will retry on first demand." -ForegroundColor Yellow
+        }
+    } else {
+        Write-Host "IndexTTS2 service is currently stopped; RoughCut will start the managed Docker stack on first demand." -ForegroundColor Yellow
     }
 
     Write-Host "Docker services are ready." -ForegroundColor Green

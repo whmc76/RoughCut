@@ -9,6 +9,7 @@ from typing import Any
 import httpx
 
 from roughcut.config import get_settings
+from roughcut.docker_gpu_guard import hold_managed_gpu_services
 from roughcut.providers.voice.base import VoiceProvider
 
 
@@ -75,26 +76,30 @@ class IndexTTS2VoiceProvider(VoiceProvider):
         output_dir.mkdir(parents=True, exist_ok=True)
 
         results: list[dict[str, Any]] = []
-        with httpx.Client(timeout=timeout, follow_redirects=True) as client:
-            for segment in segments:
-                try:
-                    results.append(
-                        self._execute_segment(
-                            client=client,
-                            request=request,
-                            segment=segment,
-                            reference_audio_b64=reference_audio_b64,
-                            output_dir=output_dir,
+        with hold_managed_gpu_services(
+            required_urls=[str(request.get("speech_endpoint") or "")],
+            reason="indextts2_dubbing",
+        ):
+            with httpx.Client(timeout=timeout, follow_redirects=True) as client:
+                for segment in segments:
+                    try:
+                        results.append(
+                            self._execute_segment(
+                                client=client,
+                                request=request,
+                                segment=segment,
+                                reference_audio_b64=reference_audio_b64,
+                                output_dir=output_dir,
+                            )
                         )
-                    )
-                except Exception as exc:
-                    results.append(
-                        {
-                            "segment_id": segment.get("segment_id"),
-                            "status": "failed",
-                            "error": str(exc),
-                        }
-                    )
+                    except Exception as exc:
+                        results.append(
+                            {
+                                "segment_id": segment.get("segment_id"),
+                                "status": "failed",
+                                "error": str(exc),
+                            }
+                        )
 
         success_count = sum(1 for item in results if item.get("status") == "success")
         failed_count = sum(1 for item in results if item.get("status") == "failed")

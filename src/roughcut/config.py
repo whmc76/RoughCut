@@ -7,6 +7,8 @@ from typing import Any
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from roughcut.speech.dialects import DEFAULT_TRANSCRIPTION_DIALECT, normalize_transcription_dialect
+
 _OVERRIDES_FILE = Path("roughcut_config.json")
 DEFAULT_JOB_WORKFLOW_MODE = "standard_edit"
 TRANSCRIPTION_MODEL_OPTIONS: dict[str, list[str]] = {
@@ -14,22 +16,26 @@ TRANSCRIPTION_MODEL_OPTIONS: dict[str, list[str]] = {
         "sensevoice-small",
     ],
     "local_whisper": [
+        "large-v3",
         "base",
         "small",
         "medium",
-        "large-v3",
         "distil-large-v3",
     ],
     "openai": [
         "gpt-4o-transcribe",
         "gpt-4o-mini-transcribe",
     ],
+    "qwen_asr": [
+        "qwen3-asr-1.7b",
+    ],
 }
 DEFAULT_TRANSCRIPTION_PROVIDER = "openai"
 DEFAULT_TRANSCRIPTION_MODELS: dict[str, str] = {
     "funasr": "sensevoice-small",
-    "local_whisper": "base",
+    "local_whisper": "large-v3",
     "openai": "gpt-4o-transcribe",
+    "qwen_asr": "qwen3-asr-1.7b",
 }
 AVATAR_PROVIDER_OPTIONS: tuple[str, ...] = ("heygem",)
 VOICE_PROVIDER_OPTIONS: tuple[str, ...] = ("indextts2", "runninghub")
@@ -54,8 +60,41 @@ class Settings(BaseSettings):
     s3_region: str = "us-east-1"
 
     # Transcription
-    transcription_provider: str = DEFAULT_TRANSCRIPTION_PROVIDER  # openai | local_whisper | funasr
+    transcription_provider: str = DEFAULT_TRANSCRIPTION_PROVIDER  # openai | local_whisper | funasr | qwen_asr
     transcription_model: str = DEFAULT_TRANSCRIPTION_MODELS[DEFAULT_TRANSCRIPTION_PROVIDER]
+    transcription_dialect: str = DEFAULT_TRANSCRIPTION_DIALECT
+    qwen_asr_api_base_url: str = "http://127.0.0.1:18096"
+    watch_auto_scan_interval_sec: int = 45
+    watch_auto_settle_seconds: int = 45
+    watch_auto_merge_enabled: bool = True
+    watch_auto_merge_min_score: float = 0.72
+    watch_auto_enqueue_enabled: bool = True
+    watch_auto_max_active_jobs: int = 2
+    watch_auto_max_jobs_per_root: int = 1
+    gpu_retry_enabled: bool = True
+    gpu_retry_base_delay_sec: int = 90
+    gpu_retry_max_delay_sec: int = 900
+    gpu_busy_utilization_threshold: int = 92
+    gpu_busy_memory_threshold: float = 0.92
+    docker_gpu_guard_enabled: bool = True
+    docker_gpu_guard_idle_timeout_sec: int = 900
+    heygem_docker_guard_enabled: bool = True
+    heygem_docker_compose_file: str = "E:/WorkSpace/heygem/docker-compose.yml"
+    heygem_docker_env_file: str = "E:/WorkSpace/heygem/.env"
+    heygem_docker_services: str = "heygem"
+    heygem_docker_idle_timeout_sec: int = 900
+    indextts2_docker_guard_enabled: bool = True
+    indextts2_docker_compose_file: str = "E:/WorkSpace/indextts2-service/docker-compose.yml"
+    indextts2_docker_env_file: str = "E:/WorkSpace/indextts2-service/.env"
+    indextts2_docker_services: str = "indextts2"
+    indextts2_docker_idle_timeout_sec: int = 900
+    qwen_asr_docker_guard_enabled: bool = True
+    qwen_asr_docker_compose_file: str = "E:/WorkSpace/asr-qwen3-asr-1.7b/docker-compose.yml"
+    qwen_asr_docker_env_file: str = ""
+    qwen_asr_docker_services: str = "asr"
+    qwen_asr_docker_idle_timeout_sec: int = 900
+    funasr_auto_unload_enabled: bool = True
+    funasr_idle_unload_sec: int = 600
 
     # Reasoning
     llm_mode: str = "performance"  # performance | local
@@ -96,7 +135,7 @@ class Settings(BaseSettings):
     avatar_presenter_id: str = ""
     avatar_layout_template: str = "picture_in_picture_right"
     avatar_safe_margin: float = 0.08
-    avatar_overlay_scale: float = 0.24
+    avatar_overlay_scale: float = 0.18
 
     # Voice / AI Director dubbing
     voice_provider: str = "indextts2"
@@ -139,6 +178,7 @@ class Settings(BaseSettings):
     cover_selection_review_gap: float = 0.08
     packaging_selection_review_gap: float = 0.08
     packaging_selection_min_score: float = 0.6
+    subtitle_filler_cleanup_enabled: bool = True
 
     # Feature flags
     fact_check_enabled: bool = False
@@ -216,6 +256,11 @@ def get_settings() -> Settings:
         object.__setattr__(_settings, "transcription_model", model)
         object.__setattr__(
             _settings,
+            "transcription_dialect",
+            normalize_transcription_dialect(getattr(_settings, "transcription_dialect", DEFAULT_TRANSCRIPTION_DIALECT)),
+        )
+        object.__setattr__(
+            _settings,
             "default_job_workflow_mode",
             _normalize_default_workflow_mode(getattr(_settings, "default_job_workflow_mode", DEFAULT_JOB_WORKFLOW_MODE)),
         )
@@ -257,6 +302,11 @@ def apply_runtime_overrides(updates: dict[str, Any]) -> Settings:
     )
     object.__setattr__(settings, "transcription_provider", provider)
     object.__setattr__(settings, "transcription_model", model)
+    object.__setattr__(
+        settings,
+        "transcription_dialect",
+        normalize_transcription_dialect(getattr(settings, "transcription_dialect", DEFAULT_TRANSCRIPTION_DIALECT)),
+    )
     object.__setattr__(
         settings,
         "default_job_workflow_mode",

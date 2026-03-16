@@ -15,6 +15,7 @@ from roughcut.api.options import (
     build_avatar_provider_options,
     build_channel_profile_options,
     build_enhancement_mode_options,
+    build_transcription_dialect_options,
     build_voice_provider_options,
     build_workflow_mode_options,
 )
@@ -30,6 +31,7 @@ from roughcut.config import (
 )
 from roughcut.creative.modes import normalize_enhancement_modes, normalize_workflow_mode
 from roughcut.creative.modes import build_mode_catalog
+from roughcut.speech.dialects import DEFAULT_TRANSCRIPTION_DIALECT, normalize_transcription_dialect
 
 router = APIRouter(prefix="/config", tags=["config"])
 
@@ -40,6 +42,7 @@ class ConfigOut(BaseModel):
     # Transcription
     transcription_provider: str
     transcription_model: str
+    transcription_dialect: str
     # Reasoning
     llm_mode: str
     reasoning_provider: str
@@ -54,6 +57,7 @@ class ConfigOut(BaseModel):
     openai_base_url: str
     openai_auth_mode: str
     openai_api_key_helper: str
+    qwen_asr_api_base_url: str
     avatar_provider: str
     avatar_api_base_url: str
     avatar_training_api_base_url: str
@@ -97,6 +101,7 @@ class ConfigOut(BaseModel):
     cover_selection_review_gap: float
     packaging_selection_review_gap: float
     packaging_selection_min_score: float
+    subtitle_filler_cleanup_enabled: bool
     # Overrides currently stored
     overrides: dict
 
@@ -106,6 +111,7 @@ class ConfigOptionsOut(BaseModel):
     channel_profiles: list[dict[str, str]]
     workflow_modes: list[dict[str, str]]
     enhancement_modes: list[dict[str, str]]
+    transcription_dialects: list[dict[str, str]]
     avatar_providers: list[dict[str, str]]
     voice_providers: list[dict[str, str]]
     creative_mode_catalog: dict[str, list[dict[str, Any]]]
@@ -118,6 +124,7 @@ class ConfigOptionsOut(BaseModel):
 class ConfigPatch(BaseModel):
     transcription_provider: str | None = None
     transcription_model: str | None = None
+    transcription_dialect: str | None = None
     llm_mode: str | None = None
     reasoning_provider: str | None = None
     reasoning_model: str | None = None
@@ -132,6 +139,7 @@ class ConfigPatch(BaseModel):
     openai_base_url: str | None = None
     openai_auth_mode: str | None = None
     openai_api_key_helper: str | None = None
+    qwen_asr_api_base_url: str | None = None
     avatar_provider: str | None = None
     avatar_api_base_url: str | None = None
     avatar_training_api_base_url: str | None = None
@@ -171,6 +179,7 @@ class ConfigPatch(BaseModel):
     cover_selection_review_gap: float | None = None
     packaging_selection_review_gap: float | None = None
     packaging_selection_min_score: float | None = None
+    subtitle_filler_cleanup_enabled: bool | None = None
 
 
 @router.get("", response_model=ConfigOut)
@@ -180,6 +189,7 @@ def get_config():
     return ConfigOut(
         transcription_provider=s.transcription_provider,
         transcription_model=s.transcription_model,
+        transcription_dialect=s.transcription_dialect,
         llm_mode=s.llm_mode,
         reasoning_provider=s.reasoning_provider,
         reasoning_model=s.reasoning_model,
@@ -193,6 +203,7 @@ def get_config():
         openai_base_url=s.openai_base_url,
         openai_auth_mode=s.openai_auth_mode,
         openai_api_key_helper=s.openai_api_key_helper,
+        qwen_asr_api_base_url=s.qwen_asr_api_base_url,
         avatar_provider=s.avatar_provider,
         avatar_api_base_url=s.avatar_api_base_url,
         avatar_training_api_base_url=s.avatar_training_api_base_url,
@@ -233,6 +244,7 @@ def get_config():
         cover_selection_review_gap=s.cover_selection_review_gap,
         packaging_selection_review_gap=s.packaging_selection_review_gap,
         packaging_selection_min_score=s.packaging_selection_min_score,
+        subtitle_filler_cleanup_enabled=s.subtitle_filler_cleanup_enabled,
         overrides=overrides,
     )
 
@@ -244,6 +256,7 @@ def get_config_options():
         channel_profiles=build_channel_profile_options(),
         workflow_modes=build_workflow_mode_options(),
         enhancement_modes=build_enhancement_mode_options(),
+        transcription_dialects=build_transcription_dialect_options(),
         avatar_providers=build_avatar_provider_options(),
         voice_providers=build_voice_provider_options(),
         creative_mode_catalog=build_mode_catalog(),
@@ -270,6 +283,15 @@ def patch_config(body: ConfigPatch):
                 ),
             )
         updates["transcription_provider"] = provider
+    if "transcription_dialect" in updates:
+        dialect = str(updates["transcription_dialect"]).strip().lower()
+        normalized_dialect = normalize_transcription_dialect(dialect)
+        if dialect != normalized_dialect and dialect:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unsupported transcription_dialect. Use one of: {', '.join(item['value'] for item in build_transcription_dialect_options())}",
+            )
+        updates["transcription_dialect"] = normalized_dialect or DEFAULT_TRANSCRIPTION_DIALECT
     if "avatar_provider" in updates:
         avatar_provider = str(updates["avatar_provider"]).strip().lower()
         if avatar_provider not in AVATAR_PROVIDER_OPTIONS:

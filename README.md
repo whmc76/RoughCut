@@ -163,6 +163,7 @@ AVATAR_API_BASE_URL=http://127.0.0.1:49202
 AVATAR_TRAINING_API_BASE_URL=http://127.0.0.1:49204
 HEYGEM_SHARED_ROOT=E:/WorkSpace/heygem/data
 HEYGEM_VOICE_ROOT=E:/WorkSpace/RoughCut/data/voice_refs
+QWEN_ASR_API_BASE_URL=http://127.0.0.1:18096
 VOICE_PROVIDER=indextts2
 VOICE_CLONE_API_BASE_URL=http://127.0.0.1:49204
 ```
@@ -391,7 +392,7 @@ curl http://localhost:8000/api/v1/jobs/{job_id}/report
 | `MINIMAX_API_HOST` | `https://api.minimaxi.com` | MiniMax Coding Plan / MCP API Host |
 | `MINIMAX_CODING_PLAN_API_KEY` | `""` | MiniMax Coding Plan Key；留空时搜索/MCP 默认回退 `MINIMAX_API_KEY` |
 | `VISION_MODEL` | `""` | 视觉模型（空 = 使用 reasoning_model） |
-| `TRANSCRIPTION_PROVIDER` | `openai` | 转写后端：`openai` / `funasr` / `local_whisper` |
+| `TRANSCRIPTION_PROVIDER` | `openai` | 转写后端：`openai` / `funasr` / `local_whisper` / `qwen_asr` |
 | `TRANSCRIPTION_MODEL` | `gpt-4o-transcribe` | 转写模型 |
 | `SUBTITLE_FONT` | `Microsoft YaHei` | 字幕字体 |
 | `SUBTITLE_FONT_SIZE` | `80` | 字幕字号（pt，相对 PlayResY） |

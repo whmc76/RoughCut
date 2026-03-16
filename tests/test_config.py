@@ -6,8 +6,9 @@ from roughcut.config import Settings, get_settings
 
 def test_default_settings():
     s = Settings(_env_file=None)
-    assert s.transcription_provider == "local_whisper"
-    assert s.transcription_model == "base"
+    assert s.transcription_provider == "openai"
+    assert s.transcription_model == "gpt-4o-transcribe"
+    assert s.transcription_dialect == "mandarin"
     assert s.llm_mode == "performance"
     assert s.reasoning_provider == "openai"
     assert s.local_reasoning_model == "qwen3.5:9b"
@@ -30,6 +31,8 @@ def test_default_settings():
     assert s.cover_selection_review_gap == 0.08
     assert s.packaging_selection_review_gap == 0.08
     assert s.packaging_selection_min_score == 0.6
+    assert s.subtitle_filler_cleanup_enabled is True
+    assert s.avatar_overlay_scale == 0.18
     assert s.active_reasoning_provider == "openai"
 
 
@@ -53,7 +56,7 @@ def test_max_upload_size_bytes():
 def test_get_settings_sanitizes_invalid_transcription_override(tmp_path, monkeypatch):
     overrides_file = tmp_path / "roughcut_config.json"
     overrides_file.write_text(
-        '{"transcription_provider":"qwen_asr","transcription_model":"Qwen/Qwen3-ASR-1.7B"}',
+        '{"transcription_provider":"qwen_asr","transcription_model":"Qwen/Qwen3-ASR-1.7B","transcription_dialect":"martian"}',
         encoding="utf-8",
     )
     monkeypatch.setattr(config_mod, "_OVERRIDES_FILE", overrides_file)
@@ -61,7 +64,25 @@ def test_get_settings_sanitizes_invalid_transcription_override(tmp_path, monkeyp
 
     settings = get_settings()
 
-    assert settings.transcription_provider == "local_whisper"
-    assert settings.transcription_model == "base"
+    assert settings.transcription_provider == "qwen_asr"
+    assert settings.transcription_model == "qwen3-asr-1.7b"
+    assert settings.transcription_dialect == "mandarin"
     assert settings.default_job_workflow_mode == "standard_edit"
     assert settings.default_job_enhancement_modes == []
+
+
+def test_get_settings_accepts_qwen_asr_override(tmp_path, monkeypatch):
+    overrides_file = tmp_path / "roughcut_config.json"
+    overrides_file.write_text(
+        '{"transcription_provider":"qwen_asr","transcription_model":"qwen3-asr-1.7b","transcription_dialect":"beijing"}',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(config_mod, "_OVERRIDES_FILE", overrides_file)
+    config_mod._settings = None
+
+    settings = get_settings()
+
+    assert settings.transcription_provider == "qwen_asr"
+    assert settings.transcription_model == "qwen3-asr-1.7b"
+    assert settings.transcription_dialect == "beijing"
+    assert settings.qwen_asr_api_base_url == "http://127.0.0.1:18096"

@@ -217,12 +217,12 @@ class PackagingConfigOut(BaseModel):
     cover_style: str = "preset_default"
     title_style: str = "preset_default"
     copy_style: str = "attention_grabbing"
-    music_volume: float = 0.22
-    watermark_position: str = "top_right"
+    music_volume: float = 0.12
+    watermark_position: str = "top_left"
     watermark_opacity: float = 0.82
     watermark_scale: float = 0.16
-    avatar_overlay_position: str = "top_left"
-    avatar_overlay_scale: float = 0.22
+    avatar_overlay_position: str = "top_right"
+    avatar_overlay_scale: float = 0.18
     avatar_overlay_corner_radius: int = 26
     avatar_overlay_border_width: int = 4
     avatar_overlay_border_color: str = "#F4E4B8"

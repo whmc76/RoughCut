@@ -32,6 +32,10 @@ def get_transcription_provider() -> TranscriptionProvider:
         from roughcut.providers.transcription.local_whisper import LocalWhisperProvider
 
         instance = LocalWhisperProvider(model_size=model)
+    elif provider == "qwen_asr":
+        from roughcut.providers.transcription.qwen_asr_http import QwenASRHTTPProvider
+
+        instance = QwenASRHTTPProvider(model_name=model)
     else:
         raise ValueError(f"Unknown transcription provider: {provider}")
     _TRANSCRIPTION_PROVIDER_CACHE[cache_key] = instance
