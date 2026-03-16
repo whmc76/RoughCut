@@ -2,8 +2,8 @@
 Orchestrator: single-process loop that reads job_steps and advances the state machine.
 State in DB, Celery only executes individual steps.
 
-Pipeline: probe → extract_audio → transcribe → subtitle_postprocess
-        → glossary_review → content_profile → summary_review → ai_director
+ Pipeline: probe → extract_audio → transcribe → subtitle_postprocess
+        → glossary_review → subtitle_translation → content_profile → summary_review → ai_director
         → avatar_commentary → edit_plan → render → platform_package
 """
 from __future__ import annotations
@@ -16,7 +16,8 @@ from datetime import datetime, timezone
 
 from sqlalchemy import func, select
 
-from roughcut.db.models import Job, JobStep
+from roughcut.config import get_settings
+from roughcut.db.models import Job, JobStep, RenderOutput
 from roughcut.db.session import get_session_factory
 
 logger = logging.getLogger(__name__)
@@ -28,6 +29,7 @@ PIPELINE_STEPS = [
     "transcribe",
     "subtitle_postprocess",
     "glossary_review",
+    "subtitle_translation",
     "content_profile",
     "summary_review",
     "ai_director",
@@ -42,6 +44,7 @@ STEP_TASK_MAP = {
     "extract_audio": "roughcut.pipeline.tasks.media_extract_audio",
     "transcribe": "roughcut.pipeline.tasks.llm_transcribe",
     "subtitle_postprocess": "roughcut.pipeline.tasks.llm_subtitle_postprocess",
+    "subtitle_translation": "roughcut.pipeline.tasks.llm_subtitle_translation",
     "content_profile": "roughcut.pipeline.tasks.llm_content_profile",
     "glossary_review": "roughcut.pipeline.tasks.llm_glossary_review",
     "ai_director": "roughcut.pipeline.tasks.llm_ai_director",
@@ -56,6 +59,7 @@ STEP_QUEUES = {
     "extract_audio": "media_queue",
     "transcribe": "llm_queue",
     "subtitle_postprocess": "llm_queue",
+    "subtitle_translation": "llm_queue",
     "content_profile": "llm_queue",
     "glossary_review": "llm_queue",
     "ai_director": "llm_queue",
@@ -71,6 +75,13 @@ _GPU_SENSITIVE_STEPS = {"transcribe", "avatar_commentary", "render"}
 
 async def tick() -> None:
     """Single orchestrator tick: find ready steps and dispatch them."""
+    try:
+        from roughcut.runtime_preflight import ensure_runtime_services_ready
+
+        await ensure_runtime_services_ready(reason="orchestrator_tick")
+    except Exception:
+        logger.exception("Runtime preflight failed")
+
     factory = get_session_factory()
     async with factory() as session:
         jobs_result = await session.execute(
@@ -95,6 +106,7 @@ async def tick() -> None:
         except Exception:
             logger.exception("Watch auto duty tick failed")
 
+        await _recover_stale_running_steps(session)
         running_gpu_steps = await _count_running_gpu_steps(session)
 
         # Find all pending steps
@@ -160,6 +172,82 @@ async def _count_running_gpu_steps(session) -> int:
     return int(result.scalar() or 0)
 
 
+def _step_stale_timeout_seconds(step_name: str) -> int:
+    settings = get_settings()
+    if step_name == "render":
+        return max(600, int(getattr(settings, "render_step_stale_timeout_sec", 5400) or 5400))
+    return max(300, int(getattr(settings, "step_stale_timeout_sec", 900) or 900))
+
+
+def _step_last_heartbeat_at(step: JobStep) -> datetime | None:
+    metadata = step.metadata_ or {}
+    updated_at = metadata.get("updated_at")
+    if isinstance(updated_at, str) and updated_at.strip():
+        try:
+            return datetime.fromisoformat(updated_at)
+        except ValueError:
+            return None
+    return step.started_at
+
+
+async def _recover_stale_running_steps(session) -> None:
+    settings = get_settings()
+    if not bool(getattr(settings, "step_stale_recovery_enabled", True)):
+        return
+
+    now = datetime.now(timezone.utc)
+    result = await session.execute(
+        select(JobStep)
+        .join(Job, Job.id == JobStep.job_id)
+        .where(
+            JobStep.status == "running",
+            Job.status.notin_(["cancelled", "failed", "done"]),
+        )
+    )
+    stale_steps = result.scalars().all()
+    for step in stale_steps:
+        last_heartbeat_at = _step_last_heartbeat_at(step)
+        if last_heartbeat_at is None:
+            continue
+        stale_after = _step_stale_timeout_seconds(step.step_name)
+        if (now - last_heartbeat_at).total_seconds() < stale_after:
+            continue
+
+        metadata = dict(step.metadata_ or {})
+        previous_task_id = metadata.pop("task_id", None)
+        metadata.pop("retry_wait_until", None)
+        metadata.pop("retry_after_sec", None)
+        metadata["detail"] = f"检测到步骤心跳超时({stale_after}s)，调度器已自动回收并重新入队。"
+        metadata["updated_at"] = now.isoformat()
+        if step.step_name == "render":
+            metadata["progress"] = 0.0
+            render_outputs_result = await session.execute(
+                select(RenderOutput).where(RenderOutput.job_id == step.job_id, RenderOutput.status == "running")
+            )
+            for render_output in render_outputs_result.scalars().all():
+                render_output.status = "failed"
+
+        step.status = "pending"
+        step.started_at = None
+        step.finished_at = None
+        step.error_message = None
+        step.metadata_ = metadata
+
+        job = await session.get(Job, step.job_id)
+        if job is not None and job.status != "needs_review":
+            job.status = "processing"
+            job.error_message = None
+            job.updated_at = now
+
+        logger.warning(
+            "Recovered stale running step job=%s step=%s previous_task_id=%s stale_after=%ss",
+            step.job_id,
+            step.step_name,
+            previous_task_id,
+            stale_after,
+        )
+
+
 def _gpu_dispatch_wait_reason(step_name: str, *, running_gpu_steps: int) -> str | None:
     if step_name not in _GPU_SENSITIVE_STEPS:
         return None
@@ -207,23 +295,36 @@ async def _recover_incomplete_jobs() -> None:
 
             for step in steps:
                 if step.status == "running":
+                    last_heartbeat_at = _step_last_heartbeat_at(step)
+                    if last_heartbeat_at is not None:
+                        stale_after = _step_stale_timeout_seconds(step.step_name)
+                        if (now - last_heartbeat_at).total_seconds() < stale_after:
+                            continue
+                    metadata = dict(step.metadata_ or {})
+                    metadata.pop("task_id", None)
+                    metadata.pop("retry_wait_until", None)
+                    metadata.pop("retry_after_sec", None)
                     step.status = "pending"
                     step.started_at = None
                     step.finished_at = None
                     step.error_message = None
                     step.metadata_ = {
-                        **(step.metadata_ or {}),
+                        **metadata,
                         "detail": "服务重启后自动恢复，步骤重新入队。",
                         "updated_at": now.isoformat(),
                     }
                     recovered = True
                 elif step.status == "failed" and step.attempt < MAX_ATTEMPTS:
+                    metadata = dict(step.metadata_ or {})
+                    metadata.pop("task_id", None)
+                    metadata.pop("retry_wait_until", None)
+                    metadata.pop("retry_after_sec", None)
                     step.status = "pending"
                     step.started_at = None
                     step.finished_at = None
                     step.error_message = None
                     step.metadata_ = {
-                        **(step.metadata_ or {}),
+                        **metadata,
                         "detail": "检测到可重试失败步骤，启动时已自动续跑。",
                         "updated_at": now.isoformat(),
                     }
@@ -307,11 +408,13 @@ async def _update_job_statuses(session) -> None:
         )
         steps = steps_result.scalars().all()
         step_map = {s.step_name: s for s in steps}
+        await _reconcile_completed_render_step(session, job, step_map)
         ordered_existing_steps = [
             step_map[name]
             for name in PIPELINE_STEPS
             if name in step_map
         ]
+        _reconcile_terminal_steps(job, ordered_existing_steps)
         last_existing_step = ordered_existing_steps[-1] if ordered_existing_steps else None
 
         # All steps done = job done
@@ -323,7 +426,6 @@ async def _update_job_statuses(session) -> None:
             continue
 
         if last_existing_step is not None and last_existing_step.status == "done":
-            _reconcile_terminal_steps(job, ordered_existing_steps)
             job.status = "done"
             job.error_message = None
             job.updated_at = datetime.now(timezone.utc)
@@ -349,6 +451,33 @@ async def _update_job_statuses(session) -> None:
             job.error_message = f"Step {failed_steps[0].step_name} failed after {MAX_ATTEMPTS} attempts"
             job.updated_at = datetime.now(timezone.utc)
             logger.error(f"Job {job.id} failed: {job.error_message}")
+
+
+async def _reconcile_completed_render_step(session, job: Job, step_map: dict[str, JobStep]) -> None:
+    render_step = step_map.get("render")
+    if render_step is None or render_step.status == "done":
+        return
+
+    render_output_result = await session.execute(
+        select(RenderOutput)
+        .where(RenderOutput.job_id == job.id, RenderOutput.status == "done")
+        .order_by(RenderOutput.created_at.desc())
+    )
+    render_output = render_output_result.scalars().first()
+    if render_output is None or not render_output.output_path:
+        return
+
+    render_step.status = "done"
+    render_step.finished_at = render_step.finished_at or datetime.now(timezone.utc)
+    render_step.error_message = None
+    render_step.metadata_ = {
+        **(render_step.metadata_ or {}),
+        "detail": "检测到已完成渲染输出，调度器已自动收口 render 步骤。",
+        "progress": 1.0,
+        "output_path": render_output.output_path,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    logger.info("Job %s reconciled render step from completed render output", job.id)
 
 
 async def _ensure_job_steps(job: Job, session) -> None:
