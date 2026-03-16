@@ -789,22 +789,44 @@ def _clean_example_text(value: Any) -> str:
 
 
 def _extract_confirmed_profile_fields(content_profile: dict[str, Any] | None) -> dict[str, Any]:
-    feedback = (content_profile or {}).get("user_feedback")
-    if not isinstance(feedback, dict):
+    profile = content_profile or {}
+    feedback = profile.get("user_feedback")
+    sources: list[dict[str, Any]] = []
+    if isinstance(feedback, dict):
+        sources.append(feedback)
+    if _content_profile_is_confirmed(profile):
+        sources.append(profile)
+    if not sources:
         return {}
+
     confirmed: dict[str, Any] = {}
-    for key in ("subject_brand", "subject_model", "subject_type", "video_theme"):
-        value = str(feedback.get(key) or "").strip()
-        if value:
-            confirmed[key] = value
+    for source in sources:
+        for key in ("subject_brand", "subject_model", "subject_type", "video_theme"):
+            value = str(source.get(key) or "").strip()
+            if value and key not in confirmed:
+                confirmed[key] = value
+
     keywords: list[str] = []
-    for item in feedback.get("keywords") or []:
-        value = str(item).strip()
-        if value and value not in keywords:
-            keywords.append(value)
+    for source in sources:
+        for field_name in ("keywords", "search_queries"):
+            for item in source.get(field_name) or []:
+                value = str(item).strip()
+                if value and value not in keywords:
+                    keywords.append(value)
+
     if keywords:
         confirmed["keywords"] = keywords
     return confirmed
+
+
+def _content_profile_is_confirmed(profile: dict[str, Any] | None) -> bool:
+    review_mode = str((profile or {}).get("review_mode") or "").strip().lower()
+    if review_mode in {"manual_confirmed", "auto_confirmed"}:
+        return True
+    automation = (profile or {}).get("automation_review")
+    if isinstance(automation, dict) and bool(automation.get("auto_confirm")):
+        return True
+    return False
 
 
 def _build_confirmed_feedback_entities(content_profile: dict[str, Any] | None) -> list[dict[str, Any]]:

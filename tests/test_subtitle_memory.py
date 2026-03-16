@@ -71,6 +71,30 @@ def test_build_subtitle_review_memory_includes_confirmed_feedback_entities():
     assert any(item["wrong"] == "五眼版" and item["correct"] == "UV版" for item in confirmed["model_aliases"])
 
 
+def test_build_subtitle_review_memory_uses_auto_confirmed_profile_as_confirmed_subject():
+    memory = build_subtitle_review_memory(
+        channel_profile="edc_tactical",
+        glossary_terms=[],
+        user_memory={},
+        recent_subtitles=[],
+        content_profile={
+            "subject_brand": "Loop露普",
+            "subject_model": "SK05二代UV版",
+            "review_mode": "auto_confirmed",
+            "automation_review": {"auto_confirm": True},
+            "search_queries": ["Loop露普 SK05二代UV版"],
+        },
+    )
+
+    confirmed = memory["confirmed_entities"][0]
+    alias_map = {(item["wrong"], item["correct"]) for item in memory["aliases"]}
+
+    assert confirmed["brand"] == "Loop露普"
+    assert confirmed["model"] == "SK05二代UV版"
+    assert ("SK零五二代", "SK05二代") in alias_map
+    assert ("五眼版", "UV版") in alias_map
+
+
 def test_build_transcription_prompt_includes_terms_and_aliases():
     prompt = build_transcription_prompt(
         source_name="arc_review.mp4",
