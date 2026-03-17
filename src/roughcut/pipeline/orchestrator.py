@@ -13,12 +13,14 @@ import logging
 import math
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 
 from roughcut.config import get_settings
-from roughcut.db.models import Job, JobStep, RenderOutput
+from roughcut.db.models import Artifact, Job, JobStep, RenderOutput, SubtitleCorrection, SubtitleItem, Timeline
 from roughcut.db.session import get_session_factory
+from roughcut.pipeline.quality import QUALITY_ARTIFACT_TYPE, assess_job_quality
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +73,17 @@ STEP_QUEUES = {
 
 MAX_ATTEMPTS = 3
 _GPU_SENSITIVE_STEPS = {"transcribe", "avatar_commentary", "render"}
+_QUALITY_RERUN_STEPS = {
+    "subtitle_postprocess",
+    "glossary_review",
+    "subtitle_translation",
+    "content_profile",
+    "ai_director",
+    "avatar_commentary",
+    "edit_plan",
+    "render",
+    "platform_package",
+}
 
 
 async def tick() -> None:
@@ -184,10 +197,10 @@ def _step_last_heartbeat_at(step: JobStep) -> datetime | None:
     updated_at = metadata.get("updated_at")
     if isinstance(updated_at, str) and updated_at.strip():
         try:
-            return datetime.fromisoformat(updated_at)
+            return _coerce_utc(datetime.fromisoformat(updated_at))
         except ValueError:
             return None
-    return step.started_at
+    return _coerce_utc(step.started_at) if step.started_at is not None else None
 
 
 async def _recover_stale_running_steps(session) -> None:
@@ -262,6 +275,12 @@ def _gpu_dispatch_wait_reason(step_name: str, *, running_gpu_steps: int) -> str 
     if not busy_reason:
         return None
     return f"{busy_reason} 调度器暂不派发新的 GPU 任务。"
+
+
+def _coerce_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
 
 
 def _set_step_waiting_metadata(
@@ -362,7 +381,7 @@ async def _is_step_ready(step: JobStep, session) -> bool:
         )
     )
     prev_step = result.scalar_one_or_none()
-    return prev_step is not None and prev_step.status == "done"
+    return prev_step is not None and prev_step.status in {"done", "skipped"}
 
 
 async def _dispatch_step(step: JobStep, session) -> None:
@@ -417,19 +436,17 @@ async def _update_job_statuses(session) -> None:
         _reconcile_terminal_steps(job, ordered_existing_steps)
         last_existing_step = ordered_existing_steps[-1] if ordered_existing_steps else None
 
-        # All steps done = job done
-        if all(s.status == "done" for s in steps):
+        done_candidate = all(s.status == "done" for s in steps) or (
+            last_existing_step is not None and last_existing_step.status == "done"
+        )
+        if done_candidate:
+            rerun_started = await _assess_and_maybe_rerun_job(session, job, steps)
+            if rerun_started:
+                continue
             job.status = "done"
             job.error_message = None
             job.updated_at = datetime.now(timezone.utc)
-            logger.info(f"Job {job.id} completed")
-            continue
-
-        if last_existing_step is not None and last_existing_step.status == "done":
-            job.status = "done"
-            job.error_message = None
-            job.updated_at = datetime.now(timezone.utc)
-            logger.info(f"Job {job.id} reconciled to completed from terminal step {last_existing_step.step_name}")
+            logger.info("Job %s completed", job.id)
             continue
 
         review_step = step_map.get("summary_review")
@@ -518,6 +535,244 @@ def _reconcile_terminal_steps(job: Job, steps: list[JobStep]) -> None:
             continue
         step.finished_at = step.finished_at or now
         step.error_message = None
+
+
+async def _assess_and_maybe_rerun_job(session, job: Job, steps: list[JobStep]) -> bool:
+    artifacts_result = await session.execute(
+        select(Artifact).where(Artifact.job_id == job.id).order_by(Artifact.created_at.asc(), Artifact.id.asc())
+    )
+    artifacts = artifacts_result.scalars().all()
+    subtitle_result = await session.execute(
+        select(SubtitleItem).where(SubtitleItem.job_id == job.id).order_by(SubtitleItem.version.desc(), SubtitleItem.item_index.asc())
+    )
+    subtitle_items = subtitle_result.scalars().all()
+    corrections_result = await session.execute(select(SubtitleCorrection).where(SubtitleCorrection.job_id == job.id))
+    corrections = corrections_result.scalars().all()
+
+    assessment = assess_job_quality(
+        job=job,
+        steps=steps,
+        artifacts=artifacts,
+        subtitle_items=subtitle_items,
+        corrections=corrections,
+        completion_candidate=True,
+    )
+    previous_quality = _latest_quality_assessment(artifacts)
+    previous_payload = previous_quality.data_json if previous_quality and isinstance(previous_quality.data_json, dict) else {}
+    previous_count = int(previous_payload.get("auto_rerun_count") or 0)
+    previous_history = list(previous_payload.get("auto_rerun_history") or [])
+    recommended_steps = [
+        str(step_name).strip()
+        for step_name in assessment.get("recommended_rerun_steps") or []
+        if str(step_name).strip() in _QUALITY_RERUN_STEPS
+    ]
+    recommended_step = recommended_steps[0] if recommended_steps else ""
+    issue_codes = [str(code) for code in assessment.get("issue_codes") or [] if str(code).strip()]
+    reason_signature = "|".join(sorted(issue_codes))
+
+    settings = get_settings()
+    should_rerun = (
+        bool(getattr(settings, "quality_auto_rerun_enabled", True))
+        and bool(assessment.get("auto_fixable"))
+        and bool(recommended_steps)
+        and float(assessment.get("score") or 0.0) < float(getattr(settings, "quality_auto_rerun_below_score", 75.0) or 75.0)
+        and previous_count < int(getattr(settings, "quality_auto_rerun_max_attempts", 1) or 1)
+        and not any(
+            str(item.get("step") or "") == recommended_step and str(item.get("signature") or "") == reason_signature
+            for item in previous_history
+            if isinstance(item, dict)
+        )
+    )
+
+    now = datetime.now(timezone.utc)
+    history_entry = {
+        "at": now.isoformat(),
+        "step": recommended_step or None,
+        "signature": reason_signature,
+        "score": assessment.get("score"),
+        "issue_codes": issue_codes,
+    }
+    payload = {
+        **assessment,
+        "assessed_at": now.isoformat(),
+        "auto_rerun_count": previous_count,
+        "auto_rerun_history": previous_history,
+        "auto_rerun_triggered": False,
+    }
+
+    if should_rerun and recommended_steps:
+        await _reset_job_for_quality_rerun(
+            session,
+            job,
+            steps,
+            rerun_steps=recommended_steps,
+            issue_codes=issue_codes,
+        )
+        payload["auto_rerun_triggered"] = True
+        payload["auto_rerun_count"] = previous_count + 1
+        payload["auto_rerun_history"] = [*previous_history, history_entry]
+        payload["auto_rerun_step"] = recommended_step
+        payload["auto_rerun_steps"] = recommended_steps
+        session.add(
+            Artifact(
+                job_id=job.id,
+                artifact_type=QUALITY_ARTIFACT_TYPE,
+                data_json=payload,
+            )
+        )
+        logger.info(
+            "Job %s scheduled automatic quality rerun from %s, score=%.1f issues=%s",
+            job.id,
+            recommended_step,
+            float(assessment.get("score") or 0.0),
+            ",".join(issue_codes),
+        )
+        return True
+
+    if recommended_step and previous_count >= int(getattr(settings, "quality_auto_rerun_max_attempts", 1) or 1):
+        payload["auto_rerun_skipped_reason"] = "max_attempts_reached"
+    elif recommended_step and any(
+        str(item.get("step") or "") == recommended_step and str(item.get("signature") or "") == reason_signature
+        for item in previous_history
+        if isinstance(item, dict)
+    ):
+        payload["auto_rerun_skipped_reason"] = "same_issue_already_retried"
+
+    session.add(
+        Artifact(
+            job_id=job.id,
+            artifact_type=QUALITY_ARTIFACT_TYPE,
+            data_json=payload,
+        )
+    )
+    return False
+
+
+def _latest_quality_assessment(artifacts: list[Artifact]) -> Artifact | None:
+    assessments = [artifact for artifact in artifacts if artifact.artifact_type == QUALITY_ARTIFACT_TYPE]
+    if not assessments:
+        return None
+    return max(assessments, key=lambda artifact: (artifact.created_at, str(artifact.id)))
+
+
+async def _reset_job_for_quality_rerun(
+    session,
+    job: Job,
+    steps: list[JobStep],
+    *,
+    rerun_steps: list[str],
+    issue_codes: list[str],
+) -> None:
+    rerun_step_set = set(rerun_steps)
+    cleanup_artifact_types = _artifact_types_for_quality_rerun(rerun_step_set)
+
+    if cleanup_artifact_types:
+        artifact_result = await session.execute(
+            select(Artifact).where(Artifact.job_id == job.id, Artifact.artifact_type.in_(sorted(cleanup_artifact_types)))
+        )
+        cleanup_artifacts = artifact_result.scalars().all()
+        for artifact in cleanup_artifacts:
+            _cleanup_artifact_files(artifact)
+        await session.execute(
+            delete(Artifact).where(Artifact.job_id == job.id, Artifact.artifact_type.in_(sorted(cleanup_artifact_types)))
+        )
+
+    if "render" in rerun_step_set:
+        render_output_result = await session.execute(select(RenderOutput).where(RenderOutput.job_id == job.id))
+        for output in render_output_result.scalars().all():
+            if output.output_path:
+                _unlink_local_path(output.output_path)
+        await session.execute(delete(RenderOutput).where(RenderOutput.job_id == job.id))
+
+    if "edit_plan" in rerun_step_set:
+        await session.execute(delete(Timeline).where(Timeline.job_id == job.id))
+
+    if "subtitle_postprocess" in rerun_step_set:
+        await session.execute(delete(SubtitleCorrection).where(SubtitleCorrection.job_id == job.id))
+        await session.execute(delete(SubtitleItem).where(SubtitleItem.job_id == job.id))
+    elif "glossary_review" in rerun_step_set:
+        await session.execute(delete(SubtitleCorrection).where(SubtitleCorrection.job_id == job.id))
+
+    now = datetime.now(timezone.utc)
+    reason_text = "、".join(issue_codes) if issue_codes else "quality_gate"
+    first_step = next((step_name for step_name in PIPELINE_STEPS if step_name in rerun_step_set), "")
+    for step in steps:
+        if step.step_name not in rerun_step_set:
+            continue
+        step.status = "pending"
+        step.attempt = 0
+        step.started_at = None
+        step.finished_at = None
+        step.error_message = None
+        detail = (
+            f"质量评分触发自动改进重跑：{reason_text}"
+            if step.step_name == first_step
+            else "等待自动改进重跑链路继续。"
+        )
+        step.metadata_ = {
+            "detail": detail,
+            "updated_at": now.isoformat(),
+        }
+
+    job.status = "processing"
+    job.error_message = None
+    job.updated_at = now
+
+
+def _artifact_types_for_quality_rerun(rerun_steps: set[str]) -> set[str]:
+    artifact_types: set[str] = set()
+    if "subtitle_translation" in rerun_steps:
+        artifact_types.add("subtitle_translation")
+    if "content_profile" in rerun_steps:
+        artifact_types.update({"content_profile", "content_profile_draft", "content_profile_final"})
+    if "ai_director" in rerun_steps:
+        artifact_types.add("ai_director_plan")
+    if "avatar_commentary" in rerun_steps:
+        artifact_types.add("avatar_commentary_plan")
+    if "render" in rerun_steps:
+        artifact_types.add("render_outputs")
+    if "platform_package" in rerun_steps:
+        artifact_types.add("platform_packaging_md")
+    return artifact_types
+
+
+def _cleanup_artifact_files(artifact: Artifact) -> None:
+    if artifact.storage_path:
+        _unlink_local_path(artifact.storage_path)
+    if artifact.artifact_type == "render_outputs" and isinstance(artifact.data_json, dict):
+        for path in _collect_local_paths(artifact.data_json):
+            _unlink_local_path(path)
+
+
+def _collect_local_paths(payload: object) -> set[str]:
+    paths: set[str] = set()
+    if isinstance(payload, dict):
+        for value in payload.values():
+            paths.update(_collect_local_paths(value))
+    elif isinstance(payload, list):
+        for value in payload:
+            paths.update(_collect_local_paths(value))
+    elif isinstance(payload, str):
+        candidate = payload.strip()
+        if _looks_like_local_path(candidate):
+            paths.add(candidate)
+    return paths
+
+
+def _looks_like_local_path(value: str) -> bool:
+    if not value or "://" in value:
+        return False
+    if "\\" not in value and "/" not in value:
+        return False
+    suffix = Path(value).suffix.lower()
+    return bool(suffix)
+
+
+def _unlink_local_path(value: str) -> None:
+    try:
+        Path(value).unlink(missing_ok=True)
+    except Exception:
+        pass
 
 
 async def run_orchestrator(poll_interval: float = 5.0) -> None:

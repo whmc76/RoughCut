@@ -68,6 +68,10 @@ class JobOut(BaseModel):
     source_name: str
     content_subject: str | None = None
     content_summary: str | None = None
+    quality_score: float | None = None
+    quality_grade: str | None = None
+    quality_summary: str | None = None
+    quality_issue_codes: list[str] = Field(default_factory=list)
     avatar_delivery_status: str | None = None
     avatar_delivery_summary: str | None = None
     status: str
@@ -129,6 +133,10 @@ class ContentProfileReviewOut(BaseModel):
     job_id: str
     status: str
     review_step_status: str
+    review_step_detail: str | None = None
+    review_reasons: list[str] = Field(default_factory=list)
+    blocking_reasons: list[str] = Field(default_factory=list)
+    identity_review: dict[str, Any] | None = None
     workflow_mode: str
     enhancement_modes: list[str] = Field(default_factory=list)
     draft: dict[str, Any] | None
@@ -320,6 +328,9 @@ class AvatarMaterialProfileOut(BaseModel):
     display_name: str
     presenter_alias: str | None = None
     notes: str | None = None
+    personal_info: dict[str, Any] = {}
+    creator_profile: dict[str, Any] = {}
+    profile_dashboard: dict[str, Any] = {}
     profile_dir: str
     training_status: str
     training_provider: str

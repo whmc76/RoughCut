@@ -91,8 +91,64 @@ def test_build_subtitle_review_memory_uses_auto_confirmed_profile_as_confirmed_s
 
     assert confirmed["brand"] == "Loop露普"
     assert confirmed["model"] == "SK05二代UV版"
+    assert ("SK零五", "SK05") in alias_map
     assert ("SK零五二代", "SK05二代") in alias_map
     assert ("五眼版", "UV版") in alias_map
+
+
+def test_confirmed_subject_overrides_conflicting_builtin_brand_aliases():
+    memory = build_subtitle_review_memory(
+        channel_profile="edc_tactical",
+        glossary_terms=[
+            {
+                "correct_form": "LOOPGEAR",
+                "wrong_forms": ["Loop露普", "露普"],
+                "category": "flashlight_brand",
+            }
+        ],
+        user_memory={},
+        recent_subtitles=[
+            {"text_final": "陆虎SK零五二代。"},
+            {"text_final": "全新的二代啊五眼版。"},
+        ],
+        content_profile={
+            "subject_brand": "Loop露普",
+            "subject_model": "SK05二代UV版",
+            "review_mode": "auto_confirmed",
+            "automation_review": {"auto_confirm": True},
+            "search_queries": ["Loop露普 SK05二代UV版"],
+        },
+        include_recent_terms=False,
+        include_recent_examples=False,
+    )
+
+    terms = [item["term"] for item in memory["terms"]]
+    alias_map = {(item["wrong"], item["correct"]) for item in memory["aliases"]}
+
+    assert "LOOPGEAR" not in terms
+    assert ("露普", "LOOPGEAR") not in alias_map
+    assert apply_domain_term_corrections(
+        "陆虎SK零五二代。",
+        memory,
+        next_text="全新的二代啊五眼版。",
+    ) == "Loop露普SK05二代。"
+    assert apply_domain_term_corrections(
+        "因为SK零五我已经买了。",
+        memory,
+    ) == "因为SK05我已经买了。"
+    assert apply_domain_term_corrections(
+        "S四零五都卖了一万多块的序列号我这个二代是四百号其实。",
+        memory,
+    ) == "SK05都卖了一万多块的序列号我这个二代是四百号其实。"
+    assert apply_domain_term_corrections(
+        "C零五的二代啊它是新加了一排灯珠啊应该是这个专门用。",
+        memory,
+    ) == "SK05二代啊它是新加了一排灯珠啊应该是这个专门用。"
+    assert apply_domain_term_corrections(
+        "全新的二代啊五眼版。",
+        memory,
+        prev_text="陆虎SK零五二代。",
+    ) == "全新的二代啊UV版。"
 
 
 def test_build_transcription_prompt_includes_terms_and_aliases():
@@ -394,7 +450,7 @@ def test_build_subtitle_review_memory_includes_new_mainstream_edc_brand_clusters
     terms = {item["term"] for item in memory["terms"]}
     alias_map = {(item["wrong"], item["correct"]) for item in memory["aliases"]}
 
-    assert "FOXBAT狐蝠工业" in terms
+    assert "狐蝠工业" in terms
     assert "头狼工业" in terms
     assert "PSIGEAR" in terms
     assert "LIIGEAR" in terms

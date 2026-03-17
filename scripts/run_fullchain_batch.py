@@ -16,6 +16,8 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from sqlalchemy import select
 
+from roughcut.config import get_settings
+from roughcut.creative.modes import normalize_enhancement_modes
 from roughcut.db.models import Artifact, Job, JobStep, RenderOutput, SubtitleCorrection, SubtitleItem, Timeline
 from roughcut.media.output import get_cover_manifest_path, get_legacy_cover_manifest_path
 from roughcut.db.session import get_session_factory
@@ -31,6 +33,8 @@ PIPELINE_STEPS = [
     "subtitle_postprocess",
     "content_profile",
     "glossary_review",
+    "ai_director",
+    "avatar_commentary",
     "edit_plan",
     "render",
     "platform_package",
@@ -73,7 +77,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--channel-profile", default="edc_tactical")
     parser.add_argument("--language", default="zh-CN")
     parser.add_argument("--scan-mode", choices=["fast", "precise"], default="fast")
-    parser.add_argument("--report-dir", type=Path, default=ROOT / ".artifacts" / "fullchain-batch")
+    parser.add_argument("--report-dir", type=Path, default=ROOT / "output" / "test" / "fullchain-batch")
     return parser.parse_args()
 
 
@@ -163,14 +167,29 @@ async def prepare_job_for_source(
 
         reusable = jobs[0] if jobs else None
         if reusable is not None:
+            default_modes = list(get_settings().default_job_enhancement_modes or [])
             step_result = await session.execute(select(JobStep).where(JobStep.job_id == reusable.id))
-            for step in step_result.scalars().all():
-                if step.status != "done":
-                    step.status = "pending"
-                    step.error_message = None
-                    step.started_at = None
-                    step.finished_at = None
-                    step.metadata_ = None
+            existing_steps = {step.step_name: step for step in step_result.scalars().all()}
+            for step_name in PIPELINE_STEPS:
+                step = existing_steps.get(step_name)
+                if step is None:
+                    session.add(
+                        JobStep(
+                            job_id=reusable.id,
+                            step_name=step_name,
+                            status="pending",
+                            attempt=0,
+                        )
+                    )
+                    continue
+                step.status = "pending"
+                step.error_message = None
+                step.started_at = None
+                step.finished_at = None
+                step.metadata_ = None
+            reusable.enhancement_modes = normalize_enhancement_modes(
+                list(reusable.enhancement_modes or []) + default_modes
+            )
             reusable.status = "pending"
             reusable.error_message = None
             reusable.updated_at = datetime.now(timezone.utc)

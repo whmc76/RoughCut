@@ -6,11 +6,15 @@ import logging
 import os
 import shutil
 import sys
+import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import Any
 
 import click
 import uvicorn
+from sqlalchemy import func, select
+from sqlalchemy.orm import selectinload
 
 from roughcut.config import get_settings
 
@@ -32,6 +36,17 @@ class DoctorCheck:
     status: str
     detail: str
     critical: bool = False
+
+
+@dataclass
+class QualityAuditRow:
+    job_id: str
+    source_name: str
+    status: str
+    score: float
+    grade: str
+    issue_codes: list[str]
+    recommended_rerun_steps: list[str]
 
 
 def _repo_root() -> Path:
@@ -243,6 +258,221 @@ def migrate():
         check=False,
     )
     raise SystemExit(result.returncode)
+
+
+@cli.group()
+def quality():
+    """Audit and improve job quality."""
+
+
+@quality.command("audit")
+@click.option("--limit", default=20, type=int, show_default=True, help="Max jobs to print")
+@click.option("--status", "statuses", multiple=True, help="Filter job status, repeatable")
+@click.option("--persist", is_flag=True, default=False, help="Persist quality_assessment artifacts")
+@click.option("--json-output", "json_output", is_flag=True, default=False, help="Print machine-readable JSON")
+def quality_audit(limit: int, statuses: tuple[str, ...], persist: bool, json_output: bool):
+    """Score jobs and sort from lowest quality upward."""
+    rows = asyncio.run(_quality_audit_async(limit=limit, statuses=list(statuses), persist=persist))
+    if json_output:
+        click.echo(json.dumps([asdict(row) for row in rows], ensure_ascii=False, indent=2))
+        return
+    for row in rows:
+        click.echo(f"{row.score:>5.1f} {row.grade} {row.status:<12} {row.job_id} {row.source_name}")
+        click.echo(f"  issues={', '.join(row.issue_codes) if row.issue_codes else '-'}")
+        click.echo(f"  rerun={', '.join(row.recommended_rerun_steps) if row.recommended_rerun_steps else '-'}")
+
+
+@quality.command("improve")
+@click.option("--limit", default=3, type=int, show_default=True, help="Max jobs to process")
+@click.option("--max-score", default=74.9, type=float, show_default=True, help="Only process jobs below this score")
+@click.option("--status", "statuses", multiple=True, default=("done",), help="Filter job status, repeatable")
+@click.option(
+    "--max-processing",
+    default=6,
+    type=int,
+    show_default=True,
+    help="Do not trigger new improvements when processing jobs already reach this cap",
+)
+@click.option("--dry-run", is_flag=True, default=False, help="Preview which jobs would be processed")
+@click.option("--json-output", "json_output", is_flag=True, default=False, help="Print machine-readable JSON")
+def quality_improve(
+    limit: int,
+    max_score: float,
+    statuses: tuple[str, ...],
+    max_processing: int,
+    dry_run: bool,
+    json_output: bool,
+):
+    """Trigger auto-improvement from the lowest-scoring eligible jobs."""
+    result = asyncio.run(
+        _quality_improve_async(
+            limit=limit,
+            max_score=max_score,
+            statuses=list(statuses),
+            max_processing=max_processing,
+            dry_run=dry_run,
+        )
+    )
+    if json_output:
+        click.echo(json.dumps(result, ensure_ascii=False, indent=2))
+        return
+    for item in result["jobs"]:
+        click.echo(
+            f"{item['action']:<8} {item['score']:>5.1f} {item['grade']} {item['status']:<12} {item['job_id']} {item['source_name']}"
+        )
+        click.echo(f"  issues={', '.join(item['issue_codes']) if item['issue_codes'] else '-'}")
+        click.echo(f"  rerun={', '.join(item['recommended_rerun_steps']) if item['recommended_rerun_steps'] else '-'}")
+    click.echo(
+        " ".join(
+            [
+                f"processed={result['processed_count']}",
+                f"dry_run={str(dry_run).lower()}",
+                f"eligible={result['eligible_count']}",
+                f"total_scanned={result['total_scanned']}",
+                f"processing_now={result['processing_count']}",
+                f"available_slots={result['available_slots']}",
+            ]
+        )
+    )
+
+
+async def _quality_audit_async(*, limit: int, statuses: list[str], persist: bool) -> list[QualityAuditRow]:
+    from roughcut.db.models import Artifact, Job, JobStep, SubtitleCorrection, SubtitleItem
+    from roughcut.db.session import get_session_factory
+    from roughcut.pipeline.orchestrator import _latest_quality_assessment
+    from roughcut.pipeline.quality import QUALITY_ARTIFACT_TYPE, assess_job_quality
+
+    normalized_statuses = {item.strip() for item in statuses if item.strip()}
+    factory = get_session_factory()
+    async with factory() as session:
+        stmt = select(Job).options(selectinload(Job.steps), selectinload(Job.artifacts)).order_by(Job.updated_at.desc(), Job.created_at.desc())
+        jobs = (await session.execute(stmt)).scalars().all()
+        rows: list[QualityAuditRow] = []
+        for job in jobs:
+            if normalized_statuses and job.status not in normalized_statuses:
+                continue
+            subtitle_items = (
+                await session.execute(select(SubtitleItem).where(SubtitleItem.job_id == job.id).order_by(SubtitleItem.item_index.asc()))
+            ).scalars().all()
+            corrections = (
+                await session.execute(select(SubtitleCorrection).where(SubtitleCorrection.job_id == job.id))
+            ).scalars().all()
+            assessment = assess_job_quality(
+                job=job,
+                steps=list(job.steps or []),
+                artifacts=list(job.artifacts or []),
+                subtitle_items=subtitle_items,
+                corrections=corrections,
+                completion_candidate=(job.status == "done"),
+            )
+            if persist:
+                previous = _latest_quality_assessment(list(job.artifacts or []))
+                previous_payload = previous.data_json if previous and isinstance(previous.data_json, dict) else {}
+                payload = {
+                    **assessment,
+                    "auto_rerun_count": int(previous_payload.get("auto_rerun_count") or 0),
+                    "auto_rerun_history": list(previous_payload.get("auto_rerun_history") or []),
+                    "auto_rerun_triggered": False,
+                }
+                session.add(Artifact(job_id=job.id, artifact_type=QUALITY_ARTIFACT_TYPE, data_json=payload))
+            rows.append(
+                QualityAuditRow(
+                    job_id=str(job.id),
+                    source_name=job.source_name,
+                    status=job.status,
+                    score=float(assessment["score"]),
+                    grade=str(assessment["grade"]),
+                    issue_codes=[str(item) for item in assessment.get("issue_codes") or []],
+                    recommended_rerun_steps=[str(item) for item in assessment.get("recommended_rerun_steps") or []],
+                )
+            )
+        if persist:
+            await session.commit()
+    rows.sort(key=lambda item: (item.score, item.status, item.source_name.lower()))
+    return rows[: max(0, limit)]
+
+
+async def _quality_improve_async(
+    *,
+    limit: int,
+    max_score: float,
+    statuses: list[str],
+    max_processing: int,
+    dry_run: bool,
+) -> dict[str, Any]:
+    from roughcut.db.models import Job, JobStep
+    from roughcut.db.session import get_session_factory
+    from roughcut.pipeline.orchestrator import _assess_and_maybe_rerun_job
+
+    audit_rows = await _quality_audit_async(limit=10000, statuses=statuses, persist=False)
+    eligible_rows = [row for row in audit_rows if row.score <= max_score]
+    result_rows: list[dict[str, Any]] = []
+    factory = get_session_factory()
+    async with factory() as session:
+        processing_count = int(
+            (
+                await session.execute(
+                    select(func.count()).select_from(Job).where(Job.status == "processing")
+                )
+            ).scalar_one()
+        )
+        available_slots = max(0, max_processing - processing_count)
+        effective_limit = min(max(0, limit), available_slots)
+        selected_rows = eligible_rows[:effective_limit] if dry_run else eligible_rows
+
+        if dry_run or not selected_rows or effective_limit <= 0:
+            for row in selected_rows:
+                result_rows.append(
+                    {
+                        **asdict(row),
+                        "action": "would_run",
+                    }
+                )
+            return {
+                "processed_count": 0,
+                "eligible_count": len(eligible_rows),
+                "total_scanned": len(audit_rows),
+                "processing_count": processing_count,
+                "available_slots": available_slots,
+                "jobs": result_rows,
+            }
+
+        selected_ids = {uuid.UUID(row.job_id): row for row in eligible_rows}
+        jobs = (
+            await session.execute(
+                select(Job)
+                .options(selectinload(Job.steps), selectinload(Job.artifacts))
+                .where(Job.id.in_(list(selected_ids)))
+            )
+        ).scalars().all()
+        triggered_count = 0
+        for job in jobs:
+            row = selected_ids[job.id]
+            rerun_started = await _assess_and_maybe_rerun_job(session, job, list(job.steps or []))
+            if not rerun_started and triggered_count >= max(0, limit):
+                continue
+            action = "triggered" if rerun_started else "skipped"
+            if rerun_started:
+                triggered_count += 1
+            result_rows.append(
+                {
+                    **asdict(row),
+                    "action": action,
+                }
+            )
+            if triggered_count >= effective_limit:
+                break
+        await session.commit()
+
+    result_rows.sort(key=lambda item: (item["score"], item["source_name"].lower()))
+    return {
+        "processed_count": sum(1 for item in result_rows if item["action"] == "triggered"),
+        "eligible_count": len(eligible_rows),
+        "total_scanned": len(audit_rows),
+        "processing_count": processing_count,
+        "available_slots": available_slots,
+        "jobs": result_rows,
+    }
 
 
 if __name__ == "__main__":

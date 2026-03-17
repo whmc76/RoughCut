@@ -8,6 +8,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+_SUBTITLE_FONT_SCALE = 1.9
+
 SUBTITLE_STYLE_PRESETS: dict[str, dict[str, object]] = {
     "bold_yellow_outline": {
         "font_name": "Microsoft YaHei",
@@ -437,7 +439,8 @@ def write_ass_file(
     """
     style = dict(SUBTITLE_STYLE_PRESETS.get(style_name, SUBTITLE_STYLE_PRESETS["bold_yellow_outline"]))
     font_name = str(style.get("font_name") or font_name)
-    font_size = int(style.get("font_size") or font_size)
+    base_font_size = int(style.get("font_size") or font_size)
+    font_size = max(int(font_size), int(round(base_font_size * _SUBTITLE_FONT_SCALE)))
     font_size = _resolve_subtitle_font_size(
         play_res_x=play_res_x,
         play_res_y=play_res_y,
@@ -509,6 +512,7 @@ def write_ass_file(
                 play_res_x=play_res_x,
                 font_size=font_size,
             ),
+            max_lines=2,
         )
         text = text.replace("{", r"\{").replace("\n", r"\N")
         lines.append(f"Dialogue: 0,{start},{end},Default,,0,0,0,,{_build_motion_tag(text, motion_style)}")
@@ -573,20 +577,20 @@ def _build_motion_tag(text: str, motion_style: str) -> str:
 def _estimate_subtitle_line_capacity(*, play_res_x: int, font_size: int) -> int:
     safe_margin = _resolve_subtitle_horizontal_margin(play_res_x=play_res_x)
     usable_width = max(220, int(play_res_x) - (safe_margin * 2))
-    estimated_char_width = max(24.0, float(font_size) * 0.92)
-    return max(8, min(18, int(usable_width / estimated_char_width)))
+    estimated_char_width = max(28.0, float(font_size) * 1.08)
+    return max(6, min(14, int(usable_width / estimated_char_width)))
 
 
 def _resolve_subtitle_font_size(*, play_res_x: int, play_res_y: int, font_size: int) -> int:
     portrait = int(play_res_y) > int(play_res_x)
     if portrait:
-        width_limit = int(play_res_x * 0.09)
-        height_limit = int(play_res_y * 0.065)
-        min_size = max(54, int(min(play_res_x, play_res_y) * 0.074))
+        width_limit = int(play_res_x * 0.14)
+        height_limit = int(play_res_y * 0.105)
+        min_size = max(88, int(min(play_res_x, play_res_y) * 0.1))
     else:
-        width_limit = int(play_res_x * 0.07)
-        height_limit = int(play_res_y * 0.054)
-        min_size = 40
+        width_limit = int(play_res_x * 0.12)
+        height_limit = int(play_res_y * 0.105)
+        min_size = 92
     return max(min_size, min(int(font_size), width_limit, height_limit))
 
 
@@ -594,7 +598,7 @@ def _resolve_subtitle_horizontal_margin(*, play_res_x: int) -> int:
     return max(28, int(play_res_x * 0.06))
 
 
-def _wrap_subtitle_text(text: str, *, max_chars_per_line: int, max_lines: int = 4) -> str:
+def _wrap_subtitle_text(text: str, *, max_chars_per_line: int, max_lines: int = 2) -> str:
     raw = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
     if "\n" in raw:
         return "\n".join(
@@ -615,7 +619,13 @@ def _wrap_subtitle_text(text: str, *, max_chars_per_line: int, max_lines: int = 
         remaining = remaining[split_at:].strip()
 
     if remaining:
-        segments.append(remaining)
+        if len(segments) >= max_lines - 1 and len(remaining) > max_chars_per_line:
+            truncated = remaining[:max_chars_per_line].rstrip()
+            if len(remaining) > max_chars_per_line and max_chars_per_line >= 2:
+                truncated = truncated[:-1].rstrip() + "…"
+            segments.append(truncated)
+        else:
+            segments.append(remaining)
     return "\n".join(part for part in segments if part)
 
 

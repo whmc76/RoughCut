@@ -1,6 +1,6 @@
 """job creative modes
 
-Revision ID: 0005
+Revision ID: 0005_job_creative_modes
 Revises: 0004
 Create Date: 2026-03-12
 
@@ -11,7 +11,7 @@ from alembic import op
 import sqlalchemy as sa
 
 
-revision: str = "0005"
+revision: str = "0005_job_creative_modes"
 down_revision = "0004"
 branch_labels = None
 depends_on = None

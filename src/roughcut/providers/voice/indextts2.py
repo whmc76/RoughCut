@@ -35,8 +35,11 @@ class IndexTTS2VoiceProvider(VoiceProvider):
                     "segment_id": segment.get("segment_id"),
                     "text": segment.get("rewritten_text") or segment.get("script") or segment.get("source_text"),
                     "target_duration_sec": segment.get("target_duration_sec"),
+                    "use_speed": _resolve_use_speed(segment),
+                    "target_dur": _resolve_target_dur(segment),
                     "emotion_text": _infer_emotion_text(segment),
                     "emotion_strength": _infer_emotion_strength(segment),
+                    "emo_text_weight": _resolve_emo_text_weight(segment),
                     "purpose": segment.get("purpose"),
                 }
                 for segment in segments
@@ -136,22 +139,15 @@ class IndexTTS2VoiceProvider(VoiceProvider):
                 "error": "empty_text",
             }
 
-        payload = {
-            "input": text,
-            "voice": "default",
-            "model": "indextts2",
-            "response_format": "wav",
-            "provider_options": {
-                "output_mode": "base64",
-                "speaker_audio_base64": reference_audio_b64,
-                "emo_text": str(segment.get("emotion_text") or "").strip(),
-                "use_emo_text": True,
-                "auto_mix_emotion": True,
-                "emotion_strength": float(segment.get("emotion_strength") or 0.32),
-                "max_text_tokens_per_segment": 120,
-                "interval_silence": 120,
-            },
-        }
+        payload = build_indextts2_speech_payload(
+            text=text,
+            speaker_audio_base64=reference_audio_b64,
+            emotion_text=str(segment.get("emotion_text") or "").strip(),
+            emotion_strength=float(segment.get("emotion_strength") or 0.32),
+            emo_text_weight=_resolve_emo_text_weight(segment),
+            use_speed=_resolve_use_speed(segment),
+            target_dur=_resolve_target_dur(segment),
+        )
 
         response = client.post(str(request.get("speech_endpoint") or ""), json=payload)
         response.raise_for_status()
@@ -172,7 +168,47 @@ class IndexTTS2VoiceProvider(VoiceProvider):
             "format": str(body.get("format") or "wav"),
             "emotion_text": segment.get("emotion_text"),
             "emotion_strength": segment.get("emotion_strength"),
+            "emo_text_weight": segment.get("emo_text_weight"),
+            "use_speed": segment.get("use_speed"),
+            "target_dur": segment.get("target_dur"),
         }
+
+
+def build_indextts2_speech_payload(
+    *,
+    text: str,
+    speaker_audio_base64: str,
+    emotion_text: str,
+    emotion_strength: float,
+    emo_text_weight: float = 1.0,
+    use_speed: bool = False,
+    target_dur: float | None = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "input": text,
+        "text": text,
+        "voice": "default",
+        "model": "indextts2",
+        "response_format": "wav",
+        "use_speed": bool(use_speed),
+        "provider_options": {
+            "output_mode": "base64",
+            "speaker_audio_base64": speaker_audio_base64,
+            "emo_text": emotion_text,
+            "use_emo_text": True,
+            "auto_mix_emotion": True,
+            "emotion_strength": float(emotion_strength),
+            "emo_text_weight": float(emo_text_weight),
+            "use_speed": bool(use_speed),
+            "max_text_tokens_per_segment": 120,
+            "interval_silence": 120,
+        },
+    }
+    normalized_target_dur = _normalize_positive_float(target_dur)
+    if normalized_target_dur is not None:
+        payload["target_dur"] = normalized_target_dur
+        payload["provider_options"]["target_dur"] = normalized_target_dur
+    return payload
 
 
 def _build_output_name(*, segment_id: str) -> str:
@@ -203,3 +239,27 @@ def _infer_emotion_strength(segment: dict[str, Any]) -> float:
     if purpose in {"bridge", "explain", "science_boost"}:
         return 0.24
     return 0.3
+
+
+def _resolve_use_speed(segment: dict[str, Any]) -> bool:
+    if "use_speed" in segment:
+        return bool(segment.get("use_speed"))
+    return _normalize_positive_float(segment.get("target_dur") or segment.get("target_duration_sec")) is not None
+
+
+def _resolve_target_dur(segment: dict[str, Any]) -> float | None:
+    return _normalize_positive_float(segment.get("target_dur") or segment.get("target_duration_sec"))
+
+
+def _resolve_emo_text_weight(segment: dict[str, Any]) -> float:
+    return float(_normalize_positive_float(segment.get("emo_text_weight")) or 1.0)
+
+
+def _normalize_positive_float(value: Any) -> float | None:
+    try:
+        normalized = float(value)
+    except (TypeError, ValueError):
+        return None
+    if normalized <= 0:
+        return None
+    return normalized

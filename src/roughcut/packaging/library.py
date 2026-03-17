@@ -17,7 +17,7 @@ import numpy as np
 from roughcut.config import get_settings
 
 
-PACKAGING_ROOT = Path(".artifacts/packaging")
+PACKAGING_ROOT = Path("output/test/packaging")
 MANIFEST_PATH = PACKAGING_ROOT / "manifest.json"
 
 ASSET_EXTENSIONS: dict[str, set[str]] = {
@@ -45,12 +45,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "copy_style": "attention_grabbing",
     "subtitle_motion_style": "motion_static",
     "smart_effect_style": "smart_effect_rhythm",
-    "music_volume": 0.22,
-    "watermark_position": "top_right",
+    "music_volume": 0.12,
+    "watermark_position": "top_left",
     "watermark_opacity": 0.82,
     "watermark_scale": 0.16,
-    "avatar_overlay_position": "top_left",
-    "avatar_overlay_scale": 0.22,
+    "avatar_overlay_position": "top_right",
+    "avatar_overlay_scale": 0.18,
     "avatar_overlay_corner_radius": 26,
     "avatar_overlay_border_width": 4,
     "avatar_overlay_border_color": "#F4E4B8",
@@ -722,7 +722,10 @@ def _normalize_config(config: dict[str, Any], assets_by_id: dict[str, dict[str, 
     normalized["music_volume"] = float(normalized.get("music_volume") or DEFAULT_CONFIG["music_volume"])
     normalized["watermark_opacity"] = float(normalized.get("watermark_opacity") or DEFAULT_CONFIG["watermark_opacity"])
     normalized["watermark_scale"] = float(normalized.get("watermark_scale") or DEFAULT_CONFIG["watermark_scale"])
-    normalized["watermark_position"] = str(normalized.get("watermark_position") or "top_right").strip() or "top_right"
+    normalized["watermark_position"] = (
+        str(normalized.get("watermark_position") or DEFAULT_CONFIG["watermark_position"]).strip()
+        or DEFAULT_CONFIG["watermark_position"]
+    )
     normalized["enabled"] = bool(normalized.get("enabled"))
     return normalized
 

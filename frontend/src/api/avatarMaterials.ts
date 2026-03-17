@@ -1,4 +1,4 @@
-import type { AvatarMaterialLibrary } from "../types";
+import type { AvatarCreatorProfile, AvatarMaterialLibrary } from "../types";
 import { apiPath, request, requestForm } from "./core";
 
 export const avatarMaterialsApi = {
@@ -7,6 +7,7 @@ export const avatarMaterialsApi = {
     displayName: string,
     presenterAlias: string,
     notes: string,
+    creatorProfile: AvatarCreatorProfile,
     speakingVideos: File[],
     portraitPhotos: File[],
     voiceSamples: File[],
@@ -15,6 +16,7 @@ export const avatarMaterialsApi = {
     formData.append("display_name", displayName);
     if (presenterAlias.trim()) formData.append("presenter_alias", presenterAlias.trim());
     if (notes.trim()) formData.append("notes", notes.trim());
+    formData.append("creator_profile_json", JSON.stringify(creatorProfile));
     speakingVideos.forEach((file) => formData.append("speaking_videos", file));
     portraitPhotos.forEach((file) => formData.append("portrait_photos", file));
     voiceSamples.forEach((file) => formData.append("voice_samples", file));
@@ -35,13 +37,20 @@ export const avatarMaterialsApi = {
       method: "PUT",
     });
   },
-  updateAvatarMaterialProfile: (profileId: string, displayName: string, presenterAlias: string, notes: string) =>
+  updateAvatarMaterialProfile: (
+    profileId: string,
+    displayName: string,
+    presenterAlias: string,
+    notes: string,
+    creatorProfile: AvatarCreatorProfile,
+  ) =>
     request<AvatarMaterialLibrary>(`/avatar-materials/profiles/${profileId}`, {
       method: "PATCH",
       body: JSON.stringify({
         display_name: displayName,
         presenter_alias: presenterAlias,
         notes,
+        creator_profile: creatorProfile,
       }),
     }),
   avatarMaterialFileUrl: (profileId: string, fileId: string) =>

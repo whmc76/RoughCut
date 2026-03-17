@@ -206,6 +206,21 @@ _GENERIC_SUBJECT_PREFIXES = {
     "全新",
 }
 
+_NON_BRAND_CONTEXT_PREFIXES = {
+    "因为",
+    "所以",
+    "然后",
+    "其实",
+    "最近",
+    "如果",
+    "但是",
+    "还有",
+    "之前",
+    "现在",
+    "就是",
+    "已经",
+}
+
 _ARABIC_TO_CHINESE_DIGITS = str.maketrans("0123456789", "零一二三四五六七八九")
 _CHINESE_TO_ARABIC_DIGITS = {
     "零": "0",
@@ -255,6 +270,10 @@ def build_subtitle_review_memory(
     effective_glossary_terms = merge_glossary_terms(
         glossary_terms or [],
         builtin_glossary_terms,
+    )
+    effective_glossary_terms = _suppress_conflicting_brand_terms(
+        effective_glossary_terms,
+        confirmed_entities=confirmed_entities,
     )
     context_text = " ".join(
         str(item or "")
@@ -393,7 +412,7 @@ def build_subtitle_review_memory(
         for item in ranked_terms
         if item.get("term")
     }
-    for term in glossary_terms or []:
+    for term in effective_glossary_terms:
         correct_form = _normalize_term(term.get("correct_form"))
         if not correct_form or correct_form in ranked_term_values:
             continue
@@ -854,6 +873,85 @@ def _build_confirmed_feedback_entities(content_profile: dict[str, Any] | None) -
     ]
 
 
+def _suppress_conflicting_brand_terms(
+    glossary_terms: list[dict[str, Any]] | None,
+    *,
+    confirmed_entities: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    if not glossary_terms:
+        return []
+
+    protected_values, protected_tokens = _collect_confirmed_subject_conflict_keys(confirmed_entities or [])
+    if not protected_values and not protected_tokens:
+        return list(glossary_terms)
+
+    filtered: list[dict[str, Any]] = []
+    for term in glossary_terms:
+        category = str(term.get("category") or "").strip()
+        if not _is_brand_like_category(category):
+            filtered.append(term)
+            continue
+
+        correct_form = _compact_subject_text(term.get("correct_form"))
+        if _normalize_conflict_key(correct_form) in protected_values:
+            filtered.append(term)
+            continue
+
+        wrong_forms = term.get("wrong_forms") or []
+        if any(
+            _conflicts_with_confirmed_subject(wrong_form, protected_values, protected_tokens)
+            for wrong_form in wrong_forms
+        ):
+            continue
+        filtered.append(term)
+    return filtered
+
+
+def _collect_confirmed_subject_conflict_keys(
+    confirmed_entities: list[dict[str, Any]],
+) -> tuple[set[str], set[str]]:
+    protected_values: set[str] = set()
+    protected_tokens: set[str] = set()
+    for entity in confirmed_entities:
+        candidates: list[Any] = [
+            entity.get("brand"),
+            entity.get("model"),
+            *(entity.get("phrases") or []),
+        ]
+        for item in entity.get("model_aliases") or []:
+            candidates.append(item.get("correct"))
+            candidates.append(item.get("wrong"))
+        for candidate in candidates:
+            compact = _compact_subject_text(candidate)
+            normalized = _normalize_conflict_key(compact)
+            if not normalized:
+                continue
+            protected_values.add(normalized)
+            for token in re.findall(r"[A-Za-z]{2,12}\d{0,4}|[\u4e00-\u9fff]{2,8}", compact, flags=re.IGNORECASE):
+                normalized_token = _normalize_conflict_key(token)
+                if normalized_token:
+                    protected_tokens.add(normalized_token)
+    return protected_values, protected_tokens
+
+
+def _normalize_conflict_key(value: Any) -> str:
+    compact = _compact_subject_text(value)
+    return compact.casefold() if compact else ""
+
+
+def _conflicts_with_confirmed_subject(
+    value: Any,
+    protected_values: set[str],
+    protected_tokens: set[str],
+) -> bool:
+    normalized = _normalize_conflict_key(value)
+    if not normalized:
+        return False
+    if normalized in protected_values or normalized in protected_tokens:
+        return True
+    return any(token and token in protected_tokens for token in re.findall(r"[a-z]{2,12}\d{0,4}|[\u4e00-\u9fff]{2,8}", normalized))
+
+
 def _compact_subject_text(value: Any) -> str:
     text = " ".join(str(value or "").strip().split())
     if not text:
@@ -869,6 +967,7 @@ def _build_confirmed_model_aliases(model: str) -> list[dict[str, str]]:
     for candidate in (
         compact,
         _extract_model_core(compact),
+        _extract_model_base_anchor(compact),
         _extract_model_generation_anchor(compact),
         _extract_model_suffix(compact),
         _extract_model_variant_suffix(compact),
@@ -895,6 +994,11 @@ def _extract_model_core(model: str) -> str:
 
 def _extract_model_generation_anchor(model: str) -> str:
     match = re.search(r"[A-Za-z]{1,6}\d{1,4}(?:[零〇一二三四五六七八九十\d]+代)", model, re.IGNORECASE)
+    return match.group(0) if match else ""
+
+
+def _extract_model_base_anchor(model: str) -> str:
+    match = re.search(r"[A-Za-z]{1,6}\d{1,4}", model, re.IGNORECASE)
     return match.group(0) if match else ""
 
 
@@ -954,8 +1058,20 @@ def _apply_confirmed_entity_corrections(
             ):
                 continue
             result = _replace_confirmed_subject_anchor(result, wrong=wrong, correct=correct, brand=brand)
-        for anchor in _build_confirmed_model_anchor_forms(model):
+        anchor_forms = _build_confirmed_model_anchor_forms(model)
+        for anchor in anchor_forms:
             result = _replace_confirmed_subject_anchor(result, wrong=anchor, correct=anchor, brand=brand)
+        fuzzy_anchor_forms = [
+            anchor for anchor in anchor_forms
+            if re.fullmatch(r"[A-Za-z]{1,6}\d{1,4}", anchor, re.IGNORECASE)
+        ]
+        result = _replace_fuzzy_confirmed_model_anchors(
+            result,
+            anchor_forms=fuzzy_anchor_forms,
+            prev_text=prev_text,
+            next_text=next_text,
+            entity=entity,
+        )
     return result
 
 
@@ -969,7 +1085,11 @@ def _replace_confirmed_subject_anchor(text: str, *, wrong: str, correct: str, br
     prefix_match = re.search(r"([A-Za-z\u4e00-\u9fff]{1,4})$", text[:start])
     raw_prefix = prefix_match.group(1) if prefix_match else ""
     prefix = _trim_brand_candidate_prefix(raw_prefix)
-    if prefix and _alias_supports_brand_prefix(wrong, correct) and not _is_generic_subject_prefix(prefix):
+    if (
+        prefix
+        and _alias_supports_brand_prefix(wrong, correct)
+        and _looks_like_brand_candidate_prefix(prefix)
+    ):
         if brand and text[:start].endswith(brand):
             return text
         replace_start = start - len(prefix)
@@ -986,6 +1106,7 @@ def _build_confirmed_model_anchor_forms(model: str) -> list[str]:
     for candidate in (
         compact,
         _extract_model_core(compact),
+        _extract_model_base_anchor(compact),
         _extract_model_generation_anchor(compact),
     ):
         value = _compact_subject_text(candidate)
@@ -997,6 +1118,17 @@ def _build_confirmed_model_anchor_forms(model: str) -> list[str]:
 def _is_generic_subject_prefix(value: str) -> bool:
     token = str(value or "").strip()
     return token in _GENERIC_SUBJECT_PREFIXES
+
+
+def _looks_like_brand_candidate_prefix(value: str) -> bool:
+    token = str(value or "").strip()
+    if not token:
+        return False
+    if _is_generic_subject_prefix(token) or token in _NON_BRAND_CONTEXT_PREFIXES:
+        return False
+    if re.search(r"[A-Za-z0-9]", token):
+        return True
+    return len(token) <= 2
 
 
 def _trim_brand_candidate_prefix(value: str) -> str:
@@ -1046,6 +1178,94 @@ def _confirmed_alias_has_context_support(
     neighbor_context = " ".join(item for item in [str(prev_text or ""), str(next_text or "")] if item)
     entity_tokens = _extract_context_support_tokens(entity)
     return any(token and token in neighbor_context for token in entity_tokens)
+
+
+def _replace_fuzzy_confirmed_model_anchors(
+    text: str,
+    *,
+    anchor_forms: list[str],
+    prev_text: str,
+    next_text: str,
+    entity: dict[str, Any],
+) -> str:
+    result = str(text or "")
+    if not result:
+        return result
+
+    for canonical in anchor_forms:
+        if not _anchor_supports_fuzzy_match(canonical):
+            continue
+        candidate_spans = _find_fuzzy_model_like_candidates(result)
+        for candidate in candidate_spans:
+            wrong = candidate.group(0)
+            if wrong == canonical:
+                continue
+            if not _fuzzy_model_anchor_has_context_support(
+                wrong=wrong,
+                canonical=canonical,
+                current_text=result,
+                prev_text=prev_text,
+                next_text=next_text,
+                entity=entity,
+            ):
+                continue
+            similarity = _confirmed_model_anchor_similarity(wrong, canonical)
+            threshold = 0.7 if wrong[:1].upper() == canonical[:1].upper() else 0.55
+            if similarity < threshold:
+                continue
+            start, end = candidate.span()
+            result = f"{result[:start]}{canonical}{result[end:]}"
+            break
+    return result
+
+
+def _anchor_supports_fuzzy_match(value: str) -> bool:
+    compact = _compact_subject_text(value)
+    return bool(
+        compact
+        and re.search(r"[A-Za-z]", compact)
+        and re.search(r"[\d零〇一二三四五六七八九十]", compact)
+    )
+
+
+def _find_fuzzy_model_like_candidates(text: str) -> list[re.Match[str]]:
+    return list(
+        re.finditer(
+            r"(?<![A-Za-z0-9])([A-Za-z][A-Za-z0-9零〇一二三四五六七八九十]{2,8})(?![A-Za-z0-9])",
+            str(text or ""),
+        )
+    )
+
+
+def _confirmed_model_anchor_similarity(wrong: str, canonical: str) -> float:
+    canonical_variants = {
+        _compact_subject_text(canonical),
+        _compact_subject_text(canonical.translate(_ARABIC_TO_CHINESE_DIGITS)),
+    }
+    return max(
+        SequenceMatcher(None, _compact_subject_text(wrong), variant).ratio()
+        for variant in canonical_variants
+        if variant
+    )
+
+
+def _fuzzy_model_anchor_has_context_support(
+    *,
+    wrong: str,
+    canonical: str,
+    current_text: str,
+    prev_text: str,
+    next_text: str,
+    entity: dict[str, Any],
+) -> bool:
+    if not wrong or not canonical:
+        return False
+    context = " ".join(item for item in [str(current_text or ""), str(prev_text or ""), str(next_text or "")] if item)
+    model_context_tokens = {"代", "版本", "版", "灯", "灯珠", "序列号", "跑马灯", "光杯"}
+    if any(token in str(current_text or "") for token in model_context_tokens):
+        return True
+    entity_tokens = _extract_context_support_tokens(entity)
+    return any(token and token in context for token in entity_tokens)
 
 
 def _extract_context_support_tokens(entity: dict[str, Any]) -> list[str]:

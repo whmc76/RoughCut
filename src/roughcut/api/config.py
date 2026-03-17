@@ -18,6 +18,7 @@ from roughcut.api.options import (
     build_transcription_dialect_options,
     build_voice_provider_options,
     build_workflow_mode_options,
+    normalize_job_language,
 )
 from roughcut.config import (
     AVATAR_PROVIDER_OPTIONS,
@@ -89,6 +90,11 @@ class ConfigOut(BaseModel):
     ffmpeg_timeout_sec: int
     allowed_extensions: list[str]
     output_dir: str
+    preferred_ui_language: str
+    telegram_remote_review_enabled: bool
+    telegram_bot_api_base_url: str
+    telegram_bot_token_set: bool
+    telegram_bot_chat_id: str
     default_job_workflow_mode: str
     default_job_enhancement_modes: list[str]
     # Feature flags
@@ -102,6 +108,9 @@ class ConfigOut(BaseModel):
     packaging_selection_review_gap: float
     packaging_selection_min_score: float
     subtitle_filler_cleanup_enabled: bool
+    quality_auto_rerun_enabled: bool
+    quality_auto_rerun_below_score: float
+    quality_auto_rerun_max_attempts: int
     # Overrides currently stored
     overrides: dict
 
@@ -168,6 +177,11 @@ class ConfigPatch(BaseModel):
     ffmpeg_timeout_sec: int | None = None
     allowed_extensions: list[str] | None = None
     output_dir: str | None = None
+    preferred_ui_language: str | None = None
+    telegram_remote_review_enabled: bool | None = None
+    telegram_bot_api_base_url: str | None = None
+    telegram_bot_token: str | None = None
+    telegram_bot_chat_id: str | None = None
     default_job_workflow_mode: str | None = None
     default_job_enhancement_modes: list[str] | None = None
     fact_check_enabled: bool | None = None
@@ -180,6 +194,9 @@ class ConfigPatch(BaseModel):
     packaging_selection_review_gap: float | None = None
     packaging_selection_min_score: float | None = None
     subtitle_filler_cleanup_enabled: bool | None = None
+    quality_auto_rerun_enabled: bool | None = None
+    quality_auto_rerun_below_score: float | None = None
+    quality_auto_rerun_max_attempts: int | None = None
 
 
 @router.get("", response_model=ConfigOut)
@@ -233,6 +250,11 @@ def get_config():
         ffmpeg_timeout_sec=s.ffmpeg_timeout_sec,
         allowed_extensions=s.allowed_extensions,
         output_dir=s.output_dir,
+        preferred_ui_language=s.preferred_ui_language,
+        telegram_remote_review_enabled=s.telegram_remote_review_enabled,
+        telegram_bot_api_base_url=s.telegram_bot_api_base_url,
+        telegram_bot_token_set=bool(s.telegram_bot_token),
+        telegram_bot_chat_id=s.telegram_bot_chat_id,
         default_job_workflow_mode=s.default_job_workflow_mode,
         default_job_enhancement_modes=s.default_job_enhancement_modes,
         fact_check_enabled=s.fact_check_enabled,
@@ -245,6 +267,9 @@ def get_config():
         packaging_selection_review_gap=s.packaging_selection_review_gap,
         packaging_selection_min_score=s.packaging_selection_min_score,
         subtitle_filler_cleanup_enabled=s.subtitle_filler_cleanup_enabled,
+        quality_auto_rerun_enabled=s.quality_auto_rerun_enabled,
+        quality_auto_rerun_below_score=s.quality_auto_rerun_below_score,
+        quality_auto_rerun_max_attempts=s.quality_auto_rerun_max_attempts,
         overrides=overrides,
     )
 
@@ -314,6 +339,18 @@ def patch_config(body: ConfigPatch):
             raise HTTPException(status_code=400, detail="output_dir cannot be empty")
         Path(output_dir).mkdir(parents=True, exist_ok=True)
         updates["output_dir"] = output_dir
+    if "preferred_ui_language" in updates:
+        try:
+            updates["preferred_ui_language"] = normalize_job_language(str(updates["preferred_ui_language"] or ""))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if "telegram_bot_api_base_url" in updates:
+        api_base_url = str(updates["telegram_bot_api_base_url"]).strip().rstrip("/")
+        if not api_base_url:
+            raise HTTPException(status_code=400, detail="telegram_bot_api_base_url cannot be empty")
+        updates["telegram_bot_api_base_url"] = api_base_url
+    if "telegram_bot_chat_id" in updates:
+        updates["telegram_bot_chat_id"] = str(updates["telegram_bot_chat_id"] or "").strip()
     if "default_job_workflow_mode" in updates:
         try:
             updates["default_job_workflow_mode"] = normalize_workflow_mode(str(updates["default_job_workflow_mode"] or ""))
@@ -357,6 +394,13 @@ def patch_config(body: ConfigPatch):
             0.0,
             min(1.0, float(updates["packaging_selection_min_score"])),
         )
+    if "quality_auto_rerun_below_score" in updates:
+        updates["quality_auto_rerun_below_score"] = max(
+            0.0,
+            min(100.0, float(updates["quality_auto_rerun_below_score"])),
+        )
+    if "quality_auto_rerun_max_attempts" in updates:
+        updates["quality_auto_rerun_max_attempts"] = max(0, min(5, int(updates["quality_auto_rerun_max_attempts"])))
     current_provider = updates.get(
         "transcription_provider",
         overrides.get("transcription_provider", DEFAULT_TRANSCRIPTION_PROVIDER),

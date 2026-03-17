@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -108,7 +109,7 @@ async def test_avatar_materials_endpoint_exposes_requirements(client: AsyncClien
     data = response.json()
     assert data["provider"] == "heygem"
     assert data["training_api_available"] is False
-    assert any(section["title"] == "上传类型与用途" for section in data["sections"])
+    assert any(section["title"] == "档案组成" for section in data["sections"])
     assert any(section["title"] == "必须满足" for section in data["sections"])
     assert data["profiles"] == []
 
@@ -164,7 +165,26 @@ async def test_avatar_materials_upload_creates_profile(client: AsyncClient, tmp_
 
     response = await client.post(
         "/api/v1/avatar-materials/profiles",
-        data={"display_name": "测试数字人"},
+        data={
+            "display_name": "测试数字人",
+            "creator_profile_json": json.dumps(
+                {
+                    "identity": {
+                        "public_name": "测试作者",
+                        "title": "EDC评测作者",
+                    },
+                    "positioning": {
+                        "creator_focus": "手电开箱、EDC装备",
+                        "expertise": ["手电", "EDC"],
+                    },
+                    "publishing": {
+                        "primary_platform": "B站",
+                        "active_platforms": ["B站", "小红书"],
+                    },
+                },
+                ensure_ascii=False,
+            ),
+        },
         files=[
             ("speaking_videos", ("presenter.mp4", b"fake-video", "video/mp4")),
             ("portrait_photos", ("portrait.jpg", b"fake-image", "image/jpeg")),
@@ -183,6 +203,14 @@ async def test_avatar_materials_upload_creates_profile(client: AsyncClient, tmp_
     assert profile["capability_status"]["portrait_reference"] == "ready"
     assert profile["capability_status"]["preview"] == "ready"
     assert profile["training_api_available"] is True
+    assert profile["personal_info"]["public_name"] == "测试作者"
+    assert profile["personal_info"]["title"] == "EDC评测作者"
+    assert profile["personal_info"]["creator_focus"] == "手电开箱、EDC装备"
+    assert profile["personal_info"]["expertise"] == ["手电", "EDC"]
+    assert profile["creator_profile"]["identity"]["public_name"] == "测试作者"
+    assert profile["creator_profile"]["publishing"]["primary_platform"] == "B站"
+    assert profile["profile_dashboard"]["section_status"]["identity"] is True
+    assert profile["profile_dashboard"]["section_status"]["publishing"] is True
     assert any(item["role"] == "speaking_video" for item in profile["files"])
     assert any(item["role"] == "portrait_photo" for item in profile["files"])
     assert any(item["role"] == "voice_sample" for item in profile["files"])
@@ -955,6 +983,15 @@ async def test_job_list_includes_content_preview(client: AsyncClient):
                         },
                     },
                 ),
+                Artifact(
+                    job_id=job_id,
+                    artifact_type="quality_assessment",
+                    data_json={
+                        "score": 82.5,
+                        "grade": "B",
+                        "issue_codes": ["detail_blind", "generic_video_theme"],
+                    },
+                ),
             ]
         )
         await session.commit()
@@ -964,6 +1001,10 @@ async def test_job_list_includes_content_preview(client: AsyncClient):
     item = next(job for job in response.json() if job["id"] == str(job_id))
     assert item["content_subject"] == "LEATHERMAN ARC · 多功能工具钳 · 开箱与上手体验"
     assert item["content_summary"] == "围绕 ARC 的刀具配置和实际上手手感展开。"
+    assert item["quality_score"] == 82.5
+    assert item["quality_grade"] == "B"
+    assert item["quality_summary"] == "B 82.5 · 2 个扣分项"
+    assert item["quality_issue_codes"] == ["detail_blind", "generic_video_theme"]
     assert item["avatar_delivery_status"] == "done"
     assert item["avatar_delivery_summary"] == "数字人口播已作为画中画写入成片。"
 
@@ -1320,6 +1361,47 @@ async def test_job_activity_reports_avatar_final_delivery_result(client: AsyncCl
 
 
 @pytest.mark.asyncio
+async def test_job_activity_reports_quality_assessment_decision(client: AsyncClient):
+    from roughcut.db.models import Artifact, Job
+    from roughcut.db.session import get_session_factory
+
+    job_id = uuid.uuid4()
+
+    async with get_session_factory()() as session:
+        session.add(
+            Job(
+                id=job_id,
+                source_path="jobs/demo/quality.mp4",
+                source_name="quality.mp4",
+                status="done",
+                language="zh-CN",
+            )
+        )
+        session.add(
+            Artifact(
+                job_id=job_id,
+                artifact_type="quality_assessment",
+                data_json={
+                    "score": 64.0,
+                    "grade": "C",
+                    "issue_codes": ["detail_blind", "subtitle_sync_issue"],
+                    "recommended_rerun_steps": ["content_profile", "render", "platform_package"],
+                },
+            )
+        )
+        await session.commit()
+
+    response = await client.get(f"/api/v1/jobs/{job_id}/activity")
+    assert response.status_code == 200
+    data = response.json()
+    quality_decision = next(item for item in data["decisions"] if item["kind"] == "quality_assessment")
+    assert quality_decision["summary"] == "C 64.0 · 2 个扣分项"
+    assert "detail_blind" in quality_decision["detail"]
+    assert "content_profile" in quality_decision["detail"]
+    assert any(event["title"] == "质量评分已更新" for event in data["events"])
+
+
+@pytest.mark.asyncio
 async def test_content_profile_endpoint_returns_memory_cloud(client: AsyncClient):
     from roughcut.db.models import Artifact, Job, JobStep
     from roughcut.db.session import get_session_factory
@@ -1346,6 +1428,7 @@ async def test_content_profile_endpoint_returns_memory_cloud(client: AsyncClient
                 step_name="summary_review",
                 status="running",
                 started_at=now,
+                metadata_={"detail": "首次品牌/型号证据不足，需人工确认后再继续。"},
             )
         )
         session.add(
@@ -1359,6 +1442,28 @@ async def test_content_profile_endpoint_returns_memory_cloud(client: AsyncClient
                     "video_theme": "开箱与上手体验",
                     "summary": "围绕 LEATHERMAN ARC 展开。",
                     "search_queries": ["LEATHERMAN ARC", "LEATHERMAN ARC 开箱"],
+                    "identity_review": {
+                        "required": True,
+                        "first_seen_brand": True,
+                        "first_seen_model": True,
+                        "conservative_summary": True,
+                        "support_sources": ["transcript", "source_name"],
+                        "evidence_strength": "weak",
+                        "reason": "开箱类视频命中首次品牌/型号且缺少交叉印证，需人工确认",
+                        "evidence_bundle": {
+                            "candidate_brand": "LEATHERMAN",
+                            "candidate_model": "ARC",
+                            "matched_subtitle_snippets": ["[0.0-1.0] LEATHERMAN ARC 开箱"],
+                            "matched_glossary_aliases": {"brand": ["莱泽曼"], "model": []},
+                            "matched_source_name_terms": ["ARC"],
+                            "matched_visible_text_terms": [],
+                            "matched_evidence_terms": [],
+                        },
+                    },
+                    "automation_review": {
+                        "review_reasons": ["首次品牌/型号证据不足，已退化为保守摘要"],
+                        "blocking_reasons": ["开箱类视频命中首次品牌/型号且缺少交叉印证，需人工确认"],
+                    },
                 },
             )
         )
@@ -1381,8 +1486,100 @@ async def test_content_profile_endpoint_returns_memory_cloud(client: AsyncClient
     data = response.json()
     assert data["draft"]["subject_brand"] == "LEATHERMAN"
     assert data["review_step_status"] == "running"
+    assert data["review_step_detail"] == "首次品牌/型号证据不足，需人工确认后再继续。"
+    assert data["review_reasons"] == ["首次品牌/型号证据不足，已退化为保守摘要"]
+    assert data["blocking_reasons"] == ["开箱类视频命中首次品牌/型号且缺少交叉印证，需人工确认"]
+    assert data["identity_review"]["evidence_bundle"]["matched_glossary_aliases"]["brand"] == ["莱泽曼"]
     assert data["workflow_mode"] == "standard_edit"
     assert data["enhancement_modes"] == ["avatar_commentary"]
     assert data["memory"]["field_preferences"]["subject_brand"][0]["value"] == "LEATHERMAN"
     assert data["memory"]["cloud"]["words"]
     assert any(word["label"] == "LEATHERMAN ARC" for word in data["memory"]["cloud"]["words"])
+
+
+@pytest.mark.asyncio
+async def test_confirm_content_profile_persists_identity_alias_memory_on_simple_approval(client: AsyncClient):
+    from roughcut.db.models import Artifact, Job, JobStep
+    from roughcut.db.session import get_session_factory
+
+    job_id = uuid.uuid4()
+    now = datetime.now(timezone.utc)
+
+    async with get_session_factory()() as session:
+        session.add(
+            Job(
+                id=job_id,
+                source_path="jobs/demo/fxx1.mp4",
+                source_name="20260316_鸿福_F叉二一小副包_开箱测评.mp4",
+                status="needs_review",
+                language="zh-CN",
+                channel_profile="edc_tactical",
+                workflow_mode="standard_edit",
+            )
+        )
+        session.add(
+            JobStep(
+                job_id=job_id,
+                step_name="summary_review",
+                status="pending",
+                started_at=now,
+                metadata_={"detail": "首次品牌/型号证据不足，需人工确认后再继续。"},
+            )
+        )
+        session.add(
+            Artifact(
+                job_id=job_id,
+                artifact_type="content_profile_draft",
+                data_json={
+                    "subject_brand": "狐蝠工业",
+                    "subject_model": "FXX1小副包",
+                    "subject_type": "EDC机能包",
+                    "video_theme": "狐蝠工业FXX1小副包开箱与上手评测",
+                    "summary": "这条视频主要围绕一款EDC机能包展开，具体品牌型号待人工确认。",
+                    "search_queries": ["狐蝠工业 FXX1小副包"],
+                    "identity_review": {
+                        "required": True,
+                        "first_seen_brand": True,
+                        "first_seen_model": True,
+                        "conservative_summary": True,
+                        "support_sources": ["transcript", "source_name"],
+                        "evidence_strength": "weak",
+                        "reason": "开箱类视频命中首次品牌/型号且缺少交叉印证，需人工确认",
+                        "evidence_bundle": {
+                            "candidate_brand": "狐蝠工业",
+                            "candidate_model": "FXX1小副包",
+                            "matched_subtitle_snippets": ["[0.0-1.8] 这期鸿福 F叉二一小副包做个开箱测评。"],
+                            "matched_glossary_aliases": {
+                                "brand": ["鸿福"],
+                                "model": ["F叉二一小副包"],
+                            },
+                            "matched_source_name_terms": ["鸿福", "F叉二一小副包"],
+                            "matched_visible_text_terms": [],
+                            "matched_evidence_terms": [],
+                        },
+                    },
+                    "automation_review": {
+                        "review_reasons": ["首次品牌/型号证据不足，已退化为保守摘要"],
+                        "blocking_reasons": ["开箱类视频命中首次品牌/型号且缺少交叉印证，需人工确认"],
+                    },
+                },
+            )
+        )
+        await session.commit()
+
+    response = await client.post(f"/api/v1/jobs/{job_id}/content-profile/confirm", json={})
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "processing"
+    assert any(
+        item["field_name"] == "subject_brand"
+        and item["original_value"] == "鸿福"
+        and item["corrected_value"] == "狐蝠工业"
+        for item in data["memory"]["recent_corrections"]
+    )
+    assert any(
+        item["field_name"] == "subject_model"
+        and item["original_value"] == "F叉二一小副包"
+        and item["corrected_value"] == "FXX1小副包"
+        for item in data["memory"]["recent_corrections"]
+    )

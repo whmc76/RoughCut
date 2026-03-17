@@ -21,8 +21,8 @@ def build_render_plan(
     smart_effect_style: str = "smart_effect_rhythm",
     cover_style: str | None = None,
     title_style: str = "preset_default",
-    target_lufs: float = -14.0,
-    peak_limit: float = -1.0,
+    target_lufs: float = -16.0,
+    peak_limit: float = -2.0,
     noise_reduction: bool = True,
     intro: dict | None = None,
     outro: dict | None = None,
@@ -120,25 +120,45 @@ def build_plain_render_plan(render_plan: dict[str, Any]) -> dict[str, Any]:
     for key in ("intro", "outro", "insert", "watermark", "music"):
         plain_plan[key] = None
     plain_plan["subtitles"] = None
-    if plain_plan.get("editing_accents"):
-        plain_plan["editing_accents"] = {
-            **copy.deepcopy(plain_plan["editing_accents"]),
-            "emphasis_overlays": [],
-            "sound_effects": [],
-        }
-    else:
-        plain_plan["editing_accents"] = {
-            "style": "plain",
-            "transitions": {
-                "enabled": False,
-                "transition": "none",
-                "duration_sec": 0.0,
-                "boundary_indexes": [],
-            },
-            "emphasis_overlays": [],
-            "sound_effects": [],
-        }
+    plain_plan["avatar_commentary"] = None
+    plain_plan["editing_accents"] = _build_disabled_editing_accents(
+        plain_plan.get("editing_accents"),
+        style="plain",
+    )
     return plain_plan
+
+
+def build_avatar_render_plan(render_plan: dict[str, Any]) -> dict[str, Any]:
+    avatar_plan = copy.deepcopy(render_plan)
+    avatar_plan["editing_accents"] = _build_disabled_editing_accents(
+        avatar_plan.get("editing_accents"),
+        style="avatar_focus",
+    )
+    return avatar_plan
+
+
+def build_ai_effect_render_plan(render_plan: dict[str, Any]) -> dict[str, Any]:
+    ai_plan = copy.deepcopy(render_plan)
+    ai_plan["avatar_commentary"] = None
+    return ai_plan
+
+
+def _build_disabled_editing_accents(editing_accents: dict[str, Any] | None, *, style: str) -> dict[str, Any]:
+    base = copy.deepcopy(editing_accents) if isinstance(editing_accents, dict) else {}
+    transitions = copy.deepcopy(base.get("transitions") or {})
+    return {
+        **base,
+        "style": style,
+        "transitions": {
+            **transitions,
+            "enabled": False,
+            "transition": str(transitions.get("transition") or "none"),
+            "duration_sec": float(transitions.get("duration_sec") or 0.0),
+            "boundary_indexes": [],
+        },
+        "emphasis_overlays": [],
+        "sound_effects": [],
+    }
 
 
 def _select_transition_boundaries(keep_segments: list[dict[str, Any]]) -> list[int]:

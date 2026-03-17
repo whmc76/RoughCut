@@ -1,8 +1,15 @@
 from __future__ import annotations
 
+import uuid
 from types import SimpleNamespace
 
+import pytest
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import async_sessionmaker
+
+from roughcut.db.models import FactClaim, SubtitleCorrection, SubtitleItem
 from roughcut.speech.postprocess import _should_merge_subtitle_pair, normalize_text, split_into_subtitles
+from roughcut.speech.postprocess import save_subtitle_items
 
 
 def _mock_segment(idx, start, end, text, words=None):
@@ -28,6 +35,15 @@ def test_normalize_text_short_no_punctuation():
 
 def test_normalize_text_cleans_mixed_punctuation_tail():
     assert normalize_text("效果非常帅，。") == "效果非常帅。"
+
+
+def test_normalize_text_converts_display_numbers_and_prunes_fillers():
+    assert normalize_text("呃然后这个方案是第二代增强百分之五十有两个档位吧") == "方案是第2代增强50%有2个档位吧。"
+
+
+def test_normalize_text_adds_soft_clause_spacing_for_long_sentence():
+    result = normalize_text("这把刀我觉得非常实用因为螺丝细节也处理得很好")
+    assert " 因为" in result
 
 
 def test_split_into_subtitles_basic():
@@ -175,3 +191,60 @@ def test_split_into_subtitles_collapses_adjacent_near_duplicates():
     assert entries[0].text_raw == "其实也算上是一个呼应"
     assert entries[0].start == 0.0
     assert entries[0].end == 1.9
+
+
+def test_split_into_subtitles_normalizes_filler_words_and_numbers_for_display():
+    segs = [_mock_segment(0, 0.0, 2.0, "呃然后这个包装小了一圈有两个档位吧")]
+
+    entries = split_into_subtitles(segs, max_chars=20, max_duration=5.0)
+
+    assert len(entries) == 1
+    assert entries[0].text_raw == "呃然后这个包装小了一圈有两个档位吧"
+    assert entries[0].text_norm == "包装小了一圈有2个档位吧。"
+
+
+@pytest.mark.asyncio
+async def test_save_subtitle_items_replaces_existing_rows_for_same_job_version(db_engine):
+    factory = async_sessionmaker(db_engine, expire_on_commit=False)
+    job_id = uuid.uuid4()
+
+    initial_entries = split_into_subtitles([_mock_segment(0, 0.0, 2.0, "第一句第二句")], max_chars=4, max_duration=5.0)
+    replacement_entries = split_into_subtitles([_mock_segment(0, 0.0, 1.0, "第三句")], max_chars=8, max_duration=5.0)
+
+    async with factory() as session:
+        items = await save_subtitle_items(job_id, initial_entries, session)
+        session.add(
+            SubtitleCorrection(
+                job_id=job_id,
+                subtitle_item_id=items[0].id,
+                original_span="第一句",
+                suggested_span="第一句",
+                change_type="glossary",
+                confidence=1.0,
+            )
+        )
+        session.add(
+            FactClaim(
+                job_id=job_id,
+                subtitle_item_id=items[0].id,
+                claim_text="第一句",
+                risk_level="low",
+            )
+        )
+        await session.commit()
+
+    async with factory() as session:
+        await save_subtitle_items(job_id, replacement_entries, session)
+        await session.commit()
+
+    async with factory() as session:
+        item_rows = (
+            await session.execute(select(SubtitleItem).where(SubtitleItem.job_id == job_id).order_by(SubtitleItem.item_index))
+        ).scalars().all()
+        correction_rows = (await session.execute(select(SubtitleCorrection).where(SubtitleCorrection.job_id == job_id))).scalars().all()
+        claim_rows = (await session.execute(select(FactClaim).where(FactClaim.job_id == job_id))).scalars().all()
+
+    assert len(item_rows) == len(replacement_entries)
+    assert [item.text_raw for item in item_rows] == [entry.text_raw for entry in replacement_entries]
+    assert correction_rows == []
+    assert claim_rows == []

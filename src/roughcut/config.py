@@ -76,6 +76,10 @@ class Settings(BaseSettings):
     gpu_retry_max_delay_sec: int = 900
     gpu_busy_utilization_threshold: int = 92
     gpu_busy_memory_threshold: float = 0.92
+    step_heartbeat_interval_sec: int = 20
+    step_stale_recovery_enabled: bool = True
+    step_stale_timeout_sec: int = 900
+    render_step_stale_timeout_sec: int = 5400
     docker_gpu_guard_enabled: bool = True
     docker_gpu_guard_idle_timeout_sec: int = 900
     heygem_docker_guard_enabled: bool = True
@@ -152,8 +156,13 @@ class Settings(BaseSettings):
 
     # Output
     output_dir: str = "output"
+    preferred_ui_language: str = "zh-CN"
     output_name_pattern: str = "{date}_{stem}"  # {date}=YYYYMMDD, {stem}=original filename stem
     render_debug_dir: str = "output/test/render-debug"
+    telegram_remote_review_enabled: bool = False
+    telegram_bot_api_base_url: str = "https://api.telegram.org"
+    telegram_bot_token: str = ""
+    telegram_bot_chat_id: str = ""
     default_job_workflow_mode: str = DEFAULT_JOB_WORKFLOW_MODE
     default_job_enhancement_modes: list[str] = []
 
@@ -164,7 +173,7 @@ class Settings(BaseSettings):
 
     # Subtitle style (burned into video) — neon/fluorescent: black text + green glow
     subtitle_font: str = "Microsoft YaHei"
-    subtitle_font_size: int = 80                 # pt at PlayResY; increase for larger text
+    subtitle_font_size: int = 144                # pt at PlayResY; tuned for large 1-2 line subtitles
     subtitle_color: str = "000000"               # text color RGB hex (black)
     subtitle_outline_color: str = "00FF00"       # outline/glow color RGB hex (neon green)
     subtitle_outline_width: int = 5              # outline thickness; thick = fluorescent glow
@@ -179,6 +188,9 @@ class Settings(BaseSettings):
     packaging_selection_review_gap: float = 0.08
     packaging_selection_min_score: float = 0.6
     subtitle_filler_cleanup_enabled: bool = True
+    quality_auto_rerun_enabled: bool = True
+    quality_auto_rerun_below_score: float = 75.0
+    quality_auto_rerun_max_attempts: int = 1
 
     # Feature flags
     fact_check_enabled: bool = False

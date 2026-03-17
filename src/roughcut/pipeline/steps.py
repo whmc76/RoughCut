@@ -13,6 +13,7 @@ import subprocess
 import tempfile
 import time
 import uuid
+from contextlib import suppress
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -28,12 +29,15 @@ from roughcut.creative import (
     build_ai_director_plan,
     build_avatar_commentary_plan,
     build_job_creative_profile,
+    multilingual_translation_mode_enabled,
 )
 from roughcut.db.models import Artifact, GlossaryTerm, Job, JobStep, RenderOutput, SubtitleItem, Timeline, TranscriptSegment
 from roughcut.db.session import get_session_factory
 from roughcut.edit.decisions import build_edit_decision
 from roughcut.edit.otio_export import export_to_otio
 from roughcut.edit.render_plan import (
+    build_ai_effect_render_plan,
+    build_avatar_render_plan,
     build_plain_render_plan,
     build_render_plan,
     build_smart_editing_accents,
@@ -42,7 +46,6 @@ from roughcut.edit.render_plan import (
 from roughcut.edit.timeline import save_editorial_timeline
 from roughcut.media.audio import extract_audio, extract_audio_clip
 from roughcut.media.output import (
-    build_output_name,
     extract_cover_frame,
     get_output_project_dir,
     load_cover_selection_summary,
@@ -55,7 +58,9 @@ from roughcut.media.silence import detect_silence
 from roughcut.packaging.library import list_packaging_assets, resolve_packaging_plan_for_job
 from roughcut.providers.factory import get_avatar_provider, get_reasoning_provider, get_voice_provider
 from roughcut.providers.reasoning.base import Message
+from roughcut.pipeline.quality import _compute_subtitle_sync_check
 from roughcut.review.content_profile import (
+    apply_identity_review_guard,
     assess_content_profile_automation,
     build_transcript_excerpt,
     enrich_content_profile,
@@ -67,6 +72,13 @@ from roughcut.review.domain_glossaries import filter_scoped_glossary_terms, merg
 from roughcut.review.glossary_engine import apply_glossary_corrections
 from roughcut.review.platform_copy import generate_platform_packaging, save_platform_packaging_markdown
 from roughcut.review.subtitle_memory import build_subtitle_review_memory, build_transcription_prompt
+from roughcut.review.subtitle_translation import (
+    detect_subtitle_language,
+    languages_equivalent,
+    resolve_translation_target_language,
+    translate_subtitle_items,
+)
+from roughcut.review.telegram_bot import get_telegram_review_bot_service
 from roughcut.speech.postprocess import save_subtitle_items, split_into_subtitles
 from roughcut.speech.transcribe import transcribe_audio
 from roughcut.storage.s3 import get_storage, job_key
@@ -77,6 +89,7 @@ STEP_LABELS = {
     "extract_audio": "提取音频",
     "transcribe": "语音转写",
     "subtitle_postprocess": "字幕后处理",
+    "subtitle_translation": "字幕翻译",
     "content_profile": "内容摘要",
     "summary_review": "人工确认",
     "glossary_review": "术语纠错",
@@ -98,13 +111,13 @@ def _resolve_subtitle_split_profile(*, width: int | None, height: int | None) ->
     if safe_height > safe_width and safe_width > 0:
         return {
             "orientation": "portrait",
-            "max_chars": 18,
-            "max_duration": 3.2,
+            "max_chars": 12,
+            "max_duration": 2.6,
         }
     return {
         "orientation": "landscape",
-        "max_chars": 26,
-        "max_duration": 4.8,
+        "max_chars": 18,
+        "max_duration": 3.4,
     }
 
 
@@ -136,6 +149,30 @@ async def _set_step_progress(
         metadata["elapsed_seconds"] = round(elapsed_seconds, 3)
     step.metadata_ = metadata
     await session.commit()
+
+
+def _spawn_step_heartbeat(
+    *,
+    step_id: uuid.UUID | None,
+    detail: str,
+    progress: float | None = None,
+) -> asyncio.Task[None] | None:
+    if step_id is None:
+        return None
+
+    interval_sec = max(5, int(get_settings().step_heartbeat_interval_sec or 20))
+
+    async def _heartbeat_loop() -> None:
+        factory = get_session_factory()
+        while True:
+            await asyncio.sleep(interval_sec)
+            async with factory() as session:
+                step_ref = await session.get(JobStep, step_id)
+                if step_ref is None or step_ref.status != "running":
+                    return
+                await _set_step_progress(session, step_ref, detail=detail, progress=progress)
+
+    return asyncio.create_task(_heartbeat_loop())
 
 
 def _content_profile_artifact_priority(artifact_type: str) -> int:
@@ -782,6 +819,14 @@ async def run_content_profile(job_id: str) -> dict:
             }
             for item in subtitle_items
         ]
+        glossary_result = await session.execute(select(GlossaryTerm))
+        glossary_terms = glossary_result.scalars().all()
+        effective_glossary_terms = _build_effective_glossary_terms(
+            glossary_terms=glossary_terms,
+            channel_profile=job.channel_profile,
+            subtitle_items=subtitle_dicts,
+            source_name=job.source_name,
+        )
         user_memory = await load_content_profile_user_memory(session, channel_profile=job.channel_profile)
         packaging_config = (list_packaging_assets().get("config") or {})
         seeded_profile_artifact = await _load_latest_optional_artifact(
@@ -807,6 +852,7 @@ async def run_content_profile(job_id: str) -> dict:
                 source_name=job.source_name,
                 channel_profile=job.channel_profile,
                 transcript_excerpt=build_transcript_excerpt(subtitle_dicts),
+                glossary_terms=effective_glossary_terms,
                 user_memory=user_memory,
                 include_research=False,
             )
@@ -820,9 +866,17 @@ async def run_content_profile(job_id: str) -> dict:
                     subtitle_items=subtitle_dicts,
                     channel_profile=job.channel_profile,
                     user_memory=user_memory,
+                    glossary_terms=effective_glossary_terms,
                     include_research=False,
                     copy_style=str(packaging_config.get("copy_style") or "attention_grabbing"),
                 )
+        content_profile = apply_identity_review_guard(
+            content_profile,
+            subtitle_items=subtitle_dicts,
+            user_memory=user_memory,
+            glossary_terms=effective_glossary_terms,
+            source_name=job.source_name,
+        )
         content_profile["creative_profile"] = _job_creative_profile(job)
 
         auto_review_enabled = bool(settings.auto_confirm_content_profile) and auto_review_mode_enabled(
@@ -831,6 +885,9 @@ async def run_content_profile(job_id: str) -> dict:
         automation = assess_content_profile_automation(
             content_profile,
             subtitle_items=subtitle_dicts,
+            user_memory=user_memory,
+            glossary_terms=effective_glossary_terms,
+            source_name=job.source_name,
             auto_confirm_enabled=auto_review_enabled,
             threshold=settings.content_profile_review_threshold,
         )
@@ -878,6 +935,19 @@ async def run_content_profile(job_id: str) -> dict:
                     "blocking_reasons": automation["blocking_reasons"],
                 }
             job.status = "processing"
+        elif review_step is not None and bool((automation.get("identity_review") or {}).get("required")):
+            now = datetime.now(timezone.utc)
+            review_step.metadata_ = {
+                **(review_step.metadata_ or {}),
+                "label": STEP_LABELS.get("summary_review", "summary_review"),
+                "detail": str((automation.get("identity_review") or {}).get("reason") or "内容摘要待人工确认"),
+                "progress": 0.0,
+                "updated_at": now.isoformat(),
+                "auto_confirmed": False,
+                "identity_review": automation.get("identity_review"),
+                "review_reasons": automation["review_reasons"],
+                "blocking_reasons": automation["blocking_reasons"],
+            }
 
         subject = " / ".join(
             part for part in [
@@ -891,6 +961,11 @@ async def run_content_profile(job_id: str) -> dict:
             detail = f"已生成内容摘要：{subject or '待人工确认'}"
         await _set_step_progress(session, step, detail=detail, progress=1.0)
         await session.commit()
+        if not auto_confirmed:
+            try:
+                await get_telegram_review_bot_service().notify_content_profile_review(job.id)
+            except Exception:
+                logger.exception("Failed to send Telegram content profile review for job %s", job.id)
 
         return {
             "subject_brand": content_profile.get("subject_brand"),
@@ -978,6 +1053,7 @@ async def run_glossary_review(job_id: str) -> dict:
                     subtitle_items=subtitle_dicts,
                     channel_profile=job.channel_profile,
                     user_memory=user_memory,
+                    glossary_terms=effective_glossary_terms,
                     include_research=False,
                     copy_style=str(packaging_config.get("copy_style") or "attention_grabbing"),
                 )
@@ -993,6 +1069,7 @@ async def run_glossary_review(job_id: str) -> dict:
                 source_name=job.source_name,
                 channel_profile=job.channel_profile,
                 transcript_excerpt=str(content_profile.get("transcript_excerpt") or ""),
+                glossary_terms=effective_glossary_terms,
                 user_memory=user_memory,
                 include_research=False,
             )
@@ -1041,6 +1118,11 @@ async def run_glossary_review(job_id: str) -> dict:
             progress=1.0,
         )
         await session.commit()
+        if pending_corrections > 0:
+            try:
+                await get_telegram_review_bot_service().notify_subtitle_review(job.id)
+            except Exception:
+                logger.exception("Failed to send Telegram subtitle review for job %s", job.id)
 
         return {
             "correction_count": len(corrections),
@@ -1054,6 +1136,99 @@ async def run_glossary_review(job_id: str) -> dict:
                     content_profile.get("subject_model"),
                 ] if part
             ).strip(),
+        }
+
+
+async def run_subtitle_translation(job_id: str) -> dict:
+    factory = get_session_factory()
+    async with factory() as session:
+        job = await session.get(Job, uuid.UUID(job_id))
+        step_result = await session.execute(
+            select(JobStep).where(JobStep.job_id == job.id, JobStep.step_name == "subtitle_translation")
+        )
+        step = step_result.scalar_one()
+
+        if not multilingual_translation_mode_enabled(getattr(job, "enhancement_modes", [])):
+            await _set_step_progress(session, step, detail="未启用多语言翻译模式，跳过。", progress=1.0)
+            await session.commit()
+            return {"enabled": False, "skipped": True}
+
+        await _set_step_progress(session, step, detail="读取校对后的字幕，准备生成英文译文", progress=0.18)
+        item_result = await session.execute(
+            select(SubtitleItem)
+            .where(SubtitleItem.job_id == job.id, SubtitleItem.version == 1)
+            .order_by(SubtitleItem.item_index)
+        )
+        subtitle_items = item_result.scalars().all()
+        subtitle_dicts = [
+            {
+                "index": item.item_index,
+                "start_time": item.start_time,
+                "end_time": item.end_time,
+                "text_raw": item.text_raw,
+                "text_norm": item.text_norm,
+                "text_final": item.text_final,
+            }
+            for item in subtitle_items
+        ]
+        preferred_ui_language = str(get_settings().preferred_ui_language or "zh-CN")
+        source_language = detect_subtitle_language(subtitle_dicts)
+        target_language = resolve_translation_target_language(
+            source_language=source_language,
+            target_language=None,
+            target_language_mode="auto",
+            preferred_ui_language=preferred_ui_language,
+        )
+        if languages_equivalent(source_language, target_language):
+            await _set_step_progress(
+                session,
+                step,
+                detail=f"源字幕语言与目标语言一致（{source_language} -> {target_language}），跳过翻译。",
+                progress=1.0,
+            )
+            await session.commit()
+            return {
+                "enabled": True,
+                "skipped": True,
+                "reason": "same_language",
+                "source_language": source_language,
+                "target_language_mode": "auto",
+                "target_language": target_language,
+                "translated_count": 0,
+            }
+
+        await _set_step_progress(
+            session,
+            step,
+            detail=f"翻译校对后的字幕（{source_language} -> {target_language}）",
+            progress=0.72,
+        )
+        translation = await translate_subtitle_items(
+            subtitle_dicts,
+            target_language_mode="auto",
+            preferred_ui_language=preferred_ui_language,
+        )
+        session.add(
+            Artifact(
+                job_id=job.id,
+                step_id=step.id,
+                artifact_type="subtitle_translation",
+                data_json=translation,
+            )
+        )
+        await _set_step_progress(
+            session,
+            step,
+            detail=f"已生成英文字幕译文，共 {translation.get('item_count') or 0} 条。",
+            progress=1.0,
+        )
+        await session.commit()
+        return {
+            "enabled": True,
+            "source_language": translation.get("source_language"),
+            "target_language_mode": translation.get("target_language_mode"),
+            "target_language": translation.get("target_language"),
+            "translated_count": translation.get("item_count"),
         }
 
 
@@ -1581,6 +1756,12 @@ async def run_render(job_id: str) -> dict:
             for si in subtitle_items
         ]
 
+        stale_render_outputs_result = await session.execute(
+            select(RenderOutput).where(RenderOutput.job_id == job.id, RenderOutput.status == "running")
+        )
+        for stale_render_output in stale_render_outputs_result.scalars().all():
+            stale_render_output.status = "failed"
+
         # Create render output record
         render_output = RenderOutput(
             job_id=job.id,
@@ -1595,22 +1776,26 @@ async def run_render(job_id: str) -> dict:
         await session.commit()
 
     # Render (outside transaction — can be long)
-    # Build canonical output name: YYYYMMDD_OriginalStem
-    out_name = build_output_name(job.source_name, job.created_at)
     out_dir = get_output_project_dir(
         job.source_name,
         job.created_at,
         content_profile=content_profile,
     )
+    out_name = out_dir.name
     debug_dir = Path(get_settings().render_debug_dir) / f"{job_id}_{out_name}"
     debug_dir.mkdir(parents=True, exist_ok=True)
     local_packaged_mp4 = out_dir / f"{out_name}.mp4"
-    local_plain_mp4 = out_dir / f"{out_name}_plain.mp4"
+    local_plain_mp4 = out_dir / f"{out_name}_素板.mp4"
+    local_avatar_mp4 = out_dir / f"{out_name}_数字人版.mp4"
+    local_ai_effect_mp4 = out_dir / f"{out_name}_AI特效版.mp4"
     local_packaged_srt = out_dir / f"{out_name}.srt"
-    local_plain_srt = out_dir / f"{out_name}_plain.srt"
+    local_plain_srt = out_dir / f"{out_name}_素板.srt"
+    local_avatar_srt = out_dir / f"{out_name}_数字人版.srt"
+    local_ai_effect_srt = out_dir / f"{out_name}_AI特效版.srt"
     local_cover = out_dir / f"{out_name}_cover.jpg"
 
     with tempfile.TemporaryDirectory() as tmpdir:
+        render_heartbeat: asyncio.Task[None] | None = None
         async with get_session_factory()() as session:
             step_result = await session.execute(
                 select(JobStep).where(JobStep.job_id == uuid.UUID(job_id), JobStep.step_name == "render")
@@ -1627,6 +1812,15 @@ async def run_render(job_id: str) -> dict:
                     ),
                     progress=0.35,
                 )
+                render_heartbeat = _spawn_step_heartbeat(
+                    step_id=render_step.id,
+                    detail=(
+                        "先渲染素版，再生成包装版"
+                        if (has_packaging or has_editing_accents)
+                        else "执行 FFmpeg 渲染成片"
+                    ),
+                    progress=0.35,
+                )
         source_path = await _resolve_source(
             job,
             tmpdir,
@@ -1634,9 +1828,13 @@ async def run_render(job_id: str) -> dict:
             debug_dir=debug_dir,
         )
         tmp_plain_mp4 = Path(tmpdir) / "output_plain.mp4"
+        tmp_avatar_mp4 = Path(tmpdir) / "output_avatar.mp4"
+        tmp_ai_effect_mp4 = Path(tmpdir) / "output_ai_effect.mp4"
         tmp_packaged_mp4 = Path(tmpdir) / "output_packaged.mp4"
         tmp_cover_plain_mp4 = Path(tmpdir) / "output_cover_plain.mp4"
         plain_render_plan = build_plain_render_plan(render_plan_timeline.data_json)
+        avatar_render_plan = build_avatar_render_plan(render_plan_timeline.data_json)
+        ai_effect_render_plan = build_ai_effect_render_plan(render_plan_timeline.data_json)
         await render_video(
             source_path=source_path,
             render_plan=plain_render_plan,
@@ -1652,11 +1850,32 @@ async def run_render(job_id: str) -> dict:
             if s.get("type") == "keep"
         ]
         remapped_subtitles = remap_subtitles_to_timeline(subtitle_dicts, keep_segments)
+        packaged_subtitles = await _map_subtitles_to_packaged_timeline(
+            remapped_subtitles,
+            render_plan_timeline.data_json,
+        )
+        final_overlay_accents = await _map_editing_accents_to_packaged_timeline(
+            render_plan_timeline.data_json.get("editing_accents"),
+            render_plan_timeline.data_json,
+        )
+        ai_effect_overlay_accents = await _map_editing_accents_to_packaged_timeline(
+            ai_effect_render_plan.get("editing_accents"),
+            ai_effect_render_plan,
+        )
         avatar_plan = render_plan_timeline.data_json.get("avatar_commentary") or {}
         avatar_result: dict[str, Any] | None = None
-        packaged_source_path = tmp_plain_mp4
-        packaged_editorial_timeline = editorial_timeline.data_json
-        packaged_subtitle_items = subtitle_dicts
+        avatar_variant_source_path: Path | None = None
+        avatar_variant_editorial_timeline: dict[str, Any] | None = None
+        avatar_variant_subtitle_items: list[dict[str, Any]] | None = None
+        (
+            packaged_source_path,
+            packaged_editorial_timeline,
+            packaged_subtitle_items,
+        ) = _resolve_packaged_render_variant(
+            original_source_path=source_path,
+            original_editorial_timeline=editorial_timeline.data_json,
+            original_subtitle_items=subtitle_dicts,
+        )
         if (
             "avatar_commentary" in set(getattr(job, "enhancement_modes", []) or [])
             and str(avatar_plan.get("mode") or "") == "full_track_audio_passthrough"
@@ -1690,19 +1909,22 @@ async def run_render(job_id: str) -> dict:
                         border_width=int(avatar_plan.get("overlay_border_width") or 0),
                         border_color=str(avatar_plan.get("overlay_border_color") or "#F4E4B8"),
                     )
-                    tmp_plain_mp4 = pip_output_path
-                    packaged_source_path = pip_output_path
                     pip_duration = float((await probe(pip_output_path)).duration or 0.0)
-                    packaged_editorial_timeline = {
-                        "segments": [
-                            {
-                                "type": "keep",
-                                "start": 0.0,
-                                "end": pip_duration,
-                            }
-                        ]
-                    }
-                    packaged_subtitle_items = remapped_subtitles
+                    (
+                        avatar_variant_source_path,
+                        avatar_variant_editorial_timeline,
+                        avatar_variant_subtitle_items,
+                    ) = _resolve_packaged_render_variant(
+                        original_source_path=source_path,
+                        original_editorial_timeline=editorial_timeline.data_json,
+                        original_subtitle_items=subtitle_dicts,
+                        variant_source_path=pip_output_path,
+                        variant_duration_sec=pip_duration,
+                        variant_subtitle_items=remapped_subtitles,
+                    )
+                    packaged_source_path = avatar_variant_source_path
+                    packaged_editorial_timeline = avatar_variant_editorial_timeline
+                    packaged_subtitle_items = avatar_variant_subtitle_items
                     avatar_result = {
                         **(avatar_result or {}),
                         "status": "done",
@@ -1756,19 +1978,22 @@ async def run_render(job_id: str) -> dict:
                         border_width=int(avatar_plan.get("overlay_border_width") or 0),
                         border_color=str(avatar_plan.get("overlay_border_color") or "#F4E4B8"),
                     )
-                    tmp_plain_mp4 = pip_output_path
-                    packaged_source_path = pip_output_path
                     pip_duration = float((await probe(pip_output_path)).duration or 0.0)
-                    packaged_editorial_timeline = {
-                        "segments": [
-                            {
-                                "type": "keep",
-                                "start": 0.0,
-                                "end": pip_duration,
-                            }
-                        ]
-                    }
-                    packaged_subtitle_items = remapped_subtitles
+                    (
+                        avatar_variant_source_path,
+                        avatar_variant_editorial_timeline,
+                        avatar_variant_subtitle_items,
+                    ) = _resolve_packaged_render_variant(
+                        original_source_path=source_path,
+                        original_editorial_timeline=editorial_timeline.data_json,
+                        original_subtitle_items=subtitle_dicts,
+                        variant_source_path=pip_output_path,
+                        variant_duration_sec=pip_duration,
+                        variant_subtitle_items=remapped_subtitles,
+                    )
+                    packaged_source_path = avatar_variant_source_path
+                    packaged_editorial_timeline = avatar_variant_editorial_timeline
+                    packaged_subtitle_items = avatar_variant_subtitle_items
                     avatar_result = {
                         **(avatar_result or {}),
                         "status": "done",
@@ -1799,6 +2024,10 @@ async def run_render(job_id: str) -> dict:
                     "reason": "avatar_segment_render_failed",
                     "detail": f"数字人片段渲染失败，已自动回退普通成片：{exc}",
                 }
+        if render_heartbeat is not None:
+            render_heartbeat.cancel()
+            with suppress(asyncio.CancelledError):
+                await render_heartbeat
         async with get_session_factory()() as session:
             step_result = await session.execute(
                 select(JobStep).where(JobStep.job_id == uuid.UUID(job_id), JobStep.step_name == "render")
@@ -1815,15 +2044,54 @@ async def run_render(job_id: str) -> dict:
             if render_output:
                 render_output.progress = 0.55
                 await session.commit()
+            packaging_heartbeat = _spawn_step_heartbeat(
+                step_id=render_step.id if render_step else None,
+                detail="素版已完成，开始生成包装版",
+                progress=0.55,
+            )
+        if (
+            avatar_variant_source_path is not None
+            and avatar_variant_editorial_timeline is not None
+            and avatar_variant_subtitle_items is not None
+        ):
+            await render_video(
+                source_path=avatar_variant_source_path,
+                render_plan=avatar_render_plan,
+                editorial_timeline=avatar_variant_editorial_timeline,
+                output_path=tmp_avatar_mp4,
+                subtitle_items=packaged_subtitles,
+                overlay_editing_accents=await _map_editing_accents_to_packaged_timeline(
+                    avatar_render_plan.get("editing_accents"),
+                    avatar_render_plan,
+                ),
+                debug_dir=debug_dir / "avatar_variant",
+            )
+        await render_video(
+            source_path=source_path,
+            render_plan=ai_effect_render_plan,
+            editorial_timeline=editorial_timeline.data_json,
+            output_path=tmp_ai_effect_mp4,
+            subtitle_items=packaged_subtitles,
+            overlay_editing_accents=ai_effect_overlay_accents,
+            debug_dir=debug_dir / "ai_effect_variant",
+        )
         await render_video(
             source_path=packaged_source_path,
             render_plan=render_plan_timeline.data_json,
             editorial_timeline=packaged_editorial_timeline,
             output_path=tmp_packaged_mp4,
-            subtitle_items=packaged_subtitle_items,
+            subtitle_items=packaged_subtitles,
+            overlay_editing_accents=final_overlay_accents,
             debug_dir=debug_dir / "packaged",
         )
+        if packaging_heartbeat is not None:
+            packaging_heartbeat.cancel()
+            with suppress(asyncio.CancelledError):
+                await packaging_heartbeat
         shutil.copy2(tmp_plain_mp4, local_plain_mp4)
+        if tmp_avatar_mp4.exists():
+            shutil.copy2(tmp_avatar_mp4, local_avatar_mp4)
+        shutil.copy2(tmp_ai_effect_mp4, local_ai_effect_mp4)
         shutil.copy2(tmp_packaged_mp4, local_packaged_mp4)
         async with get_session_factory()() as session:
             step_result = await session.execute(
@@ -1838,12 +2106,15 @@ async def run_render(job_id: str) -> dict:
                 await session.commit()
 
         # Write SRT with remapped timestamps (matches the edited video)
-        packaged_subtitles = await _map_subtitles_to_packaged_timeline(
-            remapped_subtitles,
-            render_plan_timeline.data_json,
-        )
         write_srt_file(packaged_subtitles, local_packaged_srt)
         write_srt_file(remapped_subtitles, local_plain_srt)
+        if tmp_avatar_mp4.exists():
+            write_srt_file(packaged_subtitles, local_avatar_srt)
+        write_srt_file(packaged_subtitles, local_ai_effect_srt)
+        packaged_subtitle_sync = _compute_subtitle_sync_check(local_packaged_mp4, local_packaged_srt)
+        plain_subtitle_sync = _compute_subtitle_sync_check(local_plain_mp4, local_plain_srt)
+        avatar_subtitle_sync = _compute_subtitle_sync_check(local_avatar_mp4, local_avatar_srt) if tmp_avatar_mp4.exists() else None
+        ai_effect_subtitle_sync = _compute_subtitle_sync_check(local_ai_effect_mp4, local_ai_effect_srt)
 
         # Extract cover frame from the plain render so burned subtitles never leak into thumbnails.
         try:
@@ -1866,10 +2137,15 @@ async def run_render(job_id: str) -> dict:
     # Also upload to S3/MinIO for API download endpoint (non-critical — local file is primary)
     packaged_output_key = job_key(job_id, "output.mp4")
     plain_output_key = job_key(job_id, "output_plain.mp4")
+    avatar_output_key = job_key(job_id, "output_avatar.mp4")
+    ai_effect_output_key = job_key(job_id, "output_ai_effect.mp4")
     try:
         storage = get_storage()
         await storage.async_upload_file(local_packaged_mp4, packaged_output_key)
         await storage.async_upload_file(local_plain_mp4, plain_output_key)
+        if local_avatar_mp4.exists():
+            await storage.async_upload_file(local_avatar_mp4, avatar_output_key)
+        await storage.async_upload_file(local_ai_effect_mp4, ai_effect_output_key)
     except Exception:
         pass  # Local file is the primary delivery; S3 is for the download API
 
@@ -1879,12 +2155,22 @@ async def run_render(job_id: str) -> dict:
         "srt": str(local_packaged_srt),
         "packaged_mp4": str(local_packaged_mp4),
         "plain_mp4": str(local_plain_mp4),
+        "avatar_mp4": str(local_avatar_mp4) if local_avatar_mp4.exists() else None,
+        "ai_effect_mp4": str(local_ai_effect_mp4),
         "packaged_srt": str(local_packaged_srt),
         "plain_srt": str(local_plain_srt),
+        "avatar_srt": str(local_avatar_srt) if local_avatar_srt.exists() else None,
+        "ai_effect_srt": str(local_ai_effect_srt),
         "cover": str(local_cover) if local_cover else None,
         "cover_variants": [str(path) for path in cover_variants] if local_cover else [],
         "cover_selection": cover_selection,
         "output_name": out_name,
+        "variants": {
+            "packaged": str(local_packaged_mp4),
+            "plain": str(local_plain_mp4),
+            "avatar": str(local_avatar_mp4) if local_avatar_mp4.exists() else None,
+            "ai_effect": str(local_ai_effect_mp4),
+        },
     }
     async with get_session_factory()() as session:
         render_output = await session.get(RenderOutput, render_output_id)
@@ -1903,14 +2189,26 @@ async def run_render(job_id: str) -> dict:
                 data_json={
                     "plain_mp4": str(local_plain_mp4),
                     "packaged_mp4": str(local_packaged_mp4),
+                    "avatar_mp4": str(local_avatar_mp4) if local_avatar_mp4.exists() else None,
+                    "ai_effect_mp4": str(local_ai_effect_mp4),
                     "plain_srt": str(local_plain_srt),
                     "packaged_srt": str(local_packaged_srt),
+                    "avatar_srt": str(local_avatar_srt) if local_avatar_srt.exists() else None,
+                    "ai_effect_srt": str(local_ai_effect_srt),
                     "packaged_output_key": packaged_output_key,
                     "plain_output_key": plain_output_key,
+                    "avatar_output_key": avatar_output_key if local_avatar_mp4.exists() else None,
+                    "ai_effect_output_key": ai_effect_output_key,
                     "cover": str(local_cover) if local_cover else None,
                     "cover_variants": [str(path) for path in cover_variants] if local_cover else [],
                     "cover_selection": cover_selection,
                     "avatar_result": avatar_result,
+                    "quality_checks": {
+                        "subtitle_sync": packaged_subtitle_sync,
+                        "plain_subtitle_sync": plain_subtitle_sync,
+                        "avatar_subtitle_sync": avatar_subtitle_sync,
+                        "ai_effect_subtitle_sync": ai_effect_subtitle_sync,
+                    },
                 },
             )
         )
@@ -1989,6 +2287,7 @@ async def run_platform_package(job_id: str) -> dict:
             raise ValueError("Rendered output not found; platform package requires a finished render")
 
     packaging_config = (list_packaging_assets().get("config") or {})
+    author_profile = _select_default_avatar_profile()
     packaging = await generate_platform_packaging(
         source_name=job.source_name,
         content_profile=content_profile,
@@ -1998,6 +2297,7 @@ async def run_platform_package(job_id: str) -> dict:
             or (content_profile or {}).get("copy_style")
             or "attention_grabbing"
         ),
+        author_profile=author_profile,
     )
 
     output_mp4 = Path(render_output.output_path)
@@ -2317,6 +2617,84 @@ async def _map_subtitles_to_packaged_timeline(
             )
 
     return mapped
+
+
+async def _map_editing_accents_to_packaged_timeline(
+    editing_accents: dict[str, Any] | None,
+    render_plan: dict,
+) -> dict[str, Any]:
+    base = dict(editing_accents or {})
+    mapped = {
+        **base,
+        "transitions": dict(base.get("transitions") or {}),
+        "emphasis_overlays": [dict(item) for item in base.get("emphasis_overlays") or []],
+        "sound_effects": [dict(item) for item in base.get("sound_effects") or []],
+    }
+    leading_offset = 0.0
+
+    intro_plan = render_plan.get("intro")
+    if intro_plan and intro_plan.get("path"):
+        intro_duration = await _probe_media_duration(Path(intro_plan["path"]))
+        if intro_duration > 0:
+            leading_offset += intro_duration
+            for collection_name in ("emphasis_overlays", "sound_effects"):
+                for item in mapped.get(collection_name) or []:
+                    item["start_time"] = float(item.get("start_time", 0.0) or 0.0) + intro_duration
+                    if "end_time" in item:
+                        item["end_time"] = float(item.get("end_time", 0.0) or 0.0) + intro_duration
+
+    insert_plan = render_plan.get("insert")
+    if insert_plan and insert_plan.get("path"):
+        insert_duration = await _probe_media_duration(Path(insert_plan["path"]))
+        insert_after_sec = float(insert_plan.get("insert_after_sec", 0.0) or 0.0) + leading_offset
+        if insert_duration > 0:
+            mapped["emphasis_overlays"] = _shift_timed_items_for_insert(
+                mapped.get("emphasis_overlays") or [],
+                insert_after_sec=insert_after_sec,
+                insert_duration=insert_duration,
+            )
+            mapped["sound_effects"] = _shift_sound_effects_for_insert(
+                mapped.get("sound_effects") or [],
+                insert_after_sec=insert_after_sec,
+                insert_duration=insert_duration,
+            )
+
+    return mapped
+
+
+def _resolve_packaged_render_variant(
+    *,
+    original_source_path: Path,
+    original_editorial_timeline: dict[str, Any],
+    original_subtitle_items: list[dict[str, Any]],
+    variant_source_path: Path | None = None,
+    variant_duration_sec: float | None = None,
+    variant_subtitle_items: list[dict[str, Any]] | None = None,
+) -> tuple[Path, dict[str, Any], list[dict[str, Any]]]:
+    if variant_source_path is None:
+        return (
+            original_source_path,
+            dict(original_editorial_timeline),
+            [dict(item) for item in original_subtitle_items],
+        )
+
+    duration = max(0.0, float(variant_duration_sec or 0.0))
+    if duration <= 0.0:
+        raise ValueError("variant_duration_sec must be positive when variant_source_path is provided")
+
+    return (
+        variant_source_path,
+        {
+            "segments": [
+                {
+                    "type": "keep",
+                    "start": 0.0,
+                    "end": duration,
+                }
+            ]
+        },
+        [dict(item) for item in (variant_subtitle_items or [])],
+    )
 
 
 async def _render_full_track_avatar_video(
@@ -2792,28 +3170,60 @@ def _shift_subtitles_for_insert(
     insert_after_sec: float,
     insert_duration: float,
 ) -> list[dict]:
+    return _shift_timed_items_for_insert(
+        subtitle_items,
+        insert_after_sec=insert_after_sec,
+        insert_duration=insert_duration,
+    )
+
+
+def _shift_timed_items_for_insert(
+    items: list[dict],
+    *,
+    insert_after_sec: float,
+    insert_duration: float,
+) -> list[dict]:
     shifted: list[dict] = []
-    for item in subtitle_items:
+    for item in items:
         start_time = float(item.get("start_time", 0.0) or 0.0)
-        end_time = float(item.get("end_time", 0.0) or 0.0)
+        end_time = float(item.get("end_time", start_time + float(item.get("duration_sec", 0.0) or 0.0)) or 0.0)
         if end_time <= insert_after_sec:
             shifted.append(dict(item))
             continue
         if start_time >= insert_after_sec:
             shifted_item = dict(item)
             shifted_item["start_time"] = start_time + insert_duration
-            shifted_item["end_time"] = end_time + insert_duration
+            if "end_time" in item or "duration_sec" in item:
+                shifted_item["end_time"] = end_time + insert_duration
             shifted.append(shifted_item)
             continue
 
         head = dict(item)
         head["start_time"] = start_time
-        head["end_time"] = insert_after_sec
+        if "end_time" in item or "duration_sec" in item:
+            head["end_time"] = insert_after_sec
 
         tail = dict(item)
         tail["start_time"] = insert_after_sec + insert_duration
-        tail["end_time"] = end_time + insert_duration
+        if "end_time" in item or "duration_sec" in item:
+            tail["end_time"] = end_time + insert_duration
         shifted.extend([head, tail])
+    return shifted
+
+
+def _shift_sound_effects_for_insert(
+    items: list[dict],
+    *,
+    insert_after_sec: float,
+    insert_duration: float,
+) -> list[dict]:
+    shifted: list[dict] = []
+    for item in items:
+        shifted_item = dict(item)
+        start_time = float(item.get("start_time", 0.0) or 0.0)
+        if start_time >= insert_after_sec:
+            shifted_item["start_time"] = start_time + insert_duration
+        shifted.append(shifted_item)
     return shifted
 
 
@@ -2902,6 +3312,7 @@ def run_step_sync(step_name: str, job_id: str) -> dict:
         "extract_audio": run_extract_audio,
         "transcribe": run_transcribe,
         "subtitle_postprocess": run_subtitle_postprocess,
+        "subtitle_translation": run_subtitle_translation,
         "content_profile": run_content_profile,
         "glossary_review": run_glossary_review,
         "ai_director": run_ai_director,

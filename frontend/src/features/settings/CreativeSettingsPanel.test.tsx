@@ -18,7 +18,9 @@ vi.mock("../../api", () => ({
 const SAMPLE_CONFIG: Config = {
   transcription_provider: "openai",
   transcription_model: "gpt-4o-transcribe",
+  transcription_dialect: "mandarin",
   llm_mode: "performance",
+  preferred_ui_language: "zh-CN",
   reasoning_provider: "openai",
   reasoning_model: "gpt-4.1",
   local_reasoning_model: "qwen3:8b",
@@ -60,6 +62,10 @@ const SAMPLE_CONFIG: Config = {
   ffmpeg_timeout_sec: 600,
   allowed_extensions: [".mp4"],
   output_dir: "data/output",
+  telegram_remote_review_enabled: false,
+  telegram_bot_api_base_url: "https://api.telegram.org",
+  telegram_bot_token_set: false,
+  telegram_bot_chat_id: "",
   default_job_workflow_mode: "standard_edit",
   default_job_enhancement_modes: ["avatar_commentary"],
   fact_check_enabled: true,
@@ -79,6 +85,7 @@ const SAMPLE_OPTIONS: ConfigOptions = {
   channel_profiles: [{ value: "", label: "自动匹配" }],
   workflow_modes: [{ value: "standard_edit", label: "标准成片" }],
   enhancement_modes: [{ value: "avatar_commentary", label: "数字人解说" }],
+  transcription_dialects: [{ value: "mandarin", label: "普通话" }],
   avatar_providers: [{ value: "heygem", label: "heygem" }],
   voice_providers: [{ value: "indextts2", label: "indextts2" }],
   creative_mode_catalog: {

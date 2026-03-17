@@ -16,7 +16,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 os.environ.setdefault("PYTHONIOENCODING", "utf-8")
 
-ARTIFACT_ROOT = ROOT / ".artifacts" / "asr-bench"
+ARTIFACT_ROOT = ROOT / "output" / "test" / "asr-bench"
 SAMPLE_ROOT = ARTIFACT_ROOT / "samples"
 RESULT_ROOT = ARTIFACT_ROOT / "results"
 

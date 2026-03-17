@@ -7,6 +7,7 @@ from .modes import (
     build_active_workflow_mode_options,
     build_job_creative_profile,
     build_mode_catalog,
+    multilingual_translation_mode_enabled,
     normalize_enhancement_modes,
     normalize_workflow_mode,
 )
@@ -22,6 +23,7 @@ __all__ = [
     "build_active_workflow_mode_options",
     "build_job_creative_profile",
     "build_mode_catalog",
+    "multilingual_translation_mode_enabled",
     "normalize_enhancement_modes",
     "normalize_workflow_mode",
 ]

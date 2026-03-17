@@ -5,6 +5,7 @@ export const STEP_LABELS: Record<string, string> = {
   extract_audio: "提音频",
   transcribe: "转写",
   subtitle_postprocess: "字幕",
+  subtitle_translation: "翻译",
   content_profile: "摘要",
   summary_review: "核对",
   glossary_review: "纠错",
@@ -52,6 +53,7 @@ export const WORKFLOW_MODE_LABELS: Record<string, string> = {
 };
 
 export const ENHANCEMENT_MODE_LABELS: Record<string, string> = {
+  multilingual_translation: "多语言翻译",
   auto_review: "自动审核",
   avatar_commentary: "数字人解说",
   ai_effects: "智能剪辑特效",

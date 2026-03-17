@@ -58,3 +58,31 @@ def test_transcription_provider_supports_funasr(monkeypatch):
 
     assert first is second
     assert created == ["sensevoice-small"]
+
+
+def test_transcription_provider_supports_qwen_asr(monkeypatch):
+    provider_factory._TRANSCRIPTION_PROVIDER_CACHE.clear()
+
+    settings = Settings(_env_file=None, transcription_provider="qwen_asr", transcription_model="qwen3-asr-1.7b")
+    monkeypatch.setattr(provider_factory, "get_settings", lambda: settings)
+
+    created: list[str] = []
+
+    class DummyProvider:
+        def __init__(self, *, model_name: str) -> None:
+            created.append(model_name)
+
+    import sys
+    import types
+
+    monkeypatch.setitem(
+        sys.modules,
+        "roughcut.providers.transcription.qwen_asr_http",
+        types.SimpleNamespace(QwenASRHTTPProvider=DummyProvider),
+    )
+
+    first = provider_factory.get_transcription_provider()
+    second = provider_factory.get_transcription_provider()
+
+    assert first is second
+    assert created == ["qwen3-asr-1.7b"]

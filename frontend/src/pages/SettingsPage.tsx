@@ -1,4 +1,5 @@
 import { PageHeader } from "../components/ui/PageHeader";
+import { BotSettingsPanel } from "../features/settings/BotSettingsPanel";
 import { CreativeSettingsPanel } from "../features/settings/CreativeSettingsPanel";
 import { useI18n } from "../i18n";
 import { ModelSettingsPanel } from "../features/settings/ModelSettingsPanel";
@@ -45,6 +46,7 @@ export function SettingsPage() {
           options={workspace.options.data}
           onChange={(key, value) => workspace.setForm((prev) => ({ ...prev, [key]: value }))}
         />
+        <BotSettingsPanel form={workspace.form} config={workspace.config.data} onChange={(key, value) => workspace.setForm((prev) => ({ ...prev, [key]: value }))} />
       </div>
     </section>
   );

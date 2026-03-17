@@ -2214,6 +2214,7 @@ dev = [
 local-asr = [
     { name = "faster-whisper" },
     { name = "funasr" },
+    { name = "modelscope" },
 ]
 
 [package.metadata]
@@ -2232,6 +2233,7 @@ requires-dist = [
     { name = "funasr", marker = "extra == 'local-asr'", specifier = ">=1.2" },
     { name = "httpx" },
     { name = "httpx", marker = "extra == 'dev'" },
+    { name = "modelscope", marker = "extra == 'local-asr'", specifier = ">=1.20" },
     { name = "openai", specifier = ">=1.0" },
     { name = "opentimelineio" },
     { name = "pydantic-settings", specifier = ">=2.0" },

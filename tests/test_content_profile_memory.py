@@ -47,11 +47,65 @@ async def test_content_profile_memory_records_corrections_and_keywords(db_sessio
 
     memory = await load_content_profile_user_memory(db_session, channel_profile="edc_tactical")
 
-    assert memory["field_preferences"]["subject_brand"][0]["value"] == "LEATHERMAN"
-    assert memory["field_preferences"]["subject_model"][0]["value"] == "ARC"
-    assert memory["keyword_preferences"][0]["keyword"] == "LEATHERMAN ARC"
+    assert any(item["value"] == "LEATHERMAN" for item in memory["field_preferences"]["subject_brand"])
+    assert any(item["value"] == "ARC" for item in memory["field_preferences"]["subject_model"])
+    assert any(item["keyword"] == "LEATHERMAN ARC" for item in memory["keyword_preferences"])
     assert memory["recent_corrections"][0]["field_name"] in {"subject_brand", "subject_model"}
     assert any(item["phrase"] == "LEATHERMAN ARC" for item in memory["phrase_preferences"])
+
+
+@pytest.mark.asyncio
+async def test_content_profile_memory_records_identity_aliases_from_confirmed_review(db_session):
+    job = Job(
+        id=uuid.uuid4(),
+        source_path="E:/videos/fxx1.mp4",
+        source_name="20260316_鸿福_F叉二一小副包_开箱测评.mp4",
+        status="needs_review",
+        channel_profile="edc_tactical",
+    )
+    db_session.add(job)
+    await db_session.flush()
+
+    await record_content_profile_feedback_memory(
+        db_session,
+        job=job,
+        draft_profile={
+            "subject_brand": "狐蝠工业",
+            "subject_model": "FXX1小副包",
+        },
+        final_profile={
+            "subject_brand": "狐蝠工业",
+            "subject_model": "FXX1小副包",
+            "identity_review": {
+                "evidence_bundle": {
+                    "candidate_brand": "狐蝠工业",
+                    "candidate_model": "FXX1小副包",
+                    "matched_glossary_aliases": {
+                        "brand": ["鸿福"],
+                        "model": ["F叉二一小副包"],
+                    },
+                }
+            },
+            "search_queries": ["狐蝠工业 FXX1小副包"],
+        },
+        user_feedback={},
+    )
+    await db_session.flush()
+
+    memory = await load_content_profile_user_memory(db_session, channel_profile="edc_tactical")
+
+    assert any(
+        item["field_name"] == "subject_brand"
+        and item["original_value"] == "鸿福"
+        and item["corrected_value"] == "狐蝠工业"
+        for item in memory["recent_corrections"]
+    )
+    assert any(
+        item["field_name"] == "subject_model"
+        and item["original_value"] == "F叉二一小副包"
+        and item["corrected_value"] == "FXX1小副包"
+        for item in memory["recent_corrections"]
+    )
 
 
 def test_content_profile_memory_cloud_prioritizes_specific_terms():

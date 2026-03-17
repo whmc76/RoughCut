@@ -8,6 +8,7 @@ def test_platform_package_step_appended_to_pipeline():
     steps = create_job_steps(__import__("uuid").uuid4())
     assert "content_profile" in PIPELINE_STEPS
     assert "summary_review" in PIPELINE_STEPS
+    assert PIPELINE_STEPS.index("glossary_review") < PIPELINE_STEPS.index("content_profile")
     assert "ai_director" in PIPELINE_STEPS
     assert "avatar_commentary" in PIPELINE_STEPS
     assert PIPELINE_STEPS[-1] == "platform_package"
@@ -91,8 +92,19 @@ def test_normalize_platform_packaging_preserves_specific_identity_when_available
     )
 
     assert packaging["highlights"]["product"] == "REATE EDC折刀"
-    assert packaging["platforms"]["bilibili"]["titles"][0].startswith("REATEEDC折刀：")
+    assert packaging["platforms"]["bilibili"]["titles"][0].startswith("REATE EDC折刀：")
     assert packaging["platforms"]["bilibili"]["tags"][:4] == ["REATE", "EDC折刀", "折刀雕刻开箱", "EDC"]
+
+
+def test_normalize_platform_packaging_prefers_brand_model_in_fallback_copy():
+    packaging = normalize_platform_packaging(
+        {"highlights": {}, "platforms": {"bilibili": {"titles": [], "description": "", "tags": []}}},
+        content_profile={"subject_brand": "Loop露普", "subject_model": "SK05二代Pro UV版", "subject_type": "EDC手电"},
+    )
+
+    assert packaging["platforms"]["bilibili"]["titles"][0].startswith("Loop露普 SK05二代Pro UV版：")
+    assert "Loop露普 SK05二代Pro UV版" in packaging["platforms"]["bilibili"]["description"]
+    assert packaging["platforms"]["xiaohongshu"]["titles"][0] == "Loop露普 SK05二代Pro UV版终于到手，细节直接封神"
 
 
 def test_normalize_platform_packaging_applies_global_copy_style_to_fallbacks():
@@ -128,3 +140,158 @@ def test_normalize_platform_packaging_applies_platform_bias_to_descriptions():
     assert "压进这一条里了" in packaging["platforms"]["douyin"]["description"]
     assert "按实话给你讲" in packaging["platforms"]["kuaishou"]["description"]
     assert "方便快速做判断" in packaging["platforms"]["wechat_channels"]["description"]
+
+
+def test_normalize_platform_packaging_strips_unverified_spec_claims():
+    packaging = normalize_platform_packaging(
+        {
+            "highlights": {
+                "strongest_selling_point": "极亮直接翻倍到2500流明",
+                "title_hook": "还没发布呢闲鱼已经有人卖了",
+            },
+            "platforms": {
+                "bilibili": {
+                    "titles": ["极亮2500流明！SK05二代Pro UV版升级太狠了"],
+                    "description": "极亮直接翻倍到2500流明，UV灯功率1200毫瓦。",
+                    "tags": [],
+                }
+            },
+        },
+        content_profile={"subject_brand": "Loop露普", "subject_model": "SK05二代Pro UV版", "subject_type": "手电"},
+        fact_sheet={"status": "unverified", "verified_facts": [], "official_sources": []},
+    )
+
+    assert packaging["highlights"]["strongest_selling_point"] == ""
+    assert "2500" not in packaging["platforms"]["bilibili"]["titles"][0]
+    assert "1200" not in packaging["platforms"]["bilibili"]["description"]
+
+
+def test_normalize_platform_packaging_keeps_verified_spec_claims():
+    packaging = normalize_platform_packaging(
+        {
+            "highlights": {
+                "strongest_selling_point": "总光通量4360流明，射程405米",
+            },
+            "platforms": {
+                "bilibili": {
+                    "titles": ["SK05 Pro 4360流明和405米射程到底够不够用"],
+                    "description": "这次重点看4360流明总光通量和405米射程。",
+                    "tags": [],
+                }
+            },
+        },
+        content_profile={"subject_brand": "Loop", "subject_model": "SK05 Pro", "subject_type": "手电"},
+        fact_sheet={
+            "status": "verified",
+            "verified_facts": [
+                {"fact": "总光通量 4360 lm", "source_url": "https://example.com/spec", "source_title": "spec"},
+                {"fact": "射程 405 m", "source_url": "https://example.com/spec", "source_title": "spec"},
+            ],
+            "official_sources": [{"title": "spec", "url": "https://example.com/spec"}],
+        },
+    )
+
+    assert "4360" in packaging["platforms"]["bilibili"]["titles"][0]
+    assert "405" in packaging["platforms"]["bilibili"]["description"]
+
+
+def test_normalize_platform_packaging_replaces_wrong_near_sound_identity_with_confirmed_anchor():
+    packaging = normalize_platform_packaging(
+        {
+            "highlights": {
+                "title_hook": "今天给大家介绍一个意料之外的新品，陆虎SK零五二代。",
+            },
+            "platforms": {
+                "bilibili": {
+                    "titles": ["Loop露普EDC手电：今天给大家介绍一个意料之外的新品，陆虎SK零五二代。"],
+                    "description": "这次开箱的是Loop露普EDC手电。",
+                    "tags": [],
+                }
+            },
+        },
+        content_profile={"subject_brand": "Loop露普", "subject_model": "SK05二代Pro UV版", "subject_type": "手电"},
+        fact_sheet={"status": "unverified", "verified_facts": [], "official_sources": []},
+    )
+
+    assert packaging["highlights"]["title_hook"] == "这次重点看哪些细节"
+    assert packaging["platforms"]["bilibili"]["titles"][0].startswith("Loop露普 SK05二代Pro UV版：")
+    assert "陆虎" not in packaging["platforms"]["bilibili"]["titles"][0]
+
+
+def test_normalize_platform_packaging_adds_author_info_by_platform_strategy():
+    author_profile = {
+        "display_name": "赛博迪克朗",
+        "presenter_alias": "CyberDickLang",
+        "creator_profile": {
+            "identity": {
+                "public_name": "赛博迪克朗",
+                "title": "EDC评测作者",
+            },
+            "positioning": {
+                "creator_focus": "手电开箱、EDC装备",
+                "style": "真实上手、不接硬广",
+                "expertise": ["手电", "EDC", "工具"],
+            },
+        },
+    }
+
+    packaging = normalize_platform_packaging(
+        {"highlights": {}, "platforms": {"bilibili": {"titles": [], "description": "", "tags": []}}},
+        content_profile={"subject_brand": "Loop露普", "subject_model": "SK05二代Pro UV版", "subject_type": "手电"},
+        author_profile=author_profile,
+    )
+
+    assert "赛博迪克朗" in packaging["platforms"]["bilibili"]["description"]
+    assert "长期关注手电开箱、EDC装备" in packaging["platforms"]["bilibili"]["description"]
+    assert "平时主要分享手电开箱、EDC装备" in packaging["platforms"]["xiaohongshu"]["description"]
+    assert "平时就盯手电开箱、EDC装备" in packaging["platforms"]["douyin"]["description"]
+    assert "平时就爱折腾手电开箱、EDC装备" in packaging["platforms"]["kuaishou"]["description"]
+
+
+def test_normalize_platform_packaging_rewrites_overly_similar_descriptions():
+    same_description = "这次开箱的是Loop露普 SK05二代Pro UV版，重点看细节、质感和真实上手体验，方便快速做判断。"
+
+    packaging = normalize_platform_packaging(
+        {
+            "highlights": {},
+            "platforms": {
+                "bilibili": {"titles": [], "description": same_description, "tags": []},
+                "xiaohongshu": {"titles": [], "description": same_description, "tags": []},
+                "douyin": {"titles": [], "description": same_description, "tags": []},
+                "kuaishou": {"titles": [], "description": same_description, "tags": []},
+                "wechat_channels": {"titles": [], "description": same_description, "tags": []},
+            },
+        },
+        content_profile={"subject_brand": "Loop露普", "subject_model": "SK05二代Pro UV版", "subject_type": "手电"},
+    )
+
+    descriptions = [
+        packaging["platforms"][key]["description"]
+        for key in ["bilibili", "xiaohongshu", "douyin", "kuaishou", "wechat_channels"]
+    ]
+
+    assert len(set(descriptions)) == 5
+    assert "不是硬广，更像一次有质感的真实开箱分享" in packaging["platforms"]["xiaohongshu"]["description"]
+    assert "按实话给你讲" in packaging["platforms"]["kuaishou"]["description"]
+
+
+def test_build_fallback_description_uses_creator_cta_and_primary_platform():
+    packaging = normalize_platform_packaging(
+        {"highlights": {}, "platforms": {"wechat_channels": {"titles": [], "description": "", "tags": []}}},
+        content_profile={"subject_brand": "Loop露普", "subject_model": "SK05二代Pro UV版", "subject_type": "手电"},
+        author_profile={
+            "display_name": "赛博迪克朗",
+            "creator_profile": {
+                "identity": {"public_name": "赛博迪克朗", "title": "EDC评测作者"},
+                "positioning": {"creator_focus": "手电开箱、EDC装备"},
+                "publishing": {
+                    "primary_platform": "视频号",
+                    "default_call_to_action": "评论区告诉我你更想看哪类实测？",
+                    "description_strategy": "视频号优先强调可信度和结论。",
+                },
+            },
+        },
+    )
+
+    assert "主内容阵地在视频号" in packaging["platforms"]["wechat_channels"]["description"]
+    assert packaging["platforms"]["wechat_channels"]["description"].endswith("评论区告诉我你更想看哪类实测？")

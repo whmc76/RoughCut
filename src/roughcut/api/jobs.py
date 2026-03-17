@@ -47,6 +47,7 @@ from roughcut.db.models import (
 from roughcut.db.session import get_session
 from roughcut.pipeline.celery_app import celery_app
 from roughcut.pipeline.orchestrator import PIPELINE_STEPS, create_job_steps
+from roughcut.pipeline.quality import QUALITY_ARTIFACT_TYPE
 from roughcut.review.content_profile import _extract_reference_frames
 from roughcut.review.content_profile import apply_content_profile_feedback
 from roughcut.review.content_profile import build_reviewed_transcript_excerpt
@@ -69,6 +70,7 @@ STEP_LABELS = {
     "extract_audio": "提取音频",
     "transcribe": "语音转写",
     "subtitle_postprocess": "字幕后处理",
+    "subtitle_translation": "字幕翻译",
     "content_profile": "内容摘要",
     "summary_review": "信息核对",
     "glossary_review": "术语纠错",
@@ -343,14 +345,37 @@ async def get_content_profile(job_id: uuid.UUID, session: AsyncSession = Depends
         select(JobStep).where(JobStep.job_id == job_id, JobStep.step_name == "summary_review")
     )
     review_step = review_step_result.scalar_one_or_none()
+    active_profile = final if isinstance(final, dict) and final else draft if isinstance(draft, dict) and draft else {}
+    automation_review = active_profile.get("automation_review") if isinstance(active_profile, dict) else {}
     user_memory = await load_content_profile_user_memory(session, channel_profile=job.channel_profile)
     memory = dict(user_memory or {})
     memory["cloud"] = build_content_profile_memory_cloud(user_memory)
+
+    review_step_detail = None
+    if review_step is not None:
+        review_step_detail = str((review_step.metadata_ or {}).get("detail") or "").strip() or None
+    review_reasons = list((automation_review or {}).get("review_reasons") or [])
+    blocking_reasons = list((automation_review or {}).get("blocking_reasons") or [])
+    if review_step is not None:
+        review_reasons = review_reasons or list((review_step.metadata_ or {}).get("review_reasons") or [])
+        blocking_reasons = blocking_reasons or list((review_step.metadata_ or {}).get("blocking_reasons") or [])
+    identity_review = (
+        (active_profile or {}).get("identity_review")
+        if isinstance(active_profile, dict)
+        else None
+    )
+    if identity_review is None and review_step is not None:
+        candidate = (review_step.metadata_ or {}).get("identity_review")
+        identity_review = candidate if isinstance(candidate, dict) else None
 
     return ContentProfileReviewOut(
         job_id=str(job_id),
         status=job.status,
         review_step_status=review_step.status if review_step else "pending",
+        review_step_detail=review_step_detail,
+        review_reasons=review_reasons,
+        blocking_reasons=blocking_reasons,
+        identity_review=identity_review,
         workflow_mode=str(getattr(job, "workflow_mode", "") or "standard_edit"),
         enhancement_modes=list(getattr(job, "enhancement_modes", []) or []),
         draft=draft,
@@ -560,10 +585,20 @@ async def confirm_content_profile(
     memory["cloud"] = build_content_profile_memory_cloud(user_memory)
     await session.commit()
 
+    review_step_detail = None
+    if review_step is not None:
+        review_step_detail = str((review_step.metadata_ or {}).get("detail") or "").strip() or None
+    automation_review = final_profile.get("automation_review") if isinstance(final_profile, dict) else {}
+    identity_review = final_profile.get("identity_review") if isinstance(final_profile, dict) else None
+
     return ContentProfileReviewOut(
         job_id=str(job_id),
         status=job.status,
         review_step_status=review_step.status if review_step else "done",
+        review_step_detail=review_step_detail,
+        review_reasons=list((automation_review or {}).get("review_reasons") or []),
+        blocking_reasons=list((automation_review or {}).get("blocking_reasons") or []),
+        identity_review=identity_review if isinstance(identity_review, dict) else None,
         workflow_mode=job.workflow_mode,
         enhancement_modes=list(job.enhancement_modes or []),
         draft=draft_artifact.data_json,
@@ -808,6 +843,7 @@ async def get_job_activity(job_id: uuid.UUID, session: AsyncSession = Depends(ge
                     "avatar_commentary_plan",
                     "render_outputs",
                     "platform_packaging_md",
+                    QUALITY_ARTIFACT_TYPE,
                 ]
             ),
         )
@@ -1042,6 +1078,38 @@ def _build_activity_decisions(
             }
         )
 
+    quality = next((artifact for artifact in artifacts if artifact.artifact_type == QUALITY_ARTIFACT_TYPE and artifact.data_json), None)
+    if quality and quality.data_json:
+        data = quality.data_json
+        score = data.get("score")
+        grade = str(data.get("grade") or "").strip()
+        recommended_steps = [str(item).strip() for item in (data.get("recommended_rerun_steps") or []) if str(item).strip()]
+        issue_codes = [str(item).strip() for item in (data.get("issue_codes") or []) if str(item).strip()]
+        summary_parts = []
+        if grade or score is not None:
+            summary_parts.append(f"{grade} {float(score):.1f}" if grade and score is not None else str(grade or score))
+        if issue_codes:
+            summary_parts.append(f"{len(issue_codes)} 个扣分项")
+        decisions.append(
+            {
+                "kind": "quality_assessment",
+                "title": "质量评分",
+                "status": "done",
+                "summary": " · ".join(part for part in summary_parts if part).strip() or "质量评分已更新",
+                "detail": (
+                    "；".join(
+                        part for part in [
+                            f"问题：{', '.join(issue_codes)}" if issue_codes else "",
+                            f"建议补跑：{', '.join(recommended_steps)}" if recommended_steps else "",
+                        ]
+                        if part
+                    )
+                    or None
+                ),
+                "updated_at": _iso_or_none(quality.created_at),
+            }
+        )
+
     return decisions
 
 
@@ -1180,6 +1248,23 @@ def _artifact_event_summary(artifact: Artifact) -> dict | None:
                 "title": "数字人成片结果已回写",
                 "detail": str(avatar_result.get("detail") or avatar_result.get("status") or "数字人结果已更新"),
             }
+    if artifact.artifact_type == QUALITY_ARTIFACT_TYPE:
+        score = data.get("score") if isinstance(data, dict) else None
+        grade = str(data.get("grade") or "").strip() if isinstance(data, dict) else ""
+        issue_codes = [str(item).strip() for item in (data.get("issue_codes") or []) if str(item).strip()] if isinstance(data, dict) else []
+        title = "质量评分已更新"
+        detail = " · ".join(
+            part
+            for part in [
+                f"{grade} {float(score):.1f}" if grade and score is not None else (str(score) if score is not None else ""),
+                f"{len(issue_codes)} 个扣分项" if issue_codes else "",
+            ]
+            if part
+        )
+        return {
+            "title": title,
+            "detail": detail or "质量评分已写入",
+        }
     return None
 
 
@@ -1296,6 +1381,11 @@ def _attach_job_preview(job: Job) -> None:
     preview = _resolve_job_content_preview(job.artifacts or [])
     job.content_subject = preview["subject"]
     job.content_summary = preview["summary"]
+    quality_preview = _resolve_job_quality_preview(job.artifacts or [])
+    job.quality_score = quality_preview["score"]
+    job.quality_grade = quality_preview["grade"]
+    job.quality_summary = quality_preview["summary"]
+    job.quality_issue_codes = quality_preview["issue_codes"]
     avatar_preview = _resolve_job_avatar_preview(job)
     job.avatar_delivery_status = avatar_preview["status"]
     job.avatar_delivery_summary = avatar_preview["summary"]
@@ -1434,6 +1524,38 @@ def _resolve_job_avatar_preview(job: Job) -> dict[str, str | None]:
             "summary": str((render_execution or {}).get("error") or "数字人素材生成失败"),
         }
     return {"status": "running", "summary": "数字人计划已生成，等待渲染落地"}
+
+
+def _resolve_job_quality_preview(artifacts: list[Artifact]) -> dict[str, Any]:
+    quality = next(
+        (artifact for artifact in artifacts if artifact.artifact_type == QUALITY_ARTIFACT_TYPE and artifact.data_json),
+        None,
+    )
+    if quality is None or not isinstance(quality.data_json, dict):
+        return {"score": None, "grade": None, "summary": None, "issue_codes": []}
+
+    data = quality.data_json
+    score_raw = data.get("score")
+    try:
+        score = float(score_raw) if score_raw is not None else None
+    except (TypeError, ValueError):
+        score = None
+    grade = str(data.get("grade") or "").strip() or None
+    issue_codes = [str(item).strip() for item in (data.get("issue_codes") or []) if str(item).strip()]
+    summary = " · ".join(
+        part
+        for part in [
+            f"{grade} {score:.1f}" if grade and score is not None else (grade or (f"{score:.1f}" if score is not None else "")),
+            f"{len(issue_codes)} 个扣分项" if issue_codes else "",
+        ]
+        if part
+    ) or None
+    return {
+        "score": score,
+        "grade": grade,
+        "summary": summary,
+        "issue_codes": issue_codes,
+    }
 
 
 def _select_preview_artifact(artifacts: list[Artifact]) -> Artifact | None:

@@ -84,7 +84,14 @@ export function CreativeSettingsPanel({ form, config, options, onChange }: Creat
         .filter((file) => file.role === "speaking_video")
         .map((file) => ({
           value: file.path,
-          label: `${profile.display_name} · ${file.original_name}`,
+          label: [
+            profile.creator_profile?.identity?.public_name || profile.display_name,
+            profile.creator_profile?.identity?.title,
+            profile.creator_profile?.publishing?.primary_platform,
+            file.original_name,
+          ]
+            .filter(Boolean)
+            .join(" · "),
         })),
     )
     .sort((left, right) => left.label.localeCompare(right.label, "zh-CN"));
@@ -146,7 +153,7 @@ export function CreativeSettingsPanel({ form, config, options, onChange }: Creat
           placeholder={config?.avatar_api_key_set ? "已设置，留空则不更新" : "留空则不更新"}
         />
         <SelectField
-          label="从数字人档案选择讲话视频模板"
+          label="从创作者档案选择讲话视频模板"
           value={selectedPresenter?.value ?? ""}
           onChange={(event) => onChange("avatar_presenter_id", event.target.value)}
           options={[
@@ -162,7 +169,7 @@ export function CreativeSettingsPanel({ form, config, options, onChange }: Creat
         <div className="muted">
           {selectedPresenter
             ? `当前已选模板：${selectedPresenter.label}`
-            : "可以直接填写本地模板视频路径，也可以从上面的数字人档案里一键选用讲话视频片段。"}
+            : "可以直接填写本地模板视频路径，也可以从上面的创作者档案里一键选用讲话视频片段。"}
         </div>
         <TextField
           label="数字人布局模板"

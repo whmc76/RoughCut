@@ -22,6 +22,7 @@ from typing import Any
 from roughcut.config import get_settings
 from roughcut.providers.multimodal import complete_with_images
 from roughcut.providers.reasoning.base import extract_json_text
+from roughcut.review.content_profile import _mapped_brand_for_model, _normalize_profile_value, _seed_profile_from_text
 
 COVER_TITLE_STRATEGIES = [
     {
@@ -93,6 +94,36 @@ def _looks_generated_stem(stem: str) -> bool:
     return bool(parts) and all(part.isdigit() for part in parts)
 
 
+def _build_output_subject_prefixes(*, brand: str, model: str) -> list[str]:
+    parts = [str(part or "").strip() for part in (brand, model) if str(part or "").strip()]
+    prefixes: list[str] = []
+    for candidate in (
+        "".join(parts),
+        " ".join(parts),
+        "_".join(parts),
+        "-".join(parts),
+        *(reversed(parts)),
+        *parts,
+    ):
+        value = str(candidate or "").strip()
+        if value and value not in prefixes:
+            prefixes.append(value)
+    return sorted(prefixes, key=len, reverse=True)
+
+
+def _strip_output_subject_prefix(text: str, *, brand: str, model: str) -> str:
+    cleaned = str(text or "").strip()
+    if not cleaned:
+        return ""
+    for prefix in _build_output_subject_prefixes(brand=brand, model=model):
+        while prefix and cleaned.startswith(prefix):
+            remainder = cleaned[len(prefix):].strip(" _-")
+            if not remainder:
+                return ""
+            cleaned = remainder
+    return cleaned
+
+
 def _resolve_output_title_hint(
     source_name: str,
     *,
@@ -103,7 +134,11 @@ def _resolve_output_title_hint(
     brand = str((content_profile or {}).get("subject_brand") or "").strip()
     model = str((content_profile or {}).get("subject_model") or "").strip()
     subject_type = str((content_profile or {}).get("subject_type") or "").strip()
-    video_theme = str((content_profile or {}).get("video_theme") or "").strip()
+    video_theme = _strip_output_subject_prefix(
+        str((content_profile or {}).get("video_theme") or "").strip(),
+        brand=brand,
+        model=model,
+    )
     summary = str((content_profile or {}).get("summary") or (content_profile or {}).get("hook_line") or "").strip()
     cover_title = (content_profile or {}).get("cover_title") if isinstance(content_profile, dict) else None
     cover_title_text = ""
@@ -113,10 +148,16 @@ def _resolve_output_title_hint(
             for key in ("top", "main", "bottom")
             if str(cover_title.get(key) or "").strip()
         ).strip()
+        cover_title_text = _strip_output_subject_prefix(
+            cover_title_text,
+            brand=brand,
+            model=model,
+        )
 
     subject = " ".join(part for part in (brand, model) if part).strip()
     themed_subject = " ".join(part for part in (subject, video_theme) if part).strip()
     subject_fallback = " ".join(part for part in (subject_type, video_theme) if part).strip()
+    title_hint = _strip_output_subject_prefix(str(title_hint or "").strip(), brand=brand, model=model)
     source_key = _normalize_compare_key(stem)
     generic_keys = {
         "shipin",
@@ -128,6 +169,8 @@ def _resolve_output_title_hint(
         "zhetiaoneirong",
     }
     for candidate in (title_hint, themed_subject, subject, subject_fallback, cover_title_text, summary, stem):
+        if _candidate_conflicts_with_subject(candidate, brand=brand, model=model):
+            continue
         normalized = _normalize_output_component(candidate, max_length=56)
         compare_key = _normalize_compare_key(normalized)
         if not normalized or not compare_key:
@@ -138,6 +181,24 @@ def _resolve_output_title_hint(
             continue
         return normalized
     return _normalize_output_component(stem, max_length=56) or "output"
+
+
+def _candidate_conflicts_with_subject(text: str, *, brand: str, model: str) -> bool:
+    candidate = str(text or "").strip()
+    if not candidate or not (brand or model):
+        return False
+    seeded = _seed_profile_from_text(candidate)
+    candidate_brand = str(seeded.get("subject_brand") or "").strip()
+    candidate_model = str(seeded.get("subject_model") or "").strip()
+    if candidate_brand and brand and _normalize_profile_value(candidate_brand) != _normalize_profile_value(brand):
+        return True
+    if candidate_model and model and _normalize_profile_value(candidate_model) != _normalize_profile_value(model):
+        return True
+    mapped_brand = _mapped_brand_for_model(candidate_model or model)
+    effective_brand = candidate_brand or brand
+    if mapped_brand and effective_brand and _normalize_profile_value(effective_brand) != _normalize_profile_value(mapped_brand):
+        return True
+    return False
 
 
 def build_output_name(source_name: str, created_at: datetime | None = None) -> str:

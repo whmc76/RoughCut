@@ -17,6 +17,7 @@ import httpx
 from roughcut.config import get_settings
 from roughcut.docker_gpu_guard import hold_managed_gpu_services_async
 from roughcut.media.probe import probe
+from roughcut.providers.voice.indextts2 import build_indextts2_speech_payload
 
 _DEFAULT_HEYGEM_ROOT = Path("E:/WorkSpace/heygem/data")
 _DEFAULT_VOICE_ROOT = Path("data/voice_refs")
@@ -193,6 +194,8 @@ async def synthesize_preview_audio(
     output_path: Path,
     training_reference_name: str = "",
     lang: str = "zh",
+    target_duration_sec: float | None = None,
+    emo_text_weight: float = 1.0,
 ) -> Path:
     settings = get_settings()
     base_url = str(settings.avatar_training_api_base_url or "").strip().rstrip("/")
@@ -208,22 +211,15 @@ async def synthesize_preview_audio(
         raise RuntimeError("indextts2 reference audio is missing")
 
     emotion_text, emotion_strength = _infer_indextts2_preview_emotion(script)
-    payload = {
-        "input": script,
-        "voice": "default",
-        "model": "indextts2",
-        "response_format": "wav",
-        "provider_options": {
-            "output_mode": "base64",
-            "speaker_audio_base64": base64.b64encode(reference_audio_path.read_bytes()).decode("utf-8"),
-            "emo_text": emotion_text,
-            "use_emo_text": True,
-            "auto_mix_emotion": True,
-            "emotion_strength": emotion_strength,
-            "interval_silence": 120,
-            "max_text_tokens_per_segment": 120,
-        },
-    }
+    payload = build_indextts2_speech_payload(
+        text=script,
+        speaker_audio_base64=base64.b64encode(reference_audio_path.read_bytes()).decode("utf-8"),
+        emotion_text=emotion_text,
+        emotion_strength=emotion_strength,
+        emo_text_weight=emo_text_weight,
+        use_speed=target_duration_sec is not None,
+        target_dur=target_duration_sec,
+    )
 
     timeout = httpx.Timeout(300.0, connect=10.0)
     async with hold_managed_gpu_services_async(

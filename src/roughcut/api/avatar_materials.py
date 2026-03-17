@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import uuid
 from pathlib import Path
 from typing import Any
@@ -15,6 +16,9 @@ from roughcut.avatar import (
     delete_avatar_material_profile,
     get_avatar_material_profile,
     now_iso,
+    normalize_creator_profile,
+    normalize_avatar_personal_info,
+    personal_info_from_creator_profile,
     sanitize_filename,
     save_avatar_material_profile,
 )
@@ -42,6 +46,8 @@ class AvatarMaterialProfileUpdate(BaseModel):
     display_name: str | None = None
     presenter_alias: str | None = None
     notes: str | None = None
+    personal_info: dict[str, Any] | None = None
+    creator_profile: dict[str, Any] | None = None
 
 
 @router.get("", response_model=AvatarMaterialLibraryOut)
@@ -68,6 +74,8 @@ async def upload_avatar_material_profile(
     display_name: str = Form(...),
     presenter_alias: str | None = Form(None),
     notes: str | None = Form(None),
+    personal_info_json: str | None = Form(None),
+    creator_profile_json: str | None = Form(None),
     speaking_videos: list[UploadFile] | None = File(None),
     portrait_photos: list[UploadFile] | None = File(None),
     voice_samples: list[UploadFile] | None = File(None),
@@ -89,6 +97,23 @@ async def upload_avatar_material_profile(
     training_api_available = await is_heygem_training_available()
     preview_service_available = await is_heygem_preview_available()
     profile_id, profile_dir = create_profile_dir(cleaned_name)
+    personal_info = _parse_personal_info_form(
+        personal_info_json,
+        display_name=cleaned_name,
+        presenter_alias=str(presenter_alias or "").strip(),
+    )
+    creator_profile = _parse_creator_profile_form(
+        creator_profile_json,
+        display_name=cleaned_name,
+        presenter_alias=str(presenter_alias or "").strip(),
+        notes=str(notes or "").strip(),
+        personal_info=personal_info,
+    )
+    personal_info = personal_info_from_creator_profile(
+        creator_profile,
+        display_name=cleaned_name,
+        presenter_alias=str(presenter_alias or "").strip(),
+    )
     stored_files: list[dict[str, Any]] = []
     blocking_issues: list[str] = []
     warnings: list[str] = []
@@ -151,6 +176,8 @@ async def upload_avatar_material_profile(
         "display_name": cleaned_name,
         "presenter_alias": str(presenter_alias or "").strip() or None,
         "notes": str(notes or "").strip() or None,
+        "personal_info": personal_info,
+        "creator_profile": creator_profile,
         "profile_dir": str(profile_dir),
         "training_status": profile_state["training_status"],
         "training_provider": "heygem",
@@ -282,6 +309,27 @@ async def update_avatar_material_profile(profile_id: str, payload: AvatarMateria
     if payload.notes is not None:
         profile["notes"] = str(payload.notes).strip() or None
 
+    if payload.personal_info is not None:
+        profile["personal_info"] = normalize_avatar_personal_info(
+            payload.personal_info,
+            display_name=str(profile.get("display_name") or "").strip(),
+            presenter_alias=str(profile.get("presenter_alias") or "").strip(),
+        )
+
+    if payload.creator_profile is not None:
+        profile["creator_profile"] = normalize_creator_profile(
+            payload.creator_profile,
+            personal_info=profile.get("personal_info") if isinstance(profile.get("personal_info"), dict) else None,
+            display_name=str(profile.get("display_name") or "").strip(),
+            presenter_alias=str(profile.get("presenter_alias") or "").strip(),
+            notes=str(profile.get("notes") or "").strip(),
+        )
+        profile["personal_info"] = personal_info_from_creator_profile(
+            profile["creator_profile"],
+            display_name=str(profile.get("display_name") or "").strip(),
+            presenter_alias=str(profile.get("presenter_alias") or "").strip(),
+        )
+
     save_avatar_material_profile(profile)
     return await get_avatar_materials()
 
@@ -368,6 +416,62 @@ def _list_profiles() -> list[dict[str, Any]]:
 
     profiles = list_avatar_material_profiles()
     return profiles
+
+
+def _parse_personal_info_form(
+    raw: str | None,
+    *,
+    display_name: str,
+    presenter_alias: str,
+) -> dict[str, Any]:
+    if raw is None or not str(raw).strip():
+        return normalize_avatar_personal_info(
+            None,
+            display_name=display_name,
+            presenter_alias=presenter_alias,
+        )
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid personal_info_json: {exc.msg}") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="personal_info_json must be a JSON object")
+    return normalize_avatar_personal_info(
+        payload,
+        display_name=display_name,
+        presenter_alias=presenter_alias,
+    )
+
+
+def _parse_creator_profile_form(
+    raw: str | None,
+    *,
+    display_name: str,
+    presenter_alias: str,
+    notes: str,
+    personal_info: dict[str, Any] | None,
+) -> dict[str, Any]:
+    if raw is None or not str(raw).strip():
+        return normalize_creator_profile(
+            None,
+            personal_info=personal_info,
+            display_name=display_name,
+            presenter_alias=presenter_alias,
+            notes=notes,
+        )
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid creator_profile_json: {exc.msg}") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="creator_profile_json must be a JSON object")
+    return normalize_creator_profile(
+        payload,
+        personal_info=personal_info,
+        display_name=display_name,
+        presenter_alias=presenter_alias,
+        notes=notes,
+    )
 
 
 def _build_profile_runtime_state(
@@ -645,7 +749,14 @@ def _merge_checks(file_record: dict[str, Any], blocking_issues: list[str], warni
 
 
 def _default_preview_script(profile: dict[str, Any]) -> str:
-    name = str(profile.get("display_name") or "该数字人").strip() or "该数字人"
+    creator_profile = profile.get("creator_profile") if isinstance(profile.get("creator_profile"), dict) else {}
+    identity = creator_profile.get("identity") if isinstance(creator_profile.get("identity"), dict) else {}
+    name = (
+        str(identity.get("public_name") or "").strip()
+        or str(profile.get("presenter_alias") or "").strip()
+        or str(profile.get("display_name") or "该数字人").strip()
+        or "该数字人"
+    )
     return (
         f"大家好，我是{name}。"
         "现在这是一条 RoughCut 自动生成的数字人预览样片，"

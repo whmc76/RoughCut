@@ -5,9 +5,10 @@ import re
 import uuid
 from dataclasses import dataclass
 
+from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from roughcut.db.models import SubtitleItem, TranscriptSegment
+from roughcut.db.models import FactClaim, SubtitleCorrection, SubtitleItem, TranscriptSegment
 
 
 @dataclass
@@ -19,15 +20,141 @@ class SubtitleEntry:
     text_norm: str
 
 
-# Chinese filler words / hedge words
-FILLER_PATTERNS = re.compile(
-    r"(?:那个|这个|嗯|啊|呃|就是|然后|对吧|对对对|好吧|这样子|那么|所以说|总的来说)+",
-    re.UNICODE,
+_ER_FILLER_RE = re.compile(r"呃+")
+_CHINESE_DIGIT_VALUES = {
+    "零": 0,
+    "〇": 0,
+    "一": 1,
+    "二": 2,
+    "两": 2,
+    "三": 3,
+    "四": 4,
+    "五": 5,
+    "六": 6,
+    "七": 7,
+    "八": 8,
+    "九": 9,
+}
+_CHINESE_UNIT_VALUES = {
+    "十": 10,
+    "百": 100,
+    "千": 1000,
+    "万": 10000,
+}
+_DISPLAY_ORDINAL_UNITS = (
+    "分钟",
+    "小时",
+    "句",
+    "步",
+    "代",
+    "次",
+    "档",
+    "页",
+    "期",
+    "集",
+    "层",
+    "排",
+    "条",
+    "款",
+    "件",
+    "章",
+    "轮",
+    "名",
+    "天",
+    "年",
+    "月",
+    "秒",
+    "个",
 )
-
-# Chinese number normalization: 1 -> 一, etc. (basic)
-_NUM_MAP = {"0": "零", "1": "一", "2": "二", "3": "三", "4": "四",
-            "5": "五", "6": "六", "7": "七", "8": "八", "9": "九"}
+_DISPLAY_QUANTITY_UNITS = (
+    "分钟",
+    "小时",
+    "代",
+    "档",
+    "个",
+    "倍",
+    "号",
+    "次",
+    "年",
+    "月",
+    "天",
+    "秒",
+    "项",
+    "种",
+    "款",
+    "把",
+    "条",
+    "层",
+    "米",
+    "元",
+    "块",
+    "颗",
+    "排",
+    "面",
+    "页",
+    "张",
+    "集",
+    "级",
+    "斤",
+)
+_DISPLAY_NUM_TOKEN = r"[零〇一二两三四五六七八九十百千万\d]+"
+_DISPLAY_ORDINAL_UNIT_PATTERN = "|".join(
+    sorted((re.escape(unit) for unit in _DISPLAY_ORDINAL_UNITS), key=len, reverse=True)
+)
+_DISPLAY_QUANTITY_UNIT_PATTERN = "|".join(
+    sorted((re.escape(unit) for unit in _DISPLAY_QUANTITY_UNITS), key=len, reverse=True)
+)
+_PERCENT_NUMBER_RE = re.compile(rf"百分之(?P<number>{_DISPLAY_NUM_TOKEN})")
+_ORDINAL_NUMBER_RE = re.compile(
+    rf"第(?P<number>{_DISPLAY_NUM_TOKEN})(?P<unit>{_DISPLAY_ORDINAL_UNIT_PATTERN})"
+)
+_QUANTITY_NUMBER_RE = re.compile(
+    rf"(?<![第A-Za-z0-9])(?P<number>{_DISPLAY_NUM_TOKEN})(?P<unit>{_DISPLAY_QUANTITY_UNIT_PATTERN})"
+)
+_SUBTITLE_FILLER_PREFIX_TOKENS = (
+    "呃",
+    "嗯",
+    "啊",
+    "吧",
+    "呢",
+    "吗",
+    "嘛",
+    "呀",
+    "哈",
+    "哦",
+    "诶",
+    "欸",
+    "哎",
+    "那个",
+    "这个",
+    "就是",
+    "然后",
+    "其实",
+    "那么",
+    "对吧",
+    "好吧",
+    "这样子",
+    "所以说",
+    "总的来说",
+)
+_SUBTITLE_FILLER_WHOLE_CLAUSE_TOKENS = {
+    "那个",
+    "这个",
+    "就是",
+    "然后",
+    "其实",
+    "那么",
+    "对吧",
+    "好吧",
+    "这样子",
+    "所以说",
+    "总的来说",
+}
+_INLINE_FILLER_RE = re.compile(r"(?:呃|嗯|诶|欸|哎|哈|哦)+")
+_INLINE_PARTICLE_RE = re.compile(r"(?<=[\u4e00-\u9fffA-Za-z0-9])(?:啊|吧|呢|吗|嘛|呀)(?=[\u4e00-\u9fffA-Za-z0-9])")
+_TRAILING_FILLER_RE = re.compile(r"(?:呢|吗|嘛|呀|哈|哦|诶|欸|哎)+$")
+_TRAILING_KEEPABLE_PARTICLE_RE = re.compile(r"(?:啊+|吧+)$")
+_TERMINAL_PUNCTUATION = "。！？!?"
 _HARD_BREAK_CHARS = "。！？!?；;"
 _SOFT_BREAK_CHARS = "，,、：:"
 _NO_SPLIT_ENDINGS = (
@@ -69,19 +196,197 @@ _BOUNDARY_PROTECTED_TERMS = (
 
 def normalize_text(text: str) -> str:
     """Apply punctuation cleanup and whitespace normalization."""
-    # Remove leading/trailing whitespace
-    text = text.strip()
-    # Collapse repeated punctuation
+    text = normalize_display_text(text)
     text = re.sub(r"[，,]{2,}", "，", text)
     text = re.sub(r"[。.]{2,}", "。", text)
     text = re.sub(r"[，,]+[。.!！？]+", "。", text)
     text = re.sub(r"[。.!！？]+[，,]+", "。", text)
-    # Remove space around Chinese characters
-    text = re.sub(r"([\u4e00-\u9fff])\s+(?=[\u4e00-\u9fff])", r"\1", text)
-    # Ensure ends with punctuation if longer than 5 chars
-    if len(text) > 5 and not text[-1] in "。！？，、…":
+    if len(text) > 5 and text and text[-1] not in "。！？，、…":
         text += "。"
     return text
+
+
+def normalize_display_text(text: str, *, cleanup_fillers: bool = True) -> str:
+    result = str(text or "").strip()
+    if not result:
+        return result
+    result = re.sub(r"([\u4e00-\u9fff])\s+(?=[\u4e00-\u9fff])", r"\1", result)
+    if cleanup_fillers:
+        result = cleanup_subtitle_fillers(result)
+    result = _normalize_display_numbers(result)
+    result = apply_subtitle_clause_spacing(result)
+    result = re.sub(r"\s+([，,。.!！？；;：:])", r"\1", result)
+    result = re.sub(r"([，；：])(?=[^\s])", r"\1 ", result)
+    result = re.sub(r"[，,]{2,}", "，", result)
+    result = re.sub(r"[。.]{2,}", "。", result)
+    result = re.sub(r"[，,]+([。.!！？])", r"\1", result)
+    result = re.sub(r"\s{2,}", " ", result)
+    return result.strip("，,")
+
+
+def cleanup_subtitle_fillers(text: str) -> str:
+    result = str(text or "").strip()
+    if not result:
+        return result
+
+    pieces = [piece for piece in re.split(r"([，,。！？!?；;])", result) if piece != ""]
+    cleaned: list[str] = []
+    for index, piece in enumerate(pieces):
+        if piece in "，,。！？!?；;":
+            if cleaned and cleaned[-1] in "，,；;" and piece in _TERMINAL_PUNCTUATION:
+                cleaned[-1] = piece
+                continue
+            if cleaned and cleaned[-1] not in "，,。！？!?；;":
+                cleaned.append(piece)
+            continue
+
+        clause = piece.strip()
+        if not clause:
+            continue
+        clause = _strip_subtitle_filler_prefixes(clause)
+        clause = _ER_FILLER_RE.sub("", clause)
+        clause = _INLINE_FILLER_RE.sub("", clause)
+        clause = _INLINE_PARTICLE_RE.sub("", clause)
+        clause = _strip_subtitle_filler_suffixes(
+            clause,
+            keep_sentence_final_particle=_next_piece_is_terminal_punctuation(pieces, index),
+        )
+        clause = _strip_subtitle_filler_prefixes(clause)
+        clause = clause.strip("，, ")
+        if not clause or clause in _SUBTITLE_FILLER_WHOLE_CLAUSE_TOKENS:
+            continue
+        cleaned.append(clause)
+
+    collapsed = "".join(cleaned).strip("，,")
+    collapsed = re.sub(r"([，,；;]){2,}", lambda match: match.group(0)[0], collapsed)
+    collapsed = re.sub(r"[，,]+([。！？!?；;])", r"\1", collapsed)
+    return collapsed
+
+
+def apply_subtitle_clause_spacing(text: str) -> str:
+    result = str(text or "").strip()
+    if not result or len(result.replace(" ", "")) <= 10:
+        return result
+    result = re.sub(r"([，；：])(?=[^\s])", r"\1 ", result)
+    if " " not in result and len(result) >= 14:
+        for token in _GOOD_BREAK_PREFIXES:
+            result = re.sub(rf"(?<!^)(?<!\s)(?={re.escape(token)})", " ", result)
+    return re.sub(r"\s{2,}", " ", result).strip()
+
+
+def _normalize_display_numbers(text: str) -> str:
+    if not text:
+        return text
+
+    def replace_percent(match: re.Match[str]) -> str:
+        number = _normalize_numeric_token(match.group("number"))
+        return f"{number}%" if number else match.group(0)
+
+    def replace_ordinal(match: re.Match[str]) -> str:
+        number = _normalize_numeric_token(match.group("number"))
+        unit = match.group("unit")
+        return f"第{number}{unit}" if number else match.group(0)
+
+    def replace_quantity(match: re.Match[str]) -> str:
+        number = _normalize_numeric_token(match.group("number"))
+        unit = match.group("unit")
+        return f"{number}{unit}" if number else match.group(0)
+
+    result = _PERCENT_NUMBER_RE.sub(replace_percent, text)
+    result = _ORDINAL_NUMBER_RE.sub(replace_ordinal, result)
+    result = _QUANTITY_NUMBER_RE.sub(replace_quantity, result)
+    return result
+
+
+def _normalize_numeric_token(token: str) -> str:
+    value = str(token or "").strip()
+    if not value:
+        return value
+    if value.isdigit():
+        return value
+    if re.fullmatch(r"[零〇一二两三四五六七八九]+", value):
+        return "".join(str(_CHINESE_DIGIT_VALUES[char]) for char in value)
+    parsed = _parse_chinese_number(value)
+    return str(parsed) if parsed is not None else value
+
+
+def _parse_chinese_number(token: str) -> int | None:
+    if not token:
+        return None
+    total = 0
+    section = 0
+    number = 0
+    saw_token = False
+    for char in token:
+        if char.isdigit():
+            number = number * 10 + int(char)
+            saw_token = True
+            continue
+        if char in _CHINESE_DIGIT_VALUES:
+            number = _CHINESE_DIGIT_VALUES[char]
+            saw_token = True
+            continue
+        unit = _CHINESE_UNIT_VALUES.get(char)
+        if unit is None:
+            return None
+        saw_token = True
+        if unit == 10000:
+            section = (section + (number or 1)) * unit
+            total += section
+            section = 0
+            number = 0
+            continue
+        section += (number or 1) * unit
+        number = 0
+    if not saw_token:
+        return None
+    return total + section + number
+
+
+def _strip_subtitle_filler_prefixes(text: str) -> str:
+    result = str(text or "").strip()
+    changed = True
+    while result and changed:
+        changed = False
+        result = result.lstrip("，, ")
+        for token in _SUBTITLE_FILLER_PREFIX_TOKENS:
+            if result.startswith(token) and len(result) > len(token):
+                result = result[len(token):].lstrip("，, ")
+                changed = True
+                break
+    return result
+
+
+def _strip_subtitle_filler_suffixes(text: str, *, keep_sentence_final_particle: bool) -> str:
+    result = str(text or "").strip().rstrip("，, ")
+    if not result:
+        return result
+
+    while True:
+        changed = False
+        for token in (*_SUBTITLE_FILLER_WHOLE_CLAUSE_TOKENS, "呢", "吗", "嘛", "呀", "哈", "哦", "诶", "欸", "哎"):
+            if result.endswith(token):
+                result = result[:-len(token)].rstrip("，, ")
+                changed = True
+                break
+        if not changed:
+            break
+
+    result = _TRAILING_FILLER_RE.sub("", result).rstrip("，, ")
+    if keep_sentence_final_particle:
+        result = _TRAILING_KEEPABLE_PARTICLE_RE.sub(lambda match: match.group(0)[-1], result)
+    else:
+        result = _TRAILING_KEEPABLE_PARTICLE_RE.sub("", result).rstrip("，, ")
+    return result
+
+
+def _next_piece_is_terminal_punctuation(pieces: list[str], index: int) -> bool:
+    for next_index in range(index + 1, len(pieces)):
+        next_piece = pieces[next_index]
+        if not next_piece.strip():
+            continue
+        return next_piece in _TERMINAL_PUNCTUATION
+    return True
 
 
 def split_into_subtitles(
@@ -427,8 +732,8 @@ def _are_near_duplicate_subtitles(left: str, right: str) -> bool:
 
 
 def _pick_clearer_duplicate_text(left: str, right: str) -> str:
-    left_text = normalize_text(left).rstrip("。！？!?")
-    right_text = normalize_text(right).rstrip("。！？!?")
+    left_text = _normalize_compare_subtitle_text(left).rstrip("。！？!?")
+    right_text = _normalize_compare_subtitle_text(right).rstrip("。！？!?")
     left_compact = _compact_compare_text(left_text)
     right_compact = _compact_compare_text(right_text)
     if len(right_compact) > len(left_compact):
@@ -444,6 +749,16 @@ def _words_to_text(words: list[dict]) -> str:
     return "".join(re.sub(r"\s+", "", str(word.get("word", ""))) for word in words)
 
 
+def _normalize_compare_subtitle_text(text: str) -> str:
+    result = str(text or "").strip()
+    result = re.sub(r"[，,]{2,}", "，", result)
+    result = re.sub(r"[。.]{2,}", "。", result)
+    result = re.sub(r"[，,]+[。.!！？]+", "。", result)
+    result = re.sub(r"[。.!！？]+[，,]+", "。", result)
+    result = re.sub(r"([\u4e00-\u9fff])\s+(?=[\u4e00-\u9fff])", r"\1", result)
+    return result
+
+
 async def save_subtitle_items(
     job_id: uuid.UUID,
     entries: list[SubtitleEntry],
@@ -451,6 +766,10 @@ async def save_subtitle_items(
     version: int = 1,
 ) -> list[SubtitleItem]:
     """Persist subtitle entries to the database."""
+    await session.execute(delete(SubtitleCorrection).where(SubtitleCorrection.job_id == job_id))
+    await session.execute(delete(FactClaim).where(FactClaim.job_id == job_id))
+    await session.execute(delete(SubtitleItem).where(SubtitleItem.job_id == job_id, SubtitleItem.version == version))
+
     items: list[SubtitleItem] = []
     for entry in entries:
         item = SubtitleItem(

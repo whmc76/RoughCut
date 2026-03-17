@@ -85,6 +85,11 @@ def assess_glossary_correction_automation(
     }
 
 
+def _is_brand_like_category(value: Any) -> bool:
+    normalized = str(value or "").strip().lower()
+    return bool(normalized and "brand" in normalized)
+
+
 async def apply_glossary_corrections(
     job_id: uuid.UUID,
     subtitle_items: list[SubtitleItem],
@@ -112,6 +117,7 @@ async def apply_glossary_corrections(
         for term in terms:
             correct_form = str(term.correct_form if isinstance(term, GlossaryTerm) else term.get("correct_form") or "").strip()
             wrong_forms = term.wrong_forms if isinstance(term, GlossaryTerm) else list(term.get("wrong_forms") or [])
+            category = str(term.category if isinstance(term, GlossaryTerm) else term.get("category") or "")
             if not correct_form:
                 continue
             for wrong_form in wrong_forms:
@@ -129,7 +135,9 @@ async def apply_glossary_corrections(
                         match_start=match.start(),
                         match_end=match.end(),
                         confidence=0.95,
-                        auto_accept_enabled=settings.auto_accept_glossary_corrections,
+                        auto_accept_enabled=(
+                            settings.auto_accept_glossary_corrections and not _is_brand_like_category(category)
+                        ),
                         threshold=settings.glossary_correction_review_threshold,
                     )
                     correction = SubtitleCorrection(

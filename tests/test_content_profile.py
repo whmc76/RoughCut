@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 
 from roughcut.edit.presets import get_workflow_preset
@@ -8,6 +9,7 @@ import pytest
 from roughcut.review.content_profile import (
     _merge_specific_profile_hints,
     _apply_visual_subject_guard,
+    _infer_visual_profile_hints,
     _sanitize_profile_identity,
     _seed_profile_from_text,
     _seed_profile_from_user_memory,
@@ -85,6 +87,34 @@ def test_seed_profile_from_text_extracts_flashlight_brand_and_model():
     assert any("SK05" in item for item in seeded["search_queries"])
 
 
+def test_seed_profile_from_text_extracts_bag_brand_and_model_from_fxx1_alias():
+    seeded = _seed_profile_from_text("这期鸿福 F叉二一小副包做个开箱测评，重点看分仓、挂点和日常收纳。")
+
+    assert seeded["subject_brand"] == "狐蝠工业"
+    assert seeded["subject_model"] == "FXX1小副包"
+    assert seeded["subject_type"] == "EDC机能包"
+    assert seeded["video_theme"] == "狐蝠工业FXX1小副包开箱与上手评测"
+    assert any("FXX1小副包" in item for item in seeded["search_queries"])
+
+
+def test_seed_profile_from_text_uses_glossary_brand_and_generic_model():
+    seeded = _seed_profile_from_text(
+        "今天开箱狐蝠工业 F21 小副包，主要看看分仓和挂点。",
+        glossary_terms=[
+            {
+                "correct_form": "FOXBAT狐蝠工业",
+                "wrong_forms": ["狐蝠工业", "FOXBAT"],
+                "category": "bag_brand",
+            }
+        ],
+    )
+
+    assert seeded["subject_brand"] == "FOXBAT狐蝠工业"
+    assert seeded["subject_model"] == "F21小副包"
+    assert seeded["subject_type"] == "EDC机能包"
+    assert any("F21" in item for item in seeded["search_queries"])
+
+
 def test_sanitize_profile_identity_backfills_supported_transcript_brand_and_model():
     sanitized = _sanitize_profile_identity(
         {
@@ -117,6 +147,26 @@ def test_sanitize_profile_identity_backfills_brand_model_from_specific_theme():
 
     assert sanitized["subject_brand"] == "Loop露普"
     assert sanitized["subject_model"] == "SK05二代UV版"
+
+
+def test_sanitize_profile_identity_corrects_conflicting_brand_model_pair():
+    sanitized = _sanitize_profile_identity(
+        {
+            "subject_brand": "LEATHERMAN",
+            "subject_model": "SK05二代Pro UV版",
+            "subject_type": "EDC手电",
+            "video_theme": "LEATHERMAN SK05二代Pro UV版开箱对比评测",
+            "summary": "这次重点看 LEATHERMAN SK05二代Pro UV版 的升级。",
+        },
+        transcript_excerpt="这次主要看 Loop露普 SK05二代Pro UV版 的泛光、UV 和二代变化。Loop露普这一代的灯珠排列也变了。",
+        source_name="Loop露普_SK05二代ProUV版_20260225-153519.mp4",
+        memory_hints=None,
+    )
+
+    assert sanitized["subject_brand"] == ""
+    assert sanitized["subject_model"] == "SK05二代Pro UV版"
+    assert sanitized["video_theme"] == ""
+    assert sanitized["summary"] == ""
 
 
 def test_merge_specific_profile_hints_upgrades_generic_video_theme():
@@ -396,6 +446,8 @@ def test_apply_visual_subject_guard_overrides_conflicting_subject_type():
         "subject_type": "智能灯具",
         "visual_hints": {
             "subject_type": "EDC折刀",
+            "subject_brand": "REATE",
+            "subject_model": "EXO-M",
             "visible_text": "MT33",
         },
     }
@@ -403,7 +455,55 @@ def test_apply_visual_subject_guard_overrides_conflicting_subject_type():
     _apply_visual_subject_guard(profile)
 
     assert profile["subject_type"] == "EDC折刀"
+    assert profile["subject_brand"] == "REATE"
+    assert profile["subject_model"] == "EXO-M"
     assert profile["visible_text"] == "MT33"
+
+
+@pytest.mark.asyncio
+async def test_infer_visual_profile_hints_extracts_visible_identity(monkeypatch: pytest.MonkeyPatch):
+    from roughcut.review import content_profile as content_profile_module
+
+    async def fake_complete_with_images(*args, **kwargs):
+        return '{"subject_type":"EDC机能包","subject_brand":"FOXBAT狐蝠工业","subject_model":"F21小副包","visible_text":"FOXBAT F21","reason":"包装正面可见品牌和型号"}'
+
+    monkeypatch.setattr(content_profile_module, "complete_with_images", fake_complete_with_images)
+
+    hints = await _infer_visual_profile_hints([])
+    assert hints == {}
+
+    hints = await _infer_visual_profile_hints([SimpleNamespace()])
+
+    assert hints["subject_type"] == "EDC机能包"
+    assert hints["subject_brand"] == "FOXBAT狐蝠工业"
+    assert hints["subject_model"] == "F21小副包"
+    assert hints["visible_text"] == "FOXBAT F21"
+
+
+@pytest.mark.asyncio
+async def test_infer_visual_profile_hints_votes_across_frames(monkeypatch: pytest.MonkeyPatch):
+    from roughcut.review import content_profile as content_profile_module
+
+    async def fake_complete_with_images(prompt, image_paths, **kwargs):
+        frame_name = image_paths[0].name
+        if frame_name == "frame_01.jpg":
+            return '{"subject_type":"EDC机能包","subject_brand":"FOXBAT狐蝠工业","subject_model":"F21小副包","visible_text":"FOXBAT F21","reason":"包装正面清晰"}'
+        if frame_name == "frame_02.jpg":
+            return '{"subject_type":"EDC机能包","subject_brand":"FOXBAT狐蝠工业","subject_model":"F21小副包","visible_text":"F21","reason":"侧面型号可见"}'
+        if frame_name == "frame_03.jpg":
+            return '{"subject_type":"EDC机能包","subject_brand":"头狼工业","subject_model":"副包","visible_text":"WOLF","reason":"背景卡片误识别"}'
+        return "{}"
+
+    monkeypatch.setattr(content_profile_module, "complete_with_images", fake_complete_with_images)
+
+    hints = await _infer_visual_profile_hints(
+        [Path("frame_01.jpg"), Path("frame_02.jpg"), Path("frame_03.jpg")]
+    )
+
+    assert hints["subject_type"] == "EDC机能包"
+    assert hints["subject_brand"] == "FOXBAT狐蝠工业"
+    assert hints["subject_model"] == "F21小副包"
+    assert hints["visible_text"] == "FOXBAT F21"
 
 
 def test_filter_evidence_by_visual_subject_drops_conflicting_lighting_results():
@@ -485,6 +585,71 @@ def test_assess_content_profile_automation_blocks_product_profile_without_identi
 
     assert assessment["auto_confirm"] is False
     assert "开箱类视频未识别出可验证主体" in assessment["blocking_reasons"]
+
+
+def test_assess_content_profile_automation_blocks_conflicting_brand_and_model():
+    assessment = assess_content_profile_automation(
+        {
+            "preset_name": "edc_tactical",
+            "subject_brand": "LEATHERMAN",
+            "subject_model": "SK05二代Pro UV版",
+            "subject_type": "EDC手电",
+            "video_theme": "手电开箱与对比评测",
+            "summary": "这条视频重点讲 SK05二代Pro UV版 的升级和上手体验。",
+            "engagement_question": "这次升级你最在意哪一项？",
+            "search_queries": ["Loop露普 SK05二代Pro UV版", "SK05二代Pro UV版 开箱"],
+            "cover_title": {"top": "Loop露普", "main": "SK05二代Pro UV版", "bottom": "开箱对比"},
+            "evidence": [{"title": "Loop露普 SK05二代Pro UV版"}],
+        },
+        subtitle_items=[
+            {"text_raw": "这次主要看 Loop露普 SK05二代Pro UV版 的二代变化和 UV 表现。"},
+            {"text_raw": "后面再看泛光和实际使用。"},
+            {"text_raw": "这代的灯珠排列也有变化。"},
+        ],
+    )
+
+    assert assessment["auto_confirm"] is False
+    assert "开箱类视频主体品牌与型号冲突" in assessment["blocking_reasons"]
+
+
+def test_assess_content_profile_automation_blocks_first_seen_product_identity():
+    assessment = assess_content_profile_automation(
+        {
+            "preset_name": "unboxing_default",
+            "subject_brand": "狐蝠工业",
+            "subject_model": "FXX1小副包",
+            "subject_type": "EDC机能包",
+            "video_theme": "狐蝠工业FXX1小副包开箱与上手评测",
+            "summary": "这条视频主要围绕一款EDC机能包展开，重点看分仓、挂点、收纳，具体品牌型号待人工确认。",
+            "engagement_question": "你更看重副包的分仓还是挂点？",
+            "search_queries": ["狐蝠工业 FXX1小副包"],
+            "cover_title": {"top": "狐蝠工业", "main": "FXX1小副包", "bottom": "分仓挂点先看"},
+            "transcript_excerpt": "[0.0-2.0] 这期鸿福 F叉二一小副包做个开箱测评。",
+        },
+        subtitle_items=[
+            {"text_raw": "这期鸿福 F叉二一小副包做个开箱测评。"},
+            {"text_raw": "重点看分仓和挂点设计。"},
+            {"text_raw": "日常收纳会更直观一点。"},
+        ],
+        user_memory={},
+        glossary_terms=[
+            {"correct_form": "狐蝠工业", "wrong_forms": ["鸿福", "狐蝠"], "category": "bag_brand"},
+            {"correct_form": "FXX1小副包", "wrong_forms": ["F叉二一小副包"], "category": "bag_model"},
+        ],
+        source_name="IMG_0025.mp4",
+    )
+
+    assert assessment["auto_confirm"] is False
+    assert "开箱类视频命中首次品牌/型号且缺少交叉印证，需人工确认" in assessment["blocking_reasons"]
+    assert assessment["identity_review"]["required"] is True
+    assert assessment["identity_review"]["conservative_summary"] is True
+    evidence_bundle = assessment["identity_review"]["evidence_bundle"]
+    assert evidence_bundle["candidate_brand"] == "狐蝠工业"
+    assert evidence_bundle["candidate_model"] == "FXX1小副包"
+    assert evidence_bundle["matched_glossary_aliases"]["brand"] == ["鸿福"]
+    assert evidence_bundle["matched_glossary_aliases"]["model"] == ["F叉二一小副包"]
+    assert evidence_bundle["matched_subtitle_snippets"]
+    assert evidence_bundle["matched_subtitle_snippets"][0].endswith("这期鸿福 F叉二一小副包做个开箱测评。")
 
 
 @pytest.mark.asyncio
@@ -626,6 +791,35 @@ async def test_enrich_content_profile_uses_llm_to_replace_generic_engagement_que
     )
 
     assert result["engagement_question"] == "ARC这次升级你最在意单手开合还是钳头？"
+
+
+@pytest.mark.asyncio
+async def test_enrich_content_profile_backfills_identity_from_glossary_seed(monkeypatch: pytest.MonkeyPatch):
+    from roughcut.review import content_profile as content_profile_module
+
+    def raising_provider():
+        raise RuntimeError("provider unavailable")
+
+    monkeypatch.setattr(content_profile_module, "get_reasoning_provider", raising_provider)
+
+    result = await enrich_content_profile(
+        profile={},
+        source_name="IMG_0001.mp4",
+        channel_profile="edc_tactical",
+        transcript_excerpt="今天开箱狐蝠工业 F21 小副包，先看一下这个分仓设计。",
+        glossary_terms=[
+            {
+                "correct_form": "FOXBAT狐蝠工业",
+                "wrong_forms": ["狐蝠工业", "FOXBAT"],
+                "category": "bag_brand",
+            }
+        ],
+        include_research=False,
+    )
+
+    assert result["subject_brand"] == "FOXBAT狐蝠工业"
+    assert result["subject_model"] == "F21小副包"
+    assert result["subject_type"] == "EDC机能包"
 
 
 @pytest.mark.asyncio
@@ -813,7 +1007,7 @@ async def test_polish_subtitle_items_fallback_uses_phrase_preferences(monkeypatc
     )
 
     assert polished == 1
-    assert item.text_final == "这个次顶配镜面看起来会更亮一点"
+    assert item.text_final == "次顶配镜面看起来会更亮一点"
 
 
 @pytest.mark.asyncio
@@ -1004,7 +1198,7 @@ async def test_polish_subtitle_items_fallback_removes_leading_filler_words(monke
     )
 
     assert polished == 1
-    assert item.text_final == "然后这个包装小了一圈。"
+    assert item.text_final == "包装小了一圈。"
 
 
 @pytest.mark.asyncio
@@ -1070,11 +1264,11 @@ async def test_polish_subtitle_items_fallback_removes_trailing_filler_words(monk
     )
 
     assert polished == 1
-    assert item.text_final == "这个尾绳孔做得非常好。"
+    assert item.text_final == "尾绳孔做得非常好啊。"
 
 
 @pytest.mark.asyncio
-async def test_polish_subtitle_items_fallback_keeps_short_clause_particle(monkeypatch: pytest.MonkeyPatch):
+async def test_polish_subtitle_items_fallback_removes_non_ah_ba_sentence_particle(monkeypatch: pytest.MonkeyPatch):
     from roughcut.review import content_profile as content_profile_module
 
     def raising_provider():
@@ -1103,4 +1297,37 @@ async def test_polish_subtitle_items_fallback_keeps_short_clause_particle(monkey
     )
 
     assert polished == 1
-    assert item.text_final == "尾按呢。"
+    assert item.text_final == "尾按。"
+
+
+@pytest.mark.asyncio
+async def test_polish_subtitle_items_fallback_keeps_sentence_final_ba_and_adds_spacing(monkeypatch: pytest.MonkeyPatch):
+    from roughcut.review import content_profile as content_profile_module
+
+    def raising_provider():
+        raise RuntimeError("provider unavailable")
+
+    class DummySettings:
+        subtitle_filler_cleanup_enabled = True
+
+    monkeypatch.setattr(content_profile_module, "get_reasoning_provider", raising_provider)
+    monkeypatch.setattr(content_profile_module, "get_settings", lambda: DummySettings())
+
+    item = SimpleNamespace(
+        item_index=0,
+        start_time=0.0,
+        end_time=2.0,
+        text_raw="呃然后这个方案是第二代因为有两个档位吧。",
+        text_norm="呃然后这个方案是第二代因为有两个档位吧。",
+        text_final=None,
+    )
+
+    polished = await polish_subtitle_items(
+        [item],
+        content_profile={"preset_name": "edc_tactical"},
+        glossary_terms=[],
+        review_memory={"terms": [], "aliases": [], "style_examples": []},
+    )
+
+    assert polished == 1
+    assert item.text_final == "方案是第2代 因为有2个档位吧。"

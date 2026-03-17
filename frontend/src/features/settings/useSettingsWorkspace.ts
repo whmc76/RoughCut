@@ -4,13 +4,14 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../../api";
 import type { SettingsForm } from "./constants";
 
-const EMPTY_SECRET_KEYS = ["openai_api_key", "anthropic_api_key", "minimax_api_key", "minimax_coding_plan_api_key", "ollama_api_key"] as const;
+const EMPTY_SECRET_KEYS = ["openai_api_key", "anthropic_api_key", "minimax_api_key", "minimax_coding_plan_api_key", "ollama_api_key", "telegram_bot_token"] as const;
 const CREATIVE_SECRET_KEYS = ["avatar_api_key", "voice_clone_api_key"] as const;
 
 function buildSettingsForm(config: NonNullable<ReturnType<typeof api.getConfig> extends Promise<infer T> ? T : never>): SettingsForm {
   return {
     transcription_provider: config.transcription_provider,
     transcription_model: config.transcription_model,
+    transcription_dialect: config.transcription_dialect,
     llm_mode: config.llm_mode,
     reasoning_provider: config.reasoning_provider,
     reasoning_model: config.reasoning_model,
@@ -52,6 +53,10 @@ function buildSettingsForm(config: NonNullable<ReturnType<typeof api.getConfig> 
     max_video_duration_sec: config.max_video_duration_sec,
     ffmpeg_timeout_sec: config.ffmpeg_timeout_sec,
     output_dir: config.output_dir,
+    telegram_remote_review_enabled: config.telegram_remote_review_enabled,
+    telegram_bot_api_base_url: config.telegram_bot_api_base_url,
+    telegram_bot_token: "",
+    telegram_bot_chat_id: config.telegram_bot_chat_id,
   };
 }
 

@@ -574,7 +574,7 @@ def _normalize_scan_mode(scan_mode: str | None) -> str:
 
 
 def _now_iso() -> str:
-    return datetime.utcnow().isoformat()
+    return datetime.now(timezone.utc).isoformat()
 
 
 def _update_scan_file_progress(state: WatchInventoryScanState, processed: int, total: int) -> None:
@@ -593,7 +593,7 @@ async def _persist_scan_snapshot(watch_path: str, state: WatchInventoryScanState
         if root is None:
             return
         root.inventory_cache_json = state.to_dict(include_inventory=True)
-        root.inventory_cache_updated_at = datetime.utcnow()
+        root.inventory_cache_updated_at = datetime.now(timezone.utc)
         await session.commit()
 
 

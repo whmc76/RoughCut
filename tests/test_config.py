@@ -20,7 +20,12 @@ def test_default_settings():
     assert s.minimax_base_url == "https://api.minimaxi.com/v1"
     assert ".mp4" in s.allowed_extensions
     assert s.output_dir == "output"
+    assert s.preferred_ui_language == "zh-CN"
     assert s.render_debug_dir == "output/test/render-debug"
+    assert s.telegram_remote_review_enabled is False
+    assert s.telegram_bot_api_base_url == "https://api.telegram.org"
+    assert s.telegram_bot_token == ""
+    assert s.telegram_bot_chat_id == ""
     assert s.default_job_workflow_mode == "standard_edit"
     assert s.default_job_enhancement_modes == []
     assert s.cover_output_variants == 5
@@ -33,6 +38,9 @@ def test_default_settings():
     assert s.packaging_selection_review_gap == 0.08
     assert s.packaging_selection_min_score == 0.6
     assert s.subtitle_filler_cleanup_enabled is True
+    assert s.quality_auto_rerun_enabled is True
+    assert s.quality_auto_rerun_below_score == 75.0
+    assert s.quality_auto_rerun_max_attempts == 1
     assert s.avatar_overlay_scale == 0.18
     assert s.active_reasoning_provider == "openai"
 

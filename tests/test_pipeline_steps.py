@@ -5,12 +5,13 @@ import subprocess
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from roughcut.db.models import Artifact, Job, JobStep, SubtitleItem, Timeline
+from roughcut.db.models import Artifact, GlossaryTerm, Job, JobStep, SubtitleItem, Timeline
 from roughcut.pipeline.steps import (
     _get_cover_seek,
     _load_latest_artifact,
@@ -34,6 +35,8 @@ def test_resolve_subtitle_split_profile_prefers_faster_portrait_subtitles():
     assert portrait["orientation"] == "portrait"
     assert portrait["max_duration"] < landscape["max_duration"]
     assert portrait["max_chars"] < landscape["max_chars"]
+    assert portrait["max_chars"] == 12
+    assert landscape["max_chars"] == 18
 
 
 def test_record_source_integrity_writes_debug_report(tmp_path: Path):
@@ -349,6 +352,364 @@ async def test_run_content_profile_keeps_manual_review_when_auto_review_mode_dis
         review_step = review_step_result.scalar_one()
         assert review_step.status == "pending"
         assert review_step.metadata_ is None
+
+
+@pytest.mark.asyncio
+async def test_run_content_profile_passes_effective_glossary_terms_into_inference(db_engine, monkeypatch, tmp_path: Path):
+    import roughcut.pipeline.steps as steps_mod
+
+    factory = async_sessionmaker(db_engine, expire_on_commit=False)
+    job_id = uuid.uuid4()
+    source_path = tmp_path / "source.mp4"
+    source_path.write_bytes(b"video")
+    captured: dict[str, object] = {}
+
+    async with factory() as session:
+        session.add(
+            Job(
+                id=job_id,
+                source_path="jobs/demo/source.mp4",
+                source_name="source.mp4",
+                status="processing",
+                language="zh-CN",
+                channel_profile="unboxing_default",
+                enhancement_modes=[],
+            )
+        )
+        session.add(JobStep(job_id=job_id, step_name="content_profile", status="running"))
+        session.add(JobStep(job_id=job_id, step_name="summary_review", status="pending"))
+        session.add(
+            GlossaryTerm(
+                wrong_forms=["鸿福", "狐蝠"],
+                correct_form="狐蝠工业",
+                category="bag_brand",
+                context_hint="主流机能包品牌",
+            )
+        )
+        session.add(
+            SubtitleItem(
+                job_id=job_id,
+                version=1,
+                item_index=0,
+                start_time=0.0,
+                end_time=1.0,
+                text_raw="这期鸿福 F叉二一小副包做个开箱测评。",
+                text_norm="这期鸿福 F叉二一小副包做个开箱测评。",
+                text_final="这期鸿福 F叉二一小副包做个开箱测评。",
+            )
+        )
+        await session.commit()
+
+    monkeypatch.setattr(steps_mod, "get_session_factory", lambda: factory)
+
+    async def fake_load_content_profile_user_memory(*args, **kwargs):
+        return {}
+
+    async def fake_resolve_source(*args, **kwargs):
+        return source_path
+
+    async def fake_infer_content_profile(**kwargs):
+        captured["glossary_terms"] = kwargs.get("glossary_terms")
+        return {
+            "preset_name": "unboxing_default",
+            "subject_brand": "狐蝠工业",
+            "subject_model": "FXX1小副包",
+            "subject_type": "EDC机能包",
+            "video_theme": "狐蝠工业FXX1小副包开箱与上手评测",
+            "summary": "这条视频主要围绕狐蝠工业 FXX1小副包展开，重点看分仓、挂点和日常收纳。",
+            "engagement_question": "你更看重副包的分仓还是挂点？",
+            "search_queries": ["狐蝠工业 FXX1小副包"],
+            "cover_title": {"top": "狐蝠工业", "main": "FXX1小副包", "bottom": "分仓挂点先看"},
+            "evidence": [{"title": "狐蝠工业 FXX1小副包"}],
+        }
+
+    monkeypatch.setattr(steps_mod, "load_content_profile_user_memory", fake_load_content_profile_user_memory)
+    monkeypatch.setattr(steps_mod, "_resolve_source", fake_resolve_source)
+    monkeypatch.setattr(steps_mod, "infer_content_profile", fake_infer_content_profile)
+
+    result = await run_content_profile(str(job_id))
+
+    assert result["subject_brand"] == "狐蝠工业"
+    assert any(
+        item.get("correct_form") == "狐蝠工业"
+        for item in list(captured.get("glossary_terms") or [])
+    )
+
+
+@pytest.mark.asyncio
+async def test_run_content_profile_blocks_auto_confirm_for_first_seen_product_identity(db_engine, monkeypatch, tmp_path: Path):
+    import roughcut.pipeline.steps as steps_mod
+
+    factory = async_sessionmaker(db_engine, expire_on_commit=False)
+    job_id = uuid.uuid4()
+    source_path = tmp_path / "source.mp4"
+    source_path.write_bytes(b"video")
+
+    async with factory() as session:
+        session.add(
+            Job(
+                id=job_id,
+                source_path="jobs/demo/source.mp4",
+                source_name="IMG_0025.mp4",
+                status="processing",
+                language="zh-CN",
+                channel_profile="unboxing_default",
+                enhancement_modes=["auto_review"],
+            )
+        )
+        session.add(JobStep(job_id=job_id, step_name="content_profile", status="running"))
+        session.add(JobStep(job_id=job_id, step_name="summary_review", status="pending"))
+        session.add(
+            GlossaryTerm(
+                wrong_forms=["鸿福", "狐蝠"],
+                correct_form="狐蝠工业",
+                category="bag_brand",
+                context_hint="主流机能包品牌",
+            )
+        )
+        session.add(
+            GlossaryTerm(
+                wrong_forms=["F叉二一小副包"],
+                correct_form="FXX1小副包",
+                category="bag_model",
+                context_hint="机能包型号",
+            )
+        )
+        for index, text in enumerate(
+            [
+                "这期鸿福 F叉二一小副包做个开箱测评。",
+                "重点看分仓和挂点设计。",
+                "日常收纳会更直观一点。",
+                "整体装载和细节也都聊一下。",
+                "最后再说说通勤场景适不适合。",
+                "这次主要还是上手体验。",
+            ]
+        ):
+            session.add(
+                SubtitleItem(
+                    job_id=job_id,
+                    version=1,
+                    item_index=index,
+                    start_time=float(index),
+                    end_time=float(index) + 1.0,
+                    text_raw=text,
+                    text_norm=text,
+                    text_final=text,
+                )
+            )
+        await session.commit()
+
+    monkeypatch.setattr(steps_mod, "get_session_factory", lambda: factory)
+
+    async def fake_load_content_profile_user_memory(*args, **kwargs):
+        return {}
+
+    async def fake_resolve_source(*args, **kwargs):
+        return source_path
+
+    async def fake_infer_content_profile(**kwargs):
+        return {
+            "preset_name": "unboxing_default",
+            "subject_brand": "狐蝠工业",
+            "subject_model": "FXX1小副包",
+            "subject_type": "EDC机能包",
+            "video_theme": "狐蝠工业FXX1小副包开箱与上手评测",
+            "summary": "这条视频主要围绕狐蝠工业 FXX1小副包展开，重点看分仓、挂点和日常收纳。",
+            "engagement_question": "你更看重副包的分仓还是挂点？",
+            "search_queries": ["狐蝠工业 FXX1小副包", "FXX1小副包 开箱"],
+            "cover_title": {"top": "狐蝠工业", "main": "FXX1小副包", "bottom": "分仓挂点先看"},
+            "evidence": [],
+        }
+
+    monkeypatch.setattr(steps_mod, "load_content_profile_user_memory", fake_load_content_profile_user_memory)
+    monkeypatch.setattr(steps_mod, "_resolve_source", fake_resolve_source)
+    monkeypatch.setattr(steps_mod, "infer_content_profile", fake_infer_content_profile)
+
+    result = await run_content_profile(str(job_id))
+
+    assert result["auto_confirmed"] is False
+
+    async with factory() as session:
+        artifact_result = await session.execute(
+            select(Artifact).where(Artifact.job_id == job_id, Artifact.artifact_type == "content_profile_draft")
+        )
+        draft = artifact_result.scalar_one()
+        assert "具体品牌型号待人工确认" in draft.data_json["summary"]
+        assert draft.data_json["automation_review"]["identity_review"]["required"] is True
+
+        review_step_result = await session.execute(
+            select(JobStep).where(JobStep.job_id == job_id, JobStep.step_name == "summary_review")
+        )
+        review_step = review_step_result.scalar_one()
+        assert review_step.status == "pending"
+        assert "首次品牌/型号" in review_step.metadata_["detail"]
+
+
+@pytest.mark.asyncio
+async def test_run_subtitle_translation_generates_english_artifact_when_enabled(db_engine, monkeypatch):
+    import roughcut.pipeline.steps as steps_mod
+
+    factory = async_sessionmaker(db_engine, expire_on_commit=False)
+    job_id = uuid.uuid4()
+
+    async with factory() as session:
+        session.add(
+            Job(
+                id=job_id,
+                source_path="jobs/demo/source.mp4",
+                source_name="source.mp4",
+                status="processing",
+                language="zh-CN",
+                channel_profile="edc_tactical",
+                enhancement_modes=["multilingual_translation"],
+            )
+        )
+        session.add(JobStep(job_id=job_id, step_name="subtitle_translation", status="running"))
+        for index, text in enumerate(["这是第一句。", "这是第二句。"]):
+            session.add(
+                SubtitleItem(
+                    job_id=job_id,
+                    version=1,
+                    item_index=index,
+                    start_time=float(index),
+                    end_time=float(index) + 1.2,
+                    text_raw=text,
+                    text_norm=text,
+                    text_final=text,
+                )
+            )
+        await session.commit()
+
+    monkeypatch.setattr(steps_mod, "get_session_factory", lambda: factory)
+
+    async def fake_translate_subtitle_items(subtitle_items, *, target_language=None, target_language_mode="auto", preferred_ui_language="zh-CN"):
+        assert target_language_mode == "auto"
+        assert preferred_ui_language == "zh-CN"
+        return {
+            "target_language": "en",
+            "target_language_mode": "auto",
+            "source_language": "zh-CN",
+            "item_count": 2,
+            "items": [
+                {"index": 0, "text_source": "这是第一句。", "text_translated": "This is the first line."},
+                {"index": 1, "text_source": "这是第二句。", "text_translated": "This is the second line."},
+            ],
+        }
+
+    monkeypatch.setattr(steps_mod, "translate_subtitle_items", fake_translate_subtitle_items)
+
+    result = await steps_mod.run_subtitle_translation(str(job_id))
+
+    assert result["enabled"] is True
+    assert result["source_language"] == "zh-CN"
+    assert result["target_language_mode"] == "auto"
+    assert result["target_language"] == "en"
+    assert result["translated_count"] == 2
+
+    async with factory() as session:
+        artifact_result = await session.execute(
+            select(Artifact).where(Artifact.job_id == job_id, Artifact.artifact_type == "subtitle_translation")
+        )
+        artifact = artifact_result.scalar_one()
+        assert artifact.data_json["target_language"] == "en"
+        assert artifact.data_json["target_language_mode"] == "auto"
+        assert artifact.data_json["items"][0]["text_translated"] == "This is the first line."
+
+
+@pytest.mark.asyncio
+async def test_run_subtitle_translation_skips_when_mode_disabled(db_engine, monkeypatch):
+    import roughcut.pipeline.steps as steps_mod
+
+    factory = async_sessionmaker(db_engine, expire_on_commit=False)
+    job_id = uuid.uuid4()
+
+    async with factory() as session:
+        session.add(
+            Job(
+                id=job_id,
+                source_path="jobs/demo/source.mp4",
+                source_name="source.mp4",
+                status="processing",
+                language="zh-CN",
+                enhancement_modes=[],
+            )
+        )
+        session.add(JobStep(job_id=job_id, step_name="subtitle_translation", status="running"))
+        await session.commit()
+
+    monkeypatch.setattr(steps_mod, "get_session_factory", lambda: factory)
+
+    result = await steps_mod.run_subtitle_translation(str(job_id))
+
+    assert result == {"enabled": False, "skipped": True}
+
+    async with factory() as session:
+        artifact_result = await session.execute(
+            select(Artifact).where(Artifact.job_id == job_id, Artifact.artifact_type == "subtitle_translation")
+        )
+        assert artifact_result.scalar_one_or_none() is None
+
+
+@pytest.mark.asyncio
+async def test_run_subtitle_translation_skips_when_source_matches_target_language(db_engine, monkeypatch):
+    import roughcut.pipeline.steps as steps_mod
+
+    factory = async_sessionmaker(db_engine, expire_on_commit=False)
+    job_id = uuid.uuid4()
+
+    async with factory() as session:
+        session.add(
+            Job(
+                id=job_id,
+                source_path="jobs/demo/source.mp4",
+                source_name="source.mp4",
+                status="processing",
+                language="en-US",
+                enhancement_modes=["multilingual_translation"],
+            )
+        )
+        session.add(JobStep(job_id=job_id, step_name="subtitle_translation", status="running"))
+        for index, text in enumerate(["This is the first line.", "This is the second line."]):
+            session.add(
+                SubtitleItem(
+                    job_id=job_id,
+                    version=1,
+                    item_index=index,
+                    start_time=float(index),
+                    end_time=float(index) + 1.2,
+                    text_raw=text,
+                    text_norm=text,
+                    text_final=text,
+                )
+            )
+        await session.commit()
+
+    monkeypatch.setattr(steps_mod, "get_session_factory", lambda: factory)
+    monkeypatch.setattr(
+        steps_mod,
+        "get_settings",
+        lambda: SimpleNamespace(preferred_ui_language="en-US"),
+    )
+
+    async def fail_translate_subtitle_items(*args, **kwargs):
+        raise AssertionError("translate_subtitle_items should not be called when source and target match")
+
+    monkeypatch.setattr(steps_mod, "translate_subtitle_items", fail_translate_subtitle_items)
+
+    result = await steps_mod.run_subtitle_translation(str(job_id))
+
+    assert result["enabled"] is True
+    assert result["skipped"] is True
+    assert result["reason"] == "same_language"
+    assert result["source_language"] == "en-US"
+    assert result["target_language"] == "en"
+    assert result["translated_count"] == 0
+
+    async with factory() as session:
+        artifact_result = await session.execute(
+            select(Artifact).where(Artifact.job_id == job_id, Artifact.artifact_type == "subtitle_translation")
+        )
+        assert artifact_result.scalar_one_or_none() is None
 
 
 @pytest.mark.asyncio

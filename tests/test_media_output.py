@@ -44,6 +44,28 @@ def test_get_output_project_dir_uses_content_title_for_numeric_source_name(tmp_p
     assert project_dir.is_dir()
 
 
+def test_get_output_project_dir_dedupes_subject_prefix_from_theme(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(
+        output_mod,
+        "get_settings",
+        lambda: SimpleNamespace(output_dir=str(tmp_path), output_name_pattern="{date}_{stem}"),
+    )
+
+    project_dir = output_mod.get_output_project_dir(
+        "20260225-153519.mp4",
+        datetime(2026, 3, 16, 8, 0, 0),
+        content_profile={
+            "subject_brand": "Loop露普",
+            "subject_model": "SK05二代UV版",
+            "video_theme": "Loop露普SK05二代UV版开箱与一代对比评测",
+        },
+    )
+
+    assert project_dir == tmp_path / "20260316_Loop露普_SK05二代UV版_开箱与一代对比评测_20260225-153519"
+    assert project_dir.exists()
+    assert project_dir.is_dir()
+
+
 def test_build_cover_variant_output_path_includes_version_and_strategy(tmp_path: Path):
     path = output_mod.build_cover_variant_output_path(tmp_path / "demo_cover.jpg", 1, "bilibili")
 

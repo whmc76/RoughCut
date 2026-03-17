@@ -69,7 +69,8 @@ def _update_step_status(
             if step:
                 current_task_id = (step.metadata_ or {}).get("task_id")
                 if task_id and current_task_id and current_task_id != task_id:
-                    return False
+                    if not (status == "running" and step.status != "running"):
+                        return False
                 step.status = status
                 now = datetime.now(timezone.utc)
                 if status == "running":
@@ -82,6 +83,7 @@ def _update_step_status(
                 step.metadata_ = {
                     **(step.metadata_ or {}),
                     "updated_at": now.isoformat(),
+                    **({"task_id": task_id} if task_id else {}),
                     **({"elapsed_seconds": round(elapsed_seconds, 3)} if elapsed_seconds is not None else {}),
                 }
                 if error:
@@ -187,6 +189,11 @@ def _memory_pressure_guard_enabled(step_name: str) -> bool:
     settings = get_settings()
     transcription_provider = str(getattr(settings, "transcription_provider", "") or "").strip().lower()
     if step_name == "transcribe" and transcription_provider == "qwen_asr":
+        return False
+    if step_name == "render":
+        # Render may rely on an external managed GPU service like HeyGem.
+        # Those containers keep large VRAM reservations even while idle, so
+        # a memory-based local guard would block render forever.
         return False
     return True
 
@@ -319,6 +326,11 @@ def llm_transcribe(self, job_id: str):
 @celery_app.task(name="roughcut.pipeline.tasks.llm_subtitle_postprocess", bind=True, max_retries=3)
 def llm_subtitle_postprocess(self, job_id: str):
     return _run_task_step(self, job_id, "subtitle_postprocess", retry_countdown=10)
+
+
+@celery_app.task(name="roughcut.pipeline.tasks.llm_subtitle_translation", bind=True, max_retries=3)
+def llm_subtitle_translation(self, job_id: str):
+    return _run_task_step(self, job_id, "subtitle_translation", retry_countdown=15)
 
 
 @celery_app.task(name="roughcut.pipeline.tasks.llm_content_profile", bind=True, max_retries=3)

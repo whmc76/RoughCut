@@ -132,3 +132,15 @@ def test_packaging_library_flags_review_for_low_confidence_pool(tmp_path, monkey
     assert plan["music"]["asset_id"] in {music_a["id"], music_b["id"]}
     assert plan["music"]["selection_summary"]["review_recommended"] is True
     assert plan["music"]["selection_summary"]["review_reason"]
+
+
+def test_packaging_library_defaults_match_new_overlay_layout(tmp_path, monkeypatch):
+    monkeypatch.setattr(library, "PACKAGING_ROOT", tmp_path)
+    monkeypatch.setattr(library, "MANIFEST_PATH", tmp_path / "manifest.json")
+
+    payload = library.list_packaging_assets()
+
+    assert payload["config"]["music_volume"] == 0.12
+    assert payload["config"]["watermark_position"] == "top_left"
+    assert payload["config"]["avatar_overlay_position"] == "top_right"
+    assert payload["config"]["avatar_overlay_scale"] == 0.18

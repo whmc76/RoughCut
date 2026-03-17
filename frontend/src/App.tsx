@@ -1,5 +1,7 @@
+import { useEffect, useRef } from "react";
 import { NavLink, Route, Routes } from "react-router-dom";
 
+import { api } from "./api";
 import { useI18n } from "./i18n";
 import { ControlPage } from "./pages/ControlPage";
 import { CreativeModesPage } from "./pages/CreativeModesPage";
@@ -14,6 +16,18 @@ import { WatchRootsPage } from "./pages/WatchRootsPage";
 
 export function App() {
   const { locale, setLocale, t } = useI18n();
+  const syncedLocaleRef = useRef<string>("");
+
+  useEffect(() => {
+    if (syncedLocaleRef.current === locale) {
+      return;
+    }
+    syncedLocaleRef.current = locale;
+    void api.patchConfig({ preferred_ui_language: locale }).catch(() => {
+      syncedLocaleRef.current = "";
+    });
+  }, [locale]);
+
   const navigation = [
     { to: "/", label: t("app.nav.overview") },
     { to: "/jobs", label: t("app.nav.jobs") },

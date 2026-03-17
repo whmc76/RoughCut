@@ -15,7 +15,7 @@ from typing import Any
 from roughcut.edit.decisions import build_edit_decision
 from roughcut.edit.render_plan import build_render_plan
 from roughcut.media.audio import extract_audio
-from roughcut.media.output import build_output_name, extract_cover_frame, get_output_dir, write_srt_file
+from roughcut.media.output import build_output_name, extract_cover_frame, write_srt_file
 from roughcut.media.render import render_video
 from roughcut.media.silence import detect_silence
 from roughcut.media.subtitles import remap_subtitles_to_timeline
@@ -45,7 +45,7 @@ async def main() -> None:
     if not args.source.exists():
         raise FileNotFoundError(args.source)
 
-    output_root = get_output_dir() / "manual-tests"
+    output_root = Path("output/test/manual-tests")
     output_root.mkdir(parents=True, exist_ok=True)
     run_name = f"{build_output_name(args.source.name)}_manual_{time.strftime('%Y%m%d_%H%M%S')}"
     run_dir = output_root / run_name

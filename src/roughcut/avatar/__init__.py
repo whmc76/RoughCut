@@ -1,23 +1,33 @@
 from .materials import (
     avatar_materials_root,
+    build_creator_profile_dashboard,
     build_avatar_material_requirements,
     create_profile_dir,
     delete_avatar_material_profile,
     get_avatar_material_profile,
     list_avatar_material_profiles,
     now_iso,
+    normalize_avatar_material_profile,
+    normalize_creator_profile,
+    normalize_avatar_personal_info,
+    personal_info_from_creator_profile,
     sanitize_filename,
     save_avatar_material_profile,
 )
 
 __all__ = [
     "avatar_materials_root",
+    "build_creator_profile_dashboard",
     "build_avatar_material_requirements",
     "create_profile_dir",
     "delete_avatar_material_profile",
     "get_avatar_material_profile",
     "list_avatar_material_profiles",
     "now_iso",
+    "normalize_avatar_material_profile",
+    "normalize_creator_profile",
+    "normalize_avatar_personal_info",
+    "personal_info_from_creator_profile",
     "sanitize_filename",
     "save_avatar_material_profile",
 ]

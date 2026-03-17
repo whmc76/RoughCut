@@ -246,11 +246,74 @@ export type AvatarMaterialPreviewRun = {
   created_at: string;
 };
 
+export type AvatarPersonalInfo = {
+  public_name?: string | null;
+  real_name?: string | null;
+  title?: string | null;
+  organization?: string | null;
+  location?: string | null;
+  bio?: string | null;
+  expertise?: string[];
+  experience?: string | null;
+  achievements?: string | null;
+  creator_focus?: string | null;
+  audience?: string | null;
+  style?: string | null;
+  contact?: string | null;
+  extra_notes?: string | null;
+};
+
+export type AvatarCreatorProfile = {
+  identity?: {
+    public_name?: string | null;
+    real_name?: string | null;
+    title?: string | null;
+    organization?: string | null;
+    location?: string | null;
+    bio?: string | null;
+  };
+  positioning?: {
+    creator_focus?: string | null;
+    expertise?: string[];
+    audience?: string | null;
+    style?: string | null;
+    tone_keywords?: string[];
+  };
+  publishing?: {
+    primary_platform?: string | null;
+    active_platforms?: string[];
+    signature?: string | null;
+    default_call_to_action?: string | null;
+    description_strategy?: string | null;
+  };
+  business?: {
+    contact?: string | null;
+    collaboration_notes?: string | null;
+    availability?: string | null;
+  };
+  archive_notes?: string | null;
+};
+
+export type AvatarProfileDashboard = {
+  completeness_score: number;
+  section_status: Record<string, boolean>;
+  material_counts: {
+    speaking_videos: number;
+    portrait_photos: number;
+    voice_samples: number;
+  };
+  strengths: string[];
+  next_steps: string[];
+};
+
 export type AvatarMaterialProfile = {
   id: string;
   display_name: string;
   presenter_alias?: string | null;
   notes?: string | null;
+  personal_info?: AvatarPersonalInfo;
+  creator_profile?: AvatarCreatorProfile;
+  profile_dashboard?: AvatarProfileDashboard;
   profile_dir: string;
   training_status: string;
   training_provider: string;
@@ -278,6 +341,30 @@ export type ContentProfileReview = {
   job_id: string;
   status: string;
   review_step_status: string;
+  review_step_detail?: string | null;
+  review_reasons?: string[];
+  blocking_reasons?: string[];
+  identity_review?: {
+    required?: boolean;
+    first_seen_brand?: boolean;
+    first_seen_model?: boolean;
+    conservative_summary?: boolean;
+    support_sources?: string[];
+    evidence_strength?: string;
+    reason?: string;
+    evidence_bundle?: {
+      candidate_brand?: string | null;
+      candidate_model?: string | null;
+      matched_subtitle_snippets?: string[];
+      matched_glossary_aliases?: {
+        brand?: string[];
+        model?: string[];
+      } | null;
+      matched_source_name_terms?: string[];
+      matched_visible_text_terms?: string[];
+      matched_evidence_terms?: string[];
+    } | null;
+  } | null;
   workflow_mode: string;
   enhancement_modes: string[];
   draft: Record<string, any> | null;
@@ -350,6 +437,7 @@ export type CreativeModeDefinition = {
 export type Config = {
   transcription_provider: string;
   transcription_model: string;
+  transcription_dialect: string;
   llm_mode: string;
   reasoning_provider: string;
   reasoning_model: string;
@@ -392,6 +480,11 @@ export type Config = {
   ffmpeg_timeout_sec: number;
   allowed_extensions: string[];
   output_dir: string;
+  preferred_ui_language: string;
+  telegram_remote_review_enabled: boolean;
+  telegram_bot_api_base_url: string;
+  telegram_bot_token_set: boolean;
+  telegram_bot_chat_id: string;
   default_job_workflow_mode: string;
   default_job_enhancement_modes: string[];
   fact_check_enabled: boolean;
@@ -411,6 +504,7 @@ export type ConfigOptions = {
   channel_profiles: SelectOption[];
   workflow_modes: SelectOption[];
   enhancement_modes: SelectOption[];
+  transcription_dialects: SelectOption[];
   avatar_providers: SelectOption[];
   voice_providers: SelectOption[];
   creative_mode_catalog: {

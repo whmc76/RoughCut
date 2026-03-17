@@ -143,6 +143,28 @@ async def record_content_profile_feedback_memory(
     final_profile: dict[str, Any],
     user_feedback: dict[str, Any],
 ) -> None:
+    recorded_pairs: set[tuple[str, str, str]] = set()
+
+    def remember_correction(field_name: str, original_value: Any, corrected_value: Any) -> None:
+        original = _clean_memory_value(original_value)
+        corrected = _clean_memory_value(corrected_value)
+        if not corrected:
+            return
+        correction_key = (field_name, original, corrected)
+        if correction_key in recorded_pairs:
+            return
+        recorded_pairs.add(correction_key)
+        session.add(
+            ContentProfileCorrection(
+                job_id=job.id,
+                source_name=job.source_name,
+                channel_profile=job.channel_profile,
+                field_name=field_name,
+                original_value=original or None,
+                corrected_value=corrected,
+            )
+        )
+
     for field_name in CONTENT_PROFILE_MEMORY_FIELDS:
         if field_name not in user_feedback:
             continue
@@ -152,16 +174,10 @@ async def record_content_profile_feedback_memory(
         original_value = _clean_memory_value((draft_profile or {}).get(field_name))
         if corrected_value == original_value:
             continue
-        session.add(
-            ContentProfileCorrection(
-                job_id=job.id,
-                source_name=job.source_name,
-                channel_profile=job.channel_profile,
-                field_name=field_name,
-                original_value=original_value or None,
-                corrected_value=corrected_value,
-            )
-        )
+        remember_correction(field_name, original_value, corrected_value)
+
+    for field_name, alias_value, corrected_value in _extract_identity_alias_feedback_rows(final_profile):
+        remember_correction(field_name, alias_value, corrected_value)
 
     raw_keywords = user_feedback.get("keywords")
     keywords = raw_keywords if isinstance(raw_keywords, list) and raw_keywords else final_profile.get("search_queries") or []
@@ -182,6 +198,35 @@ async def record_content_profile_feedback_memory(
                 scope_value=job.channel_profile,
                 keyword=keyword,
             )
+
+
+def _extract_identity_alias_feedback_rows(final_profile: dict[str, Any]) -> list[tuple[str, str, str]]:
+    identity_review = (final_profile or {}).get("identity_review")
+    if not isinstance(identity_review, dict):
+        return []
+    evidence_bundle = identity_review.get("evidence_bundle")
+    if not isinstance(evidence_bundle, dict):
+        return []
+    matched_glossary_aliases = evidence_bundle.get("matched_glossary_aliases")
+    if not isinstance(matched_glossary_aliases, dict):
+        return []
+
+    alias_rows: list[tuple[str, str, str]] = []
+    field_specs = (
+        ("subject_brand", "candidate_brand", "brand"),
+        ("subject_model", "candidate_model", "model"),
+    )
+    for field_name, candidate_key, alias_key in field_specs:
+        corrected_value = _clean_memory_value((final_profile or {}).get(field_name))
+        candidate_value = _clean_memory_value(evidence_bundle.get(candidate_key))
+        if not corrected_value or corrected_value != candidate_value:
+            continue
+        for alias in matched_glossary_aliases.get(alias_key) or []:
+            alias_value = _clean_memory_value(alias)
+            if not alias_value or alias_value == corrected_value:
+                continue
+            alias_rows.append((field_name, alias_value, corrected_value))
+    return alias_rows
 
 
 def _build_field_preferences(

@@ -3,8 +3,11 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+import shutil
 import subprocess
 import tempfile
+import uuid
 from pathlib import Path
 from typing import Any, Callable
 
@@ -12,6 +15,7 @@ from roughcut.config import get_settings
 
 
 logger = logging.getLogger(__name__)
+_WINDOWS_CMD_SOFT_LIMIT = 30000
 
 _EXPORT_RESOLUTION_PRESETS: dict[str, tuple[int, int]] = {
     "1080p": (1920, 1080),
@@ -25,6 +29,26 @@ _TRANSPOSE_MAP = {
     270: ",transpose=2",
 }
 
+_DEFAULT_TARGET_LUFS = -16.0
+_DEFAULT_PEAK_LIMIT_DB = -2.0
+_DEFAULT_LRA = 10.0
+
+
+def _resolve_ffmpeg_timeout(
+    *,
+    source_duration_sec: float | None = None,
+    multiplier: float = 1.6,
+    buffer_sec: int = 300,
+    minimum_timeout: int | None = None,
+) -> int:
+    settings = get_settings()
+    base_timeout = int(getattr(settings, "ffmpeg_timeout_sec", 600) or 600)
+    minimum = max(base_timeout, int(minimum_timeout or 0))
+    if not source_duration_sec or source_duration_sec <= 0:
+        return minimum
+    adaptive_timeout = int(source_duration_sec * multiplier + buffer_sec)
+    return max(minimum, adaptive_timeout)
+
 
 async def render_video(
     source_path: Path,
@@ -32,6 +56,7 @@ async def render_video(
     editorial_timeline: dict,
     output_path: Path,
     subtitle_items: list[dict] | None = None,
+    overlay_editing_accents: dict[str, Any] | None = None,
     progress_callback: Callable[[float], None] | None = None,
     debug_dir: Path | None = None,
 ) -> Path:
@@ -46,11 +71,15 @@ async def render_video(
          explicit normalization pass if stale rotation metadata survived.
     """
     del progress_callback  # Progress callbacks are not wired up yet.
+    settings = get_settings()
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    settings = get_settings()
     if debug_dir is not None:
         debug_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        source_duration = _probe_duration(source_path)
+    except Exception:
+        source_duration = 0.0
 
     packaging_enabled = any(render_plan.get(key) for key in ("intro", "outro", "insert", "watermark", "music"))
     base_output_path = output_path if not packaging_enabled else output_path.with_name(f"{output_path.stem}.base{output_path.suffix}")
@@ -104,64 +133,27 @@ async def render_video(
     )
     filter_parts.extend(segment_filters)
 
-    if (editing_accents.get("sound_effects") or []):
-        sfx_filters, audio_label = _build_sound_effect_filters(audio_label, editing_accents)
-        filter_parts.extend(sfx_filters)
-
-    vp = render_plan.get("voice_processing", {})
-    audio_filter = f"[{audio_label}]"
-    if vp.get("noise_reduction"):
-        audio_filter += "anlmdn,"
-    audio_filter += "loudnorm=I=-14:TP=-1:LRA=11[afinal]"
+    audio_filter = _build_master_audio_filter_chain(
+        input_label=audio_label,
+        voice_processing=render_plan.get("voice_processing") or {},
+        loudness=render_plan.get("loudness") or {},
+        output_label="afinal",
+        allow_noise_reduction=True,
+        include_declipping=True,
+        include_async_resample=True,
+    )
     filter_parts.append(audio_filter)
     video_map = f"[{video_label}]"
 
-    if subtitle_items and render_plan.get("subtitles"):
-        from roughcut.media.subtitles import (
-            escape_path_for_ffmpeg_filter,
-            remap_subtitles_to_timeline,
-            write_ass_file,
+    if editing_accents.get("emphasis_overlays") and _should_apply_smart_effect_video_transforms(render_plan.get("avatar_commentary") or {}):
+        smart_effect_filters, video_label = _build_smart_effect_video_filters(
+            video_label,
+            editing_accents,
+            expected_width=render_w,
+            expected_height=render_h,
         )
-
-        remapped = remap_subtitles_to_timeline(subtitle_items, keep_segments)
-        if remapped:
-            ass_path = output_path.parent / "subtitle.ass"
-            write_ass_file(
-                remapped,
-                ass_path,
-                style_name=str((render_plan.get("subtitles") or {}).get("style") or "bold_yellow_outline"),
-                font_name=settings.subtitle_font,
-                font_size=settings.subtitle_font_size,
-                text_color_rgb=settings.subtitle_color,
-                outline_color_rgb=settings.subtitle_outline_color,
-                outline_width=settings.subtitle_outline_width,
-                margin_v_override=await _resolve_subtitle_margin_with_avatar(
-                    expected_width=render_w,
-                    expected_height=render_h,
-                    avatar_plan=render_plan.get("avatar_commentary") or {},
-                ),
-                motion_style=str((render_plan.get("subtitles") or {}).get("motion_style") or "motion_static"),
-                play_res_x=render_w,
-                play_res_y=render_h,
-            )
-            escaped = escape_path_for_ffmpeg_filter(ass_path)
-            filter_parts.append(f"[{video_label}]subtitles='{escaped}'[vsub]")
-            video_label = "vsub"
-            video_map = f"[{video_label}]"
-
-    if editing_accents.get("emphasis_overlays"):
-        overlay_filters, video_label = _build_emphasis_overlay_filters(video_label, editing_accents)
-        filter_parts.extend(overlay_filters)
+        filter_parts.extend(smart_effect_filters)
         video_map = f"[{video_label}]"
-        if _should_apply_smart_effect_video_transforms(render_plan.get("avatar_commentary") or {}):
-            smart_effect_filters, video_label = _build_smart_effect_video_filters(
-                video_label,
-                editing_accents,
-                expected_width=render_w,
-                expected_height=render_h,
-            )
-            filter_parts.extend(smart_effect_filters)
-            video_map = f"[{video_label}]"
 
     if (render_w, render_h) != (expected_w, expected_h):
         filter_parts.append(
@@ -199,7 +191,14 @@ async def render_video(
     ]
     _write_debug_text(debug_dir, "render.ffmpeg.txt", _format_command(cmd))
 
-    result = await _run_process(cmd, timeout=settings.ffmpeg_timeout_sec)
+    result = await _run_process(
+        cmd,
+        timeout=_resolve_ffmpeg_timeout(
+            source_duration_sec=source_duration,
+            multiplier=1.5,
+            buffer_sec=240,
+        ),
+    )
     _write_process_debug(debug_dir, "render", result)
     if result.returncode != 0:
         raise RuntimeError(f"ffmpeg render failed: {result.stderr[-2000:]}")
@@ -210,6 +209,7 @@ async def render_video(
         expected_height=render_h,
         debug_dir=debug_dir,
     )
+    current_output = base_output_path
     if packaging_enabled:
         packaged = await _apply_packaging_plan(
             base_output_path,
@@ -225,9 +225,31 @@ async def render_video(
             expected_height=render_h,
             debug_dir=debug_dir,
         )
+        current_output = packaged
     elif base_output_path != output_path:
-        base_output_path.replace(output_path)
-    return output_path
+        _finalize_output_file(base_output_path, output_path)
+        current_output = output_path
+
+    overlay_plan = _build_overlay_only_editing_accents(
+        overlay_editing_accents if isinstance(overlay_editing_accents, dict) else editing_accents
+    )
+    if subtitle_items or overlay_plan.get("emphasis_overlays") or overlay_plan.get("sound_effects"):
+        overlay_output_path = output_path
+        if current_output == output_path:
+            overlay_output_path = output_path.with_name(f"{output_path.stem}.overlay{output_path.suffix}")
+        await _apply_timed_overlays_to_video(
+            current_output,
+            output_path=overlay_output_path,
+            render_plan=render_plan,
+            subtitle_items=subtitle_items,
+            overlay_editing_accents=overlay_plan,
+            debug_dir=debug_dir,
+        )
+        if overlay_output_path != output_path:
+            _finalize_output_file(overlay_output_path, output_path)
+        current_output = output_path
+
+    return current_output
 
 
 def _build_segment_filter_chain(
@@ -336,6 +358,37 @@ def _build_sound_effect_filters(
     return parts, current_audio
 
 
+def _db_to_linear_gain(db_value: float) -> float:
+    return 10 ** (db_value / 20.0)
+
+
+def _build_master_audio_filter_chain(
+    *,
+    input_label: str,
+    voice_processing: dict[str, Any],
+    loudness: dict[str, Any],
+    output_label: str,
+    allow_noise_reduction: bool,
+    include_declipping: bool,
+    include_async_resample: bool,
+) -> str:
+    target_lufs = float(loudness.get("target_lufs") or _DEFAULT_TARGET_LUFS)
+    peak_limit_db = float(loudness.get("peak_limit") or _DEFAULT_PEAK_LIMIT_DB)
+    lra = float(loudness.get("lra") or _DEFAULT_LRA)
+    limiter_linear = max(0.05, min(0.99, _db_to_linear_gain(peak_limit_db)))
+
+    filters: list[str] = []
+    if include_async_resample:
+        filters.append("aresample=async=1:first_pts=0")
+    if include_declipping:
+        filters.append("adeclip")
+    if allow_noise_reduction and bool(voice_processing.get("noise_reduction")):
+        filters.append("anlmdn")
+    filters.append(f"loudnorm=I={target_lufs}:TP={peak_limit_db}:LRA={lra}:linear=true")
+    filters.append(f"alimiter=limit={limiter_linear:.6f}:level=disabled")
+    return f"[{input_label}]" + ",".join(filters) + f"[{output_label}]"
+
+
 def _build_emphasis_overlay_filters(
     video_label: str,
     editing_accents: dict[str, Any],
@@ -415,6 +468,119 @@ def _build_smart_effect_video_filters(
         )
         current_video = output_label
     return parts, current_video
+
+
+def _build_overlay_only_editing_accents(editing_accents: dict[str, Any] | None) -> dict[str, Any]:
+    base = dict(editing_accents or {})
+    return {
+        "style": str(base.get("style") or "smart_effect_rhythm"),
+        "emphasis_overlays": [dict(item) for item in base.get("emphasis_overlays") or []],
+        "sound_effects": [dict(item) for item in base.get("sound_effects") or []],
+    }
+
+
+async def _apply_timed_overlays_to_video(
+    source_path: Path,
+    *,
+    output_path: Path,
+    render_plan: dict[str, Any],
+    subtitle_items: list[dict] | None,
+    overlay_editing_accents: dict[str, Any] | None,
+    debug_dir: Path | None,
+) -> Path:
+    from roughcut.media.subtitles import escape_path_for_ffmpeg_filter, write_ass_file
+
+    settings = get_settings()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    source_info = _probe_video_stream(source_path)
+    render_w = int(source_info.get("display_width") or source_info.get("width") or 0)
+    render_h = int(source_info.get("display_height") or source_info.get("height") or 0)
+    overlay_plan = _build_overlay_only_editing_accents(overlay_editing_accents)
+
+    filter_parts: list[str] = []
+    video_label = "0:v"
+    audio_label = "0:a"
+    video_map = "0:v"
+    audio_map = "0:a"
+
+    if subtitle_items and render_plan.get("subtitles"):
+        ass_path = output_path.parent / f"{output_path.stem}.subtitle.ass"
+        write_ass_file(
+            subtitle_items,
+            ass_path,
+            style_name=str((render_plan.get("subtitles") or {}).get("style") or "bold_yellow_outline"),
+            font_name=settings.subtitle_font,
+            font_size=settings.subtitle_font_size,
+            text_color_rgb=settings.subtitle_color,
+            outline_color_rgb=settings.subtitle_outline_color,
+            outline_width=settings.subtitle_outline_width,
+            margin_v_override=await _resolve_subtitle_margin_with_avatar(
+                expected_width=render_w,
+                expected_height=render_h,
+                avatar_plan=render_plan.get("avatar_commentary") or {},
+            ),
+            motion_style=str((render_plan.get("subtitles") or {}).get("motion_style") or "motion_static"),
+            play_res_x=render_w,
+            play_res_y=render_h,
+        )
+        escaped = escape_path_for_ffmpeg_filter(ass_path)
+        filter_parts.append(f"[{video_label}]subtitles='{escaped}'[vsub]")
+        video_label = "vsub"
+        video_map = f"[{video_label}]"
+
+    if overlay_plan.get("emphasis_overlays"):
+        overlay_filters, video_label = _build_emphasis_overlay_filters(video_label, overlay_plan)
+        filter_parts.extend(overlay_filters)
+        video_map = f"[{video_label}]"
+
+    if overlay_plan.get("sound_effects"):
+        sfx_filters, audio_label = _build_sound_effect_filters(audio_label, overlay_plan)
+        filter_parts.extend(sfx_filters)
+        audio_map = f"[{audio_label}]"
+
+    if not filter_parts:
+        if source_path != output_path:
+            _finalize_output_file(source_path, output_path)
+        return output_path
+
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        str(source_path),
+        "-filter_complex",
+        ";".join(filter_parts),
+        "-map",
+        video_map,
+        "-map",
+        audio_map,
+        "-c:v",
+        "libx264",
+        "-preset",
+        "fast",
+        "-crf",
+        "18",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "192k",
+        str(output_path),
+    ]
+    _write_debug_text(debug_dir, "render.overlays.ffmpeg.txt", _format_command(cmd))
+    result = await _run_process(
+        cmd,
+        timeout=_resolve_ffmpeg_timeout(
+            source_duration_sec=_probe_duration(source_path),
+            multiplier=1.2,
+            buffer_sec=180,
+            minimum_timeout=300,
+        ),
+    )
+    _write_process_debug(debug_dir, "render_overlays", result)
+    if result.returncode != 0:
+        raise RuntimeError(f"ffmpeg timed overlay render failed: {result.stderr[-2000:]}")
+    return output_path
 
 
 def _resolve_effect_overlay_tokens(style: str) -> dict[str, Any]:
@@ -624,9 +790,9 @@ async def _apply_packaging_plan(
     expected_height: int,
     debug_dir: Path | None,
 ) -> Path:
-    current_path = source_path
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp = Path(tmpdir)
+        current_path = _stage_packaging_source(source_path, tmp)
         insert_plan = render_plan.get("insert")
         if insert_plan:
             current_path = await _apply_insert_clip(
@@ -658,8 +824,18 @@ async def _apply_packaging_plan(
                 debug_dir=debug_dir,
             )
         if current_path != output_path:
-            current_path.replace(output_path)
+            _finalize_output_file(current_path, output_path)
     return output_path
+
+
+def _stage_packaging_source(source_path: Path, temp_root: Path) -> Path:
+    source_drive = source_path.drive.lower()
+    temp_drive = temp_root.drive.lower()
+    if source_drive and temp_drive and source_drive != temp_drive:
+        staged = temp_root / f"packaging_source{source_path.suffix}"
+        shutil.copy2(source_path, staged)
+        return staged
+    return source_path
 
 
 async def _apply_insert_clip(
@@ -722,7 +898,14 @@ async def _apply_insert_clip(
         str(output_path),
     ]
     _write_debug_text(debug_dir, "packaging.insert.ffmpeg.txt", _format_command(cmd))
-    result = await _run_process(cmd, timeout=get_settings().ffmpeg_timeout_sec)
+    result = await _run_process(
+        cmd,
+        timeout=_resolve_ffmpeg_timeout(
+            source_duration_sec=source_duration,
+            multiplier=1.4,
+            buffer_sec=180,
+        ),
+    )
     _write_process_debug(debug_dir, "packaging.insert", result)
     if result.returncode != 0:
         raise RuntimeError(f"ffmpeg insert packaging failed: {result.stderr[-2000:]}")
@@ -792,7 +975,14 @@ async def _apply_intro_outro(
         ]
     )
     _write_debug_text(debug_dir, "packaging.bookends.ffmpeg.txt", _format_command(cmd))
-    result = await _run_process(cmd, timeout=get_settings().ffmpeg_timeout_sec)
+    result = await _run_process(
+        cmd,
+        timeout=_resolve_ffmpeg_timeout(
+            source_duration_sec=_probe_duration(source_path),
+            multiplier=1.4,
+            buffer_sec=180,
+        ),
+    )
     _write_process_debug(debug_dir, "packaging.bookends", result)
     if result.returncode != 0:
         raise RuntimeError(f"ffmpeg intro/outro packaging failed: {result.stderr[-2000:]}")
@@ -811,6 +1001,10 @@ async def _apply_music_and_watermark(
 ) -> Path:
     if not music_plan and not watermark_plan:
         return source_path
+    try:
+        source_duration = _probe_duration(source_path)
+    except Exception:
+        source_duration = 0.0
 
     cmd = ["ffmpeg", "-y", "-i", str(source_path)]
     filter_parts: list[str] = []
@@ -829,16 +1023,29 @@ async def _apply_music_and_watermark(
         if music_plan.get("loop_mode") in {"loop_single", "loop_all"}:
             cmd.extend(["-stream_loop", "-1"])
         cmd.extend(["-i", str(music_input_path)])
-        volume = float(music_plan.get("volume", 0.22) or 0.22)
+        volume = float(music_plan.get("volume", 0.12) or 0.12)
         enter_sec = max(0.0, float(music_plan.get("enter_sec", 0.0) or 0.0))
         if enter_sec > 0:
             delay_ms = int(round(enter_sec * 1000))
-            filter_parts.append(f"[{next_input_index}:a]volume={volume},adelay={delay_ms}|{delay_ms}[bgm]")
+            filter_parts.append(
+                f"[{next_input_index}:a]volume={volume},highpass=f=120,lowpass=f=6000,adelay={delay_ms}|{delay_ms}[bgm_pre]"
+            )
         else:
-            filter_parts.append(f"[{next_input_index}:a]volume={volume}[bgm]")
+            filter_parts.append(f"[{next_input_index}:a]volume={volume},highpass=f=120,lowpass=f=6000[bgm_pre]")
         filter_parts.append(
-            f"[0:a][bgm]amix=inputs=2:duration=first:dropout_transition=2,"
-            "loudnorm=I=-14:TP=-1:LRA=11[aout]"
+            "[bgm_pre][0:a]sidechaincompress=threshold=0.02:ratio=10:attack=15:release=350:makeup=1[bgm]"
+        )
+        filter_parts.append(f"[0:a][bgm]amix=inputs=2:duration=first:dropout_transition=2[amixed]")
+        filter_parts.append(
+            _build_master_audio_filter_chain(
+                input_label="amixed",
+                voice_processing={"noise_reduction": False},
+                loudness={"target_lufs": _DEFAULT_TARGET_LUFS, "peak_limit": _DEFAULT_PEAK_LIMIT_DB, "lra": _DEFAULT_LRA},
+                output_label="aout",
+                allow_noise_reduction=False,
+                include_declipping=False,
+                include_async_resample=False,
+            )
         )
         audio_map = "[aout]"
         next_input_index += 1
@@ -870,10 +1077,20 @@ async def _apply_music_and_watermark(
         cmd.extend(["-c:a", "copy"])
     else:
         cmd.extend(["-c:a", "aac", "-b:a", "192k"])
+    if source_duration > 0:
+        cmd.extend(["-t", f"{source_duration:.6f}"])
     cmd.append(str(output_path))
 
     _write_debug_text(debug_dir, "packaging.music_watermark.ffmpeg.txt", _format_command(cmd))
-    result = await _run_process(cmd, timeout=get_settings().ffmpeg_timeout_sec)
+    result = await _run_process(
+        cmd,
+        timeout=_resolve_ffmpeg_timeout(
+            source_duration_sec=source_duration,
+            multiplier=2.2,
+            buffer_sec=420,
+            minimum_timeout=900,
+        ),
+    )
     _write_process_debug(debug_dir, "packaging.music_watermark", result)
     if result.returncode != 0:
         raise RuntimeError(f"ffmpeg music/watermark packaging failed: {result.stderr[-2000:]}")
@@ -917,7 +1134,15 @@ async def _prepare_multi_track_music_loop(
         ]
     )
     _write_debug_text(debug_dir, "packaging.music_loop_all.ffmpeg.txt", _format_command(cmd))
-    result = await _run_process(cmd, timeout=get_settings().ffmpeg_timeout_sec)
+    loop_duration = max((_probe_duration(path) for path in unique_paths), default=0.0)
+    result = await _run_process(
+        cmd,
+        timeout=_resolve_ffmpeg_timeout(
+            source_duration_sec=loop_duration,
+            multiplier=1.3,
+            buffer_sec=180,
+        ),
+    )
     _write_process_debug(debug_dir, "packaging.music_loop_all", result)
     if result.returncode != 0 or not output_path.exists():
         raise RuntimeError(f"ffmpeg multi-track music loop failed: {result.stderr[-2000:]}")
@@ -1024,7 +1249,7 @@ async def _normalize_rendered_output(
             stripped_info = _probe_video_stream(stripped)
             _write_debug_json(debug_dir, "output.post_strip.ffprobe.json", stripped_info)
             if _is_expected_output(stripped_info, expected_width, expected_height):
-                stripped.replace(output_path)
+                _finalize_output_file(stripped, output_path)
                 return
 
     if _can_bake_rotation(info, expected_width, expected_height):
@@ -1059,7 +1284,7 @@ async def _normalize_rendered_output(
             baked_info = _probe_video_stream(baked)
             _write_debug_json(debug_dir, "output.post_normalize.ffprobe.json", baked_info)
             if _is_expected_output(baked_info, expected_width, expected_height):
-                baked.replace(output_path)
+                _finalize_output_file(baked, output_path)
                 return
 
     final_info = _probe_video_stream(output_path)
@@ -1076,17 +1301,54 @@ async def _normalize_rendered_output(
 
 async def _run_process(cmd: list[str], *, timeout: int) -> subprocess.CompletedProcess[str]:
     loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(
-        None,
-        lambda: subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=timeout,
-        ),
-    )
+    safe_cmd, temp_files = _materialize_long_filter_complex_args(cmd)
+    try:
+        return await loop.run_in_executor(
+            None,
+            lambda: subprocess.run(
+                safe_cmd,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=timeout,
+            ),
+        )
+    finally:
+        for path in temp_files:
+            path.unlink(missing_ok=True)
+
+
+def _materialize_long_filter_complex_args(cmd: list[str]) -> tuple[list[str], list[Path]]:
+    if os.name != "nt" or len(_format_command(cmd)) < _WINDOWS_CMD_SOFT_LIMIT:
+        return list(cmd), []
+
+    rewritten = list(cmd)
+    temp_files: list[Path] = []
+    index = 0
+    while index < len(rewritten) - 1:
+        if rewritten[index] != "-filter_complex":
+            index += 1
+            continue
+        script_path = Path(tempfile.gettempdir()) / f"roughcut_ffmpeg_{uuid.uuid4().hex}.fcs"
+        script_path.write_text(str(rewritten[index + 1]), encoding="utf-8")
+        rewritten[index] = "-filter_complex_script"
+        rewritten[index + 1] = str(script_path)
+        temp_files.append(script_path)
+        index += 2
+    return rewritten, temp_files
+
+
+def _finalize_output_file(source_path: Path, target_path: Path) -> None:
+    if source_path == target_path:
+        return
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        source_path.replace(target_path)
+    except OSError:
+        if target_path.exists():
+            target_path.unlink()
+        shutil.move(str(source_path), str(target_path))
 
 
 def _probe_video_stream(path: Path) -> dict[str, Any]:
@@ -1198,6 +1460,7 @@ def _format_command(cmd: list[str]) -> str:
 def _write_debug_json(debug_dir: Path | None, name: str, payload: Any) -> None:
     if debug_dir is None:
         return
+    debug_dir.mkdir(parents=True, exist_ok=True)
     (debug_dir / name).write_text(
         json.dumps(payload, ensure_ascii=False, indent=2),
         encoding="utf-8",
@@ -1207,6 +1470,7 @@ def _write_debug_json(debug_dir: Path | None, name: str, payload: Any) -> None:
 def _write_debug_text(debug_dir: Path | None, name: str, content: str) -> None:
     if debug_dir is None:
         return
+    debug_dir.mkdir(parents=True, exist_ok=True)
     (debug_dir / name).write_text(content, encoding="utf-8")
 
 
@@ -1217,6 +1481,7 @@ def _write_process_debug(
 ) -> None:
     if debug_dir is None:
         return
+    debug_dir.mkdir(parents=True, exist_ok=True)
     (debug_dir / f"{prefix}.stdout.log").write_text(result.stdout or "", encoding="utf-8")
     (debug_dir / f"{prefix}.stderr.log").write_text(result.stderr or "", encoding="utf-8")
 

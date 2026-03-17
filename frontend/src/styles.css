@@ -274,6 +274,26 @@ label {
   color: #fff7ea;
 }
 
+select.input {
+  color-scheme: light;
+  background:
+    linear-gradient(180deg, rgba(255, 248, 235, 0.08), rgba(255, 255, 255, 0.03)),
+    rgba(33, 28, 24, 0.96);
+  color: #fff7ea;
+}
+
+select.input option {
+  background: #f8efe1;
+  color: #2b2118;
+}
+
+select.input option:checked,
+select.input option:hover,
+select.input option:focus {
+  background: #efc993;
+  color: #241a12;
+}
+
 .button {
   border: 1px solid var(--line);
   background: rgba(255, 255, 255, 0.04);
@@ -2098,6 +2118,34 @@ label {
   gap: 16px;
 }
 
+.avatar-creator-summary-grid,
+.avatar-stat-grid,
+.avatar-creator-section-grid,
+.avatar-creator-field-grid {
+  display: grid;
+  gap: 16px;
+}
+
+.avatar-creator-summary-grid {
+  grid-template-columns: minmax(320px, 0.9fr) minmax(0, 1.1fr);
+}
+
+.avatar-stat-grid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.avatar-creator-section-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.avatar-creator-field-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.avatar-creator-field-span {
+  grid-column: 1 / -1;
+}
+
 .avatar-file-grid {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
@@ -2271,7 +2319,11 @@ label {
   .builtin-pack-grid,
   .checklist-grid,
   .avatar-material-grid,
-  .avatar-file-grid {
+  .avatar-file-grid,
+  .avatar-creator-summary-grid,
+  .avatar-creator-section-grid,
+  .avatar-stat-grid,
+  .avatar-creator-field-grid {
     grid-template-columns: 1fr;
   }
 

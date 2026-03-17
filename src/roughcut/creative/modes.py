@@ -39,6 +39,22 @@ _WORKFLOW_MODES: Final[dict[str, dict[str, object]]] = {
 }
 
 _ENHANCEMENT_MODES: Final[dict[str, dict[str, object]]] = {
+    "multilingual_translation": {
+        "key": "multilingual_translation",
+        "kind": "enhancement",
+        "status": "active",
+        "title": "多语言翻译",
+        "tagline": "在字幕完整校对后生成多语言字幕版本，默认先产出英文译文。",
+        "summary": "翻译步骤会放在字幕纠错之后，优先使用校正后的字幕文本做多语言输出，降低术语和品牌误译概率。",
+        "suitable_for": ["海外分发", "双语字幕", "英文版视频包装", "后续多语言再创作"],
+        "pipeline_outline": [
+            "先完成字幕后处理与术语纠错，拿到较干净的中文字幕",
+            "基于校正后的字幕生成英文译文，后续可扩展更多目标语言",
+            "将译文作为独立 artifact 保留，供包装、出海分发和再创作使用",
+        ],
+        "providers": ["内置推理模型", "OpenAI 兼容推理接口", "MiniMax 兼容推理接口"],
+        "default_delivery": "默认生成英文字幕版本，后续可扩展语言选择",
+    },
     "auto_review": {
         "key": "auto_review",
         "kind": "enhancement",
@@ -160,6 +176,10 @@ def normalize_enhancement_modes(values: list[str] | tuple[str, ...] | None) -> l
 
 def auto_review_mode_enabled(enhancement_modes: list[str] | tuple[str, ...] | None) -> bool:
     return "auto_review" in set(enhancement_modes or [])
+
+
+def multilingual_translation_mode_enabled(enhancement_modes: list[str] | tuple[str, ...] | None) -> bool:
+    return "multilingual_translation" in set(enhancement_modes or [])
 
 
 def build_job_creative_profile(*, workflow_mode: str, enhancement_modes: list[str]) -> dict[str, object]:

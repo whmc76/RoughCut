@@ -39,6 +39,11 @@ def test_get_config_exposes_extended_provider_fields(tmp_path, monkeypatch):
     object.__setattr__(settings, "search_provider", "auto")
     object.__setattr__(settings, "search_fallback_provider", "searxng")
     object.__setattr__(settings, "output_dir", "output")
+    object.__setattr__(settings, "preferred_ui_language", "en-US")
+    object.__setattr__(settings, "telegram_remote_review_enabled", True)
+    object.__setattr__(settings, "telegram_bot_api_base_url", "https://api.telegram.org")
+    object.__setattr__(settings, "telegram_bot_token", "bot-token")
+    object.__setattr__(settings, "telegram_bot_chat_id", "123456789")
     object.__setattr__(settings, "default_job_workflow_mode", "standard_edit")
     object.__setattr__(settings, "default_job_enhancement_modes", ["ai_director"])
     object.__setattr__(settings, "auto_confirm_content_profile", True)
@@ -50,6 +55,9 @@ def test_get_config_exposes_extended_provider_fields(tmp_path, monkeypatch):
     object.__setattr__(settings, "packaging_selection_review_gap", 0.08)
     object.__setattr__(settings, "packaging_selection_min_score", 0.6)
     object.__setattr__(settings, "subtitle_filler_cleanup_enabled", True)
+    object.__setattr__(settings, "quality_auto_rerun_enabled", True)
+    object.__setattr__(settings, "quality_auto_rerun_below_score", 75.0)
+    object.__setattr__(settings, "quality_auto_rerun_max_attempts", 1)
 
     cfg = get_config()
 
@@ -76,6 +84,11 @@ def test_get_config_exposes_extended_provider_fields(tmp_path, monkeypatch):
     assert cfg.search_provider == "auto"
     assert cfg.search_fallback_provider == "searxng"
     assert cfg.output_dir == "output"
+    assert cfg.preferred_ui_language == "en-US"
+    assert cfg.telegram_remote_review_enabled is True
+    assert cfg.telegram_bot_api_base_url == "https://api.telegram.org"
+    assert cfg.telegram_bot_token_set is True
+    assert cfg.telegram_bot_chat_id == "123456789"
     assert cfg.default_job_workflow_mode == "standard_edit"
     assert cfg.default_job_enhancement_modes == ["ai_director"]
     assert cfg.auto_confirm_content_profile is True
@@ -87,6 +100,9 @@ def test_get_config_exposes_extended_provider_fields(tmp_path, monkeypatch):
     assert cfg.packaging_selection_review_gap == 0.08
     assert cfg.packaging_selection_min_score == 0.6
     assert cfg.subtitle_filler_cleanup_enabled is True
+    assert cfg.quality_auto_rerun_enabled is True
+    assert cfg.quality_auto_rerun_below_score == 75.0
+    assert cfg.quality_auto_rerun_max_attempts == 1
     assert cfg.openai_auth_mode == "api_key"
     assert cfg.anthropic_auth_mode == "api_key"
 
@@ -97,6 +113,7 @@ def test_get_config_options_exposes_transcription_model_lists():
     assert options.job_languages[0]["value"] == "zh-CN"
     assert options.channel_profiles[0]["value"] == ""
     assert options.workflow_modes[0]["value"] == "standard_edit"
+    assert any(item["value"] == "multilingual_translation" for item in options.enhancement_modes)
     assert any(item["value"] == "auto_review" for item in options.enhancement_modes)
     assert any(item["value"] == "avatar_commentary" for item in options.enhancement_modes)
     assert any(item["value"] == "mandarin" for item in options.transcription_dialects)
@@ -105,6 +122,7 @@ def test_get_config_options_exposes_transcription_model_lists():
     assert any(item["value"] == "indextts2" for item in options.voice_providers)
     assert any(item["key"] == "long_text_to_video" and item["status"] == "planned" for item in options.creative_mode_catalog["workflow_modes"])
     assert any(item["key"] == "ai_director" and item["status"] == "active" for item in options.creative_mode_catalog["enhancement_modes"])
+    assert any(item["key"] == "multilingual_translation" and item["status"] == "active" for item in options.creative_mode_catalog["enhancement_modes"])
     assert any(item["key"] == "auto_review" and item["status"] == "active" for item in options.creative_mode_catalog["enhancement_modes"])
     assert "local_whisper" in options.transcription_models
     assert options.transcription_models["local_whisper"][0] == "large-v3"
@@ -181,6 +199,27 @@ def test_patch_config_accepts_qwen_asr_provider(tmp_path, monkeypatch):
     assert cfg.transcription_provider == "qwen_asr"
     assert cfg.transcription_model == "qwen3-asr-1.7b"
     assert cfg.transcription_dialect == "beijing"
+
+
+def test_patch_config_clamps_quality_auto_rerun_settings(tmp_path, monkeypatch):
+    import roughcut.api.config as config_api
+    import roughcut.config as config_mod
+
+    monkeypatch.setattr(config_api, "_CONFIG_FILE", tmp_path / "roughcut_config.json")
+    monkeypatch.setattr(config_mod, "_OVERRIDES_FILE", tmp_path / "roughcut_config.json")
+    config_mod._settings = None
+
+    cfg = patch_config(
+        ConfigPatch(
+            quality_auto_rerun_enabled=True,
+            quality_auto_rerun_below_score=120.0,
+            quality_auto_rerun_max_attempts=8,
+        )
+    )
+
+    assert cfg.quality_auto_rerun_enabled is True
+    assert cfg.quality_auto_rerun_below_score == 100.0
+    assert cfg.quality_auto_rerun_max_attempts == 5
     assert cfg.qwen_asr_api_base_url == "http://127.0.0.1:18096"
 
 
@@ -209,6 +248,46 @@ def test_patch_config_accepts_creative_provider_fields(tmp_path, monkeypatch):
     assert cfg.director_rewrite_strength == 0.88
     assert cfg.default_job_workflow_mode == "standard_edit"
     assert cfg.default_job_enhancement_modes == ["avatar_commentary", "ai_director"]
+
+
+def test_patch_config_accepts_preferred_ui_language(tmp_path, monkeypatch):
+    import roughcut.api.config as config_api
+    import roughcut.config as config_mod
+
+    monkeypatch.setattr(config_api, "_CONFIG_FILE", tmp_path / "roughcut_config.json")
+    monkeypatch.setattr(config_mod, "_OVERRIDES_FILE", tmp_path / "roughcut_config.json")
+    config_mod._settings = None
+
+    cfg = patch_config(
+        ConfigPatch(
+            preferred_ui_language="en-US",
+        )
+    )
+
+    assert cfg.preferred_ui_language == "en-US"
+
+
+def test_patch_config_accepts_telegram_remote_review_fields(tmp_path, monkeypatch):
+    import roughcut.api.config as config_api
+    import roughcut.config as config_mod
+
+    monkeypatch.setattr(config_api, "_CONFIG_FILE", tmp_path / "roughcut_config.json")
+    monkeypatch.setattr(config_mod, "_OVERRIDES_FILE", tmp_path / "roughcut_config.json")
+    config_mod._settings = None
+
+    cfg = patch_config(
+        ConfigPatch(
+            telegram_remote_review_enabled=True,
+            telegram_bot_api_base_url="https://api.telegram.org/",
+            telegram_bot_token="bot-token",
+            telegram_bot_chat_id="123456789",
+        )
+    )
+
+    assert cfg.telegram_remote_review_enabled is True
+    assert cfg.telegram_bot_api_base_url == "https://api.telegram.org"
+    assert cfg.telegram_bot_token_set is True
+    assert cfg.telegram_bot_chat_id == "123456789"
 
 
 def test_patch_config_accepts_subtitle_filler_cleanup_toggle(tmp_path, monkeypatch):
