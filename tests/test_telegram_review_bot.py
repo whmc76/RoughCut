@@ -9,6 +9,7 @@ import roughcut.review.telegram_bot as telegram_bot
 from roughcut.review.telegram_bot import (
     _build_content_profile_review_message,
     _build_pending_subtitle_candidates,
+    TelegramReviewBotService,
     _extract_review_reference,
     _interpret_content_profile_reply,
     _interpret_subtitle_review_reply,
@@ -121,6 +122,72 @@ async def test_interpret_content_profile_reply_maps_to_frontend_like_payload(mon
     assert payload["video_theme"] == "夜骑补光对比"
     assert payload["keywords"] == ["夜骑", "补光"]
     assert payload["correction_notes"] == "品牌和主题都改一下"
+
+
+@pytest.mark.asyncio
+async def test_handle_update_help_responds_without_chat_match(monkeypatch):
+    service = TelegramReviewBotService()
+    sent = []
+
+    async def fake_send_text(text: str) -> None:
+        sent.append(text)
+
+    monkeypatch.setattr(
+        telegram_bot,
+        "get_settings",
+        lambda: SimpleNamespace(
+            telegram_remote_review_enabled=True,
+            telegram_bot_chat_id="123",
+            telegram_bot_token="token",
+            telegram_bot_api_base_url="https://api.telegram.org",
+        ),
+    )
+    service._send_text = fake_send_text
+
+    await service._handle_update(
+        {
+            "message": {
+                "text": "/help",
+                "chat": {"id": "999"},
+            }
+        }
+    )
+
+    assert sent, "help response should be sent even when chat id differs"
+    assert "远程审核已启用" in sent[0]
+
+
+@pytest.mark.asyncio
+async def test_handle_update_without_reference_guides_reply_pattern(monkeypatch):
+    service = TelegramReviewBotService()
+    sent = []
+
+    async def fake_send_text(text: str) -> None:
+        sent.append(text)
+
+    monkeypatch.setattr(
+        telegram_bot,
+        "get_settings",
+        lambda: SimpleNamespace(
+            telegram_remote_review_enabled=True,
+            telegram_bot_chat_id="123",
+            telegram_bot_token="token",
+            telegram_bot_api_base_url="https://api.telegram.org",
+        ),
+    )
+    service._send_text = fake_send_text
+
+    await service._handle_update(
+        {
+            "message": {
+                "text": "通过",
+                "chat": {"id": "123"},
+            }
+        }
+    )
+
+    assert sent
+    assert "未识别到审核上下文" in sent[0]
 
 
 def test_build_content_profile_review_message_matches_frontend_sections():

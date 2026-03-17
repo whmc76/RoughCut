@@ -281,6 +281,11 @@ class TelegramReviewBotService:
         text = str(message.get("text") or "").strip()
         if not text:
             return
+        if text.lower() in {"/start", "/help"}:
+            await self._send_text(
+                "远程审核已启用。请将审核意见直接回复到我推送的任务消息；支持“全部通过 / 全部拒绝”，也可直接说 S1 通过，S2 改成 xxx。"
+            )
+            return
 
         settings = get_settings()
         expected_chat_id = str(settings.telegram_bot_chat_id or "").strip()
@@ -288,17 +293,14 @@ class TelegramReviewBotService:
         if expected_chat_id and actual_chat_id != expected_chat_id:
             return
 
-        if text.lower() in {"/start", "/help"}:
-            await self._send_text(
-                "远程审核已启用。请直接回复我发出的审核消息，我会把你的意见回写到 RoughCut 并继续流程。",
-            )
-            return
-
         review_ref = _extract_review_reference(text)
         if review_ref is None:
             reply_to_message = message.get("reply_to_message") or {}
             review_ref = _extract_review_reference(str(reply_to_message.get("text") or ""))
         if review_ref is None:
+            await self._send_text(
+                "未识别到审核上下文。请直接在我推送的审核消息下点击“回复”并给出意见；不要新开一条无上下文消息。"
+            )
             return
 
         kind, job_id = review_ref
