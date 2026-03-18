@@ -158,6 +158,27 @@ async def test_handle_update_help_responds_without_chat_match(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_handle_update_whoami_returns_chat_id(monkeypatch):
+    service = TelegramReviewBotService()
+    sent = []
+
+    async def fake_send_text(text: str) -> None:
+        sent.append(text)
+
+    service._send_text = fake_send_text
+    await service._handle_update(
+        {
+            "message": {
+                "text": "/whoami",
+                "chat": {"id": "999"},
+            }
+        }
+    )
+
+    assert sent == ["当前会话 Chat ID：999"]
+
+
+@pytest.mark.asyncio
 async def test_handle_update_without_reference_guides_reply_pattern(monkeypatch):
     service = TelegramReviewBotService()
     sent = []

@@ -281,10 +281,15 @@ class TelegramReviewBotService:
         text = str(message.get("text") or "").strip()
         if not text:
             return
-        if text.lower() in {"/start", "/help"}:
+        text_lower = text.lower()
+        if text_lower in {"/start", "/help"}:
             await self._send_text(
                 "远程审核已启用。请将审核意见直接回复到我推送的任务消息；支持“全部通过 / 全部拒绝”，也可直接说 S1 通过，S2 改成 xxx。"
             )
+            return
+        if text_lower in {"/whoami", "/id"}:
+            chat_id = str((message.get("chat") or {}).get("id") or "").strip()
+            await self._send_text(f"当前会话 Chat ID：{chat_id}")
             return
 
         settings = get_settings()
