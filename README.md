@@ -17,7 +17,7 @@
 - **术语纠错** — 维护品牌/型号词表，自动匹配并标注疑似错误
 - **断点续跑** — 每步骤状态持久化在数据库，进程崩溃后可从中断处继续
 - **目录监听** — 监听指定文件夹，新视频自动入队处理
-- **多 LLM 后端** — OpenAI / Anthropic / Ollama 可配置切换
+- **多 LLM 后端** — MiniMax / OpenAI / Anthropic / Ollama 可配置切换
 
 ---
 
@@ -72,7 +72,7 @@ probe → extract_audio → transcribe → subtitle_postprocess
 - `uv`（项目内部 Python 依赖与 CLI 仍使用它）
 - FFmpeg（需在 PATH 中，支持 libx264 / libass）
 - Docker / Docker Compose（推荐用于基础服务或完整部署）
-- LLM 后端之一：Ollama（本地）或 OpenAI API Key
+- LLM 后端之一：MiniMax API Key、Ollama（本地）或 OpenAI API Key
 
 ---
 
@@ -170,7 +170,15 @@ VOICE_CLONE_API_BASE_URL=http://127.0.0.1:49204
 
 其中 `49204` 当前约定为独立 `IndexTTS2 accel` 正式入口。不要再并行常驻 `baseline / sage / accel` 多个实例去争抢同一块 GPU。
 
-OpenAI 配置：
+MiniMax 默认配置：
+
+```env
+MINIMAX_API_KEY=sk-...
+REASONING_PROVIDER=minimax
+REASONING_MODEL=MiniMax-M2.7
+```
+
+OpenAI 兼容替代配置：
 
 ```env
 OPENAI_API_KEY=sk-...
@@ -374,8 +382,8 @@ curl http://localhost:8000/api/v1/jobs/{job_id}/report
 | `OUTPUT_DIR` | `data/output` | 成片输出目录 |
 | `OUTPUT_NAME_PATTERN` | `{date}_{stem}` | 输出文件名模板 |
 | `RENDER_DEBUG_DIR` | `logs/render-debug` | render 调试产物目录 |
-| `REASONING_PROVIDER` | `openai` | 推理后端：`openai` / `anthropic` / `minimax` / `ollama` |
-| `REASONING_MODEL` | `gpt-4o-mini` | 推理模型名称 |
+| `REASONING_PROVIDER` | `minimax` | 推理后端：`openai` / `anthropic` / `minimax` / `ollama` |
+| `REASONING_MODEL` | `MiniMax-M2.7` | 推理模型名称 |
 | `MULTIMODAL_FALLBACK_PROVIDER` | `ollama` | 主模型视觉失败时的本地备份 provider |
 | `MULTIMODAL_FALLBACK_MODEL` | `""` | 主模型视觉失败时的本地备份视觉模型（空 = 自动探测） |
 | `SEARCH_PROVIDER` | `auto` | 搜索后端：优先主模型搜索桥接，失败回退本地搜索 |

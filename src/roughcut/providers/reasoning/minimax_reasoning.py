@@ -3,7 +3,7 @@ from __future__ import annotations
 import openai
 
 from roughcut.config import get_settings
-from roughcut.providers.reasoning.base import Message, ReasoningProvider, ReasoningResponse
+from roughcut.providers.reasoning.base import Message, ReasoningProvider, ReasoningResponse, strip_reasoning_tags
 
 
 class MiniMaxReasoningProvider(ReasoningProvider):
@@ -39,7 +39,7 @@ class MiniMaxReasoningProvider(ReasoningProvider):
                 "completion_tokens": response.usage.completion_tokens,
             }
             return ReasoningResponse(
-                content=choice.message.content or "",
+                content=strip_reasoning_tags(choice.message.content or ""),
                 usage=usage,
                 model=response.model,
             )

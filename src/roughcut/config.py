@@ -102,8 +102,8 @@ class Settings(BaseSettings):
 
     # Reasoning
     llm_mode: str = "performance"  # performance | local
-    reasoning_provider: str = "openai"  # openai | anthropic | minimax | ollama
-    reasoning_model: str = "gpt-4o-mini"
+    reasoning_provider: str = "minimax"  # openai | anthropic | minimax | ollama
+    reasoning_model: str = "MiniMax-M2.7"
     local_reasoning_model: str = "qwen3.5:9b"
     local_vision_model: str = ""
     multimodal_fallback_provider: str = "ollama"  # local backup for visual tasks
