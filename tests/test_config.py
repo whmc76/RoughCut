@@ -11,6 +11,7 @@ def test_default_settings():
     assert s.transcription_dialect == "mandarin"
     assert s.llm_mode == "performance"
     assert s.reasoning_provider == "openai"
+    assert s.reasoning_model == "gpt-4o-mini"
     assert s.local_reasoning_model == "qwen3.5:9b"
     assert s.multimodal_fallback_provider == "ollama"
     assert s.search_provider == "auto"
@@ -22,6 +23,13 @@ def test_default_settings():
     assert s.output_dir == "output"
     assert s.preferred_ui_language == "zh-CN"
     assert s.render_debug_dir == "output/test/render-debug"
+    assert s.telegram_agent_enabled is False
+    assert s.telegram_agent_claude_enabled is False
+    assert s.telegram_agent_claude_command == "claude"
+    assert s.telegram_agent_acp_command == ""
+    assert s.telegram_agent_task_timeout_sec == 900
+    assert s.telegram_agent_result_max_chars == 3500
+    assert s.telegram_agent_state_dir == "data/telegram-agent"
     assert s.telegram_remote_review_enabled is False
     assert s.telegram_bot_api_base_url == "https://api.telegram.org"
     assert s.telegram_bot_token == ""
@@ -43,8 +51,6 @@ def test_default_settings():
     assert s.quality_auto_rerun_max_attempts == 1
     assert s.avatar_overlay_scale == 0.18
     assert s.active_reasoning_provider == "openai"
-
-
 def test_local_mode_switches_active_provider():
     s = Settings(_env_file=None, llm_mode="local", local_reasoning_model="qwen3.5:9b")
     assert s.active_reasoning_provider == "ollama"

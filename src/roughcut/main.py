@@ -20,7 +20,6 @@ _FRONTEND_DIST = _REPO_ROOT / "frontend" / "dist"
 async def lifespan(app: FastAPI):
     # Ensure MinIO bucket exists on startup
     from roughcut.storage.s3 import get_storage
-    from roughcut.review.telegram_bot import get_telegram_review_bot_service
 
     try:
         storage = get_storage()
@@ -28,10 +27,7 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         import logging
         logging.getLogger(__name__).warning(f"Could not initialize S3 storage: {e}")
-    bot_service = get_telegram_review_bot_service()
-    await bot_service.start()
     yield
-    await bot_service.stop()
 
 
 def create_app() -> FastAPI:

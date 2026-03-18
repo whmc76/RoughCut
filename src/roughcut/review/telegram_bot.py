@@ -21,6 +21,13 @@ from roughcut.db.models import Job
 from roughcut.db.session import get_session_factory
 from roughcut.packaging.library import list_packaging_assets
 from roughcut.review.report import generate_report
+from roughcut.telegram.commands import handle_telegram_command
+from roughcut.telegram.policy import is_allowed_chat, telegram_agent_enabled
+from roughcut.telegram.task_service import (
+    get_agent_task_status,
+    mark_task_notified,
+    pending_notification_records,
+)
 from roughcut.providers.factory import get_reasoning_provider
 from roughcut.providers.reasoning.base import Message
 
@@ -177,6 +184,9 @@ class TelegramReviewBotService:
             await self._task
         self._task = None
 
+    async def run_forever(self) -> None:
+        await self._run()
+
     async def notify_content_profile_review(self, job_id: uuid.UUID) -> None:
         settings = get_settings()
         if not _telegram_ready(settings):
@@ -253,6 +263,7 @@ class TelegramReviewBotService:
                 continue
             try:
                 await self._poll_updates()
+                await self._poll_agent_tasks()
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -281,38 +292,57 @@ class TelegramReviewBotService:
         text = str(message.get("text") or "").strip()
         if not text:
             return
-
-        settings = get_settings()
-        expected_chat_id = str(settings.telegram_bot_chat_id or "").strip()
         actual_chat_id = str((message.get("chat") or {}).get("id") or "").strip()
-        if expected_chat_id and actual_chat_id != expected_chat_id:
-            return
-
-        if text.lower() in {"/start", "/help"}:
-            await self._send_text(
-                "远程审核已启用。请直接回复我发出的审核消息，我会把你的意见回写到 RoughCut 并继续流程。",
+        text_lower = text.lower()
+        if text_lower in {"/start", "/help"}:
+            await self._send_chat_text(
+                "远程审核已启用，Telegram agent 控制面已接管。"
+                "审核消息可直接回复“全部通过 / 全部拒绝”或类似“S1通过，S2改成 xxx”。\n"
+                "命令：/status、/jobs [limit]、/job <job_id>、"
+                "/run <claude|acp> <preset> --task \"...\"、/task <task_id> [--full]、"
+                "/tasks [limit]、/presets、/confirm <task_id>、/cancel <task_id>、"
+                "/review [content|subtitle] <job_id> <pass|reject|note> [备注]",
+                chat_id=actual_chat_id,
             )
             return
+        if text_lower in {"/whoami", "/id"}:
+            await self._send_chat_text(f"当前会话 Chat ID：{actual_chat_id}", chat_id=actual_chat_id)
+            return
+
+        settings = get_settings()
+        if not is_allowed_chat(settings, actual_chat_id):
+            return
+        if text.startswith("/"):
+            async def send_with_chat_id(reply_text: str) -> None:
+                await self._send_chat_text(reply_text, chat_id=actual_chat_id)
+
+            setattr(send_with_chat_id, "_telegram_chat_id", actual_chat_id)
+            if await handle_telegram_command(text, send_text=send_with_chat_id):
+                return
 
         review_ref = _extract_review_reference(text)
         if review_ref is None:
             reply_to_message = message.get("reply_to_message") or {}
             review_ref = _extract_review_reference(str(reply_to_message.get("text") or ""))
         if review_ref is None:
+            await self._send_chat_text(
+                "未识别到审核上下文。请直接在我推送的审核消息下点击“回复”并给出意见；不要新开一条无上下文消息。",
+                chat_id=actual_chat_id,
+            )
             return
 
         kind, job_id = review_ref
         if kind == _REVIEW_KIND_CONTENT:
-            await self._handle_content_profile_reply(job_id, text)
+            await self._handle_content_profile_reply(job_id, text, reply_chat_id=actual_chat_id)
         elif kind == _REVIEW_KIND_SUBTITLE:
-            await self._handle_subtitle_reply(job_id, text)
+            await self._handle_subtitle_reply(job_id, text, reply_chat_id=actual_chat_id)
 
-    async def _handle_content_profile_reply(self, job_id: uuid.UUID, text: str) -> None:
+    async def _handle_content_profile_reply(self, job_id: uuid.UUID, text: str, *, reply_chat_id: str = "") -> None:
         factory = get_session_factory()
         async with factory() as session:
             review = await get_content_profile(job_id, session)
             if review.review_step_status == "done":
-                await self._send_text(f"任务 {job_id} 的内容摘要已经确认过了，无需重复提交。")
+                await self._send_chat_text(f"任务 {job_id} 的内容摘要已经确认过了，无需重复提交。", chat_id=reply_chat_id)
                 return
             payload = (
                 {}
@@ -320,20 +350,21 @@ class TelegramReviewBotService:
                 else await _interpret_content_profile_reply(review, text)
             )
             await confirm_content_profile(job_id, ContentProfileConfirmIn(**payload), session)
-        await self._send_text(f"已接收任务 {job_id} 的审核意见，系统正在校正内容摘要并继续后续流程。")
+        await self._send_chat_text(f"已接收任务 {job_id} 的审核意见，系统正在校正内容摘要并继续后续流程。", chat_id=reply_chat_id)
 
-    async def _handle_subtitle_reply(self, job_id: uuid.UUID, text: str) -> None:
+    async def _handle_subtitle_reply(self, job_id: uuid.UUID, text: str, *, reply_chat_id: str = "") -> None:
         factory = get_session_factory()
         async with factory() as session:
             report = await generate_report(job_id, session)
             candidates = _build_pending_subtitle_candidates(report)
             if not candidates:
-                await self._send_text(f"任务 {job_id} 当前没有待审核的字幕纠错候选。")
+                await self._send_chat_text(f"任务 {job_id} 当前没有待审核的字幕纠错候选。", chat_id=reply_chat_id)
                 return
             actions = await _interpret_subtitle_review_reply(text, candidates)
             if not actions:
-                await self._send_text(
-                    "没有识别出可执行的字幕审核动作。请回复“全部通过”或类似“S1通过，S2改成 xxx，S3拒绝”的格式。"
+                await self._send_chat_text(
+                    "没有识别出可执行的字幕审核动作。请回复“全部通过”或类似“S1通过，S2改成 xxx，S3拒绝”的格式。",
+                    chat_id=reply_chat_id,
                 )
                 return
             action_request = ReviewApplyRequest(
@@ -350,7 +381,27 @@ class TelegramReviewBotService:
             from roughcut.api.jobs import apply_review
 
             result = await apply_review(job_id, action_request, session)
-        await self._send_text(f"已应用任务 {job_id} 的 {int(result.get('applied') or 0)} 条字幕审核意见。")
+        await self._send_chat_text(f"已应用任务 {job_id} 的 {int(result.get('applied') or 0)} 条字幕审核意见。", chat_id=reply_chat_id)
+
+    async def _poll_agent_tasks(self) -> None:
+        for record in pending_notification_records():
+            payload = get_agent_task_status(record.task_id)
+            status = str(payload.get("status") or "").strip().lower()
+            if status not in {"success", "failed", "cancelled"}:
+                continue
+            result_excerpt = str(payload.get("result_excerpt") or "").strip()
+            error_text = str(payload.get("error_text") or "").strip()
+            lines = [
+                f"Agent 任务完成：{record.task_id}",
+                f"- preset：{record.provider}/{record.preset}",
+                f"- 状态：{status}",
+            ]
+            if result_excerpt:
+                lines.extend(["结果摘要：", result_excerpt])
+            if error_text:
+                lines.extend(["错误：", error_text])
+            await self._send_text("\n".join(lines))
+            mark_task_notified(record.task_id)
 
     async def _send_review_message(self, kind: str, job_id: uuid.UUID, body: str) -> None:
         chunks = _split_review_message(body)
@@ -362,10 +413,17 @@ class TelegramReviewBotService:
 
     async def _send_text(self, text: str) -> None:
         settings = get_settings()
-        if not _telegram_ready(settings):
+        chat_id = str(getattr(settings, "telegram_bot_chat_id", "") or "").strip()
+        if not _telegram_ready(settings) or not chat_id:
+            return
+        await self._send_chat_text(text, chat_id=chat_id)
+
+    async def _send_chat_text(self, text: str, *, chat_id: str) -> None:
+        settings = get_settings()
+        if not _telegram_ready(settings) or not str(chat_id or "").strip():
             return
         payload = {
-            "chat_id": settings.telegram_bot_chat_id,
+            "chat_id": str(chat_id).strip(),
             "text": text,
         }
         await self._call_api(settings, "sendMessage", payload)
@@ -386,11 +444,7 @@ class TelegramReviewBotService:
 
 
 def _telegram_ready(settings: Any) -> bool:
-    return bool(
-        getattr(settings, "telegram_remote_review_enabled", False)
-        and str(getattr(settings, "telegram_bot_token", "") or "").strip()
-        and str(getattr(settings, "telegram_bot_chat_id", "") or "").strip()
-    )
+    return telegram_agent_enabled(settings)
 
 
 def _extract_review_reference(text: str) -> tuple[str, uuid.UUID] | None:

@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from roughcut.config import get_settings
 from roughcut.pipeline.celery_app import celery_app
 from roughcut.pipeline.steps import run_step_sync
+from roughcut.telegram.executors import execute_agent_preset
 
 logger = logging.getLogger(__name__)
 _GPU_INTENSIVE_STEPS = {"transcribe", "avatar_commentary", "render"}
@@ -366,3 +367,52 @@ def media_render(self, job_id: str):
 @celery_app.task(name="roughcut.pipeline.tasks.llm_platform_package", bind=True, max_retries=2)
 def llm_platform_package(self, job_id: str):
     return _run_task_step(self, job_id, "platform_package", retry_countdown=20)
+
+
+@celery_app.task(name="roughcut.pipeline.tasks.agent_run_preset", bind=True, max_retries=0)
+def agent_run_preset(
+    self,
+    *,
+    provider: str,
+    preset: str,
+    task_text: str,
+    scope_path: str = "",
+    job_id: str = "",
+):
+    logger.info(
+        "agent task started task_id=%s provider=%s preset=%s scope=%s job=%s",
+        self.request.id,
+        provider,
+        preset,
+        scope_path,
+        job_id,
+    )
+    started = time.perf_counter()
+    try:
+        result = execute_agent_preset(
+            provider=provider,
+            preset=preset,
+            task_text=task_text,
+            scope_path=scope_path,
+            job_id=job_id,
+        )
+        elapsed = time.perf_counter() - started
+        logger.info(
+            "agent task finished task_id=%s provider=%s preset=%s elapsed=%.2fs",
+            self.request.id,
+            provider,
+            preset,
+            elapsed,
+        )
+        return result
+    except Exception as exc:
+        elapsed = time.perf_counter() - started
+        logger.exception(
+            "agent task failed task_id=%s provider=%s preset=%s elapsed=%.2fs error=%s",
+            self.request.id,
+            provider,
+            preset,
+            elapsed,
+            exc,
+        )
+        raise

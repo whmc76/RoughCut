@@ -159,6 +159,13 @@ class Settings(BaseSettings):
     preferred_ui_language: str = "zh-CN"
     output_name_pattern: str = "{date}_{stem}"  # {date}=YYYYMMDD, {stem}=original filename stem
     render_debug_dir: str = "output/test/render-debug"
+    telegram_agent_enabled: bool = False
+    telegram_agent_claude_enabled: bool = False
+    telegram_agent_claude_command: str = "claude"
+    telegram_agent_acp_command: str = ""
+    telegram_agent_task_timeout_sec: int = 900
+    telegram_agent_result_max_chars: int = 3500
+    telegram_agent_state_dir: str = "data/telegram-agent"
     telegram_remote_review_enabled: bool = False
     telegram_bot_api_base_url: str = "https://api.telegram.org"
     telegram_bot_token: str = ""

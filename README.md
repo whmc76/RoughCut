@@ -223,7 +223,27 @@ pnpm dev:orchestrator
 pnpm dev:worker:media
 pnpm dev:worker:llm
 pnpm dev:watcher
+pnpm dev:telegram-agent
 ```
+
+Telegram 轮询入口建议独立运行：
+
+```bash
+pnpm dev:telegram-agent
+```
+
+当前支持的远程命令：
+
+- `/status`
+- `/jobs [limit]`
+- `/job <job_id>`
+- `/run <claude|acp> <preset> --task "..."`
+- `/task <task_id> [--full]`
+- `/tasks [limit]`
+- `/presets`
+- `/confirm <task_id>`
+- `/cancel <task_id>`
+- `/review [content|subtitle] <job_id> <pass|reject|note> [备注]`
 
 ### 9. 测试与构建
 
@@ -403,7 +423,23 @@ curl http://localhost:8000/api/v1/jobs/{job_id}/report
 | `COVER_TITLE` | `""` | 封面叠加标题（空 = 不叠加） |
 | `FFMPEG_TIMEOUT_SEC` | `600` | FFmpeg 单次执行超时（秒） |
 | `MAX_UPLOAD_SIZE_MB` | `2048` | 上传文件大小上限（MB） |
+| `TELEGRAM_AGENT_ENABLED` | `false` | 启用独立 Telegram agent；建议与 `roughcut telegram-agent` 独立进程一起使用 |
+| `TELEGRAM_AGENT_CLAUDE_ENABLED` | `false` | 允许 Telegram agent 调用本机 Claude Code CLI |
+| `TELEGRAM_AGENT_CLAUDE_COMMAND` | `claude` | Claude Code CLI 命令名 |
+| `TELEGRAM_AGENT_ACP_COMMAND` | `""` | 外部 ACP bridge 命令；Telegram agent 会通过 stdin 发送 JSON 负载 |
+| `TELEGRAM_AGENT_TASK_TIMEOUT_SEC` | `900` | Telegram agent 异步任务超时 |
+| `TELEGRAM_AGENT_RESULT_MAX_CHARS` | `3500` | Telegram 回推结果摘要最大字符数 |
+| `TELEGRAM_AGENT_STATE_DIR` | `data/telegram-agent` | Telegram agent 本地任务状态文件目录 |
 | `FACT_CHECK_ENABLED` | `false` | 事实核验开关（Phase 2） |
+
+如果要直接启用仓库内置的 ACP bridge，推荐配置：
+
+```env
+TELEGRAM_AGENT_ACP_COMMAND=uv run python scripts/acp_bridge.py
+ROUGHCUT_ACP_BRIDGE_BACKEND=claude
+```
+
+如果不显式配置 `TELEGRAM_AGENT_ACP_COMMAND`，Telegram agent 也会默认回退到仓库内置的 `scripts/acp_bridge.py`。
 | `AUTO_CONFIRM_CONTENT_PROFILE` | `true` | 高置信度内容摘要自动确认，避免任务卡在人工核对 |
 | `CONTENT_PROFILE_REVIEW_THRESHOLD` | `0.72` | 内容摘要自动确认阈值，范围 `0.0` 到 `1.0` |
 | `AUTO_ACCEPT_GLOSSARY_CORRECTIONS` | `true` | 高置信度术语纠错自动接受，只保留风险项待确认 |

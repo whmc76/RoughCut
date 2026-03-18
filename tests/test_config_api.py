@@ -40,6 +40,13 @@ def test_get_config_exposes_extended_provider_fields(tmp_path, monkeypatch):
     object.__setattr__(settings, "search_fallback_provider", "searxng")
     object.__setattr__(settings, "output_dir", "output")
     object.__setattr__(settings, "preferred_ui_language", "en-US")
+    object.__setattr__(settings, "telegram_agent_enabled", True)
+    object.__setattr__(settings, "telegram_agent_claude_enabled", True)
+    object.__setattr__(settings, "telegram_agent_claude_command", "claude")
+    object.__setattr__(settings, "telegram_agent_acp_command", "python scripts/acp_bridge.py")
+    object.__setattr__(settings, "telegram_agent_task_timeout_sec", 600)
+    object.__setattr__(settings, "telegram_agent_result_max_chars", 2800)
+    object.__setattr__(settings, "telegram_agent_state_dir", "data/telegram-agent")
     object.__setattr__(settings, "telegram_remote_review_enabled", True)
     object.__setattr__(settings, "telegram_bot_api_base_url", "https://api.telegram.org")
     object.__setattr__(settings, "telegram_bot_token", "bot-token")
@@ -85,6 +92,13 @@ def test_get_config_exposes_extended_provider_fields(tmp_path, monkeypatch):
     assert cfg.search_fallback_provider == "searxng"
     assert cfg.output_dir == "output"
     assert cfg.preferred_ui_language == "en-US"
+    assert cfg.telegram_agent_enabled is True
+    assert cfg.telegram_agent_claude_enabled is True
+    assert cfg.telegram_agent_claude_command == "claude"
+    assert cfg.telegram_agent_acp_command == "python scripts/acp_bridge.py"
+    assert cfg.telegram_agent_task_timeout_sec == 600
+    assert cfg.telegram_agent_result_max_chars == 2800
+    assert cfg.telegram_agent_state_dir == "data/telegram-agent"
     assert cfg.telegram_remote_review_enabled is True
     assert cfg.telegram_bot_api_base_url == "https://api.telegram.org"
     assert cfg.telegram_bot_token_set is True
@@ -277,6 +291,13 @@ def test_patch_config_accepts_telegram_remote_review_fields(tmp_path, monkeypatc
 
     cfg = patch_config(
         ConfigPatch(
+            telegram_agent_enabled=True,
+            telegram_agent_claude_enabled=True,
+            telegram_agent_claude_command="claude",
+            telegram_agent_acp_command="python scripts/acp_bridge.py",
+            telegram_agent_task_timeout_sec=1200,
+            telegram_agent_result_max_chars=5000,
+            telegram_agent_state_dir=str(tmp_path / "agent-state"),
             telegram_remote_review_enabled=True,
             telegram_bot_api_base_url="https://api.telegram.org/",
             telegram_bot_token="bot-token",
@@ -284,6 +305,13 @@ def test_patch_config_accepts_telegram_remote_review_fields(tmp_path, monkeypatc
         )
     )
 
+    assert cfg.telegram_agent_enabled is True
+    assert cfg.telegram_agent_claude_enabled is True
+    assert cfg.telegram_agent_claude_command == "claude"
+    assert cfg.telegram_agent_acp_command == "python scripts/acp_bridge.py"
+    assert cfg.telegram_agent_task_timeout_sec == 1200
+    assert cfg.telegram_agent_result_max_chars == 5000
+    assert cfg.telegram_agent_state_dir == str(tmp_path / "agent-state")
     assert cfg.telegram_remote_review_enabled is True
     assert cfg.telegram_bot_api_base_url == "https://api.telegram.org"
     assert cfg.telegram_bot_token_set is True

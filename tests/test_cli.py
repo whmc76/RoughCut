@@ -137,6 +137,25 @@ def test_quality_improve_outputs_processed_summary(monkeypatch):
     assert "available_slots=4" in result.output
 
 
+def test_telegram_agent_command_runs_service(monkeypatch):
+    runner = CliRunner()
+    called = {"run_forever": False}
+
+    class FakeService:
+        async def run_forever(self):
+            called["run_forever"] = True
+
+    import roughcut.review.telegram_bot as telegram_bot_mod
+
+    monkeypatch.setattr(telegram_bot_mod, "get_telegram_review_bot_service", lambda: FakeService())
+
+    result = runner.invoke(cli_mod.cli, ["telegram-agent"])
+
+    assert result.exit_code == 0
+    assert "Starting Telegram agent" in result.output
+    assert called["run_forever"] is True
+
+
 def test_quality_improve_continues_past_skipped_jobs(monkeypatch):
     runner = CliRunner()
     jobs = [

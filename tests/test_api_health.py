@@ -902,6 +902,7 @@ async def test_control_status_reports_services(client: AsyncClient, monkeypatch:
     assert response.status_code == 200
     data = response.json()["services"]
     assert data["api"] is True
+    assert data["telegram_agent"] is False
     assert data["orchestrator"] is True
     assert data["media_worker"] is True
     assert data["llm_worker"] is False

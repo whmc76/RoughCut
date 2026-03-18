@@ -87,6 +87,27 @@ def _has_container(containers: set[str], name: str) -> bool:
     return any(container == name or container.startswith(f"{name}-") for container in containers)
 
 
+def build_service_status(*, api_running: bool) -> dict[str, object]:
+    containers = _running_container_names()
+    return {
+        "checked_at": datetime.now(timezone.utc).isoformat(),
+        "services": {
+            "api": api_running,
+            "telegram_agent": _has_process("telegram-agent"),
+            "orchestrator": _has_process("roughcut.cli orchestrator --poll-interval"),
+            "media_worker": _has_process(
+                "celery -A roughcut.pipeline.celery_app:celery_app worker --queues=media_queue"
+            ),
+            "llm_worker": _has_process(
+                "celery -A roughcut.pipeline.celery_app:celery_app worker --queues=llm_queue"
+            ),
+            "postgres": _has_container(containers, "roughcut-postgres"),
+            "redis": _has_container(containers, "roughcut-redis"),
+            "minio": _has_container(containers, "roughcut-minio"),
+        },
+    }
+
+
 def _launch_stop_script(*, stop_docker: bool) -> None:
     if not _STOP_SCRIPT.exists():
         raise RuntimeError(f"Stop script not found: {_STOP_SCRIPT}")
@@ -127,20 +148,4 @@ async def stop_services(body: StopServicesIn):
 
 @router.get("/status")
 async def service_status():
-    containers = _running_container_names()
-    return {
-        "checked_at": datetime.now(timezone.utc).isoformat(),
-        "services": {
-            "api": True,
-            "orchestrator": _has_process("roughcut.cli orchestrator --poll-interval"),
-            "media_worker": _has_process(
-                "celery -A roughcut.pipeline.celery_app:celery_app worker --queues=media_queue"
-            ),
-            "llm_worker": _has_process(
-                "celery -A roughcut.pipeline.celery_app:celery_app worker --queues=llm_queue"
-            ),
-            "postgres": _has_container(containers, "roughcut-postgres"),
-            "redis": _has_container(containers, "roughcut-redis"),
-            "minio": _has_container(containers, "roughcut-minio"),
-        },
-    }
+    return build_service_status(api_running=True)

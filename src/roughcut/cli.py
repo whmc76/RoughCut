@@ -248,6 +248,17 @@ def worker(queue: str, concurrency: int, pool: str):
     )
 
 
+@cli.command("telegram-agent")
+def telegram_agent():
+    """Start the standalone Telegram agent process."""
+    from roughcut.review.telegram_bot import get_telegram_review_bot_service
+
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+    click.echo("Starting Telegram agent")
+    asyncio.run(get_telegram_review_bot_service().run_forever())
+
+
 @cli.command()
 def migrate():
     """Run Alembic database migrations."""

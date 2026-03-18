@@ -91,6 +91,13 @@ class ConfigOut(BaseModel):
     allowed_extensions: list[str]
     output_dir: str
     preferred_ui_language: str
+    telegram_agent_enabled: bool
+    telegram_agent_claude_enabled: bool
+    telegram_agent_claude_command: str
+    telegram_agent_acp_command: str
+    telegram_agent_task_timeout_sec: int
+    telegram_agent_result_max_chars: int
+    telegram_agent_state_dir: str
     telegram_remote_review_enabled: bool
     telegram_bot_api_base_url: str
     telegram_bot_token_set: bool
@@ -178,6 +185,13 @@ class ConfigPatch(BaseModel):
     allowed_extensions: list[str] | None = None
     output_dir: str | None = None
     preferred_ui_language: str | None = None
+    telegram_agent_enabled: bool | None = None
+    telegram_agent_claude_enabled: bool | None = None
+    telegram_agent_claude_command: str | None = None
+    telegram_agent_acp_command: str | None = None
+    telegram_agent_task_timeout_sec: int | None = None
+    telegram_agent_result_max_chars: int | None = None
+    telegram_agent_state_dir: str | None = None
     telegram_remote_review_enabled: bool | None = None
     telegram_bot_api_base_url: str | None = None
     telegram_bot_token: str | None = None
@@ -251,6 +265,13 @@ def get_config():
         allowed_extensions=s.allowed_extensions,
         output_dir=s.output_dir,
         preferred_ui_language=s.preferred_ui_language,
+        telegram_agent_enabled=s.telegram_agent_enabled,
+        telegram_agent_claude_enabled=s.telegram_agent_claude_enabled,
+        telegram_agent_claude_command=s.telegram_agent_claude_command,
+        telegram_agent_acp_command=s.telegram_agent_acp_command,
+        telegram_agent_task_timeout_sec=s.telegram_agent_task_timeout_sec,
+        telegram_agent_result_max_chars=s.telegram_agent_result_max_chars,
+        telegram_agent_state_dir=s.telegram_agent_state_dir,
         telegram_remote_review_enabled=s.telegram_remote_review_enabled,
         telegram_bot_api_base_url=s.telegram_bot_api_base_url,
         telegram_bot_token_set=bool(s.telegram_bot_token),
@@ -349,6 +370,16 @@ def patch_config(body: ConfigPatch):
         if not api_base_url:
             raise HTTPException(status_code=400, detail="telegram_bot_api_base_url cannot be empty")
         updates["telegram_bot_api_base_url"] = api_base_url
+    if "telegram_agent_claude_command" in updates:
+        updates["telegram_agent_claude_command"] = str(updates["telegram_agent_claude_command"] or "").strip() or "claude"
+    if "telegram_agent_acp_command" in updates:
+        updates["telegram_agent_acp_command"] = str(updates["telegram_agent_acp_command"] or "").strip()
+    if "telegram_agent_state_dir" in updates:
+        state_dir = str(updates["telegram_agent_state_dir"] or "").strip()
+        if not state_dir:
+            raise HTTPException(status_code=400, detail="telegram_agent_state_dir cannot be empty")
+        Path(state_dir).mkdir(parents=True, exist_ok=True)
+        updates["telegram_agent_state_dir"] = state_dir
     if "telegram_bot_chat_id" in updates:
         updates["telegram_bot_chat_id"] = str(updates["telegram_bot_chat_id"] or "").strip()
     if "default_job_workflow_mode" in updates:
@@ -401,6 +432,10 @@ def patch_config(body: ConfigPatch):
         )
     if "quality_auto_rerun_max_attempts" in updates:
         updates["quality_auto_rerun_max_attempts"] = max(0, min(5, int(updates["quality_auto_rerun_max_attempts"])))
+    if "telegram_agent_task_timeout_sec" in updates:
+        updates["telegram_agent_task_timeout_sec"] = max(30, min(7200, int(updates["telegram_agent_task_timeout_sec"])))
+    if "telegram_agent_result_max_chars" in updates:
+        updates["telegram_agent_result_max_chars"] = max(500, min(12000, int(updates["telegram_agent_result_max_chars"])))
     current_provider = updates.get(
         "transcription_provider",
         overrides.get("transcription_provider", DEFAULT_TRANSCRIPTION_PROVIDER),
