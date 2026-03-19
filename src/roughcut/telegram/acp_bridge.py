@@ -9,9 +9,19 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from roughcut.telegram.output_codec import decode_process_output
 
-def build_backend_command(payload: dict[str, Any]) -> tuple[list[str], Path, int]:
-    backend = str(os.getenv("ROUGHCUT_ACP_BRIDGE_BACKEND", "claude") or "claude").strip().lower()
+
+def _configured_backend() -> str:
+    return str(os.getenv("ROUGHCUT_ACP_BRIDGE_BACKEND", "claude") or "claude").strip().lower()
+
+
+def _configured_fallback_backend() -> str:
+    return str(os.getenv("ROUGHCUT_ACP_BRIDGE_FALLBACK_BACKEND", "") or "").strip().lower()
+
+
+def build_backend_command(payload: dict[str, Any], *, backend: str | None = None) -> tuple[list[str], Path, int]:
+    backend = str(backend or _configured_backend() or "claude").strip().lower()
     repo_root = Path(str(payload.get("repo_root") or ".")).resolve()
     prompt = str(payload.get("prompt") or payload.get("task") or "").strip()
     if not prompt:
@@ -51,7 +61,6 @@ def build_backend_command(payload: dict[str, Any]) -> tuple[list[str], Path, int
         ]
         if model_name:
             command.extend(["--model", model_name])
-        command.append(prompt)
         return command, repo_root, max(30, timeout)
 
     if backend == "codex":
@@ -65,10 +74,18 @@ def build_backend_command(payload: dict[str, Any]) -> tuple[list[str], Path, int
             raise RuntimeError(f"Codex command not found in PATH: {command_name}")
 
         sandbox_mode = str(os.getenv("ROUGHCUT_ACP_BRIDGE_CODEX_SANDBOX", "danger-full-access") or "danger-full-access").strip()
+        model_name = (
+            str(os.getenv("ROUGHCUT_ACP_BRIDGE_CODEX_MODEL", "")).strip()
+            or str(os.getenv("TELEGRAM_AGENT_CODEX_MODEL", "")).strip()
+        )
         command = [
             resolved,
             "-a",
             "never",
+        ]
+        if model_name:
+            command.extend(["-m", model_name])
+        command.extend([
             "exec",
             "--color",
             "never",
@@ -77,15 +94,14 @@ def build_backend_command(payload: dict[str, Any]) -> tuple[list[str], Path, int
             "-s",
             sandbox_mode,
             prompt,
-        ]
+        ])
         return command, repo_root, max(30, timeout)
 
     raise ValueError(f"Unsupported ACP bridge backend: {backend}")
 
 
-def run_bridge(payload: dict[str, Any]) -> dict[str, Any]:
-    command, cwd, timeout = build_backend_command(payload)
-    backend = str(os.getenv("ROUGHCUT_ACP_BRIDGE_BACKEND", "claude") or "claude").strip().lower()
+def _run_backend(payload: dict[str, Any], *, backend: str) -> dict[str, Any]:
+    command, cwd, timeout = build_backend_command(payload, backend=backend)
     stdout_override_path: Path | None = None
     temp_dir: tempfile.TemporaryDirectory[str] | None = None
     if backend == "codex":
@@ -93,23 +109,22 @@ def run_bridge(payload: dict[str, Any]) -> dict[str, Any]:
         stdout_override_path = Path(temp_dir.name) / "last-message.txt"
         command = [*command[:-1], "-o", str(stdout_override_path), command[-1]]
     try:
+        stdin_payload = payload.get("prompt") if backend == "claude" else None
         result = subprocess.run(
             command,
+            input=str(stdin_payload or "").encode("utf-8") if backend == "claude" else None,
             capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
             timeout=timeout,
             cwd=str(cwd),
-            env=os.environ.copy(),
+            env={**os.environ.copy(), "PYTHONIOENCODING": os.environ.get("PYTHONIOENCODING", "utf-8")},
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
         stdout = ""
         if stdout_override_path and stdout_override_path.exists():
-            stdout = stdout_override_path.read_text(encoding="utf-8", errors="replace").strip()
+            stdout = decode_process_output(stdout_override_path.read_bytes())
         if not stdout:
-            stdout = str(result.stdout or "").strip()
-        stderr = str(result.stderr or "").strip()
+            stdout = decode_process_output(result.stdout)
+        stderr = decode_process_output(result.stderr)
         excerpt = stdout or stderr
         if len(excerpt) > 3500:
             excerpt = excerpt[:3484].rstrip() + "\n...[truncated]"
@@ -126,6 +141,33 @@ def run_bridge(payload: dict[str, Any]) -> dict[str, Any]:
     finally:
         if temp_dir is not None:
             temp_dir.cleanup()
+
+
+def run_bridge(payload: dict[str, Any]) -> dict[str, Any]:
+    primary_backend = _configured_backend()
+    fallback_backend = _configured_fallback_backend()
+    backends: list[str] = []
+    for item in (primary_backend, fallback_backend):
+        normalized = str(item or "").strip().lower()
+        if normalized and normalized not in backends:
+            backends.append(normalized)
+    if not backends:
+        backends = ["claude"]
+
+    last_error: Exception | None = None
+    for index, backend in enumerate(backends):
+        try:
+            result = _run_backend(payload, backend=backend)
+            if index > 0:
+                result["fallback_from"] = primary_backend
+            return result
+        except Exception as exc:
+            last_error = exc
+            if index == len(backends) - 1:
+                raise
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("No ACP bridge backend available")
 
 
 def main() -> int:

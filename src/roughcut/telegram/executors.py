@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from roughcut.config import get_settings
+from roughcut.telegram.output_codec import decode_process_output
 from roughcut.telegram.presets import get_preset
 
 
@@ -89,21 +90,18 @@ def _execute_claude_preset(*, preset: str, task_text: str, scope_path: str, job_
     ]
     if model_name:
         command.extend(["--model", model_name])
-    command.append(prompt)
     timeout = max(30, int(getattr(settings, "telegram_agent_task_timeout_sec", 900)))
     result = subprocess.run(
         command,
+        input=prompt.encode("utf-8"),
         capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
         timeout=timeout,
         cwd=str(repo_root),
         env=os.environ.copy(),
         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
-    stdout = str(result.stdout or "").strip()
-    stderr = str(result.stderr or "").strip()
+    stdout = decode_process_output(result.stdout)
+    stderr = decode_process_output(result.stderr)
     excerpt = _truncate_text(stdout or stderr, max_chars=int(getattr(settings, "telegram_agent_result_max_chars", 3500)))
     if result.returncode != 0:
         raise RuntimeError(stderr or stdout or f"claude exited with code {result.returncode}")
@@ -125,16 +123,20 @@ def _execute_codex_preset(*, preset: str, task_text: str, scope_path: str, job_i
     if preset_config is None:
         raise ValueError(f"Unknown Codex preset: {preset}")
 
+    settings = get_settings()
     command_name = str(
-        getattr(get_settings(), "telegram_agent_codex_command", "")
+        getattr(settings, "telegram_agent_codex_command", "")
         or os.getenv("TELEGRAM_AGENT_CODEX_COMMAND", "codex")
         or "codex"
     ).strip()
     resolved_command = shutil.which(command_name)
     if not resolved_command:
         raise RuntimeError(f"Codex command not found in PATH: {command_name}")
+    model_name = str(
+        getattr(settings, "telegram_agent_codex_model", "")
+        or os.getenv("TELEGRAM_AGENT_CODEX_MODEL", "")
+    ).strip()
 
-    settings = get_settings()
     repo_root = _repo_root()
     scope_value = _normalize_scope(scope_path, repo_root)
     prompt = _render_prompt(
@@ -152,6 +154,10 @@ def _execute_codex_preset(*, preset: str, task_text: str, scope_path: str, job_i
             resolved_command,
             "-a",
             "never",
+        ]
+        if model_name:
+            command.extend(["-m", model_name])
+        command.extend([
             "exec",
             "--color",
             "never",
@@ -162,13 +168,10 @@ def _execute_codex_preset(*, preset: str, task_text: str, scope_path: str, job_i
             "-o",
             str(output_file),
             prompt,
-        ]
+        ])
         result = subprocess.run(
             command,
             capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
             timeout=timeout,
             cwd=str(repo_root),
             env=os.environ.copy(),
@@ -176,10 +179,10 @@ def _execute_codex_preset(*, preset: str, task_text: str, scope_path: str, job_i
         )
         stdout = ""
         if output_file.exists():
-            stdout = output_file.read_text(encoding="utf-8", errors="replace").strip()
+            stdout = decode_process_output(output_file.read_bytes())
         if not stdout:
-            stdout = str(result.stdout or "").strip()
-    stderr = str(result.stderr or "").strip()
+            stdout = decode_process_output(result.stdout)
+    stderr = decode_process_output(result.stderr)
     excerpt = _truncate_text(stdout or stderr, max_chars=int(getattr(settings, "telegram_agent_result_max_chars", 3500)))
     if result.returncode != 0:
         raise RuntimeError(stderr or stdout or f"codex exited with code {result.returncode}")
@@ -226,22 +229,66 @@ def _execute_acp_preset(*, preset: str, task_text: str, scope_path: str, job_id:
     env["ROUGHCUT_AGENT_PRESET"] = preset
     env["ROUGHCUT_AGENT_SCOPE_PATH"] = scope_value
     env["ROUGHCUT_AGENT_JOB_ID"] = job_id
+    bridge_backend = str(
+        getattr(settings, "acp_bridge_backend", "")
+        or os.getenv("ROUGHCUT_ACP_BRIDGE_BACKEND", "claude")
+        or "claude"
+    ).strip()
+    bridge_fallback_backend = str(
+        getattr(settings, "acp_bridge_fallback_backend", "")
+        or os.getenv("ROUGHCUT_ACP_BRIDGE_FALLBACK_BACKEND", "codex")
+        or "codex"
+    ).strip()
+    claude_command = str(getattr(settings, "telegram_agent_claude_command", "claude") or "claude").strip()
+    claude_model = str(
+        getattr(settings, "acp_bridge_claude_model", "")
+        or getattr(settings, "telegram_agent_claude_model", "")
+        or os.getenv("TELEGRAM_AGENT_CLAUDE_MODEL", "")
+        or os.getenv("ROUGHCUT_ACP_BRIDGE_CLAUDE_MODEL", "")
+    ).strip()
+    codex_command = str(
+        getattr(settings, "acp_bridge_codex_command", "")
+        or getattr(settings, "telegram_agent_codex_command", "")
+        or os.getenv("ROUGHCUT_ACP_BRIDGE_CODEX_COMMAND", "")
+        or os.getenv("TELEGRAM_AGENT_CODEX_COMMAND", "codex")
+        or "codex"
+    ).strip()
+    codex_model = str(
+        getattr(settings, "acp_bridge_codex_model", "")
+        or getattr(settings, "telegram_agent_codex_model", "")
+        or os.getenv("ROUGHCUT_ACP_BRIDGE_CODEX_MODEL", "")
+        or os.getenv("TELEGRAM_AGENT_CODEX_MODEL", "")
+        or "gpt-5.4-mini"
+    ).strip()
+    env["ROUGHCUT_ACP_BRIDGE_BACKEND"] = bridge_backend
+    if bridge_fallback_backend:
+        env["ROUGHCUT_ACP_BRIDGE_FALLBACK_BACKEND"] = bridge_fallback_backend
+    if claude_command:
+        env["TELEGRAM_AGENT_CLAUDE_COMMAND"] = claude_command
+        env["ROUGHCUT_ACP_BRIDGE_CLAUDE_COMMAND"] = claude_command
+    if claude_model:
+        env["TELEGRAM_AGENT_CLAUDE_MODEL"] = claude_model
+        env["ROUGHCUT_ACP_BRIDGE_CLAUDE_MODEL"] = claude_model
+    if codex_command:
+        env["TELEGRAM_AGENT_CODEX_COMMAND"] = codex_command
+        env["ROUGHCUT_ACP_BRIDGE_CODEX_COMMAND"] = codex_command
+    if codex_model:
+        env["TELEGRAM_AGENT_CODEX_MODEL"] = codex_model
+        env["ROUGHCUT_ACP_BRIDGE_CODEX_MODEL"] = codex_model
+    env.setdefault("PYTHONIOENCODING", "utf-8")
     timeout = max(30, int(getattr(settings, "telegram_agent_task_timeout_sec", 900)))
     result = subprocess.run(
         bridge_command,
         shell=True,
-        input=json.dumps(payload, ensure_ascii=False),
+        input=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
         capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
         timeout=timeout,
         cwd=str(repo_root),
         env=env,
         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
-    stdout = str(result.stdout or "").strip()
-    stderr = str(result.stderr or "").strip()
+    stdout = decode_process_output(result.stdout)
+    stderr = decode_process_output(result.stderr)
     if result.returncode != 0:
         raise RuntimeError(stderr or stdout or f"ACP bridge exited with code {result.returncode}")
     try:
