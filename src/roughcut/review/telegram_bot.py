@@ -21,7 +21,7 @@ from roughcut.db.models import Job
 from roughcut.db.session import get_session_factory
 from roughcut.packaging.library import list_packaging_assets
 from roughcut.review.report import generate_report
-from roughcut.telegram.commands import handle_telegram_command
+from roughcut.telegram.commands import handle_telegram_command, handle_telegram_freeform_request
 from roughcut.telegram.policy import is_allowed_chat, telegram_agent_enabled
 from roughcut.telegram.task_service import (
     get_agent_task_status,
@@ -299,9 +299,10 @@ class TelegramReviewBotService:
                 "远程审核已启用，Telegram agent 控制面已接管。"
                 "审核消息可直接回复“全部通过 / 全部拒绝”或类似“S1通过，S2改成 xxx”。\n"
                 "命令：/status、/jobs [limit]、/job <job_id>、"
-                "/run <claude|acp> <preset> --task \"...\"、/task <task_id> [--full]、"
+                "/run <claude|codex|acp> <preset> --task \"...\"、/task <task_id> [--full]、"
                 "/tasks [limit]、/presets、/confirm <task_id>、/cancel <task_id>、"
-                "/review [content|subtitle] <job_id> <pass|reject|note> [备注]",
+                "/review [content|subtitle] <job_id> <pass|reject|note> [备注]\n"
+                "如果直接发送复杂错误、结构优化、链路优化或未知命令需求，agent 会自动尝试分流并创建处理任务。",
                 chat_id=actual_chat_id,
             )
             return
@@ -324,6 +325,13 @@ class TelegramReviewBotService:
         if review_ref is None:
             reply_to_message = message.get("reply_to_message") or {}
             review_ref = _extract_review_reference(str(reply_to_message.get("text") or ""))
+        if review_ref is None and bool(getattr(settings, "telegram_agent_enabled", False)):
+            async def send_with_chat_id(reply_text: str) -> None:
+                await self._send_chat_text(reply_text, chat_id=actual_chat_id)
+
+            setattr(send_with_chat_id, "_telegram_chat_id", actual_chat_id)
+            if await handle_telegram_freeform_request(text, send_text=send_with_chat_id):
+                return
         if review_ref is None:
             await self._send_chat_text(
                 "未识别到审核上下文。请直接在我推送的审核消息下点击“回复”并给出意见；不要新开一条无上下文消息。",

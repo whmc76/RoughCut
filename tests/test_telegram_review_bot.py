@@ -210,6 +210,47 @@ async def test_handle_update_without_reference_guides_reply_pattern(monkeypatch)
     assert "未识别到审核上下文" in sent[0]
 
 
+@pytest.mark.asyncio
+async def test_handle_update_freeform_request_routes_to_agent(monkeypatch):
+    service = TelegramReviewBotService()
+    sent = []
+    routed = []
+
+    async def fake_send_text(text: str) -> None:
+        sent.append(text)
+
+    async def fake_handle_freeform(text: str, *, send_text) -> bool:
+        routed.append(text)
+        await send_text("已创建 agent 任务")
+        return True
+
+    monkeypatch.setattr(
+        telegram_bot,
+        "get_settings",
+        lambda: SimpleNamespace(
+            telegram_agent_enabled=True,
+            telegram_remote_review_enabled=False,
+            telegram_bot_chat_id="123",
+            telegram_bot_token="token",
+            telegram_bot_api_base_url="https://api.telegram.org",
+        ),
+    )
+    monkeypatch.setattr(telegram_bot, "handle_telegram_freeform_request", fake_handle_freeform)
+    service._send_chat_text = lambda text, *, chat_id: fake_send_text(text)
+
+    await service._handle_update(
+        {
+            "message": {
+                "text": "请帮我优化 telegram agent 的错误链路",
+                "chat": {"id": "123"},
+            }
+        }
+    )
+
+    assert routed == ["请帮我优化 telegram agent 的错误链路"]
+    assert sent == ["已创建 agent 任务"]
+
+
 def test_telegram_agent_enabled_without_chat_id():
     settings = SimpleNamespace(
         telegram_agent_enabled=True,

@@ -177,9 +177,12 @@ def _step_retry_wait_remaining(step: JobStep) -> int:
 
 async def _count_running_gpu_steps(session) -> int:
     result = await session.execute(
-        select(func.count(JobStep.id)).where(
+        select(func.count(JobStep.id))
+        .join(Job, Job.id == JobStep.job_id)
+        .where(
             JobStep.status == "running",
             JobStep.step_name.in_(sorted(_GPU_SENSITIVE_STEPS)),
+            Job.status.notin_(["cancelled", "failed", "done"]),
         )
     )
     return int(result.scalar() or 0)
