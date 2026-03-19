@@ -5,6 +5,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +33,13 @@ def execute_agent_preset(
             scope_path=scope_path,
             job_id=job_id,
         )
+    if normalized_provider == "codex":
+        return _execute_codex_preset(
+            preset=preset,
+            task_text=task_text,
+            scope_path=scope_path,
+            job_id=job_id,
+        )
     if normalized_provider == "acp":
         return _execute_acp_preset(
             preset=preset,
@@ -54,6 +62,10 @@ def _execute_claude_preset(*, preset: str, task_text: str, scope_path: str, job_
     resolved_command = shutil.which(command_name)
     if not resolved_command:
         raise RuntimeError(f"Claude command not found in PATH: {command_name}")
+    model_name = str(
+        getattr(settings, "telegram_agent_claude_model", "")
+        or os.getenv("TELEGRAM_AGENT_CLAUDE_MODEL", "")
+    ).strip()
 
     repo_root = _repo_root()
     scope_value = _normalize_scope(scope_path, repo_root)
@@ -74,8 +86,10 @@ def _execute_claude_preset(*, preset: str, task_text: str, scope_path: str, job_
         "text",
         "--add-dir",
         str(repo_root),
-        prompt,
     ]
+    if model_name:
+        command.extend(["--model", model_name])
+    command.append(prompt)
     timeout = max(30, int(getattr(settings, "telegram_agent_task_timeout_sec", 900)))
     result = subprocess.run(
         command,
@@ -95,6 +109,82 @@ def _execute_claude_preset(*, preset: str, task_text: str, scope_path: str, job_
         raise RuntimeError(stderr or stdout or f"claude exited with code {result.returncode}")
     return {
         "provider": "claude",
+        "preset": preset,
+        "cwd": str(repo_root),
+        "scope_path": scope_value,
+        "job_id": job_id,
+        "stdout": stdout,
+        "stderr": stderr,
+        "excerpt": excerpt,
+        "returncode": result.returncode,
+    }
+
+
+def _execute_codex_preset(*, preset: str, task_text: str, scope_path: str, job_id: str) -> dict[str, Any]:
+    preset_config = get_preset("codex", preset)
+    if preset_config is None:
+        raise ValueError(f"Unknown Codex preset: {preset}")
+
+    command_name = str(
+        getattr(get_settings(), "telegram_agent_codex_command", "")
+        or os.getenv("TELEGRAM_AGENT_CODEX_COMMAND", "codex")
+        or "codex"
+    ).strip()
+    resolved_command = shutil.which(command_name)
+    if not resolved_command:
+        raise RuntimeError(f"Codex command not found in PATH: {command_name}")
+
+    settings = get_settings()
+    repo_root = _repo_root()
+    scope_value = _normalize_scope(scope_path, repo_root)
+    prompt = _render_prompt(
+        provider="codex",
+        preset=preset,
+        task_text=task_text,
+        scope_path=scope_value,
+        job_id=job_id,
+    )
+    sandbox_mode = "danger-full-access" if preset_config.allow_edits else "read-only"
+    timeout = max(30, int(getattr(settings, "telegram_agent_task_timeout_sec", 900)))
+    with tempfile.TemporaryDirectory(prefix="roughcut-codex-") as temp_dir:
+        output_file = Path(temp_dir) / "last-message.txt"
+        command = [
+            resolved_command,
+            "-a",
+            "never",
+            "exec",
+            "--color",
+            "never",
+            "-C",
+            str(repo_root),
+            "-s",
+            sandbox_mode,
+            "-o",
+            str(output_file),
+            prompt,
+        ]
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+            cwd=str(repo_root),
+            env=os.environ.copy(),
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        stdout = ""
+        if output_file.exists():
+            stdout = output_file.read_text(encoding="utf-8", errors="replace").strip()
+        if not stdout:
+            stdout = str(result.stdout or "").strip()
+    stderr = str(result.stderr or "").strip()
+    excerpt = _truncate_text(stdout or stderr, max_chars=int(getattr(settings, "telegram_agent_result_max_chars", 3500)))
+    if result.returncode != 0:
+        raise RuntimeError(stderr or stdout or f"codex exited with code {result.returncode}")
+    return {
+        "provider": "codex",
         "preset": preset,
         "cwd": str(repo_root),
         "scope_path": scope_value,

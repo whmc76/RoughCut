@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 import shlex
+import shutil
 import uuid
 from dataclasses import dataclass
 from typing import Awaitable, Callable
@@ -32,6 +34,57 @@ from roughcut.telegram.task_service import (
 SendText = Callable[[str], Awaitable[None]]
 _DEFAULT_JOB_LIMIT = 5
 _MAX_JOB_LIMIT = 10
+_AGENT_REQUEST_KEYWORDS = (
+    "agent",
+    "telegram",
+    "command",
+    "commands",
+    "acp",
+    "claude",
+    "codex",
+    "bug",
+    "error",
+    "fix",
+    "review",
+    "plan",
+    "implement",
+    "optimize",
+    "refactor",
+    "unsupported",
+    "未知命令",
+    "不支持",
+    "指令",
+    "命令",
+    "修复",
+    "错误",
+    "排查",
+    "分析",
+    "优化",
+    "重构",
+    "扩展",
+    "支持",
+    "实现",
+    "链路",
+    "结构",
+)
+_EDIT_REQUEST_KEYWORDS = (
+    "fix",
+    "implement",
+    "optimize",
+    "refactor",
+    "support",
+    "extend",
+    "repair",
+    "新增",
+    "扩展",
+    "支持",
+    "实现",
+    "修复",
+    "优化",
+    "重构",
+    "改造",
+    "补齐",
+)
 
 
 @dataclass
@@ -93,13 +146,28 @@ async def handle_telegram_command(text: str, *, send_text: SendText) -> bool:
     if command.name in {"start", "help", "whoami", "id"}:
         return False
 
+    if await _dispatch_agent_request(
+        text=command.raw_text,
+        send_text=send_text,
+        source="unknown_command",
+    ):
+        return True
+
     await send_text(
         "未知命令。可用命令：/status、/jobs [limit]、/job <job_id>、"
-        "/run <claude|acp> <preset> --task \"...\" [--path ...] [--job ...]、"
+        "/run <claude|codex|acp> <preset> --task \"...\" [--path ...] [--job ...]、"
         "/task <task_id> [--full]、/tasks [limit]、/presets、/confirm <task_id>、/cancel <task_id>、"
         "/review [content|subtitle] <job_id> <pass|reject|note> [备注]"
     )
     return True
+
+
+async def handle_telegram_freeform_request(text: str, *, send_text: SendText) -> bool:
+    return await _dispatch_agent_request(
+        text=text,
+        send_text=send_text,
+        source="freeform",
+    )
 
 
 async def _handle_status_command(send_text: SendText) -> None:
@@ -197,8 +265,23 @@ async def _handle_run_command(args: list[str], send_text: SendText) -> None:
         await send_text(f"未知 preset：{provider}/{preset_name}")
         return
     settings = get_settings()
-    if provider == "claude" and not bool(getattr(settings, "telegram_agent_claude_enabled", False)):
-        await send_text("Claude CLI 执行器未启用，请先配置 `TELEGRAM_AGENT_CLAUDE_ENABLED=true`。")
+    if provider == "claude" and not _claude_command_available(settings):
+        await send_text(
+            "Claude CLI 执行器不可用。请确认 `TELEGRAM_AGENT_CLAUDE_ENABLED=true`，"
+            "并且 `TELEGRAM_AGENT_CLAUDE_COMMAND` 可执行。"
+        )
+        return
+    if provider == "codex" and not _codex_command_available(settings):
+        await send_text(
+            "Codex CLI 执行器不可用。请确认本机已安装 `codex`，"
+            "或设置 `TELEGRAM_AGENT_CODEX_COMMAND` 指向可执行命令。"
+        )
+        return
+    if provider == "acp" and not _acp_available(settings):
+        await send_text(
+            "ACP 执行器不可用。请配置 `TELEGRAM_AGENT_ACP_COMMAND`，"
+            "或确保内置 ACP bridge 所需的 Claude/Codex 命令可执行。"
+        )
         return
     if preset.requires_task and not parsed["task"]:
         await send_text("该 preset 需要 `--task`。")
@@ -372,7 +455,7 @@ async def _handle_review_command(args: list[str], send_text: SendText) -> None:
 def _parse_run_args(args: list[str]) -> dict[str, str] | str:
     if len(args) < 2:
         return (
-            "用法：/run <claude|acp> <preset> --task \"...\" [--path relative/path] [--job <job_id>]\n"
+            "用法：/run <claude|codex|acp> <preset> --task \"...\" [--path relative/path] [--job <job_id>]\n"
             + "\n".join(["可用 preset：", *preset_help_lines()])
         )
     provider = str(args[0]).strip().lower()
@@ -514,3 +597,144 @@ def _summarize_latest_step(job: Job) -> str:
     )
     latest = ranked[0]
     return f"{latest.step_name}:{latest.status}"
+
+
+async def _dispatch_agent_request(text: str, *, send_text: SendText, source: str) -> bool:
+    settings = get_settings()
+    if not bool(getattr(settings, "telegram_agent_enabled", False)):
+        return False
+
+    normalized = str(text or "").strip()
+    if not normalized:
+        return False
+    if source == "freeform" and not _looks_like_agent_request(normalized):
+        return False
+
+    provider = _select_agent_provider(settings)
+    if not provider:
+        return False
+    preset_name = _select_agent_preset(provider, normalized, source=source)
+    preset = get_preset(provider, preset_name)
+    if preset is None:
+        return False
+
+    task_text = _build_agent_request_task_text(normalized, source=source)
+    record = create_task_record(
+        chat_id=_chat_id_from_sender(send_text),
+        provider=provider,
+        preset=preset_name,
+        task_text=task_text,
+        status="awaiting_confirmation" if preset.requires_confirmation else "queued",
+        confirmation_required=preset.requires_confirmation,
+    )
+    if preset.requires_confirmation:
+        await send_text(
+            f"已识别为 Telegram agent 扩展请求，等待确认：{record.task_id}\n"
+            f"- preset：{provider}/{preset_name}\n"
+            f"- 原始请求：{_truncate_request_text(normalized)}\n"
+            "该任务可能会修改代码、补充命令或优化链路。"
+            f"\n回复：/confirm {record.task_id}"
+        )
+        return True
+
+    submit_agent_task(record)
+    await send_text(
+        f"已将请求交给 Telegram agent：{record.task_id}\n"
+        f"- preset：{provider}/{preset_name}\n"
+        f"- 原始请求：{_truncate_request_text(normalized)}"
+    )
+    return True
+
+
+def _build_agent_request_task_text(text: str, *, source: str) -> str:
+    if source == "unknown_command":
+        return (
+            f"Telegram 收到未支持命令：{text}\n"
+            "请先判断是否已有等价命令或现成功能；如果没有，请补齐最小可行实现，"
+            "让后续相似请求可以被 Telegram agent 直接识别、分发或执行。"
+        )
+    return (
+        f"这是来自 Telegram agent 的自然语言工程请求：{text}\n"
+        "请优先处理复杂错误、结构优化和链路优化；如果需要新增 Telegram 命令、"
+        "增强未知指令兜底或扩展 ACP/Claude Code/Codex 接入，也请一并处理。"
+    )
+
+
+def _looks_like_agent_request(text: str) -> bool:
+    lowered = str(text or "").strip().lower()
+    if not lowered:
+        return False
+    return any(keyword in lowered for keyword in _AGENT_REQUEST_KEYWORDS)
+
+
+def _select_agent_provider(settings) -> str | None:
+    if _acp_available(settings):
+        return "acp"
+    if _codex_command_available(settings):
+        return "codex"
+    if _claude_command_available(settings):
+        return "claude"
+    return None
+
+
+def _select_agent_preset(provider: str, text: str, *, source: str) -> str:
+    if source == "unknown_command" or _looks_like_edit_request(text):
+        return "extend" if provider == "acp" else "implement"
+    return "triage" if provider == "acp" else "plan"
+
+
+def _looks_like_edit_request(text: str) -> bool:
+    lowered = str(text or "").strip().lower()
+    if not lowered:
+        return False
+    return any(keyword in lowered for keyword in _EDIT_REQUEST_KEYWORDS)
+
+
+def _truncate_request_text(text: str, *, max_chars: int = 180) -> str:
+    normalized = str(text or "").strip().replace("\r", " ").replace("\n", " ")
+    if len(normalized) <= max_chars:
+        return normalized
+    return normalized[: max(0, max_chars - 16)].rstrip() + " ...[truncated]"
+
+
+def _claude_command_name(settings) -> str:
+    return str(getattr(settings, "telegram_agent_claude_command", "claude") or "claude").strip()
+
+
+def _codex_command_name(settings) -> str:
+    return str(
+        getattr(settings, "telegram_agent_codex_command", "")
+        or os.getenv("TELEGRAM_AGENT_CODEX_COMMAND", "codex")
+        or "codex"
+    ).strip()
+
+
+def _configured_acp_backend() -> str:
+    return str(os.getenv("ROUGHCUT_ACP_BRIDGE_BACKEND", "claude") or "claude").strip().lower()
+
+
+def _claude_command_available(settings) -> bool:
+    if not bool(getattr(settings, "telegram_agent_claude_enabled", False)):
+        return False
+    return bool(shutil.which(_claude_command_name(settings)))
+
+
+def _codex_command_available(settings) -> bool:
+    return bool(shutil.which(_codex_command_name(settings)))
+
+
+def _acp_available(settings) -> bool:
+    explicit_command = str(getattr(settings, "telegram_agent_acp_command", "") or "").strip()
+    if explicit_command:
+        return True
+    backend = _configured_acp_backend()
+    if backend == "codex":
+        return _codex_command_available(settings)
+    if backend == "claude":
+        command_name = str(
+            os.getenv("ROUGHCUT_ACP_BRIDGE_CLAUDE_COMMAND", "")
+            or _claude_command_name(settings)
+            or "claude"
+        ).strip()
+        return bool(shutil.which(command_name))
+    return False

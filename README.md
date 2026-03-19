@@ -237,13 +237,19 @@ pnpm dev:telegram-agent
 - `/status`
 - `/jobs [limit]`
 - `/job <job_id>`
-- `/run <claude|acp> <preset> --task "..."`
+- `/run <claude|codex|acp> <preset> --task "..."`
 - `/task <task_id> [--full]`
 - `/tasks [limit]`
 - `/presets`
 - `/confirm <task_id>`
 - `/cancel <task_id>`
 - `/review [content|subtitle] <job_id> <pass|reject|note> [备注]`
+
+当 Telegram 收到未知命令，或直接收到“修复错误 / 结构优化 / 链路优化 / 扩展命令”这类自然语言工程请求时，agent 会自动尝试分流：
+
+- 优先走 ACP bridge
+- 如果是需要改代码的扩展类请求，会自动创建待确认任务
+- 如果是分析类请求，会直接创建只读诊断任务
 
 ### 9. 测试与构建
 
@@ -426,6 +432,8 @@ curl http://localhost:8000/api/v1/jobs/{job_id}/report
 | `TELEGRAM_AGENT_ENABLED` | `false` | 启用独立 Telegram agent；建议与 `roughcut telegram-agent` 独立进程一起使用 |
 | `TELEGRAM_AGENT_CLAUDE_ENABLED` | `false` | 允许 Telegram agent 调用本机 Claude Code CLI |
 | `TELEGRAM_AGENT_CLAUDE_COMMAND` | `claude` | Claude Code CLI 命令名 |
+| `TELEGRAM_AGENT_CLAUDE_MODEL` | `opus` | Claude Code CLI 模型名；为空则使用 Claude 默认模型 |
+| `TELEGRAM_AGENT_CODEX_COMMAND` | `codex` | Codex CLI 命令名；用于 `/run codex ...` 或 ACP `codex` backend |
 | `TELEGRAM_AGENT_ACP_COMMAND` | `""` | 外部 ACP bridge 命令；Telegram agent 会通过 stdin 发送 JSON 负载 |
 | `TELEGRAM_AGENT_TASK_TIMEOUT_SEC` | `900` | Telegram agent 异步任务超时 |
 | `TELEGRAM_AGENT_RESULT_MAX_CHARS` | `3500` | Telegram 回推结果摘要最大字符数 |
@@ -437,6 +445,16 @@ curl http://localhost:8000/api/v1/jobs/{job_id}/report
 ```env
 TELEGRAM_AGENT_ACP_COMMAND=uv run python scripts/acp_bridge.py
 ROUGHCUT_ACP_BRIDGE_BACKEND=claude
+TELEGRAM_AGENT_CLAUDE_MODEL=opus
+ROUGHCUT_ACP_BRIDGE_CLAUDE_MODEL=opus
+```
+
+如果要让内置 ACP bridge 改走 Codex，可以改成：
+
+```env
+TELEGRAM_AGENT_ACP_COMMAND=uv run python scripts/acp_bridge.py
+ROUGHCUT_ACP_BRIDGE_BACKEND=codex
+ROUGHCUT_ACP_BRIDGE_CODEX_COMMAND=codex
 ```
 
 如果不显式配置 `TELEGRAM_AGENT_ACP_COMMAND`，Telegram agent 也会默认回退到仓库内置的 `scripts/acp_bridge.py`。
