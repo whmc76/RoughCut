@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 import roughcut.telegram.commands as commands_mod
-from roughcut.telegram.commands import handle_telegram_command, parse_telegram_command
+from roughcut.telegram.commands import handle_telegram_command, handle_telegram_freeform_request, parse_telegram_command
 
 
 def test_parse_telegram_command_trims_bot_suffix():
@@ -163,6 +163,81 @@ async def test_handle_run_implement_requires_confirmation(monkeypatch):
     assert handled is True
     assert created[0]["status"] == "awaiting_confirmation"
     assert "/confirm task-1" in sent[0]
+
+
+@pytest.mark.asyncio
+async def test_handle_unknown_command_creates_extension_task(monkeypatch):
+    sent: list[str] = []
+
+    async def fake_send_text(text: str) -> None:
+        sent.append(text)
+
+    setattr(fake_send_text, "_telegram_chat_id", "321")
+
+    created = []
+
+    def fake_create_task_record(**kwargs):
+        created.append(kwargs)
+        return SimpleNamespace(task_id="task-unknown")
+
+    monkeypatch.setattr(
+        commands_mod,
+        "get_settings",
+        lambda: SimpleNamespace(
+            telegram_agent_enabled=True,
+            telegram_agent_claude_enabled=False,
+            telegram_agent_claude_command="claude",
+            telegram_agent_acp_command="python scripts/acp_bridge.py",
+        ),
+    )
+    monkeypatch.setattr(commands_mod, "create_task_record", fake_create_task_record)
+
+    handled = await handle_telegram_command("/refactor-telegram-agent", send_text=fake_send_text)
+
+    assert handled is True
+    assert created[0]["provider"] == "acp"
+    assert created[0]["preset"] == "extend"
+    assert created[0]["status"] == "awaiting_confirmation"
+    assert "/confirm task-unknown" in sent[0]
+
+
+@pytest.mark.asyncio
+async def test_handle_freeform_request_queues_triage_task(monkeypatch):
+    sent: list[str] = []
+
+    async def fake_send_text(text: str) -> None:
+        sent.append(text)
+
+    setattr(fake_send_text, "_telegram_chat_id", "321")
+
+    created = []
+    submitted = []
+
+    def fake_create_task_record(**kwargs):
+        created.append(kwargs)
+        return SimpleNamespace(task_id="task-freeform", **kwargs)
+
+    monkeypatch.setattr(
+        commands_mod,
+        "get_settings",
+        lambda: SimpleNamespace(
+            telegram_agent_enabled=True,
+            telegram_agent_claude_enabled=False,
+            telegram_agent_claude_command="claude",
+            telegram_agent_acp_command="python scripts/acp_bridge.py",
+        ),
+    )
+    monkeypatch.setattr(commands_mod, "create_task_record", fake_create_task_record)
+    monkeypatch.setattr(commands_mod, "submit_agent_task", lambda record: submitted.append(record) or record)
+
+    handled = await handle_telegram_freeform_request("请帮我分析 telegram agent 的链路问题", send_text=fake_send_text)
+
+    assert handled is True
+    assert created[0]["provider"] == "acp"
+    assert created[0]["preset"] == "triage"
+    assert created[0]["status"] == "queued"
+    assert submitted
+    assert "已将请求交给 Telegram agent" in sent[0]
 
 
 @pytest.mark.asyncio
