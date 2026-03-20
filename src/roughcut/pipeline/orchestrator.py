@@ -373,20 +373,19 @@ async def _is_step_ready(step: JobStep, session) -> bool:
         return True  # First step is always ready
 
     existing_steps_result = await session.execute(
-        select(JobStep.step_name).where(JobStep.job_id == step.job_id)
+        select(JobStep).where(JobStep.job_id == step.job_id)
     )
-    existing_step_names = {name for name in existing_steps_result.scalars().all()}
-    prev_step_name = _find_previous_existing_step_name(step.step_name, existing_step_names)
-    if prev_step_name is None:
-        return True
-    result = await session.execute(
-        select(JobStep).where(
-            JobStep.job_id == step.job_id,
-            JobStep.step_name == prev_step_name,
-        )
-    )
-    prev_step = result.scalar_one_or_none()
-    return prev_step is not None and prev_step.status in {"done", "skipped"}
+    steps_by_name = {
+        existing_step.step_name: existing_step
+        for existing_step in existing_steps_result.scalars().all()
+    }
+    for prerequisite_name in PIPELINE_STEPS[:step_idx]:
+        prerequisite = steps_by_name.get(prerequisite_name)
+        if prerequisite is None:
+            continue
+        if prerequisite.status not in {"done", "skipped"}:
+            return False
+    return True
 
 
 async def _dispatch_step(step: JobStep, session) -> None:

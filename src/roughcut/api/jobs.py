@@ -17,6 +17,7 @@ from sqlalchemy.orm import selectinload
 
 from roughcut.api.options import normalize_channel_profile, normalize_job_language
 from roughcut.api.schemas import (
+    ContentProfileApprovalStatsOut,
     ContentProfileMemoryStatsOut,
     ContentProfileConfirmIn,
     ContentProfileReviewOut,
@@ -58,6 +59,12 @@ from roughcut.review.content_profile_memory import (
     build_content_profile_memory_cloud,
     load_content_profile_user_memory,
     record_content_profile_feedback_memory,
+)
+from roughcut.review.content_profile_review_stats import (
+    apply_current_content_profile_review_policy,
+    build_content_profile_auto_review_gate,
+    summarize_content_profile_review_stats,
+    record_content_profile_manual_review,
 )
 from roughcut.review.domain_glossaries import detect_glossary_domains
 from roughcut.review.report import generate_report
@@ -341,6 +348,11 @@ async def get_content_profile(job_id: uuid.UUID, session: AsyncSession = Depends
     artifacts = artifact_result.scalars().all()
     draft = next((item.data_json for item in artifacts if item.artifact_type == "content_profile_draft"), None)
     final = next((item.data_json for item in artifacts if item.artifact_type == "content_profile_final"), None)
+    settings = get_settings()
+    if isinstance(draft, dict):
+        draft = apply_current_content_profile_review_policy(draft, settings=settings)
+    if isinstance(final, dict):
+        final = apply_current_content_profile_review_policy(final, settings=settings)
 
     review_step_result = await session.execute(
         select(JobStep).where(JobStep.job_id == job_id, JobStep.step_name == "summary_review")
@@ -428,6 +440,35 @@ async def get_content_profile_memory_stats(
         keyword_preferences=_build_keyword_preferences(keyword_stats, channel_profile=channel_profile, limit=18),
         recent_corrections=_build_recent_corrections(corrections, channel_profile=channel_profile, limit=12),
         cloud=build_content_profile_memory_cloud(user_memory),
+    )
+
+
+@router.get("/stats/content-profile-approval", response_model=ContentProfileApprovalStatsOut)
+async def get_content_profile_approval_stats():
+    settings = get_settings()
+    required_accuracy = float(getattr(settings, "content_profile_auto_review_min_accuracy", 0.9) or 0.9)
+    minimum_sample_size = int(getattr(settings, "content_profile_auto_review_min_samples", 20) or 20)
+    summary = summarize_content_profile_review_stats(
+        min_accuracy=required_accuracy,
+        min_samples=minimum_sample_size,
+    )
+    return ContentProfileApprovalStatsOut(
+        updated_at=summary["updated_at"],
+        auto_review_enabled=bool(getattr(settings, "auto_confirm_content_profile", False)),
+        review_threshold=float(getattr(settings, "content_profile_review_threshold", 0.9) or 0.9),
+        required_accuracy=summary["required_accuracy"],
+        minimum_sample_size=summary["minimum_sample_size"],
+        gate_passed=summary["gate_passed"],
+        detail=str(summary["detail"]),
+        measured_accuracy=summary["measured_accuracy"],
+        sample_size=int(summary["sample_size"]),
+        manual_review_total=int(summary["manual_review_total"]),
+        approved_without_changes=int(summary["approved_without_changes"]),
+        corrected_after_review=int(summary["corrected_after_review"]),
+        eligible_manual_review_total=int(summary["eligible_manual_review_total"]),
+        eligible_approved_without_changes=int(summary["eligible_approved_without_changes"]),
+        eligible_corrected_after_review=int(summary["eligible_corrected_after_review"]),
+        eligible_approval_accuracy=summary["eligible_approval_accuracy"],
     )
 
 
@@ -545,6 +586,32 @@ async def confirm_content_profile(
         accepted_corrections=accepted_corrections,
     )
     final_profile["user_feedback"] = user_feedback
+    manual_review_outcome = record_content_profile_manual_review(
+        job_id=str(job.id),
+        draft_artifact_id=str(draft_artifact.id),
+        draft_profile=draft_artifact.data_json or {},
+        final_profile=final_profile,
+    )
+    automation_review = final_profile.get("automation_review") if isinstance(final_profile, dict) else {}
+    if isinstance(automation_review, dict):
+        settings = get_settings()
+        accuracy_gate = build_content_profile_auto_review_gate(
+            min_accuracy=float(getattr(settings, "content_profile_auto_review_min_accuracy", 0.9) or 0.9),
+            min_samples=int(getattr(settings, "content_profile_auto_review_min_samples", 20) or 20),
+        )
+        automation_review.update(
+            {
+                "approval_accuracy_gate_passed": bool(accuracy_gate["gate_passed"]),
+                "approval_accuracy": accuracy_gate["measured_accuracy"],
+                "approval_accuracy_required": accuracy_gate["required_accuracy"],
+                "approval_accuracy_sample_size": accuracy_gate["sample_size"],
+                "approval_accuracy_min_samples": accuracy_gate["minimum_sample_size"],
+                "approval_accuracy_detail": accuracy_gate["detail"],
+                "manual_review_sample_size": accuracy_gate["manual_review_total"],
+            }
+        )
+        final_profile["automation_review"] = automation_review
+    final_profile["manual_review_outcome"] = manual_review_outcome
 
     review_step_result = await session.execute(
         select(JobStep).where(JobStep.job_id == job_id, JobStep.step_name == "summary_review")

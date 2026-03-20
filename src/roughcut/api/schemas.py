@@ -161,6 +161,25 @@ class ContentProfileMemoryStatsOut(BaseModel):
     cloud: dict[str, Any] = {}
 
 
+class ContentProfileApprovalStatsOut(BaseModel):
+    updated_at: str | None = None
+    auto_review_enabled: bool
+    review_threshold: float
+    required_accuracy: float
+    minimum_sample_size: int
+    gate_passed: bool
+    detail: str
+    measured_accuracy: float | None = None
+    sample_size: int = 0
+    manual_review_total: int = 0
+    approved_without_changes: int = 0
+    corrected_after_review: int = 0
+    eligible_manual_review_total: int = 0
+    eligible_approved_without_changes: int = 0
+    eligible_corrected_after_review: int = 0
+    eligible_approval_accuracy: float | None = None
+
+
 class ContentProfileConfirmIn(BaseModel):
     workflow_mode: str | None = None
     enhancement_modes: list[str] | None = None

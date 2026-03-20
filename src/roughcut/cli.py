@@ -49,6 +49,26 @@ class QualityAuditRow:
     recommended_rerun_steps: list[str]
 
 
+@dataclass
+class ContentProfileApprovalStatsRow:
+    updated_at: str | None
+    auto_review_enabled: bool
+    review_threshold: float
+    required_accuracy: float
+    minimum_sample_size: int
+    gate_passed: bool
+    detail: str
+    measured_accuracy: float | None
+    sample_size: int
+    manual_review_total: int
+    approved_without_changes: int
+    corrected_after_review: int
+    eligible_manual_review_total: int
+    eligible_approved_without_changes: int
+    eligible_corrected_after_review: int
+    eligible_approval_accuracy: float | None
+
+
 def _repo_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
@@ -347,6 +367,58 @@ def quality_improve(
     )
 
 
+@quality.command("content-profile-review-stats")
+@click.option("--json-output", "json_output", is_flag=True, default=False, help="Print machine-readable JSON")
+def quality_content_profile_review_stats(json_output: bool):
+    """Show whether content-profile auto-review is allowed to be re-enabled."""
+    row = _content_profile_review_stats()
+    payload = asdict(row)
+    if json_output:
+        click.echo(json.dumps(payload, ensure_ascii=False, indent=2))
+        return
+    measured = f"{row.measured_accuracy:.1%}" if row.measured_accuracy is not None else "n/a"
+    eligible = f"{row.eligible_approval_accuracy:.1%}" if row.eligible_approval_accuracy is not None else "n/a"
+    click.echo(f"auto_review_enabled={str(row.auto_review_enabled).lower()} gate_passed={str(row.gate_passed).lower()}")
+    click.echo(
+        f"quality_threshold={row.review_threshold:.0%} required_accuracy={row.required_accuracy:.0%} "
+        f"minimum_sample_size={row.minimum_sample_size}"
+    )
+    click.echo(
+        f"measured_accuracy={measured} eligible_sample_size={row.sample_size} "
+        f"manual_review_total={row.manual_review_total}"
+    )
+    click.echo(
+        f"approved_without_changes={row.approved_without_changes} corrected_after_review={row.corrected_after_review}"
+    )
+    click.echo(
+        f"eligible_approved_without_changes={row.eligible_approved_without_changes} "
+        f"eligible_corrected_after_review={row.eligible_corrected_after_review} "
+        f"eligible_accuracy={eligible}"
+    )
+    click.echo(f"detail={row.detail}")
+    if row.updated_at:
+        click.echo(f"updated_at={row.updated_at}")
+
+
+@quality.command("backfill-content-profile-policy")
+@click.option("--json-output", "json_output", is_flag=True, default=False, help="Print machine-readable JSON")
+def quality_backfill_content_profile_policy(json_output: bool):
+    """Rewrite stored content-profile artifacts with the current review policy fields."""
+    result = asyncio.run(_backfill_content_profile_policy_async())
+    if json_output:
+        click.echo(json.dumps(result, ensure_ascii=False, indent=2))
+        return
+    click.echo(
+        " ".join(
+            [
+                f"updated_artifacts={result['updated_artifacts']}",
+                f"scanned_artifacts={result['scanned_artifacts']}",
+                f"job_count={result['job_count']}",
+            ]
+        )
+    )
+
+
 async def _quality_audit_async(*, limit: int, statuses: list[str], persist: bool) -> list[QualityAuditRow]:
     from roughcut.db.models import Artifact, Job, JobStep, SubtitleCorrection, SubtitleItem
     from roughcut.db.session import get_session_factory
@@ -401,6 +473,66 @@ async def _quality_audit_async(*, limit: int, statuses: list[str], persist: bool
             await session.commit()
     rows.sort(key=lambda item: (item.score, item.status, item.source_name.lower()))
     return rows[: max(0, limit)]
+
+
+def _content_profile_review_stats() -> ContentProfileApprovalStatsRow:
+    from roughcut.review.content_profile_review_stats import summarize_content_profile_review_stats
+
+    settings = get_settings()
+    summary = summarize_content_profile_review_stats(
+        min_accuracy=float(getattr(settings, "content_profile_auto_review_min_accuracy", 0.9) or 0.9),
+        min_samples=int(getattr(settings, "content_profile_auto_review_min_samples", 20) or 20),
+    )
+    return ContentProfileApprovalStatsRow(
+        updated_at=summary["updated_at"],
+        auto_review_enabled=bool(getattr(settings, "auto_confirm_content_profile", False)),
+        review_threshold=float(getattr(settings, "content_profile_review_threshold", 0.9) or 0.9),
+        required_accuracy=summary["required_accuracy"],
+        minimum_sample_size=summary["minimum_sample_size"],
+        gate_passed=summary["gate_passed"],
+        detail=str(summary["detail"]),
+        measured_accuracy=summary["measured_accuracy"],
+        sample_size=int(summary["sample_size"]),
+        manual_review_total=int(summary["manual_review_total"]),
+        approved_without_changes=int(summary["approved_without_changes"]),
+        corrected_after_review=int(summary["corrected_after_review"]),
+        eligible_manual_review_total=int(summary["eligible_manual_review_total"]),
+        eligible_approved_without_changes=int(summary["eligible_approved_without_changes"]),
+        eligible_corrected_after_review=int(summary["eligible_corrected_after_review"]),
+        eligible_approval_accuracy=summary["eligible_approval_accuracy"],
+    )
+
+
+async def _backfill_content_profile_policy_async() -> dict[str, int]:
+    from roughcut.db.models import Artifact
+    from roughcut.db.session import get_session_factory
+    from roughcut.review.content_profile_review_stats import apply_current_content_profile_review_policy
+
+    scanned_artifacts = 0
+    updated_artifacts = 0
+    touched_job_ids: set[str] = set()
+    factory = get_session_factory()
+    async with factory() as session:
+        artifact_result = await session.execute(
+            select(Artifact).where(Artifact.artifact_type.in_(["content_profile_draft", "content_profile_final"]))
+        )
+        artifacts = artifact_result.scalars().all()
+        settings = get_settings()
+        for artifact in artifacts:
+            if not isinstance(artifact.data_json, dict):
+                continue
+            scanned_artifacts += 1
+            updated = apply_current_content_profile_review_policy(artifact.data_json, settings=settings)
+            if updated != artifact.data_json:
+                artifact.data_json = updated
+                updated_artifacts += 1
+                touched_job_ids.add(str(artifact.job_id))
+        await session.commit()
+    return {
+        "scanned_artifacts": scanned_artifacts,
+        "updated_artifacts": updated_artifacts,
+        "job_count": len(touched_job_ids),
+    }
 
 
 async def _quality_improve_async(

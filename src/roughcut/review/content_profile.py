@@ -13,6 +13,7 @@ from roughcut.providers.factory import get_reasoning_provider, get_search_provid
 from roughcut.providers.multimodal import complete_with_images
 from roughcut.providers.reasoning.base import Message, extract_json_text
 from roughcut.review.content_profile_memory import summarize_content_profile_user_memory
+from roughcut.review.content_profile_review_stats import build_content_profile_auto_review_gate
 from roughcut.review.subtitle_memory import (
     _extract_compound_components,
     apply_domain_term_corrections,
@@ -251,8 +252,10 @@ def assess_content_profile_automation(
 
     subject_brand = str(profile.get("subject_brand") or "").strip()
     subject_model = str(profile.get("subject_model") or "").strip()
+    has_verifiable_subject = bool(subject_brand or subject_model)
+    has_complete_subject_identity = bool(subject_brand and subject_model)
     mapped_brand = _mapped_brand_for_model(subject_model)
-    if subject_brand or subject_model:
+    if has_verifiable_subject:
         score += 0.10 if preset_name in product_like_presets else 0.06
         reasons.append("识别出可验证主体")
     if (
@@ -263,9 +266,11 @@ def assess_content_profile_automation(
         and _normalize_profile_value(subject_brand) != _normalize_profile_value(mapped_brand)
     ):
         blocking_reasons.append("开箱类视频主体品牌与型号冲突")
-    elif preset_name in product_like_presets:
+    elif preset_name in product_like_presets and not has_verifiable_subject:
         blocking_reasons.append("开箱类视频未识别出可验证主体")
-    else:
+    elif preset_name in product_like_presets and not has_complete_subject_identity:
+        review_reasons.append("开箱类视频主体身份信息仍不完整")
+    elif has_verifiable_subject and not has_complete_subject_identity:
         review_reasons.append("主体身份信息不完整")
 
     if bool(identity_review.get("required")):
@@ -276,12 +281,19 @@ def assess_content_profile_automation(
     score = round(min(score, 1.0), 3)
     review_reasons = list(dict.fromkeys(review_reasons))
     blocking_reasons = list(dict.fromkeys(blocking_reasons))
-    auto_confirm = auto_confirm_enabled and score >= normalized_threshold and not blocking_reasons
+    quality_gate_passed = score >= normalized_threshold and not blocking_reasons
+    settings = get_settings()
+    accuracy_gate = build_content_profile_auto_review_gate(
+        min_accuracy=float(getattr(settings, "content_profile_auto_review_min_accuracy", 0.9) or 0.9),
+        min_samples=int(getattr(settings, "content_profile_auto_review_min_samples", 20) or 20),
+    )
+    auto_confirm = auto_confirm_enabled and quality_gate_passed and bool(accuracy_gate["gate_passed"])
 
     return {
         "enabled": auto_confirm_enabled,
         "threshold": normalized_threshold,
         "score": score,
+        "quality_gate_passed": quality_gate_passed,
         "auto_confirm": auto_confirm,
         "reasons": reasons,
         "review_reasons": review_reasons,
@@ -289,6 +301,13 @@ def assess_content_profile_automation(
         "identity_review": identity_review,
         "subtitle_count": subtitle_count,
         "transcript_excerpt_length": transcript_length,
+        "approval_accuracy_gate_passed": bool(accuracy_gate["gate_passed"]),
+        "approval_accuracy": accuracy_gate["measured_accuracy"],
+        "approval_accuracy_required": accuracy_gate["required_accuracy"],
+        "approval_accuracy_sample_size": accuracy_gate["sample_size"],
+        "approval_accuracy_min_samples": accuracy_gate["minimum_sample_size"],
+        "approval_accuracy_detail": accuracy_gate["detail"],
+        "manual_review_sample_size": accuracy_gate["manual_review_total"],
     }
 
 
