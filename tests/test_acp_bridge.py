@@ -5,6 +5,23 @@ from pathlib import Path
 import roughcut.telegram.acp_bridge as bridge_mod
 
 
+def test_build_backend_command_uses_codex_defaults(monkeypatch, tmp_path: Path):
+    monkeypatch.delenv("ROUGHCUT_ACP_BRIDGE_BACKEND", raising=False)
+    monkeypatch.delenv("ROUGHCUT_ACP_BRIDGE_CODEX_COMMAND", raising=False)
+    monkeypatch.delenv("ROUGHCUT_ACP_BRIDGE_CODEX_MODEL", raising=False)
+    monkeypatch.delenv("TELEGRAM_AGENT_CODEX_MODEL", raising=False)
+    monkeypatch.setattr(bridge_mod.shutil, "which", lambda name: "C:/tools/codex.exe")
+
+    command, cwd, timeout = bridge_mod.build_backend_command(
+        {"repo_root": str(tmp_path), "prompt": "检查代码"}
+    )
+
+    assert command[0] == "C:/tools/codex.exe"
+    assert "exec" in command
+    assert cwd == tmp_path.resolve()
+    assert timeout == 900
+
+
 def test_build_backend_command_uses_claude_defaults(monkeypatch, tmp_path: Path):
     monkeypatch.setenv("ROUGHCUT_ACP_BRIDGE_BACKEND", "claude")
     monkeypatch.delenv("ROUGHCUT_ACP_BRIDGE_CLAUDE_COMMAND", raising=False)
@@ -166,3 +183,57 @@ def test_run_bridge_falls_back_to_codex_when_claude_fails(monkeypatch, tmp_path:
     assert result["backend"] == "codex"
     assert result["fallback_from"] == "claude"
     assert result["excerpt"] == "bridge codex fallback ok"
+
+
+def test_run_bridge_uses_codex_and_falls_back_to_claude_by_default(monkeypatch, tmp_path: Path):
+    monkeypatch.delenv("ROUGHCUT_ACP_BRIDGE_BACKEND", raising=False)
+    monkeypatch.delenv("ROUGHCUT_ACP_BRIDGE_FALLBACK_BACKEND", raising=False)
+    monkeypatch.setenv("ROUGHCUT_ACP_BRIDGE_CLAUDE_MODEL", "opus")
+    monkeypatch.setenv("ROUGHCUT_ACP_BRIDGE_CODEX_MODEL", "gpt-5.4-mini")
+    monkeypatch.setattr(
+        bridge_mod.shutil,
+        "which",
+        lambda name: f"C:/tools/{name}.exe",
+    )
+
+    class FakeTempDir:
+        def __init__(self, path: Path):
+            self.name = str(path)
+
+        def cleanup(self):
+            return None
+
+    monkeypatch.setattr(
+        bridge_mod.tempfile,
+        "TemporaryDirectory",
+        lambda prefix: FakeTempDir(tmp_path / "codex-temp"),
+    )
+
+    class FakeCodexFailure:
+        returncode = 1
+        stdout = ""
+        stderr = "codex failed"
+
+    class FakeClaudeSuccess:
+        returncode = 0
+        stdout = "claude ok"
+        stderr = ""
+
+    calls: list[list[str]] = []
+
+    def fake_run(command, *args, **kwargs):
+        calls.append(command)
+        if command[0].endswith("codex.exe"):
+            return FakeCodexFailure()
+        return FakeClaudeSuccess()
+
+    monkeypatch.setattr(bridge_mod.subprocess, "run", fake_run)
+
+    result = bridge_mod.run_bridge({"repo_root": str(tmp_path), "prompt": "检查代码"})
+
+    assert len(calls) == 2
+    assert calls[0][0].endswith("codex.exe")
+    assert calls[1][0].endswith("claude.exe")
+    assert result["backend"] == "claude"
+    assert result["fallback_from"] == "codex"
+    assert result["excerpt"] == "claude ok"

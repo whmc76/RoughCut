@@ -13,11 +13,11 @@ from roughcut.telegram.output_codec import decode_process_output
 
 
 def _configured_backend() -> str:
-    return str(os.getenv("ROUGHCUT_ACP_BRIDGE_BACKEND", "claude") or "claude").strip().lower()
+    return str(os.getenv("ROUGHCUT_ACP_BRIDGE_BACKEND", "codex") or "codex").strip().lower()
 
 
 def _configured_fallback_backend() -> str:
-    return str(os.getenv("ROUGHCUT_ACP_BRIDGE_FALLBACK_BACKEND", "") or "").strip().lower()
+    return str(os.getenv("ROUGHCUT_ACP_BRIDGE_FALLBACK_BACKEND", "claude") or "claude").strip().lower()
 
 
 def build_backend_command(payload: dict[str, Any], *, backend: str | None = None) -> tuple[list[str], Path, int]:

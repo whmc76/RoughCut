@@ -164,13 +164,13 @@ class Settings(BaseSettings):
     telegram_agent_claude_command: str = "claude"
     telegram_agent_claude_model: str = "opus"
     telegram_agent_codex_command: str = "codex"
-    telegram_agent_codex_model: str = ""
+    telegram_agent_codex_model: str = "gpt-5.4-mini"
     telegram_agent_acp_command: str = ""
     telegram_agent_task_timeout_sec: int = 900
     telegram_agent_result_max_chars: int = 3500
     telegram_agent_state_dir: str = "data/telegram-agent"
-    acp_bridge_backend: str = Field(default="claude", validation_alias="ROUGHCUT_ACP_BRIDGE_BACKEND")
-    acp_bridge_fallback_backend: str = Field(default="codex", validation_alias="ROUGHCUT_ACP_BRIDGE_FALLBACK_BACKEND")
+    acp_bridge_backend: str = Field(default="codex", validation_alias="ROUGHCUT_ACP_BRIDGE_BACKEND")
+    acp_bridge_fallback_backend: str = Field(default="claude", validation_alias="ROUGHCUT_ACP_BRIDGE_FALLBACK_BACKEND")
     acp_bridge_claude_model: str = Field(default="opus", validation_alias="ROUGHCUT_ACP_BRIDGE_CLAUDE_MODEL")
     acp_bridge_codex_command: str = Field(default="codex", validation_alias="ROUGHCUT_ACP_BRIDGE_CODEX_COMMAND")
     acp_bridge_codex_model: str = Field(default="gpt-5.4-mini", validation_alias="ROUGHCUT_ACP_BRIDGE_CODEX_MODEL")

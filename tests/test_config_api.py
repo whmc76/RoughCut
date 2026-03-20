@@ -44,10 +44,17 @@ def test_get_config_exposes_extended_provider_fields(tmp_path, monkeypatch):
     object.__setattr__(settings, "telegram_agent_claude_enabled", True)
     object.__setattr__(settings, "telegram_agent_claude_command", "claude")
     object.__setattr__(settings, "telegram_agent_claude_model", "opus")
+    object.__setattr__(settings, "telegram_agent_codex_command", "codex")
+    object.__setattr__(settings, "telegram_agent_codex_model", "gpt-5.4-mini")
     object.__setattr__(settings, "telegram_agent_acp_command", "python scripts/acp_bridge.py")
     object.__setattr__(settings, "telegram_agent_task_timeout_sec", 600)
     object.__setattr__(settings, "telegram_agent_result_max_chars", 2800)
     object.__setattr__(settings, "telegram_agent_state_dir", "data/telegram-agent")
+    object.__setattr__(settings, "acp_bridge_backend", "codex")
+    object.__setattr__(settings, "acp_bridge_fallback_backend", "claude")
+    object.__setattr__(settings, "acp_bridge_claude_model", "opus")
+    object.__setattr__(settings, "acp_bridge_codex_command", "codex")
+    object.__setattr__(settings, "acp_bridge_codex_model", "gpt-5.4-mini")
     object.__setattr__(settings, "telegram_remote_review_enabled", True)
     object.__setattr__(settings, "telegram_bot_api_base_url", "https://api.telegram.org")
     object.__setattr__(settings, "telegram_bot_token", "bot-token")
@@ -97,10 +104,17 @@ def test_get_config_exposes_extended_provider_fields(tmp_path, monkeypatch):
     assert cfg.telegram_agent_claude_enabled is True
     assert cfg.telegram_agent_claude_command == "claude"
     assert cfg.telegram_agent_claude_model == "opus"
+    assert cfg.telegram_agent_codex_command == "codex"
+    assert cfg.telegram_agent_codex_model == "gpt-5.4-mini"
     assert cfg.telegram_agent_acp_command == "python scripts/acp_bridge.py"
     assert cfg.telegram_agent_task_timeout_sec == 600
     assert cfg.telegram_agent_result_max_chars == 2800
     assert cfg.telegram_agent_state_dir == "data/telegram-agent"
+    assert cfg.acp_bridge_backend == "codex"
+    assert cfg.acp_bridge_fallback_backend == "claude"
+    assert cfg.acp_bridge_claude_model == "opus"
+    assert cfg.acp_bridge_codex_command == "codex"
+    assert cfg.acp_bridge_codex_model == "gpt-5.4-mini"
     assert cfg.telegram_remote_review_enabled is True
     assert cfg.telegram_bot_api_base_url == "https://api.telegram.org"
     assert cfg.telegram_bot_token_set is True
@@ -297,10 +311,17 @@ def test_patch_config_accepts_telegram_remote_review_fields(tmp_path, monkeypatc
             telegram_agent_claude_enabled=True,
             telegram_agent_claude_command="claude",
             telegram_agent_claude_model="opus",
+            telegram_agent_codex_command="codex-nightly",
+            telegram_agent_codex_model="gpt-5.4-mini",
             telegram_agent_acp_command="python scripts/acp_bridge.py",
             telegram_agent_task_timeout_sec=1200,
             telegram_agent_result_max_chars=5000,
             telegram_agent_state_dir=str(tmp_path / "agent-state"),
+            acp_bridge_backend="codex",
+            acp_bridge_fallback_backend="claude",
+            acp_bridge_claude_model="opus",
+            acp_bridge_codex_command="codex-nightly",
+            acp_bridge_codex_model="gpt-5.4-mini",
             telegram_remote_review_enabled=True,
             telegram_bot_api_base_url="https://api.telegram.org/",
             telegram_bot_token="bot-token",
@@ -312,14 +333,33 @@ def test_patch_config_accepts_telegram_remote_review_fields(tmp_path, monkeypatc
     assert cfg.telegram_agent_claude_enabled is True
     assert cfg.telegram_agent_claude_command == "claude"
     assert cfg.telegram_agent_claude_model == "opus"
+    assert cfg.telegram_agent_codex_command == "codex-nightly"
+    assert cfg.telegram_agent_codex_model == "gpt-5.4-mini"
     assert cfg.telegram_agent_acp_command == "python scripts/acp_bridge.py"
     assert cfg.telegram_agent_task_timeout_sec == 1200
     assert cfg.telegram_agent_result_max_chars == 5000
     assert cfg.telegram_agent_state_dir == str(tmp_path / "agent-state")
+    assert cfg.acp_bridge_backend == "codex"
+    assert cfg.acp_bridge_fallback_backend == "claude"
+    assert cfg.acp_bridge_claude_model == "opus"
+    assert cfg.acp_bridge_codex_command == "codex-nightly"
+    assert cfg.acp_bridge_codex_model == "gpt-5.4-mini"
     assert cfg.telegram_remote_review_enabled is True
     assert cfg.telegram_bot_api_base_url == "https://api.telegram.org"
     assert cfg.telegram_bot_token_set is True
     assert cfg.telegram_bot_chat_id == "123456789"
+
+
+def test_patch_config_rejects_unknown_acp_bridge_backend(tmp_path, monkeypatch):
+    import roughcut.api.config as config_api
+    import roughcut.config as config_mod
+
+    monkeypatch.setattr(config_api, "_CONFIG_FILE", tmp_path / "roughcut_config.json")
+    monkeypatch.setattr(config_mod, "_OVERRIDES_FILE", tmp_path / "roughcut_config.json")
+    config_mod._settings = None
+
+    with pytest.raises(HTTPException, match="acp_bridge_backend must be claude or codex"):
+        patch_config(ConfigPatch(acp_bridge_backend="unsupported"))
 
 
 def test_patch_config_accepts_subtitle_filler_cleanup_toggle(tmp_path, monkeypatch):
