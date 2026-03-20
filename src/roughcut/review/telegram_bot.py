@@ -24,8 +24,11 @@ from roughcut.config import get_settings
 from roughcut.creative.modes import build_active_enhancement_mode_options, build_active_workflow_mode_options
 from roughcut.db.models import Artifact, Job, JobStep
 from roughcut.db.session import get_session_factory
+from roughcut.media.audio import extract_audio
 from roughcut.media.probe import probe
 from roughcut.packaging.library import list_packaging_assets, resolve_packaging_plan_for_job
+from roughcut.providers.factory import get_reasoning_provider, get_transcription_provider
+from roughcut.review.subtitle_memory import build_transcription_prompt
 from roughcut.review.report import generate_report
 from roughcut.telegram.commands import handle_telegram_command, handle_telegram_freeform_request
 from roughcut.telegram.policy import is_allowed_chat, telegram_agent_enabled
@@ -34,7 +37,6 @@ from roughcut.telegram.task_service import (
     mark_task_notified,
     pending_notification_records,
 )
-from roughcut.providers.factory import get_reasoning_provider
 from roughcut.providers.reasoning.base import Message
 
 logger = logging.getLogger(__name__)
@@ -181,6 +183,18 @@ _FINAL_REVIEW_CALLBACK_ACK_TEXT = {
     "music": "已接收 BGM 重出",
     "platform": "已接收平台文案重出",
     "avatar": "已接收数字人口播重做",
+}
+_AUDIO_SUFFIX_BY_MIME = {
+    "audio/ogg": ".ogg",
+    "audio/opus": ".opus",
+    "audio/mpeg": ".mp3",
+    "audio/mp3": ".mp3",
+    "audio/mp4": ".m4a",
+    "audio/x-m4a": ".m4a",
+    "audio/aac": ".aac",
+    "audio/wav": ".wav",
+    "audio/x-wav": ".wav",
+    "audio/webm": ".webm",
 }
 
 
@@ -418,10 +432,8 @@ class TelegramReviewBotService:
             await self._handle_callback_query(callback_query)
             return
         message = update.get("message") or {}
-        text = _message_text(message)
-        if not text:
-            return
         actual_chat_id = str((message.get("chat") or {}).get("id") or "").strip()
+        text = _message_text(message)
         text_lower = text.lower()
         if text_lower in {"/start", "/help"}:
             await self._send_chat_text(
@@ -431,7 +443,8 @@ class TelegramReviewBotService:
                 "/run <claude|codex|acp> <preset> --task \"...\"、/task <task_id> [--full]、"
                 "/tasks [limit]、/presets、/confirm <task_id>、/cancel <task_id>、"
                 "/review [content|subtitle|final] <job_id> <pass|reject|note> [备注]\n"
-                "如果直接发送复杂错误、结构优化、链路优化或未知命令需求，agent 会自动尝试分流并创建处理任务。",
+                "如果直接发送复杂错误、结构优化、链路优化或未知命令需求，agent 会自动尝试分流并创建处理任务。"
+                "也支持直接发语音，我会先转写，再走命令、审核或 agent 分流。",
                 chat_id=actual_chat_id,
             )
             return
@@ -442,6 +455,11 @@ class TelegramReviewBotService:
         settings = get_settings()
         if not is_allowed_chat(settings, actual_chat_id):
             return
+        text, from_voice = await self._resolve_message_text(message, chat_id=actual_chat_id, settings=settings)
+        if not text:
+            return
+        if from_voice:
+            text = _normalize_spoken_command_text(text)
         if text.startswith("/"):
             async def send_with_chat_id(reply_text: str) -> None:
                 await self._send_chat_text(reply_text, chat_id=actual_chat_id)
@@ -472,6 +490,103 @@ class TelegramReviewBotService:
             await self._handle_subtitle_reply(job_id, text, reply_chat_id=actual_chat_id)
         elif kind == _REVIEW_KIND_FINAL:
             await self._handle_final_review_reply(job_id, text, reply_chat_id=actual_chat_id)
+
+    async def _resolve_message_text(
+        self,
+        message: dict[str, Any],
+        *,
+        chat_id: str,
+        settings: Any,
+    ) -> tuple[str, bool]:
+        text = _message_text(message)
+        if text:
+            return text, False
+        transcript = await self._transcribe_message_audio_text(message, chat_id=chat_id, settings=settings)
+        return transcript, bool(transcript)
+
+    async def _transcribe_message_audio_text(
+        self,
+        message: dict[str, Any],
+        *,
+        chat_id: str,
+        settings: Any,
+    ) -> str:
+        attachment = _extract_audio_attachment(message)
+        if attachment is None:
+            return ""
+
+        file_id = str(attachment.get("file_id") or "").strip()
+        if not file_id:
+            return ""
+
+        try:
+            transcript = await self._download_and_transcribe_audio(
+                file_id=file_id,
+                file_name=str(attachment.get("file_name") or "").strip(),
+                mime_type=str(attachment.get("mime_type") or "").strip(),
+                settings=settings,
+            )
+        except Exception as exc:
+            logger.warning("Failed to transcribe Telegram audio message for chat %s: %s", chat_id, exc)
+            await self._send_chat_text(
+                "语音指令转写失败。请直接发送文字，或稍后重试更清晰的语音。",
+                chat_id=chat_id,
+            )
+            return ""
+
+        if not transcript:
+            await self._send_chat_text(
+                "语音里没有识别到清晰的可执行文本。请换一条更清晰的语音，或直接发送文字。",
+                chat_id=chat_id,
+            )
+            return ""
+        return transcript
+
+    async def _download_and_transcribe_audio(
+        self,
+        *,
+        file_id: str,
+        file_name: str,
+        mime_type: str,
+        settings: Any,
+    ) -> str:
+        file_info = await self._call_api(settings, "getFile", {"file_id": file_id})
+        file_path = str(((file_info.get("result") or {}).get("file_path")) or "").strip()
+        if not file_path:
+            raise RuntimeError(f"Telegram getFile did not return file_path for {file_id}")
+
+        suffix = _guess_audio_suffix(file_name=file_name, mime_type=mime_type, fallback_path=file_path)
+        with tempfile.TemporaryDirectory(prefix="roughcut-telegram-audio-") as tmpdir:
+            workdir = Path(tmpdir)
+            source_path = workdir / f"source{suffix}"
+            wav_path = workdir / "source.wav"
+            await self._download_telegram_file(settings, file_path=file_path, output_path=source_path)
+            await extract_audio(source_path, wav_path)
+            provider = get_transcription_provider()
+            transcription_prompt = build_transcription_prompt(
+                source_name=Path(file_path).name,
+                channel_profile=None,
+                review_memory=None,
+                dialect_profile=getattr(settings, "transcription_dialect", None),
+            )
+            result = await provider.transcribe(
+                wav_path,
+                language="zh-CN",
+                prompt=transcription_prompt or None,
+            )
+        return _compact_text(" ".join(str(segment.text or "").strip() for segment in result.segments if str(segment.text or "").strip()))
+
+    async def _download_telegram_file(self, settings: Any, *, file_path: str, output_path: Path) -> Path:
+        url = (
+            f"{str(settings.telegram_bot_api_base_url).rstrip('/')}"
+            f"/file/bot{str(settings.telegram_bot_token).strip()}/{file_path.lstrip('/')}"
+        )
+        timeout = httpx.Timeout(65.0, connect=10.0)
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.get(url)
+        response.raise_for_status()
+        output_path.write_bytes(response.content)
+        return output_path
 
     async def _handle_callback_query(self, callback_query: dict[str, Any]) -> None:
         callback_query_id = str(callback_query.get("id") or "").strip()
@@ -1002,6 +1117,59 @@ def _build_review_reply_markup(kind: str, job_id: uuid.UUID) -> dict[str, Any] |
 
 def _message_text(message: dict[str, Any]) -> str:
     return str(message.get("text") or message.get("caption") or "").strip()
+
+
+def _extract_audio_attachment(message: dict[str, Any]) -> dict[str, Any] | None:
+    for key in ("voice", "audio"):
+        payload = message.get(key)
+        if isinstance(payload, dict) and str(payload.get("file_id") or "").strip():
+            return payload
+    return None
+
+
+def _guess_audio_suffix(*, file_name: str, mime_type: str, fallback_path: str) -> str:
+    candidate = Path(str(file_name or fallback_path or "").strip()).suffix.lower()
+    if candidate:
+        return candidate
+    normalized_mime = str(mime_type or "").strip().lower()
+    if normalized_mime in _AUDIO_SUFFIX_BY_MIME:
+        return _AUDIO_SUFFIX_BY_MIME[normalized_mime]
+    return ".ogg"
+
+
+def _normalize_spoken_command_text(text: str) -> str:
+    normalized = _compact_text(text)
+    if not normalized:
+        return ""
+    compact = re.sub(r"[\s，。,！？!?:：；;、\"'“”‘’（）()]+", "", normalized).lower()
+    if compact in {"状态", "查看状态", "服务状态", "系统状态", "当前状态", "status"}:
+        return "/status"
+    if compact in {"谁", "我是谁", "id", "chatid", "会话id", "会话编号"}:
+        return "/whoami"
+    if compact in {"最近任务", "查看任务", "任务列表", "jobs", "joblist"}:
+        return "/jobs"
+    if compact in {"最近agent任务", "agent任务", "agent任务列表", "tasks", "tasklist"}:
+        return "/tasks"
+    if compact in {"预设", "预设列表", "查看预设", "presets"}:
+        return "/presets"
+
+    confirm_match = re.match(r"^(?:确认|确认任务|提交确认)([A-Za-z0-9-]+)$", compact, re.IGNORECASE)
+    if confirm_match:
+        return f"/confirm {confirm_match.group(1)}"
+
+    cancel_match = re.match(r"^(?:取消|取消任务|撤销任务)([A-Za-z0-9-]+)$", compact, re.IGNORECASE)
+    if cancel_match:
+        return f"/cancel {cancel_match.group(1)}"
+
+    task_match = re.match(r"^(?:查看任务|任务详情|查看agent任务|agent任务详情)([A-Za-z0-9-]+)$", compact, re.IGNORECASE)
+    if task_match:
+        return f"/task {task_match.group(1)}"
+
+    return normalized
+
+
+def _compact_text(text: str) -> str:
+    return re.sub(r"\s+", " ", str(text or "").strip())
 
 
 def _looks_like_subtitle_review_reply(text: str) -> bool:

@@ -305,6 +305,141 @@ async def test_handle_update_freeform_request_routes_to_agent(monkeypatch):
     assert sent == ["已创建 agent 任务"]
 
 
+@pytest.mark.asyncio
+async def test_handle_update_voice_request_routes_to_agent(monkeypatch):
+    service = TelegramReviewBotService()
+    sent = []
+    routed = []
+
+    async def fake_send_text(text: str) -> None:
+        sent.append(text)
+
+    async def fake_transcribe(message: dict, *, chat_id: str, settings) -> str:
+        assert message["voice"]["file_id"] == "voice-file-1"
+        assert chat_id == "123"
+        return "请帮我优化 telegram agent 的错误链路"
+
+    async def fake_handle_freeform(text: str, *, send_text) -> bool:
+        routed.append(text)
+        await send_text("已创建 agent 任务")
+        return True
+
+    monkeypatch.setattr(
+        telegram_bot,
+        "get_settings",
+        lambda: SimpleNamespace(
+            telegram_agent_enabled=True,
+            telegram_remote_review_enabled=False,
+            telegram_bot_chat_id="123",
+            telegram_bot_token="token",
+            telegram_bot_api_base_url="https://api.telegram.org",
+        ),
+    )
+    monkeypatch.setattr(service, "_transcribe_message_audio_text", fake_transcribe)
+    monkeypatch.setattr(telegram_bot, "handle_telegram_freeform_request", fake_handle_freeform)
+    service._send_chat_text = lambda text, *, chat_id: fake_send_text(text)
+
+    await service._handle_update(
+        {
+            "message": {
+                "voice": {"file_id": "voice-file-1", "mime_type": "audio/ogg"},
+                "chat": {"id": "123"},
+            }
+        }
+    )
+
+    assert routed == ["请帮我优化 telegram agent 的错误链路"]
+    assert sent == ["已创建 agent 任务"]
+
+
+@pytest.mark.asyncio
+async def test_handle_update_voice_command_maps_to_status(monkeypatch):
+    service = TelegramReviewBotService()
+    sent = []
+    commands = []
+
+    async def fake_send_text(text: str) -> None:
+        sent.append(text)
+
+    async def fake_transcribe(_message: dict, *, chat_id: str, settings) -> str:
+        assert chat_id == "123"
+        return "查看状态"
+
+    async def fake_handle_command(text: str, *, send_text) -> bool:
+        commands.append(text)
+        await send_text("服务状态：正常")
+        return True
+
+    monkeypatch.setattr(
+        telegram_bot,
+        "get_settings",
+        lambda: SimpleNamespace(
+            telegram_agent_enabled=True,
+            telegram_remote_review_enabled=False,
+            telegram_bot_chat_id="123",
+            telegram_bot_token="token",
+            telegram_bot_api_base_url="https://api.telegram.org",
+        ),
+    )
+    monkeypatch.setattr(service, "_transcribe_message_audio_text", fake_transcribe)
+    monkeypatch.setattr(telegram_bot, "handle_telegram_command", fake_handle_command)
+    service._send_chat_text = lambda text, *, chat_id: fake_send_text(text)
+
+    await service._handle_update(
+        {
+            "message": {
+                "voice": {"file_id": "voice-file-2", "mime_type": "audio/ogg"},
+                "chat": {"id": "123"},
+            }
+        }
+    )
+
+    assert commands == ["/status"]
+    assert sent == ["服务状态：正常"]
+
+
+@pytest.mark.asyncio
+async def test_handle_update_voice_reply_dispatches_review(monkeypatch):
+    service = TelegramReviewBotService()
+    job_id = uuid.uuid4()
+    handled = []
+
+    async def fake_transcribe(_message: dict, *, chat_id: str, settings) -> str:
+        assert chat_id == "123"
+        return "通过"
+
+    async def fake_handle(job_id_value: uuid.UUID, text: str, *, reply_chat_id: str = "") -> None:
+        handled.append((job_id_value, text, reply_chat_id))
+
+    monkeypatch.setattr(
+        telegram_bot,
+        "get_settings",
+        lambda: SimpleNamespace(
+            telegram_agent_enabled=True,
+            telegram_remote_review_enabled=False,
+            telegram_bot_chat_id="123",
+            telegram_bot_token="token",
+            telegram_bot_api_base_url="https://api.telegram.org",
+        ),
+    )
+    monkeypatch.setattr(service, "_transcribe_message_audio_text", fake_transcribe)
+    service._handle_content_profile_reply = fake_handle
+
+    await service._handle_update(
+        {
+            "message": {
+                "voice": {"file_id": "voice-file-3", "mime_type": "audio/ogg"},
+                "chat": {"id": "123"},
+                "reply_to_message": {
+                    "caption": f"【RC:content_profile:{job_id}】\n请审核",
+                },
+            }
+        }
+    )
+
+    assert handled == [(job_id, "通过", "123")]
+
+
 def test_telegram_agent_enabled_without_chat_id():
     settings = SimpleNamespace(
         telegram_agent_enabled=True,
@@ -314,6 +449,13 @@ def test_telegram_agent_enabled_without_chat_id():
     )
 
     assert telegram_bot._telegram_ready(settings) is True
+
+
+def test_normalize_spoken_command_text_maps_common_aliases():
+    assert telegram_bot._normalize_spoken_command_text("查看状态") == "/status"
+    assert telegram_bot._normalize_spoken_command_text("最近任务") == "/jobs"
+    assert telegram_bot._normalize_spoken_command_text("确认任务 abc-123") == "/confirm abc-123"
+    assert telegram_bot._normalize_spoken_command_text("取消任务 task-99") == "/cancel task-99"
 
 
 def test_build_content_profile_review_message_matches_frontend_sections():
