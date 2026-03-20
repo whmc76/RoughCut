@@ -28,6 +28,7 @@ _STEP_RERUN_CHAINS: dict[str, tuple[str, ...]] = {
         "avatar_commentary",
         "edit_plan",
         "render",
+        "final_review",
         "platform_package",
     ),
     "glossary_review": (
@@ -38,10 +39,11 @@ _STEP_RERUN_CHAINS: dict[str, tuple[str, ...]] = {
         "avatar_commentary",
         "edit_plan",
         "render",
+        "final_review",
         "platform_package",
     ),
-    "content_profile": ("content_profile", "ai_director", "avatar_commentary", "edit_plan", "render", "platform_package"),
-    "render": ("render", "platform_package"),
+    "content_profile": ("content_profile", "ai_director", "avatar_commentary", "edit_plan", "render", "final_review", "platform_package"),
+    "render": ("render", "final_review", "platform_package"),
 }
 _COMPARISON_KEYWORDS = (
     "对比",

@@ -8,12 +8,15 @@ def test_platform_package_step_appended_to_pipeline():
     steps = create_job_steps(__import__("uuid").uuid4())
     assert "content_profile" in PIPELINE_STEPS
     assert "summary_review" in PIPELINE_STEPS
+    assert "final_review" in PIPELINE_STEPS
     assert PIPELINE_STEPS.index("glossary_review") < PIPELINE_STEPS.index("content_profile")
     assert "ai_director" in PIPELINE_STEPS
     assert "avatar_commentary" in PIPELINE_STEPS
+    assert PIPELINE_STEPS.index("render") < PIPELINE_STEPS.index("final_review") < PIPELINE_STEPS.index("platform_package")
     assert PIPELINE_STEPS[-1] == "platform_package"
     assert any(step.step_name == "content_profile" for step in steps)
     assert any(step.step_name == "summary_review" for step in steps)
+    assert any(step.step_name == "final_review" for step in steps)
     assert any(step.step_name == "ai_director" for step in steps)
     assert any(step.step_name == "avatar_commentary" for step in steps)
     assert steps[-1].step_name == "platform_package"

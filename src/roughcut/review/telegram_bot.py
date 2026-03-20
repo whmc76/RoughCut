@@ -5,21 +5,27 @@ import contextlib
 import json
 import logging
 import re
+import subprocess
+import tempfile
 import uuid
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 import httpx
+from sqlalchemy import select
 
 from roughcut.api.avatar_materials import get_avatar_materials
 from roughcut.api.config import get_config
-from roughcut.api.jobs import confirm_content_profile, get_content_profile
+from roughcut.api.jobs import _ensure_content_profile_thumbnail, confirm_content_profile, get_content_profile
 from roughcut.api.schemas import ContentProfileConfirmIn, ReviewActionCreate, ReviewApplyRequest
 from roughcut.config import get_settings
 from roughcut.creative.modes import build_active_enhancement_mode_options, build_active_workflow_mode_options
-from roughcut.db.models import Job
+from roughcut.db.models import Artifact, Job, JobStep
 from roughcut.db.session import get_session_factory
-from roughcut.packaging.library import list_packaging_assets
+from roughcut.media.probe import probe
+from roughcut.packaging.library import list_packaging_assets, resolve_packaging_plan_for_job
 from roughcut.review.report import generate_report
 from roughcut.telegram.commands import handle_telegram_command, handle_telegram_freeform_request
 from roughcut.telegram.policy import is_allowed_chat, telegram_agent_enabled
@@ -35,12 +41,22 @@ logger = logging.getLogger(__name__)
 
 _REVIEW_KIND_CONTENT = "content_profile"
 _REVIEW_KIND_SUBTITLE = "subtitle_review"
+_REVIEW_KIND_FINAL = "final_review"
 _REVIEW_REF_PATTERN = re.compile(
-    r"RC:(?P<kind>content_profile|subtitle_review):(?P<job_id>[0-9a-fA-F-]{36})"
+    r"RC:(?P<kind>content_profile|subtitle_review|final_review):(?P<job_id>[0-9a-fA-F-]{36})"
+)
+_REVIEW_CALLBACK_PATTERN = re.compile(
+    r"^RCB:(?P<kind>final):(?P<job_id>[0-9a-fA-F-]{36}):(?P<action>[a-z_]+)$"
 )
 _SIMPLE_APPROVAL_PATTERN = re.compile(r"^(通过|确认|继续|好的|ok|okay|yes|y|pass)[！!。.，,\s]*$", re.IGNORECASE)
+_FINAL_APPROVAL_PATTERN = re.compile(
+    r"(?:(?:整体|整片|成片|片子|视频)\s*(?:通过|确认|继续)|(?:通过|确认|继续)\s*(?:整体|整片|成片|片子|视频))",
+    re.IGNORECASE,
+)
 _ACCEPT_ALL_PATTERN = re.compile(r"(全部|全都|都)(通过|接受|采纳)|全部接受|全部通过", re.IGNORECASE)
 _REJECT_ALL_PATTERN = re.compile(r"(全部|全都|都)(拒绝|驳回)|全部拒绝", re.IGNORECASE)
+_SUBTITLE_SLOT_PATTERN = re.compile(r"(?i)(?<![A-Za-z0-9])S\d{1,3}(?![A-Za-z0-9])")
+_NEGATED_SUBTITLE_CONTENT_PATTERN = re.compile(r"字幕(?:内容|文本)?(?:本身)?(?:没问题|没有问题|无需修改|不用改)")
 _WORKFLOW_MODE_LABELS = {
     "standard_edit": "标准成片",
     "long_text_to_video": "长文本转视频",
@@ -152,6 +168,20 @@ _CONTENT_FIELD_ORDER = (
     ("correction_notes", "校对备注"),
     ("supplemental_context", "补充上下文"),
 )
+_FINAL_REVIEW_CALLBACK_ACTION_TEXT = {
+    "approve": "成片通过",
+    "cover": "只改封面",
+    "music": "只改BGM",
+    "platform": "只改平台文案",
+    "avatar": "数字人口播重做",
+}
+_FINAL_REVIEW_CALLBACK_ACK_TEXT = {
+    "approve": "已接收成片通过",
+    "cover": "已接收封面重出",
+    "music": "已接收 BGM 重出",
+    "platform": "已接收平台文案重出",
+    "avatar": "已接收数字人口播重做",
+}
 
 
 @dataclass
@@ -164,6 +194,38 @@ class TelegramReviewCandidate:
     change_type: str
     confidence: float
     source: str | None = None
+    start_sec: float | None = None
+    end_sec: float | None = None
+
+
+@dataclass
+class TelegramReviewThumbnail:
+    path: Path
+    caption: str
+
+
+@dataclass
+class TelegramReviewVideo:
+    path: Path
+    caption: str
+
+
+@dataclass
+class TelegramFinalReviewClip:
+    label: str
+    start_sec: float
+    duration_sec: float
+    transcript_excerpt: str
+    matched_keyword: str | None = None
+
+
+@dataclass(frozen=True)
+class FinalReviewRerunPlan:
+    category: str
+    label: str
+    trigger_step: str
+    rerun_steps: tuple[str, ...]
+    targets: tuple[str, ...] = ()
 
 
 class TelegramReviewBotService:
@@ -201,6 +263,7 @@ class TelegramReviewBotService:
             draft = dict(review.final or review.draft or {})
             packaging_state = list_packaging_assets()
             packaging_config = dict((packaging_state.get("config") or {}))
+            packaging_plan = resolve_packaging_plan_for_job(str(job.id), content_profile=draft)
             config = get_config()
             avatar_materials = await get_avatar_materials()
             message = _build_content_profile_review_message(
@@ -210,10 +273,12 @@ class TelegramReviewBotService:
                 draft=draft,
                 packaging_assets=packaging_state.get("assets") or {},
                 packaging_config=packaging_config,
+                packaging_plan=packaging_plan,
                 config=config,
                 avatar_materials=avatar_materials,
             )
-        await self._send_review_message(_REVIEW_KIND_CONTENT, job_id, message)
+            thumbnails = await self._build_content_profile_thumbnails(job, kind=_REVIEW_KIND_CONTENT)
+        await self._send_review_message(_REVIEW_KIND_CONTENT, job_id, message, thumbnails=thumbnails)
 
     async def notify_subtitle_review(self, job_id: uuid.UUID) -> None:
         settings = get_settings()
@@ -255,6 +320,66 @@ class TelegramReviewBotService:
                 )
         await self._send_review_message(_REVIEW_KIND_SUBTITLE, job_id, "\n".join(lines).strip())
 
+    async def notify_final_review(self, job_id: uuid.UUID) -> None:
+        settings = get_settings()
+        if not _telegram_ready(settings):
+            return
+
+        factory = get_session_factory()
+        async with factory() as session:
+            job = await session.get(Job, job_id)
+            if job is None:
+                return
+            review_step = (
+                await session.execute(
+                    select(JobStep).where(JobStep.job_id == job.id, JobStep.step_name == "final_review")
+                )
+            ).scalar_one_or_none()
+            if review_step is None or review_step.status != "pending":
+                return
+            steps = (
+                await session.execute(
+                    select(JobStep).where(JobStep.job_id == job.id).order_by(JobStep.id.asc())
+                )
+            ).scalars().all()
+            render_outputs_artifact = (
+                await session.execute(
+                    select(Artifact)
+                    .where(Artifact.job_id == job.id, Artifact.artifact_type == "render_outputs")
+                    .order_by(Artifact.created_at.desc())
+                )
+            ).scalars().first()
+            render_outputs = render_outputs_artifact.data_json if render_outputs_artifact and isinstance(render_outputs_artifact.data_json, dict) else {}
+            content_profile_artifacts = (
+                await session.execute(
+                    select(Artifact)
+                    .where(
+                        Artifact.job_id == job.id,
+                        Artifact.artifact_type.in_(("content_profile_final", "content_profile", "content_profile_draft")),
+                    )
+                    .order_by(Artifact.created_at.desc())
+                )
+            ).scalars().all()
+            content_profile = _select_final_review_content_profile(content_profile_artifacts)
+            subtitle_report = await generate_report(job.id, session)
+            message = _build_final_review_message(
+                source_name=job.source_name,
+                job_id=job.id,
+                workflow_mode=str(getattr(job, "workflow_mode", "") or "standard_edit"),
+                enhancement_modes=list(getattr(job, "enhancement_modes", []) or []),
+                render_outputs=render_outputs,
+                content_profile=content_profile,
+                subtitle_report=subtitle_report,
+                rerun_context=_extract_latest_final_review_rerun_context(steps),
+            )
+            videos = await _build_final_review_videos(
+                job.id,
+                render_outputs,
+                content_profile=content_profile,
+                subtitle_report=subtitle_report,
+            )
+        await self._send_review_message(_REVIEW_KIND_FINAL, job_id, message, videos=videos)
+
     async def _run(self) -> None:
         while True:
             settings = get_settings()
@@ -274,7 +399,7 @@ class TelegramReviewBotService:
         settings = get_settings()
         payload = {
             "timeout": 50,
-            "allowed_updates": ["message"],
+            "allowed_updates": ["message", "callback_query"],
         }
         if self._offset is not None:
             payload["offset"] = self._offset
@@ -288,8 +413,12 @@ class TelegramReviewBotService:
             await self._handle_update(item)
 
     async def _handle_update(self, update: dict[str, Any]) -> None:
+        callback_query = update.get("callback_query") or {}
+        if callback_query:
+            await self._handle_callback_query(callback_query)
+            return
         message = update.get("message") or {}
-        text = str(message.get("text") or "").strip()
+        text = _message_text(message)
         if not text:
             return
         actual_chat_id = str((message.get("chat") or {}).get("id") or "").strip()
@@ -301,7 +430,7 @@ class TelegramReviewBotService:
                 "命令：/status、/jobs [limit]、/job <job_id>、"
                 "/run <claude|codex|acp> <preset> --task \"...\"、/task <task_id> [--full]、"
                 "/tasks [limit]、/presets、/confirm <task_id>、/cancel <task_id>、"
-                "/review [content|subtitle] <job_id> <pass|reject|note> [备注]\n"
+                "/review [content|subtitle|final] <job_id> <pass|reject|note> [备注]\n"
                 "如果直接发送复杂错误、结构优化、链路优化或未知命令需求，agent 会自动尝试分流并创建处理任务。",
                 chat_id=actual_chat_id,
             )
@@ -321,10 +450,7 @@ class TelegramReviewBotService:
             if await handle_telegram_command(text, send_text=send_with_chat_id):
                 return
 
-        review_ref = _extract_review_reference(text)
-        if review_ref is None:
-            reply_to_message = message.get("reply_to_message") or {}
-            review_ref = _extract_review_reference(str(reply_to_message.get("text") or ""))
+        review_ref = _extract_review_reference_from_message(message)
         if review_ref is None and bool(getattr(settings, "telegram_agent_enabled", False)):
             async def send_with_chat_id(reply_text: str) -> None:
                 await self._send_chat_text(reply_text, chat_id=actual_chat_id)
@@ -344,6 +470,39 @@ class TelegramReviewBotService:
             await self._handle_content_profile_reply(job_id, text, reply_chat_id=actual_chat_id)
         elif kind == _REVIEW_KIND_SUBTITLE:
             await self._handle_subtitle_reply(job_id, text, reply_chat_id=actual_chat_id)
+        elif kind == _REVIEW_KIND_FINAL:
+            await self._handle_final_review_reply(job_id, text, reply_chat_id=actual_chat_id)
+
+    async def _handle_callback_query(self, callback_query: dict[str, Any]) -> None:
+        callback_query_id = str(callback_query.get("id") or "").strip()
+        message = callback_query.get("message") or {}
+        actual_chat_id = str((message.get("chat") or {}).get("id") or "").strip()
+        settings = get_settings()
+        if not is_allowed_chat(settings, actual_chat_id):
+            if callback_query_id:
+                await self._answer_callback_query(callback_query_id, text="当前会话未授权。")
+            return
+        callback_ref = _extract_review_callback_reference(str(callback_query.get("data") or ""))
+        if callback_ref is None:
+            if callback_query_id:
+                await self._answer_callback_query(callback_query_id, text="未识别审核操作。")
+            return
+        kind, job_id, action = callback_ref
+        if kind != _REVIEW_KIND_FINAL:
+            if callback_query_id:
+                await self._answer_callback_query(callback_query_id, text="当前仅支持成片审核快捷按钮。")
+            return
+        reply_text = _FINAL_REVIEW_CALLBACK_ACTION_TEXT.get(action)
+        if not reply_text:
+            if callback_query_id:
+                await self._answer_callback_query(callback_query_id, text="未识别审核操作。")
+            return
+        if callback_query_id:
+            await self._answer_callback_query(
+                callback_query_id,
+                text=_FINAL_REVIEW_CALLBACK_ACK_TEXT.get(action, "已接收审核操作"),
+            )
+        await self._handle_final_review_reply(job_id, reply_text, reply_chat_id=actual_chat_id)
 
     async def _handle_content_profile_reply(self, job_id: uuid.UUID, text: str, *, reply_chat_id: str = "") -> None:
         factory = get_session_factory()
@@ -391,6 +550,150 @@ class TelegramReviewBotService:
             result = await apply_review(job_id, action_request, session)
         await self._send_chat_text(f"已应用任务 {job_id} 的 {int(result.get('applied') or 0)} 条字幕审核意见。", chat_id=reply_chat_id)
 
+    async def _handle_final_review_reply(self, job_id: uuid.UUID, text: str, *, reply_chat_id: str = "") -> None:
+        factory = get_session_factory()
+        async with factory() as session:
+            job = await session.get(Job, job_id)
+            if job is None:
+                await self._send_chat_text(f"任务 {job_id} 不存在。", chat_id=reply_chat_id)
+                return
+            review_step = (
+                await session.execute(
+                    select(JobStep).where(JobStep.job_id == job.id, JobStep.step_name == "final_review")
+                )
+            ).scalar_one_or_none()
+            if review_step is None:
+                await self._send_chat_text(f"任务 {job_id} 当前没有成片审核节点。", chat_id=reply_chat_id)
+                return
+            if review_step.status == "done":
+                await self._send_chat_text(f"任务 {job_id} 的成片已经确认过了，无需重复提交。", chat_id=reply_chat_id)
+                return
+
+            now = datetime.now(timezone.utc)
+            note = str(text or "").strip()
+            metadata = dict(review_step.metadata_ or {})
+            subtitle_applied = 0
+            if _looks_like_subtitle_review_reply(note):
+                report = await generate_report(job_id, session)
+                candidates = _build_pending_subtitle_candidates(report)
+                if candidates:
+                    actions = await _interpret_subtitle_review_reply(note, candidates)
+                    if actions:
+                        from roughcut.api.jobs import apply_review
+
+                        action_request = ReviewApplyRequest(
+                            actions=[
+                                ReviewActionCreate(
+                                    target_type="subtitle_correction",
+                                    target_id=uuid.UUID(item["correction_id"]),
+                                    action=item["action"],
+                                    override_text=item.get("override_text"),
+                                )
+                                for item in actions
+                            ]
+                        )
+                        result = await apply_review(job_id, action_request, session)
+                        subtitle_applied = int(result.get("applied") or 0)
+                        metadata["subtitle_review_applied_at"] = now.isoformat()
+                        metadata["subtitle_review_applied_count"] = subtitle_applied
+                        review_step.metadata_ = metadata
+                        await session.refresh(job)
+                        await session.refresh(review_step)
+
+            if _SIMPLE_APPROVAL_PATTERN.match(note) or _FINAL_APPROVAL_PATTERN.search(note):
+                review_step.status = "done"
+                review_step.finished_at = now
+                review_step.error_message = None
+                metadata.update(
+                    {
+                        "detail": "成片已人工审核通过，继续生成平台文案。",
+                        "updated_at": now.isoformat(),
+                        "approved_via": "telegram",
+                    }
+                )
+                review_step.metadata_ = metadata
+                job.status = "processing"
+                job.error_message = None
+                job.updated_at = now
+                await session.commit()
+                if subtitle_applied > 0:
+                    await self._send_chat_text(
+                        f"已应用任务 {job_id} 的 {subtitle_applied} 条字幕审核意见，并确认成片通过，系统继续后续流程。",
+                        chat_id=reply_chat_id,
+                    )
+                else:
+                    await self._send_chat_text(f"已确认任务 {job_id} 的成片，系统继续后续流程。", chat_id=reply_chat_id)
+                return
+
+            feedback_history = list(metadata.get("feedback_history") or [])
+            feedback_history.append({"text": note, "at": now.isoformat(), "via": "telegram"})
+            rerun_plan = _combine_final_review_rerun_plans(_build_final_review_rerun_plans(note))
+            if rerun_plan is not None:
+                from roughcut.pipeline.orchestrator import _reset_job_for_quality_rerun
+
+                steps = (
+                    await session.execute(
+                        select(JobStep).where(JobStep.job_id == job.id).order_by(JobStep.id.asc())
+                    )
+                ).scalars().all()
+                await _reset_job_for_quality_rerun(
+                    session,
+                    job,
+                    steps,
+                    rerun_steps=list(rerun_plan.rerun_steps),
+                    issue_codes=[f"manual_review:{rerun_plan.category}"],
+                )
+                first_step = next((step for step in steps if step.step_name == rerun_plan.trigger_step), None)
+                if first_step is not None:
+                    first_metadata = dict(first_step.metadata_ or {})
+                    first_metadata.update(
+                        {
+                            "detail": f"人工成片审核要求重跑：{rerun_plan.label}",
+                            "updated_at": now.isoformat(),
+                            "review_feedback": note,
+                            "review_rerun_category": rerun_plan.category,
+                            "review_rerun_steps": list(rerun_plan.rerun_steps),
+                            "review_rerun_targets": list(rerun_plan.targets),
+                        }
+                    )
+                    first_step.metadata_ = first_metadata
+                await session.commit()
+                target_text = f"目标：{', '.join(rerun_plan.targets)}；" if rerun_plan.targets else ""
+                await self._send_chat_text(
+                    f"已记录任务 {job_id} 的成片修改意见，{target_text}并按“{rerun_plan.label}”触发重跑："
+                    f"{' -> '.join(rerun_plan.rerun_steps)}。",
+                    chat_id=reply_chat_id,
+                )
+                return
+
+            metadata.update(
+                {
+                    "detail": (
+                        f"已应用 {subtitle_applied} 条字幕审核意见，任务保持暂停，等待人工确认成片后再继续。"
+                        if subtitle_applied > 0
+                        else "已收到成片修改意见，任务保持暂停，等待人工处理后再继续。"
+                    ),
+                    "updated_at": now.isoformat(),
+                    "feedback_history": feedback_history[-10:],
+                    "latest_feedback": note,
+                }
+            )
+            review_step.metadata_ = metadata
+            review_step.started_at = review_step.started_at or now
+            job.status = "needs_review"
+            job.updated_at = now
+            await session.commit()
+        if subtitle_applied > 0:
+            await self._send_chat_text(
+                f"已应用任务 {job_id} 的 {subtitle_applied} 条字幕审核意见；当前成片仍保持暂停。确认无误后可直接回复“成片通过”继续。",
+                chat_id=reply_chat_id,
+            )
+        else:
+            await self._send_chat_text(
+                f"已记录任务 {job_id} 的成片修改意见，当前不会继续生成平台文案。请修订后重新送审，或直接回复“通过”继续。",
+                chat_id=reply_chat_id,
+            )
+
     async def _poll_agent_tasks(self) -> None:
         for record in pending_notification_records():
             payload = get_agent_task_status(record.task_id)
@@ -411,39 +714,202 @@ class TelegramReviewBotService:
             await self._send_text("\n".join(lines))
             mark_task_notified(record.task_id)
 
-    async def _send_review_message(self, kind: str, job_id: uuid.UUID, body: str) -> None:
-        chunks = _split_review_message(body)
-        total = len(chunks)
-        for index, chunk in enumerate(chunks, start=1):
-            header = f"【RC:{kind}:{job_id}】"
-            prefix = f"{header} ({index}/{total})" if total > 1 else header
-            await self._send_text(f"{prefix}\n{chunk}")
-
-    async def _send_text(self, text: str) -> None:
+    async def _send_review_message(
+        self,
+        kind: str,
+        job_id: uuid.UUID,
+        body: str,
+        *,
+        thumbnails: list[TelegramReviewThumbnail] | None = None,
+        videos: list[TelegramReviewVideo] | None = None,
+    ) -> None:
         settings = get_settings()
         chat_id = str(getattr(settings, "telegram_bot_chat_id", "") or "").strip()
         if not _telegram_ready(settings) or not chat_id:
             return
-        await self._send_chat_text(text, chat_id=chat_id)
+        chunks = _split_review_message(body)
+        total = len(chunks)
+        anchor_message_id: int | None = None
+        reply_markup = _build_review_reply_markup(kind, job_id)
+        for index, chunk in enumerate(chunks, start=1):
+            header = f"【RC:{kind}:{job_id}】"
+            prefix = f"{header} ({index}/{total})" if total > 1 else header
+            message_id = await self._send_text(
+                f"{prefix}\n{chunk}",
+                reply_markup=reply_markup if index == 1 else None,
+            )
+            if anchor_message_id is None:
+                anchor_message_id = message_id
+        for item in thumbnails or []:
+            try:
+                await self._send_chat_photo(
+                    item.path,
+                    chat_id=chat_id,
+                    caption=item.caption,
+                    reply_to_message_id=anchor_message_id,
+                )
+            except Exception:
+                logger.exception("Failed to send review thumbnail for job %s", job_id)
+        for item in videos or []:
+            try:
+                await self._send_chat_video(
+                    item.path,
+                    chat_id=chat_id,
+                    caption=item.caption,
+                    reply_to_message_id=anchor_message_id,
+                )
+            except Exception:
+                logger.exception("Failed to send review video for job %s", job_id)
 
-    async def _send_chat_text(self, text: str, *, chat_id: str) -> None:
+    async def _send_text(self, text: str, *, reply_markup: dict[str, Any] | None = None) -> int | None:
+        settings = get_settings()
+        chat_id = str(getattr(settings, "telegram_bot_chat_id", "") or "").strip()
+        if not _telegram_ready(settings) or not chat_id:
+            return None
+        return await self._send_chat_text(text, chat_id=chat_id, reply_markup=reply_markup)
+
+    async def _send_chat_text(
+        self,
+        text: str,
+        *,
+        chat_id: str,
+        reply_markup: dict[str, Any] | None = None,
+    ) -> int | None:
         settings = get_settings()
         if not _telegram_ready(settings) or not str(chat_id or "").strip():
-            return
+            return None
         payload = {
             "chat_id": str(chat_id).strip(),
             "text": text,
         }
-        await self._call_api(settings, "sendMessage", payload)
+        if reply_markup:
+            payload["reply_markup"] = reply_markup
+        data = await self._call_api(settings, "sendMessage", payload)
+        return _extract_message_id(data)
 
-    async def _call_api(self, settings: Any, method: str, payload: dict[str, Any]) -> dict[str, Any]:
+    async def _answer_callback_query(self, callback_query_id: str, *, text: str = "") -> None:
+        settings = get_settings()
+        callback_id = str(callback_query_id or "").strip()
+        if not _telegram_ready(settings) or not callback_id:
+            return
+        payload: dict[str, Any] = {"callback_query_id": callback_id}
+        trimmed_text = str(text or "").strip()
+        if trimmed_text:
+            payload["text"] = trimmed_text[:200]
+            payload["show_alert"] = False
+        await self._call_api(settings, "answerCallbackQuery", payload)
+
+    async def _send_chat_photo(
+        self,
+        photo_path: Path,
+        *,
+        chat_id: str,
+        caption: str = "",
+        reply_to_message_id: int | None = None,
+    ) -> int | None:
+        settings = get_settings()
+        if not _telegram_ready(settings) or not str(chat_id or "").strip() or not photo_path.exists():
+            return None
+        payload: dict[str, Any] = {
+            "chat_id": str(chat_id).strip(),
+        }
+        trimmed_caption = str(caption or "").strip()
+        if trimmed_caption:
+            payload["caption"] = trimmed_caption[:1024]
+        if reply_to_message_id is not None:
+            payload["reply_to_message_id"] = str(reply_to_message_id)
+        files = {
+            "photo": (
+                photo_path.name,
+                photo_path.read_bytes(),
+                "image/jpeg",
+            )
+        }
+        data = await self._call_api(settings, "sendPhoto", payload, files=files)
+        return _extract_message_id(data)
+
+    async def _send_chat_video(
+        self,
+        video_path: Path,
+        *,
+        chat_id: str,
+        caption: str = "",
+        reply_to_message_id: int | None = None,
+    ) -> int | None:
+        settings = get_settings()
+        if not _telegram_ready(settings) or not str(chat_id or "").strip() or not video_path.exists():
+            return None
+        payload: dict[str, Any] = {"chat_id": str(chat_id).strip()}
+        trimmed_caption = str(caption or "").strip()
+        if trimmed_caption:
+            payload["caption"] = trimmed_caption[:1024]
+        if reply_to_message_id is not None:
+            payload["reply_to_message_id"] = str(reply_to_message_id)
+        content_type = "video/mp4" if video_path.suffix.lower() == ".mp4" else "application/octet-stream"
+        files = {
+            "video": (
+                video_path.name,
+                video_path.read_bytes(),
+                content_type,
+            )
+        }
+        try:
+            data = await self._call_api(settings, "sendVideo", payload, files=files)
+        except Exception:
+            document_files = {
+                "document": (
+                    video_path.name,
+                    video_path.read_bytes(),
+                    content_type,
+                )
+            }
+            data = await self._call_api(settings, "sendDocument", payload, files=document_files)
+        return _extract_message_id(data)
+
+    async def _build_content_profile_thumbnails(
+        self,
+        job: Job,
+        *,
+        kind: str,
+    ) -> list[TelegramReviewThumbnail]:
+        thumbnails: list[TelegramReviewThumbnail] = []
+        for index in range(3):
+            try:
+                path = await _ensure_content_profile_thumbnail(job, index=index)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to prepare content profile thumbnail %s for job %s: %s",
+                    index,
+                    job.id,
+                    exc,
+                )
+                continue
+            thumbnails.append(
+                TelegramReviewThumbnail(
+                    path=path,
+                    caption=f"【RC:{kind}:{job.id}】\n参考缩略图 {index + 1}/3",
+                )
+            )
+        return thumbnails
+
+    async def _call_api(
+        self,
+        settings: Any,
+        method: str,
+        payload: dict[str, Any],
+        *,
+        files: dict[str, tuple[str, bytes, str]] | None = None,
+    ) -> dict[str, Any]:
         url = (
             f"{str(settings.telegram_bot_api_base_url).rstrip('/')}"
             f"/bot{str(settings.telegram_bot_token).strip()}/{method}"
         )
         timeout = httpx.Timeout(65.0, connect=10.0)
         async with httpx.AsyncClient(timeout=timeout) as client:
-            response = await client.post(url, json=payload)
+            if files:
+                response = await client.post(url, data=payload, files=files)
+            else:
+                response = await client.post(url, json=payload)
         response.raise_for_status()
         data = response.json()
         if not data.get("ok", False):
@@ -462,6 +928,233 @@ def _extract_review_reference(text: str) -> tuple[str, uuid.UUID] | None:
     try:
         return match.group("kind"), uuid.UUID(match.group("job_id"))
     except ValueError:
+        return None
+
+
+def _extract_review_reference_from_message(message: dict[str, Any]) -> tuple[str, uuid.UUID] | None:
+    for candidate in (
+        _message_text(message),
+        _message_text(message.get("reply_to_message") or {}),
+    ):
+        review_ref = _extract_review_reference(candidate)
+        if review_ref is not None:
+            return review_ref
+    return None
+
+
+def _extract_review_callback_reference(data: str) -> tuple[str, uuid.UUID, str] | None:
+    match = _REVIEW_CALLBACK_PATTERN.match(str(data or "").strip())
+    if match is None:
+        return None
+    try:
+        return _REVIEW_KIND_FINAL, uuid.UUID(match.group("job_id")), match.group("action")
+    except ValueError:
+        return None
+
+
+def _build_review_callback_data(kind: str, job_id: uuid.UUID, action: str) -> str | None:
+    if kind != _REVIEW_KIND_FINAL:
+        return None
+    normalized_action = str(action or "").strip().lower()
+    if normalized_action not in _FINAL_REVIEW_CALLBACK_ACTION_TEXT:
+        return None
+    return f"RCB:final:{job_id}:{normalized_action}"
+
+
+def _build_final_review_reply_markup(job_id: uuid.UUID) -> dict[str, Any]:
+    return {
+        "inline_keyboard": [
+            [
+                {
+                    "text": "成片通过",
+                    "callback_data": _build_review_callback_data(_REVIEW_KIND_FINAL, job_id, "approve"),
+                },
+                {
+                    "text": "只改封面",
+                    "callback_data": _build_review_callback_data(_REVIEW_KIND_FINAL, job_id, "cover"),
+                },
+            ],
+            [
+                {
+                    "text": "只改BGM",
+                    "callback_data": _build_review_callback_data(_REVIEW_KIND_FINAL, job_id, "music"),
+                },
+                {
+                    "text": "只改平台文案",
+                    "callback_data": _build_review_callback_data(_REVIEW_KIND_FINAL, job_id, "platform"),
+                },
+            ],
+            [
+                {
+                    "text": "数字人口播重做",
+                    "callback_data": _build_review_callback_data(_REVIEW_KIND_FINAL, job_id, "avatar"),
+                }
+            ],
+        ]
+    }
+
+
+def _build_review_reply_markup(kind: str, job_id: uuid.UUID) -> dict[str, Any] | None:
+    if kind == _REVIEW_KIND_FINAL:
+        return _build_final_review_reply_markup(job_id)
+    return None
+
+
+def _message_text(message: dict[str, Any]) -> str:
+    return str(message.get("text") or message.get("caption") or "").strip()
+
+
+def _looks_like_subtitle_review_reply(text: str) -> bool:
+    normalized = str(text or "").strip()
+    if not normalized:
+        return False
+    return bool(
+        _ACCEPT_ALL_PATTERN.search(normalized)
+        or _REJECT_ALL_PATTERN.search(normalized)
+        or _SUBTITLE_SLOT_PATTERN.search(normalized)
+    )
+
+
+def _build_final_review_rerun_plan(note: str) -> FinalReviewRerunPlan | None:
+    plans = _build_final_review_rerun_plans(note)
+    return plans[0] if plans else None
+
+
+def _build_final_review_rerun_plans(note: str) -> list[FinalReviewRerunPlan]:
+    normalized = str(note or "").strip().lower()
+    if not normalized:
+        return []
+
+    subtitle_style_keywords = ("字幕样式", "字幕风格", "字幕颜色", "字幕描边", "字幕特效")
+    subtitle_text_keywords = ("术语", "错别字", "翻译", "字幕时间", "字幕不同步", "字幕内容", "字幕文本")
+    has_subtitle_style_request = any(keyword in normalized for keyword in subtitle_style_keywords)
+    has_subtitle_text_request = any(keyword in normalized for keyword in subtitle_text_keywords) and not bool(
+        _NEGATED_SUBTITLE_CONTENT_PATTERN.search(normalized)
+    )
+
+    plans: list[FinalReviewRerunPlan] = []
+    for category, label, trigger_step, keywords, targets in (
+        ("subtitle", "字幕与术语修订", "subtitle_postprocess", ("字幕", "术语", "错别字", "翻译", "字幕时间", "字幕不同步", "字幕内容", "字幕文本"), ("subtitle_text", "subtitle_timing")),
+        ("subtitle_style", "字幕样式重出", "render", subtitle_style_keywords, ("subtitle_style",)),
+        ("content_profile", "内容摘要与文案定位调整", "content_profile", ("摘要", "主题", "关键词", "文案方向", "内容定位", "主体识别", "标题钩子"), ("summary", "keywords", "content_profile")),
+        ("ai_director", "AI 导演文案与配音重做", "ai_director", ("旁白", "解说词", "口播文案", "ai导演", "ai 导演", "重配音", "配音文案"), ("voiceover", "director_script")),
+        ("avatar_commentary", "数字人解说重做", "avatar_commentary", ("数字人", "口播人", "虚拟人", "画中画", "主播形象", "讲解人"), ("avatar",)),
+        ("edit_plan", "剪辑结构重做", "edit_plan", ("节奏", "结构", "镜头", "重剪", "重新剪", "剪辑", "删掉", "前面太长", "后面太长", "卡点"), ("timeline", "pacing")),
+        ("cover_render", "封面重出", "render", ("封面", "缩略图", "标题图", "封面字", "封面标题"), ("cover",)),
+        ("packaging_render", "包装素材重出", "render", ("片头", "片尾", "转场", "水印", "包装"), ("intro", "outro", "transition", "watermark")),
+        ("music_render", "背景音乐重出", "render", ("bgm", "背景音乐", "音乐"), ("music",)),
+        ("platform_package", "平台文案与发布文案重出", "platform_package", ("平台文案", "发布文案", "发布标题", "简介", "话题", "标签", "hashtags", "hashtag"), ("publish_copy", "hashtags", "platform_copy")),
+    ):
+        if category == "subtitle":
+            if "字幕" not in normalized and not has_subtitle_text_request:
+                continue
+            if has_subtitle_style_request and not has_subtitle_text_request:
+                continue
+        elif not any(keyword in normalized for keyword in keywords):
+            continue
+        plans.append(
+            FinalReviewRerunPlan(
+                category=category,
+                label=label,
+                trigger_step=trigger_step,
+                rerun_steps=_rerun_chain_from_step(trigger_step),
+                targets=targets,
+            )
+        )
+    return plans
+
+
+def _combine_final_review_rerun_plans(plans: list[FinalReviewRerunPlan]) -> FinalReviewRerunPlan | None:
+    if not plans:
+        return None
+    from roughcut.pipeline.orchestrator import PIPELINE_STEPS
+
+    indexed = []
+    for plan in plans:
+        if plan.trigger_step not in PIPELINE_STEPS:
+            continue
+        indexed.append((PIPELINE_STEPS.index(plan.trigger_step), plan))
+    if not indexed:
+        return None
+    indexed.sort(key=lambda item: item[0])
+    _, earliest = indexed[0]
+    labels: list[str] = []
+    categories: list[str] = []
+    targets: list[str] = []
+    for _, plan in indexed:
+        if plan.label not in labels:
+            labels.append(plan.label)
+        if plan.category not in categories:
+            categories.append(plan.category)
+        for target in plan.targets:
+            if target not in targets:
+                targets.append(target)
+    return FinalReviewRerunPlan(
+        category="+".join(categories),
+        label=" + ".join(labels),
+        trigger_step=earliest.trigger_step,
+        rerun_steps=earliest.rerun_steps,
+        targets=tuple(targets),
+    )
+
+
+def _extract_latest_final_review_rerun_context(steps: list[JobStep]) -> dict[str, Any] | None:
+    latest: tuple[datetime, dict[str, Any]] | None = None
+    for step in steps or []:
+        metadata = dict(step.metadata_ or {})
+        targets = list(metadata.get("review_rerun_targets") or [])
+        feedback = str(metadata.get("review_feedback") or "").strip()
+        if not targets and not feedback:
+            continue
+        updated_at = metadata.get("updated_at")
+        try:
+            updated = datetime.fromisoformat(str(updated_at))
+        except Exception:
+            updated = datetime.min.replace(tzinfo=timezone.utc)
+        payload = {
+            "step_name": step.step_name,
+            "targets": [str(item).strip() for item in targets if str(item).strip()],
+            "feedback": feedback,
+            "label": str(metadata.get("detail") or "").strip(),
+        }
+        if latest is None or updated > latest[0]:
+            latest = (updated, payload)
+    return latest[1] if latest is not None else None
+
+
+def _build_final_review_rerun_context_lines(context: dict[str, Any] | None) -> list[str]:
+    if not isinstance(context, dict) or not context:
+        return []
+    lines: list[str] = []
+    targets = [str(item).strip() for item in (context.get("targets") or []) if str(item).strip()]
+    if targets:
+        lines.append(f"- 本次重跑目标：{', '.join(targets)}")
+    step_name = str(context.get("step_name") or "").strip()
+    if step_name:
+        lines.append(f"- 触发起点：{step_name}")
+    feedback = str(context.get("feedback") or "").strip()
+    if feedback:
+        snippet = feedback if len(feedback) <= 80 else feedback[:79].rstrip() + "…"
+        lines.append(f"- 上次修改意见：{snippet}")
+    return lines
+
+
+def _rerun_chain_from_step(step_name: str) -> tuple[str, ...]:
+    from roughcut.pipeline.orchestrator import PIPELINE_STEPS
+
+    if step_name not in PIPELINE_STEPS:
+        return ()
+    start_index = PIPELINE_STEPS.index(step_name)
+    return tuple(PIPELINE_STEPS[start_index:])
+
+
+def _extract_message_id(data: dict[str, Any]) -> int | None:
+    result = data.get("result")
+    if not isinstance(result, dict):
+        return None
+    try:
+        return int(result.get("message_id"))
+    except (TypeError, ValueError):
         return None
 
 
@@ -495,6 +1188,7 @@ def _build_content_profile_review_message(
     draft: dict[str, Any],
     packaging_assets: dict[str, list[dict[str, Any]]],
     packaging_config: dict[str, Any],
+    packaging_plan: dict[str, Any] | None = None,
     config: Any | None = None,
     avatar_materials: Any | None = None,
 ) -> str:
@@ -507,33 +1201,38 @@ def _build_content_profile_review_message(
         _ENHANCEMENT_MODE_LABELS.get(str(item), str(item))
         for item in (review.enhancement_modes or [])
     ]
+    effective_packaging_plan = packaging_plan or _build_packaging_plan_from_config(
+        packaging_assets,
+        packaging_config,
+    )
     copy_style_key = str(
         draft.get("copy_style")
+        or effective_packaging_plan.get("copy_style")
         or packaging_config.get("copy_style")
         or "attention_grabbing"
     ).strip()
     copy_style = _COPY_STYLE_LABELS.get(copy_style_key, copy_style_key or "未设置")
     keywords = _join_non_empty(draft.get("keywords") or draft.get("search_queries") or [])
 
-    asset_index = _build_packaging_asset_index(packaging_assets)
     packaging_summary = [
-        ("片头", _asset_label(asset_index, packaging_config.get("intro_asset_id"))),
-        ("片尾", _asset_label(asset_index, packaging_config.get("outro_asset_id"))),
-        ("转场 / 包装插片", _asset_list_label(asset_index, packaging_config.get("insert_asset_ids") or [])),
-        ("水印", _asset_label(asset_index, packaging_config.get("watermark_asset_id"))),
-        ("音乐", _asset_list_label(asset_index, packaging_config.get("music_asset_ids") or [])),
+        ("片头", _resolved_packaging_label(effective_packaging_plan.get("intro"))),
+        ("片尾", _resolved_packaging_label(effective_packaging_plan.get("outro"))),
+        ("转场 / 包装插片", _resolved_packaging_label(effective_packaging_plan.get("insert"))),
+        ("水印", _resolved_packaging_label(effective_packaging_plan.get("watermark"))),
+        ("音乐", _resolved_packaging_label(effective_packaging_plan.get("music"))),
     ]
     style_summary = [
-        ("字幕风格", _style_label(packaging_config.get("subtitle_style"), _SUBTITLE_STYLE_LABELS)),
-        ("封面模板", _style_label(packaging_config.get("cover_style"), _COVER_STYLE_LABELS)),
-        ("标题模板", _style_label(packaging_config.get("title_style"), _TITLE_STYLE_LABELS)),
+        ("字幕风格", _style_label(effective_packaging_plan.get("subtitle_style"), _SUBTITLE_STYLE_LABELS)),
+        ("封面模板", _style_label(effective_packaging_plan.get("cover_style"), _COVER_STYLE_LABELS)),
+        ("标题模板", _style_label(effective_packaging_plan.get("title_style"), _TITLE_STYLE_LABELS)),
         ("文案风格", copy_style),
-        ("智能剪辑特效", _style_label(packaging_config.get("smart_effect_style"), _SMART_EFFECT_STYLE_LABELS)),
+        ("智能剪辑特效", _style_label(effective_packaging_plan.get("smart_effect_style"), _SMART_EFFECT_STYLE_LABELS)),
     ]
     review_checks = _build_review_checks(
         enhancement_modes=list(review.enhancement_modes or []),
         config=config,
         packaging_config=packaging_config,
+        packaging_plan=effective_packaging_plan,
         avatar_materials=avatar_materials,
     )
     content_lines = [
@@ -615,6 +1314,438 @@ def _build_content_profile_review_message(
     return "\n".join(lines)
 
 
+def _build_final_review_message(
+    *,
+    source_name: str,
+    job_id: uuid.UUID,
+    workflow_mode: str,
+    enhancement_modes: list[str],
+    render_outputs: dict[str, Any],
+    content_profile: dict[str, Any] | None = None,
+    subtitle_report: Any | None = None,
+    rerun_context: dict[str, Any] | None = None,
+) -> str:
+    workflow_label = _WORKFLOW_MODE_LABELS.get(workflow_mode, workflow_mode or "未设置")
+    enhancement_labels = [
+        _ENHANCEMENT_MODE_LABELS.get(str(item), str(item))
+        for item in (enhancement_modes or [])
+        if str(item).strip()
+    ]
+    summary = str((content_profile or {}).get("summary") or (content_profile or {}).get("video_theme") or "").strip()
+    keywords = _join_non_empty(_extract_final_review_keywords(content_profile))
+    subtitle_hints = _build_final_review_subtitle_hints(subtitle_report)
+    variant_lines = []
+    for label, key in (
+        ("主成片", "packaged_mp4"),
+        ("素板", "plain_mp4"),
+        ("数字人版", "avatar_mp4"),
+        ("AI 特效版", "ai_effect_mp4"),
+    ):
+        path = str(render_outputs.get(key) or "").strip()
+        if path:
+            variant_lines.append(f"- {label}：{Path(path).name}")
+    cover = str(render_outputs.get("cover") or "").strip()
+    cover_text = Path(cover).name if cover else "未生成"
+    lines = [
+        f"任务：{source_name}",
+        f"Job ID：{job_id}",
+        "",
+        "成片审核：",
+        f"- 工作流模式：{workflow_label}",
+        f"- 增强模式：{', '.join(enhancement_labels) if enhancement_labels else '未启用'}",
+        f"- 封面：{cover_text}",
+        *variant_lines,
+        "- 审片包：默认发送 3 段压缩预览，不直接上传整片，避免 Telegram 大文件卡顿。",
+        f"- 内容摘要：{summary or '未生成'}",
+        f"- 关键词：{keywords or '未识别'}",
+    ]
+    rerun_lines = _build_final_review_rerun_context_lines(rerun_context)
+    if rerun_lines:
+        lines.extend(
+            [
+                "",
+                "重跑说明：",
+                *rerun_lines,
+            ]
+        )
+    if subtitle_hints:
+        lines.extend(
+            [
+                "",
+                "字幕复核提醒：",
+                *subtitle_hints,
+            ]
+        )
+    lines.extend(
+        [
+            "",
+            "回复方式：",
+            "1. 请结合下面的压缩片段、摘要和关键词一起审片。",
+            "2. 可直接点下方快捷按钮，也可回复“通过”或“成片通过”继续平台文案和后续定稿。",
+            "3. 也可以在同一条回复里写字幕动作，例如“S1通过，S2改成 Olight”。",
+            "4. 回复修改意见会暂停在成片审核，不再自动继续。",
+            "5. 修改完成后可继续在同一条消息下回复“通过”。",
+            "",
+            "快捷回复示例：",
+            "- 成片通过",
+            "- S1通过，S2改成 Olight",
+            "- 只改封面",
+            "- 只改BGM",
+            "- 只改平台文案",
+            "- 数字人口播重做",
+        ]
+    )
+    return "\n".join(lines)
+
+
+async def _build_final_review_videos(
+    job_id: uuid.UUID,
+    render_outputs: dict[str, Any],
+    *,
+    content_profile: dict[str, Any] | None = None,
+    subtitle_report: Any | None = None,
+) -> list[TelegramReviewVideo]:
+    source_path = _resolve_final_review_video_source(render_outputs)
+    if source_path is None:
+        return []
+    try:
+        meta = await probe(source_path)
+    except Exception as exc:
+        logger.warning("Failed to probe final review source for job %s: %s", job_id, exc)
+        return []
+
+    subtitle_items = _extract_subtitle_items_from_report(subtitle_report)
+    clip_specs = _build_final_review_clip_specs(
+        duration_sec=float(meta.duration or 0.0),
+        subtitle_items=subtitle_items,
+        keywords=_extract_final_review_keywords(content_profile),
+    )
+    videos: list[TelegramReviewVideo] = []
+    for index, clip in enumerate(clip_specs, start=1):
+        try:
+            preview_path = await _ensure_final_review_preview(
+                job_id=job_id,
+                source_path=source_path,
+                clip_index=index,
+                start_sec=clip.start_sec,
+                duration_sec=clip.duration_sec,
+            )
+        except Exception as exc:
+            logger.warning("Failed to build final review preview %s for job %s: %s", index, job_id, exc)
+            continue
+        keyword_suffix = f" · 关键词 {clip.matched_keyword}" if clip.matched_keyword else ""
+        videos.append(
+            TelegramReviewVideo(
+                path=preview_path,
+                caption=(
+                    f"【RC:{_REVIEW_KIND_FINAL}:{job_id}】\n"
+                    f"预览 {index}/3 · {clip.label}{keyword_suffix} · "
+                    f"{_format_time_range(clip.start_sec, clip.start_sec + clip.duration_sec)}\n"
+                    f"字幕：{clip.transcript_excerpt or '本段无明显字幕'}"
+                ),
+            )
+        )
+    return videos
+
+
+def _select_final_review_content_profile(artifacts: list[Artifact]) -> dict[str, Any]:
+    priority = {
+        "content_profile_final": 3,
+        "content_profile": 2,
+        "content_profile_draft": 1,
+    }
+    selected: Artifact | None = None
+    selected_rank = -1
+    for artifact in artifacts or []:
+        rank = priority.get(str(artifact.artifact_type or "").strip(), 0)
+        if rank < selected_rank:
+            continue
+        if rank == selected_rank and selected is not None:
+            if (artifact.created_at or datetime.min.replace(tzinfo=timezone.utc)) <= (
+                selected.created_at or datetime.min.replace(tzinfo=timezone.utc)
+            ):
+                continue
+        selected = artifact
+        selected_rank = rank
+    return dict(selected.data_json or {}) if selected and isinstance(selected.data_json, dict) else {}
+
+
+def _resolve_final_review_video_source(render_outputs: dict[str, Any]) -> Path | None:
+    for key in ("packaged_mp4", "avatar_mp4", "ai_effect_mp4", "plain_mp4"):
+        value = str(render_outputs.get(key) or "").strip()
+        if not value:
+            continue
+        candidate = Path(value)
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _extract_final_review_keywords(content_profile: dict[str, Any] | None) -> list[str]:
+    keywords: list[str] = []
+    for raw in (content_profile or {}).get("keywords") or (content_profile or {}).get("search_queries") or []:
+        value = str(raw or "").strip()
+        if value and value not in keywords:
+            keywords.append(value)
+    return keywords[:6]
+
+
+def _extract_subtitle_items_from_report(report: Any | None) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    for item in getattr(report, "items", []) or []:
+        items.append(
+            {
+                "index": int(item.get("index") or 0),
+                "start": float(item.get("start") or 0.0),
+                "end": float(item.get("end") or item.get("start") or 0.0),
+                "text": str(item.get("text_final") or item.get("text_norm") or item.get("text_raw") or "").strip(),
+            }
+        )
+    return items
+
+
+def _build_final_review_clip_specs(
+    *,
+    duration_sec: float,
+    subtitle_items: list[dict[str, Any]],
+    keywords: list[str],
+) -> list[TelegramFinalReviewClip]:
+    if duration_sec <= 0:
+        return []
+    clip_duration = min(8.0, max(5.0, duration_sec / 5.0))
+    anchor_plan = [
+        ("开头节奏", _pick_subtitle_anchor(subtitle_items, duration_sec * 0.12)),
+        ("中段重点", _pick_keyword_anchor(subtitle_items, duration_sec, keywords) or _pick_subtitle_anchor(subtitle_items, duration_sec * 0.50)),
+        ("结尾收口", _pick_subtitle_anchor(subtitle_items, duration_sec * 0.84)),
+    ]
+    clips: list[TelegramFinalReviewClip] = []
+    seen_starts: set[int] = set()
+    fallback_centers = [duration_sec * 0.12, duration_sec * 0.50, duration_sec * 0.84]
+    for index, (label, anchor) in enumerate(anchor_plan):
+        matched_keyword = str((anchor or {}).get("matched_keyword") or "").strip() or None
+        center = float((anchor or {}).get("center") or fallback_centers[index] or 0.0)
+        start_sec = _clamp_clip_start(center=center, duration_sec=duration_sec, clip_duration=clip_duration)
+        rounded_key = int(round(start_sec * 10))
+        if rounded_key in seen_starts:
+            center = fallback_centers[index]
+            start_sec = _clamp_clip_start(center=center, duration_sec=duration_sec, clip_duration=clip_duration)
+            rounded_key = int(round(start_sec * 10))
+        seen_starts.add(rounded_key)
+        transcript_excerpt = _build_clip_transcript_excerpt(
+            subtitle_items,
+            start_sec=start_sec,
+            end_sec=min(duration_sec, start_sec + clip_duration),
+        )
+        clips.append(
+            TelegramFinalReviewClip(
+                label=label,
+                start_sec=start_sec,
+                duration_sec=min(clip_duration, max(1.5, duration_sec - start_sec)),
+                transcript_excerpt=transcript_excerpt,
+                matched_keyword=matched_keyword,
+            )
+        )
+    return clips
+
+
+def _pick_subtitle_anchor(subtitle_items: list[dict[str, Any]], target_time: float) -> dict[str, Any] | None:
+    if not subtitle_items:
+        return None
+    best: dict[str, Any] | None = None
+    best_distance: float | None = None
+    for item in subtitle_items:
+        center = (float(item.get("start") or 0.0) + float(item.get("end") or 0.0)) / 2
+        distance = abs(center - target_time)
+        if best_distance is None or distance < best_distance:
+            best = dict(item)
+            best["center"] = center
+            best_distance = distance
+    return best
+
+
+def _pick_keyword_anchor(
+    subtitle_items: list[dict[str, Any]],
+    duration_sec: float,
+    keywords: list[str],
+) -> dict[str, Any] | None:
+    if not subtitle_items or not keywords:
+        return None
+    best: dict[str, Any] | None = None
+    best_score: tuple[int, float] | None = None
+    midpoint = duration_sec / 2
+    normalized_keywords = [(keyword, _normalize_match_key(keyword)) for keyword in keywords if str(keyword).strip()]
+    for item in subtitle_items:
+        text = _normalize_match_key(item.get("text") or "")
+        if not text:
+            continue
+        matches = [keyword for keyword, token in normalized_keywords if token and token in text]
+        if not matches:
+            continue
+        center = (float(item.get("start") or 0.0) + float(item.get("end") or 0.0)) / 2
+        score = (len(matches), -abs(center - midpoint))
+        if best_score is None or score > best_score:
+            best = dict(item)
+            best["center"] = center
+            best["matched_keyword"] = matches[0]
+            best_score = score
+    return best
+
+
+def _clamp_clip_start(*, center: float, duration_sec: float, clip_duration: float) -> float:
+    if duration_sec <= clip_duration:
+        return 0.0
+    start_sec = max(0.0, center - clip_duration * 0.35)
+    return min(start_sec, max(0.0, duration_sec - clip_duration))
+
+
+def _build_clip_transcript_excerpt(
+    subtitle_items: list[dict[str, Any]],
+    *,
+    start_sec: float,
+    end_sec: float,
+    limit: int = 72,
+) -> str:
+    texts: list[str] = []
+    for item in subtitle_items:
+        item_start = float(item.get("start") or 0.0)
+        item_end = float(item.get("end") or item_start)
+        if item_end < start_sec or item_start > end_sec:
+            continue
+        text = str(item.get("text") or "").strip()
+        if text:
+            texts.append(text)
+        if len(texts) >= 3:
+            break
+    combined = " / ".join(texts)
+    if len(combined) <= limit:
+        return combined
+    return combined[: max(0, limit - 1)].rstrip() + "…"
+
+
+def _build_final_review_subtitle_hints(report: Any | None, *, limit: int = 4) -> list[str]:
+    candidates = _build_pending_subtitle_candidates(report) if report is not None else []
+    if not candidates:
+        return []
+    low_confidence = [
+        item
+        for item in candidates
+        if 0.0 < float(item.confidence or 0.0) < 0.9
+    ]
+    selected = sorted(
+        low_confidence or candidates,
+        key=lambda item: (
+            float(item.confidence or 1.0) if float(item.confidence or 0.0) > 0 else 1.0,
+            int(item.subtitle_index or 0),
+        ),
+    )[:limit]
+    lines: list[str] = []
+    for item in selected:
+        time_range = (
+            _format_time_range(float(item.start_sec or 0.0), float(item.end_sec or item.start_sec or 0.0))
+            if item.start_sec is not None
+            else "时间未知"
+        )
+        lines.append(
+            f"- {item.slot} · 字幕 #{item.subtitle_index} · {time_range} · "
+            f"原“{item.original}” -> 建议“{item.suggested}” · 置信度 {round(float(item.confidence or 0.0) * 100)}%"
+        )
+    return lines
+
+
+def _format_time_range(start_sec: float, end_sec: float) -> str:
+    return f"{_format_seconds(start_sec)}-{_format_seconds(max(end_sec, start_sec))}"
+
+
+def _format_seconds(value: float) -> str:
+    total_seconds = max(0, int(round(float(value or 0.0))))
+    minutes, seconds = divmod(total_seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours > 0:
+        return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+    return f"{minutes:02d}:{seconds:02d}"
+
+
+async def _ensure_final_review_preview(
+    *,
+    job_id: uuid.UUID,
+    source_path: Path,
+    clip_index: int,
+    start_sec: float,
+    duration_sec: float,
+) -> Path:
+    source_stat = source_path.stat()
+    cache_dir = Path(tempfile.gettempdir()) / "roughcut_final_review_previews" / str(job_id)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_key = f"{source_stat.st_size}_{int(source_stat.st_mtime)}_{int(start_sec * 1000)}_{int(duration_sec * 1000)}"
+    output_path = cache_dir / f"preview_{clip_index:02d}_{cache_key}.mp4"
+    if output_path.exists():
+        return output_path
+
+    settings = get_settings()
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-ss",
+        f"{max(0.0, start_sec):.2f}",
+        "-i",
+        str(source_path),
+        "-t",
+        f"{max(1.5, duration_sec):.2f}",
+        "-vf",
+        "scale=720:-2,fps=24",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "31",
+        "-maxrate",
+        "900k",
+        "-bufsize",
+        "1800k",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "96k",
+        "-movflags",
+        "+faststart",
+        str(output_path),
+    ]
+    loop = asyncio.get_running_loop()
+    result = await loop.run_in_executor(
+        None,
+        lambda: subprocess.run(
+            cmd,
+            capture_output=True,
+            timeout=max(45, min(int(getattr(settings, "ffmpeg_timeout_sec", 600) or 600), 180)),
+        ),
+    )
+    if result.returncode != 0 or not output_path.exists():
+        raise RuntimeError(f"ffmpeg preview render failed: {result.stderr.decode('utf-8', errors='replace')[-600:]}")
+    return output_path
+
+
+def _build_packaging_plan_from_config(
+    packaging_assets: dict[str, list[dict[str, Any]]],
+    packaging_config: dict[str, Any],
+) -> dict[str, Any]:
+    asset_index = _build_packaging_asset_index(packaging_assets)
+    insert_ids = list(packaging_config.get("insert_asset_ids") or [])
+    music_ids = list(packaging_config.get("music_asset_ids") or [])
+    return {
+        "intro": _resolved_packaging_item(asset_index, packaging_config.get("intro_asset_id")),
+        "outro": _resolved_packaging_item(asset_index, packaging_config.get("outro_asset_id")),
+        "insert": _resolved_packaging_item(asset_index, insert_ids[0] if insert_ids else None),
+        "watermark": _resolved_packaging_item(asset_index, packaging_config.get("watermark_asset_id")),
+        "music": _resolved_packaging_item(asset_index, music_ids[0] if music_ids else None),
+        "subtitle_style": packaging_config.get("subtitle_style"),
+        "cover_style": packaging_config.get("cover_style"),
+        "title_style": packaging_config.get("title_style"),
+        "copy_style": packaging_config.get("copy_style"),
+        "smart_effect_style": packaging_config.get("smart_effect_style"),
+    }
+
+
 def _build_packaging_asset_index(packaging_assets: dict[str, list[dict[str, Any]]]) -> dict[str, str]:
     index: dict[str, str] = {}
     for items in packaging_assets.values():
@@ -638,6 +1769,32 @@ def _asset_list_label(asset_index: dict[str, str], asset_ids: list[Any]) -> str:
     return "、".join(labels) if labels else "未选择"
 
 
+def _resolved_packaging_item(asset_index: dict[str, str], asset_id: Any) -> dict[str, str] | None:
+    asset_key = str(asset_id or "").strip()
+    if not asset_key:
+        return None
+    return {
+        "asset_id": asset_key,
+        "original_name": asset_index.get(asset_key, asset_key),
+    }
+
+
+def _resolved_packaging_label(item: Any) -> str:
+    if not isinstance(item, dict):
+        return "未选择"
+    label = str(item.get("original_name") or item.get("asset_id") or "").strip()
+    if not label:
+        return "未选择"
+    candidate_ids = [
+        str(candidate).strip()
+        for candidate in (item.get("candidate_asset_ids") or [])
+        if str(candidate).strip()
+    ]
+    if len(candidate_ids) > 1:
+        return f"{label}（候选池 {len(candidate_ids)} 首）"
+    return label
+
+
 def _style_label(value: Any, labels: dict[str, str]) -> str:
     key = str(value or "").strip()
     if not key:
@@ -650,15 +1807,20 @@ def _build_review_checks(
     enhancement_modes: list[str],
     config: Any | None,
     packaging_config: dict[str, Any],
+    packaging_plan: dict[str, Any] | None,
     avatar_materials: Any | None,
 ) -> list[dict[str, str]]:
     packaging_enabled = bool(packaging_config.get("enabled"))
+    selected_packaging = _selected_packaging_labels(packaging_plan or {})
     checks = [
         {
             "label": "包装素材与风格模板",
             "status": "齐全" if packaging_enabled else "待补",
             "detail": (
-                "全局包装已启用，审核后会沿用当前包装素材池与风格模板。"
+                "全局包装已启用，审核后会沿用当前任务级包装方案："
+                f"{'；'.join(selected_packaging)}。"
+                if packaging_enabled and selected_packaging
+                else "全局包装已启用，审核后会沿用当前包装素材池与风格模板。"
                 if packaging_enabled
                 else "全局包装当前关闭，成片会跳过片头片尾、水印和背景音乐包装。"
             ),
@@ -667,13 +1829,15 @@ def _build_review_checks(
 
     if "avatar_commentary" in enhancement_modes:
         presenter_id = str(_get_value(config, "avatar_presenter_id") or "").strip()
-        ready_profile = _find_preview_ready_profile(_get_value(avatar_materials, "profiles") or [])
+        profiles = list(_get_value(avatar_materials, "profiles") or [])
+        bound_profile = _find_avatar_profile_label(profiles, presenter_id)
+        ready_profile = _find_preview_ready_profile(profiles)
         if presenter_id:
             detail = (
-                f"已绑定数字人模板：{presenter_id}"
+                f"已绑定数字人模板：{_format_avatar_binding_label(bound_profile or presenter_id)}"
                 + (
                     f"；另有可自动切换档案：{ready_profile}"
-                    if ready_profile
+                    if ready_profile and ready_profile != bound_profile
                     else "；渲染时会优先使用这个模板生成画中画数字人口播。"
                 )
             )
@@ -693,8 +1857,11 @@ def _build_review_checks(
         checks.append({"label": "数字人解说", "status": status, "detail": detail})
 
     if "ai_effects" in enhancement_modes:
-        has_insert = bool(packaging_config.get("insert_asset_ids") or [])
-        smart_effect_style = _style_label(packaging_config.get("smart_effect_style"), _SMART_EFFECT_STYLE_LABELS)
+        has_insert = _resolved_packaging_label((packaging_plan or {}).get("insert")) != "未选择"
+        smart_effect_style = _style_label(
+            (packaging_plan or {}).get("smart_effect_style") or packaging_config.get("smart_effect_style"),
+            _SMART_EFFECT_STYLE_LABELS,
+        )
         if packaging_enabled:
             detail = (
                 f"已启用智能剪辑特效，当前风格为 {smart_effect_style}；包装配置里也包含插片/转场素材，可直接叠加节奏强化效果。"
@@ -758,6 +1925,73 @@ def _find_preview_ready_profile(profiles: list[Any]) -> str | None:
             if display_name:
                 return display_name
     return None
+
+
+def _selected_packaging_labels(packaging_plan: dict[str, Any]) -> list[str]:
+    labels: list[str] = []
+    for label, key in (
+        ("片头", "intro"),
+        ("片尾", "outro"),
+        ("转场", "insert"),
+        ("水印", "watermark"),
+        ("音乐", "music"),
+    ):
+        value = _resolved_packaging_label(packaging_plan.get(key))
+        if value != "未选择":
+            labels.append(f"{label} {value}")
+    return labels
+
+
+def _find_avatar_profile_label(profiles: list[Any], presenter_id: str) -> str | None:
+    if not presenter_id:
+        return None
+    normalized_presenter = _normalize_match_key(presenter_id)
+    presenter_name = Path(presenter_id).stem.strip()
+    for profile in profiles:
+        display_name = str(_get_value(profile, "display_name") or "").strip()
+        presenter_alias = str(_get_value(profile, "presenter_alias") or "").strip()
+        profile_dir = str(_get_value(profile, "profile_dir") or "").strip()
+        profile_id = str(_get_value(profile, "id") or "").strip()
+        candidates = {
+            _normalize_match_key(display_name),
+            _normalize_match_key(presenter_alias),
+            _normalize_match_key(profile_dir),
+            _normalize_match_key(profile_id),
+            _normalize_match_key(Path(profile_dir).name if profile_dir else ""),
+        }
+        if normalized_presenter in {item for item in candidates if item}:
+            return display_name or presenter_alias or presenter_name or presenter_id
+        if profile_dir and normalized_presenter.startswith(_normalize_match_key(profile_dir)):
+            return display_name or presenter_alias or presenter_name or presenter_id
+        for file_item in _get_value(profile, "files") or []:
+            file_path = str(_get_value(file_item, "path") or "").strip()
+            original_name = str(_get_value(file_item, "original_name") or "").strip()
+            stored_name = str(_get_value(file_item, "stored_name") or "").strip()
+            file_id = str(_get_value(file_item, "id") or "").strip()
+            file_candidates = {
+                _normalize_match_key(file_path),
+                _normalize_match_key(original_name),
+                _normalize_match_key(stored_name),
+                _normalize_match_key(file_id),
+                _normalize_match_key(Path(file_path).name if file_path else ""),
+                _normalize_match_key(Path(original_name).stem if original_name else ""),
+            }
+            if normalized_presenter in {item for item in file_candidates if item}:
+                return display_name or presenter_alias or presenter_name or presenter_id
+            if file_path and normalized_presenter.startswith(_normalize_match_key(Path(file_path).parent.as_posix())):
+                return display_name or presenter_alias or presenter_name or presenter_id
+    return presenter_name or None
+
+
+def _format_avatar_binding_label(display_name: str) -> str:
+    name = str(display_name or "").strip()
+    if not name:
+        return "已绑定数字人模板"
+    return f"使用 {name}数字人的解说视频素材"
+
+
+def _normalize_match_key(value: str) -> str:
+    return str(value or "").strip().replace("\\", "/").lower()
 
 
 def _display_value(value: Any) -> str:
@@ -834,6 +2068,8 @@ def _build_pending_subtitle_candidates(report: Any) -> list[TelegramReviewCandid
                     change_type=str(correction.get("type") or ""),
                     confidence=float(correction.get("confidence") or 0.0),
                     source=str(correction.get("source") or "") or None,
+                    start_sec=float(item.get("start") or 0.0),
+                    end_sec=float(item.get("end") or item.get("start") or 0.0),
                 )
             )
             slot_index += 1
