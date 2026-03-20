@@ -273,6 +273,7 @@ async def test_update_job_statuses_triggers_quality_rerun_for_generic_low_detail
         assert step_map["probe"].status == "done"
         assert step_map["content_profile"].status == "pending"
         assert step_map["render"].status == "pending"
+        assert step_map["final_review"].status == "pending"
         assert step_map["platform_package"].status == "pending"
         assert latest_quality.data_json["auto_rerun_triggered"] is True
         assert latest_quality.data_json["auto_rerun_step"] == "content_profile"
@@ -478,6 +479,7 @@ async def test_update_job_statuses_reruns_subtitle_chain_for_subtitle_quality_is
         assert step_map["ai_director"].status == "pending"
         assert step_map["avatar_commentary"].status == "pending"
         assert step_map["render"].status == "pending"
+        assert step_map["final_review"].status == "pending"
         assert step_map["platform_package"].status == "pending"
         assert latest_quality.data_json["auto_rerun_triggered"] is True
         assert latest_quality.data_json["auto_rerun_steps"] == [
@@ -489,5 +491,6 @@ async def test_update_job_statuses_reruns_subtitle_chain_for_subtitle_quality_is
             "avatar_commentary",
             "edit_plan",
             "render",
+            "final_review",
             "platform_package",
         ]

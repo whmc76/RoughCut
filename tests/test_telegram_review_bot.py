@@ -2,15 +2,28 @@ from __future__ import annotations
 
 import uuid
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
 import roughcut.review.telegram_bot as telegram_bot
 from roughcut.review.telegram_bot import (
+    FinalReviewRerunPlan,
+    TelegramFinalReviewClip,
+    TelegramReviewThumbnail,
     TelegramReviewBotService,
     _build_content_profile_review_message,
+    _build_final_review_clip_specs,
+    _build_final_review_message,
+    _build_final_review_reply_markup,
+    _build_final_review_rerun_plan,
+    _build_final_review_rerun_plans,
+    _combine_final_review_rerun_plans,
     _build_pending_subtitle_candidates,
+    _build_review_callback_data,
     _extract_review_reference,
+    _extract_review_callback_reference,
+    _extract_review_reference_from_message,
     _interpret_content_profile_reply,
     _interpret_subtitle_review_reply,
     _split_review_message,
@@ -23,6 +36,41 @@ def test_extract_review_reference_reads_embedded_token():
     result = _extract_review_reference(f"【RC:content_profile:{job_id}】\n请审核")
 
     assert result == ("content_profile", job_id)
+
+
+def test_extract_review_reference_reads_reply_caption_token():
+    job_id = uuid.uuid4()
+
+    result = _extract_review_reference_from_message(
+        {
+            "text": "通过",
+            "reply_to_message": {
+                "caption": f"【RC:content_profile:{job_id}】\n参考缩略图 1/3",
+            },
+        }
+    )
+
+    assert result == ("content_profile", job_id)
+
+
+def test_extract_review_callback_reference_reads_final_review_action():
+    job_id = uuid.uuid4()
+
+    result = _extract_review_callback_reference(_build_review_callback_data("final_review", job_id, "cover"))
+
+    assert result == ("final_review", job_id, "cover")
+
+
+def test_build_final_review_reply_markup_contains_expected_buttons():
+    job_id = uuid.uuid4()
+
+    markup = _build_final_review_reply_markup(job_id)
+    button_texts = [button["text"] for row in markup["inline_keyboard"] for button in row]
+    callback_values = [button["callback_data"] for row in markup["inline_keyboard"] for button in row]
+
+    assert button_texts == ["成片通过", "只改封面", "只改BGM", "只改平台文案", "数字人口播重做"]
+    assert callback_values[0] == f"RCB:final:{job_id}:approve"
+    assert callback_values[-1] == f"RCB:final:{job_id}:avatar"
 
 
 def test_split_review_message_preserves_all_lines():
@@ -39,6 +87,8 @@ def test_build_pending_subtitle_candidates_only_includes_undecided_items():
         items=[
             {
                 "index": 1,
+                "start": 0.0,
+                "end": 1.5,
                 "corrections": [
                     {"id": "a", "original": "原词", "suggested": "新词", "type": "term", "confidence": 0.9, "source": "glossary", "decision": None},
                     {"id": "b", "original": "旧词", "suggested": "新词2", "type": "term", "confidence": 0.7, "source": "glossary", "decision": "accepted"},
@@ -46,6 +96,8 @@ def test_build_pending_subtitle_candidates_only_includes_undecided_items():
             },
             {
                 "index": 2,
+                "start": 1.6,
+                "end": 3.0,
                 "corrections": [
                     {"id": "c", "original": "错别字", "suggested": "正字", "type": "subtitle", "confidence": 0.8, "source": "memory", "decision": None},
                 ],
@@ -57,6 +109,8 @@ def test_build_pending_subtitle_candidates_only_includes_undecided_items():
 
     assert [item.slot for item in candidates] == ["S1", "S2"]
     assert [item.correction_id for item in candidates] == ["a", "c"]
+    assert candidates[0].start_sec == 0.0
+    assert candidates[0].end_sec == 1.5
 
 
 @pytest.mark.asyncio
@@ -381,3 +435,700 @@ def test_build_content_profile_review_message_includes_avatar_check_when_enabled
     )
 
     assert "数字人解说：未显式绑定 avatar_presenter_id，但已有可用数字人档案：店播数字人A" in message
+
+
+def test_build_content_profile_review_message_prefers_resolved_packaging_and_avatar_display_name():
+    message = _build_content_profile_review_message(
+        source_name="fas.mp4",
+        job_id=uuid.uuid4(),
+        review=SimpleNamespace(
+            workflow_mode="standard_edit",
+            enhancement_modes=["avatar_commentary"],
+        ),
+        draft={
+            "subject_type": "手电",
+            "video_theme": "户外实测",
+        },
+        packaging_assets={},
+        packaging_config={"enabled": True},
+        packaging_plan={
+            "outro": {"asset_id": "outro-1", "original_name": "品牌片尾.mp4"},
+            "music": {"asset_id": "music-1", "original_name": "战术BGM.mp3"},
+            "subtitle_style": "bold_yellow_outline",
+            "cover_style": "preset_default",
+            "title_style": "preset_default",
+            "copy_style": "attention_grabbing",
+            "smart_effect_style": "smart_effect_rhythm",
+        },
+        config=SimpleNamespace(
+            avatar_presenter_id=r"data\avatar_materials\profiles\FAS_b3622e31\presenter.mp4",
+            voice_provider="indextts2",
+            voice_clone_api_base_url="http://127.0.0.1:49204",
+            voice_clone_api_key_set=False,
+            voice_clone_voice_id="",
+        ),
+        avatar_materials=SimpleNamespace(
+            profiles=[
+                SimpleNamespace(
+                    id="fas-profile",
+                    display_name="FAS",
+                    presenter_alias="FAS",
+                    profile_dir=r"data\avatar_materials\profiles\FAS_b3622e31",
+                    files=[
+                        SimpleNamespace(
+                            id="fas-file",
+                            path=r"data\avatar_materials\profiles\FAS_b3622e31\presenter.mp4",
+                            original_name="presenter.mp4",
+                            stored_name="presenter.mp4",
+                        )
+                    ],
+                    capability_status={"preview": "ready"},
+                )
+            ]
+        ),
+    )
+
+    assert "片尾：品牌片尾.mp4" in message
+    assert "音乐：战术BGM.mp3" in message
+    assert "使用 FAS数字人的解说视频素材" in message
+
+
+@pytest.mark.asyncio
+async def test_send_review_message_sends_text_then_thumbnail_context(monkeypatch, tmp_path):
+    service = TelegramReviewBotService()
+    sent_text: list[str] = []
+    sent_photos: list[tuple[str, str, str, int | None]] = []
+    job_id = uuid.uuid4()
+    photo_path = tmp_path / "thumb.jpg"
+    photo_path.write_bytes(b"thumb")
+
+    async def fake_send_text(text: str, *, reply_markup=None) -> int | None:
+        sent_text.append(text)
+        return 88
+
+    async def fake_send_photo(
+        path,
+        *,
+        chat_id: str,
+        caption: str = "",
+        reply_to_message_id: int | None = None,
+    ) -> int | None:
+        sent_photos.append((path.name, caption, chat_id, reply_to_message_id))
+        return 99
+
+    monkeypatch.setattr(
+        telegram_bot,
+        "get_settings",
+        lambda: SimpleNamespace(
+            telegram_agent_enabled=True,
+            telegram_remote_review_enabled=False,
+            telegram_bot_chat_id="123",
+            telegram_bot_token="token",
+            telegram_bot_api_base_url="https://api.telegram.org",
+        ),
+    )
+    service._send_text = fake_send_text
+    service._send_chat_photo = fake_send_photo
+
+    await service._send_review_message(
+        "content_profile",
+        job_id,
+        "任务：缩略图校对",
+        thumbnails=[
+            TelegramReviewThumbnail(
+                path=photo_path,
+                caption=f"【RC:content_profile:{job_id}】\n参考缩略图 1/3",
+            )
+        ],
+    )
+
+    assert sent_text == [f"【RC:content_profile:{job_id}】\n任务：缩略图校对"]
+    assert sent_photos == [("thumb.jpg", f"【RC:content_profile:{job_id}】\n参考缩略图 1/3", "123", 88)]
+
+
+def test_build_final_review_message_includes_summary_keywords_and_subtitle_hints():
+    message = _build_final_review_message(
+        source_name="final.mp4",
+        job_id=uuid.uuid4(),
+        workflow_mode="standard_edit",
+        enhancement_modes=["avatar_commentary"],
+        render_outputs={
+            "packaged_mp4": r"E:\output\final.mp4",
+            "plain_mp4": r"E:\output\plain.mp4",
+            "cover": r"E:\output\cover.jpg",
+        },
+        content_profile={
+            "summary": "这期重点看扁桶手电的便携性和泛光表现。",
+            "search_queries": ["扁桶手电", "Olight 司令官2 Ultra"],
+        },
+        subtitle_report=SimpleNamespace(
+            items=[
+                {
+                    "index": 3,
+                    "start": 12.0,
+                    "end": 14.0,
+                    "text_raw": "这是 olight 的开箱",
+                    "text_norm": "这是 olight 的开箱",
+                    "text_final": "这是 olight 的开箱",
+                    "corrections": [
+                        {
+                            "id": "corr-1",
+                            "original": "olight",
+                            "suggested": "Olight",
+                            "type": "term",
+                            "confidence": 0.64,
+                            "source": "glossary",
+                            "decision": None,
+                        }
+                    ],
+                }
+            ]
+        ),
+        rerun_context={
+            "step_name": "render",
+            "targets": ["cover", "music"],
+            "feedback": "封面太弱，BGM 换掉",
+        },
+    )
+
+    assert "默认发送 3 段压缩预览" in message
+    assert "内容摘要：这期重点看扁桶手电的便携性和泛光表现。" in message
+    assert "关键词：扁桶手电，Olight 司令官2 Ultra" in message
+    assert "重跑说明：" in message
+    assert "本次重跑目标：cover, music" in message
+    assert "字幕复核提醒：" in message
+    assert "原“olight” -> 建议“Olight”" in message
+    assert "S1通过，S2改成 Olight" in message
+    assert "只改封面" in message
+    assert "只改平台文案" in message
+
+
+@pytest.mark.asyncio
+async def test_send_review_message_attaches_final_review_reply_markup(monkeypatch):
+    service = TelegramReviewBotService()
+    job_id = uuid.uuid4()
+    sent_texts: list[tuple[str, dict[str, object] | None]] = []
+    sent_videos: list[tuple[str, int | None]] = []
+
+    monkeypatch.setattr(
+        telegram_bot,
+        "get_settings",
+        lambda: SimpleNamespace(
+            telegram_agent_enabled=True,
+            telegram_remote_review_enabled=False,
+            telegram_bot_chat_id="123",
+            telegram_bot_token="token",
+            telegram_bot_api_base_url="https://api.telegram.org",
+        ),
+    )
+
+    async def fake_send_text(text: str, *, reply_markup=None):
+        sent_texts.append((text, reply_markup))
+        return 99 if len(sent_texts) == 1 else 100
+
+    async def fake_send_video(path, *, chat_id: str, caption: str = "", reply_to_message_id: int | None = None):
+        sent_videos.append((caption, reply_to_message_id))
+        return 101
+
+    service._send_text = fake_send_text
+    service._send_chat_video = fake_send_video
+
+    await service._send_review_message(
+        "final_review",
+        job_id,
+        "\n".join(f"line {index}" for index in range(800)),
+        videos=[telegram_bot.TelegramReviewVideo(path=telegram_bot.Path(__file__), caption="预览 1")],
+    )
+
+    assert len(sent_texts) >= 2
+    assert sent_texts[0][1] == _build_final_review_reply_markup(job_id)
+    assert all(reply_markup is None for _, reply_markup in sent_texts[1:])
+    assert sent_videos == [("预览 1", 99)]
+
+
+def test_build_final_review_clip_specs_prefers_keyword_segment():
+    clips = _build_final_review_clip_specs(
+        duration_sec=60.0,
+        subtitle_items=[
+            {"index": 1, "start": 1.0, "end": 3.0, "text": "先看开头展示"},
+            {"index": 2, "start": 24.0, "end": 28.0, "text": "这里重点讲扁桶手电的握持和亮度"},
+            {"index": 3, "start": 50.0, "end": 55.0, "text": "最后总结值不值得买"},
+        ],
+        keywords=["扁桶手电", "亮度"],
+    )
+
+    assert len(clips) == 3
+    assert any(clip.matched_keyword == "扁桶手电" for clip in clips)
+    assert any("开头" in clip.label for clip in clips)
+    assert all(0.0 <= clip.start_sec < 60.0 for clip in clips)
+    assert all(isinstance(clip, TelegramFinalReviewClip) for clip in clips)
+
+
+def test_build_final_review_rerun_plan_maps_common_feedback():
+    cases = {
+        "封面要重做，标题字太弱": ("render", "封面重出"),
+        "数字人口播不自然，重跑数字人": ("avatar_commentary", "数字人解说重做"),
+        "节奏太拖，前半段重剪": ("edit_plan", "剪辑结构重做"),
+        "字幕有错别字": ("subtitle_postprocess", "字幕与术语修订"),
+        "摘要和主题不准": ("content_profile", "内容摘要与文案定位调整"),
+        "旁白文案要重写": ("ai_director", "AI 导演文案与配音重做"),
+        "发布标题和话题标签重写": ("platform_package", "平台文案与发布文案重出"),
+        "字幕样式太花了": ("render", "字幕样式重出"),
+        "BGM 换掉": ("render", "背景音乐重出"),
+    }
+
+    for text, (trigger_step, label) in cases.items():
+        plan = _build_final_review_rerun_plan(text)
+        assert isinstance(plan, FinalReviewRerunPlan)
+        assert plan.trigger_step == trigger_step
+        assert plan.label == label
+        assert plan.rerun_steps[0] == trigger_step
+
+
+def test_combine_final_review_rerun_plans_prefers_earliest_step():
+    plans = _build_final_review_rerun_plans("字幕和封面都要改，发布文案也重写")
+    combined = _combine_final_review_rerun_plans(plans)
+
+    assert combined is not None
+    assert combined.trigger_step == "subtitle_postprocess"
+    assert combined.rerun_steps[0] == "subtitle_postprocess"
+    assert "字幕与术语修订" in combined.label
+    assert "封面重出" in combined.label
+    assert "平台文案与发布文案重出" in combined.label
+    assert "cover" in combined.targets
+    assert "publish_copy" in combined.targets
+
+
+def test_build_final_review_rerun_plans_distinguishes_subtitle_style_from_subtitle_text():
+    plans = _build_final_review_rerun_plans("字幕样式要换，但是字幕内容本身没问题")
+
+    assert [plan.category for plan in plans] == ["subtitle_style"]
+    assert plans[0].trigger_step == "render"
+    assert plans[0].targets == ("subtitle_style",)
+
+
+@pytest.mark.asyncio
+async def test_build_final_review_videos_generates_compressed_previews(monkeypatch, tmp_path):
+    packaged = tmp_path / "packaged.mp4"
+    packaged.write_bytes(b"video")
+
+    async def fake_probe(path):
+        assert path == packaged
+        return SimpleNamespace(
+            duration=42.0,
+            width=1080,
+            height=1920,
+            fps=30.0,
+            video_codec="h264",
+            audio_codec="aac",
+            audio_sample_rate=48000,
+            audio_channels=2,
+            file_size=1024,
+            format_name="mov,mp4",
+            bit_rate=900000,
+        )
+
+    async def fake_preview(*, job_id, source_path, clip_index, start_sec, duration_sec):
+        assert source_path == packaged
+        preview = tmp_path / f"preview_{clip_index}.mp4"
+        preview.write_bytes(b"preview")
+        return preview
+
+    monkeypatch.setattr(telegram_bot, "probe", fake_probe)
+    monkeypatch.setattr(telegram_bot, "_ensure_final_review_preview", fake_preview)
+
+    videos = await telegram_bot._build_final_review_videos(
+        uuid.uuid4(),
+        {"packaged_mp4": str(packaged)},
+        content_profile={"search_queries": ["扁桶手电"]},
+        subtitle_report=SimpleNamespace(
+            items=[
+                {"index": 1, "start": 2.0, "end": 4.0, "text_raw": "开头", "text_norm": "开头", "text_final": "开头", "corrections": []},
+                {"index": 2, "start": 18.0, "end": 22.0, "text_raw": "重点讲扁桶手电", "text_norm": "重点讲扁桶手电", "text_final": "重点讲扁桶手电", "corrections": []},
+                {"index": 3, "start": 34.0, "end": 38.0, "text_raw": "最后总结", "text_norm": "最后总结", "text_final": "最后总结", "corrections": []},
+            ]
+        ),
+    )
+
+    assert len(videos) == 3
+    assert [item.path.name for item in videos] == ["preview_1.mp4", "preview_2.mp4", "preview_3.mp4"]
+    assert all("预览" in item.caption for item in videos)
+    assert all("packaged.mp4" not in item.caption for item in videos)
+
+
+@pytest.mark.asyncio
+async def test_handle_update_dispatches_final_review_callback(monkeypatch):
+    service = TelegramReviewBotService()
+    job_id = uuid.uuid4()
+    handled: list[tuple[uuid.UUID, str, str]] = []
+    answered: list[tuple[str, str]] = []
+
+    monkeypatch.setattr(
+        telegram_bot,
+        "get_settings",
+        lambda: SimpleNamespace(
+            telegram_agent_enabled=True,
+            telegram_remote_review_enabled=False,
+            telegram_bot_chat_id="123",
+            telegram_bot_token="token",
+            telegram_bot_api_base_url="https://api.telegram.org",
+        ),
+    )
+
+    async def fake_handle(job_id_value: uuid.UUID, text: str, *, reply_chat_id: str = ""):
+        handled.append((job_id_value, text, reply_chat_id))
+
+    async def fake_answer(callback_query_id: str, *, text: str = ""):
+        answered.append((callback_query_id, text))
+
+    service._handle_final_review_reply = fake_handle
+    service._answer_callback_query = fake_answer
+
+    await service._handle_update(
+        {
+            "callback_query": {
+                "id": "cb-1",
+                "data": _build_review_callback_data("final_review", job_id, "music"),
+                "message": {"chat": {"id": "123"}},
+            }
+        }
+    )
+
+    assert answered == [("cb-1", "已接收 BGM 重出")]
+    assert handled == [(job_id, "只改BGM", "123")]
+
+
+@pytest.mark.asyncio
+async def test_handle_final_review_reply_marks_step_done(db_engine):
+    from roughcut.db.models import Job, JobStep
+    from roughcut.db.session import get_session_factory
+
+    service = TelegramReviewBotService()
+    sent: list[str] = []
+    job_id = uuid.uuid4()
+
+    async def fake_send_text(text: str, *, chat_id: str) -> None:
+        sent.append(text)
+
+    service._send_chat_text = fake_send_text
+
+    async with get_session_factory()() as session:
+        session.add(
+            Job(
+                id=job_id,
+                source_path="jobs/demo/final.mp4",
+                source_name="final.mp4",
+                status="needs_review",
+                language="zh-CN",
+            )
+        )
+        session.add(JobStep(job_id=job_id, step_name="final_review", status="pending"))
+        await session.commit()
+
+    await service._handle_final_review_reply(job_id, "通过", reply_chat_id="123")
+
+    async with get_session_factory()() as session:
+        job = await session.get(Job, job_id)
+        step = (
+            await session.execute(
+                telegram_bot.select(JobStep).where(JobStep.job_id == job_id, JobStep.step_name == "final_review")
+            )
+        ).scalar_one()
+
+        assert job.status == "processing"
+        assert step.status == "done"
+        assert "成片已人工审核通过" in str((step.metadata_ or {}).get("detail") or "")
+
+    assert sent == [f"已确认任务 {job_id} 的成片，系统继续后续流程。"]
+
+
+@pytest.mark.asyncio
+async def test_handle_final_review_reply_applies_subtitle_actions_and_stays_paused(db_engine, monkeypatch):
+    from roughcut.db.models import Job, JobStep
+    from roughcut.db.session import get_session_factory
+
+    service = TelegramReviewBotService()
+    sent: list[str] = []
+    job_id = uuid.uuid4()
+    applied_requests: list[list[tuple[str, str, str | None]]] = []
+
+    async def fake_send_text(text: str, *, chat_id: str) -> None:
+        sent.append(text)
+
+    async def fake_apply_review(job_id_value, request, session):
+        applied_requests.append(
+            [
+                (str(action.target_id), action.action, action.override_text)
+                for action in request.actions
+            ]
+        )
+        return {"applied": len(request.actions)}
+
+    monkeypatch.setattr(telegram_bot, "_interpret_subtitle_review_reply", AsyncMock(return_value=[
+        {"correction_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "action": "accepted", "override_text": "Olight"},
+    ]))
+    import roughcut.api.jobs as jobs_api
+    monkeypatch.setattr(jobs_api, "apply_review", fake_apply_review)
+    service._send_chat_text = fake_send_text
+
+    async with get_session_factory()() as session:
+        session.add(
+            Job(
+                id=job_id,
+                source_path="jobs/demo/final.mp4",
+                source_name="final.mp4",
+                status="needs_review",
+                language="zh-CN",
+            )
+        )
+        session.add(JobStep(job_id=job_id, step_name="final_review", status="pending"))
+        await session.commit()
+
+    monkeypatch.setattr(
+        telegram_bot,
+        "generate_report",
+        AsyncMock(
+            return_value=SimpleNamespace(
+                items=[
+                    {
+                        "index": 1,
+                        "start": 2.0,
+                        "end": 4.0,
+                        "text_raw": "olight 开箱",
+                        "text_norm": "olight 开箱",
+                        "text_final": "olight 开箱",
+                        "corrections": [
+                            {
+                                "id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                                "original": "olight",
+                                "suggested": "Olight",
+                                "type": "term",
+                                "confidence": 0.7,
+                                "source": "glossary",
+                                "decision": None,
+                            }
+                        ],
+                    }
+                ]
+            )
+        ),
+    )
+
+    await service._handle_final_review_reply(job_id, "S1改成 Olight", reply_chat_id="123")
+
+    async with get_session_factory()() as session:
+        job = await session.get(Job, job_id)
+        step = (
+            await session.execute(
+                telegram_bot.select(JobStep).where(JobStep.job_id == job_id, JobStep.step_name == "final_review")
+            )
+        ).scalar_one()
+
+        assert job.status == "needs_review"
+        assert step.status == "pending"
+        assert "已应用 1 条字幕审核意见" in str((step.metadata_ or {}).get("detail") or "")
+
+    assert applied_requests == [[("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "accepted", "Olight")]]
+    assert sent == [f"已应用任务 {job_id} 的 1 条字幕审核意见；当前成片仍保持暂停。确认无误后可直接回复“成片通过”继续。"]
+
+
+@pytest.mark.asyncio
+async def test_handle_final_review_reply_applies_subtitle_actions_and_passes(db_engine, monkeypatch):
+    from roughcut.db.models import Job, JobStep
+    from roughcut.db.session import get_session_factory
+
+    service = TelegramReviewBotService()
+    sent: list[str] = []
+    job_id = uuid.uuid4()
+
+    async def fake_send_text(text: str, *, chat_id: str) -> None:
+        sent.append(text)
+
+    async def fake_apply_review(job_id_value, request, session):
+        return {"applied": len(request.actions)}
+
+    monkeypatch.setattr(telegram_bot, "_interpret_subtitle_review_reply", AsyncMock(return_value=[
+        {"correction_id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", "action": "accepted"},
+    ]))
+    import roughcut.api.jobs as jobs_api
+    monkeypatch.setattr(jobs_api, "apply_review", fake_apply_review)
+    service._send_chat_text = fake_send_text
+
+    async with get_session_factory()() as session:
+        session.add(
+            Job(
+                id=job_id,
+                source_path="jobs/demo/final.mp4",
+                source_name="final.mp4",
+                status="needs_review",
+                language="zh-CN",
+            )
+        )
+        session.add(JobStep(job_id=job_id, step_name="final_review", status="pending"))
+        await session.commit()
+
+    monkeypatch.setattr(
+        telegram_bot,
+        "generate_report",
+        AsyncMock(
+            return_value=SimpleNamespace(
+                items=[
+                    {
+                        "index": 1,
+                        "start": 2.0,
+                        "end": 4.0,
+                        "text_raw": "字幕",
+                        "text_norm": "字幕",
+                        "text_final": "字幕",
+                        "corrections": [
+                            {
+                                "id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+                                "original": "旧词",
+                                "suggested": "新词",
+                                "type": "term",
+                                "confidence": 0.7,
+                                "source": "glossary",
+                                "decision": None,
+                            }
+                        ],
+                    }
+                ]
+            )
+        ),
+    )
+
+    await service._handle_final_review_reply(job_id, "S1通过，成片通过", reply_chat_id="123")
+
+    async with get_session_factory()() as session:
+        job = await session.get(Job, job_id)
+        step = (
+            await session.execute(
+                telegram_bot.select(JobStep).where(JobStep.job_id == job_id, JobStep.step_name == "final_review")
+            )
+        ).scalar_one()
+
+        assert job.status == "processing"
+        assert step.status == "done"
+
+    assert sent == [f"已应用任务 {job_id} 的 1 条字幕审核意见，并确认成片通过，系统继续后续流程。"]
+
+
+@pytest.mark.asyncio
+async def test_handle_final_review_reply_triggers_structured_rerun(db_engine):
+    import roughcut.pipeline.orchestrator as orchestrator_mod
+    from roughcut.db.models import Job, JobStep
+    from roughcut.db.session import get_session_factory
+
+    service = TelegramReviewBotService()
+    sent: list[str] = []
+    job_id = uuid.uuid4()
+
+    async def fake_send_text(text: str, *, chat_id: str) -> None:
+        sent.append(text)
+
+    service._send_chat_text = fake_send_text
+
+    async with get_session_factory()() as session:
+        session.add(
+            Job(
+                id=job_id,
+                source_path="jobs/demo/final.mp4",
+                source_name="final.mp4",
+                status="needs_review",
+                language="zh-CN",
+                enhancement_modes=["avatar_commentary"],
+            )
+        )
+        for step in orchestrator_mod.create_job_steps(job_id):
+            step.status = "done"
+            session.add(step)
+        final_review_step = (
+            await session.execute(
+                telegram_bot.select(JobStep).where(
+                    JobStep.job_id == job_id,
+                    JobStep.step_name == "final_review",
+                )
+            )
+        ).scalar_one()
+        final_review_step.status = "pending"
+        await session.commit()
+
+    await service._handle_final_review_reply(job_id, "数字人口播不自然，重跑数字人", reply_chat_id="123")
+
+    async with get_session_factory()() as session:
+        job = await session.get(Job, job_id)
+        steps = (
+            await session.execute(
+                telegram_bot.select(JobStep).where(JobStep.job_id == job_id)
+            )
+        ).scalars().all()
+        step_map = {step.step_name: step for step in steps}
+
+        assert job.status == "processing"
+        assert step_map["avatar_commentary"].status == "pending"
+        assert step_map["edit_plan"].status == "pending"
+        assert step_map["render"].status == "pending"
+        assert step_map["final_review"].status == "pending"
+        assert "人工成片审核要求重跑：数字人解说重做" in str((step_map["avatar_commentary"].metadata_ or {}).get("detail") or "")
+
+    assert sent == [
+        f"已记录任务 {job_id} 的成片修改意见，目标：avatar；并按“数字人解说重做”触发重跑：avatar_commentary -> edit_plan -> render -> final_review -> platform_package。"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_handle_final_review_reply_triggers_platform_package_only_rerun(db_engine):
+    import roughcut.pipeline.orchestrator as orchestrator_mod
+    from roughcut.db.models import Job, JobStep
+    from roughcut.db.session import get_session_factory
+
+    service = TelegramReviewBotService()
+    sent: list[str] = []
+    job_id = uuid.uuid4()
+
+    async def fake_send_text(text: str, *, chat_id: str) -> None:
+        sent.append(text)
+
+    service._send_chat_text = fake_send_text
+
+    async with get_session_factory()() as session:
+        session.add(
+            Job(
+                id=job_id,
+                source_path="jobs/demo/final.mp4",
+                source_name="final.mp4",
+                status="needs_review",
+                language="zh-CN",
+            )
+        )
+        for step in orchestrator_mod.create_job_steps(job_id):
+            step.status = "done"
+            session.add(step)
+        final_review_step = (
+            await session.execute(
+                telegram_bot.select(JobStep).where(JobStep.job_id == job_id, JobStep.step_name == "final_review")
+            )
+        ).scalar_one()
+        final_review_step.status = "pending"
+        await session.commit()
+
+    await service._handle_final_review_reply(job_id, "发布标题和话题标签重写一下", reply_chat_id="123")
+
+    async with get_session_factory()() as session:
+        job = await session.get(Job, job_id)
+        steps = (
+            await session.execute(
+                telegram_bot.select(JobStep).where(JobStep.job_id == job_id)
+            )
+        ).scalars().all()
+        step_map = {step.step_name: step for step in steps}
+
+        assert job.status == "processing"
+        assert step_map["platform_package"].status == "pending"
+        assert step_map["render"].status == "done"
+        assert step_map["final_review"].status == "pending"
+        assert "平台文案与发布文案重出" in str((step_map["platform_package"].metadata_ or {}).get("detail") or "")
+
+    assert sent == [
+        f"已记录任务 {job_id} 的成片修改意见，目标：publish_copy, hashtags, platform_copy；并按“平台文案与发布文案重出”触发重跑：platform_package。"
+    ]

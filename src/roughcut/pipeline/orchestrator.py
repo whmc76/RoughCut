@@ -4,7 +4,7 @@ State in DB, Celery only executes individual steps.
 
  Pipeline: probe → extract_audio → transcribe → subtitle_postprocess
         → glossary_review → subtitle_translation → content_profile → summary_review → ai_director
-        → avatar_commentary → edit_plan → render → platform_package
+        → avatar_commentary → edit_plan → render → final_review → platform_package
 """
 from __future__ import annotations
 
@@ -38,6 +38,7 @@ PIPELINE_STEPS = [
     "avatar_commentary",
     "edit_plan",
     "render",
+    "final_review",
     "platform_package",
 ]
 
@@ -82,6 +83,7 @@ _QUALITY_RERUN_STEPS = {
     "avatar_commentary",
     "edit_plan",
     "render",
+    "final_review",
     "platform_package",
 }
 
@@ -363,7 +365,7 @@ async def _recover_incomplete_jobs() -> None:
 
 async def _is_step_ready(step: JobStep, session) -> bool:
     """Check if all prerequisite steps are done."""
-    if step.step_name == "summary_review":
+    if step.step_name in {"summary_review", "final_review"}:
         return False
 
     step_idx = PIPELINE_STEPS.index(step.step_name)
@@ -454,11 +456,22 @@ async def _update_job_statuses(session) -> None:
 
         review_step = step_map.get("summary_review")
         draft_step = step_map.get("content_profile")
+        final_review_step = step_map.get("final_review")
+        render_step = step_map.get("render")
         if (
             draft_step is not None
             and draft_step.status == "done"
             and review_step is not None
             and review_step.status == "pending"
+        ):
+            job.status = "needs_review"
+            job.updated_at = datetime.now(timezone.utc)
+            continue
+        if (
+            render_step is not None
+            and render_step.status == "done"
+            and final_review_step is not None
+            and final_review_step.status == "pending"
         ):
             job.status = "needs_review"
             job.updated_at = datetime.now(timezone.utc)

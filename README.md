@@ -445,8 +445,11 @@ curl http://localhost:8000/api/v1/jobs/{job_id}/report
 ```env
 TELEGRAM_AGENT_ACP_COMMAND=uv run python scripts/acp_bridge.py
 ROUGHCUT_ACP_BRIDGE_BACKEND=claude
+ROUGHCUT_ACP_BRIDGE_FALLBACK_BACKEND=codex
 TELEGRAM_AGENT_CLAUDE_MODEL=opus
 ROUGHCUT_ACP_BRIDGE_CLAUDE_MODEL=opus
+ROUGHCUT_ACP_BRIDGE_CODEX_COMMAND=codex
+ROUGHCUT_ACP_BRIDGE_CODEX_MODEL=gpt-5.4-mini
 ```
 
 如果要让内置 ACP bridge 改走 Codex，可以改成：
@@ -455,9 +458,11 @@ ROUGHCUT_ACP_BRIDGE_CLAUDE_MODEL=opus
 TELEGRAM_AGENT_ACP_COMMAND=uv run python scripts/acp_bridge.py
 ROUGHCUT_ACP_BRIDGE_BACKEND=codex
 ROUGHCUT_ACP_BRIDGE_CODEX_COMMAND=codex
+ROUGHCUT_ACP_BRIDGE_CODEX_MODEL=gpt-5.4-mini
 ```
 
 如果不显式配置 `TELEGRAM_AGENT_ACP_COMMAND`，Telegram agent 也会默认回退到仓库内置的 `scripts/acp_bridge.py`。
+当前推荐链路是：ACP 主走 Claude Code `opus`，失败时自动 fallback 到 Codex `gpt-5.4-mini`。
 | `AUTO_CONFIRM_CONTENT_PROFILE` | `true` | 高置信度内容摘要自动确认，避免任务卡在人工核对 |
 | `CONTENT_PROFILE_REVIEW_THRESHOLD` | `0.72` | 内容摘要自动确认阈值，范围 `0.0` 到 `1.0` |
 | `AUTO_ACCEPT_GLOSSARY_CORRECTIONS` | `true` | 高置信度术语纠错自动接受，只保留风险项待确认 |

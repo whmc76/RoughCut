@@ -88,6 +88,7 @@ def test_assess_job_quality_penalizes_generic_profile_and_missed_detail():
         "avatar_commentary",
         "edit_plan",
         "render",
+        "final_review",
         "platform_package",
     ]
 
@@ -154,6 +155,7 @@ def test_assess_job_quality_prefers_subtitle_rerun_when_subtitles_missing():
         "avatar_commentary",
         "edit_plan",
         "render",
+        "final_review",
         "platform_package",
     ]
 
@@ -229,4 +231,4 @@ def test_assess_job_quality_penalizes_subtitle_sync_issue_and_prefers_render_rer
 
     assert "subtitle_sync_issue" in assessment["issue_codes"]
     assert assessment["recommended_rerun_step"] == "render"
-    assert assessment["recommended_rerun_steps"] == ["render", "platform_package"]
+    assert assessment["recommended_rerun_steps"] == ["render", "final_review", "platform_package"]

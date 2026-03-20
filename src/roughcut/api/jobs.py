@@ -78,6 +78,7 @@ STEP_LABELS = {
     "avatar_commentary": "数字人解说",
     "edit_plan": "剪辑决策",
     "render": "渲染输出",
+    "final_review": "成片审核",
     "platform_package": "平台文案",
 }
 
@@ -912,6 +913,27 @@ def _build_current_step(job: Job) -> dict | None:
         }
 
     if job.status == "needs_review":
+        waiting_review = next(
+            (
+                step for step in steps
+                if step.step_name in {"summary_review", "final_review"} and step.status == "pending"
+            ),
+            None,
+        )
+        if waiting_review is not None:
+            review_detail = (
+                "等待核对内容信息后继续。"
+                if waiting_review.step_name == "summary_review"
+                else "等待审核成片后继续。"
+            )
+            return {
+                "step_name": waiting_review.step_name,
+                "label": STEP_LABELS[waiting_review.step_name],
+                "status": "needs_review",
+                "detail": review_detail,
+                "progress": None,
+                "updated_at": _iso_or_none(job.updated_at),
+            }
         return {
             "step_name": "summary_review",
             "label": STEP_LABELS["summary_review"],

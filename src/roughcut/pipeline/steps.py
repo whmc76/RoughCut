@@ -97,6 +97,7 @@ STEP_LABELS = {
     "avatar_commentary": "数字人解说",
     "edit_plan": "剪辑决策",
     "render": "渲染输出",
+    "final_review": "成片审核",
     "platform_package": "平台文案",
 }
 
@@ -2231,6 +2232,10 @@ async def run_render(job_id: str) -> dict:
                 progress=1.0,
             )
         await session.commit()
+        try:
+            await get_telegram_review_bot_service().notify_final_review(uuid.UUID(job_id))
+        except Exception:
+            logger.exception("Failed to send Telegram final review for job %s", job_id)
 
     return {"output_key": packaged_output_key, "local": local_paths}
 
