@@ -116,6 +116,8 @@ class ConfigOut(BaseModel):
     fact_check_enabled: bool
     auto_confirm_content_profile: bool
     content_profile_review_threshold: float
+    content_profile_auto_review_min_accuracy: float
+    content_profile_auto_review_min_samples: int
     auto_accept_glossary_corrections: bool
     glossary_correction_review_threshold: float
     auto_select_cover_variant: bool
@@ -217,6 +219,8 @@ class ConfigPatch(BaseModel):
     fact_check_enabled: bool | None = None
     auto_confirm_content_profile: bool | None = None
     content_profile_review_threshold: float | None = None
+    content_profile_auto_review_min_accuracy: float | None = None
+    content_profile_auto_review_min_samples: int | None = None
     auto_accept_glossary_corrections: bool | None = None
     glossary_correction_review_threshold: float | None = None
     auto_select_cover_variant: bool | None = None
@@ -305,6 +309,8 @@ def get_config():
         fact_check_enabled=s.fact_check_enabled,
         auto_confirm_content_profile=s.auto_confirm_content_profile,
         content_profile_review_threshold=s.content_profile_review_threshold,
+        content_profile_auto_review_min_accuracy=s.content_profile_auto_review_min_accuracy,
+        content_profile_auto_review_min_samples=s.content_profile_auto_review_min_samples,
         auto_accept_glossary_corrections=s.auto_accept_glossary_corrections,
         glossary_correction_review_threshold=s.glossary_correction_review_threshold,
         auto_select_cover_variant=s.auto_select_cover_variant,
@@ -444,6 +450,16 @@ def patch_config(body: ConfigPatch):
         updates["content_profile_review_threshold"] = max(
             0.0,
             min(1.0, float(updates["content_profile_review_threshold"])),
+        )
+    if "content_profile_auto_review_min_accuracy" in updates:
+        updates["content_profile_auto_review_min_accuracy"] = max(
+            0.0,
+            min(1.0, float(updates["content_profile_auto_review_min_accuracy"])),
+        )
+    if "content_profile_auto_review_min_samples" in updates:
+        updates["content_profile_auto_review_min_samples"] = max(
+            1,
+            min(10000, int(updates["content_profile_auto_review_min_samples"])),
         )
     if "avatar_safe_margin" in updates:
         updates["avatar_safe_margin"] = max(0.0, min(0.4, float(updates["avatar_safe_margin"])))
