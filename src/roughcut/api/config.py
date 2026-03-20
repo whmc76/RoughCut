@@ -94,6 +94,7 @@ class ConfigOut(BaseModel):
     telegram_agent_enabled: bool
     telegram_agent_claude_enabled: bool
     telegram_agent_claude_command: str
+    telegram_agent_claude_model: str
     telegram_agent_acp_command: str
     telegram_agent_task_timeout_sec: int
     telegram_agent_result_max_chars: int
@@ -188,6 +189,7 @@ class ConfigPatch(BaseModel):
     telegram_agent_enabled: bool | None = None
     telegram_agent_claude_enabled: bool | None = None
     telegram_agent_claude_command: str | None = None
+    telegram_agent_claude_model: str | None = None
     telegram_agent_acp_command: str | None = None
     telegram_agent_task_timeout_sec: int | None = None
     telegram_agent_result_max_chars: int | None = None
@@ -268,6 +270,7 @@ def get_config():
         telegram_agent_enabled=s.telegram_agent_enabled,
         telegram_agent_claude_enabled=s.telegram_agent_claude_enabled,
         telegram_agent_claude_command=s.telegram_agent_claude_command,
+        telegram_agent_claude_model=s.telegram_agent_claude_model,
         telegram_agent_acp_command=s.telegram_agent_acp_command,
         telegram_agent_task_timeout_sec=s.telegram_agent_task_timeout_sec,
         telegram_agent_result_max_chars=s.telegram_agent_result_max_chars,
@@ -372,6 +375,8 @@ def patch_config(body: ConfigPatch):
         updates["telegram_bot_api_base_url"] = api_base_url
     if "telegram_agent_claude_command" in updates:
         updates["telegram_agent_claude_command"] = str(updates["telegram_agent_claude_command"] or "").strip() or "claude"
+    if "telegram_agent_claude_model" in updates:
+        updates["telegram_agent_claude_model"] = str(updates["telegram_agent_claude_model"] or "").strip() or "opus"
     if "telegram_agent_acp_command" in updates:
         updates["telegram_agent_acp_command"] = str(updates["telegram_agent_acp_command"] or "").strip()
     if "telegram_agent_state_dir" in updates:

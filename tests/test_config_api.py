@@ -43,6 +43,7 @@ def test_get_config_exposes_extended_provider_fields(tmp_path, monkeypatch):
     object.__setattr__(settings, "telegram_agent_enabled", True)
     object.__setattr__(settings, "telegram_agent_claude_enabled", True)
     object.__setattr__(settings, "telegram_agent_claude_command", "claude")
+    object.__setattr__(settings, "telegram_agent_claude_model", "opus")
     object.__setattr__(settings, "telegram_agent_acp_command", "python scripts/acp_bridge.py")
     object.__setattr__(settings, "telegram_agent_task_timeout_sec", 600)
     object.__setattr__(settings, "telegram_agent_result_max_chars", 2800)
@@ -95,6 +96,7 @@ def test_get_config_exposes_extended_provider_fields(tmp_path, monkeypatch):
     assert cfg.telegram_agent_enabled is True
     assert cfg.telegram_agent_claude_enabled is True
     assert cfg.telegram_agent_claude_command == "claude"
+    assert cfg.telegram_agent_claude_model == "opus"
     assert cfg.telegram_agent_acp_command == "python scripts/acp_bridge.py"
     assert cfg.telegram_agent_task_timeout_sec == 600
     assert cfg.telegram_agent_result_max_chars == 2800
@@ -294,6 +296,7 @@ def test_patch_config_accepts_telegram_remote_review_fields(tmp_path, monkeypatc
             telegram_agent_enabled=True,
             telegram_agent_claude_enabled=True,
             telegram_agent_claude_command="claude",
+            telegram_agent_claude_model="opus",
             telegram_agent_acp_command="python scripts/acp_bridge.py",
             telegram_agent_task_timeout_sec=1200,
             telegram_agent_result_max_chars=5000,
@@ -308,6 +311,7 @@ def test_patch_config_accepts_telegram_remote_review_fields(tmp_path, monkeypatc
     assert cfg.telegram_agent_enabled is True
     assert cfg.telegram_agent_claude_enabled is True
     assert cfg.telegram_agent_claude_command == "claude"
+    assert cfg.telegram_agent_claude_model == "opus"
     assert cfg.telegram_agent_acp_command == "python scripts/acp_bridge.py"
     assert cfg.telegram_agent_task_timeout_sec == 1200
     assert cfg.telegram_agent_result_max_chars == 5000

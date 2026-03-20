@@ -26,6 +26,13 @@ def test_default_settings():
     assert s.telegram_agent_enabled is False
     assert s.telegram_agent_claude_enabled is False
     assert s.telegram_agent_claude_command == "claude"
+    assert s.telegram_agent_claude_model == "opus"
+    assert s.telegram_agent_codex_command == "codex"
+    assert s.acp_bridge_backend == "claude"
+    assert s.acp_bridge_fallback_backend == "codex"
+    assert s.acp_bridge_claude_model == "opus"
+    assert s.acp_bridge_codex_command == "codex"
+    assert s.acp_bridge_codex_model == "gpt-5.4-mini"
     assert s.telegram_agent_acp_command == ""
     assert s.telegram_agent_task_timeout_sec == 900
     assert s.telegram_agent_result_max_chars == 3500
