@@ -2767,31 +2767,61 @@ def _extract_reference_frames(source_path: Path, tmpdir: Path, *, count: int) ->
     if duration <= 0:
         return []
 
+    safe_margin = min(max(duration * 0.08, 1.0), max(duration / 4, 0.0))
+    usable_start = safe_margin if duration > safe_margin * 2 else 0.0
+    usable_end = duration - safe_margin if duration > safe_margin * 2 else duration
+    usable_duration = max(usable_end - usable_start, duration)
+
     frames: list[Path] = []
     for i in range(count):
-        seek = duration * (i + 1) / (count + 1)
+        segment_start = usable_start + (usable_duration * i / max(count, 1))
+        segment_end = usable_start + (usable_duration * (i + 1) / max(count, 1))
+        segment_length = max(segment_end - segment_start, 0.8)
+        seek = max(segment_start + (segment_length / 2), 0.0)
         out = tmpdir / f"profile_{i:02d}.jpg"
         result = subprocess.run(
             [
                 "ffmpeg",
                 "-y",
                 "-ss",
-                f"{seek:.2f}",
+                f"{segment_start:.2f}",
+                "-t",
+                f"{segment_length:.2f}",
                 "-i",
                 str(source_path),
                 "-frames:v",
                 "1",
-                "-update",
-                "1",
                 "-q:v",
                 "3",
                 "-vf",
-                "scale=960:-2",
+                "thumbnail=90,scale=960:-2",
                 str(out),
             ],
             capture_output=True,
-            timeout=20,
+            timeout=30,
         )
+        if result.returncode != 0 or not out.exists():
+            result = subprocess.run(
+                [
+                    "ffmpeg",
+                    "-y",
+                    "-ss",
+                    f"{seek:.2f}",
+                    "-i",
+                    str(source_path),
+                    "-frames:v",
+                    "1",
+                    "-update",
+                    "1",
+                    "-q:v",
+                    "3",
+                    "-vf",
+                    "scale=960:-2",
+                    str(out),
+                ],
+                capture_output=True,
+                timeout=20,
+            )
         if result.returncode == 0 and out.exists():
             frames.append(out)
     return frames
