@@ -46,6 +46,83 @@ async def test_is_step_ready_allows_skipped_optional_predecessor(db_engine):
 
 
 @pytest.mark.asyncio
+async def test_reset_job_for_quality_rerun_increments_review_round_and_clears_notification_fingerprint(db_engine):
+    import roughcut.pipeline.orchestrator as orchestrator_mod
+    from roughcut.db.models import Job, JobStep
+    from roughcut.db.session import get_session_factory
+
+    job_id = uuid.uuid4()
+    factory = get_session_factory()
+
+    async with factory() as session:
+        session.add(
+            Job(
+                id=job_id,
+                source_path="jobs/demo/review-round.mp4",
+                source_name="review-round.mp4",
+                status="needs_review",
+                language="zh-CN",
+            )
+        )
+        session.add(
+            JobStep(
+                job_id=job_id,
+                step_name="glossary_review",
+                status="done",
+                metadata_={
+                    "review_round": 1,
+                    "telegram_review_notifications": {
+                        "subtitle_review": {"round": 1, "signature": "old-subtitle"}
+                    },
+                },
+            )
+        )
+        session.add(
+            JobStep(
+                job_id=job_id,
+                step_name="final_review",
+                status="pending",
+                metadata_={
+                    "review_round": 1,
+                    "telegram_review_notifications": {
+                        "final_review": {"round": 1, "signature": "old-final"}
+                    },
+                },
+            )
+        )
+        await session.commit()
+
+    async with factory() as session:
+        job = await session.get(Job, job_id)
+        steps = (
+            await session.execute(
+                orchestrator_mod.select(JobStep).where(JobStep.job_id == job_id)
+            )
+        ).scalars().all()
+        await orchestrator_mod._reset_job_for_quality_rerun(
+            session,
+            job,
+            steps,
+            rerun_steps=["glossary_review", "final_review"],
+            issue_codes=["subtitle_terms"],
+        )
+        await session.commit()
+
+    async with factory() as session:
+        steps = (
+            await session.execute(
+                orchestrator_mod.select(JobStep).where(JobStep.job_id == job_id)
+            )
+        ).scalars().all()
+        step_map = {step.step_name: step for step in steps}
+
+        assert step_map["glossary_review"].metadata_["review_round"] == 2
+        assert step_map["glossary_review"].metadata_["telegram_review_notifications"] == {}
+        assert step_map["final_review"].metadata_["review_round"] == 2
+        assert step_map["final_review"].metadata_["telegram_review_notifications"] == {}
+
+
+@pytest.mark.asyncio
 async def test_tick_respects_retry_wait_until_before_redispatch(monkeypatch, db_engine):
     import roughcut.pipeline.orchestrator as orchestrator_mod
     import roughcut.watcher.folder_watcher as watcher_mod

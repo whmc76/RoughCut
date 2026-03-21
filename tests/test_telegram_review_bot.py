@@ -14,6 +14,7 @@ from roughcut.review.telegram_bot import (
     TelegramReviewThumbnail,
     TelegramReviewBotService,
     _build_content_profile_review_message,
+    _format_review_round_label,
     _build_final_review_clip_specs,
     _build_final_review_message,
     _build_final_review_reply_markup,
@@ -842,6 +843,8 @@ async def test_send_review_message_sends_text_then_thumbnail_context(monkeypatch
     )
     service._send_text = fake_send_text
     service._send_chat_photo = fake_send_photo
+    service._resolve_review_delivery = AsyncMock(return_value=(True, 1, "第一次审核"))
+    service._record_review_delivery = AsyncMock()
 
     await service._send_review_message(
         "content_profile",
@@ -855,15 +858,15 @@ async def test_send_review_message_sends_text_then_thumbnail_context(monkeypatch
         ],
     )
 
-    assert sent_text == [f"【RC:content_profile:{job_id}】\n任务：缩略图校对"]
-    assert sent_photos == [("thumb.jpg", f"【RC:content_profile:{job_id}】\n参考缩略图 1/3", "123", 88)]
+    assert sent_text == [f"【RC:content_profile:{job_id}】\n审核阶段：第一次审核\n审核类型：内容摘要审核\n\n任务：缩略图校对"]
+    assert sent_photos == [("thumb.jpg", f"【RC:content_profile:{job_id}】\n审核阶段：第一次审核\n参考缩略图 1/3", "123", 88)]
 
 
 @pytest.mark.asyncio
 async def test_send_review_message_sends_multiple_thumbnails_as_media_group(monkeypatch, tmp_path):
     service = TelegramReviewBotService()
     sent_text: list[str] = []
-    sent_photo_groups: list[tuple[list[str], str, int | None]] = []
+    sent_photo_groups: list[tuple[list[tuple[str, str]], str, int | None]] = []
     sent_photos: list[str] = []
     job_id = uuid.uuid4()
     photo_paths = []
@@ -882,7 +885,7 @@ async def test_send_review_message_sends_multiple_thumbnails_as_media_group(monk
         chat_id: str,
         reply_to_message_id: int | None = None,
     ) -> list[int]:
-        sent_photo_groups.append(([item.path.name for item in photos], chat_id, reply_to_message_id))
+        sent_photo_groups.append(([(item.path.name, item.caption) for item in photos], chat_id, reply_to_message_id))
         return [91, 92, 93]
 
     async def fake_send_photo(*args, **kwargs) -> int | None:
@@ -903,6 +906,8 @@ async def test_send_review_message_sends_multiple_thumbnails_as_media_group(monk
     service._send_text = fake_send_text
     service._send_chat_photo_group = fake_send_photo_group
     service._send_chat_photo = fake_send_photo
+    service._resolve_review_delivery = AsyncMock(return_value=(True, 1, "第一次审核"))
+    service._record_review_delivery = AsyncMock()
 
     await service._send_review_message(
         "content_profile",
@@ -917,8 +922,15 @@ async def test_send_review_message_sends_multiple_thumbnails_as_media_group(monk
         ],
     )
 
-    assert sent_text == [f"【RC:content_profile:{job_id}】\n任务：缩略图校对"]
-    assert sent_photo_groups == [([path.name for path in photo_paths], "123", 88)]
+    assert sent_text == [f"【RC:content_profile:{job_id}】\n审核阶段：第一次审核\n审核类型：内容摘要审核\n\n任务：缩略图校对"]
+    assert sent_photo_groups == [(
+        [
+            (path.name, f"【RC:content_profile:{job_id}】\n审核阶段：第一次审核\n参考缩略图 {index + 1}/3")
+            for index, path in enumerate(photo_paths)
+        ],
+        "123",
+        88,
+    )]
     assert sent_photos == []
 
 
@@ -1008,6 +1020,8 @@ async def test_send_review_message_attaches_final_review_reply_markup(monkeypatc
 
     service._send_text = fake_send_text
     service._send_chat_video = fake_send_video
+    service._resolve_review_delivery = AsyncMock(return_value=(True, 3, "第三次复核"))
+    service._record_review_delivery = AsyncMock()
 
     await service._send_review_message(
         "final_review",
@@ -1019,7 +1033,46 @@ async def test_send_review_message_attaches_final_review_reply_markup(monkeypatc
     assert len(sent_texts) >= 2
     assert sent_texts[0][1] == _build_final_review_reply_markup(job_id)
     assert all(reply_markup is None for _, reply_markup in sent_texts[1:])
-    assert sent_videos == [("预览 1", 99)]
+    assert "审核阶段：第三次复核" in sent_texts[0][0]
+    assert sent_videos == [("预览 1\n审核阶段：第三次复核", 99)]
+
+
+@pytest.mark.asyncio
+async def test_send_review_message_skips_duplicate_payload(monkeypatch):
+    service = TelegramReviewBotService()
+    job_id = uuid.uuid4()
+    sent_texts: list[str] = []
+
+    monkeypatch.setattr(
+        telegram_bot,
+        "get_settings",
+        lambda: SimpleNamespace(
+            telegram_agent_enabled=True,
+            telegram_remote_review_enabled=False,
+            telegram_bot_chat_id="123",
+            telegram_bot_token="token",
+            telegram_bot_api_base_url="https://api.telegram.org",
+        ),
+    )
+
+    async def fake_send_text(text: str, *, reply_markup=None):
+        sent_texts.append(text)
+        return 99
+
+    service._send_text = fake_send_text
+    service._resolve_review_delivery = AsyncMock(return_value=(False, 3, "第三次复核"))
+    service._record_review_delivery = AsyncMock()
+
+    result = await service._send_review_message("final_review", job_id, "重复内容")
+
+    assert result == {"sent": False, "round_number": 3, "round_label": "第三次复核"}
+    assert sent_texts == []
+    service._record_review_delivery.assert_not_called()
+
+
+def test_format_review_round_label_uses_audit_then_rereview():
+    assert _format_review_round_label(1) == "第一次审核"
+    assert _format_review_round_label(3) == "第三次复核"
 
 
 def test_build_final_review_clip_specs_prefers_keyword_segment():

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import logging
 import re
@@ -222,6 +223,16 @@ _AUDIO_SUFFIX_BY_MIME = {
     "audio/x-wav": ".wav",
     "audio/webm": ".webm",
 }
+_REVIEW_KIND_TITLES = {
+    _REVIEW_KIND_CONTENT: "内容摘要审核",
+    _REVIEW_KIND_SUBTITLE: "字幕复核",
+    _REVIEW_KIND_FINAL: "成片审核",
+}
+_REVIEW_STEP_NAME_BY_KIND = {
+    _REVIEW_KIND_CONTENT: "summary_review",
+    _REVIEW_KIND_SUBTITLE: "glossary_review",
+    _REVIEW_KIND_FINAL: "final_review",
+}
 
 
 @dataclass
@@ -416,14 +427,18 @@ class TelegramReviewBotService:
                     attachment_path = _write_full_subtitle_review_attachment(job.id, subtitle_lines)
             else:
                 return
-        await self._send_review_message(_REVIEW_KIND_SUBTITLE, job_id, message)
-        if attachment_path is not None:
+        delivery = await self._send_review_message(_REVIEW_KIND_SUBTITLE, job_id, message)
+        if attachment_path is not None and bool((delivery or {}).get("sent")):
             try:
                 chat_id = str(getattr(settings, "telegram_bot_chat_id", "") or "").strip()
+                round_label = str((delivery or {}).get("round_label") or _format_review_round_label(1))
                 await self._send_chat_document(
                     attachment_path,
                     chat_id=chat_id,
-                    caption=f"【RC:{_REVIEW_KIND_SUBTITLE}:{job_id}】\n全量字幕人工复核清单",
+                    caption=_prepend_review_round_to_caption(
+                        f"【RC:{_REVIEW_KIND_SUBTITLE}:{job_id}】\n全量字幕人工复核清单",
+                        round_label=round_label,
+                    ),
                 )
             except Exception:
                 logger.exception("Failed to send full subtitle review attachment for job %s", job_id)
@@ -974,6 +989,76 @@ class TelegramReviewBotService:
             await self._send_text("\n".join(lines))
             mark_task_notified(record.task_id)
 
+    async def _resolve_review_delivery(
+        self,
+        *,
+        kind: str,
+        job_id: uuid.UUID,
+        signature: str,
+    ) -> tuple[bool, int, str]:
+        round_number = 1
+        step_name = _REVIEW_STEP_NAME_BY_KIND.get(kind)
+        if not step_name:
+            return True, round_number, _format_review_round_label(round_number)
+
+        factory = get_session_factory()
+        async with factory() as session:
+            step = (
+                await session.execute(
+                    select(JobStep).where(JobStep.job_id == job_id, JobStep.step_name == step_name)
+                )
+            ).scalar_one_or_none()
+            if step is None:
+                return True, round_number, _format_review_round_label(round_number)
+            metadata = dict(step.metadata_ or {})
+            round_number = _coerce_positive_int(metadata.get("review_round"), default=1)
+            notifications = dict(metadata.get("telegram_review_notifications") or {})
+            last_sent = dict(notifications.get(kind) or {})
+            if (
+                _coerce_positive_int(last_sent.get("round"), default=0) == round_number
+                and str(last_sent.get("signature") or "").strip() == signature
+            ):
+                return False, round_number, _format_review_round_label(round_number)
+        return True, round_number, _format_review_round_label(round_number)
+
+    async def _record_review_delivery(
+        self,
+        *,
+        kind: str,
+        job_id: uuid.UUID,
+        round_number: int,
+        round_label: str,
+        signature: str,
+    ) -> None:
+        step_name = _REVIEW_STEP_NAME_BY_KIND.get(kind)
+        if not step_name:
+            return
+
+        factory = get_session_factory()
+        async with factory() as session:
+            step = (
+                await session.execute(
+                    select(JobStep).where(JobStep.job_id == job_id, JobStep.step_name == step_name)
+                )
+            ).scalar_one_or_none()
+            if step is None:
+                return
+            metadata = dict(step.metadata_ or {})
+            metadata["review_round"] = max(
+                round_number,
+                _coerce_positive_int(metadata.get("review_round"), default=1),
+            )
+            notifications = dict(metadata.get("telegram_review_notifications") or {})
+            notifications[kind] = {
+                "round": round_number,
+                "round_label": round_label,
+                "signature": signature,
+                "sent_at": datetime.now(timezone.utc).isoformat(),
+            }
+            metadata["telegram_review_notifications"] = notifications
+            step.metadata_ = metadata
+            await session.commit()
+
     async def _send_review_message(
         self,
         kind: str,
@@ -986,8 +1071,34 @@ class TelegramReviewBotService:
         settings = get_settings()
         chat_id = str(getattr(settings, "telegram_bot_chat_id", "") or "").strip()
         if not _telegram_ready(settings) or not chat_id:
-            return
-        chunks = _split_review_message(body)
+            return {"sent": False, "round_number": 1, "round_label": _format_review_round_label(1)}
+
+        signature = _build_review_delivery_signature(
+            kind,
+            body,
+            thumbnails=thumbnails,
+            videos=videos,
+        )
+        should_send, round_number, round_label = await self._resolve_review_delivery(
+            kind=kind,
+            job_id=job_id,
+            signature=signature,
+        )
+        if not should_send:
+            logger.info(
+                "Skipping duplicate Telegram review notification job=%s kind=%s round=%s",
+                job_id,
+                kind,
+                round_number,
+            )
+            return {"sent": False, "round_number": round_number, "round_label": round_label}
+
+        decorated_body = _prepend_review_round_context(
+            body,
+            kind=kind,
+            round_label=round_label,
+        )
+        chunks = _split_review_message(decorated_body)
         total = len(chunks)
         anchor_message_id: int | None = None
         reply_markup = _build_review_reply_markup(kind, job_id)
@@ -1004,7 +1115,13 @@ class TelegramReviewBotService:
         if len(thumbnail_items) > 1:
             try:
                 await self._send_chat_photo_group(
-                    thumbnail_items,
+                    [
+                        TelegramReviewThumbnail(
+                            path=item.path,
+                            caption=_prepend_review_round_to_caption(item.caption, round_label=round_label),
+                        )
+                        for item in thumbnail_items
+                    ],
                     chat_id=chat_id,
                     reply_to_message_id=anchor_message_id,
                 )
@@ -1016,7 +1133,7 @@ class TelegramReviewBotService:
                     await self._send_chat_photo(
                         item.path,
                         chat_id=chat_id,
-                        caption=item.caption,
+                        caption=_prepend_review_round_to_caption(item.caption, round_label=round_label),
                         reply_to_message_id=anchor_message_id,
                     )
                 except Exception:
@@ -1026,11 +1143,19 @@ class TelegramReviewBotService:
                 await self._send_chat_video(
                     item.path,
                     chat_id=chat_id,
-                    caption=item.caption,
+                    caption=_prepend_review_round_to_caption(item.caption, round_label=round_label),
                     reply_to_message_id=anchor_message_id,
                 )
             except Exception:
                 logger.exception("Failed to send review video for job %s", job_id)
+        await self._record_review_delivery(
+            kind=kind,
+            job_id=job_id,
+            round_number=round_number,
+            round_label=round_label,
+            signature=signature,
+        )
+        return {"sent": True, "round_number": round_number, "round_label": round_label}
 
     async def _send_text(self, text: str, *, reply_markup: dict[str, Any] | None = None) -> int | None:
         settings = get_settings()
@@ -1567,6 +1692,73 @@ def _extract_message_id(data: dict[str, Any]) -> int | None:
         return int(result.get("message_id"))
     except (TypeError, ValueError):
         return None
+
+
+def _build_review_delivery_signature(
+    kind: str,
+    body: str,
+    *,
+    thumbnails: list[TelegramReviewThumbnail] | None = None,
+    videos: list[TelegramReviewVideo] | None = None,
+) -> str:
+    payload = {
+        "kind": kind,
+        "body": str(body or "").strip(),
+        "thumbnail_captions": [str(item.caption or "").strip() for item in thumbnails or []],
+        "video_captions": [str(item.caption or "").strip() for item in videos or []],
+    }
+    return hashlib.sha1(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def _coerce_positive_int(value: object, *, default: int = 1) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed > 0 else default
+
+
+def _to_chinese_count(value: int) -> str:
+    digits = {0: "零", 1: "一", 2: "二", 3: "三", 4: "四", 5: "五", 6: "六", 7: "七", 8: "八", 9: "九"}
+    number = max(0, int(value))
+    if number < 10:
+        return digits[number]
+    if number == 10:
+        return "十"
+    if number < 20:
+        return f"十{digits[number % 10]}"
+    if number < 100:
+        tens, ones = divmod(number, 10)
+        ones_text = digits[ones] if ones else ""
+        return f"{digits[tens]}十{ones_text}"
+    return str(number)
+
+
+def _format_review_round_label(round_number: int) -> str:
+    ordinal = _to_chinese_count(_coerce_positive_int(round_number, default=1))
+    suffix = "审核" if round_number <= 1 else "复核"
+    return f"第{ordinal}次{suffix}"
+
+
+def _prepend_review_round_context(body: str, *, kind: str, round_label: str) -> str:
+    title = _REVIEW_KIND_TITLES.get(kind, "审核")
+    content = str(body or "").strip()
+    lines = [
+        f"审核阶段：{round_label}",
+        f"审核类型：{title}",
+    ]
+    if content:
+        lines.extend(["", content])
+    return "\n".join(lines).strip()
+
+
+def _prepend_review_round_to_caption(caption: str, *, round_label: str) -> str:
+    lines = str(caption or "").splitlines()
+    if not lines:
+        return f"审核阶段：{round_label}"
+    if any(line.strip() == f"审核阶段：{round_label}" for line in lines):
+        return "\n".join(lines).strip()
+    return "\n".join([lines[0], f"审核阶段：{round_label}", *lines[1:]]).strip()
 
 
 def _split_review_message(text: str, *, limit: int = 3200) -> list[str]:
