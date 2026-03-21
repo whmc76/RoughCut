@@ -177,6 +177,86 @@ async def test_interpret_content_profile_reply_maps_to_frontend_like_payload(mon
     assert payload["keywords"] == ["夜骑", "补光"]
     assert payload["correction_notes"] == "品牌和主题都改一下"
 
+
+@pytest.mark.asyncio
+async def test_handle_content_profile_reply_acknowledges_and_dispatches_subtitle_review(monkeypatch):
+    service = TelegramReviewBotService()
+    sent: list[str] = []
+    notified: list[uuid.UUID] = []
+    confirmed_payloads: list[dict[str, object]] = []
+    job_id = uuid.uuid4()
+
+    class FakeSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    async def fake_send_text(text: str, *, chat_id: str) -> None:
+        sent.append(text)
+
+    async def fake_get_content_profile(job_id_value, session):
+        assert job_id_value == job_id
+        return SimpleNamespace(
+            review_step_status="pending",
+            workflow_mode="standard_edit",
+            enhancement_modes=[],
+            draft={},
+            final=None,
+        )
+
+    async def fake_confirm(job_id_value, body, session):
+        assert job_id_value == job_id
+        confirmed_payloads.append(body.model_dump(exclude_none=True))
+        return SimpleNamespace()
+
+    async def fake_generate_report(job_id_value, session):
+        assert job_id_value == job_id
+        return SimpleNamespace(
+            items=[
+                {
+                    "index": 1,
+                    "start": 0.0,
+                    "end": 1.0,
+                    "corrections": [
+                        {
+                            "id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                            "original": "鸿福",
+                            "suggested": "狐蝠工业",
+                            "type": "term",
+                            "confidence": 0.82,
+                            "source": "glossary",
+                            "decision": None,
+                        }
+                    ],
+                }
+            ]
+        )
+
+    async def fake_notify_subtitle_review(job_id_value: uuid.UUID) -> None:
+        notified.append(job_id_value)
+
+    service._send_chat_text = fake_send_text
+    service.notify_subtitle_review = fake_notify_subtitle_review
+
+    monkeypatch.setattr(telegram_bot, "get_session_factory", lambda: (lambda: FakeSession()))
+    monkeypatch.setattr(telegram_bot, "get_content_profile", fake_get_content_profile)
+    monkeypatch.setattr(telegram_bot, "confirm_content_profile", fake_confirm)
+    monkeypatch.setattr(telegram_bot, "generate_report", fake_generate_report)
+    monkeypatch.setattr(
+        telegram_bot,
+        "_interpret_content_profile_reply",
+        AsyncMock(return_value={"correction_notes": "字幕还需要校对"}),
+    )
+
+    await service._handle_content_profile_reply(job_id, "通过 但是字幕还需要校对", reply_chat_id="123")
+
+    assert sent[0] == f"已收到任务 {job_id} 的审核意见，正在处理，请稍候。"
+    assert sent[1] == f"已确认任务 {job_id} 的内容摘要；检测到你还要校对字幕，我现在把 1 条待审字幕项发你。"
+    assert notified == [job_id]
+    assert confirmed_payloads == [{"correction_notes": "字幕还需要校对"}]
+
 @pytest.mark.asyncio
 async def test_handle_update_help_responds_without_chat_match(monkeypatch):
     service = TelegramReviewBotService()

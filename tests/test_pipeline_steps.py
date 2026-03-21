@@ -28,6 +28,14 @@ from roughcut.pipeline.steps import (
 )
 
 
+class _FakeTelegramReviewBotService:
+    def __init__(self) -> None:
+        self.content_profile_notifications: list[uuid.UUID] = []
+
+    async def notify_content_profile_review(self, job_id: uuid.UUID) -> None:
+        self.content_profile_notifications.append(job_id)
+
+
 def test_resolve_subtitle_split_profile_prefers_faster_portrait_subtitles():
     portrait = _resolve_subtitle_split_profile(width=1080, height=1920)
     landscape = _resolve_subtitle_split_profile(width=1920, height=1080)
@@ -163,13 +171,21 @@ async def test_run_glossary_review_loads_recent_subtitles_without_name_error(db_
 
 
 @pytest.mark.asyncio
-async def test_run_content_profile_auto_confirms_high_confidence_profile(db_engine, monkeypatch, tmp_path: Path):
+async def test_run_content_profile_keeps_manual_review_until_accuracy_gate_passes(db_engine, monkeypatch, tmp_path: Path):
     import roughcut.pipeline.steps as steps_mod
+    from roughcut.review import content_profile as content_profile_mod
 
     factory = async_sessionmaker(db_engine, expire_on_commit=False)
     job_id = uuid.uuid4()
     source_path = tmp_path / "source.mp4"
     source_path.write_bytes(b"video")
+    fake_review_bot = _FakeTelegramReviewBotService()
+    settings = SimpleNamespace(
+        auto_confirm_content_profile=True,
+        content_profile_review_threshold=0.72,
+        content_profile_auto_review_min_accuracy=0.9,
+        content_profile_auto_review_min_samples=20,
+    )
 
     async with factory() as session:
         session.add(
@@ -210,6 +226,140 @@ async def test_run_content_profile_auto_confirms_high_confidence_profile(db_engi
         await session.commit()
 
     monkeypatch.setattr(steps_mod, "get_session_factory", lambda: factory)
+    monkeypatch.setattr(steps_mod, "get_settings", lambda: settings)
+    monkeypatch.setattr(steps_mod, "get_telegram_review_bot_service", lambda: fake_review_bot)
+    monkeypatch.setattr(content_profile_mod, "get_settings", lambda: settings)
+
+    async def fake_load_content_profile_user_memory(*args, **kwargs):
+        return {}
+
+    async def fake_resolve_source(*args, **kwargs):
+        return source_path
+
+    async def fake_infer_content_profile(**kwargs):
+        return {
+            "preset_name": "screen_tutorial",
+            "subject_type": "剪映字幕工作流",
+            "video_theme": "批量字幕样式调整步骤讲解",
+            "summary": "这条视频主要围绕剪映字幕工作流展开，重点讲清批量调样式、检查错位和复用预设的完整步骤。",
+            "engagement_question": "你做批量字幕时最容易卡在样式统一还是时间轴检查？",
+            "search_queries": ["剪映 批量字幕 样式", "剪映 字幕 预设 导出"],
+            "cover_title": {"top": "剪映", "main": "批量字幕流程", "bottom": "样式统一教程"},
+            "evidence": [{"title": "剪映字幕文档"}],
+        }
+
+    monkeypatch.setattr(steps_mod, "load_content_profile_user_memory", fake_load_content_profile_user_memory)
+    monkeypatch.setattr(steps_mod, "_resolve_source", fake_resolve_source)
+    monkeypatch.setattr(steps_mod, "infer_content_profile", fake_infer_content_profile)
+
+    result = await run_content_profile(str(job_id))
+
+    assert result["auto_confirmed"] is False
+    assert result["automation_score"] >= 0.72
+
+    async with factory() as session:
+        artifact_result = await session.execute(
+            select(Artifact).where(Artifact.job_id == job_id).order_by(Artifact.created_at.asc())
+        )
+        artifacts = artifact_result.scalars().all()
+        artifact_map = {item.artifact_type: item.data_json for item in artifacts}
+        assert set(artifact_map) == {"content_profile_draft"}
+
+        draft = artifact_map["content_profile_draft"]
+        assert draft["automation_review"]["enabled"] is True
+        assert draft["automation_review"]["quality_gate_passed"] is True
+        assert draft["automation_review"]["approval_accuracy_gate_passed"] is False
+        assert draft["automation_review"]["approval_accuracy_sample_size"] == 0
+        assert draft["automation_review"]["auto_confirm"] is False
+        assert draft["creative_profile"]["workflow_mode"] == "standard_edit"
+        assert draft["creative_profile"]["enhancement_modes"] == ["auto_review"]
+
+        review_step_result = await session.execute(
+            select(JobStep).where(JobStep.job_id == job_id, JobStep.step_name == "summary_review")
+        )
+        review_step = review_step_result.scalar_one()
+        assert review_step.status == "pending"
+        assert review_step.metadata_ is None
+
+    assert fake_review_bot.content_profile_notifications == [job_id]
+
+
+@pytest.mark.asyncio
+async def test_run_content_profile_auto_confirms_high_confidence_profile_when_accuracy_gate_passes(
+    db_engine,
+    monkeypatch,
+    tmp_path: Path,
+):
+    import roughcut.pipeline.steps as steps_mod
+    from roughcut.review import content_profile as content_profile_mod
+
+    factory = async_sessionmaker(db_engine, expire_on_commit=False)
+    job_id = uuid.uuid4()
+    source_path = tmp_path / "source.mp4"
+    source_path.write_bytes(b"video")
+    fake_review_bot = _FakeTelegramReviewBotService()
+    settings = SimpleNamespace(
+        auto_confirm_content_profile=True,
+        content_profile_review_threshold=0.72,
+        content_profile_auto_review_min_accuracy=0.9,
+        content_profile_auto_review_min_samples=20,
+    )
+
+    async with factory() as session:
+        session.add(
+            Job(
+                id=job_id,
+                source_path="jobs/demo/source.mp4",
+                source_name="source.mp4",
+                status="processing",
+                language="zh-CN",
+                channel_profile="screen_tutorial",
+                enhancement_modes=["auto_review"],
+            )
+        )
+        session.add(JobStep(job_id=job_id, step_name="content_profile", status="running"))
+        session.add(JobStep(job_id=job_id, step_name="summary_review", status="pending"))
+        for index, text in enumerate(
+            [
+                "这期演示剪映里怎么批量处理字幕样式",
+                "先导入字幕模板再统一调整字号",
+                "第二步要把描边和阴影一起改掉",
+                "第三步检查时间轴里有没有错位",
+                "最后导出预设方便下次复用",
+                "这样整个流程就能稳定复现",
+            ]
+        ):
+            session.add(
+                SubtitleItem(
+                    job_id=job_id,
+                    version=1,
+                    item_index=index,
+                    start_time=float(index),
+                    end_time=float(index) + 1.0,
+                    text_raw=text,
+                    text_norm=text,
+                    text_final=text,
+                )
+            )
+        await session.commit()
+
+    monkeypatch.setattr(steps_mod, "get_session_factory", lambda: factory)
+    monkeypatch.setattr(steps_mod, "get_settings", lambda: settings)
+    monkeypatch.setattr(steps_mod, "get_telegram_review_bot_service", lambda: fake_review_bot)
+    monkeypatch.setattr(content_profile_mod, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        content_profile_mod,
+        "build_content_profile_auto_review_gate",
+        lambda **kwargs: {
+            "gate_passed": True,
+            "detail": "自动放行候选样本人工确认准确率 95.0%，已达到 90% 门槛。",
+            "measured_accuracy": 0.95,
+            "required_accuracy": float(kwargs["min_accuracy"]),
+            "sample_size": 24,
+            "minimum_sample_size": int(kwargs["min_samples"]),
+            "manual_review_total": 30,
+        },
+    )
 
     async def fake_load_content_profile_user_memory(*args, **kwargs):
         return {}
@@ -249,6 +399,8 @@ async def test_run_content_profile_auto_confirms_high_confidence_profile(db_engi
         draft = artifact_map["content_profile_draft"]
         final = artifact_map["content_profile_final"]
         assert draft["automation_review"]["auto_confirm"] is True
+        assert draft["automation_review"]["approval_accuracy_gate_passed"] is True
+        assert draft["automation_review"]["approval_accuracy_sample_size"] == 24
         assert draft["creative_profile"]["workflow_mode"] == "standard_edit"
         assert draft["creative_profile"]["enhancement_modes"] == ["auto_review"]
         assert final["review_mode"] == "auto_confirmed"
@@ -260,15 +412,25 @@ async def test_run_content_profile_auto_confirms_high_confidence_profile(db_engi
         assert review_step.status == "done"
         assert review_step.metadata_["auto_confirmed"] is True
 
+    assert fake_review_bot.content_profile_notifications == []
+
 
 @pytest.mark.asyncio
 async def test_run_content_profile_keeps_manual_review_when_auto_review_mode_disabled(db_engine, monkeypatch, tmp_path: Path):
     import roughcut.pipeline.steps as steps_mod
+    from roughcut.review import content_profile as content_profile_mod
 
     factory = async_sessionmaker(db_engine, expire_on_commit=False)
     job_id = uuid.uuid4()
     source_path = tmp_path / "source.mp4"
     source_path.write_bytes(b"video")
+    fake_review_bot = _FakeTelegramReviewBotService()
+    settings = SimpleNamespace(
+        auto_confirm_content_profile=True,
+        content_profile_review_threshold=0.72,
+        content_profile_auto_review_min_accuracy=0.9,
+        content_profile_auto_review_min_samples=20,
+    )
 
     async with factory() as session:
         session.add(
@@ -309,6 +471,9 @@ async def test_run_content_profile_keeps_manual_review_when_auto_review_mode_dis
         await session.commit()
 
     monkeypatch.setattr(steps_mod, "get_session_factory", lambda: factory)
+    monkeypatch.setattr(steps_mod, "get_settings", lambda: settings)
+    monkeypatch.setattr(steps_mod, "get_telegram_review_bot_service", lambda: fake_review_bot)
+    monkeypatch.setattr(content_profile_mod, "get_settings", lambda: settings)
 
     async def fake_load_content_profile_user_memory(*args, **kwargs):
         return {}
@@ -352,6 +517,8 @@ async def test_run_content_profile_keeps_manual_review_when_auto_review_mode_dis
         review_step = review_step_result.scalar_one()
         assert review_step.status == "pending"
         assert review_step.metadata_ is None
+
+    assert fake_review_bot.content_profile_notifications == [job_id]
 
 
 @pytest.mark.asyncio
@@ -439,11 +606,19 @@ async def test_run_content_profile_passes_effective_glossary_terms_into_inferenc
 @pytest.mark.asyncio
 async def test_run_content_profile_blocks_auto_confirm_for_first_seen_product_identity(db_engine, monkeypatch, tmp_path: Path):
     import roughcut.pipeline.steps as steps_mod
+    from roughcut.review import content_profile as content_profile_mod
 
     factory = async_sessionmaker(db_engine, expire_on_commit=False)
     job_id = uuid.uuid4()
     source_path = tmp_path / "source.mp4"
     source_path.write_bytes(b"video")
+    fake_review_bot = _FakeTelegramReviewBotService()
+    settings = SimpleNamespace(
+        auto_confirm_content_profile=True,
+        content_profile_review_threshold=0.72,
+        content_profile_auto_review_min_accuracy=0.9,
+        content_profile_auto_review_min_samples=20,
+    )
 
     async with factory() as session:
         session.add(
@@ -500,6 +675,9 @@ async def test_run_content_profile_blocks_auto_confirm_for_first_seen_product_id
         await session.commit()
 
     monkeypatch.setattr(steps_mod, "get_session_factory", lambda: factory)
+    monkeypatch.setattr(steps_mod, "get_settings", lambda: settings)
+    monkeypatch.setattr(steps_mod, "get_telegram_review_bot_service", lambda: fake_review_bot)
+    monkeypatch.setattr(content_profile_mod, "get_settings", lambda: settings)
 
     async def fake_load_content_profile_user_memory(*args, **kwargs):
         return {}
@@ -543,6 +721,8 @@ async def test_run_content_profile_blocks_auto_confirm_for_first_seen_product_id
         review_step = review_step_result.scalar_one()
         assert review_step.status == "pending"
         assert "首次品牌/型号" in review_step.metadata_["detail"]
+
+    assert fake_review_bot.content_profile_notifications == [job_id]
 
 
 @pytest.mark.asyncio
