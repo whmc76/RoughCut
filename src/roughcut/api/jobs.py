@@ -96,6 +96,7 @@ PROFILE_ARTIFACT_PRIORITY = {
     "content_profile": 2,
     "content_profile_draft": 1,
 }
+_CONTENT_PROFILE_THUMBNAIL_CACHE_VERSION = "v2"
 
 
 @router.get("", response_model=list[JobOut])
@@ -1699,7 +1700,12 @@ def _open_in_file_manager(target_path: Path) -> None:
 
 
 async def _ensure_content_profile_thumbnail(job: Job, *, index: int) -> Path:
-    cache_dir = Path(tempfile.gettempdir()) / "roughcut_content_profile_frames" / str(job.id)
+    cache_dir = (
+        Path(tempfile.gettempdir())
+        / "roughcut_content_profile_frames"
+        / _CONTENT_PROFILE_THUMBNAIL_CACHE_VERSION
+        / str(job.id)
+    )
     cache_dir.mkdir(parents=True, exist_ok=True)
     cached = cache_dir / f"profile_{index:02d}.jpg"
     if cached.exists():

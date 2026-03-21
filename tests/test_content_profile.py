@@ -9,6 +9,7 @@ import pytest
 from roughcut.review.content_profile import (
     _merge_specific_profile_hints,
     _apply_visual_subject_guard,
+    _extract_reference_frames,
     _infer_visual_profile_hints,
     _sanitize_profile_identity,
     _seed_profile_from_text,
@@ -439,6 +440,33 @@ def test_seed_profile_from_subtitles_detects_reate_folding_knife_signals():
 
     assert profile["subject_brand"] == "REATE"
     assert profile["subject_type"] == "EDC折刀"
+
+
+def test_extract_reference_frames_falls_back_to_center_seek_when_thumbnail_filter_fails(tmp_path: Path, monkeypatch):
+    outputs: list[list[str]] = []
+
+    class Result:
+        def __init__(self, returncode: int):
+            self.returncode = returncode
+
+    monkeypatch.setattr("roughcut.review.content_profile._probe_duration", lambda path: 120.0)
+
+    def fake_run(args, capture_output=True, timeout=0):
+        outputs.append(list(args))
+        out = Path(args[-1])
+        if "thumbnail=90,scale=960:-2" in args:
+            return Result(1)
+        out.write_bytes(b"jpg")
+        return Result(0)
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    frames = _extract_reference_frames(tmp_path / "demo.mp4", tmp_path, count=3)
+
+    assert len(frames) == 3
+    assert all(path.exists() for path in frames)
+    assert any("thumbnail=90,scale=960:-2" in cmd for cmd in outputs)
+    assert any("-update" in cmd for cmd in outputs)
 
 
 def test_apply_visual_subject_guard_overrides_conflicting_subject_type():

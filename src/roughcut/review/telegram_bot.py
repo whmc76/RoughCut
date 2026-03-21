@@ -22,13 +22,14 @@ from roughcut.api.jobs import _ensure_content_profile_thumbnail, confirm_content
 from roughcut.api.schemas import ContentProfileConfirmIn, ReviewActionCreate, ReviewApplyRequest
 from roughcut.config import get_settings
 from roughcut.creative.modes import build_active_enhancement_mode_options, build_active_workflow_mode_options
-from roughcut.db.models import Artifact, Job, JobStep
+from roughcut.db.models import Artifact, Job, JobStep, ReviewAction, SubtitleItem
 from roughcut.db.session import get_session_factory
 from roughcut.media.audio import extract_audio
 from roughcut.media.probe import probe
 from roughcut.packaging.library import list_packaging_assets, resolve_packaging_plan_for_job
 from roughcut.providers.factory import get_reasoning_provider, get_transcription_provider
 from roughcut.review.subtitle_memory import build_transcription_prompt
+from roughcut.review.content_profile import build_reviewed_transcript_excerpt
 from roughcut.review.report import generate_report
 from roughcut.telegram.commands import handle_telegram_command, handle_telegram_freeform_request
 from roughcut.telegram.policy import is_allowed_chat, telegram_agent_enabled
@@ -58,6 +59,13 @@ _FINAL_APPROVAL_PATTERN = re.compile(
 _ACCEPT_ALL_PATTERN = re.compile(r"(全部|全都|都)(通过|接受|采纳)|全部接受|全部通过", re.IGNORECASE)
 _REJECT_ALL_PATTERN = re.compile(r"(全部|全都|都)(拒绝|驳回)|全部拒绝", re.IGNORECASE)
 _SUBTITLE_SLOT_PATTERN = re.compile(r"(?i)(?<![A-Za-z0-9])S\d{1,3}(?![A-Za-z0-9])")
+_FULL_SUBTITLE_SLOT_PATTERN = re.compile(r"(?i)(?<![A-Za-z0-9])L\d{1,4}(?![A-Za-z0-9])")
+_FULL_SUBTITLE_ACTION_PATTERN = re.compile(
+    r"(?is)(?<![A-Za-z0-9])L(?P<slot>\d{1,4})(?![A-Za-z0-9])\s*"
+    r"(?:(?P<pass>通过|ok|okay|没问题|无误|无需修改|不用改)"
+    r"|(?:(?:改成|改为|修改为|替换为)\s*[:：]?\s*(?P<replace>.*?)))"
+    r"(?=(?<![A-Za-z0-9])L\d{1,4}(?![A-Za-z0-9])|$)"
+)
 _NEGATED_SUBTITLE_CONTENT_PATTERN = re.compile(r"字幕(?:内容|文本)?(?:本身)?(?:没问题|没有问题|无需修改|不用改)")
 _CONTENT_PROFILE_SUBTITLE_REVIEW_KEYWORDS = (
     "字幕校对",
@@ -231,6 +239,16 @@ class TelegramReviewCandidate:
 
 
 @dataclass
+class TelegramSubtitleLineCandidate:
+    slot: str
+    subtitle_item_id: str
+    subtitle_index: int
+    text: str
+    start_sec: float | None = None
+    end_sec: float | None = None
+
+
+@dataclass
 class TelegramReviewThumbnail:
     path: Path
     caption: str
@@ -317,11 +335,13 @@ class TelegramReviewBotService:
                 )
         await self._send_review_message(_REVIEW_KIND_CONTENT, job_id, message, thumbnails=thumbnails)
 
-    async def notify_subtitle_review(self, job_id: uuid.UUID) -> None:
+    async def notify_subtitle_review(self, job_id: uuid.UUID, *, force_full_review: bool = False) -> None:
         settings = get_settings()
         if not _telegram_ready(settings):
             return
 
+        message = ""
+        attachment_path: Path | None = None
         factory = get_session_factory()
         async with factory() as session:
             job = await session.get(Job, job_id)
@@ -329,33 +349,84 @@ class TelegramReviewBotService:
                 return
             report = await generate_report(job_id, session)
             pending_candidates = _build_pending_subtitle_candidates(report)
-            if not pending_candidates:
+            if pending_candidates:
+                lines = [
+                    f"任务：{job.source_name}",
+                    f"Job ID：{job.id}",
+                    f"待审核字幕纠错：{len(pending_candidates)} 条",
+                    f"总候选：{report.total_corrections}，已接受：{report.accepted_count}，已拒绝：{report.rejected_count}",
+                    "",
+                    "回复方式：",
+                    "1. 回复“全部通过”会批量接受所有待审项。",
+                    "2. 回复“全部拒绝”会批量拒绝所有待审项。",
+                    "3. 也可以直接自然语言说明，例如：S1通过，S2改成锐钛，S3拒绝。",
+                    "",
+                    "待审清单：",
+                ]
+                for candidate in pending_candidates:
+                    lines.extend(
+                        [
+                            f"{candidate.slot} · 字幕 #{candidate.subtitle_index}",
+                            f"原文：{candidate.original}",
+                            f"建议：{candidate.suggested}",
+                            f"类型：{candidate.change_type} · 置信度：{round(candidate.confidence * 100)}%",
+                            f"来源：{candidate.source or 'unknown'}",
+                            "",
+                        ]
+                    )
+                message = "\n".join(lines).strip()
+            elif force_full_review:
+                subtitle_lines = await _load_full_subtitle_review_lines(job_id, session)
+                if not subtitle_lines:
+                    message = (
+                        f"任务：{job.source_name}\n"
+                        f"Job ID：{job.id}\n\n"
+                        "当前没有可供复核的字幕内容。"
+                    )
+                else:
+                    preview_excerpt = build_reviewed_transcript_excerpt(
+                        [
+                            {
+                                "index": item.subtitle_index,
+                                "start_time": item.start_sec or 0.0,
+                                "end_time": item.end_sec or 0.0,
+                                "text_final": item.text,
+                            }
+                            for item in subtitle_lines
+                        ],
+                        max_items=12,
+                        max_chars=900,
+                    )
+                    message = "\n".join(
+                        [
+                            f"任务：{job.source_name}",
+                            f"Job ID：{job.id}",
+                            f"自动字幕纠错未产出候选，已切换为全量人工字幕复核。",
+                            f"字幕总条数：{len(subtitle_lines)}",
+                            "",
+                            "回复方式：",
+                            "1. 回复“全部通过”表示整份字幕无需修改。",
+                            "2. 回复类似“L17改成 狐蝠工业，L18通过”的格式逐条修订。",
+                            "3. 我已附上完整字幕复核清单，可按行号核对。",
+                            "",
+                            "字幕预览：",
+                            preview_excerpt or "无",
+                        ]
+                    ).strip()
+                    attachment_path = _write_full_subtitle_review_attachment(job.id, subtitle_lines)
+            else:
                 return
-            lines = [
-                f"任务：{job.source_name}",
-                f"Job ID：{job.id}",
-                f"待审核字幕纠错：{len(pending_candidates)} 条",
-                f"总候选：{report.total_corrections}，已接受：{report.accepted_count}，已拒绝：{report.rejected_count}",
-                "",
-                "回复方式：",
-                "1. 回复“全部通过”会批量接受所有待审项。",
-                "2. 回复“全部拒绝”会批量拒绝所有待审项。",
-                "3. 也可以直接自然语言说明，例如：S1通过，S2改成锐钛，S3拒绝。",
-                "",
-                "待审清单：",
-            ]
-            for candidate in pending_candidates:
-                lines.extend(
-                    [
-                        f"{candidate.slot} · 字幕 #{candidate.subtitle_index}",
-                        f"原文：{candidate.original}",
-                        f"建议：{candidate.suggested}",
-                        f"类型：{candidate.change_type} · 置信度：{round(candidate.confidence * 100)}%",
-                        f"来源：{candidate.source or 'unknown'}",
-                        "",
-                    ]
+        await self._send_review_message(_REVIEW_KIND_SUBTITLE, job_id, message)
+        if attachment_path is not None:
+            try:
+                chat_id = str(getattr(settings, "telegram_bot_chat_id", "") or "").strip()
+                await self._send_chat_document(
+                    attachment_path,
+                    chat_id=chat_id,
+                    caption=f"【RC:{_REVIEW_KIND_SUBTITLE}:{job_id}】\n全量字幕人工复核清单",
                 )
-        await self._send_review_message(_REVIEW_KIND_SUBTITLE, job_id, "\n".join(lines).strip())
+            except Exception:
+                logger.exception("Failed to send full subtitle review attachment for job %s", job_id)
 
     async def notify_final_review(self, job_id: uuid.UUID) -> None:
         settings = get_settings()
@@ -679,10 +750,11 @@ class TelegramReviewBotService:
             await self._send_chat_text(
                 (
                     f"已确认任务 {job_id} 的内容摘要；"
-                    "但当前没有待审核的字幕纠错候选，系统会继续后续流程。"
+                    "自动字幕纠错没有产出候选，我现在改发全量字幕人工复核包。"
                 ),
                 chat_id=reply_chat_id,
             )
+            await self.notify_subtitle_review(job_id, force_full_review=True)
             return
         await self._send_chat_text(f"已接收任务 {job_id} 的审核意见，系统正在校正内容摘要并继续后续流程。", chat_id=reply_chat_id)
 
@@ -692,7 +764,28 @@ class TelegramReviewBotService:
             report = await generate_report(job_id, session)
             candidates = _build_pending_subtitle_candidates(report)
             if not candidates:
-                await self._send_chat_text(f"任务 {job_id} 当前没有待审核的字幕纠错候选。", chat_id=reply_chat_id)
+                full_review_lines = await _load_full_subtitle_review_lines(job_id, session)
+                if not full_review_lines:
+                    await self._send_chat_text(f"任务 {job_id} 当前没有可复核的字幕内容。", chat_id=reply_chat_id)
+                    return
+                accept_all, actions = _interpret_full_subtitle_review_reply(text, full_review_lines)
+                if accept_all:
+                    await self._send_chat_text(
+                        f"已确认任务 {job_id} 的全量字幕人工复核，无需字幕修改。",
+                        chat_id=reply_chat_id,
+                    )
+                    return
+                if not actions:
+                    await self._send_chat_text(
+                        "当前是全量字幕人工复核。请回复“全部通过”，或使用类似“L17改成 狐蝠工业，L18通过”的格式。",
+                        chat_id=reply_chat_id,
+                    )
+                    return
+                applied = await _apply_full_subtitle_review_actions(job_id, actions, session)
+                await self._send_chat_text(
+                    f"已应用任务 {job_id} 的 {applied} 条全量字幕人工复核修改。",
+                    chat_id=reply_chat_id,
+                )
                 return
             actions = await _interpret_subtitle_review_reply(text, candidates)
             if not actions:
@@ -907,16 +1000,27 @@ class TelegramReviewBotService:
             )
             if anchor_message_id is None:
                 anchor_message_id = message_id
-        for item in thumbnails or []:
+        thumbnail_items = list(thumbnails or [])
+        if len(thumbnail_items) > 1:
             try:
-                await self._send_chat_photo(
-                    item.path,
+                await self._send_chat_photo_group(
+                    thumbnail_items,
                     chat_id=chat_id,
-                    caption=item.caption,
                     reply_to_message_id=anchor_message_id,
                 )
             except Exception:
-                logger.exception("Failed to send review thumbnail for job %s", job_id)
+                logger.exception("Failed to send review thumbnail group for job %s", job_id)
+        else:
+            for item in thumbnail_items:
+                try:
+                    await self._send_chat_photo(
+                        item.path,
+                        chat_id=chat_id,
+                        caption=item.caption,
+                        reply_to_message_id=anchor_message_id,
+                    )
+                except Exception:
+                    logger.exception("Failed to send review thumbnail for job %s", job_id)
         for item in videos or []:
             try:
                 await self._send_chat_video(
@@ -995,6 +1099,55 @@ class TelegramReviewBotService:
         data = await self._call_api(settings, "sendPhoto", payload, files=files)
         return _extract_message_id(data)
 
+    async def _send_chat_photo_group(
+        self,
+        photos: list[TelegramReviewThumbnail],
+        *,
+        chat_id: str,
+        reply_to_message_id: int | None = None,
+    ) -> list[int]:
+        settings = get_settings()
+        if not _telegram_ready(settings) or not str(chat_id or "").strip():
+            return []
+        media: list[dict[str, Any]] = []
+        files: dict[str, tuple[str, bytes, str]] = {}
+        for index, item in enumerate(photos):
+            if not item.path.exists():
+                continue
+            attach_name = f"photo{index}"
+            entry: dict[str, Any] = {
+                "type": "photo",
+                "media": f"attach://{attach_name}",
+            }
+            trimmed_caption = str(item.caption or "").strip()
+            if trimmed_caption:
+                entry["caption"] = trimmed_caption[:1024]
+            media.append(entry)
+            files[attach_name] = (
+                item.path.name,
+                item.path.read_bytes(),
+                "image/jpeg",
+            )
+        if not media:
+            return []
+        payload: dict[str, Any] = {
+            "chat_id": str(chat_id).strip(),
+            "media": json.dumps(media, ensure_ascii=False),
+        }
+        if reply_to_message_id is not None:
+            payload["reply_to_message_id"] = str(reply_to_message_id)
+        data = await self._call_api(settings, "sendMediaGroup", payload, files=files)
+        if not isinstance(data, list):
+            return []
+        message_ids: list[int] = []
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            message_id = _extract_message_id(item)
+            if message_id is not None:
+                message_ids.append(message_id)
+        return message_ids
+
     async def _send_chat_video(
         self,
         video_path: Path,
@@ -1031,6 +1184,33 @@ class TelegramReviewBotService:
                 )
             }
             data = await self._call_api(settings, "sendDocument", payload, files=document_files)
+        return _extract_message_id(data)
+
+    async def _send_chat_document(
+        self,
+        document_path: Path,
+        *,
+        chat_id: str,
+        caption: str = "",
+        reply_to_message_id: int | None = None,
+    ) -> int | None:
+        settings = get_settings()
+        if not _telegram_ready(settings) or not str(chat_id or "").strip() or not document_path.exists():
+            return None
+        payload: dict[str, Any] = {"chat_id": str(chat_id).strip()}
+        trimmed_caption = str(caption or "").strip()
+        if trimmed_caption:
+            payload["caption"] = trimmed_caption[:1024]
+        if reply_to_message_id is not None:
+            payload["reply_to_message_id"] = str(reply_to_message_id)
+        files = {
+            "document": (
+                document_path.name,
+                document_path.read_bytes(),
+                "text/plain; charset=utf-8",
+            )
+        }
+        data = await self._call_api(settings, "sendDocument", payload, files=files)
         return _extract_message_id(data)
 
     async def _build_content_profile_thumbnails(
@@ -2305,6 +2485,128 @@ def _build_pending_subtitle_candidates(report: Any) -> list[TelegramReviewCandid
             )
             slot_index += 1
     return candidates
+
+
+async def _load_full_subtitle_review_lines(
+    job_id: uuid.UUID,
+    session: Any,
+) -> list[TelegramSubtitleLineCandidate]:
+    result = await session.execute(
+        select(SubtitleItem)
+        .where(SubtitleItem.job_id == job_id)
+        .order_by(SubtitleItem.item_index)
+    )
+    subtitle_items = result.scalars().all()
+    lines: list[TelegramSubtitleLineCandidate] = []
+    slot_index = 1
+    for item in subtitle_items:
+        text = str(item.text_final or item.text_norm or item.text_raw or "").strip()
+        if not text:
+            continue
+        lines.append(
+            TelegramSubtitleLineCandidate(
+                slot=f"L{slot_index}",
+                subtitle_item_id=str(item.id),
+                subtitle_index=int(item.item_index),
+                text=text,
+                start_sec=float(item.start_time or 0.0),
+                end_sec=float(item.end_time or item.start_time or 0.0),
+            )
+        )
+        slot_index += 1
+    return lines
+
+
+def _write_full_subtitle_review_attachment(
+    job_id: uuid.UUID,
+    subtitle_lines: list[TelegramSubtitleLineCandidate],
+) -> Path:
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        suffix=".txt",
+        prefix=f"roughcut-subtitle-review-{job_id}-",
+        delete=False,
+    ) as handle:
+        handle.write(f"Job ID: {job_id}\n")
+        handle.write("全量字幕人工复核清单\n\n")
+        for item in subtitle_lines:
+            handle.write(
+                f"{item.slot} [{item.start_sec or 0.0:.1f}-{item.end_sec or 0.0:.1f}] "
+                f"字幕#{item.subtitle_index}: {item.text}\n"
+            )
+    return Path(handle.name)
+
+
+def _interpret_full_subtitle_review_reply(
+    text: str,
+    subtitle_lines: list[TelegramSubtitleLineCandidate],
+) -> tuple[bool, list[dict[str, str]]]:
+    normalized = str(text or "").strip()
+    if not normalized:
+        return False, []
+    if _ACCEPT_ALL_PATTERN.search(normalized):
+        return True, []
+
+    line_by_slot = {item.slot.lower(): item for item in subtitle_lines}
+    actions: list[dict[str, str]] = []
+    for match in _FULL_SUBTITLE_ACTION_PATTERN.finditer(normalized):
+        slot = f"L{match.group('slot')}".lower()
+        candidate = line_by_slot.get(slot)
+        if candidate is None:
+            continue
+        replacement = str(match.group("replace") or "").strip().rstrip("，。,；; ")
+        if match.group("pass"):
+            actions.append(
+                {
+                    "subtitle_item_id": candidate.subtitle_item_id,
+                    "action": "accepted",
+                }
+            )
+        elif replacement:
+            actions.append(
+                {
+                    "subtitle_item_id": candidate.subtitle_item_id,
+                    "action": "updated",
+                    "override_text": replacement,
+                }
+            )
+    return False, actions
+
+
+async def _apply_full_subtitle_review_actions(
+    job_id: uuid.UUID,
+    actions: list[dict[str, str]],
+    session: Any,
+) -> int:
+    applied = 0
+    for action in actions:
+        target_id = str(action.get("subtitle_item_id") or "").strip()
+        if not target_id:
+            continue
+        try:
+            subtitle_item_id = uuid.UUID(target_id)
+        except ValueError:
+            continue
+        item = await session.get(SubtitleItem, subtitle_item_id)
+        if item is None or item.job_id != job_id:
+            continue
+        override_text = str(action.get("override_text") or "").strip()
+        if action.get("action") == "updated" and override_text:
+            item.text_final = override_text
+        session.add(
+            ReviewAction(
+                job_id=job_id,
+                target_type="subtitle_item",
+                target_id=subtitle_item_id,
+                action=str(action.get("action") or "accepted"),
+                override_text=override_text or None,
+            )
+        )
+        applied += 1
+    if applied > 0:
+        await session.commit()
+    return applied
 
 
 async def _interpret_subtitle_review_reply(
