@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import os
+import tempfile
 import uuid
+from pathlib import Path
 from typing import AsyncGenerator
 
 import pytest
@@ -11,10 +13,11 @@ from fastapi.testclient import TestClient
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-# Use SQLite for tests (no PostgreSQL required)
-TEST_DB_URL = "sqlite+aiosqlite:///./test.db"
+# Use a per-process SQLite file for tests to avoid collisions between parallel pytest processes.
+TEST_DB_FILE = Path(tempfile.gettempdir()) / f"roughcut-test-{os.getpid()}.db"
+TEST_DB_URL = f"sqlite+aiosqlite:///{TEST_DB_FILE.as_posix()}"
 
-os.environ.setdefault("DATABASE_URL", TEST_DB_URL)
+os.environ["DATABASE_URL"] = TEST_DB_URL
 os.environ.setdefault("OPENAI_API_KEY", "test-key")
 os.environ.setdefault("S3_ENDPOINT_URL", "http://localhost:9000")
 
@@ -44,6 +47,7 @@ def event_loop():
 
 @pytest_asyncio.fixture(scope="session")
 async def db_engine():
+    TEST_DB_FILE.unlink(missing_ok=True)
     engine = create_async_engine(TEST_DB_URL, echo=False)
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
@@ -51,6 +55,7 @@ async def db_engine():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.drop_all)
     await engine.dispose()
+    TEST_DB_FILE.unlink(missing_ok=True)
 
 
 @pytest_asyncio.fixture

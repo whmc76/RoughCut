@@ -59,6 +59,24 @@ _ACCEPT_ALL_PATTERN = re.compile(r"(全部|全都|都)(通过|接受|采纳)|全
 _REJECT_ALL_PATTERN = re.compile(r"(全部|全都|都)(拒绝|驳回)|全部拒绝", re.IGNORECASE)
 _SUBTITLE_SLOT_PATTERN = re.compile(r"(?i)(?<![A-Za-z0-9])S\d{1,3}(?![A-Za-z0-9])")
 _NEGATED_SUBTITLE_CONTENT_PATTERN = re.compile(r"字幕(?:内容|文本)?(?:本身)?(?:没问题|没有问题|无需修改|不用改)")
+_CONTENT_PROFILE_SUBTITLE_REVIEW_KEYWORDS = (
+    "字幕校对",
+    "字幕纠错",
+    "字幕复核",
+    "字幕确认",
+    "字幕还需要",
+    "字幕还有问题",
+    "字幕不太对",
+    "字幕不对",
+    "字幕有问题",
+    "字幕有错",
+    "字幕错别字",
+    "字幕术语",
+    "字幕时间",
+    "字幕不同步",
+    "术语还要",
+    "错别字还要",
+)
 _WORKFLOW_MODE_LABELS = {
     "standard_edit": "标准成片",
     "long_text_to_video": "长文本转视频",
@@ -292,6 +310,11 @@ class TelegramReviewBotService:
                 avatar_materials=avatar_materials,
             )
             thumbnails = await self._build_content_profile_thumbnails(job, kind=_REVIEW_KIND_CONTENT)
+            if not thumbnails:
+                message = (
+                    f"{message}\n\n"
+                    "参考缩略图：当前未能自动抽取，本次先按文字信息审核。"
+                )
         await self._send_review_message(_REVIEW_KIND_CONTENT, job_id, message, thumbnails=thumbnails)
 
     async def notify_subtitle_review(self, job_id: uuid.UUID) -> None:
@@ -620,18 +643,47 @@ class TelegramReviewBotService:
         await self._handle_final_review_reply(job_id, reply_text, reply_chat_id=actual_chat_id)
 
     async def _handle_content_profile_reply(self, job_id: uuid.UUID, text: str, *, reply_chat_id: str = "") -> None:
+        subtitle_followup_requested = _looks_like_content_profile_subtitle_followup(text)
         factory = get_session_factory()
+        subtitle_review_candidate_count = 0
         async with factory() as session:
             review = await get_content_profile(job_id, session)
             if review.review_step_status == "done":
                 await self._send_chat_text(f"任务 {job_id} 的内容摘要已经确认过了，无需重复提交。", chat_id=reply_chat_id)
                 return
+            if reply_chat_id and (subtitle_followup_requested or not _SIMPLE_APPROVAL_PATTERN.match(text)):
+                await self._send_chat_text(
+                    f"已收到任务 {job_id} 的审核意见，正在处理，请稍候。",
+                    chat_id=reply_chat_id,
+                )
             payload = (
                 {}
                 if _SIMPLE_APPROVAL_PATTERN.match(text)
                 else await _interpret_content_profile_reply(review, text)
             )
             await confirm_content_profile(job_id, ContentProfileConfirmIn(**payload), session)
+            if subtitle_followup_requested:
+                report = await generate_report(job_id, session)
+                subtitle_review_candidate_count = len(_build_pending_subtitle_candidates(report))
+        if subtitle_followup_requested and subtitle_review_candidate_count > 0:
+            await self._send_chat_text(
+                (
+                    f"已确认任务 {job_id} 的内容摘要；检测到你还要校对字幕，"
+                    f"我现在把 {subtitle_review_candidate_count} 条待审字幕项发你。"
+                ),
+                chat_id=reply_chat_id,
+            )
+            await self.notify_subtitle_review(job_id)
+            return
+        if subtitle_followup_requested:
+            await self._send_chat_text(
+                (
+                    f"已确认任务 {job_id} 的内容摘要；"
+                    "但当前没有待审核的字幕纠错候选，系统会继续后续流程。"
+                ),
+                chat_id=reply_chat_id,
+            )
+            return
         await self._send_chat_text(f"已接收任务 {job_id} 的审核意见，系统正在校正内容摘要并继续后续流程。", chat_id=reply_chat_id)
 
     async def _handle_subtitle_reply(self, job_id: uuid.UUID, text: str, *, reply_chat_id: str = "") -> None:
@@ -1181,6 +1233,17 @@ def _looks_like_subtitle_review_reply(text: str) -> bool:
         or _REJECT_ALL_PATTERN.search(normalized)
         or _SUBTITLE_SLOT_PATTERN.search(normalized)
     )
+
+
+def _looks_like_content_profile_subtitle_followup(text: str) -> bool:
+    normalized = str(text or "").strip().lower()
+    if not normalized:
+        return False
+    if _NEGATED_SUBTITLE_CONTENT_PATTERN.search(normalized):
+        return False
+    if _looks_like_subtitle_review_reply(normalized):
+        return True
+    return any(keyword in normalized for keyword in _CONTENT_PROFILE_SUBTITLE_REVIEW_KEYWORDS)
 
 
 def _build_final_review_rerun_plan(note: str) -> FinalReviewRerunPlan | None:
