@@ -86,6 +86,7 @@ _QUALITY_RERUN_STEPS = {
     "final_review",
     "platform_package",
 }
+_REVIEW_ROUND_STEPS = {"summary_review", "glossary_review", "final_review"}
 
 
 async def tick() -> None:
@@ -714,6 +715,7 @@ async def _reset_job_for_quality_rerun(
     for step in steps:
         if step.step_name not in rerun_step_set:
             continue
+        previous_metadata = dict(step.metadata_ or {})
         step.status = "pending"
         step.attempt = 0
         step.started_at = None
@@ -724,14 +726,26 @@ async def _reset_job_for_quality_rerun(
             if step.step_name == first_step
             else "等待自动改进重跑链路继续。"
         )
-        step.metadata_ = {
+        metadata = {
             "detail": detail,
             "updated_at": now.isoformat(),
         }
+        if step.step_name in _REVIEW_ROUND_STEPS:
+            metadata["review_round"] = _coerce_review_round(previous_metadata.get("review_round")) + 1
+            metadata["telegram_review_notifications"] = {}
+        step.metadata_ = metadata
 
     job.status = "processing"
     job.error_message = None
     job.updated_at = now
+
+
+def _coerce_review_round(value: object) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return 1
+    return parsed if parsed > 0 else 1
 
 
 def _artifact_types_for_quality_rerun(rerun_steps: set[str]) -> set[str]:
