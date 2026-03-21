@@ -25,6 +25,7 @@ logs/*.log
 logs/asr-regression/
 logs/*.json
 logs/*.jpg
+output/
 output_sub_check.jpg
 output_sub_check2.jpg
 ref1_10s.jpg
