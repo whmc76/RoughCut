@@ -248,6 +248,8 @@ pnpm dev:telegram-agent
 当 Telegram 收到未知命令，或直接收到“修复错误 / 结构优化 / 链路优化 / 扩展命令”这类自然语言工程请求时，agent 会自动尝试分流：
 
 - 优先走 ACP bridge
+- ACP 默认优先调用 Codex，并建议使用 `gpt-5.4-mini` 承担工程级任务；Claude 作为后备桥接后端
+- ACP/Codex prompt 会自动附带 RoughCut 项目规则和同 Telegram 会话的近期任务记忆，避免每次冷启动
 - 如果是需要改代码的扩展类请求，会自动创建待确认任务
 - 如果是分析类请求，会直接创建只读诊断任务
 

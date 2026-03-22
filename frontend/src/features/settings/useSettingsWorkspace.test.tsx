@@ -62,6 +62,21 @@ const SAMPLE_CONFIG: Config = {
   ffmpeg_timeout_sec: 600,
   allowed_extensions: [".mp4"],
   output_dir: "data/output",
+  telegram_agent_enabled: true,
+  telegram_agent_claude_enabled: true,
+  telegram_agent_claude_command: "claude",
+  telegram_agent_claude_model: "opus",
+  telegram_agent_codex_command: "codex",
+  telegram_agent_codex_model: "gpt-5.4-mini",
+  telegram_agent_acp_command: "python scripts/acp_bridge.py",
+  telegram_agent_task_timeout_sec: 900,
+  telegram_agent_result_max_chars: 3500,
+  telegram_agent_state_dir: "data/telegram-agent",
+  acp_bridge_backend: "codex",
+  acp_bridge_fallback_backend: "claude",
+  acp_bridge_claude_model: "opus",
+  acp_bridge_codex_command: "codex",
+  acp_bridge_codex_model: "gpt-5.4-mini",
   telegram_remote_review_enabled: true,
   telegram_bot_api_base_url: "https://api.telegram.org",
   telegram_bot_token_set: false,
@@ -165,5 +180,17 @@ describe("useSettingsWorkspace", () => {
     expect(mockApi.patchConfig.mock.calls[0][0]).not.toHaveProperty("openai_api_key");
     expect(mockApi.patchConfig.mock.calls[0][0]).not.toHaveProperty("anthropic_api_key");
     await waitFor(() => expect(result.current.saveState).toBe("saved"));
+  });
+
+  it("hydrates Telegram agent Codex and ACP settings into the form", async () => {
+    const { result } = renderHookWithQueryClient(() => useSettingsWorkspace());
+
+    await waitFor(() => expect(result.current.config.data).toEqual(SAMPLE_CONFIG));
+    await waitFor(() => expect(result.current.form.telegram_agent_codex_model).toBe("gpt-5.4-mini"));
+
+    expect(result.current.form.telegram_agent_enabled).toBe(true);
+    expect(result.current.form.telegram_agent_codex_command).toBe("codex");
+    expect(result.current.form.acp_bridge_backend).toBe("codex");
+    expect(result.current.form.acp_bridge_fallback_backend).toBe("claude");
   });
 });

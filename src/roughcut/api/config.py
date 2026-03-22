@@ -95,10 +95,17 @@ class ConfigOut(BaseModel):
     telegram_agent_claude_enabled: bool
     telegram_agent_claude_command: str
     telegram_agent_claude_model: str
+    telegram_agent_codex_command: str
+    telegram_agent_codex_model: str
     telegram_agent_acp_command: str
     telegram_agent_task_timeout_sec: int
     telegram_agent_result_max_chars: int
     telegram_agent_state_dir: str
+    acp_bridge_backend: str
+    acp_bridge_fallback_backend: str
+    acp_bridge_claude_model: str
+    acp_bridge_codex_command: str
+    acp_bridge_codex_model: str
     telegram_remote_review_enabled: bool
     telegram_bot_api_base_url: str
     telegram_bot_token_set: bool
@@ -190,10 +197,17 @@ class ConfigPatch(BaseModel):
     telegram_agent_claude_enabled: bool | None = None
     telegram_agent_claude_command: str | None = None
     telegram_agent_claude_model: str | None = None
+    telegram_agent_codex_command: str | None = None
+    telegram_agent_codex_model: str | None = None
     telegram_agent_acp_command: str | None = None
     telegram_agent_task_timeout_sec: int | None = None
     telegram_agent_result_max_chars: int | None = None
     telegram_agent_state_dir: str | None = None
+    acp_bridge_backend: str | None = None
+    acp_bridge_fallback_backend: str | None = None
+    acp_bridge_claude_model: str | None = None
+    acp_bridge_codex_command: str | None = None
+    acp_bridge_codex_model: str | None = None
     telegram_remote_review_enabled: bool | None = None
     telegram_bot_api_base_url: str | None = None
     telegram_bot_token: str | None = None
@@ -271,10 +285,17 @@ def get_config():
         telegram_agent_claude_enabled=s.telegram_agent_claude_enabled,
         telegram_agent_claude_command=s.telegram_agent_claude_command,
         telegram_agent_claude_model=s.telegram_agent_claude_model,
+        telegram_agent_codex_command=s.telegram_agent_codex_command,
+        telegram_agent_codex_model=s.telegram_agent_codex_model,
         telegram_agent_acp_command=s.telegram_agent_acp_command,
         telegram_agent_task_timeout_sec=s.telegram_agent_task_timeout_sec,
         telegram_agent_result_max_chars=s.telegram_agent_result_max_chars,
         telegram_agent_state_dir=s.telegram_agent_state_dir,
+        acp_bridge_backend=s.acp_bridge_backend,
+        acp_bridge_fallback_backend=s.acp_bridge_fallback_backend,
+        acp_bridge_claude_model=s.acp_bridge_claude_model,
+        acp_bridge_codex_command=s.acp_bridge_codex_command,
+        acp_bridge_codex_model=s.acp_bridge_codex_model,
         telegram_remote_review_enabled=s.telegram_remote_review_enabled,
         telegram_bot_api_base_url=s.telegram_bot_api_base_url,
         telegram_bot_token_set=bool(s.telegram_bot_token),
@@ -377,6 +398,10 @@ def patch_config(body: ConfigPatch):
         updates["telegram_agent_claude_command"] = str(updates["telegram_agent_claude_command"] or "").strip() or "claude"
     if "telegram_agent_claude_model" in updates:
         updates["telegram_agent_claude_model"] = str(updates["telegram_agent_claude_model"] or "").strip() or "opus"
+    if "telegram_agent_codex_command" in updates:
+        updates["telegram_agent_codex_command"] = str(updates["telegram_agent_codex_command"] or "").strip() or "codex"
+    if "telegram_agent_codex_model" in updates:
+        updates["telegram_agent_codex_model"] = str(updates["telegram_agent_codex_model"] or "").strip() or "gpt-5.4-mini"
     if "telegram_agent_acp_command" in updates:
         updates["telegram_agent_acp_command"] = str(updates["telegram_agent_acp_command"] or "").strip()
     if "telegram_agent_state_dir" in updates:
@@ -385,6 +410,22 @@ def patch_config(body: ConfigPatch):
             raise HTTPException(status_code=400, detail="telegram_agent_state_dir cannot be empty")
         Path(state_dir).mkdir(parents=True, exist_ok=True)
         updates["telegram_agent_state_dir"] = state_dir
+    if "acp_bridge_backend" in updates:
+        backend = str(updates["acp_bridge_backend"] or "").strip().lower()
+        if backend not in {"claude", "codex"}:
+            raise HTTPException(status_code=400, detail="acp_bridge_backend must be claude or codex")
+        updates["acp_bridge_backend"] = backend
+    if "acp_bridge_fallback_backend" in updates:
+        fallback_backend = str(updates["acp_bridge_fallback_backend"] or "").strip().lower()
+        if fallback_backend not in {"claude", "codex"}:
+            raise HTTPException(status_code=400, detail="acp_bridge_fallback_backend must be claude or codex")
+        updates["acp_bridge_fallback_backend"] = fallback_backend
+    if "acp_bridge_claude_model" in updates:
+        updates["acp_bridge_claude_model"] = str(updates["acp_bridge_claude_model"] or "").strip() or "opus"
+    if "acp_bridge_codex_command" in updates:
+        updates["acp_bridge_codex_command"] = str(updates["acp_bridge_codex_command"] or "").strip() or "codex"
+    if "acp_bridge_codex_model" in updates:
+        updates["acp_bridge_codex_model"] = str(updates["acp_bridge_codex_model"] or "").strip() or "gpt-5.4-mini"
     if "telegram_bot_chat_id" in updates:
         updates["telegram_bot_chat_id"] = str(updates["telegram_bot_chat_id"] or "").strip()
     if "default_job_workflow_mode" in updates:

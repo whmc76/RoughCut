@@ -60,6 +60,8 @@ def submit_agent_task(record: TelegramAgentTaskRecord) -> TelegramAgentTaskRecor
     celery_app.send_task(
         "roughcut.pipeline.tasks.agent_run_preset",
         kwargs={
+            "task_id": record.task_id,
+            "chat_id": record.chat_id,
             "provider": record.provider,
             "preset": record.preset,
             "task_text": record.task_text,

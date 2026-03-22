@@ -373,6 +373,8 @@ def llm_platform_package(self, job_id: str):
 def agent_run_preset(
     self,
     *,
+    task_id: str = "",
+    chat_id: str = "",
     provider: str,
     preset: str,
     task_text: str,
@@ -390,6 +392,8 @@ def agent_run_preset(
     started = time.perf_counter()
     try:
         result = execute_agent_preset(
+            task_id=task_id or self.request.id,
+            chat_id=chat_id,
             provider=provider,
             preset=preset,
             task_text=task_text,

@@ -129,6 +129,74 @@ def test_execute_acp_preset_passes_claude_model_to_bridge_env(monkeypatch, tmp_p
     assert result["excerpt"] == "ok"
 
 
+def test_execute_acp_preset_includes_task_context_in_bridge_payload(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        executors_mod,
+        "get_settings",
+        lambda: SimpleNamespace(
+            acp_bridge_backend="codex",
+            acp_bridge_fallback_backend="claude",
+            acp_bridge_claude_model="opus",
+            acp_bridge_codex_command="codex",
+            acp_bridge_codex_model="gpt-5.4-mini",
+            telegram_agent_claude_command="claude",
+            telegram_agent_codex_command="codex",
+            telegram_agent_codex_model="gpt-5.4-mini",
+            telegram_agent_acp_command="python scripts/acp_bridge.py",
+            telegram_agent_task_timeout_sec=900,
+            telegram_agent_result_max_chars=3500,
+            telegram_agent_state_dir=str(tmp_path),
+        ),
+    )
+
+    store = executors_mod.TelegramAgentTaskStore(tmp_path / "tasks.json")
+    store.create_record(
+        chat_id="chat-1",
+        provider="acp",
+        preset="triage",
+        task_text="排查上一次失败",
+        status="success",
+        confirmation_required=False,
+        task_id="old-task",
+    )
+    store.update("old-task", result_excerpt="上一次确认是 ACP bridge fallback 导致的命令缺失。")
+
+    captured = {}
+
+    class FakeResult:
+        returncode = 0
+        stdout = json.dumps({"stdout": "ok", "stderr": "", "excerpt": "ok"}, ensure_ascii=False).encode("utf-8")
+        stderr = b""
+
+    def fake_run(command, *args, **kwargs):
+        captured["payload"] = json.loads(kwargs["input"].decode("utf-8"))
+        captured["env"] = kwargs.get("env", {})
+        return FakeResult()
+
+    monkeypatch.setattr(executors_mod.subprocess, "run", fake_run)
+
+    result = executors_mod.execute_agent_preset(
+        task_id="new-task",
+        chat_id="chat-1",
+        provider="acp",
+        preset="extend",
+        task_text="增强 Telegram agent",
+        scope_path="src/roughcut/telegram",
+        job_id="job-1",
+    )
+
+    assert captured["payload"]["task_id"] == "new-task"
+    assert captured["payload"]["chat_id"] == "chat-1"
+    assert "项目规则与默认约束" in captured["payload"]["prompt"]
+    assert "同会话近期任务记忆" in captured["payload"]["prompt"]
+    assert "ACP bridge fallback" in captured["payload"]["prompt"]
+    assert captured["env"]["ROUGHCUT_AGENT_TASK_ID"] == "new-task"
+    assert captured["env"]["ROUGHCUT_AGENT_CHAT_ID"] == "chat-1"
+    assert captured["env"]["ROUGHCUT_ACP_BRIDGE_BACKEND"] == "codex"
+    assert captured["env"]["ROUGHCUT_ACP_BRIDGE_FALLBACK_BACKEND"] == "claude"
+    assert result["excerpt"] == "ok"
+
+
 def test_execute_codex_preset_reads_last_message_file(monkeypatch, tmp_path: Path):
     monkeypatch.setenv("TELEGRAM_AGENT_CODEX_COMMAND", "codex")
     monkeypatch.setattr(
@@ -255,3 +323,39 @@ def test_execute_acp_preset_decodes_non_utf8_bridge_json(monkeypatch):
 
     assert result["stdout"] == payload["stdout"]
     assert result["excerpt"] == payload["excerpt"]
+
+
+def test_render_prompt_appends_project_rules_and_recent_task_memory(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr(
+        executors_mod,
+        "get_settings",
+        lambda: SimpleNamespace(
+            telegram_agent_state_dir=str(tmp_path),
+        ),
+    )
+    store = executors_mod.TelegramAgentTaskStore(tmp_path / "tasks.json")
+    store.create_record(
+        chat_id="chat-1",
+        provider="acp",
+        preset="triage",
+        task_text="分析 Telegram agent 链路",
+        status="success",
+        confirmation_required=False,
+        task_id="task-1",
+    )
+    store.update("task-1", result_excerpt="确认 ACP->Codex 已可执行，但缺少记忆注入。")
+
+    prompt = executors_mod._render_prompt(
+        task_id="task-2",
+        chat_id="chat-1",
+        provider="acp",
+        preset="extend",
+        task_text="增强工程能力",
+        scope_path="src/roughcut/telegram",
+        job_id="job-2",
+    )
+
+    assert "项目规则与默认约束" in prompt
+    assert "同会话近期任务记忆" in prompt
+    assert "缺少记忆注入" in prompt
+    assert "当前优先关注范围：src/roughcut/telegram" in prompt
