@@ -5,6 +5,7 @@ from typing import Any
 
 from roughcut.providers.factory import get_reasoning_provider
 from roughcut.providers.reasoning.base import Message
+from roughcut.usage import track_usage_operation
 
 _DEFAULT_TARGET_LANGUAGE = "en"
 _DEFAULT_TARGET_LANGUAGE_MODE = "auto"
@@ -73,15 +74,16 @@ async def _translate_subtitle_chunk(
         "\n输出 JSON：{\"items\":[{\"index\":0,\"translated_text\":\"...\"}]}"
         f"\n字幕：{prompt_items}"
     )
-    response = await provider.complete(
-        [
-            Message(role="system", content="你是专业的视频字幕翻译，输出必须是 JSON。"),
-            Message(role="user", content=prompt),
-        ],
-        temperature=0.1,
-        max_tokens=2200,
-        json_mode=True,
-    )
+    with track_usage_operation("subtitle_translation.chunk"):
+        response = await provider.complete(
+            [
+                Message(role="system", content="你是专业的视频字幕翻译，输出必须是 JSON。"),
+                Message(role="user", content=prompt),
+            ],
+            temperature=0.1,
+            max_tokens=2200,
+            json_mode=True,
+        )
     payload = response.as_json()
     translated_map: dict[int, str] = {}
     for item in list(payload.get("items") or []) if isinstance(payload, dict) else []:
@@ -131,15 +133,16 @@ async def _translate_single_subtitle(
         '\n输出 JSON：{"translation":"..."}'
         f"\n原文：{text}"
     )
-    response = await provider.complete(
-        [
-            Message(role="system", content="你是专业的视频字幕翻译，输出必须是 JSON。"),
-            Message(role="user", content=prompt),
-        ],
-        temperature=0.1,
-        max_tokens=400,
-        json_mode=True,
-    )
+    with track_usage_operation("subtitle_translation.single_fallback"):
+        response = await provider.complete(
+            [
+                Message(role="system", content="你是专业的视频字幕翻译，输出必须是 JSON。"),
+                Message(role="user", content=prompt),
+            ],
+            temperature=0.1,
+            max_tokens=400,
+            json_mode=True,
+        )
     payload = response.as_json()
     if isinstance(payload, dict):
         translation = str(payload.get("translation") or "").strip()

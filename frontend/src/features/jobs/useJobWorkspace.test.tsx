@@ -1,11 +1,13 @@
 import { act, waitFor } from "@testing-library/react";
 
 import { renderHookWithQueryClient } from "../../test/renderWithQueryClient";
-import type { ContentProfileReview, Job, JobActivity, JobTimeline, Report } from "../../types";
+import type { ContentProfileReview, Job, JobActivity, JobTimeline, Report, TokenUsageReport } from "../../types";
 import { useJobWorkspace } from "./useJobWorkspace";
 
 const mockApi = vi.hoisted(() => ({
   listJobs: vi.fn(),
+  getJobsUsageSummary: vi.fn(),
+  getJobsUsageTrend: vi.fn(),
   getConfigOptions: vi.fn(),
   getConfig: vi.fn(),
   getPackaging: vi.fn(),
@@ -13,6 +15,7 @@ const mockApi = vi.hoisted(() => ({
   getJob: vi.fn(),
   getJobActivity: vi.fn(),
   getJobReport: vi.fn(),
+  getJobTokenUsage: vi.fn(),
   getJobTimeline: vi.fn(),
   getContentProfile: vi.fn(),
   patchConfig: vi.fn(),
@@ -91,6 +94,73 @@ const SAMPLE_TIMELINE: JobTimeline = {
   data: { cuts: 12 },
 };
 
+const SAMPLE_TOKEN_USAGE: TokenUsageReport = {
+  job_id: "job_1",
+  has_telemetry: true,
+  total_calls: 5,
+  total_prompt_tokens: 3200,
+  total_completion_tokens: 900,
+  total_tokens: 4100,
+  cache: {
+    total_entries: 2,
+    hits: 1,
+    misses: 1,
+    hit_rate: 0.5,
+    avoided_calls: 1,
+    steps_with_hits: 1,
+    hits_with_usage_baseline: 1,
+    saved_prompt_tokens: 2400,
+    saved_completion_tokens: 700,
+    saved_total_tokens: 3100,
+    saved_tokens_hit_rate: 1,
+  },
+  steps: [
+    {
+      step_name: "content_profile",
+      label: "摘要",
+      calls: 3,
+      prompt_tokens: 2400,
+      completion_tokens: 700,
+      total_tokens: 3100,
+      last_updated_at: "2026-03-12T10:18:00Z",
+      cache_entries: [
+        {
+          name: "content_profile",
+          namespace: "content_profile.infer",
+          key: "cache-key-1",
+          hit: true,
+          usage_baseline: {
+            calls: 3,
+            prompt_tokens: 2400,
+            completion_tokens: 700,
+            total_tokens: 3100,
+          },
+        },
+      ],
+      operations: [
+        {
+          operation: "content_profile.visual_transcript_fuse",
+          calls: 1,
+          prompt_tokens: 1200,
+          completion_tokens: 300,
+          total_tokens: 1500,
+        },
+      ],
+    },
+  ],
+  models: [
+    {
+      model: "MiniMax-M2.7-highspeed",
+      provider: "minimax",
+      kind: "reasoning",
+      calls: 5,
+      prompt_tokens: 3200,
+      completion_tokens: 900,
+      total_tokens: 4100,
+    },
+  ],
+};
+
 const SAMPLE_PROFILE: ContentProfileReview = {
   job_id: "job_1",
   status: "needs_review",
@@ -132,6 +202,62 @@ const SAMPLE_PROFILE: ContentProfileReview = {
 describe("useJobWorkspace", () => {
   beforeEach(() => {
     mockApi.listJobs.mockResolvedValue(SAMPLE_JOBS);
+    mockApi.getJobsUsageSummary.mockResolvedValue({
+      job_count: 2,
+      jobs_with_telemetry: 1,
+      total_calls: 5,
+      total_prompt_tokens: 3200,
+      total_completion_tokens: 900,
+      total_tokens: 4100,
+      cache: {
+        total_entries: 2,
+        hits: 1,
+        misses: 1,
+        hit_rate: 0.5,
+        avoided_calls: 1,
+        steps_with_hits: 1,
+        hits_with_usage_baseline: 1,
+        saved_prompt_tokens: 2400,
+        saved_completion_tokens: 700,
+        saved_total_tokens: 3100,
+        saved_tokens_hit_rate: 1,
+      },
+      top_steps: [],
+      top_models: [],
+      top_providers: [],
+    });
+    mockApi.getJobsUsageTrend.mockResolvedValue({
+      days: 7,
+      focus_type: null,
+      focus_name: null,
+      points: [
+        {
+          date: "2026-03-12",
+          label: "03-12",
+          job_count: 2,
+          jobs_with_telemetry: 1,
+          total_calls: 5,
+          total_prompt_tokens: 3200,
+          total_completion_tokens: 900,
+          total_tokens: 4100,
+          cache: {
+            total_entries: 2,
+            hits: 1,
+            misses: 1,
+            hit_rate: 0.5,
+            avoided_calls: 1,
+            steps_with_hits: 1,
+            hits_with_usage_baseline: 1,
+            saved_prompt_tokens: 2400,
+            saved_completion_tokens: 700,
+            saved_total_tokens: 3100,
+            saved_tokens_hit_rate: 1,
+          },
+          top_entry: { dimension: "step", name: "content_profile", label: "摘要", total_tokens: 3100 },
+          top_step: { step_name: "content_profile", label: "摘要", total_tokens: 3100 },
+        },
+      ],
+    });
     mockApi.getConfigOptions.mockResolvedValue({
       job_languages: [{ value: "zh-CN", label: "简体中文" }],
       channel_profiles: [{ value: "", label: "自动匹配" }],
@@ -189,6 +315,7 @@ describe("useJobWorkspace", () => {
     mockApi.getJob.mockResolvedValue(SAMPLE_JOBS[0]);
     mockApi.getJobActivity.mockResolvedValue(SAMPLE_ACTIVITY);
     mockApi.getJobReport.mockResolvedValue(SAMPLE_REPORT);
+    mockApi.getJobTokenUsage.mockResolvedValue(SAMPLE_TOKEN_USAGE);
     mockApi.getJobTimeline.mockResolvedValue(SAMPLE_TIMELINE);
     mockApi.getContentProfile.mockResolvedValue(SAMPLE_PROFILE);
     mockApi.openJobFolder.mockResolvedValue({});
@@ -216,6 +343,8 @@ describe("useJobWorkspace", () => {
     const { result } = renderHookWithQueryClient(() => useJobWorkspace());
 
     await waitFor(() => expect(result.current.jobs.data).toEqual(SAMPLE_JOBS));
+    await waitFor(() => expect(result.current.usageSummary.data?.total_tokens).toBe(4100));
+    await waitFor(() => expect(result.current.usageTrend.data?.points[0]?.total_tokens).toBe(4100));
     expect(result.current.filteredJobs.map((job) => job.id)).toEqual(["job_2", "job_1"]);
 
     act(() => {
@@ -233,6 +362,7 @@ describe("useJobWorkspace", () => {
     });
 
     await waitFor(() => expect(result.current.contentProfile.data).toEqual(SAMPLE_PROFILE));
+    await waitFor(() => expect(result.current.tokenUsage.data).toEqual(SAMPLE_TOKEN_USAGE));
     await waitFor(() => expect(result.current.contentDraft).toEqual(SAMPLE_PROFILE.final));
     expect(result.current.contentKeywords).toBe("开箱, 升级, 限定");
 

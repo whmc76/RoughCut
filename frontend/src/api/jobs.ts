@@ -1,8 +1,13 @@
-import type { ContentProfileReview, Job, JobActivity, JobTimeline, Report } from "../types";
+import type { ContentProfileReview, Job, JobActivity, JobTimeline, JobsUsageSummary, JobsUsageTrend, Report, TokenUsageReport } from "../types";
 import { apiPath, request, requestForm } from "./core";
 
 export const jobsApi = {
   listJobs: () => request<Job[]>("/jobs"),
+  getJobsUsageSummary: (limit = 60) => request<JobsUsageSummary>(`/jobs/usage-summary?limit=${limit}`),
+  getJobsUsageTrend: (days = 7, limit = 120, focusType?: string, focusName?: string) =>
+    request<JobsUsageTrend>(
+      `/jobs/usage-trend?days=${days}&limit=${limit}${focusType ? `&focus_type=${encodeURIComponent(focusType)}` : ""}${focusName ? `&focus_name=${encodeURIComponent(focusName)}` : ""}`,
+    ),
   createJob: async (
     file: File,
     language: string,
@@ -20,6 +25,7 @@ export const jobsApi = {
   },
   getJob: (jobId: string) => request<Job>(`/jobs/${jobId}`),
   getJobActivity: (jobId: string) => request<JobActivity>(`/jobs/${jobId}/activity`),
+  getJobTokenUsage: (jobId: string) => request<TokenUsageReport>(`/jobs/${jobId}/token-usage`),
   getJobReport: (jobId: string) => request<Report>(`/jobs/${jobId}/report`),
   getJobTimeline: (jobId: string) => request<JobTimeline>(`/jobs/${jobId}/timeline`),
   getContentProfile: (jobId: string) => request<ContentProfileReview>(`/jobs/${jobId}/content-profile`),

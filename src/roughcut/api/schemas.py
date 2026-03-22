@@ -129,6 +129,156 @@ class JobActivityOut(BaseModel):
     events: list[JobActivityEventOut]
 
 
+class TokenUsageOperationOut(BaseModel):
+    operation: str
+    calls: int = 0
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+
+
+class TokenUsageBaselineOut(BaseModel):
+    calls: int = 0
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+
+
+class TokenUsageCacheEntryOut(BaseModel):
+    name: str
+    namespace: str = ""
+    key: str = ""
+    hit: bool = False
+    usage_baseline: TokenUsageBaselineOut | None = None
+
+
+class TokenUsageCacheSummaryOut(BaseModel):
+    total_entries: int = 0
+    hits: int = 0
+    misses: int = 0
+    hit_rate: float = 0.0
+    avoided_calls: int = 0
+    steps_with_hits: int = 0
+    hits_with_usage_baseline: int = 0
+    saved_prompt_tokens: int = 0
+    saved_completion_tokens: int = 0
+    saved_total_tokens: int = 0
+    saved_tokens_hit_rate: float = 0.0
+
+
+class TokenUsageStepOut(BaseModel):
+    step_name: str
+    label: str
+    calls: int = 0
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+    last_updated_at: str | None = None
+    operations: list[TokenUsageOperationOut] = []
+    cache_entries: list[TokenUsageCacheEntryOut] = []
+
+
+class TokenUsageModelOut(BaseModel):
+    model: str
+    provider: str | None = None
+    kind: str | None = None
+    calls: int = 0
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+
+
+class TokenUsageReportOut(BaseModel):
+    job_id: str
+    has_telemetry: bool = False
+    total_calls: int = 0
+    total_prompt_tokens: int = 0
+    total_completion_tokens: int = 0
+    total_tokens: int = 0
+    steps: list[TokenUsageStepOut] = []
+    models: list[TokenUsageModelOut] = []
+    cache: TokenUsageCacheSummaryOut = Field(default_factory=TokenUsageCacheSummaryOut)
+
+
+class JobsUsageSummaryStepOut(BaseModel):
+    step_name: str
+    label: str
+    jobs: int = 0
+    calls: int = 0
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+    cache_hits: int = 0
+    cache_misses: int = 0
+
+
+class JobsUsageSummaryModelOut(BaseModel):
+    model: str
+    provider: str | None = None
+    kind: str | None = None
+    jobs: int = 0
+    calls: int = 0
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+
+
+class JobsUsageSummaryProviderOut(BaseModel):
+    provider: str
+    jobs: int = 0
+    calls: int = 0
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+
+
+class JobsUsageSummaryOut(BaseModel):
+    job_count: int = 0
+    jobs_with_telemetry: int = 0
+    total_calls: int = 0
+    total_prompt_tokens: int = 0
+    total_completion_tokens: int = 0
+    total_tokens: int = 0
+    cache: TokenUsageCacheSummaryOut = Field(default_factory=TokenUsageCacheSummaryOut)
+    top_steps: list[JobsUsageSummaryStepOut] = []
+    top_models: list[JobsUsageSummaryModelOut] = []
+    top_providers: list[JobsUsageSummaryProviderOut] = []
+
+
+class JobsUsageTrendPointTopStepOut(BaseModel):
+    step_name: str
+    label: str
+    total_tokens: int = 0
+
+
+class JobsUsageTrendPointTopEntryOut(BaseModel):
+    dimension: str
+    name: str
+    label: str
+    total_tokens: int = 0
+
+
+class JobsUsageTrendPointOut(BaseModel):
+    date: str
+    label: str
+    job_count: int = 0
+    jobs_with_telemetry: int = 0
+    total_calls: int = 0
+    total_prompt_tokens: int = 0
+    total_completion_tokens: int = 0
+    total_tokens: int = 0
+    cache: TokenUsageCacheSummaryOut = Field(default_factory=TokenUsageCacheSummaryOut)
+    top_entry: JobsUsageTrendPointTopEntryOut | None = None
+    top_step: JobsUsageTrendPointTopStepOut | None = None
+
+
+class JobsUsageTrendOut(BaseModel):
+    days: int = 7
+    focus_type: str | None = None
+    focus_name: str | None = None
+    points: list[JobsUsageTrendPointOut] = []
+
+
 class ContentProfileReviewOut(BaseModel):
     job_id: str
     status: str

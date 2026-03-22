@@ -9,9 +9,11 @@ from typing import Any
 
 from roughcut.config import get_settings
 from roughcut.edit.presets import WorkflowPreset, get_workflow_preset, select_preset
+from roughcut.llm_cache import digest_payload
 from roughcut.providers.factory import get_reasoning_provider, get_search_provider
 from roughcut.providers.multimodal import complete_with_images
 from roughcut.providers.reasoning.base import Message, extract_json_text
+from roughcut.usage import track_usage_operation
 from roughcut.review.content_profile_memory import summarize_content_profile_user_memory
 from roughcut.review.content_profile_review_stats import build_content_profile_auto_review_gate
 from roughcut.review.subtitle_memory import (
@@ -20,6 +22,92 @@ from roughcut.review.subtitle_memory import (
     summarize_subtitle_review_memory_for_polish,
 )
 from roughcut.speech.postprocess import cleanup_subtitle_fillers, normalize_display_text
+
+_CONTENT_PROFILE_INFER_CACHE_VERSION = "2026-03-22.infer.v1"
+_CONTENT_PROFILE_ENRICH_CACHE_VERSION = "2026-03-22.enrich.v1"
+
+
+def _normalize_seeded_profile_for_cache(profile: dict[str, Any] | None) -> dict[str, Any]:
+    seeded = profile or {}
+    cover_title = seeded.get("cover_title") if isinstance(seeded.get("cover_title"), dict) else {}
+    evidence = [
+        {
+            "title": str(item.get("title") or "").strip(),
+            "url": str(item.get("url") or "").strip(),
+            "snippet": str(item.get("snippet") or "").strip(),
+        }
+        for item in (seeded.get("evidence") or [])
+        if isinstance(item, dict) and (item.get("url") or item.get("title") or item.get("snippet"))
+    ]
+    visual_hints = seeded.get("visual_hints") if isinstance(seeded.get("visual_hints"), dict) else {}
+    return {
+        "subject_brand": str(seeded.get("subject_brand") or "").strip(),
+        "subject_model": str(seeded.get("subject_model") or "").strip(),
+        "subject_type": str(seeded.get("subject_type") or "").strip(),
+        "video_theme": str(seeded.get("video_theme") or "").strip(),
+        "preset_name": str(seeded.get("preset_name") or "").strip(),
+        "hook_line": str(seeded.get("hook_line") or "").strip(),
+        "visible_text": str(seeded.get("visible_text") or "").strip(),
+        "summary": str(seeded.get("summary") or "").strip(),
+        "engagement_question": str(seeded.get("engagement_question") or "").strip(),
+        "copy_style": str(seeded.get("copy_style") or "").strip(),
+        "search_queries": [str(item).strip() for item in (seeded.get("search_queries") or []) if str(item).strip()],
+        "cover_title": {
+            "top": str(cover_title.get("top") or "").strip(),
+            "main": str(cover_title.get("main") or "").strip(),
+            "bottom": str(cover_title.get("bottom") or "").strip(),
+        },
+        "evidence": evidence,
+        "visual_hints": {
+            "subject_type": str(visual_hints.get("subject_type") or "").strip(),
+            "subject_brand": str(visual_hints.get("subject_brand") or "").strip(),
+            "subject_model": str(visual_hints.get("subject_model") or "").strip(),
+            "visible_text": str(visual_hints.get("visible_text") or "").strip(),
+        },
+    }
+
+
+def build_content_profile_cache_fingerprint(
+    *,
+    source_name: str,
+    source_file_hash: str | None,
+    channel_profile: str | None,
+    transcript_excerpt: str,
+    glossary_terms: list[dict[str, Any]] | None = None,
+    user_memory: dict[str, Any] | None = None,
+    include_research: bool,
+    copy_style: str | None = None,
+    seeded_profile: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    normalized_glossary = [
+        {
+            "correct_form": str(item.get("correct_form") or "").strip(),
+            "wrong_forms": [str(value).strip() for value in (item.get("wrong_forms") or []) if str(value).strip()],
+            "category": str(item.get("category") or "").strip(),
+            "context_hint": str(item.get("context_hint") or "").strip(),
+        }
+        for item in (glossary_terms or [])
+        if isinstance(item, dict)
+    ]
+    normalized_memory = user_memory if isinstance(user_memory, dict) else {}
+    normalized_seeded_profile = _normalize_seeded_profile_for_cache(seeded_profile)
+    return {
+        "version": (
+            _CONTENT_PROFILE_ENRICH_CACHE_VERSION
+            if normalized_seeded_profile
+            else _CONTENT_PROFILE_INFER_CACHE_VERSION
+        ),
+        "source_name": str(source_name or "").strip(),
+        "source_file_hash": str(source_file_hash or "").strip(),
+        "channel_profile": str(channel_profile or "").strip(),
+        "transcript_excerpt_sha256": digest_payload(str(transcript_excerpt or "").strip()),
+        "glossary_terms_sha256": digest_payload(normalized_glossary),
+        "glossary_term_count": len(normalized_glossary),
+        "user_memory_sha256": digest_payload(normalized_memory),
+        "include_research": bool(include_research),
+        "copy_style": str(copy_style or "").strip(),
+        "seeded_profile_sha256": digest_payload(normalized_seeded_profile) if normalized_seeded_profile else "",
+    }
 
 
 def build_transcript_excerpt(subtitle_items: list[dict], *, max_items: int = 36, max_chars: int = 1400) -> str:
@@ -1119,7 +1207,8 @@ async def infer_content_profile(
                     f"\n用户历史偏好（仅作辅助参考，不能压过当前字幕和画面）：\n{memory_prompt or '无'}"
                     f"\n源文件名：{source_name}\n字幕节选：\n{transcript_excerpt}"
                 )
-                content = await complete_with_images(prompt, frame_paths, max_tokens=500, json_mode=True)
+                with track_usage_operation("content_profile.visual_transcript_fuse"):
+                    content = await complete_with_images(prompt, frame_paths, max_tokens=500, json_mode=True)
                 candidate = json.loads(extract_json_text(content))
                 initial_profile.update({k: v for k, v in candidate.items() if v})
                 _merge_specific_profile_hints(initial_profile, heuristic_profile)
@@ -1130,41 +1219,43 @@ async def infer_content_profile(
     except Exception:
         pass
 
-    try:
-        provider = get_reasoning_provider()
-        prompt = (
-            "你在分析中文短视频的口播内容。视频可能是开箱评测、录屏教学、vlog、口播观点、游戏高光或美食探店。"
-            "请根据文件名、字幕节选和已有视觉判断，补全视频主体的开箱产品品牌、开箱产品型号/版本，或软件品牌、功能名/模块名、主体类型、视频主题，并给出适合联网验证的搜索词。"
-            "同时补一个适合评论区互动的问题，要基于视频内容，不要重复泛化问题。"
-            "subject_brand 指视频里被开箱/被讲解的产品或主体品牌，不是频道名、作者名。"
-            "如果是软件/AI/科技类内容，subject_brand 应该是软件/平台名，subject_model 优先填功能名、模块名或版本名，video_theme 必须点明真实主题，比如某个新功能上线、某个工作流实操，而不是泛泛写“软件功能演示与教程”。"
-            "如果文件名像时间戳、相机命名或流水号，不要把它当成型号。"
-            "如果不确定，请留空，不要乱编。"
-            "\n输出 JSON："
-            '{"subject_brand":"","subject_model":"","subject_type":"","video_theme":"",'
-            '"preset_name":"","hook_line":"","visible_text":"","engagement_question":"","search_queries":[]}'
-            f"\n视觉粗分类（优先级高于脏字幕和错误搜索）：{json.dumps(initial_profile.get('visual_hints') or {}, ensure_ascii=False)}"
-            f"\n用户历史偏好（仅作辅助参考，不能压过当前字幕和画面）：\n{memory_prompt or '无'}"
-            f"\n已有判断：{json.dumps(initial_profile, ensure_ascii=False)}"
-            f"\n源文件名：{source_name}\n字幕节选：\n{transcript_excerpt}"
-        )
-        response = await provider.complete(
-            [
-                Message(role="system", content="你是中文短视频内容策划助手。"),
-                Message(role="user", content=prompt),
-            ],
-            temperature=0.1,
-            max_tokens=500,
-            json_mode=True,
-        )
-        candidate = response.as_json()
-        initial_profile.update({k: v for k, v in candidate.items() if v})
-        _merge_specific_profile_hints(initial_profile, heuristic_profile)
-        _merge_specific_profile_hints(initial_profile, glossary_profile)
-        _merge_specific_profile_hints(initial_profile, memory_profile)
-        _apply_visual_subject_guard(initial_profile)
-    except Exception:
-        pass
+    if _profile_needs_text_refinement(initial_profile):
+        try:
+            provider = get_reasoning_provider()
+            prompt = (
+                "你在分析中文短视频的口播内容。视频可能是开箱评测、录屏教学、vlog、口播观点、游戏高光或美食探店。"
+                "请根据文件名、字幕节选和已有视觉判断，补全视频主体的开箱产品品牌、开箱产品型号/版本，或软件品牌、功能名/模块名、主体类型、视频主题，并给出适合联网验证的搜索词。"
+                "同时补一个适合评论区互动的问题，要基于视频内容，不要重复泛化问题。"
+                "subject_brand 指视频里被开箱/被讲解的产品或主体品牌，不是频道名、作者名。"
+                "如果是软件/AI/科技类内容，subject_brand 应该是软件/平台名，subject_model 优先填功能名、模块名或版本名，video_theme 必须点明真实主题，比如某个新功能上线、某个工作流实操，而不是泛泛写“软件功能演示与教程”。"
+                "如果文件名像时间戳、相机命名或流水号，不要把它当成型号。"
+                "如果不确定，请留空，不要乱编。"
+                "\n输出 JSON："
+                '{"subject_brand":"","subject_model":"","subject_type":"","video_theme":"",'
+                '"preset_name":"","hook_line":"","visible_text":"","engagement_question":"","search_queries":[]}'
+                f"\n视觉粗分类（优先级高于脏字幕和错误搜索）：{json.dumps(initial_profile.get('visual_hints') or {}, ensure_ascii=False)}"
+                f"\n用户历史偏好（仅作辅助参考，不能压过当前字幕和画面）：\n{memory_prompt or '无'}"
+                f"\n已有判断：{json.dumps(initial_profile, ensure_ascii=False)}"
+                f"\n源文件名：{source_name}\n字幕节选：\n{transcript_excerpt}"
+            )
+            with track_usage_operation("content_profile.text_refine"):
+                response = await provider.complete(
+                    [
+                        Message(role="system", content="你是中文短视频内容策划助手。"),
+                        Message(role="user", content=prompt),
+                    ],
+                    temperature=0.1,
+                    max_tokens=500,
+                    json_mode=True,
+                )
+            candidate = response.as_json()
+            initial_profile.update({k: v for k, v in candidate.items() if v})
+            _merge_specific_profile_hints(initial_profile, heuristic_profile)
+            _merge_specific_profile_hints(initial_profile, glossary_profile)
+            _merge_specific_profile_hints(initial_profile, memory_profile)
+            _apply_visual_subject_guard(initial_profile)
+        except Exception:
+            pass
 
     return await enrich_content_profile(
         profile=initial_profile,
@@ -1243,15 +1334,16 @@ async def apply_content_profile_feedback(
             prompt += f"\n人工复检后的字幕摘录：{reviewed_excerpt}"
         if accepted_examples:
             prompt += f"\n已接受的字幕校对：{json.dumps(accepted_examples[:12], ensure_ascii=False)}"
-        response = await provider.complete(
-            [
-                Message(role="system", content="你是严谨的中文视频内容摘要整理助手。"),
-                Message(role="user", content=prompt),
-            ],
-            temperature=0.1,
-            max_tokens=700,
-            json_mode=True,
-        )
+        with track_usage_operation("content_profile.manual_feedback_normalize"):
+            response = await provider.complete(
+                [
+                    Message(role="system", content="你是严谨的中文视频内容摘要整理助手。"),
+                    Message(role="user", content=prompt),
+                ],
+                temperature=0.1,
+                max_tokens=700,
+                json_mode=True,
+            )
         normalized = response.as_json()
         merged.update({k: v for k, v in normalized.items() if v})
     except Exception:
@@ -1303,6 +1395,30 @@ async def apply_content_profile_feedback(
         preset = get_workflow_preset(str(result.get("preset_name") or channel_profile or "unboxing_default"))
         result["cover_title"] = build_cover_title(result, preset)
     return result
+
+
+def _profile_needs_text_refinement(profile: dict[str, Any] | None) -> bool:
+    candidate = profile or {}
+    subject_type = str(candidate.get("subject_type") or "").strip()
+    video_theme = str(candidate.get("video_theme") or "").strip()
+    engagement_question = str(candidate.get("engagement_question") or "").strip()
+    preset_name = str(candidate.get("preset_name") or "").strip()
+
+    if not subject_type or _is_generic_subject_type(subject_type):
+        return True
+    if not _is_specific_video_theme(video_theme, preset_name=preset_name):
+        return True
+    if _is_generic_engagement_question(engagement_question):
+        return True
+    if not preset_name:
+        return True
+
+    visible_text = str(candidate.get("visible_text") or "").strip()
+    subject_brand = str(candidate.get("subject_brand") or "").strip()
+    subject_model = str(candidate.get("subject_model") or "").strip()
+    if not any((visible_text, subject_brand, subject_model)):
+        return True
+    return False
 
 
 async def enrich_content_profile(
@@ -1382,15 +1498,16 @@ async def enrich_content_profile(
                     f"\n字幕/画面线索：{transcript_excerpt}"
                     f"\n搜索证据：{json.dumps(evidence, ensure_ascii=False)}"
                 )
-                response = await provider.complete(
-                    [
-                        Message(role="system", content="你是中文短视频内容策划与字幕审校助手。"),
-                        Message(role="user", content=prompt),
-                    ],
-                    temperature=0.1,
-                    max_tokens=700,
-                    json_mode=True,
-                )
+                with track_usage_operation("content_profile.research_refine"):
+                    response = await provider.complete(
+                        [
+                            Message(role="system", content="你是中文短视频内容策划与字幕审校助手。"),
+                            Message(role="user", content=prompt),
+                        ],
+                        temperature=0.1,
+                        max_tokens=700,
+                        json_mode=True,
+                    )
                 refined = response.as_json()
                 enriched.update({k: v for k, v in refined.items() if v})
                 _merge_specific_profile_hints(enriched, context_hints)
@@ -1474,7 +1591,8 @@ async def _infer_visual_profile_hint_from_images(frame_paths: list[Path]) -> dic
             "输出 JSON："
             '{"subject_type":"","subject_brand":"","subject_model":"","visible_text":"","reason":""}'
         )
-        content = await complete_with_images(prompt, frame_paths, max_tokens=220, json_mode=True)
+        with track_usage_operation("content_profile.visual_classify"):
+            content = await complete_with_images(prompt, frame_paths, max_tokens=220, json_mode=True)
         data = json.loads(extract_json_text(content))
         subject_type = str(data.get("subject_type") or "").strip()
         subject_brand = str(data.get("subject_brand") or "").strip()
@@ -1678,15 +1796,16 @@ async def polish_subtitle_items(
                     f"搜索证据：\n{evidence_text}\n"
                     f"待处理字幕：{json.dumps(payload_items, ensure_ascii=False)}"
                 )
-                response = await provider.complete(
-                    [
-                        Message(role="system", content="你是严谨的中文短视频字幕审校助手。"),
-                        Message(role="user", content=prompt),
-                    ],
-                    temperature=0.1,
-                    max_tokens=1600,
-                    json_mode=True,
-                )
+                with track_usage_operation("subtitle_polish.chunk"):
+                    response = await provider.complete(
+                        [
+                            Message(role="system", content="你是严谨的中文短视频字幕审校助手。"),
+                            Message(role="user", content=prompt),
+                        ],
+                        temperature=0.1,
+                        max_tokens=1600,
+                        json_mode=True,
+                    )
                 data = response.as_json()
                 updates = {
                     int(item["index"]): str(item["text_final"]).strip()
@@ -2743,15 +2862,16 @@ async def _generate_engagement_question(
             f"\n搜索证据：{json.dumps(evidence[:6], ensure_ascii=False)}"
             f"\n预设：{preset.name} / {preset.label}"
         )
-        response = await provider.complete(
-            [
-                Message(role="system", content="你是中文短视频互动策划助手。"),
-                Message(role="user", content=prompt),
-            ],
-            temperature=0.3,
-            max_tokens=160,
-            json_mode=True,
-        )
+        with track_usage_operation("content_profile.engagement_question"):
+            response = await provider.complete(
+                [
+                    Message(role="system", content="你是中文短视频互动策划助手。"),
+                    Message(role="user", content=prompt),
+                ],
+                temperature=0.3,
+                max_tokens=160,
+                json_mode=True,
+            )
         question = _normalize_engagement_question(response.as_json().get("engagement_question") or "")
         if _is_generic_engagement_question(question):
             return None
