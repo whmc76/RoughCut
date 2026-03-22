@@ -45,8 +45,8 @@ def test_default_settings():
     assert s.default_job_workflow_mode == "standard_edit"
     assert s.default_job_enhancement_modes == []
     assert s.cover_output_variants == 5
-    assert s.auto_confirm_content_profile is True
-    assert s.content_profile_review_threshold == 0.72
+    assert s.auto_confirm_content_profile is False
+    assert s.content_profile_review_threshold == 0.9
     assert s.auto_accept_glossary_corrections is True
     assert s.glossary_correction_review_threshold == 0.9
     assert s.auto_select_cover_variant is True
@@ -59,6 +59,7 @@ def test_default_settings():
     assert s.quality_auto_rerun_max_attempts == 1
     assert s.avatar_overlay_scale == 0.18
     assert s.active_reasoning_provider == "minimax"
+
 def test_local_mode_switches_active_provider():
     s = Settings(_env_file=None, llm_mode="local", local_reasoning_model="qwen3.5:9b")
     assert s.active_reasoning_provider == "ollama"

@@ -6,6 +6,7 @@
     "bootstrap": "uv sync --extra dev --extra local-asr && pnpm install",
     "setup": "uv run roughcut init",
     "doctor": "uv run roughcut doctor",
+    "benchmark:reasoning": "uv run python scripts/benchmark_reasoning.py",
     "migrate": "uv run roughcut migrate",
     "dev": "concurrently -k -n web,api,orchestrator,media,llm -c magenta,cyan,yellow,green,blue \"pnpm dev:web\" \"pnpm dev:api\" \"pnpm dev:orchestrator\" \"pnpm dev:worker:media\" \"pnpm dev:worker:llm\"",
     "dev:web": "pnpm --dir frontend dev",

@@ -17,7 +17,7 @@
 - **术语纠错** — 维护品牌/型号词表，自动匹配并标注疑似错误
 - **断点续跑** — 每步骤状态持久化在数据库，进程崩溃后可从中断处继续
 - **目录监听** — 监听指定文件夹，新视频自动入队处理
-- **多 LLM 后端** — OpenAI / Anthropic / Ollama 可配置切换
+- **多 LLM 后端** — MiniMax / OpenAI / Anthropic / Ollama 可配置切换
 
 ---
 
@@ -72,7 +72,7 @@ probe → extract_audio → transcribe → subtitle_postprocess
 - `uv`（项目内部 Python 依赖与 CLI 仍使用它）
 - FFmpeg（需在 PATH 中，支持 libx264 / libass）
 - Docker / Docker Compose（推荐用于基础服务或完整部署）
-- LLM 后端之一：Ollama（本地）或 OpenAI API Key
+- LLM 后端之一：MiniMax API Key、Ollama（本地）或 OpenAI API Key
 
 ---
 
@@ -170,7 +170,15 @@ VOICE_CLONE_API_BASE_URL=http://127.0.0.1:49204
 
 其中 `49204` 当前约定为独立 `IndexTTS2 accel` 正式入口。不要再并行常驻 `baseline / sage / accel` 多个实例去争抢同一块 GPU。
 
-OpenAI 配置：
+MiniMax 默认配置：
+
+```env
+MINIMAX_API_KEY=sk-...
+REASONING_PROVIDER=minimax
+REASONING_MODEL=MiniMax-M2.7
+```
+
+OpenAI 兼容替代配置：
 
 ```env
 OPENAI_API_KEY=sk-...

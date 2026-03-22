@@ -628,8 +628,6 @@ def test_normalize_spoken_command_text_maps_common_aliases():
     assert telegram_bot._normalize_spoken_command_text("最近任务") == "/jobs"
     assert telegram_bot._normalize_spoken_command_text("确认任务 abc-123") == "/confirm abc-123"
     assert telegram_bot._normalize_spoken_command_text("取消任务 task-99") == "/cancel task-99"
-
-
 def test_build_content_profile_review_message_matches_frontend_sections():
     job_id = uuid.uuid4()
     review = SimpleNamespace(

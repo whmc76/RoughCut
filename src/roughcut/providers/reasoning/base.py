@@ -24,8 +24,12 @@ class ReasoningResponse:
         return json.loads(extract_json_text(self.content))
 
 
+def strip_reasoning_tags(content: str) -> str:
+    return re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL | re.IGNORECASE).strip()
+
+
 def extract_json_text(content: str) -> str:
-    text = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL | re.IGNORECASE).strip()
+    text = strip_reasoning_tags(content)
 
     if text.startswith("```"):
         lines = text.splitlines()
