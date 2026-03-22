@@ -412,7 +412,7 @@ class TelegramReviewBotService:
                         [
                             f"任务：{job.source_name}",
                             f"Job ID：{job.id}",
-                            f"自动字幕纠错未产出候选，已切换为全量人工字幕复核。",
+                            "自动字幕纠错未产出候选，已切换为全量人工字幕复核。",
                             f"字幕总条数：{len(subtitle_lines)}",
                             "",
                             "回复方式：",

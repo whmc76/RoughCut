@@ -13,7 +13,6 @@ from roughcut.review.content_profile import (
     _infer_visual_profile_hints,
     _sanitize_profile_identity,
     _seed_profile_from_text,
-    _seed_profile_from_user_memory,
     _build_search_queries,
     _filter_evidence_by_visual_subject,
     _fallback_profile,

@@ -71,7 +71,7 @@ async def render_video(
          explicit normalization pass if stale rotation metadata survived.
     """
     del progress_callback  # Progress callbacks are not wired up yet.
-    settings = get_settings()
+    get_settings()
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     if debug_dir is not None:
@@ -1035,7 +1035,7 @@ async def _apply_music_and_watermark(
         filter_parts.append(
             "[bgm_pre][0:a]sidechaincompress=threshold=0.02:ratio=10:attack=15:release=350:makeup=1[bgm]"
         )
-        filter_parts.append(f"[0:a][bgm]amix=inputs=2:duration=first:dropout_transition=2[amixed]")
+        filter_parts.append("[0:a][bgm]amix=inputs=2:duration=first:dropout_transition=2[amixed]")
         filter_parts.append(
             _build_master_audio_filter_chain(
                 input_label="amixed",

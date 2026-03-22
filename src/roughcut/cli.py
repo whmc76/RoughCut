@@ -420,7 +420,7 @@ def quality_backfill_content_profile_policy(json_output: bool):
 
 
 async def _quality_audit_async(*, limit: int, statuses: list[str], persist: bool) -> list[QualityAuditRow]:
-    from roughcut.db.models import Artifact, Job, JobStep, SubtitleCorrection, SubtitleItem
+    from roughcut.db.models import Artifact, Job, SubtitleCorrection, SubtitleItem
     from roughcut.db.session import get_session_factory
     from roughcut.pipeline.orchestrator import _latest_quality_assessment
     from roughcut.pipeline.quality import QUALITY_ARTIFACT_TYPE, assess_job_quality
@@ -543,7 +543,7 @@ async def _quality_improve_async(
     max_processing: int,
     dry_run: bool,
 ) -> dict[str, Any]:
-    from roughcut.db.models import Job, JobStep
+    from roughcut.db.models import Job
     from roughcut.db.session import get_session_factory
     from roughcut.pipeline.orchestrator import _assess_and_maybe_rerun_job
 

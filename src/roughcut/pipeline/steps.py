@@ -2091,7 +2091,6 @@ async def run_render(job_id: str) -> dict:
                     )
                     packaged_source_path = avatar_variant_source_path
                     packaged_editorial_timeline = avatar_variant_editorial_timeline
-                    packaged_subtitle_items = avatar_variant_subtitle_items
                     avatar_result = {
                         **(avatar_result or {}),
                         "status": "done",
@@ -2160,7 +2159,6 @@ async def run_render(job_id: str) -> dict:
                     )
                     packaged_source_path = avatar_variant_source_path
                     packaged_editorial_timeline = avatar_variant_editorial_timeline
-                    packaged_subtitle_items = avatar_variant_subtitle_items
                     avatar_result = {
                         **(avatar_result or {}),
                         "status": "done",
@@ -3380,8 +3378,8 @@ def _build_rounded_alpha_expr(*, width: int, height: int, corner_radius: int) ->
     radius = _resolve_overlay_corner_radius(corner_radius=corner_radius, width=width, height=height)
     if radius <= 0:
         return "255"
-    max_x = max(0, width - 1)
-    max_y = max(0, height - 1)
+    max(0, width - 1)
+    max(0, height - 1)
     right_center = width - radius - 1
     bottom_center = height - radius - 1
     radius_sq = radius * radius

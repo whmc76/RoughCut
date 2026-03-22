@@ -31,7 +31,7 @@ async def detect_video_rotation(source_path: Path) -> int:
     Falls back to Display Matrix metadata when vision is unavailable.
     Returns 0 on any failure.
     """
-    settings = get_settings()
+    get_settings()
     duration = _probe_duration(source_path)
     if duration <= 0:
         return 0

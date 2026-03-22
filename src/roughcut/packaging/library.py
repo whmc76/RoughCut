@@ -312,7 +312,7 @@ def _maybe_remove_watermark_solid_background(payload: bytes, source_suffix: str)
     return output, ".png", "image/png", True
 
 
-def _detect_pure_background_color(image: "Image.Image") -> tuple[int, int, int] | None:
+def _detect_pure_background_color(image: Any) -> tuple[int, int, int] | None:
     from PIL import Image
 
     preview = image.convert("RGB")

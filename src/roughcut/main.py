@@ -31,7 +31,7 @@ async def lifespan(app: FastAPI):
 
 
 def create_app() -> FastAPI:
-    settings = get_settings()
+    get_settings()
     app = FastAPI(
         title="RoughCut API",
         description="Automated video editing and subtitle review",

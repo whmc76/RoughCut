@@ -1,0 +1,20 @@
+{
+  "updated_at": "2026-03-22T14:56:51.059966+00:00",
+  "overall": {
+    "manual_review_total": 1,
+    "approved_without_changes": 1,
+    "corrected_after_review": 0,
+    "eligible_manual_review_total": 0,
+    "eligible_approved_without_changes": 0,
+    "eligible_corrected_after_review": 0
+  },
+  "records": {
+    "065446af-dd7c-4cac-90d5-f8218808594e": {
+      "job_id": "37a228fe-4617-42a4-b817-c4ca5c19e626",
+      "recorded_at": "2026-03-22T14:56:51.059966+00:00",
+      "approved_without_changes": true,
+      "changed_fields": [],
+      "quality_gate_candidate": false
+    }
+  }
+}

@@ -32,7 +32,6 @@ class LocalWhisperProvider(TranscriptionProvider):
         return "cuda" in message
 
     def _load_model_for_device(self, device: str):
-        import ctranslate2
         from faster_whisper import WhisperModel
 
         compute_type = "float16" if device == "cuda" else "int8"

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import pytest
 
 from roughcut.edit.decisions import build_edit_decision
 from roughcut.media.silence import SilenceSegment

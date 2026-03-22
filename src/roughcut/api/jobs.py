@@ -8,6 +8,7 @@ import tempfile
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 from fastapi.responses import FileResponse
@@ -39,6 +40,7 @@ from roughcut.db.models import (
     ContentProfileKeywordStat,
     FactClaim,
     FactEvidence,
+    GlossaryTerm,
     Job,
     JobStep,
     RenderOutput,
@@ -100,7 +102,41 @@ PROFILE_ARTIFACT_PRIORITY = {
     "content_profile": 2,
     "content_profile_draft": 1,
 }
+_CONTENT_PROFILE_ARTIFACT_TYPES = ("content_profile_final", "content_profile", "content_profile_draft")
 _CONTENT_PROFILE_THUMBNAIL_CACHE_VERSION = "v2"
+
+
+def _select_preferred_content_profile_artifact(artifacts: list[Artifact]) -> Artifact | None:
+    if not artifacts:
+        return None
+    epoch = datetime.min.replace(tzinfo=timezone.utc)
+    return max(
+        artifacts,
+        key=lambda artifact: (
+            PROFILE_ARTIFACT_PRIORITY.get(str(artifact.artifact_type or "").strip(), 0),
+            artifact.created_at or epoch,
+        ),
+    )
+
+
+async def _load_latest_optional_artifact(
+    session: AsyncSession,
+    *,
+    job_id: uuid.UUID,
+    artifact_types: tuple[str, ...] | list[str],
+) -> Artifact | None:
+    result = await session.execute(
+        select(Artifact)
+        .where(
+            Artifact.job_id == job_id,
+            Artifact.artifact_type.in_(list(artifact_types)),
+        )
+        .order_by(Artifact.created_at.desc(), Artifact.id.desc())
+    )
+    artifacts = result.scalars().all()
+    if set(artifact_types).issuperset(_CONTENT_PROFILE_ARTIFACT_TYPES):
+        return _select_preferred_content_profile_artifact(artifacts)
+    return artifacts[0] if artifacts else None
 
 
 @router.get("", response_model=list[JobOut])
@@ -903,14 +939,14 @@ async def _persist_reviewed_glossary_term(
     if not suggested or not original or suggested == original:
         return
 
-    profile_artifact = await _load_latest_artifact(
+    profile_artifact = await _load_latest_optional_artifact(
         session,
-        job.id,
-        _CONTENT_PROFILE_ARTIFACT_TYPES,
+        job_id=job.id,
+        artifact_types=_CONTENT_PROFILE_ARTIFACT_TYPES,
     )
     content_profile = {}
-    if profile_artifact and isinstance(profile_artifact.payload_json, dict):
-        content_profile = dict(profile_artifact.payload_json)
+    if profile_artifact and isinstance(profile_artifact.data_json, dict):
+        content_profile = dict(profile_artifact.data_json)
 
     detected_domains = detect_glossary_domains(
         channel_profile=job.channel_profile,

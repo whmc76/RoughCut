@@ -7,7 +7,7 @@ from datetime import datetime
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from roughcut.db.models import Job, SubtitleCorrection, SubtitleItem
+from roughcut.db.models import SubtitleCorrection, SubtitleItem
 
 
 @dataclass

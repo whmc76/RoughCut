@@ -69,7 +69,6 @@ def test_build_dubbing_request_respects_indextts2_speed_overrides(monkeypatch: p
 
 def test_execute_dubbing_downloads_audio_to_local_workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     import httpx
-    import roughcut.providers.voice.indextts2 as provider_mod
 
     reference_audio = tmp_path / "reference.wav"
     reference_audio.write_bytes(b"wav")
