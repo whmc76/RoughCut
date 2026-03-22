@@ -5,6 +5,7 @@ import httpx
 from roughcut.config import get_settings
 from roughcut.providers.auth import resolve_credential
 from roughcut.providers.reasoning.base import Message, ReasoningProvider, ReasoningResponse
+from roughcut.usage import record_usage_event
 
 
 class AnthropicReasoningProvider(ReasoningProvider):
@@ -55,11 +56,18 @@ class AnthropicReasoningProvider(ReasoningProvider):
         parts = data.get("content", []) or []
         text = "".join(part.get("text", "") for part in parts if part.get("type") == "text")
         usage_data = data.get("usage", {}) or {}
+        usage = {
+            "prompt_tokens": int(usage_data.get("input_tokens", 0)),
+            "completion_tokens": int(usage_data.get("output_tokens", 0)),
+        }
+        await record_usage_event(
+            provider="anthropic",
+            model=str(data.get("model", self._model)),
+            usage=usage,
+            kind="reasoning",
+        )
         return ReasoningResponse(
             content=text,
-            usage={
-                "prompt_tokens": int(usage_data.get("input_tokens", 0)),
-                "completion_tokens": int(usage_data.get("output_tokens", 0)),
-            },
+            usage=usage,
             model=data.get("model", self._model),
         )

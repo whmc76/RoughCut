@@ -10,8 +10,8 @@ def test_default_settings():
     assert s.transcription_model == "gpt-4o-transcribe"
     assert s.transcription_dialect == "mandarin"
     assert s.llm_mode == "performance"
-    assert s.reasoning_provider == "openai"
-    assert s.reasoning_model == "gpt-4o-mini"
+    assert s.reasoning_provider == "minimax"
+    assert s.reasoning_model == "MiniMax-M2.7-highspeed"
     assert s.local_reasoning_model == "qwen3.5:9b"
     assert s.multimodal_fallback_provider == "ollama"
     assert s.search_provider == "auto"
@@ -58,7 +58,7 @@ def test_default_settings():
     assert s.quality_auto_rerun_below_score == 75.0
     assert s.quality_auto_rerun_max_attempts == 1
     assert s.avatar_overlay_scale == 0.18
-    assert s.active_reasoning_provider == "openai"
+    assert s.active_reasoning_provider == "minimax"
 def test_local_mode_switches_active_provider():
     s = Settings(_env_file=None, llm_mode="local", local_reasoning_model="qwen3.5:9b")
     assert s.active_reasoning_provider == "ollama"

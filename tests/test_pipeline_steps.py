@@ -11,7 +11,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from roughcut.db.models import Artifact, GlossaryTerm, Job, JobStep, SubtitleItem, Timeline
+from roughcut.db.models import Artifact, GlossaryTerm, Job, JobStep, RenderOutput, SubtitleItem, Timeline
 from roughcut.pipeline.steps import (
     _get_cover_seek,
     _load_latest_artifact,
@@ -25,6 +25,7 @@ from roughcut.pipeline.steps import (
     run_avatar_commentary,
     run_content_profile,
     run_glossary_review,
+    run_platform_package,
 )
 
 
@@ -898,6 +899,7 @@ async def test_run_content_profile_prefers_seeded_profile_from_early_glossary(db
 
     factory = async_sessionmaker(db_engine, expire_on_commit=False)
     job_id = uuid.uuid4()
+    fake_review_bot = _FakeTelegramReviewBotService()
 
     async with factory() as session:
         session.add(
@@ -940,6 +942,7 @@ async def test_run_content_profile_prefers_seeded_profile_from_early_glossary(db
         await session.commit()
 
     monkeypatch.setattr(steps_mod, "get_session_factory", lambda: factory)
+    monkeypatch.setattr(steps_mod, "get_telegram_review_bot_service", lambda: fake_review_bot)
 
     async def fake_load_content_profile_user_memory(*args, **kwargs):
         return {}
@@ -968,6 +971,215 @@ async def test_run_content_profile_prefers_seeded_profile_from_early_glossary(db
         draft = artifact_result.scalar_one()
         assert draft.data_json["subject_brand"] == "Loop露普"
         assert draft.data_json["engagement_question"] == "你更看重 UV 还是主灯？"
+
+    assert fake_review_bot.content_profile_notifications == [job_id]
+
+
+@pytest.mark.asyncio
+async def test_run_content_profile_reuses_strict_cache_for_identical_inputs(db_engine, monkeypatch, tmp_path: Path):
+    import roughcut.llm_cache as llm_cache_mod
+    import roughcut.pipeline.steps as steps_mod
+
+    factory = async_sessionmaker(db_engine, expire_on_commit=False)
+    job_id = uuid.uuid4()
+    source_path = tmp_path / "source.mp4"
+    source_path.write_bytes(b"video")
+    fake_review_bot = _FakeTelegramReviewBotService()
+    settings = SimpleNamespace(
+        auto_confirm_content_profile=False,
+        content_profile_review_threshold=0.72,
+        content_profile_auto_review_min_accuracy=0.9,
+        content_profile_auto_review_min_samples=20,
+        output_dir=str(tmp_path / "output"),
+        step_heartbeat_interval_sec=20,
+    )
+    infer_calls = {"count": 0}
+
+    async with factory() as session:
+        session.add(
+            Job(
+                id=job_id,
+                source_path="jobs/demo/source.mp4",
+                source_name="source.mp4",
+                file_hash="hash-demo",
+                status="processing",
+                language="zh-CN",
+                channel_profile="screen_tutorial",
+            )
+        )
+        session.add(JobStep(job_id=job_id, step_name="content_profile", status="running"))
+        session.add(JobStep(job_id=job_id, step_name="summary_review", status="pending"))
+        session.add(
+            SubtitleItem(
+                job_id=job_id,
+                version=1,
+                item_index=0,
+                start_time=0.0,
+                end_time=1.0,
+                text_raw="这期演示剪映里怎么批量处理字幕样式",
+                text_norm="这期演示剪映里怎么批量处理字幕样式",
+                text_final="这期演示剪映里怎么批量处理字幕样式",
+            )
+        )
+        await session.commit()
+
+    monkeypatch.setattr(steps_mod, "get_session_factory", lambda: factory)
+    monkeypatch.setattr(steps_mod, "get_settings", lambda: settings)
+    monkeypatch.setattr(steps_mod, "get_telegram_review_bot_service", lambda: fake_review_bot)
+    monkeypatch.setattr(llm_cache_mod, "get_settings", lambda: settings)
+    monkeypatch.setattr(steps_mod, "list_packaging_assets", lambda: {"config": {"copy_style": "attention_grabbing"}})
+
+    async def fake_load_content_profile_user_memory(*args, **kwargs):
+        return {}
+
+    async def fake_resolve_source(*args, **kwargs):
+        return source_path
+
+    async def fake_infer_content_profile(**kwargs):
+        infer_calls["count"] += 1
+        return {
+            "preset_name": "screen_tutorial",
+            "subject_type": "剪映字幕工作流",
+            "video_theme": "批量字幕样式调整步骤讲解",
+            "summary": "讲清批量字幕样式调整流程。",
+            "engagement_question": "你做批量字幕时最容易卡在哪一步？",
+            "search_queries": ["剪映 批量字幕 样式"],
+            "cover_title": {"top": "剪映", "main": "字幕样式流程", "bottom": "批量调整"},
+        }
+
+    monkeypatch.setattr(steps_mod, "load_content_profile_user_memory", fake_load_content_profile_user_memory)
+    monkeypatch.setattr(steps_mod, "_resolve_source", fake_resolve_source)
+    monkeypatch.setattr(steps_mod, "infer_content_profile", fake_infer_content_profile)
+
+    await run_content_profile(str(job_id))
+    await run_content_profile(str(job_id))
+
+    assert infer_calls["count"] == 1
+
+    async with factory() as session:
+        step_result = await session.execute(
+            select(JobStep).where(JobStep.job_id == job_id, JobStep.step_name == "content_profile")
+        )
+        step = step_result.scalar_one()
+        assert step.metadata_["cache"]["content_profile"]["hit"] is True
+
+
+@pytest.mark.asyncio
+async def test_run_platform_package_reuses_cached_fact_sheet_and_packaging(db_engine, monkeypatch, tmp_path: Path):
+    import roughcut.llm_cache as llm_cache_mod
+    import roughcut.pipeline.steps as steps_mod
+
+    factory = async_sessionmaker(db_engine, expire_on_commit=False)
+    job_id = uuid.uuid4()
+    output_path = tmp_path / "rendered.mp4"
+    output_path.write_bytes(b"rendered")
+    settings = SimpleNamespace(
+        output_dir=str(tmp_path / "output"),
+        step_heartbeat_interval_sec=20,
+    )
+    call_counts = {"fact_sheet": 0, "packaging": 0}
+
+    async with factory() as session:
+        session.add(
+            Job(
+                id=job_id,
+                source_path="jobs/demo/source.mp4",
+                source_name="source.mp4",
+                file_hash="hash-demo",
+                status="processing",
+                language="zh-CN",
+                channel_profile="edc_tactical",
+            )
+        )
+        session.add(JobStep(job_id=job_id, step_name="platform_package", status="running"))
+        session.add(
+            Artifact(
+                job_id=job_id,
+                artifact_type="content_profile_final",
+                data_json={
+                    "subject_brand": "Loop露普",
+                    "subject_model": "SK05二代Pro UV版",
+                    "subject_type": "EDC手电",
+                    "video_theme": "上手开箱",
+                    "search_queries": ["Loop露普 SK05 UV"],
+                    "evidence": [
+                        {"title": "Spec 1", "url": "https://example.com/spec1", "snippet": "4360流明"},
+                        {"title": "Spec 2", "url": "https://example.com/spec2", "snippet": "405米"},
+                    ],
+                },
+            )
+        )
+        session.add(
+            SubtitleItem(
+                job_id=job_id,
+                version=1,
+                item_index=0,
+                start_time=0.0,
+                end_time=1.0,
+                text_raw="这次重点看紫外和主灯。",
+                text_norm="这次重点看紫外和主灯。",
+                text_final="这次重点看紫外和主灯。",
+            )
+        )
+        session.add(
+            RenderOutput(
+                job_id=job_id,
+                status="done",
+                output_path=str(output_path),
+            )
+        )
+        await session.commit()
+
+    monkeypatch.setattr(steps_mod, "get_session_factory", lambda: factory)
+    monkeypatch.setattr(steps_mod, "list_packaging_assets", lambda: {"config": {"copy_style": "attention_grabbing"}})
+    monkeypatch.setattr(steps_mod, "_select_default_avatar_profile", lambda: {"display_name": "作者A"})
+    monkeypatch.setattr(llm_cache_mod, "get_settings", lambda: settings)
+
+    async def fake_build_packaging_fact_sheet(**kwargs):
+        call_counts["fact_sheet"] += 1
+        return {
+            "status": "verified",
+            "verified_facts": [{"fact": "总光通量 4360 lm", "source_url": "https://example.com/spec1", "source_title": "Spec 1"}],
+            "official_sources": [{"title": "Spec 1", "url": "https://example.com/spec1"}],
+            "guardrail_summary": "",
+        }
+
+    async def fake_generate_platform_packaging(**kwargs):
+        call_counts["packaging"] += 1
+        return {
+            "highlights": {
+                "product": "Loop露普 SK05二代Pro UV版",
+                "video_type": "开箱体验",
+                "strongest_selling_point": "主灯和紫外双线都能看",
+                "strongest_emotion": "终于到手",
+                "title_hook": "这次升级到底值不值",
+                "engagement_question": "你更看重 UV 还是主灯？",
+            },
+            "platforms": {
+                "bilibili": {"titles": ["标题1", "标题2", "标题3", "标题4", "标题5"], "description": "简介", "tags": ["EDC"]},
+                "xiaohongshu": {"titles": ["小红书1", "小红书2", "小红书3", "小红书4", "小红书5"], "description": "正文", "tags": ["手电"]},
+                "douyin": {"titles": ["抖音1", "抖音2", "抖音3", "抖音4", "抖音5"], "description": "短简介", "tags": ["开箱"]},
+                "kuaishou": {"titles": ["快手1", "快手2", "快手3", "快手4", "快手5"], "description": "快手简介", "tags": ["玩家"]},
+                "wechat_channels": {"titles": ["视频号1", "视频号2", "视频号3", "视频号4", "视频号5"], "description": "视频号简介", "tags": ["分享"]},
+            },
+            "fact_sheet": kwargs["fact_sheet"],
+        }
+
+    monkeypatch.setattr(steps_mod, "build_packaging_fact_sheet", fake_build_packaging_fact_sheet)
+    monkeypatch.setattr(steps_mod, "generate_platform_packaging", fake_generate_platform_packaging)
+
+    await run_platform_package(str(job_id))
+    await run_platform_package(str(job_id))
+
+    assert call_counts == {"fact_sheet": 1, "packaging": 1}
+
+    async with factory() as session:
+        step_result = await session.execute(
+            select(JobStep).where(JobStep.job_id == job_id, JobStep.step_name == "platform_package")
+        )
+        step = step_result.scalar_one()
+        assert step.metadata_["cache"]["platform_fact_sheet"]["hit"] is True
+        assert step.metadata_["cache"]["platform_packaging"]["hit"] is True
 
 
 @pytest.mark.asyncio

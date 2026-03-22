@@ -6,6 +6,7 @@ import httpx
 
 from roughcut.config import get_settings
 from roughcut.providers.reasoning.base import Message, ReasoningProvider, ReasoningResponse
+from roughcut.usage import record_usage_event
 
 
 class OllamaReasoningProvider(ReasoningProvider):
@@ -47,4 +48,10 @@ class OllamaReasoningProvider(ReasoningProvider):
             "prompt_tokens": data.get("prompt_eval_count", 0),
             "completion_tokens": data.get("eval_count", 0),
         }
+        await record_usage_event(
+            provider="ollama",
+            model=self._model,
+            usage=usage,
+            kind="reasoning",
+        )
         return ReasoningResponse(content=content, usage=usage, model=self._model)

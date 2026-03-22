@@ -23,9 +23,12 @@ from roughcut.api.schemas import (
     ContentProfileReviewOut,
     JobActivityOut,
     JobOut,
+    JobsUsageSummaryOut,
+    JobsUsageTrendOut,
     OpenFolderOut,
     ReportOut,
     ReviewApplyRequest,
+    TokenUsageReportOut,
 )
 from roughcut.config import get_settings
 from roughcut.config import apply_runtime_overrides
@@ -69,6 +72,7 @@ from roughcut.review.content_profile_review_stats import (
 from roughcut.review.domain_glossaries import detect_glossary_domains
 from roughcut.review.report import generate_report
 from roughcut.storage.s3 import get_storage, job_key
+from roughcut.usage import build_job_token_report, build_jobs_usage_summary, build_jobs_usage_trend
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
 
@@ -115,6 +119,64 @@ async def list_jobs(
     jobs = result.scalars().all()
     _attach_job_previews(jobs)
     return jobs
+
+
+@router.get("/usage-summary", response_model=JobsUsageSummaryOut)
+async def get_jobs_usage_summary(limit: int = 60, session: AsyncSession = Depends(get_session)):
+    normalized_limit = max(1, min(int(limit or 60), 500))
+    result = await session.execute(
+        select(Job)
+        .options(selectinload(Job.steps))
+        .order_by(Job.updated_at.desc())
+        .limit(normalized_limit)
+    )
+    jobs = result.scalars().all()
+    summary = build_jobs_usage_summary(jobs, step_labels=STEP_LABELS)
+    return JobsUsageSummaryOut(
+        job_count=int(summary.get("job_count") or 0),
+        jobs_with_telemetry=int(summary.get("jobs_with_telemetry") or 0),
+        total_calls=int(summary.get("total_calls") or 0),
+        total_prompt_tokens=int(summary.get("total_prompt_tokens") or 0),
+        total_completion_tokens=int(summary.get("total_completion_tokens") or 0),
+        total_tokens=int(summary.get("total_tokens") or 0),
+        cache=dict(summary.get("cache") or {}),
+        top_steps=list(summary.get("top_steps") or []),
+        top_models=list(summary.get("top_models") or []),
+        top_providers=list(summary.get("top_providers") or []),
+    )
+
+
+@router.get("/usage-trend", response_model=JobsUsageTrendOut)
+async def get_jobs_usage_trend(
+    days: int = 7,
+    limit: int = 120,
+    focus_type: str | None = None,
+    focus_name: str | None = None,
+    step_name: str | None = None,
+    session: AsyncSession = Depends(get_session),
+):
+    normalized_limit = max(1, min(int(limit or 120), 500))
+    result = await session.execute(
+        select(Job)
+        .options(selectinload(Job.steps))
+        .order_by(Job.updated_at.desc())
+        .limit(normalized_limit)
+    )
+    jobs = result.scalars().all()
+    trend = build_jobs_usage_trend(
+        jobs,
+        days=days,
+        step_labels=STEP_LABELS,
+        focus_type=focus_type,
+        focus_name=focus_name,
+        step_name=step_name,
+    )
+    return JobsUsageTrendOut(
+        days=int(trend.get("days") or 7),
+        focus_type=trend.get("focus_type"),
+        focus_name=trend.get("focus_name"),
+        points=list(trend.get("points") or []),
+    )
 
 
 @router.post("", response_model=JobOut, status_code=status.HTTP_201_CREATED)
@@ -958,6 +1020,29 @@ async def get_job_activity(job_id: uuid.UUID, session: AsyncSession = Depends(ge
         render=render_payload,
         decisions=decisions,
         events=events,
+    )
+
+
+@router.get("/{job_id}/token-usage", response_model=TokenUsageReportOut)
+async def get_job_token_usage(job_id: uuid.UUID, session: AsyncSession = Depends(get_session)):
+    job_result = await session.execute(
+        select(Job).options(selectinload(Job.steps)).where(Job.id == job_id)
+    )
+    job = job_result.scalar_one_or_none()
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    report = build_job_token_report(job.steps or [], step_labels=STEP_LABELS)
+    return TokenUsageReportOut(
+        job_id=str(job.id),
+        has_telemetry=bool(report.get("has_telemetry")),
+        total_calls=int(report.get("total_calls") or 0),
+        total_prompt_tokens=int(report.get("total_prompt_tokens") or 0),
+        total_completion_tokens=int(report.get("total_completion_tokens") or 0),
+        total_tokens=int(report.get("total_tokens") or 0),
+        steps=list(report.get("steps") or []),
+        models=list(report.get("models") or []),
+        cache=dict(report.get("cache") or {}),
     )
 
 

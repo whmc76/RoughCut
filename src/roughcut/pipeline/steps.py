@@ -55,6 +55,7 @@ from roughcut.media.subtitles import remap_subtitles_to_timeline
 from roughcut.media.probe import probe, validate_media
 from roughcut.media.render import render_video
 from roughcut.media.silence import detect_silence
+from roughcut.llm_cache import build_cache_key, build_cache_metadata, load_cached_entry, save_cached_json
 from roughcut.packaging.library import list_packaging_assets, resolve_packaging_plan_for_job
 from roughcut.providers.factory import get_avatar_provider, get_reasoning_provider, get_voice_provider
 from roughcut.providers.reasoning.base import Message
@@ -62,6 +63,7 @@ from roughcut.pipeline.quality import _compute_subtitle_sync_check
 from roughcut.review.content_profile import (
     apply_identity_review_guard,
     assess_content_profile_automation,
+    build_content_profile_cache_fingerprint,
     build_transcript_excerpt,
     enrich_content_profile,
     infer_content_profile,
@@ -70,7 +72,15 @@ from roughcut.review.content_profile import (
 from roughcut.review.content_profile_memory import load_content_profile_user_memory
 from roughcut.review.domain_glossaries import filter_scoped_glossary_terms, merge_glossary_terms, resolve_builtin_glossary_terms
 from roughcut.review.glossary_engine import apply_glossary_corrections
-from roughcut.review.platform_copy import generate_platform_packaging, save_platform_packaging_markdown
+from roughcut.review.platform_copy import (
+    build_packaging_fact_sheet,
+    build_packaging_fact_sheet_cache_fingerprint,
+    build_packaging_prompt_brief,
+    build_platform_packaging_cache_fingerprint,
+    generate_platform_packaging,
+    packaging_fact_sheet_cache_allowed,
+    save_platform_packaging_markdown,
+)
 from roughcut.review.subtitle_memory import build_subtitle_review_memory, build_transcription_prompt
 from roughcut.review.subtitle_translation import (
     detect_subtitle_language,
@@ -82,6 +92,7 @@ from roughcut.review.telegram_bot import get_telegram_review_bot_service
 from roughcut.speech.postprocess import save_subtitle_items, split_into_subtitles
 from roughcut.speech.transcribe import transcribe_audio
 from roughcut.storage.s3 import get_storage, job_key
+from roughcut.usage import track_step_usage, track_usage_operation
 
 
 STEP_LABELS = {
@@ -150,6 +161,57 @@ async def _set_step_progress(
         metadata["elapsed_seconds"] = round(elapsed_seconds, 3)
     step.metadata_ = metadata
     await session.commit()
+
+
+def _set_step_cache_metadata(step: JobStep | None, cache_name: str, cache_metadata: dict[str, Any]) -> None:
+    if step is None:
+        return
+    metadata = dict(step.metadata_ or {})
+    cache_block = dict(metadata.get("cache") or {})
+    cache_block[cache_name] = cache_metadata
+    metadata["cache"] = cache_block
+    step.metadata_ = metadata
+
+
+def _extract_usage_snapshot(metadata: dict[str, Any] | None) -> dict[str, int]:
+    usage = dict((metadata or {}).get("llm_usage") or {})
+    prompt_tokens = max(0, int(usage.get("prompt_tokens") or 0))
+    completion_tokens = max(0, int(usage.get("completion_tokens") or 0))
+    calls = max(0, int(usage.get("calls") or 0))
+    return {
+        "calls": calls,
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "total_tokens": prompt_tokens + completion_tokens,
+    }
+
+
+def _usage_delta(after: dict[str, Any] | None, before: dict[str, Any] | None) -> dict[str, int] | None:
+    after_snapshot = after or {}
+    before_snapshot = before or {}
+    delta = {
+        "calls": max(0, int(after_snapshot.get("calls") or 0) - int(before_snapshot.get("calls") or 0)),
+        "prompt_tokens": max(
+            0,
+            int(after_snapshot.get("prompt_tokens") or 0) - int(before_snapshot.get("prompt_tokens") or 0),
+        ),
+        "completion_tokens": max(
+            0,
+            int(after_snapshot.get("completion_tokens") or 0) - int(before_snapshot.get("completion_tokens") or 0),
+        ),
+    }
+    delta["total_tokens"] = delta["prompt_tokens"] + delta["completion_tokens"]
+    return delta if delta["calls"] > 0 or delta["total_tokens"] > 0 else None
+
+
+async def _read_persisted_step_usage_snapshot(step_id: uuid.UUID | None) -> dict[str, int]:
+    if step_id is None:
+        return {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+    async with get_session_factory()() as session:
+        step = await session.get(JobStep, step_id)
+        if step is None:
+            return {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        return _extract_usage_snapshot(dict(step.metadata_ or {}))
 
 
 def _spawn_step_heartbeat(
@@ -820,6 +882,7 @@ async def run_content_profile(job_id: str) -> dict:
             }
             for item in subtitle_items
         ]
+        transcript_excerpt = build_transcript_excerpt(subtitle_dicts)
         glossary_result = await session.execute(select(GlossaryTerm))
         glossary_terms = glossary_result.scalars().all()
         effective_glossary_terms = _build_effective_glossary_terms(
@@ -840,36 +903,134 @@ async def run_content_profile(job_id: str) -> dict:
             if seeded_profile_artifact and isinstance(seeded_profile_artifact.data_json, dict)
             else {}
         )
+        copy_style = str(
+            packaging_config.get("copy_style")
+            or seeded_profile.get("copy_style")
+            or "attention_grabbing"
+        )
+        infer_cache_namespace = "content_profile.infer"
+        infer_cache_fingerprint = build_content_profile_cache_fingerprint(
+            source_name=job.source_name,
+            source_file_hash=job.file_hash,
+            channel_profile=job.channel_profile,
+            transcript_excerpt=transcript_excerpt,
+            glossary_terms=effective_glossary_terms,
+            user_memory=user_memory,
+            include_research=False,
+            copy_style=copy_style,
+        )
+        infer_cache_key = build_cache_key(infer_cache_namespace, infer_cache_fingerprint)
+        cached_infer_entry = load_cached_entry(infer_cache_namespace, infer_cache_key)
 
-        if seeded_profile:
-            await _set_step_progress(session, step, detail="基于前置校正结果补强内容画像", progress=0.55)
-            seeded_profile["copy_style"] = str(
-                packaging_config.get("copy_style")
-                or seeded_profile.get("copy_style")
-                or "attention_grabbing"
+        if cached_infer_entry:
+            _set_step_cache_metadata(
+                step,
+                "content_profile",
+                build_cache_metadata(
+                    infer_cache_namespace,
+                    infer_cache_key,
+                    hit=True,
+                    usage_baseline=cached_infer_entry.get("usage_baseline"),
+                ),
             )
-            content_profile = await enrich_content_profile(
-                profile=seeded_profile,
+            content_profile = dict(cached_infer_entry.get("result") or {})
+        elif seeded_profile:
+            await _set_step_progress(session, step, detail="基于前置校正结果补强内容画像", progress=0.55)
+            seeded_profile["copy_style"] = copy_style
+            cache_namespace = "content_profile.enrich"
+            cache_fingerprint = build_content_profile_cache_fingerprint(
                 source_name=job.source_name,
+                source_file_hash=job.file_hash,
                 channel_profile=job.channel_profile,
-                transcript_excerpt=build_transcript_excerpt(subtitle_dicts),
+                transcript_excerpt=transcript_excerpt,
                 glossary_terms=effective_glossary_terms,
                 user_memory=user_memory,
                 include_research=False,
+                copy_style=copy_style,
+                seeded_profile=seeded_profile,
             )
+            cache_key = build_cache_key(cache_namespace, cache_fingerprint)
+            cached_profile_entry = load_cached_entry(cache_namespace, cache_key)
+            _set_step_cache_metadata(
+                step,
+                "content_profile",
+                build_cache_metadata(
+                    cache_namespace,
+                    cache_key,
+                    hit=bool(cached_profile_entry),
+                    usage_baseline=(cached_profile_entry or {}).get("usage_baseline"),
+                ),
+            )
+            if cached_profile_entry:
+                content_profile = dict(cached_profile_entry.get("result") or {})
+            else:
+                usage_before = await _read_persisted_step_usage_snapshot(step.id if step else None)
+                with track_step_usage(job_id=job.id, step_id=step.id, step_name="content_profile"):
+                    content_profile = await enrich_content_profile(
+                        profile=seeded_profile,
+                        source_name=job.source_name,
+                        channel_profile=job.channel_profile,
+                        transcript_excerpt=transcript_excerpt,
+                        glossary_terms=effective_glossary_terms,
+                        user_memory=user_memory,
+                        include_research=False,
+                    )
+                usage_after = await _read_persisted_step_usage_snapshot(step.id if step else None)
+                usage_baseline = _usage_delta(usage_after, usage_before)
+                save_cached_json(
+                    cache_namespace,
+                    cache_key,
+                    fingerprint=cache_fingerprint,
+                    result=content_profile,
+                    usage_baseline=usage_baseline,
+                )
         else:
+            _set_step_cache_metadata(
+                step,
+                "content_profile",
+                build_cache_metadata(infer_cache_namespace, infer_cache_key, hit=False),
+            )
             with tempfile.TemporaryDirectory() as tmpdir:
                 source_path = await _resolve_source(job, tmpdir, expected_hash=job.file_hash)
                 await _set_step_progress(session, step, detail="抽取画面并分析主题、主体与剪辑预设", progress=0.55)
-                content_profile = await infer_content_profile(
-                    source_path=source_path,
+                usage_before = await _read_persisted_step_usage_snapshot(step.id if step else None)
+                with track_step_usage(job_id=job.id, step_id=step.id, step_name="content_profile"):
+                    content_profile = await infer_content_profile(
+                        source_path=source_path,
+                        source_name=job.source_name,
+                        subtitle_items=subtitle_dicts,
+                        channel_profile=job.channel_profile,
+                        user_memory=user_memory,
+                        glossary_terms=effective_glossary_terms,
+                        include_research=False,
+                        copy_style=copy_style,
+                    )
+                usage_after = await _read_persisted_step_usage_snapshot(step.id if step else None)
+                usage_baseline = _usage_delta(usage_after, usage_before)
+                save_cached_json(
+                    infer_cache_namespace,
+                    infer_cache_key,
+                    fingerprint=infer_cache_fingerprint,
+                    result=content_profile,
+                    usage_baseline=usage_baseline,
+                )
+                enrich_cache_namespace = "content_profile.enrich"
+                enrich_cache_fingerprint = build_content_profile_cache_fingerprint(
                     source_name=job.source_name,
-                    subtitle_items=subtitle_dicts,
+                    source_file_hash=job.file_hash,
                     channel_profile=job.channel_profile,
-                    user_memory=user_memory,
+                    transcript_excerpt=transcript_excerpt,
                     glossary_terms=effective_glossary_terms,
+                    user_memory=user_memory,
                     include_research=False,
-                    copy_style=str(packaging_config.get("copy_style") or "attention_grabbing"),
+                    copy_style=copy_style,
+                    seeded_profile=content_profile,
+                )
+                save_cached_json(
+                    enrich_cache_namespace,
+                    build_cache_key(enrich_cache_namespace, enrich_cache_fingerprint),
+                    fingerprint=enrich_cache_fingerprint,
+                    result=content_profile,
                 )
         content_profile = apply_identity_review_guard(
             content_profile,
@@ -1048,16 +1209,17 @@ async def run_glossary_review(job_id: str) -> dict:
             with tempfile.TemporaryDirectory() as tmpdir:
                 source_path = await _resolve_source(job, tmpdir, expected_hash=job.file_hash)
                 packaging_config = (list_packaging_assets().get("config") or {})
-                content_profile = await infer_content_profile(
-                    source_path=source_path,
-                    source_name=job.source_name,
-                    subtitle_items=subtitle_dicts,
-                    channel_profile=job.channel_profile,
-                    user_memory=user_memory,
-                    glossary_terms=effective_glossary_terms,
-                    include_research=False,
-                    copy_style=str(packaging_config.get("copy_style") or "attention_grabbing"),
-                )
+                with track_step_usage(job_id=job.id, step_id=step.id, step_name="glossary_review"):
+                    content_profile = await infer_content_profile(
+                        source_path=source_path,
+                        source_name=job.source_name,
+                        subtitle_items=subtitle_dicts,
+                        channel_profile=job.channel_profile,
+                        user_memory=user_memory,
+                        glossary_terms=effective_glossary_terms,
+                        include_research=False,
+                        copy_style=str(packaging_config.get("copy_style") or "attention_grabbing"),
+                    )
         else:
             packaging_config = (list_packaging_assets().get("config") or {})
             content_profile["copy_style"] = str(
@@ -1065,15 +1227,16 @@ async def run_glossary_review(job_id: str) -> dict:
                 or content_profile.get("copy_style")
                 or "attention_grabbing"
             )
-            content_profile = await enrich_content_profile(
-                profile=content_profile,
-                source_name=job.source_name,
-                channel_profile=job.channel_profile,
-                transcript_excerpt=str(content_profile.get("transcript_excerpt") or ""),
-                glossary_terms=effective_glossary_terms,
-                user_memory=user_memory,
-                include_research=False,
-            )
+            with track_step_usage(job_id=job.id, step_id=step.id, step_name="glossary_review"):
+                content_profile = await enrich_content_profile(
+                    profile=content_profile,
+                    source_name=job.source_name,
+                    channel_profile=job.channel_profile,
+                    transcript_excerpt=str(content_profile.get("transcript_excerpt") or ""),
+                    glossary_terms=effective_glossary_terms,
+                    user_memory=user_memory,
+                    include_research=False,
+                )
         content_profile["creative_profile"] = _job_creative_profile(job)
         recent_subtitles = await _load_recent_subtitle_examples(
             session,
@@ -1204,11 +1367,12 @@ async def run_subtitle_translation(job_id: str) -> dict:
             detail=f"翻译校对后的字幕（{source_language} -> {target_language}）",
             progress=0.72,
         )
-        translation = await translate_subtitle_items(
-            subtitle_dicts,
-            target_language_mode="auto",
-            preferred_ui_language=preferred_ui_language,
-        )
+        with track_step_usage(job_id=job.id, step_id=step.id, step_name="subtitle_translation"):
+            translation = await translate_subtitle_items(
+                subtitle_dicts,
+                target_language_mode="auto",
+                preferred_ui_language=preferred_ui_language,
+            )
         session.add(
             Artifact(
                 job_id=job.id,
@@ -1273,12 +1437,13 @@ async def run_ai_director(job_id: str) -> dict:
         content_profile = profile_artifact.data_json if profile_artifact and profile_artifact.data_json else {}
 
         await _set_step_progress(session, step, detail="生成导演建议稿与重配音计划", progress=0.68)
-        plan = await build_ai_director_plan(
-            job_id=str(job.id),
-            source_name=job.source_name,
-            subtitle_items=subtitle_dicts,
-            content_profile=content_profile,
-        )
+        with track_step_usage(job_id=job.id, step_id=step.id, step_name="ai_director"):
+            plan = await build_ai_director_plan(
+                job_id=str(job.id),
+                source_name=job.source_name,
+                subtitle_items=subtitle_dicts,
+                content_profile=content_profile,
+            )
         voice_execution: dict[str, Any] | None = None
         voice_segments = list(plan.get("voiceover_segments") or [])
         if voice_segments:
@@ -1656,12 +1821,13 @@ async def run_edit_plan(job_id: str) -> dict:
         packaging_plan = resolve_packaging_plan_for_job(str(job.id), content_profile=content_profile)
         keep_segments = [segment for segment in decision.to_dict().get("segments", []) if segment.get("type") == "keep"]
         remapped_subtitles = remap_subtitles_to_timeline(subtitle_dicts, keep_segments)
-        packaging_plan["insert"] = await _plan_insert_asset_slot(
-            job_id=str(job.id),
-            insert_plan=packaging_plan.get("insert"),
-            subtitle_items=remapped_subtitles,
-            content_profile=content_profile,
-        )
+        with track_step_usage(job_id=job.id, step_id=step.id, step_name="edit_plan"):
+            packaging_plan["insert"] = await _plan_insert_asset_slot(
+                job_id=str(job.id),
+                insert_plan=packaging_plan.get("insert"),
+                subtitle_items=remapped_subtitles,
+                content_profile=content_profile,
+            )
         packaging_plan["music"] = await _plan_music_entry(
             music_plan=packaging_plan.get("music"),
             subtitle_items=remapped_subtitles,
@@ -2293,17 +2459,100 @@ async def run_platform_package(job_id: str) -> dict:
 
     packaging_config = (list_packaging_assets().get("config") or {})
     author_profile = _select_default_avatar_profile()
-    packaging = await generate_platform_packaging(
+    copy_style = str(
+        packaging_config.get("copy_style")
+        or (content_profile or {}).get("copy_style")
+        or "attention_grabbing"
+    )
+    prompt_brief = build_packaging_prompt_brief(
         source_name=job.source_name,
         content_profile=content_profile,
         subtitle_items=subtitle_dicts,
-        copy_style=str(
-            packaging_config.get("copy_style")
-            or (content_profile or {}).get("copy_style")
-            or "attention_grabbing"
-        ),
+    )
+
+    fact_sheet_cache_metadata: dict[str, Any] | None = None
+    if packaging_fact_sheet_cache_allowed(content_profile):
+        fact_sheet_cache_namespace = "platform_package.fact_sheet"
+        fact_sheet_cache_fingerprint = build_packaging_fact_sheet_cache_fingerprint(
+            source_name=job.source_name,
+            content_profile=content_profile,
+            subtitle_items=subtitle_dicts,
+        )
+        fact_sheet_cache_key = build_cache_key(fact_sheet_cache_namespace, fact_sheet_cache_fingerprint)
+        cached_fact_sheet_entry = load_cached_entry(fact_sheet_cache_namespace, fact_sheet_cache_key)
+        fact_sheet_cache_metadata = build_cache_metadata(
+            fact_sheet_cache_namespace,
+            fact_sheet_cache_key,
+            hit=bool(cached_fact_sheet_entry),
+            usage_baseline=(cached_fact_sheet_entry or {}).get("usage_baseline"),
+        )
+        if cached_fact_sheet_entry:
+            fact_sheet = dict(cached_fact_sheet_entry.get("result") or {})
+        else:
+            usage_before = await _read_persisted_step_usage_snapshot(step.id if step else None)
+            with track_step_usage(job_id=job.id, step_id=step.id if step else None, step_name="platform_package"):
+                fact_sheet = await build_packaging_fact_sheet(
+                    source_name=job.source_name,
+                    content_profile=content_profile,
+                    subtitle_items=subtitle_dicts,
+                )
+            usage_after = await _read_persisted_step_usage_snapshot(step.id if step else None)
+            usage_baseline = _usage_delta(usage_after, usage_before)
+            save_cached_json(
+                fact_sheet_cache_namespace,
+                fact_sheet_cache_key,
+                fingerprint=fact_sheet_cache_fingerprint,
+                result=fact_sheet,
+                usage_baseline=usage_baseline,
+            )
+    else:
+        with track_step_usage(job_id=job.id, step_id=step.id if step else None, step_name="platform_package"):
+            fact_sheet = await build_packaging_fact_sheet(
+                source_name=job.source_name,
+                content_profile=content_profile,
+                subtitle_items=subtitle_dicts,
+            )
+
+    packaging_cache_namespace = "platform_package.generate"
+    packaging_cache_fingerprint = build_platform_packaging_cache_fingerprint(
+        source_name=job.source_name,
+        prompt_brief=prompt_brief,
+        fact_sheet=fact_sheet,
+        copy_style=copy_style,
         author_profile=author_profile,
     )
+    packaging_cache_key = build_cache_key(packaging_cache_namespace, packaging_cache_fingerprint)
+    cached_packaging_entry = load_cached_entry(packaging_cache_namespace, packaging_cache_key)
+    packaging_cache_metadata = build_cache_metadata(
+        packaging_cache_namespace,
+        packaging_cache_key,
+        hit=bool(cached_packaging_entry),
+        usage_baseline=(cached_packaging_entry or {}).get("usage_baseline"),
+    )
+    if cached_packaging_entry:
+        packaging = dict(cached_packaging_entry.get("result") or {})
+        packaging["fact_sheet"] = fact_sheet
+    else:
+        usage_before = await _read_persisted_step_usage_snapshot(step.id if step else None)
+        with track_step_usage(job_id=job.id, step_id=step.id if step else None, step_name="platform_package"):
+            packaging = await generate_platform_packaging(
+                source_name=job.source_name,
+                content_profile=content_profile,
+                subtitle_items=subtitle_dicts,
+                copy_style=copy_style,
+                author_profile=author_profile,
+                prompt_brief=prompt_brief,
+                fact_sheet=fact_sheet,
+            )
+        usage_after = await _read_persisted_step_usage_snapshot(step.id if step else None)
+        usage_baseline = _usage_delta(usage_after, usage_before)
+        save_cached_json(
+            packaging_cache_namespace,
+            packaging_cache_key,
+            fingerprint=packaging_cache_fingerprint,
+            result=packaging,
+            usage_baseline=usage_baseline,
+        )
 
     output_mp4 = Path(render_output.output_path)
     output_md = output_mp4.with_name(f"{output_mp4.stem}_publish.md")
@@ -2333,6 +2582,9 @@ async def run_platform_package(job_id: str) -> dict:
         )
         session.add(artifact)
         if current_step is not None:
+            _set_step_cache_metadata(current_step, "platform_packaging", packaging_cache_metadata)
+            if fact_sheet_cache_metadata is not None:
+                _set_step_cache_metadata(current_step, "platform_fact_sheet", fact_sheet_cache_metadata)
             await _set_step_progress(session, current_step, detail="平台文案已生成", progress=1.0)
         await session.commit()
 
@@ -2554,15 +2806,16 @@ async def _plan_insert_asset_slot(
             f"\n候选字幕（已映射到剪后时间轴）：\n{transcript_excerpt}"
             f"\n如果拿不准，就返回 {fallback_sec:.1f} 附近的自然停顿。"
         )
-        response = await provider.complete(
-            [
-                Message(role="system", content="你是短视频植入编排助手，只输出 JSON。"),
-                Message(role="user", content=prompt),
-            ],
-            temperature=0.1,
-            max_tokens=300,
-            json_mode=True,
-        )
+        with track_usage_operation("render.insert_slot"):
+            response = await provider.complete(
+                [
+                    Message(role="system", content="你是短视频植入编排助手，只输出 JSON。"),
+                    Message(role="user", content=prompt),
+                ],
+                temperature=0.1,
+                max_tokens=300,
+                json_mode=True,
+            )
         data = response.as_json()
         chosen = float(data.get("insert_after_sec", fallback_sec) or fallback_sec)
         max_sec = float(candidates[-1].get("end_time", fallback_sec) or fallback_sec)

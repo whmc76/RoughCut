@@ -29,6 +29,9 @@ export function useJobWorkspace() {
   const queryClient = useQueryClient();
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
   const [keyword, setKeyword] = useState("");
+  const [usageTrendDays, setUsageTrendDays] = useState(7);
+  const [usageTrendFocusType, setUsageTrendFocusType] = useState("all");
+  const [usageTrendFocusName, setUsageTrendFocusName] = useState("");
   const [upload, setUpload] = useState<UploadForm>(EMPTY_UPLOAD);
   const [contentDraft, setContentDraft] = useState<Record<string, unknown>>({});
   const [reviewWorkflowMode, setReviewWorkflowMode] = useState("standard_edit");
@@ -37,6 +40,18 @@ export function useJobWorkspace() {
   const uploadDefaultsHydrated = useRef(false);
 
   const jobs = useQuery({ queryKey: ["jobs"], queryFn: api.listJobs, refetchInterval: 8_000 });
+  const usageSummary = useQuery({ queryKey: ["jobs-usage-summary", 60], queryFn: () => api.getJobsUsageSummary(60), refetchInterval: 12_000 });
+  const usageTrend = useQuery({
+    queryKey: ["jobs-usage-trend", usageTrendDays, 120, usageTrendFocusType, usageTrendFocusName],
+    queryFn: () =>
+      api.getJobsUsageTrend(
+        usageTrendDays,
+        120,
+        usageTrendFocusType !== "all" ? usageTrendFocusType : undefined,
+        usageTrendFocusName || undefined,
+      ),
+    refetchInterval: 12_000,
+  });
   const options = useQuery({ queryKey: ["config-options"], queryFn: api.getConfigOptions });
   const config = useQuery({ queryKey: ["config"], queryFn: api.getConfig });
   const packaging = useQuery({ queryKey: ["packaging"], queryFn: api.getPackaging });
@@ -56,6 +71,12 @@ export function useJobWorkspace() {
     queryKey: ["job-report", selectedJobId],
     queryFn: () => api.getJobReport(selectedJobId!),
     enabled: Boolean(selectedJobId),
+  });
+  const tokenUsage = useQuery({
+    queryKey: ["job-token-usage", selectedJobId],
+    queryFn: () => api.getJobTokenUsage(selectedJobId!),
+    enabled: Boolean(selectedJobId),
+    refetchInterval: selectedJobId ? 5_000 : false,
   });
   const timeline = useQuery({
     queryKey: ["job-timeline", selectedJobId],
@@ -119,9 +140,12 @@ export function useJobWorkspace() {
 
   const refreshAll = () => {
     void queryClient.invalidateQueries({ queryKey: ["jobs"] });
+    void queryClient.invalidateQueries({ queryKey: ["jobs-usage-summary"] });
+    void queryClient.invalidateQueries({ queryKey: ["jobs-usage-trend"] });
     if (selectedJobId) {
       void queryClient.invalidateQueries({ queryKey: ["job", selectedJobId] });
       void queryClient.invalidateQueries({ queryKey: ["job-activity", selectedJobId] });
+      void queryClient.invalidateQueries({ queryKey: ["job-token-usage", selectedJobId] });
       void queryClient.invalidateQueries({ queryKey: ["job-report", selectedJobId] });
       void queryClient.invalidateQueries({ queryKey: ["job-timeline", selectedJobId] });
       void queryClient.invalidateQueries({ queryKey: ["job-content-profile", selectedJobId] });
@@ -146,8 +170,11 @@ export function useJobWorkspace() {
         setSelectedJobId(null);
       }
       await queryClient.invalidateQueries({ queryKey: ["jobs"] });
+      await queryClient.invalidateQueries({ queryKey: ["jobs-usage-summary"] });
+      await queryClient.invalidateQueries({ queryKey: ["jobs-usage-trend"] });
       await queryClient.removeQueries({ queryKey: ["job", jobId] });
       await queryClient.removeQueries({ queryKey: ["job-activity", jobId] });
+      await queryClient.removeQueries({ queryKey: ["job-token-usage", jobId] });
       await queryClient.removeQueries({ queryKey: ["job-report", jobId] });
       await queryClient.removeQueries({ queryKey: ["job-timeline", jobId] });
       await queryClient.removeQueries({ queryKey: ["job-content-profile", jobId] });
@@ -165,7 +192,11 @@ export function useJobWorkspace() {
     onSuccess: async (job) => {
       setUpload(inheritedUploadDefaults);
       setSelectedJobId(job.id);
-      await queryClient.invalidateQueries({ queryKey: ["jobs"] });
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["jobs"] }),
+        queryClient.invalidateQueries({ queryKey: ["jobs-usage-summary"] }),
+        queryClient.invalidateQueries({ queryKey: ["jobs-usage-trend"] }),
+      ]);
     },
   });
   const confirmProfile = useMutation({
@@ -188,6 +219,8 @@ export function useJobWorkspace() {
       setReviewEnhancementModes(result.enhancement_modes ?? []);
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["jobs"] }),
+        queryClient.invalidateQueries({ queryKey: ["jobs-usage-summary"] }),
+        queryClient.invalidateQueries({ queryKey: ["jobs-usage-trend"] }),
         queryClient.invalidateQueries({ queryKey: ["job", selectedJobId] }),
         queryClient.invalidateQueries({ queryKey: ["job-content-profile", selectedJobId] }),
         queryClient.invalidateQueries({ queryKey: ["config"] }),
@@ -229,14 +262,23 @@ export function useJobWorkspace() {
     setSelectedJobId,
     keyword,
     setKeyword,
+    usageTrendDays,
+    setUsageTrendDays,
+    usageTrendFocusType,
+    setUsageTrendFocusType,
+    usageTrendFocusName,
+    setUsageTrendFocusName,
     upload,
     setUpload,
     contentDraft,
     setContentDraft,
     jobs,
+    usageSummary,
+    usageTrend,
     detail,
     activity,
     report,
+    tokenUsage,
     timeline,
     contentProfile,
     options,

@@ -9,6 +9,7 @@ import httpx
 from roughcut.config import get_settings
 from roughcut.providers.auth import resolve_credential
 from roughcut.providers.reasoning.base import extract_json_text
+from roughcut.usage import record_usage_event
 
 
 _VISION_MODEL_CACHE: str | None = None
@@ -92,6 +93,15 @@ async def _complete_once(
             response = await client.post(f"{settings.ollama_base_url.rstrip('/')}/api/chat", json=payload)
             response.raise_for_status()
             data = response.json()
+        await record_usage_event(
+            provider="ollama",
+            model=model,
+            usage={
+                "prompt_tokens": data.get("prompt_eval_count", 0),
+                "completion_tokens": data.get("eval_count", 0),
+            },
+            kind="multimodal",
+        )
         return _finalize_text(data.get("message", {}).get("content", ""), json_mode=json_mode)
 
     if provider in {"openai", "minimax"}:
@@ -115,6 +125,16 @@ async def _complete_once(
             )
             response.raise_for_status()
             data = response.json()
+        usage_data = data.get("usage", {}) or {}
+        await record_usage_event(
+            provider=provider,
+            model=str(data.get("model") or model),
+            usage={
+                "prompt_tokens": usage_data.get("prompt_tokens", 0),
+                "completion_tokens": usage_data.get("completion_tokens", 0),
+            },
+            kind="multimodal",
+        )
         return _finalize_text(data["choices"][0]["message"]["content"], json_mode=json_mode)
 
     if provider == "anthropic":
@@ -153,6 +173,16 @@ async def _complete_once(
             data = response.json()
         parts = data.get("content", []) or []
         text = "".join(part.get("text", "") for part in parts if part.get("type") == "text")
+        usage_data = data.get("usage", {}) or {}
+        await record_usage_event(
+            provider="anthropic",
+            model=str(data.get("model") or model),
+            usage={
+                "prompt_tokens": usage_data.get("input_tokens", 0),
+                "completion_tokens": usage_data.get("output_tokens", 0),
+            },
+            kind="multimodal",
+        )
         return _finalize_text(text, json_mode=json_mode)
 
     raise ValueError(f"Provider {provider} does not support multimodal completion")

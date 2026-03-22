@@ -402,8 +402,8 @@ curl http://localhost:8000/api/v1/jobs/{job_id}/report
 | `OUTPUT_DIR` | `data/output` | 成片输出目录 |
 | `OUTPUT_NAME_PATTERN` | `{date}_{stem}` | 输出文件名模板 |
 | `RENDER_DEBUG_DIR` | `logs/render-debug` | render 调试产物目录 |
-| `REASONING_PROVIDER` | `openai` | 推理后端：`openai` / `anthropic` / `minimax` / `ollama` |
-| `REASONING_MODEL` | `gpt-4o-mini` | 推理模型名称 |
+| `REASONING_PROVIDER` | `minimax` | 推理后端：`openai` / `anthropic` / `minimax` / `ollama` |
+| `REASONING_MODEL` | `MiniMax-M2.7-highspeed` | 推理模型名称 |
 | `MULTIMODAL_FALLBACK_PROVIDER` | `ollama` | 主模型视觉失败时的本地备份 provider |
 | `MULTIMODAL_FALLBACK_MODEL` | `""` | 主模型视觉失败时的本地备份视觉模型（空 = 自动探测） |
 | `SEARCH_PROVIDER` | `auto` | 搜索后端：优先主模型搜索桥接，失败回退本地搜索 |

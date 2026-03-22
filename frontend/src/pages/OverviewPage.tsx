@@ -5,6 +5,7 @@ import { PageHeader } from "../components/ui/PageHeader";
 import { PanelHeader } from "../components/ui/PanelHeader";
 import { useI18n } from "../i18n";
 import { StatCard } from "../components/ui/StatCard";
+import { JobsUsageTrendPanel } from "../features/jobs/JobsUsageTrendPanel";
 import { useOverviewWorkspace } from "../features/overview/useOverviewWorkspace";
 import { formatDate, statusLabel } from "../utils";
 
@@ -22,6 +23,54 @@ export function OverviewPage() {
         <StatCard label={t("overview.stats.watchRoots")} value={workspace.stats.watchRoots} />
         <StatCard label={t("overview.stats.glossary")} value={workspace.stats.glossary} />
       </div>
+
+      {workspace.usageSummary.data && (
+        <>
+          <div className="stats-grid compact">
+            <StatCard label={t("jobs.summary.totalTokens")} value={workspace.usageSummary.data.total_tokens.toLocaleString()} compact />
+            <StatCard label={t("jobs.summary.totalCalls")} value={workspace.usageSummary.data.total_calls.toLocaleString()} compact />
+            <StatCard label={t("jobs.summary.savedTokens")} value={workspace.usageSummary.data.cache.saved_total_tokens.toLocaleString()} compact />
+            <StatCard label={t("jobs.summary.cacheHitRate")} value={`${Math.round((workspace.usageSummary.data.cache.hit_rate || 0) * 100)}%`} compact />
+          </div>
+
+          <JobsUsageTrendPanel
+            title={t("jobs.summary.trendTitle")}
+            description={t("jobs.summary.trendDescription")}
+            trend={workspace.usageTrend.data}
+            actions={
+              <div className="usage-trend-actions">
+                <div className="mode-chip-list">
+                  {[7, 30].map((days) => (
+                    <button
+                      key={days}
+                      className={`mode-chip filter-chip ${workspace.usageTrendDays === days ? "selected" : ""}`}
+                      onClick={() => workspace.setUsageTrendDays(days)}
+                    >
+                      {days}d
+                    </button>
+                  ))}
+                </div>
+                <div className="mode-chip-list">
+                  {[
+                    { value: "all", label: t("jobs.summary.allDimensions") },
+                    { value: "step", label: t("jobs.summary.dimensionSteps") },
+                    { value: "model", label: t("jobs.summary.dimensionModels") },
+                    { value: "provider", label: t("jobs.summary.dimensionProviders") },
+                  ].map((dimension) => (
+                    <button
+                      key={dimension.value}
+                      className={`mode-chip filter-chip ${workspace.usageTrendFocusType === dimension.value ? "selected" : ""}`}
+                      onClick={() => workspace.setUsageTrendFocusType(dimension.value)}
+                    >
+                      {dimension.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            }
+          />
+        </>
+      )}
 
       <div className="panel-grid two-up">
         <section className="panel">

@@ -5,6 +5,7 @@ from typing import Any
 from roughcut.config import get_settings
 from roughcut.providers.factory import get_reasoning_provider, get_voice_provider
 from roughcut.providers.reasoning.base import Message
+from roughcut.usage import track_usage_operation
 
 
 def ai_director_mode_enabled(enhancement_modes: list[str] | tuple[str, ...] | None) -> bool:
@@ -36,15 +37,16 @@ async def build_ai_director_plan(
             f"\n字幕：{subtitle_items[:14]}"
             f"\n当前启发式草案：{heuristic}"
         )
-        response = await provider.complete(
-            [
-                Message(role="system", content="你是严谨的中文短视频导演和重配音策划。"),
-                Message(role="user", content=prompt),
-            ],
-            temperature=0.25,
-            max_tokens=1200,
-            json_mode=True,
-        )
+        with track_usage_operation("ai_director.plan"):
+            response = await provider.complete(
+                [
+                    Message(role="system", content="你是严谨的中文短视频导演和重配音策划。"),
+                    Message(role="user", content=prompt),
+                ],
+                temperature=0.25,
+                max_tokens=1200,
+                json_mode=True,
+            )
         llm_payload = response.as_json()
         if isinstance(llm_payload, dict):
             heuristic.update({key: value for key, value in llm_payload.items() if value})

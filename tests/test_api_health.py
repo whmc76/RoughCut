@@ -1306,6 +1306,460 @@ async def test_job_activity_stream(client: AsyncClient):
 
 
 @pytest.mark.asyncio
+async def test_job_token_usage_endpoint_returns_aggregated_report(client: AsyncClient):
+    from roughcut.db.models import Job, JobStep
+    from roughcut.db.session import get_session_factory
+
+    job_id = uuid.uuid4()
+
+    async with get_session_factory()() as session:
+        session.add(
+            Job(
+                id=job_id,
+                source_path="jobs/demo/source.mp4",
+                source_name="demo.mp4",
+                status="processing",
+                language="zh-CN",
+            )
+        )
+        session.add_all(
+            [
+                JobStep(
+                    job_id=job_id,
+                    step_name="content_profile",
+                    status="done",
+                    metadata_={
+                        "cache": {
+                            "content_profile": {
+                                "namespace": "content_profile.infer",
+                                "key": "cache-key-1",
+                                "hit": True,
+                            }
+                        },
+                        "llm_usage": {
+                            "calls": 2,
+                            "prompt_tokens": 1200,
+                            "completion_tokens": 320,
+                            "total_tokens": 1520,
+                            "by_operation": {
+                                "content_profile.visual_transcript_fuse": {
+                                    "calls": 1,
+                                    "prompt_tokens": 700,
+                                    "completion_tokens": 180,
+                                    "total_tokens": 880,
+                                },
+                                "content_profile.text_refine": {
+                                    "calls": 1,
+                                    "prompt_tokens": 500,
+                                    "completion_tokens": 140,
+                                    "total_tokens": 640,
+                                },
+                            },
+                            "by_model": {
+                                "MiniMax-M2.7-highspeed": {
+                                    "provider": "minimax",
+                                    "kind": "reasoning",
+                                    "calls": 2,
+                                    "prompt_tokens": 1200,
+                                    "completion_tokens": 320,
+                                    "total_tokens": 1520,
+                                }
+                            },
+                        }
+                    },
+                ),
+                JobStep(
+                    job_id=job_id,
+                    step_name="platform_package",
+                    status="running",
+                    metadata_={
+                        "llm_usage": {
+                            "calls": 1,
+                            "prompt_tokens": 860,
+                            "completion_tokens": 240,
+                            "total_tokens": 1100,
+                            "by_operation": {
+                                "platform_package.generate_packaging": {
+                                    "calls": 1,
+                                    "prompt_tokens": 860,
+                                    "completion_tokens": 240,
+                                    "total_tokens": 1100,
+                                }
+                            },
+                            "by_model": {
+                                "MiniMax-M2.7-highspeed": {
+                                    "provider": "minimax",
+                                    "kind": "reasoning",
+                                    "calls": 1,
+                                    "prompt_tokens": 860,
+                                    "completion_tokens": 240,
+                                    "total_tokens": 1100,
+                                }
+                            },
+                        }
+                    },
+                ),
+            ]
+        )
+        await session.commit()
+
+    response = await client.get(f"/api/v1/jobs/{job_id}/token-usage")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["job_id"] == str(job_id)
+    assert data["has_telemetry"] is True
+    assert data["total_calls"] == 3
+    assert data["total_prompt_tokens"] == 2060
+    assert data["total_completion_tokens"] == 560
+    assert data["total_tokens"] == 2620
+    assert data["cache"]["hits"] == 1
+    assert data["cache"]["avoided_calls"] == 1
+    assert data["steps"][0]["step_name"] == "content_profile"
+    assert data["steps"][0]["cache_entries"][0]["name"] == "content_profile"
+    assert data["steps"][0]["operations"][0]["operation"] == "content_profile.visual_transcript_fuse"
+    assert data["models"][0]["model"] == "MiniMax-M2.7-highspeed"
+
+
+@pytest.mark.asyncio
+async def test_jobs_usage_summary_endpoint_rolls_up_cache_and_tokens(client: AsyncClient):
+    from roughcut.db.models import Job, JobStep
+    from roughcut.db.session import get_session_factory
+
+    async with get_session_factory()() as session:
+        first_job_id = uuid.uuid4()
+        second_job_id = uuid.uuid4()
+        session.add_all(
+            [
+                Job(
+                    id=first_job_id,
+                    source_path="jobs/demo/one.mp4",
+                    source_name="one.mp4",
+                    status="done",
+                    language="zh-CN",
+                ),
+                Job(
+                    id=second_job_id,
+                    source_path="jobs/demo/two.mp4",
+                    source_name="two.mp4",
+                    status="done",
+                    language="zh-CN",
+                ),
+                JobStep(
+                    job_id=first_job_id,
+                    step_name="content_profile",
+                    status="done",
+                    metadata_={
+                        "cache": {
+                            "content_profile": {
+                                "namespace": "content_profile.infer",
+                                "key": "k1",
+                                "hit": True,
+                                "usage_baseline": {
+                                    "calls": 2,
+                                    "prompt_tokens": 1000,
+                                    "completion_tokens": 300,
+                                    "total_tokens": 1300,
+                                },
+                            }
+                        },
+                        "llm_usage": {
+                            "calls": 2,
+                            "prompt_tokens": 1000,
+                            "completion_tokens": 300,
+                            "total_tokens": 1300,
+                            "by_model": {
+                                "MiniMax-M2.7-highspeed": {
+                                    "provider": "minimax",
+                                    "kind": "reasoning",
+                                    "calls": 2,
+                                    "prompt_tokens": 1000,
+                                    "completion_tokens": 300,
+                                    "total_tokens": 1300,
+                                }
+                            },
+                        },
+                    },
+                ),
+                JobStep(
+                    job_id=second_job_id,
+                    step_name="platform_package",
+                    status="done",
+                    metadata_={
+                        "cache": {"platform_packaging": {"namespace": "platform_package.generate", "key": "k2", "hit": False}},
+                        "llm_usage": {
+                            "calls": 1,
+                            "prompt_tokens": 800,
+                            "completion_tokens": 200,
+                            "total_tokens": 1000,
+                            "by_model": {
+                                "gpt-4.1-mini": {
+                                    "provider": "openai",
+                                    "kind": "reasoning",
+                                    "calls": 1,
+                                    "prompt_tokens": 800,
+                                    "completion_tokens": 200,
+                                    "total_tokens": 1000,
+                                }
+                            },
+                        },
+                    },
+                ),
+            ]
+        )
+        await session.commit()
+
+    response = await client.get("/api/v1/jobs/usage-summary")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["job_count"] >= 2
+    assert data["jobs_with_telemetry"] >= 2
+    assert data["total_calls"] >= 3
+    assert data["total_tokens"] >= 2300
+    assert data["cache"]["hits"] >= 1
+    assert data["cache"]["misses"] >= 1
+    assert data["cache"]["saved_total_tokens"] >= 1300
+    assert any(item["step_name"] == "content_profile" for item in data["top_steps"])
+    assert any(item["model"] == "MiniMax-M2.7-highspeed" for item in data["top_models"])
+    assert any(item["provider"] == "minimax" for item in data["top_providers"])
+
+
+@pytest.mark.asyncio
+async def test_jobs_usage_trend_endpoint_returns_daily_points(client: AsyncClient):
+    from roughcut.db.models import Job, JobStep
+    from roughcut.db.session import get_session_factory
+
+    async with get_session_factory()() as session:
+        first_job_id = uuid.uuid4()
+        second_job_id = uuid.uuid4()
+        session.add_all(
+            [
+                Job(
+                    id=first_job_id,
+                    source_path="jobs/demo/one.mp4",
+                    source_name="one.mp4",
+                    status="done",
+                    language="zh-CN",
+                    updated_at=datetime(2026, 3, 21, 10, 0, tzinfo=timezone.utc),
+                ),
+                Job(
+                    id=second_job_id,
+                    source_path="jobs/demo/two.mp4",
+                    source_name="two.mp4",
+                    status="done",
+                    language="zh-CN",
+                    updated_at=datetime(2026, 3, 22, 10, 0, tzinfo=timezone.utc),
+                ),
+                JobStep(
+                    job_id=first_job_id,
+                    step_name="content_profile",
+                    status="done",
+                    metadata_={
+                        "cache": {
+                            "content_profile": {
+                                "namespace": "content_profile.infer",
+                                "key": "k1",
+                                "hit": True,
+                                "usage_baseline": {
+                                    "calls": 2,
+                                    "prompt_tokens": 1000,
+                                    "completion_tokens": 300,
+                                    "total_tokens": 1300,
+                                },
+                            }
+                        },
+                        "llm_usage": {
+                            "calls": 2,
+                            "prompt_tokens": 1000,
+                            "completion_tokens": 300,
+                            "total_tokens": 1300,
+                            "by_model": {
+                                "MiniMax-M2.7-highspeed": {
+                                    "provider": "minimax",
+                                    "kind": "reasoning",
+                                    "calls": 2,
+                                    "prompt_tokens": 1000,
+                                    "completion_tokens": 300,
+                                    "total_tokens": 1300,
+                                }
+                            },
+                        }
+                    },
+                ),
+                JobStep(
+                    job_id=second_job_id,
+                    step_name="platform_package",
+                    status="done",
+                    metadata_={
+                        "llm_usage": {
+                            "calls": 1,
+                            "prompt_tokens": 800,
+                            "completion_tokens": 200,
+                            "total_tokens": 1000,
+                            "by_model": {
+                                "gpt-4.1-mini": {
+                                    "provider": "openai",
+                                    "kind": "reasoning",
+                                    "calls": 1,
+                                    "prompt_tokens": 800,
+                                    "completion_tokens": 200,
+                                    "total_tokens": 1000,
+                                }
+                            },
+                        }
+                    },
+                ),
+            ]
+        )
+        await session.commit()
+
+    response = await client.get("/api/v1/jobs/usage-trend?days=2&limit=10")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["days"] == 2
+    assert len(data["points"]) == 2
+    assert data["points"][0]["date"] <= data["points"][1]["date"]
+    assert any(point["total_tokens"] >= 1000 for point in data["points"])
+    assert any(point["cache"]["saved_total_tokens"] >= 1300 for point in data["points"])
+    assert any(point.get("top_entry", {}).get("dimension") == "step" for point in data["points"] if point["total_tokens"])
+
+
+@pytest.mark.asyncio
+async def test_jobs_usage_trend_endpoint_passes_step_name_filter(client: AsyncClient, monkeypatch: pytest.MonkeyPatch):
+    import roughcut.api.jobs as jobs_api
+    from roughcut.db.models import Job
+    from roughcut.db.session import get_session_factory
+
+    job_id = uuid.uuid4()
+    captured: dict[str, object] = {}
+
+    async with get_session_factory()() as session:
+        session.add(
+            Job(
+                id=job_id,
+                source_path="jobs/demo/filter.mp4",
+                source_name="filter.mp4",
+                status="done",
+                language="zh-CN",
+                updated_at=datetime.now(timezone.utc),
+            )
+        )
+        await session.commit()
+
+    def fake_build_jobs_usage_trend(jobs, *, days, step_labels, focus_type=None, focus_name=None, step_name=None, now=None):
+        captured["days"] = days
+        captured["focus_type"] = focus_type
+        captured["focus_name"] = focus_name
+        captured["step_name"] = step_name
+        return {
+            "days": days,
+            "focus_type": focus_type,
+            "focus_name": focus_name,
+            "points": [
+                {
+                    "date": "2026-03-22",
+                    "label": "03-22",
+                    "job_count": len(jobs),
+                    "jobs_with_telemetry": 1,
+                    "total_calls": 1,
+                    "total_prompt_tokens": 800,
+                    "total_completion_tokens": 200,
+                    "total_tokens": 1000,
+                    "cache": {
+                        "total_entries": 1,
+                        "hits": 0,
+                        "misses": 1,
+                        "hit_rate": 0.0,
+                        "avoided_calls": 0,
+                        "steps_with_hits": 0,
+                    },
+                    "top_entry": {"dimension": "step", "name": "platform_package", "label": "平台文案", "total_tokens": 1000},
+                    "top_step": {"step_name": "platform_package", "label": "平台文案", "total_tokens": 1000},
+                }
+            ],
+        }
+
+    monkeypatch.setattr(jobs_api, "build_jobs_usage_trend", fake_build_jobs_usage_trend)
+
+    response = await client.get("/api/v1/jobs/usage-trend?days=1&limit=1&step_name=platform_package")
+    assert response.status_code == 200
+    data = response.json()
+    assert captured["days"] == 1
+    assert captured["step_name"] == "platform_package"
+    assert data["points"][0]["total_tokens"] == 1000
+    assert data["points"][0]["top_step"]["step_name"] == "platform_package"
+
+
+@pytest.mark.asyncio
+async def test_jobs_usage_trend_endpoint_passes_model_focus(client: AsyncClient, monkeypatch: pytest.MonkeyPatch):
+    import roughcut.api.jobs as jobs_api
+    from roughcut.db.models import Job
+    from roughcut.db.session import get_session_factory
+
+    job_id = uuid.uuid4()
+    captured: dict[str, object] = {}
+
+    async with get_session_factory()() as session:
+        session.add(
+            Job(
+                id=job_id,
+                source_path="jobs/demo/filter-model.mp4",
+                source_name="filter-model.mp4",
+                status="done",
+                language="zh-CN",
+                updated_at=datetime.now(timezone.utc),
+            )
+        )
+        await session.commit()
+
+    def fake_build_jobs_usage_trend(jobs, *, days, step_labels, focus_type=None, focus_name=None, step_name=None, now=None):
+        captured["days"] = days
+        captured["focus_type"] = focus_type
+        captured["focus_name"] = focus_name
+        return {
+            "days": days,
+            "focus_type": focus_type,
+            "focus_name": focus_name,
+            "points": [
+                {
+                    "date": "2026-03-22",
+                    "label": "03-22",
+                    "job_count": len(jobs),
+                    "jobs_with_telemetry": 1,
+                    "total_calls": 2,
+                    "total_prompt_tokens": 1000,
+                    "total_completion_tokens": 300,
+                    "total_tokens": 1300,
+                    "cache": {
+                        "total_entries": 0,
+                        "hits": 0,
+                        "misses": 0,
+                        "hit_rate": 0.0,
+                        "avoided_calls": 0,
+                        "steps_with_hits": 0,
+                    },
+                    "top_entry": {
+                        "dimension": "model",
+                        "name": "MiniMax-M2.7-highspeed",
+                        "label": "MiniMax-M2.7-highspeed",
+                        "total_tokens": 1300,
+                    },
+                    "top_step": None,
+                }
+            ],
+        }
+
+    monkeypatch.setattr(jobs_api, "build_jobs_usage_trend", fake_build_jobs_usage_trend)
+
+    response = await client.get("/api/v1/jobs/usage-trend?days=1&limit=1&focus_type=model&focus_name=MiniMax-M2.7-highspeed")
+    assert response.status_code == 200
+    data = response.json()
+    assert captured["focus_type"] == "model"
+    assert captured["focus_name"] == "MiniMax-M2.7-highspeed"
+    assert data["focus_type"] == "model"
+    assert data["points"][0]["top_entry"]["dimension"] == "model"
+
+
+@pytest.mark.asyncio
 async def test_job_activity_reports_avatar_final_delivery_result(client: AsyncClient):
     from roughcut.db.models import Artifact, Job, RenderOutput
     from roughcut.db.session import get_session_factory

@@ -4,6 +4,7 @@ import openai
 
 from roughcut.config import get_settings
 from roughcut.providers.reasoning.base import Message, ReasoningProvider, ReasoningResponse
+from roughcut.usage import record_usage_event
 
 
 class MiniMaxReasoningProvider(ReasoningProvider):
@@ -38,6 +39,12 @@ class MiniMaxReasoningProvider(ReasoningProvider):
                 "prompt_tokens": response.usage.prompt_tokens,
                 "completion_tokens": response.usage.completion_tokens,
             }
+            await record_usage_event(
+                provider="minimax",
+                model=response.model,
+                usage=usage,
+                kind="reasoning",
+            )
             return ReasoningResponse(
                 content=choice.message.content or "",
                 usage=usage,

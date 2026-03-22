@@ -7,8 +7,13 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+from roughcut.llm_cache import digest_payload
 from roughcut.providers.factory import get_reasoning_provider, get_search_provider
 from roughcut.providers.reasoning.base import Message
+from roughcut.usage import track_usage_operation
+
+_PLATFORM_FACT_SHEET_CACHE_VERSION = "2026-03-22.fact-sheet.v1"
+_PLATFORM_PACKAGE_CACHE_VERSION = "2026-03-22.generate.v1"
 
 PLATFORM_ORDER = [
     ("bilibili", "B站", "简介", "标签"),
@@ -21,17 +26,132 @@ PLATFORM_ORDER = [
 
 def build_transcript_for_packaging(subtitle_items: list[dict[str, Any]], *, max_chars: int = 6000) -> str:
     lines: list[str] = []
-    total = 0
     for item in subtitle_items:
         text = (item.get("text_final") or item.get("text_norm") or item.get("text_raw") or "").strip()
         if not text:
             continue
-        line = f"[{item.get('start_time', 0):.1f}-{item.get('end_time', 0):.1f}] {text}"
-        total += len(line)
-        if total > max_chars:
-            break
-        lines.append(line)
-    return "\n".join(lines)
+        lines.append(f"[{item.get('start_time', 0):.1f}-{item.get('end_time', 0):.1f}] {text}")
+    if not lines:
+        return ""
+
+    full_text = "\n".join(lines)
+    if len(full_text) <= max_chars:
+        return full_text
+
+    section_size = max(1, len(lines) // 3)
+    sections = [
+        lines[:section_size],
+        lines[max(0, len(lines) // 2 - section_size // 2): len(lines) // 2 + (section_size + 1) // 2],
+        list(reversed(lines[-section_size:])),
+    ]
+    deduped: list[str] = []
+    seen: set[str] = set()
+    total = 0
+    max_section_len = max(len(section) for section in sections)
+    for index in range(max_section_len):
+        for section in sections:
+            if index >= len(section):
+                continue
+            line = section[index]
+            if line in seen:
+                continue
+            projected = total + len(line) + (1 if deduped else 0)
+            if projected > max_chars:
+                return "\n".join(deduped)
+            seen.add(line)
+            deduped.append(line)
+            total = projected
+    return "\n".join(deduped)
+
+
+def build_packaging_prompt_brief(
+    *,
+    source_name: str,
+    content_profile: dict[str, Any] | None,
+    subtitle_items: list[dict[str, Any]],
+    max_transcript_chars: int = 2200,
+) -> dict[str, Any]:
+    profile = content_profile or {}
+    cover_title = profile.get("cover_title") if isinstance(profile.get("cover_title"), dict) else {}
+    return {
+        "source_name": source_name,
+        "subject_brand": str(profile.get("subject_brand") or "").strip(),
+        "subject_model": str(profile.get("subject_model") or "").strip(),
+        "subject_type": str(profile.get("subject_type") or "").strip(),
+        "video_theme": str(profile.get("video_theme") or "").strip(),
+        "summary": str(profile.get("summary") or "").strip(),
+        "hook_line": str(profile.get("hook_line") or "").strip(),
+        "visible_text": str(profile.get("visible_text") or "").strip(),
+        "engagement_question": str(profile.get("engagement_question") or "").strip(),
+        "copy_style": str(profile.get("copy_style") or "").strip(),
+        "preset_name": str(profile.get("preset_name") or "").strip(),
+        "search_queries": [str(item).strip() for item in (profile.get("search_queries") or []) if str(item).strip()][:3],
+        "cover_title": {
+            "top": str(cover_title.get("top") or "").strip(),
+            "main": str(cover_title.get("main") or "").strip(),
+            "bottom": str(cover_title.get("bottom") or "").strip(),
+        },
+        "transcript_excerpt": build_transcript_for_packaging(subtitle_items, max_chars=max_transcript_chars),
+    }
+
+
+def build_packaging_fact_sheet_cache_fingerprint(
+    *,
+    source_name: str,
+    content_profile: dict[str, Any] | None,
+    subtitle_items: list[dict[str, Any]],
+) -> dict[str, Any]:
+    profile = content_profile or {}
+    evidence = [
+        {
+            "title": str(item.get("title") or "").strip(),
+            "url": str(item.get("url") or "").strip(),
+            "snippet": str(item.get("snippet") or "").strip(),
+        }
+        for item in (profile.get("evidence") or [])
+        if isinstance(item, dict) and (item.get("url") or item.get("title") or item.get("snippet"))
+    ]
+    return {
+        "version": _PLATFORM_FACT_SHEET_CACHE_VERSION,
+        "source_name": str(source_name or "").strip(),
+        "subject_brand": str(profile.get("subject_brand") or "").strip(),
+        "subject_model": str(profile.get("subject_model") or "").strip(),
+        "subject_type": str(profile.get("subject_type") or "").strip(),
+        "search_queries": [str(item).strip() for item in (profile.get("search_queries") or []) if str(item).strip()][:4],
+        "transcript_excerpt_sha256": digest_payload(build_transcript_for_packaging(subtitle_items, max_chars=1400)),
+        "evidence_sha256": digest_payload(evidence),
+        "evidence_count": len(evidence),
+    }
+
+
+def packaging_fact_sheet_cache_allowed(content_profile: dict[str, Any] | None) -> bool:
+    profile = content_profile or {}
+    if not _has_specific_subject_identity(profile):
+        return True
+    evidence = [
+        item
+        for item in (profile.get("evidence") or [])
+        if isinstance(item, dict) and (item.get("url") or item.get("title") or item.get("snippet"))
+    ]
+    return len(evidence) >= 2
+
+
+def build_platform_packaging_cache_fingerprint(
+    *,
+    source_name: str,
+    prompt_brief: dict[str, Any],
+    fact_sheet: dict[str, Any],
+    copy_style: str,
+    author_profile: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return {
+        "version": _PLATFORM_PACKAGE_CACHE_VERSION,
+        "source_name": str(source_name or "").strip(),
+        "copy_style": str(copy_style or "").strip(),
+        "prompt_brief_sha256": digest_payload(prompt_brief or {}),
+        "fact_sheet_sha256": digest_payload(fact_sheet or {}),
+        "author_profile_sha256": digest_payload(author_profile or {}),
+    }
 
 
 async def build_packaging_fact_sheet(
@@ -88,15 +208,16 @@ async def build_packaging_fact_sheet(
             f"\n视频主体：{json.dumps({'brand': profile.get('subject_brand'), 'model': profile.get('subject_model'), 'subject_type': profile.get('subject_type')}, ensure_ascii=False)}"
             f"\n搜索证据：{json.dumps(preferred_evidence[:8], ensure_ascii=False)}"
         )
-        response = await provider.complete(
-            [
-                Message(role="system", content="你是严格的事实核验助手，只输出 JSON。"),
-                Message(role="user", content=prompt),
-            ],
-            temperature=0.0,
-            max_tokens=900,
-            json_mode=True,
-        )
+        with track_usage_operation("platform_package.fact_sheet"):
+            response = await provider.complete(
+                [
+                    Message(role="system", content="你是严格的事实核验助手，只输出 JSON。"),
+                    Message(role="user", content=prompt),
+                ],
+                temperature=0.0,
+                max_tokens=900,
+                json_mode=True,
+            )
         raw = response.as_json()
     except Exception:
         raw = {}
@@ -123,10 +244,16 @@ async def generate_platform_packaging(
     subtitle_items: list[dict[str, Any]],
     copy_style: str = "attention_grabbing",
     author_profile: dict[str, Any] | None = None,
+    prompt_brief: dict[str, Any] | None = None,
+    fact_sheet: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     provider = get_reasoning_provider()
-    transcript_text = build_transcript_for_packaging(subtitle_items)
-    fact_sheet = await build_packaging_fact_sheet(
+    prompt_brief = prompt_brief or build_packaging_prompt_brief(
+        source_name=source_name,
+        content_profile=content_profile,
+        subtitle_items=subtitle_items,
+    )
+    fact_sheet = fact_sheet or await build_packaging_fact_sheet(
         source_name=source_name,
         content_profile=content_profile,
         subtitle_items=subtitle_items,
@@ -175,25 +302,24 @@ async def generate_platform_packaging(
         "\"wechat_channels\":{\"titles\":[\"\"],\"description\":\"\",\"tags\":[\"\"]}"
         "}"
         "}\n\n"
-        f"视频已知信息：{json.dumps(content_profile or {}, ensure_ascii=False)}\n"
-        f"源文件名：{source_name}\n"
-        f"字幕全文：\n{transcript_text}"
+        f"视频摘要上下文：{json.dumps(prompt_brief, ensure_ascii=False)}"
     )
-    response = await provider.complete(
-        [
-            Message(
-                role="system",
-                content=(
-                    "你是严谨的中文多平台视频包装策划。"
-                    "优先输出真实玩家口吻、平台化表达、自然互动问题和合规标签。"
+    with track_usage_operation("platform_package.generate_packaging"):
+        response = await provider.complete(
+            [
+                Message(
+                    role="system",
+                    content=(
+                        "你是严谨的中文多平台视频包装策划。"
+                        "优先输出真实玩家口吻、平台化表达、自然互动问题和合规标签。"
+                    ),
                 ),
-            ),
-            Message(role="user", content=prompt),
-        ],
-        temperature=0.35,
-        max_tokens=3200,
-        json_mode=True,
-    )
+                Message(role="user", content=prompt),
+            ],
+            temperature=0.35,
+            max_tokens=3200,
+            json_mode=True,
+        )
     packaging = normalize_platform_packaging(
         response.as_json(),
         content_profile=content_profile,

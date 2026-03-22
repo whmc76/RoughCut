@@ -5,6 +5,7 @@ import openai
 from roughcut.config import get_settings
 from roughcut.providers.auth import resolve_credential
 from roughcut.providers.reasoning.base import Message, ReasoningProvider, ReasoningResponse
+from roughcut.usage import record_usage_event
 
 
 class OpenAIReasoningProvider(ReasoningProvider):
@@ -44,6 +45,12 @@ class OpenAIReasoningProvider(ReasoningProvider):
             "prompt_tokens": response.usage.prompt_tokens,
             "completion_tokens": response.usage.completion_tokens,
         }
+        await record_usage_event(
+            provider="openai",
+            model=response.model,
+            usage=usage,
+            kind="reasoning",
+        )
         return ReasoningResponse(
             content=choice.message.content or "",
             usage=usage,

@@ -68,6 +68,157 @@ export type JobActivity = {
   }>;
 };
 
+export type TokenUsageReport = {
+  job_id: string;
+  has_telemetry: boolean;
+  total_calls: number;
+  total_prompt_tokens: number;
+  total_completion_tokens: number;
+  total_tokens: number;
+  cache: {
+    total_entries: number;
+    hits: number;
+    misses: number;
+    hit_rate: number;
+    avoided_calls: number;
+    steps_with_hits: number;
+    hits_with_usage_baseline: number;
+    saved_prompt_tokens: number;
+    saved_completion_tokens: number;
+    saved_total_tokens: number;
+    saved_tokens_hit_rate: number;
+  };
+  steps: Array<{
+    step_name: string;
+    label: string;
+    calls: number;
+    prompt_tokens: number;
+    completion_tokens: number;
+    total_tokens: number;
+    last_updated_at?: string | null;
+    cache_entries: Array<{
+      name: string;
+      namespace: string;
+      key: string;
+      hit: boolean;
+      usage_baseline?: {
+        operation?: string;
+        calls: number;
+        prompt_tokens: number;
+        completion_tokens: number;
+        total_tokens: number;
+      } | null;
+    }>;
+    operations: Array<{
+      operation: string;
+      calls: number;
+      prompt_tokens: number;
+      completion_tokens: number;
+      total_tokens: number;
+    }>;
+  }>;
+  models: Array<{
+    model: string;
+    provider?: string | null;
+    kind?: string | null;
+    calls: number;
+    prompt_tokens: number;
+    completion_tokens: number;
+    total_tokens: number;
+  }>;
+};
+
+export type JobsUsageSummary = {
+  job_count: number;
+  jobs_with_telemetry: number;
+  total_calls: number;
+  total_prompt_tokens: number;
+  total_completion_tokens: number;
+  total_tokens: number;
+  cache: {
+    total_entries: number;
+    hits: number;
+    misses: number;
+    hit_rate: number;
+    avoided_calls: number;
+    steps_with_hits: number;
+    hits_with_usage_baseline: number;
+    saved_prompt_tokens: number;
+    saved_completion_tokens: number;
+    saved_total_tokens: number;
+    saved_tokens_hit_rate: number;
+  };
+  top_steps: Array<{
+    step_name: string;
+    label: string;
+    jobs: number;
+    calls: number;
+    prompt_tokens: number;
+    completion_tokens: number;
+    total_tokens: number;
+    cache_hits: number;
+    cache_misses: number;
+  }>;
+  top_models: Array<{
+    model: string;
+    provider?: string | null;
+    kind?: string | null;
+    jobs: number;
+    calls: number;
+    prompt_tokens: number;
+    completion_tokens: number;
+    total_tokens: number;
+  }>;
+  top_providers: Array<{
+    provider: string;
+    jobs: number;
+    calls: number;
+    prompt_tokens: number;
+    completion_tokens: number;
+    total_tokens: number;
+  }>;
+};
+
+export type JobsUsageTrend = {
+  days: number;
+  focus_type?: string | null;
+  focus_name?: string | null;
+  points: Array<{
+    date: string;
+    label: string;
+    job_count: number;
+    jobs_with_telemetry: number;
+    total_calls: number;
+    total_prompt_tokens: number;
+    total_completion_tokens: number;
+    total_tokens: number;
+    cache: {
+      total_entries: number;
+      hits: number;
+      misses: number;
+      hit_rate: number;
+      avoided_calls: number;
+      steps_with_hits: number;
+      hits_with_usage_baseline: number;
+      saved_prompt_tokens: number;
+      saved_completion_tokens: number;
+      saved_total_tokens: number;
+      saved_tokens_hit_rate: number;
+    };
+    top_entry?: {
+      dimension: string;
+      name: string;
+      label: string;
+      total_tokens: number;
+    } | null;
+    top_step?: {
+      step_name: string;
+      label: string;
+      total_tokens: number;
+    } | null;
+  }>;
+};
+
 export type GlossaryTerm = {
   id: string;
   scope_type: string;

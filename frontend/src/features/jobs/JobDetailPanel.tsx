@@ -1,4 +1,4 @@
-import type { AvatarMaterialLibrary, Config, ConfigOptions, ContentProfileReview, Job, JobActivity, JobTimeline, PackagingLibrary, Report } from "../../types";
+import type { AvatarMaterialLibrary, Config, ConfigOptions, ContentProfileReview, Job, JobActivity, JobTimeline, PackagingLibrary, Report, TokenUsageReport } from "../../types";
 import { EmptyState } from "../../components/ui/EmptyState";
 import { PanelHeader } from "../../components/ui/PanelHeader";
 import { useI18n } from "../../i18n";
@@ -15,6 +15,7 @@ type JobDetailPanelProps = {
   isLoading: boolean;
   activity?: JobActivity;
   report?: Report;
+  tokenUsage?: TokenUsageReport;
   timeline?: JobTimeline;
   contentProfile?: ContentProfileReview;
   config?: Config;
@@ -52,6 +53,7 @@ export function JobDetailPanel({
   isLoading,
   activity,
   report,
+  tokenUsage,
   timeline,
   contentProfile,
   config,
@@ -83,6 +85,16 @@ export function JobDetailPanel({
 }: JobDetailPanelProps) {
   const { t } = useI18n();
   const isReviewMode = selectedJob?.status === "needs_review";
+  const topUsageSteps = [...(tokenUsage?.steps ?? [])].sort((a, b) => b.total_tokens - a.total_tokens).slice(0, 3);
+  const topUsageModels = [...(tokenUsage?.models ?? [])].sort((a, b) => b.total_tokens - a.total_tokens).slice(0, 3);
+  const topUsageOperations = [...(topUsageSteps[0]?.operations ?? [])].sort((a, b) => b.total_tokens - a.total_tokens).slice(0, 3);
+  const topCacheSteps = [...(tokenUsage?.steps ?? [])].filter((step) => step.cache_entries.some((entry) => entry.hit)).slice(0, 3);
+  const getSavedTokensForStep = (stepName: string) =>
+    (tokenUsage?.steps.find((step) => step.step_name === stepName)?.cache_entries ?? [])
+      .filter((entry) => entry.hit)
+      .reduce((sum, entry) => sum + (entry.usage_baseline?.total_tokens ?? 0), 0);
+  const formatUsageBreakdown = (promptTokens: number, completionTokens: number, calls: number) =>
+    `${t("jobs.detail.tokenUsage.promptTokens")} ${promptTokens.toLocaleString()} / ${t("jobs.detail.tokenUsage.completionTokens")} ${completionTokens.toLocaleString()} / ${t("jobs.detail.tokenUsage.calls")} ${calls.toLocaleString()}`;
   const avatarDecision = activity?.decisions?.find((item) => item.kind === "avatar_commentary");
   const avatarHeadlineStatus = avatarDecision?.status ?? selectedJob?.avatar_delivery_status ?? null;
   const avatarHeadlineSummary = avatarDecision?.summary ?? selectedJob?.avatar_delivery_summary ?? null;
@@ -243,6 +255,136 @@ export function JobDetailPanel({
 
           {!isReviewMode && (
             <>
+              <section className="detail-block">
+                <div className="detail-key">{t("jobs.detail.tokenUsage")}</div>
+                {tokenUsage?.has_telemetry ? (
+                  <>
+                    <div className="token-usage-grid">
+                      <div className="activity-card">
+                        <div className="muted">{t("jobs.detail.tokenUsage.totalTokens")}</div>
+                        <strong>{tokenUsage.total_tokens.toLocaleString()}</strong>
+                      </div>
+                      <div className="activity-card">
+                        <div className="muted">{t("jobs.detail.tokenUsage.promptTokens")}</div>
+                        <strong>{tokenUsage.total_prompt_tokens.toLocaleString()}</strong>
+                      </div>
+                      <div className="activity-card">
+                        <div className="muted">{t("jobs.detail.tokenUsage.completionTokens")}</div>
+                        <strong>{tokenUsage.total_completion_tokens.toLocaleString()}</strong>
+                      </div>
+                      <div className="activity-card">
+                        <div className="muted">{t("jobs.detail.tokenUsage.calls")}</div>
+                        <strong>{tokenUsage.total_calls.toLocaleString()}</strong>
+                      </div>
+                      <div className="activity-card">
+                        <div className="muted">{t("jobs.detail.tokenUsage.cacheHits")}</div>
+                        <strong>{tokenUsage.cache.hits.toLocaleString()}</strong>
+                      </div>
+                      <div className="activity-card">
+                        <div className="muted">{t("jobs.detail.tokenUsage.cacheHitRate")}</div>
+                        <strong>{Math.round((tokenUsage.cache.hit_rate || 0) * 100)}%</strong>
+                      </div>
+                      <div className="activity-card">
+                        <div className="muted">{t("jobs.detail.tokenUsage.avoidedCalls")}</div>
+                        <strong>{tokenUsage.cache.avoided_calls.toLocaleString()}</strong>
+                      </div>
+                      <div className="activity-card">
+                        <div className="muted">{t("jobs.detail.tokenUsage.savedTokens")}</div>
+                        <strong>{tokenUsage.cache.saved_total_tokens.toLocaleString()}</strong>
+                      </div>
+                      <div className="activity-card">
+                        <div className="muted">{t("jobs.detail.tokenUsage.savedTokenCoverage")}</div>
+                        <strong>{Math.round((tokenUsage.cache.saved_tokens_hit_rate || 0) * 100)}%</strong>
+                      </div>
+                      <div className="activity-card">
+                        <div className="muted">{t("jobs.detail.tokenUsage.baselineHits")}</div>
+                        <strong>{tokenUsage.cache.hits_with_usage_baseline.toLocaleString()}</strong>
+                      </div>
+                      <div className="activity-card">
+                        <div className="muted">{t("jobs.detail.tokenUsage.stepsWithHits")}</div>
+                        <strong>{tokenUsage.cache.steps_with_hits.toLocaleString()}</strong>
+                      </div>
+                    </div>
+
+                    <div className="token-usage-columns top-gap">
+                      <div className="timeline-list">
+                        <div className="token-usage-subtitle">{t("jobs.detail.tokenUsage.topSteps")}</div>
+                        {topUsageSteps.map((step) => (
+                          <div key={step.step_name} className="timeline-item">
+                            <div className="toolbar">
+                              <strong>{step.label}</strong>
+                              <span className="status-pill pending">{step.total_tokens.toLocaleString()}</span>
+                            </div>
+                            <div className="muted">
+                              {formatUsageBreakdown(step.prompt_tokens, step.completion_tokens, step.calls)}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+
+                      <div className="timeline-list">
+                        <div className="token-usage-subtitle">{t("jobs.detail.tokenUsage.topOperations")}</div>
+                        {topUsageOperations.length ? (
+                          topUsageOperations.map((operation) => (
+                            <div key={operation.operation} className="timeline-item">
+                              <div className="toolbar">
+                                <strong>{operation.operation}</strong>
+                                <span className="status-pill pending">{operation.total_tokens.toLocaleString()}</span>
+                              </div>
+                              <div className="muted">
+                                {formatUsageBreakdown(operation.prompt_tokens, operation.completion_tokens, operation.calls)}
+                              </div>
+                            </div>
+                          ))
+                        ) : (
+                          <div className="muted">{t("jobs.detail.tokenUsage.noOperations")}</div>
+                        )}
+                      </div>
+
+                      <div className="timeline-list">
+                        <div className="token-usage-subtitle">{t("jobs.detail.tokenUsage.cacheSteps")}</div>
+                        {topCacheSteps.length ? (
+                          topCacheSteps.map((step) => (
+                            <div key={`${step.step_name}-cache`} className="timeline-item">
+                              <div className="toolbar">
+                                <strong>{step.label}</strong>
+                                <span className="status-pill done">
+                                  {step.cache_entries.filter((entry) => entry.hit).length.toLocaleString()}
+                                </span>
+                              </div>
+                              <div className="muted">
+                                {step.cache_entries
+                                  .filter((entry) => entry.hit)
+                                  .map((entry) => entry.name)
+                                  .join(" / ")}
+                                {` / ${t("jobs.detail.tokenUsage.savedTokens")} ${getSavedTokensForStep(step.step_name).toLocaleString()}`}
+                              </div>
+                            </div>
+                          ))
+                        ) : (
+                          <div className="muted">{t("jobs.detail.tokenUsage.noCacheHits")}</div>
+                        )}
+                      </div>
+
+                      <div className="timeline-list">
+                        <div className="token-usage-subtitle">{t("jobs.detail.tokenUsage.topModels")}</div>
+                        {topUsageModels.map((model) => (
+                          <div key={`${model.provider ?? "unknown"}-${model.model}-${model.kind ?? "reasoning"}`} className="timeline-item">
+                            <div className="toolbar">
+                              <strong>{model.model}</strong>
+                              <span className="status-pill pending">{model.total_tokens.toLocaleString()}</span>
+                            </div>
+                            <div className="muted">{[model.provider, model.kind].filter(Boolean).join(" / ") || "unknown"}</div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </>
+                ) : (
+                  <div className="notice">{t("jobs.detail.tokenUsage.empty")}</div>
+                )}
+              </section>
+
               <JobSubtitleReportSection report={report} isApplying={isApplyingReview} onApplyReview={onApplyReview} />
 
               <section className="detail-block">
