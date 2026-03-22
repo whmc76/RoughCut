@@ -28,6 +28,7 @@ logs/*.jpg
 output/
 output_sub_check.jpg
 output_sub_check2.jpg
+output/
 ref1_10s.jpg
 ref1_5s.jpg
 ref1_cover.jpg
