@@ -697,21 +697,17 @@ def test_build_content_profile_review_message_matches_frontend_sections():
     )
 
     assert f"Job ID：{job_id}" in message
-    assert "核对配置：" in message
+    assert "剪辑配置：" in message
     assert "内容核对：" in message
-    assert "增强模式素材检查：" in message
-    assert "包装素材清单：" in message
-    assert "风格模板清单：" in message
+    assert "审核就绪检查：" in message
+    assert "当前审核已继承当前激活的剪辑配置" in message
     assert "数字人解说" not in message
+    assert "工作流模式：" not in message
+    assert "包装素材清单：" not in message
+    assert "风格模板清单：" not in message
     assert "智能剪辑特效：已启用智能剪辑特效" in message
     assert "AI 导演重配音：当前走 IndexTTS2 accel 主实例，本地服务：http://127.0.0.1:49204" in message
-    assert "片头：片头A.mp4" in message
-    assert "转场 / 包装插片：夜骑转场.mp4" in message
-    assert "字幕风格：粗黄描边" in message
-    assert "封面模板：重磅测评" in message
-    assert "标题模板：教程蓝图" in message
-    assert "文案风格：专业可信" in message
-    assert "智能剪辑特效：爆点冲击" in message
+    assert "包装素材与风格模板：全局包装已启用，审核后会沿用当前任务级包装方案：片头 片头A.mp4；片尾 片尾A.mp4；转场 夜骑转场.mp4；水印 品牌水印.png；音乐 节奏感BGM.mp3。" in message
     assert "视频主题：夜骑补光实测" in message
     assert "关键词：夜骑补光，手电实测" in message
     assert "系统识别参考：" in message
@@ -800,8 +796,7 @@ def test_build_content_profile_review_message_prefers_resolved_packaging_and_ava
         ),
     )
 
-    assert "片尾：品牌片尾.mp4" in message
-    assert "音乐：战术BGM.mp3" in message
+    assert "包装素材与风格模板：全局包装已启用，审核后会沿用当前任务级包装方案：片尾 品牌片尾.mp4；音乐 战术BGM.mp3。" in message
     assert "使用 FAS数字人的解说视频素材" in message
 
 
@@ -977,6 +972,10 @@ def test_build_final_review_message_includes_summary_keywords_and_subtitle_hints
         },
     )
 
+    assert "剪辑配置：" in message
+    assert "当前成片已按当前任务的剪辑配置生成" in message
+    assert "工作流模式：" not in message
+    assert "增强模式：" not in message
     assert "默认发送 3 段压缩预览" in message
     assert "内容摘要：这期重点看扁桶手电的便携性和泛光表现。" in message
     assert "关键词：扁桶手电，Olight 司令官2 Ultra" in message

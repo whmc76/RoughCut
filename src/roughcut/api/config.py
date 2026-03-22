@@ -408,7 +408,7 @@ def patch_profile(profile_id: str, body: ConfigProfileUpdate):
             capture_current=body.capture_current,
         )
     except KeyError as exc:
-        raise HTTPException(status_code=404, detail="配置方案不存在") from exc
+        raise HTTPException(status_code=404, detail="剪辑配置不存在") from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return ConfigProfilesOut(**payload)
@@ -419,7 +419,7 @@ def activate_profile(profile_id: str):
     try:
         payload = activate_config_profile(profile_id)
     except KeyError as exc:
-        raise HTTPException(status_code=404, detail="配置方案不存在") from exc
+        raise HTTPException(status_code=404, detail="剪辑配置不存在") from exc
     return ConfigProfilesOut(**payload)
 
 
@@ -428,7 +428,7 @@ def remove_profile(profile_id: str):
     try:
         payload = delete_config_profile(profile_id)
     except KeyError as exc:
-        raise HTTPException(status_code=404, detail="配置方案不存在") from exc
+        raise HTTPException(status_code=404, detail="剪辑配置不存在") from exc
     return ConfigProfilesOut(**payload)
 
 

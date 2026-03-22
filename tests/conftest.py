@@ -30,13 +30,15 @@ def isolate_runtime_override_file(tmp_path, monkeypatch):
     output_dir = tmp_path / "output"
     stats_file = tmp_path / "content_profile_review_stats.json"
 
-    monkeypatch.setenv("OUTPUT_DIR", str(output_dir))
-    monkeypatch.setenv("TELEGRAM_AGENT_ENABLED", "false")
-    monkeypatch.setenv("TELEGRAM_AGENT_CLAUDE_ENABLED", "false")
     monkeypatch.setattr(config_api, "_CONFIG_FILE", override_file)
     monkeypatch.setattr(config_mod, "_OVERRIDES_FILE", override_file)
     monkeypatch.setattr(review_stats_mod, "_STATS_FILE", stats_file)
-    config_mod._settings = None
+    config_mod._settings = config_mod.Settings(
+        _env_file=None,
+        output_dir=str(output_dir),
+        telegram_agent_enabled=False,
+        telegram_agent_claude_enabled=False,
+    )
     yield
     config_mod._settings = None
 

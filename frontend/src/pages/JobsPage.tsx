@@ -47,7 +47,7 @@ export function JobsPage() {
 
       <ConfigProfileSwitcher
         className="top-gap"
-        description="任务创建和审核确认都会继承这里激活的方案，切换后新任务默认参数会立刻跟随。"
+        description="任务创建和审核确认都会继承这里激活的剪辑配置，数字人卡片只是其中一个配置模块，切换后新任务默认参数会立刻跟随。"
       />
 
       <JobUploadPanel
@@ -259,15 +259,12 @@ export function JobsPage() {
           timeline={workspace.timeline.data}
           contentProfile={workspace.contentProfile.data}
           config={workspace.config.data}
-          options={workspace.options.data}
           packaging={workspace.packaging.data}
           avatarMaterials={workspace.avatarMaterials.data}
           contentSource={workspace.contentSource}
           contentDraft={workspace.contentDraft}
           contentKeywords={workspace.contentKeywords}
-          reviewWorkflowMode={workspace.reviewWorkflowMode}
           reviewEnhancementModes={workspace.reviewEnhancementModes}
-          reviewCopyStyle={workspace.reviewCopyStyle}
           isConfirmingProfile={workspace.confirmProfile.isPending}
           isApplyingReview={workspace.applyReview.isPending}
           isCancelling={workspace.cancelJob.isPending}
@@ -283,9 +280,6 @@ export function JobsPage() {
                 .filter(Boolean),
             }))
           }
-          onReviewWorkflowModeChange={workspace.setReviewWorkflowMode}
-          onReviewEnhancementModesChange={workspace.setReviewEnhancementModes}
-          onReviewCopyStyleChange={workspace.setReviewCopyStyle}
           onConfirmProfile={() => workspace.confirmProfile.mutate()}
           onOpenFolder={() => workspace.selectedJob && workspace.openFolder.mutate(workspace.selectedJob.id)}
           onCancel={() => workspace.selectedJob && workspace.cancelJob.mutate(workspace.selectedJob.id)}

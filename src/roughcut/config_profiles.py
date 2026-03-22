@@ -26,6 +26,7 @@ PROFILE_CONFIG_FIELDS: tuple[str, ...] = (
     "avatar_safe_margin",
     "avatar_overlay_scale",
     "voice_provider",
+    "voice_clone_api_base_url",
     "voice_clone_voice_id",
     "director_rewrite_strength",
 )
@@ -46,6 +47,7 @@ def build_current_config_profile_snapshot() -> dict[str, Any]:
     config_snapshot["avatar_presenter_id"] = str(config_snapshot.get("avatar_presenter_id") or "").strip()
     config_snapshot["avatar_layout_template"] = str(config_snapshot.get("avatar_layout_template") or "").strip()
     config_snapshot["voice_provider"] = _normalize_voice_provider(config_snapshot.get("voice_provider"))
+    config_snapshot["voice_clone_api_base_url"] = str(config_snapshot.get("voice_clone_api_base_url") or "").strip()
     config_snapshot["voice_clone_voice_id"] = str(config_snapshot.get("voice_clone_voice_id") or "").strip()
     config_snapshot["avatar_safe_margin"] = round(
         max(0.0, min(0.4, _coerce_float(config_snapshot.get("avatar_safe_margin"), 0.08))),
@@ -304,6 +306,11 @@ def _normalize_profile_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
     config_snapshot["voice_provider"] = _normalize_voice_provider(
         config_snapshot.get("voice_provider") or current_snapshot["config"]["voice_provider"]
     )
+    config_snapshot["voice_clone_api_base_url"] = str(
+        config_snapshot.get("voice_clone_api_base_url")
+        or current_snapshot["config"]["voice_clone_api_base_url"]
+        or ""
+    ).strip()
     config_snapshot["voice_clone_voice_id"] = str(config_snapshot.get("voice_clone_voice_id") or "").strip()
     config_snapshot["director_rewrite_strength"] = round(
         max(

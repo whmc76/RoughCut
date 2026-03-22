@@ -1799,38 +1799,12 @@ def _build_content_profile_review_message(
     identity_review = draft.get("identity_review") if isinstance(draft, dict) else {}
     review_reasons = list(automation.get("review_reasons") or []) if isinstance(automation, dict) else []
     blocking_reasons = list(automation.get("blocking_reasons") or []) if isinstance(automation, dict) else []
-    workflow_mode = _WORKFLOW_MODE_LABELS.get(str(review.workflow_mode or ""), str(review.workflow_mode or "") or "未设置")
-    enhancement_modes = [
-        _ENHANCEMENT_MODE_LABELS.get(str(item), str(item))
-        for item in (review.enhancement_modes or [])
-    ]
     effective_packaging_plan = packaging_plan or _build_packaging_plan_from_config(
         packaging_assets,
         packaging_config,
     )
-    copy_style_key = str(
-        draft.get("copy_style")
-        or effective_packaging_plan.get("copy_style")
-        or packaging_config.get("copy_style")
-        or "attention_grabbing"
-    ).strip()
-    copy_style = _COPY_STYLE_LABELS.get(copy_style_key, copy_style_key or "未设置")
     keywords = _join_non_empty(draft.get("keywords") or draft.get("search_queries") or [])
 
-    packaging_summary = [
-        ("片头", _resolved_packaging_label(effective_packaging_plan.get("intro"))),
-        ("片尾", _resolved_packaging_label(effective_packaging_plan.get("outro"))),
-        ("转场 / 包装插片", _resolved_packaging_label(effective_packaging_plan.get("insert"))),
-        ("水印", _resolved_packaging_label(effective_packaging_plan.get("watermark"))),
-        ("音乐", _resolved_packaging_label(effective_packaging_plan.get("music"))),
-    ]
-    style_summary = [
-        ("字幕风格", _style_label(effective_packaging_plan.get("subtitle_style"), _SUBTITLE_STYLE_LABELS)),
-        ("封面模板", _style_label(effective_packaging_plan.get("cover_style"), _COVER_STYLE_LABELS)),
-        ("标题模板", _style_label(effective_packaging_plan.get("title_style"), _TITLE_STYLE_LABELS)),
-        ("文案风格", copy_style),
-        ("智能剪辑特效", _style_label(effective_packaging_plan.get("smart_effect_style"), _SMART_EFFECT_STYLE_LABELS)),
-    ]
     review_checks = _build_review_checks(
         enhancement_modes=list(review.enhancement_modes or []),
         config=config,
@@ -1854,16 +1828,10 @@ def _build_content_profile_review_message(
         f"任务：{source_name}",
         f"Job ID：{job_id}",
         "",
-        "核对配置：",
-        f"- 工作流模式：{workflow_mode}",
-        f"- 文案风格：{copy_style}",
-        f"- 增强模式：{', '.join(enhancement_modes) if enhancement_modes else '未启用'}",
-        "- 增强模式素材检查：",
+        "剪辑配置：",
+        "- 当前审核已继承当前激活的剪辑配置；如需改工作流、增强模式、数字人、包装或风格，请直接回复说明。",
+        "- 审核就绪检查：",
         *[f"  - {item['status']} | {item['label']}：{item['detail']}" for item in review_checks],
-        "- 包装素材清单：",
-        *[f"  - {label}：{value}" for label, value in packaging_summary],
-        "- 风格模板清单：",
-        *[f"  - {label}：{value}" for label, value in style_summary],
         "",
         "内容核对：",
         *content_lines,
@@ -1911,7 +1879,7 @@ def _build_content_profile_review_message(
             "回复方式：",
             "1. 直接回复“通过”即可继续后续流程。",
             "2. 也可以直接回复自然语言修改意见，系统会按前端同款审核字段解析。",
-            "3. 如需改工作流、增强模式或文案风格，也可以直接在回复里说明。",
+            "3. 如需切换剪辑配置，或直接改工作流、增强模式、数字人、包装和风格，也可以直接在回复里说明。",
         ]
     )
     return "\n".join(lines)
@@ -1928,12 +1896,6 @@ def _build_final_review_message(
     subtitle_report: Any | None = None,
     rerun_context: dict[str, Any] | None = None,
 ) -> str:
-    workflow_label = _WORKFLOW_MODE_LABELS.get(workflow_mode, workflow_mode or "未设置")
-    enhancement_labels = [
-        _ENHANCEMENT_MODE_LABELS.get(str(item), str(item))
-        for item in (enhancement_modes or [])
-        if str(item).strip()
-    ]
     summary = str((content_profile or {}).get("summary") or (content_profile or {}).get("video_theme") or "").strip()
     keywords = _join_non_empty(_extract_final_review_keywords(content_profile))
     subtitle_hints = _build_final_review_subtitle_hints(subtitle_report)
@@ -1953,9 +1915,10 @@ def _build_final_review_message(
         f"任务：{source_name}",
         f"Job ID：{job_id}",
         "",
+        "剪辑配置：",
+        "- 当前成片已按当前任务的剪辑配置生成；如需只改封面、BGM、平台文案或数字人口播，可直接回复。",
+        "",
         "成片审核：",
-        f"- 工作流模式：{workflow_label}",
-        f"- 增强模式：{', '.join(enhancement_labels) if enhancement_labels else '未启用'}",
         f"- 封面：{cover_text}",
         *variant_lines,
         "- 审片包：默认发送 3 段压缩预览，不直接上传整片，避免 Telegram 大文件卡顿。",

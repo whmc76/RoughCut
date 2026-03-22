@@ -12,8 +12,8 @@ type ConfigProfileSwitcherProps = {
 };
 
 export function ConfigProfileSwitcher({
-  title = "配置方案",
-  description = "把当前数字人、包装、风格和增强模式组合保存为方案，并在这里一键切换。",
+  title = "剪辑配置切换",
+  description = "把当前工作流、增强模式、数字人、包装和风格模块保存为一套剪辑配置，并在这里一键切换。",
   compact = false,
   className,
 }: ConfigProfileSwitcherProps) {
@@ -105,7 +105,7 @@ export function ConfigProfileSwitcher({
   const normalizedName = draftName.trim();
   const canCreate = Boolean(normalizedName);
   const canRename = Boolean(activeProfile && normalizedName && normalizedName !== activeProfile.name);
-  const activeSummary = activeProfile ? formatProfileSummary(activeProfile) : "还没有保存过方案，先把当前组合保存下来。";
+  const activeSummary = activeProfile ? formatProfileSummary(activeProfile) : "还没有保存过剪辑配置，先把当前组合保存下来。";
 
   return (
     <section className={classNames("config-profile-switcher", compact ? "compact" : "", className)}>
@@ -115,11 +115,11 @@ export function ConfigProfileSwitcher({
           <div className="muted compact-top">{description}</div>
         </div>
         {profiles.data?.active_profile_dirty ? (
-          <span className="status-pill failed">当前方案已改动</span>
+          <span className="status-pill failed">当前配置已改动</span>
         ) : activeProfile ? (
           <span className="status-pill done">已激活 {activeProfile.name}</span>
         ) : (
-          <span className="status-pill pending">未激活方案</span>
+          <span className="status-pill pending">未激活配置</span>
         )}
       </div>
 
@@ -139,7 +139,7 @@ export function ConfigProfileSwitcher({
             {profile.is_dirty ? <span className="config-profile-chip-mark">未保存</span> : null}
           </button>
         ))}
-        {!profiles.data?.profiles.length ? <span className="muted">暂无方案</span> : null}
+        {!profiles.data?.profiles.length ? <span className="muted">暂无剪辑配置</span> : null}
       </div>
 
       <div className="notice top-gap">
@@ -156,14 +156,14 @@ export function ConfigProfileSwitcher({
           className="input config-profile-name-input"
           value={draftName}
           onChange={(event) => setDraftName(event.target.value)}
-          placeholder="输入方案名称，例如：评测口播增强"
+          placeholder="输入配置名称，例如：评测口播增强"
         />
         <button
           className="button primary"
           disabled={!canCreate || pending}
           onClick={() => createProfile.mutate(normalizedName)}
         >
-          保存为新方案
+          保存为新配置
         </button>
         <button
           className="button ghost"
@@ -177,7 +177,7 @@ export function ConfigProfileSwitcher({
               })
           }
         >
-          覆盖当前方案
+          覆盖当前配置
         </button>
         <button
           className="button ghost"
@@ -191,22 +191,22 @@ export function ConfigProfileSwitcher({
               })
           }
         >
-          重命名当前方案
+          重命名当前配置
         </button>
         <button
           className="button danger"
           disabled={!activeProfile || pending}
           onClick={() => {
             if (!activeProfile) return;
-            if (!window.confirm(`确认删除方案“${activeProfile.name}”？`)) return;
+            if (!window.confirm(`确认删除剪辑配置“${activeProfile.name}”？`)) return;
             deleteProfile.mutate(activeProfile.id);
           }}
         >
-          删除当前方案
+          删除当前配置
         </button>
       </div>
 
-      {profiles.isLoading ? <div className="muted compact-top">正在读取方案…</div> : null}
+      {profiles.isLoading ? <div className="muted compact-top">正在读取剪辑配置…</div> : null}
       {profiles.isError ? <div className="muted compact-top">{(profiles.error as Error).message}</div> : null}
       {mutationError ? <div className="muted compact-top">{mutationError}</div> : null}
     </section>

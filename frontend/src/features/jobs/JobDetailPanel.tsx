@@ -1,4 +1,4 @@
-import type { AvatarMaterialLibrary, Config, ConfigOptions, ContentProfileReview, Job, JobActivity, JobTimeline, PackagingLibrary, Report, TokenUsageReport } from "../../types";
+import type { AvatarMaterialLibrary, Config, ContentProfileReview, Job, JobActivity, JobTimeline, PackagingLibrary, Report, TokenUsageReport } from "../../types";
 import { EmptyState } from "../../components/ui/EmptyState";
 import { PanelHeader } from "../../components/ui/PanelHeader";
 import { useI18n } from "../../i18n";
@@ -6,7 +6,7 @@ import { classNames, formatDate, statusLabel } from "../../utils";
 import { JobContentProfileSection } from "./JobContentProfileSection";
 import { JobSubtitleReportSection } from "./JobSubtitleReportSection";
 import { JobReviewConfigSection } from "./JobReviewConfigSection";
-import { enhancementModeLabel, stepLabel, workflowModeLabel } from "./constants";
+import { stepLabel, workflowModeLabel, enhancementModeLabel } from "./constants";
 
 type JobDetailPanelProps = {
   selectedJobId: string | null;
@@ -19,15 +19,12 @@ type JobDetailPanelProps = {
   timeline?: JobTimeline;
   contentProfile?: ContentProfileReview;
   config?: Config;
-  options?: ConfigOptions;
   packaging?: PackagingLibrary;
   avatarMaterials?: AvatarMaterialLibrary;
   contentSource: Record<string, unknown> | null;
   contentDraft: Record<string, unknown>;
   contentKeywords: string;
-  reviewWorkflowMode: string;
   reviewEnhancementModes: string[];
-  reviewCopyStyle: string;
   isConfirmingProfile: boolean;
   isApplyingReview: boolean;
   isCancelling: boolean;
@@ -35,9 +32,6 @@ type JobDetailPanelProps = {
   isDeleting: boolean;
   onContentFieldChange: (field: string, value: string) => void;
   onKeywordsChange: (value: string) => void;
-  onReviewWorkflowModeChange: (value: string) => void;
-  onReviewEnhancementModesChange: (value: string[]) => void;
-  onReviewCopyStyleChange: (value: string) => void;
   onConfirmProfile: () => void;
   onOpenFolder: () => void;
   onCancel: () => void;
@@ -57,15 +51,12 @@ export function JobDetailPanel({
   timeline,
   contentProfile,
   config,
-  options,
   packaging,
   avatarMaterials,
   contentSource,
   contentDraft,
   contentKeywords,
-  reviewWorkflowMode,
   reviewEnhancementModes,
-  reviewCopyStyle,
   isConfirmingProfile,
   isApplyingReview,
   isCancelling,
@@ -73,9 +64,6 @@ export function JobDetailPanel({
   isDeleting,
   onContentFieldChange,
   onKeywordsChange,
-  onReviewWorkflowModeChange,
-  onReviewEnhancementModesChange,
-  onReviewCopyStyleChange,
   onConfirmProfile,
   onOpenFolder,
   onCancel,
@@ -158,36 +146,30 @@ export function JobDetailPanel({
           </div>
           <div className="muted compact-top">{downloadHint}</div>
 
-          <section className="detail-block">
-            <div className="detail-key">{t("jobs.detail.creativeMode")}</div>
-            <div className="mode-chip-list">
-              <span className="mode-chip">{workflowModeLabel(isReviewMode ? reviewWorkflowMode : selectedJob.workflow_mode)}</span>
-              {(isReviewMode ? reviewEnhancementModes : selectedJob.enhancement_modes).length ? (
-                (isReviewMode ? reviewEnhancementModes : selectedJob.enhancement_modes).map((mode) => (
-                  <span key={mode} className="mode-chip subtle">
-                    {enhancementModeLabel(mode)}
-                  </span>
-                ))
-              ) : (
-                <span className="muted">{t("jobs.detail.noEnhancements")}</span>
-              )}
-            </div>
-          </section>
+          {!isReviewMode && (
+            <section className="detail-block">
+              <div className="detail-key">{t("jobs.detail.creativeMode")}</div>
+              <div className="mode-chip-list">
+                <span className="mode-chip">{workflowModeLabel(selectedJob.workflow_mode)}</span>
+                {selectedJob.enhancement_modes.length ? (
+                  selectedJob.enhancement_modes.map((mode) => (
+                    <span key={mode} className="mode-chip subtle">
+                      {enhancementModeLabel(mode)}
+                    </span>
+                  ))
+                ) : (
+                  <span className="muted">{t("jobs.detail.noEnhancements")}</span>
+                )}
+              </div>
+            </section>
+          )}
 
           {isReviewMode ? (
             <JobReviewConfigSection
-              selectedJob={selectedJob}
               config={config}
               packaging={packaging}
               avatarMaterials={avatarMaterials}
-              workflowMode={reviewWorkflowMode}
               enhancementModes={reviewEnhancementModes}
-              copyStyle={reviewCopyStyle}
-              workflowOptions={options?.workflow_modes ?? []}
-              enhancementOptions={options?.enhancement_modes ?? []}
-              onWorkflowModeChange={onReviewWorkflowModeChange}
-              onEnhancementModesChange={onReviewEnhancementModesChange}
-              onCopyStyleChange={onReviewCopyStyleChange}
             />
           ) : (
             <>

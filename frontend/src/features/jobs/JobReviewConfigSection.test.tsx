@@ -1,7 +1,7 @@
 import { QueryClientProvider } from "@tanstack/react-query";
 import { render, screen } from "@testing-library/react";
 
-import type { AvatarMaterialLibrary, Config, PackagingLibrary, SelectOption } from "../../types";
+import type { AvatarMaterialLibrary, Config, PackagingLibrary } from "../../types";
 import { api } from "../../api";
 import { createTestQueryClient } from "../../test/renderWithQueryClient";
 import { JobReviewConfigSection } from "./JobReviewConfigSection";
@@ -15,9 +15,6 @@ vi.mock("../../api", () => ({
     deleteConfigProfile: vi.fn(),
   },
 }));
-
-const workflowOptions: SelectOption[] = [{ value: "standard_edit", label: "标准成片" }];
-const enhancementOptions: SelectOption[] = [{ value: "avatar_commentary", label: "数字人解说" }];
 
 const baseConfig: Partial<Config> = {
   default_job_workflow_mode: "standard_edit",
@@ -64,17 +61,10 @@ function renderSection(avatarMaterials?: Partial<AvatarMaterialLibrary>, config?
   return render(
     <QueryClientProvider client={queryClient}>
       <JobReviewConfigSection
-        workflowMode="standard_edit"
         enhancementModes={["avatar_commentary"]}
-        workflowOptions={workflowOptions}
-        enhancementOptions={enhancementOptions}
-        copyStyle="attention_grabbing"
         packaging={packaging}
         avatarMaterials={avatarMaterials as AvatarMaterialLibrary | undefined}
         config={{ ...baseConfig, ...config } as Config}
-        onWorkflowModeChange={() => {}}
-        onEnhancementModesChange={() => {}}
-        onCopyStyleChange={() => {}}
       />
     </QueryClientProvider>,
   );
@@ -112,5 +102,16 @@ describe("JobReviewConfigSection", () => {
 
     expect(screen.getByText("待补")).toBeInTheDocument();
     expect(screen.getByText(/本次任务会退回普通成片，不会生成数字人口播画中画/)).toBeInTheDocument();
+  });
+
+  it("keeps only config switching and review checks in the review card", () => {
+    renderSection({ profiles: [] });
+
+    expect(screen.getByText("剪辑配置与审核")).toBeInTheDocument();
+    expect(screen.getByText("剪辑配置切换")).toBeInTheDocument();
+    expect(screen.getByText("审核就绪检查")).toBeInTheDocument();
+    expect(screen.queryByText("工作流模式")).not.toBeInTheDocument();
+    expect(screen.queryByText("包装素材清单")).not.toBeInTheDocument();
+    expect(screen.queryByText("风格模板清单")).not.toBeInTheDocument();
   });
 });

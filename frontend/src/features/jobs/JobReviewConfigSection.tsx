@@ -1,28 +1,12 @@
-import type { AvatarMaterialLibrary, Config, Job, PackagingAsset, PackagingLibrary, SelectOption } from "../../types";
+import type { AvatarMaterialLibrary, Config, PackagingLibrary } from "../../types";
 import { ConfigProfileSwitcher } from "../configProfiles/ConfigProfileSwitcher";
-import {
-  copyStylePresets,
-  coverStylePresets,
-  findStylePreset,
-  smartEffectPresets,
-  subtitleStylePresets,
-  titleStylePresets,
-} from "../../stylePresets";
-import { enhancementModeLabel, workflowModeLabel } from "./constants";
+import { findStylePreset, smartEffectPresets } from "../../stylePresets";
 
 type JobReviewConfigSectionProps = {
-  selectedJob?: Job;
   config?: Config;
   packaging?: PackagingLibrary;
   avatarMaterials?: AvatarMaterialLibrary;
-  workflowMode: string;
   enhancementModes: string[];
-  workflowOptions: SelectOption[];
-  enhancementOptions: SelectOption[];
-  copyStyle: string;
-  onWorkflowModeChange: (value: string) => void;
-  onEnhancementModesChange: (value: string[]) => void;
-  onCopyStyleChange: (value: string) => void;
 };
 
 export type ReviewCheck = {
@@ -33,170 +17,49 @@ export type ReviewCheck = {
 };
 
 export function JobReviewConfigSection({
-  selectedJob,
   config,
   packaging,
   avatarMaterials,
-  workflowMode,
   enhancementModes,
-  workflowOptions,
-  enhancementOptions,
-  copyStyle,
-  onWorkflowModeChange,
-  onEnhancementModesChange,
-  onCopyStyleChange,
 }: JobReviewConfigSectionProps) {
-  const packagingAssets = flattenPackagingAssets(packaging);
-  const packagingSummary = [
-    { label: "片头", value: assetLabel(packagingAssets, packaging?.config.intro_asset_id) },
-    { label: "片尾", value: assetLabel(packagingAssets, packaging?.config.outro_asset_id) },
-    { label: "转场 / 包装插片", value: listAssetLabels(packagingAssets, packaging?.config.insert_asset_ids) },
-    { label: "水印", value: assetLabel(packagingAssets, packaging?.config.watermark_asset_id) },
-    { label: "音乐", value: listAssetLabels(packagingAssets, packaging?.config.music_asset_ids) },
-  ];
-  const styleSummary = [
-    {
-      label: "字幕风格",
-      value: findStylePreset(subtitleStylePresets, packaging?.config.subtitle_style ?? "")?.label ?? packaging?.config.subtitle_style ?? "未设置",
-    },
-    {
-      label: "封面模板",
-      value: findStylePreset(coverStylePresets, packaging?.config.cover_style ?? "")?.label ?? packaging?.config.cover_style ?? "未设置",
-    },
-    {
-      label: "标题模板",
-      value: findStylePreset(titleStylePresets, packaging?.config.title_style ?? "")?.label ?? packaging?.config.title_style ?? "未设置",
-    },
-    {
-      label: "文案风格",
-      value: findStylePreset(copyStylePresets, copyStyle)?.label ?? copyStyle ?? "未设置",
-    },
-    {
-      label: "智能剪辑特效",
-      value:
-        findStylePreset(smartEffectPresets, packaging?.config.smart_effect_style ?? "")?.label
-        ?? packaging?.config.smart_effect_style
-        ?? "未设置",
-    },
-  ];
   const reviewChecks = buildReviewChecks({
     enhancementModes,
     config,
     packaging,
     avatarMaterials,
   });
-  const inheritedModes = sameStringArray(
-    config?.default_job_enhancement_modes ?? [],
-    enhancementModes,
-  ) && (config?.default_job_workflow_mode ?? "standard_edit") === workflowMode;
 
   return (
     <section className="detail-block review-config-block">
-      <div className="detail-key">核对配置</div>
+      <div className="detail-key">剪辑配置与审核</div>
       <div className="notice">
-        自动入队任务会先继承你上次确认过的习惯，再在这里二次确认增强模式、包装素材和风格模板。
-        {inheritedModes ? " 当前选项已与最近一次确认的默认习惯一致。" : " 当前选项已偏离最近默认习惯，确认后会覆盖为新的默认值。"}
+        审核卡片不再逐项展开工作流、增强模式、数字人、包装和风格选项，统一改为通过“剪辑配置切换”管理整套默认配置。
+        当前剪辑配置已覆盖工作流、增强模式、数字人绑定、AI 导演语音入口、包装开关与素材池，以及封面、标题、字幕、文案和特效风格。
+      </div>
+      <div className="notice compact-top">
+        这里仅保留审核相关信息：配置切换入口，以及资源是否齐全、服务是否可用、最终是否会自动降级等执行风险检查。
       </div>
       <ConfigProfileSwitcher
         compact
-        description="审核页可以直接切换整套方案，当前任务的默认审核配置会同步跟到最新方案。"
+        description="审核页只保留剪辑配置切换入口。切换后，当前任务审核默认值会跟随最新激活配置。"
       />
 
-      <div className="review-config-grid top-gap">
-        <article className="review-config-card">
-          <div className="stat-label">创作模式</div>
-          <div className="form-stack compact-top">
-            <label>
-              <span>工作流模式</span>
-              <select className="input" value={workflowMode} onChange={(event) => onWorkflowModeChange(event.target.value)}>
-                {workflowOptions.map((option) => (
-                  <option key={option.value} value={option.value}>
-                    {option.label}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <div className="muted">当前任务：{selectedJob ? workflowModeLabel(selectedJob.workflow_mode) : "—"}，本次确认后默认沿用：{workflowModeLabel(workflowMode)}</div>
-            <label>
-              <span>文案风格</span>
-              <select className="input" value={copyStyle} onChange={(event) => onCopyStyleChange(event.target.value)}>
-                {copyStylePresets.map((preset) => (
-                  <option key={preset.key} value={preset.key}>
-                    {preset.label}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <div className="muted">这是全局文案口吻，会同时影响封面、标题和简介，确认后自动继承为后续默认。</div>
-            <div className="muted">平台会自动做二次适配：B站更强调信息密度，小红书更偏分享质感，抖音更偏爆点短句，快手更直给，视频号更稳妥。</div>
-            <div className="review-mode-list">
-              {enhancementOptions.map((option) => {
-                const checked = enhancementModes.includes(option.value);
-                return (
-                  <label key={option.value} className="review-mode-row">
-                    <input
-                      type="checkbox"
-                      checked={checked}
-                      onChange={(event) =>
-                        onEnhancementModesChange(
-                          event.target.checked
-                            ? [...enhancementModes, option.value]
-                            : enhancementModes.filter((item) => item !== option.value),
-                        )
-                      }
-                    />
-                    <span>{option.label}</span>
-                  </label>
-                );
-              })}
-              {!enhancementOptions.length ? <div className="muted">暂无可选增强模式</div> : null}
+      <article className="review-config-card top-gap">
+        <div className="stat-label">审核就绪检查</div>
+        <div className="list-stack compact-top">
+          {reviewChecks.map((item) => (
+            <div key={item.key} className="avatar-rule-row">
+              <span className={`status-pill ${item.status === "ready" ? "done" : "failed"}`}>
+                {item.status === "ready" ? "齐全" : "待补"}
+              </span>
+              <div>
+                <div>{item.label}</div>
+                <div className="muted compact-top">{item.detail}</div>
+              </div>
             </div>
-          </div>
-        </article>
-
-        <article className="review-config-card">
-          <div className="stat-label">增强模式素材检查</div>
-          <div className="list-stack compact-top">
-            {reviewChecks.map((item) => (
-              <div key={item.key} className="avatar-rule-row">
-                <span className={`status-pill ${item.status === "ready" ? "done" : "failed"}`}>
-                  {item.status === "ready" ? "齐全" : "待补"}
-                </span>
-                <div>
-                  <div>{item.label}</div>
-                  <div className="muted compact-top">{item.detail}</div>
-                </div>
-              </div>
-            ))}
-          </div>
-        </article>
-      </div>
-
-      <div className="review-config-grid top-gap">
-        <article className="review-config-card">
-          <div className="stat-label">包装素材清单</div>
-          <div className="list-stack compact-top">
-            {packagingSummary.map((item) => (
-              <div key={item.label} className="summary-row">
-                <strong>{item.label}</strong>
-                <span className="muted">{item.value}</span>
-              </div>
-            ))}
-          </div>
-        </article>
-
-        <article className="review-config-card">
-          <div className="stat-label">风格模板清单</div>
-          <div className="list-stack compact-top">
-            {styleSummary.map((item) => (
-              <div key={item.label} className="summary-row">
-                <strong>{item.label}</strong>
-                <span className="muted">{item.value}</span>
-              </div>
-            ))}
-          </div>
-        </article>
-      </div>
+          ))}
+        </div>
+      </article>
     </section>
   );
 }
@@ -282,29 +145,4 @@ export function buildReviewChecks({
   }
 
   return checks;
-}
-
-function flattenPackagingAssets(packaging?: PackagingLibrary): Record<string, PackagingAsset> {
-  return Object.fromEntries(
-    Object.values(packaging?.assets ?? {})
-      .flat()
-      .map((item) => [item.id, item]),
-  );
-}
-
-function assetLabel(assets: Record<string, PackagingAsset>, assetId?: string | null): string {
-  if (!assetId) return "未选择";
-  return assets[assetId]?.original_name ?? assetId;
-}
-
-function listAssetLabels(assets: Record<string, PackagingAsset>, assetIds?: string[] | null): string {
-  if (!assetIds?.length) return "未选择";
-  return assetIds.map((assetId) => assetLabel(assets, assetId)).join("、");
-}
-
-function sameStringArray(left: string[], right: string[]): boolean {
-  if (left.length !== right.length) return false;
-  const leftSorted = [...left].sort();
-  const rightSorted = [...right].sort();
-  return leftSorted.every((item, index) => item === rightSorted[index]);
 }
