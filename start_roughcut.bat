@@ -6,6 +6,7 @@ cd /d "%SCRIPT_DIR%"
 if /I "%~1"=="dev" goto pnpm_dev
 if /I "%~1"=="build" goto pnpm_build
 if /I "%~1"=="test" goto pnpm_test
+if /I "%~1"=="clip-test" goto pnpm_test_clip
 if /I "%~1"=="setup" goto pnpm_setup
 if /I "%~1"=="doctor" goto pnpm_doctor
 if /I "%~1"=="migrate" goto pnpm_migrate
@@ -44,6 +45,14 @@ goto finish
 call :require_pnpm
 if not %ERRORLEVEL%==0 goto finish
 call pnpm test
+set EXIT_CODE=%ERRORLEVEL%
+goto finish
+
+:pnpm_test_clip
+call :require_pnpm
+if not %ERRORLEVEL%==0 goto finish
+shift
+call pnpm test:clip -- %*
 set EXIT_CODE=%ERRORLEVEL%
 goto finish
 
@@ -111,6 +120,7 @@ echo   start_roughcut.bat             One-click startup package
 echo   start_roughcut.bat dev         Run unified pnpm dev
 echo   start_roughcut.bat build       Run pnpm build
 echo   start_roughcut.bat test        Run pnpm test
+echo   start_roughcut.bat clip-test   Run one manual clip test with a chosen source
 echo   start_roughcut.bat setup       Run pnpm setup
 echo   start_roughcut.bat doctor      Run pnpm doctor
 echo   start_roughcut.bat migrate     Run pnpm migrate

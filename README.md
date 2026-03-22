@@ -272,11 +272,21 @@ pnpm lint
 细分命令：
 
 ```bash
+pnpm test:clip -- E:/videos/demo.mp4
 pnpm test:frontend
 pnpm test:backend
 pnpm build:frontend
 pnpm build:backend
 ```
+
+如果你要每次换一条视频源做完整链路测试，不要走 `pytest`，直接跑手工链路测试：
+
+```bash
+pnpm test:clip -- E:/videos/demo.mp4
+uv run roughcut clip-test E:/videos/demo.mp4 --channel-profile edc_tactical --sample-seconds 90
+```
+
+每次只要换掉传入的视频路径，就会生成一条新的测试任务产物到 `output/test/manual-tests/`。
 
 构建前端后，FastAPI 会直接托管 `frontend/dist`。
 
@@ -294,6 +304,8 @@ Windows 下当前建议把 [start_roughcut.bat](E:/WorkSpace/RoughCut/start_roug
   直接运行统一入口 `pnpm dev`
 - `start_roughcut.bat test`
   运行 `pnpm test`
+- `start_roughcut.bat clip-test E:\videos\demo.mp4`
+  跑一条指定视频源的完整手工测试链路
 - `start_roughcut.bat build`
   运行 `pnpm build`
 

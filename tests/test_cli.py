@@ -156,6 +156,59 @@ def test_telegram_agent_command_runs_service(monkeypatch):
     assert called["run_forever"] is True
 
 
+def test_clip_test_runs_manual_pipeline(monkeypatch, tmp_path: Path):
+    runner = CliRunner()
+    source = tmp_path / "demo.mp4"
+    source.write_bytes(b"video")
+    called: dict[str, object] = {}
+
+    async def fake_run_manual_clip_test(
+        source_path: Path,
+        *,
+        language: str,
+        channel_profile: str | None,
+        sample_seconds: int,
+    ):
+        called["source"] = source_path
+        called["language"] = language
+        called["channel_profile"] = channel_profile
+        called["sample_seconds"] = sample_seconds
+        return {
+            "source": str(source_path),
+            "language": language,
+            "channel_profile": channel_profile,
+            "sample_seconds": sample_seconds,
+        }
+
+    import roughcut.testing.manual_clip as manual_clip_mod
+
+    monkeypatch.setattr(manual_clip_mod, "run_manual_clip_test", fake_run_manual_clip_test)
+
+    result = runner.invoke(
+        cli_mod.cli,
+        [
+            "clip-test",
+            str(source),
+            "--language",
+            "zh-CN",
+            "--channel-profile",
+            "edc_tactical",
+            "--sample-seconds",
+            "45",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert called == {
+        "source": source,
+        "language": "zh-CN",
+        "channel_profile": "edc_tactical",
+        "sample_seconds": 45,
+    }
+    assert "Running clip test for:" in result.output
+    assert '"sample_seconds": 45' in result.output
+
+
 def test_quality_improve_continues_past_skipped_jobs(monkeypatch):
     runner = CliRunner()
     jobs = [

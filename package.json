@@ -17,6 +17,7 @@
     "dev:watcher": "uv run roughcut watcher watch",
     "dev:telegram-agent": "uv run roughcut telegram-agent",
     "test": "pnpm run test:frontend && pnpm run test:backend",
+    "test:clip": "uv run roughcut clip-test",
     "test:frontend": "pnpm --dir frontend test",
     "test:backend": "uv run pytest",
     "build": "pnpm run build:frontend",

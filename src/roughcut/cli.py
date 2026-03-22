@@ -280,6 +280,27 @@ def telegram_agent():
 
 
 @cli.command()
+@click.argument("source", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--language", default="zh-CN", show_default=True, help="Language code")
+@click.option("--channel-profile", default=None, help="Channel profile name")
+@click.option("--sample-seconds", default=90, type=click.IntRange(1), show_default=True, help="Max seconds to sample from the source")
+def clip_test(source: Path, language: str, channel_profile: str | None, sample_seconds: int):
+    """Run a full manual pipeline test for one source video."""
+    from roughcut.testing.manual_clip import run_manual_clip_test
+
+    click.echo(f"Running clip test for: {source}")
+    report = asyncio.run(
+        run_manual_clip_test(
+            source,
+            language=language,
+            channel_profile=channel_profile,
+            sample_seconds=sample_seconds,
+        )
+    )
+    click.echo(json.dumps(report, ensure_ascii=False, indent=2))
+
+
+@cli.command()
 def migrate():
     """Run Alembic database migrations."""
     import subprocess
