@@ -1,6 +1,7 @@
 import { PageHeader } from "../components/ui/PageHeader";
 import { PanelHeader } from "../components/ui/PanelHeader";
 import { StatCard } from "../components/ui/StatCard";
+import { ConfigProfileSwitcher } from "../features/configProfiles/ConfigProfileSwitcher";
 import { useI18n } from "../i18n";
 import { JobDetailPanel } from "../features/jobs/JobDetailPanel";
 import { JobDetailModal } from "../features/jobs/JobDetailModal";
@@ -42,6 +43,11 @@ export function JobsPage() {
             </button>
           </>
         }
+      />
+
+      <ConfigProfileSwitcher
+        className="top-gap"
+        description="任务创建和审核确认都会继承这里激活的方案，切换后新任务默认参数会立刻跟随。"
       />
 
       <JobUploadPanel

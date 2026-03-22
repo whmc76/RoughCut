@@ -5,6 +5,7 @@ import { PageHeader } from "../components/ui/PageHeader";
 import { PanelHeader } from "../components/ui/PanelHeader";
 import { useI18n } from "../i18n";
 import { StatCard } from "../components/ui/StatCard";
+import { ConfigProfileSwitcher } from "../features/configProfiles/ConfigProfileSwitcher";
 import { JobsUsageTrendPanel } from "../features/jobs/JobsUsageTrendPanel";
 import { useOverviewWorkspace } from "../features/overview/useOverviewWorkspace";
 import { formatDate, statusLabel } from "../utils";
@@ -16,6 +17,7 @@ export function OverviewPage() {
   return (
     <section>
       <PageHeader eyebrow={t("overview.page.eyebrow")} title={t("overview.page.title")} description={t("overview.page.description")} />
+      <ConfigProfileSwitcher className="top-gap" />
 
       <div className="stats-grid">
         <StatCard label={t("overview.stats.jobs")} value={workspace.stats.jobs} />

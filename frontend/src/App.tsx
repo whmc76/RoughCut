@@ -1,18 +1,39 @@
-import { useEffect, useRef } from "react";
+import { Suspense, lazy, useEffect, useRef } from "react";
 import { NavLink, Route, Routes } from "react-router-dom";
 
 import { api } from "./api";
 import { useI18n } from "./i18n";
-import { ControlPage } from "./pages/ControlPage";
-import { CreativeModesPage } from "./pages/CreativeModesPage";
-import { MemoryPage } from "./pages/MemoryPage";
-import { GlossaryPage } from "./pages/GlossaryPage";
-import { JobsPage } from "./pages/JobsPage";
-import { OverviewPage } from "./pages/OverviewPage";
-import { PackagingPage } from "./pages/PackagingPage";
-import { SettingsPage } from "./pages/SettingsPage";
-import { StyleTemplatesPage } from "./pages/StyleTemplatesPage";
-import { WatchRootsPage } from "./pages/WatchRootsPage";
+
+const OverviewPage = lazy(async () => ({
+  default: (await import("./pages/OverviewPage")).OverviewPage,
+}));
+const JobsPage = lazy(async () => ({
+  default: (await import("./pages/JobsPage")).JobsPage,
+}));
+const WatchRootsPage = lazy(async () => ({
+  default: (await import("./pages/WatchRootsPage")).WatchRootsPage,
+}));
+const PackagingPage = lazy(async () => ({
+  default: (await import("./pages/PackagingPage")).PackagingPage,
+}));
+const StyleTemplatesPage = lazy(async () => ({
+  default: (await import("./pages/StyleTemplatesPage")).StyleTemplatesPage,
+}));
+const CreativeModesPage = lazy(async () => ({
+  default: (await import("./pages/CreativeModesPage")).CreativeModesPage,
+}));
+const MemoryPage = lazy(async () => ({
+  default: (await import("./pages/MemoryPage")).MemoryPage,
+}));
+const GlossaryPage = lazy(async () => ({
+  default: (await import("./pages/GlossaryPage")).GlossaryPage,
+}));
+const SettingsPage = lazy(async () => ({
+  default: (await import("./pages/SettingsPage")).SettingsPage,
+}));
+const ControlPage = lazy(async () => ({
+  default: (await import("./pages/ControlPage")).ControlPage,
+}));
 
 export function App() {
   const { locale, setLocale, t } = useI18n();
@@ -74,18 +95,20 @@ export function App() {
         </div>
       </aside>
       <main className="main-content">
-        <Routes>
-          <Route path="/" element={<OverviewPage />} />
-          <Route path="/jobs" element={<JobsPage />} />
-          <Route path="/watch-roots" element={<WatchRootsPage />} />
-          <Route path="/packaging" element={<PackagingPage />} />
-          <Route path="/style-templates" element={<StyleTemplatesPage />} />
-          <Route path="/creative-modes" element={<CreativeModesPage />} />
-          <Route path="/memory" element={<MemoryPage />} />
-          <Route path="/glossary" element={<GlossaryPage />} />
-          <Route path="/settings" element={<SettingsPage />} />
-          <Route path="/control" element={<ControlPage />} />
-        </Routes>
+        <Suspense fallback={<section className="panel">加载页面中…</section>}>
+          <Routes>
+            <Route path="/" element={<OverviewPage />} />
+            <Route path="/jobs" element={<JobsPage />} />
+            <Route path="/watch-roots" element={<WatchRootsPage />} />
+            <Route path="/packaging" element={<PackagingPage />} />
+            <Route path="/style-templates" element={<StyleTemplatesPage />} />
+            <Route path="/creative-modes" element={<CreativeModesPage />} />
+            <Route path="/memory" element={<MemoryPage />} />
+            <Route path="/glossary" element={<GlossaryPage />} />
+            <Route path="/settings" element={<SettingsPage />} />
+            <Route path="/control" element={<ControlPage />} />
+          </Routes>
+        </Suspense>
       </main>
     </div>
   );

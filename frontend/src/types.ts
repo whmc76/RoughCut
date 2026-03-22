@@ -683,6 +683,32 @@ export type ConfigOptions = {
   search_fallback_providers: SelectOption[];
 };
 
+export type ConfigProfile = {
+  id: string;
+  name: string;
+  created_at: string;
+  updated_at: string;
+  is_active: boolean;
+  is_dirty: boolean;
+  workflow_mode: string;
+  enhancement_modes: string[];
+  copy_style: string;
+  cover_style: string;
+  title_style: string;
+  subtitle_style: string;
+  smart_effect_style: string;
+  avatar_presenter_id: string;
+  packaging_enabled: boolean;
+  insert_pool_size: number;
+  music_pool_size: number;
+};
+
+export type ConfigProfiles = {
+  active_profile_id?: string | null;
+  active_profile_dirty: boolean;
+  profiles: ConfigProfile[];
+};
+
 export type ServiceStatus = {
   checked_at: string;
   services: Record<string, boolean>;

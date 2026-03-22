@@ -1,4 +1,5 @@
 import type { AvatarMaterialLibrary, Config, Job, PackagingAsset, PackagingLibrary, SelectOption } from "../../types";
+import { ConfigProfileSwitcher } from "../configProfiles/ConfigProfileSwitcher";
 import {
   copyStylePresets,
   coverStylePresets,
@@ -96,6 +97,10 @@ export function JobReviewConfigSection({
         自动入队任务会先继承你上次确认过的习惯，再在这里二次确认增强模式、包装素材和风格模板。
         {inheritedModes ? " 当前选项已与最近一次确认的默认习惯一致。" : " 当前选项已偏离最近默认习惯，确认后会覆盖为新的默认值。"}
       </div>
+      <ConfigProfileSwitcher
+        compact
+        description="审核页可以直接切换整套方案，当前任务的默认审核配置会同步跟到最新方案。"
+      />
 
       <div className="review-config-grid top-gap">
         <article className="review-config-card">

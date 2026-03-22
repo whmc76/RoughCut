@@ -30,6 +30,13 @@ from roughcut.config import (
     load_runtime_overrides,
     normalize_transcription_settings,
 )
+from roughcut.config_profiles import (
+    activate_config_profile,
+    build_config_profiles_payload,
+    create_config_profile,
+    delete_config_profile,
+    update_config_profile,
+)
 from roughcut.creative.modes import normalize_enhancement_modes, normalize_workflow_mode
 from roughcut.creative.modes import build_mode_catalog
 from roughcut.speech.dialects import DEFAULT_TRANSCRIPTION_DIALECT, normalize_transcription_dialect
@@ -145,6 +152,41 @@ class ConfigOptionsOut(BaseModel):
     multimodal_fallback_providers: list[dict[str, str]]
     search_providers: list[dict[str, str]]
     search_fallback_providers: list[dict[str, str]]
+
+
+class ConfigProfileOut(BaseModel):
+    id: str
+    name: str
+    created_at: str
+    updated_at: str
+    is_active: bool
+    is_dirty: bool
+    workflow_mode: str
+    enhancement_modes: list[str]
+    copy_style: str
+    cover_style: str
+    title_style: str
+    subtitle_style: str
+    smart_effect_style: str
+    avatar_presenter_id: str
+    packaging_enabled: bool
+    insert_pool_size: int
+    music_pool_size: int
+
+
+class ConfigProfilesOut(BaseModel):
+    active_profile_id: str | None = None
+    active_profile_dirty: bool = False
+    profiles: list[ConfigProfileOut]
+
+
+class ConfigProfileCreate(BaseModel):
+    name: str
+
+
+class ConfigProfileUpdate(BaseModel):
+    name: str | None = None
+    capture_current: bool = False
 
 
 class ConfigPatch(BaseModel):
@@ -341,6 +383,53 @@ def get_config_options():
         search_providers=SEARCH_PROVIDER_OPTIONS,
         search_fallback_providers=SEARCH_FALLBACK_PROVIDER_OPTIONS,
     )
+
+
+@router.get("/profiles", response_model=ConfigProfilesOut)
+def get_config_profiles():
+    return ConfigProfilesOut(**build_config_profiles_payload())
+
+
+@router.post("/profiles", response_model=ConfigProfilesOut, status_code=201)
+def create_profile(body: ConfigProfileCreate):
+    try:
+        payload = create_config_profile(body.name)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return ConfigProfilesOut(**payload)
+
+
+@router.patch("/profiles/{profile_id}", response_model=ConfigProfilesOut)
+def patch_profile(profile_id: str, body: ConfigProfileUpdate):
+    try:
+        payload = update_config_profile(
+            profile_id,
+            name=body.name,
+            capture_current=body.capture_current,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="配置方案不存在") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return ConfigProfilesOut(**payload)
+
+
+@router.post("/profiles/{profile_id}/activate", response_model=ConfigProfilesOut)
+def activate_profile(profile_id: str):
+    try:
+        payload = activate_config_profile(profile_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="配置方案不存在") from exc
+    return ConfigProfilesOut(**payload)
+
+
+@router.delete("/profiles/{profile_id}", response_model=ConfigProfilesOut)
+def remove_profile(profile_id: str):
+    try:
+        payload = delete_config_profile(profile_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="配置方案不存在") from exc
+    return ConfigProfilesOut(**payload)
 
 
 @router.patch("", response_model=ConfigOut)

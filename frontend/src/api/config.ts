@@ -1,9 +1,28 @@
-import type { Config, ConfigOptions } from "../types";
+import type { Config, ConfigOptions, ConfigProfiles } from "../types";
 import { request } from "./core";
 
 export const configApi = {
   getConfig: () => request<Config>("/config"),
   getConfigOptions: () => request<ConfigOptions>("/config/options"),
+  getConfigProfiles: () => request<ConfigProfiles>("/config/profiles"),
+  createConfigProfile: (name: string) =>
+    request<ConfigProfiles>("/config/profiles", {
+      method: "POST",
+      body: JSON.stringify({ name }),
+    }),
+  updateConfigProfile: (profileId: string, body: { name?: string; capture_current?: boolean }) =>
+    request<ConfigProfiles>(`/config/profiles/${profileId}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }),
+  activateConfigProfile: (profileId: string) =>
+    request<ConfigProfiles>(`/config/profiles/${profileId}/activate`, {
+      method: "POST",
+    }),
+  deleteConfigProfile: (profileId: string) =>
+    request<ConfigProfiles>(`/config/profiles/${profileId}`, {
+      method: "DELETE",
+    }),
   patchConfig: (body: Record<string, unknown>) => request<Config>("/config", { method: "PATCH", body: JSON.stringify(body) }),
   resetConfig: () => request<void>("/config/overrides", { method: "DELETE" }),
 };

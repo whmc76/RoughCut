@@ -396,4 +396,25 @@ describe("useJobWorkspace", () => {
       default_job_enhancement_modes: ["avatar_commentary"],
     });
   });
+
+  it("updates upload defaults when inherited config defaults change", async () => {
+    const { result } = renderHookWithQueryClient(() => useJobWorkspace());
+
+    await waitFor(() => expect(result.current.upload.enhancementModes).toEqual(["avatar_commentary"]));
+
+    mockApi.getConfig.mockResolvedValue({
+      default_job_workflow_mode: "standard_edit",
+      default_job_enhancement_modes: ["ai_director"],
+      voice_provider: "runninghub",
+      voice_clone_api_key_set: true,
+      voice_clone_voice_id: "voice_demo",
+      avatar_presenter_id: "presenter_demo.mp4",
+    });
+
+    await act(async () => {
+      await result.current.config.refetch();
+    });
+
+    await waitFor(() => expect(result.current.upload.enhancementModes).toEqual(["ai_director"]));
+  });
 });

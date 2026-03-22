@@ -19,6 +19,11 @@ const JOB_STATUS_GROUP_PRIORITY: Record<string, number> = {
   pending: 1,
 };
 
+function sameStringArray(left: string[], right: string[]) {
+  if (left.length !== right.length) return false;
+  return left.every((item, index) => item === right[index]);
+}
+
 function compareJobs(a: { status: string; updated_at: string }, b: { status: string; updated_at: string }) {
   const groupGap = (JOB_STATUS_GROUP_PRIORITY[a.status] ?? 2) - (JOB_STATUS_GROUP_PRIORITY[b.status] ?? 2);
   if (groupGap !== 0) return groupGap;
@@ -37,7 +42,10 @@ export function useJobWorkspace() {
   const [reviewWorkflowMode, setReviewWorkflowMode] = useState("standard_edit");
   const [reviewEnhancementModes, setReviewEnhancementModes] = useState<string[]>([]);
   const [reviewCopyStyle, setReviewCopyStyle] = useState("attention_grabbing");
-  const uploadDefaultsHydrated = useRef(false);
+  const previousUploadDefaultsRef = useRef({
+    workflowMode: EMPTY_UPLOAD.workflowMode,
+    enhancementModes: EMPTY_UPLOAD.enhancementModes,
+  });
 
   const jobs = useQuery({ queryKey: ["jobs"], queryFn: api.listJobs, refetchInterval: 8_000 });
   const usageSummary = useQuery({ queryKey: ["jobs-usage-summary", 60], queryFn: () => api.getJobsUsageSummary(60), refetchInterval: 12_000 });
@@ -88,20 +96,42 @@ export function useJobWorkspace() {
     queryFn: () => api.getContentProfile(selectedJobId!),
     enabled: Boolean(selectedJobId),
   });
+  const inheritedUploadDefaults: UploadForm = useMemo(
+    () => ({
+      ...EMPTY_UPLOAD,
+      workflowMode: config.data?.default_job_workflow_mode ?? EMPTY_UPLOAD.workflowMode,
+      enhancementModes: config.data?.default_job_enhancement_modes ?? EMPTY_UPLOAD.enhancementModes,
+    }),
+    [config.data?.default_job_workflow_mode, config.data?.default_job_enhancement_modes],
+  );
 
   useEffect(() => {
     setContentDraft(contentProfile.data?.final ?? contentProfile.data?.draft ?? {});
   }, [contentProfile.data]);
 
   useEffect(() => {
-    if (!config.data || uploadDefaultsHydrated.current) return;
-    setUpload((prev) => ({
-      ...prev,
-      workflowMode: config.data.default_job_workflow_mode || prev.workflowMode,
-      enhancementModes: config.data.default_job_enhancement_modes ?? prev.enhancementModes,
-    }));
-    uploadDefaultsHydrated.current = true;
-  }, [config.data]);
+    const previousDefaults = previousUploadDefaultsRef.current;
+    const nextDefaults = {
+      workflowMode: inheritedUploadDefaults.workflowMode,
+      enhancementModes: inheritedUploadDefaults.enhancementModes,
+    };
+
+    setUpload((prev) => {
+      const followsPreviousDefaults =
+        prev.workflowMode === previousDefaults.workflowMode
+        && sameStringArray(prev.enhancementModes, previousDefaults.enhancementModes);
+
+      return followsPreviousDefaults
+        ? {
+          ...prev,
+          workflowMode: nextDefaults.workflowMode,
+          enhancementModes: nextDefaults.enhancementModes,
+        }
+        : prev;
+    });
+
+    previousUploadDefaultsRef.current = nextDefaults;
+  }, [inheritedUploadDefaults]);
 
   useEffect(() => {
     if (!selectedJobId) return;
@@ -251,11 +281,6 @@ export function useJobWorkspace() {
   const contentKeywords = Array.isArray(contentDraft.keywords ?? contentSource?.keywords)
     ? ((contentDraft.keywords ?? contentSource?.keywords) as string[]).join(", ")
     : "";
-  const inheritedUploadDefaults: UploadForm = {
-    ...EMPTY_UPLOAD,
-    workflowMode: config.data?.default_job_workflow_mode ?? EMPTY_UPLOAD.workflowMode,
-    enhancementModes: config.data?.default_job_enhancement_modes ?? EMPTY_UPLOAD.enhancementModes,
-  };
 
   return {
     selectedJobId,

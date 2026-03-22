@@ -1,7 +1,20 @@
+import { QueryClientProvider } from "@tanstack/react-query";
 import { render, screen } from "@testing-library/react";
 
 import type { AvatarMaterialLibrary, Config, PackagingLibrary, SelectOption } from "../../types";
+import { api } from "../../api";
+import { createTestQueryClient } from "../../test/renderWithQueryClient";
 import { JobReviewConfigSection } from "./JobReviewConfigSection";
+
+vi.mock("../../api", () => ({
+  api: {
+    getConfigProfiles: vi.fn(),
+    activateConfigProfile: vi.fn(),
+    createConfigProfile: vi.fn(),
+    updateConfigProfile: vi.fn(),
+    deleteConfigProfile: vi.fn(),
+  },
+}));
 
 const workflowOptions: SelectOption[] = [{ value: "standard_edit", label: "标准成片" }];
 const enhancementOptions: SelectOption[] = [{ value: "avatar_commentary", label: "数字人解说" }];
@@ -41,20 +54,29 @@ const packaging: PackagingLibrary = {
 };
 
 function renderSection(avatarMaterials?: Partial<AvatarMaterialLibrary>, config?: Partial<Config>) {
+  const queryClient = createTestQueryClient();
+  vi.mocked(api.getConfigProfiles).mockResolvedValue({
+    active_profile_id: null,
+    active_profile_dirty: false,
+    profiles: [],
+  });
+
   return render(
-    <JobReviewConfigSection
-      workflowMode="standard_edit"
-      enhancementModes={["avatar_commentary"]}
-      workflowOptions={workflowOptions}
-      enhancementOptions={enhancementOptions}
-      copyStyle="attention_grabbing"
-      packaging={packaging}
-      avatarMaterials={avatarMaterials as AvatarMaterialLibrary | undefined}
-      config={{ ...baseConfig, ...config } as Config}
-      onWorkflowModeChange={() => {}}
-      onEnhancementModesChange={() => {}}
-      onCopyStyleChange={() => {}}
-    />,
+    <QueryClientProvider client={queryClient}>
+      <JobReviewConfigSection
+        workflowMode="standard_edit"
+        enhancementModes={["avatar_commentary"]}
+        workflowOptions={workflowOptions}
+        enhancementOptions={enhancementOptions}
+        copyStyle="attention_grabbing"
+        packaging={packaging}
+        avatarMaterials={avatarMaterials as AvatarMaterialLibrary | undefined}
+        config={{ ...baseConfig, ...config } as Config}
+        onWorkflowModeChange={() => {}}
+        onEnhancementModesChange={() => {}}
+        onCopyStyleChange={() => {}}
+      />
+    </QueryClientProvider>,
   );
 }
 

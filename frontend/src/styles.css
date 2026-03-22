@@ -2149,6 +2149,54 @@ select.input option:focus {
   gap: 16px;
 }
 
+.config-profile-switcher {
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background:
+    radial-gradient(circle at top right, rgba(255, 181, 108, 0.12), transparent 32%),
+    rgba(255, 255, 255, 0.03);
+  padding: 16px;
+}
+
+.config-profile-switcher.compact {
+  padding: 14px;
+}
+
+.config-profile-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.config-profile-chip-list {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.config-profile-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.config-profile-chip.active {
+  border-color: rgba(255, 181, 108, 0.3);
+  background: linear-gradient(135deg, rgba(240, 181, 108, 0.16), rgba(255, 141, 58, 0.12));
+}
+
+.config-profile-chip-mark {
+  font-size: 11px;
+  color: var(--danger);
+}
+
+.config-profile-name-input {
+  min-width: min(100%, 280px);
+  flex: 1 1 280px;
+}
+
 .review-config-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
