@@ -1,14 +1,29 @@
 import { PageHeader } from "../components/ui/PageHeader";
+import { PanelHeader } from "../components/ui/PanelHeader";
 import { BotSettingsPanel } from "../features/settings/BotSettingsPanel";
 import { CreativeSettingsPanel } from "../features/settings/CreativeSettingsPanel";
 import { useI18n } from "../i18n";
 import { ModelSettingsPanel } from "../features/settings/ModelSettingsPanel";
 import { RuntimeSettingsPanel } from "../features/settings/RuntimeSettingsPanel";
+import { SettingsOverviewPanel } from "../features/settings/SettingsOverviewPanel";
+import { QualitySettingsPanel } from "../features/settings/QualitySettingsPanel";
+import { getActiveReasoningProvider, getProviderLabel, getSearchSummary } from "../features/settings/helpers";
 import { useSettingsWorkspace } from "../features/settings/useSettingsWorkspace";
 
 export function SettingsPage() {
   const { t } = useI18n();
   const workspace = useSettingsWorkspace();
+  const activeReasoningProvider = getActiveReasoningProvider(workspace.form);
+  const advancedCreativeSummary = `${String(workspace.form.avatar_provider ?? "未设置")} + ${String(workspace.form.voice_provider ?? "未设置")}`;
+  const telegramEnabled = Boolean(workspace.form.telegram_remote_review_enabled) || Boolean(workspace.form.telegram_agent_enabled);
+  const advancedSectionOpen = telegramEnabled;
+  const runtimeSectionOpen = telegramEnabled;
+  const advancedSummary = [advancedCreativeSummary, telegramEnabled ? "Telegram / Agent 已启用" : "Telegram / Agent 未启用"].join(" · ");
+  const runtimeSummary = [
+    `推理 ${getProviderLabel(activeReasoningProvider)}`,
+    getSearchSummary(workspace.form),
+    telegramEnabled ? "Telegram / Agent 已启用" : "Telegram / Agent 未启用",
+  ].join(" · ");
   const saveTone =
     workspace.saveState === "saving" ? "running" : workspace.saveState === "error" ? "failed" : workspace.saveState === "saved" ? "done" : "";
   const saveLabel =
@@ -37,16 +52,65 @@ export function SettingsPage() {
       />
       {workspace.saveError && <div className="notice top-gap">{workspace.saveError}</div>}
 
-      <div className="panel-grid two-up">
+      <div className="panel-grid">
+        <SettingsOverviewPanel form={workspace.form} config={workspace.config.data} configProfiles={workspace.configProfiles.data} />
         <ModelSettingsPanel form={workspace.form} options={workspace.options.data} onChange={(key, value) => workspace.setForm((prev) => ({ ...prev, [key]: value }))} />
-        <RuntimeSettingsPanel form={workspace.form} config={workspace.config.data} onChange={(key, value) => workspace.setForm((prev) => ({ ...prev, [key]: value }))} />
-        <CreativeSettingsPanel
-          form={workspace.form}
-          config={workspace.config.data}
-          options={workspace.options.data}
-          onChange={(key, value) => workspace.setForm((prev) => ({ ...prev, [key]: value }))}
-        />
-        <BotSettingsPanel form={workspace.form} config={workspace.config.data} onChange={(key, value) => workspace.setForm((prev) => ({ ...prev, [key]: value }))} />
+        <QualitySettingsPanel form={workspace.form} config={workspace.config.data} onChange={(key, value) => workspace.setForm((prev) => ({ ...prev, [key]: value }))} />
+        <details className="settings-disclosure settings-page-runtime" open={runtimeSectionOpen}>
+          <summary className="settings-disclosure-trigger">
+            <div>
+              <strong>接入与执行设置</strong>
+              <div className="muted">{runtimeSummary}</div>
+            </div>
+          </summary>
+          <div className="settings-disclosure-body">
+            <RuntimeSettingsPanel form={workspace.form} config={workspace.config.data} onChange={(key, value) => workspace.setForm((prev) => ({ ...prev, [key]: value }))} />
+            <details className="settings-disclosure settings-page-advanced" open={advancedSectionOpen}>
+              <summary className="settings-disclosure-trigger">
+                <div>
+                  <strong>高级工程设置</strong>
+                  <div className="muted">{advancedSummary}</div>
+                </div>
+              </summary>
+              <div className="settings-disclosure-body">
+                <PanelHeader title="高级设置" description="数字人、Telegram 和工程执行细节。" />
+                <div className="accordion-stack">
+                  <details className="settings-disclosure">
+                    <summary className="settings-disclosure-trigger">
+                      <div>
+                        <strong>增强能力</strong>
+                        <div className="muted">数字人、配音、画中画</div>
+                      </div>
+                    </summary>
+                    <div className="settings-disclosure-body">
+                      <CreativeSettingsPanel
+                        form={workspace.form}
+                        config={workspace.config.data}
+                        options={workspace.options.data}
+                        onChange={(key, value) => workspace.setForm((prev) => ({ ...prev, [key]: value }))}
+                      />
+                    </div>
+                  </details>
+                  <details className="settings-disclosure" open={telegramEnabled}>
+                    <summary className="settings-disclosure-trigger">
+                      <div>
+                        <strong>Telegram 与 Agent</strong>
+                        <div className="muted">远程审核与工程执行</div>
+                      </div>
+                    </summary>
+                    <div className="settings-disclosure-body">
+                      <BotSettingsPanel
+                        form={workspace.form}
+                        config={workspace.config.data}
+                        onChange={(key, value) => workspace.setForm((prev) => ({ ...prev, [key]: value }))}
+                      />
+                    </div>
+                  </details>
+                </div>
+              </div>
+            </details>
+          </div>
+        </details>
       </div>
     </section>
   );

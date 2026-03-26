@@ -55,6 +55,8 @@ function renderSection(avatarMaterials?: Partial<AvatarMaterialLibrary>, config?
   vi.mocked(api.getConfigProfiles).mockResolvedValue({
     active_profile_id: null,
     active_profile_dirty: false,
+    active_profile_dirty_keys: [],
+    active_profile_dirty_details: [],
     profiles: [],
   });
 
@@ -94,24 +96,24 @@ describe("JobReviewConfigSection", () => {
       ],
     });
 
-    expect(screen.getByText(/未显式绑定 avatar_presenter_id，但已有可用数字人档案：店播数字人A/)).toBeInTheDocument();
+    expect(screen.getByText(/未显式绑定 avatar_presenter_id，但已有可用数字人档案：店播数字人A/)).toBeTruthy();
   });
 
   it("warns that avatar commentary will degrade gracefully when no presenter source is available", () => {
     renderSection({ profiles: [] });
 
-    expect(screen.getByText("待补")).toBeInTheDocument();
-    expect(screen.getByText(/本次任务会退回普通成片，不会生成数字人口播画中画/)).toBeInTheDocument();
+    expect(screen.getByText("待补")).toBeTruthy();
+    expect(screen.getByText(/本次任务会退回普通成片，不会生成数字人口播画中画/)).toBeTruthy();
   });
 
   it("keeps only config switching and review checks in the review card", () => {
     renderSection({ profiles: [] });
 
-    expect(screen.getByText("剪辑配置与审核")).toBeInTheDocument();
-    expect(screen.getByText("剪辑配置切换")).toBeInTheDocument();
-    expect(screen.getByText("审核就绪检查")).toBeInTheDocument();
-    expect(screen.queryByText("工作流模式")).not.toBeInTheDocument();
-    expect(screen.queryByText("包装素材清单")).not.toBeInTheDocument();
-    expect(screen.queryByText("风格模板清单")).not.toBeInTheDocument();
+    expect(screen.getByText("剪辑配置与审核")).toBeTruthy();
+    expect(screen.getByText("剪辑配置切换")).toBeTruthy();
+    expect(screen.getByText("审核就绪检查")).toBeTruthy();
+    expect(screen.queryByText("工作流模式")).toBeNull();
+    expect(screen.queryByText("包装素材清单")).toBeNull();
+    expect(screen.queryByText("风格模板清单")).toBeNull();
   });
 });

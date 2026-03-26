@@ -22,26 +22,15 @@ function buildSettingsForm(config: NonNullable<ReturnType<typeof api.getConfig> 
     search_provider: config.search_provider,
     search_fallback_provider: config.search_fallback_provider,
     model_search_helper: config.model_search_helper,
-    openai_base_url: config.openai_base_url,
-    openai_auth_mode: config.openai_auth_mode,
-    openai_api_key_helper: config.openai_api_key_helper,
+    qwen_asr_api_base_url: config.qwen_asr_api_base_url,
     avatar_provider: config.avatar_provider,
-    avatar_api_base_url: config.avatar_api_base_url,
-    avatar_training_api_base_url: config.avatar_training_api_base_url,
     avatar_presenter_id: config.avatar_presenter_id,
     avatar_layout_template: config.avatar_layout_template,
     avatar_safe_margin: config.avatar_safe_margin,
     avatar_overlay_scale: config.avatar_overlay_scale,
-    anthropic_base_url: config.anthropic_base_url,
-    anthropic_auth_mode: config.anthropic_auth_mode,
-    anthropic_api_key_helper: config.anthropic_api_key_helper,
-    minimax_base_url: config.minimax_base_url,
-    minimax_api_host: config.minimax_api_host,
     voice_provider: config.voice_provider,
-    voice_clone_api_base_url: config.voice_clone_api_base_url,
     voice_clone_voice_id: config.voice_clone_voice_id,
     director_rewrite_strength: config.director_rewrite_strength,
-    ollama_base_url: config.ollama_base_url,
     openai_api_key: "",
     avatar_api_key: "",
     anthropic_api_key: "",
@@ -52,7 +41,21 @@ function buildSettingsForm(config: NonNullable<ReturnType<typeof api.getConfig> 
     max_upload_size_mb: config.max_upload_size_mb,
     max_video_duration_sec: config.max_video_duration_sec,
     ffmpeg_timeout_sec: config.ffmpeg_timeout_sec,
-    output_dir: config.output_dir,
+    fact_check_enabled: config.fact_check_enabled,
+    auto_confirm_content_profile: config.auto_confirm_content_profile,
+    content_profile_review_threshold: config.content_profile_review_threshold,
+    content_profile_auto_review_min_accuracy: config.content_profile_auto_review_min_accuracy,
+    content_profile_auto_review_min_samples: config.content_profile_auto_review_min_samples,
+    auto_accept_glossary_corrections: config.auto_accept_glossary_corrections,
+    glossary_correction_review_threshold: config.glossary_correction_review_threshold,
+    auto_select_cover_variant: config.auto_select_cover_variant,
+    cover_selection_review_gap: config.cover_selection_review_gap,
+    packaging_selection_review_gap: config.packaging_selection_review_gap,
+    packaging_selection_min_score: config.packaging_selection_min_score,
+    subtitle_filler_cleanup_enabled: config.subtitle_filler_cleanup_enabled,
+    quality_auto_rerun_enabled: config.quality_auto_rerun_enabled,
+    quality_auto_rerun_below_score: config.quality_auto_rerun_below_score,
+    quality_auto_rerun_max_attempts: config.quality_auto_rerun_max_attempts,
     telegram_agent_enabled: config.telegram_agent_enabled,
     telegram_agent_claude_enabled: config.telegram_agent_claude_enabled,
     telegram_agent_claude_command: config.telegram_agent_claude_command,
@@ -89,6 +92,7 @@ export function useSettingsWorkspace() {
   const queryClient = useQueryClient();
   const config = useQuery({ queryKey: ["config"], queryFn: api.getConfig });
   const options = useQuery({ queryKey: ["config-options"], queryFn: api.getConfigOptions });
+  const configProfiles = useQuery({ queryKey: ["config-profiles"], queryFn: api.getConfigProfiles });
   const [form, setForm] = useState<SettingsForm>({});
   const [saveState, setSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -157,6 +161,7 @@ export function useSettingsWorkspace() {
 
   return {
     config,
+    configProfiles,
     options,
     form,
     setForm,

@@ -110,3 +110,21 @@ def test_get_settings_accepts_qwen_asr_override(tmp_path, monkeypatch):
     assert settings.transcription_model == "qwen3-asr-1.7b"
     assert settings.transcription_dialect == "beijing"
     assert settings.qwen_asr_api_base_url == "http://127.0.0.1:18096"
+
+
+def test_load_runtime_overrides_strips_secret_keys_from_legacy_file(tmp_path, monkeypatch):
+    overrides_file = tmp_path / "roughcut_config.json"
+    overrides_file.write_text(
+        '{"reasoning_provider":"minimax","minimax_api_key":"secret-token"}',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(config_mod, "_OVERRIDES_FILE", overrides_file)
+    config_mod._settings = None
+    config_mod._session_secret_overrides.clear()
+
+    persisted = config_mod.load_runtime_overrides()
+
+    assert persisted == {"reasoning_provider": "minimax"}
+    assert config_mod.get_session_secret_override_keys() == ["minimax_api_key"]
+    if overrides_file.exists():
+        assert overrides_file.read_text(encoding="utf-8") == '{\n  "reasoning_provider": "minimax"\n}'

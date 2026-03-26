@@ -293,3 +293,46 @@ class ChannelProfile(Base):
     name: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
     config_json: Mapped[dict] = mapped_column(JSON_TYPE, nullable=False)
     created_at: Mapped[datetime] = mapped_column(TIMESTAMPTZ, server_default=func.now())
+
+
+class AppSetting(Base):
+    __tablename__ = "app_settings"
+
+    key: Mapped[str] = mapped_column(Text, primary_key=True)
+    value_json: Mapped[dict | list | str | int | float | bool | None] = mapped_column(JSON_TYPE)
+    updated_at: Mapped[datetime] = mapped_column(
+        TIMESTAMPTZ,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+
+class ConfigProfile(Base):
+    __tablename__ = "config_profiles"
+    __table_args__ = (UniqueConstraint("name"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID_TYPE, primary_key=True, default=_uuid)
+    name: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    description: Mapped[str | None] = mapped_column(Text)
+    settings_json: Mapped[dict] = mapped_column(JSON_TYPE, nullable=False, default=dict)
+    packaging_json: Mapped[dict] = mapped_column(JSON_TYPE, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMPTZ, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        TIMESTAMPTZ,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+
+class PackagingAsset(Base):
+    __tablename__ = "packaging_assets"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    asset_type: Mapped[str] = mapped_column(Text, nullable=False)
+    original_name: Mapped[str] = mapped_column(Text, nullable=False)
+    stored_name: Mapped[str] = mapped_column(Text, nullable=False)
+    path: Mapped[str] = mapped_column(Text, nullable=False)
+    size_bytes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    content_type: Mapped[str] = mapped_column(Text, nullable=False)
+    watermark_preprocessed: Mapped[bool | None] = mapped_column(Boolean)
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMPTZ, server_default=func.now())

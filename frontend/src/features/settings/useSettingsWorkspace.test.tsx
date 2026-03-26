@@ -1,12 +1,13 @@
 import { act, waitFor } from "@testing-library/react";
 
 import { renderHookWithQueryClient } from "../../test/renderWithQueryClient";
-import type { Config, ConfigOptions } from "../../types";
+import type { Config, ConfigOptions, ConfigProfiles } from "../../types";
 import { useSettingsWorkspace } from "./useSettingsWorkspace";
 
 const mockApi = vi.hoisted(() => ({
   getConfig: vi.fn(),
   getConfigOptions: vi.fn(),
+  getConfigProfiles: vi.fn(),
   patchConfig: vi.fn(),
   resetConfig: vi.fn(),
 }));
@@ -16,6 +17,14 @@ vi.mock("../../api", () => ({
 }));
 
 const SAMPLE_CONFIG: Config = {
+  persistence: {
+    settings_store: "database",
+    profiles_store: "database",
+    packaging_store: "database",
+    legacy_override_file_present: false,
+    legacy_profiles_file_present: false,
+    legacy_packaging_manifest_present: false,
+  },
   transcription_provider: "openai",
   transcription_model: "gpt-4o-transcribe",
   transcription_dialect: "mandarin",
@@ -33,6 +42,7 @@ const SAMPLE_CONFIG: Config = {
   openai_base_url: "https://api.openai.com/v1",
   openai_auth_mode: "api_key",
   openai_api_key_helper: "",
+  qwen_asr_api_base_url: "http://127.0.0.1:18096",
   avatar_provider: "heygem",
   avatar_api_base_url: "https://api.heygem.com",
   avatar_training_api_base_url: "http://127.0.0.1:18180",
@@ -86,12 +96,21 @@ const SAMPLE_CONFIG: Config = {
   fact_check_enabled: true,
   auto_confirm_content_profile: true,
   content_profile_review_threshold: 0.72,
+  content_profile_auto_review_min_accuracy: 0.9,
+  content_profile_auto_review_min_samples: 20,
   auto_accept_glossary_corrections: true,
   glossary_correction_review_threshold: 0.9,
   auto_select_cover_variant: true,
   cover_selection_review_gap: 0.08,
   packaging_selection_review_gap: 0.08,
   packaging_selection_min_score: 0.6,
+  subtitle_filler_cleanup_enabled: true,
+  quality_auto_rerun_enabled: true,
+  quality_auto_rerun_below_score: 75,
+  quality_auto_rerun_max_attempts: 1,
+  override_keys: [],
+  session_secret_keys: [],
+  profile_bindable_keys: ["transcription_provider", "quality_auto_rerun_enabled"],
   overrides: {},
 };
 
@@ -136,10 +155,53 @@ const SAMPLE_OPTIONS: ConfigOptions = {
   ],
 };
 
+const SAMPLE_CONFIG_PROFILES: ConfigProfiles = {
+  active_profile_id: "profile_active",
+  active_profile_dirty: false,
+  active_profile_dirty_keys: [],
+  active_profile_dirty_details: [],
+  profiles: [
+    {
+      id: "profile_active",
+      name: "标准方案",
+      description: "适合默认测评口播和自动复跑阈值基线",
+      created_at: "2026-03-26T08:00:00Z",
+      updated_at: "2026-03-26T09:30:00Z",
+      is_active: true,
+      is_dirty: false,
+      dirty_keys: [],
+      dirty_details: [],
+      llm_mode: "cloud",
+      transcription_provider: "openai",
+      transcription_model: "gpt-4o-transcribe",
+      transcription_dialect: "mandarin",
+      reasoning_provider: "openai",
+      reasoning_model: "gpt-4.1",
+      workflow_mode: "standard_edit",
+      enhancement_modes: ["avatar_commentary"],
+      auto_confirm_content_profile: true,
+      content_profile_review_threshold: 0.72,
+      packaging_selection_min_score: 0.6,
+      quality_auto_rerun_enabled: true,
+      quality_auto_rerun_below_score: 75,
+      copy_style: "attention_grabbing",
+      cover_style: "preset_default",
+      title_style: "preset_default",
+      subtitle_style: "bold_yellow_outline",
+      smart_effect_style: "smart_effect_rhythm",
+      avatar_presenter_id: "presenter_demo",
+      packaging_enabled: true,
+      insert_pool_size: 0,
+      music_pool_size: 0,
+    },
+  ],
+};
+
 describe("useSettingsWorkspace", () => {
   beforeEach(() => {
     mockApi.getConfig.mockResolvedValue(SAMPLE_CONFIG);
     mockApi.getConfigOptions.mockResolvedValue(SAMPLE_OPTIONS);
+    mockApi.getConfigProfiles.mockResolvedValue(SAMPLE_CONFIG_PROFILES);
     mockApi.patchConfig.mockImplementation(async (payload: Record<string, unknown>) => ({
       ...SAMPLE_CONFIG,
       ...payload,
@@ -155,12 +217,16 @@ describe("useSettingsWorkspace", () => {
     const { result } = renderHookWithQueryClient(() => useSettingsWorkspace());
 
     await waitFor(() => expect(result.current.config.data).toEqual(SAMPLE_CONFIG));
-    await waitFor(() => expect(result.current.form.output_dir).toBe("data/output"));
+    await waitFor(() => expect(result.current.form.max_upload_size_mb).toBe(2048));
+    expect("openai_base_url" in result.current.form).toBe(false);
+    expect("avatar_api_base_url" in result.current.form).toBe(false);
+    expect("voice_clone_api_base_url" in result.current.form).toBe(false);
+    expect("output_dir" in result.current.form).toBe(false);
 
     act(() => {
       result.current.setForm((prev) => ({
         ...prev,
-        output_dir: "D:/RoughCut/output",
+        max_upload_size_mb: 4096,
         openai_api_key: "  ",
         anthropic_api_key: "",
       }));
@@ -173,12 +239,16 @@ describe("useSettingsWorkspace", () => {
     await waitFor(() =>
       expect(mockApi.patchConfig).toHaveBeenCalledWith(
         expect.objectContaining({
-          output_dir: "D:/RoughCut/output",
+          max_upload_size_mb: 4096,
         }),
       ),
     );
     expect(mockApi.patchConfig.mock.calls[0][0]).not.toHaveProperty("openai_api_key");
     expect(mockApi.patchConfig.mock.calls[0][0]).not.toHaveProperty("anthropic_api_key");
+    expect(mockApi.patchConfig.mock.calls[0][0]).not.toHaveProperty("openai_base_url");
+    expect(mockApi.patchConfig.mock.calls[0][0]).not.toHaveProperty("avatar_api_base_url");
+    expect(mockApi.patchConfig.mock.calls[0][0]).not.toHaveProperty("voice_clone_api_base_url");
+    expect(mockApi.patchConfig.mock.calls[0][0]).not.toHaveProperty("output_dir");
     await waitFor(() => expect(result.current.saveState).toBe("saved"));
   });
 
@@ -186,6 +256,7 @@ describe("useSettingsWorkspace", () => {
     const { result } = renderHookWithQueryClient(() => useSettingsWorkspace());
 
     await waitFor(() => expect(result.current.config.data).toEqual(SAMPLE_CONFIG));
+    await waitFor(() => expect(result.current.configProfiles.data).toEqual(SAMPLE_CONFIG_PROFILES));
     await waitFor(() => expect(result.current.form.telegram_agent_codex_model).toBe("gpt-5.4-mini"));
 
     expect(result.current.form.telegram_agent_enabled).toBe(true);

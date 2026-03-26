@@ -23,14 +23,18 @@ from roughcut.api.options import (
 from roughcut.config import (
     AVATAR_PROVIDER_OPTIONS,
     DEFAULT_TRANSCRIPTION_PROVIDER,
+    PROFILE_BINDABLE_SETTINGS,
     TRANSCRIPTION_MODEL_OPTIONS,
     VOICE_PROVIDER_OPTIONS,
     apply_runtime_overrides,
+    clear_runtime_overrides,
     get_settings,
+    get_session_secret_override_keys,
     load_runtime_overrides,
     normalize_transcription_settings,
 )
 from roughcut.config_profiles import (
+    CONFIG_PROFILES_FILE,
     activate_config_profile,
     build_config_profiles_payload,
     create_config_profile,
@@ -39,14 +43,26 @@ from roughcut.config_profiles import (
 )
 from roughcut.creative.modes import normalize_enhancement_modes, normalize_workflow_mode
 from roughcut.creative.modes import build_mode_catalog
+from roughcut.packaging.library import MANIFEST_PATH
 from roughcut.speech.dialects import DEFAULT_TRANSCRIPTION_DIALECT, normalize_transcription_dialect
 
 router = APIRouter(prefix="/config", tags=["config"])
 
 _CONFIG_FILE = Path("roughcut_config.json")
+_SECRET_OVERRIDE_KEYS = {
+    "openai_api_key",
+    "anthropic_api_key",
+    "minimax_api_key",
+    "minimax_coding_plan_api_key",
+    "ollama_api_key",
+    "avatar_api_key",
+    "voice_clone_api_key",
+    "telegram_bot_token",
+}
 
 
 class ConfigOut(BaseModel):
+    persistence: dict[str, Any]
     # Transcription
     transcription_provider: str
     transcription_model: str
@@ -136,7 +152,20 @@ class ConfigOut(BaseModel):
     quality_auto_rerun_below_score: float
     quality_auto_rerun_max_attempts: int
     # Overrides currently stored
+    override_keys: list[str]
+    session_secret_keys: list[str]
+    profile_bindable_keys: list[str]
     overrides: dict
+
+
+def _sanitize_overrides(overrides: dict[str, Any]) -> dict[str, Any]:
+    sanitized: dict[str, Any] = {}
+    for key, value in overrides.items():
+        if key in _SECRET_OVERRIDE_KEYS:
+            sanitized[key] = "[secure]" if str(value or "").strip() else ""
+        else:
+            sanitized[key] = value
+    return sanitized
 
 
 class ConfigOptionsOut(BaseModel):
@@ -157,12 +186,26 @@ class ConfigOptionsOut(BaseModel):
 class ConfigProfileOut(BaseModel):
     id: str
     name: str
+    description: str
     created_at: str
     updated_at: str
     is_active: bool
     is_dirty: bool
+    dirty_keys: list[str]
+    dirty_details: list[dict[str, Any]]
+    llm_mode: str
+    transcription_provider: str
+    transcription_model: str
+    transcription_dialect: str
+    reasoning_provider: str
+    reasoning_model: str
     workflow_mode: str
     enhancement_modes: list[str]
+    auto_confirm_content_profile: bool
+    content_profile_review_threshold: float
+    packaging_selection_min_score: float
+    quality_auto_rerun_enabled: bool
+    quality_auto_rerun_below_score: float
     copy_style: str
     cover_style: str
     title_style: str
@@ -177,15 +220,19 @@ class ConfigProfileOut(BaseModel):
 class ConfigProfilesOut(BaseModel):
     active_profile_id: str | None = None
     active_profile_dirty: bool = False
+    active_profile_dirty_keys: list[str] = []
+    active_profile_dirty_details: list[dict[str, Any]] = []
     profiles: list[ConfigProfileOut]
 
 
 class ConfigProfileCreate(BaseModel):
     name: str
+    description: str | None = None
 
 
 class ConfigProfileUpdate(BaseModel):
     name: str | None = None
+    description: str | None = None
     capture_current: bool = False
 
 
@@ -279,7 +326,17 @@ class ConfigPatch(BaseModel):
 def get_config():
     s = get_settings()
     overrides = load_runtime_overrides()
+    sanitized_overrides = _sanitize_overrides(overrides)
+    session_secret_keys = get_session_secret_override_keys()
     return ConfigOut(
+        persistence={
+            "settings_store": "database",
+            "profiles_store": "database",
+            "packaging_store": "database",
+            "legacy_override_file_present": _CONFIG_FILE.exists(),
+            "legacy_profiles_file_present": CONFIG_PROFILES_FILE.exists(),
+            "legacy_packaging_manifest_present": MANIFEST_PATH.exists(),
+        },
         transcription_provider=s.transcription_provider,
         transcription_model=s.transcription_model,
         transcription_dialect=s.transcription_dialect,
@@ -363,7 +420,10 @@ def get_config():
         quality_auto_rerun_enabled=s.quality_auto_rerun_enabled,
         quality_auto_rerun_below_score=s.quality_auto_rerun_below_score,
         quality_auto_rerun_max_attempts=s.quality_auto_rerun_max_attempts,
-        overrides=overrides,
+        override_keys=sorted(overrides.keys()),
+        session_secret_keys=session_secret_keys,
+        profile_bindable_keys=sorted(PROFILE_BINDABLE_SETTINGS),
+        overrides=sanitized_overrides,
     )
 
 
@@ -393,7 +453,7 @@ def get_config_profiles():
 @router.post("/profiles", response_model=ConfigProfilesOut, status_code=201)
 def create_profile(body: ConfigProfileCreate):
     try:
-        payload = create_config_profile(body.name)
+        payload = create_config_profile(body.name, description=body.description)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return ConfigProfilesOut(**payload)
@@ -405,6 +465,7 @@ def patch_profile(profile_id: str, body: ConfigProfileUpdate):
         payload = update_config_profile(
             profile_id,
             name=body.name,
+            description=body.description,
             capture_current=body.capture_current,
         )
     except KeyError as exc:
@@ -604,5 +665,4 @@ def patch_config(body: ConfigPatch):
 @router.delete("/overrides", status_code=204)
 def reset_config():
     """Reset all runtime overrides — revert to env vars."""
-    if _CONFIG_FILE.exists():
-        _CONFIG_FILE.unlink()
+    clear_runtime_overrides()

@@ -483,6 +483,7 @@ export type AvatarMaterialLibrary = {
   training_api_available: boolean;
   preview_service_available?: boolean;
   intake_mode: string;
+  warnings?: string[];
   summary: string;
   sections: AvatarMaterialSection[];
   profiles: AvatarMaterialProfile[];
@@ -586,6 +587,14 @@ export type CreativeModeDefinition = {
 };
 
 export type Config = {
+  persistence: {
+    settings_store: string;
+    profiles_store: string;
+    packaging_store: string;
+    legacy_override_file_present: boolean;
+    legacy_profiles_file_present: boolean;
+    legacy_packaging_manifest_present: boolean;
+  };
   transcription_provider: string;
   transcription_model: string;
   transcription_dialect: string;
@@ -602,6 +611,7 @@ export type Config = {
   openai_base_url: string;
   openai_auth_mode: string;
   openai_api_key_helper: string;
+  qwen_asr_api_base_url: string;
   avatar_provider: string;
   avatar_api_base_url: string;
   avatar_training_api_base_url: string;
@@ -656,12 +666,21 @@ export type Config = {
   fact_check_enabled: boolean;
   auto_confirm_content_profile: boolean;
   content_profile_review_threshold: number;
+  content_profile_auto_review_min_accuracy: number;
+  content_profile_auto_review_min_samples: number;
   auto_accept_glossary_corrections: boolean;
   glossary_correction_review_threshold: number;
   auto_select_cover_variant: boolean;
   cover_selection_review_gap: number;
   packaging_selection_review_gap: number;
   packaging_selection_min_score: number;
+  subtitle_filler_cleanup_enabled: boolean;
+  quality_auto_rerun_enabled: boolean;
+  quality_auto_rerun_below_score: number;
+  quality_auto_rerun_max_attempts: number;
+  override_keys: string[];
+  session_secret_keys: string[];
+  profile_bindable_keys: string[];
   overrides: Record<string, unknown>;
 };
 
@@ -683,15 +702,35 @@ export type ConfigOptions = {
   search_fallback_providers: SelectOption[];
 };
 
+export type ConfigProfileDirtyDetail = {
+  key: string;
+  saved_value: unknown;
+  current_value: unknown;
+};
+
 export type ConfigProfile = {
   id: string;
   name: string;
+  description: string;
   created_at: string;
   updated_at: string;
   is_active: boolean;
   is_dirty: boolean;
+  dirty_keys: string[];
+  dirty_details: ConfigProfileDirtyDetail[];
+  llm_mode: string;
+  transcription_provider: string;
+  transcription_model: string;
+  transcription_dialect: string;
+  reasoning_provider: string;
+  reasoning_model: string;
   workflow_mode: string;
   enhancement_modes: string[];
+  auto_confirm_content_profile: boolean;
+  content_profile_review_threshold: number;
+  packaging_selection_min_score: number;
+  quality_auto_rerun_enabled: boolean;
+  quality_auto_rerun_below_score: number;
   copy_style: string;
   cover_style: string;
   title_style: string;
@@ -706,6 +745,8 @@ export type ConfigProfile = {
 export type ConfigProfiles = {
   active_profile_id?: string | null;
   active_profile_dirty: boolean;
+  active_profile_dirty_keys: string[];
+  active_profile_dirty_details: ConfigProfileDirtyDetail[];
   profiles: ConfigProfile[];
 };
 

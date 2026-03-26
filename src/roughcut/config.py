@@ -11,6 +11,16 @@ from roughcut.speech.dialects import DEFAULT_TRANSCRIPTION_DIALECT, normalize_tr
 
 _OVERRIDES_FILE = Path("roughcut_config.json")
 DEFAULT_JOB_WORKFLOW_MODE = "standard_edit"
+SECRET_SETTINGS: tuple[str, ...] = (
+    "openai_api_key",
+    "anthropic_api_key",
+    "minimax_api_key",
+    "minimax_coding_plan_api_key",
+    "ollama_api_key",
+    "avatar_api_key",
+    "voice_clone_api_key",
+    "telegram_bot_token",
+)
 TRANSCRIPTION_MODEL_OPTIONS: dict[str, list[str]] = {
     "funasr": [
         "sensevoice-small",
@@ -39,6 +49,57 @@ DEFAULT_TRANSCRIPTION_MODELS: dict[str, str] = {
 }
 AVATAR_PROVIDER_OPTIONS: tuple[str, ...] = ("heygem",)
 VOICE_PROVIDER_OPTIONS: tuple[str, ...] = ("indextts2", "runninghub")
+PROFILE_BINDABLE_SETTINGS: tuple[str, ...] = (
+    "transcription_provider",
+    "transcription_model",
+    "transcription_dialect",
+    "qwen_asr_api_base_url",
+    "llm_mode",
+    "reasoning_provider",
+    "reasoning_model",
+    "local_reasoning_model",
+    "local_vision_model",
+    "multimodal_fallback_provider",
+    "multimodal_fallback_model",
+    "search_provider",
+    "search_fallback_provider",
+    "model_search_helper",
+    "openai_base_url",
+    "openai_auth_mode",
+    "anthropic_base_url",
+    "anthropic_auth_mode",
+    "minimax_base_url",
+    "minimax_api_host",
+    "ollama_base_url",
+    "avatar_provider",
+    "avatar_api_base_url",
+    "avatar_training_api_base_url",
+    "avatar_presenter_id",
+    "avatar_layout_template",
+    "avatar_safe_margin",
+    "avatar_overlay_scale",
+    "voice_provider",
+    "voice_clone_api_base_url",
+    "voice_clone_voice_id",
+    "director_rewrite_strength",
+    "default_job_workflow_mode",
+    "default_job_enhancement_modes",
+    "fact_check_enabled",
+    "auto_confirm_content_profile",
+    "content_profile_review_threshold",
+    "content_profile_auto_review_min_accuracy",
+    "content_profile_auto_review_min_samples",
+    "auto_accept_glossary_corrections",
+    "glossary_correction_review_threshold",
+    "auto_select_cover_variant",
+    "cover_selection_review_gap",
+    "packaging_selection_review_gap",
+    "packaging_selection_min_score",
+    "subtitle_filler_cleanup_enabled",
+    "quality_auto_rerun_enabled",
+    "quality_auto_rerun_below_score",
+    "quality_auto_rerun_max_attempts",
+)
 
 
 class Settings(BaseSettings):
@@ -251,6 +312,7 @@ class Settings(BaseSettings):
 
 
 _settings: Settings | None = None
+_session_secret_overrides: dict[str, Any] = {}
 
 
 def normalize_transcription_settings(provider: object, model: object) -> tuple[str, str]:
@@ -270,50 +332,76 @@ def get_settings() -> Settings:
     global _settings
     if _settings is None:
         _settings = Settings()
-        if _OVERRIDES_FILE.exists():
-            try:
-                overrides = json.loads(_OVERRIDES_FILE.read_text(encoding="utf-8"))
-            except Exception:
-                overrides = {}
-            for key, value in overrides.items():
-                if hasattr(_settings, key):
-                    object.__setattr__(_settings, key, value)
-        provider, model = normalize_transcription_settings(
-            _settings.transcription_provider,
-            _settings.transcription_model,
-        )
-        object.__setattr__(_settings, "transcription_provider", provider)
-        object.__setattr__(_settings, "transcription_model", model)
-        object.__setattr__(
-            _settings,
-            "transcription_dialect",
-            normalize_transcription_dialect(getattr(_settings, "transcription_dialect", DEFAULT_TRANSCRIPTION_DIALECT)),
-        )
-        object.__setattr__(
-            _settings,
-            "default_job_workflow_mode",
-            _normalize_default_workflow_mode(getattr(_settings, "default_job_workflow_mode", DEFAULT_JOB_WORKFLOW_MODE)),
-        )
-        object.__setattr__(
-            _settings,
-            "default_job_enhancement_modes",
-            _normalize_default_enhancement_modes(getattr(_settings, "default_job_enhancement_modes", []) or []),
-        )
+        _apply_settings_overrides(_settings, load_runtime_overrides())
+        _apply_settings_overrides(_settings, _session_secret_overrides)
+        _normalize_settings(_settings)
     return _settings
 
 
 def load_runtime_overrides() -> dict[str, Any]:
-    if _OVERRIDES_FILE.exists():
-        try:
-            payload = json.loads(_OVERRIDES_FILE.read_text(encoding="utf-8"))
-        except Exception:
-            return {}
-        return payload if isinstance(payload, dict) else {}
-    return {}
+    legacy = _load_runtime_overrides_from_legacy_file()
+    legacy_persisted, legacy_secrets = _split_runtime_overrides(legacy)
+    _update_session_secret_overrides(legacy_secrets)
+    try:
+        from roughcut.state_store import RUNTIME_OVERRIDES_KEY, delete_setting, get_json_setting, set_json_setting
+
+        payload = get_json_setting(RUNTIME_OVERRIDES_KEY, default=None)
+        if isinstance(payload, dict):
+            persisted, secrets = _split_runtime_overrides(payload)
+            _update_session_secret_overrides(secrets)
+            if persisted != payload:
+                if persisted:
+                    set_json_setting(RUNTIME_OVERRIDES_KEY, persisted)
+                else:
+                    delete_setting(RUNTIME_OVERRIDES_KEY)
+            if legacy:
+                _OVERRIDES_FILE.unlink(missing_ok=True)
+            return persisted
+        if legacy_persisted:
+            set_json_setting(RUNTIME_OVERRIDES_KEY, legacy_persisted)
+            _OVERRIDES_FILE.unlink(missing_ok=True)
+            return legacy_persisted
+        if legacy:
+            _OVERRIDES_FILE.unlink(missing_ok=True)
+        return {}
+    except Exception:
+        if legacy != legacy_persisted:
+            if legacy_persisted:
+                _OVERRIDES_FILE.write_text(json.dumps(legacy_persisted, indent=2, ensure_ascii=False), encoding="utf-8")
+            else:
+                _OVERRIDES_FILE.unlink(missing_ok=True)
+        return legacy_persisted
 
 
 def save_runtime_overrides(data: dict[str, Any]) -> None:
-    _OVERRIDES_FILE.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    persisted, secrets = _split_runtime_overrides(data)
+    _update_session_secret_overrides(secrets)
+    try:
+        from roughcut.state_store import RUNTIME_OVERRIDES_KEY, delete_setting, set_json_setting
+
+        if persisted:
+            set_json_setting(RUNTIME_OVERRIDES_KEY, persisted)
+        else:
+            delete_setting(RUNTIME_OVERRIDES_KEY)
+        _OVERRIDES_FILE.unlink(missing_ok=True)
+    except Exception:
+        if persisted:
+            _OVERRIDES_FILE.write_text(json.dumps(persisted, indent=2, ensure_ascii=False), encoding="utf-8")
+        else:
+            _OVERRIDES_FILE.unlink(missing_ok=True)
+
+
+def clear_runtime_overrides() -> None:
+    global _settings
+    try:
+        from roughcut.state_store import RUNTIME_OVERRIDES_KEY, delete_setting
+
+        delete_setting(RUNTIME_OVERRIDES_KEY)
+    except Exception:
+        pass
+    _session_secret_overrides.clear()
+    _OVERRIDES_FILE.unlink(missing_ok=True)
+    _settings = None
 
 
 def apply_runtime_overrides(updates: dict[str, Any]) -> Settings:
@@ -362,3 +450,69 @@ def _normalize_default_enhancement_modes(value: object) -> list[str]:
     if isinstance(value, (list, tuple, set)):
         return normalize_enhancement_modes(list(value))
     return normalize_enhancement_modes([])
+
+
+def _load_runtime_overrides_from_legacy_file() -> dict[str, Any]:
+    if not _OVERRIDES_FILE.exists():
+        return {}
+    try:
+        payload = json.loads(_OVERRIDES_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def get_session_secret_override_keys() -> list[str]:
+    return sorted(_session_secret_overrides.keys())
+
+
+def _apply_settings_overrides(settings: Settings, updates: dict[str, Any]) -> None:
+    for key, value in updates.items():
+        if hasattr(settings, key):
+            object.__setattr__(settings, key, value)
+
+
+def _normalize_settings(settings: Settings) -> None:
+    provider, model = normalize_transcription_settings(
+        settings.transcription_provider,
+        settings.transcription_model,
+    )
+    object.__setattr__(settings, "transcription_provider", provider)
+    object.__setattr__(settings, "transcription_model", model)
+    object.__setattr__(
+        settings,
+        "transcription_dialect",
+        normalize_transcription_dialect(getattr(settings, "transcription_dialect", DEFAULT_TRANSCRIPTION_DIALECT)),
+    )
+    object.__setattr__(
+        settings,
+        "default_job_workflow_mode",
+        _normalize_default_workflow_mode(getattr(settings, "default_job_workflow_mode", DEFAULT_JOB_WORKFLOW_MODE)),
+    )
+    object.__setattr__(
+        settings,
+        "default_job_enhancement_modes",
+        _normalize_default_enhancement_modes(getattr(settings, "default_job_enhancement_modes", []) or []),
+    )
+
+
+def _split_runtime_overrides(data: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    persisted: dict[str, Any] = {}
+    secrets: dict[str, Any] = {}
+    for key, value in data.items():
+        if key in SECRET_SETTINGS:
+            if str(value or "").strip():
+                secrets[key] = value
+            continue
+        persisted[key] = value
+    return persisted, secrets
+
+
+def _update_session_secret_overrides(updates: dict[str, Any]) -> None:
+    for key, value in updates.items():
+        if key not in SECRET_SETTINGS:
+            continue
+        if str(value or "").strip():
+            _session_secret_overrides[key] = value
+        else:
+            _session_secret_overrides.pop(key, None)

@@ -5,12 +5,12 @@ export const configApi = {
   getConfig: () => request<Config>("/config"),
   getConfigOptions: () => request<ConfigOptions>("/config/options"),
   getConfigProfiles: () => request<ConfigProfiles>("/config/profiles"),
-  createConfigProfile: (name: string) =>
+  createConfigProfile: (name: string, description?: string) =>
     request<ConfigProfiles>("/config/profiles", {
       method: "POST",
-      body: JSON.stringify({ name }),
+      body: JSON.stringify({ name, description }),
     }),
-  updateConfigProfile: (profileId: string, body: { name?: string; capture_current?: boolean }) =>
+  updateConfigProfile: (profileId: string, body: { name?: string; description?: string; capture_current?: boolean }) =>
     request<ConfigProfiles>(`/config/profiles/${profileId}`, {
       method: "PATCH",
       body: JSON.stringify(body),

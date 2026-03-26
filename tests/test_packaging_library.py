@@ -79,11 +79,11 @@ def test_packaging_library_delete_clears_selected_ids(tmp_path, monkeypatch):
         filename="mark.png",
         payload=b"watermark",
     )
-    state = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))
+    state = library.list_packaging_assets()
     assert state["config"]["watermark_asset_id"] == watermark["id"]
 
     library.delete_packaging_asset(watermark["id"])
-    state = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))
+    state = library.list_packaging_assets()
     assert state["config"]["watermark_asset_id"] is None
 
 

@@ -33,6 +33,11 @@ def test_config_profile_round_trip_restores_config_and_packaging(tmp_path, monke
 
     patch_config(
         ConfigPatch(
+            transcription_provider="qwen_asr",
+            transcription_model="qwen3-asr-1.7b",
+            transcription_dialect="beijing",
+            reasoning_provider="openai",
+            reasoning_model="gpt-4.1",
             default_job_workflow_mode="standard_edit",
             default_job_enhancement_modes=["avatar_commentary", "ai_effects"],
             avatar_presenter_id="profiles/demo_presenter.mp4",
@@ -42,6 +47,11 @@ def test_config_profile_round_trip_restores_config_and_packaging(tmp_path, monke
             voice_clone_api_base_url="https://voice.example.com",
             voice_clone_voice_id="voice_alpha",
             director_rewrite_strength=0.74,
+            auto_confirm_content_profile=True,
+            content_profile_review_threshold=0.72,
+            packaging_selection_min_score=0.81,
+            quality_auto_rerun_enabled=False,
+            quality_auto_rerun_below_score=63.5,
         )
     )
     library.update_packaging_config(
@@ -57,24 +67,36 @@ def test_config_profile_round_trip_restores_config_and_packaging(tmp_path, monke
         }
     )
 
-    created = create_profile(ConfigProfileCreate(name="口播测评方案"))
+    created = create_profile(ConfigProfileCreate(name="口播测评方案", description="适合带数字人和智能特效的测评口播"))
     profile_id = created.active_profile_id
 
     assert profile_id
     assert created.active_profile_dirty is False
+    assert created.active_profile_dirty_details == []
     assert created.profiles[0].name == "口播测评方案"
+    assert created.profiles[0].description == "适合带数字人和智能特效的测评口播"
     assert created.profiles[0].workflow_mode == "standard_edit"
     assert created.profiles[0].copy_style == "trusted_expert"
     assert created.profiles[0].avatar_presenter_id == "profiles/demo_presenter.mp4"
 
     patch_config(
         ConfigPatch(
+            transcription_provider="openai",
+            transcription_model="gpt-4o-transcribe",
+            transcription_dialect="mandarin",
+            reasoning_provider="minimax",
+            reasoning_model="MiniMax-M2.7-highspeed",
             default_job_enhancement_modes=["ai_director"],
             avatar_presenter_id="profiles/other_presenter.mp4",
             voice_provider="indextts2",
             voice_clone_api_base_url="http://127.0.0.1:49204",
             voice_clone_voice_id="voice_beta",
             director_rewrite_strength=0.31,
+            auto_confirm_content_profile=False,
+            content_profile_review_threshold=0.9,
+            packaging_selection_min_score=0.55,
+            quality_auto_rerun_enabled=True,
+            quality_auto_rerun_below_score=75.0,
         )
     )
     library.update_packaging_config(
@@ -92,12 +114,22 @@ def test_config_profile_round_trip_restores_config_and_packaging(tmp_path, monke
     config = get_config()
     packaging = library.list_packaging_assets()
 
+    assert config.transcription_provider == "qwen_asr"
+    assert config.transcription_model == "qwen3-asr-1.7b"
+    assert config.transcription_dialect == "beijing"
+    assert config.reasoning_provider == "openai"
+    assert config.reasoning_model == "gpt-4.1"
     assert config.default_job_enhancement_modes == ["avatar_commentary", "ai_effects"]
     assert config.avatar_presenter_id == "profiles/demo_presenter.mp4"
     assert config.voice_provider == "runninghub"
     assert config.voice_clone_api_base_url == "https://voice.example.com"
     assert config.voice_clone_voice_id == "voice_alpha"
     assert config.director_rewrite_strength == 0.74
+    assert config.auto_confirm_content_profile is True
+    assert config.content_profile_review_threshold == 0.72
+    assert config.packaging_selection_min_score == 0.81
+    assert config.quality_auto_rerun_enabled is False
+    assert config.quality_auto_rerun_below_score == 63.5
     assert packaging["config"]["copy_style"] == "trusted_expert"
     assert packaging["config"]["cover_style"] == "tech_showcase"
     assert packaging["config"]["title_style"] == "chrome_impact"
@@ -122,7 +154,7 @@ def test_config_profile_marks_active_profile_dirty_until_recaptured(tmp_path, mo
         }
     )
 
-    created = create_profile(ConfigProfileCreate(name="默认方案"))
+    created = create_profile(ConfigProfileCreate(name="默认方案", description="默认审核基线"))
     profile_id = created.active_profile_id
 
     patch_config(
@@ -142,18 +174,42 @@ def test_config_profile_marks_active_profile_dirty_until_recaptured(tmp_path, mo
     active_profile = next(profile for profile in profiles.profiles if profile.id == profile_id)
 
     assert profiles.active_profile_dirty is True
+    assert set(profiles.active_profile_dirty_keys) == {
+        "avatar_presenter_id",
+        "default_job_enhancement_modes",
+        "packaging.copy_style",
+        "packaging.cover_style",
+    }
+    dirty_details = {item["key"]: item for item in profiles.active_profile_dirty_details}
+    assert dirty_details["avatar_presenter_id"] == {
+        "key": "avatar_presenter_id",
+        "saved_value": "profiles/demo_presenter.mp4",
+        "current_value": "profiles/demo_presenter_b.mp4",
+    }
+    assert dirty_details["default_job_enhancement_modes"] == {
+        "key": "default_job_enhancement_modes",
+        "saved_value": ["avatar_commentary"],
+        "current_value": ["avatar_commentary", "ai_director"],
+    }
     assert active_profile.is_active is True
     assert active_profile.is_dirty is True
+    assert set(active_profile.dirty_keys) == set(profiles.active_profile_dirty_keys)
+    assert active_profile.dirty_details == profiles.active_profile_dirty_details
 
     updated = patch_profile(
         profile_id,
-        ConfigProfileUpdate(name="导演增强方案", capture_current=True),
+        ConfigProfileUpdate(name="导演增强方案", description="导演增强和复跑优先", capture_current=True),
     )
     refreshed_profile = next(profile for profile in updated.profiles if profile.id == profile_id)
 
     assert updated.active_profile_dirty is False
+    assert updated.active_profile_dirty_keys == []
+    assert updated.active_profile_dirty_details == []
     assert refreshed_profile.name == "导演增强方案"
+    assert refreshed_profile.description == "导演增强和复跑优先"
     assert refreshed_profile.is_dirty is False
+    assert refreshed_profile.dirty_keys == []
+    assert refreshed_profile.dirty_details == []
     assert refreshed_profile.copy_style == "premium_editorial"
     assert refreshed_profile.cover_style == "luxury_blackgold"
     assert refreshed_profile.enhancement_modes == ["avatar_commentary", "ai_director"]

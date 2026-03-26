@@ -115,6 +115,95 @@ async def test_avatar_materials_endpoint_exposes_requirements(client: AsyncClien
 
 
 @pytest.mark.asyncio
+async def test_avatar_materials_endpoint_warns_on_demo_profiles(client: AsyncClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    import roughcut.api.avatar_materials as avatar_materials_api
+    import roughcut.avatar.materials as avatar_materials_mod
+
+    monkeypatch.setattr(avatar_materials_mod, "_AVATAR_MATERIALS_ROOT", tmp_path / "avatar_materials")
+
+    profile_dir = tmp_path / "avatar_materials" / "profiles" / "demo_profile"
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    avatar_materials_mod.save_avatar_material_profile(
+        {
+            "id": "demo-profile-1",
+            "display_name": "demo creator a",
+            "presenter_alias": "CreatorDemoA",
+            "notes": "demo profile",
+            "profile_dir": str(profile_dir),
+            "training_status": "ready_for_manual_training",
+            "training_provider": "heygem",
+            "training_api_available": True,
+            "next_action": "ready",
+            "capability_status": {
+                "heygem_avatar": "ready",
+                "voice_clone": "ready",
+                "portrait_reference": "ready",
+                "preview": "ready",
+            },
+            "blocking_issues": [],
+            "warnings": [],
+            "created_at": "2026-03-26T00:00:00Z",
+            "files": [],
+            "preview_runs": [],
+            "creator_profile": {
+                "identity": {"public_name": "CreatorDemoA", "title": None, "bio": None},
+                "positioning": {
+                    "creator_focus": None,
+                    "expertise": [],
+                    "audience": None,
+                    "style": None,
+                    "tone_keywords": [],
+                },
+                "publishing": {
+                    "primary_platform": None,
+                    "active_platforms": [],
+                    "signature": None,
+                    "default_call_to_action": None,
+                    "description_strategy": None,
+                },
+                "business": {
+                    "contact": None,
+                    "collaboration_notes": None,
+                    "availability": None,
+                },
+                "archive_notes": None,
+            },
+            "profile_dashboard": {
+                "completeness_score": 20,
+                "section_status": {
+                    "identity": False,
+                    "positioning": False,
+                    "publishing": False,
+                    "business": False,
+                    "materials": True,
+                },
+                "material_counts": {
+                    "speaking_videos": 1,
+                    "portrait_photos": 1,
+                    "voice_samples": 1,
+                },
+                    "strengths": ["demo pipeline ready"],
+                    "next_steps": [],
+                },
+            }
+        )
+
+    async def fake_training_available():
+        return False
+
+    monkeypatch.setattr(avatar_materials_api, "is_heygem_training_available", fake_training_available)
+
+    response = await client.get("/api/v1/avatar-materials")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert len(data["profiles"]) == 1
+    assert data["warnings"]
+    assert "demo creator a" in data["warnings"][0]
+    assert "profiles.json" in data["warnings"][0]
+
+
+@pytest.mark.asyncio
 async def test_avatar_materials_upload_creates_profile(client: AsyncClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     import roughcut.api.avatar_materials as avatar_materials_api
     import roughcut.avatar.materials as avatar_materials_mod

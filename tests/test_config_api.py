@@ -135,6 +135,44 @@ def test_get_config_exposes_extended_provider_fields(tmp_path, monkeypatch):
     assert cfg.quality_auto_rerun_max_attempts == 1
     assert cfg.openai_auth_mode == "api_key"
     assert cfg.anthropic_auth_mode == "api_key"
+    assert cfg.persistence["settings_store"] == "database"
+    assert cfg.persistence["profiles_store"] == "database"
+    assert cfg.persistence["packaging_store"] == "database"
+    assert "transcription_provider" in cfg.profile_bindable_keys
+    assert "quality_auto_rerun_enabled" in cfg.profile_bindable_keys
+    assert cfg.override_keys == []
+    assert cfg.session_secret_keys == []
+    assert cfg.overrides == {}
+
+
+def test_get_config_redacts_secret_overrides(tmp_path, monkeypatch):
+    import json
+
+    import roughcut.api.config as config_api
+    import roughcut.config as config_mod
+
+    overrides_file = tmp_path / "roughcut_config.json"
+    overrides_file.write_text(
+        json.dumps(
+            {
+                "reasoning_provider": "minimax",
+                "minimax_api_key": "super-secret",
+                "telegram_bot_token": "bot-secret",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(config_api, "_CONFIG_FILE", overrides_file)
+    monkeypatch.setattr(config_mod, "_OVERRIDES_FILE", overrides_file)
+    config_mod._settings = None
+
+    cfg = get_config()
+
+    assert cfg.override_keys == ["reasoning_provider"]
+    assert cfg.session_secret_keys == ["minimax_api_key", "telegram_bot_token"]
+    assert cfg.overrides["reasoning_provider"] == "minimax"
+    assert "minimax_api_key" not in cfg.overrides
+    assert "telegram_bot_token" not in cfg.overrides
 
 
 def test_get_config_options_exposes_transcription_model_lists():
@@ -348,6 +386,8 @@ def test_patch_config_accepts_telegram_remote_review_fields(tmp_path, monkeypatc
     assert cfg.telegram_bot_api_base_url == "https://api.telegram.org"
     assert cfg.telegram_bot_token_set is True
     assert cfg.telegram_bot_chat_id == "123456789"
+    assert "telegram_bot_token" not in cfg.override_keys
+    assert "telegram_bot_token" in cfg.session_secret_keys
 
 
 def test_patch_config_rejects_unknown_acp_bridge_backend(tmp_path, monkeypatch):
@@ -396,3 +436,62 @@ def test_patch_config_accepts_indextts2_voice_provider(tmp_path, monkeypatch):
 
     assert cfg.voice_provider == "indextts2"
     assert cfg.voice_clone_api_base_url == "http://127.0.0.1:49204"
+
+
+def test_patch_config_persists_to_database_without_override_file(tmp_path, monkeypatch):
+    import roughcut.api.config as config_api
+    import roughcut.config as config_mod
+
+    override_file = tmp_path / "roughcut_config.json"
+    monkeypatch.setattr(config_api, "_CONFIG_FILE", override_file)
+    monkeypatch.setattr(config_mod, "_OVERRIDES_FILE", override_file)
+    config_mod._settings = None
+
+    patch_config(
+        ConfigPatch(
+            transcription_provider="qwen_asr",
+            transcription_model="qwen3-asr-1.7b",
+            transcription_dialect="beijing",
+            quality_auto_rerun_enabled=False,
+            quality_auto_rerun_below_score=66.0,
+        )
+    )
+
+    assert override_file.exists() is False
+
+    config_mod._settings = None
+    settings = get_settings()
+
+    assert settings.transcription_provider == "qwen_asr"
+    assert settings.transcription_model == "qwen3-asr-1.7b"
+    assert settings.transcription_dialect == "beijing"
+    assert settings.quality_auto_rerun_enabled is False
+    assert settings.quality_auto_rerun_below_score == 66.0
+
+
+def test_patch_config_keeps_secret_keys_out_of_persisted_overrides(tmp_path, monkeypatch):
+    import roughcut.api.config as config_api
+    import roughcut.config as config_mod
+
+    override_file = tmp_path / "roughcut_config.json"
+    monkeypatch.setattr(config_api, "_CONFIG_FILE", override_file)
+    monkeypatch.setattr(config_mod, "_OVERRIDES_FILE", override_file)
+    config_mod._settings = None
+    config_mod._session_secret_overrides.clear()
+
+    cfg = patch_config(
+        ConfigPatch(
+            minimax_api_key="secret-token",
+            reasoning_provider="minimax",
+        )
+    )
+
+    persisted = config_mod.load_runtime_overrides()
+
+    assert cfg.minimax_api_key_set is True
+    assert "minimax_api_key" in cfg.session_secret_keys
+    assert "minimax_api_key" not in cfg.override_keys
+    assert persisted["reasoning_provider"] == "minimax"
+    assert persisted["transcription_provider"] == "openai"
+    assert persisted["transcription_model"] == "gpt-4o-transcribe"
+    assert "minimax_api_key" not in persisted

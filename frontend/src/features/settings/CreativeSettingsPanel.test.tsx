@@ -16,6 +16,14 @@ vi.mock("../../api", () => ({
 }));
 
 const SAMPLE_CONFIG: Config = {
+  persistence: {
+    settings_store: "database",
+    profiles_store: "database",
+    packaging_store: "database",
+    legacy_override_file_present: false,
+    legacy_profiles_file_present: false,
+    legacy_packaging_manifest_present: false,
+  },
   transcription_provider: "openai",
   transcription_model: "gpt-4o-transcribe",
   transcription_dialect: "mandarin",
@@ -33,6 +41,7 @@ const SAMPLE_CONFIG: Config = {
   openai_base_url: "https://api.openai.com/v1",
   openai_auth_mode: "api_key",
   openai_api_key_helper: "",
+  qwen_asr_api_base_url: "http://127.0.0.1:18096",
   avatar_provider: "heygem",
   avatar_api_base_url: "http://127.0.0.1:49202",
   avatar_training_api_base_url: "http://127.0.0.1:49204",
@@ -86,12 +95,21 @@ const SAMPLE_CONFIG: Config = {
   fact_check_enabled: true,
   auto_confirm_content_profile: true,
   content_profile_review_threshold: 0.72,
+  content_profile_auto_review_min_accuracy: 0.9,
+  content_profile_auto_review_min_samples: 20,
   auto_accept_glossary_corrections: true,
   glossary_correction_review_threshold: 0.9,
   auto_select_cover_variant: true,
   cover_selection_review_gap: 0.08,
   packaging_selection_review_gap: 0.08,
   packaging_selection_min_score: 0.6,
+  subtitle_filler_cleanup_enabled: true,
+  quality_auto_rerun_enabled: true,
+  quality_auto_rerun_below_score: 75,
+  quality_auto_rerun_max_attempts: 1,
+  override_keys: [],
+  session_secret_keys: [],
+  profile_bindable_keys: ["transcription_provider", "quality_auto_rerun_enabled"],
   overrides: {},
 };
 
@@ -194,6 +212,14 @@ describe("CreativeSettingsPanel", () => {
     const { onChange } = renderPanel();
 
     await waitFor(() => expect(mockApi.getPackaging).toHaveBeenCalledTimes(1));
+
+    expect(screen.getByText("数字人")).toBeInTheDocument();
+    expect(screen.getByText("语音")).toBeInTheDocument();
+    expect(screen.getByText("导演改写")).toBeInTheDocument();
+    expect(screen.getByText("Provider 与凭据")).toBeInTheDocument();
+    expect(screen.queryByLabelText("数字人 API Base URL")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("语音合成 API Base URL")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("RunningHub 工作流 ID / Voice ID（仅 RunningHub）")).not.toBeInTheDocument();
 
     fireEvent.change(screen.getByLabelText("数字人解说定位方案"), {
       target: { value: "brand_safe_top_right" },

@@ -765,6 +765,88 @@ select.input option:focus {
   gap: 12px;
 }
 
+.settings-overview-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.settings-overview-card,
+.settings-subsection {
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.settings-overview-card {
+  padding: 16px;
+  display: grid;
+  gap: 6px;
+}
+
+.settings-overview-label {
+  color: var(--text-muted);
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.settings-overview-card strong {
+  font-size: 18px;
+  line-height: 1.2;
+}
+
+.settings-subsection {
+  padding: 14px;
+  display: grid;
+  gap: 12px;
+}
+
+.settings-subsection-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: baseline;
+  flex-wrap: wrap;
+}
+
+.settings-disclosure {
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.02);
+  overflow: hidden;
+}
+
+.settings-disclosure-trigger {
+  list-style: none;
+  cursor: pointer;
+  padding: 16px 18px;
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+}
+
+.settings-disclosure-trigger::-webkit-details-marker {
+  display: none;
+}
+
+.settings-disclosure-trigger::after {
+  content: "展开";
+  color: var(--text-muted);
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.settings-disclosure[open] > .settings-disclosure-trigger::after {
+  content: "收起";
+}
+
+.settings-disclosure-body {
+  padding: 0 18px 18px;
+}
+
 .template-summary-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -2169,17 +2251,81 @@ select.input option:focus {
   align-items: flex-start;
 }
 
+.config-profile-list-stack {
+  display: grid;
+  gap: 14px;
+}
+
+.config-profile-list-section {
+  display: grid;
+  gap: 10px;
+}
+
+.config-profile-list-section-head {
+  display: grid;
+  gap: 4px;
+}
+
 .config-profile-chip-list {
-  display: flex;
-  gap: 8px;
-  flex-wrap: wrap;
-  align-items: center;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  align-items: stretch;
 }
 
 .config-profile-chip {
-  display: inline-flex;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.03);
+  padding: 12px;
+  display: grid;
+  gap: 10px;
+}
+
+.config-profile-chip-button {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  padding: 0;
+  text-align: left;
+  cursor: pointer;
+}
+
+.config-profile-chip-actions {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
   align-items: center;
-  gap: 8px;
+}
+
+.config-profile-chip-button:focus-visible,
+.config-profile-chip-actions .button:focus-visible {
+  outline: 2px solid rgba(240, 181, 108, 0.34);
+  outline-offset: 4px;
+}
+
+.config-profile-chip-button:disabled,
+.config-profile-chip-actions .button:disabled {
+  cursor: not-allowed;
+}
+
+.config-profile-chip-button:hover .config-profile-chip-title {
+  color: #fff3dc;
+}
+
+.config-profile-chip-button:hover .config-profile-chip-meta {
+  color: #d7c7b3;
+}
+
+.config-profile-chip-button:hover .config-profile-chip-description {
+  color: #e2d2be;
+}
+
+.config-profile-chip {
+  width: 100%;
+  min-height: 96px;
+  align-items: stretch;
 }
 
 .config-profile-chip.active {
@@ -2187,14 +2333,122 @@ select.input option:focus {
   background: linear-gradient(135deg, rgba(240, 181, 108, 0.16), rgba(255, 141, 58, 0.12));
 }
 
+.config-profile-list-toolbar {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.config-profile-filter-input {
+  min-width: min(100%, 280px);
+  flex: 1 1 280px;
+}
+
+.config-profile-sort-select {
+  min-width: 180px;
+  flex: 0 0 180px;
+}
+
+.config-profile-chip-copy {
+  display: grid;
+  gap: 8px;
+  width: 100%;
+}
+
+.config-profile-chip-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  align-items: center;
+}
+
+.config-profile-chip-title {
+  font-weight: 700;
+  color: #fff7ea;
+}
+
+.config-profile-chip-description,
+.config-profile-chip-meta {
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-muted);
+}
+
 .config-profile-chip-mark {
   font-size: 11px;
   color: var(--danger);
 }
 
+.config-profile-preview {
+  display: grid;
+  gap: 10px;
+}
+
+.config-profile-preview-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.config-profile-preview-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
 .config-profile-name-input {
   min-width: min(100%, 280px);
   flex: 1 1 280px;
+}
+
+.config-profile-description-input {
+  min-width: min(100%, 360px);
+  flex: 2 1 360px;
+}
+
+.config-profile-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.config-profile-summary-card {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.03);
+  padding: 12px;
+}
+
+.config-profile-summary-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.config-profile-summary-tag {
+  white-space: nowrap;
+}
+
+.config-profile-diff-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.config-profile-diff-list {
+  display: grid;
+  gap: 8px;
+}
+
+.config-profile-diff-row {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  flex-wrap: wrap;
 }
 
 .review-config-grid {
@@ -2231,6 +2485,14 @@ select.input option:focus {
 }
 
 @media (max-width: 960px) {
+  .config-profile-chip-list {
+    grid-template-columns: 1fr;
+  }
+
+  .config-profile-summary-grid {
+    grid-template-columns: 1fr;
+  }
+
   .review-config-grid {
     grid-template-columns: 1fr;
   }
@@ -2493,6 +2755,7 @@ select.input option:focus {
   .watch-grid,
   .form-grid.three-up,
   .stats-grid,
+  .settings-overview-grid,
   .template-summary-grid,
   .preset-grid,
   .mode-card-grid,

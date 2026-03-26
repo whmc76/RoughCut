@@ -13,8 +13,10 @@ from typing import Any
 from io import BytesIO
 
 import numpy as np
+from sqlalchemy import select
 
 from roughcut.config import get_settings
+from roughcut.state_store import PACKAGING_CONFIG_KEY, run_db_operation
 
 
 PACKAGING_ROOT = Path("output/test/packaging")
@@ -590,18 +592,24 @@ def _normalize_asset_type(asset_type: str) -> str:
 
 
 def _load_state() -> dict[str, Any]:
-    state = {
+    default_state = {
         "assets": [],
         "config": dict(DEFAULT_CONFIG),
     }
-    if not MANIFEST_PATH.exists():
-        return state
     try:
-        raw = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+        state, has_data = _load_state_from_db()
+        if has_data:
+            return state
     except Exception:
-        return state
-    state["assets"] = list(raw.get("assets") or [])
-    state["config"].update(raw.get("config") or {})
+        state = default_state
+
+    legacy_state = _load_legacy_state()
+    if legacy_state["assets"] or legacy_state["config"] != dict(DEFAULT_CONFIG):
+        try:
+            _save_state_to_db(legacy_state)
+        except Exception:
+            pass
+        return legacy_state
     return state
 
 
@@ -731,8 +739,103 @@ def _normalize_config(config: dict[str, Any], assets_by_id: dict[str, dict[str, 
 
 
 def _save_state(state: dict[str, Any]) -> None:
-    PACKAGING_ROOT.mkdir(parents=True, exist_ok=True)
-    MANIFEST_PATH.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+    try:
+        _save_state_to_db(state)
+    except Exception:
+        PACKAGING_ROOT.mkdir(parents=True, exist_ok=True)
+        MANIFEST_PATH.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _load_state_from_db() -> tuple[dict[str, Any], bool]:
+    async def _operation(session: Any) -> tuple[dict[str, Any], bool]:
+        from roughcut.db.models import AppSetting, PackagingAsset
+
+        asset_rows = (await session.execute(select(PackagingAsset))).scalars().all()
+        config_row = await session.get(AppSetting, PACKAGING_CONFIG_KEY)
+        state = {
+            "assets": [_serialize_asset_row(row) for row in asset_rows],
+            "config": dict(DEFAULT_CONFIG),
+        }
+        if config_row is not None and isinstance(config_row.value_json, dict):
+            state["config"].update(config_row.value_json)
+        has_data = bool(asset_rows) or config_row is not None
+        return state, has_data
+
+    return run_db_operation(_operation)
+
+
+def _save_state_to_db(state: dict[str, Any]) -> None:
+    assets = [dict(item or {}) for item in (state.get("assets") or [])]
+    config = dict(state.get("config") or {})
+
+    async def _operation(session: Any) -> None:
+        from roughcut.db.models import AppSetting, PackagingAsset
+
+        existing_assets = (await session.execute(select(PackagingAsset))).scalars().all()
+        for row in existing_assets:
+            await session.delete(row)
+
+        for item in assets:
+            session.add(
+                PackagingAsset(
+                    id=str(item.get("id") or uuid.uuid4().hex),
+                    asset_type=str(item.get("asset_type") or ""),
+                    original_name=str(item.get("original_name") or ""),
+                    stored_name=str(item.get("stored_name") or ""),
+                    path=str(item.get("path") or ""),
+                    size_bytes=int(item.get("size_bytes") or 0),
+                    content_type=str(item.get("content_type") or "application/octet-stream"),
+                    watermark_preprocessed=item.get("watermark_preprocessed"),
+                    created_at=_parse_asset_timestamp(item.get("created_at")),
+                )
+            )
+
+        config_row = await session.get(AppSetting, PACKAGING_CONFIG_KEY)
+        if config_row is None:
+            config_row = AppSetting(key=PACKAGING_CONFIG_KEY, value_json=config)
+            session.add(config_row)
+        else:
+            config_row.value_json = config
+
+        await session.commit()
+
+    run_db_operation(_operation)
+
+
+def _load_legacy_state() -> dict[str, Any]:
+    state = {
+        "assets": [],
+        "config": dict(DEFAULT_CONFIG),
+    }
+    if not MANIFEST_PATH.exists():
+        return state
+    try:
+        raw = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return state
+    state["assets"] = list(raw.get("assets") or [])
+    state["config"].update(raw.get("config") or {})
+    return state
+
+
+def _serialize_asset_row(row: Any) -> dict[str, Any]:
+    return {
+        "id": row.id,
+        "asset_type": row.asset_type,
+        "original_name": row.original_name,
+        "stored_name": row.stored_name,
+        "path": row.path,
+        "size_bytes": row.size_bytes,
+        "content_type": row.content_type,
+        "watermark_preprocessed": row.watermark_preprocessed,
+        "created_at": row.created_at.isoformat() if isinstance(row.created_at, datetime) else str(row.created_at),
+    }
+
+
+def _parse_asset_timestamp(value: Any) -> datetime:
+    if isinstance(value, datetime):
+        return value
+    return datetime.fromisoformat(str(value or datetime.now(timezone.utc).isoformat()))
 
 
 def _rank_packaging_assets(
