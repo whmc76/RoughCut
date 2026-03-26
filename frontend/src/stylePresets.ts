@@ -141,7 +141,7 @@ export const coverStylePresets: StylePreset[] = [
 
 export const titleStylePresets: StylePreset[] = [
   { key: "preset_default", label: "跟随策略自动联动", groupId: "adaptive", summary: "默认按小红书 / B站 / YouTube / CTR / 品牌策略自动切模板。", accent: "#f0b56c", badge: "自动", sampleTop: "平台策略", sampleBottom: "自动切换", sampleFoot: "推荐默认" },
-  { key: "cyber_logo_stack", label: "赛博 logo 叠层", groupId: "impact", summary: "适合 logo 感标题和霓虹描边。", accent: "#55d7ff", badge: "赛博", sampleTop: "FAST加帕", sampleBottom: "未来感爆字", sampleFoot: "类似科技潮流封面" },
+  { key: "cyber_logo_stack", label: "未来 logo 叠层", groupId: "impact", summary: "适合 logo 感标题和霓虹描边。", accent: "#55d7ff", badge: "霓虹", sampleTop: "品牌主标题", sampleBottom: "未来感爆字", sampleFoot: "类似科技潮流封面" },
   { key: "chrome_impact", label: "镀铬冲击", groupId: "impact", summary: "更像 YouTube 开箱大字。", accent: "#dce7ff", badge: "镀铬", sampleTop: "版本升级", sampleBottom: "直接拉满", sampleFoot: "国际化开箱感" },
   { key: "festival_badge", label: "节庆徽章", groupId: "banner", summary: "适合活动、限定、节点主题。", accent: "#f5bf54", badge: "徽章", sampleTop: "马年限定版", sampleBottom: "一眼就到位", sampleFoot: "适合节庆和礼盒" },
   { key: "double_banner", label: "双横幅爆字", groupId: "banner", summary: "上下一组横幅，最像剪映热门封面字效。", accent: "#ff6f6f", badge: "横幅", sampleTop: "城六崩卫版", sampleBottom: "定制化全面升级", sampleFoot: "层级最强" },

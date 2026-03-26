@@ -133,8 +133,8 @@ describe("useGlossaryWorkspace", () => {
         term_count: 1,
         terms: [
           {
-            correct_form: "FAS",
-            wrong_forms: ["法斯", "发斯"],
+            correct_form: "BRX",
+            wrong_forms: ["比阿尔艾克斯", "B R X"],
             category: "term",
             context_hint: "圈内缩写",
           },
@@ -148,8 +148,8 @@ describe("useGlossaryWorkspace", () => {
 
     await act(async () => {
       await result.current.importOneBuiltinTerm({
-        correct_form: "FAS",
-        wrong_forms: ["法斯", "发斯"],
+        correct_form: "BRX",
+        wrong_forms: ["比阿尔艾克斯", "B R X"],
         category: "term",
         context_hint: "圈内缩写",
       });
@@ -157,8 +157,8 @@ describe("useGlossaryWorkspace", () => {
 
     await waitFor(() =>
       expect(mockApi.createGlossary).toHaveBeenCalledWith({
-        wrong_forms: ["法斯", "发斯"],
-        correct_form: "FAS",
+        wrong_forms: ["比阿尔艾克斯", "B R X"],
+        correct_form: "BRX",
         scope_type: "global",
         scope_value: "",
         category: "term",
@@ -169,11 +169,11 @@ describe("useGlossaryWorkspace", () => {
 
   it("syncs aliases into existing glossary terms when sync mode is enabled", async () => {
     const existingTerm: GlossaryTerm = {
-      id: "term_fas",
+      id: "term_brx",
       scope_type: "global",
       scope_value: "",
       wrong_forms: ["老错写"],
-      correct_form: "FAS",
+      correct_form: "BRX",
       category: "term",
       context_hint: "旧提示",
       created_at: "2026-03-12T10:00:00Z",
@@ -182,7 +182,7 @@ describe("useGlossaryWorkspace", () => {
 
     const { result } = renderHookWithQueryClient(() => useGlossaryWorkspace());
 
-    await waitFor(() => expect(result.current.glossary.data?.[0].correct_form).toBe("FAS"));
+    await waitFor(() => expect(result.current.glossary.data?.[0].correct_form).toBe("BRX"));
 
     act(() => {
       result.current.setBuiltinImportMode("sync_aliases");
@@ -190,16 +190,16 @@ describe("useGlossaryWorkspace", () => {
 
     await act(async () => {
       await result.current.importOneBuiltinTerm({
-        correct_form: "FAS",
-        wrong_forms: ["法斯", "发斯"],
+        correct_form: "BRX",
+        wrong_forms: ["比阿尔艾克斯", "B R X"],
         category: "term",
         context_hint: "圈内缩写",
       });
     });
 
     await waitFor(() =>
-      expect(mockApi.updateGlossary).toHaveBeenCalledWith("term_fas", {
-        wrong_forms: ["法斯", "发斯"],
+      expect(mockApi.updateGlossary).toHaveBeenCalledWith("term_brx", {
+        wrong_forms: ["比阿尔艾克斯", "B R X"],
         category: "term",
         context_hint: "圈内缩写",
       }),

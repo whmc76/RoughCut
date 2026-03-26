@@ -1,9 +1,10 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState } from "react";
+import type { ReactNode } from "react";
 
 import { api } from "../../api";
 import { PanelHeader } from "../../components/ui/PanelHeader";
-import type { AvatarCreatorProfile, AvatarMaterialFile, AvatarMaterialProfile } from "../../types";
+import type { AvatarCreatorProfile, AvatarMaterialFile, AvatarMaterialLibrary, AvatarMaterialProfile } from "../../types";
 
 type CreatorProfileFormState = {
   public_name: string;
@@ -30,6 +31,7 @@ type CreatorProfileFormState = {
 
 export function AvatarMaterialPanel() {
   const queryClient = useQueryClient();
+  const [createModalOpen, setCreateModalOpen] = useState(false);
   const [displayName, setDisplayName] = useState("");
   const [presenterAlias, setPresenterAlias] = useState("");
   const [notes, setNotes] = useState("");
@@ -41,6 +43,7 @@ export function AvatarMaterialPanel() {
   const [replaceError, setReplaceError] = useState<string | null>(null);
   const [previewErrors, setPreviewErrors] = useState<Record<string, string | null>>({});
   const library = useQuery({ queryKey: ["avatar-materials"], queryFn: api.getAvatarMaterials });
+  const config = useQuery({ queryKey: ["config", "avatar-materials"], queryFn: api.getConfig });
 
   const selectedFileCount = speakingVideos.length + portraitPhotos.length + voiceSamples.length;
   const upload = useMutation({
@@ -63,6 +66,7 @@ export function AvatarMaterialPanel() {
       setSpeakingVideos([]);
       setPortraitPhotos([]);
       setVoiceSamples([]);
+      setCreateModalOpen(false);
     },
   });
   const remove = useMutation({
@@ -124,6 +128,14 @@ export function AvatarMaterialPanel() {
       queryClient.setQueryData(["avatar-materials"], data);
     },
   });
+  const activatePresenter = useMutation({
+    mutationFn: (avatarPresenterId: string) => api.patchConfig({ avatar_presenter_id: avatarPresenterId }),
+    onSuccess: (data) => {
+      queryClient.setQueryData(["config", "avatar-materials"], data);
+      queryClient.setQueryData(["config"], data);
+      void queryClient.invalidateQueries({ queryKey: ["config"] });
+    },
+  });
 
   const payload = library.data;
   const readyCount = (payload?.profiles ?? []).filter((item) => item.profile_dashboard?.section_status?.materials).length;
@@ -133,52 +145,58 @@ export function AvatarMaterialPanel() {
       <PanelHeader
         title="创作者档案"
         description="把作者身份、内容定位、渠道策略、商务备注和数字人口播素材放进同一个档案，后续文案生成、模板复用和数字人预览都从这里取数。"
+        actions={
+          <button className="button primary" type="button" onClick={() => setCreateModalOpen(true)}>
+            创建创作者档案
+          </button>
+        }
       />
 
       {library.error ? <div className="notice">{String(library.error)}</div> : null}
 
-      <div className="avatar-creator-summary-grid">
-        <article className="avatar-material-card">
-          <div className="stat-label">档案说明</div>
-          <p className="muted compact-top">{payload?.summary ?? "加载中..."}</p>
-          <div className="avatar-stat-grid compact-top">
-            <div className="activity-card">
-              <strong>{payload?.profiles?.length ?? 0}</strong>
-              <div className="muted compact-top">创作者档案</div>
-            </div>
-            <div className="activity-card">
-              <strong>{readyCount}</strong>
-              <div className="muted compact-top">可直接生成数字人预览</div>
-            </div>
-          </div>
-          <div className="list-stack compact-top">
-            {(payload?.sections ?? []).map((section) => (
-              <section key={section.title} className="avatar-requirement-block">
-                <strong>{section.title}</strong>
-                <div className="list-stack compact-top">
-                  {section.rules.map((rule) => (
-                    <div key={`${section.title}-${rule.title}`} className="avatar-rule-row">
-                      <span className={`status-pill ${rule.severity === "required" ? "failed" : rule.severity === "recommended" ? "running" : ""}`}>
-                        {rule.severity === "required" ? "必须" : rule.severity === "recommended" ? "建议" : "说明"}
-                      </span>
-                      <div>
-                        <div>{rule.title}</div>
-                        <div className="muted compact-top">{rule.detail}</div>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </section>
-            ))}
-          </div>
-        </article>
+      <div className="avatar-profile-grid top-gap">
+        {(payload?.profiles ?? []).map((profile) => (
+          <CreatorArchiveCard
+            key={profile.id}
+            profile={profile}
+            removing={remove.isPending}
+            previewing={preview.isPending}
+            onRemove={() => remove.mutate(profile.id)}
+            onPreview={(script) => preview.mutate({ profileId: profile.id, script })}
+            onPreviewUnavailable={(message) => setPreviewErrors((prev) => ({ ...prev, [profile.id]: message }))}
+            onReplace={(fileId, file) => replaceMaterial.mutate({ profileId: profile.id, fileId, file })}
+            replacingFileId={replaceFileId}
+            previewError={previewErrors[profile.id] ?? null}
+            onUpdateProfile={(nextDisplayName, nextPresenterAlias, nextNotes, nextCreatorProfile) =>
+              updateProfile.mutate({
+                profileId: profile.id,
+                displayName: nextDisplayName,
+                presenterAlias: nextPresenterAlias,
+                notes: nextNotes,
+                creatorProfile: nextCreatorProfile,
+              })
+            }
+            updating={updateProfile.isPending}
+            activePresenterId={String(config.data?.avatar_presenter_id ?? "")}
+            onActivateProfile={(avatarPresenterId) => activatePresenter.mutate(avatarPresenterId)}
+            activating={activatePresenter.isPending}
+          />
+        ))}
+      </div>
+      {replaceError ? <div className="notice top-gap">{replaceError}</div> : null}
+      {!payload?.profiles?.length ? <div className="empty-state top-gap">还没有创作者档案，先建一个完整的人设与素材档案。</div> : null}
 
-        <article className="avatar-material-card">
-          <div className="stat-label">新建创作者档案</div>
+      <FloatingModal open={createModalOpen} onClose={() => setCreateModalOpen(false)} title="创建创作者档案" closeLabel="关闭">
+        <section className="panel creator-profile-modal-panel">
+          <PanelHeader
+            title="创建创作者档案"
+            description="通过独立弹窗录入人设资料和数字人素材，避免把创建表单长期占在主页面里。"
+          />
+          <CreatorProfileIntakeGuide payload={payload} readyCount={readyCount} />
           <div className="form-stack compact-top">
             <label>
               <span>档案名称</span>
-              <input className="input" value={displayName} onChange={(event) => setDisplayName(event.target.value)} placeholder="例如：赛博迪克朗 / FAS潮玩" />
+              <input className="input" value={displayName} onChange={(event) => setDisplayName(event.target.value)} placeholder="例如：创作者名称 / 品牌账号" />
             </label>
             <label>
               <span>出镜 / 口播名</span>
@@ -213,43 +231,109 @@ export function AvatarMaterialPanel() {
               />
             </div>
             <div className="muted">本次共选 {selectedFileCount} 个素材文件。</div>
-            <button className="button primary" type="button" disabled={upload.isPending || !displayName.trim() || selectedFileCount === 0} onClick={() => upload.mutate()}>
-              {upload.isPending ? "创建中..." : "创建创作者档案"}
-            </button>
+            <div className="toolbar">
+              <button className="button primary" type="button" disabled={upload.isPending || !displayName.trim() || selectedFileCount === 0} onClick={() => upload.mutate()}>
+                {upload.isPending ? "创建中..." : "创建创作者档案"}
+              </button>
+              <button className="button ghost" type="button" disabled={upload.isPending} onClick={() => setCreateModalOpen(false)}>
+                取消
+              </button>
+            </div>
             {upload.error ? <div className="notice">{String(upload.error)}</div> : null}
           </div>
-        </article>
-      </div>
-
-      <div className="list-stack top-gap">
-        {(payload?.profiles ?? []).map((profile) => (
-          <CreatorArchiveCard
-            key={profile.id}
-            profile={profile}
-            removing={remove.isPending}
-            previewing={preview.isPending}
-            onRemove={() => remove.mutate(profile.id)}
-            onPreview={(script) => preview.mutate({ profileId: profile.id, script })}
-            onPreviewUnavailable={(message) => setPreviewErrors((prev) => ({ ...prev, [profile.id]: message }))}
-            onReplace={(fileId, file) => replaceMaterial.mutate({ profileId: profile.id, fileId, file })}
-            replacingFileId={replaceFileId}
-            previewError={previewErrors[profile.id] ?? null}
-            onUpdateProfile={(nextDisplayName, nextPresenterAlias, nextNotes, nextCreatorProfile) =>
-              updateProfile.mutate({
-                profileId: profile.id,
-                displayName: nextDisplayName,
-                presenterAlias: nextPresenterAlias,
-                notes: nextNotes,
-                creatorProfile: nextCreatorProfile,
-              })
-            }
-            updating={updateProfile.isPending}
-          />
-        ))}
-        {replaceError ? <div className="notice top-gap">{replaceError}</div> : null}
-        {!payload?.profiles?.length ? <div className="empty-state">还没有创作者档案，先建一个完整的人设与素材档案。</div> : null}
-      </div>
+        </section>
+      </FloatingModal>
     </section>
+  );
+}
+
+function CreatorProfileIntakeGuide({
+  payload,
+  readyCount,
+}: {
+  payload?: AvatarMaterialLibrary;
+  readyCount: number;
+}) {
+  return (
+    <div className="avatar-creator-summary-grid avatar-creator-summary-grid-single compact-top">
+      <article className="avatar-material-card">
+        <div className="stat-label">填写帮助</div>
+        <p className="muted compact-top">{payload?.summary ?? "创建档案时建议先补齐身份定位，再上传数字人口播所需素材。"}</p>
+        <div className="avatar-stat-grid compact-top">
+          <div className="activity-card">
+            <strong>{payload?.profiles?.length ?? 0}</strong>
+            <div className="muted compact-top">当前档案数</div>
+          </div>
+          <div className="activity-card">
+            <strong>{readyCount}</strong>
+            <div className="muted compact-top">可直接生成数字人预览</div>
+          </div>
+        </div>
+        <div className="list-stack compact-top">
+          {(payload?.sections ?? []).map((section) => (
+            <section key={section.title} className="avatar-requirement-block">
+              <strong>{section.title}</strong>
+              <div className="list-stack compact-top">
+                {section.rules.map((rule) => (
+                  <div key={`${section.title}-${rule.title}`} className="avatar-rule-row">
+                    <span className={`status-pill ${rule.severity === "required" ? "failed" : rule.severity === "recommended" ? "running" : ""}`}>
+                      {rule.severity === "required" ? "必须" : rule.severity === "recommended" ? "建议" : "说明"}
+                    </span>
+                    <div>
+                      <div>{rule.title}</div>
+                      <div className="muted compact-top">{rule.detail}</div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </section>
+          ))}
+        </div>
+      </article>
+    </div>
+  );
+}
+
+function FloatingModal({
+  open,
+  onClose,
+  title,
+  closeLabel,
+  children,
+}: {
+  open: boolean;
+  onClose: () => void;
+  title: string;
+  closeLabel: string;
+  children: ReactNode;
+}) {
+  useEffect(() => {
+    if (!open) return undefined;
+
+    const previousOverflow = document.body.style.overflow;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+
+    document.body.style.overflow = "hidden";
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [open, onClose]);
+
+  if (!open) return null;
+
+  return (
+    <div className="floating-modal-backdrop" onClick={onClose} role="presentation">
+      <div className="floating-modal-shell" role="dialog" aria-modal="true" aria-label={title} onClick={(event) => event.stopPropagation()}>
+        <button className="button ghost floating-modal-close" type="button" onClick={onClose} aria-label={`关闭${title}弹窗`}>
+          {closeLabel}
+        </button>
+        {children}
+      </div>
+    </div>
   );
 }
 
@@ -503,6 +587,9 @@ function CreatorArchiveCard({
   previewError,
   onUpdateProfile,
   updating,
+  activePresenterId,
+  onActivateProfile,
+  activating,
 }: {
   profile: AvatarMaterialProfile;
   removing: boolean;
@@ -515,6 +602,9 @@ function CreatorArchiveCard({
   previewError: string | null;
   onUpdateProfile: (displayName: string, presenterAlias: string, notes: string, creatorProfile: AvatarCreatorProfile) => void;
   updating: boolean;
+  activePresenterId: string;
+  onActivateProfile: (avatarPresenterId: string) => void;
+  activating: boolean;
 }) {
   const previewSpeakerName = profile.creator_profile?.identity?.public_name || profile.presenter_alias || profile.display_name;
   const [previewScript, setPreviewScript] = useState(
@@ -522,6 +612,7 @@ function CreatorArchiveCard({
   );
   const [openPreviewId, setOpenPreviewId] = useState<string | null>(null);
   const lastLatestPreviewRunId = useRef<string | null>(null);
+  const [detailsOpen, setDetailsOpen] = useState(false);
   const [editing, setEditing] = useState(false);
   const [editDisplayName, setEditDisplayName] = useState(profile.display_name);
   const [editPresenterAlias, setEditPresenterAlias] = useState(profile.presenter_alias || "");
@@ -563,51 +654,175 @@ function CreatorArchiveCard({
     onUpdateProfile(editDisplayName.trim(), editPresenterAlias.trim(), editNotes.trim(), buildCreatorProfilePayload(editCreatorProfile));
     setEditing(false);
   };
+  const triggerPreview = () => {
+    const script =
+      previewScript.trim() ||
+      `大家好，我是${previewSpeakerName}。现在这是一条 RoughCut 自动生成的创作者数字人预览样片，主要用于检查音色一致性、口型同步和讲话镜头稳定性。`;
+    const hasPrerequisite = profile.capability_status?.heygem_avatar === "ready" && profile.capability_status?.voice_clone === "ready";
+    if (!hasPrerequisite) {
+      onPreviewUnavailable(profile.next_action || "需要讲话视频片段和声音采样。");
+      return;
+    }
+    setPreviewScript(script);
+    onPreview(script);
+  };
+  const closeDetails = () => {
+    setDetailsOpen(false);
+    setEditing(false);
+  };
 
   const dashboard = profile.profile_dashboard;
   const publicName = profile.creator_profile?.identity?.public_name || profile.presenter_alias || profile.display_name;
+  const latestPreview = profile.preview_runs?.[0];
+  const presenterFile = profile.files.find((file) => file.role === "speaking_video") ?? null;
+  const presenterFilePath = presenterFile?.path ?? "";
+  const isActiveProfile = Boolean(presenterFilePath) && presenterFilePath === activePresenterId;
 
   return (
-    <article className="avatar-profile-card">
-      <div className="avatar-profile-head">
-        <div>
-          {editing ? <input className="input" value={editDisplayName} onChange={(event) => setEditDisplayName(event.target.value)} /> : <strong>{profile.display_name}</strong>}
-          <div className="muted compact-top">
-            {editing ? <input className="input" value={editPresenterAlias} onChange={(event) => setEditPresenterAlias(event.target.value)} placeholder="出镜 / 口播名" /> : `${publicName} · ${new Date(profile.created_at).toLocaleString()}`}
+    <>
+      <article className="avatar-profile-card avatar-profile-summary-card">
+        <div className="avatar-profile-head">
+          <div>
+            <strong>{profile.display_name}</strong>
+            <div className="muted compact-top">{publicName} · {new Date(profile.created_at).toLocaleString()}</div>
+          </div>
+          <div className="toolbar">
+            <span className={`status-pill ${profile.training_status === "ready_for_manual_training" ? "done" : "running"}`}>
+              {profile.training_status === "ready_for_manual_training" ? "数字人链路可导入" : "待补素材"}
+            </span>
+            <span className="status-pill">{dashboard?.completeness_score ?? 0}% 完整度</span>
+            {isActiveProfile ? <span className="status-pill done">已激活</span> : null}
           </div>
         </div>
-        <div className="toolbar">
-          <span className={`status-pill ${profile.training_status === "ready_for_manual_training" ? "done" : "running"}`}>
-            {profile.training_status === "ready_for_manual_training" ? "数字人链路可导入" : "待补素材"}
-          </span>
-          <span className="status-pill">{dashboard?.completeness_score ?? 0}% 完整度</span>
-          <button className="button ghost" type="button" disabled={updating || removing} onClick={() => setEditing((current) => !current)}>
-            {editing ? "取消编辑" : "编辑档案"}
+
+        {profile.notes ? <div className="muted compact-top">{profile.notes}</div> : null}
+
+        <div className="avatar-stat-grid top-gap">
+          <div className="activity-card">
+            <strong>{dashboard?.material_counts?.speaking_videos ?? 0}</strong>
+            <div className="muted compact-top">讲话视频</div>
+          </div>
+          <div className="activity-card">
+            <strong>{dashboard?.material_counts?.voice_samples ?? 0}</strong>
+            <div className="muted compact-top">声音采样</div>
+          </div>
+          <div className="activity-card">
+            <strong>{dashboard?.material_counts?.portrait_photos ?? 0}</strong>
+            <div className="muted compact-top">肖像照</div>
+          </div>
+          <div className="activity-card">
+            <strong>{profile.preview_runs?.length ?? 0}</strong>
+            <div className="muted compact-top">预览样片</div>
+          </div>
+        </div>
+
+        <div className="mode-chip-list top-gap">
+          <CapabilityChip label="身份信息" ready={Boolean(dashboard?.section_status?.identity)} />
+          <CapabilityChip label="内容定位" ready={Boolean(dashboard?.section_status?.positioning)} />
+          <CapabilityChip label="渠道策略" ready={Boolean(dashboard?.section_status?.publishing)} />
+          <CapabilityChip label="商务信息" ready={Boolean(dashboard?.section_status?.business)} />
+          <CapabilityChip label="数字人素材" ready={Boolean(dashboard?.section_status?.materials)} />
+        </div>
+
+        {(dashboard?.strengths?.length ?? 0) > 0 ? (
+          <div className="list-stack top-gap">
+            {(dashboard?.strengths ?? []).slice(0, 2).map((item) => (
+              <div key={item} className="activity-card">
+                {item}
+              </div>
+            ))}
+          </div>
+        ) : null}
+
+        {latestPreview ? (
+          <div className="avatar-card-meta top-gap">
+            最近预览：{latestPreview.status === "completed" ? "已生成" : latestPreview.status === "running" ? "生成中" : "生成失败"}
+          </div>
+        ) : null}
+
+        {previewError ? <div className="notice compact-top">{previewError}</div> : null}
+        {!presenterFilePath ? <div className="notice compact-top">缺少讲话视频片段，暂时不能激活到剪辑配置。</div> : null}
+        <div className="avatar-card-meta compact-top">{profile.next_action}</div>
+
+        <div className="toolbar top-gap">
+          <button className="button primary" type="button" disabled={previewing} onClick={triggerPreview}>
+            {previewing ? "测试中..." : "测试数字人样片"}
+          </button>
+          <button
+            className={isActiveProfile ? "button primary" : "button ghost"}
+            type="button"
+            disabled={activating || !presenterFilePath}
+            onClick={() => {
+              if (presenterFilePath) onActivateProfile(presenterFilePath);
+            }}
+          >
+            {isActiveProfile ? "已激活到剪辑配置" : activating ? "激活中..." : "激活到剪辑配置"}
+          </button>
+          {latestPreview?.output_path ? (
+            <a className="button ghost" href={api.avatarMaterialPreviewUrl(profile.id, latestPreview.id)} target="_blank" rel="noreferrer">
+              下载最近样片
+            </a>
+          ) : null}
+          <button className="button ghost" type="button" onClick={() => setDetailsOpen(true)}>
+            查看详情
+          </button>
+          <button
+            className="button ghost"
+            type="button"
+            disabled={updating || removing}
+            onClick={() => {
+              setEditing(true);
+              setDetailsOpen(true);
+            }}
+          >
+            编辑档案
           </button>
           <button className="button ghost" type="button" onClick={onRemove} disabled={removing}>
             删除
           </button>
         </div>
-      </div>
+      </article>
 
-      {editing ? (
-        <div className="form-stack compact-top">
-          <label>
-            <span>内部备注</span>
-            <textarea className="input avatar-textarea" value={editNotes} onChange={(event) => setEditNotes(event.target.value)} />
-          </label>
-          <CreatorProfileFields value={editCreatorProfile} onChange={setEditCreatorProfile} />
-          <div className="toolbar">
-            <button className="button primary" type="button" disabled={updating || !editDisplayName.trim()} onClick={saveProfile}>
-              {updating ? "保存中..." : "保存档案"}
-            </button>
-            <button className="button ghost" type="button" disabled={updating} onClick={() => setEditing(false)}>
-              取消
-            </button>
+      <FloatingModal open={detailsOpen} onClose={closeDetails} title={`${profile.display_name}档案详情`} closeLabel="关闭">
+        <section className="panel creator-profile-modal-panel creator-profile-detail-panel">
+          <div className="avatar-profile-head">
+            <div>
+              {editing ? <input className="input" value={editDisplayName} onChange={(event) => setEditDisplayName(event.target.value)} /> : <strong>{profile.display_name}</strong>}
+              <div className="muted compact-top">
+                {editing ? <input className="input" value={editPresenterAlias} onChange={(event) => setEditPresenterAlias(event.target.value)} placeholder="出镜 / 口播名" /> : `${publicName} · ${new Date(profile.created_at).toLocaleString()}`}
+              </div>
+            </div>
+            <div className="toolbar">
+              <span className={`status-pill ${profile.training_status === "ready_for_manual_training" ? "done" : "running"}`}>
+                {profile.training_status === "ready_for_manual_training" ? "数字人链路可导入" : "待补素材"}
+              </span>
+              <span className="status-pill">{dashboard?.completeness_score ?? 0}% 完整度</span>
+              {!editing ? (
+                <button className="button ghost" type="button" disabled={updating || removing} onClick={() => setEditing(true)}>
+                  编辑档案
+                </button>
+              ) : null}
+            </div>
           </div>
-        </div>
-      ) : (
-        <>
+
+          {editing ? (
+            <div className="form-stack compact-top">
+              <label>
+                <span>内部备注</span>
+                <textarea className="input avatar-textarea" value={editNotes} onChange={(event) => setEditNotes(event.target.value)} />
+              </label>
+              <CreatorProfileFields value={editCreatorProfile} onChange={setEditCreatorProfile} />
+              <div className="toolbar">
+                <button className="button primary" type="button" disabled={updating || !editDisplayName.trim()} onClick={saveProfile}>
+                  {updating ? "保存中..." : "保存档案"}
+                </button>
+                <button className="button ghost" type="button" disabled={updating} onClick={() => setEditing(false)}>
+                  取消
+                </button>
+              </div>
+            </div>
+          ) : (
+            <>
           {profile.notes ? <div className="muted compact-top">{profile.notes}</div> : null}
           <div className="avatar-stat-grid top-gap">
             <div className="activity-card">
@@ -663,129 +878,120 @@ function CreatorArchiveCard({
               ) : null}
             </div>
           ) : null}
-        </>
-      )}
+            </>
+          )}
 
-      {profile.blocking_issues.length ? (
-        <div className="avatar-issue-block top-gap">
-          <div className="stat-label">阻塞项</div>
-          <div className="list-stack compact-top">
-            {profile.blocking_issues.map((item) => (
-              <div key={item} className="notice">
-                {item}
-              </div>
-            ))}
-          </div>
-        </div>
-      ) : null}
-
-      {profile.warnings.length ? (
-        <div className="avatar-issue-block top-gap">
-          <div className="stat-label">建议补充</div>
-          <div className="list-stack compact-top">
-            {profile.warnings.map((item) => (
-              <div key={item} className="activity-card">
-                {item}
-              </div>
-            ))}
-          </div>
-        </div>
-      ) : null}
-
-      <div className="avatar-file-grid top-gap">
-        <AvatarRoleColumn
-          title="讲话视频片段"
-          files={groupedFiles.speaking_video}
-          profileId={profile.id}
-          roleKey="speaking_video"
-          onReplace={onReplace}
-          replacingFileId={replacingFileId}
-        />
-        <AvatarRoleColumn
-          title="肖像照"
-          files={groupedFiles.portrait_photo}
-          profileId={profile.id}
-          roleKey="portrait_photo"
-          onReplace={onReplace}
-          replacingFileId={replacingFileId}
-        />
-        <AvatarRoleColumn
-          title="声音采样"
-          files={groupedFiles.voice_sample}
-          profileId={profile.id}
-          roleKey="voice_sample"
-          onReplace={onReplace}
-          replacingFileId={replacingFileId}
-        />
-      </div>
-
-      <section className="avatar-issue-block top-gap">
-        <div className="stat-label">数字人预览</div>
-        <div className="form-stack compact-top">
-          {previewError ? <div className="notice">{previewError}</div> : null}
-          <textarea className="input avatar-textarea" value={previewScript} onChange={(event) => setPreviewScript(event.target.value)} placeholder="输入一段预览台词" />
-          <div className="toolbar">
-            <button
-              className="button primary"
-              type="button"
-              disabled={previewing}
-              onClick={() => {
-                const script =
-                  previewScript.trim() ||
-                  `大家好，我是${previewSpeakerName}。现在这是一条 RoughCut 自动生成的创作者数字人预览样片，主要用于检查音色一致性、口型同步和讲话镜头稳定性。`;
-                const hasPrerequisite = profile.capability_status?.heygem_avatar === "ready" && profile.capability_status?.voice_clone === "ready";
-                if (!hasPrerequisite) {
-                  onPreviewUnavailable(profile.next_action || "需要讲话视频片段和声音采样。");
-                  return;
-                }
-                setPreviewScript(script);
-                onPreview(script);
-              }}
-            >
-              {previewing ? "生成中..." : "生成数字人预览"}
-            </button>
-          </div>
-          {profile.capability_status.preview !== "ready" ? <span className="muted">{profile.next_action || "需要讲话视频片段和声音采样。"}</span> : null}
-          <div className="list-stack">
-            {(profile.preview_runs ?? []).map((run) => (
-              <div key={run.id} className="avatar-file-card">
-                <div className="toolbar">
-                  <strong>{run.status === "running" ? "生成中" : run.status === "completed" ? "预览已生成" : "预览失败"}</strong>
-                  <div className="toolbar">
-                    {run.output_path ? (
-                      <button className="button ghost" type="button" onClick={() => setOpenPreviewId((current) => (current === run.id ? null : run.id))}>
-                        {openPreviewId === run.id ? "收起播放" : "直接播放"}
-                      </button>
-                    ) : null}
-                    {run.output_path ? (
-                      <a className="button ghost" href={api.avatarMaterialPreviewUrl(profile.id, run.id)} target="_blank" rel="noreferrer">
-                        下载样片
-                      </a>
-                    ) : null}
+          {profile.blocking_issues.length ? (
+            <div className="avatar-issue-block top-gap">
+              <div className="stat-label">阻塞项</div>
+              <div className="list-stack compact-top">
+                {profile.blocking_issues.map((item) => (
+                  <div key={item} className="notice">
+                    {item}
                   </div>
-                </div>
-                <div className="muted compact-top">{new Date(run.created_at).toLocaleString()}</div>
-                <div className="muted compact-top">{run.script}</div>
-                {run.preview_mode ? (
-                  <div className="muted compact-top">
-                    {run.preview_mode === "scripted_tts" ? "脚本 TTS 预览" : run.preview_mode === "source_audio_direct" ? "HeyGem 直连预览" : "原始声音样本回退预览"}
-                  </div>
-                ) : null}
-                {run.fallback_reason ? <div className="muted compact-top">已回退到原始声音样本</div> : null}
-                {run.output_path && openPreviewId === run.id ? (
-                  <video className="avatar-preview-player compact-top" controls playsInline preload="metadata" src={api.avatarMaterialPreviewUrl(profile.id, run.id)} />
-                ) : null}
-                {run.duration_sec ? <div className="muted compact-top">{run.duration_sec.toFixed(1)}s · {run.width}x{run.height}</div> : null}
-                {run.error_message ? <div className="notice compact-top">{run.error_message}</div> : null}
+                ))}
               </div>
-            ))}
-            {!profile.preview_runs?.length ? <div className="empty-state">还没有预览样片。</div> : null}
-          </div>
-        </div>
-      </section>
+            </div>
+          ) : null}
 
-      <div className="muted compact-top">{profile.next_action}</div>
-    </article>
+          {profile.warnings.length ? (
+            <div className="avatar-issue-block top-gap">
+              <div className="stat-label">建议补充</div>
+              <div className="list-stack compact-top">
+                {profile.warnings.map((item) => (
+                  <div key={item} className="activity-card">
+                    {item}
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : null}
+
+          <div className="avatar-file-grid top-gap">
+            <AvatarRoleColumn
+              title="讲话视频片段"
+              files={groupedFiles.speaking_video}
+              profileId={profile.id}
+              roleKey="speaking_video"
+              onReplace={onReplace}
+              replacingFileId={replacingFileId}
+            />
+            <AvatarRoleColumn
+              title="肖像照"
+              files={groupedFiles.portrait_photo}
+              profileId={profile.id}
+              roleKey="portrait_photo"
+              onReplace={onReplace}
+              replacingFileId={replacingFileId}
+            />
+            <AvatarRoleColumn
+              title="声音采样"
+              files={groupedFiles.voice_sample}
+              profileId={profile.id}
+              roleKey="voice_sample"
+              onReplace={onReplace}
+              replacingFileId={replacingFileId}
+            />
+          </div>
+
+          <section className="avatar-issue-block top-gap">
+            <div className="stat-label">数字人预览</div>
+            <div className="form-stack compact-top">
+              {previewError ? <div className="notice">{previewError}</div> : null}
+              <textarea className="input avatar-textarea" value={previewScript} onChange={(event) => setPreviewScript(event.target.value)} placeholder="输入一段预览台词" />
+              <div className="toolbar">
+                <button
+                  className="button primary"
+                  type="button"
+                  disabled={previewing}
+                  onClick={triggerPreview}
+                >
+                  {previewing ? "生成中..." : "生成数字人预览"}
+                </button>
+              </div>
+              {profile.capability_status.preview !== "ready" ? <span className="muted">{profile.next_action || "需要讲话视频片段和声音采样。"}</span> : null}
+              <div className="list-stack">
+                {(profile.preview_runs ?? []).map((run) => (
+                  <div key={run.id} className="avatar-file-card">
+                    <div className="toolbar">
+                      <strong>{run.status === "running" ? "生成中" : run.status === "completed" ? "预览已生成" : "预览失败"}</strong>
+                      <div className="toolbar">
+                        {run.output_path ? (
+                          <button className="button ghost" type="button" onClick={() => setOpenPreviewId((current) => (current === run.id ? null : run.id))}>
+                            {openPreviewId === run.id ? "收起播放" : "直接播放"}
+                          </button>
+                        ) : null}
+                        {run.output_path ? (
+                          <a className="button ghost" href={api.avatarMaterialPreviewUrl(profile.id, run.id)} target="_blank" rel="noreferrer">
+                            下载样片
+                          </a>
+                        ) : null}
+                      </div>
+                    </div>
+                    <div className="muted compact-top">{new Date(run.created_at).toLocaleString()}</div>
+                    <div className="muted compact-top">{run.script}</div>
+                    {run.preview_mode ? (
+                      <div className="muted compact-top">
+                        {run.preview_mode === "scripted_tts" ? "脚本 TTS 预览" : run.preview_mode === "source_audio_direct" ? "HeyGem 直连预览" : "原始声音样本回退预览"}
+                      </div>
+                    ) : null}
+                    {run.fallback_reason ? <div className="muted compact-top">已回退到原始声音样本</div> : null}
+                    {run.output_path && openPreviewId === run.id ? (
+                      <video className="avatar-preview-player compact-top" controls playsInline preload="metadata" src={api.avatarMaterialPreviewUrl(profile.id, run.id)} />
+                    ) : null}
+                    {run.duration_sec ? <div className="muted compact-top">{run.duration_sec.toFixed(1)}s · {run.width}x{run.height}</div> : null}
+                    {run.error_message ? <div className="notice compact-top">{run.error_message}</div> : null}
+                  </div>
+                ))}
+                {!profile.preview_runs?.length ? <div className="empty-state">还没有预览样片。</div> : null}
+              </div>
+            </div>
+          </section>
+
+          <div className="muted compact-top">{profile.next_action}</div>
+        </section>
+      </FloatingModal>
+    </>
   );
 }
 

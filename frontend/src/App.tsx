@@ -22,6 +22,9 @@ const StyleTemplatesPage = lazy(async () => ({
 const CreativeModesPage = lazy(async () => ({
   default: (await import("./pages/CreativeModesPage")).CreativeModesPage,
 }));
+const CreatorProfilesPage = lazy(async () => ({
+  default: (await import("./pages/CreatorProfilesPage")).CreatorProfilesPage,
+}));
 const MemoryPage = lazy(async () => ({
   default: (await import("./pages/MemoryPage")).MemoryPage,
 }));
@@ -56,6 +59,7 @@ export function App() {
     { to: "/packaging", label: t("app.nav.packaging") },
     { to: "/style-templates", label: t("app.nav.styleTemplates") },
     { to: "/creative-modes", label: t("app.nav.creativeModes") },
+    { to: "/creator-profiles", label: t("app.nav.creatorProfiles") },
     { to: "/memory", label: t("app.nav.memory") },
     { to: "/glossary", label: t("app.nav.glossary") },
     { to: "/settings", label: t("app.nav.settings") },
@@ -103,6 +107,7 @@ export function App() {
             <Route path="/packaging" element={<PackagingPage />} />
             <Route path="/style-templates" element={<StyleTemplatesPage />} />
             <Route path="/creative-modes" element={<CreativeModesPage />} />
+            <Route path="/creator-profiles" element={<CreatorProfilesPage />} />
             <Route path="/memory" element={<MemoryPage />} />
             <Route path="/glossary" element={<GlossaryPage />} />
             <Route path="/settings" element={<SettingsPage />} />

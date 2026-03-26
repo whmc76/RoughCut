@@ -35,8 +35,8 @@ vi.mock("../../api", () => ({
 const SAMPLE_JOBS: Job[] = [
   {
     id: "job_1",
-    source_name: "fas_upgrade.mp4",
-    content_subject: "FAST加帕 城六崩卫版",
+    source_name: "product_upgrade.mp4",
+    content_subject: "品牌升级版拆解",
     content_summary: "升级版开箱和细节拆解",
     status: "done",
     language: "zh-CN",

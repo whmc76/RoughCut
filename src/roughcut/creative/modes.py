@@ -71,6 +71,22 @@ _ENHANCEMENT_MODES: Final[dict[str, dict[str, object]]] = {
         "providers": ["内置摘要审核规则"],
         "default_delivery": "作为显式增强模式启用，不默认替代人工审核",
     },
+    "multi_platform_adaptation": {
+        "key": "multi_platform_adaptation",
+        "kind": "enhancement",
+        "status": "active",
+        "title": "多平台版本适配",
+        "tagline": "按平台安全区、标题结构和发布文案差异，输出更适合分发的多平台版本。",
+        "summary": "复用当前已有的平台包装、标题生成和画面安全区策略，把同一条内容适配成更适合 B 站、小红书、抖音等不同平台分发的版本。",
+        "suitable_for": ["一稿多发", "平台矩阵运营", "同题多版本发布", "需要兼顾不同平台阅读习惯的内容"],
+        "pipeline_outline": [
+            "复用已有内容画像、标题和包装信息，识别平台差异点",
+            "按平台安全区、标题风格和文案偏好生成适配版本",
+            "输出多平台发布文案与更稳妥的成片呈现方案",
+        ],
+        "providers": ["平台文案生成", "包装安全区策略", "现有渲染参数适配"],
+        "default_delivery": "已可接入默认配置，用于统一控制多平台适配输出",
+    },
     "avatar_commentary": {
         "key": "avatar_commentary",
         "kind": "enhancement",
@@ -196,7 +212,7 @@ def build_job_creative_profile(*, workflow_mode: str, enhancement_modes: list[st
         "execution_state": execution_state,
         "implementation_notes": [
             "长文本转视频当前只保留方案与接口占位，不进入现有已有视频主流程。",
-            "数字人解说、智能剪辑特效与 AI 导演当前作为通用增强能力挂载到标准成片任务。",
+            "自动审核、多平台版本适配、数字人解说、智能剪辑特效与 AI 导演当前作为通用增强能力挂载到标准成片任务。",
             "TTS 方案优先支持 IndexTTS2 与 RunningHub 这类真实服务。",
             "素材库策略要求走较新素材，不使用老旧缓存素材。",
         ],

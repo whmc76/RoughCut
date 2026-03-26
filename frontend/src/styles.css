@@ -2243,6 +2243,7 @@ select.input option:focus {
   gap: 16px;
 }
 
+.avatar-profile-grid,
 .avatar-creator-summary-grid,
 .avatar-stat-grid,
 .avatar-creator-section-grid,
@@ -2253,6 +2254,14 @@ select.input option:focus {
 
 .avatar-creator-summary-grid {
   grid-template-columns: minmax(320px, 0.9fr) minmax(0, 1.1fr);
+}
+
+.avatar-creator-summary-grid.avatar-creator-summary-grid-single {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.avatar-profile-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
 .avatar-stat-grid {
@@ -2325,10 +2334,56 @@ select.input option:focus {
   gap: 10px;
 }
 
+.avatar-profile-summary-card {
+  align-content: start;
+}
+
+.avatar-card-meta {
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
 .avatar-role-column {
   display: grid;
   align-content: start;
   gap: 10px;
+}
+
+.floating-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  padding: 24px;
+  background: rgba(7, 10, 16, 0.62);
+  backdrop-filter: blur(12px);
+}
+
+.floating-modal-shell {
+  position: relative;
+  width: min(1120px, calc(100vw - 48px));
+  max-height: calc(100vh - 48px);
+}
+
+.floating-modal-close {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  z-index: 2;
+}
+
+.creator-profile-modal-panel {
+  max-height: calc(100vh - 48px);
+  overflow: auto;
+  padding-top: 58px;
+}
+
+.creator-profile-detail-panel {
+  display: grid;
+  gap: 14px;
 }
 
 .avatar-preview-player {
@@ -2444,6 +2499,7 @@ select.input option:focus {
   .builtin-pack-grid,
   .checklist-grid,
   .avatar-material-grid,
+  .avatar-profile-grid,
   .avatar-file-grid,
   .avatar-creator-summary-grid,
   .avatar-creator-section-grid,
