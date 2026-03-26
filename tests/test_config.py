@@ -115,7 +115,7 @@ def test_get_settings_accepts_qwen_asr_override(tmp_path, monkeypatch):
 def test_load_runtime_overrides_strips_secret_keys_from_legacy_file(tmp_path, monkeypatch):
     overrides_file = tmp_path / "roughcut_config.json"
     overrides_file.write_text(
-        '{"reasoning_provider":"minimax","minimax_api_key":"secret-token"}',
+        '{"reasoning_provider":"minimax","minimax_api_key":"secret-token","openai_base_url":"https://override.invalid/v1","output_dir":"custom-output"}',
         encoding="utf-8",
     )
     monkeypatch.setattr(config_mod, "_OVERRIDES_FILE", overrides_file)

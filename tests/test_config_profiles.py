@@ -44,7 +44,6 @@ def test_config_profile_round_trip_restores_config_and_packaging(tmp_path, monke
             avatar_layout_template="picture_in_picture_right",
             avatar_safe_margin=0.12,
             voice_provider="runninghub",
-            voice_clone_api_base_url="https://voice.example.com",
             voice_clone_voice_id="voice_alpha",
             director_rewrite_strength=0.74,
             auto_confirm_content_profile=True,
@@ -89,7 +88,6 @@ def test_config_profile_round_trip_restores_config_and_packaging(tmp_path, monke
             default_job_enhancement_modes=["ai_director"],
             avatar_presenter_id="profiles/other_presenter.mp4",
             voice_provider="indextts2",
-            voice_clone_api_base_url="http://127.0.0.1:49204",
             voice_clone_voice_id="voice_beta",
             director_rewrite_strength=0.31,
             auto_confirm_content_profile=False,
@@ -122,7 +120,6 @@ def test_config_profile_round_trip_restores_config_and_packaging(tmp_path, monke
     assert config.default_job_enhancement_modes == ["avatar_commentary", "ai_effects"]
     assert config.avatar_presenter_id == "profiles/demo_presenter.mp4"
     assert config.voice_provider == "runninghub"
-    assert config.voice_clone_api_base_url == "https://voice.example.com"
     assert config.voice_clone_voice_id == "voice_alpha"
     assert config.director_rewrite_strength == 0.74
     assert config.auto_confirm_content_profile is True

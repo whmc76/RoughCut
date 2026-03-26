@@ -53,7 +53,12 @@ export function SettingsPage() {
       {workspace.saveError && <div className="notice top-gap">{workspace.saveError}</div>}
 
       <div className="panel-grid">
-        <SettingsOverviewPanel form={workspace.form} config={workspace.config.data} configProfiles={workspace.configProfiles.data} />
+        <SettingsOverviewPanel
+          form={workspace.form}
+          config={workspace.config.data}
+          runtimeEnvironment={workspace.runtimeEnvironment.data}
+          configProfiles={workspace.configProfiles.data}
+        />
         <ModelSettingsPanel form={workspace.form} options={workspace.options.data} onChange={(key, value) => workspace.setForm((prev) => ({ ...prev, [key]: value }))} />
         <QualitySettingsPanel form={workspace.form} config={workspace.config.data} onChange={(key, value) => workspace.setForm((prev) => ({ ...prev, [key]: value }))} />
         <details className="settings-disclosure settings-page-runtime" open={runtimeSectionOpen}>
@@ -64,7 +69,12 @@ export function SettingsPage() {
             </div>
           </summary>
           <div className="settings-disclosure-body">
-            <RuntimeSettingsPanel form={workspace.form} config={workspace.config.data} onChange={(key, value) => workspace.setForm((prev) => ({ ...prev, [key]: value }))} />
+            <RuntimeSettingsPanel
+              form={workspace.form}
+              config={workspace.config.data}
+              runtimeEnvironment={workspace.runtimeEnvironment.data}
+              onChange={(key, value) => workspace.setForm((prev) => ({ ...prev, [key]: value }))}
+            />
             <details className="settings-disclosure settings-page-advanced" open={advancedSectionOpen}>
               <summary className="settings-disclosure-trigger">
                 <div>
@@ -86,6 +96,7 @@ export function SettingsPage() {
                       <CreativeSettingsPanel
                         form={workspace.form}
                         config={workspace.config.data}
+                        runtimeEnvironment={workspace.runtimeEnvironment.data}
                         options={workspace.options.data}
                         onChange={(key, value) => workspace.setForm((prev) => ({ ...prev, [key]: value }))}
                       />

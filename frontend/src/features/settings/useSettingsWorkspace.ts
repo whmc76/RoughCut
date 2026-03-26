@@ -91,6 +91,7 @@ function sanitizeSettingsForm(form: SettingsForm): Record<string, string | numbe
 export function useSettingsWorkspace() {
   const queryClient = useQueryClient();
   const config = useQuery({ queryKey: ["config"], queryFn: api.getConfig });
+  const runtimeEnvironment = useQuery({ queryKey: ["config-environment"], queryFn: api.getRuntimeEnvironment });
   const options = useQuery({ queryKey: ["config-options"], queryFn: api.getConfigOptions });
   const configProfiles = useQuery({ queryKey: ["config-profiles"], queryFn: api.getConfigProfiles });
   const [form, setForm] = useState<SettingsForm>({});
@@ -161,6 +162,7 @@ export function useSettingsWorkspace() {
 
   return {
     config,
+    runtimeEnvironment,
     configProfiles,
     options,
     form,

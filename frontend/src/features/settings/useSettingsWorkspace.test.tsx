@@ -1,11 +1,12 @@
 import { act, waitFor } from "@testing-library/react";
 
 import { renderHookWithQueryClient } from "../../test/renderWithQueryClient";
-import type { Config, ConfigOptions, ConfigProfiles } from "../../types";
+import type { Config, ConfigOptions, ConfigProfiles, RuntimeEnvironment } from "../../types";
 import { useSettingsWorkspace } from "./useSettingsWorkspace";
 
 const mockApi = vi.hoisted(() => ({
   getConfig: vi.fn(),
+  getRuntimeEnvironment: vi.fn(),
   getConfigOptions: vi.fn(),
   getConfigProfiles: vi.fn(),
   patchConfig: vi.fn(),
@@ -39,29 +40,17 @@ const SAMPLE_CONFIG: Config = {
   search_provider: "auto",
   search_fallback_provider: "openai",
   model_search_helper: "gpt-4.1-mini",
-  openai_base_url: "https://api.openai.com/v1",
-  openai_auth_mode: "api_key",
-  openai_api_key_helper: "",
   qwen_asr_api_base_url: "http://127.0.0.1:18096",
   avatar_provider: "heygem",
-  avatar_api_base_url: "https://api.heygem.com",
-  avatar_training_api_base_url: "http://127.0.0.1:18180",
   avatar_api_key_set: false,
   avatar_presenter_id: "presenter_demo",
   avatar_layout_template: "picture_in_picture_right",
   avatar_safe_margin: 0.08,
   avatar_overlay_scale: 0.24,
-  anthropic_base_url: "https://api.anthropic.com",
-  anthropic_auth_mode: "api_key",
-  anthropic_api_key_helper: "",
-  minimax_base_url: "https://api.minimax.chat",
-  minimax_api_host: "https://api.minimaxi.com",
   voice_provider: "indextts2",
-  voice_clone_api_base_url: "http://127.0.0.1:49204",
   voice_clone_api_key_set: false,
   voice_clone_voice_id: "voice_demo",
   director_rewrite_strength: 0.55,
-  ollama_base_url: "http://127.0.0.1:11434",
   openai_api_key_set: true,
   anthropic_api_key_set: false,
   minimax_api_key_set: false,
@@ -71,7 +60,6 @@ const SAMPLE_CONFIG: Config = {
   max_video_duration_sec: 7200,
   ffmpeg_timeout_sec: 600,
   allowed_extensions: [".mp4"],
-  output_dir: "data/output",
   telegram_agent_enabled: true,
   telegram_agent_claude_enabled: true,
   telegram_agent_claude_command: "claude",
@@ -112,6 +100,22 @@ const SAMPLE_CONFIG: Config = {
   session_secret_keys: [],
   profile_bindable_keys: ["transcription_provider", "quality_auto_rerun_enabled"],
   overrides: {},
+};
+
+const SAMPLE_RUNTIME_ENVIRONMENT: RuntimeEnvironment = {
+  openai_base_url: "https://api.openai.com/v1",
+  openai_auth_mode: "api_key",
+  openai_api_key_helper: "",
+  anthropic_base_url: "https://api.anthropic.com",
+  anthropic_auth_mode: "api_key",
+  anthropic_api_key_helper: "",
+  minimax_base_url: "https://api.minimax.chat",
+  minimax_api_host: "https://api.minimaxi.com",
+  ollama_base_url: "http://127.0.0.1:11434",
+  avatar_api_base_url: "https://api.heygem.com",
+  avatar_training_api_base_url: "http://127.0.0.1:18180",
+  voice_clone_api_base_url: "http://127.0.0.1:49204",
+  output_dir: "data/output",
 };
 
 const SAMPLE_OPTIONS: ConfigOptions = {
@@ -200,6 +204,7 @@ const SAMPLE_CONFIG_PROFILES: ConfigProfiles = {
 describe("useSettingsWorkspace", () => {
   beforeEach(() => {
     mockApi.getConfig.mockResolvedValue(SAMPLE_CONFIG);
+    mockApi.getRuntimeEnvironment.mockResolvedValue(SAMPLE_RUNTIME_ENVIRONMENT);
     mockApi.getConfigOptions.mockResolvedValue(SAMPLE_OPTIONS);
     mockApi.getConfigProfiles.mockResolvedValue(SAMPLE_CONFIG_PROFILES);
     mockApi.patchConfig.mockImplementation(async (payload: Record<string, unknown>) => ({
@@ -217,6 +222,7 @@ describe("useSettingsWorkspace", () => {
     const { result } = renderHookWithQueryClient(() => useSettingsWorkspace());
 
     await waitFor(() => expect(result.current.config.data).toEqual(SAMPLE_CONFIG));
+    await waitFor(() => expect(result.current.runtimeEnvironment.data).toEqual(SAMPLE_RUNTIME_ENVIRONMENT));
     await waitFor(() => expect(result.current.form.max_upload_size_mb).toBe(2048));
     expect("openai_base_url" in result.current.form).toBe(false);
     expect("avatar_api_base_url" in result.current.form).toBe(false);
@@ -256,6 +262,7 @@ describe("useSettingsWorkspace", () => {
     const { result } = renderHookWithQueryClient(() => useSettingsWorkspace());
 
     await waitFor(() => expect(result.current.config.data).toEqual(SAMPLE_CONFIG));
+    await waitFor(() => expect(result.current.runtimeEnvironment.data).toEqual(SAMPLE_RUNTIME_ENVIRONMENT));
     await waitFor(() => expect(result.current.configProfiles.data).toEqual(SAMPLE_CONFIG_PROFILES));
     await waitFor(() => expect(result.current.form.telegram_agent_codex_model).toBe("gpt-5.4-mini"));
 

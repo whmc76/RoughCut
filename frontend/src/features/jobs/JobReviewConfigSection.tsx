@@ -1,4 +1,7 @@
+import { useQuery } from "@tanstack/react-query";
+
 import type { AvatarMaterialLibrary, Config, PackagingLibrary } from "../../types";
+import { api } from "../../api";
 import { ConfigProfileSwitcher } from "../configProfiles/ConfigProfileSwitcher";
 import { findStylePreset, smartEffectPresets } from "../../stylePresets";
 
@@ -22,9 +25,11 @@ export function JobReviewConfigSection({
   avatarMaterials,
   enhancementModes,
 }: JobReviewConfigSectionProps) {
+  const runtimeEnvironment = useQuery({ queryKey: ["config-environment"], queryFn: api.getRuntimeEnvironment });
   const reviewChecks = buildReviewChecks({
     enhancementModes,
     config,
+    runtimeEnvironment: runtimeEnvironment.data,
     packaging,
     avatarMaterials,
   });
@@ -67,11 +72,13 @@ export function JobReviewConfigSection({
 export function buildReviewChecks({
   enhancementModes,
   config,
+  runtimeEnvironment,
   packaging,
   avatarMaterials,
 }: {
   enhancementModes: string[];
   config?: Config;
+  runtimeEnvironment?: { voice_clone_api_base_url?: string };
   packaging?: PackagingLibrary;
   avatarMaterials?: AvatarMaterialLibrary;
 }): ReviewCheck[] {
@@ -119,7 +126,7 @@ export function buildReviewChecks({
 
   if (enhancementModes.includes("ai_director")) {
     const indexTtsReady = config?.voice_provider === "indextts2"
-      && Boolean(String(config.voice_clone_api_base_url ?? "").trim());
+      && Boolean(String(runtimeEnvironment?.voice_clone_api_base_url ?? "").trim());
     const runningHubReady = config?.voice_provider === "runninghub"
       && config.voice_clone_api_key_set
       && Boolean(String(config.voice_clone_voice_id ?? "").trim());
@@ -128,7 +135,7 @@ export function buildReviewChecks({
       label: "AI 导演重配音",
       status: indexTtsReady || runningHubReady ? "ready" : "warning",
       detail: indexTtsReady
-        ? `当前走 IndexTTS2 accel 主实例，本地服务：${config?.voice_clone_api_base_url}；会自动做情绪文本和强度控制。`
+        ? `当前走 IndexTTS2 accel 主实例，本地服务：${runtimeEnvironment?.voice_clone_api_base_url}；会自动做情绪文本和强度控制。`
         : runningHubReady
         ? `当前走 RunningHub，工作流 / voice id：${config?.voice_clone_voice_id}`
         : "已启用 AI 导演，但语音 provider 配置还不完整，缺少可用的 TTS / 语音克隆执行入口。",

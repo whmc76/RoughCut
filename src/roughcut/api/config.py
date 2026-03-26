@@ -23,6 +23,7 @@ from roughcut.api.options import (
 from roughcut.config import (
     AVATAR_PROVIDER_OPTIONS,
     DEFAULT_TRANSCRIPTION_PROVIDER,
+    ENV_MANAGED_SETTINGS,
     PROFILE_BINDABLE_SETTINGS,
     TRANSCRIPTION_MODEL_OPTIONS,
     VOICE_PROVIDER_OPTIONS,
@@ -78,25 +79,14 @@ class ConfigOut(BaseModel):
     search_provider: str
     search_fallback_provider: str
     model_search_helper: str
-    openai_base_url: str
-    openai_auth_mode: str
-    openai_api_key_helper: str
     qwen_asr_api_base_url: str
     avatar_provider: str
-    avatar_api_base_url: str
-    avatar_training_api_base_url: str
     avatar_api_key_set: bool
     avatar_presenter_id: str
     avatar_layout_template: str
     avatar_safe_margin: float
     avatar_overlay_scale: float
-    anthropic_base_url: str
-    anthropic_auth_mode: str
-    anthropic_api_key_helper: str
-    minimax_base_url: str
-    minimax_api_host: str
     voice_provider: str
-    voice_clone_api_base_url: str
     voice_clone_api_key_set: bool
     voice_clone_voice_id: str
     director_rewrite_strength: float
@@ -106,13 +96,11 @@ class ConfigOut(BaseModel):
     anthropic_api_key_set: bool
     minimax_api_key_set: bool
     minimax_coding_plan_api_key_set: bool
-    ollama_base_url: str
     # Security
     max_upload_size_mb: int
     max_video_duration_sec: int
     ffmpeg_timeout_sec: int
     allowed_extensions: list[str]
-    output_dir: str
     preferred_ui_language: str
     telegram_agent_enabled: bool
     telegram_agent_claude_enabled: bool
@@ -156,6 +144,22 @@ class ConfigOut(BaseModel):
     session_secret_keys: list[str]
     profile_bindable_keys: list[str]
     overrides: dict
+
+
+class RuntimeEnvironmentOut(BaseModel):
+    openai_base_url: str
+    openai_auth_mode: str
+    openai_api_key_helper: str
+    anthropic_base_url: str
+    anthropic_auth_mode: str
+    anthropic_api_key_helper: str
+    minimax_base_url: str
+    minimax_api_host: str
+    ollama_base_url: str
+    avatar_api_base_url: str
+    avatar_training_api_base_url: str
+    voice_clone_api_base_url: str
+    output_dir: str
 
 
 def _sanitize_overrides(overrides: dict[str, Any]) -> dict[str, Any]:
@@ -350,25 +354,14 @@ def get_config():
         search_provider=s.search_provider,
         search_fallback_provider=s.search_fallback_provider,
         model_search_helper=s.model_search_helper,
-        openai_base_url=s.openai_base_url,
-        openai_auth_mode=s.openai_auth_mode,
-        openai_api_key_helper=s.openai_api_key_helper,
         qwen_asr_api_base_url=s.qwen_asr_api_base_url,
         avatar_provider=s.avatar_provider,
-        avatar_api_base_url=s.avatar_api_base_url,
-        avatar_training_api_base_url=s.avatar_training_api_base_url,
         avatar_api_key_set=bool(s.avatar_api_key),
         avatar_presenter_id=s.avatar_presenter_id,
         avatar_layout_template=s.avatar_layout_template,
         avatar_safe_margin=s.avatar_safe_margin,
         avatar_overlay_scale=s.avatar_overlay_scale,
-        anthropic_base_url=s.anthropic_base_url,
-        anthropic_auth_mode=s.anthropic_auth_mode,
-        anthropic_api_key_helper=s.anthropic_api_key_helper,
-        minimax_base_url=s.minimax_base_url,
-        minimax_api_host=s.minimax_api_host,
         voice_provider=s.voice_provider,
-        voice_clone_api_base_url=s.voice_clone_api_base_url,
         voice_clone_api_key_set=bool(s.voice_clone_api_key),
         voice_clone_voice_id=s.voice_clone_voice_id,
         director_rewrite_strength=s.director_rewrite_strength,
@@ -377,12 +370,10 @@ def get_config():
         anthropic_api_key_set=bool(s.anthropic_api_key),
         minimax_api_key_set=bool(s.minimax_api_key),
         minimax_coding_plan_api_key_set=bool(s.minimax_coding_plan_api_key),
-        ollama_base_url=s.ollama_base_url,
         max_upload_size_mb=s.max_upload_size_mb,
         max_video_duration_sec=s.max_video_duration_sec,
         ffmpeg_timeout_sec=s.ffmpeg_timeout_sec,
         allowed_extensions=s.allowed_extensions,
-        output_dir=s.output_dir,
         preferred_ui_language=s.preferred_ui_language,
         telegram_agent_enabled=s.telegram_agent_enabled,
         telegram_agent_claude_enabled=s.telegram_agent_claude_enabled,
@@ -424,6 +415,26 @@ def get_config():
         session_secret_keys=session_secret_keys,
         profile_bindable_keys=sorted(PROFILE_BINDABLE_SETTINGS),
         overrides=sanitized_overrides,
+    )
+
+
+@router.get("/environment", response_model=RuntimeEnvironmentOut)
+def get_runtime_environment():
+    s = get_settings()
+    return RuntimeEnvironmentOut(
+        openai_base_url=s.openai_base_url,
+        openai_auth_mode=s.openai_auth_mode,
+        openai_api_key_helper=s.openai_api_key_helper,
+        anthropic_base_url=s.anthropic_base_url,
+        anthropic_auth_mode=s.anthropic_auth_mode,
+        anthropic_api_key_helper=s.anthropic_api_key_helper,
+        minimax_base_url=s.minimax_base_url,
+        minimax_api_host=s.minimax_api_host,
+        ollama_base_url=s.ollama_base_url,
+        avatar_api_base_url=s.avatar_api_base_url,
+        avatar_training_api_base_url=s.avatar_training_api_base_url,
+        voice_clone_api_base_url=s.voice_clone_api_base_url,
+        output_dir=s.output_dir,
     )
 
 
@@ -498,6 +509,15 @@ def patch_config(body: ConfigPatch):
     overrides = load_runtime_overrides()
 
     updates = body.model_dump(exclude_none=True)
+    forbidden_fields = sorted(key for key in updates if key in ENV_MANAGED_SETTINGS)
+    if forbidden_fields:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "These settings are managed by startup env only: "
+                f"{', '.join(forbidden_fields)}"
+            ),
+        )
     if "transcription_provider" in updates:
         provider = str(updates["transcription_provider"]).strip().lower()
         if provider not in TRANSCRIPTION_MODEL_OPTIONS:
@@ -534,12 +554,6 @@ def patch_config(body: ConfigPatch):
                 detail=f"Unsupported voice_provider. Use one of: {', '.join(VOICE_PROVIDER_OPTIONS)}",
             )
         updates["voice_provider"] = voice_provider
-    if "output_dir" in updates:
-        output_dir = str(updates["output_dir"]).strip()
-        if not output_dir:
-            raise HTTPException(status_code=400, detail="output_dir cannot be empty")
-        Path(output_dir).mkdir(parents=True, exist_ok=True)
-        updates["output_dir"] = output_dir
     if "preferred_ui_language" in updates:
         try:
             updates["preferred_ui_language"] = normalize_job_language(str(updates["preferred_ui_language"] or ""))

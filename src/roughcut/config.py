@@ -21,6 +21,21 @@ SECRET_SETTINGS: tuple[str, ...] = (
     "voice_clone_api_key",
     "telegram_bot_token",
 )
+ENV_MANAGED_SETTINGS: tuple[str, ...] = (
+    "openai_base_url",
+    "openai_auth_mode",
+    "openai_api_key_helper",
+    "anthropic_base_url",
+    "anthropic_auth_mode",
+    "anthropic_api_key_helper",
+    "minimax_base_url",
+    "minimax_api_host",
+    "ollama_base_url",
+    "avatar_api_base_url",
+    "avatar_training_api_base_url",
+    "voice_clone_api_base_url",
+    "output_dir",
+)
 TRANSCRIPTION_MODEL_OPTIONS: dict[str, list[str]] = {
     "funasr": [
         "sensevoice-small",
@@ -64,22 +79,12 @@ PROFILE_BINDABLE_SETTINGS: tuple[str, ...] = (
     "search_provider",
     "search_fallback_provider",
     "model_search_helper",
-    "openai_base_url",
-    "openai_auth_mode",
-    "anthropic_base_url",
-    "anthropic_auth_mode",
-    "minimax_base_url",
-    "minimax_api_host",
-    "ollama_base_url",
     "avatar_provider",
-    "avatar_api_base_url",
-    "avatar_training_api_base_url",
     "avatar_presenter_id",
     "avatar_layout_template",
     "avatar_safe_margin",
     "avatar_overlay_scale",
     "voice_provider",
-    "voice_clone_api_base_url",
     "voice_clone_voice_id",
     "director_rewrite_strength",
     "default_job_workflow_mode",
@@ -405,12 +410,13 @@ def clear_runtime_overrides() -> None:
 
 
 def apply_runtime_overrides(updates: dict[str, Any]) -> Settings:
+    filtered_updates = _strip_env_managed_updates(updates)
     overrides = load_runtime_overrides()
-    overrides.update(updates)
+    overrides.update(filtered_updates)
     save_runtime_overrides(overrides)
 
     settings = get_settings()
-    for key, value in updates.items():
+    for key, value in filtered_updates.items():
         if hasattr(settings, key):
             object.__setattr__(settings, key, value)
 
@@ -504,6 +510,8 @@ def _split_runtime_overrides(data: dict[str, Any]) -> tuple[dict[str, Any], dict
             if str(value or "").strip():
                 secrets[key] = value
             continue
+        if key in ENV_MANAGED_SETTINGS:
+            continue
         persisted[key] = value
     return persisted, secrets
 
@@ -516,3 +524,11 @@ def _update_session_secret_overrides(updates: dict[str, Any]) -> None:
             _session_secret_overrides[key] = value
         else:
             _session_secret_overrides.pop(key, None)
+
+
+def _strip_env_managed_updates(updates: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: value
+        for key, value in updates.items()
+        if key not in ENV_MANAGED_SETTINGS
+    }

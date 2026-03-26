@@ -1,6 +1,6 @@
 import { render, screen } from "@testing-library/react";
 
-import type { Config } from "../../types";
+import type { Config, RuntimeEnvironment } from "../../types";
 import { RuntimeSettingsPanel } from "./RuntimeSettingsPanel";
 import type { SettingsForm } from "./constants";
 
@@ -26,25 +26,14 @@ const SAMPLE_CONFIG: Config = {
   search_provider: "auto",
   search_fallback_provider: "searxng",
   model_search_helper: "",
-  openai_base_url: "https://api.openai.com/v1",
-  openai_auth_mode: "api_key",
-  openai_api_key_helper: "",
   qwen_asr_api_base_url: "http://127.0.0.1:18096",
   avatar_provider: "heygem",
-  avatar_api_base_url: "http://127.0.0.1:49202",
-  avatar_training_api_base_url: "http://127.0.0.1:49204",
   avatar_api_key_set: false,
   avatar_presenter_id: "",
   avatar_layout_template: "picture_in_picture_right",
   avatar_safe_margin: 0.08,
   avatar_overlay_scale: 0.18,
-  anthropic_base_url: "https://api.anthropic.com",
-  anthropic_auth_mode: "api_key",
-  anthropic_api_key_helper: "",
-  minimax_base_url: "https://api.minimaxi.com/v1",
-  minimax_api_host: "https://api.minimaxi.com",
   voice_provider: "indextts2",
-  voice_clone_api_base_url: "http://127.0.0.1:49204",
   voice_clone_api_key_set: false,
   voice_clone_voice_id: "",
   director_rewrite_strength: 0.55,
@@ -53,12 +42,10 @@ const SAMPLE_CONFIG: Config = {
   anthropic_api_key_set: false,
   minimax_api_key_set: true,
   minimax_coding_plan_api_key_set: true,
-  ollama_base_url: "http://127.0.0.1:11434",
   max_upload_size_mb: 2048,
   max_video_duration_sec: 7200,
   ffmpeg_timeout_sec: 600,
   allowed_extensions: [".mp4"],
-  output_dir: "output",
   preferred_ui_language: "zh-CN",
   telegram_agent_enabled: false,
   telegram_agent_claude_enabled: false,
@@ -102,6 +89,22 @@ const SAMPLE_CONFIG: Config = {
   overrides: {},
 };
 
+const SAMPLE_RUNTIME_ENVIRONMENT: RuntimeEnvironment = {
+  openai_base_url: "https://api.openai.com/v1",
+  openai_auth_mode: "api_key",
+  openai_api_key_helper: "",
+  anthropic_base_url: "https://api.anthropic.com",
+  anthropic_auth_mode: "api_key",
+  anthropic_api_key_helper: "",
+  minimax_base_url: "https://api.minimaxi.com/v1",
+  minimax_api_host: "https://api.minimaxi.com",
+  ollama_base_url: "http://127.0.0.1:11434",
+  avatar_api_base_url: "http://127.0.0.1:49202",
+  avatar_training_api_base_url: "http://127.0.0.1:49204",
+  voice_clone_api_base_url: "http://127.0.0.1:49204",
+  output_dir: "output",
+};
+
 describe("RuntimeSettingsPanel", () => {
   it("shows only the active provider credentials", () => {
     const form: SettingsForm = {
@@ -110,27 +113,24 @@ describe("RuntimeSettingsPanel", () => {
       reasoning_provider: SAMPLE_CONFIG.reasoning_provider,
       search_provider: SAMPLE_CONFIG.search_provider,
       search_fallback_provider: SAMPLE_CONFIG.search_fallback_provider,
-      minimax_base_url: SAMPLE_CONFIG.minimax_base_url,
-      minimax_api_host: SAMPLE_CONFIG.minimax_api_host,
       minimax_api_key: "",
-      openai_base_url: SAMPLE_CONFIG.openai_base_url,
-      openai_auth_mode: SAMPLE_CONFIG.openai_auth_mode,
-      openai_api_key_helper: SAMPLE_CONFIG.openai_api_key_helper,
-      anthropic_base_url: SAMPLE_CONFIG.anthropic_base_url,
-      anthropic_auth_mode: SAMPLE_CONFIG.anthropic_auth_mode,
-      anthropic_api_key_helper: SAMPLE_CONFIG.anthropic_api_key_helper,
-      ollama_base_url: SAMPLE_CONFIG.ollama_base_url,
-      output_dir: SAMPLE_CONFIG.output_dir,
       max_upload_size_mb: SAMPLE_CONFIG.max_upload_size_mb,
       max_video_duration_sec: SAMPLE_CONFIG.max_video_duration_sec,
       ffmpeg_timeout_sec: SAMPLE_CONFIG.ffmpeg_timeout_sec,
     };
 
-    render(<RuntimeSettingsPanel form={form} config={SAMPLE_CONFIG} onChange={vi.fn()} />);
+    render(
+      <RuntimeSettingsPanel
+        form={form}
+        config={SAMPLE_CONFIG}
+        runtimeEnvironment={SAMPLE_RUNTIME_ENVIRONMENT}
+        onChange={vi.fn()}
+      />,
+    );
 
-    expect(screen.getByText("当前接入")).toBeTruthy();
-    expect(screen.getByText("运行限制")).toBeTruthy();
+    expect(screen.getByText("接入与限制")).toBeTruthy();
     expect(screen.getByText("连接与鉴权细节")).toBeTruthy();
+    expect(screen.getByText("运行环境状态")).toBeTruthy();
     expect(screen.getByText("凭据来源：当前会话")).toBeTruthy();
     expect(screen.getAllByText(/MiniMax · 当前会话/).length).toBeGreaterThan(0);
     expect(screen.getByLabelText("MiniMax API Key")).toBeTruthy();

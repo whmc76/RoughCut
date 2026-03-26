@@ -1,7 +1,7 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
-import type { Config, ConfigOptions } from "../../types";
+import type { Config, ConfigOptions, RuntimeEnvironment } from "../../types";
 import { CreativeSettingsPanel } from "./CreativeSettingsPanel";
 import type { SettingsForm } from "./constants";
 
@@ -38,25 +38,14 @@ const SAMPLE_CONFIG: Config = {
   search_provider: "auto",
   search_fallback_provider: "openai",
   model_search_helper: "gpt-4.1-mini",
-  openai_base_url: "https://api.openai.com/v1",
-  openai_auth_mode: "api_key",
-  openai_api_key_helper: "",
   qwen_asr_api_base_url: "http://127.0.0.1:18096",
   avatar_provider: "heygem",
-  avatar_api_base_url: "http://127.0.0.1:49202",
-  avatar_training_api_base_url: "http://127.0.0.1:49204",
   avatar_api_key_set: false,
   avatar_presenter_id: "",
   avatar_layout_template: "picture_in_picture_left",
   avatar_safe_margin: 0.1,
   avatar_overlay_scale: 0.22,
-  anthropic_base_url: "https://api.anthropic.com",
-  anthropic_auth_mode: "api_key",
-  anthropic_api_key_helper: "",
-  minimax_base_url: "https://api.minimaxi.com/v1",
-  minimax_api_host: "https://api.minimaxi.com",
   voice_provider: "indextts2",
-  voice_clone_api_base_url: "http://127.0.0.1:49204",
   voice_clone_api_key_set: false,
   voice_clone_voice_id: "",
   director_rewrite_strength: 0.55,
@@ -65,12 +54,10 @@ const SAMPLE_CONFIG: Config = {
   anthropic_api_key_set: false,
   minimax_api_key_set: false,
   minimax_coding_plan_api_key_set: false,
-  ollama_base_url: "http://127.0.0.1:11434",
   max_upload_size_mb: 2048,
   max_video_duration_sec: 7200,
   ffmpeg_timeout_sec: 600,
   allowed_extensions: [".mp4"],
-  output_dir: "data/output",
   telegram_agent_enabled: true,
   telegram_agent_claude_enabled: true,
   telegram_agent_claude_command: "claude",
@@ -113,6 +100,22 @@ const SAMPLE_CONFIG: Config = {
   overrides: {},
 };
 
+const SAMPLE_RUNTIME_ENVIRONMENT: RuntimeEnvironment = {
+  openai_base_url: "https://api.openai.com/v1",
+  openai_auth_mode: "api_key",
+  openai_api_key_helper: "",
+  anthropic_base_url: "https://api.anthropic.com",
+  anthropic_auth_mode: "api_key",
+  anthropic_api_key_helper: "",
+  minimax_base_url: "https://api.minimaxi.com/v1",
+  minimax_api_host: "https://api.minimaxi.com",
+  ollama_base_url: "http://127.0.0.1:11434",
+  avatar_api_base_url: "http://127.0.0.1:49202",
+  avatar_training_api_base_url: "http://127.0.0.1:49204",
+  voice_clone_api_base_url: "http://127.0.0.1:49204",
+  output_dir: "data/output",
+};
+
 const SAMPLE_OPTIONS: ConfigOptions = {
   job_languages: [{ value: "zh-CN", label: "简体中文" }],
   channel_profiles: [{ value: "", label: "自动匹配" }],
@@ -143,8 +146,6 @@ function renderPanel() {
   const onChange = vi.fn();
   const form: SettingsForm = {
     avatar_provider: SAMPLE_CONFIG.avatar_provider,
-    avatar_api_base_url: SAMPLE_CONFIG.avatar_api_base_url,
-    avatar_training_api_base_url: SAMPLE_CONFIG.avatar_training_api_base_url,
     avatar_presenter_id: SAMPLE_CONFIG.avatar_presenter_id,
     avatar_layout_template: SAMPLE_CONFIG.avatar_layout_template,
     avatar_safe_margin: SAMPLE_CONFIG.avatar_safe_margin,
@@ -153,13 +154,18 @@ function renderPanel() {
     avatar_overlay_border_width: 4,
     avatar_overlay_border_color: "#F4E4B8",
     voice_provider: SAMPLE_CONFIG.voice_provider,
-    voice_clone_api_base_url: SAMPLE_CONFIG.voice_clone_api_base_url,
     voice_clone_voice_id: SAMPLE_CONFIG.voice_clone_voice_id,
     director_rewrite_strength: SAMPLE_CONFIG.director_rewrite_strength,
   };
   render(
     <QueryClientProvider client={queryClient}>
-      <CreativeSettingsPanel form={form} config={SAMPLE_CONFIG} options={SAMPLE_OPTIONS} onChange={onChange} />
+      <CreativeSettingsPanel
+        form={form}
+        config={SAMPLE_CONFIG}
+        runtimeEnvironment={SAMPLE_RUNTIME_ENVIRONMENT}
+        options={SAMPLE_OPTIONS}
+        onChange={onChange}
+      />
     </QueryClientProvider>,
   );
   return { onChange };

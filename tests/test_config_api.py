@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 from fastapi import HTTPException
 
-from roughcut.api.config import ConfigPatch, get_config, get_config_options, patch_config
+from roughcut.api.config import ConfigPatch, get_config, get_config_options, get_runtime_environment, patch_config
 from roughcut.config import get_settings
 
 
@@ -78,27 +78,19 @@ def test_get_config_exposes_extended_provider_fields(tmp_path, monkeypatch):
 
     assert cfg.llm_mode == "performance"
     assert cfg.transcription_dialect == "beijing"
-    assert cfg.openai_base_url == "https://api.openai.com/v1"
     assert cfg.qwen_asr_api_base_url == "http://127.0.0.1:18096"
     assert cfg.avatar_provider == "heygem"
-    assert cfg.avatar_api_base_url == "https://api.heygem.com"
-    assert cfg.avatar_training_api_base_url == "http://127.0.0.1:18180"
     assert cfg.avatar_presenter_id == "presenter_demo"
     assert cfg.avatar_layout_template == "picture_in_picture_right"
     assert cfg.avatar_safe_margin == 0.08
     assert cfg.avatar_overlay_scale == 0.24
-    assert cfg.anthropic_base_url == "https://api.anthropic.com"
-    assert cfg.minimax_base_url == "https://api.minimaxi.com/v1"
-    assert cfg.minimax_api_host == "https://api.minimaxi.com"
     assert cfg.voice_provider == "indextts2"
-    assert cfg.voice_clone_api_base_url == "http://127.0.0.1:49204"
     assert cfg.voice_clone_voice_id == "voice_demo"
     assert cfg.director_rewrite_strength == 0.55
     assert cfg.local_reasoning_model == "qwen3.5:9b"
     assert cfg.multimodal_fallback_provider == "ollama"
     assert cfg.search_provider == "auto"
     assert cfg.search_fallback_provider == "searxng"
-    assert cfg.output_dir == "output"
     assert cfg.preferred_ui_language == "en-US"
     assert cfg.telegram_agent_enabled is True
     assert cfg.telegram_agent_claude_enabled is True
@@ -133,16 +125,54 @@ def test_get_config_exposes_extended_provider_fields(tmp_path, monkeypatch):
     assert cfg.quality_auto_rerun_enabled is True
     assert cfg.quality_auto_rerun_below_score == 75.0
     assert cfg.quality_auto_rerun_max_attempts == 1
-    assert cfg.openai_auth_mode == "api_key"
-    assert cfg.anthropic_auth_mode == "api_key"
     assert cfg.persistence["settings_store"] == "database"
     assert cfg.persistence["profiles_store"] == "database"
     assert cfg.persistence["packaging_store"] == "database"
     assert "transcription_provider" in cfg.profile_bindable_keys
     assert "quality_auto_rerun_enabled" in cfg.profile_bindable_keys
+    assert "openai_base_url" not in cfg.profile_bindable_keys
+    assert "voice_clone_api_base_url" not in cfg.profile_bindable_keys
+    assert "output_dir" not in cfg.profile_bindable_keys
     assert cfg.override_keys == []
     assert cfg.session_secret_keys == []
     assert cfg.overrides == {}
+
+
+def test_get_runtime_environment_exposes_env_managed_fields(tmp_path, monkeypatch):
+    import roughcut.api.config as config_api
+    import roughcut.config as config_mod
+
+    monkeypatch.setattr(config_api, "_CONFIG_FILE", tmp_path / "roughcut_config.json")
+    monkeypatch.setattr(config_mod, "_OVERRIDES_FILE", tmp_path / "roughcut_config.json")
+    config_mod._settings = None
+
+    settings = get_settings()
+    object.__setattr__(settings, "openai_base_url", "https://api.openai.com/v1")
+    object.__setattr__(settings, "openai_auth_mode", "api_key")
+    object.__setattr__(settings, "openai_api_key_helper", "")
+    object.__setattr__(settings, "anthropic_base_url", "https://api.anthropic.com")
+    object.__setattr__(settings, "anthropic_auth_mode", "api_key")
+    object.__setattr__(settings, "anthropic_api_key_helper", "")
+    object.__setattr__(settings, "minimax_base_url", "https://api.minimaxi.com/v1")
+    object.__setattr__(settings, "minimax_api_host", "https://api.minimaxi.com")
+    object.__setattr__(settings, "ollama_base_url", "http://127.0.0.1:11434")
+    object.__setattr__(settings, "avatar_api_base_url", "https://api.heygem.com")
+    object.__setattr__(settings, "avatar_training_api_base_url", "http://127.0.0.1:18180")
+    object.__setattr__(settings, "voice_clone_api_base_url", "http://127.0.0.1:49204")
+    object.__setattr__(settings, "output_dir", "output")
+
+    runtime_environment = get_runtime_environment()
+
+    assert runtime_environment.openai_base_url == "https://api.openai.com/v1"
+    assert runtime_environment.openai_auth_mode == "api_key"
+    assert runtime_environment.anthropic_base_url == "https://api.anthropic.com"
+    assert runtime_environment.minimax_base_url == "https://api.minimaxi.com/v1"
+    assert runtime_environment.minimax_api_host == "https://api.minimaxi.com"
+    assert runtime_environment.ollama_base_url == "http://127.0.0.1:11434"
+    assert runtime_environment.avatar_api_base_url == "https://api.heygem.com"
+    assert runtime_environment.avatar_training_api_base_url == "http://127.0.0.1:18180"
+    assert runtime_environment.voice_clone_api_base_url == "http://127.0.0.1:49204"
+    assert runtime_environment.output_dir == "output"
 
 
 def test_get_config_redacts_secret_overrides(tmp_path, monkeypatch):
@@ -267,6 +297,24 @@ def test_patch_config_accepts_qwen_asr_provider(tmp_path, monkeypatch):
     assert cfg.transcription_provider == "qwen_asr"
     assert cfg.transcription_model == "qwen3-asr-1.7b"
     assert cfg.transcription_dialect == "beijing"
+
+
+def test_patch_config_rejects_env_managed_connection_fields(tmp_path, monkeypatch):
+    import roughcut.api.config as config_api
+    import roughcut.config as config_mod
+
+    monkeypatch.setattr(config_api, "_CONFIG_FILE", tmp_path / "roughcut_config.json")
+    monkeypatch.setattr(config_mod, "_OVERRIDES_FILE", tmp_path / "roughcut_config.json")
+    config_mod._settings = None
+
+    with pytest.raises(HTTPException, match="startup env only"):
+        patch_config(
+            ConfigPatch(
+                openai_base_url="https://override.invalid/v1",
+                voice_clone_api_base_url="https://voice.example.com",
+                output_dir=str(tmp_path / "exports"),
+            )
+        )
 
 
 def test_patch_config_clamps_quality_auto_rerun_settings(tmp_path, monkeypatch):
@@ -430,12 +478,11 @@ def test_patch_config_accepts_indextts2_voice_provider(tmp_path, monkeypatch):
     cfg = patch_config(
         ConfigPatch(
             voice_provider="indextts2",
-            voice_clone_api_base_url="http://127.0.0.1:49204",
         )
     )
 
     assert cfg.voice_provider == "indextts2"
-    assert cfg.voice_clone_api_base_url == "http://127.0.0.1:49204"
+    assert get_runtime_environment().voice_clone_api_base_url == "http://127.0.0.1:49204"
 
 
 def test_patch_config_persists_to_database_without_override_file(tmp_path, monkeypatch):

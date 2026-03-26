@@ -608,25 +608,14 @@ export type Config = {
   search_provider: string;
   search_fallback_provider: string;
   model_search_helper: string;
-  openai_base_url: string;
-  openai_auth_mode: string;
-  openai_api_key_helper: string;
   qwen_asr_api_base_url: string;
   avatar_provider: string;
-  avatar_api_base_url: string;
-  avatar_training_api_base_url: string;
   avatar_api_key_set: boolean;
   avatar_presenter_id: string;
   avatar_layout_template: string;
   avatar_safe_margin: number;
   avatar_overlay_scale: number;
-  anthropic_base_url: string;
-  anthropic_auth_mode: string;
-  anthropic_api_key_helper: string;
-  minimax_base_url: string;
-  minimax_api_host: string;
   voice_provider: string;
-  voice_clone_api_base_url: string;
   voice_clone_api_key_set: boolean;
   voice_clone_voice_id: string;
   director_rewrite_strength: number;
@@ -635,12 +624,10 @@ export type Config = {
   anthropic_api_key_set: boolean;
   minimax_api_key_set: boolean;
   minimax_coding_plan_api_key_set: boolean;
-  ollama_base_url: string;
   max_upload_size_mb: number;
   max_video_duration_sec: number;
   ffmpeg_timeout_sec: number;
   allowed_extensions: string[];
-  output_dir: string;
   preferred_ui_language: string;
   telegram_agent_enabled: boolean;
   telegram_agent_claude_enabled: boolean;
@@ -682,6 +669,22 @@ export type Config = {
   session_secret_keys: string[];
   profile_bindable_keys: string[];
   overrides: Record<string, unknown>;
+};
+
+export type RuntimeEnvironment = {
+  openai_base_url: string;
+  openai_auth_mode: string;
+  openai_api_key_helper: string;
+  anthropic_base_url: string;
+  anthropic_auth_mode: string;
+  anthropic_api_key_helper: string;
+  minimax_base_url: string;
+  minimax_api_host: string;
+  ollama_base_url: string;
+  avatar_api_base_url: string;
+  avatar_training_api_base_url: string;
+  voice_clone_api_base_url: string;
+  output_dir: string;
 };
 
 export type ConfigOptions = {

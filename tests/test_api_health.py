@@ -43,30 +43,49 @@ async def test_config_has_extended_provider_fields(client: AsyncClient):
     assert response.status_code == 200
     data = response.json()
     assert "transcription_dialect" in data
-    assert "openai_base_url" in data
     assert "qwen_asr_api_base_url" in data
     assert "avatar_provider" in data
+    assert "voice_provider" in data
+    assert "minimax_api_key_set" in data
+    assert "openai_base_url" not in data
+    assert "avatar_api_base_url" not in data
+    assert "voice_clone_api_base_url" not in data
+    assert "output_dir" not in data
+
+
+@pytest.mark.asyncio
+async def test_runtime_environment_exposes_env_managed_fields(client: AsyncClient):
+    response = await client.get("/api/v1/config/environment")
+    assert response.status_code == 200
+    data = response.json()
+    assert "openai_base_url" in data
+    assert "openai_auth_mode" in data
     assert "avatar_api_base_url" in data
     assert "avatar_training_api_base_url" in data
-    assert "voice_provider" in data
     assert "voice_clone_api_base_url" in data
-    assert "anthropic_base_url" in data
-    assert "minimax_base_url" in data
-    assert "openai_auth_mode" in data
-    assert "anthropic_auth_mode" in data
-    assert "minimax_api_key_set" in data
     assert "output_dir" in data
 
 
 @pytest.mark.asyncio
-async def test_config_patch_updates_output_dir(client: AsyncClient, tmp_path: Path):
-    output_dir = tmp_path / "exports"
-
-    response = await client.patch("/api/v1/config", json={"output_dir": str(output_dir)})
+async def test_config_patch_updates_preferred_ui_language(client: AsyncClient):
+    response = await client.patch("/api/v1/config", json={"preferred_ui_language": "en-US"})
 
     assert response.status_code == 200
-    assert response.json()["output_dir"] == str(output_dir)
-    assert output_dir.exists()
+    assert response.json()["preferred_ui_language"] == "en-US"
+
+
+@pytest.mark.asyncio
+async def test_config_patch_rejects_env_managed_fields(client: AsyncClient, tmp_path: Path):
+    response = await client.patch(
+        "/api/v1/config",
+        json={
+            "openai_base_url": "https://override.invalid/v1",
+            "output_dir": str(tmp_path / "exports"),
+        },
+    )
+
+    assert response.status_code == 400
+    assert "startup env only" in response.json()["detail"]
 
 
 @pytest.mark.asyncio

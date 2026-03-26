@@ -10,6 +10,7 @@ from typing import Any
 from sqlalchemy import select
 
 from roughcut.config import (
+    ENV_MANAGED_SETTINGS,
     PROFILE_BINDABLE_SETTINGS,
     VOICE_PROVIDER_OPTIONS,
     apply_runtime_overrides,
@@ -420,6 +421,8 @@ def _normalize_config_snapshot(config: dict[str, Any]) -> dict[str, Any]:
         for key in PROFILE_CONFIG_FIELDS
     }
     normalized.update(dict(config or {}))
+    for key in ENV_MANAGED_SETTINGS:
+        normalized.pop(key, None)
 
     provider, model = normalize_transcription_settings(
         normalized.get("transcription_provider"),
@@ -451,22 +454,7 @@ def _normalize_config_snapshot(config: dict[str, Any]) -> dict[str, Any]:
         normalized.get("search_fallback_provider") or settings.search_fallback_provider
     ).strip().lower()
     normalized["model_search_helper"] = str(normalized.get("model_search_helper") or settings.model_search_helper).strip()
-    normalized["openai_base_url"] = str(normalized.get("openai_base_url") or settings.openai_base_url).strip()
-    normalized["openai_auth_mode"] = str(normalized.get("openai_auth_mode") or settings.openai_auth_mode).strip()
-    normalized["anthropic_base_url"] = str(normalized.get("anthropic_base_url") or settings.anthropic_base_url).strip()
-    normalized["anthropic_auth_mode"] = str(
-        normalized.get("anthropic_auth_mode") or settings.anthropic_auth_mode
-    ).strip()
-    normalized["minimax_base_url"] = str(normalized.get("minimax_base_url") or settings.minimax_base_url).strip()
-    normalized["minimax_api_host"] = str(normalized.get("minimax_api_host") or settings.minimax_api_host).strip()
-    normalized["ollama_base_url"] = str(normalized.get("ollama_base_url") or settings.ollama_base_url).strip()
     normalized["avatar_provider"] = str(normalized.get("avatar_provider") or settings.avatar_provider).strip().lower()
-    normalized["avatar_api_base_url"] = str(
-        normalized.get("avatar_api_base_url") or settings.avatar_api_base_url
-    ).strip()
-    normalized["avatar_training_api_base_url"] = str(
-        normalized.get("avatar_training_api_base_url") or settings.avatar_training_api_base_url
-    ).strip()
     normalized["avatar_presenter_id"] = str(normalized.get("avatar_presenter_id") or "").strip()
     normalized["avatar_layout_template"] = str(
         normalized.get("avatar_layout_template") or settings.avatar_layout_template
@@ -480,9 +468,6 @@ def _normalize_config_snapshot(config: dict[str, Any]) -> dict[str, Any]:
         4,
     )
     normalized["voice_provider"] = _normalize_voice_provider(normalized.get("voice_provider"))
-    normalized["voice_clone_api_base_url"] = str(
-        normalized.get("voice_clone_api_base_url") or settings.voice_clone_api_base_url
-    ).strip()
     normalized["voice_clone_voice_id"] = str(normalized.get("voice_clone_voice_id") or "").strip()
     normalized["director_rewrite_strength"] = round(
         max(0.0, min(1.0, _coerce_float(normalized.get("director_rewrite_strength"), settings.director_rewrite_strength))),

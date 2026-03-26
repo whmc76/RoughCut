@@ -1,11 +1,12 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { api } from "../../api";
-import type { Config, ConfigOptions } from "../../types";
+import type { Config, ConfigOptions, RuntimeEnvironment } from "../../types";
 import { SelectField } from "../../components/forms/SelectField";
 import { TextField } from "../../components/forms/TextField";
 import { PanelHeader } from "../../components/ui/PanelHeader";
 import type { SettingsForm } from "./constants";
+import { getProviderLabel } from "./helpers";
 
 const AVATAR_POSITION_SCHEMES = [
   {
@@ -62,11 +63,12 @@ const AVATAR_SIZE_SCHEMES = [
 type CreativeSettingsPanelProps = {
   form: SettingsForm;
   config?: Config;
+  runtimeEnvironment?: RuntimeEnvironment;
   options?: ConfigOptions;
   onChange: (key: string, value: string | number | boolean) => void;
 };
 
-export function CreativeSettingsPanel({ form, config, options, onChange }: CreativeSettingsPanelProps) {
+export function CreativeSettingsPanel({ form, config, runtimeEnvironment, options, onChange }: CreativeSettingsPanelProps) {
   const queryClient = useQueryClient();
   const avatarProviders = options?.avatar_providers ?? [{ value: "heygem", label: "heygem" }];
   const voiceProviders = options?.voice_providers ?? [{ value: "indextts2", label: "indextts2" }];
@@ -110,6 +112,29 @@ export function CreativeSettingsPanel({ form, config, options, onChange }: Creat
     )?.value ?? "";
   const selectedSizeScheme =
     AVATAR_SIZE_SCHEMES.find((item) => Math.abs(item.scale - currentOverlayScale) < 0.001)?.value ?? "";
+  const avatarProviderLabel = getProviderLabel(String(form.avatar_provider ?? ""));
+  const voiceProviderLabel = getProviderLabel(String(form.voice_provider ?? ""));
+  const avatarApiBaseUrl = String(runtimeEnvironment?.avatar_api_base_url ?? "").trim();
+  const avatarTrainingBaseUrl = String(runtimeEnvironment?.avatar_training_api_base_url ?? "").trim();
+  const voiceCloneApiBaseUrl = String(runtimeEnvironment?.voice_clone_api_base_url ?? "").trim();
+  const voiceCloneVoiceId = String(form.voice_clone_voice_id ?? "").trim();
+  const directorRewriteStrength = Number(form.director_rewrite_strength ?? 0.55);
+  const avatarCredentialSummary = config?.avatar_api_key_set ? "凭据已配置" : "凭据未配置";
+  const voiceCredentialSummary = config?.voice_clone_api_key_set ? "凭据已配置" : "凭据未配置";
+  const connectionDetailsOpen =
+    avatarProviderLabel !== "HeyGem" ||
+    voiceProviderLabel !== "IndexTTS2" ||
+    Boolean(voiceCloneVoiceId);
+  const advancedAvatarOpen =
+    Boolean(selectedPresenter) ||
+    Boolean(String(form.avatar_presenter_id ?? "").trim()) ||
+    String(form.avatar_layout_template ?? "picture_in_picture_right") !== "picture_in_picture_right" ||
+    currentOverlayPosition !== "top_left" ||
+    Math.abs(Number(form.avatar_safe_margin ?? 0.08) - 0.08) > 0.001 ||
+    Math.abs(currentOverlayScale - 0.18) > 0.001 ||
+    currentOverlayCornerRadius !== 26 ||
+    currentOverlayBorderWidth !== 4 ||
+    currentOverlayBorderColor !== "#F4E4B8";
 
   const handlePositionSchemeChange = (value: string) => {
     const scheme = AVATAR_POSITION_SCHEMES.find((item) => item.value === value);
@@ -127,154 +152,219 @@ export function CreativeSettingsPanel({ form, config, options, onChange }: Creat
 
   return (
     <section className="panel">
-      <PanelHeader title="增强能力 Provider" description="数字人解说和 AI 导演的执行入口先接成可配置 provider。" />
+      <PanelHeader title="增强能力 Provider" description="数字人、语音和导演改写入口。" />
       <div className="form-stack">
-        <SelectField
-          label="数字人 Provider"
-          value={String(form.avatar_provider ?? "")}
-          onChange={(event) => onChange("avatar_provider", event.target.value)}
-          options={avatarProviders}
-        />
-        <TextField
-          label="数字人 API Base URL"
-          value={String(form.avatar_api_base_url ?? "")}
-          onChange={(event) => onChange("avatar_api_base_url", event.target.value)}
-        />
-        <TextField
-          label="数字人口播参考音频 / TTS API Base URL"
-          value={String(form.avatar_training_api_base_url ?? "")}
-          onChange={(event) => onChange("avatar_training_api_base_url", event.target.value)}
-        />
-        <TextField
-          label="数字人 API Key"
-          type="password"
-          value={String(form.avatar_api_key ?? "")}
-          onChange={(event) => onChange("avatar_api_key", event.target.value)}
-          placeholder={config?.avatar_api_key_set ? "已设置，留空则不更新" : "留空则不更新"}
-        />
-        <SelectField
-          label="从创作者档案选择讲话视频模板"
-          value={selectedPresenter?.value ?? ""}
-          onChange={(event) => onChange("avatar_presenter_id", event.target.value)}
-          options={[
-            { value: "", label: presenterOptions.length ? "手动填写模板路径" : "暂无可选模板" },
-            ...presenterOptions,
-          ]}
-        />
-        <TextField
-          label="数字人模板视频 / 形象标识"
-          value={String(form.avatar_presenter_id ?? "")}
-          onChange={(event) => onChange("avatar_presenter_id", event.target.value)}
-        />
-        <div className="muted">
-          {selectedPresenter
-            ? `当前已选模板：${selectedPresenter.label}`
-            : "可以直接填写本地模板视频路径，也可以从上面的创作者档案里一键选用讲话视频片段。"}
+        <div className="settings-overview-grid">
+          <article className="settings-overview-card">
+            <span className="settings-overview-label">数字人</span>
+            <strong>{avatarProviderLabel}</strong>
+            <div className="muted">
+              {selectedPresenter ? `模板已绑定 · ${selectedPresenter.label}` : `${avatarCredentialSummary} · 地址走启动环境`}
+            </div>
+          </article>
+          <article className="settings-overview-card">
+            <span className="settings-overview-label">语音</span>
+            <strong>{voiceProviderLabel}</strong>
+            <div className="muted">
+              {voiceCloneVoiceId ? `Voice / Workflow ID · ${voiceCloneVoiceId}` : `${voiceCredentialSummary} · 地址走启动环境`}
+            </div>
+          </article>
+          <article className="settings-overview-card">
+            <span className="settings-overview-label">导演改写</span>
+            <strong>{Math.round(directorRewriteStrength * 100)}%</strong>
+            <div className="muted">
+              布局 {String(form.avatar_layout_template ?? "picture_in_picture_right")} · 位置 {currentOverlayPosition}
+            </div>
+          </article>
         </div>
-        <TextField
-          label="数字人布局模板"
-          value={String(form.avatar_layout_template ?? "")}
-          onChange={(event) => onChange("avatar_layout_template", event.target.value)}
-        />
-        <SelectField
-          label="数字人解说定位方案"
-          value={selectedPositionScheme}
-          onChange={(event) => handlePositionSchemeChange(event.target.value)}
-          options={[
-            { value: "", label: "自定义位置" },
-            ...AVATAR_POSITION_SCHEMES.map((item) => ({ value: item.value, label: item.label })),
-          ]}
-        />
-        <div className="muted">
-          {AVATAR_POSITION_SCHEMES.find((item) => item.value === selectedPositionScheme)?.note ??
-            `当前使用自定义位置：${currentOverlayPosition}，字幕安全边距 ${Number(form.avatar_safe_margin ?? 0.08).toFixed(2)}。`}
-        </div>
-        <SelectField
-          label="数字人解说尺寸方案"
-          value={selectedSizeScheme}
-          onChange={(event) => handleSizeSchemeChange(event.target.value)}
-          options={[
-            { value: "", label: "自定义尺寸" },
-            ...AVATAR_SIZE_SCHEMES.map((item) => ({ value: item.value, label: item.label })),
-          ]}
-        />
-        <div className="muted">
-          {AVATAR_SIZE_SCHEMES.find((item) => item.value === selectedSizeScheme)?.note ??
-            `当前使用自定义尺寸：${Math.round(currentOverlayScale * 100)}%。`}
-        </div>
-        <div className="field-row">
-          <TextField
-            label="字幕安全边距"
-            type="number"
-            value={String(form.avatar_safe_margin ?? 0.08)}
-            onChange={(event) => onChange("avatar_safe_margin", Number(event.target.value))}
-          />
-          <TextField
-            label="数字人缩放比"
-            type="number"
-            value={String(currentOverlayScale)}
-            onChange={(event) => {
-              const value = Number(event.target.value);
-              onChange("avatar_overlay_scale", value);
-              savePackagingConfig.mutate({ avatar_overlay_scale: value });
-            }}
-          />
-        </div>
-        <div className="field-row">
-          <TextField
-            label="数字人圆角"
-            type="number"
-            value={String(currentOverlayCornerRadius)}
-            onChange={(event) => {
-              const value = Number(event.target.value);
-              savePackagingConfig.mutate({ avatar_overlay_corner_radius: value });
-            }}
-          />
-          <TextField
-            label="数字人边框宽度"
-            type="number"
-            value={String(currentOverlayBorderWidth)}
-            onChange={(event) => {
-              const value = Number(event.target.value);
-              savePackagingConfig.mutate({ avatar_overlay_border_width: value });
-            }}
-          />
-        </div>
-        <TextField
-          label="数字人边框颜色"
-          value={currentOverlayBorderColor}
-          onChange={(event) => savePackagingConfig.mutate({ avatar_overlay_border_color: event.target.value })}
-        />
-        <div className="muted">圆角和边框会直接进入成片画中画渲染，不是预览样式。</div>
-        <SelectField
-          label="语音 Provider"
-          value={String(form.voice_provider ?? "")}
-          onChange={(event) => onChange("voice_provider", event.target.value)}
-          options={voiceProviders}
-        />
-        <TextField
-          label="语音合成 API Base URL"
-          value={String(form.voice_clone_api_base_url ?? "")}
-          onChange={(event) => onChange("voice_clone_api_base_url", event.target.value)}
-        />
-        <TextField
-          label="语音克隆 API Key"
-          type="password"
-          value={String(form.voice_clone_api_key ?? "")}
-          onChange={(event) => onChange("voice_clone_api_key", event.target.value)}
-          placeholder={config?.voice_clone_api_key_set ? "已设置，留空则不更新" : "留空则不更新"}
-        />
-        <TextField
-          label="RunningHub 工作流 ID / Voice ID（仅 RunningHub）"
-          value={String(form.voice_clone_voice_id ?? "")}
-          onChange={(event) => onChange("voice_clone_voice_id", event.target.value)}
-        />
         <TextField
           label="AI 导演改写强度"
           type="number"
-          value={String(form.director_rewrite_strength ?? 0.55)}
+          value={String(directorRewriteStrength)}
           onChange={(event) => onChange("director_rewrite_strength", Number(event.target.value))}
         />
+        <details className="settings-disclosure" open={connectionDetailsOpen}>
+          <summary className="settings-disclosure-trigger">
+            <div>
+              <strong>Provider 与凭据</strong>
+              <div className="muted">
+                {avatarProviderLabel} · {avatarCredentialSummary} / {voiceProviderLabel} · {voiceCredentialSummary}
+              </div>
+            </div>
+          </summary>
+          <div className="settings-disclosure-body">
+            <div className="form-stack">
+              <section className="settings-subsection">
+                <div className="settings-subsection-head">
+                  <strong>数字人链路</strong>
+                  <span className="muted">{avatarProviderLabel}</span>
+                </div>
+                <div className="form-stack">
+                  <SelectField
+                    label="数字人 Provider"
+                    value={String(form.avatar_provider ?? "")}
+                    onChange={(event) => onChange("avatar_provider", event.target.value)}
+                    options={avatarProviders}
+                  />
+                  <TextField
+                    label="数字人 API Key"
+                    type="password"
+                    value={String(form.avatar_api_key ?? "")}
+                    onChange={(event) => onChange("avatar_api_key", event.target.value)}
+                    placeholder={config?.avatar_api_key_set ? "已设置，留空则不更新" : "留空则不更新"}
+                  />
+                  <div className="muted">
+                    连接地址改为启动环境管理。
+                    {avatarApiBaseUrl ? ` 当前地址：${avatarApiBaseUrl}。` : ""}
+                    {avatarTrainingBaseUrl ? ` 训练 / TTS：${avatarTrainingBaseUrl}。` : ""}
+                  </div>
+                </div>
+              </section>
+              <section className="settings-subsection">
+                <div className="settings-subsection-head">
+                  <strong>语音链路</strong>
+                  <span className="muted">{voiceProviderLabel}</span>
+                </div>
+                <div className="form-stack">
+                  <SelectField
+                    label="语音 Provider"
+                    value={String(form.voice_provider ?? "")}
+                    onChange={(event) => onChange("voice_provider", event.target.value)}
+                    options={voiceProviders}
+                  />
+                  <TextField
+                    label="语音克隆 API Key"
+                    type="password"
+                    value={String(form.voice_clone_api_key ?? "")}
+                    onChange={(event) => onChange("voice_clone_api_key", event.target.value)}
+                    placeholder={config?.voice_clone_api_key_set ? "已设置，留空则不更新" : "留空则不更新"}
+                  />
+                  <div className="muted">
+                    连接地址改为启动环境管理。
+                    {voiceCloneApiBaseUrl ? ` 当前地址：${voiceCloneApiBaseUrl}。` : ""}
+                  </div>
+                  {(String(form.voice_provider ?? "") === "runninghub" || voiceCloneVoiceId) && (
+                    <TextField
+                      label="RunningHub 工作流 ID / Voice ID（仅 RunningHub）"
+                      value={String(form.voice_clone_voice_id ?? "")}
+                      onChange={(event) => onChange("voice_clone_voice_id", event.target.value)}
+                    />
+                  )}
+                </div>
+              </section>
+            </div>
+          </div>
+        </details>
+        <details className="settings-disclosure" open={advancedAvatarOpen}>
+          <summary className="settings-disclosure-trigger">
+            <div>
+              <strong>画中画与模板细节</strong>
+              <div className="muted">
+                {selectedPresenter
+                  ? `当前模板：${selectedPresenter.label}`
+                  : `位置 ${currentOverlayPosition} · 尺寸 ${Math.round(currentOverlayScale * 100)}%`}
+              </div>
+            </div>
+          </summary>
+          <div className="settings-disclosure-body">
+            <div className="form-stack">
+              <SelectField
+                label="从创作者档案选择讲话视频模板"
+                value={selectedPresenter?.value ?? ""}
+                onChange={(event) => onChange("avatar_presenter_id", event.target.value)}
+                options={[
+                  { value: "", label: presenterOptions.length ? "手动填写模板路径" : "暂无可选模板" },
+                  ...presenterOptions,
+                ]}
+              />
+              <TextField
+                label="数字人模板视频 / 形象标识"
+                value={String(form.avatar_presenter_id ?? "")}
+                onChange={(event) => onChange("avatar_presenter_id", event.target.value)}
+              />
+              <div className="muted">
+                {selectedPresenter
+                  ? `当前已选模板：${selectedPresenter.label}`
+                  : "可直接填本地路径，或从上面一键选模板。"}
+              </div>
+              <TextField
+                label="数字人布局模板"
+                value={String(form.avatar_layout_template ?? "")}
+                onChange={(event) => onChange("avatar_layout_template", event.target.value)}
+              />
+              <SelectField
+                label="数字人解说定位方案"
+                value={selectedPositionScheme}
+                onChange={(event) => handlePositionSchemeChange(event.target.value)}
+                options={[
+                  { value: "", label: "自定义位置" },
+                  ...AVATAR_POSITION_SCHEMES.map((item) => ({ value: item.value, label: item.label })),
+                ]}
+              />
+              <div className="muted">
+                {AVATAR_POSITION_SCHEMES.find((item) => item.value === selectedPositionScheme)?.note ??
+                  `当前使用自定义位置：${currentOverlayPosition}，字幕安全边距 ${Number(form.avatar_safe_margin ?? 0.08).toFixed(2)}。`}
+              </div>
+              <SelectField
+                label="数字人解说尺寸方案"
+                value={selectedSizeScheme}
+                onChange={(event) => handleSizeSchemeChange(event.target.value)}
+                options={[
+                  { value: "", label: "自定义尺寸" },
+                  ...AVATAR_SIZE_SCHEMES.map((item) => ({ value: item.value, label: item.label })),
+                ]}
+              />
+              <div className="muted">
+                {AVATAR_SIZE_SCHEMES.find((item) => item.value === selectedSizeScheme)?.note ??
+                  `当前使用自定义尺寸：${Math.round(currentOverlayScale * 100)}%。`}
+              </div>
+              <div className="field-row">
+                <TextField
+                  label="字幕安全边距"
+                  type="number"
+                  value={String(form.avatar_safe_margin ?? 0.08)}
+                  onChange={(event) => onChange("avatar_safe_margin", Number(event.target.value))}
+                />
+                <TextField
+                  label="数字人缩放比"
+                  type="number"
+                  value={String(currentOverlayScale)}
+                  onChange={(event) => {
+                    const value = Number(event.target.value);
+                    onChange("avatar_overlay_scale", value);
+                    savePackagingConfig.mutate({ avatar_overlay_scale: value });
+                  }}
+                />
+              </div>
+              <div className="field-row">
+                <TextField
+                  label="数字人圆角"
+                  type="number"
+                  value={String(currentOverlayCornerRadius)}
+                  onChange={(event) => {
+                    const value = Number(event.target.value);
+                    savePackagingConfig.mutate({ avatar_overlay_corner_radius: value });
+                  }}
+                />
+                <TextField
+                  label="数字人边框宽度"
+                  type="number"
+                  value={String(currentOverlayBorderWidth)}
+                  onChange={(event) => {
+                    const value = Number(event.target.value);
+                    savePackagingConfig.mutate({ avatar_overlay_border_width: value });
+                  }}
+                />
+              </div>
+              <TextField
+                label="数字人边框颜色"
+                value={currentOverlayBorderColor}
+                onChange={(event) => savePackagingConfig.mutate({ avatar_overlay_border_color: event.target.value })}
+              />
+              <div className="muted">圆角和边框会直接进入成片画中画渲染，不是预览样式。</div>
+            </div>
+          </div>
+        </details>
       </div>
     </section>
   );

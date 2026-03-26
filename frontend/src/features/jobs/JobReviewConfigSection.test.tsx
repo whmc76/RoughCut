@@ -9,6 +9,7 @@ import { JobReviewConfigSection } from "./JobReviewConfigSection";
 vi.mock("../../api", () => ({
   api: {
     getConfigProfiles: vi.fn(),
+    getRuntimeEnvironment: vi.fn(),
     activateConfigProfile: vi.fn(),
     createConfigProfile: vi.fn(),
     updateConfigProfile: vi.fn(),
@@ -58,6 +59,21 @@ function renderSection(avatarMaterials?: Partial<AvatarMaterialLibrary>, config?
     active_profile_dirty_keys: [],
     active_profile_dirty_details: [],
     profiles: [],
+  });
+  vi.mocked(api.getRuntimeEnvironment).mockResolvedValue({
+    openai_base_url: "https://api.openai.com/v1",
+    openai_auth_mode: "api_key",
+    openai_api_key_helper: "",
+    anthropic_base_url: "https://api.anthropic.com",
+    anthropic_auth_mode: "api_key",
+    anthropic_api_key_helper: "",
+    minimax_base_url: "https://api.minimaxi.com/v1",
+    minimax_api_host: "https://api.minimaxi.com",
+    ollama_base_url: "http://127.0.0.1:11434",
+    avatar_api_base_url: "http://127.0.0.1:49202",
+    avatar_training_api_base_url: "http://127.0.0.1:49204",
+    voice_clone_api_base_url: "http://127.0.0.1:49204",
+    output_dir: "output",
   });
 
   return render(

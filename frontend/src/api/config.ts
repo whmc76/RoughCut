@@ -1,8 +1,9 @@
-import type { Config, ConfigOptions, ConfigProfiles } from "../types";
+import type { Config, ConfigOptions, ConfigProfiles, RuntimeEnvironment } from "../types";
 import { request } from "./core";
 
 export const configApi = {
   getConfig: () => request<Config>("/config"),
+  getRuntimeEnvironment: () => request<RuntimeEnvironment>("/config/environment"),
   getConfigOptions: () => request<ConfigOptions>("/config/options"),
   getConfigProfiles: () => request<ConfigProfiles>("/config/profiles"),
   createConfigProfile: (name: string, description?: string) =>
