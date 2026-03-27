@@ -1,0 +1,57 @@
+{
+  "active_profile_id": "0dd09f0cf37e44ebae9b5dfeb7c10435",
+  "profiles": [
+    {
+      "id": "0dd09f0cf37e44ebae9b5dfeb7c10435",
+      "name": "FAS标准",
+      "created_at": "2026-03-26T07:31:39.092673+00:00",
+      "updated_at": "2026-03-26T12:47:04.250204+00:00",
+      "config": {
+        "default_job_workflow_mode": "standard_edit",
+        "default_job_enhancement_modes": [
+          "avatar_commentary",
+          "auto_review",
+          "ai_effects"
+        ],
+        "avatar_presenter_id": "data\\avatar_materials\\profiles\\FAS_d2d15bc6\\_.mp4",
+        "avatar_layout_template": "picture_in_picture_right",
+        "avatar_safe_margin": 0.08,
+        "avatar_overlay_scale": 0.18,
+        "voice_provider": "indextts2",
+        "voice_clone_api_base_url": "http://127.0.0.1:49204",
+        "voice_clone_voice_id": "2003864334474354690",
+        "director_rewrite_strength": 0.55
+      },
+      "packaging": {
+        "intro_asset_id": null,
+        "outro_asset_id": null,
+        "insert_asset_id": null,
+        "insert_asset_ids": [],
+        "insert_selection_mode": "manual",
+        "insert_position_mode": "llm",
+        "watermark_asset_id": null,
+        "music_asset_ids": [],
+        "music_selection_mode": "random",
+        "music_loop_mode": "loop_single",
+        "subtitle_style": "bold_yellow_outline",
+        "cover_style": "preset_default",
+        "title_style": "preset_default",
+        "copy_style": "attention_grabbing",
+        "subtitle_motion_style": "motion_static",
+        "smart_effect_style": "smart_effect_rhythm",
+        "music_volume": 0.12,
+        "watermark_position": "top_left",
+        "watermark_opacity": 0.82,
+        "watermark_scale": 0.16,
+        "avatar_overlay_position": "top_right",
+        "avatar_overlay_scale": 0.18,
+        "avatar_overlay_corner_radius": 26,
+        "avatar_overlay_border_width": 4,
+        "avatar_overlay_border_color": "#F4E4B8",
+        "export_resolution_mode": "source",
+        "export_resolution_preset": "1080p",
+        "enabled": true
+      }
+    }
+  ]
+}

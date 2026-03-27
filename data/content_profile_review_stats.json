@@ -1,9 +1,9 @@
 {
-  "updated_at": "2026-03-22T14:56:51.059966+00:00",
+  "updated_at": "2026-03-23T15:46:59.459881+00:00",
   "overall": {
-    "manual_review_total": 1,
+    "manual_review_total": 2,
     "approved_without_changes": 1,
-    "corrected_after_review": 0,
+    "corrected_after_review": 1,
     "eligible_manual_review_total": 0,
     "eligible_approved_without_changes": 0,
     "eligible_corrected_after_review": 0
@@ -14,6 +14,22 @@
       "recorded_at": "2026-03-22T14:56:51.059966+00:00",
       "approved_without_changes": true,
       "changed_fields": [],
+      "quality_gate_candidate": false
+    },
+    "fa2fb23c-108f-4787-802e-854e02aaea79": {
+      "job_id": "1c077801-edf4-4a2c-ba91-845b3ccc69eb",
+      "recorded_at": "2026-03-23T15:46:59.459881+00:00",
+      "approved_without_changes": false,
+      "changed_fields": [
+        "subject_brand",
+        "subject_model",
+        "subject_type",
+        "video_theme",
+        "hook_line",
+        "summary",
+        "engagement_question",
+        "search_queries"
+      ],
       "quality_gate_candidate": false
     }
   }

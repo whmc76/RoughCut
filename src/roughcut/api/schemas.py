@@ -518,6 +518,7 @@ class AvatarMaterialLibraryOut(BaseModel):
     training_api_available: bool
     preview_service_available: bool = True
     intake_mode: str
+    warnings: list[str] = []
     summary: str
     sections: list[AvatarMaterialSectionOut]
     profiles: list[AvatarMaterialProfileOut]

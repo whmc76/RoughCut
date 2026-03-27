@@ -120,6 +120,45 @@ def test_local_whisper_retries_on_cpu_when_cuda_transcribe_fails(monkeypatch):
     assert result.segments[0].text == "ok"
 
 
+def test_local_whisper_retries_on_cpu_when_cublas_is_missing(monkeypatch):
+    class DummySegment:
+        def __init__(self, start: float, end: float, text: str) -> None:
+            self.start = start
+            self.end = end
+            self.text = text
+            self.words = []
+
+    load_calls: list[tuple[str, str, str]] = []
+
+    class DummyWhisperModel:
+        def __init__(self, model_size: str, *, device: str, compute_type: str) -> None:
+            load_calls.append((model_size, device, compute_type))
+            self.device = device
+
+        def transcribe(self, *_args, **_kwargs):
+            if self.device == "cuda":
+                raise RuntimeError("Library libcublas.so.12 is not found or cannot be loaded")
+            return iter([DummySegment(0.0, 1.0, "ok")]), types.SimpleNamespace(duration=1.0)
+
+    monkeypatch.setitem(
+        sys.modules,
+        "ctranslate2",
+        types.SimpleNamespace(get_cuda_device_count=lambda: 1),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "faster_whisper",
+        types.SimpleNamespace(WhisperModel=DummyWhisperModel),
+    )
+
+    provider = LocalWhisperProvider(model_size="base")
+    result = provider._transcribe_sync(Path("dummy.wav"), "zh")
+
+    assert load_calls == [("base", "cuda", "float16"), ("base", "cpu", "int8")]
+    assert len(result.segments) == 1
+    assert result.segments[0].text == "ok"
+
+
 def test_local_whisper_reports_segment_progress(monkeypatch):
     progress_updates: list[dict] = []
     transcribe_kwargs: dict = {}
@@ -214,6 +253,10 @@ def test_local_whisper_retries_without_hotwords_when_unsupported():
 def test_local_whisper_detects_unstable_repetition():
     assert LocalWhisperProvider._segment_looks_unstable("也算一个，也算一个，也算一个，也算一个", 12.0) is True
     assert LocalWhisperProvider._segment_looks_unstable("这把 NOC MT-33 先看钢马和镜面板细节", 6.0) is False
+    assert LocalWhisperProvider._segment_looks_unstable(
+        "这把MT33先看外观细节再看锁定结构最后聊一下上手手感和日常携带体验",
+        24.0,
+    ) is False
 
 
 def test_local_whisper_builds_chunk_ranges_for_rescue():

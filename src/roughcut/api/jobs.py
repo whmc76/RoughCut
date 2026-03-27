@@ -324,17 +324,28 @@ async def cancel_job(job_id: uuid.UUID, session: AsyncSession = Depends(get_sess
     job.error_message = "Cancelled by user"
     job.updated_at = now
     for step in job.steps or []:
+        metadata = dict(step.metadata_ or {})
+        last_task_id = str(metadata.pop("task_id", "") or "").strip()
+        metadata.pop("queue", None)
+        metadata.pop("retry_wait_until", None)
+        metadata.pop("retry_after_sec", None)
+        if last_task_id:
+            metadata["last_task_id"] = last_task_id
+        metadata["updated_at"] = now.isoformat()
         if step.status == "pending":
             step.status = "skipped"
             step.finished_at = now
+            step.metadata_ = {
+                **metadata,
+                "detail": "任务已取消，后续流程停止。",
+            }
         elif step.status == "running":
             step.status = "cancelled"
             step.error_message = "Cancelled by user"
             step.finished_at = now
             step.metadata_ = {
-                **(step.metadata_ or {}),
+                **metadata,
                 "detail": "任务已取消，后续流程停止。",
-                "updated_at": now.isoformat(),
             }
     await session.commit()
     await session.refresh(job)

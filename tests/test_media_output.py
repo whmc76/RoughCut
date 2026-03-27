@@ -66,6 +66,25 @@ def test_get_output_project_dir_dedupes_subject_prefix_from_theme(tmp_path: Path
     assert project_dir.is_dir()
 
 
+def test_resolve_output_orientation_label_supports_horizontal_vertical_and_square():
+    assert output_mod.resolve_output_orientation_label(3840, 2160) == "横版"
+    assert output_mod.resolve_output_orientation_label(2160, 3840) == "竖版"
+    assert output_mod.resolve_output_orientation_label(1080, 1080) == "方版"
+
+
+def test_build_variant_output_path_includes_orientation_and_variant_label(tmp_path: Path):
+    path = output_mod.build_variant_output_path(
+        tmp_path,
+        "20260324_LuckyKiss_KissPod",
+        variant_label="成片",
+        extension=".mp4",
+        width=2160,
+        height=3840,
+    )
+
+    assert path == tmp_path / "20260324_LuckyKiss_KissPod_竖版_成片.mp4"
+
+
 def test_build_cover_variant_output_path_includes_version_and_strategy(tmp_path: Path):
     path = output_mod.build_cover_variant_output_path(tmp_path / "demo_cover.jpg", 1, "bilibili")
 
@@ -246,6 +265,18 @@ def test_title_style_tokens_clamp_text_into_cross_platform_safe_zone():
     assert "min((h-text_h)/2" in style["main"]["y"]
     assert style["bottom"]["y"].startswith("max(max(h*0.120")
     assert "h-max(h*0.140" in style["bottom"]["y"]
+
+
+def test_cover_multimodal_fast_fallback_treats_provider_cooldown_as_retryable():
+    assert output_mod._is_cover_multimodal_fast_fallback_error(
+        RuntimeError("Multimodal provider minimax cooling down for 45s")
+    ) is True
+
+
+def test_cover_multimodal_fast_fallback_treats_connection_refused_as_retryable():
+    assert output_mod._is_cover_multimodal_fast_fallback_error(
+        RuntimeError("ConnectError: [Errno 111] Connection refused")
+    ) is True
 
 
 def test_prioritize_cover_variants_promotes_ctr_for_portrait():

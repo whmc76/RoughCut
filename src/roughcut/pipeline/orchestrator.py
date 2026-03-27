@@ -273,7 +273,7 @@ async def tick() -> None:
                 continue
 
             await _dispatch_step(step, session)
-            if step.step_name in _GPU_SENSITIVE_STEPS:
+            if _step_requires_local_gpu_for_dispatch(step.step_name):
                 running_gpu_steps += 1
 
         # Check for failed jobs (all steps failed)
@@ -296,7 +296,7 @@ def _step_retry_wait_remaining(step: JobStep) -> int:
 
 async def _count_running_gpu_steps(session) -> int:
     result = await session.execute(
-        select(func.count(JobStep.id))
+        select(JobStep.step_name)
         .join(Job, Job.id == JobStep.job_id)
         .where(
             JobStep.status == "running",
@@ -304,7 +304,8 @@ async def _count_running_gpu_steps(session) -> int:
             Job.status.notin_(["cancelled", "failed", "done"]),
         )
     )
-    return int(result.scalar() or 0)
+    running_step_names = [str(step_name or "").strip().lower() for step_name in result.scalars().all()]
+    return sum(1 for step_name in running_step_names if _step_requires_local_gpu_for_dispatch(step_name))
 
 
 def _step_stale_timeout_seconds(step_name: str) -> int:
@@ -384,7 +385,7 @@ async def _recover_stale_running_steps(session) -> None:
 
 
 def _gpu_dispatch_wait_reason(step_name: str, *, running_gpu_steps: int) -> str | None:
-    if step_name not in _GPU_SENSITIVE_STEPS:
+    if not _step_requires_local_gpu_for_dispatch(step_name):
         return None
     if running_gpu_steps > 0:
         return "检测到 RoughCut 仍有 GPU 步骤运行，当前步骤等待空闲后再派发。"
@@ -397,6 +398,15 @@ def _gpu_dispatch_wait_reason(step_name: str, *, running_gpu_steps: int) -> str 
     if not busy_reason:
         return None
     return f"{busy_reason} 调度器暂不派发新的 GPU 任务。"
+
+
+def _step_requires_local_gpu_for_dispatch(step_name: str) -> bool:
+    try:
+        from roughcut.pipeline.tasks import _step_requires_local_gpu
+
+        return bool(_step_requires_local_gpu(step_name))
+    except Exception:
+        return step_name in _GPU_SENSITIVE_STEPS
 
 
 def _coerce_utc(value: datetime) -> datetime:

@@ -46,6 +46,7 @@ from roughcut.edit.render_plan import (
 from roughcut.edit.timeline import save_editorial_timeline
 from roughcut.media.audio import extract_audio, extract_audio_clip
 from roughcut.media.output import (
+    build_variant_output_path,
     extract_cover_frame,
     get_output_project_dir,
     load_cover_selection_summary,
@@ -1951,15 +1952,6 @@ async def run_render(job_id: str) -> dict:
     out_name = out_dir.name
     debug_dir = Path(get_settings().render_debug_dir) / f"{job_id}_{out_name}"
     debug_dir.mkdir(parents=True, exist_ok=True)
-    local_packaged_mp4 = out_dir / f"{out_name}.mp4"
-    local_plain_mp4 = out_dir / f"{out_name}_素板.mp4"
-    local_avatar_mp4 = out_dir / f"{out_name}_数字人版.mp4"
-    local_ai_effect_mp4 = out_dir / f"{out_name}_AI特效版.mp4"
-    local_packaged_srt = out_dir / f"{out_name}.srt"
-    local_plain_srt = out_dir / f"{out_name}_素板.srt"
-    local_avatar_srt = out_dir / f"{out_name}_数字人版.srt"
-    local_ai_effect_srt = out_dir / f"{out_name}_AI特效版.srt"
-    local_cover = out_dir / f"{out_name}_cover.jpg"
 
     with tempfile.TemporaryDirectory() as tmpdir:
         render_heartbeat: asyncio.Task[None] | None = None
@@ -2253,8 +2245,94 @@ async def run_render(job_id: str) -> dict:
             packaging_heartbeat.cancel()
             with suppress(asyncio.CancelledError):
                 await packaging_heartbeat
+        plain_meta = await probe(tmp_plain_mp4)
+        packaged_meta = await probe(tmp_packaged_mp4)
+        ai_effect_meta = await probe(tmp_ai_effect_mp4)
+        avatar_meta = await probe(tmp_avatar_mp4) if tmp_avatar_mp4.exists() else None
+
+        local_plain_mp4 = build_variant_output_path(
+            out_dir,
+            out_name,
+            variant_label="素板",
+            extension=".mp4",
+            width=plain_meta.width,
+            height=plain_meta.height,
+        )
+        local_packaged_mp4 = build_variant_output_path(
+            out_dir,
+            out_name,
+            variant_label="成片",
+            extension=".mp4",
+            width=packaged_meta.width,
+            height=packaged_meta.height,
+        )
+        local_ai_effect_mp4 = build_variant_output_path(
+            out_dir,
+            out_name,
+            variant_label="AI特效版",
+            extension=".mp4",
+            width=ai_effect_meta.width,
+            height=ai_effect_meta.height,
+        )
+        local_avatar_mp4 = (
+            build_variant_output_path(
+                out_dir,
+                out_name,
+                variant_label="数字人版",
+                extension=".mp4",
+                width=avatar_meta.width,
+                height=avatar_meta.height,
+            )
+            if avatar_meta is not None
+            else None
+        )
+        local_plain_srt = build_variant_output_path(
+            out_dir,
+            out_name,
+            variant_label="素板",
+            extension=".srt",
+            width=plain_meta.width,
+            height=plain_meta.height,
+        )
+        local_packaged_srt = build_variant_output_path(
+            out_dir,
+            out_name,
+            variant_label="成片",
+            extension=".srt",
+            width=packaged_meta.width,
+            height=packaged_meta.height,
+        )
+        local_ai_effect_srt = build_variant_output_path(
+            out_dir,
+            out_name,
+            variant_label="AI特效版",
+            extension=".srt",
+            width=ai_effect_meta.width,
+            height=ai_effect_meta.height,
+        )
+        local_avatar_srt = (
+            build_variant_output_path(
+                out_dir,
+                out_name,
+                variant_label="数字人版",
+                extension=".srt",
+                width=avatar_meta.width,
+                height=avatar_meta.height,
+            )
+            if avatar_meta is not None
+            else None
+        )
+        local_cover = build_variant_output_path(
+            out_dir,
+            out_name,
+            variant_label="封面",
+            extension=".jpg",
+            width=plain_meta.width,
+            height=plain_meta.height,
+        )
+
         shutil.copy2(tmp_plain_mp4, local_plain_mp4)
-        if tmp_avatar_mp4.exists():
+        if tmp_avatar_mp4.exists() and local_avatar_mp4 is not None:
             shutil.copy2(tmp_avatar_mp4, local_avatar_mp4)
         shutil.copy2(tmp_ai_effect_mp4, local_ai_effect_mp4)
         shutil.copy2(tmp_packaged_mp4, local_packaged_mp4)
@@ -2273,12 +2351,16 @@ async def run_render(job_id: str) -> dict:
         # Write SRT with remapped timestamps (matches the edited video)
         write_srt_file(packaged_subtitles, local_packaged_srt)
         write_srt_file(remapped_subtitles, local_plain_srt)
-        if tmp_avatar_mp4.exists():
+        if tmp_avatar_mp4.exists() and local_avatar_srt is not None:
             write_srt_file(packaged_subtitles, local_avatar_srt)
         write_srt_file(packaged_subtitles, local_ai_effect_srt)
         packaged_subtitle_sync = _compute_subtitle_sync_check(local_packaged_mp4, local_packaged_srt)
         plain_subtitle_sync = _compute_subtitle_sync_check(local_plain_mp4, local_plain_srt)
-        avatar_subtitle_sync = _compute_subtitle_sync_check(local_avatar_mp4, local_avatar_srt) if tmp_avatar_mp4.exists() else None
+        avatar_subtitle_sync = (
+            _compute_subtitle_sync_check(local_avatar_mp4, local_avatar_srt)
+            if local_avatar_mp4 is not None and local_avatar_srt is not None and tmp_avatar_mp4.exists()
+            else None
+        )
         ai_effect_subtitle_sync = _compute_subtitle_sync_check(local_ai_effect_mp4, local_ai_effect_srt)
 
         # Extract cover frame from the plain render so burned subtitles never leak into thumbnails.
@@ -2308,7 +2390,7 @@ async def run_render(job_id: str) -> dict:
         storage = get_storage()
         await storage.async_upload_file(local_packaged_mp4, packaged_output_key)
         await storage.async_upload_file(local_plain_mp4, plain_output_key)
-        if local_avatar_mp4.exists():
+        if local_avatar_mp4 is not None and local_avatar_mp4.exists():
             await storage.async_upload_file(local_avatar_mp4, avatar_output_key)
         await storage.async_upload_file(local_ai_effect_mp4, ai_effect_output_key)
     except Exception:
@@ -2320,11 +2402,11 @@ async def run_render(job_id: str) -> dict:
         "srt": str(local_packaged_srt),
         "packaged_mp4": str(local_packaged_mp4),
         "plain_mp4": str(local_plain_mp4),
-        "avatar_mp4": str(local_avatar_mp4) if local_avatar_mp4.exists() else None,
+        "avatar_mp4": str(local_avatar_mp4) if local_avatar_mp4 is not None and local_avatar_mp4.exists() else None,
         "ai_effect_mp4": str(local_ai_effect_mp4),
         "packaged_srt": str(local_packaged_srt),
         "plain_srt": str(local_plain_srt),
-        "avatar_srt": str(local_avatar_srt) if local_avatar_srt.exists() else None,
+        "avatar_srt": str(local_avatar_srt) if local_avatar_srt is not None and local_avatar_srt.exists() else None,
         "ai_effect_srt": str(local_ai_effect_srt),
         "cover": str(local_cover) if local_cover else None,
         "cover_variants": [str(path) for path in cover_variants] if local_cover else [],
@@ -2333,7 +2415,7 @@ async def run_render(job_id: str) -> dict:
         "variants": {
             "packaged": str(local_packaged_mp4),
             "plain": str(local_plain_mp4),
-            "avatar": str(local_avatar_mp4) if local_avatar_mp4.exists() else None,
+            "avatar": str(local_avatar_mp4) if local_avatar_mp4 is not None and local_avatar_mp4.exists() else None,
             "ai_effect": str(local_ai_effect_mp4),
         },
     }
@@ -2354,15 +2436,15 @@ async def run_render(job_id: str) -> dict:
                 data_json={
                     "plain_mp4": str(local_plain_mp4),
                     "packaged_mp4": str(local_packaged_mp4),
-                    "avatar_mp4": str(local_avatar_mp4) if local_avatar_mp4.exists() else None,
+                    "avatar_mp4": str(local_avatar_mp4) if local_avatar_mp4 is not None and local_avatar_mp4.exists() else None,
                     "ai_effect_mp4": str(local_ai_effect_mp4),
                     "plain_srt": str(local_plain_srt),
                     "packaged_srt": str(local_packaged_srt),
-                    "avatar_srt": str(local_avatar_srt) if local_avatar_srt.exists() else None,
+                    "avatar_srt": str(local_avatar_srt) if local_avatar_srt is not None and local_avatar_srt.exists() else None,
                     "ai_effect_srt": str(local_ai_effect_srt),
                     "packaged_output_key": packaged_output_key,
                     "plain_output_key": plain_output_key,
-                    "avatar_output_key": avatar_output_key if local_avatar_mp4.exists() else None,
+                    "avatar_output_key": avatar_output_key if local_avatar_mp4 is not None and local_avatar_mp4.exists() else None,
                     "ai_effect_output_key": ai_effect_output_key,
                     "cover": str(local_cover) if local_cover else None,
                     "cover_variants": [str(path) for path in cover_variants] if local_cover else [],

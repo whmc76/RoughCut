@@ -141,3 +141,193 @@ def test_edit_decision_to_dict():
     types = {s["type"] for s in d["segments"]}
     assert "keep" in types
     assert "remove" in types
+
+
+def test_build_edit_decision_removes_micro_keep_without_subtitle_overlap():
+    silences = [
+        SilenceSegment(start=0.0, end=1.0),
+        SilenceSegment(start=1.28, end=3.0),
+    ]
+    decision = build_edit_decision(
+        source_path="test.mp4",
+        duration=3.0,
+        silence_segments=silences,
+        subtitle_items=[],
+    )
+
+    keep_segments = [segment for segment in decision.segments if segment.type == "keep"]
+    assert keep_segments == []
+    assert len(decision.segments) == 1
+    assert decision.segments[0].type == "remove"
+    assert decision.segments[0].start == 0.0
+    assert decision.segments[0].end == 3.0
+
+
+def test_build_edit_decision_trims_keep_edges_to_subtitle_bounds():
+    silences = [
+        SilenceSegment(start=0.0, end=1.0),
+        SilenceSegment(start=2.8, end=4.0),
+    ]
+    subtitle_items = [
+        {
+            "index": 0,
+            "start_time": 1.28,
+            "end_time": 1.58,
+            "text_raw": "KissPod",
+            "text_norm": "KissPod",
+            "text_final": "KissPod",
+        }
+    ]
+    decision = build_edit_decision(
+        source_path="test.mp4",
+        duration=4.0,
+        silence_segments=silences,
+        subtitle_items=subtitle_items,
+        content_profile={
+            "subject_brand": "LuckyKiss",
+            "subject_model": "KissPod",
+            "subject_type": "弹射益生菌含片",
+        },
+    )
+
+    keep_segments = [segment for segment in decision.segments if segment.type == "keep"]
+    assert len(keep_segments) == 1
+    keep = keep_segments[0]
+    assert keep.start == 1.0
+    assert 1.58 < keep.end < 2.8
+    assert keep.end - keep.start < 1.8
+
+
+def test_build_edit_decision_preserves_short_anchor_keep_between_cuts():
+    silences = [
+        SilenceSegment(start=0.0, end=1.0),
+        SilenceSegment(start=1.42, end=2.0),
+    ]
+    subtitle_items = [
+        {
+            "index": 0,
+            "start_time": 1.08,
+            "end_time": 1.32,
+            "text_raw": "KissPod",
+            "text_norm": "KissPod",
+            "text_final": "KissPod",
+        }
+    ]
+    decision = build_edit_decision(
+        source_path="test.mp4",
+        duration=2.0,
+        silence_segments=silences,
+        subtitle_items=subtitle_items,
+        content_profile={
+            "subject_brand": "LuckyKiss",
+            "subject_model": "KissPod",
+            "subject_type": "弹射益生菌含片",
+        },
+    )
+
+    keep_segments = [segment for segment in decision.segments if segment.type == "keep"]
+    assert len(keep_segments) == 1
+    assert keep_segments[0].end - keep_segments[0].start > 0.3
+
+
+def test_build_edit_decision_preserves_short_portability_comparison_keep():
+    silences = [
+        SilenceSegment(start=0.0, end=1.0),
+        SilenceSegment(start=1.58, end=2.1),
+    ]
+    subtitle_items = [
+        {
+            "index": 0,
+            "start_time": 1.08,
+            "end_time": 1.46,
+            "text_raw": "尺寸和莱德曼是很接近的",
+            "text_norm": "尺寸和莱德曼是很接近的",
+            "text_final": "尺寸和莱德曼是很接近的",
+        }
+    ]
+    decision = build_edit_decision(
+        source_path="test.mp4",
+        duration=2.1,
+        silence_segments=silences,
+        subtitle_items=subtitle_items,
+        content_profile={
+            "subject_brand": "LuckyKiss",
+            "subject_model": "KissPod",
+            "subject_type": "弹射益生菌含片",
+        },
+    )
+
+    keep_segments = [segment for segment in decision.segments if segment.type == "keep"]
+    assert len(keep_segments) == 1
+    keep = keep_segments[0]
+    assert keep.start < 1.08
+    assert keep.end > 1.46
+    assert keep.end - keep.start >= 0.45
+
+
+def test_build_edit_decision_skips_edge_trim_for_short_keep_audio_safety():
+    silences = [
+        SilenceSegment(start=0.0, end=1.0),
+        SilenceSegment(start=2.0, end=3.0),
+    ]
+    subtitle_items = [
+        {
+            "index": 0,
+            "start_time": 1.28,
+            "end_time": 1.58,
+            "text_raw": "KissPod真的挺好用",
+            "text_norm": "KissPod真的挺好用",
+            "text_final": "KissPod真的挺好用",
+        }
+    ]
+    decision = build_edit_decision(
+        source_path="test.mp4",
+        duration=3.0,
+        silence_segments=silences,
+        subtitle_items=subtitle_items,
+        content_profile={
+            "subject_brand": "LuckyKiss",
+            "subject_model": "KissPod",
+            "subject_type": "弹射益生菌含片",
+        },
+    )
+
+    keep_segments = [segment for segment in decision.segments if segment.type == "keep"]
+    assert len(keep_segments) == 1
+    keep = keep_segments[0]
+    assert keep.start == 1.0
+    assert keep.end == 2.0
+
+
+def test_build_edit_decision_keeps_wider_audio_safe_padding_for_long_keep():
+    silences = [
+        SilenceSegment(start=0.0, end=1.0),
+        SilenceSegment(start=3.0, end=4.0),
+    ]
+    subtitle_items = [
+        {
+            "index": 0,
+            "start_time": 1.5,
+            "end_time": 2.2,
+            "text_raw": "KissPod真的挺好用",
+            "text_norm": "KissPod真的挺好用",
+            "text_final": "KissPod真的挺好用",
+        }
+    ]
+    decision = build_edit_decision(
+        source_path="test.mp4",
+        duration=4.0,
+        silence_segments=silences,
+        subtitle_items=subtitle_items,
+        content_profile={
+            "subject_brand": "LuckyKiss",
+            "subject_model": "KissPod",
+            "subject_type": "弹射益生菌含片",
+        },
+    )
+
+    keep_segments = [segment for segment in decision.segments if segment.type == "keep"]
+    assert len(keep_segments) == 1
+    keep = keep_segments[0]
+    assert keep.start <= 1.32
+    assert keep.end >= 2.44

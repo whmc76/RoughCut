@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
 import shutil
 import subprocess
@@ -23,6 +24,8 @@ from roughcut.config import get_settings
 from roughcut.providers.multimodal import complete_with_images
 from roughcut.providers.reasoning.base import extract_json_text
 from roughcut.review.content_profile import _mapped_brand_for_model, _normalize_profile_value, _seed_profile_from_text
+
+logger = logging.getLogger(__name__)
 
 COVER_TITLE_STRATEGIES = [
     {
@@ -62,6 +65,27 @@ _COVER_SAFE_VERTICAL_TOP_RATIO = 0.12
 _COVER_SAFE_VERTICAL_BOTTOM_RATIO = 0.14
 _COVER_SAFE_MIN_INNER_PADDING = 18
 _COVER_SAFE_TEXT_WIDTH_RATIO = 31 / 64
+
+
+def _is_cover_multimodal_fast_fallback_error(exc: Exception) -> bool:
+    message = str(exc or "").lower()
+    if not message:
+        return False
+    return any(
+        token in message
+        for token in (
+            "429",
+            "too many requests",
+            "rate limit",
+            "timed out",
+            "timeout",
+            "cooling down",
+            "cooldown",
+            "connection refused",
+            "connecterror",
+            "all connection attempts failed",
+        )
+    )
 
 
 def _sanitize(name: str) -> str:
@@ -256,6 +280,33 @@ def get_output_project_dir(
     project_dir = get_output_dir() / project_name
     project_dir.mkdir(parents=True, exist_ok=True)
     return project_dir
+
+
+def resolve_output_orientation_label(width: int | None, height: int | None) -> str:
+    safe_width = int(width or 0)
+    safe_height = int(height or 0)
+    if safe_width <= 0 or safe_height <= 0:
+        return "未知方向"
+    if safe_height > safe_width:
+        return "竖版"
+    if safe_width > safe_height:
+        return "横版"
+    return "方版"
+
+
+def build_variant_output_path(
+    project_dir: Path,
+    project_name: str,
+    *,
+    variant_label: str,
+    extension: str,
+    width: int | None,
+    height: int | None,
+) -> Path:
+    orientation_label = resolve_output_orientation_label(width, height)
+    suffix = extension if str(extension).startswith(".") else f".{extension}"
+    filename = _sanitize(f"{project_name}_{orientation_label}_{variant_label}{suffix}")
+    return project_dir / filename
 
 
 def get_cover_manifest_path(output_path: Path) -> Path:
@@ -578,7 +629,7 @@ async def _rank_cover_candidates(
             )
             content = await asyncio.wait_for(
                 complete_with_images(prompt, preview_paths, max_tokens=220, json_mode=True),
-                timeout=12,
+                timeout=6,
             )
             data = json.loads(extract_json_text(content))
             ordered: list[dict[str, Any]] = []
@@ -598,7 +649,9 @@ async def _rank_cover_candidates(
                 seen_indices.add(idx)
             if ordered:
                 return ordered
-        except Exception:
+        except Exception as exc:
+            if _is_cover_multimodal_fast_fallback_error(exc):
+                logger.warning("Cover ranking degraded to fallback due to multimodal limit: %s", exc)
             pass
 
     fallback: list[dict[str, Any]] = []
@@ -705,7 +758,7 @@ async def _generate_cover_title_variants(
             )
             content = await asyncio.wait_for(
                 complete_with_images(prompt, preview_paths[:variant_count], max_tokens=700, json_mode=True),
-                timeout=15,
+                timeout=8,
             )
             data = json.loads(extract_json_text(content))
             indexed_plans: dict[int, dict[str, Any]] = {}
@@ -763,7 +816,9 @@ async def _generate_cover_title_variants(
                         }
                     )
                 return plans_by_candidate
-        except Exception:
+        except Exception as exc:
+            if _is_cover_multimodal_fast_fallback_error(exc):
+                logger.warning("Cover title generation degraded to fallback due to multimodal limit: %s", exc)
             pass
     return [
         {

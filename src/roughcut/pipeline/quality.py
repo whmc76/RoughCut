@@ -9,6 +9,7 @@ from typing import Any, Sequence
 
 from roughcut.db.models import Artifact, Job, JobStep, SubtitleCorrection, SubtitleItem
 from roughcut.review.content_profile import (
+    _has_ingestible_product_subject_conflict,
     _is_generic_engagement_question,
     _is_generic_profile_summary,
     _is_generic_subject_type,
@@ -205,6 +206,21 @@ def assess_job_quality(
                 )
             )
 
+        if _has_ingestible_product_subject_conflict(
+            profile=profile,
+            subtitle_items=[_subtitle_item_to_dict(item) for item in subtitle_items],
+            transcript_excerpt=str(profile.get("transcript_excerpt") or ""),
+        ):
+            issues.append(
+                QualityIssue(
+                    "subject_conflict",
+                    "字幕主体与内容画像主体冲突，疑似把入口产品误识别成装备/工具类",
+                    22.0,
+                    auto_fix_step="content_profile",
+                    blocking=True,
+                )
+            )
+
     pending_corrections = sum(1 for item in corrections if item.human_decision not in {"accepted", "rejected"})
     if pending_corrections > 0:
         penalty = min(12.0, 4.0 + pending_corrections * 1.5)
@@ -293,6 +309,17 @@ def _build_subtitle_text(items: Sequence[SubtitleItem]) -> str:
         if text:
             parts.append(text)
     return _normalize_text(" ".join(parts))
+
+
+def _subtitle_item_to_dict(item: SubtitleItem) -> dict[str, Any]:
+    return {
+        "item_index": int(item.item_index or 0),
+        "start_time": float(item.start_time or 0.0),
+        "end_time": float(item.end_time or 0.0),
+        "text_raw": str(item.text_raw or ""),
+        "text_norm": str(item.text_norm or ""),
+        "text_final": str(item.text_final or ""),
+    }
 
 
 def _build_profile_text(profile: dict[str, Any]) -> str:

@@ -29,7 +29,7 @@ class LocalWhisperProvider(TranscriptionProvider):
     @staticmethod
     def _is_cuda_runtime_error(exc: Exception) -> bool:
         message = str(exc).lower()
-        return "cuda" in message
+        return any(token in message for token in ("cuda", "cublas", "cudnn", "nvidia"))
 
     def _load_model_for_device(self, device: str):
         from faster_whisper import WhisperModel
@@ -204,8 +204,6 @@ class LocalWhisperProvider(TranscriptionProvider):
         compact = re.sub(r"\s+", "", str(text or "").strip())
         if not compact:
             return False
-        if duration >= 18 and len(compact) >= 28:
-            return True
         clauses = [item for item in re.split(r"[，,。.!！？?；;]", compact) if len(item) >= 3]
         if len(clauses) >= 4:
             counts: dict[str, int] = {}

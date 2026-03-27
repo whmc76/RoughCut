@@ -195,10 +195,10 @@ async def test_tick_respects_retry_wait_until_before_redispatch(monkeypatch, db_
     async def zero(*args, **kwargs):
         return 0
 
-    dispatched: list[str] = []
+    dispatched: list[tuple[str, str]] = []
 
     async def fake_dispatch(step, session):
-        dispatched.append(step.step_name)
+        dispatched.append((str(step.job_id), step.step_name))
 
     monkeypatch.setattr(watcher_mod, "run_watch_root_auto_duty", no_watch_duty)
     monkeypatch.setattr(orchestrator_mod, "_ensure_job_steps", no_op)
@@ -232,7 +232,7 @@ async def test_tick_respects_retry_wait_until_before_redispatch(monkeypatch, db_
 
     await orchestrator_mod.tick()
 
-    assert "transcribe" not in dispatched
+    assert (str(job_id), "transcribe") not in dispatched
 
     async with factory() as session:
         step = (

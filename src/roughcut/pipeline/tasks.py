@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import shutil
 import subprocess
 import time
@@ -26,6 +27,8 @@ _GPU_PRESSURE_TOKENS = (
     "insufficient",
     "alloc",
 )
+_ACTIVE_JOB_STATUSES = {"pending", "processing"}
+_TERMINAL_JOB_STATUSES = {"done", "failed", "cancelled", "needs_review"}
 
 
 def _reset_db_session_state() -> None:
@@ -39,6 +42,59 @@ def _reset_db_session_state() -> None:
             pass
     _sess._engine = None
     _sess._session_factory = None
+
+
+def _can_transition_step(
+    *,
+    job_status: str,
+    step_status: str,
+    target_status: str,
+    current_task_id: str | None,
+    task_id: str | None,
+) -> bool:
+    normalized_job_status = str(job_status or "").strip().lower()
+    normalized_step_status = str(step_status or "").strip().lower()
+    current_task = str(current_task_id or "").strip()
+    incoming_task = str(task_id or "").strip()
+
+    if target_status == "running":
+        if normalized_job_status not in _ACTIVE_JOB_STATUSES:
+            return False
+        if normalized_step_status != "pending":
+            return False
+        if current_task and incoming_task and current_task != incoming_task:
+            return False
+        return True
+
+    if normalized_job_status in _TERMINAL_JOB_STATUSES and target_status != "cancelled":
+        return False
+    if normalized_step_status != "running":
+        return False
+    if incoming_task and current_task and current_task != incoming_task:
+        return False
+    return True
+
+
+def _finalize_step_metadata(
+    metadata: dict,
+    *,
+    status: str,
+    current_task_id: str | None,
+    task_id: str | None,
+) -> dict:
+    updated = dict(metadata)
+    if status == "running":
+        if task_id:
+            updated["task_id"] = task_id
+        return updated
+
+    last_task_id = str(task_id or current_task_id or "").strip()
+    updated.pop("task_id", None)
+    updated.pop("retry_wait_until", None)
+    updated.pop("retry_after_sec", None)
+    if last_task_id:
+        updated["last_task_id"] = last_task_id
+    return updated
 
 
 def _update_step_status(
@@ -69,9 +125,14 @@ def _update_step_status(
             step = result.scalar_one_or_none()
             if step:
                 current_task_id = (step.metadata_ or {}).get("task_id")
-                if task_id and current_task_id and current_task_id != task_id:
-                    if not (status == "running" and step.status != "running"):
-                        return False
+                if not _can_transition_step(
+                    job_status=str(job.status or ""),
+                    step_status=str(step.status or ""),
+                    target_status=status,
+                    current_task_id=str(current_task_id or ""),
+                    task_id=str(task_id or ""),
+                ):
+                    return False
                 step.status = status
                 now = datetime.now(timezone.utc)
                 if status == "running":
@@ -81,12 +142,16 @@ def _update_step_status(
                 elapsed_seconds = None
                 if step.started_at:
                     elapsed_seconds = max(0.0, ((step.finished_at or now) - step.started_at).total_seconds())
-                step.metadata_ = {
+                step.metadata_ = _finalize_step_metadata(
+                    {
                     **(step.metadata_ or {}),
                     "updated_at": now.isoformat(),
-                    **({"task_id": task_id} if task_id else {}),
                     **({"elapsed_seconds": round(elapsed_seconds, 3)} if elapsed_seconds is not None else {}),
-                }
+                    },
+                    status=status,
+                    current_task_id=str(current_task_id or ""),
+                    task_id=str(task_id or ""),
+                )
                 if error:
                     step.error_message = error
                 elif status in ("running", "done"):
@@ -127,7 +192,13 @@ def _update_step_retry_waiting(
             if step is None:
                 return False
             current_task_id = (step.metadata_ or {}).get("task_id")
-            if task_id and current_task_id and current_task_id != task_id:
+            if not _can_transition_step(
+                job_status=str(job.status or ""),
+                step_status=str(step.status or ""),
+                target_status="pending",
+                current_task_id=str(current_task_id or ""),
+                task_id=str(task_id or ""),
+            ):
                 return False
             now = datetime.now(timezone.utc)
             step.status = "pending"
@@ -175,7 +246,40 @@ def _is_gpu_pressure_error(exc: Exception) -> bool:
 
 
 def _is_gpu_sensitive_step(step_name: str) -> bool:
-    return step_name in _GPU_INTENSIVE_STEPS
+    return _step_requires_local_gpu(step_name)
+
+
+def _step_requires_local_gpu(step_name: str) -> bool:
+    normalized = str(step_name or "").strip().lower()
+    if normalized == "render":
+        return True
+    if normalized == "transcribe":
+        settings = get_settings()
+        provider = str(getattr(settings, "transcription_provider", "") or "").strip().lower()
+        if provider != "local_whisper":
+            return False
+        return _local_gpu_available_or_expected()
+    return False
+
+
+def _local_gpu_available_or_expected() -> bool:
+    try:
+        import ctranslate2
+
+        if int(ctranslate2.get_cuda_device_count() or 0) > 0:
+            return True
+    except Exception:
+        pass
+
+    docker_gpus = str(os.getenv("ROUGHCUT_DOCKER_GPUS", "") or "").strip().lower()
+    if docker_gpus and docker_gpus not in {"none", "void", "off", "false", "0", "no"}:
+        return True
+
+    visible_devices = str(os.getenv("NVIDIA_VISIBLE_DEVICES", "") or "").strip().lower()
+    if visible_devices and visible_devices not in {"none", "void", "off", "false", "0", "no"}:
+        return True
+
+    return False
 
 
 def _compute_retry_countdown(task) -> int:
@@ -252,6 +356,7 @@ def _probe_local_gpu_pressure(step_name: str) -> str | None:
 def _run_task_step(task, job_id: str, step_name: str, *, retry_countdown: int):
     task_id = task.request.id
     if not _update_step_status(job_id, step_name, "running", task_id=task_id):
+        logger.info("step ignored before start step=%s job=%s task_id=%s", step_name, job_id, task_id)
         return {"ignored": True}
 
     started = time.perf_counter()
@@ -259,7 +364,9 @@ def _run_task_step(task, job_id: str, step_name: str, *, retry_countdown: int):
     local_gpu_wait_reason = _probe_local_gpu_pressure(step_name)
     if local_gpu_wait_reason:
         countdown = _compute_retry_countdown(task)
-        _update_step_retry_waiting(job_id, step_name, local_gpu_wait_reason, countdown=countdown, task_id=task_id)
+        if not _update_step_retry_waiting(job_id, step_name, local_gpu_wait_reason, countdown=countdown, task_id=task_id):
+            logger.info("step gpu wait ignored step=%s job=%s task_id=%s", step_name, job_id, task_id)
+            return {"ignored": True}
         logger.warning(
             "step waiting for gpu step=%s job=%s task_id=%s retry_in=%ss reason=%s",
             step_name,
@@ -272,7 +379,15 @@ def _run_task_step(task, job_id: str, step_name: str, *, retry_countdown: int):
     try:
         result = run_step_sync(step_name, job_id)
         elapsed = time.perf_counter() - started
-        _update_step_status(job_id, step_name, "done", task_id=task_id)
+        if not _update_step_status(job_id, step_name, "done", task_id=task_id):
+            logger.warning(
+                "step completion ignored after execution step=%s job=%s task_id=%s elapsed=%.2fs",
+                step_name,
+                job_id,
+                task_id,
+                elapsed,
+            )
+            return {"ignored": True, "late_writeback": True}
         logger.info(
             "step finished step=%s job=%s task_id=%s elapsed=%.2fs result=%s",
             step_name,
@@ -286,7 +401,15 @@ def _run_task_step(task, job_id: str, step_name: str, *, retry_countdown: int):
         if _is_gpu_pressure_error(exc):
             countdown = _compute_retry_countdown(task)
             wait_detail = f"检测到 GPU/资源繁忙，{countdown}s 后自动重试：{exc}"
-            _update_step_retry_waiting(job_id, step_name, wait_detail, countdown=countdown, task_id=task_id)
+            if not _update_step_retry_waiting(job_id, step_name, wait_detail, countdown=countdown, task_id=task_id):
+                logger.warning(
+                    "step gpu retry ignored step=%s job=%s task_id=%s error=%s",
+                    step_name,
+                    job_id,
+                    task_id,
+                    exc,
+                )
+                return {"ignored": True, "late_writeback": True}
             logger.warning(
                 "step retrying for gpu pressure step=%s job=%s task_id=%s retry_in=%ss error=%s",
                 step_name,
@@ -297,7 +420,16 @@ def _run_task_step(task, job_id: str, step_name: str, *, retry_countdown: int):
             )
             raise task.retry(exc=exc, countdown=countdown)
         elapsed = time.perf_counter() - started
-        _update_step_status(job_id, step_name, "failed", str(exc), task_id=task_id)
+        if not _update_step_status(job_id, step_name, "failed", str(exc), task_id=task_id):
+            logger.warning(
+                "step failure ignored after execution step=%s job=%s task_id=%s elapsed=%.2fs error=%s",
+                step_name,
+                job_id,
+                task_id,
+                elapsed,
+                exc,
+            )
+            return {"ignored": True, "late_writeback": True}
         logger.exception(
             "step failed step=%s job=%s task_id=%s elapsed=%.2fs error=%s",
             step_name,

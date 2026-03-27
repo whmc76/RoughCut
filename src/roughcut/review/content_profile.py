@@ -25,6 +25,25 @@ from roughcut.speech.postprocess import cleanup_subtitle_fillers, normalize_disp
 
 _CONTENT_PROFILE_INFER_CACHE_VERSION = "2026-03-22.infer.v1"
 _CONTENT_PROFILE_ENRICH_CACHE_VERSION = "2026-03-22.enrich.v1"
+_INGESTIBLE_PRODUCT_SIGNALS = (
+    "luckykiss",
+    "kisspod",
+    "kissport",
+    "含片",
+    "益生菌",
+    "口香糖",
+    "薄荷糖",
+    "零糖",
+    "口气",
+)
+_GEAR_STYLE_SIGNALS = (
+    "工具钳",
+    "战术笔",
+    "edc",
+    "弹夹",
+    "装备",
+    "莱德曼",
+)
 
 
 def _normalize_seeded_profile_for_cache(profile: dict[str, Any] | None) -> dict[str, Any]:
@@ -167,6 +186,40 @@ def apply_glossary_terms(text: str, glossary_terms: list[dict[str, Any]]) -> str
             if wrong_form and wrong_form != correct_form:
                 result = re.sub(re.escape(wrong_form), correct_form, result, flags=re.IGNORECASE)
     return result
+
+
+def _build_subtitle_signal_blob(subtitle_items: list[dict[str, Any]] | None, *, max_items: int = 96) -> str:
+    chunks: list[str] = []
+    for item in (subtitle_items or [])[:max_items]:
+        text = _clean_line(item.get("text_final") or item.get("text_norm") or item.get("text_raw") or "")
+        if text:
+            chunks.append(text)
+    return "\n".join(chunks)
+
+
+def _has_ingestible_product_subject_conflict(
+    *,
+    profile: dict[str, Any],
+    subtitle_items: list[dict[str, Any]] | None = None,
+    transcript_excerpt: str = "",
+) -> bool:
+    profile_blob = " ".join(
+        [
+            str(profile.get("subject_type") or ""),
+            str(profile.get("summary") or ""),
+            str(profile.get("video_theme") or ""),
+            str(profile.get("subject_brand") or ""),
+            str(profile.get("subject_model") or ""),
+            json.dumps(profile.get("cover_title") or {}, ensure_ascii=False),
+        ]
+    ).lower()
+    subtitle_blob = f"{transcript_excerpt}\n{_build_subtitle_signal_blob(subtitle_items)}".lower()
+
+    ingestible_hits = sum(1 for token in _INGESTIBLE_PRODUCT_SIGNALS if token in subtitle_blob)
+    gear_hits = sum(1 for token in _GEAR_STYLE_SIGNALS if token in profile_blob)
+    profile_ingestible_hits = sum(1 for token in _INGESTIBLE_PRODUCT_SIGNALS if token in profile_blob)
+
+    return ingestible_hits >= 2 and gear_hits >= 1 and profile_ingestible_hits == 0
 
 
 def build_cover_title(profile: dict[str, Any], preset: WorkflowPreset) -> dict[str, str]:
@@ -337,6 +390,13 @@ def assess_content_profile_automation(
         review_reasons.append("字幕上下文偏少")
     else:
         review_reasons.append("字幕上下文不足")
+
+    if _has_ingestible_product_subject_conflict(
+        profile=profile,
+        subtitle_items=subtitle_items,
+        transcript_excerpt=transcript_excerpt,
+    ):
+        blocking_reasons.append("字幕显示为含片/益生菌等入口产品，但当前摘要主体仍落在装备/工具类")
 
     subject_brand = str(profile.get("subject_brand") or "").strip()
     subject_model = str(profile.get("subject_model") or "").strip()

@@ -40,6 +40,13 @@ _CREATOR_BUSINESS_FIELDS = (
     "availability",
 )
 
+_DEMO_PROFILE_NAME_PATTERNS = (
+    "演示创作者",
+    "creatordemo",
+    "demo creator",
+    "demo_creator",
+)
+
 
 def avatar_materials_root() -> Path:
     root = _AVATAR_MATERIALS_ROOT
@@ -106,6 +113,7 @@ def build_avatar_material_requirements() -> dict[str, Any]:
         "provider": "heygem",
         "training_api_available": False,
         "intake_mode": "guided_processing",
+        "warnings": [],
         "summary": "这里现在是创作者档案工作台。一个档案同时管理作者身份、内容定位、渠道信息、商务备注，以及数字人口播所需的讲话视频、声音采样和肖像照，后续简介生成与数字人链路都会复用这些信息。",
         "sections": [
             {
@@ -430,3 +438,63 @@ def build_creator_profile_dashboard(profile: dict[str, Any]) -> dict[str, Any]:
         "strengths": strengths[:4],
         "next_steps": next_steps[:5],
     }
+
+
+def detect_avatar_material_library_warnings(profiles: list[dict[str, Any]]) -> list[str]:
+    warnings: list[str] = []
+    suspicious_profiles = [
+        profile for profile in profiles
+        if _looks_like_demo_avatar_profile(profile)
+    ]
+    if suspicious_profiles:
+        names = "、".join(
+            str(profile.get("display_name") or profile.get("presenter_alias") or profile.get("id") or "未命名档案")
+            for profile in suspicious_profiles[:3]
+        )
+        warnings.append(
+            f"检测到疑似演示创作者档案：{names}。如果这是正式工作台，请检查本地状态文件 data/avatar_materials/profiles.json 是否被样例数据覆盖。"
+        )
+    return warnings
+
+
+def _looks_like_demo_avatar_profile(profile: dict[str, Any]) -> bool:
+    display_name = str(profile.get("display_name") or "").strip()
+    presenter_alias = str(profile.get("presenter_alias") or "").strip()
+    creator_profile = profile.get("creator_profile") if isinstance(profile.get("creator_profile"), dict) else {}
+    dashboard = profile.get("profile_dashboard") if isinstance(profile.get("profile_dashboard"), dict) else {}
+
+    if not _matches_demo_profile_name(display_name, presenter_alias):
+        return False
+
+    completeness_score = int(dashboard.get("completeness_score") or 0)
+    return completeness_score <= 20 and _creator_profile_is_nearly_empty(creator_profile)
+
+
+def _matches_demo_profile_name(display_name: str, presenter_alias: str) -> bool:
+    blob = f"{display_name} {presenter_alias}".lower()
+    return any(pattern in blob for pattern in _DEMO_PROFILE_NAME_PATTERNS)
+
+
+def _creator_profile_is_nearly_empty(profile: dict[str, Any]) -> bool:
+    identity = profile.get("identity") if isinstance(profile.get("identity"), dict) else {}
+    positioning = profile.get("positioning") if isinstance(profile.get("positioning"), dict) else {}
+    publishing = profile.get("publishing") if isinstance(profile.get("publishing"), dict) else {}
+    business = profile.get("business") if isinstance(profile.get("business"), dict) else {}
+
+    meaningful_fields = (
+        str(identity.get("title") or "").strip(),
+        str(identity.get("bio") or "").strip(),
+        str(positioning.get("creator_focus") or "").strip(),
+        str(positioning.get("audience") or "").strip(),
+        str(positioning.get("style") or "").strip(),
+        str(publishing.get("primary_platform") or "").strip(),
+        str(publishing.get("signature") or "").strip(),
+        str(business.get("contact") or "").strip(),
+        str(business.get("collaboration_notes") or "").strip(),
+    )
+    list_fields = (
+        list(positioning.get("expertise") or []),
+        list(positioning.get("tone_keywords") or []),
+        list(publishing.get("active_platforms") or []),
+    )
+    return not any(meaningful_fields) and not any(list_fields)

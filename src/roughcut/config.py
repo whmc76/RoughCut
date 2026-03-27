@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -35,6 +36,12 @@ ENV_MANAGED_SETTINGS: tuple[str, ...] = (
     "avatar_training_api_base_url",
     "voice_clone_api_base_url",
     "output_dir",
+)
+ENV_EXPLICIT_OVERRIDE_SETTINGS: tuple[str, ...] = ENV_MANAGED_SETTINGS + (
+    "transcription_provider",
+    "transcription_model",
+    "transcription_dialect",
+    "qwen_asr_api_base_url",
 )
 TRANSCRIPTION_MODEL_OPTIONS: dict[str, list[str]] = {
     "funasr": [
@@ -510,7 +517,7 @@ def _split_runtime_overrides(data: dict[str, Any]) -> tuple[dict[str, Any], dict
             if str(value or "").strip():
                 secrets[key] = value
             continue
-        if key in ENV_MANAGED_SETTINGS:
+        if key in ENV_MANAGED_SETTINGS or _has_explicit_env_override(key):
             continue
         persisted[key] = value
     return persisted, secrets
@@ -530,5 +537,25 @@ def _strip_env_managed_updates(updates: dict[str, Any]) -> dict[str, Any]:
     return {
         key: value
         for key, value in updates.items()
-        if key not in ENV_MANAGED_SETTINGS
+        if key not in ENV_MANAGED_SETTINGS and not _has_explicit_env_override(key)
     }
+
+
+def _has_explicit_env_override(key: str) -> bool:
+    if key not in ENV_EXPLICIT_OVERRIDE_SETTINGS:
+        return False
+    for env_name in _env_names_for_setting(key):
+        value = os.getenv(env_name)
+        if value is not None and str(value).strip():
+            return True
+    return False
+
+
+def _env_names_for_setting(key: str) -> tuple[str, ...]:
+    names = {str(key or "").upper()}
+    field = Settings.model_fields.get(key)
+    if field is not None:
+        validation_alias = getattr(field, "validation_alias", None)
+        if isinstance(validation_alias, str) and validation_alias.strip():
+            names.add(validation_alias.strip())
+    return tuple(sorted(names))

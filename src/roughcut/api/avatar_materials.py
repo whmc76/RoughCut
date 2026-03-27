@@ -13,6 +13,7 @@ from roughcut.api.schemas import AvatarMaterialLibraryOut
 from roughcut.avatar import (
     build_avatar_material_requirements,
     create_profile_dir,
+    detect_avatar_material_library_warnings,
     delete_avatar_material_profile,
     get_avatar_material_profile,
     now_iso,
@@ -65,6 +66,7 @@ async def get_avatar_materials():
         profile["capability_status"] = capability_status
         profile["next_action"] = next_action
     payload["preview_service_available"] = preview_service_available
+    payload["warnings"] = detect_avatar_material_library_warnings(profiles)
     payload["profiles"] = profiles
     return payload
 

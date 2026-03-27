@@ -679,6 +679,32 @@ def test_assess_content_profile_automation_blocks_first_seen_product_identity():
     assert evidence_bundle["matched_subtitle_snippets"][0].endswith("这期鸿福 F叉二一小副包做个开箱测评。")
 
 
+def test_assess_content_profile_automation_blocks_ingestible_product_mislabeled_as_gear():
+    assessment = assess_content_profile_automation(
+        {
+            "preset_name": "edc_tactical",
+            "subject_type": "多功能工具钳",
+            "video_theme": "高价工具钳开箱",
+            "summary": "这条视频主要围绕多功能工具钳展开，重点看上手体验和开箱包装。",
+            "engagement_question": "这类工具钳你会随身带吗？",
+            "search_queries": ["工具钳 开箱", "工具钳 上手"],
+            "cover_title": {"top": "多功能工具钳", "main": "高价工具钳开箱", "bottom": "这次升级到位吗"},
+            "evidence": [{"title": "demo"}],
+        },
+        subtitle_items=[
+            {"text_raw": "今天给大家介绍一个 LuckyKiss 的。"},
+            {"text_raw": "益生菌含片这个产品它叫 KissPod。"},
+            {"text_raw": "这个含片直接给它放进去。"},
+            {"text_raw": "口气清新的能力还是相当不错。"},
+            {"text_raw": "一个是三百亿的这个益生菌。"},
+            {"text_raw": "另外它是这个零糖。"},
+        ],
+    )
+
+    assert assessment["auto_confirm"] is False
+    assert "字幕显示为含片/益生菌等入口产品，但当前摘要主体仍落在装备/工具类" in assessment["blocking_reasons"]
+
+
 @pytest.mark.asyncio
 async def test_apply_content_profile_feedback_accepts_draft_without_reenrichment(
     monkeypatch: pytest.MonkeyPatch,

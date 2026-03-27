@@ -12,26 +12,33 @@ x-app-env: &app-env
   S3_REGION: us-east-1
   OUTPUT_DIR: /app/data/output
   RENDER_DEBUG_DIR: /app/logs/render-debug
+  XDG_CACHE_HOME: /app/data/cache
+  HF_HOME: /app/data/cache/huggingface
+  ROUGHCUT_DOCKER_GPUS: ${ROUGHCUT_DOCKER_GPUS:-all}
   SUBTITLE_FONT: Noto Sans CJK SC
   COVER_TITLE_FONT_PATH: /usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc
   HEYGEM_SHARED_ROOT: /code/data
   HEYGEM_VOICE_ROOT: /code/data/voice/data
   AVATAR_API_BASE_URL: ${AVATAR_API_BASE_URL:-http://host.docker.internal:49202}
   AVATAR_TRAINING_API_BASE_URL: ${AVATAR_TRAINING_API_BASE_URL:-http://host.docker.internal:49204}
+  OLLAMA_BASE_URL: ${ROUGHCUT_DOCKER_OLLAMA_BASE_URL:-http://host.docker.internal:11434}
 
 x-app-common: &app-common
   build:
     context: .
     dockerfile: Dockerfile
     args:
-      ROUGHCUT_PYTHON_EXTRAS: ${ROUGHCUT_DOCKER_PYTHON_EXTRAS:-}
+      ROUGHCUT_PYTHON_EXTRAS: ${ROUGHCUT_DOCKER_PYTHON_EXTRAS:-local-asr}
   image: roughcut:local
   env_file:
     - .env
   environment:
     <<: *app-env
+  extra_hosts:
+    - "host.docker.internal:host-gateway"
   volumes:
     - ./data/output:/app/data/output
+    - ./data/cache:/app/data/cache
     - ./logs:/app/logs
     - ./watch:/app/watch
     - ${HEYGEM_SHARED_HOST_DIR:-E:/WorkSpace/heygem/data}:/code/data
@@ -97,7 +104,7 @@ services:
       context: .
       dockerfile: Dockerfile
       args:
-        ROUGHCUT_PYTHON_EXTRAS: ${ROUGHCUT_DOCKER_PYTHON_EXTRAS:-}
+        ROUGHCUT_PYTHON_EXTRAS: ${ROUGHCUT_DOCKER_PYTHON_EXTRAS:-local-asr}
     image: roughcut:local
     env_file:
       - .env
@@ -130,10 +137,20 @@ services:
 
   worker-media:
     <<: *app-common
+    gpus: ${ROUGHCUT_DOCKER_GPUS:-all}
+    environment:
+      <<: *app-env
+      NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-all}
+      NVIDIA_DRIVER_CAPABILITIES: ${NVIDIA_DRIVER_CAPABILITIES:-compute,utility,video}
     command: ["roughcut", "worker", "--queue", "media_queue", "--pool", "prefork", "--concurrency", "2"]
 
   worker-llm:
     <<: *app-common
+    gpus: ${ROUGHCUT_DOCKER_GPUS:-all}
+    environment:
+      <<: *app-env
+      NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-all}
+      NVIDIA_DRIVER_CAPABILITIES: ${NVIDIA_DRIVER_CAPABILITIES:-compute,utility,video}
     command: ["roughcut", "worker", "--queue", "llm_queue", "--pool", "prefork", "--concurrency", "2"]
 
   watcher:

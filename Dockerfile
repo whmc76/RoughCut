@@ -17,8 +17,11 @@ ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 ENV UV_LINK_MODE=copy
 ENV UV_COMPILE_BYTECODE=1
+ENV UV_HTTP_TIMEOUT=300
 ENV UV_PROJECT_ENVIRONMENT=/app/.venv
+ENV UV_CACHE_DIR=/root/.cache/uv
 ENV PATH="/app/.venv/bin:${PATH}"
+ENV LD_LIBRARY_PATH="/app/.venv/lib/python3.11/site-packages/nvidia/cublas/lib:/app/.venv/lib/python3.11/site-packages/nvidia/cudnn/lib:${LD_LIBRARY_PATH}"
 ARG ROUGHCUT_PYTHON_EXTRAS=""
 
 WORKDIR /app
@@ -35,19 +38,32 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY pyproject.toml uv.lock README.md alembic.ini ./
-COPY src ./src
-COPY frontend ./frontend
-COPY --from=frontend-builder /frontend/frontend/dist ./frontend/dist
 
-RUN if [ -n "${ROUGHCUT_PYTHON_EXTRAS}" ]; then \
+RUN --mount=type=cache,target=/root/.cache/uv if [ -n "${ROUGHCUT_PYTHON_EXTRAS}" ]; then \
         set --; \
         for extra in ${ROUGHCUT_PYTHON_EXTRAS}; do \
             set -- "$@" --extra "${extra}"; \
         done; \
-        uv sync --frozen --no-dev "$@"; \
+        uv sync --frozen --no-dev --no-install-project "$@"; \
     else \
-        uv sync --frozen --no-dev; \
+        uv sync --frozen --no-dev --no-install-project; \
     fi
+
+COPY src ./src
+COPY frontend ./frontend
+COPY --from=frontend-builder /frontend/frontend/dist ./frontend/dist
+
+RUN --mount=type=cache,target=/root/.cache/uv if [ -n "${ROUGHCUT_PYTHON_EXTRAS}" ]; then \
+        set --; \
+        for extra in ${ROUGHCUT_PYTHON_EXTRAS}; do \
+            set -- "$@" --extra "${extra}"; \
+        done; \
+        uv sync --frozen --no-dev --no-editable "$@"; \
+    else \
+        uv sync --frozen --no-dev --no-editable; \
+    fi
+
+RUN python -c "from pathlib import Path; libs = [Path('/app/.venv/lib/python3.11/site-packages/nvidia/cublas/lib/libcublas.so.12'), Path('/app/.venv/lib/python3.11/site-packages/nvidia/cudnn/lib/libcudnn.so.9')]; missing = [str(path) for path in libs if not path.exists()]; assert not missing, f'Missing CUDA runtime libs: {missing}'"
 
 RUN mkdir -p /app/data/output /app/logs
 

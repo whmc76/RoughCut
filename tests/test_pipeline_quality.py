@@ -232,3 +232,63 @@ def test_assess_job_quality_penalizes_subtitle_sync_issue_and_prefers_render_rer
     assert "subtitle_sync_issue" in assessment["issue_codes"]
     assert assessment["recommended_rerun_step"] == "render"
     assert assessment["recommended_rerun_steps"] == ["render", "final_review", "platform_package"]
+
+
+def test_assess_job_quality_blocks_subject_conflict_between_subtitles_and_profile():
+    job = Job(
+        id=uuid.uuid4(),
+        source_path="jobs/demo/luckykiss.mp4",
+        source_name="luckykiss.mp4",
+        status="processing",
+        language="zh-CN",
+    )
+    steps = [
+        JobStep(job_id=job.id, step_name="content_profile", status="done"),
+    ]
+    artifacts = [
+        Artifact(
+            job_id=job.id,
+            artifact_type="content_profile_final",
+            data_json={
+                "subject_type": "多功能工具钳",
+                "video_theme": "工具钳开箱",
+                "summary": "这条视频主要围绕多功能工具钳展开。",
+                "engagement_question": "这类工具钳你会随身带吗？",
+                "preset_name": "edc_tactical",
+                "review_mode": "manual_confirmed",
+                "automation_review": {"score": 0.91},
+            },
+            created_at=_now(),
+        ),
+    ]
+    subtitles = [
+        SubtitleItem(
+            job_id=job.id,
+            version=1,
+            item_index=0,
+            start_time=0.0,
+            end_time=4.0,
+            text_raw="今天给大家介绍一个 LuckyKiss 的益生菌含片，产品名叫 KissPod。",
+        ),
+        SubtitleItem(
+            job_id=job.id,
+            version=1,
+            item_index=1,
+            start_time=4.0,
+            end_time=8.0,
+            text_raw="这个含片主打口气清新和零糖，还是弹射入口的玩法。",
+        ),
+    ]
+
+    assessment = assess_job_quality(
+        job=job,
+        steps=steps,
+        artifacts=artifacts,
+        subtitle_items=subtitles,
+        corrections=[],
+        completion_candidate=False,
+    )
+
+    assert "subject_conflict" in assessment["issue_codes"]
+    assert assessment["auto_fixable"] is False
+    assert assessment["recommended_rerun_step"] == "content_profile"
