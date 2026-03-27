@@ -1,4 +1,5 @@
 import { PageHeader } from "../components/ui/PageHeader";
+import { PageSection } from "../components/ui/PageSection";
 import { PanelHeader } from "../components/ui/PanelHeader";
 import { BotSettingsPanel } from "../features/settings/BotSettingsPanel";
 import { CreativeSettingsPanel } from "../features/settings/CreativeSettingsPanel";
@@ -36,11 +37,16 @@ export function SettingsPage() {
           : t("autosave.idle");
 
   return (
-    <section>
+    <section className="page-stack">
       <PageHeader
         eyebrow={t("settings.page.eyebrow")}
         title={t("settings.page.title")}
         description={t("settings.page.description")}
+        summary={[
+          { label: "基础优先", value: "总览、模型、质量", detail: "先稳定核心产出，再打开更深层的接入设置" },
+          { label: "高级收敛", value: "运行接入与工程能力", detail: "Telegram、Agent 和数字人配置放到后段，避免首屏过载" },
+          { label: "保存方式", value: "自动保存", detail: "状态会直接反映当前配置是否已经落盘" },
+        ]}
         actions={
           <>
             <button className="button ghost" onClick={() => workspace.reset.mutate()} disabled={workspace.reset.isPending}>
@@ -52,15 +58,28 @@ export function SettingsPage() {
       />
       {workspace.saveError && <div className="notice top-gap">{workspace.saveError}</div>}
 
-      <div className="panel-grid">
-        <SettingsOverviewPanel
-          form={workspace.form}
-          config={workspace.config.data}
-          runtimeEnvironment={workspace.runtimeEnvironment.data}
-          configProfiles={workspace.configProfiles.data}
-        />
-        <ModelSettingsPanel form={workspace.form} options={workspace.options.data} onChange={(key, value) => workspace.setForm((prev) => ({ ...prev, [key]: value }))} />
-        <QualitySettingsPanel form={workspace.form} config={workspace.config.data} onChange={(key, value) => workspace.setForm((prev) => ({ ...prev, [key]: value }))} />
+      <PageSection
+        eyebrow="核心"
+        title="先稳定核心产出设置"
+        description="优先处理总览、模型和质量，这些配置直接决定任务默认表现。"
+      >
+        <div className="panel-grid">
+          <SettingsOverviewPanel
+            form={workspace.form}
+            config={workspace.config.data}
+            runtimeEnvironment={workspace.runtimeEnvironment.data}
+            configProfiles={workspace.configProfiles.data}
+          />
+          <ModelSettingsPanel form={workspace.form} options={workspace.options.data} onChange={(key, value) => workspace.setForm((prev) => ({ ...prev, [key]: value }))} />
+          <QualitySettingsPanel form={workspace.form} config={workspace.config.data} onChange={(key, value) => workspace.setForm((prev) => ({ ...prev, [key]: value }))} />
+        </div>
+      </PageSection>
+
+      <PageSection
+        eyebrow="接入"
+        title="接入、自动化与高级工程能力"
+        description="接入层和自动化能力放在后段，只在需要联动外部服务或增强能力时展开。"
+      >
         <details className="settings-disclosure settings-page-runtime" open={runtimeSectionOpen}>
           <summary className="settings-disclosure-trigger">
             <div>
@@ -122,7 +141,7 @@ export function SettingsPage() {
             </details>
           </div>
         </details>
-      </div>
+      </PageSection>
     </section>
   );
 }

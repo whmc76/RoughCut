@@ -71,6 +71,13 @@ export function JobQueueTable({
                 <td colSpan={5}><EmptyState message={errorMessage} tone="error" /></td>
               </tr>
             )}
+            {!isLoading && !errorMessage && jobs.length === 0 && (
+              <tr>
+                <td colSpan={5}>
+                  <EmptyState message="当前没有匹配的任务。可以先创建新任务，或调整上方搜索条件。" />
+                </td>
+              </tr>
+            )}
             {jobs.map((job) => (
               <tr key={job.id} className={classNames(selectedJobId === job.id && "selected-row")} onClick={() => onSelect(job.id)}>
                 <td>

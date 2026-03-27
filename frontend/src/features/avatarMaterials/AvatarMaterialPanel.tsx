@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 
 import { api } from "../../api";
@@ -32,6 +32,8 @@ type CreatorProfileFormState = {
 export function AvatarMaterialPanel() {
   const queryClient = useQueryClient();
   const [createModalOpen, setCreateModalOpen] = useState(false);
+  const [profileQuery, setProfileQuery] = useState("");
+  const [statusFilter, setStatusFilter] = useState<"all" | "ready" | "needs_materials" | "active">("all");
   const [displayName, setDisplayName] = useState("");
   const [presenterAlias, setPresenterAlias] = useState("");
   const [notes, setNotes] = useState("");
@@ -138,10 +140,65 @@ export function AvatarMaterialPanel() {
   });
 
   const payload = library.data;
-  const readyCount = (payload?.profiles ?? []).filter((item) => item.profile_dashboard?.section_status?.materials).length;
+  const profiles = payload?.profiles ?? [];
+  const deferredProfileQuery = useDeferredValue(profileQuery);
+  const activePresenterId = String(config.data?.avatar_presenter_id ?? "");
+  const readyCount = profiles.filter((item) => item.profile_dashboard?.section_status?.materials).length;
+  const activeCount = profiles.filter((item) => getProfilePresenterPath(item) === activePresenterId).length;
+  const profilesMissingMaterials = profiles.length - readyCount;
+  const filteredProfiles = useMemo(() => {
+    const normalizedQuery = deferredProfileQuery.trim().toLowerCase();
+    const list = profiles.filter((profile) => {
+      const matchesQuery =
+        !normalizedQuery ||
+        [
+          profile.display_name,
+          profile.presenter_alias,
+          profile.notes,
+          profile.creator_profile?.identity?.public_name,
+          profile.creator_profile?.positioning?.creator_focus,
+          profile.creator_profile?.publishing?.primary_platform,
+        ]
+          .filter(Boolean)
+          .join(" ")
+          .toLowerCase()
+          .includes(normalizedQuery);
+
+      if (!matchesQuery) {
+        return false;
+      }
+
+      if (statusFilter === "ready") {
+        return Boolean(profile.profile_dashboard?.section_status?.materials);
+      }
+      if (statusFilter === "needs_materials") {
+        return !profile.profile_dashboard?.section_status?.materials;
+      }
+      if (statusFilter === "active") {
+        return getProfilePresenterPath(profile) === activePresenterId;
+      }
+      return true;
+    });
+
+    return [...list].sort((left, right) => {
+      const leftActive = getProfilePresenterPath(left) === activePresenterId ? 1 : 0;
+      const rightActive = getProfilePresenterPath(right) === activePresenterId ? 1 : 0;
+      if (leftActive !== rightActive) {
+        return rightActive - leftActive;
+      }
+
+      const leftReady = left.profile_dashboard?.section_status?.materials ? 1 : 0;
+      const rightReady = right.profile_dashboard?.section_status?.materials ? 1 : 0;
+      if (leftReady !== rightReady) {
+        return rightReady - leftReady;
+      }
+
+      return new Date(right.created_at).getTime() - new Date(left.created_at).getTime();
+    });
+  }, [activePresenterId, deferredProfileQuery, profiles, statusFilter]);
 
   return (
-    <section className="panel top-gap">
+    <section className="panel">
       <PanelHeader
         title="创作者档案"
         description="把作者身份、内容定位、渠道策略、商务备注和数字人口播素材放进同一个档案，后续文案生成、模板复用和数字人预览都从这里取数。"
@@ -153,9 +210,53 @@ export function AvatarMaterialPanel() {
       />
 
       {library.error ? <div className="notice">{String(library.error)}</div> : null}
+      {(payload?.warnings ?? []).map((warning) => (
+        <div key={warning} className="notice top-gap">{warning}</div>
+      ))}
+
+      <div className="avatar-creator-summary-grid avatar-creator-summary-grid-single top-gap">
+        <article className="avatar-material-card">
+          <div className="stat-label">档案总览</div>
+          <div className="avatar-stat-grid top-gap">
+            <div className="activity-card">
+              <strong>{profiles.length}</strong>
+              <div className="muted compact-top">当前档案数</div>
+            </div>
+            <div className="activity-card">
+              <strong>{readyCount}</strong>
+              <div className="muted compact-top">素材已就绪</div>
+            </div>
+            <div className="activity-card">
+              <strong>{profilesMissingMaterials}</strong>
+              <div className="muted compact-top">待补素材</div>
+            </div>
+            <div className="activity-card">
+              <strong>{activeCount}</strong>
+              <div className="muted compact-top">已激活到配置</div>
+            </div>
+          </div>
+          <div className="config-profile-list-toolbar top-gap">
+            <input
+              className="input config-profile-filter-input"
+              value={profileQuery}
+              onChange={(event) => setProfileQuery(event.target.value)}
+              placeholder="搜索档案名称、出镜名、定位或主平台"
+            />
+            <select className="input config-profile-sort-select" value={statusFilter} onChange={(event) => setStatusFilter(event.target.value as "all" | "ready" | "needs_materials" | "active")}>
+              <option value="all">全部档案</option>
+              <option value="ready">只看已就绪</option>
+              <option value="needs_materials">只看待补素材</option>
+              <option value="active">只看已激活</option>
+            </select>
+          </div>
+          <div className="muted compact-top">
+            共 {profiles.length} 个档案，当前显示 {filteredProfiles.length} 个。
+          </div>
+        </article>
+      </div>
 
       <div className="avatar-profile-grid top-gap">
-        {(payload?.profiles ?? []).map((profile) => (
+        {filteredProfiles.map((profile) => (
           <CreatorArchiveCard
             key={profile.id}
             profile={profile}
@@ -177,14 +278,15 @@ export function AvatarMaterialPanel() {
               })
             }
             updating={updateProfile.isPending}
-            activePresenterId={String(config.data?.avatar_presenter_id ?? "")}
+            activePresenterId={activePresenterId}
             onActivateProfile={(avatarPresenterId) => activatePresenter.mutate(avatarPresenterId)}
             activating={activatePresenter.isPending}
           />
         ))}
       </div>
       {replaceError ? <div className="notice top-gap">{replaceError}</div> : null}
-      {!payload?.profiles?.length ? <div className="empty-state top-gap">还没有创作者档案，先建一个完整的人设与素材档案。</div> : null}
+      {!profiles.length ? <div className="empty-state top-gap">还没有创作者档案，先建一个完整的人设与素材档案。</div> : null}
+      {profiles.length > 0 && filteredProfiles.length === 0 ? <div className="empty-state top-gap">当前筛选条件下没有匹配档案。</div> : null}
 
       <FloatingModal open={createModalOpen} onClose={() => setCreateModalOpen(false)} title="创建创作者档案" closeLabel="关闭">
         <section className="panel creator-profile-modal-panel">
@@ -193,53 +295,79 @@ export function AvatarMaterialPanel() {
             description="通过独立弹窗录入人设资料和数字人素材，避免把创建表单长期占在主页面里。"
           />
           <CreatorProfileIntakeGuide payload={payload} readyCount={readyCount} />
+          <div className="avatar-create-summary-grid top-gap">
+            <AvatarMetricCard value={selectedFileCount} label="已选素材" />
+            <AvatarMetricCard value={displayName.trim() ? "已填写" : "待填写"} label="档案名称" />
+            <AvatarMetricCard value={readyCount} label="现有可预览档案" />
+          </div>
+
           <div className="form-stack compact-top">
-            <label>
-              <span>档案名称</span>
-              <input className="input" value={displayName} onChange={(event) => setDisplayName(event.target.value)} placeholder="例如：创作者名称 / 品牌账号" />
-            </label>
-            <label>
-              <span>出镜 / 口播名</span>
-              <input className="input" value={presenterAlias} onChange={(event) => setPresenterAlias(event.target.value)} placeholder="可选，用于数字人口播或前台展示" />
-            </label>
-            <label>
-              <span>内部备注</span>
-              <textarea className="input avatar-textarea" value={notes} onChange={(event) => setNotes(event.target.value)} placeholder="例如：人物来源、录制环境、希望保留的语气" />
-            </label>
-            <CreatorProfileFields value={creatorProfile} onChange={setCreatorProfile} />
-            <div className="avatar-file-grid top-gap">
-              <AvatarFileField
-                label="讲话视频片段"
-                hint="HeyGem 数字人训练 / 口型参考。建议单人出镜、20 到 120 秒。"
-                accept=".mp4,.mov,.mkv,.avi"
-                files={speakingVideos}
-                onChange={setSpeakingVideos}
-              />
-              <AvatarFileField
-                label="肖像照"
-                hint="人物核验和模板管理。建议 3 到 10 张正脸图片。"
-                accept=".jpg,.jpeg,.png"
-                files={portraitPhotos}
-                onChange={setPortraitPhotos}
-              />
-              <AvatarFileField
-                label="声音采样"
-                hint="声音克隆 / AI 导演重配音。建议单说话人干净人声。"
-                accept=".wav,.mp3,.m4a"
-                files={voiceSamples}
-                onChange={setVoiceSamples}
-              />
-            </div>
-            <div className="muted">本次共选 {selectedFileCount} 个素材文件。</div>
-            <div className="toolbar">
-              <button className="button primary" type="button" disabled={upload.isPending || !displayName.trim() || selectedFileCount === 0} onClick={() => upload.mutate()}>
-                {upload.isPending ? "创建中..." : "创建创作者档案"}
-              </button>
-              <button className="button ghost" type="button" disabled={upload.isPending} onClick={() => setCreateModalOpen(false)}>
-                取消
-              </button>
-            </div>
-            {upload.error ? <div className="notice">{String(upload.error)}</div> : null}
+            <AvatarSectionCard
+              eyebrow="基础"
+              title="先录入档案基础信息"
+              description="名称、出镜名和内部备注会直接影响搜索、识别和后续维护效率。"
+            >
+              <label>
+                <span>档案名称</span>
+                <input className="input" value={displayName} onChange={(event) => setDisplayName(event.target.value)} placeholder="例如：创作者名称 / 品牌账号" />
+              </label>
+              <label>
+                <span>出镜 / 口播名</span>
+                <input className="input" value={presenterAlias} onChange={(event) => setPresenterAlias(event.target.value)} placeholder="可选，用于数字人口播或前台展示" />
+              </label>
+              <label>
+                <span>内部备注</span>
+                <textarea className="input avatar-textarea" value={notes} onChange={(event) => setNotes(event.target.value)} placeholder="例如：人物来源、录制环境、希望保留的语气" />
+              </label>
+            </AvatarSectionCard>
+
+            <AvatarSectionCard
+              eyebrow="档案"
+              title="再补齐创作者身份与定位"
+              description="这些信息会被后续文案、模板和数字人脚本直接复用。"
+            >
+              <CreatorProfileFields value={creatorProfile} onChange={setCreatorProfile} />
+            </AvatarSectionCard>
+
+            <AvatarSectionCard
+              eyebrow="素材"
+              title="最后上传数字人素材"
+              description="讲话视频、肖像照和声音采样决定当前档案能否直接生成预览。"
+            >
+              <div className="avatar-file-grid">
+                <AvatarFileField
+                  label="讲话视频片段"
+                  hint="HeyGem 数字人训练 / 口型参考。建议单人出镜、20 到 120 秒。"
+                  accept=".mp4,.mov,.mkv,.avi"
+                  files={speakingVideos}
+                  onChange={setSpeakingVideos}
+                />
+                <AvatarFileField
+                  label="肖像照"
+                  hint="人物核验和模板管理。建议 3 到 10 张正脸图片。"
+                  accept=".jpg,.jpeg,.png"
+                  files={portraitPhotos}
+                  onChange={setPortraitPhotos}
+                />
+                <AvatarFileField
+                  label="声音采样"
+                  hint="声音克隆 / AI 导演重配音。建议单说话人干净人声。"
+                  accept=".wav,.mp3,.m4a"
+                  files={voiceSamples}
+                  onChange={setVoiceSamples}
+                />
+              </div>
+              <div className="muted">本次共选 {selectedFileCount} 个素材文件。</div>
+              <div className="toolbar">
+                <button className="button primary" type="button" disabled={upload.isPending || !displayName.trim() || selectedFileCount === 0} onClick={() => upload.mutate()}>
+                  {upload.isPending ? "创建中..." : "创建创作者档案"}
+                </button>
+                <button className="button ghost" type="button" disabled={upload.isPending} onClick={() => setCreateModalOpen(false)}>
+                  取消
+                </button>
+              </div>
+              {upload.error ? <div className="notice">{String(upload.error)}</div> : null}
+            </AvatarSectionCard>
           </div>
         </section>
       </FloatingModal>
@@ -575,6 +703,38 @@ function AvatarFileField({
   );
 }
 
+function AvatarSectionCard({
+  eyebrow,
+  title,
+  description,
+  children,
+}: {
+  eyebrow: string;
+  title: string;
+  description: string;
+  children: ReactNode;
+}) {
+  return (
+    <section className="avatar-section-card">
+      <div className="avatar-section-card-head">
+        <div className="stat-label">{eyebrow}</div>
+        <strong>{title}</strong>
+        <div className="muted">{description}</div>
+      </div>
+      <div className="form-stack">{children}</div>
+    </section>
+  );
+}
+
+function AvatarMetricCard({ value, label }: { value: ReactNode; label: string }) {
+  return (
+    <div className="activity-card">
+      <strong>{value}</strong>
+      <div className="muted compact-top">{label}</div>
+    </div>
+  );
+}
+
 function CreatorArchiveCard({
   profile,
   removing,
@@ -677,6 +837,11 @@ function CreatorArchiveCard({
   const presenterFile = profile.files.find((file) => file.role === "speaking_video") ?? null;
   const presenterFilePath = presenterFile?.path ?? "";
   const isActiveProfile = Boolean(presenterFilePath) && presenterFilePath === activePresenterId;
+  const materialStatusSummary = [
+    `${dashboard?.material_counts?.speaking_videos ?? 0} 个讲话视频`,
+    `${dashboard?.material_counts?.voice_samples ?? 0} 个声音采样`,
+    `${dashboard?.material_counts?.portrait_photos ?? 0} 张肖像照`,
+  ].join(" · ");
 
   return (
     <>
@@ -698,22 +863,10 @@ function CreatorArchiveCard({
         {profile.notes ? <div className="muted compact-top">{profile.notes}</div> : null}
 
         <div className="avatar-stat-grid top-gap">
-          <div className="activity-card">
-            <strong>{dashboard?.material_counts?.speaking_videos ?? 0}</strong>
-            <div className="muted compact-top">讲话视频</div>
-          </div>
-          <div className="activity-card">
-            <strong>{dashboard?.material_counts?.voice_samples ?? 0}</strong>
-            <div className="muted compact-top">声音采样</div>
-          </div>
-          <div className="activity-card">
-            <strong>{dashboard?.material_counts?.portrait_photos ?? 0}</strong>
-            <div className="muted compact-top">肖像照</div>
-          </div>
-          <div className="activity-card">
-            <strong>{profile.preview_runs?.length ?? 0}</strong>
-            <div className="muted compact-top">预览样片</div>
-          </div>
+          <AvatarMetricCard value={dashboard?.material_counts?.speaking_videos ?? 0} label="讲话视频" />
+          <AvatarMetricCard value={dashboard?.material_counts?.voice_samples ?? 0} label="声音采样" />
+          <AvatarMetricCard value={dashboard?.material_counts?.portrait_photos ?? 0} label="肖像照" />
+          <AvatarMetricCard value={profile.preview_runs?.length ?? 0} label="预览样片" />
         </div>
 
         <div className="mode-chip-list top-gap">
@@ -823,120 +976,154 @@ function CreatorArchiveCard({
             </div>
           ) : (
             <>
-          {profile.notes ? <div className="muted compact-top">{profile.notes}</div> : null}
-          <div className="avatar-stat-grid top-gap">
-            <div className="activity-card">
-              <strong>{dashboard?.material_counts?.speaking_videos ?? 0}</strong>
-              <div className="muted compact-top">讲话视频</div>
-            </div>
-            <div className="activity-card">
-              <strong>{dashboard?.material_counts?.voice_samples ?? 0}</strong>
-              <div className="muted compact-top">声音采样</div>
-            </div>
-            <div className="activity-card">
-              <strong>{dashboard?.material_counts?.portrait_photos ?? 0}</strong>
-              <div className="muted compact-top">肖像照</div>
-            </div>
-            <div className="activity-card">
-              <strong>{(dashboard?.strengths ?? []).length}</strong>
-              <div className="muted compact-top">已成型优势</div>
-            </div>
-          </div>
-          <div className="mode-chip-list top-gap">
-            <CapabilityChip label="身份信息" ready={Boolean(dashboard?.section_status?.identity)} />
-            <CapabilityChip label="内容定位" ready={Boolean(dashboard?.section_status?.positioning)} />
-            <CapabilityChip label="渠道策略" ready={Boolean(dashboard?.section_status?.publishing)} />
-            <CapabilityChip label="商务信息" ready={Boolean(dashboard?.section_status?.business)} />
-            <CapabilityChip label="数字人素材" ready={Boolean(dashboard?.section_status?.materials)} />
-          </div>
-          <CreatorProfileSummary profile={profile} />
-          {(dashboard?.strengths?.length || dashboard?.next_steps?.length) ? (
-            <div className="avatar-creator-section-grid top-gap">
-              {(dashboard?.strengths?.length ?? 0) > 0 ? (
-                <section className="avatar-requirement-block">
-                  <div className="stat-label">当前优势</div>
-                  <div className="list-stack compact-top">
-                    {(dashboard?.strengths ?? []).map((item) => (
-                      <div key={item} className="activity-card">
-                        {item}
-                      </div>
-                    ))}
+              <section className="avatar-detail-section">
+                <div className="avatar-detail-section-head">
+                  <div>
+                    <div className="stat-label">概览</div>
+                    <strong>先看档案当前可用程度</strong>
                   </div>
-                </section>
-              ) : null}
-              {(dashboard?.next_steps?.length ?? 0) > 0 ? (
-                <section className="avatar-requirement-block">
-                  <div className="stat-label">下一步补齐</div>
+                  <div className="muted">{materialStatusSummary}</div>
+                </div>
+                {profile.notes ? <div className="muted compact-top">{profile.notes}</div> : null}
+                <div className="avatar-stat-grid top-gap">
+                  <AvatarMetricCard value={dashboard?.material_counts?.speaking_videos ?? 0} label="讲话视频" />
+                  <AvatarMetricCard value={dashboard?.material_counts?.voice_samples ?? 0} label="声音采样" />
+                  <AvatarMetricCard value={dashboard?.material_counts?.portrait_photos ?? 0} label="肖像照" />
+                  <AvatarMetricCard value={(dashboard?.strengths ?? []).length} label="已成型优势" />
+                </div>
+                <div className="mode-chip-list top-gap">
+                  <CapabilityChip label="身份信息" ready={Boolean(dashboard?.section_status?.identity)} />
+                  <CapabilityChip label="内容定位" ready={Boolean(dashboard?.section_status?.positioning)} />
+                  <CapabilityChip label="渠道策略" ready={Boolean(dashboard?.section_status?.publishing)} />
+                  <CapabilityChip label="商务信息" ready={Boolean(dashboard?.section_status?.business)} />
+                  <CapabilityChip label="数字人素材" ready={Boolean(dashboard?.section_status?.materials)} />
+                </div>
+                <div className="avatar-card-meta top-gap">{profile.next_action}</div>
+              </section>
+
+              <section className="avatar-detail-section">
+                <div className="avatar-detail-section-head">
+                  <div>
+                    <div className="stat-label">档案信息</div>
+                    <strong>身份、定位和渠道信息</strong>
+                  </div>
+                  <div className="muted">用于文案、配音和模板复用</div>
+                </div>
+                <CreatorProfileSummary profile={profile} />
+                {(dashboard?.strengths?.length || dashboard?.next_steps?.length) ? (
+                  <div className="avatar-creator-section-grid top-gap">
+                    {(dashboard?.strengths?.length ?? 0) > 0 ? (
+                      <section className="avatar-requirement-block">
+                        <div className="stat-label">当前优势</div>
+                        <div className="list-stack compact-top">
+                          {(dashboard?.strengths ?? []).map((item) => (
+                            <div key={item} className="activity-card">
+                              {item}
+                            </div>
+                          ))}
+                        </div>
+                      </section>
+                    ) : null}
+                    {(dashboard?.next_steps?.length ?? 0) > 0 ? (
+                      <section className="avatar-requirement-block">
+                        <div className="stat-label">下一步补齐</div>
+                        <div className="list-stack compact-top">
+                          {(dashboard?.next_steps ?? []).map((item) => (
+                            <div key={item} className="notice">
+                              {item}
+                            </div>
+                          ))}
+                        </div>
+                      </section>
+                    ) : null}
+                  </div>
+                ) : null}
+              </section>
+            </>
+          )}
+
+          {(profile.blocking_issues.length || profile.warnings.length) ? (
+            <section className="avatar-detail-section">
+              <div className="avatar-detail-section-head">
+                <div>
+                  <div className="stat-label">风险</div>
+                  <strong>阻塞项和建议补充</strong>
+                </div>
+                <div className="muted">先清理阻塞项，再补建议项</div>
+              </div>
+              {profile.blocking_issues.length ? (
+                <div className="avatar-issue-block">
+                  <div className="stat-label">阻塞项</div>
                   <div className="list-stack compact-top">
-                    {(dashboard?.next_steps ?? []).map((item) => (
+                    {profile.blocking_issues.map((item) => (
                       <div key={item} className="notice">
                         {item}
                       </div>
                     ))}
                   </div>
-                </section>
+                </div>
               ) : null}
-            </div>
-          ) : null}
-            </>
-          )}
 
-          {profile.blocking_issues.length ? (
-            <div className="avatar-issue-block top-gap">
-              <div className="stat-label">阻塞项</div>
-              <div className="list-stack compact-top">
-                {profile.blocking_issues.map((item) => (
-                  <div key={item} className="notice">
-                    {item}
+              {profile.warnings.length ? (
+                <div className="avatar-issue-block">
+                  <div className="stat-label">建议补充</div>
+                  <div className="list-stack compact-top">
+                    {profile.warnings.map((item) => (
+                      <div key={item} className="activity-card">
+                        {item}
+                      </div>
+                    ))}
                   </div>
-                ))}
-              </div>
-            </div>
+                </div>
+              ) : null}
+            </section>
           ) : null}
 
-          {profile.warnings.length ? (
-            <div className="avatar-issue-block top-gap">
-              <div className="stat-label">建议补充</div>
-              <div className="list-stack compact-top">
-                {profile.warnings.map((item) => (
-                  <div key={item} className="activity-card">
-                    {item}
-                  </div>
-                ))}
+          <section className="avatar-detail-section">
+            <div className="avatar-detail-section-head">
+              <div>
+                <div className="stat-label">素材</div>
+                <strong>数字人训练与展示素材</strong>
               </div>
+              <div className="muted">支持直接替换文件，不必回到列表页</div>
             </div>
-          ) : null}
+            <div className="avatar-file-grid">
+              <AvatarRoleColumn
+                title="讲话视频片段"
+                files={groupedFiles.speaking_video}
+                profileId={profile.id}
+                roleKey="speaking_video"
+                onReplace={onReplace}
+                replacingFileId={replacingFileId}
+              />
+              <AvatarRoleColumn
+                title="肖像照"
+                files={groupedFiles.portrait_photo}
+                profileId={profile.id}
+                roleKey="portrait_photo"
+                onReplace={onReplace}
+                replacingFileId={replacingFileId}
+              />
+              <AvatarRoleColumn
+                title="声音采样"
+                files={groupedFiles.voice_sample}
+                profileId={profile.id}
+                roleKey="voice_sample"
+                onReplace={onReplace}
+                replacingFileId={replacingFileId}
+              />
+            </div>
+          </section>
 
-          <div className="avatar-file-grid top-gap">
-            <AvatarRoleColumn
-              title="讲话视频片段"
-              files={groupedFiles.speaking_video}
-              profileId={profile.id}
-              roleKey="speaking_video"
-              onReplace={onReplace}
-              replacingFileId={replacingFileId}
-            />
-            <AvatarRoleColumn
-              title="肖像照"
-              files={groupedFiles.portrait_photo}
-              profileId={profile.id}
-              roleKey="portrait_photo"
-              onReplace={onReplace}
-              replacingFileId={replacingFileId}
-            />
-            <AvatarRoleColumn
-              title="声音采样"
-              files={groupedFiles.voice_sample}
-              profileId={profile.id}
-              roleKey="voice_sample"
-              onReplace={onReplace}
-              replacingFileId={replacingFileId}
-            />
-          </div>
-
-          <section className="avatar-issue-block top-gap">
-            <div className="stat-label">数字人预览</div>
-            <div className="form-stack compact-top">
+          <section className="avatar-detail-section">
+            <div className="avatar-detail-section-head">
+              <div>
+                <div className="stat-label">预览</div>
+                <strong>调试数字人样片</strong>
+              </div>
+              <div className="muted">用于检查音色、口型和讲述稳定性</div>
+            </div>
+            <div className="form-stack">
               {previewError ? <div className="notice">{previewError}</div> : null}
               <textarea className="input avatar-textarea" value={previewScript} onChange={(event) => setPreviewScript(event.target.value)} placeholder="输入一段预览台词" />
               <div className="toolbar">
@@ -987,8 +1174,6 @@ function CreatorArchiveCard({
               </div>
             </div>
           </section>
-
-          <div className="muted compact-top">{profile.next_action}</div>
         </section>
       </FloatingModal>
     </>
@@ -1120,6 +1305,10 @@ const roleAcceptByRole: Record<"speaking_video" | "portrait_photo" | "voice_samp
 
 function CapabilityChip({ label, ready }: { label: string; ready: boolean }) {
   return <span className={`mode-chip ${ready ? "" : "planned"}`}>{label} · {ready ? "已完善" : "待完善"}</span>;
+}
+
+function getProfilePresenterPath(profile: AvatarMaterialProfile): string {
+  return profile.files.find((file) => file.role === "speaking_video")?.path ?? "";
 }
 
 function pipelineLabel(target: string) {

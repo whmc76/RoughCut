@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { api } from "../api";
 import { PageHeader } from "../components/ui/PageHeader";
+import { PageSection } from "../components/ui/PageSection";
 import { PanelHeader } from "../components/ui/PanelHeader";
 import { useI18n } from "../i18n";
 import type { CreativeModeDefinition } from "../types";
@@ -31,11 +32,16 @@ export function CreativeModesPage() {
   };
 
   return (
-    <section>
+    <section className="page-stack">
       <PageHeader
         eyebrow={t("creative.page.eyebrow")}
         title={t("creative.page.title")}
         description={t("creative.page.description")}
+        summary={[
+          { label: "先分清类型", value: "主流程模式 / 增强能力", detail: "工作流决定产出路径，增强项决定附加能力" },
+          { label: "重点决策", value: "只激活真正常用的增强项", detail: "默认配置越少，任务创建越稳定" },
+          { label: "阅读方式", value: "先看输出方式再看供应商", detail: "避免只看名字，不清楚它实际影响什么" },
+        ]}
         actions={<Link className="button primary" to="/creator-profiles">{t("creative.page.openCreatorProfiles")}</Link>}
       />
 
@@ -43,29 +49,41 @@ export function CreativeModesPage() {
 
       {catalog && (
         <>
-          <section className="panel">
-            <PanelHeader title={t("creative.section.workflow")} description={t("creative.section.workflowDescription")} />
-            <div className="mode-card-grid">
-              {catalog.workflow_modes.map((mode) => (
-                <CreativeModeCard key={mode.key} mode={mode} />
-              ))}
-            </div>
-          </section>
+          <PageSection
+            eyebrow="主流程"
+            title="决定任务的基本产出路径"
+            description="主流程模式决定任务按什么方式生成主成片，属于任务创建时的第一决策。"
+          >
+            <section className="panel">
+              <PanelHeader title={t("creative.section.workflow")} description={t("creative.section.workflowDescription")} />
+              <div className="mode-card-grid">
+                {catalog.workflow_modes.map((mode) => (
+                  <CreativeModeCard key={mode.key} mode={mode} />
+                ))}
+              </div>
+            </section>
+          </PageSection>
 
-          <section className="panel top-gap">
-            <PanelHeader title={t("creative.section.enhancement")} description={t("creative.section.enhancementDescription")} />
-            <div className="mode-card-grid">
-              {catalog.enhancement_modes.map((mode) => (
-                <CreativeModeCard
-                  key={mode.key}
-                  mode={mode}
-                  active={activeEnhancementModes.includes(mode.key)}
-                  saving={saveEnhancementModes.isPending}
-                  onToggleActive={() => toggleEnhancementMode(mode.key)}
-                />
-              ))}
-            </div>
-          </section>
+          <PageSection
+            eyebrow="增强"
+            title="补充默认增强能力"
+            description="增强项只在确实常用时才建议激活，避免每个新任务默认挂太多非必要能力。"
+          >
+            <section className="panel">
+              <PanelHeader title={t("creative.section.enhancement")} description={t("creative.section.enhancementDescription")} />
+              <div className="mode-card-grid">
+                {catalog.enhancement_modes.map((mode) => (
+                  <CreativeModeCard
+                    key={mode.key}
+                    mode={mode}
+                    active={activeEnhancementModes.includes(mode.key)}
+                    saving={saveEnhancementModes.isPending}
+                    onToggleActive={() => toggleEnhancementMode(mode.key)}
+                  />
+                ))}
+              </div>
+            </section>
+          </PageSection>
         </>
       )}
     </section>

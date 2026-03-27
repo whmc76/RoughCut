@@ -52,18 +52,36 @@ export function App() {
     });
   }, [locale]);
 
-  const navigation = [
-    { to: "/", label: t("app.nav.overview") },
-    { to: "/jobs", label: t("app.nav.jobs") },
-    { to: "/watch-roots", label: t("app.nav.watchRoots") },
-    { to: "/packaging", label: t("app.nav.packaging") },
-    { to: "/style-templates", label: t("app.nav.styleTemplates") },
-    { to: "/creative-modes", label: t("app.nav.creativeModes") },
-    { to: "/creator-profiles", label: t("app.nav.creatorProfiles") },
-    { to: "/memory", label: t("app.nav.memory") },
-    { to: "/glossary", label: t("app.nav.glossary") },
-    { to: "/settings", label: t("app.nav.settings") },
-    { to: "/control", label: t("app.nav.control") },
+  const navigationGroups = [
+    {
+      label: "工作台",
+      items: [
+        { to: "/", label: t("app.nav.overview") },
+        { to: "/jobs", label: t("app.nav.jobs") },
+        { to: "/watch-roots", label: t("app.nav.watchRoots") },
+      ],
+    },
+    {
+      label: "包装与风格",
+      items: [
+        { to: "/packaging", label: t("app.nav.packaging") },
+        { to: "/style-templates", label: t("app.nav.styleTemplates") },
+        { to: "/creative-modes", label: t("app.nav.creativeModes") },
+        { to: "/creator-profiles", label: t("app.nav.creatorProfiles") },
+      ],
+    },
+    {
+      label: "知识与配置",
+      items: [
+        { to: "/memory", label: t("app.nav.memory") },
+        { to: "/glossary", label: t("app.nav.glossary") },
+        { to: "/settings", label: t("app.nav.settings") },
+      ],
+    },
+    {
+      label: "系统",
+      items: [{ to: "/control", label: t("app.nav.control") }],
+    },
   ];
 
   return (
@@ -75,15 +93,22 @@ export function App() {
           <p className="muted">{t("app.sidebar.description")}</p>
         </div>
         <nav className="nav-list">
-          {navigation.map((item) => (
-            <NavLink
-              key={item.to}
-              to={item.to}
-              end={item.to === "/"}
-              className={({ isActive }) => (isActive ? "nav-link active" : "nav-link")}
-            >
-              {item.label}
-            </NavLink>
+          {navigationGroups.map((group) => (
+            <div key={group.label} className="nav-group">
+              <div className="sidebar-section-label">{group.label}</div>
+              <div className="nav-group-links">
+                {group.items.map((item) => (
+                  <NavLink
+                    key={item.to}
+                    to={item.to}
+                    end={item.to === "/"}
+                    className={({ isActive }) => (isActive ? "nav-link active" : "nav-link")}
+                  >
+                    {item.label}
+                  </NavLink>
+                ))}
+              </div>
+            </div>
           ))}
         </nav>
         <div className="sidebar-footer">

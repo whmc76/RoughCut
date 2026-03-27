@@ -1,5 +1,6 @@
 import { useMemo, useState, type CSSProperties } from "react";
 import { PageHeader } from "../components/ui/PageHeader";
+import { PageSection } from "../components/ui/PageSection";
 import { useStyleTemplatesWorkspace } from "../features/styleTemplates/useStyleTemplatesWorkspace";
 import { useI18n } from "../i18n";
 import {
@@ -29,83 +30,104 @@ export function StyleTemplatesPage() {
   const config = workspace.packaging.data?.config;
 
   return (
-    <section>
-      <PageHeader eyebrow={t("style.page.eyebrow")} title={t("style.page.title")} description={t("style.page.description")} />
+    <section className="page-stack">
+      <PageHeader
+        eyebrow={t("style.page.eyebrow")}
+        title={t("style.page.title")}
+        description={t("style.page.description")}
+        summary={[
+          { label: "调整顺序", value: "字幕 -> 标题 -> 文案 -> 封面", detail: "先控制读感，再处理点击面和包装感" },
+          { label: "选型方式", value: "只保留当前最合适的一套", detail: "每个模块都收敛到单个默认样式，避免配置发散" },
+          { label: "额外注意", value: "数字人避让独立管理", detail: "画中画会影响字幕安全区和整体画面布局" },
+        ]}
+      />
 
       {!config && workspace.packaging.isLoading && <div className="panel">{t("style.page.loading")}</div>}
 
       {config && (
         <>
-          <StyleSection
-            section="subtitle"
-            title={t("style.section.subtitle")}
-            description={t("style.section.subtitleDescription")}
-            currentKey={config.subtitle_style}
-            groups={subtitleStyleGroups}
-            presets={subtitleStylePresets}
-            onSelect={(value) => workspace.saveConfig.mutate({ subtitle_style: value })}
-            isSaving={workspace.saveConfig.isPending}
-          />
-          <StyleSection
-            section="subtitleMotion"
-            title={t("style.section.subtitleMotion")}
-            description={t("style.section.subtitleMotionDescription")}
-            currentKey={config.subtitle_motion_style ?? "motion_static"}
-            groups={subtitleMotionGroups}
-            presets={subtitleMotionPresets}
-            onSelect={(value) => workspace.saveConfig.mutate({ subtitle_motion_style: value })}
-            isSaving={workspace.saveConfig.isPending}
-          />
+          <PageSection
+            eyebrow="主样式"
+            title="先确定主成片的基础观感"
+            description="这一段只处理字幕、动效、标题、文案和封面，它们决定主成片最直接的视觉和阅读体验。"
+          >
+            <StyleSection
+              section="subtitle"
+              title={t("style.section.subtitle")}
+              description={t("style.section.subtitleDescription")}
+              currentKey={config.subtitle_style}
+              groups={subtitleStyleGroups}
+              presets={subtitleStylePresets}
+              onSelect={(value) => workspace.saveConfig.mutate({ subtitle_style: value })}
+              isSaving={workspace.saveConfig.isPending}
+            />
+            <StyleSection
+              section="subtitleMotion"
+              title={t("style.section.subtitleMotion")}
+              description={t("style.section.subtitleMotionDescription")}
+              currentKey={config.subtitle_motion_style ?? "motion_static"}
+              groups={subtitleMotionGroups}
+              presets={subtitleMotionPresets}
+              onSelect={(value) => workspace.saveConfig.mutate({ subtitle_motion_style: value })}
+              isSaving={workspace.saveConfig.isPending}
+            />
 
-          <StyleSection
-            section="title"
-            title={t("style.section.title")}
-            description={t("style.section.titleDescription")}
-            currentKey={config.title_style}
-            groups={titleStyleGroups}
-            presets={titleStylePresets}
-            onSelect={(value) => workspace.saveConfig.mutate({ title_style: value })}
-            isSaving={workspace.saveConfig.isPending}
-          />
+            <StyleSection
+              section="title"
+              title={t("style.section.title")}
+              description={t("style.section.titleDescription")}
+              currentKey={config.title_style}
+              groups={titleStyleGroups}
+              presets={titleStylePresets}
+              onSelect={(value) => workspace.saveConfig.mutate({ title_style: value })}
+              isSaving={workspace.saveConfig.isPending}
+            />
 
-          <StyleSection
-            section="copy"
-            title={t("style.section.copy")}
-            description={t("style.section.copyDescription")}
-            currentKey={config.copy_style}
-            groups={copyStyleGroups}
-            presets={copyStylePresets}
-            onSelect={(value) => workspace.saveConfig.mutate({ copy_style: value })}
-            isSaving={workspace.saveConfig.isPending}
-          />
+            <StyleSection
+              section="copy"
+              title={t("style.section.copy")}
+              description={t("style.section.copyDescription")}
+              currentKey={config.copy_style}
+              groups={copyStyleGroups}
+              presets={copyStylePresets}
+              onSelect={(value) => workspace.saveConfig.mutate({ copy_style: value })}
+              isSaving={workspace.saveConfig.isPending}
+            />
 
-          <StyleSection
-            section="cover"
-            title={t("style.section.cover")}
-            description={t("style.section.coverDescription")}
-            currentKey={config.cover_style}
-            groups={coverStyleGroups}
-            presets={coverStylePresets}
-            onSelect={(value) => workspace.saveConfig.mutate({ cover_style: value })}
-            isSaving={workspace.saveConfig.isPending}
-          />
+            <StyleSection
+              section="cover"
+              title={t("style.section.cover")}
+              description={t("style.section.coverDescription")}
+              currentKey={config.cover_style}
+              groups={coverStyleGroups}
+              presets={coverStylePresets}
+              onSelect={(value) => workspace.saveConfig.mutate({ cover_style: value })}
+              isSaving={workspace.saveConfig.isPending}
+            />
+          </PageSection>
 
-          <StyleSection
-            section="effects"
-            title="智能剪辑特效"
-            description="控制自动转场、镜头强调和局部视觉强化的整体风格。这个模块默认放在最下面，只在需要时再展开。"
-            currentKey={config.smart_effect_style ?? "smart_effect_rhythm"}
-            groups={smartEffectGroups}
-            presets={smartEffectPresets}
-            onSelect={(value) => workspace.saveConfig.mutate({ smart_effect_style: value })}
-            isSaving={workspace.saveConfig.isPending}
-          />
+          <PageSection
+            eyebrow="增强"
+            title="需要时再补充视觉强化"
+            description="特效和数字人画中画属于增强层，放在后段配置，避免干扰主样式选型。"
+          >
+            <StyleSection
+              section="effects"
+              title="智能剪辑特效"
+              description="控制自动转场、镜头强调和局部视觉强化的整体风格。这个模块默认放在最下面，只在需要时再展开。"
+              currentKey={config.smart_effect_style ?? "smart_effect_rhythm"}
+              groups={smartEffectGroups}
+              presets={smartEffectPresets}
+              onSelect={(value) => workspace.saveConfig.mutate({ smart_effect_style: value })}
+              isSaving={workspace.saveConfig.isPending}
+            />
 
-          <AvatarPictureInPictureSection
-            config={config}
-            isSaving={workspace.saveConfig.isPending}
-            onChange={(patch) => workspace.saveConfig.mutate(patch)}
-          />
+            <AvatarPictureInPictureSection
+              config={config}
+              isSaving={workspace.saveConfig.isPending}
+              onChange={(patch) => workspace.saveConfig.mutate(patch)}
+            />
+          </PageSection>
         </>
       )}
     </section>

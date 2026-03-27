@@ -1,4 +1,5 @@
 import { api } from "../../api";
+import { EmptyState } from "../../components/ui/EmptyState";
 import { PanelHeader } from "../../components/ui/PanelHeader";
 import { StatCard } from "../../components/ui/StatCard";
 import { useI18n } from "../../i18n";
@@ -46,6 +47,7 @@ export function WatchRootInventoryPanel({
         .replace("{pending}", String(inventory.pending_count))
         .replace("{deduped}", String(inventory.deduped_count))
     : t("watch.inventory.description");
+  const pendingItems = inventory?.inventory.pending ?? [];
 
   return (
     <section className="panel inventory-panel">
@@ -60,10 +62,10 @@ export function WatchRootInventoryPanel({
             <button className="button ghost" onClick={() => onScan(true)} disabled={isScanning}>
               {t("watch.inventory.forceScan")}
             </button>
-            <button className="button primary" onClick={() => onEnqueue(true)} disabled={!inventory?.inventory.pending.length || isEnqueueing || isMerging}>
+            <button className="button primary" onClick={() => onEnqueue(true)} disabled={!pendingItems.length || isEnqueueing || isMerging}>
               {t("watch.inventory.enqueueAll")}
             </button>
-            <button className="button ghost" onClick={onSmartMergeSuggest} disabled={!inventory?.inventory.pending.length || isScanning || isSuggesting}>
+            <button className="button ghost" onClick={onSmartMergeSuggest} disabled={!pendingItems.length || isScanning || isSuggesting}>
               {t("watch.inventory.smartMerge")}
             </button>
           </div>
@@ -118,43 +120,47 @@ export function WatchRootInventoryPanel({
             </div>
           )}
 
-          <div className="table-wrap">
-            <table className="data-table">
-              <thead>
-                <tr>
-                  <th></th>
-                  <th>{t("watch.inventory.file")}</th>
-                  <th>{t("watch.inventory.info")}</th>
-                  <th>{t("watch.inventory.modifiedAt")}</th>
-                </tr>
-              </thead>
-              <tbody>
-                {inventory.inventory.pending.map((item) => {
-                  const checked = selectedPending.includes(item.relative_path);
-                  return (
-                    <tr key={item.relative_path}>
-                      <td>
-                        <input type="checkbox" checked={checked} onChange={(event) => onTogglePending(item.relative_path, event.target.checked)} />
-                      </td>
-                      <td>
-                        <div className="inventory-row">
-                          <img src={api.inventoryThumbnailUrl(root.id, item.relative_path)} alt={item.source_name} className="inventory-thumb" />
-                          <div>
-                            <div className="row-title">{item.source_name}</div>
-                            <div className="muted">{item.relative_path}</div>
+          {pendingItems.length ? (
+            <div className="table-wrap">
+              <table className="data-table">
+                <thead>
+                  <tr>
+                    <th></th>
+                    <th>{t("watch.inventory.file")}</th>
+                    <th>{t("watch.inventory.info")}</th>
+                    <th>{t("watch.inventory.modifiedAt")}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {pendingItems.map((item) => {
+                    const checked = selectedPending.includes(item.relative_path);
+                    return (
+                      <tr key={item.relative_path}>
+                        <td>
+                          <input type="checkbox" checked={checked} onChange={(event) => onTogglePending(item.relative_path, event.target.checked)} />
+                        </td>
+                        <td>
+                          <div className="inventory-row">
+                            <img src={api.inventoryThumbnailUrl(root.id, item.relative_path)} alt={item.source_name} className="inventory-thumb" />
+                            <div>
+                              <div className="row-title">{item.source_name}</div>
+                              <div className="muted">{item.relative_path}</div>
+                            </div>
                           </div>
-                        </div>
-                      </td>
-                      <td>
-                        {formatDuration(item.duration_sec)} / {formatBytes(item.size_bytes)}
-                      </td>
-                      <td>{formatDate(item.modified_at)}</td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
+                        </td>
+                        <td>
+                          {formatDuration(item.duration_sec)} / {formatBytes(item.size_bytes)}
+                        </td>
+                        <td>{formatDate(item.modified_at)}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <EmptyState message="当前没有待处理素材。可以重新扫描目录，或先在左侧调整监听规则。" />
+          )}
 
           {!!selectedPending.length && (
             <div className="toolbar top-gap">
