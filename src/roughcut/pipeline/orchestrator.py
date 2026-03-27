@@ -16,6 +16,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from sqlalchemy import delete, func, select
+from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.pool import NullPool
+from sqlalchemy.sql import text
 
 from roughcut.config import get_settings
 from roughcut.db.models import Artifact, Job, JobStep, RenderOutput, SubtitleCorrection, SubtitleItem, Timeline
@@ -87,6 +90,119 @@ _QUALITY_RERUN_STEPS = {
     "platform_package",
 }
 _REVIEW_ROUND_STEPS = {"summary_review", "glossary_review", "final_review"}
+_ORCHESTRATOR_ADVISORY_LOCK_KEY = 22032026
+
+
+class _SingleActiveOrchestratorLease:
+    def __init__(self) -> None:
+        self._engine = None
+        self._conn = None
+
+    async def try_acquire(self) -> bool:
+        if self._conn is not None:
+            return True
+        if not _supports_postgres_orchestrator_lock():
+            return True
+
+        settings = get_settings()
+        engine = create_async_engine(
+            settings.database_url,
+            echo=False,
+            poolclass=NullPool,
+        )
+        conn = None
+        try:
+            conn = await engine.connect()
+            acquired = bool(
+                (
+                    await conn.execute(
+                        text("SELECT pg_try_advisory_lock(:lock_key)"),
+                        {"lock_key": _ORCHESTRATOR_ADVISORY_LOCK_KEY},
+                    )
+                ).scalar()
+            )
+            if not acquired:
+                await conn.close()
+                await engine.dispose()
+                return False
+            self._engine = engine
+            self._conn = conn
+            return True
+        except Exception:
+            if conn is not None:
+                await conn.close()
+            await engine.dispose()
+            raise
+
+    async def release(self) -> None:
+        if self._conn is None:
+            return
+        try:
+            await self._conn.execute(
+                text("SELECT pg_advisory_unlock(:lock_key)"),
+                {"lock_key": _ORCHESTRATOR_ADVISORY_LOCK_KEY},
+            )
+        except Exception:
+            logger.warning("Failed to release orchestrator advisory lock", exc_info=True)
+        finally:
+            await self._conn.close()
+            await self._engine.dispose()
+            self._conn = None
+            self._engine = None
+
+
+def _supports_postgres_orchestrator_lock() -> bool:
+    scheme = str(get_settings().database_url or "").split(":", 1)[0].lower()
+    return scheme in {"postgresql", "postgresql+asyncpg", "postgres"}
+
+
+async def get_orchestrator_lock_snapshot() -> dict[str, object]:
+    if not _supports_postgres_orchestrator_lock():
+        return {
+            "status": "unsupported",
+            "leader_active": None,
+            "detail": "Current database backend does not support PostgreSQL advisory locks.",
+        }
+
+    settings = get_settings()
+    engine = create_async_engine(
+        settings.database_url,
+        echo=False,
+        poolclass=NullPool,
+    )
+    try:
+        async with engine.connect() as conn:
+            acquired = bool(
+                (
+                    await conn.execute(
+                        text("SELECT pg_try_advisory_lock(:lock_key)"),
+                        {"lock_key": _ORCHESTRATOR_ADVISORY_LOCK_KEY},
+                    )
+                ).scalar()
+            )
+            if acquired:
+                await conn.execute(
+                    text("SELECT pg_advisory_unlock(:lock_key)"),
+                    {"lock_key": _ORCHESTRATOR_ADVISORY_LOCK_KEY},
+                )
+                return {
+                    "status": "free",
+                    "leader_active": False,
+                    "detail": "No active orchestrator lock holder detected.",
+                }
+            return {
+                "status": "held",
+                "leader_active": True,
+                "detail": "An active orchestrator currently holds the single-active lock.",
+            }
+    except Exception as exc:
+        return {
+            "status": "unknown",
+            "leader_active": None,
+            "detail": str(exc),
+        }
+    finally:
+        await engine.dispose()
 
 
 async def tick() -> None:
@@ -807,13 +923,38 @@ def _unlink_local_path(value: str) -> None:
 async def run_orchestrator(poll_interval: float = 5.0) -> None:
     """Main orchestrator loop."""
     logger.info("Orchestrator started, polling every %.1fs", poll_interval)
-    await _recover_incomplete_jobs()
-    while True:
-        try:
-            await tick()
-        except Exception:
-            logger.exception("Orchestrator tick error")
-        await asyncio.sleep(poll_interval)
+    lease = _SingleActiveOrchestratorLease()
+    waiting_for_lock = False
+    recovered = False
+    try:
+        while True:
+            try:
+                has_lock = await lease.try_acquire()
+            except Exception:
+                logger.exception("Orchestrator lock acquisition error")
+                await asyncio.sleep(poll_interval)
+                continue
+
+            if not has_lock:
+                if not waiting_for_lock:
+                    logger.warning("Another RoughCut orchestrator is active; waiting for single-active lock")
+                    waiting_for_lock = True
+                await asyncio.sleep(poll_interval)
+                continue
+
+            if waiting_for_lock:
+                logger.info("Single-active orchestrator lock acquired")
+                waiting_for_lock = False
+            if not recovered:
+                await _recover_incomplete_jobs()
+                recovered = True
+            try:
+                await tick()
+            except Exception:
+                logger.exception("Orchestrator tick error")
+            await asyncio.sleep(poll_interval)
+    finally:
+        await lease.release()
 
 
 def create_job_steps(job_id: uuid.UUID) -> list[JobStep]:

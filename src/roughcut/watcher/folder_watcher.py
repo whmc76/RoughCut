@@ -1332,6 +1332,39 @@ async def run_watch_root_auto_duty() -> dict[str, Any]:
     return summary
 
 
+async def get_watch_root_auto_duty_snapshot() -> dict[str, Any]:
+    from sqlalchemy import select
+
+    settings = get_settings()
+    factory = get_session_factory()
+    async with factory() as session:
+        result = await session.execute(
+            select(WatchRoot).where(WatchRoot.enabled.is_(True)).order_by(WatchRoot.created_at.asc())
+        )
+        roots = result.scalars().all()
+        scheduler_state = await _load_auto_scheduler_state(session)
+
+    running_scans = 0
+    cached_pending_total = 0
+    for root in roots:
+        status = get_watch_root_inventory_scan_status(root.path, include_inventory=False)
+        if status and status.get("status") == "running":
+            running_scans += 1
+        payload = _get_cached_inventory_payload(root)
+        cached_pending_total += len(list((payload.get("inventory") or {}).get("pending") or []))
+
+    return {
+        "roots_total": len(roots),
+        "running_scans": running_scans,
+        "cached_pending_total": cached_pending_total,
+        "auto_enqueue_enabled": bool(getattr(settings, "watch_auto_enqueue_enabled", True)),
+        "auto_merge_enabled": bool(getattr(settings, "watch_auto_merge_enabled", True)),
+        "active_jobs": int(scheduler_state.get("active_jobs") or 0),
+        "running_gpu_steps": int(scheduler_state.get("running_gpu_steps") or 0),
+        "idle_slots": _available_auto_slots(scheduler_state, settings),
+    }
+
+
 class VideoFileHandler(FileSystemEventHandler):
     def __init__(
         self,

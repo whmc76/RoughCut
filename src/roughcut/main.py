@@ -1,16 +1,16 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
-
 from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from roughcut.api.router import api_router
 from roughcut.config import get_settings
+from roughcut.runtime_health import build_readiness_payload
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _FRONTEND_DIST = _REPO_ROOT / "frontend" / "dist"
@@ -53,6 +53,16 @@ def create_app() -> FastAPI:
     async def health():
         return {"status": "ok"}
 
+    @app.get("/healthz")
+    async def healthz():
+        return {"status": "ok"}
+
+    @app.get("/readyz")
+    async def readyz():
+        payload = await build_readiness_payload()
+        status_code = 200 if payload["status"] == "ready" else 503
+        return JSONResponse(payload, status_code=status_code)
+
     if (_FRONTEND_DIST / "assets").exists():
         app.mount("/assets", StaticFiles(directory=str(_FRONTEND_DIST / "assets")), name="frontend-assets")
 
@@ -75,7 +85,7 @@ def create_app() -> FastAPI:
 
     @app.get("/{full_path:path}", include_in_schema=False)
     async def frontend_app(full_path: str):
-        if full_path.startswith("api/") or full_path == "health":
+        if full_path.startswith("api/") or full_path in {"health", "healthz", "readyz"}:
             return HTMLResponse(status_code=404, content="Not Found")
         candidate = (_FRONTEND_DIST / full_path).resolve()
         if (_FRONTEND_DIST.exists() and _FRONTEND_DIST in candidate.parents and candidate.is_file()):

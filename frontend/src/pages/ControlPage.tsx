@@ -5,12 +5,23 @@ import { useControlWorkspace } from "../features/control/useControlWorkspace";
 import { useI18n } from "../i18n";
 import { formatDate } from "../utils";
 
+function renderRuntimeTone(status: string | undefined) {
+  return status === "ready" || status === "held" || status === "free" ? "status-ok" : "status-off";
+}
+
 export function ControlPage() {
   const { t } = useI18n();
   const workspace = useControlWorkspace();
   const lastChecked = workspace.status.data
     ? t("control.services.lastChecked").replace("{time}", formatDate(workspace.status.data.checked_at))
     : t("control.services.unavailable");
+  const healthChecked = workspace.healthDetail.data
+    ? `health detail ${formatDate(workspace.healthDetail.data.checked_at)}`
+    : "health detail unavailable";
+  const runtime = workspace.status.data?.runtime;
+  const readinessChecks = Object.entries(runtime?.readiness_checks ?? {});
+  const managedServices = workspace.healthDetail.data?.managed_services ?? [];
+  const watchAutomation = workspace.healthDetail.data?.watch_automation;
 
   return (
     <section className="page-stack">
@@ -40,7 +51,144 @@ export function ControlPage() {
               </article>
             ))}
           </div>
+          {runtime && (
+            <div className="top-gap list-stack">
+              <article className="list-card">
+                <div>
+                  <div className="row-title">Runtime readiness</div>
+                  <div className="muted">区分“进程在线”与“依赖可用”。</div>
+                </div>
+                <div className="row-meta">
+                  <strong className={renderRuntimeTone(runtime.readiness_status)}>{runtime.readiness_status ?? "unknown"}</strong>
+                </div>
+              </article>
+              <article className="list-card">
+                <div>
+                  <div className="row-title">Orchestrator lock</div>
+                  <div className="muted">{runtime.orchestrator_lock?.detail ?? "暂无锁状态详情"}</div>
+                </div>
+                <div className="row-meta">
+                  <strong className={renderRuntimeTone(runtime.orchestrator_lock?.status)}>{runtime.orchestrator_lock?.status ?? "unknown"}</strong>
+                  <span>{runtime.orchestrator_lock?.leader_active == null ? "leader=unknown" : `leader=${runtime.orchestrator_lock.leader_active ? "active" : "idle"}`}</span>
+                </div>
+              </article>
+              {readinessChecks.map(([key, value]) => (
+                <article key={key} className="list-card">
+                  <div>
+                    <div className="row-title">{key}</div>
+                    <div className="muted">{value.detail}</div>
+                  </div>
+                  <div className="row-meta">
+                    <strong className={renderRuntimeTone(value.status)}>{value.status}</strong>
+                  </div>
+                </article>
+              ))}
+            </div>
+          )}
         </section>
+      </PageSection>
+
+      <PageSection
+        eyebrow="运行细项"
+        title="把问题拆到依赖和自动化层"
+        description="这里单独展开 health detail，方便判断故障是出在受管服务、watcher 自动入队，还是基础依赖。"
+      >
+        <div className="panel-grid two-up">
+          <section className="panel">
+            <PanelHeader title="Managed services" description={healthChecked} />
+            <div className="list-stack">
+              {managedServices.map((service) => (
+                <article key={`${service.name}-${service.url}`} className="list-card">
+                  <div>
+                    <div className="row-title">{service.name}</div>
+                    <div className="muted">{service.url}</div>
+                  </div>
+                  <div className="row-meta">
+                    <strong className={renderRuntimeTone(service.status)}>{service.status}</strong>
+                    <span>{service.enabled ? "managed" : "disabled"}</span>
+                  </div>
+                </article>
+              ))}
+              {!managedServices.length && !workspace.healthDetail.isLoading && (
+                <article className="list-card">
+                  <div>
+                    <div className="row-title">No managed services</div>
+                    <div className="muted">当前配置没有启用受管 GPU sidecar，或接口未返回服务清单。</div>
+                  </div>
+                </article>
+              )}
+              {workspace.healthDetail.isError && (
+                <article className="list-card">
+                  <div>
+                    <div className="row-title">Health detail unavailable</div>
+                    <div className="muted">{(workspace.healthDetail.error as Error).message}</div>
+                  </div>
+                </article>
+              )}
+            </div>
+          </section>
+
+          <section className="panel">
+            <PanelHeader title="Watch automation" description={healthChecked} />
+            <div className="list-stack">
+              {watchAutomation ? (
+                <>
+                  <article className="list-card">
+                    <div>
+                      <div className="row-title">Auto enqueue / merge</div>
+                      <div className="muted">判断 watcher 当前是否在自动接片和自动合并。</div>
+                    </div>
+                    <div className="row-meta">
+                      <strong className={watchAutomation.auto_enqueue_enabled ? "status-ok" : "status-off"}>
+                        {watchAutomation.auto_enqueue_enabled ? "enqueue on" : "enqueue off"}
+                      </strong>
+                      <span>{watchAutomation.auto_merge_enabled ? "merge on" : "merge off"}</span>
+                    </div>
+                  </article>
+                  <article className="list-card">
+                    <div>
+                      <div className="row-title">Watch roots / pending</div>
+                      <div className="muted">根目录数量和缓存中的待处理素材规模。</div>
+                    </div>
+                    <div className="row-meta">
+                      <strong>{watchAutomation.roots_total} roots</strong>
+                      <span>{watchAutomation.cached_pending_total} pending</span>
+                    </div>
+                  </article>
+                  <article className="list-card">
+                    <div>
+                      <div className="row-title">Scans / active jobs</div>
+                      <div className="muted">同时看扫描活动和当前自动调度出的任务量。</div>
+                    </div>
+                    <div className="row-meta">
+                      <strong>{watchAutomation.running_scans} scans</strong>
+                      <span>{watchAutomation.active_jobs} jobs</span>
+                    </div>
+                  </article>
+                  <article className="list-card">
+                    <div>
+                      <div className="row-title">GPU guard / idle slots</div>
+                      <div className="muted">GPU 步骤是否在跑，以及自动调度还剩多少空位。</div>
+                    </div>
+                    <div className="row-meta">
+                      <strong>{watchAutomation.running_gpu_steps} gpu</strong>
+                      <span>{watchAutomation.idle_slots} idle</span>
+                    </div>
+                  </article>
+                </>
+              ) : (
+                !workspace.healthDetail.isLoading && (
+                  <article className="list-card">
+                    <div>
+                      <div className="row-title">Watch automation unavailable</div>
+                      <div className="muted">接口还没有返回 watcher 自动入队状态。</div>
+                    </div>
+                  </article>
+                )
+              )}
+            </div>
+          </section>
+        </div>
       </PageSection>
 
       <PageSection

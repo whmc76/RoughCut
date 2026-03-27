@@ -172,8 +172,10 @@ async def handle_telegram_freeform_request(text: str, *, send_text: SendText) ->
 
 async def _handle_status_command(send_text: SendText) -> None:
     api_running = _has_process("roughcut.cli api") or _has_process("uvicorn roughcut.main:app")
-    payload = build_service_status(api_running=api_running)
+    payload = await build_service_status(api_running=api_running)
     services = payload["services"]
+    runtime = payload.get("runtime") or {}
+    orchestrator_lock = runtime.get("orchestrator_lock") or {}
     lines = [
         "服务状态：",
         f"- API：{_render_service_state(services['api'])}",
@@ -184,6 +186,8 @@ async def _handle_status_command(send_text: SendText) -> None:
         f"- PostgreSQL：{_render_service_state(services['postgres'])}",
         f"- Redis：{_render_service_state(services['redis'])}",
         f"- MinIO：{_render_service_state(services['minio'])}",
+        f"- Runtime Ready：{runtime.get('readiness_status', 'unknown')}",
+        f"- Orchestrator Lock：{orchestrator_lock.get('status', 'unknown')}",
     ]
     await send_text("\n".join(lines))
 

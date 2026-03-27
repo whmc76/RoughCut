@@ -6,6 +6,7 @@ import { api } from "../../api";
 export function useControlWorkspace() {
   const [stopDocker, setStopDocker] = useState(false);
   const status = useQuery({ queryKey: ["control-status"], queryFn: api.getControlStatus, refetchInterval: 10_000 });
+  const healthDetail = useQuery({ queryKey: ["health-detail"], queryFn: api.getHealthDetail, refetchInterval: 10_000 });
   const stop = useMutation({
     mutationFn: () => api.stopServices(stopDocker),
   });
@@ -14,6 +15,7 @@ export function useControlWorkspace() {
     stopDocker,
     setStopDocker,
     status,
+    healthDetail,
     stop,
   };
 }

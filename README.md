@@ -118,13 +118,21 @@ pnpm setup
 - `watch`
 - `.env`（若不存在且 `.env.example` 存在）
 
-### 4. 启动基础服务
+### 4. 启动 Docker 服务
+
+最低成本常驻，只起基础设施：
+
+```bash
+pnpm docker:infra:up
+```
+
+推荐常驻，直接起 `infra + runtime`，并自动在宿主机后台启动 workspace watch：
 
 ```bash
 pnpm docker:up
 ```
 
-启动 PostgreSQL（5432）、Redis（6379）、MinIO（9000/9001）。
+其中基础设施包含 PostgreSQL（5432）、Redis（6379）、MinIO（9000/9001）。
 
 数字人相关服务现在默认走独立共享服务，不再依赖 RoughCut 内部 Docker：
 
@@ -300,6 +308,20 @@ Windows 下当前建议把 [start_roughcut.bat](E:/WorkSpace/RoughCut/start_roug
 
 - `start_roughcut.bat`
   一键启动包模式，后台拉起 API / orchestrator / workers，并自动打开浏览器；这个终端窗口本身就是托管器，直接关窗即可停掉整套服务
+- `start_roughcut.bat infra`
+  只启动 PostgreSQL / Redis / MinIO 这套轻量基础设施
+- `start_roughcut.bat runtime`
+  启动推荐的常驻 Docker runtime：`api + orchestrator + worker-media + worker-llm`，并自动在宿主机后台启动 workspace watch
+- `start_roughcut.bat full`
+  启动 runtime + automation（当前包含 `watcher`），并自动在宿主机后台启动 workspace watch
+- `start_roughcut.bat runtime-down`
+  关闭 runtime，并停止对应的后台 workspace watch
+- `start_roughcut.bat full-down`
+  关闭 runtime + automation，并停止对应的后台 workspace watch
+- `start_roughcut.bat runtime-watch`
+  监听 workspace 改动并自动 refresh Docker runtime；适合 Docker 开发态，不适合重任务常驻队列
+- `start_roughcut.bat full-watch`
+  监听 workspace 改动并自动 refresh runtime + automation
 - `start_roughcut.bat dev`
   直接运行统一入口 `pnpm dev`
 - `start_roughcut.bat test`
@@ -315,10 +337,14 @@ Windows 下当前建议把 [start_roughcut.bat](E:/WorkSpace/RoughCut/start_roug
 
 ## Docker 部署
 
-仓库现在支持两种 Docker 用法：
+仓库现在推荐把 Docker 拆成三层，而不是继续只用一个全量 compose：
 
-- `docker compose up -d`：基础设施 + RoughCut 全部服务
-- `docker compose --profile watcher up -d`：额外启动目录监听容器
+- `docker-compose.infra.yml`
+  只放 `postgres` / `redis` / `minio`
+- `docker-compose.runtime.yml`
+  放推荐常驻的 `migrate` / `api` / `orchestrator` / `worker-media` / `worker-llm`
+- `docker-compose.automation.yml`
+  放可选自动化服务，当前第一版只包含 `watcher`
 
 ### 1. 准备配置
 
@@ -326,15 +352,29 @@ Windows 下当前建议把 [start_roughcut.bat](E:/WorkSpace/RoughCut/start_roug
 cp .env.example .env
 ```
 
-在 `.env` 中填写你的模型配置和 API Key。容器内的 PostgreSQL / Redis / MinIO 地址由 `docker-compose.yml` 自动覆盖为容器服务名，无需手动改成 `postgres` / `redis` / `minio`。
+在 `.env` 中填写你的模型配置和 API Key。容器内的 PostgreSQL / Redis / MinIO 地址由 runtime / automation compose 自动覆盖为容器服务名，无需手动改成 `postgres` / `redis` / `minio`。
 
 ### 2. 构建并启动
 
+最低成本常驻（只起基础设施）：
+
 ```bash
-docker compose up -d --build
+docker compose -f docker-compose.infra.yml up -d
 ```
 
-启动后默认包含：
+推荐常驻（基础设施 + Docker runtime）：
+
+```bash
+docker compose -f docker-compose.infra.yml -f docker-compose.runtime.yml up -d --build
+```
+
+全自动无人值守（再加 watcher）：
+
+```bash
+docker compose -f docker-compose.infra.yml -f docker-compose.runtime.yml -f docker-compose.automation.yml up -d --build
+```
+
+推荐常驻默认包含：
 
 - `api`：FastAPI + 内置静态面板，访问 `http://localhost:8000`
 - `orchestrator`
@@ -344,26 +384,78 @@ docker compose up -d --build
 - `redis`
 - `minio`
 
+全自动无人值守额外包含：
+
+- `watcher`
+
 ### 3. 查看日志
 
 ```bash
-docker compose logs -f api
-docker compose logs -f orchestrator
-docker compose logs -f worker-media
+docker compose -f docker-compose.infra.yml -f docker-compose.runtime.yml logs -f api
+docker compose -f docker-compose.infra.yml -f docker-compose.runtime.yml logs -f orchestrator
+docker compose -f docker-compose.infra.yml -f docker-compose.runtime.yml logs -f worker-media
 ```
+
+### 3.5 Docker 开发态自动同步 workspace 改动
+
+参考 Hydra 现在在做的方案，RoughCut 也可以用“宿主机监听 workspace 改动，再触发一次 Docker runtime refresh”的方式，而不是把代码目录直接 bind mount 到容器里。
+
+  当前仓库已经提供两层脚本：
+  
+  - `scripts/run-roughcut-docker-refresh-session.ps1`
+    单次执行 `docker compose up -d --build --force-recreate`，只重建 `migrate / api / orchestrator / worker-media / worker-llm`，不会主动重建 `postgres / redis / minio`
+  - `scripts/watch-roughcut-docker-runtime.ps1`
+    持续监听 `src/`、`frontend/`、`scripts/`、compose、`Dockerfile`、`pyproject.toml`、`uv.lock` 等改动，debounce 后触发 refresh
+
+常用命令：
+
+```bash
+pnpm docker:runtime:watch
+pnpm docker:auto:watch
+```
+
+如果你走默认的 Docker 启停入口，现在 watch 会一起自动启动 / 停止：
+
+```bash
+pnpm docker:runtime:up
+pnpm docker:runtime:down
+pnpm docker:auto:up
+pnpm docker:auto:down
+```
+
+Windows 入口也加了快捷命令：
+
+```powershell
+./start_roughcut.bat runtime-watch
+./start_roughcut.bat full-watch
+```
+
+这套方案和 Hydra 的差别是：
+
+- Hydra 需要同步 runtime home / SQLite 状态
+- RoughCut 不需要同步 runtime home，因为状态真相在 PostgreSQL / Redis / MinIO volume
+- RoughCut 的 watch 主要负责“代码变了就重建并重启 runtime 容器”
+
+注意：
+
+- 这套 watch 更适合 Docker 开发态，不适合正在跑重任务的稳定常驻队列
+- 每次命中改动都会重建并 `force-recreate` `api / orchestrator / workers`
+- `data/`、`logs/`、`watch/`、`.venv/`、`node_modules/`、`docs/` 默认不会触发 refresh
+- `runtime` / `full` 模式现在会在宿主机后台自动拉起对应 watch；如果你只想起容器、不想自动同步，可用 `start_roughcut.ps1 -Mode runtime -NoDockerWatch`
 
 ### 4. 数据目录
 
 - `./data/output`：成片输出
 - `./logs`：运行日志与 render debug
-- `./watch`：可选目录监听挂载点（启用 `watcher` profile 时使用）
+- `./watch`：可选目录监听挂载点（启用 automation compose 时使用）
 
-### 5. 说明
-
-- Docker 镜像默认内置 `uv`、`ffmpeg` 和 `Noto Sans CJK` 中文字体。
-- Docker 镜像会在构建阶段自动执行 `frontend/` 下的前端依赖安装和构建。
-- 默认镜像已包含 `local-asr` 额外依赖；本地可选 `FunASR SenseVoice` 或 `faster-whisper`。
-- 当前项目默认 ASR 方案为 `openai + gpt-4o-transcribe`；离线中文口播优先建议 `funasr + sensevoice-small`。
+  ### 5. 说明
+  
+  - Docker 镜像默认内置 `uv`、`ffmpeg` 和 `Noto Sans CJK` 中文字体。
+  - Docker 镜像会在构建阶段自动执行 `frontend/` 下的前端依赖安装和构建。
+  - 默认 Docker 镜像不再内置 `local-asr` 额外依赖，优先走更轻的 runtime 构建；如果你确实要在容器内启用 `funasr` / `faster-whisper`，先设置 `ROUGHCUT_DOCKER_PYTHON_EXTRAS=local-asr` 再执行 `docker compose build` / `pnpm docker:runtime:up`。
+  - 当前项目默认 ASR 方案为 `openai + gpt-4o-transcribe`；离线中文口播优先建议 `funasr + sensevoice-small`。
+  - 推荐把长期在线形态收敛到 `infra + runtime` 这一档；`watcher` 只在确实需要自动扫盘时再加入。
 - 推荐本地开发使用 `uv + npm`，容器部署使用 `docker compose`，不要混用系统级 `pip` 和容器内运行时配置。
 
 ---

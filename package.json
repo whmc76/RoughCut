@@ -26,9 +26,22 @@
     "lint": "pnpm run lint:frontend && pnpm run lint:backend",
     "lint:frontend": "pnpm --dir frontend typecheck",
     "lint:backend": "uv run ruff check src tests",
-    "docker:up": "docker compose up -d --build --remove-orphans",
-    "docker:down": "docker compose down --remove-orphans",
-    "docker:logs": "docker compose logs -f"
+    "docker:up": "pwsh -NoProfile -File start_roughcut.ps1 -Mode runtime",
+    "docker:down": "pwsh -NoProfile -File start_roughcut.ps1 -Mode runtime-down",
+    "docker:logs": "docker compose -f docker-compose.infra.yml -f docker-compose.runtime.yml logs -f",
+    "docker:infra:up": "docker compose -f docker-compose.infra.yml up -d --remove-orphans",
+    "docker:infra:down": "docker compose -f docker-compose.infra.yml down --remove-orphans",
+    "docker:infra:logs": "docker compose -f docker-compose.infra.yml logs -f",
+    "docker:runtime:up": "pwsh -NoProfile -File start_roughcut.ps1 -Mode runtime",
+    "docker:runtime:down": "pwsh -NoProfile -File start_roughcut.ps1 -Mode runtime-down",
+    "docker:runtime:logs": "docker compose -f docker-compose.infra.yml -f docker-compose.runtime.yml logs -f",
+    "docker:runtime:refresh": "pwsh -NoProfile -File scripts/run-roughcut-docker-refresh-session.ps1 -ComposeMode runtime",
+    "docker:runtime:watch": "pwsh -NoProfile -File scripts/watch-roughcut-docker-runtime.ps1 -ComposeMode runtime",
+    "docker:auto:up": "pwsh -NoProfile -File start_roughcut.ps1 -Mode full",
+    "docker:auto:down": "pwsh -NoProfile -File start_roughcut.ps1 -Mode full-down",
+    "docker:auto:logs": "docker compose -f docker-compose.infra.yml -f docker-compose.runtime.yml -f docker-compose.automation.yml logs -f",
+    "docker:auto:refresh": "pwsh -NoProfile -File scripts/run-roughcut-docker-refresh-session.ps1 -ComposeMode full",
+    "docker:auto:watch": "pwsh -NoProfile -File scripts/watch-roughcut-docker-runtime.ps1 -ComposeMode full"
   },
   "devDependencies": {
     "concurrently": "^9.2.1"

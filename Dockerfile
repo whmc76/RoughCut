@@ -19,6 +19,7 @@ ENV UV_LINK_MODE=copy
 ENV UV_COMPILE_BYTECODE=1
 ENV UV_PROJECT_ENVIRONMENT=/app/.venv
 ENV PATH="/app/.venv/bin:${PATH}"
+ARG ROUGHCUT_PYTHON_EXTRAS=""
 
 WORKDIR /app
 
@@ -36,9 +37,17 @@ RUN apt-get update \
 COPY pyproject.toml uv.lock README.md alembic.ini ./
 COPY src ./src
 COPY frontend ./frontend
-COPY --from=frontend-builder /frontend/dist ./frontend/dist
+COPY --from=frontend-builder /frontend/frontend/dist ./frontend/dist
 
-RUN uv sync --frozen --no-dev --extra local-asr
+RUN if [ -n "${ROUGHCUT_PYTHON_EXTRAS}" ]; then \
+        set --; \
+        for extra in ${ROUGHCUT_PYTHON_EXTRAS}; do \
+            set -- "$@" --extra "${extra}"; \
+        done; \
+        uv sync --frozen --no-dev "$@"; \
+    else \
+        uv sync --frozen --no-dev; \
+    fi
 
 RUN mkdir -p /app/data/output /app/logs
 

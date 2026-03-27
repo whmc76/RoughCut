@@ -9,6 +9,9 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel
 
+from roughcut.pipeline.orchestrator import get_orchestrator_lock_snapshot
+from roughcut.runtime_health import build_readiness_payload
+
 router = APIRouter(prefix="/control", tags=["control"])
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -87,8 +90,24 @@ def _has_container(containers: set[str], name: str) -> bool:
     return any(container == name or container.startswith(f"{name}-") for container in containers)
 
 
-def build_service_status(*, api_running: bool) -> dict[str, object]:
+async def build_service_status(*, api_running: bool) -> dict[str, object]:
     containers = _running_container_names()
+    try:
+        readiness = await build_readiness_payload()
+    except Exception as exc:
+        readiness = {
+            "status": "unknown",
+            "checks": {},
+            "detail": str(exc),
+        }
+    try:
+        orchestrator_lock = await get_orchestrator_lock_snapshot()
+    except Exception as exc:
+        orchestrator_lock = {
+            "status": "unknown",
+            "leader_active": None,
+            "detail": str(exc),
+        }
     return {
         "checked_at": datetime.now(timezone.utc).isoformat(),
         "services": {
@@ -104,6 +123,11 @@ def build_service_status(*, api_running: bool) -> dict[str, object]:
             "postgres": _has_container(containers, "roughcut-postgres"),
             "redis": _has_container(containers, "roughcut-redis"),
             "minio": _has_container(containers, "roughcut-minio"),
+        },
+        "runtime": {
+            "readiness_status": readiness.get("status", "unknown"),
+            "readiness_checks": readiness.get("checks", {}),
+            "orchestrator_lock": orchestrator_lock,
         },
     }
 
@@ -148,4 +172,4 @@ async def stop_services(body: StopServicesIn):
 
 @router.get("/status")
 async def service_status():
-    return build_service_status(api_running=True)
+    return await build_service_status(api_running=True)

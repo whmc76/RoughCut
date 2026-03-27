@@ -4,6 +4,13 @@ set SCRIPT_DIR=%~dp0
 cd /d "%SCRIPT_DIR%"
 
 if /I "%~1"=="dev" goto pnpm_dev
+if /I "%~1"=="infra" goto powershell_infra
+if /I "%~1"=="runtime" goto powershell_runtime
+if /I "%~1"=="full" goto powershell_full
+if /I "%~1"=="runtime-down" goto powershell_runtime_down
+if /I "%~1"=="full-down" goto powershell_full_down
+if /I "%~1"=="runtime-watch" goto powershell_runtime_watch
+if /I "%~1"=="full-watch" goto powershell_full_watch
 if /I "%~1"=="build" goto pnpm_build
 if /I "%~1"=="test" goto pnpm_test
 if /I "%~1"=="clip-test" goto pnpm_test_clip
@@ -102,6 +109,76 @@ if %ERRORLEVEL%==0 (
 set EXIT_CODE=%ERRORLEVEL%
 goto finish
 
+:powershell_infra
+where pwsh >nul 2>nul
+if %ERRORLEVEL%==0 (
+  pwsh -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%start_roughcut.ps1" -Mode infra
+) else (
+  powershell -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%start_roughcut.ps1" -Mode infra
+)
+set EXIT_CODE=%ERRORLEVEL%
+goto finish
+
+:powershell_runtime
+where pwsh >nul 2>nul
+if %ERRORLEVEL%==0 (
+  pwsh -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%start_roughcut.ps1" -Mode runtime
+) else (
+  powershell -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%start_roughcut.ps1" -Mode runtime
+)
+set EXIT_CODE=%ERRORLEVEL%
+goto finish
+
+:powershell_full
+where pwsh >nul 2>nul
+if %ERRORLEVEL%==0 (
+  pwsh -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%start_roughcut.ps1" -Mode full
+) else (
+  powershell -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%start_roughcut.ps1" -Mode full
+)
+set EXIT_CODE=%ERRORLEVEL%
+goto finish
+
+:powershell_runtime_down
+where pwsh >nul 2>nul
+if %ERRORLEVEL%==0 (
+  pwsh -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%start_roughcut.ps1" -Mode runtime-down
+) else (
+  powershell -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%start_roughcut.ps1" -Mode runtime-down
+)
+set EXIT_CODE=%ERRORLEVEL%
+goto finish
+
+:powershell_full_down
+where pwsh >nul 2>nul
+if %ERRORLEVEL%==0 (
+  pwsh -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%start_roughcut.ps1" -Mode full-down
+) else (
+  powershell -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%start_roughcut.ps1" -Mode full-down
+)
+set EXIT_CODE=%ERRORLEVEL%
+goto finish
+
+:powershell_runtime_watch
+where pwsh >nul 2>nul
+if %ERRORLEVEL%==0 (
+  pwsh -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%scripts\watch-roughcut-docker-runtime.ps1" -ComposeMode runtime
+) else (
+  powershell -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%scripts\watch-roughcut-docker-runtime.ps1" -ComposeMode runtime
+)
+set EXIT_CODE=%ERRORLEVEL%
+goto finish
+
+:powershell_full_watch
+where pwsh >nul 2>nul
+if %ERRORLEVEL%==0 (
+  pwsh -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%scripts\watch-roughcut-docker-runtime.ps1" -ComposeMode full
+) else (
+  powershell -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%scripts\watch-roughcut-docker-runtime.ps1" -ComposeMode full
+)
+set EXIT_CODE=%ERRORLEVEL%
+goto finish
+
 :powershell_stoponly
 where pwsh >nul 2>nul
 if %ERRORLEVEL%==0 (
@@ -117,6 +194,13 @@ echo.
 echo RoughCut Windows entrypoint
 echo.
 echo   start_roughcut.bat             One-click startup package
+echo   start_roughcut.bat infra       Start only PostgreSQL / Redis / MinIO containers
+echo   start_roughcut.bat runtime     Start recommended always-on Docker runtime and auto-start workspace watch
+echo   start_roughcut.bat full        Start runtime plus automation services and auto-start workspace watch
+echo   start_roughcut.bat runtime-down Stop runtime and its workspace watch
+echo   start_roughcut.bat full-down    Stop runtime plus automation and their workspace watch
+echo   start_roughcut.bat runtime-watch  Watch workspace changes and auto-refresh Docker runtime
+echo   start_roughcut.bat full-watch     Watch workspace changes and auto-refresh runtime + automation
 echo   start_roughcut.bat dev         Run unified pnpm dev
 echo   start_roughcut.bat build       Run pnpm build
 echo   start_roughcut.bat test        Run pnpm test

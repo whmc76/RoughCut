@@ -1,9 +1,63 @@
 from __future__ import annotations
 
+import asyncio
 import uuid
 from datetime import datetime, timedelta, timezone
 
 import pytest
+
+
+@pytest.mark.asyncio
+async def test_run_orchestrator_waits_for_single_active_lock(monkeypatch):
+    import roughcut.pipeline.orchestrator as orchestrator_mod
+
+    events: list[str] = []
+
+    class FakeLease:
+        def __init__(self):
+            self._states = [False, True]
+
+        async def try_acquire(self) -> bool:
+            state = self._states.pop(0) if self._states else True
+            events.append(f"lock:{state}")
+            return state
+
+        async def release(self) -> None:
+            events.append("release")
+
+    async def fake_recover():
+        events.append("recover")
+
+    async def fake_tick():
+        events.append("tick")
+        raise asyncio.CancelledError
+
+    async def fake_sleep(_interval: float):
+        events.append("sleep")
+
+    monkeypatch.setattr(orchestrator_mod, "_SingleActiveOrchestratorLease", FakeLease)
+    monkeypatch.setattr(orchestrator_mod, "_recover_incomplete_jobs", fake_recover)
+    monkeypatch.setattr(orchestrator_mod, "tick", fake_tick)
+    monkeypatch.setattr(orchestrator_mod.asyncio, "sleep", fake_sleep)
+
+    with pytest.raises(asyncio.CancelledError):
+        await orchestrator_mod.run_orchestrator(poll_interval=0.01)
+
+    assert events[:4] == ["lock:False", "sleep", "lock:True", "recover"]
+    assert "tick" in events
+    assert events[-1] == "release"
+
+
+@pytest.mark.asyncio
+async def test_get_orchestrator_lock_snapshot_reports_unsupported_for_non_postgres(monkeypatch):
+    import roughcut.pipeline.orchestrator as orchestrator_mod
+
+    monkeypatch.setattr(orchestrator_mod, "_supports_postgres_orchestrator_lock", lambda: False)
+
+    snapshot = await orchestrator_mod.get_orchestrator_lock_snapshot()
+
+    assert snapshot["status"] == "unsupported"
+    assert snapshot["leader_active"] is None
 
 
 @pytest.mark.asyncio

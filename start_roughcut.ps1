@@ -1,4 +1,6 @@
 param(
+    [ValidateSet("local", "infra", "runtime", "full", "runtime-watch", "full-watch", "runtime-down", "full-down")]
+    [string]$Mode = "local",
     [int]$Port = 38471,
     [switch]$SkipDocker,
     [switch]$SkipMigrate,
@@ -6,7 +8,8 @@ param(
     [switch]$StopOnly,
     [switch]$StopDocker,
     [switch]$NoPause,
-    [switch]$NoWatcher
+    [switch]$NoWatcher,
+    [switch]$NoDockerWatch
 )
 
 Set-StrictMode -Version Latest
@@ -26,6 +29,10 @@ $FrontendDir = Join-Path $RepoRoot "frontend"
 $FrontendSrcDir = Join-Path $FrontendDir "src"
 $FrontendDist = Join-Path $FrontendDir "dist\index.html"
 $WatchDir = Join-Path $RepoRoot "watch"
+$InfraComposeFile = Join-Path $RepoRoot "docker-compose.infra.yml"
+$RuntimeComposeFile = Join-Path $RepoRoot "docker-compose.runtime.yml"
+$AutomationComposeFile = Join-Path $RepoRoot "docker-compose.automation.yml"
+$DockerWatchScript = Join-Path $RepoRoot "scripts\watch-roughcut-docker-runtime.ps1"
 $script:ManagedProcesses = @()
 
 function Invoke-NativeCommandChecked {
@@ -41,6 +48,240 @@ function Invoke-NativeCommandChecked {
             throw "$FailureMessage (exit code $LASTEXITCODE)."
         }
         throw "Command failed: $FilePath $($Arguments -join ' ') (exit code $LASTEXITCODE)."
+    }
+}
+
+function Get-RoughCutComposeFiles {
+    param(
+        [ValidateSet("infra", "runtime", "full")]
+        [string]$ComposeMode
+    )
+
+    $files = @($InfraComposeFile)
+    if ($ComposeMode -in @("runtime", "full")) {
+        $files += $RuntimeComposeFile
+    }
+    if ($ComposeMode -eq "full") {
+        $files += $AutomationComposeFile
+    }
+    return $files
+}
+
+function Invoke-RoughCutCompose {
+    param(
+        [ValidateSet("infra", "runtime", "full")]
+        [string]$ComposeMode,
+        [string[]]$ComposeArguments
+    )
+
+    $docker = Get-Command docker -ErrorAction SilentlyContinue
+    if ($null -eq $docker) {
+        throw "Docker Desktop is required for mode '$ComposeMode'."
+    }
+
+    $composeFiles = Get-RoughCutComposeFiles -ComposeMode $ComposeMode
+    $args = @("compose")
+    foreach ($composeFile in $composeFiles) {
+        if (-not (Test-Path $composeFile)) {
+            throw "Compose file not found: $composeFile"
+        }
+        $args += "-f"
+        $args += $composeFile
+    }
+    $args += $ComposeArguments
+    Invoke-NativeCommandChecked -FilePath $docker.Source -Arguments $args -FailureMessage "docker compose command failed"
+}
+
+function Start-RoughCutComposeMode {
+    param(
+        [ValidateSet("infra", "runtime", "full")]
+        [string]$ComposeMode
+    )
+
+    Write-Host "Starting RoughCut Docker mode: $ComposeMode" -ForegroundColor Cyan
+    switch ($ComposeMode) {
+        "infra" {
+            Invoke-RoughCutCompose -ComposeMode $ComposeMode -ComposeArguments @("up", "-d", "--remove-orphans")
+        }
+        default {
+            try {
+                Invoke-RoughCutCompose -ComposeMode $ComposeMode -ComposeArguments @("up", "-d", "--build", "--remove-orphans")
+            } catch {
+                $existingImage = docker image inspect roughcut:local 2>$null
+                if ($LASTEXITCODE -ne 0) {
+                    throw
+                }
+                Write-Host "Docker build failed, but local image roughcut:local exists. Retrying without --build." -ForegroundColor Yellow
+                Invoke-RoughCutCompose -ComposeMode $ComposeMode -ComposeArguments @("up", "-d", "--remove-orphans")
+            }
+        }
+    }
+
+    Write-Host ""
+    switch ($ComposeMode) {
+        "infra" {
+            Write-Host "Infra services are up." -ForegroundColor Green
+        }
+        "runtime" {
+            Write-Host "Recommended always-on runtime is up." -ForegroundColor Green
+        }
+        "full" {
+            Write-Host "Runtime plus automation services are up." -ForegroundColor Green
+        }
+    }
+}
+
+function Stop-RoughCutComposeMode {
+    param(
+        [ValidateSet("runtime", "full")]
+        [string]$ComposeMode
+    )
+
+    Stop-RoughCutDockerWatch -ComposeMode $ComposeMode
+    Write-Host "Stopping RoughCut Docker mode: $ComposeMode" -ForegroundColor Cyan
+    Invoke-RoughCutCompose -ComposeMode $ComposeMode -ComposeArguments @("down", "--remove-orphans")
+}
+
+function Get-RoughCutDockerWatchLockPath {
+    param(
+        [ValidateSet("runtime", "full")]
+        [string]$ComposeMode
+    )
+
+    return Join-Path $RepoRoot ("logs\docker-watch-{0}.lock" -f $ComposeMode)
+}
+
+function Get-RoughCutDockerWatchProcessId {
+    param([string]$LockPath)
+
+    if (-not (Test-Path $LockPath)) {
+        return $null
+    }
+
+    foreach ($line in (Get-Content $LockPath -ErrorAction SilentlyContinue)) {
+        if ($line -match "^pid=(\d+)$") {
+            return [int]$Matches[1]
+        }
+    }
+
+    return $null
+}
+
+function Test-RoughCutDockerWatchActive {
+    param([int]$ProcessId)
+
+    if ($ProcessId -le 0) {
+        return $false
+    }
+
+    $process = Get-CimInstance Win32_Process -Filter "ProcessId = $ProcessId" -ErrorAction SilentlyContinue
+    if ($null -eq $process) {
+        return $false
+    }
+
+    $commandLine = [string]($process.CommandLine ?? "")
+    return $commandLine -match [regex]::Escape("watch-roughcut-docker-runtime.ps1")
+}
+
+function Get-PowerShellCommand {
+    $powerShellCommand = Get-Command pwsh -ErrorAction SilentlyContinue
+    if ($null -eq $powerShellCommand) {
+        $powerShellCommand = Get-Command powershell -ErrorAction SilentlyContinue
+    }
+    if ($null -eq $powerShellCommand) {
+        throw "PowerShell executable not found."
+    }
+    return $powerShellCommand
+}
+
+function Start-RoughCutDockerWatchMode {
+    param(
+        [ValidateSet("runtime-watch", "full-watch")]
+        [string]$WatchMode
+    )
+
+    if (-not (Test-Path $DockerWatchScript)) {
+        throw "Docker watch script not found: $DockerWatchScript"
+    }
+
+    $composeMode = if ($WatchMode -eq "full-watch") { "full" } else { "runtime" }
+    $powerShellCommand = Get-PowerShellCommand
+    Write-Host "Starting RoughCut Docker watch mode: $composeMode" -ForegroundColor Cyan
+    Invoke-NativeCommandChecked -FilePath $powerShellCommand.Source -Arguments @("-NoProfile", "-File", $DockerWatchScript, "-ComposeMode", $composeMode) -FailureMessage "Docker watch mode failed"
+}
+
+function Start-RoughCutDockerWatch {
+    param(
+        [ValidateSet("runtime", "full")]
+        [string]$ComposeMode
+    )
+
+    if ($NoDockerWatch) {
+        Write-Host "Docker watch disabled for mode $ComposeMode." -ForegroundColor Yellow
+        return
+    }
+
+    if (-not (Test-Path $DockerWatchScript)) {
+        throw "Docker watch script not found: $DockerWatchScript"
+    }
+
+    $otherMode = if ($ComposeMode -eq "full") { "runtime" } else { "full" }
+    Stop-RoughCutDockerWatch -ComposeMode $otherMode -SilentlyContinue
+
+    $lockPath = Get-RoughCutDockerWatchLockPath -ComposeMode $ComposeMode
+    $existingPid = Get-RoughCutDockerWatchProcessId -LockPath $lockPath
+    if ($null -ne $existingPid -and (Test-RoughCutDockerWatchActive -ProcessId $existingPid)) {
+        Write-Host "Docker watch already running for $ComposeMode (PID $existingPid)." -ForegroundColor Yellow
+        return
+    }
+    if (Test-Path $lockPath) {
+        Remove-Item $lockPath -Force -ErrorAction SilentlyContinue
+    }
+
+    $powerShellCommand = Get-PowerShellCommand
+    $outLog = Join-Path $RepoRoot ("logs\docker-watch-{0}.out.log" -f $ComposeMode)
+    $errLog = Join-Path $RepoRoot ("logs\docker-watch-{0}.err.log" -f $ComposeMode)
+    New-Item -ItemType Directory -Force -Path (Join-Path $RepoRoot "logs") | Out-Null
+
+    $process = Start-Process `
+        -FilePath $powerShellCommand.Source `
+        -ArgumentList @("-NoProfile", "-File", $DockerWatchScript, "-ComposeMode", $ComposeMode) `
+        -WorkingDirectory $RepoRoot `
+        -WindowStyle Hidden `
+        -PassThru `
+        -RedirectStandardOutput $outLog `
+        -RedirectStandardError $errLog
+
+    Write-Host "Docker watch started for $ComposeMode (PID $($process.Id))." -ForegroundColor Green
+}
+
+function Stop-RoughCutDockerWatch {
+    param(
+        [ValidateSet("runtime", "full", "all")]
+        [string]$ComposeMode = "all",
+        [switch]$SilentlyContinue
+    )
+
+    $modes = if ($ComposeMode -eq "all") { @("runtime", "full") } else { @($ComposeMode) }
+    foreach ($modeName in $modes) {
+        $lockPath = Get-RoughCutDockerWatchLockPath -ComposeMode $modeName
+        $processId = Get-RoughCutDockerWatchProcessId -LockPath $lockPath
+        if ($null -ne $processId -and (Test-RoughCutDockerWatchActive -ProcessId $processId)) {
+            try {
+                Stop-Process -Id $processId -Force -ErrorAction Stop
+                Write-Host "Docker watch stopped for $modeName (PID $processId)." -ForegroundColor Green
+            } catch {
+                if (-not $SilentlyContinue) {
+                    Write-Host "Failed to stop docker watch for $modeName (PID $processId): $($_.Exception.Message)" -ForegroundColor Yellow
+                }
+            }
+        } elseif (-not $SilentlyContinue) {
+            Write-Host "Docker watch is not running for $modeName." -ForegroundColor Yellow
+        }
+
+        if (Test-Path $lockPath) {
+            Remove-Item $lockPath -Force -ErrorAction SilentlyContinue
+        }
     }
 }
 
@@ -740,7 +981,31 @@ function Wait-LauncherClose {
 
 if ($StopOnly) {
 Stop-RoughCutServices -StopDockerServices:$StopDocker
+Stop-RoughCutDockerWatch -ComposeMode all -SilentlyContinue
 Remove-LegacyHeygemMockContainer
+    exit 0
+}
+
+if ($Mode -in @("runtime-watch", "full-watch")) {
+    Start-RoughCutDockerWatchMode -WatchMode $Mode
+    exit 0
+}
+
+if ($Mode -eq "runtime-down") {
+    Stop-RoughCutComposeMode -ComposeMode "runtime"
+    exit 0
+}
+
+if ($Mode -eq "full-down") {
+    Stop-RoughCutComposeMode -ComposeMode "full"
+    exit 0
+}
+
+if ($Mode -ne "local") {
+    Start-RoughCutComposeMode -ComposeMode $Mode
+    if ($Mode -in @("runtime", "full")) {
+        Start-RoughCutDockerWatch -ComposeMode $Mode
+    }
     exit 0
 }
 

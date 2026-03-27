@@ -17,6 +17,61 @@ async def test_health(client: AsyncClient):
 
 
 @pytest.mark.asyncio
+async def test_health_detail_reports_runtime_surfaces(client: AsyncClient, monkeypatch: pytest.MonkeyPatch):
+    import roughcut.api.health as health_api
+
+    async def fake_readiness():
+        return {
+            "status": "ready",
+            "checks": {
+                "database": {"status": "ok", "detail": "ok"},
+                "redis": {"status": "ok", "detail": "ok"},
+                "storage": {"status": "ok", "detail": "ok"},
+            },
+        }
+
+    async def fake_lock_snapshot():
+        return {
+            "status": "held",
+            "leader_active": True,
+            "detail": "active leader",
+        }
+
+    async def fake_managed_services():
+        return [
+            {"name": "heygem", "url": "http://127.0.0.1:49202", "status": "ok", "enabled": True},
+            {"name": "indextts2", "url": "http://127.0.0.1:49204", "status": "failed", "enabled": True},
+        ]
+
+    async def fake_watch_snapshot():
+        return {
+            "roots_total": 2,
+            "running_scans": 1,
+            "cached_pending_total": 3,
+            "auto_enqueue_enabled": True,
+            "auto_merge_enabled": True,
+            "active_jobs": 1,
+            "running_gpu_steps": 0,
+            "idle_slots": 1,
+        }
+
+    monkeypatch.setattr(health_api, "build_readiness_payload", fake_readiness)
+    monkeypatch.setattr(health_api, "get_orchestrator_lock_snapshot", fake_lock_snapshot)
+    monkeypatch.setattr(health_api, "get_managed_service_snapshots", fake_managed_services)
+    monkeypatch.setattr(health_api, "get_watch_root_auto_duty_snapshot", fake_watch_snapshot)
+
+    response = await client.get("/api/v1/health/detail")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "degraded"
+    assert payload["readiness"]["status"] == "ready"
+    assert payload["orchestrator_lock"]["status"] == "held"
+    assert payload["managed_services"][1]["status"] == "failed"
+    assert payload["watch_automation"]["running_scans"] == 1
+
+
+@pytest.mark.asyncio
 async def test_glossary_empty_list(client: AsyncClient):
     response = await client.get("/api/v1/glossary")
     assert response.status_code == 200
@@ -1005,10 +1060,28 @@ async def test_control_status_reports_services(client: AsyncClient, monkeypatch:
         "_has_process",
         lambda needle: "orchestrator" in needle or "media_queue" in needle,
     )
+    async def fake_readiness():
+        return {
+            "status": "ready",
+            "checks": {
+                "database": {"status": "ok", "detail": "ok"},
+                "redis": {"status": "ok", "detail": "ok"},
+                "storage": {"status": "ok", "detail": "ok"},
+            },
+        }
+    async def fake_lock_snapshot():
+        return {
+            "status": "held",
+            "leader_active": True,
+            "detail": "active orchestrator leader",
+        }
+    monkeypatch.setattr(control_api, "build_readiness_payload", fake_readiness)
+    monkeypatch.setattr(control_api, "get_orchestrator_lock_snapshot", fake_lock_snapshot)
 
     response = await client.get("/api/v1/control/status")
     assert response.status_code == 200
-    data = response.json()["services"]
+    payload = response.json()
+    data = payload["services"]
     assert data["api"] is True
     assert data["telegram_agent"] is False
     assert data["orchestrator"] is True
@@ -1017,6 +1090,9 @@ async def test_control_status_reports_services(client: AsyncClient, monkeypatch:
     assert data["postgres"] is True
     assert data["redis"] is True
     assert data["minio"] is False
+    assert payload["runtime"]["readiness_status"] == "ready"
+    assert payload["runtime"]["orchestrator_lock"]["status"] == "held"
+    assert payload["runtime"]["orchestrator_lock"]["leader_active"] is True
 
 
 def test_control_running_container_names_handles_missing_docker(monkeypatch: pytest.MonkeyPatch):

@@ -1,7 +1,7 @@
 """store settings, profiles, and packaging state in database
 
 Revision ID: 0007
-Revises: 0006
+Revises: 0006_glossary_term_scope
 Create Date: 2026-03-26
 
 """
@@ -14,7 +14,7 @@ from sqlalchemy.dialects import postgresql
 TIMESTAMPTZ = sa.TIMESTAMP(timezone=True)
 
 revision: str = "0007"
-down_revision = "0006"
+down_revision = "0006_glossary_term_scope"
 branch_labels = None
 depends_on = None
 

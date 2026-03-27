@@ -687,6 +687,47 @@ export type RuntimeEnvironment = {
   output_dir: string;
 };
 
+export type ReadinessCheck = {
+  status: string;
+  detail: string;
+};
+
+export type OrchestratorLockSnapshot = {
+  status?: string;
+  leader_active?: boolean | null;
+  detail?: string;
+};
+
+export type ManagedServiceSnapshot = {
+  name: string;
+  url: string;
+  status: string;
+  enabled: boolean;
+};
+
+export type WatchAutomationSnapshot = {
+  roots_total: number;
+  running_scans: number;
+  cached_pending_total: number;
+  auto_enqueue_enabled: boolean;
+  auto_merge_enabled: boolean;
+  active_jobs: number;
+  running_gpu_steps: number;
+  idle_slots: number;
+};
+
+export type HealthDetail = {
+  checked_at: string;
+  status: string;
+  readiness: {
+    status: string;
+    checks: Record<string, ReadinessCheck>;
+  };
+  orchestrator_lock: OrchestratorLockSnapshot;
+  managed_services: ManagedServiceSnapshot[];
+  watch_automation: WatchAutomationSnapshot;
+};
+
 export type ConfigOptions = {
   job_languages: SelectOption[];
   channel_profiles: SelectOption[];
@@ -756,4 +797,9 @@ export type ConfigProfiles = {
 export type ServiceStatus = {
   checked_at: string;
   services: Record<string, boolean>;
+  runtime?: {
+    readiness_status?: string;
+    readiness_checks?: Record<string, ReadinessCheck>;
+    orchestrator_lock?: OrchestratorLockSnapshot;
+  };
 };

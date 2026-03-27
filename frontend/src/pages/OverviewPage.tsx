@@ -11,9 +11,14 @@ import { JobsUsageTrendPanel } from "../features/jobs/JobsUsageTrendPanel";
 import { useOverviewWorkspace } from "../features/overview/useOverviewWorkspace";
 import { formatDate, statusLabel } from "../utils";
 
+function renderRuntimeTone(status: string | undefined) {
+  return status === "ready" || status === "held" || status === "free" ? "status-ok" : "status-off";
+}
+
 export function OverviewPage() {
   const { t } = useI18n();
   const workspace = useOverviewWorkspace();
+  const runtime = workspace.services.data?.runtime;
 
   return (
     <section className="page-stack">
@@ -125,8 +130,25 @@ export function OverviewPage() {
                   <strong className={online ? "status-ok" : "status-off"}>{online ? t("overview.services.online") : t("overview.services.offline")}</strong>
                 </article>
               ))}
+              {runtime?.readiness_status && (
+                <article className="service-card">
+                  <span>runtime ready</span>
+                  <strong className={renderRuntimeTone(runtime.readiness_status)}>{runtime.readiness_status}</strong>
+                </article>
+              )}
+              {runtime?.orchestrator_lock?.status && (
+                <article className="service-card">
+                  <span>orchestrator lock</span>
+                  <strong className={renderRuntimeTone(runtime.orchestrator_lock.status)}>{runtime.orchestrator_lock.status}</strong>
+                </article>
+              )}
               {!workspace.services.data && !workspace.services.isLoading && <EmptyState message={t("overview.services.empty")} />}
             </div>
+            {runtime && (
+              <div className="top-gap muted">
+                {runtime.orchestrator_lock?.detail ?? "未返回 orchestrator lock 详情。"}
+              </div>
+            )}
           </section>
         </div>
       </PageSection>

@@ -5,6 +5,52 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 
+def test_readyz_returns_200_when_dependencies_are_ready(monkeypatch):
+    import roughcut.main as main_mod
+
+    async def fake_readiness():
+        return {
+            "status": "ready",
+            "checks": {
+                "database": {"status": "ok", "detail": "ok"},
+                "redis": {"status": "ok", "detail": "ok"},
+                "storage": {"status": "ok", "detail": "ok"},
+            },
+        }
+
+    monkeypatch.setattr(main_mod, "build_readiness_payload", fake_readiness)
+    app = main_mod.create_app()
+    client = TestClient(app)
+
+    response = client.get("/readyz")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "ready"
+
+
+def test_readyz_returns_503_when_dependencies_are_degraded(monkeypatch):
+    import roughcut.main as main_mod
+
+    async def fake_readiness():
+        return {
+            "status": "degraded",
+            "checks": {
+                "database": {"status": "ok", "detail": "ok"},
+                "redis": {"status": "failed", "detail": "connection refused"},
+                "storage": {"status": "ok", "detail": "ok"},
+            },
+        }
+
+    monkeypatch.setattr(main_mod, "build_readiness_payload", fake_readiness)
+    app = main_mod.create_app()
+    client = TestClient(app)
+
+    response = client.get("/readyz")
+
+    assert response.status_code == 503
+    assert response.json()["checks"]["redis"]["status"] == "failed"
+
+
 def test_create_app_returns_placeholder_when_frontend_missing(tmp_path: Path, monkeypatch):
     import roughcut.main as main_mod
 

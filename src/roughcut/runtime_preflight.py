@@ -7,6 +7,7 @@ import subprocess
 import time
 from pathlib import Path
 
+from roughcut.docker_gpu_guard import _probe_service_health
 from roughcut.config import get_settings
 from roughcut.docker_gpu_guard import hold_managed_gpu_services_async
 
@@ -111,3 +112,62 @@ def _managed_service_urls() -> list[str]:
         seen.add(url)
         deduped.append(url)
     return deduped
+
+
+def _managed_service_targets() -> list[dict[str, str]]:
+    settings = get_settings()
+    targets: list[dict[str, str]] = []
+
+    if str(getattr(settings, "transcription_provider", "") or "").strip().lower() == "qwen_asr":
+        targets.append(
+            {
+                "name": "qwen_asr",
+                "url": str(getattr(settings, "qwen_asr_api_base_url", "") or "").strip(),
+                "probe_kind": "health_json",
+            }
+        )
+    if str(getattr(settings, "avatar_provider", "") or "").strip().lower() == "heygem":
+        targets.append(
+            {
+                "name": "heygem",
+                "url": str(getattr(settings, "avatar_api_base_url", "") or "").strip(),
+                "probe_kind": "heygem_preview",
+            }
+        )
+    if str(getattr(settings, "voice_provider", "") or "").strip().lower() == "indextts2":
+        targets.append(
+            {
+                "name": "indextts2",
+                "url": str(getattr(settings, "voice_clone_api_base_url", "") or "").strip(),
+                "probe_kind": "health_json",
+            }
+        )
+
+    deduped: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for target in targets:
+        key = (target["name"], target["url"])
+        if not target["url"] or key in seen:
+            continue
+        seen.add(key)
+        deduped.append(target)
+    return deduped
+
+
+async def get_managed_service_snapshots() -> list[dict[str, str | bool]]:
+    snapshots: list[dict[str, str | bool]] = []
+    for target in _managed_service_targets():
+        healthy = await asyncio.to_thread(
+            _probe_service_health,
+            target["url"],
+            probe_kind=target["probe_kind"],
+        )
+        snapshots.append(
+            {
+                "name": target["name"],
+                "url": target["url"],
+                "status": "ok" if healthy else "failed",
+                "enabled": True,
+            }
+        )
+    return snapshots

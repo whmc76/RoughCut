@@ -38,16 +38,38 @@ async def test_handle_status_command_reports_service_matrix(monkeypatch):
                 "postgres": True,
                 "redis": True,
                 "minio": False,
-            }
+            },
+            "runtime": {
+                "readiness_status": "ready",
+                "orchestrator_lock": {"status": "held"},
+            },
         },
     )
-
+    async def fake_build_service_status(api_running: bool):
+        return {
+            "services": {
+                "api": api_running,
+                "telegram_agent": True,
+                "orchestrator": True,
+                "media_worker": False,
+                "llm_worker": True,
+                "postgres": True,
+                "redis": True,
+                "minio": False,
+            },
+            "runtime": {
+                "readiness_status": "ready",
+                "orchestrator_lock": {"status": "held"},
+            },
+        }
+    monkeypatch.setattr(commands_mod, "build_service_status", fake_build_service_status)
     handled = await handle_telegram_command("/status", send_text=fake_send_text)
 
     assert handled is True
     assert sent
     assert "Telegram Agent" in sent[0]
     assert "Orchestrator" in sent[0]
+    assert "Runtime Ready" in sent[0]
     assert "未运行" in sent[0]
 
 
