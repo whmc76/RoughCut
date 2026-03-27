@@ -3,6 +3,8 @@ param(
     [ValidateSet("runtime", "full")]
     [string]$ComposeMode = "runtime",
 
+    [string]$DockerPythonExtras = "",
+
     [int]$DebounceMilliseconds = 2000,
 
     [switch]$NoBuild,
@@ -182,6 +184,7 @@ function Invoke-RefreshSession {
     $sessionParams = @{
         ComposeMode = $ComposeMode
         ChangedPaths = $ChangedPaths
+        DockerPythonExtras = $DockerPythonExtras
     }
     if ($NoBuild) {
         $sessionParams.NoBuild = $true
@@ -246,6 +249,7 @@ Write-Host " =========================================="
 Write-Host (" [INFO] Compose Mode      : {0}" -f $ComposeMode)
 Write-Host (" [INFO] Debounce (ms)     : {0}" -f $DebounceMilliseconds)
 Write-Host (" [INFO] Build Image       : {0}" -f $(-not $NoBuild))
+Write-Host (" [INFO] Python Extras     : {0}" -f $(if ([string]::IsNullOrWhiteSpace($DockerPythonExtras)) { "<none>" } else { $DockerPythonExtras }))
 Write-Host (" [INFO] Workspace Root    : {0}" -f $repoRoot)
 Write-Host ""
 Write-Host " [WARN] This loop rebuilds and recreates runtime containers."

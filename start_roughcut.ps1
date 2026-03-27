@@ -1,6 +1,7 @@
 param(
     [ValidateSet("local", "infra", "runtime", "full", "runtime-watch", "full-watch", "runtime-down", "full-down")]
     [string]$Mode = "local",
+    [string]$DockerPythonExtras = "",
     [int]$Port = 38471,
     [switch]$SkipDocker,
     [switch]$SkipMigrate,
@@ -71,7 +72,8 @@ function Invoke-RoughCutCompose {
     param(
         [ValidateSet("infra", "runtime", "full")]
         [string]$ComposeMode,
-        [string[]]$ComposeArguments
+        [string[]]$ComposeArguments,
+        [string]$DockerPythonExtrasOverride = ""
     )
 
     $docker = Get-Command docker -ErrorAction SilentlyContinue
@@ -89,7 +91,15 @@ function Invoke-RoughCutCompose {
         $args += $composeFile
     }
     $args += $ComposeArguments
-    Invoke-NativeCommandChecked -FilePath $docker.Source -Arguments $args -FailureMessage "docker compose command failed"
+    $previousDockerExtras = [Environment]::GetEnvironmentVariable("ROUGHCUT_DOCKER_PYTHON_EXTRAS", "Process")
+    try {
+        if ($ComposeMode -in @("runtime", "full")) {
+            [Environment]::SetEnvironmentVariable("ROUGHCUT_DOCKER_PYTHON_EXTRAS", $DockerPythonExtrasOverride, "Process")
+        }
+        Invoke-NativeCommandChecked -FilePath $docker.Source -Arguments $args -FailureMessage "docker compose command failed"
+    } finally {
+        [Environment]::SetEnvironmentVariable("ROUGHCUT_DOCKER_PYTHON_EXTRAS", $previousDockerExtras, "Process")
+    }
 }
 
 function Start-RoughCutComposeMode {
@@ -105,14 +115,14 @@ function Start-RoughCutComposeMode {
         }
         default {
             try {
-                Invoke-RoughCutCompose -ComposeMode $ComposeMode -ComposeArguments @("up", "-d", "--build", "--remove-orphans")
+                Invoke-RoughCutCompose -ComposeMode $ComposeMode -ComposeArguments @("up", "-d", "--build", "--remove-orphans") -DockerPythonExtrasOverride $DockerPythonExtras
             } catch {
                 $existingImage = docker image inspect roughcut:local 2>$null
                 if ($LASTEXITCODE -ne 0) {
                     throw
                 }
                 Write-Host "Docker build failed, but local image roughcut:local exists. Retrying without --build." -ForegroundColor Yellow
-                Invoke-RoughCutCompose -ComposeMode $ComposeMode -ComposeArguments @("up", "-d", "--remove-orphans")
+                Invoke-RoughCutCompose -ComposeMode $ComposeMode -ComposeArguments @("up", "-d", "--remove-orphans") -DockerPythonExtrasOverride $DockerPythonExtras
             }
         }
     }
@@ -207,7 +217,7 @@ function Start-RoughCutDockerWatchMode {
     $composeMode = if ($WatchMode -eq "full-watch") { "full" } else { "runtime" }
     $powerShellCommand = Get-PowerShellCommand
     Write-Host "Starting RoughCut Docker watch mode: $composeMode" -ForegroundColor Cyan
-    Invoke-NativeCommandChecked -FilePath $powerShellCommand.Source -Arguments @("-NoProfile", "-File", $DockerWatchScript, "-ComposeMode", $composeMode) -FailureMessage "Docker watch mode failed"
+    Invoke-NativeCommandChecked -FilePath $powerShellCommand.Source -Arguments @("-NoProfile", "-File", $DockerWatchScript, "-ComposeMode", $composeMode, "-DockerPythonExtras", $DockerPythonExtras) -FailureMessage "Docker watch mode failed"
 }
 
 function Start-RoughCutDockerWatch {
@@ -245,7 +255,7 @@ function Start-RoughCutDockerWatch {
 
     $process = Start-Process `
         -FilePath $powerShellCommand.Source `
-        -ArgumentList @("-NoProfile", "-File", $DockerWatchScript, "-ComposeMode", $ComposeMode) `
+        -ArgumentList @("-NoProfile", "-File", $DockerWatchScript, "-ComposeMode", $ComposeMode, "-DockerPythonExtras", $DockerPythonExtras) `
         -WorkingDirectory $RepoRoot `
         -WindowStyle Hidden `
         -PassThru `

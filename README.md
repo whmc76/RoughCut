@@ -311,9 +311,13 @@ Windows 下当前建议把 [start_roughcut.bat](E:/WorkSpace/RoughCut/start_roug
 - `start_roughcut.bat infra`
   只启动 PostgreSQL / Redis / MinIO 这套轻量基础设施
 - `start_roughcut.bat runtime`
-  启动推荐的常驻 Docker runtime：`api + orchestrator + worker-media + worker-llm`，并自动在宿主机后台启动 workspace watch
+  启动推荐的常驻 Docker runtime：`api + orchestrator + worker-media + worker-llm`，并自动在宿主机后台启动 workspace watch；默认不在容器里安装 `local-asr` extras
+- `start_roughcut.bat runtime-local-asr`
+  启动 runtime，并显式在 Docker 镜像里启用 `local-asr` extras
 - `start_roughcut.bat full`
-  启动 runtime + automation（当前包含 `watcher`），并自动在宿主机后台启动 workspace watch
+  启动 runtime + automation（当前包含 `watcher`），并自动在宿主机后台启动 workspace watch；默认不在容器里安装 `local-asr` extras
+- `start_roughcut.bat full-local-asr`
+  启动 full stack，并显式在 Docker 镜像里启用 `local-asr` extras
 - `start_roughcut.bat runtime-down`
   关闭 runtime，并停止对应的后台 workspace watch
 - `start_roughcut.bat full-down`
@@ -410,8 +414,12 @@ docker compose -f docker-compose.infra.yml -f docker-compose.runtime.yml logs -f
 常用命令：
 
 ```bash
+pnpm docker:runtime:up
 pnpm docker:runtime:watch
+pnpm docker:runtime:up:local-asr
+pnpm docker:runtime:watch:local-asr
 pnpm docker:auto:watch
+pnpm docker:auto:up:local-asr
 ```
 
 如果你走默认的 Docker 启停入口，现在 watch 会一起自动启动 / 停止：
@@ -451,10 +459,10 @@ Windows 入口也加了快捷命令：
 
   ### 5. 说明
   
-  - Docker 镜像默认内置 `uv`、`ffmpeg` 和 `Noto Sans CJK` 中文字体。
-  - Docker 镜像会在构建阶段自动执行 `frontend/` 下的前端依赖安装和构建。
-  - 默认 Docker 镜像不再内置 `local-asr` 额外依赖，优先走更轻的 runtime 构建；如果你确实要在容器内启用 `funasr` / `faster-whisper`，先设置 `ROUGHCUT_DOCKER_PYTHON_EXTRAS=local-asr` 再执行 `docker compose build` / `pnpm docker:runtime:up`。
-  - 当前项目默认 ASR 方案为 `openai + gpt-4o-transcribe`；离线中文口播优先建议 `funasr + sensevoice-small`。
+- Docker 镜像默认内置 `uv`、`ffmpeg` 和 `Noto Sans CJK` 中文字体。
+- Docker 镜像会在构建阶段自动执行 `frontend/` 下的前端依赖安装和构建。
+- 默认 Docker 入口会强制清空 `ROUGHCUT_DOCKER_PYTHON_EXTRAS`，优先走更轻的 runtime 构建；如果你确实要在容器内启用 `funasr` / `faster-whisper`，使用 `pnpm docker:runtime:up:local-asr`、`pnpm docker:auto:up:local-asr`，或显式传 `-DockerPythonExtras local-asr`。
+- 当前项目默认 ASR 方案为 `openai + gpt-4o-transcribe`；离线中文口播优先建议 `funasr + sensevoice-small`。
   - 推荐把长期在线形态收敛到 `infra + runtime` 这一档；`watcher` 只在确实需要自动扫盘时再加入。
 - 推荐本地开发使用 `uv + npm`，容器部署使用 `docker compose`，不要混用系统级 `pip` 和容器内运行时配置。
 

@@ -5,6 +5,8 @@ param(
 
     [string[]]$ChangedPaths = @(),
 
+    [string]$DockerPythonExtras = "",
+
     [switch]$NoBuild,
 
     [switch]$DryRun
@@ -103,11 +105,18 @@ try {
     $upArgs += "--remove-orphans"
     $upArgs += Get-RoughCutRefreshServices -Mode $ComposeMode
 
-    Invoke-Step ("Refresh Docker {0} runtime via docker compose {1}" -f $ComposeMode, ($upArgs -join " ")) {
-        docker @composeArgs @upArgs
-        if ($LASTEXITCODE -ne 0) {
-            throw "docker compose refresh failed for $ComposeMode"
+    $previousDockerExtras = [Environment]::GetEnvironmentVariable("ROUGHCUT_DOCKER_PYTHON_EXTRAS", "Process")
+    $extrasLabel = if ([string]::IsNullOrWhiteSpace($DockerPythonExtras)) { "<none>" } else { $DockerPythonExtras }
+    try {
+        [Environment]::SetEnvironmentVariable("ROUGHCUT_DOCKER_PYTHON_EXTRAS", $DockerPythonExtras, "Process")
+        Invoke-Step ("Refresh Docker {0} runtime via docker compose {1} (python extras: {2})" -f $ComposeMode, ($upArgs -join " "), $extrasLabel) {
+            docker @composeArgs @upArgs
+            if ($LASTEXITCODE -ne 0) {
+                throw "docker compose refresh failed for $ComposeMode"
+            }
         }
+    } finally {
+        [Environment]::SetEnvironmentVariable("ROUGHCUT_DOCKER_PYTHON_EXTRAS", $previousDockerExtras, "Process")
     }
 } finally {
     Remove-Item $lockPath -Force -ErrorAction SilentlyContinue
