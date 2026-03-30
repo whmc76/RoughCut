@@ -8,7 +8,7 @@ from typing import Any
 
 import httpx
 
-from roughcut.config import get_settings
+from roughcut.config import DEFAULT_OUTPUT_ROOT, get_settings
 from roughcut.docker_gpu_guard import hold_managed_gpu_services
 from roughcut.providers.voice.base import VoiceProvider
 
@@ -75,7 +75,7 @@ class IndexTTS2VoiceProvider(VoiceProvider):
 
         reference_audio_b64 = base64.b64encode(reference_audio_path.read_bytes()).decode("utf-8")
         timeout = httpx.Timeout(180.0, connect=20.0)
-        output_dir = Path("data/avatar_dubbing") / str(job_id)
+        output_dir = DEFAULT_OUTPUT_ROOT / "voice" / "avatar_dubbing" / str(job_id)
         output_dir.mkdir(parents=True, exist_ok=True)
 
         results: list[dict[str, Any]] = []

@@ -12,6 +12,16 @@ from roughcut.speech.dialects import DEFAULT_TRANSCRIPTION_DIALECT, normalize_tr
 
 _OVERRIDES_FILE = Path("roughcut_config.json")
 DEFAULT_JOB_WORKFLOW_MODE = "standard_edit"
+DEFAULT_OUTPUT_ROOT = Path(os.getenv("ROUGHCUT_OUTPUT_ROOT", "F:/roughcut_outputs")).expanduser()
+DEFAULT_TEST_OUTPUT_ROOT = Path(
+    os.getenv("ROUGHCUT_TEST_OUTPUT_ROOT", str((DEFAULT_OUTPUT_ROOT / "tests").as_posix()))
+).expanduser()
+DEFAULT_HEYGEM_SHARED_ROOT = Path(
+    os.getenv("HEYGEM_SHARED_ROOT", str((DEFAULT_OUTPUT_ROOT / "heygem").as_posix()))
+).expanduser()
+DEFAULT_HEYGEM_VOICE_ROOT = Path(
+    os.getenv("HEYGEM_VOICE_ROOT", str((DEFAULT_OUTPUT_ROOT / "voice_refs").as_posix()))
+).expanduser()
 SECRET_SETTINGS: tuple[str, ...] = (
     "openai_api_key",
     "anthropic_api_key",
@@ -131,6 +141,10 @@ class Settings(BaseSettings):
     s3_secret_access_key: str = "minioadmin"
     s3_bucket_name: str = "roughcut"
     s3_region: str = "us-east-1"
+    job_storage_dir: str = str((DEFAULT_OUTPUT_ROOT / "jobs").as_posix())
+    cleanup_job_storage_on_terminal: bool = True
+    cleanup_render_debug_on_terminal: bool = True
+    cleanup_heygem_temp_on_terminal: bool = True
 
     # Transcription
     transcription_provider: str = DEFAULT_TRANSCRIPTION_PROVIDER  # openai | local_whisper | funasr | qwen_asr
@@ -228,10 +242,10 @@ class Settings(BaseSettings):
     allowed_extensions: list[str] = [".mp4", ".mov", ".mkv", ".avi", ".webm"]
 
     # Output
-    output_dir: str = "output"
+    output_dir: str = str((DEFAULT_OUTPUT_ROOT / "output").as_posix())
     preferred_ui_language: str = "zh-CN"
     output_name_pattern: str = "{date}_{stem}"  # {date}=YYYYMMDD, {stem}=original filename stem
-    render_debug_dir: str = "output/test/render-debug"
+    render_debug_dir: str = str((DEFAULT_OUTPUT_ROOT / "render-debug").as_posix())
     telegram_agent_enabled: bool = False
     telegram_agent_claude_enabled: bool = False
     telegram_agent_claude_command: str = "claude"
@@ -241,7 +255,7 @@ class Settings(BaseSettings):
     telegram_agent_acp_command: str = ""
     telegram_agent_task_timeout_sec: int = 900
     telegram_agent_result_max_chars: int = 3500
-    telegram_agent_state_dir: str = "data/telegram-agent"
+    telegram_agent_state_dir: str = str((DEFAULT_OUTPUT_ROOT / "telegram-agent").as_posix())
     acp_bridge_backend: str = Field(default="codex", validation_alias="ROUGHCUT_ACP_BRIDGE_BACKEND")
     acp_bridge_fallback_backend: str = Field(default="claude", validation_alias="ROUGHCUT_ACP_BRIDGE_FALLBACK_BACKEND")
     acp_bridge_claude_model: str = Field(default="opus", validation_alias="ROUGHCUT_ACP_BRIDGE_CLAUDE_MODEL")

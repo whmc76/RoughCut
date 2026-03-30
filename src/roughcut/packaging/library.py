@@ -15,11 +15,11 @@ from io import BytesIO
 import numpy as np
 from sqlalchemy import select
 
-from roughcut.config import get_settings
+from roughcut.config import DEFAULT_TEST_OUTPUT_ROOT, get_settings
 from roughcut.state_store import PACKAGING_CONFIG_KEY, run_db_operation
 
 
-PACKAGING_ROOT = Path("output/test/packaging")
+PACKAGING_ROOT = DEFAULT_TEST_OUTPUT_ROOT / "packaging"
 MANIFEST_PATH = PACKAGING_ROOT / "manifest.json"
 
 ASSET_EXTENSIONS: dict[str, set[str]] = {

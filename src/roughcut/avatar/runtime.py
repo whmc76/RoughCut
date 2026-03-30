@@ -14,13 +14,13 @@ from typing import Any
 
 import httpx
 
-from roughcut.config import get_settings
+from roughcut.config import DEFAULT_HEYGEM_SHARED_ROOT, DEFAULT_HEYGEM_VOICE_ROOT, get_settings
 from roughcut.docker_gpu_guard import hold_managed_gpu_services_async
 from roughcut.media.probe import probe
 from roughcut.providers.voice.indextts2 import build_indextts2_speech_payload
 
-_DEFAULT_HEYGEM_ROOT = Path("E:/WorkSpace/heygem/data")
-_DEFAULT_VOICE_ROOT = Path("data/voice_refs")
+_DEFAULT_HEYGEM_ROOT = DEFAULT_HEYGEM_SHARED_ROOT
+_DEFAULT_VOICE_ROOT = DEFAULT_HEYGEM_VOICE_ROOT
 _CONTAINER_DATA_ROOT = Path("/code/data")
 _POLL_INTERVAL_SECONDS = 2.0
 _POLL_TIMEOUT_SECONDS = 600.0

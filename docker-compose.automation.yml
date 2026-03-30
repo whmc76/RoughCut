@@ -3,13 +3,11 @@ x-automation-app-env: &automation-app-env
   REDIS_URL: redis://redis:6379/0
   CELERY_BROKER_URL: redis://redis:6379/0
   CELERY_RESULT_BACKEND: redis://redis:6379/1
-  S3_ENDPOINT_URL: http://minio:9000
-  S3_ACCESS_KEY_ID: minioadmin
-  S3_SECRET_ACCESS_KEY: minioadmin
-  S3_BUCKET_NAME: roughcut
-  S3_REGION: us-east-1
+  JOB_STORAGE_DIR: /app/data/jobs
   OUTPUT_DIR: /app/data/output
   RENDER_DEBUG_DIR: /app/logs/render-debug
+  XDG_CACHE_HOME: /app/data/cache
+  HF_HOME: /app/data/cache/huggingface
   SUBTITLE_FONT: Noto Sans CJK SC
   COVER_TITLE_FONT_PATH: /usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc
   HEYGEM_SHARED_ROOT: /code/data
@@ -27,16 +25,16 @@ x-automation-app-common: &automation-app-common
   environment:
     <<: *automation-app-env
   volumes:
-    - ./data/output:/app/data/output
-    - ./logs:/app/logs
+    - ${ROUGHCUT_OUTPUT_HOST_ROOT:-F:/roughcut_outputs}/jobs:/app/data/jobs
+    - ${ROUGHCUT_OUTPUT_HOST_ROOT:-F:/roughcut_outputs}/output:/app/data/output
+    - ${ROUGHCUT_OUTPUT_HOST_ROOT:-F:/roughcut_outputs}/cache:/app/data/cache
+    - ${ROUGHCUT_OUTPUT_HOST_ROOT:-F:/roughcut_outputs}/render-debug:/app/logs/render-debug
     - ./watch:/app/watch
-    - ${HEYGEM_SHARED_HOST_DIR:-E:/WorkSpace/heygem/data}:/code/data
+    - ${HEYGEM_SHARED_HOST_DIR:-F:/roughcut_outputs/heygem}:/code/data
   depends_on:
     postgres:
       condition: service_healthy
     redis:
-      condition: service_healthy
-    minio:
       condition: service_healthy
     migrate:
       condition: service_completed_successfully

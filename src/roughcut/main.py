@@ -18,7 +18,7 @@ _FRONTEND_DIST = _REPO_ROOT / "frontend" / "dist"
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Ensure MinIO bucket exists on startup
+    # Ensure host-backed job storage exists on startup
     from roughcut.storage.s3 import get_storage
 
     try:

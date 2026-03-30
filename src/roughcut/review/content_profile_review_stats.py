@@ -5,10 +5,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from roughcut.config import get_settings
+from roughcut.config import DEFAULT_OUTPUT_ROOT, get_settings
 
 
-_STATS_FILE = Path(__file__).resolve().parents[3] / "data" / "content_profile_review_stats.json"
+_STATS_FILE = DEFAULT_OUTPUT_ROOT / "content_profile_review_stats.json"
 _TRACKED_PROFILE_FIELDS = (
     "subject_brand",
     "subject_model",

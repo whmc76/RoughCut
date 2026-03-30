@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import roughcut.config as config_mod
-from roughcut.config import Settings, get_settings
+from roughcut.config import DEFAULT_OUTPUT_ROOT, Settings, get_settings
 
 
 def test_default_settings():
@@ -20,9 +20,10 @@ def test_default_settings():
     assert s.anthropic_auth_mode == "api_key"
     assert s.minimax_base_url == "https://api.minimaxi.com/v1"
     assert ".mp4" in s.allowed_extensions
-    assert s.output_dir == "output"
+    assert s.job_storage_dir == str((DEFAULT_OUTPUT_ROOT / "jobs").as_posix())
+    assert s.output_dir == str((DEFAULT_OUTPUT_ROOT / "output").as_posix())
     assert s.preferred_ui_language == "zh-CN"
-    assert s.render_debug_dir == "output/test/render-debug"
+    assert s.render_debug_dir == str((DEFAULT_OUTPUT_ROOT / "render-debug").as_posix())
     assert s.telegram_agent_enabled is False
     assert s.telegram_agent_claude_enabled is False
     assert s.telegram_agent_claude_command == "claude"
@@ -37,7 +38,7 @@ def test_default_settings():
     assert s.telegram_agent_acp_command == ""
     assert s.telegram_agent_task_timeout_sec == 900
     assert s.telegram_agent_result_max_chars == 3500
-    assert s.telegram_agent_state_dir == "data/telegram-agent"
+    assert s.telegram_agent_state_dir == str((DEFAULT_OUTPUT_ROOT / "telegram-agent").as_posix())
     assert s.telegram_remote_review_enabled is False
     assert s.telegram_bot_api_base_url == "https://api.telegram.org"
     assert s.telegram_bot_token == ""

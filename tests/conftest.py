@@ -20,6 +20,10 @@ TEST_DB_URL = f"sqlite+aiosqlite:///{TEST_DB_FILE.as_posix()}"
 os.environ["DATABASE_URL"] = TEST_DB_URL
 os.environ.setdefault("OPENAI_API_KEY", "test-key")
 os.environ.setdefault("S3_ENDPOINT_URL", "http://localhost:9000")
+os.environ.setdefault("ROUGHCUT_OUTPUT_ROOT", "F:/roughcut_outputs")
+os.environ.setdefault("ROUGHCUT_TEST_OUTPUT_ROOT", "F:/roughcut_outputs/tests")
+os.environ.setdefault("HEYGEM_SHARED_ROOT", "F:/roughcut_outputs/heygem")
+os.environ.setdefault("HEYGEM_VOICE_ROOT", "F:/roughcut_outputs/voice_refs")
 
 
 def _safe_unlink(path: Path) -> None:
@@ -38,9 +42,13 @@ def isolate_runtime_override_file(tmp_path, monkeypatch):
     from roughcut.db.session import Base
     import roughcut.review.content_profile_review_stats as review_stats_mod
 
-    override_file = tmp_path / "roughcut_config.json"
-    output_dir = tmp_path / "output"
-    stats_file = tmp_path / "content_profile_review_stats.json"
+    test_root = Path(os.environ["ROUGHCUT_TEST_OUTPUT_ROOT"]) / f"pytest-{os.getpid()}" / tmp_path.name
+    test_root.mkdir(parents=True, exist_ok=True)
+    override_file = test_root / "roughcut_config.json"
+    output_dir = test_root / "output"
+    job_storage_dir = test_root / "jobs"
+    render_debug_dir = test_root / "render-debug"
+    stats_file = test_root / "content_profile_review_stats.json"
     sync_engine = create_engine(TEST_DB_URL.replace("sqlite+aiosqlite:///", "sqlite:///"), future=True)
     Base.metadata.create_all(sync_engine)
     sync_engine.dispose()
@@ -59,6 +67,8 @@ def isolate_runtime_override_file(tmp_path, monkeypatch):
     config_mod._settings = config_mod.Settings(
         _env_file=None,
         output_dir=str(output_dir),
+        job_storage_dir=str(job_storage_dir),
+        render_debug_dir=str(render_debug_dir),
         telegram_agent_enabled=False,
         telegram_agent_claude_enabled=False,
     )

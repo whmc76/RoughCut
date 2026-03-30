@@ -113,8 +113,8 @@ pnpm setup
 
 这一步会创建：
 
-- `data/output`
-- `logs/render-debug`
+- `F:/roughcut_outputs/output`
+- `F:/roughcut_outputs/render-debug`
 - `watch`
 - `.env`（若不存在且 `.env.example` 存在）
 
@@ -132,14 +132,14 @@ pnpm docker:infra:up
 pnpm docker:up
 ```
 
-其中基础设施包含 PostgreSQL（5432）、Redis（6379）、MinIO（9000/9001）。
+其中基础设施包含 PostgreSQL（5432）和 Redis（6379）。
 
 数字人相关服务现在默认走独立共享服务，不再依赖 RoughCut 内部 Docker：
 
 - HeyGem: `http://127.0.0.1:49202`
 - IndexTTS2 accel 主实例: `http://127.0.0.1:49204`
-- HeyGem 数据根: `E:/WorkSpace/heygem/data`
-- 参考音频缓存目录: `E:/WorkSpace/RoughCut/data/voice_refs`
+- HeyGem 数据根: `F:/roughcut_outputs/heygem`
+- 参考音频缓存目录: `F:/roughcut_outputs/voice_refs`
 
 ### 5. 配置环境变量
 
@@ -157,7 +157,10 @@ REASONING_MODEL=qwen3.5:9b        # 需支持视觉
 TRANSCRIPTION_PROVIDER=funasr
 TRANSCRIPTION_MODEL=sensevoice-small
 
-OUTPUT_DIR=D:/output               # 成片输出目录
+ROUGHCUT_OUTPUT_ROOT=F:/roughcut_outputs
+JOB_STORAGE_DIR=F:/roughcut_outputs/jobs
+OUTPUT_DIR=F:/roughcut_outputs/output
+RENDER_DEBUG_DIR=F:/roughcut_outputs/render-debug
 AUTO_CONFIRM_CONTENT_PROFILE=true
 CONTENT_PROFILE_REVIEW_THRESHOLD=0.72
 AUTO_ACCEPT_GLOSSARY_CORRECTIONS=true
@@ -169,8 +172,8 @@ PACKAGING_SELECTION_MIN_SCORE=0.6
 AVATAR_PROVIDER=heygem
 AVATAR_API_BASE_URL=http://127.0.0.1:49202
 AVATAR_TRAINING_API_BASE_URL=http://127.0.0.1:49204
-HEYGEM_SHARED_ROOT=E:/WorkSpace/heygem/data
-HEYGEM_VOICE_ROOT=E:/WorkSpace/RoughCut/data/voice_refs
+HEYGEM_SHARED_ROOT=F:/roughcut_outputs/heygem
+HEYGEM_VOICE_ROOT=F:/roughcut_outputs/voice_refs
 QWEN_ASR_API_BASE_URL=http://127.0.0.1:18096
 VOICE_PROVIDER=indextts2
 VOICE_CLONE_API_BASE_URL=http://127.0.0.1:49204
@@ -294,7 +297,7 @@ pnpm test:clip -- E:/videos/demo.mp4
 uv run roughcut clip-test E:/videos/demo.mp4 --channel-profile edc_tactical --sample-seconds 90
 ```
 
-每次只要换掉传入的视频路径，就会生成一条新的测试任务产物到 `output/test/manual-tests/`。
+每次只要换掉传入的视频路径，就会生成一条新的测试任务产物到 `F:/roughcut_outputs/tests/manual-tests/`。
 
 构建前端后，FastAPI 会直接托管 `frontend/dist`。
 
@@ -309,7 +312,7 @@ Windows 下当前建议把 [start_roughcut.bat](E:/WorkSpace/RoughCut/start_roug
 - `start_roughcut.bat`
   一键启动包模式，后台拉起 API / orchestrator / workers，并自动打开浏览器；这个终端窗口本身就是托管器，直接关窗即可停掉整套服务
 - `start_roughcut.bat infra`
-  只启动 PostgreSQL / Redis / MinIO 这套轻量基础设施
+  只启动 PostgreSQL / Redis 这套轻量基础设施
 - `start_roughcut.bat runtime`
   启动推荐的常驻 Docker runtime：`api + orchestrator + worker-media + worker-llm`，并自动在宿主机后台启动 workspace watch；默认不在容器里安装 `local-asr` extras
 - `start_roughcut.bat runtime-local-asr`
@@ -344,7 +347,7 @@ Windows 下当前建议把 [start_roughcut.bat](E:/WorkSpace/RoughCut/start_roug
 仓库现在推荐把 Docker 拆成三层，而不是继续只用一个全量 compose：
 
 - `docker-compose.infra.yml`
-  只放 `postgres` / `redis` / `minio`
+  只放 `postgres` / `redis`
 - `docker-compose.runtime.yml`
   放推荐常驻的 `migrate` / `api` / `orchestrator` / `worker-media` / `worker-llm`
 - `docker-compose.automation.yml`
@@ -356,7 +359,7 @@ Windows 下当前建议把 [start_roughcut.bat](E:/WorkSpace/RoughCut/start_roug
 cp .env.example .env
 ```
 
-在 `.env` 中填写你的模型配置和 API Key。容器内的 PostgreSQL / Redis / MinIO 地址由 runtime / automation compose 自动覆盖为容器服务名，无需手动改成 `postgres` / `redis` / `minio`。
+在 `.env` 中填写你的模型配置和 API Key。容器内的 PostgreSQL / Redis 地址由 runtime / automation compose 自动覆盖为容器服务名，无需手动改成 `postgres` / `redis`。
 
 ### 2. 构建并启动
 
@@ -386,7 +389,6 @@ docker compose -f docker-compose.infra.yml -f docker-compose.runtime.yml -f dock
 - `worker-llm`
 - `postgres`
 - `redis`
-- `minio`
 
 全自动无人值守额外包含：
 
@@ -407,7 +409,7 @@ docker compose -f docker-compose.infra.yml -f docker-compose.runtime.yml logs -f
   当前仓库已经提供两层脚本：
   
   - `scripts/run-roughcut-docker-refresh-session.ps1`
-    单次执行 `docker compose up -d --build --force-recreate`，只重建 `migrate / api / orchestrator / worker-media / worker-llm`，不会主动重建 `postgres / redis / minio`
+    单次执行 `docker compose up -d --build --force-recreate`，只重建 `migrate / api / orchestrator / worker-media / worker-llm`，不会主动重建 `postgres / redis`
   - `scripts/watch-roughcut-docker-runtime.ps1`
     持续监听 `src/`、`frontend/`、`scripts/`、compose、`Dockerfile`、`pyproject.toml`、`uv.lock` 等改动，debounce 后触发 refresh
 
@@ -441,7 +443,7 @@ Windows 入口也加了快捷命令：
 这套方案和 Hydra 的差别是：
 
 - Hydra 需要同步 runtime home / SQLite 状态
-- RoughCut 不需要同步 runtime home，因为状态真相在 PostgreSQL / Redis / MinIO volume
+- RoughCut 不需要同步 runtime home，因为状态真相在 PostgreSQL / Redis 和宿主机输出目录
 - RoughCut 的 watch 主要负责“代码变了就重建并重启 runtime 容器”
 
 注意：
@@ -453,8 +455,10 @@ Windows 入口也加了快捷命令：
 
 ### 4. 数据目录
 
-- `./data/output`：成片输出
-- `./logs`：运行日志与 render debug
+- `F:/roughcut_outputs/output`：成片输出
+- `F:/roughcut_outputs/render-debug`：render 诊断目录
+- `F:/roughcut_outputs/jobs`：任务运行期文件与中间产物
+- `F:/roughcut_outputs/heygem`：HeyGem 输入 / temp / result
 - `./watch`：可选目录监听挂载点（启用 automation compose 时使用）
 
   ### 5. 说明
@@ -519,9 +523,10 @@ curl http://localhost:8000/api/v1/jobs/{job_id}/report
 
 | 配置项 | 默认值 | 说明 |
 |--------|--------|------|
-| `OUTPUT_DIR` | `data/output` | 成片输出目录 |
+| `JOB_STORAGE_DIR` | `F:/roughcut_outputs/jobs` | 任务运行期文件根目录 |
+| `OUTPUT_DIR` | `F:/roughcut_outputs/output` | 成片输出目录 |
 | `OUTPUT_NAME_PATTERN` | `{date}_{stem}` | 输出文件名模板 |
-| `RENDER_DEBUG_DIR` | `logs/render-debug` | render 调试产物目录 |
+| `RENDER_DEBUG_DIR` | `F:/roughcut_outputs/render-debug` | render 调试产物目录 |
 | `REASONING_PROVIDER` | `minimax` | 推理后端：`openai` / `anthropic` / `minimax` / `ollama` |
 | `REASONING_MODEL` | `MiniMax-M2.7-highspeed` | 推理模型名称 |
 | `MULTIMODAL_FALLBACK_PROVIDER` | `ollama` | 主模型视觉失败时的本地备份 provider |
@@ -559,7 +564,7 @@ curl http://localhost:8000/api/v1/jobs/{job_id}/report
 | `TELEGRAM_AGENT_ACP_COMMAND` | `""` | 外部 ACP bridge 命令；Telegram agent 会通过 stdin 发送 JSON 负载 |
 | `TELEGRAM_AGENT_TASK_TIMEOUT_SEC` | `900` | Telegram agent 异步任务超时 |
 | `TELEGRAM_AGENT_RESULT_MAX_CHARS` | `3500` | Telegram 回推结果摘要最大字符数 |
-| `TELEGRAM_AGENT_STATE_DIR` | `data/telegram-agent` | Telegram agent 本地任务状态文件目录 |
+| `TELEGRAM_AGENT_STATE_DIR` | `F:/roughcut_outputs/telegram-agent` | Telegram agent 本地任务状态文件目录 |
 | `FACT_CHECK_ENABLED` | `false` | 事实核验开关（Phase 2） |
 
 如果要直接启用仓库内置的 ACP bridge，推荐配置：
@@ -622,7 +627,7 @@ src/roughcut/
 ├── edit/                # 剪辑决策 + 时间轴模型
 ├── pipeline/            # Celery 任务 + Orchestrator 状态机
 ├── watcher/             # 目录监听进程
-└── storage/             # MinIO/S3 存储层
+└── storage/             # 宿主机文件系统任务存储层
 ```
 
 ---
@@ -705,13 +710,13 @@ rm -rf .pytest_cache
 
 ## 渲染排查
 
-当 render 遇到旋转、S3 下载一致性或 ffmpeg 参数问题时，可直接查看：
+当 render 遇到旋转、任务文件路径或 ffmpeg 参数问题时，可直接查看：
 
-- `logs/render-debug/{job_id}_{output_name}/source.integrity.json`：下载源文件 SHA-256 校验
-- `logs/render-debug/{job_id}_{output_name}/source.ffprobe.json`：下载源文件的 ffprobe 结果
-- `logs/render-debug/{job_id}_{output_name}/render.ffmpeg.txt`：完整渲染命令
-- `logs/render-debug/{job_id}_{output_name}/strip.ffmpeg.txt` / `normalize.ffmpeg.txt`：旋转归一化命令
-- `logs/render-debug/{job_id}_{output_name}/*.stderr.log`：对应 ffmpeg stderr 输出
+- `F:/roughcut_outputs/render-debug/{job_id}_{output_name}/source.integrity.json`：下载源文件 SHA-256 校验
+- `F:/roughcut_outputs/render-debug/{job_id}_{output_name}/source.ffprobe.json`：下载源文件的 ffprobe 结果
+- `F:/roughcut_outputs/render-debug/{job_id}_{output_name}/render.ffmpeg.txt`：完整渲染命令
+- `F:/roughcut_outputs/render-debug/{job_id}_{output_name}/strip.ffmpeg.txt` / `normalize.ffmpeg.txt`：旋转归一化命令
+- `F:/roughcut_outputs/render-debug/{job_id}_{output_name}/*.stderr.log`：对应 ffmpeg stderr 输出
 
 ---
 

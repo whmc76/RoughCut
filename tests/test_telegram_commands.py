@@ -37,7 +37,6 @@ async def test_handle_status_command_reports_service_matrix(monkeypatch):
                 "llm_worker": True,
                 "postgres": True,
                 "redis": True,
-                "minio": False,
             },
             "runtime": {
                 "readiness_status": "ready",
@@ -55,7 +54,6 @@ async def test_handle_status_command_reports_service_matrix(monkeypatch):
                 "llm_worker": True,
                 "postgres": True,
                 "redis": True,
-                "minio": False,
             },
             "runtime": {
                 "readiness_status": "ready",

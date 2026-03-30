@@ -7,6 +7,7 @@ import pytest
 from roughcut.avatar.runtime import _stage_video_for_heygem
 from roughcut.providers.avatar.heygem import (
     HeyGemAvatarProvider,
+    _resolve_audio_source,
     _resolve_presenter_source,
     _resolve_task_timeout_seconds,
 )
@@ -17,6 +18,7 @@ def test_stage_video_for_heygem_returns_container_video_url(tmp_path: Path, monk
 
     shared_root = tmp_path / "face2face"
     monkeypatch.setattr(runtime_mod, "_DEFAULT_HEYGEM_ROOT", shared_root)
+    monkeypatch.setenv("HEYGEM_SHARED_ROOT", str(shared_root))
 
     source = tmp_path / "anchor.mp4"
     source.write_bytes(b"video")
@@ -33,6 +35,7 @@ def test_resolve_presenter_source_returns_container_video_url_for_local_file(tmp
     shared_root = tmp_path / "face2face"
     shared_root.mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(heygem_mod, "_DEFAULT_SHARED_ROOTS", (shared_root,))
+    monkeypatch.setenv("HEYGEM_SHARED_ROOT", str(shared_root))
     monkeypatch.setattr(
         heygem_mod,
         "_prepare_presenter_video",
@@ -45,6 +48,27 @@ def test_resolve_presenter_source_returns_container_video_url_for_local_file(tmp
     presenter_source = _resolve_presenter_source(str(source))
 
     assert presenter_source == "/code/data/inputs/video/presenter_heygem_anchor.mp4"
+
+
+def test_resolve_audio_source_namespaces_staged_file_by_job(tmp_path: Path, monkeypatch):
+    import roughcut.providers.avatar.heygem as heygem_mod
+
+    shared_root = tmp_path / "face2face"
+    shared_root.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(heygem_mod, "_DEFAULT_SHARED_ROOTS", (shared_root,))
+    monkeypatch.setenv("HEYGEM_SHARED_ROOT", str(shared_root))
+
+    source = tmp_path / "drive.wav"
+    source.write_bytes(b"audio")
+
+    audio_source = _resolve_audio_source(
+        str(source),
+        job_id="job-123",
+        segment_id="avatar_full_track",
+    )
+
+    assert audio_source == "/code/data/inputs/audio/job_123_avatar_full_track_drive.wav"
+    assert (shared_root / "inputs" / "audio" / "job_123_avatar_full_track_drive.wav").exists()
 
 
 def test_heygem_poll_task_surfaces_non_success_code():
@@ -80,6 +104,7 @@ def test_heygem_poll_task_treats_missing_task_as_success_when_result_file_exists
     (shared_root / "temp" / "task-1-r.mp4").parent.mkdir(parents=True, exist_ok=True)
     (shared_root / "temp" / "task-1-r.mp4").write_bytes(b"video")
     monkeypatch.setattr(heygem_mod, "_DEFAULT_SHARED_ROOTS", (shared_root,))
+    monkeypatch.setenv("HEYGEM_SHARED_ROOT", str(shared_root))
 
     class FakeResponse:
         def raise_for_status(self):

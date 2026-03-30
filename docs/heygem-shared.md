@@ -13,8 +13,8 @@ Files:
 
 Default host data roots:
 
-- `E:/WorkSpace/heygem/data`
-- `E:/WorkSpace/RoughCut/data/voice_refs`
+- `F:/roughcut_outputs/heygem`
+- `F:/roughcut_outputs/voice_refs`
 
 Start:
 
@@ -27,8 +27,8 @@ Projects can point at the shared services with:
 ```env
 AVATAR_API_BASE_URL=http://127.0.0.1:49202
 AVATAR_TRAINING_API_BASE_URL=http://127.0.0.1:49204
-HEYGEM_SHARED_ROOT=E:/WorkSpace/heygem/data
-HEYGEM_VOICE_ROOT=E:/WorkSpace/RoughCut/data/voice_refs
+HEYGEM_SHARED_ROOT=F:/roughcut_outputs/heygem
+HEYGEM_VOICE_ROOT=F:/roughcut_outputs/voice_refs
 VOICE_PROVIDER=indextts2
 VOICE_CLONE_API_BASE_URL=http://127.0.0.1:49204
 ```

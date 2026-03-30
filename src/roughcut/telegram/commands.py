@@ -185,7 +185,6 @@ async def _handle_status_command(send_text: SendText) -> None:
         f"- LLM Worker：{_render_service_state(services['llm_worker'])}",
         f"- PostgreSQL：{_render_service_state(services['postgres'])}",
         f"- Redis：{_render_service_state(services['redis'])}",
-        f"- MinIO：{_render_service_state(services['minio'])}",
         f"- Runtime Ready：{runtime.get('readiness_status', 'unknown')}",
         f"- Orchestrator Lock：{orchestrator_lock.get('status', 'unknown')}",
     ]

@@ -40,7 +40,7 @@ def _ensure_core_compose_services_started() -> None:
     if shutil.which("docker") is None or not compose_file.exists():
         return
 
-    required_services = ("postgres", "redis", "minio")
+    required_services = ("postgres", "redis")
     running = _list_running_compose_services(compose_file)
     missing = [service for service in required_services if service not in running]
     if not missing:

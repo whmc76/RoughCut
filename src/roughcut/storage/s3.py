@@ -1,11 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import shutil
 from pathlib import Path
 from typing import BinaryIO
-
-import boto3
-from botocore.exceptions import ClientError
 
 from roughcut.config import get_settings
 
@@ -14,49 +12,60 @@ class S3Storage:
     def __init__(self) -> None:
         settings = get_settings()
         self._bucket = settings.s3_bucket_name
-        self._client = boto3.client(
-            "s3",
-            endpoint_url=settings.s3_endpoint_url,
-            aws_access_key_id=settings.s3_access_key_id,
-            aws_secret_access_key=settings.s3_secret_access_key,
-            region_name=settings.s3_region,
-        )
+        configured_root = getattr(settings, "job_storage_dir", "data/jobs")
+        self._root = Path(str(configured_root or "data/jobs")).expanduser().resolve()
 
     def ensure_bucket(self) -> None:
-        try:
-            self._client.head_bucket(Bucket=self._bucket)
-        except ClientError:
-            self._client.create_bucket(Bucket=self._bucket)
+        self._root.mkdir(parents=True, exist_ok=True)
+
+    def resolve_path(self, key: str) -> Path:
+        candidate = Path(str(key or "")).expanduser()
+        if candidate.is_absolute():
+            return candidate
+        relative = candidate
+        if self._root.name.lower() == "jobs" and candidate.parts[:1] == ("jobs",):
+            relative = Path(*candidate.parts[1:]) if len(candidate.parts) > 1 else Path()
+        return (self._root / relative).resolve()
 
     def upload_file(self, local_path: Path, key: str) -> str:
-        self._client.upload_file(str(local_path), self._bucket, key)
+        target_path = self.resolve_path(key)
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(local_path, target_path)
         return key
 
     def upload_fileobj(self, fileobj: BinaryIO, key: str) -> str:
-        self._client.upload_fileobj(fileobj, self._bucket, key)
+        target_path = self.resolve_path(key)
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        with target_path.open("wb") as handle:
+            shutil.copyfileobj(fileobj, handle)
         return key
 
     def download_file(self, key: str, local_path: Path) -> Path:
+        source_path = self.resolve_path(key)
+        if not source_path.exists():
+            raise FileNotFoundError(str(source_path))
         local_path.parent.mkdir(parents=True, exist_ok=True)
-        self._client.download_file(self._bucket, key, str(local_path))
+        shutil.copy2(source_path, local_path)
         return local_path
 
     def get_presigned_url(self, key: str, expires_in: int = 3600) -> str:
-        return self._client.generate_presigned_url(
-            "get_object",
-            Params={"Bucket": self._bucket, "Key": key},
-            ExpiresIn=expires_in,
-        )
+        del expires_in
+        return str(self.resolve_path(key))
 
     def delete_object(self, key: str) -> None:
-        self._client.delete_object(Bucket=self._bucket, Key=key)
+        target_path = self.resolve_path(key)
+        try:
+            target_path.unlink(missing_ok=True)
+        except IsADirectoryError:
+            shutil.rmtree(target_path, ignore_errors=True)
 
     def object_exists(self, key: str) -> bool:
-        try:
-            self._client.head_object(Bucket=self._bucket, Key=key)
-            return True
-        except ClientError:
-            return False
+        return self.resolve_path(key).exists()
+
+    def delete_prefix(self, prefix: str) -> None:
+        prefix_path = self.resolve_path(prefix)
+        if prefix_path.exists():
+            shutil.rmtree(prefix_path, ignore_errors=True)
 
     # Async wrappers using thread pool
     async def async_upload_file(self, local_path: Path, key: str) -> str:

@@ -12,29 +12,33 @@ from roughcut.cli import QualityAuditRow
 def test_init_creates_project_dirs_and_env(tmp_path: Path, monkeypatch):
     runner = CliRunner()
     (tmp_path / ".env.example").write_text("OUTPUT_DIR=output\n", encoding="utf-8")
+    output_root = Path("F:/roughcut_outputs/tests") / f"cli-init-{tmp_path.name}"
+    debug_root = output_root / "render-debug"
     monkeypatch.setattr(cli_mod, "_repo_root", lambda: tmp_path)
     monkeypatch.setattr(
         cli_mod,
         "get_settings",
-        lambda: SimpleNamespace(output_dir="output", render_debug_dir="output/test/render-debug"),
+        lambda: SimpleNamespace(output_dir=str(output_root), render_debug_dir=str(debug_root)),
     )
 
     result = runner.invoke(cli_mod.cli, ["init"])
 
     assert result.exit_code == 0
-    assert (tmp_path / "output").exists()
-    assert (tmp_path / "output" / "test" / "render-debug").exists()
+    assert output_root.exists()
+    assert debug_root.exists()
     assert (tmp_path / "watch").exists()
     assert (tmp_path / ".env").exists()
 
 
 def test_doctor_reports_missing_ffmpeg_as_failure(tmp_path: Path, monkeypatch):
     runner = CliRunner()
+    output_root = Path("F:/roughcut_outputs/tests") / f"cli-doctor-{tmp_path.name}"
+    debug_root = output_root / "render-debug"
     monkeypatch.setattr(cli_mod, "_repo_root", lambda: tmp_path)
     monkeypatch.setattr(
         cli_mod,
         "get_settings",
-        lambda: SimpleNamespace(output_dir="output", render_debug_dir="output/test/render-debug"),
+        lambda: SimpleNamespace(output_dir=str(output_root), render_debug_dir=str(debug_root)),
     )
 
     def fake_which(name: str) -> str | None:

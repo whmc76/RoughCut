@@ -280,7 +280,11 @@ async def _resolve_source(
     If source_path is already a local file, return it directly.
     Otherwise download from S3 to tmpdir.
     """
-    source_path = Path(job.source_path)
+    source_path = await _resolve_storage_reference(
+        job.source_path,
+        tmpdir=tmpdir,
+        default_name=job.source_name,
+    )
     if source_path.exists():
         _record_source_integrity(
             source_path,
@@ -290,18 +294,33 @@ async def _resolve_source(
             downloaded=False,
         )
         return source_path
-    # It's an S3 key — download to tmpdir
-    local = Path(tmpdir) / job.source_name
+    raise FileNotFoundError(job.source_path)
+
+
+async def _resolve_storage_reference(
+    reference: str,
+    *,
+    tmpdir: str | None = None,
+    default_name: str | None = None,
+) -> Path:
+    candidate = Path(str(reference or "")).expanduser()
+    if candidate.exists():
+        return candidate
+
     storage = get_storage()
-    await storage.async_download_file(job.source_path, local)
-    _record_source_integrity(
-        local,
-        source_ref=job.source_path,
-        expected_hash=expected_hash,
-        debug_dir=debug_dir,
-        downloaded=True,
-    )
-    return local
+    resolve_path = getattr(storage, "resolve_path", None)
+    if callable(resolve_path):
+        resolved = resolve_path(str(reference or ""))
+        if resolved.exists():
+            return resolved
+
+    if tmpdir is None:
+        raise FileNotFoundError(str(reference))
+
+    local_name = default_name or candidate.name or "artifact.bin"
+    local_path = Path(tmpdir) / local_name
+    await storage.async_download_file(str(reference), local_path)
+    return local_path
 
 
 async def _get_job_and_step(job_id: str, step_name: str):
@@ -639,10 +658,12 @@ async def run_transcribe(job_id: str) -> dict:
         # Get audio artifact key
         audio_artifact = await _load_latest_artifact(session, job.id, "audio_wav")
 
-        storage = get_storage()
         with tempfile.TemporaryDirectory() as tmpdir:
-            audio_path = Path(tmpdir) / "audio.wav"
-            await storage.async_download_file(audio_artifact.storage_path, audio_path)
+            audio_path = await _resolve_storage_reference(
+                str(audio_artifact.storage_path or ""),
+                tmpdir=tmpdir,
+                default_name="audio.wav",
+            )
             await _set_step_progress(session, step, detail=f"加载 {job.language} 转写模型", progress=0.2)
             glossary_result = await session.execute(select(GlossaryTerm))
             glossary_terms = glossary_result.scalars().all()
@@ -1451,10 +1472,12 @@ async def run_ai_director(job_id: str) -> dict:
             try:
                 await _set_step_progress(session, step, detail="上传参考音频并执行 AI 导演重配音", progress=0.84)
                 audio_artifact = await _load_latest_artifact(session, job.id, "audio_wav")
-                storage = get_storage()
                 with tempfile.TemporaryDirectory() as tmpdir:
-                    reference_audio_path = Path(tmpdir) / "director_reference.wav"
-                    await storage.async_download_file(audio_artifact.storage_path, reference_audio_path)
+                    reference_audio_path = await _resolve_storage_reference(
+                        str(audio_artifact.storage_path or ""),
+                        tmpdir=tmpdir,
+                        default_name="director_reference.wav",
+                    )
                     voice_execution = await asyncio.to_thread(
                         get_voice_provider().execute_dubbing,
                         job_id=str(job.id),
@@ -1581,7 +1604,6 @@ async def run_avatar_commentary(job_id: str) -> dict:
             }
         elif plan.get("mode") == "segmented_audio_passthrough" and avatar_segments:
             audio_artifact = await _load_latest_artifact(session, job.id, "audio_wav")
-            storage = get_storage()
             avatar_profile = _select_default_avatar_profile()
             avatar_video_path = _pick_avatar_profile_speaking_video_path(avatar_profile)
             if avatar_profile and avatar_video_path:
@@ -1605,8 +1627,11 @@ async def run_avatar_commentary(job_id: str) -> dict:
                 await _set_step_progress(session, step, detail="切分原声并逐段生成数字人口播", progress=0.84)
                 with tempfile.TemporaryDirectory() as tmpdir:
                     tmp_root = Path(tmpdir)
-                    source_audio_path = tmp_root / "avatar_reference.wav"
-                    await storage.async_download_file(audio_artifact.storage_path, source_audio_path)
+                    source_audio_path = await _resolve_storage_reference(
+                        str(audio_artifact.storage_path or ""),
+                        tmpdir=tmpdir,
+                        default_name="avatar_reference.wav",
+                    )
                     staged_segments: list[dict[str, Any]] = []
                     for segment in avatar_segments:
                         clip_path = tmp_root / f"{segment.get('segment_id')}.wav"
@@ -1654,7 +1679,6 @@ async def run_avatar_commentary(job_id: str) -> dict:
             try:
                 await _set_step_progress(session, step, detail="为数字人段落生成配音", progress=0.82)
                 audio_artifact = await _load_latest_artifact(session, job.id, "audio_wav")
-                storage = get_storage()
                 avatar_dubbing_request = get_voice_provider().build_dubbing_request(
                     job_id=str(job.id),
                     segments=[
@@ -1672,8 +1696,11 @@ async def run_avatar_commentary(job_id: str) -> dict:
                     },
                 )
                 with tempfile.TemporaryDirectory() as tmpdir:
-                    reference_audio_path = Path(tmpdir) / "avatar_reference.wav"
-                    await storage.async_download_file(audio_artifact.storage_path, reference_audio_path)
+                    reference_audio_path = await _resolve_storage_reference(
+                        str(audio_artifact.storage_path or ""),
+                        tmpdir=tmpdir,
+                        default_name="avatar_reference.wav",
+                    )
                     voice_execution = await asyncio.to_thread(
                         get_voice_provider().execute_dubbing,
                         job_id=str(job.id),
@@ -1794,10 +1821,12 @@ async def run_edit_plan(job_id: str) -> dict:
             artifact_types=("avatar_commentary_plan",),
         )
 
-        storage = get_storage()
         with tempfile.TemporaryDirectory() as tmpdir:
-            audio_path = Path(tmpdir) / "audio.wav"
-            await storage.async_download_file(audio_artifact.storage_path, audio_path)
+            audio_path = await _resolve_storage_reference(
+                str(audio_artifact.storage_path or ""),
+                tmpdir=tmpdir,
+                default_name="audio.wav",
+            )
             await _set_step_progress(session, step, detail="检测静音和明显废话段", progress=0.5)
             silences = detect_silence(audio_path)
 
@@ -2381,21 +2410,6 @@ async def run_render(job_id: str) -> dict:
             cover_variants = []
             cover_selection = None
 
-    # Also upload to S3/MinIO for API download endpoint (non-critical — local file is primary)
-    packaged_output_key = job_key(job_id, "output.mp4")
-    plain_output_key = job_key(job_id, "output_plain.mp4")
-    avatar_output_key = job_key(job_id, "output_avatar.mp4")
-    ai_effect_output_key = job_key(job_id, "output_ai_effect.mp4")
-    try:
-        storage = get_storage()
-        await storage.async_upload_file(local_packaged_mp4, packaged_output_key)
-        await storage.async_upload_file(local_plain_mp4, plain_output_key)
-        if local_avatar_mp4 is not None and local_avatar_mp4.exists():
-            await storage.async_upload_file(local_avatar_mp4, avatar_output_key)
-        await storage.async_upload_file(local_ai_effect_mp4, ai_effect_output_key)
-    except Exception:
-        pass  # Local file is the primary delivery; S3 is for the download API
-
     # Update render output
     local_paths = {
         "mp4": str(local_packaged_mp4),
@@ -2442,10 +2456,6 @@ async def run_render(job_id: str) -> dict:
                     "packaged_srt": str(local_packaged_srt),
                     "avatar_srt": str(local_avatar_srt) if local_avatar_srt is not None and local_avatar_srt.exists() else None,
                     "ai_effect_srt": str(local_ai_effect_srt),
-                    "packaged_output_key": packaged_output_key,
-                    "plain_output_key": plain_output_key,
-                    "avatar_output_key": avatar_output_key if local_avatar_mp4 is not None and local_avatar_mp4.exists() else None,
-                    "ai_effect_output_key": ai_effect_output_key,
                     "cover": str(local_cover) if local_cover else None,
                     "cover_variants": [str(path) for path in cover_variants] if local_cover else [],
                     "cover_selection": cover_selection,
@@ -2483,7 +2493,7 @@ async def run_render(job_id: str) -> dict:
         except Exception:
             logger.exception("Failed to send Telegram final review for job %s", job_id)
 
-    return {"output_key": packaged_output_key, "local": local_paths}
+    return {"output_path": str(local_packaged_mp4), "local": local_paths}
 
 
 async def run_platform_package(job_id: str) -> dict:

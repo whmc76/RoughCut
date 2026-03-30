@@ -21,7 +21,7 @@ from typing import Any, Callable
 from watchdog.events import FileSystemEvent, FileSystemEventHandler
 from watchdog.observers import Observer
 
-from roughcut.config import get_settings
+from roughcut.config import DEFAULT_TEST_OUTPUT_ROOT, get_settings
 from roughcut.db.models import Job, WatchRoot
 from roughcut.db.session import get_session_factory
 from roughcut.media.probe import probe
@@ -251,7 +251,7 @@ async def ensure_watch_inventory_thumbnail(
         raise FileNotFoundError(str(source))
 
     stat = source.stat()
-    cache_root = Path("output/test/watch-previews") / hashlib.sha1(str(root).encode("utf-8")).hexdigest()[:12]
+    cache_root = DEFAULT_TEST_OUTPUT_ROOT / "watch-previews" / hashlib.sha1(str(root).encode("utf-8")).hexdigest()[:12]
     cache_root.mkdir(parents=True, exist_ok=True)
     cache_name = hashlib.sha1(
         f"{relative_path}|{stat.st_mtime_ns}|{stat.st_size}|{width}".encode("utf-8")
@@ -733,7 +733,7 @@ async def create_merged_job_for_inventory_paths(
         if not path.exists() or not path.is_file():
             raise FileNotFoundError(str(path))
 
-    output_dir = Path("output/test/watch-merged")
+    output_dir = DEFAULT_TEST_OUTPUT_ROOT / "watch-merged"
     output_path = output_dir / f"watch_merge_{uuid.uuid4().hex}.mp4"
 
     merged_path = await _merge_videos_for_job(resolved_paths, output_path=output_path)

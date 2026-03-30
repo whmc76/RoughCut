@@ -24,6 +24,7 @@ from roughcut.config import get_settings
 from roughcut.db.models import Artifact, Job, JobStep, RenderOutput, SubtitleCorrection, SubtitleItem, Timeline
 from roughcut.db.session import get_session_factory
 from roughcut.pipeline.quality import QUALITY_ARTIFACT_TYPE, assess_job_quality
+from roughcut.storage.runtime_cleanup import cleanup_job_runtime_files
 
 logger = logging.getLogger(__name__)
 
@@ -577,6 +578,7 @@ async def _update_job_statuses(session) -> None:
             job.status = "done"
             job.error_message = None
             job.updated_at = datetime.now(timezone.utc)
+            await _cleanup_terminal_job_files(session, job.id, purge_deliverables=False)
             logger.info("Job %s completed", job.id)
             continue
 
@@ -609,7 +611,19 @@ async def _update_job_statuses(session) -> None:
             job.status = "failed"
             job.error_message = f"Step {failed_steps[0].step_name} failed after {MAX_ATTEMPTS} attempts"
             job.updated_at = datetime.now(timezone.utc)
+            await _cleanup_terminal_job_files(session, job.id, purge_deliverables=True)
             logger.error(f"Job {job.id} failed: {job.error_message}")
+
+
+async def _cleanup_terminal_job_files(session, job_id, *, purge_deliverables: bool) -> None:
+    artifact_result = await session.execute(select(Artifact).where(Artifact.job_id == job_id))
+    render_output_result = await session.execute(select(RenderOutput).where(RenderOutput.job_id == job_id))
+    cleanup_job_runtime_files(
+        str(job_id),
+        artifacts=artifact_result.scalars().all(),
+        render_outputs=render_output_result.scalars().all(),
+        purge_deliverables=purge_deliverables,
+    )
 
 
 async def _reconcile_completed_render_step(session, job: Job, step_map: dict[str, JobStep]) -> None:

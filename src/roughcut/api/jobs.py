@@ -3,7 +3,6 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
-import shutil
 import tempfile
 import uuid
 from datetime import datetime, timezone
@@ -74,6 +73,7 @@ from roughcut.review.content_profile_review_stats import (
 from roughcut.review.domain_glossaries import detect_glossary_domains
 from roughcut.review.report import generate_report
 from roughcut.storage.s3 import get_storage, job_key
+from roughcut.storage.runtime_cleanup import cleanup_job_runtime_files
 from roughcut.usage import build_job_token_report, build_jobs_usage_summary, build_jobs_usage_trend
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
@@ -347,7 +347,15 @@ async def cancel_job(job_id: uuid.UUID, session: AsyncSession = Depends(get_sess
                 **metadata,
                 "detail": "任务已取消，后续流程停止。",
             }
+    render_outputs_result = await session.execute(select(RenderOutput).where(RenderOutput.job_id == job_id))
+    render_outputs = render_outputs_result.scalars().all()
     await session.commit()
+    cleanup_job_runtime_files(
+        str(job_id),
+        artifacts=list(job.artifacts or []),
+        render_outputs=render_outputs,
+        purge_deliverables=True,
+    )
     await session.refresh(job)
     _attach_job_preview(job)
     return job
@@ -803,36 +811,57 @@ async def get_download_url(
     variant_value = str(variant or "packaged").strip().lower()
     if variant_value not in {"packaged", "plain"}:
         raise HTTPException(status_code=400, detail="variant must be 'packaged' or 'plain'")
+    _resolve_download_variant_path(render_output, variant_value)
+    return {
+        "url": f"/api/v1/jobs/{job_id}/download/file?variant={variant_value}",
+        "expires_in": None,
+    }
 
-    artifact_result = await session.execute(
-        select(Artifact)
-        .where(Artifact.job_id == job_id, Artifact.artifact_type == "render_outputs")
-        .order_by(Artifact.created_at.desc())
+
+@router.get("/{job_id}/download/file")
+async def download_rendered_file(
+    job_id: uuid.UUID,
+    variant: str = "packaged",
+    session: AsyncSession = Depends(get_session),
+):
+    result = await session.execute(
+        select(RenderOutput)
+        .where(RenderOutput.job_id == job_id, RenderOutput.status == "done")
+        .order_by(RenderOutput.created_at.desc())
     )
-    outputs_artifact = artifact_result.scalars().first()
-    outputs_data = outputs_artifact.data_json if outputs_artifact and outputs_artifact.data_json else {}
+    render_output = result.scalar_one_or_none()
+    if not render_output:
+        raise HTTPException(status_code=404, detail="Rendered output not found")
 
-    storage = get_storage()
-    if variant_value == "plain":
-        candidates = [
-            str(outputs_data.get("plain_output_key") or ""),
-            job_key(str(job_id), "output_plain.mp4"),
-        ]
-    else:
-        candidates = [
-            str(outputs_data.get("packaged_output_key") or ""),
-            job_key(str(job_id), "output.mp4"),
-            render_output.output_path,
-        ]
-    object_key = next(
-        (key for key in candidates if key and storage.object_exists(key)),
-        None,
-    )
-    if not object_key:
-        raise HTTPException(status_code=404, detail="Rendered object not found in storage")
+    variant_value = str(variant or "packaged").strip().lower()
+    if variant_value not in {"packaged", "plain"}:
+        raise HTTPException(status_code=400, detail="variant must be 'packaged' or 'plain'")
 
-    url = storage.get_presigned_url(object_key, expires_in=3600)
-    return {"url": url, "expires_in": 3600}
+    download_path = _resolve_download_variant_path(render_output, variant_value)
+    filename = download_path.name
+    media_type = "video/mp4" if download_path.suffix.lower() == ".mp4" else "application/octet-stream"
+    return FileResponse(path=download_path, filename=filename, media_type=media_type)
+
+
+def _resolve_download_variant_path(render_output: RenderOutput, variant: str) -> Path:
+    base_output = Path(str(render_output.output_path or "")).expanduser()
+    if not base_output.exists():
+        raise HTTPException(status_code=404, detail="Rendered output file not found")
+
+    if variant == "packaged":
+        return base_output
+
+    candidate_names = [
+        base_output.name.replace("成片", "素板"),
+        base_output.name.replace("成片", "素版"),
+        base_output.name.replace("packaged", "plain"),
+    ]
+    for candidate_name in candidate_names:
+        candidate = base_output.with_name(candidate_name)
+        if candidate.exists():
+            return candidate
+
+    raise HTTPException(status_code=404, detail="Plain rendered output not found")
 
 
 def _revoke_running_steps(steps: list[JobStep]) -> None:
@@ -852,38 +881,15 @@ async def _clear_job_runtime_state(job_id: uuid.UUID, session: AsyncSession) -> 
     packaging_artifacts = await session.execute(
         select(Artifact).where(Artifact.job_id == job_id)
     )
-    for artifact in packaging_artifacts.scalars().all():
-        if artifact.storage_path:
-            try:
-                Path(artifact.storage_path).unlink(missing_ok=True)
-            except Exception:
-                pass
-
     render_outputs = await session.execute(select(RenderOutput).where(RenderOutput.job_id == job_id))
-    for item in render_outputs.scalars().all():
-        if item.output_path:
-            output_path = Path(item.output_path)
-            output_dir = output_path.parent
-            if output_dir.name == output_path.stem:
-                try:
-                    shutil.rmtree(output_dir, ignore_errors=True)
-                    continue
-                except Exception:
-                    pass
-            try:
-                output_path.unlink(missing_ok=True)
-                output_path.with_suffix(".srt").unlink(missing_ok=True)
-            except Exception:
-                pass
-            for candidate in output_dir.glob(f"{output_path.stem}_cover*"):
-                try:
-                    candidate.unlink(missing_ok=True)
-                except Exception:
-                    pass
-            try:
-                output_path.with_name(f"{output_path.stem}_publish.md").unlink(missing_ok=True)
-            except Exception:
-                pass
+    artifact_rows = packaging_artifacts.scalars().all()
+    render_output_rows = render_outputs.scalars().all()
+    cleanup_job_runtime_files(
+        str(job_id),
+        artifacts=artifact_rows,
+        render_outputs=render_output_rows,
+        purge_deliverables=True,
+    )
 
     await session.execute(
         delete(FactEvidence).where(FactEvidence.claim_id.in_(select(FactClaim.id).where(FactClaim.job_id == job_id)))
@@ -1857,8 +1863,13 @@ async def _resolve_job_source(job: Job, tmpdir: str) -> Path:
     source_path = Path(job.source_path)
     if source_path.exists():
         return source_path
-    local_path = Path(tmpdir) / job.source_name
     storage = get_storage()
+    resolve_path = getattr(storage, "resolve_path", None)
+    if callable(resolve_path):
+        resolved = resolve_path(job.source_path)
+        if resolved.exists():
+            return resolved
+    local_path = Path(tmpdir) / job.source_name
     await storage.async_download_file(job.source_path, local_path)
     return local_path
 

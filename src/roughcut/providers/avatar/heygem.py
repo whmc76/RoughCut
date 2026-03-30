@@ -10,15 +10,14 @@ from typing import Any
 
 import httpx
 
-from roughcut.config import get_settings
+from roughcut.config import DEFAULT_HEYGEM_SHARED_ROOT, get_settings
 from roughcut.docker_gpu_guard import hold_managed_gpu_services
 from roughcut.providers.avatar.base import AvatarProvider
 
 _DEFAULT_SHARED_ROOTS = (
-    Path("E:/WorkSpace/heygem/data"),
+    DEFAULT_HEYGEM_SHARED_ROOT,
     Path("D:/duix_avatar_data/face2face"),
     Path("d:/duix_avatar_data/face2face"),
-    Path("data/heygem"),
 )
 _CONTAINER_VIDEO_ROOT = Path("/code/data/inputs/video")
 _POLL_INTERVAL_SECONDS = 2.0
@@ -75,7 +74,7 @@ class HeyGemAvatarProvider(AvatarProvider):
                 "segments": [],
             }
 
-        presenter_source = _resolve_presenter_source(presenter_id)
+        presenter_source = _resolve_presenter_source(presenter_id, job_id=job_id)
         if not presenter_source:
             return {
                 "provider": "heygem",
@@ -158,7 +157,13 @@ class HeyGemAvatarProvider(AvatarProvider):
         presenter_source: str,
         segment: dict[str, Any],
     ) -> dict[str, Any]:
-        audio_source = _resolve_audio_source(str(segment.get("audio_url") or "").strip())
+        job_id = str(request.get("job_id") or "").strip()
+        segment_id = str(segment.get("segment_id") or "").strip()
+        audio_source = _resolve_audio_source(
+            str(segment.get("audio_url") or "").strip(),
+            job_id=job_id,
+            segment_id=segment_id,
+        )
         if not audio_source:
             return {
                 "segment_id": segment.get("segment_id"),
@@ -208,13 +213,16 @@ class HeyGemAvatarProvider(AvatarProvider):
                 )
                 data = query_payload.get("data") or {}
                 result_value = str(data.get("result") or "").strip()
+                local_result_path = _resolve_local_result_path(result_value)
                 return {
                     "segment_id": segment.get("segment_id"),
                     "status": "success" if int(data.get("status") or 0) == 2 else "failed",
                     "task_code": task_code,
                     "progress": data.get("progress"),
                     "result": result_value,
-                    "local_result_path": _resolve_local_result_path(result_value),
+                    "local_result_path": local_result_path,
+                    "staged_audio_path": _resolve_container_local_path(audio_source),
+                    "staged_presenter_path": _resolve_container_local_path(presenter_source),
                     "video_duration": data.get("video_duration"),
                     "width": data.get("width"),
                     "height": data.get("height"),
@@ -366,7 +374,7 @@ def _is_training_only_endpoint(base: str) -> bool:
     return is_training_only
 
 
-def _resolve_presenter_source(presenter_id: str) -> str | None:
+def _resolve_presenter_source(presenter_id: str, *, job_id: str | None = None) -> str | None:
     if presenter_id.startswith(("http://", "https://")):
         return presenter_id
 
@@ -379,7 +387,14 @@ def _resolve_presenter_source(presenter_id: str) -> str | None:
 
     local_path = Path(presenter_id)
     if local_path.exists():
-        target_path = _prepare_presenter_video(local_path=local_path, shared_video_dir=shared_video_dir)
+        if job_id:
+            target_path = _prepare_presenter_video(
+                local_path=local_path,
+                shared_video_dir=shared_video_dir,
+                job_id=job_id,
+            )
+        else:
+            target_path = _prepare_presenter_video(local_path=local_path, shared_video_dir=shared_video_dir)
         return _shared_video_url(target_path.name)
 
     if presenter_id.startswith("/code/data/inputs/video/"):
@@ -392,9 +407,13 @@ def _resolve_presenter_source(presenter_id: str) -> str | None:
     return None
 
 
-def _prepare_presenter_video(*, local_path: Path, shared_video_dir: Path) -> Path:
+def _prepare_presenter_video(*, local_path: Path, shared_video_dir: Path, job_id: str | None = None) -> Path:
     safe_stem = local_path.stem or "avatar_anchor"
-    target_path = shared_video_dir / f"{safe_stem}_heygem_anchor.mp4"
+    prefix = _normalize_job_path_prefix(job_id)
+    target_name = f"{safe_stem}_heygem_anchor.mp4"
+    if prefix:
+        target_name = f"{prefix}_{target_name}"
+    target_path = shared_video_dir / target_name
     if target_path.exists() and target_path.stat().st_mtime >= local_path.stat().st_mtime:
         return target_path
 
@@ -454,7 +473,12 @@ def _resolve_completed_task_result(task_code: str) -> str | None:
     return _resolve_local_result_path(f"/{task_code}-r.mp4")
 
 
-def _resolve_audio_source(audio_value: str) -> str | None:
+def _resolve_audio_source(
+    audio_value: str,
+    *,
+    job_id: str | None = None,
+    segment_id: str | None = None,
+) -> str | None:
     if not audio_value:
         return None
     if audio_value.startswith(("http://", "https://")):
@@ -471,7 +495,9 @@ def _resolve_audio_source(audio_value: str) -> str | None:
 
     shared_audio_dir = shared_root / "inputs" / "audio"
     shared_audio_dir.mkdir(parents=True, exist_ok=True)
-    target_path = shared_audio_dir / local_path.name
+    prefix_parts = [part for part in (_normalize_job_path_prefix(job_id), _sanitize_stage_name(segment_id)) if part]
+    target_name = local_path.name if not prefix_parts else f"{'_'.join(prefix_parts)}_{local_path.name}"
+    target_path = shared_audio_dir / target_name
     if local_path.resolve() != target_path.resolve():
         shutil.copy2(local_path, target_path)
     return str((Path("/code/data/inputs/audio") / target_path.name).as_posix())
@@ -492,3 +518,26 @@ def _detect_shared_root() -> Path | None:
 
 def _shared_video_url(name: str) -> str:
     return str((_CONTAINER_VIDEO_ROOT / name).as_posix())
+
+
+def _resolve_container_local_path(container_path: str) -> str | None:
+    value = str(container_path or "").strip()
+    if not value.startswith("/code/data/"):
+        return None
+    shared_root = _detect_shared_root()
+    if shared_root is None:
+        return None
+    relative = value.removeprefix("/code/data/").replace("/", "\\")
+    return str((shared_root / relative).resolve())
+
+
+def _normalize_job_path_prefix(job_id: str | None) -> str:
+    raw = str(job_id or "").strip().replace("-", "_")
+    return raw[:48].strip("._")
+
+
+def _sanitize_stage_name(value: str | None) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    return "".join(ch if ch.isalnum() or ch in {"_", "-"} else "_" for ch in raw)[:48].strip("._")

@@ -122,7 +122,6 @@ async def build_service_status(*, api_running: bool) -> dict[str, object]:
             ),
             "postgres": _has_container(containers, "roughcut-postgres"),
             "redis": _has_container(containers, "roughcut-redis"),
-            "minio": _has_container(containers, "roughcut-minio"),
         },
         "runtime": {
             "readiness_status": readiness.get("status", "unknown"),

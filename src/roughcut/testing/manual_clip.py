@@ -11,6 +11,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+from roughcut.config import DEFAULT_TEST_OUTPUT_ROOT
 from roughcut.edit.decisions import build_edit_decision
 from roughcut.edit.render_plan import build_render_plan
 from roughcut.media.audio import extract_audio
@@ -43,7 +44,7 @@ async def run_manual_clip_test(
     if not source.exists():
         raise FileNotFoundError(source)
 
-    output_root = Path("output/test/manual-tests")
+    output_root = DEFAULT_TEST_OUTPUT_ROOT / "manual-tests"
     output_root.mkdir(parents=True, exist_ok=True)
     run_name = f"{build_output_name(source.name)}_manual_{time.strftime('%Y%m%d_%H%M%S')}"
     run_dir = output_root / run_name

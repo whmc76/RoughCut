@@ -1089,7 +1089,6 @@ async def test_control_status_reports_services(client: AsyncClient, monkeypatch:
     assert data["llm_worker"] is False
     assert data["postgres"] is True
     assert data["redis"] is True
-    assert data["minio"] is False
     assert payload["runtime"]["readiness_status"] == "ready"
     assert payload["runtime"]["orchestrator_lock"]["status"] == "held"
     assert payload["runtime"]["orchestrator_lock"]["leader_active"] is True

@@ -647,23 +647,6 @@ function Resolve-PortSet {
 
     $postgresPort = Resolve-ServicePort -ContainerName "roughcut-postgres-1" -ContainerPort 5432 -EnvVarName "ROUGHCUT_POSTGRES_PORT" -PreferredPorts @(25432,25434,25436,25438,25440,25442,25444,25446) -UsedPorts $UsedPorts
     $redisPort = Resolve-ServicePort -ContainerName "roughcut-redis-1" -ContainerPort 6379 -EnvVarName "ROUGHCUT_REDIS_PORT" -PreferredPorts @(26379,26380,26381,26382,26383,26384,26385) -UsedPorts $UsedPorts
-    $minioApiPort = Resolve-ServicePort -ContainerName "roughcut-minio-1" -ContainerPort 9000 -EnvVarName "MINIO_API_PORT" -PreferredPorts @(39000,39002,39004,39006,39008,39010,39012) -UsedPorts $UsedPorts
-    $minioApiPortRaw = if ($minioApiPort -is [array]) { $minioApiPort[0] } else { $minioApiPort }
-    $minioApiPortInt = 0
-    if (-not [int]::TryParse("$minioApiPortRaw", [ref]$minioApiPortInt)) {
-        throw "Failed to parse MINIO_API_PORT value: $minioApiPortRaw"
-    }
-    $minioApiPort = $minioApiPortInt
-    $minioConsoleCandidates = @(
-        ($minioApiPort + 1),
-        39001, 39003, 39005, 39007, 39009, 39011
-    )
-    $minioConsolePort = Resolve-ServicePort -ContainerName "roughcut-minio-1" -ContainerPort 9001 -EnvVarName "MINIO_CONSOLE_PORT" -PreferredPorts $minioConsoleCandidates -UsedPorts $UsedPorts
-
-    if ($minioConsolePort -eq $minioApiPort) {
-        $UsedPorts.Remove($minioConsolePort)
-        $minioConsolePort = Resolve-StandalonePort -EnvVarName "MINIO_CONSOLE_PORT" -PreferredPorts @(39001,39003,39005,39007,39009,39011) -UsedPorts $UsedPorts
-    }
 
     $configuredHeygemApiPort = Parse-PortValue -Value $(if ($env:HEYGEM_API_PORT) { $env:HEYGEM_API_PORT } else { Get-LocalDotEnvValue -Key "HEYGEM_API_PORT" })
     $configuredIndexTtsPort = Parse-PortValue -Value $(if ($env:INDEXTTS2_API_PORT) { $env:INDEXTTS2_API_PORT } else { Get-LocalDotEnvValue -Key "INDEXTTS2_API_PORT" })
@@ -676,8 +659,6 @@ function Resolve-PortSet {
     return @{
         Postgres = $postgresPort
         Redis = $redisPort
-        MinioApi = $minioApiPort
-        MinioConsole = $minioConsolePort
         HeygemApi = $heygemApiPort
         HeygemTraining = $heygemTrainingPort
     }
@@ -729,14 +710,12 @@ function Update-LocalServiceEnv {
     param(
         [int]$PostgresPort,
         [int]$RedisPort,
-        [int]$MinioApiPort,
-        [int]$MinioConsolePort,
         [int]$HeygemApiPort,
         [int]$HeygemTrainingPort,
         [int]$ApiPort
     )
 
-    $defaultHeygemRoot = "E:/WorkSpace/heygem/data"
+    $defaultHeygemRoot = "F:/roughcut_outputs/heygem"
     $heygemSharedRoot = if ($env:HEYGEM_SHARED_ROOT -and -not [string]::IsNullOrWhiteSpace($env:HEYGEM_SHARED_ROOT)) {
         [System.IO.Path]::GetFullPath($env:HEYGEM_SHARED_ROOT).Replace('\\', '/')
     } else {
@@ -748,8 +727,6 @@ function Update-LocalServiceEnv {
 
     $env:ROUGHCUT_POSTGRES_PORT = "$PostgresPort"
     $env:ROUGHCUT_REDIS_PORT = "$RedisPort"
-    $env:MINIO_API_PORT = "$MinioApiPort"
-    $env:MINIO_CONSOLE_PORT = "$MinioConsolePort"
     $env:HEYGEM_API_PORT = "$HeygemApiPort"
     $env:INDEXTTS2_API_PORT = "$HeygemTrainingPort"
     $env:HEYGEM_SHARED_HOST_DIR = $heygemSharedRoot
@@ -757,7 +734,7 @@ function Update-LocalServiceEnv {
     $voiceRoot = if ($env:HEYGEM_VOICE_ROOT -and -not [string]::IsNullOrWhiteSpace($env:HEYGEM_VOICE_ROOT)) {
         [System.IO.Path]::GetFullPath($env:HEYGEM_VOICE_ROOT).Replace('\\', '/')
     } else {
-        "E:/WorkSpace/RoughCut/data/voice_refs"
+        "F:/roughcut_outputs/voice_refs"
     }
     if (-not (Test-Path $voiceRoot)) {
         New-Item -ItemType Directory -Force -Path $voiceRoot | Out-Null
@@ -782,23 +759,8 @@ function Update-LocalServiceEnv {
     $env:CELERY_BROKER_URL = "redis://localhost:$RedisPort/0"
     $env:CELERY_RESULT_BACKEND = "redis://localhost:$RedisPort/1"
 
-    $s3Endpoint = Get-LocalDotEnvValue -Key "S3_ENDPOINT_URL"
-    $shouldRewriteS3Endpoint = $true
-    if (-not [string]::IsNullOrWhiteSpace($s3Endpoint)) {
-        try {
-            $s3Uri = [uri]$s3Endpoint
-            if ($s3Uri.Host -and $s3Uri.Host -notin @("localhost", "127.0.0.1")) {
-                $shouldRewriteS3Endpoint = $false
-            }
-        } catch {
-            $shouldRewriteS3Endpoint = $true
-        }
-    }
-    if ($shouldRewriteS3Endpoint) {
-        $env:S3_ENDPOINT_URL = "http://127.0.0.1:$MinioApiPort"
-    }
     $env:ROUGHCUT_API_PORT = "$ApiPort"
-    Write-Host "Allocated ports -> PostgreSQL:$PostgresPort Redis:$RedisPort MinIO API:$MinioApiPort MinIO Console:$MinioConsolePort External HeyGem:$HeygemApiPort/$HeygemTrainingPort API:$ApiPort" -ForegroundColor Cyan
+    Write-Host "Allocated ports -> PostgreSQL:$PostgresPort Redis:$RedisPort External HeyGem:$HeygemApiPort/$HeygemTrainingPort API:$ApiPort" -ForegroundColor Cyan
 }
 
 function Get-ProcessMatches {
@@ -1026,9 +988,9 @@ Stop-RoughCutServices
 
     if (-not $SkipDocker) {
         Write-Host "Checking Docker services..." -ForegroundColor Cyan
-    $dockerContainers = @("roughcut-postgres-1", "roughcut-redis-1", "roughcut-minio-1")
-    $dockerServices = @("postgres", "redis", "minio")
-        $legacyDockerNames = @("fastcut-postgres-1", "fastcut-redis-1", "fastcut-minio-1")
+    $dockerContainers = @("roughcut-postgres-1", "roughcut-redis-1")
+    $dockerServices = @("postgres", "redis")
+        $legacyDockerNames = @("fastcut-postgres-1", "fastcut-redis-1")
     $usedPorts = @{}
     try {
         $running = docker ps -a --format "{{.Names}}"
@@ -1049,7 +1011,7 @@ Stop-RoughCutServices
     $requestedApiPort = if ($PSBoundParameters.ContainsKey("Port")) { $Port } else { 0 }
     $resolvedApiPort = Resolve-ApiPort -UsedPorts $usedPorts -RequestedPort $requestedApiPort
 
-    Update-LocalServiceEnv -PostgresPort $servicePorts.Postgres -RedisPort $servicePorts.Redis -MinioApiPort $servicePorts.MinioApi -MinioConsolePort $servicePorts.MinioConsole -HeygemApiPort $servicePorts.HeygemApi -HeygemTrainingPort $servicePorts.HeygemTraining -ApiPort $resolvedApiPort
+    Update-LocalServiceEnv -PostgresPort $servicePorts.Postgres -RedisPort $servicePorts.Redis -HeygemApiPort $servicePorts.HeygemApi -HeygemTrainingPort $servicePorts.HeygemTraining -ApiPort $resolvedApiPort
     $Port = $resolvedApiPort
 
     Write-Host "Starting docker compose services..." -ForegroundColor Yellow
@@ -1060,12 +1022,6 @@ Stop-RoughCutServices
     }
     if (-not (Wait-LocalPortListening -TestPort $servicePorts.Redis -ServiceName "Redis" -TimeoutSec 60)) {
         throw "Redis failed to start in time."
-    }
-    if (-not (Wait-LocalPortListening -TestPort $servicePorts.MinioApi -ServiceName "MinIO API" -TimeoutSec 90)) {
-        throw "MinIO failed to start in time."
-    }
-    if (-not (Wait-LocalPortListening -TestPort $servicePorts.MinioConsole -ServiceName "MinIO Console" -TimeoutSec 90)) {
-        throw "MinIO Console failed to start in time."
     }
     if (Wait-LocalPortListening -TestPort $servicePorts.HeygemApi -ServiceName "HeyGem API (external)" -TimeoutSec 2) {
         Write-Host "External HeyGem preview service is already running." -ForegroundColor Green
