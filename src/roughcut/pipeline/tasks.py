@@ -44,6 +44,12 @@ def _reset_db_session_state() -> None:
     _sess._session_factory = None
 
 
+def _coerce_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
 def _can_transition_step(
     *,
     job_status: str,
@@ -60,11 +66,13 @@ def _can_transition_step(
     if target_status == "running":
         if normalized_job_status not in _ACTIVE_JOB_STATUSES:
             return False
-        if normalized_step_status != "pending":
-            return False
         if current_task and incoming_task and current_task != incoming_task:
             return False
-        return True
+        if normalized_step_status == "pending":
+            return True
+        if normalized_step_status == "running" and current_task and incoming_task and current_task == incoming_task:
+            return True
+        return False
 
     if normalized_job_status in _TERMINAL_JOB_STATUSES and target_status != "cancelled":
         return False
@@ -141,7 +149,9 @@ def _update_step_status(
                     step.finished_at = now
                 elapsed_seconds = None
                 if step.started_at:
-                    elapsed_seconds = max(0.0, ((step.finished_at or now) - step.started_at).total_seconds())
+                    start_time = _coerce_utc(step.started_at)
+                    end_time = _coerce_utc(step.finished_at) if step.finished_at is not None else now
+                    elapsed_seconds = max(0.0, (end_time - start_time).total_seconds())
                 step.metadata_ = _finalize_step_metadata(
                     {
                     **(step.metadata_ or {}),

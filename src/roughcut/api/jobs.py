@@ -355,6 +355,7 @@ async def cancel_job(job_id: uuid.UUID, session: AsyncSession = Depends(get_sess
         artifacts=list(job.artifacts or []),
         render_outputs=render_outputs,
         purge_deliverables=True,
+        preserve_storage_keys=[str(job.source_path or "").strip()],
     )
     await session.refresh(job)
     _attach_job_preview(job)
@@ -373,7 +374,7 @@ async def restart_job(job_id: uuid.UUID, session: AsyncSession = Depends(get_ses
         raise HTTPException(status_code=409, detail="Only completed, review-paused, cancelled, or failed jobs can be restarted")
 
     _revoke_running_steps(job.steps or [])
-    await _clear_job_runtime_state(job_id, session)
+    await _clear_job_runtime_state(job_id, session, source_path=str(job.source_path or "").strip())
 
     now = datetime.now(timezone.utc)
     job.status = "pending"
@@ -421,7 +422,7 @@ async def delete_job(job_id: uuid.UUID, session: AsyncSession = Depends(get_sess
         raise HTTPException(status_code=404, detail="Job not found")
 
     _revoke_running_steps(job.steps or [])
-    await _clear_job_runtime_state(job_id, session)
+    await _clear_job_runtime_state(job_id, session, source_path="")
     await session.execute(delete(JobStep).where(JobStep.job_id == job_id))
     await session.execute(delete(Job).where(Job.id == job_id))
     await session.commit()
@@ -877,7 +878,7 @@ def _revoke_running_steps(steps: list[JobStep]) -> None:
             pass
 
 
-async def _clear_job_runtime_state(job_id: uuid.UUID, session: AsyncSession) -> None:
+async def _clear_job_runtime_state(job_id: uuid.UUID, session: AsyncSession, *, source_path: str = "") -> None:
     packaging_artifacts = await session.execute(
         select(Artifact).where(Artifact.job_id == job_id)
     )
@@ -889,6 +890,7 @@ async def _clear_job_runtime_state(job_id: uuid.UUID, session: AsyncSession) -> 
         artifacts=artifact_rows,
         render_outputs=render_output_rows,
         purge_deliverables=True,
+        preserve_storage_keys=[source_path] if source_path else [],
     )
 
     await session.execute(

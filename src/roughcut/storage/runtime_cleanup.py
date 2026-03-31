@@ -15,12 +15,18 @@ def cleanup_job_runtime_files(
     artifacts: Iterable[Any] | None = None,
     render_outputs: Iterable[Any] | None = None,
     purge_deliverables: bool,
+    preserve_storage_keys: Iterable[str] | None = None,
 ) -> None:
     settings = get_settings()
     storage = get_storage()
+    preserved_storage_paths = _resolve_storage_preserve_paths(storage, preserve_storage_keys)
 
     if bool(getattr(settings, "cleanup_job_storage_on_terminal", True)):
-        storage.delete_prefix(job_key(job_id, "").rstrip("/"))
+        _cleanup_storage_prefix(
+            storage,
+            job_key(job_id, "").rstrip("/"),
+            preserve_paths=preserved_storage_paths,
+        )
 
     if bool(getattr(settings, "cleanup_render_debug_on_terminal", True)):
         _cleanup_render_debug_dirs(job_id)
@@ -49,6 +55,62 @@ def _cleanup_render_debug_dirs(job_id: str) -> None:
     prefix = f"{job_id}_"
     for candidate in debug_root.glob(f"{prefix}*"):
         shutil.rmtree(candidate, ignore_errors=True)
+
+
+def _resolve_storage_preserve_paths(storage, preserve_storage_keys: Iterable[str] | None) -> set[Path]:
+    resolved_paths: set[Path] = set()
+    if not preserve_storage_keys:
+        return resolved_paths
+    resolve_path = getattr(storage, "resolve_path", None)
+    for key in preserve_storage_keys:
+        value = str(key or "").strip()
+        if not value:
+            continue
+        if callable(resolve_path):
+            try:
+                resolved_paths.add(resolve_path(value).resolve())
+                continue
+            except Exception:
+                pass
+        path_like = _resolve_path_like(value)
+        if path_like is not None:
+            resolved_paths.add(path_like.resolve())
+    return resolved_paths
+
+
+def _cleanup_storage_prefix(storage, prefix: str, *, preserve_paths: set[Path]) -> None:
+    if not preserve_paths:
+        storage.delete_prefix(prefix)
+        return
+
+    resolve_path = getattr(storage, "resolve_path", None)
+    if not callable(resolve_path):
+        storage.delete_prefix(prefix)
+        return
+
+    prefix_path = resolve_path(prefix)
+    if not prefix_path.exists():
+        return
+    _delete_tree_except(prefix_path.resolve(), preserve_paths)
+
+
+def _delete_tree_except(path: Path, preserve_paths: set[Path]) -> None:
+    if not path.exists():
+        return
+    if path.is_file():
+        if path.resolve() not in preserve_paths:
+            path.unlink(missing_ok=True)
+        return
+
+    for child in path.iterdir():
+        resolved_child = child.resolve()
+        if any(_is_relative_to(keep_path, resolved_child) for keep_path in preserve_paths):
+            _delete_tree_except(resolved_child, preserve_paths)
+            continue
+        if child.is_dir():
+            shutil.rmtree(child, ignore_errors=True)
+        else:
+            child.unlink(missing_ok=True)
 
 
 def _collect_payload_paths(payload: Any) -> set[str]:

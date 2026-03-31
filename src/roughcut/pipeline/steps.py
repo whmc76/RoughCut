@@ -575,13 +575,33 @@ async def run_probe(job_id: str) -> dict:
         )
         step = step_result.scalar_one()
         await _set_step_progress(session, step, detail="下载源视频并准备探测媒体参数", progress=0.1)
+        probe_heartbeat = _spawn_step_heartbeat(
+            step_id=step.id,
+            detail="下载源视频并准备探测媒体参数",
+            progress=0.1,
+        )
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            source_path = await _resolve_source(job, tmpdir)
-            await _set_step_progress(session, step, detail="读取分辨率、时长、编码与文件哈希", progress=0.45)
-            meta = await probe(source_path)
-            validate_media(meta)
-            file_hash = _hash_file(source_path)
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                source_path = await _resolve_source(job, tmpdir)
+                if probe_heartbeat is not None:
+                    probe_heartbeat.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await probe_heartbeat
+                await _set_step_progress(session, step, detail="读取分辨率、时长、编码与文件哈希", progress=0.45)
+                probe_heartbeat = _spawn_step_heartbeat(
+                    step_id=step.id,
+                    detail="读取分辨率、时长、编码与文件哈希",
+                    progress=0.45,
+                )
+                meta = await probe(source_path)
+                validate_media(meta)
+                file_hash = _hash_file(source_path)
+        finally:
+            if probe_heartbeat is not None:
+                probe_heartbeat.cancel()
+                with suppress(asyncio.CancelledError):
+                    await probe_heartbeat
 
         job.file_hash = file_hash
         artifact = Artifact(

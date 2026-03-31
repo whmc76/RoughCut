@@ -578,7 +578,7 @@ async def _update_job_statuses(session) -> None:
             job.status = "done"
             job.error_message = None
             job.updated_at = datetime.now(timezone.utc)
-            await _cleanup_terminal_job_files(session, job.id, purge_deliverables=False)
+            await _cleanup_terminal_job_files(session, job, purge_deliverables=False)
             logger.info("Job %s completed", job.id)
             continue
 
@@ -611,18 +611,19 @@ async def _update_job_statuses(session) -> None:
             job.status = "failed"
             job.error_message = f"Step {failed_steps[0].step_name} failed after {MAX_ATTEMPTS} attempts"
             job.updated_at = datetime.now(timezone.utc)
-            await _cleanup_terminal_job_files(session, job.id, purge_deliverables=True)
+            await _cleanup_terminal_job_files(session, job, purge_deliverables=True)
             logger.error(f"Job {job.id} failed: {job.error_message}")
 
 
-async def _cleanup_terminal_job_files(session, job_id, *, purge_deliverables: bool) -> None:
-    artifact_result = await session.execute(select(Artifact).where(Artifact.job_id == job_id))
-    render_output_result = await session.execute(select(RenderOutput).where(RenderOutput.job_id == job_id))
+async def _cleanup_terminal_job_files(session, job: Job, *, purge_deliverables: bool) -> None:
+    artifact_result = await session.execute(select(Artifact).where(Artifact.job_id == job.id))
+    render_output_result = await session.execute(select(RenderOutput).where(RenderOutput.job_id == job.id))
     cleanup_job_runtime_files(
-        str(job_id),
+        str(job.id),
         artifacts=artifact_result.scalars().all(),
         render_outputs=render_output_result.scalars().all(),
         purge_deliverables=purge_deliverables,
+        preserve_storage_keys=[str(getattr(job, "source_path", "") or "").strip()],
     )
 
 

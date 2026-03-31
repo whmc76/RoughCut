@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import shutil
 from pathlib import Path
 from typing import BinaryIO
@@ -19,9 +20,16 @@ class S3Storage:
         self._root.mkdir(parents=True, exist_ok=True)
 
     def resolve_path(self, key: str) -> Path:
-        candidate = Path(str(key or "")).expanduser()
+        raw = str(key or "").strip()
+        candidate = Path(raw).expanduser()
         if candidate.is_absolute():
-            return candidate
+            if candidate.exists():
+                return candidate
+            remapped = _remap_windows_job_storage_path(raw, storage_root=self._root)
+            return remapped or candidate
+        remapped = _remap_windows_job_storage_path(raw, storage_root=self._root)
+        if remapped is not None:
+            return remapped
         relative = candidate
         if self._root.name.lower() == "jobs" and candidate.parts[:1] == ("jobs",):
             relative = Path(*candidate.parts[1:]) if len(candidate.parts) > 1 else Path()
@@ -89,3 +97,15 @@ def get_storage() -> S3Storage:
     if _storage is None:
         _storage = S3Storage()
     return _storage
+
+
+def _remap_windows_job_storage_path(raw: str, *, storage_root: Path) -> Path | None:
+    normalized = str(raw or "").strip().replace("\\", "/")
+    if not re.match(r"^[A-Za-z]:/", normalized):
+        return None
+    marker = "/jobs/"
+    index = normalized.lower().find(marker)
+    if index < 0:
+        return None
+    relative = normalized[index + len(marker):].strip("/")
+    return storage_root.resolve() if not relative else (storage_root / Path(relative)).resolve()

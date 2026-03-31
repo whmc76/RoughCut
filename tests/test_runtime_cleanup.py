@@ -11,6 +11,7 @@ def test_cleanup_job_runtime_files_removes_job_storage_debug_and_heygem_temp(
     monkeypatch,
 ):
     import roughcut.config as config_mod
+    import roughcut.storage.s3 as s3_mod
 
     job_id = "job-cleanup-1"
     job_storage_dir = tmp_path / "jobs"
@@ -41,6 +42,7 @@ def test_cleanup_job_runtime_files_removes_job_storage_debug_and_heygem_temp(
         job_storage_dir=str(job_storage_dir),
         render_debug_dir=str(render_debug_dir),
     )
+    s3_mod._storage = None
 
     cleanup_job_runtime_files(
         job_id,
@@ -58,3 +60,35 @@ def test_cleanup_job_runtime_files_removes_job_storage_debug_and_heygem_temp(
     assert not debug_dir.exists()
     assert not heygem_file.exists()
     assert deliverable.exists()
+
+
+def test_cleanup_job_runtime_files_preserves_source_storage_key(tmp_path: Path, monkeypatch):
+    import roughcut.config as config_mod
+    import roughcut.storage.s3 as s3_mod
+
+    job_id = "job-cleanup-2"
+    job_storage_dir = tmp_path / "jobs"
+    source_file = job_storage_dir / job_id / "source.mp4"
+    derived_file = job_storage_dir / job_id / "audio.wav"
+    source_file.parent.mkdir(parents=True, exist_ok=True)
+    source_file.write_bytes(b"video")
+    derived_file.write_bytes(b"audio")
+
+    config_mod._settings = config_mod.Settings(
+        _env_file=None,
+        output_dir=str(tmp_path / "output"),
+        job_storage_dir=str(job_storage_dir),
+        render_debug_dir=str(tmp_path / "render-debug"),
+    )
+    s3_mod._storage = None
+
+    cleanup_job_runtime_files(
+        job_id,
+        artifacts=[],
+        render_outputs=[],
+        purge_deliverables=False,
+        preserve_storage_keys=[f"jobs/{job_id}/source.mp4"],
+    )
+
+    assert source_file.exists()
+    assert not derived_file.exists()

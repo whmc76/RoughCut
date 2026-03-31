@@ -12,6 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from roughcut.db.models import Artifact, GlossaryTerm, Job, JobStep, RenderOutput, SubtitleItem, Timeline
+from roughcut.media.probe import MediaMeta
 from roughcut.pipeline.steps import (
     _get_cover_seek,
     _load_latest_artifact,
@@ -26,6 +27,7 @@ from roughcut.pipeline.steps import (
     run_content_profile,
     run_glossary_review,
     run_platform_package,
+    run_probe,
 )
 
 
@@ -35,6 +37,89 @@ class _FakeTelegramReviewBotService:
 
     async def notify_content_profile_review(self, job_id: uuid.UUID) -> None:
         self.content_profile_notifications.append(job_id)
+
+
+@pytest.mark.asyncio
+async def test_run_probe_starts_and_cleans_up_step_heartbeat(db_engine, monkeypatch, tmp_path: Path):
+    import roughcut.pipeline.steps as steps_mod
+
+    factory = async_sessionmaker(db_engine, expire_on_commit=False)
+    job_id = uuid.uuid4()
+    source_path = tmp_path / "source.mp4"
+    source_path.write_bytes(b"video")
+    heartbeat_calls: list[dict[str, object]] = []
+
+    class FakeHeartbeat:
+        def __init__(self) -> None:
+            self.cancelled = False
+
+        def cancel(self) -> None:
+            self.cancelled = True
+
+        def __await__(self):
+            async def _done():
+                return None
+
+            return _done().__await__()
+
+    async with factory() as session:
+        session.add(
+            Job(
+                id=job_id,
+                source_path="jobs/demo/source.mp4",
+                source_name="source.mp4",
+                status="processing",
+                language="zh-CN",
+            )
+        )
+        session.add(JobStep(job_id=job_id, step_name="probe", status="running"))
+        await session.commit()
+
+    monkeypatch.setattr(steps_mod, "get_session_factory", lambda: factory)
+
+    async def fake_resolve_source(*args, **kwargs):
+        return source_path
+
+    async def fake_probe(_path: Path) -> MediaMeta:
+        return MediaMeta(
+            duration=12.3,
+            width=1920,
+            height=1080,
+            fps=30.0,
+            video_codec="h264",
+            audio_codec="aac",
+            audio_sample_rate=48000,
+            audio_channels=2,
+            file_size=source_path.stat().st_size,
+            format_name="mov,mp4,m4a,3gp,3g2,mj2",
+            bit_rate=1024,
+        )
+
+    def fake_spawn_step_heartbeat(*, step_id, detail: str, progress: float | None = None):
+        task = FakeHeartbeat()
+        heartbeat_calls.append(
+            {
+                "step_id": step_id,
+                "detail": detail,
+                "progress": progress,
+                "task": task,
+            }
+        )
+        return task
+
+    monkeypatch.setattr(steps_mod, "_resolve_source", fake_resolve_source)
+    monkeypatch.setattr(steps_mod, "probe", fake_probe)
+    monkeypatch.setattr(steps_mod, "validate_media", lambda _meta: None)
+    monkeypatch.setattr(steps_mod, "_hash_file", lambda _path: "sha256-demo")
+    monkeypatch.setattr(steps_mod, "_spawn_step_heartbeat", fake_spawn_step_heartbeat)
+
+    result = await run_probe(str(job_id))
+
+    assert result == {"duration": 12.3, "file_hash": "sha256-demo"}
+    assert heartbeat_calls, "probe should keep the step heartbeat alive during long-running source work"
+    assert heartbeat_calls[0]["detail"] == "下载源视频并准备探测媒体参数"
+    assert heartbeat_calls[0]["progress"] == 0.1
+    assert heartbeat_calls[0]["task"].cancelled is True
 
 
 def test_resolve_subtitle_split_profile_prefers_faster_portrait_subtitles():

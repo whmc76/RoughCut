@@ -137,6 +137,56 @@ async def test_run_task_step_ignores_late_writeback_after_job_is_cancelled(db_en
 
 
 @pytest.mark.asyncio
+async def test_run_task_step_accepts_dispatched_running_step_with_same_task_id(db_engine, monkeypatch):
+    import roughcut.pipeline.tasks as tasks_mod
+    from roughcut.db.models import Job, JobStep
+    from roughcut.db.session import get_session_factory
+
+    job_id = uuid.uuid4()
+    now = datetime.now(timezone.utc)
+    factory = get_session_factory()
+    async with factory() as session:
+        session.add(
+            Job(
+                id=job_id,
+                source_path="jobs/demo/dispatched.mp4",
+                source_name="dispatched.mp4",
+                status="processing",
+                language="zh-CN",
+            )
+        )
+        session.add(
+            JobStep(
+                job_id=job_id,
+                step_name="probe",
+                status="running",
+                started_at=now,
+                metadata_={"task_id": "dispatched-task", "updated_at": now.isoformat()},
+            )
+        )
+        await session.commit()
+
+    monkeypatch.setattr(tasks_mod, "_probe_local_gpu_pressure", lambda step_name: None)
+    monkeypatch.setattr(tasks_mod, "run_step_sync", lambda step_name, job_id: {"ok": True, "step_name": step_name})
+
+    fake_task = SimpleNamespace(request=SimpleNamespace(id="dispatched-task", retries=0))
+    result = await asyncio.to_thread(
+        functools.partial(tasks_mod._run_task_step, fake_task, str(job_id), "probe", retry_countdown=10)
+    )
+
+    assert result == {"ok": True, "step_name": "probe"}
+
+    async with factory() as session:
+        step = (
+            await session.execute(
+                select(JobStep).where(JobStep.job_id == job_id, JobStep.step_name == "probe")
+            )
+        ).scalar_one()
+        assert step.status == "done"
+        assert step.metadata_["last_task_id"] == "dispatched-task"
+
+
+@pytest.mark.asyncio
 async def test_cancel_job_clears_stale_task_ids_from_step_metadata(client):
     from roughcut.db.models import Job, JobStep
     from roughcut.db.session import get_session_factory
