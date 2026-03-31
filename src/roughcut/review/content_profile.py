@@ -3103,11 +3103,11 @@ def _build_fallback_engagement_question(profile: dict[str, Any], preset: Workflo
     theme = str(profile.get("video_theme") or "").strip()
     subject = _build_engagement_subject(profile, preset)
 
-    if preset.name == "screen_tutorial":
+    if _is_tutorial_preset(preset):
         return "这一步你平时最容易卡在哪？"
     if preset.name == "vlog_daily":
         return "这种日常节奏你还想看我拍哪一段？"
-    if preset.name == "talking_head_commentary":
+    if _is_commentary_preset(preset):
         return "这个判断你是赞同还是反对？"
     if preset.name == "gameplay_highlight":
         return "这波如果换你来打会怎么处理？"
@@ -3617,11 +3617,11 @@ def _pick_cover_top(
         return compact_brand
     if subject_type:
         return subject_type[:14]
-    if preset.name == "screen_tutorial":
+    if _is_tutorial_preset(preset):
         return "教程"
     if preset.name == "vlog_daily":
         return "VLOG"
-    if preset.name == "talking_head_commentary":
+    if _is_commentary_preset(preset):
         return "观点"
     if preset.name == "gameplay_highlight":
         return "高能"
@@ -3770,7 +3770,7 @@ def _build_cover_hook(
             return explosive
 
     fallback = ""
-    if preset.name == "screen_tutorial":
+    if _is_tutorial_preset(preset):
         fallback = _build_screen_tutorial_cover_hook(
             brand=brand,
             model=model,
@@ -3778,12 +3778,8 @@ def _build_cover_hook(
             theme=theme,
             copy_style=copy_style,
         )
-    elif preset.name == "unboxing_limited":
-        fallback = "限定细节值不值"
-    elif preset.name == "unboxing_upgrade":
-        fallback = "这次升级够不够狠"
-    elif preset.name == "edc_tactical":
-        fallback = "做工结构直接看"
+    elif _is_unboxing_preset(preset):
+        fallback = _build_unboxing_cover_hook(theme=theme)
     else:
         fallback = preset.cover_accent
     return _apply_copy_style_to_hook(
@@ -3805,7 +3801,7 @@ def _upgrade_cover_hook(
     copy_style: str,
     preset: WorkflowPreset,
 ) -> str:
-    if preset.name == "screen_tutorial":
+    if _is_tutorial_preset(preset):
         boosted = _build_screen_tutorial_cover_hook(
             brand=brand,
             model=model,
@@ -3858,6 +3854,32 @@ def _build_screen_tutorial_cover_hook(
     if subject_type and not _is_generic_subject_type(subject_type):
         return _apply_copy_style_to_hook(f"{subject_type}太狠了", copy_style=copy_style, brand=brand, model=model, subject_type=subject_type)[:18]
     return _apply_copy_style_to_hook("这波效果太夸张", copy_style=copy_style, brand=brand, model=model, subject_type=subject_type)
+
+
+def _build_unboxing_cover_hook(*, theme: str) -> str:
+    theme_text = _clean_line(theme)
+    if any(token in theme_text for token in ("限定", "联名", "纪念版", "特别版")):
+        return "限定细节值不值"
+    if any(token in theme_text for token in ("做工", "结构", "拆解", "材质")):
+        return "做工结构直接看"
+    return "这次升级够不够狠"
+
+
+def _is_tutorial_preset(preset: WorkflowPreset) -> bool:
+    return preset.content_kind == "tutorial" or preset.name in {"screen_tutorial", "tutorial_standard"}
+
+
+def _is_unboxing_preset(preset: WorkflowPreset) -> bool:
+    return preset.content_kind == "unboxing" or preset.name in {
+        "unboxing_standard",
+        "unboxing_limited",
+        "unboxing_upgrade",
+        "edc_tactical",
+    }
+
+
+def _is_commentary_preset(preset: WorkflowPreset) -> bool:
+    return preset.content_kind == "commentary" or preset.name in {"commentary_focus", "talking_head_commentary"}
 
 
 def _apply_copy_style_to_hook(
