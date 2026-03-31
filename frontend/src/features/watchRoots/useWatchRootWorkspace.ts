@@ -8,7 +8,7 @@ import type { WatchInventorySmartMergeGroup } from "../../types";
 function serializeRootForm(form: RootForm): string {
   return JSON.stringify({
     path: form.path,
-    channel_profile: form.channel_profile,
+    workflow_template: form.workflow_template,
     enabled: form.enabled,
     scan_mode: form.scan_mode,
   });
@@ -46,7 +46,7 @@ export function useWatchRootWorkspace() {
     if (selectedRoot) {
       const nextForm = {
         path: selectedRoot.path,
-        channel_profile: selectedRoot.channel_profile || "",
+        workflow_template: selectedRoot.workflow_template || "",
         enabled: selectedRoot.enabled,
         scan_mode: selectedRoot.scan_mode,
       };
@@ -150,7 +150,7 @@ export function useWatchRootWorkspace() {
           if (requestVersion !== updateVersionRef.current) return;
           lastPersistedRef.current = serializeRootForm({
             path: updatedRoot.path,
-            channel_profile: updatedRoot.channel_profile || "",
+            workflow_template: updatedRoot.workflow_template || "",
             enabled: updatedRoot.enabled,
             scan_mode: updatedRoot.scan_mode,
           });

@@ -18,8 +18,6 @@ $ErrorActionPreference = "Stop"
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $lockDir = Join-Path $repoRoot "logs"
 $lockPath = Join-Path $lockDir ("docker-refresh-{0}.lock" -f $ComposeMode)
-$ensureTelegramAgentScript = Join-Path $repoRoot "scripts\ensure-roughcut-telegram-agent.ps1"
-$stopTelegramAgentScript = Join-Path $repoRoot "scripts\stop-roughcut-telegram-agent.ps1"
 
 function Invoke-Step {
     param([string]$Message, [scriptblock]$ActionBlock)
@@ -115,12 +113,6 @@ try {
             docker @composeArgs @upArgs
             if ($LASTEXITCODE -ne 0) {
                 throw "docker compose refresh failed for $ComposeMode"
-            }
-        }
-        if ($ComposeMode -eq "full" -and (Test-Path $stopTelegramAgentScript) -and (Test-Path $ensureTelegramAgentScript)) {
-            Invoke-Step "Restart host Telegram agent" {
-                & $stopTelegramAgentScript
-                & $ensureTelegramAgentScript -Restart
             }
         }
     } finally {

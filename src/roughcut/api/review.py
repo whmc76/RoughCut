@@ -95,7 +95,7 @@ async def create_watch_root(
 ):
     root = WatchRoot(
         path=body.path,
-        channel_profile=body.channel_profile,
+        workflow_template=body.workflow_template,
         enabled=body.enabled,
         scan_mode=body.scan_mode,
     )
@@ -115,7 +115,7 @@ async def update_watch_root(
     if not root:
         raise HTTPException(status_code=404, detail="Watch root not found")
     root.path = body.path
-    root.channel_profile = body.channel_profile
+    root.workflow_template = body.workflow_template
     root.enabled = body.enabled
     root.scan_mode = body.scan_mode
     await session.commit()
@@ -225,7 +225,7 @@ async def enqueue_inventory_items(
 
     results = await create_jobs_for_inventory_paths(
         [str(item["path"]) for item in selected_items],
-        channel_profile=root.channel_profile,
+        workflow_template=root.workflow_template,
     )
     job_ids_by_path = {result["path"]: result["job_id"] for result in results}
     created_job_ids = [job_id for job_id in job_ids_by_path.values() if job_id]
@@ -303,7 +303,7 @@ async def merge_inventory_items(
         raise HTTPException(status_code=404, detail="Selected inventory items not found")
 
     file_paths = [str(item["path"]) for item in selected_items]
-    job_id = await create_merged_job_for_inventory_paths(file_paths, channel_profile=root.channel_profile)
+    job_id = await create_merged_job_for_inventory_paths(file_paths, workflow_template=root.workflow_template)
     merged_job_ids = [job_id] if job_id else []
 
     selected_path_set = {str(item["path"]) for item in selected_items}

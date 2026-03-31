@@ -1,0 +1,68 @@
+x-dev-app-env: &dev-app-env
+  WATCHFILES_FORCE_POLLING: "true"
+  PYTHONPATH: /app/src
+
+x-dev-source-sync-volumes: &dev-source-sync-volumes
+  - ./src:/app/src
+  - ./frontend/dist:/app/frontend/dist
+  - ./alembic.ini:/app/alembic.ini:ro
+  - ./pyproject.toml:/app/pyproject.toml:ro
+
+services:
+  migrate:
+    environment:
+      <<: *dev-app-env
+    volumes: *dev-source-sync-volumes
+
+  api:
+    environment:
+      <<: *dev-app-env
+    command: ["roughcut", "api", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+    volumes: *dev-source-sync-volumes
+    depends_on:
+      frontend-watch:
+        condition: service_started
+
+  orchestrator:
+    environment:
+      <<: *dev-app-env
+    command: ["python", "-m", "watchfiles", "--filter", "python", "roughcut orchestrator --poll-interval 2", "/app/src"]
+    volumes: *dev-source-sync-volumes
+
+  worker-media:
+    environment:
+      <<: *dev-app-env
+    command: ["python", "-m", "watchfiles", "--filter", "python", "roughcut worker --queue media_queue --pool prefork --concurrency 2", "/app/src"]
+    volumes: *dev-source-sync-volumes
+
+  worker-llm:
+    environment:
+      <<: *dev-app-env
+    command: ["python", "-m", "watchfiles", "--filter", "python", "roughcut worker --queue llm_queue --pool prefork --concurrency 2", "/app/src"]
+    volumes: *dev-source-sync-volumes
+
+  frontend-watch:
+    image: node:22-bookworm-slim
+    working_dir: /workspace
+    environment:
+      CHOKIDAR_USEPOLLING: "true"
+      CHOKIDAR_INTERVAL: "700"
+    command:
+      - bash
+      - -lc
+      - |
+        corepack enable
+        pnpm config set store-dir /pnpm/store
+        pnpm install --frozen-lockfile --filter roughcut-frontend...
+        pnpm --dir frontend build --watch
+    restart: unless-stopped
+    volumes:
+      - .:/workspace
+      - roughcut_pnpm_store:/pnpm/store
+      - roughcut_node_modules:/workspace/node_modules
+      - roughcut_frontend_node_modules:/workspace/frontend/node_modules
+
+volumes:
+  roughcut_pnpm_store:
+  roughcut_node_modules:
+  roughcut_frontend_node_modules:

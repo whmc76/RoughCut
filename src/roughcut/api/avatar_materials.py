@@ -20,6 +20,7 @@ from roughcut.avatar import (
     normalize_creator_profile,
     normalize_avatar_personal_info,
     personal_info_from_creator_profile,
+    resolve_avatar_material_path,
     sanitize_filename,
     save_avatar_material_profile,
 )
@@ -220,14 +221,14 @@ async def replace_avatar_material_file(
     if len(payload) > settings.max_upload_size_bytes:
         raise HTTPException(status_code=400, detail=f"{file.filename or 'file'} exceeds max upload size")
 
-    profile_dir = Path(str(profile.get("profile_dir") or "")).resolve()
+    profile_dir = resolve_avatar_material_path(profile.get("profile_dir"))
     if not profile_dir.exists():
         profile_dir.mkdir(parents=True, exist_ok=True)
     training_api_available = await is_heygem_training_available()
     preview_service_available = await is_heygem_preview_available()
     target = files[file_idx]
     target_role = str(target.get("role") or "generic")
-    old_path = Path(str(target.get("path") or ""))
+    old_path = resolve_avatar_material_path(target.get("path"))
     if old_path.exists():
         old_path.unlink(missing_ok=True)
 
@@ -380,7 +381,7 @@ def get_avatar_material_file(profile_id: str, file_id: str):
     file_entry = next((item for item in profile.get("files") or [] if str(item.get("id")) == str(file_id)), None)
     if not file_entry:
         raise HTTPException(status_code=404, detail="Avatar material file not found")
-    file_path = Path(str(file_entry.get("path") or ""))
+    file_path = resolve_avatar_material_path(file_entry.get("path"))
     if not file_path.exists():
         raise HTTPException(status_code=404, detail="Avatar material file missing on disk")
     return FileResponse(
@@ -402,7 +403,7 @@ def get_avatar_preview_file(profile_id: str, preview_id: str):
     if not preview_run:
         raise HTTPException(status_code=404, detail="Avatar preview not found")
 
-    file_path = Path(str(preview_run.get("output_path") or ""))
+    file_path = resolve_avatar_material_path(preview_run.get("output_path"))
     if not file_path.exists():
         raise HTTPException(status_code=404, detail="Avatar preview file missing on disk")
 

@@ -38,9 +38,12 @@ async def run_manual_clip_test(
     source: Path,
     *,
     language: str = "zh-CN",
+    workflow_template: str | None = None,
     channel_profile: str | None = None,
     sample_seconds: int = 90,
 ) -> dict[str, Any]:
+    if workflow_template is None and channel_profile is not None:
+        workflow_template = channel_profile
     if not source.exists():
         raise FileNotFoundError(source)
 
@@ -83,7 +86,7 @@ async def run_manual_clip_test(
             source_path=working_source,
             source_name=source.name,
             subtitle_items=subtitle_dicts,
-            channel_profile=channel_profile,
+            workflow_template=workflow_template,
         )
         polished_count = await polish_subtitle_items(
             subtitle_items,
@@ -100,7 +103,7 @@ async def run_manual_clip_test(
             subtitle_items=polished_subtitle_dicts,
         )
         editorial_timeline = decision.to_dict()
-        workflow_preset = content_profile.get("preset_name") or channel_profile or "unboxing_default"
+        workflow_preset = content_profile.get("workflow_template") or workflow_template or "unboxing_standard"
         render_plan = build_render_plan(uuid.uuid4(), workflow_preset=workflow_preset)
 
         output_mp4 = run_dir / f"{run_name}.mp4"
@@ -130,7 +133,7 @@ async def run_manual_clip_test(
             "source": str(source),
             "sample_source": str(working_source),
             "language": language,
-            "channel_profile": channel_profile,
+            "workflow_template": workflow_template,
             "transcript_segments": len(transcript.segments),
             "subtitle_items": len(subtitle_items),
             "polished_count": polished_count,

@@ -171,27 +171,27 @@ INSERT_SELECTION_MODES = {"manual", "random"}
 AVATAR_OVERLAY_POSITION_OPTIONS = {"top_left", "top_right", "bottom_left", "bottom_right"}
 
 PRESET_HINT_KEYWORDS: dict[str, set[str]] = {
-    "unboxing_default": {"UNBOX", "BOX", "PACKAGE", "PRODUCT", "DETAIL", "MACRO", "SHOWCASE", "开箱", "包装", "细节"},
+    "unboxing_standard": {"UNBOX", "BOX", "PACKAGE", "PRODUCT", "DETAIL", "MACRO", "SHOWCASE", "开箱", "包装", "细节"},
     "unboxing_limited": {"LIMITED", "SPECIAL", "COLLECT", "EDITION", "限定", "联名", "收藏", "纪念"},
     "unboxing_upgrade": {"UPGRADE", "V2", "NEW", "DETAIL", "COMPARE", "升级", "新版", "改版", "对比"},
     "edc_tactical": {"EDC", "TACTICAL", "KNIFE", "TOOL", "GEAR", "MACRO", "战术", "工具", "钳", "刀"},
-    "screen_tutorial": {"SCREEN", "UI", "FLOW", "STEP", "GUIDE", "TUTORIAL", "教程", "录屏", "步骤", "操作"},
+    "tutorial_standard": {"SCREEN", "UI", "FLOW", "STEP", "GUIDE", "TUTORIAL", "教程", "录屏", "步骤", "操作"},
     "vlog_daily": {"VLOG", "DAILY", "CITY", "TRAVEL", "LIFESTYLE", "日常", "出行", "生活"},
-    "talking_head_commentary": {"COMMENTARY", "TALK", "ANALYSIS", "观点", "口播", "分析"},
+    "commentary_focus": {"COMMENTARY", "TALK", "ANALYSIS", "观点", "口播", "分析"},
     "gameplay_highlight": {"GAME", "GAMEPLAY", "HIGHLIGHT", "ACE", "CLUTCH", "REPLAY", "游戏", "高光", "对局"},
     "food_explore": {"FOOD", "DISH", "STORE", "MENU", "CAFE", "RESTAURANT", "探店", "试吃", "美食", "菜"},
 }
 
 MUSIC_MOOD_KEYWORDS: dict[str, set[str]] = {
-    "screen_tutorial": {"CALM", "CLEAN", "LIGHT", "AMBIENT", "FOCUS", "LOFI", "PIANO", "教程", "轻松"},
+    "tutorial_standard": {"CALM", "CLEAN", "LIGHT", "AMBIENT", "FOCUS", "LOFI", "PIANO", "教程", "轻松"},
     "vlog_daily": {"CHILL", "LOFI", "SUNNY", "SOFT", "WARM", "TRAVEL", "VLOG", "日常", "轻快"},
-    "talking_head_commentary": {"CLEAN", "MINIMAL", "DOCUMENTARY", "AMBIENT", "NEWS", "分析", "简洁"},
+    "commentary_focus": {"CLEAN", "MINIMAL", "DOCUMENTARY", "AMBIENT", "NEWS", "分析", "简洁"},
     "gameplay_highlight": {"HYPE", "EPIC", "BATTLE", "ENERGY", "BASS", "TRAP", "高能", "热血"},
     "food_explore": {"COZY", "JAZZ", "FUNK", "WARM", "CAFE", "LIFESTYLE", "美食", "轻松"},
     "edc_tactical": {"TACTICAL", "DARK", "INDUSTRIAL", "METAL", "BASS", "战术", "硬核"},
     "unboxing_upgrade": {"TECH", "UPBEAT", "CLEAN", "FUTURE", "ENERGY", "科技", "升级"},
     "unboxing_limited": {"LUXURY", "PREMIUM", "SHINE", "COLLECT", "高级", "限定"},
-    "unboxing_default": {"TECH", "UPBEAT", "CLEAN", "SHOWCASE", "科技", "展示"},
+    "unboxing_standard": {"TECH", "UPBEAT", "CLEAN", "SHOWCASE", "科技", "展示"},
 }
 
 GENERIC_MUSIC_TOKENS = {"BGM", "MUSIC", "LOOP", "TRACK", "BEAT", "INSTRUMENTAL", "AMBIENT"}
@@ -876,7 +876,7 @@ def _score_packaging_asset(
     content_profile: dict[str, Any] | None,
 ) -> dict[str, Any]:
     profile = content_profile or {}
-    preset_name = str(profile.get("preset_name") or "").strip()
+    preset_name = str(profile.get("workflow_template") or profile.get("preset_name") or "").strip()
     asset_tokens = _tokenize_packaging_text(
         " ".join(
             [

@@ -8,7 +8,7 @@ import { useI18n } from "../../i18n";
 type JobUploadPanelProps = {
   upload: UploadForm;
   languageOptions: SelectOption[];
-  channelProfileOptions: SelectOption[];
+  workflowTemplateOptions: SelectOption[];
   workflowModeOptions: SelectOption[];
   enhancementOptions: SelectOption[];
   onChange: (next: UploadForm) => void;
@@ -19,7 +19,7 @@ type JobUploadPanelProps = {
 export function JobUploadPanel({
   upload,
   languageOptions,
-  channelProfileOptions,
+  workflowTemplateOptions,
   workflowModeOptions,
   enhancementOptions,
   onChange,
@@ -49,9 +49,9 @@ export function JobUploadPanel({
         />
         <SelectField
           label={t("jobs.upload.channelProfile")}
-          value={upload.channelProfile}
-          onChange={(event) => onChange({ ...upload, channelProfile: event.target.value })}
-          options={channelProfileOptions}
+          value={upload.workflowTemplate}
+          onChange={(event) => onChange({ ...upload, workflowTemplate: event.target.value })}
+          options={workflowTemplateOptions}
         />
         <SelectField
           label={t("jobs.upload.workflowMode")}

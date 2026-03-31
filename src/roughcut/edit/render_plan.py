@@ -14,7 +14,7 @@ from roughcut.db.models import Timeline
 def build_render_plan(
     editorial_timeline_id: uuid.UUID,
     *,
-    workflow_preset: str = "unboxing_default",
+    workflow_preset: str = "unboxing_standard",
     subtitle_version: int = 1,
     subtitle_style: str = "bold_yellow_outline",
     subtitle_motion_style: str = "motion_static",

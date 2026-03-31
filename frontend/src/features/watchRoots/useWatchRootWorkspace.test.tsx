@@ -25,7 +25,7 @@ const SAMPLE_ROOTS: WatchRoot[] = [
   {
     id: "root_1",
     path: "D:/videos/source",
-    channel_profile: "edc_tactical",
+    workflow_template: "edc_tactical",
     enabled: true,
     scan_mode: "fast",
     created_at: "2026-03-12T10:00:00Z",
@@ -33,7 +33,7 @@ const SAMPLE_ROOTS: WatchRoot[] = [
   {
     id: "root_2",
     path: "D:/videos/backup",
-    channel_profile: null,
+    workflow_template: null,
     enabled: false,
     scan_mode: "precise",
     created_at: "2026-03-12T11:00:00Z",
@@ -67,7 +67,7 @@ describe("useWatchRootWorkspace", () => {
     mockApi.listWatchRoots.mockResolvedValue(SAMPLE_ROOTS);
     mockApi.getConfigOptions.mockResolvedValue({
       job_languages: [{ value: "zh-CN", label: "简体中文" }],
-      channel_profiles: [{ value: "", label: "自动匹配" }, { value: "edc_tactical", label: "EDC 战术版 (edc_tactical)" }],
+      workflow_templates: [{ value: "", label: "自动匹配" }, { value: "edc_tactical", label: "EDC 战术版模板 (edc_tactical)" }],
       workflow_modes: [{ value: "standard_edit", label: "标准成片" }],
       enhancement_modes: [],
       creative_mode_catalog: { workflow_modes: [], enhancement_modes: [] },
@@ -99,7 +99,7 @@ describe("useWatchRootWorkspace", () => {
     await waitFor(() => expect(result.current.selectedRootId).toBe("root_1"));
     expect(result.current.form).toEqual({
       path: "D:/videos/source",
-      channel_profile: "edc_tactical",
+      workflow_template: "edc_tactical",
       enabled: true,
       scan_mode: "fast",
     });

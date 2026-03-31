@@ -40,7 +40,7 @@ const SAMPLE_JOBS: Job[] = [
     content_summary: "升级版开箱和细节拆解",
     status: "done",
     language: "zh-CN",
-    channel_profile: "edc_tactical",
+    workflow_template: "edc_tactical",
     workflow_mode: "standard_edit",
     enhancement_modes: ["avatar_commentary"],
     file_hash: "hash1",
@@ -56,7 +56,7 @@ const SAMPLE_JOBS: Job[] = [
     content_summary: "讲解目录扫描和设置保存",
     status: "running",
     language: "zh-CN",
-    channel_profile: "ops",
+    workflow_template: "tutorial_standard",
     workflow_mode: "standard_edit",
     enhancement_modes: ["ai_director"],
     file_hash: "hash2",
@@ -260,7 +260,7 @@ describe("useJobWorkspace", () => {
     });
     mockApi.getConfigOptions.mockResolvedValue({
       job_languages: [{ value: "zh-CN", label: "简体中文" }],
-      channel_profiles: [{ value: "", label: "自动匹配" }],
+      workflow_templates: [{ value: "", label: "自动匹配" }],
       workflow_modes: [{ value: "standard_edit", label: "标准成片" }],
       enhancement_modes: [{ value: "avatar_commentary", label: "数字人解说" }, { value: "ai_director", label: "AI 导演" }],
       creative_mode_catalog: { workflow_modes: [], enhancement_modes: [] },
@@ -343,8 +343,6 @@ describe("useJobWorkspace", () => {
     const { result } = renderHookWithQueryClient(() => useJobWorkspace());
 
     await waitFor(() => expect(result.current.jobs.data).toEqual(SAMPLE_JOBS));
-    await waitFor(() => expect(result.current.usageSummary.data?.total_tokens).toBe(4100));
-    await waitFor(() => expect(result.current.usageTrend.data?.points[0]?.total_tokens).toBe(4100));
     expect(result.current.filteredJobs.map((job) => job.id)).toEqual(["job_2", "job_1"]);
 
     act(() => {
@@ -416,5 +414,15 @@ describe("useJobWorkspace", () => {
     });
 
     await waitFor(() => expect(result.current.upload.enhancementModes).toEqual(["ai_director"]));
+  });
+
+  it("does not fetch usage analysis in the jobs workspace", async () => {
+    renderHookWithQueryClient(() => useJobWorkspace());
+
+    await waitFor(() => expect(mockApi.listJobs).toHaveBeenCalled());
+    await waitFor(() => expect(mockApi.getConfigOptions).toHaveBeenCalled());
+
+    expect(mockApi.getJobsUsageSummary).not.toHaveBeenCalled();
+    expect(mockApi.getJobsUsageTrend).not.toHaveBeenCalled();
   });
 });

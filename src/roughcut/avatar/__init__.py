@@ -12,6 +12,7 @@ from .materials import (
     normalize_creator_profile,
     normalize_avatar_personal_info,
     personal_info_from_creator_profile,
+    resolve_avatar_material_path,
     sanitize_filename,
     save_avatar_material_profile,
 )
@@ -30,6 +31,7 @@ __all__ = [
     "normalize_creator_profile",
     "normalize_avatar_personal_info",
     "personal_info_from_creator_profile",
+    "resolve_avatar_material_path",
     "sanitize_filename",
     "save_avatar_material_profile",
 ]

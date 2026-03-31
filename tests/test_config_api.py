@@ -3,8 +3,29 @@ from __future__ import annotations
 import pytest
 from fastapi import HTTPException
 
-from roughcut.api.config import ConfigPatch, get_config, get_config_options, get_runtime_environment, patch_config
+from roughcut.api.config import (
+    ConfigPatch,
+    get_config,
+    get_config_options,
+    get_model_catalog,
+    get_runtime_environment,
+    get_service_status,
+    patch_config,
+)
 from roughcut.config import get_settings
+
+
+def test_get_config_options_exposes_workflow_templates_instead_of_channel_profiles():
+    options = get_config_options()
+
+    assert options.workflow_templates[0]["value"] == ""
+    assert options.workflow_templates[0]["label"] == "自动选择模板"
+    assert any(item["value"] == "unboxing_standard" for item in options.workflow_templates)
+    assert any(item["value"] == "tutorial_standard" for item in options.workflow_templates)
+    assert any(item["label"] == "潮玩EDC开箱" for item in options.workflow_templates)
+    assert all(item["value"] != "unboxing_limited" for item in options.workflow_templates)
+    assert all(item["value"] != "unboxing_upgrade" for item in options.workflow_templates)
+    assert all(item["value"] != "edc_tactical" for item in options.workflow_templates)
 
 
 def test_get_config_exposes_extended_provider_fields(tmp_path, monkeypatch):
@@ -209,7 +230,7 @@ def test_get_config_options_exposes_transcription_model_lists():
     options = get_config_options()
 
     assert options.job_languages[0]["value"] == "zh-CN"
-    assert options.channel_profiles[0]["value"] == ""
+    assert options.workflow_templates[0]["value"] == ""
     assert options.workflow_modes[0]["value"] == "standard_edit"
     assert any(item["value"] == "multilingual_translation" for item in options.enhancement_modes)
     assert any(item["value"] == "auto_review" for item in options.enhancement_modes)
@@ -228,10 +249,105 @@ def test_get_config_options_exposes_transcription_model_lists():
     assert options.transcription_models["openai"] == ["gpt-4o-transcribe", "gpt-4o-mini-transcribe"]
     assert options.transcription_models["qwen_asr"] == ["qwen3-asr-1.7b"]
     assert "large-v3" in options.transcription_models["local_whisper"]
-    assert any(item["value"] == "edc_tactical" for item in options.channel_profiles)
+    assert any(item["value"] == "unboxing_standard" for item in options.workflow_templates)
+    assert all(item["value"] != "edc_tactical" for item in options.workflow_templates)
     assert any(item["value"] == "ollama" for item in options.multimodal_fallback_providers)
     assert any(item["value"] == "auto" for item in options.search_providers)
     assert all(item["value"] != "auto" for item in options.search_fallback_providers)
+
+
+def test_get_service_status_reports_local_runtime_endpoints(monkeypatch):
+    import roughcut.config as config_mod
+
+    config_mod._settings = None
+    settings = get_settings()
+    object.__setattr__(settings, "ollama_base_url", "http://127.0.0.1:11434")
+    object.__setattr__(settings, "qwen_asr_api_base_url", "http://127.0.0.1:18096")
+    object.__setattr__(settings, "openai_api_key", "openai-test-key")
+
+    class DummyResponse:
+        def __init__(self, status_code: int, payload: dict | None = None):
+            self.status_code = status_code
+            self._payload = payload or {}
+
+        def json(self):
+            return self._payload
+
+    def fake_get(url: str, *args, **kwargs):
+        if url.endswith("/api/tags"):
+            return DummyResponse(200, {"models": [{"name": "qwen3:8b"}]})
+        if url.endswith("/health"):
+            return DummyResponse(200, {"status": "ok"})
+        raise AssertionError(f"unexpected url: {url}")
+
+    monkeypatch.setattr("roughcut.api.provider_catalog.httpx.get", fake_get)
+
+    status = get_service_status()
+
+    assert status.services["ollama"].status == "ok"
+    assert status.services["ollama"].base_url == "http://127.0.0.1:11434"
+    assert status.services["qwen_asr"].status == "ok"
+    assert status.services["openai"].status == "configured"
+
+
+def test_get_model_catalog_returns_live_ollama_models(monkeypatch):
+    import roughcut.config as config_mod
+
+    config_mod._settings = None
+    settings = get_settings()
+    object.__setattr__(settings, "ollama_base_url", "http://127.0.0.1:11434")
+
+    class DummyResponse:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {"models": [{"name": "qwen3:8b"}, {"name": "qwen2.5vl:7b"}]}
+
+    monkeypatch.setattr("roughcut.api.provider_catalog.httpx.get", lambda *args, **kwargs: DummyResponse())
+
+    catalog = get_model_catalog(provider="ollama", kind="reasoning", refresh=1)
+
+    assert catalog.provider == "ollama"
+    assert catalog.kind == "reasoning"
+    assert catalog.source == "live"
+    assert catalog.models == ["qwen2.5vl:7b", "qwen3:8b"]
+
+
+def test_get_model_catalog_keeps_cached_models_when_refresh_fails(monkeypatch):
+    import roughcut.api.provider_catalog as catalog_mod
+    import roughcut.config as config_mod
+
+    config_mod._settings = None
+    settings = get_settings()
+    object.__setattr__(settings, "openai_base_url", "https://api.openai.com/v1")
+    object.__setattr__(settings, "openai_api_key", "openai-test-key")
+    catalog_mod._MODEL_CATALOG_CACHE.clear()
+
+    class LiveResponse:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {"data": [{"id": "gpt-4.1"}, {"id": "gpt-4.1-mini"}]}
+
+    def first_get(*args, **kwargs):
+        return LiveResponse()
+
+    monkeypatch.setattr("roughcut.api.provider_catalog.httpx.get", first_get)
+    fresh = get_model_catalog(provider="openai", kind="reasoning", refresh=1)
+
+    def failing_get(*args, **kwargs):
+        raise RuntimeError("upstream unavailable")
+
+    monkeypatch.setattr("roughcut.api.provider_catalog.httpx.get", failing_get)
+    cached = get_model_catalog(provider="openai", kind="reasoning", refresh=1)
+
+    assert fresh.models == ["gpt-4.1", "gpt-4.1-mini"]
+    assert cached.models == ["gpt-4.1", "gpt-4.1-mini"]
+    assert cached.source == "cache"
+    assert cached.status == "error"
+    assert "upstream unavailable" in (cached.error or "")
 
 
 def test_patch_config_rejects_unknown_transcription_provider(tmp_path, monkeypatch):

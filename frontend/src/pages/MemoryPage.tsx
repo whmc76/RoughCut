@@ -19,13 +19,13 @@ export function MemoryPage() {
         description={t("memory.page.description")}
         summary={[
           { label: "看什么", value: "纠错积累与字段偏好", detail: "这页用来校准系统长期记忆，而不是处理单个任务" },
-          { label: "怎么筛", value: "按频道查看", detail: "频道切换后更容易看出某类内容的长期偏差" },
+          { label: "怎么筛", value: "按领域查看", detail: "领域切换后更容易看出某类内容的长期偏差" },
           { label: "怎么用", value: "先看统计，再调偏好", detail: "先确认问题集中在哪，再决定要不要改规则" },
         ]}
         actions={
-          <select className="input" value={workspace.channelProfile} onChange={(event) => workspace.setChannelProfile(event.target.value)}>
+          <select className="input" value={workspace.subjectDomain} onChange={(event) => workspace.setSubjectDomain(event.target.value)}>
             <option value="">{t("memory.page.allChannels")}</option>
-            {workspace.stats.data?.channel_profiles.map((item) => (
+            {workspace.stats.data?.subject_domains.map((item) => (
               <option key={item} value={item}>
                 {item}
               </option>

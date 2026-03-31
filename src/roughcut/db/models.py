@@ -41,7 +41,7 @@ class Job(Base):
     file_hash: Mapped[str | None] = mapped_column(Text)
     status: Mapped[str] = mapped_column(Text, nullable=False, default="pending")
     error_message: Mapped[str | None] = mapped_column(Text)
-    channel_profile: Mapped[str | None] = mapped_column(Text)
+    workflow_template: Mapped[str | None] = mapped_column(Text)
     language: Mapped[str] = mapped_column(Text, default="zh-CN")
     workflow_mode: Mapped[str] = mapped_column(Text, nullable=False, default="standard_edit", server_default="standard_edit")
     enhancement_modes: Mapped[list[str]] = mapped_column(JSON_TYPE, nullable=False, default=list, server_default="[]")
@@ -60,6 +60,14 @@ class Job(Base):
     render_outputs: Mapped[list[RenderOutput]] = relationship(
         "RenderOutput", back_populates="job", cascade="all, delete-orphan"
     )
+
+    @property
+    def channel_profile(self) -> str | None:
+        return self.workflow_template
+
+    @channel_profile.setter
+    def channel_profile(self, value: str | None) -> None:
+        self.workflow_template = value
 
 
 class JobStep(Base):
@@ -238,11 +246,19 @@ class ContentProfileCorrection(Base):
     id: Mapped[uuid.UUID] = mapped_column(UUID_TYPE, primary_key=True, default=_uuid)
     job_id: Mapped[uuid.UUID] = mapped_column(UUID_TYPE, ForeignKey("jobs.id", ondelete="CASCADE"))
     source_name: Mapped[str] = mapped_column(Text, nullable=False)
-    channel_profile: Mapped[str | None] = mapped_column(Text)
+    subject_domain: Mapped[str | None] = mapped_column(Text)
     field_name: Mapped[str] = mapped_column(Text, nullable=False)
     original_value: Mapped[str | None] = mapped_column(Text)
     corrected_value: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(TIMESTAMPTZ, server_default=func.now())
+
+    @property
+    def channel_profile(self) -> str | None:
+        return self.subject_domain
+
+    @channel_profile.setter
+    def channel_profile(self, value: str | None) -> None:
+        self.subject_domain = value
 
 
 class ContentProfileKeywordStat(Base):
@@ -264,12 +280,20 @@ class WatchRoot(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(UUID_TYPE, primary_key=True, default=_uuid)
     path: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
-    channel_profile: Mapped[str | None] = mapped_column(Text)
+    workflow_template: Mapped[str | None] = mapped_column(Text)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     scan_mode: Mapped[str] = mapped_column(Text, nullable=False, default="fast", server_default="fast")
     inventory_cache_json: Mapped[dict | None] = mapped_column(JSON_TYPE)
     inventory_cache_updated_at: Mapped[datetime | None] = mapped_column(TIMESTAMPTZ)
     created_at: Mapped[datetime] = mapped_column(TIMESTAMPTZ, server_default=func.now())
+
+    @property
+    def channel_profile(self) -> str | None:
+        return self.workflow_template
+
+    @channel_profile.setter
+    def channel_profile(self, value: str | None) -> None:
+        self.workflow_template = value
 
 
 class GlossaryTerm(Base):

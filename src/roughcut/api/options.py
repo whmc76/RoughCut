@@ -7,7 +7,7 @@ from roughcut.creative.modes import (
     build_active_workflow_mode_options,
 )
 from roughcut.config import AVATAR_PROVIDER_OPTIONS, VOICE_PROVIDER_OPTIONS
-from roughcut.edit.presets import PRESETS
+from roughcut.edit.presets import PRESETS, list_workflow_template_options, normalize_workflow_template_name
 from roughcut.speech.dialects import TRANSCRIPTION_DIALECT_OPTIONS
 
 DEFAULT_JOB_LANGUAGE: Final[str] = "zh-CN"
@@ -45,17 +45,11 @@ SEARCH_FALLBACK_PROVIDER_OPTIONS: Final[list[dict[str, str]]] = [
 ]
 
 _ALLOWED_JOB_LANGUAGES = {option["value"] for option in JOB_LANGUAGE_OPTIONS}
-_ALLOWED_CHANNEL_PROFILES = set(PRESETS)
+_ALLOWED_WORKFLOW_TEMPLATES = set(PRESETS)
 
 
-def build_channel_profile_options() -> list[dict[str, str]]:
-    return [
-        {"value": "", "label": "自动匹配"},
-        *[
-            {"value": preset.name, "label": f"{preset.label} ({preset.name})"}
-            for preset in PRESETS.values()
-        ],
-    ]
+def build_workflow_template_options() -> list[dict[str, str]]:
+    return list_workflow_template_options()
 
 
 def build_workflow_mode_options() -> list[dict[str, str]]:
@@ -85,10 +79,18 @@ def normalize_job_language(value: str | None) -> str:
     return normalized
 
 
-def normalize_channel_profile(value: str | None) -> str | None:
-    normalized = str(value or "").strip()
+def normalize_workflow_template(value: str | None) -> str | None:
+    normalized = normalize_workflow_template_name(value)
     if not normalized:
         return None
-    if normalized not in _ALLOWED_CHANNEL_PROFILES:
-        raise ValueError(f"Unsupported channel_profile: {normalized}")
+    if normalized not in _ALLOWED_WORKFLOW_TEMPLATES:
+        raise ValueError(f"Unsupported workflow_template: {normalized}")
     return normalized
+
+
+def build_channel_profile_options() -> list[dict[str, str]]:
+    return build_workflow_template_options()
+
+
+def normalize_channel_profile(value: str | None) -> str | None:
+    return normalize_workflow_template(value)

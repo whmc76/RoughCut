@@ -16,7 +16,7 @@ def test_build_render_plan_defaults():
     plan = build_render_plan(editorial_timeline_id=timeline_id)
 
     assert plan["editorial_timeline_id"] == str(timeline_id)
-    assert plan["workflow_preset"] == "unboxing_default"
+    assert plan["workflow_preset"] == "unboxing_standard"
     assert plan["loudness"]["target_lufs"] == -16.0
     assert plan["loudness"]["peak_limit"] == -2.0
     assert plan["voice_processing"]["noise_reduction"] is True

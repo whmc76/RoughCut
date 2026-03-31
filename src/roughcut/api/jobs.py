@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import os
 import subprocess
 import sys
@@ -15,7 +16,7 @@ from sqlalchemy import delete, distinct, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from roughcut.api.options import normalize_channel_profile, normalize_job_language
+from roughcut.api.options import normalize_job_language, normalize_workflow_template
 from roughcut.api.schemas import (
     ContentProfileApprovalStatsOut,
     ContentProfileMemoryStatsOut,
@@ -77,6 +78,10 @@ from roughcut.storage.runtime_cleanup import cleanup_job_runtime_files
 from roughcut.usage import build_job_token_report, build_jobs_usage_summary, build_jobs_usage_trend
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
+
+_CONTENT_PROFILE_PLACEHOLDER_JPEG = base64.b64decode(
+    "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAYEBQYFBAYGBQYHBwYIChAKCgkJChQODwwQFxQYGBcUFhYaHSUfGhsjHBYWICwgIyYnKSopGR8tMC0oMCUoKSj/2wBDAQcHBwoIChMKChMoGhYaKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCj/wAARCAAJABADASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwDwCiiitzI//9k="
+)
 
 STEP_LABELS = {
     "probe": "探测媒体信息",
@@ -219,7 +224,7 @@ async def get_jobs_usage_trend(
 async def create_job(
     file: UploadFile = File(...),
     language: str = Form("zh-CN"),
-    channel_profile: str | None = Form(None),
+    workflow_template: str | None = Form(None),
     workflow_mode: str | None = Form(None),
     enhancement_modes: list[str] | None = Form(None),
     session: AsyncSession = Depends(get_session),
@@ -227,7 +232,7 @@ async def create_job(
     settings = get_settings()
     try:
         language = normalize_job_language(language)
-        channel_profile = normalize_channel_profile(channel_profile)
+        workflow_template = normalize_workflow_template(workflow_template)
         workflow_mode = normalize_workflow_mode(workflow_mode or settings.default_job_workflow_mode)
         enhancement_modes = normalize_enhancement_modes(
             enhancement_modes if enhancement_modes is not None else settings.default_job_enhancement_modes,
@@ -267,7 +272,7 @@ async def create_job(
             source_name=file.filename or f"video{suffix}",
             status="pending",
             language=language,
-            channel_profile=channel_profile,
+            workflow_template=workflow_template,
             workflow_mode=workflow_mode,
             enhancement_modes=enhancement_modes,
         )
@@ -479,7 +484,7 @@ async def get_content_profile(job_id: uuid.UUID, session: AsyncSession = Depends
     review_step = review_step_result.scalar_one_or_none()
     active_profile = final if isinstance(final, dict) and final else draft if isinstance(draft, dict) and draft else {}
     automation_review = active_profile.get("automation_review") if isinstance(active_profile, dict) else {}
-    user_memory = await load_content_profile_user_memory(session, channel_profile=job.channel_profile)
+    user_memory = await load_content_profile_user_memory(session, subject_domain=(active_profile or {}).get("subject_domain"))
     memory = dict(user_memory or {})
     memory["cloud"] = build_content_profile_memory_cloud(user_memory)
 
@@ -518,16 +523,16 @@ async def get_content_profile(job_id: uuid.UUID, session: AsyncSession = Depends
 
 @router.get("/stats/content-profile-memory", response_model=ContentProfileMemoryStatsOut)
 async def get_content_profile_memory_stats(
-    channel_profile: str | None = None,
+    subject_domain: str | None = None,
     session: AsyncSession = Depends(get_session),
 ):
-    user_memory = await load_content_profile_user_memory(session, channel_profile=channel_profile)
-    channel_profile_result = await session.execute(
-        select(distinct(ContentProfileCorrection.channel_profile))
-        .where(ContentProfileCorrection.channel_profile.is_not(None))
-        .order_by(ContentProfileCorrection.channel_profile)
+    user_memory = await load_content_profile_user_memory(session, subject_domain=subject_domain)
+    subject_domain_result = await session.execute(
+        select(distinct(ContentProfileCorrection.subject_domain))
+        .where(ContentProfileCorrection.subject_domain.is_not(None))
+        .order_by(ContentProfileCorrection.subject_domain)
     )
-    channel_profiles = [item for item in channel_profile_result.scalars().all() if item]
+    subject_domains = [item for item in subject_domain_result.scalars().all() if item]
 
     correction_result = await session.execute(
         select(ContentProfileCorrection).order_by(ContentProfileCorrection.created_at.desc()).limit(240)
@@ -540,24 +545,24 @@ async def get_content_profile_memory_stats(
     total_corrections = sum(
         1
         for item in corrections
-        if not channel_profile or item.channel_profile in {None, channel_profile}
+        if not subject_domain or item.subject_domain in {None, subject_domain}
     )
     total_keywords = sum(
         int(item.usage_count or 0)
         for item in keyword_stats
         if item.scope_type == "global"
-        or (channel_profile and item.scope_type == "channel_profile" and item.scope_value == channel_profile)
+        or (subject_domain and item.scope_type == "subject_domain" and item.scope_value == subject_domain)
     )
 
     return ContentProfileMemoryStatsOut(
-        scope="channel_profile" if channel_profile else "global",
-        channel_profile=channel_profile,
-        channel_profiles=channel_profiles,
+        scope="subject_domain" if subject_domain else "global",
+        subject_domain=subject_domain,
+        subject_domains=subject_domains,
         total_corrections=total_corrections,
         total_keywords=total_keywords,
-        field_preferences=_build_field_preferences(corrections, channel_profile=channel_profile, limit=6),
-        keyword_preferences=_build_keyword_preferences(keyword_stats, channel_profile=channel_profile, limit=18),
-        recent_corrections=_build_recent_corrections(corrections, channel_profile=channel_profile, limit=12),
+        field_preferences=_build_field_preferences(corrections, subject_domain=subject_domain, limit=6),
+        keyword_preferences=_build_keyword_preferences(keyword_stats, subject_domain=subject_domain, limit=18),
+        recent_corrections=_build_recent_corrections(corrections, subject_domain=subject_domain, limit=12),
         cloud=build_content_profile_memory_cloud(user_memory),
     )
 
@@ -699,7 +704,7 @@ async def confirm_content_profile(
     final_profile = await apply_content_profile_feedback(
         draft_profile=draft_artifact.data_json or {},
         source_name=job.source_name,
-        channel_profile=job.channel_profile,
+        workflow_template=job.workflow_template,
         user_feedback=user_feedback,
         reviewed_subtitle_excerpt=reviewed_subtitle_excerpt,
         accepted_corrections=accepted_corrections,
@@ -767,7 +772,10 @@ async def confirm_content_profile(
             "default_job_enhancement_modes": list(job.enhancement_modes or []),
         }
     )
-    user_memory = await load_content_profile_user_memory(session, channel_profile=job.channel_profile)
+    user_memory = await load_content_profile_user_memory(
+        session,
+        subject_domain=str(final_profile.get("subject_domain") or ""),
+    )
     memory = dict(user_memory or {})
     memory["cloud"] = build_content_profile_memory_cloud(user_memory)
     await session.commit()
@@ -968,7 +976,7 @@ async def _persist_reviewed_glossary_term(
         content_profile = dict(profile_artifact.data_json)
 
     detected_domains = detect_glossary_domains(
-        channel_profile=job.channel_profile,
+        workflow_template=job.workflow_template,
         content_profile=content_profile,
     )
     scopes: list[tuple[str, str]] = []
@@ -976,8 +984,8 @@ async def _persist_reviewed_glossary_term(
         pair = ("domain", domain)
         if pair not in scopes:
             scopes.append(pair)
-    if job.channel_profile:
-        scopes.append(("channel_profile", job.channel_profile))
+    if job.workflow_template:
+        scopes.append(("workflow_template", job.workflow_template))
 
     for scope_type, scope_value in scopes:
         result = await session.execute(
@@ -996,7 +1004,7 @@ async def _persist_reviewed_glossary_term(
                     wrong_forms=[original],
                     correct_form=suggested,
                     category=correction.change_type,
-                    context_hint=f"reviewed_from_job:{job.channel_profile or 'uncategorized'}",
+                    context_hint=f"reviewed_from_job:{job.workflow_template or 'auto'}",
                 )
             )
             continue
@@ -1193,7 +1201,7 @@ def _build_activity_decisions(
         ).strip() or "已生成视频类型识别"
         detail = "；".join(
             part for part in [
-                f"策略：{data.get('preset_name')}" if data.get("preset_name") else "",
+                f"模板：{data.get('workflow_template')}" if data.get("workflow_template") else "",
                 f"摘要：{data.get('summary')}" if data.get("summary") else "",
             ] if part
         ) or None
@@ -1852,28 +1860,52 @@ async def _ensure_content_profile_thumbnail(job: Job, *, index: int) -> Path:
         return cached
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        source_path = await _resolve_job_source(job, tmpdir)
+        try:
+            source_path = await _resolve_job_source(job, tmpdir)
+        except FileNotFoundError:
+            _write_content_profile_placeholder_thumbnail(job, cached, index=index)
+            return cached
         frames = _extract_reference_frames(source_path, cache_dir, count=3)
     if not frames:
-        raise RuntimeError("Unable to extract content profile thumbnails")
+        _write_content_profile_placeholder_thumbnail(job, cached, index=index)
+        return cached
     if not cached.exists():
         raise FileNotFoundError("Requested thumbnail was not generated")
     return cached
 
 
 async def _resolve_job_source(job: Job, tmpdir: str) -> Path:
-    source_path = Path(job.source_path)
-    if source_path.exists():
-        return source_path
     storage = get_storage()
+    candidate_keys = [
+        str(job.source_path or "").strip(),
+        job_key(str(job.id), "output_plain.mp4"),
+        job_key(str(job.id), "output.mp4"),
+        job_key(str(job.id), "output_ai_effect.mp4"),
+    ]
     resolve_path = getattr(storage, "resolve_path", None)
-    if callable(resolve_path):
-        resolved = resolve_path(job.source_path)
-        if resolved.exists():
-            return resolved
-    local_path = Path(tmpdir) / job.source_name
-    await storage.async_download_file(job.source_path, local_path)
-    return local_path
+
+    for candidate_key in candidate_keys:
+        if not candidate_key:
+            continue
+        if callable(resolve_path):
+            resolved = resolve_path(candidate_key)
+            if resolved.exists() and resolved.is_file():
+                return resolved
+        local_name = Path(str(candidate_key).replace("s3://", "", 1)).name or job.source_name
+        local_path = Path(tmpdir) / local_name
+        try:
+            await storage.async_download_file(candidate_key, local_path)
+        except FileNotFoundError:
+            continue
+        if local_path.exists():
+            return local_path
+
+    raise FileNotFoundError(f"Unable to resolve source media for job {job.id}")
+
+
+def _write_content_profile_placeholder_thumbnail(job: Job, target_path: Path, *, index: int) -> None:
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    target_path.write_bytes(_CONTENT_PROFILE_PLACEHOLDER_JPEG)
 
 
 def _iso_or_none(value: datetime | None) -> str | None:

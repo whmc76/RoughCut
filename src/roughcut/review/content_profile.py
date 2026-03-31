@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from roughcut.config import get_settings
-from roughcut.edit.presets import WorkflowPreset, get_workflow_preset, select_preset
+from roughcut.edit.presets import WorkflowPreset, get_workflow_preset, select_workflow_template
 from roughcut.llm_cache import digest_payload
 from roughcut.providers.factory import get_reasoning_provider, get_search_provider
 from roughcut.providers.multimodal import complete_with_images
@@ -45,6 +45,44 @@ _GEAR_STYLE_SIGNALS = (
     "莱德曼",
 )
 
+_CONTENT_KIND_DEFAULT_SUBJECT_TYPE = {
+    "tutorial": "录屏教学",
+    "vlog": "Vlog日常",
+    "commentary": "口播观点",
+    "gameplay": "游戏实况",
+    "food": "探店试吃",
+}
+
+_CONTENT_KIND_DEFAULT_VIDEO_THEME = {
+    "tutorial": "软件流程演示与步骤讲解",
+    "vlog": "日常记录与生活分享",
+    "commentary": "观点表达与信息拆解",
+    "gameplay": "高能操作与对局复盘",
+    "food": "探店试吃与性价比判断",
+}
+
+
+def _workflow_template_name(profile: dict[str, Any] | None) -> str:
+    candidate = profile or {}
+    workflow_template = str(candidate.get("workflow_template") or "").strip()
+    if workflow_template:
+        return workflow_template
+    legacy_preset = str(candidate.get("preset_name") or "").strip()
+    if legacy_preset:
+        return get_workflow_preset(legacy_preset).name
+    return ""
+
+
+def _content_kind_name(profile: dict[str, Any] | None) -> str:
+    candidate = profile or {}
+    value = str(candidate.get("content_kind") or "").strip().lower()
+    if value:
+        return value
+    template_name = _workflow_template_name(candidate)
+    if template_name:
+        return get_workflow_preset(template_name).content_kind
+    return "unboxing"
+
 
 def _normalize_seeded_profile_for_cache(profile: dict[str, Any] | None) -> dict[str, Any]:
     seeded = profile or {}
@@ -63,8 +101,10 @@ def _normalize_seeded_profile_for_cache(profile: dict[str, Any] | None) -> dict[
         "subject_brand": str(seeded.get("subject_brand") or "").strip(),
         "subject_model": str(seeded.get("subject_model") or "").strip(),
         "subject_type": str(seeded.get("subject_type") or "").strip(),
+        "content_kind": str(seeded.get("content_kind") or "").strip(),
+        "subject_domain": str(seeded.get("subject_domain") or "").strip(),
         "video_theme": str(seeded.get("video_theme") or "").strip(),
-        "preset_name": str(seeded.get("preset_name") or "").strip(),
+        "workflow_template": _workflow_template_name(seeded),
         "hook_line": str(seeded.get("hook_line") or "").strip(),
         "visible_text": str(seeded.get("visible_text") or "").strip(),
         "summary": str(seeded.get("summary") or "").strip(),
@@ -90,7 +130,8 @@ def build_content_profile_cache_fingerprint(
     *,
     source_name: str,
     source_file_hash: str | None,
-    channel_profile: str | None,
+    workflow_template: str | None = None,
+    channel_profile: str | None = None,
     transcript_excerpt: str,
     glossary_terms: list[dict[str, Any]] | None = None,
     user_memory: dict[str, Any] | None = None,
@@ -98,6 +139,8 @@ def build_content_profile_cache_fingerprint(
     copy_style: str | None = None,
     seeded_profile: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    if workflow_template is None and channel_profile is not None:
+        workflow_template = channel_profile
     normalized_glossary = [
         {
             "correct_form": str(item.get("correct_form") or "").strip(),
@@ -118,7 +161,7 @@ def build_content_profile_cache_fingerprint(
         ),
         "source_name": str(source_name or "").strip(),
         "source_file_hash": str(source_file_hash or "").strip(),
-        "channel_profile": str(channel_profile or "").strip(),
+        "workflow_template": str(workflow_template or "").strip(),
         "transcript_excerpt_sha256": digest_payload(str(transcript_excerpt or "").strip()),
         "glossary_terms_sha256": digest_payload(normalized_glossary),
         "glossary_term_count": len(normalized_glossary),
@@ -303,8 +346,8 @@ def assess_content_profile_automation(
         for item in subtitle_items
         if _clean_line(item.get("text_final") or item.get("text_norm") or item.get("text_raw") or "")
     )
-    preset_name = str(profile.get("preset_name") or "").strip()
-    product_like_presets = {"unboxing_default", "unboxing_limited", "unboxing_upgrade", "edc_tactical"}
+    preset_name = _workflow_template_name(profile)
+    product_like_presets = {"unboxing_default", "unboxing_standard", "unboxing_limited", "unboxing_upgrade", "edc_tactical"}
 
     score = 0.0
     reasons: list[str] = []
@@ -492,8 +535,8 @@ def _assess_identity_review_requirement(
     glossary_terms: list[dict[str, Any]] | None,
     source_name: str,
 ) -> dict[str, Any]:
-    preset_name = str(profile.get("preset_name") or "").strip()
-    product_like_presets = {"unboxing_default", "unboxing_limited", "unboxing_upgrade", "edc_tactical"}
+    preset_name = _workflow_template_name(profile)
+    product_like_presets = {"unboxing_default", "unboxing_standard", "unboxing_limited", "unboxing_upgrade", "edc_tactical"}
     if preset_name not in product_like_presets:
         return {
             "required": False,
@@ -1218,12 +1261,15 @@ async def infer_content_profile(
     source_path: Path,
     source_name: str,
     subtitle_items: list[dict],
-    channel_profile: str | None,
+    workflow_template: str | None = None,
+    channel_profile: str | None = None,
     user_memory: dict[str, Any] | None = None,
     glossary_terms: list[dict[str, Any]] | None = None,
     include_research: bool = True,
     copy_style: str = "attention_grabbing",
 ) -> dict[str, Any]:
+    if workflow_template is None and channel_profile is not None:
+        workflow_template = channel_profile
     transcript_excerpt = build_transcript_excerpt(subtitle_items)
     heuristic_profile = _seed_profile_from_subtitles(subtitle_items, glossary_terms=glossary_terms)
     glossary_profile = _seed_profile_from_glossary_terms(transcript_excerpt, glossary_terms)
@@ -1231,7 +1277,7 @@ async def infer_content_profile(
     memory_prompt = summarize_content_profile_user_memory(user_memory)
     initial_profile = _fallback_profile(
         source_name=source_name,
-        channel_profile=channel_profile,
+        workflow_template=workflow_template,
         transcript_excerpt=transcript_excerpt,
     )
     initial_profile.update(heuristic_profile)
@@ -1253,14 +1299,13 @@ async def infer_content_profile(
                     "请结合图片和口播字幕，判断视频主体是什么。"
                     "如果画面里有产品、软件界面、店招、包装、盒体、logo、英文单词、型号字样，都优先识别。"
                     "如果是软件/AI/科技类视频，优先识别软件名、平台名、功能名、版本名和当前演示的核心主题，不要退化成“软件工具”。"
-                    "尽量给出开箱产品品牌、开箱产品型号/版本，或软件品牌、功能名/模块名、主体类型、视频主题，以及适合的剪辑预设。"
+                    "尽量给出开箱产品品牌、开箱产品型号/版本，或软件品牌、功能名/模块名、内容类型、主体领域、主体类型、视频主题。"
                     "另外补一个适合评论区互动的问题，要贴合内容，不要总是泛泛地问值不值。"
                     "subject_brand 指视频里被开箱/被讲解的产品或主体品牌，不是频道名、作者名。"
                     "如果不确定，不要乱编，留空即可。\n\n"
                     "输出 JSON："
-                    '{"subject_brand":"","subject_model":"","subject_type":"","video_theme":"",'
-                    '"preset_name":"","hook_line":"","visible_text":"","engagement_question":"","search_queries":[]}'
-                    "\n要求：preset_name 只能从 unboxing_default、unboxing_limited、unboxing_upgrade、edc_tactical、screen_tutorial、vlog_daily、talking_head_commentary、gameplay_highlight、food_explore 中选择。"
+                    '{"subject_brand":"","subject_model":"","subject_type":"","content_kind":"","subject_domain":"","video_theme":"",'
+                    '"hook_line":"","visible_text":"","engagement_question":"","search_queries":[]}'
                     "\n如果文件名像时间戳、相机命名或流水号，不要把它当成型号。"
                     "\nsearch_queries 提供 2-3 个适合联网搜索验证的查询词。"
                     f"\n视觉粗分类（优先级高于脏字幕和错误搜索）：{json.dumps(visual_hints, ensure_ascii=False)}"
@@ -1291,8 +1336,8 @@ async def infer_content_profile(
                 "如果文件名像时间戳、相机命名或流水号，不要把它当成型号。"
                 "如果不确定，请留空，不要乱编。"
                 "\n输出 JSON："
-                '{"subject_brand":"","subject_model":"","subject_type":"","video_theme":"",'
-                '"preset_name":"","hook_line":"","visible_text":"","engagement_question":"","search_queries":[]}'
+                '{"subject_brand":"","subject_model":"","subject_type":"","content_kind":"","subject_domain":"","video_theme":"",'
+                '"hook_line":"","visible_text":"","engagement_question":"","search_queries":[]}'
                 f"\n视觉粗分类（优先级高于脏字幕和错误搜索）：{json.dumps(initial_profile.get('visual_hints') or {}, ensure_ascii=False)}"
                 f"\n用户历史偏好（仅作辅助参考，不能压过当前字幕和画面）：\n{memory_prompt or '无'}"
                 f"\n已有判断：{json.dumps(initial_profile, ensure_ascii=False)}"
@@ -1320,7 +1365,7 @@ async def infer_content_profile(
     return await enrich_content_profile(
         profile=initial_profile,
         source_name=source_name,
-        channel_profile=channel_profile,
+        workflow_template=workflow_template,
         transcript_excerpt=transcript_excerpt,
         glossary_terms=glossary_terms,
         user_memory=user_memory,
@@ -1332,11 +1377,14 @@ async def apply_content_profile_feedback(
     *,
     draft_profile: dict[str, Any],
     source_name: str,
-    channel_profile: str | None,
+    workflow_template: str | None = None,
+    channel_profile: str | None = None,
     user_feedback: dict[str, Any],
     reviewed_subtitle_excerpt: str | None = None,
     accepted_corrections: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    if workflow_template is None and channel_profile is not None:
+        workflow_template = channel_profile
     merged = dict(draft_profile or {})
     merged["user_feedback"] = dict(user_feedback or {})
     if not any(value for value in (user_feedback or {}).values()):
@@ -1413,7 +1461,7 @@ async def apply_content_profile_feedback(
     result = await enrich_content_profile(
         profile=merged,
         source_name=source_name,
-        channel_profile=channel_profile,
+        channel_profile=workflow_template,
         transcript_excerpt=transcript_excerpt,
         include_research=False,
     )
@@ -1452,7 +1500,7 @@ async def apply_content_profile_feedback(
             "visible_text",
         )
     ):
-        preset = get_workflow_preset(str(result.get("preset_name") or channel_profile or "unboxing_default"))
+        preset = get_workflow_preset(str(result.get("workflow_template") or workflow_template or "unboxing_standard"))
         result["cover_title"] = build_cover_title(result, preset)
     return result
 
@@ -1462,7 +1510,7 @@ def _profile_needs_text_refinement(profile: dict[str, Any] | None) -> bool:
     subject_type = str(candidate.get("subject_type") or "").strip()
     video_theme = str(candidate.get("video_theme") or "").strip()
     engagement_question = str(candidate.get("engagement_question") or "").strip()
-    preset_name = str(candidate.get("preset_name") or "").strip()
+    preset_name = _workflow_template_name(candidate)
 
     if not subject_type or _is_generic_subject_type(subject_type):
         return True
@@ -1485,12 +1533,15 @@ async def enrich_content_profile(
     *,
     profile: dict[str, Any],
     source_name: str,
-    channel_profile: str | None,
+    workflow_template: str | None = None,
+    channel_profile: str | None = None,
     transcript_excerpt: str,
     glossary_terms: list[dict[str, Any]] | None = None,
     user_memory: dict[str, Any] | None = None,
     include_research: bool = True,
 ) -> dict[str, Any]:
+    if workflow_template is None and channel_profile is not None:
+        workflow_template = channel_profile
     enriched = dict(profile or {})
     confirmed_fields = _extract_confirmed_profile_fields(enriched)
     _apply_confirmed_profile_fields(enriched, confirmed_fields)
@@ -1511,13 +1562,24 @@ async def enrich_content_profile(
     _merge_specific_profile_hints(enriched, context_hints)
     _merge_specific_profile_hints(enriched, memory_hints)
 
-    preset = select_preset(
-        channel_profile=channel_profile or enriched.get("preset_name"),
+    if not str(enriched.get("content_kind") or "").strip():
+        template_hint = get_workflow_preset(workflow_template)
+        enriched["content_kind"] = template_hint.content_kind
+    if not str(enriched.get("subject_domain") or "").strip():
+        if str(enriched.get("content_kind") or "") == "tutorial":
+            enriched["subject_domain"] = "software"
+        elif str(enriched.get("content_kind") or "") == "unboxing" and "edc" in transcript_excerpt.lower():
+            enriched["subject_domain"] = "edc"
+
+    preset = select_workflow_template(
+        workflow_template=workflow_template or enriched.get("workflow_template"),
+        content_kind=_content_kind_name(enriched),
+        subject_domain=str(enriched.get("subject_domain") or ""),
         subject_model=str(enriched.get("subject_model", "")),
         subject_type=str(enriched.get("subject_type", "")),
         transcript_hint=transcript_excerpt,
     )
-    enriched["preset_name"] = preset.name
+    enriched["workflow_template"] = preset.name
     enriched["preset"] = preset.to_dict()
     enriched["transcript_excerpt"] = transcript_excerpt
     enriched = _sanitize_profile_identity(
@@ -1798,7 +1860,7 @@ async def polish_subtitle_items(
             provider = None
 
     polished_count = 0
-    preset = get_workflow_preset(content_profile.get("preset_name"))
+    preset = get_workflow_preset(_workflow_template_name(content_profile))
     evidence = content_profile.get("evidence") or []
     evidence_text = "\n".join(
         f"- {item.get('title', '')}: {item.get('snippet', '')}" for item in evidence[:6]
@@ -2443,6 +2505,11 @@ def _seed_profile_from_text(
         subject_type = str(glossary_seed.get("subject_type") or "").strip()
 
     topic_terms = _extract_topic_terms(transcript)
+    product_identity_detected = bool(
+        subject_type
+        or brand in {"LEATHERMAN", "REATE", "Loop露普", "狐蝠工业"}
+        or model
+    )
     tech_brand = _detect_primary_tech_brand(transcript, topic_terms=topic_terms)
     feature = topic_terms[0] if topic_terms else ""
     tech_subject_type = _infer_tech_subject_type(
@@ -2450,11 +2517,11 @@ def _seed_profile_from_text(
         tech_brand=tech_brand,
         topic_terms=topic_terms,
     )
-    if tech_brand and not brand:
+    if tech_brand and not brand and not product_identity_detected:
         brand = tech_brand
-    if tech_subject_type:
+    if tech_subject_type and not product_identity_detected:
         subject_type = tech_subject_type
-    if feature and not model:
+    if feature and not model and not product_identity_detected:
         model = feature
 
     seeded: dict[str, Any] = {}
@@ -2805,7 +2872,7 @@ def _merge_specific_profile_hints(profile: dict[str, Any], hints: dict[str, Any]
         profile["subject_type"] = hints["subject_type"]
     hinted_theme = str(hints.get("video_theme") or "").strip()
     current_theme = str(profile.get("video_theme") or "").strip()
-    preset_name = str(profile.get("preset_name") or "").strip()
+    preset_name = _workflow_template_name(profile)
     if hinted_theme and _is_specific_video_theme(hinted_theme, preset_name=preset_name):
         if not _is_specific_video_theme(current_theme, preset_name=preset_name):
             profile["video_theme"] = hinted_theme
@@ -3025,31 +3092,40 @@ def _probe_duration(source_path: Path) -> float:
 def _fallback_profile(
     *,
     source_name: str,
-    channel_profile: str | None,
+    workflow_template: str | None = None,
+    channel_profile: str | None = None,
     transcript_excerpt: str,
 ) -> dict[str, Any]:
-    preset = select_preset(
-        channel_profile=channel_profile,
+    if workflow_template is None and channel_profile is not None:
+        workflow_template = channel_profile
+    preset = select_workflow_template(
+        workflow_template=workflow_template,
         transcript_hint=transcript_excerpt,
     )
+    content_kind = preset.content_kind
+    subject_domain = "edc" if preset.name == "edc_tactical" else "software" if preset.name == "tutorial_standard" else ""
     subject_type = _default_subject_type_for_preset(preset)
     video_theme = _default_video_theme_for_preset(preset)
     engagement_question = _default_engagement_question(preset)
     return {
         "subject_brand": "",
         "subject_model": "",
+        "content_kind": content_kind,
+        "subject_domain": subject_domain,
         "subject_type": subject_type,
         "video_theme": video_theme,
-        "preset_name": preset.name,
+        "workflow_template": preset.name,
         "preset": preset.to_dict(),
         "hook_line": preset.cover_accent,
         "summary": _build_profile_summary(
             {
                 "subject_brand": "",
                 "subject_model": "",
+                "content_kind": content_kind,
+                "subject_domain": subject_domain,
                 "subject_type": subject_type,
                 "video_theme": video_theme,
-                "preset_name": preset.name,
+                "workflow_template": preset.name,
             }
         ),
         "engagement_question": engagement_question,
@@ -3082,11 +3158,11 @@ def _build_fallback_engagement_question(profile: dict[str, Any], preset: Workflo
     theme = str(profile.get("video_theme") or "").strip()
     subject = _build_engagement_subject(profile, preset)
 
-    if preset.name == "screen_tutorial":
+    if preset.name == "tutorial_standard":
         return "这一步你平时最容易卡在哪？"
     if preset.name == "vlog_daily":
         return "这种日常节奏你还想看我拍哪一段？"
-    if preset.name == "talking_head_commentary":
+    if preset.name == "commentary_focus":
         return "这个判断你是赞同还是反对？"
     if preset.name == "gameplay_highlight":
         return "这波如果换你来打会怎么处理？"
@@ -3596,11 +3672,11 @@ def _pick_cover_top(
         return compact_brand
     if subject_type:
         return subject_type[:14]
-    if preset.name == "screen_tutorial":
+    if preset.name == "tutorial_standard":
         return "教程"
     if preset.name == "vlog_daily":
         return "VLOG"
-    if preset.name == "talking_head_commentary":
+    if preset.name == "commentary_focus":
         return "观点"
     if preset.name == "gameplay_highlight":
         return "高能"
@@ -3749,7 +3825,7 @@ def _build_cover_hook(
             return explosive
 
     fallback = ""
-    if preset.name == "screen_tutorial":
+    if preset.name in {"tutorial_standard", "screen_tutorial"}:
         fallback = _build_screen_tutorial_cover_hook(
             brand=brand,
             model=model,
@@ -3784,7 +3860,7 @@ def _upgrade_cover_hook(
     copy_style: str,
     preset: WorkflowPreset,
 ) -> str:
-    if preset.name == "screen_tutorial":
+    if preset.name in {"tutorial_standard", "screen_tutorial"}:
         boosted = _build_screen_tutorial_cover_hook(
             brand=brand,
             model=model,
@@ -3937,20 +4013,21 @@ def _pick_visible_brand(visible_text: str) -> str:
 def _build_profile_summary(profile: dict[str, Any]) -> str:
     brand = str(profile.get("subject_brand") or "").strip()
     model = str(profile.get("subject_model") or "").strip()
-    preset_name = str(profile.get("preset_name") or "").strip()
-    subject_type = str(profile.get("subject_type") or _default_subject_type_by_name(preset_name)).strip()
-    theme = str(profile.get("video_theme") or _default_video_theme_by_name(preset_name)).strip()
+    preset_name = _workflow_template_name(profile)
+    content_kind = _content_kind_name(profile)
+    subject_type = str(profile.get("subject_type") or _default_subject_type_by_name(preset_name or content_kind)).strip()
+    theme = str(profile.get("video_theme") or _default_video_theme_by_name(preset_name or content_kind)).strip()
     parts = [part for part in (brand, model or subject_type) if part]
     product = " ".join(parts).strip() or subject_type
-    if preset_name == "screen_tutorial":
+    if content_kind == "tutorial":
         return f"这条视频主要围绕{product}的操作演示展开，内容方向偏{theme}，重点是步骤清晰、术语准确，方便后续剪成可跟做的教程。"
-    if preset_name == "vlog_daily":
+    if content_kind == "vlog":
         return f"这条视频主要围绕{product}展开，内容方向偏{theme}，重点是保留生活感、场景切换和真实情绪。"
-    if preset_name == "talking_head_commentary":
+    if content_kind == "commentary":
         return f"这条视频主要围绕{product}展开表达，内容方向偏{theme}，重点是观点钩子、论点节奏和结论清晰。"
-    if preset_name == "gameplay_highlight":
+    if content_kind == "gameplay":
         return f"这条视频主要围绕{product}展开，内容方向偏{theme}，重点是高能操作、关键节点和结果反馈。"
-    if preset_name == "food_explore":
+    if content_kind == "food":
         return f"这条视频主要围绕{product}展开，内容方向偏{theme}，重点是店名菜名、口感描述和是否值得去。"
     return f"这条视频主要围绕{product}展开，内容方向偏{theme}，适合后续做搜索校验、字幕纠错和剪辑包装。"
 
@@ -3961,11 +4038,16 @@ def _default_subject_type_for_preset(preset: WorkflowPreset) -> str:
 
 def _default_subject_type_by_name(preset_name: str) -> str:
     mapping = {
-        "screen_tutorial": "录屏教学",
+        "tutorial_standard": "录屏教学",
+        "tutorial": "录屏教学",
         "vlog_daily": "Vlog日常",
-        "talking_head_commentary": "口播观点",
+        "vlog": "Vlog日常",
+        "commentary_focus": "口播观点",
+        "commentary": "口播观点",
         "gameplay_highlight": "游戏实况",
+        "gameplay": "游戏实况",
         "food_explore": "探店试吃",
+        "food": "探店试吃",
     }
     return mapping.get(preset_name, "开箱产品")
 
@@ -3976,20 +4058,25 @@ def _default_video_theme_for_preset(preset: WorkflowPreset) -> str:
 
 def _default_video_theme_by_name(preset_name: str) -> str:
     mapping = {
-        "screen_tutorial": "软件流程演示与步骤讲解",
+        "tutorial_standard": "软件流程演示与步骤讲解",
+        "tutorial": "软件流程演示与步骤讲解",
         "vlog_daily": "日常记录与生活分享",
-        "talking_head_commentary": "观点表达与信息拆解",
+        "vlog": "日常记录与生活分享",
+        "commentary_focus": "观点表达与信息拆解",
+        "commentary": "观点表达与信息拆解",
         "gameplay_highlight": "高能操作与对局复盘",
+        "gameplay": "高能操作与对局复盘",
         "food_explore": "探店试吃与性价比判断",
+        "food": "探店试吃与性价比判断",
     }
     return mapping.get(preset_name, "产品开箱与上手体验")
 
 
 def _default_engagement_question(preset: WorkflowPreset) -> str:
     mapping = {
-        "screen_tutorial": "这套流程你会直接照着做吗？",
+        "tutorial_standard": "这套流程你会直接照着做吗？",
         "vlog_daily": "你最想看我下次拍哪种日常？",
-        "talking_head_commentary": "这件事你同意这个判断吗？",
+        "commentary_focus": "这件事你同意这个判断吗？",
         "gameplay_highlight": "这波操作你会怎么打？",
         "food_explore": "这家店你会专门去吃一次吗？",
     }

@@ -63,7 +63,9 @@ RUN --mount=type=cache,target=/root/.cache/uv if [ -n "${ROUGHCUT_PYTHON_EXTRAS}
         uv sync --frozen --no-dev --no-editable; \
     fi
 
-RUN python -c "from pathlib import Path; libs = [Path('/app/.venv/lib/python3.11/site-packages/nvidia/cublas/lib/libcublas.so.12'), Path('/app/.venv/lib/python3.11/site-packages/nvidia/cudnn/lib/libcudnn.so.9')]; missing = [str(path) for path in libs if not path.exists()]; assert not missing, f'Missing CUDA runtime libs: {missing}'"
+RUN if echo " ${ROUGHCUT_PYTHON_EXTRAS} " | grep -q " local-asr "; then \
+        python -c "from pathlib import Path; libs = [Path('/app/.venv/lib/python3.11/site-packages/nvidia/cublas/lib/libcublas.so.12'), Path('/app/.venv/lib/python3.11/site-packages/nvidia/cudnn/lib/libcudnn.so.9')]; missing = [str(path) for path in libs if not path.exists()]; assert not missing, f'Missing CUDA runtime libs: {missing}'"; \
+    fi
 
 RUN mkdir -p /app/data/output /app/logs
 

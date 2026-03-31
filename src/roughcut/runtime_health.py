@@ -44,12 +44,12 @@ async def _check_redis_ready() -> tuple[bool, str]:
 async def _check_storage_ready() -> tuple[bool, str]:
     from roughcut.storage.s3 import get_storage
 
-    def _ensure_storage_root() -> None:
+    def _head_bucket() -> None:
         storage = get_storage()
-        storage.ensure_bucket()
+        storage._client.head_bucket(Bucket=storage._bucket)
 
     try:
-        await asyncio.to_thread(_ensure_storage_root)
+        await asyncio.to_thread(_head_bucket)
         return True, "ok"
     except Exception as exc:
         return False, str(exc)

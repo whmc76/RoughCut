@@ -59,6 +59,31 @@ def avatar_materials_index_path() -> Path:
     return avatar_materials_root() / "profiles.json"
 
 
+def resolve_avatar_material_path(value: Any) -> Path:
+    raw = str(value or "").strip()
+    if not raw:
+        return Path("__roughcut_missing_avatar_material__")
+
+    normalized_raw = raw.replace("\\", "/")
+    direct_path = Path(raw).expanduser()
+    normalized_path = Path(normalized_raw).expanduser()
+    remapped_path = _remap_avatar_material_storage_path(normalized_raw)
+
+    for candidate in (direct_path, normalized_path, remapped_path):
+        if candidate is not None and candidate.exists():
+            return candidate.resolve()
+
+    sibling_match = _resolve_unique_avatar_material_sibling(remapped_path or normalized_path)
+    if sibling_match is not None:
+        return sibling_match.resolve()
+
+    if remapped_path is not None:
+        return remapped_path
+    if normalized_raw != raw:
+        return normalized_path
+    return direct_path
+
+
 def list_avatar_material_profiles() -> list[dict[str, Any]]:
     index_path = avatar_materials_index_path()
     if not index_path.exists():
@@ -93,7 +118,7 @@ def get_avatar_material_profile(profile_id: str) -> dict[str, Any]:
 
 def delete_avatar_material_profile(profile_id: str) -> None:
     profile = get_avatar_material_profile(profile_id)
-    profile_dir = Path(str(profile.get("profile_dir") or ""))
+    profile_dir = resolve_avatar_material_path(profile.get("profile_dir"))
     if profile_dir.exists():
         for child in sorted(profile_dir.rglob("*"), reverse=True):
             if child.is_file():
@@ -216,6 +241,41 @@ def create_profile_dir(display_name: str) -> tuple[str, Path]:
     profile_dir = avatar_materials_root() / "profiles" / f"{safe_name}_{profile_id[:8]}"
     profile_dir.mkdir(parents=True, exist_ok=True)
     return profile_id, profile_dir
+
+
+def _remap_avatar_material_storage_path(raw: str) -> Path | None:
+    cleaned = str(raw or "").strip().replace("\\", "/")
+    if not cleaned or "://" in cleaned:
+        return None
+
+    segments = [segment for segment in cleaned.split("/") if segment and segment != "."]
+    if not segments:
+        return None
+
+    lowered = [segment.lower() for segment in segments]
+    if "avatar_materials" in lowered:
+        avatar_root_index = lowered.index("avatar_materials")
+        return avatar_materials_root().joinpath(*segments[avatar_root_index + 1 :])
+
+    if lowered[0] in {"profiles", "profiles.json"}:
+        return avatar_materials_root().joinpath(*segments)
+
+    return None
+
+
+def _resolve_unique_avatar_material_sibling(candidate: Path | None) -> Path | None:
+    if candidate is None:
+        return None
+
+    parent = candidate.parent
+    suffix = candidate.suffix.lower()
+    if not suffix or not parent.exists():
+        return None
+
+    siblings = [child for child in parent.iterdir() if child.is_file() and child.suffix.lower() == suffix]
+    if len(siblings) == 1:
+        return siblings[0]
+    return None
 
 
 def now_iso() -> str:

@@ -4,7 +4,8 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../../api";
 import type { ConfigProfile } from "../../types";
 import { classNames } from "../../utils";
-import { formatDirtyKeyLabel, formatDirtyValue, summarizeDirtyDetails } from "./diffPresentation";
+import { getTranscriptionProviderLabel } from "../settings/helpers";
+import { formatDirtyDetailValue, formatDirtyKeyLabel, formatDirtyValue, summarizeDirtyDetails } from "./diffPresentation";
 
 type ConfigProfileSwitcherProps = {
   title?: string;
@@ -344,11 +345,11 @@ export function ConfigProfileSwitcher({
                 <div className="config-profile-diff-list compact-top">
                   {previewComparisonDetails.slice(0, 6).map((item) => (
                     <div key={`${previewProfile.id}-${item.key}`} className="config-profile-diff-row">
-                      <span className="status-pill pending config-profile-summary-tag">{item.label}</span>
-                      <div className="muted">
-                        {formatDirtyValue(item.active_value)} -&gt; {formatDirtyValue(item.preview_value)}
+                        <span className="status-pill pending config-profile-summary-tag">{item.label}</span>
+                        <div className="muted">
+                        {formatDirtyDetailValue(item.key, item.active_value)} -&gt; {formatDirtyDetailValue(item.key, item.preview_value)}
+                        </div>
                       </div>
-                    </div>
                   ))}
                   {previewComparisonDetails.length > 6 ? (
                     <div className="muted">
@@ -377,7 +378,7 @@ export function ConfigProfileSwitcher({
                           {formatDirtyKeyLabel(item.key)}
                         </span>
                         <div className="muted">
-                          {formatDirtyValue(item.saved_value)} -&gt; {formatDirtyValue(item.current_value)}
+                          {formatDirtyDetailValue(item.key, item.saved_value)} -&gt; {formatDirtyDetailValue(item.key, item.current_value)}
                         </div>
                       </div>
                     ))}
@@ -518,7 +519,7 @@ function formatProfileSummary(profile: ConfigProfile) {
     : "包装关闭";
   return [
     `${profile.llm_mode === "local" ? "本地" : "云端"}推理`,
-    `转写 ${profile.transcription_provider}`,
+    `转写 ${getTranscriptionProviderLabel(profile.transcription_provider)}`,
     `推理 ${profile.reasoning_provider}`,
     `工作流 ${profile.workflow_mode}`,
     enhancementLabel,
@@ -611,8 +612,8 @@ function buildProfileComparisonDetails(activeProfile: ConfigProfile, previewProf
     {
       key: "transcription_provider",
       label: "转写 provider",
-      active_value: activeProfile.transcription_provider,
-      preview_value: previewProfile.transcription_provider,
+      active_value: getTranscriptionProviderLabel(activeProfile.transcription_provider),
+      preview_value: getTranscriptionProviderLabel(previewProfile.transcription_provider),
     },
     {
       key: "transcription_model",
@@ -745,7 +746,7 @@ function buildProfileSummaryGroups(profile: ConfigProfile) {
       label: "生产链路",
       items: [
         `${profile.llm_mode === "local" ? "本地" : "云端"}推理`,
-        `转写 ${profile.transcription_provider} / ${profile.transcription_model || "未设置"}`,
+        `转写 ${getTranscriptionProviderLabel(profile.transcription_provider)} / ${profile.transcription_model || "未设置"}`,
         `方言 ${profile.transcription_dialect || "默认"}`,
         `推理 ${profile.reasoning_provider} / ${profile.reasoning_model || "未设置"}`,
         `工作流 ${profile.workflow_mode}`,

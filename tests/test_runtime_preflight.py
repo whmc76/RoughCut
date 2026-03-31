@@ -52,3 +52,9 @@ def test_runtime_compose_overrides_voice_clone_api_base_url_for_containers():
         "VOICE_CLONE_API_BASE_URL: ${ROUGHCUT_DOCKER_VOICE_CLONE_API_BASE_URL:-http://host.docker.internal:49204}"
         in compose_text
     )
+
+
+def test_runtime_compose_mounts_avatar_material_profiles_into_container():
+    compose_text = Path("docker-compose.runtime.yml").read_text(encoding="utf-8")
+
+    assert "./data/avatar_materials:/app/data/avatar_materials" in compose_text

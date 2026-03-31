@@ -55,14 +55,14 @@ export function GlossaryFormPanel({ editing, form, isSaving, autosaveState, auto
           options={[
             { value: "global", label: t("glossary.form.scope.global") },
             { value: "domain", label: t("glossary.form.scope.domain") },
-            { value: "channel_profile", label: t("glossary.form.scope.channelProfile") },
+            { value: "workflow_template", label: t("glossary.form.scope.channelProfile") },
           ]}
         />
         <TextField
           label={t("glossary.form.scopeValue")}
           value={form.scope_value}
           onChange={(event) => onChange({ ...form, scope_value: event.target.value })}
-          placeholder="gear / ai / edc_tactical"
+          placeholder="gear / ai / edc_tactical / tutorial_standard"
         />
         <SelectField
           label={t("glossary.form.category")}

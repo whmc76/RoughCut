@@ -87,6 +87,18 @@ def test_seed_profile_from_text_extracts_flashlight_brand_and_model():
     assert any("SK05" in item for item in seeded["search_queries"])
 
 
+def test_seed_profile_from_text_does_not_turn_flashlight_unboxing_into_comfyui_tool():
+    seeded = _seed_profile_from_text(
+        "这次开箱 Loop露普 SK05二代Pro UV版手电，重点看泛光、UV 和夜骑补光。"
+        "桌面显示器只是挂着 ComfyUI 页面，不是这次要讲的主体。"
+    )
+
+    assert seeded["subject_brand"] == "Loop露普"
+    assert seeded["subject_model"] == "SK05二代ProUV版"
+    assert seeded["subject_type"] == "EDC手电"
+    assert "ComfyUI" not in seeded["video_theme"]
+
+
 def test_seed_profile_from_text_extracts_bag_brand_and_model_from_fxx1_alias():
     seeded = _seed_profile_from_text("这期鸿福 F叉二一小副包做个开箱测评，重点看分仓、挂点和日常收纳。")
 

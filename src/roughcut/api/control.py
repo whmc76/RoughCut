@@ -128,6 +128,11 @@ async def build_service_status(*, api_running: bool) -> dict[str, object]:
             "readiness_checks": readiness.get("checks", {}),
             "orchestrator_lock": orchestrator_lock,
         },
+        "runtime": {
+            "readiness_status": readiness.get("status", "unknown"),
+            "readiness_checks": readiness.get("checks", {}),
+            "orchestrator_lock": orchestrator_lock,
+        },
     }
 
 

@@ -26,14 +26,33 @@ CONTENT_PROFILE_MEMORY_FIELD_LABELS = {
 }
 
 
+def _normalize_subject_domain_hint(value: str | None) -> str | None:
+    normalized = str(value or "").strip().lower()
+    if not normalized:
+        return None
+    if normalized == "edc_tactical":
+        return "edc"
+    if normalized in {"screen_tutorial", "tutorial_standard"}:
+        return "software"
+    if normalized == "food_explore":
+        return "food"
+    if normalized == "gameplay_highlight":
+        return "game"
+    return normalized
+
+
 async def load_content_profile_user_memory(
     session: AsyncSession,
     *,
-    channel_profile: str | None,
+    subject_domain: str | None = None,
+    channel_profile: str | None = None,
     recent_limit: int = 10,
     keyword_limit: int = 12,
     field_limit: int = 4,
 ) -> dict[str, Any]:
+    if subject_domain is None and channel_profile is not None:
+        subject_domain = channel_profile
+    subject_domain = _normalize_subject_domain_hint(subject_domain)
     correction_result = await session.execute(
         select(ContentProfileCorrection).order_by(ContentProfileCorrection.created_at.desc()).limit(240)
     )
@@ -42,16 +61,16 @@ async def load_content_profile_user_memory(
     keyword_result = await session.execute(select(ContentProfileKeywordStat))
     keyword_stats = keyword_result.scalars().all()
 
-    field_preferences = _build_field_preferences(corrections, channel_profile=channel_profile, limit=field_limit)
-    recent_corrections = _build_recent_corrections(corrections, channel_profile=channel_profile, limit=recent_limit)
-    keyword_preferences = _build_keyword_preferences(keyword_stats, channel_profile=channel_profile, limit=keyword_limit)
+    field_preferences = _build_field_preferences(corrections, subject_domain=subject_domain, limit=field_limit)
+    recent_corrections = _build_recent_corrections(corrections, subject_domain=subject_domain, limit=recent_limit)
+    keyword_preferences = _build_keyword_preferences(keyword_stats, subject_domain=subject_domain, limit=keyword_limit)
     phrase_preferences = _build_phrase_preferences(
         corrections,
         keyword_stats,
-        channel_profile=channel_profile,
+        subject_domain=subject_domain,
         limit=keyword_limit,
     )
-    style_preferences = _build_style_preferences(corrections, channel_profile=channel_profile, limit=6)
+    style_preferences = _build_style_preferences(corrections, subject_domain=subject_domain, limit=6)
 
     if not any([field_preferences, recent_corrections, keyword_preferences, phrase_preferences, style_preferences]):
         return {}
@@ -144,6 +163,10 @@ async def record_content_profile_feedback_memory(
     user_feedback: dict[str, Any],
 ) -> None:
     recorded_pairs: set[tuple[str, str, str]] = set()
+    fallback_subject_domain = _normalize_subject_domain_hint(
+        str(final_profile.get("subject_domain") or "")
+        or str(getattr(job, "workflow_template", None) or getattr(job, "channel_profile", None) or "")
+    )
 
     def remember_correction(field_name: str, original_value: Any, corrected_value: Any) -> None:
         original = _clean_memory_value(original_value)
@@ -158,7 +181,7 @@ async def record_content_profile_feedback_memory(
             ContentProfileCorrection(
                 job_id=job.id,
                 source_name=job.source_name,
-                channel_profile=job.channel_profile,
+                subject_domain=fallback_subject_domain or "",
                 field_name=field_name,
                 original_value=original or None,
                 corrected_value=corrected,
@@ -191,11 +214,12 @@ async def record_content_profile_feedback_memory(
 
     for keyword in normalized_keywords:
         await _increment_keyword_stat(session, scope_type="global", scope_value="", keyword=keyword)
-        if job.channel_profile:
+        final_subject_domain = fallback_subject_domain or ""
+        if final_subject_domain:
             await _increment_keyword_stat(
                 session,
-                scope_type="channel_profile",
-                scope_value=job.channel_profile,
+                scope_type="subject_domain",
+                scope_value=final_subject_domain,
                 keyword=keyword,
             )
 
@@ -232,12 +256,12 @@ def _extract_identity_alias_feedback_rows(final_profile: dict[str, Any]) -> list
 def _build_field_preferences(
     corrections: list[ContentProfileCorrection],
     *,
-    channel_profile: str | None,
+    subject_domain: str | None,
     limit: int,
 ) -> dict[str, list[dict[str, Any]]]:
     buckets: dict[str, Counter[str]] = defaultdict(Counter)
     for item in corrections:
-        weight = 2 if channel_profile and item.channel_profile == channel_profile else 1
+        weight = 2 if subject_domain and item.subject_domain == subject_domain else 1
         if item.field_name in CONTENT_PROFILE_MEMORY_FIELDS and item.corrected_value:
             buckets[item.field_name][item.corrected_value] += weight
 
@@ -254,12 +278,12 @@ def _build_field_preferences(
 def _build_recent_corrections(
     corrections: list[ContentProfileCorrection],
     *,
-    channel_profile: str | None,
+    subject_domain: str | None,
     limit: int,
 ) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     for item in corrections:
-        if channel_profile and item.channel_profile not in {None, channel_profile}:
+        if subject_domain and item.subject_domain not in {None, subject_domain}:
             continue
         items.append(
             {
@@ -277,14 +301,14 @@ def _build_recent_corrections(
 def _build_keyword_preferences(
     stats: list[ContentProfileKeywordStat],
     *,
-    channel_profile: str | None,
+    subject_domain: str | None,
     limit: int,
 ) -> list[dict[str, Any]]:
     counts: Counter[str] = Counter()
     for item in stats:
         if item.scope_type == "global":
             counts[item.keyword] += int(item.usage_count or 0)
-        elif channel_profile and item.scope_type == "channel_profile" and item.scope_value == channel_profile:
+        elif subject_domain and item.scope_type == "subject_domain" and item.scope_value == subject_domain:
             counts[item.keyword] += int(item.usage_count or 0) * 2
 
     return [
@@ -297,21 +321,21 @@ def _build_phrase_preferences(
     corrections: list[ContentProfileCorrection],
     stats: list[ContentProfileKeywordStat],
     *,
-    channel_profile: str | None,
+    subject_domain: str | None,
     limit: int,
 ) -> list[dict[str, Any]]:
     counts: Counter[str] = Counter()
     for item in corrections:
-        if channel_profile and item.channel_profile not in {None, channel_profile}:
+        if subject_domain and item.subject_domain not in {None, subject_domain}:
             continue
         for phrase in _extract_learning_phrases(item.corrected_value):
-            counts[phrase] += 2 if channel_profile and item.channel_profile == channel_profile else 1
+            counts[phrase] += 2 if subject_domain and item.subject_domain == subject_domain else 1
 
     for item in stats:
         weight = 0
         if item.scope_type == "global":
             weight = max(1, int(item.usage_count or 0))
-        elif channel_profile and item.scope_type == "channel_profile" and item.scope_value == channel_profile:
+        elif subject_domain and item.scope_type == "subject_domain" and item.scope_value == subject_domain:
             weight = max(1, int(item.usage_count or 0)) * 2
         if weight <= 0:
             continue
@@ -324,7 +348,7 @@ def _build_phrase_preferences(
 def _build_style_preferences(
     corrections: list[ContentProfileCorrection],
     *,
-    channel_profile: str | None,
+    subject_domain: str | None,
     limit: int,
 ) -> list[dict[str, Any]]:
     counts: Counter[str] = Counter()
@@ -332,11 +356,11 @@ def _build_style_preferences(
     for item in corrections:
         if item.field_name not in {"video_theme"}:
             continue
-        if channel_profile and item.channel_profile not in {None, channel_profile}:
+        if subject_domain and item.subject_domain not in {None, subject_domain}:
             continue
         value = _clean_memory_value(item.corrected_value)
         for tag in _infer_style_tags(value):
-            counts[tag] += 2 if channel_profile and item.channel_profile == channel_profile else 1
+            counts[tag] += 2 if subject_domain and item.subject_domain == subject_domain else 1
             examples.setdefault(tag, value)
     return [
         {"tag": tag, "count": count, "example": examples.get(tag, "")}

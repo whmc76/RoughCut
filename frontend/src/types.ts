@@ -17,7 +17,7 @@ export type Job = {
   avatar_delivery_summary?: string | null;
   status: string;
   language: string;
-  channel_profile?: string | null;
+  workflow_template?: string | null;
   workflow_mode: string;
   enhancement_modes: string[];
   file_hash?: string | null;
@@ -247,7 +247,7 @@ export type BuiltinGlossaryPack = {
 export type WatchRoot = {
   id: string;
   path: string;
-  channel_profile?: string | null;
+  workflow_template?: string | null;
   enabled: boolean;
   scan_mode: "fast" | "precise";
   created_at: string;
@@ -526,8 +526,8 @@ export type ContentProfileReview = {
 
 export type ContentProfileMemoryStats = {
   scope: string;
-  channel_profile?: string | null;
-  channel_profiles: string[];
+  subject_domain?: string | null;
+  subject_domains: string[];
   total_corrections: number;
   total_keywords: number;
   field_preferences: Record<string, Array<Record<string, any>>>;
@@ -687,6 +687,28 @@ export type RuntimeEnvironment = {
   output_dir: string;
 };
 
+export type ProviderServiceStatusEntry = {
+  name: string;
+  base_url: string;
+  status: string;
+  error?: string | null;
+};
+
+export type ProviderServiceStatus = {
+  checked_at: string;
+  services: Record<string, ProviderServiceStatusEntry>;
+};
+
+export type ModelCatalog = {
+  provider: string;
+  kind: string;
+  models: string[];
+  source: string;
+  refreshed_at: string;
+  status: string;
+  error?: string | null;
+};
+
 export type ReadinessCheck = {
   status: string;
   detail: string;
@@ -730,7 +752,7 @@ export type HealthDetail = {
 
 export type ConfigOptions = {
   job_languages: SelectOption[];
-  channel_profiles: SelectOption[];
+  workflow_templates: SelectOption[];
   workflow_modes: SelectOption[];
   enhancement_modes: SelectOption[];
   transcription_dialects: SelectOption[];

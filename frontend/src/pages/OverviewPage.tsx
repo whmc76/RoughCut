@@ -6,7 +6,6 @@ import { PageSection } from "../components/ui/PageSection";
 import { PanelHeader } from "../components/ui/PanelHeader";
 import { useI18n } from "../i18n";
 import { StatCard } from "../components/ui/StatCard";
-import { ConfigProfileSwitcher } from "../features/configProfiles/ConfigProfileSwitcher";
 import { JobsUsageTrendPanel } from "../features/jobs/JobsUsageTrendPanel";
 import { useOverviewWorkspace } from "../features/overview/useOverviewWorkspace";
 import { formatDate, statusLabel } from "../utils";
@@ -19,6 +18,17 @@ export function OverviewPage() {
   const { t } = useI18n();
   const workspace = useOverviewWorkspace();
   const runtime = workspace.services.data?.runtime;
+  const usageTrendStepOptions = workspace.usageSummary.data?.top_steps.slice(0, 5) ?? [];
+  const usageTrendModelOptions = workspace.usageSummary.data?.top_models.slice(0, 5) ?? [];
+  const usageTrendProviderOptions = workspace.usageSummary.data?.top_providers.slice(0, 5) ?? [];
+  const usageTrendFocusOptions =
+    workspace.usageTrendFocusType === "step"
+      ? usageTrendStepOptions.map((step) => ({ name: step.step_name, label: step.label }))
+      : workspace.usageTrendFocusType === "model"
+        ? usageTrendModelOptions.map((model) => ({ name: model.model, label: model.model }))
+        : workspace.usageTrendFocusType === "provider"
+          ? usageTrendProviderOptions.map((provider) => ({ name: provider.provider, label: provider.provider }))
+          : [];
 
   return (
     <section className="page-stack">
@@ -27,32 +37,123 @@ export function OverviewPage() {
         title={t("overview.page.title")}
         description={t("overview.page.description")}
         summary={[
-          { label: "先看全局", value: "任务、服务、用量", detail: "先确认健康度，再进入具体页面" },
-          { label: "配置基线", value: "统一剪辑配置", detail: "顶部切换会影响后续新任务默认参数" },
-          { label: "常用入口", value: "最近任务与服务状态", detail: "适合快速判断下一步该去哪一页" },
+          { label: "第一段", value: "系统状态", detail: "先判断现在能不能继续跑，是否需要先处理系统问题" },
+          { label: "第二段", value: "任务分析", detail: "再看成本、缓存和热点步骤，判断是否存在异常消耗" },
+          { label: "第三段", value: "下一步入口", detail: "最后再决定进入任务页还是系统页，不重复展示模块" },
         ]}
       />
       <PageSection
         eyebrow="运行"
-        title="先确认系统当前状态"
-        description="这一段只负责判断今天系统是否可用，以及新任务会继承哪套配置。"
+        title="先判断现在能不能继续跑"
+        description="这里只回答系统当前是否适合继续处理任务，不做配置，不做队列操作，也不承担分析复盘。"
       >
-        <ConfigProfileSwitcher />
-
         <div className="stats-grid">
           <StatCard label={t("overview.stats.jobs")} value={workspace.stats.jobs} />
           <StatCard label={t("overview.stats.running")} value={workspace.stats.running} />
           <StatCard label={t("overview.stats.watchRoots")} value={workspace.stats.watchRoots} />
           <StatCard label={t("overview.stats.glossary")} value={workspace.stats.glossary} />
         </div>
+      </PageSection>
 
-        {workspace.usageSummary.data && (
+      {workspace.usageSummary.data && (
+        <PageSection
+          eyebrow="分析"
+          title="再看成本、缓存和热点"
+          description="任务分析只保留在概览页，用来复盘资源消耗、定位异常步骤，并判断默认策略是否需要调整。"
+        >
           <>
             <div className="stats-grid compact">
               <StatCard label={t("jobs.summary.totalTokens")} value={workspace.usageSummary.data.total_tokens.toLocaleString()} compact />
               <StatCard label={t("jobs.summary.totalCalls")} value={workspace.usageSummary.data.total_calls.toLocaleString()} compact />
               <StatCard label={t("jobs.summary.savedTokens")} value={workspace.usageSummary.data.cache.saved_total_tokens.toLocaleString()} compact />
               <StatCard label={t("jobs.summary.cacheHitRate")} value={`${Math.round((workspace.usageSummary.data.cache.hit_rate || 0) * 100)}%`} compact />
+            </div>
+
+            <div className="panel-grid two-up">
+              <section className="panel">
+                <PanelHeader title={t("jobs.summary.topSteps")} description={t("jobs.summary.topStepsDescription")} />
+                <div className="timeline-list">
+                  {workspace.usageSummary.data.top_steps.slice(0, 5).map((step) => (
+                    <div key={step.step_name} className="timeline-item">
+                      <div className="toolbar">
+                        <strong>{step.label}</strong>
+                        <span className="status-pill pending">{step.total_tokens.toLocaleString()}</span>
+                      </div>
+                      <div className="muted">
+                        {t("jobs.summary.stepBreakdown")}
+                        {`: ${step.jobs.toLocaleString()} / ${step.calls.toLocaleString()} / ${step.cache_hits.toLocaleString()}`}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </section>
+
+              <section className="panel">
+                <PanelHeader title={t("jobs.summary.cachePanel")} description={t("jobs.summary.cachePanelDescription")} />
+                <div className="stats-grid compact">
+                  <StatCard label={t("jobs.summary.consideredJobs")} value={workspace.usageSummary.data.job_count.toLocaleString()} compact />
+                  <StatCard label={t("jobs.summary.jobsWithTelemetry")} value={workspace.usageSummary.data.jobs_with_telemetry.toLocaleString()} compact />
+                  <StatCard label={t("jobs.summary.avoidedCalls")} value={workspace.usageSummary.data.cache.avoided_calls.toLocaleString()} compact />
+                  <StatCard label={t("jobs.summary.savedTokensCoverage")} value={`${Math.round((workspace.usageSummary.data.cache.saved_tokens_hit_rate || 0) * 100)}%`} compact />
+                </div>
+                <div className="timeline-list">
+                  <div className="timeline-item">
+                    <strong>{t("jobs.summary.cacheHits")}</strong>
+                    <span>{workspace.usageSummary.data.cache.hits.toLocaleString()}</span>
+                  </div>
+                  <div className="timeline-item">
+                    <strong>{t("jobs.summary.cacheMisses")}</strong>
+                    <span>{workspace.usageSummary.data.cache.misses.toLocaleString()}</span>
+                  </div>
+                  <div className="timeline-item">
+                    <strong>{t("jobs.summary.stepsWithHits")}</strong>
+                    <span>{workspace.usageSummary.data.cache.steps_with_hits.toLocaleString()}</span>
+                  </div>
+                  <div className="timeline-item">
+                    <strong>{t("jobs.summary.savedTokens")}</strong>
+                    <span>{workspace.usageSummary.data.cache.saved_total_tokens.toLocaleString()}</span>
+                  </div>
+                  <div className="timeline-item">
+                    <strong>{t("jobs.summary.baselineHits")}</strong>
+                    <span>{workspace.usageSummary.data.cache.hits_with_usage_baseline.toLocaleString()}</span>
+                  </div>
+                </div>
+              </section>
+            </div>
+
+            <div className="panel-grid two-up">
+              <section className="panel">
+                <PanelHeader title={t("jobs.summary.topModels")} description={t("jobs.summary.topModelsDescription")} />
+                <div className="timeline-list">
+                  {workspace.usageSummary.data.top_models.slice(0, 5).map((model) => (
+                    <div key={model.model} className="timeline-item">
+                      <div className="toolbar">
+                        <strong>{model.model}</strong>
+                        <span className="status-pill pending">{model.total_tokens.toLocaleString()}</span>
+                      </div>
+                      <div className="muted">
+                        {model.provider || "—"}
+                        {` / ${model.calls.toLocaleString()} / ${model.jobs.toLocaleString()}`}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </section>
+
+              <section className="panel">
+                <PanelHeader title={t("jobs.summary.topProviders")} description={t("jobs.summary.topProvidersDescription")} />
+                <div className="timeline-list">
+                  {workspace.usageSummary.data.top_providers.slice(0, 5).map((provider) => (
+                    <div key={provider.provider} className="timeline-item">
+                      <div className="toolbar">
+                        <strong>{provider.provider}</strong>
+                        <span className="status-pill pending">{provider.total_tokens.toLocaleString()}</span>
+                      </div>
+                      <div className="muted">{`${provider.calls.toLocaleString()} / ${provider.jobs.toLocaleString()}`}</div>
+                    </div>
+                  ))}
+                </div>
+              </section>
             </div>
 
             <JobsUsageTrendPanel
@@ -73,7 +174,7 @@ export function OverviewPage() {
                     ))}
                   </div>
                   <div className="mode-chip-list">
-                    {[
+                  {[
                       { value: "all", label: t("jobs.summary.allDimensions") },
                       { value: "step", label: t("jobs.summary.dimensionSteps") },
                       { value: "model", label: t("jobs.summary.dimensionModels") },
@@ -82,9 +183,33 @@ export function OverviewPage() {
                       <button
                         key={dimension.value}
                         className={`mode-chip filter-chip ${workspace.usageTrendFocusType === dimension.value ? "selected" : ""}`}
-                        onClick={() => workspace.setUsageTrendFocusType(dimension.value)}
+                        onClick={() => {
+                          workspace.setUsageTrendFocusType(dimension.value);
+                          workspace.setUsageTrendFocusName("");
+                        }}
                       >
                         {dimension.label}
+                      </button>
+                    ))}
+                  </div>
+                  <div className="mode-chip-list">
+                    <button
+                      className={`mode-chip filter-chip ${workspace.usageTrendFocusName === "" ? "selected" : ""}`}
+                      onClick={() => workspace.setUsageTrendFocusName("")}
+                    >
+                      {workspace.usageTrendFocusType === "model"
+                        ? t("jobs.summary.allModels")
+                        : workspace.usageTrendFocusType === "provider"
+                          ? t("jobs.summary.allProviders")
+                          : t("jobs.summary.allSteps")}
+                    </button>
+                    {usageTrendFocusOptions.map((option) => (
+                      <button
+                        key={option.name}
+                        className={`mode-chip filter-chip ${workspace.usageTrendFocusName === option.name ? "selected" : ""}`}
+                        onClick={() => workspace.setUsageTrendFocusName(option.name)}
+                      >
+                        {option.label}
                       </button>
                     ))}
                   </div>
@@ -92,13 +217,13 @@ export function OverviewPage() {
               }
             />
           </>
-        )}
-      </PageSection>
+        </PageSection>
+      )}
 
       <PageSection
         eyebrow="入口"
-        title="从这里继续进入具体工作"
-        description="最近任务和服务状态保留在一屏内，方便快速判断下一步应该进任务页还是系统页。"
+        title="最后决定进入哪一页继续处理"
+        description="最近任务和服务入口放在末段，用来承接前面的判断结果，再进入任务页或系统页继续操作。"
       >
         <div className="panel-grid two-up">
           <section className="panel">

@@ -1,4 +1,4 @@
-import { waitFor } from "@testing-library/react";
+import { act, waitFor } from "@testing-library/react";
 
 import { renderHookWithQueryClient } from "../../test/renderWithQueryClient";
 import type { GlossaryTerm, Job, ServiceStatus, WatchRoot } from "../../types";
@@ -25,7 +25,7 @@ const SAMPLE_JOBS: Job[] = [
     content_summary: null,
     status: "done",
     language: "zh-CN",
-    channel_profile: null,
+    workflow_template: null,
     workflow_mode: "standard_edit",
     enhancement_modes: [],
     file_hash: null,
@@ -41,7 +41,7 @@ const SAMPLE_JOBS: Job[] = [
     content_summary: null,
     status: "running",
     language: "zh-CN",
-    channel_profile: null,
+    workflow_template: null,
     workflow_mode: "standard_edit",
     enhancement_modes: ["avatar_commentary"],
     file_hash: null,
@@ -57,7 +57,7 @@ const SAMPLE_JOBS: Job[] = [
     content_summary: null,
     status: "processing",
     language: "zh-CN",
-    channel_profile: null,
+    workflow_template: null,
     workflow_mode: "standard_edit",
     enhancement_modes: ["ai_director"],
     file_hash: null,
@@ -72,7 +72,7 @@ const SAMPLE_ROOTS: WatchRoot[] = [
   {
     id: "root_1",
     path: "D:/watch/source",
-    channel_profile: "edc",
+    workflow_template: "edc_tactical",
     enabled: true,
     scan_mode: "fast",
     created_at: "2026-03-12T10:00:00Z",
@@ -193,5 +193,21 @@ describe("useOverviewWorkspace", () => {
     expect(result.current.usageSummary.data?.total_tokens).toBe(4100);
     expect(result.current.usageTrend.data?.points[0]?.label).toBe("03-12");
     expect(result.current.services.data).toEqual(SAMPLE_SERVICES);
+  });
+
+  it("tracks overview usage trend focus type and focus name", async () => {
+    const { result } = renderHookWithQueryClient(() => useOverviewWorkspace());
+
+    await waitFor(() => expect(result.current.usageSummary.data?.total_tokens).toBe(4100));
+    expect(mockApi.getJobsUsageTrend).toHaveBeenLastCalledWith(7, 120, undefined, undefined);
+
+    act(() => {
+      result.current.setUsageTrendFocusType("model");
+      result.current.setUsageTrendFocusName("MiniMax-M2.7-highspeed");
+    });
+
+    await waitFor(() =>
+      expect(mockApi.getJobsUsageTrend).toHaveBeenLastCalledWith(7, 120, "model", "MiniMax-M2.7-highspeed"),
+    );
   });
 });

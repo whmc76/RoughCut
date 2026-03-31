@@ -1,247 +1,5 @@
 [
   {
-    "id": "422d4e7bc3ad47fb8e0d3d2ed558cafa",
-    "display_name": "赛博迪克朗",
-    "presenter_alias": "CyberDickLang",
-    "notes": "赛博迪克朗 的个人数字人",
-    "profile_dir": "data\\avatar_materials\\profiles\\2_422d4e7b",
-    "training_status": "ready_for_manual_training",
-    "training_provider": "heygem",
-    "training_api_available": true,
-    "next_action": "素材已通过基础预检，声音采样也已完成预处理，可以直接生成脚本驱动的数字人预览样片。",
-    "capability_status": {
-      "heygem_avatar": "ready",
-      "voice_clone": "ready",
-      "portrait_reference": "ready",
-      "preview": "ready"
-    },
-    "blocking_issues": [],
-    "warnings": [],
-    "created_at": "2026-03-12T15:12:34.574681+00:00",
-    "files": [
-      {
-        "id": "531ebd1eb7b642129664e1ba537b5eb8",
-        "original_name": "主播镜头1-合并-20260313-151353.mp4",
-        "stored_name": "_1-_-20260313-151353.mp4",
-        "kind": "video",
-        "role": "speaking_video",
-        "role_label": "讲话视频片段",
-        "pipeline_target": "heygem_avatar",
-        "content_type": "video/mp4",
-        "size_bytes": 26625799,
-        "path": "E:\\WorkSpace\\RoughCut\\data\\avatar_materials\\profiles\\2_422d4e7b\\_1-_-20260313-151353.mp4",
-        "created_at": "2026-03-12T15:12:33.755964+00:00",
-        "probe": {
-          "duration": 24.101995,
-          "width": 1248,
-          "height": 1664,
-          "fps": 25.0,
-          "video_codec": "h264",
-          "audio_codec": "aac",
-          "audio_sample_rate": 44100,
-          "audio_channels": 2,
-          "format_name": "mov,mp4,m4a,3gp,3g2,mj2",
-          "bit_rate": 8837707
-        },
-        "artifacts": null,
-        "checks": [
-          {
-            "level": "ok",
-            "message": "讲话视频片段基础参数达标，可进入 HeyGem 人工复核。"
-          }
-        ]
-      },
-      {
-        "id": "bb326ee4063341d7bd09e508a7302317",
-        "original_name": "肖像.png",
-        "stored_name": "_.png",
-        "kind": "image",
-        "role": "portrait_photo",
-        "role_label": "肖像照",
-        "pipeline_target": "avatar_identity",
-        "content_type": "image/png",
-        "size_bytes": 1184255,
-        "path": "data\\avatar_materials\\profiles\\2_422d4e7b\\_.png",
-        "created_at": "2026-03-12T15:12:33.758091+00:00",
-        "probe": null,
-        "artifacts": null,
-        "checks": [
-          {
-            "level": "ok",
-            "message": "肖像照已入库，可用于形象核验和模板管理。"
-          }
-        ]
-      },
-      {
-        "id": "36801f1d91084774b8f7e5d6004bba7c",
-        "original_name": "赛博迪克朗.m4a",
-        "stored_name": "_.m4a",
-        "kind": "audio",
-        "role": "voice_sample",
-        "role_label": "声音采样",
-        "pipeline_target": "voice_clone",
-        "content_type": "audio/mp4",
-        "size_bytes": 614416,
-        "path": "data\\avatar_materials\\profiles\\2_422d4e7b\\_.m4a",
-        "created_at": "2026-03-12T15:12:33.793821+00:00",
-        "probe": {
-          "duration": 24.063813,
-          "width": 0,
-          "height": 0,
-          "fps": 0.0,
-          "video_codec": "",
-          "audio_codec": "aac",
-          "audio_sample_rate": 48000,
-          "audio_channels": 2,
-          "format_name": "mov,mp4,m4a,3gp,3g2,mj2",
-          "bit_rate": 204262
-        },
-        "artifacts": {
-          "normalized_wav_path": "data\\avatar_materials\\profiles\\2_422d4e7b\\derived\\voice_36801f1d_16k_mono.wav",
-          "training_reference_name": "voice_36801f1d.wav",
-          "training_preprocess": {
-            "code": 0,
-            "msg": "success",
-            "reference_audio_text": "大家好，欢迎来到我的播数字人播客测试现场。今天想和大家简单聊一聊，看看数字人的表达是否自然清晰呢。然后。😊|||呃，互动啊有没有更加温度。那么未来呀希望通过这样的方式把更多有趣的内容呢啊带给大家啊，希望大家喜欢吧。",
-            "asr_format_audio_url": "/code/sessions/20260313/648fa7804560400ca88a0936bd693c09/format_denoise_voice_36801f1d_part0.wav|||/code/sessions/20260313/648fa7804560400ca88a0936bd693c09/format_denoise_voice_36801f1d_part1.wav"
-          }
-        },
-        "checks": [
-          {
-            "level": "ok",
-            "message": "声音采样基础参数达标，可用于语音克隆。"
-          }
-        ]
-      }
-    ],
-    "preview_runs": [
-      {
-        "id": "b243a4acceee42809b0f4f8115d0ca16",
-        "status": "completed",
-        "script": "大家好，我是赛博迪克朗。现在这是一条 RoughCut 自动生成的数字人预览样片，主要用于检查音色一致性、口型同步和讲话镜头的整体稳定性。",
-        "task_code": "avatar-preview-b243a4-0",
-        "source_voice_file_id": "36801f1d91084774b8f7e5d6004bba7c",
-        "source_video_file_id": "531ebd1eb7b642129664e1ba537b5eb8",
-        "output_path": "data\\avatar_materials\\profiles\\2_422d4e7b\\previews\\b243a4acceee42809b0f4f8115d0ca16.mp4",
-        "output_size_bytes": 22945469,
-        "duration_sec": 11.981,
-        "width": 1248,
-        "height": 1664,
-        "preview_mode": "scripted_tts",
-        "fallback_reason": null,
-        "created_at": "2026-03-13T11:07:51Z"
-      },
-      {
-        "id": "82e6b6df3233427d99068948f5aa4913",
-        "status": "completed",
-        "script": "大家好，我是赛博迪克朗。这是一条 RoughCut 集成修复后的真实预览测试。",
-        "task_code": "avatar-preview-82e6b6-0",
-        "source_voice_file_id": "36801f1d91084774b8f7e5d6004bba7c",
-        "source_video_file_id": "531ebd1eb7b642129664e1ba537b5eb8",
-        "output_path": "data\\avatar_materials\\profiles\\2_422d4e7b\\previews\\82e6b6df3233427d99068948f5aa4913.mp4",
-        "output_size_bytes": 12251950,
-        "duration_sec": 6.48,
-        "width": 1248,
-        "height": 1664,
-        "preview_mode": "scripted_tts",
-        "fallback_reason": null,
-        "created_at": "2026-03-13T11:06:42Z"
-      },
-      {
-        "id": "f286c3be82174c22a9c592b3f4b748ac",
-        "status": "completed",
-        "script": "大家好，我是赛博迪克朗。现在这是一条 RoughCut 自动生成的数字人预览样片，主要用于检查音色一致性、口型同步和讲话镜头的整体稳定性。",
-        "task_code": "avatar-preview-f286c3-0",
-        "source_voice_file_id": "36801f1d91084774b8f7e5d6004bba7c",
-        "source_video_file_id": "531ebd1eb7b642129664e1ba537b5eb8",
-        "output_path": "data\\avatar_materials\\profiles\\2_422d4e7b\\previews\\f286c3be82174c22a9c592b3f4b748ac.mp4",
-        "output_size_bytes": 22079129,
-        "duration_sec": 11.52,
-        "width": 1248,
-        "height": 1664,
-        "preview_mode": "scripted_tts",
-        "fallback_reason": null,
-        "created_at": "2026-03-13T10:54:30Z"
-      },
-      {
-        "id": "429e4ed8614c42fda44735d972ff839d",
-        "status": "failed",
-        "script": "大家好，我是赛博迪克朗。现在这是一条 RoughCut 自动生成的数字人预览样片，主要用于检查音色一致性、口型同步和讲话镜头的整体稳定性。",
-        "error_message": "No preview-capable HeyGem endpoint found; training-only endpoints: http://127.0.0.1:49203; unreachable endpoints: http://127.0.0.1:49202",
-        "created_at": "2026-03-13T10:52:30.050370+00:00"
-      },
-      {
-        "id": "7bc8359da18940c290e5af97e93e2173",
-        "status": "failed",
-        "script": "大家好，我是赛博迪克朗。现在这是一条 RoughCut 自动生成的数字人预览样片，主要用于检查音色一致性、口型同步和讲话镜头的整体稳定性。",
-        "error_message": "No preview-capable HeyGem endpoint found; training-only endpoints: http://127.0.0.1:49203; unreachable endpoints: http://127.0.0.1:8383",
-        "created_at": "2026-03-13T10:51:37.513911+00:00"
-      },
-      {
-        "id": "591c9a1f69034ad4acf3427d9be8426b",
-        "status": "failed",
-        "script": "大家好，我是赛博迪克朗。现在这是一条 RoughCut 自动生成的数字人预览样片，主要用于检查音色一致性、口型同步和讲话镜头的整体稳定性。",
-        "error_message": "Server error '500 Internal Server Error' for url 'http://127.0.0.1:49203/v1/invoke'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500",
-        "created_at": "2026-03-13T10:46:35.633459+00:00"
-      },
-      {
-        "id": "7461334518f342408827649d84f6fa38",
-        "status": "completed",
-        "script": "大家好，我是赛博迪克朗。现在这是一条 RoughCut 自动生成的数字人预览样片，主要用于检查音色一致性、口型同步和讲话镜头的整体稳定性。",
-        "task_code": "avatar-preview-746133-0",
-        "source_voice_file_id": "36801f1d91084774b8f7e5d6004bba7c",
-        "source_video_file_id": "531ebd1eb7b642129664e1ba537b5eb8",
-        "output_path": "data\\avatar_materials\\profiles\\2_422d4e7b\\previews\\7461334518f342408827649d84f6fa38.mp4",
-        "output_size_bytes": 327666,
-        "duration_sec": 3.0,
-        "width": 640,
-        "height": 360,
-        "preview_mode": "scripted_tts",
-        "fallback_reason": null,
-        "created_at": "2026-03-13T10:24:45Z"
-      },
-      {
-        "id": "5ccfef79ba7249e3a993ecdbd8ee3133",
-        "status": "failed",
-        "script": "大家好，我是赛博迪克朗。现在这是一条 RoughCut 自动生成的数字人预览样片，主要用于检查音色一致性、口型同步和讲话镜头的整体稳定性。",
-        "error_message": "heygem_preview_result_points_to_source_video",
-        "created_at": "2026-03-13T10:21:05.305512+00:00"
-      },
-      {
-        "id": "3b0c6203a71b4ed2ab885da3cf348a5b",
-        "status": "completed",
-        "script": "大家好，我是赛博迪克朗。现在这是一条 RoughCut 自动生成的数字人预览样片，主要用于检查音色一致性、口型同步和讲话镜头的整体稳定性。",
-        "task_code": "avatar-preview-3b0c62-0",
-        "source_voice_file_id": "36801f1d91084774b8f7e5d6004bba7c",
-        "source_video_file_id": "531ebd1eb7b642129664e1ba537b5eb8",
-        "output_path": "data\\avatar_materials\\profiles\\2_422d4e7b\\previews\\3b0c6203a71b4ed2ab885da3cf348a5b.mp4",
-        "output_size_bytes": 3477975,
-        "duration_sec": 13.8,
-        "width": 1248,
-        "height": 1664,
-        "preview_mode": "scripted_tts",
-        "fallback_reason": null,
-        "created_at": "2026-03-13T09:38:05Z"
-      },
-      {
-        "id": "7516202cd25349a3acc913db01064fe1",
-        "status": "completed",
-        "script": "校验输出与源素材差异。",
-        "task_code": "avatar-preview-751620-0",
-        "source_voice_file_id": "36801f1d91084774b8f7e5d6004bba7c",
-        "source_video_file_id": "531ebd1eb7b642129664e1ba537b5eb8",
-        "output_path": "data\\avatar_materials\\profiles\\2_422d4e7b\\previews\\7516202cd25349a3acc913db01064fe1.mp4",
-        "output_size_bytes": 492640,
-        "duration_sec": 1.8,
-        "width": 1248,
-        "height": 1664,
-        "preview_mode": "scripted_tts",
-        "fallback_reason": null,
-        "created_at": "2026-03-13T09:35:46Z"
-      }
-    ]
-  },
-  {
     "id": "d2d15bc6d77a47b79cf20a79b56596c2",
     "display_name": "FAS",
     "presenter_alias": "FAS",
@@ -422,6 +180,300 @@
         "created_at": "2026-03-26T07:59:33Z"
       }
     ],
+    "profile_dashboard": {
+      "completeness_score": 20,
+      "section_status": {
+        "identity": false,
+        "positioning": false,
+        "publishing": false,
+        "business": false,
+        "materials": true
+      },
+      "material_counts": {
+        "speaking_videos": 1,
+        "portrait_photos": 1,
+        "voice_samples": 1
+      },
+      "strengths": [
+        "数字人口播素材链路已打通"
+      ],
+      "next_steps": [
+        "补充作者名、身份标题或简介，先把对外身份讲清楚。",
+        "补充内容定位、受众和表达风格，方便平台文案按策略生成。",
+        "补充主平台、活跃平台和个性签名，方便形成渠道化档案。",
+        "补充联系方式或合作备注，方便归档为完整创作者档案。"
+      ]
+    }
+  },
+  {
+    "id": "422d4e7bc3ad47fb8e0d3d2ed558cafa",
+    "display_name": "赛博迪克朗",
+    "presenter_alias": "CyberDickLang",
+    "notes": "赛博迪克朗 的个人数字人",
+    "profile_dir": "data\\avatar_materials\\profiles\\2_422d4e7b",
+    "training_status": "ready_for_manual_training",
+    "training_provider": "heygem",
+    "training_api_available": true,
+    "next_action": "素材已通过基础预检，声音采样也已完成预处理，可以直接生成脚本驱动的数字人预览样片。",
+    "capability_status": {
+      "heygem_avatar": "ready",
+      "voice_clone": "ready",
+      "portrait_reference": "ready",
+      "preview": "ready"
+    },
+    "blocking_issues": [],
+    "warnings": [],
+    "created_at": "2026-03-12T15:12:34.574681+00:00",
+    "files": [
+      {
+        "id": "531ebd1eb7b642129664e1ba537b5eb8",
+        "original_name": "主播镜头1-合并-20260313-151353.mp4",
+        "stored_name": "_1-_-20260313-151353.mp4",
+        "kind": "video",
+        "role": "speaking_video",
+        "role_label": "讲话视频片段",
+        "pipeline_target": "heygem_avatar",
+        "content_type": "video/mp4",
+        "size_bytes": 26625799,
+        "path": "E:\\WorkSpace\\RoughCut\\data\\avatar_materials\\profiles\\2_422d4e7b\\_1-_-20260313-151353.mp4",
+        "created_at": "2026-03-12T15:12:33.755964+00:00",
+        "probe": {
+          "duration": 24.101995,
+          "width": 1248,
+          "height": 1664,
+          "fps": 25.0,
+          "video_codec": "h264",
+          "audio_codec": "aac",
+          "audio_sample_rate": 44100,
+          "audio_channels": 2,
+          "format_name": "mov,mp4,m4a,3gp,3g2,mj2",
+          "bit_rate": 8837707
+        },
+        "artifacts": null,
+        "checks": [
+          {
+            "level": "ok",
+            "message": "讲话视频片段基础参数达标，可进入 HeyGem 人工复核。"
+          }
+        ]
+      },
+      {
+        "id": "bb326ee4063341d7bd09e508a7302317",
+        "original_name": "肖像.png",
+        "stored_name": "_.png",
+        "kind": "image",
+        "role": "portrait_photo",
+        "role_label": "肖像照",
+        "pipeline_target": "avatar_identity",
+        "content_type": "image/png",
+        "size_bytes": 1184255,
+        "path": "data\\avatar_materials\\profiles\\2_422d4e7b\\_.png",
+        "created_at": "2026-03-12T15:12:33.758091+00:00",
+        "probe": null,
+        "artifacts": null,
+        "checks": [
+          {
+            "level": "ok",
+            "message": "肖像照已入库，可用于形象核验和模板管理。"
+          }
+        ]
+      },
+      {
+        "id": "36801f1d91084774b8f7e5d6004bba7c",
+        "original_name": "赛博迪克朗.m4a",
+        "stored_name": "_.m4a",
+        "kind": "audio",
+        "role": "voice_sample",
+        "role_label": "声音采样",
+        "pipeline_target": "voice_clone",
+        "content_type": "audio/mp4",
+        "size_bytes": 614416,
+        "path": "data\\avatar_materials\\profiles\\2_422d4e7b\\_.m4a",
+        "created_at": "2026-03-12T15:12:33.793821+00:00",
+        "probe": {
+          "duration": 24.063813,
+          "width": 0,
+          "height": 0,
+          "fps": 0.0,
+          "video_codec": "",
+          "audio_codec": "aac",
+          "audio_sample_rate": 48000,
+          "audio_channels": 2,
+          "format_name": "mov,mp4,m4a,3gp,3g2,mj2",
+          "bit_rate": 204262
+        },
+        "artifacts": {
+          "normalized_wav_path": "/app/data/avatar_materials/profiles/2_422d4e7b/derived/voice_36801f1d_16k_mono.wav",
+          "training_reference_name": "voice_36801f1d.wav",
+          "training_preprocess": {
+            "code": 0,
+            "msg": "success",
+            "reference_audio_text": "大家好，欢迎来到我的播数字人播客测试现场。今天想和大家简单聊一聊，看看数字人的表达是否自然清晰呢。然后。😊|||呃，互动啊有没有更加温度。那么未来呀希望通过这样的方式把更多有趣的内容呢啊带给大家啊，希望大家喜欢吧。",
+            "asr_format_audio_url": "/code/sessions/20260313/648fa7804560400ca88a0936bd693c09/format_denoise_voice_36801f1d_part0.wav|||/code/sessions/20260313/648fa7804560400ca88a0936bd693c09/format_denoise_voice_36801f1d_part1.wav"
+          }
+        },
+        "checks": [
+          {
+            "level": "ok",
+            "message": "声音采样基础参数达标，可用于语音克隆。"
+          }
+        ]
+      }
+    ],
+    "preview_runs": [
+      {
+        "id": "63aa0918401648c4b5140eb17fcb6a90",
+        "status": "failed",
+        "script": "大家好，我是赛博迪克朗。这是一条恢复后的预览样片，用来确认素材展示和预览播放已经恢复。",
+        "error_message": "heygem preview task failed from http://host.docker.internal:49202/easy/submit->http://host.docker.internal:49202/easy/query: 三次获取音频时长失败: Command '['ffprobe', '-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', '/code/data/inputs/audio/e26e98940f384b0b99fccbb2fb833de8.source.wav']' returned non-zero exit status 1.",
+        "created_at": "2026-03-31T10:44:11.773104+00:00"
+      },
+      {
+        "id": "b0f690f0686042d1bb055f721fa59086",
+        "status": "failed",
+        "script": "大家好，我是赛博迪克朗。这是一条恢复后的预览样片，用来确认素材展示和预览播放已经恢复。",
+        "error_message": "heygem preview failed on http://host.docker.internal:49204; tried=http://host.docker.internal:49204/easy/submit->http://host.docker.internal:49204/easy/query, http://host.docker.internal:49204/v1/easy/submit->http://host.docker.internal:49204/v1/easy/query, http://host.docker.internal:49204/api/easy/submit->http://host.docker.internal:49204/api/easy/query, http://host.docker.internal:49204/v1/submit->http://host.docker.internal:49204/v1/query, http://host.docker.internal:49204/submit->http://host.docker.internal:49204/query; last_error=Client error '404 Not Found' for url 'http://host.docker.internal:49204/submit'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/404",
+        "created_at": "2026-03-31T10:40:36.576052+00:00"
+      },
+      {
+        "id": "b243a4acceee42809b0f4f8115d0ca16",
+        "status": "completed",
+        "script": "大家好，我是赛博迪克朗。现在这是一条 RoughCut 自动生成的数字人预览样片，主要用于检查音色一致性、口型同步和讲话镜头的整体稳定性。",
+        "task_code": "avatar-preview-b243a4-0",
+        "source_voice_file_id": "36801f1d91084774b8f7e5d6004bba7c",
+        "source_video_file_id": "531ebd1eb7b642129664e1ba537b5eb8",
+        "output_path": "data\\avatar_materials\\profiles\\2_422d4e7b\\previews\\b243a4acceee42809b0f4f8115d0ca16.mp4",
+        "output_size_bytes": 22945469,
+        "duration_sec": 11.981,
+        "width": 1248,
+        "height": 1664,
+        "preview_mode": "scripted_tts",
+        "fallback_reason": null,
+        "created_at": "2026-03-13T11:07:51Z"
+      },
+      {
+        "id": "82e6b6df3233427d99068948f5aa4913",
+        "status": "completed",
+        "script": "大家好，我是赛博迪克朗。这是一条 RoughCut 集成修复后的真实预览测试。",
+        "task_code": "avatar-preview-82e6b6-0",
+        "source_voice_file_id": "36801f1d91084774b8f7e5d6004bba7c",
+        "source_video_file_id": "531ebd1eb7b642129664e1ba537b5eb8",
+        "output_path": "data\\avatar_materials\\profiles\\2_422d4e7b\\previews\\82e6b6df3233427d99068948f5aa4913.mp4",
+        "output_size_bytes": 12251950,
+        "duration_sec": 6.48,
+        "width": 1248,
+        "height": 1664,
+        "preview_mode": "scripted_tts",
+        "fallback_reason": null,
+        "created_at": "2026-03-13T11:06:42Z"
+      },
+      {
+        "id": "f286c3be82174c22a9c592b3f4b748ac",
+        "status": "completed",
+        "script": "大家好，我是赛博迪克朗。现在这是一条 RoughCut 自动生成的数字人预览样片，主要用于检查音色一致性、口型同步和讲话镜头的整体稳定性。",
+        "task_code": "avatar-preview-f286c3-0",
+        "source_voice_file_id": "36801f1d91084774b8f7e5d6004bba7c",
+        "source_video_file_id": "531ebd1eb7b642129664e1ba537b5eb8",
+        "output_path": "data\\avatar_materials\\profiles\\2_422d4e7b\\previews\\f286c3be82174c22a9c592b3f4b748ac.mp4",
+        "output_size_bytes": 22079129,
+        "duration_sec": 11.52,
+        "width": 1248,
+        "height": 1664,
+        "preview_mode": "scripted_tts",
+        "fallback_reason": null,
+        "created_at": "2026-03-13T10:54:30Z"
+      },
+      {
+        "id": "429e4ed8614c42fda44735d972ff839d",
+        "status": "failed",
+        "script": "大家好，我是赛博迪克朗。现在这是一条 RoughCut 自动生成的数字人预览样片，主要用于检查音色一致性、口型同步和讲话镜头的整体稳定性。",
+        "error_message": "No preview-capable HeyGem endpoint found; training-only endpoints: http://127.0.0.1:49203; unreachable endpoints: http://127.0.0.1:49202",
+        "created_at": "2026-03-13T10:52:30.050370+00:00"
+      },
+      {
+        "id": "7bc8359da18940c290e5af97e93e2173",
+        "status": "failed",
+        "script": "大家好，我是赛博迪克朗。现在这是一条 RoughCut 自动生成的数字人预览样片，主要用于检查音色一致性、口型同步和讲话镜头的整体稳定性。",
+        "error_message": "No preview-capable HeyGem endpoint found; training-only endpoints: http://127.0.0.1:49203; unreachable endpoints: http://127.0.0.1:8383",
+        "created_at": "2026-03-13T10:51:37.513911+00:00"
+      },
+      {
+        "id": "591c9a1f69034ad4acf3427d9be8426b",
+        "status": "failed",
+        "script": "大家好，我是赛博迪克朗。现在这是一条 RoughCut 自动生成的数字人预览样片，主要用于检查音色一致性、口型同步和讲话镜头的整体稳定性。",
+        "error_message": "Server error '500 Internal Server Error' for url 'http://127.0.0.1:49203/v1/invoke'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500",
+        "created_at": "2026-03-13T10:46:35.633459+00:00"
+      },
+      {
+        "id": "7461334518f342408827649d84f6fa38",
+        "status": "completed",
+        "script": "大家好，我是赛博迪克朗。现在这是一条 RoughCut 自动生成的数字人预览样片，主要用于检查音色一致性、口型同步和讲话镜头的整体稳定性。",
+        "task_code": "avatar-preview-746133-0",
+        "source_voice_file_id": "36801f1d91084774b8f7e5d6004bba7c",
+        "source_video_file_id": "531ebd1eb7b642129664e1ba537b5eb8",
+        "output_path": "data\\avatar_materials\\profiles\\2_422d4e7b\\previews\\7461334518f342408827649d84f6fa38.mp4",
+        "output_size_bytes": 327666,
+        "duration_sec": 3.0,
+        "width": 640,
+        "height": 360,
+        "preview_mode": "scripted_tts",
+        "fallback_reason": null,
+        "created_at": "2026-03-13T10:24:45Z"
+      },
+      {
+        "id": "5ccfef79ba7249e3a993ecdbd8ee3133",
+        "status": "failed",
+        "script": "大家好，我是赛博迪克朗。现在这是一条 RoughCut 自动生成的数字人预览样片，主要用于检查音色一致性、口型同步和讲话镜头的整体稳定性。",
+        "error_message": "heygem_preview_result_points_to_source_video",
+        "created_at": "2026-03-13T10:21:05.305512+00:00"
+      }
+    ],
+    "personal_info": {
+      "public_name": "CyberDickLang",
+      "real_name": null,
+      "title": null,
+      "organization": null,
+      "location": null,
+      "bio": null,
+      "expertise": [],
+      "experience": null,
+      "achievements": null,
+      "creator_focus": null,
+      "audience": null,
+      "style": null,
+      "contact": null,
+      "extra_notes": null
+    },
+    "creator_profile": {
+      "identity": {
+        "public_name": "CyberDickLang",
+        "real_name": null,
+        "title": null,
+        "organization": null,
+        "location": null,
+        "bio": null
+      },
+      "positioning": {
+        "creator_focus": null,
+        "expertise": [],
+        "audience": null,
+        "style": null,
+        "tone_keywords": []
+      },
+      "publishing": {
+        "primary_platform": null,
+        "active_platforms": [],
+        "signature": null,
+        "default_call_to_action": null,
+        "description_strategy": null
+      },
+      "business": {
+        "contact": null,
+        "collaboration_notes": null,
+        "availability": null
+      },
+      "archive_notes": "赛博迪克朗 的个人数字人"
+    },
     "profile_dashboard": {
       "completeness_score": 20,
       "section_status": {

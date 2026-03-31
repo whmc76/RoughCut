@@ -1,6 +1,6 @@
 import { render, screen } from "@testing-library/react";
 
-import type { Config, RuntimeEnvironment } from "../../types";
+import type { Config, ProviderServiceStatus, RuntimeEnvironment } from "../../types";
 import { RuntimeSettingsPanel } from "./RuntimeSettingsPanel";
 import type { SettingsForm } from "./constants";
 
@@ -105,6 +105,15 @@ const SAMPLE_RUNTIME_ENVIRONMENT: RuntimeEnvironment = {
   output_dir: "output",
 };
 
+const SAMPLE_SERVICE_STATUS: ProviderServiceStatus = {
+  checked_at: "2026-03-31T12:00:00Z",
+  services: {
+    qwen_asr: { name: "qwen_asr", base_url: "http://127.0.0.1:18096", status: "ok", error: null },
+    ollama: { name: "ollama", base_url: "http://127.0.0.1:11434", status: "ok", error: null },
+    minimax: { name: "minimax", base_url: "https://api.minimaxi.com/v1", status: "configured", error: null },
+  },
+};
+
 describe("RuntimeSettingsPanel", () => {
   it("shows only the active provider credentials", () => {
     const form: SettingsForm = {
@@ -124,6 +133,7 @@ describe("RuntimeSettingsPanel", () => {
         form={form}
         config={SAMPLE_CONFIG}
         runtimeEnvironment={SAMPLE_RUNTIME_ENVIRONMENT}
+        serviceStatus={SAMPLE_SERVICE_STATUS}
         onChange={vi.fn()}
       />,
     );
@@ -134,6 +144,7 @@ describe("RuntimeSettingsPanel", () => {
     expect(screen.getByText("凭据来源：当前会话")).toBeTruthy();
     expect(screen.getAllByText(/MiniMax · 当前会话/).length).toBeGreaterThan(0);
     expect(screen.getByLabelText("MiniMax API Key")).toBeTruthy();
+    expect(screen.getByText(/Qwen ASR \(local\) · 状态正常/)).toBeTruthy();
     expect(screen.queryByLabelText("OpenAI API Key")).toBeNull();
     expect(screen.queryByLabelText("Anthropic API Key")).toBeNull();
   });

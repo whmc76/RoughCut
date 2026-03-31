@@ -7,7 +7,7 @@ import type { UploadForm } from "./constants";
 const EMPTY_UPLOAD: UploadForm = {
   file: null,
   language: "zh-CN",
-  channelProfile: "",
+  workflowTemplate: "",
   workflowMode: "standard_edit",
   enhancementModes: [],
 };
@@ -34,9 +34,6 @@ export function useJobWorkspace() {
   const queryClient = useQueryClient();
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
   const [keyword, setKeyword] = useState("");
-  const [usageTrendDays, setUsageTrendDays] = useState(7);
-  const [usageTrendFocusType, setUsageTrendFocusType] = useState("all");
-  const [usageTrendFocusName, setUsageTrendFocusName] = useState("");
   const [upload, setUpload] = useState<UploadForm>(EMPTY_UPLOAD);
   const [contentDraft, setContentDraft] = useState<Record<string, unknown>>({});
   const [reviewWorkflowMode, setReviewWorkflowMode] = useState("standard_edit");
@@ -48,18 +45,6 @@ export function useJobWorkspace() {
   });
 
   const jobs = useQuery({ queryKey: ["jobs"], queryFn: api.listJobs, refetchInterval: 8_000 });
-  const usageSummary = useQuery({ queryKey: ["jobs-usage-summary", 60], queryFn: () => api.getJobsUsageSummary(60), refetchInterval: 12_000 });
-  const usageTrend = useQuery({
-    queryKey: ["jobs-usage-trend", usageTrendDays, 120, usageTrendFocusType, usageTrendFocusName],
-    queryFn: () =>
-      api.getJobsUsageTrend(
-        usageTrendDays,
-        120,
-        usageTrendFocusType !== "all" ? usageTrendFocusType : undefined,
-        usageTrendFocusName || undefined,
-      ),
-    refetchInterval: 12_000,
-  });
   const options = useQuery({ queryKey: ["config-options"], queryFn: api.getConfigOptions });
   const config = useQuery({ queryKey: ["config"], queryFn: api.getConfig });
   const packaging = useQuery({ queryKey: ["packaging"], queryFn: api.getPackaging });
@@ -215,7 +200,7 @@ export function useJobWorkspace() {
       api.createJob(
         upload.file!,
         upload.language,
-        upload.channelProfile || undefined,
+        upload.workflowTemplate || undefined,
         upload.workflowMode,
         upload.enhancementModes,
       ),
@@ -287,19 +272,11 @@ export function useJobWorkspace() {
     setSelectedJobId,
     keyword,
     setKeyword,
-    usageTrendDays,
-    setUsageTrendDays,
-    usageTrendFocusType,
-    setUsageTrendFocusType,
-    usageTrendFocusName,
-    setUsageTrendFocusName,
     upload,
     setUpload,
     contentDraft,
     setContentDraft,
     jobs,
-    usageSummary,
-    usageTrend,
     detail,
     activity,
     report,

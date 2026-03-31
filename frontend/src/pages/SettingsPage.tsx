@@ -68,9 +68,16 @@ export function SettingsPage() {
             form={workspace.form}
             config={workspace.config.data}
             runtimeEnvironment={workspace.runtimeEnvironment.data}
+            serviceStatus={workspace.serviceStatus.data}
             configProfiles={workspace.configProfiles.data}
           />
-          <ModelSettingsPanel form={workspace.form} options={workspace.options.data} onChange={(key, value) => workspace.setForm((prev) => ({ ...prev, [key]: value }))} />
+          <ModelSettingsPanel
+            form={workspace.form}
+            options={workspace.options.data}
+            runtimeEnvironment={workspace.runtimeEnvironment.data}
+            serviceStatus={workspace.serviceStatus.data}
+            onChange={(key, value) => workspace.setForm((prev) => ({ ...prev, [key]: value }))}
+          />
           <QualitySettingsPanel form={workspace.form} config={workspace.config.data} onChange={(key, value) => workspace.setForm((prev) => ({ ...prev, [key]: value }))} />
         </div>
       </PageSection>
@@ -92,6 +99,7 @@ export function SettingsPage() {
               form={workspace.form}
               config={workspace.config.data}
               runtimeEnvironment={workspace.runtimeEnvironment.data}
+              serviceStatus={workspace.serviceStatus.data}
               onChange={(key, value) => workspace.setForm((prev) => ({ ...prev, [key]: value }))}
             />
             <details className="settings-disclosure settings-page-advanced" open={advancedSectionOpen}>
