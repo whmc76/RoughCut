@@ -15,7 +15,11 @@ from roughcut.providers.multimodal import complete_with_images
 from roughcut.providers.reasoning.base import Message, extract_json_text
 from roughcut.usage import track_usage_operation
 from roughcut.review.content_profile_memory import summarize_content_profile_user_memory
+from roughcut.review.content_profile_candidates import build_identity_candidates
+from roughcut.review.content_profile_evidence import IdentityEvidenceBundle
+from roughcut.review.content_profile_resolve import resolve_identity_candidates
 from roughcut.review.content_profile_review_stats import build_content_profile_auto_review_gate
+from roughcut.review.content_profile_scoring import score_identity_candidates
 from roughcut.review.subtitle_memory import (
     _extract_compound_components,
     apply_domain_term_corrections,
@@ -468,6 +472,17 @@ def apply_identity_review_guard(
     source_name: str = "",
 ) -> dict[str, Any]:
     guarded = dict(profile or {})
+    transcript_excerpt = str(guarded.get("transcript_excerpt") or "").strip()
+    if not transcript_excerpt and subtitle_items:
+        transcript_excerpt = build_transcript_excerpt(list(subtitle_items), max_items=24, max_chars=900)
+    memory_hints = _seed_profile_from_user_memory(transcript_excerpt, user_memory)
+    guarded = _sanitize_profile_identity(
+        guarded,
+        transcript_excerpt=transcript_excerpt,
+        source_name=source_name,
+        glossary_terms=glossary_terms,
+        memory_hints=memory_hints,
+    )
     identity_review = _assess_identity_review_requirement(
         guarded,
         subtitle_items=subtitle_items,
@@ -899,53 +914,52 @@ def _sanitize_profile_identity(
 
     confirmed_brand = str(confirmed_fields.get("subject_brand") or "").strip()
     confirmed_model = str(confirmed_fields.get("subject_model") or "").strip()
-    identity_conflict_detected = False
+    evidence_bundle = IdentityEvidenceBundle(
+        transcript_excerpt=transcript_excerpt,
+        source_name=source_name,
+        transcript_hints=transcript_hints,
+        source_hints=source_hints,
+        visual_hints={
+            "subject_brand": str(raw_visual_hints.get("subject_brand") or "").strip(),
+            "subject_model": str(raw_visual_hints.get("subject_model") or "").strip(),
+            "subject_type": str(raw_visual_hints.get("subject_type") or "").strip(),
+            "visible_text": str(raw_visual_hints.get("visible_text") or "").strip(),
+        },
+        visible_text_hints=visual_hints,
+        profile_identity={
+            "subject_brand": str(sanitized.get("subject_brand") or "").strip(),
+            "subject_model": str(sanitized.get("subject_model") or "").strip(),
+            "subject_type": str(sanitized.get("subject_type") or "").strip(),
+        },
+    )
+    scored_candidates = score_identity_candidates(
+        build_identity_candidates(evidence_bundle),
+        normalize=_normalize_profile_value,
+    )
+    resolved_identity = resolve_identity_candidates(
+        scored_candidates,
+        normalize=_normalize_profile_value,
+        mapped_brand_for_model=_mapped_brand_for_model,
+    )
+    identity_conflict_detected = bool(resolved_identity.conflicts)
 
     if confirmed_model:
         verified_model = confirmed_model
     else:
-        verified_model = _supported_identity_value(
-            sanitized.get("subject_model"),
-            transcript_hints.get("subject_model"),
-            raw_visual_hints.get("subject_model"),
-            visual_hints.get("subject_model"),
-            theme_hints.get("subject_model"),
-            source_hints.get("subject_model"),
-        )
+        verified_model = resolved_identity.subject_model
 
     if confirmed_brand:
         verified_brand = confirmed_brand
     else:
-        verified_brand = _supported_identity_value(
-            sanitized.get("subject_brand"),
-            transcript_hints.get("subject_brand"),
-            raw_visual_hints.get("subject_brand"),
-            visual_hints.get("subject_brand"),
-            theme_hints.get("subject_brand"),
-            source_hints.get("subject_brand"),
-        )
-        if not verified_brand and verified_model:
-            mapped_brand = _mapped_brand_for_model(verified_model)
-            if mapped_brand and not confirmed_brand:
-                current_brand = str(sanitized.get("subject_brand") or "").strip()
-                if current_brand and _normalize_profile_value(current_brand) != _normalize_profile_value(mapped_brand):
-                    identity_conflict_detected = True
-                else:
-                    verified_brand = mapped_brand
+        verified_brand = resolved_identity.subject_brand
 
-    mapped_brand = _mapped_brand_for_model(verified_model)
-    if (
-        mapped_brand
-        and verified_brand
-        and _normalize_profile_value(verified_brand) != _normalize_profile_value(mapped_brand)
-    ):
-        identity_conflict_detected = True
-        if confirmed_brand and confirmed_model:
-            pass
-        elif confirmed_brand:
-            verified_model = ""
-        else:
-            verified_brand = ""
+    profile_identity_conflict_detected = False
+    current_profile_brand = str(sanitized.get("subject_brand") or "").strip()
+    current_profile_model = str(sanitized.get("subject_model") or "").strip()
+    if current_profile_brand and verified_brand and _normalize_profile_value(current_profile_brand) != _normalize_profile_value(verified_brand):
+        profile_identity_conflict_detected = True
+    if current_profile_model and verified_model and _normalize_profile_value(current_profile_model) != _normalize_profile_value(verified_model):
+        profile_identity_conflict_detected = True
 
     if not verified_brand:
         sanitized["subject_brand"] = ""
@@ -957,7 +971,15 @@ def _sanitize_profile_identity(
     else:
         sanitized["subject_model"] = verified_model
 
-    if identity_conflict_detected or (not sanitized.get("subject_brand") and not sanitized.get("subject_model")):
+    if "subject_type" not in confirmed_fields:
+        resolved_subject_type = str(resolved_identity.subject_type or "").strip()
+        current_subject_type = str(sanitized.get("subject_type") or "").strip()
+        if resolved_subject_type:
+            sanitized["subject_type"] = resolved_subject_type
+        elif _is_generic_subject_type(current_subject_type):
+            sanitized["subject_type"] = ""
+
+    if identity_conflict_detected or profile_identity_conflict_detected or (not sanitized.get("subject_brand") and not sanitized.get("subject_model")):
         for key in ("video_theme", "visible_text", "hook_line", "summary", "engagement_question"):
             if key in confirmed_fields:
                 continue
@@ -1125,14 +1147,12 @@ def _text_has_unsupported_identity(
     if seeded_brand and not _first_supported_identity_value(
         seeded_brand,
         transcript_hints.get("subject_brand"),
-        (memory_hints or {}).get("subject_brand"),
         source_hints.get("subject_brand"),
     ):
         return True
     if seeded_model and not _first_supported_identity_value(
         seeded_model,
         transcript_hints.get("subject_model"),
-        (memory_hints or {}).get("subject_model"),
         source_hints.get("subject_model"),
     ):
         return True
@@ -2450,11 +2470,12 @@ def _seed_profile_from_text(
         tech_brand=tech_brand,
         topic_terms=topic_terms,
     )
-    if tech_brand and not brand:
+    physical_product_detected = subject_type in {"多功能工具钳", "EDC折刀", "EDC手电", "EDC机能包"}
+    if tech_brand and not brand and not physical_product_detected:
         brand = tech_brand
-    if tech_subject_type:
+    if tech_subject_type and not physical_product_detected:
         subject_type = tech_subject_type
-    if feature and not model:
+    if feature and not model and not physical_product_detected:
         model = feature
 
     seeded: dict[str, Any] = {}

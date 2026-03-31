@@ -979,7 +979,7 @@ async def test_run_subtitle_translation_skips_when_source_matches_target_languag
 
 
 @pytest.mark.asyncio
-async def test_run_content_profile_prefers_seeded_profile_from_early_glossary(db_engine, monkeypatch):
+async def test_run_content_profile_does_not_trust_seeded_profile_without_current_identity_evidence(db_engine, monkeypatch):
     import roughcut.pipeline.steps as steps_mod
 
     factory = async_sessionmaker(db_engine, expire_on_commit=False)
@@ -1019,9 +1019,9 @@ async def test_run_content_profile_prefers_seeded_profile_from_early_glossary(db
                 item_index=0,
                 start_time=0.0,
                 end_time=1.0,
-                text_raw="Loop露普SK05二代Pro UV版",
-                text_norm="Loop露普SK05二代Pro UV版",
-                text_final="Loop露普SK05二代Pro UV版",
+                text_raw="这期重点看夹持、补光范围和实际手感。",
+                text_norm="这期重点看夹持、补光范围和实际手感。",
+                text_final="这期重点看夹持、补光范围和实际手感。",
             )
         )
         await session.commit()
@@ -1032,29 +1032,26 @@ async def test_run_content_profile_prefers_seeded_profile_from_early_glossary(db
     async def fake_load_content_profile_user_memory(*args, **kwargs):
         return {}
 
-    async def fail_infer_content_profile(**kwargs):
-        raise AssertionError("infer_content_profile should not run when a seeded profile exists")
-
     async def fake_enrich_content_profile(**kwargs):
         profile = dict(kwargs["profile"])
         profile["engagement_question"] = "你更看重 UV 还是主灯？"
         return profile
 
     monkeypatch.setattr(steps_mod, "load_content_profile_user_memory", fake_load_content_profile_user_memory)
-    monkeypatch.setattr(steps_mod, "infer_content_profile", fail_infer_content_profile)
     monkeypatch.setattr(steps_mod, "enrich_content_profile", fake_enrich_content_profile)
 
     result = await run_content_profile(str(job_id))
 
-    assert result["subject_brand"] == "Loop露普"
-    assert result["subject_model"] == "SK05二代Pro UV版"
+    assert result["subject_brand"] in {"", None}
+    assert result["subject_model"] in {"", None}
 
     async with factory() as session:
         artifact_result = await session.execute(
             select(Artifact).where(Artifact.job_id == job_id, Artifact.artifact_type == "content_profile_draft")
         )
         draft = artifact_result.scalar_one()
-        assert draft.data_json["subject_brand"] == "Loop露普"
+        assert draft.data_json["subject_brand"] in {"", None}
+        assert draft.data_json["subject_model"] in {"", None}
         assert draft.data_json["engagement_question"] == "你更看重 UV 还是主灯？"
 
     assert fake_review_bot.content_profile_notifications == [job_id]

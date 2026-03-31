@@ -87,6 +87,16 @@ def test_seed_profile_from_text_extracts_flashlight_brand_and_model():
     assert any("SK05" in item for item in seeded["search_queries"])
 
 
+def test_seed_profile_from_text_keeps_physical_product_subject_when_stray_tech_brand_appears():
+    seeded = _seed_profile_from_text(
+        "这期主要开箱一个夜骑手电，重点看泛光、聚光和夹持手感。"
+        "桌面显示器上挂着 ComfyUI 页面，但那不是本期主体。"
+    )
+
+    assert seeded["subject_type"] == "EDC手电"
+    assert seeded.get("subject_brand", "") != "ComfyUI"
+
+
 def test_seed_profile_from_text_extracts_bag_brand_and_model_from_fxx1_alias():
     seeded = _seed_profile_from_text("这期鸿福 F叉二一小副包做个开箱测评，重点看分仓、挂点和日常收纳。")
 
@@ -132,7 +142,7 @@ def test_sanitize_profile_identity_backfills_supported_transcript_brand_and_mode
     assert sanitized["subject_model"] == "SK05二代UV版"
 
 
-def test_sanitize_profile_identity_backfills_brand_model_from_specific_theme():
+def test_sanitize_profile_identity_does_not_backfill_brand_model_from_theme_without_current_evidence():
     sanitized = _sanitize_profile_identity(
         {
             "subject_brand": "",
@@ -145,11 +155,11 @@ def test_sanitize_profile_identity_backfills_brand_model_from_specific_theme():
         memory_hints=None,
     )
 
-    assert sanitized["subject_brand"] == "Loop露普"
-    assert sanitized["subject_model"] == "SK05二代UV版"
+    assert sanitized["subject_brand"] == ""
+    assert sanitized["subject_model"] == ""
 
 
-def test_sanitize_profile_identity_corrects_conflicting_brand_model_pair():
+def test_sanitize_profile_identity_prefers_current_video_evidence_over_conflicting_profile_identity():
     sanitized = _sanitize_profile_identity(
         {
             "subject_brand": "LEATHERMAN",
@@ -163,10 +173,10 @@ def test_sanitize_profile_identity_corrects_conflicting_brand_model_pair():
         memory_hints=None,
     )
 
-    assert sanitized["subject_brand"] == ""
+    assert sanitized["subject_brand"] == "Loop露普"
     assert sanitized["subject_model"] == "SK05二代Pro UV版"
-    assert sanitized["video_theme"] == ""
-    assert sanitized["summary"] == ""
+    assert "LEATHERMAN" not in sanitized["video_theme"]
+    assert "LEATHERMAN" not in sanitized["summary"]
 
 
 def test_merge_specific_profile_hints_upgrades_generic_video_theme():
@@ -206,6 +216,26 @@ def test_seed_profile_from_user_memory_uses_recent_brand_model_corrections():
     assert seeded["subject_brand"] == "Loop露普"
     assert seeded["subject_model"] == "SK05二代Pro UV版"
     assert seeded["subject_type"] == "EDC手电"
+
+
+def test_seed_profile_from_user_memory_does_not_inject_brand_model_without_current_token_hit():
+    seeded = _seed_profile_from_user_memory(
+        "这次重点看夜骑补光、夹持结构和防滚设计。",
+        {
+            "field_preferences": {
+                "subject_brand": [{"value": "Loop露普", "count": 6}],
+                "subject_model": [{"value": "SK05二代Pro UV版", "count": 8}],
+                "subject_type": [{"value": "EDC手电", "count": 3}],
+            },
+            "recent_corrections": [
+                {"field_name": "subject_brand", "corrected_value": "Loop露普"},
+                {"field_name": "subject_model", "corrected_value": "SK05二代Pro UV版"},
+            ],
+            "phrase_preferences": [{"phrase": "Loop露普 SK05二代Pro UV版", "count": 4}],
+        },
+    )
+
+    assert seeded == {}
 
 
 def test_build_cover_title_prefers_visible_english_brand():
