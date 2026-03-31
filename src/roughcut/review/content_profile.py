@@ -3866,11 +3866,13 @@ def _build_unboxing_cover_hook(*, theme: str) -> str:
 
 
 def _is_tutorial_preset(preset: WorkflowPreset) -> bool:
-    return preset.content_kind == "tutorial" or preset.name in {"screen_tutorial", "tutorial_standard"}
+    content_kind = str(getattr(preset, "content_kind", "") or "").strip().lower()
+    return content_kind == "tutorial" or preset.name in {"screen_tutorial", "tutorial_standard"}
 
 
 def _is_unboxing_preset(preset: WorkflowPreset) -> bool:
-    return preset.content_kind == "unboxing" or preset.name in {
+    content_kind = str(getattr(preset, "content_kind", "") or "").strip().lower()
+    return content_kind == "unboxing" or preset.name in {
         "unboxing_standard",
         "unboxing_limited",
         "unboxing_upgrade",
@@ -3879,7 +3881,8 @@ def _is_unboxing_preset(preset: WorkflowPreset) -> bool:
 
 
 def _is_commentary_preset(preset: WorkflowPreset) -> bool:
-    return preset.content_kind == "commentary" or preset.name in {"commentary_focus", "talking_head_commentary"}
+    content_kind = str(getattr(preset, "content_kind", "") or "").strip().lower()
+    return content_kind == "commentary" or preset.name in {"commentary_focus", "talking_head_commentary"}
 
 
 def _apply_copy_style_to_hook(
