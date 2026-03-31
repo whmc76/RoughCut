@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -12,8 +13,31 @@ from roughcut.api.router import api_router
 from roughcut.config import get_settings
 from roughcut.runtime_health import build_readiness_payload
 
-_REPO_ROOT = Path(__file__).resolve().parents[2]
-_FRONTEND_DIST = _REPO_ROOT / "frontend" / "dist"
+
+def _resolve_frontend_dist() -> Path:
+    candidates: list[Path] = []
+
+    configured = os.getenv("ROUGHCUT_FRONTEND_DIST")
+    if configured:
+        candidates.append(Path(configured).expanduser())
+
+    module_path = Path(__file__).resolve()
+    candidates.extend(parent / "frontend" / "dist" for parent in module_path.parents)
+    candidates.append(Path.cwd() / "frontend" / "dist")
+
+    seen: set[Path] = set()
+    for candidate in candidates:
+        resolved = candidate.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        if (resolved / "index.html").exists():
+            return resolved
+
+    return candidates[0].resolve() if candidates else Path.cwd() / "frontend" / "dist"
+
+
+_FRONTEND_DIST = _resolve_frontend_dist()
 
 
 @asynccontextmanager

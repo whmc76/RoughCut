@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from roughcut import runtime_preflight as mod
@@ -41,3 +43,12 @@ async def test_runtime_preflight_is_throttled(monkeypatch: pytest.MonkeyPatch):
     await mod.ensure_runtime_services_ready(reason="second")
 
     assert calls == ["core", "managed:first"]
+
+
+def test_runtime_compose_overrides_voice_clone_api_base_url_for_containers():
+    compose_text = Path("docker-compose.runtime.yml").read_text(encoding="utf-8")
+
+    assert (
+        "VOICE_CLONE_API_BASE_URL: ${ROUGHCUT_DOCKER_VOICE_CLONE_API_BASE_URL:-http://host.docker.internal:49204}"
+        in compose_text
+    )

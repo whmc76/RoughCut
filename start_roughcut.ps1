@@ -34,6 +34,8 @@ $InfraComposeFile = Join-Path $RepoRoot "docker-compose.infra.yml"
 $RuntimeComposeFile = Join-Path $RepoRoot "docker-compose.runtime.yml"
 $AutomationComposeFile = Join-Path $RepoRoot "docker-compose.automation.yml"
 $DockerWatchScript = Join-Path $RepoRoot "scripts\watch-roughcut-docker-runtime.ps1"
+$EnsureTelegramAgentScript = Join-Path $RepoRoot "scripts\ensure-roughcut-telegram-agent.ps1"
+$StopTelegramAgentScript = Join-Path $RepoRoot "scripts\stop-roughcut-telegram-agent.ps1"
 $script:ManagedProcesses = @()
 
 function Invoke-NativeCommandChecked {
@@ -821,6 +823,9 @@ function Stop-RoughCutServices {
     Stop-RoughCutProcess -Name "Media worker" -Pattern "celery -A roughcut\.pipeline\.celery_app:celery_app worker --queues=media_queue"
     Stop-RoughCutProcess -Name "LLM worker" -Pattern "celery -A roughcut\.pipeline\.celery_app:celery_app worker --queues=llm_queue"
     Stop-RoughCutProcess -Name "Watcher" -Pattern "roughcut\.cli watcher"
+    if (Test-Path $StopTelegramAgentScript) {
+        & $StopTelegramAgentScript
+    }
 
     if ($StopDockerServices) {
         Write-Host "Stopping docker compose services..." -ForegroundColor Cyan
@@ -969,12 +974,18 @@ if ($Mode -eq "runtime-down") {
 }
 
 if ($Mode -eq "full-down") {
+    if (Test-Path $StopTelegramAgentScript) {
+        & $StopTelegramAgentScript
+    }
     Stop-RoughCutComposeMode -ComposeMode "full"
     exit 0
 }
 
 if ($Mode -ne "local") {
     Start-RoughCutComposeMode -ComposeMode $Mode
+    if ($Mode -eq "full" -and (Test-Path $EnsureTelegramAgentScript)) {
+        & $EnsureTelegramAgentScript -Restart
+    }
     if ($Mode -in @("runtime", "full")) {
         Start-RoughCutDockerWatch -ComposeMode $Mode
     }
@@ -1056,6 +1067,12 @@ if (-not $NoWatcher) {
         -StdoutPath (Join-Path $RepoRoot "logs\watcher.out.log") `
         -StderrPath (Join-Path $RepoRoot "logs\watcher.err.log")
 }
+Start-RoughCutProcess `
+    -Name "Telegram agent" `
+    -Arguments @("-m", "roughcut.cli", "telegram-agent") `
+    -MatchPattern ([regex]::Escape("roughcut.cli telegram-agent")) `
+    -StdoutPath (Join-Path $RepoRoot "logs\telegram-agent.out.log") `
+    -StderrPath (Join-Path $RepoRoot "logs\telegram-agent.err.log")
 Start-RoughCutProcess `
     -Name "API" `
     -Arguments @("-m", "roughcut.cli", "api", "--host", "127.0.0.1", "--port", "$Port") `

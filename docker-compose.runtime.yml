@@ -15,6 +15,7 @@ x-app-env: &app-env
   HEYGEM_VOICE_ROOT: /code/data/voice/data
   AVATAR_API_BASE_URL: ${AVATAR_API_BASE_URL:-http://host.docker.internal:49202}
   AVATAR_TRAINING_API_BASE_URL: ${AVATAR_TRAINING_API_BASE_URL:-http://host.docker.internal:49204}
+  VOICE_CLONE_API_BASE_URL: ${ROUGHCUT_DOCKER_VOICE_CLONE_API_BASE_URL:-http://host.docker.internal:49204}
   OLLAMA_BASE_URL: ${ROUGHCUT_DOCKER_OLLAMA_BASE_URL:-http://host.docker.internal:11434}
 
 x-app-common: &app-common
