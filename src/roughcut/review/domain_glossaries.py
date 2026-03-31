@@ -385,14 +385,14 @@ _DOMAIN_TERM_LIBRARY: dict[str, tuple[GlossaryTermLike, ...]] = {
     ),
 }
 
-_CHANNEL_PROFILE_DOMAINS: dict[str, tuple[str, ...]] = {
+_WORKFLOW_TEMPLATE_DOMAINS: dict[str, tuple[str, ...]] = {
     "edc_tactical": ("gear", "knife", "tactical", "outdoor", "flashlight", "bag", "lighter", "functional_wear", "toy"),
-    "screen_tutorial": ("tech", "ai", "coding"),
+    "tutorial_standard": ("tech", "ai", "coding"),
     "vlog_daily": ("travel",),
-    "talking_head_commentary": ("tech", "ai", "coding"),
+    "commentary_focus": ("tech", "ai", "coding"),
     "gameplay_highlight": ("tech",),
     "food_explore": ("food",),
-    "unboxing_default": ("gear", "tech", "bag"),
+    "unboxing_standard": ("gear", "tech", "bag"),
     "unboxing_limited": ("gear", "tech", "bag"),
     "unboxing_upgrade": ("gear", "tech", "bag"),
     "news_briefing": ("news", "finance"),
@@ -464,13 +464,13 @@ _VISIBLE_DOMAIN_PACKS: tuple[str, ...] = (
 
 def resolve_builtin_glossary_terms(
     *,
-    channel_profile: str | None,
+    workflow_template: str | None,
     content_profile: dict[str, Any] | None = None,
     subtitle_items: list[dict[str, Any]] | None = None,
     source_name: str | None = None,
 ) -> list[GlossaryTermLike]:
     domains = detect_glossary_domains(
-        channel_profile=channel_profile,
+        workflow_template=workflow_template,
         content_profile=content_profile,
         subtitle_items=subtitle_items,
         source_name=source_name,
@@ -485,14 +485,14 @@ def resolve_builtin_glossary_terms(
 def filter_scoped_glossary_terms(
     terms: list[GlossaryTermLike] | None,
     *,
-    channel_profile: str | None,
+    workflow_template: str | None,
     content_profile: dict[str, Any] | None = None,
     subtitle_items: list[dict[str, Any]] | None = None,
     source_name: str | None = None,
 ) -> list[GlossaryTermLike]:
     detected_domains = set(
         detect_glossary_domains(
-            channel_profile=channel_profile,
+            workflow_template=workflow_template,
             content_profile=content_profile,
             subtitle_items=subtitle_items,
             source_name=source_name,
@@ -505,7 +505,7 @@ def filter_scoped_glossary_terms(
         if scope_type == "global":
             filtered.append(term)
             continue
-        if scope_type == "channel_profile" and channel_profile and scope_value == channel_profile:
+        if scope_type == "workflow_template" and workflow_template and scope_value == workflow_template:
             filtered.append(term)
             continue
         if scope_type == "domain" and scope_value in detected_domains:
@@ -545,15 +545,19 @@ def merge_glossary_terms(
 
 def detect_glossary_domains(
     *,
-    channel_profile: str | None,
+    workflow_template: str | None,
     content_profile: dict[str, Any] | None = None,
     subtitle_items: list[dict[str, Any]] | None = None,
     source_name: str | None = None,
 ) -> list[str]:
     domains: list[str] = []
-    for domain in _CHANNEL_PROFILE_DOMAINS.get(str(channel_profile or "").strip(), ()):
+    for domain in _WORKFLOW_TEMPLATE_DOMAINS.get(str(workflow_template or "").strip(), ()):
         if domain not in domains:
             domains.append(domain)
+
+    declared_domain = str((content_profile or {}).get("subject_domain") or "").strip().lower()
+    if declared_domain and declared_domain not in domains:
+        domains.append(declared_domain)
 
     haystacks: list[str] = []
     if source_name:
@@ -609,7 +613,7 @@ def list_builtin_glossary_packs() -> list[dict[str, Any]]:
         )
         presets = sorted(
             preset
-            for preset, domains in _CHANNEL_PROFILE_DOMAINS.items()
+            for preset, domains in _WORKFLOW_TEMPLATE_DOMAINS.items()
             if domain in domains
         )
         packs.append(

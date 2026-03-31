@@ -239,7 +239,8 @@ _CHINESE_TO_ARABIC_DIGITS = {
 
 def build_subtitle_review_memory(
     *,
-    channel_profile: str | None,
+    workflow_template: str | None = None,
+    channel_profile: str | None = None,
     glossary_terms: list[dict[str, Any]] | None,
     user_memory: dict[str, Any] | None,
     recent_subtitles: list[dict[str, Any]] | None,
@@ -249,20 +250,22 @@ def build_subtitle_review_memory(
     term_limit: int = 30,
     example_limit: int = 6,
 ) -> dict[str, Any]:
+    if workflow_template is None and channel_profile is not None:
+        workflow_template = channel_profile
     term_scores: Counter[str] = Counter()
     examples: list[dict[str, str]] = []
     alias_pairs: list[dict[str, str]] = []
     seen_examples: set[str] = set()
     seen_aliases: set[tuple[str, str]] = set()
     builtin_glossary_terms = resolve_builtin_glossary_terms(
-        channel_profile=channel_profile,
+        workflow_template=workflow_template,
         content_profile=content_profile,
         subtitle_items=recent_subtitles,
     )
     confirmed_entities = _build_confirmed_feedback_entities(content_profile)
     direct_domains = set(
         detect_glossary_domains(
-            channel_profile=channel_profile,
+            workflow_template=workflow_template,
             content_profile=content_profile,
             subtitle_items=recent_subtitles,
         )
@@ -477,7 +480,7 @@ def build_subtitle_review_memory(
     ranked_terms.sort(key=lambda item: (-_is_compound_domain_term(item["term"]), -int(item.get("count") or 0), item["term"]))
 
     return {
-        "channel_profile": channel_profile or "",
+        "workflow_template": workflow_template or "",
         "terms": ranked_terms,
         "aliases": alias_pairs[:120],
         "confirmed_entities": confirmed_entities[:6],
@@ -552,13 +555,16 @@ def _summarize_subtitle_review_memory(
 def build_transcription_prompt(
     *,
     source_name: str,
-    channel_profile: str | None,
+    workflow_template: str | None = None,
+    channel_profile: str | None = None,
     review_memory: dict[str, Any] | None,
     dialect_profile: str | None = None,
 ) -> str:
+    if workflow_template is None and channel_profile is not None:
+        workflow_template = channel_profile
     snippets: list[str] = []
-    if channel_profile:
-        snippets.append(f"频道类型：{channel_profile}")
+    if workflow_template:
+        snippets.append(f"默认模板：{workflow_template}")
 
     dialect_spec = resolve_transcription_dialect(dialect_profile)
     if dialect_spec["value"] != "mandarin":

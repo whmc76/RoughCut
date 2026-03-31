@@ -1,10 +1,13 @@
-import type { Config, ConfigOptions, ConfigProfiles, RuntimeEnvironment } from "../types";
+import type { Config, ConfigOptions, ConfigProfiles, ModelCatalog, ProviderServiceStatus, RuntimeEnvironment } from "../types";
 import { request } from "./core";
 
 export const configApi = {
   getConfig: () => request<Config>("/config"),
   getRuntimeEnvironment: () => request<RuntimeEnvironment>("/config/environment"),
+  getServiceStatus: () => request<ProviderServiceStatus>("/config/service-status"),
   getConfigOptions: () => request<ConfigOptions>("/config/options"),
+  getModelCatalog: ({ provider, kind, refresh = false }: { provider: string; kind: string; refresh?: boolean }) =>
+    request<ModelCatalog>(`/config/model-catalog?${new URLSearchParams({ provider, kind, refresh: refresh ? "1" : "0" }).toString()}`),
   getConfigProfiles: () => request<ConfigProfiles>("/config/profiles"),
   createConfigProfile: (name: string, description?: string) =>
     request<ConfigProfiles>("/config/profiles", {

@@ -1,8 +1,15 @@
-import type { Config, RuntimeEnvironment } from "../../types";
+import type { Config, ProviderServiceStatus, RuntimeEnvironment } from "../../types";
 import { TextField } from "../../components/forms/TextField";
 import { PanelHeader } from "../../components/ui/PanelHeader";
 import type { SettingsForm } from "./constants";
-import { getActiveReasoningProvider, getCredentialSourceLabel, getProviderLabel } from "./helpers";
+import {
+  getActiveReasoningProvider,
+  getCredentialSourceLabel,
+  getProviderLabel,
+  getProviderStatusLabel,
+  getTranscriptionProviderLabel,
+  isLocalTranscriptionProvider,
+} from "./helpers";
 
 const DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1";
 const DEFAULT_ANTHROPIC_BASE_URL = "https://api.anthropic.com";
@@ -15,10 +22,11 @@ type RuntimeSettingsPanelProps = {
   form: SettingsForm;
   config?: Config;
   runtimeEnvironment?: RuntimeEnvironment;
+  serviceStatus?: ProviderServiceStatus;
   onChange: (key: string, value: string | number | boolean) => void;
 };
 
-export function RuntimeSettingsPanel({ form, config, runtimeEnvironment, onChange }: RuntimeSettingsPanelProps) {
+export function RuntimeSettingsPanel({ form, config, runtimeEnvironment, serviceStatus, onChange }: RuntimeSettingsPanelProps) {
   const transcriptionProvider = String(form.transcription_provider ?? "");
   const activeReasoningProvider = getActiveReasoningProvider(form);
   const searchProvider = String(form.search_provider ?? "auto");
@@ -68,6 +76,7 @@ export function RuntimeSettingsPanel({ form, config, runtimeEnvironment, onChang
   const runtimeLimitsSummary = `上传 ${maxUploadSizeMb} MB · 视频 ${maxVideoDurationSec} 秒 · FFmpeg ${ffmpegTimeoutSec} 秒`;
   const runtimeLimitsOpen = maxUploadSizeMb !== 2048 || maxVideoDurationSec !== 7200 || ffmpegTimeoutSec !== 600;
   const outputDir = String(runtimeEnvironment?.output_dir ?? DEFAULT_OUTPUT_DIR).trim() || DEFAULT_OUTPUT_DIR;
+  const qwenStatus = serviceStatus?.services.qwen_asr;
   const environmentSummary = [
     `输出 ${outputDir}`,
     openAiUsesHelper ? `OpenAI ${String(runtimeEnvironment?.openai_auth_mode ?? "api_key")}` : "云端接入已分层",
@@ -190,8 +199,13 @@ export function RuntimeSettingsPanel({ form, config, runtimeEnvironment, onChang
             </div>
           </div>
         </details>
-        {(transcriptionProvider === "local_whisper" || transcriptionProvider === "funasr") && (
-          <div className="notice">转写走本地 {getProviderLabel(transcriptionProvider)}，不依赖云端 API key。</div>
+        {isLocalTranscriptionProvider(transcriptionProvider) && (
+          <div className="notice">转写走本地 {getTranscriptionProviderLabel(transcriptionProvider)}，不依赖云端 API key。</div>
+        )}
+        {transcriptionProvider === "qwen_asr" && qwenStatus && (
+          <div className="notice">
+            {getTranscriptionProviderLabel("qwen_asr")} · {getProviderStatusLabel(qwenStatus.status)}
+          </div>
         )}
         <details className="settings-disclosure" open={environmentDetailsOpen}>
           <summary className="settings-disclosure-trigger">

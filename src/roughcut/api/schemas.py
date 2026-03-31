@@ -11,14 +11,14 @@ from roughcut.creative.modes import (
     normalize_enhancement_modes,
     normalize_workflow_mode,
 )
-from roughcut.api.options import normalize_channel_profile, normalize_job_language
+from roughcut.api.options import normalize_job_language, normalize_workflow_template
 
 
 # ── Jobs ──────────────────────────────────────────────────────────────────────
 
 class JobCreate(BaseModel):
     language: str = "zh-CN"
-    channel_profile: str | None = None
+    workflow_template: str | None = None
     workflow_mode: str = DEFAULT_WORKFLOW_MODE
     enhancement_modes: list[str] = Field(default_factory=list)
 
@@ -27,10 +27,10 @@ class JobCreate(BaseModel):
     def validate_language(cls, value: Any) -> str:
         return normalize_job_language(value)
 
-    @field_validator("channel_profile", mode="before")
+    @field_validator("workflow_template", mode="before")
     @classmethod
-    def validate_channel_profile(cls, value: Any) -> str | None:
-        return normalize_channel_profile(value)
+    def validate_workflow_template(cls, value: Any) -> str | None:
+        return normalize_workflow_template(value)
 
     @field_validator("workflow_mode", mode="before")
     @classmethod
@@ -76,7 +76,7 @@ class JobOut(BaseModel):
     avatar_delivery_summary: str | None = None
     status: str
     language: str
-    channel_profile: str | None
+    workflow_template: str | None
     workflow_mode: str
     enhancement_modes: list[str] = Field(default_factory=list)
     file_hash: str | None
@@ -301,8 +301,8 @@ class OpenFolderOut(BaseModel):
 
 class ContentProfileMemoryStatsOut(BaseModel):
     scope: str
-    channel_profile: str | None = None
-    channel_profiles: list[str] = []
+    subject_domain: str | None = None
+    subject_domains: list[str] = []
     total_corrections: int = 0
     total_keywords: int = 0
     field_preferences: dict[str, list[dict[str, Any]]] = {}
@@ -575,14 +575,14 @@ class BuiltinGlossaryPackOut(BaseModel):
 
 class WatchRootCreate(BaseModel):
     path: str
-    channel_profile: str | None = None
+    workflow_template: str | None = None
     enabled: bool = True
     scan_mode: Literal["fast", "precise"] = "fast"
 
-    @field_validator("channel_profile", mode="before")
+    @field_validator("workflow_template", mode="before")
     @classmethod
-    def validate_channel_profile(cls, value: Any) -> str | None:
-        return normalize_channel_profile(value)
+    def validate_workflow_template(cls, value: Any) -> str | None:
+        return normalize_workflow_template(value)
 
 
 class WatchRootOut(BaseModel):
@@ -590,7 +590,7 @@ class WatchRootOut(BaseModel):
 
     id: uuid.UUID
     path: str
-    channel_profile: str | None
+    workflow_template: str | None
     enabled: bool
     scan_mode: Literal["fast", "precise"]
     created_at: datetime

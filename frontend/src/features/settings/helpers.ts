@@ -13,12 +13,44 @@ export const PROVIDER_LABELS: Record<string, string> = {
   searxng: "SearXNG",
 };
 
+export const TRANSCRIPTION_PROVIDER_LABELS: Record<string, string> = {
+  funasr: "FunASR (local)",
+  local_whisper: "Faster Whisper (local)",
+  openai: "OpenAI (api)",
+  qwen_asr: "Qwen ASR (local)",
+};
+
 function readString(form: SettingsForm, key: string, fallback = ""): string {
   return String(form[key] ?? fallback).trim();
 }
 
 export function getProviderLabel(value: string): string {
   return PROVIDER_LABELS[value] ?? (value || "未设置");
+}
+
+export function getTranscriptionProviderLabel(value: string): string {
+  return TRANSCRIPTION_PROVIDER_LABELS[value] ?? getProviderLabel(value);
+}
+
+export function isLocalTranscriptionProvider(value: string): boolean {
+  return value === "funasr" || value === "local_whisper" || value === "qwen_asr";
+}
+
+export function getProviderStatusLabel(status: string): string {
+  switch (status) {
+    case "ok":
+      return "状态正常";
+    case "configured":
+      return "已配置";
+    case "unauthorized":
+      return "鉴权失败";
+    case "unreachable":
+      return "不可达";
+    case "not_configured":
+      return "未配置";
+    default:
+      return status || "未知状态";
+  }
 }
 
 export function getActiveReasoningProvider(form: SettingsForm): string {

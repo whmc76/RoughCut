@@ -14,6 +14,7 @@ from typing import Any
 
 import httpx
 
+from roughcut.avatar.materials import resolve_avatar_material_path
 from roughcut.config import DEFAULT_HEYGEM_SHARED_ROOT, DEFAULT_HEYGEM_VOICE_ROOT, get_settings
 from roughcut.docker_gpu_guard import hold_managed_gpu_services_async
 from roughcut.media.probe import probe
@@ -128,7 +129,7 @@ async def prepare_voice_sample_artifacts(
     attempt_preprocess: bool = True,
     require_preprocess: bool = False,
 ) -> dict[str, Any]:
-    source_path = Path(str(file_record.get("path") or ""))
+    source_path = resolve_avatar_material_path(file_record.get("path"))
     if not source_path.exists():
         raise FileNotFoundError(source_path)
 
@@ -251,12 +252,12 @@ async def generate_avatar_preview(
 
     voice_file = await _ensure_voice_prepared(voice_file, attempt_training_preprocess=False)
     voice_artifacts = dict(voice_file.get("artifacts") or {})
-    normalized_audio_path = Path(str(voice_artifacts.get("normalized_wav_path") or ""))
+    normalized_audio_path = resolve_avatar_material_path(voice_artifacts.get("normalized_wav_path"))
     if not normalized_audio_path.exists():
         raise RuntimeError("missing_normalized_voice_sample")
 
     preview_id = uuid.uuid4().hex
-    source_video_path = Path(str(video_file.get("path") or ""))
+    source_video_path = resolve_avatar_material_path(video_file.get("path"))
     if not source_video_path.exists():
         raise RuntimeError(f"preview source video missing: {source_video_path}")
 
@@ -433,7 +434,7 @@ async def _ensure_voice_prepared(
     attempt_training_preprocess: bool = True,
 ) -> dict[str, Any]:
     artifacts = dict(file_record.get("artifacts") or {})
-    normalized_path = Path(str(artifacts.get("normalized_wav_path") or ""))
+    normalized_path = resolve_avatar_material_path(artifacts.get("normalized_wav_path"))
     if normalized_path.exists() and artifacts.get("training_preprocess"):
         return file_record
     if normalized_path.exists() and not attempt_training_preprocess:
@@ -481,7 +482,7 @@ def _resolve_indextts_reference_path(
     preprocess_result: dict[str, Any],
     training_reference_name: str,
 ) -> Path | None:
-    normalized = Path(str(preprocess_result.get("normalized_wav_path") or "")).expanduser()
+    normalized = resolve_avatar_material_path(preprocess_result.get("normalized_wav_path"))
     if normalized.exists():
         return normalized
 
@@ -725,6 +726,8 @@ async def _probe_heygem_preview_endpoints(base_url: str) -> bool | None:
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
                 response = await client.get(f"{base_url}{path}")
+            if response.status_code in {404, 405}:
+                continue
             if response.status_code < 500:
                 return False
         except Exception:
@@ -825,9 +828,9 @@ def _build_preview_run(
 
     profile_dir_value = str(profile.get("profile_dir") or "").strip()
     if profile_dir_value:
-        profile_dir = Path(profile_dir_value)
+        profile_dir = resolve_avatar_material_path(profile_dir_value)
     else:
-        profile_dir = Path(str(video_file.get("path") or "")).resolve().parent
+        profile_dir = resolve_avatar_material_path(video_file.get("path")).parent
     preview_dir = profile_dir / "previews"
     preview_dir.mkdir(parents=True, exist_ok=True)
     stored_path = preview_dir / f"{preview_id}.mp4"

@@ -149,7 +149,7 @@ async def test_config_options_exposes_transcription_models(client: AsyncClient):
     assert response.status_code == 200
     data = response.json()
     assert data["job_languages"][0]["value"] == "zh-CN"
-    assert data["channel_profiles"][0]["value"] == ""
+    assert data["workflow_templates"][0]["value"] == ""
     assert data["workflow_modes"][0]["value"] == "standard_edit"
     assert any(item["value"] == "avatar_commentary" for item in data["enhancement_modes"])
     assert any(item["value"] == "mandarin" for item in data["transcription_dialects"])
@@ -161,7 +161,8 @@ async def test_config_options_exposes_transcription_models(client: AsyncClient):
     assert data["transcription_models"]["openai"] == ["gpt-4o-transcribe", "gpt-4o-mini-transcribe"]
     assert data["transcription_models"]["qwen_asr"] == ["qwen3-asr-1.7b"]
     assert "large-v3" in data["transcription_models"]["local_whisper"]
-    assert any(item["value"] == "edc_tactical" for item in data["channel_profiles"])
+    assert any(item["value"] == "unboxing_standard" for item in data["workflow_templates"])
+    assert all(item["value"] != "edc_tactical" for item in data["workflow_templates"])
     assert any(item["value"] == "ollama" for item in data["multimodal_fallback_providers"])
     assert any(item["value"] == "auto" for item in data["search_providers"])
 
@@ -525,14 +526,156 @@ async def test_avatar_material_preview_creates_run(client: AsyncClient, tmp_path
 
 
 @pytest.mark.asyncio
-async def test_watch_root_rejects_unknown_channel_profile(client: AsyncClient):
+async def test_avatar_material_file_endpoint_resolves_legacy_windows_storage_paths(
+    client: AsyncClient,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import roughcut.avatar.materials as avatar_materials_mod
+
+    monkeypatch.setattr(avatar_materials_mod, "_AVATAR_MATERIALS_ROOT", tmp_path / "avatar_materials")
+
+    profile_dir = tmp_path / "avatar_materials" / "profiles" / "demo_profile"
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    speaking_video = profile_dir / "presenter.mp4"
+    preview_path = profile_dir / "previews" / "preview.mp4"
+    preview_path.parent.mkdir(parents=True, exist_ok=True)
+    speaking_video.write_bytes(b"legacy-video")
+    preview_path.write_bytes(b"legacy-preview")
+
+    legacy_video_path = r"E:\WorkSpace\RoughCut\data\avatar_materials\profiles\demo_profile\presenter.mp4"
+    legacy_preview_path = r"E:\WorkSpace\RoughCut\data\avatar_materials\profiles\demo_profile\previews\preview.mp4"
+
+    avatar_materials_mod.save_avatar_material_profile(
+        {
+            "id": "profile-legacy",
+            "display_name": "Legacy Profile",
+            "presenter_alias": None,
+            "notes": None,
+            "profile_dir": r"E:\WorkSpace\RoughCut\data\avatar_materials\profiles\demo_profile",
+            "training_status": "ready_for_manual_training",
+            "training_provider": "heygem",
+            "training_api_available": True,
+            "next_action": "ready",
+            "capability_status": {
+                "heygem_avatar": "ready",
+                "voice_clone": "ready",
+                "portrait_reference": "ready",
+                "preview": "ready",
+            },
+            "blocking_issues": [],
+            "warnings": [],
+            "created_at": "2026-03-12T00:00:00Z",
+            "files": [
+                {
+                    "id": "file-legacy",
+                    "original_name": "presenter.mp4",
+                    "stored_name": "presenter.mp4",
+                    "kind": "video",
+                    "role": "speaking_video",
+                    "role_label": "讲话视频片段",
+                    "pipeline_target": "heygem_avatar",
+                    "content_type": "video/mp4",
+                    "size_bytes": len(b"legacy-video"),
+                    "path": legacy_video_path,
+                    "created_at": "2026-03-12T00:00:00Z",
+                    "probe": None,
+                    "artifacts": None,
+                    "checks": [],
+                }
+            ],
+            "preview_runs": [
+                {
+                    "id": "preview-legacy",
+                    "status": "completed",
+                    "script": "legacy preview",
+                    "output_path": legacy_preview_path,
+                    "created_at": "2026-03-12T00:00:05Z",
+                }
+            ],
+        }
+    )
+
+    file_response = await client.get("/api/v1/avatar-materials/profiles/profile-legacy/files/file-legacy")
+    assert file_response.status_code == 200
+    assert file_response.content == b"legacy-video"
+
+    preview_response = await client.get("/api/v1/avatar-materials/profiles/profile-legacy/preview-runs/preview-legacy/file")
+    assert preview_response.status_code == 200
+    assert preview_response.content == b"legacy-preview"
+
+
+@pytest.mark.asyncio
+async def test_avatar_material_file_endpoint_falls_back_to_unique_sibling_when_stored_name_is_stale(
+    client: AsyncClient,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import roughcut.avatar.materials as avatar_materials_mod
+
+    monkeypatch.setattr(avatar_materials_mod, "_AVATAR_MATERIALS_ROOT", tmp_path / "avatar_materials")
+
+    profile_dir = tmp_path / "avatar_materials" / "profiles" / "legacy_profile"
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    actual_video = profile_dir / "_.mp4"
+    actual_video.write_bytes(b"rescued-video")
+
+    avatar_materials_mod.save_avatar_material_profile(
+        {
+            "id": "profile-stale-name",
+            "display_name": "Legacy Filename",
+            "presenter_alias": None,
+            "notes": None,
+            "profile_dir": r"E:\WorkSpace\RoughCut\data\avatar_materials\profiles\legacy_profile",
+            "training_status": "ready_for_manual_training",
+            "training_provider": "heygem",
+            "training_api_available": True,
+            "next_action": "ready",
+            "capability_status": {
+                "heygem_avatar": "ready",
+                "voice_clone": "ready",
+                "portrait_reference": "ready",
+                "preview": "ready",
+            },
+            "blocking_issues": [],
+            "warnings": [],
+            "created_at": "2026-03-12T00:00:00Z",
+            "files": [
+                {
+                    "id": "file-stale-name",
+                    "original_name": "主播镜头1-合并-20260313-151353.mp4",
+                    "stored_name": "_1-_-20260313-151353.mp4",
+                    "kind": "video",
+                    "role": "speaking_video",
+                    "role_label": "讲话视频片段",
+                    "pipeline_target": "heygem_avatar",
+                    "content_type": "video/mp4",
+                    "size_bytes": len(b"rescued-video"),
+                    "path": r"E:\WorkSpace\RoughCut\data\avatar_materials\profiles\legacy_profile\_1-_-20260313-151353.mp4",
+                    "created_at": "2026-03-12T00:00:00Z",
+                    "probe": None,
+                    "artifacts": None,
+                    "checks": [],
+                }
+            ],
+            "preview_runs": [],
+        }
+    )
+
+    response = await client.get("/api/v1/avatar-materials/profiles/profile-stale-name/files/file-stale-name")
+    assert response.status_code == 200
+    assert response.content == b"rescued-video"
+
+
+@pytest.mark.asyncio
+async def test_watch_root_rejects_unknown_workflow_template(client: AsyncClient):
     response = await client.post(
         "/api/v1/watch-roots",
-        json={"path": "/tmp/videos-invalid", "enabled": True, "channel_profile": "free_text_profile"},
+        json={"path": "/tmp/videos-invalid", "enabled": True, "workflow_template": "free_text_profile"},
     )
 
     assert response.status_code == 422
-    assert "Unsupported channel_profile" in response.text
+    assert "Unsupported workflow_template" in response.text
 
 
 @pytest.mark.asyncio
@@ -818,16 +961,16 @@ async def test_watch_root_inventory_enqueue_selected_item(client: AsyncClient, m
     from roughcut.db.models import WatchRoot
     from roughcut.db.session import get_session_factory
 
-    async def fake_create_jobs_for_inventory_paths(file_paths: list[str], *, channel_profile: str | None = None, language: str = "zh-CN"):
+    async def fake_create_jobs_for_inventory_paths(file_paths: list[str], *, workflow_template: str | None = None, language: str = "zh-CN"):
         assert file_paths == ["/tmp/videos-enqueue/a.mp4"]
-        assert channel_profile == "edc_tactical"
+        assert workflow_template == "unboxing_standard"
         return [{"path": "/tmp/videos-enqueue/a.mp4", "job_id": "job-123"}]
 
     monkeypatch.setattr(review_api, "create_jobs_for_inventory_paths", fake_create_jobs_for_inventory_paths)
 
     created = await client.post(
         "/api/v1/watch-roots",
-        json={"path": "/tmp/videos-enqueue", "enabled": True, "channel_profile": "edc_tactical"},
+        json={"path": "/tmp/videos-enqueue", "enabled": True, "workflow_template": "edc_tactical"},
     )
     root_id = created.json()["id"]
 
@@ -914,7 +1057,7 @@ async def test_watch_root_inventory_enqueue_all(client: AsyncClient, monkeypatch
     from roughcut.db.models import WatchRoot
     from roughcut.db.session import get_session_factory
 
-    async def fake_create_jobs_for_inventory_paths(file_paths: list[str], *, channel_profile: str | None = None, language: str = "zh-CN"):
+    async def fake_create_jobs_for_inventory_paths(file_paths: list[str], *, workflow_template: str | None = None, language: str = "zh-CN"):
         assert file_paths == ["/tmp/videos-batch/a.mp4", "/tmp/videos-batch/b.mp4"]
         return [
             {"path": "/tmp/videos-batch/a.mp4", "job_id": "job-a"},
@@ -1129,7 +1272,7 @@ async def test_job_list_includes_content_preview(client: AsyncClient):
                 source_name="arc.mp4",
                 status="needs_review",
                 language="zh-CN",
-                channel_profile="edc",
+                workflow_template="edc_tactical",
                 enhancement_modes=["avatar_commentary"],
             )
         )
@@ -1372,7 +1515,7 @@ async def test_content_profile_memory_stats_endpoint(client: AsyncClient):
                 ContentProfileCorrection(
                     job_id=uuid.uuid4(),
                     source_name="a.mp4",
-                    channel_profile="edc",
+                    subject_domain="edc",
                     field_name="subject_brand",
                     original_value="",
                     corrected_value="LEATHERMAN",
@@ -1380,23 +1523,23 @@ async def test_content_profile_memory_stats_endpoint(client: AsyncClient):
                 ContentProfileCorrection(
                     job_id=uuid.uuid4(),
                     source_name="b.mp4",
-                    channel_profile="edc",
+                    subject_domain="edc",
                     field_name="subject_model",
                     original_value="",
                     corrected_value="ARC",
                 ),
                 ContentProfileKeywordStat(scope_type="global", scope_value="", keyword="LEATHERMAN ARC", usage_count=2),
-                ContentProfileKeywordStat(scope_type="channel_profile", scope_value="edc", keyword="多功能工具钳", usage_count=3),
+                ContentProfileKeywordStat(scope_type="subject_domain", scope_value="edc", keyword="多功能工具钳", usage_count=3),
             ]
         )
         await session.commit()
 
-    response = await client.get("/api/v1/jobs/stats/content-profile-memory?channel_profile=edc")
+    response = await client.get("/api/v1/jobs/stats/content-profile-memory?subject_domain=edc")
     assert response.status_code == 200
     data = response.json()
-    assert data["scope"] == "channel_profile"
-    assert data["channel_profile"] == "edc"
-    assert "edc" in data["channel_profiles"]
+    assert data["scope"] == "subject_domain"
+    assert data["subject_domain"] == "edc"
+    assert "edc" in data["subject_domains"]
     assert data["total_corrections"] >= 2
     assert data["total_keywords"] >= 3
     assert data["field_preferences"]["subject_brand"][0]["value"] == "LEATHERMAN"
@@ -1446,7 +1589,7 @@ async def test_job_activity_stream(client: AsyncClient):
                 data_json={
                     "subject_type": "录屏教学",
                     "video_theme": "软件流程演示与步骤讲解",
-                    "preset_name": "screen_tutorial",
+                    "workflow_template": "tutorial_standard",
                     "summary": "主要展示完整操作流程。",
                 },
             )
@@ -2055,7 +2198,7 @@ async def test_content_profile_endpoint_returns_memory_cloud(client: AsyncClient
             source_name="memory.mp4",
             status="needs_review",
             language="zh-CN",
-            channel_profile="edc_memory_demo",
+            workflow_template="edc_tactical",
             workflow_mode="standard_edit",
             enhancement_modes=["avatar_commentary"],
         )
@@ -2151,7 +2294,7 @@ async def test_confirm_content_profile_persists_identity_alias_memory_on_simple_
                 source_name="20260316_鸿福_F叉二一小副包_开箱测评.mp4",
                 status="needs_review",
                 language="zh-CN",
-                channel_profile="edc_tactical",
+                workflow_template="edc_tactical",
                 workflow_mode="standard_edit",
             )
         )

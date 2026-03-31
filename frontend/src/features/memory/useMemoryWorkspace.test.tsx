@@ -14,8 +14,8 @@ vi.mock("../../api", () => ({
 
 const SAMPLE_GLOBAL_STATS: ContentProfileMemoryStats = {
   scope: "global",
-  channel_profile: null,
-  channel_profiles: ["edc_tactical", "ops"],
+  subject_domain: null,
+  subject_domains: ["edc", "software"],
   total_corrections: 10,
   total_keywords: 24,
   field_preferences: {},
@@ -29,14 +29,14 @@ const SAMPLE_GLOBAL_STATS: ContentProfileMemoryStats = {
 const SAMPLE_CHANNEL_STATS: ContentProfileMemoryStats = {
   ...SAMPLE_GLOBAL_STATS,
   scope: "channel",
-  channel_profile: "edc_tactical",
+  subject_domain: "edc",
   total_corrections: 7,
 };
 
 describe("useMemoryWorkspace", () => {
   beforeEach(() => {
-    mockApi.getMemoryStats.mockImplementation((channelProfile?: string) =>
-      Promise.resolve(channelProfile ? SAMPLE_CHANNEL_STATS : SAMPLE_GLOBAL_STATS),
+    mockApi.getMemoryStats.mockImplementation((subjectDomain?: string) =>
+      Promise.resolve(subjectDomain ? SAMPLE_CHANNEL_STATS : SAMPLE_GLOBAL_STATS),
     );
   });
 
@@ -44,17 +44,17 @@ describe("useMemoryWorkspace", () => {
     vi.clearAllMocks();
   });
 
-  it("loads global memory stats and refetches when channel profile changes", async () => {
+  it("loads global memory stats and refetches when subject domain changes", async () => {
     const { result } = renderHookWithQueryClient(() => useMemoryWorkspace());
 
     await waitFor(() => expect(result.current.stats.data).toEqual(SAMPLE_GLOBAL_STATS));
     expect(mockApi.getMemoryStats).toHaveBeenCalledWith(undefined);
 
     act(() => {
-      result.current.setChannelProfile("edc_tactical");
+      result.current.setSubjectDomain("edc");
     });
 
     await waitFor(() => expect(result.current.stats.data).toEqual(SAMPLE_CHANNEL_STATS));
-    expect(mockApi.getMemoryStats).toHaveBeenLastCalledWith("edc_tactical");
+    expect(mockApi.getMemoryStats).toHaveBeenLastCalledWith("edc");
   });
 });

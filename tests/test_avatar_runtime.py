@@ -4,7 +4,12 @@ from pathlib import Path
 
 import pytest
 
-from roughcut.avatar.runtime import _ensure_voice_prepared, _prepare_direct_preview_audio, _submit_heygem_preview_to_base
+from roughcut.avatar.runtime import (
+    _ensure_voice_prepared,
+    _is_heygem_training_only_service,
+    _prepare_direct_preview_audio,
+    _submit_heygem_preview_to_base,
+)
 
 
 @pytest.mark.asyncio
@@ -259,6 +264,53 @@ async def test_submit_heygem_preview_treats_missing_task_as_success_when_result_
 
     assert payload["status"] == 2
     assert payload["result"] == "/preview-task-r.mp4"
+
+
+@pytest.mark.asyncio
+async def test_is_heygem_training_only_service_does_not_treat_404_preview_probe_as_preview_capable(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import httpx
+    import roughcut.avatar.runtime as runtime_mod
+
+    runtime_mod._HEYGEM_PREVIEW_SERVICE_CACHE.clear()
+
+    class FakeResponse:
+        def __init__(self, status_code: int, payload: dict[str, object] | None = None):
+            self.status_code = status_code
+            self._payload = payload or {}
+
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                raise httpx.HTTPStatusError("error", request=None, response=None)
+
+        def json(self):
+            return self._payload
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, url: str):
+            if url.endswith("/json"):
+                return FakeResponse(404)
+            if url.endswith("/easy/query?code=healthcheck"):
+                return FakeResponse(404)
+            raise AssertionError(f"unexpected GET {url}")
+
+        async def post(self, url: str):
+            assert url.endswith("/v1/health")
+            return FakeResponse(200)
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+
+    assert await _is_heygem_training_only_service("http://127.0.0.1:49204") is True
 
 
 @pytest.mark.asyncio

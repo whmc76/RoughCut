@@ -13,13 +13,14 @@ from roughcut.api.options import (
     SEARCH_FALLBACK_PROVIDER_OPTIONS,
     SEARCH_PROVIDER_OPTIONS,
     build_avatar_provider_options,
-    build_channel_profile_options,
     build_enhancement_mode_options,
     build_transcription_dialect_options,
     build_voice_provider_options,
+    build_workflow_template_options,
     build_workflow_mode_options,
     normalize_job_language,
 )
+from roughcut.api.provider_catalog import build_service_status_payload, get_model_catalog_payload
 from roughcut.config import (
     AVATAR_PROVIDER_OPTIONS,
     DEFAULT_TRANSCRIPTION_PROVIDER,
@@ -162,6 +163,28 @@ class RuntimeEnvironmentOut(BaseModel):
     output_dir: str
 
 
+class ProviderServiceStatusEntryOut(BaseModel):
+    name: str
+    base_url: str
+    status: str
+    error: str | None = None
+
+
+class ProviderServiceStatusOut(BaseModel):
+    checked_at: str
+    services: dict[str, ProviderServiceStatusEntryOut]
+
+
+class ModelCatalogOut(BaseModel):
+    provider: str
+    kind: str
+    models: list[str]
+    source: str
+    refreshed_at: str
+    status: str
+    error: str | None = None
+
+
 def _sanitize_overrides(overrides: dict[str, Any]) -> dict[str, Any]:
     sanitized: dict[str, Any] = {}
     for key, value in overrides.items():
@@ -174,7 +197,7 @@ def _sanitize_overrides(overrides: dict[str, Any]) -> dict[str, Any]:
 
 class ConfigOptionsOut(BaseModel):
     job_languages: list[dict[str, str]]
-    channel_profiles: list[dict[str, str]]
+    workflow_templates: list[dict[str, str]]
     workflow_modes: list[dict[str, str]]
     enhancement_modes: list[dict[str, str]]
     transcription_dialects: list[dict[str, str]]
@@ -438,11 +461,21 @@ def get_runtime_environment():
     )
 
 
+@router.get("/service-status", response_model=ProviderServiceStatusOut)
+def get_service_status():
+    return ProviderServiceStatusOut(**build_service_status_payload())
+
+
+@router.get("/model-catalog", response_model=ModelCatalogOut)
+def get_model_catalog(provider: str, kind: str, refresh: int = 0):
+    return ModelCatalogOut(**get_model_catalog_payload(provider=provider, kind=kind, refresh=bool(refresh)))
+
+
 @router.get("/options", response_model=ConfigOptionsOut)
 def get_config_options():
     return ConfigOptionsOut(
         job_languages=JOB_LANGUAGE_OPTIONS,
-        channel_profiles=build_channel_profile_options(),
+        workflow_templates=build_workflow_template_options(),
         workflow_modes=build_workflow_mode_options(),
         enhancement_modes=build_enhancement_mode_options(),
         transcription_dialects=build_transcription_dialect_options(),

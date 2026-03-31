@@ -99,7 +99,7 @@ describe("ConfigProfileSwitcher", () => {
     expect(screen.getByText("生产链路")).toBeTruthy();
     expect(screen.getByText("审核阈值")).toBeTruthy();
     expect(screen.getByText("风格与绑定")).toBeTruthy();
-    expect(screen.getByText(/转写 openai \/ gpt-4o-transcribe/)).toBeTruthy();
+    expect(screen.getByText(/转写 OpenAI \(api\) \/ gpt-4o-transcribe/)).toBeTruthy();
     expect(screen.getByText(/推理 openai \/ gpt-4.1/)).toBeTruthy();
     expect(screen.getByText(/方言 mandarin/)).toBeTruthy();
     expect(screen.getByText(/画像自动确认 0.72/)).toBeTruthy();
@@ -144,7 +144,7 @@ describe("ConfigProfileSwitcher", () => {
     expect(screen.getByText("切换前预览")).toBeTruthy();
     expect(screen.getByText(/当前悬停的是“本地审稿”/)).toBeTruthy();
     expect(screen.getAllByText("适合本地模型审稿和低成本预审").length).toBeGreaterThan(0);
-    expect(screen.getByText(/转写 local_whisper \/ large-v3/)).toBeTruthy();
+    expect(screen.getByText(/转写 Faster Whisper \(local\) \/ large-v3/)).toBeTruthy();
     expect(screen.getByText(/推理 ollama \/ qwen3:8b/)).toBeTruthy();
     expect(screen.getByText("包装关闭")).toBeTruthy();
     expect(screen.getByText(/与当前激活方案“高节奏口播”相比/)).toBeTruthy();

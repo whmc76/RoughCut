@@ -149,7 +149,7 @@ def assess_job_quality(
         video_theme = str(profile.get("video_theme") or "").strip()
         summary = str(profile.get("summary") or "").strip()
         question = str(profile.get("engagement_question") or "").strip()
-        preset_name = str(profile.get("preset_name") or "").strip()
+        preset_name = str(profile.get("workflow_template") or profile.get("preset_name") or "").strip()
 
         if _is_generic_subject_type(subject_type):
             issues.append(

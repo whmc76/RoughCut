@@ -33,7 +33,7 @@ export function WatchRootList({ roots, selectedRootId, onSelect, onCreateNew }: 
           >
             <div>
               <div className="row-title">{root.path}</div>
-              <div className="muted">{root.channel_profile || t("watch.list.unsetProfile")}</div>
+              <div className="muted">{root.workflow_template || t("watch.list.unsetProfile")}</div>
             </div>
             <div className="row-meta">
               <span className={`status-chip ${root.enabled ? "done" : "cancelled"}`}>{root.enabled ? t("watch.list.enabled") : t("watch.list.disabled")}</span>

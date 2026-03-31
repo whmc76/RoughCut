@@ -71,6 +71,7 @@ function buildWorkspace(overrides: Record<string, unknown> = {}) {
     },
     config: { data: undefined },
     runtimeEnvironment: { data: undefined },
+    serviceStatus: { data: undefined },
     configProfiles: { data: undefined },
     options: { data: undefined },
     setForm: vi.fn(),

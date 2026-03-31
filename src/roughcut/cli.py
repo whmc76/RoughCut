@@ -233,13 +233,13 @@ def orchestrator(poll_interval: float):
 
 @cli.command()
 @click.argument("path")
-@click.option("--channel-profile", default=None, help="Channel profile name")
+@click.option("--workflow-template", default=None, help="Default workflow template")
 @click.option("--language", default="zh-CN", help="Language code")
-def watcher(path: str, channel_profile: str | None, language: str):
+def watcher(path: str, workflow_template: str | None, language: str):
     """Watch a directory for new video files."""
     from roughcut.watcher.folder_watcher import watch_directory
-    click.echo(f"Watching: {path} (lang={language}, profile={channel_profile})")
-    asyncio.run(watch_directory(path, channel_profile=channel_profile, language=language))
+    click.echo(f"Watching: {path} (lang={language}, template={workflow_template})")
+    asyncio.run(watch_directory(path, workflow_template=workflow_template, language=language))
 
 
 @cli.command()
@@ -279,24 +279,99 @@ def telegram_agent():
     asyncio.run(get_telegram_review_bot_service().run_forever())
 
 
+@cli.command("recover-job-index")
+@click.option("--endpoint-url", required=True, help="S3/MinIO endpoint URL")
+@click.option("--access-key-id", default="minioadmin", show_default=True, help="S3 access key")
+@click.option("--secret-access-key", default="minioadmin", show_default=True, help="S3 secret key")
+@click.option("--bucket", default="jobs", show_default=True, help="Bucket to scan")
+@click.option("--limit", default=None, type=int, help="Max jobs to recover")
+@click.option("--dry-run", is_flag=True, default=False, help="Inspect candidates without writing the database")
+@click.option("--json-output", "json_output", is_flag=True, default=False, help="Print machine-readable JSON")
+def recover_job_index(
+    endpoint_url: str,
+    access_key_id: str,
+    secret_access_key: str,
+    bucket: str,
+    limit: int | None,
+    dry_run: bool,
+    json_output: bool,
+):
+    """Recover missing job rows from an S3/MinIO bucket listing."""
+    from roughcut.recovery.job_index_restore import apply_recovered_jobs, collect_recovered_jobs
+
+    candidates = collect_recovered_jobs(
+        endpoint_url=endpoint_url,
+        access_key_id=access_key_id,
+        secret_access_key=secret_access_key,
+        bucket=bucket,
+        limit=limit,
+    )
+    if dry_run:
+        payload = {
+            "candidates": len(candidates),
+            "jobs": [
+                {
+                    "job_id": item.job_id,
+                    "source_name": item.source_name,
+                    "status": item.status,
+                    "enhancement_modes": item.enhancement_modes,
+                    "created_at": item.created_at.isoformat(),
+                    "updated_at": item.updated_at.isoformat(),
+                }
+                for item in candidates
+            ],
+        }
+    else:
+        payload = asyncio.run(apply_recovered_jobs(candidates))
+
+    if json_output:
+        click.echo(json.dumps(payload, ensure_ascii=False, indent=2))
+        return
+
+    if dry_run:
+        click.echo(f"candidates={payload['candidates']}")
+        return
+    click.echo(
+        " ".join(
+            [
+                f"candidates={payload['candidates']}",
+                f"inserted={payload['inserted']}",
+                f"skipped_existing={payload['skipped_existing']}",
+            ]
+        )
+    )
+
+
 @cli.command()
 @click.argument("source", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.option("--language", default="zh-CN", show_default=True, help="Language code")
-@click.option("--channel-profile", default=None, help="Channel profile name")
+@click.option("--workflow-template", "--channel-profile", default=None, help="Default workflow template")
 @click.option("--sample-seconds", default=90, type=click.IntRange(1), show_default=True, help="Max seconds to sample from the source")
-def clip_test(source: Path, language: str, channel_profile: str | None, sample_seconds: int):
+def clip_test(source: Path, language: str, workflow_template: str | None, sample_seconds: int):
     """Run a full manual pipeline test for one source video."""
     from roughcut.testing.manual_clip import run_manual_clip_test
 
     click.echo(f"Running clip test for: {source}")
-    report = asyncio.run(
-        run_manual_clip_test(
-            source,
-            language=language,
-            channel_profile=channel_profile,
-            sample_seconds=sample_seconds,
+    try:
+        report = asyncio.run(
+            run_manual_clip_test(
+                source,
+                language=language,
+                workflow_template=workflow_template,
+                sample_seconds=sample_seconds,
+            )
         )
-    )
+    except TypeError as exc:
+        if "workflow_template" not in str(exc):
+            raise
+        report = asyncio.run(
+            run_manual_clip_test(
+                source,
+                language=language,
+                channel_profile=workflow_template,
+                sample_seconds=sample_seconds,
+            )
+        )
     click.echo(json.dumps(report, ensure_ascii=False, indent=2))
 
 

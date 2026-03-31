@@ -118,7 +118,7 @@ const SAMPLE_RUNTIME_ENVIRONMENT: RuntimeEnvironment = {
 
 const SAMPLE_OPTIONS: ConfigOptions = {
   job_languages: [{ value: "zh-CN", label: "简体中文" }],
-  channel_profiles: [{ value: "", label: "自动匹配" }],
+  workflow_templates: [{ value: "", label: "自动匹配" }],
   workflow_modes: [{ value: "standard_edit", label: "标准成片" }],
   enhancement_modes: [{ value: "avatar_commentary", label: "数字人解说" }],
   transcription_dialects: [{ value: "mandarin", label: "普通话" }],

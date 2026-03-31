@@ -51,7 +51,7 @@ export function useGlossaryWorkspace() {
       if (scopeFilter === "all") return api.listGlossary();
       if (scopeFilter === "global") return api.listGlossary({ scope_type: "global", scope_value: "" });
       if (scopeFilter.startsWith("domain:")) return api.listGlossary({ scope_type: "domain", scope_value: scopeFilter.slice("domain:".length) });
-      if (scopeFilter.startsWith("channel_profile:")) return api.listGlossary({ scope_type: "channel_profile", scope_value: scopeFilter.slice("channel_profile:".length) });
+      if (scopeFilter.startsWith("workflow_template:")) return api.listGlossary({ scope_type: "workflow_template", scope_value: scopeFilter.slice("workflow_template:".length) });
       return api.listGlossary();
     },
   });

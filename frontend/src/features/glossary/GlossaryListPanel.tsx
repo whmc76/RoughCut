@@ -31,8 +31,8 @@ export function GlossaryListPanel({ terms, scopeFilter, onScopeFilterChange, isD
             <option value="domain:tech">{t("glossary.list.scope.domainTech")}</option>
             <option value="domain:ai">{t("glossary.list.scope.domainAi")}</option>
             <option value="domain:coding">{t("glossary.list.scope.domainCoding")}</option>
-            <option value="channel_profile:edc_tactical">{t("glossary.list.scope.channelEdc")}</option>
-            <option value="channel_profile:screen_tutorial">{t("glossary.list.scope.channelScreen")}</option>
+            <option value="workflow_template:edc_tactical">{t("glossary.list.scope.channelEdc")}</option>
+            <option value="workflow_template:tutorial_standard">{t("glossary.list.scope.channelScreen")}</option>
           </select>
         }
       />

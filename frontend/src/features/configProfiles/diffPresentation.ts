@@ -1,4 +1,5 @@
 import type { ConfigProfileDirtyDetail } from "../../types";
+import { getTranscriptionProviderLabel } from "../settings/helpers";
 
 export function formatDirtyKeyLabel(key: string): string {
   const knownLabels: Record<string, string> = {
@@ -95,8 +96,15 @@ export function formatDirtyValue(value: unknown): string {
   }
 }
 
+export function formatDirtyDetailValue(key: string, value: unknown): string {
+  if (key === "transcription_provider" && typeof value === "string") {
+    return getTranscriptionProviderLabel(value);
+  }
+  return formatDirtyValue(value);
+}
+
 export function summarizeDirtyDetails(details: ConfigProfileDirtyDetail[]): string {
   return details
-    .map((item) => `${formatDirtyKeyLabel(item.key)}: ${formatDirtyValue(item.saved_value)} -> ${formatDirtyValue(item.current_value)}`)
+    .map((item) => `${formatDirtyKeyLabel(item.key)}: ${formatDirtyDetailValue(item.key, item.saved_value)} -> ${formatDirtyDetailValue(item.key, item.current_value)}`)
     .join("；");
 }

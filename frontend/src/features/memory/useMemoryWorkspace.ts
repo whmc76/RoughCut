@@ -4,15 +4,15 @@ import { useQuery } from "@tanstack/react-query";
 import { api } from "../../api";
 
 export function useMemoryWorkspace() {
-  const [channelProfile, setChannelProfile] = useState("");
+  const [subjectDomain, setSubjectDomain] = useState("");
   const stats = useQuery({
-    queryKey: ["memory-stats", channelProfile],
-    queryFn: () => api.getMemoryStats(channelProfile || undefined),
+    queryKey: ["memory-stats", subjectDomain],
+    queryFn: () => api.getMemoryStats(subjectDomain || undefined),
   });
 
   return {
-    channelProfile,
-    setChannelProfile,
+    subjectDomain,
+    setSubjectDomain,
     stats,
   };
 }

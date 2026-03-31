@@ -674,7 +674,7 @@ class TelegramReviewBotService:
             provider = get_transcription_provider()
             transcription_prompt = build_transcription_prompt(
                 source_name=Path(file_path).name,
-                channel_profile=None,
+                workflow_template=None,
                 review_memory=None,
                 dialect_profile=getattr(settings, "transcription_dialect", None),
             )

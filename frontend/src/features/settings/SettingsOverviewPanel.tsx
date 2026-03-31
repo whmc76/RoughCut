@@ -1,4 +1,4 @@
-import type { Config, ConfigProfiles, RuntimeEnvironment } from "../../types";
+import type { Config, ConfigProfiles, ProviderServiceStatus, RuntimeEnvironment } from "../../types";
 import { PanelHeader } from "../../components/ui/PanelHeader";
 import type { SettingsForm } from "./constants";
 import {
@@ -6,18 +6,21 @@ import {
   getActiveReasoningProvider,
   getCredentialSourceLabel,
   getProviderLabel,
+  getProviderStatusLabel,
   getSearchSummary,
+  getTranscriptionProviderLabel,
 } from "./helpers";
-import { formatDirtyKeyLabel, formatDirtyValue } from "../configProfiles/diffPresentation";
+import { formatDirtyDetailValue, formatDirtyKeyLabel } from "../configProfiles/diffPresentation";
 
 type SettingsOverviewPanelProps = {
   form: SettingsForm;
   config?: Config;
   runtimeEnvironment?: RuntimeEnvironment;
+  serviceStatus?: ProviderServiceStatus;
   configProfiles?: ConfigProfiles;
 };
 
-export function SettingsOverviewPanel({ form, config, runtimeEnvironment, configProfiles }: SettingsOverviewPanelProps) {
+export function SettingsOverviewPanel({ form, config, runtimeEnvironment, serviceStatus, configProfiles }: SettingsOverviewPanelProps) {
   const transcriptionProvider = String(form.transcription_provider ?? "");
   const activeReasoningProvider = getActiveReasoningProvider(form);
   const activeReasoningModel = getActiveReasoningModel(form);
@@ -54,7 +57,7 @@ export function SettingsOverviewPanel({ form, config, runtimeEnvironment, config
             })
           : "本地服务";
   const executionSummary = [
-    `转写 ${getProviderLabel(transcriptionProvider)} / ${String(form.transcription_model ?? "未设置")}`,
+    `转写 ${getTranscriptionProviderLabel(transcriptionProvider)} / ${String(form.transcription_model ?? "未设置")}`,
     `推理 ${getProviderLabel(activeReasoningProvider)} / ${activeReasoningModel || "未设置模型"}`,
     `搜索 ${getSearchSummary(form)}`,
   ];
@@ -66,6 +69,12 @@ export function SettingsOverviewPanel({ form, config, runtimeEnvironment, config
     rerunEnabled ? `低分复跑 < ${Number(form.quality_auto_rerun_below_score ?? 75)}` : "低分复跑关闭",
   ];
   const storageSummary = `设置 ${config?.persistence.settings_store ?? "database"} · 方案 ${config?.persistence.profiles_store ?? "database"} · 包装 ${config?.persistence.packaging_store ?? "database"}`;
+  const activeLocalStatus =
+    transcriptionProvider === "qwen_asr"
+      ? serviceStatus?.services.qwen_asr
+      : activeReasoningProvider === "ollama"
+        ? serviceStatus?.services.ollama
+        : null;
   const profileStatus = configProfiles?.active_profile_dirty
     ? `当前设置与方案存在 ${dirtyDetails.length || configProfiles.active_profile_dirty_keys.length} 项差异`
     : activeProfile
@@ -79,7 +88,7 @@ export function SettingsOverviewPanel({ form, config, runtimeEnvironment, config
         <article className="settings-overview-card">
           <span className="settings-overview-label">执行链路</span>
           <strong>
-            {getProviderLabel(transcriptionProvider)} + {getProviderLabel(activeReasoningProvider)}
+            {getTranscriptionProviderLabel(transcriptionProvider)} + {getProviderLabel(activeReasoningProvider)}
           </strong>
           <div className="muted">{executionSummary.join(" · ")}</div>
         </article>
@@ -97,6 +106,7 @@ export function SettingsOverviewPanel({ form, config, runtimeEnvironment, config
           <div className="muted">{strategySummary.join(" · ")}</div>
           <div className="muted">{profileStatus}</div>
           <div className="muted">{storageSummary}</div>
+          {activeLocalStatus ? <div className="muted">本地服务：{getProviderStatusLabel(activeLocalStatus.status)}</div> : null}
         </article>
       </div>
       <div className="notice top-gap">
@@ -110,7 +120,7 @@ export function SettingsOverviewPanel({ form, config, runtimeEnvironment, config
               <div key={item.key} className="config-profile-diff-row">
                 <span className="status-pill failed config-profile-summary-tag">{formatDirtyKeyLabel(item.key)}</span>
                 <div className="muted">
-                  {formatDirtyValue(item.saved_value)} -&gt; {formatDirtyValue(item.current_value)}
+                  {formatDirtyDetailValue(item.key, item.saved_value)} -&gt; {formatDirtyDetailValue(item.key, item.current_value)}
                 </div>
               </div>
             ))}

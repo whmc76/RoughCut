@@ -9,7 +9,7 @@ import { useI18n } from "../../i18n";
 
 type WatchRootFormPanelProps = {
   form: RootForm;
-  channelProfileOptions: SelectOption[];
+  workflowTemplateOptions: SelectOption[];
   isEditing: boolean;
   isSaving: boolean;
   isDeleting: boolean;
@@ -22,7 +22,7 @@ type WatchRootFormPanelProps = {
 
 export function WatchRootFormPanel({
   form,
-  channelProfileOptions,
+  workflowTemplateOptions,
   isEditing,
   isSaving,
   isDeleting,
@@ -61,9 +61,9 @@ export function WatchRootFormPanel({
         <TextField label={t("watch.form.path")} value={form.path} onChange={(event) => onChange({ ...form, path: event.target.value })} />
         <SelectField
           label={t("watch.form.channelProfile")}
-          value={form.channel_profile}
-          onChange={(event) => onChange({ ...form, channel_profile: event.target.value })}
-          options={channelProfileOptions}
+          value={form.workflow_template}
+          onChange={(event) => onChange({ ...form, workflow_template: event.target.value })}
+          options={workflowTemplateOptions}
         />
         <div className="field-row">
           <SelectField

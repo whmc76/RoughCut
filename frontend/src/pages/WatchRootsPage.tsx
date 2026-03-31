@@ -9,7 +9,7 @@ import { useI18n } from "../i18n";
 export function WatchRootsPage() {
   const { t } = useI18n();
   const workspace = useWatchRootWorkspace();
-  const channelProfileOptions = workspace.options.data?.channel_profiles ?? [{ value: "", label: t("watch.page.autoMatch") }];
+  const workflowTemplateOptions = workspace.options.data?.workflow_templates ?? [{ value: "", label: t("watch.page.autoMatch") }];
 
   return (
     <section className="page-stack">
@@ -34,7 +34,7 @@ export function WatchRootsPage() {
           <WatchRootList roots={workspace.roots.data ?? []} selectedRootId={workspace.selectedRootId} onSelect={workspace.setSelectedRootId} onCreateNew={() => workspace.setSelectedRootId(null)} />
           <WatchRootFormPanel
             form={workspace.form}
-            channelProfileOptions={channelProfileOptions}
+            workflowTemplateOptions={workflowTemplateOptions}
             isEditing={Boolean(workspace.selectedRootId)}
             isSaving={workspace.createRoot.isPending}
             isDeleting={workspace.deleteRoot.isPending}

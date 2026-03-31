@@ -84,7 +84,7 @@ def build_packaging_prompt_brief(
         "visible_text": str(profile.get("visible_text") or "").strip(),
         "engagement_question": str(profile.get("engagement_question") or "").strip(),
         "copy_style": str(profile.get("copy_style") or "").strip(),
-        "preset_name": str(profile.get("preset_name") or "").strip(),
+        "workflow_template": str(profile.get("workflow_template") or profile.get("preset_name") or "").strip(),
         "search_queries": [str(item).strip() for item in (profile.get("search_queries") or []) if str(item).strip()][:3],
         "cover_title": {
             "top": str(cover_title.get("top") or "").strip(),

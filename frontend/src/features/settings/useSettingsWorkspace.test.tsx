@@ -1,12 +1,13 @@
 import { act, waitFor } from "@testing-library/react";
 
 import { renderHookWithQueryClient } from "../../test/renderWithQueryClient";
-import type { Config, ConfigOptions, ConfigProfiles, RuntimeEnvironment } from "../../types";
+import type { Config, ConfigOptions, ConfigProfiles, ProviderServiceStatus, RuntimeEnvironment } from "../../types";
 import { useSettingsWorkspace } from "./useSettingsWorkspace";
 
 const mockApi = vi.hoisted(() => ({
   getConfig: vi.fn(),
   getRuntimeEnvironment: vi.fn(),
+  getServiceStatus: vi.fn(),
   getConfigOptions: vi.fn(),
   getConfigProfiles: vi.fn(),
   patchConfig: vi.fn(),
@@ -118,9 +119,27 @@ const SAMPLE_RUNTIME_ENVIRONMENT: RuntimeEnvironment = {
   output_dir: "data/output",
 };
 
+const SAMPLE_SERVICE_STATUS: ProviderServiceStatus = {
+  checked_at: "2026-03-31T12:00:00Z",
+  services: {
+    ollama: {
+      name: "ollama",
+      base_url: "http://127.0.0.1:11434",
+      status: "ok",
+      error: null,
+    },
+    openai: {
+      name: "openai",
+      base_url: "https://api.openai.com/v1",
+      status: "configured",
+      error: null,
+    },
+  },
+};
+
 const SAMPLE_OPTIONS: ConfigOptions = {
   job_languages: [{ value: "zh-CN", label: "简体中文" }],
-  channel_profiles: [{ value: "", label: "自动匹配" }],
+  workflow_templates: [{ value: "", label: "自动匹配" }],
   workflow_modes: [{ value: "standard_edit", label: "标准成片" }],
   enhancement_modes: [
     { value: "avatar_commentary", label: "数字人解说" },
@@ -205,6 +224,7 @@ describe("useSettingsWorkspace", () => {
   beforeEach(() => {
     mockApi.getConfig.mockResolvedValue(SAMPLE_CONFIG);
     mockApi.getRuntimeEnvironment.mockResolvedValue(SAMPLE_RUNTIME_ENVIRONMENT);
+    mockApi.getServiceStatus.mockResolvedValue(SAMPLE_SERVICE_STATUS);
     mockApi.getConfigOptions.mockResolvedValue(SAMPLE_OPTIONS);
     mockApi.getConfigProfiles.mockResolvedValue(SAMPLE_CONFIG_PROFILES);
     mockApi.patchConfig.mockImplementation(async (payload: Record<string, unknown>) => ({
@@ -223,6 +243,7 @@ describe("useSettingsWorkspace", () => {
 
     await waitFor(() => expect(result.current.config.data).toEqual(SAMPLE_CONFIG));
     await waitFor(() => expect(result.current.runtimeEnvironment.data).toEqual(SAMPLE_RUNTIME_ENVIRONMENT));
+    await waitFor(() => expect(result.current.serviceStatus.data).toEqual(SAMPLE_SERVICE_STATUS));
     await waitFor(() => expect(result.current.form.max_upload_size_mb).toBe(2048));
     expect("openai_base_url" in result.current.form).toBe(false);
     expect("avatar_api_base_url" in result.current.form).toBe(false);
@@ -263,6 +284,7 @@ describe("useSettingsWorkspace", () => {
 
     await waitFor(() => expect(result.current.config.data).toEqual(SAMPLE_CONFIG));
     await waitFor(() => expect(result.current.runtimeEnvironment.data).toEqual(SAMPLE_RUNTIME_ENVIRONMENT));
+    await waitFor(() => expect(result.current.serviceStatus.data).toEqual(SAMPLE_SERVICE_STATUS));
     await waitFor(() => expect(result.current.configProfiles.data).toEqual(SAMPLE_CONFIG_PROFILES));
     await waitFor(() => expect(result.current.form.telegram_agent_codex_model).toBe("gpt-5.4-mini"));
 

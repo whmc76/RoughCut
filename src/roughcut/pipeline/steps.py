@@ -118,6 +118,19 @@ logger = logging.getLogger(__name__)
 _CONTENT_PROFILE_ARTIFACT_TYPES = ("content_profile_final", "content_profile", "content_profile_draft")
 
 
+def _workflow_template_subject_domain(workflow_template: str | None) -> str | None:
+    normalized = str(workflow_template or "").strip().lower()
+    if normalized == "edc_tactical":
+        return "edc"
+    if normalized == "tutorial_standard":
+        return "software"
+    if normalized == "food_explore":
+        return "food"
+    if normalized == "gameplay_highlight":
+        return "game"
+    return None
+
+
 def _resolve_subtitle_split_profile(*, width: int | None, height: int | None) -> dict[str, float | int | str]:
     safe_width = max(0, int(width or 0))
     safe_height = max(0, int(height or 0))
@@ -400,7 +413,7 @@ def _serialize_glossary_terms(terms: list[GlossaryTerm]) -> list[dict[str, str |
 def _build_effective_glossary_terms(
     *,
     glossary_terms: list[GlossaryTerm] | list[dict[str, Any]],
-    channel_profile: str | None,
+    workflow_template: str | None,
     content_profile: dict[str, Any] | None = None,
     subtitle_items: list[dict[str, Any]] | None = None,
     source_name: str | None = None,
@@ -420,13 +433,13 @@ def _build_effective_glossary_terms(
     ]
     serialized = filter_scoped_glossary_terms(
         serialized,
-        channel_profile=channel_profile,
+        workflow_template=workflow_template,
         content_profile=content_profile,
         subtitle_items=subtitle_items,
         source_name=source_name,
     )
     builtin = resolve_builtin_glossary_terms(
-        channel_profile=channel_profile,
+        workflow_template=workflow_template,
         content_profile=content_profile,
         subtitle_items=subtitle_items,
         source_name=source_name,
@@ -465,7 +478,7 @@ def _merge_execution_into_segments(
 async def _load_recent_subtitle_examples(
     session,
     *,
-    channel_profile: str | None,
+    workflow_template: str | None,
     exclude_job_id: uuid.UUID,
     limit: int = 160,
 ) -> list[dict[str, str]]:
@@ -476,8 +489,8 @@ async def _load_recent_subtitle_examples(
         .order_by(SubtitleItem.created_at.desc())
         .limit(limit)
     )
-    if channel_profile:
-        stmt = stmt.where(Job.channel_profile == channel_profile)
+    if workflow_template:
+        stmt = stmt.where(Job.workflow_template == workflow_template)
 
     result = await session.execute(stmt)
     return [
@@ -687,20 +700,23 @@ async def run_transcribe(job_id: str) -> dict:
             await _set_step_progress(session, step, detail=f"加载 {job.language} 转写模型", progress=0.2)
             glossary_result = await session.execute(select(GlossaryTerm))
             glossary_terms = glossary_result.scalars().all()
-            user_memory = await load_content_profile_user_memory(session, channel_profile=job.channel_profile)
+            user_memory = await load_content_profile_user_memory(
+                session,
+                subject_domain=_workflow_template_subject_domain(job.workflow_template),
+            )
             recent_subtitles = await _load_recent_subtitle_examples(
                 session,
-                channel_profile=job.channel_profile,
+                workflow_template=job.workflow_template,
                 exclude_job_id=job.id,
             )
             effective_glossary_terms = _build_effective_glossary_terms(
                 glossary_terms=glossary_terms,
-                channel_profile=job.channel_profile,
+                workflow_template=job.workflow_template,
                 subtitle_items=recent_subtitles,
                 source_name=job.source_name,
             )
             review_memory = build_subtitle_review_memory(
-                channel_profile=job.channel_profile,
+                workflow_template=job.workflow_template,
                 glossary_terms=effective_glossary_terms,
                 user_memory=user_memory,
                 recent_subtitles=recent_subtitles,
@@ -710,7 +726,7 @@ async def run_transcribe(job_id: str) -> dict:
             settings = get_settings()
             transcription_prompt = build_transcription_prompt(
                 source_name=job.source_name,
-                channel_profile=job.channel_profile,
+                workflow_template=job.workflow_template,
                 review_memory=review_memory,
                 dialect_profile=settings.transcription_dialect,
             )
@@ -819,7 +835,10 @@ async def run_subtitle_postprocess(job_id: str) -> dict:
         items = await save_subtitle_items(job.id, entries, session)
         glossary_result = await session.execute(select(GlossaryTerm))
         glossary_terms = glossary_result.scalars().all()
-        user_memory = await load_content_profile_user_memory(session, channel_profile=job.channel_profile)
+        user_memory = await load_content_profile_user_memory(
+            session,
+            subject_domain=_workflow_template_subject_domain(job.workflow_template),
+        )
         profile_artifact = await _load_latest_optional_artifact(
             session,
             job_id=job.id,
@@ -828,7 +847,7 @@ async def run_subtitle_postprocess(job_id: str) -> dict:
         content_profile = profile_artifact.data_json if profile_artifact and profile_artifact.data_json else {}
         effective_glossary_terms = _build_effective_glossary_terms(
             glossary_terms=glossary_terms,
-            channel_profile=job.channel_profile,
+            workflow_template=job.workflow_template,
             subtitle_items=[
                 {
                     "text_raw": item.text_raw,
@@ -841,7 +860,7 @@ async def run_subtitle_postprocess(job_id: str) -> dict:
             source_name=job.source_name,
         )
         review_memory = build_subtitle_review_memory(
-            channel_profile=job.channel_profile,
+            workflow_template=job.workflow_template,
             glossary_terms=effective_glossary_terms,
             user_memory=user_memory,
             recent_subtitles=[
@@ -859,7 +878,7 @@ async def run_subtitle_postprocess(job_id: str) -> dict:
         )
         polished_count = await polish_subtitle_items(
             items,
-            content_profile=content_profile or {"preset_name": job.channel_profile or "unboxing_default"},
+            content_profile=content_profile or {"workflow_template": job.workflow_template or "unboxing_standard"},
             glossary_terms=effective_glossary_terms,
             review_memory=review_memory,
             allow_llm=False,
@@ -929,11 +948,14 @@ async def run_content_profile(job_id: str) -> dict:
         glossary_terms = glossary_result.scalars().all()
         effective_glossary_terms = _build_effective_glossary_terms(
             glossary_terms=glossary_terms,
-            channel_profile=job.channel_profile,
+            workflow_template=job.workflow_template,
             subtitle_items=subtitle_dicts,
             source_name=job.source_name,
         )
-        user_memory = await load_content_profile_user_memory(session, channel_profile=job.channel_profile)
+        user_memory = await load_content_profile_user_memory(
+            session,
+            subject_domain=_workflow_template_subject_domain(job.workflow_template),
+        )
         packaging_config = (list_packaging_assets().get("config") or {})
         seeded_profile_artifact = await _load_latest_optional_artifact(
             session,
@@ -954,7 +976,7 @@ async def run_content_profile(job_id: str) -> dict:
         infer_cache_fingerprint = build_content_profile_cache_fingerprint(
             source_name=job.source_name,
             source_file_hash=job.file_hash,
-            channel_profile=job.channel_profile,
+            workflow_template=job.workflow_template,
             transcript_excerpt=transcript_excerpt,
             glossary_terms=effective_glossary_terms,
             user_memory=user_memory,
@@ -983,7 +1005,7 @@ async def run_content_profile(job_id: str) -> dict:
             cache_fingerprint = build_content_profile_cache_fingerprint(
                 source_name=job.source_name,
                 source_file_hash=job.file_hash,
-                channel_profile=job.channel_profile,
+                workflow_template=job.workflow_template,
                 transcript_excerpt=transcript_excerpt,
                 glossary_terms=effective_glossary_terms,
                 user_memory=user_memory,
@@ -1011,7 +1033,7 @@ async def run_content_profile(job_id: str) -> dict:
                     content_profile = await enrich_content_profile(
                         profile=seeded_profile,
                         source_name=job.source_name,
-                        channel_profile=job.channel_profile,
+                        workflow_template=job.workflow_template,
                         transcript_excerpt=transcript_excerpt,
                         glossary_terms=effective_glossary_terms,
                         user_memory=user_memory,
@@ -1034,14 +1056,14 @@ async def run_content_profile(job_id: str) -> dict:
             )
             with tempfile.TemporaryDirectory() as tmpdir:
                 source_path = await _resolve_source(job, tmpdir, expected_hash=job.file_hash)
-                await _set_step_progress(session, step, detail="抽取画面并分析主题、主体与剪辑预设", progress=0.55)
+                await _set_step_progress(session, step, detail="抽取画面并分析主题、主体与处理模板", progress=0.55)
                 usage_before = await _read_persisted_step_usage_snapshot(step.id if step else None)
                 with track_step_usage(job_id=job.id, step_id=step.id, step_name="content_profile"):
                     content_profile = await infer_content_profile(
                         source_path=source_path,
                         source_name=job.source_name,
                         subtitle_items=subtitle_dicts,
-                        channel_profile=job.channel_profile,
+                        workflow_template=job.workflow_template,
                         user_memory=user_memory,
                         glossary_terms=effective_glossary_terms,
                         include_research=False,
@@ -1060,7 +1082,7 @@ async def run_content_profile(job_id: str) -> dict:
                 enrich_cache_fingerprint = build_content_profile_cache_fingerprint(
                     source_name=job.source_name,
                     source_file_hash=job.file_hash,
-                    channel_profile=job.channel_profile,
+                    workflow_template=job.workflow_template,
                     transcript_excerpt=transcript_excerpt,
                     glossary_terms=effective_glossary_terms,
                     user_memory=user_memory,
@@ -1213,7 +1235,7 @@ async def run_glossary_review(job_id: str) -> dict:
         glossary_terms = glossary_result.scalars().all()
         effective_glossary_terms = _build_effective_glossary_terms(
             glossary_terms=glossary_terms,
-            channel_profile=job.channel_profile,
+            workflow_template=job.workflow_template,
             subtitle_items=subtitle_dicts,
             source_name=job.source_name,
         )
@@ -1235,7 +1257,10 @@ async def run_glossary_review(job_id: str) -> dict:
             detail=f"已识别 {len(corrections)} 处术语纠错候选，自动接受 {auto_accepted_corrections} 条",
             progress=0.45,
         )
-        user_memory = await load_content_profile_user_memory(session, channel_profile=job.channel_profile)
+        user_memory = await load_content_profile_user_memory(
+            session,
+            subject_domain=_workflow_template_subject_domain(job.workflow_template),
+        )
 
         profile_result = await session.execute(
             select(Artifact)
@@ -1256,7 +1281,7 @@ async def run_glossary_review(job_id: str) -> dict:
                         source_path=source_path,
                         source_name=job.source_name,
                         subtitle_items=subtitle_dicts,
-                        channel_profile=job.channel_profile,
+                        workflow_template=job.workflow_template,
                         user_memory=user_memory,
                         glossary_terms=effective_glossary_terms,
                         include_research=False,
@@ -1273,7 +1298,7 @@ async def run_glossary_review(job_id: str) -> dict:
                 content_profile = await enrich_content_profile(
                     profile=content_profile,
                     source_name=job.source_name,
-                    channel_profile=job.channel_profile,
+                    workflow_template=job.workflow_template,
                     transcript_excerpt=str(content_profile.get("transcript_excerpt") or ""),
                     glossary_terms=effective_glossary_terms,
                     user_memory=user_memory,
@@ -1282,7 +1307,7 @@ async def run_glossary_review(job_id: str) -> dict:
         content_profile["creative_profile"] = _job_creative_profile(job)
         recent_subtitles = await _load_recent_subtitle_examples(
             session,
-            channel_profile=job.channel_profile,
+            workflow_template=job.workflow_template,
             exclude_job_id=job.id,
         )
         related_subtitles = await _load_related_profile_subtitle_examples(
@@ -1296,7 +1321,7 @@ async def run_glossary_review(job_id: str) -> dict:
             content_profile=content_profile,
             glossary_terms=effective_glossary_terms,
             review_memory=build_subtitle_review_memory(
-                channel_profile=job.channel_profile,
+                workflow_template=job.workflow_template,
                 glossary_terms=effective_glossary_terms,
                 user_memory=user_memory,
                 recent_subtitles=subtitle_dicts + related_subtitles + recent_subtitles,
@@ -1335,7 +1360,7 @@ async def run_glossary_review(job_id: str) -> dict:
             "auto_accepted_correction_count": auto_accepted_corrections,
             "pending_correction_count": pending_corrections,
             "polished_count": polished_count,
-            "preset": content_profile.get("preset_name"),
+            "workflow_template": content_profile.get("workflow_template"),
             "subject": " ".join(
                 part for part in [
                     content_profile.get("subject_brand"),
@@ -1886,7 +1911,7 @@ async def run_edit_plan(job_id: str) -> dict:
 
         render_plan_dict = build_render_plan(
             editorial_timeline_id=editorial_timeline.id,
-            workflow_preset=job.channel_profile or "unboxing_default",
+            workflow_preset=job.workflow_template or "unboxing_standard",
             subtitle_style=str(packaging_plan.get("subtitle_style") or "bold_yellow_outline"),
             subtitle_motion_style=str(packaging_plan.get("subtitle_motion_style") or "motion_static"),
             smart_effect_style=str(packaging_plan.get("smart_effect_style") or "smart_effect_rhythm"),
@@ -2737,7 +2762,7 @@ def _score_music_entry_candidates(
     *,
     content_profile: dict | None,
 ) -> list[dict[str, Any]]:
-    preset_name = str((content_profile or {}).get("preset_name") or "").strip()
+    workflow_template = str((content_profile or {}).get("workflow_template") or (content_profile or {}).get("preset_name") or "").strip()
     scored: list[dict[str, Any]] = []
     for index, item in enumerate(subtitle_items):
         end_time = float(item.get("end_time", 0.0) or 0.0)
@@ -2765,7 +2790,7 @@ def _score_music_entry_candidates(
             reasons.append("句子在这里收束")
         if len(text) >= 10:
             score += 0.08
-        if preset_name in {"unboxing_default", "unboxing_limited", "unboxing_upgrade", "edc_tactical"} and 5.0 <= end_time <= 14.0:
+        if workflow_template in {"unboxing_standard", "unboxing_limited", "unboxing_upgrade", "edc_tactical"} and 5.0 <= end_time <= 14.0:
             score += 0.08
             reasons.append("适合在主体介绍后进入 BGM")
 

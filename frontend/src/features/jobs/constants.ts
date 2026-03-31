@@ -42,7 +42,7 @@ export const CONTENT_FIELD_LABELS: Record<(typeof CONTENT_FIELDS)[number] | "key
 export type UploadForm = {
   file: File | null;
   language: string;
-  channelProfile: string;
+  workflowTemplate: string;
   workflowMode: string;
   enhancementModes: string[];
 };

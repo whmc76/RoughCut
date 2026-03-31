@@ -11,14 +11,14 @@ export const jobsApi = {
   createJob: async (
     file: File,
     language: string,
-    channelProfile?: string,
+    workflowTemplate?: string,
     workflowMode?: string,
     enhancementModes: string[] = [],
   ) => {
     const formData = new FormData();
     formData.append("file", file);
     formData.append("language", language);
-    if (channelProfile) formData.append("channel_profile", channelProfile);
+    if (workflowTemplate) formData.append("workflow_template", workflowTemplate);
     if (workflowMode) formData.append("workflow_mode", workflowMode);
     enhancementModes.forEach((mode) => formData.append("enhancement_modes", mode));
     return requestForm<Job>("/jobs", formData);
