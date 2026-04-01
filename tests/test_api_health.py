@@ -2648,3 +2648,63 @@ async def test_confirm_content_profile_persists_identity_alias_memory_on_simple_
         and item["corrected_value"] == "FXX1小副包"
         for item in data["memory"]["recent_corrections"]
     )
+
+
+@pytest.mark.asyncio
+async def test_confirm_content_profile_touches_runtime_refresh_hold(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    from roughcut.db.models import Artifact, Job, JobStep
+    from roughcut.db.session import get_session_factory
+
+    hold_path = tmp_path / "runtime-refresh-hold.json"
+    monkeypatch.setenv("ROUGHCUT_RUNTIME_REFRESH_HOLD_PATH", str(hold_path))
+
+    job_id = uuid.uuid4()
+    now = datetime.now(timezone.utc)
+
+    async with get_session_factory()() as session:
+        session.add(
+            Job(
+                id=job_id,
+                source_path="jobs/demo/review.mp4",
+                source_name="review.mp4",
+                status="needs_review",
+                language="zh-CN",
+                workflow_template="unboxing_standard",
+                workflow_mode="standard_edit",
+            )
+        )
+        session.add(
+            JobStep(
+                job_id=job_id,
+                step_name="summary_review",
+                status="pending",
+                started_at=now,
+            )
+        )
+        session.add(
+            Artifact(
+                job_id=job_id,
+                artifact_type="content_profile_draft",
+                data_json={
+                    "subject_type": "AI创作工具",
+                    "summary": "待人工确认后继续。",
+                    "automation_review": {
+                        "review_reasons": ["主题待确认"],
+                        "blocking_reasons": ["缺少稳定证据"],
+                    },
+                },
+            )
+        )
+        await session.commit()
+
+    response = await client.post(f"/api/v1/jobs/{job_id}/content-profile/confirm", json={})
+    assert response.status_code == 200
+    assert hold_path.exists()
+    payload = json.loads(hold_path.read_text(encoding="utf-8"))
+    assert payload["reason"] == "content_profile_confirm"
+    assert payload["job_id"] == str(job_id)
+    assert payload["expires_at_utc"].endswith("Z")

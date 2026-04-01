@@ -97,6 +97,48 @@ exit $scriptExit
     assert "Docker refresh session completed successfully" in result.stdout
 
 
+def test_refresh_session_defers_when_review_hold_is_active(tmp_path: Path):
+    script_path = json.dumps(str(Path(__file__).resolve().parents[1] / "scripts" / "run-roughcut-docker-refresh-session.ps1"))
+    hold_path = tmp_path / "runtime-refresh-hold.json"
+    hold_payload = {
+        "reason": "content_profile_review",
+        "job_id": "00000000-0000-0000-0000-000000000001",
+        "expires_at_utc": "2099-01-01T00:00:00Z",
+    }
+    hold_path.write_text(json.dumps(hold_payload), encoding="utf-8")
+    hold_path_json = json.dumps(str(hold_path))
+    script_text = rf"""
+$ErrorActionPreference = "Stop"
+$env:ROUGHCUT_RUNTIME_REFRESH_HOLD_PATH = {hold_path_json}
+$global:dockerCalls = @()
+function docker {{
+    param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Args)
+    $commandLine = $Args -join " "
+    $global:dockerCalls += $commandLine
+    $global:LASTEXITCODE = 0
+    if ($commandLine -match '\bup\b') {{
+        Write-Output "UP_CALLED"
+    }}
+}}
+try {{
+    & {script_path} -ComposeMode runtime -DryRun
+    $scriptExit = 0
+}} catch {{
+    $scriptExit = 1
+    Write-Output ("ERROR=" + $_.Exception.Message)
+}}
+Write-Output ("CALLS=" + ($global:dockerCalls -join " || "))
+exit $scriptExit
+"""
+
+    result = _run_powershell_wrapper(tmp_path, script_text)
+
+    assert result.returncode != 0
+    assert "[DEFERRED]" in result.stdout
+    assert "content_profile_review" in result.stdout
+    assert "UP_CALLED" not in result.stdout
+
+
 def test_watch_script_uses_longer_backoff_for_deferred_refresh():
     script_text = Path("scripts/watch-roughcut-docker-runtime.ps1").read_text(encoding="utf-8")
 

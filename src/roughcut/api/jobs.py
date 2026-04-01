@@ -73,6 +73,7 @@ from roughcut.review.content_profile_review_stats import (
 )
 from roughcut.review.domain_glossaries import detect_glossary_domains
 from roughcut.review.report import generate_report
+from roughcut.runtime_refresh_hold import touch_runtime_refresh_hold
 from roughcut.storage.s3 import get_storage, job_key
 from roughcut.storage.runtime_cleanup import cleanup_job_runtime_files
 from roughcut.usage import build_job_token_report, build_jobs_usage_summary, build_jobs_usage_trend
@@ -499,6 +500,7 @@ async def get_content_profile(job_id: uuid.UUID, session: AsyncSession = Depends
     job = await session.get(Job, job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
+    touch_runtime_refresh_hold(reason="content_profile_review", job_id=str(job_id), hold_seconds=90)
 
     from roughcut.db.models import Artifact
 
@@ -691,6 +693,7 @@ async def confirm_content_profile(
     job = await session.get(Job, job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
+    touch_runtime_refresh_hold(reason="content_profile_confirm", job_id=str(job_id), hold_seconds=120)
 
     artifact_result = await session.execute(
         select(Artifact)
@@ -968,6 +971,7 @@ async def apply_review(
     job = await session.get(Job, job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
+    touch_runtime_refresh_hold(reason="review_apply", job_id=str(job_id), hold_seconds=90)
 
     applied = 0
     for action in request.actions:

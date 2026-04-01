@@ -19,6 +19,11 @@ $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $lockDir = Join-Path $repoRoot "logs"
 $lockPath = Join-Path $lockDir ("docker-refresh-{0}.lock" -f $ComposeMode)
 $codexHostBridgeEnvPath = Join-Path $lockDir "codex-host-bridge.env"
+$runtimeRefreshHoldPath = if ([string]::IsNullOrWhiteSpace($env:ROUGHCUT_RUNTIME_REFRESH_HOLD_PATH)) {
+    Join-Path $lockDir "runtime-refresh-hold.json"
+} else {
+    $env:ROUGHCUT_RUNTIME_REFRESH_HOLD_PATH
+}
 
 function Get-RoughCutLockRecord {
     param([string]$Path)
@@ -134,6 +139,45 @@ SELECT
     }
 }
 
+function Get-ActiveRuntimeRefreshHold {
+    param([string]$Path)
+
+    if (-not (Test-Path $Path)) {
+        return $null
+    }
+
+    try {
+        $payload = Get-Content $Path -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    } catch {
+        return $null
+    }
+
+    if ($null -eq $payload) {
+        return $null
+    }
+
+    $expiresAtRaw = [string]($payload.expires_at_utc ?? "")
+    if ([string]::IsNullOrWhiteSpace($expiresAtRaw)) {
+        return $null
+    }
+
+    try {
+        $expiresAt = [DateTimeOffset]::Parse($expiresAtRaw, [System.Globalization.CultureInfo]::InvariantCulture)
+    } catch {
+        return $null
+    }
+
+    if ($expiresAt -le [DateTimeOffset]::UtcNow) {
+        return $null
+    }
+
+    return [pscustomobject]@{
+        reason = [string]($payload.reason ?? "")
+        job_id = [string]($payload.job_id ?? "")
+        expires_at_utc = $expiresAt.ToString("o")
+    }
+}
+
 function Invoke-Step {
     param([string]$Message, [scriptblock]$ActionBlock)
 
@@ -231,6 +275,13 @@ Set-Content -Path $lockPath -Value $lockContent -Encoding UTF8
 try {
     Set-Location $repoRoot
     $previousCodexBridgeEnv = Import-CodexHostBridgeEnv -Path $codexHostBridgeEnvPath
+
+    $activeRefreshHold = Get-ActiveRuntimeRefreshHold -Path $runtimeRefreshHoldPath
+    if ($null -ne $activeRefreshHold) {
+        $detail = "reason=$($activeRefreshHold.reason), job_id=$($activeRefreshHold.job_id), expires_at_utc=$($activeRefreshHold.expires_at_utc)"
+        Write-Warning ("Deferring Docker refresh for {0} because an interactive runtime hold is active: {1}" -f $ComposeMode, $detail)
+        throw "[DEFERRED] $detail"
+    }
 
     if ($ChangedPaths.Count -gt 0) {
         Write-Host "Changed paths:"
