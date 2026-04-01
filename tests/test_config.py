@@ -37,6 +37,7 @@ def test_default_settings():
     assert s.acp_bridge_codex_model == "gpt-5.4-mini"
     assert s.telegram_agent_acp_command == ""
     assert s.telegram_agent_task_timeout_sec == 900
+    assert s.transcribe_runtime_timeout_sec == 900
     assert s.telegram_agent_result_max_chars == 3500
     assert s.telegram_agent_state_dir == str((DEFAULT_OUTPUT_ROOT / "telegram-agent").as_posix())
     assert s.telegram_remote_review_enabled is False

@@ -184,6 +184,7 @@ class Settings(BaseSettings):
     step_heartbeat_interval_sec: int = 20
     step_stale_recovery_enabled: bool = True
     step_stale_timeout_sec: int = 900
+    transcribe_runtime_timeout_sec: int = 900
     render_step_stale_timeout_sec: int = 5400
     docker_gpu_guard_enabled: bool = True
     docker_gpu_guard_idle_timeout_sec: int = 900

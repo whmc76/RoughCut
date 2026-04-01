@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 from datetime import datetime, timezone
@@ -33,12 +34,13 @@ def _has_process(substring: str) -> bool:
     try:
         if os.name == "nt":
             shell = _pick_shell()
+            current_pid = os.getpid()
             script = (
                 "$needle = @'\n"
                 f"{substring}\n"
                 "'@;"
                 " $proc = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | "
-                "Where-Object { $_.CommandLine -and $_.CommandLine.Contains($needle) } | "
+                f"Where-Object {{ $_.ProcessId -ne {current_pid} -and $_.CommandLine -and $_.CommandLine.Contains($needle) }} | "
                 "Select-Object -First 1;"
                 " if ($null -ne $proc) { '1' }"
             )
@@ -68,6 +70,20 @@ def _has_process(substring: str) -> bool:
         return False
 
 
+def _running_compose_service_names() -> set[str]:
+    containers = _running_container_names()
+    services: set[str] = set()
+    for service in ("orchestrator", "worker-media", "worker-llm"):
+        if _has_compose_container(containers, service):
+            services.add(service)
+    return services
+
+
+def _has_compose_container(containers: set[str], service_name: str) -> bool:
+    pattern = re.compile(rf"(^|.*-){re.escape(service_name)}-\d+$")
+    return any(pattern.search(container) for container in containers)
+
+
 def _running_container_names() -> set[str]:
     try:
         result = subprocess.run(
@@ -90,8 +106,43 @@ def _has_container(containers: set[str], name: str) -> bool:
     return any(container == name or container.startswith(f"{name}-") for container in containers)
 
 
+def _service_status_from_runtime(
+    *,
+    compose_services: set[str],
+    service_name: str,
+    process_needle: str,
+    celery_queue: str | None = None,
+) -> bool:
+    if service_name in compose_services:
+        return True
+    if compose_services:
+        return False
+    if celery_queue and celery_queue in _running_celery_queues():
+        return True
+    return _has_process(process_needle)
+
+
+def _running_celery_queues() -> set[str]:
+    try:
+        from roughcut.pipeline.celery_app import celery_app
+
+        inspector = celery_app.control.inspect(timeout=1.0)
+        payload = inspector.active_queues() or {}
+    except Exception:
+        return set()
+
+    queues: set[str] = set()
+    for worker_queues in payload.values():
+        for queue_entry in worker_queues or []:
+            name = str((queue_entry or {}).get("name") or "").strip()
+            if name:
+                queues.add(name)
+    return queues
+
+
 async def build_service_status(*, api_running: bool) -> dict[str, object]:
     containers = _running_container_names()
+    compose_services = _running_compose_service_names()
     try:
         readiness = await build_readiness_payload()
     except Exception as exc:
@@ -113,15 +164,28 @@ async def build_service_status(*, api_running: bool) -> dict[str, object]:
         "services": {
             "api": api_running,
             "telegram_agent": _has_process("telegram-agent"),
-            "orchestrator": _has_process("roughcut.cli orchestrator --poll-interval"),
-            "media_worker": _has_process(
-                "celery -A roughcut.pipeline.celery_app:celery_app worker --queues=media_queue"
+            "orchestrator": _service_status_from_runtime(
+                compose_services=compose_services,
+                service_name="orchestrator",
+                process_needle="roughcut.cli orchestrator --poll-interval",
+            )
+            or bool(orchestrator_lock.get("leader_active")),
+            "media_worker": _service_status_from_runtime(
+                compose_services=compose_services,
+                service_name="worker-media",
+                process_needle="celery -A roughcut.pipeline.celery_app:celery_app worker --queues=media_queue",
+                celery_queue="media_queue",
             ),
-            "llm_worker": _has_process(
-                "celery -A roughcut.pipeline.celery_app:celery_app worker --queues=llm_queue"
+            "llm_worker": _service_status_from_runtime(
+                compose_services=compose_services,
+                service_name="worker-llm",
+                process_needle="celery -A roughcut.pipeline.celery_app:celery_app worker --queues=llm_queue",
+                celery_queue="llm_queue",
             ),
-            "postgres": _has_container(containers, "roughcut-postgres"),
-            "redis": _has_container(containers, "roughcut-redis"),
+            "postgres": _has_container(containers, "roughcut-postgres")
+            or readiness.get("checks", {}).get("database", {}).get("status") == "ok",
+            "redis": _has_container(containers, "roughcut-redis")
+            or readiness.get("checks", {}).get("redis", {}).get("status") == "ok",
         },
         "runtime": {
             "readiness_status": readiness.get("status", "unknown"),

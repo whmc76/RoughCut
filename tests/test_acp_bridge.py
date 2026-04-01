@@ -237,3 +237,43 @@ def test_run_bridge_uses_codex_and_falls_back_to_claude_by_default(monkeypatch, 
     assert result["backend"] == "claude"
     assert result["fallback_from"] == "codex"
     assert result["excerpt"] == "claude ok"
+
+
+def test_run_bridge_uses_codex_proxy_when_configured(monkeypatch, tmp_path: Path):
+    monkeypatch.setenv("ROUGHCUT_ACP_BRIDGE_BACKEND", "codex")
+    monkeypatch.setenv("ROUGHCUT_ACP_BRIDGE_CODEX_PROXY_URL", "http://host.docker.internal:38695/v1/codex/exec")
+    monkeypatch.setenv("ROUGHCUT_ACP_BRIDGE_CODEX_PROXY_TOKEN", "bridge-token")
+
+    captured: dict[str, object] = {}
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "provider": "acp",
+                "backend": "codex",
+                "stdout": "proxy ok",
+                "stderr": "",
+                "excerpt": "proxy ok",
+                "returncode": 0,
+                "host_bridge": True,
+            }
+
+    def fake_post(url, *, json=None, headers=None, timeout=None):
+        captured["url"] = url
+        captured["json"] = json
+        captured["headers"] = headers
+        captured["timeout"] = timeout
+        return FakeResponse()
+
+    monkeypatch.setattr(bridge_mod.httpx, "post", fake_post)
+
+    result = bridge_mod.run_bridge({"repo_root": str(tmp_path), "prompt": "检查代码"})
+
+    assert captured["url"] == "http://host.docker.internal:38695/v1/codex/exec"
+    assert captured["json"]["prompt"] == "检查代码"
+    assert captured["headers"]["Authorization"] == "Bearer bridge-token"
+    assert result["host_bridge"] is True
+    assert result["excerpt"] == "proxy ok"

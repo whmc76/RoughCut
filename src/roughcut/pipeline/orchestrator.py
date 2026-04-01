@@ -355,6 +355,18 @@ async def _recover_stale_running_steps(session) -> None:
         if (now - last_heartbeat_at).total_seconds() < stale_after:
             continue
 
+        from roughcut.recovery import stuck_step_recovery as stuck_step_recovery_mod
+
+        job = await session.get(Job, step.job_id)
+        if job is not None:
+            await stuck_step_recovery_mod.record_stuck_step_diagnostic(
+                session,
+                job,
+                step,
+                stale_after_sec=stale_after,
+                applied_action="reset_to_pending",
+                now=now,
+            )
         metadata = dict(step.metadata_ or {})
         previous_task_id = metadata.pop("task_id", None)
         metadata.pop("retry_wait_until", None)

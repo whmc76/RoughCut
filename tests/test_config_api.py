@@ -12,7 +12,7 @@ from roughcut.api.config import (
     get_service_status,
     patch_config,
 )
-from roughcut.config import get_settings
+from roughcut.config import Settings, get_settings
 
 
 def test_get_config_options_exposes_workflow_templates_instead_of_channel_profiles():
@@ -69,6 +69,7 @@ def test_get_config_exposes_extended_provider_fields(tmp_path, monkeypatch):
     object.__setattr__(settings, "telegram_agent_codex_model", "gpt-5.4-mini")
     object.__setattr__(settings, "telegram_agent_acp_command", "python scripts/acp_bridge.py")
     object.__setattr__(settings, "telegram_agent_task_timeout_sec", 600)
+    object.__setattr__(settings, "transcribe_runtime_timeout_sec", 1500)
     object.__setattr__(settings, "telegram_agent_result_max_chars", 2800)
     object.__setattr__(settings, "telegram_agent_state_dir", "data/telegram-agent")
     object.__setattr__(settings, "acp_bridge_backend", "codex")
@@ -121,6 +122,7 @@ def test_get_config_exposes_extended_provider_fields(tmp_path, monkeypatch):
     assert cfg.telegram_agent_codex_model == "gpt-5.4-mini"
     assert cfg.telegram_agent_acp_command == "python scripts/acp_bridge.py"
     assert cfg.telegram_agent_task_timeout_sec == 600
+    assert cfg.transcribe_runtime_timeout_sec == 1500
     assert cfg.telegram_agent_result_max_chars == 2800
     assert cfg.telegram_agent_state_dir == "data/telegram-agent"
     assert cfg.acp_bridge_backend == "codex"
@@ -595,6 +597,7 @@ def test_patch_config_accepts_telegram_remote_review_fields(tmp_path, monkeypatc
             telegram_agent_codex_model="gpt-5.4-mini",
             telegram_agent_acp_command="python scripts/acp_bridge.py",
             telegram_agent_task_timeout_sec=1200,
+            transcribe_runtime_timeout_sec=1800,
             telegram_agent_result_max_chars=5000,
             telegram_agent_state_dir=str(tmp_path / "agent-state"),
             acp_bridge_backend="codex",
@@ -617,6 +620,7 @@ def test_patch_config_accepts_telegram_remote_review_fields(tmp_path, monkeypatc
     assert cfg.telegram_agent_codex_model == "gpt-5.4-mini"
     assert cfg.telegram_agent_acp_command == "python scripts/acp_bridge.py"
     assert cfg.telegram_agent_task_timeout_sec == 1200
+    assert cfg.transcribe_runtime_timeout_sec == 1800
     assert cfg.telegram_agent_result_max_chars == 5000
     assert cfg.telegram_agent_state_dir == str(tmp_path / "agent-state")
     assert cfg.acp_bridge_backend == "codex"
@@ -642,6 +646,19 @@ def test_patch_config_rejects_unknown_acp_bridge_backend(tmp_path, monkeypatch):
 
     with pytest.raises(HTTPException, match="acp_bridge_backend must be claude or codex"):
         patch_config(ConfigPatch(acp_bridge_backend="unsupported"))
+
+
+def test_patch_config_clamps_transcribe_runtime_timeout(tmp_path, monkeypatch):
+    import roughcut.api.config as config_api
+    import roughcut.config as config_mod
+
+    monkeypatch.setattr(config_api, "_CONFIG_FILE", tmp_path / "roughcut_config.json")
+    monkeypatch.setattr(config_mod, "_OVERRIDES_FILE", tmp_path / "roughcut_config.json")
+    config_mod._settings = Settings(_env_file=None)
+
+    cfg = patch_config(ConfigPatch(transcribe_runtime_timeout_sec=30))
+
+    assert cfg.transcribe_runtime_timeout_sec == 60
 
 
 def test_patch_config_accepts_subtitle_filler_cleanup_toggle(tmp_path, monkeypatch):

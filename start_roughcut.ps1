@@ -34,6 +34,12 @@ $InfraComposeFile = Join-Path $RepoRoot "docker-compose.infra.yml"
 $RuntimeComposeFile = Join-Path $RepoRoot "docker-compose.runtime.yml"
 $AutomationComposeFile = Join-Path $RepoRoot "docker-compose.automation.yml"
 $DockerWatchScript = Join-Path $RepoRoot "scripts\watch-roughcut-docker-runtime.ps1"
+$CodexHostBridgeScript = Join-Path $RepoRoot "scripts\codex_host_bridge.py"
+$CodexHostBridgeEnvFile = Join-Path $RepoRoot "logs\codex-host-bridge.env"
+$CodexHostBridgeOutLog = Join-Path $RepoRoot "logs\codex-host-bridge.out.log"
+$CodexHostBridgeErrLog = Join-Path $RepoRoot "logs\codex-host-bridge.err.log"
+$CodexHostBridgePort = 38695
+$CodexHostBridgeBindHost = "0.0.0.0"
 $script:ManagedProcesses = @()
 
 function Invoke-NativeCommandChecked {
@@ -102,6 +108,105 @@ function Invoke-RoughCutCompose {
     }
 }
 
+function Get-RoughCutComposeStatusEntries {
+    param(
+        [ValidateSet("infra", "runtime", "full")]
+        [string]$ComposeMode
+    )
+
+    $docker = Get-Command docker -ErrorAction SilentlyContinue
+    if ($null -eq $docker) {
+        throw "Docker Desktop is required for mode '$ComposeMode'."
+    }
+
+    $composeFiles = Get-RoughCutComposeFiles -ComposeMode $ComposeMode
+    $args = @("compose")
+    foreach ($composeFile in $composeFiles) {
+        $args += "-f"
+        $args += $composeFile
+    }
+    $args += @("ps", "--all", "--format", "json")
+
+    $rawOutput = & $docker.Source @args
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to inspect docker compose status for mode '$ComposeMode' (exit code $LASTEXITCODE)."
+    }
+
+    $entries = @()
+    foreach ($line in ($rawOutput -split "(`r`n|`n|`r)")) {
+        $trimmed = $line.Trim()
+        if ([string]::IsNullOrWhiteSpace($trimmed)) {
+            continue
+        }
+        $entries += $trimmed | ConvertFrom-Json
+    }
+
+    return $entries
+}
+
+function Wait-RoughCutComposeModeReady {
+    param(
+        [ValidateSet("runtime", "full")]
+        [string]$ComposeMode,
+        [int]$TimeoutSec = 120
+    )
+
+    $requiredRunningServices = @("postgres", "redis", "minio", "api", "orchestrator", "worker-media", "worker-llm")
+    if ($ComposeMode -eq "full") {
+        $requiredRunningServices += "watcher"
+    }
+
+    $requiredHealthyServices = @("postgres", "redis", "minio")
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    $lastIssues = @()
+
+    while ((Get-Date) -lt $deadline) {
+        $entries = @(Get-RoughCutComposeStatusEntries -ComposeMode $ComposeMode)
+        $serviceMap = @{}
+        foreach ($entry in $entries) {
+            $serviceMap[[string]$entry.Service] = $entry
+        }
+
+        $issues = @()
+        foreach ($serviceName in $requiredRunningServices) {
+            if (-not $serviceMap.ContainsKey($serviceName)) {
+                $issues += "$serviceName missing"
+                continue
+            }
+
+            $entry = $serviceMap[$serviceName]
+            if ($entry.State -ne "running") {
+                $exitCode = if ($null -ne $entry.ExitCode -and "$($entry.ExitCode)" -ne "") { " exit=$($entry.ExitCode)" } else { "" }
+                $issues += "$serviceName state=$($entry.State)$exitCode"
+                continue
+            }
+
+            if ($serviceName -in $requiredHealthyServices -and $entry.Health -and $entry.Health -ne "healthy") {
+                $issues += "$serviceName health=$($entry.Health)"
+            }
+        }
+
+        if (-not $serviceMap.ContainsKey("migrate")) {
+            $issues += "migrate missing"
+        } else {
+            $migrateEntry = $serviceMap["migrate"]
+            if ($migrateEntry.State -ne "exited" -or $migrateEntry.ExitCode -ne 0) {
+                $issues += "migrate state=$($migrateEntry.State) exit=$($migrateEntry.ExitCode)"
+            }
+        }
+
+        if ($issues.Count -eq 0) {
+            return
+        }
+
+        $lastIssues = $issues
+        Start-Sleep -Seconds 2
+    }
+
+    $detail = if ($lastIssues.Count -gt 0) { $lastIssues -join "; " } else { "unknown status" }
+    throw "Docker mode '$ComposeMode' did not become ready within $TimeoutSec seconds: $detail"
+}
+
 function Start-RoughCutComposeMode {
     param(
         [ValidateSet("infra", "runtime", "full")]
@@ -109,6 +214,9 @@ function Start-RoughCutComposeMode {
     )
 
     Write-Host "Starting RoughCut Docker mode: $ComposeMode" -ForegroundColor Cyan
+    if ($ComposeMode -in @("runtime", "full")) {
+        Start-RoughCutCodexHostBridge
+    }
     switch ($ComposeMode) {
         "infra" {
             Invoke-RoughCutCompose -ComposeMode $ComposeMode -ComposeArguments @("up", "-d", "--remove-orphans")
@@ -125,6 +233,11 @@ function Start-RoughCutComposeMode {
                 Invoke-RoughCutCompose -ComposeMode $ComposeMode -ComposeArguments @("up", "-d", "--remove-orphans") -DockerPythonExtrasOverride $DockerPythonExtras
             }
         }
+    }
+
+    if ($ComposeMode -in @("runtime", "full")) {
+        Write-Host "Verifying RoughCut Docker mode: $ComposeMode" -ForegroundColor Cyan
+        Wait-RoughCutComposeModeReady -ComposeMode $ComposeMode
     }
 
     Write-Host ""
@@ -148,6 +261,7 @@ function Stop-RoughCutComposeMode {
     )
 
     Stop-RoughCutDockerWatch -ComposeMode $ComposeMode
+    Stop-RoughCutCodexHostBridge -SilentlyContinue
     Write-Host "Stopping RoughCut Docker mode: $ComposeMode" -ForegroundColor Cyan
     Invoke-RoughCutCompose -ComposeMode $ComposeMode -ComposeArguments @("down", "--remove-orphans")
 }
@@ -204,6 +318,261 @@ function Get-PowerShellCommand {
     return $powerShellCommand
 }
 
+function Get-RoughCutCodexHostBridgeToken {
+    $bytes = New-Object byte[] 24
+    [System.Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
+    return [Convert]::ToBase64String($bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_')
+}
+
+function Get-RoughCutCodexHostBridgeProcessMatchPattern {
+    return [regex]::Escape("scripts\codex_host_bridge.py")
+}
+
+function Test-RoughCutCodexHostBridgeActive {
+    param([int]$ProcessId)
+
+    if ($ProcessId -le 0) {
+        return $false
+    }
+
+    $process = Get-CimInstance Win32_Process -Filter "ProcessId = $ProcessId" -ErrorAction SilentlyContinue
+    if ($null -eq $process) {
+        return $false
+    }
+
+    $commandLine = [string]($process.CommandLine ?? "")
+    return $commandLine -match (Get-RoughCutCodexHostBridgeProcessMatchPattern)
+}
+
+function Test-RoughCutCodexHostBridgeReady {
+    param([int]$TimeoutSec = 20)
+
+    $uri = "http://127.0.0.1:$CodexHostBridgePort/healthz"
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    while ((Get-Date) -lt $deadline) {
+        try {
+            $response = Invoke-RestMethod -Uri $uri -Method Get -TimeoutSec 3
+            if ($response.status -eq "ok") {
+                return $true
+            }
+        } catch {
+        }
+        Start-Sleep -Milliseconds 400
+    }
+    return $false
+}
+
+function Get-RoughCutCodexHostBridgeEnvMap {
+    param([string]$Token)
+
+    return [ordered]@{
+        ROUGHCUT_ACP_BRIDGE_CODEX_PROXY_URL = "http://host.docker.internal:$CodexHostBridgePort/v1/codex/exec"
+        ROUGHCUT_ACP_BRIDGE_CODEX_PROXY_TOKEN = $Token
+    }
+}
+
+function Write-RoughCutCodexHostBridgeEnvFile {
+    param([System.Collections.IDictionary]$EnvironmentMap)
+
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $CodexHostBridgeEnvFile) | Out-Null
+    $lines = @()
+    foreach ($entry in $EnvironmentMap.GetEnumerator()) {
+        $lines += ("{0}={1}" -f $entry.Key, $entry.Value)
+    }
+    Set-Content -Path $CodexHostBridgeEnvFile -Value $lines -Encoding UTF8
+}
+
+function Read-RoughCutCodexHostBridgeEnvFile {
+    if (-not (Test-Path $CodexHostBridgeEnvFile)) {
+        return @{}
+    }
+
+    $environmentMap = @{}
+    foreach ($line in (Get-Content $CodexHostBridgeEnvFile -ErrorAction SilentlyContinue)) {
+        if ($line -match "^\s*([^=]+?)=(.*)$") {
+            $environmentMap[$Matches[1]] = $Matches[2]
+        }
+    }
+
+    return $environmentMap
+}
+
+function Set-RoughCutCodexHostBridgeEnv {
+    param([string]$Token)
+
+    $environmentMap = Get-RoughCutCodexHostBridgeEnvMap -Token $Token
+    Write-RoughCutCodexHostBridgeEnvFile -EnvironmentMap $environmentMap
+    foreach ($entry in $environmentMap.GetEnumerator()) {
+        [Environment]::SetEnvironmentVariable($entry.Key, $entry.Value, "Process")
+    }
+}
+
+function Import-RoughCutCodexHostBridgeEnv {
+    $environmentMap = Read-RoughCutCodexHostBridgeEnvFile
+    foreach ($entry in $environmentMap.GetEnumerator()) {
+        [Environment]::SetEnvironmentVariable($entry.Key, $entry.Value, "Process")
+    }
+    return $environmentMap
+}
+
+function Clear-RoughCutCodexHostBridgeEnv {
+    foreach ($name in @("ROUGHCUT_ACP_BRIDGE_CODEX_PROXY_URL", "ROUGHCUT_ACP_BRIDGE_CODEX_PROXY_TOKEN")) {
+        [Environment]::SetEnvironmentVariable($name, $null, "Process")
+    }
+    if (Test-Path $CodexHostBridgeEnvFile) {
+        Remove-Item $CodexHostBridgeEnvFile -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Get-RoughCutCodexHostBridgeProcessId {
+    $environmentMap = Read-RoughCutCodexHostBridgeEnvFile
+    $rawValue = $environmentMap["pid"]
+    if ($rawValue -and $rawValue -match "^\d+$") {
+        return [int]$rawValue
+    }
+    return $null
+}
+
+function Get-RoughCutCodexHostBridgeLauncher {
+    if (Test-Path $Python) {
+        return [pscustomobject]@{
+            FilePath = $Python
+            Arguments = @($CodexHostBridgeScript)
+        }
+    }
+
+    if ($null -ne $Uv) {
+        return [pscustomobject]@{
+            FilePath = $Uv.Source
+            Arguments = @("run", "python", $CodexHostBridgeScript)
+        }
+    }
+
+    if ($null -ne $SystemPython) {
+        return [pscustomobject]@{
+            FilePath = $SystemPython.Source
+            Arguments = @($CodexHostBridgeScript)
+        }
+    }
+
+    throw "Python executable not found for Codex host bridge."
+}
+
+function Start-RoughCutCodexHostBridge {
+    if (-not (Test-Path $CodexHostBridgeScript)) {
+        Write-Host "Codex host bridge script not found. ACP will stay on container-local auth." -ForegroundColor Yellow
+        Clear-RoughCutCodexHostBridgeEnv
+        return
+    }
+
+    $codexCommand = Get-Command codex -ErrorAction SilentlyContinue
+    $codexAuthPath = Join-Path $env:USERPROFILE ".codex\auth.json"
+    if ($null -eq $codexCommand -or -not (Test-Path $codexAuthPath)) {
+        Write-Host "Host Codex CLI or auth state is unavailable. ACP will stay on container-local auth." -ForegroundColor Yellow
+        Clear-RoughCutCodexHostBridgeEnv
+        return
+    }
+
+    $existingPid = Get-RoughCutCodexHostBridgeProcessId
+    if ($null -ne $existingPid -and (Test-RoughCutCodexHostBridgeActive -ProcessId $existingPid) -and (Test-RoughCutCodexHostBridgeReady -TimeoutSec 2)) {
+        Import-RoughCutCodexHostBridgeEnv | Out-Null
+        Write-Host "Codex host bridge already running (PID $existingPid)." -ForegroundColor Green
+        return
+    }
+
+    Stop-RoughCutCodexHostBridge -SilentlyContinue
+
+    $token = Get-RoughCutCodexHostBridgeToken
+    Set-RoughCutCodexHostBridgeEnv -Token $token
+
+    New-Item -ItemType Directory -Force -Path (Join-Path $RepoRoot "logs") | Out-Null
+    Clear-Content -Path $CodexHostBridgeOutLog -ErrorAction SilentlyContinue
+    Clear-Content -Path $CodexHostBridgeErrLog -ErrorAction SilentlyContinue
+
+    $launcher = Get-RoughCutCodexHostBridgeLauncher
+    $arguments = @()
+    $arguments += $launcher.Arguments
+    $arguments += @("--host", $CodexHostBridgeBindHost, "--port", "$CodexHostBridgePort", "--token", $token)
+
+    $previousPythonPath = [Environment]::GetEnvironmentVariable("PYTHONPATH", "Process")
+    try {
+        if ($null -ne $SystemPython -and $launcher.FilePath -eq $SystemPython.Source) {
+            $bridgePythonPath = Join-Path $RepoRoot "src"
+            $nextPythonPath = if ([string]::IsNullOrWhiteSpace($previousPythonPath)) {
+                $bridgePythonPath
+            } else {
+                "$bridgePythonPath;$previousPythonPath"
+            }
+            [Environment]::SetEnvironmentVariable("PYTHONPATH", $nextPythonPath, "Process")
+        }
+
+        $process = Start-Process `
+            -FilePath $launcher.FilePath `
+            -ArgumentList $arguments `
+            -WorkingDirectory $RepoRoot `
+            -WindowStyle Hidden `
+            -PassThru `
+            -RedirectStandardOutput $CodexHostBridgeOutLog `
+            -RedirectStandardError $CodexHostBridgeErrLog
+    } finally {
+        [Environment]::SetEnvironmentVariable("PYTHONPATH", $previousPythonPath, "Process")
+    }
+
+    $environmentMap = Read-RoughCutCodexHostBridgeEnvFile
+    $environmentMap["pid"] = "$($process.Id)"
+    Write-RoughCutCodexHostBridgeEnvFile -EnvironmentMap $environmentMap
+
+    if (-not (Test-RoughCutCodexHostBridgeReady -TimeoutSec 20)) {
+        $stderr = if (Test-Path $CodexHostBridgeErrLog) { (Get-Content $CodexHostBridgeErrLog -Raw -ErrorAction SilentlyContinue).Trim() } else { "" }
+        $stdout = if (Test-Path $CodexHostBridgeOutLog) { (Get-Content $CodexHostBridgeOutLog -Raw -ErrorAction SilentlyContinue).Trim() } else { "" }
+        Stop-RoughCutCodexHostBridge -SilentlyContinue
+        if (-not [string]::IsNullOrWhiteSpace($stderr)) {
+            throw "Codex host bridge failed to start: $stderr"
+        }
+        if (-not [string]::IsNullOrWhiteSpace($stdout)) {
+            throw "Codex host bridge failed to start: $stdout"
+        }
+        throw "Codex host bridge failed to become ready."
+    }
+
+    Write-Host "Codex host bridge started on port $CodexHostBridgePort (PID $($process.Id))." -ForegroundColor Green
+}
+
+function Stop-RoughCutCodexHostBridge {
+    param([switch]$SilentlyContinue)
+
+    $processId = Get-RoughCutCodexHostBridgeProcessId
+    if ($null -ne $processId -and (Test-RoughCutCodexHostBridgeActive -ProcessId $processId)) {
+        try {
+            Stop-Process -Id $processId -Force -ErrorAction Stop
+            if (-not $SilentlyContinue) {
+                Write-Host "Codex host bridge stopped (PID $processId)." -ForegroundColor Green
+            }
+        } catch {
+            if (-not $SilentlyContinue) {
+                Write-Host "Failed to stop Codex host bridge (PID $processId): $($_.Exception.Message)" -ForegroundColor Yellow
+            }
+        }
+    } elseif (-not $SilentlyContinue) {
+        Write-Host "Codex host bridge is not running." -ForegroundColor Yellow
+    }
+
+    Clear-RoughCutCodexHostBridgeEnv
+}
+
+function Get-RoughCutDockerWatchArguments {
+    param(
+        [ValidateSet("runtime", "full")]
+        [string]$ComposeMode
+    )
+
+    $arguments = @("-NoProfile", "-File", $DockerWatchScript, "-ComposeMode", $ComposeMode)
+    if (-not [string]::IsNullOrWhiteSpace($DockerPythonExtras)) {
+        $arguments += @("-DockerPythonExtras", $DockerPythonExtras)
+    }
+    return $arguments
+}
+
 function Start-RoughCutDockerWatchMode {
     param(
         [ValidateSet("runtime-watch", "full-watch")]
@@ -217,7 +586,7 @@ function Start-RoughCutDockerWatchMode {
     $composeMode = if ($WatchMode -eq "full-watch") { "full" } else { "runtime" }
     $powerShellCommand = Get-PowerShellCommand
     Write-Host "Starting RoughCut Docker watch mode: $composeMode" -ForegroundColor Cyan
-    Invoke-NativeCommandChecked -FilePath $powerShellCommand.Source -Arguments @("-NoProfile", "-File", $DockerWatchScript, "-ComposeMode", $composeMode, "-DockerPythonExtras", $DockerPythonExtras) -FailureMessage "Docker watch mode failed"
+    Invoke-NativeCommandChecked -FilePath $powerShellCommand.Source -Arguments (Get-RoughCutDockerWatchArguments -ComposeMode $composeMode) -FailureMessage "Docker watch mode failed"
 }
 
 function Start-RoughCutDockerWatch {
@@ -253,14 +622,42 @@ function Start-RoughCutDockerWatch {
     $errLog = Join-Path $RepoRoot ("logs\docker-watch-{0}.err.log" -f $ComposeMode)
     New-Item -ItemType Directory -Force -Path (Join-Path $RepoRoot "logs") | Out-Null
 
+    Clear-Content -Path $outLog -ErrorAction SilentlyContinue
+    Clear-Content -Path $errLog -ErrorAction SilentlyContinue
+
     $process = Start-Process `
         -FilePath $powerShellCommand.Source `
-        -ArgumentList @("-NoProfile", "-File", $DockerWatchScript, "-ComposeMode", $ComposeMode, "-DockerPythonExtras", $DockerPythonExtras) `
+        -ArgumentList (Get-RoughCutDockerWatchArguments -ComposeMode $ComposeMode) `
         -WorkingDirectory $RepoRoot `
         -WindowStyle Hidden `
         -PassThru `
         -RedirectStandardOutput $outLog `
         -RedirectStandardError $errLog
+
+    $confirmed = $false
+    for ($attempt = 0; $attempt -lt 10; $attempt++) {
+        Start-Sleep -Milliseconds 300
+        if ($process.HasExited) {
+            break
+        }
+        $activePid = Get-RoughCutDockerWatchProcessId -LockPath $lockPath
+        if ($null -ne $activePid -and $activePid -eq $process.Id -and (Test-RoughCutDockerWatchActive -ProcessId $process.Id)) {
+            $confirmed = $true
+            break
+        }
+    }
+
+    if (-not $confirmed) {
+        $stderr = if (Test-Path $errLog) { (Get-Content $errLog -Raw -ErrorAction SilentlyContinue).Trim() } else { "" }
+        $stdout = if (Test-Path $outLog) { (Get-Content $outLog -Raw -ErrorAction SilentlyContinue).Trim() } else { "" }
+        if (-not [string]::IsNullOrWhiteSpace($stderr)) {
+            throw "Docker watch failed to stay alive for ${ComposeMode}: $stderr"
+        }
+        if (-not [string]::IsNullOrWhiteSpace($stdout)) {
+            throw "Docker watch failed to confirm startup for ${ComposeMode}: $stdout"
+        }
+        throw "Docker watch failed to confirm startup for $ComposeMode."
+    }
 
     Write-Host "Docker watch started for $ComposeMode (PID $($process.Id))." -ForegroundColor Green
 }

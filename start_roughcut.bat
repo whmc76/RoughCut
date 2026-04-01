@@ -184,9 +184,9 @@ goto finish
 :powershell_runtime_watch
 where pwsh >nul 2>nul
 if %ERRORLEVEL%==0 (
-  pwsh -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%scripts\watch-roughcut-docker-runtime.ps1" -ComposeMode runtime
+  pwsh -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%start_roughcut.ps1" -Mode runtime-watch
 ) else (
-  powershell -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%scripts\watch-roughcut-docker-runtime.ps1" -ComposeMode runtime
+  powershell -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%start_roughcut.ps1" -Mode runtime-watch
 )
 set EXIT_CODE=%ERRORLEVEL%
 goto finish
@@ -194,9 +194,9 @@ goto finish
 :powershell_full_watch
 where pwsh >nul 2>nul
 if %ERRORLEVEL%==0 (
-  pwsh -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%scripts\watch-roughcut-docker-runtime.ps1" -ComposeMode full
+  pwsh -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%start_roughcut.ps1" -Mode full-watch
 ) else (
-  powershell -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%scripts\watch-roughcut-docker-runtime.ps1" -ComposeMode full
+  powershell -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%start_roughcut.ps1" -Mode full-watch
 )
 set EXIT_CODE=%ERRORLEVEL%
 goto finish

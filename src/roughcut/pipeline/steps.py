@@ -330,6 +330,13 @@ def _spawn_step_heartbeat(
     return asyncio.create_task(_heartbeat_loop())
 
 
+def _resolve_transcribe_runtime_timeout_seconds(settings: object) -> float:
+    timeout = getattr(settings, "transcribe_runtime_timeout_sec", None)
+    if timeout is None:
+        timeout = getattr(settings, "step_stale_timeout_sec", 900)
+    return max(0.1, float(timeout or 900))
+
+
 def _content_profile_artifact_priority(artifact_type: str) -> int:
     priorities = {
         "content_profile_final": 3,
@@ -880,6 +887,11 @@ async def run_transcribe(job_id: str) -> dict:
             last_progress = {"progress": 0.0, "ts": 0.0}
             accept_progress_updates = {"value": True}
             pending_progress_updates = []
+            heartbeat_state = {
+                "detail": f"使用 {job.language} 模型执行转写",
+                "progress": 0.25,
+            }
+            transcribe_heartbeat: asyncio.Task[None] | None = None
 
             async def _persist_transcribe_progress(progress: float, detail: str) -> None:
                 progress_factory = get_session_factory()
@@ -888,6 +900,21 @@ async def run_transcribe(job_id: str) -> dict:
                     if step_ref is None:
                         return
                     await _set_step_progress(progress_session, step_ref, detail=detail, progress=progress)
+
+            async def _transcribe_heartbeat_loop() -> None:
+                interval_sec = max(5, int(getattr(settings, "step_heartbeat_interval_sec", 20) or 20))
+                while True:
+                    await asyncio.sleep(interval_sec)
+                    async with get_session_factory()() as heartbeat_session:
+                        step_ref = await heartbeat_session.get(JobStep, step.id)
+                        if step_ref is None or step_ref.status != "running":
+                            return
+                        await _set_step_progress(
+                            heartbeat_session,
+                            step_ref,
+                            detail=str(heartbeat_state["detail"]),
+                            progress=float(heartbeat_state["progress"]),
+                        )
 
             def _on_transcribe_progress(payload: dict) -> None:
                 if not accept_progress_updates["value"]:
@@ -903,6 +930,8 @@ async def run_transcribe(job_id: str) -> dict:
                 last_progress["progress"] = scaled_progress
                 last_progress["ts"] = now
                 detail = f"已转写 {segment_count} 段，覆盖 {segment_end:.0f}s / {total_duration:.0f}s"
+                heartbeat_state["detail"] = detail
+                heartbeat_state["progress"] = scaled_progress
                 future = asyncio.run_coroutine_threadsafe(
                     _persist_transcribe_progress(scaled_progress, detail),
                     progress_loop,
@@ -910,23 +939,38 @@ async def run_transcribe(job_id: str) -> dict:
                 pending_progress_updates.append(future)
 
             await _set_step_progress(session, step, detail=f"使用 {job.language} 模型执行转写", progress=0.25)
-            result = await transcribe_audio(
-                job.id,
-                step,
-                audio_path,
-                job.language,
-                session,
-                prompt=transcription_prompt,
-                progress_callback=_on_transcribe_progress,
-                glossary_terms=effective_glossary_terms,
-                review_memory=review_memory,
-            )
-            accept_progress_updates["value"] = False
-            if pending_progress_updates:
-                await asyncio.gather(
-                    *(asyncio.wrap_future(future) for future in pending_progress_updates),
-                    return_exceptions=True,
+            transcribe_heartbeat = asyncio.create_task(_transcribe_heartbeat_loop())
+            transcribe_timeout_sec = _resolve_transcribe_runtime_timeout_seconds(settings)
+            try:
+                result = await asyncio.wait_for(
+                    transcribe_audio(
+                        job.id,
+                        step,
+                        audio_path,
+                        job.language,
+                        session,
+                        prompt=transcription_prompt,
+                        progress_callback=_on_transcribe_progress,
+                        glossary_terms=effective_glossary_terms,
+                        review_memory=review_memory,
+                    ),
+                    timeout=transcribe_timeout_sec,
                 )
+            except asyncio.TimeoutError as exc:
+                raise TimeoutError(
+                    f"Transcribe step timed out after {transcribe_timeout_sec:.1f}s"
+                ) from exc
+            finally:
+                accept_progress_updates["value"] = False
+                if transcribe_heartbeat is not None:
+                    transcribe_heartbeat.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await transcribe_heartbeat
+                if pending_progress_updates:
+                    await asyncio.gather(
+                        *(asyncio.wrap_future(future) for future in pending_progress_updates),
+                        return_exceptions=True,
+                    )
 
         await _set_step_progress(session, step, detail=f"转写完成，共 {len(result.segments)} 段", progress=1.0)
         await session.commit()

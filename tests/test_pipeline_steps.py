@@ -4,6 +4,7 @@ import asyncio
 import json
 import subprocess
 import uuid
+from contextlib import suppress
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -488,6 +489,198 @@ async def test_run_transcribe_uses_strict_memory_scope_without_domain_signal(db_
             )
         ).scalar_one_or_none()
         assert transcript_evidence is None
+
+
+@pytest.mark.asyncio
+async def test_run_transcribe_keeps_step_heartbeat_alive_when_provider_is_silent(
+    db_engine,
+    monkeypatch,
+    tmp_path: Path,
+):
+    import roughcut.pipeline.steps as steps_mod
+
+    factory = async_sessionmaker(db_engine, expire_on_commit=False)
+    job_id = uuid.uuid4()
+    audio_path = tmp_path / "audio.wav"
+    audio_path.write_bytes(b"wav")
+    release_transcribe = asyncio.Event()
+    real_sleep = asyncio.sleep
+
+    async with factory() as session:
+        session.add(
+            Job(
+                id=job_id,
+                source_path="jobs/demo/source.mp4",
+                source_name="source.mp4",
+                status="processing",
+                language="zh-CN",
+                workflow_template="unboxing_standard",
+            )
+        )
+        session.add(JobStep(job_id=job_id, step_name="extract_audio", status="done", metadata_={"has_audio": True}))
+        session.add(JobStep(job_id=job_id, step_name="transcribe", status="running"))
+        session.add(
+            Artifact(
+                job_id=job_id,
+                artifact_type="audio_wav",
+                storage_path="jobs/demo/audio.wav",
+                data_json={},
+            )
+        )
+        await session.commit()
+
+    monkeypatch.setattr(steps_mod, "get_session_factory", lambda: factory)
+    monkeypatch.setattr(
+        steps_mod,
+        "get_settings",
+        lambda: SimpleNamespace(
+            transcription_dialect="zh-CN",
+            asr_evidence_enabled=False,
+            ocr_enabled=False,
+            entity_graph_enabled=False,
+            research_verifier_enabled=False,
+            correction_framework_version="multisource_v1",
+            step_heartbeat_interval_sec=20,
+            transcribe_runtime_timeout_sec=30,
+        ),
+    )
+
+    async def fast_sleep(_delay: float):
+        await real_sleep(0)
+
+    async def fake_resolve_storage_reference(*args, **kwargs):
+        return audio_path
+
+    async def fake_load_content_profile_user_memory(*args, **kwargs):
+        return {}
+
+    async def fake_load_recent_subtitle_examples(*args, **kwargs):
+        return []
+
+    def fake_build_subtitle_review_memory(**kwargs):
+        return {"subject_domain": kwargs.get("subject_domain"), "terms": [], "aliases": []}
+
+    async def fake_transcribe_audio(*args, **kwargs):
+        await release_transcribe.wait()
+        return TranscriptResult(
+            segments=[TranscriptSegment(index=0, start=0.0, end=1.0, text="测试")],
+            language="zh-CN",
+            duration=1.0,
+        )
+
+    monkeypatch.setattr(steps_mod.asyncio, "sleep", fast_sleep)
+    monkeypatch.setattr(steps_mod, "_resolve_storage_reference", fake_resolve_storage_reference)
+    monkeypatch.setattr(steps_mod, "load_content_profile_user_memory", fake_load_content_profile_user_memory)
+    monkeypatch.setattr(steps_mod, "_load_recent_subtitle_examples", fake_load_recent_subtitle_examples)
+    monkeypatch.setattr(steps_mod, "build_subtitle_review_memory", fake_build_subtitle_review_memory)
+    monkeypatch.setattr(steps_mod, "transcribe_audio", fake_transcribe_audio)
+
+    task = asyncio.create_task(run_transcribe(str(job_id)))
+    try:
+        await real_sleep(0.05)
+        async with factory() as session:
+            step = (
+                await session.execute(select(JobStep).where(JobStep.job_id == job_id, JobStep.step_name == "transcribe"))
+            ).scalar_one()
+            first_updated_at = datetime.fromisoformat(step.metadata_["updated_at"])
+
+        await real_sleep(0.05)
+        async with factory() as session:
+            step = (
+                await session.execute(select(JobStep).where(JobStep.job_id == job_id, JobStep.step_name == "transcribe"))
+            ).scalar_one()
+            second_updated_at = datetime.fromisoformat(step.metadata_["updated_at"])
+
+        assert second_updated_at > first_updated_at
+        assert task.done() is False
+    finally:
+        release_transcribe.set()
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
+@pytest.mark.asyncio
+async def test_run_transcribe_times_out_when_provider_hangs(db_engine, monkeypatch, tmp_path: Path):
+    import roughcut.pipeline.steps as steps_mod
+
+    factory = async_sessionmaker(db_engine, expire_on_commit=False)
+    job_id = uuid.uuid4()
+    audio_path = tmp_path / "audio.wav"
+    audio_path.write_bytes(b"wav")
+    release_transcribe = asyncio.Event()
+    real_sleep = asyncio.sleep
+
+    async with factory() as session:
+        session.add(
+            Job(
+                id=job_id,
+                source_path="jobs/demo/source.mp4",
+                source_name="source.mp4",
+                status="processing",
+                language="zh-CN",
+                workflow_template="unboxing_standard",
+            )
+        )
+        session.add(JobStep(job_id=job_id, step_name="extract_audio", status="done", metadata_={"has_audio": True}))
+        session.add(JobStep(job_id=job_id, step_name="transcribe", status="running"))
+        session.add(
+            Artifact(
+                job_id=job_id,
+                artifact_type="audio_wav",
+                storage_path="jobs/demo/audio.wav",
+                data_json={},
+            )
+        )
+        await session.commit()
+
+    monkeypatch.setattr(steps_mod, "get_session_factory", lambda: factory)
+    monkeypatch.setattr(
+        steps_mod,
+        "get_settings",
+        lambda: SimpleNamespace(
+            transcription_dialect="zh-CN",
+            asr_evidence_enabled=False,
+            ocr_enabled=False,
+            entity_graph_enabled=False,
+            research_verifier_enabled=False,
+            correction_framework_version="multisource_v1",
+            step_heartbeat_interval_sec=20,
+            transcribe_runtime_timeout_sec=0.1,
+        ),
+    )
+
+    async def fake_resolve_storage_reference(*args, **kwargs):
+        return audio_path
+
+    async def fake_load_content_profile_user_memory(*args, **kwargs):
+        return {}
+
+    async def fake_load_recent_subtitle_examples(*args, **kwargs):
+        return []
+
+    def fake_build_subtitle_review_memory(**kwargs):
+        return {"subject_domain": kwargs.get("subject_domain"), "terms": [], "aliases": []}
+
+    async def fake_transcribe_audio(*args, **kwargs):
+        await release_transcribe.wait()
+        return TranscriptResult(
+            segments=[TranscriptSegment(index=0, start=0.0, end=1.0, text="测试")],
+            language="zh-CN",
+            duration=1.0,
+        )
+
+    monkeypatch.setattr(steps_mod, "_resolve_storage_reference", fake_resolve_storage_reference)
+    monkeypatch.setattr(steps_mod, "load_content_profile_user_memory", fake_load_content_profile_user_memory)
+    monkeypatch.setattr(steps_mod, "_load_recent_subtitle_examples", fake_load_recent_subtitle_examples)
+    monkeypatch.setattr(steps_mod, "build_subtitle_review_memory", fake_build_subtitle_review_memory)
+    monkeypatch.setattr(steps_mod, "transcribe_audio", fake_transcribe_audio)
+
+    task = asyncio.create_task(run_transcribe(str(job_id)))
+    await real_sleep(0.25)
+
+    assert task.done(), "hung transcribe should not stay running forever"
+    assert isinstance(task.exception(), asyncio.TimeoutError)
 
 
 @pytest.mark.asyncio

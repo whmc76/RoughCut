@@ -103,6 +103,7 @@ class ConfigOut(BaseModel):
     max_upload_size_mb: int
     max_video_duration_sec: int
     ffmpeg_timeout_sec: int
+    transcribe_runtime_timeout_sec: int
     allowed_extensions: list[str]
     preferred_ui_language: str
     telegram_agent_enabled: bool
@@ -319,6 +320,7 @@ class ConfigPatch(BaseModel):
     max_upload_size_mb: int | None = None
     max_video_duration_sec: int | None = None
     ffmpeg_timeout_sec: int | None = None
+    transcribe_runtime_timeout_sec: int | None = None
     allowed_extensions: list[str] | None = None
     output_dir: str | None = None
     preferred_ui_language: str | None = None
@@ -407,6 +409,7 @@ def get_config():
         max_upload_size_mb=s.max_upload_size_mb,
         max_video_duration_sec=s.max_video_duration_sec,
         ffmpeg_timeout_sec=s.ffmpeg_timeout_sec,
+        transcribe_runtime_timeout_sec=s.transcribe_runtime_timeout_sec,
         allowed_extensions=s.allowed_extensions,
         preferred_ui_language=s.preferred_ui_language,
         telegram_agent_enabled=s.telegram_agent_enabled,
@@ -712,6 +715,8 @@ def patch_config(body: ConfigPatch):
         updates["quality_auto_rerun_max_attempts"] = max(0, min(5, int(updates["quality_auto_rerun_max_attempts"])))
     if "telegram_agent_task_timeout_sec" in updates:
         updates["telegram_agent_task_timeout_sec"] = max(30, min(7200, int(updates["telegram_agent_task_timeout_sec"])))
+    if "transcribe_runtime_timeout_sec" in updates:
+        updates["transcribe_runtime_timeout_sec"] = max(60, min(7200, int(updates["transcribe_runtime_timeout_sec"])))
     if "telegram_agent_result_max_chars" in updates:
         updates["telegram_agent_result_max_chars"] = max(500, min(12000, int(updates["telegram_agent_result_max_chars"])))
     current_provider = updates.get(

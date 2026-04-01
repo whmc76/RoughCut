@@ -25,25 +25,49 @@ $subscriptions = @()
 $watchers = @()
 $pendingPaths = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
 $pendingSince = $null
+$retryNotBefore = $null
 
-function Get-WatchLockProcessId {
+function Get-RoughCutLockRecord {
     param([string]$Path)
 
     if (-not (Test-Path $Path)) {
         return $null
     }
 
+    $record = [ordered]@{}
     foreach ($line in (Get-Content $Path -ErrorAction SilentlyContinue)) {
-        if ($line -match "^pid=(\d+)$") {
-            return [int]$Matches[1]
+        if ($line -match "^\s*([^=]+?)=(.*)$") {
+            $record[$Matches[1]] = $Matches[2]
         }
     }
 
-    return $null
+    if ($record.Count -eq 0) {
+        return $null
+    }
+
+    return [pscustomobject]$record
 }
 
-function Test-WatchProcessActive {
-    param([int]$ProcessId)
+function Format-RoughCutLockRecord {
+    param($LockRecord)
+
+    if ($null -eq $LockRecord) {
+        return "<empty>"
+    }
+
+    $pairs = @()
+    foreach ($prop in $LockRecord.PSObject.Properties) {
+        $pairs += ("{0}={1}" -f $prop.Name, $prop.Value)
+    }
+
+    return ($pairs -join ", ")
+}
+
+function Test-RoughCutProcessActive {
+    param(
+        [int]$ProcessId,
+        [string]$ScriptName
+    )
 
     if ($ProcessId -le 0) {
         return $false
@@ -55,7 +79,31 @@ function Test-WatchProcessActive {
     }
 
     $commandLine = [string]($process.CommandLine ?? "")
-    return $commandLine -match [regex]::Escape("watch-roughcut-docker-runtime.ps1")
+    return $commandLine -match [regex]::Escape($ScriptName)
+}
+
+function Resolve-WatchLockState {
+    param(
+        [string]$Path,
+        [string]$ScriptName
+    )
+
+    if (-not (Test-Path $Path)) {
+        return
+    }
+
+    $lockRecord = Get-RoughCutLockRecord -Path $Path
+    $lockPid = $null
+    if ($null -ne $lockRecord -and $null -ne $lockRecord.pid -and $lockRecord.pid -match "^\d+$") {
+        $lockPid = [int]$lockRecord.pid
+    }
+
+    if ($null -ne $lockPid -and (Test-RoughCutProcessActive -ProcessId $lockPid -ScriptName $ScriptName)) {
+        throw "RoughCut docker watch is already running for $ComposeMode. Lock: $Path`n$(Format-RoughCutLockRecord -LockRecord $lockRecord)"
+    }
+
+    Write-Warning ("Removing stale RoughCut docker watch lock for {0}: {1}" -f $ComposeMode, (Format-RoughCutLockRecord -LockRecord $lockRecord))
+    Remove-Item $Path -Force -ErrorAction SilentlyContinue
 }
 
 function Test-RelevantRoughCutWorkspacePath {
@@ -193,41 +241,72 @@ function Invoke-RefreshSession {
         $sessionParams.DryRun = $true
     }
 
+    $hasFailure = $false
+    $status = "success"
     try {
         $scriptOutput = @(& $sessionScript @sessionParams 2>&1)
         foreach ($entry in $scriptOutput) {
             if ($entry -is [System.Management.Automation.ErrorRecord]) {
-                Write-Host ($entry.ToString())
+                $hasFailure = $true
+                $message = $entry.ToString()
+                if ($message -match "\[DEFERRED\]") {
+                    $status = "deferred"
+                    Write-Host (" [WARN] {0}" -f $message)
+                } else {
+                    $status = "failed"
+                    Write-Host (" [ERROR] {0}" -f $message)
+                }
             } elseif ($null -ne $entry) {
                 Write-Host $entry
             }
         }
-        return 0
     } catch {
-        Write-Host $_
-        return 1
+        $hasFailure = $true
+        $message = $_.Exception.Message
+        if ($message -match "\[DEFERRED\]") {
+            $status = "deferred"
+            Write-Host (" [WARN] {0}" -f $message)
+        } else {
+            $status = "failed"
+            Write-Host (" [ERROR] {0}" -f $message)
+        }
+        if ($_.Exception.InnerException) {
+            Write-Host (" [ERROR] Inner exception: {0}" -f $_.Exception.InnerException.Message)
+        }
+        return [pscustomobject]@{
+            ExitCode = 1
+            Status = $status
+        }
+    }
+
+    if ($hasFailure) {
+        return [pscustomobject]@{
+            ExitCode = 1
+            Status = $status
+        }
+    }
+
+    return [pscustomobject]@{
+        ExitCode = 0
+        Status = $status
     }
 }
 
 if ($RunOnce) {
-    $exitCode = Invoke-RefreshSession -ChangedPaths @("<manual-run>")
-    exit $exitCode
+    $refreshResult = Invoke-RefreshSession -ChangedPaths @("<manual-run>")
+    exit $refreshResult.ExitCode
 }
 
 New-Item -ItemType Directory -Force -Path $lockDir | Out-Null
 
-if (Test-Path $lockPath) {
-    $existingPid = Get-WatchLockProcessId -Path $lockPath
-    if ($null -ne $existingPid -and (Test-WatchProcessActive -ProcessId $existingPid)) {
-        throw "RoughCut docker watch is already running for $ComposeMode. Lock: $lockPath"
-    }
-    Remove-Item $lockPath -Force -ErrorAction SilentlyContinue
-}
+Resolve-WatchLockState -Path $lockPath -ScriptName "watch-roughcut-docker-runtime.ps1"
 
 $lockContent = @(
     "pid=$PID"
     "started_at_utc=$([DateTime]::UtcNow.ToString("o"))"
     "compose_mode=$ComposeMode"
+    "script=watch-roughcut-docker-runtime.ps1"
+    "workspace_root=$repoRoot"
 ) -join [Environment]::NewLine
 Set-Content -Path $lockPath -Value $lockContent -Encoding UTF8
 
@@ -241,6 +320,7 @@ $eventActions = @("Changed", "Created", "Deleted", "Renamed")
 foreach ($action in $eventActions) {
     $subscriptions += Register-ObjectEvent -InputObject $watcher -EventName $action -SourceIdentifier ("roughcut-docker-watch-{0}" -f $action) -MessageData $action
 }
+$subscriptions += Register-ObjectEvent -InputObject $watcher -EventName "Error" -SourceIdentifier "roughcut-docker-watch-Error" -MessageData "Error"
 
 Write-Host ""
 Write-Host " =========================================="
@@ -260,11 +340,22 @@ try {
     while ($true) {
         $event = Wait-Event -Timeout 1
         if ($null -ne $event) {
+            if ($event.SourceEventArgs -is [System.IO.ErrorEventArgs]) {
+                $watchException = $event.SourceEventArgs.GetException()
+                Write-Warning ("File watcher error: {0}" -f $watchException.Message)
+                if ($null -ne $watchException.InnerException) {
+                    Write-Warning ("File watcher inner error: {0}" -f $watchException.InnerException.Message)
+                }
+                Remove-Event -EventIdentifier $event.EventIdentifier
+                continue
+            }
+
             $eventPath = $event.SourceEventArgs.FullPath
             $relativePath = Get-RelativeRoughCutPath -Path $eventPath
             if (Test-RelevantRoughCutWorkspacePath -RelativePath $relativePath) {
                 $null = $pendingPaths.Add($relativePath)
                 $pendingSince = Get-Date
+                $retryNotBefore = $null
                 Write-Host (" [INFO] Queued change: {0}" -f $relativePath)
             }
             Remove-Event -EventIdentifier $event.EventIdentifier
@@ -279,16 +370,32 @@ try {
         if ($elapsed -lt $DebounceMilliseconds) {
             continue
         }
+        if ($null -ne $retryNotBefore -and (Get-Date) -lt $retryNotBefore) {
+            continue
+        }
 
         $changedBatch = @($pendingPaths)
         $pendingPaths.Clear()
         $pendingSince = $null
 
         Write-Host (" [INFO] Refreshing Docker {0} after {1} change(s)" -f $ComposeMode, $changedBatch.Count)
-        $exitCode = Invoke-RefreshSession -ChangedPaths $changedBatch
-        if ($exitCode -ne 0) {
-            Write-Warning ("Docker auto-refresh failed with exit code {0}" -f $exitCode)
+        $refreshResult = Invoke-RefreshSession -ChangedPaths $changedBatch
+        if ($refreshResult.ExitCode -ne 0) {
+            foreach ($path in $changedBatch) {
+                $null = $pendingPaths.Add($path)
+            }
+            if ($pendingPaths.Count -gt 0) {
+                $pendingSince = Get-Date
+                $retryDelaySeconds = if ($refreshResult.Status -eq "deferred") { 30 } else { 5 }
+                $retryNotBefore = (Get-Date).AddSeconds($retryDelaySeconds)
+                if ($refreshResult.Status -eq "deferred") {
+                    Write-Warning ("Docker auto-refresh deferred because active work is still running. Retrying in {0} seconds." -f $retryDelaySeconds)
+                }
+            }
+            Write-Warning ("Docker auto-refresh failed with exit code {0}" -f $refreshResult.ExitCode)
+            Write-Warning ("Pending changes retained for retry: {0}" -f ($changedBatch -join ", "))
         } else {
+            $retryNotBefore = $null
             Write-Host " [OK] Docker auto-refresh complete"
         }
     }

@@ -178,6 +178,93 @@ async def test_reset_job_for_quality_rerun_increments_review_round_and_clears_no
 
 
 @pytest.mark.asyncio
+async def test_recover_stale_running_steps_records_stuck_step_diagnostic(db_engine, monkeypatch):
+    import roughcut.pipeline.orchestrator as orchestrator_mod
+    import roughcut.recovery.stuck_step_recovery as recovery_mod
+    from roughcut.db.models import Job, JobStep
+    from roughcut.db.session import get_session_factory
+
+    job_id = uuid.uuid4()
+    factory = get_session_factory()
+    calls: list[dict[str, object]] = []
+
+    async def fake_record_stuck_step_diagnostic(session, job, step, *, stale_after_sec, applied_action, now):
+        calls.append(
+            {
+                "job_id": str(job.id),
+                "step_name": step.step_name,
+                "stale_after_sec": stale_after_sec,
+                "applied_action": applied_action,
+            }
+        )
+        step.metadata_ = {
+            **(step.metadata_ or {}),
+            "recovery_source": "local",
+            "recovery_action": applied_action,
+            "recovery_summary": "recorded",
+            "updated_at": now.isoformat(),
+        }
+        return {
+            "source": "local",
+            "recommended_action": {"kind": applied_action},
+            "summary": "recorded",
+        }
+
+    monkeypatch.setattr(recovery_mod, "record_stuck_step_diagnostic", fake_record_stuck_step_diagnostic)
+
+    async with factory() as session:
+        session.add(
+            Job(
+                id=job_id,
+                source_path="jobs/demo/stuck-step.mp4",
+                source_name="stuck-step.mp4",
+                status="processing",
+                language="zh-CN",
+            )
+        )
+        session.add(
+            JobStep(
+                job_id=job_id,
+                step_name="transcribe",
+                status="running",
+                attempt=1,
+                started_at=datetime.now(timezone.utc) - timedelta(hours=2),
+                metadata_={
+                    "task_id": "stale-task",
+                    "updated_at": (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat(),
+                },
+            )
+        )
+        await session.commit()
+
+    async with factory() as session:
+        await orchestrator_mod._recover_stale_running_steps(session)
+        await session.commit()
+
+    async with factory() as session:
+        step = (
+            await session.execute(
+                orchestrator_mod.select(JobStep).where(
+                    JobStep.job_id == job_id,
+                    JobStep.step_name == "transcribe",
+                )
+            )
+        ).scalar_one()
+
+    assert calls == [
+        {
+            "job_id": str(job_id),
+            "step_name": "transcribe",
+            "stale_after_sec": orchestrator_mod._step_stale_timeout_seconds("transcribe"),
+            "applied_action": "reset_to_pending",
+        }
+    ]
+    assert step.status == "pending"
+    assert step.metadata_["recovery_action"] == "reset_to_pending"
+    assert step.metadata_["recovery_source"] == "local"
+
+
+@pytest.mark.asyncio
 async def test_tick_respects_retry_wait_until_before_redispatch(monkeypatch, db_engine):
     import roughcut.pipeline.orchestrator as orchestrator_mod
     import roughcut.watcher.folder_watcher as watcher_mod

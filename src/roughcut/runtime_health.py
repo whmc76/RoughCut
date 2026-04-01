@@ -44,12 +44,21 @@ async def _check_redis_ready() -> tuple[bool, str]:
 async def _check_storage_ready() -> tuple[bool, str]:
     from roughcut.storage.s3 import get_storage
 
-    def _head_bucket() -> None:
+    def _probe_storage() -> None:
         storage = get_storage()
-        storage._client.head_bucket(Bucket=storage._bucket)
+        client = getattr(storage, "_client", None)
+        bucket = getattr(storage, "_bucket", None)
+        if client is not None and bucket:
+            client.head_bucket(Bucket=bucket)
+            return
+        ensure_bucket = getattr(storage, "ensure_bucket", None)
+        if callable(ensure_bucket):
+            ensure_bucket()
+            return
+        raise RuntimeError("Storage backend does not expose a readiness probe")
 
     try:
-        await asyncio.to_thread(_head_bucket)
+        await asyncio.to_thread(_probe_storage)
         return True, "ok"
     except Exception as exc:
         return False, str(exc)

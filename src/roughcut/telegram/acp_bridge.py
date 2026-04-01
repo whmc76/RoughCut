@@ -9,6 +9,8 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+import httpx
+
 from roughcut.telegram.output_codec import decode_process_output
 
 
@@ -101,6 +103,41 @@ def build_backend_command(payload: dict[str, Any], *, backend: str | None = None
 
 
 def _run_backend(payload: dict[str, Any], *, backend: str) -> dict[str, Any]:
+    if backend == "codex":
+        proxy_url = str(os.getenv("ROUGHCUT_ACP_BRIDGE_CODEX_PROXY_URL", "") or "").strip()
+        if proxy_url:
+            headers = {"Content-Type": "application/json"}
+            proxy_token = str(os.getenv("ROUGHCUT_ACP_BRIDGE_CODEX_PROXY_TOKEN", "") or "").strip()
+            if proxy_token:
+                headers["Authorization"] = f"Bearer {proxy_token}"
+            timeout = int(
+                os.getenv(
+                    "ROUGHCUT_ACP_BRIDGE_TIMEOUT_SEC",
+                    os.getenv("TELEGRAM_AGENT_TASK_TIMEOUT_SEC", "900"),
+                )
+                or "900"
+            )
+            response = httpx.post(
+                proxy_url,
+                json={
+                    "repo_root": str(Path(str(payload.get("repo_root") or ".")).resolve()),
+                    "prompt": str(payload.get("prompt") or payload.get("task") or "").strip(),
+                    "model": (
+                        str(os.getenv("ROUGHCUT_ACP_BRIDGE_CODEX_MODEL", "")).strip()
+                        or str(os.getenv("TELEGRAM_AGENT_CODEX_MODEL", "")).strip()
+                    ),
+                    "sandbox": str(os.getenv("ROUGHCUT_ACP_BRIDGE_CODEX_SANDBOX", "danger-full-access") or "danger-full-access").strip(),
+                    "timeout_sec": max(30, timeout),
+                },
+                headers=headers,
+                timeout=max(30, timeout),
+            )
+            response.raise_for_status()
+            result = response.json()
+            if not isinstance(result, dict):
+                raise RuntimeError("Codex host bridge returned a non-object response")
+            return result
+
     command, cwd, timeout = build_backend_command(payload, backend=backend)
     stdout_override_path: Path | None = None
     temp_dir: tempfile.TemporaryDirectory[str] | None = None
