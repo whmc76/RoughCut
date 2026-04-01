@@ -114,6 +114,7 @@ export function BotSettingsPanel({ form, config, onChange }: BotSettingsPanelPro
                       checked={claudeEnabled}
                       onChange={(event) => onChange("telegram_agent_claude_enabled", event.target.checked)}
                     />
+                    <div className="muted">关闭后不仅不能直连 `/run claude`，ACP 主后端或回退后端里的 Claude 也会被一并禁用。</div>
                     {claudeEnabled && (
                       <div className="field-row">
                         <TextField

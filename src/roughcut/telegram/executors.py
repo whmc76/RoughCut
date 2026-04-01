@@ -273,16 +273,11 @@ def _execute_acp_preset(
     env["ROUGHCUT_AGENT_JOB_ID"] = job_id
     env["ROUGHCUT_AGENT_TASK_ID"] = task_id
     env["ROUGHCUT_AGENT_CHAT_ID"] = chat_id
-    bridge_backend = str(
-        getattr(settings, "acp_bridge_backend", "")
-        or os.getenv("ROUGHCUT_ACP_BRIDGE_BACKEND", "codex")
-        or "codex"
-    ).strip()
-    bridge_fallback_backend = str(
-        getattr(settings, "acp_bridge_fallback_backend", "")
-        or os.getenv("ROUGHCUT_ACP_BRIDGE_FALLBACK_BACKEND", "claude")
-        or "claude"
-    ).strip()
+    backends = _configured_acp_backends(settings)
+    if not backends:
+        raise RuntimeError("ACP bridge has no enabled backend")
+    bridge_backend = backends[0]
+    bridge_fallback_backend = backends[1] if len(backends) > 1 else ""
     claude_command = str(getattr(settings, "telegram_agent_claude_command", "claude") or "claude").strip()
     claude_model = str(
         getattr(settings, "acp_bridge_claude_model", "")
@@ -307,10 +302,10 @@ def _execute_acp_preset(
     env["ROUGHCUT_ACP_BRIDGE_BACKEND"] = bridge_backend
     if bridge_fallback_backend:
         env["ROUGHCUT_ACP_BRIDGE_FALLBACK_BACKEND"] = bridge_fallback_backend
-    if claude_command:
+    if bool(getattr(settings, "telegram_agent_claude_enabled", False)) and claude_command:
         env["TELEGRAM_AGENT_CLAUDE_COMMAND"] = claude_command
         env["ROUGHCUT_ACP_BRIDGE_CLAUDE_COMMAND"] = claude_command
-    if claude_model:
+    if bool(getattr(settings, "telegram_agent_claude_enabled", False)) and claude_model:
         env["TELEGRAM_AGENT_CLAUDE_MODEL"] = claude_model
         env["ROUGHCUT_ACP_BRIDGE_CLAUDE_MODEL"] = claude_model
     if codex_command:
@@ -486,3 +481,26 @@ def _truncate_text(text: str, *, max_chars: int) -> str:
 def _default_acp_bridge_command(repo_root: Path) -> str:
     script = repo_root / "scripts" / "acp_bridge.py"
     return f'"{sys.executable}" "{script}"'
+
+
+def _configured_acp_backends(settings) -> list[str]:
+    backends: list[str] = []
+    claude_enabled = bool(getattr(settings, "telegram_agent_claude_enabled", False))
+    primary = str(
+        getattr(settings, "acp_bridge_backend", "")
+        or os.getenv("ROUGHCUT_ACP_BRIDGE_BACKEND", "codex")
+        or "codex"
+    ).strip().lower()
+    fallback = str(
+        getattr(settings, "acp_bridge_fallback_backend", "")
+        or os.getenv("ROUGHCUT_ACP_BRIDGE_FALLBACK_BACKEND", "claude")
+        or "claude"
+    ).strip().lower()
+    for item in (primary, fallback):
+        if item not in {"claude", "codex"}:
+            continue
+        if item == "claude" and not claude_enabled:
+            continue
+        if item not in backends:
+            backends.append(item)
+    return backends

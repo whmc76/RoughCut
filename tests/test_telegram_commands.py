@@ -260,6 +260,44 @@ async def test_handle_freeform_request_queues_triage_task(monkeypatch):
     assert "已将请求交给 Telegram agent" in sent[0]
 
 
+def test_acp_available_prefers_settings_backend_over_env(monkeypatch):
+    settings = SimpleNamespace(
+        telegram_agent_acp_command="",
+        acp_bridge_backend="codex",
+        acp_bridge_fallback_backend="claude",
+        telegram_agent_codex_command="codex",
+        telegram_agent_claude_command="claude",
+        telegram_agent_claude_enabled=False,
+    )
+    monkeypatch.setenv("ROUGHCUT_ACP_BRIDGE_BACKEND", "claude")
+    monkeypatch.setattr(
+        commands_mod.shutil,
+        "which",
+        lambda name: "C:/tools/codex.exe" if name == "codex" else None,
+    )
+
+    assert commands_mod._acp_available(settings) is True
+    assert commands_mod._select_agent_provider(settings) == "acp"
+
+
+def test_acp_available_uses_fallback_backend_when_primary_missing(monkeypatch):
+    settings = SimpleNamespace(
+        telegram_agent_acp_command="",
+        acp_bridge_backend="codex",
+        acp_bridge_fallback_backend="claude",
+        telegram_agent_codex_command="codex",
+        telegram_agent_claude_command="claude",
+        telegram_agent_claude_enabled=True,
+    )
+    monkeypatch.setattr(
+        commands_mod.shutil,
+        "which",
+        lambda name: "C:/tools/claude.exe" if name == "claude" else None,
+    )
+
+    assert commands_mod._acp_available(settings) is True
+
+
 @pytest.mark.asyncio
 async def test_handle_confirm_command_submits_task(monkeypatch):
     sent: list[str] = []

@@ -712,8 +712,34 @@ def _codex_command_name(settings) -> str:
     ).strip()
 
 
-def _configured_acp_backend() -> str:
-    return str(os.getenv("ROUGHCUT_ACP_BRIDGE_BACKEND", "claude") or "claude").strip().lower()
+def _configured_acp_backend(settings) -> str:
+    return str(
+        getattr(settings, "acp_bridge_backend", "")
+        or os.getenv("ROUGHCUT_ACP_BRIDGE_BACKEND", "codex")
+        or "codex"
+    ).strip().lower()
+
+
+def _configured_acp_fallback_backend(settings) -> str:
+    return str(
+        getattr(settings, "acp_bridge_fallback_backend", "")
+        or os.getenv("ROUGHCUT_ACP_BRIDGE_FALLBACK_BACKEND", "claude")
+        or "claude"
+    ).strip().lower()
+
+
+def _configured_acp_backends(settings) -> list[str]:
+    backends: list[str] = []
+    claude_enabled = bool(getattr(settings, "telegram_agent_claude_enabled", False))
+    for item in (_configured_acp_backend(settings), _configured_acp_fallback_backend(settings)):
+        normalized = str(item or "").strip().lower()
+        if normalized not in {"claude", "codex"}:
+            continue
+        if normalized == "claude" and not claude_enabled:
+            continue
+        if normalized not in backends:
+            backends.append(normalized)
+    return backends
 
 
 def _claude_command_available(settings) -> bool:
@@ -730,14 +756,9 @@ def _acp_available(settings) -> bool:
     explicit_command = str(getattr(settings, "telegram_agent_acp_command", "") or "").strip()
     if explicit_command:
         return True
-    backend = _configured_acp_backend()
-    if backend == "codex":
-        return _codex_command_available(settings)
-    if backend == "claude":
-        command_name = str(
-            os.getenv("ROUGHCUT_ACP_BRIDGE_CLAUDE_COMMAND", "")
-            or _claude_command_name(settings)
-            or "claude"
-        ).strip()
-        return bool(shutil.which(command_name))
+    for backend in _configured_acp_backends(settings):
+        if backend == "codex" and _codex_command_available(settings):
+            return True
+        if backend == "claude" and _claude_command_available(settings):
+            return True
     return False

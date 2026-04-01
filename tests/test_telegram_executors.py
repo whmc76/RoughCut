@@ -91,6 +91,7 @@ def test_execute_acp_preset_passes_claude_model_to_bridge_env(monkeypatch, tmp_p
             acp_bridge_claude_model="opus",
             acp_bridge_codex_command="codex",
             acp_bridge_codex_model="gpt-5.4-mini",
+            telegram_agent_claude_enabled=True,
             telegram_agent_claude_command="claude",
             telegram_agent_codex_command="codex",
             telegram_agent_codex_model="",
@@ -139,6 +140,7 @@ def test_execute_acp_preset_includes_task_context_in_bridge_payload(monkeypatch,
             acp_bridge_claude_model="opus",
             acp_bridge_codex_command="codex",
             acp_bridge_codex_model="gpt-5.4-mini",
+            telegram_agent_claude_enabled=True,
             telegram_agent_claude_command="claude",
             telegram_agent_codex_command="codex",
             telegram_agent_codex_model="gpt-5.4-mini",
@@ -194,6 +196,53 @@ def test_execute_acp_preset_includes_task_context_in_bridge_payload(monkeypatch,
     assert captured["env"]["ROUGHCUT_AGENT_CHAT_ID"] == "chat-1"
     assert captured["env"]["ROUGHCUT_ACP_BRIDGE_BACKEND"] == "codex"
     assert captured["env"]["ROUGHCUT_ACP_BRIDGE_FALLBACK_BACKEND"] == "claude"
+    assert result["excerpt"] == "ok"
+
+
+def test_execute_acp_preset_skips_disabled_claude_backend(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        executors_mod,
+        "get_settings",
+        lambda: SimpleNamespace(
+            acp_bridge_backend="claude",
+            acp_bridge_fallback_backend="codex",
+            acp_bridge_claude_model="opus",
+            acp_bridge_codex_command="codex",
+            acp_bridge_codex_model="gpt-5.4-mini",
+            telegram_agent_claude_enabled=False,
+            telegram_agent_claude_command="claude",
+            telegram_agent_codex_command="codex",
+            telegram_agent_codex_model="gpt-5.4-mini",
+            telegram_agent_acp_command="python scripts/acp_bridge.py",
+            telegram_agent_task_timeout_sec=900,
+            telegram_agent_result_max_chars=3500,
+        ),
+    )
+
+    captured = {}
+
+    class FakeResult:
+        returncode = 0
+        stdout = json.dumps({"stdout": "ok", "stderr": "", "excerpt": "ok"}, ensure_ascii=False).encode("utf-8")
+        stderr = b""
+
+    def fake_run(command, *args, **kwargs):
+        captured["env"] = kwargs.get("env", {})
+        return FakeResult()
+
+    monkeypatch.setattr(executors_mod.subprocess, "run", fake_run)
+
+    result = executors_mod.execute_agent_preset(
+        provider="acp",
+        preset="delegate",
+        task_text="做一件事",
+        scope_path="src",
+        job_id="job-1",
+    )
+
+    assert captured["env"]["ROUGHCUT_ACP_BRIDGE_BACKEND"] == "codex"
+    assert "ROUGHCUT_ACP_BRIDGE_CLAUDE_COMMAND" not in captured["env"]
+    assert "TELEGRAM_AGENT_CLAUDE_COMMAND" not in captured["env"]
     assert result["excerpt"] == "ok"
 
 
