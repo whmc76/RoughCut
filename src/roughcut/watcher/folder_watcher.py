@@ -22,7 +22,8 @@ from watchdog.events import FileSystemEvent, FileSystemEventHandler
 from watchdog.observers import Observer
 
 from roughcut.config import DEFAULT_TEST_OUTPUT_ROOT, get_settings
-from roughcut.db.models import Job, WatchRoot
+from roughcut.creative.modes import normalize_enhancement_modes, normalize_workflow_mode
+from roughcut.db.models import ConfigProfile, Job, WatchRoot
 from roughcut.db.session import get_session_factory
 from roughcut.media.probe import probe
 from roughcut.media.output import get_output_dir
@@ -36,11 +37,21 @@ _SCAN_STATES: dict[str, "WatchInventoryScanState"] = {}
 _SCAN_FILE_CACHE: dict[str, dict[str, "CachedWatchFileResult"]] = {}
 
 
-async def _call_inventory_job_factory(factory, file_paths: list[str], *, workflow_template: str | None) -> Any:
+async def _call_inventory_job_factory(
+    factory,
+    file_paths: list[str],
+    *,
+    workflow_template: str | None,
+    config_profile_id: uuid.UUID | str | None = None,
+) -> Any:
     try:
-        return await factory(file_paths, workflow_template=workflow_template)
+        return await factory(
+            file_paths,
+            workflow_template=workflow_template,
+            config_profile_id=config_profile_id,
+        )
     except TypeError as exc:
-        if "workflow_template" not in str(exc):
+        if "workflow_template" not in str(exc) and "config_profile_id" not in str(exc):
             raise
         return await factory(file_paths, channel_profile=workflow_template)
 
@@ -237,12 +248,18 @@ def replace_watch_root_inventory_scan_snapshot(watch_path: str, payload: dict) -
 async def create_jobs_for_inventory_paths(
     file_paths: list[str],
     *,
+    config_profile_id: uuid.UUID | str | None = None,
     workflow_template: str | None = None,
     language: str = "zh-CN",
 ) -> list[dict[str, str | None]]:
     results: list[dict[str, str | None]] = []
     for file_path in file_paths:
-        job_id = await _create_job_for_file(Path(file_path), workflow_template, language)
+        job_id = await _create_job_for_file(
+            Path(file_path),
+            workflow_template,
+            language,
+            config_profile_id=config_profile_id,
+        )
         results.append({"path": file_path, "job_id": job_id or None})
     return results
 
@@ -610,6 +627,8 @@ async def _create_job_for_file(
     file_path: Path,
     workflow_template: str | None = None,
     language: str = "zh-CN",
+    *,
+    config_profile_id: uuid.UUID | str | None = None,
 ) -> str:
     """Upload file to S3, create job + steps in DB. Returns job_id."""
     # Compute hash first for dedup
@@ -629,6 +648,26 @@ async def _create_job_for_file(
     factory = get_session_factory()
     async with factory() as session:
         settings = get_settings()
+        profile_uuid = None
+        profile_settings_snapshot: dict[str, Any] | None = None
+        profile_packaging_snapshot: dict[str, Any] | None = None
+        if config_profile_id is not None:
+            profile_uuid = config_profile_id if isinstance(config_profile_id, uuid.UUID) else uuid.UUID(str(config_profile_id))
+            profile = await session.get(ConfigProfile, profile_uuid)
+            if profile is not None:
+                profile_settings_snapshot = dict(profile.settings_json or {})
+                profile_packaging_snapshot = dict(profile.packaging_json or {})
+
+        workflow_mode = settings.default_job_workflow_mode
+        enhancement_modes = list(settings.default_job_enhancement_modes or [])
+        if profile_settings_snapshot:
+            workflow_mode = normalize_workflow_mode(
+                str(profile_settings_snapshot.get("default_job_workflow_mode") or workflow_mode)
+            )
+            enhancement_modes = normalize_enhancement_modes(
+                list(profile_settings_snapshot.get("default_job_enhancement_modes") or enhancement_modes)
+            )
+
         job = Job(
             id=job_id,
             source_path=s3_key,
@@ -636,9 +675,12 @@ async def _create_job_for_file(
             file_hash=file_hash,
             status="pending",
             language=language,
+            config_profile_id=profile_uuid,
+            config_profile_snapshot_json=profile_settings_snapshot,
+            packaging_snapshot_json=profile_packaging_snapshot,
             workflow_template=workflow_template,
-            workflow_mode=settings.default_job_workflow_mode,
-            enhancement_modes=list(settings.default_job_enhancement_modes or []),
+            workflow_mode=workflow_mode,
+            enhancement_modes=enhancement_modes,
         )
         session.add(job)
         for step in create_job_steps(job_id):
@@ -731,6 +773,7 @@ async def _merge_videos_for_job(file_paths: list[Path], *, output_path: Path) ->
 async def create_merged_job_for_inventory_paths(
     file_paths: list[str],
     *,
+    config_profile_id: uuid.UUID | str | None = None,
     workflow_template: str | None = None,
     language: str = "zh-CN",
 ) -> str | None:
@@ -747,7 +790,12 @@ async def create_merged_job_for_inventory_paths(
 
     merged_path = await _merge_videos_for_job(resolved_paths, output_path=output_path)
     try:
-        return await _create_job_for_file(merged_path, workflow_template, language)
+        return await _create_job_for_file(
+            merged_path,
+            workflow_template,
+            language,
+            config_profile_id=config_profile_id,
+        )
     finally:
         if merged_path.exists():
             merged_path.unlink()
@@ -1275,6 +1323,7 @@ async def run_watch_root_auto_duty() -> dict[str, Any]:
                         job_id = await _call_inventory_job_factory(
                             create_merged_job_for_inventory_paths,
                             [str(item.get("path") or "") for item in selected_items],
+                            config_profile_id=root.config_profile_id,
                             workflow_template=root.workflow_template,
                         )
                         payload, created_ids = _mark_inventory_items_as_dispatched(
@@ -1315,6 +1364,7 @@ async def run_watch_root_auto_duty() -> dict[str, Any]:
                         results = await _call_inventory_job_factory(
                             create_jobs_for_inventory_paths,
                             [str(item.get("path") or "") for item in selected_items],
+                            config_profile_id=root.config_profile_id,
                             workflow_template=root.workflow_template,
                         )
                         job_ids_by_path = {result["path"]: result["job_id"] for result in results}
@@ -1380,10 +1430,12 @@ class VideoFileHandler(FileSystemEventHandler):
     def __init__(
         self,
         workflow_template: str | None,
+        config_profile_id: uuid.UUID | str | None,
         language: str,
         loop: asyncio.AbstractEventLoop,
     ) -> None:
         self._workflow_template = workflow_template
+        self._config_profile_id = config_profile_id
         self._language = language
         self._loop = loop
         self._settings = get_settings()
@@ -1393,7 +1445,12 @@ class VideoFileHandler(FileSystemEventHandler):
             return
         logger.info(f"New file detected: {file_path}")
         future = asyncio.run_coroutine_threadsafe(
-            _create_job_for_file(file_path, self._workflow_template, self._language),
+            _create_job_for_file(
+                file_path,
+                self._workflow_template,
+                self._language,
+                config_profile_id=self._config_profile_id,
+            ),
             self._loop,
         )
 
@@ -1421,6 +1478,7 @@ class VideoFileHandler(FileSystemEventHandler):
 async def watch_directory(
     watch_path: str,
     workflow_template: str | None = None,
+    config_profile_id: uuid.UUID | str | None = None,
     language: str = "zh-CN",
 ) -> None:
     """Watch a directory for new video files. Runs until cancelled."""
@@ -1429,7 +1487,7 @@ async def watch_directory(
         raise FileNotFoundError(f"Watch path does not exist: {watch_path}")
 
     loop = asyncio.get_running_loop()
-    handler = VideoFileHandler(workflow_template, language, loop)
+    handler = VideoFileHandler(workflow_template, config_profile_id, language, loop)
     observer = Observer()
     observer.schedule(handler, str(path), recursive=True)
     observer.start()
@@ -1459,7 +1517,7 @@ async def watch_from_db() -> None:
 
     tasks = [
         asyncio.create_task(
-            watch_directory(root.path, root.workflow_template)
+            watch_directory(root.path, root.workflow_template, root.config_profile_id)
         )
         for root in roots
     ]

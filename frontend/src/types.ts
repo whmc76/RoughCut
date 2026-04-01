@@ -247,6 +247,7 @@ export type BuiltinGlossaryPack = {
 export type WatchRoot = {
   id: string;
   path: string;
+  config_profile_id?: string | null;
   workflow_template?: string | null;
   enabled: boolean;
   scan_mode: "fast" | "precise";

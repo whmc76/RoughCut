@@ -8,6 +8,7 @@ import type { WatchInventorySmartMergeGroup } from "../../types";
 function serializeRootForm(form: RootForm): string {
   return JSON.stringify({
     path: form.path,
+    config_profile_id: form.config_profile_id,
     workflow_template: form.workflow_template,
     enabled: form.enabled,
     scan_mode: form.scan_mode,
@@ -28,6 +29,7 @@ export function useWatchRootWorkspace() {
 
   const roots = useQuery({ queryKey: ["watch-roots"], queryFn: api.listWatchRoots });
   const options = useQuery({ queryKey: ["config-options"], queryFn: api.getConfigOptions });
+  const configProfiles = useQuery({ queryKey: ["config-profiles"], queryFn: api.getConfigProfiles });
   const selectedRoot = roots.data?.find((root) => root.id === selectedRootId) ?? null;
   const inventory = useQuery({
     queryKey: ["watch-root-inventory", selectedRootId],
@@ -46,6 +48,7 @@ export function useWatchRootWorkspace() {
     if (selectedRoot) {
       const nextForm = {
         path: selectedRoot.path,
+        config_profile_id: selectedRoot.config_profile_id || "",
         workflow_template: selectedRoot.workflow_template || "",
         enabled: selectedRoot.enabled,
         scan_mode: selectedRoot.scan_mode,
@@ -150,6 +153,7 @@ export function useWatchRootWorkspace() {
           if (requestVersion !== updateVersionRef.current) return;
           lastPersistedRef.current = serializeRootForm({
             path: updatedRoot.path,
+            config_profile_id: updatedRoot.config_profile_id || "",
             workflow_template: updatedRoot.workflow_template || "",
             enabled: updatedRoot.enabled,
             scan_mode: updatedRoot.scan_mode,
@@ -182,6 +186,7 @@ export function useWatchRootWorkspace() {
     setSelectedPending,
     roots,
     options,
+    configProfiles,
     selectedRoot,
     inventory,
     refreshRoots,

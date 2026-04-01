@@ -435,7 +435,11 @@ def reset_packaging_config() -> dict[str, Any]:
 def resolve_packaging_plan_for_job(job_id: str, *, content_profile: dict[str, Any] | None = None) -> dict[str, Any]:
     state = _load_state()
     config = dict(DEFAULT_CONFIG)
-    config.update(state["config"])
+    job_packaging_snapshot = _load_job_packaging_snapshot(job_id)
+    if isinstance(job_packaging_snapshot, dict) and job_packaging_snapshot:
+        config.update(job_packaging_snapshot)
+    else:
+        config.update(state["config"])
     if not config.get("enabled"):
         return {
             "intro": None,
@@ -503,6 +507,26 @@ def resolve_packaging_plan_for_job(job_id: str, *, content_profile: dict[str, An
         "export_resolution_mode": config["export_resolution_mode"],
         "export_resolution_preset": config["export_resolution_preset"],
     }
+
+
+def _load_job_packaging_snapshot(job_id: str) -> dict[str, Any] | None:
+    async def _operation(session: Any) -> dict[str, Any] | None:
+        from roughcut.db.models import Job
+
+        try:
+            parsed_job_id = uuid.UUID(str(job_id))
+        except ValueError:
+            return None
+
+        job = await session.get(Job, parsed_job_id)
+        if job is None or not isinstance(job.packaging_snapshot_json, dict):
+            return None
+        return dict(job.packaging_snapshot_json)
+
+    try:
+        return run_db_operation(_operation)
+    except Exception:
+        return None
 
 
 def get_packaging_asset(asset_id: str) -> dict[str, Any]:

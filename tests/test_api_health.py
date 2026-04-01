@@ -775,6 +775,52 @@ async def test_watch_roots_crud(client: AsyncClient):
 
 
 @pytest.mark.asyncio
+async def test_watch_roots_crud_persists_bound_config_profile(client: AsyncClient):
+    from roughcut.db.models import ConfigProfile
+    from roughcut.db.session import get_session_factory
+
+    profile_id = uuid.uuid4()
+    async with get_session_factory()() as session:
+        session.add(
+            ConfigProfile(
+                id=profile_id,
+                name="FAS标准",
+                description="EDC潮玩开箱新品介绍",
+                settings_json={
+                    "reasoning_model": "profile-reasoner",
+                    "default_job_workflow_mode": "standard_edit",
+                    "default_job_enhancement_modes": ["ai_director"],
+                },
+                packaging_json={
+                    "copy_style": "attention_grabbing",
+                    "subtitle_style": "bold_yellow_outline",
+                    "cover_style": "preset_default",
+                    "title_style": "preset_default",
+                    "smart_effect_style": "smart_effect_rhythm",
+                    "subtitle_motion_style": "motion_static",
+                    "enabled": True,
+                },
+                created_at=datetime.now(timezone.utc),
+                updated_at=datetime.now(timezone.utc),
+            )
+        )
+        await session.commit()
+
+    resp = await client.post(
+        "/api/v1/watch-roots",
+        json={"path": "/tmp/videos-profile", "enabled": True, "config_profile_id": str(profile_id)},
+    )
+    assert resp.status_code == 201
+    created = resp.json()
+    assert created["config_profile_id"] == str(profile_id)
+
+    resp = await client.get("/api/v1/watch-roots")
+    assert resp.status_code == 200
+    roots = resp.json()
+    assert any(r["id"] == created["id"] and r["config_profile_id"] == str(profile_id) for r in roots)
+
+
+@pytest.mark.asyncio
 async def test_watch_root_inventory(client: AsyncClient, monkeypatch: pytest.MonkeyPatch):
     import roughcut.api.review as review_api
 
@@ -1203,14 +1249,22 @@ async def test_control_status_reports_services(client: AsyncClient, monkeypatch:
 
     monkeypatch.setattr(
         control_api,
-        "_running_container_names",
-        lambda: {"roughcut-postgres-1", "roughcut-redis-1"},
+        "_running_compose_service_names",
+        lambda: {"orchestrator", "worker-media"},
     )
     monkeypatch.setattr(
         control_api,
-        "_has_process",
-        lambda needle: "orchestrator" in needle or "media_queue" in needle,
+        "_running_container_names",
+        lambda: {"roughcut-postgres-1", "roughcut-redis-1"},
     )
+
+    def fake_has_process(needle: str) -> bool:
+        if "orchestrator" in needle or "media_queue" in needle or "llm_queue" in needle:
+            raise AssertionError("compose-backed services must not rely on command-line matching")
+        return False
+
+    monkeypatch.setattr(control_api, "_has_process", fake_has_process)
+
     async def fake_readiness():
         return {
             "status": "ready",
@@ -1243,6 +1297,60 @@ async def test_control_status_reports_services(client: AsyncClient, monkeypatch:
     assert payload["runtime"]["readiness_status"] == "ready"
     assert payload["runtime"]["orchestrator_lock"]["status"] == "held"
     assert payload["runtime"]["orchestrator_lock"]["leader_active"] is True
+
+
+@pytest.mark.asyncio
+async def test_control_status_falls_back_to_runtime_probes_when_compose_is_unavailable(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import roughcut.api.control as control_api
+
+    monkeypatch.setattr(control_api, "_running_compose_service_names", lambda: set())
+    monkeypatch.setattr(control_api, "_running_container_names", lambda: set())
+    monkeypatch.setattr(control_api, "_running_celery_queues", lambda: {"media_queue", "llm_queue"})
+    monkeypatch.setattr(control_api, "_has_process", lambda needle: False)
+
+    async def fake_readiness():
+        return {
+            "status": "ready",
+            "checks": {
+                "database": {"status": "ok", "detail": "ok"},
+                "redis": {"status": "ok", "detail": "ok"},
+                "storage": {"status": "ok", "detail": "ok"},
+            },
+        }
+
+    async def fake_lock_snapshot():
+        return {
+            "status": "held",
+            "leader_active": True,
+            "detail": "active orchestrator leader",
+        }
+
+    monkeypatch.setattr(control_api, "build_readiness_payload", fake_readiness)
+    monkeypatch.setattr(control_api, "get_orchestrator_lock_snapshot", fake_lock_snapshot)
+
+    response = await client.get("/api/v1/control/status")
+
+    assert response.status_code == 200
+    payload = response.json()
+    data = payload["services"]
+    assert data["orchestrator"] is True
+    assert data["media_worker"] is True
+    assert data["llm_worker"] is True
+    assert data["postgres"] is True
+    assert data["redis"] is True
+
+
+def test_control_running_compose_service_names_handles_missing_docker(monkeypatch: pytest.MonkeyPatch):
+    import roughcut.api.control as control_api
+
+    def fake_run(*args, **kwargs):
+        raise FileNotFoundError("docker not found")
+
+    monkeypatch.setattr(control_api.subprocess, "run", fake_run)
+    assert control_api._running_compose_service_names() == set()
 
 
 def test_control_running_container_names_handles_missing_docker(monkeypatch: pytest.MonkeyPatch):

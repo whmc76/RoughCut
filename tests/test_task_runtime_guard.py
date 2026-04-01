@@ -249,3 +249,53 @@ async def test_cancel_job_clears_stale_task_ids_from_step_metadata(client):
         assert package_step.status == "skipped"
         assert "task_id" not in (package_step.metadata_ or {})
         assert package_step.metadata_["last_task_id"] == "queued-task"
+
+
+@pytest.mark.asyncio
+async def test_run_task_step_uses_job_config_snapshot_without_switching_global_profile(db_engine, monkeypatch):
+    import roughcut.config as config_mod
+    import roughcut.pipeline.tasks as tasks_mod
+    from roughcut.db.models import Job, JobStep
+    from roughcut.db.session import get_session_factory
+
+    config_mod._settings = config_mod.Settings(_env_file=None, reasoning_model="global-reasoner")
+
+    job_id = uuid.uuid4()
+    factory = get_session_factory()
+    async with factory() as session:
+        session.add(
+            Job(
+                id=job_id,
+                source_path="jobs/demo/profile-bound.mp4",
+                source_name="profile-bound.mp4",
+                status="processing",
+                language="zh-CN",
+                config_profile_snapshot_json={
+                    "reasoning_model": "profile-reasoner",
+                    "default_job_workflow_mode": "standard_edit",
+                    "default_job_enhancement_modes": [],
+                },
+            )
+        )
+        session.add(
+            JobStep(
+                job_id=job_id,
+                step_name="probe",
+                status="pending",
+            )
+        )
+        await session.commit()
+
+    monkeypatch.setattr(tasks_mod, "_probe_local_gpu_pressure", lambda step_name: None)
+    monkeypatch.setattr(
+        tasks_mod,
+        "run_step_sync",
+        lambda step_name, current_job_id: {"step_name": step_name, "job_id": current_job_id, "reasoning_model": config_mod.get_settings().reasoning_model},
+    )
+
+    fake_task = SimpleNamespace(request=SimpleNamespace(id="profile-task", retries=0))
+    result = await asyncio.to_thread(
+        functools.partial(tasks_mod._run_task_step, fake_task, str(job_id), "probe", retry_countdown=10)
+    )
+
+    assert result["reasoning_model"] == "profile-reasoner"

@@ -42,6 +42,9 @@ class Job(Base):
     status: Mapped[str] = mapped_column(Text, nullable=False, default="pending")
     error_message: Mapped[str | None] = mapped_column(Text)
     workflow_template: Mapped[str | None] = mapped_column(Text)
+    config_profile_id: Mapped[uuid.UUID | None] = mapped_column(UUID_TYPE, ForeignKey("config_profiles.id", ondelete="SET NULL"))
+    config_profile_snapshot_json: Mapped[dict | None] = mapped_column(JSON_TYPE)
+    packaging_snapshot_json: Mapped[dict | None] = mapped_column(JSON_TYPE)
     language: Mapped[str] = mapped_column(Text, default="zh-CN")
     workflow_mode: Mapped[str] = mapped_column(Text, nullable=False, default="standard_edit", server_default="standard_edit")
     enhancement_modes: Mapped[list[str]] = mapped_column(JSON_TYPE, nullable=False, default=list, server_default="[]")
@@ -347,6 +350,7 @@ class WatchRoot(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(UUID_TYPE, primary_key=True, default=_uuid)
     path: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    config_profile_id: Mapped[uuid.UUID | None] = mapped_column(UUID_TYPE, ForeignKey("config_profiles.id", ondelete="SET NULL"))
     workflow_template: Mapped[str | None] = mapped_column(Text)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     scan_mode: Mapped[str] = mapped_column(Text, nullable=False, default="fast", server_default="fast")

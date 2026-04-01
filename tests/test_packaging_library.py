@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import uuid
 
+import pytest
+
 from roughcut.packaging import library
 
 
@@ -244,3 +246,54 @@ def test_packaging_library_music_selection_prefers_tech_domain_over_template_nam
     )
 
     assert plan["music"]["asset_id"] == tech_music["id"]
+
+
+@pytest.mark.asyncio
+async def test_packaging_library_uses_job_packaging_snapshot_when_present(db_engine, tmp_path, monkeypatch):
+    from datetime import datetime, timezone
+
+    from roughcut.db.models import Job
+    from roughcut.db.session import get_session_factory
+
+    monkeypatch.setattr(library, "PACKAGING_ROOT", tmp_path)
+    monkeypatch.setattr(library, "MANIFEST_PATH", tmp_path / "manifest.json")
+
+    library.update_packaging_config(
+        {
+            "copy_style": "trusted_expert",
+            "subtitle_style": "cinema_blue",
+            "cover_style": "tactical_neon",
+        }
+    )
+
+    job_id = uuid.uuid4()
+    async with get_session_factory()() as session:
+        session.add(
+            Job(
+                id=job_id,
+                source_path="jobs/demo/packaging-profile.mp4",
+                source_name="packaging-profile.mp4",
+                status="pending",
+                language="zh-CN",
+                packaging_snapshot_json={
+                    "copy_style": "attention_grabbing",
+                    "subtitle_style": "bold_yellow_outline",
+                    "cover_style": "preset_default",
+                    "title_style": "preset_default",
+                    "subtitle_motion_style": "motion_static",
+                    "smart_effect_style": "smart_effect_rhythm",
+                    "export_resolution_mode": "source",
+                    "export_resolution_preset": "1080p",
+                    "enabled": True,
+                },
+                created_at=datetime.now(timezone.utc),
+                updated_at=datetime.now(timezone.utc),
+            )
+        )
+        await session.commit()
+
+    plan = library.resolve_packaging_plan_for_job(str(job_id), content_profile={"workflow_template": "tutorial_standard"})
+
+    assert plan["copy_style"] == "attention_grabbing"
+    assert plan["subtitle_style"] == "bold_yellow_outline"
+    assert plan["cover_style"] == "preset_default"

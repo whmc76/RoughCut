@@ -8,7 +8,7 @@ import subprocess
 import time
 from datetime import datetime, timezone
 
-from roughcut.config import get_settings, normalize_transcription_provider_name
+from roughcut.config import apply_in_memory_runtime_overrides, get_settings, normalize_transcription_provider_name
 from roughcut.pipeline.celery_app import celery_app
 from roughcut.pipeline.steps import run_step_sync
 from roughcut.telegram.executors import execute_agent_preset
@@ -363,11 +363,36 @@ def _probe_local_gpu_pressure(step_name: str) -> str | None:
     return None
 
 
+def _apply_job_runtime_snapshot(job_id: str) -> None:
+    import asyncio
+    import uuid
+
+    from roughcut.db.models import Job
+    from roughcut.db.session import get_session_factory
+
+    _reset_db_session_state()
+
+    async def _load_job_updates() -> dict:
+        factory = get_session_factory()
+        async with factory() as session:
+            job = await session.get(Job, uuid.UUID(job_id))
+            if job is None:
+                return {}
+            updates = dict(job.config_profile_snapshot_json or {})
+            updates["default_job_workflow_mode"] = str(job.workflow_mode or updates.get("default_job_workflow_mode") or "")
+            updates["default_job_enhancement_modes"] = list(job.enhancement_modes or updates.get("default_job_enhancement_modes") or [])
+            return updates
+
+    apply_in_memory_runtime_overrides(asyncio.run(_load_job_updates()))
+
+
 def _run_task_step(task, job_id: str, step_name: str, *, retry_countdown: int):
     task_id = task.request.id
     if not _update_step_status(job_id, step_name, "running", task_id=task_id):
         logger.info("step ignored before start step=%s job=%s task_id=%s", step_name, job_id, task_id)
         return {"ignored": True}
+
+    _apply_job_runtime_snapshot(job_id)
 
     started = time.perf_counter()
     logger.info("step started step=%s job=%s task_id=%s", step_name, job_id, task_id)

@@ -578,9 +578,17 @@ class BuiltinGlossaryPackOut(BaseModel):
 
 class WatchRootCreate(BaseModel):
     path: str
+    config_profile_id: uuid.UUID | None = None
     workflow_template: str | None = None
     enabled: bool = True
     scan_mode: Literal["fast", "precise"] = "fast"
+
+    @field_validator("config_profile_id", mode="before")
+    @classmethod
+    def validate_config_profile_id(cls, value: Any) -> uuid.UUID | None:
+        if value is None or str(value).strip() == "":
+            return None
+        return uuid.UUID(str(value))
 
     @field_validator("workflow_template", mode="before")
     @classmethod
@@ -593,6 +601,7 @@ class WatchRootOut(BaseModel):
 
     id: uuid.UUID
     path: str
+    config_profile_id: uuid.UUID | None
     workflow_template: str | None
     enabled: bool
     scan_mode: Literal["fast", "precise"]

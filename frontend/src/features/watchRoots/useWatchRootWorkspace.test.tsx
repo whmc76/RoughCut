@@ -7,6 +7,7 @@ import { useWatchRootWorkspace } from "./useWatchRootWorkspace";
 const mockApi = vi.hoisted(() => ({
   listWatchRoots: vi.fn(),
   getConfigOptions: vi.fn(),
+  getConfigProfiles: vi.fn(),
   getInventoryStatus: vi.fn(),
   createWatchRoot: vi.fn(),
   updateWatchRoot: vi.fn(),
@@ -25,6 +26,7 @@ const SAMPLE_ROOTS: WatchRoot[] = [
   {
     id: "root_1",
     path: "D:/videos/source",
+    config_profile_id: "profile_fas",
     workflow_template: "edc_tactical",
     enabled: true,
     scan_mode: "fast",
@@ -76,6 +78,13 @@ describe("useWatchRootWorkspace", () => {
       search_providers: [],
       search_fallback_providers: [],
     });
+    mockApi.getConfigProfiles.mockResolvedValue({
+      active_profile_id: "profile_fas",
+      active_profile_dirty: false,
+      active_profile_dirty_keys: [],
+      active_profile_dirty_details: [],
+      profiles: [],
+    });
     mockApi.getInventoryStatus.mockResolvedValue(SAMPLE_INVENTORY);
     mockApi.createWatchRoot.mockResolvedValue(SAMPLE_ROOTS[0]);
     mockApi.updateWatchRoot.mockImplementation(async (rootId: string, body: Partial<WatchRoot>) => ({
@@ -99,6 +108,7 @@ describe("useWatchRootWorkspace", () => {
     await waitFor(() => expect(result.current.selectedRootId).toBe("root_1"));
     expect(result.current.form).toEqual({
       path: "D:/videos/source",
+      config_profile_id: "profile_fas",
       workflow_template: "edc_tactical",
       enabled: true,
       scan_mode: "fast",

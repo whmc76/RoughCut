@@ -10,6 +10,14 @@ export function WatchRootsPage() {
   const { t } = useI18n();
   const workspace = useWatchRootWorkspace();
   const workflowTemplateOptions = workspace.options.data?.workflow_templates ?? [{ value: "", label: t("watch.page.autoMatch") }];
+  const configProfiles = workspace.configProfiles.data?.profiles ?? [];
+  const activeConfigProfile = configProfiles.find((profile) => profile.is_active) ?? null;
+  const boundConfigProfile = configProfiles.find((profile) => profile.id === workspace.form.config_profile_id) ?? null;
+  const effectiveConfigProfile = boundConfigProfile ?? activeConfigProfile;
+  const configProfileOptions = [
+    { value: "", label: t("watch.form.followActiveProfileOption") },
+    ...configProfiles.map((profile) => ({ value: profile.id, label: profile.name })),
+  ];
 
   return (
     <section className="page-stack">
@@ -34,6 +42,9 @@ export function WatchRootsPage() {
           <WatchRootList roots={workspace.roots.data ?? []} selectedRootId={workspace.selectedRootId} onSelect={workspace.setSelectedRootId} onCreateNew={() => workspace.setSelectedRootId(null)} />
           <WatchRootFormPanel
             form={workspace.form}
+            configProfileOptions={configProfileOptions}
+            boundConfigProfile={boundConfigProfile}
+            effectiveConfigProfile={effectiveConfigProfile}
             workflowTemplateOptions={workflowTemplateOptions}
             isEditing={Boolean(workspace.selectedRootId)}
             isSaving={workspace.createRoot.isPending}

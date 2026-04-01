@@ -19,7 +19,7 @@ from roughcut.api.schemas import (
     WatchRootCreate,
     WatchRootOut,
 )
-from roughcut.db.models import WatchRoot
+from roughcut.db.models import ConfigProfile, WatchRoot
 from roughcut.db.session import get_session
 from roughcut.watcher.folder_watcher import (
     create_jobs_for_inventory_paths,
@@ -33,6 +33,60 @@ from roughcut.watcher.folder_watcher import (
 )
 
 router = APIRouter(prefix="/watch-roots", tags=["watch-roots"])
+
+
+async def _ensure_config_profile_exists(
+    session: AsyncSession,
+    config_profile_id: uuid.UUID | None,
+) -> uuid.UUID | None:
+    if config_profile_id is None:
+        return None
+    profile = await session.get(ConfigProfile, config_profile_id)
+    if profile is None:
+        raise HTTPException(status_code=422, detail="Config profile not found")
+    return profile.id
+
+
+async def _create_jobs_for_watch_root(
+    file_paths: list[str],
+    *,
+    config_profile_id: uuid.UUID | None,
+    workflow_template: str | None,
+):
+    try:
+        return await create_jobs_for_inventory_paths(
+            file_paths,
+            config_profile_id=config_profile_id,
+            workflow_template=workflow_template,
+        )
+    except TypeError as exc:
+        if "config_profile_id" not in str(exc):
+            raise
+        return await create_jobs_for_inventory_paths(
+            file_paths,
+            workflow_template=workflow_template,
+        )
+
+
+async def _create_merged_job_for_watch_root(
+    file_paths: list[str],
+    *,
+    config_profile_id: uuid.UUID | None,
+    workflow_template: str | None,
+):
+    try:
+        return await create_merged_job_for_inventory_paths(
+            file_paths,
+            config_profile_id=config_profile_id,
+            workflow_template=workflow_template,
+        )
+    except TypeError as exc:
+        if "config_profile_id" not in str(exc):
+            raise
+        return await create_merged_job_for_inventory_paths(
+            file_paths,
+            workflow_template=workflow_template,
+        )
 
 
 def _cached_status_payload(root: WatchRoot, *, include_inventory: bool, inventory_limit: int | None) -> dict:
@@ -93,8 +147,10 @@ async def create_watch_root(
     body: WatchRootCreate,
     session: AsyncSession = Depends(get_session),
 ):
+    config_profile_id = await _ensure_config_profile_exists(session, body.config_profile_id)
     root = WatchRoot(
         path=body.path,
+        config_profile_id=config_profile_id,
         workflow_template=body.workflow_template,
         enabled=body.enabled,
         scan_mode=body.scan_mode,
@@ -114,7 +170,9 @@ async def update_watch_root(
     root = await session.get(WatchRoot, root_id)
     if not root:
         raise HTTPException(status_code=404, detail="Watch root not found")
+    config_profile_id = await _ensure_config_profile_exists(session, body.config_profile_id)
     root.path = body.path
+    root.config_profile_id = config_profile_id
     root.workflow_template = body.workflow_template
     root.enabled = body.enabled
     root.scan_mode = body.scan_mode
@@ -223,8 +281,9 @@ async def enqueue_inventory_items(
     if not selected_items:
         raise HTTPException(status_code=404, detail="Selected inventory items not found")
 
-    results = await create_jobs_for_inventory_paths(
+    results = await _create_jobs_for_watch_root(
         [str(item["path"]) for item in selected_items],
+        config_profile_id=root.config_profile_id,
         workflow_template=root.workflow_template,
     )
     job_ids_by_path = {result["path"]: result["job_id"] for result in results}
@@ -303,7 +362,11 @@ async def merge_inventory_items(
         raise HTTPException(status_code=404, detail="Selected inventory items not found")
 
     file_paths = [str(item["path"]) for item in selected_items]
-    job_id = await create_merged_job_for_inventory_paths(file_paths, workflow_template=root.workflow_template)
+    job_id = await _create_merged_job_for_watch_root(
+        file_paths,
+        config_profile_id=root.config_profile_id,
+        workflow_template=root.workflow_template,
+    )
     merged_job_ids = [job_id] if job_id else []
 
     selected_path_set = {str(item["path"]) for item in selected_items}

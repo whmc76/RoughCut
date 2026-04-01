@@ -514,6 +514,17 @@ def apply_runtime_overrides(updates: dict[str, Any]) -> Settings:
     return settings
 
 
+def apply_in_memory_runtime_overrides(updates: dict[str, Any] | None = None) -> Settings:
+    global _settings
+    _settings = Settings()
+    _apply_settings_overrides(_settings, load_runtime_overrides())
+    _apply_settings_overrides(_settings, _session_secret_overrides)
+    if updates:
+        _apply_settings_overrides(_settings, _strip_env_managed_updates(dict(updates)))
+    _normalize_settings(_settings)
+    return _settings
+
+
 def _normalize_default_workflow_mode(value: object) -> str:
     from roughcut.creative.modes import normalize_workflow_mode
 
