@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
 
@@ -625,3 +626,45 @@ async def test_update_job_statuses_reruns_subtitle_chain_for_subtitle_quality_is
             "final_review",
             "platform_package",
         ]
+
+
+def test_artifact_types_for_quality_rerun_gates_multisource_artifacts_by_feature_flags(monkeypatch):
+    import roughcut.pipeline.orchestrator as orchestrator_mod
+
+    monkeypatch.setattr(
+        orchestrator_mod,
+        "get_settings",
+        lambda: SimpleNamespace(
+            ocr_enabled=False,
+            entity_graph_enabled=False,
+            asr_evidence_enabled=False,
+            research_verifier_enabled=False,
+        ),
+    )
+
+    disabled_cleanup = orchestrator_mod._artifact_types_for_quality_rerun(
+        {"transcribe", "content_profile", "glossary_review"}
+    )
+
+    assert "transcript_evidence" not in disabled_cleanup
+    assert "content_profile_ocr" not in disabled_cleanup
+    assert "entity_resolution_trace" not in disabled_cleanup
+
+    monkeypatch.setattr(
+        orchestrator_mod,
+        "get_settings",
+        lambda: SimpleNamespace(
+            ocr_enabled=True,
+            entity_graph_enabled=True,
+            asr_evidence_enabled=True,
+            research_verifier_enabled=False,
+        ),
+    )
+
+    enabled_cleanup = orchestrator_mod._artifact_types_for_quality_rerun(
+        {"transcribe", "content_profile", "glossary_review"}
+    )
+
+    assert "transcript_evidence" in enabled_cleanup
+    assert "content_profile_ocr" in enabled_cleanup
+    assert "entity_resolution_trace" in enabled_cleanup

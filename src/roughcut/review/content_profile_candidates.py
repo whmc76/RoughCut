@@ -16,6 +16,8 @@ class IdentityCandidate:
 def build_identity_candidates(bundle: IdentityEvidenceBundle) -> list[IdentityCandidate]:
     candidates: list[IdentityCandidate] = []
     source_maps: list[tuple[str, dict[str, str]]] = [
+        ("transcript_labels", bundle.transcript_source_labels),
+        ("ocr", bundle.ocr_hints),
         ("profile", bundle.profile_identity),
         ("memory_confirmed", bundle.memory_confirmed_hints),
         ("transcript", bundle.transcript_hints),
@@ -37,6 +39,22 @@ def build_identity_candidates(bundle: IdentityEvidenceBundle) -> list[IdentityCa
                         excerpt=_source_excerpt(bundle, source_type),
                     )
                 )
+    for entity in bundle.graph_confirmed_entities or []:
+        for field_name, key in (
+            ("subject_brand", "brand"),
+            ("subject_model", "model"),
+            ("subject_type", "subject_type"),
+        ):
+            value = str(entity.get(key) or "").strip()
+            if value:
+                candidates.append(
+                    IdentityCandidate(
+                        field_name=field_name,
+                        value=value,
+                        source_type="graph_confirmed",
+                        excerpt=_source_excerpt(bundle, "graph_confirmed"),
+                    )
+                )
     return candidates
 
 
@@ -47,10 +65,14 @@ def _source_excerpt(bundle: IdentityEvidenceBundle, source_type: str) -> str:
         return bundle.source_name
     if source_type == "visible_text":
         return str((bundle.visible_text_hints or {}).get("visible_text") or "").strip()
+    if source_type == "ocr":
+        return str((bundle.ocr_hints or {}).get("visible_text") or "").strip()
     if source_type == "visual_cluster":
         return str((bundle.visual_cluster_hints or {}).get("visible_text") or "").strip()
     if source_type == "visual":
         return str((bundle.visual_hints or {}).get("visible_text") or "").strip()
+    if source_type == "graph_confirmed":
+        return "graph_confirmed"
     return ""
 
 

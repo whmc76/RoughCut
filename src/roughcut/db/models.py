@@ -274,6 +274,73 @@ class ContentProfileKeywordStat(Base):
     last_used_at: Mapped[datetime] = mapped_column(TIMESTAMPTZ, server_default=func.now(), onupdate=func.now())
 
 
+class ContentProfileEntity(Base):
+    __tablename__ = "content_profile_entities"
+    __table_args__ = (UniqueConstraint("subject_domain", "brand", "model"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID_TYPE, primary_key=True, default=_uuid)
+    subject_domain: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    brand: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    model: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    subject_type: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMPTZ, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMPTZ, server_default=func.now(), onupdate=func.now())
+
+    aliases: Mapped[list[ContentProfileEntityAlias]] = relationship(
+        "ContentProfileEntityAlias",
+        back_populates="entity",
+        cascade="all, delete-orphan",
+    )
+    observations: Mapped[list[ContentProfileEntityObservation]] = relationship(
+        "ContentProfileEntityObservation",
+        back_populates="entity",
+        cascade="all, delete-orphan",
+    )
+
+
+class ContentProfileEntityAlias(Base):
+    __tablename__ = "content_profile_entity_aliases"
+    __table_args__ = (UniqueConstraint("entity_id", "field_name", "alias_value"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID_TYPE, primary_key=True, default=_uuid)
+    entity_id: Mapped[uuid.UUID] = mapped_column(UUID_TYPE, ForeignKey("content_profile_entities.id", ondelete="CASCADE"))
+    field_name: Mapped[str] = mapped_column(Text, nullable=False)
+    alias_value: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMPTZ, server_default=func.now())
+
+    entity: Mapped[ContentProfileEntity] = relationship("ContentProfileEntity", back_populates="aliases")
+
+
+class ContentProfileEntityObservation(Base):
+    __tablename__ = "content_profile_entity_observations"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID_TYPE, primary_key=True, default=_uuid)
+    entity_id: Mapped[uuid.UUID] = mapped_column(UUID_TYPE, ForeignKey("content_profile_entities.id", ondelete="CASCADE"))
+    job_id: Mapped[uuid.UUID | None] = mapped_column(UUID_TYPE, ForeignKey("jobs.id", ondelete="SET NULL"))
+    source_name: Mapped[str | None] = mapped_column(Text)
+    observation_type: Mapped[str] = mapped_column(Text, nullable=False, default="manual_confirm")
+    payload_json: Mapped[dict | None] = mapped_column(JSON_TYPE)
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMPTZ, server_default=func.now())
+
+    entity: Mapped[ContentProfileEntity] = relationship("ContentProfileEntity", back_populates="observations")
+
+
+class ContentProfileEntityRejection(Base):
+    __tablename__ = "content_profile_entity_rejections"
+    __table_args__ = (
+        UniqueConstraint("subject_domain", "field_name", "alias_value", "canonical_value", "override_value"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID_TYPE, primary_key=True, default=_uuid)
+    job_id: Mapped[uuid.UUID | None] = mapped_column(UUID_TYPE, ForeignKey("jobs.id", ondelete="SET NULL"))
+    subject_domain: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    field_name: Mapped[str] = mapped_column(Text, nullable=False)
+    alias_value: Mapped[str] = mapped_column(Text, nullable=False)
+    canonical_value: Mapped[str] = mapped_column(Text, nullable=False)
+    override_value: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMPTZ, server_default=func.now())
+
+
 class WatchRoot(Base):
     __tablename__ = "watch_roots"
     __table_args__ = (UniqueConstraint("path"),)

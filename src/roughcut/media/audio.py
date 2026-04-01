@@ -7,6 +7,23 @@ from pathlib import Path
 from roughcut.config import get_settings
 
 
+class NoAudioStreamError(RuntimeError):
+    """Raised when the source video has no audio stream to extract."""
+
+
+def _looks_like_no_audio_stream(stderr: str) -> bool:
+    lowered = str(stderr or "").lower()
+    return any(
+        marker in lowered
+        for marker in (
+            "output file does not contain any stream",
+            "matches no streams",
+            "stream map 'a' matches no streams",
+            "stream specifier ':a' in filtergraph description matches no streams",
+        )
+    )
+
+
 async def extract_audio(video_path: Path, output_path: Path, *, sample_rate: int = 16000) -> Path:
     """Extract mono WAV audio from video file for transcription."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -36,6 +53,8 @@ async def extract_audio(video_path: Path, output_path: Path, *, sample_rate: int
         ),
     )
     if result.returncode != 0:
+        if _looks_like_no_audio_stream(result.stderr):
+            raise NoAudioStreamError(f"ffmpeg audio extraction skipped because the source has no audio stream: {video_path}")
         raise RuntimeError(f"ffmpeg audio extraction failed: {result.stderr}")
 
     return output_path

@@ -9,6 +9,13 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from roughcut.db.models import ContentProfileCorrection, ContentProfileKeywordStat, Job
+from roughcut.review.entity_graph import (
+    add_entity_aliases,
+    load_graph_confirmed_entities,
+    load_rejected_alias_pairs,
+    record_entity_rejection,
+    upsert_content_profile_entity,
+)
 from roughcut.review.domain_glossaries import _DOMAIN_COMPATIBILITY, normalize_subject_domain
 
 
@@ -45,6 +52,7 @@ async def load_content_profile_user_memory(
     *,
     subject_domain: str | None = None,
     channel_profile: str | None = None,
+    strict_subject_domain: bool = False,
     recent_limit: int = 10,
     keyword_limit: int = 12,
     field_limit: int = 4,
@@ -52,25 +60,34 @@ async def load_content_profile_user_memory(
     if subject_domain is None and channel_profile is not None:
         subject_domain = channel_profile
     subject_domain = _normalize_subject_domain_hint(subject_domain)
+    if strict_subject_domain and subject_domain is None:
+        return {}
+    subject_domains = _expand_subject_domain_scope(subject_domain) if subject_domain else set()
+    if subject_domain:
+        subject_domains.add(subject_domain)
     correction_result = await session.execute(
         select(ContentProfileCorrection).order_by(ContentProfileCorrection.created_at.desc()).limit(240)
     )
     corrections = correction_result.scalars().all()
+    rejected_pairs = await load_rejected_alias_pairs(session, subject_domains=subject_domains)
+    filtered_corrections = _filter_rejected_corrections(corrections, rejected_pairs=rejected_pairs)
 
     keyword_result = await session.execute(select(ContentProfileKeywordStat))
     keyword_stats = keyword_result.scalars().all()
 
-    field_preferences = _build_field_preferences(corrections, subject_domain=subject_domain, limit=field_limit)
-    recent_corrections = _build_recent_corrections(corrections, subject_domain=subject_domain, limit=recent_limit)
+    field_preferences = _build_field_preferences(filtered_corrections, subject_domain=subject_domain, limit=field_limit)
+    recent_corrections = _build_recent_corrections(filtered_corrections, subject_domain=subject_domain, limit=recent_limit)
     keyword_preferences = _build_keyword_preferences(keyword_stats, subject_domain=subject_domain, limit=keyword_limit)
     phrase_preferences = _build_phrase_preferences(
-        corrections,
+        filtered_corrections,
         keyword_stats,
         subject_domain=subject_domain,
         limit=keyword_limit,
     )
-    style_preferences = _build_style_preferences(corrections, subject_domain=subject_domain, limit=6)
-    confirmed_entities = _build_confirmed_entities(corrections, subject_domain=subject_domain, limit=6)
+    style_preferences = _build_style_preferences(filtered_corrections, subject_domain=subject_domain, limit=6)
+    confirmed_entities = await load_graph_confirmed_entities(session, subject_domains=subject_domains, limit=6)
+    if not confirmed_entities:
+        confirmed_entities = _build_confirmed_entities(filtered_corrections, subject_domain=subject_domain, limit=6)
 
     if not any([field_preferences, recent_corrections, keyword_preferences, phrase_preferences, style_preferences, confirmed_entities]):
         return {}
@@ -203,6 +220,35 @@ async def record_content_profile_feedback_memory(
     for field_name, alias_value, corrected_value in _extract_identity_alias_feedback_rows(final_profile):
         remember_correction(field_name, alias_value, corrected_value)
 
+    entity = await upsert_content_profile_entity(
+        session,
+        subject_domain=fallback_subject_domain or "",
+        brand=_clean_memory_value((final_profile or {}).get("subject_brand")),
+        model=_clean_memory_value((final_profile or {}).get("subject_model")),
+        subject_type=_clean_memory_value((final_profile or {}).get("subject_type")),
+        job_id=job.id,
+        source_name=job.source_name,
+        observation_type="manual_confirm",
+        payload={"source": "content_profile_feedback"},
+    )
+    alias_outcomes = _extract_identity_alias_outcomes(final_profile)
+    accepted_brand_aliases = [item["alias_value"] for item in alias_outcomes if item["field_name"] == "subject_brand" and item["status"] == "accepted"]
+    accepted_model_aliases = [item["alias_value"] for item in alias_outcomes if item["field_name"] == "subject_model" and item["status"] == "accepted"]
+    await add_entity_aliases(session, entity=entity, field_name="subject_brand", aliases=accepted_brand_aliases)
+    await add_entity_aliases(session, entity=entity, field_name="subject_model", aliases=accepted_model_aliases)
+    for outcome in alias_outcomes:
+        if outcome["status"] != "rejected":
+            continue
+        await record_entity_rejection(
+            session,
+            job_id=job.id,
+            subject_domain=fallback_subject_domain or "",
+            field_name=outcome["field_name"],
+            alias_value=outcome["alias_value"],
+            canonical_value=outcome["canonical_value"],
+            override_value=outcome["final_value"],
+        )
+
     raw_keywords = user_feedback.get("keywords")
     keywords = raw_keywords if isinstance(raw_keywords, list) and raw_keywords else final_profile.get("search_queries") or []
     normalized_keywords = []
@@ -226,6 +272,15 @@ async def record_content_profile_feedback_memory(
 
 
 def _extract_identity_alias_feedback_rows(final_profile: dict[str, Any]) -> list[tuple[str, str, str]]:
+    outcomes = _extract_identity_alias_outcomes(final_profile)
+    return [
+        (item["field_name"], item["alias_value"], item["canonical_value"])
+        for item in outcomes
+        if item["status"] == "accepted"
+    ]
+
+
+def _extract_identity_alias_outcomes(final_profile: dict[str, Any]) -> list[dict[str, str]]:
     identity_review = (final_profile or {}).get("identity_review")
     if not isinstance(identity_review, dict):
         return []
@@ -236,7 +291,7 @@ def _extract_identity_alias_feedback_rows(final_profile: dict[str, Any]) -> list
     if not isinstance(matched_glossary_aliases, dict):
         return []
 
-    alias_rows: list[tuple[str, str, str]] = []
+    alias_rows: list[dict[str, str]] = []
     field_specs = (
         ("subject_brand", "candidate_brand", "brand"),
         ("subject_model", "candidate_model", "model"),
@@ -244,13 +299,30 @@ def _extract_identity_alias_feedback_rows(final_profile: dict[str, Any]) -> list
     for field_name, candidate_key, alias_key in field_specs:
         corrected_value = _clean_memory_value((final_profile or {}).get(field_name))
         candidate_value = _clean_memory_value(evidence_bundle.get(candidate_key))
-        if not corrected_value or corrected_value != candidate_value:
-            continue
         for alias in matched_glossary_aliases.get(alias_key) or []:
             alias_value = _clean_memory_value(alias)
-            if not alias_value or alias_value == corrected_value:
+            if not alias_value:
                 continue
-            alias_rows.append((field_name, alias_value, corrected_value))
+            if corrected_value and corrected_value == candidate_value and alias_value != corrected_value:
+                alias_rows.append(
+                    {
+                        "field_name": field_name,
+                        "alias_value": alias_value,
+                        "canonical_value": corrected_value,
+                        "final_value": corrected_value,
+                        "status": "accepted",
+                    }
+                )
+            elif corrected_value and candidate_value and corrected_value != candidate_value:
+                alias_rows.append(
+                    {
+                        "field_name": field_name,
+                        "alias_value": alias_value,
+                        "canonical_value": candidate_value,
+                        "final_value": corrected_value,
+                        "status": "rejected",
+                    }
+                )
     return alias_rows
 
 
@@ -299,6 +371,26 @@ def _build_recent_corrections(
         if len(items) >= limit:
             break
     return items
+
+
+def _filter_rejected_corrections(
+    corrections: list[ContentProfileCorrection],
+    *,
+    rejected_pairs: set[tuple[str, str, str]],
+) -> list[ContentProfileCorrection]:
+    if not rejected_pairs:
+        return corrections
+    filtered: list[ContentProfileCorrection] = []
+    for item in corrections:
+        key = (
+            _clean_memory_value(item.field_name),
+            _clean_memory_value(item.original_value),
+            _clean_memory_value(item.corrected_value),
+        )
+        if key in rejected_pairs:
+            continue
+        filtered.append(item)
+    return filtered
 
 
 def _build_keyword_preferences(

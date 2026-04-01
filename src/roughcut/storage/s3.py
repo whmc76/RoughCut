@@ -25,8 +25,6 @@ class S3Storage:
             raw = raw[5:]
         candidate = Path(raw).expanduser()
         if candidate.is_absolute():
-            if candidate.exists():
-                return candidate
             remapped = _remap_windows_job_storage_path(raw, storage_root=self._root)
             return remapped or candidate
         remapped = _remap_windows_job_storage_path(raw, storage_root=self._root)
@@ -125,14 +123,68 @@ def _multipart_part_sort_key(path: Path) -> tuple[int, str]:
 
 
 def _remap_windows_job_storage_path(raw: str, *, storage_root: Path) -> Path | None:
-    normalized = str(raw or "").strip().replace("\\", "/")
-    if not re.match(r"^[A-Za-z]:/", normalized):
+    normalized = str(raw or "").strip()
+    if not normalized:
         return None
-    marker = "/jobs/"
-    index = normalized.lower().find(marker)
-    if index < 0:
+
+    normalized = normalized.replace("\\", "/")
+    cleaned = normalized.strip().strip("/")
+    if not cleaned:
         return None
-    relative = normalized[index + len(marker):].strip("/")
-    if not relative:
+    unc_root = storage_root.parent if storage_root.name.lower() == "jobs" else storage_root
+
+    # Handle UNC paths like \\server\share\... or escaped variants with redundant slashes.
+    leading_slashes = re.match(r"^/+", normalized)
+    if leading_slashes and len(leading_slashes.group(0)) >= 2:
+        normalized = re.sub(r"/+", "/", normalized).strip("/")
+        if not normalized:
+            return None
+        cleaned = normalized
+        segments = normalized.split("/")
+        if len(segments) <= 2:
+            return None
+        cleaned = "/".join(segments[2:])
+        cleaned = cleaned.strip("/")
+        if not cleaned:
+            return storage_root.resolve()
+
+        marker = "/jobs/"
+        marker_index = cleaned.lower().find(marker)
+        if marker_index >= 0:
+            relative = cleaned[marker_index + len(marker):].strip("/")
+            return (unc_root / Path(relative)).resolve() if relative else unc_root.resolve()
+        if cleaned.lower().startswith("jobs/"):
+            relative = cleaned[5:].strip("/")
+            return unc_root.resolve() if not relative else (unc_root / Path(relative)).resolve()
+        if cleaned.lower() == "jobs":
+            return unc_root.resolve()
+        return (unc_root / Path(cleaned)).resolve()
+
+    # Handle classic Windows absolute path C:/... and normalize to storage root only
+    # when it clearly points at a jobs storage path. Real local source files must stay
+    # as absolute paths so live jobs can read them directly.
+    if not re.match(r"^[A-Za-z]:", cleaned):
+        return None
+
+    if re.match(r"^[A-Za-z]:/", cleaned):
+        without_drive = cleaned[2:].strip("/")
+    elif re.match(r"^[A-Za-z]:\\", normalized):
+        without_drive = cleaned[2:].strip("/")
+    else:
+        return None
+
+    if not without_drive:
         return storage_root.resolve()
-    return (storage_root / Path(relative)).resolve()
+
+    marker = "/jobs/"
+    marker_index = without_drive.lower().find(marker)
+    if marker_index >= 0:
+        relative = without_drive[marker_index + len(marker):].strip("/")
+        return storage_root.resolve() if not relative else (storage_root / Path(relative)).resolve()
+    if without_drive.lower().startswith("jobs/"):
+        relative = without_drive[5:].strip("/")
+        return storage_root.resolve() if not relative else (storage_root / Path(relative)).resolve()
+    if without_drive.lower() == "jobs":
+        return storage_root.resolve()
+
+    return None

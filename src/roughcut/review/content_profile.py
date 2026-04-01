@@ -10,11 +10,12 @@ from typing import Any
 from roughcut.config import get_settings
 from roughcut.edit.presets import WorkflowPreset, get_workflow_preset, normalize_workflow_template_name, select_workflow_template
 from roughcut.llm_cache import digest_payload
-from roughcut.providers.factory import get_reasoning_provider, get_search_provider
+from roughcut.providers.factory import get_ocr_provider, get_reasoning_provider, get_search_provider
 from roughcut.providers.multimodal import complete_with_images
 from roughcut.providers.reasoning.base import Message, extract_json_text
 from roughcut.usage import track_usage_operation
 from roughcut.review.content_profile_memory import summarize_content_profile_user_memory
+from roughcut.review.content_profile_ocr import build_content_profile_ocr
 from roughcut.review.content_profile_candidates import build_identity_candidates
 from roughcut.review.content_profile_evidence import IdentityEvidenceBundle
 from roughcut.review.content_profile_resolve import resolve_identity_candidates
@@ -26,10 +27,15 @@ from roughcut.review.subtitle_memory import (
     apply_domain_term_corrections,
     summarize_subtitle_review_memory_for_polish,
 )
-from roughcut.speech.postprocess import cleanup_subtitle_fillers, normalize_display_text
+from roughcut.speech.postprocess import (
+    apply_subtitle_clause_spacing,
+    cleanup_subtitle_fillers,
+    normalize_display_numbers,
+    normalize_display_text,
+)
 
-_CONTENT_PROFILE_INFER_CACHE_VERSION = "2026-04-01.infer.v2"
-_CONTENT_PROFILE_ENRICH_CACHE_VERSION = "2026-04-01.enrich.v2"
+_CONTENT_PROFILE_INFER_CACHE_VERSION = "2026-04-01.infer.v3"
+_CONTENT_PROFILE_ENRICH_CACHE_VERSION = "2026-04-01.enrich.v3"
 _INGESTIBLE_PRODUCT_SIGNALS = (
     "luckykiss",
     "kisspod",
@@ -105,6 +111,8 @@ def _infer_subject_domain_from_content(
 
 def _normalize_seeded_profile_for_cache(profile: dict[str, Any] | None) -> dict[str, Any]:
     seeded = profile or {}
+    if not seeded:
+        return {}
     cover_title = seeded.get("cover_title") if isinstance(seeded.get("cover_title"), dict) else {}
     evidence = [
         {
@@ -117,7 +125,7 @@ def _normalize_seeded_profile_for_cache(profile: dict[str, Any] | None) -> dict[
     ]
     visual_hints = seeded.get("visual_hints") if isinstance(seeded.get("visual_hints"), dict) else {}
     visual_cluster_hints = seeded.get("visual_cluster_hints") if isinstance(seeded.get("visual_cluster_hints"), dict) else visual_hints
-    return {
+    normalized = {
         "subject_brand": str(seeded.get("subject_brand") or "").strip(),
         "subject_model": str(seeded.get("subject_model") or "").strip(),
         "subject_type": str(seeded.get("subject_type") or "").strip(),
@@ -150,6 +158,29 @@ def _normalize_seeded_profile_for_cache(profile: dict[str, Any] | None) -> dict[
             "visible_text": str(visual_cluster_hints.get("visible_text") or "").strip(),
         },
     }
+    if not any(
+        (
+            normalized["subject_brand"],
+            normalized["subject_model"],
+            normalized["subject_type"],
+            normalized["content_kind"],
+            normalized["subject_domain"],
+            normalized["video_theme"],
+            normalized["workflow_template"],
+            normalized["hook_line"],
+            normalized["visible_text"],
+            normalized["summary"],
+            normalized["engagement_question"],
+            normalized["copy_style"],
+            normalized["search_queries"],
+            normalized["evidence"],
+            any(normalized["cover_title"].values()),
+            any(normalized["visual_hints"].values()),
+            any(normalized["visual_cluster_hints"].values()),
+        )
+    ):
+        return {}
+    return normalized
 
 
 def build_content_profile_cache_fingerprint(
@@ -159,6 +190,7 @@ def build_content_profile_cache_fingerprint(
     workflow_template: str | None = None,
     channel_profile: str | None = None,
     transcript_excerpt: str,
+    subtitle_digest: str | None = None,
     glossary_terms: list[dict[str, Any]] | None = None,
     user_memory: dict[str, Any] | None = None,
     include_research: bool,
@@ -189,6 +221,7 @@ def build_content_profile_cache_fingerprint(
         "source_file_hash": str(source_file_hash or "").strip(),
         "workflow_template": str(workflow_template or "").strip(),
         "transcript_excerpt_sha256": digest_payload(str(transcript_excerpt or "").strip()),
+        "subtitle_digest": str(subtitle_digest or "").strip(),
         "glossary_terms_sha256": digest_payload(normalized_glossary),
         "glossary_term_count": len(normalized_glossary),
         "user_memory_sha256": digest_payload(normalized_memory),
@@ -606,6 +639,7 @@ def _assess_identity_review_requirement(
     evidence_bundle = _collect_identity_evidence_bundle(
         profile,
         subtitle_items=subtitle_items,
+        user_memory=user_memory,
         glossary_terms=glossary_terms,
         source_name=source_name,
     )
@@ -670,7 +704,9 @@ def _collect_identity_support_sources(evidence_bundle: dict[str, Any] | None) ->
     support_sources: list[str] = []
     source_flags = (
         ("transcript", bundle.get("matched_subtitle_snippets") or []),
+        ("transcript_labels", bundle.get("matched_transcript_source_labels") or {}),
         ("source_name", bundle.get("matched_source_name_terms") or []),
+        ("ocr", bundle.get("matched_ocr_terms") or []),
         ("visible_text", bundle.get("matched_visible_text_terms") or []),
         ("evidence", bundle.get("matched_evidence_terms") or []),
     )
@@ -684,6 +720,7 @@ def _collect_identity_evidence_bundle(
     profile: dict[str, Any],
     *,
     subtitle_items: list[dict[str, Any]] | None,
+    user_memory: dict[str, Any] | None = None,
     glossary_terms: list[dict[str, Any]] | None,
     source_name: str,
 ) -> dict[str, Any]:
@@ -691,7 +728,9 @@ def _collect_identity_evidence_bundle(
     model = str(profile.get("subject_model") or "").strip()
     matched_brand_aliases = _collect_identity_aliases(brand, glossary_terms=glossary_terms) if brand else []
     matched_model_aliases = _collect_identity_aliases(model, glossary_terms=glossary_terms) if model else []
-    visible_text = str(profile.get("visible_text") or "").strip()
+    transcript_source_labels = _profile_transcript_source_labels(profile)
+    ocr_hints = _profile_ocr_hints(profile, glossary_terms=glossary_terms)
+    visible_text = str(profile.get("visible_text") or ocr_hints.get("visible_text") or "").strip()
     evidence_text = " ".join(
         " ".join(
             str(item.get(key) or "")
@@ -703,12 +742,18 @@ def _collect_identity_evidence_bundle(
     return {
         "candidate_brand": brand or None,
         "candidate_model": model or None,
+        "graph_confirmed_entities": _graph_confirmed_entities(user_memory)[:6],
         "matched_subtitle_snippets": _collect_identity_subtitle_snippets(
             brand,
             model,
             subtitle_items=subtitle_items,
             glossary_terms=glossary_terms,
         ),
+        "matched_transcript_source_labels": {
+            field_name: str(transcript_source_labels.get(field_name) or "").strip()
+            for field_name in ("subject_brand", "subject_model", "subject_type", "video_theme")
+            if str(transcript_source_labels.get(field_name) or "").strip()
+        },
         "matched_glossary_aliases": {
             "brand": _collect_identity_matched_aliases(
                 brand,
@@ -747,6 +792,12 @@ def _collect_identity_evidence_bundle(
             brand,
             model,
             text=visible_text,
+            glossary_terms=glossary_terms,
+        ),
+        "matched_ocr_terms": _collect_identity_match_terms(
+            brand,
+            model,
+            text=str(ocr_hints.get("visible_text") or "").strip(),
             glossary_terms=glossary_terms,
         ),
         "matched_evidence_terms": _collect_identity_match_terms(
@@ -894,8 +945,27 @@ def _build_conservative_identity_summary(
     subtitle_items: list[dict[str, Any]] | None,
 ) -> str:
     subject_type = str(profile.get("subject_type") or "").strip()
-    safe_subject = subject_type if subject_type and not _is_generic_subject_type(subject_type) else "开箱产品"
+    safe_subject = subject_type if subject_type and not _is_generic_subject_type(subject_type) else ""
+    raw_theme = str(profile.get("video_theme") or "").strip()
+    theme = (
+        _summary_theme_fragment(
+            raw_theme,
+            brand=str(profile.get("subject_brand") or "").strip(),
+            model=str(profile.get("subject_model") or "").strip(),
+            preset_name=_workflow_template_name(profile) or _content_kind_name(profile),
+            content_kind=_content_kind_name(profile),
+            subject_domain=str(profile.get("subject_domain") or "").strip(),
+        )
+        if raw_theme
+        else ""
+    )
     focus = _build_conservative_identity_focus(profile, subtitle_items=subtitle_items)
+    if not safe_subject:
+        if theme:
+            return f"这条视频主要围绕{theme}展开，主体品牌型号待进一步确认，建议先结合字幕、画面文字和人工核对后再继续包装。"
+        if focus:
+            return f"这条视频当前主体待进一步确认，重点看{focus}，建议先结合字幕、画面文字和人工核对后再继续包装。"
+        return "这条视频当前主体待进一步确认，建议先结合字幕、画面文字和人工核对后再继续包装。"
     if focus:
         return f"这条视频主要围绕一款{safe_subject}展开，重点看{focus}，具体品牌型号待人工确认。"
     return f"这条视频主要围绕一款{safe_subject}展开，具体品牌型号待人工确认，适合先人工核对主体身份后再继续包装。"
@@ -1046,6 +1116,8 @@ def _sanitize_profile_identity(
             or ""
         ),
     )
+    transcript_source_labels = _profile_transcript_source_labels(sanitized)
+    ocr_hints = _profile_ocr_hints(sanitized, glossary_terms=glossary_terms)
     confirmed_fields = _extract_confirmed_profile_fields(sanitized)
 
     confirmed_brand = str(confirmed_fields.get("subject_brand") or "").strip()
@@ -1054,6 +1126,7 @@ def _sanitize_profile_identity(
         transcript_excerpt=transcript_excerpt,
         source_name=source_name,
         transcript_hints=transcript_hints,
+        transcript_source_labels=transcript_source_labels,
         source_hints=source_hints,
         visual_cluster_hints={
             "subject_brand": str(raw_visual_hints.get("subject_brand") or "").strip(),
@@ -1063,7 +1136,9 @@ def _sanitize_profile_identity(
         },
         visual_hints={},
         visible_text_hints=visual_hints,
+        ocr_hints=ocr_hints,
         memory_confirmed_hints=memory_confirmed_hints,
+        graph_confirmed_entities=_graph_confirmed_entities(user_memory)[:6],
         profile_identity={
             "subject_brand": str(sanitized.get("subject_brand") or "").strip(),
             "subject_model": str(sanitized.get("subject_model") or "").strip(),
@@ -1150,11 +1225,37 @@ def _sanitize_profile_identity(
         ):
             sanitized["visible_text"] = ""
 
+    resolved_video_theme_value = str(resolved_identity.video_theme or "").strip()
+    if sanitized.get("subject_brand") or sanitized.get("subject_model"):
+        for key in ("video_theme", "summary"):
+            if key in confirmed_fields:
+                continue
+            value = str(sanitized.get(key) or "").strip()
+            if (
+                key == "video_theme"
+                and resolved_video_theme_value
+                and _normalize_profile_value(value) == _normalize_profile_value(resolved_video_theme_value)
+            ):
+                continue
+            if value and _text_conflicts_with_verified_identity(
+                value,
+                brand=str(sanitized.get("subject_brand") or ""),
+                model=str(sanitized.get("subject_model") or ""),
+                glossary_terms=glossary_terms,
+            ):
+                sanitized[key] = ""
+
     if identity_conflict_detected or profile_identity_conflict_detected or (not sanitized.get("subject_brand") and not sanitized.get("subject_model")):
         for key in ("video_theme", "visible_text", "hook_line", "summary", "engagement_question"):
             if key in confirmed_fields:
                 continue
             value = str(sanitized.get(key) or "").strip()
+            if (
+                key == "video_theme"
+                and resolved_video_theme_value
+                and _normalize_profile_value(value) == _normalize_profile_value(resolved_video_theme_value)
+            ):
+                continue
             if value and (
                 _text_has_unsupported_identity(
                     value,
@@ -1224,6 +1325,47 @@ def _sanitize_profile_identity(
         sanitized["evidence"] = evidence
 
     return sanitized
+
+
+def _profile_transcript_source_labels(profile: dict[str, Any] | None) -> dict[str, Any]:
+    transcript_evidence = (profile or {}).get("transcript_evidence")
+    if not isinstance(transcript_evidence, dict):
+        return {}
+    labels = transcript_evidence.get("source_labels")
+    return dict(labels) if isinstance(labels, dict) else {}
+
+
+def _profile_ocr_hints(
+    profile: dict[str, Any] | None,
+    *,
+    glossary_terms: list[dict[str, Any]] | None,
+) -> dict[str, Any]:
+    ocr_evidence = (profile or {}).get("ocr_evidence")
+    ocr_profile = (profile or {}).get("ocr_profile")
+    source = ocr_evidence if isinstance(ocr_evidence, dict) else ocr_profile if isinstance(ocr_profile, dict) else {}
+    hints = {
+        field_name: str(source.get(field_name) or "").strip()
+        for field_name in ("subject_brand", "subject_model", "subject_type")
+        if str(source.get(field_name) or "").strip()
+    }
+    visible_text = str(source.get("visible_text") or "").strip()
+    if visible_text:
+        hints.setdefault("visible_text", visible_text)
+        seeded = _seed_profile_from_text(visible_text, glossary_terms=glossary_terms)
+        for field_name in ("subject_brand", "subject_model", "subject_type"):
+            value = str(seeded.get(field_name) or "").strip()
+            if value and field_name not in hints:
+                hints[field_name] = value
+    return hints
+
+
+def _graph_confirmed_entities(user_memory: dict[str, Any] | None) -> list[dict[str, Any]]:
+    graph_bucket = (user_memory or {}).get("entity_graph")
+    if isinstance(graph_bucket, dict):
+        graph_entities = list(graph_bucket.get("confirmed_entities") or [])
+        if graph_entities:
+            return graph_entities
+    return list((user_memory or {}).get("confirmed_entities") or [])
 
 
 def _mapped_brand_for_model(model: object) -> str:
@@ -1476,10 +1618,17 @@ async def infer_content_profile(
     initial_profile.update(glossary_profile)
     initial_profile.update(memory_profile)
     initial_profile["copy_style"] = str(copy_style or "attention_grabbing").strip() or "attention_grabbing"
+    settings = get_settings()
 
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
             frame_paths = _extract_reference_frames(source_path, Path(tmpdir), count=3)
+            if bool(getattr(settings, "ocr_enabled", False)):
+                ocr_profile = await _collect_content_profile_ocr(frame_paths, source_name=source_name)
+                if ocr_profile:
+                    initial_profile["ocr_profile"] = ocr_profile
+                    if ocr_profile.get("visible_text") and not str(initial_profile.get("visible_text") or "").strip():
+                        initial_profile["visible_text"] = str(ocr_profile.get("visible_text") or "").strip()
             visual_hints = await _infer_visual_profile_hints(frame_paths)
             if visual_hints:
                 initial_profile["visual_hints"] = dict(visual_hints)
@@ -1564,6 +1713,26 @@ async def infer_content_profile(
         user_memory=user_memory,
         include_research=include_research,
     )
+
+
+async def _collect_content_profile_ocr(frame_paths: list[Path], *, source_name: str) -> dict[str, Any]:
+    if not frame_paths:
+        return {}
+    try:
+        provider = get_ocr_provider()
+        result = await provider.recognize_frames(frame_paths, language="zh-CN")
+    except Exception:
+        return {}
+
+    profile = build_content_profile_ocr(result.frames, source_name=source_name)
+    profile["provider"] = str(result.provider or "").strip()
+    profile["available"] = bool(result.available) and bool(profile.get("line_count"))
+    profile["status"] = str(result.status or profile.get("status") or ("ok" if profile.get("line_count") else "empty")).strip()
+    if result.reason:
+        profile["reason"] = str(result.reason).strip()
+    if result.metadata:
+        profile["metadata"] = dict(result.metadata)
+    return profile
 
 
 async def apply_content_profile_feedback(
@@ -2270,7 +2439,9 @@ async def polish_subtitle_items(
                     "4. 结合 prev_text / next_text 只做邻句消歧，不要借邻句重写本句。\n"
                     "5. 单条输出必须和原句表达同一件事，禁止写成标题、摘要、卖点文案。\n"
                     "6. 优先保证品牌、型号、版本名、EDC/工具钳相关术语正确。\n"
-                    "7. 输出 JSON：{\"items\":[{\"index\":1,\"text_final\":\"...\"}]}\n\n"
+                    "7. 数字写法按展示语境润色：规格参数、版本代号、价格、档位、序号优先用阿拉伯数字；"
+                    "自然口语数量词和语气表达优先用中文数字，例如“一个”“一次”“一点”。\n"
+                    "8. 输出 JSON：{\"items\":[{\"index\":1,\"text_final\":\"...\"}]}\n\n"
                     f"视频主体：{json.dumps(content_profile, ensure_ascii=False)}\n"
                     f"预设要求：{preset.subtitle_goal}；风格：{preset.subtitle_tone}\n"
                     f"词表：\n{glossary_text}\n"
@@ -2297,7 +2468,7 @@ async def polish_subtitle_items(
                 for item in chunk:
                     polished = updates.get(item.item_index)
                     if polished:
-                        polished = _cleanup_polished_text(polished)
+                        polished = _cleanup_polished_text(polished, preserve_display_numbers=True)
                         original = item.text_final or item.text_norm or item.text_raw or ""
                         current_position = chunk_positions.get(item.item_index, start)
                         if _is_safe_subtitle_polish(
@@ -2331,6 +2502,7 @@ async def polish_subtitle_items(
                                     or indexed_items[current_position + 1].text_norm
                                     or indexed_items[current_position + 1].text_raw
                                 ) if current_position + 1 < len(indexed_items) else "",
+                                preserve_display_numbers=True,
                             )
                             item.text_final = polished
                         else:
@@ -2348,6 +2520,7 @@ async def polish_subtitle_items(
                                     or indexed_items[current_position + 1].text_norm
                                     or indexed_items[current_position + 1].text_raw
                                 ) if current_position + 1 < len(indexed_items) else "",
+                                preserve_display_numbers=True,
                             )
                         polished_count += 1
                         continue
@@ -2365,6 +2538,7 @@ async def polish_subtitle_items(
                             or indexed_items[chunk_positions.get(item.item_index, start) + 1].text_norm
                             or indexed_items[chunk_positions.get(item.item_index, start) + 1].text_raw
                         ) if chunk_positions.get(item.item_index, start) + 1 < len(indexed_items) else "",
+                        preserve_display_numbers=True,
                     )
                     polished_count += 1
                 continue
@@ -2386,6 +2560,7 @@ async def polish_subtitle_items(
                     or indexed_items[position + 1].text_norm
                     or indexed_items[position + 1].text_raw
                 ) if position + 1 < len(indexed_items) else "",
+                preserve_display_numbers=True,
             )
             polished_count += 1
 
@@ -3877,10 +4052,11 @@ def _extract_reference_frames(source_path: Path, tmpdir: Path, *, count: int) ->
 def _probe_duration(source_path: Path) -> float:
     import subprocess
 
+    timeout_seconds = max(30, int(get_settings().ffmpeg_timeout_sec or 600))
     result = subprocess.run(
         ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_format", str(source_path)],
         capture_output=True,
-        timeout=10,
+        timeout=timeout_seconds,
     )
     try:
         data = json.loads(result.stdout.decode("utf-8", errors="replace"))
@@ -4017,6 +4193,7 @@ def _fallback_polish_text(
     review_memory: dict[str, Any] | None = None,
     prev_text: str = "",
     next_text: str = "",
+    preserve_display_numbers: bool = False,
 ) -> str:
     polished = _apply_learned_phrase_preferences(text.strip(), review_memory)
     polished = _repair_common_intro_slot(polished)
@@ -4043,21 +4220,78 @@ def _fallback_polish_text(
             prev_text=prev_text,
             next_text=next_text,
         )
-    polished = normalize_display_text(
-        polished,
-        cleanup_fillers=get_settings().subtitle_filler_cleanup_enabled,
-    )
+    if preserve_display_numbers:
+        polished = str(polished or "").strip()
+        polished = _normalize_display_numbers_for_polish(polished)
+        polished = apply_subtitle_clause_spacing(polished)
+        polished = re.sub(r"\s+([，,。.!！？；;：:])", r"\1", polished)
+        polished = re.sub(r"([，；：])(?=[^\s])", r"\1 ", polished)
+        polished = re.sub(r"[，,]{2,}", "，", polished)
+        polished = re.sub(r"[。.]{2,}", "。", polished)
+        polished = re.sub(r"[，,]+([。.!！？])", r"\1", polished)
+        polished = re.sub(r"\s{2,}", " ", polished).strip("，,")
+    else:
+        polished = normalize_display_text(
+            polished,
+            cleanup_fillers=get_settings().subtitle_filler_cleanup_enabled,
+        )
     polished = re.sub(r"(。){2,}", "。", polished)
     polished = re.sub(r"(，){2,}", "，", polished)
     return polished
 
 
-def _cleanup_polished_text(text: str) -> str:
-    text = normalize_display_text(text, cleanup_fillers=False)
+def _cleanup_polished_text(text: str, *, preserve_display_numbers: bool = False) -> str:
+    if preserve_display_numbers:
+        text = apply_subtitle_clause_spacing(str(text or "").strip())
+        text = _normalize_display_numbers_for_polish(text)
+        text = re.sub(r"\s+([，,。.!！？；;：:])", r"\1", text)
+        text = re.sub(r"([，；：])(?=[^\s])", r"\1 ", text)
+        text = re.sub(r"[，,]{2,}", "，", text)
+        text = re.sub(r"[。.]{2,}", "。", text)
+        text = re.sub(r"[，,]+([。.!！？])", r"\1", text)
+        text = re.sub(r"\s{2,}", " ", text).strip("，,")
+    else:
+        text = normalize_display_text(text, cleanup_fillers=False)
     text = text.replace("「", "“").replace("」", "”")
     text = re.sub(r"[!！]{2,}", "！", text)
     text = re.sub(r"[?？]{2,}", "？", text)
     return text
+
+
+_NATURAL_ONE_RESTORE_UNITS = (
+    "分钟",
+    "小时",
+    "秒",
+    "个",
+    "次",
+    "条",
+    "款",
+    "件",
+    "位",
+    "组",
+    "份",
+    "项",
+    "种",
+    "节",
+    "段",
+    "回",
+    "遍",
+    "把",
+    "张",
+    "层",
+    "包",
+    "台",
+)
+
+
+def _normalize_display_numbers_for_polish(text: str) -> str:
+    normalized = normalize_display_numbers(str(text or "").strip())
+    normalized = re.sub(
+        rf"(?<![第A-Za-z0-9])1(?=(?:{'|'.join(_NATURAL_ONE_RESTORE_UNITS)}))",
+        "一",
+        normalized,
+    )
+    return normalized
 
 
 def _apply_explicit_review_aliases_for_polish(text: str, *, review_memory: dict[str, Any] | None) -> str:
@@ -4296,8 +4530,8 @@ def _is_safe_subtitle_polish(
     review_memory: dict[str, Any] | None,
     content_profile: dict[str, Any],
 ) -> bool:
-    original = _cleanup_polished_text(original_text)
-    polished = _cleanup_polished_text(polished_text)
+    original = _cleanup_polished_text(original_text, preserve_display_numbers=True)
+    polished = _cleanup_polished_text(polished_text, preserve_display_numbers=True)
     if not original or not polished:
         return False
     if polished == original:
@@ -4892,11 +5126,22 @@ def _summary_theme_fragment(
     content_kind: str = "",
     subject_domain: str = "",
 ) -> str:
-    cleaned = _strip_identity_tokens_from_text(
-        theme,
-        brand=brand,
-        model=model,
-    )
+    raw_cleaned = _clean_line(theme)
+    if brand or model:
+        cleaned = _strip_identity_tokens_from_text(
+            theme,
+            brand=brand,
+            model=model,
+        )
+    else:
+        cleaned = raw_cleaned
+    if not cleaned and raw_cleaned and _is_specific_video_theme_for_context(
+        raw_cleaned,
+        preset_name=preset_name,
+        content_kind=content_kind,
+        subject_domain=subject_domain,
+    ):
+        return raw_cleaned
     if _is_specific_video_theme_for_context(
         cleaned,
         preset_name=preset_name,
@@ -4927,6 +5172,14 @@ def _extract_query_support_terms(text: str) -> list[str]:
     return terms
 
 
+def _build_neutral_profile_summary() -> str:
+    return "这条视频当前主题待进一步确认，建议结合字幕、画面文字和人工核对后再继续包装。"
+
+
+def _build_theme_preserving_summary(theme: str) -> str:
+    return f"这条视频主要围绕{theme}展开，主体品牌型号待进一步确认，建议先结合字幕、画面文字和人工核对后再继续包装。"
+
+
 def _build_profile_summary(profile: dict[str, Any]) -> str:
     brand = str(profile.get("subject_brand") or "").strip()
     model = str(profile.get("subject_model") or "").strip()
@@ -4942,6 +5195,23 @@ def _build_profile_summary(profile: dict[str, Any]) -> str:
         content_kind=content_kind,
         subject_domain=subject_domain,
     )
+    default_theme = _clean_line(
+        _default_video_theme_by_context(
+            preset_name=preset_name or content_kind,
+            content_kind=content_kind,
+            subject_domain=subject_domain,
+        )
+    )
+    theme_norm = _normalize_profile_value(theme)
+    if brand and _normalize_profile_value(brand) in theme_norm:
+        theme = default_theme
+        theme_norm = _normalize_profile_value(theme)
+    if model and _normalize_profile_value(model) in theme_norm:
+        theme = default_theme
+    if not brand and not model and _is_generic_subject_type(subject_type):
+        if theme and _clean_line(theme) != default_theme:
+            return _build_theme_preserving_summary(theme)
+        return _build_neutral_profile_summary()
     parts = [part for part in (brand, model or subject_type) if part]
     product = " ".join(parts).strip() or subject_type
     if content_kind == "tutorial":
@@ -4989,6 +5259,8 @@ def _default_video_theme_by_context(*, preset_name: str, content_kind: str, subj
     normalized_preset = str(preset_name or "").strip()
     normalized_kind = str(content_kind or "").strip().lower()
     normalized_domain = str(subject_domain or "").strip().lower()
+    if not normalized_preset and not normalized_kind and not normalized_domain:
+        return "内容主题待进一步确认"
 
     tutorial_domain_mapping = {
         "ai": "AI工作流与模型能力讲解",

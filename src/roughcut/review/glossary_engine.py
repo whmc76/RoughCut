@@ -71,6 +71,9 @@ def assess_glossary_correction_automation(
                 reasons.append("匹配位于独立英文 token")
             else:
                 blocking_reasons.append("匹配落在更长英文词内部")
+        if _is_low_risk_brand_normalization(original, suggested):
+            score += 0.04
+            reasons.append("品牌名仅做大小写/空格归一")
 
     score = round(min(score, 0.99), 3)
     auto_apply = auto_accept_enabled and score >= normalized_threshold and not blocking_reasons
@@ -88,6 +91,12 @@ def assess_glossary_correction_automation(
 def _is_brand_like_category(value: Any) -> bool:
     normalized = str(value or "").strip().lower()
     return bool(normalized and "brand" in normalized)
+
+
+def _is_low_risk_brand_normalization(original: str, suggested: str) -> bool:
+    source = _compact_text(original).upper()
+    target = _compact_text(suggested).upper()
+    return bool(source and target and source == target and source != str(original or "").strip())
 
 
 async def apply_glossary_corrections(
@@ -136,7 +145,11 @@ async def apply_glossary_corrections(
                         match_end=match.end(),
                         confidence=0.95,
                         auto_accept_enabled=(
-                            settings.auto_accept_glossary_corrections and not _is_brand_like_category(category)
+                            settings.auto_accept_glossary_corrections
+                            and (
+                                not _is_brand_like_category(category)
+                                or _is_low_risk_brand_normalization(original, correct_form)
+                            )
                         ),
                         threshold=settings.glossary_correction_review_threshold,
                     )

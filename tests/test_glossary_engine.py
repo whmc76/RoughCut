@@ -81,6 +81,23 @@ def test_assess_glossary_correction_automation_blocks_embedded_english_match():
     assert "匹配落在更长英文词内部" in assessment["blocking_reasons"]
 
 
+def test_assess_glossary_correction_automation_accepts_low_risk_brand_normalization():
+    full_text = "这次我把 Loop Gear 的两款小灯放一起看"
+    start = full_text.index("Loop Gear")
+    assessment = assess_glossary_correction_automation(
+        full_text=full_text,
+        original_span="Loop Gear",
+        suggested_span="LOOPGEAR",
+        match_start=start,
+        match_end=start + len("Loop Gear"),
+        confidence=0.95,
+        auto_accept_enabled=True,
+    )
+
+    assert assessment["auto_apply"] is True
+    assert assessment["blocking_reasons"] == []
+
+
 @pytest.mark.asyncio
 async def test_apply_glossary_corrections_auto_accepts_safe_matches(db_session, monkeypatch):
     import roughcut.review.glossary_engine as glossary_engine_module
@@ -202,3 +219,44 @@ async def test_apply_glossary_corrections_brand_terms_require_review(db_session,
     assert len(corrections) == 1
     assert corrections[0].auto_applied is False
     assert corrections[0].human_decision == "pending"
+
+
+@pytest.mark.asyncio
+async def test_apply_glossary_corrections_auto_accepts_low_risk_brand_normalization(db_session, monkeypatch):
+    import roughcut.review.glossary_engine as glossary_engine_module
+
+    settings = type(
+        "SettingsStub",
+        (),
+        {
+            "auto_accept_glossary_corrections": True,
+            "glossary_correction_review_threshold": 0.9,
+        },
+    )()
+    monkeypatch.setattr(glossary_engine_module, "get_settings", lambda: settings)
+
+    subtitle_item = SubtitleItem(
+        job_id=uuid.uuid4(),
+        version=1,
+        item_index=0,
+        start_time=0.0,
+        end_time=1.0,
+        text_raw="这次我把 Loop Gear 的两款小灯放一起看",
+        text_norm="这次我把 Loop Gear 的两款小灯放一起看",
+        text_final=None,
+    )
+    db_session.add(subtitle_item)
+    await db_session.flush()
+
+    corrections = await apply_glossary_corrections(
+        subtitle_item.job_id,
+        [subtitle_item],
+        db_session,
+        glossary_terms=[
+            {"correct_form": "LOOPGEAR", "wrong_forms": ["Loop Gear"], "category": "flashlight_brand"},
+        ],
+    )
+
+    assert len(corrections) == 1
+    assert corrections[0].auto_applied is True
+    assert corrections[0].human_decision == "accepted"

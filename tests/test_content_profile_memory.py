@@ -12,6 +12,24 @@ from roughcut.review.content_profile_memory import (
 )
 
 
+async def _create_job(
+    db_session,
+    *,
+    source_name: str,
+    workflow_template: str,
+) -> Job:
+    job = Job(
+        id=uuid.uuid4(),
+        source_path=f"E:/videos/{source_name}",
+        source_name=source_name,
+        status="needs_review",
+        channel_profile=workflow_template,
+    )
+    db_session.add(job)
+    await db_session.flush()
+    return job
+
+
 @pytest.mark.asyncio
 async def test_content_profile_memory_records_corrections_and_keywords(db_session):
     job = Job(
@@ -217,3 +235,247 @@ def test_content_profile_memory_cloud_prioritizes_specific_terms():
     assert any(item["label"] == "次顶配镜面" and item["kind"] == "phrase" for item in cloud["words"])
     assert cloud["phrases"][0]["phrase"] == "次顶配镜面"
     assert cloud["styles"][0]["tag"] == "detail_focused"
+
+
+@pytest.mark.asyncio
+async def test_content_profile_memory_isolates_graph_memory_by_subject_domain(db_session):
+    edc_job = await _create_job(
+        db_session,
+        source_name="20260401_鸿福_F叉二一小副包_开箱测评.mp4",
+        workflow_template="edc_tactical",
+    )
+    food_job = await _create_job(
+        db_session,
+        source_name="20260401_老韩_爆汁牛肉堡_探店.mp4",
+        workflow_template="food_explore",
+    )
+
+    await record_content_profile_feedback_memory(
+        db_session,
+        job=edc_job,
+        draft_profile={
+            "subject_brand": "狐蝠工业",
+            "subject_model": "FXX1小副包",
+            "subject_type": "EDC机能包",
+        },
+        final_profile={
+            "subject_brand": "狐蝠工业",
+            "subject_model": "FXX1小副包",
+            "subject_type": "EDC机能包",
+            "identity_review": {
+                "evidence_bundle": {
+                    "candidate_brand": "狐蝠工业",
+                    "candidate_model": "FXX1小副包",
+                    "matched_glossary_aliases": {
+                        "brand": ["鸿福"],
+                        "model": ["F叉二一小副包"],
+                    },
+                }
+            },
+        },
+        user_feedback={},
+    )
+    await record_content_profile_feedback_memory(
+        db_session,
+        job=food_job,
+        draft_profile={
+            "subject_brand": "老韩",
+            "subject_model": "爆汁牛肉堡",
+            "subject_type": "探店试吃",
+        },
+        final_profile={
+            "subject_brand": "老韩",
+            "subject_model": "爆汁牛肉堡",
+            "subject_type": "探店试吃",
+            "identity_review": {
+                "evidence_bundle": {
+                    "candidate_brand": "老韩",
+                    "candidate_model": "爆汁牛肉堡",
+                    "matched_glossary_aliases": {
+                        "brand": ["韩叔"],
+                        "model": ["牛堡"],
+                    },
+                }
+            },
+        },
+        user_feedback={},
+    )
+    await db_session.flush()
+
+    edc_memory = await load_content_profile_user_memory(db_session, subject_domain="edc")
+    food_memory = await load_content_profile_user_memory(db_session, subject_domain="food")
+
+    assert any(
+        item["brand"] == "狐蝠工业"
+        and item["model"] == "FXX1小副包"
+        and "F叉二一小副包" in item["model_aliases"]
+        for item in edc_memory["confirmed_entities"]
+    )
+    assert not any(item["brand"] == "老韩" for item in edc_memory["confirmed_entities"])
+    assert any(
+        item["brand"] == "老韩"
+        and item["model"] == "爆汁牛肉堡"
+        and "牛堡" in item["model_aliases"]
+        for item in food_memory["confirmed_entities"]
+    )
+    assert not any(item["brand"] == "狐蝠工业" for item in food_memory["confirmed_entities"])
+
+
+@pytest.mark.asyncio
+async def test_content_profile_memory_promotes_identity_aliases_into_confirmed_entities(db_session):
+    job = await _create_job(
+        db_session,
+        source_name="20260316_鸿福_F叉二一小副包_开箱测评.mp4",
+        workflow_template="edc_tactical",
+    )
+
+    await record_content_profile_feedback_memory(
+        db_session,
+        job=job,
+        draft_profile={
+            "subject_brand": "狐蝠工业",
+            "subject_model": "FXX1小副包",
+            "subject_type": "EDC机能包",
+        },
+        final_profile={
+            "subject_brand": "狐蝠工业",
+            "subject_model": "FXX1小副包",
+            "subject_type": "EDC机能包",
+            "identity_review": {
+                "evidence_bundle": {
+                    "candidate_brand": "狐蝠工业",
+                    "candidate_model": "FXX1小副包",
+                    "matched_glossary_aliases": {
+                        "brand": ["鸿福"],
+                        "model": ["F叉二一小副包"],
+                    },
+                }
+            },
+        },
+        user_feedback={},
+    )
+    await db_session.flush()
+
+    memory = await load_content_profile_user_memory(db_session, subject_domain="edc")
+
+    assert any(
+        item["brand"] == "狐蝠工业"
+        and item["model"] == "FXX1小副包"
+        and "F叉二一小副包" in item["model_aliases"]
+        and any("鸿福" in phrase for phrase in item["phrases"])
+        for item in memory["confirmed_entities"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_content_profile_memory_suppresses_rejected_alias_mappings(db_session):
+    confirmed_job = await _create_job(
+        db_session,
+        source_name="20260316_鸿福_F叉二一小副包_开箱测评.mp4",
+        workflow_template="edc_tactical",
+    )
+    rejected_job = await _create_job(
+        db_session,
+        source_name="20260402_鸿福_F叉二一小副包_纠错.mp4",
+        workflow_template="edc_tactical",
+    )
+
+    await record_content_profile_feedback_memory(
+        db_session,
+        job=confirmed_job,
+        draft_profile={
+            "subject_brand": "狐蝠工业",
+            "subject_model": "FXX1小副包",
+        },
+        final_profile={
+            "subject_brand": "狐蝠工业",
+            "subject_model": "FXX1小副包",
+            "identity_review": {
+                "evidence_bundle": {
+                    "candidate_brand": "狐蝠工业",
+                    "candidate_model": "FXX1小副包",
+                    "matched_glossary_aliases": {
+                        "brand": ["鸿福"],
+                        "model": ["F叉二一小副包"],
+                    },
+                }
+            },
+        },
+        user_feedback={},
+    )
+    await record_content_profile_feedback_memory(
+        db_session,
+        job=rejected_job,
+        draft_profile={
+            "subject_brand": "狐蝠工业",
+            "subject_model": "FXX1小副包",
+        },
+        final_profile={
+            "subject_brand": "狐锋工业",
+            "subject_model": "FXX1小副包 Pro",
+            "identity_review": {
+                "evidence_bundle": {
+                    "candidate_brand": "狐蝠工业",
+                    "candidate_model": "FXX1小副包",
+                    "matched_glossary_aliases": {
+                        "brand": ["鸿福"],
+                        "model": ["F叉二一小副包"],
+                    },
+                }
+            },
+        },
+        user_feedback={
+            "subject_brand": "狐锋工业",
+            "subject_model": "FXX1小副包 Pro",
+        },
+    )
+    await db_session.flush()
+
+    memory = await load_content_profile_user_memory(db_session, subject_domain="edc")
+
+    assert not any(
+        item["field_name"] == "subject_brand"
+        and item["original_value"] == "鸿福"
+        and item["corrected_value"] == "狐蝠工业"
+        for item in memory["recent_corrections"]
+    )
+    assert not any(
+        item["field_name"] == "subject_model"
+        and item["original_value"] == "F叉二一小副包"
+        and item["corrected_value"] == "FXX1小副包"
+        for item in memory["recent_corrections"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_content_profile_memory_falls_back_to_legacy_corrections_when_graph_is_empty(db_session):
+    job = await _create_job(
+        db_session,
+        source_name="legacy.mp4",
+        workflow_template="edc_tactical",
+    )
+    del job
+
+    from roughcut.db.models import ContentProfileCorrection
+
+    db_session.add(
+        ContentProfileCorrection(
+            job_id=uuid.uuid4(),
+            source_name="legacy.mp4",
+            subject_domain="edc",
+            field_name="subject_brand",
+            original_value="莱泽曼",
+            corrected_value="LEATHERMAN",
+        )
+    )
+    await db_session.flush()
+
+    memory = await load_content_profile_user_memory(db_session, subject_domain="edc")
+
+    assert any(item["value"] == "LEATHERMAN" for item in memory["field_preferences"]["subject_brand"])
+    assert any(
+        item["field_name"] == "subject_brand"
+        and item["original_value"] == "莱泽曼"
+        and item["corrected_value"] == "LEATHERMAN"
+        for item in memory["recent_corrections"]
+    )

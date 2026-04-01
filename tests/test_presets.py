@@ -84,3 +84,29 @@ def test_select_workflow_template_for_vlog():
         transcript_hint="今天带你们看我一天怎么过",
     )
     assert preset.name == "vlog_daily"
+
+
+def test_select_workflow_template_for_podcast_like_commentary_transcript():
+    preset = select_workflow_template(
+        workflow_template=None,
+        content_kind="",
+        subject_domain="",
+        subject_model="",
+        subject_type="",
+        transcript_hint="大家好今天继续测试数字人的表达是否自然，互动感和口播节奏够不够稳定。",
+    )
+
+    assert preset.name == "commentary_focus"
+
+
+def test_select_workflow_template_for_digital_host_expression_transcript():
+    preset = select_workflow_template(
+        workflow_template=None,
+        content_kind="",
+        subject_domain="",
+        subject_model="",
+        subject_type="",
+        transcript_hint="大家好欢迎来到我的播客测试现场，今天想看看数字人的表达是否自然清晰，互动有没有温度。",
+    )
+
+    assert preset.name == "commentary_focus"

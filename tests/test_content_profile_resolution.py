@@ -181,3 +181,90 @@ def test_score_identity_candidates_does_not_double_count_duplicate_visual_cluste
     assert scored["subject_model"][0].value == "MT33"
     assert scored["subject_model"][0].current_evidence_score == 4
     assert scored["subject_model"][0].all_sources == ("visual_cluster",)
+
+
+def test_build_identity_candidates_includes_graph_ocr_and_transcript_source_label_sources():
+    bundle = IdentityEvidenceBundle(
+        transcript_excerpt="这期主要看分仓和挂点。",
+        source_name="demo.mp4",
+        transcript_hints={},
+        transcript_source_labels={
+            "subject_brand": "狐蝠工业",
+            "subject_model": "FXX1小副包",
+            "video_theme": "狐蝠工业FXX1小副包开箱与挂点评测",
+        },
+        source_hints={},
+        visual_hints={},
+        visual_cluster_hints={},
+        visible_text_hints={},
+        ocr_hints={"subject_brand": "狐蝠工业", "subject_model": "FXX1小副包"},
+        profile_identity={},
+        memory_confirmed_hints={},
+        graph_confirmed_entities=[
+            {"brand": "傲雷", "model": "司令官2Ultra", "subject_type": "EDC手电"},
+        ],
+    )
+
+    candidates = build_identity_candidates(bundle)
+    source_pairs = {(item.field_name, item.value, item.source_type) for item in candidates}
+
+    assert ("subject_brand", "狐蝠工业", "transcript_labels") in source_pairs
+    assert ("subject_model", "FXX1小副包", "ocr") in source_pairs
+    assert ("subject_brand", "傲雷", "graph_confirmed") in source_pairs
+
+
+def test_score_identity_candidates_prefers_current_video_evidence_over_graph_memory():
+    bundle = IdentityEvidenceBundle(
+        transcript_excerpt="这期主要看挂点和分仓。",
+        source_name="demo.mp4",
+        transcript_hints={},
+        transcript_source_labels={"subject_brand": "狐蝠工业", "subject_model": "FXX1小副包"},
+        source_hints={},
+        visual_hints={},
+        visual_cluster_hints={"subject_brand": "狐蝠工业", "subject_model": "FXX1小副包"},
+        visible_text_hints={},
+        ocr_hints={"subject_brand": "狐蝠工业", "subject_model": "FXX1小副包"},
+        profile_identity={},
+        memory_confirmed_hints={"subject_brand": "傲雷", "subject_model": "司令官2Ultra"},
+        graph_confirmed_entities=[
+            {"brand": "傲雷", "model": "司令官2Ultra", "subject_type": "EDC手电"},
+        ],
+    )
+
+    scored = score_identity_candidates(build_identity_candidates(bundle), normalize=_normalize)
+
+    brand = scored["subject_brand"][0]
+    model = scored["subject_model"][0]
+
+    assert brand.value == "狐蝠工业"
+    assert model.value == "FXX1小副包"
+    assert brand.current_evidence_score > 0
+    assert model.current_evidence_score > 0
+    assert "graph_confirmed" not in brand.all_sources
+
+
+def test_resolve_identity_candidates_clears_brand_and_model_when_current_ocr_and_transcript_conflict():
+    bundle = IdentityEvidenceBundle(
+        transcript_excerpt="这期主要看挂点和分仓。",
+        source_name="demo.mp4",
+        transcript_hints={},
+        transcript_source_labels={"subject_brand": "狐蝠工业", "subject_model": "FXX1小副包"},
+        source_hints={},
+        visual_hints={},
+        visual_cluster_hints={},
+        visible_text_hints={},
+        ocr_hints={"subject_brand": "NOC", "subject_model": "MT33"},
+        profile_identity={},
+        memory_confirmed_hints={},
+    )
+
+    scored = score_identity_candidates(build_identity_candidates(bundle), normalize=_normalize)
+    resolved = resolve_identity_candidates(
+        scored,
+        normalize=_normalize,
+        mapped_brand_for_model=lambda value: {"FXX1小副包": "狐蝠工业", "MT33": "NOC"}.get(str(value), ""),
+    )
+
+    assert resolved.subject_brand == ""
+    assert resolved.subject_model == ""
+    assert "current_identity_conflict" in resolved.conflicts

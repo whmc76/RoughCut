@@ -6,15 +6,18 @@ from typing import Callable
 from roughcut.review.content_profile_candidates import IdentityCandidate
 
 _CURRENT_EVIDENCE_WEIGHTS: dict[str, int] = {
+    "transcript_labels": 5,
+    "ocr": 4,
     "transcript": 4,
     "source_name": 3,
     "visual_cluster": 4,
     "visual": 3,
     "visible_text": 2,
     "memory_confirmed": 2,
+    "graph_confirmed": 1,
     "profile": 0,
 }
-_NON_CURRENT_EVIDENCE_SOURCES = {"profile", "memory_confirmed"}
+_NON_CURRENT_EVIDENCE_SOURCES = {"profile", "memory_confirmed", "graph_confirmed"}
 
 
 @dataclass(frozen=True)

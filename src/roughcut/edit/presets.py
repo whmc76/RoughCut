@@ -213,7 +213,27 @@ def select_workflow_template(
         return PRESETS["tutorial_standard"]
     if any(keyword in haystack for keyword in ("vlog", "日常", "出门", "出行", "探店", "周末", "今天带你", "跟我", "生活", "一天", "citywalk")):
         return PRESETS["vlog_daily"]
-    if any(keyword in haystack for keyword in ("口播", "观点", "评论", "复盘", "热点", "分析", "看法", "聊聊", "为什么", "到底")):
+    if any(
+        keyword in haystack
+        for keyword in (
+            "口播",
+            "观点",
+            "评论",
+            "复盘",
+            "热点",
+            "分析",
+            "看法",
+            "聊聊",
+            "聊一聊",
+            "播客",
+            "表达",
+            "互动",
+            "清晰",
+            "数字人",
+            "为什么",
+            "到底",
+        )
+    ):
         return PRESETS["commentary_focus"]
     if any(keyword in haystack for keyword in ("游戏", "对局", "吃鸡", "王者", "lol", "fps", "团战", "击杀", "直播切片", "实况")):
         return PRESETS["gameplay_highlight"]

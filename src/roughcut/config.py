@@ -135,6 +135,10 @@ PROFILE_BINDABLE_SETTINGS: tuple[str, ...] = (
     "quality_auto_rerun_enabled",
     "quality_auto_rerun_below_score",
     "quality_auto_rerun_max_attempts",
+    "ocr_enabled",
+    "entity_graph_enabled",
+    "asr_evidence_enabled",
+    "research_verifier_enabled",
 )
 
 
@@ -307,6 +311,11 @@ class Settings(BaseSettings):
     quality_auto_rerun_enabled: bool = True
     quality_auto_rerun_below_score: float = 75.0
     quality_auto_rerun_max_attempts: int = 1
+    correction_framework_version: str = "multisource_v1"
+    ocr_enabled: bool = False
+    entity_graph_enabled: bool = False
+    asr_evidence_enabled: bool = False
+    research_verifier_enabled: bool = False
 
     # Feature flags
     fact_check_enabled: bool = False

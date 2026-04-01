@@ -15,3 +15,6 @@ class IdentityEvidenceBundle:
     profile_identity: dict[str, Any]
     visual_cluster_hints: dict[str, Any] = field(default_factory=dict)
     memory_confirmed_hints: dict[str, Any] = field(default_factory=dict)
+    transcript_source_labels: dict[str, Any] = field(default_factory=dict)
+    ocr_hints: dict[str, Any] = field(default_factory=dict)
+    graph_confirmed_entities: list[dict[str, Any]] = field(default_factory=list)

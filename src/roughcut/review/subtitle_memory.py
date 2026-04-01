@@ -6,13 +6,16 @@ import re
 from typing import Any
 
 from roughcut.review.domain_glossaries import (
+    _CANONICAL_DOMAIN_SOURCES,
     _DOMAIN_COMPATIBILITY,
     _DOMAIN_KEYWORDS,
+    canonicalize_domains,
     detect_glossary_domains,
     filter_scoped_glossary_terms,
     merge_glossary_terms,
     normalize_subject_domain,
     resolve_builtin_glossary_terms,
+    select_primary_subject_domain,
 )
 from roughcut.speech.dialects import resolve_transcription_dialect
 
@@ -249,6 +252,7 @@ def build_subtitle_review_memory(
     *,
     workflow_template: str | None = None,
     channel_profile: str | None = None,
+    subject_domain: str | None = None,
     glossary_terms: list[dict[str, Any]] | None,
     user_memory: dict[str, Any] | None,
     recent_subtitles: list[dict[str, Any]] | None,
@@ -260,6 +264,12 @@ def build_subtitle_review_memory(
 ) -> dict[str, Any]:
     if workflow_template is None and channel_profile is not None:
         workflow_template = channel_profile
+    resolved_subject_domain = _resolve_review_subject_domain(
+        subject_domain=subject_domain,
+        workflow_template=workflow_template,
+        content_profile=content_profile,
+        recent_subtitles=recent_subtitles,
+    )
     term_scores: Counter[str] = Counter()
     examples: list[dict[str, str]] = []
     alias_pairs: list[dict[str, str]] = []
@@ -274,16 +284,21 @@ def build_subtitle_review_memory(
         _build_confirmed_feedback_entities(content_profile),
         _select_user_memory_confirmed_entities(
             user_memory,
+            subject_domain=resolved_subject_domain,
             workflow_template=workflow_template,
             content_profile=content_profile,
             recent_subtitles=recent_subtitles,
         ),
     )
-    direct_domains = set(
-        detect_glossary_domains(
-            workflow_template=workflow_template,
-            content_profile=content_profile,
-            subtitle_items=recent_subtitles,
+    direct_domains = (
+        _expand_review_subject_domains(resolved_subject_domain)
+        if resolved_subject_domain
+        else set(
+            detect_glossary_domains(
+                workflow_template=workflow_template,
+                content_profile=content_profile,
+                subtitle_items=recent_subtitles,
+            )
         )
     )
     scoped_glossary_terms = filter_scoped_glossary_terms(
@@ -312,6 +327,8 @@ def build_subtitle_review_memory(
         value = _normalize_term(term)
         if not value:
             return
+        if not _term_supported_by_subject_domain(value, resolved_subject_domain):
+            return
         term_scores[value] += max(1, weight)
 
     for key in ("subject_brand", "subject_model", "subject_type", "video_theme"):
@@ -335,7 +352,7 @@ def build_subtitle_review_memory(
             remember_term(token, 8)
 
     for item in (user_memory or {}).get("phrase_preferences") or []:
-        remember_term(item.get("phrase"), 5)
+        remember_term(item.get("phrase"), 9)
         for token in _extract_compound_domain_terms(str(item.get("phrase") or "")):
             remember_term(token, 10)
 
@@ -368,6 +385,8 @@ def build_subtitle_review_memory(
                 alias_pairs.append({"wrong": wrong, "correct": correct})
 
     for term in effective_glossary_terms:
+        if not _glossary_term_supported_by_subject_domain(term, resolved_subject_domain):
+            continue
         correct_form = _normalize_term(term.get("correct_form"))
         if correct_form:
             term_domain = str(term.get("domain") or "").strip()
@@ -410,6 +429,8 @@ def build_subtitle_review_memory(
         )
         if not text:
             continue
+        if not _text_supported_by_subject_domain(text, resolved_subject_domain):
+            continue
         if include_recent_terms:
             for token in _extract_domain_terms(text):
                 remember_term(token, 2)
@@ -438,6 +459,8 @@ def build_subtitle_review_memory(
         if item.get("term")
     }
     for term in effective_glossary_terms:
+        if not _glossary_term_supported_by_subject_domain(term, resolved_subject_domain):
+            continue
         correct_form = _normalize_term(term.get("correct_form"))
         if not correct_form or correct_form in ranked_term_values:
             continue
@@ -454,6 +477,8 @@ def build_subtitle_review_memory(
     ) -> None:
         collected: list[tuple[int, str, str]] = []
         for term in term_collection or []:
+            if not _glossary_term_supported_by_subject_domain(term, resolved_subject_domain):
+                continue
             correct_form = _normalize_term(term.get("correct_form"))
             if not correct_form:
                 continue
@@ -503,9 +528,11 @@ def build_subtitle_review_memory(
 
     return {
         "workflow_template": workflow_template or "",
+        "subject_domain": resolved_subject_domain or "",
         "terms": ranked_terms,
         "aliases": alias_pairs[:120],
         "confirmed_entities": confirmed_entities[:6],
+        "negative_alias_pairs": list((user_memory or {}).get("negative_alias_pairs") or [])[:40],
         "style_examples": examples[:example_limit],
         "phrase_preferences": list((user_memory or {}).get("phrase_preferences") or [])[:12],
         "style_preferences": list((user_memory or {}).get("style_preferences") or [])[:8],
@@ -528,16 +555,18 @@ def _merge_confirmed_entities(*entity_groups: list[dict[str, Any]]) -> list[dict
 def _select_user_memory_confirmed_entities(
     user_memory: dict[str, Any] | None,
     *,
+    subject_domain: str | None,
     workflow_template: str | None,
     content_profile: dict[str, Any] | None,
     recent_subtitles: list[dict[str, Any]] | None,
 ) -> list[dict[str, Any]]:
-    items = list((user_memory or {}).get("confirmed_entities") or [])
+    graph_items = list((((user_memory or {}).get("entity_graph") or {}).get("confirmed_entities") or []))
+    items = graph_items + list((user_memory or {}).get("confirmed_entities") or [])
     if not items:
         return []
 
     current_subject_type = _compact_subject_text((content_profile or {}).get("subject_type"))
-    current_domain = str(normalize_subject_domain((content_profile or {}).get("subject_domain")) or "").strip().lower()
+    current_domain = str(normalize_subject_domain(subject_domain or (content_profile or {}).get("subject_domain")) or "").strip().lower()
     if not current_domain:
         detected_domains = detect_glossary_domains(
             workflow_template=workflow_template,
@@ -546,6 +575,8 @@ def _select_user_memory_confirmed_entities(
         )
         if detected_domains:
             current_domain = str(normalize_subject_domain(detected_domains[0]) or detected_domains[0] or "").strip().lower()
+    if not current_domain:
+        return []
     context_text = " ".join(
         str(item or "")
         for item in [
@@ -692,7 +723,9 @@ def build_transcription_prompt(
     alias_pairs = [
         f"{item['wrong']}={item['correct']}"
         for item in (review_memory or {}).get("aliases") or []
-        if item.get("wrong") and item.get("correct")
+        if item.get("wrong")
+        and item.get("correct")
+        and _prompt_term_supported_by_domains(str(item.get("correct") or "").strip(), dominant_domains)
     ][:8]
     if alias_pairs:
         snippets.append(f"错写归一：{'; '.join(alias_pairs)}")
@@ -704,6 +737,10 @@ def build_transcription_prompt(
 
 
 def _select_prompt_dominant_domains(review_memory: dict[str, Any] | None) -> set[str]:
+    explicit_subject_domain = normalize_subject_domain((review_memory or {}).get("subject_domain"))
+    if explicit_subject_domain:
+        return _expand_review_subject_domains(explicit_subject_domain)
+
     scored_domains: Counter[str] = Counter()
     for item in (review_memory or {}).get("terms") or []:
         term = str(item.get("term") or "").strip()
@@ -759,6 +796,90 @@ def _domains_for_term(term: str) -> set[str]:
                 matched.add(domain)
                 break
     return matched
+
+
+def _resolve_review_subject_domain(
+    *,
+    subject_domain: str | None,
+    workflow_template: str | None,
+    content_profile: dict[str, Any] | None,
+    recent_subtitles: list[dict[str, Any]] | None,
+) -> str | None:
+    explicit_subject_domain = normalize_subject_domain(subject_domain or (content_profile or {}).get("subject_domain"))
+    if explicit_subject_domain:
+        return explicit_subject_domain
+    return select_primary_subject_domain(
+        detect_glossary_domains(
+            workflow_template=workflow_template,
+            content_profile=content_profile,
+            subtitle_items=recent_subtitles,
+        )
+    )
+
+
+def _expand_review_subject_domains(subject_domain: str | None) -> set[str]:
+    normalized_subject_domain = normalize_subject_domain(subject_domain)
+    if not normalized_subject_domain:
+        return set()
+
+    queue = [normalized_subject_domain, *_CANONICAL_DOMAIN_SOURCES.get(normalized_subject_domain, (normalized_subject_domain,))]
+    expanded: set[str] = set()
+    seen: set[str] = set()
+    while queue:
+        domain = str(queue.pop(0) or "").strip().lower()
+        if not domain or domain in seen:
+            continue
+        seen.add(domain)
+        expanded.add(domain)
+        canonical = normalize_subject_domain(domain)
+        if canonical:
+            expanded.add(canonical)
+            if canonical not in seen:
+                queue.append(canonical)
+        for related in _DOMAIN_COMPATIBILITY.get(domain, ()):
+            if related not in seen:
+                queue.append(related)
+    return expanded
+
+
+def _term_supported_by_subject_domain(term: str, subject_domain: str | None) -> bool:
+    normalized_term = str(term or "").strip()
+    if not normalized_term or not subject_domain:
+        return bool(normalized_term)
+    term_domains = canonicalize_domains(_domains_for_term(normalized_term))
+    if not term_domains:
+        return True
+    supported_domains = _expand_review_subject_domains(subject_domain)
+    return bool(set(term_domains) & supported_domains)
+
+
+def _text_supported_by_subject_domain(text: str, subject_domain: str | None) -> bool:
+    normalized_text = str(text or "").strip()
+    if not normalized_text or not subject_domain:
+        return bool(normalized_text)
+    text_domains = detect_glossary_domains(
+        workflow_template=None,
+        content_profile=None,
+        subtitle_items=[{"text_final": normalized_text}],
+    )
+    if not text_domains:
+        return True
+    supported_domains = _expand_review_subject_domains(subject_domain)
+    return bool(set(text_domains) & supported_domains)
+
+
+def _glossary_term_supported_by_subject_domain(term: dict[str, Any], subject_domain: str | None) -> bool:
+    if not subject_domain:
+        return True
+    term_domain = str(term.get("domain") or "").strip()
+    if term_domain:
+        supported_domains = _expand_review_subject_domains(subject_domain)
+        normalized_term_domain = normalize_subject_domain(term_domain) or term_domain.lower()
+        return normalized_term_domain in supported_domains or term_domain.lower() in supported_domains
+    correct_form = _normalize_term(term.get("correct_form"))
+    if not correct_form:
+        return False
+    return _term_supported_by_subject_domain(correct_form, subject_domain)
 
 
 def apply_domain_term_corrections(
@@ -1206,15 +1327,48 @@ def _apply_confirmed_entity_corrections(
     next_text: str = "",
 ) -> str:
     result = str(text or "")
+    negative_alias_pairs = {
+        (
+            _normalize_conflict_key(item.get("alias_value")),
+            _normalize_conflict_key(item.get("canonical_value")),
+        )
+        for item in (review_memory or {}).get("negative_alias_pairs") or []
+        if item.get("alias_value") and item.get("canonical_value")
+    }
     for entity in (review_memory or {}).get("confirmed_entities") or []:
         brand = str(entity.get("brand") or "").strip()
         model = str(entity.get("model") or "").strip()
+        brand_aliases = [
+            str(item or "").strip()
+            for item in entity.get("brand_aliases") or []
+            if str(item or "").strip()
+        ]
+        for alias in sorted(brand_aliases, key=len, reverse=True):
+            if (
+                _normalize_conflict_key(alias),
+                _normalize_conflict_key(brand),
+            ) in negative_alias_pairs:
+                continue
+            if not _confirmed_brand_alias_has_anchor_support(
+                alias=alias,
+                current_text=result,
+                prev_text=prev_text,
+                next_text=next_text,
+                entity=entity,
+            ):
+                continue
+            result = re.sub(re.escape(alias), brand, result, count=1, flags=re.IGNORECASE)
         model_aliases = [
             (str(item.get("wrong") or "").strip(), str(item.get("correct") or "").strip())
             for item in entity.get("model_aliases") or []
             if item.get("wrong") and item.get("correct")
         ]
         for wrong, correct in sorted(model_aliases, key=lambda item: (-len(item[0]), item[0])):
+            if (
+                _normalize_conflict_key(wrong),
+                _normalize_conflict_key(correct),
+            ) in negative_alias_pairs:
+                continue
             if not _confirmed_alias_has_context_support(
                 wrong=wrong,
                 correct=correct,
@@ -1224,10 +1378,22 @@ def _apply_confirmed_entity_corrections(
                 entity=entity,
             ):
                 continue
-            result = _replace_confirmed_subject_anchor(result, wrong=wrong, correct=correct, brand=brand)
+            result = _replace_confirmed_subject_anchor(
+                result,
+                wrong=wrong,
+                correct=correct,
+                brand=brand,
+                negative_alias_pairs=negative_alias_pairs,
+            )
         anchor_forms = _build_confirmed_model_anchor_forms(model)
         for anchor in anchor_forms:
-            result = _replace_confirmed_subject_anchor(result, wrong=anchor, correct=anchor, brand=brand)
+            result = _replace_confirmed_subject_anchor(
+                result,
+                wrong=anchor,
+                correct=anchor,
+                brand=brand,
+                negative_alias_pairs=negative_alias_pairs,
+            )
         fuzzy_anchor_forms = [
             anchor for anchor in anchor_forms
             if re.fullmatch(r"[A-Za-z]{1,6}\d{1,4}", anchor, re.IGNORECASE)
@@ -1242,7 +1408,14 @@ def _apply_confirmed_entity_corrections(
     return result
 
 
-def _replace_confirmed_subject_anchor(text: str, *, wrong: str, correct: str, brand: str) -> str:
+def _replace_confirmed_subject_anchor(
+    text: str,
+    *,
+    wrong: str,
+    correct: str,
+    brand: str,
+    negative_alias_pairs: set[tuple[str, str]] | None = None,
+) -> str:
     if not text or not wrong or not correct:
         return text
     match = re.search(re.escape(wrong), text, re.IGNORECASE)
@@ -1257,12 +1430,53 @@ def _replace_confirmed_subject_anchor(text: str, *, wrong: str, correct: str, br
         and _alias_supports_brand_prefix(wrong, correct)
         and _looks_like_brand_candidate_prefix(prefix)
     ):
+        if (
+            _normalize_conflict_key(prefix),
+            _normalize_conflict_key(brand),
+        ) in (negative_alias_pairs or set()):
+            return text
         if brand and text[:start].endswith(brand):
             return text
         replace_start = start - len(prefix)
         replacement = f"{brand}{correct}" if brand else correct
         return f"{text[:replace_start]}{replacement}{text[end:]}"
     return f"{text[:start]}{correct}{text[end:]}"
+
+
+def _confirmed_brand_alias_has_anchor_support(
+    *,
+    alias: str,
+    current_text: str,
+    prev_text: str,
+    next_text: str,
+    entity: dict[str, Any],
+) -> bool:
+    if not alias:
+        return False
+    current = str(current_text or "")
+    if not re.search(re.escape(alias), current, re.IGNORECASE):
+        return False
+    supporting_values = [
+        str(entity.get("model") or "").strip(),
+        *(str(item.get("correct") or "").strip() for item in entity.get("model_aliases") or []),
+        *(str(item.get("wrong") or "").strip() for item in entity.get("model_aliases") or []),
+        *(str(item or "").strip() for item in entity.get("phrases") or []),
+    ]
+    supporting_values = [
+        value
+        for value in supporting_values
+        if value and _normalize_conflict_key(value) != _normalize_conflict_key(alias)
+    ]
+    if any(value and re.search(re.escape(value), current, re.IGNORECASE) for value in supporting_values):
+        return True
+
+    context = " ".join(item for item in (str(prev_text or ""), str(next_text or "")) if item)
+    entity_tokens = [
+        token
+        for token in _extract_context_support_tokens(entity)
+        if _normalize_conflict_key(token) != _normalize_conflict_key(alias)
+    ]
+    return any(token and token in context for token in entity_tokens)
 
 
 def _build_confirmed_model_anchor_forms(model: str) -> list[str]:

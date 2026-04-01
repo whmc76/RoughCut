@@ -44,7 +44,7 @@ from roughcut.edit.render_plan import (
     save_render_plan,
 )
 from roughcut.edit.timeline import save_editorial_timeline
-from roughcut.media.audio import extract_audio, extract_audio_clip
+from roughcut.media.audio import NoAudioStreamError, extract_audio, extract_audio_clip
 from roughcut.media.output import (
     build_variant_output_path,
     extract_cover_frame,
@@ -56,7 +56,7 @@ from roughcut.media.subtitles import remap_subtitles_to_timeline
 from roughcut.media.probe import probe, validate_media
 from roughcut.media.render import render_video
 from roughcut.media.silence import detect_silence
-from roughcut.llm_cache import build_cache_key, build_cache_metadata, load_cached_entry, save_cached_json
+from roughcut.llm_cache import build_cache_key, build_cache_metadata, digest_payload, load_cached_entry, save_cached_json
 from roughcut.packaging.library import list_packaging_assets, resolve_packaging_plan_for_job
 from roughcut.providers.factory import get_avatar_provider, get_reasoning_provider, get_voice_provider
 from roughcut.providers.reasoning.base import Message
@@ -72,9 +72,12 @@ from roughcut.review.content_profile import (
 )
 from roughcut.review.content_profile_memory import load_content_profile_user_memory
 from roughcut.review.domain_glossaries import (
+    _CANONICAL_DOMAIN_SOURCES,
+    _DOMAIN_COMPATIBILITY,
     detect_glossary_domains,
     filter_scoped_glossary_terms,
     merge_glossary_terms,
+    normalize_subject_domain,
     resolve_builtin_glossary_terms,
     select_primary_subject_domain,
 )
@@ -88,6 +91,7 @@ from roughcut.review.platform_copy import (
     packaging_fact_sheet_cache_allowed,
     save_platform_packaging_markdown,
 )
+from roughcut.review.evidence_types import ARTIFACT_TYPE_CONTENT_PROFILE_OCR, build_correction_framework_trace
 from roughcut.review.subtitle_memory import build_subtitle_review_memory, build_transcription_prompt
 from roughcut.review.subtitle_translation import (
     detect_subtitle_language,
@@ -97,7 +101,7 @@ from roughcut.review.subtitle_translation import (
 )
 from roughcut.review.telegram_bot import get_telegram_review_bot_service
 from roughcut.speech.postprocess import save_subtitle_items, split_into_subtitles
-from roughcut.speech.transcribe import transcribe_audio
+from roughcut.speech.transcribe import persist_empty_transcript_result, transcribe_audio
 from roughcut.storage.s3 import get_storage, job_key
 from roughcut.usage import track_step_usage, track_usage_operation
 
@@ -122,6 +126,8 @@ STEP_LABELS = {
 logger = logging.getLogger(__name__)
 
 _CONTENT_PROFILE_ARTIFACT_TYPES = ("content_profile_final", "content_profile", "content_profile_draft")
+_EDIT_PLAN_SUBTITLE_POLISH_TIMEOUT_SEC = 45.0
+_EDIT_PLAN_INSERT_SLOT_TIMEOUT_SEC = 20.0
 
 
 def _workflow_template_subject_domain(workflow_template: str | None) -> str | None:
@@ -135,13 +141,64 @@ def _infer_subject_domain_for_memory(
     subtitle_items: list[dict[str, Any]] | None = None,
     content_profile: dict[str, Any] | None = None,
     source_name: str | None = None,
+    subject_domain: str | None = None,
 ) -> str | None:
+    explicit_subject_domain = normalize_subject_domain(subject_domain or (content_profile or {}).get("subject_domain"))
+    if explicit_subject_domain:
+        return explicit_subject_domain
     return select_primary_subject_domain(detect_glossary_domains(
         workflow_template=None,
         content_profile=content_profile,
         subtitle_items=subtitle_items,
         source_name=source_name,
     ))
+
+
+def _expand_subject_domain_scope(subject_domain: str | None) -> set[str]:
+    normalized_subject_domain = normalize_subject_domain(subject_domain)
+    if not normalized_subject_domain:
+        return set()
+
+    queue = [normalized_subject_domain, *_CANONICAL_DOMAIN_SOURCES.get(normalized_subject_domain, (normalized_subject_domain,))]
+    expanded: set[str] = set()
+    seen: set[str] = set()
+    while queue:
+        domain = str(queue.pop(0) or "").strip().lower()
+        if not domain or domain in seen:
+            continue
+        seen.add(domain)
+        expanded.add(domain)
+        canonical = normalize_subject_domain(domain)
+        if canonical:
+            expanded.add(canonical)
+            if canonical not in seen:
+                queue.append(canonical)
+        for related in _DOMAIN_COMPATIBILITY.get(domain, ()):
+            if related not in seen:
+                queue.append(related)
+    return expanded
+
+
+def _glossary_term_matches_subject_domain(term: dict[str, Any], subject_domain: str | None) -> bool:
+    if not subject_domain:
+        return True
+    supported_domains = _expand_subject_domain_scope(subject_domain)
+    term_domain = str(term.get("domain") or "").strip().lower()
+    if term_domain:
+        normalized_term_domain = normalize_subject_domain(term_domain) or term_domain
+        return term_domain in supported_domains or normalized_term_domain in supported_domains
+
+    correct_form = str(term.get("correct_form") or "").strip()
+    if not correct_form:
+        return False
+    detected_domains = detect_glossary_domains(
+        workflow_template=None,
+        content_profile=None,
+        subtitle_items=[{"text_final": correct_form}],
+    )
+    if not detected_domains:
+        return True
+    return bool(set(detected_domains) & supported_domains)
 
 
 def _resolve_subtitle_split_profile(*, width: int | None, height: int | None) -> dict[str, float | int | str]:
@@ -197,6 +254,14 @@ def _set_step_cache_metadata(step: JobStep | None, cache_name: str, cache_metada
     cache_block = dict(metadata.get("cache") or {})
     cache_block[cache_name] = cache_metadata
     metadata["cache"] = cache_block
+    step.metadata_ = metadata
+
+
+def _set_step_correction_framework_metadata(step: JobStep | None, settings: object) -> None:
+    if step is None:
+        return
+    metadata = dict(step.metadata_ or {})
+    metadata["correction_framework"] = build_correction_framework_trace(settings)
     step.metadata_ = metadata
 
 
@@ -439,7 +504,11 @@ def _build_effective_glossary_terms(
     content_profile: dict[str, Any] | None = None,
     subtitle_items: list[dict[str, Any]] | None = None,
     source_name: str | None = None,
+    subject_domain: str | None = None,
 ) -> list[dict[str, str | list[str] | None]]:
+    effective_content_profile = dict(content_profile or {})
+    if subject_domain and not effective_content_profile.get("subject_domain"):
+        effective_content_profile["subject_domain"] = subject_domain
     serialized = [
         item
         if isinstance(item, dict)
@@ -456,17 +525,20 @@ def _build_effective_glossary_terms(
     serialized = filter_scoped_glossary_terms(
         serialized,
         workflow_template=workflow_template,
-        content_profile=content_profile,
+        content_profile=effective_content_profile,
         subtitle_items=subtitle_items,
         source_name=source_name,
     )
     builtin = resolve_builtin_glossary_terms(
         workflow_template=workflow_template,
-        content_profile=content_profile,
+        content_profile=effective_content_profile,
         subtitle_items=subtitle_items,
         source_name=source_name,
     )
-    return merge_glossary_terms(serialized, builtin)
+    merged_terms = merge_glossary_terms(serialized, builtin)
+    if not subject_domain:
+        return merged_terms
+    return [term for term in merged_terms if _glossary_term_matches_subject_domain(term, subject_domain)]
 
 
 def _merge_execution_into_segments(
@@ -679,7 +751,16 @@ async def run_extract_audio(job_id: str) -> dict:
             source_path = await _resolve_source(job, tmpdir)
             audio_path = Path(tmpdir) / "audio.wav"
             await _set_step_progress(session, step, detail="提取音频轨道", progress=0.45)
-            await extract_audio(source_path, audio_path)
+            try:
+                await extract_audio(source_path, audio_path)
+            except NoAudioStreamError:
+                metadata = dict(step.metadata_ or {})
+                metadata["has_audio"] = False
+                metadata["audio_optional"] = True
+                step.metadata_ = metadata
+                await _set_step_progress(session, step, detail="源视频无音轨，已跳过音频提取", progress=1.0)
+                await session.commit()
+                return {"audio_key": None, "has_audio": False}
 
             # Upload to S3
             storage = get_storage()
@@ -694,6 +775,9 @@ async def run_extract_audio(job_id: str) -> dict:
             storage_path=key,
         )
         session.add(artifact)
+        metadata = dict(step.metadata_ or {})
+        metadata["has_audio"] = True
+        step.metadata_ = metadata
         await _set_step_progress(session, step, detail="音频已就绪", progress=1.0)
         await session.commit()
 
@@ -710,8 +794,79 @@ async def run_transcribe(job_id: str) -> dict:
         step = step_result.scalar_one()
         await _set_step_progress(session, step, detail="加载音频并准备转写", progress=0.1)
 
-        # Get audio artifact key
-        audio_artifact = await _load_latest_artifact(session, job.id, "audio_wav")
+        glossary_result = await session.execute(select(GlossaryTerm))
+        glossary_terms = glossary_result.scalars().all()
+        subject_domain = _infer_subject_domain_for_memory(
+            workflow_template=job.workflow_template,
+            subtitle_items=None,
+            content_profile={},
+            source_name=job.source_name,
+        )
+        user_memory = await load_content_profile_user_memory(
+            session,
+            subject_domain=subject_domain,
+            strict_subject_domain=True,
+        )
+        recent_subtitles = []
+        if subject_domain:
+            recent_subtitles = await _load_recent_subtitle_examples(
+                session,
+                workflow_template=job.workflow_template,
+                exclude_job_id=job.id,
+            )
+        effective_glossary_terms = _build_effective_glossary_terms(
+            glossary_terms=glossary_terms,
+            workflow_template=job.workflow_template,
+            subtitle_items=recent_subtitles or None,
+            source_name=job.source_name if subject_domain else None,
+            subject_domain=subject_domain,
+        )
+        review_memory = build_subtitle_review_memory(
+            workflow_template=job.workflow_template,
+            subject_domain=subject_domain,
+            glossary_terms=effective_glossary_terms,
+            user_memory=user_memory,
+            recent_subtitles=recent_subtitles,
+            include_recent_terms=False,
+            include_recent_examples=False,
+        )
+        settings = get_settings()
+        _set_step_correction_framework_metadata(step, settings)
+        transcription_prompt = build_transcription_prompt(
+            source_name=job.source_name,
+            workflow_template=job.workflow_template,
+            review_memory=review_memory,
+            dialect_profile=settings.transcription_dialect,
+        )
+
+        # Get audio artifact key when the source contains an audio stream.
+        audio_artifact = await _load_latest_optional_artifact(
+            session,
+            job_id=job.id,
+            artifact_types=("audio_wav",),
+        )
+        extract_step_result = await session.execute(
+            select(JobStep).where(JobStep.job_id == job.id, JobStep.step_name == "extract_audio")
+        )
+        extract_step = extract_step_result.scalar_one_or_none()
+        extract_metadata = dict(extract_step.metadata_ or {}) if extract_step is not None and isinstance(extract_step.metadata_, dict) else {}
+        has_audio = extract_metadata.get("has_audio")
+        if audio_artifact is None and has_audio is False:
+            await persist_empty_transcript_result(
+                job_id=job.id,
+                step=step,
+                language=job.language,
+                session=session,
+                prompt=transcription_prompt,
+                reason="no_audio_stream",
+                glossary_terms=effective_glossary_terms,
+                review_memory=review_memory,
+            )
+            await _set_step_progress(session, step, detail="源视频无音轨，已跳过转写", progress=1.0)
+            await session.commit()
+            return {"segment_count": 0, "duration": 0.0, "has_audio": False}
+        if audio_artifact is None:
+            raise ValueError("Artifact not found: audio_wav")
 
         with tempfile.TemporaryDirectory() as tmpdir:
             audio_path = await _resolve_storage_reference(
@@ -720,38 +875,6 @@ async def run_transcribe(job_id: str) -> dict:
                 default_name="audio.wav",
             )
             await _set_step_progress(session, step, detail=f"加载 {job.language} 转写模型", progress=0.2)
-            glossary_result = await session.execute(select(GlossaryTerm))
-            glossary_terms = glossary_result.scalars().all()
-            user_memory = await load_content_profile_user_memory(
-                session,
-                subject_domain=None,
-            )
-            recent_subtitles = await _load_recent_subtitle_examples(
-                session,
-                workflow_template=job.workflow_template,
-                exclude_job_id=job.id,
-            )
-            effective_glossary_terms = _build_effective_glossary_terms(
-                glossary_terms=glossary_terms,
-                workflow_template=job.workflow_template,
-                subtitle_items=recent_subtitles,
-                source_name=job.source_name,
-            )
-            review_memory = build_subtitle_review_memory(
-                workflow_template=job.workflow_template,
-                glossary_terms=effective_glossary_terms,
-                user_memory=user_memory,
-                recent_subtitles=recent_subtitles,
-                include_recent_terms=False,
-                include_recent_examples=False,
-            )
-            settings = get_settings()
-            transcription_prompt = build_transcription_prompt(
-                source_name=job.source_name,
-                workflow_template=job.workflow_template,
-                review_memory=review_memory,
-                dialect_profile=settings.transcription_dialect,
-            )
 
             progress_loop = asyncio.get_running_loop()
             last_progress = {"progress": 0.0, "ts": 0.0}
@@ -857,31 +980,33 @@ async def run_subtitle_postprocess(job_id: str) -> dict:
         items = await save_subtitle_items(job.id, entries, session)
         glossary_result = await session.execute(select(GlossaryTerm))
         glossary_terms = glossary_result.scalars().all()
-        user_memory = await load_content_profile_user_memory(
-            session,
-            subject_domain=_infer_subject_domain_for_memory(
-                workflow_template=job.workflow_template,
-                subtitle_items=[
-                    {
-                        "text_raw": item.text_raw,
-                        "text_norm": item.text_norm,
-                        "text_final": item.text_final,
-                    }
-                    for item in items
-                ],
-                content_profile={},
-                source_name=job.source_name,
-            ),
-        )
         profile_artifact = await _load_latest_optional_artifact(
             session,
             job_id=job.id,
             artifact_types=_CONTENT_PROFILE_ARTIFACT_TYPES,
         )
         content_profile = profile_artifact.data_json if profile_artifact and profile_artifact.data_json else {}
+        subject_domain = _infer_subject_domain_for_memory(
+            workflow_template=job.workflow_template,
+            subtitle_items=[
+                {
+                    "text_raw": item.text_raw,
+                    "text_norm": item.text_norm,
+                    "text_final": item.text_final,
+                }
+                for item in items
+            ],
+            content_profile=content_profile,
+            source_name=job.source_name,
+        )
+        user_memory = await load_content_profile_user_memory(
+            session,
+            subject_domain=subject_domain,
+        )
         effective_glossary_terms = _build_effective_glossary_terms(
             glossary_terms=glossary_terms,
             workflow_template=job.workflow_template,
+            content_profile=content_profile,
             subtitle_items=[
                 {
                     "text_raw": item.text_raw,
@@ -892,9 +1017,11 @@ async def run_subtitle_postprocess(job_id: str) -> dict:
                 for item in items
             ],
             source_name=job.source_name,
+            subject_domain=subject_domain,
         )
         review_memory = build_subtitle_review_memory(
             workflow_template=job.workflow_template,
+            subject_domain=subject_domain,
             glossary_terms=effective_glossary_terms,
             user_memory=user_memory,
             recent_subtitles=[
@@ -958,6 +1085,7 @@ async def run_content_profile(job_id: str) -> dict:
             select(JobStep).where(JobStep.job_id == job.id, JobStep.step_name == "content_profile")
         )
         step = step_result.scalar_one()
+        _set_step_correction_framework_metadata(step, settings)
         await _set_step_progress(session, step, detail="整理字幕上下文并识别视频类型", progress=0.15)
 
         item_result = await session.execute(
@@ -978,22 +1106,37 @@ async def run_content_profile(job_id: str) -> dict:
             for item in subtitle_items
         ]
         transcript_excerpt = build_transcript_excerpt(subtitle_dicts)
+        subtitle_digest = digest_payload(
+            [
+                {
+                    "index": item["index"],
+                    "start_time": item["start_time"],
+                    "end_time": item["end_time"],
+                    "text_raw": item["text_raw"],
+                    "text_norm": item["text_norm"],
+                    "text_final": item["text_final"],
+                }
+                for item in subtitle_dicts
+            ]
+        )
         glossary_result = await session.execute(select(GlossaryTerm))
         glossary_terms = glossary_result.scalars().all()
+        subject_domain = _infer_subject_domain_for_memory(
+            workflow_template=job.workflow_template,
+            subtitle_items=subtitle_dicts,
+            content_profile={},
+            source_name=job.source_name,
+        )
         effective_glossary_terms = _build_effective_glossary_terms(
             glossary_terms=glossary_terms,
             workflow_template=job.workflow_template,
             subtitle_items=subtitle_dicts,
             source_name=job.source_name,
+            subject_domain=subject_domain,
         )
         user_memory = await load_content_profile_user_memory(
             session,
-            subject_domain=_infer_subject_domain_for_memory(
-                workflow_template=job.workflow_template,
-                subtitle_items=subtitle_dicts,
-                content_profile={},
-                source_name=job.source_name,
-            ),
+            subject_domain=subject_domain,
         )
         packaging_config = (list_packaging_assets().get("config") or {})
         # Reruns must re-infer from the current transcript and frames instead of
@@ -1006,6 +1149,7 @@ async def run_content_profile(job_id: str) -> dict:
             source_file_hash=job.file_hash,
             workflow_template=job.workflow_template,
             transcript_excerpt=transcript_excerpt,
+            subtitle_digest=subtitle_digest,
             glossary_terms=effective_glossary_terms,
             user_memory=user_memory,
             include_research=False,
@@ -1035,6 +1179,7 @@ async def run_content_profile(job_id: str) -> dict:
                 source_file_hash=job.file_hash,
                 workflow_template=job.workflow_template,
                 transcript_excerpt=transcript_excerpt,
+                subtitle_digest=subtitle_digest,
                 glossary_terms=effective_glossary_terms,
                 user_memory=user_memory,
                 include_research=False,
@@ -1112,6 +1257,7 @@ async def run_content_profile(job_id: str) -> dict:
                     source_file_hash=job.file_hash,
                     workflow_template=job.workflow_template,
                     transcript_excerpt=transcript_excerpt,
+                    subtitle_digest=subtitle_digest,
                     glossary_terms=effective_glossary_terms,
                     user_memory=user_memory,
                     include_research=False,
@@ -1146,6 +1292,19 @@ async def run_content_profile(job_id: str) -> dict:
             threshold=settings.content_profile_review_threshold,
         )
         content_profile["automation_review"] = automation
+        ocr_profile = None
+        if bool(getattr(settings, "ocr_enabled", False)):
+            candidate_ocr_profile = content_profile.pop("ocr_profile", None)
+            if isinstance(candidate_ocr_profile, dict):
+                ocr_profile = candidate_ocr_profile
+                session.add(
+                    Artifact(
+                        job_id=job.id,
+                        step_id=step.id,
+                        artifact_type=ARTIFACT_TYPE_CONTENT_PROFILE_OCR,
+                        data_json=ocr_profile,
+                    )
+                )
         artifact = Artifact(
             job_id=job.id,
             step_id=step.id,
@@ -1235,10 +1394,12 @@ async def run_glossary_review(job_id: str) -> dict:
     factory = get_session_factory()
     async with factory() as session:
         job = await session.get(Job, uuid.UUID(job_id))
+        settings = get_settings()
         step_result = await session.execute(
             select(JobStep).where(JobStep.job_id == job.id, JobStep.step_name == "glossary_review")
         )
         step = step_result.scalar_one()
+        _set_step_correction_framework_metadata(step, settings)
         await _set_step_progress(session, step, detail="应用术语词表并收集字幕上下文", progress=0.15)
 
         item_result = await session.execute(
@@ -1259,13 +1420,31 @@ async def run_glossary_review(job_id: str) -> dict:
             }
             for item in subtitle_items
         ]
+        profile_result = await session.execute(
+            select(Artifact)
+            .where(
+                Artifact.job_id == job.id,
+                Artifact.artifact_type.in_(["content_profile_final", "content_profile_draft"]),
+            )
+            .order_by(Artifact.created_at.desc())
+        )
+        profile_artifacts = profile_result.scalars().all()
+        content_profile = profile_artifacts[0].data_json if profile_artifacts else None
+        subject_domain = _infer_subject_domain_for_memory(
+            workflow_template=job.workflow_template,
+            subtitle_items=subtitle_dicts,
+            content_profile=content_profile or {},
+            source_name=job.source_name,
+        )
         glossary_result = await session.execute(select(GlossaryTerm))
         glossary_terms = glossary_result.scalars().all()
         effective_glossary_terms = _build_effective_glossary_terms(
             glossary_terms=glossary_terms,
             workflow_template=job.workflow_template,
+            content_profile=content_profile or {},
             subtitle_items=subtitle_dicts,
             source_name=job.source_name,
+            subject_domain=subject_domain,
         )
         corrections = await apply_glossary_corrections(
             job.id,
@@ -1287,24 +1466,8 @@ async def run_glossary_review(job_id: str) -> dict:
         )
         user_memory = await load_content_profile_user_memory(
             session,
-            subject_domain=_infer_subject_domain_for_memory(
-                workflow_template=job.workflow_template,
-                subtitle_items=subtitle_dicts,
-                content_profile={},
-                source_name=job.source_name,
-            ),
+            subject_domain=subject_domain,
         )
-
-        profile_result = await session.execute(
-            select(Artifact)
-            .where(
-                Artifact.job_id == job.id,
-                Artifact.artifact_type.in_(["content_profile_final", "content_profile_draft"]),
-            )
-            .order_by(Artifact.created_at.desc())
-        )
-        profile_artifacts = profile_result.scalars().all()
-        content_profile = profile_artifacts[0].data_json if profile_artifacts else None
         if not content_profile:
             with tempfile.TemporaryDirectory() as tmpdir:
                 source_path = await _resolve_source(job, tmpdir, expected_hash=job.file_hash)
@@ -1337,6 +1500,20 @@ async def run_glossary_review(job_id: str) -> dict:
                     user_memory=user_memory,
                     include_research=False,
                 )
+        subject_domain = _infer_subject_domain_for_memory(
+            workflow_template=job.workflow_template,
+            subtitle_items=subtitle_dicts,
+            content_profile=content_profile,
+            source_name=job.source_name,
+        )
+        effective_glossary_terms = _build_effective_glossary_terms(
+            glossary_terms=glossary_terms,
+            workflow_template=job.workflow_template,
+            content_profile=content_profile,
+            subtitle_items=subtitle_dicts,
+            source_name=job.source_name,
+            subject_domain=subject_domain,
+        )
         content_profile["creative_profile"] = _job_creative_profile(job)
         recent_subtitles = await _load_recent_subtitle_examples(
             session,
@@ -1355,6 +1532,7 @@ async def run_glossary_review(job_id: str) -> dict:
             glossary_terms=effective_glossary_terms,
             review_memory=build_subtitle_review_memory(
                 workflow_template=job.workflow_template,
+                subject_domain=subject_domain,
                 glossary_terms=effective_glossary_terms,
                 user_memory=user_memory,
                 recent_subtitles=subtitle_dicts + related_subtitles + recent_subtitles,
@@ -1899,6 +2077,99 @@ async def run_edit_plan(job_id: str) -> dict:
             artifact_types=("avatar_commentary_plan",),
         )
 
+        if (
+            profile_artifact is not None
+            and str(profile_artifact.artifact_type or "").strip().lower() == "content_profile_final"
+            and isinstance(content_profile, dict)
+        ):
+            try:
+                subject_domain = _infer_subject_domain_for_memory(
+                    workflow_template=job.workflow_template,
+                    subtitle_items=subtitle_dicts,
+                    content_profile=content_profile,
+                    source_name=job.source_name,
+                )
+                glossary_result = await session.execute(select(GlossaryTerm))
+                glossary_terms = glossary_result.scalars().all()
+                effective_glossary_terms = _build_effective_glossary_terms(
+                    glossary_terms=glossary_terms,
+                    workflow_template=job.workflow_template,
+                    content_profile=content_profile,
+                    subtitle_items=subtitle_dicts,
+                    source_name=job.source_name,
+                    subject_domain=subject_domain,
+                )
+                user_memory = await load_content_profile_user_memory(
+                    session,
+                    subject_domain=subject_domain,
+                )
+                recent_subtitles = await _load_recent_subtitle_examples(
+                    session,
+                    workflow_template=job.workflow_template,
+                    exclude_job_id=job.id,
+                )
+                related_subtitles = await _load_related_profile_subtitle_examples(
+                    session,
+                    content_profile=content_profile,
+                    exclude_job_id=job.id,
+                )
+                review_memory = build_subtitle_review_memory(
+                    workflow_template=job.workflow_template,
+                    subject_domain=subject_domain,
+                    glossary_terms=effective_glossary_terms,
+                    user_memory=user_memory,
+                    recent_subtitles=subtitle_dicts + related_subtitles + recent_subtitles,
+                    content_profile=content_profile,
+                    include_recent_terms=False,
+                    include_recent_examples=False,
+                )
+                try:
+                    await asyncio.wait_for(
+                        polish_subtitle_items(
+                            subtitle_items,
+                            content_profile=content_profile,
+                            glossary_terms=effective_glossary_terms,
+                            review_memory=review_memory,
+                            allow_llm=True,
+                        ),
+                        timeout=_EDIT_PLAN_SUBTITLE_POLISH_TIMEOUT_SEC,
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "Formal subtitle polish timed out during edit_plan for job %s; using rule-based fallback",
+                        job.id,
+                    )
+                    await polish_subtitle_items(
+                        subtitle_items,
+                        content_profile=content_profile,
+                        glossary_terms=effective_glossary_terms,
+                        review_memory=review_memory,
+                        allow_llm=False,
+                    )
+                except Exception:
+                    logger.exception("LLM subtitle polish failed during edit_plan for job %s", job.id)
+                    await polish_subtitle_items(
+                        subtitle_items,
+                        content_profile=content_profile,
+                        glossary_terms=effective_glossary_terms,
+                        review_memory=review_memory,
+                        allow_llm=False,
+                    )
+            except Exception:
+                logger.exception("Formal subtitle polish failed during edit_plan for job %s", job.id)
+            finally:
+                subtitle_dicts = [
+                    {
+                        "index": si.item_index,
+                        "start_time": si.start_time,
+                        "end_time": si.end_time,
+                        "text_raw": si.text_raw,
+                        "text_norm": si.text_norm,
+                        "text_final": si.text_final,
+                    }
+                    for si in subtitle_items
+                ]
+
         with tempfile.TemporaryDirectory() as tmpdir:
             audio_path = await _resolve_storage_reference(
                 str(audio_artifact.storage_path or ""),
@@ -1930,12 +2201,29 @@ async def run_edit_plan(job_id: str) -> dict:
         keep_segments = [segment for segment in decision.to_dict().get("segments", []) if segment.get("type") == "keep"]
         remapped_subtitles = remap_subtitles_to_timeline(subtitle_dicts, keep_segments)
         with track_step_usage(job_id=job.id, step_id=step.id, step_name="edit_plan"):
-            packaging_plan["insert"] = await _plan_insert_asset_slot(
-                job_id=str(job.id),
-                insert_plan=packaging_plan.get("insert"),
-                subtitle_items=remapped_subtitles,
-                content_profile=content_profile,
-            )
+            try:
+                packaging_plan["insert"] = await asyncio.wait_for(
+                    _plan_insert_asset_slot(
+                        job_id=str(job.id),
+                        insert_plan=packaging_plan.get("insert"),
+                        subtitle_items=remapped_subtitles,
+                        content_profile=content_profile,
+                        allow_llm=True,
+                    ),
+                    timeout=_EDIT_PLAN_INSERT_SLOT_TIMEOUT_SEC,
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "Insert-slot planning timed out during edit_plan for job %s; using deterministic fallback",
+                    job.id,
+                )
+                packaging_plan["insert"] = await _plan_insert_asset_slot(
+                    job_id=str(job.id),
+                    insert_plan=packaging_plan.get("insert"),
+                    subtitle_items=remapped_subtitles,
+                    content_profile=content_profile,
+                    allow_llm=False,
+                )
         packaging_plan["music"] = await _plan_music_entry(
             music_plan=packaging_plan.get("music"),
             subtitle_items=remapped_subtitles,
@@ -2922,6 +3210,7 @@ async def _plan_insert_asset_slot(
     insert_plan: dict | None,
     subtitle_items: list[dict],
     content_profile: dict | None,
+    allow_llm: bool = True,
 ) -> dict | None:
     if not insert_plan:
         return None
@@ -2960,6 +3249,18 @@ async def _plan_insert_asset_slot(
     )
     fallback = candidates[len(candidates) // 2]
     fallback_sec = float(fallback.get("end_time", 0.0) or 0.0)
+    fallback_plan = dict(insert_plan)
+    fallback_plan["insert_after_sec"] = fallback_sec
+    fallback_plan["reason"] = "回退到中间自然停顿。"
+    fallback_plan["timing_summary"] = _build_timing_summary(
+        [],
+        review_gap=float(settings.packaging_selection_review_gap),
+        min_score=float(settings.packaging_selection_min_score),
+        low_confidence_reason="插入点回退到默认停顿，建议确认。",
+    )
+
+    if not allow_llm:
+        return fallback_plan
 
     try:
         provider = get_reasoning_provider()
@@ -3001,15 +3302,8 @@ async def _plan_insert_asset_slot(
         )
         return insert_plan
     except Exception:
-        insert_plan["insert_after_sec"] = fallback_sec
-        insert_plan["reason"] = "LLM 未返回可靠结果，回退到中间自然停顿。"
-        insert_plan["timing_summary"] = _build_timing_summary(
-            [],
-            review_gap=float(settings.packaging_selection_review_gap),
-            min_score=float(settings.packaging_selection_min_score),
-            low_confidence_reason="插入点回退到默认停顿，建议确认。",
-        )
-        return insert_plan
+        fallback_plan["reason"] = "LLM 未返回可靠结果，回退到中间自然停顿。"
+        return fallback_plan
 
 
 async def _map_subtitles_to_packaged_timeline(

@@ -224,6 +224,11 @@ def normalize_display_text(text: str, *, cleanup_fillers: bool = True) -> str:
     return result.strip("，,")
 
 
+def normalize_display_numbers(text: str) -> str:
+    """Normalize numeric expressions in subtitle text without touching spacing/punctuation."""
+    return _normalize_display_numbers(str(text or "").strip())
+
+
 def cleanup_subtitle_fillers(text: str) -> str:
     result = str(text or "").strip()
     if not result:

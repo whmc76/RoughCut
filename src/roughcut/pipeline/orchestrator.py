@@ -24,6 +24,11 @@ from roughcut.config import get_settings
 from roughcut.db.models import Artifact, Job, JobStep, RenderOutput, SubtitleCorrection, SubtitleItem, Timeline
 from roughcut.db.session import get_session_factory
 from roughcut.pipeline.quality import QUALITY_ARTIFACT_TYPE, assess_job_quality
+from roughcut.review.evidence_types import (
+    ARTIFACT_TYPE_CONTENT_PROFILE_OCR,
+    ARTIFACT_TYPE_ENTITY_RESOLUTION_TRACE,
+    ARTIFACT_TYPE_TRANSCRIPT_EVIDENCE,
+)
 from roughcut.storage.runtime_cleanup import cleanup_job_runtime_files
 
 logger = logging.getLogger(__name__)
@@ -891,10 +896,19 @@ def _coerce_review_round(value: object) -> int:
 
 def _artifact_types_for_quality_rerun(rerun_steps: set[str]) -> set[str]:
     artifact_types: set[str] = set()
+    settings = get_settings()
     if "subtitle_translation" in rerun_steps:
         artifact_types.add("subtitle_translation")
+    if "transcribe" in rerun_steps and bool(getattr(settings, "asr_evidence_enabled", False)):
+        artifact_types.add(ARTIFACT_TYPE_TRANSCRIPT_EVIDENCE)
     if "content_profile" in rerun_steps:
         artifact_types.update({"content_profile", "content_profile_draft", "content_profile_final"})
+        if bool(getattr(settings, "ocr_enabled", False)):
+            artifact_types.add(ARTIFACT_TYPE_CONTENT_PROFILE_OCR)
+        if bool(getattr(settings, "entity_graph_enabled", False)):
+            artifact_types.add(ARTIFACT_TYPE_ENTITY_RESOLUTION_TRACE)
+    elif "glossary_review" in rerun_steps and bool(getattr(settings, "entity_graph_enabled", False)):
+        artifact_types.add(ARTIFACT_TYPE_ENTITY_RESOLUTION_TRACE)
     if "ai_director" in rerun_steps:
         artifact_types.add("ai_director_plan")
     if "avatar_commentary" in rerun_steps:

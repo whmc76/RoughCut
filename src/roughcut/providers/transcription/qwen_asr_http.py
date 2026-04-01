@@ -12,6 +12,7 @@ from roughcut.providers.transcription.base import (
     TranscriptResult,
     TranscriptSegment,
     TranscriptionProvider,
+    payload_to_dict,
 )
 
 
@@ -30,6 +31,7 @@ class QwenASRHTTPProvider(TranscriptionProvider):
         progress_callback: TranscriptionProgressCallback | None = None,
     ) -> TranscriptResult:
         timeout = httpx.Timeout(1800.0, connect=30.0)
+        context = prompt or None
         with audio_path.open("rb") as audio_file:
             files = {
                 "file": (
@@ -62,11 +64,25 @@ class QwenASRHTTPProvider(TranscriptionProvider):
                 continue
             start = max(0.0, float(item.get("start") or 0.0))
             end = max(start, float(item.get("end") or start))
-            segment = TranscriptSegment(index=len(segments), start=start, end=end, text=text)
+            segment = TranscriptSegment(
+                index=len(segments),
+                start=start,
+                end=end,
+                text=text,
+                provider="qwen3_asr",
+                model=self._model_name,
+                raw_payload=dict(item),
+                raw_text=text,
+                context=context,
+                confidence=item.get("confidence"),
+                logprob=item.get("logprob"),
+                alignment=item.get("alignment"),
+            )
             segments.append(segment)
 
         if duration <= 0.0 and segments:
             duration = segments[-1].end
+        raw_segments_copy = list(segments)
         segments = self._repair_segments(segments, duration=duration)
 
         if progress_callback is not None:
@@ -81,7 +97,16 @@ class QwenASRHTTPProvider(TranscriptionProvider):
                         "text": segment.text,
                     }
                 )
-        return TranscriptResult(segments=segments, language=language_value, duration=duration)
+        return TranscriptResult(
+            segments=segments,
+            language=language_value,
+            duration=duration,
+            provider="qwen3_asr",
+            model=self._model_name,
+            raw_payload=payload_to_dict(payload),
+            raw_segments=raw_segments_copy,
+            context=context,
+        )
 
     def _repair_segments(self, segments: list[TranscriptSegment], *, duration: float) -> list[TranscriptSegment]:
         repaired = [
@@ -90,6 +115,17 @@ class QwenASRHTTPProvider(TranscriptionProvider):
                 start=max(0.0, float(segment.start)),
                 end=max(float(segment.start), float(segment.end)),
                 text=segment.text.strip(),
+                words=list(segment.words),
+                speaker=segment.speaker,
+                provider=segment.provider,
+                model=segment.model,
+                raw_payload=dict(segment.raw_payload),
+                raw_text=segment.raw_text or segment.text,
+                context=segment.context,
+                hotword=segment.hotword,
+                confidence=segment.confidence,
+                logprob=segment.logprob,
+                alignment=segment.alignment,
             )
             for index, segment in enumerate(segments)
             if segment.text.strip()
@@ -112,6 +148,17 @@ class QwenASRHTTPProvider(TranscriptionProvider):
                     start=0.0,
                     end=round(max(duration, segment.end), 3),
                     text=segment.text,
+                    words=list(segment.words),
+                    speaker=segment.speaker,
+                    provider=segment.provider,
+                    model=segment.model,
+                    raw_payload=dict(segment.raw_payload),
+                    raw_text=segment.raw_text or segment.text,
+                    context=segment.context,
+                    hotword=segment.hotword,
+                    confidence=segment.confidence,
+                    logprob=segment.logprob,
+                    alignment=segment.alignment,
                 )
             ]
 
@@ -128,6 +175,17 @@ class QwenASRHTTPProvider(TranscriptionProvider):
                     start=round(cursor, 3),
                     end=round(max(cursor, end), 3),
                     text=chunk,
+                    words=list(segment.words),
+                    speaker=segment.speaker,
+                    provider=segment.provider,
+                    model=segment.model,
+                    raw_payload=dict(segment.raw_payload),
+                    raw_text=segment.raw_text or segment.text,
+                    context=segment.context,
+                    hotword=segment.hotword,
+                    confidence=segment.confidence,
+                    logprob=segment.logprob,
+                    alignment=segment.alignment,
                 )
             )
             cursor = end

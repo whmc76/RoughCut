@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from roughcut.config import get_settings, normalize_transcription_settings, resolve_transcription_provider_plan as _resolve_plan
+from roughcut.providers.ocr.base import OCRProvider
 from roughcut.providers.avatar.base import AvatarProvider
 from roughcut.providers.reasoning.base import ReasoningProvider
 from roughcut.providers.transcription.base import TranscriptionProvider
 from roughcut.providers.voice.base import VoiceProvider
 
 _TRANSCRIPTION_PROVIDER_CACHE: dict[tuple[str, str], TranscriptionProvider] = {}
+_OCR_PROVIDER_CACHE: dict[str, OCRProvider] = {}
 _AVATAR_PROVIDER_CACHE: dict[str, AvatarProvider] = {}
 _VOICE_PROVIDER_CACHE: dict[str, VoiceProvider] = {}
 
@@ -45,6 +47,24 @@ def get_transcription_provider(*, provider: str | None = None, model: str | None
     else:
         raise ValueError(f"Unknown transcription provider: {provider}")
     _TRANSCRIPTION_PROVIDER_CACHE[cache_key] = instance
+    return instance
+
+
+def get_ocr_provider(*, provider: str | None = None) -> OCRProvider:
+    settings = get_settings()
+    provider_name = str(provider or getattr(settings, "ocr_provider", "paddleocr") or "paddleocr").strip().lower()
+    cached = _OCR_PROVIDER_CACHE.get(provider_name)
+    if cached is not None:
+        return cached
+
+    if provider_name == "paddleocr":
+        from roughcut.providers.ocr.paddleocr_provider import PaddleOCRProvider
+
+        instance = PaddleOCRProvider()
+    else:
+        raise ValueError(f"Unknown OCR provider: {provider_name}")
+
+    _OCR_PROVIDER_CACHE[provider_name] = instance
     return instance
 
 

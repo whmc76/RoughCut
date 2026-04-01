@@ -12,6 +12,7 @@ from roughcut.providers.transcription.base import (
     TranscriptSegment,
     TranscriptionProvider,
     WordTiming,
+    payload_to_dict,
 )
 
 
@@ -39,6 +40,7 @@ class OpenAIWhisperProvider(TranscriptionProvider):
     ) -> TranscriptResult:
         del progress_callback
         lang_code = language.split("-")[0]  # "zh-CN" → "zh"
+        context = prompt or None
 
         with audio_path.open("rb") as f:
             response = await self._client.audio.transcriptions.create(
@@ -56,7 +58,21 @@ class OpenAIWhisperProvider(TranscriptionProvider):
         for idx, seg in enumerate(raw_segments):
             words: list[WordTiming] = []
             for w in getattr(seg, "words", []) or []:
-                words.append(WordTiming(word=w.word, start=w.start, end=w.end))
+                words.append(
+                    WordTiming(
+                        word=w.word,
+                        start=w.start,
+                        end=w.end,
+                        provider="openai",
+                        model=self._model,
+                        raw_payload=payload_to_dict(w),
+                        raw_text=str(getattr(w, "word", "") or None),
+                        context=context,
+                        confidence=getattr(w, "confidence", None),
+                        logprob=getattr(w, "logprob", None),
+                        alignment=getattr(w, "alignment", None),
+                    )
+                )
 
             segments.append(
                 TranscriptSegment(
@@ -65,8 +81,25 @@ class OpenAIWhisperProvider(TranscriptionProvider):
                     end=seg.end,
                     text=seg.text.strip(),
                     words=words,
+                    provider="openai",
+                    model=self._model,
+                    raw_payload=payload_to_dict(seg),
+                    raw_text=seg.text.strip(),
+                    context=context,
+                    confidence=getattr(seg, "confidence", None),
+                    logprob=getattr(seg, "avg_logprob", None),
+                    alignment=getattr(seg, "alignment", None),
                 )
             )
 
         duration = segments[-1].end if segments else 0.0
-        return TranscriptResult(segments=segments, language=language, duration=duration)
+        return TranscriptResult(
+            segments=segments,
+            language=language,
+            duration=duration,
+            provider="openai",
+            model=self._model,
+            raw_payload=payload_to_dict(response),
+            raw_segments=list(segments),
+            context=context,
+        )

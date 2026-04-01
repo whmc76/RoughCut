@@ -2350,9 +2350,108 @@ async def test_content_profile_endpoint_returns_memory_cloud(client: AsyncClient
     assert data["identity_review"]["evidence_bundle"]["matched_glossary_aliases"]["brand"] == ["莱泽曼"]
     assert data["workflow_mode"] == "standard_edit"
     assert data["enhancement_modes"] == ["avatar_commentary"]
+    assert data["ocr_evidence"] == {}
+    assert data["transcript_evidence"] == {}
+    assert data["entity_resolution_trace"] == {}
     assert data["memory"]["field_preferences"]["subject_brand"][0]["value"] == "LEATHERMAN"
     assert data["memory"]["cloud"]["words"]
     assert any(word["label"] == "LEATHERMAN ARC" for word in data["memory"]["cloud"]["words"])
+
+
+@pytest.mark.asyncio
+async def test_content_profile_endpoint_exposes_evidence_artifacts(client: AsyncClient):
+    from roughcut.db.models import Artifact, Job, JobStep
+    from roughcut.db.session import get_session_factory
+
+    job_id = uuid.uuid4()
+    now = datetime.now(timezone.utc)
+
+    async with get_session_factory()() as session:
+        session.add(
+            Job(
+                id=job_id,
+                source_path="jobs/demo/evidence.mp4",
+                source_name="evidence.mp4",
+                status="needs_review",
+                language="zh-CN",
+                workflow_template="edc_tactical",
+                workflow_mode="standard_edit",
+            )
+        )
+        session.add(
+            JobStep(
+                job_id=job_id,
+                step_name="summary_review",
+                status="running",
+                started_at=now,
+                metadata_={"detail": "等待人工确认。"},
+            )
+        )
+        session.add(
+            Artifact(
+                job_id=job_id,
+                artifact_type="content_profile_draft",
+                data_json={
+                    "subject_brand": "狐蝠工业",
+                    "subject_model": "FXX1小副包",
+                    "subject_type": "EDC机能包",
+                    "video_theme": "开箱与上手评测",
+                    "summary": "围绕狐蝠工业 FXX1小副包展开。",
+                },
+            )
+        )
+        session.add(
+            Artifact(
+                job_id=job_id,
+                artifact_type="content_profile_ocr",
+                data_json={
+                    "source_name": "evidence.mp4",
+                    "frame_count": 2,
+                    "line_count": 3,
+                    "available": True,
+                    "status": "ok",
+                    "visible_text": "狐蝠工业 FXX1小副包 开箱",
+                    "raw_snippets": [
+                        {
+                            "frame_index": 0,
+                            "timestamp": 0.0,
+                            "text": "狐蝠工业",
+                            "confidence": 0.99,
+                            "box": [0, 0, 10, 10],
+                            "frame_path": "/tmp/frame-0.jpg",
+                        }
+                    ],
+                },
+            )
+        )
+        session.add(
+            Artifact(
+                job_id=job_id,
+                artifact_type="transcript_evidence",
+                data_json={
+                    "provider": "qwen3_asr",
+                    "model": "qwen3-asr-1.7b",
+                    "prompt": "请优先识别品牌与型号。",
+                    "segments": [{"start": 0.0, "end": 1.2, "text": "这期开箱狐蝠工业 FXX1小副包。"}],
+                },
+            )
+        )
+        await session.commit()
+
+    response = await client.get(f"/api/v1/jobs/{job_id}/content-profile")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["ocr_evidence"]["visible_text"] == "狐蝠工业 FXX1小副包 开箱"
+    assert data["transcript_evidence"]["provider"] == "qwen3_asr"
+    assert data["transcript_evidence"]["prompt"] == "请优先识别品牌与型号。"
+    assert data["entity_resolution_trace"] == {}
+
+    confirm_response = await client.post(f"/api/v1/jobs/{job_id}/content-profile/confirm", json={})
+    assert confirm_response.status_code == 200
+    confirm_data = confirm_response.json()
+    assert confirm_data["ocr_evidence"]["visible_text"] == "狐蝠工业 FXX1小副包 开箱"
+    assert confirm_data["transcript_evidence"]["model"] == "qwen3-asr-1.7b"
+    assert confirm_data["entity_resolution_trace"] == {}
 
 
 @pytest.mark.asyncio

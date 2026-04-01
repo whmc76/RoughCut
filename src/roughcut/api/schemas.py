@@ -287,6 +287,9 @@ class ContentProfileReviewOut(BaseModel):
     review_reasons: list[str] = Field(default_factory=list)
     blocking_reasons: list[str] = Field(default_factory=list)
     identity_review: dict[str, Any] | None = None
+    ocr_evidence: dict[str, Any] = Field(default_factory=dict)
+    transcript_evidence: dict[str, Any] = Field(default_factory=dict)
+    entity_resolution_trace: dict[str, Any] = Field(default_factory=dict)
     workflow_mode: str
     enhancement_modes: list[str] = Field(default_factory=list)
     draft: dict[str, Any] | None

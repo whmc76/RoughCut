@@ -130,6 +130,53 @@ def test_build_subtitle_review_memory_includes_confirmed_entities_from_user_memo
     assert ("司令官2", "司令官2Ultra") in alias_map
 
 
+def test_build_subtitle_review_memory_consumes_graph_entities_with_strict_subject_domain_gating():
+    memory = build_subtitle_review_memory(
+        channel_profile="edc_tactical",
+        subject_domain="edc",
+        glossary_terms=[],
+        user_memory={
+            "entity_graph": {
+                "confirmed_entities": [
+                    {
+                        "brand": "狐蝠工业",
+                        "model": "FXX1小副包",
+                        "phrases": ["狐蝠工业FXX1小副包", "FXX1小副包"],
+                        "brand_aliases": ["鸿福"],
+                        "model_aliases": [{"wrong": "F叉二一小副包", "correct": "FXX1小副包"}],
+                        "subject_type": "EDC机能包",
+                        "subject_domain": "edc",
+                    },
+                    {
+                        "brand": "RunningHub",
+                        "model": "无限画布",
+                        "phrases": ["RunningHub 无限画布"],
+                        "brand_aliases": ["running hub"],
+                        "model_aliases": [{"wrong": "无限画板", "correct": "无限画布"}],
+                        "subject_type": "AI工作流",
+                        "subject_domain": "ai",
+                    },
+                ],
+            },
+        },
+        recent_subtitles=[{"text_final": "这次包型主要看 FXX1 小副包的仓位和背负。"}],
+        content_profile={"subject_type": "EDC机能包", "subject_domain": "edc"},
+        include_recent_terms=False,
+        include_recent_examples=False,
+    )
+
+    terms = {item["term"] for item in memory["terms"]}
+    alias_map = {(item["wrong"], item["correct"]) for item in memory["aliases"]}
+    confirmed = {(item["brand"], item["model"]) for item in memory["confirmed_entities"]}
+
+    assert ("狐蝠工业", "FXX1小副包") in confirmed
+    assert ("RunningHub", "无限画布") not in confirmed
+    assert "狐蝠工业" in terms
+    assert "RunningHub" not in terms
+    assert ("F叉二一小副包", "FXX1小副包") in alias_map
+    assert ("无限画板", "无限画布") not in alias_map
+
+
 def test_build_subtitle_review_memory_filters_cross_domain_memory_terms_for_edc_context():
     memory = build_subtitle_review_memory(
         channel_profile="edc_tactical",
@@ -172,6 +219,92 @@ def test_build_subtitle_review_memory_filters_cross_domain_memory_terms_for_edc_
     assert "RunningHub" not in terms
     assert "ComfyUI" not in prompt
     assert "RunningHub" not in prompt
+
+
+def test_build_subtitle_review_memory_respects_explicit_subject_domain_for_mixed_inputs():
+    memory = build_subtitle_review_memory(
+        channel_profile="tutorial_standard",
+        subject_domain="edc",
+        glossary_terms=[
+            {
+                "correct_form": "ComfyUI",
+                "wrong_forms": ["康飞UI"],
+                "category": "brand",
+                "domain": "ai",
+            },
+            {
+                "correct_form": "泛光",
+                "wrong_forms": ["反光"],
+                "category": "flashlight",
+                "domain": "flashlight",
+            },
+        ],
+        user_memory={
+            "keyword_preferences": [
+                {"keyword": "ComfyUI 工作流", "count": 6},
+                {"keyword": "手电 泛光", "count": 4},
+            ],
+            "phrase_preferences": [
+                {"phrase": "RunningHub 无限画布", "count": 5},
+                {"phrase": "夜骑补光", "count": 3},
+            ],
+            "confirmed_entities": [
+                {
+                    "brand": "RunningHub",
+                    "model": "无限画布",
+                    "phrases": ["RunningHub 无限画布"],
+                    "model_aliases": [{"wrong": "running hub", "correct": "RunningHub"}],
+                    "subject_type": "AI工作流",
+                    "subject_domain": "ai",
+                }
+            ],
+        },
+        recent_subtitles=[
+            {"text_final": "这支手电重点看泛光和夜骑补光。"},
+            {"text_final": "ComfyUI 工作流和节点编排这期不相关。"},
+        ],
+        content_profile={"subject_type": "EDC手电", "subject_domain": "edc"},
+        include_recent_terms=False,
+        include_recent_examples=False,
+    )
+
+    terms = {item["term"] for item in memory["terms"]}
+    alias_map = {(item["wrong"], item["correct"]) for item in memory["aliases"]}
+
+    assert "泛光" in terms
+    assert "夜骑补光" in terms
+    assert "ComfyUI" not in terms
+    assert "RunningHub" not in terms
+    assert ("康飞UI", "ComfyUI") not in alias_map
+    assert ("running hub", "RunningHub") not in alias_map
+
+
+def test_build_transcription_prompt_prefers_explicit_subject_domain_over_term_counts():
+    prompt = build_transcription_prompt(
+        source_name="clip.mp4",
+        channel_profile="tutorial_standard",
+        review_memory={
+            "subject_domain": "edc",
+            "terms": [
+                {"term": "ComfyUI", "count": 99},
+                {"term": "司令官2Ultra", "count": 8},
+                {"term": "手电", "count": 6},
+            ],
+            "aliases": [
+                {"wrong": "司令官2", "correct": "司令官2Ultra"},
+                {"wrong": "康飞UI", "correct": "ComfyUI"},
+            ],
+            "confirmed_entities": [
+                {"brand": "傲雷", "model": "司令官2Ultra", "phrases": ["傲雷司令官2Ultra"]},
+            ],
+            "style_examples": [],
+        },
+    )
+
+    assert "司令官2Ultra" in prompt
+    assert "手电" in prompt
+    assert "ComfyUI" not in prompt
+    assert "康飞UI=ComfyUI" not in prompt
 
 
 def test_confirmed_subject_overrides_conflicting_builtin_brand_aliases():
@@ -977,6 +1110,77 @@ def test_apply_domain_term_corrections_repairs_wrong_brand_before_canonical_mode
     )
 
     assert corrected == "这个是Loop露普SK05二代。"
+
+
+def test_apply_domain_term_corrections_requires_current_anchor_for_graph_brand_alias():
+    corrected = apply_domain_term_corrections(
+        "鸿福这包其实收纳还行。",
+        {
+            "terms": [{"term": "狐蝠工业"}, {"term": "FXX1小副包"}],
+            "aliases": [],
+            "style_examples": [],
+            "confirmed_entities": [
+                {
+                    "brand": "狐蝠工业",
+                    "model": "FXX1小副包",
+                    "phrases": ["狐蝠工业FXX1小副包", "FXX1小副包"],
+                    "brand_aliases": ["鸿福"],
+                    "model_aliases": [{"wrong": "F叉二一小副包", "correct": "FXX1小副包"}],
+                }
+            ],
+        },
+        prev_text="这次聊一个通勤小包。",
+        next_text="重点还是看背负。",
+    )
+
+    assert corrected == "鸿福这包其实收纳还行。"
+
+
+def test_apply_domain_term_corrections_replaces_graph_brand_alias_with_current_model_anchor():
+    corrected = apply_domain_term_corrections(
+        "鸿福FXX1小副包这次把拉链也换了。",
+        {
+            "terms": [{"term": "狐蝠工业"}, {"term": "FXX1小副包"}],
+            "aliases": [],
+            "style_examples": [],
+            "confirmed_entities": [
+                {
+                    "brand": "狐蝠工业",
+                    "model": "FXX1小副包",
+                    "phrases": ["狐蝠工业FXX1小副包", "FXX1小副包"],
+                    "brand_aliases": ["鸿福"],
+                    "model_aliases": [{"wrong": "F叉二一小副包", "correct": "FXX1小副包"}],
+                }
+            ],
+        },
+    )
+
+    assert corrected == "狐蝠工业FXX1小副包这次把拉链也换了。"
+
+
+def test_apply_domain_term_corrections_suppresses_negative_memory_alias_even_with_anchor():
+    corrected = apply_domain_term_corrections(
+        "鸿福FXX1小副包这次把拉链也换了。",
+        {
+            "terms": [{"term": "狐蝠工业"}, {"term": "FXX1小副包"}],
+            "aliases": [],
+            "style_examples": [],
+            "negative_alias_pairs": [
+                {"field_name": "subject_brand", "alias_value": "鸿福", "canonical_value": "狐蝠工业"},
+            ],
+            "confirmed_entities": [
+                {
+                    "brand": "狐蝠工业",
+                    "model": "FXX1小副包",
+                    "phrases": ["狐蝠工业FXX1小副包", "FXX1小副包"],
+                    "brand_aliases": ["鸿福"],
+                    "model_aliases": [{"wrong": "F叉二一小副包", "correct": "FXX1小副包"}],
+                }
+            ],
+        },
+    )
+
+    assert corrected == "鸿福FXX1小副包这次把拉链也换了。"
 
 
 def test_apply_domain_term_corrections_keeps_wuyanban_without_local_context_support():

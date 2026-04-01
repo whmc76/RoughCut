@@ -153,6 +153,38 @@ async def _load_latest_optional_artifact(
     return artifacts[0] if artifacts else None
 
 
+def _coerce_artifact_payload(artifact: Artifact | None) -> dict[str, Any]:
+    if artifact is None or not isinstance(artifact.data_json, dict):
+        return {}
+    return dict(artifact.data_json)
+
+
+async def _load_content_profile_review_evidence(
+    job_id: uuid.UUID,
+    session: AsyncSession,
+) -> dict[str, dict[str, Any]]:
+    ocr_artifact = await _load_latest_optional_artifact(
+        session,
+        job_id=job_id,
+        artifact_types=["content_profile_ocr"],
+    )
+    transcript_artifact = await _load_latest_optional_artifact(
+        session,
+        job_id=job_id,
+        artifact_types=["transcript_evidence"],
+    )
+    entity_resolution_artifact = await _load_latest_optional_artifact(
+        session,
+        job_id=job_id,
+        artifact_types=["entity_resolution_trace"],
+    )
+    return {
+        "ocr_evidence": _coerce_artifact_payload(ocr_artifact),
+        "transcript_evidence": _coerce_artifact_payload(transcript_artifact),
+        "entity_resolution_trace": _coerce_artifact_payload(entity_resolution_artifact),
+    }
+
+
 @router.get("", response_model=list[JobOut])
 async def list_jobs(
     limit: int = 50,
@@ -513,6 +545,7 @@ async def get_content_profile(job_id: uuid.UUID, session: AsyncSession = Depends
     if identity_review is None and review_step is not None:
         candidate = (review_step.metadata_ or {}).get("identity_review")
         identity_review = candidate if isinstance(candidate, dict) else None
+    evidence = await _load_content_profile_review_evidence(job_id, session)
 
     return ContentProfileReviewOut(
         job_id=str(job_id),
@@ -522,6 +555,7 @@ async def get_content_profile(job_id: uuid.UUID, session: AsyncSession = Depends
         review_reasons=review_reasons,
         blocking_reasons=blocking_reasons,
         identity_review=identity_review,
+        **evidence,
         workflow_mode=str(getattr(job, "workflow_mode", "") or "standard_edit"),
         enhancement_modes=list(getattr(job, "enhancement_modes", []) or []),
         draft=draft,
@@ -794,6 +828,7 @@ async def confirm_content_profile(
         review_step_detail = str((review_step.metadata_ or {}).get("detail") or "").strip() or None
     automation_review = final_profile.get("automation_review") if isinstance(final_profile, dict) else {}
     identity_review = final_profile.get("identity_review") if isinstance(final_profile, dict) else None
+    evidence = await _load_content_profile_review_evidence(job_id, session)
 
     return ContentProfileReviewOut(
         job_id=str(job_id),
@@ -803,6 +838,7 @@ async def confirm_content_profile(
         review_reasons=list((automation_review or {}).get("review_reasons") or []),
         blocking_reasons=list((automation_review or {}).get("blocking_reasons") or []),
         identity_review=identity_review if isinstance(identity_review, dict) else None,
+        **evidence,
         workflow_mode=job.workflow_mode,
         enhancement_modes=list(job.enhancement_modes or []),
         draft=draft_artifact.data_json,

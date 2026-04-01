@@ -10,6 +10,8 @@ from roughcut.review.content_profile import (
     _merge_specific_profile_hints,
     _aggregate_visual_profile_hints,
     _apply_visual_subject_guard,
+    _probe_duration,
+    _build_conservative_identity_summary,
     _build_profile_summary,
     _extract_reference_frames,
     _infer_visual_profile_hints,
@@ -23,6 +25,7 @@ from roughcut.review.content_profile import (
     assess_content_profile_automation,
     apply_identity_review_guard,
     apply_content_profile_feedback,
+    build_content_profile_cache_fingerprint,
     build_reviewed_transcript_excerpt,
     build_transcript_excerpt,
     build_cover_title,
@@ -47,6 +50,42 @@ def test_build_cover_title_avoids_generic_main_line():
     assert title["top"] == "MAN"
     assert title["main"] == "MAN多功能工具钳"
     assert title["bottom"] == "这次升级够不够狠"
+
+
+def test_probe_duration_uses_configured_ffmpeg_timeout(monkeypatch: pytest.MonkeyPatch):
+    import roughcut.review.content_profile as content_profile_mod
+    import subprocess
+
+    captured: dict[str, object] = {}
+
+    def fake_run(cmd, capture_output, timeout):
+        captured["cmd"] = cmd
+        captured["timeout"] = timeout
+        return SimpleNamespace(returncode=0, stdout=b'{"format":{"duration":"12.3"}}')
+
+    monkeypatch.setattr(content_profile_mod, "get_settings", lambda: SimpleNamespace(ffmpeg_timeout_sec=45))
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    duration = _probe_duration(Path("demo.mp4"))
+
+    assert duration == 12.3
+    assert captured["timeout"] == 45
+
+
+def test_build_content_profile_cache_fingerprint_uses_infer_version_without_seeded_profile():
+    fingerprint = build_content_profile_cache_fingerprint(
+        source_name="8ab62636b25b4b6ba8398467ddfb371a.mp4",
+        source_file_hash="demo-hash",
+        workflow_template="",
+        transcript_excerpt="[0.8-3.0] 大家好欢迎来到我的。\n[3.7-5.4] 播数字人播客测试现场。",
+        glossary_terms=[],
+        user_memory={},
+        include_research=False,
+        copy_style="attention_grabbing",
+    )
+
+    assert fingerprint["version"].startswith("2026-04-01.infer.")
+    assert fingerprint["seeded_profile_sha256"] == ""
 
 
 def test_build_reviewed_transcript_excerpt_applies_accepted_corrections():
@@ -605,6 +644,76 @@ def test_apply_identity_review_guard_clears_visible_text_that_conflicts_with_ver
     assert guarded["visible_text"] == ""
 
 
+def test_apply_identity_review_guard_prefers_ocr_and_transcript_source_labels_over_graph_memory():
+    guarded = apply_identity_review_guard(
+        {
+            "subject_brand": "傲雷",
+            "subject_model": "司令官2Ultra",
+            "subject_type": "EDC手电",
+            "video_theme": "旧型号上手体验",
+            "summary": "主要看傲雷司令官2Ultra。",
+            "transcript_excerpt": "这期主要看分仓和挂点设计。",
+            "ocr_evidence": {
+                "visible_text": "狐蝠工业 FXX1小副包 开箱",
+            },
+            "transcript_evidence": {
+                "source_labels": {
+                    "subject_brand": "狐蝠工业",
+                    "subject_model": "FXX1小副包",
+                    "subject_type": "EDC机能包",
+                    "video_theme": "狐蝠工业FXX1小副包开箱与挂点评测",
+                }
+            },
+        },
+        user_memory={
+            "confirmed_entities": [
+                {
+                    "brand": "傲雷",
+                    "model": "司令官2Ultra",
+                    "phrases": ["傲雷司令官2Ultra", "司令官2Ultra"],
+                    "subject_type": "EDC手电",
+                    "subject_domain": "edc",
+                }
+            ]
+        },
+        source_name="demo.mp4",
+    )
+
+    assert guarded["subject_brand"] == "狐蝠工业"
+    assert guarded["subject_model"] == "FXX1小副包"
+    assert guarded["subject_type"] == "EDC机能包"
+    assert guarded["video_theme"] == "狐蝠工业FXX1小副包开箱与挂点评测"
+
+
+def test_apply_identity_review_guard_drops_profile_only_specific_theme_without_current_support():
+    guarded = apply_identity_review_guard(
+        {
+            "subject_brand": "",
+            "subject_model": "",
+            "subject_type": "EDC机能包",
+            "video_theme": "ComfyUI 无限画布工作流实操",
+            "summary": "主要讲 ComfyUI 工作流。",
+            "transcript_excerpt": "这期主要看分仓、挂点和日常收纳。",
+            "ocr_evidence": {
+                "visible_text": "狐蝠工业 FXX1小副包 开箱",
+            },
+            "transcript_evidence": {
+                "source_labels": {
+                    "subject_brand": "狐蝠工业",
+                    "subject_model": "FXX1小副包",
+                    "subject_type": "EDC机能包",
+                }
+            },
+        },
+        source_name="demo.mp4",
+    )
+
+    assert guarded["subject_brand"] == "狐蝠工业"
+    assert guarded["subject_model"] == "FXX1小副包"
+    assert guarded["video_theme"] == ""
+    assert guarded["summary"] == ""
+
+
 def test_build_profile_summary_falls_back_when_theme_only_repeats_identity():
     summary = _build_profile_summary(
         {
@@ -652,6 +761,81 @@ def test_build_profile_summary_prefers_tech_domain_fallback_over_tutorial_templa
     assert "内容方向偏软件流程演示与步骤讲解" not in summary
 
 
+def test_build_profile_summary_uses_neutral_fallback_for_unknown_generic_subject():
+    summary = _build_profile_summary(
+        {
+            "workflow_template": "",
+            "content_kind": "",
+            "subject_domain": "",
+            "subject_brand": "",
+            "subject_model": "",
+            "subject_type": "",
+            "video_theme": "",
+        }
+    )
+
+    assert "主题待进一步确认" in summary
+    assert "开箱产品" not in summary
+    assert "产品开箱与上手体验" not in summary
+
+
+def test_build_profile_summary_keeps_specific_theme_when_identity_missing_but_theme_is_strong():
+    summary = _build_profile_summary(
+        {
+            "workflow_template": "unboxing_standard",
+            "content_kind": "unboxing",
+            "subject_domain": "edc",
+            "subject_brand": "",
+            "subject_model": "",
+            "subject_type": "",
+            "video_theme": "MT33开箱与上手评测",
+        }
+    )
+
+    assert "MT33开箱与上手评测" in summary
+    assert "主题待进一步确认" not in summary
+
+
+def test_build_conservative_identity_summary_uses_neutral_subject_when_identity_missing():
+    summary = _build_conservative_identity_summary(
+        {
+            "subject_brand": "",
+            "subject_model": "",
+            "subject_type": "",
+            "video_theme": "",
+        },
+        subtitle_items=[
+            {
+                "text_raw": "今天主要看数字人口播的表达自然不自然。",
+                "text_final": "今天主要看数字人口播的表达自然不自然。",
+            }
+        ],
+    )
+
+    assert "开箱产品" not in summary
+    assert "主体待进一步确认" in summary
+
+
+def test_build_conservative_identity_summary_keeps_specific_theme_when_identity_is_weak():
+    summary = _build_conservative_identity_summary(
+        {
+            "subject_brand": "",
+            "subject_model": "MT33",
+            "subject_type": "",
+            "video_theme": "MT33开箱与上手评测",
+        },
+        subtitle_items=[
+            {
+                "text_raw": "这期主要看 MT33 的整体设计和细节。",
+                "text_final": "这期主要看 MT33 的整体设计和细节。",
+            }
+        ],
+    )
+
+    assert "MT33开箱与上手评测" in summary
+    assert "主体待进一步确认" not in summary
+
+
 def test_fallback_profile_uses_ai_domain_specific_theme_when_transcript_points_to_ai():
     profile = _fallback_profile(
         source_name="workflow.mp4",
@@ -661,6 +845,19 @@ def test_fallback_profile_uses_ai_domain_specific_theme_when_transcript_points_t
 
     assert profile["subject_domain"] == "ai"
     assert profile["video_theme"] == "AI工作流与模型能力讲解"
+
+
+def test_fallback_profile_prefers_commentary_template_for_podcast_like_transcript():
+    profile = _fallback_profile(
+        source_name="avatar-podcast.mp4",
+        workflow_template=None,
+        transcript_excerpt="大家好欢迎来到我的播客测试现场，今天想聊聊数字人的表达是否自然，以及互动感够不够。",
+    )
+
+    assert profile["workflow_template"] == "commentary_focus"
+    assert profile["content_kind"] == "commentary"
+    assert profile["subject_type"] == "口播观点"
+    assert profile["video_theme"] == "观点表达与信息拆解"
 
 
 def test_build_transcript_excerpt_pulls_high_signal_items_from_later_segments():
@@ -1060,6 +1257,58 @@ def test_assess_content_profile_automation_blocks_ingestible_product_mislabeled_
     assert "字幕显示为含片/益生菌等入口产品，但当前摘要主体仍落在装备/工具类" in assessment["blocking_reasons"]
 
 
+def test_assess_content_profile_automation_identity_evidence_bundle_reads_graph_ocr_and_transcript_labels():
+    assessment = assess_content_profile_automation(
+        {
+            "preset_name": "unboxing_default",
+            "subject_brand": "狐蝠工业",
+            "subject_model": "FXX1小副包",
+            "subject_type": "EDC机能包",
+            "video_theme": "狐蝠工业FXX1小副包开箱与挂点评测",
+            "summary": "围绕狐蝠工业 FXX1小副包展开。",
+            "engagement_question": "你更看重挂点还是分仓？",
+            "search_queries": ["狐蝠工业 FXX1小副包"],
+            "cover_title": {"top": "狐蝠工业", "main": "FXX1小副包", "bottom": "分仓挂点先看"},
+            "transcript_excerpt": "这期主要看分仓和挂点。",
+            "ocr_evidence": {
+                "visible_text": "狐蝠工业 FXX1小副包 开箱",
+            },
+            "transcript_evidence": {
+                "source_labels": {
+                    "subject_brand": "狐蝠工业",
+                    "subject_model": "FXX1小副包",
+                }
+            },
+        },
+        subtitle_items=[
+            {"text_raw": "这期主要看分仓和挂点。"},
+        ],
+        user_memory={
+            "confirmed_entities": [
+                {
+                    "brand": "狐蝠工业",
+                    "model": "FXX1小副包",
+                    "phrases": ["狐蝠工业FXX1小副包", "FXX1小副包"],
+                    "subject_type": "EDC机能包",
+                    "subject_domain": "edc",
+                }
+            ]
+        },
+        glossary_terms=[
+            {"correct_form": "狐蝠工业", "wrong_forms": ["鸿福"], "category": "bag_brand"},
+            {"correct_form": "FXX1小副包", "wrong_forms": ["F叉二一小副包"], "category": "bag_model"},
+        ],
+        source_name="IMG_0025.mp4",
+    )
+
+    evidence_bundle = assessment["identity_review"]["evidence_bundle"]
+
+    assert evidence_bundle["graph_confirmed_entities"][0]["brand"] == "狐蝠工业"
+    assert evidence_bundle["matched_ocr_terms"] == ["狐蝠工业", "FXX1小副包"]
+    assert evidence_bundle["matched_transcript_source_labels"]["subject_brand"] == "狐蝠工业"
+    assert evidence_bundle["matched_transcript_source_labels"]["subject_model"] == "FXX1小副包"
+
+
 @pytest.mark.asyncio
 async def test_apply_content_profile_feedback_accepts_draft_without_reenrichment(
     monkeypatch: pytest.MonkeyPatch,
@@ -1199,6 +1448,49 @@ async def test_enrich_content_profile_uses_llm_to_replace_generic_engagement_que
     )
 
     assert result["engagement_question"] == "ARC这次升级你最在意单手开合还是钳头？"
+
+
+@pytest.mark.asyncio
+async def test_enrich_content_profile_rebuilds_theme_and_summary_from_resolved_current_entities(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from roughcut.review import content_profile as content_profile_module
+
+    def raising_provider():
+        raise RuntimeError("provider unavailable")
+
+    monkeypatch.setattr(content_profile_module, "get_reasoning_provider", raising_provider)
+
+    result = await enrich_content_profile(
+        profile={
+            "subject_brand": "",
+            "subject_model": "",
+            "subject_type": "EDC机能包",
+            "video_theme": "ComfyUI 无限画布工作流实操",
+            "summary": "主要讲 ComfyUI 工作流和节点编排。",
+            "ocr_evidence": {
+                "visible_text": "狐蝠工业 FXX1小副包 开箱",
+            },
+            "transcript_evidence": {
+                "source_labels": {
+                    "subject_brand": "狐蝠工业",
+                    "subject_model": "FXX1小副包",
+                    "subject_type": "EDC机能包",
+                    "video_theme": "狐蝠工业FXX1小副包开箱与挂点评测",
+                }
+            },
+        },
+        source_name="demo.mp4",
+        channel_profile="edc_tactical",
+        transcript_excerpt="这期主要看分仓、挂点和日常收纳。",
+        include_research=False,
+    )
+
+    assert result["subject_brand"] == "狐蝠工业"
+    assert result["subject_model"] == "FXX1小副包"
+    assert result["video_theme"] == "狐蝠工业FXX1小副包开箱与挂点评测"
+    assert "狐蝠工业 FXX1小副包" in result["summary"]
+    assert "ComfyUI" not in result["summary"]
 
 
 @pytest.mark.asyncio
@@ -1628,6 +1920,47 @@ async def test_polish_subtitle_items_llm_result_still_runs_cleanup_pipeline(monk
 
     assert polished == 1
     assert item.text_final == "光线会更好。"
+
+
+@pytest.mark.asyncio
+async def test_polish_subtitle_items_llm_prompt_includes_display_number_guidance(monkeypatch: pytest.MonkeyPatch):
+    from roughcut.review import content_profile as content_profile_module
+
+    class FakeResponse:
+        def as_json(self):
+            return {
+                "items": [
+                    {"index": 0, "text_final": "这次拿到一个新的手电筒。"}
+                ]
+            }
+
+    class FakeProvider:
+        async def complete(self, messages, **kwargs):
+            prompt = messages[1].content
+            assert "阿拉伯数字" in prompt
+            assert "中文数字" in prompt
+            return FakeResponse()
+
+    monkeypatch.setattr(content_profile_module, "get_reasoning_provider", lambda: FakeProvider())
+
+    item = SimpleNamespace(
+        item_index=0,
+        start_time=0.0,
+        end_time=2.0,
+        text_raw="这次拿到1个新的手电筒。",
+        text_norm="这次拿到1个新的手电筒。",
+        text_final=None,
+    )
+
+    polished = await polish_subtitle_items(
+        [item],
+        content_profile={"preset_name": "edc_tactical", "subject_type": "EDC手电"},
+        glossary_terms=[],
+        review_memory={"terms": [], "aliases": [], "style_examples": []},
+    )
+
+    assert polished == 1
+    assert item.text_final == "这次拿到一个新的手电筒。"
 
 
 @pytest.mark.asyncio

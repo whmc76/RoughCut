@@ -17,6 +17,7 @@ from roughcut.providers.transcription.base import (
     TranscriptResult,
     TranscriptSegment,
     TranscriptionProvider,
+    payload_to_dict,
 )
 
 logger = logging.getLogger(__name__)
@@ -78,10 +79,13 @@ class FunASRProvider(TranscriptionProvider):
         try:
             model = self._load_model()
             kwargs = self._build_generate_kwargs(lang_code=lang_code, prompt=prompt)
+            context = prompt or None
+            hotword = kwargs.get("hotword")
             raw_result = model.generate(input=str(audio_path), **kwargs)
 
             segments: list[TranscriptSegment] = []
             for item in self._extract_segment_payloads(raw_result):
+                raw_text = str(item.get("text") or item.get("raw_text") or "").strip()
                 text = self._postprocess_text(item)
                 if not text:
                     continue
@@ -91,10 +95,20 @@ class FunASRProvider(TranscriptionProvider):
                     start=start,
                     end=end,
                     text=text,
+                    provider="funasr",
+                    model=self._resolved_model,
+                    raw_payload=payload_to_dict(item),
+                    raw_text=raw_text or text,
+                    context=context,
+                    hotword=hotword,
+                    confidence=item.get("confidence"),
+                    logprob=item.get("logprob"),
+                    alignment=item.get("alignment"),
                 )
                 segments.append(segment)
 
             duration = self._probe_audio_duration(audio_path, fallback=segments[-1].end if segments else 0.0)
+            raw_segments = list(segments)
             segments = self._repair_segments(segments, duration=duration)
 
             for segment in segments:
@@ -119,7 +133,17 @@ class FunASRProvider(TranscriptionProvider):
                         "text": segments[-1].text,
                     }
                 )
-            return TranscriptResult(segments=segments, language=lang_code, duration=duration)
+            return TranscriptResult(
+                segments=segments,
+                language=lang_code,
+                duration=duration,
+                provider="funasr",
+                model=self._resolved_model,
+                raw_payload=payload_to_dict(raw_result),
+                raw_segments=raw_segments,
+                context=context,
+                hotword=hotword,
+            )
         finally:
             self._schedule_idle_unload()
 
@@ -282,6 +306,15 @@ class FunASRProvider(TranscriptionProvider):
                 text=segment.text.strip(),
                 words=list(segment.words),
                 speaker=segment.speaker,
+                provider=segment.provider,
+                model=segment.model,
+                raw_payload=dict(segment.raw_payload),
+                raw_text=segment.raw_text or segment.text,
+                context=segment.context,
+                hotword=segment.hotword,
+                confidence=segment.confidence,
+                logprob=segment.logprob,
+                alignment=segment.alignment,
             )
             for index, segment in enumerate(segments)
             if segment.text.strip()
@@ -312,6 +345,17 @@ class FunASRProvider(TranscriptionProvider):
                     start=0.0,
                     end=round(max(duration, 0.0), 3),
                     text=segment.text,
+                    words=list(segment.words),
+                    speaker=segment.speaker,
+                    provider=segment.provider,
+                    model=segment.model,
+                    raw_payload=dict(segment.raw_payload),
+                    raw_text=segment.raw_text or segment.text,
+                    context=segment.context,
+                    hotword=segment.hotword,
+                    confidence=segment.confidence,
+                    logprob=segment.logprob,
+                    alignment=segment.alignment,
                 )
             ]
 
@@ -328,6 +372,17 @@ class FunASRProvider(TranscriptionProvider):
                     start=round(cursor, 3),
                     end=round(max(cursor, end), 3),
                     text=chunk,
+                    words=list(segment.words),
+                    speaker=segment.speaker,
+                    provider=segment.provider,
+                    model=segment.model,
+                    raw_payload=dict(segment.raw_payload),
+                    raw_text=segment.raw_text or segment.text,
+                    context=segment.context,
+                    hotword=segment.hotword,
+                    confidence=segment.confidence,
+                    logprob=segment.logprob,
+                    alignment=segment.alignment,
                 )
             )
             cursor = end

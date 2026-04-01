@@ -1870,6 +1870,16 @@ def _build_content_profile_review_message(
             ]
         )
 
+    evidence_lines = _build_content_profile_evidence_lines(draft)
+    if evidence_lines:
+        lines.extend(
+            [
+                "",
+                "OCR / 转写证据：",
+                *evidence_lines,
+            ]
+        )
+
     lines.extend(
         [
             "",
@@ -2563,6 +2573,70 @@ def _normalize_match_key(value: str) -> str:
 def _display_value(value: Any) -> str:
     text = str(value or "").strip()
     return text or "未识别"
+
+
+def _build_content_profile_evidence_lines(draft: dict[str, Any]) -> list[str]:
+    if not isinstance(draft, dict):
+        return []
+
+    lines: list[str] = []
+
+    ocr_evidence = draft.get("ocr_evidence")
+    if isinstance(ocr_evidence, dict) and ocr_evidence:
+        summary_source = str(ocr_evidence.get("visible_text") or "").strip()
+        if not summary_source:
+            snippets = [
+                str(item.get("text") or "").strip()
+                for item in (ocr_evidence.get("raw_snippets") or [])
+                if isinstance(item, dict) and str(item.get("text") or "").strip()
+            ]
+            summary_source = " / ".join(snippets[:2])
+        summary = _preview_inline_text(summary_source, limit=64)
+        detail_parts = []
+        if ocr_evidence.get("frame_count") is not None:
+            detail_parts.append(f"{ocr_evidence.get('frame_count')} 帧")
+        if ocr_evidence.get("line_count") is not None:
+            detail_parts.append(f"{ocr_evidence.get('line_count')} 行")
+        suffix = f"（{_join_non_empty(detail_parts)}）" if detail_parts else ""
+        lines.append(f"- OCR 文字摘要：{summary or '未识别'}{suffix}")
+
+    transcript_evidence = draft.get("transcript_evidence")
+    if isinstance(transcript_evidence, dict) and transcript_evidence:
+        provider = _display_value(transcript_evidence.get("provider"))
+        model = _display_value(transcript_evidence.get("model"))
+        prompt_source = str(
+            transcript_evidence.get("prompt")
+            or transcript_evidence.get("context")
+            or transcript_evidence.get("hotword")
+            or ""
+        ).strip()
+        prompt = _preview_inline_text(prompt_source, limit=80)
+        lines.append(f"- 转写证据：{provider} / {model}")
+        if prompt:
+            lines.append(f"  - Prompt 轨迹：{prompt}")
+
+    entity_resolution_trace = draft.get("entity_resolution_trace")
+    if isinstance(entity_resolution_trace, dict) and entity_resolution_trace:
+        trace_summary = _preview_inline_text(
+            str(
+                entity_resolution_trace.get("summary")
+                or entity_resolution_trace.get("detail")
+                or entity_resolution_trace.get("trace")
+                or ""
+            ).strip(),
+            limit=80,
+        )
+        if trace_summary:
+            lines.append(f"- 实体解析轨迹：{trace_summary}")
+
+    return lines
+
+
+def _preview_inline_text(text: str, *, limit: int = 80) -> str:
+    compact = _compact_text(text)
+    if len(compact) <= limit:
+        return compact
+    return compact[: max(0, limit - 1)].rstrip() + "…"
 
 
 def _build_identity_review_lines(identity_review: Any) -> list[str]:

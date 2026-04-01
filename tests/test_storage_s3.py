@@ -60,3 +60,57 @@ def test_s3_storage_resolve_path_maps_windows_job_storage_path_into_current_root
     assert storage.resolve_path("F:/roughcut_outputs/jobs/demo/video.mp4") == (
         tmp_path / "jobs" / "demo" / "video.mp4"
     ).resolve()
+
+
+def test_s3_storage_resolve_path_preserves_local_drive_absolute_path_without_jobs_marker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    import roughcut.storage.s3 as s3_mod
+
+    monkeypatch.setattr(
+        s3_mod,
+        "get_settings",
+        lambda: SimpleNamespace(s3_bucket_name="jobs", job_storage_dir=str(tmp_path / "jobs")),
+    )
+
+    storage = s3_mod.S3Storage()
+
+    assert storage.resolve_path(r"Y:\\EDC系列\\未剪辑视频\\20260209-124735.mp4") == Path(
+        r"Y:\\EDC系列\\未剪辑视频\\20260209-124735.mp4"
+    )
+
+
+def test_s3_storage_resolve_path_remaps_unc_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    import roughcut.storage.s3 as s3_mod
+
+    monkeypatch.setattr(
+        s3_mod,
+        "get_settings",
+        lambda: SimpleNamespace(s3_bucket_name="jobs", job_storage_dir=str(tmp_path / "jobs")),
+    )
+
+    storage = s3_mod.S3Storage()
+
+    assert storage.resolve_path("//server/share/jobs/2026/clip.mp4") == (
+        tmp_path / "2026" / "clip.mp4"
+    ).resolve()
+
+
+def test_s3_storage_resolve_path_remaps_unc_without_share_root_prefix(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    import roughcut.storage.s3 as s3_mod
+
+    monkeypatch.setattr(
+        s3_mod,
+        "get_settings",
+        lambda: SimpleNamespace(s3_bucket_name="jobs", job_storage_dir=str(tmp_path / "jobs")),
+    )
+
+    storage = s3_mod.S3Storage()
+
+    assert storage.resolve_path("//fileserver/media/EDC系列/未剪辑视频/demo.mp4") == (
+        tmp_path / "EDC系列" / "未剪辑视频" / "demo.mp4"
+    ).resolve()

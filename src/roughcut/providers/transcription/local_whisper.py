@@ -13,6 +13,7 @@ from roughcut.providers.transcription.base import (
     TranscriptSegment,
     TranscriptionProvider,
     WordTiming,
+    payload_to_dict,
 )
 
 logger = logging.getLogger(__name__)
@@ -116,18 +117,46 @@ class LocalWhisperProvider(TranscriptionProvider):
         allow_rescue: bool = True,
     ) -> TranscriptResult:
         transcribe_kwargs = self._build_transcribe_kwargs(lang_code=lang_code, prompt=prompt)
+        context = prompt or None
+        hotword = ",".join(self._extract_hotwords(prompt)) or None
         raw_segments, info = self._call_model_transcribe(model, audio_path, transcribe_kwargs)
+        raw_segments = list(raw_segments)
         total_duration = float(getattr(info, "duration", 0.0) or 0.0)
 
         segments: list[TranscriptSegment] = []
         for idx, seg in enumerate(raw_segments):
-            words = [WordTiming(word=w.word, start=w.start, end=w.end) for w in (seg.words or [])]
+            words = [
+                WordTiming(
+                    word=w.word,
+                    start=w.start,
+                    end=w.end,
+                    provider="faster_whisper",
+                    model=self._model_size,
+                    raw_payload=payload_to_dict(w),
+                    raw_text=getattr(w, "word", None),
+                    context=context,
+                    hotword=hotword,
+                    confidence=getattr(w, "probability", None),
+                    logprob=getattr(w, "logprob", None),
+                    alignment=getattr(w, "alignment", None),
+                )
+                for w in (seg.words or [])
+            ]
             current = TranscriptSegment(
                 index=idx,
                 start=seg.start,
                 end=seg.end,
                 text=seg.text.strip(),
                 words=words,
+                provider="faster_whisper",
+                model=self._model_size,
+                raw_payload=payload_to_dict(seg),
+                raw_text=seg.text.strip(),
+                context=context,
+                hotword=hotword,
+                confidence=getattr(seg, "confidence", None),
+                logprob=getattr(seg, "avg_logprob", None),
+                alignment=getattr(seg, "alignment", None),
             )
             segments.append(current)
             if progress_callback is not None:
@@ -143,7 +172,21 @@ class LocalWhisperProvider(TranscriptionProvider):
                 )
 
         duration = segments[-1].end if segments else 0.0
-        result = TranscriptResult(segments=segments, language=lang_code, duration=duration)
+        result = TranscriptResult(
+            segments=segments,
+            language=lang_code,
+            duration=duration,
+            provider="faster_whisper",
+            model=self._model_size,
+            raw_payload={
+                "info": payload_to_dict(info),
+                "segments": [payload_to_dict(seg) for seg in raw_segments],
+                "transcribe_kwargs": dict(transcribe_kwargs),
+            },
+            raw_segments=list(segments),
+            context=context,
+            hotword=hotword,
+        )
         if allow_rescue and self._should_rescue_transcript(result):
             rescued = self._rescue_low_quality_transcript(
                 model,
@@ -249,6 +292,15 @@ class LocalWhisperProvider(TranscriptionProvider):
                         text=segment.text,
                         words=segment.words,
                         speaker=segment.speaker,
+                        provider=segment.provider,
+                        model=segment.model,
+                        raw_payload=dict(segment.raw_payload),
+                        raw_text=segment.raw_text or segment.text,
+                        context=segment.context,
+                        hotword=segment.hotword,
+                        confidence=segment.confidence,
+                        logprob=segment.logprob,
+                        alignment=segment.alignment,
                     )
                 )
                 next_index += 1
@@ -275,13 +327,32 @@ class LocalWhisperProvider(TranscriptionProvider):
                         text=segment.text,
                         words=segment.words,
                         speaker=segment.speaker,
+                        provider=segment.provider,
+                        model=segment.model,
+                        raw_payload=dict(segment.raw_payload),
+                        raw_text=segment.raw_text or segment.text,
+                        context=segment.context,
+                        hotword=segment.hotword,
+                        confidence=segment.confidence,
+                        logprob=segment.logprob,
+                        alignment=segment.alignment,
                     )
                 )
                 next_index += 1
         if not replaced:
             return None
         duration = rescued_segments[-1].end if rescued_segments else result.duration
-        return TranscriptResult(segments=rescued_segments, language=result.language, duration=duration)
+        return TranscriptResult(
+            segments=rescued_segments,
+            language=result.language,
+            duration=duration,
+            provider=result.provider,
+            model=result.model,
+            raw_payload=dict(result.raw_payload),
+            raw_segments=list(result.raw_segments or result.segments),
+            context=result.context,
+            hotword=result.hotword,
+        )
 
     def _transcribe_segment_in_chunks(
         self,
@@ -315,7 +386,20 @@ class LocalWhisperProvider(TranscriptionProvider):
                     continue
                 for seg in chunk_result.segments:
                     adjusted_words = [
-                        WordTiming(word=word.word, start=word.start + chunk_start, end=word.end + chunk_start)
+                        WordTiming(
+                            word=word.word,
+                            start=word.start + chunk_start,
+                            end=word.end + chunk_start,
+                            provider=word.provider,
+                            model=word.model,
+                            raw_payload=dict(word.raw_payload),
+                            raw_text=word.raw_text or word.word,
+                            context=word.context,
+                            hotword=word.hotword,
+                            confidence=word.confidence,
+                            logprob=word.logprob,
+                            alignment=word.alignment,
+                        )
                         for word in seg.words
                     ]
                     segments.append(
@@ -326,6 +410,15 @@ class LocalWhisperProvider(TranscriptionProvider):
                             text=seg.text,
                             words=adjusted_words,
                             speaker=seg.speaker,
+                            provider=seg.provider,
+                            model=seg.model,
+                            raw_payload=dict(seg.raw_payload),
+                            raw_text=seg.raw_text or seg.text,
+                            context=seg.context,
+                            hotword=seg.hotword,
+                            confidence=seg.confidence,
+                            logprob=seg.logprob,
+                            alignment=seg.alignment,
                         )
                     )
                     next_index += 1
