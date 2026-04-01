@@ -76,7 +76,7 @@ export function RuntimeSettingsPanel({ form, config, runtimeEnvironment, service
   const runtimeLimitsSummary = `上传 ${maxUploadSizeMb} MB · 视频 ${maxVideoDurationSec} 秒 · FFmpeg ${ffmpegTimeoutSec} 秒`;
   const runtimeLimitsOpen = maxUploadSizeMb !== 2048 || maxVideoDurationSec !== 7200 || ffmpegTimeoutSec !== 600;
   const outputDir = String(runtimeEnvironment?.output_dir ?? DEFAULT_OUTPUT_DIR).trim() || DEFAULT_OUTPUT_DIR;
-  const qwenStatus = serviceStatus?.services.qwen_asr;
+  const qwenStatus = serviceStatus?.services.qwen3_asr;
   const environmentSummary = [
     `输出 ${outputDir}`,
     openAiUsesHelper ? `OpenAI ${String(runtimeEnvironment?.openai_auth_mode ?? "api_key")}` : "云端接入已分层",
@@ -202,9 +202,9 @@ export function RuntimeSettingsPanel({ form, config, runtimeEnvironment, service
         {isLocalTranscriptionProvider(transcriptionProvider) && (
           <div className="notice">转写走本地 {getTranscriptionProviderLabel(transcriptionProvider)}，不依赖云端 API key。</div>
         )}
-        {transcriptionProvider === "qwen_asr" && qwenStatus && (
+        {transcriptionProvider === "qwen3_asr" && qwenStatus && (
           <div className="notice">
-            {getTranscriptionProviderLabel("qwen_asr")} · {getProviderStatusLabel(qwenStatus.status)}
+            {getTranscriptionProviderLabel("qwen3_asr")} · {getProviderStatusLabel(qwenStatus.status)}
           </div>
         )}
         <details className="settings-disclosure" open={environmentDetailsOpen}>

@@ -8,7 +8,9 @@ import pytest
 
 from roughcut.review.content_profile import (
     _merge_specific_profile_hints,
+    _aggregate_visual_profile_hints,
     _apply_visual_subject_guard,
+    _build_profile_summary,
     _extract_reference_frames,
     _infer_visual_profile_hints,
     _sanitize_profile_identity,
@@ -19,6 +21,7 @@ from roughcut.review.content_profile import (
     _seed_profile_from_subtitles,
     _seed_profile_from_user_memory,
     assess_content_profile_automation,
+    apply_identity_review_guard,
     apply_content_profile_feedback,
     build_reviewed_transcript_excerpt,
     build_transcript_excerpt,
@@ -29,7 +32,7 @@ from roughcut.review.content_profile import (
 
 
 def test_build_cover_title_avoids_generic_main_line():
-    preset = get_workflow_preset("unboxing_upgrade")
+    preset = get_workflow_preset("unboxing_standard")
     title = build_cover_title(
         {
             "subject_brand": "曼（MAN）",
@@ -107,6 +110,19 @@ def test_seed_profile_from_text_does_not_turn_flashlight_unboxing_into_comfyui_t
     assert seeded["subject_model"] == "SK05二代ProUV版"
     assert seeded["subject_type"] == "EDC手电"
     assert "ComfyUI" not in seeded["video_theme"]
+
+
+def test_seed_profile_from_text_does_not_promote_late_uncorroborated_flashlight_model():
+    seeded = _seed_profile_from_text(
+        "这期主要开箱一个新的手电筒，前面重点讲 Pro、Slim 和 Ultra 版本差异。"
+        "后面零散提到一个 SK05 的误识别片段，但没有品牌支撑，也不是本期主体。"
+    )
+
+    assert seeded.get("subject_brand", "") != "Loop露普"
+    assert seeded.get("subject_model", "") == ""
+    assert seeded["subject_type"] == "EDC手电"
+    assert "SK05" not in seeded.get("video_theme", "")
+    assert not any("SK05" in item for item in seeded.get("search_queries", []))
 
 
 def test_seed_profile_from_text_extracts_bag_brand_and_model_from_fxx1_alias():
@@ -250,6 +266,80 @@ def test_seed_profile_from_user_memory_does_not_inject_brand_model_without_curre
     assert seeded == {}
 
 
+def test_seed_profile_from_user_memory_uses_confirmed_entity_for_flashlight_contextual_alias_hit():
+    seeded = _seed_profile_from_user_memory(
+        "这次手电开箱主要看司令官2的 Ultra 版本、流明档位和夹持手感。",
+        {
+            "field_preferences": {},
+            "recent_corrections": [],
+            "phrase_preferences": [],
+            "confirmed_entities": [
+                {
+                    "brand": "傲雷",
+                    "model": "司令官2Ultra",
+                    "phrases": ["傲雷司令官2Ultra", "司令官2Ultra"],
+                    "model_aliases": [{"wrong": "司令官2", "correct": "司令官2Ultra"}],
+                    "subject_type": "EDC手电",
+                    "subject_domain": "edc",
+                }
+            ],
+        },
+    )
+
+    assert seeded["subject_brand"] == "傲雷"
+    assert seeded["subject_model"] == "司令官2Ultra"
+    assert seeded["subject_type"] == "EDC手电"
+
+
+def test_seed_profile_from_user_memory_uses_confirmed_entity_when_alias_and_variant_are_split():
+    seeded = _seed_profile_from_user_memory(
+        "今天我们收到一个新的手机筒。"
+        "本来想买Pro版，这次是司令官2代的 Ultra 版本，材料和参数上有差。",
+        {
+            "field_preferences": {},
+            "recent_corrections": [],
+            "phrase_preferences": [],
+            "confirmed_entities": [
+                {
+                    "brand": "傲雷",
+                    "model": "司令官2Ultra",
+                    "phrases": ["傲雷司令官2Ultra", "司令官2Ultra"],
+                    "model_aliases": [{"wrong": "司令官2", "correct": "司令官2Ultra"}],
+                    "subject_type": "EDC手电",
+                    "subject_domain": "edc",
+                }
+            ],
+        },
+    )
+
+    assert seeded["subject_brand"] == "傲雷"
+    assert seeded["subject_model"] == "司令官2Ultra"
+    assert seeded["subject_type"] == "EDC手电"
+
+
+def test_seed_profile_from_user_memory_does_not_inject_confirmed_entity_outside_flashlight_context():
+    seeded = _seed_profile_from_user_memory(
+        "这次主要聊桌面灯光和拍摄布光，没有讲具体产品型号。",
+        {
+            "field_preferences": {},
+            "recent_corrections": [],
+            "phrase_preferences": [],
+            "confirmed_entities": [
+                {
+                    "brand": "傲雷",
+                    "model": "司令官2Ultra",
+                    "phrases": ["傲雷司令官2Ultra", "司令官2Ultra"],
+                    "model_aliases": [{"wrong": "司令官2", "correct": "司令官2Ultra"}],
+                    "subject_type": "EDC手电",
+                    "subject_domain": "edc",
+                }
+            ],
+        },
+    )
+
+    assert seeded == {}
+
+
 def test_build_cover_title_prefers_visible_english_brand():
     preset = get_workflow_preset("unboxing_upgrade")
     title = build_cover_title(
@@ -371,6 +461,23 @@ def test_build_cover_title_prefers_theme_entity_anchor_for_product_titles():
     assert title["main"] == "NOC MT-33折刀"
 
 
+def test_build_cover_title_uses_transcript_focus_for_generic_unboxing_hook():
+    preset = get_workflow_preset("unboxing_standard")
+    title = build_cover_title(
+        {
+            "subject_brand": "LEATHERMAN",
+            "subject_model": "ARC",
+            "subject_type": "多功能工具钳",
+            "video_theme": "产品开箱与上手体验",
+            "transcript_excerpt": "这次重点看锁定机构和开合手感，后面再看钳头结构。",
+            "hook_line": "",
+        },
+        preset,
+    )
+
+    assert title["bottom"] == "锁定机构直接看"
+
+
 def test_fallback_profile_does_not_use_timestamp_as_model():
     profile = _fallback_profile(
         source_name="20260130-140529.mp4",
@@ -444,6 +551,116 @@ def test_build_search_queries_anchors_model_only_product_with_subject_type():
     assert "MT33 EDC折刀" in queries
     assert "MT33 折刀" in queries
     assert "MT33 开箱" not in queries
+
+
+def test_apply_identity_review_guard_drops_stale_search_queries_without_current_support():
+    guarded = apply_identity_review_guard(
+        {
+            "subject_brand": "傲雷",
+            "subject_model": "司令官2Ultra",
+            "subject_type": "EDC手电",
+            "video_theme": "版本差异与上手体验",
+            "search_queries": ["ComfyUI 工作流 教程"],
+            "transcript_excerpt": "今天看傲雷这支司令官2 Ultra 手电，重点对比 Pro 和 Slim 版本差异。",
+        },
+        source_name="Commander2Ultra-unboxing.mp4",
+    )
+
+    assert "ComfyUI 工作流 教程" not in guarded["search_queries"]
+
+
+def test_apply_identity_review_guard_keeps_currently_supported_search_queries():
+    guarded = apply_identity_review_guard(
+        {
+            "subject_brand": "傲雷",
+            "subject_model": "司令官2Ultra",
+            "subject_type": "EDC手电",
+            "video_theme": "版本差异与上手体验",
+            "search_queries": ["傲雷 司令官2Ultra 对比"],
+            "transcript_excerpt": "今天看傲雷这支司令官2 Ultra 手电，重点对比 Pro 和 Slim 版本差异。",
+        },
+        source_name="Commander2Ultra-unboxing.mp4",
+    )
+
+    assert "傲雷 司令官2Ultra 对比" in guarded["search_queries"]
+
+
+def test_apply_identity_review_guard_clears_visible_text_that_conflicts_with_verified_identity():
+    guarded = apply_identity_review_guard(
+        {
+            "subject_brand": "FOXBAT狐蝠工业",
+            "subject_model": "F21小副包",
+            "subject_type": "EDC机能包",
+            "video_theme": "分仓挂点与上手体验",
+            "visible_text": "WOLF F21",
+            "transcript_excerpt": "这次主要看狐蝠工业 F21 小副包的分仓和挂点设计。",
+        },
+        source_name="foxbat-f21.mp4",
+        glossary_terms=[
+            {"correct_form": "FOXBAT狐蝠工业", "wrong_forms": ["狐蝠工业", "FOXBAT"], "category": "bag_brand"},
+            {"correct_form": "F21小副包", "wrong_forms": ["F21", "F21 小副包"], "category": "bag_model"},
+        ],
+    )
+
+    assert guarded["visible_text"] == ""
+
+
+def test_build_profile_summary_falls_back_when_theme_only_repeats_identity():
+    summary = _build_profile_summary(
+        {
+            "subject_brand": "REATE",
+            "subject_model": "EXO-M",
+            "subject_type": "EDC折刀",
+            "workflow_template": "unboxing_standard",
+            "video_theme": "REATE EXO-M 开箱评测",
+        }
+    )
+
+    assert "内容方向偏产品开箱与上手体验" in summary
+    assert "内容方向偏REATE EXO-M 开箱评测" not in summary
+
+
+def test_build_profile_summary_prefers_ai_domain_fallback_over_tutorial_template_copy():
+    summary = _build_profile_summary(
+        {
+            "workflow_template": "tutorial_standard",
+            "content_kind": "tutorial",
+            "subject_domain": "ai",
+            "subject_brand": "ComfyUI",
+            "subject_type": "AI工作流工具",
+            "video_theme": "ComfyUI 教程",
+        }
+    )
+
+    assert "内容方向偏AI工作流与模型能力讲解" in summary
+    assert "内容方向偏软件流程演示与步骤讲解" not in summary
+
+
+def test_build_profile_summary_prefers_tech_domain_fallback_over_tutorial_template_copy():
+    summary = _build_profile_summary(
+        {
+            "workflow_template": "tutorial_standard",
+            "content_kind": "tutorial",
+            "subject_domain": "tech",
+            "subject_brand": "iPhone",
+            "subject_type": "手机",
+            "video_theme": "iPhone 教程",
+        }
+    )
+
+    assert "内容方向偏数码科技体验与功能讲解" in summary
+    assert "内容方向偏软件流程演示与步骤讲解" not in summary
+
+
+def test_fallback_profile_uses_ai_domain_specific_theme_when_transcript_points_to_ai():
+    profile = _fallback_profile(
+        source_name="workflow.mp4",
+        workflow_template="tutorial_standard",
+        transcript_excerpt="今天主要演示 ComfyUI 的节点编排、工作流和模型推理。",
+    )
+
+    assert profile["subject_domain"] == "ai"
+    assert profile["video_theme"] == "AI工作流与模型能力讲解"
 
 
 def test_build_transcript_excerpt_pulls_high_signal_items_from_later_segments():
@@ -529,6 +746,31 @@ def test_apply_visual_subject_guard_overrides_conflicting_subject_type():
     assert profile["visible_text"] == "MT33"
 
 
+def test_apply_visual_subject_guard_prefers_explicit_visual_cluster():
+    profile = {
+        "subject_type": "智能灯具",
+        "visual_hints": {
+            "subject_type": "智能灯具",
+            "subject_brand": "某台灯",
+            "subject_model": "L1",
+            "visible_text": "L1",
+        },
+        "visual_cluster_hints": {
+            "subject_type": "EDC折刀",
+            "subject_brand": "NOC",
+            "subject_model": "MT33",
+            "visible_text": "NOC MT33",
+        },
+    }
+
+    _apply_visual_subject_guard(profile)
+
+    assert profile["subject_type"] == "EDC折刀"
+    assert profile["subject_brand"] == "NOC"
+    assert profile["subject_model"] == "MT33"
+    assert profile["visible_text"] == "NOC MT33"
+
+
 @pytest.mark.asyncio
 async def test_infer_visual_profile_hints_extracts_visible_identity(monkeypatch: pytest.MonkeyPatch):
     from roughcut.review import content_profile as content_profile_module
@@ -573,6 +815,77 @@ async def test_infer_visual_profile_hints_votes_across_frames(monkeypatch: pytes
     assert hints["subject_brand"] == "FOXBAT狐蝠工业"
     assert hints["subject_model"] == "F21小副包"
     assert hints["visible_text"] == "FOXBAT F21"
+
+
+def test_aggregate_visual_profile_hints_prefers_visible_text_supported_by_identity_cluster():
+    hints = _aggregate_visual_profile_hints(
+        [
+            {
+                "subject_type": "EDC机能包",
+                "subject_brand": "FOXBAT狐蝠工业",
+                "subject_model": "F21小副包",
+                "visible_text": "FOXBAT F21",
+                "reason": "包装正面清晰",
+            },
+            {
+                "subject_type": "EDC机能包",
+                "subject_brand": "FOXBAT狐蝠工业",
+                "subject_model": "F21小副包",
+                "visible_text": "F21",
+                "reason": "侧面型号可见",
+            },
+            {
+                "subject_type": "EDC机能包",
+                "visible_text": "WOLF",
+                "reason": "背景卡片误识别",
+            },
+            {
+                "subject_type": "EDC机能包",
+                "visible_text": "WOLF",
+                "reason": "桌面贴纸误识别",
+            },
+        ]
+    )
+
+    assert hints["subject_brand"] == "FOXBAT狐蝠工业"
+    assert hints["subject_model"] == "F21小副包"
+    assert hints["visible_text"] == "FOXBAT F21"
+
+
+def test_aggregate_visual_profile_hints_prefers_coherent_identity_cluster_over_split_votes():
+    hints = _aggregate_visual_profile_hints(
+        [
+            {
+                "subject_type": "EDC折刀",
+                "subject_brand": "NOC",
+                "subject_model": "MT33",
+                "visible_text": "NOC MT33",
+                "reason": "包装正面清晰",
+            },
+            {
+                "subject_type": "EDC折刀",
+                "subject_brand": "NOC",
+                "visible_text": "NOC",
+                "reason": "品牌 logo 清晰",
+            },
+            {
+                "subject_type": "EDC折刀",
+                "subject_model": "ARC",
+                "visible_text": "ARC",
+                "reason": "背景工具钳卡片误识别",
+            },
+            {
+                "subject_type": "EDC折刀",
+                "subject_model": "ARC",
+                "visible_text": "ARC",
+                "reason": "桌面贴纸误识别",
+            },
+        ]
+    )
+
+    assert hints["subject_brand"] == "NOC"
+    assert hints["subject_model"] == "MT33"
+    assert hints["visible_text"] == "NOC MT33"
 
 
 def test_filter_evidence_by_visual_subject_drops_conflicting_lighting_results():
@@ -942,7 +1255,61 @@ async def test_enrich_content_profile_falls_back_to_contextual_question_when_llm
         include_research=False,
     )
 
-    assert result["engagement_question"] == "LEATHERMANARC这次升级你最在意哪一项？"
+    assert result["engagement_question"] == "LEATHERMANARC这次升级你更在意开合还是钳头？"
+
+
+@pytest.mark.asyncio
+async def test_enrich_content_profile_prefers_focus_driven_question_when_llm_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from roughcut.review import content_profile as content_profile_module
+
+    def raising_provider():
+        raise RuntimeError("provider unavailable")
+
+    monkeypatch.setattr(content_profile_module, "get_reasoning_provider", raising_provider)
+
+    result = await enrich_content_profile(
+        profile={
+            "subject_brand": "LEATHERMAN",
+            "subject_model": "ARC",
+            "subject_type": "多功能工具钳",
+            "video_theme": "产品开箱与上手体验",
+            "engagement_question": "你觉得这次到手值不值？",
+        },
+        source_name="arc.mp4",
+        channel_profile=None,
+        transcript_excerpt="这次重点看 ARC 的锁定机构和开合手感，后面再看钳头结构。",
+        include_research=False,
+    )
+
+    assert result["engagement_question"] == "LEATHERMANARC你更想先看锁定机构还是开合？"
+
+
+@pytest.mark.asyncio
+async def test_enrich_content_profile_backfills_focus_driven_hook_line(monkeypatch: pytest.MonkeyPatch):
+    from roughcut.review import content_profile as content_profile_module
+
+    def raising_provider():
+        raise RuntimeError("provider unavailable")
+
+    monkeypatch.setattr(content_profile_module, "get_reasoning_provider", raising_provider)
+
+    result = await enrich_content_profile(
+        profile={
+            "subject_brand": "LEATHERMAN",
+            "subject_model": "ARC",
+            "subject_type": "多功能工具钳",
+            "video_theme": "产品开箱与上手体验",
+            "hook_line": "",
+        },
+        source_name="arc.mp4",
+        channel_profile=None,
+        transcript_excerpt="这次重点看 ARC 的锁定机构和开合手感，后面再看钳头结构。",
+        include_research=False,
+    )
+
+    assert result["hook_line"] == "锁定机构直接看"
 
 
 @pytest.mark.asyncio

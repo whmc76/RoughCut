@@ -84,12 +84,20 @@ async def test_glossary_builtin_packs_endpoint(client: AsyncClient):
     assert response.status_code == 200
     data = response.json()
     domains = {item["domain"] for item in data}
-    assert {"gear", "tech", "ai", "travel", "food", "finance", "news", "sports"}.issubset(domains)
-    gear_pack = next(item for item in data if item["domain"] == "gear")
-    assert gear_pack["term_count"] >= 20
-    assert any(term["correct_form"] == "EDC" for term in gear_pack["terms"])
-    assert any(term["correct_form"] == "潮玩" for term in gear_pack["terms"])
-    assert any(term["correct_form"] == "户外" for term in gear_pack["terms"])
+    assert {"edc", "outdoor", "tech", "ai", "functional", "tools", "travel", "food", "finance", "news", "sports"}.issubset(domains)
+    edc_pack = next(item for item in data if item["domain"] == "edc")
+    tech_pack = next(item for item in data if item["domain"] == "tech")
+    ai_pack = next(item for item in data if item["domain"] == "ai")
+    functional_pack = next(item for item in data if item["domain"] == "functional")
+    tools_pack = next(item for item in data if item["domain"] == "tools")
+    assert edc_pack["term_count"] >= 20
+    assert any(term["correct_form"] == "EDC" for term in edc_pack["terms"])
+    assert any(term["correct_form"] == "潮玩" for term in edc_pack["terms"])
+    assert any(term["correct_form"] == "户外" for term in edc_pack["terms"])
+    assert any(term["correct_form"] in {"芯片", "手机", "耳机"} for term in tech_pack["terms"])
+    assert any(term["correct_form"] in {"工作流", "ComfyUI", "模型"} for term in ai_pack["terms"])
+    assert any(term["correct_form"] in {"机能", "机能装备", "tomtoc"} for term in functional_pack["terms"])
+    assert any(term["correct_form"] in {"NexTool", "工具钳", "SATA"} for term in tools_pack["terms"])
 
 
 @pytest.mark.asyncio
@@ -157,10 +165,10 @@ async def test_config_options_exposes_transcription_models(client: AsyncClient):
     assert any(item["value"] == "heygem" for item in data["avatar_providers"])
     assert any(item["value"] == "indextts2" for item in data["voice_providers"])
     assert any(item["key"] == "long_text_to_video" and item["status"] == "planned" for item in data["creative_mode_catalog"]["workflow_modes"])
-    assert data["transcription_models"]["local_whisper"][0] == "large-v3"
+    assert data["transcription_models"]["faster_whisper"][0] == "large-v3"
     assert data["transcription_models"]["openai"] == ["gpt-4o-transcribe", "gpt-4o-mini-transcribe"]
-    assert data["transcription_models"]["qwen_asr"] == ["qwen3-asr-1.7b"]
-    assert "large-v3" in data["transcription_models"]["local_whisper"]
+    assert data["transcription_models"]["qwen3_asr"] == ["qwen3-asr-1.7b"]
+    assert "large-v3" in data["transcription_models"]["faster_whisper"]
     assert any(item["value"] == "unboxing_standard" for item in data["workflow_templates"])
     assert all(item["value"] != "edc_tactical" for item in data["workflow_templates"])
     assert any(item["value"] == "ollama" for item in data["multimodal_fallback_providers"])
@@ -963,7 +971,7 @@ async def test_watch_root_inventory_enqueue_selected_item(client: AsyncClient, m
 
     async def fake_create_jobs_for_inventory_paths(file_paths: list[str], *, workflow_template: str | None = None, language: str = "zh-CN"):
         assert file_paths == ["/tmp/videos-enqueue/a.mp4"]
-        assert workflow_template == "unboxing_standard"
+        assert workflow_template == "edc_tactical"
         return [{"path": "/tmp/videos-enqueue/a.mp4", "job_id": "job-123"}]
 
     monkeypatch.setattr(review_api, "create_jobs_for_inventory_paths", fake_create_jobs_for_inventory_paths)
@@ -1629,6 +1637,75 @@ async def test_job_activity_stream(client: AsyncClient):
     assert data["current_step"]["detail"].startswith("执行 FFmpeg 渲染成片")
     subtitle_decision = next(item for item in data["decisions"] if item["kind"] == "subtitle_review")
     assert subtitle_decision["detail"] == "待审 1 条，自动/已接受 0 条"
+
+
+@pytest.mark.asyncio
+async def test_apply_review_persists_glossary_terms_by_domain_not_workflow_template(client: AsyncClient):
+    from sqlalchemy import select
+
+    from roughcut.db.models import Artifact, GlossaryTerm, Job, SubtitleCorrection
+    from roughcut.db.session import get_session_factory
+
+    job_id = uuid.uuid4()
+    correction_id = uuid.uuid4()
+
+    async with get_session_factory()() as session:
+        session.add(
+            Job(
+                id=job_id,
+                source_path="jobs/demo/ai.mp4",
+                source_name="ai.mp4",
+                status="needs_review",
+                language="zh-CN",
+                workflow_template="tutorial_standard",
+            )
+        )
+        session.add(
+            Artifact(
+                job_id=job_id,
+                artifact_type="content_profile",
+                data_json={
+                    "video_theme": "AI 工作流演示",
+                    "summary": "主要介绍节点编排、工作流和模型推理。",
+                    "subject_domain": "ai",
+                },
+            )
+        )
+        session.add(
+            SubtitleCorrection(
+                id=correction_id,
+                job_id=job_id,
+                subtitle_item_id=None,
+                original_span="康飞UI",
+                suggested_span="ComfyUI",
+                change_type="brand",
+                confidence=0.94,
+                source="glossary",
+                auto_applied=False,
+            )
+        )
+        await session.commit()
+
+    response = await client.post(
+        f"/api/v1/jobs/{job_id}/review/apply",
+        json={
+            "actions": [
+                {
+                    "target_type": "subtitle_correction",
+                    "target_id": str(correction_id),
+                    "action": "accepted",
+                }
+            ]
+        },
+    )
+    assert response.status_code == 200
+
+    async with get_session_factory()() as session:
+        result = await session.execute(select(GlossaryTerm).where(GlossaryTerm.correct_form == "ComfyUI"))
+        terms = result.scalars().all()
+
+    assert any(item.scope_type == "domain" and item.scope_value == "ai" for item in terms)
+    assert all(item.scope_type != "workflow_template" for item in terms)
 
 
 @pytest.mark.asyncio

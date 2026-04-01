@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from roughcut.config import get_settings
-from roughcut.edit.presets import WorkflowPreset, get_workflow_preset, select_workflow_template
+from roughcut.edit.presets import WorkflowPreset, get_workflow_preset, normalize_workflow_template_name, select_workflow_template
 from roughcut.llm_cache import digest_payload
 from roughcut.providers.factory import get_reasoning_provider, get_search_provider
 from roughcut.providers.multimodal import complete_with_images
@@ -20,6 +20,7 @@ from roughcut.review.content_profile_evidence import IdentityEvidenceBundle
 from roughcut.review.content_profile_resolve import resolve_identity_candidates
 from roughcut.review.content_profile_review_stats import build_content_profile_auto_review_gate
 from roughcut.review.content_profile_scoring import score_identity_candidates
+from roughcut.review.domain_glossaries import detect_glossary_domains, select_primary_subject_domain
 from roughcut.review.subtitle_memory import (
     _extract_compound_components,
     apply_domain_term_corrections,
@@ -27,8 +28,8 @@ from roughcut.review.subtitle_memory import (
 )
 from roughcut.speech.postprocess import cleanup_subtitle_fillers, normalize_display_text
 
-_CONTENT_PROFILE_INFER_CACHE_VERSION = "2026-03-22.infer.v1"
-_CONTENT_PROFILE_ENRICH_CACHE_VERSION = "2026-03-22.enrich.v1"
+_CONTENT_PROFILE_INFER_CACHE_VERSION = "2026-04-01.infer.v2"
+_CONTENT_PROFILE_ENRICH_CACHE_VERSION = "2026-04-01.enrich.v2"
 _INGESTIBLE_PRODUCT_SIGNALS = (
     "luckykiss",
     "kisspod",
@@ -68,9 +69,9 @@ _CONTENT_KIND_DEFAULT_VIDEO_THEME = {
 
 def _workflow_template_name(profile: dict[str, Any] | None) -> str:
     candidate = profile or {}
-    workflow_template = str(candidate.get("workflow_template") or "").strip()
+    workflow_template = normalize_workflow_template_name(str(candidate.get("workflow_template") or "").strip())
     if workflow_template:
-        return workflow_template
+        return get_workflow_preset(workflow_template).name
     legacy_preset = str(candidate.get("preset_name") or "").strip()
     if legacy_preset:
         return get_workflow_preset(legacy_preset).name
@@ -88,6 +89,20 @@ def _content_kind_name(profile: dict[str, Any] | None) -> str:
     return "unboxing"
 
 
+def _infer_subject_domain_from_content(
+    *,
+    profile: dict[str, Any] | None,
+    transcript_excerpt: str,
+    source_name: str,
+) -> str:
+    return str(select_primary_subject_domain(detect_glossary_domains(
+        workflow_template=None,
+        content_profile=profile,
+        subtitle_items=[{"text_final": transcript_excerpt}] if str(transcript_excerpt or "").strip() else None,
+        source_name=source_name,
+    )) or "")
+
+
 def _normalize_seeded_profile_for_cache(profile: dict[str, Any] | None) -> dict[str, Any]:
     seeded = profile or {}
     cover_title = seeded.get("cover_title") if isinstance(seeded.get("cover_title"), dict) else {}
@@ -101,6 +116,7 @@ def _normalize_seeded_profile_for_cache(profile: dict[str, Any] | None) -> dict[
         if isinstance(item, dict) and (item.get("url") or item.get("title") or item.get("snippet"))
     ]
     visual_hints = seeded.get("visual_hints") if isinstance(seeded.get("visual_hints"), dict) else {}
+    visual_cluster_hints = seeded.get("visual_cluster_hints") if isinstance(seeded.get("visual_cluster_hints"), dict) else visual_hints
     return {
         "subject_brand": str(seeded.get("subject_brand") or "").strip(),
         "subject_model": str(seeded.get("subject_model") or "").strip(),
@@ -126,6 +142,12 @@ def _normalize_seeded_profile_for_cache(profile: dict[str, Any] | None) -> dict[
             "subject_brand": str(visual_hints.get("subject_brand") or "").strip(),
             "subject_model": str(visual_hints.get("subject_model") or "").strip(),
             "visible_text": str(visual_hints.get("visible_text") or "").strip(),
+        },
+        "visual_cluster_hints": {
+            "subject_type": str(visual_cluster_hints.get("subject_type") or "").strip(),
+            "subject_brand": str(visual_cluster_hints.get("subject_brand") or "").strip(),
+            "subject_model": str(visual_cluster_hints.get("subject_model") or "").strip(),
+            "visible_text": str(visual_cluster_hints.get("visible_text") or "").strip(),
         },
     }
 
@@ -277,6 +299,7 @@ def build_cover_title(profile: dict[str, Any], preset: WorkflowPreset) -> dict[s
     theme = _clean_line(raw_theme)
     hook = _clean_line(profile.get("hook_line") or "")
     visible_text = str(profile.get("visible_text") or "").strip()
+    transcript_excerpt = str(profile.get("transcript_excerpt") or "").strip()
     copy_style = str(profile.get("copy_style") or "attention_grabbing").strip() or "attention_grabbing"
     anchor = _extract_cover_entity_anchor(
         brand=brand,
@@ -309,6 +332,7 @@ def build_cover_title(profile: dict[str, Any], preset: WorkflowPreset) -> dict[s
         model=model,
         subject_type=subject_type,
         theme=theme,
+        transcript_excerpt=transcript_excerpt,
         copy_style=copy_style,
         preset=preset,
     )
@@ -351,7 +375,7 @@ def assess_content_profile_automation(
         if _clean_line(item.get("text_final") or item.get("text_norm") or item.get("text_raw") or "")
     )
     preset_name = _workflow_template_name(profile)
-    product_like_presets = {"unboxing_default", "unboxing_standard", "unboxing_limited", "unboxing_upgrade", "edc_tactical"}
+    product_like_presets = {"unboxing_standard", "edc_tactical"}
 
     score = 0.0
     reasons: list[str] = []
@@ -525,6 +549,7 @@ def apply_identity_review_guard(
         source_name=source_name,
         glossary_terms=glossary_terms,
         memory_hints=memory_hints,
+        user_memory=user_memory,
     )
     identity_review = _assess_identity_review_requirement(
         guarded,
@@ -551,7 +576,7 @@ def _assess_identity_review_requirement(
     source_name: str,
 ) -> dict[str, Any]:
     preset_name = _workflow_template_name(profile)
-    product_like_presets = {"unboxing_default", "unboxing_standard", "unboxing_limited", "unboxing_upgrade", "edc_tactical"}
+    product_like_presets = {"unboxing_standard", "edc_tactical"}
     if preset_name not in product_like_presets:
         return {
             "required": False,
@@ -876,44 +901,102 @@ def _build_conservative_identity_summary(
     return f"这条视频主要围绕一款{safe_subject}展开，具体品牌型号待人工确认，适合先人工核对主体身份后再继续包装。"
 
 
+def _profile_visual_cluster_hints(profile: dict[str, Any] | None) -> dict[str, Any]:
+    candidate = profile or {}
+    explicit_cluster = candidate.get("visual_cluster_hints")
+    if isinstance(explicit_cluster, dict) and explicit_cluster:
+        return dict(explicit_cluster)
+    visual_hints = candidate.get("visual_hints")
+    if isinstance(visual_hints, dict) and visual_hints:
+        return dict(visual_hints)
+    return {}
+
+
+def _visual_cluster_prompt_payload(profile: dict[str, Any] | None) -> dict[str, Any]:
+    hints = _profile_visual_cluster_hints(profile)
+    return {
+        "subject_type": str(hints.get("subject_type") or "").strip(),
+        "subject_brand": str(hints.get("subject_brand") or "").strip(),
+        "subject_model": str(hints.get("subject_model") or "").strip(),
+        "visible_text": str(hints.get("visible_text") or "").strip(),
+    }
+
+
 def _build_conservative_identity_focus(
     profile: dict[str, Any],
     *,
     subtitle_items: list[dict[str, Any]] | None,
 ) -> str:
-    transcript_excerpt = str(profile.get("transcript_excerpt") or "").strip()
-    if not transcript_excerpt and subtitle_items:
-        transcript_excerpt = build_transcript_excerpt(list(subtitle_items), max_items=24, max_chars=900)
-    focus_terms = [
-        token
-        for token in (
-            "分仓",
-            "挂点",
-            "收纳",
-            "装载",
-            "做工",
-            "结构",
-            "开合",
-            "手感",
-            "细节",
-            "体验",
-            "对比",
-            "升级",
-        )
-        if token in transcript_excerpt
-    ]
-    deduped: list[str] = []
-    for token in focus_terms:
-        if token not in deduped:
-            deduped.append(token)
-    if deduped:
-        return "、".join(deduped[:3])
+    focus_terms = _extract_profile_focus_terms(profile, subtitle_items=subtitle_items, limit=3)
+    if focus_terms:
+        return "、".join(focus_terms)
     theme = _strip_identity_tokens_from_text(
         str(profile.get("video_theme") or ""),
         brand=str(profile.get("subject_brand") or ""),
         model=str(profile.get("subject_model") or ""),
     )
     return theme[:16] if theme else ""
+
+
+_OUTPUT_FOCUS_PATTERNS: list[tuple[str, tuple[str, ...]]] = [
+    ("锁定机构", ("锁定机构", "锁片", "锁定")),
+    ("开合", ("单手开合", "开合")),
+    ("钳头", ("钳头",)),
+    ("分仓", ("分仓",)),
+    ("挂点", ("挂点",)),
+    ("收纳", ("收纳", "装载")),
+    ("做工", ("做工",)),
+    ("结构", ("结构",)),
+    ("材质", ("材质",)),
+    ("细节", ("细节",)),
+    ("手感", ("手感",)),
+    ("泛光", ("泛光",)),
+    ("聚光", ("聚光",)),
+    ("UV", ("UV", "紫外")),
+    ("亮度", ("亮度", "流明")),
+    ("步骤", ("步骤",)),
+    ("节点编排", ("节点编排", "节点搭建", "节点连接")),
+    ("工作流", ("工作流", "流程编排")),
+    ("无限画布", ("无限画布",)),
+    ("新功能", ("新功能", "上线", "更新")),
+    ("口感", ("口感",)),
+    ("价格", ("价格", "性价比")),
+]
+
+
+def _extract_profile_focus_terms(
+    profile: dict[str, Any],
+    *,
+    subtitle_items: list[dict[str, Any]] | None = None,
+    limit: int = 3,
+) -> list[str]:
+    transcript_excerpt = str(profile.get("transcript_excerpt") or "").strip()
+    if not transcript_excerpt and subtitle_items:
+        transcript_excerpt = build_transcript_excerpt(list(subtitle_items), max_items=24, max_chars=900)
+    preset_name = _workflow_template_name(profile) or _content_kind_name(profile)
+    theme_fragment = _summary_theme_fragment(
+        str(profile.get("video_theme") or ""),
+        brand=str(profile.get("subject_brand") or ""),
+        model=str(profile.get("subject_model") or ""),
+        preset_name=preset_name,
+        content_kind=_content_kind_name(profile),
+        subject_domain=str(profile.get("subject_domain") or ""),
+    )
+    summary = _strip_identity_tokens_from_text(
+        str(profile.get("summary") or ""),
+        brand=str(profile.get("subject_brand") or ""),
+        model=str(profile.get("subject_model") or ""),
+    )
+    combined = "\n".join(part for part in (transcript_excerpt, theme_fragment, summary) if part)
+    if not combined:
+        return []
+    focus_terms: list[str] = []
+    for label, patterns in _OUTPUT_FOCUS_PATTERNS:
+        if any(pattern and pattern in combined for pattern in patterns):
+            focus_terms.append(label)
+            if len(focus_terms) >= limit:
+                break
+    return focus_terms
 
 
 def _strip_identity_tokens_from_text(text: str, *, brand: str, model: str) -> str:
@@ -933,9 +1016,10 @@ def _sanitize_profile_identity(
     source_name: str,
     glossary_terms: list[dict[str, Any]] | None = None,
     memory_hints: dict[str, Any] | None = None,
+    user_memory: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     sanitized = dict(profile or {})
-    raw_visual_hints = sanitized.get("visual_hints") or {}
+    raw_visual_hints = _profile_visual_cluster_hints(sanitized)
     transcript_hints = _seed_profile_from_transcript_excerpt(
         transcript_excerpt,
         glossary_terms=glossary_terms,
@@ -953,6 +1037,15 @@ def _sanitize_profile_identity(
         if _is_informative_source_hint(Path(source_name).stem)
         else {}
     )
+    memory_confirmed_hints = _select_confirmed_entity_from_user_memory(
+        transcript_excerpt,
+        user_memory=user_memory,
+        subject_type=str(
+            sanitized.get("subject_type")
+            or transcript_hints.get("subject_type")
+            or ""
+        ),
+    )
     confirmed_fields = _extract_confirmed_profile_fields(sanitized)
 
     confirmed_brand = str(confirmed_fields.get("subject_brand") or "").strip()
@@ -962,17 +1055,20 @@ def _sanitize_profile_identity(
         source_name=source_name,
         transcript_hints=transcript_hints,
         source_hints=source_hints,
-        visual_hints={
+        visual_cluster_hints={
             "subject_brand": str(raw_visual_hints.get("subject_brand") or "").strip(),
             "subject_model": str(raw_visual_hints.get("subject_model") or "").strip(),
             "subject_type": str(raw_visual_hints.get("subject_type") or "").strip(),
             "visible_text": str(raw_visual_hints.get("visible_text") or "").strip(),
         },
+        visual_hints={},
         visible_text_hints=visual_hints,
+        memory_confirmed_hints=memory_confirmed_hints,
         profile_identity={
             "subject_brand": str(sanitized.get("subject_brand") or "").strip(),
             "subject_model": str(sanitized.get("subject_model") or "").strip(),
             "subject_type": str(sanitized.get("subject_type") or "").strip(),
+            "video_theme": str(sanitized.get("video_theme") or "").strip(),
         },
     )
     scored_candidates = score_identity_candidates(
@@ -1021,6 +1117,38 @@ def _sanitize_profile_identity(
             sanitized["subject_type"] = resolved_subject_type
         elif _is_generic_subject_type(current_subject_type):
             sanitized["subject_type"] = ""
+
+    if "video_theme" not in confirmed_fields:
+        resolved_video_theme = str(resolved_identity.video_theme or "").strip()
+        current_video_theme = str(sanitized.get("video_theme") or "").strip()
+        preset_name = _workflow_template_name(sanitized)
+        content_kind = _content_kind_name(sanitized)
+        subject_domain = str(sanitized.get("subject_domain") or "").strip()
+        if _should_replace_video_theme(
+            current_video_theme=current_video_theme,
+            resolved_video_theme=resolved_video_theme,
+            preset_name=preset_name,
+            content_kind=content_kind,
+            subject_domain=subject_domain,
+        ):
+            sanitized["video_theme"] = resolved_video_theme
+        elif current_video_theme and not _is_specific_video_theme_for_context(
+            current_video_theme,
+            preset_name=preset_name,
+            content_kind=content_kind,
+            subject_domain=subject_domain,
+        ):
+            sanitized["video_theme"] = ""
+
+    if "visible_text" not in confirmed_fields:
+        current_visible_text = str(sanitized.get("visible_text") or "").strip()
+        if _visible_text_conflicts_with_verified_identity(
+            current_visible_text,
+            brand=str(sanitized.get("subject_brand") or ""),
+            model=str(sanitized.get("subject_model") or ""),
+            glossary_terms=glossary_terms,
+        ):
+            sanitized["visible_text"] = ""
 
     if identity_conflict_detected or profile_identity_conflict_detected or (not sanitized.get("subject_brand") and not sanitized.get("subject_model")):
         for key in ("video_theme", "visible_text", "hook_line", "summary", "engagement_question"):
@@ -1158,16 +1286,11 @@ def _identity_support_count(primary: Any, *candidates: Any) -> int:
 
 
 def _query_is_identity_supported(query: str, *, transcript_excerpt: str, source_name: str) -> bool:
-    normalized_query = _normalize_profile_value(query)
-    if not normalized_query:
-        return False
-    transcript_norm = _normalize_profile_value(transcript_excerpt)
-    if transcript_norm and normalized_query in transcript_norm:
-        return True
-    source_stem = Path(source_name).stem
-    if _is_informative_source_hint(source_stem) and normalized_query in _normalize_profile_value(source_stem):
-        return True
-    return False
+    return _search_query_support_score(
+        query,
+        transcript_excerpt=transcript_excerpt,
+        source_name=source_name,
+    ) > 0
 
 
 def _normalize_profile_value(value: object) -> str:
@@ -1231,6 +1354,55 @@ def _text_conflicts_with_verified_identity(
     mapped_brand = _mapped_brand_for_model(seeded_model or model)
     effective_brand = seeded_brand or brand
     if mapped_brand and effective_brand and _normalize_profile_value(effective_brand) != _normalize_profile_value(mapped_brand):
+        return True
+    return False
+
+
+def _visible_text_conflicts_with_verified_identity(
+    text: str,
+    *,
+    brand: str,
+    model: str,
+    glossary_terms: list[dict[str, Any]] | None = None,
+) -> bool:
+    visible_text = str(text or "").strip()
+    if not visible_text or not (brand or model):
+        return False
+    if _text_conflicts_with_verified_identity(
+        visible_text,
+        brand=brand,
+        model=model,
+        glossary_terms=glossary_terms,
+    ):
+        return True
+
+    tokens = _extract_guard_tokens(visible_text)
+    if not tokens:
+        return False
+
+    allowed_tokens: set[str] = set()
+    for value in (brand, model):
+        for alias in _collect_identity_aliases(value, glossary_terms=glossary_terms):
+            allowed_tokens.update(_extract_guard_tokens(alias))
+    unmatched_tokens = {token for token in tokens if token not in allowed_tokens}
+    if not unmatched_tokens:
+        return False
+
+    brand_supported = not brand or _text_matches_identity_value(
+        brand,
+        normalized_text=_normalize_profile_value(visible_text),
+        glossary_terms=glossary_terms,
+    )
+    model_supported = not model or _text_matches_identity_value(
+        model,
+        normalized_text=_normalize_profile_value(visible_text),
+        glossary_terms=glossary_terms,
+    )
+    if not brand_supported and any(re.fullmatch(r"[A-Z]{3,14}", token) for token in unmatched_tokens):
+        return True
+    if not model_supported and unmatched_tokens:
+        return True
+    if not brand_supported and not model_supported:
         return True
     return False
 
@@ -1311,6 +1483,7 @@ async def infer_content_profile(
             visual_hints = await _infer_visual_profile_hints(frame_paths)
             if visual_hints:
                 initial_profile["visual_hints"] = dict(visual_hints)
+                initial_profile["visual_cluster_hints"] = dict(visual_hints)
             _merge_specific_profile_hints(initial_profile, visual_hints)
             _apply_visual_subject_guard(initial_profile)
             if frame_paths:
@@ -1328,7 +1501,7 @@ async def infer_content_profile(
                     '"hook_line":"","visible_text":"","engagement_question":"","search_queries":[]}'
                     "\n如果文件名像时间戳、相机命名或流水号，不要把它当成型号。"
                     "\nsearch_queries 提供 2-3 个适合联网搜索验证的查询词。"
-                    f"\n视觉粗分类（优先级高于脏字幕和错误搜索）：{json.dumps(visual_hints, ensure_ascii=False)}"
+                    f"\n视觉一致簇（当前画面主体验证结果，优先级高于脏字幕和错误搜索）：{json.dumps(_visual_cluster_prompt_payload(initial_profile), ensure_ascii=False)}"
                     f"\n用户历史偏好（仅作辅助参考，不能压过当前字幕和画面）：\n{memory_prompt or '无'}"
                     f"\n源文件名：{source_name}\n字幕节选：\n{transcript_excerpt}"
                 )
@@ -1358,7 +1531,7 @@ async def infer_content_profile(
                 "\n输出 JSON："
                 '{"subject_brand":"","subject_model":"","subject_type":"","content_kind":"","subject_domain":"","video_theme":"",'
                 '"hook_line":"","visible_text":"","engagement_question":"","search_queries":[]}'
-                f"\n视觉粗分类（优先级高于脏字幕和错误搜索）：{json.dumps(initial_profile.get('visual_hints') or {}, ensure_ascii=False)}"
+                    f"\n视觉一致簇（当前画面主体验证结果，优先级高于脏字幕和错误搜索）：{json.dumps(_visual_cluster_prompt_payload(initial_profile), ensure_ascii=False)}"
                 f"\n用户历史偏好（仅作辅助参考，不能压过当前字幕和画面）：\n{memory_prompt or '无'}"
                 f"\n已有判断：{json.dumps(initial_profile, ensure_ascii=False)}"
                 f"\n源文件名：{source_name}\n字幕节选：\n{transcript_excerpt}"
@@ -1572,6 +1745,7 @@ async def enrich_content_profile(
         source_name=source_name,
         glossary_terms=glossary_terms,
         memory_hints=memory_hints,
+        user_memory=user_memory,
     )
     context_hints = _seed_profile_from_context(
         enriched,
@@ -1586,10 +1760,13 @@ async def enrich_content_profile(
         template_hint = get_workflow_preset(workflow_template)
         enriched["content_kind"] = template_hint.content_kind
     if not str(enriched.get("subject_domain") or "").strip():
-        if str(enriched.get("content_kind") or "") == "tutorial":
-            enriched["subject_domain"] = "software"
-        elif str(enriched.get("content_kind") or "") == "unboxing" and "edc" in transcript_excerpt.lower():
-            enriched["subject_domain"] = "edc"
+        inferred_subject_domain = _infer_subject_domain_from_content(
+            profile=enriched,
+            transcript_excerpt=transcript_excerpt,
+            source_name=source_name,
+        )
+        if inferred_subject_domain:
+            enriched["subject_domain"] = inferred_subject_domain
 
     preset = select_workflow_template(
         workflow_template=workflow_template or enriched.get("workflow_template"),
@@ -1608,13 +1785,14 @@ async def enrich_content_profile(
         source_name=source_name,
         glossary_terms=glossary_terms,
         memory_hints=memory_hints,
+        user_memory=user_memory,
     )
 
     if include_research:
         evidence = await _search_evidence(enriched, source_name, transcript_excerpt=transcript_excerpt)
         evidence = _filter_evidence_by_visual_subject(
             evidence,
-            visual_subject_type=str(((enriched.get("visual_hints") or {}).get("subject_type") or "")),
+            visual_subject_type=str((_profile_visual_cluster_hints(enriched).get("subject_type") or "")),
         )
         if evidence:
             enriched["evidence"] = evidence
@@ -1634,7 +1812,7 @@ async def enrich_content_profile(
                     '{"subject_brand":"","subject_model":"","subject_type":"","video_theme":"",'
                     '"hook_line":"","visible_text":"","summary":"","engagement_question":"",'
                     '"cover_title":{"top":"","main":"","bottom":""}}'
-                    f"\n视觉粗分类（优先级高于脏字幕和错误搜索）：{json.dumps(enriched.get('visual_hints') or {}, ensure_ascii=False)}"
+                    f"\n视觉一致簇（当前画面主体验证结果，优先级高于脏字幕和错误搜索）：{json.dumps(_visual_cluster_prompt_payload(enriched), ensure_ascii=False)}"
                     f"\n已有判断：{json.dumps(enriched, ensure_ascii=False)}"
                     f"\n用户历史偏好（仅作辅助参考，不能压过当前字幕和画面）：\n{memory_prompt or '无'}"
                     f"\n字幕/画面线索：{transcript_excerpt}"
@@ -1660,6 +1838,7 @@ async def enrich_content_profile(
                     source_name=source_name,
                     glossary_terms=glossary_terms,
                     memory_hints=memory_hints,
+                    user_memory=user_memory,
                 )
                 _apply_visual_subject_guard(enriched)
             except Exception:
@@ -1672,6 +1851,20 @@ async def enrich_content_profile(
         hinted = memory_hints or context_hints
         if hinted.get("subject_type"):
             enriched["subject_type"] = hinted["subject_type"]
+
+    if "hook_line" not in confirmed_fields:
+        current_hook = str(enriched.get("hook_line") or "").strip()
+        if not current_hook or _is_generic_cover_line(current_hook):
+            enriched["hook_line"] = _build_cover_hook(
+                hook=current_hook,
+                brand=_clean_line(enriched.get("subject_brand") or enriched.get("brand") or ""),
+                model=_clean_line(enriched.get("subject_model") or enriched.get("model") or ""),
+                subject_type=_clean_line(enriched.get("subject_type") or ""),
+                theme=_clean_line(str(enriched.get("video_theme") or "").strip()),
+                transcript_excerpt=transcript_excerpt,
+                copy_style=str(enriched.get("copy_style") or "attention_grabbing").strip() or "attention_grabbing",
+                preset=preset,
+            )
 
     cover_title = enriched.get("cover_title")
     if not isinstance(cover_title, dict) or not _cover_title_is_usable(cover_title):
@@ -1762,9 +1955,12 @@ def _aggregate_visual_profile_hints(hints_list: list[dict[str, Any]]) -> dict[st
     if not hints_list:
         return {}
 
+    best_cluster_indexes = _select_visual_hint_cluster_indexes(hints_list)
+    cluster_hints = [hints_list[index] for index in best_cluster_indexes] or hints_list
+
     def _pick_value(key: str) -> str:
         votes: dict[str, tuple[int, int, str]] = {}
-        for index, hints in enumerate(hints_list):
+        for index, hints in enumerate(cluster_hints):
             raw_value = str(hints.get(key) or "").strip()
             normalized = _normalize_profile_value(raw_value)
             if not normalized:
@@ -1779,10 +1975,34 @@ def _aggregate_visual_profile_hints(hints_list: list[dict[str, Any]]) -> dict[st
         _, _, value = max(votes.values(), key=lambda item: (item[0], len(item[2]), -item[1]))
         return value
 
+    def _pick_visible_text_value(*, subject_brand: str, subject_model: str) -> str:
+        votes: dict[str, tuple[int, int, int, str]] = {}
+        for index, hints in enumerate(cluster_hints):
+            raw_value = str(hints.get("visible_text") or "").strip()
+            normalized = _normalize_profile_value(raw_value)
+            if not normalized:
+                continue
+            score, first_index, support, canonical = votes.get(normalized, (0, -1, 0, raw_value))
+            score += 1
+            support += _visual_hint_visible_text_support_score(
+                raw_value,
+                subject_brand=subject_brand,
+                subject_model=subject_model,
+                hint_brand=str(hints.get("subject_brand") or "").strip(),
+                hint_model=str(hints.get("subject_model") or "").strip(),
+            )
+            if len(raw_value) > len(canonical):
+                canonical = raw_value
+            votes[normalized] = (score, index if first_index == -1 else first_index, support, canonical)
+        if not votes:
+            return ""
+        _, _, _, value = max(votes.values(), key=lambda item: (item[2], item[0], len(item[3]), -item[1]))
+        return value
+
     subject_brand = _pick_value("subject_brand")
     subject_model = _pick_value("subject_model")
     subject_type = _pick_value("subject_type")
-    visible_text = _pick_value("visible_text")
+    visible_text = _pick_visible_text_value(subject_brand=subject_brand, subject_model=subject_model)
     if not visible_text:
         visible_text = " ".join(part for part in (subject_brand, subject_model) if part).strip()
 
@@ -1806,6 +2026,126 @@ def _aggregate_visual_profile_hints(hints_list: list[dict[str, Any]]) -> dict[st
     return aggregated
 
 
+def _select_visual_hint_cluster_indexes(hints_list: list[dict[str, Any]]) -> list[int]:
+    best_indexes: list[int] = []
+    best_signature: tuple[int, int, int, int, int] | None = None
+    for index, anchor in enumerate(hints_list):
+        cluster_indexes = [
+            candidate_index
+            for candidate_index, candidate in enumerate(hints_list)
+            if _visual_hints_are_cluster_compatible(anchor, candidate)
+        ]
+        signature = _score_visual_hint_cluster(anchor, cluster_indexes=cluster_indexes, hints_list=hints_list)
+        if best_signature is None or signature > best_signature:
+            best_signature = signature
+            best_indexes = cluster_indexes
+    return best_indexes
+
+
+def _score_visual_hint_cluster(
+    anchor: dict[str, Any],
+    *,
+    cluster_indexes: list[int],
+    hints_list: list[dict[str, Any]],
+) -> tuple[int, int, int, int, int]:
+    support_score = 0
+    completeness = 0
+    visible_support = 0
+    anchor_completeness = 0
+
+    anchor_brand = str(anchor.get("subject_brand") or "").strip()
+    anchor_model = str(anchor.get("subject_model") or "").strip()
+    anchor_type = str(anchor.get("subject_type") or "").strip()
+    if anchor_brand:
+        anchor_completeness += 1
+    if anchor_model:
+        anchor_completeness += 1
+    if anchor_type:
+        anchor_completeness += 1
+
+    for index in cluster_indexes:
+        hint = hints_list[index]
+        hint_brand = str(hint.get("subject_brand") or "").strip()
+        hint_model = str(hint.get("subject_model") or "").strip()
+        hint_type = str(hint.get("subject_type") or "").strip()
+        hint_visible_text = str(hint.get("visible_text") or "").strip()
+
+        support_score += 1
+        if hint_brand and anchor_brand and _normalize_profile_value(hint_brand) == _normalize_profile_value(anchor_brand):
+            support_score += 2
+        if hint_model and anchor_model and _normalize_profile_value(hint_model) == _normalize_profile_value(anchor_model):
+            support_score += 2
+        if hint_type and anchor_type and _normalize_profile_value(hint_type) == _normalize_profile_value(anchor_type):
+            support_score += 1
+
+        completeness += int(bool(hint_brand)) + int(bool(hint_model)) + int(bool(hint_type))
+        visible_support += _visual_hint_visible_text_support_score(
+            hint_visible_text,
+            subject_brand=anchor_brand,
+            subject_model=anchor_model,
+            hint_brand=hint_brand,
+            hint_model=hint_model,
+        )
+
+    return (support_score, anchor_completeness, completeness, visible_support, -min(cluster_indexes))
+
+
+def _visual_hints_are_cluster_compatible(anchor: dict[str, Any], candidate: dict[str, Any]) -> bool:
+    for key in ("subject_type", "subject_brand", "subject_model"):
+        anchor_value = str(anchor.get(key) or "").strip()
+        candidate_value = str(candidate.get(key) or "").strip()
+        if anchor_value and candidate_value and _normalize_profile_value(anchor_value) != _normalize_profile_value(candidate_value):
+            return False
+    anchor_brand = str(anchor.get("subject_brand") or "").strip()
+    anchor_model = str(anchor.get("subject_model") or "").strip()
+    if not anchor_brand and not anchor_model:
+        return True
+
+    candidate_brand = str(candidate.get("subject_brand") or "").strip()
+    candidate_model = str(candidate.get("subject_model") or "").strip()
+    candidate_visible_text = str(candidate.get("visible_text") or "").strip()
+
+    supports_anchor = False
+    if anchor_brand and (
+        (candidate_brand and _normalize_profile_value(candidate_brand) == _normalize_profile_value(anchor_brand))
+        or _text_matches_identity_value(anchor_brand, normalized_text=_normalize_profile_value(candidate_visible_text), glossary_terms=None)
+    ):
+        supports_anchor = True
+    if anchor_model and (
+        (candidate_model and _normalize_profile_value(candidate_model) == _normalize_profile_value(anchor_model))
+        or _text_matches_identity_value(anchor_model, normalized_text=_normalize_profile_value(candidate_visible_text), glossary_terms=None)
+    ):
+        supports_anchor = True
+    return supports_anchor
+
+
+def _visual_hint_visible_text_support_score(
+    text: str,
+    *,
+    subject_brand: str,
+    subject_model: str,
+    hint_brand: str,
+    hint_model: str,
+) -> int:
+    score = 0
+    normalized_text = _normalize_profile_value(text)
+    if not normalized_text:
+        return score
+    if subject_brand and _text_matches_identity_value(subject_brand, normalized_text=normalized_text, glossary_terms=None):
+        score += 4
+    if subject_model and _text_matches_identity_value(subject_model, normalized_text=normalized_text, glossary_terms=None):
+        score += 4
+    if hint_brand and subject_brand and _normalize_profile_value(hint_brand) == _normalize_profile_value(subject_brand):
+        score += 2
+    if hint_model and subject_model and _normalize_profile_value(hint_model) == _normalize_profile_value(subject_model):
+        score += 2
+    if hint_brand and subject_brand and _normalize_profile_value(hint_brand) != _normalize_profile_value(subject_brand):
+        score -= 3
+    if hint_model and subject_model and _normalize_profile_value(hint_model) != _normalize_profile_value(subject_model):
+        score -= 3
+    return score
+
+
 def _subject_type_family(subject_type: str) -> str:
     normalized = _clean_line(subject_type)
     if not normalized:
@@ -1822,7 +2162,7 @@ def _subject_type_family(subject_type: str) -> str:
 
 
 def _apply_visual_subject_guard(profile: dict[str, Any]) -> None:
-    visual_hints = profile.get("visual_hints") or {}
+    visual_hints = _profile_visual_cluster_hints(profile)
     visual_subject_type = str(visual_hints.get("subject_type") or "").strip()
     if not visual_subject_type:
         current_subject_type = str(profile.get("subject_type") or "").strip()
@@ -2094,71 +2434,173 @@ def _build_search_queries(
     *,
     transcript_excerpt: str = "",
 ) -> list[str]:
-    queries: list[str] = []
-    for value in profile.get("search_queries") or []:
-        if value:
-            queries.append(str(value))
-
     brand = str(profile.get("subject_brand") or "").strip()
     model = str(profile.get("subject_model") or "").strip()
     subject_type = str(profile.get("subject_type") or "").strip()
+    video_theme = str(profile.get("video_theme") or "").strip()
     visible_text = str(profile.get("visible_text") or "").strip()
     source_stem = Path(source_name).stem
     signal_terms = _extract_search_signal_terms(transcript_excerpt, visible_text, source_stem)
     topic_terms = _extract_topic_terms("\n".join(part for part in (transcript_excerpt, visible_text, source_stem) if part))
     software_like = _is_software_like_subject(subject_type, brand=brand, model=model, topic_terms=topic_terms)
+    query_candidates: list[str] = []
+
+    for value in profile.get("search_queries") or []:
+        if value:
+            query_candidates.append(str(value))
 
     if brand and model:
-        queries.append(f"{brand} {model}")
+        query_candidates.append(f"{brand} {model}")
         if software_like:
-            queries.append(f"{brand} {model} 教程")
-            queries.append(f"{brand} {model} 功能")
+            query_candidates.append(f"{brand} {model} 教程")
+            query_candidates.append(f"{brand} {model} 功能")
         else:
-            queries.append(f"{brand} {model} 开箱")
+            query_candidates.append(f"{brand} {model} 开箱")
     elif brand:
         for term in signal_terms[:2]:
-            queries.append(f"{brand} {term}")
+            query_candidates.append(f"{brand} {term}")
             if subject_type:
-                queries.append(f"{brand} {term} {subject_type}")
+                query_candidates.append(f"{brand} {term} {subject_type}")
     elif model:
         if subject_type and not _is_generic_subject_type(subject_type):
-            queries.append(f"{model} {subject_type}")
+            query_candidates.append(f"{model} {subject_type}")
             compact_subject = _subject_type_search_anchor(subject_type)
             if compact_subject:
-                queries.append(f"{model} {compact_subject}")
+                query_candidates.append(f"{model} {compact_subject}")
         else:
-            queries.append(model)
-            queries.append(f"{model} 开箱")
+            query_candidates.append(model)
+            query_candidates.append(f"{model} 开箱")
         if subject_type:
-            queries.append(f"{model} {subject_type}")
+            query_candidates.append(f"{model} {subject_type}")
     if brand and subject_type:
-        queries.append(f"{brand} {subject_type}")
+        query_candidates.append(f"{brand} {subject_type}")
     if model and subject_type:
-        queries.append(f"{model} {subject_type}")
+        query_candidates.append(f"{model} {subject_type}")
     if software_like and brand and model and any(term in {"无限画布", "漫剧工作流", "工作流", "节点编排", "智能体"} for term in topic_terms):
         for topic in topic_terms[:3]:
             if topic != model:
-                queries.append(f"{brand} {topic}")
-            queries.append(f"{brand} {topic} 教程")
+                query_candidates.append(f"{brand} {topic}")
+            query_candidates.append(f"{brand} {topic} 教程")
         if "无限画布" in topic_terms or model == "无限画布":
-            queries.append(f"{brand} 无限画布 漫剧")
+            query_candidates.append(f"{brand} 无限画布 漫剧")
     if not brand and not model:
         for term in signal_terms[:3]:
             suffix = "教程" if software_like else "开箱"
-            queries.append(f"{term} {suffix}")
+            query_candidates.append(f"{term} {suffix}")
             if subject_type and not _is_generic_subject_type(subject_type):
-                queries.append(f"{term} {subject_type}")
+                query_candidates.append(f"{term} {subject_type}")
     if _is_informative_source_hint(source_stem):
-        queries.append(source_stem)
+        query_candidates.append(source_stem)
 
-    deduped: list[str] = []
+    support_kwargs = {
+        "brand": brand,
+        "model": model,
+        "subject_type": subject_type,
+        "video_theme": video_theme,
+        "visible_text": visible_text,
+        "transcript_excerpt": transcript_excerpt,
+        "source_name": source_name,
+        "signal_terms": signal_terms,
+        "topic_terms": topic_terms,
+        "software_like": software_like,
+    }
+    scored: list[tuple[int, int, str]] = []
     seen: set[str] = set()
-    for query in queries:
+    for index, query in enumerate(query_candidates):
         normalized = query.strip()
-        if normalized and normalized not in seen:
-            seen.add(normalized)
-            deduped.append(normalized)
-    return deduped
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        score = _search_query_support_score(normalized, **support_kwargs)
+        if score <= 0:
+            continue
+        scored.append((score, -index, normalized))
+    scored.sort(reverse=True)
+    return [query for _, _, query in scored]
+
+
+def _search_query_support_score(
+    query: str,
+    *,
+    transcript_excerpt: str,
+    source_name: str,
+    brand: str = "",
+    model: str = "",
+    subject_type: str = "",
+    video_theme: str = "",
+    visible_text: str = "",
+    signal_terms: list[str] | None = None,
+    topic_terms: list[str] | None = None,
+    software_like: bool | None = None,
+) -> int:
+    normalized_query = _normalize_profile_value(query)
+    if not normalized_query:
+        return 0
+
+    transcript_norm = _normalize_profile_value(transcript_excerpt)
+    visible_norm = _normalize_profile_value(visible_text)
+    source_stem = Path(source_name).stem
+    source_norm = _normalize_profile_value(source_stem if _is_informative_source_hint(source_stem) else "")
+    score = 0
+
+    if transcript_norm and normalized_query in transcript_norm:
+        score += 6
+    if visible_norm and normalized_query in visible_norm:
+        score += 4
+    if source_norm and normalized_query in source_norm:
+        score += 4
+
+    for value, weight in (
+        (brand, 3),
+        (model, 3),
+        (subject_type, 2),
+        (_subject_type_search_anchor(subject_type), 1),
+    ):
+        normalized_value = _normalize_profile_value(value)
+        if normalized_value and normalized_value in normalized_query:
+            score += weight
+
+    for term in signal_terms or []:
+        normalized_term = _normalize_profile_value(term)
+        if normalized_term and normalized_term in normalized_query:
+            score += 2
+
+    for term in topic_terms or []:
+        normalized_term = _normalize_profile_value(term)
+        if normalized_term and normalized_term in normalized_query:
+            score += 2
+
+    theme_support = _summary_theme_fragment(
+        video_theme,
+        brand=brand,
+        model=model,
+        preset_name="",
+    )
+    for term in _extract_query_support_terms(theme_support):
+        normalized_term = _normalize_profile_value(term)
+        if normalized_term and normalized_term in normalized_query:
+            score += 1
+
+    intent_pairs: list[tuple[str, bool]] = [
+        ("对比", "对比" in transcript_excerpt or "差异" in transcript_excerpt or "版本" in transcript_excerpt),
+        ("升级", "升级" in transcript_excerpt or "升级" in video_theme),
+    ]
+    if software_like is not None:
+        intent_pairs.extend(
+            [
+                ("教程", software_like),
+                ("功能", software_like),
+                ("开箱", not software_like),
+                ("评测", not software_like),
+                ("上手", not software_like),
+                ("体验", not software_like),
+            ]
+        )
+    for term, supported in intent_pairs:
+        if term in query and supported:
+            score += 1
+
+    return score
 
 
 def _is_software_like_subject(
@@ -2412,7 +2854,136 @@ def _seed_profile_from_user_memory(transcript_excerpt: str, user_memory: dict[st
         elif seeded.get("subject_brand") == "Loop露普" or str(seeded.get("subject_model") or "").startswith("SK05"):
             seeded["subject_type"] = "EDC手电"
 
+    if "subject_brand" not in seeded and "subject_model" not in seeded:
+        confirmed_entity = _select_confirmed_entity_from_user_memory(
+            transcript_excerpt,
+            user_memory=user_memory,
+            subject_type=str(seeded.get("subject_type") or ""),
+        )
+        if confirmed_entity:
+            brand = str(confirmed_entity.get("brand") or "").strip()
+            model = str(confirmed_entity.get("model") or "").strip()
+            if brand:
+                seeded["subject_brand"] = brand
+            if model:
+                seeded["subject_model"] = model
+            if confirmed_entity.get("subject_type") and "subject_type" not in seeded:
+                seeded["subject_type"] = str(confirmed_entity.get("subject_type") or "").strip()
+
     return seeded
+
+
+def _select_confirmed_entity_from_user_memory(
+    transcript_excerpt: str,
+    *,
+    user_memory: dict[str, Any] | None,
+    subject_type: str,
+) -> dict[str, Any]:
+    transcript = str(transcript_excerpt or "").strip()
+    normalized = _normalize_profile_value(transcript)
+    if not transcript or not normalized:
+        return {}
+    for entity in (user_memory or {}).get("confirmed_entities") or []:
+        if not _confirmed_entity_matches_current_context(
+            entity,
+            transcript=transcript,
+            normalized=normalized,
+            subject_type=subject_type,
+        ):
+            continue
+        return dict(entity)
+    return {}
+
+
+def _confirmed_entity_matches_current_context(
+    entity: dict[str, Any],
+    *,
+    transcript: str,
+    normalized: str,
+    subject_type: str,
+) -> bool:
+    entity_subject_type = str(entity.get("subject_type") or "").strip()
+    effective_subject_type = str(subject_type or "").strip()
+    alias_context_support = _confirmed_entity_has_alias_context_support(
+        entity,
+        transcript=transcript,
+        normalized=normalized,
+    )
+    if not effective_subject_type:
+        transcript_seed = _seed_profile_from_text(transcript)
+        effective_subject_type = str(transcript_seed.get("subject_type") or "").strip()
+
+    if entity_subject_type and effective_subject_type and _normalize_profile_value(entity_subject_type) != _normalize_profile_value(effective_subject_type):
+        return False
+    if (
+        entity_subject_type
+        and "手电" in entity_subject_type
+        and not alias_context_support
+        and not any(token in transcript for token in ("手电", "电筒", "开箱", "流明", "夜骑", "泛光", "聚光", "夹持"))
+    ):
+        return False
+
+    brand = str(entity.get("brand") or "").strip()
+    model = str(entity.get("model") or "").strip()
+    if brand and _memory_value_matches_transcript(brand, transcript, normalized):
+        return True
+    if model and _memory_keyword_matches_transcript(model, transcript, normalized):
+        return True
+
+    for phrase in entity.get("phrases") or []:
+        if _memory_keyword_matches_transcript(str(phrase or "").strip(), transcript, normalized):
+            return True
+
+    model_norm = _normalize_profile_value(model)
+    variant_tokens = [
+        token for token in ("ULTRA", "PRO", "UV", "MAX", "MINI", "PLUS", "二代", "2代")
+        if token in model.upper() or token in model
+    ]
+    for item in entity.get("model_aliases") or []:
+        wrong = str(item.get("wrong") or "").strip()
+        if not wrong or not _memory_value_matches_transcript(wrong, transcript, normalized):
+            continue
+        if not variant_tokens:
+            return True
+        if any(token.upper() in transcript.upper() or token in transcript for token in variant_tokens):
+            return True
+        if model_norm and _memory_keyword_matches_transcript(model, transcript, normalized):
+            return True
+    return False
+
+
+def _confirmed_entity_has_alias_context_support(
+    entity: dict[str, Any],
+    *,
+    transcript: str,
+    normalized: str,
+) -> bool:
+    brand = str(entity.get("brand") or "").strip()
+    model = str(entity.get("model") or "").strip()
+    if brand and _memory_value_matches_transcript(brand, transcript, normalized):
+        return True
+    if model and _memory_keyword_matches_transcript(model, transcript, normalized):
+        return True
+    for phrase in entity.get("phrases") or []:
+        if _memory_keyword_matches_transcript(str(phrase or "").strip(), transcript, normalized):
+            return True
+
+    model_norm = _normalize_profile_value(model)
+    variant_tokens = [
+        token for token in ("ULTRA", "PRO", "UV", "MAX", "MINI", "PLUS", "二代", "2代")
+        if token in model.upper() or token in model
+    ]
+    for item in entity.get("model_aliases") or []:
+        wrong = str(item.get("wrong") or "").strip()
+        if not wrong or not _memory_value_matches_transcript(wrong, transcript, normalized):
+            continue
+        if not variant_tokens:
+            return True
+        if any(token.upper() in transcript.upper() or token in transcript for token in variant_tokens):
+            return True
+        if model_norm and _memory_keyword_matches_transcript(model, transcript, normalized):
+            return True
+    return False
 
 
 def _seed_profile_from_glossary_terms(
@@ -2487,20 +3058,39 @@ def _seed_profile_from_text(
         brand = glossary_brand
 
     model = ""
+    model_source = ""
     if re.search(r"(?<![A-Z0-9])ARC(?![A-Z0-9])", normalized):
         model = "ARC"
+        model_source = "explicit_alias"
     elif re.search(r"(?<![A-Z0-9])SURGE(?![A-Z0-9])", normalized):
         model = "SURGE"
+        model_source = "explicit_alias"
     elif re.search(r"(?<![A-Z0-9])CHARGE(?![A-Z0-9])", normalized):
         model = "CHARGE"
+        model_source = "explicit_alias"
     elif _extract_edc_bag_model(canon, transcript):
         model = _extract_edc_bag_model(canon, transcript)
+        model_source = "bag_alias"
     else:
         model = _extract_edc_flashlight_model(canon)
+        if model:
+            model_source = "flashlight_alias"
     if not model:
         model = _extract_generic_product_model(canon, transcript)
+        if model:
+            model_source = "generic"
     if not model:
         model = str(glossary_seed.get("subject_model") or "").strip()
+        if model:
+            model_source = "glossary"
+
+    if model and not _has_supported_product_model_hint(
+        transcript=transcript,
+        brand=brand,
+        model=model,
+        model_source=model_source,
+    ):
+        model = ""
 
     if not brand and model in _MODEL_TO_BRAND:
         brand = _MODEL_TO_BRAND[model]
@@ -2606,6 +3196,87 @@ def _extract_edc_flashlight_model(text: str) -> str:
     if "UV" in normalized:
         suffixes.append("UV版")
     return " ".join(suffixes[:1]).replace(" ", "") if len(suffixes) == 1 else f"{suffixes[0]}{''.join(suffixes[1:])}"
+
+
+def _has_supported_product_model_hint(
+    *,
+    transcript: str,
+    brand: str,
+    model: str,
+    model_source: str = "",
+) -> bool:
+    compact_model = re.sub(r"[^A-Z0-9]+", "", _canonicalize_spoken_identity_text(model))
+    compact_transcript = re.sub(r"[^A-Z0-9]+", "", _canonicalize_spoken_identity_text(transcript))
+    mention_count = compact_transcript.count(compact_model)
+    first_index = compact_transcript.find(compact_model)
+    early_mention = first_index != -1 and first_index <= 240
+    has_variant_marker = any(token in compact_model for token in ("PRO", "MAX", "MINI", "UV", "II"))
+    product_cues = (
+        "开箱",
+        "对比",
+        "评测",
+        "测评",
+        "上手",
+        "手电",
+        "电筒",
+        "UV",
+        "流明",
+        "泛光",
+        "聚光",
+        "夜骑",
+        "版本",
+        "一代",
+        "二代",
+    )
+
+    if not compact_model:
+        return False
+    if model_source == "bag_alias":
+        return True
+    if model_source in {"glossary", "explicit_alias", "generic"}:
+        return mention_count >= 1
+    if model_source == "flashlight_alias":
+        family_match = re.match(r"[A-Z]{1,4}\d{1,4}", compact_model)
+        family = family_match.group(0) if family_match else compact_model
+        canonical_transcript = _canonicalize_spoken_identity_text(transcript)
+        family_mentions = compact_transcript.count(family)
+        family_index = canonical_transcript.find(family)
+        family_is_early = family_index != -1 and family_index <= 240
+        local_window = canonical_transcript[max(0, family_index - 16):family_index + 32] if family_index != -1 else ""
+        variant_hits = 0
+        local_variant_hits = 0
+        if "2" in compact_model and any(token in transcript for token in ("二代", "2代", "Ⅱ代", "II")):
+            variant_hits += 1
+            if any(token in local_window for token in ("2代", "II")):
+                local_variant_hits += 1
+        if "PRO" in compact_model and "PRO" in transcript.upper():
+            variant_hits += 1
+            if "PRO" in local_window:
+                local_variant_hits += 1
+        if "UV" in compact_model and "UV" in transcript.upper():
+            variant_hits += 1
+            if "UV" in local_window:
+                local_variant_hits += 1
+
+        if family_mentions >= 2:
+            return True
+        if brand and family_mentions >= 1:
+            return True
+        if family_mentions >= 1 and variant_hits >= 2:
+            return True
+        if family_is_early and local_variant_hits >= 1 and any(cue in transcript for cue in product_cues):
+            return True
+        return False
+    if len(compact_model) < 4:
+        return False
+
+    if mention_count >= 2:
+        return True
+    if brand and mention_count >= 1:
+        return True
+    if early_mention and (has_variant_marker or any(cue in transcript for cue in product_cues)):
+        return True
+    return False
 
 
 def _extract_edc_bag_model(text: str, original_text: str) -> str:
@@ -2953,12 +3624,45 @@ def _is_generic_engagement_question(text: str) -> bool:
 
 
 def _is_specific_video_theme(text: str, *, preset_name: str) -> bool:
+    return _is_specific_video_theme_for_context(text, preset_name=preset_name, content_kind="", subject_domain="")
+
+
+def _is_specific_video_theme_for_context(
+    text: str,
+    *,
+    preset_name: str,
+    content_kind: str,
+    subject_domain: str,
+) -> bool:
     normalized = _clean_line(text)
     if not normalized:
         return False
-    if normalized in {"产品开箱与上手体验", "产品开箱评测", "新品开箱评测", "开箱评测", "开箱体验", "上手体验", "产品体验", "评测"}:
+    if normalized in {
+        "产品开箱与上手体验",
+        "产品开箱评测",
+        "新品开箱评测",
+        "开箱评测",
+        "开箱体验",
+        "上手体验",
+        "产品体验",
+        "评测",
+        "教程",
+        "软件教程",
+        "AI教程",
+        "数码教程",
+        "操作演示",
+        "功能讲解",
+        "步骤讲解",
+        "流程演示",
+    }:
         return False
-    default_theme = _clean_line(_default_video_theme_by_name(preset_name))
+    default_theme = _clean_line(
+        _default_video_theme_by_context(
+            preset_name=preset_name,
+            content_kind=content_kind,
+            subject_domain=subject_domain,
+        )
+    )
     if default_theme and normalized == default_theme:
         return False
     return len(normalized) >= 6 or any(
@@ -2984,6 +3688,82 @@ def _is_specific_video_theme(text: str, *, preset_name: str) -> bool:
             "智能体",
         )
     )
+
+
+def _should_replace_video_theme(
+    *,
+    current_video_theme: str,
+    resolved_video_theme: str,
+    preset_name: str,
+    content_kind: str = "",
+    subject_domain: str = "",
+) -> bool:
+    resolved = str(resolved_video_theme or "").strip()
+    if not _is_specific_video_theme_for_context(
+        resolved,
+        preset_name=preset_name,
+        content_kind=content_kind,
+        subject_domain=subject_domain,
+    ):
+        return False
+    current = str(current_video_theme or "").strip()
+    if not _is_specific_video_theme_for_context(
+        current,
+        preset_name=preset_name,
+        content_kind=content_kind,
+        subject_domain=subject_domain,
+    ):
+        return True
+    return _video_theme_specificity_score(resolved) > _video_theme_specificity_score(current)
+
+
+def _video_theme_specificity_score(text: str) -> int:
+    normalized = _clean_line(text)
+    if not normalized:
+        return 0
+    score = 1
+    informative_tokens = (
+        "升级",
+        "限定",
+        "联名",
+        "教程",
+        "步骤",
+        "观点",
+        "复盘",
+        "高光",
+        "探店",
+        "试吃",
+        "对比",
+        "横评",
+        "无限画布",
+        "工作流",
+        "节点",
+        "新功能",
+        "上线",
+        "漫剧",
+        "智能体",
+        "实测",
+        "开箱",
+        "上手",
+    )
+    generic_tokens = (
+        "功能演示",
+        "软件功能演示",
+        "流程演示",
+        "产品体验",
+        "上手体验",
+    )
+    for token in informative_tokens:
+        if token in normalized:
+            score += 3
+    for token in generic_tokens:
+        if token in normalized:
+            score -= 2
+    if any(char.isdigit() for char in normalized):
+        score += 1
+    if re.search(r"(PRO|ULTRA|MAX|MINI|SE|PLUS|UV)", normalized, re.IGNORECASE):
+        score += 1
+    return score
 
 
 async def _generate_engagement_question(
@@ -3123,9 +3903,20 @@ def _fallback_profile(
         transcript_hint=transcript_excerpt,
     )
     content_kind = preset.content_kind
-    subject_domain = "edc" if preset.name == "edc_tactical" else "software" if preset.name == "tutorial_standard" else ""
+    subject_domain = _infer_subject_domain_from_content(
+        profile={
+            "subject_type": _default_subject_type_for_preset(preset),
+            "video_theme": _default_video_theme_for_preset(preset),
+        },
+        transcript_excerpt=transcript_excerpt,
+        source_name=source_name,
+    )
     subject_type = _default_subject_type_for_preset(preset)
-    video_theme = _default_video_theme_for_preset(preset)
+    video_theme = _default_video_theme_by_context(
+        preset_name=preset.name,
+        content_kind=content_kind,
+        subject_domain=str(subject_domain or ""),
+    )
     engagement_question = _default_engagement_question(preset)
     return {
         "subject_brand": "",
@@ -3177,6 +3968,7 @@ def _normalize_engagement_question(text: str) -> str:
 def _build_fallback_engagement_question(profile: dict[str, Any], preset: WorkflowPreset) -> str:
     theme = str(profile.get("video_theme") or "").strip()
     subject = _build_engagement_subject(profile, preset)
+    focus_terms = _extract_profile_focus_terms(profile, limit=3)
 
     if _is_tutorial_preset(preset):
         return "这一步你平时最容易卡在哪？"
@@ -3188,6 +3980,10 @@ def _build_fallback_engagement_question(profile: dict[str, Any], preset: Workflo
         return "这波如果换你来打会怎么处理？"
     if preset.name == "food_explore":
         return "这家店你会为了这道菜专门跑一趟吗？"
+    if len(focus_terms) >= 2 and any(token in theme for token in ("升级", "改款", "新版", "迭代")):
+        return _normalize_engagement_question(f"{subject}这次升级你更在意{focus_terms[0]}还是{focus_terms[1]}")
+    if len(focus_terms) >= 2:
+        return _normalize_engagement_question(f"{subject}你更想先看{focus_terms[0]}还是{focus_terms[1]}")
     if any(token in theme for token in ("对比", "横评", "比较")):
         return _normalize_engagement_question(f"{subject}和上一版你更站哪边")
     if any(token in theme for token in ("升级", "改款", "新版", "迭代")):
@@ -3827,6 +4623,7 @@ def _build_cover_hook(
     model: str,
     subject_type: str,
     theme: str,
+    transcript_excerpt: str,
     copy_style: str,
     preset: WorkflowPreset,
 ) -> str:
@@ -3854,7 +4651,7 @@ def _build_cover_hook(
             copy_style=copy_style,
         )
     elif _is_unboxing_preset(preset):
-        fallback = _build_unboxing_cover_hook(theme=theme)
+        fallback = _build_unboxing_cover_hook(theme=theme, transcript_excerpt=transcript_excerpt)
     else:
         fallback = preset.cover_accent
     return _apply_copy_style_to_hook(
@@ -3931,8 +4728,44 @@ def _build_screen_tutorial_cover_hook(
     return _apply_copy_style_to_hook("这波效果太夸张", copy_style=copy_style, brand=brand, model=model, subject_type=subject_type)
 
 
-def _build_unboxing_cover_hook(*, theme: str) -> str:
+def _focus_terms_to_cover_hook(focus_terms: list[str]) -> str:
+    if len(focus_terms) >= 2 and focus_terms[0] == "分仓" and focus_terms[1] == "挂点":
+        return "分仓挂点直接看"
+    mapping = {
+        "锁定机构": "锁定机构直接看",
+        "开合": "开合手感直接看",
+        "钳头": "钳头结构直接看",
+        "分仓": "分仓设计直接看",
+        "挂点": "挂点细节直接看",
+        "收纳": "收纳装载直接看",
+        "做工": "做工细节直接看",
+        "结构": "结构变化直接看",
+        "材质": "材质差异直接看",
+        "细节": "关键细节直接看",
+        "手感": "上手手感直接看",
+        "泛光": "泛光表现直接看",
+        "聚光": "聚光效果直接看",
+        "UV": "UV表现直接看",
+        "亮度": "亮度表现直接看",
+    }
+    for term in focus_terms:
+        if term in mapping:
+            return mapping[term]
+    return ""
+
+
+def _build_unboxing_cover_hook(*, theme: str, transcript_excerpt: str = "") -> str:
     theme_text = _clean_line(theme)
+    focus_terms = _extract_profile_focus_terms(
+        {
+            "video_theme": theme,
+            "transcript_excerpt": transcript_excerpt,
+        },
+        limit=2,
+    )
+    focus_hook = _focus_terms_to_cover_hook(focus_terms)
+    if focus_hook:
+        return focus_hook
     if any(token in theme_text for token in ("限定", "联名", "纪念版", "特别版")):
         return "限定细节值不值"
     if any(token in theme_text for token in ("做工", "结构", "拆解", "材质")):
@@ -3947,12 +4780,7 @@ def _is_tutorial_preset(preset: WorkflowPreset) -> bool:
 
 def _is_unboxing_preset(preset: WorkflowPreset) -> bool:
     content_kind = str(getattr(preset, "content_kind", "") or "").strip().lower()
-    return content_kind == "unboxing" or preset.name in {
-        "unboxing_standard",
-        "unboxing_limited",
-        "unboxing_upgrade",
-        "edc_tactical",
-    }
+    return content_kind == "unboxing" or preset.name in {"unboxing_standard", "edc_tactical"}
 
 
 def _is_commentary_preset(preset: WorkflowPreset) -> bool:
@@ -3995,7 +4823,7 @@ def _boost_cover_click_phrase(text: str, *, subject: str) -> str:
     normalized = _clean_line(text)
     if not normalized:
         return normalized
-    if any(token in normalized for token in ("升级", "够不够", "值不值", "重点", "细节", "讲透")):
+    if any(token in normalized for token in ("升级", "够不够", "值不值", "重点", "细节", "讲透", "直接看")):
         return normalized[:18]
 
     boring_to_hot = {
@@ -4055,13 +4883,65 @@ def _pick_visible_brand(visible_text: str) -> str:
     return match.group(0).strip().upper()[:14]
 
 
+def _summary_theme_fragment(
+    theme: str,
+    *,
+    brand: str,
+    model: str,
+    preset_name: str,
+    content_kind: str = "",
+    subject_domain: str = "",
+) -> str:
+    cleaned = _strip_identity_tokens_from_text(
+        theme,
+        brand=brand,
+        model=model,
+    )
+    if _is_specific_video_theme_for_context(
+        cleaned,
+        preset_name=preset_name,
+        content_kind=content_kind,
+        subject_domain=subject_domain,
+    ):
+        return cleaned
+    fallback = _default_video_theme_by_context(
+        preset_name=preset_name,
+        content_kind=content_kind,
+        subject_domain=subject_domain,
+    )
+    return str(fallback or "").strip()
+
+
+def _extract_query_support_terms(text: str) -> list[str]:
+    terms: list[str] = []
+    seen: set[str] = set()
+    for match in re.finditer(r"[\u4e00-\u9fff]{2,8}|[A-Za-z][A-Za-z0-9+-]{1,23}", str(text or "")):
+        token = match.group(0).strip()
+        if len(token) < 2:
+            continue
+        if token in {"主要围绕", "内容方向", "产品开箱与上手体验"}:
+            continue
+        if token not in seen:
+            seen.add(token)
+            terms.append(token)
+    return terms
+
+
 def _build_profile_summary(profile: dict[str, Any]) -> str:
     brand = str(profile.get("subject_brand") or "").strip()
     model = str(profile.get("subject_model") or "").strip()
     preset_name = _workflow_template_name(profile)
     content_kind = _content_kind_name(profile)
+    subject_domain = str(profile.get("subject_domain") or "").strip()
     subject_type = str(profile.get("subject_type") or _default_subject_type_by_name(preset_name or content_kind)).strip()
-    theme = str(profile.get("video_theme") or _default_video_theme_by_name(preset_name or content_kind)).strip()
+    theme = _summary_theme_fragment(
+        str(profile.get("video_theme") or ""),
+        brand=brand,
+        model=model,
+        preset_name=preset_name or content_kind,
+        content_kind=content_kind,
+        subject_domain=subject_domain,
+    )
     parts = [part for part in (brand, model or subject_type) if part]
     product = " ".join(parts).strip() or subject_type
     if content_kind == "tutorial":
@@ -4098,10 +4978,25 @@ def _default_subject_type_by_name(preset_name: str) -> str:
 
 
 def _default_video_theme_for_preset(preset: WorkflowPreset) -> str:
-    return _default_video_theme_by_name(preset.name)
+    return _default_video_theme_by_context(preset_name=preset.name, content_kind=preset.content_kind, subject_domain="")
 
 
 def _default_video_theme_by_name(preset_name: str) -> str:
+    return _default_video_theme_by_context(preset_name=preset_name, content_kind="", subject_domain="")
+
+
+def _default_video_theme_by_context(*, preset_name: str, content_kind: str, subject_domain: str) -> str:
+    normalized_preset = str(preset_name or "").strip()
+    normalized_kind = str(content_kind or "").strip().lower()
+    normalized_domain = str(subject_domain or "").strip().lower()
+
+    tutorial_domain_mapping = {
+        "ai": "AI工作流与模型能力讲解",
+        "tech": "数码科技体验与功能讲解",
+    }
+    if (normalized_kind == "tutorial" or normalized_preset in {"tutorial_standard", "tutorial"}) and normalized_domain in tutorial_domain_mapping:
+        return tutorial_domain_mapping[normalized_domain]
+
     mapping = {
         "tutorial_standard": "软件流程演示与步骤讲解",
         "tutorial": "软件流程演示与步骤讲解",
@@ -4114,7 +5009,7 @@ def _default_video_theme_by_name(preset_name: str) -> str:
         "food_explore": "探店试吃与性价比判断",
         "food": "探店试吃与性价比判断",
     }
-    return mapping.get(preset_name, "产品开箱与上手体验")
+    return mapping.get(normalized_preset or normalized_kind, "产品开箱与上手体验")
 
 
 def _default_engagement_question(preset: WorkflowPreset) -> str:

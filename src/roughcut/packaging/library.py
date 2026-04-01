@@ -16,6 +16,8 @@ import numpy as np
 from sqlalchemy import select
 
 from roughcut.config import DEFAULT_TEST_OUTPUT_ROOT, get_settings
+from roughcut.edit.presets import normalize_workflow_template_name
+from roughcut.review.domain_glossaries import detect_glossary_domains, normalize_subject_domain, select_primary_subject_domain
 from roughcut.state_store import PACKAGING_CONFIG_KEY, run_db_operation
 
 
@@ -172,8 +174,6 @@ AVATAR_OVERLAY_POSITION_OPTIONS = {"top_left", "top_right", "bottom_left", "bott
 
 PRESET_HINT_KEYWORDS: dict[str, set[str]] = {
     "unboxing_standard": {"UNBOX", "BOX", "PACKAGE", "PRODUCT", "DETAIL", "MACRO", "SHOWCASE", "开箱", "包装", "细节"},
-    "unboxing_limited": {"LIMITED", "SPECIAL", "COLLECT", "EDITION", "限定", "联名", "收藏", "纪念"},
-    "unboxing_upgrade": {"UPGRADE", "V2", "NEW", "DETAIL", "COMPARE", "升级", "新版", "改版", "对比"},
     "edc_tactical": {"EDC", "TACTICAL", "KNIFE", "TOOL", "GEAR", "MACRO", "战术", "工具", "钳", "刀"},
     "tutorial_standard": {"SCREEN", "UI", "FLOW", "STEP", "GUIDE", "TUTORIAL", "教程", "录屏", "步骤", "操作"},
     "vlog_daily": {"VLOG", "DAILY", "CITY", "TRAVEL", "LIFESTYLE", "日常", "出行", "生活"},
@@ -189,9 +189,35 @@ MUSIC_MOOD_KEYWORDS: dict[str, set[str]] = {
     "gameplay_highlight": {"HYPE", "EPIC", "BATTLE", "ENERGY", "BASS", "TRAP", "高能", "热血"},
     "food_explore": {"COZY", "JAZZ", "FUNK", "WARM", "CAFE", "LIFESTYLE", "美食", "轻松"},
     "edc_tactical": {"TACTICAL", "DARK", "INDUSTRIAL", "METAL", "BASS", "战术", "硬核"},
-    "unboxing_upgrade": {"TECH", "UPBEAT", "CLEAN", "FUTURE", "ENERGY", "科技", "升级"},
-    "unboxing_limited": {"LUXURY", "PREMIUM", "SHINE", "COLLECT", "高级", "限定"},
     "unboxing_standard": {"TECH", "UPBEAT", "CLEAN", "SHOWCASE", "科技", "展示"},
+}
+
+DOMAIN_HINT_KEYWORDS: dict[str, set[str]] = {
+    "edc": {"EDC", "TACTICAL", "KNIFE", "TOOL", "GEAR", "MACRO", "战术", "工具", "钳", "刀"},
+    "outdoor": {"OUTDOOR", "CAMP", "HIKE", "GEAR", "户外", "露营", "徒步"},
+    "tech": {"TECH", "PHONE", "CHIP", "SCREEN", "CAMERA", "PHONE", "LAPTOP", "EARBUD", "手机", "芯片", "屏幕", "相机", "耳机"},
+    "ai": {"AI", "WORKFLOW", "NODE", "MODEL", "AGENT", "COMFYUI", "RUNNINGHUB", "工作流", "节点", "模型", "智能体"},
+    "functional": {"FUNCTIONAL", "BAG", "SLING", "UTILITY", "机能", "通勤", "穿搭", "包"},
+    "tools": {"TOOLS", "TOOL", "PLIER", "BIT", "SCREWDRIVER", "工具", "钳", "批头", "螺丝刀"},
+    "food": {"FOOD", "DISH", "CAFE", "RESTAURANT", "美食", "探店", "试吃"},
+    "travel": {"TRAVEL", "CITY", "TRIP", "VLOG", "出行", "旅行"},
+    "finance": {"FINANCE", "MARKET", "ECON", "财经", "金融"},
+    "news": {"NEWS", "REPORT", "BRIEF", "新闻", "快讯"},
+    "sports": {"SPORT", "GAME", "MATCH", "赛事", "比赛"},
+}
+
+DOMAIN_MOOD_KEYWORDS: dict[str, set[str]] = {
+    "edc": {"TACTICAL", "DARK", "INDUSTRIAL", "METAL", "BASS", "战术", "硬核"},
+    "outdoor": {"OPEN", "EPIC", "NATURE", "TRAVEL", "WIDE", "户外", "自然"},
+    "tech": {"TECH", "CLEAN", "SHOWCASE", "UPBEAT", "科技", "展示"},
+    "ai": {"AI", "WORKFLOW", "NODE", "AMBIENT", "FOCUS", "DIGITAL", "工作流", "节点"},
+    "functional": {"UTILITY", "STREET", "URBAN", "工业", "机能"},
+    "tools": {"INDUSTRIAL", "METAL", "TOOL", "硬核", "工业"},
+    "food": {"COZY", "JAZZ", "FUNK", "WARM", "美食", "轻松"},
+    "travel": {"CHILL", "SUNNY", "WARM", "TRAVEL", "日常", "轻快"},
+    "finance": {"CLEAN", "MINIMAL", "NEWS", "简洁", "分析"},
+    "news": {"DOCUMENTARY", "CLEAN", "NEWS", "稳重", "简洁"},
+    "sports": {"HYPE", "EPIC", "BATTLE", "ENERGY", "高能", "热血"},
 }
 
 GENERIC_MUSIC_TOKENS = {"BGM", "MUSIC", "LOOP", "TRACK", "BEAT", "INSTRUMENTAL", "AMBIENT"}
@@ -876,7 +902,10 @@ def _score_packaging_asset(
     content_profile: dict[str, Any] | None,
 ) -> dict[str, Any]:
     profile = content_profile or {}
-    preset_name = str(profile.get("workflow_template") or profile.get("preset_name") or "").strip()
+    preset_name = normalize_workflow_template_name(
+        str(profile.get("workflow_template") or profile.get("preset_name") or "").strip()
+    )
+    subject_domain = _resolve_packaging_subject_domain(profile)
     asset_tokens = _tokenize_packaging_text(
         " ".join(
             [
@@ -892,35 +921,52 @@ def _score_packaging_asset(
         )
     )
     preset_tokens = PRESET_HINT_KEYWORDS.get(preset_name, set())
+    domain_tokens = DOMAIN_HINT_KEYWORDS.get(subject_domain, set())
     reasons: list[str] = []
     score = 0.28
 
     if asset_type == "music":
         mood_tokens = MUSIC_MOOD_KEYWORDS.get(preset_name, set())
+        domain_mood_tokens = DOMAIN_MOOD_KEYWORDS.get(subject_domain, set())
         mood_matches = asset_tokens & mood_tokens
+        domain_mood_matches = asset_tokens & domain_mood_tokens
         preset_matches = asset_tokens & preset_tokens
+        domain_matches = asset_tokens & domain_tokens
+        if domain_mood_matches:
+            score += min(0.34, 0.12 * len(domain_mood_matches))
+            reasons.append("BGM 气质匹配内容领域")
         if mood_matches:
             score += min(0.3, 0.1 * len(mood_matches))
             reasons.append("BGM 气质匹配视频风格")
         if asset_tokens & GENERIC_MUSIC_TOKENS:
             score += 0.08
             reasons.append("文件命名明确为背景音乐")
+        if domain_matches:
+            score += min(0.18, 0.09 * len(domain_matches))
+            reasons.append("文件命名直接命中内容领域")
         if preset_matches:
             score += 0.12
             reasons.append("文件命名直接命中内容预设")
+        if domain_matches and domain_mood_matches:
+            score += 0.08
+            reasons.append("内容领域和气质同时命中")
         if mood_matches and preset_matches:
             score += 0.08
             reasons.append("风格和内容类型同时命中")
     else:
         subject_matches = asset_tokens & profile_tokens
+        domain_matches = asset_tokens & domain_tokens
         if subject_matches:
             score += min(0.34, 0.12 * len(subject_matches))
             reasons.append("插入素材命中视频主体信息")
+        if domain_matches:
+            score += min(0.18, 0.09 * len(domain_matches))
+            reasons.append("文件命名贴合当前内容领域")
         if asset_tokens & GENERIC_INSERT_TOKENS:
             score += 0.12
             reasons.append("文件命名表明是可插入 B-roll")
         if asset_tokens & preset_tokens:
-            score += 0.14
+            score += 0.08
             reasons.append("文件命名贴合当前内容类型")
 
     if not reasons and asset_tokens:
@@ -957,6 +1003,19 @@ def _build_packaging_selection_summary(rankings: list[dict[str, Any]]) -> dict[s
             else ""
         ),
     }
+
+
+def _resolve_packaging_subject_domain(profile: dict[str, Any] | None) -> str:
+    candidate = normalize_subject_domain(str((profile or {}).get("subject_domain") or "").strip())
+    if candidate:
+        return candidate
+    detected = detect_glossary_domains(
+        workflow_template=None,
+        content_profile=profile or {},
+        subtitle_items=None,
+        source_name=None,
+    )
+    return str(select_primary_subject_domain(detected) or "")
 
 
 def _tokenize_packaging_text(text: str) -> set[str]:

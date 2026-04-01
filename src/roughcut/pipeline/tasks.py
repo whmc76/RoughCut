@@ -8,7 +8,7 @@ import subprocess
 import time
 from datetime import datetime, timezone
 
-from roughcut.config import get_settings
+from roughcut.config import get_settings, normalize_transcription_provider_name
 from roughcut.pipeline.celery_app import celery_app
 from roughcut.pipeline.steps import run_step_sync
 from roughcut.telegram.executors import execute_agent_preset
@@ -265,8 +265,8 @@ def _step_requires_local_gpu(step_name: str) -> bool:
         return True
     if normalized == "transcribe":
         settings = get_settings()
-        provider = str(getattr(settings, "transcription_provider", "") or "").strip().lower()
-        if provider != "local_whisper":
+        provider = normalize_transcription_provider_name(getattr(settings, "transcription_provider", ""))
+        if provider != "faster_whisper":
             return False
         return _local_gpu_available_or_expected()
     return False
@@ -302,8 +302,8 @@ def _compute_retry_countdown(task) -> int:
 
 def _memory_pressure_guard_enabled(step_name: str) -> bool:
     settings = get_settings()
-    transcription_provider = str(getattr(settings, "transcription_provider", "") or "").strip().lower()
-    if step_name == "transcribe" and transcription_provider == "qwen_asr":
+    transcription_provider = normalize_transcription_provider_name(getattr(settings, "transcription_provider", ""))
+    if step_name == "transcribe" and transcription_provider == "qwen3_asr":
         return False
     if step_name == "render":
         # Render may rely on an external managed GPU service like HeyGem.

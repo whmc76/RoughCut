@@ -42,7 +42,7 @@ def test_is_gpu_pressure_error_detects_cuda_oom():
 def test_probe_local_gpu_pressure_reports_busy_gpu(monkeypatch):
     monkeypatch.setattr(tasks_mod, "get_settings", lambda: SimpleNamespace(
         gpu_retry_enabled=True,
-        transcription_provider="local_whisper",
+        transcription_provider="faster_whisper",
         gpu_busy_utilization_threshold=92,
         gpu_busy_memory_threshold=0.92,
     ))
@@ -62,7 +62,7 @@ def test_probe_local_gpu_pressure_reports_busy_gpu(monkeypatch):
 def test_probe_local_gpu_pressure_allows_qwen_asr_resident_memory(monkeypatch):
     monkeypatch.setattr(tasks_mod, "get_settings", lambda: SimpleNamespace(
         gpu_retry_enabled=True,
-        transcription_provider="qwen_asr",
+        transcription_provider="qwen3_asr",
         gpu_busy_utilization_threshold=92,
         gpu_busy_memory_threshold=0.92,
     ))

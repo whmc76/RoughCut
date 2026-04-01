@@ -71,7 +71,13 @@ from roughcut.review.content_profile import (
     polish_subtitle_items,
 )
 from roughcut.review.content_profile_memory import load_content_profile_user_memory
-from roughcut.review.domain_glossaries import filter_scoped_glossary_terms, merge_glossary_terms, resolve_builtin_glossary_terms
+from roughcut.review.domain_glossaries import (
+    detect_glossary_domains,
+    filter_scoped_glossary_terms,
+    merge_glossary_terms,
+    resolve_builtin_glossary_terms,
+    select_primary_subject_domain,
+)
 from roughcut.review.glossary_engine import apply_glossary_corrections
 from roughcut.review.platform_copy import (
     build_packaging_fact_sheet,
@@ -119,16 +125,23 @@ _CONTENT_PROFILE_ARTIFACT_TYPES = ("content_profile_final", "content_profile", "
 
 
 def _workflow_template_subject_domain(workflow_template: str | None) -> str | None:
-    normalized = str(workflow_template or "").strip().lower()
-    if normalized == "edc_tactical":
-        return "edc"
-    if normalized == "tutorial_standard":
-        return "software"
-    if normalized == "food_explore":
-        return "food"
-    if normalized == "gameplay_highlight":
-        return "game"
+    del workflow_template
     return None
+
+
+def _infer_subject_domain_for_memory(
+    *,
+    workflow_template: str | None,
+    subtitle_items: list[dict[str, Any]] | None = None,
+    content_profile: dict[str, Any] | None = None,
+    source_name: str | None = None,
+) -> str | None:
+    return select_primary_subject_domain(detect_glossary_domains(
+        workflow_template=None,
+        content_profile=content_profile,
+        subtitle_items=subtitle_items,
+        source_name=source_name,
+    ))
 
 
 def _resolve_subtitle_split_profile(*, width: int | None, height: int | None) -> dict[str, float | int | str]:
@@ -255,7 +268,7 @@ def _spawn_step_heartbeat(
 def _content_profile_artifact_priority(artifact_type: str) -> int:
     priorities = {
         "content_profile_final": 3,
-        "content_profile": 2,
+        "content_profile": 1,
         "content_profile_draft": 1,
     }
     return priorities.get(str(artifact_type or "").strip(), 0)
@@ -265,6 +278,15 @@ def _select_preferred_content_profile_artifact(artifacts: list[Artifact]) -> Art
     if not artifacts:
         return None
     epoch = datetime.min.replace(tzinfo=timezone.utc)
+    finals = [artifact for artifact in artifacts if str(artifact.artifact_type or "").strip() == "content_profile_final"]
+    if finals:
+        return max(
+            finals,
+            key=lambda artifact: (
+                _content_profile_artifact_priority(artifact.artifact_type),
+                artifact.created_at or epoch,
+            ),
+        )
     return max(
         artifacts,
         key=lambda artifact: (
@@ -702,7 +724,7 @@ async def run_transcribe(job_id: str) -> dict:
             glossary_terms = glossary_result.scalars().all()
             user_memory = await load_content_profile_user_memory(
                 session,
-                subject_domain=_workflow_template_subject_domain(job.workflow_template),
+                subject_domain=None,
             )
             recent_subtitles = await _load_recent_subtitle_examples(
                 session,
@@ -837,7 +859,19 @@ async def run_subtitle_postprocess(job_id: str) -> dict:
         glossary_terms = glossary_result.scalars().all()
         user_memory = await load_content_profile_user_memory(
             session,
-            subject_domain=_workflow_template_subject_domain(job.workflow_template),
+            subject_domain=_infer_subject_domain_for_memory(
+                workflow_template=job.workflow_template,
+                subtitle_items=[
+                    {
+                        "text_raw": item.text_raw,
+                        "text_norm": item.text_norm,
+                        "text_final": item.text_final,
+                    }
+                    for item in items
+                ],
+                content_profile={},
+                source_name=job.source_name,
+            ),
         )
         profile_artifact = await _load_latest_optional_artifact(
             session,
@@ -954,24 +988,18 @@ async def run_content_profile(job_id: str) -> dict:
         )
         user_memory = await load_content_profile_user_memory(
             session,
-            subject_domain=_workflow_template_subject_domain(job.workflow_template),
+            subject_domain=_infer_subject_domain_for_memory(
+                workflow_template=job.workflow_template,
+                subtitle_items=subtitle_dicts,
+                content_profile={},
+                source_name=job.source_name,
+            ),
         )
         packaging_config = (list_packaging_assets().get("config") or {})
-        seeded_profile_artifact = await _load_latest_optional_artifact(
-            session,
-            job_id=job.id,
-            artifact_types=_CONTENT_PROFILE_ARTIFACT_TYPES,
-        )
-        seeded_profile = (
-            dict(seeded_profile_artifact.data_json or {})
-            if seeded_profile_artifact and isinstance(seeded_profile_artifact.data_json, dict)
-            else {}
-        )
-        copy_style = str(
-            packaging_config.get("copy_style")
-            or seeded_profile.get("copy_style")
-            or "attention_grabbing"
-        )
+        # Reruns must re-infer from the current transcript and frames instead of
+        # recycling a stale same-job profile artifact.
+        seeded_profile: dict[str, Any] = {}
+        copy_style = str(packaging_config.get("copy_style") or "attention_grabbing")
         infer_cache_namespace = "content_profile.infer"
         infer_cache_fingerprint = build_content_profile_cache_fingerprint(
             source_name=job.source_name,
@@ -1259,7 +1287,12 @@ async def run_glossary_review(job_id: str) -> dict:
         )
         user_memory = await load_content_profile_user_memory(
             session,
-            subject_domain=_workflow_template_subject_domain(job.workflow_template),
+            subject_domain=_infer_subject_domain_for_memory(
+                workflow_template=job.workflow_template,
+                subtitle_items=subtitle_dicts,
+                content_profile={},
+                source_name=job.source_name,
+            ),
         )
 
         profile_result = await session.execute(
@@ -2790,7 +2823,7 @@ def _score_music_entry_candidates(
             reasons.append("句子在这里收束")
         if len(text) >= 10:
             score += 0.08
-        if workflow_template in {"unboxing_standard", "unboxing_limited", "unboxing_upgrade", "edc_tactical"} and 5.0 <= end_time <= 14.0:
+        if _workflow_template_subject_domain(workflow_template) == "gear" and 5.0 <= end_time <= 14.0:
             score += 0.08
             reasons.append("适合在主体介绍后进入 BGM")
 

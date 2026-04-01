@@ -11,6 +11,7 @@ class ResolvedIdentity:
     subject_brand: str
     subject_model: str
     subject_type: str
+    video_theme: str
     conflicts: tuple[str, ...] = ()
 
 
@@ -24,6 +25,7 @@ def resolve_identity_candidates(
     brand = _pick_supported_candidate(scored.get("subject_brand") or [])
     model = _pick_supported_candidate(scored.get("subject_model") or [])
     subject_type = _pick_supported_candidate(scored.get("subject_type") or [])
+    video_theme = _pick_supported_candidate(scored.get("video_theme") or [])
 
     mapped_brand = mapped_brand_for_model(model) if model else ""
     if mapped_brand and brand and normalize(mapped_brand) != normalize(brand):
@@ -36,6 +38,7 @@ def resolve_identity_candidates(
         subject_brand=brand,
         subject_model=model,
         subject_type=subject_type,
+        video_theme=video_theme,
         conflicts=tuple(conflicts),
     )
 

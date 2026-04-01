@@ -418,6 +418,7 @@ def test_build_packaging_prompt_brief_keeps_only_compact_fields():
             "subject_brand": "Loop露普",
             "subject_model": "SK05二代Pro UV版",
             "subject_type": "EDC手电",
+            "subject_domain": "edc",
             "video_theme": "上手开箱",
             "summary": "这期重点看真实上手体验。",
             "hook_line": "这次升级有点猛",
@@ -434,6 +435,7 @@ def test_build_packaging_prompt_brief_keeps_only_compact_fields():
 
     assert brief["source_name"] == "demo.mp4"
     assert brief["subject_brand"] == "Loop露普"
+    assert brief["subject_domain"] == "edc"
     assert "evidence" not in brief
     assert "automation_review" not in brief
     assert "先看外观" in brief["transcript_excerpt"]

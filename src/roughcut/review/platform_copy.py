@@ -78,6 +78,7 @@ def build_packaging_prompt_brief(
         "subject_brand": str(profile.get("subject_brand") or "").strip(),
         "subject_model": str(profile.get("subject_model") or "").strip(),
         "subject_type": str(profile.get("subject_type") or "").strip(),
+        "subject_domain": str(profile.get("subject_domain") or "").strip(),
         "video_theme": str(profile.get("video_theme") or "").strip(),
         "summary": str(profile.get("summary") or "").strip(),
         "hook_line": str(profile.get("hook_line") or "").strip(),
@@ -262,7 +263,7 @@ async def generate_platform_packaging(
     author_prompt_text = _build_author_prompt_text(author_profile)
     prompt = (
         "你是多平台视频包装官，负责把字幕整理成适合不同平台发布的标题、简介和标签。"
-        "内容默认按 EDC、刀具、工具、桌搭、开箱、收藏类创作者口吻处理。"
+        f"{_domain_prompt_voice_instruction(content_profile)}"
         "要求：\n"
         "1. 输出真实自然，不要像硬广，不编造事实。\n"
         "2. 刀具、EDC、工具相关内容必须保守合规，避免危险导向表述。\n"
@@ -1335,6 +1336,24 @@ def _platform_bias_instruction(label: str) -> str:
         "视频号": "更稳妥可信，适合快速概括重点和结论。",
     }
     return mapping.get(label, "按平台用户习惯自动调整语气和信息密度。")
+
+
+def _domain_prompt_voice_instruction(content_profile: dict[str, Any] | None) -> str:
+    domain = str((content_profile or {}).get("subject_domain") or "").strip().lower()
+    mapping = {
+        "edc": "内容按 EDC/装备体验类创作者口吻处理，强调上手体验、细节和真实判断。",
+        "outdoor": "内容按户外装备体验类创作者口吻处理，强调场景、耐用性和实际使用感受。",
+        "tech": "内容按数码科技内容口吻处理，强调设备体验、关键差异、参数判断和真实感受。",
+        "ai": "内容按 AI领域内容口吻处理，强调工作流、模型能力、使用门槛、实际效果和结论。",
+        "functional": "内容按机能/包袋/穿搭体验口吻处理，强调收纳、搭配、做工和使用场景。",
+        "tools": "内容按工具实测内容口吻处理，强调结构、手感、功能点和真实上手体验。",
+        "food": "内容按美食体验口吻处理，强调口感、环境、流程和真实评价。",
+        "travel": "内容按旅行/生活记录口吻处理，强调行程体验、信息效率和实用建议。",
+        "finance": "内容按财经解读口吻处理，强调结论、逻辑和信息边界。",
+        "news": "内容按新闻速览口吻处理，强调信息密度、事实边界和结论摘要。",
+        "sports": "内容按体育内容口吻处理，强调关键回合、结果和观感。",
+    }
+    return mapping.get(domain, "内容按当前视频所属领域的真实创作者口吻处理，强调信息准确、自然表达和平台适配。")
 
 
 def _copy_style_headline_hook(copy_style: str, *, hook: str, brand: str, subject: str) -> str:

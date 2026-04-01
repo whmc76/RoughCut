@@ -22,8 +22,8 @@ def build_service_status_payload() -> dict[str, Any]:
             base_url=settings.ollama_base_url,
             url=f"{settings.ollama_base_url.rstrip('/')}/api/tags",
         ),
-        "qwen_asr": _probe_local_service(
-            name="qwen_asr",
+        "qwen3_asr": _probe_local_service(
+            name="qwen3_asr",
             base_url=settings.qwen_asr_api_base_url,
             url=f"{settings.qwen_asr_api_base_url.rstrip('/')}/health",
         ),

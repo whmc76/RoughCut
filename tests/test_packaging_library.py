@@ -144,3 +144,71 @@ def test_packaging_library_defaults_match_new_overlay_layout(tmp_path, monkeypat
     assert payload["config"]["watermark_position"] == "top_left"
     assert payload["config"]["avatar_overlay_position"] == "top_right"
     assert payload["config"]["avatar_overlay_scale"] == 0.18
+
+
+def test_packaging_library_music_selection_prefers_ai_domain_over_template_name(tmp_path, monkeypatch):
+    monkeypatch.setattr(library, "PACKAGING_ROOT", tmp_path)
+    monkeypatch.setattr(library, "MANIFEST_PATH", tmp_path / "manifest.json")
+
+    ai_music = library.save_packaging_asset(
+        asset_type="music",
+        filename="workflow_nodes_ai_bgm.mp3",
+        payload=b"ai",
+    )
+    tech_music = library.save_packaging_asset(
+        asset_type="music",
+        filename="phone_chip_review_bgm.mp3",
+        payload=b"tech",
+    )
+
+    library.update_packaging_config(
+        {
+            "music_asset_ids": [ai_music["id"], tech_music["id"]],
+            "music_selection_mode": "random",
+        }
+    )
+
+    plan = library.resolve_packaging_plan_for_job(
+        str(uuid.uuid4()),
+        content_profile={
+            "workflow_template": "tutorial_standard",
+            "subject_domain": "ai",
+            "video_theme": "ComfyUI 工作流与模型推理讲解",
+        },
+    )
+
+    assert plan["music"]["asset_id"] == ai_music["id"]
+
+
+def test_packaging_library_music_selection_prefers_tech_domain_over_template_name(tmp_path, monkeypatch):
+    monkeypatch.setattr(library, "PACKAGING_ROOT", tmp_path)
+    monkeypatch.setattr(library, "MANIFEST_PATH", tmp_path / "manifest.json")
+
+    ai_music = library.save_packaging_asset(
+        asset_type="music",
+        filename="workflow_nodes_ai_bgm.mp3",
+        payload=b"ai",
+    )
+    tech_music = library.save_packaging_asset(
+        asset_type="music",
+        filename="phone_chip_review_bgm.mp3",
+        payload=b"tech",
+    )
+
+    library.update_packaging_config(
+        {
+            "music_asset_ids": [ai_music["id"], tech_music["id"]],
+            "music_selection_mode": "random",
+        }
+    )
+
+    plan = library.resolve_packaging_plan_for_job(
+        str(uuid.uuid4()),
+        content_profile={
+            "workflow_template": "tutorial_standard",
+            "subject_domain": "tech",
+            "video_theme": "手机芯片与续航实测",
+        },
+    )
+
+    assert plan["music"]["asset_id"] == tech_music["id"]

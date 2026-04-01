@@ -15,15 +15,18 @@ class IdentityCandidate:
 
 def build_identity_candidates(bundle: IdentityEvidenceBundle) -> list[IdentityCandidate]:
     candidates: list[IdentityCandidate] = []
-    source_maps = (
+    source_maps: list[tuple[str, dict[str, str]]] = [
         ("profile", bundle.profile_identity),
+        ("memory_confirmed", bundle.memory_confirmed_hints),
         ("transcript", bundle.transcript_hints),
         ("source_name", bundle.source_hints),
-        ("visual", bundle.visual_hints),
-        ("visible_text", bundle.visible_text_hints),
-    )
+        ("visual_cluster", bundle.visual_cluster_hints),
+    ]
+    if _legacy_visual_hints_add_new_signal(bundle):
+        source_maps.append(("visual", bundle.visual_hints))
+    source_maps.append(("visible_text", bundle.visible_text_hints))
     for source_type, hints in source_maps:
-        for field_name in ("subject_brand", "subject_model", "subject_type"):
+        for field_name in ("subject_brand", "subject_model", "subject_type", "video_theme"):
             value = str((hints or {}).get(field_name) or "").strip()
             if value:
                 candidates.append(
@@ -44,6 +47,19 @@ def _source_excerpt(bundle: IdentityEvidenceBundle, source_type: str) -> str:
         return bundle.source_name
     if source_type == "visible_text":
         return str((bundle.visible_text_hints or {}).get("visible_text") or "").strip()
+    if source_type == "visual_cluster":
+        return str((bundle.visual_cluster_hints or {}).get("visible_text") or "").strip()
     if source_type == "visual":
         return str((bundle.visual_hints or {}).get("visible_text") or "").strip()
     return ""
+
+
+def _legacy_visual_hints_add_new_signal(bundle: IdentityEvidenceBundle) -> bool:
+    legacy = bundle.visual_hints or {}
+    cluster = bundle.visual_cluster_hints or {}
+    for field_name in ("subject_brand", "subject_model", "subject_type", "video_theme", "visible_text"):
+        legacy_value = str(legacy.get(field_name) or "").strip()
+        cluster_value = str(cluster.get(field_name) or "").strip()
+        if legacy_value and legacy_value != cluster_value:
+            return True
+    return False

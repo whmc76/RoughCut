@@ -1,7 +1,14 @@
 from __future__ import annotations
 
+import pytest
+
 from roughcut.pipeline.orchestrator import PIPELINE_STEPS, create_job_steps
-from roughcut.review.platform_copy import normalize_platform_packaging, render_platform_packaging_markdown
+from roughcut.review.platform_copy import (
+    build_packaging_prompt_brief,
+    generate_platform_packaging,
+    normalize_platform_packaging,
+    render_platform_packaging_markdown,
+)
 
 
 def test_platform_package_step_appended_to_pipeline():
@@ -298,3 +305,57 @@ def test_build_fallback_description_uses_creator_cta_and_primary_platform():
 
     assert "主内容阵地在视频号" in packaging["platforms"]["wechat_channels"]["description"]
     assert packaging["platforms"]["wechat_channels"]["description"].endswith("评论区告诉我你更想看哪类实测？")
+
+
+@pytest.mark.asyncio
+async def test_generate_platform_packaging_uses_domain_specific_prompt_instead_of_edc_default(monkeypatch: pytest.MonkeyPatch):
+    from roughcut.review import platform_copy as copy_mod
+
+    captured: dict[str, str] = {}
+
+    class _FakeResponse:
+        def as_json(self):
+            return {
+                "highlights": {},
+                "platforms": {
+                    "bilibili": {"titles": [""], "description": "", "tags": []},
+                    "xiaohongshu": {"titles": [""], "description": "", "tags": []},
+                    "douyin": {"titles": [""], "description": "", "tags": []},
+                    "kuaishou": {"titles": [""], "description": "", "tags": []},
+                    "wechat_channels": {"titles": [""], "description": "", "tags": []},
+                },
+            }
+
+    class _FakeProvider:
+        async def complete(self, messages, **kwargs):
+            captured["prompt"] = messages[-1].content
+            return _FakeResponse()
+
+    monkeypatch.setattr(copy_mod, "get_reasoning_provider", lambda: _FakeProvider())
+
+    await generate_platform_packaging(
+        source_name="ai.mp4",
+        content_profile={
+            "subject_brand": "ComfyUI",
+            "subject_type": "AI工作流工具",
+            "subject_domain": "ai",
+            "video_theme": "ComfyUI 工作流演示",
+        },
+        subtitle_items=[],
+    )
+
+    assert "默认按 EDC" not in captured["prompt"]
+    assert "AI领域内容" in captured["prompt"]
+
+
+def test_build_packaging_prompt_brief_exposes_subject_domain():
+    brief = build_packaging_prompt_brief(
+        source_name="ai.mp4",
+        content_profile={
+            "subject_domain": "ai",
+            "subject_type": "AI工作流工具",
+        },
+        subtitle_items=[],
+    )
+
+    assert brief["subject_domain"] == "ai"

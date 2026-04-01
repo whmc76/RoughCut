@@ -162,7 +162,7 @@ const SAMPLE_OPTIONS: ConfigOptions = {
   },
   transcription_models: {
     openai: ["gpt-4o-transcribe"],
-    local_whisper: ["large-v3"],
+    faster_whisper: ["large-v3"],
   },
   multimodal_fallback_providers: [
     { value: "openai", label: "OpenAI" },

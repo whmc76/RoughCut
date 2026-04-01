@@ -8,7 +8,7 @@ from roughcut import runtime_preflight as mod
 
 
 class _Settings:
-    transcription_provider = "qwen_asr"
+    transcription_provider = "qwen3_asr"
     qwen_asr_api_base_url = "http://127.0.0.1:18096"
     avatar_provider = "heygem"
     avatar_api_base_url = "http://127.0.0.1:49202"

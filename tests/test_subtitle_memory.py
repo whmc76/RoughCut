@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from roughcut.review.domain_glossaries import detect_glossary_domains, normalize_subject_domain
 from roughcut.review.subtitle_memory import (
     apply_domain_term_corrections,
     build_subtitle_review_memory,
@@ -96,6 +97,83 @@ def test_build_subtitle_review_memory_uses_auto_confirmed_profile_as_confirmed_s
     assert ("五眼版", "UV版") in alias_map
 
 
+def test_build_subtitle_review_memory_includes_confirmed_entities_from_user_memory():
+    memory = build_subtitle_review_memory(
+        channel_profile="edc_tactical",
+        glossary_terms=[],
+        user_memory={
+            "confirmed_entities": [
+                {
+                    "brand": "傲雷",
+                    "model": "司令官2Ultra",
+                    "phrases": ["傲雷司令官2Ultra", "司令官2Ultra"],
+                    "model_aliases": [{"wrong": "司令官2", "correct": "司令官2Ultra"}],
+                    "subject_type": "EDC手电",
+                    "subject_domain": "edc",
+                }
+            ]
+        },
+        recent_subtitles=[
+            {"text_raw": "这次还是手电开箱，重点看 Ultra 版本和流明档位。"},
+        ],
+        content_profile={
+            "subject_type": "EDC手电",
+            "content_kind": "unboxing",
+        },
+    )
+
+    confirmed = memory["confirmed_entities"][0]
+    alias_map = {(item["wrong"], item["correct"]) for item in memory["aliases"]}
+
+    assert confirmed["brand"] == "傲雷"
+    assert confirmed["model"] == "司令官2Ultra"
+    assert ("司令官2", "司令官2Ultra") in alias_map
+
+
+def test_build_subtitle_review_memory_filters_cross_domain_memory_terms_for_edc_context():
+    memory = build_subtitle_review_memory(
+        channel_profile="edc_tactical",
+        glossary_terms=[],
+        user_memory={
+            "keyword_preferences": [{"keyword": "ComfyUI 工作流", "count": 8}],
+            "phrase_preferences": [{"phrase": "RunningHub 无限画布", "count": 6}],
+            "confirmed_entities": [
+                {
+                    "brand": "傲雷",
+                    "model": "司令官2Ultra",
+                    "phrases": ["傲雷司令官2Ultra", "司令官2Ultra"],
+                    "model_aliases": [{"wrong": "司令官2", "correct": "司令官2Ultra"}],
+                    "subject_type": "EDC手电",
+                    "subject_domain": "edc",
+                }
+            ],
+        },
+        recent_subtitles=[
+            {"text_final": "今天这支手电主要看司令官2代的 Ultra 版本、流明和夹持。"},
+        ],
+        content_profile={
+            "subject_type": "EDC手电",
+            "content_kind": "unboxing",
+        },
+        include_recent_terms=False,
+        include_recent_examples=False,
+    )
+
+    terms = [item["term"] for item in memory["terms"]]
+    prompt = build_transcription_prompt(
+        source_name="20260209-124735.mp4",
+        channel_profile="edc_tactical",
+        review_memory=memory,
+        dialect_profile="beijing",
+    )
+
+    assert "司令官2Ultra" in terms
+    assert "ComfyUI" not in terms
+    assert "RunningHub" not in terms
+    assert "ComfyUI" not in prompt
+    assert "RunningHub" not in prompt
+
+
 def test_confirmed_subject_overrides_conflicting_builtin_brand_aliases():
     memory = build_subtitle_review_memory(
         channel_profile="edc_tactical",
@@ -140,15 +218,32 @@ def test_confirmed_subject_overrides_conflicting_builtin_brand_aliases():
         "S四零五都卖了一万多块的序列号我这个二代是四百号其实。",
         memory,
     ) == "SK05都卖了一万多块的序列号我这个二代是四百号其实。"
-    assert apply_domain_term_corrections(
-        "C零五的二代啊它是新加了一排灯珠啊应该是这个专门用。",
-        memory,
-    ) == "SK05二代啊它是新加了一排灯珠啊应该是这个专门用。"
-    assert apply_domain_term_corrections(
-        "全新的二代啊五眼版。",
-        memory,
-        prev_text="陆虎SK零五二代。",
-    ) == "全新的二代啊UV版。"
+
+
+def test_detect_glossary_domains_returns_tech_for_consumer_electronics_context():
+    assert detect_glossary_domains(
+        workflow_template="tutorial_standard",
+        subtitle_items=[{"text_final": "今天主要讲手机影像、芯片、屏幕和续航表现。"}],
+        content_profile={},
+        source_name="phone.mp4",
+    ) == ["tech"]
+
+
+def test_detect_glossary_domains_returns_ai_for_ai_workflow_context():
+    assert detect_glossary_domains(
+        workflow_template="tutorial_standard",
+        subtitle_items=[{"text_final": "今天主要演示节点编排、工作流、模型推理和 ComfyUI。"}],
+        content_profile={},
+        source_name="workflow.mp4",
+    ) == ["ai"]
+
+
+def test_normalize_subject_domain_preserves_legacy_signal_aliases():
+    assert normalize_subject_domain("digital") == "tech"
+    assert normalize_subject_domain("tech") == "tech"
+    assert normalize_subject_domain("ai") == "ai"
+    assert normalize_subject_domain("coding") == "ai"
+    assert normalize_subject_domain("software") == "ai"
 
 
 def test_build_transcription_prompt_includes_terms_and_aliases():
@@ -162,7 +257,8 @@ def test_build_transcription_prompt_includes_terms_and_aliases():
         },
     )
 
-    assert "edc_tactical" in prompt
+    assert "默认模板" not in prompt
+    assert "edc_tactical" not in prompt
     assert "LEATHERMAN" in prompt
     assert "多功能工具钳" in prompt
     assert "来自慢=LEATHERMAN" in prompt
@@ -540,6 +636,107 @@ def test_build_subtitle_review_memory_injects_ai_creator_hotwords():
     assert "无限画布" in terms
     assert ("running hub", "RunningHub") in alias_map
     assert ("RH", "RunningHub") in alias_map
+
+
+def test_detect_glossary_domains_keeps_no_signal_input_empty():
+    domains = detect_glossary_domains(
+        workflow_template=None,
+        content_profile=None,
+        subtitle_items=[],
+        source_name="20260209-124735.mp4",
+    )
+
+    assert domains == []
+
+
+def test_detect_glossary_domains_does_not_treat_workflow_template_as_domain_signal():
+    domains = detect_glossary_domains(
+        workflow_template="unboxing_standard",
+        content_profile={},
+        subtitle_items=[],
+        source_name="demo.mp4",
+    )
+
+    assert domains == []
+
+
+def test_detect_glossary_domains_returns_canonical_domains_from_content_evidence():
+    assert detect_glossary_domains(
+        workflow_template="unboxing_standard",
+        content_profile={},
+        subtitle_items=[{"text_final": "今天主要演示节点编排、工作流和模型推理。"}],
+        source_name="demo.mp4",
+    ) == ["ai"]
+
+    assert detect_glossary_domains(
+        workflow_template="unboxing_standard",
+        content_profile={},
+        subtitle_items=[{"text_final": "这次重点看机能包的分仓、挂点和通勤穿搭。"}],
+        source_name="bag.mp4",
+    ) == ["functional"]
+
+    assert detect_glossary_domains(
+        workflow_template="unboxing_standard",
+        content_profile={},
+        subtitle_items=[{"text_final": "今天开箱这把工具钳，重点看钳头、批头和螺丝刀。"}],
+        source_name="tool.mp4",
+    ) == ["tools"]
+
+
+def test_build_subtitle_review_memory_does_not_inject_ai_terms_without_domain_signal():
+    memory = build_subtitle_review_memory(
+        channel_profile=None,
+        glossary_terms=[],
+        user_memory={},
+        recent_subtitles=[],
+        content_profile={},
+    )
+
+    terms = [item["term"] for item in memory["terms"]]
+
+    assert "ComfyUI" not in terms
+    assert "RunningHub" not in terms
+    assert "OpenClaw" not in terms
+
+
+def test_build_subtitle_review_memory_does_not_inject_builtin_terms_from_template_alone():
+    memory = build_subtitle_review_memory(
+        channel_profile="tutorial_standard",
+        glossary_terms=[],
+        user_memory={},
+        recent_subtitles=[],
+        content_profile={},
+    )
+
+    terms = [item["term"] for item in memory["terms"]]
+
+    assert "ComfyUI" not in terms
+    assert "RunningHub" not in terms
+    assert "芯片" not in terms
+
+
+def test_build_subtitle_review_memory_does_not_apply_workflow_template_scoped_terms_for_correction():
+    memory = build_subtitle_review_memory(
+        channel_profile="tutorial_standard",
+        glossary_terms=[
+            {
+                "scope_type": "workflow_template",
+                "scope_value": "tutorial_standard",
+                "correct_form": "ComfyUI",
+                "wrong_forms": ["康飞UI"],
+                "category": "brand",
+            }
+        ],
+        user_memory={},
+        recent_subtitles=[],
+        content_profile={},
+    )
+
+    terms = [item["term"] for item in memory["terms"]]
+    alias_map = {(item["wrong"], item["correct"]) for item in memory["aliases"]}
+
+    assert "ComfyUI" not in terms
+    assert ("康飞UI", "ComfyUI") not in alias_map
 
 
 def test_build_subtitle_review_memory_injects_food_glossary():

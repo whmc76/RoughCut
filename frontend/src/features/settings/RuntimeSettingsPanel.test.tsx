@@ -13,7 +13,7 @@ const SAMPLE_CONFIG: Config = {
     legacy_profiles_file_present: false,
     legacy_packaging_manifest_present: false,
   },
-  transcription_provider: "qwen_asr",
+  transcription_provider: "qwen3_asr",
   transcription_model: "qwen3-asr-1.7b",
   transcription_dialect: "beijing",
   llm_mode: "performance",
@@ -108,7 +108,7 @@ const SAMPLE_RUNTIME_ENVIRONMENT: RuntimeEnvironment = {
 const SAMPLE_SERVICE_STATUS: ProviderServiceStatus = {
   checked_at: "2026-03-31T12:00:00Z",
   services: {
-    qwen_asr: { name: "qwen_asr", base_url: "http://127.0.0.1:18096", status: "ok", error: null },
+    qwen3_asr: { name: "qwen3_asr", base_url: "http://127.0.0.1:18096", status: "ok", error: null },
     ollama: { name: "ollama", base_url: "http://127.0.0.1:11434", status: "ok", error: null },
     minimax: { name: "minimax", base_url: "https://api.minimaxi.com/v1", status: "configured", error: null },
   },
@@ -144,7 +144,7 @@ describe("RuntimeSettingsPanel", () => {
     expect(screen.getByText("凭据来源：当前会话")).toBeTruthy();
     expect(screen.getAllByText(/MiniMax · 当前会话/).length).toBeGreaterThan(0);
     expect(screen.getByLabelText("MiniMax API Key")).toBeTruthy();
-    expect(screen.getByText(/Qwen ASR \(local\) · 状态正常/)).toBeTruthy();
+    expect(screen.getByText(/Qwen3 ASR \(local\) · 状态正常/)).toBeTruthy();
     expect(screen.queryByLabelText("OpenAI API Key")).toBeNull();
     expect(screen.queryByLabelText("Anthropic API Key")).toBeNull();
   });

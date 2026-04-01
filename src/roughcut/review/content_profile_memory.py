@@ -9,6 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from roughcut.db.models import ContentProfileCorrection, ContentProfileKeywordStat, Job
+from roughcut.review.domain_glossaries import _DOMAIN_COMPATIBILITY, normalize_subject_domain
 
 
 CONTENT_PROFILE_MEMORY_FIELDS = (
@@ -30,15 +31,13 @@ def _normalize_subject_domain_hint(value: str | None) -> str | None:
     normalized = str(value or "").strip().lower()
     if not normalized:
         return None
-    if normalized == "edc_tactical":
+    if normalized in {"edc_tactical"}:
         return "edc"
-    if normalized in {"screen_tutorial", "tutorial_standard"}:
-        return "software"
     if normalized == "food_explore":
         return "food"
     if normalized == "gameplay_highlight":
         return "game"
-    return normalized
+    return normalize_subject_domain(normalized)
 
 
 async def load_content_profile_user_memory(
@@ -71,8 +70,9 @@ async def load_content_profile_user_memory(
         limit=keyword_limit,
     )
     style_preferences = _build_style_preferences(corrections, subject_domain=subject_domain, limit=6)
+    confirmed_entities = _build_confirmed_entities(corrections, subject_domain=subject_domain, limit=6)
 
-    if not any([field_preferences, recent_corrections, keyword_preferences, phrase_preferences, style_preferences]):
+    if not any([field_preferences, recent_corrections, keyword_preferences, phrase_preferences, style_preferences, confirmed_entities]):
         return {}
     return {
         "field_preferences": field_preferences,
@@ -80,6 +80,7 @@ async def load_content_profile_user_memory(
         "keyword_preferences": keyword_preferences,
         "phrase_preferences": phrase_preferences,
         "style_preferences": style_preferences,
+        "confirmed_entities": confirmed_entities,
     }
 
 
@@ -261,7 +262,9 @@ def _build_field_preferences(
 ) -> dict[str, list[dict[str, Any]]]:
     buckets: dict[str, Counter[str]] = defaultdict(Counter)
     for item in corrections:
-        weight = 2 if subject_domain and item.subject_domain == subject_domain else 1
+        weight = _subject_domain_weight(subject_domain, item.subject_domain)
+        if weight <= 0:
+            continue
         if item.field_name in CONTENT_PROFILE_MEMORY_FIELDS and item.corrected_value:
             buckets[item.field_name][item.corrected_value] += weight
 
@@ -283,7 +286,7 @@ def _build_recent_corrections(
 ) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     for item in corrections:
-        if subject_domain and item.subject_domain not in {None, subject_domain}:
+        if not _subject_domain_visible(subject_domain, item.subject_domain):
             continue
         items.append(
             {
@@ -308,8 +311,13 @@ def _build_keyword_preferences(
     for item in stats:
         if item.scope_type == "global":
             counts[item.keyword] += int(item.usage_count or 0)
-        elif subject_domain and item.scope_type == "subject_domain" and item.scope_value == subject_domain:
-            counts[item.keyword] += int(item.usage_count or 0) * 2
+            continue
+        if item.scope_type != "subject_domain":
+            continue
+        weight = _subject_domain_weight(subject_domain, item.scope_value)
+        if weight <= 0:
+            continue
+        counts[item.keyword] += int(item.usage_count or 0) * weight
 
     return [
         {"keyword": keyword, "count": count}
@@ -326,17 +334,20 @@ def _build_phrase_preferences(
 ) -> list[dict[str, Any]]:
     counts: Counter[str] = Counter()
     for item in corrections:
-        if subject_domain and item.subject_domain not in {None, subject_domain}:
+        weight = _subject_domain_weight(subject_domain, item.subject_domain)
+        if weight <= 0:
             continue
         for phrase in _extract_learning_phrases(item.corrected_value):
-            counts[phrase] += 2 if subject_domain and item.subject_domain == subject_domain else 1
+            counts[phrase] += weight
 
     for item in stats:
         weight = 0
         if item.scope_type == "global":
             weight = max(1, int(item.usage_count or 0))
-        elif subject_domain and item.scope_type == "subject_domain" and item.scope_value == subject_domain:
-            weight = max(1, int(item.usage_count or 0)) * 2
+        elif item.scope_type == "subject_domain":
+            scope_weight = _subject_domain_weight(subject_domain, item.scope_value)
+            if scope_weight > 0:
+                weight = max(1, int(item.usage_count or 0)) * scope_weight
         if weight <= 0:
             continue
         for phrase in _extract_learning_phrases(item.keyword):
@@ -356,16 +367,99 @@ def _build_style_preferences(
     for item in corrections:
         if item.field_name not in {"video_theme"}:
             continue
-        if subject_domain and item.subject_domain not in {None, subject_domain}:
+        weight = _subject_domain_weight(subject_domain, item.subject_domain)
+        if weight <= 0:
             continue
         value = _clean_memory_value(item.corrected_value)
         for tag in _infer_style_tags(value):
-            counts[tag] += 2 if subject_domain and item.subject_domain == subject_domain else 1
+            counts[tag] += weight
             examples.setdefault(tag, value)
     return [
         {"tag": tag, "count": count, "example": examples.get(tag, "")}
         for tag, count in counts.most_common(limit)
     ]
+
+
+def _build_confirmed_entities(
+    corrections: list[ContentProfileCorrection],
+    *,
+    subject_domain: str | None,
+    limit: int,
+) -> list[dict[str, Any]]:
+    grouped: dict[tuple[str, str], dict[str, str]] = {}
+    for item in corrections:
+        if not _subject_domain_visible(subject_domain, item.subject_domain):
+            continue
+        normalized_item_domain = _normalize_subject_domain_hint(item.subject_domain)
+        key = (str(normalized_item_domain or ""), str(item.source_name or ""))
+        bucket = grouped.setdefault(
+            key,
+            {
+                "subject_domain": str(normalized_item_domain or ""),
+                "source_name": str(item.source_name or ""),
+                "subject_brand": "",
+                "subject_model": "",
+                "subject_type": "",
+            },
+        )
+        if item.field_name in {"subject_brand", "subject_model", "subject_type"} and item.corrected_value and not bucket[item.field_name]:
+            bucket[item.field_name] = item.corrected_value
+
+    entities: list[dict[str, Any]] = []
+    for bucket in grouped.values():
+        brand = _clean_memory_value(bucket.get("subject_brand"))
+        model = _clean_memory_value(bucket.get("subject_model"))
+        subject_type = _clean_memory_value(bucket.get("subject_type"))
+        if not brand and not model:
+            continue
+        phrases: list[str] = []
+        combined = _normalize_keyword(f"{brand} {model}".strip())
+        if combined:
+            phrases.append(combined)
+        if model:
+            phrases.append(model)
+        entity = {
+            "brand": brand,
+            "model": model,
+            "phrases": phrases[:6],
+            "model_aliases": [],
+            "subject_type": subject_type,
+            "subject_domain": _normalize_subject_domain_hint(bucket.get("subject_domain")) or "",
+        }
+        if entity not in entities:
+            entities.append(entity)
+        if len(entities) >= limit:
+            break
+    return entities
+
+
+def _subject_domain_visible(subject_domain: str | None, item_subject_domain: str | None) -> bool:
+    if not subject_domain:
+        return True
+    normalized_item = _normalize_subject_domain_hint(item_subject_domain)
+    if normalized_item is None:
+        return True
+    return normalized_item in _expand_subject_domain_scope(subject_domain)
+
+
+def _subject_domain_weight(subject_domain: str | None, item_subject_domain: str | None) -> int:
+    if not subject_domain:
+        return 1
+    normalized_item = _normalize_subject_domain_hint(item_subject_domain)
+    if normalized_item is None:
+        return 1
+    if normalized_item == subject_domain:
+        return 2
+    if normalized_item in _expand_subject_domain_scope(subject_domain):
+        return 1
+    return 0
+
+
+def _expand_subject_domain_scope(subject_domain: str | None) -> set[str]:
+    normalized = _normalize_subject_domain_hint(subject_domain)
+    if not normalized:
+        return set()
+    return {normalized, *_DOMAIN_COMPATIBILITY.get(normalized, ())}
 
 
 async def _increment_keyword_stat(

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from roughcut.config import get_settings
+from roughcut.config import get_settings, normalize_transcription_settings, resolve_transcription_provider_plan as _resolve_plan
 from roughcut.providers.avatar.base import AvatarProvider
 from roughcut.providers.reasoning.base import ReasoningProvider
 from roughcut.providers.transcription.base import TranscriptionProvider
@@ -11,10 +11,16 @@ _AVATAR_PROVIDER_CACHE: dict[str, AvatarProvider] = {}
 _VOICE_PROVIDER_CACHE: dict[str, VoiceProvider] = {}
 
 
-def get_transcription_provider() -> TranscriptionProvider:
+def resolve_transcription_provider_plan(*, provider: str, model: str) -> list[tuple[str, str]]:
+    return _resolve_plan(provider, model)
+
+
+def get_transcription_provider(*, provider: str | None = None, model: str | None = None) -> TranscriptionProvider:
     settings = get_settings()
-    provider = settings.transcription_provider.lower()
-    model = settings.transcription_model
+    provider, model = normalize_transcription_settings(
+        provider or settings.transcription_provider,
+        model or settings.transcription_model,
+    )
     cache_key = (provider, model)
     cached = _TRANSCRIPTION_PROVIDER_CACHE.get(cache_key)
     if cached is not None:
@@ -28,11 +34,11 @@ def get_transcription_provider() -> TranscriptionProvider:
         from roughcut.providers.transcription.funasr_provider import FunASRProvider
 
         instance = FunASRProvider(model_name=model)
-    elif provider == "local_whisper":
+    elif provider == "faster_whisper":
         from roughcut.providers.transcription.local_whisper import LocalWhisperProvider
 
         instance = LocalWhisperProvider(model_size=model)
-    elif provider == "qwen_asr":
+    elif provider == "qwen3_asr":
         from roughcut.providers.transcription.qwen_asr_http import QwenASRHTTPProvider
 
         instance = QwenASRHTTPProvider(model_name=model)

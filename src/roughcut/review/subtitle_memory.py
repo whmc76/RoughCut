@@ -5,7 +5,15 @@ from difflib import SequenceMatcher
 import re
 from typing import Any
 
-from roughcut.review.domain_glossaries import detect_glossary_domains, merge_glossary_terms, resolve_builtin_glossary_terms
+from roughcut.review.domain_glossaries import (
+    _DOMAIN_COMPATIBILITY,
+    _DOMAIN_KEYWORDS,
+    detect_glossary_domains,
+    filter_scoped_glossary_terms,
+    merge_glossary_terms,
+    normalize_subject_domain,
+    resolve_builtin_glossary_terms,
+)
 from roughcut.speech.dialects import resolve_transcription_dialect
 
 
@@ -262,7 +270,15 @@ def build_subtitle_review_memory(
         content_profile=content_profile,
         subtitle_items=recent_subtitles,
     )
-    confirmed_entities = _build_confirmed_feedback_entities(content_profile)
+    confirmed_entities = _merge_confirmed_entities(
+        _build_confirmed_feedback_entities(content_profile),
+        _select_user_memory_confirmed_entities(
+            user_memory,
+            workflow_template=workflow_template,
+            content_profile=content_profile,
+            recent_subtitles=recent_subtitles,
+        ),
+    )
     direct_domains = set(
         detect_glossary_domains(
             workflow_template=workflow_template,
@@ -270,8 +286,14 @@ def build_subtitle_review_memory(
             subtitle_items=recent_subtitles,
         )
     )
-    effective_glossary_terms = merge_glossary_terms(
+    scoped_glossary_terms = filter_scoped_glossary_terms(
         glossary_terms or [],
+        workflow_template=workflow_template,
+        content_profile=content_profile,
+        subtitle_items=recent_subtitles,
+    )
+    effective_glossary_terms = merge_glossary_terms(
+        scoped_glossary_terms,
         builtin_glossary_terms,
     )
     effective_glossary_terms = _suppress_conflicting_brand_terms(
@@ -490,6 +512,84 @@ def build_subtitle_review_memory(
     }
 
 
+def _merge_confirmed_entities(*entity_groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    merged: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for group in entity_groups:
+        for entity in group or []:
+            key = (_compact_subject_text(entity.get("brand")), _compact_subject_text(entity.get("model")))
+            if not any(key) or key in seen:
+                continue
+            seen.add(key)
+            merged.append(entity)
+    return merged
+
+
+def _select_user_memory_confirmed_entities(
+    user_memory: dict[str, Any] | None,
+    *,
+    workflow_template: str | None,
+    content_profile: dict[str, Any] | None,
+    recent_subtitles: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    items = list((user_memory or {}).get("confirmed_entities") or [])
+    if not items:
+        return []
+
+    current_subject_type = _compact_subject_text((content_profile or {}).get("subject_type"))
+    current_domain = str(normalize_subject_domain((content_profile or {}).get("subject_domain")) or "").strip().lower()
+    if not current_domain:
+        detected_domains = detect_glossary_domains(
+            workflow_template=workflow_template,
+            content_profile=content_profile,
+            subtitle_items=recent_subtitles,
+        )
+        if detected_domains:
+            current_domain = str(normalize_subject_domain(detected_domains[0]) or detected_domains[0] or "").strip().lower()
+    context_text = " ".join(
+        str(item or "")
+        for item in [
+            *((content_profile or {}).get(key) or "" for key in ("subject_type", "content_kind", "video_theme", "summary")),
+            *(row.get("text_final") or row.get("text_norm") or row.get("text_raw") or "" for row in (recent_subtitles or [])),
+        ]
+    )
+    normalized_context = _compact_subject_text(context_text).casefold()
+
+    selected: list[dict[str, Any]] = []
+    for entity in items:
+        entity_domain = str(normalize_subject_domain(entity.get("subject_domain")) or entity.get("subject_domain") or "").strip().lower()
+        entity_subject_type = _compact_subject_text(entity.get("subject_type"))
+        if entity_domain and current_domain and not _memory_entity_domain_matches_current_domain(
+            entity_domain,
+            current_domain,
+        ):
+            continue
+        if entity_subject_type and current_subject_type and entity_subject_type != current_subject_type:
+            continue
+        if entity_subject_type and "手电" in entity_subject_type and not any(token in normalized_context for token in ("手电", "电筒", "开箱", "流明", "夜骑", "泛光", "聚光")):
+            continue
+        selected.append(entity)
+    return selected[:6]
+
+
+def _memory_entity_domain_matches_current_domain(entity_domain: str, current_domain: str) -> bool:
+    normalized_entity = str(normalize_subject_domain(entity_domain) or entity_domain or "").strip().lower()
+    normalized_current = str(normalize_subject_domain(current_domain) or current_domain or "").strip().lower()
+    if not normalized_entity or not normalized_current:
+        return True
+    if normalized_entity == normalized_current:
+        return True
+    compatibility = {
+        "edc": {"outdoor", "functional", "tools"},
+        "outdoor": {"edc", "functional", "tools"},
+        "functional": {"edc", "outdoor"},
+        "tools": {"edc", "outdoor"},
+        "tech": set(),
+        "ai": set(),
+    }
+    return normalized_current in compatibility.get(normalized_entity, set()) or normalized_entity in compatibility.get(normalized_current, set())
+
+
 def summarize_subtitle_review_memory(review_memory: dict[str, Any] | None) -> str:
     return _summarize_subtitle_review_memory(review_memory, include_examples=True)
 
@@ -563,8 +663,6 @@ def build_transcription_prompt(
     if workflow_template is None and channel_profile is not None:
         workflow_template = channel_profile
     snippets: list[str] = []
-    if workflow_template:
-        snippets.append(f"默认模板：{workflow_template}")
 
     dialect_spec = resolve_transcription_dialect(dialect_profile)
     if dialect_spec["value"] != "mandarin":
@@ -572,7 +670,12 @@ def build_transcription_prompt(
         if dialect_spec["prompt_hint"]:
             snippets.append(str(dialect_spec["prompt_hint"]).rstrip("。.!！？；;"))
 
-    base_terms = [str(item.get("term") or "").strip() for item in (review_memory or {}).get("terms") or []]
+    dominant_domains = _select_prompt_dominant_domains(review_memory)
+    base_terms = [
+        str(item.get("term") or "").strip()
+        for item in (review_memory or {}).get("terms") or []
+        if _prompt_term_supported_by_domains(str(item.get("term") or "").strip(), dominant_domains)
+    ]
     base_terms = [item for item in base_terms if item]
     dialect_hotwords = [str(item).strip() for item in dialect_spec.get("hotwords") or [] if str(item).strip()]
     reserved_dialect_slots = min(4, len(dialect_hotwords))
@@ -598,6 +701,64 @@ def build_transcription_prompt(
         snippets.append(f"源文件名参考：{source_name}")
 
     return "。".join(snippets)[:320]
+
+
+def _select_prompt_dominant_domains(review_memory: dict[str, Any] | None) -> set[str]:
+    scored_domains: Counter[str] = Counter()
+    for item in (review_memory or {}).get("terms") or []:
+        term = str(item.get("term") or "").strip()
+        if not term:
+            continue
+        weight = max(1, int(item.get("count") or 1))
+        for domain in _domains_for_term(term):
+            scored_domains[domain] += weight
+
+    for entity in (review_memory or {}).get("confirmed_entities") or []:
+        for candidate in (
+            entity.get("brand"),
+            entity.get("model"),
+            *((entity.get("phrases") or [])[:4]),
+        ):
+            for domain in _domains_for_term(str(candidate or "").strip()):
+                scored_domains[domain] += 6
+
+    if not scored_domains:
+        return set()
+
+    max_score = max(scored_domains.values())
+    selected = {
+        domain
+        for domain, score in scored_domains.items()
+        if score * 2 >= max_score
+    }
+    expanded = set(selected)
+    for domain in tuple(selected):
+        expanded.update(_DOMAIN_COMPATIBILITY.get(domain, ()))
+    return expanded
+
+
+def _prompt_term_supported_by_domains(term: str, dominant_domains: set[str]) -> bool:
+    normalized = str(term or "").strip()
+    if not normalized or not dominant_domains:
+        return bool(normalized)
+    term_domains = _domains_for_term(normalized)
+    if not term_domains:
+        return True
+    return bool(term_domains & dominant_domains)
+
+
+def _domains_for_term(term: str) -> set[str]:
+    normalized = str(term or "").strip()
+    if not normalized:
+        return set()
+    haystack = normalized.upper()
+    matched: set[str] = set()
+    for domain, keywords in _DOMAIN_KEYWORDS.items():
+        for keyword in keywords:
+            if keyword.upper() in haystack:
+                matched.add(domain)
+                break
+    return matched
 
 
 def apply_domain_term_corrections(

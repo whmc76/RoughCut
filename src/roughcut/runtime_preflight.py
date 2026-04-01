@@ -7,6 +7,7 @@ import subprocess
 import time
 from pathlib import Path
 
+from roughcut.config import normalize_transcription_provider_name
 from roughcut.docker_gpu_guard import _probe_service_health
 from roughcut.config import get_settings
 from roughcut.docker_gpu_guard import hold_managed_gpu_services_async
@@ -97,7 +98,8 @@ def _managed_service_urls() -> list[str]:
     settings = get_settings()
     urls: list[str] = []
 
-    if str(getattr(settings, "transcription_provider", "") or "").strip().lower() == "qwen_asr":
+    transcription_provider = normalize_transcription_provider_name(getattr(settings, "transcription_provider", ""))
+    if transcription_provider == "qwen3_asr":
         urls.append(str(getattr(settings, "qwen_asr_api_base_url", "") or "").strip())
     if str(getattr(settings, "avatar_provider", "") or "").strip().lower() == "heygem":
         urls.append(str(getattr(settings, "avatar_api_base_url", "") or "").strip())
@@ -118,10 +120,11 @@ def _managed_service_targets() -> list[dict[str, str]]:
     settings = get_settings()
     targets: list[dict[str, str]] = []
 
-    if str(getattr(settings, "transcription_provider", "") or "").strip().lower() == "qwen_asr":
+    transcription_provider = normalize_transcription_provider_name(getattr(settings, "transcription_provider", ""))
+    if transcription_provider == "qwen3_asr":
         targets.append(
             {
-                "name": "qwen_asr",
+                "name": "qwen3_asr",
                 "url": str(getattr(settings, "qwen_asr_api_base_url", "") or "").strip(),
                 "probe_kind": "health_json",
             }

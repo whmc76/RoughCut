@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import roughcut.config as config_mod
-from roughcut.config import DEFAULT_OUTPUT_ROOT, Settings, get_settings
+from roughcut.config import DEFAULT_OUTPUT_ROOT, Settings, get_settings, normalize_transcription_settings
 
 
 def test_default_settings():
@@ -89,7 +89,7 @@ def test_get_settings_sanitizes_invalid_transcription_override(tmp_path, monkeyp
 
     settings = get_settings()
 
-    assert settings.transcription_provider == "qwen_asr"
+    assert settings.transcription_provider == "qwen3_asr"
     assert settings.transcription_model == "qwen3-asr-1.7b"
     assert settings.transcription_dialect == "mandarin"
     assert settings.default_job_workflow_mode == "standard_edit"
@@ -107,10 +107,17 @@ def test_get_settings_accepts_qwen_asr_override(tmp_path, monkeypatch):
 
     settings = get_settings()
 
-    assert settings.transcription_provider == "qwen_asr"
+    assert settings.transcription_provider == "qwen3_asr"
     assert settings.transcription_model == "qwen3-asr-1.7b"
     assert settings.transcription_dialect == "beijing"
     assert settings.qwen_asr_api_base_url == "http://127.0.0.1:18096"
+
+
+def test_normalize_transcription_settings_maps_legacy_provider_aliases():
+    assert normalize_transcription_settings("local_whisper", "base") == ("faster_whisper", "base")
+    assert normalize_transcription_settings("fast", "large-v3") == ("faster_whisper", "large-v3")
+    assert normalize_transcription_settings("qwen_asr", "qwen3-asr-1.7b") == ("qwen3_asr", "qwen3-asr-1.7b")
+    assert normalize_transcription_settings("qwen3asr", "qwen3-asr-1.7b") == ("qwen3_asr", "qwen3-asr-1.7b")
 
 
 def test_load_runtime_overrides_strips_secret_keys_from_legacy_file(tmp_path, monkeypatch):

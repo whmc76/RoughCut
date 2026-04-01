@@ -70,8 +70,8 @@ export function SettingsOverviewPanel({ form, config, runtimeEnvironment, servic
   ];
   const storageSummary = `设置 ${config?.persistence.settings_store ?? "database"} · 方案 ${config?.persistence.profiles_store ?? "database"} · 包装 ${config?.persistence.packaging_store ?? "database"}`;
   const activeLocalStatus =
-    transcriptionProvider === "qwen_asr"
-      ? serviceStatus?.services.qwen_asr
+    transcriptionProvider === "qwen3_asr"
+      ? serviceStatus?.services.qwen3_asr
       : activeReasoningProvider === "ollama"
         ? serviceStatus?.services.ollama
         : null;

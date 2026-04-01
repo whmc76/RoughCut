@@ -104,7 +104,7 @@ STEP_ORDER = {step_name: index for index, step_name in enumerate(PIPELINE_STEPS)
 
 PROFILE_ARTIFACT_PRIORITY = {
     "content_profile_final": 3,
-    "content_profile": 2,
+    "content_profile": 1,
     "content_profile_draft": 1,
 }
 _CONTENT_PROFILE_ARTIFACT_TYPES = ("content_profile_final", "content_profile", "content_profile_draft")
@@ -115,6 +115,15 @@ def _select_preferred_content_profile_artifact(artifacts: list[Artifact]) -> Art
     if not artifacts:
         return None
     epoch = datetime.min.replace(tzinfo=timezone.utc)
+    finals = [artifact for artifact in artifacts if str(artifact.artifact_type or "").strip() == "content_profile_final"]
+    if finals:
+        return max(
+            finals,
+            key=lambda artifact: (
+                PROFILE_ARTIFACT_PRIORITY.get(str(artifact.artifact_type or "").strip(), 0),
+                artifact.created_at or epoch,
+            ),
+        )
     return max(
         artifacts,
         key=lambda artifact: (
@@ -984,8 +993,6 @@ async def _persist_reviewed_glossary_term(
         pair = ("domain", domain)
         if pair not in scopes:
             scopes.append(pair)
-    if job.workflow_template:
-        scopes.append(("workflow_template", job.workflow_template))
 
     for scope_type, scope_value in scopes:
         result = await session.execute(

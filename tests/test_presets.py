@@ -4,7 +4,7 @@ from roughcut.edit.presets import get_workflow_preset, list_workflow_template_op
 from roughcut.review.content_profile import apply_glossary_terms, build_cover_title
 
 
-def test_select_workflow_template_by_content_and_transcript_hint():
+def test_select_workflow_template_keeps_edc_tactical_for_edc_unboxing_context():
     preset = select_workflow_template(
         workflow_template=None,
         content_kind="unboxing",
@@ -13,16 +13,17 @@ def test_select_workflow_template_by_content_and_transcript_hint():
         subject_type="EDC 刀具",
         transcript_hint="这是今年的限定版开箱",
     )
-    assert preset.name == "unboxing_limited"
+    assert preset.name == "edc_tactical"
 
 
 def test_get_workflow_preset_default():
     assert get_workflow_preset(None).name == "unboxing_standard"
 
 
-def test_get_workflow_preset_keeps_legacy_variants_available_for_runtime_logic():
-    assert get_workflow_preset("unboxing_limited").name == "unboxing_limited"
-    assert get_workflow_preset("unboxing_upgrade").name == "unboxing_upgrade"
+def test_get_workflow_preset_normalizes_legacy_unboxing_variants():
+    assert get_workflow_preset("unboxing_limited").name == "unboxing_standard"
+    assert get_workflow_preset("unboxing_upgrade").name == "unboxing_standard"
+    assert get_workflow_preset("unboxing_default").name == "unboxing_standard"
     assert get_workflow_preset("edc_tactical").name == "edc_tactical"
 
 
@@ -39,7 +40,7 @@ def test_workflow_template_options_only_expose_single_edc_unboxing_entry():
 
 
 def test_build_cover_title_uses_profile_and_preset():
-    preset = get_workflow_preset("unboxing_upgrade")
+    preset = get_workflow_preset("unboxing_standard")
     title = build_cover_title(
         {
             "subject_brand": "FAS刀帕",

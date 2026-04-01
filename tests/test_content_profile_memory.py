@@ -108,6 +108,86 @@ async def test_content_profile_memory_records_identity_aliases_from_confirmed_re
     )
 
 
+@pytest.mark.asyncio
+async def test_content_profile_memory_builds_confirmed_entities_from_manual_identity_feedback(db_session):
+    job = Job(
+        id=uuid.uuid4(),
+        source_path="E:/videos/olight.mp4",
+        source_name="20260401_手电开箱.mp4",
+        status="needs_review",
+        channel_profile="edc_tactical",
+    )
+    db_session.add(job)
+    await db_session.flush()
+
+    await record_content_profile_feedback_memory(
+        db_session,
+        job=job,
+        draft_profile={
+            "subject_brand": "",
+            "subject_model": "",
+            "subject_type": "EDC手电",
+        },
+        final_profile={
+            "subject_brand": "傲雷",
+            "subject_model": "司令官2Ultra",
+            "subject_type": "EDC手电",
+            "search_queries": ["傲雷 司令官2Ultra"],
+        },
+        user_feedback={
+            "subject_brand": "傲雷",
+            "subject_model": "司令官2Ultra",
+        },
+    )
+    await db_session.flush()
+
+    memory = await load_content_profile_user_memory(db_session, channel_profile="edc_tactical")
+
+    assert memory["confirmed_entities"][0]["brand"] == "傲雷"
+    assert memory["confirmed_entities"][0]["model"] == "司令官2Ultra"
+
+
+@pytest.mark.asyncio
+async def test_content_profile_memory_includes_confirmed_entities_when_subject_domain_is_explicit(db_session):
+    job = Job(
+        id=uuid.uuid4(),
+        source_path="E:/videos/olight.mp4",
+        source_name="20260401_手电开箱.mp4",
+        status="needs_review",
+        channel_profile="edc_tactical",
+    )
+    db_session.add(job)
+    await db_session.flush()
+
+    await record_content_profile_feedback_memory(
+        db_session,
+        job=job,
+        draft_profile={
+            "subject_brand": "",
+            "subject_model": "",
+            "subject_type": "EDC手电",
+        },
+        final_profile={
+            "subject_brand": "傲雷",
+            "subject_model": "司令官2Ultra",
+            "subject_type": "EDC手电",
+            "search_queries": ["傲雷 司令官2Ultra"],
+        },
+        user_feedback={
+            "subject_brand": "傲雷",
+            "subject_model": "司令官2Ultra",
+        },
+    )
+    await db_session.flush()
+
+    memory = await load_content_profile_user_memory(db_session, subject_domain="edc")
+
+    assert any(
+        item["brand"] == "傲雷" and item["model"] == "司令官2Ultra"
+        for item in memory["confirmed_entities"]
+    )
+
+
 def test_content_profile_memory_cloud_prioritizes_specific_terms():
     cloud = build_content_profile_memory_cloud(
         {

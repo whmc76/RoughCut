@@ -52,7 +52,7 @@ export function ModelSettingsPanel({ form, options, runtimeEnvironment, serviceS
     label: getTranscriptionProviderLabel(provider),
   }));
   const modelDetailsOpen =
-    transcriptionProvider === "qwen_asr" ||
+    transcriptionProvider === "qwen3_asr" ||
     llmMode === "local" ||
     searchProvider !== "auto" ||
     searchFallbackProvider === "model" ||
@@ -77,7 +77,7 @@ export function ModelSettingsPanel({ form, options, runtimeEnvironment, serviceS
   const transcriptionModels = transcriptionCatalog.data?.models ?? options?.transcription_models?.[transcriptionProvider] ?? [];
   const reasoningModels = reasoningCatalog.data?.models ?? [];
   const fallbackModels = fallbackCatalog.data?.models ?? [];
-  const qwenStatus = serviceStatus?.services.qwen_asr;
+  const qwenStatus = serviceStatus?.services.qwen3_asr;
   const ollamaStatus = serviceStatus?.services.ollama;
   const qwenBaseUrl = qwenStatus?.base_url || String(form.qwen_asr_api_base_url ?? "");
   const qwenStatusLabel = qwenStatus ? getProviderStatusLabel(qwenStatus.status) : "";
@@ -164,7 +164,7 @@ export function ModelSettingsPanel({ form, options, runtimeEnvironment, serviceS
                     onChange={(event) => onChange("transcription_dialect", event.target.value)}
                     options={transcriptionDialects}
                   />
-                  {transcriptionProvider === "qwen_asr" && (
+                  {transcriptionProvider === "qwen3_asr" && (
                     <div className="muted">
                       服务地址：{qwenBaseUrl}
                       {qwenStatusLabel ? ` · ${qwenStatusLabel}` : ""}

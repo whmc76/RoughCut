@@ -4,6 +4,8 @@ from collections import OrderedDict
 from typing import Any
 import re
 
+from roughcut.edit.presets import normalize_workflow_template_name
+
 
 GlossaryTermLike = dict[str, Any]
 
@@ -61,6 +63,18 @@ _BAG_DOMESTIC_BRANDS: tuple[GlossaryTermLike, ...] = (
     {"correct_form": "BOLTBOAT", "wrong_forms": ["Boltboat", "BOLT BOAT"], "category": "bag_brand", "context_hint": "主流机能包品牌"},
     {"correct_form": "PSIGEAR", "wrong_forms": ["PSI GEAR", "PsiGear", "psiger", "混沌装备", "CHAOS GEAR", "Chaos Gear"], "category": "bag_brand", "context_hint": "主流战术/机能包品牌"},
     {"correct_form": "LIIGEAR", "wrong_forms": ["LiiGear", "LII GEAR", "Lii Gear"], "category": "bag_brand", "context_hint": "主流机能包品牌"},
+)
+
+_TOOLS_TERMS: tuple[GlossaryTermLike, ...] = (
+    *_TOOL_DOMESTIC_BRANDS,
+    {"correct_form": "工具钳", "wrong_forms": ["工具前", "工具钱"], "category": "tools", "context_hint": "多功能工具主体"},
+    {"correct_form": "多功能工具钳", "wrong_forms": ["多功能工具前"], "category": "tools", "context_hint": "多功能工具主体"},
+    {"correct_form": "钳头", "wrong_forms": ["前头"], "category": "tools", "context_hint": "工具钳结构"},
+    {"correct_form": "批头", "wrong_forms": ["披头"], "category": "tools", "context_hint": "工具配件"},
+    {"correct_form": "螺丝刀", "wrong_forms": ["罗丝刀", "螺四刀"], "category": "tools", "context_hint": "常见工具"},
+    {"correct_form": "扳手", "wrong_forms": ["板手"], "category": "tools", "context_hint": "常见工具"},
+    {"correct_form": "尖嘴钳", "wrong_forms": ["尖嘴前"], "category": "tools", "context_hint": "常见工具"},
+    {"correct_form": "钢丝钳", "wrong_forms": ["钢丝前"], "category": "tools", "context_hint": "常见工具"},
 )
 
 
@@ -201,11 +215,6 @@ _DOMAIN_TERM_LIBRARY: dict[str, tuple[GlossaryTermLike, ...]] = {
         {"correct_form": "延迟", "wrong_forms": ["言迟", "延时"], "category": "tech_term", "context_hint": "设备体验"},
         {"correct_form": "快充", "wrong_forms": ["快冲"], "category": "tech_term", "context_hint": "充电术语"},
         {"correct_form": "固件", "wrong_forms": ["顾件"], "category": "tech_term", "context_hint": "固件更新"},
-        {"correct_form": "RunningHub", "wrong_forms": ["running hub", "瑞宁哈布", "润宁哈布", "RH"], "category": "tech_brand", "context_hint": "AI创作平台"},
-        {"correct_form": "ComfyUI", "wrong_forms": ["comfy ui", "康菲UI", "康飞UI", "咖啡外"], "category": "tech_brand", "context_hint": "AI工作流工具"},
-        {"correct_form": "OpenClaw", "wrong_forms": ["open claw", "欧喷扣", "欧喷爪"], "category": "tech_brand", "context_hint": "AI Agent 框架"},
-        {"correct_form": "无限画布", "wrong_forms": ["无边画布", "无限画板"], "category": "tech_feature", "context_hint": "创作功能"},
-        {"correct_form": "节点编排", "wrong_forms": ["节点排布"], "category": "tech_feature", "context_hint": "工作流设计"},
     ),
     "ai": (
         {"correct_form": "提示词", "wrong_forms": ["提词", "提示辞"], "category": "tech_term", "context_hint": "Prompt"},
@@ -383,6 +392,7 @@ _DOMAIN_TERM_LIBRARY: dict[str, tuple[GlossaryTermLike, ...]] = {
         {"correct_form": "战术裤", "wrong_forms": ["站术裤"], "category": "wear", "context_hint": "机能穿搭"},
         {"correct_form": "通勤包", "wrong_forms": ["通情包"], "category": "wear", "context_hint": "装备穿搭"},
     ),
+    "tools": _TOOLS_TERMS,
 }
 
 _WORKFLOW_TEMPLATE_DOMAINS: dict[str, tuple[str, ...]] = {
@@ -393,8 +403,6 @@ _WORKFLOW_TEMPLATE_DOMAINS: dict[str, tuple[str, ...]] = {
     "gameplay_highlight": ("tech",),
     "food_explore": ("food",),
     "unboxing_standard": ("gear", "tech", "bag"),
-    "unboxing_limited": ("gear", "tech", "bag"),
-    "unboxing_upgrade": ("gear", "tech", "bag"),
     "news_briefing": ("news", "finance"),
     "market_watch": ("finance", "news"),
     "sports_highlight": ("sports",),
@@ -412,9 +420,10 @@ _DOMAIN_KEYWORDS: dict[str, tuple[str, ...]] = {
         "户外", "战术", "露营", "徒步", "营地", "快挂", "鞘套", "战术笔", "K鞘", "四百号", "即EDC", "如假包换",
     ),
     "edc": ("EDC", "FAS", "NOC", "REATE", "LEATHERMAN", "OLIGHT", "ZIPPO", "FENIX", "NITECORE", "NEXTORCH", "ACEBEAM", "LOOPGEAR", "SUPFIRE", "JETBEAM", "KLARUS", "WUBEN", "NexTool", "SATA", "LAOA", "WORKPRO", "SOG", "WARNA", "SQT顺全作", "GERBER", "RUIKE", "SANRENMU", "KIZER", "WE Knife", "CIVIVI", "BESTECH", "KUBEY", "REAL STEEL", "CJRB", "ARTISAN CUTLERY", "MAXACE", "MUNDUS", "MICROTECH", "tomtoc", "PGYTECH", "NIID", "COMBACK", "MADEN", "LEVEL8", "狐蝠工业", "头狼工业", "BOLTBOAT", "PSIGEAR", "LIIGEAR", "折刀", "刀", "钛", "柄材", "钢材", "背夹", "工具钳", "彩雕", "深雕", "顶配", "次顶配", "标配", "高配", "低配", "钢马", "锆马", "钛马", "铜马", "大马", "大马士革", "镜面", "雾面", "K鞘", "四百号", "即EDC"),
-    "tech": ("芯片", "显卡", "处理器", "续航", "屏幕", "相机", "手机", "笔记本", "耳机", "快充", "固件", "RunningHub", "ComfyUI", "OpenClaw", "无限画布", "节点编排"),
+    "tech": ("芯片", "显卡", "处理器", "续航", "屏幕", "相机", "手机", "笔记本", "耳机", "快充", "固件"),
     "ai": ("AI", "提示词", "工作流", "模型", "微调", "推理", "多模态", "智能体", "RAG", "LoRA", "Agent", "MCP", "Checkpoint", "ControlNet", "Flux", "RunningHub", "ComfyUI", "OpenClaw", "无限画布", "节点编排"),
     "coding": ("编程", "代码", "函数", "接口", "仓库", "提交", "分支", "调试", "报错", "部署", "脚本", "API"),
+    "tools": ("工具钳", "多功能工具钳", "钳头", "批头", "螺丝刀", "扳手", "尖嘴钳", "钢丝钳", "NexTool", "SATA", "LAOA", "WORKPRO", "SOG", "WARNA", "SQT顺全作", "GERBER"),
     "travel": ("旅行", "出行", "机票", "酒店", "民宿", "值机", "citywalk", "攻略", "景点", "登机"),
     "food": ("探店", "试吃", "口感", "锅气", "回甘", "拉花", "挂耳", "熟成", "奶茶", "火锅", "甜品", "烧烤"),
     "finance": ("财经", "金融", "利率", "汇率", "通胀", "降息", "加息", "美联储", "纳斯达克", "标普", "财报", "市盈率"),
@@ -441,25 +450,168 @@ _DOMAIN_COMPATIBILITY: dict[str, tuple[str, ...]] = {
     "outdoor": ("gear", "edc", "flashlight", "bag", "lighter", "tactical", "functional_wear"),
     "functional_wear": ("gear", "edc", "bag", "tactical", "outdoor"),
     "toy": ("gear", "edc"),
-    "tech": ("ai", "coding"),
-    "ai": ("tech", "coding"),
-    "coding": ("tech", "ai"),
+    "tools": ("edc", "outdoor"),
+    "functional": ("bag", "functional_wear"),
+    "tech": (),
+    "ai": ("coding",),
+    "coding": ("ai",),
     "finance": ("news",),
     "news": ("finance",),
 }
 
+_CANONICAL_DOMAIN_ALIASES: dict[str, str] = {
+    "digital": "tech",
+    "software": "ai",
+    "coding": "ai",
+    "gear": "edc",
+    "knife": "edc",
+    "flashlight": "edc",
+    "lighter": "edc",
+    "toy": "edc",
+    "bag": "functional",
+    "functional_wear": "functional",
+    "tool": "tools",
+}
+
+_CANONICAL_DOMAIN_SOURCES: dict[str, tuple[str, ...]] = {
+    "edc": ("edc", "gear", "knife", "flashlight", "lighter", "toy"),
+    "outdoor": ("outdoor", "tactical"),
+    "tech": ("tech",),
+    "ai": ("ai", "coding"),
+    "functional": ("bag", "functional_wear"),
+    "tools": ("tools",),
+    "travel": ("travel",),
+    "food": ("food",),
+    "finance": ("finance",),
+    "news": ("news",),
+    "sports": ("sports",),
+}
+
 _VISIBLE_DOMAIN_PACKS: tuple[str, ...] = (
-    "gear",
-    "bag",
+    "edc",
+    "outdoor",
     "tech",
     "ai",
-    "coding",
+    "functional",
+    "tools",
     "travel",
     "food",
     "finance",
     "news",
     "sports",
 )
+
+
+def _detect_glossary_signal_domains(
+    *,
+    workflow_template: str | None,
+    content_profile: dict[str, Any] | None = None,
+    subtitle_items: list[dict[str, Any]] | None = None,
+    source_name: str | None = None,
+    include_workflow_template: bool,
+) -> list[str]:
+    domains: list[str] = []
+    normalized_workflow_template = normalize_workflow_template_name(workflow_template)
+    if include_workflow_template:
+        for domain in _WORKFLOW_TEMPLATE_DOMAINS.get(normalized_workflow_template, ()):
+            if domain not in domains:
+                domains.append(domain)
+
+    declared_domain = normalize_subject_domain((content_profile or {}).get("subject_domain"))
+    if declared_domain and declared_domain not in domains:
+        domains.append(declared_domain)
+
+    haystacks: list[str] = []
+    if source_name:
+        haystacks.append(str(source_name))
+    for key in ("subject_brand", "subject_model", "subject_type", "video_theme", "summary", "hook_line"):
+        haystacks.append(str((content_profile or {}).get(key) or ""))
+    for item in subtitle_items or []:
+        haystacks.append(str(item.get("text_final") or item.get("text_norm") or item.get("text_raw") or ""))
+    joined = " ".join(haystacks).upper()
+    scores: dict[str, int] = {}
+    for domain, keywords in _DOMAIN_KEYWORDS.items():
+        score = 0
+        for keyword in keywords:
+            if keyword.upper() in joined:
+                score += 1 if len(keyword) <= 2 else 2
+        if score > 0:
+            scores[domain] = score
+
+    for domain, score in sorted(scores.items(), key=lambda item: (-item[1], item[0])):
+        threshold = 1 if domain in {"gear", "edc"} else 2
+        if score >= threshold and domain not in domains:
+            domains.append(domain)
+    return domains
+
+
+def normalize_subject_domain(value: str | None) -> str | None:
+    normalized = str(value or "").strip().lower()
+    if not normalized:
+        return None
+    return _CANONICAL_DOMAIN_ALIASES.get(normalized, normalized)
+
+
+def canonicalize_domains(domains: list[str] | tuple[str, ...] | set[str] | None) -> list[str]:
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for domain in domains or []:
+        canonical = normalize_subject_domain(domain)
+        if canonical and canonical not in seen:
+            seen.add(canonical)
+            ordered.append(canonical)
+    if "functional" in seen:
+        ordered = [domain for domain in ordered if domain != "edc"]
+        seen.discard("edc")
+    if "tools" in seen:
+        ordered = [domain for domain in ordered if domain != "edc"]
+        seen.discard("edc")
+    return ordered
+
+
+def select_primary_subject_domain(domains: list[str] | tuple[str, ...] | set[str] | None) -> str | None:
+    scores: dict[str, int] = {}
+    for domain in domains or []:
+        normalized = str(domain or "").strip().lower()
+        canonical = normalize_subject_domain(normalized)
+        if not canonical:
+            continue
+        weight = 1
+        if normalized in {"bag", "functional_wear"}:
+            weight = 4
+        elif normalized in {"tools", "tool"}:
+            weight = 4
+        elif normalized in {"ai", "coding", "software"}:
+            weight = 4
+        elif normalized in {"tech", "digital"}:
+            weight = 4
+        elif normalized in {"outdoor", "tactical"}:
+            weight = 3
+        elif normalized in {"knife", "flashlight", "lighter", "toy", "edc"}:
+            weight = 3
+        elif normalized == "gear":
+            weight = 1
+        scores[canonical] = scores.get(canonical, 0) + weight
+
+    if not scores:
+        canonical = canonicalize_domains(domains)
+        return canonical[0] if canonical else None
+
+    priority = {
+        "functional": 6,
+        "tools": 5,
+        "ai": 4,
+        "tech": 3,
+        "edc": 3,
+        "outdoor": 2,
+        "food": 1,
+        "travel": 1,
+        "finance": 1,
+        "news": 1,
+        "sports": 1,
+    }
+    ranked = sorted(scores.items(), key=lambda item: (-item[1], -priority.get(item[0], 0), item[0]))
+    return ranked[0][0]
 
 
 def resolve_builtin_glossary_terms(
@@ -469,11 +621,12 @@ def resolve_builtin_glossary_terms(
     subtitle_items: list[dict[str, Any]] | None = None,
     source_name: str | None = None,
 ) -> list[GlossaryTermLike]:
-    domains = detect_glossary_domains(
+    domains = _detect_glossary_signal_domains(
         workflow_template=workflow_template,
         content_profile=content_profile,
         subtitle_items=subtitle_items,
         source_name=source_name,
+        include_workflow_template=False,
     )
     merged: list[GlossaryTermLike] = []
     for domain in _expand_compatible_domains(domains):
@@ -490,14 +643,14 @@ def filter_scoped_glossary_terms(
     subtitle_items: list[dict[str, Any]] | None = None,
     source_name: str | None = None,
 ) -> list[GlossaryTermLike]:
-    detected_domains = set(
-        detect_glossary_domains(
-            workflow_template=workflow_template,
-            content_profile=content_profile,
-            subtitle_items=subtitle_items,
-            source_name=source_name,
-        )
+    raw_detected_domains = detect_glossary_domains(
+        workflow_template=workflow_template,
+        content_profile=content_profile,
+        subtitle_items=subtitle_items,
+        source_name=source_name,
     )
+    detected_domains = set(raw_detected_domains)
+    detected_domains.update(canonicalize_domains(raw_detected_domains))
     filtered: list[GlossaryTermLike] = []
     for term in terms or []:
         scope_type = str(term.get("scope_type") or "global").strip() or "global"
@@ -505,10 +658,10 @@ def filter_scoped_glossary_terms(
         if scope_type == "global":
             filtered.append(term)
             continue
-        if scope_type == "workflow_template" and workflow_template and scope_value == workflow_template:
-            filtered.append(term)
-            continue
-        if scope_type == "domain" and scope_value in detected_domains:
+        if scope_type == "domain" and (
+            scope_value in detected_domains
+            or (normalize_subject_domain(scope_value) or "") in detected_domains
+        ):
             filtered.append(term)
             continue
     return filtered
@@ -550,49 +703,19 @@ def detect_glossary_domains(
     subtitle_items: list[dict[str, Any]] | None = None,
     source_name: str | None = None,
 ) -> list[str]:
-    domains: list[str] = []
-    for domain in _WORKFLOW_TEMPLATE_DOMAINS.get(str(workflow_template or "").strip(), ()):
-        if domain not in domains:
-            domains.append(domain)
-
-    declared_domain = str((content_profile or {}).get("subject_domain") or "").strip().lower()
-    if declared_domain and declared_domain not in domains:
-        domains.append(declared_domain)
-
-    haystacks: list[str] = []
-    if source_name:
-        haystacks.append(str(source_name))
-    for key in ("subject_brand", "subject_model", "subject_type", "video_theme", "summary", "hook_line"):
-        haystacks.append(str((content_profile or {}).get(key) or ""))
-    for item in subtitle_items or []:
-        haystacks.append(str(item.get("text_final") or item.get("text_norm") or item.get("text_raw") or ""))
-    joined = " ".join(haystacks).upper()
-    scores: dict[str, int] = {}
-    for domain, keywords in _DOMAIN_KEYWORDS.items():
-        score = 0
-        for keyword in keywords:
-            if keyword.upper() in joined:
-                score += 1 if len(keyword) <= 2 else 2
-        if score > 0:
-            scores[domain] = score
-
-    for domain, score in sorted(scores.items(), key=lambda item: (-item[1], item[0])):
-        threshold = 1 if domain in {"gear", "edc"} else 2
-        if score >= threshold and domain not in domains:
-            domains.append(domain)
-
-    if any(domain in domains for domain in ("gear", "edc", "toy", "knife", "flashlight", "lighter", "tactical", "outdoor", "functional_wear")):
-        domains = ["gear", *[domain for domain in domains if domain != "gear"]]
-    if any(domain in domains for domain in ("tech", "ai", "coding")) and "tech" not in domains:
-        domains = ["tech", *domains]
-
-    if not domains:
-        domains.append("tech")
-    return domains
+    return canonicalize_domains(
+        _detect_glossary_signal_domains(
+            workflow_template=workflow_template,
+            content_profile=content_profile,
+            subtitle_items=subtitle_items,
+            source_name=source_name,
+            include_workflow_template=False,
+        )
+    )
 
 
 def build_domain_signal_summary(domains: list[str]) -> str:
-    ordered = [domain for domain in domains if domain in _DOMAIN_TERM_LIBRARY]
+    ordered = [domain for domain in canonicalize_domains(domains) if domain]
     return ", ".join(ordered)
 
 
@@ -614,7 +737,7 @@ def list_builtin_glossary_packs() -> list[dict[str, Any]]:
         presets = sorted(
             preset
             for preset, domains in _WORKFLOW_TEMPLATE_DOMAINS.items()
-            if domain in domains
+            if domain in canonicalize_domains(domains)
         )
         packs.append(
             {
@@ -630,7 +753,12 @@ def list_builtin_glossary_packs() -> list[dict[str, Any]]:
 def _expand_compatible_domains(domains: list[str]) -> list[str]:
     ordered: list[str] = []
     seen: set[str] = set()
-    queue = [domain for domain in domains if domain]
+    queue: list[str] = []
+    for domain in domains if domains else []:
+        normalized = str(domain or "").strip().lower()
+        if not normalized:
+            continue
+        queue.extend(_CANONICAL_DOMAIN_SOURCES.get(normalize_subject_domain(normalized) or normalized, (normalized,)))
     while queue:
         domain = queue.pop(0)
         if domain in seen:

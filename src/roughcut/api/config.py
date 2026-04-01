@@ -33,6 +33,8 @@ from roughcut.config import (
     get_settings,
     get_session_secret_override_keys,
     load_runtime_overrides,
+    canonicalize_transcription_provider_name,
+    normalize_transcription_provider_name,
     normalize_transcription_settings,
 )
 from roughcut.config_profiles import (
@@ -552,7 +554,7 @@ def patch_config(body: ConfigPatch):
             ),
         )
     if "transcription_provider" in updates:
-        provider = str(updates["transcription_provider"]).strip().lower()
+        provider = canonicalize_transcription_provider_name(updates["transcription_provider"])
         if provider not in TRANSCRIPTION_MODEL_OPTIONS:
             raise HTTPException(
                 status_code=400,

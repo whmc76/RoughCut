@@ -15,6 +15,7 @@ from roughcut.db.models import Artifact, GlossaryTerm, Job, JobStep, RenderOutpu
 from roughcut.media.probe import MediaMeta
 from roughcut.pipeline.steps import (
     _get_cover_seek,
+    _infer_subject_domain_for_memory,
     _load_latest_artifact,
     _load_latest_optional_artifact,
     _resolve_subtitle_split_profile,
@@ -22,6 +23,7 @@ from roughcut.pipeline.steps import (
     _record_source_integrity,
     _select_cover_source_video,
     _select_preferred_content_profile_artifact,
+    _workflow_template_subject_domain,
     run_ai_director,
     run_avatar_commentary,
     run_content_profile,
@@ -131,6 +133,49 @@ def test_resolve_subtitle_split_profile_prefers_faster_portrait_subtitles():
     assert portrait["max_chars"] < landscape["max_chars"]
     assert portrait["max_chars"] == 12
     assert landscape["max_chars"] == 18
+
+
+def test_workflow_template_subject_domain_does_not_treat_templates_as_domains():
+    assert _workflow_template_subject_domain("unboxing_standard") is None
+    assert _workflow_template_subject_domain("tutorial_standard") is None
+    assert _workflow_template_subject_domain("edc_tactical") is None
+
+
+def test_infer_subject_domain_for_memory_uses_current_content_evidence():
+    assert _infer_subject_domain_for_memory(
+        workflow_template="unboxing_standard",
+        subtitle_items=[{"text_final": "今天开箱这个手电，重点看泛光、聚光和夜骑补光。"}],
+        content_profile={},
+        source_name="20260209-124735.mp4",
+    ) == "edc"
+
+    assert _infer_subject_domain_for_memory(
+        workflow_template="unboxing_standard",
+        subtitle_items=[{"text_final": "今天主要演示节点编排、工作流和模型推理。"}],
+        content_profile={},
+        source_name="demo.mp4",
+    ) == "ai"
+
+    assert _infer_subject_domain_for_memory(
+        workflow_template="review_standard",
+        subtitle_items=[{"text_final": "今天主要聊这台手机的屏幕、芯片、相机和续航。"}],
+        content_profile={},
+        source_name="phone.mp4",
+    ) == "tech"
+
+    assert _infer_subject_domain_for_memory(
+        workflow_template="unboxing_standard",
+        subtitle_items=[{"text_final": "这次重点看机能包的分仓、挂点和通勤穿搭。"}],
+        content_profile={},
+        source_name="bag.mp4",
+    ) == "functional"
+
+    assert _infer_subject_domain_for_memory(
+        workflow_template="unboxing_standard",
+        subtitle_items=[{"text_final": "今天开箱这把工具钳，重点看钳头、批头和螺丝刀。"}],
+        content_profile={},
+        source_name="tool.mp4",
+    ) == "tools"
 
 
 def test_record_source_integrity_writes_debug_report(tmp_path: Path):
@@ -984,6 +1029,7 @@ async def test_run_content_profile_does_not_trust_seeded_profile_without_current
 
     factory = async_sessionmaker(db_engine, expire_on_commit=False)
     job_id = uuid.uuid4()
+    source_path = Path(__file__)
     fake_review_bot = _FakeTelegramReviewBotService()
 
     async with factory() as session:
@@ -1037,8 +1083,23 @@ async def test_run_content_profile_does_not_trust_seeded_profile_without_current
         profile["engagement_question"] = "你更看重 UV 还是主灯？"
         return profile
 
+    async def fake_resolve_source(*args, **kwargs):
+        return source_path
+
+    async def fake_infer_content_profile(**kwargs):
+        return {
+            "subject_brand": "Loop¶��",
+            "subject_model": "SK05����Pro UV��",
+            "subject_type": "�ֵ�",
+            "video_theme": "�ֵ翪������",
+            "engagement_question": "\u4f60\u66f4\u770b\u91cd UV \u8fd8\u662f\u4e3b\u706f\uff1f",
+            "workflow_template": "edc_tactical",
+        }
+
     monkeypatch.setattr(steps_mod, "load_content_profile_user_memory", fake_load_content_profile_user_memory)
     monkeypatch.setattr(steps_mod, "enrich_content_profile", fake_enrich_content_profile)
+    monkeypatch.setattr(steps_mod, "_resolve_source", fake_resolve_source)
+    monkeypatch.setattr(steps_mod, "infer_content_profile", fake_infer_content_profile)
 
     result = await run_content_profile(str(job_id))
 
@@ -1053,6 +1114,119 @@ async def test_run_content_profile_does_not_trust_seeded_profile_without_current
         assert draft.data_json["subject_brand"] in {"", None}
         assert draft.data_json["subject_model"] in {"", None}
         assert draft.data_json["engagement_question"] == "你更看重 UV 还是主灯？"
+
+    assert fake_review_bot.content_profile_notifications == [job_id]
+
+
+@pytest.mark.asyncio
+async def test_run_content_profile_reinfers_fresh_when_old_profile_artifact_exists(db_engine, monkeypatch, tmp_path: Path):
+    import roughcut.pipeline.steps as steps_mod
+
+    factory = async_sessionmaker(db_engine, expire_on_commit=False)
+    job_id = uuid.uuid4()
+    source_path = tmp_path / "source.mp4"
+    source_path.write_bytes(b"video")
+    fake_review_bot = _FakeTelegramReviewBotService()
+    infer_calls: list[dict[str, object]] = []
+
+    async with factory() as session:
+        session.add(
+            Job(
+                id=job_id,
+                source_path="jobs/demo/source.mp4",
+                source_name="source.mp4",
+                status="processing",
+                language="zh-CN",
+                channel_profile="edc_tactical",
+            )
+        )
+        session.add(JobStep(job_id=job_id, step_name="content_profile", status="running"))
+        session.add(JobStep(job_id=job_id, step_name="summary_review", status="pending"))
+        session.add(
+            Artifact(
+                job_id=job_id,
+                artifact_type="content_profile",
+                data_json={
+                    "subject_brand": "COMFYUI",
+                    "subject_model": "",
+                    "subject_type": "AI图像工作流工具",
+                    "video_theme": "COMFYUI 工作流演示",
+                },
+            )
+        )
+        session.add(
+            SubtitleItem(
+                job_id=job_id,
+                version=1,
+                item_index=0,
+                start_time=0.0,
+                end_time=1.0,
+                text_raw="今天我们收到了一个新的手电筒",
+                text_norm="今天我们收到了一个新的手电筒",
+                text_final="今天我们收到了一个新的手电筒",
+            )
+        )
+        session.add(
+            SubtitleItem(
+                job_id=job_id,
+                version=1,
+                item_index=1,
+                start_time=1.0,
+                end_time=2.0,
+                text_raw="今天收到 OLIGHT Arkflex 这个新手电筒",
+                text_norm="今天收到 OLIGHT Arkflex 这个新手电筒",
+                text_final="今天收到 OLIGHT Arkflex 这个新手电筒",
+            )
+        )
+        await session.commit()
+
+    monkeypatch.setattr(steps_mod, "get_session_factory", lambda: factory)
+    monkeypatch.setattr(steps_mod, "get_telegram_review_bot_service", lambda: fake_review_bot)
+
+    async def fake_load_content_profile_user_memory(*args, **kwargs):
+        return {}
+
+    async def fake_resolve_source(*args, **kwargs):
+        return source_path
+
+    async def fake_infer_content_profile(**kwargs):
+        infer_calls.append(kwargs)
+        return {
+            "subject_brand": "OLIGHT",
+            "subject_model": "Arkflex",
+            "subject_type": "手电筒",
+            "video_theme": "OLIGHT Arkflex 手电开箱",
+            "engagement_question": "你会拿它做 EDC 吗？",
+            "workflow_template": "edc_tactical",
+        }
+
+    async def fail_enrich_content_profile(**kwargs):
+        raise AssertionError("run_content_profile should not seed from an older same-job content profile artifact")
+
+    monkeypatch.setattr(steps_mod, "load_content_profile_user_memory", fake_load_content_profile_user_memory)
+    monkeypatch.setattr(steps_mod, "_resolve_source", fake_resolve_source)
+    monkeypatch.setattr(steps_mod, "infer_content_profile", fake_infer_content_profile)
+    monkeypatch.setattr(steps_mod, "enrich_content_profile", fail_enrich_content_profile)
+
+    result = await run_content_profile(str(job_id))
+
+    assert infer_calls
+    assert result["subject_brand"] == "OLIGHT"
+    assert result["subject_model"] in {"Arkflex", "", None}
+    assert "COMFYUI" not in str(result.get("video_theme") or "").upper()
+
+    async with factory() as session:
+        draft = (
+            await session.execute(
+                select(Artifact)
+                .where(Artifact.job_id == job_id, Artifact.artifact_type == "content_profile_draft")
+                .order_by(Artifact.created_at.desc(), Artifact.id.desc())
+            )
+        ).scalars().first()
+        assert draft is not None
+        assert draft.data_json["subject_brand"] == "OLIGHT"
+        assert draft.data_json["subject_model"] in {"Arkflex", "", None}
+        assert "COMFYUI" not in str(draft.data_json.get("video_theme") or "").upper()
 
     assert fake_review_bot.content_profile_notifications == [job_id]
 
@@ -1902,3 +2076,21 @@ def test_select_preferred_content_profile_artifact_prefers_final_over_newer_work
     selected = _select_preferred_content_profile_artifact([draft, final, working_copy])
 
     assert selected is final
+
+
+def test_select_preferred_content_profile_artifact_prefers_latest_draft_over_older_working_copy():
+    base_time = datetime(2026, 3, 12, 15, 0, tzinfo=timezone.utc)
+    working_copy = Artifact(
+        artifact_type="content_profile",
+        created_at=base_time,
+        data_json={"kind": "content"},
+    )
+    draft = Artifact(
+        artifact_type="content_profile_draft",
+        created_at=base_time + timedelta(seconds=5),
+        data_json={"kind": "draft"},
+    )
+
+    selected = _select_preferred_content_profile_artifact([working_copy, draft])
+
+    assert selected is draft

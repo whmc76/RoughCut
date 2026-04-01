@@ -243,12 +243,12 @@ def test_get_config_options_exposes_transcription_model_lists():
     assert any(item["key"] == "ai_director" and item["status"] == "active" for item in options.creative_mode_catalog["enhancement_modes"])
     assert any(item["key"] == "multilingual_translation" and item["status"] == "active" for item in options.creative_mode_catalog["enhancement_modes"])
     assert any(item["key"] == "auto_review" and item["status"] == "active" for item in options.creative_mode_catalog["enhancement_modes"])
-    assert "local_whisper" in options.transcription_models
-    assert options.transcription_models["local_whisper"][0] == "large-v3"
+    assert "faster_whisper" in options.transcription_models
+    assert options.transcription_models["faster_whisper"][0] == "large-v3"
     assert "openai" in options.transcription_models
     assert options.transcription_models["openai"] == ["gpt-4o-transcribe", "gpt-4o-mini-transcribe"]
-    assert options.transcription_models["qwen_asr"] == ["qwen3-asr-1.7b"]
-    assert "large-v3" in options.transcription_models["local_whisper"]
+    assert options.transcription_models["qwen3_asr"] == ["qwen3-asr-1.7b"]
+    assert "large-v3" in options.transcription_models["faster_whisper"]
     assert any(item["value"] == "unboxing_standard" for item in options.workflow_templates)
     assert all(item["value"] != "edc_tactical" for item in options.workflow_templates)
     assert any(item["value"] == "ollama" for item in options.multimodal_fallback_providers)
@@ -286,7 +286,7 @@ def test_get_service_status_reports_local_runtime_endpoints(monkeypatch):
 
     assert status.services["ollama"].status == "ok"
     assert status.services["ollama"].base_url == "http://127.0.0.1:11434"
-    assert status.services["qwen_asr"].status == "ok"
+    assert status.services["qwen3_asr"].status == "ok"
     assert status.services["openai"].status == "configured"
 
 
@@ -403,14 +403,14 @@ def test_patch_config_accepts_qwen_asr_provider(tmp_path, monkeypatch):
 
     cfg = patch_config(
         ConfigPatch(
-            transcription_provider="qwen_asr",
+            transcription_provider="qwen3_asr",
             transcription_model="qwen3-asr-1.7b",
             transcription_dialect="beijing",
             qwen_asr_api_base_url="http://127.0.0.1:18096",
         )
     )
 
-    assert cfg.transcription_provider == "qwen_asr"
+    assert cfg.transcription_provider == "qwen3_asr"
     assert cfg.transcription_model == "qwen3-asr-1.7b"
     assert cfg.transcription_dialect == "beijing"
 
@@ -625,7 +625,7 @@ def test_patch_config_persists_to_database_without_override_file(tmp_path, monke
     config_mod._settings = None
     settings = get_settings()
 
-    assert settings.transcription_provider == "qwen_asr"
+    assert settings.transcription_provider == "qwen3_asr"
     assert settings.transcription_model == "qwen3-asr-1.7b"
     assert settings.transcription_dialect == "beijing"
     assert settings.quality_auto_rerun_enabled is False

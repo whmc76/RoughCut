@@ -7,7 +7,7 @@ from roughcut.providers import factory as provider_factory
 def test_transcription_provider_cache_reuses_instance(monkeypatch):
     provider_factory._TRANSCRIPTION_PROVIDER_CACHE.clear()
 
-    settings = Settings(_env_file=None, transcription_provider="local_whisper", transcription_model="base")
+    settings = Settings(_env_file=None, transcription_provider="faster_whisper", transcription_model="base")
     monkeypatch.setattr(provider_factory, "get_settings", lambda: settings)
 
     created: list[str] = []
@@ -63,7 +63,7 @@ def test_transcription_provider_supports_funasr(monkeypatch):
 def test_transcription_provider_supports_qwen_asr(monkeypatch):
     provider_factory._TRANSCRIPTION_PROVIDER_CACHE.clear()
 
-    settings = Settings(_env_file=None, transcription_provider="qwen_asr", transcription_model="qwen3-asr-1.7b")
+    settings = Settings(_env_file=None, transcription_provider="qwen3_asr", transcription_model="qwen3-asr-1.7b")
     monkeypatch.setattr(provider_factory, "get_settings", lambda: settings)
 
     created: list[str] = []
@@ -86,3 +86,15 @@ def test_transcription_provider_supports_qwen_asr(monkeypatch):
 
     assert first is second
     assert created == ["qwen3-asr-1.7b"]
+
+
+def test_resolve_transcription_provider_plan_falls_back_by_priority():
+    assert provider_factory.resolve_transcription_provider_plan(
+        provider="openai",
+        model="gpt-4o-transcribe",
+    ) == [
+        ("openai", "gpt-4o-transcribe"),
+        ("qwen3_asr", "qwen3-asr-1.7b"),
+        ("funasr", "sensevoice-small"),
+        ("faster_whisper", "large-v3"),
+    ]

@@ -47,7 +47,7 @@ def test_build_render_plan_custom():
         ai_director_plan={"voiceover_segments": [{"segment_id": "director_hook"}]},
         avatar_commentary_plan={"segments": [{"segment_id": "avatar_1"}]},
     )
-    assert plan["workflow_preset"] == "unboxing_upgrade"
+    assert plan["workflow_preset"] == "unboxing_standard"
     assert plan["loudness"]["target_lufs"] == -16.0
     assert plan["voice_processing"]["noise_reduction"] is False
     assert plan["subtitles"]["style"] == "white_minimal"

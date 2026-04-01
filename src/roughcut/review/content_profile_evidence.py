@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 
@@ -13,3 +13,5 @@ class IdentityEvidenceBundle:
     visual_hints: dict[str, Any]
     visible_text_hints: dict[str, Any]
     profile_identity: dict[str, Any]
+    visual_cluster_hints: dict[str, Any] = field(default_factory=dict)
+    memory_confirmed_hints: dict[str, Any] = field(default_factory=dict)

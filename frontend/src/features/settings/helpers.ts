@@ -8,16 +8,16 @@ export const PROVIDER_LABELS: Record<string, string> = {
   minimax: "MiniMax",
   ollama: "Ollama",
   openai: "OpenAI",
-  qwen_asr: "Qwen ASR",
+  qwen3_asr: "Qwen3 ASR",
   runninghub: "RunningHub",
   searxng: "SearXNG",
 };
 
 export const TRANSCRIPTION_PROVIDER_LABELS: Record<string, string> = {
   funasr: "FunASR (local)",
-  local_whisper: "Faster Whisper (local)",
+  faster_whisper: "Faster Whisper (local)",
   openai: "OpenAI (api)",
-  qwen_asr: "Qwen ASR (local)",
+  qwen3_asr: "Qwen3 ASR (local)",
 };
 
 function readString(form: SettingsForm, key: string, fallback = ""): string {
@@ -33,7 +33,7 @@ export function getTranscriptionProviderLabel(value: string): string {
 }
 
 export function isLocalTranscriptionProvider(value: string): boolean {
-  return value === "funasr" || value === "local_whisper" || value === "qwen_asr";
+  return value === "funasr" || value === "faster_whisper" || value === "qwen3_asr";
 }
 
 export function getProviderStatusLabel(status: string): string {

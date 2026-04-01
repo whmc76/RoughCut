@@ -8,10 +8,13 @@ from roughcut.review.content_profile_candidates import IdentityCandidate
 _CURRENT_EVIDENCE_WEIGHTS: dict[str, int] = {
     "transcript": 4,
     "source_name": 3,
+    "visual_cluster": 4,
     "visual": 3,
     "visible_text": 2,
+    "memory_confirmed": 2,
     "profile": 0,
 }
+_NON_CURRENT_EVIDENCE_SOURCES = {"profile", "memory_confirmed"}
 
 
 @dataclass(frozen=True)
@@ -52,7 +55,7 @@ def score_identity_candidates(
         sources.add(candidate.source_type)
         weight = _CURRENT_EVIDENCE_WEIGHTS.get(candidate.source_type, 0)
         current["total_score"] += weight
-        if candidate.source_type != "profile":
+        if candidate.source_type not in _NON_CURRENT_EVIDENCE_SOURCES:
             current["current_evidence_score"] += weight
         if len(str(candidate.value)) > len(str(current["value"])):
             current["value"] = candidate.value
@@ -67,7 +70,7 @@ def score_identity_candidates(
                 normalized_value=normalized,
                 total_score=int(item["total_score"]),
                 current_evidence_score=int(item["current_evidence_score"]),
-                current_source_count=sum(1 for source in sources if source != "profile"),
+                current_source_count=sum(1 for source in sources if source not in _NON_CURRENT_EVIDENCE_SOURCES),
                 all_sources=sources,
             )
         )

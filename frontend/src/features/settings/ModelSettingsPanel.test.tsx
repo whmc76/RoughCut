@@ -30,7 +30,7 @@ const SAMPLE_OPTIONS: ConfigOptions = {
   },
   transcription_models: {
     openai: ["gpt-4o-transcribe"],
-    qwen_asr: ["qwen3-asr-1.7b"],
+    qwen3_asr: ["qwen3-asr-1.7b"],
   },
   multimodal_fallback_providers: [
     { value: "ollama", label: "Ollama" },
@@ -66,7 +66,7 @@ const SAMPLE_SERVICE_STATUS: ProviderServiceStatus = {
   checked_at: "2026-03-31T12:00:00Z",
   services: {
     ollama: { name: "ollama", base_url: "http://127.0.0.1:11434", status: "ok", error: null },
-    qwen_asr: { name: "qwen_asr", base_url: "http://127.0.0.1:18096", status: "ok", error: null },
+    qwen3_asr: { name: "qwen3_asr", base_url: "http://127.0.0.1:18096", status: "ok", error: null },
   },
 };
 
@@ -88,7 +88,7 @@ function renderPanel(form: SettingsForm) {
 describe("ModelSettingsPanel", () => {
   beforeEach(() => {
     vi.mocked(api.getModelCatalog).mockImplementation(async ({ provider, kind, refresh }) => {
-      if (provider === "qwen_asr") {
+      if (provider === "qwen3_asr") {
         return {
           provider,
           kind,
@@ -128,7 +128,7 @@ describe("ModelSettingsPanel", () => {
 
   it("shows qwen asr endpoint and model dropdown when qwen provider is active", async () => {
     const form: SettingsForm = {
-      transcription_provider: "qwen_asr",
+      transcription_provider: "qwen3_asr",
       transcription_model: "qwen3-asr-1.7b",
       transcription_dialect: "beijing",
       qwen_asr_api_base_url: "http://127.0.0.1:18096",
@@ -144,14 +144,14 @@ describe("ModelSettingsPanel", () => {
     expect(screen.getByText("转写")).toBeInTheDocument();
     expect(screen.getByText("推理")).toBeInTheDocument();
     expect(screen.getByText("搜索")).toBeInTheDocument();
-    expect(screen.getAllByText("Qwen ASR (local)").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Qwen3 ASR (local)").length).toBeGreaterThan(0);
     expect(screen.getByText("转写、推理与搜索细节")).toBeInTheDocument();
     await waitFor(() => expect(screen.getByText(/服务地址：http:\/\/127.0.0.1:18096/)).toBeInTheDocument());
     expect(screen.getByLabelText("转写模型")).toHaveValue("qwen3-asr-1.7b");
     expect(screen.getByRole("button", { name: "刷新转写模型" })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "刷新转写模型" }));
     await waitFor(() =>
-      expect(api.getModelCatalog).toHaveBeenCalledWith({ provider: "qwen_asr", kind: "transcription", refresh: true }),
+      expect(api.getModelCatalog).toHaveBeenCalledWith({ provider: "qwen3_asr", kind: "transcription", refresh: true }),
     );
   });
 

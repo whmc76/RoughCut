@@ -7,7 +7,8 @@ from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from roughcut.db.models import Artifact, FactClaim, JobStep, SubtitleCorrection, SubtitleItem, TranscriptSegment
-from roughcut.providers.factory import get_transcription_provider
+from roughcut.config import get_settings
+from roughcut.providers.factory import get_transcription_provider, resolve_transcription_provider_plan
 from roughcut.providers.transcription.base import TranscriptResult, TranscriptionProgressCallback
 from roughcut.review.subtitle_memory import apply_domain_term_corrections
 
@@ -15,6 +16,41 @@ from roughcut.review.subtitle_memory import apply_domain_term_corrections
 def _is_brand_like_term(term: dict) -> bool:
     category = str(term.get("category") or "").strip().lower()
     return bool(category and "brand" in category)
+
+
+async def execute_transcription_plan(
+    *,
+    audio_path: Path,
+    language: str,
+    prompt: str | None,
+    provider_plan: list[tuple[str, str]],
+    progress_callback: TranscriptionProgressCallback | None = None,
+) -> tuple[TranscriptResult, str, str, list[dict[str, str]]]:
+    attempt_errors: list[dict[str, str]] = []
+    for provider_name, model_name in provider_plan:
+        try:
+            provider = get_transcription_provider(provider=provider_name, model=model_name)
+            result = await provider.transcribe(
+                audio_path,
+                language=language,
+                prompt=prompt,
+                progress_callback=progress_callback,
+            )
+            return result, provider_name, model_name, attempt_errors
+        except Exception as exc:
+            attempt_errors.append(
+                {
+                    "provider": provider_name,
+                    "model": model_name,
+                    "error": str(exc),
+                }
+            )
+
+    failure_summary = "; ".join(
+        f"{item['provider']}/{item['model']}: {item['error']}"
+        for item in attempt_errors
+    )
+    raise RuntimeError(f"All transcription providers failed: {failure_summary}")
 
 
 async def transcribe_audio(
@@ -32,11 +68,16 @@ async def transcribe_audio(
     Transcribe audio using the configured TranscriptionProvider.
     Writes TranscriptSegment rows and an artifact to the DB.
     """
-    provider = get_transcription_provider()
-    result = await provider.transcribe(
-        audio_path,
+    settings = get_settings()
+    provider_plan = resolve_transcription_provider_plan(
+        provider=settings.transcription_provider,
+        model=settings.transcription_model,
+    )
+    result, selected_provider, selected_model, attempt_errors = await execute_transcription_plan(
+        audio_path=audio_path,
         language=language,
         prompt=prompt,
+        provider_plan=provider_plan,
         progress_callback=progress_callback,
     )
 
@@ -76,6 +117,16 @@ async def transcribe_audio(
             "language": result.language,
             "duration": result.duration,
             "segment_count": len(result.segments),
+            "provider": selected_provider,
+            "model": selected_model,
+            "attempts": [
+                *attempt_errors,
+                *(
+                    [{"provider": selected_provider, "model": selected_model, "error": ""}]
+                    if selected_provider
+                    else []
+                ),
+            ],
         },
     )
     session.add(artifact)

@@ -20,39 +20,6 @@ class WorkflowPreset:
 
 
 PRESETS: dict[str, WorkflowPreset] = {
-    "unboxing_default": WorkflowPreset(
-        name="unboxing_default",
-        label="开箱标准版",
-        description="通用开箱/体验视频，强调主体识别、信息准确和节奏流畅。",
-        subtitle_goal="修正品牌型号，保留口播节奏，去掉明显 ASR 错词和无意义口头禅，把开箱体验说清楚。",
-        subtitle_tone="口语化、利落、可信，不要编造参数。",
-        cover_style="tech_showcase",
-        cover_variant_count=5,
-        cover_accent="开箱细节拉满",
-        content_kind="unboxing",
-    ),
-    "unboxing_limited": WorkflowPreset(
-        name="unboxing_limited",
-        label="限定收藏版",
-        description="适合限定版、联名版、生肖款等主题，强调稀缺性和设计元素。",
-        subtitle_goal="突出限定属性、工艺细节和收藏价值，品牌型号必须准确。",
-        subtitle_tone="有兴奋感，但不要夸张空喊。",
-        cover_style="collection_drop",
-        cover_variant_count=5,
-        cover_accent="限定款值不值",
-        content_kind="unboxing",
-    ),
-    "unboxing_upgrade": WorkflowPreset(
-        name="unboxing_upgrade",
-        label="升级对比版",
-        description="适合升级款、改版、战术版、2.0 等主题，强调变化点。",
-        subtitle_goal="突出升级点、改版逻辑和体验变化，避免重复废话。",
-        subtitle_tone="判断明确、信息密度高。",
-        cover_style="upgrade_spotlight",
-        cover_variant_count=5,
-        cover_accent="这次升级到位吗",
-        content_kind="unboxing",
-    ),
     "edc_tactical": WorkflowPreset(
         name="edc_tactical",
         label="EDC 战术版",
@@ -155,6 +122,10 @@ PRESETS: dict[str, WorkflowPreset] = {
 }
 
 LEGACY_PRESET_ALIASES = {
+    "screen_tutorial": "tutorial_standard",
+    "unboxing_default": "unboxing_standard",
+    "unboxing_limited": "unboxing_standard",
+    "unboxing_upgrade": "unboxing_standard",
     "talking_head_commentary_v2": "commentary_focus",
 }
 
@@ -184,9 +155,6 @@ def normalize_workflow_template_name(name: str | None) -> str:
 
 
 def get_workflow_preset(name: str | None) -> WorkflowPreset:
-    raw = str(name or "").strip().lower()
-    if raw and raw in PRESETS:
-        return PRESETS[raw]
     normalized = normalize_workflow_template_name(name)
     if normalized in PRESETS:
         return PRESETS[normalized]
@@ -215,9 +183,6 @@ def select_workflow_template(
     subject_type: str = "",
     transcript_hint: str = "",
 ) -> WorkflowPreset:
-    raw_override = str(workflow_template or "").strip().lower()
-    if raw_override in PRESETS:
-        return PRESETS[raw_override]
     normalized_override = normalize_workflow_template_name(workflow_template)
     if normalized_override in PRESETS:
         return PRESETS[normalized_override]
@@ -240,10 +205,6 @@ def select_workflow_template(
             return PRESETS[template_name]
 
     if normalized_kind == "unboxing":
-        if any(keyword in haystack for keyword in ("限定", "联名", "生肖", "纪念", "lunar", "limited")):
-            return PRESETS["unboxing_limited"]
-        if any(keyword in haystack for keyword in ("升级", "改版", "2.0", "升级版", "新版")):
-            return PRESETS["unboxing_upgrade"]
         if any(keyword in haystack for keyword in ("刀", "edc", "战术", "tactical", "钛", "柄", "锁")):
             return PRESETS["edc_tactical"]
         return PRESETS["unboxing_standard"]
@@ -258,10 +219,6 @@ def select_workflow_template(
         return PRESETS["gameplay_highlight"]
     if any(keyword in haystack for keyword in ("探店", "试吃", "美食", "餐厅", "咖啡", "奶茶", "火锅", "烧烤", "甜品", "口感")):
         return PRESETS["food_explore"]
-    if any(keyword in haystack for keyword in ("限定", "联名", "生肖", "纪念", "lunar", "limited")):
-        return PRESETS["unboxing_limited"]
-    if any(keyword in haystack for keyword in ("升级", "改版", "2.0", "升级版", "新版")):
-        return PRESETS["unboxing_upgrade"]
     if any(keyword in haystack for keyword in ("刀", "edc", "战术", "tactical", "钛", "柄", "锁")):
         return PRESETS["edc_tactical"]
     return PRESETS["unboxing_standard"]

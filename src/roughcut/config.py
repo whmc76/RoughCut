@@ -53,11 +53,25 @@ ENV_EXPLICIT_OVERRIDE_SETTINGS: tuple[str, ...] = ENV_MANAGED_SETTINGS + (
     "transcription_dialect",
     "qwen_asr_api_base_url",
 )
+TRANSCRIPTION_PROVIDER_ALIASES: dict[str, str] = {
+    "fast": "faster_whisper",
+    "faster-whisper": "faster_whisper",
+    "local_whisper": "faster_whisper",
+    "qwen3-asr": "qwen3_asr",
+    "qwen3asr": "qwen3_asr",
+    "qwen_asr": "qwen3_asr",
+}
+TRANSCRIPTION_PROVIDER_PRIORITY: tuple[str, ...] = (
+    "openai",
+    "qwen3_asr",
+    "funasr",
+    "faster_whisper",
+)
 TRANSCRIPTION_MODEL_OPTIONS: dict[str, list[str]] = {
     "funasr": [
         "sensevoice-small",
     ],
-    "local_whisper": [
+    "faster_whisper": [
         "large-v3",
         "base",
         "small",
@@ -68,16 +82,16 @@ TRANSCRIPTION_MODEL_OPTIONS: dict[str, list[str]] = {
         "gpt-4o-transcribe",
         "gpt-4o-mini-transcribe",
     ],
-    "qwen_asr": [
+    "qwen3_asr": [
         "qwen3-asr-1.7b",
     ],
 }
 DEFAULT_TRANSCRIPTION_PROVIDER = "openai"
 DEFAULT_TRANSCRIPTION_MODELS: dict[str, str] = {
     "funasr": "sensevoice-small",
-    "local_whisper": "large-v3",
+    "faster_whisper": "large-v3",
     "openai": "gpt-4o-transcribe",
-    "qwen_asr": "qwen3-asr-1.7b",
+    "qwen3_asr": "qwen3-asr-1.7b",
 }
 AVATAR_PROVIDER_OPTIONS: tuple[str, ...] = ("heygem",)
 VOICE_PROVIDER_OPTIONS: tuple[str, ...] = ("indextts2", "runninghub")
@@ -147,7 +161,7 @@ class Settings(BaseSettings):
     cleanup_heygem_temp_on_terminal: bool = True
 
     # Transcription
-    transcription_provider: str = DEFAULT_TRANSCRIPTION_PROVIDER  # openai | local_whisper | funasr | qwen_asr
+    transcription_provider: str = DEFAULT_TRANSCRIPTION_PROVIDER  # openai | qwen3_asr | funasr | faster_whisper
     transcription_model: str = DEFAULT_TRANSCRIPTION_MODELS[DEFAULT_TRANSCRIPTION_PROVIDER]
     transcription_dialect: str = DEFAULT_TRANSCRIPTION_DIALECT
     qwen_asr_api_base_url: str = "http://127.0.0.1:18096"
@@ -341,10 +355,20 @@ _settings: Settings | None = None
 _session_secret_overrides: dict[str, Any] = {}
 
 
-def normalize_transcription_settings(provider: object, model: object) -> tuple[str, str]:
+def canonicalize_transcription_provider_name(provider: object) -> str:
     provider_value = str(provider or DEFAULT_TRANSCRIPTION_PROVIDER).strip().lower() or DEFAULT_TRANSCRIPTION_PROVIDER
+    return TRANSCRIPTION_PROVIDER_ALIASES.get(provider_value, provider_value)
+
+
+def normalize_transcription_provider_name(provider: object) -> str:
+    provider_value = canonicalize_transcription_provider_name(provider)
     if provider_value not in TRANSCRIPTION_MODEL_OPTIONS:
         provider_value = DEFAULT_TRANSCRIPTION_PROVIDER
+    return provider_value
+
+
+def normalize_transcription_settings(provider: object, model: object) -> tuple[str, str]:
+    provider_value = normalize_transcription_provider_name(provider)
 
     model_value = str(model or "").strip()
     allowed_models = TRANSCRIPTION_MODEL_OPTIONS[provider_value]
@@ -352,6 +376,22 @@ def normalize_transcription_settings(provider: object, model: object) -> tuple[s
         model_value = DEFAULT_TRANSCRIPTION_MODELS[provider_value]
 
     return provider_value, model_value
+
+
+def resolve_transcription_provider_plan(provider: object, model: object) -> list[tuple[str, str]]:
+    provider_value, model_value = normalize_transcription_settings(provider, model)
+    try:
+        start_index = TRANSCRIPTION_PROVIDER_PRIORITY.index(provider_value)
+    except ValueError:
+        start_index = 0
+
+    plan: list[tuple[str, str]] = []
+    for index, candidate in enumerate(TRANSCRIPTION_PROVIDER_PRIORITY):
+        if index < start_index:
+            continue
+        candidate_model = model_value if candidate == provider_value else DEFAULT_TRANSCRIPTION_MODELS[candidate]
+        plan.append((candidate, candidate_model))
+    return plan
 
 
 def get_settings() -> Settings:
