@@ -50,7 +50,7 @@ const AVATAR_SIZE_SCHEMES = [
     value: "balanced",
     label: "平衡",
     scale: 0.22,
-    note: "默认推荐，兼顾可见性和主画面完整性。",
+    note: "常用推荐，兼顾可见性和主画面完整性。",
   },
   {
     value: "focus",
@@ -361,7 +361,7 @@ export function CreativeSettingsPanel({ form, config, runtimeEnvironment, option
                 value={currentOverlayBorderColor}
                 onChange={(event) => savePackagingConfig.mutate({ avatar_overlay_border_color: event.target.value })}
               />
-              <div className="muted">圆角和边框会直接进入成片画中画渲染，不是预览样式。</div>
+              <div className="muted">这些画中画项会直接写入包装配置并参与成片渲染，系统设置重置时也会一并恢复默认值。</div>
             </div>
           </div>
         </details>

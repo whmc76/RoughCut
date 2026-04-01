@@ -5,6 +5,7 @@ export const packagingApi = {
   getPackaging: () => request<PackagingLibrary>("/packaging"),
   patchPackagingConfig: (body: Record<string, unknown>) =>
     request<PackagingLibrary>("/packaging/config", { method: "PATCH", body: JSON.stringify(body) }),
+  resetPackagingConfig: () => request<PackagingLibrary>("/packaging/config", { method: "DELETE" }),
   uploadPackagingAsset: async (assetType: string, file: File) => {
     const formData = new FormData();
     formData.append("file", file);

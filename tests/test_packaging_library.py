@@ -146,6 +146,38 @@ def test_packaging_library_defaults_match_new_overlay_layout(tmp_path, monkeypat
     assert payload["config"]["avatar_overlay_scale"] == 0.18
 
 
+def test_packaging_library_reset_restores_defaults_but_keeps_assets(tmp_path, monkeypatch):
+    monkeypatch.setattr(library, "PACKAGING_ROOT", tmp_path)
+    monkeypatch.setattr(library, "MANIFEST_PATH", tmp_path / "manifest.json")
+
+    intro = library.save_packaging_asset(
+        asset_type="intro",
+        filename="intro.mp4",
+        payload=b"intro",
+    )
+    library.update_packaging_config(
+        {
+            "intro_asset_id": intro["id"],
+            "avatar_overlay_position": "bottom_left",
+            "avatar_overlay_scale": 0.26,
+            "avatar_overlay_corner_radius": 32,
+            "avatar_overlay_border_width": 6,
+            "avatar_overlay_border_color": "#FFFFFF",
+        }
+    )
+
+    config = library.reset_packaging_config()
+    state = library.list_packaging_assets()
+
+    assert config["intro_asset_id"] is None
+    assert config["avatar_overlay_position"] == "top_right"
+    assert config["avatar_overlay_scale"] == 0.18
+    assert config["avatar_overlay_corner_radius"] == 26
+    assert config["avatar_overlay_border_width"] == 4
+    assert config["avatar_overlay_border_color"] == "#F4E4B8"
+    assert len(state["assets"]["intro"]) == 1
+
+
 def test_packaging_library_music_selection_prefers_ai_domain_over_template_name(tmp_path, monkeypatch):
     monkeypatch.setattr(library, "PACKAGING_ROOT", tmp_path)
     monkeypatch.setattr(library, "MANIFEST_PATH", tmp_path / "manifest.json")

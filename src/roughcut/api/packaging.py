@@ -8,6 +8,7 @@ from roughcut.packaging.library import (
     delete_packaging_asset,
     get_packaging_asset,
     list_packaging_assets,
+    reset_packaging_config,
     save_packaging_asset,
     update_packaging_config,
 )
@@ -60,4 +61,10 @@ def patch_packaging_config(body: PackagingConfigPatch):
         update_packaging_config(body.model_dump(exclude_none=True))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return list_packaging_assets()
+
+
+@router.delete("/config", response_model=PackagingLibraryOut)
+def delete_packaging_config():
+    reset_packaging_config()
     return list_packaging_assets()

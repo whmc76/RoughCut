@@ -424,6 +424,14 @@ def update_packaging_config(patch: dict[str, Any]) -> dict[str, Any]:
     return state["config"]
 
 
+def reset_packaging_config() -> dict[str, Any]:
+    state = _load_state()
+    assets_by_id = {item["id"]: item for item in state["assets"]}
+    state["config"] = _normalize_config(dict(DEFAULT_CONFIG), assets_by_id)
+    _save_state(state)
+    return state["config"]
+
+
 def resolve_packaging_plan_for_job(job_id: str, *, content_profile: dict[str, Any] | None = None) -> dict[str, Any]:
     state = _load_state()
     config = dict(DEFAULT_CONFIG)

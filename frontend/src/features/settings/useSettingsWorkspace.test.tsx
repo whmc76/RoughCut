@@ -12,6 +12,7 @@ const mockApi = vi.hoisted(() => ({
   getConfigProfiles: vi.fn(),
   patchConfig: vi.fn(),
   resetConfig: vi.fn(),
+  resetPackagingConfig: vi.fn(),
 }));
 
 vi.mock("../../api", () => ({
@@ -232,6 +233,7 @@ describe("useSettingsWorkspace", () => {
       ...payload,
     }));
     mockApi.resetConfig.mockResolvedValue({});
+    mockApi.resetPackagingConfig.mockResolvedValue({});
   });
 
   afterEach(() => {
@@ -292,5 +294,18 @@ describe("useSettingsWorkspace", () => {
     expect(result.current.form.telegram_agent_codex_command).toBe("codex");
     expect(result.current.form.acp_bridge_backend).toBe("codex");
     expect(result.current.form.acp_bridge_fallback_backend).toBe("claude");
+  });
+
+  it("resets config and packaging-backed settings together", async () => {
+    const { result } = renderHookWithQueryClient(() => useSettingsWorkspace());
+
+    await waitFor(() => expect(result.current.config.data).toEqual(SAMPLE_CONFIG));
+
+    await act(async () => {
+      result.current.reset.mutate();
+    });
+
+    await waitFor(() => expect(mockApi.resetConfig).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(mockApi.resetPackagingConfig).toHaveBeenCalledTimes(1));
   });
 });

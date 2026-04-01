@@ -828,7 +828,7 @@ async def test_send_review_message_sends_text_then_thumbnail_context(monkeypatch
         "get_settings",
         lambda: SimpleNamespace(
             telegram_agent_enabled=True,
-            telegram_remote_review_enabled=False,
+            telegram_remote_review_enabled=True,
             telegram_bot_chat_id="123",
             telegram_bot_token="token",
             telegram_bot_api_base_url="https://api.telegram.org",
@@ -890,7 +890,7 @@ async def test_send_review_message_sends_multiple_thumbnails_as_media_group(monk
         "get_settings",
         lambda: SimpleNamespace(
             telegram_agent_enabled=True,
-            telegram_remote_review_enabled=False,
+            telegram_remote_review_enabled=True,
             telegram_bot_chat_id="123",
             telegram_bot_token="token",
             telegram_bot_api_base_url="https://api.telegram.org",
@@ -1000,7 +1000,7 @@ async def test_send_review_message_attaches_final_review_reply_markup(monkeypatc
         "get_settings",
         lambda: SimpleNamespace(
             telegram_agent_enabled=True,
-            telegram_remote_review_enabled=False,
+            telegram_remote_review_enabled=True,
             telegram_bot_chat_id="123",
             telegram_bot_token="token",
             telegram_bot_api_base_url="https://api.telegram.org",
@@ -1045,7 +1045,7 @@ async def test_send_review_message_skips_duplicate_payload(monkeypatch):
         "get_settings",
         lambda: SimpleNamespace(
             telegram_agent_enabled=True,
-            telegram_remote_review_enabled=False,
+            telegram_remote_review_enabled=True,
             telegram_bot_chat_id="123",
             telegram_bot_token="token",
             telegram_bot_api_base_url="https://api.telegram.org",
@@ -1063,6 +1063,39 @@ async def test_send_review_message_skips_duplicate_payload(monkeypatch):
     result = await service._send_review_message("final_review", job_id, "重复内容")
 
     assert result == {"sent": False, "round_number": 3, "round_label": "第三次复核"}
+    assert sent_texts == []
+    service._record_review_delivery.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_send_review_message_does_not_send_review_when_remote_review_disabled(monkeypatch):
+    service = TelegramReviewBotService()
+    job_id = uuid.uuid4()
+    sent_texts: list[str] = []
+
+    monkeypatch.setattr(
+        telegram_bot,
+        "get_settings",
+        lambda: SimpleNamespace(
+            telegram_agent_enabled=True,
+            telegram_remote_review_enabled=False,
+            telegram_bot_chat_id="123",
+            telegram_bot_token="token",
+            telegram_bot_api_base_url="https://api.telegram.org",
+        ),
+    )
+
+    async def fake_send_text(text: str, *, reply_markup=None):
+        sent_texts.append(text)
+        return 99
+
+    service._send_text = fake_send_text
+    service._resolve_review_delivery = AsyncMock(return_value=(True, 1, "第一次审核"))
+    service._record_review_delivery = AsyncMock()
+
+    result = await service._send_review_message("content_profile", job_id, "不应发送")
+
+    assert result == {"sent": False, "round_number": 1, "round_label": "第一次审核"}
     assert sent_texts == []
     service._record_review_delivery.assert_not_called()
 

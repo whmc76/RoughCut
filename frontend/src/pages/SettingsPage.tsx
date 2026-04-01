@@ -15,15 +15,17 @@ export function SettingsPage() {
   const { t } = useI18n();
   const workspace = useSettingsWorkspace();
   const activeReasoningProvider = getActiveReasoningProvider(workspace.form);
-  const advancedCreativeSummary = `${String(workspace.form.avatar_provider ?? "未设置")} + ${String(workspace.form.voice_provider ?? "未设置")}`;
-  const telegramEnabled = Boolean(workspace.form.telegram_remote_review_enabled) || Boolean(workspace.form.telegram_agent_enabled);
-  const advancedSectionOpen = telegramEnabled;
-  const runtimeSectionOpen = telegramEnabled;
-  const advancedSummary = [advancedCreativeSummary, telegramEnabled ? "Telegram / Agent 已启用" : "Telegram / Agent 未启用"].join(" · ");
-  const runtimeSummary = [
+  const telegramReviewEnabled = Boolean(workspace.form.telegram_remote_review_enabled);
+  const telegramAgentEnabled = Boolean(workspace.form.telegram_agent_enabled);
+  const automationSummary = [
+    `${String(workspace.form.avatar_provider ?? "未设置")} + ${String(workspace.form.voice_provider ?? "未设置")}`,
+    telegramReviewEnabled ? "Telegram 审核已启用" : "Telegram 审核关闭",
+    telegramAgentEnabled ? "Telegram Agent 已启用" : "Telegram Agent 关闭",
+  ].join(" · ");
+  const environmentSummary = [
     `推理 ${getProviderLabel(activeReasoningProvider)}`,
     getSearchSummary(workspace.form),
-    telegramEnabled ? "Telegram / Agent 已启用" : "Telegram / Agent 未启用",
+    `输出 ${String(workspace.runtimeEnvironment.data?.output_dir ?? "output")}`,
   ].join(" · ");
   const saveTone =
     workspace.saveState === "saving" ? "running" : workspace.saveState === "error" ? "failed" : workspace.saveState === "saved" ? "done" : "";
@@ -37,15 +39,15 @@ export function SettingsPage() {
           : t("autosave.idle");
 
   return (
-    <section className="page-stack">
+    <section className="page-stack settings-page">
       <PageHeader
         eyebrow={t("settings.page.eyebrow")}
         title={t("settings.page.title")}
         description={t("settings.page.description")}
         summary={[
-          { label: "基础优先", value: "总览、模型、质量", detail: "先稳定核心产出，再打开更深层的接入设置" },
-          { label: "高级收敛", value: "运行接入与工程能力", detail: "Telegram、Agent 和数字人配置放到后段，避免首屏过载" },
-          { label: "保存方式", value: "自动保存", detail: "状态会直接反映当前配置是否已经落盘" },
+          { label: "核心链路", value: "转写 / 推理 / 搜索", detail: "配置、Provider 状态和检测动作在同一章完成" },
+          { label: "质量策略", value: "审核 / 复跑 / 默认行为", detail: "把影响产出的规则与接入概念分开" },
+          { label: "扩展自动化", value: "环境 / 数字人 / Telegram", detail: "保留工程能力，但不再藏在模糊的接入区" },
         ]}
         actions={
           <>
@@ -56,14 +58,14 @@ export function SettingsPage() {
           </>
         }
       />
-      {workspace.saveError && <div className="notice top-gap">{workspace.saveError}</div>}
+      {workspace.saveError ? <div className="notice top-gap">{workspace.saveError}</div> : null}
 
       <PageSection
-        eyebrow="核心"
-        title="先稳定核心产出设置"
-        description="优先处理总览、模型和质量，这些配置直接决定任务默认表现。"
+        eyebrow="Core"
+        title="核心链路与 Provider"
+        description="先决定转写、推理和搜索如何跑，再直接看到每个 Provider 的状态、凭据来源和检测结果。"
       >
-        <div className="panel-grid">
+        <div className="settings-section-stack">
           <SettingsOverviewPanel
             form={workspace.form}
             config={workspace.config.data}
@@ -73,82 +75,59 @@ export function SettingsPage() {
           />
           <ModelSettingsPanel
             form={workspace.form}
+            config={workspace.config.data}
             options={workspace.options.data}
             runtimeEnvironment={workspace.runtimeEnvironment.data}
             serviceStatus={workspace.serviceStatus.data}
             onChange={(key, value) => workspace.setForm((prev) => ({ ...prev, [key]: value }))}
           />
-          <QualitySettingsPanel form={workspace.form} config={workspace.config.data} onChange={(key, value) => workspace.setForm((prev) => ({ ...prev, [key]: value }))} />
         </div>
       </PageSection>
 
       <PageSection
-        eyebrow="接入"
-        title="接入、自动化与高级工程能力"
-        description="接入层和自动化能力放在后段，只在需要联动外部服务或增强能力时展开。"
+        eyebrow="Quality"
+        title="质量与默认策略"
+        description="把审核阈值、低分复跑和默认规则单独放一章，避免和 Provider 配置相互干扰。"
       >
-        <details className="settings-disclosure settings-page-runtime" open={runtimeSectionOpen}>
-          <summary className="settings-disclosure-trigger">
-            <div>
-              <strong>接入与执行设置</strong>
-              <div className="muted">{runtimeSummary}</div>
-            </div>
-          </summary>
-          <div className="settings-disclosure-body">
-            <RuntimeSettingsPanel
+        <QualitySettingsPanel
+          form={workspace.form}
+          config={workspace.config.data}
+          onChange={(key, value) => workspace.setForm((prev) => ({ ...prev, [key]: value }))}
+        />
+      </PageSection>
+
+      <PageSection
+        eyebrow="Automation"
+        title="扩展与自动化"
+        description="运行环境、数字人和 Telegram/Agent 放在后段，但保持语义明确，不再用一个大而空的接入模块承载。"
+      >
+        <div className="settings-section-stack">
+          <RuntimeSettingsPanel
+            form={workspace.form}
+            config={workspace.config.data}
+            runtimeEnvironment={workspace.runtimeEnvironment.data}
+            serviceStatus={workspace.serviceStatus.data}
+            onChange={(key, value) => workspace.setForm((prev) => ({ ...prev, [key]: value }))}
+          />
+          <section className="panel settings-extension-panel">
+            <PanelHeader title="数字人与配音能力" description={environmentSummary} />
+            <CreativeSettingsPanel
               form={workspace.form}
               config={workspace.config.data}
               runtimeEnvironment={workspace.runtimeEnvironment.data}
-              serviceStatus={workspace.serviceStatus.data}
+              options={workspace.options.data}
               onChange={(key, value) => workspace.setForm((prev) => ({ ...prev, [key]: value }))}
             />
-            <details className="settings-disclosure settings-page-advanced" open={advancedSectionOpen}>
-              <summary className="settings-disclosure-trigger">
-                <div>
-                  <strong>高级工程设置</strong>
-                  <div className="muted">{advancedSummary}</div>
-                </div>
-              </summary>
-              <div className="settings-disclosure-body">
-                <PanelHeader title="高级设置" description="数字人、Telegram 和工程执行细节。" />
-                <div className="accordion-stack">
-                  <details className="settings-disclosure">
-                    <summary className="settings-disclosure-trigger">
-                      <div>
-                        <strong>增强能力</strong>
-                        <div className="muted">数字人、配音、画中画</div>
-                      </div>
-                    </summary>
-                    <div className="settings-disclosure-body">
-                      <CreativeSettingsPanel
-                        form={workspace.form}
-                        config={workspace.config.data}
-                        runtimeEnvironment={workspace.runtimeEnvironment.data}
-                        options={workspace.options.data}
-                        onChange={(key, value) => workspace.setForm((prev) => ({ ...prev, [key]: value }))}
-                      />
-                    </div>
-                  </details>
-                  <details className="settings-disclosure" open={telegramEnabled}>
-                    <summary className="settings-disclosure-trigger">
-                      <div>
-                        <strong>Telegram 与 Agent</strong>
-                        <div className="muted">远程审核与工程执行</div>
-                      </div>
-                    </summary>
-                    <div className="settings-disclosure-body">
-                      <BotSettingsPanel
-                        form={workspace.form}
-                        config={workspace.config.data}
-                        onChange={(key, value) => workspace.setForm((prev) => ({ ...prev, [key]: value }))}
-                      />
-                    </div>
-                  </details>
-                </div>
-              </div>
-            </details>
-          </div>
-        </details>
+          </section>
+          <section className="panel settings-extension-panel">
+            <PanelHeader title="Telegram 与 Agent 自动化" description={automationSummary} />
+            <BotSettingsPanel
+              form={workspace.form}
+              config={workspace.config.data}
+              onChange={(key, value) => workspace.setForm((prev) => ({ ...prev, [key]: value }))}
+            />
+          </section>
+        </div>
       </PageSection>
     </section>
   );

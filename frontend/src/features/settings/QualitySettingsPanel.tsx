@@ -52,10 +52,12 @@ export function QualitySettingsPanel({ form, config, onChange }: QualitySettings
       />
       <div className="form-stack">
         <CheckboxField
-          label="启用事实核查"
+          label="启用事实核查（预留）"
           checked={Boolean(form.fact_check_enabled)}
+          disabled
           onChange={(event) => onChange("fact_check_enabled", event.target.checked)}
         />
+        <div className="muted">事实核查配置项目前未接入任务运行链路，保留显示仅用于兼容旧配置，不会影响当前任务执行。</div>
         <CheckboxField
           label="允许自动确认内容画像"
           checked={autoConfirmEnabled}

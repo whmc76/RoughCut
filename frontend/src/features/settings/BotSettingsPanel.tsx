@@ -15,14 +15,16 @@ export function BotSettingsPanel({ form, config, onChange }: BotSettingsPanelPro
   const reviewEnabled = Boolean(form.telegram_remote_review_enabled);
   const agentEnabled = Boolean(form.telegram_agent_enabled);
   const claudeEnabled = Boolean(form.telegram_agent_claude_enabled);
+  const transportEnabled = reviewEnabled || agentEnabled;
   const chatId = String(form.telegram_bot_chat_id ?? "");
+  const botTokenReady = Boolean(config?.telegram_bot_token_set);
 
   return (
     <div className="form-stack">
       <section className="panel">
         <PanelHeader
           title="Telegram Bot 远程审核"
-          description="把待审核内容推送到指定聊天并接收回复。"
+          description="只控制内容摘要、字幕、成片这些审核通知；Bot Token 同时供远程审核和下方 Telegram Agent 共用。"
         />
         <div className="form-stack">
           <CheckboxField
@@ -30,7 +32,7 @@ export function BotSettingsPanel({ form, config, onChange }: BotSettingsPanelPro
             checked={reviewEnabled}
             onChange={(event) => onChange("telegram_remote_review_enabled", event.target.checked)}
           />
-          {reviewEnabled ? (
+          {transportEnabled ? (
             <>
               <TextField
                 label="Telegram Bot API Base URL"
@@ -45,19 +47,30 @@ export function BotSettingsPanel({ form, config, onChange }: BotSettingsPanelPro
                 onChange={(event) => onChange("telegram_bot_token", event.target.value)}
                 placeholder={config?.telegram_bot_token_set ? "已设置，留空则不更新" : "留空则不更新"}
               />
-              <TextField
-                label="审核接收 Chat ID"
-                value={chatId}
-                onChange={(event) => onChange("telegram_bot_chat_id", event.target.value)}
-                placeholder="例如 123456789 或 -100xxxxxxxxxx"
-              />
-              <div className="notice">
-                <div>当前状态：{config?.telegram_bot_token_set && chatId ? "已启用并具备推送条件" : "已启用，但 Token / Chat ID 还不完整"}</div>
-                <div className="muted compact-top">建议先让目标账号给 Bot 发一条消息，再回填 chat id。</div>
-              </div>
+              {reviewEnabled ? (
+                <>
+                  <TextField
+                    label="审核接收 Chat ID"
+                    value={chatId}
+                    onChange={(event) => onChange("telegram_bot_chat_id", event.target.value)}
+                    placeholder="例如 123456789 或 -100xxxxxxxxxx"
+                  />
+                  <div className="notice">
+                    <div>当前状态：{botTokenReady && chatId ? "已启用并具备推送条件" : "已启用，但 Token / Chat ID 还不完整"}</div>
+                    <div className="muted compact-top">建议先让目标账号给 Bot 发一条消息，再回填 chat id。</div>
+                  </div>
+                </>
+              ) : agentEnabled ? (
+                <div className="notice">
+                  <div>当前状态：{botTokenReady ? "Agent 已具备 Telegram 轮询条件" : "Agent 已启用，但 Bot Token 还未配置"}</div>
+                  <div className="muted compact-top">远程审核关闭时不会发送审核消息，但 Agent 仍需要 Bot Token 来接收 Telegram 命令。</div>
+                </div>
+              ) : null}
             </>
           ) : (
-            <div className="muted">未启用时隐藏 Token 和 Chat ID。</div>
+            <div className="muted">
+              {agentEnabled ? "远程审核关闭；即使下方 Agent 开启，也不会推送内容摘要 / 字幕 / 成片审核。" : "远程审核关闭，不会推送内容摘要 / 字幕 / 成片审核。"}
+            </div>
           )}
         </div>
       </section>
@@ -65,7 +78,7 @@ export function BotSettingsPanel({ form, config, onChange }: BotSettingsPanelPro
       <section className="panel">
         <PanelHeader
           title="Telegram Agent 工程任务"
-          description="控制工程任务如何通过 ACP、Codex、Claude 执行。"
+          description="只控制 Telegram 命令、工程任务分流和结果回推，不会触发审核通知。"
         />
         <div className="form-stack">
           <CheckboxField
@@ -178,7 +191,9 @@ export function BotSettingsPanel({ form, config, onChange }: BotSettingsPanelPro
               </details>
             </>
           ) : (
-            <div className="muted">未启用时收起执行器和 ACP 参数。</div>
+            <div className="muted">
+              {reviewEnabled ? "Agent 关闭；仍可使用上方 Telegram 远程审核。" : "Agent 关闭，不会接管 Telegram 命令或工程任务。"}
+            </div>
           )}
         </div>
       </section>

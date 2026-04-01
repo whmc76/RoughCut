@@ -118,12 +118,17 @@ export function useSettingsWorkspace() {
   });
 
   const reset = useMutation({
-    mutationFn: api.resetConfig,
+    mutationFn: async () => {
+      await Promise.all([api.resetConfig(), api.resetPackagingConfig()]);
+    },
     onSuccess: async () => {
       requestVersionRef.current += 1;
       setSaveState("idle");
       setSaveError(null);
-      await queryClient.invalidateQueries({ queryKey: ["config"] });
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["config"] }),
+        queryClient.invalidateQueries({ queryKey: ["packaging"] }),
+      ]);
     },
   });
 

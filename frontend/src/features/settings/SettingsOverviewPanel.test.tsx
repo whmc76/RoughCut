@@ -213,6 +213,7 @@ describe("SettingsOverviewPanel", () => {
     expect(screen.getByText("标准方案")).toBeTruthy();
     expect(screen.getByText(/当前设置与方案存在 2 项差异/)).toBeTruthy();
     expect(screen.getByText(/设置 database · 方案 database · 包装 database/)).toBeTruthy();
+    expect(screen.getByText(/事实核查未接入/)).toBeTruthy();
     expect(screen.getByText("推理模型")).toBeTruthy();
     expect(screen.getByText(/gpt-4.1 -> gpt-4.1-mini/)).toBeTruthy();
     expect(screen.getByText("文案风格")).toBeTruthy();

@@ -87,20 +87,18 @@ describe("SettingsPage", () => {
     vi.clearAllMocks();
   });
 
-  it("keeps advanced engineering settings collapsed by default", () => {
+  it("organizes settings into core, quality, and automation chapters", () => {
     mockUseSettingsWorkspace.mockReturnValue(buildWorkspace());
 
     render(<SettingsPage />);
 
-    const runtimeDetails = screen.getByText("接入与执行设置").closest("details");
-    const advancedDetails = screen.getByText("高级工程设置").closest("details");
-    expect(runtimeDetails).not.toHaveAttribute("open");
-    expect(advancedDetails).not.toHaveAttribute("open");
-    expect(screen.getByText(/推理 OpenAI · 自动跟随 OpenAI，失败回退 SearXNG/)).toBeInTheDocument();
-    expect(screen.getByText("heygem + indextts2 · Telegram / Agent 未启用")).toBeInTheDocument();
+    expect(screen.getByText("核心链路与 Provider")).toBeInTheDocument();
+    expect(screen.getByText("质量与默认策略")).toBeInTheDocument();
+    expect(screen.getByText("扩展与自动化")).toBeInTheDocument();
+    expect(screen.queryByText("接入与执行设置")).not.toBeInTheDocument();
   });
 
-  it("auto-expands advanced engineering settings when telegram automation is enabled", () => {
+  it("still distinguishes telegram review from telegram agent in the automation summary", () => {
     mockUseSettingsWorkspace.mockReturnValue(
       buildWorkspace({
         form: {
@@ -114,10 +112,7 @@ describe("SettingsPage", () => {
 
     render(<SettingsPage />);
 
-    const runtimeDetails = screen.getByText("接入与执行设置").closest("details");
-    const advancedDetails = screen.getByText("高级工程设置").closest("details");
-    expect(runtimeDetails).toHaveAttribute("open");
-    expect(advancedDetails).toHaveAttribute("open");
-    expect(screen.getByText("heygem + indextts2 · Telegram / Agent 已启用")).toBeInTheDocument();
+    expect(screen.getByText(/Telegram 审核已启用/)).toBeInTheDocument();
+    expect(screen.getByText(/Telegram Agent 关闭/)).toBeInTheDocument();
   });
 });

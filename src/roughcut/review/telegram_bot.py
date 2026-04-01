@@ -33,7 +33,12 @@ from roughcut.review.subtitle_memory import build_transcription_prompt
 from roughcut.review.content_profile import build_reviewed_transcript_excerpt
 from roughcut.review.report import generate_report
 from roughcut.telegram.commands import handle_telegram_command, handle_telegram_freeform_request
-from roughcut.telegram.policy import is_allowed_chat, telegram_agent_enabled
+from roughcut.telegram.policy import (
+    is_allowed_chat,
+    telegram_agent_enabled,
+    telegram_review_enabled,
+    telegram_service_enabled,
+)
 from roughcut.telegram.task_service import (
     get_agent_task_status,
     mark_task_notified,
@@ -312,7 +317,7 @@ class TelegramReviewBotService:
 
     async def notify_content_profile_review(self, job_id: uuid.UUID) -> None:
         settings = get_settings()
-        if not _telegram_ready(settings):
+        if not _telegram_review_ready(settings):
             return
 
         factory = get_session_factory()
@@ -348,7 +353,7 @@ class TelegramReviewBotService:
 
     async def notify_subtitle_review(self, job_id: uuid.UUID, *, force_full_review: bool = False) -> None:
         settings = get_settings()
-        if not _telegram_ready(settings):
+        if not _telegram_review_ready(settings):
             return
 
         message = ""
@@ -445,7 +450,7 @@ class TelegramReviewBotService:
 
     async def notify_final_review(self, job_id: uuid.UUID) -> None:
         settings = get_settings()
-        if not _telegram_ready(settings):
+        if not _telegram_review_ready(settings):
             return
 
         factory = get_session_factory()
@@ -506,7 +511,7 @@ class TelegramReviewBotService:
     async def _run(self) -> None:
         while True:
             settings = get_settings()
-            if not _telegram_ready(settings):
+            if not _telegram_service_ready(settings):
                 await asyncio.sleep(10)
                 continue
             try:
@@ -545,8 +550,15 @@ class TelegramReviewBotService:
         text = _message_text(message)
         text_lower = text.lower()
         if text_lower in {"/start", "/help"}:
+            settings = get_settings()
+            review_enabled = telegram_review_enabled(settings)
+            agent_enabled = telegram_agent_enabled(settings)
+            service_parts = [
+                "远程审核已启用" if review_enabled else "远程审核未启用",
+                "Telegram Agent 已启用" if agent_enabled else "Telegram Agent 未启用",
+            ]
             await self._send_chat_text(
-                "远程审核已启用，Telegram agent 控制面已接管。"
+                f"{'；'.join(service_parts)}。"
                 "审核消息可直接回复“全部通过 / 全部拒绝”或类似“S1通过，S2改成 xxx”。\n"
                 "命令：/status、/jobs [limit]、/job <job_id>、"
                 "/run <claude|codex|acp> <preset> --task \"...\"、/task <task_id> [--full]、"
@@ -970,6 +982,9 @@ class TelegramReviewBotService:
             )
 
     async def _poll_agent_tasks(self) -> None:
+        settings = get_settings()
+        if not telegram_agent_enabled(settings):
+            return
         for record in pending_notification_records():
             payload = get_agent_task_status(record.task_id)
             status = str(payload.get("status") or "").strip().lower()
@@ -1070,7 +1085,7 @@ class TelegramReviewBotService:
     ) -> None:
         settings = get_settings()
         chat_id = str(getattr(settings, "telegram_bot_chat_id", "") or "").strip()
-        if not _telegram_ready(settings) or not chat_id:
+        if not _telegram_review_ready(settings) or not chat_id:
             return {"sent": False, "round_number": 1, "round_label": _format_review_round_label(1)}
 
         signature = _build_review_delivery_signature(
@@ -1160,7 +1175,7 @@ class TelegramReviewBotService:
     async def _send_text(self, text: str, *, reply_markup: dict[str, Any] | None = None) -> int | None:
         settings = get_settings()
         chat_id = str(getattr(settings, "telegram_bot_chat_id", "") or "").strip()
-        if not _telegram_ready(settings) or not chat_id:
+        if not _telegram_service_ready(settings) or not chat_id:
             return None
         return await self._send_chat_text(text, chat_id=chat_id, reply_markup=reply_markup)
 
@@ -1172,7 +1187,7 @@ class TelegramReviewBotService:
         reply_markup: dict[str, Any] | None = None,
     ) -> int | None:
         settings = get_settings()
-        if not _telegram_ready(settings) or not str(chat_id or "").strip():
+        if not _telegram_service_ready(settings) or not str(chat_id or "").strip():
             return None
         payload = {
             "chat_id": str(chat_id).strip(),
@@ -1186,7 +1201,7 @@ class TelegramReviewBotService:
     async def _answer_callback_query(self, callback_query_id: str, *, text: str = "") -> None:
         settings = get_settings()
         callback_id = str(callback_query_id or "").strip()
-        if not _telegram_ready(settings) or not callback_id:
+        if not _telegram_service_ready(settings) or not callback_id:
             return
         payload: dict[str, Any] = {"callback_query_id": callback_id}
         trimmed_text = str(text or "").strip()
@@ -1204,7 +1219,7 @@ class TelegramReviewBotService:
         reply_to_message_id: int | None = None,
     ) -> int | None:
         settings = get_settings()
-        if not _telegram_ready(settings) or not str(chat_id or "").strip() or not photo_path.exists():
+        if not _telegram_service_ready(settings) or not str(chat_id or "").strip() or not photo_path.exists():
             return None
         payload: dict[str, Any] = {
             "chat_id": str(chat_id).strip(),
@@ -1232,7 +1247,7 @@ class TelegramReviewBotService:
         reply_to_message_id: int | None = None,
     ) -> list[int]:
         settings = get_settings()
-        if not _telegram_ready(settings) or not str(chat_id or "").strip():
+        if not _telegram_service_ready(settings) or not str(chat_id or "").strip():
             return []
         media: list[dict[str, Any]] = []
         files: dict[str, tuple[str, bytes, str]] = {}
@@ -1282,7 +1297,7 @@ class TelegramReviewBotService:
         reply_to_message_id: int | None = None,
     ) -> int | None:
         settings = get_settings()
-        if not _telegram_ready(settings) or not str(chat_id or "").strip() or not video_path.exists():
+        if not _telegram_service_ready(settings) or not str(chat_id or "").strip() or not video_path.exists():
             return None
         payload: dict[str, Any] = {"chat_id": str(chat_id).strip()}
         trimmed_caption = str(caption or "").strip()
@@ -1320,7 +1335,7 @@ class TelegramReviewBotService:
         reply_to_message_id: int | None = None,
     ) -> int | None:
         settings = get_settings()
-        if not _telegram_ready(settings) or not str(chat_id or "").strip() or not document_path.exists():
+        if not _telegram_service_ready(settings) or not str(chat_id or "").strip() or not document_path.exists():
             return None
         payload: dict[str, Any] = {"chat_id": str(chat_id).strip()}
         trimmed_caption = str(caption or "").strip()
@@ -1390,7 +1405,15 @@ class TelegramReviewBotService:
 
 
 def _telegram_ready(settings: Any) -> bool:
-    return telegram_agent_enabled(settings)
+    return _telegram_service_ready(settings)
+
+
+def _telegram_service_ready(settings: Any) -> bool:
+    return telegram_service_enabled(settings)
+
+
+def _telegram_review_ready(settings: Any) -> bool:
+    return telegram_review_enabled(settings)
 
 
 def _extract_review_reference(text: str) -> tuple[str, uuid.UUID] | None:

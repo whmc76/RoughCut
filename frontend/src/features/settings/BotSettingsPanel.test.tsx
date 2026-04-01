@@ -1,7 +1,7 @@
 import { render, screen } from "@testing-library/react";
 
 import type { Config } from "../../types";
-import { QualitySettingsPanel } from "./QualitySettingsPanel";
+import { BotSettingsPanel } from "./BotSettingsPanel";
 import type { SettingsForm } from "./constants";
 
 const SAMPLE_CONFIG: Config = {
@@ -47,7 +47,7 @@ const SAMPLE_CONFIG: Config = {
   max_video_duration_sec: 7200,
   ffmpeg_timeout_sec: 600,
   allowed_extensions: [".mp4"],
-  telegram_agent_enabled: false,
+  telegram_agent_enabled: true,
   telegram_agent_claude_enabled: false,
   telegram_agent_claude_command: "claude",
   telegram_agent_claude_model: "opus",
@@ -68,7 +68,7 @@ const SAMPLE_CONFIG: Config = {
   telegram_bot_chat_id: "",
   default_job_workflow_mode: "standard_edit",
   default_job_enhancement_modes: ["avatar_commentary"],
-  fact_check_enabled: true,
+  fact_check_enabled: false,
   auto_confirm_content_profile: true,
   content_profile_review_threshold: 0.72,
   content_profile_auto_review_min_accuracy: 0.9,
@@ -85,60 +85,26 @@ const SAMPLE_CONFIG: Config = {
   quality_auto_rerun_max_attempts: 1,
   override_keys: [],
   session_secret_keys: [],
-  profile_bindable_keys: ["fact_check_enabled", "quality_auto_rerun_enabled"],
+  profile_bindable_keys: [],
   overrides: {},
 };
 
-describe("QualitySettingsPanel", () => {
-  it("shows only active strategy fields inside advanced disclosure", () => {
+describe("BotSettingsPanel", () => {
+  it("shows shared bot transport fields when agent is enabled without remote review", () => {
     const form: SettingsForm = {
-      fact_check_enabled: true,
-      auto_confirm_content_profile: false,
-      auto_accept_glossary_corrections: false,
-      auto_select_cover_variant: false,
-      subtitle_filler_cleanup_enabled: true,
-      quality_auto_rerun_enabled: false,
-      packaging_selection_min_score: 0.6,
+      telegram_remote_review_enabled: false,
+      telegram_agent_enabled: true,
+      telegram_bot_api_base_url: "https://api.telegram.org",
+      telegram_bot_token: "",
+      telegram_agent_codex_command: "codex",
+      telegram_agent_codex_model: "gpt-5.4-mini",
     };
 
-    render(<QualitySettingsPanel form={form} config={SAMPLE_CONFIG} onChange={vi.fn()} />);
+    render(<BotSettingsPanel form={form} config={SAMPLE_CONFIG} onChange={vi.fn()} />);
 
-    expect(screen.getByText("阈值与复跑策略")).toBeInTheDocument();
-    expect(screen.getByLabelText("启用事实核查（预留）")).toBeDisabled();
-    expect(screen.getByText(/事实核查配置项目前未接入任务运行链路/)).toBeInTheDocument();
-    expect(screen.getByText(/画像手动确认/)).toBeInTheDocument();
-    expect(screen.queryByLabelText("内容画像确认阈值")).not.toBeInTheDocument();
-    expect(screen.queryByLabelText("术语修正确认阈值")).not.toBeInTheDocument();
-    expect(screen.queryByLabelText("封面复核间隔")).not.toBeInTheDocument();
-    expect(screen.queryByLabelText("触发复跑分数线")).not.toBeInTheDocument();
-    expect(screen.getByLabelText("包装最低通过分")).toHaveValue(0.6);
-  });
-
-  it("reveals thresholds when corresponding automation switches are enabled", () => {
-    const form: SettingsForm = {
-      fact_check_enabled: true,
-      auto_confirm_content_profile: true,
-      content_profile_review_threshold: 0.72,
-      content_profile_auto_review_min_accuracy: 0.88,
-      content_profile_auto_review_min_samples: 12,
-      auto_accept_glossary_corrections: true,
-      glossary_correction_review_threshold: 0.82,
-      auto_select_cover_variant: true,
-      cover_selection_review_gap: 0.05,
-      packaging_selection_review_gap: 0.07,
-      packaging_selection_min_score: 0.66,
-      subtitle_filler_cleanup_enabled: true,
-      quality_auto_rerun_enabled: true,
-      quality_auto_rerun_below_score: 78,
-      quality_auto_rerun_max_attempts: 2,
-    };
-
-    render(<QualitySettingsPanel form={form} config={SAMPLE_CONFIG} onChange={vi.fn()} />);
-
-    expect(screen.getByLabelText("内容画像确认阈值")).toHaveValue(0.72);
-    expect(screen.getByLabelText("术语修正确认阈值")).toHaveValue(0.82);
-    expect(screen.getByLabelText("封面复核间隔")).toHaveValue(0.05);
-    expect(screen.getByLabelText("触发复跑分数线")).toHaveValue(78);
-    expect(screen.getByText(/复跑 < 78/)).toBeInTheDocument();
+    expect(screen.getByLabelText("Telegram Bot API Base URL")).toBeInTheDocument();
+    expect(screen.getByLabelText("Bot Token")).toBeInTheDocument();
+    expect(screen.queryByLabelText("审核接收 Chat ID")).not.toBeInTheDocument();
+    expect(screen.getByText(/Agent 已启用，但 Bot Token 还未配置/)).toBeInTheDocument();
   });
 });

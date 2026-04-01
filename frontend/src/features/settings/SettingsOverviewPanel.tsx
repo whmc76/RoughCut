@@ -62,7 +62,7 @@ export function SettingsOverviewPanel({ form, config, runtimeEnvironment, servic
     `搜索 ${getSearchSummary(form)}`,
   ];
   const strategySummary = [
-    factCheckEnabled ? "事实核查开启" : "事实核查关闭",
+    factCheckEnabled ? "事实核查未接入（当前值为开启）" : "事实核查未接入",
     autoConfirmEnabled
       ? `画像自动确认 ${Number(form.content_profile_review_threshold ?? 0.9).toFixed(2)}`
       : "画像人工确认",
