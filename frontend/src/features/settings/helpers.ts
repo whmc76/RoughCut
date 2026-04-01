@@ -53,6 +53,30 @@ export function getProviderStatusLabel(status: string): string {
   }
 }
 
+export function formatProviderDetail(detail: string): string {
+  const normalized = String(detail ?? "").trim();
+  if (!normalized) {
+    return "暂无检测信息";
+  }
+  const lower = normalized.toLowerCase();
+  if (lower === "credential is missing") {
+    return "未配置凭据，暂时无法完成连通性检查。";
+  }
+  if (lower.startsWith("http 401") || lower.startsWith("http 403")) {
+    return "鉴权失败，请检查 API Key 或上游权限。";
+  }
+  if (lower.startsWith("http 404")) {
+    return "服务可达，但模型列表接口返回 404。";
+  }
+  if (lower.includes("connection refused")) {
+    return "连接被拒绝，请确认服务已启动并监听当前地址。";
+  }
+  if (lower.includes("timed out")) {
+    return "请求超时，请检查网络或上游响应速度。";
+  }
+  return normalized;
+}
+
 export function getActiveReasoningProvider(form: SettingsForm): string {
   return readString(form, "llm_mode", "performance") === "local" ? "ollama" : readString(form, "reasoning_provider");
 }

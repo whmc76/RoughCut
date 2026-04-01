@@ -45,7 +45,7 @@ export function QualitySettingsPanel({ form, config, onChange }: QualitySettings
   ];
 
   return (
-    <section className="panel">
+    <section className="panel settings-quality-panel">
       <PanelHeader
         title="质检与自动化"
         description={`影响审核、包装和复跑。当前有 ${profileBindableCount} 项会随配置方案绑定。`}

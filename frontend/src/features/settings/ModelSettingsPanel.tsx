@@ -1,27 +1,59 @@
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMemo, useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { api } from "../../api";
-import type { ConfigOptions, ProviderServiceStatus, RuntimeEnvironment } from "../../types";
+import type {
+  Config,
+  ConfigOptions,
+  ProviderCheckResult,
+  ProviderServiceStatus,
+  ProviderServiceStatusEntry,
+  RuntimeEnvironment,
+} from "../../types";
 import { SelectField } from "../../components/forms/SelectField";
 import { TextField } from "../../components/forms/TextField";
 import { PanelHeader } from "../../components/ui/PanelHeader";
 import type { SettingsForm } from "./constants";
-import { LLM_MODE_OPTIONS, REASONING_PROVIDER_OPTIONS } from "./constants";
+import { REASONING_PROVIDER_OPTIONS } from "./constants";
 import {
   getActiveReasoningModel,
   getActiveReasoningProvider,
+  getCredentialSourceLabel,
   getProviderLabel,
+  formatProviderDetail,
   getProviderStatusLabel,
   getSearchSummary,
   getTranscriptionProviderLabel,
+  isLocalTranscriptionProvider,
 } from "./helpers";
 
 type ModelSettingsPanelProps = {
   form: SettingsForm;
+  config?: Config;
   options?: ConfigOptions;
   runtimeEnvironment?: RuntimeEnvironment;
   serviceStatus?: ProviderServiceStatus;
   onChange: (key: string, value: string | number | boolean) => void;
+};
+
+type ProviderCardDescriptor = {
+  key: string;
+  title: string;
+  subtitle: string;
+  tone: "cloud" | "local" | "route";
+  status: string;
+  detail: string;
+  baseUrl: string;
+  checkedAt?: string;
+  credentialSource?: string;
+  refreshActions: Array<{ provider: string; kind: string; label: string }>;
+  secretField?:
+    | {
+        key: "openai_api_key" | "anthropic_api_key" | "minimax_api_key" | "ollama_api_key";
+        label: string;
+        placeholder: string;
+      }
+    | undefined;
 };
 
 function buildModelOptions(models: string[], currentValue: string) {
@@ -35,14 +67,174 @@ function buildModelOptions(models: string[], currentValue: string) {
   return baseOptions;
 }
 
-export function ModelSettingsPanel({ form, options, runtimeEnvironment, serviceStatus, onChange }: ModelSettingsPanelProps) {
+function readFormString(form: SettingsForm, key: string, fallback = "") {
+  return String(form[key] ?? fallback).trim();
+}
+
+function getBaseUrl(provider: string, runtimeEnvironment: RuntimeEnvironment | undefined, form: SettingsForm): string {
+  switch (provider) {
+    case "openai":
+      return String(runtimeEnvironment?.openai_base_url ?? "");
+    case "anthropic":
+      return String(runtimeEnvironment?.anthropic_base_url ?? "");
+    case "minimax":
+      return String(runtimeEnvironment?.minimax_base_url ?? "");
+    case "ollama":
+      return String(runtimeEnvironment?.ollama_base_url ?? "");
+    case "qwen3_asr":
+      return readFormString(form, "qwen_asr_api_base_url");
+    default:
+      return "";
+  }
+}
+
+function getProviderServiceEntry(provider: string, serviceStatus: ProviderServiceStatus | undefined): ProviderServiceStatusEntry | undefined {
+  return serviceStatus?.services[provider];
+}
+
+function getProviderCredentialSource(provider: string, config: Config | undefined, runtimeEnvironment: RuntimeEnvironment | undefined) {
+  if (provider === "openai") {
+    return getCredentialSourceLabel(config, {
+      mode: String(runtimeEnvironment?.openai_auth_mode ?? "api_key"),
+      helperCommand: String(runtimeEnvironment?.openai_api_key_helper ?? ""),
+      keySet: Boolean(config?.openai_api_key_set),
+      overrideKey: "openai_api_key",
+    });
+  }
+  if (provider === "anthropic") {
+    return getCredentialSourceLabel(config, {
+      mode: String(runtimeEnvironment?.anthropic_auth_mode ?? "api_key"),
+      helperCommand: String(runtimeEnvironment?.anthropic_api_key_helper ?? ""),
+      keySet: Boolean(config?.anthropic_api_key_set),
+      overrideKey: "anthropic_api_key",
+    });
+  }
+  if (provider === "minimax") {
+    return getCredentialSourceLabel(config, {
+      keySet: Boolean(config?.minimax_api_key_set),
+      overrideKey: "minimax_api_key",
+    });
+  }
+  if (provider === "ollama" || provider === "qwen3_asr") {
+    return "本地服务";
+  }
+  if (provider === "faster_whisper" || provider === "funasr") {
+    return "本地内嵌";
+  }
+  if (provider === "searxng") {
+    return "搜索回退";
+  }
+  return "";
+}
+
+function getProviderSecretField(provider: string, config: Config | undefined): ProviderCardDescriptor["secretField"] {
+  if (provider === "openai") {
+    return {
+      key: "openai_api_key",
+      label: "OpenAI API Key",
+      placeholder: config?.openai_api_key_set ? "已设置，留空则不更新" : "留空则不更新",
+    };
+  }
+  if (provider === "anthropic") {
+    return {
+      key: "anthropic_api_key",
+      label: "Anthropic API Key",
+      placeholder: config?.anthropic_api_key_set ? "已设置，留空则不更新" : "留空则不更新",
+    };
+  }
+  if (provider === "minimax") {
+    return {
+      key: "minimax_api_key",
+      label: "MiniMax API Key",
+      placeholder: config?.minimax_api_key_set ? "已设置，留空则不更新" : "留空则不更新",
+    };
+  }
+  if (provider === "ollama") {
+    return {
+      key: "ollama_api_key",
+      label: "Ollama API Key",
+      placeholder: config?.ollama_api_key_set ? "已设置，留空则不更新" : "通常可留空",
+    };
+  }
+  return undefined;
+}
+
+function getProviderBaseDetail(provider: string, runtimeEnvironment: RuntimeEnvironment | undefined, form: SettingsForm) {
+  const baseUrl = getBaseUrl(provider, runtimeEnvironment, form);
+  if (provider === "faster_whisper" || provider === "funasr") {
+    return "本地运行，不依赖独立 HTTP 服务。";
+  }
+  if (provider === "searxng") {
+    return "当前作为搜索回退使用。";
+  }
+  if (provider === "ollama" || provider === "qwen3_asr") {
+    return baseUrl ? "本地服务已接入，可直接检测连通性。" : "本地服务地址未配置。";
+  }
+  return baseUrl ? "云端 Provider 已配置，建议检测凭据与模型列表。" : "当前未配置服务地址。";
+}
+
+function getProviderTone(provider: string): ProviderCardDescriptor["tone"] {
+  if (provider === "ollama" || provider === "qwen3_asr" || provider === "faster_whisper" || provider === "funasr") {
+    return "local";
+  }
+  if (provider === "searxng" || provider === "search-route") {
+    return "route";
+  }
+  return "cloud";
+}
+
+function formatCheckTime(value: string | undefined) {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
+}
+
+function getProviderSummary(
+  provider: string,
+  serviceEntry: ProviderServiceStatusEntry | undefined,
+  lastCheck: ProviderCheckResult | undefined,
+  runtimeEnvironment: RuntimeEnvironment | undefined,
+  form: SettingsForm,
+) {
+  if (lastCheck) {
+    const detail = lastCheck.models.length ? `${lastCheck.detail || "检测完成"} · ${lastCheck.models.length} 个模型` : lastCheck.detail || "检测完成";
+    return {
+      status: getProviderStatusLabel(lastCheck.status),
+      detail,
+      baseUrl: lastCheck.base_url,
+      checkedAt: lastCheck.checked_at,
+    };
+  }
+  if (serviceEntry) {
+    return {
+      status: getProviderStatusLabel(serviceEntry.status),
+      detail: serviceEntry.error ? serviceEntry.error : getProviderBaseDetail(provider, runtimeEnvironment, form),
+      baseUrl: serviceEntry.base_url,
+    };
+  }
+  return {
+    status: isLocalTranscriptionProvider(provider) ? "本地链路" : "待检测",
+    detail: getProviderBaseDetail(provider, runtimeEnvironment, form),
+    baseUrl: getBaseUrl(provider, runtimeEnvironment, form),
+  };
+}
+
+export function ModelSettingsPanel({ form, config, options, runtimeEnvironment, serviceStatus, onChange }: ModelSettingsPanelProps) {
   const queryClient = useQueryClient();
-  const llmMode = String(form.llm_mode ?? "performance");
-  const transcriptionProvider = String(form.transcription_provider ?? "");
+  const [lastChecks, setLastChecks] = useState<Record<string, ProviderCheckResult>>({});
+  const llmMode = readFormString(form, "llm_mode", "performance");
+  const transcriptionProvider = readFormString(form, "transcription_provider");
   const activeReasoningProvider = getActiveReasoningProvider(form);
   const activeReasoningModel = getActiveReasoningModel(form);
-  const searchProvider = String(form.search_provider ?? "auto");
-  const searchFallbackProvider = String(form.search_fallback_provider ?? "searxng");
+  const searchProvider = readFormString(form, "search_provider", "auto");
+  const searchFallbackProvider = readFormString(form, "search_fallback_provider", "searxng");
   const transcriptionDialects = options?.transcription_dialects ?? [{ value: "mandarin", label: "普通话" }];
   const multimodalFallbackProviders = options?.multimodal_fallback_providers ?? [{ value: "ollama", label: "Ollama" }];
   const searchProviders = options?.search_providers ?? [{ value: "auto", label: "自动选择" }];
@@ -51,12 +243,7 @@ export function ModelSettingsPanel({ form, options, runtimeEnvironment, serviceS
     value: provider,
     label: getTranscriptionProviderLabel(provider),
   }));
-  const modelDetailsOpen =
-    transcriptionProvider === "qwen3_asr" ||
-    llmMode === "local" ||
-    searchProvider !== "auto" ||
-    searchFallbackProvider === "model" ||
-    Boolean(String(form.model_search_helper ?? "").trim());
+
   const transcriptionCatalog = useQuery({
     queryKey: ["config-model-catalog", "transcription", transcriptionProvider],
     queryFn: () => api.getModelCatalog({ provider: transcriptionProvider, kind: "transcription" }),
@@ -68,7 +255,7 @@ export function ModelSettingsPanel({ form, options, runtimeEnvironment, serviceS
     queryFn: () => api.getModelCatalog({ provider: reasoningCatalogProvider, kind: "reasoning" }),
     enabled: Boolean(reasoningCatalogProvider),
   });
-  const fallbackProvider = String(form.multimodal_fallback_provider ?? "");
+  const fallbackProvider = readFormString(form, "multimodal_fallback_provider");
   const fallbackCatalog = useQuery({
     queryKey: ["config-model-catalog", "vision_fallback", fallbackProvider],
     queryFn: () => api.getModelCatalog({ provider: fallbackProvider, kind: "vision_fallback" }),
@@ -77,212 +264,317 @@ export function ModelSettingsPanel({ form, options, runtimeEnvironment, serviceS
   const transcriptionModels = transcriptionCatalog.data?.models ?? options?.transcription_models?.[transcriptionProvider] ?? [];
   const reasoningModels = reasoningCatalog.data?.models ?? [];
   const fallbackModels = fallbackCatalog.data?.models ?? [];
-  const qwenStatus = serviceStatus?.services.qwen3_asr;
-  const ollamaStatus = serviceStatus?.services.ollama;
-  const qwenBaseUrl = qwenStatus?.base_url || String(form.qwen_asr_api_base_url ?? "");
-  const qwenStatusLabel = qwenStatus ? getProviderStatusLabel(qwenStatus.status) : "";
-  const ollamaBaseUrl = ollamaStatus?.base_url || String(runtimeEnvironment?.ollama_base_url ?? "");
-  const ollamaStatusLabel = ollamaStatus ? getProviderStatusLabel(ollamaStatus.status) : "";
+
   const refreshCatalog = async (provider: string, kind: string) => {
     const next = await api.getModelCatalog({ provider, kind, refresh: true });
     queryClient.setQueryData(["config-model-catalog", kind, provider], next);
   };
 
+  const providerCheck = useMutation({
+    mutationFn: (provider: string) => api.checkProvider(provider),
+    onSuccess: (result) => {
+      setLastChecks((prev) => ({ ...prev, [result.provider]: result }));
+      void queryClient.invalidateQueries({ queryKey: ["config-service-status"] });
+    },
+  });
+
+  const providerCards = useMemo(() => {
+    const orderedProviders: string[] = [];
+    const pushUnique = (value: string) => {
+      if (!value || orderedProviders.includes(value)) return;
+      orderedProviders.push(value);
+    };
+
+    pushUnique(transcriptionProvider);
+    pushUnique(activeReasoningProvider);
+    if (searchProvider !== "auto") {
+      pushUnique(searchProvider);
+    } else {
+      pushUnique(searchFallbackProvider);
+    }
+
+    const cards: ProviderCardDescriptor[] = orderedProviders.map((provider) => {
+      const serviceEntry = getProviderServiceEntry(provider, serviceStatus);
+      const summary = getProviderSummary(provider, serviceEntry, lastChecks[provider], runtimeEnvironment, form);
+      const refreshActions: ProviderCardDescriptor["refreshActions"] = [];
+
+      if (provider === transcriptionProvider) {
+        refreshActions.push({ provider, kind: "transcription", label: "刷新转写模型" });
+      }
+      if (provider === reasoningCatalogProvider) {
+        refreshActions.push({ provider, kind: "reasoning", label: llmMode === "local" ? "检测 Ollama / 刷新模型" : "刷新推理模型" });
+      }
+
+      return {
+        key: provider,
+        title: provider === transcriptionProvider ? getTranscriptionProviderLabel(provider) : getProviderLabel(provider),
+        subtitle:
+          provider === transcriptionProvider
+            ? `当前转写 Provider`
+            : provider === activeReasoningProvider
+              ? llmMode === "local"
+                ? `当前本地推理 Provider`
+                : `当前推理 Provider`
+              : provider === searchProvider || provider === searchFallbackProvider
+                ? "搜索链路关联 Provider"
+                : "当前活跃 Provider",
+        tone: getProviderTone(provider),
+        status: summary.status,
+        detail: summary.detail,
+        baseUrl: summary.baseUrl,
+        checkedAt: summary.checkedAt,
+        credentialSource: getProviderCredentialSource(provider, config, runtimeEnvironment),
+        refreshActions,
+        secretField: getProviderSecretField(provider, config),
+      };
+    });
+
+    cards.push({
+      key: "search-route",
+      title: "搜索路由",
+      subtitle: "当前搜索策略",
+      tone: "route",
+      status: searchProvider === "auto" ? "自动跟随" : "固定 Provider",
+      detail: getSearchSummary(form),
+      baseUrl: "",
+      credentialSource: searchProvider === "auto" ? "按推理 Provider 自动路由" : "",
+      refreshActions: [],
+    });
+
+    return cards;
+  }, [
+    activeReasoningProvider,
+    config,
+    form,
+    lastChecks,
+    llmMode,
+    reasoningCatalogProvider,
+    runtimeEnvironment,
+    searchFallbackProvider,
+    searchProvider,
+    serviceStatus,
+    transcriptionProvider,
+  ]);
+
   return (
-    <section className="panel">
-      <PanelHeader title="转写与推理" description="基础链路只保留当前会参与运行的字段。" />
-      <div className="form-stack">
-        <div className="settings-overview-grid">
-          <article className="settings-overview-card">
-            <span className="settings-overview-label">转写</span>
-            <strong>{getTranscriptionProviderLabel(transcriptionProvider)}</strong>
-            <div className="muted">
-              {String(form.transcription_model ?? "未设置")}
-              {form.transcription_dialect ? ` · ${String(form.transcription_dialect)}` : ""}
-            </div>
-          </article>
-          <article className="settings-overview-card">
-            <span className="settings-overview-label">推理</span>
-            <strong>{llmMode === "local" ? "本地模式" : "云端模式"}</strong>
-            <div className="muted">
-              {getProviderLabel(activeReasoningProvider)} · {activeReasoningModel || "未设置模型"}
-            </div>
-          </article>
-          <article className="settings-overview-card">
-            <span className="settings-overview-label">搜索</span>
-            <strong>{getSearchSummary(form)}</strong>
-            <div className="muted">
-              {String(form.model_search_helper ?? "").trim() ? `辅助模型 ${String(form.model_search_helper)}` : "仅在需要时启用模型代理搜索"}
-            </div>
-          </article>
+    <section className="panel settings-core-panel">
+      <PanelHeader title="核心链路配置" description="把配置、Provider 卡、检测动作和模型刷新放到同一块里。" />
+      <div className="settings-provider-deck-head">
+        <div>
+          <strong>活跃 Provider</strong>
+          <div className="muted">
+            当前链路：转写 {getTranscriptionProviderLabel(transcriptionProvider)} · 推理 {getProviderLabel(activeReasoningProvider)} · 搜索 {getSearchSummary(form)}
+          </div>
         </div>
-        <SelectField
-          label="LLM 模式"
-          value={String(form.llm_mode ?? "")}
-          onChange={(event) => onChange("llm_mode", event.target.value)}
-          options={LLM_MODE_OPTIONS.map((mode) => ({ value: mode, label: mode }))}
-        />
-        <details className="settings-disclosure" open={modelDetailsOpen}>
-          <summary className="settings-disclosure-trigger">
-            <div>
-              <strong>转写、推理与搜索细节</strong>
-              <div className="muted">
-                {getTranscriptionProviderLabel(transcriptionProvider)} · {getProviderLabel(activeReasoningProvider)} · {getSearchSummary(form)}
-              </div>
-            </div>
-          </summary>
-          <div className="settings-disclosure-body">
-            <div className="form-stack">
-              <section className="settings-subsection">
-                <div className="settings-subsection-head">
-                  <strong>转写链路</strong>
-                  <span className="muted">{getTranscriptionProviderLabel(transcriptionProvider)}</span>
+      </div>
+      <div className="settings-provider-deck">
+        {providerCards.map((card) => {
+          const isCheckable = ["openai", "anthropic", "minimax", "ollama", "qwen3_asr"].includes(card.key);
+          const checkPending = providerCheck.isPending && providerCheck.variables === card.key;
+          const secretField = card.secretField;
+          return (
+            <article key={card.key} className={`settings-provider-card tone-${card.tone} ${isCheckable ? "actionable" : "informational"}`}>
+              <div className="settings-provider-card-head">
+                <div>
+                  <span className="settings-overview-label">{card.subtitle}</span>
+                  <strong>{card.title}</strong>
                 </div>
-                <div className="form-stack">
-                  <SelectField
-                    label="转写 Provider"
-                    value={String(form.transcription_provider ?? "")}
-                    onChange={(event) => onChange("transcription_provider", event.target.value)}
-                    options={transcriptionProviderOptions}
-                  />
-                  <SelectField
-                    label="转写模型"
-                    value={String(form.transcription_model ?? "")}
-                    onChange={(event) => onChange("transcription_model", event.target.value)}
-                    options={buildModelOptions(transcriptionModels, String(form.transcription_model ?? ""))}
-                  />
+                <span className={`status-pill ${card.status.includes("正常") || card.status.includes("自动") ? "done" : card.status.includes("不可达") || card.status.includes("失败") ? "failed" : "processing"}`}>
+                  {card.status}
+                </span>
+              </div>
+              <div className="settings-provider-card-copy">
+                <div className="settings-provider-summary">{formatProviderDetail(card.detail)}</div>
+                <div className="settings-provider-meta">
+                  {card.credentialSource ? (
+                    <div className="settings-provider-meta-row">
+                      <span>凭据来源</span>
+                      <strong>{card.credentialSource}</strong>
+                    </div>
+                  ) : null}
+                  {card.baseUrl ? (
+                    <div className="settings-provider-meta-row">
+                      <span>服务地址</span>
+                      <strong>{card.baseUrl}</strong>
+                    </div>
+                  ) : null}
+                  {card.checkedAt ? (
+                    <div className="settings-provider-meta-row">
+                      <span>最近检测</span>
+                      <strong>{formatCheckTime(card.checkedAt)}</strong>
+                    </div>
+                  ) : null}
+                </div>
+              </div>
+              {secretField ? (
+                <TextField
+                  label={secretField.label}
+                  type="password"
+                  value={String(form[secretField.key] ?? "")}
+                  onChange={(event) => onChange(secretField.key, event.target.value)}
+                  placeholder={secretField.placeholder}
+                />
+              ) : null}
+              <div className="settings-provider-actions">
+                {isCheckable ? (
                   <button
                     type="button"
-                    className="button ghost button-sm"
-                    onClick={() => void refreshCatalog(transcriptionProvider, "transcription")}
+                    className="button button-sm"
+                    onClick={() => providerCheck.mutate(card.key)}
+                    disabled={checkPending}
                   >
-                    刷新转写模型
+                    {checkPending ? `检测 ${card.title} 中` : `检测 ${card.title}`}
                   </button>
-                  <SelectField
-                    label="转写方言"
-                    value={String(form.transcription_dialect ?? "mandarin")}
-                    onChange={(event) => onChange("transcription_dialect", event.target.value)}
-                    options={transcriptionDialects}
-                  />
-                  {transcriptionProvider === "qwen3_asr" && (
-                    <div className="muted">
-                      服务地址：{qwenBaseUrl}
-                      {qwenStatusLabel ? ` · ${qwenStatusLabel}` : ""}
-                      {qwenStatus?.error ? ` · ${qwenStatus.error}` : ""}
-                    </div>
-                  )}
-                </div>
-              </section>
-              <section className="settings-subsection">
-                <div className="settings-subsection-head">
-                  <strong>推理链路</strong>
-                  <span className="muted">{llmMode === "local" ? "本地模型" : getProviderLabel(activeReasoningProvider)}</span>
-                </div>
-                <div className="form-stack">
-                  {llmMode === "performance" ? (
-                    <>
-                      <SelectField
-                        label="推理 Provider"
-                        value={String(form.reasoning_provider ?? "")}
-                        onChange={(event) => onChange("reasoning_provider", event.target.value)}
-                        options={REASONING_PROVIDER_OPTIONS.map((provider) => ({ value: provider, label: getProviderLabel(provider) }))}
-                      />
-                      <SelectField
-                        label="推理模型"
-                        value={String(form.reasoning_model ?? "")}
-                        onChange={(event) => onChange("reasoning_model", event.target.value)}
-                        options={buildModelOptions(reasoningModels, String(form.reasoning_model ?? ""))}
-                      />
-                      <button
-                        type="button"
-                        className="button ghost button-sm"
-                        onClick={() => void refreshCatalog(reasoningCatalogProvider, "reasoning")}
-                      >
-                        刷新推理模型
-                      </button>
-                      <SelectField
-                        label="视觉回退 Provider"
-                        value={String(form.multimodal_fallback_provider ?? "")}
-                        onChange={(event) => onChange("multimodal_fallback_provider", event.target.value)}
-                        options={multimodalFallbackProviders}
-                      />
-                      <SelectField
-                        label="视觉回退模型"
-                        value={String(form.multimodal_fallback_model ?? "")}
-                        onChange={(event) => onChange("multimodal_fallback_model", event.target.value)}
-                        options={buildModelOptions(fallbackModels, String(form.multimodal_fallback_model ?? ""))}
-                      />
-                      <button
-                        type="button"
-                        className="button ghost button-sm"
-                        onClick={() => void refreshCatalog(fallbackProvider, "vision_fallback")}
-                      >
-                        刷新视觉回退模型
-                      </button>
-                    </>
-                  ) : (
-                    <>
-                      <SelectField
-                        label="本地推理模型"
-                        value={String(form.local_reasoning_model ?? "")}
-                        onChange={(event) => onChange("local_reasoning_model", event.target.value)}
-                        options={buildModelOptions(reasoningModels, String(form.local_reasoning_model ?? ""))}
-                      />
-                      <SelectField
-                        label="本地视觉模型"
-                        value={String(form.local_vision_model ?? "")}
-                        onChange={(event) => onChange("local_vision_model", event.target.value)}
-                        options={buildModelOptions(reasoningModels, String(form.local_vision_model ?? ""))}
-                      />
-                      <button
-                        type="button"
-                        className="button ghost button-sm"
-                        onClick={() => void refreshCatalog("ollama", "reasoning")}
-                      >
-                        检测 Ollama / 刷新模型
-                      </button>
-                      <div className="muted">
-                        Ollama 服务：{ollamaBaseUrl}
-                        {ollamaStatusLabel ? ` · ${ollamaStatusLabel}` : ""}
-                        {ollamaStatus?.error ? ` · ${ollamaStatus.error}` : ""}
-                      </div>
-                      <div className="muted">本地模式下推理固定走 {getProviderLabel(activeReasoningProvider)}，不会使用云端回退 Provider。</div>
-                    </>
-                  )}
-                </div>
-              </section>
-              <section className="settings-subsection">
-                <div className="settings-subsection-head">
-                  <strong>搜索链路</strong>
-                  <span className="muted">{getSearchSummary(form)}</span>
-                </div>
-                <div className="form-stack">
-                  <SelectField
-                    label="搜索 Provider"
-                    value={searchProvider}
-                    onChange={(event) => onChange("search_provider", event.target.value)}
-                    options={searchProviders}
-                  />
-                  {searchProvider === "auto" && (
-                    <SelectField
-                      label="搜索回退 Provider"
-                      value={searchFallbackProvider}
-                      onChange={(event) => onChange("search_fallback_provider", event.target.value)}
-                      options={searchFallbackProviders}
-                    />
-                  )}
-                  {(searchProvider === "model" || (searchProvider === "auto" && searchFallbackProvider === "model")) && (
-                    <TextField
-                      label="搜索辅助模型"
-                      value={String(form.model_search_helper ?? "")}
-                      onChange={(event) => onChange("model_search_helper", event.target.value)}
-                    />
-                  )}
-                </div>
-              </section>
+                ) : null}
+                {card.refreshActions.map((action) => (
+                  <button
+                    key={`${action.provider}-${action.kind}`}
+                    type="button"
+                    className="button ghost button-sm"
+                    onClick={() => void refreshCatalog(action.provider, action.kind)}
+                  >
+                    {action.label}
+                  </button>
+                ))}
+              </div>
+            </article>
+          );
+        })}
+      </div>
+
+      <div className="settings-chain-grid">
+        <section className="settings-chain-card">
+          <div className="settings-chain-card-head">
+            <div>
+              <span className="settings-overview-label">转写</span>
+              <strong>转写链路</strong>
+            </div>
+            <div className="muted">
+              {getTranscriptionProviderLabel(transcriptionProvider)} · {String(form.transcription_model ?? "未设置")}
             </div>
           </div>
-        </details>
+          <div className="settings-chain-card-body form-grid three-up">
+            <SelectField
+              label="转写 Provider"
+              value={transcriptionProvider}
+              onChange={(event) => onChange("transcription_provider", event.target.value)}
+              options={transcriptionProviderOptions}
+            />
+            <SelectField
+              label="转写模型"
+              value={String(form.transcription_model ?? "")}
+              onChange={(event) => onChange("transcription_model", event.target.value)}
+              options={buildModelOptions(transcriptionModels, String(form.transcription_model ?? ""))}
+            />
+            <SelectField
+              label="转写方言"
+              value={String(form.transcription_dialect ?? "mandarin")}
+              onChange={(event) => onChange("transcription_dialect", event.target.value)}
+              options={transcriptionDialects}
+            />
+          </div>
+        </section>
+
+        <section className="settings-chain-card">
+          <div className="settings-chain-card-head">
+            <div>
+              <span className="settings-overview-label">推理</span>
+              <strong>推理链路</strong>
+            </div>
+            <div className="muted">
+              {llmMode === "local" ? "本地模式" : getProviderLabel(activeReasoningProvider)} · {activeReasoningModel || "未设置模型"}
+            </div>
+          </div>
+          <div className="settings-chain-card-body form-grid three-up">
+            <SelectField
+              label="LLM 模式"
+              value={llmMode}
+              onChange={(event) => onChange("llm_mode", event.target.value)}
+              options={[
+                { value: "performance", label: "performance" },
+                { value: "local", label: "local" },
+              ]}
+            />
+            {llmMode === "performance" ? (
+              <>
+                <SelectField
+                  label="推理 Provider"
+                  value={String(form.reasoning_provider ?? "")}
+                  onChange={(event) => onChange("reasoning_provider", event.target.value)}
+                  options={REASONING_PROVIDER_OPTIONS.map((provider) => ({ value: provider, label: getProviderLabel(provider) }))}
+                />
+                <SelectField
+                  label="推理模型"
+                  value={String(form.reasoning_model ?? "")}
+                  onChange={(event) => onChange("reasoning_model", event.target.value)}
+                  options={buildModelOptions(reasoningModels, String(form.reasoning_model ?? ""))}
+                />
+                <SelectField
+                  label="视觉回退 Provider"
+                  value={String(form.multimodal_fallback_provider ?? "")}
+                  onChange={(event) => onChange("multimodal_fallback_provider", event.target.value)}
+                  options={multimodalFallbackProviders}
+                />
+                <SelectField
+                  label="视觉回退模型"
+                  value={String(form.multimodal_fallback_model ?? "")}
+                  onChange={(event) => onChange("multimodal_fallback_model", event.target.value)}
+                  options={buildModelOptions(fallbackModels, String(form.multimodal_fallback_model ?? ""))}
+                />
+              </>
+            ) : (
+              <>
+                <SelectField
+                  label="本地推理模型"
+                  value={String(form.local_reasoning_model ?? "")}
+                  onChange={(event) => onChange("local_reasoning_model", event.target.value)}
+                  options={buildModelOptions(reasoningModels, String(form.local_reasoning_model ?? ""))}
+                />
+                <SelectField
+                  label="本地视觉模型"
+                  value={String(form.local_vision_model ?? "")}
+                  onChange={(event) => onChange("local_vision_model", event.target.value)}
+                  options={buildModelOptions(reasoningModels, String(form.local_vision_model ?? ""))}
+                />
+              </>
+            )}
+          </div>
+        </section>
+
+        <section className="settings-chain-card">
+          <div className="settings-chain-card-head">
+            <div>
+              <span className="settings-overview-label">搜索</span>
+              <strong>搜索链路</strong>
+            </div>
+            <div className="muted">{getSearchSummary(form)}</div>
+          </div>
+          <div className="settings-chain-card-body form-grid three-up">
+            <SelectField
+              label="搜索 Provider"
+              value={searchProvider}
+              onChange={(event) => onChange("search_provider", event.target.value)}
+              options={searchProviders}
+            />
+            {searchProvider === "auto" ? (
+              <SelectField
+                label="搜索回退 Provider"
+                value={searchFallbackProvider}
+                onChange={(event) => onChange("search_fallback_provider", event.target.value)}
+                options={searchFallbackProviders}
+              />
+            ) : null}
+            {(searchProvider === "model" || (searchProvider === "auto" && searchFallbackProvider === "model")) ? (
+              <TextField
+                label="搜索辅助模型"
+                value={String(form.model_search_helper ?? "")}
+                onChange={(event) => onChange("model_search_helper", event.target.value)}
+              />
+            ) : (
+              <div className="settings-chain-note muted">仅在启用模型代理搜索时需要辅助模型。</div>
+            )}
+          </div>
+        </section>
       </div>
     </section>
   );

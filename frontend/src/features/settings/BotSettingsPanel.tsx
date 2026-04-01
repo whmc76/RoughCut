@@ -1,7 +1,6 @@
 import { CheckboxField } from "../../components/forms/CheckboxField";
 import { SelectField } from "../../components/forms/SelectField";
 import { TextField } from "../../components/forms/TextField";
-import { PanelHeader } from "../../components/ui/PanelHeader";
 import type { Config } from "../../types";
 import { ACP_BRIDGE_BACKEND_OPTIONS, type SettingsForm } from "./constants";
 
@@ -18,14 +17,37 @@ export function BotSettingsPanel({ form, config, onChange }: BotSettingsPanelPro
   const transportEnabled = reviewEnabled || agentEnabled;
   const chatId = String(form.telegram_bot_chat_id ?? "");
   const botTokenReady = Boolean(config?.telegram_bot_token_set);
+  const reviewStatus = reviewEnabled ? (botTokenReady && chatId ? "就绪" : "待补全") : "关闭";
+  const agentStatus = agentEnabled ? "在线" : "关闭";
 
   return (
-    <div className="form-stack">
-      <section className="panel">
-        <PanelHeader
-          title="Telegram Bot 远程审核"
-          description="只控制内容摘要、字幕、成片这些审核通知；Bot Token 同时供远程审核和下方 Telegram Agent 共用。"
-        />
+    <section className="settings-module-panel settings-bot-panel">
+      <div className="settings-module-summary-strip">
+        <article className="settings-module-chip">
+          <span className="settings-overview-label">远程审核</span>
+          <strong>{reviewStatus}</strong>
+          <div className="muted">{reviewEnabled ? "摘要 / 字幕 / 成片通知" : "未发送审核通知"}</div>
+        </article>
+        <article className="settings-module-chip">
+          <span className="settings-overview-label">Agent</span>
+          <strong>{agentStatus}</strong>
+          <div className="muted">{agentEnabled ? "接收 Telegram 工程命令" : "不接管 Telegram 命令"}</div>
+        </article>
+        <article className="settings-module-chip">
+          <span className="settings-overview-label">传输凭据</span>
+          <strong>{botTokenReady ? "Bot Token 已就绪" : "Bot Token 未配置"}</strong>
+          <div className="muted">{chatId ? `Chat ID ${chatId}` : "Chat ID 待填写"}</div>
+        </article>
+      </div>
+
+      <div className="settings-module-dual-grid">
+        <section className="settings-tool-card settings-tool-card-review">
+          <div className="settings-tool-card-head">
+            <div>
+              <strong>Telegram Bot 远程审核</strong>
+              <div className="muted">只控制内容摘要、字幕、成片这些审核通知。</div>
+            </div>
+          </div>
         <div className="form-stack">
           <CheckboxField
             label="启用 Telegram 远程审核"
@@ -73,13 +95,15 @@ export function BotSettingsPanel({ form, config, onChange }: BotSettingsPanelPro
             </div>
           )}
         </div>
-      </section>
+        </section>
 
-      <section className="panel">
-        <PanelHeader
-          title="Telegram Agent 工程任务"
-          description="只控制 Telegram 命令、工程任务分流和结果回推，不会触发审核通知。"
-        />
+        <section className="settings-tool-card settings-tool-card-agent">
+          <div className="settings-tool-card-head">
+            <div>
+              <strong>Telegram Agent 工程任务</strong>
+              <div className="muted">只控制 Telegram 命令、工程任务分流和结果回推。</div>
+            </div>
+          </div>
         <div className="form-stack">
           <CheckboxField
             label="启用 Telegram Agent 分流"
@@ -197,7 +221,8 @@ export function BotSettingsPanel({ form, config, onChange }: BotSettingsPanelPro
             </div>
           )}
         </div>
-      </section>
-    </div>
+        </section>
+      </div>
+    </section>
   );
 }

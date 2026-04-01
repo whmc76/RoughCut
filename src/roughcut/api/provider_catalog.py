@@ -49,6 +49,29 @@ def build_service_status_payload() -> dict[str, Any]:
     }
 
 
+def build_provider_check_payload(*, provider: str) -> dict[str, Any]:
+    normalized_provider = str(provider or "").strip().lower()
+    settings = get_settings()
+    checked_at = _now_iso()
+
+    if normalized_provider == "ollama":
+        return _check_ollama_provider(settings=settings, checked_at=checked_at)
+    if normalized_provider == "qwen3_asr":
+        return _check_local_provider(
+            provider=normalized_provider,
+            base_url=settings.qwen_asr_api_base_url,
+            url=f"{settings.qwen_asr_api_base_url.rstrip('/')}/health",
+            checked_at=checked_at,
+        )
+    if normalized_provider == "openai":
+        return _check_openai_provider(settings=settings, checked_at=checked_at)
+    if normalized_provider == "minimax":
+        return _check_minimax_provider(settings=settings, checked_at=checked_at)
+    if normalized_provider == "anthropic":
+        return _check_anthropic_provider(settings=settings, checked_at=checked_at)
+    raise ValueError(f"Unsupported provider: {normalized_provider}")
+
+
 def get_model_catalog_payload(*, provider: str, kind: str, refresh: bool) -> dict[str, Any]:
     normalized_provider = str(provider or "").strip().lower()
     normalized_kind = str(kind or "").strip().lower()
@@ -169,6 +192,175 @@ def _fetch_anthropic_models() -> list[str]:
         raise RuntimeError(f"anthropic models request returned HTTP {response.status_code}")
     data = response.json()
     return [str(item.get("id") or "").strip() for item in data.get("data", []) if str(item.get("id") or "").strip()]
+
+
+def _check_ollama_provider(*, settings: Any, checked_at: str) -> dict[str, Any]:
+    base_url = str(settings.ollama_base_url or "").strip()
+    if not base_url:
+        return {
+            "provider": "ollama",
+            "base_url": "",
+            "checked_at": checked_at,
+            "status": "not_configured",
+            "detail": "base_url is empty",
+            "models": [],
+        }
+    try:
+        models = _fetch_ollama_models()
+        return {
+            "provider": "ollama",
+            "base_url": base_url,
+            "checked_at": checked_at,
+            "status": "ok",
+            "detail": "ok",
+            "models": models,
+        }
+    except Exception as exc:
+        return {
+            "provider": "ollama",
+            "base_url": base_url,
+            "checked_at": checked_at,
+            "status": "error",
+            "detail": str(exc),
+            "models": [],
+        }
+
+
+def _check_local_provider(*, provider: str, base_url: str, url: str, checked_at: str) -> dict[str, Any]:
+    normalized_base = str(base_url or "").strip()
+    if not normalized_base:
+        return {
+            "provider": provider,
+            "base_url": "",
+            "checked_at": checked_at,
+            "status": "not_configured",
+            "detail": "base_url is empty",
+            "models": [],
+        }
+    try:
+        response = httpx.get(url, timeout=5)
+        if response.status_code >= 400:
+            return {
+                "provider": provider,
+                "base_url": normalized_base,
+                "checked_at": checked_at,
+                "status": "unreachable",
+                "detail": f"HTTP {response.status_code}",
+                "models": [],
+            }
+        return {
+            "provider": provider,
+            "base_url": normalized_base,
+            "checked_at": checked_at,
+            "status": "ok",
+            "detail": "ok",
+            "models": [],
+        }
+    except Exception as exc:
+        return {
+            "provider": provider,
+            "base_url": normalized_base,
+            "checked_at": checked_at,
+            "status": "unreachable",
+            "detail": str(exc),
+            "models": [],
+        }
+
+
+def _check_openai_provider(*, settings: Any, checked_at: str) -> dict[str, Any]:
+    base_url = str(settings.openai_base_url or "").strip()
+    if not base_url:
+        return {
+            "provider": "openai",
+            "base_url": "",
+            "checked_at": checked_at,
+            "status": "not_configured",
+            "detail": "base_url is empty",
+            "models": [],
+        }
+    try:
+        models = _fetch_openai_compatible_models(provider="openai")
+        return {
+            "provider": "openai",
+            "base_url": base_url,
+            "checked_at": checked_at,
+            "status": "ok",
+            "detail": "ok",
+            "models": models,
+        }
+    except Exception as exc:
+        return {
+            "provider": "openai",
+            "base_url": base_url,
+            "checked_at": checked_at,
+            "status": "error",
+            "detail": str(exc),
+            "models": [],
+        }
+
+
+def _check_minimax_provider(*, settings: Any, checked_at: str) -> dict[str, Any]:
+    base_url = str(settings.minimax_base_url or "").strip()
+    if not base_url:
+        return {
+            "provider": "minimax",
+            "base_url": "",
+            "checked_at": checked_at,
+            "status": "not_configured",
+            "detail": "base_url is empty",
+            "models": [],
+        }
+    try:
+        models = _fetch_openai_compatible_models(provider="minimax")
+        return {
+            "provider": "minimax",
+            "base_url": base_url,
+            "checked_at": checked_at,
+            "status": "ok",
+            "detail": "ok",
+            "models": models,
+        }
+    except Exception as exc:
+        return {
+            "provider": "minimax",
+            "base_url": base_url,
+            "checked_at": checked_at,
+            "status": "error",
+            "detail": str(exc),
+            "models": [],
+        }
+
+
+def _check_anthropic_provider(*, settings: Any, checked_at: str) -> dict[str, Any]:
+    base_url = str(settings.anthropic_base_url or "").strip()
+    if not base_url:
+        return {
+            "provider": "anthropic",
+            "base_url": "",
+            "checked_at": checked_at,
+            "status": "not_configured",
+            "detail": "base_url is empty",
+            "models": [],
+        }
+    try:
+        models = _fetch_anthropic_models()
+        return {
+            "provider": "anthropic",
+            "base_url": base_url,
+            "checked_at": checked_at,
+            "status": "ok",
+            "detail": "ok",
+            "models": models,
+        }
+    except Exception as exc:
+        return {
+            "provider": "anthropic",
+            "base_url": base_url,
+            "checked_at": checked_at,
+            "status": "error",
+            "detail": str(exc),
+            "models": [],
+        }
 
 
 def _probe_local_service(*, name: str, base_url: str, url: str) -> dict[str, Any]:

@@ -115,9 +115,10 @@ const SAMPLE_SERVICE_STATUS: ProviderServiceStatus = {
 };
 
 describe("RuntimeSettingsPanel", () => {
-  it("shows only the active provider credentials", () => {
+  it("shows environment status and execution limits without duplicating provider credentials", () => {
     const form: SettingsForm = {
       transcription_provider: SAMPLE_CONFIG.transcription_provider,
+      qwen_asr_api_base_url: SAMPLE_CONFIG.qwen_asr_api_base_url,
       llm_mode: SAMPLE_CONFIG.llm_mode,
       reasoning_provider: SAMPLE_CONFIG.reasoning_provider,
       search_provider: SAMPLE_CONFIG.search_provider,
@@ -138,13 +139,13 @@ describe("RuntimeSettingsPanel", () => {
       />,
     );
 
-    expect(screen.getByText("接入与限制")).toBeTruthy();
-    expect(screen.getByText("连接与鉴权细节")).toBeTruthy();
-    expect(screen.getByText("运行环境状态")).toBeTruthy();
-    expect(screen.getByText("凭据来源：当前会话")).toBeTruthy();
-    expect(screen.getAllByText(/MiniMax · 当前会话/).length).toBeGreaterThan(0);
-    expect(screen.getByLabelText("MiniMax API Key")).toBeTruthy();
-    expect(screen.getByText(/Qwen3 ASR \(local\) · 状态正常/)).toBeTruthy();
+    expect(screen.getByText("运行环境与执行限制")).toBeTruthy();
+    expect(screen.getByText("服务矩阵")).toBeTruthy();
+    expect(screen.getByText("运行环境")).toBeTruthy();
+    expect(screen.getByText("上传与 FFmpeg")).toBeTruthy();
+    expect(screen.getByText("Qwen3 ASR")).toBeTruthy();
+    expect(screen.getByText("Ollama")).toBeTruthy();
+    expect(screen.queryByLabelText("MiniMax API Key")).toBeNull();
     expect(screen.queryByLabelText("OpenAI API Key")).toBeNull();
     expect(screen.queryByLabelText("Anthropic API Key")).toBeNull();
   });

@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from roughcut.api.options import (
     JOB_LANGUAGE_OPTIONS,
@@ -20,7 +20,7 @@ from roughcut.api.options import (
     build_workflow_mode_options,
     normalize_job_language,
 )
-from roughcut.api.provider_catalog import build_service_status_payload, get_model_catalog_payload
+from roughcut.api.provider_catalog import build_provider_check_payload, build_service_status_payload, get_model_catalog_payload
 from roughcut.config import (
     AVATAR_PROVIDER_OPTIONS,
     DEFAULT_TRANSCRIPTION_PROVIDER,
@@ -185,6 +185,15 @@ class ModelCatalogOut(BaseModel):
     refreshed_at: str
     status: str
     error: str | None = None
+
+
+class ProviderCheckOut(BaseModel):
+    provider: str
+    base_url: str
+    checked_at: str
+    status: str
+    detail: str | None = None
+    models: list[str] = Field(default_factory=list)
 
 
 def _sanitize_overrides(overrides: dict[str, Any]) -> dict[str, Any]:
@@ -466,6 +475,14 @@ def get_runtime_environment():
 @router.get("/service-status", response_model=ProviderServiceStatusOut)
 def get_service_status():
     return ProviderServiceStatusOut(**build_service_status_payload())
+
+
+@router.get("/provider-check", response_model=ProviderCheckOut)
+def get_provider_check(provider: str):
+    try:
+        return ProviderCheckOut(**build_provider_check_payload(provider=provider))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.get("/model-catalog", response_model=ModelCatalogOut)

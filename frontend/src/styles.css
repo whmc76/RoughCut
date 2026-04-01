@@ -1,19 +1,21 @@
 :root {
   font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
-  color: #f3efe6;
+  color: #eef3f8;
   background:
-    radial-gradient(circle at top, rgba(227, 171, 103, 0.16), transparent 36%),
-    linear-gradient(160deg, #161412 0%, #1d1a17 48%, #11100f 100%);
+    radial-gradient(circle at top left, rgba(83, 154, 255, 0.14), transparent 28%),
+    radial-gradient(circle at top right, rgba(255, 181, 108, 0.1), transparent 24%),
+    linear-gradient(160deg, #091018 0%, #0d141d 42%, #080c12 100%);
   color-scheme: dark;
-  --panel: rgba(35, 30, 26, 0.88);
-  --panel-border: rgba(255, 219, 180, 0.12);
+  --panel: rgba(16, 21, 29, 0.88);
+  --panel-border: rgba(144, 179, 255, 0.14);
   --line: rgba(255, 255, 255, 0.08);
-  --text-muted: #b0a18f;
-  --accent: #f0b56c;
-  --accent-strong: #ff8d3a;
-  --danger: #e16f5c;
-  --ok: #75cf9f;
-  --off: #887d72;
+  --text-muted: #98a6ba;
+  --accent: #7bd2ff;
+  --accent-strong: #ffb15f;
+  --danger: #ff7b7b;
+  --ok: #7ad7aa;
+  --off: #6d7688;
+  --sidebar-width: 260px;
 }
 
 * {
@@ -42,14 +44,16 @@ select {
 
 .app-shell {
   display: grid;
-  grid-template-columns: 260px minmax(0, 1fr);
+  grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
   min-height: 100vh;
 }
 
 .sidebar {
   padding: 28px 20px;
   border-right: 1px solid var(--line);
-  background: rgba(17, 15, 13, 0.9);
+  background:
+    linear-gradient(180deg, rgba(10, 14, 20, 0.94), rgba(7, 10, 15, 0.98)),
+    rgba(8, 10, 15, 0.96);
   display: flex;
   flex-direction: column;
   gap: 24px;
@@ -106,9 +110,9 @@ select {
 
 .nav-link:hover,
 .nav-link.active {
-  color: #fff7ea;
+  color: #f7fbff;
   border-color: var(--panel-border);
-  background: linear-gradient(135deg, rgba(255, 164, 70, 0.12), rgba(255, 255, 255, 0.03));
+  background: linear-gradient(135deg, rgba(104, 188, 255, 0.14), rgba(255, 177, 95, 0.08));
 }
 
 .sidebar-footer {
@@ -146,6 +150,61 @@ select {
 .page-section {
   display: grid;
   gap: 14px;
+}
+
+.settings-page .page-section {
+  padding-top: 0;
+  border-top: 0;
+}
+
+.settings-page .page-section:first-of-type {
+  padding-top: 0;
+  border-top: 0;
+}
+
+.settings-stage {
+  position: relative;
+  padding: 26px 28px 30px;
+  border-radius: 30px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+}
+
+.settings-stage::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 6px;
+}
+
+.settings-stage-core {
+  background:
+    radial-gradient(circle at top left, rgba(112, 196, 255, 0.16), transparent 32%),
+    linear-gradient(180deg, rgba(12, 18, 28, 0.96), rgba(10, 15, 24, 0.92));
+}
+
+.settings-stage-core::before {
+  background: linear-gradient(180deg, #74d2ff, rgba(94, 135, 255, 0.24));
+}
+
+.settings-stage-quality {
+  background:
+    radial-gradient(circle at top left, rgba(120, 214, 170, 0.14), transparent 30%),
+    linear-gradient(180deg, rgba(10, 24, 22, 0.96), rgba(9, 19, 19, 0.92));
+}
+
+.settings-stage-quality::before {
+  background: linear-gradient(180deg, #76ddb0, rgba(48, 152, 118, 0.2));
+}
+
+.settings-stage-automation {
+  background:
+    radial-gradient(circle at top left, rgba(255, 188, 108, 0.16), transparent 32%),
+    linear-gradient(180deg, rgba(25, 17, 13, 0.96), rgba(19, 14, 11, 0.92));
+}
+
+.settings-stage-automation::before {
+  background: linear-gradient(180deg, #ffb468, rgba(255, 132, 84, 0.22));
 }
 
 .page-header,
@@ -221,7 +280,9 @@ select {
 .page-summary-card {
   border: 1px solid var(--line);
   border-radius: 18px;
-  background: rgba(255, 255, 255, 0.025);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.03), rgba(255, 255, 255, 0.015)),
+    rgba(10, 14, 20, 0.62);
   padding: 14px 16px;
   display: grid;
   gap: 6px;
@@ -254,7 +315,30 @@ select {
   background: var(--panel);
   border-radius: 22px;
   padding: 20px;
-  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.22);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.24);
+}
+
+.settings-summary-panel {
+  background:
+    radial-gradient(circle at top right, rgba(115, 196, 255, 0.15), transparent 34%),
+    rgba(11, 17, 26, 0.92);
+}
+
+.settings-core-panel {
+  background:
+    radial-gradient(circle at top left, rgba(255, 186, 92, 0.1), transparent 26%),
+    rgba(13, 17, 24, 0.94);
+}
+
+.settings-runtime-panel,
+.settings-extension-panel {
+  background: rgba(16, 19, 26, 0.88);
+}
+
+.settings-quality-panel {
+  background:
+    radial-gradient(circle at top right, rgba(122, 215, 170, 0.12), transparent 30%),
+    rgba(10, 20, 19, 0.92);
 }
 
 .panel-grid {
@@ -716,7 +800,10 @@ select.input option:focus {
 
 .detail-modal-backdrop {
   position: fixed;
-  inset: 0;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: var(--sidebar-width);
   z-index: 60;
   display: flex;
   justify-content: flex-end;
@@ -895,6 +982,28 @@ select.input option:focus {
   gap: 12px;
 }
 
+.settings-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.settings-section-stack {
+  display: grid;
+  gap: 16px;
+}
+
+.settings-command-card {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 18px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.035), rgba(255, 255, 255, 0.015)),
+    rgba(8, 11, 17, 0.42);
+  padding: 16px;
+  display: grid;
+  gap: 8px;
+}
+
 .settings-overview-card,
 .settings-subsection {
   border: 1px solid var(--line);
@@ -932,6 +1041,300 @@ select.input option:focus {
   gap: 12px;
   align-items: baseline;
   flex-wrap: wrap;
+}
+
+.settings-provider-deck-head {
+  margin-bottom: 14px;
+}
+
+.settings-provider-deck {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 18px;
+}
+
+.settings-provider-card,
+.settings-service-card {
+  border-radius: 18px;
+  padding: 16px;
+  display: grid;
+  gap: 12px;
+}
+
+.settings-provider-card {
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.035), rgba(255, 255, 255, 0.015)),
+    rgba(10, 12, 17, 0.78);
+  position: relative;
+  overflow: hidden;
+}
+
+.settings-provider-card::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 4px;
+  border-radius: 18px 0 0 18px;
+  background: rgba(255, 181, 108, 0.45);
+}
+
+.settings-provider-card.actionable {
+  box-shadow: inset 0 0 0 1px rgba(255, 181, 108, 0.05);
+}
+
+.settings-provider-card.informational {
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.settings-provider-card.tone-cloud::before {
+  background: linear-gradient(180deg, rgba(125, 211, 255, 0.94), rgba(103, 124, 255, 0.52));
+}
+
+.settings-provider-card.tone-local::before {
+  background: linear-gradient(180deg, rgba(117, 229, 176, 0.88), rgba(69, 173, 136, 0.44));
+}
+
+.settings-provider-card.tone-route::before {
+  background: linear-gradient(180deg, rgba(131, 190, 255, 0.86), rgba(70, 123, 216, 0.4));
+}
+
+.settings-provider-card-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.settings-provider-card-copy {
+  display: grid;
+  gap: 10px;
+}
+
+.settings-provider-summary {
+  font-size: 14px;
+  line-height: 1.5;
+  color: #f4e5d2;
+}
+
+.settings-provider-meta {
+  display: grid;
+  gap: 8px;
+}
+
+.settings-provider-meta-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+  padding-top: 8px;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.settings-provider-meta-row span {
+  color: var(--text-muted);
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.settings-provider-meta-row strong {
+  color: #f8eddf;
+  font-size: 13px;
+  line-height: 1.5;
+  text-align: right;
+  word-break: break-all;
+}
+
+.settings-provider-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.settings-chain-grid,
+.settings-environment-grid {
+  display: grid;
+  gap: 14px;
+}
+
+.settings-chain-card {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 20px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0.015)),
+    rgba(8, 12, 18, 0.74);
+  overflow: hidden;
+}
+
+.settings-chain-card-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+  padding: 16px 18px 0;
+  flex-wrap: wrap;
+}
+
+.settings-chain-card-body {
+  padding: 0 18px 18px;
+}
+
+.settings-chain-note {
+  align-self: end;
+  min-height: 42px;
+  display: flex;
+  align-items: center;
+  border: 1px dashed rgba(255, 255, 255, 0.1);
+  border-radius: 12px;
+  padding: 10px 12px;
+  background: rgba(255, 255, 255, 0.015);
+}
+
+.settings-runtime-grid,
+.settings-service-card-grid {
+  display: grid;
+  gap: 12px;
+}
+
+.settings-service-card-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin: 16px 0;
+}
+
+.settings-service-card {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.settings-runtime-summary-card {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 18px;
+  padding: 16px;
+  background: rgba(255, 255, 255, 0.03);
+  display: grid;
+  gap: 8px;
+}
+
+.settings-automation-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 16px;
+}
+
+.settings-extension-shell {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 24px;
+  padding: 18px;
+  display: grid;
+  gap: 16px;
+}
+
+.settings-extension-shell-creative {
+  background:
+    radial-gradient(circle at top left, rgba(125, 211, 255, 0.14), transparent 34%),
+    rgba(9, 16, 26, 0.86);
+}
+
+.settings-extension-shell-bot {
+  background:
+    radial-gradient(circle at top left, rgba(255, 187, 108, 0.14), transparent 32%),
+    rgba(23, 17, 12, 0.86);
+}
+
+.settings-module-panel {
+  display: grid;
+  gap: 16px;
+}
+
+.settings-module-column {
+  display: grid;
+  gap: 16px;
+}
+
+.settings-module-summary-grid,
+.settings-module-summary-strip {
+  display: grid;
+  gap: 12px;
+}
+
+.settings-module-chip {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 18px;
+  padding: 14px 16px;
+  background: rgba(255, 255, 255, 0.03);
+  display: grid;
+  gap: 6px;
+}
+
+.settings-module-summary-strip {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.settings-module-dual-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.settings-tool-card {
+  border-radius: 22px;
+  padding: 18px;
+  display: grid;
+  gap: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.settings-tool-card-review {
+  background:
+    linear-gradient(180deg, rgba(109, 198, 255, 0.08), rgba(255, 255, 255, 0.02)),
+    rgba(8, 14, 22, 0.78);
+}
+
+.settings-tool-card-agent {
+  background:
+    linear-gradient(180deg, rgba(255, 183, 108, 0.1), rgba(255, 255, 255, 0.02)),
+    rgba(24, 17, 12, 0.78);
+}
+
+.settings-tool-card-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.settings-creative-panel .settings-overview-card {
+  background:
+    linear-gradient(180deg, rgba(120, 200, 255, 0.08), rgba(255, 255, 255, 0.015)),
+    rgba(9, 15, 24, 0.58);
+}
+
+.settings-bot-panel .settings-module-chip {
+  background:
+    linear-gradient(180deg, rgba(255, 188, 108, 0.08), rgba(255, 255, 255, 0.015)),
+    rgba(20, 14, 11, 0.62);
+}
+
+.settings-environment-list {
+  display: grid;
+  gap: 10px;
+  padding: 12px 18px 18px;
+}
+
+.settings-environment-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+  padding-top: 10px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.settings-environment-row:first-child {
+  border-top: 0;
+  padding-top: 0;
 }
 
 .settings-disclosure {
@@ -2914,6 +3317,12 @@ select.input option:focus {
   .watch-grid,
   .form-grid.three-up,
   .stats-grid,
+  .settings-summary-grid,
+  .settings-provider-deck,
+  .settings-service-card-grid,
+  .settings-automation-grid,
+  .settings-module-summary-strip,
+  .settings-module-dual-grid,
   .settings-overview-grid,
   .template-summary-grid,
   .preset-grid,
@@ -2942,6 +3351,7 @@ select.input option:focus {
 
 @media (max-width: 960px) {
   .detail-modal-backdrop {
+    left: 0 !important;
     padding: 12px;
   }
 
@@ -2980,6 +3390,10 @@ select.input option:focus {
   .page-section-header {
     flex-direction: column;
     align-items: stretch;
+  }
+
+  .settings-stage {
+    padding: 22px 20px 24px;
   }
 
   .page-header-actions {

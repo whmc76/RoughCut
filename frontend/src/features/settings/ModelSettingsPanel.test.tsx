@@ -10,6 +10,7 @@ import type { SettingsForm } from "./constants";
 vi.mock("../../api", () => ({
   api: {
     getModelCatalog: vi.fn(),
+    checkProvider: vi.fn(),
   },
 }));
 
@@ -120,6 +121,14 @@ describe("ModelSettingsPanel", () => {
         error: null,
       };
     });
+    vi.mocked(api.checkProvider).mockResolvedValue({
+      provider: "openai",
+      base_url: "https://api.openai.com/v1",
+      checked_at: "2026-04-01T12:00:00Z",
+      status: "ok",
+      detail: "OpenAI models endpoint reachable",
+      models: ["gpt-4o-transcribe", "gpt-4.1"],
+    });
   });
 
   afterEach(() => {
@@ -141,12 +150,12 @@ describe("ModelSettingsPanel", () => {
 
     renderPanel(form);
 
-    expect(screen.getByText("转写")).toBeInTheDocument();
-    expect(screen.getByText("推理")).toBeInTheDocument();
-    expect(screen.getByText("搜索")).toBeInTheDocument();
+    expect(screen.getByText("活跃 Provider")).toBeInTheDocument();
+    expect(screen.getByText("转写链路")).toBeInTheDocument();
+    expect(screen.getByText("推理链路")).toBeInTheDocument();
+    expect(screen.getByText("搜索链路")).toBeInTheDocument();
     expect(screen.getAllByText("Qwen3 ASR (local)").length).toBeGreaterThan(0);
-    expect(screen.getByText("转写、推理与搜索细节")).toBeInTheDocument();
-    await waitFor(() => expect(screen.getByText(/服务地址：http:\/\/127.0.0.1:18096/)).toBeInTheDocument());
+    await waitFor(() => expect(screen.getAllByText("http://127.0.0.1:18096").length).toBeGreaterThan(0));
     expect(screen.getByLabelText("转写模型")).toHaveValue("qwen3-asr-1.7b");
     expect(screen.getByRole("button", { name: "刷新转写模型" })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "刷新转写模型" }));
@@ -169,11 +178,35 @@ describe("ModelSettingsPanel", () => {
 
     renderPanel(form);
 
-    expect(screen.getByText("本地模式")).toBeInTheDocument();
+    expect(screen.getByText(/当前本地推理 Provider/)).toBeInTheDocument();
     await waitFor(() => expect(screen.getByLabelText("本地推理模型")).toHaveValue("qwen3.5:9b"));
     expect(screen.getByLabelText("本地视觉模型")).toHaveValue("qwen2.5vl:7b");
-    expect(screen.getByText(/Ollama 服务：http:\/\/127.0.0.1:11434/)).toBeInTheDocument();
+    expect(screen.getAllByText("http://127.0.0.1:11434").length).toBeGreaterThan(0);
     expect(screen.queryByLabelText("推理 Provider")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("视觉回退 Provider")).not.toBeInTheDocument();
+  });
+
+  it("shows active provider cards and runs a real connectivity check action", async () => {
+    const form: SettingsForm = {
+      transcription_provider: "openai",
+      transcription_model: "gpt-4o-transcribe",
+      transcription_dialect: "mandarin",
+      llm_mode: "performance",
+      reasoning_provider: "minimax",
+      reasoning_model: "MiniMax-M2.7-highspeed",
+      search_provider: "auto",
+      search_fallback_provider: "searxng",
+    };
+
+    renderPanel(form);
+
+    expect(screen.getByText("活跃 Provider")).toBeInTheDocument();
+    expect(screen.getAllByText(/OpenAI/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText("MiniMax").length).toBeGreaterThan(0);
+
+    fireEvent.click(screen.getByRole("button", { name: "检测 OpenAI (api)" }));
+
+    await waitFor(() => expect(api.checkProvider).toHaveBeenCalledWith("openai"));
+    expect(screen.getByText((content) => content.includes("OpenAI models endpoint reachable"))).toBeInTheDocument();
   });
 });

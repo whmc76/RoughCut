@@ -699,6 +699,15 @@ export type ProviderServiceStatus = {
   services: Record<string, ProviderServiceStatusEntry>;
 };
 
+export type ProviderCheckResult = {
+  provider: string;
+  base_url: string;
+  checked_at: string;
+  status: string;
+  detail?: string | null;
+  models: string[];
+};
+
 export type ModelCatalog = {
   provider: string;
   kind: string;

@@ -350,6 +350,84 @@ def test_get_model_catalog_keeps_cached_models_when_refresh_fails(monkeypatch):
     assert "upstream unavailable" in (cached.error or "")
 
 
+@pytest.mark.asyncio
+async def test_provider_check_reports_live_openai_models(client, monkeypatch):
+    import roughcut.config as config_mod
+
+    config_mod._settings = None
+    settings = get_settings()
+    object.__setattr__(settings, "openai_base_url", "https://api.openai.com/v1")
+    object.__setattr__(settings, "openai_api_key", "openai-test-key")
+
+    requests: list[tuple[str, dict[str, str]]] = []
+
+    class DummyResponse:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {"data": [{"id": "gpt-4.1"}, {"id": "gpt-4.1-mini"}]}
+
+    def fake_get(url: str, *args, **kwargs):
+        requests.append((url, dict(kwargs.get("headers") or {})))
+        return DummyResponse()
+
+    monkeypatch.setattr("roughcut.api.provider_catalog.httpx.get", fake_get)
+
+    response = await client.get("/api/v1/config/provider-check?provider=openai")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["provider"] == "openai"
+    assert payload["base_url"] == "https://api.openai.com/v1"
+    assert payload["status"] == "ok"
+    assert payload["detail"] == "ok"
+    assert payload["models"] == ["gpt-4.1", "gpt-4.1-mini"]
+    assert payload["checked_at"]
+    assert requests == [
+        (
+            "https://api.openai.com/v1/models",
+            {"Authorization": "Bearer openai-test-key"},
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_provider_check_reports_live_ollama_models(client, monkeypatch):
+    import roughcut.config as config_mod
+
+    config_mod._settings = None
+    settings = get_settings()
+    object.__setattr__(settings, "ollama_base_url", "http://127.0.0.1:11434")
+
+    requests: list[str] = []
+
+    class DummyResponse:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {"models": [{"name": "qwen3:8b"}, {"name": "qwen2.5vl:7b"}]}
+
+    def fake_get(url: str, *args, **kwargs):
+        requests.append(url)
+        return DummyResponse()
+
+    monkeypatch.setattr("roughcut.api.provider_catalog.httpx.get", fake_get)
+
+    response = await client.get("/api/v1/config/provider-check?provider=ollama")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["provider"] == "ollama"
+    assert payload["base_url"] == "http://127.0.0.1:11434"
+    assert payload["status"] == "ok"
+    assert payload["detail"] == "ok"
+    assert payload["models"] == ["qwen2.5vl:7b", "qwen3:8b"]
+    assert payload["checked_at"]
+    assert requests == ["http://127.0.0.1:11434/api/tags"]
+
+
 def test_patch_config_rejects_unknown_transcription_provider(tmp_path, monkeypatch):
     import roughcut.api.config as config_api
     import roughcut.config as config_mod

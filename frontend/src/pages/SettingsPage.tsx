@@ -61,6 +61,7 @@ export function SettingsPage() {
       {workspace.saveError ? <div className="notice top-gap">{workspace.saveError}</div> : null}
 
       <PageSection
+        className="settings-stage settings-stage-core"
         eyebrow="Core"
         title="核心链路与 Provider"
         description="先决定转写、推理和搜索如何跑，再直接看到每个 Provider 的状态、凭据来源和检测结果。"
@@ -85,6 +86,7 @@ export function SettingsPage() {
       </PageSection>
 
       <PageSection
+        className="settings-stage settings-stage-quality"
         eyebrow="Quality"
         title="质量与默认策略"
         description="把审核阈值、低分复跑和默认规则单独放一章，避免和 Provider 配置相互干扰。"
@@ -97,6 +99,7 @@ export function SettingsPage() {
       </PageSection>
 
       <PageSection
+        className="settings-stage settings-stage-automation"
         eyebrow="Automation"
         title="扩展与自动化"
         description="运行环境、数字人和 Telegram/Agent 放在后段，但保持语义明确，不再用一个大而空的接入模块承载。"
@@ -109,24 +112,26 @@ export function SettingsPage() {
             serviceStatus={workspace.serviceStatus.data}
             onChange={(key, value) => workspace.setForm((prev) => ({ ...prev, [key]: value }))}
           />
-          <section className="panel settings-extension-panel">
-            <PanelHeader title="数字人与配音能力" description={environmentSummary} />
-            <CreativeSettingsPanel
-              form={workspace.form}
-              config={workspace.config.data}
-              runtimeEnvironment={workspace.runtimeEnvironment.data}
-              options={workspace.options.data}
-              onChange={(key, value) => workspace.setForm((prev) => ({ ...prev, [key]: value }))}
-            />
-          </section>
-          <section className="panel settings-extension-panel">
-            <PanelHeader title="Telegram 与 Agent 自动化" description={automationSummary} />
-            <BotSettingsPanel
-              form={workspace.form}
-              config={workspace.config.data}
-              onChange={(key, value) => workspace.setForm((prev) => ({ ...prev, [key]: value }))}
-            />
-          </section>
+          <div className="settings-automation-grid">
+            <section className="settings-extension-shell settings-extension-shell-creative">
+              <PanelHeader title="数字人与配音能力" description={environmentSummary} />
+              <CreativeSettingsPanel
+                form={workspace.form}
+                config={workspace.config.data}
+                runtimeEnvironment={workspace.runtimeEnvironment.data}
+                options={workspace.options.data}
+                onChange={(key, value) => workspace.setForm((prev) => ({ ...prev, [key]: value }))}
+              />
+            </section>
+            <section className="settings-extension-shell settings-extension-shell-bot">
+              <PanelHeader title="Telegram 与 Agent 自动化" description={automationSummary} />
+              <BotSettingsPanel
+                form={workspace.form}
+                config={workspace.config.data}
+                onChange={(key, value) => workspace.setForm((prev) => ({ ...prev, [key]: value }))}
+              />
+            </section>
+          </div>
         </div>
       </PageSection>
     </section>

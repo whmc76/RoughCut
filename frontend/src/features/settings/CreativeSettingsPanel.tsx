@@ -4,7 +4,6 @@ import { api } from "../../api";
 import type { Config, ConfigOptions, RuntimeEnvironment } from "../../types";
 import { SelectField } from "../../components/forms/SelectField";
 import { TextField } from "../../components/forms/TextField";
-import { PanelHeader } from "../../components/ui/PanelHeader";
 import type { SettingsForm } from "./constants";
 import { getProviderLabel } from "./helpers";
 
@@ -151,9 +150,8 @@ export function CreativeSettingsPanel({ form, config, runtimeEnvironment, option
   };
 
   return (
-    <section className="panel">
-      <PanelHeader title="增强能力 Provider" description="数字人、语音和导演改写入口。" />
-      <div className="form-stack">
+    <section className="settings-module-panel settings-creative-panel">
+      <div className="settings-module-summary-grid">
         <div className="settings-overview-grid">
           <article className="settings-overview-card">
             <span className="settings-overview-label">数字人</span>
@@ -177,6 +175,8 @@ export function CreativeSettingsPanel({ form, config, runtimeEnvironment, option
             </div>
           </article>
         </div>
+      </div>
+      <div className="settings-module-column">
         <TextField
           label="AI 导演改写强度"
           type="number"

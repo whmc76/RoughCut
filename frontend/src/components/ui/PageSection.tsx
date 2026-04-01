@@ -5,12 +5,13 @@ type PageSectionProps = {
   title: string;
   description?: string;
   actions?: ReactNode;
+  className?: string;
   children: ReactNode;
 };
 
-export function PageSection({ eyebrow, title, description, actions, children }: PageSectionProps) {
+export function PageSection({ eyebrow, title, description, actions, className, children }: PageSectionProps) {
   return (
-    <section className="page-section">
+    <section className={className ? `page-section ${className}` : "page-section"}>
       <div className="page-section-header">
         <div className="page-section-copy">
           {eyebrow ? <div className="page-eyebrow">{eyebrow}</div> : null}
