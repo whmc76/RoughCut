@@ -14,6 +14,11 @@ from roughcut.providers.factory import get_ocr_provider, get_reasoning_provider,
 from roughcut.providers.multimodal import complete_with_images
 from roughcut.providers.reasoning.base import Message, extract_json_text
 from roughcut.usage import track_usage_operation
+from roughcut.db.session import get_session_factory
+from roughcut.review.content_understanding_evidence import build_evidence_bundle
+from roughcut.review.content_understanding_infer import infer_content_understanding
+from roughcut.review.content_understanding_schema import map_content_understanding_to_legacy_profile
+from roughcut.review.content_understanding_verify import build_hybrid_verification_bundle, verify_content_understanding
 from roughcut.review.content_profile_memory import summarize_content_profile_user_memory
 from roughcut.review.content_profile_ocr import build_content_profile_ocr
 from roughcut.review.content_profile_candidates import build_identity_candidates
@@ -575,6 +580,21 @@ def apply_identity_review_guard(
     transcript_excerpt = str(guarded.get("transcript_excerpt") or "").strip()
     if not transcript_excerpt and subtitle_items:
         transcript_excerpt = build_transcript_excerpt(list(subtitle_items), max_items=24, max_chars=900)
+    if isinstance(guarded.get("content_understanding"), dict):
+        identity_review = _assess_identity_review_requirement(
+            guarded,
+            subtitle_items=subtitle_items,
+            user_memory=user_memory,
+            glossary_terms=glossary_terms,
+            source_name=source_name,
+        )
+        guarded["identity_review"] = identity_review
+        if bool(identity_review.get("conservative_summary")):
+            guarded["summary"] = _build_conservative_identity_summary(
+                guarded,
+                subtitle_items=subtitle_items,
+            )
+        return guarded
     memory_hints = _seed_profile_from_user_memory(transcript_excerpt, user_memory)
     guarded = _sanitize_profile_identity(
         guarded,
@@ -1605,20 +1625,14 @@ async def infer_content_profile(
     if workflow_template is None and channel_profile is not None:
         workflow_template = channel_profile
     transcript_excerpt = build_transcript_excerpt(subtitle_items)
-    heuristic_profile = _seed_profile_from_subtitles(subtitle_items, glossary_terms=glossary_terms)
-    glossary_profile = _seed_profile_from_glossary_terms(transcript_excerpt, glossary_terms)
-    memory_profile = _seed_profile_from_user_memory(transcript_excerpt, user_memory)
-    memory_prompt = summarize_content_profile_user_memory(user_memory)
     initial_profile = _fallback_profile(
         source_name=source_name,
         workflow_template=workflow_template,
         transcript_excerpt=transcript_excerpt,
     )
-    initial_profile.update(heuristic_profile)
-    initial_profile.update(glossary_profile)
-    initial_profile.update(memory_profile)
     initial_profile["copy_style"] = str(copy_style or "attention_grabbing").strip() or "attention_grabbing"
     settings = get_settings()
+    visual_hints: dict[str, Any] = {}
 
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1633,83 +1647,86 @@ async def infer_content_profile(
             if visual_hints:
                 initial_profile["visual_hints"] = dict(visual_hints)
                 initial_profile["visual_cluster_hints"] = dict(visual_hints)
-            _merge_specific_profile_hints(initial_profile, visual_hints)
-            if frame_paths:
-                prompt = (
-                    "你在分析一条中文短视频。视频可能是开箱评测、录屏教学、vlog、口播观点、游戏高光或美食探店。"
-                    "请结合图片和口播字幕，判断视频主体是什么。"
-                    "如果画面里有产品、软件界面、店招、包装、盒体、logo、英文单词、型号字样，都优先识别。"
-                    "如果是软件/AI/科技类视频，优先识别软件名、平台名、功能名、版本名和当前演示的核心主题，不要退化成“软件工具”。"
-                    "尽量给出开箱产品品牌、开箱产品型号/版本，或软件品牌、功能名/模块名、内容类型、主体领域、主体类型、视频主题。"
-                    "另外补一个适合评论区互动的问题，要贴合内容，不要总是泛泛地问值不值。"
-                    "subject_brand 指视频里被开箱/被讲解的产品或主体品牌，不是频道名、作者名。"
-                    "如果不确定，不要乱编，留空即可。\n\n"
-                    "输出 JSON："
-                    '{"subject_brand":"","subject_model":"","subject_type":"","content_kind":"","subject_domain":"","video_theme":"",'
-                    '"hook_line":"","visible_text":"","engagement_question":"","search_queries":[]}'
-                    "\n如果文件名像时间戳、相机命名或流水号，不要把它当成型号。"
-                    "\nsearch_queries 提供 2-3 个适合联网搜索验证的查询词。"
-                    f"\n视觉一致簇（当前画面主体验证结果，优先级高于脏字幕和错误搜索）：{json.dumps(_visual_cluster_prompt_payload(initial_profile), ensure_ascii=False)}"
-                    f"\n用户历史偏好（仅作辅助参考，不能压过当前字幕和画面）：\n{memory_prompt or '无'}"
-                    f"\n源文件名：{source_name}\n字幕节选：\n{transcript_excerpt}"
-                )
-                with track_usage_operation("content_profile.visual_transcript_fuse"):
-                    content = await complete_with_images(prompt, frame_paths, max_tokens=500, json_mode=True)
-                candidate = json.loads(extract_json_text(content))
-                initial_profile.update({k: v for k, v in candidate.items() if v})
-                _merge_specific_profile_hints(initial_profile, heuristic_profile)
-                _merge_specific_profile_hints(initial_profile, glossary_profile)
-                _merge_specific_profile_hints(initial_profile, memory_profile)
-                _merge_specific_profile_hints(initial_profile, visual_hints)
     except Exception:
         pass
 
-    if _profile_needs_text_refinement(initial_profile):
+    evidence_bundle = build_evidence_bundle(
+        source_name=source_name,
+        subtitle_items=subtitle_items,
+        transcript_excerpt=transcript_excerpt,
+        visible_text=str(initial_profile.get("visible_text") or "").strip(),
+        ocr_profile=initial_profile.get("ocr_profile") if isinstance(initial_profile.get("ocr_profile"), dict) else {},
+        visual_hints=visual_hints,
+    )
+
+    try:
+        with track_usage_operation("content_profile.universal_infer"):
+            understanding = await infer_content_understanding(evidence_bundle)
+    except Exception:
+        return initial_profile
+
+    if include_research and understanding.search_queries:
         try:
-            provider = get_reasoning_provider()
-            prompt = (
-                "你在分析中文短视频的口播内容。视频可能是开箱评测、录屏教学、vlog、口播观点、游戏高光或美食探店。"
-                "请根据文件名、字幕节选和已有视觉判断，补全视频主体的开箱产品品牌、开箱产品型号/版本，或软件品牌、功能名/模块名、主体类型、视频主题，并给出适合联网验证的搜索词。"
-                "同时补一个适合评论区互动的问题，要基于视频内容，不要重复泛化问题。"
-                "subject_brand 指视频里被开箱/被讲解的产品或主体品牌，不是频道名、作者名。"
-                "如果是软件/AI/科技类内容，subject_brand 应该是软件/平台名，subject_model 优先填功能名、模块名或版本名，video_theme 必须点明真实主题，比如某个新功能上线、某个工作流实操，而不是泛泛写“软件功能演示与教程”。"
-                "如果文件名像时间戳、相机命名或流水号，不要把它当成型号。"
-                "如果不确定，请留空，不要乱编。"
-                "\n输出 JSON："
-                '{"subject_brand":"","subject_model":"","subject_type":"","content_kind":"","subject_domain":"","video_theme":"",'
-                '"hook_line":"","visible_text":"","engagement_question":"","search_queries":[]}'
-                    f"\n视觉一致簇（当前画面主体验证结果，优先级高于脏字幕和错误搜索）：{json.dumps(_visual_cluster_prompt_payload(initial_profile), ensure_ascii=False)}"
-                f"\n用户历史偏好（仅作辅助参考，不能压过当前字幕和画面）：\n{memory_prompt or '无'}"
-                f"\n已有判断：{json.dumps(initial_profile, ensure_ascii=False)}"
-                f"\n源文件名：{source_name}\n字幕节选：\n{transcript_excerpt}"
-            )
-            with track_usage_operation("content_profile.text_refine"):
-                response = await provider.complete(
-                    [
-                        Message(role="system", content="你是中文短视频内容策划助手。"),
-                        Message(role="user", content=prompt),
-                    ],
-                    temperature=0.1,
-                    max_tokens=500,
-                    json_mode=True,
+            async with get_session_factory()() as session:
+                verification_bundle = await build_hybrid_verification_bundle(
+                    search_queries=understanding.search_queries,
+                    online_search=_online_search_content_understanding,
+                    internal_search=None,
+                    session=session,
                 )
-            candidate = response.as_json()
-            initial_profile.update({k: v for k, v in candidate.items() if v})
-            _merge_specific_profile_hints(initial_profile, heuristic_profile)
-            _merge_specific_profile_hints(initial_profile, glossary_profile)
-            _merge_specific_profile_hints(initial_profile, memory_profile)
+                with track_usage_operation("content_profile.universal_verify"):
+                    understanding = await verify_content_understanding(
+                        understanding=understanding,
+                        evidence_bundle=evidence_bundle,
+                        verification_bundle=verification_bundle,
+                    )
         except Exception:
             pass
 
-    return await enrich_content_profile(
-        profile=initial_profile,
-        source_name=source_name,
+    profile = map_content_understanding_to_legacy_profile(understanding)
+    profile["content_understanding"] = profile.get("content_understanding") or {}
+    profile["transcript_excerpt"] = transcript_excerpt
+    profile["workflow_template"] = str(workflow_template or "").strip()
+    profile["copy_style"] = str(copy_style or "attention_grabbing").strip() or "attention_grabbing"
+    if initial_profile.get("ocr_profile"):
+        profile["ocr_profile"] = dict(initial_profile.get("ocr_profile") or {})
+    if initial_profile.get("visible_text") and not profile.get("visible_text"):
+        profile["visible_text"] = str(initial_profile.get("visible_text") or "").strip()
+    if visual_hints:
+        profile["visual_hints"] = dict(visual_hints)
+        profile["visual_cluster_hints"] = dict(visual_hints)
+
+    preset = select_workflow_template(
         workflow_template=workflow_template,
-        transcript_excerpt=transcript_excerpt,
-        glossary_terms=glossary_terms,
-        user_memory=user_memory,
-        include_research=include_research,
+        content_kind=str(profile.get("content_kind") or "").strip(),
+        subject_domain=str(profile.get("subject_domain") or "").strip(),
+        subject_model=str(profile.get("subject_model") or "").strip(),
+        subject_type=str(profile.get("subject_type") or "").strip(),
+        transcript_hint=transcript_excerpt,
     )
+    if not str(profile.get("summary") or "").strip():
+        profile["summary"] = _build_profile_summary(profile)
+    if not str(profile.get("engagement_question") or "").strip():
+        profile["engagement_question"] = _default_engagement_question(preset)
+    profile["cover_title"] = build_cover_title(profile, preset)
+    return profile
+
+
+async def _online_search_content_understanding(*, search_queries: list[str]) -> list[dict[str, Any]]:
+    provider = get_search_provider()
+    results: list[dict[str, Any]] = []
+    for query in search_queries[:4]:
+        for item in await provider.search(query):
+            results.append(
+                {
+                    "query": query,
+                    "title": str(getattr(item, "title", "") or ""),
+                    "url": str(getattr(item, "url", "") or ""),
+                    "snippet": str(getattr(item, "snippet", "") or ""),
+                    "score": float(getattr(item, "score", 0.0) or 0.0),
+                }
+            )
+    return results
 
 
 async def _collect_content_profile_ocr(frame_paths: list[Path], *, source_name: str) -> dict[str, Any]:

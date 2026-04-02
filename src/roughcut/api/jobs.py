@@ -136,6 +136,32 @@ class FinalReviewVariantTimelineRerenderOut(BaseModel):
     validation_issue_count: int = 0
 
 
+def _ensure_content_understanding_payload(profile: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(profile, dict):
+        return profile
+    if isinstance(profile.get("content_understanding"), dict):
+        return profile
+
+    enriched = dict(profile)
+    enriched["content_understanding"] = {
+        "video_type": str(enriched.get("content_kind") or "").strip(),
+        "content_domain": str(enriched.get("subject_domain") or "").strip(),
+        "primary_subject": str(enriched.get("subject_type") or "").strip(),
+        "subject_entities": [],
+        "video_theme": str(enriched.get("video_theme") or "").strip(),
+        "summary": str(enriched.get("summary") or "").strip(),
+        "hook_line": str(enriched.get("hook_line") or "").strip(),
+        "engagement_question": str(enriched.get("engagement_question") or "").strip(),
+        "search_queries": [str(item).strip() for item in (enriched.get("search_queries") or []) if str(item).strip()],
+        "evidence_spans": [],
+        "uncertainties": [],
+        "confidence": {},
+        "needs_review": bool(enriched.get("review_required") or False),
+        "review_reasons": [str(item).strip() for item in (enriched.get("review_reasons") or []) if str(item).strip()],
+    }
+    return enriched
+
+
 def _select_preferred_content_profile_artifact(artifacts: list[Artifact]) -> Artifact | None:
     if not artifacts:
         return None
@@ -542,8 +568,10 @@ async def get_content_profile(job_id: uuid.UUID, session: AsyncSession = Depends
     settings = get_settings()
     if isinstance(draft, dict):
         draft = apply_current_content_profile_review_policy(draft, settings=settings)
+        draft = _ensure_content_understanding_payload(draft)
     if isinstance(final, dict):
         final = apply_current_content_profile_review_policy(final, settings=settings)
+        final = _ensure_content_understanding_payload(final)
 
     review_step_result = await session.execute(
         select(JobStep).where(JobStep.job_id == job_id, JobStep.step_name == "summary_review")

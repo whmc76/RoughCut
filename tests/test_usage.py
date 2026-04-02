@@ -444,6 +444,7 @@ def test_build_packaging_prompt_brief_keeps_only_compact_fields():
 @pytest.mark.asyncio
 async def test_infer_content_profile_skips_text_refine_when_visual_fusion_is_specific(monkeypatch: pytest.MonkeyPatch):
     from roughcut.review import content_profile as content_profile_module
+    from roughcut.review.content_understanding_schema import ContentUnderstanding, SubjectEntity
 
     monkeypatch.setattr(content_profile_module, "_extract_reference_frames", lambda *args, **kwargs: [Path("frame_01.jpg")])
     async def fake_infer_visual_profile_hints(frame_paths):
@@ -456,20 +457,34 @@ async def test_infer_content_profile_skips_text_refine_when_visual_fusion_is_spe
 
     monkeypatch.setattr(content_profile_module, "_infer_visual_profile_hints", fake_infer_visual_profile_hints)
 
-    async def fake_complete_with_images(*args, **kwargs):
-        return (
-            '{"subject_brand":"Loop露普","subject_model":"SK05二代Pro UV版","subject_type":"EDC手电",'
-            '"video_theme":"EDC手电开箱与紫外实测","preset_name":"unboxing_upgrade",'
-            '"hook_line":"这次升级看紫外实测","visible_text":"Loop SK05",'
-            '"engagement_question":"这类手电你更看重泛光还是紫外？","search_queries":["Loop SK05 UV"]}'
+    async def fake_infer_content_understanding(evidence_bundle):
+        assert evidence_bundle["candidate_hints"]["visual_hints"]["subject_brand"] == "Loop露普"
+        assert evidence_bundle["candidate_hints"]["visual_hints"]["subject_model"] == "SK05二代Pro UV版"
+        return ContentUnderstanding(
+            video_type="unboxing",
+            content_domain="edc",
+            primary_subject="EDC手电",
+            subject_entities=[
+                SubjectEntity(
+                    kind="product",
+                    name="Loop露普 SK05二代Pro UV版",
+                    brand="Loop露普",
+                    model="SK05二代Pro UV版",
+                )
+            ],
+            video_theme="EDC手电开箱与紫外实测",
+            summary="这条视频主要围绕 Loop露普 SK05二代Pro UV版 展开。",
+            hook_line="这次升级看紫外实测",
+            engagement_question="这类手电你更看重泛光还是紫外？",
+            search_queries=["Loop SK05 UV"],
+            evidence_spans=[],
+            uncertainties=[],
+            confidence={"overall": 0.88},
+            needs_review=False,
+            review_reasons=[],
         )
 
-    monkeypatch.setattr(content_profile_module, "complete_with_images", fake_complete_with_images)
-
-    def fail_provider():
-        raise AssertionError("text refine should not be called")
-
-    monkeypatch.setattr(content_profile_module, "get_reasoning_provider", fail_provider)
+    monkeypatch.setattr(content_profile_module, "infer_content_understanding", fake_infer_content_understanding)
 
     result = await content_profile_module.infer_content_profile(
         source_path=Path("demo.mp4"),
@@ -480,4 +495,5 @@ async def test_infer_content_profile_skips_text_refine_when_visual_fusion_is_spe
     )
 
     assert result["subject_brand"] == "Loop露普"
+    assert result["subject_model"] == "SK05二代Pro UV版"
     assert result["video_theme"] == "EDC手电开箱与紫外实测"

@@ -31,12 +31,22 @@ class ContentUnderstanding:
 
 
 def map_content_understanding_to_legacy_profile(value: ContentUnderstanding) -> dict[str, Any]:
+    subject_brand = ""
+    subject_model = ""
+    for entity in value.subject_entities:
+        normalized_kind = str(entity.kind or "").strip().lower()
+        if entity.brand and not subject_brand:
+            subject_brand = entity.brand
+        if entity.model and not subject_model and (entity.brand or normalized_kind in {"product", "hardware", "device"}):
+            subject_model = entity.model
+        if subject_brand and subject_model:
+            break
     subject_type = value.primary_subject or (value.subject_entities[0].name if value.subject_entities else "")
     return {
         "content_kind": value.video_type,
         "subject_domain": value.content_domain,
-        "subject_brand": "",
-        "subject_model": "",
+        "subject_brand": subject_brand,
+        "subject_model": subject_model,
         "subject_type": subject_type,
         "video_theme": value.video_theme,
         "summary": value.summary,

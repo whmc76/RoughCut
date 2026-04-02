@@ -37,6 +37,19 @@ export function JobContentProfileSection({
   onConfirm,
 }: JobContentProfileSectionProps) {
   const { t } = useI18n();
+  const contentUnderstanding = contentSource && typeof contentSource.content_understanding === "object"
+    ? (contentSource.content_understanding as Record<string, unknown>)
+    : null;
+  const effectiveContentSource = contentUnderstanding
+    ? {
+        ...contentSource,
+        subject_type: contentSource?.subject_type ?? contentUnderstanding.primary_subject ?? contentUnderstanding.video_type ?? "",
+        video_theme: contentSource?.video_theme ?? contentUnderstanding.video_theme ?? "",
+        summary: contentSource?.summary ?? contentUnderstanding.summary ?? "",
+        hook_line: contentSource?.hook_line ?? contentUnderstanding.hook_line ?? "",
+        engagement_question: contentSource?.engagement_question ?? contentUnderstanding.engagement_question ?? "",
+      }
+    : contentSource;
   const identityReview = contentProfile?.identity_review;
   const evidenceBundle = identityReview?.evidence_bundle;
   const supportSources = (identityReview?.support_sources ?? []).map((item) => IDENTITY_SUPPORT_SOURCE_LABELS[item] ?? item);
@@ -63,7 +76,7 @@ export function JobContentProfileSection({
   return (
     <section className="detail-block">
       <div className="detail-key">{t("jobs.contentReview.title")}</div>
-      {contentSource ? (
+      {effectiveContentSource ? (
         <>
           <div className="thumbnail-strip">
             {[0, 1, 2].map((index) => (
@@ -76,7 +89,7 @@ export function JobContentProfileSection({
                 <span>{contentFieldLabel(field)}</span>
                 <input
                   className="input"
-                  value={String(contentDraft[field] ?? contentSource[field] ?? "")}
+                  value={String(contentDraft[field] ?? effectiveContentSource[field] ?? "")}
                   onChange={(event) => onFieldChange(field, event.target.value)}
                 />
               </label>
