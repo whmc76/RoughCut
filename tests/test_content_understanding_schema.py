@@ -1,4 +1,5 @@
 from roughcut.review.content_understanding_schema import (
+    ContentSemanticFacts,
     ContentUnderstanding,
     SubjectEntity,
     map_content_understanding_to_legacy_profile,
@@ -32,6 +33,7 @@ def test_map_content_understanding_to_legacy_profile_keeps_non_product_subjects_
     assert legacy["subject_type"] == "ComfyUI 工作流"
     assert legacy["subject_brand"] == ""
     assert legacy["subject_model"] == ""
+    assert legacy["content_understanding"]["semantic_facts"]["brand_candidates"] == []
 
 
 def test_map_content_understanding_to_legacy_profile_drops_unknown_placeholder_fields():
@@ -58,3 +60,37 @@ def test_map_content_understanding_to_legacy_profile_drops_unknown_placeholder_f
     assert legacy["subject_domain"] == ""
     assert legacy["subject_type"] == ""
     assert legacy["video_theme"] == ""
+
+
+def test_map_content_understanding_to_legacy_profile_exposes_semantic_facts_for_review_debugging():
+    understanding = ContentUnderstanding(
+        video_type="product_review",
+        content_domain="bags",
+        primary_subject="HSJUN × BOLTBOAT 游刃机能双肩包",
+        semantic_facts=ContentSemanticFacts(
+            brand_candidates=["HSJUN", "BOLTBOAT"],
+            model_candidates=["游刃"],
+            product_name_candidates=["游刃"],
+            product_type_candidates=["机能双肩包"],
+            entity_candidates=["HSJUN × BOLTBOAT 游刃"],
+            collaboration_pairs=["HSJUN × BOLTBOAT"],
+            search_expansions=["HSJUN BOLTBOAT 游刃"],
+            evidence_sentences=["这是 hsjun 和 boltboat 联名的包，它叫游刃"],
+        ),
+        subject_entities=[SubjectEntity(kind="product", name="游刃机能双肩包", brand="HSJUN × BOLTBOAT", model="游刃")],
+        video_theme="联名机能双肩包对比评测",
+        summary="视频围绕 HSJUN × BOLTBOAT 游刃机能双肩包展开对比评测。",
+        hook_line="联名机能包上身实测",
+        engagement_question="你更在意结构还是背负？",
+        search_queries=["HSJUN BOLTBOAT 游刃"],
+        evidence_spans=[],
+        uncertainties=[],
+        confidence={"overall": 0.74},
+        needs_review=False,
+        review_reasons=[],
+    )
+
+    legacy = map_content_understanding_to_legacy_profile(understanding)
+
+    assert legacy["content_understanding"]["semantic_facts"]["brand_candidates"] == ["HSJUN", "BOLTBOAT"]
+    assert legacy["content_understanding"]["semantic_facts"]["collaboration_pairs"] == ["HSJUN × BOLTBOAT"]
