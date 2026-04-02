@@ -295,6 +295,11 @@ def _compact_semantic_value(value: object | None) -> Any | None:
             if normalized is not None:
                 compacted_list.append(normalized)
         return compacted_list or None
+    if isinstance(value, str):
+        text = value.strip()
+        return text if text else None
+    if isinstance(value, (bool, int, float)):
+        return value
     text = _as_text(value)
     return text if text else None
 
@@ -308,8 +313,9 @@ def normalize_evidence_bundle(bundle: object | None) -> dict[str, Any]:
     visual_semantic_evidence = _as_dict(raw.get("visual_semantic_evidence"))
 
     visible_text = _as_text(raw.get("visible_text"))
+    ocr_visible_text = _as_text(ocr_profile.get("visible_text"))
     if not visible_text:
-        visible_text = _as_text(ocr_profile.get("visible_text"))
+        visible_text = ocr_visible_text
 
     candidate_hints = _as_dict(raw.get("candidate_hints"))
     visual_hints = _as_dict(raw.get("visual_hints"))
@@ -353,7 +359,7 @@ def normalize_evidence_bundle(bundle: object | None) -> dict[str, Any]:
             "visual_semantic_evidence": visual_semantic_evidence,
             "ocr_semantic_evidence": _compact_semantic_section(
                 {
-                    "visible_text": visible_text,
+                    "visible_text": ocr_visible_text,
                     "ocr_profile": ocr_profile,
                 }
             ),

@@ -34,6 +34,56 @@ def test_normalize_evidence_bundle_builds_primary_evidence_graph_sections():
     assert bundle["ocr_semantic_evidence"]["visible_text"] == "BOLTBOAT"
 
 
+def test_normalize_evidence_bundle_does_not_promote_visual_hint_text_into_ocr_semantic_evidence():
+    bundle = normalize_evidence_bundle(
+        {
+            "source_name": "demo.mp4",
+            "visual_hints": {"visible_text": "VISUAL ONLY"},
+            "ocr_profile": {},
+        }
+    )
+
+    assert bundle["visible_text"] == "VISUAL ONLY"
+    assert bundle["ocr_semantic_evidence"] == {}
+
+
+def test_normalize_evidence_bundle_does_not_treat_standalone_visible_text_as_ocr_evidence():
+    bundle = normalize_evidence_bundle(
+        {
+            "source_name": "demo.mp4",
+            "visible_text": "TOP LEVEL ONLY",
+            "ocr_profile": {},
+        }
+    )
+
+    assert bundle["visible_text"] == "TOP LEVEL ONLY"
+    assert bundle["ocr_semantic_evidence"] == {}
+
+
+def test_normalize_evidence_bundle_preserves_ocr_profile_scalar_types():
+    bundle = normalize_evidence_bundle(
+        {
+            "source_name": "demo.mp4",
+            "ocr_profile": {
+                "visible_text": "BOLTBOAT",
+                "available": True,
+                "frame_count": 3,
+                "line_count": 7,
+                "confidence": 0.92,
+                "timestamp": 12.5,
+            },
+        }
+    )
+
+    ocr_semantic_evidence = bundle["ocr_semantic_evidence"]
+    assert ocr_semantic_evidence["visible_text"] == "BOLTBOAT"
+    assert ocr_semantic_evidence["ocr_profile"]["available"] is True
+    assert ocr_semantic_evidence["ocr_profile"]["frame_count"] == 3
+    assert ocr_semantic_evidence["ocr_profile"]["line_count"] == 7
+    assert ocr_semantic_evidence["ocr_profile"]["confidence"] == 0.92
+    assert ocr_semantic_evidence["ocr_profile"]["timestamp"] == 12.5
+
+
 def test_build_evidence_bundle_keeps_evidence_only_fields():
     bundle = build_evidence_bundle(
         source_name="IMG_1234.mp4",
