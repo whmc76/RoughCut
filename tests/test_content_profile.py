@@ -714,6 +714,61 @@ def test_apply_identity_review_guard_drops_profile_only_specific_theme_without_c
     assert guarded["summary"] == ""
 
 
+def test_apply_identity_review_guard_does_not_override_llm_understanding_identity():
+    guarded = apply_identity_review_guard(
+        {
+            "subject_brand": "",
+            "subject_model": "VX07",
+            "subject_type": "EDC机能包",
+            "video_theme": "VX07机能包开箱对比评测",
+            "summary": "这条视频主要围绕 VX07 机能包的装载和背负体验展开。",
+            "transcript_excerpt": "这期主要看 VX07 机能包的装载和背负细节。",
+            "content_understanding": {
+                "video_type": "unboxing",
+                "content_domain": "gear",
+                "primary_subject": "EDC机能包",
+                "subject_entities": [
+                    {
+                        "kind": "product",
+                        "name": "VX07机能包",
+                        "brand": "",
+                        "model": "VX07",
+                    }
+                ],
+                "video_theme": "VX07机能包开箱对比评测",
+                "summary": "这条视频主要围绕 VX07 机能包的装载和背负体验展开。",
+                "hook_line": "实战向改版",
+                "engagement_question": "你更在意装载还是背负？",
+                "search_queries": ["VX07 机能包"],
+                "evidence_spans": [],
+                "uncertainties": [],
+                "confidence": {"overall": 0.74},
+                "needs_review": False,
+                "review_reasons": [],
+            },
+        },
+        source_name="vx07.mp4",
+        user_memory={
+            "confirmed_entities": [
+                {
+                    "brand": "Loop露普",
+                    "model": "SK05二代Pro UV版",
+                    "phrases": ["SK05", "手电"],
+                    "subject_type": "EDC手电",
+                    "subject_domain": "edc",
+                }
+            ]
+        },
+    )
+
+    assert guarded["subject_model"] == "VX07"
+    assert guarded["subject_type"] == "EDC机能包"
+    assert guarded["video_theme"] == "VX07机能包开箱对比评测"
+    assert guarded["summary"] == "这条视频主要围绕 VX07 机能包的装载和背负体验展开。"
+    assert guarded["content_understanding"]["primary_subject"] == "EDC机能包"
+    assert guarded["identity_review"]["required"] is False
+
+
 def test_build_profile_summary_falls_back_when_theme_only_repeats_identity():
     summary = _build_profile_summary(
         {
@@ -1311,6 +1366,69 @@ def test_assess_content_profile_automation_blocks_ingestible_product_mislabeled_
 
     assert assessment["auto_confirm"] is False
     assert "字幕显示为含片/益生菌等入口产品，但当前摘要主体仍落在装备/工具类" in assessment["blocking_reasons"]
+
+
+def test_assess_content_profile_automation_respects_content_understanding_needs_review():
+    assessment = assess_content_profile_automation(
+        {
+            "preset_name": "unboxing_default",
+            "subject_brand": "狐蝠工业",
+            "subject_model": "F21小副包",
+            "subject_type": "EDC机能包",
+            "video_theme": "狐蝠工业F21小副包开箱与上手评测",
+            "summary": "这条视频主要围绕狐蝠工业 F21小副包展开。",
+            "engagement_question": "你更看重分仓还是挂点？",
+            "search_queries": ["狐蝠工业 F21小副包"],
+            "cover_title": {"top": "狐蝠工业", "main": "F21小副包", "bottom": "开箱上手"},
+            "content_understanding": {
+                "needs_review": True,
+                "review_reasons": ["联网搜索与内部已确认实体存在冲突，需人工复核"],
+            },
+        },
+        subtitle_items=[
+            {"text_raw": "这次主要看狐蝠工业 F21 小副包的分仓和挂点。"},
+            {"text_raw": "后面再看上手细节。"},
+            {"text_raw": "最后聊聊收纳体验。"},
+            {"text_raw": "这次主要看挂点布局。"},
+            {"text_raw": "整体结构比上一代更紧凑。"},
+            {"text_raw": "最后再看值不值得买。"},
+        ],
+        auto_confirm_enabled=True,
+        threshold=0.1,
+    )
+
+    assert assessment["auto_confirm"] is False
+    assert "联网搜索与内部已确认实体存在冲突，需人工复核" in assessment["blocking_reasons"]
+
+
+def test_assess_content_profile_automation_keeps_llm_review_reasons_when_no_manual_block():
+    assessment = assess_content_profile_automation(
+        {
+            "preset_name": "tutorial_default",
+            "subject_type": "AI工作流创作平台",
+            "video_theme": "ComfyUI 无限画布工作流实操",
+            "summary": "这条视频主要围绕 ComfyUI 无限画布工作流展开。",
+            "engagement_question": "你现在最卡在哪一步？",
+            "search_queries": ["ComfyUI 无限画布 工作流"],
+            "cover_title": {"top": "ComfyUI", "main": "无限画布实操", "bottom": "工作流拆开讲"},
+            "content_understanding": {
+                "needs_review": False,
+                "review_reasons": ["型号信息缺失，但不影响当前视频主题判断"],
+            },
+        },
+        subtitle_items=[
+            {"text_raw": "这期主要讲 ComfyUI 无限画布工作流。"},
+            {"text_raw": "后面我会拆开节点配置。"},
+            {"text_raw": "最后给你一套可复用思路。"},
+            {"text_raw": "先看布局，再看节点串联。"},
+            {"text_raw": "最后看调参顺序。"},
+            {"text_raw": "这样更容易复现。"},
+        ],
+        auto_confirm_enabled=False,
+    )
+
+    assert "型号信息缺失，但不影响当前视频主题判断" in assessment["review_reasons"]
+    assert "型号信息缺失，但不影响当前视频主题判断" not in assessment["blocking_reasons"]
 
 
 def test_assess_content_profile_automation_identity_evidence_bundle_reads_graph_ocr_and_transcript_labels():

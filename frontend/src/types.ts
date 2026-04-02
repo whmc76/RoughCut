@@ -541,6 +541,7 @@ export type ContentUnderstanding = {
   summary: string;
   hook_line: string;
   engagement_question: string;
+  question?: string;
   search_queries: string[];
   evidence_spans: Record<string, any>[];
   uncertainties: string[];

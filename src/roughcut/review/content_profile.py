@@ -403,6 +403,9 @@ def assess_content_profile_automation(
 ) -> dict[str, Any]:
     normalized_threshold = max(0.0, min(1.0, float(threshold)))
     subtitle_items = subtitle_items or []
+    content_understanding = profile.get("content_understanding")
+    if not isinstance(content_understanding, dict):
+        content_understanding = {}
     transcript_excerpt = str(profile.get("transcript_excerpt") or "").strip()
     if not transcript_excerpt and subtitle_items:
         transcript_excerpt = build_transcript_excerpt(subtitle_items, max_items=24, max_chars=900)
@@ -534,6 +537,19 @@ def assess_content_profile_automation(
         blocking_reasons.append(str(identity_review.get("reason") or "开箱类视频主体身份待人工确认"))
         if bool(identity_review.get("conservative_summary")):
             review_reasons.append("首次品牌/型号证据不足，已退化为保守摘要")
+
+    llm_review_reasons = [
+        str(item).strip()
+        for item in content_understanding.get("review_reasons") or []
+        if str(item).strip()
+    ]
+    if bool(content_understanding.get("needs_review")):
+        if llm_review_reasons:
+            blocking_reasons.extend(llm_review_reasons)
+        else:
+            blocking_reasons.append("LLM 内容理解结果要求人工复核")
+    else:
+        review_reasons.extend(llm_review_reasons)
 
     score = round(min(score, 1.0), 3)
     review_reasons = list(dict.fromkeys(review_reasons))

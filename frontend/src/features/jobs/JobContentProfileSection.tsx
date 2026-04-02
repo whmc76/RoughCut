@@ -11,6 +11,10 @@ const IDENTITY_SUPPORT_SOURCE_LABELS: Record<string, string> = {
   evidence: "外部证据",
 };
 
+function getTextValue(value: unknown) {
+  return typeof value === "string" ? value.trim() : "";
+}
+
 type JobContentProfileSectionProps = {
   jobId: string;
   contentProfile?: ContentProfileReview;
@@ -37,17 +41,33 @@ export function JobContentProfileSection({
   onConfirm,
 }: JobContentProfileSectionProps) {
   const { t } = useI18n();
-  const contentUnderstanding = contentSource && typeof contentSource.content_understanding === "object"
+  const contentUnderstanding = contentSource
+    && typeof contentSource.content_understanding === "object"
+    && !Array.isArray(contentSource.content_understanding)
     ? (contentSource.content_understanding as Record<string, unknown>)
     : null;
   const effectiveContentSource = contentUnderstanding
     ? {
         ...contentSource,
-        subject_type: contentSource?.subject_type ?? contentUnderstanding.primary_subject ?? contentUnderstanding.video_type ?? "",
-        video_theme: contentSource?.video_theme ?? contentUnderstanding.video_theme ?? "",
-        summary: contentSource?.summary ?? contentUnderstanding.summary ?? "",
-        hook_line: contentSource?.hook_line ?? contentUnderstanding.hook_line ?? "",
-        engagement_question: contentSource?.engagement_question ?? contentUnderstanding.engagement_question ?? "",
+        subject_type:
+          getTextValue(contentUnderstanding.subject_type)
+          || getTextValue(contentUnderstanding.primary_subject)
+          || getTextValue(contentUnderstanding.video_type)
+          || getTextValue(contentSource?.subject_type),
+        video_theme:
+          getTextValue(contentUnderstanding.video_theme)
+          || getTextValue(contentSource?.video_theme),
+        summary:
+          getTextValue(contentUnderstanding.summary)
+          || getTextValue(contentSource?.summary),
+        hook_line:
+          getTextValue(contentUnderstanding.hook_line)
+          || getTextValue(contentSource?.hook_line),
+        engagement_question:
+          getTextValue(contentUnderstanding.question)
+          || getTextValue(contentUnderstanding.engagement_question)
+          || getTextValue(contentSource?.engagement_question)
+          || getTextValue(contentSource?.question),
       }
     : contentSource;
   const identityReview = contentProfile?.identity_review;

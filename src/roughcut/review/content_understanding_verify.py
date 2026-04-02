@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field, is_dataclass, asdict
+from dataclasses import dataclass, field, is_dataclass, asdict, replace
 import json
 from typing import Any, Awaitable, Callable
 
@@ -94,8 +94,12 @@ async def verify_content_understanding(
         max_tokens=2200,
         json_mode=True,
     )
-    data = response.as_json()
-    return parse_content_understanding_payload(data)
+    candidate = parse_content_understanding_payload(response.as_json())
+    return _apply_conservative_verification(
+        base=understanding,
+        candidate=candidate,
+        evidence_bundle=evidence_bundle,
+    )
 
 
 async def _run_search(online_search: SearchCallable | None, *, search_queries: list[str]) -> list[Any]:
@@ -142,3 +146,77 @@ def _result_to_dict(item: Any) -> dict[str, Any]:
             if not key.startswith("_")
         }
     return {"value": str(item)}
+
+
+def _apply_conservative_verification(
+    *,
+    base: ContentUnderstanding,
+    candidate: ContentUnderstanding,
+    evidence_bundle: dict[str, Any],
+) -> ContentUnderstanding:
+    has_direct_evidence = _has_direct_evidence(evidence_bundle)
+    conflicts = _collect_conflict_fields(base, candidate)
+    review_reasons = _merge_unique(
+        list(base.review_reasons),
+        list(candidate.review_reasons),
+        [
+            "缺少直接视频证据，外部搜索/内部检索仅作弱佐证" if not has_direct_evidence else "",
+            "核验结果与当前视频结论存在冲突，已保守保留原结论" if conflicts else "",
+        ],
+    )
+    uncertainties = _merge_unique(list(base.uncertainties), list(candidate.uncertainties))
+    needs_review = bool(base.needs_review or candidate.needs_review or not has_direct_evidence or conflicts)
+    return replace(
+        base,
+        uncertainties=uncertainties,
+        review_reasons=review_reasons,
+        needs_review=needs_review,
+    )
+
+
+def _collect_conflict_fields(base: ContentUnderstanding, candidate: ContentUnderstanding) -> list[str]:
+    conflict_fields: list[str] = []
+    for field_name in (
+        "video_type",
+        "content_domain",
+        "primary_subject",
+        "subject_entities",
+        "video_theme",
+        "summary",
+        "hook_line",
+        "engagement_question",
+    ):
+        if getattr(base, field_name) != getattr(candidate, field_name):
+            conflict_fields.append(field_name)
+    return conflict_fields
+
+
+def _has_direct_evidence(evidence_bundle: dict[str, Any] | None) -> bool:
+    bundle = evidence_bundle or {}
+    return bool(_collect_text_fragments(bundle))
+
+
+def _collect_text_fragments(value: Any) -> list[str]:
+    fragments: list[str] = []
+    if isinstance(value, dict):
+        for item in value.values():
+            fragments.extend(_collect_text_fragments(item))
+        return fragments
+    if isinstance(value, (list, tuple, set)):
+        for item in value:
+            fragments.extend(_collect_text_fragments(item))
+        return fragments
+    text = str(value or "").strip()
+    if text:
+        fragments.append(text)
+    return fragments
+
+
+def _merge_unique(*groups: list[str]) -> list[str]:
+    merged: list[str] = []
+    for group in groups:
+        for item in group:
+            text = str(item or "").strip()
+            if text and text not in merged:
+                merged.append(text)
+    return merged
