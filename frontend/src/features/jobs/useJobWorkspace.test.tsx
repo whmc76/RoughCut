@@ -187,6 +187,9 @@ const SAMPLE_PROFILE: ContentProfileReview = {
       matched_evidence_terms: [],
     },
   },
+  ocr_evidence: {},
+  transcript_evidence: {},
+  entity_resolution_trace: {},
   workflow_mode: "standard_edit",
   enhancement_modes: ["avatar_commentary"],
   draft: {

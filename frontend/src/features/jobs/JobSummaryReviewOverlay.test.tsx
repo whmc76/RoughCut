@@ -23,6 +23,21 @@ const contentProfile: ContentProfileReview = {
     required: true,
     reason: "开箱类视频命中首次品牌/型号且缺少交叉印证，需人工确认",
   },
+  ocr_evidence: {
+    visible_text: "狐蝠工业 FXX1小副包 开箱",
+    frame_count: 3,
+    line_count: 2,
+    raw_snippets: [{ text: "FXX1小副包" }],
+  },
+  transcript_evidence: {
+    provider: "qwen3_asr",
+    model: "qwen3-asr-1.7b",
+    prompt: "请优先识别品牌与型号。",
+    segments: [{ text: "这期开箱狐蝠工业 FXX1小副包。" }],
+  },
+  entity_resolution_trace: {
+    summary: "当前画面文字与转写都更支持机能包，不支持手电。",
+  },
   workflow_mode: "standard_edit",
   enhancement_modes: [],
   draft: { title: "草稿标题" },
@@ -71,5 +86,30 @@ describe("JobSummaryReviewOverlay", () => {
         screen.getByTestId("job-content-profile-section"),
       ) & Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
+  });
+
+  it("surfaces OCR and transcript evidence before the editor", () => {
+    render(
+      <JobSummaryReviewOverlay
+        jobId="job_1"
+        jobTitle="needs_review.mp4"
+        contentProfile={contentProfile}
+        contentSource={{ title: "最终标题" }}
+        contentDraft={{ title: "草稿标题" }}
+        contentKeywords="开箱,升级"
+        isConfirmingProfile={false}
+        onContentFieldChange={vi.fn()}
+        onKeywordsChange={vi.fn()}
+        onConfirmProfile={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("画面与识别证据")).toBeInTheDocument();
+    expect(screen.getByText("狐蝠工业 FXX1小副包 开箱")).toBeInTheDocument();
+    expect(screen.getByText("3 帧 / 2 行")).toBeInTheDocument();
+    expect(screen.getByText("qwen3_asr / qwen3-asr-1.7b")).toBeInTheDocument();
+    expect(screen.getByText("请优先识别品牌与型号。")).toBeInTheDocument();
+    expect(screen.getByText("这期开箱狐蝠工业 FXX1小副包。")).toBeInTheDocument();
+    expect(screen.getByText("当前画面文字与转写都更支持机能包，不支持手电。")).toBeInTheDocument();
   });
 });

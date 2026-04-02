@@ -16,8 +16,16 @@ export function JobsPage() {
   const workflowTemplateOptions = workspace.options.data?.workflow_templates ?? [{ value: "", label: t("watch.page.autoMatch") }];
   const workflowModeOptions = workspace.options.data?.workflow_modes ?? [{ value: "standard_edit", label: t("creative.workflow.standard_edit") }];
   const enhancementOptions = workspace.options.data?.enhancement_modes ?? [];
-  const reviewStep = workspace.activity.data?.current_step?.step_name === "final_review" ? "final_review" : "summary_review";
-  const isReviewJob = workspace.selectedJob?.status === "needs_review";
+  const activeReviewStep =
+    workspace.activity.data?.current_step?.step_name === "summary_review" || workspace.activity.data?.current_step?.step_name === "final_review"
+      ? workspace.activity.data.current_step.step_name
+      : workspace.selectedJob?.steps.find(
+        (step) =>
+          (step.step_name === "summary_review" || step.step_name === "final_review")
+          && step.status !== "done",
+      )?.step_name;
+  const reviewStep = activeReviewStep === "final_review" ? "final_review" : "summary_review";
+  const isReviewJob = Boolean(workspace.selectedJobId && activeReviewStep);
 
   return (
     <section className="page-stack">

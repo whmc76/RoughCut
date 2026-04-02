@@ -522,6 +522,9 @@ export type ContentProfileReview = {
       matched_evidence_terms?: string[];
     } | null;
   } | null;
+  ocr_evidence: Record<string, any>;
+  transcript_evidence: Record<string, any>;
+  entity_resolution_trace: Record<string, any>;
   workflow_mode: string;
   enhancement_modes: string[];
   draft: Record<string, any> | null;

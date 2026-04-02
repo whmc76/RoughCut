@@ -1634,7 +1634,6 @@ async def infer_content_profile(
                 initial_profile["visual_hints"] = dict(visual_hints)
                 initial_profile["visual_cluster_hints"] = dict(visual_hints)
             _merge_specific_profile_hints(initial_profile, visual_hints)
-            _apply_visual_subject_guard(initial_profile)
             if frame_paths:
                 prompt = (
                     "你在分析一条中文短视频。视频可能是开箱评测、录屏教学、vlog、口播观点、游戏高光或美食探店。"
@@ -1662,7 +1661,6 @@ async def infer_content_profile(
                 _merge_specific_profile_hints(initial_profile, glossary_profile)
                 _merge_specific_profile_hints(initial_profile, memory_profile)
                 _merge_specific_profile_hints(initial_profile, visual_hints)
-                _apply_visual_subject_guard(initial_profile)
     except Exception:
         pass
 
@@ -1700,7 +1698,6 @@ async def infer_content_profile(
             _merge_specific_profile_hints(initial_profile, heuristic_profile)
             _merge_specific_profile_hints(initial_profile, glossary_profile)
             _merge_specific_profile_hints(initial_profile, memory_profile)
-            _apply_visual_subject_guard(initial_profile)
         except Exception:
             pass
 
@@ -2009,12 +2006,10 @@ async def enrich_content_profile(
                     memory_hints=memory_hints,
                     user_memory=user_memory,
                 )
-                _apply_visual_subject_guard(enriched)
             except Exception:
                 pass
 
     _apply_confirmed_profile_fields(enriched, confirmed_fields)
-    _apply_visual_subject_guard(enriched)
 
     if _is_generic_subject_type(str(enriched.get("subject_type") or "")):
         hinted = memory_hints or context_hints
@@ -2089,7 +2084,7 @@ async def _infer_visual_profile_hint_from_images(frame_paths: list[Path]) -> dic
         prompt = (
             "只看这组视频画面，不参考字幕。"
             "请判断画面里被重点展示或被手持操作的主体属于哪一类。"
-            "优先在这些类型中选择：EDC折刀、多功能工具钳、智能灯具、软件界面、人物口播、食品饮品、游戏画面、其他产品。"
+            "优先在这些类型中选择：EDC折刀、多功能工具钳、EDC手电、EDC机能包、软件界面、人物口播、食品饮品、游戏画面、其他产品。"
             "如果画面里能直接看到型号、品牌字样，也提取出来。"
             "不要因为背景海报、桌垫、摆件或贴纸误判主体。"
             "输出 JSON："

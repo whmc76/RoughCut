@@ -217,6 +217,52 @@ describe("JobsPage", () => {
     expect(mockJobReviewOverlay).toHaveBeenCalled();
   });
 
+  it("routes pending jobs with an active summary review step into the dedicated review overlay", () => {
+    mockUseJobWorkspace.mockReturnValue(
+      buildWorkspace({
+        selectedJobId: "job-review-2",
+        selectedJob: {
+          id: "job-review-2",
+          source_name: "pending-review.mp4",
+          content_subject: "测试主题",
+          content_summary: "测试摘要",
+          status: "pending",
+          language: "zh-CN",
+          workflow_mode: "standard_edit",
+          enhancement_modes: [],
+          created_at: "2026-04-02T02:00:00Z",
+          updated_at: "2026-04-02T02:10:00Z",
+          steps: [
+            {
+              id: "summary-step",
+              step_name: "summary_review",
+              status: "pending",
+              attempt: 0,
+              started_at: null,
+              finished_at: null,
+              error_message: null,
+            },
+          ],
+        },
+        activity: {
+          data: {
+            current_step: {
+              step_name: "summary_review",
+              label: "信息核对",
+              status: "pending",
+              detail: "等待校对内容信息后继续。",
+            },
+          },
+        },
+      }),
+    );
+
+    render(<JobsPage />);
+
+    expect(screen.getByTestId("job-review-overlay")).toHaveTextContent("summary_review");
+    expect(screen.queryByTestId("job-detail-modal")).not.toBeInTheDocument();
+  });
+
   it("keeps non-review jobs in the standard detail modal flow", () => {
     mockUseJobWorkspace.mockReturnValue(
       buildWorkspace({

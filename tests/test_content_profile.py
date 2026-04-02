@@ -980,12 +980,68 @@ async def test_infer_visual_profile_hints_extracts_visible_identity(monkeypatch:
     hints = await _infer_visual_profile_hints([])
     assert hints == {}
 
-    hints = await _infer_visual_profile_hints([SimpleNamespace()])
+
+@pytest.mark.asyncio
+async def test_infer_visual_profile_hints_prompt_includes_bag_and_flashlight_categories(monkeypatch: pytest.MonkeyPatch):
+    from roughcut.review import content_profile as content_profile_module
+
+    captured: dict[str, str] = {}
+
+    async def fake_complete_with_images(prompt, *args, **kwargs):
+        captured["prompt"] = prompt
+        return '{"subject_type":"EDC机能包","subject_brand":"FOXBAT狐蝠工业","subject_model":"F21小副包","visible_text":"FOXBAT F21","reason":"包装正面可见品牌和型号"}'
+
+    monkeypatch.setattr(content_profile_module, "complete_with_images", fake_complete_with_images)
+
+    hints = await _infer_visual_profile_hints([Path("frame_01.jpg")])
 
     assert hints["subject_type"] == "EDC机能包"
-    assert hints["subject_brand"] == "FOXBAT狐蝠工业"
-    assert hints["subject_model"] == "F21小副包"
-    assert hints["visible_text"] == "FOXBAT F21"
+    assert "EDC机能包" in captured["prompt"]
+    assert "EDC手电" in captured["prompt"]
+
+
+@pytest.mark.asyncio
+async def test_enrich_content_profile_does_not_call_legacy_visual_subject_guard(monkeypatch: pytest.MonkeyPatch):
+    from roughcut.review import content_profile as content_profile_module
+
+    def fail_guard(*args, **kwargs):
+        raise AssertionError("legacy visual subject guard should not be used")
+
+    monkeypatch.setattr(content_profile_module, "_apply_visual_subject_guard", fail_guard)
+
+    result = await enrich_content_profile(
+        profile={
+            "subject_type": "EDC手电",
+            "visible_text": "狐蝠工业 FXX1小副包 开箱",
+            "visual_cluster_hints": {
+                "subject_type": "EDC机能包",
+                "subject_brand": "狐蝠工业",
+                "subject_model": "FXX1小副包",
+                "visible_text": "狐蝠工业 FXX1小副包",
+            },
+            "transcript_evidence": {
+                "source_labels": {
+                    "subject_brand": "狐蝠工业",
+                    "subject_model": "FXX1小副包",
+                    "subject_type": "EDC机能包",
+                    "video_theme": "狐蝠工业FXX1小副包开箱与挂点评测",
+                }
+            },
+            "ocr_evidence": {
+                "visible_text": "狐蝠工业 FXX1小副包 开箱",
+            },
+            "summary": "围绕狐蝠工业 FXX1小副包展开。",
+            "engagement_question": "你更看重挂点还是分仓？",
+        },
+        source_name="IMG_0041.MOV",
+        workflow_template="edc_tactical",
+        transcript_excerpt="这期主要看分仓、挂点和日常收纳。",
+        include_research=False,
+    )
+
+    assert result["subject_type"] == "EDC机能包"
+    assert result["subject_brand"] == "狐蝠工业"
+    assert result["subject_model"] == "FXX1小副包"
 
 
 @pytest.mark.asyncio
