@@ -30,6 +30,7 @@ from roughcut.review.content_profile import (
     build_transcript_excerpt,
     build_cover_title,
     enrich_content_profile,
+    infer_content_profile,
     polish_subtitle_items,
 )
 
@@ -1622,6 +1623,49 @@ async def test_enrich_content_profile_uses_llm_to_replace_generic_engagement_que
     )
 
     assert result["engagement_question"] == "ARC这次升级你最在意单手开合还是钳头？"
+
+
+@pytest.mark.asyncio
+async def test_infer_content_profile_uses_neutral_review_fallback_when_content_understanding_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    from roughcut.review import content_profile as content_profile_module
+
+    async def raising_infer_content_understanding(evidence_bundle):
+        raise RuntimeError("llm unavailable")
+
+    monkeypatch.setattr(content_profile_module, "infer_content_understanding", raising_infer_content_understanding)
+    monkeypatch.setattr(content_profile_module, "_extract_reference_frames", lambda *args, **kwargs: [])
+    monkeypatch.setattr(
+        content_profile_module,
+        "get_settings",
+        lambda: SimpleNamespace(ocr_enabled=False),
+    )
+
+    result = await infer_content_profile(
+        source_path=tmp_path / "bag.mp4",
+        source_name="bag.mp4",
+        subtitle_items=[
+            {
+                "index": 0,
+                "start_time": 0.0,
+                "end_time": 2.0,
+                "text_raw": "这期聊一个机能双肩包，重点看分仓和背负。",
+                "text_norm": "这期聊一个机能双肩包，重点看分仓和背负。",
+                "text_final": "这期聊一个机能双肩包，重点看分仓和背负。",
+            }
+        ],
+        workflow_template="edc_tactical",
+        include_research=False,
+    )
+
+    assert result["subject_type"] == ""
+    assert result["video_theme"] == ""
+    assert result["summary"] == "这条视频当前主题待进一步确认，建议结合字幕、画面文字和人工核对后再继续包装。"
+    assert result["content_understanding"]["needs_review"] is True
+    assert "内容理解推断失败" in result["content_understanding"]["review_reasons"]
+    assert result["cover_title"]["main"] == "内容待确认"
 
 
 @pytest.mark.asyncio

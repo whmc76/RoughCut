@@ -17,7 +17,7 @@ from roughcut.usage import track_usage_operation
 from roughcut.db.session import get_session_factory
 from roughcut.review.content_understanding_evidence import build_evidence_bundle
 from roughcut.review.content_understanding_infer import infer_content_understanding
-from roughcut.review.content_understanding_schema import map_content_understanding_to_legacy_profile
+from roughcut.review.content_understanding_schema import ContentUnderstanding, map_content_understanding_to_legacy_profile
 from roughcut.review.content_understanding_verify import build_hybrid_verification_bundle, verify_content_understanding
 from roughcut.review.content_profile_memory import summarize_content_profile_user_memory
 from roughcut.review.content_profile_ocr import build_content_profile_ocr
@@ -1726,8 +1726,13 @@ async def infer_content_profile(
     try:
         with track_usage_operation("content_profile.universal_infer"):
             understanding = await infer_content_understanding(evidence_bundle)
+        force_neutral_cover_title = False
     except Exception:
-        return initial_profile
+        understanding = _build_failed_content_understanding(
+            transcript_excerpt=transcript_excerpt,
+            failure_reason="内容理解推断失败",
+        )
+        force_neutral_cover_title = True
 
     if include_research and understanding.search_queries:
         try:
@@ -1773,7 +1778,33 @@ async def infer_content_profile(
     if not str(profile.get("engagement_question") or "").strip():
         profile["engagement_question"] = _default_engagement_question(preset)
     profile["cover_title"] = build_cover_title(profile, preset)
+    if force_neutral_cover_title:
+        profile["cover_title"] = {
+            "top": "",
+            "main": "内容待确认",
+            "bottom": "",
+        }
     return profile
+
+
+def _build_failed_content_understanding(*, transcript_excerpt: str, failure_reason: str) -> ContentUnderstanding:
+    summary = _build_neutral_profile_summary()
+    return ContentUnderstanding(
+        video_type="",
+        content_domain="",
+        primary_subject="",
+        subject_entities=[],
+        video_theme="",
+        summary=summary,
+        hook_line="内容待人工确认",
+        engagement_question="这条视频主要在讲什么？",
+        search_queries=[],
+        evidence_spans=[],
+        uncertainties=[str(failure_reason or "内容理解暂不可用").strip()],
+        confidence={},
+        needs_review=True,
+        review_reasons=[str(failure_reason or "内容理解暂不可用").strip()],
+    )
 
 
 async def _online_search_content_understanding(*, search_queries: list[str]) -> list[dict[str, Any]]:
