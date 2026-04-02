@@ -16,6 +16,34 @@ async def test_health(client: AsyncClient):
     assert response.json() == {"status": "ok"}
 
 
+def test_job_content_preview_ignores_generic_placeholder_subject_fields():
+    from roughcut.api.jobs import _resolve_job_content_preview
+    from roughcut.db.models import Artifact
+
+    preview = _resolve_job_content_preview(
+        [
+            Artifact(
+                artifact_type="content_profile",
+                data_json={
+                    "subject_brand": "",
+                    "subject_model": "",
+                    "subject_type": "unknown",
+                    "video_theme": "待确认",
+                    "summary": "这条视频当前主题待进一步确认，建议结合字幕、画面文字和人工核对后再继续包装。",
+                    "content_understanding": {
+                        "needs_review": True,
+                        "primary_subject": "unknown",
+                        "video_theme": "待确认",
+                    },
+                },
+            )
+        ]
+    )
+
+    assert preview["subject"] is None
+    assert preview["summary"] == "这条视频当前主题待进一步确认，建议结合字幕、画面文字和人工核对后再继续包装。"
+
+
 @pytest.mark.asyncio
 async def test_health_detail_reports_runtime_surfaces(client: AsyncClient, monkeypatch: pytest.MonkeyPatch):
     import roughcut.api.health as health_api

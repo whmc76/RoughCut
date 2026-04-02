@@ -32,3 +32,29 @@ def test_map_content_understanding_to_legacy_profile_keeps_non_product_subjects_
     assert legacy["subject_type"] == "ComfyUI 工作流"
     assert legacy["subject_brand"] == ""
     assert legacy["subject_model"] == ""
+
+
+def test_map_content_understanding_to_legacy_profile_drops_unknown_placeholder_fields():
+    understanding = ContentUnderstanding(
+        video_type="unknown",
+        content_domain="unknown",
+        primary_subject="unknown",
+        subject_entities=[],
+        video_theme="待确认",
+        summary="这条视频当前主题待进一步确认，建议结合字幕、画面文字和人工核对后再继续包装。",
+        hook_line="内容待人工确认",
+        engagement_question="这条视频主要在讲什么？",
+        search_queries=[],
+        evidence_spans=[],
+        uncertainties=["证据不足"],
+        confidence={},
+        needs_review=True,
+        review_reasons=["证据不足"],
+    )
+
+    legacy = map_content_understanding_to_legacy_profile(understanding)
+
+    assert legacy["content_kind"] == ""
+    assert legacy["subject_domain"] == ""
+    assert legacy["subject_type"] == ""
+    assert legacy["video_theme"] == ""

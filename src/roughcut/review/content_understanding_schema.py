@@ -30,6 +30,15 @@ class ContentUnderstanding:
     review_reasons: list[str] = field(default_factory=list)
 
 
+def _normalize_understanding_value(value: str) -> str:
+    normalized = str(value or "").strip()
+    if normalized.lower() in {"unknown", "n/a", "none", "null"}:
+        return ""
+    if normalized in {"未知", "待确认", "内容待确认", "待人工确认", "未识别"}:
+        return ""
+    return normalized
+
+
 def map_content_understanding_to_legacy_profile(value: ContentUnderstanding) -> dict[str, Any]:
     subject_brand = ""
     subject_model = ""
@@ -41,24 +50,29 @@ def map_content_understanding_to_legacy_profile(value: ContentUnderstanding) -> 
             subject_model = entity.model
         if subject_brand and subject_model:
             break
-    subject_type = value.primary_subject or (value.subject_entities[0].name if value.subject_entities else "")
+    content_kind = _normalize_understanding_value(value.video_type)
+    subject_domain = _normalize_understanding_value(value.content_domain)
+    subject_type = _normalize_understanding_value(
+        value.primary_subject or (value.subject_entities[0].name if value.subject_entities else "")
+    )
+    video_theme = _normalize_understanding_value(value.video_theme)
     return {
-        "content_kind": value.video_type,
-        "subject_domain": value.content_domain,
+        "content_kind": content_kind,
+        "subject_domain": subject_domain,
         "subject_brand": subject_brand,
         "subject_model": subject_model,
         "subject_type": subject_type,
-        "video_theme": value.video_theme,
+        "video_theme": video_theme,
         "summary": value.summary,
         "hook_line": value.hook_line,
         "engagement_question": value.engagement_question,
         "search_queries": list(value.search_queries),
         "content_understanding": {
-            "video_type": value.video_type,
-            "content_domain": value.content_domain,
-            "primary_subject": value.primary_subject,
+            "video_type": content_kind,
+            "content_domain": subject_domain,
+            "primary_subject": subject_type,
             "subject_entities": [entity.__dict__ for entity in value.subject_entities],
-            "video_theme": value.video_theme,
+            "video_theme": video_theme,
             "summary": value.summary,
             "hook_line": value.hook_line,
             "engagement_question": value.engagement_question,

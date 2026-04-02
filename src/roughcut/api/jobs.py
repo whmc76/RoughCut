@@ -2019,15 +2019,26 @@ def _resolve_job_content_preview(artifacts: list[Artifact]) -> dict[str, str | N
         return {"subject": None, "summary": None}
 
     data = profile.data_json
+    def _normalize_preview_value(value: object) -> str:
+        normalized = str(value or "").strip()
+        if normalized.lower() in {"unknown", "n/a", "none", "null"}:
+            return ""
+        if normalized in {"未知", "待确认", "内容待确认", "待人工确认", "未识别"}:
+            return ""
+        return normalized
+
     product = " ".join(
         part.strip()
-        for part in [str(data.get("subject_brand") or "").strip(), str(data.get("subject_model") or "").strip()]
+        for part in [
+            _normalize_preview_value(data.get("subject_brand")),
+            _normalize_preview_value(data.get("subject_model")),
+        ]
         if part and str(part).strip()
     ).strip()
     subject_parts = [
         product,
-        str(data.get("subject_type") or "").strip(),
-        str(data.get("video_theme") or "").strip(),
+        _normalize_preview_value(data.get("subject_type")),
+        _normalize_preview_value(data.get("video_theme")),
     ]
     subject = " · ".join(part for part in subject_parts if part).strip() or None
     summary = str(data.get("summary") or data.get("hook_line") or "").strip() or None

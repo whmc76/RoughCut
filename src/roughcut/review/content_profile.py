@@ -1689,12 +1689,9 @@ async def infer_content_profile(
     if workflow_template is None and channel_profile is not None:
         workflow_template = channel_profile
     transcript_excerpt = build_transcript_excerpt(subtitle_items)
-    initial_profile = _fallback_profile(
-        source_name=source_name,
-        workflow_template=workflow_template,
-        transcript_excerpt=transcript_excerpt,
-    )
-    initial_profile["copy_style"] = str(copy_style or "attention_grabbing").strip() or "attention_grabbing"
+    initial_profile: dict[str, Any] = {
+        "copy_style": str(copy_style or "attention_grabbing").strip() or "attention_grabbing",
+    }
     settings = get_settings()
     visual_hints: dict[str, Any] = {}
 
