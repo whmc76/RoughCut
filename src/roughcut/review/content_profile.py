@@ -1205,8 +1205,8 @@ def _sanitize_profile_identity(
     glossary_terms: list[dict[str, Any]] | None = None,
     memory_hints: dict[str, Any] | None = None,
     user_memory: dict[str, Any] | None = None,
-    allow_subject_type_inference: bool = True,
-    allow_video_theme_inference: bool = True,
+    allow_subject_type_inference: bool = False,
+    allow_video_theme_inference: bool = False,
 ) -> dict[str, Any]:
     sanitized = dict(profile or {})
     raw_visual_hints = _profile_visual_cluster_hints(sanitized)
@@ -3976,14 +3976,6 @@ def _merge_specific_profile_hints(profile: dict[str, Any], hints: dict[str, Any]
         profile["subject_brand"] = hints["subject_brand"]
     if hints.get("subject_model") and not profile.get("subject_model"):
         profile["subject_model"] = hints["subject_model"]
-    if hints.get("subject_type") and _is_generic_subject_type(str(profile.get("subject_type") or "")):
-        profile["subject_type"] = hints["subject_type"]
-    hinted_theme = str(hints.get("video_theme") or "").strip()
-    current_theme = str(profile.get("video_theme") or "").strip()
-    preset_name = _workflow_template_name(profile)
-    if hinted_theme and _is_specific_video_theme(hinted_theme, preset_name=preset_name):
-        if not _is_specific_video_theme(current_theme, preset_name=preset_name):
-            profile["video_theme"] = hinted_theme
 
     current_queries = [str(item).strip() for item in profile.get("search_queries") or [] if str(item).strip()]
     for item in hints.get("search_queries") or []:

@@ -247,21 +247,52 @@ def test_sanitize_profile_identity_prefers_current_video_evidence_over_conflicti
     assert "LEATHERMAN" not in sanitized["summary"]
 
 
-def test_merge_specific_profile_hints_upgrades_generic_video_theme():
+def test_merge_specific_profile_hints_only_merges_identity_and_queries():
     profile = {
         "preset_name": "edc_tactical",
+        "subject_type": "开箱产品",
         "video_theme": "新品开箱评测",
     }
 
     _merge_specific_profile_hints(
         profile,
         {
+            "subject_type": "EDC手电",
             "video_theme": "Loop露普SK05二代UV版开箱与一代对比评测",
             "search_queries": ["Loop露普 SK05二代UV版"],
         },
     )
 
-    assert profile["video_theme"] == "Loop露普SK05二代UV版开箱与一代对比评测"
+    assert profile["subject_type"] == "开箱产品"
+    assert profile["video_theme"] == "新品开箱评测"
+    assert profile["search_queries"] == ["Loop露普 SK05二代UV版"]
+
+
+def test_sanitize_profile_identity_does_not_infer_type_or_theme_by_default():
+    sanitized = _sanitize_profile_identity(
+        {
+            "subject_brand": "",
+            "subject_model": "",
+            "subject_type": "",
+            "video_theme": "",
+            "visible_text": "FOXBAT F21 小副包 开箱",
+        },
+        transcript_excerpt="今天开箱 FOXBAT 狐蝠工业 F21 小副包，重点看分仓和挂点。",
+        source_name="f21.mp4",
+        glossary_terms=[
+            {
+                "correct_form": "FOXBAT狐蝠工业",
+                "wrong_forms": ["狐蝠工业", "FOXBAT"],
+                "category": "bag_brand",
+            }
+        ],
+        memory_hints=None,
+    )
+
+    assert sanitized["subject_brand"] == "FOXBAT狐蝠工业"
+    assert sanitized["subject_model"] == "F21小副包"
+    assert sanitized["subject_type"] == ""
+    assert sanitized["video_theme"] == ""
 
 
 def test_seed_profile_from_user_memory_uses_recent_brand_model_corrections():
