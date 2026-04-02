@@ -113,3 +113,68 @@ describe("JobSummaryReviewOverlay", () => {
     expect(screen.getByText("当前画面文字与转写都更支持机能包，不支持手电。")).toBeInTheDocument();
   });
 });
+
+describe("JobContentProfileSection", () => {
+  async function renderActualSection(
+    contentSource: Record<string, unknown> | null,
+    contentDraft: Record<string, unknown> = {},
+    contentProfile?: ContentProfileReview,
+  ) {
+    const { JobContentProfileSection } = await vi.importActual<typeof import("./JobContentProfileSection")>(
+      "./JobContentProfileSection",
+    );
+
+    render(
+      <JobContentProfileSection
+        jobId="job_1"
+        contentProfile={contentProfile}
+        contentSource={contentSource}
+        contentDraft={contentDraft}
+        contentKeywords=""
+        isSaving={false}
+        onFieldChange={vi.fn()}
+        onKeywordsChange={vi.fn()}
+        onConfirm={vi.fn()}
+      />,
+    );
+  }
+
+  it("keeps legacy content_profile fields visible when no nested understanding is present", async () => {
+    await renderActualSection({
+      subject_type: "legacy_subject",
+      video_theme: "legacy_theme",
+      hook_line: "legacy_hook",
+      summary: "legacy_summary",
+      engagement_question: "legacy_question",
+    });
+
+    expect(screen.getByDisplayValue("legacy_subject")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("legacy_theme")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("legacy_hook")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("legacy_summary")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("legacy_question")).toBeInTheDocument();
+  });
+
+  it("prefers nested content_understanding fields over legacy flat fields", async () => {
+    await renderActualSection({
+      subject_type: "legacy_subject",
+      video_theme: "legacy_theme",
+      hook_line: "legacy_hook",
+      summary: "legacy_summary",
+      engagement_question: "legacy_question",
+      content_understanding: {
+        primary_subject: "nested_subject",
+        video_theme: "nested_theme",
+        hook_line: "nested_hook",
+        summary: "nested_summary",
+        question: "nested_question",
+      },
+    });
+
+    expect(screen.getByDisplayValue("nested_subject")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("nested_theme")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("nested_hook")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("nested_summary")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("nested_question")).toBeInTheDocument();
+  });
+});

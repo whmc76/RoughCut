@@ -2455,6 +2455,9 @@ async def test_content_profile_endpoint_returns_memory_cloud(client: AsyncClient
     assert data["review_step_detail"] == "首次品牌/型号证据不足，需人工确认后再继续。"
     assert data["review_reasons"] == ["首次品牌/型号证据不足，已退化为保守摘要"]
     assert data["blocking_reasons"] == ["开箱类视频命中首次品牌/型号且缺少交叉印证，需人工确认"]
+    assert data["draft"]["content_understanding"]["primary_subject"] == "多功能工具钳"
+    assert data["draft"]["content_understanding"]["video_type"] == ""
+    assert data["draft"]["content_understanding"]["content_domain"] == ""
     assert data["identity_review"]["evidence_bundle"]["matched_glossary_aliases"]["brand"] == ["莱泽曼"]
     assert data["workflow_mode"] == "standard_edit"
     assert data["enhancement_modes"] == ["avatar_commentary"]

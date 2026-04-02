@@ -1,0 +1,222 @@
+from __future__ import annotations
+
+from dataclasses import dataclass, field, is_dataclass, asdict, replace
+import json
+from typing import Any, Awaitable, Callable
+
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from roughcut.providers.factory import get_reasoning_provider, get_search_provider
+from roughcut.providers.reasoning.base import Message
+from roughcut.review.content_understanding_infer import parse_content_understanding_payload
+from roughcut.review.content_understanding_retrieval import search_confirmed_content_entities
+from roughcut.review.content_understanding_schema import ContentUnderstanding, map_content_understanding_to_legacy_profile
+
+
+SearchCallable = Callable[..., Awaitable[list[Any]]]
+
+
+@dataclass(frozen=True)
+class HybridVerificationBundle:
+    search_queries: list[str] = field(default_factory=list)
+    online_results: list[Any] = field(default_factory=list)
+    database_results: list[Any] = field(default_factory=list)
+
+
+async def build_hybrid_verification_bundle(
+    *,
+    search_queries: list[str],
+    online_search: SearchCallable | None = None,
+    internal_search: SearchCallable | None = None,
+    session: AsyncSession | None = None,
+) -> HybridVerificationBundle:
+    normalized_queries = [str(query).strip() for query in search_queries if str(query).strip()]
+    online_results = await _run_search(online_search, search_queries=normalized_queries)
+    database_results = await _run_internal_search(
+        internal_search,
+        session=session,
+        search_queries=normalized_queries,
+    )
+    return HybridVerificationBundle(
+        search_queries=normalized_queries,
+        online_results=list(online_results),
+        database_results=list(database_results),
+    )
+
+
+async def verify_content_understanding(
+    *,
+    understanding: ContentUnderstanding,
+    evidence_bundle: dict[str, Any],
+    verification_bundle: HybridVerificationBundle | None = None,
+    search_queries: list[str] | None = None,
+    session: AsyncSession | None = None,
+    online_search: SearchCallable | None = None,
+    internal_search: SearchCallable | None = None,
+    provider=None,
+) -> ContentUnderstanding:
+    queries = [str(query).strip() for query in (search_queries or understanding.search_queries) if str(query).strip()]
+    bundle = verification_bundle or await build_hybrid_verification_bundle(
+        search_queries=queries,
+        online_search=online_search,
+        internal_search=internal_search,
+        session=session,
+    )
+    reasoning_provider = provider or get_reasoning_provider()
+    prompt_payload = _bundle_to_prompt_payload(bundle)
+    prompt = (
+        "你是内容理解核验器。请结合在线搜索结果与内部已确认实体，判断内容在讲什么，并输出 JSON。"
+        "联网搜索和数据库命中都只是弱佐证，不能覆盖当前视频的直接证据。"
+        "要求："
+        "1. 只输出可核验的内容，不要编造。"
+        "2. primary_subject 要尽量具体。"
+        "3. subject_entities 至少列出相关主体。"
+        "4. uncertainties 要写明不确定之处。"
+        "JSON 结构："
+        "{"
+        '"video_type":"","content_domain":"","primary_subject":"","subject_entities":[{"kind":"","name":"","brand":"","model":""}],'
+        '"video_theme":"","summary":"","hook_line":"","engagement_question":"","search_queries":[],"evidence_spans":[],'
+        '"uncertainties":[],"confidence":{},"needs_review":true,"review_reasons":[]'
+        "}"
+        f"\n原始理解：{json.dumps(map_content_understanding_to_legacy_profile(understanding), ensure_ascii=False)}"
+        f"\n当前视频证据：{json.dumps(evidence_bundle, ensure_ascii=False)}"
+        f"\n混合检索输入：{json.dumps(prompt_payload, ensure_ascii=False)}"
+    )
+    response = await reasoning_provider.complete(
+        [
+            Message(
+                role="system",
+                content="你是严谨的内容理解核验模型，必须输出 JSON。",
+            ),
+            Message(role="user", content=prompt),
+        ],
+        temperature=0.0,
+        max_tokens=2200,
+        json_mode=True,
+    )
+    candidate = parse_content_understanding_payload(response.as_json())
+    return _apply_conservative_verification(
+        base=understanding,
+        candidate=candidate,
+        evidence_bundle=evidence_bundle,
+    )
+
+
+async def _run_search(online_search: SearchCallable | None, *, search_queries: list[str]) -> list[Any]:
+    if online_search is not None:
+        return await online_search(search_queries=search_queries)
+
+    provider = get_search_provider()
+    results: list[Any] = []
+    for query in search_queries:
+        results.extend(await provider.search(query))
+    return results
+
+
+async def _run_internal_search(
+    internal_search: SearchCallable | None,
+    *,
+    session: AsyncSession | None,
+    search_queries: list[str],
+) -> list[Any]:
+    if internal_search is not None:
+        return await internal_search(search_queries=search_queries)
+    if session is None:
+        return []
+    return await search_confirmed_content_entities(session, search_queries=search_queries)
+
+
+def _bundle_to_prompt_payload(bundle: HybridVerificationBundle) -> dict[str, Any]:
+    return {
+        "search_queries": list(bundle.search_queries),
+        "online_results": [_result_to_dict(item) for item in bundle.online_results],
+        "database_results": [_result_to_dict(item) for item in bundle.database_results],
+    }
+
+
+def _result_to_dict(item: Any) -> dict[str, Any]:
+    if isinstance(item, dict):
+        return dict(item)
+    if is_dataclass(item):
+        return asdict(item)
+    if hasattr(item, "__dict__"):
+        return {
+            key: value
+            for key, value in vars(item).items()
+            if not key.startswith("_")
+        }
+    return {"value": str(item)}
+
+
+def _apply_conservative_verification(
+    *,
+    base: ContentUnderstanding,
+    candidate: ContentUnderstanding,
+    evidence_bundle: dict[str, Any],
+) -> ContentUnderstanding:
+    has_direct_evidence = _has_direct_evidence(evidence_bundle)
+    conflicts = _collect_conflict_fields(base, candidate)
+    review_reasons = _merge_unique(
+        list(base.review_reasons),
+        list(candidate.review_reasons),
+        [
+            "缺少直接视频证据，外部搜索/内部检索仅作弱佐证" if not has_direct_evidence else "",
+            "核验结果与当前视频结论存在冲突，已保守保留原结论" if conflicts else "",
+        ],
+    )
+    uncertainties = _merge_unique(list(base.uncertainties), list(candidate.uncertainties))
+    needs_review = bool(base.needs_review or candidate.needs_review or not has_direct_evidence or conflicts)
+    return replace(
+        base,
+        uncertainties=uncertainties,
+        review_reasons=review_reasons,
+        needs_review=needs_review,
+    )
+
+
+def _collect_conflict_fields(base: ContentUnderstanding, candidate: ContentUnderstanding) -> list[str]:
+    conflict_fields: list[str] = []
+    for field_name in (
+        "video_type",
+        "content_domain",
+        "primary_subject",
+        "subject_entities",
+        "video_theme",
+        "summary",
+        "hook_line",
+        "engagement_question",
+    ):
+        if getattr(base, field_name) != getattr(candidate, field_name):
+            conflict_fields.append(field_name)
+    return conflict_fields
+
+
+def _has_direct_evidence(evidence_bundle: dict[str, Any] | None) -> bool:
+    bundle = evidence_bundle or {}
+    return bool(_collect_text_fragments(bundle))
+
+
+def _collect_text_fragments(value: Any) -> list[str]:
+    fragments: list[str] = []
+    if isinstance(value, dict):
+        for item in value.values():
+            fragments.extend(_collect_text_fragments(item))
+        return fragments
+    if isinstance(value, (list, tuple, set)):
+        for item in value:
+            fragments.extend(_collect_text_fragments(item))
+        return fragments
+    text = str(value or "").strip()
+    if text:
+        fragments.append(text)
+    return fragments
+
+
+def _merge_unique(*groups: list[str]) -> list[str]:
+    merged: list[str] = []
+    for group in groups:
+        for item in group:
+            text = str(item or "").strip()
+            if text and text not in merged:
+                merged.append(text)
+    return merged

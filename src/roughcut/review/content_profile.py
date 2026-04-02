@@ -14,6 +14,11 @@ from roughcut.providers.factory import get_ocr_provider, get_reasoning_provider,
 from roughcut.providers.multimodal import complete_with_images
 from roughcut.providers.reasoning.base import Message, extract_json_text
 from roughcut.usage import track_usage_operation
+from roughcut.db.session import get_session_factory
+from roughcut.review.content_understanding_evidence import build_evidence_bundle
+from roughcut.review.content_understanding_infer import infer_content_understanding
+from roughcut.review.content_understanding_schema import map_content_understanding_to_legacy_profile
+from roughcut.review.content_understanding_verify import build_hybrid_verification_bundle, verify_content_understanding
 from roughcut.review.content_profile_memory import summarize_content_profile_user_memory
 from roughcut.review.content_profile_ocr import build_content_profile_ocr
 from roughcut.review.content_profile_candidates import build_identity_candidates
@@ -73,6 +78,44 @@ _CONTENT_KIND_DEFAULT_VIDEO_THEME = {
 }
 
 
+def _hint_candidate_key(field_name: str) -> str:
+    return f"{field_name}_candidates"
+
+
+def _append_hint_candidate(hints: dict[str, Any], field_name: str, value: object) -> None:
+    text = str(value or "").strip()
+    if not text:
+        return
+    key = _hint_candidate_key(field_name)
+    current = [
+        str(item).strip()
+        for item in (hints.get(key) or [])
+        if str(item).strip()
+    ]
+    if text not in current:
+        current.append(text)
+    if current:
+        hints[key] = current
+
+
+def _hint_values(hints: dict[str, Any] | None, field_name: str) -> list[str]:
+    candidate = hints if isinstance(hints, dict) else {}
+    values: list[str] = []
+    direct = str(candidate.get(field_name) or "").strip()
+    if direct:
+        values.append(direct)
+    for item in candidate.get(_hint_candidate_key(field_name)) or []:
+        text = str(item).strip()
+        if text and text not in values:
+            values.append(text)
+    return values
+
+
+def _hint_primary_value(hints: dict[str, Any] | None, field_name: str) -> str:
+    values = _hint_values(hints, field_name)
+    return values[0] if values else ""
+
+
 def _workflow_template_name(profile: dict[str, Any] | None) -> str:
     candidate = profile or {}
     workflow_template = normalize_workflow_template_name(str(candidate.get("workflow_template") or "").strip())
@@ -129,9 +172,11 @@ def _normalize_seeded_profile_for_cache(profile: dict[str, Any] | None) -> dict[
         "subject_brand": str(seeded.get("subject_brand") or "").strip(),
         "subject_model": str(seeded.get("subject_model") or "").strip(),
         "subject_type": str(seeded.get("subject_type") or "").strip(),
+        "subject_type_candidates": [str(item).strip() for item in (seeded.get("subject_type_candidates") or []) if str(item).strip()],
         "content_kind": str(seeded.get("content_kind") or "").strip(),
         "subject_domain": str(seeded.get("subject_domain") or "").strip(),
         "video_theme": str(seeded.get("video_theme") or "").strip(),
+        "video_theme_candidates": [str(item).strip() for item in (seeded.get("video_theme_candidates") or []) if str(item).strip()],
         "workflow_template": _workflow_template_name(seeded),
         "hook_line": str(seeded.get("hook_line") or "").strip(),
         "visible_text": str(seeded.get("visible_text") or "").strip(),
@@ -147,12 +192,14 @@ def _normalize_seeded_profile_for_cache(profile: dict[str, Any] | None) -> dict[
         "evidence": evidence,
         "visual_hints": {
             "subject_type": str(visual_hints.get("subject_type") or "").strip(),
+            "subject_type_candidates": [str(item).strip() for item in (visual_hints.get("subject_type_candidates") or []) if str(item).strip()],
             "subject_brand": str(visual_hints.get("subject_brand") or "").strip(),
             "subject_model": str(visual_hints.get("subject_model") or "").strip(),
             "visible_text": str(visual_hints.get("visible_text") or "").strip(),
         },
         "visual_cluster_hints": {
             "subject_type": str(visual_cluster_hints.get("subject_type") or "").strip(),
+            "subject_type_candidates": [str(item).strip() for item in (visual_cluster_hints.get("subject_type_candidates") or []) if str(item).strip()],
             "subject_brand": str(visual_cluster_hints.get("subject_brand") or "").strip(),
             "subject_model": str(visual_cluster_hints.get("subject_model") or "").strip(),
             "visible_text": str(visual_cluster_hints.get("visible_text") or "").strip(),
@@ -163,9 +210,11 @@ def _normalize_seeded_profile_for_cache(profile: dict[str, Any] | None) -> dict[
             normalized["subject_brand"],
             normalized["subject_model"],
             normalized["subject_type"],
+            normalized["subject_type_candidates"],
             normalized["content_kind"],
             normalized["subject_domain"],
             normalized["video_theme"],
+            normalized["video_theme_candidates"],
             normalized["workflow_template"],
             normalized["hook_line"],
             normalized["visible_text"],
@@ -398,6 +447,9 @@ def assess_content_profile_automation(
 ) -> dict[str, Any]:
     normalized_threshold = max(0.0, min(1.0, float(threshold)))
     subtitle_items = subtitle_items or []
+    content_understanding = profile.get("content_understanding")
+    if not isinstance(content_understanding, dict):
+        content_understanding = {}
     transcript_excerpt = str(profile.get("transcript_excerpt") or "").strip()
     if not transcript_excerpt and subtitle_items:
         transcript_excerpt = build_transcript_excerpt(subtitle_items, max_items=24, max_chars=900)
@@ -530,6 +582,19 @@ def assess_content_profile_automation(
         if bool(identity_review.get("conservative_summary")):
             review_reasons.append("首次品牌/型号证据不足，已退化为保守摘要")
 
+    llm_review_reasons = [
+        str(item).strip()
+        for item in content_understanding.get("review_reasons") or []
+        if str(item).strip()
+    ]
+    if bool(content_understanding.get("needs_review")):
+        if llm_review_reasons:
+            blocking_reasons.extend(llm_review_reasons)
+        else:
+            blocking_reasons.append("LLM 内容理解结果要求人工复核")
+    else:
+        review_reasons.extend(llm_review_reasons)
+
     score = round(min(score, 1.0), 3)
     review_reasons = list(dict.fromkeys(review_reasons))
     blocking_reasons = list(dict.fromkeys(blocking_reasons))
@@ -575,6 +640,21 @@ def apply_identity_review_guard(
     transcript_excerpt = str(guarded.get("transcript_excerpt") or "").strip()
     if not transcript_excerpt and subtitle_items:
         transcript_excerpt = build_transcript_excerpt(list(subtitle_items), max_items=24, max_chars=900)
+    if isinstance(guarded.get("content_understanding"), dict):
+        identity_review = _assess_identity_review_requirement(
+            guarded,
+            subtitle_items=subtitle_items,
+            user_memory=user_memory,
+            glossary_terms=glossary_terms,
+            source_name=source_name,
+        )
+        guarded["identity_review"] = identity_review
+        if bool(identity_review.get("conservative_summary")):
+            guarded["summary"] = _build_conservative_identity_summary(
+                guarded,
+                subtitle_items=subtitle_items,
+            )
+        return guarded
     memory_hints = _seed_profile_from_user_memory(transcript_excerpt, user_memory)
     guarded = _sanitize_profile_identity(
         guarded,
@@ -1087,6 +1167,8 @@ def _sanitize_profile_identity(
     glossary_terms: list[dict[str, Any]] | None = None,
     memory_hints: dict[str, Any] | None = None,
     user_memory: dict[str, Any] | None = None,
+    allow_subject_type_inference: bool = True,
+    allow_video_theme_inference: bool = True,
 ) -> dict[str, Any]:
     sanitized = dict(profile or {})
     raw_visual_hints = _profile_visual_cluster_hints(sanitized)
@@ -1185,7 +1267,7 @@ def _sanitize_profile_identity(
     else:
         sanitized["subject_model"] = verified_model
 
-    if "subject_type" not in confirmed_fields:
+    if allow_subject_type_inference and "subject_type" not in confirmed_fields:
         resolved_subject_type = str(resolved_identity.subject_type or "").strip()
         current_subject_type = str(sanitized.get("subject_type") or "").strip()
         if resolved_subject_type:
@@ -1193,7 +1275,7 @@ def _sanitize_profile_identity(
         elif _is_generic_subject_type(current_subject_type):
             sanitized["subject_type"] = ""
 
-    if "video_theme" not in confirmed_fields:
+    if allow_video_theme_inference and "video_theme" not in confirmed_fields:
         resolved_video_theme = str(resolved_identity.video_theme or "").strip()
         current_video_theme = str(sanitized.get("video_theme") or "").strip()
         preset_name = _workflow_template_name(sanitized)
@@ -1352,10 +1434,12 @@ def _profile_ocr_hints(
     if visible_text:
         hints.setdefault("visible_text", visible_text)
         seeded = _seed_profile_from_text(visible_text, glossary_terms=glossary_terms)
-        for field_name in ("subject_brand", "subject_model", "subject_type"):
+        for field_name in ("subject_brand", "subject_model"):
             value = str(seeded.get(field_name) or "").strip()
             if value and field_name not in hints:
                 hints[field_name] = value
+        for value in _hint_values(seeded, "subject_type"):
+            _append_hint_candidate(hints, "subject_type", value)
     return hints
 
 
@@ -1605,20 +1689,14 @@ async def infer_content_profile(
     if workflow_template is None and channel_profile is not None:
         workflow_template = channel_profile
     transcript_excerpt = build_transcript_excerpt(subtitle_items)
-    heuristic_profile = _seed_profile_from_subtitles(subtitle_items, glossary_terms=glossary_terms)
-    glossary_profile = _seed_profile_from_glossary_terms(transcript_excerpt, glossary_terms)
-    memory_profile = _seed_profile_from_user_memory(transcript_excerpt, user_memory)
-    memory_prompt = summarize_content_profile_user_memory(user_memory)
     initial_profile = _fallback_profile(
         source_name=source_name,
         workflow_template=workflow_template,
         transcript_excerpt=transcript_excerpt,
     )
-    initial_profile.update(heuristic_profile)
-    initial_profile.update(glossary_profile)
-    initial_profile.update(memory_profile)
     initial_profile["copy_style"] = str(copy_style or "attention_grabbing").strip() or "attention_grabbing"
     settings = get_settings()
+    visual_hints: dict[str, Any] = {}
 
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1633,83 +1711,86 @@ async def infer_content_profile(
             if visual_hints:
                 initial_profile["visual_hints"] = dict(visual_hints)
                 initial_profile["visual_cluster_hints"] = dict(visual_hints)
-            _merge_specific_profile_hints(initial_profile, visual_hints)
-            if frame_paths:
-                prompt = (
-                    "你在分析一条中文短视频。视频可能是开箱评测、录屏教学、vlog、口播观点、游戏高光或美食探店。"
-                    "请结合图片和口播字幕，判断视频主体是什么。"
-                    "如果画面里有产品、软件界面、店招、包装、盒体、logo、英文单词、型号字样，都优先识别。"
-                    "如果是软件/AI/科技类视频，优先识别软件名、平台名、功能名、版本名和当前演示的核心主题，不要退化成“软件工具”。"
-                    "尽量给出开箱产品品牌、开箱产品型号/版本，或软件品牌、功能名/模块名、内容类型、主体领域、主体类型、视频主题。"
-                    "另外补一个适合评论区互动的问题，要贴合内容，不要总是泛泛地问值不值。"
-                    "subject_brand 指视频里被开箱/被讲解的产品或主体品牌，不是频道名、作者名。"
-                    "如果不确定，不要乱编，留空即可。\n\n"
-                    "输出 JSON："
-                    '{"subject_brand":"","subject_model":"","subject_type":"","content_kind":"","subject_domain":"","video_theme":"",'
-                    '"hook_line":"","visible_text":"","engagement_question":"","search_queries":[]}'
-                    "\n如果文件名像时间戳、相机命名或流水号，不要把它当成型号。"
-                    "\nsearch_queries 提供 2-3 个适合联网搜索验证的查询词。"
-                    f"\n视觉一致簇（当前画面主体验证结果，优先级高于脏字幕和错误搜索）：{json.dumps(_visual_cluster_prompt_payload(initial_profile), ensure_ascii=False)}"
-                    f"\n用户历史偏好（仅作辅助参考，不能压过当前字幕和画面）：\n{memory_prompt or '无'}"
-                    f"\n源文件名：{source_name}\n字幕节选：\n{transcript_excerpt}"
-                )
-                with track_usage_operation("content_profile.visual_transcript_fuse"):
-                    content = await complete_with_images(prompt, frame_paths, max_tokens=500, json_mode=True)
-                candidate = json.loads(extract_json_text(content))
-                initial_profile.update({k: v for k, v in candidate.items() if v})
-                _merge_specific_profile_hints(initial_profile, heuristic_profile)
-                _merge_specific_profile_hints(initial_profile, glossary_profile)
-                _merge_specific_profile_hints(initial_profile, memory_profile)
-                _merge_specific_profile_hints(initial_profile, visual_hints)
     except Exception:
         pass
 
-    if _profile_needs_text_refinement(initial_profile):
+    evidence_bundle = build_evidence_bundle(
+        source_name=source_name,
+        subtitle_items=subtitle_items,
+        transcript_excerpt=transcript_excerpt,
+        visible_text=str(initial_profile.get("visible_text") or "").strip(),
+        ocr_profile=initial_profile.get("ocr_profile") if isinstance(initial_profile.get("ocr_profile"), dict) else {},
+        visual_hints=visual_hints,
+    )
+
+    try:
+        with track_usage_operation("content_profile.universal_infer"):
+            understanding = await infer_content_understanding(evidence_bundle)
+    except Exception:
+        return initial_profile
+
+    if include_research and understanding.search_queries:
         try:
-            provider = get_reasoning_provider()
-            prompt = (
-                "你在分析中文短视频的口播内容。视频可能是开箱评测、录屏教学、vlog、口播观点、游戏高光或美食探店。"
-                "请根据文件名、字幕节选和已有视觉判断，补全视频主体的开箱产品品牌、开箱产品型号/版本，或软件品牌、功能名/模块名、主体类型、视频主题，并给出适合联网验证的搜索词。"
-                "同时补一个适合评论区互动的问题，要基于视频内容，不要重复泛化问题。"
-                "subject_brand 指视频里被开箱/被讲解的产品或主体品牌，不是频道名、作者名。"
-                "如果是软件/AI/科技类内容，subject_brand 应该是软件/平台名，subject_model 优先填功能名、模块名或版本名，video_theme 必须点明真实主题，比如某个新功能上线、某个工作流实操，而不是泛泛写“软件功能演示与教程”。"
-                "如果文件名像时间戳、相机命名或流水号，不要把它当成型号。"
-                "如果不确定，请留空，不要乱编。"
-                "\n输出 JSON："
-                '{"subject_brand":"","subject_model":"","subject_type":"","content_kind":"","subject_domain":"","video_theme":"",'
-                '"hook_line":"","visible_text":"","engagement_question":"","search_queries":[]}'
-                    f"\n视觉一致簇（当前画面主体验证结果，优先级高于脏字幕和错误搜索）：{json.dumps(_visual_cluster_prompt_payload(initial_profile), ensure_ascii=False)}"
-                f"\n用户历史偏好（仅作辅助参考，不能压过当前字幕和画面）：\n{memory_prompt or '无'}"
-                f"\n已有判断：{json.dumps(initial_profile, ensure_ascii=False)}"
-                f"\n源文件名：{source_name}\n字幕节选：\n{transcript_excerpt}"
-            )
-            with track_usage_operation("content_profile.text_refine"):
-                response = await provider.complete(
-                    [
-                        Message(role="system", content="你是中文短视频内容策划助手。"),
-                        Message(role="user", content=prompt),
-                    ],
-                    temperature=0.1,
-                    max_tokens=500,
-                    json_mode=True,
+            async with get_session_factory()() as session:
+                verification_bundle = await build_hybrid_verification_bundle(
+                    search_queries=understanding.search_queries,
+                    online_search=_online_search_content_understanding,
+                    internal_search=None,
+                    session=session,
                 )
-            candidate = response.as_json()
-            initial_profile.update({k: v for k, v in candidate.items() if v})
-            _merge_specific_profile_hints(initial_profile, heuristic_profile)
-            _merge_specific_profile_hints(initial_profile, glossary_profile)
-            _merge_specific_profile_hints(initial_profile, memory_profile)
+                with track_usage_operation("content_profile.universal_verify"):
+                    understanding = await verify_content_understanding(
+                        understanding=understanding,
+                        evidence_bundle=evidence_bundle,
+                        verification_bundle=verification_bundle,
+                    )
         except Exception:
             pass
 
-    return await enrich_content_profile(
-        profile=initial_profile,
-        source_name=source_name,
+    profile = map_content_understanding_to_legacy_profile(understanding)
+    profile["content_understanding"] = profile.get("content_understanding") or {}
+    profile["transcript_excerpt"] = transcript_excerpt
+    profile["workflow_template"] = str(workflow_template or "").strip()
+    profile["copy_style"] = str(copy_style or "attention_grabbing").strip() or "attention_grabbing"
+    if initial_profile.get("ocr_profile"):
+        profile["ocr_profile"] = dict(initial_profile.get("ocr_profile") or {})
+    if initial_profile.get("visible_text") and not profile.get("visible_text"):
+        profile["visible_text"] = str(initial_profile.get("visible_text") or "").strip()
+    if visual_hints:
+        profile["visual_hints"] = dict(visual_hints)
+        profile["visual_cluster_hints"] = dict(visual_hints)
+
+    preset = select_workflow_template(
         workflow_template=workflow_template,
-        transcript_excerpt=transcript_excerpt,
-        glossary_terms=glossary_terms,
-        user_memory=user_memory,
-        include_research=include_research,
+        content_kind=str(profile.get("content_kind") or "").strip(),
+        subject_domain=str(profile.get("subject_domain") or "").strip(),
+        subject_model=str(profile.get("subject_model") or "").strip(),
+        subject_type=str(profile.get("subject_type") or "").strip(),
+        transcript_hint=transcript_excerpt,
     )
+    if not str(profile.get("summary") or "").strip():
+        profile["summary"] = _build_profile_summary(profile)
+    if not str(profile.get("engagement_question") or "").strip():
+        profile["engagement_question"] = _default_engagement_question(preset)
+    profile["cover_title"] = build_cover_title(profile, preset)
+    return profile
+
+
+async def _online_search_content_understanding(*, search_queries: list[str]) -> list[dict[str, Any]]:
+    provider = get_search_provider()
+    results: list[dict[str, Any]] = []
+    for query in search_queries[:4]:
+        for item in await provider.search(query):
+            results.append(
+                {
+                    "query": query,
+                    "title": str(getattr(item, "title", "") or ""),
+                    "url": str(getattr(item, "url", "") or ""),
+                    "snippet": str(getattr(item, "snippet", "") or ""),
+                    "score": float(getattr(item, "score", 0.0) or 0.0),
+                }
+            )
+    return results
 
 
 async def _collect_content_profile_ocr(frame_paths: list[Path], *, source_name: str) -> dict[str, Any]:
@@ -1912,6 +1993,8 @@ async def enrich_content_profile(
         glossary_terms=glossary_terms,
         memory_hints=memory_hints,
         user_memory=user_memory,
+        allow_subject_type_inference=False,
+        allow_video_theme_inference=False,
     )
     context_hints = _seed_profile_from_context(
         enriched,
@@ -1919,8 +2002,8 @@ async def enrich_content_profile(
         glossary_terms=glossary_terms,
     )
     memory_prompt = summarize_content_profile_user_memory(user_memory)
-    _merge_specific_profile_hints(enriched, context_hints)
-    _merge_specific_profile_hints(enriched, memory_hints)
+    _merge_specific_profile_hints(enriched, _identity_only_profile_hints(context_hints))
+    _merge_specific_profile_hints(enriched, _identity_only_profile_hints(memory_hints))
 
     if not str(enriched.get("content_kind") or "").strip():
         template_hint = get_workflow_preset(workflow_template)
@@ -1933,6 +2016,30 @@ async def enrich_content_profile(
         )
         if inferred_subject_domain:
             enriched["subject_domain"] = inferred_subject_domain
+
+    llm_understanding = await _infer_content_understanding_for_enrich(
+        profile=enriched,
+        source_name=source_name,
+        transcript_excerpt=transcript_excerpt,
+        include_research=include_research,
+    )
+    if llm_understanding is not None:
+        llm_profile = map_content_understanding_to_legacy_profile(llm_understanding)
+        for key in (
+            "content_kind",
+            "subject_domain",
+            "subject_brand",
+            "subject_model",
+            "subject_type",
+            "video_theme",
+            "summary",
+            "hook_line",
+            "engagement_question",
+            "search_queries",
+        ):
+            if key in llm_profile and llm_profile.get(key):
+                enriched[key] = llm_profile[key]
+        enriched["content_understanding"] = llm_profile.get("content_understanding") or {}
 
     preset = select_workflow_template(
         workflow_template=workflow_template or enriched.get("workflow_template"),
@@ -1952,6 +2059,8 @@ async def enrich_content_profile(
         glossary_terms=glossary_terms,
         memory_hints=memory_hints,
         user_memory=user_memory,
+        allow_subject_type_inference=False,
+        allow_video_theme_inference=False,
     )
 
     if include_research:
@@ -1996,8 +2105,8 @@ async def enrich_content_profile(
                     )
                 refined = response.as_json()
                 enriched.update({k: v for k, v in refined.items() if v})
-                _merge_specific_profile_hints(enriched, context_hints)
-                _merge_specific_profile_hints(enriched, memory_hints)
+                _merge_specific_profile_hints(enriched, _identity_only_profile_hints(context_hints))
+                _merge_specific_profile_hints(enriched, _identity_only_profile_hints(memory_hints))
                 enriched = _sanitize_profile_identity(
                     enriched,
                     transcript_excerpt=transcript_excerpt,
@@ -2005,16 +2114,13 @@ async def enrich_content_profile(
                     glossary_terms=glossary_terms,
                     memory_hints=memory_hints,
                     user_memory=user_memory,
+                    allow_subject_type_inference=False,
+                    allow_video_theme_inference=False,
                 )
             except Exception:
                 pass
 
     _apply_confirmed_profile_fields(enriched, confirmed_fields)
-
-    if _is_generic_subject_type(str(enriched.get("subject_type") or "")):
-        hinted = memory_hints or context_hints
-        if hinted.get("subject_type"):
-            enriched["subject_type"] = hinted["subject_type"]
 
     if "hook_line" not in confirmed_fields:
         current_hook = str(enriched.get("hook_line") or "").strip()
@@ -2061,6 +2167,73 @@ async def enrich_content_profile(
     ):
         enriched["cover_title"] = build_cover_title(enriched, preset)
     return enriched
+
+
+async def _infer_content_understanding_for_enrich(
+    *,
+    profile: dict[str, Any],
+    source_name: str,
+    transcript_excerpt: str,
+    include_research: bool,
+) -> Any | None:
+    evidence_bundle = build_evidence_bundle(
+        source_name=source_name,
+        subtitle_items=[],
+        transcript_excerpt=transcript_excerpt,
+        visible_text=str(profile.get("visible_text") or "").strip(),
+        ocr_profile=_enrich_ocr_profile(profile),
+        visual_hints=_profile_visual_cluster_hints(profile),
+    )
+    evidence_bundle["candidate_hints"] = _enrich_candidate_hints(profile)
+    try:
+        with track_usage_operation("content_profile.enrich_universal_infer"):
+            understanding = await infer_content_understanding(evidence_bundle)
+    except Exception:
+        return None
+
+    if include_research and understanding.search_queries:
+        try:
+            async with get_session_factory()() as session:
+                verification_bundle = await build_hybrid_verification_bundle(
+                    search_queries=understanding.search_queries,
+                    online_search=_online_search_content_understanding,
+                    internal_search=None,
+                    session=session,
+                )
+                with track_usage_operation("content_profile.enrich_universal_verify"):
+                    understanding = await verify_content_understanding(
+                        understanding=understanding,
+                        evidence_bundle=evidence_bundle,
+                        verification_bundle=verification_bundle,
+                    )
+        except Exception:
+            pass
+    return understanding
+
+
+def _enrich_ocr_profile(profile: dict[str, Any] | None) -> dict[str, Any]:
+    candidate = profile or {}
+    for key in ("ocr_profile", "ocr_evidence"):
+        value = candidate.get(key)
+        if isinstance(value, dict) and value:
+            return dict(value)
+    return {}
+
+
+def _enrich_candidate_hints(profile: dict[str, Any] | None) -> dict[str, Any]:
+    candidate = profile or {}
+    search_queries = [str(item).strip() for item in (candidate.get("search_queries") or []) if str(item).strip()]
+    return {
+        "subject_brand": str(candidate.get("subject_brand") or "").strip(),
+        "subject_model": str(candidate.get("subject_model") or "").strip(),
+        "subject_type": str(candidate.get("subject_type") or "").strip(),
+        "video_theme": str(candidate.get("video_theme") or "").strip(),
+        "summary": str(candidate.get("summary") or "").strip(),
+        "hook_line": str(candidate.get("hook_line") or "").strip(),
+        "engagement_question": str(candidate.get("engagement_question") or "").strip(),
+        "search_queries": search_queries,
+        "visual_hints": _profile_visual_cluster_hints(candidate),
+    }
 
 
 async def _infer_visual_profile_hints(frame_paths: list[Path]) -> dict[str, Any]:
@@ -2981,19 +3154,26 @@ def _seed_profile_from_user_memory(transcript_excerpt: str, user_memory: dict[st
         corrected = str(item.get("corrected_value") or "").strip()
         if corrected and _normalize_profile_value(corrected) in transcript_norm:
             field_name = str(item.get("field_name") or "").strip()
-            if field_name in {"subject_brand", "subject_model", "subject_type", "video_theme"} and field_name not in seeded:
+            if field_name in {"subject_brand", "subject_model"} and field_name not in seeded:
                 seeded[field_name] = corrected
+            elif field_name in {"subject_type", "video_theme"}:
+                _append_hint_candidate(seeded, field_name, corrected)
 
     for field_name in ("subject_brand", "subject_model", "subject_type"):
-        if field_name in seeded:
+        if field_name in {"subject_brand", "subject_model"} and field_name in seeded:
+            continue
+        if field_name == "subject_type" and _hint_primary_value(seeded, field_name):
             continue
         for item in field_preferences.get(field_name) or []:
             value = str(item.get("value") or "").strip()
             if value and _normalize_profile_value(value) in transcript_norm:
-                seeded[field_name] = value
+                if field_name in {"subject_brand", "subject_model"}:
+                    seeded[field_name] = value
+                else:
+                    _append_hint_candidate(seeded, field_name, value)
                 break
 
-    if "video_theme" not in seeded:
+    if not _hint_primary_value(seeded, "video_theme"):
         for item in field_preferences.get("video_theme") or []:
             value = str(item.get("value") or "").strip()
             if not value:
@@ -3001,7 +3181,7 @@ def _seed_profile_from_user_memory(transcript_excerpt: str, user_memory: dict[st
             tokens = [token for token in re.split(r"[\s/·\-]+", value) if token]
             hit_count = sum(1 for token in tokens if _normalize_profile_value(token) and _normalize_profile_value(token) in transcript_norm)
             if hit_count >= 2:
-                seeded["video_theme"] = value
+                _append_hint_candidate(seeded, "video_theme", value)
                 break
 
     if "subject_brand" not in seeded:
@@ -3017,18 +3197,19 @@ def _seed_profile_from_user_memory(transcript_excerpt: str, user_memory: dict[st
             if seeded.get("subject_brand"):
                 break
 
-    if "subject_type" not in seeded:
+    if not _hint_primary_value(seeded, "subject_type"):
         transcript_seed = _seed_profile_from_text(transcript_excerpt)
-        if transcript_seed.get("subject_type"):
-            seeded["subject_type"] = transcript_seed["subject_type"]
+        transcript_subject_type = _hint_primary_value(transcript_seed, "subject_type")
+        if transcript_subject_type:
+            _append_hint_candidate(seeded, "subject_type", transcript_subject_type)
         elif seeded.get("subject_brand") == "Loop露普" or str(seeded.get("subject_model") or "").startswith("SK05"):
-            seeded["subject_type"] = "EDC手电"
+            _append_hint_candidate(seeded, "subject_type", "EDC手电")
 
     if "subject_brand" not in seeded and "subject_model" not in seeded:
         confirmed_entity = _select_confirmed_entity_from_user_memory(
             transcript_excerpt,
             user_memory=user_memory,
-            subject_type=str(seeded.get("subject_type") or ""),
+            subject_type=_hint_primary_value(seeded, "subject_type"),
         )
         if confirmed_entity:
             brand = str(confirmed_entity.get("brand") or "").strip()
@@ -3037,8 +3218,8 @@ def _seed_profile_from_user_memory(transcript_excerpt: str, user_memory: dict[st
                 seeded["subject_brand"] = brand
             if model:
                 seeded["subject_model"] = model
-            if confirmed_entity.get("subject_type") and "subject_type" not in seeded:
-                seeded["subject_type"] = str(confirmed_entity.get("subject_type") or "").strip()
+            if confirmed_entity.get("subject_type") and not _hint_primary_value(seeded, "subject_type"):
+                _append_hint_candidate(seeded, "subject_type", confirmed_entity.get("subject_type"))
 
     return seeded
 
@@ -3081,7 +3262,7 @@ def _confirmed_entity_matches_current_context(
     )
     if not effective_subject_type:
         transcript_seed = _seed_profile_from_text(transcript)
-        effective_subject_type = str(transcript_seed.get("subject_type") or "").strip()
+        effective_subject_type = _hint_primary_value(transcript_seed, "subject_type")
 
     if entity_subject_type and effective_subject_type and _normalize_profile_value(entity_subject_type) != _normalize_profile_value(effective_subject_type):
         return False
@@ -3198,7 +3379,7 @@ def _seed_profile_from_glossary_terms(
         seeded["subject_brand"] = best_brand[1]
         subject_type = _subject_type_from_glossary_category(best_brand_category)
         if subject_type:
-            seeded["subject_type"] = subject_type
+            _append_hint_candidate(seeded, "subject_type", subject_type)
     if best_model:
         seeded["subject_model"] = best_model[1]
         if "subject_brand" not in seeded and best_model[1] in _MODEL_TO_BRAND:
@@ -3281,8 +3462,8 @@ def _seed_profile_from_text(
         subject_type = "EDC机能包"
     elif any(keyword in transcript for keyword in plier_keywords):
         subject_type = "多功能工具钳"
-    elif glossary_seed.get("subject_type"):
-        subject_type = str(glossary_seed.get("subject_type") or "").strip()
+    elif _hint_primary_value(glossary_seed, "subject_type"):
+        subject_type = _hint_primary_value(glossary_seed, "subject_type")
 
     topic_terms = _extract_topic_terms(transcript)
     product_identity_detected = bool(
@@ -3310,7 +3491,7 @@ def _seed_profile_from_text(
     if model:
         seeded["subject_model"] = model
     if subject_type:
-        seeded["subject_type"] = subject_type
+        _append_hint_candidate(seeded, "subject_type", subject_type)
     video_theme = _build_seeded_video_theme(
         transcript=transcript,
         brand=brand,
@@ -3319,7 +3500,7 @@ def _seed_profile_from_text(
         topic_terms=topic_terms,
     )
     if video_theme:
-        seeded["video_theme"] = video_theme
+        _append_hint_candidate(seeded, "video_theme", video_theme)
     if brand or model:
         queries = _build_seeded_search_queries(
             brand=brand,
@@ -3745,6 +3926,16 @@ def _merge_specific_profile_hints(profile: dict[str, Any], hints: dict[str, Any]
             current_queries.append(value)
     if current_queries:
         profile["search_queries"] = current_queries
+
+
+def _identity_only_profile_hints(hints: dict[str, Any] | None) -> dict[str, Any]:
+    candidate = hints if isinstance(hints, dict) else {}
+    normalized_queries = [str(item).strip() for item in (candidate.get("search_queries") or []) if str(item).strip()]
+    return {
+        "subject_brand": str(candidate.get("subject_brand") or "").strip(),
+        "subject_model": str(candidate.get("subject_model") or "").strip(),
+        "search_queries": normalized_queries,
+    }
 
 
 def _is_generic_subject_type(text: str) -> bool:

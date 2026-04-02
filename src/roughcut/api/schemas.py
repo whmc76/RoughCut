@@ -297,6 +297,23 @@ class ContentProfileReviewOut(BaseModel):
     memory: dict[str, Any] | None = None
 
 
+class ContentUnderstandingOut(BaseModel):
+    video_type: str = ""
+    content_domain: str = ""
+    primary_subject: str = ""
+    subject_entities: list[dict[str, Any]] = Field(default_factory=list)
+    video_theme: str = ""
+    summary: str = ""
+    hook_line: str = ""
+    engagement_question: str = ""
+    search_queries: list[str] = Field(default_factory=list)
+    evidence_spans: list[dict[str, Any]] = Field(default_factory=list)
+    uncertainties: list[str] = Field(default_factory=list)
+    confidence: dict[str, float] = Field(default_factory=dict)
+    needs_review: bool = True
+    review_reasons: list[str] = Field(default_factory=list)
+
+
 class OpenFolderOut(BaseModel):
     path: str
     kind: str

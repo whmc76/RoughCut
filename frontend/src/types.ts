@@ -532,6 +532,24 @@ export type ContentProfileReview = {
   memory: Record<string, any> | null;
 };
 
+export type ContentUnderstanding = {
+  video_type: string;
+  content_domain: string;
+  primary_subject: string;
+  subject_entities: Record<string, any>[];
+  video_theme: string;
+  summary: string;
+  hook_line: string;
+  engagement_question: string;
+  question?: string;
+  search_queries: string[];
+  evidence_spans: Record<string, any>[];
+  uncertainties: string[];
+  confidence: Record<string, number>;
+  needs_review: boolean;
+  review_reasons: string[];
+};
+
 export type ContentProfileMemoryStats = {
   scope: string;
   subject_domain?: string | null;
