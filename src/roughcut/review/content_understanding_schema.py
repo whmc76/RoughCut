@@ -50,6 +50,7 @@ class ContentUnderstanding:
     search_queries: list[str] = field(default_factory=list)
     evidence_spans: list[dict[str, Any]] = field(default_factory=list)
     uncertainties: list[str] = field(default_factory=list)
+    conflicts: list[str] = field(default_factory=list)
     confidence: dict[str, float] = field(default_factory=dict)
     needs_review: bool = True
     review_reasons: list[str] = field(default_factory=list)
@@ -165,6 +166,7 @@ def parse_content_understanding_payload(data: Any) -> ContentUnderstanding:
         search_queries=[str(item).strip() for item in list(payload.get("search_queries") or []) if str(item).strip()],
         evidence_spans=[dict(item) for item in list(payload.get("evidence_spans") or []) if isinstance(item, dict)],
         uncertainties=[str(item).strip() for item in list(payload.get("uncertainties") or []) if str(item).strip()],
+        conflicts=[str(item).strip() for item in list(payload.get("conflicts") or []) if str(item).strip()],
         confidence=confidence,
         needs_review=bool(payload.get("needs_review", True)),
         review_reasons=[str(item).strip() for item in list(payload.get("review_reasons") or []) if str(item).strip()],
@@ -191,6 +193,7 @@ def serialize_content_understanding_payload(value: ContentUnderstanding) -> dict
         "search_queries": list(value.search_queries),
         "evidence_spans": list(value.evidence_spans),
         "uncertainties": list(value.uncertainties),
+        "conflicts": list(value.conflicts),
         "confidence": dict(value.confidence),
         "needs_review": value.needs_review,
         "review_reasons": list(value.review_reasons),
@@ -288,6 +291,7 @@ def map_content_understanding_to_legacy_profile(value: ContentUnderstanding) -> 
                     search_queries=value.search_queries,
                     evidence_spans=value.evidence_spans,
                     uncertainties=value.uncertainties,
+                    conflicts=value.conflicts,
                     confidence=value.confidence,
                     needs_review=value.needs_review,
                     review_reasons=value.review_reasons,

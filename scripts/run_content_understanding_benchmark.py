@@ -225,7 +225,7 @@ async def prepare_job_for_source(source_path: Path, *, channel_profile: str, lan
 
     created = await create_jobs_for_inventory_paths(
         [str(source_path)],
-        channel_profile=channel_profile,
+        workflow_template=channel_profile,
         language=language,
     )
     job_id = str(created[0].get("job_id") or "").strip()

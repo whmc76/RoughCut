@@ -48,6 +48,7 @@ def resolve_entities(
         ],
     )
     uncertainties = _merge_unique(list(base.uncertainties), list(candidate.uncertainties))
+    merged_conflicts = _merge_unique(list(base.conflicts), list(candidate.conflicts), conflicts)
     needs_review = bool(base.needs_review or candidate.needs_review or not has_direct_evidence or conflicts)
     primary_subject = candidate.resolved_primary_subject if use_resolved else base.primary_subject
     subject_entities = list(candidate.resolved_entities) if use_resolved else list(base.subject_entities)
@@ -60,6 +61,7 @@ def resolve_entities(
         resolved_primary_subject=candidate.resolved_primary_subject,
         entity_resolution_map=list(candidate.entity_resolution_map),
         uncertainties=uncertainties,
+        conflicts=merged_conflicts,
         review_reasons=review_reasons,
         needs_review=needs_review,
         confidence=dict(base.confidence or candidate.confidence),

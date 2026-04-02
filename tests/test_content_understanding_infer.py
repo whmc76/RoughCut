@@ -127,6 +127,44 @@ async def test_infer_content_understanding_preserves_capability_matrix_and_trace
 
 
 @pytest.mark.asyncio
+async def test_infer_content_understanding_populates_capability_matrix_and_trace_when_final_stage_omits_them(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from types import SimpleNamespace
+
+    from roughcut.review import content_understanding_infer as infer_mod
+    from roughcut.review.content_understanding_schema import ContentSemanticFacts, ContentUnderstanding
+
+    async def fake_infer_content_semantic_facts(provider, evidence_bundle):
+        return ContentSemanticFacts(entity_candidates=["demo"])
+
+    async def fake_infer_final_understanding(provider, evidence_bundle, semantic_facts):
+        return ContentUnderstanding(
+            video_type="product_review",
+            content_domain="gear",
+            primary_subject="demo subject",
+            semantic_facts=semantic_facts,
+        )
+
+    monkeypatch.setattr(infer_mod, "get_reasoning_provider", lambda: object())
+    monkeypatch.setattr(infer_mod, "infer_content_semantic_facts", fake_infer_content_semantic_facts, raising=False)
+    monkeypatch.setattr(infer_mod, "infer_final_understanding", fake_infer_final_understanding, raising=False)
+    monkeypatch.setattr(
+        infer_mod,
+        "get_settings",
+        lambda: SimpleNamespace(active_reasoning_provider="minimax", reasoning_provider="minimax"),
+    )
+
+    result = await infer_mod.infer_content_understanding(
+        {"transcript_excerpt": "demo", "visual_hints": {"subject_type": "gear"}}
+    )
+
+    assert result.capability_matrix["reasoning"]["provider"] == "minimax"
+    assert result.capability_matrix["visual_understanding"]["status"] == "ready"
+    assert result.orchestration_trace == ["capability_resolution", "fact_extraction", "final_understanding"]
+
+
+@pytest.mark.asyncio
 async def test_infer_content_understanding_uses_reasoning_provider_payload(monkeypatch: pytest.MonkeyPatch):
     from roughcut.review import content_understanding_infer as infer_mod
 

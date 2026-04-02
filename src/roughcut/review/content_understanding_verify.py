@@ -75,13 +75,14 @@ async def verify_content_understanding(
         "4. uncertainties 要写明不确定之处。"
         "5. observed_entities 要保留视频里的原始称呼；resolved_entities 和 resolved_primary_subject 用于归一化结果；"
         "6. entity_resolution_map 要说明 observed 到 resolved 的映射。"
+        "7. conflicts 要列出与当前视频原始理解冲突的字段名。"
         "JSON 结构："
         "{"
         '"video_type":"","content_domain":"","primary_subject":"","subject_entities":[{"kind":"","name":"","brand":"","model":""}],'
         '"observed_entities":[{"kind":"","name":"","brand":"","model":""}],'
         '"resolved_entities":[{"kind":"","name":"","brand":"","model":""}],"resolved_primary_subject":"","entity_resolution_map":[{"observed_name":"","resolved_name":"","confidence":0.0,"reason":""}],'
         '"video_theme":"","summary":"","hook_line":"","engagement_question":"","search_queries":[],"evidence_spans":[],'
-        '"uncertainties":[],"confidence":{},"needs_review":true,"review_reasons":[]'
+        '"uncertainties":[],"conflicts":[],"confidence":{},"needs_review":true,"review_reasons":[]'
         "}"
         f"\n原始理解：{json.dumps(map_content_understanding_to_legacy_profile(understanding), ensure_ascii=False)}"
         f"\n当前视频证据：{json.dumps(evidence_bundle, ensure_ascii=False)}"

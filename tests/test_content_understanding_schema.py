@@ -163,6 +163,7 @@ def test_content_understanding_payload_round_trips_capability_matrix_and_trace_t
         video_type="product_review",
         content_domain="gear",
         primary_subject="demo subject",
+        conflicts=["primary_subject", "video_theme"],
         capability_matrix={"visual_understanding": {"provider": "minimax", "mode": "native_multimodal"}},
         orchestration_trace=["capability_resolution", "fact_extraction", "final_understanding"],
     )
@@ -172,3 +173,4 @@ def test_content_understanding_payload_round_trips_capability_matrix_and_trace_t
 
     assert reparsed.capability_matrix == understanding.capability_matrix
     assert reparsed.orchestration_trace == understanding.orchestration_trace
+    assert reparsed.conflicts == understanding.conflicts

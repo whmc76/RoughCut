@@ -101,6 +101,8 @@ async def test_verify_content_understanding_keeps_current_conclusion_when_hybrid
     assert result.content_domain == "ai"
     assert result.primary_subject == "ComfyUI 工作流"
     assert result.subject_entities == [SubjectEntity(kind="software", name="ComfyUI")]
+    assert "video_type" in result.conflicts
+    assert "primary_subject" in result.conflicts
     assert result.needs_review is True
     assert any("弱佐证" in reason or "冲突" in reason for reason in result.review_reasons)
 

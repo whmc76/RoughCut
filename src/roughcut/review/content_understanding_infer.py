@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from typing import Any
 
+from roughcut.config import get_settings
 from roughcut.providers.factory import get_reasoning_provider
 from roughcut.providers.reasoning.base import Message
+from roughcut.review.content_understanding_capabilities import resolve_content_understanding_capabilities
 from roughcut.review.content_understanding_evidence import normalize_evidence_bundle
 from roughcut.review.content_understanding_facts import _load_json_object, infer_content_semantic_facts
 from roughcut.review.content_understanding_schema import (
@@ -20,9 +22,16 @@ def parse_content_understanding_payload(data: Any) -> ContentUnderstanding:
 async def infer_content_understanding(evidence_bundle: dict[str, Any]) -> ContentUnderstanding:
     evidence_bundle = normalize_evidence_bundle(evidence_bundle)
     provider = get_reasoning_provider()
+    capability_matrix = _resolve_capability_matrix(evidence_bundle)
+    orchestration_trace = ["capability_resolution", "fact_extraction", "final_understanding"]
     semantic_facts = await infer_content_semantic_facts(provider, evidence_bundle)
     understanding = await infer_final_understanding(provider, evidence_bundle, semantic_facts)
-    return _with_staged_semantic_facts(understanding, semantic_facts)
+    return _with_staged_semantic_facts(
+        understanding,
+        semantic_facts,
+        capability_matrix=capability_matrix,
+        orchestration_trace=orchestration_trace,
+    )
 
 
 async def infer_final_understanding(
@@ -100,6 +109,7 @@ async def infer_final_understanding(
             search_queries=understanding.search_queries or semantic_facts.search_expansions[:4],
             evidence_spans=understanding.evidence_spans,
             uncertainties=understanding.uncertainties,
+            conflicts=understanding.conflicts,
             confidence=understanding.confidence,
             needs_review=understanding.needs_review,
             review_reasons=understanding.review_reasons,
@@ -112,6 +122,9 @@ async def infer_final_understanding(
 def _with_staged_semantic_facts(
     understanding: ContentUnderstanding,
     semantic_facts: ContentSemanticFacts,
+    *,
+    capability_matrix: dict[str, Any],
+    orchestration_trace: list[str],
 ) -> ContentUnderstanding:
     return ContentUnderstanding(
         video_type=understanding.video_type,
@@ -130,11 +143,12 @@ def _with_staged_semantic_facts(
         search_queries=understanding.search_queries or semantic_facts.search_expansions[:4],
         evidence_spans=understanding.evidence_spans,
         uncertainties=understanding.uncertainties,
+        conflicts=understanding.conflicts,
         confidence=understanding.confidence,
         needs_review=understanding.needs_review,
         review_reasons=understanding.review_reasons,
-        capability_matrix=understanding.capability_matrix,
-        orchestration_trace=understanding.orchestration_trace,
+        capability_matrix=understanding.capability_matrix or capability_matrix,
+        orchestration_trace=understanding.orchestration_trace or orchestration_trace,
     )
 
 
@@ -284,3 +298,16 @@ async def _repair_empty_understanding_payload(
     )
     payload = repaired.as_json()
     return payload if isinstance(payload, dict) else {}
+
+
+def _resolve_capability_matrix(evidence_bundle: dict[str, Any]) -> dict[str, Any]:
+    settings = get_settings()
+    candidate_hints = evidence_bundle.get("candidate_hints")
+    nested_visual_hints = candidate_hints.get("visual_hints") if isinstance(candidate_hints, dict) else {}
+    has_visual_inputs = bool(evidence_bundle.get("visual_semantic_evidence") or nested_visual_hints)
+    visual_provider = str(settings.active_reasoning_provider or settings.reasoning_provider or "").strip() if has_visual_inputs else ""
+    return resolve_content_understanding_capabilities(
+        reasoning_provider=str(settings.active_reasoning_provider or settings.reasoning_provider or "").strip(),
+        visual_provider=visual_provider,
+        visual_mcp_provider="",
+    )
