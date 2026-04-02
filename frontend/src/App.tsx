@@ -2,6 +2,7 @@ import { Suspense, lazy, useEffect, useRef } from "react";
 import { NavLink, Route, Routes } from "react-router-dom";
 
 import { api } from "./api";
+import { useFrontendBuildRefresh } from "./hooks/useFrontendBuildRefresh";
 import { useI18n } from "./i18n";
 
 const OverviewPage = lazy(async () => ({
@@ -41,6 +42,8 @@ const ControlPage = lazy(async () => ({
 export function App() {
   const { locale, setLocale, t } = useI18n();
   const syncedLocaleRef = useRef<string>("");
+
+  useFrontendBuildRefresh();
 
   useEffect(() => {
     if (syncedLocaleRef.current === locale) {

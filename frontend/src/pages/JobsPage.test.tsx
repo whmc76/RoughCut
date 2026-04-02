@@ -4,6 +4,8 @@ import { render, screen } from "@testing-library/react";
 import { JobsPage } from "./JobsPage";
 
 const mockUseJobWorkspace = vi.fn();
+const mockJobDetailModal = vi.fn();
+const mockJobReviewOverlay = vi.fn();
 
 vi.mock("../i18n", () => ({
   useI18n: () => ({
@@ -59,7 +61,17 @@ vi.mock("../features/jobs/JobDetailPanel", () => ({
 }));
 
 vi.mock("../features/jobs/JobDetailModal", () => ({
-  JobDetailModal: ({ children }: { children: ReactNode }) => <div>{children}</div>,
+  JobDetailModal: ({ children, open }: { children: ReactNode; open: boolean }) => {
+    mockJobDetailModal({ open });
+    return open ? <div data-testid="job-detail-modal">{children}</div> : null;
+  },
+}));
+
+vi.mock("../features/jobs/JobReviewOverlay", () => ({
+  JobReviewOverlay: ({ open, reviewStep }: { open: boolean; reviewStep?: string | null }) => {
+    mockJobReviewOverlay({ open, reviewStep });
+    return open ? <div data-testid="job-review-overlay">{reviewStep}</div> : null;
+  },
 }));
 
 vi.mock("../features/jobs/JobsUsageTrendPanel", () => ({
@@ -106,6 +118,7 @@ function buildWorkspace(overrides: Record<string, unknown> = {}) {
     reviewEnhancementModes: [],
     confirmProfile: { mutate: vi.fn(), isPending: false },
     applyReview: { mutate: vi.fn(), isPending: false },
+    finalReviewDecision: { mutate: vi.fn(), isPending: false },
     cancelJob: { mutate: vi.fn(), isPending: false },
     restartJob: { mutate: vi.fn(), isPending: false },
     deleteJob: { mutate: vi.fn(), isPending: false },
@@ -165,5 +178,68 @@ describe("JobsPage", () => {
 
     expect(screen.queryByText("usage-trend-panel")).not.toBeInTheDocument();
     expect(screen.queryByText("jobs.summary.topSteps")).not.toBeInTheDocument();
+  });
+
+  it("routes needs_review jobs into the dedicated review overlay instead of the detail modal", () => {
+    mockUseJobWorkspace.mockReturnValue(
+      buildWorkspace({
+        selectedJobId: "job-review-1",
+        selectedJob: {
+          id: "job-review-1",
+          source_name: "needs_review.mp4",
+          content_subject: "测试主题",
+          content_summary: "测试摘要",
+          status: "needs_review",
+          language: "zh-CN",
+          workflow_mode: "standard_edit",
+          enhancement_modes: [],
+          created_at: "2026-04-02T02:00:00Z",
+          updated_at: "2026-04-02T02:10:00Z",
+          steps: [],
+        },
+        activity: {
+          data: {
+            current_step: {
+              step_name: "final_review",
+              label: "成片审核",
+              status: "pending",
+              detail: "等待审核成片后继续。",
+            },
+          },
+        },
+      }),
+    );
+
+    render(<JobsPage />);
+
+    expect(screen.getByTestId("job-review-overlay")).toHaveTextContent("final_review");
+    expect(screen.queryByTestId("job-detail-modal")).not.toBeInTheDocument();
+    expect(mockJobReviewOverlay).toHaveBeenCalled();
+  });
+
+  it("keeps non-review jobs in the standard detail modal flow", () => {
+    mockUseJobWorkspace.mockReturnValue(
+      buildWorkspace({
+        selectedJobId: "job-running-1",
+        selectedJob: {
+          id: "job-running-1",
+          source_name: "running.mp4",
+          content_subject: "测试主题",
+          content_summary: "测试摘要",
+          status: "processing",
+          language: "zh-CN",
+          workflow_mode: "standard_edit",
+          enhancement_modes: [],
+          created_at: "2026-04-02T02:00:00Z",
+          updated_at: "2026-04-02T02:10:00Z",
+          steps: [],
+        },
+      }),
+    );
+
+    render(<JobsPage />);
+
+    expect(screen.getByTestId("job-detail-modal")).toBeInTheDocument();
+    expect(screen.queryByTestId("job-review-overlay")).not.toBeInTheDocument();
   });
 });

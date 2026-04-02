@@ -3199,6 +3199,58 @@ select.input option:focus {
   z-index: 2;
 }
 
+.review-overlay-backdrop {
+  z-index: 75;
+  align-items: flex-start;
+  padding-top: 28px;
+  padding-bottom: 28px;
+}
+
+.review-overlay-shell {
+  width: min(1280px, calc(100vw - 56px));
+}
+
+.review-overlay-content {
+  max-height: calc(100vh - 56px);
+  overflow: auto;
+  padding-top: 58px;
+}
+
+.final-review-overlay {
+  display: grid;
+  gap: 14px;
+}
+
+.review-secondary-fold {
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  padding: 14px 16px;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.review-secondary-fold > summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.review-secondary-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 14px;
+}
+
+.review-evidence-block {
+  margin-bottom: -6px;
+}
+
+.review-reason-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
 .creator-profile-modal-panel {
   max-height: calc(100vh - 48px);
   overflow: auto;

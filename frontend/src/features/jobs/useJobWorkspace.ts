@@ -248,6 +248,11 @@ export function useJobWorkspace() {
       api.applyReview(selectedJobId!, [{ target_type: "subtitle_correction", target_id: payload.targetId, action: payload.action }]),
     onSuccess: refreshAll,
   });
+  const finalReviewDecision = useMutation({
+    mutationFn: async (payload: { decision: "approve" | "reject"; note?: string }) =>
+      api.finalReviewDecision(selectedJobId!, payload),
+    onSuccess: refreshAll,
+  });
 
   const filteredJobs = useMemo(() => {
     const needle = keyword.trim().toLowerCase();
@@ -295,6 +300,7 @@ export function useJobWorkspace() {
     uploadJob,
     confirmProfile,
     applyReview,
+    finalReviewDecision,
     filteredJobs,
     selectedJob,
     contentSource,

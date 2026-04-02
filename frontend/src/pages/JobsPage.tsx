@@ -4,6 +4,7 @@ import { ConfigProfileSwitcher } from "../features/configProfiles/ConfigProfileS
 import { useI18n } from "../i18n";
 import { JobDetailPanel } from "../features/jobs/JobDetailPanel";
 import { JobDetailModal } from "../features/jobs/JobDetailModal";
+import { JobReviewOverlay } from "../features/jobs/JobReviewOverlay";
 import { JobQueueTable } from "../features/jobs/JobQueueTable";
 import { JobUploadPanel } from "../features/jobs/JobUploadPanel";
 import { useJobWorkspace } from "../features/jobs/useJobWorkspace";
@@ -15,6 +16,8 @@ export function JobsPage() {
   const workflowTemplateOptions = workspace.options.data?.workflow_templates ?? [{ value: "", label: t("watch.page.autoMatch") }];
   const workflowModeOptions = workspace.options.data?.workflow_modes ?? [{ value: "standard_edit", label: t("creative.workflow.standard_edit") }];
   const enhancementOptions = workspace.options.data?.enhancement_modes ?? [];
+  const reviewStep = workspace.activity.data?.current_step?.step_name === "final_review" ? "final_review" : "summary_review";
+  const isReviewJob = workspace.selectedJob?.status === "needs_review";
 
   return (
     <section className="page-stack">
@@ -80,8 +83,39 @@ export function JobsPage() {
         />
       </PageSection>
 
+      <JobReviewOverlay
+        open={Boolean(workspace.selectedJobId && isReviewJob)}
+        reviewStep={reviewStep}
+        selectedJob={workspace.selectedJob}
+        activity={workspace.activity.data}
+        report={workspace.report.data}
+        contentProfile={workspace.contentProfile.data}
+        contentSource={workspace.contentSource}
+        contentDraft={workspace.contentDraft}
+        contentKeywords={workspace.contentKeywords}
+        isConfirmingProfile={workspace.confirmProfile.isPending}
+        isApplyingReview={workspace.applyReview.isPending}
+        isSubmittingFinalReview={workspace.finalReviewDecision.isPending}
+        onContentFieldChange={(field, value) => workspace.setContentDraft((prev) => ({ ...prev, [field]: value }))}
+        onKeywordsChange={(value) =>
+          workspace.setContentDraft((prev) => ({
+            ...prev,
+            keywords: value
+              .split(",")
+              .map((item) => item.trim())
+              .filter(Boolean),
+          }))
+        }
+        onConfirmProfile={() => workspace.confirmProfile.mutate()}
+        onApplyReview={(targetId, action) => workspace.applyReview.mutate({ targetId, action })}
+        onApproveFinalReview={() => workspace.finalReviewDecision.mutate({ decision: "approve" })}
+        onRejectFinalReview={(note) => workspace.finalReviewDecision.mutate({ decision: "reject", note })}
+        onOpenFolder={() => workspace.selectedJob && workspace.openFolder.mutate(workspace.selectedJob.id)}
+        onClose={() => workspace.setSelectedJobId(null)}
+      />
+
       <JobDetailModal
-        open={Boolean(workspace.selectedJobId)}
+        open={Boolean(workspace.selectedJobId && !isReviewJob)}
         title={workspace.selectedJob?.source_name}
         onClose={() => workspace.setSelectedJobId(null)}
       >

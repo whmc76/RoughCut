@@ -13,6 +13,10 @@ export type Job = {
   source_name: string;
   content_subject?: string | null;
   content_summary?: string | null;
+  quality_score?: number | null;
+  quality_grade?: string | null;
+  quality_summary?: string | null;
+  quality_issue_codes?: string[] | null;
   avatar_delivery_status?: string | null;
   avatar_delivery_summary?: string | null;
   status: string;

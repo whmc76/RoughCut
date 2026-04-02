@@ -25,6 +25,7 @@ const mockApi = vi.hoisted(() => ({
   restartJob: vi.fn(),
   createJob: vi.fn(),
   confirmContentProfile: vi.fn(),
+  finalReviewDecision: vi.fn(),
   applyReview: vi.fn(),
 }));
 
@@ -331,6 +332,14 @@ describe("useJobWorkspace", () => {
         title: "确认后的标题",
         keywords: ["教程", "配置"],
       },
+    });
+    mockApi.finalReviewDecision.mockResolvedValue({
+      job_id: "job_1",
+      decision: "approve",
+      job_status: "processing",
+      review_step_status: "done",
+      rerun_triggered: false,
+      note: null,
     });
     mockApi.applyReview.mockResolvedValue({});
   });

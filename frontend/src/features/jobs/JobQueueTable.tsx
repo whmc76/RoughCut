@@ -6,6 +6,31 @@ import { useI18n } from "../../i18n";
 import { classNames, formatDate, statusLabel } from "../../utils";
 import { enhancementModeLabel, stepLabel, workflowModeLabel } from "./constants";
 
+function resolvePendingReviewStep(job: Job) {
+  return job.steps.find((step) => (step.step_name === "summary_review" || step.step_name === "final_review") && step.status === "pending")
+    ?? job.steps.find((step) => (step.step_name === "summary_review" || step.step_name === "final_review") && step.status !== "done")
+    ?? null;
+}
+
+function reviewActionLabel(job: Job, t: (key: string) => string) {
+  if (job.status !== "needs_review") return t("jobs.actions.review");
+  const reviewStep = resolvePendingReviewStep(job);
+  if (reviewStep?.step_name === "final_review") return "成片审核";
+  if (reviewStep?.step_name === "summary_review") return "信息核对";
+  return "打开审核";
+}
+
+function reviewPreviewText(job: Job, t: (key: string) => string) {
+  if (job.status !== "needs_review") {
+    return job.content_summary || job.content_subject || t("jobs.queue.noSummary");
+  }
+  const reviewStep = resolvePendingReviewStep(job);
+  if (reviewStep?.step_name === "final_review") {
+    return job.quality_summary || "等待审核成片后继续。";
+  }
+  return job.content_summary || job.content_subject || "等待信息核对后继续。";
+}
+
 type JobQueueTableProps = {
   jobs: Job[];
   selectedJobId: string | null;
@@ -97,7 +122,7 @@ export function JobQueueTable({
                     </div>
                     <div className="job-file-copy">
                       <div className="row-title">{job.source_name}</div>
-                      <div className="muted line-clamp-2">{job.content_summary || job.content_subject || t("jobs.queue.noSummary")}</div>
+                      <div className="muted line-clamp-2">{reviewPreviewText(job, t)}</div>
                       <div className="mode-chip-list compact-top">
                         <span className="mode-chip">{workflowModeLabel(job.workflow_mode)}</span>
                         {job.enhancement_modes.map((mode) => (
@@ -144,7 +169,7 @@ export function JobQueueTable({
                         onSelect(job.id);
                       }}
                     >
-                      {job.status === "needs_review" ? "核对配置" : t("jobs.actions.review")}
+                      {reviewActionLabel(job, t)}
                     </button>
                     <button
                       className="button ghost button-sm"

@@ -1,6 +1,17 @@
 import type { ContentProfileReview, Job, JobActivity, JobTimeline, JobsUsageSummary, JobsUsageTrend, Report, TokenUsageReport } from "../types";
 import { apiPath, request, requestForm } from "./core";
 
+type FinalReviewDecision = "approve" | "reject";
+
+type FinalReviewDecisionResponse = {
+  job_id: string;
+  decision: FinalReviewDecision;
+  job_status: string;
+  review_step_status: string;
+  rerun_triggered: boolean;
+  note?: string | null;
+};
+
 export const jobsApi = {
   listJobs: () => request<Job[]>("/jobs"),
   getJobsUsageSummary: (limit = 60) => request<JobsUsageSummary>(`/jobs/usage-summary?limit=${limit}`),
@@ -31,6 +42,8 @@ export const jobsApi = {
   getContentProfile: (jobId: string) => request<ContentProfileReview>(`/jobs/${jobId}/content-profile`),
   confirmContentProfile: (jobId: string, body: Record<string, unknown>) =>
     request<ContentProfileReview>(`/jobs/${jobId}/content-profile/confirm`, { method: "POST", body: JSON.stringify(body) }),
+  finalReviewDecision: (jobId: string, body: { decision: FinalReviewDecision; note?: string }) =>
+    request<FinalReviewDecisionResponse>(`/jobs/${jobId}/final-review`, { method: "POST", body: JSON.stringify(body) }),
   applyReview: (jobId: string, actions: Array<{ target_type: string; target_id: string; action: string; override_text?: string }>) =>
     request<{ applied: number }>(`/jobs/${jobId}/review/apply`, { method: "POST", body: JSON.stringify({ actions }) }),
   contentProfileThumbnailUrl: (jobId: string, index: number) => apiPath(`/jobs/${jobId}/content-profile/thumbnail?index=${index}`),
