@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from datetime import date, datetime
+import math
 import uuid
 from pathlib import Path
+from typing import Any
 
 from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -180,7 +183,7 @@ async def persist_transcript_result(
         job_id=job_id,
         step_id=step.id,
         artifact_type="transcript",
-        data_json={
+        data_json=_json_safe_value({
             "language": language,
             "duration": result.duration,
             "segment_count": len(result.segments),
@@ -194,7 +197,7 @@ async def persist_transcript_result(
                     else []
                 ),
             ],
-        },
+        }),
     )
     session.add(artifact)
     if bool(getattr(settings, "asr_evidence_enabled", False)):
@@ -203,7 +206,7 @@ async def persist_transcript_result(
                 job_id=job_id,
                 step_id=step.id,
                 artifact_type=ARTIFACT_TYPE_TRANSCRIPT_EVIDENCE,
-                data_json={
+                data_json=_json_safe_value({
                     "language": language,
                     "duration": result.duration,
                     "provider": result.provider or selected_provider,
@@ -222,7 +225,7 @@ async def persist_transcript_result(
                     "raw_payload": deepcopy(result.raw_payload),
                     "raw_segments": [_serialize_transcript_segment(seg) for seg in (result.raw_segments or [])],
                     "segments": [_serialize_transcript_segment(seg) for seg in result.segments],
-                },
+                }),
             )
         )
     await session.flush()
@@ -287,24 +290,24 @@ def _serialize_word_timing(word: WordTiming) -> dict[str, object]:
     return {
         "word": word.word,
         "raw_text": word.raw_text,
-        "start": word.start,
-        "end": word.end,
+        "start": _json_safe_value(word.start),
+        "end": _json_safe_value(word.end),
         "provider": word.provider,
         "model": word.model,
         "context": word.context,
         "hotword": word.hotword,
-        "confidence": word.confidence,
-        "logprob": word.logprob,
-        "alignment": deepcopy(word.alignment),
-        "raw_payload": deepcopy(word.raw_payload),
+        "confidence": _json_safe_value(word.confidence),
+        "logprob": _json_safe_value(word.logprob),
+        "alignment": _json_safe_value(deepcopy(word.alignment)),
+        "raw_payload": _json_safe_value(deepcopy(word.raw_payload)),
     }
 
 
 def _serialize_transcript_segment(seg: ProviderTranscriptSegment) -> dict[str, object]:
     return {
         "index": seg.index,
-        "start": seg.start,
-        "end": seg.end,
+        "start": _json_safe_value(seg.start),
+        "end": _json_safe_value(seg.end),
         "text": seg.text,
         "raw_text": seg.raw_text,
         "speaker": seg.speaker,
@@ -312,9 +315,60 @@ def _serialize_transcript_segment(seg: ProviderTranscriptSegment) -> dict[str, o
         "model": seg.model,
         "context": seg.context,
         "hotword": seg.hotword,
-        "confidence": seg.confidence,
-        "logprob": seg.logprob,
-        "alignment": deepcopy(seg.alignment),
-        "raw_payload": deepcopy(seg.raw_payload),
+        "confidence": _json_safe_value(seg.confidence),
+        "logprob": _json_safe_value(seg.logprob),
+        "alignment": _json_safe_value(deepcopy(seg.alignment)),
+        "raw_payload": _json_safe_value(deepcopy(seg.raw_payload)),
         "words": [_serialize_word_timing(word) for word in seg.words],
     }
+
+
+def _json_safe_value(value: Any) -> Any:
+    if value is None or isinstance(value, (bool, int, str)):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, uuid.UUID):
+        return str(value)
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {str(key): _json_safe_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe_value(item) for item in value]
+
+    item_method = getattr(value, "item", None)
+    if callable(item_method):
+        try:
+            scalar = item_method()
+        except Exception:
+            scalar = None
+        else:
+            if scalar is not value:
+                return _json_safe_value(scalar)
+
+    for attr in ("model_dump", "dict", "to_dict"):
+        method = getattr(value, attr, None)
+        if not callable(method):
+            continue
+        try:
+            dumped = method()
+        except TypeError:
+            try:
+                dumped = method(mode="json")
+            except Exception:
+                continue
+        except Exception:
+            continue
+        return _json_safe_value(dumped)
+
+    if hasattr(value, "__dict__"):
+        return {
+            key: _json_safe_value(item)
+            for key, item in vars(value).items()
+            if not key.startswith("_")
+        }
+
+    return repr(value)
