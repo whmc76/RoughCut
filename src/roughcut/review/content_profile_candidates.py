@@ -29,8 +29,7 @@ def build_identity_candidates(bundle: IdentityEvidenceBundle) -> list[IdentityCa
     source_maps.append(("visible_text", bundle.visible_text_hints))
     for source_type, hints in source_maps:
         for field_name in ("subject_brand", "subject_model", "subject_type", "video_theme"):
-            value = str((hints or {}).get(field_name) or "").strip()
-            if value:
+            for value in _collect_field_values(hints, field_name):
                 candidates.append(
                     IdentityCandidate(
                         field_name=field_name,
@@ -80,8 +79,20 @@ def _legacy_visual_hints_add_new_signal(bundle: IdentityEvidenceBundle) -> bool:
     legacy = bundle.visual_hints or {}
     cluster = bundle.visual_cluster_hints or {}
     for field_name in ("subject_brand", "subject_model", "subject_type", "video_theme", "visible_text"):
-        legacy_value = str(legacy.get(field_name) or "").strip()
-        cluster_value = str(cluster.get(field_name) or "").strip()
-        if legacy_value and legacy_value != cluster_value:
+        legacy_values = _collect_field_values(legacy, field_name)
+        cluster_values = _collect_field_values(cluster, field_name)
+        if legacy_values and legacy_values != cluster_values:
             return True
     return False
+
+
+def _collect_field_values(hints: dict[str, str], field_name: str) -> list[str]:
+    values: list[str] = []
+    direct = str((hints or {}).get(field_name) or "").strip()
+    if direct:
+        values.append(direct)
+    for item in (hints or {}).get(f"{field_name}_candidates") or []:
+        text = str(item or "").strip()
+        if text and text not in values:
+            values.append(text)
+    return values

@@ -124,8 +124,8 @@ def test_seed_profile_from_text_extracts_flashlight_brand_and_model():
 
     assert seeded["subject_brand"] == "Loop露普"
     assert seeded["subject_model"] == "SK05二代ProUV版"
-    assert seeded["subject_type"] == "EDC手电"
-    assert seeded["video_theme"] == "Loop露普SK05二代ProUV版开箱与一代对比评测"
+    assert seeded["subject_type_candidates"] == ["EDC手电"]
+    assert seeded["video_theme_candidates"] == ["Loop露普SK05二代ProUV版开箱与一代对比评测"]
     assert any("SK05" in item for item in seeded["search_queries"])
 
 
@@ -135,7 +135,7 @@ def test_seed_profile_from_text_keeps_physical_product_subject_when_stray_tech_b
         "桌面显示器上挂着 ComfyUI 页面，但那不是本期主体。"
     )
 
-    assert seeded["subject_type"] == "EDC手电"
+    assert seeded["subject_type_candidates"] == ["EDC手电"]
     assert seeded.get("subject_brand", "") != "ComfyUI"
 
 
@@ -147,8 +147,8 @@ def test_seed_profile_from_text_does_not_turn_flashlight_unboxing_into_comfyui_t
 
     assert seeded["subject_brand"] == "Loop露普"
     assert seeded["subject_model"] == "SK05二代ProUV版"
-    assert seeded["subject_type"] == "EDC手电"
-    assert "ComfyUI" not in seeded["video_theme"]
+    assert seeded["subject_type_candidates"] == ["EDC手电"]
+    assert all("ComfyUI" not in item for item in seeded.get("video_theme_candidates", []))
 
 
 def test_seed_profile_from_text_does_not_promote_late_uncorroborated_flashlight_model():
@@ -159,8 +159,8 @@ def test_seed_profile_from_text_does_not_promote_late_uncorroborated_flashlight_
 
     assert seeded.get("subject_brand", "") != "Loop露普"
     assert seeded.get("subject_model", "") == ""
-    assert seeded["subject_type"] == "EDC手电"
-    assert "SK05" not in seeded.get("video_theme", "")
+    assert seeded["subject_type_candidates"] == ["EDC手电"]
+    assert not any("SK05" in item for item in seeded.get("video_theme_candidates", []))
     assert not any("SK05" in item for item in seeded.get("search_queries", []))
 
 
@@ -169,8 +169,8 @@ def test_seed_profile_from_text_extracts_bag_brand_and_model_from_fxx1_alias():
 
     assert seeded["subject_brand"] == "狐蝠工业"
     assert seeded["subject_model"] == "FXX1小副包"
-    assert seeded["subject_type"] == "EDC机能包"
-    assert seeded["video_theme"] == "狐蝠工业FXX1小副包开箱与上手评测"
+    assert seeded["subject_type_candidates"] == ["EDC机能包"]
+    assert seeded["video_theme_candidates"] == ["狐蝠工业FXX1小副包开箱与上手评测"]
     assert any("FXX1小副包" in item for item in seeded["search_queries"])
 
 
@@ -188,7 +188,7 @@ def test_seed_profile_from_text_uses_glossary_brand_and_generic_model():
 
     assert seeded["subject_brand"] == "FOXBAT狐蝠工业"
     assert seeded["subject_model"] == "F21小副包"
-    assert seeded["subject_type"] == "EDC机能包"
+    assert seeded["subject_type_candidates"] == ["EDC机能包"]
     assert any("F21" in item for item in seeded["search_queries"])
 
 
@@ -282,7 +282,7 @@ def test_seed_profile_from_user_memory_uses_recent_brand_model_corrections():
 
     assert seeded["subject_brand"] == "Loop露普"
     assert seeded["subject_model"] == "SK05二代Pro UV版"
-    assert seeded["subject_type"] == "EDC手电"
+    assert seeded["subject_type_candidates"] == ["EDC手电"]
 
 
 def test_seed_profile_from_user_memory_does_not_inject_brand_model_without_current_token_hit():
@@ -327,7 +327,7 @@ def test_seed_profile_from_user_memory_uses_confirmed_entity_for_flashlight_cont
 
     assert seeded["subject_brand"] == "傲雷"
     assert seeded["subject_model"] == "司令官2Ultra"
-    assert seeded["subject_type"] == "EDC手电"
+    assert seeded["subject_type_candidates"] == ["EDC手电"]
 
 
 def test_seed_profile_from_user_memory_uses_confirmed_entity_when_alias_and_variant_are_split():
@@ -353,7 +353,7 @@ def test_seed_profile_from_user_memory_uses_confirmed_entity_when_alias_and_vari
 
     assert seeded["subject_brand"] == "傲雷"
     assert seeded["subject_model"] == "司令官2Ultra"
-    assert seeded["subject_type"] == "EDC手电"
+    assert seeded["subject_type_candidates"] == ["EDC手电"]
 
 
 def test_seed_profile_from_user_memory_does_not_inject_confirmed_entity_outside_flashlight_context():
@@ -937,7 +937,7 @@ def test_seed_profile_from_subtitles_handles_edc_asr_aliases():
 
     assert profile["subject_brand"] == "LEATHERMAN"
     assert profile["subject_model"] == "ARC"
-    assert profile["subject_type"] == "多功能工具钳"
+    assert profile["subject_type_candidates"] == ["多功能工具钳"]
 
 
 def test_seed_profile_from_subtitles_detects_reate_folding_knife_signals():
@@ -949,7 +949,7 @@ def test_seed_profile_from_subtitles_detects_reate_folding_knife_signals():
     )
 
     assert profile["subject_brand"] == "REATE"
-    assert profile["subject_type"] == "EDC折刀"
+    assert profile["subject_type_candidates"] == ["EDC折刀"]
 
 
 def test_extract_reference_frames_falls_back_to_center_seek_when_thumbnail_filter_fails(tmp_path: Path, monkeypatch):
@@ -1218,8 +1218,8 @@ def test_seed_profile_from_subtitles_detects_runninghub_infinite_canvas_theme():
 
     assert profile["subject_brand"] == "RunningHub"
     assert profile["subject_model"] == "无限画布"
-    assert profile["subject_type"] == "AI工作流创作平台"
-    assert "无限画布" in profile["video_theme"]
+    assert profile["subject_type_candidates"] == ["AI工作流创作平台"]
+    assert any("无限画布" in item for item in profile["video_theme_candidates"])
     assert any("RunningHub 无限画布" in item for item in profile["search_queries"])
 
 

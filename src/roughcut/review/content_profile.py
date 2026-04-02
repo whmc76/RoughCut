@@ -78,6 +78,44 @@ _CONTENT_KIND_DEFAULT_VIDEO_THEME = {
 }
 
 
+def _hint_candidate_key(field_name: str) -> str:
+    return f"{field_name}_candidates"
+
+
+def _append_hint_candidate(hints: dict[str, Any], field_name: str, value: object) -> None:
+    text = str(value or "").strip()
+    if not text:
+        return
+    key = _hint_candidate_key(field_name)
+    current = [
+        str(item).strip()
+        for item in (hints.get(key) or [])
+        if str(item).strip()
+    ]
+    if text not in current:
+        current.append(text)
+    if current:
+        hints[key] = current
+
+
+def _hint_values(hints: dict[str, Any] | None, field_name: str) -> list[str]:
+    candidate = hints if isinstance(hints, dict) else {}
+    values: list[str] = []
+    direct = str(candidate.get(field_name) or "").strip()
+    if direct:
+        values.append(direct)
+    for item in candidate.get(_hint_candidate_key(field_name)) or []:
+        text = str(item).strip()
+        if text and text not in values:
+            values.append(text)
+    return values
+
+
+def _hint_primary_value(hints: dict[str, Any] | None, field_name: str) -> str:
+    values = _hint_values(hints, field_name)
+    return values[0] if values else ""
+
+
 def _workflow_template_name(profile: dict[str, Any] | None) -> str:
     candidate = profile or {}
     workflow_template = normalize_workflow_template_name(str(candidate.get("workflow_template") or "").strip())
@@ -134,9 +172,11 @@ def _normalize_seeded_profile_for_cache(profile: dict[str, Any] | None) -> dict[
         "subject_brand": str(seeded.get("subject_brand") or "").strip(),
         "subject_model": str(seeded.get("subject_model") or "").strip(),
         "subject_type": str(seeded.get("subject_type") or "").strip(),
+        "subject_type_candidates": [str(item).strip() for item in (seeded.get("subject_type_candidates") or []) if str(item).strip()],
         "content_kind": str(seeded.get("content_kind") or "").strip(),
         "subject_domain": str(seeded.get("subject_domain") or "").strip(),
         "video_theme": str(seeded.get("video_theme") or "").strip(),
+        "video_theme_candidates": [str(item).strip() for item in (seeded.get("video_theme_candidates") or []) if str(item).strip()],
         "workflow_template": _workflow_template_name(seeded),
         "hook_line": str(seeded.get("hook_line") or "").strip(),
         "visible_text": str(seeded.get("visible_text") or "").strip(),
@@ -152,12 +192,14 @@ def _normalize_seeded_profile_for_cache(profile: dict[str, Any] | None) -> dict[
         "evidence": evidence,
         "visual_hints": {
             "subject_type": str(visual_hints.get("subject_type") or "").strip(),
+            "subject_type_candidates": [str(item).strip() for item in (visual_hints.get("subject_type_candidates") or []) if str(item).strip()],
             "subject_brand": str(visual_hints.get("subject_brand") or "").strip(),
             "subject_model": str(visual_hints.get("subject_model") or "").strip(),
             "visible_text": str(visual_hints.get("visible_text") or "").strip(),
         },
         "visual_cluster_hints": {
             "subject_type": str(visual_cluster_hints.get("subject_type") or "").strip(),
+            "subject_type_candidates": [str(item).strip() for item in (visual_cluster_hints.get("subject_type_candidates") or []) if str(item).strip()],
             "subject_brand": str(visual_cluster_hints.get("subject_brand") or "").strip(),
             "subject_model": str(visual_cluster_hints.get("subject_model") or "").strip(),
             "visible_text": str(visual_cluster_hints.get("visible_text") or "").strip(),
@@ -168,9 +210,11 @@ def _normalize_seeded_profile_for_cache(profile: dict[str, Any] | None) -> dict[
             normalized["subject_brand"],
             normalized["subject_model"],
             normalized["subject_type"],
+            normalized["subject_type_candidates"],
             normalized["content_kind"],
             normalized["subject_domain"],
             normalized["video_theme"],
+            normalized["video_theme_candidates"],
             normalized["workflow_template"],
             normalized["hook_line"],
             normalized["visible_text"],
@@ -1390,10 +1434,12 @@ def _profile_ocr_hints(
     if visible_text:
         hints.setdefault("visible_text", visible_text)
         seeded = _seed_profile_from_text(visible_text, glossary_terms=glossary_terms)
-        for field_name in ("subject_brand", "subject_model", "subject_type"):
+        for field_name in ("subject_brand", "subject_model"):
             value = str(seeded.get(field_name) or "").strip()
             if value and field_name not in hints:
                 hints[field_name] = value
+        for value in _hint_values(seeded, "subject_type"):
+            _append_hint_candidate(hints, "subject_type", value)
     return hints
 
 
@@ -3108,19 +3154,26 @@ def _seed_profile_from_user_memory(transcript_excerpt: str, user_memory: dict[st
         corrected = str(item.get("corrected_value") or "").strip()
         if corrected and _normalize_profile_value(corrected) in transcript_norm:
             field_name = str(item.get("field_name") or "").strip()
-            if field_name in {"subject_brand", "subject_model", "subject_type", "video_theme"} and field_name not in seeded:
+            if field_name in {"subject_brand", "subject_model"} and field_name not in seeded:
                 seeded[field_name] = corrected
+            elif field_name in {"subject_type", "video_theme"}:
+                _append_hint_candidate(seeded, field_name, corrected)
 
     for field_name in ("subject_brand", "subject_model", "subject_type"):
-        if field_name in seeded:
+        if field_name in {"subject_brand", "subject_model"} and field_name in seeded:
+            continue
+        if field_name == "subject_type" and _hint_primary_value(seeded, field_name):
             continue
         for item in field_preferences.get(field_name) or []:
             value = str(item.get("value") or "").strip()
             if value and _normalize_profile_value(value) in transcript_norm:
-                seeded[field_name] = value
+                if field_name in {"subject_brand", "subject_model"}:
+                    seeded[field_name] = value
+                else:
+                    _append_hint_candidate(seeded, field_name, value)
                 break
 
-    if "video_theme" not in seeded:
+    if not _hint_primary_value(seeded, "video_theme"):
         for item in field_preferences.get("video_theme") or []:
             value = str(item.get("value") or "").strip()
             if not value:
@@ -3128,7 +3181,7 @@ def _seed_profile_from_user_memory(transcript_excerpt: str, user_memory: dict[st
             tokens = [token for token in re.split(r"[\s/·\-]+", value) if token]
             hit_count = sum(1 for token in tokens if _normalize_profile_value(token) and _normalize_profile_value(token) in transcript_norm)
             if hit_count >= 2:
-                seeded["video_theme"] = value
+                _append_hint_candidate(seeded, "video_theme", value)
                 break
 
     if "subject_brand" not in seeded:
@@ -3144,18 +3197,19 @@ def _seed_profile_from_user_memory(transcript_excerpt: str, user_memory: dict[st
             if seeded.get("subject_brand"):
                 break
 
-    if "subject_type" not in seeded:
+    if not _hint_primary_value(seeded, "subject_type"):
         transcript_seed = _seed_profile_from_text(transcript_excerpt)
-        if transcript_seed.get("subject_type"):
-            seeded["subject_type"] = transcript_seed["subject_type"]
+        transcript_subject_type = _hint_primary_value(transcript_seed, "subject_type")
+        if transcript_subject_type:
+            _append_hint_candidate(seeded, "subject_type", transcript_subject_type)
         elif seeded.get("subject_brand") == "Loop露普" or str(seeded.get("subject_model") or "").startswith("SK05"):
-            seeded["subject_type"] = "EDC手电"
+            _append_hint_candidate(seeded, "subject_type", "EDC手电")
 
     if "subject_brand" not in seeded and "subject_model" not in seeded:
         confirmed_entity = _select_confirmed_entity_from_user_memory(
             transcript_excerpt,
             user_memory=user_memory,
-            subject_type=str(seeded.get("subject_type") or ""),
+            subject_type=_hint_primary_value(seeded, "subject_type"),
         )
         if confirmed_entity:
             brand = str(confirmed_entity.get("brand") or "").strip()
@@ -3164,8 +3218,8 @@ def _seed_profile_from_user_memory(transcript_excerpt: str, user_memory: dict[st
                 seeded["subject_brand"] = brand
             if model:
                 seeded["subject_model"] = model
-            if confirmed_entity.get("subject_type") and "subject_type" not in seeded:
-                seeded["subject_type"] = str(confirmed_entity.get("subject_type") or "").strip()
+            if confirmed_entity.get("subject_type") and not _hint_primary_value(seeded, "subject_type"):
+                _append_hint_candidate(seeded, "subject_type", confirmed_entity.get("subject_type"))
 
     return seeded
 
@@ -3208,7 +3262,7 @@ def _confirmed_entity_matches_current_context(
     )
     if not effective_subject_type:
         transcript_seed = _seed_profile_from_text(transcript)
-        effective_subject_type = str(transcript_seed.get("subject_type") or "").strip()
+        effective_subject_type = _hint_primary_value(transcript_seed, "subject_type")
 
     if entity_subject_type and effective_subject_type and _normalize_profile_value(entity_subject_type) != _normalize_profile_value(effective_subject_type):
         return False
@@ -3325,7 +3379,7 @@ def _seed_profile_from_glossary_terms(
         seeded["subject_brand"] = best_brand[1]
         subject_type = _subject_type_from_glossary_category(best_brand_category)
         if subject_type:
-            seeded["subject_type"] = subject_type
+            _append_hint_candidate(seeded, "subject_type", subject_type)
     if best_model:
         seeded["subject_model"] = best_model[1]
         if "subject_brand" not in seeded and best_model[1] in _MODEL_TO_BRAND:
@@ -3408,8 +3462,8 @@ def _seed_profile_from_text(
         subject_type = "EDC机能包"
     elif any(keyword in transcript for keyword in plier_keywords):
         subject_type = "多功能工具钳"
-    elif glossary_seed.get("subject_type"):
-        subject_type = str(glossary_seed.get("subject_type") or "").strip()
+    elif _hint_primary_value(glossary_seed, "subject_type"):
+        subject_type = _hint_primary_value(glossary_seed, "subject_type")
 
     topic_terms = _extract_topic_terms(transcript)
     product_identity_detected = bool(
@@ -3437,7 +3491,7 @@ def _seed_profile_from_text(
     if model:
         seeded["subject_model"] = model
     if subject_type:
-        seeded["subject_type"] = subject_type
+        _append_hint_candidate(seeded, "subject_type", subject_type)
     video_theme = _build_seeded_video_theme(
         transcript=transcript,
         brand=brand,
@@ -3446,7 +3500,7 @@ def _seed_profile_from_text(
         topic_terms=topic_terms,
     )
     if video_theme:
-        seeded["video_theme"] = video_theme
+        _append_hint_candidate(seeded, "video_theme", video_theme)
     if brand or model:
         queries = _build_seeded_search_queries(
             brand=brand,
