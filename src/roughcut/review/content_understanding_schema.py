@@ -111,6 +111,19 @@ def parse_entity_resolution_payload(data: Any) -> list[EntityResolution]:
     return values
 
 
+def _as_dict(value: Any) -> dict[str, Any]:
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def parse_primary_evidence_graph_payload(data: Any) -> dict[str, dict[str, Any]]:
+    payload = data if isinstance(data, dict) else {}
+    return {
+        "audio_semantic_evidence": _as_dict(payload.get("audio_semantic_evidence")),
+        "visual_semantic_evidence": _as_dict(payload.get("visual_semantic_evidence")),
+        "ocr_semantic_evidence": _as_dict(payload.get("ocr_semantic_evidence")),
+    }
+
+
 def _preferred_subject_entities(value: ContentUnderstanding) -> list[SubjectEntity]:
     return list(value.resolved_entities or value.subject_entities or value.observed_entities)
 

@@ -3,6 +3,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from roughcut.review.content_understanding_schema import parse_primary_evidence_graph_payload
+
 _RELATION_CUE_TERMS = (
     "叫",
     "是",
@@ -273,6 +275,30 @@ def _merge_semantic_fact_inputs(
     return merged
 
 
+def _compact_semantic_section(value: object | None) -> dict[str, Any]:
+    compacted = _compact_semantic_value(value)
+    return compacted if isinstance(compacted, dict) else {}
+
+
+def _compact_semantic_value(value: object | None) -> Any | None:
+    if isinstance(value, dict):
+        compacted: dict[str, Any] = {}
+        for key, nested in value.items():
+            normalized = _compact_semantic_value(nested)
+            if normalized is not None:
+                compacted[str(key)] = normalized
+        return compacted or None
+    if isinstance(value, list):
+        compacted_list: list[Any] = []
+        for nested in value:
+            normalized = _compact_semantic_value(nested)
+            if normalized is not None:
+                compacted_list.append(normalized)
+        return compacted_list or None
+    text = _as_text(value)
+    return text if text else None
+
+
 def normalize_evidence_bundle(bundle: object | None) -> dict[str, Any]:
     raw = bundle if isinstance(bundle, dict) else {}
     source_name = _as_text(raw.get("source_name"))
@@ -314,13 +340,33 @@ def normalize_evidence_bundle(bundle: object | None) -> dict[str, Any]:
     }
     semantic_fact_inputs = _merge_semantic_fact_inputs(_as_dict(raw.get("semantic_fact_inputs")), computed_semantic_inputs)
 
+    primary_evidence_graph = parse_primary_evidence_graph_payload(
+        {
+            "audio_semantic_evidence": _compact_semantic_section(
+                {
+                    "transcript_text": transcript_excerpt,
+                    "subtitle_lines": subtitle_lines,
+                    "cue_lines": cue_lines,
+                    "relation_hints": relation_hints,
+                }
+            ),
+            "visual_semantic_evidence": visual_semantic_evidence,
+            "ocr_semantic_evidence": _compact_semantic_section(
+                {
+                    "visible_text": visible_text,
+                    "ocr_profile": ocr_profile,
+                }
+            ),
+        }
+    )
+
     normalized: dict[str, Any] = {
         "source_name": source_name,
         "transcript_excerpt": transcript_excerpt,
         "subtitle_items": subtitle_items,
         "visible_text": visible_text,
         "ocr_profile": ocr_profile,
-        "visual_semantic_evidence": visual_semantic_evidence,
+        **primary_evidence_graph,
         "candidate_hints": candidate_hints,
         "semantic_fact_inputs": semantic_fact_inputs,
     }

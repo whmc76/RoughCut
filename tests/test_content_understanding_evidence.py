@@ -13,8 +13,25 @@ def test_normalize_evidence_bundle_keeps_visual_semantic_evidence_separate_from_
     )
 
     assert bundle["visual_semantic_evidence"]["object_categories"] == ["backpack"]
+    assert bundle["ocr_semantic_evidence"] == {}
     assert bundle["candidate_hints"]["visual_hints"]["subject_type"] == "EDC机能包"
     assert "visual_semantic_evidence" not in bundle["candidate_hints"]
+
+
+def test_normalize_evidence_bundle_builds_primary_evidence_graph_sections():
+    bundle = normalize_evidence_bundle(
+        {
+            "source_name": "demo.mp4",
+            "transcript_excerpt": "这是 HSJUN 的包",
+            "visual_semantic_evidence": {"object_categories": ["backpack"]},
+            "visible_text": "BOLTBOAT",
+            "ocr_profile": {"visible_text": "BOLTBOAT"},
+        }
+    )
+
+    assert bundle["audio_semantic_evidence"]["transcript_text"] == "这是 HSJUN 的包"
+    assert bundle["visual_semantic_evidence"]["object_categories"] == ["backpack"]
+    assert bundle["ocr_semantic_evidence"]["visible_text"] == "BOLTBOAT"
 
 
 def test_build_evidence_bundle_keeps_evidence_only_fields():
