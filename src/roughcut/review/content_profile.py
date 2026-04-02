@@ -663,7 +663,45 @@ def apply_identity_review_guard(
         glossary_terms=glossary_terms,
         memory_hints=memory_hints,
         user_memory=user_memory,
+        allow_subject_type_inference=False,
+        allow_video_theme_inference=False,
     )
+    confirmed_fields = _extract_confirmed_profile_fields(guarded)
+    if "subject_type" not in confirmed_fields:
+        current_subject_type = str(guarded.get("subject_type") or "").strip()
+        transcript_source_labels = _profile_transcript_source_labels(guarded)
+        source_label_subject_type = str(transcript_source_labels.get("subject_type") or "").strip()
+        if current_subject_type and (
+            _is_generic_subject_type(current_subject_type)
+            or (
+                source_label_subject_type
+                and _normalize_profile_value(current_subject_type) != _normalize_profile_value(source_label_subject_type)
+            )
+            or _text_conflicts_with_verified_identity(
+                current_subject_type,
+                brand=str(guarded.get("subject_brand") or ""),
+                model=str(guarded.get("subject_model") or ""),
+                glossary_terms=glossary_terms,
+            )
+        ):
+            guarded["subject_type"] = ""
+    if "video_theme" not in confirmed_fields:
+        current_video_theme = str(guarded.get("video_theme") or "").strip()
+        transcript_source_labels = _profile_transcript_source_labels(guarded)
+        source_label_video_theme = str(transcript_source_labels.get("video_theme") or "").strip()
+        if current_video_theme and (
+            (
+                source_label_video_theme
+                and _normalize_profile_value(current_video_theme) != _normalize_profile_value(source_label_video_theme)
+            )
+            or _text_conflicts_with_verified_identity(
+                current_video_theme,
+                brand=str(guarded.get("subject_brand") or ""),
+                model=str(guarded.get("subject_model") or ""),
+                glossary_terms=glossary_terms,
+            )
+        ):
+            guarded["video_theme"] = ""
     identity_review = _assess_identity_review_requirement(
         guarded,
         subtitle_items=subtitle_items,

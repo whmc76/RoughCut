@@ -682,8 +682,38 @@ def test_apply_identity_review_guard_prefers_ocr_and_transcript_source_labels_ov
 
     assert guarded["subject_brand"] == "狐蝠工业"
     assert guarded["subject_model"] == "FXX1小副包"
-    assert guarded["subject_type"] == "EDC机能包"
-    assert guarded["video_theme"] == "狐蝠工业FXX1小副包开箱与挂点评测"
+    assert guarded["subject_type"] == ""
+    assert guarded["video_theme"] == ""
+
+
+def test_apply_identity_review_guard_does_not_infer_type_or_theme_without_llm_understanding():
+    guarded = apply_identity_review_guard(
+        {
+            "subject_brand": "",
+            "subject_model": "",
+            "subject_type": "",
+            "video_theme": "",
+            "summary": "",
+            "transcript_excerpt": "这期主要看 VX07 机能包的装载和背负细节。",
+            "ocr_evidence": {
+                "visible_text": "VX07 机能包 开箱",
+            },
+            "transcript_evidence": {
+                "source_labels": {
+                    "subject_brand": "赫斯俊",
+                    "subject_model": "VX07",
+                    "subject_type": "EDC机能包",
+                    "video_theme": "VX07机能包开箱对比评测",
+                }
+            },
+        },
+        source_name="demo.mp4",
+    )
+
+    assert guarded["subject_brand"] == "赫斯俊"
+    assert guarded["subject_model"] == "VX07"
+    assert guarded["subject_type"] == ""
+    assert guarded["video_theme"] == ""
 
 
 def test_apply_identity_review_guard_drops_profile_only_specific_theme_without_current_support():
