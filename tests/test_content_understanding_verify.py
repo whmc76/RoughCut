@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from roughcut.review.content_understanding_schema import ContentUnderstanding, SubjectEntity
+from roughcut.review.content_understanding_resolution import should_run_entity_resolution
 from roughcut.review.content_understanding_verify import (
     HybridVerificationBundle,
     build_hybrid_verification_bundle,
@@ -265,3 +266,86 @@ async def test_verify_content_understanding_keeps_observed_entity_when_resolutio
 
     assert result.primary_subject == "船长联名包"
     assert result.needs_review is True
+
+
+def test_should_run_entity_resolution_skips_when_entities_are_aligned():
+    base = ContentUnderstanding(
+        video_type="product_review",
+        content_domain="bags",
+        primary_subject="船长联名包",
+        subject_entities=[SubjectEntity(kind="product", name="船长联名包")],
+        observed_entities=[SubjectEntity(kind="product", name="船长联名包")],
+    )
+    candidate = ContentUnderstanding(
+        video_type="product_review",
+        content_domain="bags",
+        primary_subject="船长联名包",
+        subject_entities=[SubjectEntity(kind="product", name="船长联名包")],
+        observed_entities=[SubjectEntity(kind="product", name="船长联名包")],
+        resolved_primary_subject="",
+        resolved_entities=[],
+    )
+
+    assert should_run_entity_resolution(
+        understanding=base,
+        candidate=candidate,
+        evidence_bundle={"transcript_excerpt": "这是船长联名的包"},
+        verification_bundle=HybridVerificationBundle(),
+    ) is False
+
+
+@pytest.mark.asyncio
+async def test_verify_content_understanding_only_runs_resolution_when_conflicts_exist():
+    understanding = ContentUnderstanding(
+        video_type="product_review",
+        content_domain="gear",
+        primary_subject="船长联名包",
+        observed_entities=[SubjectEntity(kind="product", name="船长联名包")],
+        subject_entities=[SubjectEntity(kind="product", name="船长联名包")],
+        search_queries=["船长 游刃 双肩包"],
+        confidence={"overall": 0.78},
+        needs_review=False,
+    )
+    result = await verify_content_understanding(
+        understanding=understanding,
+        evidence_bundle={"transcript_excerpt": "这是船长联名的包"},
+        verification_bundle=HybridVerificationBundle(
+            search_queries=["船长 游刃 双肩包"],
+            online_results=[{"title": "HSJUN × BOLTBOAT 游刃机能双肩包"}],
+            database_results=[{"primary_subject": "HSJUN × BOLTBOAT 游刃机能双肩包"}],
+        ),
+        provider=FakeProvider(
+            {
+                "video_type": "product_review",
+                "content_domain": "gear",
+                "primary_subject": "船长联名包",
+                "subject_entities": [{"kind": "product", "name": "船长联名包"}],
+                "observed_entities": [{"kind": "product", "name": "船长联名包"}],
+                "resolved_entities": [
+                    {"kind": "product", "name": "HSJUN × BOLTBOAT 游刃机能双肩包", "brand": "HSJUN × BOLTBOAT", "model": "游刃"}
+                ],
+                "resolved_primary_subject": "HSJUN × BOLTBOAT 游刃机能双肩包",
+                "entity_resolution_map": [
+                    {
+                        "observed_name": "船长联名包",
+                        "resolved_name": "HSJUN × BOLTBOAT 游刃机能双肩包",
+                        "confidence": 0.93,
+                        "reason": "在线搜索和内部记录稳定指向 BOLTBOAT",
+                    }
+                ],
+                "video_theme": "联名机能双肩包对比评测",
+                "summary": "视频围绕 HSJUN × BOLTBOAT 游刃机能双肩包展开对比评测。",
+                "hook_line": "联名机能包上身实测",
+                "engagement_question": "你更在意结构还是背负？",
+                "search_queries": ["HSJUN BOLTBOAT 游刃"],
+                "evidence_spans": [],
+                "uncertainties": ["视频里更常用船长这个叫法"],
+                "confidence": {"overall": 0.84, "resolution": 0.93},
+                "needs_review": True,
+                "review_reasons": ["原始称呼与归一化实体存在差异"],
+            }
+        ),
+    )
+
+    assert result.entity_resolution_map
+    assert result.resolved_primary_subject == "HSJUN × BOLTBOAT 游刃机能双肩包"
