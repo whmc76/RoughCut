@@ -30,3 +30,10 @@ BENCHMARK_SAMPLES = [
         "expected_keywords": ["材料", "配件", "纤维"],
     },
 ]
+
+BENCHMARK_REPORT_CONTRACT_FIELDS = (
+    "observed_entities",
+    "resolved_entities",
+    "conflicts",
+    "capability_matrix",
+)

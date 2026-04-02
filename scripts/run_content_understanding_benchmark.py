@@ -52,6 +52,8 @@ class SampleRunReport:
     observed_entities: list[dict[str, Any]]
     resolved_entities: list[dict[str, Any]]
     resolved_primary_subject: str
+    conflicts: list[Any]
+    capability_matrix: dict[str, Any]
     needs_review: bool | None
     review_reasons: list[str]
     elapsed_seconds: float
@@ -148,6 +150,8 @@ def main() -> None:
                     observed_entities=[],
                     resolved_entities=[],
                     resolved_primary_subject="",
+                    conflicts=[],
+                    capability_matrix={},
                     needs_review=None,
                     review_reasons=[],
                     elapsed_seconds=round(time.perf_counter() - started, 3),
@@ -342,6 +346,8 @@ async def collect_sample_report(job_id: str, sample: dict[str, Any], elapsed_sec
             observed_entities=list(understanding.get("observed_entities") or []),
             resolved_entities=list(understanding.get("resolved_entities") or []),
             resolved_primary_subject=str(understanding.get("resolved_primary_subject") or ""),
+            conflicts=list(understanding.get("conflicts") or []),
+            capability_matrix=dict(understanding.get("capability_matrix") or {}),
             needs_review=understanding.get("needs_review"),
             review_reasons=review_reasons,
             elapsed_seconds=round(elapsed_seconds, 3),
@@ -385,6 +391,10 @@ def build_console_summary(summary: dict[str, Any]) -> dict[str, Any]:
                 "expected_product_family": item["expected_product_family"],
                 "keyword_hits": item["keyword_hits"],
                 "keyword_misses": item["keyword_misses"],
+                "observed_entities": item["observed_entities"],
+                "resolved_entities": item["resolved_entities"],
+                "conflicts": item["conflicts"],
+                "capability_matrix": item["capability_matrix"],
                 "subject_type": item["subject_type"],
                 "resolved_primary_subject": item["resolved_primary_subject"],
                 "needs_review": item["needs_review"],
