@@ -69,16 +69,21 @@ _DISPLAY_ORDINAL_UNITS = (
 _DISPLAY_QUANTITY_UNITS = (
     "分钟",
     "小时",
+    "毫米",
+    "厘米",
+    "英寸",
     "代",
     "档",
     "个",
     "倍",
     "号",
+    "日",
     "次",
     "年",
     "月",
     "天",
     "秒",
+    "寸",
     "项",
     "种",
     "款",
@@ -86,6 +91,11 @@ _DISPLAY_QUANTITY_UNITS = (
     "条",
     "层",
     "米",
+    "毫升",
+    "升",
+    "克",
+    "千克",
+    "公斤",
     "元",
     "块",
     "颗",
@@ -96,6 +106,9 @@ _DISPLAY_QUANTITY_UNITS = (
     "集",
     "级",
     "斤",
+    "瓦",
+    "伏",
+    "安",
 )
 _DISPLAY_NUM_TOKEN = r"[零〇一二两三四五六七八九十百千万\d]+"
 _DISPLAY_ORDINAL_UNIT_PATTERN = "|".join(
@@ -110,6 +123,72 @@ _ORDINAL_NUMBER_RE = re.compile(
 )
 _QUANTITY_NUMBER_RE = re.compile(
     rf"(?<![第A-Za-z0-9])(?P<number>{_DISPLAY_NUM_TOKEN})(?P<unit>{_DISPLAY_QUANTITY_UNIT_PATTERN})"
+)
+_TIME_WITH_MINUTE_RE = re.compile(
+    rf"(?P<prefix>(?:凌晨|早上|上午|中午|下午|晚上)?)"
+    rf"(?P<hour>{_DISPLAY_NUM_TOKEN})点(?P<minute>{_DISPLAY_NUM_TOKEN})(?:分|分钟)?"
+)
+_TIME_HALF_RE = re.compile(
+    rf"(?P<prefix>(?:凌晨|早上|上午|中午|下午|晚上)?)"
+    rf"(?P<hour>{_DISPLAY_NUM_TOKEN})点半"
+)
+_TIME_HOUR_ONLY_RE = re.compile(
+    rf"(?P<prefix>(?:凌晨|早上|上午|中午|下午|晚上))"
+    rf"(?P<hour>{_DISPLAY_NUM_TOKEN})点(?=(?:整|钟|左右|前|后|开始|开播|上线|下班|出发|到|[，,。！？!?；;]|$))"
+)
+_COLLOQUIAL_PRICE_RE = re.compile(
+    rf"(?P<integer>{_DISPLAY_NUM_TOKEN})块(?P<fraction>{_DISPLAY_NUM_TOKEN})(?![\u4e00-\u9fffA-Za-z0-9])"
+)
+_ALPHA_NUMERIC_COMBO_RE = re.compile(
+    rf"(?P<prefix>[A-Za-z])(?P<number>{_DISPLAY_NUM_TOKEN})(?=[\u4e00-\u9fff]|$)"
+)
+_SPACED_MODEL_TOKEN_RE = re.compile(
+    rf"(?<![A-Za-z0-9])(?P<letters>(?:[A-Za-z]\s+){{1,7}}[A-Za-z])\s+"
+    rf"(?P<number>{_DISPLAY_NUM_TOKEN})(?:\s+(?P<suffix>[A-Za-z]+))?(?![A-Za-z0-9])"
+)
+_NATURAL_SINGLE_UNITS = {"个", "次", "年", "月", "天", "小时", "分钟", "秒"}
+_VAGUE_NUMBER_TOKENS = {
+    "一两",
+    "一二",
+    "二三",
+    "两三",
+    "三四",
+    "四五",
+    "五六",
+    "六七",
+    "七八",
+    "八九",
+}
+_INFO_COUNT_NOUN_PREFIXES = (
+    "档位",
+    "接口",
+    "版本",
+    "型号",
+    "规格",
+    "参数",
+    "模式",
+    "方案",
+    "步骤",
+    "配色",
+    "功能",
+    "层",
+    "页",
+    "面",
+    "代",
+    "代目",
+    "级",
+    "级别",
+    "平台",
+    "模块",
+    "尺寸",
+    "机位",
+    "镜头",
+    "孔位",
+    "按钮",
+    "刀型",
+    "钢材",
+    "容量",
+    "续航",
 )
 _SUBTITLE_FILLER_PREFIX_TOKENS = (
     "呃",
@@ -283,6 +362,11 @@ def _normalize_display_numbers(text: str) -> str:
     if not text:
         return text
 
+    result = _normalize_spaced_model_tokens(text)
+    result = _normalize_colloquial_price_tokens(result)
+    result = _normalize_alpha_numeric_tokens(result)
+    result = _normalize_time_tokens(result)
+
     def replace_percent(match: re.Match[str]) -> str:
         number = _normalize_numeric_token(match.group("number"))
         return f"{number}%" if number else match.group(0)
@@ -293,14 +377,99 @@ def _normalize_display_numbers(text: str) -> str:
         return f"第{number}{unit}" if number else match.group(0)
 
     def replace_quantity(match: re.Match[str]) -> str:
+        raw_number = match.group("number")
         number = _normalize_numeric_token(match.group("number"))
         unit = match.group("unit")
+        if _should_preserve_natural_quantity(
+            raw_number,
+            unit,
+            match.string[match.end():match.end() + 6],
+        ):
+            return match.group(0)
         return f"{number}{unit}" if number else match.group(0)
 
-    result = _PERCENT_NUMBER_RE.sub(replace_percent, text)
+    result = _PERCENT_NUMBER_RE.sub(replace_percent, result)
     result = _ORDINAL_NUMBER_RE.sub(replace_ordinal, result)
     result = _QUANTITY_NUMBER_RE.sub(replace_quantity, result)
     return result
+
+
+def _normalize_colloquial_price_tokens(text: str) -> str:
+    def replace_price(match: re.Match[str]) -> str:
+        integer = _normalize_numeric_token(match.group("integer"))
+        fraction = _normalize_numeric_token(match.group("fraction"))
+        if not integer or not fraction:
+            return match.group(0)
+        return f"{integer}块{fraction}"
+
+    return _COLLOQUIAL_PRICE_RE.sub(replace_price, text)
+
+
+def _normalize_spaced_model_tokens(text: str) -> str:
+    def replace_model(match: re.Match[str]) -> str:
+        letters = re.sub(r"\s+", "", str(match.group("letters") or "")).upper()
+        number = _normalize_numeric_token(match.group("number"))
+        suffix = re.sub(r"\s+", "", str(match.group("suffix") or ""))
+        if not letters or not number:
+            return match.group(0)
+        suffix_text = suffix.lower() if suffix else ""
+        return f"{letters}-{number}{suffix_text}"
+
+    return _SPACED_MODEL_TOKEN_RE.sub(replace_model, text)
+
+
+def _normalize_alpha_numeric_tokens(text: str) -> str:
+    def replace_alpha_numeric(match: re.Match[str]) -> str:
+        prefix = str(match.group("prefix") or "").upper()
+        number = _normalize_numeric_token(match.group("number"))
+        return f"{prefix}{number}" if number else match.group(0)
+
+    return _ALPHA_NUMERIC_COMBO_RE.sub(replace_alpha_numeric, text)
+
+
+def _normalize_time_tokens(text: str) -> str:
+    def replace_time_with_minute(match: re.Match[str]) -> str:
+        prefix = str(match.group("prefix") or "")
+        hour = _normalize_numeric_token(match.group("hour"))
+        minute = _normalize_numeric_token(match.group("minute"))
+        if not hour or not minute:
+            return match.group(0)
+        return f"{prefix}{hour}点{minute}"
+
+    def replace_time_half(match: re.Match[str]) -> str:
+        prefix = str(match.group("prefix") or "")
+        hour = _normalize_numeric_token(match.group("hour"))
+        return f"{prefix}{hour}点30" if hour else match.group(0)
+
+    def replace_time_hour_only(match: re.Match[str]) -> str:
+        prefix = str(match.group("prefix") or "")
+        hour = _normalize_numeric_token(match.group("hour"))
+        return f"{prefix}{hour}点" if hour else match.group(0)
+
+    result = _TIME_HALF_RE.sub(replace_time_half, text)
+    result = _TIME_WITH_MINUTE_RE.sub(replace_time_with_minute, result)
+    result = _TIME_HOUR_ONLY_RE.sub(replace_time_hour_only, result)
+    return result
+
+
+def _should_preserve_natural_quantity(number_token: str, unit: str, tail_text: str) -> bool:
+    normalized_token = str(number_token or "").strip()
+    if not normalized_token:
+        return False
+    if normalized_token in _VAGUE_NUMBER_TOKENS:
+        return True
+    if normalized_token == "一" and unit in _NATURAL_SINGLE_UNITS:
+        if unit == "个" and _starts_with_info_count_noun(tail_text):
+            return False
+        return True
+    return False
+
+
+def _starts_with_info_count_noun(text: str) -> bool:
+    candidate = str(text or "").strip()
+    if not candidate:
+        return False
+    return any(candidate.startswith(prefix) for prefix in _INFO_COUNT_NOUN_PREFIXES)
 
 
 def _normalize_numeric_token(token: str) -> str:

@@ -41,6 +41,29 @@ def test_normalize_text_converts_display_numbers_and_prunes_fillers():
     assert normalize_text("呃然后这个方案是第二代增强百分之五十有两个档位吧") == "方案是第2代增强50%有2个档位吧。"
 
 
+def test_normalize_text_keeps_natural_single_count_phrase():
+    assert normalize_text("我先看一个整体效果再说") == "我先看一个整体效果再说。"
+
+
+def test_normalize_text_keeps_vague_quantity_phrase():
+    assert normalize_text("这块区域还有两三个气泡") == "这块区域还有两三个气泡。"
+
+
+def test_normalize_text_formats_info_numbers_dates_and_alpha_numeric_tokens():
+    assert (
+        normalize_text("这个包装有两个档位三月五号上午八点二十上线a四纸也能放")
+        == "包装有2个档位3月5号上午8点20上线A4纸也能放。"
+    )
+
+
+def test_normalize_text_formats_colloquial_price_expression():
+    assert normalize_text("这套配置今天只要十九块九") == "这套配置今天只要19块9。"
+
+
+def test_normalize_text_formats_spaced_model_token():
+    assert normalize_text("现在默认转写模型是g p t 四 o") == "现在默认转写模型是GPT-4o。"
+
+
 def test_normalize_text_adds_soft_clause_spacing_for_long_sentence():
     result = normalize_text("这把刀我觉得非常实用因为螺丝细节也处理得很好")
     assert " 因为" in result
