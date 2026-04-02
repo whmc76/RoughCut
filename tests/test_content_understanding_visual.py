@@ -48,7 +48,7 @@ async def test_infer_visual_semantic_evidence_dispatches_mcp_mode(monkeypatch: p
     async def _infer_with_visual_mcp(frame_paths, capabilities):
         calls.append("mcp")
         assert frame_paths == [Path("frame_02.jpg")]
-        assert capabilities["visual_understanding"]["mode"] == "mcp"
+        assert capabilities["visual_understanding"]["mode"] == "visual_mcp"
         return {"route": "mcp"}
 
     monkeypatch.setattr(
@@ -62,7 +62,7 @@ async def test_infer_visual_semantic_evidence_dispatches_mcp_mode(monkeypatch: p
 
     result = await infer_visual_semantic_evidence(
         frame_paths=[Path("frame_02.jpg")],
-        capabilities={"visual_understanding": {"provider": "mcp:minimax-vision", "mode": "mcp"}},
+        capabilities={"visual_understanding": {"provider": "mcp:minimax-vision", "mode": "visual_mcp"}},
     )
 
     assert result == {"route": "mcp"}
@@ -92,3 +92,29 @@ async def test_infer_visual_semantic_evidence_returns_empty_result_when_unavaila
     )
 
     assert result == {}
+
+
+@pytest.mark.asyncio
+async def test_infer_visual_semantic_evidence_real_native_route_returns_semantic_shape():
+    result = await infer_visual_semantic_evidence(
+        frame_paths=[Path("frame_04.jpg")],
+        capabilities={"visual_understanding": {"provider": "minimax", "mode": "native_multimodal"}},
+    )
+
+    assert result["mode"] == "native_multimodal"
+    assert result["provider"] == "minimax"
+    assert "object_categories" in result
+    assert isinstance(result["object_categories"], list)
+
+
+@pytest.mark.asyncio
+async def test_infer_visual_semantic_evidence_real_mcp_route_returns_semantic_shape():
+    result = await infer_visual_semantic_evidence(
+        frame_paths=[Path("frame_05.jpg")],
+        capabilities={"visual_understanding": {"provider": "mcp:minimax-vision", "mode": "visual_mcp"}},
+    )
+
+    assert result["mode"] == "visual_mcp"
+    assert result["provider"] == "mcp:minimax-vision"
+    assert "object_categories" in result
+    assert isinstance(result["object_categories"], list)
