@@ -95,6 +95,14 @@ DEFAULT_TRANSCRIPTION_MODELS: dict[str, str] = {
 }
 AVATAR_PROVIDER_OPTIONS: tuple[str, ...] = ("heygem",)
 VOICE_PROVIDER_OPTIONS: tuple[str, ...] = ("indextts2", "runninghub")
+CONTENT_UNDERSTANDING_CAPABILITY_SLOTS: tuple[str, ...] = (
+    "asr",
+    "visual_understanding",
+    "ocr",
+    "hybrid_retrieval",
+    "reasoning",
+    "verification",
+)
 PROFILE_BINDABLE_SETTINGS: tuple[str, ...] = (
     "transcription_provider",
     "transcription_model",
@@ -313,6 +321,7 @@ class Settings(BaseSettings):
     quality_auto_rerun_below_score: float = 75.0
     quality_auto_rerun_max_attempts: int = 1
     correction_framework_version: str = "multisource_v1"
+    ocr_provider: str = "paddleocr"
     ocr_enabled: bool = False
     entity_graph_enabled: bool = False
     asr_evidence_enabled: bool = False
