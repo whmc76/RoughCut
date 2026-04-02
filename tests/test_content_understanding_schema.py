@@ -3,7 +3,10 @@ from roughcut.review.content_understanding_schema import (
     ContentUnderstanding,
     SubjectEntity,
     map_content_understanding_to_legacy_profile,
+    parse_content_understanding_payload,
+    serialize_content_understanding_payload,
 )
+from roughcut.review.content_understanding_orchestrator import build_content_understanding_orchestration_context
 
 
 def test_map_content_understanding_to_legacy_profile_keeps_non_product_subjects_sparse():
@@ -129,3 +132,43 @@ def test_map_content_understanding_to_legacy_profile_prefers_resolved_entities()
     assert legacy["subject_type"] == "HSJUN × BOLTBOAT 游刃机能双肩包"
     assert legacy["subject_brand"] == "HSJUN × BOLTBOAT"
     assert legacy["subject_model"] == "游刃"
+
+
+def test_content_understanding_payload_and_orchestrator_preserve_capability_matrix_and_trace():
+    understanding = ContentUnderstanding(
+        video_type="product_review",
+        content_domain="gear",
+        primary_subject="demo subject",
+        capability_matrix={"visual_understanding": {"provider": "minimax", "mode": "native_multimodal"}},
+        orchestration_trace=["capability_resolution", "fact_extraction", "final_understanding"],
+    )
+
+    payload = serialize_content_understanding_payload(understanding)
+    orchestration_context = build_content_understanding_orchestration_context(
+        {
+            "source_name": "demo.mp4",
+            "capability_matrix": understanding.capability_matrix,
+            "orchestration_trace": understanding.orchestration_trace,
+        }
+    )
+
+    assert payload["capability_matrix"] == understanding.capability_matrix
+    assert payload["orchestration_trace"] == understanding.orchestration_trace
+    assert orchestration_context["capability_matrix"] == understanding.capability_matrix
+    assert orchestration_context["orchestration_trace"] == understanding.orchestration_trace
+
+
+def test_content_understanding_payload_round_trips_capability_matrix_and_trace_through_parser():
+    understanding = ContentUnderstanding(
+        video_type="product_review",
+        content_domain="gear",
+        primary_subject="demo subject",
+        capability_matrix={"visual_understanding": {"provider": "minimax", "mode": "native_multimodal"}},
+        orchestration_trace=["capability_resolution", "fact_extraction", "final_understanding"],
+    )
+
+    payload = serialize_content_understanding_payload(understanding)
+    reparsed = parse_content_understanding_payload(payload)
+
+    assert reparsed.capability_matrix == understanding.capability_matrix
+    assert reparsed.orchestration_trace == understanding.orchestration_trace

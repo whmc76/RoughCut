@@ -53,6 +53,8 @@ class ContentUnderstanding:
     confidence: dict[str, float] = field(default_factory=dict)
     needs_review: bool = True
     review_reasons: list[str] = field(default_factory=list)
+    capability_matrix: dict[str, Any] = field(default_factory=dict)
+    orchestration_trace: list[str] = field(default_factory=list)
 
 
 def _normalize_understanding_value(value: str) -> str:
@@ -115,6 +117,114 @@ def _as_dict(value: Any) -> dict[str, Any]:
     return dict(value) if isinstance(value, dict) else {}
 
 
+def _as_string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    items: list[str] = []
+    for item in value:
+        text = str(item).strip()
+        if text:
+            items.append(text)
+    return items
+
+
+def parse_content_understanding_payload(data: Any) -> ContentUnderstanding:
+    payload = data if isinstance(data, dict) else {}
+
+    confidence: dict[str, float] = {}
+    raw_confidence = payload.get("confidence")
+    if isinstance(raw_confidence, dict):
+        for key, value in raw_confidence.items():
+            try:
+                confidence[str(key)] = float(value)
+            except (TypeError, ValueError):
+                continue
+    else:
+        try:
+            confidence["overall"] = float(raw_confidence)
+        except (TypeError, ValueError):
+            pass
+
+    capability_matrix = payload.get("capability_matrix")
+    orchestration_trace = payload.get("orchestration_trace")
+
+    return ContentUnderstanding(
+        video_type=str(payload.get("video_type") or "").strip(),
+        content_domain=str(payload.get("content_domain") or "").strip(),
+        primary_subject=str(payload.get("primary_subject") or "").strip(),
+        semantic_facts=parse_content_semantic_facts_payload(payload.get("semantic_facts")),
+        subject_entities=_parse_subject_entities_payload(payload.get("subject_entities")),
+        observed_entities=_parse_subject_entities_payload(payload.get("observed_entities")),
+        resolved_entities=_parse_subject_entities_payload(payload.get("resolved_entities")),
+        resolved_primary_subject=str(payload.get("resolved_primary_subject") or "").strip(),
+        entity_resolution_map=parse_entity_resolution_payload(payload.get("entity_resolution_map")),
+        video_theme=str(payload.get("video_theme") or "").strip(),
+        summary=str(payload.get("summary") or "").strip(),
+        hook_line=str(payload.get("hook_line") or "").strip(),
+        engagement_question=str(payload.get("engagement_question") or "").strip(),
+        search_queries=[str(item).strip() for item in list(payload.get("search_queries") or []) if str(item).strip()],
+        evidence_spans=[dict(item) for item in list(payload.get("evidence_spans") or []) if isinstance(item, dict)],
+        uncertainties=[str(item).strip() for item in list(payload.get("uncertainties") or []) if str(item).strip()],
+        confidence=confidence,
+        needs_review=bool(payload.get("needs_review", True)),
+        review_reasons=[str(item).strip() for item in list(payload.get("review_reasons") or []) if str(item).strip()],
+        capability_matrix=_as_dict(capability_matrix),
+        orchestration_trace=_as_string_list(orchestration_trace),
+    )
+
+
+def serialize_content_understanding_payload(value: ContentUnderstanding) -> dict[str, Any]:
+    return {
+        "video_type": _normalize_understanding_value(value.video_type),
+        "content_domain": _normalize_understanding_value(value.content_domain),
+        "primary_subject": _normalize_understanding_value(value.primary_subject),
+        "semantic_facts": asdict(value.semantic_facts),
+        "subject_entities": [asdict(entity) for entity in value.subject_entities],
+        "observed_entities": [asdict(entity) for entity in value.observed_entities],
+        "resolved_entities": [asdict(entity) for entity in value.resolved_entities],
+        "resolved_primary_subject": _normalize_understanding_value(value.resolved_primary_subject),
+        "entity_resolution_map": [asdict(item) for item in value.entity_resolution_map],
+        "video_theme": _normalize_understanding_value(value.video_theme),
+        "summary": value.summary,
+        "hook_line": value.hook_line,
+        "engagement_question": value.engagement_question,
+        "search_queries": list(value.search_queries),
+        "evidence_spans": list(value.evidence_spans),
+        "uncertainties": list(value.uncertainties),
+        "confidence": dict(value.confidence),
+        "needs_review": value.needs_review,
+        "review_reasons": list(value.review_reasons),
+        "capability_matrix": dict(value.capability_matrix),
+        "orchestration_trace": list(value.orchestration_trace),
+    }
+
+
+def _parse_subject_entities_payload(data: Any) -> list[SubjectEntity]:
+    subject_entities: list[SubjectEntity] = []
+    for item in list(data or []):
+        if isinstance(item, str) and item.strip():
+            subject_entities.append(
+                SubjectEntity(
+                    kind="",
+                    name=item.strip(),
+                    brand="",
+                    model="",
+                )
+            )
+            continue
+        if not isinstance(item, dict):
+            continue
+        subject_entities.append(
+            SubjectEntity(
+                kind=str(item.get("kind") or "").strip(),
+                name=str(item.get("name") or "").strip(),
+                brand=str(item.get("brand") or "").strip(),
+                model=str(item.get("model") or "").strip(),
+            )
+        )
+    return subject_entities
+
+
 def parse_primary_evidence_graph_payload(data: Any) -> dict[str, dict[str, Any]]:
     payload = data if isinstance(data, dict) else {}
     return {
@@ -160,24 +270,30 @@ def map_content_understanding_to_legacy_profile(value: ContentUnderstanding) -> 
         "engagement_question": value.engagement_question,
         "search_queries": list(value.search_queries),
         "content_understanding": {
-            "video_type": content_kind,
-            "content_domain": subject_domain,
-            "primary_subject": subject_type,
-            "semantic_facts": value.semantic_facts.__dict__,
-            "subject_entities": [asdict(entity) for entity in value.subject_entities],
-            "observed_entities": [asdict(entity) for entity in value.observed_entities],
-            "resolved_entities": [asdict(entity) for entity in value.resolved_entities],
-            "resolved_primary_subject": _normalize_understanding_value(value.resolved_primary_subject),
-            "entity_resolution_map": [asdict(item) for item in value.entity_resolution_map],
-            "video_theme": video_theme,
-            "summary": value.summary,
-            "hook_line": value.hook_line,
-            "engagement_question": value.engagement_question,
-            "search_queries": list(value.search_queries),
-            "evidence_spans": list(value.evidence_spans),
-            "uncertainties": list(value.uncertainties),
-            "confidence": dict(value.confidence),
-            "needs_review": value.needs_review,
-            "review_reasons": list(value.review_reasons),
+            **serialize_content_understanding_payload(
+                ContentUnderstanding(
+                    video_type=content_kind,
+                    content_domain=subject_domain,
+                    primary_subject=subject_type,
+                    semantic_facts=value.semantic_facts,
+                    subject_entities=value.subject_entities,
+                    observed_entities=value.observed_entities,
+                    resolved_entities=value.resolved_entities,
+                    resolved_primary_subject=value.resolved_primary_subject,
+                    entity_resolution_map=value.entity_resolution_map,
+                    video_theme=video_theme,
+                    summary=value.summary,
+                    hook_line=value.hook_line,
+                    engagement_question=value.engagement_question,
+                    search_queries=value.search_queries,
+                    evidence_spans=value.evidence_spans,
+                    uncertainties=value.uncertainties,
+                    confidence=value.confidence,
+                    needs_review=value.needs_review,
+                    review_reasons=value.review_reasons,
+                    capability_matrix=value.capability_matrix,
+                    orchestration_trace=value.orchestration_trace,
+                )
+            ),
         },
     }
