@@ -54,7 +54,6 @@ export function JobReviewOverlay({
 }: JobReviewOverlayProps) {
   const { t } = useI18n();
   const [rejectNote, setRejectNote] = useState("");
-  const [previewOpen, setPreviewOpen] = useState(false);
   const [selectedRejectReasons, setSelectedRejectReasons] = useState<string[]>([]);
 
   useEffect(() => {
@@ -77,7 +76,6 @@ export function JobReviewOverlay({
     if (!open || reviewStep !== "final_review") {
       setRejectNote("");
       setSelectedRejectReasons([]);
-      setPreviewOpen(false);
     }
   }, [open, reviewStep, selectedJob?.id]);
 
@@ -89,8 +87,8 @@ export function JobReviewOverlay({
 
   const previewSrc = `/api/v1/jobs/${selectedJob.id}/download/file?variant=packaged`;
 
-  const togglePreview = () => {
-    setPreviewOpen((current) => !current);
+  const openPreview = () => {
+    window.open(previewSrc, "_blank", "noopener,noreferrer");
   };
 
   const toggleRejectReason = (reason: string) => {
@@ -142,14 +140,13 @@ export function JobReviewOverlay({
               reviewDetail={activity?.current_step?.detail ?? null}
               rejectNote={rejectNote}
               previewSrc={previewSrc}
-              isPreviewOpen={previewOpen}
               selectedRejectReasons={selectedRejectReasons}
               isOpeningFolder={false}
               isDownloading={false}
               isPreviewing={false}
               isSubmittingDecision={isSubmittingFinalReview}
               isApplyingSubtitleReview={isApplyingReview}
-              onPreview={togglePreview}
+              onPreview={openPreview}
               onDownload={download}
               onOpenFolder={onOpenFolder}
               onRejectNoteChange={setRejectNote}

@@ -16,7 +16,6 @@ type JobFinalReviewOverlayProps = {
   reviewDetail?: string | null;
   rejectNote?: string;
   previewSrc?: string | null;
-  isPreviewOpen?: boolean;
   selectedRejectReasons?: string[];
   isPreviewing?: boolean;
   isDownloading?: boolean;
@@ -50,6 +49,24 @@ function buildSpotCheckItems(report?: Report) {
     }));
 }
 
+function buildPreviewTranscriptItems(report?: Report) {
+  if (!report?.items?.length) return [];
+  return [...report.items]
+    .sort((a, b) => a.index - b.index)
+    .slice(0, 6)
+    .map((item) => ({
+      ...item,
+      headline: item.text_final || item.text_norm || item.text_raw,
+    }));
+}
+
+function formatTime(seconds: number) {
+  const totalSeconds = Math.max(0, Math.floor(seconds));
+  const minutes = Math.floor(totalSeconds / 60);
+  const remainingSeconds = totalSeconds % 60;
+  return `${minutes}:${String(remainingSeconds).padStart(2, "0")}`;
+}
+
 export function JobFinalReviewOverlay({
   selectedJob,
   report,
@@ -57,7 +74,6 @@ export function JobFinalReviewOverlay({
   reviewDetail,
   rejectNote = "",
   previewSrc = null,
-  isPreviewOpen = false,
   selectedRejectReasons = [],
   isPreviewing,
   isDownloading,
@@ -79,6 +95,7 @@ export function JobFinalReviewOverlay({
   const issueCodes = (selectedJob.quality_issue_codes ?? []).filter(Boolean);
   const hasQuality = qualityScore !== null || Boolean(qualityGrade) || Boolean(qualitySummary) || issueCodes.length > 0;
   const spotCheckItems = buildSpotCheckItems(report);
+  const previewTranscriptItems = buildPreviewTranscriptItems(report);
   const workflowDetails = [selectedJob.workflow_mode, selectedJob.enhancement_modes.length ? selectedJob.enhancement_modes.join(" / ") : "无增强"]
     .filter(Boolean)
     .join(" · ");
@@ -103,9 +120,60 @@ export function JobFinalReviewOverlay({
         }
       />
 
-      <div className="notice compact-top">
-        这里优先展示成片质量结果和字幕抽检，工作流与配置只保留最少上下文，不再占据主要视觉位置。
-      </div>
+      {previewSrc ? (
+        <section className="detail-block">
+          <div className="detail-key">成片预览</div>
+          <div className="final-review-preview-frame" data-testid="final-review-preview-frame">
+            <video
+              data-testid="final-review-preview-player"
+              className="packaging-video-preview final-review-preview-player"
+              controls
+              playsInline
+              preload="metadata"
+              src={previewSrc}
+            />
+          </div>
+        </section>
+      ) : null}
+
+      <section className="detail-block">
+        <div className="detail-key">审核证据</div>
+        <div className="final-review-evidence-grid">
+          <article className="activity-card final-review-evidence-card">
+            <div className="detail-key">摘要与主题</div>
+            <div className="final-review-evidence-copy">
+              <strong>{selectedJob.content_subject?.trim() || "未生成主题摘要"}</strong>
+              <div className="muted">
+                {selectedJob.content_summary?.trim() || "当前没有可供审核的摘要，请先回看成片和字幕。"}
+              </div>
+              {selectedJob.avatar_delivery_summary ? (
+                <div className="final-review-warning">
+                  <span className={`status-pill ${selectedJob.avatar_delivery_status || "pending"}`}>数字人</span>
+                  <span>{selectedJob.avatar_delivery_summary}</span>
+                </div>
+              ) : null}
+            </div>
+          </article>
+
+          <article className="activity-card final-review-evidence-card">
+            <div className="detail-key">字幕速览</div>
+            {previewTranscriptItems.length ? (
+              <div className="final-review-transcript-list">
+                {previewTranscriptItems.map((item) => (
+                  <div key={item.index} className="final-review-transcript-row">
+                    <div className="final-review-transcript-meta">
+                      #{item.index} · {formatTime(item.start)} - {formatTime(item.end)}
+                    </div>
+                    <div>{item.headline}</div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="muted">暂无可核对字幕</div>
+            )}
+          </article>
+        </div>
+      </section>
 
       <section className="detail-block">
         <div className="detail-key">当前需要你确认</div>
@@ -155,20 +223,6 @@ export function JobFinalReviewOverlay({
           ) : null}
         </div>
       </section>
-
-      {isPreviewOpen && previewSrc ? (
-        <section className="detail-block">
-          <div className="detail-key">成片预览</div>
-          <video
-            data-testid="final-review-preview-player"
-            className="packaging-video-preview"
-            controls
-            playsInline
-            preload="metadata"
-            src={previewSrc}
-          />
-        </section>
-      ) : null}
 
       <section className="detail-block">
         <div className="detail-key">质量结果</div>

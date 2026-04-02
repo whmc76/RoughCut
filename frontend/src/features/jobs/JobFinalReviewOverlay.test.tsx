@@ -5,6 +5,8 @@ import { JobFinalReviewOverlay } from "./JobFinalReviewOverlay";
 const SAMPLE_JOB = {
   id: "job-final-1",
   source_name: "final_cut.mp4",
+  content_subject: "AI创作工具",
+  content_summary: "这条视频当前主题待进一步确认，建议结合字幕、画面文字和人工核对后再继续包装。",
   status: "needs_review",
   language: "zh-CN",
   workflow_mode: "standard_edit",
@@ -93,7 +95,6 @@ describe("JobFinalReviewOverlay", () => {
         selectedJob={SAMPLE_JOB}
         report={SAMPLE_REPORT}
         previewSrc="/api/v1/jobs/job-final-1/download/file?variant=packaged"
-        isPreviewOpen
         selectedRejectReasons={["字幕问题"]}
         onPreview={onPreview}
         onDownload={onDownload}
@@ -107,6 +108,10 @@ describe("JobFinalReviewOverlay", () => {
     );
 
     expect(screen.getByRole("heading", { name: "最终审核" })).toBeInTheDocument();
+    expect(screen.getByText("摘要与主题")).toBeInTheDocument();
+    expect(screen.getByText("AI创作工具")).toBeInTheDocument();
+    expect(screen.getByText("这条视频当前主题待进一步确认，建议结合字幕、画面文字和人工核对后再继续包装。")).toBeInTheDocument();
+    expect(screen.getByText("字幕速览")).toBeInTheDocument();
     expect(screen.getByText("评分")).toBeInTheDocument();
     expect(screen.getByText("87.5")).toBeInTheDocument();
     expect(screen.getByText("A-")).toBeInTheDocument();
@@ -117,12 +122,13 @@ describe("JobFinalReviewOverlay", () => {
     expect(screen.getByText("字幕抽检")).toBeInTheDocument();
     expect(screen.getByText("#1 这里是第一句成稿")).toBeInTheDocument();
     expect(screen.getByText("原文：这里是第一句原文")).toBeInTheDocument();
-    expect(screen.getByText(/这里是第三句定稿/)).toBeInTheDocument();
+    expect(screen.getAllByText(/这里是第三句定稿/).length).toBeGreaterThan(0);
     expect(screen.getByText("字幕总数")).toBeInTheDocument();
     expect(screen.getByText("12")).toBeInTheDocument();
     expect(screen.getByText("问题分类")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "字幕问题" })).toHaveAttribute("aria-pressed", "true");
     expect(screen.getByTestId("final-review-preview-player")).toHaveAttribute("src", "/api/v1/jobs/job-final-1/download/file?variant=packaged");
+    expect(screen.getByTestId("final-review-preview-frame")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "打开成片" }));
     fireEvent.click(screen.getByRole("button", { name: "下载" }));
@@ -170,5 +176,21 @@ describe("JobFinalReviewOverlay", () => {
     expect(screen.getByRole("button", { name: "下载" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "打开文件夹" })).toBeInTheDocument();
     expect(screen.queryByTestId("final-review-preview-player")).not.toBeInTheDocument();
+  });
+
+  it("renders the preview by default whenever a packaged video is available", () => {
+    render(
+      <JobFinalReviewOverlay
+        selectedJob={SAMPLE_JOB}
+        previewSrc="/api/v1/jobs/job-final-1/download/file?variant=packaged"
+        onPreview={vi.fn()}
+        onDownload={vi.fn()}
+        onOpenFolder={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByTestId("final-review-preview-player")).toHaveAttribute("src", "/api/v1/jobs/job-final-1/download/file?variant=packaged");
+    expect(screen.getByTestId("final-review-preview-frame")).toBeInTheDocument();
+    expect(screen.getByText("AI创作工具")).toBeInTheDocument();
   });
 });

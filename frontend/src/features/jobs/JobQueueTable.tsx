@@ -20,6 +20,14 @@ function reviewActionLabel(job: Job, t: (key: string) => string) {
   return "打开审核";
 }
 
+function reviewStatusLabel(job: Job): string {
+  if (job.status !== "needs_review") return statusLabel(job.status);
+  const reviewStep = resolvePendingReviewStep(job);
+  if (reviewStep?.step_name === "final_review") return "最终核对";
+  if (reviewStep?.step_name === "summary_review") return "预审核";
+  return statusLabel(job.status);
+}
+
 function reviewPreviewText(job: Job, t: (key: string) => string) {
   if (job.status !== "needs_review") {
     return job.content_summary || job.content_subject || t("jobs.queue.noSummary");
@@ -144,7 +152,7 @@ export function JobQueueTable({
                 </td>
                 <td>
                   <div className="form-stack compact-top">
-                    <span className={`status-chip ${job.status}`}>{statusLabel(job.status)}</span>
+                    <span className={`status-chip ${job.status}`}>{reviewStatusLabel(job)}</span>
                     <span className="muted">{job.progress_percent ?? 0}%</span>
                   </div>
                 </td>
