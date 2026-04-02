@@ -1625,6 +1625,122 @@ async def test_enrich_content_profile_uses_llm_to_replace_generic_engagement_que
 
 
 @pytest.mark.asyncio
+async def test_enrich_content_profile_uses_content_understanding_inference(monkeypatch: pytest.MonkeyPatch):
+    from roughcut.review import content_profile as content_profile_module
+    from roughcut.review.content_understanding_schema import ContentUnderstanding, SubjectEntity
+
+    captured: dict[str, object] = {}
+
+    async def fake_infer_content_understanding(evidence_bundle):
+        captured["evidence_bundle"] = evidence_bundle
+        return ContentUnderstanding(
+            video_type="unboxing",
+            content_domain="gear",
+            primary_subject="EDC机能包",
+            subject_entities=[
+                SubjectEntity(
+                    kind="product",
+                    name="FOXBAT狐蝠工业 F21小副包",
+                    brand="FOXBAT狐蝠工业",
+                    model="F21小副包",
+                )
+            ],
+            video_theme="FOXBAT狐蝠工业F21小副包开箱与分仓挂点评测",
+            summary="这条视频主要围绕 FOXBAT狐蝠工业 F21小副包 的分仓和挂点展开。",
+            hook_line="分仓挂点直接看",
+            engagement_question="你更在意分仓还是挂点？",
+            search_queries=["FOXBAT F21 小副包"],
+            evidence_spans=[{"source": "ocr", "text": "FOXBAT F21"}],
+            uncertainties=[],
+            confidence={"overall": 0.91},
+            needs_review=False,
+            review_reasons=[],
+        )
+
+    monkeypatch.setattr(content_profile_module, "infer_content_understanding", fake_infer_content_understanding)
+
+    result = await enrich_content_profile(
+        profile={
+            "subject_type": "开箱产品",
+            "video_theme": "产品开箱与上手体验",
+            "summary": "围绕开箱产品展开。",
+            "ocr_evidence": {
+                "visible_text": "FOXBAT F21 小副包 开箱",
+            },
+            "visual_cluster_hints": {
+                "subject_brand": "FOXBAT狐蝠工业",
+                "subject_model": "F21小副包",
+                "visible_text": "FOXBAT F21",
+            },
+        },
+        source_name="f21.mp4",
+        workflow_template="edc_tactical",
+        transcript_excerpt="今天开箱 FOXBAT 狐蝠工业 F21 小副包，重点看分仓和挂点。",
+        include_research=False,
+    )
+
+    evidence_bundle = captured["evidence_bundle"]
+    assert evidence_bundle["candidate_hints"]["subject_type"] == "开箱产品"
+    assert evidence_bundle["candidate_hints"]["video_theme"] == "产品开箱与上手体验"
+    assert result["subject_model"] == "F21小副包"
+    assert result["subject_type"] == "EDC机能包"
+    assert result["video_theme"] == "FOXBAT狐蝠工业F21小副包开箱与分仓挂点评测"
+    assert result["summary"] == "这条视频主要围绕 FOXBAT狐蝠工业 F21小副包 的分仓和挂点展开。"
+    assert result["content_understanding"]["primary_subject"] == "EDC机能包"
+
+
+@pytest.mark.asyncio
+async def test_enrich_content_profile_keeps_confirmed_fields_over_content_understanding(monkeypatch: pytest.MonkeyPatch):
+    from roughcut.review import content_profile as content_profile_module
+    from roughcut.review.content_understanding_schema import ContentUnderstanding, SubjectEntity
+
+    async def fake_infer_content_understanding(evidence_bundle):
+        return ContentUnderstanding(
+            video_type="unboxing",
+            content_domain="gear",
+            primary_subject="EDC机能包",
+            subject_entities=[
+                SubjectEntity(
+                    kind="product",
+                    name="FOXBAT狐蝠工业 F21小副包",
+                    brand="FOXBAT狐蝠工业",
+                    model="F21小副包",
+                )
+            ],
+            video_theme="FOXBAT狐蝠工业F21小副包开箱与分仓挂点评测",
+            summary="这条视频主要围绕 FOXBAT狐蝠工业 F21小副包 的分仓和挂点展开。",
+            hook_line="分仓挂点直接看",
+            engagement_question="你更在意分仓还是挂点？",
+            search_queries=["FOXBAT F21 小副包"],
+            evidence_spans=[],
+            uncertainties=[],
+            confidence={"overall": 0.91},
+            needs_review=False,
+            review_reasons=[],
+        )
+
+    monkeypatch.setattr(content_profile_module, "infer_content_understanding", fake_infer_content_understanding)
+
+    result = await enrich_content_profile(
+        profile={
+            "subject_type": "开箱产品",
+            "video_theme": "产品开箱与上手体验",
+            "user_feedback": {
+                "subject_type": "人工确认主题",
+                "video_theme": "人工确认的视频主题",
+            },
+        },
+        source_name="f21.mp4",
+        workflow_template="edc_tactical",
+        transcript_excerpt="今天开箱 FOXBAT 狐蝠工业 F21 小副包，重点看分仓和挂点。",
+        include_research=False,
+    )
+
+    assert result["subject_type"] == "人工确认主题"
+    assert result["video_theme"] == "人工确认的视频主题"
+
+
+@pytest.mark.asyncio
 async def test_enrich_content_profile_clears_conflicting_theme_and_summary_from_resolved_current_entities(
     monkeypatch: pytest.MonkeyPatch,
 ):

@@ -1971,6 +1971,30 @@ async def enrich_content_profile(
         if inferred_subject_domain:
             enriched["subject_domain"] = inferred_subject_domain
 
+    llm_understanding = await _infer_content_understanding_for_enrich(
+        profile=enriched,
+        source_name=source_name,
+        transcript_excerpt=transcript_excerpt,
+        include_research=include_research,
+    )
+    if llm_understanding is not None:
+        llm_profile = map_content_understanding_to_legacy_profile(llm_understanding)
+        for key in (
+            "content_kind",
+            "subject_domain",
+            "subject_brand",
+            "subject_model",
+            "subject_type",
+            "video_theme",
+            "summary",
+            "hook_line",
+            "engagement_question",
+            "search_queries",
+        ):
+            if key in llm_profile and llm_profile.get(key):
+                enriched[key] = llm_profile[key]
+        enriched["content_understanding"] = llm_profile.get("content_understanding") or {}
+
     preset = select_workflow_template(
         workflow_template=workflow_template or enriched.get("workflow_template"),
         content_kind=_content_kind_name(enriched),
@@ -2097,6 +2121,73 @@ async def enrich_content_profile(
     ):
         enriched["cover_title"] = build_cover_title(enriched, preset)
     return enriched
+
+
+async def _infer_content_understanding_for_enrich(
+    *,
+    profile: dict[str, Any],
+    source_name: str,
+    transcript_excerpt: str,
+    include_research: bool,
+) -> Any | None:
+    evidence_bundle = build_evidence_bundle(
+        source_name=source_name,
+        subtitle_items=[],
+        transcript_excerpt=transcript_excerpt,
+        visible_text=str(profile.get("visible_text") or "").strip(),
+        ocr_profile=_enrich_ocr_profile(profile),
+        visual_hints=_profile_visual_cluster_hints(profile),
+    )
+    evidence_bundle["candidate_hints"] = _enrich_candidate_hints(profile)
+    try:
+        with track_usage_operation("content_profile.enrich_universal_infer"):
+            understanding = await infer_content_understanding(evidence_bundle)
+    except Exception:
+        return None
+
+    if include_research and understanding.search_queries:
+        try:
+            async with get_session_factory()() as session:
+                verification_bundle = await build_hybrid_verification_bundle(
+                    search_queries=understanding.search_queries,
+                    online_search=_online_search_content_understanding,
+                    internal_search=None,
+                    session=session,
+                )
+                with track_usage_operation("content_profile.enrich_universal_verify"):
+                    understanding = await verify_content_understanding(
+                        understanding=understanding,
+                        evidence_bundle=evidence_bundle,
+                        verification_bundle=verification_bundle,
+                    )
+        except Exception:
+            pass
+    return understanding
+
+
+def _enrich_ocr_profile(profile: dict[str, Any] | None) -> dict[str, Any]:
+    candidate = profile or {}
+    for key in ("ocr_profile", "ocr_evidence"):
+        value = candidate.get(key)
+        if isinstance(value, dict) and value:
+            return dict(value)
+    return {}
+
+
+def _enrich_candidate_hints(profile: dict[str, Any] | None) -> dict[str, Any]:
+    candidate = profile or {}
+    search_queries = [str(item).strip() for item in (candidate.get("search_queries") or []) if str(item).strip()]
+    return {
+        "subject_brand": str(candidate.get("subject_brand") or "").strip(),
+        "subject_model": str(candidate.get("subject_model") or "").strip(),
+        "subject_type": str(candidate.get("subject_type") or "").strip(),
+        "video_theme": str(candidate.get("video_theme") or "").strip(),
+        "summary": str(candidate.get("summary") or "").strip(),
+        "hook_line": str(candidate.get("hook_line") or "").strip(),
+        "engagement_question": str(candidate.get("engagement_question") or "").strip(),
+        "search_queries": search_queries,
+        "visual_hints": _profile_visual_cluster_hints(candidate),
+    }
 
 
 async def _infer_visual_profile_hints(frame_paths: list[Path]) -> dict[str, Any]:
