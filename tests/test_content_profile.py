@@ -1094,7 +1094,7 @@ async def test_enrich_content_profile_does_not_call_legacy_visual_subject_guard(
         include_research=False,
     )
 
-    assert result["subject_type"] == "EDC机能包"
+    assert result["subject_type"] == "EDC手电"
     assert result["subject_brand"] == "狐蝠工业"
     assert result["subject_model"] == "FXX1小副包"
 
@@ -1625,7 +1625,7 @@ async def test_enrich_content_profile_uses_llm_to_replace_generic_engagement_que
 
 
 @pytest.mark.asyncio
-async def test_enrich_content_profile_rebuilds_theme_and_summary_from_resolved_current_entities(
+async def test_enrich_content_profile_clears_conflicting_theme_and_summary_from_resolved_current_entities(
     monkeypatch: pytest.MonkeyPatch,
 ):
     from roughcut.review import content_profile as content_profile_module
@@ -1662,7 +1662,7 @@ async def test_enrich_content_profile_rebuilds_theme_and_summary_from_resolved_c
 
     assert result["subject_brand"] == "狐蝠工业"
     assert result["subject_model"] == "FXX1小副包"
-    assert result["video_theme"] == "狐蝠工业FXX1小副包开箱与挂点评测"
+    assert result["video_theme"] == ""
     assert "狐蝠工业 FXX1小副包" in result["summary"]
     assert "ComfyUI" not in result["summary"]
 
@@ -1693,7 +1693,73 @@ async def test_enrich_content_profile_backfills_identity_from_glossary_seed(monk
 
     assert result["subject_brand"] == "FOXBAT狐蝠工业"
     assert result["subject_model"] == "F21小副包"
-    assert result["subject_type"] == "EDC机能包"
+    assert result.get("subject_type", "") == ""
+
+
+@pytest.mark.asyncio
+async def test_enrich_content_profile_does_not_classify_subject_type_from_context_seed(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from roughcut.review import content_profile as content_profile_module
+
+    def raising_provider():
+        raise RuntimeError("provider unavailable")
+
+    monkeypatch.setattr(content_profile_module, "get_reasoning_provider", raising_provider)
+
+    result = await enrich_content_profile(
+        profile={},
+        source_name="IMG_0001.mp4",
+        channel_profile="edc_tactical",
+        transcript_excerpt="今天开箱狐蝠工业 F21 小副包，先看一下这个分仓设计。",
+        glossary_terms=[
+            {
+                "correct_form": "FOXBAT狐蝠工业",
+                "wrong_forms": ["狐蝠工业", "FOXBAT"],
+                "category": "bag_brand",
+            }
+        ],
+        include_research=False,
+    )
+
+    assert result["subject_brand"] == "FOXBAT狐蝠工业"
+    assert result["subject_model"] == "F21小副包"
+    assert result.get("subject_type", "") == ""
+
+
+@pytest.mark.asyncio
+async def test_enrich_content_profile_does_not_upgrade_generic_theme_from_context_seed(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from roughcut.review import content_profile as content_profile_module
+
+    def raising_provider():
+        raise RuntimeError("provider unavailable")
+
+    monkeypatch.setattr(content_profile_module, "get_reasoning_provider", raising_provider)
+
+    result = await enrich_content_profile(
+        profile={
+            "subject_type": "开箱产品",
+            "video_theme": "产品开箱与上手体验",
+        },
+        source_name="bag.mp4",
+        channel_profile="edc_tactical",
+        transcript_excerpt="今天开箱狐蝠工业 F21 小副包，重点看分仓、挂点和日常收纳。",
+        glossary_terms=[
+            {
+                "correct_form": "FOXBAT狐蝠工业",
+                "wrong_forms": ["狐蝠工业", "FOXBAT"],
+                "category": "bag_brand",
+            }
+        ],
+        include_research=False,
+    )
+
+    assert result["subject_brand"] == "FOXBAT狐蝠工业"
+    assert result["subject_model"] == "F21小副包"
+    assert result["subject_type"] == "开箱产品"
+    assert result["video_theme"] == "产品开箱与上手体验"
 
 
 @pytest.mark.asyncio

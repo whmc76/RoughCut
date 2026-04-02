@@ -1123,6 +1123,8 @@ def _sanitize_profile_identity(
     glossary_terms: list[dict[str, Any]] | None = None,
     memory_hints: dict[str, Any] | None = None,
     user_memory: dict[str, Any] | None = None,
+    allow_subject_type_inference: bool = True,
+    allow_video_theme_inference: bool = True,
 ) -> dict[str, Any]:
     sanitized = dict(profile or {})
     raw_visual_hints = _profile_visual_cluster_hints(sanitized)
@@ -1221,7 +1223,7 @@ def _sanitize_profile_identity(
     else:
         sanitized["subject_model"] = verified_model
 
-    if "subject_type" not in confirmed_fields:
+    if allow_subject_type_inference and "subject_type" not in confirmed_fields:
         resolved_subject_type = str(resolved_identity.subject_type or "").strip()
         current_subject_type = str(sanitized.get("subject_type") or "").strip()
         if resolved_subject_type:
@@ -1229,7 +1231,7 @@ def _sanitize_profile_identity(
         elif _is_generic_subject_type(current_subject_type):
             sanitized["subject_type"] = ""
 
-    if "video_theme" not in confirmed_fields:
+    if allow_video_theme_inference and "video_theme" not in confirmed_fields:
         resolved_video_theme = str(resolved_identity.video_theme or "").strip()
         current_video_theme = str(sanitized.get("video_theme") or "").strip()
         preset_name = _workflow_template_name(sanitized)
@@ -1945,6 +1947,8 @@ async def enrich_content_profile(
         glossary_terms=glossary_terms,
         memory_hints=memory_hints,
         user_memory=user_memory,
+        allow_subject_type_inference=False,
+        allow_video_theme_inference=False,
     )
     context_hints = _seed_profile_from_context(
         enriched,
@@ -1952,8 +1956,8 @@ async def enrich_content_profile(
         glossary_terms=glossary_terms,
     )
     memory_prompt = summarize_content_profile_user_memory(user_memory)
-    _merge_specific_profile_hints(enriched, context_hints)
-    _merge_specific_profile_hints(enriched, memory_hints)
+    _merge_specific_profile_hints(enriched, _identity_only_profile_hints(context_hints))
+    _merge_specific_profile_hints(enriched, _identity_only_profile_hints(memory_hints))
 
     if not str(enriched.get("content_kind") or "").strip():
         template_hint = get_workflow_preset(workflow_template)
@@ -1985,6 +1989,8 @@ async def enrich_content_profile(
         glossary_terms=glossary_terms,
         memory_hints=memory_hints,
         user_memory=user_memory,
+        allow_subject_type_inference=False,
+        allow_video_theme_inference=False,
     )
 
     if include_research:
@@ -2029,8 +2035,8 @@ async def enrich_content_profile(
                     )
                 refined = response.as_json()
                 enriched.update({k: v for k, v in refined.items() if v})
-                _merge_specific_profile_hints(enriched, context_hints)
-                _merge_specific_profile_hints(enriched, memory_hints)
+                _merge_specific_profile_hints(enriched, _identity_only_profile_hints(context_hints))
+                _merge_specific_profile_hints(enriched, _identity_only_profile_hints(memory_hints))
                 enriched = _sanitize_profile_identity(
                     enriched,
                     transcript_excerpt=transcript_excerpt,
@@ -2038,16 +2044,13 @@ async def enrich_content_profile(
                     glossary_terms=glossary_terms,
                     memory_hints=memory_hints,
                     user_memory=user_memory,
+                    allow_subject_type_inference=False,
+                    allow_video_theme_inference=False,
                 )
             except Exception:
                 pass
 
     _apply_confirmed_profile_fields(enriched, confirmed_fields)
-
-    if _is_generic_subject_type(str(enriched.get("subject_type") or "")):
-        hinted = memory_hints or context_hints
-        if hinted.get("subject_type"):
-            enriched["subject_type"] = hinted["subject_type"]
 
     if "hook_line" not in confirmed_fields:
         current_hook = str(enriched.get("hook_line") or "").strip()
@@ -3778,6 +3781,16 @@ def _merge_specific_profile_hints(profile: dict[str, Any], hints: dict[str, Any]
             current_queries.append(value)
     if current_queries:
         profile["search_queries"] = current_queries
+
+
+def _identity_only_profile_hints(hints: dict[str, Any] | None) -> dict[str, Any]:
+    candidate = hints if isinstance(hints, dict) else {}
+    normalized_queries = [str(item).strip() for item in (candidate.get("search_queries") or []) if str(item).strip()]
+    return {
+        "subject_brand": str(candidate.get("subject_brand") or "").strip(),
+        "subject_model": str(candidate.get("subject_model") or "").strip(),
+        "search_queries": normalized_queries,
+    }
 
 
 def _is_generic_subject_type(text: str) -> bool:
