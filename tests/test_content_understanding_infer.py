@@ -6,6 +6,47 @@ import pytest
 
 
 @pytest.mark.asyncio
+async def test_infer_content_understanding_runs_fact_extraction_before_final_understanding(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from roughcut.review import content_understanding_infer as infer_mod
+    from roughcut.review.content_understanding_schema import ContentSemanticFacts, ContentUnderstanding
+
+    call_order: list[str] = []
+    providers_seen: list[object] = []
+
+    class SentinelProvider:
+        pass
+
+    sentinel_provider = SentinelProvider()
+
+    async def fake_infer_content_semantic_facts(provider, evidence_bundle):
+        call_order.append("facts")
+        providers_seen.append(provider)
+        return ContentSemanticFacts(entity_candidates=["HSJUN", "游刃"])
+
+    async def fake_infer_final_understanding(provider, evidence_bundle, semantic_facts):
+        call_order.append("final")
+        providers_seen.append(provider)
+        return ContentUnderstanding(
+            video_type="product_review",
+            content_domain="bags",
+            primary_subject="HSJUN × BOLTBOAT 游刃机能双肩包",
+            semantic_facts=semantic_facts,
+        )
+
+    monkeypatch.setattr(infer_mod, "infer_content_semantic_facts", fake_infer_content_semantic_facts, raising=False)
+    monkeypatch.setattr(infer_mod, "infer_final_understanding", fake_infer_final_understanding, raising=False)
+    monkeypatch.setattr(infer_mod, "get_reasoning_provider", lambda: sentinel_provider)
+
+    result = await infer_mod.infer_content_understanding({"transcript_excerpt": "这是 HSJUN 的游刃"})
+
+    assert call_order == ["facts", "final"]
+    assert providers_seen == [sentinel_provider, sentinel_provider]
+    assert result.semantic_facts.entity_candidates == ["HSJUN", "游刃"]
+
+
+@pytest.mark.asyncio
 async def test_infer_content_understanding_uses_reasoning_provider_payload(monkeypatch: pytest.MonkeyPatch):
     from roughcut.review import content_understanding_infer as infer_mod
 
