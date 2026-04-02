@@ -1182,6 +1182,7 @@ async def run_content_profile(job_id: str) -> dict:
             session,
             subject_domain=subject_domain,
         )
+        include_research = bool(getattr(settings, "research_verifier_enabled", False))
         packaging_config = (list_packaging_assets().get("config") or {})
         # Reruns must re-infer from the current transcript and frames instead of
         # recycling a stale same-job profile artifact.
@@ -1196,7 +1197,7 @@ async def run_content_profile(job_id: str) -> dict:
             subtitle_digest=subtitle_digest,
             glossary_terms=effective_glossary_terms,
             user_memory=user_memory,
-            include_research=False,
+            include_research=include_research,
             copy_style=copy_style,
         )
         infer_cache_key = build_cache_key(infer_cache_namespace, infer_cache_fingerprint)
@@ -1226,7 +1227,7 @@ async def run_content_profile(job_id: str) -> dict:
                 subtitle_digest=subtitle_digest,
                 glossary_terms=effective_glossary_terms,
                 user_memory=user_memory,
-                include_research=False,
+                include_research=include_research,
                 copy_style=copy_style,
                 seeded_profile=seeded_profile,
             )
@@ -1254,7 +1255,7 @@ async def run_content_profile(job_id: str) -> dict:
                         transcript_excerpt=transcript_excerpt,
                         glossary_terms=effective_glossary_terms,
                         user_memory=user_memory,
-                        include_research=False,
+                        include_research=include_research,
                     )
                 usage_after = await _read_persisted_step_usage_snapshot(step.id if step else None)
                 usage_baseline = _usage_delta(usage_after, usage_before)
@@ -1283,7 +1284,7 @@ async def run_content_profile(job_id: str) -> dict:
                         workflow_template=job.workflow_template,
                         user_memory=user_memory,
                         glossary_terms=effective_glossary_terms,
-                        include_research=False,
+                        include_research=include_research,
                         copy_style=copy_style,
                     )
                 usage_after = await _read_persisted_step_usage_snapshot(step.id if step else None)
@@ -1304,7 +1305,7 @@ async def run_content_profile(job_id: str) -> dict:
                     subtitle_digest=subtitle_digest,
                     glossary_terms=effective_glossary_terms,
                     user_memory=user_memory,
-                    include_research=False,
+                    include_research=include_research,
                     copy_style=copy_style,
                     seeded_profile=content_profile,
                 )
@@ -1512,6 +1513,7 @@ async def run_glossary_review(job_id: str) -> dict:
             session,
             subject_domain=subject_domain,
         )
+        include_research = bool(getattr(settings, "research_verifier_enabled", False))
         if not content_profile:
             with tempfile.TemporaryDirectory() as tmpdir:
                 source_path = await _resolve_source(job, tmpdir, expected_hash=job.file_hash)
@@ -1524,7 +1526,7 @@ async def run_glossary_review(job_id: str) -> dict:
                         workflow_template=job.workflow_template,
                         user_memory=user_memory,
                         glossary_terms=effective_glossary_terms,
-                        include_research=False,
+                        include_research=include_research,
                         copy_style=str(packaging_config.get("copy_style") or "attention_grabbing"),
                     )
         else:
@@ -1542,7 +1544,7 @@ async def run_glossary_review(job_id: str) -> dict:
                     transcript_excerpt=str(content_profile.get("transcript_excerpt") or ""),
                     glossary_terms=effective_glossary_terms,
                     user_memory=user_memory,
-                    include_research=False,
+                    include_research=include_research,
                 )
         subject_domain = _infer_subject_domain_for_memory(
             workflow_template=job.workflow_template,

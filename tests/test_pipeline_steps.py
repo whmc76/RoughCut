@@ -395,6 +395,93 @@ async def test_run_glossary_review_prefers_content_profile_subject_domain_for_me
 
 
 @pytest.mark.asyncio
+async def test_run_glossary_review_passes_include_research_when_enabled(db_engine, monkeypatch):
+    import roughcut.pipeline.steps as steps_mod
+
+    factory = async_sessionmaker(db_engine, expire_on_commit=False)
+    job_id = uuid.uuid4()
+    captured: dict[str, object] = {}
+    settings = SimpleNamespace(
+        research_verifier_enabled=True,
+        correction_framework_version="multisource_v1",
+    )
+
+    async with factory() as session:
+        session.add(
+            Job(
+                id=job_id,
+                source_path="jobs/demo/source.mp4",
+                source_name="source.mp4",
+                status="processing",
+                language="zh-CN",
+                workflow_template="unboxing_standard",
+            )
+        )
+        session.add(JobStep(job_id=job_id, step_name="glossary_review", status="running"))
+        session.add(
+            SubtitleItem(
+                job_id=job_id,
+                version=1,
+                item_index=0,
+                start_time=0.0,
+                end_time=1.0,
+                text_raw="这句只是提到了机能包和 VX07 面料。",
+                text_norm="这句只是提到了机能包和 VX07 面料。",
+                text_final="这句只是提到了机能包和 VX07 面料。",
+            )
+        )
+        session.add(
+            Artifact(
+                job_id=job_id,
+                artifact_type="content_profile_final",
+                data_json={
+                    "subject_type": "机能双肩包",
+                    "video_theme": "机能包开箱",
+                    "transcript_excerpt": "[0.0-1.0] 这句只是提到了机能包和 VX07 面料。",
+                },
+            )
+        )
+        await session.commit()
+
+    monkeypatch.setattr(steps_mod, "get_session_factory", lambda: factory)
+    monkeypatch.setattr(steps_mod, "get_settings", lambda: settings)
+
+    async def fake_apply_glossary_corrections(*args, **kwargs):
+        return []
+
+    async def fake_load_content_profile_user_memory(*args, **kwargs):
+        return {}
+
+    async def fake_load_recent_subtitle_examples(*args, **kwargs):
+        return []
+
+    async def fake_load_related_profile_subtitle_examples(*args, **kwargs):
+        return []
+
+    def fake_build_subtitle_review_memory(**kwargs):
+        return {}
+
+    async def fake_polish_subtitle_items(*args, **kwargs):
+        return 0
+
+    async def fake_enrich_content_profile(**kwargs):
+        captured["include_research"] = kwargs["include_research"]
+        return kwargs["profile"]
+
+    monkeypatch.setattr(steps_mod, "apply_glossary_corrections", fake_apply_glossary_corrections)
+    monkeypatch.setattr(steps_mod, "load_content_profile_user_memory", fake_load_content_profile_user_memory)
+    monkeypatch.setattr(steps_mod, "_load_recent_subtitle_examples", fake_load_recent_subtitle_examples)
+    monkeypatch.setattr(steps_mod, "_load_related_profile_subtitle_examples", fake_load_related_profile_subtitle_examples)
+    monkeypatch.setattr(steps_mod, "build_subtitle_review_memory", fake_build_subtitle_review_memory)
+    monkeypatch.setattr(steps_mod, "polish_subtitle_items", fake_polish_subtitle_items)
+    monkeypatch.setattr(steps_mod, "enrich_content_profile", fake_enrich_content_profile)
+
+    await run_glossary_review(str(job_id))
+
+    assert captured["include_research"] is True
+
+
+@pytest.mark.asyncio
 async def test_run_transcribe_uses_strict_memory_scope_without_domain_signal(db_engine, monkeypatch, tmp_path: Path):
     import roughcut.pipeline.steps as steps_mod
 
@@ -1724,6 +1811,90 @@ async def test_run_content_profile_persists_dedicated_ocr_artifact_when_enabled(
         assert "content_profile_ocr" in artifact_map
         assert "ocr_profile" not in artifact_map["content_profile_draft"]
         assert artifact_map["content_profile_ocr"]["visible_text"] == "傲雷 司令官2 Ultra"
+
+
+@pytest.mark.asyncio
+async def test_run_content_profile_passes_include_research_when_enabled(db_engine, monkeypatch, tmp_path: Path):
+    import roughcut.llm_cache as llm_cache_mod
+    import roughcut.pipeline.steps as steps_mod
+
+    factory = async_sessionmaker(db_engine, expire_on_commit=False)
+    job_id = uuid.uuid4()
+    source_path = tmp_path / "source.mp4"
+    source_path.write_bytes(b"video")
+    fake_review_bot = _FakeTelegramReviewBotService()
+    settings = SimpleNamespace(
+        auto_confirm_content_profile=False,
+        content_profile_review_threshold=0.72,
+        content_profile_auto_review_min_accuracy=0.9,
+        content_profile_auto_review_min_samples=20,
+        ocr_enabled=False,
+        entity_graph_enabled=False,
+        asr_evidence_enabled=False,
+        research_verifier_enabled=True,
+        correction_framework_version="multisource_v1",
+        output_dir=str(tmp_path / "output"),
+        step_heartbeat_interval_sec=20,
+    )
+    captured: dict[str, object] = {}
+
+    async with factory() as session:
+        session.add(
+            Job(
+                id=job_id,
+                source_path="jobs/demo/source.mp4",
+                source_name="source.mp4",
+                file_hash="hash-demo",
+                status="processing",
+                language="zh-CN",
+                channel_profile="edc_tactical",
+            )
+        )
+        session.add(JobStep(job_id=job_id, step_name="content_profile", status="running"))
+        session.add(JobStep(job_id=job_id, step_name="summary_review", status="pending"))
+        session.add(
+            SubtitleItem(
+                job_id=job_id,
+                version=1,
+                item_index=0,
+                start_time=0.0,
+                end_time=1.0,
+                text_raw="这期主要看赫斯郡和船家联名的机能双剑包。",
+                text_norm="这期主要看赫斯郡和船家联名的机能双剑包。",
+                text_final="这期主要看赫斯郡和船家联名的机能双剑包。",
+            )
+        )
+        await session.commit()
+
+    monkeypatch.setattr(steps_mod, "get_session_factory", lambda: factory)
+    monkeypatch.setattr(steps_mod, "get_settings", lambda: settings)
+    monkeypatch.setattr(steps_mod, "get_telegram_review_bot_service", lambda: fake_review_bot)
+    monkeypatch.setattr(llm_cache_mod, "get_settings", lambda: settings)
+    monkeypatch.setattr(steps_mod, "list_packaging_assets", lambda: {"config": {"copy_style": "attention_grabbing"}})
+
+    async def fake_load_content_profile_user_memory(*args, **kwargs):
+        return {}
+
+    async def fake_resolve_source(*args, **kwargs):
+        return source_path
+
+    async def fake_infer_content_profile(**kwargs):
+        captured["include_research"] = kwargs["include_research"]
+        return {
+            "subject_type": "机能双肩包",
+            "video_theme": "联名机能双肩包开箱",
+            "summary": "这条视频主要围绕机能双肩包展开。",
+            "engagement_question": "你更偏黑色还是白色版本？",
+            "search_queries": ["机能双肩包 评测"],
+        }
+
+    monkeypatch.setattr(steps_mod, "load_content_profile_user_memory", fake_load_content_profile_user_memory)
+    monkeypatch.setattr(steps_mod, "_resolve_source", fake_resolve_source)
+    monkeypatch.setattr(steps_mod, "infer_content_profile", fake_infer_content_profile)
+
+    await run_content_profile(str(job_id))
+
+    assert captured["include_research"] is True
 
 
 @pytest.mark.asyncio
