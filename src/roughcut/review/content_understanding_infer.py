@@ -9,76 +9,12 @@ from roughcut.review.content_understanding_facts import _load_json_object, infer
 from roughcut.review.content_understanding_schema import (
     ContentSemanticFacts,
     ContentUnderstanding,
-    parse_entity_resolution_payload,
-    SubjectEntity,
-    parse_content_semantic_facts_payload,
+    parse_content_understanding_payload as parse_content_understanding_payload_from_schema,
 )
 
 
-def _parse_subject_entities(data: Any) -> list[SubjectEntity]:
-    subject_entities: list[SubjectEntity] = []
-    for item in list(data or []):
-        if isinstance(item, str) and item.strip():
-            subject_entities.append(
-                SubjectEntity(
-                    kind="",
-                    name=item.strip(),
-                    brand="",
-                    model="",
-                )
-            )
-            continue
-        if not isinstance(item, dict):
-            continue
-        subject_entities.append(
-            SubjectEntity(
-                kind=str(item.get("kind") or "").strip(),
-                name=str(item.get("name") or "").strip(),
-                brand=str(item.get("brand") or "").strip(),
-                model=str(item.get("model") or "").strip(),
-            )
-        )
-    return subject_entities
-
-
 def parse_content_understanding_payload(data: Any) -> ContentUnderstanding:
-    payload = data if isinstance(data, dict) else {}
-
-    confidence: dict[str, float] = {}
-    raw_confidence = payload.get("confidence")
-    if isinstance(raw_confidence, dict):
-        for key, value in raw_confidence.items():
-            try:
-                confidence[str(key)] = float(value)
-            except (TypeError, ValueError):
-                continue
-    else:
-        try:
-            confidence["overall"] = float(raw_confidence)
-        except (TypeError, ValueError):
-            pass
-
-    return ContentUnderstanding(
-        video_type=str(payload.get("video_type") or "").strip(),
-        content_domain=str(payload.get("content_domain") or "").strip(),
-        primary_subject=str(payload.get("primary_subject") or "").strip(),
-        semantic_facts=parse_content_semantic_facts_payload(payload.get("semantic_facts")),
-        subject_entities=_parse_subject_entities(payload.get("subject_entities")),
-        observed_entities=_parse_subject_entities(payload.get("observed_entities")),
-        resolved_entities=_parse_subject_entities(payload.get("resolved_entities")),
-        resolved_primary_subject=str(payload.get("resolved_primary_subject") or "").strip(),
-        entity_resolution_map=parse_entity_resolution_payload(payload.get("entity_resolution_map")),
-        video_theme=str(payload.get("video_theme") or "").strip(),
-        summary=str(payload.get("summary") or "").strip(),
-        hook_line=str(payload.get("hook_line") or "").strip(),
-        engagement_question=str(payload.get("engagement_question") or "").strip(),
-        search_queries=[str(item).strip() for item in list(payload.get("search_queries") or []) if str(item).strip()],
-        evidence_spans=[dict(item) for item in list(payload.get("evidence_spans") or []) if isinstance(item, dict)],
-        uncertainties=[str(item).strip() for item in list(payload.get("uncertainties") or []) if str(item).strip()],
-        confidence=confidence,
-        needs_review=bool(payload.get("needs_review", True)),
-        review_reasons=[str(item).strip() for item in list(payload.get("review_reasons") or []) if str(item).strip()],
-    )
+    return parse_content_understanding_payload_from_schema(data)
 
 
 async def infer_content_understanding(evidence_bundle: dict[str, Any]) -> ContentUnderstanding:
@@ -167,6 +103,8 @@ async def infer_final_understanding(
             confidence=understanding.confidence,
             needs_review=understanding.needs_review,
             review_reasons=understanding.review_reasons,
+            capability_matrix=understanding.capability_matrix,
+            orchestration_trace=understanding.orchestration_trace,
         )
     return understanding
 
@@ -195,6 +133,8 @@ def _with_staged_semantic_facts(
         confidence=understanding.confidence,
         needs_review=understanding.needs_review,
         review_reasons=understanding.review_reasons,
+        capability_matrix=understanding.capability_matrix,
+        orchestration_trace=understanding.orchestration_trace,
     )
 
 

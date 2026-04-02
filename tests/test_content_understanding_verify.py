@@ -266,6 +266,16 @@ async def test_verify_content_understanding_keeps_observed_entity_when_resolutio
 
     assert result.primary_subject == "船长联名包"
     assert result.needs_review is True
+    assert result.resolved_primary_subject == "HSJUN × BOLTBOAT 游刃机能双肩包"
+    assert len(result.resolved_entities) == 1
+    assert result.resolved_entities[0].name == "HSJUN × BOLTBOAT 游刃机能双肩包"
+    assert result.resolved_entities[0].brand == "HSJUN × BOLTBOAT"
+    assert result.resolved_entities[0].model == "游刃"
+    assert len(result.entity_resolution_map) == 1
+    assert result.entity_resolution_map[0].observed_name == "船长联名包"
+    assert result.entity_resolution_map[0].resolved_name == "HSJUN × BOLTBOAT 游刃机能双肩包"
+    assert result.entity_resolution_map[0].confidence == 0.42
+    assert result.entity_resolution_map[0].reason == "只有弱匹配"
 
 
 def test_should_run_entity_resolution_skips_when_entities_are_aligned():

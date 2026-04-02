@@ -76,6 +76,56 @@ async def test_infer_content_understanding_always_uses_staged_semantic_facts(
     assert result.semantic_facts == staged_facts
 
 
+def test_parse_content_understanding_payload_preserves_capability_matrix_and_trace():
+    from roughcut.review import content_understanding_infer as infer_mod
+
+    result = infer_mod.parse_content_understanding_payload(
+        {
+            "video_type": "product_review",
+            "content_domain": "gear",
+            "primary_subject": "demo subject",
+            "capability_matrix": {"visual_understanding": {"provider": "minimax", "mode": "native_multimodal"}},
+            "orchestration_trace": ["capability_resolution", "fact_extraction", "final_understanding"],
+        }
+    )
+
+    assert result.capability_matrix == {"visual_understanding": {"provider": "minimax", "mode": "native_multimodal"}}
+    assert result.orchestration_trace == ["capability_resolution", "fact_extraction", "final_understanding"]
+
+
+@pytest.mark.asyncio
+async def test_infer_content_understanding_preserves_capability_matrix_and_trace(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from roughcut.review import content_understanding_infer as infer_mod
+    from roughcut.review.content_understanding_schema import ContentSemanticFacts, ContentUnderstanding
+
+    capability_matrix = {"visual_understanding": {"provider": "minimax", "mode": "native_multimodal"}}
+    orchestration_trace = ["capability_resolution", "fact_extraction", "final_understanding"]
+
+    async def fake_infer_content_semantic_facts(provider, evidence_bundle):
+        return ContentSemanticFacts(entity_candidates=["demo"])
+
+    async def fake_infer_final_understanding(provider, evidence_bundle, semantic_facts):
+        return ContentUnderstanding(
+            video_type="product_review",
+            content_domain="gear",
+            primary_subject="demo subject",
+            semantic_facts=semantic_facts,
+            capability_matrix=capability_matrix,
+            orchestration_trace=orchestration_trace,
+        )
+
+    monkeypatch.setattr(infer_mod, "get_reasoning_provider", lambda: object())
+    monkeypatch.setattr(infer_mod, "infer_content_semantic_facts", fake_infer_content_semantic_facts, raising=False)
+    monkeypatch.setattr(infer_mod, "infer_final_understanding", fake_infer_final_understanding, raising=False)
+
+    result = await infer_mod.infer_content_understanding({"transcript_excerpt": "demo"})
+
+    assert result.capability_matrix == capability_matrix
+    assert result.orchestration_trace == orchestration_trace
+
+
 @pytest.mark.asyncio
 async def test_infer_content_understanding_uses_reasoning_provider_payload(monkeypatch: pytest.MonkeyPatch):
     from roughcut.review import content_understanding_infer as infer_mod
