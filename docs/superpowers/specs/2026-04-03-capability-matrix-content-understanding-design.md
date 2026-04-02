@@ -2,7 +2,7 @@
 
 ## Goal
 
-把当前以 `content_profile` 为中心的内容理解链，重构成一个通用的、能力矩阵驱动的多模态理解框架。
+把当前内容理解链彻底重构成一个通用的、能力矩阵驱动的多模态理解框架。
 
 这套框架要满足四个核心目标：
 
@@ -10,6 +10,7 @@
 - `ASR` 与视觉理解并列为主证据，`OCR` 是强补充证据
 - 运行时按 provider 能力矩阵选择正确路径，而不是把多种视觉方案混用
 - 在保证准确率优先的前提下，把单条任务延迟控制在可接受范围
+- 内部主真相源直接切到 `content_understanding + evidence graph + orchestration trace`，不再让 `content_profile` 充当内部主对象
 
 ## Non-Goals
 
@@ -133,6 +134,14 @@
 - 回退成预设品类
 - 根据规则“帮忙改判”
 - 把未知包装成看似具体的主题
+
+### 6. No Internal Compatibility Constraint
+
+本次重构接受内部主链彻底替换：
+
+- `content_understanding` 是唯一内部主对象
+- `content_profile` 不再作为内部真相源
+- 任何 legacy 映射都只能是外围导出层，而不是核心链路的一部分
 
 ## Target Architecture
 
@@ -385,7 +394,7 @@
 
 ### Final Artifact
 
-`content_profile_draft` / `content_understanding` 至少包含：
+新的内部草稿 artifact 至少包含：
 
 - `observed_entities`
 - `resolved_entities`
@@ -433,7 +442,7 @@
 
 ### Phase 1
 
-落 capability matrix schema 与 orchestration trace，不改变最终 UI 读取逻辑。
+落 capability matrix schema 与 orchestration trace，并引入新的 `content_understanding` 主对象。
 
 ### Phase 2
 
@@ -449,7 +458,7 @@
 
 ### Phase 5
 
-基于固定 benchmark 和 live 样本回归，清除剩余 legacy 主题推断路径。
+基于固定 benchmark 和 live 样本回归，删除剩余 legacy 主题推断路径，并把旧 `content_profile` 降成可选导出层。
 
 ## Benchmark And Validation
 
@@ -484,7 +493,7 @@
 如果实体消歧触发阈值太低，时延会明显上升。  
 解决方式是默认三阶段，只在冲突时升级。
 
-### 4. Legacy 兼容污染
+### 4. 旧主链残留污染
 
-旧的 `subject_type/video_theme` helper 仍可能偷偷越权。  
-解决方式是在迁移期持续压缩 legacy 写权限，只允许它们消费新链结果。
+旧的 `content_profile`/`subject_type/video_theme` helper 仍可能偷偷越权。  
+解决方式是直接把内部主链切到新对象，并持续删除旧链写权限。

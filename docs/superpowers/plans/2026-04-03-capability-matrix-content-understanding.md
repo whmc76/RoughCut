@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Rebuild RoughCut content understanding into a capability-matrix-driven, multimodal framework where ASR and vision are both primary evidence, resolution is adaptive, and final judgments remain LLM-only.
+**Goal:** Rebuild RoughCut content understanding into a capability-matrix-driven, multimodal framework where ASR and vision are both primary evidence, resolution is adaptive, final judgments remain LLM-only, and the internal mainline no longer depends on `content_profile`.
 
-**Architecture:** Introduce a capability router plus structured evidence/fact layers ahead of final understanding. Default to a three-stage path, only escalate to entity resolution when evidence conflicts or aliases remain unstable, and keep all final user-facing fields derived from LLM outputs with explicit `observed / resolved / conflicts` traceability.
+**Architecture:** Introduce a capability router plus structured evidence/fact layers ahead of final understanding. Default to a three-stage path, only escalate to entity resolution when evidence conflicts or aliases remain unstable, and make `content_understanding + evidence graph + orchestration trace` the only internal truth source. Any legacy `content_profile` export becomes a thin peripheral adapter rather than part of the core pipeline.
 
 **Tech Stack:** Python 3.11, SQLAlchemy async, pytest, existing RoughCut reasoning/search/OCR/transcription providers, multimodal provider adapters, ffmpeg-based frame extraction
 
@@ -69,7 +69,7 @@ git commit -m "feat: add content understanding capability matrix"
 ### Task 2: Promote Visual Understanding From Hints To Evidence
 
 **Files:**
-- Modify: `src/roughcut/review/content_profile.py`
+- Create: `src/roughcut/review/content_understanding_orchestrator.py`
 - Modify: `src/roughcut/review/content_understanding_evidence.py`
 - Test: `tests/test_content_understanding_evidence.py`
 
@@ -108,7 +108,7 @@ Expected: PASS
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/roughcut/review/content_profile.py src/roughcut/review/content_understanding_evidence.py tests/test_content_understanding_evidence.py
+git add src/roughcut/review/content_understanding_orchestrator.py src/roughcut/review/content_understanding_evidence.py tests/test_content_understanding_evidence.py
 git commit -m "refactor: separate visual evidence from visual hints"
 ```
 
@@ -116,7 +116,7 @@ git commit -m "refactor: separate visual evidence from visual hints"
 
 **Files:**
 - Create: `src/roughcut/review/content_understanding_visual.py`
-- Modify: `src/roughcut/review/content_profile.py`
+- Modify: `src/roughcut/review/content_understanding_orchestrator.py`
 - Test: `tests/test_content_understanding_visual.py`
 
 - [ ] **Step 1: Write the failing test**
@@ -157,7 +157,7 @@ Expected: PASS
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/roughcut/review/content_understanding_visual.py src/roughcut/review/content_profile.py tests/test_content_understanding_visual.py
+git add src/roughcut/review/content_understanding_visual.py src/roughcut/review/content_understanding_orchestrator.py tests/test_content_understanding_visual.py
 git commit -m "feat: route visual understanding by provider capability"
 ```
 
@@ -317,13 +317,13 @@ git commit -m "feat: add conditional entity resolution stage"
 
 **Files:**
 - Modify: `src/roughcut/review/content_understanding_schema.py`
-- Modify: `src/roughcut/review/content_profile.py`
+- Modify: `src/roughcut/review/content_understanding_orchestrator.py`
 - Test: `tests/test_content_understanding_schema.py`
 
 - [ ] **Step 1: Write the failing test**
 
 ```python
-def test_map_content_understanding_to_legacy_profile_exposes_capability_matrix_and_trace():
+def test_content_understanding_payload_exposes_capability_matrix_and_trace():
     understanding = ContentUnderstanding(
         video_type="product_review",
         content_domain="gear",
@@ -331,21 +331,21 @@ def test_map_content_understanding_to_legacy_profile_exposes_capability_matrix_a
         capability_matrix={"visual_understanding": {"provider": "minimax", "mode": "native_multimodal"}},
         orchestration_trace=["capability_resolution", "fact_extraction", "final_understanding"],
     )
-    profile = map_content_understanding_to_legacy_profile(understanding)
-    assert "capability_matrix" in profile["content_understanding"]
-    assert "orchestration_trace" in profile["content_understanding"]
+    payload = serialize_content_understanding_payload(understanding)
+    assert "capability_matrix" in payload
+    assert "orchestration_trace" in payload
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `pytest tests/test_content_understanding_schema.py::test_map_content_understanding_to_legacy_profile_exposes_capability_matrix_and_trace -v`
+Run: `pytest tests/test_content_understanding_schema.py::test_content_understanding_payload_exposes_capability_matrix_and_trace -v`
 Expected: FAIL because these fields are not persisted.
 
 - [ ] **Step 3: Write minimal implementation**
 
 ```python
-content_understanding_payload["capability_matrix"] = value.capability_matrix
-content_understanding_payload["orchestration_trace"] = value.orchestration_trace
+payload["capability_matrix"] = value.capability_matrix
+payload["orchestration_trace"] = value.orchestration_trace
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
@@ -356,7 +356,7 @@ Expected: PASS
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/roughcut/review/content_understanding_schema.py src/roughcut/review/content_profile.py tests/test_content_understanding_schema.py
+git add src/roughcut/review/content_understanding_schema.py src/roughcut/review/content_understanding_orchestrator.py tests/test_content_understanding_schema.py
 git commit -m "feat: persist capability matrix in content understanding artifacts"
 ```
 
@@ -435,7 +435,7 @@ Expected: PASS
 - [ ] **Step 2: Run curated four-sample benchmark**
 
 Run: `python scripts/run_content_understanding_benchmark.py --source-dir "Y:\\EDC系列\\未剪辑视频" --samples 20260301-171443.mp4 20260211-120605.mp4 20260211-123939.mp4 20260213-133009.mp4 --limit 4`
-Expected: Generate a JSON/Markdown benchmark report under `output/test/content-understanding-benchmark/`.
+Expected: Generate a JSON/Markdown benchmark report under `output/test/content-understanding-benchmark/` from the new `content_understanding` mainline, without relying on legacy `content_profile` internals.
 
 - [ ] **Step 3: Manually inspect benchmark deltas**
 
