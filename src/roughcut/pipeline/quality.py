@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from roughcut.db.models import Artifact, Job, JobStep, SubtitleCorrection, SubtitleItem
+from roughcut.media.variant_timeline_bundle import resolve_effective_variant_timeline_bundle
 from roughcut.review.content_profile import (
     _has_ingestible_product_subject_conflict,
     _is_generic_engagement_question,
@@ -113,8 +114,15 @@ def assess_job_quality(
         "content_profile_draft",
     )
     render_artifact = _latest_artifact(artifacts, "render_outputs")
+    variant_bundle_artifact = _latest_artifact(artifacts, "variant_timeline_bundle")
     profile = profile_artifact.data_json if profile_artifact and isinstance(profile_artifact.data_json, dict) else {}
     render_outputs = render_artifact.data_json if render_artifact and isinstance(render_artifact.data_json, dict) else {}
+    variant_bundle = (
+        variant_bundle_artifact.data_json
+        if variant_bundle_artifact and isinstance(variant_bundle_artifact.data_json, dict)
+        else {}
+    )
+    variant_bundle = resolve_effective_variant_timeline_bundle(variant_bundle, render_outputs=render_outputs) or {}
     corrections = list(corrections or [])
     subtitle_items = list(subtitle_items or [])
     subtitle_text = _build_subtitle_text(subtitle_items)
@@ -232,7 +240,9 @@ def assess_job_quality(
             )
         )
 
-    sync_check = _resolve_subtitle_sync_check(render_outputs)
+    sync_check = _resolve_packaged_variant_subtitle_sync_check(variant_bundle) or _resolve_subtitle_sync_check(
+        render_outputs
+    )
     if sync_check and sync_check.get("status") == "warning":
         warning_codes = [str(code) for code in sync_check.get("warning_codes") or [] if str(code).strip()]
         issues.append(
@@ -404,6 +414,24 @@ def _grade_for_score(score: float) -> str:
     if score >= 60.0:
         return "C"
     return "D"
+
+
+def _resolve_packaged_variant_subtitle_sync_check(variant_bundle: dict[str, Any]) -> dict[str, Any] | None:
+    if not isinstance(variant_bundle, dict):
+        return None
+    variants = variant_bundle.get("variants")
+    if not isinstance(variants, dict):
+        return None
+    packaged_variant = variants.get("packaged")
+    if not isinstance(packaged_variant, dict):
+        return None
+    quality_checks = packaged_variant.get("quality_checks")
+    if not isinstance(quality_checks, dict):
+        return None
+    subtitle_sync = quality_checks.get("subtitle_sync")
+    if isinstance(subtitle_sync, dict):
+        return subtitle_sync
+    return None
 
 
 def _resolve_subtitle_sync_check(render_outputs: dict[str, Any]) -> dict[str, Any] | None:

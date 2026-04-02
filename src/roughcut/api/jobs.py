@@ -8,13 +8,14 @@ import tempfile
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 from fastapi.responses import FileResponse
 from sqlalchemy import delete, distinct, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
+from pydantic import BaseModel
 
 from roughcut.api.options import normalize_job_language, normalize_workflow_template
 from roughcut.api.schemas import (
@@ -54,6 +55,7 @@ from roughcut.db.session import get_session
 from roughcut.pipeline.celery_app import celery_app
 from roughcut.pipeline.orchestrator import PIPELINE_STEPS, create_job_steps
 from roughcut.pipeline.quality import QUALITY_ARTIFACT_TYPE
+from roughcut.media.variant_timeline_bundle import resolve_effective_variant_timeline_bundle
 from roughcut.review.content_profile import _extract_reference_frames
 from roughcut.review.content_profile import apply_content_profile_feedback
 from roughcut.review.content_profile import build_reviewed_transcript_excerpt
@@ -110,6 +112,28 @@ PROFILE_ARTIFACT_PRIORITY = {
 }
 _CONTENT_PROFILE_ARTIFACT_TYPES = ("content_profile_final", "content_profile", "content_profile_draft")
 _CONTENT_PROFILE_THUMBNAIL_CACHE_VERSION = "v2"
+
+
+class FinalReviewDecisionIn(BaseModel):
+    decision: Literal["approve", "reject"]
+    note: str | None = None
+
+
+class FinalReviewDecisionOut(BaseModel):
+    job_id: str
+    decision: Literal["approve", "reject"]
+    job_status: str
+    review_step_status: str
+    rerun_triggered: bool = False
+    note: str | None = None
+
+
+class FinalReviewVariantTimelineRerenderOut(BaseModel):
+    job_id: str
+    job_status: str
+    rerun_steps: list[str]
+    validation_status: str | None = None
+    validation_issue_count: int = 0
 
 
 def _select_preferred_content_profile_artifact(artifacts: list[Artifact]) -> Artifact | None:
@@ -1004,6 +1028,223 @@ async def apply_review(
     return {"applied": applied}
 
 
+@router.post("/{job_id}/final-review", response_model=FinalReviewDecisionOut)
+async def apply_final_review_decision(
+    job_id: uuid.UUID,
+    request: FinalReviewDecisionIn,
+    session: AsyncSession = Depends(get_session),
+):
+    job_result = await session.execute(
+        select(Job)
+        .options(selectinload(Job.steps))
+        .where(Job.id == job_id)
+    )
+    job = job_result.scalar_one_or_none()
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    review_step = next((step for step in job.steps or [] if step.step_name == "final_review"), None)
+    if review_step is None:
+        raise HTTPException(status_code=404, detail="Final review step not found")
+
+    decision = str(request.decision or "").strip().lower()
+    note = str(request.note or "").strip() or None
+    if decision == "reject" and not note:
+        raise HTTPException(status_code=400, detail="note is required when decision is reject")
+    if decision == "approve" and review_step.status == "done":
+        return FinalReviewDecisionOut(
+            job_id=str(job.id),
+            decision="approve",
+            job_status=str(job.status),
+            review_step_status=str(review_step.status),
+            rerun_triggered=False,
+            note=note,
+        )
+    if review_step.status == "done" and decision == "reject":
+        raise HTTPException(status_code=409, detail="Final review has already been approved")
+
+    now = datetime.now(timezone.utc)
+    session.add(
+        ReviewAction(
+            job_id=job.id,
+            target_type="final_review",
+            target_id=job.id,
+            action=decision,
+            override_text=note,
+        )
+    )
+
+    if decision == "approve":
+        metadata = dict(review_step.metadata_ or {})
+        metadata.update(
+            {
+                "detail": "成片已人工审核通过，继续生成平台文案。",
+                "updated_at": now.isoformat(),
+                "approved_via": "web",
+            }
+        )
+        review_step.metadata_ = metadata
+        review_step.status = "done"
+        review_step.finished_at = now
+        review_step.error_message = None
+        job.status = "processing"
+        job.error_message = None
+        job.updated_at = now
+        await session.commit()
+        return FinalReviewDecisionOut(
+            job_id=str(job.id),
+            decision="approve",
+            job_status=str(job.status),
+            review_step_status=str(review_step.status),
+            rerun_triggered=False,
+            note=note,
+        )
+
+    feedback_history = list((review_step.metadata_ or {}).get("feedback_history") or [])
+    feedback_history.append({"text": note, "at": now.isoformat(), "via": "web"})
+    rerun_triggered = False
+
+    from roughcut.pipeline.orchestrator import _reset_job_for_quality_rerun
+    from roughcut.review.telegram_bot import _build_final_review_rerun_plans, _combine_final_review_rerun_plans
+
+    rerun_plan = _combine_final_review_rerun_plans(_build_final_review_rerun_plans(note))
+    if rerun_plan is not None:
+        steps = (
+            await session.execute(
+                select(JobStep).where(JobStep.job_id == job.id).order_by(JobStep.id.asc())
+            )
+        ).scalars().all()
+        await _reset_job_for_quality_rerun(
+            session,
+            job,
+            steps,
+            rerun_steps=list(rerun_plan.rerun_steps),
+            issue_codes=[f"manual_review:{rerun_plan.category}"],
+        )
+        first_step = next((step for step in steps if step.step_name == rerun_plan.trigger_step), None)
+        if first_step is not None:
+            first_metadata = dict(first_step.metadata_ or {})
+            first_metadata.update(
+                {
+                    "detail": f"人工成片审核要求重跑：{rerun_plan.label}",
+                    "updated_at": now.isoformat(),
+                    "review_feedback": note,
+                    "review_rerun_category": rerun_plan.category,
+                    "review_rerun_steps": list(rerun_plan.rerun_steps),
+                    "review_rerun_targets": list(rerun_plan.targets),
+                }
+            )
+            first_step.metadata_ = first_metadata
+        rerun_triggered = True
+        await session.commit()
+        return FinalReviewDecisionOut(
+            job_id=str(job.id),
+            decision="reject",
+            job_status=str(job.status),
+            review_step_status=str(review_step.status),
+            rerun_triggered=rerun_triggered,
+            note=note,
+        )
+
+    metadata = dict(review_step.metadata_ or {})
+    metadata.update(
+        {
+            "detail": "已收到成片修改意见，任务保持暂停，等待人工处理后再继续。",
+            "updated_at": now.isoformat(),
+            "feedback_history": feedback_history[-10:],
+            "latest_feedback": note,
+        }
+    )
+    review_step.metadata_ = metadata
+    review_step.started_at = review_step.started_at or now
+    job.status = "needs_review"
+    job.updated_at = now
+    await session.commit()
+    return FinalReviewDecisionOut(
+        job_id=str(job.id),
+        decision="reject",
+        job_status=str(job.status),
+        review_step_status=str(review_step.status),
+        rerun_triggered=rerun_triggered,
+        note=note,
+    )
+
+
+@router.post("/{job_id}/final-review/rerender-variant-timeline", response_model=FinalReviewVariantTimelineRerenderOut)
+async def rerender_final_review_variant_timeline(
+    job_id: uuid.UUID,
+    session: AsyncSession = Depends(get_session),
+):
+    job_result = await session.execute(
+        select(Job)
+        .options(selectinload(Job.steps))
+        .where(Job.id == job_id)
+    )
+    job = job_result.scalar_one_or_none()
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    artifacts = (
+        await session.execute(
+            select(Artifact).where(Artifact.job_id == job.id).order_by(Artifact.created_at.asc(), Artifact.id.asc())
+        )
+    ).scalars().all()
+    bundle = _resolve_effective_variant_bundle_from_artifacts(artifacts)
+    validation = bundle.get("validation") if isinstance(bundle, dict) else None
+    issues = [str(item).strip() for item in (validation.get("issues") or []) if str(item).strip()] if isinstance(validation, dict) else []
+    validation_status = str(validation.get("status") or "").strip().lower() if isinstance(validation, dict) else None
+    if not issues or validation_status not in {"warning", "error"}:
+        raise HTTPException(status_code=409, detail="No variant timeline warning detected for this job")
+
+    steps = list(job.steps or [])
+    if not steps:
+        raise HTTPException(status_code=409, detail="Job steps are missing")
+
+    rerun_steps = ["render", "final_review", "platform_package"]
+
+    from roughcut.pipeline.orchestrator import _reset_job_for_quality_rerun
+
+    await _reset_job_for_quality_rerun(
+        session,
+        job,
+        steps,
+        rerun_steps=rerun_steps,
+        issue_codes=["variant_timeline_warning"],
+    )
+
+    now = datetime.now(timezone.utc)
+    render_step = next((step for step in steps if step.step_name == "render"), None)
+    if render_step is not None:
+        metadata = dict(render_step.metadata_ or {})
+        metadata.update(
+            {
+                "detail": "时间轴对齐告警触发重渲染：render -> final_review -> platform_package",
+                "updated_at": now.isoformat(),
+                "variant_timeline_validation_status": validation_status,
+                "variant_timeline_validation_issues": issues[:10],
+            }
+        )
+        render_step.metadata_ = metadata
+
+    session.add(
+        ReviewAction(
+            job_id=job.id,
+            target_type="final_review",
+            target_id=job.id,
+            action="rerender_variant_timeline",
+            override_text="时间轴对齐告警触发重渲染",
+        )
+    )
+    await session.commit()
+    return FinalReviewVariantTimelineRerenderOut(
+        job_id=str(job.id),
+        job_status=str(job.status),
+        rerun_steps=rerun_steps,
+        validation_status=validation_status,
+        validation_issue_count=len(issues),
+    )
+
+
 async def _persist_reviewed_glossary_term(
     session: AsyncSession,
     *,
@@ -1370,11 +1611,19 @@ def _build_activity_decisions(
         grade = str(data.get("grade") or "").strip()
         recommended_steps = [str(item).strip() for item in (data.get("recommended_rerun_steps") or []) if str(item).strip()]
         issue_codes = [str(item).strip() for item in (data.get("issue_codes") or []) if str(item).strip()]
+        bundle = _resolve_effective_variant_bundle_from_artifacts(artifacts)
+        timing_summary = _resolve_variant_timing_summary(bundle)
+        validation_summary = _summarize_variant_timeline_validation(bundle)
+        validation_detail = _describe_variant_timeline_validation(bundle)
         summary_parts = []
         if grade or score is not None:
             summary_parts.append(f"{grade} {float(score):.1f}" if grade and score is not None else str(grade or score))
         if issue_codes:
             summary_parts.append(f"{len(issue_codes)} 个扣分项")
+        if timing_summary:
+            summary_parts.append(timing_summary)
+        if validation_summary:
+            summary_parts.append(validation_summary)
         decisions.append(
             {
                 "kind": "quality_assessment",
@@ -1386,6 +1635,7 @@ def _build_activity_decisions(
                         part for part in [
                             f"问题：{', '.join(issue_codes)}" if issue_codes else "",
                             f"建议补跑：{', '.join(recommended_steps)}" if recommended_steps else "",
+                            f"时间轴校验：{validation_detail}" if validation_detail else "",
                         ]
                         if part
                     )
@@ -1827,11 +2077,16 @@ def _resolve_job_quality_preview(artifacts: list[Artifact]) -> dict[str, Any]:
         score = None
     grade = str(data.get("grade") or "").strip() or None
     issue_codes = [str(item).strip() for item in (data.get("issue_codes") or []) if str(item).strip()]
+    bundle = _resolve_effective_variant_bundle_from_artifacts(artifacts)
+    timing_summary = _resolve_variant_timing_summary(bundle)
+    validation_summary = _summarize_variant_timeline_validation(bundle)
     summary = " · ".join(
         part
         for part in [
             f"{grade} {score:.1f}" if grade and score is not None else (grade or (f"{score:.1f}" if score is not None else "")),
             f"{len(issue_codes)} 个扣分项" if issue_codes else "",
+            timing_summary or "",
+            validation_summary or "",
         ]
         if part
     ) or None
@@ -1841,6 +2096,95 @@ def _resolve_job_quality_preview(artifacts: list[Artifact]) -> dict[str, Any]:
         "summary": summary,
         "issue_codes": issue_codes,
     }
+
+
+def _resolve_effective_variant_bundle_from_artifacts(artifacts: list[Artifact]) -> dict[str, Any] | None:
+    bundle_artifact = next(
+        (artifact for artifact in artifacts if artifact.artifact_type == "variant_timeline_bundle" and artifact.data_json),
+        None,
+    )
+    render_outputs_artifact = next(
+        (artifact for artifact in artifacts if artifact.artifact_type == "render_outputs" and artifact.data_json),
+        None,
+    )
+    return resolve_effective_variant_timeline_bundle(
+        bundle_artifact.data_json if bundle_artifact and isinstance(bundle_artifact.data_json, dict) else None,
+        render_outputs=render_outputs_artifact.data_json if render_outputs_artifact and isinstance(render_outputs_artifact.data_json, dict) else {},
+    )
+
+
+def _resolve_variant_timing_summary(bundle: dict[str, Any] | None) -> str | None:
+    if bundle is None or not isinstance(bundle, dict):
+        return None
+    variants = bundle.get("variants")
+    if not isinstance(variants, dict):
+        return None
+    packaged_variant = variants.get("packaged")
+    if not isinstance(packaged_variant, dict):
+        return None
+    subtitle_events = packaged_variant.get("subtitle_events")
+    if not isinstance(subtitle_events, list):
+        return None
+
+    event_count = 0
+    first_start: float | None = None
+    last_end: float | None = None
+    for item in subtitle_events:
+        if not isinstance(item, dict):
+            continue
+        event_count += 1
+        start_value = _coerce_timing_value(
+            item.get("start_time", item.get("start_sec", item.get("start")))
+        )
+        end_value = _coerce_timing_value(item.get("end_time", item.get("end_sec", item.get("end"))))
+        if start_value is not None:
+            first_start = start_value if first_start is None else min(first_start, start_value)
+        if end_value is not None:
+            last_end = end_value if last_end is None else max(last_end, end_value)
+
+    if event_count <= 0:
+        return None
+
+    parts = [f"packaged {event_count} 条字幕"]
+    if first_start is not None and last_end is not None:
+        parts.append(f"{first_start:.1f}-{last_end:.1f}s")
+    elif first_start is not None:
+        parts.append(f"起始 {first_start:.1f}s")
+    elif last_end is not None:
+        parts.append(f"结束 {last_end:.1f}s")
+    return " · ".join(parts)
+
+
+def _summarize_variant_timeline_validation(bundle: dict[str, Any] | None) -> str | None:
+    validation = bundle.get("validation") if isinstance(bundle, dict) else None
+    if not isinstance(validation, dict):
+        return None
+    issues = [str(item).strip() for item in (validation.get("issues") or []) if str(item).strip()]
+    status = str(validation.get("status") or "").strip().lower()
+    if not issues and status in {"", "ok"}:
+        return None
+    label = "时间轴异常" if status == "error" else "时间轴告警"
+    return f"{label} {len(issues)} 项" if issues else label
+
+
+def _describe_variant_timeline_validation(bundle: dict[str, Any] | None, *, limit: int = 3) -> str | None:
+    validation = bundle.get("validation") if isinstance(bundle, dict) else None
+    if not isinstance(validation, dict):
+        return None
+    issues = [str(item).strip() for item in (validation.get("issues") or []) if str(item).strip()]
+    if not issues:
+        return None
+    visible = issues[:limit]
+    if len(issues) > limit:
+        visible.append(f"其余 {len(issues) - limit} 项省略")
+    return "；".join(visible)
+
+
+def _coerce_timing_value(value: Any) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _select_preview_artifact(artifacts: list[Artifact]) -> Artifact | None:

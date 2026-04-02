@@ -988,6 +988,41 @@ def test_build_final_review_message_includes_summary_keywords_and_subtitle_hints
     assert "只改平台文案" in message
 
 
+def test_build_final_review_message_includes_variant_timeline_warning():
+    message = _build_final_review_message(
+        source_name="final.mp4",
+        job_id=uuid.uuid4(),
+        workflow_mode="standard_edit",
+        enhancement_modes=[],
+        render_outputs={
+            "packaged_mp4": r"E:\output\final.mp4",
+        },
+        content_profile=None,
+        subtitle_report=None,
+        variant_timeline_bundle={
+            "timeline_rules": {"source": "legacy_render_outputs"},
+            "variants": {
+                "packaged": {
+                    "media": {"path": r"E:\output\final.mp4"},
+                    "subtitle_events": [],
+                }
+            },
+            "validation": {
+                "status": "warning",
+                "issues": [
+                    "packaged: srt_path present but subtitle events could not be loaded",
+                    "ai_effect: sync metrics indicate a large subtitle gap",
+                ],
+            },
+        },
+    )
+
+    assert "时间轴校验：" in message
+    assert "检测到 2 条风险，请重点核对特效版/横板字幕与声音是否对齐。" in message
+    assert "packaged: srt_path present but subtitle events could not be loaded" in message
+    assert "ai_effect: sync metrics indicate a large subtitle gap" in message
+
+
 @pytest.mark.asyncio
 async def test_send_review_message_attaches_final_review_reply_markup(monkeypatch):
     service = TelegramReviewBotService()
@@ -1213,6 +1248,261 @@ async def test_build_final_review_videos_generates_compressed_previews(monkeypat
     assert [item.path.name for item in videos] == ["preview_1.mp4", "preview_2.mp4", "preview_3.mp4"]
     assert all("预览" in item.caption for item in videos)
     assert all("packaged.mp4" not in item.caption for item in videos)
+
+
+@pytest.mark.asyncio
+async def test_build_final_review_videos_prefers_packaged_srt_timeline_for_caption_excerpt(monkeypatch, tmp_path):
+    packaged = tmp_path / "packaged.mp4"
+    packaged.write_bytes(b"video")
+    packaged_srt = tmp_path / "packaged.srt"
+    packaged_srt.write_text(
+        "\n".join(
+            [
+                "1",
+                "00:00:02,000 --> 00:00:04,000",
+                "开头",
+                "",
+                "2",
+                "00:00:18,000 --> 00:00:22,000",
+                "重点讲扁桶手电",
+                "",
+                "3",
+                "00:00:34,000 --> 00:00:38,000",
+                "最后总结",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    async def fake_probe(path):
+        assert path == packaged
+        return SimpleNamespace(
+            duration=42.0,
+            width=1080,
+            height=1920,
+            fps=30.0,
+            video_codec="h264",
+            audio_codec="aac",
+            audio_sample_rate=48000,
+            audio_channels=2,
+            file_size=1024,
+            format_name="mov,mp4",
+            bit_rate=900000,
+        )
+
+    async def fake_preview(*, job_id, source_path, clip_index, start_sec, duration_sec):
+        assert source_path == packaged
+        preview = tmp_path / f"preview_{clip_index}.mp4"
+        preview.write_bytes(b"preview")
+        return preview
+
+    monkeypatch.setattr(telegram_bot, "probe", fake_probe)
+    monkeypatch.setattr(telegram_bot, "_ensure_final_review_preview", fake_preview)
+
+    videos = await telegram_bot._build_final_review_videos(
+        uuid.uuid4(),
+        {"packaged_mp4": str(packaged), "packaged_srt": str(packaged_srt)},
+        content_profile={"search_queries": ["扁桶手电"]},
+        subtitle_report=SimpleNamespace(
+            items=[
+                {
+                    "index": 1,
+                    "start": 89.0,
+                    "end": 97.0,
+                    "text_raw": "当然你现在,我现在开了几几次。",
+                    "text_norm": "当然你现在,我现在开了几几次。",
+                    "text_final": "当然你现在,我现在开了几几次。",
+                    "corrections": [],
+                },
+                {
+                    "index": 2,
+                    "start": 152.0,
+                    "end": 160.0,
+                    "text_raw": "确实是非常好适合EDC的一把小玩具。",
+                    "text_norm": "确实是非常好适合EDC的一把小玩具。",
+                    "text_final": "确实是非常好适合EDC的一把小玩具。",
+                    "corrections": [],
+                },
+            ]
+        ),
+    )
+
+    captions = "\n".join(item.caption for item in videos)
+    assert "开头" in captions
+    assert "重点讲扁桶手电" in captions
+    assert "最后总结" in captions
+    assert "当然你现在" not in captions
+    assert "确实是非常好适合EDC的一把小玩具" not in captions
+    assert "本段无明显字幕" not in captions
+
+
+@pytest.mark.asyncio
+async def test_build_final_review_videos_prefers_variant_timeline_bundle_over_report(monkeypatch, tmp_path):
+    render_packaged = tmp_path / "render_packaged.mp4"
+    render_packaged.write_bytes(b"video")
+    bundle_avatar = tmp_path / "bundle_avatar.mp4"
+    bundle_avatar.write_bytes(b"video")
+    bundle_ai_effect = tmp_path / "bundle_ai_effect.mp4"
+    bundle_ai_effect.write_bytes(b"video")
+    bundle_plain = tmp_path / "bundle_plain.mp4"
+    bundle_plain.write_bytes(b"video")
+
+    async def fake_probe(path):
+        assert path == bundle_avatar
+        return SimpleNamespace(
+            duration=42.0,
+            width=1080,
+            height=1920,
+            fps=30.0,
+            video_codec="h264",
+            audio_codec="aac",
+            audio_sample_rate=48000,
+            audio_channels=2,
+            file_size=1024,
+            format_name="mov,mp4",
+            bit_rate=900000,
+        )
+
+    async def fake_preview(*, job_id, source_path, clip_index, start_sec, duration_sec):
+        assert source_path == bundle_avatar
+        preview = tmp_path / f"bundle_preview_{clip_index}.mp4"
+        preview.write_bytes(b"preview")
+        return preview
+
+    monkeypatch.setattr(telegram_bot, "probe", fake_probe)
+    monkeypatch.setattr(telegram_bot, "_ensure_final_review_preview", fake_preview)
+
+    videos = await telegram_bot._build_final_review_videos(
+        uuid.uuid4(),
+        {"packaged_mp4": str(render_packaged)},
+        content_profile={"search_queries": ["keyword"]},
+        subtitle_report=SimpleNamespace(
+            items=[
+                {"index": 1, "start": 2.0, "end": 4.0, "text_raw": "old-start", "text_norm": "old-start", "text_final": "old-start", "corrections": []},
+                {"index": 2, "start": 18.0, "end": 22.0, "text_raw": "old-keyword", "text_norm": "old-keyword", "text_final": "old-keyword", "corrections": []},
+                {"index": 3, "start": 34.0, "end": 38.0, "text_raw": "old-end", "text_norm": "old-end", "text_final": "old-end", "corrections": []},
+            ]
+        ),
+        variant_timeline_bundle={
+            "timeline_rules": {"version": 1},
+            "variants": {
+                "packaged": {
+                    "media": {"path": str(tmp_path / "bundle_packaged_missing.mp4")},
+                    "subtitle_events": [
+                        {"start_time": 2.0, "end_time": 4.0, "text": "bundle-start"},
+                    ],
+                },
+                "avatar": {
+                    "media": {"path": str(bundle_avatar)},
+                    "subtitle_events": [
+                        {"start_time": 18.0, "end_time": 22.0, "text_final": "bundle-keyword"},
+                    ],
+                },
+                "ai_effect": {
+                    "media": {"path": str(bundle_ai_effect)},
+                    "subtitle_events": [
+                        {"start_time": 34.0, "end_time": 38.0, "text_norm": "bundle-end"},
+                    ],
+                },
+                "plain": {
+                    "media": {"path": str(bundle_plain)},
+                    "subtitle_events": [
+                        {"start_time": 50.0, "end_time": 54.0, "text": "bundle-plain"},
+                    ],
+                },
+            },
+        },
+    )
+
+    captions = "\n".join(item.caption for item in videos)
+    assert "bundle-keyword" in captions
+    assert "old-start" not in captions
+    assert "old-keyword" not in captions
+    assert "old-end" not in captions
+    assert "bundle_packaged_missing" not in captions
+
+
+@pytest.mark.asyncio
+async def test_build_final_review_videos_builds_legacy_bundle_from_render_outputs(monkeypatch, tmp_path):
+    ai_effect = tmp_path / "legacy_ai_effect.mp4"
+    ai_effect.write_bytes(b"video")
+    ai_effect_srt = tmp_path / "legacy_ai_effect.srt"
+    ai_effect_srt.write_text(
+        "\n".join(
+            [
+                "1",
+                "00:00:03,000 --> 00:00:05,000",
+                "legacy-ai-start",
+                "",
+                "2",
+                "00:00:18,000 --> 00:00:22,000",
+                "legacy-ai-keyword",
+                "",
+                "3",
+                "00:00:34,000 --> 00:00:38,000",
+                "legacy-ai-end",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    async def fake_probe(path):
+        assert path == ai_effect
+        return SimpleNamespace(
+            duration=42.0,
+            width=1080,
+            height=1920,
+            fps=30.0,
+            video_codec="h264",
+            audio_codec="aac",
+            audio_sample_rate=48000,
+            audio_channels=2,
+            file_size=1024,
+            format_name="mov,mp4",
+            bit_rate=900000,
+        )
+
+    async def fake_preview(*, job_id, source_path, clip_index, start_sec, duration_sec):
+        assert source_path == ai_effect
+        preview = tmp_path / f"legacy_preview_{clip_index}.mp4"
+        preview.write_bytes(b"preview")
+        return preview
+
+    monkeypatch.setattr(telegram_bot, "probe", fake_probe)
+    monkeypatch.setattr(telegram_bot, "_ensure_final_review_preview", fake_preview)
+
+    videos = await telegram_bot._build_final_review_videos(
+        uuid.uuid4(),
+        {
+            "packaged_mp4": str(tmp_path / "missing_packaged.mp4"),
+            "packaged_srt": str(tmp_path / "missing_packaged.srt"),
+            "ai_effect_mp4": str(ai_effect),
+            "ai_effect_srt": str(ai_effect_srt),
+            "quality_checks": {
+                "ai_effect_subtitle_sync": {
+                    "status": "ok",
+                    "video_duration_sec": 42.0,
+                }
+            },
+        },
+        content_profile={"search_queries": ["legacy-ai-keyword"]},
+        subtitle_report=SimpleNamespace(
+            items=[
+                {"index": 1, "start": 80.0, "end": 82.0, "text_raw": "old-a", "text_norm": "old-a", "text_final": "old-a", "corrections": []},
+                {"index": 2, "start": 90.0, "end": 94.0, "text_raw": "old-b", "text_norm": "old-b", "text_final": "old-b", "corrections": []},
+            ]
+        ),
+        variant_timeline_bundle=None,
+    )
+
+    captions = "\n".join(item.caption for item in videos)
+    assert "legacy-ai-start" in captions
+    assert "legacy-ai-keyword" in captions
+    assert "legacy-ai-end" in captions
+    assert "old-a" not in captions
+    assert "old-b" not in captions
 
 
 @pytest.mark.asyncio

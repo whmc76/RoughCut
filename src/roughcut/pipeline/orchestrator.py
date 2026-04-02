@@ -926,7 +926,7 @@ def _artifact_types_for_quality_rerun(rerun_steps: set[str]) -> set[str]:
     if "avatar_commentary" in rerun_steps:
         artifact_types.add("avatar_commentary_plan")
     if "render" in rerun_steps:
-        artifact_types.add("render_outputs")
+        artifact_types.update({"render_outputs", "variant_timeline_bundle", QUALITY_ARTIFACT_TYPE})
     if "platform_package" in rerun_steps:
         artifact_types.add("platform_packaging_md")
     return artifact_types

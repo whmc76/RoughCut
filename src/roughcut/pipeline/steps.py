@@ -2451,20 +2451,32 @@ async def run_render(job_id: str) -> dict:
         packaged_subtitles = await _map_subtitles_to_packaged_timeline(
             remapped_subtitles,
             render_plan_timeline.data_json,
+            keep_segments=keep_segments,
         )
         final_overlay_accents = await _map_editing_accents_to_packaged_timeline(
             render_plan_timeline.data_json.get("editing_accents"),
             render_plan_timeline.data_json,
+            keep_segments=keep_segments,
         )
         ai_effect_overlay_accents = await _map_editing_accents_to_packaged_timeline(
             ai_effect_render_plan.get("editing_accents"),
             ai_effect_render_plan,
+            keep_segments=keep_segments,
+        )
+        packaged_transition_offsets = _resolve_transition_overlap_offsets(
+            render_plan_timeline.data_json,
+            keep_segments=keep_segments,
+        )
+        ai_effect_transition_offsets = _resolve_transition_overlap_offsets(
+            ai_effect_render_plan,
+            keep_segments=keep_segments,
         )
         avatar_plan = render_plan_timeline.data_json.get("avatar_commentary") or {}
         avatar_result: dict[str, Any] | None = None
         avatar_variant_source_path: Path | None = None
         avatar_variant_editorial_timeline: dict[str, Any] | None = None
         avatar_variant_subtitle_items: list[dict[str, Any]] | None = None
+        avatar_overlay_accents: dict[str, Any] | None = None
         (
             packaged_source_path,
             packaged_editorial_timeline,
@@ -2650,16 +2662,18 @@ async def run_render(job_id: str) -> dict:
             and avatar_variant_editorial_timeline is not None
             and avatar_variant_subtitle_items is not None
         ):
+            avatar_overlay_accents = await _map_editing_accents_to_packaged_timeline(
+                avatar_render_plan.get("editing_accents"),
+                avatar_render_plan,
+                keep_segments=keep_segments,
+            )
             await render_video(
                 source_path=avatar_variant_source_path,
                 render_plan=avatar_render_plan,
                 editorial_timeline=avatar_variant_editorial_timeline,
                 output_path=tmp_avatar_mp4,
                 subtitle_items=packaged_subtitles,
-                overlay_editing_accents=await _map_editing_accents_to_packaged_timeline(
-                    avatar_render_plan.get("editing_accents"),
-                    avatar_render_plan,
-                ),
+                overlay_editing_accents=avatar_overlay_accents,
                 debug_dir=debug_dir / "avatar_variant",
             )
         await render_video(
@@ -2843,6 +2857,59 @@ async def run_render(job_id: str) -> dict:
             "ai_effect": str(local_ai_effect_mp4),
         },
     }
+    variant_timeline_bundle = _build_variant_timeline_bundle(
+        editorial_timeline_id=editorial_timeline.id,
+        render_plan_timeline_id=render_plan_timeline.id,
+        keep_segments=keep_segments,
+        render_plan=render_plan_timeline.data_json,
+        variants={
+            "plain": _build_variant_timeline_entry(
+                media_path=local_plain_mp4,
+                srt_path=local_plain_srt,
+                media_meta=plain_meta,
+                subtitle_events=remapped_subtitles,
+                transition_offsets=[],
+                segments=editorial_timeline.data_json.get("segments") or [],
+                quality_check=plain_subtitle_sync or {},
+            ),
+            "packaged": _build_variant_timeline_entry(
+                media_path=local_packaged_mp4,
+                srt_path=local_packaged_srt,
+                media_meta=packaged_meta,
+                subtitle_events=packaged_subtitles,
+                transition_offsets=packaged_transition_offsets,
+                segments=packaged_editorial_timeline.get("segments") or [],
+                overlay_events=final_overlay_accents,
+                quality_check=packaged_subtitle_sync or {},
+            ),
+            "ai_effect": _build_variant_timeline_entry(
+                media_path=local_ai_effect_mp4,
+                srt_path=local_ai_effect_srt,
+                media_meta=ai_effect_meta,
+                subtitle_events=packaged_subtitles,
+                transition_offsets=ai_effect_transition_offsets,
+                segments=editorial_timeline.data_json.get("segments") or [],
+                overlay_events=ai_effect_overlay_accents,
+                quality_check=ai_effect_subtitle_sync or {},
+            ),
+            **(
+                {
+                    "avatar": _build_variant_timeline_entry(
+                        media_path=local_avatar_mp4,
+                        srt_path=local_avatar_srt,
+                        media_meta=avatar_meta,
+                        subtitle_events=packaged_subtitles,
+                        transition_offsets=[],
+                        segments=(avatar_variant_editorial_timeline or {}).get("segments") or [],
+                        overlay_events=avatar_overlay_accents,
+                        quality_check=avatar_subtitle_sync or {},
+                    )
+                }
+                if local_avatar_mp4 is not None and local_avatar_srt is not None and avatar_meta is not None
+                else {}
+            ),
+        },
+    )
     async with get_session_factory()() as session:
         render_output = await session.get(RenderOutput, render_output_id)
         render_output.output_path = str(local_packaged_mp4)
@@ -2877,6 +2944,14 @@ async def run_render(job_id: str) -> dict:
                         "ai_effect_subtitle_sync": ai_effect_subtitle_sync,
                     },
                 },
+            )
+        )
+        session.add(
+            Artifact(
+                job_id=uuid.UUID(job_id),
+                step_id=render_step.id if render_step else None,
+                artifact_type="variant_timeline_bundle",
+                data_json=variant_timeline_bundle,
             )
         )
         if render_step:
@@ -3353,11 +3428,19 @@ async def _plan_insert_asset_slot(
 async def _map_subtitles_to_packaged_timeline(
     subtitle_items: list[dict],
     render_plan: dict,
+    *,
+    keep_segments: list[dict[str, Any]] | None = None,
 ) -> list[dict]:
     if not subtitle_items:
         return []
 
     mapped = [dict(item) for item in subtitle_items]
+    transition_offsets = _resolve_transition_overlap_offsets(
+        render_plan,
+        keep_segments=keep_segments or [],
+    )
+    if transition_offsets:
+        mapped = _shift_timed_items_for_transition_overlaps(mapped, transition_offsets=transition_offsets)
     leading_offset = 0.0
 
     intro_plan = render_plan.get("intro")
@@ -3386,6 +3469,8 @@ async def _map_subtitles_to_packaged_timeline(
 async def _map_editing_accents_to_packaged_timeline(
     editing_accents: dict[str, Any] | None,
     render_plan: dict,
+    *,
+    keep_segments: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     base = dict(editing_accents or {})
     mapped = {
@@ -3394,6 +3479,19 @@ async def _map_editing_accents_to_packaged_timeline(
         "emphasis_overlays": [dict(item) for item in base.get("emphasis_overlays") or []],
         "sound_effects": [dict(item) for item in base.get("sound_effects") or []],
     }
+    transition_offsets = _resolve_transition_overlap_offsets(
+        render_plan,
+        keep_segments=keep_segments or [],
+    )
+    if transition_offsets:
+        mapped["emphasis_overlays"] = _shift_timed_items_for_transition_overlaps(
+            mapped.get("emphasis_overlays") or [],
+            transition_offsets=transition_offsets,
+        )
+        mapped["sound_effects"] = _shift_sound_effects_for_transition_overlaps(
+            mapped.get("sound_effects") or [],
+            transition_offsets=transition_offsets,
+        )
     leading_offset = 0.0
 
     intro_plan = render_plan.get("intro")
@@ -3989,6 +4087,238 @@ def _shift_sound_effects_for_insert(
             shifted_item["start_time"] = start_time + insert_duration
         shifted.append(shifted_item)
     return shifted
+
+
+def _build_variant_timeline_bundle(
+    *,
+    editorial_timeline_id: Any,
+    render_plan_timeline_id: Any,
+    keep_segments: list[dict[str, Any]],
+    render_plan: dict[str, Any],
+    variants: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    bundle = {
+        "timeline_rules": {
+            "editorial_timeline_id": str(editorial_timeline_id or "").strip() or None,
+            "render_plan_timeline_id": str(render_plan_timeline_id or "").strip() or None,
+            "keep_segments": [dict(segment) for segment in keep_segments],
+            "packaging": {
+                "intro": _clone_json_like(render_plan.get("intro")),
+                "outro": _clone_json_like(render_plan.get("outro")),
+                "insert": _clone_json_like(render_plan.get("insert")),
+                "watermark": _clone_json_like(render_plan.get("watermark")),
+                "music": _clone_json_like(render_plan.get("music")),
+            },
+            "editing_accents": _clone_json_like(render_plan.get("editing_accents") or {}),
+        },
+        "variants": {name: dict(payload) for name, payload in variants.items() if isinstance(payload, dict)},
+    }
+    bundle["validation"] = _validate_variant_timeline_bundle(bundle)
+    return bundle
+
+
+def _build_variant_timeline_entry(
+    *,
+    media_path: Path | None,
+    srt_path: Path | None,
+    media_meta: Any | None,
+    subtitle_events: list[dict[str, Any]] | None,
+    transition_offsets: list[tuple[float, float]] | None,
+    segments: list[dict[str, Any]] | None,
+    overlay_events: dict[str, Any] | None = None,
+    quality_check: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return {
+        "media": _build_variant_media_payload(
+            media_path=media_path,
+            srt_path=srt_path,
+            media_meta=media_meta,
+        ),
+        "segments": [dict(segment) for segment in (segments or [])],
+        "transitions": [
+            {
+                "boundary_time_sec": round(float(boundary_time), 3),
+                "overlap_sec": round(float(overlap), 3),
+            }
+            for boundary_time, overlap in (transition_offsets or [])
+        ],
+        "subtitle_events": [_normalize_subtitle_event(item) for item in (subtitle_events or [])],
+        "overlay_events": {
+            "emphasis_overlays": [dict(item) for item in ((overlay_events or {}).get("emphasis_overlays") or [])],
+            "sound_effects": [dict(item) for item in ((overlay_events or {}).get("sound_effects") or [])],
+        },
+        "quality_checks": dict(quality_check or {}),
+    }
+
+
+def _build_variant_media_payload(
+    *,
+    media_path: Path | None,
+    srt_path: Path | None,
+    media_meta: Any | None,
+) -> dict[str, Any]:
+    return {
+        "path": str(media_path) if media_path else None,
+        "srt_path": str(srt_path) if srt_path else None,
+        "duration_sec": round(float(getattr(media_meta, "duration", 0.0) or 0.0), 3),
+        "width": int(getattr(media_meta, "width", 0) or 0),
+        "height": int(getattr(media_meta, "height", 0) or 0),
+    }
+
+
+def _normalize_subtitle_event(item: dict[str, Any]) -> dict[str, Any]:
+    start_time = float(item.get("start_time", item.get("start", 0.0)) or 0.0)
+    end_time = float(item.get("end_time", item.get("end", start_time)) or start_time)
+    return {
+        "index": int(item.get("index", 0) or 0),
+        "start_time": round(start_time, 3),
+        "end_time": round(end_time, 3),
+        "text": str(item.get("text_final") or item.get("text_norm") or item.get("text_raw") or item.get("text") or "").strip(),
+    }
+
+
+def _clone_json_like(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(key): _clone_json_like(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_clone_json_like(item) for item in value]
+    return value
+
+
+def _validate_variant_timeline_bundle(bundle: dict[str, Any]) -> dict[str, Any]:
+    issues: list[str] = []
+    variants = bundle.get("variants")
+    if not isinstance(variants, dict):
+        return {"status": "warning", "issues": ["variants payload missing"]}
+
+    for variant_name, variant in variants.items():
+        if not isinstance(variant, dict):
+            issues.append(f"{variant_name}: variant payload is not a dict")
+            continue
+        media = variant.get("media")
+        duration_sec = 0.0
+        if isinstance(media, dict):
+            duration_sec = float(media.get("duration_sec") or 0.0)
+
+        previous_end: float | None = None
+        for index, event in enumerate(variant.get("subtitle_events") or [], start=1):
+            if not isinstance(event, dict):
+                issues.append(f"{variant_name}: subtitle event {index} is not a dict")
+                continue
+            start_time = float(event.get("start_time", event.get("start", 0.0)) or 0.0)
+            end_time = float(event.get("end_time", event.get("end", start_time)) or start_time)
+            if end_time < start_time:
+                issues.append(f"{variant_name}: subtitle event {index} has end before start")
+            if previous_end is not None and start_time < previous_end - 1e-6:
+                issues.append(f"{variant_name}: subtitle events are not monotonic at index {index}")
+            if duration_sec > 0 and end_time > duration_sec + 0.05:
+                issues.append(f"{variant_name}: subtitle event {index} extends beyond media duration")
+            previous_end = max(previous_end or end_time, end_time)
+
+    return {"status": "warning" if issues else "ok", "issues": issues}
+
+
+def _resolve_transition_overlap_offsets(
+    render_plan: dict[str, Any] | None,
+    *,
+    keep_segments: list[dict[str, Any]],
+) -> list[tuple[float, float]]:
+    if len(keep_segments) < 2:
+        return []
+
+    transitions = ((render_plan or {}).get("editing_accents") or {}).get("transitions") or {}
+    if not transitions.get("enabled"):
+        return []
+
+    raw_duration = float(transitions.get("duration_sec") or 0.12)
+    requested_indexes: list[int] = []
+    for raw_index in transitions.get("boundary_indexes") or []:
+        try:
+            index = int(raw_index)
+        except (TypeError, ValueError):
+            continue
+        if 0 <= index < len(keep_segments) - 1:
+            requested_indexes.append(index)
+    if not requested_indexes:
+        return []
+
+    boundary_positions: list[float] = []
+    elapsed = 0.0
+    for segment in keep_segments:
+        elapsed += max(0.0, float(segment.get("end", 0.0) or 0.0) - float(segment.get("start", 0.0) or 0.0))
+        boundary_positions.append(elapsed)
+
+    offsets: list[tuple[float, float]] = []
+    for index in requested_indexes:
+        current = keep_segments[index]
+        following = keep_segments[index + 1]
+        current_duration = max(0.0, float(current.get("end", 0.0) or 0.0) - float(current.get("start", 0.0) or 0.0))
+        next_duration = max(0.0, float(following.get("end", 0.0) or 0.0) - float(following.get("start", 0.0) or 0.0))
+        transition_duration = min(max(raw_duration, 0.08), current_duration / 4, next_duration / 4, 0.18)
+        if transition_duration < 0.08:
+            continue
+        offsets.append((boundary_positions[index], round(transition_duration, 3)))
+
+    offsets.sort(key=lambda item: item[0])
+    return offsets
+
+
+def _shift_timed_items_for_transition_overlaps(
+    items: list[dict],
+    *,
+    transition_offsets: list[tuple[float, float]],
+) -> list[dict]:
+    shifted: list[dict] = []
+    for item in items:
+        shifted_item = dict(item)
+        start_time = float(item.get("start_time", 0.0) or 0.0)
+        end_time = float(item.get("end_time", start_time + float(item.get("duration_sec", 0.0) or 0.0)) or 0.0)
+        shifted_item["start_time"] = _shift_time_for_transition_overlaps(
+            start_time,
+            transition_offsets=transition_offsets,
+            inclusive=True,
+        )
+        if "end_time" in item:
+            shifted_item["end_time"] = max(
+                shifted_item["start_time"],
+                _shift_time_for_transition_overlaps(
+                    end_time,
+                    transition_offsets=transition_offsets,
+                    inclusive=False,
+                ),
+            )
+        shifted.append(shifted_item)
+    return shifted
+
+
+def _shift_sound_effects_for_transition_overlaps(
+    items: list[dict],
+    *,
+    transition_offsets: list[tuple[float, float]],
+) -> list[dict]:
+    shifted: list[dict] = []
+    for item in items:
+        shifted_item = dict(item)
+        shifted_item["start_time"] = _shift_time_for_transition_overlaps(
+            float(item.get("start_time", 0.0) or 0.0),
+            transition_offsets=transition_offsets,
+            inclusive=True,
+        )
+        shifted.append(shifted_item)
+    return shifted
+
+
+def _shift_time_for_transition_overlaps(
+    value: float,
+    *,
+    transition_offsets: list[tuple[float, float]],
+    inclusive: bool,
+) -> float:
+    shifted = float(value or 0.0)
+    for boundary_time, overlap in transition_offsets:
+        if shifted > boundary_time or (inclusive and shifted >= boundary_time):
+            shifted -= overlap
+    return max(0.0, shifted)
 
 
 def _select_default_avatar_profile() -> dict[str, Any] | None:

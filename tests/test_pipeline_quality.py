@@ -234,6 +234,105 @@ def test_assess_job_quality_penalizes_subtitle_sync_issue_and_prefers_render_rer
     assert assessment["recommended_rerun_steps"] == ["render", "final_review", "platform_package"]
 
 
+def test_assess_job_quality_prefers_variant_bundle_packaged_quality_checks():
+    job = Job(
+        id=uuid.uuid4(),
+        source_path="jobs/demo/bundle.mp4",
+        source_name="bundle.mp4",
+        status="done",
+        language="zh-CN",
+    )
+    steps = [
+        JobStep(job_id=job.id, step_name="subtitle_postprocess", status="done"),
+        JobStep(job_id=job.id, step_name="glossary_review", status="done"),
+        JobStep(job_id=job.id, step_name="content_profile", status="done"),
+        JobStep(job_id=job.id, step_name="render", status="done"),
+        JobStep(job_id=job.id, step_name="platform_package", status="done"),
+    ]
+    artifacts = [
+        Artifact(
+            job_id=job.id,
+            artifact_type="content_profile_final",
+            data_json={
+                "subject_brand": "Loop露普",
+                "subject_model": "SK05二代UV版",
+                "subject_type": "EDC手电",
+                "video_theme": "SK05二代UV版与一代亮度续航对比",
+                "summary": "围绕 Loop露普 SK05二代UV版 和一代做亮度、续航与 UV 功能差异对比。",
+                "engagement_question": "你更在意二代的 UV 功能还是亮度升级？",
+                "preset_name": "edc_tactical",
+                "review_mode": "auto_confirmed",
+                "automation_review": {"score": 0.95},
+            },
+            created_at=_now(),
+        ),
+        Artifact(
+            job_id=job.id,
+            artifact_type="render_outputs",
+            data_json={
+                "packaged_mp4": "E:/tmp/bundle.mp4",
+                "packaged_srt": "E:/tmp/bundle.srt",
+                "quality_checks": {
+                    "subtitle_sync": {
+                        "status": "ok",
+                        "message": "render outputs remain aligned",
+                        "warning_codes": [],
+                    }
+                },
+            },
+            created_at=_now(),
+        ),
+        Artifact(
+            job_id=job.id,
+            artifact_type="variant_timeline_bundle",
+            data_json={
+                "timeline_rules": {"lead_in_sec": 1.5},
+                "variants": {
+                    "packaged": {
+                        "media": {"path": "E:/tmp/bundle.mp4"},
+                        "subtitle_events": [
+                            {"start_time": 0.0, "end_time": 2.4, "text": "bundle subtitle one"},
+                            {"start_time": 2.8, "end_time": 6.2, "text": "bundle subtitle two"},
+                        ],
+                        "overlay_events": [],
+                        "quality_checks": {
+                            "subtitle_sync": {
+                                "status": "warning",
+                                "message": "bundle packaged timing is off",
+                                "warning_codes": ["subtitle_out_of_bounds"],
+                            }
+                        },
+                    }
+                },
+            },
+            created_at=_now(),
+        ),
+    ]
+    subtitles = [
+        SubtitleItem(
+            job_id=job.id,
+            version=1,
+            item_index=0,
+            start_time=0.0,
+            end_time=4.0,
+            text_raw="这次重点看二代 UV 版和一代在亮度和续航上的区别。",
+        )
+    ]
+
+    assessment = assess_job_quality(
+        job=job,
+        steps=steps,
+        artifacts=artifacts,
+        subtitle_items=subtitles,
+        corrections=[],
+        completion_candidate=True,
+    )
+
+    assert assessment["issue_codes"] == ["subtitle_sync_issue"]
+    assert assessment["signals"]["subtitle_sync"]["status"] == "warning"
+    assert assessment["signals"]["subtitle_sync"]["message"] == "bundle packaged timing is off"
+
+
 def test_assess_job_quality_blocks_subject_conflict_between_subtitles_and_profile():
     job = Job(
         id=uuid.uuid4(),

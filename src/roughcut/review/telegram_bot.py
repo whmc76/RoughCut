@@ -27,6 +27,7 @@ from roughcut.db.models import Artifact, Job, JobStep, ReviewAction, SubtitleIte
 from roughcut.db.session import get_session_factory
 from roughcut.media.audio import extract_audio
 from roughcut.media.probe import probe
+from roughcut.media.variant_timeline_bundle import resolve_effective_variant_timeline_bundle
 from roughcut.packaging.library import list_packaging_assets, resolve_packaging_plan_for_job
 from roughcut.providers.factory import get_reasoning_provider, get_transcription_provider
 from roughcut.review.subtitle_memory import build_transcription_prompt
@@ -478,6 +479,22 @@ class TelegramReviewBotService:
                 )
             ).scalars().first()
             render_outputs = render_outputs_artifact.data_json if render_outputs_artifact and isinstance(render_outputs_artifact.data_json, dict) else {}
+            variant_timeline_bundle_artifact = (
+                await session.execute(
+                    select(Artifact)
+                    .where(Artifact.job_id == job.id, Artifact.artifact_type == "variant_timeline_bundle")
+                    .order_by(Artifact.created_at.desc())
+                )
+            ).scalars().first()
+            variant_timeline_bundle = (
+                variant_timeline_bundle_artifact.data_json
+                if variant_timeline_bundle_artifact and isinstance(variant_timeline_bundle_artifact.data_json, dict)
+                else None
+            )
+            variant_timeline_bundle = resolve_effective_variant_timeline_bundle(
+                variant_timeline_bundle,
+                render_outputs=render_outputs,
+            )
             content_profile_artifacts = (
                 await session.execute(
                     select(Artifact)
@@ -498,6 +515,7 @@ class TelegramReviewBotService:
                 render_outputs=render_outputs,
                 content_profile=content_profile,
                 subtitle_report=subtitle_report,
+                variant_timeline_bundle=variant_timeline_bundle,
                 rerun_context=_extract_latest_final_review_rerun_context(steps),
             )
             videos = await _build_final_review_videos(
@@ -505,6 +523,7 @@ class TelegramReviewBotService:
                 render_outputs,
                 content_profile=content_profile,
                 subtitle_report=subtitle_report,
+                variant_timeline_bundle=variant_timeline_bundle,
             )
         await self._send_review_message(_REVIEW_KIND_FINAL, job_id, message, videos=videos)
 
@@ -1927,6 +1946,7 @@ def _build_final_review_message(
     render_outputs: dict[str, Any],
     content_profile: dict[str, Any] | None = None,
     subtitle_report: Any | None = None,
+    variant_timeline_bundle: dict[str, Any] | None = None,
     rerun_context: dict[str, Any] | None = None,
 ) -> str:
     summary = str((content_profile or {}).get("summary") or (content_profile or {}).get("video_theme") or "").strip()
@@ -1975,6 +1995,15 @@ def _build_final_review_message(
                 *subtitle_hints,
             ]
         )
+    validation_lines = _build_final_review_validation_lines(variant_timeline_bundle)
+    if validation_lines:
+        lines.extend(
+            [
+                "",
+                "时间轴校验：",
+                *validation_lines,
+            ]
+        )
     lines.extend(
         [
             "",
@@ -1997,14 +2026,42 @@ def _build_final_review_message(
     return "\n".join(lines)
 
 
+def _build_final_review_validation_lines(variant_timeline_bundle: dict[str, Any] | None) -> list[str]:
+    validation = (
+        variant_timeline_bundle.get("validation")
+        if isinstance(variant_timeline_bundle, dict)
+        else None
+    )
+    if not isinstance(validation, dict):
+        return []
+
+    issues = [str(item).strip() for item in (validation.get("issues") or []) if str(item).strip()]
+    status = str(validation.get("status") or "").strip().lower()
+    if not issues and status in {"", "ok"}:
+        return []
+
+    risk_label = "异常" if status == "error" else "风险"
+    lines = [f"- 检测到 {len(issues)} 条{risk_label}，请重点核对特效版/横板字幕与声音是否对齐。"]
+    for issue in issues[:3]:
+        lines.append(f"- {issue}")
+    if len(issues) > 3:
+        lines.append(f"- 其余 {len(issues) - 3} 条已省略")
+    return lines
+
+
 async def _build_final_review_videos(
     job_id: uuid.UUID,
     render_outputs: dict[str, Any],
     *,
     content_profile: dict[str, Any] | None = None,
     subtitle_report: Any | None = None,
+    variant_timeline_bundle: dict[str, Any] | None = None,
 ) -> list[TelegramReviewVideo]:
-    source_path = _resolve_final_review_video_source(render_outputs)
+    variant_timeline_bundle = resolve_effective_variant_timeline_bundle(
+        variant_timeline_bundle,
+        render_outputs=render_outputs,
+    )
+    source_path = _resolve_final_review_video_source(render_outputs, variant_timeline_bundle=variant_timeline_bundle)
     if source_path is None:
         return []
     try:
@@ -2013,7 +2070,11 @@ async def _build_final_review_videos(
         logger.warning("Failed to probe final review source for job %s: %s", job_id, exc)
         return []
 
-    subtitle_items = _extract_subtitle_items_from_report(subtitle_report)
+    subtitle_items = _extract_preview_subtitle_items(
+        render_outputs,
+        subtitle_report=subtitle_report,
+        variant_timeline_bundle=variant_timeline_bundle,
+    )
     clip_specs = _build_final_review_clip_specs(
         duration_sec=float(meta.duration or 0.0),
         subtitle_items=subtitle_items,
@@ -2069,7 +2130,14 @@ def _select_final_review_content_profile(artifacts: list[Artifact]) -> dict[str,
     return dict(selected.data_json or {}) if selected and isinstance(selected.data_json, dict) else {}
 
 
-def _resolve_final_review_video_source(render_outputs: dict[str, Any]) -> Path | None:
+def _resolve_final_review_video_source(
+    render_outputs: dict[str, Any],
+    *,
+    variant_timeline_bundle: dict[str, Any] | None = None,
+) -> Path | None:
+    _bundle_variant, bundle_source_path = _select_final_review_bundle_variant(variant_timeline_bundle)
+    if bundle_source_path is not None:
+        return bundle_source_path
     for key in ("packaged_mp4", "avatar_mp4", "ai_effect_mp4", "plain_mp4"):
         value = str(render_outputs.get(key) or "").strip()
         if not value:
@@ -2098,6 +2166,130 @@ def _extract_subtitle_items_from_report(report: Any | None) -> list[dict[str, An
                 "start": float(item.get("start") or 0.0),
                 "end": float(item.get("end") or item.get("start") or 0.0),
                 "text": str(item.get("text_final") or item.get("text_norm") or item.get("text_raw") or "").strip(),
+            }
+        )
+    return items
+
+
+def _extract_preview_subtitle_items(
+    render_outputs: dict[str, Any],
+    *,
+    subtitle_report: Any | None = None,
+    variant_timeline_bundle: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    bundle_variant, _bundle_source_path = _select_final_review_bundle_variant(variant_timeline_bundle)
+    if isinstance(bundle_variant, dict):
+        bundle_items = _extract_subtitle_items_from_variant(bundle_variant)
+        if bundle_items:
+            return bundle_items
+    packaged_srt = Path(str(render_outputs.get("packaged_srt") or "").strip())
+    if packaged_srt.exists():
+        items = _extract_subtitle_items_from_srt(packaged_srt)
+        if items:
+            return items
+    return _extract_subtitle_items_from_report(subtitle_report)
+
+
+def _select_final_review_bundle_variant(
+    bundle: dict[str, Any] | None,
+) -> tuple[dict[str, Any] | None, Path | None]:
+    variants = (bundle or {}).get("variants")
+    if not isinstance(variants, dict):
+        return None, None
+
+    for variant_name in ("packaged", "avatar", "ai_effect", "plain"):
+        variant = variants.get(variant_name)
+        if not isinstance(variant, dict):
+            continue
+        media = variant.get("media")
+        if not isinstance(media, dict):
+            continue
+        for key in ("path", "mp4", "video", "source_path"):
+            value = str(media.get(key) or "").strip()
+            if not value:
+                continue
+            candidate = Path(value)
+            if candidate.exists():
+                return variant, candidate
+    return None, None
+
+
+def _extract_subtitle_items_from_variant(variant: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not isinstance(variant, dict):
+        return []
+
+    items: list[dict[str, Any]] = []
+    for index, event in enumerate(variant.get("subtitle_events") or [], start=1):
+        item = _coerce_subtitle_event_to_item(event, index=index)
+        if item is not None:
+            items.append(item)
+    return items
+
+
+def _coerce_subtitle_event_to_item(event: Any, *, index: int) -> dict[str, Any] | None:
+    if not isinstance(event, dict):
+        return None
+
+    def _event_float(*keys: str) -> float | None:
+        for key in keys:
+            value = event.get(key)
+            if value is None or value == "":
+                continue
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                continue
+        return None
+
+    start_sec = _event_float("start", "start_sec", "start_time", "begin", "begin_sec")
+    end_sec = _event_float("end", "end_sec", "end_time", "stop", "stop_sec")
+    duration_sec = _event_float("duration", "duration_sec")
+    if start_sec is None:
+        return None
+    if end_sec is None and duration_sec is not None:
+        end_sec = start_sec + duration_sec
+    if end_sec is None:
+        end_sec = start_sec
+
+    text = ""
+    for key in ("text", "text_final", "text_norm", "text_raw", "content", "subtitle"):
+        value = str(event.get(key) or "").strip()
+        if value:
+            text = value
+            break
+    if not text:
+        return None
+
+    return {
+        "index": int(event.get("index") or index),
+        "start": float(start_sec),
+        "end": float(end_sec),
+        "text": text,
+    }
+
+
+def _extract_subtitle_items_from_srt(path: Path) -> list[dict[str, Any]]:
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+
+    items: list[dict[str, Any]] = []
+    for block in re.split(r"\r?\n\r?\n+", text):
+        lines = [line.strip("\ufeff") for line in block.splitlines() if line.strip()]
+        if len(lines) < 2 or "-->" not in lines[1]:
+            continue
+        start_text, end_text = [part.strip() for part in lines[1].split("-->", 1)]
+        start_sec = _parse_srt_timestamp(start_text)
+        end_sec = _parse_srt_timestamp(end_text)
+        if start_sec is None or end_sec is None:
+            continue
+        items.append(
+            {
+                "index": len(items) + 1,
+                "start": start_sec,
+                "end": end_sec,
+                "text": " ".join(lines[2:]).strip(),
             }
         )
     return items
@@ -2262,6 +2454,14 @@ def _format_seconds(value: float) -> str:
     if hours > 0:
         return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
     return f"{minutes:02d}:{seconds:02d}"
+
+
+def _parse_srt_timestamp(value: str) -> float | None:
+    match = re.match(r"(\d{2}):(\d{2}):(\d{2})[,.:](\d{3})", value.strip())
+    if not match:
+        return None
+    hours, minutes, seconds, millis = (int(part) for part in match.groups())
+    return hours * 3600 + minutes * 60 + seconds + millis / 1000.0
 
 
 async def _ensure_final_review_preview(
