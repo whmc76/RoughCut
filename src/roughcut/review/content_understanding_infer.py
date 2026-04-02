@@ -82,7 +82,7 @@ async def infer_content_understanding(evidence_bundle: dict[str, Any]) -> Conten
             Message(role="user", content=prompt),
         ],
         temperature=0.1,
-        max_tokens=900,
+        max_tokens=1400,
         json_mode=True,
     )
     understanding = parse_content_understanding_payload(
@@ -138,28 +138,41 @@ def _build_content_understanding_prompt(
     semantic_facts: ContentSemanticFacts,
 ) -> str:
     transcript_excerpt = str(evidence_bundle.get("transcript_excerpt") or "").strip()
+    compact_evidence = _build_compact_evidence_payload(evidence_bundle)
     prompt = (
         "你是严谨的视频内容理解引擎。根据证据包和已抽取的语义事实，推断一个通用内容理解结果，"
         "只输出一个 JSON 对象，不要 Markdown，不要代码块，不要解释。"
-        "字段必须包括 video_type, content_domain, primary_subject, semantic_facts, subject_entities, "
+        "字段必须包括 video_type, content_domain, primary_subject, subject_entities, "
         "video_theme, summary, hook_line, engagement_question, search_queries, evidence_spans, "
         "uncertainties, confidence, needs_review, review_reasons。"
         "约束："
-        "semantic_facts 必须是对象，字段包括 brand_candidates, model_candidates, product_name_candidates, "
-        "product_type_candidates, entity_candidates, collaboration_pairs, search_expansions, evidence_sentences；"
         "subject_entities 必须是对象数组，每项包含 kind,name,brand,model；"
-        "summary 用中文且不超过 120 字；"
+        "summary 用中文且不超过 100 字；"
         "hook_line 用中文且不超过 24 字；"
         "search_queries 最多 4 条，优先结合 semantic_facts.search_expansions 生成；"
-        "evidence_spans 最多 6 条，字段只允许 timestamp,text,type；"
+        "evidence_spans 最多 4 条，字段只允许 timestamp,text,type；"
         "confidence 必须是对象，例如 {\"overall\":0.78}；"
         "信息不足时字段留空或空数组，不要编造。"
-        f"\n证据包: {evidence_bundle}"
+        f"\n紧凑证据包: {compact_evidence}"
         f"\n语义事实: {semantic_facts.__dict__}"
     )
     if transcript_excerpt:
         prompt += f"\n转写片段: {transcript_excerpt}"
     return prompt
+
+
+def _build_compact_evidence_payload(evidence_bundle: dict[str, Any]) -> dict[str, Any]:
+    semantic_fact_inputs = evidence_bundle.get("semantic_fact_inputs")
+    compact_semantic_inputs = semantic_fact_inputs if isinstance(semantic_fact_inputs, dict) else {}
+    candidate_hints = evidence_bundle.get("candidate_hints")
+    compact_candidate_hints = candidate_hints if isinstance(candidate_hints, dict) else {}
+    return {
+        "source_name": str(evidence_bundle.get("source_name") or "").strip(),
+        "transcript_excerpt": str(evidence_bundle.get("transcript_excerpt") or "").strip(),
+        "visible_text": str(evidence_bundle.get("visible_text") or "").strip(),
+        "semantic_fact_inputs": compact_semantic_inputs,
+        "candidate_hints": compact_candidate_hints,
+    }
 
 
 async def _infer_content_semantic_facts(
@@ -236,7 +249,7 @@ async def _load_json_object(
                 Message(role="user", content=repair_prompt),
             ],
             temperature=0.0,
-            max_tokens=900,
+            max_tokens=1400,
             json_mode=True,
         )
         payload = repaired.as_json()

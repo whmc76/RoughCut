@@ -65,6 +65,7 @@ async def test_infer_content_understanding_uses_reasoning_provider_payload(monke
 
     assert provider.calls == 2
     assert "brand_candidates" in prompts[1]
+    assert "primary_subject, semantic_facts, subject_entities" not in prompts[1]
     assert result.video_type == "tutorial"
     assert result.content_domain == "ai"
     assert result.primary_subject == "ComfyUI 工作流"
@@ -203,3 +204,90 @@ async def test_infer_content_understanding_uses_semantic_facts_to_expand_retriev
     assert "HSJUN" in prompts[1]
     assert "游刃" in prompts[1]
     assert result.search_queries == ["HSJUN BOLTBOAT 游刃", "boltboat hsjun 游刃"]
+
+
+@pytest.mark.asyncio
+async def test_infer_content_understanding_uses_compact_evidence_payload_for_final_prompt(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from roughcut.review import content_understanding_infer as infer_mod
+
+    prompts: list[str] = []
+
+    class FakeResponse:
+        def __init__(self, payload):
+            self.payload = payload
+            self.content = json.dumps(payload, ensure_ascii=False)
+
+        def as_json(self):
+            return self.payload
+
+    class FakeProvider:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def complete(self, *args, **kwargs):
+            prompts.append(args[0][-1].content)
+            self.calls += 1
+            if self.calls == 1:
+                return FakeResponse(
+                    {
+                        "brand_candidates": ["HSJUN", "BOLTBOAT"],
+                        "model_candidates": ["游刃"],
+                        "product_name_candidates": ["游刃"],
+                        "product_type_candidates": ["机能双肩包"],
+                        "entity_candidates": ["HSJUN × BOLTBOAT 游刃"],
+                        "collaboration_pairs": ["HSJUN × BOLTBOAT"],
+                        "search_expansions": ["HSJUN BOLTBOAT 游刃"],
+                        "evidence_sentences": ["这是 hsjun 和 boltboat 联名的包，它叫游刃"],
+                    }
+                )
+            return FakeResponse(
+                {
+                    "video_type": "product_review",
+                    "content_domain": "bags",
+                    "primary_subject": "HSJUN × BOLTBOAT 游刃机能双肩包",
+                    "subject_entities": [{"kind": "product", "name": "游刃机能双肩包", "brand": "HSJUN × BOLTBOAT", "model": "游刃"}],
+                    "video_theme": "联名机能双肩包对比评测",
+                    "summary": "视频围绕 HSJUN × BOLTBOAT 游刃机能双肩包展开对比评测。",
+                    "hook_line": "联名机能包上身实测",
+                    "engagement_question": "你更在意结构还是背负？",
+                    "search_queries": ["HSJUN BOLTBOAT 游刃"],
+                    "evidence_spans": [],
+                    "uncertainties": [],
+                    "confidence": {"overall": 0.74},
+                    "needs_review": False,
+                    "review_reasons": [],
+                }
+            )
+
+    monkeypatch.setattr(infer_mod, "get_reasoning_provider", lambda: FakeProvider())
+
+    subtitle_items = [
+        {
+            "index": index,
+            "start_time": float(index),
+            "end_time": float(index) + 1.0,
+            "text_final": f"字幕片段 {index}",
+        }
+        for index in range(50)
+    ]
+    evidence_bundle = {
+        "source_name": "hsjun_boltboat.mp4",
+        "transcript_excerpt": "这是 hsjun 和 boltboat 联名的包，它叫游刃",
+        "subtitle_items": subtitle_items,
+        "semantic_fact_inputs": {
+            "source_name": "hsjun_boltboat.mp4",
+            "subtitle_lines": [f"字幕片段 {index}" for index in range(6)],
+            "transcript_text": "这是 hsjun 和 boltboat 联名的包，它叫游刃",
+            "visible_text": "HSJUN BOLTBOAT",
+            "hint_candidates": ["HSJUN", "BOLTBOAT", "游刃"],
+        },
+    }
+
+    await infer_mod.infer_content_understanding(evidence_bundle)
+
+    assert "'subtitle_items':" not in prompts[1]
+    assert "字幕片段 49" not in prompts[1]
+    assert "HSJUN BOLTBOAT" in prompts[1]
+    assert "这是 hsjun 和 boltboat 联名的包，它叫游刃" in prompts[1]
