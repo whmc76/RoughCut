@@ -9,7 +9,7 @@ async def infer_visual_semantic_evidence(frame_paths: list[Path] | list[str], ca
     mode = str((visual_capability or {}).get("mode") or "").strip()
     if mode == "native_multimodal":
         return await _infer_with_native_multimodal(frame_paths, capabilities)
-    if mode == "visual_mcp":
+    if mode in {"mcp", "visual_mcp"}:
         return await _infer_with_visual_mcp(frame_paths, capabilities)
     return {}
 
@@ -19,7 +19,7 @@ async def _infer_with_native_multimodal(frame_paths: list[Path] | list[str], cap
 
 
 async def _infer_with_visual_mcp(frame_paths: list[Path] | list[str], capabilities: dict[str, Any]) -> dict[str, Any]:
-    return _build_visual_semantic_stub(frame_paths=frame_paths, capabilities=capabilities, mode="visual_mcp")
+    return _build_visual_semantic_stub(frame_paths=frame_paths, capabilities=capabilities, mode="mcp")
 
 
 def _build_visual_semantic_stub(

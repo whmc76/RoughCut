@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from roughcut.review.content_understanding_capabilities import resolve_content_understanding_capabilities
 from roughcut.review.content_understanding_visual import infer_visual_semantic_evidence
 
 
@@ -109,12 +110,17 @@ async def test_infer_visual_semantic_evidence_real_native_route_returns_semantic
 
 @pytest.mark.asyncio
 async def test_infer_visual_semantic_evidence_real_mcp_route_returns_semantic_shape():
-    result = await infer_visual_semantic_evidence(
-        frame_paths=[Path("frame_05.jpg")],
-        capabilities={"visual_understanding": {"provider": "mcp:minimax-vision", "mode": "visual_mcp"}},
+    capabilities = resolve_content_understanding_capabilities(
+        reasoning_provider="minimax",
+        visual_provider="",
+        visual_mcp_provider="mcp:minimax-vision",
     )
 
-    assert result["mode"] == "visual_mcp"
+    assert capabilities["visual_understanding"]["mode"] == "visual_mcp"
+
+    result = await infer_visual_semantic_evidence(frame_paths=[Path("frame_05.jpg")], capabilities=capabilities)
+
+    assert result["mode"] == "mcp"
     assert result["provider"] == "mcp:minimax-vision"
     assert "object_categories" in result
     assert isinstance(result["object_categories"], list)
