@@ -1,6 +1,50 @@
 from __future__ import annotations
 
+import re
 from typing import Any
+
+_RELATION_CUE_TERMS = (
+    "叫",
+    "是",
+    "来自",
+    "联名",
+    "合作",
+    "型号",
+    "系列",
+    "版本",
+    "品牌",
+    "出品",
+)
+_GENERIC_TOKEN_STOPWORDS = {
+    "今天",
+    "主要",
+    "这个",
+    "这款",
+    "一下",
+    "系列",
+    "型号",
+    "品牌",
+    "联名",
+    "合作",
+    "review",
+    "video",
+}
+_ENTITY_TOKEN_PATTERN = r"[A-Za-z][A-Za-z0-9_-]{1,}|[\u4e00-\u9fff]{2,8}"
+_COLLABORATION_PATTERNS = (
+    re.compile(
+        rf"(?P<left>{_ENTITY_TOKEN_PATTERN})\s*(?:和|与|跟|同|及|、|&|＆|x|X|×)\s*(?P<right>{_ENTITY_TOKEN_PATTERN})\s*(?:联名|合作)"
+    ),
+    re.compile(
+        rf"(?P<left>{_ENTITY_TOKEN_PATTERN})\s*(?:x|X|×|&|＆)\s*(?P<right>{_ENTITY_TOKEN_PATTERN})(?:\s*(?:联名|合作))?"
+    ),
+)
+_NAMING_PATTERNS = (
+    re.compile(rf"(?:叫|名叫|叫做|型号(?:是)?|系列(?:叫|是)?|版本(?:叫|是)?)(?P<value>{_ENTITY_TOKEN_PATTERN})"),
+)
+_OWNERSHIP_PATTERNS = (
+    re.compile(rf"(?P<owner>{_ENTITY_TOKEN_PATTERN})\s*家(?:的|出品的?)"),
+    re.compile(rf"(?:来自|是)\s*(?P<owner>{_ENTITY_TOKEN_PATTERN})\s*(?:家|品牌|出的|出品)"),
+)
 
 
 def _as_dict(value: object | None) -> dict[str, Any]:
@@ -34,16 +78,170 @@ def _collect_subtitle_lines(subtitle_items: list[dict[str, Any]]) -> list[str]:
 def _collect_hint_candidates(candidate_hints: dict[str, Any], visual_hints: dict[str, Any]) -> list[str]:
     values: list[str] = []
     for source in (candidate_hints, visual_hints):
-        for key, raw in source.items():
-            if isinstance(raw, list):
-                items = raw
-            else:
-                items = [raw]
-            for item in items:
-                normalized = _as_text(item)
-                if normalized and normalized not in values:
+        for raw in source.values():
+            for normalized in _iter_text_like_values(raw):
+                if normalized not in values:
                     values.append(normalized)
     return values
+
+
+def _iter_text_like_values(value: object | None) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, dict):
+        values: list[str] = []
+        for nested in value.values():
+            for text in _iter_text_like_values(nested):
+                if text not in values:
+                    values.append(text)
+        return values
+    if isinstance(value, list):
+        values: list[str] = []
+        for nested in value:
+            for text in _iter_text_like_values(nested):
+                if text not in values:
+                    values.append(text)
+        return values
+    normalized = _as_text(value)
+    return [normalized] if normalized else []
+
+
+def _relation_cue_score(text: str) -> int:
+    normalized = _as_text(text)
+    if not normalized:
+        return 0
+    score = sum(2 for cue in _RELATION_CUE_TERMS if cue in normalized)
+    if any(char.isascii() and char.isalpha() for char in normalized):
+        score += 1
+    if re.search(r"[\u4e00-\u9fff]{2,}", normalized):
+        score += 1
+    return score
+
+
+def _collect_cue_lines(subtitle_lines: list[str], transcript_excerpt: str) -> list[str]:
+    ranked: list[tuple[int, int, str]] = []
+    for index, line in enumerate(subtitle_lines):
+        score = _relation_cue_score(line)
+        if score <= 0:
+            continue
+        ranked.append((score, -index, line))
+    ranked.sort(reverse=True)
+    cue_lines = [line for _score, _neg_index, line in ranked[:8]]
+    if not cue_lines and transcript_excerpt:
+        cue_lines = [segment.strip() for segment in re.split(r"[\n。！？]", transcript_excerpt) if segment.strip()][:4]
+    return cue_lines
+
+
+def _tokenize_entity_like_text(value: str) -> list[str]:
+    normalized = _as_text(value)
+    if not normalized:
+        return []
+    tokens: list[str] = []
+    for match in re.findall(_ENTITY_TOKEN_PATTERN, normalized):
+        token = str(match or "").strip()
+        if not token:
+            continue
+        normalized_key = token.lower()
+        if normalized_key in _GENERIC_TOKEN_STOPWORDS:
+            continue
+        output = token.upper() if token.isascii() else token
+        if output not in tokens:
+            tokens.append(output)
+    return tokens
+
+
+def _collect_entity_like_tokens(
+    *,
+    source_name: str,
+    visible_text: str,
+    cue_lines: list[str],
+    hint_candidates: list[str],
+    relation_hints: list[dict[str, str]],
+) -> list[str]:
+    values: list[str] = []
+    for raw in [source_name, visible_text, *cue_lines, *hint_candidates]:
+        for token in _tokenize_entity_like_text(raw):
+            if token not in values:
+                values.append(token)
+    for item in relation_hints:
+        for raw in item.values():
+            for token in _tokenize_entity_like_text(str(raw or "")):
+                if token not in values:
+                    values.append(token)
+    return values[:20]
+
+
+def _collect_relation_hints(cue_lines: list[str], transcript_excerpt: str) -> list[dict[str, str]]:
+    hints: list[dict[str, str]] = []
+    candidate_lines = [*cue_lines]
+    if transcript_excerpt:
+        candidate_lines.extend(
+            segment.strip()
+            for segment in re.split(r"[\n。！？]", transcript_excerpt)
+            if segment.strip()
+        )
+    for line in candidate_lines:
+        for hint in _extract_relation_hints_from_line(line):
+            if hint not in hints:
+                hints.append(hint)
+    return hints[:8]
+
+
+def _extract_relation_hints_from_line(text: str) -> list[dict[str, str]]:
+    normalized = _as_text(text)
+    if not normalized:
+        return []
+    hints: list[dict[str, str]] = []
+    for pattern in _COLLABORATION_PATTERNS:
+        for match in pattern.finditer(normalized):
+            left = _clean_relation_value(match.group("left"))
+            right = _clean_relation_value(match.group("right"))
+            if left and right:
+                hints.append({"relation": "collaboration", "left": left, "right": right, "text": normalized})
+    for pattern in _NAMING_PATTERNS:
+        for match in pattern.finditer(normalized):
+            value = _clean_relation_value(match.group("value"))
+            if value:
+                hints.append({"relation": "naming", "value": value, "text": normalized})
+    for pattern in _OWNERSHIP_PATTERNS:
+        for match in pattern.finditer(normalized):
+            owner = _clean_relation_value(match.group("owner"))
+            if owner:
+                hints.append({"relation": "ownership", "owner": owner, "text": normalized})
+    return hints
+
+
+def _clean_relation_value(value: str) -> str:
+    cleaned = _as_text(value).strip(" ,.;:()[]{}<>-_")
+    return cleaned
+
+
+def _merge_semantic_fact_inputs(
+    provided: dict[str, Any],
+    computed: dict[str, Any],
+) -> dict[str, Any]:
+    merged = dict(computed)
+    for key in ("source_name", "transcript_text", "visible_text"):
+        value = _as_text(provided.get(key))
+        if value:
+            merged[key] = value
+    for key in ("subtitle_lines", "cue_lines", "hint_candidates", "entity_like_tokens"):
+        raw = provided.get(key)
+        if isinstance(raw, list):
+            values = [str(item).strip() for item in raw if str(item).strip()]
+            if values:
+                merged[key] = values
+    raw_relation_hints = provided.get("relation_hints")
+    if isinstance(raw_relation_hints, list):
+        relation_hints = [
+            {str(k): str(v).strip() for k, v in item.items() if str(v).strip()}
+            for item in raw_relation_hints
+            if isinstance(item, dict)
+        ]
+        relation_hints = [item for item in relation_hints if item]
+        if relation_hints:
+            merged["relation_hints"] = relation_hints
+    return merged
 
 
 def normalize_evidence_bundle(bundle: object | None) -> dict[str, Any]:
@@ -65,13 +263,26 @@ def normalize_evidence_bundle(bundle: object | None) -> dict[str, Any]:
         visible_text = _as_text(visual_hints.get("visible_text"))
     candidate_hints["visual_hints"] = visual_hints
     subtitle_lines = _collect_subtitle_lines(subtitle_items)
-    semantic_fact_inputs = {
+    hint_candidates = _collect_hint_candidates(candidate_hints, visual_hints)
+    cue_lines = _collect_cue_lines(subtitle_lines, transcript_excerpt)
+    relation_hints = _collect_relation_hints(cue_lines, transcript_excerpt)
+    computed_semantic_inputs = {
         "source_name": source_name,
         "subtitle_lines": subtitle_lines,
+        "cue_lines": cue_lines,
         "transcript_text": transcript_excerpt,
         "visible_text": visible_text,
-        "hint_candidates": _collect_hint_candidates(candidate_hints, visual_hints),
+        "hint_candidates": hint_candidates,
+        "relation_hints": relation_hints,
+        "entity_like_tokens": _collect_entity_like_tokens(
+            source_name=source_name,
+            visible_text=visible_text,
+            cue_lines=cue_lines,
+            hint_candidates=hint_candidates,
+            relation_hints=relation_hints,
+        ),
     }
+    semantic_fact_inputs = _merge_semantic_fact_inputs(_as_dict(raw.get("semantic_fact_inputs")), computed_semantic_inputs)
 
     normalized: dict[str, Any] = {
         "source_name": source_name,

@@ -4,6 +4,7 @@ from typing import Any
 
 from roughcut.providers.factory import get_reasoning_provider
 from roughcut.providers.reasoning.base import Message
+from roughcut.review.content_understanding_evidence import normalize_evidence_bundle
 from roughcut.review.content_understanding_schema import (
     ContentSemanticFacts,
     ContentUnderstanding,
@@ -72,6 +73,7 @@ def parse_content_understanding_payload(data: Any) -> ContentUnderstanding:
 
 
 async def infer_content_understanding(evidence_bundle: dict[str, Any]) -> ContentUnderstanding:
+    evidence_bundle = normalize_evidence_bundle(evidence_bundle)
     provider = get_reasoning_provider()
     semantic_facts = await _infer_content_semantic_facts(provider, evidence_bundle)
     prompt = _build_content_understanding_prompt(evidence_bundle, semantic_facts)
@@ -163,7 +165,36 @@ def _build_content_understanding_prompt(
 
 def _build_compact_evidence_payload(evidence_bundle: dict[str, Any]) -> dict[str, Any]:
     semantic_fact_inputs = evidence_bundle.get("semantic_fact_inputs")
-    compact_semantic_inputs = semantic_fact_inputs if isinstance(semantic_fact_inputs, dict) else {}
+    raw_semantic_inputs = semantic_fact_inputs if isinstance(semantic_fact_inputs, dict) else {}
+    compact_semantic_inputs = {
+        "source_name": str(raw_semantic_inputs.get("source_name") or "").strip(),
+        "cue_lines": [
+            str(item).strip()
+            for item in (raw_semantic_inputs.get("cue_lines") or [])
+            if str(item).strip()
+        ][:8],
+        "relation_hints": [
+            {
+                str(key): str(value).strip()
+                for key, value in item.items()
+                if str(value).strip()
+            }
+            for item in (raw_semantic_inputs.get("relation_hints") or [])
+            if isinstance(item, dict)
+        ][:8],
+        "transcript_text": str(raw_semantic_inputs.get("transcript_text") or "").strip(),
+        "visible_text": str(raw_semantic_inputs.get("visible_text") or "").strip(),
+        "hint_candidates": [
+            str(item).strip()
+            for item in (raw_semantic_inputs.get("hint_candidates") or [])
+            if str(item).strip()
+        ][:12],
+        "entity_like_tokens": [
+            str(item).strip()
+            for item in (raw_semantic_inputs.get("entity_like_tokens") or [])
+            if str(item).strip()
+        ][:20],
+    }
     candidate_hints = evidence_bundle.get("candidate_hints")
     compact_candidate_hints = candidate_hints if isinstance(candidate_hints, dict) else {}
     return {
@@ -186,6 +217,7 @@ async def _infer_content_semantic_facts(
         "entity_candidates, collaboration_pairs, search_expansions, evidence_sentences。"
         "要求："
         "只提取证据支持的候选，不要输出最终结论；"
+        "优先参考 cue_lines 和 relation_hints 中的命名、归属、联名、型号、系列等关系提示，以及 entity_like_tokens 中的实体样 token；"
         "search_expansions 最多 6 条，可包含中英别名、音译、联名组合、近似实体检索词；"
         "evidence_sentences 最多 6 条，应保留原始语义片段；"
         "信息不足时返回空数组。"
