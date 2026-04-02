@@ -87,33 +87,42 @@ async def infer_content_understanding(evidence_bundle: dict[str, Any]) -> Conten
         max_tokens=1400,
         json_mode=True,
     )
-    understanding = parse_content_understanding_payload(
-        await _load_json_object(
-            provider,
-            response,
-            required_fields=[
-                "video_type",
-                "content_domain",
-                "primary_subject",
-                "subject_entities",
-                "video_theme",
-                "summary",
-                "hook_line",
-                "engagement_question",
-                "search_queries",
-                "evidence_spans",
-                "uncertainties",
-                "confidence",
-                "needs_review",
-                "review_reasons",
-            ],
-            empty_object_description=(
-                '{"video_type":"","content_domain":"","primary_subject":"","subject_entities":[],'
-                '"video_theme":"","summary":"","hook_line":"","engagement_question":"","search_queries":[],'
-                '"evidence_spans":[],"uncertainties":[],"confidence":{},"needs_review":true,"review_reasons":[]}'
-            ),
-        )
+    payload = await _load_json_object(
+        provider,
+        response,
+        required_fields=[
+            "video_type",
+            "content_domain",
+            "primary_subject",
+            "subject_entities",
+            "video_theme",
+            "summary",
+            "hook_line",
+            "engagement_question",
+            "search_queries",
+            "evidence_spans",
+            "uncertainties",
+            "confidence",
+            "needs_review",
+            "review_reasons",
+        ],
+        empty_object_description=(
+            '{"video_type":"","content_domain":"","primary_subject":"","subject_entities":[],'
+            '"video_theme":"","summary":"","hook_line":"","engagement_question":"","search_queries":[],'
+            '"evidence_spans":[],"uncertainties":[],"confidence":{},"needs_review":true,"review_reasons":[]}'
+        ),
     )
+    understanding = parse_content_understanding_payload(payload)
+    if _needs_understanding_repair(understanding, semantic_facts):
+        repaired_payload = await _repair_empty_understanding_payload(
+            provider=provider,
+            response=response,
+            evidence_bundle=evidence_bundle,
+            semantic_facts=semantic_facts,
+        )
+        repaired_understanding = parse_content_understanding_payload(repaired_payload)
+        if not _needs_understanding_repair(repaired_understanding, semantic_facts):
+            understanding = repaired_understanding
     if understanding.semantic_facts == ContentSemanticFacts():
         understanding = ContentUnderstanding(
             video_type=understanding.video_type,
@@ -285,4 +294,75 @@ async def _load_json_object(
             json_mode=True,
         )
         payload = repaired.as_json()
+    return payload if isinstance(payload, dict) else {}
+
+
+def _needs_understanding_repair(
+    understanding: ContentUnderstanding,
+    semantic_facts: ContentSemanticFacts,
+) -> bool:
+    informative_semantic_facts = any(
+        (
+            semantic_facts.brand_candidates,
+            semantic_facts.model_candidates,
+            semantic_facts.product_name_candidates,
+            semantic_facts.product_type_candidates,
+            semantic_facts.entity_candidates,
+            semantic_facts.collaboration_pairs,
+            semantic_facts.search_expansions,
+            semantic_facts.evidence_sentences,
+        )
+    )
+    if not informative_semantic_facts:
+        return False
+    has_core_output = any(
+        (
+            understanding.video_type,
+            understanding.content_domain,
+            understanding.primary_subject,
+            understanding.subject_entities,
+            understanding.video_theme,
+            understanding.summary,
+            understanding.hook_line,
+            understanding.engagement_question,
+            understanding.search_queries,
+            understanding.review_reasons,
+        )
+    )
+    return not has_core_output
+
+
+async def _repair_empty_understanding_payload(
+    *,
+    provider: Any,
+    response: Any,
+    evidence_bundle: dict[str, Any],
+    semantic_facts: ContentSemanticFacts,
+) -> dict[str, Any]:
+    repair_prompt = (
+        "下面这个内容理解结果虽然是 JSON，但核心字段为空。"
+        "请基于原始输出、语义事实和紧凑证据，重写成一个严格 JSON 对象。"
+        "不要输出 Markdown，不要代码块，不要解释。"
+        "字段必须包括 video_type, content_domain, primary_subject, subject_entities, "
+        "video_theme, summary, hook_line, engagement_question, search_queries, evidence_spans, "
+        "uncertainties, confidence, needs_review, review_reasons。"
+        "要求："
+        "1. 如果证据足够，就补全最合理的内容理解结果；"
+        "2. 如果证据不足，也必须明确写出 review_reasons，不能整包留空；"
+        "3. 不要编造未被证据支持的品牌/型号；"
+        "4. 允许保守，但不能忽略 semantic_facts 已经明确给出的候选。"
+        f"\n原始输出:\n{getattr(response, 'content', '')}"
+        f"\n语义事实:\n{semantic_facts.__dict__}"
+        f"\n紧凑证据包:\n{_build_compact_evidence_payload(evidence_bundle)}"
+    )
+    repaired = await provider.complete(
+        [
+            Message(role="system", content="你是内容理解 JSON 修复器，只输出严格 JSON。"),
+            Message(role="user", content=repair_prompt),
+        ],
+        temperature=0.0,
+        max_tokens=1400,
+        json_mode=True,
+    )
+    payload = repaired.as_json()
     return payload if isinstance(payload, dict) else {}

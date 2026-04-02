@@ -371,3 +371,103 @@ async def test_infer_content_understanding_compact_payload_keeps_relation_hints(
     assert "relation_hints" in prompts[1]
     assert "collaboration" in prompts[1]
     assert "YOUREN" in prompts[1]
+
+
+@pytest.mark.asyncio
+async def test_infer_content_understanding_repairs_empty_final_payload_when_semantic_facts_are_informative(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from roughcut.review import content_understanding_infer as infer_mod
+
+    prompts: list[str] = []
+
+    class FakeResponse:
+        def __init__(self, payload):
+            self.payload = payload
+            self.content = json.dumps(payload, ensure_ascii=False)
+
+        def as_json(self):
+            return self.payload
+
+    class FakeProvider:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def complete(self, *args, **kwargs):
+            prompts.append(args[0][-1].content)
+            self.calls += 1
+            if self.calls == 1:
+                return FakeResponse(
+                    {
+                        "brand_candidates": ["HSJUN", "BOLTBOAT"],
+                        "model_candidates": ["游刃"],
+                        "product_name_candidates": ["游刃"],
+                        "product_type_candidates": ["机能双肩包"],
+                        "entity_candidates": ["HSJUN × BOLTBOAT 游刃"],
+                        "collaboration_pairs": ["HSJUN × BOLTBOAT"],
+                        "search_expansions": ["HSJUN BOLTBOAT 游刃"],
+                        "evidence_sentences": ["这是 hsjun 和 boltboat 联名的包，它叫游刃"],
+                    }
+                )
+            if self.calls == 2:
+                return FakeResponse(
+                    {
+                        "video_type": "",
+                        "content_domain": "",
+                        "primary_subject": "",
+                        "subject_entities": [],
+                        "video_theme": "",
+                        "summary": "",
+                        "hook_line": "",
+                        "engagement_question": "",
+                        "search_queries": [],
+                        "evidence_spans": [],
+                        "uncertainties": [],
+                        "confidence": {},
+                        "needs_review": True,
+                        "review_reasons": [],
+                    }
+                )
+            return FakeResponse(
+                {
+                    "video_type": "product_review",
+                    "content_domain": "bags",
+                    "primary_subject": "HSJUN × BOLTBOAT 游刃机能双肩包",
+                    "subject_entities": [{"kind": "product", "name": "游刃机能双肩包", "brand": "HSJUN × BOLTBOAT", "model": "游刃"}],
+                    "video_theme": "联名机能双肩包对比评测",
+                    "summary": "视频围绕 HSJUN × BOLTBOAT 游刃机能双肩包展开对比评测。",
+                    "hook_line": "联名机能包上身实测",
+                    "engagement_question": "你更在意结构还是背负？",
+                    "search_queries": ["HSJUN BOLTBOAT 游刃"],
+                    "evidence_spans": [],
+                    "uncertainties": [],
+                    "confidence": {"overall": 0.74},
+                    "needs_review": True,
+                    "review_reasons": ["联名实体待核验"],
+                }
+            )
+
+    monkeypatch.setattr(infer_mod, "get_reasoning_provider", lambda: FakeProvider())
+
+    result = await infer_mod.infer_content_understanding(
+        {
+            "transcript_excerpt": "这是 hsjun 和 boltboat 联名的包，它叫游刃",
+            "semantic_fact_inputs": {
+                "source_name": "hsjun_boltboat.mp4",
+                "cue_lines": ["这是 hsjun 和 boltboat 联名的包", "这个系列叫游刃"],
+                "transcript_text": "这是 hsjun 和 boltboat 联名的包，它叫游刃",
+                "visible_text": "HSJUN BOLTBOAT",
+                "hint_candidates": ["HSJUN", "BOLTBOAT", "游刃"],
+                "entity_like_tokens": ["HSJUN", "BOLTBOAT", "YOUREN"],
+                "relation_hints": [
+                    {"relation": "collaboration", "left": "hsjun", "right": "boltboat", "text": "这是 hsjun 和 boltboat 联名的包"},
+                    {"relation": "naming", "value": "游刃", "text": "这个系列叫游刃"},
+                ],
+            },
+        }
+    )
+
+    assert result.primary_subject == "HSJUN × BOLTBOAT 游刃机能双肩包"
+    assert result.video_theme == "联名机能双肩包对比评测"
+    assert result.search_queries == ["HSJUN BOLTBOAT 游刃"]
+    assert len(prompts) == 3
