@@ -86,7 +86,7 @@ async def infer_content_understanding(evidence_bundle: dict[str, Any]) -> Conten
     provider = get_reasoning_provider()
     semantic_facts = await infer_content_semantic_facts(provider, evidence_bundle)
     understanding = await infer_final_understanding(provider, evidence_bundle, semantic_facts)
-    return understanding
+    return _with_staged_semantic_facts(understanding, semantic_facts)
 
 
 async def infer_final_understanding(
@@ -169,6 +169,33 @@ async def infer_final_understanding(
             review_reasons=understanding.review_reasons,
         )
     return understanding
+
+
+def _with_staged_semantic_facts(
+    understanding: ContentUnderstanding,
+    semantic_facts: ContentSemanticFacts,
+) -> ContentUnderstanding:
+    return ContentUnderstanding(
+        video_type=understanding.video_type,
+        content_domain=understanding.content_domain,
+        primary_subject=understanding.primary_subject,
+        semantic_facts=semantic_facts,
+        subject_entities=understanding.subject_entities,
+        observed_entities=understanding.observed_entities,
+        resolved_entities=understanding.resolved_entities,
+        resolved_primary_subject=understanding.resolved_primary_subject,
+        entity_resolution_map=understanding.entity_resolution_map,
+        video_theme=understanding.video_theme,
+        summary=understanding.summary,
+        hook_line=understanding.hook_line,
+        engagement_question=understanding.engagement_question,
+        search_queries=understanding.search_queries or semantic_facts.search_expansions[:4],
+        evidence_spans=understanding.evidence_spans,
+        uncertainties=understanding.uncertainties,
+        confidence=understanding.confidence,
+        needs_review=understanding.needs_review,
+        review_reasons=understanding.review_reasons,
+    )
 
 
 def _build_content_understanding_prompt(
