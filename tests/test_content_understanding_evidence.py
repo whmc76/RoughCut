@@ -1,6 +1,20 @@
 from __future__ import annotations
 
-from roughcut.review.content_understanding_evidence import build_evidence_bundle
+from roughcut.review.content_understanding_evidence import build_evidence_bundle, normalize_evidence_bundle
+
+
+def test_normalize_evidence_bundle_keeps_visual_semantic_evidence_separate_from_hint_fields():
+    bundle = normalize_evidence_bundle(
+        {
+            "source_name": "demo.mp4",
+            "visual_semantic_evidence": {"object_categories": ["backpack"]},
+            "visual_hints": {"subject_type": "EDC机能包"},
+        }
+    )
+
+    assert bundle["visual_semantic_evidence"]["object_categories"] == ["backpack"]
+    assert bundle["candidate_hints"]["visual_hints"]["subject_type"] == "EDC机能包"
+    assert "visual_semantic_evidence" not in bundle["candidate_hints"]
 
 
 def test_build_evidence_bundle_keeps_evidence_only_fields():
@@ -59,26 +73,28 @@ def test_build_evidence_bundle_collects_generic_semantic_fact_inputs():
 
 def test_build_evidence_bundle_prioritizes_relation_rich_cue_lines_and_entity_tokens():
     bundle = build_evidence_bundle(
-        source_name="hsjun_boltboat_youren_review.mp4",
+        source_name="collab_backpack_review.mp4",
         subtitle_items=[
             {"text_final": "今天主要聊一下上身感受", "start_time": 0.0, "end_time": 1.0},
             {"text_final": "这是 hsjun 和 boltboat 联名的包", "start_time": 1.0, "end_time": 2.0},
-            {"text_final": "这个系列叫游刃", "start_time": 2.0, "end_time": 3.0},
+            {"text_final": "这个系列叫 游刃", "start_time": 2.0, "end_time": 3.0},
             {"text_final": "它的面料和容量我后面再说", "start_time": 3.0, "end_time": 4.0},
             {"text_final": "型号其实就是这次联名双肩包", "start_time": 4.0, "end_time": 5.0},
         ],
-        transcript_excerpt="这是 hsjun 和 boltboat 联名的包，这个系列叫游刃",
+        transcript_excerpt="这是 hsjun 和 boltboat 联名的包，这个系列叫 游刃",
         visible_text="HSJUN BOLTBOAT",
     )
 
     semantic_inputs = bundle["semantic_fact_inputs"]
 
     assert "这是 hsjun 和 boltboat 联名的包" in semantic_inputs["cue_lines"]
-    assert "这个系列叫游刃" in semantic_inputs["cue_lines"]
+    assert "这个系列叫 游刃" in semantic_inputs["cue_lines"]
     assert "HSJUN" in semantic_inputs["entity_like_tokens"]
     assert "BOLTBOAT" in semantic_inputs["entity_like_tokens"]
-    assert any("YOUREN" in token for token in semantic_inputs["entity_like_tokens"])
+    assert any(item["relation"] == "naming" and item.get("value") == "游刃" for item in semantic_inputs["relation_hints"])
+    assert "游刃" in semantic_inputs["entity_like_tokens"]
     assert len(semantic_inputs["cue_lines"]) <= 8
+    assert "COLLAB_BACKPACK_REVIEW" not in semantic_inputs["entity_like_tokens"]
 
 
 def test_build_evidence_bundle_collects_relation_hints_and_skips_placeholder_hint_values():
@@ -86,10 +102,10 @@ def test_build_evidence_bundle_collects_relation_hints_and_skips_placeholder_hin
         source_name="brand_collab_review.mp4",
         subtitle_items=[
             {"text_final": "这是 hsjun 和 boltboat 联名的包", "start_time": 0.0, "end_time": 1.0},
-            {"text_final": "这个系列叫游刃", "start_time": 1.0, "end_time": 2.0},
+            {"text_final": "这个系列叫 游刃", "start_time": 1.0, "end_time": 2.0},
             {"text_final": "这是 hsjun 家的轻量化双肩包", "start_time": 2.0, "end_time": 3.0},
         ],
-        transcript_excerpt="这是 hsjun 和 boltboat 联名的包，这个系列叫游刃",
+        transcript_excerpt="这是 hsjun 和 boltboat 联名的包，这个系列叫 游刃",
         visible_text="",
         ocr_profile={"visible_text": ""},
         visual_hints={"subject_brand": "HSJUN", "nested": {"subject_model": "游刃"}},
@@ -103,3 +119,38 @@ def test_build_evidence_bundle_collects_relation_hints_and_skips_placeholder_hin
     assert any(item["relation"] == "collaboration" for item in semantic_inputs["relation_hints"])
     assert any(item["relation"] == "naming" for item in semantic_inputs["relation_hints"])
     assert any(item["relation"] == "ownership" for item in semantic_inputs["relation_hints"])
+
+
+def test_build_content_understanding_orchestration_context_rejects_invalid_or_nested_context_input():
+    from roughcut.review.content_understanding_orchestrator import build_content_understanding_orchestration_context
+
+    try:
+        build_content_understanding_orchestration_context(None)
+    except TypeError as exc:
+        assert "dict evidence bundle" in str(exc)
+    else:
+        raise AssertionError("expected TypeError for non-dict input")
+
+    try:
+        build_content_understanding_orchestration_context({"evidence_bundle": {}})
+    except ValueError as exc:
+        assert "already-orchestrated context" in str(exc)
+    else:
+        raise AssertionError("expected ValueError for nested orchestrator context")
+
+
+def test_build_content_understanding_orchestration_context_uses_new_mainline_and_preserves_visual_semantic_evidence():
+    from roughcut.review.content_understanding_orchestrator import build_content_understanding_orchestration_context
+
+    context = build_content_understanding_orchestration_context(
+        {
+            "source_name": "demo.mp4",
+            "visual_semantic_evidence": {"object_categories": ["backpack"]},
+            "visual_hints": {"subject_type": "EDC机能包"},
+        }
+    )
+
+    assert context["mainline"] == "content_understanding"
+    assert context["evidence_bundle"]["visual_semantic_evidence"]["object_categories"] == ["backpack"]
+    assert context["evidence_bundle"]["candidate_hints"]["visual_hints"]["subject_type"] == "EDC机能包"
+    assert "content_profile" not in context

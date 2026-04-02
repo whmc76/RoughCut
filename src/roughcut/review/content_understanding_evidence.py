@@ -28,6 +28,12 @@ _GENERIC_TOKEN_STOPWORDS = {
     "合作",
     "review",
     "video",
+    "mp4",
+    "mov",
+    "mkv",
+    "avi",
+    "webm",
+    "demo",
 }
 _ENTITY_TOKEN_PATTERN = r"[A-Za-z][A-Za-z0-9_-]{1,}|[\u4e00-\u9fff]{2,8}"
 _COLLABORATION_PATTERNS = (
@@ -39,7 +45,7 @@ _COLLABORATION_PATTERNS = (
     ),
 )
 _NAMING_PATTERNS = (
-    re.compile(rf"(?:叫|名叫|叫做|型号(?:是)?|系列(?:叫|是)?|版本(?:叫|是)?)(?P<value>{_ENTITY_TOKEN_PATTERN})"),
+    re.compile(rf"(?:叫|名叫|叫做|型号(?:是)?|系列(?:叫|是)?|版本(?:叫|是)?)(?:\s+)?(?P<value>{_ENTITY_TOKEN_PATTERN})"),
 )
 _OWNERSHIP_PATTERNS = (
     re.compile(rf"(?P<owner>{_ENTITY_TOKEN_PATTERN})\s*家(?:的|出品的?)"),
@@ -150,6 +156,25 @@ def _tokenize_entity_like_text(value: str) -> list[str]:
     return tokens
 
 
+def _tokenize_source_name(value: str) -> list[str]:
+    normalized = _as_text(value)
+    if not normalized:
+        return []
+    stem = normalized.rsplit(".", 1)[0]
+    tokens: list[str] = []
+    for raw in re.split(r"[^A-Za-z0-9\u4e00-\u9fff]+", stem):
+        token = str(raw or "").strip()
+        if not token:
+            continue
+        normalized_key = token.lower()
+        if normalized_key in _GENERIC_TOKEN_STOPWORDS:
+            continue
+        output = token.upper() if token.isascii() else token
+        if output not in tokens:
+            tokens.append(output)
+    return tokens
+
+
 def _collect_entity_like_tokens(
     *,
     source_name: str,
@@ -159,12 +184,16 @@ def _collect_entity_like_tokens(
     relation_hints: list[dict[str, str]],
 ) -> list[str]:
     values: list[str] = []
-    for raw in [source_name, visible_text, *cue_lines, *hint_candidates]:
+    for token in _tokenize_source_name(source_name):
+        if token not in values:
+            values.append(token)
+    for raw in [visible_text, *cue_lines, *hint_candidates]:
         for token in _tokenize_entity_like_text(raw):
             if token not in values:
                 values.append(token)
     for item in relation_hints:
-        for raw in item.values():
+        for key in ("left", "right", "value", "owner"):
+            raw = item.get(key)
             for token in _tokenize_entity_like_text(str(raw or "")):
                 if token not in values:
                     values.append(token)
@@ -250,6 +279,7 @@ def normalize_evidence_bundle(bundle: object | None) -> dict[str, Any]:
     transcript_excerpt = _as_text(raw.get("transcript_excerpt"))
     subtitle_items = _as_subtitle_items(raw.get("subtitle_items"))
     ocr_profile = _as_dict(raw.get("ocr_profile"))
+    visual_semantic_evidence = _as_dict(raw.get("visual_semantic_evidence"))
 
     visible_text = _as_text(raw.get("visible_text"))
     if not visible_text:
@@ -290,6 +320,7 @@ def normalize_evidence_bundle(bundle: object | None) -> dict[str, Any]:
         "subtitle_items": subtitle_items,
         "visible_text": visible_text,
         "ocr_profile": ocr_profile,
+        "visual_semantic_evidence": visual_semantic_evidence,
         "candidate_hints": candidate_hints,
         "semantic_fact_inputs": semantic_fact_inputs,
     }
@@ -303,6 +334,7 @@ def build_evidence_bundle(
     transcript_excerpt: str = "",
     visible_text: str = "",
     ocr_profile: dict[str, Any] | None = None,
+    visual_semantic_evidence: dict[str, Any] | None = None,
     visual_hints: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return normalize_evidence_bundle(
@@ -312,6 +344,7 @@ def build_evidence_bundle(
             "transcript_excerpt": transcript_excerpt,
             "visible_text": visible_text,
             "ocr_profile": ocr_profile or {},
+            "visual_semantic_evidence": visual_semantic_evidence or {},
             "visual_hints": visual_hints or {},
         }
     )
