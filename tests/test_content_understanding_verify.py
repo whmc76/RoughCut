@@ -155,3 +155,113 @@ async def test_verify_content_understanding_stays_conservative_without_direct_ev
     assert result.primary_subject == "ComfyUI 工作流"
     assert result.needs_review is True
     assert "缺少直接视频证据" in " ".join(result.review_reasons)
+
+
+@pytest.mark.asyncio
+async def test_verify_content_understanding_can_promote_resolved_entity_over_observed_alias():
+    understanding = ContentUnderstanding(
+        video_type="product_review",
+        content_domain="bags",
+        primary_subject="船长联名包",
+        subject_entities=[SubjectEntity(kind="product", name="船长联名包", brand="船长", model="游刃")],
+        observed_entities=[SubjectEntity(kind="product", name="船长联名包", brand="船长", model="游刃")],
+        video_theme="联名机能双肩包对比评测",
+        summary="视频围绕船长联名包展开对比评测。",
+        hook_line="联名机能包上身实测",
+        engagement_question="你更在意结构还是背负？",
+        search_queries=["船长 游刃 双肩包"],
+        evidence_spans=[],
+        uncertainties=[],
+        confidence={"overall": 0.7},
+        needs_review=True,
+        review_reasons=[],
+    )
+    verification_payload = {
+        "video_type": "product_review",
+        "content_domain": "bags",
+        "primary_subject": "船长联名包",
+        "resolved_primary_subject": "HSJUN × BOLTBOAT 游刃机能双肩包",
+        "subject_entities": [{"kind": "product", "name": "船长联名包", "brand": "船长", "model": "游刃"}],
+        "observed_entities": [{"kind": "product", "name": "船长联名包", "brand": "船长", "model": "游刃"}],
+        "resolved_entities": [{"kind": "product", "name": "HSJUN × BOLTBOAT 游刃机能双肩包", "brand": "HSJUN × BOLTBOAT", "model": "游刃"}],
+        "entity_resolution_map": [{"observed_name": "船长联名包", "resolved_name": "HSJUN × BOLTBOAT 游刃机能双肩包", "confidence": 0.93, "reason": "在线搜索和内部记录稳定指向 BOLTBOAT"}],
+        "video_theme": "联名机能双肩包对比评测",
+        "summary": "视频围绕 HSJUN × BOLTBOAT 游刃机能双肩包展开对比评测。",
+        "hook_line": "联名机能包上身实测",
+        "engagement_question": "你更在意结构还是背负？",
+        "search_queries": ["HSJUN BOLTBOAT 游刃"],
+        "evidence_spans": [],
+        "uncertainties": ["视频里更常用船长这个叫法"],
+        "confidence": {"overall": 0.86, "resolution": 0.93},
+        "needs_review": True,
+        "review_reasons": ["原始称呼与归一化实体存在差异"],
+    }
+
+    result = await verify_content_understanding(
+        understanding=understanding,
+        evidence_bundle={"transcript_excerpt": "这是船长联名的包，它叫游刃"},
+        verification_bundle=HybridVerificationBundle(
+            search_queries=["船长 游刃 双肩包"],
+            online_results=[{"title": "HSJUN × BOLTBOAT 游刃机能双肩包"}],
+            database_results=[{"primary_subject": "HSJUN × BOLTBOAT 游刃机能双肩包"}],
+        ),
+        provider=FakeProvider(verification_payload),
+    )
+
+    assert result.primary_subject == "HSJUN × BOLTBOAT 游刃机能双肩包"
+    assert result.needs_review is True
+
+
+@pytest.mark.asyncio
+async def test_verify_content_understanding_keeps_observed_entity_when_resolution_is_weak():
+    understanding = ContentUnderstanding(
+        video_type="product_review",
+        content_domain="bags",
+        primary_subject="船长联名包",
+        subject_entities=[SubjectEntity(kind="product", name="船长联名包", brand="船长", model="游刃")],
+        observed_entities=[SubjectEntity(kind="product", name="船长联名包", brand="船长", model="游刃")],
+        video_theme="联名机能双肩包对比评测",
+        summary="视频围绕船长联名包展开对比评测。",
+        hook_line="联名机能包上身实测",
+        engagement_question="你更在意结构还是背负？",
+        search_queries=["船长 游刃 双肩包"],
+        evidence_spans=[],
+        uncertainties=[],
+        confidence={"overall": 0.7},
+        needs_review=True,
+        review_reasons=[],
+    )
+    verification_payload = {
+        "video_type": "product_review",
+        "content_domain": "bags",
+        "primary_subject": "船长联名包",
+        "resolved_primary_subject": "HSJUN × BOLTBOAT 游刃机能双肩包",
+        "subject_entities": [{"kind": "product", "name": "船长联名包", "brand": "船长", "model": "游刃"}],
+        "observed_entities": [{"kind": "product", "name": "船长联名包", "brand": "船长", "model": "游刃"}],
+        "resolved_entities": [{"kind": "product", "name": "HSJUN × BOLTBOAT 游刃机能双肩包", "brand": "HSJUN × BOLTBOAT", "model": "游刃"}],
+        "entity_resolution_map": [{"observed_name": "船长联名包", "resolved_name": "HSJUN × BOLTBOAT 游刃机能双肩包", "confidence": 0.42, "reason": "只有弱匹配"}],
+        "video_theme": "联名机能双肩包对比评测",
+        "summary": "视频围绕 HSJUN × BOLTBOAT 游刃机能双肩包展开对比评测。",
+        "hook_line": "联名机能包上身实测",
+        "engagement_question": "你更在意结构还是背负？",
+        "search_queries": ["HSJUN BOLTBOAT 游刃"],
+        "evidence_spans": [],
+        "uncertainties": ["只能弱匹配到外部实体"],
+        "confidence": {"overall": 0.68, "resolution": 0.42},
+        "needs_review": True,
+        "review_reasons": ["外部消歧证据偏弱"],
+    }
+
+    result = await verify_content_understanding(
+        understanding=understanding,
+        evidence_bundle={"transcript_excerpt": "这是船长联名的包，它叫游刃"},
+        verification_bundle=HybridVerificationBundle(
+            search_queries=["船长 游刃 双肩包"],
+            online_results=[{"title": "疑似相关结果"}],
+            database_results=[],
+        ),
+        provider=FakeProvider(verification_payload),
+    )
+
+    assert result.primary_subject == "船长联名包"
+    assert result.needs_review is True

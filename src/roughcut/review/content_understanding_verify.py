@@ -72,9 +72,13 @@ async def verify_content_understanding(
         "2. primary_subject 要尽量具体。"
         "3. subject_entities 至少列出相关主体。"
         "4. uncertainties 要写明不确定之处。"
+        "5. observed_entities 要保留视频里的原始称呼；resolved_entities 和 resolved_primary_subject 用于归一化结果；"
+        "6. entity_resolution_map 要说明 observed 到 resolved 的映射。"
         "JSON 结构："
         "{"
         '"video_type":"","content_domain":"","primary_subject":"","subject_entities":[{"kind":"","name":"","brand":"","model":""}],'
+        '"observed_entities":[{"kind":"","name":"","brand":"","model":""}],'
+        '"resolved_entities":[{"kind":"","name":"","brand":"","model":""}],"resolved_primary_subject":"","entity_resolution_map":[{"observed_name":"","resolved_name":"","confidence":0.0,"reason":""}],'
         '"video_theme":"","summary":"","hook_line":"","engagement_question":"","search_queries":[],"evidence_spans":[],'
         '"uncertainties":[],"confidence":{},"needs_review":true,"review_reasons":[]'
         "}"
@@ -156,6 +160,12 @@ def _apply_conservative_verification(
 ) -> ContentUnderstanding:
     has_direct_evidence = _has_direct_evidence(evidence_bundle)
     conflicts = _collect_conflict_fields(base, candidate)
+    resolution_confidence = float(candidate.confidence.get("resolution") or candidate.confidence.get("overall") or 0.0)
+    use_resolved = bool(
+        candidate.resolved_primary_subject
+        and candidate.resolved_entities
+        and resolution_confidence >= 0.7
+    )
     review_reasons = _merge_unique(
         list(base.review_reasons),
         list(candidate.review_reasons),
@@ -166,11 +176,20 @@ def _apply_conservative_verification(
     )
     uncertainties = _merge_unique(list(base.uncertainties), list(candidate.uncertainties))
     needs_review = bool(base.needs_review or candidate.needs_review or not has_direct_evidence or conflicts)
+    primary_subject = candidate.resolved_primary_subject if use_resolved else base.primary_subject
+    subject_entities = list(candidate.resolved_entities) if use_resolved else list(base.subject_entities)
     return replace(
         base,
+        primary_subject=primary_subject,
+        subject_entities=subject_entities,
+        observed_entities=list(base.observed_entities or base.subject_entities),
+        resolved_entities=list(candidate.resolved_entities if use_resolved else []),
+        resolved_primary_subject=candidate.resolved_primary_subject if use_resolved else "",
+        entity_resolution_map=list(candidate.entity_resolution_map),
         uncertainties=uncertainties,
         review_reasons=review_reasons,
         needs_review=needs_review,
+        confidence=dict(base.confidence or candidate.confidence),
     )
 
 

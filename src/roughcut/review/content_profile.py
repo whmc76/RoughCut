@@ -39,8 +39,8 @@ from roughcut.speech.postprocess import (
     normalize_display_text,
 )
 
-_CONTENT_PROFILE_INFER_CACHE_VERSION = "2026-04-03.infer.v7"
-_CONTENT_PROFILE_ENRICH_CACHE_VERSION = "2026-04-03.enrich.v7"
+_CONTENT_PROFILE_INFER_CACHE_VERSION = "2026-04-03.infer.v8"
+_CONTENT_PROFILE_ENRICH_CACHE_VERSION = "2026-04-03.enrich.v8"
 _INGESTIBLE_PRODUCT_SIGNALS = (
     "luckykiss",
     "kisspod",
@@ -2673,8 +2673,8 @@ async def polish_subtitle_items(
                     "4. 结合 prev_text / next_text 只做邻句消歧，不要借邻句重写本句。\n"
                     "5. 单条输出必须和原句表达同一件事，禁止写成标题、摘要、卖点文案。\n"
                     "6. 优先保证品牌、型号、版本名、EDC/工具钳相关术语正确。\n"
-                    "7. 数字写法按展示语境润色：规格参数、版本代号、价格、档位、序号优先用阿拉伯数字；"
-                    "自然口语数量词和语气表达优先用中文数字，例如“一个”“一次”“一点”。\n"
+                    "7. 数字写法按展示语境润色：字母+数字组合、日期时间、型号规格、版本代号、价格、档位、序号优先用阿拉伯数字；"
+                    "自然口语数量词和模糊词组优先用中文数字，例如“一个”“一次”“两三个”“一点”。\n"
                     "8. 输出 JSON：{\"items\":[{\"index\":1,\"text_final\":\"...\"}]}\n\n"
                     f"视频主体：{json.dumps(content_profile, ensure_ascii=False)}\n"
                     f"预设要求：{preset.subtitle_goal}；风格：{preset.subtitle_tone}\n"
@@ -4502,40 +4502,8 @@ def _cleanup_polished_text(text: str, *, preserve_display_numbers: bool = False)
     return text
 
 
-_NATURAL_ONE_RESTORE_UNITS = (
-    "分钟",
-    "小时",
-    "秒",
-    "个",
-    "次",
-    "条",
-    "款",
-    "件",
-    "位",
-    "组",
-    "份",
-    "项",
-    "种",
-    "节",
-    "段",
-    "回",
-    "遍",
-    "把",
-    "张",
-    "层",
-    "包",
-    "台",
-)
-
-
 def _normalize_display_numbers_for_polish(text: str) -> str:
-    normalized = normalize_display_numbers(str(text or "").strip())
-    normalized = re.sub(
-        rf"(?<![第A-Za-z0-9])1(?=(?:{'|'.join(_NATURAL_ONE_RESTORE_UNITS)}))",
-        "一",
-        normalized,
-    )
-    return normalized
+    return normalize_display_numbers(str(text or "").strip())
 
 
 def _apply_explicit_review_aliases_for_polish(text: str, *, review_memory: dict[str, Any] | None) -> str:

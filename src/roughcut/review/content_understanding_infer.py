@@ -8,16 +8,15 @@ from roughcut.review.content_understanding_evidence import normalize_evidence_bu
 from roughcut.review.content_understanding_schema import (
     ContentSemanticFacts,
     ContentUnderstanding,
+    parse_entity_resolution_payload,
     SubjectEntity,
     parse_content_semantic_facts_payload,
 )
 
 
-def parse_content_understanding_payload(data: Any) -> ContentUnderstanding:
-    payload = data if isinstance(data, dict) else {}
-
+def _parse_subject_entities(data: Any) -> list[SubjectEntity]:
     subject_entities: list[SubjectEntity] = []
-    for item in list(payload.get("subject_entities") or []):
+    for item in list(data or []):
         if isinstance(item, str) and item.strip():
             subject_entities.append(
                 SubjectEntity(
@@ -38,6 +37,11 @@ def parse_content_understanding_payload(data: Any) -> ContentUnderstanding:
                 model=str(item.get("model") or "").strip(),
             )
         )
+    return subject_entities
+
+
+def parse_content_understanding_payload(data: Any) -> ContentUnderstanding:
+    payload = data if isinstance(data, dict) else {}
 
     confidence: dict[str, float] = {}
     raw_confidence = payload.get("confidence")
@@ -58,7 +62,11 @@ def parse_content_understanding_payload(data: Any) -> ContentUnderstanding:
         content_domain=str(payload.get("content_domain") or "").strip(),
         primary_subject=str(payload.get("primary_subject") or "").strip(),
         semantic_facts=parse_content_semantic_facts_payload(payload.get("semantic_facts")),
-        subject_entities=subject_entities,
+        subject_entities=_parse_subject_entities(payload.get("subject_entities")),
+        observed_entities=_parse_subject_entities(payload.get("observed_entities")),
+        resolved_entities=_parse_subject_entities(payload.get("resolved_entities")),
+        resolved_primary_subject=str(payload.get("resolved_primary_subject") or "").strip(),
+        entity_resolution_map=parse_entity_resolution_payload(payload.get("entity_resolution_map")),
         video_theme=str(payload.get("video_theme") or "").strip(),
         summary=str(payload.get("summary") or "").strip(),
         hook_line=str(payload.get("hook_line") or "").strip(),
@@ -95,6 +103,10 @@ async def infer_content_understanding(evidence_bundle: dict[str, Any]) -> Conten
             "content_domain",
             "primary_subject",
             "subject_entities",
+            "observed_entities",
+            "resolved_entities",
+            "resolved_primary_subject",
+            "entity_resolution_map",
             "video_theme",
             "summary",
             "hook_line",
@@ -108,6 +120,7 @@ async def infer_content_understanding(evidence_bundle: dict[str, Any]) -> Conten
         ],
         empty_object_description=(
             '{"video_type":"","content_domain":"","primary_subject":"","subject_entities":[],'
+            '"observed_entities":[],"resolved_entities":[],"resolved_primary_subject":"","entity_resolution_map":[],'
             '"video_theme":"","summary":"","hook_line":"","engagement_question":"","search_queries":[],'
             '"evidence_spans":[],"uncertainties":[],"confidence":{},"needs_review":true,"review_reasons":[]}'
         ),
@@ -130,6 +143,10 @@ async def infer_content_understanding(evidence_bundle: dict[str, Any]) -> Conten
             primary_subject=understanding.primary_subject,
             semantic_facts=semantic_facts,
             subject_entities=understanding.subject_entities,
+            observed_entities=understanding.observed_entities,
+            resolved_entities=understanding.resolved_entities,
+            resolved_primary_subject=understanding.resolved_primary_subject,
+            entity_resolution_map=understanding.entity_resolution_map,
             video_theme=understanding.video_theme,
             summary=understanding.summary,
             hook_line=understanding.hook_line,
@@ -153,11 +170,14 @@ def _build_content_understanding_prompt(
     prompt = (
         "你是严谨的视频内容理解引擎。根据证据包和已抽取的语义事实，推断一个通用内容理解结果，"
         "只输出一个 JSON 对象，不要 Markdown，不要代码块，不要解释。"
-        "字段必须包括 video_type, content_domain, primary_subject, subject_entities, "
+        "字段必须包括 video_type, content_domain, primary_subject, subject_entities, observed_entities, "
+        "resolved_entities, resolved_primary_subject, entity_resolution_map, "
         "video_theme, summary, hook_line, engagement_question, search_queries, evidence_spans, "
         "uncertainties, confidence, needs_review, review_reasons。"
         "约束："
         "subject_entities 必须是对象数组，每项包含 kind,name,brand,model；"
+        "observed_entities 必须保留视频里原始看到或听到的主体称呼；"
+        "resolved_entities、resolved_primary_subject、entity_resolution_map 在首轮推断可为空；"
         "summary 用中文且不超过 100 字；"
         "hook_line 用中文且不超过 24 字；"
         "search_queries 最多 4 条，优先结合 semantic_facts.search_expansions 生成；"
@@ -343,7 +363,8 @@ async def _repair_empty_understanding_payload(
         "下面这个内容理解结果虽然是 JSON，但核心字段为空。"
         "请基于原始输出、语义事实和紧凑证据，重写成一个严格 JSON 对象。"
         "不要输出 Markdown，不要代码块，不要解释。"
-        "字段必须包括 video_type, content_domain, primary_subject, subject_entities, "
+        "字段必须包括 video_type, content_domain, primary_subject, subject_entities, observed_entities, "
+        "resolved_entities, resolved_primary_subject, entity_resolution_map, "
         "video_theme, summary, hook_line, engagement_question, search_queries, evidence_spans, "
         "uncertainties, confidence, needs_review, review_reasons。"
         "要求："

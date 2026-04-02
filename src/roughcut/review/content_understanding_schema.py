@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Any
 
 
@@ -10,6 +10,14 @@ class SubjectEntity:
     name: str
     brand: str = ""
     model: str = ""
+
+
+@dataclass(frozen=True)
+class EntityResolution:
+    observed_name: str
+    resolved_name: str
+    confidence: float = 0.0
+    reason: str = ""
 
 
 @dataclass(frozen=True)
@@ -31,6 +39,10 @@ class ContentUnderstanding:
     primary_subject: str
     semantic_facts: ContentSemanticFacts = field(default_factory=ContentSemanticFacts)
     subject_entities: list[SubjectEntity] = field(default_factory=list)
+    observed_entities: list[SubjectEntity] = field(default_factory=list)
+    resolved_entities: list[SubjectEntity] = field(default_factory=list)
+    resolved_primary_subject: str = ""
+    entity_resolution_map: list[EntityResolution] = field(default_factory=list)
     video_theme: str = ""
     summary: str = ""
     hook_line: str = ""
@@ -75,10 +87,39 @@ def parse_content_semantic_facts_payload(data: Any) -> ContentSemanticFacts:
     )
 
 
+def parse_entity_resolution_payload(data: Any) -> list[EntityResolution]:
+    values: list[EntityResolution] = []
+    for item in list(data or []):
+        if not isinstance(item, dict):
+            continue
+        observed_name = str(item.get("observed_name") or "").strip()
+        resolved_name = str(item.get("resolved_name") or "").strip()
+        if not observed_name and not resolved_name:
+            continue
+        try:
+            confidence = float(item.get("confidence") or 0.0)
+        except (TypeError, ValueError):
+            confidence = 0.0
+        values.append(
+            EntityResolution(
+                observed_name=observed_name,
+                resolved_name=resolved_name,
+                confidence=confidence,
+                reason=str(item.get("reason") or "").strip(),
+            )
+        )
+    return values
+
+
+def _preferred_subject_entities(value: ContentUnderstanding) -> list[SubjectEntity]:
+    return list(value.resolved_entities or value.subject_entities or value.observed_entities)
+
+
 def map_content_understanding_to_legacy_profile(value: ContentUnderstanding) -> dict[str, Any]:
     subject_brand = ""
     subject_model = ""
-    for entity in value.subject_entities:
+    preferred_entities = _preferred_subject_entities(value)
+    for entity in preferred_entities:
         normalized_kind = str(entity.kind or "").strip().lower()
         if entity.brand and not subject_brand:
             subject_brand = entity.brand
@@ -89,7 +130,9 @@ def map_content_understanding_to_legacy_profile(value: ContentUnderstanding) -> 
     content_kind = _normalize_understanding_value(value.video_type)
     subject_domain = _normalize_understanding_value(value.content_domain)
     subject_type = _normalize_understanding_value(
-        value.primary_subject or (value.subject_entities[0].name if value.subject_entities else "")
+        value.resolved_primary_subject
+        or value.primary_subject
+        or (preferred_entities[0].name if preferred_entities else "")
     )
     video_theme = _normalize_understanding_value(value.video_theme)
     return {
@@ -108,7 +151,11 @@ def map_content_understanding_to_legacy_profile(value: ContentUnderstanding) -> 
             "content_domain": subject_domain,
             "primary_subject": subject_type,
             "semantic_facts": value.semantic_facts.__dict__,
-            "subject_entities": [entity.__dict__ for entity in value.subject_entities],
+            "subject_entities": [asdict(entity) for entity in value.subject_entities],
+            "observed_entities": [asdict(entity) for entity in value.observed_entities],
+            "resolved_entities": [asdict(entity) for entity in value.resolved_entities],
+            "resolved_primary_subject": _normalize_understanding_value(value.resolved_primary_subject),
+            "entity_resolution_map": [asdict(item) for item in value.entity_resolution_map],
             "video_theme": video_theme,
             "summary": value.summary,
             "hook_line": value.hook_line,

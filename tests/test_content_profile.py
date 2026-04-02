@@ -85,7 +85,7 @@ def test_build_content_profile_cache_fingerprint_uses_infer_version_without_seed
         copy_style="attention_grabbing",
     )
 
-    assert fingerprint["version"].startswith("2026-04-03.infer.v7")
+    assert fingerprint["version"].startswith("2026-04-03.infer.v8")
     assert fingerprint["seeded_profile_sha256"] == ""
 
 
@@ -2400,6 +2400,8 @@ async def test_polish_subtitle_items_llm_prompt_includes_display_number_guidance
             prompt = messages[1].content
             assert "阿拉伯数字" in prompt
             assert "中文数字" in prompt
+            assert "字母+数字" in prompt
+            assert "日期时间" in prompt
             return FakeResponse()
 
     monkeypatch.setattr(content_profile_module, "get_reasoning_provider", lambda: FakeProvider())
@@ -2455,6 +2457,39 @@ async def test_polish_subtitle_items_fallback_removes_leading_filler_words(monke
 
     assert polished == 1
     assert item.text_final == "包装小了一圈。"
+
+
+@pytest.mark.asyncio
+async def test_polish_subtitle_items_fallback_applies_readable_number_strategy(monkeypatch: pytest.MonkeyPatch):
+    from roughcut.review import content_profile as content_profile_module
+
+    def raising_provider():
+        raise RuntimeError("provider unavailable")
+
+    class DummySettings:
+        subtitle_filler_cleanup_enabled = False
+
+    monkeypatch.setattr(content_profile_module, "get_reasoning_provider", raising_provider)
+    monkeypatch.setattr(content_profile_module, "get_settings", lambda: DummySettings())
+
+    item = SimpleNamespace(
+        item_index=0,
+        start_time=0.0,
+        end_time=2.0,
+        text_raw="这个包装有两个档位，三月五号上午八点二十上线，a四纸也能放。",
+        text_norm="这个包装有两个档位，三月五号上午八点二十上线，a四纸也能放。",
+        text_final=None,
+    )
+
+    polished = await polish_subtitle_items(
+        [item],
+        content_profile={"preset_name": "edc_tactical"},
+        glossary_terms=[],
+        review_memory={"terms": [], "aliases": [], "style_examples": []},
+    )
+
+    assert polished == 1
+    assert item.text_final == "这个包装有2个档位， 3月5号上午8点20上线， A4纸也能放。"
 
 
 @pytest.mark.asyncio

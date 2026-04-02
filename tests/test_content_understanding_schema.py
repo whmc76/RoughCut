@@ -94,3 +94,38 @@ def test_map_content_understanding_to_legacy_profile_exposes_semantic_facts_for_
 
     assert legacy["content_understanding"]["semantic_facts"]["brand_candidates"] == ["HSJUN", "BOLTBOAT"]
     assert legacy["content_understanding"]["semantic_facts"]["collaboration_pairs"] == ["HSJUN × BOLTBOAT"]
+
+
+def test_map_content_understanding_to_legacy_profile_prefers_resolved_entities():
+    understanding = ContentUnderstanding(
+        video_type="product_review",
+        content_domain="bags",
+        primary_subject="船长联名包",
+        subject_entities=[SubjectEntity(kind="product", name="船长联名包")],
+        observed_entities=[SubjectEntity(kind="product", name="船长联名包", brand="船长", model="游刃")],
+        resolved_entities=[
+            SubjectEntity(
+                kind="product",
+                name="HSJUN × BOLTBOAT 游刃机能双肩包",
+                brand="HSJUN × BOLTBOAT",
+                model="游刃",
+            )
+        ],
+        resolved_primary_subject="HSJUN × BOLTBOAT 游刃机能双肩包",
+        video_theme="联名机能双肩包对比评测",
+        summary="视频围绕 HSJUN × BOLTBOAT 游刃机能双肩包展开对比评测。",
+        hook_line="联名机能包上身实测",
+        engagement_question="你更在意结构还是背负？",
+        search_queries=["HSJUN BOLTBOAT 游刃"],
+        evidence_spans=[],
+        uncertainties=[],
+        confidence={"overall": 0.84},
+        needs_review=True,
+        review_reasons=["视频原始称呼与归一化实体存在差异"],
+    )
+
+    legacy = map_content_understanding_to_legacy_profile(understanding)
+
+    assert legacy["subject_type"] == "HSJUN × BOLTBOAT 游刃机能双肩包"
+    assert legacy["subject_brand"] == "HSJUN × BOLTBOAT"
+    assert legacy["subject_model"] == "游刃"
