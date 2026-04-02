@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from roughcut.review.content_understanding_evidence import normalize_evidence_bundle
+from roughcut.review.content_understanding_visual import infer_visual_semantic_evidence
 
 
 def build_content_understanding_orchestration_context(bundle: object | None) -> dict[str, Any]:
@@ -15,4 +16,16 @@ def build_content_understanding_orchestration_context(bundle: object | None) -> 
         "mainline": "content_understanding",
         "orchestrator": "content_understanding",
         "evidence_bundle": evidence_bundle,
+    }
+
+
+async def build_visual_understanding_orchestration_context(
+    *,
+    frame_paths: list[Any],
+    capabilities: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "frame_paths": list(frame_paths),
+        "capabilities": capabilities,
+        "visual_semantic_evidence": await infer_visual_semantic_evidence(frame_paths, capabilities),
     }
