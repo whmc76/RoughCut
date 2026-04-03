@@ -23,6 +23,7 @@ from roughcut.review.telegram_bot import (
     _combine_final_review_rerun_plans,
     _extract_final_review_content_profile_feedback,
     _build_pending_subtitle_candidates,
+    _select_final_review_content_profile,
     _build_review_callback_data,
     _extract_review_reference,
     _extract_review_callback_reference,
@@ -987,6 +988,37 @@ def test_build_final_review_message_includes_summary_keywords_and_subtitle_hints
     assert "S1通过，S2改成 Olight" in message
     assert "只改封面" in message
     assert "只改平台文案" in message
+
+
+def test_select_final_review_content_profile_prefers_downstream_context():
+    artifacts = [
+        SimpleNamespace(
+            artifact_type="content_profile_final",
+            created_at=None,
+            data_json={
+                "summary": "旧摘要",
+                "search_queries": ["旧关键词"],
+            },
+        ),
+        SimpleNamespace(
+            artifact_type="downstream_context",
+            created_at=None,
+            data_json={
+                "resolved_profile": {
+                    "summary": "校对和调研后的最终摘要",
+                    "search_queries": ["新关键词"],
+                },
+                "manual_review_applied": True,
+                "research_applied": True,
+            },
+        ),
+    ]
+
+    selected = _select_final_review_content_profile(artifacts)
+
+    assert selected["summary"] == "校对和调研后的最终摘要"
+    assert selected["search_queries"] == ["新关键词"]
+    assert selected["manual_review_applied"] is True
 
 
 def test_build_final_review_message_includes_variant_timeline_warning():

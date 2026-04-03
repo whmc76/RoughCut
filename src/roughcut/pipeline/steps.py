@@ -74,6 +74,10 @@ from roughcut.review.content_profile import (
     resolve_content_profile_review_feedback,
 )
 from roughcut.review.content_profile_memory import load_content_profile_user_memory
+from roughcut.review.downstream_context import (
+    build_downstream_context,
+    resolve_downstream_profile,
+)
 from roughcut.review.domain_glossaries import (
     _CANONICAL_DOMAIN_SOURCES,
     _DOMAIN_COMPATIBILITY,
@@ -129,6 +133,7 @@ STEP_LABELS = {
 logger = logging.getLogger(__name__)
 
 _CONTENT_PROFILE_ARTIFACT_TYPES = ("content_profile_final", "content_profile", "content_profile_draft")
+_DOWNSTREAM_PROFILE_ARTIFACT_TYPES = ("downstream_context",) + _CONTENT_PROFILE_ARTIFACT_TYPES
 _EDIT_PLAN_SUBTITLE_POLISH_TIMEOUT_SEC = 45.0
 _EDIT_PLAN_INSERT_SLOT_TIMEOUT_SEC = 20.0
 
@@ -349,6 +354,16 @@ def _content_profile_artifact_priority(artifact_type: str) -> int:
     return priorities.get(str(artifact_type or "").strip(), 0)
 
 
+def _downstream_profile_artifact_priority(artifact_type: str) -> int:
+    priorities = {
+        "downstream_context": 4,
+        "content_profile_final": 3,
+        "content_profile": 2,
+        "content_profile_draft": 1,
+    }
+    return priorities.get(str(artifact_type or "").strip(), 0)
+
+
 def _select_preferred_content_profile_artifact(artifacts: list[Artifact]) -> Artifact | None:
     if not artifacts:
         return None
@@ -369,6 +384,35 @@ def _select_preferred_content_profile_artifact(artifacts: list[Artifact]) -> Art
             artifact.created_at or epoch,
         ),
     )
+
+
+def _select_preferred_downstream_profile_artifact(artifacts: list[Artifact]) -> Artifact | None:
+    if not artifacts:
+        return None
+    epoch = datetime.min.replace(tzinfo=timezone.utc)
+    return max(
+        artifacts,
+        key=lambda artifact: (
+            _downstream_profile_artifact_priority(artifact.artifact_type),
+            artifact.created_at or epoch,
+        ),
+    )
+
+
+async def _load_preferred_downstream_profile(session, *, job_id: uuid.UUID) -> tuple[Artifact | None, dict[str, Any]]:
+    result = await session.execute(
+        select(Artifact)
+        .where(
+            Artifact.job_id == job_id,
+            Artifact.artifact_type.in_(_DOWNSTREAM_PROFILE_ARTIFACT_TYPES),
+        )
+        .order_by(Artifact.created_at.desc(), Artifact.id.desc())
+    )
+    artifacts = result.scalars().all()
+    artifact = _select_preferred_downstream_profile_artifact(artifacts)
+    if artifact is None:
+        return None, {}
+    return artifact, resolve_downstream_profile(artifact.data_json if isinstance(artifact.data_json, dict) else {})
 
 
 def _compute_step_elapsed_seconds(step: JobStep | None, *, now: datetime | None = None) -> float | None:
@@ -1027,12 +1071,7 @@ async def run_subtitle_postprocess(job_id: str) -> dict:
         items = await save_subtitle_items(job.id, entries, session)
         glossary_result = await session.execute(select(GlossaryTerm))
         glossary_terms = glossary_result.scalars().all()
-        profile_artifact = await _load_latest_optional_artifact(
-            session,
-            job_id=job.id,
-            artifact_types=_CONTENT_PROFILE_ARTIFACT_TYPES,
-        )
-        content_profile = profile_artifact.data_json if profile_artifact and profile_artifact.data_json else {}
+        _profile_artifact, content_profile = await _load_preferred_downstream_profile(session, job_id=job.id)
         subject_domain = _infer_subject_domain_for_memory(
             workflow_template=job.workflow_template,
             subtitle_items=[
@@ -1395,10 +1434,12 @@ async def run_content_profile(job_id: str) -> dict:
         review_step = review_step_result.scalar_one_or_none()
 
         auto_confirmed = bool(automation.get("auto_confirm"))
+        context_source_profile: dict[str, Any] = dict(content_profile)
         if resolved_manual_review_feedback:
             now = datetime.now(timezone.utc)
             final_profile = dict(content_profile)
             final_profile["review_mode"] = "manual_confirmed"
+            context_source_profile = dict(final_profile)
             session.add(
                 Artifact(
                     job_id=job.id,
@@ -1428,6 +1469,7 @@ async def run_content_profile(job_id: str) -> dict:
             now = datetime.now(timezone.utc)
             final_profile = dict(content_profile)
             final_profile["review_mode"] = "auto_confirmed"
+            context_source_profile = dict(final_profile)
             session.add(
                 Artifact(
                     job_id=job.id,
@@ -1467,6 +1509,15 @@ async def run_content_profile(job_id: str) -> dict:
                 "review_reasons": automation["review_reasons"],
                 "blocking_reasons": automation["blocking_reasons"],
             }
+
+        session.add(
+            Artifact(
+                job_id=job.id,
+                step_id=step.id,
+                artifact_type="downstream_context",
+                data_json=build_downstream_context(context_source_profile),
+            )
+        )
 
         subject = " / ".join(
             part for part in [
@@ -1543,16 +1594,18 @@ async def run_glossary_review(job_id: str) -> dict:
             }
             for item in subtitle_items
         ]
-        profile_result = await session.execute(
-            select(Artifact)
-            .where(
-                Artifact.job_id == job.id,
-                Artifact.artifact_type.in_(["content_profile_final", "content_profile_draft"]),
+        _profile_artifact, content_profile = await _load_preferred_downstream_profile(session, job_id=job.id)
+        if not content_profile:
+            profile_result = await session.execute(
+                select(Artifact)
+                .where(
+                    Artifact.job_id == job.id,
+                    Artifact.artifact_type.in_(["content_profile_final", "content_profile_draft"]),
+                )
+                .order_by(Artifact.created_at.desc())
             )
-            .order_by(Artifact.created_at.desc())
-        )
-        profile_artifacts = profile_result.scalars().all()
-        content_profile = profile_artifacts[0].data_json if profile_artifacts else None
+            profile_artifacts = profile_result.scalars().all()
+            content_profile = profile_artifacts[0].data_json if profile_artifacts else None
         subject_domain = _infer_subject_domain_for_memory(
             workflow_template=job.workflow_template,
             subtitle_items=subtitle_dicts,
@@ -1674,6 +1727,14 @@ async def run_glossary_review(job_id: str) -> dict:
             data_json=content_profile,
         )
         session.add(artifact)
+        session.add(
+            Artifact(
+                job_id=job.id,
+                step_id=None,
+                artifact_type="downstream_context",
+                data_json=build_downstream_context(content_profile),
+            )
+        )
         await _set_step_progress(
             session,
             step,
@@ -1831,12 +1892,7 @@ async def run_ai_director(job_id: str) -> dict:
             }
             for item in subtitle_items
         ]
-        profile_artifact = await _load_latest_optional_artifact(
-            session,
-            job_id=job.id,
-            artifact_types=_CONTENT_PROFILE_ARTIFACT_TYPES,
-        )
-        content_profile = profile_artifact.data_json if profile_artifact and profile_artifact.data_json else {}
+        _profile_artifact, content_profile = await _load_preferred_downstream_profile(session, job_id=job.id)
 
         await _set_step_progress(session, step, detail="生成导演建议稿与重配音计划", progress=0.68)
         with track_step_usage(job_id=job.id, step_id=step.id, step_name="ai_director"):
@@ -1926,17 +1982,12 @@ async def run_avatar_commentary(job_id: str) -> dict:
             }
             for item in subtitle_items
         ]
-        profile_artifact = await _load_latest_optional_artifact(
-            session,
-            job_id=job.id,
-            artifact_types=_CONTENT_PROFILE_ARTIFACT_TYPES,
-        )
+        _profile_artifact, content_profile = await _load_preferred_downstream_profile(session, job_id=job.id)
         director_artifact = await _load_latest_optional_artifact(
             session,
             job_id=job.id,
             artifact_types=("ai_director_plan",),
         )
-        content_profile = profile_artifact.data_json if profile_artifact and profile_artifact.data_json else {}
         ai_director_plan = director_artifact.data_json if director_artifact and director_artifact.data_json else {}
 
         await _set_step_progress(session, step, detail="生成数字人解说分镜与 provider 请求体", progress=0.72)
@@ -2180,16 +2231,7 @@ async def run_edit_plan(job_id: str) -> dict:
             for si in subtitle_items
         ]
 
-        profile_result = await session.execute(
-            select(Artifact)
-            .where(
-                Artifact.job_id == job.id,
-                Artifact.artifact_type.in_(_CONTENT_PROFILE_ARTIFACT_TYPES),
-            )
-            .order_by(Artifact.created_at.desc())
-        )
-        profile_artifact = _select_preferred_content_profile_artifact(profile_result.scalars().all())
-        content_profile = profile_artifact.data_json if profile_artifact else None
+        profile_artifact, content_profile = await _load_preferred_downstream_profile(session, job_id=job.id)
         ai_director_artifact = await _load_latest_optional_artifact(
             session,
             job_id=job.id,
@@ -2203,7 +2245,7 @@ async def run_edit_plan(job_id: str) -> dict:
 
         if (
             profile_artifact is not None
-            and str(profile_artifact.artifact_type or "").strip().lower() == "content_profile_final"
+            and str(profile_artifact.artifact_type or "").strip().lower() in {"content_profile_final", "downstream_context"}
             and isinstance(content_profile, dict)
         ):
             try:
@@ -2414,16 +2456,7 @@ async def run_render(job_id: str) -> dict:
             or (render_plan_timeline.data_json.get("editing_accents") or {}).get("sound_effects")
         )
 
-        content_profile_result = await session.execute(
-            select(Artifact)
-            .where(
-                Artifact.job_id == job.id,
-                Artifact.artifact_type.in_(_CONTENT_PROFILE_ARTIFACT_TYPES),
-            )
-            .order_by(Artifact.created_at.desc())
-        )
-        content_profile_artifact = _select_preferred_content_profile_artifact(content_profile_result.scalars().all())
-        content_profile = content_profile_artifact.data_json if content_profile_artifact else None
+        content_profile_artifact, content_profile = await _load_preferred_downstream_profile(session, job_id=job.id)
 
         # Get subtitle items
         item_result = await session.execute(
@@ -3074,16 +3107,7 @@ async def run_platform_package(job_id: str) -> dict:
         step = step_result.scalar_one_or_none()
         await _set_step_progress(session, step, detail="整理成片信息并生成平台文案", progress=0.2)
 
-        content_profile_result = await session.execute(
-            select(Artifact)
-            .where(
-                Artifact.job_id == job.id,
-                Artifact.artifact_type.in_(_CONTENT_PROFILE_ARTIFACT_TYPES),
-            )
-            .order_by(Artifact.created_at.desc())
-        )
-        content_profile_artifact = _select_preferred_content_profile_artifact(content_profile_result.scalars().all())
-        content_profile = content_profile_artifact.data_json if content_profile_artifact else None
+        content_profile_artifact, content_profile = await _load_preferred_downstream_profile(session, job_id=job.id)
 
         item_result = await session.execute(
             select(SubtitleItem)

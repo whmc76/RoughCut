@@ -998,9 +998,10 @@ async def test_run_content_profile_keeps_manual_review_until_accuracy_gate_passe
         )
         artifacts = artifact_result.scalars().all()
         artifact_map = {item.artifact_type: item.data_json for item in artifacts}
-        assert set(artifact_map) == {"content_profile_draft"}
+        assert set(artifact_map) == {"content_profile_draft", "downstream_context"}
 
         draft = artifact_map["content_profile_draft"]
+        assert artifact_map["downstream_context"]["resolved_profile"]["subject_type"] == draft["subject_type"]
         assert draft["automation_review"]["enabled"] is True
         assert draft["automation_review"]["quality_gate_passed"] is True
         assert draft["automation_review"]["approval_accuracy_gate_passed"] is False
@@ -1129,10 +1130,11 @@ async def test_run_content_profile_auto_confirms_high_confidence_profile_when_ac
         )
         artifacts = artifact_result.scalars().all()
         artifact_map = {item.artifact_type: item.data_json for item in artifacts}
-        assert set(artifact_map) == {"content_profile_draft", "content_profile_final"}
+        assert set(artifact_map) == {"content_profile_draft", "content_profile_final", "downstream_context"}
 
         draft = artifact_map["content_profile_draft"]
         final = artifact_map["content_profile_final"]
+        assert artifact_map["downstream_context"]["resolved_profile"]["review_mode"] == "auto_confirmed"
         assert draft["automation_review"]["auto_confirm"] is True
         assert draft["automation_review"]["approval_accuracy_gate_passed"] is True
         assert draft["automation_review"]["approval_accuracy_sample_size"] == 24
@@ -1243,8 +1245,9 @@ async def test_run_content_profile_keeps_manual_review_when_auto_review_mode_dis
         )
         artifacts = artifact_result.scalars().all()
         artifact_map = {item.artifact_type: item.data_json for item in artifacts}
-        assert set(artifact_map) == {"content_profile_draft"}
+        assert set(artifact_map) == {"content_profile_draft", "downstream_context"}
         assert artifact_map["content_profile_draft"]["automation_review"]["auto_confirm"] is False
+        assert artifact_map["downstream_context"]["manual_review_applied"] is False
 
         review_step_result = await session.execute(
             select(JobStep).where(JobStep.job_id == job_id, JobStep.step_name == "summary_review")
@@ -1865,10 +1868,12 @@ async def test_run_content_profile_applies_llm_resolved_final_review_feedback_an
         )
         artifacts = artifact_result.scalars().all()
         artifact_map = {item.artifact_type: item.data_json for item in artifacts}
-        assert set(artifact_map) == {"content_profile_draft", "content_profile_final"}
+        assert set(artifact_map) == {"content_profile_draft", "content_profile_final", "downstream_context"}
         assert artifact_map["content_profile_final"]["review_mode"] == "manual_confirmed"
         assert artifact_map["content_profile_final"]["subject_brand"] == "傲雷"
         assert artifact_map["content_profile_final"]["subject_model"] == "司令官2Ultra"
+        assert artifact_map["downstream_context"]["resolved_profile"]["subject_brand"] == "傲雷"
+        assert artifact_map["downstream_context"]["manual_review_applied"] is True
 
         review_step_result = await session.execute(
             select(JobStep).where(JobStep.job_id == job_id, JobStep.step_name == "summary_review")
@@ -1987,7 +1992,11 @@ async def test_run_content_profile_keeps_summary_review_pending_when_final_revie
         )
         artifacts = artifact_result.scalars().all()
         artifact_map = {item.artifact_type: item.data_json for item in artifacts}
-        assert set(artifact_map) == {"content_profile_draft"}
+        assert set(artifact_map) == {"content_profile_draft", "downstream_context"}
+        assert (
+            artifact_map["downstream_context"]["resolved_profile"]["subject_brand"]
+            == artifact_map["content_profile_draft"]["subject_brand"]
+        )
 
         review_step_result = await session.execute(
             select(JobStep).where(JobStep.job_id == job_id, JobStep.step_name == "summary_review")
@@ -2836,6 +2845,27 @@ async def test_run_edit_plan_repolishes_subtitles_with_llm_after_content_profile
             )
         )
         session.add(
+            Artifact(
+                job_id=job_id,
+                artifact_type="downstream_context",
+                data_json={
+                    "resolved_profile": {
+                        "workflow_template": "unboxing_standard",
+                        "subject_domain": "edc",
+                        "subject_type": "校对后的手电",
+                        "subject_brand": "傲雷校对版",
+                        "subject_model": "司令官2 Ultra 校对版",
+                    },
+                    "field_sources": {
+                        "subject_brand": "manual_review",
+                        "subject_model": "manual_review",
+                    },
+                    "manual_review_applied": True,
+                    "research_applied": False,
+                },
+            )
+        )
+        session.add(
             SubtitleItem(
                 job_id=job_id,
                 version=1,
@@ -2914,8 +2944,8 @@ async def test_run_edit_plan_repolishes_subtitles_with_llm_after_content_profile
 
     assert result["timeline_id"] == str(editorial_timeline_id)
     assert polish_calls["allow_llm"] is True
-    assert polish_calls["content_profile"]["subject_brand"] == "傲雷"
-    assert polish_calls["content_profile"]["subject_model"] == "司令官2 Ultra"
+    assert polish_calls["content_profile"]["subject_brand"] == "傲雷校对版"
+    assert polish_calls["content_profile"]["subject_model"] == "司令官2 Ultra 校对版"
 
     async with factory() as session:
         subtitle = (
@@ -3331,6 +3361,134 @@ async def test_run_platform_package_passes_resolved_review_feedback_into_packagi
 
 
 @pytest.mark.asyncio
+async def test_run_platform_package_prefers_downstream_context_profile(
+    db_engine,
+    monkeypatch,
+    tmp_path: Path,
+):
+    import roughcut.pipeline.steps as steps_mod
+
+    factory = async_sessionmaker(db_engine, expire_on_commit=False)
+    job_id = uuid.uuid4()
+    output_path = tmp_path / "rendered.mp4"
+    output_path.write_bytes(b"rendered")
+    settings = SimpleNamespace(
+        output_dir=str(tmp_path / "output"),
+        step_heartbeat_interval_sec=20,
+    )
+    captured: dict[str, Any] = {}
+
+    async with factory() as session:
+        session.add(
+            Job(
+                id=job_id,
+                source_path="jobs/demo/source.mp4",
+                source_name="source.mp4",
+                file_hash="hash-demo",
+                status="processing",
+                language="zh-CN",
+                channel_profile="edc_tactical",
+            )
+        )
+        session.add(JobStep(job_id=job_id, step_name="platform_package", status="running"))
+        session.add(
+            Artifact(
+                job_id=job_id,
+                artifact_type="content_profile_final",
+                data_json={
+                    "subject_brand": "耐克",
+                    "subject_model": "SK05",
+                    "subject_type": "手电筒",
+                    "video_theme": "旧主题",
+                },
+            )
+        )
+        session.add(
+            Artifact(
+                job_id=job_id,
+                artifact_type="downstream_context",
+                data_json={
+                    "resolved_profile": {
+                        "subject_brand": "傲雷",
+                        "subject_model": "司令官2Ultra",
+                        "subject_type": "手电筒",
+                        "video_theme": "傲雷司令官2Ultra版本选购与参数对比",
+                    },
+                    "field_sources": {
+                        "subject_brand": "manual_review",
+                        "subject_model": "manual_review",
+                    },
+                    "manual_review_applied": True,
+                    "research_applied": True,
+                },
+            )
+        )
+        session.add(
+            SubtitleItem(
+                job_id=job_id,
+                version=1,
+                item_index=0,
+                start_time=0.0,
+                end_time=1.0,
+                text_raw="这次重点看司令官2Ultra。",
+                text_norm="这次重点看司令官2Ultra。",
+                text_final="这次重点看司令官2Ultra。",
+            )
+        )
+        session.add(
+            RenderOutput(
+                job_id=job_id,
+                status="done",
+                output_path=str(output_path),
+            )
+        )
+        await session.commit()
+
+    monkeypatch.setattr(steps_mod, "get_session_factory", lambda: factory)
+    monkeypatch.setattr(steps_mod, "list_packaging_assets", lambda: {"config": {"copy_style": "attention_grabbing"}})
+    monkeypatch.setattr(steps_mod, "_select_default_avatar_profile", lambda: {"display_name": "作者A"})
+    monkeypatch.setattr(steps_mod, "get_settings", lambda: settings)
+
+    async def fake_build_packaging_fact_sheet(**kwargs):
+        captured["fact_sheet_content_profile"] = dict(kwargs["content_profile"])
+        return {
+            "status": "verified",
+            "verified_facts": [],
+            "official_sources": [],
+            "guardrail_summary": "",
+        }
+
+    async def fake_generate_platform_packaging(**kwargs):
+        captured["generate_content_profile"] = dict(kwargs["content_profile"])
+        return {
+            "highlights": {
+                "product": "傲雷 司令官2Ultra",
+                "video_type": "开箱体验",
+                "strongest_selling_point": "版本差异一眼看清",
+                "strongest_emotion": "这次终于对上型号了",
+                "title_hook": "司令官2Ultra到底值不值",
+                "engagement_question": "你更想看哪一版？",
+            },
+            "platforms": {
+                "bilibili": {"titles": ["标题1", "标题2", "标题3", "标题4", "标题5"], "description": "简介", "tags": ["手电"]},
+                "xiaohongshu": {"titles": ["小红书1", "小红书2", "小红书3", "小红书4", "小红书5"], "description": "正文", "tags": ["手电"]},
+                "douyin": {"titles": ["抖音1", "抖音2", "抖音3", "抖音4", "抖音5"], "description": "短简介", "tags": ["手电"]},
+                "kuaishou": {"titles": ["快手1", "快手2", "快手3", "快手4", "快手5"], "description": "快手简介", "tags": ["手电"]},
+                "wechat_channels": {"titles": ["视频号1", "视频号2", "视频号3", "视频号4", "视频号5"], "description": "视频号简介", "tags": ["手电"]},
+            },
+            "fact_sheet": kwargs["fact_sheet"],
+        }
+
+    monkeypatch.setattr(steps_mod, "build_packaging_fact_sheet", fake_build_packaging_fact_sheet)
+    monkeypatch.setattr(steps_mod, "generate_platform_packaging", fake_generate_platform_packaging)
+
+    await run_platform_package(str(job_id))
+
+    assert captured["fact_sheet_content_profile"]["subject_brand"] == "傲雷"
+    assert captured["generate_content_profile"]["subject_model"] == "司令官2Ultra"
+
+
+@pytest.mark.asyncio
 async def test_run_ai_director_generates_plan_for_enabled_job(db_engine, monkeypatch):
     import roughcut.pipeline.steps as steps_mod
 
@@ -3360,6 +3518,24 @@ async def test_run_ai_director_generates_plan_for_enabled_job(db_engine, monkeyp
                 },
             )
         )
+        session.add(
+            Artifact(
+                job_id=job_id,
+                artifact_type="downstream_context",
+                data_json={
+                    "resolved_profile": {
+                        "subject_type": "校对后的科普讲解",
+                        "summary": "综合调研后，主题应聚焦在版本差异与选购逻辑。",
+                        "engagement_question": "你会怎么解释 Ultra 和 Pro 的差别？",
+                    },
+                    "field_sources": {
+                        "summary": "research",
+                    },
+                    "manual_review_applied": True,
+                    "research_applied": True,
+                },
+            )
+        )
         for index, text in enumerate(["先说结论", "中间补背景", "最后抛问题"]):
             session.add(
                 SubtitleItem(
@@ -3376,8 +3552,10 @@ async def test_run_ai_director_generates_plan_for_enabled_job(db_engine, monkeyp
         await session.commit()
 
     monkeypatch.setattr(steps_mod, "get_session_factory", lambda: factory)
+    captured: dict[str, Any] = {}
 
     async def fake_build_ai_director_plan(**kwargs):
+        captured["content_profile"] = dict(kwargs["content_profile"])
         return {
             "opening_hook": "这条内容最该先讲清楚的结论，我先替你拎出来。",
             "bridge_line": "这里应该补一层背景说明。",
@@ -3392,6 +3570,8 @@ async def test_run_ai_director_generates_plan_for_enabled_job(db_engine, monkeyp
 
     assert result["enabled"] is True
     assert result["voiceover_segment_count"] == 1
+    assert captured["content_profile"]["subject_type"] == "校对后的科普讲解"
+    assert captured["content_profile"]["summary"] == "综合调研后，主题应聚焦在版本差异与选购逻辑。"
 
     async with factory() as session:
         artifact = await _load_latest_optional_artifact(session, job_id=job_id, artifact_types=("ai_director_plan",))
@@ -3431,6 +3611,23 @@ async def test_run_avatar_commentary_generates_plan_for_enabled_job(db_engine, m
         session.add(
             Artifact(
                 job_id=job_id,
+                artifact_type="downstream_context",
+                data_json={
+                    "resolved_profile": {
+                        "summary": "人工校对后，应把数字人解说聚焦在型号纠偏与选购建议。",
+                        "engagement_question": "你最想让数字人补型号差异还是参数差异？",
+                    },
+                    "field_sources": {
+                        "summary": "manual_review",
+                    },
+                    "manual_review_applied": True,
+                    "research_applied": True,
+                },
+            )
+        )
+        session.add(
+            Artifact(
+                job_id=job_id,
                 artifact_type="ai_director_plan",
                 data_json={
                     "voiceover_segments": [
@@ -3460,8 +3657,10 @@ async def test_run_avatar_commentary_generates_plan_for_enabled_job(db_engine, m
         await session.commit()
 
     monkeypatch.setattr(steps_mod, "get_session_factory", lambda: factory)
+    captured: dict[str, Any] = {}
 
     def fake_build_avatar_commentary_plan(**kwargs):
+        captured["content_profile"] = dict(kwargs["content_profile"])
         return {
             "provider": "heygem",
             "layout_template": "picture_in_picture_right",
@@ -3475,6 +3674,8 @@ async def test_run_avatar_commentary_generates_plan_for_enabled_job(db_engine, m
 
     assert result["enabled"] is True
     assert result["segment_count"] == 1
+    assert captured["content_profile"]["summary"] == "人工校对后，应把数字人解说聚焦在型号纠偏与选购建议。"
+    assert captured["content_profile"]["engagement_question"] == "你最想让数字人补型号差异还是参数差异？"
 
     async with factory() as session:
         artifact = await _load_latest_optional_artifact(session, job_id=job_id, artifact_types=("avatar_commentary_plan",))

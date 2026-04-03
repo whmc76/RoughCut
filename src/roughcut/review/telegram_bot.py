@@ -30,6 +30,7 @@ from roughcut.media.probe import probe
 from roughcut.media.variant_timeline_bundle import resolve_effective_variant_timeline_bundle
 from roughcut.packaging.library import list_packaging_assets, resolve_packaging_plan_for_job
 from roughcut.providers.factory import get_reasoning_provider, get_transcription_provider
+from roughcut.review.downstream_context import select_resolved_downstream_profile
 from roughcut.review.subtitle_memory import build_transcription_prompt
 from roughcut.review.content_profile import build_reviewed_transcript_excerpt
 from roughcut.review.report import generate_report
@@ -500,7 +501,7 @@ class TelegramReviewBotService:
                     select(Artifact)
                     .where(
                         Artifact.job_id == job.id,
-                        Artifact.artifact_type.in_(("content_profile_final", "content_profile", "content_profile_draft")),
+                        Artifact.artifact_type.in_(("downstream_context", "content_profile_final", "content_profile", "content_profile_draft")),
                     )
                     .order_by(Artifact.created_at.desc())
                 )
@@ -2162,25 +2163,7 @@ async def _build_final_review_videos(
 
 
 def _select_final_review_content_profile(artifacts: list[Artifact]) -> dict[str, Any]:
-    priority = {
-        "content_profile_final": 3,
-        "content_profile": 2,
-        "content_profile_draft": 1,
-    }
-    selected: Artifact | None = None
-    selected_rank = -1
-    for artifact in artifacts or []:
-        rank = priority.get(str(artifact.artifact_type or "").strip(), 0)
-        if rank < selected_rank:
-            continue
-        if rank == selected_rank and selected is not None:
-            if (artifact.created_at or datetime.min.replace(tzinfo=timezone.utc)) <= (
-                selected.created_at or datetime.min.replace(tzinfo=timezone.utc)
-            ):
-                continue
-        selected = artifact
-        selected_rank = rank
-    return dict(selected.data_json or {}) if selected and isinstance(selected.data_json, dict) else {}
+    return select_resolved_downstream_profile(list(artifacts or []))
 
 
 def _resolve_final_review_video_source(
