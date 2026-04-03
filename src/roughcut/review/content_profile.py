@@ -15,9 +15,11 @@ from roughcut.providers.multimodal import complete_with_images
 from roughcut.providers.reasoning.base import Message, extract_json_text
 from roughcut.usage import track_usage_operation
 from roughcut.db.session import get_session_factory
+from roughcut.review.content_understanding_capabilities import resolve_content_understanding_capabilities
 from roughcut.review.content_understanding_evidence import build_evidence_bundle
 from roughcut.review.content_understanding_infer import infer_content_understanding
 from roughcut.review.content_understanding_schema import ContentUnderstanding, map_content_understanding_to_legacy_profile
+from roughcut.review.content_understanding_visual import infer_visual_semantic_evidence
 from roughcut.review.content_understanding_verify import build_hybrid_verification_bundle, verify_content_understanding
 from roughcut.review.content_profile_memory import summarize_content_profile_user_memory
 from roughcut.review.content_profile_ocr import build_content_profile_ocr
@@ -39,8 +41,8 @@ from roughcut.speech.postprocess import (
     normalize_display_text,
 )
 
-_CONTENT_PROFILE_INFER_CACHE_VERSION = "2026-04-03.infer.v8"
-_CONTENT_PROFILE_ENRICH_CACHE_VERSION = "2026-04-03.enrich.v8"
+_CONTENT_PROFILE_INFER_CACHE_VERSION = "2026-04-03.infer.v9"
+_CONTENT_PROFILE_ENRICH_CACHE_VERSION = "2026-04-03.enrich.v9"
 _INGESTIBLE_PRODUCT_SIGNALS = (
     "luckykiss",
     "kisspod",
@@ -1732,6 +1734,7 @@ async def infer_content_profile(
     }
     settings = get_settings()
     visual_hints: dict[str, Any] = {}
+    visual_semantic_evidence: dict[str, Any] = {}
 
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1742,7 +1745,15 @@ async def infer_content_profile(
                     initial_profile["ocr_profile"] = ocr_profile
                     if ocr_profile.get("visible_text") and not str(initial_profile.get("visible_text") or "").strip():
                         initial_profile["visible_text"] = str(ocr_profile.get("visible_text") or "").strip()
-            visual_hints = await _infer_visual_profile_hints(frame_paths)
+            capabilities = resolve_content_understanding_capabilities(
+                reasoning_provider=str(settings.active_reasoning_provider or settings.reasoning_provider or "").strip(),
+                visual_provider=str(settings.active_reasoning_provider or settings.reasoning_provider or "").strip(),
+                visual_mcp_provider="",
+            )
+            visual_semantic_evidence = await infer_visual_semantic_evidence(frame_paths, capabilities)
+            if visual_semantic_evidence:
+                initial_profile["visual_semantic_evidence"] = dict(visual_semantic_evidence)
+                visual_hints = _build_visual_hints_from_semantic_evidence(visual_semantic_evidence)
             if visual_hints:
                 initial_profile["visual_hints"] = dict(visual_hints)
                 initial_profile["visual_cluster_hints"] = dict(visual_hints)
@@ -1755,6 +1766,7 @@ async def infer_content_profile(
         transcript_excerpt=transcript_excerpt,
         visible_text=str(initial_profile.get("visible_text") or "").strip(),
         ocr_profile=initial_profile.get("ocr_profile") if isinstance(initial_profile.get("ocr_profile"), dict) else {},
+        visual_semantic_evidence=visual_semantic_evidence,
         visual_hints=visual_hints,
     )
 
@@ -1799,6 +1811,8 @@ async def infer_content_profile(
     if visual_hints:
         profile["visual_hints"] = dict(visual_hints)
         profile["visual_cluster_hints"] = dict(visual_hints)
+    if visual_semantic_evidence:
+        profile["visual_semantic_evidence"] = dict(visual_semantic_evidence)
 
     preset = select_workflow_template(
         workflow_template=workflow_template,
@@ -2248,6 +2262,9 @@ async def _infer_content_understanding_for_enrich(
         transcript_excerpt=transcript_excerpt,
         visible_text=str(profile.get("visible_text") or "").strip(),
         ocr_profile=_enrich_ocr_profile(profile),
+        visual_semantic_evidence=dict(profile.get("visual_semantic_evidence") or {})
+        if isinstance(profile.get("visual_semantic_evidence"), dict)
+        else {},
         visual_hints=_profile_visual_cluster_hints(profile),
     )
     evidence_bundle["candidate_hints"] = _enrich_candidate_hints(profile)
@@ -2427,6 +2444,31 @@ def _aggregate_visual_profile_hints(hints_list: list[dict[str, Any]]) -> dict[st
     if reasons:
         aggregated["reason"] = reasons[0]
     return aggregated
+
+
+def _build_visual_hints_from_semantic_evidence(visual_semantic_evidence: dict[str, Any] | None) -> dict[str, Any]:
+    evidence = dict(visual_semantic_evidence or {})
+    subject_candidates = [str(item).strip() for item in list(evidence.get("subject_candidates") or []) if str(item).strip()]
+    visible_brands = [str(item).strip() for item in list(evidence.get("visible_brands") or []) if str(item).strip()]
+    visible_models = [str(item).strip() for item in list(evidence.get("visible_models") or []) if str(item).strip()]
+    object_categories = [str(item).strip() for item in list(evidence.get("object_categories") or []) if str(item).strip()]
+    evidence_notes = [str(item).strip() for item in list(evidence.get("evidence_notes") or []) if str(item).strip()]
+
+    hints: dict[str, Any] = {}
+    if subject_candidates:
+        hints["subject_type"] = subject_candidates[0]
+    elif object_categories:
+        hints["subject_type"] = object_categories[0]
+    if visible_brands:
+        hints["subject_brand"] = visible_brands[0]
+    if visible_models:
+        hints["subject_model"] = visible_models[0]
+    visible_text = " ".join(part for part in (visible_brands[:1] + visible_models[:1]) if part).strip()
+    if visible_text:
+        hints["visible_text"] = visible_text
+    if evidence_notes:
+        hints["reason"] = evidence_notes[0]
+    return hints
 
 
 def _select_visual_hint_cluster_indexes(hints_list: list[dict[str, Any]]) -> list[int]:

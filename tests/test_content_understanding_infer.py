@@ -234,6 +234,84 @@ async def test_infer_content_understanding_uses_reasoning_provider_payload(monke
 
 
 @pytest.mark.asyncio
+async def test_infer_content_understanding_compact_payload_includes_visual_semantic_evidence(monkeypatch: pytest.MonkeyPatch):
+    from roughcut.review import content_understanding_infer as infer_mod
+
+    prompts: list[str] = []
+
+    class FakeResponse:
+        def __init__(self, payload):
+            self.payload = payload
+            self.content = json.dumps(payload, ensure_ascii=False)
+
+        def as_json(self):
+            return self.payload
+
+    class FakeProvider:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def complete(self, *args, **kwargs):
+            prompts.append(args[0][-1].content)
+            self.calls += 1
+            if self.calls == 1:
+                return FakeResponse(
+                    {
+                        "brand_candidates": ["HSJUN"],
+                        "model_candidates": ["游刃"],
+                        "product_name_candidates": ["游刃"],
+                        "product_type_candidates": ["机能双肩包"],
+                        "entity_candidates": ["HSJUN 游刃机能双肩包"],
+                        "collaboration_pairs": [],
+                        "search_expansions": ["HSJUN 游刃 双肩包"],
+                        "evidence_sentences": ["画面里持续展示一个双肩包"],
+                    }
+                )
+            return FakeResponse(
+                {
+                    "video_type": "product_review",
+                    "content_domain": "bags",
+                    "primary_subject": "HSJUN 游刃机能双肩包",
+                    "subject_entities": [{"kind": "product", "name": "HSJUN 游刃机能双肩包"}],
+                    "observed_entities": [],
+                    "resolved_entities": [],
+                    "resolved_primary_subject": "",
+                    "entity_resolution_map": [],
+                    "video_theme": "机能双肩包展示",
+                    "summary": "视频主要展示机能双肩包。",
+                    "hook_line": "机能包展示",
+                    "engagement_question": "你更在意背负还是结构？",
+                    "search_queries": ["HSJUN 游刃 双肩包"],
+                    "evidence_spans": [],
+                    "uncertainties": [],
+                    "confidence": {"overall": 0.8},
+                    "needs_review": False,
+                    "review_reasons": [],
+                }
+            )
+
+    monkeypatch.setattr(infer_mod, "get_reasoning_provider", lambda: FakeProvider())
+
+    await infer_mod.infer_content_understanding(
+        {
+            "source_name": "demo.mp4",
+            "transcript_excerpt": "今天看这个包的背负系统",
+            "visual_semantic_evidence": {
+                "object_categories": ["backpack"],
+                "subject_candidates": ["机能双肩包"],
+                "visible_brands": ["HSJUN"],
+                "interaction_type": "handheld_demo",
+                "scene_context": "桌面开箱展示",
+            },
+        }
+    )
+
+    assert "visual_semantic_evidence" in prompts[1]
+    assert "backpack" in prompts[1]
+    assert "handheld_demo" in prompts[1]
+
+
+@pytest.mark.asyncio
 async def test_infer_content_understanding_repairs_malformed_json_response(monkeypatch: pytest.MonkeyPatch):
     from roughcut.review import content_understanding_infer as infer_mod
 

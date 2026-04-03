@@ -85,8 +85,70 @@ def test_build_content_profile_cache_fingerprint_uses_infer_version_without_seed
         copy_style="attention_grabbing",
     )
 
-    assert fingerprint["version"].startswith("2026-04-03.infer.v8")
+    assert fingerprint["version"].startswith("2026-04-03.infer.v9")
     assert fingerprint["seeded_profile_sha256"] == ""
+
+
+@pytest.mark.asyncio
+async def test_infer_content_profile_routes_visual_semantic_evidence_into_content_understanding(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    from roughcut.review import content_profile as content_profile_module
+    from roughcut.review.content_understanding_schema import ContentUnderstanding
+
+    captured: dict[str, object] = {}
+
+    async def fake_infer_content_understanding(evidence_bundle):
+        captured["evidence_bundle"] = evidence_bundle
+        return ContentUnderstanding(
+            video_type="product_review",
+            content_domain="bags",
+            primary_subject="机能双肩包",
+            video_theme="机能双肩包展示",
+            summary="视频主要展示机能双肩包。",
+            hook_line="机能包展示",
+            engagement_question="你更在意背负还是结构？",
+            search_queries=["机能双肩包"],
+            needs_review=True,
+            review_reasons=["待人工复核"],
+        )
+
+    monkeypatch.setattr(content_profile_module, "infer_content_understanding", fake_infer_content_understanding)
+    monkeypatch.setattr(content_profile_module, "_extract_reference_frames", lambda *args, **kwargs: [tmp_path / "f1.jpg"])
+    monkeypatch.setattr(
+        content_profile_module,
+        "resolve_content_understanding_capabilities",
+        lambda **kwargs: {"visual_understanding": {"provider": "minimax", "mode": "native_multimodal", "status": "ready"}},
+    )
+    async def fake_infer_visual_semantic_evidence(frame_paths, capabilities):
+        return {
+            "object_categories": ["backpack"],
+            "subject_candidates": ["机能双肩包"],
+            "visible_brands": ["HSJUN"],
+        }
+
+    monkeypatch.setattr(content_profile_module, "infer_visual_semantic_evidence", fake_infer_visual_semantic_evidence)
+    monkeypatch.setattr(
+        content_profile_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            ocr_enabled=False,
+            active_reasoning_provider="minimax",
+            reasoning_provider="minimax",
+        ),
+    )
+
+    await infer_content_profile(
+        source_path=tmp_path / "bag.mp4",
+        source_name="bag.mp4",
+        subtitle_items=[],
+        include_research=False,
+    )
+
+    evidence_bundle = captured["evidence_bundle"]
+    assert evidence_bundle["visual_semantic_evidence"]["object_categories"] == ["backpack"]
+    assert evidence_bundle["visual_semantic_evidence"]["visible_brands"] == ["HSJUN"]
 
 
 def test_build_reviewed_transcript_excerpt_applies_accepted_corrections():

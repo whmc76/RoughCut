@@ -138,6 +138,51 @@ def test_build_evidence_bundle_collects_generic_semantic_fact_inputs():
     assert "游刃" in semantic_inputs["hint_candidates"]
 
 
+def test_build_evidence_bundle_includes_visual_semantic_evidence_tokens_in_semantic_inputs():
+    bundle = build_evidence_bundle(
+        source_name="bag_visual_demo.mp4",
+        transcript_excerpt="今天看这个包的背负系统",
+        visual_semantic_evidence={
+            "object_categories": ["backpack"],
+            "subject_candidates": ["机能双肩包"],
+            "visible_brands": ["HSJUN"],
+            "visible_models": ["游刃"],
+            "interaction_type": "handheld_demo",
+            "scene_context": "桌面开箱展示",
+            "evidence_notes": ["画面中手持展示双肩包正面和肩带"],
+        },
+    )
+
+    semantic_inputs = bundle["semantic_fact_inputs"]
+
+    assert "backpack" in semantic_inputs["hint_candidates"]
+    assert "机能双肩包" in semantic_inputs["hint_candidates"]
+    assert "HSJUN" in semantic_inputs["entity_like_tokens"]
+    assert "游刃" in semantic_inputs["entity_like_tokens"]
+
+
+def test_build_evidence_bundle_does_not_promote_visual_status_metadata_into_semantic_inputs():
+    bundle = build_evidence_bundle(
+        source_name="bag_visual_demo.mp4",
+        visual_semantic_evidence={
+            "provider": "minimax",
+            "mode": "native_multimodal",
+            "status": "degraded",
+            "failure_reason": "visual_parse_failed",
+            "frame_paths": ["frame_01.jpg"],
+            "object_categories": ["backpack"],
+            "subject_candidates": ["机能双肩包"],
+        },
+    )
+
+    semantic_inputs = bundle["semantic_fact_inputs"]
+
+    assert "degraded" not in semantic_inputs["hint_candidates"]
+    assert "visual_parse_failed" not in semantic_inputs["hint_candidates"]
+    assert "frame_01.jpg" not in semantic_inputs["hint_candidates"]
+    assert "backpack" in semantic_inputs["hint_candidates"]
+
+
 def test_build_evidence_bundle_prioritizes_relation_rich_cue_lines_and_entity_tokens():
     bundle = build_evidence_bundle(
         source_name="collab_backpack_review.mp4",

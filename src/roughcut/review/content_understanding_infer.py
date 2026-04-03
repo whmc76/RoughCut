@@ -217,10 +217,42 @@ def _build_compact_evidence_payload(evidence_bundle: dict[str, Any]) -> dict[str
     }
     candidate_hints = evidence_bundle.get("candidate_hints")
     compact_candidate_hints = candidate_hints if isinstance(candidate_hints, dict) else {}
+    visual_semantic_evidence = evidence_bundle.get("visual_semantic_evidence")
+    raw_visual_semantic_evidence = visual_semantic_evidence if isinstance(visual_semantic_evidence, dict) else {}
+    compact_visual_semantic_evidence = {
+        "object_categories": [
+            str(item).strip()
+            for item in (raw_visual_semantic_evidence.get("object_categories") or [])
+            if str(item).strip()
+        ][:8],
+        "visible_brands": [
+            str(item).strip()
+            for item in (raw_visual_semantic_evidence.get("visible_brands") or [])
+            if str(item).strip()
+        ][:8],
+        "visible_models": [
+            str(item).strip()
+            for item in (raw_visual_semantic_evidence.get("visible_models") or [])
+            if str(item).strip()
+        ][:8],
+        "subject_candidates": [
+            str(item).strip()
+            for item in (raw_visual_semantic_evidence.get("subject_candidates") or [])
+            if str(item).strip()
+        ][:8],
+        "interaction_type": str(raw_visual_semantic_evidence.get("interaction_type") or "").strip(),
+        "scene_context": str(raw_visual_semantic_evidence.get("scene_context") or "").strip(),
+        "evidence_notes": [
+            str(item).strip()
+            for item in (raw_visual_semantic_evidence.get("evidence_notes") or [])
+            if str(item).strip()
+        ][:8],
+    }
     return {
         "source_name": str(evidence_bundle.get("source_name") or "").strip(),
         "transcript_excerpt": str(evidence_bundle.get("transcript_excerpt") or "").strip(),
         "visible_text": str(evidence_bundle.get("visible_text") or "").strip(),
+        "visual_semantic_evidence": compact_visual_semantic_evidence,
         "semantic_fact_inputs": compact_semantic_inputs,
         "candidate_hints": compact_candidate_hints,
     }

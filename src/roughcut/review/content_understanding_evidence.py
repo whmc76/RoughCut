@@ -83,14 +83,48 @@ def _collect_subtitle_lines(subtitle_items: list[dict[str, Any]]) -> list[str]:
     return lines
 
 
-def _collect_hint_candidates(candidate_hints: dict[str, Any], visual_hints: dict[str, Any]) -> list[str]:
+def _collect_hint_candidates(
+    candidate_hints: dict[str, Any],
+    visual_hints: dict[str, Any],
+    visual_semantic_evidence: dict[str, Any],
+) -> list[str]:
     values: list[str] = []
-    for source in (candidate_hints, visual_hints):
+    visual_semantic_candidates = _visual_semantic_text_candidates(visual_semantic_evidence)
+    for source in (candidate_hints, visual_hints, visual_semantic_candidates):
         for raw in source.values():
             for normalized in _iter_text_like_values(raw):
                 if normalized not in values:
                     values.append(normalized)
     return values
+
+
+def _visual_semantic_text_candidates(visual_semantic_evidence: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(visual_semantic_evidence, dict):
+        return {}
+    allowed: dict[str, Any] = {}
+    for key in (
+        "object_categories",
+        "visible_brands",
+        "visible_models",
+        "subject_candidates",
+        "interaction_type",
+        "scene_context",
+        "evidence_notes",
+    ):
+        value = visual_semantic_evidence.get(key)
+        if value:
+            allowed[key] = value
+    frame_level_findings = visual_semantic_evidence.get("frame_level_findings")
+    if isinstance(frame_level_findings, list):
+        allowed["frame_level_findings"] = [
+            {
+                "finding": str(item.get("finding") or "").strip(),
+                "evidence": str(item.get("evidence") or "").strip(),
+            }
+            for item in frame_level_findings
+            if isinstance(item, dict)
+        ]
+    return allowed
 
 
 def _iter_text_like_values(value: object | None) -> list[str]:
@@ -325,7 +359,7 @@ def normalize_evidence_bundle(bundle: object | None) -> dict[str, Any]:
         visible_text = _as_text(visual_hints.get("visible_text"))
     candidate_hints["visual_hints"] = visual_hints
     subtitle_lines = _collect_subtitle_lines(subtitle_items)
-    hint_candidates = _collect_hint_candidates(candidate_hints, visual_hints)
+    hint_candidates = _collect_hint_candidates(candidate_hints, visual_hints, visual_semantic_evidence)
     cue_lines = _collect_cue_lines(subtitle_lines, transcript_excerpt)
     relation_hints = _collect_relation_hints(cue_lines, transcript_excerpt)
     computed_semantic_inputs = {
