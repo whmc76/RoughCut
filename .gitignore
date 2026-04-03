@@ -41,6 +41,9 @@ src/**/__pycache__/
 scripts/__pycache__/
 __pycache__/
 .artifacts/
+.playwright-cli/
+.tmp/
 .worktrees/
 tmp_*/
 tmp_*.py
+logs/*.env
