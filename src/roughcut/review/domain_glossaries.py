@@ -60,8 +60,8 @@ _BAG_DOMESTIC_BRANDS: tuple[GlossaryTermLike, ...] = (
     {"correct_form": "LEVEL8", "wrong_forms": ["Level8", "LEVEL 8", "地平线8号"], "category": "bag_brand", "context_hint": "国产通勤包品牌"},
     {"correct_form": "狐蝠工业", "wrong_forms": ["FOXBAT", "Foxbat", "FOXBAT DYNAMICS", "狐蝠", "鸿福"], "category": "bag_brand", "context_hint": "主流机能包品牌"},
     {"correct_form": "头狼工业", "wrong_forms": ["头狼", "头狼工业风", "FIRST WOLF"], "category": "bag_brand", "context_hint": "主流机能包品牌"},
-    {"correct_form": "HSJUN", "wrong_forms": ["hesijun", "HESIJUN", "hsjun", "HS JUN", "赫斯郡", "赫斯俊"], "category": "bag_brand", "context_hint": "小众机能包品牌", "domain": "bag", "category_scope": "bag"},
-    {"correct_form": "BOLTBOAT", "wrong_forms": ["Boltboat", "BOLT BOAT", "船家"], "category": "bag_brand", "context_hint": "主流机能包品牌", "domain": "bag", "category_scope": "bag"},
+    {"correct_form": "HSJUN", "wrong_forms": ["hesijun", "HESIJUN", "hsjun", "HS JUN", "赫斯郡", "赫斯俊"], "category": "bag_brand", "context_hint": "小众机能包品牌", "domain": "bag", "category_scope": "bag", "transcription_seed_templates": ["unboxing_standard", "edc_tactical"]},
+    {"correct_form": "BOLTBOAT", "wrong_forms": ["Boltboat", "BOLT BOAT", "船家"], "category": "bag_brand", "context_hint": "主流机能包品牌", "domain": "bag", "category_scope": "bag", "transcription_seed_templates": ["unboxing_standard", "edc_tactical"]},
     {"correct_form": "PSIGEAR", "wrong_forms": ["PSI GEAR", "PsiGear", "psiger", "混沌装备", "CHAOS GEAR", "Chaos Gear"], "category": "bag_brand", "context_hint": "主流战术/机能包品牌"},
     {"correct_form": "LIIGEAR", "wrong_forms": ["LiiGear", "LII GEAR", "Lii Gear"], "category": "bag_brand", "context_hint": "主流机能包品牌"},
 )
@@ -359,7 +359,7 @@ _DOMAIN_TERM_LIBRARY: dict[str, tuple[GlossaryTermLike, ...]] = {
         *_BAG_DOMESTIC_BRANDS,
         {"correct_form": "FXX1小副包", "wrong_forms": ["F叉二一小副包", "F X X 1小副包"], "category": "bag_model", "context_hint": "狐蝠工业机能副包型号"},
         {"correct_form": "FXX1", "wrong_forms": ["F叉二一", "F X X 1"], "category": "bag_model", "context_hint": "狐蝠工业机能副包型号"},
-        {"correct_form": "游刃", "wrong_forms": [], "category": "bag_model", "context_hint": "机能包产品名", "domain": "bag", "category_scope": "bag"},
+        {"correct_form": "游刃", "wrong_forms": [], "category": "bag_model", "context_hint": "机能包产品名", "domain": "bag", "category_scope": "bag", "transcription_seed_templates": ["unboxing_standard", "edc_tactical"]},
         {"correct_form": "机能包", "wrong_forms": ["机能包儿"], "category": "bag", "context_hint": "EDC 包袋品类"},
         {"correct_form": "通勤包", "wrong_forms": ["通情包"], "category": "bag", "context_hint": "EDC 包袋品类"},
         {"correct_form": "斜挎包", "wrong_forms": ["斜胯包"], "category": "bag", "context_hint": "EDC 包袋品类"},
@@ -623,6 +623,7 @@ def resolve_builtin_glossary_terms(
     subtitle_items: list[dict[str, Any]] | None = None,
     source_name: str | None = None,
 ) -> list[GlossaryTermLike]:
+    normalized_workflow_template = normalize_workflow_template_name(workflow_template)
     domains = _detect_glossary_signal_domains(
         workflow_template=workflow_template,
         content_profile=content_profile,
@@ -634,6 +635,16 @@ def resolve_builtin_glossary_terms(
     for domain in _expand_compatible_domains(domains):
         for term in _DOMAIN_TERM_LIBRARY.get(domain, ()):
             merged.append({**term, "domain": domain})
+    if normalized_workflow_template:
+        for domain, terms in _DOMAIN_TERM_LIBRARY.items():
+            for term in terms:
+                templates = {
+                    normalize_workflow_template_name(item) or str(item or "").strip()
+                    for item in (term.get("transcription_seed_templates") or [])
+                    if str(item or "").strip()
+                }
+                if normalized_workflow_template in templates:
+                    merged.append({**term, "domain": domain})
     return merge_glossary_terms([], merged)
 
 

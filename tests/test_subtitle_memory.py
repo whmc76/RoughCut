@@ -824,6 +824,30 @@ def test_build_subtitle_review_memory_does_not_inject_bag_hotwords_into_flashlig
     assert ("船家", "BOLTBOAT") not in alias_map
 
 
+def test_build_transcription_prompt_prioritizes_bag_identity_hotwords_for_functional_domain():
+    memory = build_subtitle_review_memory(
+        workflow_template="unboxing_standard",
+        subject_domain="functional",
+        glossary_terms=[],
+        user_memory={},
+        recent_subtitles=[],
+        content_profile=None,
+        include_recent_terms=False,
+        include_recent_examples=False,
+    )
+
+    prompt = build_transcription_prompt(
+        source_name="20260301-171443.mp4",
+        workflow_template="unboxing_standard",
+        review_memory=memory,
+        dialect_profile="beijing",
+    )
+
+    assert "HSJUN" in prompt
+    assert "BOLTBOAT" in prompt
+    assert "游刃" in prompt
+
+
 def test_detect_glossary_domains_keeps_no_signal_input_empty():
     domains = detect_glossary_domains(
         workflow_template=None,

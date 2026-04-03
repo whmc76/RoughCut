@@ -240,6 +240,13 @@ _CATEGORY_SCOPE_KEYWORDS: dict[str, tuple[str, ...]] = {
     "tools": ("工具钳", "钳", "批头", "螺丝刀", "扳手", "尖嘴钳", "钢丝钳"),
 }
 
+_CATEGORY_SCOPE_PRIMARY_DOMAINS: dict[str, tuple[str, ...]] = {
+    "bag": ("functional",),
+    "flashlight": ("edc",),
+    "knife": ("edc",),
+    "tools": ("tools",),
+}
+
 _ARABIC_TO_CHINESE_DIGITS = str.maketrans("0123456789", "零一二三四五六七八九")
 _CHINESE_TO_ARABIC_DIGITS = {
     "零": "0",
@@ -936,6 +943,12 @@ def _text_supports_category_scope(text: str, scope: str) -> bool:
     return bool(compact and any(keyword in compact for keyword in keywords))
 
 
+def _subject_domain_supports_category_scope(subject_domain: str | None, scope: str) -> bool:
+    normalized_subject_domain = normalize_subject_domain(subject_domain)
+    primary_domains = _CATEGORY_SCOPE_PRIMARY_DOMAINS.get(str(scope or "").strip().lower(), ())
+    return bool(normalized_subject_domain and normalized_subject_domain in primary_domains)
+
+
 def _glossary_term_supported_by_review_context(
     term: dict[str, Any],
     *,
@@ -950,7 +963,9 @@ def _glossary_term_supported_by_review_context(
         scopes.append(inferred_scope)
     if not scopes:
         return True
-    return any(_text_supports_category_scope(context_text, scope) for scope in scopes)
+    if any(_text_supports_category_scope(context_text, scope) for scope in scopes):
+        return True
+    return any(_subject_domain_supports_category_scope(subject_domain, scope) for scope in scopes)
 
 
 def apply_domain_term_corrections(

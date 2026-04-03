@@ -35,6 +35,7 @@ from roughcut.db.models import Artifact, GlossaryTerm, Job, JobStep, RenderOutpu
 from roughcut.db.session import get_session_factory
 from roughcut.edit.decisions import build_edit_decision
 from roughcut.edit.otio_export import export_to_otio
+from roughcut.edit.presets import normalize_workflow_template_name
 from roughcut.edit.render_plan import (
     build_ai_effect_render_plan,
     build_avatar_render_plan,
@@ -81,6 +82,7 @@ from roughcut.review.downstream_context import (
 from roughcut.review.domain_glossaries import (
     _CANONICAL_DOMAIN_SOURCES,
     _DOMAIN_COMPATIBILITY,
+    _WORKFLOW_TEMPLATE_DOMAINS,
     detect_glossary_domains,
     filter_scoped_glossary_terms,
     merge_glossary_terms,
@@ -139,8 +141,15 @@ _EDIT_PLAN_INSERT_SLOT_TIMEOUT_SEC = 20.0
 
 
 def _workflow_template_subject_domain(workflow_template: str | None) -> str | None:
-    del workflow_template
-    return None
+    normalized = normalize_workflow_template_name(workflow_template)
+    if not normalized:
+        return None
+    if normalized == "edc_tactical":
+        return "edc"
+    domains = _WORKFLOW_TEMPLATE_DOMAINS.get(normalized, ())
+    if not domains:
+        return None
+    return select_primary_subject_domain(domains)
 
 
 def _infer_subject_domain_for_memory(
@@ -154,12 +163,15 @@ def _infer_subject_domain_for_memory(
     explicit_subject_domain = normalize_subject_domain(subject_domain or (content_profile or {}).get("subject_domain"))
     if explicit_subject_domain:
         return explicit_subject_domain
-    return select_primary_subject_domain(detect_glossary_domains(
+    detected_subject_domain = select_primary_subject_domain(detect_glossary_domains(
         workflow_template=None,
         content_profile=content_profile,
         subtitle_items=subtitle_items,
         source_name=source_name,
     ))
+    if detected_subject_domain:
+        return detected_subject_domain
+    return _workflow_template_subject_domain(workflow_template)
 
 
 def _expand_subject_domain_scope(subject_domain: str | None) -> set[str]:

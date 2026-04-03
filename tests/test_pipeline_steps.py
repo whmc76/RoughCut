@@ -48,6 +48,22 @@ class _FakeTelegramReviewBotService:
         self.content_profile_notifications.append(job_id)
 
 
+def test_workflow_template_subject_domain_defaults_edc_tactical_to_edc():
+    assert _workflow_template_subject_domain("edc_tactical") == "edc"
+
+
+def test_infer_subject_domain_for_memory_falls_back_to_workflow_template_scope():
+    assert (
+        _infer_subject_domain_for_memory(
+            workflow_template="edc_tactical",
+            subtitle_items=[],
+            content_profile={},
+            source_name="20260301-171443.mp4",
+        )
+        == "edc"
+    )
+
+
 @pytest.mark.asyncio
 async def test_run_probe_starts_and_cleans_up_step_heartbeat(db_engine, monkeypatch, tmp_path: Path):
     import roughcut.pipeline.steps as steps_mod

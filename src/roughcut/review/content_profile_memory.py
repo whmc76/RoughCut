@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
+import json
 import re
 from typing import Any
 
@@ -9,6 +10,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from roughcut.db.models import ContentProfileCorrection, ContentProfileKeywordStat, Job
+from roughcut.providers.factory import get_reasoning_provider
+from roughcut.providers.reasoning.base import Message
 from roughcut.review.entity_graph import (
     add_entity_aliases,
     load_graph_confirmed_entities,
@@ -17,6 +20,7 @@ from roughcut.review.entity_graph import (
     upsert_content_profile_entity,
 )
 from roughcut.review.domain_glossaries import _DOMAIN_COMPATIBILITY, normalize_subject_domain
+from roughcut.usage import track_usage_operation
 
 
 CONTENT_PROFILE_MEMORY_FIELDS = (
@@ -234,6 +238,25 @@ async def record_content_profile_feedback_memory(
     alias_outcomes = _extract_identity_alias_outcomes(final_profile)
     accepted_brand_aliases = [item["alias_value"] for item in alias_outcomes if item["field_name"] == "subject_brand" and item["status"] == "accepted"]
     accepted_model_aliases = [item["alias_value"] for item in alias_outcomes if item["field_name"] == "subject_model" and item["status"] == "accepted"]
+    learned_alias_rows = await _extract_reusable_review_alias_rows(
+        subject_domain=fallback_subject_domain or "",
+        source_name=job.source_name,
+        draft_profile=draft_profile,
+        final_profile=final_profile,
+        user_feedback=user_feedback,
+    )
+    for field_name, alias_value, corrected_value in learned_alias_rows:
+        remember_correction(field_name, alias_value, corrected_value)
+    accepted_brand_aliases.extend(
+        alias_value
+        for field_name, alias_value, corrected_value in learned_alias_rows
+        if field_name == "subject_brand"
+    )
+    accepted_model_aliases.extend(
+        alias_value
+        for field_name, alias_value, corrected_value in learned_alias_rows
+        if field_name == "subject_model"
+    )
     await add_entity_aliases(session, entity=entity, field_name="subject_brand", aliases=accepted_brand_aliases)
     await add_entity_aliases(session, entity=entity, field_name="subject_model", aliases=accepted_model_aliases)
     for outcome in alias_outcomes:
@@ -269,6 +292,91 @@ async def record_content_profile_feedback_memory(
                 scope_value=final_subject_domain,
                 keyword=keyword,
             )
+
+
+async def _extract_reusable_review_alias_rows(
+    *,
+    subject_domain: str,
+    source_name: str,
+    draft_profile: dict[str, Any],
+    final_profile: dict[str, Any],
+    user_feedback: dict[str, Any],
+) -> list[tuple[str, str, str]]:
+    review_note_parts = [
+        _clean_memory_value(user_feedback.get("correction_notes")),
+        _clean_memory_value(user_feedback.get("supplemental_context")),
+    ]
+    review_notes = "\n".join(part for part in review_note_parts if part)
+    if not review_notes:
+        return []
+
+    canonical_map = {
+        "subject_brand": _clean_memory_value(final_profile.get("subject_brand")),
+        "subject_model": _clean_memory_value(final_profile.get("subject_model")),
+    }
+    if not any(canonical_map.values()):
+        return []
+
+    prompt = (
+        "你在学习中文短视频人工校对中具备复用价值的同音词、误听词、近似词。"
+        "只提取未来同类视频里仍可能再次出现、且明确指向当前已确认主体的 alias。"
+        "不要输出泛词、描述词、动作词，也不要输出跨类目的品牌映射。"
+        "如果 alias 不能稳定指向当前 canonical 值，就不要输出。\n"
+        "输出 JSON："
+        '{"aliases":[{"field_name":"subject_brand","alias_value":"","canonical_value":"","confidence":0.0,"reason":""}]}'
+        f"\nsubject_domain: {subject_domain or ''}"
+        f"\nsource_name: {source_name}"
+        f"\n当前草稿: {json.dumps(draft_profile or {}, ensure_ascii=False)}"
+        f"\n当前确认结果: {json.dumps(final_profile or {}, ensure_ascii=False)}"
+        f"\n人工审核备注: {review_notes}"
+    )
+    try:
+        provider = get_reasoning_provider()
+        with track_usage_operation("content_profile.review_alias_learning"):
+            response = await provider.complete(
+                [
+                    Message(role="system", content="你是严格的中文品牌别名学习助手。"),
+                    Message(role="user", content=prompt),
+                ],
+                temperature=0.0,
+                max_tokens=500,
+                json_mode=True,
+            )
+        payload = response.as_json()
+    except Exception:
+        return []
+    aliases = payload.get("aliases") if isinstance(payload, dict) else None
+    if not isinstance(aliases, list):
+        return []
+
+    rows: list[tuple[str, str, str]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for item in aliases:
+        if not isinstance(item, dict):
+            continue
+        field_name = _clean_memory_value(item.get("field_name"))
+        alias_value = _clean_memory_value(item.get("alias_value"))
+        canonical_value = _clean_memory_value(item.get("canonical_value"))
+        try:
+            confidence = float(item.get("confidence") or 0.0)
+        except (TypeError, ValueError):
+            confidence = 0.0
+        if field_name not in {"subject_brand", "subject_model"}:
+            continue
+        if confidence < 0.72:
+            continue
+        if not alias_value or not canonical_value or alias_value == canonical_value:
+            continue
+        if canonical_value != canonical_map.get(field_name):
+            continue
+        if len(alias_value) < 2 or len(alias_value) > 40:
+            continue
+        row = (field_name, alias_value, canonical_value)
+        if row in seen:
+            continue
+        seen.add(row)
+        rows.append(row)
+    return rows
 
 
 def _extract_identity_alias_feedback_rows(final_profile: dict[str, Any]) -> list[tuple[str, str, str]]:

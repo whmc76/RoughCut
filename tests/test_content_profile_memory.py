@@ -4,6 +4,7 @@ import uuid
 
 import pytest
 
+import roughcut.review.content_profile_memory as memory_mod
 from roughcut.db.models import Job
 from roughcut.review.content_profile_memory import (
     build_content_profile_memory_cloud,
@@ -364,6 +365,144 @@ async def test_content_profile_memory_promotes_identity_aliases_into_confirmed_e
         and "F叉二一小副包" in item["model_aliases"]
         and any("鸿福" in phrase for phrase in item["phrases"])
         for item in memory["confirmed_entities"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_content_profile_memory_learns_reusable_aliases_from_review_notes(db_session, monkeypatch: pytest.MonkeyPatch):
+    class _FakeResponse:
+        def as_json(self):
+            return {
+                "aliases": [
+                    {
+                        "field_name": "subject_brand",
+                        "alias_value": "赫斯郡",
+                        "canonical_value": "HSJUN",
+                        "confidence": 0.96,
+                        "reason": "审核备注明确给出同音品牌修正",
+                    },
+                    {
+                        "field_name": "subject_model",
+                        "alias_value": "游任",
+                        "canonical_value": "游刃",
+                        "confidence": 0.91,
+                        "reason": "审核备注指出新品名误听",
+                    },
+                ]
+            }
+
+    class _FakeProvider:
+        async def complete(self, *args, **kwargs):
+            return _FakeResponse()
+
+    monkeypatch.setattr(memory_mod, "get_reasoning_provider", lambda: _FakeProvider())
+
+    job = await _create_job(
+        db_session,
+        source_name="20260404_hsjun_boltboat_you ren.mp4",
+        workflow_template="unboxing_standard",
+    )
+
+    await record_content_profile_feedback_memory(
+        db_session,
+        job=job,
+        draft_profile={
+            "subject_type": "户外徒步背包",
+            "subject_domain": "functional",
+        },
+        final_profile={
+            "subject_brand": "HSJUN",
+            "subject_model": "游刃",
+            "subject_type": "户外徒步背包",
+            "subject_domain": "functional",
+            "search_queries": ["HSJUN 游刃", "HSJUN 游刃 背包"],
+        },
+        user_feedback={
+            "correction_notes": "赫斯郡其实就是 HSJUN，这期新品叫游刃，不是游任。",
+        },
+    )
+    await db_session.flush()
+
+    memory = await load_content_profile_user_memory(db_session, subject_domain="functional")
+
+    assert any(
+        item["brand"] == "HSJUN"
+        and item["model"] == "游刃"
+        and "赫斯郡" in item.get("brand_aliases", [])
+        and "游任" in item.get("model_aliases", [])
+        for item in memory["confirmed_entities"]
+    )
+    assert any(
+        item["field_name"] == "subject_brand"
+        and item["original_value"] == "赫斯郡"
+        and item["corrected_value"] == "HSJUN"
+        for item in memory["recent_corrections"]
+    )
+    assert any(
+        item["field_name"] == "subject_model"
+        and item["original_value"] == "游任"
+        and item["corrected_value"] == "游刃"
+        for item in memory["recent_corrections"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_content_profile_memory_learned_review_aliases_stay_within_subject_domain(db_session, monkeypatch: pytest.MonkeyPatch):
+    class _FakeResponse:
+        def as_json(self):
+            return {
+                "aliases": [
+                    {
+                        "field_name": "subject_brand",
+                        "alias_value": "赫斯俊",
+                        "canonical_value": "HSJUN",
+                        "confidence": 0.94,
+                        "reason": "品牌同音误听",
+                    }
+                ]
+            }
+
+    class _FakeProvider:
+        async def complete(self, *args, **kwargs):
+            return _FakeResponse()
+
+    monkeypatch.setattr(memory_mod, "get_reasoning_provider", lambda: _FakeProvider())
+
+    job = await _create_job(
+        db_session,
+        source_name="20260404_hsjun.mp4",
+        workflow_template="unboxing_standard",
+    )
+
+    await record_content_profile_feedback_memory(
+        db_session,
+        job=job,
+        draft_profile={
+            "subject_type": "户外徒步背包",
+            "subject_domain": "functional",
+        },
+        final_profile={
+            "subject_brand": "HSJUN",
+            "subject_model": "游刃",
+            "subject_type": "户外徒步背包",
+            "subject_domain": "functional",
+        },
+        user_feedback={
+            "supplemental_context": "赫斯俊就是 HSJUN。",
+        },
+    )
+    await db_session.flush()
+
+    bag_memory = await load_content_profile_user_memory(db_session, subject_domain="functional")
+    edc_memory = await load_content_profile_user_memory(db_session, subject_domain="edc")
+
+    assert any(
+        item["brand"] == "HSJUN" and "赫斯俊" in item.get("brand_aliases", [])
+        for item in bag_memory["confirmed_entities"]
+    )
+    assert not any(
+        item["brand"] == "HSJUN"
+        for item in edc_memory.get("confirmed_entities", [])
     )
 
 
