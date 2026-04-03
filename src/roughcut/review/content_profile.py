@@ -41,8 +41,8 @@ from roughcut.speech.postprocess import (
     normalize_display_text,
 )
 
-_CONTENT_PROFILE_INFER_CACHE_VERSION = "2026-04-03.infer.v9"
-_CONTENT_PROFILE_ENRICH_CACHE_VERSION = "2026-04-03.enrich.v9"
+_CONTENT_PROFILE_INFER_CACHE_VERSION = "2026-04-03.infer.v12"
+_CONTENT_PROFILE_ENRICH_CACHE_VERSION = "2026-04-03.enrich.v12"
 _INGESTIBLE_PRODUCT_SIGNALS = (
     "luckykiss",
     "kisspod",

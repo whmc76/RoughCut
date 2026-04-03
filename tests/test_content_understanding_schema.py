@@ -3,6 +3,7 @@ from roughcut.review.content_understanding_schema import (
     ContentUnderstanding,
     SubjectEntity,
     map_content_understanding_to_legacy_profile,
+    parse_content_semantic_facts_payload,
     parse_content_understanding_payload,
     serialize_content_understanding_payload,
 )
@@ -174,3 +175,20 @@ def test_content_understanding_payload_round_trips_capability_matrix_and_trace_t
     assert reparsed.capability_matrix == understanding.capability_matrix
     assert reparsed.orchestration_trace == understanding.orchestration_trace
     assert reparsed.conflicts == understanding.conflicts
+
+
+def test_parse_content_semantic_facts_payload_preserves_role_candidates():
+    facts = parse_content_semantic_facts_payload(
+        {
+            "primary_subject_candidates": ["机能双肩包", "机能双肩包"],
+            "supporting_subject_candidates": ["HSJUN", "BOLTBOAT"],
+            "component_candidates": ["背负系统", "分仓结构"],
+            "aspect_candidates": ["背负", "结构"],
+            "brand_candidates": ["HSJUN"],
+        }
+    )
+
+    assert facts.primary_subject_candidates == ["机能双肩包"]
+    assert facts.supporting_subject_candidates == ["HSJUN", "BOLTBOAT"]
+    assert facts.component_candidates == ["背负系统", "分仓结构"]
+    assert facts.aspect_candidates == ["背负", "结构"]

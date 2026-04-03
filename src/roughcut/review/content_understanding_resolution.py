@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Any
 
-from roughcut.review.content_understanding_schema import ContentUnderstanding
+from roughcut.review.content_understanding_schema import ContentUnderstanding, SubjectEntity
 
 
 _RESOLUTION_CONFIDENCE_THRESHOLD = 0.7
@@ -52,11 +52,12 @@ def resolve_entities(
     needs_review = bool(base.needs_review or candidate.needs_review or not has_direct_evidence or conflicts)
     primary_subject = candidate.resolved_primary_subject if use_resolved else base.primary_subject
     subject_entities = list(candidate.resolved_entities) if use_resolved else list(base.subject_entities)
+    observed_entities = _normalize_observed_entities(base, fallback_subject_entities=subject_entities)
     return replace(
         base,
         primary_subject=primary_subject,
         subject_entities=subject_entities,
-        observed_entities=list(base.observed_entities or base.subject_entities),
+        observed_entities=observed_entities,
         resolved_entities=list(candidate.resolved_entities),
         resolved_primary_subject=candidate.resolved_primary_subject,
         entity_resolution_map=list(candidate.entity_resolution_map),
@@ -124,3 +125,28 @@ def _merge_unique(*groups: list[str]) -> list[str]:
             if text and text not in merged:
                 merged.append(text)
     return merged
+
+
+def _normalize_observed_entities(
+    base: ContentUnderstanding,
+    *,
+    fallback_subject_entities: list[SubjectEntity],
+) -> list[SubjectEntity]:
+    observed_entities = list(base.observed_entities or fallback_subject_entities)
+    primary_candidates = [str(item).strip() for item in base.semantic_facts.primary_subject_candidates if str(item).strip()]
+    component_candidates = {
+        str(item).strip().lower()
+        for item in [*base.semantic_facts.component_candidates, *base.semantic_facts.aspect_candidates]
+        if str(item).strip()
+    }
+    if not primary_candidates:
+        return observed_entities
+
+    observed_names = {
+        str(entity.name or "").strip().lower()
+        for entity in observed_entities
+        if str(entity.name or "").strip()
+    }
+    if (not observed_entities or observed_names.issubset(component_candidates)) and primary_candidates[0].lower() not in observed_names:
+        return [SubjectEntity(kind="product", name=primary_candidates[0])] + observed_entities
+    return observed_entities

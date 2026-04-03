@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from roughcut.review.content_understanding_schema import ContentUnderstanding, SubjectEntity
+from roughcut.review.content_understanding_schema import ContentSemanticFacts, ContentUnderstanding, SubjectEntity
 from roughcut.review.content_understanding_resolution import should_run_entity_resolution
 from roughcut.review.content_understanding_verify import (
     HybridVerificationBundle,
@@ -361,3 +361,60 @@ async def test_verify_content_understanding_only_runs_resolution_when_conflicts_
 
     assert result.entity_resolution_map
     assert result.resolved_primary_subject == "HSJUN × BOLTBOAT 游刃机能双肩包"
+
+
+@pytest.mark.asyncio
+async def test_verify_content_understanding_normalizes_observed_entities_when_base_only_has_components():
+    understanding = ContentUnderstanding(
+        video_type="product_review",
+        content_domain="bags",
+        primary_subject="户外背包",
+        semantic_facts=ContentSemanticFacts(
+            primary_subject_candidates=["户外背包"],
+            component_candidates=["背包背负系统", "肩带系统"],
+            aspect_candidates=["背负调节"],
+        ),
+        subject_entities=[SubjectEntity(kind="product", name="户外背包")],
+        observed_entities=[SubjectEntity(kind="component", name="背包背负系统")],
+        video_theme="户外背包背负系统功能展示与调节方式演示",
+        summary="视频围绕户外背包展开，并重点展示背负系统与调节方式。",
+        hook_line="背包背负调节细讲",
+        engagement_question="你更在意背负还是调节？",
+        search_queries=["户外背包 背负调节"],
+        confidence={"overall": 0.76},
+        needs_review=True,
+    )
+
+    result = await verify_content_understanding(
+        understanding=understanding,
+        evidence_bundle={"transcript_excerpt": "这期主要看这个户外背包和它的背负系统调节方式"},
+        verification_bundle=HybridVerificationBundle(
+            search_queries=["户外背包 背负调节"],
+            online_results=[],
+            database_results=[],
+        ),
+        provider=FakeProvider(
+            {
+                "video_type": "product_review",
+                "content_domain": "bags",
+                "primary_subject": "户外背包",
+                "subject_entities": [{"kind": "product", "name": "户外背包"}],
+                "observed_entities": [{"kind": "component", "name": "背包背负系统"}],
+                "resolved_entities": [],
+                "resolved_primary_subject": "",
+                "entity_resolution_map": [],
+                "video_theme": "户外背包背负系统功能展示与调节方式演示",
+                "summary": "视频围绕户外背包展开，并重点展示背负系统与调节方式。",
+                "hook_line": "背包背负调节细讲",
+                "engagement_question": "你更在意背负还是调节？",
+                "search_queries": ["户外背包 背负调节"],
+                "evidence_spans": [],
+                "uncertainties": [],
+                "confidence": {"overall": 0.76},
+                "needs_review": True,
+                "review_reasons": [],
+            }
+        ),
+    )
+
+    assert result.observed_entities[0].name == "户外背包"

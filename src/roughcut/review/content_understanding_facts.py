@@ -16,9 +16,16 @@ async def infer_content_semantic_facts(
     prompt = (
         "你是视频证据语义抽取器。请根据多模态证据提取可供后续检索和消歧使用的通用语义事实，"
         "只输出一个 JSON 对象，不要 Markdown，不要代码块，不要解释。"
-        "字段必须包括 brand_candidates, model_candidates, product_name_candidates, product_type_candidates, "
-        "entity_candidates, collaboration_pairs, search_expansions, evidence_sentences。"
+        "字段必须包括 primary_subject_candidates, supporting_subject_candidates, component_candidates, "
+        "aspect_candidates, brand_candidates, model_candidates, product_name_candidates, "
+        "product_type_candidates, entity_candidates, collaboration_pairs, search_expansions, evidence_sentences。"
         "要求："
+        "优先识别视频真正围绕的可售主体或被重点展示的核心对象；"
+        "把主对象或主产品放进 primary_subject_candidates；"
+        "把联名方、配套对象、辅助对象放进 supporting_subject_candidates；"
+        "把功能系统、部件、配件、工艺模块放进 component_candidates；"
+        "把背负、做工、材质、结构、续航、亮度、锋利度等评价维度放进 aspect_candidates；"
+        "不要把功能系统、部件、工艺过程、服务方或背景物直接当成主产品候选；"
         "只提取证据支持的候选，不要输出最终结论；"
         "优先参考 cue_lines 和 relation_hints 中的命名、归属、联名、型号、系列等关系提示，以及 entity_like_tokens 中的实体样 token；"
         "search_expansions 最多 6 条，可包含中英别名、音译、联名组合、近似实体检索词；"
@@ -41,6 +48,10 @@ async def infer_content_semantic_facts(
                 provider,
                 response,
                 required_fields=[
+                    "primary_subject_candidates",
+                    "supporting_subject_candidates",
+                    "component_candidates",
+                    "aspect_candidates",
                     "brand_candidates",
                     "model_candidates",
                     "product_name_candidates",
@@ -51,7 +62,8 @@ async def infer_content_semantic_facts(
                     "evidence_sentences",
                 ],
                 empty_object_description=(
-                    '{"brand_candidates":[],"model_candidates":[],"product_name_candidates":[],'
+                    '{"primary_subject_candidates":[],"supporting_subject_candidates":[],"component_candidates":[],'
+                    '"aspect_candidates":[],"brand_candidates":[],"model_candidates":[],"product_name_candidates":[],'
                     '"product_type_candidates":[],"entity_candidates":[],"collaboration_pairs":[],'
                     '"search_expansions":[],"evidence_sentences":[]}'
                 ),

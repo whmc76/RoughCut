@@ -11,6 +11,7 @@ from roughcut.review.content_understanding_facts import _load_json_object, infer
 from roughcut.review.content_understanding_schema import (
     ContentSemanticFacts,
     ContentUnderstanding,
+    SubjectEntity,
     parse_content_understanding_payload as parse_content_understanding_payload_from_schema,
 )
 
@@ -116,7 +117,7 @@ async def infer_final_understanding(
             capability_matrix=understanding.capability_matrix,
             orchestration_trace=understanding.orchestration_trace,
         )
-    return understanding
+    return _normalize_understanding_subject_roles(understanding, semantic_facts)
 
 
 def _with_staged_semantic_facts(
@@ -152,6 +153,69 @@ def _with_staged_semantic_facts(
     )
 
 
+def _normalize_understanding_subject_roles(
+    understanding: ContentUnderstanding,
+    semantic_facts: ContentSemanticFacts,
+) -> ContentUnderstanding:
+    primary_candidates = [str(item).strip() for item in semantic_facts.primary_subject_candidates if str(item).strip()]
+    supporting_candidates = [str(item).strip() for item in semantic_facts.supporting_subject_candidates if str(item).strip()]
+    component_candidates = {
+        str(item).strip().lower()
+        for item in [*semantic_facts.component_candidates, *semantic_facts.aspect_candidates]
+        if str(item).strip()
+    }
+    if not primary_candidates:
+        return understanding
+
+    normalized_primary_subject = str(understanding.primary_subject or "").strip().lower()
+    effective_primary_subject = understanding.primary_subject
+    if not effective_primary_subject or normalized_primary_subject in component_candidates:
+        effective_primary_subject = primary_candidates[0]
+
+    def _entity_name(entity: SubjectEntity) -> str:
+        return str(entity.name or "").strip()
+
+    observed_entities = list(understanding.observed_entities)
+    observed_names = {_entity_name(entity).lower() for entity in observed_entities if _entity_name(entity)}
+    if (not observed_entities or observed_names.issubset(component_candidates)) and primary_candidates[0].lower() not in observed_names:
+        observed_entities = [SubjectEntity(kind="product", name=primary_candidates[0])] + observed_entities
+        observed_names = {_entity_name(entity).lower() for entity in observed_entities if _entity_name(entity)}
+
+    subject_entities = list(understanding.subject_entities)
+    subject_names = {_entity_name(entity).lower() for entity in subject_entities if _entity_name(entity)}
+    if (not subject_entities or subject_names.issubset(component_candidates)) and primary_candidates[0].lower() not in subject_names:
+        subject_entities = [SubjectEntity(kind="product", name=primary_candidates[0])] + subject_entities
+        subject_names = {_entity_name(entity).lower() for entity in subject_entities if _entity_name(entity)}
+    for candidate in supporting_candidates:
+        if candidate.lower() not in subject_names:
+            subject_entities.append(SubjectEntity(kind="related", name=candidate))
+
+    return ContentUnderstanding(
+        video_type=understanding.video_type,
+        content_domain=understanding.content_domain,
+        primary_subject=effective_primary_subject,
+        semantic_facts=understanding.semantic_facts,
+        subject_entities=subject_entities,
+        observed_entities=observed_entities,
+        resolved_entities=understanding.resolved_entities,
+        resolved_primary_subject=understanding.resolved_primary_subject,
+        entity_resolution_map=understanding.entity_resolution_map,
+        video_theme=understanding.video_theme,
+        summary=understanding.summary,
+        hook_line=understanding.hook_line,
+        engagement_question=understanding.engagement_question,
+        search_queries=understanding.search_queries,
+        evidence_spans=understanding.evidence_spans,
+        uncertainties=understanding.uncertainties,
+        conflicts=understanding.conflicts,
+        confidence=understanding.confidence,
+        needs_review=understanding.needs_review,
+        review_reasons=understanding.review_reasons,
+        capability_matrix=understanding.capability_matrix,
+        orchestration_trace=understanding.orchestration_trace,
+    )
+
+
 def _build_content_understanding_prompt(
     evidence_bundle: dict[str, Any],
     semantic_facts: ContentSemanticFacts,
@@ -166,6 +230,13 @@ def _build_content_understanding_prompt(
         "video_theme, summary, hook_line, engagement_question, search_queries, evidence_spans, "
         "uncertainties, confidence, needs_review, review_reasons。"
         "约束："
+        "primary_subject 必须优先表示视频真正围绕的主对象或主产品；"
+        "优先参考 semantic_facts.primary_subject_candidates；"
+        "如果 semantic_facts.component_candidates 或 semantic_facts.aspect_candidates 非空，这些内容默认只能作为组件、系统、评价点或总结素材，不能抢占 primary_subject；"
+        "如果 semantic_facts.supporting_subject_candidates 非空，它们优先进入 subject_entities 或 observed_entities，而不是覆盖主主体；"
+        "不要把功能系统、部件、工艺过程或服务方误当成 primary_subject，除非视频明确就是在讲它们本身；"
+        "如果视频既展示主产品又讨论部件/配件/工艺，把主产品放在 primary_subject，把其他内容放进 subject_entities、observed_entities 或 summary；"
+        "如果视频里既出现主对象原始称呼，也出现组件/系统称呼，observed_entities 应优先保留主对象原始称呼，组件/系统可作为补充实体或写进 summary；"
         "subject_entities 必须是对象数组，每项包含 kind,name,brand,model；"
         "observed_entities 必须保留视频里原始看到或听到的主体称呼；"
         "resolved_entities、resolved_primary_subject、entity_resolution_map 在首轮推断可为空；"
@@ -267,6 +338,10 @@ def _needs_understanding_repair(
     informative_semantic_facts = any(
         (
             semantic_facts.brand_candidates,
+            semantic_facts.primary_subject_candidates,
+            semantic_facts.supporting_subject_candidates,
+            semantic_facts.component_candidates,
+            semantic_facts.aspect_candidates,
             semantic_facts.model_candidates,
             semantic_facts.product_name_candidates,
             semantic_facts.product_type_candidates,
@@ -278,6 +353,7 @@ def _needs_understanding_repair(
     )
     if not informative_semantic_facts:
         return False
+    role_conflict = _has_subject_role_conflict(understanding, semantic_facts)
     has_core_output = any(
         (
             understanding.video_type,
@@ -292,7 +368,38 @@ def _needs_understanding_repair(
             understanding.review_reasons,
         )
     )
-    return not has_core_output
+    return (not has_core_output) or role_conflict
+
+
+def _has_subject_role_conflict(
+    understanding: ContentUnderstanding,
+    semantic_facts: ContentSemanticFacts,
+) -> bool:
+    primary_candidates = {
+        item.strip().lower()
+        for item in semantic_facts.primary_subject_candidates
+        if str(item).strip()
+    }
+    component_candidates = {
+        item.strip().lower()
+        for item in [*semantic_facts.component_candidates, *semantic_facts.aspect_candidates]
+        if str(item).strip()
+    }
+    if not primary_candidates or not component_candidates:
+        return False
+
+    normalized_primary_subject = str(understanding.primary_subject or "").strip().lower()
+    if normalized_primary_subject and normalized_primary_subject in component_candidates:
+        return True
+
+    observed_names = {
+        str(entity.name or "").strip().lower()
+        for entity in understanding.observed_entities
+        if str(entity.name or "").strip()
+    }
+    if observed_names and observed_names.issubset(component_candidates) and primary_candidates.isdisjoint(observed_names):
+        return True
+    return False
 
 
 async def _repair_empty_understanding_payload(
@@ -314,7 +421,8 @@ async def _repair_empty_understanding_payload(
         "1. 如果证据足够，就补全最合理的内容理解结果；"
         "2. 如果证据不足，也必须明确写出 review_reasons，不能整包留空；"
         "3. 不要编造未被证据支持的品牌/型号；"
-        "4. 允许保守，但不能忽略 semantic_facts 已经明确给出的候选。"
+        "4. 允许保守，但不能忽略 semantic_facts 已经明确给出的候选；"
+        "5. 如果 semantic_facts 已区分 primary_subject_candidates、component_candidates、aspect_candidates，必须优先让主对象候选成为 primary_subject，组件和维度不要顶替主主体。"
         f"\n原始输出:\n{getattr(response, 'content', '')}"
         f"\n语义事实:\n{semantic_facts.__dict__}"
         f"\n紧凑证据包:\n{_build_compact_evidence_payload(evidence_bundle)}"

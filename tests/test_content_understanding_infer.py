@@ -188,6 +188,10 @@ async def test_infer_content_understanding_uses_reasoning_provider_payload(monke
             if self.calls == 1:
                 return FakeResponse(
                     {
+                        "primary_subject_candidates": ["ComfyUI 工作流"],
+                        "supporting_subject_candidates": ["ComfyUI"],
+                        "component_candidates": ["节点编排"],
+                        "aspect_candidates": ["工作流搭建"],
                         "brand_candidates": ["ComfyUI"],
                         "model_candidates": ["工作流"],
                         "product_name_candidates": [],
@@ -227,6 +231,9 @@ async def test_infer_content_understanding_uses_reasoning_provider_payload(monke
     assert "primary_subject, semantic_facts, subject_entities" not in prompts[1]
     assert "cue_lines" in prompts[0]
     assert "relation_hints" in prompts[0]
+    assert "primary_subject_candidates" in prompts[0]
+    assert "semantic_facts.primary_subject_candidates" in prompts[1]
+    assert "不要把功能系统、部件、工艺过程或服务方误当成 primary_subject" in prompts[1]
     assert result.video_type == "tutorial"
     assert result.content_domain == "ai"
     assert result.primary_subject == "ComfyUI 工作流"
@@ -257,6 +264,10 @@ async def test_infer_content_understanding_compact_payload_includes_visual_seman
             if self.calls == 1:
                 return FakeResponse(
                     {
+                        "primary_subject_candidates": ["HSJUN 游刃机能双肩包"],
+                        "supporting_subject_candidates": ["HSJUN"],
+                        "component_candidates": ["背负系统"],
+                        "aspect_candidates": ["背负"],
                         "brand_candidates": ["HSJUN"],
                         "model_candidates": ["游刃"],
                         "product_name_candidates": ["游刃"],
@@ -312,6 +323,52 @@ async def test_infer_content_understanding_compact_payload_includes_visual_seman
 
 
 @pytest.mark.asyncio
+async def test_infer_content_semantic_facts_prompt_prioritizes_primary_sellable_subject_over_components():
+    from roughcut.review.content_understanding_facts import infer_content_semantic_facts
+
+    prompts: list[str] = []
+
+    class FakeResponse:
+        def as_json(self):
+            return {
+                "primary_subject_candidates": [],
+                "supporting_subject_candidates": [],
+                "component_candidates": [],
+                "aspect_candidates": [],
+                "brand_candidates": [],
+                "model_candidates": [],
+                "product_name_candidates": [],
+                "product_type_candidates": [],
+                "entity_candidates": [],
+                "collaboration_pairs": [],
+                "search_expansions": [],
+                "evidence_sentences": [],
+            }
+
+    class FakeProvider:
+        async def complete(self, *args, **kwargs):
+            prompts.append(args[0][-1].content)
+            return FakeResponse()
+
+    await infer_content_semantic_facts(
+        FakeProvider(),
+        {
+            "semantic_fact_inputs": {
+                "cue_lines": ["今天重点看这个包的背负系统"],
+                "relation_hints": [],
+                "entity_like_tokens": ["背负系统", "双肩包"],
+            }
+        },
+    )
+
+    assert "优先识别视频真正围绕的可售主体或被重点展示的核心对象" in prompts[0]
+    assert "把主对象或主产品放进 primary_subject_candidates" in prompts[0]
+    assert "把功能系统、部件、配件、工艺模块放进 component_candidates" in prompts[0]
+    assert "把背负、做工、材质、结构、续航、亮度、锋利度等评价维度放进 aspect_candidates" in prompts[0]
+    assert "不要把功能系统、部件、工艺过程、服务方或背景物直接当成主产品候选" in prompts[0]
+
+
+@pytest.mark.asyncio
 async def test_infer_content_understanding_repairs_malformed_json_response(monkeypatch: pytest.MonkeyPatch):
     from roughcut.review import content_understanding_infer as infer_mod
 
@@ -343,6 +400,10 @@ async def test_infer_content_understanding_repairs_malformed_json_response(monke
                         "content": '{"brand_candidates":["赫斯郡"],"model_candidates":[],"product_name_candidates":[],"product_type_candidates":["机能双肩包"],"entity_candidates":["机能双肩包"],"collaboration_pairs":[],"search_expansions":["机能双肩包 开箱"],"evidence_sentences":["今天开箱两款机能双肩包"]}',
                         "as_json": staticmethod(
                             lambda: {
+                                "primary_subject_candidates": ["机能双肩包"],
+                                "supporting_subject_candidates": ["赫斯郡"],
+                                "component_candidates": [],
+                                "aspect_candidates": ["开箱"],
                                 "brand_candidates": ["赫斯郡"],
                                 "model_candidates": [],
                                 "product_name_candidates": [],
@@ -396,6 +457,10 @@ async def test_infer_content_understanding_uses_semantic_facts_to_expand_retriev
             if self.calls == 1:
                 return FakeResponse(
                     {
+                        "primary_subject_candidates": ["HSJUN × BOLTBOAT 游刃机能双肩包"],
+                        "supporting_subject_candidates": ["HSJUN", "BOLTBOAT"],
+                        "component_candidates": [],
+                        "aspect_candidates": ["对比评测"],
                         "brand_candidates": ["HSJUN", "BOLTBOAT"],
                         "model_candidates": ["游刃"],
                         "product_name_candidates": ["游刃"],
@@ -471,6 +536,10 @@ async def test_infer_content_understanding_uses_compact_evidence_payload_for_fin
             if self.calls == 1:
                 return FakeResponse(
                     {
+                        "primary_subject_candidates": ["HSJUN × BOLTBOAT 游刃机能双肩包"],
+                        "supporting_subject_candidates": ["HSJUN", "BOLTBOAT"],
+                        "component_candidates": [],
+                        "aspect_candidates": ["对比评测"],
                         "brand_candidates": ["HSJUN", "BOLTBOAT"],
                         "model_candidates": ["游刃"],
                         "product_name_candidates": ["游刃"],
@@ -556,6 +625,10 @@ async def test_infer_content_understanding_compact_payload_keeps_relation_hints(
             if self.calls == 1:
                 return FakeResponse(
                     {
+                        "primary_subject_candidates": ["HSJUN × BOLTBOAT 游刃机能双肩包"],
+                        "supporting_subject_candidates": ["HSJUN", "BOLTBOAT"],
+                        "component_candidates": [],
+                        "aspect_candidates": ["对比评测"],
                         "brand_candidates": ["HSJUN", "BOLTBOAT"],
                         "model_candidates": ["游刃"],
                         "product_name_candidates": ["游刃"],
@@ -636,6 +709,10 @@ async def test_infer_content_understanding_repairs_empty_final_payload_when_sema
             if self.calls == 1:
                 return FakeResponse(
                     {
+                        "primary_subject_candidates": ["HSJUN × BOLTBOAT 游刃机能双肩包"],
+                        "supporting_subject_candidates": ["HSJUN", "BOLTBOAT"],
+                        "component_candidates": [],
+                        "aspect_candidates": ["对比评测"],
                         "brand_candidates": ["HSJUN", "BOLTBOAT"],
                         "model_candidates": ["游刃"],
                         "product_name_candidates": ["游刃"],
@@ -708,3 +785,162 @@ async def test_infer_content_understanding_repairs_empty_final_payload_when_sema
     assert result.video_theme == "联名机能双肩包对比评测"
     assert result.search_queries == ["HSJUN BOLTBOAT 游刃"]
     assert len(prompts) == 3
+
+
+@pytest.mark.asyncio
+async def test_infer_content_understanding_repairs_role_conflict_when_component_overrides_primary_subject(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from roughcut.review import content_understanding_infer as infer_mod
+
+    prompts: list[str] = []
+
+    class FakeResponse:
+        def __init__(self, payload):
+            self.payload = payload
+            self.content = json.dumps(payload, ensure_ascii=False)
+
+        def as_json(self):
+            return self.payload
+
+    class FakeProvider:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def complete(self, *args, **kwargs):
+            prompts.append(args[0][-1].content)
+            self.calls += 1
+            if self.calls == 1:
+                return FakeResponse(
+                    {
+                        "primary_subject_candidates": ["户外背包"],
+                        "supporting_subject_candidates": ["联名机能包"],
+                        "component_candidates": ["背包背负系统", "肩带系统"],
+                        "aspect_candidates": ["背负调节"],
+                        "brand_candidates": [],
+                        "model_candidates": [],
+                        "product_name_candidates": [],
+                        "product_type_candidates": ["户外背包"],
+                        "entity_candidates": ["户外背包", "背包背负系统"],
+                        "collaboration_pairs": [],
+                        "search_expansions": ["户外背包 背负调节"],
+                        "evidence_sentences": ["这期主要看这个户外背包和它的背负系统调节方式"],
+                    }
+                )
+            if self.calls == 2:
+                return FakeResponse(
+                    {
+                        "video_type": "product_review",
+                        "content_domain": "bags",
+                        "primary_subject": "背包背负系统",
+                        "subject_entities": [{"kind": "component", "name": "背包背负系统"}],
+                        "observed_entities": [{"kind": "component", "name": "肩带系统"}],
+                        "resolved_entities": [],
+                        "resolved_primary_subject": "",
+                        "entity_resolution_map": [],
+                        "video_theme": "背包背负系统功能展示与调节方式演示",
+                        "summary": "视频重点介绍背包背负系统与调节方式。",
+                        "hook_line": "背负系统细讲",
+                        "engagement_question": "你更在意背负还是调节？",
+                        "search_queries": ["户外背包 背负调节"],
+                        "evidence_spans": [],
+                        "uncertainties": [],
+                        "confidence": {"overall": 0.72},
+                        "needs_review": True,
+                        "review_reasons": [],
+                    }
+                )
+            return FakeResponse(
+                {
+                    "video_type": "product_review",
+                    "content_domain": "bags",
+                    "primary_subject": "户外背包",
+                    "subject_entities": [{"kind": "product", "name": "户外背包"}],
+                    "observed_entities": [{"kind": "product", "name": "户外背包"}],
+                    "resolved_entities": [],
+                    "resolved_primary_subject": "",
+                    "entity_resolution_map": [],
+                    "video_theme": "户外背包背负系统功能展示与调节方式演示",
+                    "summary": "视频围绕户外背包展开，并重点展示背负系统与调节方式。",
+                    "hook_line": "背包背负调节细讲",
+                    "engagement_question": "你更在意背负还是调节？",
+                    "search_queries": ["户外背包 背负调节"],
+                    "evidence_spans": [],
+                    "uncertainties": [],
+                    "confidence": {"overall": 0.76},
+                    "needs_review": True,
+                    "review_reasons": ["组件描述较多，主体仍需人工复核"],
+                }
+            )
+
+    monkeypatch.setattr(infer_mod, "get_reasoning_provider", lambda: FakeProvider())
+
+    result = await infer_mod.infer_content_understanding(
+        {
+            "transcript_excerpt": "这期主要看这个户外背包和它的背负系统调节方式",
+            "semantic_fact_inputs": {
+                "cue_lines": ["这期主要看这个户外背包和它的背负系统调节方式"],
+                "entity_like_tokens": ["户外背包", "背包背负系统", "肩带系统"],
+            },
+        }
+    )
+
+    assert result.primary_subject == "户外背包"
+    assert result.observed_entities[0].name == "户外背包"
+    assert len(prompts) == 3
+    assert "必须优先让主对象候选成为 primary_subject" in prompts[2]
+
+
+def test_normalize_understanding_subject_roles_promotes_primary_candidates_over_components():
+    from roughcut.review.content_understanding_infer import _normalize_understanding_subject_roles
+    from roughcut.review.content_understanding_schema import ContentSemanticFacts, ContentUnderstanding, SubjectEntity
+
+    normalized = _normalize_understanding_subject_roles(
+        ContentUnderstanding(
+            video_type="product_review",
+            content_domain="bags",
+            primary_subject="背包背负系统",
+            semantic_facts=ContentSemanticFacts(),
+            subject_entities=[SubjectEntity(kind="component", name="肩带系统")],
+            observed_entities=[SubjectEntity(kind="component", name="背包背负系统")],
+            video_theme="户外背包背负系统功能展示与调节方式演示",
+            summary="视频重点介绍背包背负系统与调节方式。",
+            hook_line="背负系统细讲",
+            engagement_question="你更在意背负还是调节？",
+            search_queries=["户外背包 背负调节"],
+            needs_review=True,
+        ),
+        ContentSemanticFacts(
+            primary_subject_candidates=["户外背包"],
+            supporting_subject_candidates=["联名机能包"],
+            component_candidates=["背包背负系统", "肩带系统"],
+            aspect_candidates=["背负调节"],
+        ),
+    )
+
+    assert normalized.primary_subject == "户外背包"
+    assert normalized.observed_entities[0].name == "户外背包"
+    assert normalized.subject_entities[0].name == "户外背包"
+    assert normalized.subject_entities[-1].name == "联名机能包"
+
+
+def test_build_compact_evidence_payload_preserves_subject_role_candidates():
+    from roughcut.review.content_understanding_infer import _build_compact_evidence_payload
+    from roughcut.review.content_understanding_schema import ContentSemanticFacts
+
+    payload = _build_compact_evidence_payload(
+        {
+            "source_name": "demo.mp4",
+            "semantic_fact_inputs": {"cue_lines": ["重点看这个包和它的背负系统"]},
+        }
+    )
+    facts = ContentSemanticFacts(
+        primary_subject_candidates=["机能双肩包"],
+        supporting_subject_candidates=["联名方"],
+        component_candidates=["背负系统"],
+        aspect_candidates=["背负"],
+    )
+
+    assert payload["semantic_fact_inputs"]["cue_lines"] == ["重点看这个包和它的背负系统"]
+    assert facts.primary_subject_candidates == ["机能双肩包"]
+    assert facts.component_candidates == ["背负系统"]
