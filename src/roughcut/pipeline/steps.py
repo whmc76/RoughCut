@@ -62,6 +62,7 @@ from roughcut.providers.factory import get_avatar_provider, get_reasoning_provid
 from roughcut.providers.reasoning.base import Message
 from roughcut.pipeline.quality import _compute_subtitle_sync_check
 from roughcut.review.content_profile import (
+    apply_content_profile_feedback,
     apply_identity_review_guard,
     assess_content_profile_automation,
     build_content_profile_cache_fingerprint,
@@ -1322,6 +1323,16 @@ async def run_content_profile(job_id: str) -> dict:
             glossary_terms=effective_glossary_terms,
             source_name=job.source_name,
         )
+        manual_review_feedback = dict(step.metadata_.get("review_user_feedback") or {}) if isinstance(step.metadata_, dict) else {}
+        if manual_review_feedback:
+            content_profile = await apply_content_profile_feedback(
+                draft_profile=content_profile,
+                source_name=job.source_name,
+                workflow_template=job.workflow_template,
+                user_feedback=manual_review_feedback,
+                reviewed_subtitle_excerpt=transcript_excerpt,
+                accepted_corrections=[],
+            )
         content_profile["creative_profile"] = _job_creative_profile(job)
 
         auto_review_enabled = bool(settings.auto_confirm_content_profile) and auto_review_mode_enabled(
@@ -1363,7 +1374,35 @@ async def run_content_profile(job_id: str) -> dict:
         review_step = review_step_result.scalar_one_or_none()
 
         auto_confirmed = bool(automation.get("auto_confirm"))
-        if auto_confirmed:
+        if manual_review_feedback:
+            now = datetime.now(timezone.utc)
+            final_profile = dict(content_profile)
+            final_profile["review_mode"] = "manual_confirmed"
+            session.add(
+                Artifact(
+                    job_id=job.id,
+                    step_id=review_step.id if review_step else None,
+                    artifact_type="content_profile_final",
+                    data_json=final_profile,
+                )
+            )
+            if review_step is not None:
+                review_step.status = "done"
+                review_step.started_at = review_step.started_at or now
+                review_step.finished_at = now
+                review_step.error_message = None
+                review_step.metadata_ = {
+                    **(review_step.metadata_ or {}),
+                    "label": STEP_LABELS.get("summary_review", "summary_review"),
+                    "detail": "已应用成片审核修正并确认内容摘要，继续后续流程。",
+                    "progress": 1.0,
+                    "updated_at": now.isoformat(),
+                    "auto_confirmed": False,
+                    "manual_confirmed": True,
+                    "review_user_feedback": dict(manual_review_feedback),
+                }
+            job.status = "processing"
+        elif auto_confirmed:
             now = datetime.now(timezone.utc)
             final_profile = dict(content_profile)
             final_profile["review_mode"] = "auto_confirmed"
@@ -1413,13 +1452,15 @@ async def run_content_profile(job_id: str) -> dict:
                 content_profile.get("video_theme"),
             ] if part
         ).strip()
-        if auto_confirmed:
+        if manual_review_feedback:
+            detail = f"已应用人工修正后的内容摘要：{subject or '人工修正完成'}"
+        elif auto_confirmed:
             detail = f"已自动确认内容摘要：{subject or '自动识别完成'}"
         else:
             detail = f"已生成内容摘要：{subject or '待人工确认'}"
         await _set_step_progress(session, step, detail=detail, progress=1.0)
         await session.commit()
-        if not auto_confirmed:
+        if not auto_confirmed and not manual_review_feedback:
             try:
                 await get_telegram_review_bot_service().notify_content_profile_review(job.id)
             except Exception:

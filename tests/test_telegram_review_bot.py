@@ -21,6 +21,7 @@ from roughcut.review.telegram_bot import (
     _build_final_review_rerun_plan,
     _build_final_review_rerun_plans,
     _combine_final_review_rerun_plans,
+    _extract_final_review_content_profile_feedback,
     _build_pending_subtitle_candidates,
     _build_review_callback_data,
     _extract_review_reference,
@@ -1199,6 +1200,21 @@ def test_build_final_review_rerun_plans_distinguishes_subtitle_style_from_subtit
     assert [plan.category for plan in plans] == ["subtitle_style"]
     assert plans[0].trigger_step == "render"
     assert plans[0].targets == ("subtitle_style",)
+
+
+def test_extract_final_review_content_profile_feedback_parses_brand_and_model_corrections():
+    feedback = _extract_final_review_content_profile_feedback("主体识别不对，品牌改成傲雷，型号改成司令官2Ultra。")
+
+    assert feedback == {
+        "subject_brand": "傲雷",
+        "subject_model": "司令官2Ultra",
+    }
+
+
+def test_build_final_review_rerun_plans_adds_content_profile_rerun_for_structured_identity_correction():
+    plans = _build_final_review_rerun_plans("品牌改成傲雷，型号改成司令官2Ultra。")
+
+    assert any(plan.category == "content_profile" for plan in plans)
 
 
 @pytest.mark.asyncio

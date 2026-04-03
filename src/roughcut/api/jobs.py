@@ -1133,10 +1133,15 @@ async def apply_final_review_decision(
     rerun_triggered = False
 
     from roughcut.pipeline.orchestrator import _reset_job_for_quality_rerun
-    from roughcut.review.telegram_bot import _build_final_review_rerun_plans, _combine_final_review_rerun_plans
+    from roughcut.review.telegram_bot import (
+        _build_final_review_rerun_plans,
+        _combine_final_review_rerun_plans,
+        _extract_final_review_content_profile_feedback,
+    )
 
     rerun_plan = _combine_final_review_rerun_plans(_build_final_review_rerun_plans(note))
     if rerun_plan is not None:
+        review_user_feedback = _extract_final_review_content_profile_feedback(note)
         steps = (
             await session.execute(
                 select(JobStep).where(JobStep.job_id == job.id).order_by(JobStep.id.asc())
@@ -1162,6 +1167,8 @@ async def apply_final_review_decision(
                     "review_rerun_targets": list(rerun_plan.targets),
                 }
             )
+            if review_user_feedback:
+                first_metadata["review_user_feedback"] = review_user_feedback
             first_step.metadata_ = first_metadata
         rerun_triggered = True
         await session.commit()

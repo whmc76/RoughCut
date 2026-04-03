@@ -935,6 +935,7 @@ class TelegramReviewBotService:
             feedback_history.append({"text": note, "at": now.isoformat(), "via": "telegram"})
             rerun_plan = _combine_final_review_rerun_plans(_build_final_review_rerun_plans(note))
             if rerun_plan is not None:
+                review_user_feedback = _extract_final_review_content_profile_feedback(note)
                 from roughcut.pipeline.orchestrator import _reset_job_for_quality_rerun
 
                 steps = (
@@ -962,6 +963,8 @@ class TelegramReviewBotService:
                             "review_rerun_targets": list(rerun_plan.targets),
                         }
                     )
+                    if review_user_feedback:
+                        first_metadata["review_user_feedback"] = review_user_feedback
                     first_step.metadata_ = first_metadata
                 await session.commit()
                 target_text = f"目标：{', '.join(rerun_plan.targets)}；" if rerun_plan.targets else ""
@@ -1598,6 +1601,46 @@ def _build_final_review_rerun_plan(note: str) -> FinalReviewRerunPlan | None:
     return plans[0] if plans else None
 
 
+def _extract_final_review_content_profile_feedback(note: str) -> dict[str, Any]:
+    text = str(note or "").strip()
+    if not text:
+        return {}
+
+    def _clean(value: str) -> str:
+        cleaned = re.sub(r"^[\s\u3000]+|[\s\u3000]+$", "", str(value or ""))
+        return cleaned.strip().strip("，,。；;：:、")
+
+    def _extract(patterns: tuple[str, ...], limit: int) -> str:
+        for pattern in patterns:
+            match = re.search(pattern, text, flags=re.IGNORECASE)
+            if not match:
+                continue
+            value = _clean(str(match.group(1) or ""))
+            if value:
+                return value[:limit]
+        return ""
+
+    subject_brand = _extract(
+        (
+            r"(?:品牌|牌子)\s*(?:改成|改为|是|为|写成|应为|应该是|[:：])\s*([A-Za-z0-9\u4e00-\u9fff·+\-/]{1,40})",
+        ),
+        40,
+    )
+    subject_model = _extract(
+        (
+            r"(?:型号|款式|产品名|名字|名称|系列|版本)\s*(?:改成|改为|是|为|写成|应为|应该是|[:：])\s*([A-Za-z0-9\u4e00-\u9fff·+\-/]{1,60})",
+        ),
+        60,
+    )
+
+    feedback: dict[str, Any] = {}
+    if subject_brand:
+        feedback["subject_brand"] = subject_brand
+    if subject_model:
+        feedback["subject_model"] = subject_model
+    return feedback
+
+
 def _build_final_review_rerun_plans(note: str) -> list[FinalReviewRerunPlan]:
     normalized = str(note or "").strip().lower()
     if not normalized:
@@ -1637,6 +1680,16 @@ def _build_final_review_rerun_plans(note: str) -> list[FinalReviewRerunPlan]:
                 trigger_step=trigger_step,
                 rerun_steps=_rerun_chain_from_step(trigger_step),
                 targets=targets,
+            )
+        )
+    if _extract_final_review_content_profile_feedback(note) and not any(plan.category == "content_profile" for plan in plans):
+        plans.append(
+            FinalReviewRerunPlan(
+                category="content_profile",
+                label="内容摘要与文案定位调整",
+                trigger_step="content_profile",
+                rerun_steps=_rerun_chain_from_step("content_profile"),
+                targets=("summary", "keywords", "content_profile"),
             )
         )
     return plans

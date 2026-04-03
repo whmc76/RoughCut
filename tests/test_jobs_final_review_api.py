@@ -301,6 +301,58 @@ async def test_final_review_endpoint_rejects_without_note_and_records_freeform_f
 
 
 @pytest.mark.asyncio
+async def test_final_review_endpoint_attaches_structured_content_profile_feedback_to_rerun_metadata(client: AsyncClient):
+    from roughcut.db.models import Job, JobStep
+    from roughcut.db.session import get_session_factory
+    from roughcut.pipeline.orchestrator import create_job_steps
+
+    job_id = uuid.uuid4()
+
+    async with get_session_factory()() as session:
+        job = Job(
+            id=job_id,
+            source_path="jobs/demo/final-review.mp4",
+            source_name="final-review.mp4",
+            status="needs_review",
+            language="zh-CN",
+            workflow_template="edc_tactical",
+            enhancement_modes=["avatar_commentary"],
+        )
+        session.add(job)
+        for step in create_job_steps(job_id):
+            if step.step_name == "final_review":
+                step.status = "pending"
+                step.metadata_ = {"detail": "等待审核成片后继续。"}
+            else:
+                step.status = "done"
+            session.add(step)
+        await session.commit()
+
+    note = "品牌改成傲雷，型号改成司令官2Ultra。"
+    response = await client.post(
+        f"/api/v1/jobs/{job_id}/final-review",
+        json={"decision": "reject", "note": note},
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["rerun_triggered"] is True
+    assert data["job_status"] == "processing"
+
+    async with get_session_factory()() as session:
+        step = (
+            await session.execute(
+                select(JobStep).where(JobStep.job_id == job_id, JobStep.step_name == "content_profile")
+            )
+        ).scalar_one()
+
+    assert step.metadata_["review_feedback"] == note
+    assert step.metadata_["review_user_feedback"] == {
+        "subject_brand": "傲雷",
+        "subject_model": "司令官2Ultra",
+    }
+
+
+@pytest.mark.asyncio
 async def test_job_detail_quality_summary_prefers_variant_bundle_timing_summary(client: AsyncClient):
     job_id = uuid.uuid4()
     await _seed_job_with_variant_bundle(job_id)

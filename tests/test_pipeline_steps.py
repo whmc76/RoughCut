@@ -1722,6 +1722,149 @@ async def test_run_content_profile_does_not_trust_seeded_profile_without_current
 
 
 @pytest.mark.asyncio
+async def test_run_content_profile_applies_final_review_feedback_and_bypasses_summary_review(
+    db_engine,
+    monkeypatch,
+    tmp_path: Path,
+):
+    import roughcut.pipeline.steps as steps_mod
+    from roughcut.review import content_profile as content_profile_mod
+
+    factory = async_sessionmaker(db_engine, expire_on_commit=False)
+    job_id = uuid.uuid4()
+    source_path = tmp_path / "source.mp4"
+    source_path.write_bytes(b"video")
+    fake_review_bot = _FakeTelegramReviewBotService()
+    settings = SimpleNamespace(
+        auto_confirm_content_profile=False,
+        content_profile_review_threshold=0.72,
+        content_profile_auto_review_min_accuracy=0.9,
+        content_profile_auto_review_min_samples=20,
+    )
+
+    async with factory() as session:
+        session.add(
+            Job(
+                id=job_id,
+                source_path="jobs/demo/source.mp4",
+                source_name="source.mp4",
+                status="processing",
+                language="zh-CN",
+                workflow_template="edc_tactical",
+                enhancement_modes=[],
+            )
+        )
+        session.add(
+            JobStep(
+                job_id=job_id,
+                step_name="content_profile",
+                status="running",
+                metadata_={
+                    "review_feedback": "品牌改成傲雷，型号改成司令官2Ultra。",
+                    "review_user_feedback": {
+                        "subject_brand": "傲雷",
+                        "subject_model": "司令官2Ultra",
+                    },
+                },
+            )
+        )
+        session.add(JobStep(job_id=job_id, step_name="summary_review", status="pending"))
+        for index, text in enumerate(
+            [
+                "这次对比 slim2 的 ultra 版本和 pro 版差别。",
+                "我更喜欢 ultra 这个版本的手感。",
+            ]
+        ):
+            session.add(
+                SubtitleItem(
+                    job_id=job_id,
+                    version=1,
+                    item_index=index,
+                    start_time=float(index),
+                    end_time=float(index) + 1.0,
+                    text_raw=text,
+                    text_norm=text,
+                    text_final=text,
+                )
+            )
+        await session.commit()
+
+    monkeypatch.setattr(steps_mod, "get_session_factory", lambda: factory)
+    monkeypatch.setattr(steps_mod, "get_settings", lambda: settings)
+    monkeypatch.setattr(steps_mod, "get_telegram_review_bot_service", lambda: fake_review_bot)
+    monkeypatch.setattr(content_profile_mod, "get_settings", lambda: settings)
+
+    async def fake_load_content_profile_user_memory(*args, **kwargs):
+        return {}
+
+    async def fake_resolve_source(*args, **kwargs):
+        return source_path
+
+    async def fake_infer_content_profile(**kwargs):
+        return {
+            "preset_name": "edc_tactical",
+            "subject_brand": "OLIGHT",
+            "subject_model": "SLIM2 Ultra",
+            "subject_type": "EDC手电",
+            "video_theme": "SLIM2 Ultra 与 PRO 版本对比",
+            "summary": "视频围绕 SLIM2 Ultra 与 PRO 版本对比展开。",
+            "engagement_question": "你更喜欢 ultra 还是 pro？",
+            "search_queries": ["SLIM2 Ultra 手电"],
+            "cover_title": {"top": "SLIM2", "main": "Ultra对比", "bottom": "版本怎么选"},
+            "evidence": [],
+        }
+
+    async def fake_apply_content_profile_feedback(**kwargs):
+        assert kwargs["user_feedback"] == {
+            "subject_brand": "傲雷",
+            "subject_model": "司令官2Ultra",
+        }
+        profile = dict(kwargs["draft_profile"])
+        profile.update(
+            {
+                "subject_brand": "傲雷",
+                "subject_model": "司令官2Ultra",
+                "subject_type": "傲雷司令官2Ultra手电筒",
+                "video_theme": "傲雷司令官2Ultra 版本选择与上手对比",
+                "summary": "视频围绕傲雷司令官2Ultra的版本差异与上手体验展开。",
+                "user_feedback": dict(kwargs["user_feedback"]),
+                "review_mode": "manual_confirmed",
+            }
+        )
+        return profile
+
+    monkeypatch.setattr(steps_mod, "load_content_profile_user_memory", fake_load_content_profile_user_memory)
+    monkeypatch.setattr(steps_mod, "_resolve_source", fake_resolve_source)
+    monkeypatch.setattr(steps_mod, "infer_content_profile", fake_infer_content_profile)
+    monkeypatch.setattr(steps_mod, "apply_content_profile_feedback", fake_apply_content_profile_feedback)
+
+    result = await run_content_profile(str(job_id))
+
+    assert result["subject_brand"] == "傲雷"
+    assert result["subject_model"] == "司令官2Ultra"
+
+    async with factory() as session:
+        artifact_result = await session.execute(
+            select(Artifact).where(Artifact.job_id == job_id).order_by(Artifact.created_at.asc())
+        )
+        artifacts = artifact_result.scalars().all()
+        artifact_map = {item.artifact_type: item.data_json for item in artifacts}
+        assert set(artifact_map) == {"content_profile_draft", "content_profile_final"}
+        assert artifact_map["content_profile_final"]["review_mode"] == "manual_confirmed"
+        assert artifact_map["content_profile_final"]["subject_brand"] == "傲雷"
+        assert artifact_map["content_profile_final"]["subject_model"] == "司令官2Ultra"
+
+        review_step_result = await session.execute(
+            select(JobStep).where(JobStep.job_id == job_id, JobStep.step_name == "summary_review")
+        )
+        review_step = review_step_result.scalar_one()
+        assert review_step.status == "done"
+        assert "成片审核修正" in review_step.metadata_["detail"]
+
+    assert fake_review_bot.content_profile_notifications == []
+
+
+@pytest.mark.asyncio
 async def test_run_content_profile_persists_dedicated_ocr_artifact_when_enabled(db_engine, monkeypatch, tmp_path: Path):
     import roughcut.pipeline.steps as steps_mod
 
