@@ -674,6 +674,64 @@ async def test_infer_content_semantic_facts_enriches_brand_and_product_type_from
 
 
 @pytest.mark.asyncio
+async def test_infer_content_semantic_facts_prefers_specific_knife_subtype_and_action_aspects():
+    from roughcut.review.content_understanding_facts import infer_content_semantic_facts
+
+    class FakeResponse:
+        def __init__(self, payload):
+            self.payload = payload
+            self.content = json.dumps(payload, ensure_ascii=False)
+
+        def as_json(self):
+            return self.payload
+
+    class FakeProvider:
+        async def complete(self, *args, **kwargs):
+            return FakeResponse(
+                {
+                    "primary_subject_candidates": [],
+                    "supporting_subject_candidates": [],
+                    "comparison_subject_candidates": [],
+                    "supporting_product_candidates": [],
+                    "component_candidates": [],
+                    "aspect_candidates": [],
+                    "brand_candidates": [],
+                    "model_candidates": [],
+                    "product_name_candidates": [],
+                    "product_type_candidates": [],
+                    "entity_candidates": [],
+                    "collaboration_pairs": [],
+                    "search_expansions": [],
+                    "evidence_sentences": [],
+                }
+            )
+
+    result = await infer_content_semantic_facts(
+        FakeProvider(),
+        {
+            "semantic_fact_inputs": {
+                "source_name": "reate_gravity_knife.mp4",
+                "cue_lines": ["今天主要看这把瑞特重力刀的定制雕刻改造"],
+                "opening_focus_lines": [
+                    "这把瑞特重力刀已经改造完成了",
+                    "重点看一下大象雕刻和刀身细节",
+                    "这次还是保留了重力刀的开合逻辑",
+                ],
+                "closing_focus_lines": ["结尾顺带提一下 EDC 桌布系列"],
+                "entity_like_tokens": ["瑞特", "REATE", "重力刀", "雕刻", "改造", "EDC桌布"],
+                "transcript_text": "前半段围绕瑞特重力刀的定制雕刻改造，结尾只顺带提到 EDC 桌布。",
+            }
+        },
+    )
+
+    assert "REATE" in result.brand_candidates
+    assert "重力刀" in result.product_type_candidates
+    assert "雕刻" in result.aspect_candidates
+    assert "改造" in result.aspect_candidates
+    assert result.primary_subject_candidates[0] == "REATE重力刀"
+
+
+@pytest.mark.asyncio
 async def test_infer_content_understanding_repairs_malformed_json_response(monkeypatch: pytest.MonkeyPatch):
     from roughcut.review import content_understanding_infer as infer_mod
 
@@ -1262,6 +1320,42 @@ def test_normalize_understanding_subject_roles_prefers_non_component_primary_can
     assert normalized.subject_entities[0].name == "户外背包"
 
 
+def test_normalize_understanding_subject_roles_prefers_product_category_entity_when_facts_only_return_components():
+    from roughcut.review.content_understanding_infer import _normalize_understanding_subject_roles
+    from roughcut.review.content_understanding_schema import ContentSemanticFacts, ContentUnderstanding, SubjectEntity
+
+    normalized = _normalize_understanding_subject_roles(
+        ContentUnderstanding(
+            video_type="product_review",
+            content_domain="bags",
+            primary_subject="背负系统",
+            semantic_facts=ContentSemanticFacts(),
+            subject_entities=[
+                SubjectEntity(kind="product", name="背负系统"),
+                SubjectEntity(kind="产品品类", name="户外背包"),
+            ],
+            observed_entities=[
+                SubjectEntity(kind="", name="背负系统"),
+                SubjectEntity(kind="", name="背包背负装置"),
+            ],
+            video_theme="户外背包背负系统功能演示",
+            summary="视频前半段在讲背包背负结构。",
+            hook_line="背负系统怎么调",
+            engagement_question="你更看重背负还是结构？",
+            search_queries=["户外背包 背负系统"],
+            needs_review=True,
+        ),
+        ContentSemanticFacts(
+            primary_subject_candidates=["背负系统", "背包背负装置", "户外背负装备"],
+            aspect_candidates=["高身位背负省力性", "快速调节便捷性"],
+        ),
+    )
+
+    assert normalized.primary_subject == "户外背包"
+    assert normalized.subject_entities[0].name == "户外背包"
+    assert normalized.observed_entities[0].name == "户外背包"
+
+
 def test_normalize_understanding_subject_roles_strips_secondary_product_from_primary_subject_label():
     from roughcut.review.content_understanding_infer import _normalize_understanding_subject_roles
     from roughcut.review.content_understanding_schema import ContentSemanticFacts, ContentUnderstanding, SubjectEntity
@@ -1298,6 +1392,57 @@ def test_normalize_understanding_subject_roles_strips_secondary_product_from_pri
     assert normalized.primary_subject == "REATE刀具"
     assert normalized.subject_entities[0].name == "REATE刀具"
     assert normalized.subject_entities[-1].name == "EDC桌布"
+
+
+def test_normalize_understanding_subject_roles_prefers_opening_supported_primary_brand_over_late_supporting_brand():
+    from roughcut.review.content_understanding_infer import _normalize_understanding_subject_roles
+    from roughcut.review.content_understanding_schema import ContentSemanticFacts, ContentUnderstanding, SubjectEntity
+
+    normalized = _normalize_understanding_subject_roles(
+        ContentUnderstanding(
+            video_type="product_review",
+            content_domain="edc_tools",
+            primary_subject="组装完成的刀具",
+            semantic_facts=ContentSemanticFacts(),
+            subject_entities=[
+                SubjectEntity(kind="product", name="组装完成的刀具", brand="FS"),
+                SubjectEntity(kind="related", name="FS 2026 EDC桌布", brand="FS"),
+            ],
+            observed_entities=[
+                SubjectEntity(kind="product", name="这把刀"),
+                SubjectEntity(kind="related", name="FS 2026 EDC桌布", brand="FS"),
+            ],
+            video_theme="刀具完成展示与桌布发布",
+            summary="前半段讲刀，结尾顺带提桌布。",
+            hook_line="这把刀终于改完了",
+            engagement_question="你更关心刀还是桌布？",
+            search_queries=["REATE 重力刀 FS 桌布"],
+            needs_review=True,
+        ),
+        ContentSemanticFacts(
+            primary_subject_candidates=["REATE重力刀", "组装完成的刀具"],
+            supporting_subject_candidates=["FS品牌"],
+            supporting_product_candidates=["FS 2026 EDC桌布"],
+            brand_candidates=["REATE", "FS"],
+            product_type_candidates=["重力刀", "刀具"],
+            aspect_candidates=["雕刻", "改造"],
+        ),
+        evidence_bundle={
+            "semantic_fact_inputs": {
+                "opening_focus_lines": [
+                    "这把 REATE 重力刀已经改造完成了",
+                    "这次还是保留了重力刀的开合逻辑",
+                ],
+                "closing_focus_lines": [
+                    "最后顺带把 FS 2026 EDC桌布也一起发了",
+                ],
+            }
+        },
+    )
+
+    assert normalized.primary_subject == "REATE重力刀"
+    assert normalized.subject_entities[0].name == "REATE重力刀"
+    assert normalized.subject_entities[0].brand == "REATE"
 
 
 def test_normalize_understanding_subject_roles_strips_component_phrase_from_primary_subject_label():
@@ -1400,6 +1545,30 @@ def test_backfill_semantic_facts_from_understanding_recovers_primary_and_compari
     assert "傲雷" in facts.brand_candidates
     assert "SLIM2 ULTRA" in facts.model_candidates
     assert "EDC23手电筒" in facts.comparison_subject_candidates
+
+
+def test_backfill_semantic_facts_from_understanding_recovers_brand_from_observed_alias_when_entities_are_blank():
+    from roughcut.review.content_understanding_infer import _backfill_semantic_facts_from_understanding
+    from roughcut.review.content_understanding_schema import ContentSemanticFacts, ContentUnderstanding, SubjectEntity
+
+    understanding = ContentUnderstanding(
+        video_type="product_review",
+        content_domain="flashlight",
+        primary_subject="SLIM2代ULTRA手电筒",
+        semantic_facts=ContentSemanticFacts(),
+        subject_entities=[SubjectEntity(kind="product", name="SLIM2代ULTRA手电筒", brand="", model="SLIM2 ULTRA")],
+        observed_entities=[
+            SubjectEntity(kind="", name="奥雷"),
+            SubjectEntity(kind="", name="SLIM2代的ULTRA版本"),
+        ],
+        search_queries=["SLIM2 ULTRA 手电筒"],
+        needs_review=True,
+    )
+
+    facts = _backfill_semantic_facts_from_understanding(ContentSemanticFacts(), understanding)
+
+    assert "OLIGHT" in facts.brand_candidates
+    assert "SLIM2 ULTRA" in facts.model_candidates
 
 
 @pytest.mark.asyncio

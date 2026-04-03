@@ -7,13 +7,27 @@ from roughcut.providers.factory import get_reasoning_provider
 from roughcut.providers.reasoning.base import Message
 from roughcut.review.content_understanding_capabilities import resolve_content_understanding_capabilities
 from roughcut.review.content_understanding_evidence import normalize_evidence_bundle
-from roughcut.review.content_understanding_facts import _load_json_object, infer_content_semantic_facts
+from roughcut.review.content_understanding_facts import (
+    _canonicalize_brand_candidate,
+    _dominant_product_type_from_text,
+    _load_json_object,
+    _pick_brand_from_text,
+    infer_content_semantic_facts,
+)
+from roughcut.review.domain_glossaries import list_builtin_glossary_packs
 from roughcut.review.content_understanding_schema import (
     ContentSemanticFacts,
     ContentUnderstanding,
     SubjectEntity,
     parse_content_understanding_payload as parse_content_understanding_payload_from_schema,
 )
+
+_GLOSSARY_BRAND_TERMS: list[dict[str, Any]] = [
+    term
+    for pack in list_builtin_glossary_packs()
+    for term in list(pack.get("terms") or [])
+    if isinstance(term, dict) and str(term.get("category") or "").strip().lower().endswith("_brand")
+]
 
 
 def parse_content_understanding_payload(data: Any) -> ContentUnderstanding:
@@ -118,7 +132,7 @@ async def infer_final_understanding(
             capability_matrix=understanding.capability_matrix,
             orchestration_trace=understanding.orchestration_trace,
         )
-    return _normalize_understanding_subject_roles(understanding, semantic_facts)
+    return _normalize_understanding_subject_roles(understanding, semantic_facts, evidence_bundle=evidence_bundle)
 
 
 def _with_staged_semantic_facts(
@@ -212,6 +226,19 @@ def _backfill_semantic_facts_from_understanding(
     ):
         _append(search_expansions, item)
 
+    if not brand_candidates:
+        observed_text_blob = " ".join(
+            str(entity.name or "").strip()
+            for entity in [*understanding.subject_entities, *understanding.observed_entities]
+            if str(entity.name or "").strip()
+        )
+        for term in _GLOSSARY_BRAND_TERMS:
+            correct_form = str(term.get("correct_form") or "").strip()
+            wrong_forms = [str(raw or "").strip() for raw in (term.get("wrong_forms") or []) if str(raw or "").strip()]
+            aliases = [correct_form, *wrong_forms]
+            if correct_form and any(alias and alias in observed_text_blob for alias in aliases):
+                _append(brand_candidates, correct_form)
+
     return ContentSemanticFacts(
         primary_subject_candidates=primary_subject_candidates,
         supporting_subject_candidates=list(semantic_facts.supporting_subject_candidates),
@@ -233,6 +260,8 @@ def _backfill_semantic_facts_from_understanding(
 def _normalize_understanding_subject_roles(
     understanding: ContentUnderstanding,
     semantic_facts: ContentSemanticFacts,
+    *,
+    evidence_bundle: dict[str, Any] | None = None,
 ) -> ContentUnderstanding:
     primary_candidates = _preferred_primary_candidates(semantic_facts)
     supporting_candidates = [str(item).strip() for item in semantic_facts.supporting_subject_candidates if str(item).strip()]
@@ -242,18 +271,42 @@ def _normalize_understanding_subject_roles(
         for item in [*semantic_facts.component_candidates, *semantic_facts.aspect_candidates]
         if str(item).strip()
     }
+    primary_candidates = _merge_entity_primary_candidates(
+        primary_candidates,
+        understanding=understanding,
+        secondary_subject_candidates=secondary_subject_candidates,
+        component_candidates=component_candidates,
+    )
     if not primary_candidates:
         return understanding
 
     normalized_primary_subject = str(understanding.primary_subject or "").strip().lower()
     effective_primary_subject = understanding.primary_subject
-    if not effective_primary_subject or normalized_primary_subject in component_candidates:
+    if (
+        not effective_primary_subject
+        or normalized_primary_subject in component_candidates
+        or _looks_component_like_name(effective_primary_subject)
+    ):
         effective_primary_subject = primary_candidates[0]
     effective_primary_subject = _normalize_primary_subject_label(
         effective_primary_subject,
         primary_candidates=primary_candidates,
         secondary_subject_candidates=secondary_subject_candidates,
         component_candidates=list(component_candidates),
+    )
+    preferred_opening_primary = _preferred_opening_primary_subject(
+        semantic_facts,
+        current_primary_subject=effective_primary_subject,
+        secondary_subject_candidates=secondary_subject_candidates,
+        evidence_bundle=evidence_bundle,
+    )
+    if preferred_opening_primary:
+        effective_primary_subject = preferred_opening_primary
+
+    preferred_primary_brand = _preferred_primary_brand(
+        effective_primary_subject,
+        semantic_facts=semantic_facts,
+        evidence_bundle=evidence_bundle,
     )
 
     def _entity_name(entity: SubjectEntity) -> str:
@@ -279,10 +332,62 @@ def _normalize_understanding_subject_roles(
                 and original_primary_subject
                 and _entity_name(subject_entities[0]).strip().lower() == original_primary_subject
             ):
-                subject_entities[0] = SubjectEntity(kind="product", name=effective_primary_subject)
+                subject_entities[0] = SubjectEntity(
+                    kind="product",
+                    name=effective_primary_subject,
+                    brand=preferred_primary_brand or subject_entities[0].brand,
+                    model=subject_entities[0].model,
+                )
             else:
-                subject_entities = [SubjectEntity(kind="product", name=effective_primary_subject)] + subject_entities
+                subject_entities = [
+                    SubjectEntity(kind="product", name=effective_primary_subject, brand=preferred_primary_brand)
+                ] + subject_entities
             subject_names = {_entity_name(entity).lower() for entity in subject_entities if _entity_name(entity)}
+        elif subject_entities:
+            first_entity = subject_entities[0]
+            if (
+                _entity_name(first_entity).strip().lower() == normalized_effective_primary
+                and preferred_primary_brand
+                and str(first_entity.brand or "").strip() != preferred_primary_brand
+            ):
+                subject_entities[0] = SubjectEntity(
+                    kind=first_entity.kind or "product",
+                    name=first_entity.name,
+                    brand=preferred_primary_brand,
+                    model=first_entity.model,
+                )
+            elif _entity_name(first_entity).strip().lower() != normalized_effective_primary:
+                matching_index = next(
+                    (
+                        index
+                        for index, entity in enumerate(subject_entities)
+                        if _entity_name(entity).strip().lower() == normalized_effective_primary
+                    ),
+                    -1,
+                )
+                if matching_index > 0:
+                    matching_entity = subject_entities.pop(matching_index)
+                    if preferred_primary_brand and not str(matching_entity.brand or "").strip():
+                        matching_entity = SubjectEntity(
+                            kind=matching_entity.kind or "product",
+                            name=matching_entity.name,
+                            brand=preferred_primary_brand,
+                            model=matching_entity.model,
+                        )
+                    subject_entities = [matching_entity, *subject_entities]
+        if observed_entities:
+            observed_matching_index = next(
+                (
+                    index
+                    for index, entity in enumerate(observed_entities)
+                    if _entity_name(entity).strip().lower() == normalized_effective_primary
+                ),
+                -1,
+            )
+            if observed_matching_index > 0:
+                observed_entities = [observed_entities[observed_matching_index], *observed_entities[:observed_matching_index], *observed_entities[observed_matching_index + 1 :]]
+            elif observed_matching_index < 0:
+                observed_entities = [SubjectEntity(kind="product", name=effective_primary_subject), *observed_entities]
     related_subject_candidates = secondary_subject_candidates or supporting_candidates
     for candidate in related_subject_candidates:
         if candidate.lower() not in subject_names:
@@ -332,6 +437,49 @@ def _preferred_primary_candidates(semantic_facts: ContentSemanticFacts) -> list[
             if text and text not in ordered:
                 ordered.append(text)
     return ordered
+
+
+def _merge_entity_primary_candidates(
+    primary_candidates: list[str],
+    *,
+    understanding: ContentUnderstanding,
+    secondary_subject_candidates: list[str],
+    component_candidates: set[str],
+) -> list[str]:
+    ordered: list[str] = []
+    for entity in [*understanding.subject_entities, *understanding.observed_entities]:
+        text = str(entity.name or "").strip()
+        kind = str(entity.kind or "").strip().lower()
+        normalized_text = text.lower()
+        if not text:
+            continue
+        if normalized_text in component_candidates:
+            continue
+        if _looks_component_like_name(text):
+            continue
+        if _contains_secondary_subject(text, secondary_subject_candidates):
+            continue
+        if any(
+            marker in kind
+            for marker in ("related", "supporting", "配套", "accessory", "secondary", "comparison", "对比", "component", "process", "工艺")
+        ):
+            continue
+        if any(marker in kind for marker in ("product", "产品", "品类", "hardware", "device")) and text not in ordered:
+            ordered.append(text)
+
+    merged: list[str] = []
+    for item in [*ordered, *primary_candidates]:
+        text = str(item).strip()
+        if text and text not in merged:
+            merged.append(text)
+    return merged
+
+
+def _looks_component_like_name(text: str) -> bool:
+    normalized = str(text or "").strip()
+    if not normalized:
+        return False
+    return any(marker in normalized for marker in ("系统", "装置", "模块", "节点"))
 
 
 def _secondary_subject_candidates(semantic_facts: ContentSemanticFacts) -> list[str]:
@@ -416,6 +564,140 @@ def _contains_secondary_subject(text: str, secondary_subject_candidates: list[st
         if normalized_candidate and normalized_candidate in normalized_text:
             return True
     return False
+
+
+def _preferred_opening_primary_subject(
+    semantic_facts: ContentSemanticFacts,
+    *,
+    current_primary_subject: str,
+    secondary_subject_candidates: list[str],
+    evidence_bundle: dict[str, Any] | None,
+) -> str:
+    opening_text = _opening_focus_text(evidence_bundle)
+    if not opening_text:
+        return ""
+    current_text = str(current_primary_subject or "").strip()
+    opening_brand = _pick_brand_from_text(opening_text, list(semantic_facts.brand_candidates))
+    dominant_type = _dominant_product_type_from_text(opening_text, list(semantic_facts.product_type_candidates))
+    current_score = _opening_primary_candidate_score(
+        current_text,
+        opening_text=opening_text,
+        opening_brand=opening_brand,
+        dominant_type=dominant_type,
+        semantic_facts=semantic_facts,
+        secondary_subject_candidates=secondary_subject_candidates,
+    )
+    if not _is_generic_primary_subject(current_text, semantic_facts):
+        return ""
+
+    best_candidate = ""
+    best_score = current_score
+    for candidate in _preferred_primary_candidates(semantic_facts):
+        score = _opening_primary_candidate_score(
+            candidate,
+            opening_text=opening_text,
+            opening_brand=opening_brand,
+            dominant_type=dominant_type,
+            semantic_facts=semantic_facts,
+            secondary_subject_candidates=secondary_subject_candidates,
+        )
+        if score > best_score:
+            best_candidate = candidate
+            best_score = score
+    return best_candidate
+
+
+def _opening_primary_candidate_score(
+    candidate: str,
+    *,
+    opening_text: str,
+    opening_brand: str,
+    dominant_type: str,
+    semantic_facts: ContentSemanticFacts,
+    secondary_subject_candidates: list[str],
+) -> int:
+    text = str(candidate or "").strip()
+    if not text:
+        return 0
+    score = 0
+    if text in opening_text:
+        score += 6
+    if not _contains_secondary_subject(text, secondary_subject_candidates):
+        score += 1
+    if opening_brand and _text_mentions_brand(text, opening_brand, semantic_facts.brand_candidates):
+        score += 4
+    if dominant_type and dominant_type in text:
+        score += 3
+    if opening_brand and dominant_type and _text_mentions_brand(opening_text, opening_brand, semantic_facts.brand_candidates) and dominant_type in opening_text:
+        if _text_mentions_brand(text, opening_brand, semantic_facts.brand_candidates) and dominant_type in text:
+            score += 2
+    return score
+
+
+def _preferred_primary_brand(
+    primary_subject: str,
+    *,
+    semantic_facts: ContentSemanticFacts,
+    evidence_bundle: dict[str, Any] | None,
+) -> str:
+    subject_text = str(primary_subject or "").strip()
+    if not subject_text:
+        return ""
+    opening_text = _opening_focus_text(evidence_bundle)
+    opening_brand = _pick_brand_from_text(opening_text, list(semantic_facts.brand_candidates)) if opening_text else ""
+    if opening_brand and _text_mentions_brand(subject_text, opening_brand, semantic_facts.brand_candidates):
+        return opening_brand
+    for brand in semantic_facts.brand_candidates:
+        canonical, _aliases = _canonicalize_brand_candidate(str(brand or "").strip())
+        if canonical and _text_mentions_brand(subject_text, canonical, semantic_facts.brand_candidates):
+            return canonical
+    return ""
+
+
+def _is_generic_primary_subject(text: str, semantic_facts: ContentSemanticFacts) -> bool:
+    subject_text = str(text or "").strip()
+    if not subject_text:
+        return True
+    for brand in semantic_facts.brand_candidates:
+        canonical, aliases = _canonicalize_brand_candidate(str(brand or "").strip())
+        for alias in aliases or (canonical,):
+            candidate = str(alias or "").strip()
+            if candidate and candidate in subject_text:
+                return False
+    dominant_type = _dominant_product_type_from_text(subject_text, list(semantic_facts.product_type_candidates))
+    return bool(dominant_type)
+
+
+def _text_mentions_brand(
+    text: str,
+    brand: str,
+    brand_candidates: list[str],
+) -> bool:
+    normalized_text = str(text or "").strip()
+    if not normalized_text:
+        return False
+    aliases: list[str] = []
+    for raw in brand_candidates:
+        canonical, raw_aliases = _canonicalize_brand_candidate(str(raw or "").strip())
+        if canonical != brand:
+            continue
+        aliases.extend(raw_aliases or (canonical,))
+    if not aliases:
+        aliases.append(brand)
+    return any(alias and alias in normalized_text for alias in aliases)
+
+
+def _opening_focus_text(evidence_bundle: dict[str, Any] | None) -> str:
+    if not isinstance(evidence_bundle, dict):
+        return ""
+    semantic_inputs = evidence_bundle.get("semantic_fact_inputs")
+    semantic_inputs = semantic_inputs if isinstance(semantic_inputs, dict) else {}
+    opening_focus_lines = [
+        str(item).strip()
+        for item in (semantic_inputs.get("opening_focus_lines") or [])
+        if str(item).strip()
+    ]
+    return " ".join(opening_focus_lines)
 
 
 def _normalize_subject_text(text: str) -> str:

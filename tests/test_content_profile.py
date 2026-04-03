@@ -86,7 +86,7 @@ def test_build_content_profile_cache_fingerprint_uses_infer_version_without_seed
         copy_style="attention_grabbing",
     )
 
-    assert fingerprint["version"].startswith("2026-04-03.infer.v29")
+    assert fingerprint["version"].startswith("2026-04-03.infer.v33")
     assert fingerprint["seeded_profile_sha256"] == ""
 
 

@@ -13,6 +13,7 @@ _GENERIC_PRODUCT_TYPE_ALIASES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("双肩包", ("双肩包", "背包", "BACKPACK")),
     ("机能包", ("机能包", "SLING_BAG", "TACTICAL_BAG")),
     ("手电筒", ("手电", "手电筒", "FLASHLIGHT", "TORCH")),
+    ("重力刀", ("重力刀", "GRAVITY_KNIFE", "GRAVITYKNIFE")),
     ("折刀", ("折刀", "FOLDING_KNIFE", "KNIFE", "折到")),
     ("美工刀", ("美工刀", "UTILITY_KNIFE", "BOX_CUTTER")),
     ("刀具", ("刀", "刀具", "刀刃", "刀身")),
@@ -462,15 +463,44 @@ def _dominant_product_type_from_text(text: str, product_type_candidates: list[st
     preferred = [str(item).strip() for item in product_type_candidates if str(item).strip()]
     scored: list[tuple[int, str]] = []
     for canonical, aliases in _GENERIC_PRODUCT_TYPE_ALIASES:
-        hits = sum(1 for alias in aliases if _evidence_contains_any_alias(text, (alias,)))
-        if not hits:
+        alias_score = sum(_product_type_alias_match_score(alias, text) for alias in aliases)
+        if not alias_score:
             continue
-        score = hits * 2
+        score = alias_score
         if canonical in preferred:
             score += 3
+        score += _product_type_specificity_bonus(canonical)
         scored.append((score, canonical))
     scored.sort(reverse=True)
     return scored[0][1] if scored else ""
+
+
+def _product_type_specificity_bonus(product_type: str) -> int:
+    normalized = str(product_type or "").strip()
+    if normalized in {"重力刀", "美工刀", "折刀", "双肩包", "机能包"}:
+        return 2
+    if normalized in {"刀具", "手电筒", "多功能工具", "收纳盒"}:
+        return 1
+    return 0
+
+
+def _product_type_alias_match_score(alias: str, text: str) -> int:
+    candidate = str(alias or "").strip()
+    if not candidate or not _evidence_contains_any_alias(text, (candidate,)):
+        return 0
+    if any(ord(ch) > 127 for ch in candidate):
+        length = len(candidate)
+        if length >= 3:
+            return 3
+        if length == 2:
+            return 2
+        return 1
+    compact = _compact_ascii(candidate)
+    if len(compact) >= 8:
+        return 3
+    if len(compact) >= 4:
+        return 2
+    return 1
 
 
 def _candidate_supported_by_opening_text(candidate: str, opening_text: str, dominant_type: str) -> bool:

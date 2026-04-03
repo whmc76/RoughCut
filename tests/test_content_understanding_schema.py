@@ -168,6 +168,41 @@ def test_map_content_understanding_to_legacy_profile_builds_branded_subject_type
     assert legacy["content_understanding"]["primary_subject"] == "OLIGHT SLIM2 ULTRA版手电筒"
 
 
+def test_map_content_understanding_to_legacy_profile_recovers_brand_from_observed_alias_context():
+    understanding = ContentUnderstanding(
+        video_type="product_review",
+        content_domain="flashlight",
+        primary_subject="SLIM2代ULTRA手电筒",
+        subject_entities=[
+            SubjectEntity(
+                kind="product",
+                name="SLIM2代ULTRA手电筒",
+                brand="",
+                model="SLIM2 ULTRA",
+            )
+        ],
+        observed_entities=[
+            SubjectEntity(kind="", name="奥雷"),
+            SubjectEntity(kind="", name="SLIM2代ULTRA版本"),
+        ],
+        video_theme="手电筒版本对比",
+        summary="视频围绕 SLIM2 ULTRA 手电筒展开对比。",
+        hook_line="ULTRA版值不值",
+        engagement_question="你会选哪个版本？",
+        search_queries=["SLIM2 ULTRA 手电筒"],
+        evidence_spans=[],
+        uncertainties=[],
+        confidence={"overall": 0.71},
+        needs_review=True,
+        review_reasons=["品牌需继续核验"],
+    )
+
+    legacy = map_content_understanding_to_legacy_profile(understanding)
+
+    assert legacy["subject_brand"] == "OLIGHT"
+    assert legacy["subject_type"].startswith("OLIGHT ")
+
+
 def test_content_understanding_payload_and_orchestrator_preserve_capability_matrix_and_trace():
     understanding = ContentUnderstanding(
         video_type="product_review",
@@ -229,3 +264,39 @@ def test_parse_content_semantic_facts_payload_preserves_role_candidates():
     assert facts.supporting_product_candidates == ["配套收纳包"]
     assert facts.component_candidates == ["背负系统", "分仓结构"]
     assert facts.aspect_candidates == ["背负", "结构"]
+
+
+def test_parse_content_semantic_facts_payload_unwraps_stringified_mapping_candidates():
+    facts = parse_content_semantic_facts_payload(
+        {
+            "primary_subject_candidates": [
+                "{'name': '瑞特拆卸工具', 'description': '原型刀具'}",
+                "{'name': '瑞特拆卸工具', 'description': '原型刀具'}",
+            ],
+            "search_expansions": [
+                "{'name': '冰型贴片刀具', 'aliases': ['冰型贴片', '定制刀具']}",
+            ],
+        }
+    )
+
+    assert facts.primary_subject_candidates == ["瑞特拆卸工具"]
+    assert facts.search_expansions == ["冰型贴片刀具"]
+
+
+def test_parse_content_understanding_payload_unwraps_stringified_subject_entity_mapping():
+    understanding = parse_content_understanding_payload(
+        {
+            "video_type": "product_review",
+            "content_domain": "edc",
+            "primary_subject": "瑞特拆卸工具",
+            "subject_entities": [
+                "{'kind': 'product', 'name': '瑞特拆卸工具', 'brand': 'REATE'}",
+            ],
+            "observed_entities": [
+                "{'name': '瑞特拆卸工具'}",
+            ],
+        }
+    )
+
+    assert understanding.subject_entities == [SubjectEntity(kind="product", name="瑞特拆卸工具", brand="REATE", model="")]
+    assert understanding.observed_entities == [SubjectEntity(kind="", name="瑞特拆卸工具", brand="", model="")]

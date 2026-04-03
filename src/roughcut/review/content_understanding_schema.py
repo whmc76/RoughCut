@@ -1,7 +1,18 @@
 from __future__ import annotations
 
+import ast
 from dataclasses import asdict, dataclass, field
 from typing import Any
+
+from roughcut.review.domain_glossaries import list_builtin_glossary_packs
+
+
+_GLOSSARY_BRAND_TERMS: list[dict[str, Any]] = [
+    term
+    for pack in list_builtin_glossary_packs()
+    for term in list(pack.get("terms") or [])
+    if isinstance(term, dict) and str(term.get("category") or "").strip().lower().endswith("_brand")
+]
 
 
 @dataclass(frozen=True)
@@ -79,7 +90,7 @@ def parse_content_semantic_facts_payload(data: Any) -> ContentSemanticFacts:
     def _items(name: str) -> list[str]:
         values: list[str] = []
         for item in list(payload.get(name) or []):
-            normalized = str(item or "").strip()
+            normalized = _normalize_semantic_fact_item(item)
             if normalized and normalized not in values:
                 values.append(normalized)
         return values
@@ -217,6 +228,30 @@ def serialize_content_understanding_payload(value: ContentUnderstanding) -> dict
 def _parse_subject_entities_payload(data: Any) -> list[SubjectEntity]:
     subject_entities: list[SubjectEntity] = []
     for item in list(data or []):
+        if isinstance(item, str):
+            parsed = _parse_stringified_mapping(item)
+            if isinstance(parsed, dict):
+                item = parsed
+            elif item.strip():
+                subject_entities.append(
+                    SubjectEntity(
+                        kind="",
+                        name=item.strip(),
+                        brand="",
+                        model="",
+                    )
+                )
+                continue
+        if isinstance(item, dict):
+            subject_entities.append(
+                SubjectEntity(
+                    kind=str(item.get("kind") or "").strip(),
+                    name=str(item.get("name") or item.get("value") or "").strip(),
+                    brand=str(item.get("brand") or "").strip(),
+                    model=str(item.get("model") or "").strip(),
+                )
+            )
+            continue
         if isinstance(item, str) and item.strip():
             subject_entities.append(
                 SubjectEntity(
@@ -226,18 +261,32 @@ def _parse_subject_entities_payload(data: Any) -> list[SubjectEntity]:
                     model="",
                 )
             )
-            continue
-        if not isinstance(item, dict):
-            continue
-        subject_entities.append(
-            SubjectEntity(
-                kind=str(item.get("kind") or "").strip(),
-                name=str(item.get("name") or "").strip(),
-                brand=str(item.get("brand") or "").strip(),
-                model=str(item.get("model") or "").strip(),
-            )
-        )
     return subject_entities
+
+
+def _normalize_semantic_fact_item(item: Any) -> str:
+    if isinstance(item, dict):
+        return str(item.get("name") or item.get("value") or item.get("term") or "").strip()
+    if isinstance(item, str):
+        parsed = _parse_stringified_mapping(item)
+        if isinstance(parsed, dict):
+            return str(parsed.get("name") or parsed.get("value") or parsed.get("term") or "").strip()
+        return item.strip()
+    return str(item or "").strip()
+
+
+def _parse_stringified_mapping(value: str) -> dict[str, Any] | None:
+    text = str(value or "").strip()
+    if not text or text[0] not in "{[":
+        return None
+    for loader in (ast.literal_eval,):
+        try:
+            parsed = loader(text)
+        except Exception:
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+    return None
 
 
 def parse_primary_evidence_graph_payload(data: Any) -> dict[str, dict[str, Any]]:
@@ -269,9 +318,19 @@ def _compose_legacy_subject_type(*, subject_type: str, subject_brand: str, subje
     normalized_model = _normalize_compact(model)
     if normalized_brand and normalized_brand in normalized_candidate:
         return candidate
-    if normalized_model and normalized_model in normalized_candidate:
+    if _subject_type_contains_model(candidate, model):
         return f"{brand} {candidate}".strip()
     return candidate
+
+
+def _subject_type_contains_model(subject_type: str, subject_model: str) -> bool:
+    normalized_candidate = _normalize_compact(subject_type)
+    normalized_model = _normalize_compact(subject_model)
+    if normalized_model and normalized_model in normalized_candidate:
+        return True
+    ascii_candidate = "".join(ch for ch in str(subject_type or "").upper() if ch.isascii() and ch.isalnum())
+    ascii_model = "".join(ch for ch in str(subject_model or "").upper() if ch.isascii() and ch.isalnum())
+    return bool(ascii_model and ascii_model in ascii_candidate)
 
 
 def map_content_understanding_to_legacy_profile(value: ContentUnderstanding) -> dict[str, Any]:
@@ -286,6 +345,8 @@ def map_content_understanding_to_legacy_profile(value: ContentUnderstanding) -> 
             subject_model = entity.model
         if subject_brand and subject_model:
             break
+    if not subject_brand:
+        subject_brand = _infer_subject_brand_from_context(value, preferred_entities)
     content_kind = _normalize_understanding_value(value.video_type)
     subject_domain = _normalize_understanding_value(value.content_domain)
     subject_type = _compose_legacy_subject_type(
@@ -338,3 +399,31 @@ def map_content_understanding_to_legacy_profile(value: ContentUnderstanding) -> 
             ),
         },
     }
+
+
+def _infer_subject_brand_from_context(
+    value: ContentUnderstanding,
+    preferred_entities: list[SubjectEntity],
+) -> str:
+    has_product_entity = any(
+        any(marker in str(entity.kind or "").strip().lower() for marker in ("product", "产品", "hardware", "device"))
+        for entity in preferred_entities
+    )
+    if not has_product_entity:
+        return ""
+    text_blob = " ".join(
+        part
+        for part in (
+            value.resolved_primary_subject,
+            value.primary_subject,
+            *[entity.name for entity in preferred_entities],
+            *[entity.name for entity in value.observed_entities],
+        )
+        if str(part or "").strip()
+    )
+    for term in _GLOSSARY_BRAND_TERMS:
+        correct_form = str(term.get("correct_form") or "").strip()
+        aliases = [correct_form, *[str(raw or "").strip() for raw in (term.get("wrong_forms") or []) if str(raw or "").strip()]]
+        if correct_form and any(alias and alias in text_blob for alias in aliases):
+            return correct_form
+    return ""
