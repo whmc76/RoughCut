@@ -145,3 +145,11 @@ def test_watch_script_uses_longer_backoff_for_deferred_refresh():
     assert 'Status -eq "deferred"' in script_text
     assert "AddSeconds($retryDelaySeconds)" in script_text
     assert "Docker auto-refresh deferred because active work is still running" in script_text
+
+
+def test_start_script_keeps_watch_modes_explicit_only():
+    script_text = Path("start_roughcut.ps1").read_text(encoding="utf-8")
+
+    assert 'if ($Mode -in @("runtime-watch", "full-watch"))' in script_text
+    assert 'Start-RoughCutDockerWatchMode -WatchMode $Mode' in script_text
+    assert 'Start-RoughCutDockerWatch -ComposeMode $Mode' not in script_text

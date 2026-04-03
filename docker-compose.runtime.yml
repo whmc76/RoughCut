@@ -30,7 +30,7 @@ x-app-common: &app-common
     context: .
     dockerfile: Dockerfile
     args:
-      ROUGHCUT_PYTHON_EXTRAS: ${ROUGHCUT_DOCKER_PYTHON_EXTRAS:-local-asr}
+      ROUGHCUT_PYTHON_EXTRAS: ${ROUGHCUT_DOCKER_PYTHON_EXTRAS:-}
   image: roughcut:local
   env_file:
     - .env
@@ -64,7 +64,7 @@ services:
       context: .
       dockerfile: Dockerfile
       args:
-        ROUGHCUT_PYTHON_EXTRAS: ${ROUGHCUT_DOCKER_PYTHON_EXTRAS:-local-asr}
+        ROUGHCUT_PYTHON_EXTRAS: ${ROUGHCUT_DOCKER_PYTHON_EXTRAS:-}
     image: roughcut:local
     env_file:
       - .env

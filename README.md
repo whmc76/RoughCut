@@ -9,7 +9,7 @@
 ## 功能
 
 - **自动剪辑** — 检测静音段和语气词，生成剪辑时间轴，保留有效内容
-- **转写** — 默认使用 OpenAI `gpt-4o-transcribe`，本地可切换到 `FunASR SenseVoice` 或 `faster-whisper`
+- **转写** — 默认使用 OpenAI `gpt-4o-transcribe`，本地服务优先建议 `qwen3_asr`；离线本地依赖可选 `FunASR SenseVoice` 或 `faster-whisper`
 - **字幕** — 字幕时间戳重映射至剪辑后时间轴，烧录荧光描边样式（黑字 + 绿色发光）
 - **封面选帧** — 视觉模型从多个候选帧中挑选最佳封面，可选标题文字叠加
 - **旋转修正** — 视觉模型识别实际画面方向，正确处理 iPhone 横屏/竖屏及错误元数据
@@ -102,8 +102,14 @@ pnpm bootstrap
 
 这一步会：
 
-- 用 `uv sync --extra dev --extra local-asr` 安装 Python 依赖
+- 用 `uv sync --extra dev` 安装默认 Python 依赖
 - 用 `pnpm install` 安装根工作区和 `frontend/` 的前端依赖
+
+如果你明确要在宿主机里启用 `funasr` / `faster-whisper`，再额外运行：
+
+```bash
+uv sync --extra dev --extra local-asr
+```
 
 ### 3. 初始化项目目录
 
@@ -126,7 +132,7 @@ pnpm setup
 pnpm docker:infra:up
 ```
 
-推荐常驻，直接起 `infra + runtime`，并自动在宿主机后台启动 workspace watch：
+推荐常驻，直接起 `infra + runtime`，默认启用 live source sync：
 
 ```bash
 pnpm docker:up
@@ -149,13 +155,13 @@ pnpm docker:up
 cp .env.example .env
 ```
 
-最小配置（本地 Ollama + 本地 ASR）：
+最小配置（本地 Ollama + 本地 ASR 服务）：
 
 ```env
 REASONING_PROVIDER=ollama
 REASONING_MODEL=qwen3.5:9b        # 需支持视觉
-TRANSCRIPTION_PROVIDER=funasr
-TRANSCRIPTION_MODEL=sensevoice-small
+TRANSCRIPTION_PROVIDER=qwen3_asr
+TRANSCRIPTION_MODEL=qwen3-asr-1.7b
 
 ROUGHCUT_OUTPUT_ROOT=F:/roughcut_outputs
 JOB_STORAGE_DIR=F:/roughcut_outputs/jobs
@@ -199,7 +205,14 @@ TRANSCRIPTION_PROVIDER=openai
 TRANSCRIPTION_MODEL=gpt-4o-transcribe
 ```
 
-更强本地中文 ASR 建议：
+推荐本地中文 ASR 服务：
+
+```env
+TRANSCRIPTION_PROVIDER=qwen3_asr
+TRANSCRIPTION_MODEL=qwen3-asr-1.7b
+```
+
+如果你不走独立服务，而是想在宿主机内直接装离线依赖，再选：
 
 ```env
 TRANSCRIPTION_PROVIDER=funasr
@@ -314,21 +327,21 @@ Windows 下当前建议把 [start_roughcut.bat](E:/WorkSpace/RoughCut/start_roug
 - `start_roughcut.bat infra`
   只启动 PostgreSQL / Redis 这套轻量基础设施
 - `start_roughcut.bat runtime`
-  启动推荐的常驻 Docker runtime：`api + orchestrator + worker-media + worker-llm`，并自动在宿主机后台启动 workspace watch；默认不在容器里安装 `local-asr` extras
+  启动推荐的常驻 Docker runtime：`api + orchestrator + worker-media + worker-llm`；`runtime/full` 默认会带上 `docker-compose.dev.yml`，通过 bind mount + 容器内 watcher 提供 live source sync；默认不在容器里安装 `local-asr` extras
 - `start_roughcut.bat runtime-local-asr`
   启动 runtime，并显式在 Docker 镜像里启用 `local-asr` extras
 - `start_roughcut.bat full`
-  启动 runtime + automation（当前包含 `watcher`），并自动在宿主机后台启动 workspace watch；默认不在容器里安装 `local-asr` extras
+  启动 runtime + automation（当前包含 `watcher`）；`runtime/full` 默认会带上 `docker-compose.dev.yml`，通过 bind mount + 容器内 watcher 提供 live source sync；默认不在容器里安装 `local-asr` extras
 - `start_roughcut.bat full-local-asr`
   启动 full stack，并显式在 Docker 镜像里启用 `local-asr` extras
 - `start_roughcut.bat runtime-down`
-  关闭 runtime，并停止对应的后台 workspace watch
+  关闭 runtime
 - `start_roughcut.bat full-down`
-  关闭 runtime + automation，并停止对应的后台 workspace watch
+  关闭 runtime + automation
 - `start_roughcut.bat runtime-watch`
-  监听 workspace 改动并自动 refresh Docker runtime；适合 Docker 开发态，不适合重任务常驻队列
+  显式启动 host-side rebuild watch，监听 workspace 改动并自动 refresh Docker runtime；适合需要整套镜像重建的开发/维护场景，不适合重任务常驻队列
 - `start_roughcut.bat full-watch`
-  监听 workspace 改动并自动 refresh runtime + automation
+  显式启动 host-side rebuild watch，监听 workspace 改动并自动 refresh runtime + automation
 - `start_roughcut.bat dev`
   直接运行统一入口 `pnpm dev`
 - `start_roughcut.bat test`
@@ -369,16 +382,16 @@ cp .env.example .env
 docker compose -f docker-compose.infra.yml up -d
 ```
 
-推荐常驻（基础设施 + Docker runtime）：
+推荐常驻（基础设施 + Docker runtime，默认 live source sync）：
 
 ```bash
-docker compose -f docker-compose.infra.yml -f docker-compose.runtime.yml up -d --build
+docker compose -f docker-compose.infra.yml -f docker-compose.runtime.yml -f docker-compose.dev.yml up -d --build
 ```
 
-全自动无人值守（再加 watcher）：
+全自动无人值守（再加 watcher，默认 live source sync）：
 
 ```bash
-docker compose -f docker-compose.infra.yml -f docker-compose.runtime.yml -f docker-compose.automation.yml up -d --build
+docker compose -f docker-compose.infra.yml -f docker-compose.runtime.yml -f docker-compose.automation.yml -f docker-compose.dev.yml up -d --build
 ```
 
 推荐常驻默认包含：
@@ -404,14 +417,25 @@ docker compose -f docker-compose.infra.yml -f docker-compose.runtime.yml logs -f
 
 ### 3.5 Docker 开发态自动同步 workspace 改动
 
-参考 Hydra 现在在做的方案，RoughCut 也可以用“宿主机监听 workspace 改动，再触发一次 Docker runtime refresh”的方式，而不是把代码目录直接 bind mount 到容器里。
+RoughCut 现在保留两种明确分离的代码同步模式：
 
-  当前仓库已经提供两层脚本：
-  
-  - `scripts/run-roughcut-docker-refresh-session.ps1`
-    单次执行 `docker compose up -d --build --force-recreate`，只重建 `migrate / api / orchestrator / worker-media / worker-llm`，不会主动重建 `postgres / redis`
-  - `scripts/watch-roughcut-docker-runtime.ps1`
-    持续监听 `src/`、`frontend/`、`scripts/`、compose、`Dockerfile`、`pyproject.toml`、`uv.lock` 等改动，debounce 后触发 refresh
+- 默认模式：`runtime/full` 自动带上 `docker-compose.dev.yml`，通过 bind mount + 容器内 watcher 提供 live source sync。
+- 显式模式：`runtime-watch/full-watch` 使用 host-side rebuild watch，在宿主机监听改动后触发一次 Docker refresh。
+
+`docker-compose.dev.yml` 当前负责：
+
+- 把 `./src` 挂到 `/app/src`
+- 把 `./frontend/dist` 挂到 `/app/frontend/dist`
+- 让 `api` 使用 `--reload`
+- 让 `orchestrator` / `worker-*` 使用 `watchfiles`
+- 启动 `frontend-watch` 持续构建前端产物
+
+host-side rebuild watch 仍由两层脚本提供：
+
+- `scripts/run-roughcut-docker-refresh-session.ps1`
+  单次执行 `docker compose up -d --build --force-recreate`，只重建 `migrate / api / orchestrator / worker-media / worker-llm`，不会主动重建 `postgres / redis`
+- `scripts/watch-roughcut-docker-runtime.ps1`
+  持续监听 `src/`、`frontend/`、`scripts/`、compose、`Dockerfile`、`pyproject.toml`、`uv.lock` 等改动，debounce 后触发 refresh
 
 常用命令：
 
@@ -424,7 +448,7 @@ pnpm docker:auto:watch
 pnpm docker:auto:up:local-asr
 ```
 
-如果你走默认的 Docker 启停入口，现在 watch 会一起自动启动 / 停止：
+默认 Docker 启停入口现在直接走 live source sync：
 
 ```bash
 pnpm docker:runtime:up
@@ -433,14 +457,14 @@ pnpm docker:auto:up
 pnpm docker:auto:down
 ```
 
-Windows 入口也加了快捷命令：
+如果你需要显式 host-side rebuild watch，使用：
 
 ```powershell
 ./start_roughcut.bat runtime-watch
 ./start_roughcut.bat full-watch
 ```
 
-这套方案和 Hydra 的差别是：
+host-side rebuild watch 方案和 Hydra 的差别是：
 
 - Hydra 需要同步 runtime home / SQLite 状态
 - RoughCut 不需要同步 runtime home，因为状态真相在 PostgreSQL / Redis 和宿主机输出目录
@@ -448,10 +472,10 @@ Windows 入口也加了快捷命令：
 
 注意：
 
-- 这套 watch 更适合 Docker 开发态，不适合正在跑重任务的稳定常驻队列
-- 每次命中改动都会重建并 `force-recreate` `api / orchestrator / workers`
-- `data/`、`logs/`、`watch/`、`.venv/`、`node_modules/`、`docs/` 默认不会触发 refresh
-- `runtime` / `full` 模式现在会在宿主机后台自动拉起对应 watch；如果你只想起容器、不想自动同步，可用 `start_roughcut.ps1 -Mode runtime -NoDockerWatch`
+- `runtime/full` 更适合日常开发，因为同步链路更短，也不依赖隐藏的宿主机 watch 进程
+- `runtime-watch/full-watch` 更适合你明确需要整套镜像重建的场景，但不适合正在跑重任务的稳定常驻队列
+- host-side rebuild watch 每次命中改动都会重建并 `force-recreate` `api / orchestrator / workers`
+- `data/`、`logs/`、`watch/`、`.venv/`、`node_modules/`、`docs/` 默认不会触发 host-side rebuild refresh
 
 ### 4. 数据目录
 
@@ -466,7 +490,7 @@ Windows 入口也加了快捷命令：
 - Docker 镜像默认内置 `uv`、`ffmpeg` 和 `Noto Sans CJK` 中文字体。
 - Docker 镜像会在构建阶段自动执行 `frontend/` 下的前端依赖安装和构建。
 - 默认 Docker 入口会强制清空 `ROUGHCUT_DOCKER_PYTHON_EXTRAS`，优先走更轻的 runtime 构建；如果你确实要在容器内启用 `funasr` / `faster-whisper`，使用 `pnpm docker:runtime:up:local-asr`、`pnpm docker:auto:up:local-asr`，或显式传 `-DockerPythonExtras local-asr`。
-- 当前项目默认 ASR 方案为 `openai + gpt-4o-transcribe`；离线中文口播优先建议 `funasr + sensevoice-small`。
+- 当前项目默认 ASR 方案为 `openai + gpt-4o-transcribe`；本地服务优先建议 `qwen3_asr + qwen3-asr-1.7b`；离线本地依赖可选 `funasr + sensevoice-small` 或 `faster_whisper`。
   - 推荐把长期在线形态收敛到 `infra + runtime` 这一档；`watcher` 只在确实需要自动扫盘时再加入。
 - 推荐本地开发使用 `uv + npm`，容器部署使用 `docker compose`，不要混用系统级 `pip` 和容器内运行时配置。
 
@@ -545,7 +569,7 @@ curl http://localhost:8000/api/v1/jobs/{job_id}/report
 | `MINIMAX_API_HOST` | `https://api.minimaxi.com` | MiniMax Coding Plan / MCP API Host |
 | `MINIMAX_CODING_PLAN_API_KEY` | `""` | MiniMax Coding Plan Key；留空时搜索/MCP 默认回退 `MINIMAX_API_KEY` |
 | `VISION_MODEL` | `""` | 视觉模型（空 = 使用 reasoning_model） |
-| `TRANSCRIPTION_PROVIDER` | `openai` | 转写后端：`openai` / `funasr` / `local_whisper` / `qwen_asr` |
+| `TRANSCRIPTION_PROVIDER` | `openai` | 转写后端：`openai` / `qwen3_asr` / `funasr` / `faster_whisper` |
 | `TRANSCRIPTION_MODEL` | `gpt-4o-transcribe` | 转写模型 |
 | `SUBTITLE_FONT` | `Microsoft YaHei` | 字幕字体 |
 | `SUBTITLE_FONT_SIZE` | `80` | 字幕字号（pt，相对 PlayResY） |

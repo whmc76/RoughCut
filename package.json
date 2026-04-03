@@ -3,7 +3,7 @@
   "private": true,
   "packageManager": "pnpm@10.27.0",
   "scripts": {
-    "bootstrap": "uv sync --extra dev --extra local-asr && pnpm install",
+    "bootstrap": "uv sync --extra dev && pnpm install",
     "setup": "uv run roughcut init",
     "doctor": "uv run roughcut doctor",
     "benchmark:reasoning": "uv run python scripts/benchmark_reasoning.py",

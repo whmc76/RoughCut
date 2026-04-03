@@ -217,14 +217,14 @@ echo RoughCut Windows entrypoint
 echo.
 echo   start_roughcut.bat             One-click startup package
 echo   start_roughcut.bat infra       Start only PostgreSQL / Redis / MinIO containers
-echo   start_roughcut.bat runtime     Start recommended always-on Docker runtime and auto-start workspace watch
+echo   start_roughcut.bat runtime     Start recommended Docker runtime with live source sync
 echo   start_roughcut.bat runtime-local-asr  Start runtime with local-asr extras enabled inside Docker
-echo   start_roughcut.bat full        Start runtime plus automation services and auto-start workspace watch
+echo   start_roughcut.bat full        Start runtime plus automation services with live source sync
 echo   start_roughcut.bat full-local-asr     Start full stack with local-asr extras enabled inside Docker
-echo   start_roughcut.bat runtime-down Stop runtime and its workspace watch
-echo   start_roughcut.bat full-down    Stop runtime plus automation and their workspace watch
-echo   start_roughcut.bat runtime-watch  Watch workspace changes and auto-refresh Docker runtime
-echo   start_roughcut.bat full-watch     Watch workspace changes and auto-refresh runtime + automation
+echo   start_roughcut.bat runtime-down Stop runtime services
+echo   start_roughcut.bat full-down    Stop runtime plus automation services
+echo   start_roughcut.bat runtime-watch  Start explicit host-side rebuild watch for Docker runtime
+echo   start_roughcut.bat full-watch     Start explicit host-side rebuild watch for runtime + automation
 echo   start_roughcut.bat dev         Run unified pnpm dev
 echo   start_roughcut.bat build       Run pnpm build
 echo   start_roughcut.bat test        Run pnpm test

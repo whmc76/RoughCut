@@ -32,6 +32,7 @@ $FrontendDist = Join-Path $FrontendDir "dist\index.html"
 $WatchDir = Join-Path $RepoRoot "watch"
 $InfraComposeFile = Join-Path $RepoRoot "docker-compose.infra.yml"
 $RuntimeComposeFile = Join-Path $RepoRoot "docker-compose.runtime.yml"
+$DevComposeFile = Join-Path $RepoRoot "docker-compose.dev.yml"
 $AutomationComposeFile = Join-Path $RepoRoot "docker-compose.automation.yml"
 $DockerWatchScript = Join-Path $RepoRoot "scripts\watch-roughcut-docker-runtime.ps1"
 $CodexHostBridgeScript = Join-Path $RepoRoot "scripts\codex_host_bridge.py"
@@ -67,6 +68,7 @@ function Get-RoughCutComposeFiles {
     $files = @($InfraComposeFile)
     if ($ComposeMode -in @("runtime", "full")) {
         $files += $RuntimeComposeFile
+        $files += $DevComposeFile
     }
     if ($ComposeMode -eq "full") {
         $files += $AutomationComposeFile
@@ -247,9 +249,11 @@ function Start-RoughCutComposeMode {
         }
         "runtime" {
             Write-Host "Recommended always-on runtime is up." -ForegroundColor Green
+            Write-Host "Docker live source sync is active for this runtime." -ForegroundColor Green
         }
         "full" {
             Write-Host "Runtime plus automation services are up." -ForegroundColor Green
+            Write-Host "Docker live source sync is active for this runtime." -ForegroundColor Green
         }
     }
 }
@@ -800,16 +804,16 @@ function Initialize-RoughCutEnvironment {
 
     if ($null -ne $Uv) {
         Write-Host "Using uv to create and sync .venv" -ForegroundColor Cyan
-        Invoke-NativeCommandChecked -FilePath $Uv.Source -Arguments @("sync", "--extra", "dev", "--extra", "local-asr") -FailureMessage "uv sync failed"
+        Invoke-NativeCommandChecked -FilePath $Uv.Source -Arguments @("sync", "--extra", "dev") -FailureMessage "uv sync failed"
     } elseif ($null -ne $SystemPython) {
         Write-Host "uv not found. Falling back to python -m venv + pip install." -ForegroundColor Yellow
         Invoke-NativeCommandChecked -FilePath $SystemPython.Source -Arguments @("-m", "venv", ".venv") -FailureMessage "python -m venv failed"
         if (-not (Test-Path $Python)) {
             throw "Failed to create virtual environment: $Python"
         }
-        Invoke-NativeCommandChecked -FilePath $Python -Arguments @("-m", "pip", "install", "-e", ".[dev,local-asr]") -FailureMessage "Backend dependency installation failed"
+        Invoke-NativeCommandChecked -FilePath $Python -Arguments @("-m", "pip", "install", "-e", ".[dev]") -FailureMessage "Backend dependency installation failed"
     } else {
-        throw "Neither uv nor python is available. Install uv, then run 'uv sync --extra dev --extra local-asr'."
+        throw "Neither uv nor python is available. Install uv, then run 'uv sync --extra dev'."
     }
 
     if (-not (Test-Path $Python)) {
@@ -1410,9 +1414,6 @@ if ($Mode -eq "full-down") {
 
 if ($Mode -ne "local") {
     Start-RoughCutComposeMode -ComposeMode $Mode
-    if ($Mode -in @("runtime", "full")) {
-        Start-RoughCutDockerWatch -ComposeMode $Mode
-    }
     exit 0
 }
 
