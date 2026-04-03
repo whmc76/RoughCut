@@ -7,6 +7,8 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from roughcut.config import get_settings
 from roughcut.edit.presets import WorkflowPreset, get_workflow_preset, normalize_workflow_template_name, select_workflow_template
 from roughcut.llm_cache import digest_payload
@@ -21,6 +23,7 @@ from roughcut.review.content_understanding_infer import infer_content_understand
 from roughcut.review.content_understanding_schema import ContentUnderstanding, map_content_understanding_to_legacy_profile
 from roughcut.review.content_understanding_visual import infer_visual_semantic_evidence
 from roughcut.review.content_understanding_verify import (
+    HybridVerificationBundle,
     build_hybrid_verification_bundle,
     build_verification_search_queries,
     verify_content_understanding,
@@ -2028,6 +2031,326 @@ async def apply_content_profile_feedback(
         preset = get_workflow_preset(str(result.get("workflow_template") or workflow_template or "unboxing_standard"))
         result["cover_title"] = build_cover_title(result, preset)
     return result
+
+
+def build_review_feedback_search_queries(
+    *,
+    draft_profile: dict[str, Any],
+    proposed_feedback: dict[str, Any] | None = None,
+    limit: int = 6,
+) -> list[str]:
+    proposed = dict(proposed_feedback or {})
+    brand = str(proposed.get("subject_brand") or "").strip()
+    model = str(proposed.get("subject_model") or "").strip()
+    subject_type = str(draft_profile.get("subject_type") or "").strip()
+    queries: list[str] = []
+
+    def _append(value: str) -> None:
+        query = str(value or "").strip()
+        if query and query not in queries and len(queries) < limit:
+            queries.append(query)
+
+    if brand and model:
+        _append(f"{brand} {model}")
+        if subject_type:
+            _append(f"{brand} {model} {subject_type}")
+    if model and subject_type:
+        _append(f"{model} {subject_type}")
+    if brand and subject_type:
+        _append(f"{brand} {subject_type}")
+
+    for item in list(draft_profile.get("search_queries") or []):
+        query = str(item).strip()
+        if not query:
+            continue
+        _append(query)
+        if brand:
+            _append(f"{brand} {query}")
+        if model:
+            _append(f"{model} {query}")
+        if brand and model:
+            _append(f"{brand} {model} {query}")
+        if len(queries) >= limit:
+            break
+    return queries
+
+
+async def build_review_feedback_verification_bundle(
+    *,
+    draft_profile: dict[str, Any],
+    proposed_feedback: dict[str, Any] | None = None,
+    session: AsyncSession | None = None,
+) -> HybridVerificationBundle | None:
+    search_queries = build_review_feedback_search_queries(
+        draft_profile=draft_profile,
+        proposed_feedback=proposed_feedback,
+    )
+    if not search_queries:
+        return None
+    return await build_hybrid_verification_bundle(
+        search_queries=search_queries,
+        online_search=_online_search_content_understanding,
+        internal_search=None,
+        session=session,
+    )
+
+
+async def resolve_content_profile_review_feedback(
+    *,
+    draft_profile: dict[str, Any],
+    source_name: str,
+    review_feedback: str | None = None,
+    proposed_feedback: dict[str, Any] | None = None,
+    reviewed_subtitle_excerpt: str | None = None,
+    accepted_corrections: list[dict[str, Any]] | None = None,
+    verification_bundle: HybridVerificationBundle | None = None,
+) -> dict[str, Any]:
+    note = str(review_feedback or "").strip()
+    proposed = dict(proposed_feedback or {})
+    if not note and not any(proposed.values()):
+        return {}
+
+    try:
+        provider = get_reasoning_provider()
+        reviewed_excerpt = str(reviewed_subtitle_excerpt or draft_profile.get("transcript_excerpt") or "").strip()
+        current_snapshot = {
+            "subject_brand": str(draft_profile.get("subject_brand") or "").strip(),
+            "subject_model": str(draft_profile.get("subject_model") or "").strip(),
+            "subject_type": str(draft_profile.get("subject_type") or "").strip(),
+            "video_theme": str(draft_profile.get("video_theme") or "").strip(),
+            "summary": str(draft_profile.get("summary") or "").strip(),
+        }
+        understanding = draft_profile.get("content_understanding") if isinstance(draft_profile.get("content_understanding"), dict) else {}
+        understanding_snapshot = {
+            "primary_subject": str(understanding.get("primary_subject") or "").strip(),
+            "resolved_primary_subject": str(understanding.get("resolved_primary_subject") or "").strip(),
+            "subject_entities": list(understanding.get("subject_entities") or [])[:6],
+            "observed_entities": list(understanding.get("observed_entities") or [])[:6],
+            "resolved_entities": list(understanding.get("resolved_entities") or [])[:6],
+        }
+        verification_snapshot = _build_review_feedback_verification_snapshot(verification_bundle)
+        accepted_examples = [
+            {
+                "original": str(item.get("original") or "").strip(),
+                "accepted": str(item.get("accepted") or "").strip(),
+            }
+            for item in (accepted_corrections or [])
+            if str(item.get("original") or "").strip() and str(item.get("accepted") or "").strip()
+        ]
+        prompt = (
+            "你在解析成片审核意见，目标是判断这条审核意见是否应该作用到当前视频主体，并输出可执行修正补丁。"
+            "审核意见是高优先级证据，但不能机械照抄；你必须先判断它是不是在修正当前主对象。"
+            "如果视频围绕单一主产品展开，或围绕同一产品族做版本对比，而审核意见只是在修正该主产品的品牌、型号、系列或版本，通常应当应用。"
+            "只有当审核意见明显指向另一个对象，或当前证据不足以判断作用对象时，才拒绝应用。"
+            "不要被旧草稿中的错误品牌型号绑住，也不要因为 ASR 噪声而忽略人工修正。"
+            "当前草稿里的品牌/型号可能本身就是错的，它们不能作为否决人工审核修正的主要依据。"
+            "如果审核意见明确写了“品牌改成X、型号改成Y”，并且当前视频主题仍是同一类产品的开箱、评测、版本对比或上手体验，应优先把 X/Y 视为当前主对象的候选修正。"
+            "返回 apply_feedback=true 时，才在 patch 中填入应应用字段；否则 patch 保持为空。"
+            "输出 JSON："
+            '{"apply_feedback":false,"reason":"","subject_brand":"","subject_model":"","subject_type":"","video_theme":"",'
+            '"hook_line":"","visible_text":"","summary":"","engagement_question":"","search_queries":[]}'
+            f"\n当前主对象快照：{json.dumps(current_snapshot, ensure_ascii=False)}"
+            f"\n当前内容理解快照：{json.dumps(understanding_snapshot, ensure_ascii=False)}"
+            f"\n审核意见原文：{note or '无'}"
+            f"\n从审核意见提取的候选修正：{json.dumps(proposed, ensure_ascii=False)}"
+            f"\n源文件名：{source_name}"
+        )
+        if reviewed_excerpt:
+            prompt += f"\n当前字幕摘录：{reviewed_excerpt}"
+        if accepted_examples:
+            prompt += f"\n已接受的字幕校对：{json.dumps(accepted_examples[:12], ensure_ascii=False)}"
+        if verification_bundle is not None:
+            prompt += (
+                "\n针对审核修正的混合检索结果（弱佐证，不能单独决定结论）："
+                f"{json.dumps(verification_snapshot, ensure_ascii=False)}"
+            )
+        with track_usage_operation("content_profile.review_feedback_resolve"):
+            response = await provider.complete(
+                [
+                    Message(role="system", content="你是严谨的中文视频内容审核修正助手。"),
+                    Message(role="user", content=prompt),
+                ],
+                temperature=0.1,
+                max_tokens=700,
+                json_mode=True,
+            )
+        payload = await _load_review_feedback_json_payload(provider, response)
+        if not bool((payload or {}).get("apply_feedback")) and _review_feedback_has_strong_verification_signal(
+            proposed,
+            verification_bundle,
+        ):
+            repair_prompt = (
+                "第一次判断偏保守。现在你已经拿到较强的外部佐证，请重新判断审核修正是否应作用于当前主对象。"
+                "如果混合检索已经稳定支持 proposed_feedback，且当前视频仍围绕同一产品族展开，应优先应用审核修正。"
+                "只有当检索结果明确指向别的对象时，才继续拒绝。"
+                "输出同样的 JSON，并明确 apply_feedback。"
+                f"\n当前主对象快照：{json.dumps(current_snapshot, ensure_ascii=False)}"
+                f"\n当前内容理解快照：{json.dumps(understanding_snapshot, ensure_ascii=False)}"
+                f"\n审核意见原文：{note or '无'}"
+                f"\n候选修正：{json.dumps(proposed, ensure_ascii=False)}"
+                f"\n混合检索结果：{json.dumps(verification_snapshot, ensure_ascii=False)}"
+            )
+            with track_usage_operation("content_profile.review_feedback_resolve_repair"):
+                repair_response = await provider.complete(
+                    [
+                        Message(role="system", content="你是严谨的中文视频内容审核修正助手。"),
+                        Message(role="user", content=repair_prompt),
+                    ],
+                    temperature=0.0,
+                    max_tokens=700,
+                    json_mode=True,
+                )
+            payload = await _load_review_feedback_json_payload(provider, repair_response)
+        if not bool((payload or {}).get("apply_feedback")):
+            return {}
+        resolved: dict[str, Any] = {}
+        for key in (
+            "subject_brand",
+            "subject_model",
+            "subject_type",
+            "video_theme",
+            "hook_line",
+            "visible_text",
+            "summary",
+            "engagement_question",
+        ):
+            value = str((payload or {}).get(key) or "").strip()
+            if value:
+                resolved[key] = value
+        queries: list[str] = []
+        for item in list((payload or {}).get("search_queries") or []):
+            value = str(item).strip()
+            if value and value not in queries:
+                queries.append(value)
+        if queries:
+            resolved["keywords"] = queries
+        return resolved
+    except Exception:
+        return {}
+
+
+async def _load_review_feedback_json_payload(
+    provider: Any,
+    response: Any,
+) -> dict[str, Any]:
+    try:
+        payload = response.as_json()
+    except Exception:
+        raw_output = str(getattr(response, "content", "") or "").strip()
+        if not raw_output:
+            return {}
+        repair_prompt = (
+            "把下面的模型输出修复成一个严格 JSON 对象。"
+            "不要 Markdown，不要代码块，不要解释。"
+            "必须保留这些字段：apply_feedback, reason, subject_brand, subject_model, subject_type, video_theme, hook_line, visible_text, summary, engagement_question, search_queries。"
+            '缺失字段时补空值，必须输出对象，结构参考：'
+            '{"apply_feedback":false,"reason":"","subject_brand":"","subject_model":"","subject_type":"","video_theme":"","hook_line":"","visible_text":"","summary":"","engagement_question":"","search_queries":[]}'
+            f"\n原始输出:\n{raw_output}"
+        )
+        repaired = await provider.complete(
+            [
+                Message(role="system", content="你是 JSON 修复器，只输出严格 JSON。"),
+                Message(role="user", content=repair_prompt),
+            ],
+            temperature=0.0,
+            max_tokens=700,
+            json_mode=True,
+        )
+        try:
+            payload = repaired.as_json()
+        except Exception:
+            return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _build_review_feedback_verification_snapshot(
+    verification_bundle: HybridVerificationBundle | None,
+) -> dict[str, Any]:
+    if verification_bundle is None:
+        return {
+            "search_queries": [],
+            "online_count": 0,
+            "database_count": 0,
+            "online_results": [],
+            "database_results": [],
+        }
+    return {
+        "search_queries": list(verification_bundle.search_queries or [])[:6],
+        "online_count": len(verification_bundle.online_results),
+        "database_count": len(verification_bundle.database_results),
+        "online_results": [
+            {
+                "query": str((item or {}).get("query") or "").strip(),
+                "title": str((item or {}).get("title") or "").strip(),
+                "snippet": str((item or {}).get("snippet") or "").strip(),
+                "url": str((item or {}).get("url") or "").strip(),
+            }
+            for item in list(verification_bundle.online_results or [])[:4]
+        ],
+        "database_results": [
+            {
+                "brand": str((item or {}).get("brand") or "").strip(),
+                "model": str((item or {}).get("model") or "").strip(),
+                "primary_subject": str((item or {}).get("primary_subject") or "").strip(),
+                "subject_type": str((item or {}).get("subject_type") or "").strip(),
+                "source_type": str((item or {}).get("source_type") or "").strip(),
+            }
+            for item in list(verification_bundle.database_results or [])[:3]
+        ],
+    }
+
+
+def _review_feedback_has_strong_verification_signal(
+    proposed_feedback: dict[str, Any],
+    verification_bundle: HybridVerificationBundle | None,
+) -> bool:
+    if verification_bundle is None:
+        return False
+    brand = _normalize_review_feedback_match_text(proposed_feedback.get("subject_brand"))
+    model = _normalize_review_feedback_match_text(proposed_feedback.get("subject_model"))
+    if not brand and not model:
+        return False
+
+    def _matches(text: str) -> bool:
+        normalized = _normalize_review_feedback_match_text(text)
+        if not normalized:
+            return False
+        brand_ok = not brand or brand in normalized
+        model_ok = not model or model in normalized
+        return brand_ok and model_ok
+
+    online_hits = 0
+    for item in verification_bundle.online_results:
+        haystack = " ".join(
+            [
+                str((item or {}).get("title") or ""),
+                str((item or {}).get("snippet") or ""),
+                str((item or {}).get("url") or ""),
+            ]
+        )
+        if _matches(haystack):
+            online_hits += 1
+
+    database_hits = 0
+    for item in verification_bundle.database_results:
+        haystack = " ".join(
+            [
+                str((item or {}).get("brand") or ""),
+                str((item or {}).get("model") or ""),
+                str((item or {}).get("primary_subject") or ""),
+            ]
+        )
+        if _matches(haystack):
+            database_hits += 1
+
+    return database_hits > 0 or online_hits >= 2
+
+
+def _normalize_review_feedback_match_text(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    if not text:
+        return ""
+    return re.sub(r"[\s\-_/·.]+", "", text)
 
 
 def _profile_needs_text_refinement(profile: dict[str, Any] | None) -> bool:

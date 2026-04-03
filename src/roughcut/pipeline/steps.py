@@ -66,10 +66,12 @@ from roughcut.review.content_profile import (
     apply_identity_review_guard,
     assess_content_profile_automation,
     build_content_profile_cache_fingerprint,
+    build_review_feedback_verification_bundle,
     build_transcript_excerpt,
     enrich_content_profile,
     infer_content_profile,
     polish_subtitle_items,
+    resolve_content_profile_review_feedback,
 )
 from roughcut.review.content_profile_memory import load_content_profile_user_memory
 from roughcut.review.domain_glossaries import (
@@ -1324,15 +1326,34 @@ async def run_content_profile(job_id: str) -> dict:
             source_name=job.source_name,
         )
         manual_review_feedback = dict(step.metadata_.get("review_user_feedback") or {}) if isinstance(step.metadata_, dict) else {}
+        review_feedback_note = str(step.metadata_.get("review_feedback") or "").strip() if isinstance(step.metadata_, dict) else ""
+        resolved_manual_review_feedback: dict[str, Any] = {}
         if manual_review_feedback:
+            review_feedback_verification_bundle = await build_review_feedback_verification_bundle(
+                draft_profile=content_profile,
+                proposed_feedback=manual_review_feedback,
+                session=session,
+            )
+            resolved_manual_review_feedback = await resolve_content_profile_review_feedback(
+                draft_profile=content_profile,
+                source_name=job.source_name,
+                review_feedback=review_feedback_note,
+                proposed_feedback=manual_review_feedback,
+                reviewed_subtitle_excerpt=transcript_excerpt,
+                accepted_corrections=[],
+                verification_bundle=review_feedback_verification_bundle,
+            )
+        if resolved_manual_review_feedback:
             content_profile = await apply_content_profile_feedback(
                 draft_profile=content_profile,
                 source_name=job.source_name,
                 workflow_template=job.workflow_template,
-                user_feedback=manual_review_feedback,
+                user_feedback=resolved_manual_review_feedback,
                 reviewed_subtitle_excerpt=transcript_excerpt,
                 accepted_corrections=[],
             )
+            content_profile["review_user_feedback"] = dict(manual_review_feedback)
+            content_profile["resolved_review_user_feedback"] = dict(resolved_manual_review_feedback)
         content_profile["creative_profile"] = _job_creative_profile(job)
 
         auto_review_enabled = bool(settings.auto_confirm_content_profile) and auto_review_mode_enabled(
@@ -1374,7 +1395,7 @@ async def run_content_profile(job_id: str) -> dict:
         review_step = review_step_result.scalar_one_or_none()
 
         auto_confirmed = bool(automation.get("auto_confirm"))
-        if manual_review_feedback:
+        if resolved_manual_review_feedback:
             now = datetime.now(timezone.utc)
             final_profile = dict(content_profile)
             final_profile["review_mode"] = "manual_confirmed"
@@ -1400,6 +1421,7 @@ async def run_content_profile(job_id: str) -> dict:
                     "auto_confirmed": False,
                     "manual_confirmed": True,
                     "review_user_feedback": dict(manual_review_feedback),
+                    "resolved_review_user_feedback": dict(resolved_manual_review_feedback),
                 }
             job.status = "processing"
         elif auto_confirmed:
@@ -1452,15 +1474,23 @@ async def run_content_profile(job_id: str) -> dict:
                 content_profile.get("video_theme"),
             ] if part
         ).strip()
-        if manual_review_feedback:
+        if resolved_manual_review_feedback:
             detail = f"已应用人工修正后的内容摘要：{subject or '人工修正完成'}"
         elif auto_confirmed:
             detail = f"已自动确认内容摘要：{subject or '自动识别完成'}"
         else:
+            if manual_review_feedback and review_step is not None:
+                review_step.metadata_ = {
+                    **(review_step.metadata_ or {}),
+                    "label": STEP_LABELS.get("summary_review", "summary_review"),
+                    "detail": "成片审核修正尚未确认到当前主体，等待人工继续确认。",
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                    "review_user_feedback": dict(manual_review_feedback),
+                }
             detail = f"已生成内容摘要：{subject or '待人工确认'}"
         await _set_step_progress(session, step, detail=detail, progress=1.0)
         await session.commit()
-        if not auto_confirmed and not manual_review_feedback:
+        if not auto_confirmed and not resolved_manual_review_feedback:
             try:
                 await get_telegram_review_bot_service().notify_content_profile_review(job.id)
             except Exception:

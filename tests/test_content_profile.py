@@ -27,6 +27,7 @@ from roughcut.review.content_profile import (
     apply_content_profile_feedback,
     build_content_profile_cache_fingerprint,
     build_reviewed_transcript_excerpt,
+    build_review_feedback_search_queries,
     build_transcript_excerpt,
     build_cover_title,
     enrich_content_profile,
@@ -1773,6 +1774,192 @@ async def test_apply_content_profile_feedback_prefers_reviewed_subtitle_excerpt(
     assert result["subject_brand"] == "REATE"
     assert result["subject_model"] == "EXO-M"
     assert result["review_mode"] == "manual_confirmed"
+
+
+@pytest.mark.asyncio
+async def test_resolve_content_profile_review_feedback_returns_only_llm_resolved_patch(monkeypatch: pytest.MonkeyPatch):
+    from roughcut.review import content_profile as content_profile_module
+
+    class FakeResponse:
+        def as_json(self):
+            return {
+                "apply_feedback": True,
+                "subject_brand": "傲雷",
+                "subject_model": "",
+                "subject_type": "傲雷司令官2手电筒",
+                "search_queries": ["傲雷 司令官2 Ultra"],
+            }
+
+    class FakeProvider:
+        async def complete(self, *args, **kwargs):
+            return FakeResponse()
+
+    monkeypatch.setattr(content_profile_module, "get_reasoning_provider", lambda: FakeProvider())
+
+    result = await content_profile_module.resolve_content_profile_review_feedback(
+        draft_profile={
+            "subject_brand": "OLIGHT",
+            "subject_model": "SLIM2 Ultra",
+            "subject_type": "EDC手电",
+        },
+        source_name="video.mp4",
+        review_feedback="品牌改成傲雷，型号改成司令官2Ultra。",
+        proposed_feedback={
+            "subject_brand": "傲雷",
+            "subject_model": "司令官2Ultra",
+        },
+        reviewed_subtitle_excerpt="这次主要看 slim2 ultra 和 pro 版本的区别。",
+    )
+
+    assert result == {
+        "subject_brand": "傲雷",
+        "subject_type": "傲雷司令官2手电筒",
+        "keywords": ["傲雷 司令官2 Ultra"],
+    }
+
+
+@pytest.mark.asyncio
+async def test_resolve_content_profile_review_feedback_retries_when_verification_strong_but_first_pass_rejects(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from roughcut.review import content_profile as content_profile_module
+    from roughcut.review.content_understanding_verify import HybridVerificationBundle
+
+    class FakeResponse:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def as_json(self):
+            return dict(self._payload)
+
+    class FakeProvider:
+        def __init__(self):
+            self.calls = 0
+
+        async def complete(self, *args, **kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                return FakeResponse({"apply_feedback": False, "reason": "当前草稿品牌与审核意见不一致"})
+            return FakeResponse(
+                {
+                    "apply_feedback": True,
+                    "subject_brand": "傲雷",
+                    "subject_model": "司令官2Ultra",
+                }
+            )
+
+    provider = FakeProvider()
+    monkeypatch.setattr(content_profile_module, "get_reasoning_provider", lambda: provider)
+
+    result = await content_profile_module.resolve_content_profile_review_feedback(
+        draft_profile={
+            "subject_brand": "耐克",
+            "subject_model": "SK05",
+            "subject_type": "SLIM2代ULTRA版手电筒",
+        },
+        source_name="video.mp4",
+        review_feedback="品牌改成傲雷，型号改成司令官2Ultra。",
+        proposed_feedback={
+            "subject_brand": "傲雷",
+            "subject_model": "司令官2Ultra",
+        },
+        verification_bundle=HybridVerificationBundle(
+            search_queries=["傲雷 司令官2Ultra"],
+            online_results=[
+                {
+                    "title": "OLIGHT傲雷 司令官2 Ultra手电",
+                    "snippet": "旗舰新品 司令官2 Ultra",
+                }
+            ],
+            database_results=[
+                {
+                    "brand": "傲雷",
+                    "model": "司令官2 Ultra",
+                    "primary_subject": "EDC手电",
+                }
+            ],
+        ),
+    )
+
+    assert provider.calls == 2
+    assert result == {
+        "subject_brand": "傲雷",
+        "subject_model": "司令官2Ultra",
+    }
+
+
+@pytest.mark.asyncio
+async def test_resolve_content_profile_review_feedback_repairs_truncated_json_payload(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from roughcut.review import content_profile as content_profile_module
+
+    class FakeResponse:
+        def __init__(self, content: str, payload: dict[str, Any] | None = None):
+            self.content = content
+            self._payload = payload
+
+        def as_json(self):
+            if self._payload is not None:
+                return dict(self._payload)
+            raise json.JSONDecodeError("bad json", self.content, 0)
+
+    class FakeProvider:
+        def __init__(self):
+            self.calls = 0
+
+        async def complete(self, *args, **kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                return FakeResponse('{"apply_feedback": true, "subject_brand": "傲雷"')
+            return FakeResponse(
+                '{"apply_feedback": true, "subject_brand": "傲雷", "subject_model": "司令官2Ultra"}',
+                {
+                    "apply_feedback": True,
+                    "subject_brand": "傲雷",
+                    "subject_model": "司令官2Ultra",
+                },
+            )
+
+    provider = FakeProvider()
+    monkeypatch.setattr(content_profile_module, "get_reasoning_provider", lambda: provider)
+
+    result = await content_profile_module.resolve_content_profile_review_feedback(
+        draft_profile={
+            "subject_brand": "耐克",
+            "subject_model": "SK05",
+            "subject_type": "SLIM2代ULTRA版手电筒",
+        },
+        source_name="video.mp4",
+        review_feedback="品牌改成傲雷，型号改成司令官2Ultra。",
+        proposed_feedback={
+            "subject_brand": "傲雷",
+            "subject_model": "司令官2Ultra",
+        },
+    )
+
+    assert provider.calls == 2
+    assert result == {
+        "subject_brand": "傲雷",
+        "subject_model": "司令官2Ultra",
+    }
+
+
+def test_build_review_feedback_search_queries_expands_brand_model_and_subject_context():
+    queries = build_review_feedback_search_queries(
+        draft_profile={
+            "subject_type": "EDC手电",
+            "search_queries": ["SLIM2 Ultra 手电"],
+        },
+        proposed_feedback={
+            "subject_brand": "傲雷",
+            "subject_model": "司令官2Ultra",
+        },
+    )
+
+    assert "傲雷 司令官2Ultra" in queries
+    assert "傲雷 司令官2Ultra EDC手电" in queries
+    assert "司令官2Ultra EDC手电" in queries
 
 
 @pytest.mark.asyncio
