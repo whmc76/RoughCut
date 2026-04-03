@@ -17,6 +17,45 @@ _RELATION_CUE_TERMS = (
     "品牌",
     "出品",
 )
+_PRODUCT_FOCUS_TERMS = (
+    "包",
+    "背包",
+    "双肩包",
+    "手电",
+    "手电筒",
+    "刀",
+    "刀具",
+    "折刀",
+    "美工刀",
+    "刀刃",
+    "刀身",
+    "工具",
+    "桌布",
+    "收纳",
+    "盒",
+    "改造",
+    "雕刻",
+    "深雕",
+    "电镀",
+    "背负",
+    "开箱",
+    "对比",
+    "版本",
+    "系列",
+)
+_ANNOUNCEMENT_CUE_TERMS = (
+    "宣布",
+    "消息",
+    "推出",
+    "发布",
+    "命名",
+    "叫",
+    "系列",
+    "开发",
+    "开创",
+    "基于",
+    "新",
+)
 _GENERIC_TOKEN_STOPWORDS = {
     "今天",
     "主要",
@@ -204,6 +243,56 @@ def _collect_cue_lines(subtitle_lines: list[str], transcript_excerpt: str) -> li
     return cue_lines
 
 
+def _product_focus_score(text: str) -> int:
+    normalized = _as_text(text)
+    if not normalized:
+        return 0
+    score = _relation_cue_score(normalized)
+    score += sum(2 for term in _PRODUCT_FOCUS_TERMS if term in normalized)
+    score += sum(1 for term in _ANNOUNCEMENT_CUE_TERMS if term in normalized)
+    if any(char.isascii() and char.isalpha() for char in normalized):
+        score += 1
+    if len(normalized) >= 10:
+        score += 1
+    return score
+
+
+def _collect_temporal_focus_lines(subtitle_items: list[dict[str, Any]]) -> tuple[list[str], list[str]]:
+    if not subtitle_items:
+        return [], []
+
+    def _pick(window: list[dict[str, Any]]) -> list[str]:
+        ranked: list[tuple[int, int, str]] = []
+        for index, item in enumerate(window):
+            text = _as_text(item.get("text_final") or item.get("text") or item.get("value"))
+            score = _product_focus_score(text)
+            if score <= 0:
+                continue
+            ranked.append((score, -index, text))
+        ranked.sort(reverse=True)
+        selected = [text for _score, _neg_index, text in ranked[:6]]
+        selected.reverse()
+        deduped: list[str] = []
+        for text in selected:
+            if text not in deduped:
+                deduped.append(text)
+        return deduped
+
+    start_time = float(subtitle_items[0].get("start_time", 0.0) or 0.0)
+    end_time = float(subtitle_items[-1].get("end_time", subtitle_items[-1].get("start_time", 0.0)) or 0.0)
+    duration = max(end_time - start_time, 1.0)
+    opening_cutoff = start_time + duration * 0.55
+    closing_cutoff = start_time + duration * 0.55
+
+    opening_window = [
+        item for item in subtitle_items if float(item.get("start_time", 0.0) or 0.0) <= opening_cutoff
+    ] or subtitle_items[: min(12, len(subtitle_items))]
+    closing_window = [
+        item for item in subtitle_items if float(item.get("start_time", 0.0) or 0.0) >= closing_cutoff
+    ] or subtitle_items[max(0, len(subtitle_items) - 12) :]
+    return _pick(opening_window), _pick(closing_window)
+
+
 def _tokenize_entity_like_text(value: str) -> list[str]:
     normalized = _as_text(value)
     if not normalized:
@@ -320,7 +409,7 @@ def _merge_semantic_fact_inputs(
         value = _as_text(provided.get(key))
         if value:
             merged[key] = value
-    for key in ("subtitle_lines", "cue_lines", "hint_candidates", "entity_like_tokens"):
+    for key in ("subtitle_lines", "cue_lines", "opening_focus_lines", "closing_focus_lines", "hint_candidates", "entity_like_tokens"):
         raw = provided.get(key)
         if isinstance(raw, list):
             values = [str(item).strip() for item in raw if str(item).strip()]
@@ -391,11 +480,14 @@ def normalize_evidence_bundle(bundle: object | None) -> dict[str, Any]:
     subtitle_lines = _collect_subtitle_lines(subtitle_items)
     hint_candidates = _collect_hint_candidates(candidate_hints, visual_hints, visual_semantic_evidence)
     cue_lines = _collect_cue_lines(subtitle_lines, transcript_excerpt)
+    opening_focus_lines, closing_focus_lines = _collect_temporal_focus_lines(subtitle_items)
     relation_hints = _collect_relation_hints(cue_lines, transcript_excerpt)
     computed_semantic_inputs = {
         "source_name": source_name,
         "subtitle_lines": subtitle_lines,
         "cue_lines": cue_lines,
+        "opening_focus_lines": opening_focus_lines,
+        "closing_focus_lines": closing_focus_lines,
         "transcript_text": transcript_excerpt,
         "visible_text": visible_text,
         "hint_candidates": hint_candidates,
@@ -417,6 +509,8 @@ def normalize_evidence_bundle(bundle: object | None) -> dict[str, Any]:
                     "transcript_text": transcript_excerpt,
                     "subtitle_lines": subtitle_lines,
                     "cue_lines": cue_lines,
+                    "opening_focus_lines": opening_focus_lines,
+                    "closing_focus_lines": closing_focus_lines,
                     "relation_hints": relation_hints,
                 }
             ),

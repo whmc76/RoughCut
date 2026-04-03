@@ -15,14 +15,37 @@ _GENERIC_PRODUCT_TYPE_ALIASES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("手电筒", ("手电", "手电筒", "FLASHLIGHT", "TORCH")),
     ("折刀", ("折刀", "FOLDING_KNIFE", "KNIFE", "折到")),
     ("美工刀", ("美工刀", "UTILITY_KNIFE", "BOX_CUTTER")),
+    ("刀具", ("刀", "刀具", "刀刃", "刀身")),
     ("多功能工具", ("多功能工具", "MULTITOOL")),
     ("收纳盒", ("收纳盒", "防水盒", "HARD_CASE", "STORAGE_BOX", "CASE")),
+)
+_GENERIC_ASPECT_ALIASES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("雕刻", ("雕刻", "彩雕", "深雕")),
+    ("改造", ("改造", "组装", "定制")),
+    ("电镀", ("电镀", "阳极", "蚀洗")),
+    ("开合", ("开合",)),
+)
+_ANNOUNCEMENT_CUE_TERMS: tuple[str, ...] = (
+    "宣布",
+    "消息",
+    "发布",
+    "推出",
+    "系列",
+    "开发",
+    "开创",
+    "命名",
+    "桌布",
 )
 _BUILTIN_GLOSSARY_BRAND_MODEL_TERMS: list[dict[str, Any]] = [
     term
     for pack in list_builtin_glossary_packs()
     for term in list(pack.get("terms") or [])
     if isinstance(term, dict) and str(term.get("category") or "").strip().lower().endswith(("_brand", "_model"))
+]
+_BUILTIN_GLOSSARY_BRAND_TERMS: list[dict[str, Any]] = [
+    term
+    for term in _BUILTIN_GLOSSARY_BRAND_MODEL_TERMS
+    if str(term.get("category") or "").strip().lower().endswith("_brand")
 ]
 
 
@@ -45,6 +68,8 @@ async def infer_content_semantic_facts(
         "把功能系统、部件、配件、工艺模块放进 component_candidates；"
         "把背负、做工、材质、结构、续航、亮度、锋利度等评价维度放进 aspect_candidates；"
         "不要把功能系统、部件、工艺过程、服务方或背景物直接当成主产品候选；"
+        "如果 opening_focus_lines 长时间围绕一个具体产品的结构、工艺、改造、上手或使用，而 closing_focus_lines 才简短宣布另一条系列、配套产品或周边，后者更可能是 supporting_product_candidates 或 comparison_subject_candidates；"
+        "closing_focus_lines 中后置出现的新系列、桌布、周边、背景配件，除非整段视频都在围绕它讲，否则不要顶替前半段持续展示的主产品；"
         "只提取证据支持的候选，不要输出最终结论；"
         "优先参考 cue_lines 和 relation_hints 中的命名、归属、联名、型号、系列等关系提示，以及 entity_like_tokens 中的实体样 token；"
         "search_expansions 最多 6 条，可包含中英别名、音译、联名组合、近似实体检索词；"
@@ -198,6 +223,7 @@ async def _repair_semantic_facts(
         "4. 功能系统、部件、结构、手感、材质等仍然只能放在 component_candidates 或 aspect_candidates；"
         "5. search_expansions 应优先生成可用于后续联网搜索和数据库检索的细粒度查询词。"
         "6. comparison_subject_candidates 和 supporting_product_candidates 只能放次要产品，不能覆盖 primary_subject_candidates。"
+        "7. 如果 opening_focus_lines 主要在讲一个具体产品，而 closing_focus_lines 才宣布新系列、桌布、周边或配套产品，优先把前者保持为主产品，后者放进次要产品角色。"
         f"\n首轮事实: {original_facts.__dict__}"
         f"\n证据输入: {_build_facts_repair_evidence_payload(evidence_bundle)}"
     )
@@ -249,6 +275,8 @@ def _build_facts_repair_evidence_payload(evidence_bundle: dict[str, Any]) -> dic
         "semantic_fact_inputs": {
             "source_name": semantic_inputs.get("source_name") or "",
             "cue_lines": list(semantic_inputs.get("cue_lines") or [])[:8],
+            "opening_focus_lines": list(semantic_inputs.get("opening_focus_lines") or [])[:6],
+            "closing_focus_lines": list(semantic_inputs.get("closing_focus_lines") or [])[:6],
             "relation_hints": list(semantic_inputs.get("relation_hints") or [])[:8],
             "entity_like_tokens": list(semantic_inputs.get("entity_like_tokens") or [])[:20],
             "visible_text": semantic_inputs.get("visible_text") or "",
@@ -271,17 +299,32 @@ def _enrich_semantic_facts_from_evidence(
     evidence_bundle: dict[str, Any],
 ) -> ContentSemanticFacts:
     evidence_text = _build_evidence_text_blob(evidence_bundle)
+    candidate_text_blob = " \n ".join(
+        text
+        for text in (
+            *facts.primary_subject_candidates,
+            *facts.supporting_subject_candidates,
+            *facts.comparison_subject_candidates,
+            *facts.supporting_product_candidates,
+            *facts.product_name_candidates,
+            *facts.entity_candidates,
+            *facts.search_expansions,
+        )
+        if str(text or "").strip()
+    )
+    evidence_with_candidates = " \n ".join(part for part in (evidence_text, candidate_text_blob) if part)
     brand_candidates = list(facts.brand_candidates)
     model_candidates = list(facts.model_candidates)
     product_name_candidates = list(facts.product_name_candidates)
     product_type_candidates = list(facts.product_type_candidates)
+    aspect_candidates = list(facts.aspect_candidates)
     primary_subject_candidates = list(facts.primary_subject_candidates)
     search_expansions = list(facts.search_expansions)
 
     for term in _BUILTIN_GLOSSARY_BRAND_MODEL_TERMS:
         category = str(term.get("category") or "").strip().lower()
         correct_form = str(term.get("correct_form") or "").strip()
-        if not correct_form or not _evidence_contains_term(evidence_text, correct_form, wrong_forms=term.get("wrong_forms") or []):
+        if not correct_form or not _evidence_contains_term(evidence_with_candidates, correct_form, wrong_forms=term.get("wrong_forms") or []):
             continue
         if category.endswith("_brand") and correct_form not in brand_candidates:
             brand_candidates.append(correct_form)
@@ -297,12 +340,26 @@ def _enrich_semantic_facts_from_evidence(
         if canonical not in product_type_candidates:
             product_type_candidates.append(canonical)
 
+    for canonical, aliases in _GENERIC_ASPECT_ALIASES:
+        if not _evidence_contains_any_alias(evidence_text, aliases):
+            continue
+        if canonical not in aspect_candidates:
+            aspect_candidates.append(canonical)
+
     preferred_primary = _prefer_primary_subject_candidates(
         primary_subject_candidates=primary_subject_candidates,
-        component_candidates=[*facts.component_candidates, *facts.aspect_candidates],
+        component_candidates=[*facts.component_candidates, *aspect_candidates],
         product_name_candidates=product_name_candidates,
         product_type_candidates=product_type_candidates,
     )
+    temporal_primary_candidate = _build_temporal_primary_candidate(
+        evidence_bundle=evidence_bundle,
+        primary_subject_candidates=preferred_primary,
+        brand_candidates=brand_candidates,
+        product_type_candidates=product_type_candidates,
+    )
+    if temporal_primary_candidate and temporal_primary_candidate not in preferred_primary:
+        preferred_primary.insert(0, temporal_primary_candidate)
     if not preferred_primary:
         preferred_primary = list(primary_subject_candidates)
 
@@ -321,7 +378,7 @@ def _enrich_semantic_facts_from_evidence(
         comparison_subject_candidates=list(facts.comparison_subject_candidates),
         supporting_product_candidates=list(facts.supporting_product_candidates),
         component_candidates=list(facts.component_candidates),
-        aspect_candidates=list(facts.aspect_candidates),
+        aspect_candidates=aspect_candidates,
         brand_candidates=brand_candidates,
         model_candidates=model_candidates,
         product_name_candidates=product_name_candidates,
@@ -344,6 +401,8 @@ def _build_evidence_text_blob(evidence_bundle: dict[str, Any]) -> str:
         semantic_inputs.get("transcript_text"),
         semantic_inputs.get("visible_text"),
         *(semantic_inputs.get("cue_lines") or []),
+        *(semantic_inputs.get("opening_focus_lines") or []),
+        *(semantic_inputs.get("closing_focus_lines") or []),
         *(semantic_inputs.get("hint_candidates") or []),
         *(semantic_inputs.get("entity_like_tokens") or []),
         *(visual_semantic_evidence.get("object_categories") or []),
@@ -355,6 +414,116 @@ def _build_evidence_text_blob(evidence_bundle: dict[str, Any]) -> str:
         if text:
             tokens.append(text)
     return " \n ".join(tokens)
+
+
+def _build_temporal_primary_candidate(
+    *,
+    evidence_bundle: dict[str, Any],
+    primary_subject_candidates: list[str],
+    brand_candidates: list[str],
+    product_type_candidates: list[str],
+) -> str:
+    semantic_inputs = evidence_bundle.get("semantic_fact_inputs") if isinstance(evidence_bundle, dict) else {}
+    semantic_inputs = semantic_inputs if isinstance(semantic_inputs, dict) else {}
+    opening_focus_lines = [str(item).strip() for item in (semantic_inputs.get("opening_focus_lines") or []) if str(item).strip()]
+    closing_focus_lines = [str(item).strip() for item in (semantic_inputs.get("closing_focus_lines") or []) if str(item).strip()]
+    if not opening_focus_lines:
+        return ""
+
+    opening_text = " ".join(opening_focus_lines)
+    closing_text = " ".join(closing_focus_lines)
+    dominant_type = _dominant_product_type_from_text(opening_text, product_type_candidates)
+    if not dominant_type:
+        return ""
+
+    if primary_subject_candidates:
+        primary_supported_by_opening = any(
+            _candidate_supported_by_opening_text(candidate, opening_text, dominant_type)
+            for candidate in primary_subject_candidates[:2]
+        )
+        if primary_supported_by_opening:
+            brand = _pick_brand_from_text(opening_text, brand_candidates)
+            if brand and any(str(candidate or "").strip() == dominant_type for candidate in primary_subject_candidates[:2]):
+                return f"{brand}{dominant_type}"
+            return ""
+
+    if closing_text and not any(term in closing_text for term in _ANNOUNCEMENT_CUE_TERMS):
+        return ""
+
+    brand = _pick_brand_from_text(opening_text, brand_candidates)
+    if brand and dominant_type not in brand:
+        return f"{brand}{dominant_type}"
+    return dominant_type
+
+
+def _dominant_product_type_from_text(text: str, product_type_candidates: list[str]) -> str:
+    if not text:
+        return ""
+    preferred = [str(item).strip() for item in product_type_candidates if str(item).strip()]
+    scored: list[tuple[int, str]] = []
+    for canonical, aliases in _GENERIC_PRODUCT_TYPE_ALIASES:
+        hits = sum(1 for alias in aliases if _evidence_contains_any_alias(text, (alias,)))
+        if not hits:
+            continue
+        score = hits * 2
+        if canonical in preferred:
+            score += 3
+        scored.append((score, canonical))
+    scored.sort(reverse=True)
+    return scored[0][1] if scored else ""
+
+
+def _candidate_supported_by_opening_text(candidate: str, opening_text: str, dominant_type: str) -> bool:
+    text = str(candidate or "").strip()
+    if not text:
+        return False
+    if text in opening_text:
+        return True
+    if dominant_type and dominant_type in text:
+        return True
+    return False
+
+
+def _pick_brand_from_text(text: str, brand_candidates: list[str]) -> str:
+    scored: dict[str, int] = {}
+    for raw in brand_candidates:
+        candidate = str(raw or "").strip()
+        if not candidate:
+            continue
+        canonical, aliases = _canonicalize_brand_candidate(candidate)
+        if not _evidence_contains_any_alias(text, aliases):
+            continue
+        score = 2 if candidate == canonical else 1
+        if canonical.isascii():
+            score += 1
+        scored[canonical] = max(scored.get(canonical, 0), score)
+    if scored:
+        return sorted(scored.items(), key=lambda item: (item[1], len(item[0])), reverse=True)[0][0]
+
+    for raw in brand_candidates:
+        candidate = str(raw or "").strip()
+        if not candidate:
+            continue
+        canonical, _aliases = _canonicalize_brand_candidate(candidate)
+        if canonical:
+            return canonical
+    return ""
+
+
+def _canonicalize_brand_candidate(candidate: str) -> tuple[str, tuple[str, ...]]:
+    normalized = str(candidate or "").strip()
+    if not normalized:
+        return "", tuple()
+    for term in _BUILTIN_GLOSSARY_BRAND_TERMS:
+        correct_form = str(term.get("correct_form") or "").strip()
+        aliases = tuple(
+            item
+            for item in [correct_form, *[str(raw or "").strip() for raw in (term.get("wrong_forms") or [])]]
+            if item
+        )
+        if normalized == correct_form or normalized in aliases:
+            return correct_form, aliases
+    return normalized, (normalized,)
 
 
 def _evidence_contains_term(text_blob: str, correct_form: str, *, wrong_forms: list[Any]) -> bool:

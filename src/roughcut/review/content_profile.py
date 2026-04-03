@@ -48,8 +48,8 @@ from roughcut.speech.postprocess import (
     normalize_display_text,
 )
 
-_CONTENT_PROFILE_INFER_CACHE_VERSION = "2026-04-03.infer.v20"
-_CONTENT_PROFILE_ENRICH_CACHE_VERSION = "2026-04-03.enrich.v20"
+_CONTENT_PROFILE_INFER_CACHE_VERSION = "2026-04-03.infer.v29"
+_CONTENT_PROFILE_ENRICH_CACHE_VERSION = "2026-04-03.enrich.v29"
 _INGESTIBLE_PRODUCT_SIGNALS = (
     "luckykiss",
     "kisspod",
@@ -3534,6 +3534,7 @@ def _transcript_signal_score(item: dict[str, Any]) -> int:
 _BRAND_ALIAS_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("LEATHERMAN", re.compile(r"(LEATHERMAN|莱[泽着]曼|来[自自泽着]慢|来[自泽着]曼|雷[泽着]曼)", re.IGNORECASE)),
     ("REATE", re.compile(r"(REATE|锐特|瑞特|睿特)", re.IGNORECASE)),
+    ("OLIGHT", re.compile(r"(OLIGHT|O\s*LIGHT|傲雷|奥雷)", re.IGNORECASE)),
     ("Loop露普", re.compile(r"(LOOP|露普|陆虎|路普|鲁普)", re.IGNORECASE)),
     ("狐蝠工业", re.compile(r"(FOXBAT|狐蝠工业|狐蝠)", re.IGNORECASE)),
 ]
@@ -3586,6 +3587,9 @@ _MODEL_TO_BRAND: dict[str, str] = {
     "SK05二代 UV版": "Loop露普",
     "SK05UV版": "Loop露普",
     "SK05 UV版": "Loop露普",
+    "SLIM2代ULTRA版本": "OLIGHT",
+    "SLIM2 ULTRA": "OLIGHT",
+    "司令官2Ultra": "OLIGHT",
 }
 
 
@@ -3944,7 +3948,7 @@ def _seed_profile_from_text(
         subject_type = "多功能工具钳"
     elif brand == "REATE" or any(keyword in transcript for keyword in knife_keywords):
         subject_type = "EDC折刀"
-    elif brand == "Loop露普" or model.startswith("SK05") or any(keyword in canon.upper() for keyword in flashlight_keywords):
+    elif brand in {"Loop露普", "OLIGHT"} or model.startswith(("SK05", "SLIM2", "司令官2")) or any(keyword in canon.upper() for keyword in flashlight_keywords):
         subject_type = "EDC手电"
     elif brand == "狐蝠工业" or model.startswith("FXX1") or any(keyword in transcript for keyword in bag_keywords):
         subject_type = "EDC机能包"
@@ -4025,16 +4029,27 @@ def _canonicalize_spoken_identity_text(text: str) -> str:
 
 def _extract_edc_flashlight_model(text: str) -> str:
     normalized = _canonicalize_spoken_identity_text(text)
-    if "SK05" not in normalized:
-        return ""
-    suffixes: list[str] = ["SK05"]
-    if "2代" in normalized or "二代" in text or "II" in normalized:
-        suffixes.append("二代")
-    if "PRO" in normalized:
-        suffixes.append("Pro")
-    if "UV" in normalized:
-        suffixes.append("UV版")
-    return " ".join(suffixes[:1]).replace(" ", "") if len(suffixes) == 1 else f"{suffixes[0]}{''.join(suffixes[1:])}"
+    if "SK05" in normalized:
+        suffixes: list[str] = ["SK05"]
+        if "2代" in normalized or "二代" in text or "II" in normalized:
+            suffixes.append("二代")
+        if "PRO" in normalized:
+            suffixes.append("Pro")
+        if "UV" in normalized:
+            suffixes.append("UV版")
+        return " ".join(suffixes[:1]).replace(" ", "") if len(suffixes) == 1 else f"{suffixes[0]}{''.join(suffixes[1:])}"
+
+    if "SLIM2" in normalized:
+        if "ULTRA" in normalized:
+            return "SLIM2代ULTRA版本"
+        if "PRO" in normalized:
+            return "SLIM2 PRO"
+        return "SLIM2"
+
+    if "司令官2" in str(text or "") and "ULTRA" in normalized:
+        return "司令官2Ultra"
+
+    return ""
 
 
 def _has_supported_product_model_hint(

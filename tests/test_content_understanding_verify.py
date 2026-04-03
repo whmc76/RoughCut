@@ -549,6 +549,136 @@ async def test_verify_content_understanding_does_not_promote_component_biased_re
 
 
 @pytest.mark.asyncio
+async def test_verify_content_understanding_does_not_promote_product_plus_component_compound_resolved_primary_subject():
+    understanding = ContentUnderstanding(
+        video_type="product_review",
+        content_domain="bags",
+        primary_subject="徒步背包",
+        semantic_facts=ContentSemanticFacts(
+            primary_subject_candidates=["徒步背包", "徒步背包背负系统"],
+            component_candidates=["背负系统", "肩带系统"],
+            product_type_candidates=["双肩包"],
+        ),
+        subject_entities=[SubjectEntity(kind="product", name="徒步背包")],
+        observed_entities=[SubjectEntity(kind="product", name="徒步背包"), SubjectEntity(kind="component", name="背负系统")],
+        video_theme="徒步背包背负系统功能演示",
+        summary="视频围绕徒步背包展开，并重点展示背负系统。",
+        hook_line="背负系统细看",
+        engagement_question="你更在意背负还是容量？",
+        search_queries=["徒步背包 背负系统"],
+        confidence={"overall": 0.8},
+        needs_review=True,
+    )
+
+    result = await verify_content_understanding(
+        understanding=understanding,
+        evidence_bundle={"transcript_excerpt": "这期主要看这个徒步背包和它的背负系统"},
+        verification_bundle=HybridVerificationBundle(
+            search_queries=["徒步背包 背负系统"],
+            online_results=[{"title": "徒步背包背负系统调节指南"}],
+            database_results=[{"primary_subject": "徒步背包"}],
+        ),
+        provider=FakeProvider(
+            {
+                "video_type": "product_review",
+                "content_domain": "bags",
+                "primary_subject": "徒步背包",
+                "subject_entities": [{"kind": "product", "name": "徒步背包"}],
+                "observed_entities": [{"kind": "product", "name": "徒步背包"}, {"kind": "component", "name": "背负系统"}],
+                "resolved_entities": [
+                    {"kind": "产品类别", "name": "徒步背包"},
+                    {"kind": "功能系统", "name": "背负系统"},
+                ],
+                "resolved_primary_subject": "徒步背包背负系统",
+                "entity_resolution_map": [
+                    {
+                        "observed_name": "徒步背包",
+                        "resolved_name": "徒步背包背负系统",
+                        "confidence": 0.82,
+                        "reason": "检索结果频繁提到背负系统",
+                    }
+                ],
+                "video_theme": "徒步背包背负系统功能演示",
+                "summary": "视频围绕徒步背包展开，并重点展示背负系统。",
+                "hook_line": "背负系统细看",
+                "engagement_question": "你更在意背负还是容量？",
+                "search_queries": ["徒步背包 背负系统"],
+                "evidence_spans": [],
+                "uncertainties": [],
+                "confidence": {"overall": 0.8, "resolution": 0.82},
+                "needs_review": True,
+                "review_reasons": [],
+            }
+        ),
+    )
+
+    assert result.primary_subject == "徒步背包"
+    assert result.resolved_primary_subject == ""
+
+
+@pytest.mark.asyncio
+async def test_verify_content_understanding_falls_back_to_clean_resolved_product_when_base_primary_is_component_biased():
+    understanding = ContentUnderstanding(
+        video_type="product_review",
+        content_domain="bags",
+        primary_subject="户外徒步背包背负系统",
+        semantic_facts=ContentSemanticFacts(
+            primary_subject_candidates=["户外徒步背包背负系统"],
+            component_candidates=["背负系统", "肩带系统"],
+            product_type_candidates=["双肩包"],
+        ),
+        subject_entities=[SubjectEntity(kind="product", name="户外徒步背包背负系统")],
+        observed_entities=[SubjectEntity(kind="component", name="背负系统")],
+        video_theme="户外背包背负系统调节功能展示",
+        summary="视频围绕背负系统展开。",
+        hook_line="背负系统细看",
+        engagement_question="你更在意背负还是容量？",
+        search_queries=["户外徒步背包 背负系统"],
+        confidence={"overall": 0.76},
+        needs_review=True,
+    )
+
+    result = await verify_content_understanding(
+        understanding=understanding,
+        evidence_bundle={"transcript_excerpt": "这期主要看这个户外徒步背包和它的背负系统"},
+        verification_bundle=HybridVerificationBundle(
+            search_queries=["户外徒步背包 背负系统"],
+            online_results=[{"title": "户外徒步背包背负系统调节指南"}],
+            database_results=[],
+        ),
+        provider=FakeProvider(
+            {
+                "video_type": "product_review",
+                "content_domain": "bags",
+                "primary_subject": "户外徒步背包背负系统",
+                "subject_entities": [{"kind": "product", "name": "户外徒步背包背负系统"}],
+                "observed_entities": [{"kind": "component", "name": "背负系统"}],
+                "resolved_entities": [
+                    {"kind": "product", "name": "户外徒步背包"},
+                    {"kind": "功能系统", "name": "高身位背负系统"},
+                ],
+                "resolved_primary_subject": "户外徒步背包背负系统",
+                "entity_resolution_map": [],
+                "video_theme": "户外背包背负系统调节功能展示",
+                "summary": "视频围绕背负系统展开。",
+                "hook_line": "背负系统细看",
+                "engagement_question": "你更在意背负还是容量？",
+                "search_queries": ["户外徒步背包 背负系统"],
+                "evidence_spans": [],
+                "uncertainties": [],
+                "confidence": {"overall": 0.76, "resolution": 0.82},
+                "needs_review": True,
+                "review_reasons": [],
+            }
+        ),
+    )
+
+    assert result.primary_subject == "户外徒步背包"
+    assert result.subject_entities[0].name == "户外徒步背包"
+    assert result.resolved_primary_subject == ""
+
+
+@pytest.mark.asyncio
 async def test_verify_content_understanding_does_not_promote_secondary_product_biased_resolved_primary_subject():
     understanding = ContentUnderstanding(
         video_type="product_review",

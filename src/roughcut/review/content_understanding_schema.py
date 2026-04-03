@@ -253,6 +253,27 @@ def _preferred_subject_entities(value: ContentUnderstanding) -> list[SubjectEnti
     return list(value.resolved_entities or value.subject_entities or value.observed_entities)
 
 
+def _normalize_compact(value: str) -> str:
+    return "".join(str(value or "").upper().split())
+
+
+def _compose_legacy_subject_type(*, subject_type: str, subject_brand: str, subject_model: str) -> str:
+    candidate = _normalize_understanding_value(subject_type)
+    brand = _normalize_understanding_value(subject_brand)
+    model = _normalize_understanding_value(subject_model)
+    if not candidate or not brand:
+        return candidate
+
+    normalized_candidate = _normalize_compact(candidate)
+    normalized_brand = _normalize_compact(brand)
+    normalized_model = _normalize_compact(model)
+    if normalized_brand and normalized_brand in normalized_candidate:
+        return candidate
+    if normalized_model and normalized_model in normalized_candidate:
+        return f"{brand} {candidate}".strip()
+    return candidate
+
+
 def map_content_understanding_to_legacy_profile(value: ContentUnderstanding) -> dict[str, Any]:
     subject_brand = ""
     subject_model = ""
@@ -267,10 +288,14 @@ def map_content_understanding_to_legacy_profile(value: ContentUnderstanding) -> 
             break
     content_kind = _normalize_understanding_value(value.video_type)
     subject_domain = _normalize_understanding_value(value.content_domain)
-    subject_type = _normalize_understanding_value(
+    subject_type = _compose_legacy_subject_type(
+        subject_type=_normalize_understanding_value(
         value.resolved_primary_subject
         or value.primary_subject
         or (preferred_entities[0].name if preferred_entities else "")
+        ),
+        subject_brand=subject_brand,
+        subject_model=subject_model,
     )
     video_theme = _normalize_understanding_value(value.video_theme)
     return {

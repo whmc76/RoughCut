@@ -251,6 +251,30 @@ def test_build_evidence_bundle_collects_relation_hints_and_skips_placeholder_hin
     assert any(item["relation"] == "ownership" for item in semantic_inputs["relation_hints"])
 
 
+def test_build_evidence_bundle_preserves_opening_and_closing_focus_lines_for_multi_product_videos():
+    bundle = build_evidence_bundle(
+        source_name="knife_multi_subject.mp4",
+        subtitle_items=[
+            {"text_final": "现在这把已经组装完成了", "start_time": 8.0, "end_time": 10.0},
+            {"text_final": "把这个雕刻就衬得更亮", "start_time": 72.0, "end_time": 74.0},
+            {"text_final": "刀刃没有做出改变其实还是保留了一定实用性", "start_time": 122.0, "end_time": 126.0},
+            {"text_final": "日常的工具因为瑞特的拆卸工具这点还是没问题的", "start_time": 200.0, "end_time": 203.0},
+            {"text_final": "结尾我还要宣布一个重要的消息", "start_time": 216.0, "end_time": 218.0},
+            {"text_final": "大家看我们这次使用的这个桌布啊", "start_time": 222.0, "end_time": 224.0},
+            {"text_final": "桌面EDC 然后单独去开创一个系列", "start_time": 238.0, "end_time": 241.0},
+            {"text_final": "我们就把它命名为EDC桌布吧", "start_time": 363.0, "end_time": 368.0},
+        ],
+        transcript_excerpt="前半段在讲刀具的雕刻和实用性，后半段宣布 EDC 桌布新系列。",
+    )
+
+    semantic_inputs = bundle["semantic_fact_inputs"]
+
+    assert "现在这把已经组装完成了" in semantic_inputs["opening_focus_lines"]
+    assert "刀刃没有做出改变其实还是保留了一定实用性" in semantic_inputs["opening_focus_lines"]
+    assert "结尾我还要宣布一个重要的消息" in semantic_inputs["closing_focus_lines"]
+    assert "我们就把它命名为EDC桌布吧" in semantic_inputs["closing_focus_lines"]
+
+
 def test_build_content_understanding_orchestration_context_rejects_invalid_or_nested_context_input():
     from roughcut.review.content_understanding_orchestrator import build_content_understanding_orchestration_context
 

@@ -315,8 +315,11 @@ async def collect_sample_report(job_id: str, sample: dict[str, Any], elapsed_sec
                 None,
                 [
                     str(data.get("content_subject") or ""),
+                    str(data.get("subject_brand") or ""),
+                    str(data.get("subject_model") or ""),
                     str(data.get("subject_type") or ""),
                     str(data.get("video_theme") or ""),
+                    str(understanding.get("primary_subject") or ""),
                     str(understanding.get("resolved_primary_subject") or ""),
                     json.dumps(understanding.get("observed_entities") or [], ensure_ascii=False),
                     json.dumps(understanding.get("resolved_entities") or [], ensure_ascii=False),

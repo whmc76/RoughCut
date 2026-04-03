@@ -368,6 +368,8 @@ async def test_infer_content_semantic_facts_prompt_prioritizes_primary_sellable_
     assert "把功能系统、部件、配件、工艺模块放进 component_candidates" in prompts[0]
     assert "把背负、做工、材质、结构、续航、亮度、锋利度等评价维度放进 aspect_candidates" in prompts[0]
     assert "不要把功能系统、部件、工艺过程、服务方或背景物直接当成主产品候选" in prompts[0]
+    assert "opening_focus_lines" in prompts[0]
+    assert "closing_focus_lines" in prompts[0]
 
 
 @pytest.mark.asyncio
@@ -567,6 +569,111 @@ async def test_infer_content_semantic_facts_enriches_empty_payload_with_visual_p
 
 
 @pytest.mark.asyncio
+async def test_infer_content_semantic_facts_uses_opening_focus_to_keep_primary_product_ahead_of_closing_series_announcement():
+    from roughcut.review.content_understanding_facts import infer_content_semantic_facts
+
+    class FakeResponse:
+        def __init__(self, payload):
+            self.payload = payload
+            self.content = json.dumps(payload, ensure_ascii=False)
+
+        def as_json(self):
+            return self.payload
+
+    class FakeProvider:
+        async def complete(self, *args, **kwargs):
+            return FakeResponse(
+                {
+                    "primary_subject_candidates": ["桌面EDC"],
+                    "supporting_subject_candidates": [],
+                    "comparison_subject_candidates": [],
+                    "supporting_product_candidates": ["EDC桌布"],
+                    "component_candidates": [],
+                    "aspect_candidates": [],
+                    "brand_candidates": ["FS", "瑞特", "REATE"],
+                    "model_candidates": [],
+                    "product_name_candidates": [],
+                    "product_type_candidates": [],
+                    "entity_candidates": [],
+                    "collaboration_pairs": [],
+                    "search_expansions": [],
+                    "evidence_sentences": [],
+                }
+            )
+
+    result = await infer_content_semantic_facts(
+        FakeProvider(),
+        {
+            "semantic_fact_inputs": {
+                "source_name": "reate_knife.mp4",
+                "cue_lines": ["现在这把已经组装完成了", "我们就把它命名为EDC桌布吧"],
+                "opening_focus_lines": ["现在这把已经组装完成了", "刀刃没有做出改变其实还是保留了一定实用性", "日常的工具因为瑞特的拆卸工具这点还是没问题的"],
+                "closing_focus_lines": ["结尾我还要宣布一个重要的消息", "大家看我们这次使用的这个桌布啊", "我们就把它命名为EDC桌布吧"],
+                "entity_like_tokens": ["瑞特", "刀", "刀刃", "桌布", "REATE"],
+                "relation_hints": [{"relation": "naming", "value": "EDC桌布", "text": "我们就把它命名为EDC桌布吧"}],
+                "transcript_text": "前半段在讲这把刀的雕刻和刀刃，后半段宣布 EDC 桌布新系列。",
+            }
+        },
+    )
+
+    assert result.primary_subject_candidates[0] == "REATE刀具"
+    assert "刀具" in result.product_type_candidates
+    assert "雕刻" in result.aspect_candidates
+
+
+@pytest.mark.asyncio
+async def test_infer_content_semantic_facts_enriches_brand_and_product_type_from_opening_focus_lines_when_llm_returns_empty():
+    from roughcut.review.content_understanding_facts import infer_content_semantic_facts
+
+    class FakeResponse:
+        def __init__(self, payload):
+            self.payload = payload
+            self.content = json.dumps(payload, ensure_ascii=False)
+
+        def as_json(self):
+            return self.payload
+
+    class FakeProvider:
+        async def complete(self, *args, **kwargs):
+            return FakeResponse(
+                {
+                    "primary_subject_candidates": [],
+                    "supporting_subject_candidates": [],
+                    "comparison_subject_candidates": [],
+                    "supporting_product_candidates": [],
+                    "component_candidates": [],
+                    "aspect_candidates": [],
+                    "brand_candidates": [],
+                    "model_candidates": [],
+                    "product_name_candidates": [],
+                    "product_type_candidates": [],
+                    "entity_candidates": [],
+                    "collaboration_pairs": [],
+                    "search_expansions": [],
+                    "evidence_sentences": [],
+                }
+            )
+
+    result = await infer_content_semantic_facts(
+        FakeProvider(),
+        {
+            "semantic_fact_inputs": {
+                "source_name": "reate_focus.mp4",
+                "cue_lines": ["结尾我还要宣布一个重要的消息"],
+                "opening_focus_lines": ["刀刃没有做出改变其实还是保留了一定实用性", "日常的工具因为瑞特的拆卸工具这点还是没问题的", "把这个雕刻就衬得更亮"],
+                "closing_focus_lines": ["大家看我们这次使用的这个桌布啊", "我们就把它命名为EDC桌布吧"],
+                "entity_like_tokens": ["瑞特", "刀", "刀刃", "桌布"],
+            }
+        },
+    )
+
+    assert "REATE" in result.brand_candidates
+    assert "刀具" in result.product_type_candidates
+    assert "雕刻" in result.aspect_candidates
+    assert result.primary_subject_candidates[0] == "REATE刀具"
+
+
+@pytest.mark.asyncio
 async def test_infer_content_understanding_repairs_malformed_json_response(monkeypatch: pytest.MonkeyPatch):
     from roughcut.review import content_understanding_infer as infer_mod
 
@@ -625,7 +732,8 @@ async def test_infer_content_understanding_repairs_malformed_json_response(monke
     assert result.video_type == "unboxing_review"
     assert result.content_domain == "bags"
     assert result.primary_subject == "机能双肩包"
-    assert result.subject_entities[0].name == "赫斯郡"
+    assert result.subject_entities[0].name == "机能双肩包"
+    assert any(entity.name == "赫斯郡" for entity in result.subject_entities)
     assert result.confidence == {"overall": 0.78}
 
 
@@ -1192,6 +1300,37 @@ def test_normalize_understanding_subject_roles_strips_secondary_product_from_pri
     assert normalized.subject_entities[-1].name == "EDC桌布"
 
 
+def test_normalize_understanding_subject_roles_strips_component_phrase_from_primary_subject_label():
+    from roughcut.review.content_understanding_infer import _normalize_understanding_subject_roles
+    from roughcut.review.content_understanding_schema import ContentSemanticFacts, ContentUnderstanding, SubjectEntity
+
+    normalized = _normalize_understanding_subject_roles(
+        ContentUnderstanding(
+            video_type="product_review",
+            content_domain="bags",
+            primary_subject="徒步背包背负系统",
+            semantic_facts=ContentSemanticFacts(),
+            subject_entities=[SubjectEntity(kind="product", name="徒步背包背负系统")],
+            observed_entities=[SubjectEntity(kind="component", name="背负系统")],
+            video_theme="徒步背包背负系统功能演示",
+            summary="视频围绕徒步背包的背负系统展开。",
+            hook_line="背负系统细看",
+            engagement_question="你更在意背负还是容量？",
+            search_queries=["徒步背包 背负系统"],
+            needs_review=True,
+        ),
+        ContentSemanticFacts(
+            primary_subject_candidates=["徒步背包", "徒步背包背负系统"],
+            component_candidates=["背负系统", "肩带系统"],
+            aspect_candidates=["背负调节"],
+            product_type_candidates=["双肩包"],
+        ),
+    )
+
+    assert normalized.primary_subject == "徒步背包"
+    assert normalized.subject_entities[0].name == "徒步背包"
+
+
 def test_build_compact_evidence_payload_preserves_subject_role_candidates():
     from roughcut.review.content_understanding_infer import _build_compact_evidence_payload
     from roughcut.review.content_understanding_schema import ContentSemanticFacts
@@ -1212,6 +1351,24 @@ def test_build_compact_evidence_payload_preserves_subject_role_candidates():
     assert payload["semantic_fact_inputs"]["cue_lines"] == ["重点看这个包和它的背负系统"]
     assert facts.primary_subject_candidates == ["机能双肩包"]
     assert facts.component_candidates == ["背负系统"]
+
+
+def test_build_compact_evidence_payload_preserves_opening_and_closing_focus_lines():
+    from roughcut.review.content_understanding_infer import _build_compact_evidence_payload
+
+    payload = _build_compact_evidence_payload(
+        {
+            "source_name": "demo.mp4",
+            "semantic_fact_inputs": {
+                "cue_lines": ["前半段看这把刀", "后半段宣布 EDC 桌布"],
+                "opening_focus_lines": ["前半段看这把刀", "看雕刻和刀刃"],
+                "closing_focus_lines": ["后半段宣布 EDC 桌布", "命名为 EDC 桌布"],
+            },
+        }
+    )
+
+    assert payload["semantic_fact_inputs"]["opening_focus_lines"] == ["前半段看这把刀", "看雕刻和刀刃"]
+    assert payload["semantic_fact_inputs"]["closing_focus_lines"] == ["后半段宣布 EDC 桌布", "命名为 EDC 桌布"]
 
 
 def test_backfill_semantic_facts_from_understanding_recovers_primary_and_comparison_roles():
@@ -1243,3 +1400,99 @@ def test_backfill_semantic_facts_from_understanding_recovers_primary_and_compari
     assert "傲雷" in facts.brand_candidates
     assert "SLIM2 ULTRA" in facts.model_candidates
     assert "EDC23手电筒" in facts.comparison_subject_candidates
+
+
+@pytest.mark.asyncio
+async def test_infer_content_semantic_facts_enriches_flashlight_brand_from_asr_alias_olei():
+    from roughcut.review.content_understanding_facts import infer_content_semantic_facts
+
+    class FakeResponse:
+        def __init__(self, payload):
+            self.payload = payload
+            self.content = json.dumps(payload, ensure_ascii=False)
+
+        def as_json(self):
+            return self.payload
+
+    class FakeProvider:
+        async def complete(self, *args, **kwargs):
+            return FakeResponse(
+                {
+                    "primary_subject_candidates": [],
+                    "supporting_subject_candidates": [],
+                    "comparison_subject_candidates": [],
+                    "supporting_product_candidates": [],
+                    "component_candidates": [],
+                    "aspect_candidates": [],
+                    "brand_candidates": [],
+                    "model_candidates": [],
+                    "product_name_candidates": [],
+                    "product_type_candidates": ["手电筒"],
+                    "entity_candidates": [],
+                    "collaboration_pairs": [],
+                    "search_expansions": [],
+                    "evidence_sentences": [],
+                }
+            )
+
+    result = await infer_content_semantic_facts(
+        FakeProvider(),
+        {
+            "semantic_fact_inputs": {
+                "source_name": "flashlight.mp4",
+                "transcript_text": "今天聊奥雷 slim2 代的 ultra 版本",
+                "cue_lines": ["今天聊奥雷 slim2 代的 ultra 版本"],
+                "entity_like_tokens": ["奥雷", "SLIM2", "ULTRA", "手电"],
+                "visible_text": "",
+            }
+        },
+    )
+
+    assert "OLIGHT" in result.brand_candidates
+
+
+@pytest.mark.asyncio
+async def test_infer_content_semantic_facts_enriches_flashlight_brand_from_primary_subject_candidate_text():
+    from roughcut.review.content_understanding_facts import infer_content_semantic_facts
+
+    class FakeResponse:
+        def __init__(self, payload):
+            self.payload = payload
+            self.content = json.dumps(payload, ensure_ascii=False)
+
+        def as_json(self):
+            return self.payload
+
+    class FakeProvider:
+        async def complete(self, *args, **kwargs):
+            return FakeResponse(
+                {
+                    "primary_subject_candidates": ["奥雷SLIM2代ULTRA版手电筒"],
+                    "supporting_subject_candidates": ["PRO版"],
+                    "comparison_subject_candidates": ["EDC23"],
+                    "supporting_product_candidates": [],
+                    "component_candidates": [],
+                    "aspect_candidates": [],
+                    "brand_candidates": [],
+                    "model_candidates": [],
+                    "product_name_candidates": [],
+                    "product_type_candidates": ["手电筒"],
+                    "entity_candidates": [],
+                    "collaboration_pairs": [],
+                    "search_expansions": ["奥雷SLIM2代ULTRA版手电筒"],
+                    "evidence_sentences": [],
+                }
+            )
+
+    result = await infer_content_semantic_facts(
+        FakeProvider(),
+        {
+            "semantic_fact_inputs": {
+                "source_name": "flashlight.mp4",
+                "cue_lines": ["今天主要看 slim2 代 ultra 版本"],
+                "entity_like_tokens": ["SLIM2", "ULTRA", "手电"],
+            }
+        },
+    )
+
+    assert "OLIGHT" in result.brand_candidates

@@ -86,7 +86,7 @@ def test_build_content_profile_cache_fingerprint_uses_infer_version_without_seed
         copy_style="attention_grabbing",
     )
 
-    assert fingerprint["version"].startswith("2026-04-03.infer.v20")
+    assert fingerprint["version"].startswith("2026-04-03.infer.v29")
     assert fingerprint["seeded_profile_sha256"] == ""
 
 
@@ -249,6 +249,18 @@ def test_seed_profile_from_text_extracts_flashlight_brand_and_model():
     assert seeded["subject_type_candidates"] == ["EDC手电"]
     assert seeded["video_theme_candidates"] == ["Loop露普SK05二代ProUV版开箱与一代对比评测"]
     assert any("SK05" in item for item in seeded["search_queries"])
+
+
+def test_seed_profile_from_text_extracts_olight_slim2_ultra_identity():
+    seeded = _seed_profile_from_text(
+        "今天想说到一个新的手机筒，是奥雷SLIM2代的ULTRA版本。"
+        "本来我是想买那个PRO版的，但最后还是选了ULTRA。"
+    )
+
+    assert seeded["subject_brand"] == "OLIGHT"
+    assert seeded["subject_model"] == "SLIM2代ULTRA版本"
+    assert seeded["subject_type_candidates"] == ["EDC手电"]
+    assert any("OLIGHT" in item for item in seeded["search_queries"])
 
 
 def test_seed_profile_from_text_keeps_physical_product_subject_when_stray_tech_brand_appears():

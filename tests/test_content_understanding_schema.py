@@ -135,6 +135,39 @@ def test_map_content_understanding_to_legacy_profile_prefers_resolved_entities()
     assert legacy["subject_model"] == "游刃"
 
 
+def test_map_content_understanding_to_legacy_profile_builds_branded_subject_type_from_identity():
+    understanding = ContentUnderstanding(
+        video_type="product_review",
+        content_domain="flashlight",
+        primary_subject="SLIM2 ULTRA版手电筒",
+        subject_entities=[
+            SubjectEntity(
+                kind="product",
+                name="SLIM2 ULTRA版手电筒",
+                brand="OLIGHT",
+                model="SLIM2 ULTRA",
+            )
+        ],
+        video_theme="手电筒版本对比",
+        summary="视频围绕 SLIM2 ULTRA版手电筒展开版本对比。",
+        hook_line="SLIM2 ULTRA这次升级值不值",
+        engagement_question="你会选 ULTRA 还是标准版？",
+        search_queries=["OLIGHT SLIM2 ULTRA"],
+        evidence_spans=[],
+        uncertainties=[],
+        confidence={"overall": 0.79},
+        needs_review=True,
+        review_reasons=["品牌型号需继续核验"],
+    )
+
+    legacy = map_content_understanding_to_legacy_profile(understanding)
+
+    assert legacy["subject_brand"] == "OLIGHT"
+    assert legacy["subject_model"] == "SLIM2 ULTRA"
+    assert legacy["subject_type"] == "OLIGHT SLIM2 ULTRA版手电筒"
+    assert legacy["content_understanding"]["primary_subject"] == "OLIGHT SLIM2 ULTRA版手电筒"
+
+
 def test_content_understanding_payload_and_orchestrator_preserve_capability_matrix_and_trace():
     understanding = ContentUnderstanding(
         video_type="product_review",

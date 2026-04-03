@@ -56,8 +56,13 @@ def resolve_entities(
     uncertainties = _merge_unique(list(base.uncertainties), list(candidate.uncertainties))
     merged_conflicts = _merge_unique(list(base.conflicts), list(candidate.conflicts), conflicts)
     needs_review = bool(base.needs_review or candidate.needs_review or not has_direct_evidence or conflicts)
+    cleaner_resolved_product = _preferred_resolved_product_entity(candidate)
     primary_subject = candidate.resolved_primary_subject if use_resolved else base.primary_subject
     subject_entities = list(candidate.resolved_entities) if use_resolved else list(base.subject_entities)
+    if component_biased_resolved_subject and cleaner_resolved_product:
+        primary_subject = cleaner_resolved_product.name
+        if not any(str(entity.name or "").strip() == cleaner_resolved_product.name for entity in subject_entities):
+            subject_entities = [SubjectEntity(kind="product", name=cleaner_resolved_product.name, brand=cleaner_resolved_product.brand, model=cleaner_resolved_product.model), *subject_entities]
     observed_entities = _normalize_observed_entities(base, fallback_subject_entities=subject_entities)
     return replace(
         base,
@@ -177,6 +182,14 @@ def _is_component_biased_resolved_primary_subject(
         for primary in primary_candidates
     ):
         return True
+    if component_candidates and any(component in resolved_name for component in component_candidates):
+        cleaner_primary_candidates = [
+            primary
+            for primary in primary_candidates
+            if primary and primary != resolved_name and primary in resolved_name and not any(component in primary for component in component_candidates)
+        ]
+        if cleaner_primary_candidates:
+            return True
 
     product_like_resolved_entities = [
         str(entity.name or "").strip().lower()
@@ -196,7 +209,21 @@ def _is_component_biased_resolved_primary_subject(
             for product in product_like_resolved_entities
         ):
             return True
+    if product_like_resolved_entities and component_candidates and any(component in resolved_name for component in component_candidates):
+        if any(product and product != resolved_name and product in resolved_name for product in product_like_resolved_entities):
+            return True
     return False
+
+
+def _preferred_resolved_product_entity(candidate: ContentUnderstanding) -> SubjectEntity | None:
+    for entity in candidate.resolved_entities:
+        kind = str(entity.kind or "").strip().lower()
+        name = str(entity.name or "").strip()
+        if not name:
+            continue
+        if kind in {"product", "产品", "产品类别", "device", "hardware"}:
+            return entity
+    return None
 
 
 def _is_supporting_biased_resolved_primary_subject(

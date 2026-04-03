@@ -253,6 +253,7 @@ def _normalize_understanding_subject_roles(
         effective_primary_subject,
         primary_candidates=primary_candidates,
         secondary_subject_candidates=secondary_subject_candidates,
+        component_candidates=list(component_candidates),
     )
 
     def _entity_name(entity: SubjectEntity) -> str:
@@ -269,6 +270,19 @@ def _normalize_understanding_subject_roles(
     if (not subject_entities or subject_names.issubset(component_candidates)) and primary_candidates[0].lower() not in subject_names:
         subject_entities = [SubjectEntity(kind="product", name=primary_candidates[0])] + subject_entities
         subject_names = {_entity_name(entity).lower() for entity in subject_entities if _entity_name(entity)}
+    if effective_primary_subject:
+        normalized_effective_primary = effective_primary_subject.lower()
+        if normalized_effective_primary not in subject_names:
+            original_primary_subject = str(understanding.primary_subject or "").strip().lower()
+            if (
+                subject_entities
+                and original_primary_subject
+                and _entity_name(subject_entities[0]).strip().lower() == original_primary_subject
+            ):
+                subject_entities[0] = SubjectEntity(kind="product", name=effective_primary_subject)
+            else:
+                subject_entities = [SubjectEntity(kind="product", name=effective_primary_subject)] + subject_entities
+            subject_names = {_entity_name(entity).lower() for entity in subject_entities if _entity_name(entity)}
     related_subject_candidates = secondary_subject_candidates or supporting_candidates
     for candidate in related_subject_candidates:
         if candidate.lower() not in subject_names:
@@ -352,6 +366,7 @@ def _normalize_primary_subject_label(
     *,
     primary_candidates: list[str],
     secondary_subject_candidates: list[str],
+    component_candidates: list[str],
 ) -> str:
     text = str(primary_subject or "").strip()
     if not text:
@@ -363,7 +378,11 @@ def _normalize_primary_subject_label(
         if not _contains_secondary_subject(candidate, secondary_subject_candidates)
     ]
     if not _contains_secondary_subject(text, secondary_subject_candidates):
-        return text
+        return _strip_component_biased_primary_subject(
+            text,
+            primary_candidates=clean_primary_candidates or primary_candidates,
+            component_candidates=component_candidates,
+        ) or text
     if not clean_primary_candidates:
         return text
     normalized_text = _normalize_subject_text(text)
@@ -373,8 +392,17 @@ def _normalize_primary_subject_label(
             normalized_text.startswith(normalized_candidate)
             or normalized_candidate in normalized_text
         ):
-            return candidate
-    return clean_primary_candidates[0]
+            return _strip_component_biased_primary_subject(
+                candidate,
+                primary_candidates=clean_primary_candidates,
+                component_candidates=component_candidates,
+            ) or candidate
+    fallback = clean_primary_candidates[0]
+    return _strip_component_biased_primary_subject(
+        fallback,
+        primary_candidates=clean_primary_candidates,
+        component_candidates=component_candidates,
+    ) or fallback
 
 
 def _contains_secondary_subject(text: str, secondary_subject_candidates: list[str]) -> bool:
@@ -392,6 +420,35 @@ def _contains_secondary_subject(text: str, secondary_subject_candidates: list[st
 
 def _normalize_subject_text(text: str) -> str:
     return "".join(ch for ch in str(text or "").lower() if ch.isalnum() or "\u4e00" <= ch <= "\u9fff")
+
+
+def _strip_component_biased_primary_subject(
+    text: str,
+    *,
+    primary_candidates: list[str],
+    component_candidates: list[str],
+) -> str:
+    normalized_text = _normalize_subject_text(text)
+    if not normalized_text:
+        return ""
+    normalized_components = [
+        _normalize_subject_text(item)
+        for item in component_candidates
+        if _normalize_subject_text(item)
+    ]
+    if not any(component in normalized_text for component in normalized_components):
+        return ""
+
+    for candidate in primary_candidates:
+        candidate_text = str(candidate or "").strip()
+        normalized_candidate = _normalize_subject_text(candidate_text)
+        if not normalized_candidate or normalized_candidate == normalized_text:
+            continue
+        if normalized_candidate in normalized_text and not any(
+            component in normalized_candidate for component in normalized_components
+        ):
+            return candidate_text
+    return ""
 
 
 def _build_content_understanding_prompt(
@@ -416,6 +473,7 @@ def _build_content_understanding_prompt(
         "不要把功能系统、部件、工艺过程或服务方误当成 primary_subject，除非视频明确就是在讲它们本身；"
         "如果视频既展示主产品又讨论部件/配件/工艺，把主产品放在 primary_subject，把其他内容放进 subject_entities、observed_entities 或 summary；"
         "如果视频里既出现主对象原始称呼，也出现组件/系统称呼，observed_entities 应优先保留主对象原始称呼，组件/系统可作为补充实体或写进 summary；"
+        "如果 opening_focus_lines 前半段持续围绕一个具体产品，而 closing_focus_lines 只是在结尾宣布另一条系列、桌布、周边或配套产品，后者默认只能作为 supporting_product 或 comparison，不要顶替 primary_subject；"
         "subject_entities 必须是对象数组，每项包含 kind,name,brand,model；"
         "observed_entities 必须保留视频里原始看到或听到的主体称呼；"
         "resolved_entities、resolved_primary_subject、entity_resolution_map 在首轮推断可为空；"
@@ -443,6 +501,16 @@ def _build_compact_evidence_payload(evidence_bundle: dict[str, Any]) -> dict[str
             for item in (raw_semantic_inputs.get("cue_lines") or [])
             if str(item).strip()
         ][:8],
+        "opening_focus_lines": [
+            str(item).strip()
+            for item in (raw_semantic_inputs.get("opening_focus_lines") or [])
+            if str(item).strip()
+        ][:6],
+        "closing_focus_lines": [
+            str(item).strip()
+            for item in (raw_semantic_inputs.get("closing_focus_lines") or [])
+            if str(item).strip()
+        ][:6],
         "relation_hints": [
             {
                 str(key): str(value).strip()

@@ -149,3 +149,78 @@ async def test_collect_sample_report_reads_conflicts_from_persisted_content_unde
     assert report.resolved_primary_subject == "HSJUN × BOLTBOAT 游刃机能双肩包"
     assert report.conflicts == ["primary_subject", "subject_entities"]
     assert report.capability_matrix == {"visual_understanding": {"mode": "native_multimodal"}}
+
+
+@pytest.mark.asyncio
+async def test_collect_sample_report_counts_subject_brand_and_model_in_keyword_hits(monkeypatch):
+    job_id = "00000000-0000-0000-0000-000000000124"
+    sample = {
+        "source_name": "flashlight.mp4",
+        "source_path": "Y:/EDC系列/未剪辑视频/flashlight.mp4",
+        "expected_product_family": "flashlight",
+        "expected_keywords": ["OLIGHT", "SLIM2"],
+    }
+    artifact_payload = {
+        "content_subject": "",
+        "content_kind": "product_review",
+        "subject_brand": "OLIGHT",
+        "subject_model": "SLIM2 ULTRA",
+        "subject_type": "SLIM2 ULTRA版手电筒",
+        "video_theme": "手电筒版本选购比较",
+        "content_understanding": {
+            "observed_entities": [{"kind": "product", "name": "SLIM2 ULTRA版手电筒"}],
+            "resolved_entities": [],
+            "resolved_primary_subject": "",
+            "conflicts": [],
+            "capability_matrix": {"visual_understanding": {"mode": "native_multimodal"}},
+            "needs_review": True,
+            "review_reasons": ["品牌词来自身份归一化"],
+        },
+    }
+
+    class FakeScalarRows:
+        def __init__(self, items):
+            self._items = items
+
+        def all(self):
+            return list(self._items)
+
+        def first(self):
+            return self._items[0] if self._items else None
+
+    class FakeExecuteResult:
+        def __init__(self, items):
+            self._items = items
+
+        def scalars(self):
+            return FakeScalarRows(self._items)
+
+    class FakeSession:
+        def __init__(self):
+            self.calls = 0
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def get(self, model, key):
+            assert str(key) == job_id
+            return SimpleNamespace(id=uuid.UUID(job_id), status="done")
+
+        async def execute(self, stmt):
+            self.calls += 1
+            if self.calls == 1:
+                return FakeExecuteResult([SimpleNamespace(id=1), SimpleNamespace(id=2)])
+            if self.calls == 2:
+                return FakeExecuteResult([SimpleNamespace(id=1)])
+            if self.calls == 3:
+                return FakeExecuteResult([SimpleNamespace(data_json=artifact_payload)])
+            raise AssertionError(f"unexpected execute call {self.calls}")
+
+    monkeypatch.setattr(benchmark_mod, "get_session_factory", lambda: (lambda: FakeSession()))
+
+    report = await benchmark_mod.collect_sample_report(job_id, sample, 1.234)
+
+    assert report.keyword_hits == ["OLIGHT", "SLIM2"]
