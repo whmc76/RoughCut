@@ -3,10 +3,27 @@ from __future__ import annotations
 from typing import Any
 
 from roughcut.providers.reasoning.base import Message
+from roughcut.review.domain_glossaries import list_builtin_glossary_packs
 from roughcut.review.content_understanding_schema import (
     ContentSemanticFacts,
     parse_content_semantic_facts_payload,
 )
+
+_GENERIC_PRODUCT_TYPE_ALIASES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("双肩包", ("双肩包", "背包", "BACKPACK")),
+    ("机能包", ("机能包", "SLING_BAG", "TACTICAL_BAG")),
+    ("手电筒", ("手电", "手电筒", "FLASHLIGHT", "TORCH")),
+    ("折刀", ("折刀", "FOLDING_KNIFE", "KNIFE", "折到")),
+    ("美工刀", ("美工刀", "UTILITY_KNIFE", "BOX_CUTTER")),
+    ("多功能工具", ("多功能工具", "MULTITOOL")),
+    ("收纳盒", ("收纳盒", "防水盒", "HARD_CASE", "STORAGE_BOX", "CASE")),
+)
+_BUILTIN_GLOSSARY_BRAND_MODEL_TERMS: list[dict[str, Any]] = [
+    term
+    for pack in list_builtin_glossary_packs()
+    for term in list(pack.get("terms") or [])
+    if isinstance(term, dict) and str(term.get("category") or "").strip().lower().endswith(("_brand", "_model"))
+]
 
 
 async def infer_content_semantic_facts(
@@ -77,7 +94,7 @@ async def infer_content_semantic_facts(
             )
             if _semantic_facts_signal_score(repaired_facts) > _semantic_facts_signal_score(facts):
                 facts = repaired_facts
-        return facts
+        return _enrich_semantic_facts_from_evidence(facts, evidence_bundle)
     except Exception:
         return ContentSemanticFacts()
 
@@ -238,3 +255,172 @@ def _build_facts_repair_evidence_payload(evidence_bundle: dict[str, Any]) -> dic
             if ocr_semantic_evidence.get(key)
         },
     }
+
+
+def _enrich_semantic_facts_from_evidence(
+    facts: ContentSemanticFacts,
+    evidence_bundle: dict[str, Any],
+) -> ContentSemanticFacts:
+    evidence_text = _build_evidence_text_blob(evidence_bundle)
+    brand_candidates = list(facts.brand_candidates)
+    model_candidates = list(facts.model_candidates)
+    product_name_candidates = list(facts.product_name_candidates)
+    product_type_candidates = list(facts.product_type_candidates)
+    primary_subject_candidates = list(facts.primary_subject_candidates)
+    search_expansions = list(facts.search_expansions)
+
+    for term in _BUILTIN_GLOSSARY_BRAND_MODEL_TERMS:
+        category = str(term.get("category") or "").strip().lower()
+        correct_form = str(term.get("correct_form") or "").strip()
+        if not correct_form or not _evidence_contains_term(evidence_text, correct_form, wrong_forms=term.get("wrong_forms") or []):
+            continue
+        if category.endswith("_brand") and correct_form not in brand_candidates:
+            brand_candidates.append(correct_form)
+        if category.endswith("_model"):
+            if correct_form not in model_candidates:
+                model_candidates.append(correct_form)
+            if correct_form not in product_name_candidates:
+                product_name_candidates.append(correct_form)
+
+    for canonical, aliases in _GENERIC_PRODUCT_TYPE_ALIASES:
+        if not _evidence_contains_any_alias(evidence_text, aliases):
+            continue
+        if canonical not in product_type_candidates:
+            product_type_candidates.append(canonical)
+
+    preferred_primary = _prefer_primary_subject_candidates(
+        primary_subject_candidates=primary_subject_candidates,
+        component_candidates=[*facts.component_candidates, *facts.aspect_candidates],
+        product_name_candidates=product_name_candidates,
+        product_type_candidates=product_type_candidates,
+    )
+    if not preferred_primary:
+        preferred_primary = list(primary_subject_candidates)
+
+    if not search_expansions:
+        search_expansions = _build_search_expansions(
+            brand_candidates=brand_candidates,
+            model_candidates=model_candidates,
+            product_name_candidates=product_name_candidates,
+            product_type_candidates=product_type_candidates,
+            primary_subject_candidates=preferred_primary,
+        )
+
+    return ContentSemanticFacts(
+        primary_subject_candidates=preferred_primary,
+        supporting_subject_candidates=list(facts.supporting_subject_candidates),
+        component_candidates=list(facts.component_candidates),
+        aspect_candidates=list(facts.aspect_candidates),
+        brand_candidates=brand_candidates,
+        model_candidates=model_candidates,
+        product_name_candidates=product_name_candidates,
+        product_type_candidates=product_type_candidates,
+        entity_candidates=list(facts.entity_candidates),
+        collaboration_pairs=list(facts.collaboration_pairs),
+        search_expansions=search_expansions,
+        evidence_sentences=list(facts.evidence_sentences),
+    )
+
+
+def _build_evidence_text_blob(evidence_bundle: dict[str, Any]) -> str:
+    semantic_inputs = evidence_bundle.get("semantic_fact_inputs") if isinstance(evidence_bundle, dict) else {}
+    semantic_inputs = semantic_inputs if isinstance(semantic_inputs, dict) else {}
+    visual_semantic_evidence = evidence_bundle.get("visual_semantic_evidence") if isinstance(evidence_bundle, dict) else {}
+    visual_semantic_evidence = visual_semantic_evidence if isinstance(visual_semantic_evidence, dict) else {}
+    tokens: list[str] = []
+    for raw in (
+        semantic_inputs.get("source_name"),
+        semantic_inputs.get("transcript_text"),
+        semantic_inputs.get("visible_text"),
+        *(semantic_inputs.get("cue_lines") or []),
+        *(semantic_inputs.get("hint_candidates") or []),
+        *(semantic_inputs.get("entity_like_tokens") or []),
+        *(visual_semantic_evidence.get("object_categories") or []),
+        *(visual_semantic_evidence.get("subject_candidates") or []),
+        *(visual_semantic_evidence.get("visible_brands") or []),
+        *(visual_semantic_evidence.get("visible_models") or []),
+    ):
+        text = str(raw or "").strip()
+        if text:
+            tokens.append(text)
+    return " \n ".join(tokens)
+
+
+def _evidence_contains_term(text_blob: str, correct_form: str, *, wrong_forms: list[Any]) -> bool:
+    terms = [correct_form, *[str(item or "").strip() for item in wrong_forms]]
+    return _evidence_contains_any_alias(text_blob, terms)
+
+
+def _evidence_contains_any_alias(text_blob: str, aliases: list[str] | tuple[str, ...]) -> bool:
+    haystack = str(text_blob or "")
+    compact_haystack = _compact_ascii(haystack)
+    for raw in aliases:
+        alias = str(raw or "").strip()
+        if not alias:
+            continue
+        if any(ord(ch) > 127 for ch in alias):
+            if alias in haystack:
+                return True
+            continue
+        compact_alias = _compact_ascii(alias)
+        if compact_alias and compact_alias in compact_haystack:
+            return True
+    return False
+
+
+def _compact_ascii(text: str) -> str:
+    return "".join(ch for ch in str(text or "").upper() if ch.isalnum())
+
+
+def _prefer_primary_subject_candidates(
+    *,
+    primary_subject_candidates: list[str],
+    component_candidates: list[str],
+    product_name_candidates: list[str],
+    product_type_candidates: list[str],
+) -> list[str]:
+    ordered: list[str] = []
+    component_set = {str(item).strip().lower() for item in component_candidates if str(item).strip()}
+
+    def _is_component_like(value: str) -> bool:
+        normalized = str(value or "").strip().lower()
+        if not normalized:
+            return False
+        return normalized in component_set
+
+    for group in (
+        [item for item in primary_subject_candidates if not _is_component_like(item)],
+        [item for item in primary_subject_candidates if _is_component_like(item)],
+        [item for item in product_name_candidates if not _is_component_like(item)],
+        [item for item in product_type_candidates if not _is_component_like(item)],
+    ):
+        for item in group:
+            text = str(item or "").strip()
+            if text and text not in ordered:
+                ordered.append(text)
+    return ordered
+
+
+def _build_search_expansions(
+    *,
+    brand_candidates: list[str],
+    model_candidates: list[str],
+    product_name_candidates: list[str],
+    product_type_candidates: list[str],
+    primary_subject_candidates: list[str],
+) -> list[str]:
+    expansions: list[str] = []
+    for item in (
+        *primary_subject_candidates,
+        *product_name_candidates,
+        *product_type_candidates,
+    ):
+        text = str(item or "").strip()
+        if text and text not in expansions:
+            expansions.append(text)
+    for brand in brand_candidates[:2]:
+        for item in [*model_candidates[:2], *product_name_candidates[:2], *product_type_candidates[:2]]:
+            combo = " ".join(part for part in (brand, item) if str(part).strip()).strip()
+            if combo and combo not in expansions:
+                expansions.append(combo)
+    return expansions[:6]

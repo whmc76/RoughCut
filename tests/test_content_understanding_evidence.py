@@ -161,6 +161,24 @@ def test_build_evidence_bundle_includes_visual_semantic_evidence_tokens_in_seman
     assert "游刃" in semantic_inputs["entity_like_tokens"]
 
 
+def test_build_evidence_bundle_expands_visual_object_categories_into_product_alias_tokens():
+    bundle = build_evidence_bundle(
+        source_name="visual_alias_demo.mp4",
+        visual_semantic_evidence={
+            "object_categories": ["backpack", "utility_knife", "flashlight"],
+            "subject_candidates": ["folding_knife"],
+        },
+    )
+
+    semantic_inputs = bundle["semantic_fact_inputs"]
+
+    assert "背包" in semantic_inputs["entity_like_tokens"]
+    assert "双肩包" in semantic_inputs["entity_like_tokens"]
+    assert "美工刀" in semantic_inputs["entity_like_tokens"]
+    assert "折刀" in semantic_inputs["entity_like_tokens"]
+    assert "手电" in semantic_inputs["entity_like_tokens"]
+
+
 def test_build_evidence_bundle_does_not_promote_visual_status_metadata_into_semantic_inputs():
     bundle = build_evidence_bundle(
         source_name="bag_visual_demo.mp4",

@@ -38,6 +38,22 @@ _GENERIC_TOKEN_STOPWORDS = {
     "demo",
 }
 _ENTITY_TOKEN_PATTERN = r"[A-Za-z][A-Za-z0-9_-]{1,}|[\u4e00-\u9fff]{2,8}"
+_VISUAL_CATEGORY_ALIAS_MAP: dict[str, tuple[str, ...]] = {
+    "backpack": ("背包", "双肩包"),
+    "bag": ("包",),
+    "sling_bag": ("斜挎包", "机能包"),
+    "flashlight": ("手电", "手电筒"),
+    "torch": ("手电", "手电筒"),
+    "knife": ("刀", "折刀"),
+    "folding_knife": ("折刀", "刀"),
+    "utility_knife": ("美工刀", "折刀"),
+    "box_cutter": ("美工刀", "刀"),
+    "multitool": ("多功能工具", "工具"),
+    "tool": ("工具",),
+    "hard_case": ("收纳盒", "防水盒"),
+    "case": ("收纳盒", "盒"),
+    "storage_box": ("收纳盒", "盒"),
+}
 _COLLABORATION_PATTERNS = (
     re.compile(
         rf"(?P<left>{_ENTITY_TOKEN_PATTERN})\s*(?:和|与|跟|同|及|、|&|＆|x|X|×)\s*(?P<right>{_ENTITY_TOKEN_PATTERN})\s*(?:联名|合作)"
@@ -124,7 +140,21 @@ def _visual_semantic_text_candidates(visual_semantic_evidence: dict[str, Any]) -
             for item in frame_level_findings
             if isinstance(item, dict)
         ]
+    normalized_aliases = _expand_visual_category_aliases(visual_semantic_evidence)
+    if normalized_aliases:
+        allowed["normalized_object_aliases"] = normalized_aliases
     return allowed
+
+
+def _expand_visual_category_aliases(visual_semantic_evidence: dict[str, Any]) -> list[str]:
+    aliases: list[str] = []
+    for key in ("object_categories", "subject_candidates"):
+        for raw in visual_semantic_evidence.get(key) or []:
+            normalized = str(raw or "").strip().lower().replace("-", "_").replace(" ", "_")
+            for alias in _VISUAL_CATEGORY_ALIAS_MAP.get(normalized, ()):
+                if alias not in aliases:
+                    aliases.append(alias)
+    return aliases
 
 
 def _iter_text_like_values(value: object | None) -> list[str]:

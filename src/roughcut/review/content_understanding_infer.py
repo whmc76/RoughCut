@@ -157,7 +157,7 @@ def _normalize_understanding_subject_roles(
     understanding: ContentUnderstanding,
     semantic_facts: ContentSemanticFacts,
 ) -> ContentUnderstanding:
-    primary_candidates = [str(item).strip() for item in semantic_facts.primary_subject_candidates if str(item).strip()]
+    primary_candidates = _preferred_primary_candidates(semantic_facts)
     supporting_candidates = [str(item).strip() for item in semantic_facts.supporting_subject_candidates if str(item).strip()]
     component_candidates = {
         str(item).strip().lower()
@@ -214,6 +214,26 @@ def _normalize_understanding_subject_roles(
         capability_matrix=understanding.capability_matrix,
         orchestration_trace=understanding.orchestration_trace,
     )
+
+
+def _preferred_primary_candidates(semantic_facts: ContentSemanticFacts) -> list[str]:
+    component_candidates = {
+        str(item).strip().lower()
+        for item in [*semantic_facts.component_candidates, *semantic_facts.aspect_candidates]
+        if str(item).strip()
+    }
+    ordered: list[str] = []
+    for group in (
+        [item for item in semantic_facts.primary_subject_candidates if str(item).strip().lower() not in component_candidates],
+        [item for item in semantic_facts.primary_subject_candidates if str(item).strip().lower() in component_candidates],
+        list(semantic_facts.product_name_candidates),
+        list(semantic_facts.product_type_candidates),
+    ):
+        for item in group:
+            text = str(item).strip()
+            if text and text not in ordered:
+                ordered.append(text)
+    return ordered
 
 
 def _build_content_understanding_prompt(

@@ -149,6 +149,8 @@ def _build_native_multimodal_prompt() -> str:
         "你是通用的视频画面语义抽取器。请只根据输入的多帧图像判断，不要依赖字幕、外部知识或任务预设。"
         "核心目标是识别画面中的主体物体、操作行为、可见品牌/型号和场景语义。"
         "要特别区分主体和背景，不要把海报、包装、桌垫、装饰、文字贴纸或其他背景物误判为主体。"
+        "object_categories 和 subject_candidates 要尽量给出最接近真实产品的具体类别，例如 backpack、flashlight、folding_knife、utility_knife、multitool、hard_case，"
+        "不要在看得出来时只写 tool、gear、accessory 这类过泛词。"
         "如果多帧里主体一致，合并成同一个判断；如果不同帧出现不同主体，保留最有证据的候选并在 findings 里说明。"
         "请输出严格 JSON，对象必须包含这些字段："
         "provider, mode, frame_paths, object_categories, visible_brands, visible_models, subject_candidates, "

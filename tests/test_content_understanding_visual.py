@@ -25,6 +25,8 @@ async def test_infer_visual_semantic_evidence_native_route_uses_multimodal_compl
         assert "品牌" in prompt
         assert "型号" in prompt
         assert "背景" in prompt
+        assert "folding_knife" in prompt
+        assert "utility_knife" in prompt
         assert "EDC" not in prompt
         return json.dumps(
             {

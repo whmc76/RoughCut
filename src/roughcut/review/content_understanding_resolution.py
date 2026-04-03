@@ -136,7 +136,7 @@ def _normalize_observed_entities(
     fallback_subject_entities: list[SubjectEntity],
 ) -> list[SubjectEntity]:
     observed_entities = list(base.observed_entities or fallback_subject_entities)
-    primary_candidates = [str(item).strip() for item in base.semantic_facts.primary_subject_candidates if str(item).strip()]
+    primary_candidates = _preferred_primary_candidates(base)
     component_candidates = {
         str(item).strip().lower()
         for item in [*base.semantic_facts.component_candidates, *base.semantic_facts.aspect_candidates]
@@ -163,11 +163,7 @@ def _is_component_biased_resolved_primary_subject(
     if not resolved_name:
         return False
 
-    primary_candidates = {
-        str(item).strip().lower()
-        for item in base.semantic_facts.primary_subject_candidates
-        if str(item).strip()
-    }
+    primary_candidates = {item.lower() for item in _preferred_primary_candidates(base)}
     component_candidates = [
         str(item).strip().lower()
         for item in [*base.semantic_facts.component_candidates, *base.semantic_facts.aspect_candidates]
@@ -198,3 +194,23 @@ def _is_component_biased_resolved_primary_subject(
         ):
             return True
     return False
+
+
+def _preferred_primary_candidates(base: ContentUnderstanding) -> list[str]:
+    component_candidates = {
+        str(item).strip().lower()
+        for item in [*base.semantic_facts.component_candidates, *base.semantic_facts.aspect_candidates]
+        if str(item).strip()
+    }
+    ordered: list[str] = []
+    for group in (
+        [item for item in base.semantic_facts.primary_subject_candidates if str(item).strip().lower() not in component_candidates],
+        [item for item in base.semantic_facts.primary_subject_candidates if str(item).strip().lower() in component_candidates],
+        list(base.semantic_facts.product_name_candidates),
+        list(base.semantic_facts.product_type_candidates),
+    ):
+        for item in group:
+            text = str(item).strip()
+            if text and text not in ordered:
+                ordered.append(text)
+    return ordered

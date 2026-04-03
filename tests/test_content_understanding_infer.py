@@ -444,7 +444,8 @@ async def test_infer_content_semantic_facts_repairs_empty_payload_when_evidence_
         },
     )
 
-    assert result.primary_subject_candidates == ["HSJUN × BOLTBOAT 游刃机能双肩包"]
+    assert result.primary_subject_candidates[0] == "HSJUN × BOLTBOAT 游刃机能双肩包"
+    assert "机能双肩包" in result.product_type_candidates
     assert result.brand_candidates == ["HSJUN", "BOLTBOAT"]
     assert len(prompts) == 2
     assert "首轮语义事实提取过空" in prompts[1]
@@ -502,6 +503,65 @@ async def test_infer_content_semantic_facts_does_not_repair_empty_payload_when_e
 
     assert result == result.__class__()
     assert provider.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_infer_content_semantic_facts_enriches_empty_payload_with_visual_product_aliases():
+    from roughcut.review.content_understanding_facts import infer_content_semantic_facts
+
+    class FakeResponse:
+        def __init__(self, payload):
+            self.payload = payload
+            self.content = json.dumps(payload, ensure_ascii=False)
+
+        def as_json(self):
+            return self.payload
+
+    class FakeProvider:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def complete(self, *args, **kwargs):
+            self.calls += 1
+            return FakeResponse(
+                {
+                    "primary_subject_candidates": [],
+                    "supporting_subject_candidates": [],
+                    "component_candidates": [],
+                    "aspect_candidates": [],
+                    "brand_candidates": [],
+                    "model_candidates": [],
+                    "product_name_candidates": [],
+                    "product_type_candidates": [],
+                    "entity_candidates": [],
+                    "collaboration_pairs": [],
+                    "search_expansions": [],
+                    "evidence_sentences": [],
+                }
+            )
+
+    provider = FakeProvider()
+    result = await infer_content_semantic_facts(
+        provider,
+        {
+            "semantic_fact_inputs": {
+                "source_name": "knife_demo.mp4",
+                "cue_lines": ["这把折到后面还要看开合和手感"],
+                "entity_like_tokens": ["折到", "utility_knife", "folding_knife"],
+                "relation_hints": [],
+            },
+            "visual_semantic_evidence": {
+                "object_categories": ["utility_knife"],
+                "subject_candidates": ["folding_knife"],
+            },
+        },
+    )
+
+    assert provider.calls == 2
+    assert "折刀" in result.product_type_candidates
+    assert "美工刀" in result.product_type_candidates
+    assert result.primary_subject_candidates[0] in {"折刀", "美工刀"}
+    assert any("折刀" in item or "美工刀" in item for item in result.search_expansions)
 
 
 @pytest.mark.asyncio
@@ -1058,6 +1118,38 @@ def test_normalize_understanding_subject_roles_promotes_primary_candidates_over_
     assert normalized.observed_entities[0].name == "户外背包"
     assert normalized.subject_entities[0].name == "户外背包"
     assert normalized.subject_entities[-1].name == "联名机能包"
+
+
+def test_normalize_understanding_subject_roles_prefers_non_component_primary_candidate_when_first_candidate_is_component():
+    from roughcut.review.content_understanding_infer import _normalize_understanding_subject_roles
+    from roughcut.review.content_understanding_schema import ContentSemanticFacts, ContentUnderstanding, SubjectEntity
+
+    normalized = _normalize_understanding_subject_roles(
+        ContentUnderstanding(
+            video_type="product_review",
+            content_domain="bags",
+            primary_subject="背负系统",
+            semantic_facts=ContentSemanticFacts(),
+            subject_entities=[SubjectEntity(kind="component", name="背负系统")],
+            observed_entities=[SubjectEntity(kind="component", name="背负系统")],
+            video_theme="户外背包高身位背负系统功能演示",
+            summary="视频重点介绍背负系统。",
+            hook_line="背负系统细讲",
+            engagement_question="你更在意背负还是调节？",
+            search_queries=["户外背包 背负系统"],
+            needs_review=True,
+        ),
+        ContentSemanticFacts(
+            primary_subject_candidates=["背负系统", "户外背包"],
+            component_candidates=["背负系统", "肩带系统"],
+            aspect_candidates=["背负调节"],
+            product_type_candidates=["双肩包"],
+        ),
+    )
+
+    assert normalized.primary_subject == "户外背包"
+    assert normalized.observed_entities[0].name == "户外背包"
+    assert normalized.subject_entities[0].name == "户外背包"
 
 
 def test_build_compact_evidence_payload_preserves_subject_role_candidates():
