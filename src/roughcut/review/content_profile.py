@@ -1913,9 +1913,10 @@ async def apply_content_profile_feedback(
 ) -> dict[str, Any]:
     if workflow_template is None and channel_profile is not None:
         workflow_template = channel_profile
+    resolved_feedback: dict[str, Any] = dict(user_feedback or {})
     merged = dict(draft_profile or {})
-    merged["user_feedback"] = dict(user_feedback or {})
-    if not any(value for value in (user_feedback or {}).values()):
+    merged["user_feedback"] = dict(resolved_feedback)
+    if not any(value for value in resolved_feedback.values()):
         merged["review_mode"] = "manual_confirmed"
         return merged
     for key in (
@@ -1926,22 +1927,22 @@ async def apply_content_profile_feedback(
         "hook_line",
         "visible_text",
     ):
-        value = user_feedback.get(key)
+        value = resolved_feedback.get(key)
         if value:
             merged[key] = str(value).strip()
 
-    if user_feedback.get("keywords"):
-        merged["search_queries"] = [str(item).strip() for item in user_feedback["keywords"] if str(item).strip()]
-    if user_feedback.get("summary"):
-        merged["summary"] = str(user_feedback["summary"]).strip()
-    if user_feedback.get("engagement_question"):
-        merged["engagement_question"] = str(user_feedback["engagement_question"]).strip()
-    if user_feedback.get("copy_style"):
-        merged["copy_style"] = str(user_feedback["copy_style"]).strip()
-    if user_feedback.get("correction_notes"):
-        merged["correction_notes"] = str(user_feedback["correction_notes"]).strip()
-    if user_feedback.get("supplemental_context"):
-        merged["supplemental_context"] = str(user_feedback["supplemental_context"]).strip()
+    if resolved_feedback.get("keywords"):
+        merged["search_queries"] = [str(item).strip() for item in resolved_feedback["keywords"] if str(item).strip()]
+    if resolved_feedback.get("summary"):
+        merged["summary"] = str(resolved_feedback["summary"]).strip()
+    if resolved_feedback.get("engagement_question"):
+        merged["engagement_question"] = str(resolved_feedback["engagement_question"]).strip()
+    if resolved_feedback.get("copy_style"):
+        merged["copy_style"] = str(resolved_feedback["copy_style"]).strip()
+    if resolved_feedback.get("correction_notes"):
+        merged["correction_notes"] = str(resolved_feedback["correction_notes"]).strip()
+    if resolved_feedback.get("supplemental_context"):
+        merged["supplemental_context"] = str(resolved_feedback["supplemental_context"]).strip()
 
     try:
         provider = get_reasoning_provider()
@@ -1982,8 +1983,30 @@ async def apply_content_profile_feedback(
             )
         normalized = response.as_json()
         merged.update({k: v for k, v in normalized.items() if v})
+        for key in (
+            "subject_brand",
+            "subject_model",
+            "subject_type",
+            "video_theme",
+            "hook_line",
+            "visible_text",
+            "summary",
+            "engagement_question",
+            "copy_style",
+        ):
+            value = str((normalized or {}).get(key) or "").strip()
+            if value and not str(resolved_feedback.get(key) or "").strip():
+                resolved_feedback[key] = value
+        normalized_queries: list[str] = []
+        for item in list((normalized or {}).get("search_queries") or []):
+            query = str(item).strip()
+            if query and query not in normalized_queries:
+                normalized_queries.append(query)
+        if normalized_queries and not list(resolved_feedback.get("keywords") or []):
+            resolved_feedback["keywords"] = normalized_queries
     except Exception:
         pass
+    merged["user_feedback"] = dict(resolved_feedback)
 
     transcript_excerpt = str(reviewed_subtitle_excerpt or merged.get("transcript_excerpt") or "")
     result = await enrich_content_profile(
@@ -1993,7 +2016,7 @@ async def apply_content_profile_feedback(
         transcript_excerpt=transcript_excerpt,
         include_research=False,
     )
-    result["user_feedback"] = dict(user_feedback or {})
+    result["user_feedback"] = dict(resolved_feedback)
     result["review_mode"] = "manual_confirmed"
     for key in (
         "subject_brand",
@@ -2006,19 +2029,19 @@ async def apply_content_profile_feedback(
         "engagement_question",
         "copy_style",
     ):
-        value = user_feedback.get(key)
+        value = resolved_feedback.get(key)
         if value:
             result[key] = str(value).strip()
-    if user_feedback.get("keywords"):
+    if resolved_feedback.get("keywords"):
         manual_queries: list[str] = []
-        for item in user_feedback["keywords"]:
+        for item in resolved_feedback["keywords"]:
             query = str(item).strip()
             if query and query not in manual_queries:
                 manual_queries.append(query)
         if manual_queries:
             result["search_queries"] = manual_queries
     if any(
-        user_feedback.get(key)
+        resolved_feedback.get(key)
         for key in (
             "subject_brand",
             "subject_model",

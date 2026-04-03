@@ -1777,6 +1777,71 @@ async def test_apply_content_profile_feedback_prefers_reviewed_subtitle_excerpt(
 
 
 @pytest.mark.asyncio
+async def test_apply_content_profile_feedback_keeps_llm_derived_fields_from_resolved_patch(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from roughcut.review import content_profile as content_profile_module
+
+    class FakeResponse:
+        def as_json(self):
+            return {
+                "subject_brand": "傲雷",
+                "subject_model": "司令官2Ultra",
+                "subject_type": "傲雷司令官2手电筒",
+                "video_theme": "傲雷司令官2Ultra版本选购与参数对比",
+                "hook_line": "司令官2Ultra到底值不值",
+                "summary": "围绕傲雷司令官2Ultra的版本差异和参数表现展开讨论。",
+                "engagement_question": "你会选司令官2Ultra还是更便宜的版本？",
+                "search_queries": ["傲雷 司令官2Ultra", "司令官2Ultra 参数对比"],
+            }
+
+    class FakeProvider:
+        async def complete(self, *args, **kwargs):
+            return FakeResponse()
+
+    async def fake_enrich_content_profile(*, profile, source_name, channel_profile, transcript_excerpt, include_research, user_memory=None):
+        return {
+            **profile,
+            "subject_type": "EDC手电",
+            "video_theme": "手电筒版本选购对比",
+            "hook_line": "花100块买ULTRA值不值？",
+            "summary": "视频博主分享SLIM2代ULTRA版手电筒选购心得。",
+            "search_queries": ["SLIM2手电筒ULTRA版"],
+            "cover_title": {"top": "手电", "main": "版本对比", "bottom": "怎么买"},
+        }
+
+    monkeypatch.setattr(content_profile_module, "get_reasoning_provider", lambda: FakeProvider())
+    monkeypatch.setattr(content_profile_module, "enrich_content_profile", fake_enrich_content_profile)
+
+    result = await apply_content_profile_feedback(
+        draft_profile={
+            "subject_brand": "耐克",
+            "subject_model": "SK05",
+            "subject_type": "SLIM2代ULTRA版手电筒",
+            "video_theme": "手电筒版本选购对比",
+            "transcript_excerpt": "这次主要看 ultra 和 pro 版本的区别。",
+            "workflow_template": "edc_tactical",
+        },
+        source_name="video.mp4",
+        channel_profile=None,
+        user_feedback={
+            "subject_brand": "傲雷",
+            "subject_model": "司令官2Ultra",
+        },
+    )
+
+    assert result["subject_brand"] == "傲雷"
+    assert result["subject_model"] == "司令官2Ultra"
+    assert result["subject_type"] == "傲雷司令官2手电筒"
+    assert result["video_theme"] == "傲雷司令官2Ultra版本选购与参数对比"
+    assert result["hook_line"] == "司令官2Ultra到底值不值"
+    assert result["summary"] == "围绕傲雷司令官2Ultra的版本差异和参数表现展开讨论。"
+    assert result["engagement_question"] == "你会选司令官2Ultra还是更便宜的版本？"
+    assert result["search_queries"] == ["傲雷 司令官2Ultra", "司令官2Ultra 参数对比"]
+    assert "傲雷" in result["cover_title"]["top"] or "傲雷" in result["cover_title"]["main"]
+
+
+@pytest.mark.asyncio
 async def test_resolve_content_profile_review_feedback_returns_only_llm_resolved_patch(monkeypatch: pytest.MonkeyPatch):
     from roughcut.review import content_profile as content_profile_module
 
