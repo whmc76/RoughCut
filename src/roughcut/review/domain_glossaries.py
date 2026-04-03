@@ -60,7 +60,8 @@ _BAG_DOMESTIC_BRANDS: tuple[GlossaryTermLike, ...] = (
     {"correct_form": "LEVEL8", "wrong_forms": ["Level8", "LEVEL 8", "地平线8号"], "category": "bag_brand", "context_hint": "国产通勤包品牌"},
     {"correct_form": "狐蝠工业", "wrong_forms": ["FOXBAT", "Foxbat", "FOXBAT DYNAMICS", "狐蝠", "鸿福"], "category": "bag_brand", "context_hint": "主流机能包品牌"},
     {"correct_form": "头狼工业", "wrong_forms": ["头狼", "头狼工业风", "FIRST WOLF"], "category": "bag_brand", "context_hint": "主流机能包品牌"},
-    {"correct_form": "BOLTBOAT", "wrong_forms": ["Boltboat", "BOLT BOAT"], "category": "bag_brand", "context_hint": "主流机能包品牌"},
+    {"correct_form": "HSJUN", "wrong_forms": ["hesijun", "HESIJUN", "hsjun", "HS JUN", "赫斯郡", "赫斯俊"], "category": "bag_brand", "context_hint": "小众机能包品牌", "domain": "bag", "category_scope": "bag"},
+    {"correct_form": "BOLTBOAT", "wrong_forms": ["Boltboat", "BOLT BOAT", "船家"], "category": "bag_brand", "context_hint": "主流机能包品牌", "domain": "bag", "category_scope": "bag"},
     {"correct_form": "PSIGEAR", "wrong_forms": ["PSI GEAR", "PsiGear", "psiger", "混沌装备", "CHAOS GEAR", "Chaos Gear"], "category": "bag_brand", "context_hint": "主流战术/机能包品牌"},
     {"correct_form": "LIIGEAR", "wrong_forms": ["LiiGear", "LII GEAR", "Lii Gear"], "category": "bag_brand", "context_hint": "主流机能包品牌"},
 )
@@ -358,6 +359,7 @@ _DOMAIN_TERM_LIBRARY: dict[str, tuple[GlossaryTermLike, ...]] = {
         *_BAG_DOMESTIC_BRANDS,
         {"correct_form": "FXX1小副包", "wrong_forms": ["F叉二一小副包", "F X X 1小副包"], "category": "bag_model", "context_hint": "狐蝠工业机能副包型号"},
         {"correct_form": "FXX1", "wrong_forms": ["F叉二一", "F X X 1"], "category": "bag_model", "context_hint": "狐蝠工业机能副包型号"},
+        {"correct_form": "游刃", "wrong_forms": [], "category": "bag_model", "context_hint": "机能包产品名", "domain": "bag", "category_scope": "bag"},
         {"correct_form": "机能包", "wrong_forms": ["机能包儿"], "category": "bag", "context_hint": "EDC 包袋品类"},
         {"correct_form": "通勤包", "wrong_forms": ["通情包"], "category": "bag", "context_hint": "EDC 包袋品类"},
         {"correct_form": "斜挎包", "wrong_forms": ["斜胯包"], "category": "bag", "context_hint": "EDC 包袋品类"},

@@ -48,8 +48,8 @@ from roughcut.speech.postprocess import (
     normalize_display_text,
 )
 
-_CONTENT_PROFILE_INFER_CACHE_VERSION = "2026-04-03.infer.v33"
-_CONTENT_PROFILE_ENRICH_CACHE_VERSION = "2026-04-03.enrich.v33"
+_CONTENT_PROFILE_INFER_CACHE_VERSION = "2026-04-04.infer.v34"
+_CONTENT_PROFILE_ENRICH_CACHE_VERSION = "2026-04-04.enrich.v34"
 _INGESTIBLE_PRODUCT_SIGNALS = (
     "luckykiss",
     "kisspod",
@@ -3592,6 +3592,13 @@ _MODEL_TO_BRAND: dict[str, str] = {
     "司令官2Ultra": "OLIGHT",
 }
 
+_CATEGORY_SCOPE_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "bag": ("包", "背包", "双肩包", "机能包", "斜挎包", "胸包", "快取包", "副包", "分仓", "挂点", "背负", "收纳"),
+    "flashlight": ("手电", "电筒", "筒身", "流明", "泛光", "聚光", "色温", "夜骑", "尾按", "尾绳孔", "绳孔", "补光", "UV"),
+    "knife": ("刀", "折刀", "重力刀", "开合", "锁定", "背夹", "刃型", "柄材", "钢材", "雕刻", "电镀"),
+    "tools": ("工具钳", "钳", "批头", "螺丝刀", "扳手", "尖嘴钳", "钢丝钳"),
+}
+
 
 def _seed_profile_from_subtitles(
     subtitle_items: list[dict],
@@ -3842,11 +3849,15 @@ def _seed_profile_from_glossary_terms(
     best_brand: tuple[int, str] | None = None
     best_brand_category = ""
     best_model: tuple[int, str] | None = None
+    best_model_category = ""
+    matched_brands: list[str] = []
 
     for term in glossary_terms:
         correct_form = str(term.get("correct_form") or "").strip()
         category = str(term.get("category") or "").strip().lower()
         if not correct_form:
+            continue
+        if not _glossary_term_matches_category_scope(term, transcript):
             continue
         matched_value = _match_glossary_identity_candidate(
             normalized_transcript=normalized_transcript,
@@ -3859,23 +3870,42 @@ def _seed_profile_from_glossary_terms(
         if _is_brand_like_glossary_category(category):
             candidate = _canonical_brand_display_name(correct_form)
             score = len(_normalize_profile_value(matched_value))
+            if candidate and candidate not in matched_brands:
+                matched_brands.append(candidate)
             if candidate and (best_brand is None or score > best_brand[0]):
                 best_brand = (score, candidate)
                 best_brand_category = category
-        elif _looks_like_product_model(correct_form):
+        elif _is_model_like_glossary_category(category) or _looks_like_product_model(correct_form):
             score = len(_normalize_profile_value(correct_form))
             if best_model is None or score > best_model[0]:
                 best_model = (score, correct_form)
+                best_model_category = category
 
-    if best_brand:
+    if best_brand and len(matched_brands) == 1:
         seeded["subject_brand"] = best_brand[1]
         subject_type = _subject_type_from_glossary_category(best_brand_category)
         if subject_type:
             _append_hint_candidate(seeded, "subject_type", subject_type)
     if best_model:
         seeded["subject_model"] = best_model[1]
+        subject_type = _subject_type_from_glossary_category(best_model_category)
+        if subject_type:
+            _append_hint_candidate(seeded, "subject_type", subject_type)
         if "subject_brand" not in seeded and best_model[1] in _MODEL_TO_BRAND:
             seeded["subject_brand"] = _MODEL_TO_BRAND[best_model[1]]
+    if matched_brands:
+        queries: list[str] = []
+        model = str(seeded.get("subject_model") or "").strip()
+        subject_type = _hint_primary_value(seeded, "subject_type")
+        for brand in matched_brands[:3]:
+            if model:
+                queries.append(f"{brand} {model}")
+            elif subject_type:
+                queries.append(f"{brand} {subject_type}")
+            else:
+                queries.append(brand)
+        if queries:
+            seeded["search_queries"] = queries
     return seeded
 
 
@@ -3933,7 +3963,13 @@ def _seed_profile_from_text(
         model=model,
         model_source=model_source,
     ):
-        model = ""
+        keep_scoped_glossary_model = (
+            model_source == "glossary"
+            and model == str(glossary_seed.get("subject_model") or "").strip()
+            and bool(_hint_primary_value(glossary_seed, "subject_type"))
+        )
+        if not keep_scoped_glossary_model:
+            model = ""
 
     if not brand and model in _MODEL_TO_BRAND:
         brand = _MODEL_TO_BRAND[model]
@@ -3993,13 +4029,18 @@ def _seed_profile_from_text(
     )
     if video_theme:
         _append_hint_candidate(seeded, "video_theme", video_theme)
+    queries: list[str] = [str(item).strip() for item in (glossary_seed.get("search_queries") or []) if str(item).strip()]
     if brand or model:
-        queries = _build_seeded_search_queries(
+        seeded_queries = _build_seeded_search_queries(
             brand=brand,
             model=model,
             subject_type=subject_type,
             topic_terms=topic_terms,
         )
+        for item in seeded_queries:
+            if item not in queries:
+                queries.append(item)
+    if queries:
         seeded["search_queries"] = queries
     return seeded
 
@@ -4336,6 +4377,10 @@ def _is_brand_like_glossary_category(category: str) -> bool:
     return "brand" in str(category or "")
 
 
+def _is_model_like_glossary_category(category: str) -> bool:
+    return "model" in str(category or "").strip().lower()
+
+
 def _looks_like_product_model(value: str) -> bool:
     compact = _clean_line(value)
     if not compact:
@@ -4343,6 +4388,50 @@ def _looks_like_product_model(value: str) -> bool:
     if re.search(r"[A-Za-z]", compact) and re.search(r"[\d零〇一二三四五六七八九十]", compact):
         return True
     return compact.endswith(("小副包", "副包", "Pro", "MAX", "Mini", "Ultra", "Plus", "SE"))
+
+
+def _normalize_category_scopes(value: Any) -> list[str]:
+    if isinstance(value, str):
+        raw_items = [value]
+    elif isinstance(value, (list, tuple, set)):
+        raw_items = list(value)
+    else:
+        raw_items = []
+    scopes: list[str] = []
+    for item in raw_items:
+        text = str(item or "").strip().lower()
+        if text and text not in scopes:
+            scopes.append(text)
+    return scopes
+
+
+def _infer_category_scope_from_glossary_category(category: str) -> str:
+    normalized = str(category or "").strip().lower()
+    if "bag" in normalized:
+        return "bag"
+    if "flashlight" in normalized:
+        return "flashlight"
+    if "knife" in normalized:
+        return "knife"
+    if "tool" in normalized:
+        return "tools"
+    return ""
+
+
+def _text_supports_category_scope(text: str, scope: str) -> bool:
+    compact = str(text or "").strip()
+    keywords = _CATEGORY_SCOPE_KEYWORDS.get(str(scope or "").strip().lower(), ())
+    return bool(compact and any(keyword in compact for keyword in keywords))
+
+
+def _glossary_term_matches_category_scope(term: dict[str, Any], transcript: str) -> bool:
+    scopes = _normalize_category_scopes(term.get("category_scope"))
+    inferred_scope = _infer_category_scope_from_glossary_category(str(term.get("category") or ""))
+    if inferred_scope and inferred_scope not in scopes:
+        scopes.append(inferred_scope)
+    if not scopes:
+        return True
+    return any(_text_supports_category_scope(transcript, scope) for scope in scopes)
 
 
 def _canonical_brand_display_name(value: str) -> str:

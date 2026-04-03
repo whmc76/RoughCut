@@ -233,6 +233,13 @@ _NON_BRAND_CONTEXT_PREFIXES = {
     "已经",
 }
 
+_CATEGORY_SCOPE_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "bag": ("包", "背包", "双肩包", "机能包", "斜挎包", "胸包", "快取包", "副包", "分仓", "挂点", "背负", "收纳"),
+    "flashlight": ("手电", "电筒", "筒身", "流明", "泛光", "聚光", "色温", "夜骑", "尾按", "尾绳孔", "绳孔", "补光", "UV"),
+    "knife": ("刀", "折刀", "重力刀", "开合", "锁定", "背夹", "刃型", "柄材", "钢材", "雕刻", "电镀"),
+    "tools": ("工具钳", "钳", "批头", "螺丝刀", "扳手", "尖嘴钳", "钢丝钳"),
+}
+
 _ARABIC_TO_CHINESE_DIGITS = str.maketrans("0123456789", "零一二三四五六七八九")
 _CHINESE_TO_ARABIC_DIGITS = {
     "零": "0",
@@ -386,7 +393,11 @@ def build_subtitle_review_memory(
                 alias_pairs.append({"wrong": wrong, "correct": correct})
 
     for term in effective_glossary_terms:
-        if not _glossary_term_supported_by_subject_domain(term, resolved_subject_domain):
+        if not _glossary_term_supported_by_review_context(
+            term,
+            subject_domain=resolved_subject_domain,
+            context_text=context_text,
+        ):
             continue
         correct_form = _normalize_term(term.get("correct_form"))
         if correct_form:
@@ -460,7 +471,11 @@ def build_subtitle_review_memory(
         if item.get("term")
     }
     for term in effective_glossary_terms:
-        if not _glossary_term_supported_by_subject_domain(term, resolved_subject_domain):
+        if not _glossary_term_supported_by_review_context(
+            term,
+            subject_domain=resolved_subject_domain,
+            context_text=context_text,
+        ):
             continue
         correct_form = _normalize_term(term.get("correct_form"))
         if not correct_form or correct_form in ranked_term_values:
@@ -478,7 +493,11 @@ def build_subtitle_review_memory(
     ) -> None:
         collected: list[tuple[int, str, str]] = []
         for term in term_collection or []:
-            if not _glossary_term_supported_by_subject_domain(term, resolved_subject_domain):
+            if not _glossary_term_supported_by_review_context(
+                term,
+                subject_domain=resolved_subject_domain,
+                context_text=context_text,
+            ):
                 continue
             correct_form = _normalize_term(term.get("correct_form"))
             if not correct_form:
@@ -881,6 +900,57 @@ def _glossary_term_supported_by_subject_domain(term: dict[str, Any], subject_dom
     if not correct_form:
         return False
     return _term_supported_by_subject_domain(correct_form, subject_domain)
+
+
+def _normalize_category_scopes(value: Any) -> list[str]:
+    if isinstance(value, str):
+        raw_items = [value]
+    elif isinstance(value, (list, tuple, set)):
+        raw_items = list(value)
+    else:
+        raw_items = []
+    scopes: list[str] = []
+    for item in raw_items:
+        text = str(item or "").strip().lower()
+        if text and text not in scopes:
+            scopes.append(text)
+    return scopes
+
+
+def _infer_category_scope_from_glossary_category(category: Any) -> str:
+    normalized = str(category or "").strip().lower()
+    if "bag" in normalized:
+        return "bag"
+    if "flashlight" in normalized:
+        return "flashlight"
+    if "knife" in normalized:
+        return "knife"
+    if "tool" in normalized:
+        return "tools"
+    return ""
+
+
+def _text_supports_category_scope(text: str, scope: str) -> bool:
+    compact = str(text or "").strip()
+    keywords = _CATEGORY_SCOPE_KEYWORDS.get(str(scope or "").strip().lower(), ())
+    return bool(compact and any(keyword in compact for keyword in keywords))
+
+
+def _glossary_term_supported_by_review_context(
+    term: dict[str, Any],
+    *,
+    subject_domain: str | None,
+    context_text: str,
+) -> bool:
+    if not _glossary_term_supported_by_subject_domain(term, subject_domain):
+        return False
+    scopes = _normalize_category_scopes(term.get("category_scope"))
+    inferred_scope = _infer_category_scope_from_glossary_category(term.get("category"))
+    if inferred_scope and inferred_scope not in scopes:
+        scopes.append(inferred_scope)
+    if not scopes:
+        return True
+    return any(_text_supports_category_scope(context_text, scope) for scope in scopes)
 
 
 def apply_domain_term_corrections(

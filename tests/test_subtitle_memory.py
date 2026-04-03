@@ -787,6 +787,43 @@ def test_build_subtitle_review_memory_injects_flashlight_brand_asr_aliases():
     assert ("奥雷", "OLIGHT") in alias_map
 
 
+def test_build_subtitle_review_memory_injects_bag_hotwords_only_with_bag_context():
+    memory = build_subtitle_review_memory(
+        channel_profile="unboxing_standard",
+        glossary_terms=[],
+        user_memory={},
+        recent_subtitles=[{"text_final": "这次赫斯郡和船家的游刃机能包，重点看分仓、挂点和背负。"}],
+        content_profile={"video_theme": "机能包开箱评测"},
+    )
+
+    terms = {item["term"] for item in memory["terms"]}
+    alias_map = {(item["wrong"], item["correct"]) for item in memory["aliases"]}
+
+    assert "HSJUN" in terms
+    assert "BOLTBOAT" in terms
+    assert "游刃" in terms
+    assert ("赫斯郡", "HSJUN") in alias_map
+    assert ("船家", "BOLTBOAT") in alias_map
+
+
+def test_build_subtitle_review_memory_does_not_inject_bag_hotwords_into_flashlight_context():
+    memory = build_subtitle_review_memory(
+        channel_profile="edc_tactical",
+        glossary_terms=[],
+        user_memory={},
+        recent_subtitles=[{"text_final": "这次主要聊手电的流明和泛光，顺嘴提了一下赫斯郡和船家。"}],
+        content_profile={"video_theme": "EDC手电版本对比评测"},
+    )
+
+    terms = {item["term"] for item in memory["terms"]}
+    alias_map = {(item["wrong"], item["correct"]) for item in memory["aliases"]}
+
+    assert "HSJUN" not in terms
+    assert "游刃" not in terms
+    assert ("赫斯郡", "HSJUN") not in alias_map
+    assert ("船家", "BOLTBOAT") not in alias_map
+
+
 def test_detect_glossary_domains_keeps_no_signal_input_empty():
     domains = detect_glossary_domains(
         workflow_template=None,
