@@ -1480,12 +1480,19 @@ async def run_content_profile(job_id: str) -> dict:
             detail = f"已自动确认内容摘要：{subject or '自动识别完成'}"
         else:
             if manual_review_feedback and review_step is not None:
+                review_step.status = "pending"
+                review_step.finished_at = None
+                review_step.error_message = None
                 review_step.metadata_ = {
                     **(review_step.metadata_ or {}),
                     "label": STEP_LABELS.get("summary_review", "summary_review"),
                     "detail": "成片审核修正尚未确认到当前主体，等待人工继续确认。",
                     "updated_at": datetime.now(timezone.utc).isoformat(),
+                    "progress": 0.0,
+                    "auto_confirmed": False,
+                    "manual_confirmed": False,
                     "review_user_feedback": dict(manual_review_feedback),
+                    "resolved_review_user_feedback": {},
                 }
             detail = f"已生成内容摘要：{subject or '待人工确认'}"
         await _set_step_progress(session, step, detail=detail, progress=1.0)

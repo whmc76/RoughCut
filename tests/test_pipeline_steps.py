@@ -1875,7 +1875,7 @@ async def test_run_content_profile_applies_llm_resolved_final_review_feedback_an
         )
         review_step = review_step_result.scalar_one()
         assert review_step.status == "done"
-        assert "成片审核修正" in review_step.metadata_["detail"]
+        assert review_step.metadata_["detail"] == "已应用成片审核修正并确认内容摘要，继续后续流程。"
 
     assert fake_review_bot.content_profile_notifications == []
 
@@ -1996,6 +1996,132 @@ async def test_run_content_profile_keeps_summary_review_pending_when_final_revie
         assert review_step.status == "pending"
 
     assert fake_review_bot.content_profile_notifications == [job_id]
+
+
+@pytest.mark.asyncio
+async def test_run_content_profile_resets_stale_manual_confirmed_summary_review_when_review_feedback_cannot_be_resolved(
+    db_engine,
+    monkeypatch,
+    tmp_path: Path,
+):
+    import roughcut.pipeline.steps as steps_mod
+    from roughcut.review import content_profile as content_profile_mod
+
+    factory = async_sessionmaker(db_engine, expire_on_commit=False)
+    job_id = uuid.uuid4()
+    source_path = tmp_path / "source.mp4"
+    source_path.write_bytes(b"video")
+    fake_review_bot = _FakeTelegramReviewBotService()
+    settings = SimpleNamespace(
+        auto_confirm_content_profile=False,
+        content_profile_review_threshold=0.72,
+        content_profile_auto_review_min_accuracy=0.9,
+        content_profile_auto_review_min_samples=20,
+    )
+
+    async with factory() as session:
+        session.add(
+            Job(
+                id=job_id,
+                source_path="jobs/demo/source.mp4",
+                source_name="source.mp4",
+                status="processing",
+                language="zh-CN",
+                workflow_template="edc_tactical",
+                enhancement_modes=[],
+            )
+        )
+        session.add(
+            JobStep(
+                job_id=job_id,
+                step_name="content_profile",
+                status="running",
+                metadata_={
+                    "review_feedback": "品牌改成傲雷，型号改成司令官2Ultra。",
+                    "review_user_feedback": {
+                        "subject_brand": "傲雷",
+                        "subject_model": "司令官2Ultra",
+                    },
+                },
+            )
+        )
+        session.add(
+            JobStep(
+                job_id=job_id,
+                step_name="summary_review",
+                status="done",
+                metadata_={
+                    "detail": "已应用成片审核修正并确认内容摘要，继续后续流程。",
+                    "manual_confirmed": True,
+                    "review_user_feedback": {
+                        "subject_brand": "傲雷",
+                        "subject_model": "司令官2Ultra",
+                    },
+                    "resolved_review_user_feedback": {
+                        "subject_brand": "傲雷",
+                        "subject_model": "司令官2Ultra",
+                    },
+                },
+            )
+        )
+        session.add(
+            SubtitleItem(
+                job_id=job_id,
+                version=1,
+                item_index=0,
+                start_time=0.0,
+                end_time=1.0,
+                text_raw="这次对比 slim2 的 ultra 版本。",
+                text_norm="这次对比 slim2 的 ultra 版本。",
+                text_final="这次对比 slim2 的 ultra 版本。",
+            )
+        )
+        await session.commit()
+
+    monkeypatch.setattr(steps_mod, "get_session_factory", lambda: factory)
+    monkeypatch.setattr(steps_mod, "get_settings", lambda: settings)
+    monkeypatch.setattr(steps_mod, "get_telegram_review_bot_service", lambda: fake_review_bot)
+    monkeypatch.setattr(content_profile_mod, "get_settings", lambda: settings)
+
+    async def fake_load_content_profile_user_memory(*args, **kwargs):
+        return {}
+
+    async def fake_resolve_source(*args, **kwargs):
+        return source_path
+
+    async def fake_infer_content_profile(**kwargs):
+        return {
+            "subject_brand": "OLIGHT",
+            "subject_model": "SLIM2 Ultra",
+            "subject_type": "EDC手电",
+            "video_theme": "SLIM2 Ultra 与 PRO 版本对比",
+            "summary": "视频围绕 SLIM2 Ultra 与 PRO 版本对比展开。",
+            "engagement_question": "你更喜欢 ultra 还是 pro？",
+            "search_queries": ["SLIM2 Ultra 手电"],
+            "cover_title": {"top": "SLIM2", "main": "Ultra对比", "bottom": "版本怎么选"},
+            "evidence": [],
+        }
+
+    async def fake_resolve_content_profile_review_feedback(**kwargs):
+        return {}
+
+    monkeypatch.setattr(steps_mod, "load_content_profile_user_memory", fake_load_content_profile_user_memory)
+    monkeypatch.setattr(steps_mod, "_resolve_source", fake_resolve_source)
+    monkeypatch.setattr(steps_mod, "infer_content_profile", fake_infer_content_profile)
+    monkeypatch.setattr(steps_mod, "build_review_feedback_verification_bundle", AsyncMock(return_value=None))
+    monkeypatch.setattr(steps_mod, "resolve_content_profile_review_feedback", fake_resolve_content_profile_review_feedback)
+
+    await run_content_profile(str(job_id))
+
+    async with factory() as session:
+        review_step_result = await session.execute(
+            select(JobStep).where(JobStep.job_id == job_id, JobStep.step_name == "summary_review")
+        )
+        review_step = review_step_result.scalar_one()
+        assert review_step.status == "pending"
+        assert review_step.metadata_["detail"] == "成片审核修正尚未确认到当前主体，等待人工继续确认。"
+        assert review_step.metadata_["manual_confirmed"] is False
+        assert review_step.metadata_["resolved_review_user_feedback"] == {}
 
 
 @pytest.mark.asyncio
