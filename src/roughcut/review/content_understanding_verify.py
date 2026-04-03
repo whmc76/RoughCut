@@ -24,6 +24,27 @@ class HybridVerificationBundle:
     database_results: list[Any] = field(default_factory=list)
 
 
+def build_verification_search_queries(
+    understanding: ContentUnderstanding,
+    *,
+    override_search_queries: list[str] | None = None,
+    limit: int = 6,
+) -> list[str]:
+    merged: list[str] = []
+    for source in (
+        override_search_queries or [],
+        understanding.search_queries,
+        understanding.semantic_facts.search_expansions,
+    ):
+        for item in source:
+            query = str(item).strip()
+            if query and query not in merged:
+                merged.append(query)
+            if len(merged) >= limit:
+                return merged
+    return merged
+
+
 async def build_hybrid_verification_bundle(
     *,
     search_queries: list[str],
@@ -56,7 +77,10 @@ async def verify_content_understanding(
     internal_search: SearchCallable | None = None,
     provider=None,
 ) -> ContentUnderstanding:
-    queries = [str(query).strip() for query in (search_queries or understanding.search_queries) if str(query).strip()]
+    queries = build_verification_search_queries(
+        understanding,
+        override_search_queries=search_queries,
+    )
     bundle = verification_bundle or await build_hybrid_verification_bundle(
         search_queries=queries,
         online_search=online_search,

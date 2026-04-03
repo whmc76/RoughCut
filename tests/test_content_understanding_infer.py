@@ -369,6 +369,142 @@ async def test_infer_content_semantic_facts_prompt_prioritizes_primary_sellable_
 
 
 @pytest.mark.asyncio
+async def test_infer_content_semantic_facts_repairs_empty_payload_when_evidence_is_informative():
+    from roughcut.review.content_understanding_facts import infer_content_semantic_facts
+
+    prompts: list[str] = []
+
+    class FakeResponse:
+        def __init__(self, payload):
+            self.payload = payload
+            self.content = json.dumps(payload, ensure_ascii=False)
+
+        def as_json(self):
+            return self.payload
+
+    class FakeProvider:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def complete(self, *args, **kwargs):
+            prompts.append(args[0][-1].content)
+            self.calls += 1
+            if self.calls == 1:
+                return FakeResponse(
+                    {
+                        "primary_subject_candidates": [],
+                        "supporting_subject_candidates": [],
+                        "component_candidates": [],
+                        "aspect_candidates": [],
+                        "brand_candidates": [],
+                        "model_candidates": [],
+                        "product_name_candidates": [],
+                        "product_type_candidates": [],
+                        "entity_candidates": [],
+                        "collaboration_pairs": [],
+                        "search_expansions": [],
+                        "evidence_sentences": [],
+                    }
+                )
+            return FakeResponse(
+                {
+                    "primary_subject_candidates": ["HSJUN × BOLTBOAT 游刃机能双肩包"],
+                    "supporting_subject_candidates": ["HSJUN", "BOLTBOAT"],
+                    "component_candidates": ["背负系统"],
+                    "aspect_candidates": ["背负"],
+                    "brand_candidates": ["HSJUN", "BOLTBOAT"],
+                    "model_candidates": ["游刃"],
+                    "product_name_candidates": ["游刃"],
+                    "product_type_candidates": ["机能双肩包"],
+                    "entity_candidates": ["HSJUN × BOLTBOAT 游刃"],
+                    "collaboration_pairs": ["HSJUN × BOLTBOAT"],
+                    "search_expansions": ["HSJUN BOLTBOAT 游刃"],
+                    "evidence_sentences": ["这是 hsjun 和 boltboat 联名的包，它叫游刃"],
+                }
+            )
+
+    result = await infer_content_semantic_facts(
+        FakeProvider(),
+        {
+            "semantic_fact_inputs": {
+                "source_name": "hsjun_boltboat.mp4",
+                "cue_lines": ["这是 hsjun 和 boltboat 联名的包", "它叫游刃"],
+                "visible_text": "HSJUN BOLTBOAT",
+                "entity_like_tokens": ["HSJUN", "BOLTBOAT", "游刃"],
+                "relation_hints": [
+                    {"relation": "collaboration", "left": "hsjun", "right": "boltboat", "text": "这是 hsjun 和 boltboat 联名的包"},
+                    {"relation": "naming", "value": "游刃", "text": "它叫游刃"},
+                ],
+            },
+            "visual_semantic_evidence": {
+                "object_categories": ["backpack"],
+                "subject_candidates": ["机能双肩包"],
+                "visible_brands": ["HSJUN"],
+            },
+        },
+    )
+
+    assert result.primary_subject_candidates == ["HSJUN × BOLTBOAT 游刃机能双肩包"]
+    assert result.brand_candidates == ["HSJUN", "BOLTBOAT"]
+    assert len(prompts) == 2
+    assert "首轮语义事实提取过空" in prompts[1]
+    assert "visual_semantic_evidence" in prompts[1]
+
+
+@pytest.mark.asyncio
+async def test_infer_content_semantic_facts_does_not_repair_empty_payload_when_evidence_is_weak():
+    from roughcut.review.content_understanding_facts import infer_content_semantic_facts
+
+    class FakeResponse:
+        def __init__(self, payload):
+            self.payload = payload
+            self.content = json.dumps(payload, ensure_ascii=False)
+
+        def as_json(self):
+            return self.payload
+
+    class FakeProvider:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def complete(self, *args, **kwargs):
+            self.calls += 1
+            return FakeResponse(
+                {
+                    "primary_subject_candidates": [],
+                    "supporting_subject_candidates": [],
+                    "component_candidates": [],
+                    "aspect_candidates": [],
+                    "brand_candidates": [],
+                    "model_candidates": [],
+                    "product_name_candidates": [],
+                    "product_type_candidates": [],
+                    "entity_candidates": [],
+                    "collaboration_pairs": [],
+                    "search_expansions": [],
+                    "evidence_sentences": [],
+                }
+            )
+
+    provider = FakeProvider()
+    result = await infer_content_semantic_facts(
+        provider,
+        {
+            "semantic_fact_inputs": {
+                "source_name": "demo.mp4",
+                "cue_lines": ["今天简单看一下"],
+                "visible_text": "",
+                "entity_like_tokens": [],
+                "relation_hints": [],
+            }
+        },
+    )
+
+    assert result == result.__class__()
+    assert provider.calls == 1
+
+
+@pytest.mark.asyncio
 async def test_infer_content_understanding_repairs_malformed_json_response(monkeypatch: pytest.MonkeyPatch):
     from roughcut.review import content_understanding_infer as infer_mod
 

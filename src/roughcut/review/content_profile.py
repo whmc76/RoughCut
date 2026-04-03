@@ -20,7 +20,11 @@ from roughcut.review.content_understanding_evidence import build_evidence_bundle
 from roughcut.review.content_understanding_infer import infer_content_understanding
 from roughcut.review.content_understanding_schema import ContentUnderstanding, map_content_understanding_to_legacy_profile
 from roughcut.review.content_understanding_visual import infer_visual_semantic_evidence
-from roughcut.review.content_understanding_verify import build_hybrid_verification_bundle, verify_content_understanding
+from roughcut.review.content_understanding_verify import (
+    build_hybrid_verification_bundle,
+    build_verification_search_queries,
+    verify_content_understanding,
+)
 from roughcut.review.content_profile_memory import summarize_content_profile_user_memory
 from roughcut.review.content_profile_ocr import build_content_profile_ocr
 from roughcut.review.content_profile_candidates import build_identity_candidates
@@ -41,8 +45,8 @@ from roughcut.speech.postprocess import (
     normalize_display_text,
 )
 
-_CONTENT_PROFILE_INFER_CACHE_VERSION = "2026-04-03.infer.v12"
-_CONTENT_PROFILE_ENRICH_CACHE_VERSION = "2026-04-03.enrich.v12"
+_CONTENT_PROFILE_INFER_CACHE_VERSION = "2026-04-03.infer.v16"
+_CONTENT_PROFILE_ENRICH_CACHE_VERSION = "2026-04-03.enrich.v16"
 _INGESTIBLE_PRODUCT_SIGNALS = (
     "luckykiss",
     "kisspod",
@@ -1781,11 +1785,12 @@ async def infer_content_profile(
         )
         force_neutral_cover_title = True
 
-    if include_research and understanding.search_queries:
+    verification_queries = build_verification_search_queries(understanding)
+    if include_research and verification_queries:
         try:
             async with get_session_factory()() as session:
                 verification_bundle = await build_hybrid_verification_bundle(
-                    search_queries=understanding.search_queries,
+                    search_queries=verification_queries,
                     online_search=_online_search_content_understanding,
                     internal_search=None,
                     session=session,
@@ -2274,11 +2279,12 @@ async def _infer_content_understanding_for_enrich(
     except Exception:
         return None
 
-    if include_research and understanding.search_queries:
+    verification_queries = build_verification_search_queries(understanding)
+    if include_research and verification_queries:
         try:
             async with get_session_factory()() as session:
                 verification_bundle = await build_hybrid_verification_bundle(
-                    search_queries=understanding.search_queries,
+                    search_queries=verification_queries,
                     online_search=_online_search_content_understanding,
                     internal_search=None,
                     session=session,

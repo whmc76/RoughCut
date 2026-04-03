@@ -85,7 +85,7 @@ def test_build_content_profile_cache_fingerprint_uses_infer_version_without_seed
         copy_style="attention_grabbing",
     )
 
-    assert fingerprint["version"].startswith("2026-04-03.infer.v12")
+    assert fingerprint["version"].startswith("2026-04-03.infer.v16")
     assert fingerprint["seeded_profile_sha256"] == ""
 
 
@@ -149,6 +149,64 @@ async def test_infer_content_profile_routes_visual_semantic_evidence_into_conten
     evidence_bundle = captured["evidence_bundle"]
     assert evidence_bundle["visual_semantic_evidence"]["object_categories"] == ["backpack"]
     assert evidence_bundle["visual_semantic_evidence"]["visible_brands"] == ["HSJUN"]
+
+
+@pytest.mark.asyncio
+async def test_infer_content_profile_runs_research_when_semantic_fact_expansions_exist_without_final_queries(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    from roughcut.review import content_profile as content_profile_module
+    from roughcut.review.content_understanding_schema import ContentSemanticFacts, ContentUnderstanding, SubjectEntity
+
+    captured_queries: list[str] = []
+
+    async def fake_infer_content_understanding(evidence_bundle):
+        return ContentUnderstanding(
+            video_type="product_review",
+            content_domain="flashlight",
+            primary_subject="SLIM2代ULTRA手电筒",
+            semantic_facts=ContentSemanticFacts(
+                search_expansions=["SLIM2 ULTRA", "SLIM2 PRO", "SLIM2代ULTRA版本"]
+            ),
+            subject_entities=[SubjectEntity(kind="product", name="SLIM2代ULTRA手电筒")],
+            search_queries=[],
+            video_theme="手电筒选购与保值性对比",
+            summary="视频围绕 SLIM2代ULTRA手电筒展开选购对比。",
+            hook_line="手电版本怎么选",
+            engagement_question="你更在意保值还是亮度？",
+            needs_review=True,
+        )
+
+    async def fake_build_hybrid_verification_bundle(*, search_queries, online_search=None, internal_search=None, session=None):
+        captured_queries.extend(search_queries)
+        return SimpleNamespace(search_queries=list(search_queries), online_results=[], database_results=[])
+
+    async def fake_verify_content_understanding(*, understanding, evidence_bundle, verification_bundle):
+        return understanding
+
+    monkeypatch.setattr(content_profile_module, "infer_content_understanding", fake_infer_content_understanding)
+    monkeypatch.setattr(content_profile_module, "build_hybrid_verification_bundle", fake_build_hybrid_verification_bundle)
+    monkeypatch.setattr(content_profile_module, "verify_content_understanding", fake_verify_content_understanding)
+    monkeypatch.setattr(content_profile_module, "_extract_reference_frames", lambda *args, **kwargs: [])
+    monkeypatch.setattr(
+        content_profile_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            ocr_enabled=False,
+            active_reasoning_provider="minimax",
+            reasoning_provider="minimax",
+        ),
+    )
+
+    await infer_content_profile(
+        source_path=tmp_path / "flashlight.mp4",
+        source_name="flashlight.mp4",
+        subtitle_items=[],
+        include_research=True,
+    )
+
+    assert captured_queries == ["SLIM2 ULTRA", "SLIM2 PRO", "SLIM2代ULTRA版本"]
 
 
 def test_build_reviewed_transcript_excerpt_applies_accepted_corrections():

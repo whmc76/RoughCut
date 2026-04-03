@@ -33,11 +33,13 @@ def resolve_entities(
     has_direct_evidence = _has_direct_evidence(evidence_bundle)
     conflicts = _collect_conflict_fields(base, candidate)
     resolution_confidence = float(candidate.confidence.get("resolution") or candidate.confidence.get("overall") or 0.0)
+    component_biased_resolved_subject = _is_component_biased_resolved_primary_subject(base, candidate)
     use_resolved = bool(
         allow_entity_resolution
         and candidate.resolved_primary_subject
         and candidate.resolved_entities
         and resolution_confidence >= _RESOLUTION_CONFIDENCE_THRESHOLD
+        and not component_biased_resolved_subject
     )
     review_reasons = _merge_unique(
         list(base.review_reasons),
@@ -45,6 +47,7 @@ def resolve_entities(
         [
             "缺少直接视频证据，外部搜索/内部检索仅作弱佐证" if not has_direct_evidence else "",
             "核验结果与当前视频结论存在冲突，已保守保留原结论" if conflicts else "",
+            "核验归一化结果更偏向组件或功能描述，已保守保留主产品主体" if component_biased_resolved_subject else "",
         ],
     )
     uncertainties = _merge_unique(list(base.uncertainties), list(candidate.uncertainties))
@@ -59,7 +62,7 @@ def resolve_entities(
         subject_entities=subject_entities,
         observed_entities=observed_entities,
         resolved_entities=list(candidate.resolved_entities),
-        resolved_primary_subject=candidate.resolved_primary_subject,
+        resolved_primary_subject="" if component_biased_resolved_subject else candidate.resolved_primary_subject,
         entity_resolution_map=list(candidate.entity_resolution_map),
         uncertainties=uncertainties,
         conflicts=merged_conflicts,
@@ -150,3 +153,48 @@ def _normalize_observed_entities(
     if (not observed_entities or observed_names.issubset(component_candidates)) and primary_candidates[0].lower() not in observed_names:
         return [SubjectEntity(kind="product", name=primary_candidates[0])] + observed_entities
     return observed_entities
+
+
+def _is_component_biased_resolved_primary_subject(
+    base: ContentUnderstanding,
+    candidate: ContentUnderstanding,
+) -> bool:
+    resolved_name = str(candidate.resolved_primary_subject or "").strip().lower()
+    if not resolved_name:
+        return False
+
+    primary_candidates = {
+        str(item).strip().lower()
+        for item in base.semantic_facts.primary_subject_candidates
+        if str(item).strip()
+    }
+    component_candidates = [
+        str(item).strip().lower()
+        for item in [*base.semantic_facts.component_candidates, *base.semantic_facts.aspect_candidates]
+        if str(item).strip()
+    ]
+    if component_candidates and any(component in resolved_name for component in component_candidates) and not any(
+        resolved_name == primary or resolved_name.startswith(primary)
+        for primary in primary_candidates
+    ):
+        return True
+
+    product_like_resolved_entities = [
+        str(entity.name or "").strip().lower()
+        for entity in candidate.resolved_entities
+        if str(entity.name or "").strip()
+        and str(entity.kind or "").strip().lower() in {"product", "产品", "产品类别", "device", "hardware"}
+    ]
+    component_like_resolved_entities = [
+        str(entity.name or "").strip().lower()
+        for entity in candidate.resolved_entities
+        if str(entity.name or "").strip()
+        and str(entity.kind or "").strip().lower() in {"system", "component", "功能系统", "组件", "调节机构", "背负方式", "feature"}
+    ]
+    if product_like_resolved_entities and component_like_resolved_entities:
+        if any(component in resolved_name for component in component_like_resolved_entities) and not any(
+            resolved_name == product or resolved_name.startswith(product)
+            for product in product_like_resolved_entities
+        ):
+            return True
+    return False

@@ -50,6 +50,66 @@ async def test_build_hybrid_verification_bundle_keeps_online_and_database_hits()
 
 
 @pytest.mark.asyncio
+async def test_verify_content_understanding_merges_search_queries_with_semantic_fact_expansions():
+    captured_queries: list[str] = []
+
+    async def fake_online(*, search_queries):
+        captured_queries.extend(search_queries)
+        return []
+
+    async def fake_internal(*, search_queries):
+        return []
+
+    understanding = ContentUnderstanding(
+        video_type="product_review",
+        content_domain="flashlight",
+        primary_subject="SLIM2代ULTRA手电筒",
+        semantic_facts=ContentSemanticFacts(
+            search_expansions=["SLIM2 ULTRA", "SLIM2 PRO", "SLIM2代ULTRA版本"]
+        ),
+        subject_entities=[SubjectEntity(kind="product", name="SLIM2代ULTRA手电筒")],
+        search_queries=["SLIM2 ULTRA手电筒"],
+        needs_review=True,
+    )
+
+    await verify_content_understanding(
+        understanding=understanding,
+        evidence_bundle={"transcript_excerpt": "这是 slim2 的 ultra 版本"},
+        online_search=fake_online,
+        internal_search=fake_internal,
+        provider=FakeProvider(
+            {
+                "video_type": "product_review",
+                "content_domain": "flashlight",
+                "primary_subject": "SLIM2代ULTRA手电筒",
+                "subject_entities": [{"kind": "product", "name": "SLIM2代ULTRA手电筒"}],
+                "observed_entities": [{"kind": "product", "name": "SLIM2代ULTRA版本"}],
+                "resolved_entities": [],
+                "resolved_primary_subject": "",
+                "entity_resolution_map": [],
+                "video_theme": "手电筒选购与保值性对比",
+                "summary": "视频围绕 SLIM2代ULTRA手电筒展开选购对比。",
+                "hook_line": "手电版本怎么选",
+                "engagement_question": "你更在意保值还是亮度？",
+                "search_queries": ["SLIM2 ULTRA手电筒"],
+                "evidence_spans": [],
+                "uncertainties": [],
+                "confidence": {"overall": 0.8},
+                "needs_review": False,
+                "review_reasons": [],
+            }
+        ),
+    )
+
+    assert captured_queries == [
+        "SLIM2 ULTRA手电筒",
+        "SLIM2 ULTRA",
+        "SLIM2 PRO",
+        "SLIM2代ULTRA版本",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_verify_content_understanding_keeps_current_conclusion_when_hybrid_search_conflicts():
     understanding = ContentUnderstanding(
         video_type="tutorial",
@@ -418,3 +478,71 @@ async def test_verify_content_understanding_normalizes_observed_entities_when_ba
     )
 
     assert result.observed_entities[0].name == "户外背包"
+
+
+@pytest.mark.asyncio
+async def test_verify_content_understanding_does_not_promote_component_biased_resolved_primary_subject():
+    understanding = ContentUnderstanding(
+        video_type="product_review",
+        content_domain="bags",
+        primary_subject="户外徒步背包",
+        semantic_facts=ContentSemanticFacts(
+            primary_subject_candidates=["户外徒步背包"],
+            component_candidates=["背负系统", "快速释放拉带"],
+            aspect_candidates=["快速调节", "省力背负"],
+        ),
+        subject_entities=[SubjectEntity(kind="product", name="户外徒步背包")],
+        observed_entities=[SubjectEntity(kind="product", name="背包"), SubjectEntity(kind="component", name="背负系统")],
+        video_theme="户外徒步背包背负系统功能展示与使用指南",
+        summary="视频围绕户外徒步背包展开，并重点展示背负系统与调节方式。",
+        hook_line="背包背负调节细讲",
+        engagement_question="你更在意背负还是调节？",
+        search_queries=["户外徒步背包 背负系统"],
+        confidence={"overall": 0.8},
+        needs_review=True,
+    )
+
+    result = await verify_content_understanding(
+        understanding=understanding,
+        evidence_bundle={"transcript_excerpt": "这期主要看这个背包和它的背负系统快速调节方式"},
+        verification_bundle=HybridVerificationBundle(
+            search_queries=["户外徒步背包 背负系统"],
+            online_results=[{"title": "户外背包背负系统调节指南"}],
+            database_results=[],
+        ),
+        provider=FakeProvider(
+            {
+                "video_type": "product_review",
+                "content_domain": "bags",
+                "primary_subject": "户外徒步背包",
+                "subject_entities": [{"kind": "product", "name": "户外徒步背包"}],
+                "observed_entities": [{"kind": "product", "name": "背包"}, {"kind": "component", "name": "背负系统"}],
+                "resolved_entities": [
+                    {"kind": "产品类别", "name": "户外徒步背包"},
+                    {"kind": "功能系统", "name": "背负系统"},
+                ],
+                "resolved_primary_subject": "户外背包背负系统快速调节功能",
+                "entity_resolution_map": [
+                    {
+                        "observed_name": "背包",
+                        "resolved_name": "户外徒步背包",
+                        "confidence": 0.93,
+                        "reason": "检索结果稳定指向徒步背包，但同时强调背负系统功能",
+                    }
+                ],
+                "video_theme": "户外徒步背包背负系统的快速调节功能展示与省力背负体验",
+                "summary": "视频主要展示户外徒步背包的背负系统和快速调节方式。",
+                "hook_line": "背包背负调节细讲",
+                "engagement_question": "你更在意背负还是调节？",
+                "search_queries": ["户外徒步背包 背负系统 快速调节"],
+                "evidence_spans": [],
+                "uncertainties": [],
+                "confidence": {"overall": 0.88, "resolution": 0.93},
+                "needs_review": True,
+                "review_reasons": ["核验结果更强调功能系统而非主产品"],
+            }
+        ),
+    )
+
+    assert result.primary_subject == "户外徒步背包"
+    assert result.resolved_primary_subject == ""
