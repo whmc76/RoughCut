@@ -27,6 +27,7 @@ async def infer_content_understanding(evidence_bundle: dict[str, Any]) -> Conten
     orchestration_trace = ["capability_resolution", "fact_extraction", "final_understanding"]
     semantic_facts = await infer_content_semantic_facts(provider, evidence_bundle)
     understanding = await infer_final_understanding(provider, evidence_bundle, semantic_facts)
+    semantic_facts = _backfill_semantic_facts_from_understanding(semantic_facts, understanding)
     return _with_staged_semantic_facts(
         understanding,
         semantic_facts,
@@ -153,12 +154,89 @@ def _with_staged_semantic_facts(
     )
 
 
+def _backfill_semantic_facts_from_understanding(
+    semantic_facts: ContentSemanticFacts,
+    understanding: ContentUnderstanding,
+) -> ContentSemanticFacts:
+    if any(
+        (
+            semantic_facts.primary_subject_candidates,
+            semantic_facts.supporting_subject_candidates,
+            semantic_facts.comparison_subject_candidates,
+            semantic_facts.supporting_product_candidates,
+            semantic_facts.component_candidates,
+            semantic_facts.aspect_candidates,
+            semantic_facts.brand_candidates,
+            semantic_facts.model_candidates,
+            semantic_facts.product_name_candidates,
+            semantic_facts.product_type_candidates,
+            semantic_facts.entity_candidates,
+            semantic_facts.search_expansions,
+        )
+    ):
+        return semantic_facts
+
+    primary_subject_candidates: list[str] = []
+    brand_candidates: list[str] = []
+    model_candidates: list[str] = []
+    product_name_candidates: list[str] = []
+    comparison_subject_candidates: list[str] = []
+    supporting_product_candidates: list[str] = []
+    search_expansions: list[str] = []
+
+    def _append(target: list[str], value: str) -> None:
+        text = str(value or "").strip()
+        if text and text not in target:
+            target.append(text)
+
+    _append(primary_subject_candidates, understanding.primary_subject)
+    _append(product_name_candidates, understanding.primary_subject)
+
+    for entity in understanding.subject_entities:
+        kind = str(entity.kind or "").strip().lower()
+        _append(brand_candidates, entity.brand)
+        _append(model_candidates, entity.model)
+        if kind in {"product", "产品", "device", "hardware"}:
+            _append(product_name_candidates, entity.name)
+        if "comparison" in kind or "对比" in kind:
+            _append(comparison_subject_candidates, entity.name)
+        if any(marker in kind for marker in ("related", "supporting", "配套", "accessory", "secondary")):
+            _append(supporting_product_candidates, entity.name)
+
+    for item in (
+        understanding.primary_subject,
+        *product_name_candidates,
+        *model_candidates[:2],
+        *comparison_subject_candidates[:2],
+        *supporting_product_candidates[:2],
+    ):
+        _append(search_expansions, item)
+
+    return ContentSemanticFacts(
+        primary_subject_candidates=primary_subject_candidates,
+        supporting_subject_candidates=list(semantic_facts.supporting_subject_candidates),
+        comparison_subject_candidates=comparison_subject_candidates,
+        supporting_product_candidates=supporting_product_candidates,
+        component_candidates=list(semantic_facts.component_candidates),
+        aspect_candidates=list(semantic_facts.aspect_candidates),
+        brand_candidates=brand_candidates,
+        model_candidates=model_candidates,
+        product_name_candidates=product_name_candidates,
+        product_type_candidates=list(semantic_facts.product_type_candidates),
+        entity_candidates=list(semantic_facts.entity_candidates),
+        collaboration_pairs=list(semantic_facts.collaboration_pairs),
+        search_expansions=search_expansions,
+        evidence_sentences=list(semantic_facts.evidence_sentences),
+    )
+
+
 def _normalize_understanding_subject_roles(
     understanding: ContentUnderstanding,
     semantic_facts: ContentSemanticFacts,
 ) -> ContentUnderstanding:
     primary_candidates = _preferred_primary_candidates(semantic_facts)
     supporting_candidates = [str(item).strip() for item in semantic_facts.supporting_subject_candidates if str(item).strip()]
+    secondary_subject_candidates = _secondary_subject_candidates(semantic_facts)
     component_candidates = {
         str(item).strip().lower()
         for item in [*semantic_facts.component_candidates, *semantic_facts.aspect_candidates]
@@ -171,6 +249,11 @@ def _normalize_understanding_subject_roles(
     effective_primary_subject = understanding.primary_subject
     if not effective_primary_subject or normalized_primary_subject in component_candidates:
         effective_primary_subject = primary_candidates[0]
+    effective_primary_subject = _normalize_primary_subject_label(
+        effective_primary_subject,
+        primary_candidates=primary_candidates,
+        secondary_subject_candidates=secondary_subject_candidates,
+    )
 
     def _entity_name(entity: SubjectEntity) -> str:
         return str(entity.name or "").strip()
@@ -186,7 +269,8 @@ def _normalize_understanding_subject_roles(
     if (not subject_entities or subject_names.issubset(component_candidates)) and primary_candidates[0].lower() not in subject_names:
         subject_entities = [SubjectEntity(kind="product", name=primary_candidates[0])] + subject_entities
         subject_names = {_entity_name(entity).lower() for entity in subject_entities if _entity_name(entity)}
-    for candidate in supporting_candidates:
+    related_subject_candidates = secondary_subject_candidates or supporting_candidates
+    for candidate in related_subject_candidates:
         if candidate.lower() not in subject_names:
             subject_entities.append(SubjectEntity(kind="related", name=candidate))
 
@@ -236,6 +320,80 @@ def _preferred_primary_candidates(semantic_facts: ContentSemanticFacts) -> list[
     return ordered
 
 
+def _secondary_subject_candidates(semantic_facts: ContentSemanticFacts) -> list[str]:
+    secondary: list[str] = []
+    for item in [*semantic_facts.comparison_subject_candidates, *semantic_facts.supporting_product_candidates]:
+        text = str(item).strip()
+        if text and text not in secondary:
+            secondary.append(text)
+
+    brand_candidates = {
+        str(item).strip().lower()
+        for item in semantic_facts.brand_candidates
+        if str(item).strip()
+    }
+    collaboration_text = " ".join(str(item).strip().lower() for item in semantic_facts.collaboration_pairs if str(item).strip())
+    for item in semantic_facts.supporting_subject_candidates:
+        text = str(item).strip()
+        lowered = text.lower()
+        if not text:
+            continue
+        if lowered in brand_candidates:
+            continue
+        if collaboration_text and lowered in collaboration_text:
+            continue
+        if text not in secondary:
+            secondary.append(text)
+    return secondary
+
+
+def _normalize_primary_subject_label(
+    primary_subject: str,
+    *,
+    primary_candidates: list[str],
+    secondary_subject_candidates: list[str],
+) -> str:
+    text = str(primary_subject or "").strip()
+    if not text:
+        return str(primary_candidates[0]).strip() if primary_candidates else ""
+
+    clean_primary_candidates = [
+        candidate
+        for candidate in primary_candidates
+        if not _contains_secondary_subject(candidate, secondary_subject_candidates)
+    ]
+    if not _contains_secondary_subject(text, secondary_subject_candidates):
+        return text
+    if not clean_primary_candidates:
+        return text
+    normalized_text = _normalize_subject_text(text)
+    for candidate in clean_primary_candidates:
+        normalized_candidate = _normalize_subject_text(candidate)
+        if normalized_candidate and (
+            normalized_text.startswith(normalized_candidate)
+            or normalized_candidate in normalized_text
+        ):
+            return candidate
+    return clean_primary_candidates[0]
+
+
+def _contains_secondary_subject(text: str, secondary_subject_candidates: list[str]) -> bool:
+    normalized_text = _normalize_subject_text(text)
+    if not normalized_text:
+        return False
+    for candidate in secondary_subject_candidates:
+        normalized_candidate = _normalize_subject_text(candidate)
+        if len(normalized_candidate) < 2:
+            continue
+        if normalized_candidate and normalized_candidate in normalized_text:
+            return True
+    return False
+
+
+def _normalize_subject_text(text: str) -> str:
+    return "".join(ch for ch in str(text or "").lower() if ch.isalnum() or "\u4e00" <= ch <= "\u9fff")
+
+
 def _build_content_understanding_prompt(
     evidence_bundle: dict[str, Any],
     semantic_facts: ContentSemanticFacts,
@@ -253,7 +411,8 @@ def _build_content_understanding_prompt(
         "primary_subject 必须优先表示视频真正围绕的主对象或主产品；"
         "优先参考 semantic_facts.primary_subject_candidates；"
         "如果 semantic_facts.component_candidates 或 semantic_facts.aspect_candidates 非空，这些内容默认只能作为组件、系统、评价点或总结素材，不能抢占 primary_subject；"
-        "如果 semantic_facts.supporting_subject_candidates 非空，它们优先进入 subject_entities 或 observed_entities，而不是覆盖主主体；"
+        "如果 semantic_facts.supporting_subject_candidates、comparison_subject_candidates 或 supporting_product_candidates 非空，它们优先进入 subject_entities 或 observed_entities，而不是覆盖主主体；"
+        "comparison_subject_candidates 表示对比/参照产品，supporting_product_candidates 表示配套或顺带发布的次要产品；"
         "不要把功能系统、部件、工艺过程或服务方误当成 primary_subject，除非视频明确就是在讲它们本身；"
         "如果视频既展示主产品又讨论部件/配件/工艺，把主产品放在 primary_subject，把其他内容放进 subject_entities、observed_entities 或 summary；"
         "如果视频里既出现主对象原始称呼，也出现组件/系统称呼，observed_entities 应优先保留主对象原始称呼，组件/系统可作为补充实体或写进 summary；"
@@ -360,6 +519,8 @@ def _needs_understanding_repair(
             semantic_facts.brand_candidates,
             semantic_facts.primary_subject_candidates,
             semantic_facts.supporting_subject_candidates,
+            semantic_facts.comparison_subject_candidates,
+            semantic_facts.supporting_product_candidates,
             semantic_facts.component_candidates,
             semantic_facts.aspect_candidates,
             semantic_facts.model_candidates,
@@ -442,7 +603,7 @@ async def _repair_empty_understanding_payload(
         "2. 如果证据不足，也必须明确写出 review_reasons，不能整包留空；"
         "3. 不要编造未被证据支持的品牌/型号；"
         "4. 允许保守，但不能忽略 semantic_facts 已经明确给出的候选；"
-        "5. 如果 semantic_facts 已区分 primary_subject_candidates、component_candidates、aspect_candidates，必须优先让主对象候选成为 primary_subject，组件和维度不要顶替主主体。"
+        "5. 如果 semantic_facts 已区分 primary_subject_candidates、comparison_subject_candidates、supporting_product_candidates、component_candidates、aspect_candidates，必须优先让主对象候选成为 primary_subject，对比产品和配套产品不要顶替主主体。"
         f"\n原始输出:\n{getattr(response, 'content', '')}"
         f"\n语义事实:\n{semantic_facts.__dict__}"
         f"\n紧凑证据包:\n{_build_compact_evidence_payload(evidence_bundle)}"

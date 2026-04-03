@@ -182,6 +182,8 @@ def test_parse_content_semantic_facts_payload_preserves_role_candidates():
         {
             "primary_subject_candidates": ["机能双肩包", "机能双肩包"],
             "supporting_subject_candidates": ["HSJUN", "BOLTBOAT"],
+            "comparison_subject_candidates": ["上一代机能包", "竞品双肩包"],
+            "supporting_product_candidates": ["配套收纳包"],
             "component_candidates": ["背负系统", "分仓结构"],
             "aspect_candidates": ["背负", "结构"],
             "brand_candidates": ["HSJUN"],
@@ -190,5 +192,7 @@ def test_parse_content_semantic_facts_payload_preserves_role_candidates():
 
     assert facts.primary_subject_candidates == ["机能双肩包"]
     assert facts.supporting_subject_candidates == ["HSJUN", "BOLTBOAT"]
+    assert facts.comparison_subject_candidates == ["上一代机能包", "竞品双肩包"]
+    assert facts.supporting_product_candidates == ["配套收纳包"]
     assert facts.component_candidates == ["背负系统", "分仓结构"]
     assert facts.aspect_candidates == ["背负", "结构"]

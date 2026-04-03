@@ -232,6 +232,8 @@ async def test_infer_content_understanding_uses_reasoning_provider_payload(monke
     assert "cue_lines" in prompts[0]
     assert "relation_hints" in prompts[0]
     assert "primary_subject_candidates" in prompts[0]
+    assert "comparison_subject_candidates" in prompts[0]
+    assert "supporting_product_candidates" in prompts[0]
     assert "semantic_facts.primary_subject_candidates" in prompts[1]
     assert "不要把功能系统、部件、工艺过程或服务方误当成 primary_subject" in prompts[1]
     assert result.video_type == "tutorial"
@@ -1152,6 +1154,44 @@ def test_normalize_understanding_subject_roles_prefers_non_component_primary_can
     assert normalized.subject_entities[0].name == "户外背包"
 
 
+def test_normalize_understanding_subject_roles_strips_secondary_product_from_primary_subject_label():
+    from roughcut.review.content_understanding_infer import _normalize_understanding_subject_roles
+    from roughcut.review.content_understanding_schema import ContentSemanticFacts, ContentUnderstanding, SubjectEntity
+
+    normalized = _normalize_understanding_subject_roles(
+        ContentUnderstanding(
+            video_type="product_review",
+            content_domain="edc_tools",
+            primary_subject="REATE刀具（EDC桌布系列特别版）",
+            semantic_facts=ContentSemanticFacts(),
+            subject_entities=[
+                SubjectEntity(kind="product", name="REATE刀具"),
+                SubjectEntity(kind="related", name="EDC桌布"),
+            ],
+            observed_entities=[
+                SubjectEntity(kind="product", name="这把刀"),
+                SubjectEntity(kind="related", name="EDC桌布"),
+            ],
+            video_theme="组装完成刀具的外观效果与配套桌布发布展示",
+            summary="视频前半段展示刀具完成效果，后半段带出配套桌布。",
+            hook_line="这把刀终于组完了",
+            engagement_question="你更关注刀还是配套桌布？",
+            search_queries=["REATE 刀具 EDC桌布"],
+            needs_review=True,
+        ),
+        ContentSemanticFacts(
+            primary_subject_candidates=["REATE刀具", "组装完成的刀具"],
+            supporting_subject_candidates=["EDC桌布", "FS"],
+            brand_candidates=["REATE", "FS"],
+            product_type_candidates=["折刀"],
+        ),
+    )
+
+    assert normalized.primary_subject == "REATE刀具"
+    assert normalized.subject_entities[0].name == "REATE刀具"
+    assert normalized.subject_entities[-1].name == "EDC桌布"
+
+
 def test_build_compact_evidence_payload_preserves_subject_role_candidates():
     from roughcut.review.content_understanding_infer import _build_compact_evidence_payload
     from roughcut.review.content_understanding_schema import ContentSemanticFacts
@@ -1172,3 +1212,34 @@ def test_build_compact_evidence_payload_preserves_subject_role_candidates():
     assert payload["semantic_fact_inputs"]["cue_lines"] == ["重点看这个包和它的背负系统"]
     assert facts.primary_subject_candidates == ["机能双肩包"]
     assert facts.component_candidates == ["背负系统"]
+
+
+def test_backfill_semantic_facts_from_understanding_recovers_primary_and_comparison_roles():
+    from roughcut.review.content_understanding_infer import _backfill_semantic_facts_from_understanding
+    from roughcut.review.content_understanding_schema import ContentSemanticFacts, ContentUnderstanding, SubjectEntity
+
+    understanding = ContentUnderstanding(
+        video_type="review/discussion",
+        content_domain="flashlight/EDC手电筒",
+        primary_subject="SLIM2代手电筒ULTRA版本",
+        semantic_facts=ContentSemanticFacts(),
+        subject_entities=[
+            SubjectEntity(kind="product", name="SLIM2代ULTRA版", brand="傲雷", model="SLIM2 ULTRA"),
+            SubjectEntity(kind="product", name="SLIM2代PRO版", brand="傲雷", model="SLIM2 PRO"),
+            SubjectEntity(kind="comparison_product", name="EDC23手电筒", brand="奈特科尔", model="EDC23"),
+        ],
+        observed_entities=[SubjectEntity(kind="", name="SLIM2代的ULTRA版本")],
+        video_theme="EDC手电筒版本选购对比与保值分析",
+        summary="对比 ULTRA 与 PRO 以及其他 EDC 手电型号。",
+        hook_line="SLIM2 ULTRA 值不值",
+        engagement_question="你会选 PRO 还是 ULTRA？",
+        search_queries=["SLIM2 手电筒 ULTRA 评测"],
+        needs_review=True,
+    )
+
+    facts = _backfill_semantic_facts_from_understanding(ContentSemanticFacts(), understanding)
+
+    assert facts.primary_subject_candidates[0] == "SLIM2代手电筒ULTRA版本"
+    assert "傲雷" in facts.brand_candidates
+    assert "SLIM2 ULTRA" in facts.model_candidates
+    assert "EDC23手电筒" in facts.comparison_subject_candidates

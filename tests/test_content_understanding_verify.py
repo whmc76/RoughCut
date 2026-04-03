@@ -546,3 +546,159 @@ async def test_verify_content_understanding_does_not_promote_component_biased_re
 
     assert result.primary_subject == "户外徒步背包"
     assert result.resolved_primary_subject == ""
+
+
+@pytest.mark.asyncio
+async def test_verify_content_understanding_does_not_promote_secondary_product_biased_resolved_primary_subject():
+    understanding = ContentUnderstanding(
+        video_type="product_review",
+        content_domain="edc_tools",
+        primary_subject="REATE刀具",
+        semantic_facts=ContentSemanticFacts(
+            primary_subject_candidates=["REATE刀具", "组装完成的刀具"],
+            supporting_subject_candidates=["EDC桌布", "FS"],
+            brand_candidates=["REATE", "FS"],
+            product_type_candidates=["折刀"],
+        ),
+        subject_entities=[SubjectEntity(kind="product", name="REATE刀具"), SubjectEntity(kind="related", name="EDC桌布")],
+        observed_entities=[SubjectEntity(kind="product", name="这把刀"), SubjectEntity(kind="related", name="EDC桌布")],
+        video_theme="组装完成刀具的外观效果与EDC日常实用价值展示",
+        summary="视频先展示刀具完成效果，后半段带到配套桌布发布。",
+        hook_line="这把刀终于组完了",
+        engagement_question="你更关注刀还是配套桌布？",
+        search_queries=["REATE 刀具 EDC桌布"],
+        confidence={"overall": 0.82},
+        needs_review=True,
+    )
+
+    result = await verify_content_understanding(
+        understanding=understanding,
+        evidence_bundle={"transcript_excerpt": "前半段看这把REATE刀，后半段补充一下EDC桌布新系列"},
+        verification_bundle=HybridVerificationBundle(
+            search_queries=["REATE 刀具 EDC桌布"],
+            online_results=[{"title": "REATE 刀具展示"}, {"title": "FS EDC桌布系列发布"}],
+            database_results=[],
+        ),
+        provider=FakeProvider(
+            {
+                "video_type": "product_review",
+                "content_domain": "edc_tools",
+                "primary_subject": "REATE刀具（EDC桌布系列特别版）",
+                "subject_entities": [
+                    {"kind": "product", "name": "REATE刀具", "brand": "REATE"},
+                    {"kind": "配套产品", "name": "EDC桌布", "brand": "FS"},
+                ],
+                "observed_entities": [
+                    {"kind": "product", "name": "这把刀"},
+                    {"kind": "related", "name": "EDC桌布"},
+                ],
+                "resolved_entities": [
+                    {"kind": "product", "name": "REATE刀具", "brand": "REATE"},
+                    {"kind": "配套产品", "name": "EDC桌布", "brand": "FS"},
+                ],
+                "resolved_primary_subject": "REATE刀具（EDC桌布系列特别版）",
+                "entity_resolution_map": [
+                    {
+                        "observed_name": "这把刀",
+                        "resolved_name": "REATE刀具",
+                        "confidence": 0.92,
+                        "reason": "视频前半段和检索都指向 REATE 刀具",
+                    }
+                ],
+                "video_theme": "组装完成刀具的外观效果与配套桌布发布展示",
+                "summary": "视频先展示刀具完成效果，后半段带到配套桌布发布。",
+                "hook_line": "这把刀终于组完了",
+                "engagement_question": "你更关注刀还是配套桌布？",
+                "search_queries": ["REATE 刀具 EDC桌布"],
+                "evidence_spans": [],
+                "uncertainties": [],
+                "confidence": {"overall": 0.88, "resolution": 0.92},
+                "needs_review": True,
+                "review_reasons": ["核验结果混入了配套产品名称"],
+            }
+        ),
+    )
+
+    assert result.primary_subject == "REATE刀具"
+    assert result.resolved_primary_subject == ""
+
+
+@pytest.mark.asyncio
+async def test_verify_content_understanding_detects_secondary_product_bias_from_resolved_entities_even_without_supporting_candidates():
+    understanding = ContentUnderstanding(
+        video_type="product_review",
+        content_domain="edc_tools",
+        primary_subject="组装完成的REATE刀具",
+        semantic_facts=ContentSemanticFacts(
+            primary_subject_candidates=["组装完成的REATE刀具", "组装完成的刀具"],
+            supporting_subject_candidates=["瑞特", "金丝帮"],
+            brand_candidates=["REATE", "FS"],
+            product_type_candidates=["折刀"],
+        ),
+        subject_entities=[SubjectEntity(kind="product", name="组装完成的REATE刀具")],
+        observed_entities=[SubjectEntity(kind="product", name="这把"), SubjectEntity(kind="related", name="EDC桌布")],
+        video_theme="组装完成刀具的外观效果展示",
+        summary="视频先展示刀具完成效果，后半段带到配套桌布发布。",
+        hook_line="这把刀终于组完了",
+        engagement_question="你更关注刀还是配套桌布？",
+        search_queries=["REATE 刀具 EDC桌布"],
+        confidence={"overall": 0.82},
+        needs_review=True,
+    )
+
+    result = await verify_content_understanding(
+        understanding=understanding,
+        evidence_bundle={"transcript_excerpt": "前半段看这把REATE刀，后半段补充一下EDC桌布新系列"},
+        verification_bundle=HybridVerificationBundle(
+            search_queries=["REATE 刀具 EDC桌布"],
+            online_results=[{"title": "REATE 刀具展示"}, {"title": "FS EDC桌布系列发布"}],
+            database_results=[],
+        ),
+        provider=FakeProvider(
+            {
+                "video_type": "product_review",
+                "content_domain": "edc_tools",
+                "primary_subject": "组装完成的REATE刀具（EDC桌布系列特别版）",
+                "subject_entities": [
+                    {"kind": "刀具品牌", "name": "瑞特", "brand": "REATE"},
+                    {"kind": "配套产品", "name": "EDC桌布", "brand": "FS"},
+                ],
+                "observed_entities": [
+                    {"kind": "product", "name": "这把"},
+                    {"kind": "related", "name": "EDC桌布"},
+                ],
+                "resolved_entities": [
+                    {"kind": "刀具品牌", "name": "瑞特", "brand": "REATE"},
+                    {"kind": "配套产品", "name": "EDC桌布", "brand": "FS"},
+                ],
+                "resolved_primary_subject": "组装完成的REATE刀具（EDC桌布系列特别版）",
+                "entity_resolution_map": [
+                    {
+                        "observed_name": "这把",
+                        "resolved_name": "组装完成的REATE刀具",
+                        "confidence": 0.92,
+                        "reason": "视频前半段和检索都指向 REATE 刀具",
+                    },
+                    {
+                        "observed_name": "EDC桌布",
+                        "resolved_name": "EDC桌布系列",
+                        "confidence": 0.8,
+                        "reason": "后半段补充发布了配套桌布系列",
+                    },
+                ],
+                "video_theme": "组装完成刀具的外观效果与配套桌布发布展示",
+                "summary": "视频先展示刀具完成效果，后半段带到配套桌布发布。",
+                "hook_line": "这把刀终于组完了",
+                "engagement_question": "你更关注刀还是配套桌布？",
+                "search_queries": ["REATE 刀具 EDC桌布"],
+                "evidence_spans": [],
+                "uncertainties": [],
+                "confidence": {"overall": 0.88, "resolution": 0.92},
+                "needs_review": True,
+                "review_reasons": ["核验结果混入了配套产品名称"],
+            }
+        ),
+    )
+
+    assert result.primary_subject == "组装完成的REATE刀具"
+    assert result.resolved_primary_subject == ""

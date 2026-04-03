@@ -34,12 +34,14 @@ def resolve_entities(
     conflicts = _collect_conflict_fields(base, candidate)
     resolution_confidence = float(candidate.confidence.get("resolution") or candidate.confidence.get("overall") or 0.0)
     component_biased_resolved_subject = _is_component_biased_resolved_primary_subject(base, candidate)
+    supporting_biased_resolved_subject = _is_supporting_biased_resolved_primary_subject(base, candidate)
     use_resolved = bool(
         allow_entity_resolution
         and candidate.resolved_primary_subject
         and candidate.resolved_entities
         and resolution_confidence >= _RESOLUTION_CONFIDENCE_THRESHOLD
         and not component_biased_resolved_subject
+        and not supporting_biased_resolved_subject
     )
     review_reasons = _merge_unique(
         list(base.review_reasons),
@@ -48,6 +50,7 @@ def resolve_entities(
             "缺少直接视频证据，外部搜索/内部检索仅作弱佐证" if not has_direct_evidence else "",
             "核验结果与当前视频结论存在冲突，已保守保留原结论" if conflicts else "",
             "核验归一化结果更偏向组件或功能描述，已保守保留主产品主体" if component_biased_resolved_subject else "",
+            "核验归一化结果混入了次要产品或配套对象名称，已保守保留主产品主体" if supporting_biased_resolved_subject else "",
         ],
     )
     uncertainties = _merge_unique(list(base.uncertainties), list(candidate.uncertainties))
@@ -62,7 +65,7 @@ def resolve_entities(
         subject_entities=subject_entities,
         observed_entities=observed_entities,
         resolved_entities=list(candidate.resolved_entities),
-        resolved_primary_subject="" if component_biased_resolved_subject else candidate.resolved_primary_subject,
+        resolved_primary_subject="" if component_biased_resolved_subject or supporting_biased_resolved_subject else candidate.resolved_primary_subject,
         entity_resolution_map=list(candidate.entity_resolution_map),
         uncertainties=uncertainties,
         conflicts=merged_conflicts,
@@ -196,6 +199,40 @@ def _is_component_biased_resolved_primary_subject(
     return False
 
 
+def _is_supporting_biased_resolved_primary_subject(
+    base: ContentUnderstanding,
+    candidate: ContentUnderstanding,
+) -> bool:
+    resolved_name = str(candidate.resolved_primary_subject or "").strip().lower()
+    if not resolved_name:
+        return False
+
+    secondary_subject_candidates = _secondary_subject_candidates(base)
+    secondary_subject_candidates.extend(_secondary_product_entity_names(candidate))
+    secondary_subject_candidates = list(dict.fromkeys(item for item in secondary_subject_candidates if item))
+    if not secondary_subject_candidates:
+        return False
+
+    matched_secondary = [item for item in secondary_subject_candidates if item in resolved_name]
+    if not matched_secondary:
+        return False
+
+    preferred_primary = [
+        item.lower()
+        for item in _preferred_primary_candidates(base)
+        if not _contains_secondary_subject(item, secondary_subject_candidates)
+    ]
+    preferred_primary.extend(
+        item.lower()
+        for item in _resolved_primary_candidates(candidate, secondary_subject_candidates)
+        if item
+    )
+    preferred_primary = list(dict.fromkeys(item for item in preferred_primary if item))
+    if not preferred_primary:
+        return False
+    return any(primary in resolved_name for primary in preferred_primary)
+
+
 def _preferred_primary_candidates(base: ContentUnderstanding) -> list[str]:
     component_candidates = {
         str(item).strip().lower()
@@ -214,3 +251,70 @@ def _preferred_primary_candidates(base: ContentUnderstanding) -> list[str]:
             if text and text not in ordered:
                 ordered.append(text)
     return ordered
+
+
+def _secondary_subject_candidates(base: ContentUnderstanding) -> list[str]:
+    semantic_facts = base.semantic_facts
+    secondary: list[str] = []
+    for item in [*semantic_facts.comparison_subject_candidates, *semantic_facts.supporting_product_candidates]:
+        text = str(item).strip().lower()
+        if text and text not in secondary:
+            secondary.append(text)
+
+    brand_candidates = {
+        str(item).strip().lower()
+        for item in semantic_facts.brand_candidates
+        if str(item).strip()
+    }
+    collaboration_text = " ".join(
+        str(item).strip().lower()
+        for item in semantic_facts.collaboration_pairs
+        if str(item).strip()
+    )
+    for item in semantic_facts.supporting_subject_candidates:
+        text = str(item).strip().lower()
+        if not text:
+            continue
+        if text in brand_candidates:
+            continue
+        if collaboration_text and text in collaboration_text:
+            continue
+        if text not in secondary:
+            secondary.append(text)
+    return secondary
+
+
+def _contains_secondary_subject(text: str, secondary_subject_candidates: list[str]) -> bool:
+    normalized_text = str(text or "").strip().lower()
+    if not normalized_text:
+        return False
+    return any(len(candidate) >= 2 and candidate in normalized_text for candidate in secondary_subject_candidates)
+
+
+def _secondary_product_entity_names(candidate: ContentUnderstanding) -> list[str]:
+    secondary_kind_markers = ("配套", "accessory", "related", "secondary")
+    names: list[str] = []
+    for entity in candidate.resolved_entities:
+        kind = str(entity.kind or "").strip().lower()
+        name = str(entity.name or "").strip().lower()
+        if not name:
+            continue
+        if any(marker in kind for marker in secondary_kind_markers) and name not in names:
+            names.append(name)
+    return names
+
+
+def _resolved_primary_candidates(
+    candidate: ContentUnderstanding,
+    secondary_subject_candidates: list[str],
+) -> list[str]:
+    candidates: list[str] = []
+    for mapping in candidate.entity_resolution_map:
+        resolved_name = str(mapping.resolved_name or "").strip()
+        if not resolved_name:
+            continue
+        if _contains_secondary_subject(resolved_name, secondary_subject_candidates):
+            continue
+        if resolved_name not in candidates:
+            candidates.append(resolved_name)
+    return candidates

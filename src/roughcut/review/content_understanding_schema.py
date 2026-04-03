@@ -24,6 +24,8 @@ class EntityResolution:
 class ContentSemanticFacts:
     primary_subject_candidates: list[str] = field(default_factory=list)
     supporting_subject_candidates: list[str] = field(default_factory=list)
+    comparison_subject_candidates: list[str] = field(default_factory=list)
+    supporting_product_candidates: list[str] = field(default_factory=list)
     component_candidates: list[str] = field(default_factory=list)
     aspect_candidates: list[str] = field(default_factory=list)
     brand_candidates: list[str] = field(default_factory=list)
@@ -85,6 +87,8 @@ def parse_content_semantic_facts_payload(data: Any) -> ContentSemanticFacts:
     return ContentSemanticFacts(
         primary_subject_candidates=_items("primary_subject_candidates"),
         supporting_subject_candidates=_items("supporting_subject_candidates"),
+        comparison_subject_candidates=_items("comparison_subject_candidates"),
+        supporting_product_candidates=_items("supporting_product_candidates"),
         component_candidates=_items("component_candidates"),
         aspect_candidates=_items("aspect_candidates"),
         brand_candidates=_items("brand_candidates"),

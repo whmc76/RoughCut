@@ -33,13 +33,15 @@ async def infer_content_semantic_facts(
     prompt = (
         "你是视频证据语义抽取器。请根据多模态证据提取可供后续检索和消歧使用的通用语义事实，"
         "只输出一个 JSON 对象，不要 Markdown，不要代码块，不要解释。"
-        "字段必须包括 primary_subject_candidates, supporting_subject_candidates, component_candidates, "
+        "字段必须包括 primary_subject_candidates, supporting_subject_candidates, comparison_subject_candidates, supporting_product_candidates, component_candidates, "
         "aspect_candidates, brand_candidates, model_candidates, product_name_candidates, "
         "product_type_candidates, entity_candidates, collaboration_pairs, search_expansions, evidence_sentences。"
         "要求："
         "优先识别视频真正围绕的可售主体或被重点展示的核心对象；"
         "把主对象或主产品放进 primary_subject_candidates；"
-        "把联名方、配套对象、辅助对象放进 supporting_subject_candidates；"
+        "把联名方、品牌方、辅助对象放进 supporting_subject_candidates；"
+        "把拿来对比、参照、上一代、竞品等对象放进 comparison_subject_candidates；"
+        "把配套产品、联动带出但不是主讲对象的新产品、周边或副产品放进 supporting_product_candidates；"
         "把功能系统、部件、配件、工艺模块放进 component_candidates；"
         "把背负、做工、材质、结构、续航、亮度、锋利度等评价维度放进 aspect_candidates；"
         "不要把功能系统、部件、工艺过程、服务方或背景物直接当成主产品候选；"
@@ -67,6 +69,8 @@ async def infer_content_semantic_facts(
                 required_fields=[
                     "primary_subject_candidates",
                     "supporting_subject_candidates",
+                    "comparison_subject_candidates",
+                    "supporting_product_candidates",
                     "component_candidates",
                     "aspect_candidates",
                     "brand_candidates",
@@ -79,7 +83,7 @@ async def infer_content_semantic_facts(
                     "evidence_sentences",
                 ],
                 empty_object_description=(
-                    '{"primary_subject_candidates":[],"supporting_subject_candidates":[],"component_candidates":[],'
+                    '{"primary_subject_candidates":[],"supporting_subject_candidates":[],"comparison_subject_candidates":[],"supporting_product_candidates":[],"component_candidates":[],'
                     '"aspect_candidates":[],"brand_candidates":[],"model_candidates":[],"product_name_candidates":[],'
                     '"product_type_candidates":[],"entity_candidates":[],"collaboration_pairs":[],'
                     '"search_expansions":[],"evidence_sentences":[]}'
@@ -159,6 +163,8 @@ def _semantic_facts_signal_score(facts: ContentSemanticFacts) -> int:
     groups = (
         facts.primary_subject_candidates,
         facts.supporting_subject_candidates,
+        facts.comparison_subject_candidates,
+        facts.supporting_product_candidates,
         facts.component_candidates,
         facts.aspect_candidates,
         facts.brand_candidates,
@@ -182,7 +188,7 @@ async def _repair_semantic_facts(
     repair_prompt = (
         "首轮语义事实提取过空。请基于视频内直接证据做一次更严格的事实补全，只输出严格 JSON。"
         "不要输出最终主题、摘要或包装文案，只补充语义事实。"
-        "字段必须包括 primary_subject_candidates, supporting_subject_candidates, component_candidates, "
+        "字段必须包括 primary_subject_candidates, supporting_subject_candidates, comparison_subject_candidates, supporting_product_candidates, component_candidates, "
         "aspect_candidates, brand_candidates, model_candidates, product_name_candidates, "
         "product_type_candidates, entity_candidates, collaboration_pairs, search_expansions, evidence_sentences。"
         "要求："
@@ -191,6 +197,7 @@ async def _repair_semantic_facts(
         "3. 如果只能提取到泛化主体，也要尽量保留品牌、版本、命名、联名、型号线索；"
         "4. 功能系统、部件、结构、手感、材质等仍然只能放在 component_candidates 或 aspect_candidates；"
         "5. search_expansions 应优先生成可用于后续联网搜索和数据库检索的细粒度查询词。"
+        "6. comparison_subject_candidates 和 supporting_product_candidates 只能放次要产品，不能覆盖 primary_subject_candidates。"
         f"\n首轮事实: {original_facts.__dict__}"
         f"\n证据输入: {_build_facts_repair_evidence_payload(evidence_bundle)}"
     )
@@ -209,6 +216,8 @@ async def _repair_semantic_facts(
         required_fields=[
             "primary_subject_candidates",
             "supporting_subject_candidates",
+            "comparison_subject_candidates",
+            "supporting_product_candidates",
             "component_candidates",
             "aspect_candidates",
             "brand_candidates",
@@ -221,7 +230,7 @@ async def _repair_semantic_facts(
             "evidence_sentences",
         ],
         empty_object_description=(
-            '{"primary_subject_candidates":[],"supporting_subject_candidates":[],"component_candidates":[],"aspect_candidates":[],'
+            '{"primary_subject_candidates":[],"supporting_subject_candidates":[],"comparison_subject_candidates":[],"supporting_product_candidates":[],"component_candidates":[],"aspect_candidates":[],'
             '"brand_candidates":[],"model_candidates":[],"product_name_candidates":[],"product_type_candidates":[],"entity_candidates":[],'
             '"collaboration_pairs":[],"search_expansions":[],"evidence_sentences":[]}'
         ),
@@ -309,6 +318,8 @@ def _enrich_semantic_facts_from_evidence(
     return ContentSemanticFacts(
         primary_subject_candidates=preferred_primary,
         supporting_subject_candidates=list(facts.supporting_subject_candidates),
+        comparison_subject_candidates=list(facts.comparison_subject_candidates),
+        supporting_product_candidates=list(facts.supporting_product_candidates),
         component_candidates=list(facts.component_candidates),
         aspect_candidates=list(facts.aspect_candidates),
         brand_candidates=brand_candidates,
