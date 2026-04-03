@@ -2010,6 +2010,80 @@ async def test_resolve_content_profile_review_feedback_repairs_truncated_json_pa
     }
 
 
+@pytest.mark.asyncio
+async def test_resolve_content_profile_review_feedback_uses_minimal_patch_retry_when_strong_signal_still_returns_empty(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from roughcut.review import content_profile as content_profile_module
+    from roughcut.review.content_understanding_verify import HybridVerificationBundle
+
+    class FakeResponse:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def as_json(self):
+            return dict(self._payload)
+
+    class FakeProvider:
+        def __init__(self):
+            self.calls = 0
+
+        async def complete(self, *args, **kwargs):
+            self.calls += 1
+            if self.calls < 3:
+                return FakeResponse({"apply_feedback": False})
+            return FakeResponse(
+                {
+                    "apply_feedback": True,
+                    "subject_brand": "傲雷",
+                    "subject_model": "司令官2Ultra",
+                }
+            )
+
+    provider = FakeProvider()
+    monkeypatch.setattr(content_profile_module, "get_reasoning_provider", lambda: provider)
+
+    result = await content_profile_module.resolve_content_profile_review_feedback(
+        draft_profile={
+            "subject_brand": "耐克",
+            "subject_model": "SK05",
+            "subject_type": "SLIM2代ULTRA版手电筒",
+        },
+        source_name="video.mp4",
+        review_feedback="品牌改成傲雷，型号改成司令官2Ultra。",
+        proposed_feedback={
+            "subject_brand": "傲雷",
+            "subject_model": "司令官2Ultra",
+        },
+        verification_bundle=HybridVerificationBundle(
+            search_queries=["傲雷 司令官2Ultra"],
+            online_results=[
+                {
+                    "title": "OLIGHT傲雷 司令官2 Ultra手电",
+                    "snippet": "旗舰新品 司令官2 Ultra",
+                },
+                {
+                    "title": "地表最硬便携手电筒?傲雷司令官Ultra多功能EDC手电测评",
+                    "snippet": "傲雷司令官 Ultra 体验",
+                },
+            ],
+            database_results=[
+                {
+                    "brand": "傲雷",
+                    "model": "司令官2 Ultra",
+                    "primary_subject": "EDC手电",
+                }
+            ],
+        ),
+    )
+
+    assert provider.calls == 3
+    assert result == {
+        "subject_brand": "傲雷",
+        "subject_model": "司令官2Ultra",
+    }
+
+
 def test_build_review_feedback_search_queries_expands_brand_model_and_subject_context():
     queries = build_review_feedback_search_queries(
         draft_profile={

@@ -2224,6 +2224,34 @@ async def resolve_content_profile_review_feedback(
                     json_mode=True,
                 )
             payload = await _load_review_feedback_json_payload(provider, repair_response)
+        if not bool((payload or {}).get("apply_feedback")) and _review_feedback_has_strong_verification_signal(
+            proposed,
+            verification_bundle,
+        ):
+            minimal_prompt = (
+                "当前任务只做最小修正判断。"
+                "你只需要判断 proposed_feedback 中的品牌/型号是否应作用于当前视频主对象。"
+                "前两轮未能稳定输出结果，但外部佐证已经较强。"
+                "如果当前视频仍围绕同一产品族展开，且 proposed_feedback 与混合检索一致，就应 apply_feedback=true。"
+                "只输出严格 JSON。"
+                '{"apply_feedback":false,"reason":"","subject_brand":"","subject_model":"","subject_type":"","video_theme":"",'
+                '"hook_line":"","visible_text":"","summary":"","engagement_question":"","search_queries":[]}'
+                f"\n当前主对象快照：{json.dumps(current_snapshot, ensure_ascii=False)}"
+                f"\n审核意见原文：{note or '无'}"
+                f"\n候选修正：{json.dumps(proposed, ensure_ascii=False)}"
+                f"\n混合检索结果：{json.dumps(verification_snapshot, ensure_ascii=False)}"
+            )
+            with track_usage_operation("content_profile.review_feedback_resolve_minimal_patch"):
+                minimal_response = await provider.complete(
+                    [
+                        Message(role="system", content="你是严谨的中文视频内容审核修正助手。"),
+                        Message(role="user", content=minimal_prompt),
+                    ],
+                    temperature=0.0,
+                    max_tokens=500,
+                    json_mode=True,
+                )
+            payload = await _load_review_feedback_json_payload(provider, minimal_response)
         if not bool((payload or {}).get("apply_feedback")):
             return {}
         resolved: dict[str, Any] = {}
