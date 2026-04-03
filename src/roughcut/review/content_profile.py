@@ -3978,7 +3978,7 @@ def _seed_profile_from_text(
     knife_keywords = ("折刀", "刀片", "锁定机构", "推刀", "梯片", "锁片", "刀柄", "柄身", "开刃")
     plier_keywords = ("工具钳", "钳子", "尖嘴钳", "钢丝钳")
     flashlight_keywords = ("手电", "电筒", "筒身", "紫光", "UV", "流明", "泛光", "照射")
-    bag_keywords = ("机能包", "副包", "小副包", "斜挎包", "胸包", "快取包", "分仓", "挂点", "收纳")
+    bag_keywords = ("机能包", "机能双肩包", "双肩包", "副包", "小副包", "斜挎包", "胸包", "快取包", "分仓", "挂点", "收纳", "背负")
 
     if brand == "LEATHERMAN" or model in {"ARC", "SURGE", "CHARGE"}:
         subject_type = "多功能工具钳"
@@ -4036,6 +4036,15 @@ def _seed_profile_from_text(
             model=model,
             subject_type=subject_type,
             topic_terms=topic_terms,
+        )
+        for item in seeded_queries:
+            if item not in queries:
+                queries.append(item)
+    elif subject_type:
+        seeded_queries = _build_scoped_seed_search_queries(
+            transcript=transcript,
+            subject_type=subject_type,
+            glossary_terms=glossary_terms,
         )
         for item in seeded_queries:
             if item not in queries:
@@ -4349,6 +4358,58 @@ def _build_seeded_search_queries(
         queries.extend([model, f"{model} 教程"])
     if brand and subject_type and "开箱" not in subject_type:
         queries.append(f"{brand} {subject_type}")
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for query in queries:
+        normalized = query.strip()
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            deduped.append(normalized)
+    return deduped
+
+
+def _build_scoped_seed_search_queries(
+    *,
+    transcript: str,
+    subject_type: str,
+    glossary_terms: list[dict[str, Any]] | None,
+) -> list[str]:
+    if not subject_type or not glossary_terms:
+        return []
+    if "包" not in subject_type:
+        return []
+
+    seed_brands: list[str] = []
+    seed_models: list[str] = []
+    seed_product_terms: list[str] = []
+    for term in glossary_terms or []:
+        if not _glossary_term_matches_category_scope(term, transcript):
+            continue
+        correct_form = str(term.get("correct_form") or "").strip()
+        category = str(term.get("category") or "").strip().lower()
+        if not correct_form:
+            continue
+        if _is_brand_like_glossary_category(category):
+            if not term.get("transcription_seed_templates"):
+                continue
+            display = _canonical_brand_display_name(correct_form)
+            if display and display not in seed_brands:
+                seed_brands.append(display)
+        elif _is_model_like_glossary_category(category) or _looks_like_product_model(correct_form):
+            if not term.get("transcription_seed_templates"):
+                continue
+            if correct_form not in seed_models:
+                seed_models.append(correct_form)
+        elif "包" in correct_form and correct_form not in seed_product_terms:
+            seed_product_terms.append(correct_form)
+
+    queries: list[str] = []
+    for brand in seed_brands[:3]:
+        for model in seed_models[:2]:
+            queries.append(f"{brand} {model}")
+        for product_term in seed_product_terms[:1]:
+            queries.append(f"{brand} {product_term}")
+
     deduped: list[str] = []
     seen: set[str] = set()
     for query in queries:

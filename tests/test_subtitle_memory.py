@@ -792,18 +792,17 @@ def test_build_subtitle_review_memory_injects_bag_hotwords_only_with_bag_context
         channel_profile="unboxing_standard",
         glossary_terms=[],
         user_memory={},
-        recent_subtitles=[{"text_final": "这次赫斯郡和船家的游刃机能包，重点看分仓、挂点和背负。"}],
-        content_profile={"video_theme": "机能包开箱评测"},
+        recent_subtitles=[{"text_final": "这次狐蝠工业阵风机能双肩包，重点看分仓、挂点和背负。"}],
+        content_profile={"video_theme": "机能双肩包开箱评测"},
     )
 
     terms = {item["term"] for item in memory["terms"]}
     alias_map = {(item["wrong"], item["correct"]) for item in memory["aliases"]}
 
-    assert "HSJUN" in terms
-    assert "BOLTBOAT" in terms
-    assert "游刃" in terms
-    assert ("赫斯郡", "HSJUN") in alias_map
-    assert ("船家", "BOLTBOAT") in alias_map
+    assert "狐蝠工业" in terms
+    assert "阵风" in terms
+    assert "双肩包" in terms
+    assert ("FOXBAT", "狐蝠工业") in alias_map
 
 
 def test_build_subtitle_review_memory_does_not_inject_bag_hotwords_into_flashlight_context():
@@ -846,6 +845,62 @@ def test_build_transcription_prompt_prioritizes_bag_identity_hotwords_for_functi
     assert "HSJUN" in prompt
     assert "BOLTBOAT" in prompt
     assert "游刃" in prompt
+    assert "狐蝠工业" in prompt
+    assert "阵风" in prompt
+
+
+def test_build_transcription_prompt_uses_bag_transcription_seeds_before_context_is_available():
+    memory = build_subtitle_review_memory(
+        workflow_template="edc_tactical",
+        subject_domain="edc",
+        glossary_terms=[],
+        user_memory={},
+        recent_subtitles=[],
+        content_profile=None,
+        include_recent_terms=False,
+        include_recent_examples=False,
+    )
+
+    prompt = build_transcription_prompt(
+        source_name="20260301-171443.mp4",
+        workflow_template="edc_tactical",
+        review_memory=memory,
+        dialect_profile="beijing",
+    )
+
+    assert "狐蝠工业" in prompt
+    assert "阵风" in prompt
+
+
+def test_build_transcription_prompt_keeps_bag_transcription_seeds_when_review_memory_is_crowded():
+    prompt = build_transcription_prompt(
+        source_name="20260301-171443.mp4",
+        workflow_template="edc_tactical",
+        review_memory={
+            "workflow_template": "edc_tactical",
+            "subject_domain": "edc",
+            "terms": [
+                {"term": "EDC手电", "count": 24},
+                {"term": "OLIGHT司令官2Ultra手电", "count": 22},
+                {"term": "司令官2", "count": 18},
+                {"term": "SEEKER", "count": 16},
+                {"term": "手电", "count": 14},
+                {"term": "OLIGHT", "count": 13},
+                {"term": "双肩包", "count": 6},
+                {"term": "阵风", "count": 6},
+                {"term": "狐蝠工业", "count": 4},
+                {"term": "HSJUN", "count": 4},
+                {"term": "BOLTBOAT", "count": 4},
+            ],
+            "aliases": [],
+            "transcription_seed_terms": ["狐蝠工业", "阵风", "双肩包"],
+        },
+        dialect_profile="beijing",
+    )
+
+    assert "狐蝠工业" in prompt
+    assert "阵风" in prompt
+    assert "双肩包" in prompt
 
 
 def test_detect_glossary_domains_keeps_no_signal_input_empty():

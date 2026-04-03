@@ -361,6 +361,33 @@ def test_seed_profile_from_text_uses_bag_hotwords_as_scoped_search_evidence():
     assert "BOLTBOAT 游刃" in seeded["search_queries"]
 
 
+def test_seed_profile_from_text_extracts_foxbat_zhenfeng_backpack_identity():
+    seeded = _seed_profile_from_text(
+        "这次主要看狐蝠工业阵风机能双肩包，重点看背负、分仓和日常收纳。",
+        glossary_terms=[
+            {
+                "correct_form": "狐蝠工业",
+                "wrong_forms": ["FOXBAT", "Foxbat", "鸿福"],
+                "category": "bag_brand",
+                "domain": "bag",
+                "category_scope": "bag",
+            },
+            {
+                "correct_form": "阵风",
+                "wrong_forms": ["震风", "阵峰"],
+                "category": "bag_model",
+                "domain": "bag",
+                "category_scope": "bag",
+            },
+        ],
+    )
+
+    assert seeded["subject_brand"] == "狐蝠工业"
+    assert seeded["subject_model"] == "阵风"
+    assert seeded["subject_type_candidates"] == ["EDC机能包"]
+    assert any("狐蝠工业 阵风" in item or "狐蝠工业阵风" in item for item in seeded["search_queries"])
+
+
 def test_seed_profile_from_text_does_not_promote_bag_hotwords_outside_bag_context():
     seeded = _seed_profile_from_text(
         "这次主要聊手电的流明和泛光，顺嘴提了赫斯郡和船家，但主体还是 slim2 ultra。",
@@ -393,6 +420,43 @@ def test_seed_profile_from_text_does_not_promote_bag_hotwords_outside_bag_contex
     assert seeded["subject_type_candidates"] == ["EDC手电"]
     assert all("HSJUN" not in item for item in seeded.get("search_queries", []))
     assert all("BOLTBOAT" not in item for item in seeded.get("search_queries", []))
+
+
+def test_seed_profile_from_text_uses_bag_transcription_seeds_as_weak_search_queries_when_identity_missing():
+    seeded = _seed_profile_from_text(
+        "这次主要看这个机能双肩包的背负、分仓和日常收纳。",
+        glossary_terms=[
+            {
+                "correct_form": "狐蝠工业",
+                "wrong_forms": ["FOXBAT", "Foxbat", "鸿福"],
+                "category": "bag_brand",
+                "domain": "bag",
+                "category_scope": "bag",
+                "transcription_seed_templates": ["edc_tactical"],
+            },
+            {
+                "correct_form": "阵风",
+                "wrong_forms": ["震风", "阵峰"],
+                "category": "bag_model",
+                "domain": "bag",
+                "category_scope": "bag",
+                "transcription_seed_templates": ["edc_tactical"],
+            },
+            {
+                "correct_form": "双肩包",
+                "wrong_forms": ["双肩抱"],
+                "category": "bag",
+                "domain": "bag",
+                "category_scope": "bag",
+            },
+        ],
+    )
+
+    assert seeded.get("subject_brand", "") == ""
+    assert seeded.get("subject_model", "") == ""
+    assert seeded["subject_type_candidates"] == ["EDC机能包"]
+    assert "狐蝠工业 阵风" in seeded["search_queries"]
+    assert "狐蝠工业 双肩包" in seeded["search_queries"]
 
 
 def test_sanitize_profile_identity_backfills_supported_transcript_brand_and_model():

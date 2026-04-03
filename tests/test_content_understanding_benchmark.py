@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict
+from datetime import datetime, timezone
 from types import SimpleNamespace
 import uuid
 
@@ -224,3 +225,95 @@ async def test_collect_sample_report_counts_subject_brand_and_model_in_keyword_h
     report = await benchmark_mod.collect_sample_report(job_id, sample, 1.234)
 
     assert report.keyword_hits == ["OLIGHT", "SLIM2"]
+
+
+@pytest.mark.asyncio
+async def test_prepare_job_for_source_updates_reused_job_workflow_template(monkeypatch, tmp_path):
+    source_path = tmp_path / "20260301-171443.mp4"
+    source_path.write_bytes(b"fake")
+    reused_job = SimpleNamespace(
+        id=uuid.uuid4(),
+        source_name=source_path.name,
+        workflow_template=None,
+        language="zh-CN",
+        status="done",
+        error_message="old",
+        updated_at=datetime.now(timezone.utc),
+    )
+    steps = [
+        SimpleNamespace(
+            step_name="probe",
+            status="done",
+            error_message="old",
+            started_at=datetime.now(timezone.utc),
+            finished_at=datetime.now(timezone.utc),
+            metadata_={"old": True},
+        ),
+        SimpleNamespace(
+            step_name="content_profile",
+            status="failed",
+            error_message="boom",
+            started_at=datetime.now(timezone.utc),
+            finished_at=datetime.now(timezone.utc),
+            metadata_={"old": True},
+        ),
+    ]
+
+    class FakeScalarRows:
+        def __init__(self, items):
+            self._items = items
+
+        def first(self):
+            return self._items[0] if self._items else None
+
+        def all(self):
+            return list(self._items)
+
+    class FakeExecuteResult:
+        def __init__(self, items):
+            self._items = items
+
+        def scalars(self):
+            return FakeScalarRows(self._items)
+
+    class FakeSession:
+        def __init__(self):
+            self.calls = 0
+            self.committed = False
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def execute(self, stmt):
+            self.calls += 1
+            if self.calls == 1:
+                return FakeExecuteResult([reused_job])
+            if self.calls == 2:
+                return FakeExecuteResult(steps)
+            raise AssertionError(f"unexpected execute call {self.calls}")
+
+        async def commit(self):
+            self.committed = True
+
+    fake_session = FakeSession()
+    monkeypatch.setattr(benchmark_mod, "get_session_factory", lambda: (lambda: fake_session))
+
+    job_id = await benchmark_mod.prepare_job_for_source(
+        source_path,
+        channel_profile="edc_tactical",
+        language="zh-CN",
+    )
+
+    assert job_id == str(reused_job.id)
+    assert reused_job.workflow_template == "edc_tactical"
+    assert reused_job.language == "zh-CN"
+    assert reused_job.status == "pending"
+    assert reused_job.error_message is None
+    assert fake_session.committed is True
+    assert steps[0].status == "pending"
+    assert steps[0].metadata_ is None
+    assert steps[1].status == "pending"
+    assert steps[1].error_message is None

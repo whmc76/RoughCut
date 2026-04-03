@@ -217,6 +217,8 @@ async def prepare_job_for_source(source_path: Path, *, channel_profile: str, lan
                     step.started_at = None
                     step.finished_at = None
                     step.metadata_ = None
+            reusable.workflow_template = channel_profile or reusable.workflow_template
+            reusable.language = language or reusable.language
             reusable.status = "pending"
             reusable.error_message = None
             reusable.updated_at = datetime.now(timezone.utc)

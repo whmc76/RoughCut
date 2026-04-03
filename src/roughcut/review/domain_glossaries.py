@@ -58,7 +58,7 @@ _BAG_DOMESTIC_BRANDS: tuple[GlossaryTermLike, ...] = (
     {"correct_form": "COMBACK", "wrong_forms": ["Comback", "COM BACK", "康贝克"], "category": "bag_brand", "context_hint": "国产机能风品牌"},
     {"correct_form": "MADEN", "wrong_forms": ["Maden", "马登"], "category": "bag_brand", "context_hint": "国产机能风品牌"},
     {"correct_form": "LEVEL8", "wrong_forms": ["Level8", "LEVEL 8", "地平线8号"], "category": "bag_brand", "context_hint": "国产通勤包品牌"},
-    {"correct_form": "狐蝠工业", "wrong_forms": ["FOXBAT", "Foxbat", "FOXBAT DYNAMICS", "狐蝠", "鸿福"], "category": "bag_brand", "context_hint": "主流机能包品牌"},
+    {"correct_form": "狐蝠工业", "wrong_forms": ["FOXBAT", "Foxbat", "FOXBAT DYNAMICS", "狐蝠", "鸿福"], "category": "bag_brand", "context_hint": "主流机能包品牌", "domain": "bag", "category_scope": "bag", "transcription_seed_templates": ["unboxing_standard", "edc_tactical"]},
     {"correct_form": "头狼工业", "wrong_forms": ["头狼", "头狼工业风", "FIRST WOLF"], "category": "bag_brand", "context_hint": "主流机能包品牌"},
     {"correct_form": "HSJUN", "wrong_forms": ["hesijun", "HESIJUN", "hsjun", "HS JUN", "赫斯郡", "赫斯俊"], "category": "bag_brand", "context_hint": "小众机能包品牌", "domain": "bag", "category_scope": "bag", "transcription_seed_templates": ["unboxing_standard", "edc_tactical"]},
     {"correct_form": "BOLTBOAT", "wrong_forms": ["Boltboat", "BOLT BOAT", "船家"], "category": "bag_brand", "context_hint": "主流机能包品牌", "domain": "bag", "category_scope": "bag", "transcription_seed_templates": ["unboxing_standard", "edc_tactical"]},
@@ -360,7 +360,9 @@ _DOMAIN_TERM_LIBRARY: dict[str, tuple[GlossaryTermLike, ...]] = {
         {"correct_form": "FXX1小副包", "wrong_forms": ["F叉二一小副包", "F X X 1小副包"], "category": "bag_model", "context_hint": "狐蝠工业机能副包型号"},
         {"correct_form": "FXX1", "wrong_forms": ["F叉二一", "F X X 1"], "category": "bag_model", "context_hint": "狐蝠工业机能副包型号"},
         {"correct_form": "游刃", "wrong_forms": [], "category": "bag_model", "context_hint": "机能包产品名", "domain": "bag", "category_scope": "bag", "transcription_seed_templates": ["unboxing_standard", "edc_tactical"]},
+        {"correct_form": "阵风", "wrong_forms": ["震风", "阵峰"], "category": "bag_model", "context_hint": "机能双肩包产品名", "domain": "bag", "category_scope": "bag", "transcription_seed_templates": ["unboxing_standard", "edc_tactical"]},
         {"correct_form": "机能包", "wrong_forms": ["机能包儿"], "category": "bag", "context_hint": "EDC 包袋品类"},
+        {"correct_form": "双肩包", "wrong_forms": ["双肩抱"], "category": "bag", "context_hint": "EDC 包袋品类"},
         {"correct_form": "通勤包", "wrong_forms": ["通情包"], "category": "bag", "context_hint": "EDC 包袋品类"},
         {"correct_form": "斜挎包", "wrong_forms": ["斜胯包"], "category": "bag", "context_hint": "EDC 包袋品类"},
         {"correct_form": "胸包", "wrong_forms": [], "category": "bag", "context_hint": "EDC 包袋品类"},
@@ -434,11 +436,11 @@ _DOMAIN_KEYWORDS: dict[str, tuple[str, ...]] = {
     "toy": ("潮玩", "盲盒", "隐藏款", "官图", "原型", "涂装", "素体", "关节", "可动", "盒损", "手办"),
     "knife": ("折刀", "主刀", "副刀", "锁定", "开合", "背夹", "刃型", "柄材", "钢材", "轴锁", "线锁", "NOC", "RUIKE", "SANRENMU", "KIZER", "WE Knife", "CIVIVI", "BESTECH", "KUBEY", "REAL STEEL", "CJRB", "ARTISAN CUTLERY", "MAXACE", "MUNDUS", "MICROTECH"),
     "flashlight": ("手电", "手电评测", "灯珠", "色温", "泛光", "聚光", "流明", "筒身", "尾按", "尾绳孔", "绳孔", "胶塞儿", "微弧版", "微弧氧化版", "UV", "FENIX", "NITECORE", "NEXTORCH", "ACEBEAM", "LOOPGEAR", "SUPFIRE", "JETBEAM", "KLARUS", "WUBEN", "NexTool"),
-    "bag": ("机能包", "通勤包", "斜挎包", "胸包", "快取包", "收纳包", "小副包", "FXX1", "FXX1小副包", "tomtoc", "PGYTECH", "NIID", "COMBACK", "MADEN", "LEVEL8", "狐蝠工业", "头狼工业", "BOLTBOAT", "PSIGEAR", "LIIGEAR"),
+    "bag": ("机能包", "双肩包", "通勤包", "斜挎包", "胸包", "快取包", "收纳包", "小副包", "阵风", "游刃", "FXX1", "FXX1小副包", "tomtoc", "PGYTECH", "NIID", "COMBACK", "MADEN", "LEVEL8", "狐蝠工业", "头狼工业", "BOLTBOAT", "PSIGEAR", "LIIGEAR"),
     "lighter": ("打火机", "内胆", "火轮", "煤油", "直冲", "火焰"),
     "tactical": ("战术", "胸挂", "快拆", "模组", "尼龙", "挂载"),
     "outdoor": ("户外", "露营", "徒步", "营地", "炉头", "天幕", "野营"),
-    "functional_wear": ("机能", "机能装备", "战术裤", "通勤包", "工装", "穿搭", "机能包", "斜挎包", "胸包", "tomtoc", "PGYTECH", "NIID", "COMBACK", "MADEN", "LEVEL8", "狐蝠工业", "头狼工业", "BOLTBOAT", "PSIGEAR", "LIIGEAR"),
+    "functional_wear": ("机能", "机能装备", "战术裤", "双肩包", "通勤包", "工装", "穿搭", "机能包", "斜挎包", "胸包", "阵风", "游刃", "tomtoc", "PGYTECH", "NIID", "COMBACK", "MADEN", "LEVEL8", "狐蝠工业", "头狼工业", "BOLTBOAT", "PSIGEAR", "LIIGEAR"),
 }
 
 _DOMAIN_COMPATIBILITY: dict[str, tuple[str, ...]] = {
@@ -684,6 +686,15 @@ def merge_glossary_terms(
     base_terms: list[GlossaryTermLike] | None,
     extra_terms: list[GlossaryTermLike] | None,
 ) -> list[GlossaryTermLike]:
+    passthrough_keys = (
+        "category",
+        "context_hint",
+        "domain",
+        "category_scope",
+        "transcription_seed_templates",
+        "scope_type",
+        "scope_value",
+    )
     merged: OrderedDict[str, GlossaryTermLike] = OrderedDict()
     for collection in (base_terms or [], extra_terms or []):
         for raw in collection:
@@ -699,12 +710,10 @@ def merge_glossary_terms(
                     seen.add(token)
                     wrong_forms.append(token)
             current["wrong_forms"] = wrong_forms
-            if raw.get("category") and not current.get("category"):
-                current["category"] = raw.get("category")
-            if raw.get("context_hint") and not current.get("context_hint"):
-                current["context_hint"] = raw.get("context_hint")
-            if raw.get("domain") and not current.get("domain"):
-                current["domain"] = raw.get("domain")
+            for key in passthrough_keys:
+                value = raw.get(key)
+                if value and not current.get(key):
+                    current[key] = value
             merged[correct_form] = current
     return list(merged.values())
 

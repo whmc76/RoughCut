@@ -18,6 +18,7 @@ from roughcut.review.domain_glossaries import (
     select_primary_subject_domain,
 )
 from roughcut.speech.dialects import resolve_transcription_dialect
+from roughcut.edit.presets import normalize_workflow_template_name
 
 
 _DOMAIN_ANCHORS = (
@@ -290,6 +291,8 @@ def build_subtitle_review_memory(
     alias_pairs: list[dict[str, str]] = []
     seen_examples: set[str] = set()
     seen_aliases: set[tuple[str, str]] = set()
+    transcription_seed_terms: list[str] = []
+    seen_transcription_seeds: set[str] = set()
     builtin_glossary_terms = resolve_builtin_glossary_terms(
         workflow_template=workflow_template,
         content_profile=content_profile,
@@ -400,6 +403,14 @@ def build_subtitle_review_memory(
                 alias_pairs.append({"wrong": wrong, "correct": correct})
 
     for term in effective_glossary_terms:
+        is_transcription_seed = _workflow_template_matches_transcription_seed(term, workflow_template)
+        if is_transcription_seed:
+            correct_form = _normalize_term(term.get("correct_form"))
+            if correct_form:
+                if correct_form not in seen_transcription_seeds:
+                    seen_transcription_seeds.add(correct_form)
+                    transcription_seed_terms.append(correct_form)
+                remember_term(correct_form, 3)
         if not _glossary_term_supported_by_review_context(
             term,
             subject_domain=resolved_subject_domain,
@@ -557,6 +568,7 @@ def build_subtitle_review_memory(
         "workflow_template": workflow_template or "",
         "subject_domain": resolved_subject_domain or "",
         "terms": ranked_terms,
+        "transcription_seed_terms": transcription_seed_terms[:16],
         "aliases": alias_pairs[:120],
         "confirmed_entities": confirmed_entities[:6],
         "negative_alias_pairs": list((user_memory or {}).get("negative_alias_pairs") or [])[:40],
@@ -728,16 +740,35 @@ def build_transcription_prompt(
         if dialect_spec["prompt_hint"]:
             snippets.append(str(dialect_spec["prompt_hint"]).rstrip("。.!！？；;"))
 
-    dominant_domains = _select_prompt_dominant_domains(review_memory)
+    dominant_domains = _select_prompt_dominant_domains(
+        review_memory,
+        workflow_template=workflow_template,
+    )
     base_terms = [
         str(item.get("term") or "").strip()
         for item in (review_memory or {}).get("terms") or []
         if _prompt_term_supported_by_domains(str(item.get("term") or "").strip(), dominant_domains)
     ]
     base_terms = [item for item in base_terms if item]
+    prioritized_seed_terms = [
+        str(item or "").strip()
+        for item in (review_memory or {}).get("transcription_seed_terms") or []
+        if str(item or "").strip() and _prompt_term_supported_by_domains(str(item or "").strip(), dominant_domains)
+    ]
     dialect_hotwords = [str(item).strip() for item in dialect_spec.get("hotwords") or [] if str(item).strip()]
     reserved_dialect_slots = min(4, len(dialect_hotwords))
-    terms = base_terms[: max(0, 12 - reserved_dialect_slots)]
+    term_limit = max(0, 12 - reserved_dialect_slots)
+    terms: list[str] = []
+    for item in prioritized_seed_terms:
+        if item and item not in terms:
+            terms.append(item)
+        if len(terms) >= term_limit:
+            break
+    for item in base_terms:
+        if item and item not in terms:
+            terms.append(item)
+        if len(terms) >= term_limit:
+            break
     for hotword in dialect_hotwords:
         if hotword and hotword not in terms:
             terms.append(hotword)
@@ -763,10 +794,24 @@ def build_transcription_prompt(
     return "。".join(snippets)[:320]
 
 
-def _select_prompt_dominant_domains(review_memory: dict[str, Any] | None) -> set[str]:
+def _select_prompt_dominant_domains(
+    review_memory: dict[str, Any] | None,
+    *,
+    workflow_template: str | None = None,
+) -> set[str]:
+    workflow_domains = set(
+        detect_glossary_domains(
+            workflow_template=workflow_template,
+            content_profile=None,
+            subtitle_items=None,
+        )
+    )
     explicit_subject_domain = normalize_subject_domain((review_memory or {}).get("subject_domain"))
     if explicit_subject_domain:
-        return _expand_review_subject_domains(explicit_subject_domain)
+        expanded = _expand_review_subject_domains(explicit_subject_domain)
+        for domain in workflow_domains:
+            expanded.update(_expand_review_subject_domains(domain))
+        return expanded
 
     scored_domains: Counter[str] = Counter()
     for item in (review_memory or {}).get("terms") or []:
@@ -787,7 +832,7 @@ def _select_prompt_dominant_domains(review_memory: dict[str, Any] | None) -> set
                 scored_domains[domain] += 6
 
     if not scored_domains:
-        return set()
+        return workflow_domains
 
     max_score = max(scored_domains.values())
     selected = {
@@ -798,6 +843,7 @@ def _select_prompt_dominant_domains(review_memory: dict[str, Any] | None) -> set
     expanded = set(selected)
     for domain in tuple(selected):
         expanded.update(_DOMAIN_COMPATIBILITY.get(domain, ()))
+    expanded.update(workflow_domains)
     return expanded
 
 
@@ -947,6 +993,18 @@ def _subject_domain_supports_category_scope(subject_domain: str | None, scope: s
     normalized_subject_domain = normalize_subject_domain(subject_domain)
     primary_domains = _CATEGORY_SCOPE_PRIMARY_DOMAINS.get(str(scope or "").strip().lower(), ())
     return bool(normalized_subject_domain and normalized_subject_domain in primary_domains)
+
+
+def _workflow_template_matches_transcription_seed(term: dict[str, Any], workflow_template: str | None) -> bool:
+    normalized_workflow_template = normalize_workflow_template_name(workflow_template)
+    if not normalized_workflow_template:
+        return False
+    templates = {
+        normalize_workflow_template_name(item) or str(item or "").strip()
+        for item in (term.get("transcription_seed_templates") or [])
+        if str(item or "").strip()
+    }
+    return normalized_workflow_template in templates
 
 
 def _glossary_term_supported_by_review_context(
