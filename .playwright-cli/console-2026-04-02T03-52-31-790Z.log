@@ -1,0 +1,7 @@
+[ 2754045ms] [ERROR] Failed to load resource: net::ERR_EMPTY_RESPONSE @ http://127.0.0.1:38471/api/v1/jobs/7ef9fa00-1f54-4e58-b41d-1d0065dd8b58/activity:0
+[ 2754190ms] [ERROR] Failed to load resource: net::ERR_EMPTY_RESPONSE @ http://127.0.0.1:38471/api/v1/jobs/7ef9fa00-1f54-4e58-b41d-1d0065dd8b58/token-usage:0
+[ 2755050ms] [ERROR] Failed to load resource: net::ERR_EMPTY_RESPONSE @ http://127.0.0.1:38471/api/v1/jobs/7ef9fa00-1f54-4e58-b41d-1d0065dd8b58/activity:0
+[ 2755194ms] [ERROR] Failed to load resource: net::ERR_EMPTY_RESPONSE @ http://127.0.0.1:38471/api/v1/jobs/7ef9fa00-1f54-4e58-b41d-1d0065dd8b58/token-usage:0
+[ 5414815ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:38471/api/v1/jobs/7ef9fa00-1f54-4e58-b41d-1d0065dd8b58/activity:0
+[ 5415817ms] [ERROR] Failed to load resource: net::ERR_EMPTY_RESPONSE @ http://127.0.0.1:38471/api/v1/jobs/7ef9fa00-1f54-4e58-b41d-1d0065dd8b58/activity:0
+[ 5416361ms] [ERROR] Failed to load resource: net::ERR_EMPTY_RESPONSE @ http://127.0.0.1:38471/api/v1/jobs/7ef9fa00-1f54-4e58-b41d-1d0065dd8b58/token-usage:0
