@@ -4,7 +4,9 @@ import pytest
 
 from roughcut.pipeline.orchestrator import PIPELINE_STEPS, create_job_steps
 from roughcut.review.platform_copy import (
+    _build_packaging_fact_queries,
     build_packaging_prompt_brief,
+    build_packaging_fact_sheet_cache_fingerprint,
     generate_platform_packaging,
     normalize_platform_packaging,
     render_platform_packaging_markdown,
@@ -359,3 +361,71 @@ def test_build_packaging_prompt_brief_exposes_subject_domain():
     )
 
     assert brief["subject_domain"] == "ai"
+
+
+def test_build_packaging_prompt_brief_exposes_resolved_review_feedback():
+    brief = build_packaging_prompt_brief(
+        source_name="flashlight.mp4",
+        content_profile={
+            "subject_brand": "耐克",
+            "subject_model": "SK05",
+            "review_mode": "manual_confirmed",
+            "resolved_review_user_feedback": {
+                "subject_brand": "傲雷",
+                "subject_model": "司令官2Ultra",
+                "video_theme": "傲雷司令官2Ultra版本选购与参数对比",
+                "hook_line": "司令官2Ultra到底值不值",
+                "search_queries": ["傲雷 司令官2Ultra", "傲雷 司令官2Ultra 手电"],
+            },
+        },
+        subtitle_items=[],
+    )
+
+    assert brief["manual_review_applied"] is True
+    assert brief["resolved_review_user_feedback"]["subject_brand"] == "傲雷"
+    assert brief["resolved_review_user_feedback"]["subject_model"] == "司令官2Ultra"
+    assert brief["resolved_review_user_feedback"]["search_queries"] == ["傲雷 司令官2Ultra", "傲雷 司令官2Ultra 手电"]
+
+
+def test_build_packaging_fact_queries_prefers_resolved_review_feedback_identity():
+    queries = _build_packaging_fact_queries(
+        source_name="flashlight.mp4",
+        content_profile={
+            "subject_brand": "耐克",
+            "subject_model": "SK05",
+            "subject_type": "手电筒",
+            "search_queries": ["耐克 SK05 手电"],
+            "resolved_review_user_feedback": {
+                "subject_brand": "傲雷",
+                "subject_model": "司令官2Ultra",
+                "subject_type": "SLIM2代ULTRA版手电筒",
+                "search_queries": ["傲雷 司令官2Ultra", "傲雷 司令官2Ultra SLIM2代ULTRA版手电筒"],
+            },
+        },
+        transcript_text="这次重点看司令官2Ultra。",
+    )
+
+    assert queries[:2] == ["傲雷 司令官2Ultra", "傲雷 司令官2Ultra SLIM2代ULTRA版手电筒"]
+    assert all("耐克" not in item for item in queries)
+
+
+def test_build_packaging_fact_sheet_cache_fingerprint_tracks_resolved_review_feedback():
+    base = build_packaging_fact_sheet_cache_fingerprint(
+        source_name="flashlight.mp4",
+        content_profile={"subject_brand": "耐克", "subject_model": "SK05"},
+        subtitle_items=[],
+    )
+    corrected = build_packaging_fact_sheet_cache_fingerprint(
+        source_name="flashlight.mp4",
+        content_profile={
+            "subject_brand": "耐克",
+            "subject_model": "SK05",
+            "resolved_review_user_feedback": {
+                "subject_brand": "傲雷",
+                "subject_model": "司令官2Ultra",
+            },
+        },
+        subtitle_items=[],
+    )
+
+    assert base["resolved_review_feedback_sha256"] != corrected["resolved_review_feedback_sha256"]

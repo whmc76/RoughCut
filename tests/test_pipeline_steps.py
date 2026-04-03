@@ -3210,6 +3210,127 @@ async def test_run_platform_package_reuses_cached_fact_sheet_and_packaging(db_en
 
 
 @pytest.mark.asyncio
+async def test_run_platform_package_passes_resolved_review_feedback_into_packaging_context(
+    db_engine,
+    monkeypatch,
+    tmp_path: Path,
+):
+    import roughcut.pipeline.steps as steps_mod
+
+    factory = async_sessionmaker(db_engine, expire_on_commit=False)
+    job_id = uuid.uuid4()
+    output_path = tmp_path / "rendered.mp4"
+    output_path.write_bytes(b"rendered")
+    settings = SimpleNamespace(
+        output_dir=str(tmp_path / "output"),
+        step_heartbeat_interval_sec=20,
+    )
+    captured: dict[str, Any] = {}
+
+    async with factory() as session:
+        session.add(
+            Job(
+                id=job_id,
+                source_path="jobs/demo/source.mp4",
+                source_name="source.mp4",
+                file_hash="hash-demo",
+                status="processing",
+                language="zh-CN",
+                channel_profile="edc_tactical",
+            )
+        )
+        session.add(JobStep(job_id=job_id, step_name="platform_package", status="running"))
+        session.add(
+            Artifact(
+                job_id=job_id,
+                artifact_type="content_profile_final",
+                data_json={
+                    "subject_brand": "耐克",
+                    "subject_model": "SK05",
+                    "subject_type": "手电筒",
+                    "video_theme": "旧主题",
+                    "hook_line": "旧钩子",
+                    "review_mode": "manual_confirmed",
+                    "resolved_review_user_feedback": {
+                        "subject_brand": "傲雷",
+                        "subject_model": "司令官2Ultra",
+                        "subject_type": "SLIM2代ULTRA版手电筒",
+                        "video_theme": "傲雷司令官2Ultra版本选购与参数对比",
+                        "hook_line": "司令官2Ultra到底值不值",
+                        "search_queries": ["傲雷 司令官2Ultra", "傲雷 司令官2Ultra 手电"],
+                    },
+                },
+            )
+        )
+        session.add(
+            SubtitleItem(
+                job_id=job_id,
+                version=1,
+                item_index=0,
+                start_time=0.0,
+                end_time=1.0,
+                text_raw="这次重点看司令官2Ultra。",
+                text_norm="这次重点看司令官2Ultra。",
+                text_final="这次重点看司令官2Ultra。",
+            )
+        )
+        session.add(
+            RenderOutput(
+                job_id=job_id,
+                status="done",
+                output_path=str(output_path),
+            )
+        )
+        await session.commit()
+
+    monkeypatch.setattr(steps_mod, "get_session_factory", lambda: factory)
+    monkeypatch.setattr(steps_mod, "list_packaging_assets", lambda: {"config": {"copy_style": "attention_grabbing"}})
+    monkeypatch.setattr(steps_mod, "_select_default_avatar_profile", lambda: {"display_name": "作者A"})
+    monkeypatch.setattr(steps_mod, "get_settings", lambda: settings)
+
+    async def fake_build_packaging_fact_sheet(**kwargs):
+        captured["fact_sheet_content_profile"] = dict(kwargs["content_profile"])
+        return {
+            "status": "verified",
+            "verified_facts": [{"fact": "司令官2Ultra 为手电产品线", "source_url": "https://example.com/spec1", "source_title": "Spec 1"}],
+            "official_sources": [{"title": "Spec 1", "url": "https://example.com/spec1"}],
+            "guardrail_summary": "",
+        }
+
+    async def fake_generate_platform_packaging(**kwargs):
+        captured["generate_content_profile"] = dict(kwargs["content_profile"])
+        captured["prompt_brief"] = dict(kwargs["prompt_brief"])
+        return {
+            "highlights": {
+                "product": "傲雷 司令官2Ultra",
+                "video_type": "开箱体验",
+                "strongest_selling_point": "版本差异一眼看清",
+                "strongest_emotion": "这次终于对上型号了",
+                "title_hook": "司令官2Ultra到底值不值",
+                "engagement_question": "你更想看哪一版？",
+            },
+            "platforms": {
+                "bilibili": {"titles": ["标题1", "标题2", "标题3", "标题4", "标题5"], "description": "简介", "tags": ["手电"]},
+                "xiaohongshu": {"titles": ["小红书1", "小红书2", "小红书3", "小红书4", "小红书5"], "description": "正文", "tags": ["手电"]},
+                "douyin": {"titles": ["抖音1", "抖音2", "抖音3", "抖音4", "抖音5"], "description": "短简介", "tags": ["手电"]},
+                "kuaishou": {"titles": ["快手1", "快手2", "快手3", "快手4", "快手5"], "description": "快手简介", "tags": ["手电"]},
+                "wechat_channels": {"titles": ["视频号1", "视频号2", "视频号3", "视频号4", "视频号5"], "description": "视频号简介", "tags": ["手电"]},
+            },
+            "fact_sheet": kwargs["fact_sheet"],
+        }
+
+    monkeypatch.setattr(steps_mod, "build_packaging_fact_sheet", fake_build_packaging_fact_sheet)
+    monkeypatch.setattr(steps_mod, "generate_platform_packaging", fake_generate_platform_packaging)
+
+    await run_platform_package(str(job_id))
+
+    assert captured["fact_sheet_content_profile"]["resolved_review_user_feedback"]["subject_brand"] == "傲雷"
+    assert captured["generate_content_profile"]["resolved_review_user_feedback"]["subject_model"] == "司令官2Ultra"
+    assert captured["prompt_brief"]["manual_review_applied"] is True
+    assert captured["prompt_brief"]["resolved_review_user_feedback"]["video_theme"] == "傲雷司令官2Ultra版本选购与参数对比"
+
+
+@pytest.mark.asyncio
 async def test_run_ai_director_generates_plan_for_enabled_job(db_engine, monkeypatch):
     import roughcut.pipeline.steps as steps_mod
 

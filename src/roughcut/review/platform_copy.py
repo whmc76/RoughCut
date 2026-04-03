@@ -12,8 +12,8 @@ from roughcut.providers.factory import get_reasoning_provider, get_search_provid
 from roughcut.providers.reasoning.base import Message
 from roughcut.usage import track_usage_operation
 
-_PLATFORM_FACT_SHEET_CACHE_VERSION = "2026-03-22.fact-sheet.v1"
-_PLATFORM_PACKAGE_CACHE_VERSION = "2026-03-22.generate.v1"
+_PLATFORM_FACT_SHEET_CACHE_VERSION = "2026-04-03.fact-sheet.v2"
+_PLATFORM_PACKAGE_CACHE_VERSION = "2026-04-03.generate.v2"
 
 PLATFORM_ORDER = [
     ("bilibili", "B站", "简介", "标签"),
@@ -73,6 +73,7 @@ def build_packaging_prompt_brief(
 ) -> dict[str, Any]:
     profile = content_profile or {}
     cover_title = profile.get("cover_title") if isinstance(profile.get("cover_title"), dict) else {}
+    resolved_feedback = _resolved_review_feedback_payload(profile)
     return {
         "source_name": source_name,
         "subject_brand": str(profile.get("subject_brand") or "").strip(),
@@ -92,6 +93,8 @@ def build_packaging_prompt_brief(
             "main": str(cover_title.get("main") or "").strip(),
             "bottom": str(cover_title.get("bottom") or "").strip(),
         },
+        "manual_review_applied": bool(str(profile.get("review_mode") or "").strip() == "manual_confirmed" or resolved_feedback),
+        "resolved_review_user_feedback": resolved_feedback,
         "transcript_excerpt": build_transcript_for_packaging(subtitle_items, max_chars=max_transcript_chars),
     }
 
@@ -103,6 +106,7 @@ def build_packaging_fact_sheet_cache_fingerprint(
     subtitle_items: list[dict[str, Any]],
 ) -> dict[str, Any]:
     profile = content_profile or {}
+    resolved_feedback = _resolved_review_feedback_payload(profile)
     evidence = [
         {
             "title": str(item.get("title") or "").strip(),
@@ -119,6 +123,7 @@ def build_packaging_fact_sheet_cache_fingerprint(
         "subject_model": str(profile.get("subject_model") or "").strip(),
         "subject_type": str(profile.get("subject_type") or "").strip(),
         "search_queries": [str(item).strip() for item in (profile.get("search_queries") or []) if str(item).strip()][:4],
+        "resolved_review_feedback_sha256": digest_payload(resolved_feedback),
         "transcript_excerpt_sha256": digest_payload(build_transcript_for_packaging(subtitle_items, max_chars=1400)),
         "evidence_sha256": digest_payload(evidence),
         "evidence_count": len(evidence),
@@ -198,6 +203,8 @@ async def build_packaging_fact_sheet(
     )
     try:
         provider = get_reasoning_provider()
+        subject_identity = _packaging_subject_identity(profile)
+        resolved_feedback = _resolved_review_feedback_payload(profile)
         prompt = (
             "你在做短视频发布前的参数核验。"
             "只能根据下面给出的搜索证据，提炼已经被证据直接支持的事实。"
@@ -206,7 +213,8 @@ async def build_packaging_fact_sheet(
             "如果证据不足，就返回空 verified_facts。"
             "输出 JSON："
             '{"verified_facts":[{"fact":"","source_url":"","source_title":""}],"official_sources":[{"title":"","url":""}],"guardrail_summary":""}'
-            f"\n视频主体：{json.dumps({'brand': profile.get('subject_brand'), 'model': profile.get('subject_model'), 'subject_type': profile.get('subject_type')}, ensure_ascii=False)}"
+            f"\n视频主体：{json.dumps(subject_identity, ensure_ascii=False)}"
+            f"\n审核确认修正：{json.dumps(resolved_feedback, ensure_ascii=False)}"
             f"\n搜索证据：{json.dumps(preferred_evidence[:8], ensure_ascii=False)}"
         )
         with track_usage_operation("platform_package.fact_sheet"):
@@ -463,11 +471,14 @@ def _build_packaging_fact_queries(
     content_profile: dict[str, Any],
     transcript_text: str,
 ) -> list[str]:
-    brand = str(content_profile.get("subject_brand") or "").strip()
-    model = str(content_profile.get("subject_model") or "").strip()
-    subject_type = str(content_profile.get("subject_type") or "").strip()
+    identity = _packaging_subject_identity(content_profile)
+    brand = str(identity.get("brand") or "").strip()
+    model = str(identity.get("model") or "").strip()
+    subject_type = str(identity.get("subject_type") or "").strip()
     queries: list[str] = []
-    for item in content_profile.get("search_queries") or []:
+    resolved_feedback = _resolved_review_feedback_payload(content_profile)
+    preferred_search_queries = resolved_feedback.get("search_queries") or content_profile.get("search_queries") or []
+    for item in preferred_search_queries:
         text = str(item).strip()
         if text:
             queries.append(text)
@@ -495,6 +506,40 @@ def _build_packaging_fact_queries(
             seen.add(text)
             deduped.append(text)
     return deduped
+
+
+def _resolved_review_feedback_payload(content_profile: dict[str, Any] | None) -> dict[str, Any]:
+    profile = content_profile or {}
+    payload = profile.get("resolved_review_user_feedback")
+    if not isinstance(payload, dict):
+        return {}
+    normalized: dict[str, Any] = {}
+    for key in (
+        "subject_brand",
+        "subject_model",
+        "subject_type",
+        "video_theme",
+        "hook_line",
+        "summary",
+        "engagement_question",
+    ):
+        value = str(payload.get(key) or "").strip()
+        if value:
+            normalized[key] = value
+    queries = [str(item).strip() for item in (payload.get("search_queries") or []) if str(item).strip()]
+    if queries:
+        normalized["search_queries"] = queries[:6]
+    return normalized
+
+
+def _packaging_subject_identity(content_profile: dict[str, Any] | None) -> dict[str, str]:
+    profile = content_profile or {}
+    resolved_feedback = _resolved_review_feedback_payload(profile)
+    return {
+        "brand": str(resolved_feedback.get("subject_brand") or profile.get("subject_brand") or "").strip(),
+        "model": str(resolved_feedback.get("subject_model") or profile.get("subject_model") or "").strip(),
+        "subject_type": str(resolved_feedback.get("subject_type") or profile.get("subject_type") or "").strip(),
+    }
 
 
 def _dedupe_evidence(evidence: list[dict[str, Any]]) -> list[dict[str, str]]:
