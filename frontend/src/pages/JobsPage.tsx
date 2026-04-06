@@ -1,5 +1,6 @@
 import { PageHeader } from "../components/ui/PageHeader";
 import { PageSection } from "../components/ui/PageSection";
+import { useState } from "react";
 import { ConfigProfileSwitcher } from "../features/configProfiles/ConfigProfileSwitcher";
 import { useI18n } from "../i18n";
 import { JobDetailPanel } from "../features/jobs/JobDetailPanel";
@@ -28,6 +29,39 @@ export function JobsPage() {
       )?.step_name;
   const reviewStep = activeReviewStep === "final_review" ? "final_review" : "summary_review";
   const isReviewJob = Boolean(workspace.selectedJobId && isReviewContext && activeReviewStep);
+  const [reviewNotice, setReviewNotice] = useState<string | null>(null);
+  const [reviewNoticeTone, setReviewNoticeTone] = useState<"success" | "error">("success");
+  const showReviewNotice = (tone: "success" | "error", message: string) => {
+    setReviewNoticeTone(tone);
+    setReviewNotice(message);
+    window.setTimeout(() => {
+      setReviewNotice((current) => (current === message ? null : current));
+    }, 5000);
+  };
+  const closeReviewOverlay = (shouldClearNotice = true) => {
+    if (isReviewJob) workspace.setSelectedJobId(null);
+    if (shouldClearNotice) {
+      setReviewNotice(null);
+    }
+  };
+  const confirmReviewProfile = () => {
+    workspace.confirmProfile.mutate(undefined, {
+      onSuccess: async () => {
+        showReviewNotice("success", "摘要核对已确认，任务继续执行中，已返回队列。");
+        await workspace.refreshAll();
+        closeReviewOverlay(false);
+      },
+      onError: (error) => {
+        showReviewNotice(
+          "error",
+          error instanceof Error
+            ? error.message
+            : `摘要核对提交失败：${String(error) || "请稍后重试。"}`,
+        );
+      },
+    });
+  };
+  const reviewNoticeClass = reviewNoticeTone === "error" ? "notice top-gap notice-error" : "notice top-gap";
 
   return (
     <section className="page-stack">
@@ -81,10 +115,16 @@ export function JobsPage() {
             {t("jobs.actions.restartFailed").replace("{error}", workspace.restartError)}
           </div>
         ) : null}
+        {reviewNotice ? <div className={reviewNoticeClass}>{reviewNotice}</div> : null}
         <JobQueueTable
           jobs={workspace.filteredJobs}
           selectedJobId={workspace.selectedJobId}
           isLoading={workspace.jobs.isLoading}
+          currentPage={workspace.jobsPage}
+          pageSize={workspace.jobsPageSize}
+          hasMore={workspace.hasMoreJobs}
+          isFetchingPage={workspace.jobs.isFetching}
+          onPageChange={(page) => workspace.setJobsPage(Math.max(0, page))}
           errorMessage={workspace.jobs.isError ? (workspace.jobs.error as Error).message : undefined}
           isOpeningFolder={workspace.openFolder.isPending}
           isCancelling={workspace.cancelJob.isPending}
@@ -121,12 +161,12 @@ export function JobsPage() {
               .filter(Boolean),
           }))
         }
-        onConfirmProfile={() => workspace.confirmProfile.mutate()}
+        onConfirmProfile={confirmReviewProfile}
         onApplyReview={(targetId, action) => workspace.applyReview.mutate({ targetId, action })}
         onApproveFinalReview={() => workspace.finalReviewDecision.mutate({ decision: "approve" })}
         onRejectFinalReview={(note) => workspace.finalReviewDecision.mutate({ decision: "reject", note })}
         onOpenFolder={() => workspace.selectedJob && workspace.openFolder.mutate(workspace.selectedJob.id)}
-        onClose={() => workspace.setSelectedJobId(null)}
+      onClose={() => closeReviewOverlay()}
       />
 
       <JobDetailModal

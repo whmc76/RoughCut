@@ -19,6 +19,7 @@ from roughcut.review.content_understanding_schema import (
     ContentSemanticFacts,
     ContentUnderstanding,
     SubjectEntity,
+    CONTENT_UNDERSTANDING_FIELD_GUIDELINES,
     parse_content_understanding_payload as parse_content_understanding_payload_from_schema,
 )
 
@@ -759,8 +760,7 @@ def _build_content_understanding_prompt(
         "subject_entities 必须是对象数组，每项包含 kind,name,brand,model；"
         "observed_entities 必须保留视频里原始看到或听到的主体称呼；"
         "resolved_entities、resolved_primary_subject、entity_resolution_map 在首轮推断可为空；"
-        "summary 用中文且不超过 100 字；"
-        "hook_line 用中文且不超过 24 字；"
+        f"{CONTENT_UNDERSTANDING_FIELD_GUIDELINES}\n"
         "search_queries 最多 4 条，优先结合 semantic_facts.search_expansions 生成；"
         "evidence_spans 最多 4 条，字段只允许 timestamp,text,type；"
         "confidence 必须是对象，例如 {\"overall\":0.78}；"
@@ -954,6 +954,7 @@ async def _repair_empty_understanding_payload(
         "3. 不要编造未被证据支持的品牌/型号；"
         "4. 允许保守，但不能忽略 semantic_facts 已经明确给出的候选；"
         "5. 如果 semantic_facts 已区分 primary_subject_candidates、comparison_subject_candidates、supporting_product_candidates、component_candidates、aspect_candidates，必须优先让主对象候选成为 primary_subject，对比产品和配套产品不要顶替主主体。"
+        f"{CONTENT_UNDERSTANDING_FIELD_GUIDELINES}\n"
         f"\n原始输出:\n{getattr(response, 'content', '')}"
         f"\n语义事实:\n{semantic_facts.__dict__}"
         f"\n紧凑证据包:\n{_build_compact_evidence_payload(evidence_bundle)}"

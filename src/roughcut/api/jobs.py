@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import os
 import subprocess
@@ -57,7 +58,7 @@ from roughcut.pipeline.orchestrator import PIPELINE_STEPS, create_job_steps
 from roughcut.pipeline.quality import QUALITY_ARTIFACT_TYPE
 from roughcut.media.variant_timeline_bundle import resolve_effective_variant_timeline_bundle
 from roughcut.recovery.stuck_step_recovery import STUCK_STEP_DIAGNOSTIC_ARTIFACT_TYPE
-from roughcut.review.content_profile import _extract_reference_frames
+from roughcut.review.content_understanding_schema import normalize_video_type
 from roughcut.review.content_profile import apply_content_profile_feedback
 from roughcut.review.content_profile import build_reviewed_transcript_excerpt
 from roughcut.review.content_profile_memory import (
@@ -113,6 +114,9 @@ PROFILE_ARTIFACT_PRIORITY = {
 }
 _CONTENT_PROFILE_ARTIFACT_TYPES = ("content_profile_final", "content_profile", "content_profile_draft")
 _CONTENT_PROFILE_THUMBNAIL_CACHE_VERSION = "v2"
+_CONTENT_PROFILE_THUMBNAIL_LOCKS: dict[str, asyncio.Lock] = {}
+_CONTENT_PROFILE_THUMBNAIL_GENERATION_SEMAPHORE = asyncio.Semaphore(2)
+_CONTENT_PROFILE_THUMBNAIL_WARM_TASKS: dict[str, asyncio.Task] = {}
 
 
 class FinalReviewDecisionIn(BaseModel):
@@ -145,7 +149,7 @@ def _ensure_content_understanding_payload(profile: dict[str, Any] | None) -> dic
 
     enriched = dict(profile)
     enriched["content_understanding"] = {
-        "video_type": str(enriched.get("content_kind") or "").strip(),
+        "video_type": normalize_video_type(enriched.get("content_kind")),
         "content_domain": str(enriched.get("subject_domain") or "").strip(),
         "primary_subject": str(enriched.get("subject_type") or "").strip(),
         "subject_entities": [],
@@ -215,20 +219,26 @@ async def _load_content_profile_review_evidence(
     job_id: uuid.UUID,
     session: AsyncSession,
 ) -> dict[str, dict[str, Any]]:
-    ocr_artifact = await _load_latest_optional_artifact(
-        session,
-        job_id=job_id,
-        artifact_types=["content_profile_ocr"],
+    evidence_result = await session.execute(
+        select(Artifact)
+        .where(
+            Artifact.job_id == job_id,
+            Artifact.artifact_type.in_(["content_profile_ocr", "transcript_evidence", "entity_resolution_trace"]),
+        )
+        .order_by(Artifact.created_at.desc())
     )
-    transcript_artifact = await _load_latest_optional_artifact(
-        session,
-        job_id=job_id,
-        artifact_types=["transcript_evidence"],
+    evidence_artifacts = evidence_result.scalars().all()
+    ocr_artifact = next(
+        (item for item in evidence_artifacts if item.artifact_type == "content_profile_ocr"),
+        None,
     )
-    entity_resolution_artifact = await _load_latest_optional_artifact(
-        session,
-        job_id=job_id,
-        artifact_types=["entity_resolution_trace"],
+    transcript_artifact = next(
+        (item for item in evidence_artifacts if item.artifact_type == "transcript_evidence"),
+        None,
+    )
+    entity_resolution_artifact = next(
+        (item for item in evidence_artifacts if item.artifact_type == "entity_resolution_trace"),
+        None,
     )
     return {
         "ocr_evidence": _coerce_artifact_payload(ocr_artifact),
@@ -742,7 +752,24 @@ async def get_content_profile_thumbnail(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
-    return FileResponse(thumbnail, media_type="image/jpeg")
+    return FileResponse(
+        thumbnail,
+        media_type="image/jpeg",
+        headers={"Cache-Control": "public, max-age=31536000, immutable"},
+    )
+
+
+@router.post("/{job_id}/content-profile/thumbnails/warm")
+async def warm_content_profile_thumbnails(
+    job_id: uuid.UUID,
+    session: AsyncSession = Depends(get_session),
+):
+    job = await session.get(Job, job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    for index in (0, 1, 2):
+        _spawn_content_profile_thumbnail_generation(job, index=index)
+    return {"status": "accepted", "job_id": str(job_id)}
 
 
 @router.post("/{job_id}/content-profile/confirm", response_model=ContentProfileReviewOut)
@@ -2447,19 +2474,123 @@ async def _ensure_content_profile_thumbnail(job: Job, *, index: int) -> Path:
     if cached.exists():
         return cached
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        try:
-            source_path = await _resolve_job_source(job, tmpdir)
-        except FileNotFoundError:
-            _write_content_profile_placeholder_thumbnail(job, cached, index=index)
+    lock = _CONTENT_PROFILE_THUMBNAIL_LOCKS.setdefault(f"{job.id}:{index}", asyncio.Lock())
+    async with lock:
+        if cached.exists():
             return cached
-        frames = _extract_reference_frames(source_path, cache_dir, count=3)
-    if not frames:
-        _write_content_profile_placeholder_thumbnail(job, cached, index=index)
-        return cached
-    if not cached.exists():
-        raise FileNotFoundError("Requested thumbnail was not generated")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            try:
+                source_path = await _resolve_job_source(job, tmpdir)
+            except FileNotFoundError:
+                _write_content_profile_placeholder_thumbnail(job, cached, index=index)
+                return cached
+            loop = asyncio.get_running_loop()
+            async with _CONTENT_PROFILE_THUMBNAIL_GENERATION_SEMAPHORE:
+                success = await loop.run_in_executor(
+                    None,
+                    _extract_reference_frame,
+                    source_path,
+                    cache_dir,
+                    index,
+                    3,
+                )
+            if not success:
+                _write_content_profile_placeholder_thumbnail(job, cached, index=index)
+                return cached
+        if not cached.exists():
+            _write_content_profile_placeholder_thumbnail(job, cached, index=index)
     return cached
+
+
+def _spawn_content_profile_thumbnail_generation(job: Job, *, index: int) -> bool:
+    key = f"{job.id}:{index}"
+    existing = _CONTENT_PROFILE_THUMBNAIL_WARM_TASKS.get(key)
+    if existing and not existing.done():
+        return False
+
+    async def runner() -> bool:
+        try:
+            await _ensure_content_profile_thumbnail(job, index=index)
+        except Exception:
+            return False
+        return True
+
+    task = asyncio.create_task(runner())
+    _CONTENT_PROFILE_THUMBNAIL_WARM_TASKS[key] = task
+
+    def _cleanup(_task: asyncio.Task) -> None:
+        _CONTENT_PROFILE_THUMBNAIL_WARM_TASKS.pop(key, None)
+
+    task.add_done_callback(_cleanup)
+    return True
+
+
+def _extract_reference_frame(source_path: Path, cache_dir: Path, index: int, total_frames: int) -> bool:
+    out = cache_dir / f"profile_{index:02d}.jpg"
+    out.unlink(missing_ok=True)
+    try:
+        total_frames = max(1, min(int(total_frames or 1), 10))
+        index = max(0, min(int(index or 0), total_frames - 1))
+        duration = _probe_duration(source_path)
+        if duration <= 0:
+            return False
+
+        safe_margin = min(max(duration * 0.08, 1.0), max(duration / 4, 0.0))
+        usable_start = safe_margin if duration > safe_margin * 2 else 0.0
+        usable_end = duration - safe_margin if duration > safe_margin * 2 else duration
+        usable_duration = max(usable_end - usable_start, duration)
+        segment_start = usable_start + (usable_duration * index / max(total_frames, 1))
+        segment_end = usable_start + (usable_duration * (index + 1) / max(total_frames, 1))
+        segment_length = max(segment_end - segment_start, 0.8)
+        seek = max(segment_start + (segment_length / 2), 0.0)
+
+        result = subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-ss",
+                f"{segment_start:.2f}",
+                "-t",
+                f"{segment_length:.2f}",
+                "-i",
+                str(source_path),
+                "-frames:v",
+                "1",
+                "-q:v",
+                "3",
+                "-vf",
+                "thumbnail=90,scale=960:-2",
+                str(out),
+            ],
+            capture_output=True,
+            timeout=30,
+        )
+        if result.returncode != 0 or not out.exists():
+            result = subprocess.run(
+                [
+                    "ffmpeg",
+                    "-y",
+                    "-ss",
+                    f"{seek:.2f}",
+                    "-i",
+                    str(source_path),
+                    "-frames:v",
+                    "1",
+                    "-update",
+                    "1",
+                    "-q:v",
+                    "3",
+                    "-vf",
+                    "scale=960:-2",
+                    str(out),
+                ],
+                capture_output=True,
+                timeout=20,
+            )
+        return result.returncode == 0 and out.exists()
+    except Exception:
+        return False
+
 
 
 async def _resolve_job_source(job: Job, tmpdir: str) -> Path:

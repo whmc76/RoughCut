@@ -980,7 +980,7 @@ def test_build_final_review_message_includes_summary_keywords_and_subtitle_hints
     assert "增强模式：" not in message
     assert "默认发送 3 段压缩预览" in message
     assert "内容摘要：这期重点看扁桶手电的便携性和泛光表现。" in message
-    assert "关键词：扁桶手电，Olight 司令官2 Ultra" in message
+    assert "关键词：扁桶手电，Olight，司令官2，Ultra" in message
     assert "重跑说明：" in message
     assert "本次重跑目标：cover, music" in message
     assert "字幕复核提醒：" in message

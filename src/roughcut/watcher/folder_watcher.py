@@ -35,6 +35,8 @@ logger = logging.getLogger(__name__)
 _SCAN_TASKS: dict[str, asyncio.Task] = {}
 _SCAN_STATES: dict[str, "WatchInventoryScanState"] = {}
 _SCAN_FILE_CACHE: dict[str, dict[str, "CachedWatchFileResult"]] = {}
+_WATCH_INVENTORY_THUMBNAIL_LOCKS: dict[str, asyncio.Lock] = {}
+_WATCH_INVENTORY_THUMBNAIL_GENERATION_SEMAPHORE = asyncio.Semaphore(2)
 
 
 async def _call_inventory_job_factory(
@@ -299,42 +301,52 @@ async def ensure_watch_inventory_thumbnail(
     if output_path.exists():
         return output_path
 
-    seek_sec = 0.5
-    try:
-        meta = await probe(source)
-        if meta.duration > 0:
-            seek_sec = max(0.0, min(meta.duration * 0.1, max(meta.duration - 0.1, 0.0)))
-    except Exception:
-        pass
+    lock = _WATCH_INVENTORY_THUMBNAIL_LOCKS.setdefault(str(output_path), asyncio.Lock())
+    async with lock:
+        if output_path.exists():
+            return output_path
+        seek_sec = 0.5
+        try:
+            meta = await probe(source)
+            if meta.duration > 0:
+                seek_sec = max(0.0, min(meta.duration * 0.1, max(meta.duration - 0.1, 0.0)))
+        except Exception:
+            pass
 
-    settings = get_settings()
-    cmd = [
-        "ffmpeg",
-        "-y",
-        "-ss",
-        f"{seek_sec:.2f}",
-        "-i",
-        str(source),
-        "-frames:v",
-        "1",
-        "-vf",
-        f"scale={width}:-2",
-        str(output_path),
-    ]
-    loop = asyncio.get_running_loop()
-    result = await loop.run_in_executor(
-        None,
-        lambda: subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=settings.ffmpeg_timeout_sec,
-        ),
-    )
-    if result.returncode != 0 or not output_path.exists():
-        raise RuntimeError(f"ffmpeg thumbnail failed: {result.stderr[-500:]}")
+        settings = get_settings()
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-ss",
+            f"{seek_sec:.2f}",
+            "-i",
+            str(source),
+            "-frames:v",
+            "1",
+            "-vf",
+            f"scale={width}:-2",
+            str(output_path),
+        ]
+        loop = asyncio.get_running_loop()
+        async with _WATCH_INVENTORY_THUMBNAIL_GENERATION_SEMAPHORE:
+            result = await loop.run_in_executor(
+                None,
+                lambda: subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=settings.ffmpeg_timeout_sec,
+                ),
+            )
+        if result.returncode != 0 or not output_path.exists():
+            if output_path.exists():
+                try:
+                    output_path.unlink()
+                except OSError:
+                    pass
+            raise RuntimeError(f"ffmpeg thumbnail failed: {result.stderr[-500:]}")
     return output_path
 
 

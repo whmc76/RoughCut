@@ -44,6 +44,11 @@ type JobQueueTableProps = {
   selectedJobId: string | null;
   isLoading: boolean;
   errorMessage?: string;
+  currentPage?: number;
+  pageSize?: number;
+  hasMore?: boolean;
+  isFetchingPage?: boolean;
+  onPageChange?: (page: number) => void;
   isOpeningFolder?: boolean;
   isCancelling?: boolean;
   isRestarting?: boolean;
@@ -59,6 +64,10 @@ export function JobQueueTable({
   jobs,
   selectedJobId,
   isLoading,
+  currentPage,
+  pageSize,
+  hasMore,
+  isFetchingPage,
   errorMessage,
   isOpeningFolder,
   isCancelling,
@@ -71,10 +80,15 @@ export function JobQueueTable({
   onDelete,
 }: JobQueueTableProps) {
   const { t } = useI18n();
+  const canGoPrev = (currentPage ?? 0) > 0 && !isFetchingPage;
+  const canGoNext = Boolean(hasMore) && !isFetchingPage;
 
   return (
     <section className="panel">
-      <PanelHeader title={t("jobs.queue.title")} description={`#${jobs.length}`} />
+      <PanelHeader
+        title={t("jobs.queue.title")}
+        description={`#${jobs.length}${currentPage !== undefined ? ` · 第 ${currentPage + 1} 页` : ""}`}
+      />
       <div className="table-wrap">
         <table className="data-table job-queue-table">
           <colgroup>
@@ -120,6 +134,7 @@ export function JobQueueTable({
                       src={api.contentProfileThumbnailUrl(job.id, 0)}
                       alt={job.source_name}
                       loading="lazy"
+                      decoding="async"
                       onError={(event) => {
                         event.currentTarget.style.display = "none";
                         event.currentTarget.nextElementSibling?.classList.add("visible");
@@ -242,6 +257,29 @@ export function JobQueueTable({
           </tbody>
         </table>
       </div>
+      {currentPage !== undefined && pageSize !== undefined && onPageChange ? (
+        <div className="toolbar top-gap">
+          <div className="muted">{`每页 ${pageSize} 条，当前 ${jobs.length} 条`}</div>
+          <div className="toolbar">
+            <button
+              className="button ghost button-sm"
+              type="button"
+              disabled={!canGoPrev}
+              onClick={() => onPageChange(currentPage - 1)}
+            >
+              上一页
+            </button>
+            <button
+              className="button button-sm"
+              type="button"
+              disabled={!canGoNext}
+              onClick={() => onPageChange(currentPage + 1)}
+            >
+              下一页
+            </button>
+          </div>
+        </div>
+      ) : null}
     </section>
   );
 }

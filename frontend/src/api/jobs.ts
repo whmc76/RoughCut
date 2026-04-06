@@ -13,7 +13,8 @@ type FinalReviewDecisionResponse = {
 };
 
 export const jobsApi = {
-  listJobs: () => request<Job[]>("/jobs"),
+  listJobs: (limit = 50, offset = 0) =>
+    request<Job[]>(`/jobs?${new URLSearchParams({ limit: String(limit), offset: String(offset) })}`),
   getJobsUsageSummary: (limit = 60) => request<JobsUsageSummary>(`/jobs/usage-summary?limit=${limit}`),
   getJobsUsageTrend: (days = 7, limit = 120, focusType?: string, focusName?: string) =>
     request<JobsUsageTrend>(
@@ -49,6 +50,9 @@ export const jobsApi = {
   applyReview: (jobId: string, actions: Array<{ target_type: string; target_id: string; action: string; override_text?: string }>) =>
     request<{ applied: number }>(`/jobs/${jobId}/review/apply`, { method: "POST", body: JSON.stringify({ actions }) }),
   contentProfileThumbnailUrl: (jobId: string, index: number) => apiPath(`/jobs/${jobId}/content-profile/thumbnail?index=${index}`),
+  warmContentProfileThumbnails: (jobId: string) => request<{ status: string; job_id: string }>(`/jobs/${jobId}/content-profile/thumbnails/warm`, {
+    method: "POST",
+  }),
   cancelJob: (jobId: string) => request<Job>(`/jobs/${jobId}/cancel`, { method: "POST" }),
   restartJob: (jobId: string) => request<Job>(`/jobs/${jobId}/restart`, { method: "POST" }),
   deleteJob: (jobId: string) => request<void>(`/jobs/${jobId}`, { method: "DELETE" }),

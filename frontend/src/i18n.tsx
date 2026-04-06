@@ -143,6 +143,8 @@ const translations: Record<UiLocale, Record<string, string>> = {
     "jobs.detail.tokenUsage.promptCompletion": "输入 {prompt} / 输出 {completion} / 调用 {calls}",
     "jobs.detail.timeline": "时间线与事件",
     "jobs.detail.errorEvents": "关键异常事件",
+    "jobs.detail.jumpToLatestFailure": "跳转到最近异常",
+    "jobs.detail.jumpToTimeline": "跳转时间线",
     "jobs.detail.jobIssue": "任务问题",
     "jobs.detail.timelineJson": "查看剪辑时间线 JSON",
 
@@ -568,6 +570,8 @@ const translations: Record<UiLocale, Record<string, string>> = {
     "jobs.detail.tokenUsage.promptCompletion": "Prompt {prompt} / Completion {completion} / Calls {calls}",
     "jobs.detail.timeline": "Timeline and Events",
     "jobs.detail.errorEvents": "Critical Error Events",
+    "jobs.detail.jumpToLatestFailure": "Jump to latest issue",
+    "jobs.detail.jumpToTimeline": "Jump to timeline",
     "jobs.detail.jobIssue": "Job Issue",
     "jobs.detail.timelineJson": "View timeline JSON",
 

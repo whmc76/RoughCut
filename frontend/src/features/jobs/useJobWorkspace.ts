@@ -13,6 +13,8 @@ const EMPTY_UPLOAD: UploadForm = {
   outputDir: "",
 };
 
+const JOBS_PAGE_SIZE = 20;
+
 const JOB_STATUS_GROUP_PRIORITY: Record<string, number> = {
   needs_review: 0,
   running: 1,
@@ -25,6 +27,20 @@ function sameStringArray(left: string[], right: string[]) {
   return left.every((item, index) => item === right[index]);
 }
 
+function normalizeKeywordList(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const normalized: string[] = [];
+  for (const item of value) {
+    const normalizedItem = String(item ?? "").trim();
+    if (normalizedItem && !normalized.includes(normalizedItem)) {
+      normalized.push(normalizedItem);
+    }
+  }
+  return normalized;
+}
+
 function compareJobs(a: { status: string; updated_at: string }, b: { status: string; updated_at: string }) {
   const groupGap = (JOB_STATUS_GROUP_PRIORITY[a.status] ?? 2) - (JOB_STATUS_GROUP_PRIORITY[b.status] ?? 2);
   if (groupGap !== 0) return groupGap;
@@ -35,6 +51,7 @@ export function useJobWorkspace() {
   const queryClient = useQueryClient();
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
   const [keyword, setKeyword] = useState("");
+  const [jobsPage, setJobsPage] = useState(0);
   const [upload, setUpload] = useState<UploadForm>(EMPTY_UPLOAD);
   const [contentDraft, setContentDraft] = useState<Record<string, unknown>>({});
   const [reviewWorkflowMode, setReviewWorkflowMode] = useState("standard_edit");
@@ -46,7 +63,11 @@ export function useJobWorkspace() {
     enhancementModes: EMPTY_UPLOAD.enhancementModes,
   });
 
-  const jobs = useQuery({ queryKey: ["jobs"], queryFn: api.listJobs, refetchInterval: 8_000 });
+  const jobs = useQuery({
+    queryKey: ["jobs", JOBS_PAGE_SIZE, jobsPage],
+    queryFn: () => api.listJobs(JOBS_PAGE_SIZE, jobsPage * JOBS_PAGE_SIZE),
+    refetchInterval: 8_000,
+  });
   const options = useQuery({ queryKey: ["config-options"], queryFn: api.getConfigOptions });
   const config = useQuery({ queryKey: ["config"], queryFn: api.getConfig });
   const packaging = useQuery({ queryKey: ["packaging"], queryFn: api.getPackaging });
@@ -56,34 +77,45 @@ export function useJobWorkspace() {
     queryFn: () => api.getJob(selectedJobId!),
     enabled: Boolean(selectedJobId),
   });
-  const isReviewMode = detail.data?.status === "needs_review";
   const activity = useQuery({
     queryKey: ["job-activity", selectedJobId],
     queryFn: () => api.getJobActivity(selectedJobId!),
     enabled: Boolean(selectedJobId),
     refetchInterval: selectedJobId ? 5_000 : false,
   });
+  const isReviewMode = detail.data?.status === "needs_review";
+  const isFinalReviewStep = (detail.data?.steps ?? []).some(
+    (step) => step.step_name === "final_review" && step.status !== "done",
+  ) || activity.data?.current_step?.step_name === "final_review";
+  const shouldLoadReport = Boolean(selectedJobId) && (!isReviewMode || isFinalReviewStep);
+  const shouldLoadTokenUsage = Boolean(selectedJobId) && !isReviewMode;
+  const shouldLoadTimeline = Boolean(selectedJobId) && !isReviewMode;
   const report = useQuery({
     queryKey: ["job-report", selectedJobId],
     queryFn: () => api.getJobReport(selectedJobId!),
-    enabled: Boolean(selectedJobId),
+    enabled: shouldLoadReport,
   });
   const tokenUsage = useQuery({
     queryKey: ["job-token-usage", selectedJobId],
     queryFn: () => api.getJobTokenUsage(selectedJobId!),
-    enabled: Boolean(selectedJobId),
+    enabled: shouldLoadTokenUsage,
     refetchInterval: selectedJobId ? 5_000 : false,
   });
   const timeline = useQuery({
     queryKey: ["job-timeline", selectedJobId],
     queryFn: () => api.getJobTimeline(selectedJobId!),
-    enabled: Boolean(selectedJobId),
+    enabled: shouldLoadTimeline,
   });
   const contentProfile = useQuery({
     queryKey: ["job-content-profile", selectedJobId],
     queryFn: () => api.getContentProfile(selectedJobId!),
     enabled: Boolean(selectedJobId) && isReviewMode,
   });
+  const selectedJob = detail.data;
+  const contentSource = contentProfile.data?.final ?? contentProfile.data?.draft ?? null;
+  const contentDraftKeywords = normalizeKeywordList(contentDraft.keywords);
+  const contentSourceKeywords = normalizeKeywordList(contentSource?.keywords);
+  const contentSourceSearchQueries = normalizeKeywordList((contentSource as Record<string, unknown> | null)?.search_queries);
   const inheritedUploadDefaults: UploadForm = useMemo(
     () => ({
       ...EMPTY_UPLOAD,
@@ -96,6 +128,15 @@ export function useJobWorkspace() {
   useEffect(() => {
     setContentDraft(contentProfile.data?.final ?? contentProfile.data?.draft ?? {});
   }, [contentProfile.data]);
+
+  useEffect(() => {
+    if (!selectedJobId || !isReviewMode) return;
+    void api.warmContentProfileThumbnails(selectedJobId);
+  }, [selectedJobId, isReviewMode]);
+
+  useEffect(() => {
+    setJobsPage(0);
+  }, [keyword]);
 
   useEffect(() => {
     const previousDefaults = previousUploadDefaultsRef.current;
@@ -234,8 +275,15 @@ export function useJobWorkspace() {
         default_job_enhancement_modes: reviewEnhancementModes,
       });
       await api.patchPackagingConfig({ copy_style: reviewCopyStyle });
+      const mergedKeywords =
+        "keywords" in contentDraft
+          ? normalizeKeywordList(contentDraft.keywords)
+          : contentSourceSearchQueries.length
+            ? contentSourceSearchQueries
+            : contentSourceKeywords;
       return api.confirmContentProfile(selectedJobId!, {
         ...contentDraft,
+        keywords: mergedKeywords,
         workflow_mode: reviewWorkflowMode,
         enhancement_modes: reviewEnhancementModes,
         copy_style: reviewCopyStyle,
@@ -272,18 +320,20 @@ export function useJobWorkspace() {
     const visibleJobs = !needle
       ? jobs.data ?? []
       : (jobs.data ?? []).filter((job) =>
-      [job.source_name, job.content_subject, job.content_summary, job.status].some((field) =>
-        String(field ?? "").toLowerCase().includes(needle),
-      ),
+        [job.source_name, job.content_subject, job.content_summary, job.status].some((field) =>
+          String(field ?? "").toLowerCase().includes(needle),
+        ),
     );
     return [...visibleJobs].sort(compareJobs);
   }, [jobs.data, keyword]);
-
-  const selectedJob = detail.data;
-  const contentSource = contentProfile.data?.final ?? contentProfile.data?.draft ?? null;
-  const contentKeywords = Array.isArray(contentDraft.keywords ?? contentSource?.keywords)
-    ? ((contentDraft.keywords ?? contentSource?.keywords) as string[]).join(", ")
-    : "";
+  const hasMoreJobs = (jobs.data?.length ?? 0) === JOBS_PAGE_SIZE;
+  const contentKeywordsList =
+    contentDraftKeywords.length
+      ? contentDraftKeywords
+      : contentSourceKeywords.length
+      ? contentSourceKeywords
+      : contentSourceSearchQueries;
+  const contentKeywords = contentKeywordsList.join(", ");
 
   return {
     selectedJobId,
@@ -318,12 +368,16 @@ export function useJobWorkspace() {
     selectedJob,
     contentSource,
     contentKeywords,
-    reviewWorkflowMode,
-    setReviewWorkflowMode,
-    reviewEnhancementModes,
-    setReviewEnhancementModes,
-    reviewCopyStyle,
-    setReviewCopyStyle,
-    restartError,
+      reviewWorkflowMode,
+      setReviewWorkflowMode,
+      reviewEnhancementModes,
+      setReviewEnhancementModes,
+      reviewCopyStyle,
+      setReviewCopyStyle,
+      jobsPage,
+      jobsPageSize: JOBS_PAGE_SIZE,
+      hasMoreJobs,
+      setJobsPage,
+      restartError,
   };
 }

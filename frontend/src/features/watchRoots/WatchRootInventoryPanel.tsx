@@ -141,7 +141,13 @@ export function WatchRootInventoryPanel({
                         </td>
                         <td>
                           <div className="inventory-row">
-                            <img src={api.inventoryThumbnailUrl(root.id, item.relative_path)} alt={item.source_name} className="inventory-thumb" />
+                            <img
+                              src={api.inventoryThumbnailUrl(root.id, item.relative_path)}
+                              alt={item.source_name}
+                              className="inventory-thumb"
+                              loading="lazy"
+                              decoding="async"
+                            />
                             <div>
                               <div className="row-title">{item.source_name}</div>
                               <div className="muted">{item.relative_path}</div>

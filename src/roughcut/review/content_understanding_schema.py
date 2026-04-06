@@ -1,10 +1,20 @@
 from __future__ import annotations
 
 import ast
+import re
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from roughcut.review.domain_glossaries import list_builtin_glossary_packs
+from roughcut.review.content_profile_field_rules import (
+    CONTENT_UNDERSTANDING_FIELD_GUIDELINES,
+    SUPPORTED_VIDEO_TYPES,
+)
+
+
+def _normalize_domain_alias(value: str) -> str:
+    value = str(value or "").strip().lower()
+    return re.sub(r"[\s·*+\-_/]+", "", value)
 
 
 _GLOSSARY_BRAND_TERMS: list[dict[str, Any]] = [
@@ -13,6 +23,29 @@ _GLOSSARY_BRAND_TERMS: list[dict[str, Any]] = [
     for term in list(pack.get("terms") or [])
     if isinstance(term, dict) and str(term.get("category") or "").strip().lower().endswith("_brand")
 ]
+
+_GLOSSARY_SUBJECT_DOMAIN_TERMS: dict[str, set[str]] = {}
+for pack in list_builtin_glossary_packs():
+    pack_domain = str(pack.get("domain") or "").strip().lower()
+    if not pack_domain:
+        continue
+    term_bucket = _GLOSSARY_SUBJECT_DOMAIN_TERMS.setdefault(pack_domain, set())
+    for raw_term in list(pack.get("terms") or []):
+        if not isinstance(raw_term, dict):
+            continue
+        aliases = [str(raw_term.get("correct_form") or "").strip()]
+        aliases.extend(str(item or "").strip() for item in (raw_term.get("wrong_forms") or []))
+        term_domain = str(raw_term.get("domain") or pack_domain).strip().lower()
+        if term_domain != pack_domain:
+            term_bucket = _GLOSSARY_SUBJECT_DOMAIN_TERMS.setdefault(term_domain, set())
+        if not aliases:
+            continue
+        for alias in aliases:
+            normalized = _normalize_domain_alias(alias)
+            if len(normalized) >= 2 and normalized.isascii() is False:
+                term_bucket.add(normalized)
+            elif len(alias.strip()) >= 2:
+                term_bucket.add(normalized)
 
 
 @dataclass(frozen=True)
@@ -82,6 +115,28 @@ def _normalize_understanding_value(value: str) -> str:
     if normalized in {"未知", "待确认", "内容待确认", "待人工确认", "未识别"}:
         return ""
     return normalized
+
+
+def normalize_video_type(value: str) -> str:
+    normalized = _normalize_understanding_value(value).strip().lower()
+    if not normalized:
+        return ""
+
+    if normalized in SUPPORTED_VIDEO_TYPES:
+        return normalized
+
+    token_map = [
+        ("unboxing", ("开箱", "上手", "评测", "测评")),
+        ("tutorial", ("教程", "录屏", "教学", "指南", "使用", "演示", "工作流", "workflow")),
+        ("vlog", ("vlog", "生活", "日常", "出行", "随手", "出门", "探店", "citywalk", "city walk")),
+        ("commentary", ("口播", "观点", "评论", "分析", "复盘", "讨论")),
+        ("gameplay", ("游戏", "实况", "对局", "直播", "fps", "吃鸡", "局内", "游戏里")),
+        ("food", ("美食", "探店", "餐厅", "试吃", "咖啡", "奶茶", "火锅", "烧烤", "甜品")),
+    ]
+    for fallback, tokens in token_map:
+        if any(token in normalized for token in tokens):
+            return fallback
+    return ""
 
 
 def parse_content_semantic_facts_payload(data: Any) -> ContentSemanticFacts:
@@ -172,8 +227,9 @@ def parse_content_understanding_payload(data: Any) -> ContentUnderstanding:
     capability_matrix = payload.get("capability_matrix")
     orchestration_trace = payload.get("orchestration_trace")
 
+    content_video_type = normalize_video_type(payload.get("video_type"))
     return ContentUnderstanding(
-        video_type=str(payload.get("video_type") or "").strip(),
+        video_type=content_video_type,
         content_domain=str(payload.get("content_domain") or "").strip(),
         primary_subject=str(payload.get("primary_subject") or "").strip(),
         semantic_facts=parse_content_semantic_facts_payload(payload.get("semantic_facts")),
@@ -200,7 +256,7 @@ def parse_content_understanding_payload(data: Any) -> ContentUnderstanding:
 
 def serialize_content_understanding_payload(value: ContentUnderstanding) -> dict[str, Any]:
     return {
-        "video_type": _normalize_understanding_value(value.video_type),
+        "video_type": normalize_video_type(value.video_type),
         "content_domain": _normalize_understanding_value(value.content_domain),
         "primary_subject": _normalize_understanding_value(value.primary_subject),
         "semantic_facts": asdict(value.semantic_facts),
@@ -302,8 +358,167 @@ def _preferred_subject_entities(value: ContentUnderstanding) -> list[SubjectEnti
     return list(value.resolved_entities or value.subject_entities or value.observed_entities)
 
 
+_COMPARISON_KIND_MARKERS = {
+    "comparison",
+    "competitor",
+    "对比",
+    "参考",
+    "benchmark",
+    "bench",
+}
+
+
+def _subject_alias_candidates(values: list[str]) -> set[str]:
+    aliases: set[str] = set()
+    for value in values:
+        raw = str(value or "").strip()
+        if not raw:
+            continue
+        for part in re.split(r"[\s/，,·+*×xX\-]", raw):
+            normalized = _normalize_compact(part)
+            if normalized:
+                aliases.add(normalized)
+                if normalized:
+                    aliases.add(normalized.replace(" ", ""))
+    return aliases
+
+
+def _identity_text_matches(entity_value: str, aliases: set[str]) -> bool:
+    normalized = _normalize_compact(entity_value)
+    if not normalized or not aliases:
+        return False
+    for alias in aliases:
+        if alias in normalized or normalized in alias:
+            return True
+    return False
+
+
+def _is_comparison_entity(entity: SubjectEntity, comparison_aliases: set[str]) -> bool:
+    normalized_kind = str(entity.kind or "").strip().lower()
+    if any(marker in normalized_kind for marker in _COMPARISON_KIND_MARKERS):
+        return True
+    for field_value in (entity.name, entity.brand, entity.model):
+        if _identity_text_matches(field_value, comparison_aliases):
+            return True
+    return False
+
+
+def _entity_matches_primary(entity: SubjectEntity, primary_aliases: set[str]) -> bool:
+    for field_value in (entity.name, entity.brand, entity.model):
+        if _identity_text_matches(field_value, primary_aliases):
+            return True
+    return False
+
+
+def _is_product_like_entity(entity: SubjectEntity) -> bool:
+    if entity.model:
+        return True
+    normalized_kind = str(entity.kind or "").strip().lower()
+    return normalized_kind in {"product", "产品", "hardware", "device"}
+
+
 def _normalize_compact(value: str) -> str:
     return "".join(str(value or "").upper().split())
+
+
+def _infer_subject_domain_hints_from_glossary_text(value_text: str) -> set[str]:
+    normalized = _normalize_domain_alias(value_text)
+    if not normalized:
+        return set()
+    hits = set()
+    for domain, aliases in _GLOSSARY_SUBJECT_DOMAIN_TERMS.items():
+        for alias in aliases:
+            alias_normalized = _normalize_domain_alias(alias)
+            if not alias_normalized or len(alias_normalized) < 2:
+                continue
+            if alias_normalized in normalized:
+                hits.add(domain)
+                break
+    return hits
+
+
+def _infer_subject_domain_from_hinting(value: ContentUnderstanding) -> set[str]:
+    semantic_values = [
+        value.primary_subject,
+        value.resolved_primary_subject,
+        value.video_theme,
+        value.summary,
+        value.hook_line,
+        value.engagement_question,
+    ]
+    for values in (
+        value.semantic_facts.primary_subject_candidates,
+        value.semantic_facts.product_name_candidates,
+        value.semantic_facts.product_type_candidates,
+        value.semantic_facts.model_candidates,
+        value.semantic_facts.brand_candidates,
+        value.semantic_facts.primary_subject_candidates,
+        value.semantic_facts.aspect_candidates,
+        value.semantic_facts.supporting_subject_candidates,
+        value.semantic_facts.supporting_product_candidates,
+        value.semantic_facts.comparison_subject_candidates,
+        value.semantic_facts.entity_candidates,
+    ):
+        for item in values:
+            text = str(item).strip()
+            if text:
+                semantic_values.append(text)
+    semantic_values.extend(
+        entity.name
+        for entity in (value.subject_entities or [])
+        if str(entity.name or "").strip()
+    )
+    semantic_values.extend(
+        entity.brand
+        for entity in (value.subject_entities or [])
+        if str(entity.brand or "").strip()
+    )
+    semantic_values.extend(
+        entity.model
+        for entity in (value.subject_entities or [])
+        if str(entity.model or "").strip()
+    )
+    semantic_values.extend(
+        entity.name
+        for entity in (value.resolved_entities or [])
+        if str(entity.name or "").strip()
+    )
+    semantic_values.extend(
+        entity.brand
+        for entity in (value.resolved_entities or [])
+        if str(entity.brand or "").strip()
+    )
+    semantic_values.extend(
+        entity.model
+        for entity in (value.resolved_entities or [])
+        if str(entity.model or "").strip()
+    )
+    semantic_values.extend(
+        entity.name
+        for entity in (value.observed_entities or [])
+        if str(entity.name or "").strip()
+    )
+    semantic_values.extend(
+        entity.brand
+        for entity in (value.observed_entities or [])
+        if str(entity.brand or "").strip()
+    )
+    semantic_values.extend(
+        entity.model
+        for entity in (value.observed_entities or [])
+        if str(entity.model or "").strip()
+    )
+    text_blob = " ".join(str(item).strip() for item in semantic_values if str(item or "").strip())
+    return _infer_subject_domain_hints_from_glossary_text(text_blob)
+
+
+def _prefer_subject_domain_from_hints(subject_domain_hints: set[str]) -> str:
+    if not subject_domain_hints:
+        return ""
+    for hint in ("bag", "edc", "flashlight", "knife", "functional", "food", "vlog", "commentary", "gameplay", "tutorial"):
+        if hint in subject_domain_hints:
+            return hint
+    return next(iter(subject_domain_hints))
 
 
 def _compose_legacy_subject_type(*, subject_type: str, subject_brand: str, subject_model: str) -> str:
@@ -333,22 +548,165 @@ def _subject_type_contains_model(subject_type: str, subject_model: str) -> bool:
     return bool(ascii_model and ascii_model in ascii_candidate)
 
 
-def map_content_understanding_to_legacy_profile(value: ContentUnderstanding) -> dict[str, Any]:
+def _infer_subject_domain_hints(value: ContentUnderstanding) -> set[str]:
+    domain_hints: set[str] = set()
+    direct = _normalize_understanding_value(value.content_domain).lower()
+    if "bag" in direct or "functional" in direct:
+        domain_hints.add("bag")
+    if "edc" in direct and not domain_hints:
+        domain_hints.add("edc")
+    if "flashlight" in direct:
+        domain_hints.add("flashlight")
+    if "knife" in direct:
+        domain_hints.add("knife")
+
+    type_blob = "".join(
+        str(item or "") + " "
+        for item in (
+            value.primary_subject,
+            value.resolved_primary_subject,
+            *value.semantic_facts.primary_subject_candidates,
+            *value.semantic_facts.product_type_candidates,
+            *value.semantic_facts.aspect_candidates,
+            *value.semantic_facts.model_candidates,
+            *value.semantic_facts.brand_candidates,
+            *value.semantic_facts.product_name_candidates,
+        )
+    )
+    if any(token in type_blob for token in ("双肩包", "机能包", "背包", "背负", "副包", "分仓", "挂点", "收纳")):
+        domain_hints.add("bag")
+    if any(token in type_blob for token in ("手电", "手电筒", "电筒", "流明", "闪光", "flashlight", "torch")):
+        domain_hints.add("flashlight")
+    if any(token in type_blob for token in ("刀", "刀具", "折刀", "重力刀", "刀柄", "开刃", "knife")):
+        domain_hints.add("knife")
+    glossary_inferred = _infer_subject_domain_from_hinting(value)
+    if glossary_inferred:
+        domain_hints.update(glossary_inferred)
+    return domain_hints
+
+
+def _entity_domain_alias_matches(entity: SubjectEntity, subject_domain: str) -> bool:
+    aliases = _GLOSSARY_SUBJECT_DOMAIN_TERMS.get(_normalize_subject_domain(subject_domain), set())
+    if not aliases:
+        return False
+    searchable = _normalize_domain_alias(f"{entity.name} {entity.brand} {entity.model}")
+    for alias in aliases:
+        alias_normalized = _normalize_domain_alias(alias)
+        if len(alias_normalized) < 2:
+            continue
+        if alias_normalized in searchable:
+            return True
+    return False
+
+
+def _normalize_subject_domain(value: str) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized == "bag":
+        return "bag"
+    return normalized
+
+
+def _matches_subject_domain(entity: SubjectEntity, subject_domain_hints: set[str]) -> bool:
+    if not subject_domain_hints:
+        return True
+    if "edc" in subject_domain_hints:
+        return True
+    normalized_name = _normalize_compact(entity.name)
+    normalized_brand = _normalize_compact(entity.brand)
+    normalized_model = _normalize_compact(entity.model)
+    searchable = "".join((entity.kind, " ", normalized_name, " ", normalized_brand, " ", normalized_model))
+    if "bag" in subject_domain_hints and any(token in searchable for token in ("BACKPACK", "BAG", "SHOULDER", "FXX1", "FOXBAT", "机能包", "双肩包", "背包", "副包", "分仓", "挂点")):
+        return True
+    if "bag" in subject_domain_hints and _entity_domain_alias_matches(entity, "bag"):
+        return True
+    if "flashlight" in subject_domain_hints and any(token in searchable for token in ("TORCH", "FLASHLIGHT", "ILLUM", "LIGHT", "手电", "手电筒", "电筒", "尾按")):
+        return True
+    if "flashlight" in subject_domain_hints and _entity_domain_alias_matches(entity, "flashlight"):
+        return True
+    if "knife" in subject_domain_hints and any(token in searchable for token in ("KNIFE", "BLADE", "GRAVITY", "折刀", "重力刀", "刀")):
+        return True
+    if "knife" in subject_domain_hints and _entity_domain_alias_matches(entity, "knife"):
+        return True
+    return False
+
+
+def _resolve_subject_brand_and_model(
+    value: ContentUnderstanding,
+    entities: list[SubjectEntity],
+    *,
+    subject_domain_hints: set[str] | None = None,
+) -> tuple[str, str]:
+    comparison_aliases = _subject_alias_candidates(value.semantic_facts.comparison_subject_candidates)
+    primary_aliases = _subject_alias_candidates(
+        [value.resolved_primary_subject, value.primary_subject] + value.semantic_facts.primary_subject_candidates
+    )
+    active_domain_hints = set(subject_domain_hints or _infer_subject_domain_hints(value))
+
     subject_brand = ""
     subject_model = ""
-    preferred_entities = _preferred_subject_entities(value)
-    for entity in preferred_entities:
-        normalized_kind = str(entity.kind or "").strip().lower()
-        if entity.brand and not subject_brand:
+
+    primary_aligned_entities = [
+        entity
+        for entity in entities
+        if _entity_matches_primary(entity, primary_aliases or set())
+        and not _is_comparison_entity(entity, comparison_aliases)
+    ]
+    if active_domain_hints:
+        primary_aligned_entities = [
+            entity
+            for entity in primary_aligned_entities
+            if _matches_subject_domain(entity, active_domain_hints)
+        ]
+    if not primary_aligned_entities:
+        primary_aligned_entities = [
+            entity
+            for entity in entities
+            if not _is_comparison_entity(entity, comparison_aliases)
+            and _matches_subject_domain(entity, active_domain_hints)
+        ]
+    if not primary_aligned_entities:
+        return "", ""
+
+    for entity in primary_aligned_entities:
+        if not subject_brand and entity.brand:
             subject_brand = entity.brand
-        if entity.model and not subject_model and (entity.brand or normalized_kind in {"product", "hardware", "device"}):
+        if not subject_model and _is_product_like_entity(entity):
             subject_model = entity.model
         if subject_brand and subject_model:
             break
+
+    if not subject_brand and primary_aligned_entities:
+        for entity in primary_aligned_entities:
+            if entity.brand:
+                subject_brand = entity.brand
+                break
+    if not subject_model and primary_aligned_entities:
+        for entity in primary_aligned_entities:
+            if _is_product_like_entity(entity) and entity.model:
+                subject_model = entity.model
+                break
+
+    return subject_brand, subject_model
+
+
+def map_content_understanding_to_legacy_profile(value: ContentUnderstanding) -> dict[str, Any]:
+    preferred_entities = _preferred_subject_entities(value)
+    subject_domain_hints = _infer_subject_domain_hints(value)
+    if not subject_domain_hints:
+        subject_domain_hints = _infer_subject_domain_from_hinting(value)
+        if not subject_domain_hints:
+            subject_domain_hints = set()
+    subject_brand, subject_model = _resolve_subject_brand_and_model(
+        value,
+        preferred_entities,
+        subject_domain_hints=subject_domain_hints,
+    )
     if not subject_brand:
         subject_brand = _infer_subject_brand_from_context(value, preferred_entities)
-    content_kind = _normalize_understanding_value(value.video_type)
+    content_kind = normalize_video_type(value.video_type)
     subject_domain = _normalize_understanding_value(value.content_domain)
+    if not subject_domain:
+        subject_domain = _prefer_subject_domain_from_hints(subject_domain_hints)
     subject_type = _compose_legacy_subject_type(
         subject_type=_normalize_understanding_value(
         value.resolved_primary_subject

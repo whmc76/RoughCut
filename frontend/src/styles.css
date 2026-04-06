@@ -526,6 +526,11 @@ select.input option:focus {
   font-size: 12px;
 }
 
+.button.button-sm.ghost {
+  padding-block: 5px;
+  border-radius: 12px;
+}
+
 .button.ghost {
   background: rgba(255, 255, 255, 0.02);
 }
@@ -887,12 +892,38 @@ select.input option:focus {
   margin-bottom: 10px;
 }
 
+.error-events-head {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.event-count-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 181, 108, 0.28);
+  color: #ffe4bf;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: normal;
+}
+
 .activity-card,
 .notice {
   border-radius: 16px;
   padding: 14px;
   border: 1px solid var(--line);
   background: rgba(255, 255, 255, 0.03);
+}
+
+.notice.notice-error {
+  border-color: rgba(255, 107, 114, 0.42);
+  color: #ffd2d5;
 }
 
 .token-usage-grid {

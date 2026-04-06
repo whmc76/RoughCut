@@ -11,7 +11,11 @@ from roughcut.providers.reasoning.base import Message
 from roughcut.review.content_understanding_infer import parse_content_understanding_payload
 from roughcut.review.content_understanding_resolution import resolve_entities, should_run_entity_resolution
 from roughcut.review.content_understanding_retrieval import search_confirmed_content_entities
-from roughcut.review.content_understanding_schema import ContentUnderstanding, map_content_understanding_to_legacy_profile
+from roughcut.review.content_understanding_schema import (
+    CONTENT_UNDERSTANDING_FIELD_GUIDELINES,
+    ContentUnderstanding,
+    map_content_understanding_to_legacy_profile,
+)
 
 
 SearchCallable = Callable[..., Awaitable[list[Any]]]
@@ -102,6 +106,7 @@ async def verify_content_understanding(
         "7. conflicts 要列出与当前视频原始理解冲突的字段名。"
         "7.5. 如果原始理解里的 semantic_facts 已经区分了 primary_subject_candidates、component_candidates、aspect_candidates，优先保持这种主次关系；"
         "8. 不要把功能系统、工艺过程、配件、服务方、合作方或背景元素顶替成主主体，除非视频明确就是在讲它们本身。"
+        f"{CONTENT_UNDERSTANDING_FIELD_GUIDELINES}\n"
         "JSON 结构："
         "{"
         '"video_type":"","content_domain":"","primary_subject":"","subject_entities":[{"kind":"","name":"","brand":"","model":""}],'

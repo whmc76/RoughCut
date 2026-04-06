@@ -109,7 +109,7 @@ export function JobReviewOverlay({
   };
 
   return (
-    <div className="floating-modal-backdrop review-overlay-backdrop" onClick={onClose} role="presentation">
+    <div className="floating-modal-backdrop review-overlay-backdrop" role="presentation">
       <div className="floating-modal-shell review-overlay-shell" role="dialog" aria-modal="true" aria-label={selectedJob.source_name} onClick={(event) => event.stopPropagation()}>
         <button className="button ghost floating-modal-close" type="button" onClick={onClose} aria-label={t("jobs.modal.closeAria")}>
           {t("jobs.modal.close")}

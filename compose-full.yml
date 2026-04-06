@@ -1,0 +1,767 @@
+name: roughcut
+services:
+  api:
+    build:
+      context: E:\WorkSpace\RoughCut
+      dockerfile: Dockerfile
+      args:
+        ROUGHCUT_PYTHON_EXTRAS: ""
+    command:
+      - roughcut
+      - api
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+        required: true
+      minio:
+        condition: service_healthy
+        required: true
+      postgres:
+        condition: service_healthy
+        required: true
+      redis:
+        condition: service_healthy
+        required: true
+    environment:
+      ALLOWED_EXTENSIONS: '[".mp4",".mov",".mkv",".avi",".webm"]'
+      ANTHROPIC_API_KEY: ""
+      ASR_EVIDENCE_ENABLED: "true"
+      AVATAR_API_BASE_URL: http://host.docker.internal:49202
+      AVATAR_TRAINING_API_BASE_URL: http://host.docker.internal:49204
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+      CLEANUP_HEYGEM_TEMP_ON_TERMINAL: "true"
+      CLEANUP_JOB_STORAGE_ON_TERMINAL: "true"
+      CLEANUP_RENDER_DEBUG_ON_TERMINAL: "true"
+      COVER_TITLE_FONT_PATH: /usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc
+      DATABASE_URL: postgresql+asyncpg://roughcut:roughcut@postgres:5432/roughcut
+      ENTITY_GRAPH_ENABLED: "true"
+      FFMPEG_TIMEOUT_SEC: "600"
+      HEYGEM_SHARED_HOST_DIR: F:/roughcut_outputs/heygem
+      HEYGEM_SHARED_ROOT: /code/data
+      HEYGEM_VOICE_ROOT: /code/data/voice/data
+      HF_HOME: /app/data/cache/huggingface
+      JOB_STORAGE_DIR: /app/data/jobs
+      MAX_UPLOAD_SIZE_MB: "2048"
+      MAX_VIDEO_DURATION_SEC: "7200"
+      MINIMAX_API_HOST: https://api.minimaxi.com
+      MINIMAX_API_KEY: sk-cp-NLFhE2PphXtl6XvCxeas1cY66KvMpLjO-bstnpGsknJYHn90TSi8mGj61Ni5TeSzplDYGRGpkNLVNbJNwV4ki5cOJQPAaybZ8XnK-d9w06u2Z6F4F5z6bNg
+      MINIMAX_CODING_PLAN_API_KEY: sk-cp-NLFhE2PphXtl6XvCxeas1cY66KvMpLjO-bstnpGsknJYHn90TSi8mGj61Ni5TeSzplDYGRGpkNLVNbJNwV4ki5cOJQPAaybZ8XnK-d9w06u2Z6F4F5z6bNg
+      OCR_ENABLED: "true"
+      OLLAMA_BASE_URL: http://host.docker.internal:11434
+      OPENAI_API_KEY: ""
+      OUTPUT_DIR: /app/data/output
+      OUTPUT_NAME_PATTERN: '{date}_{stem}'
+      QWEN_ASR_API_BASE_URL: http://host.docker.internal:18096
+      REASONING_MODEL: MiniMax-M2.7-highspeed
+      REASONING_PROVIDER: minimax
+      REDIS_URL: redis://redis:6379/0
+      RENDER_DEBUG_DIR: /app/logs/render-debug
+      RESEARCH_VERIFIER_ENABLED: "true"
+      ROUGHCUT_ACP_BRIDGE_BACKEND: claude
+      ROUGHCUT_ACP_BRIDGE_CLAUDE_MODEL: opus
+      ROUGHCUT_ACP_BRIDGE_CODEX_COMMAND: codex
+      ROUGHCUT_ACP_BRIDGE_CODEX_MODEL: gpt-5.4-mini
+      ROUGHCUT_ACP_BRIDGE_FALLBACK_BACKEND: codex
+      ROUGHCUT_DOCKER_GPUS: all
+      ROUGHCUT_OUTPUT_HOST_ROOT: F:/roughcut_outputs
+      ROUGHCUT_OUTPUT_ROOT: F:/roughcut_outputs
+      ROUGHCUT_REDIS_PORT: "26379"
+      ROUGHCUT_TEST_OUTPUT_ROOT: F:/roughcut_outputs/tests
+      S3_ACCESS_KEY_ID: minioadmin
+      S3_BUCKET_NAME: roughcut
+      S3_ENDPOINT_URL: http://minio:9000
+      S3_REGION: us-east-1
+      S3_SECRET_ACCESS_KEY: minioadmin
+      SEARCH_FALLBACK_PROVIDER: minimax
+      SEARCH_PROVIDER: auto
+      SUBTITLE_FONT: Noto Sans CJK SC
+      TELEGRAM_AGENT_CLAUDE_COMMAND: claude
+      TELEGRAM_AGENT_CLAUDE_ENABLED: "true"
+      TELEGRAM_AGENT_CLAUDE_MODEL: opus
+      TELEGRAM_AGENT_CODEX_COMMAND: codex
+      TELEGRAM_AGENT_ENABLED: "false"
+      TELEGRAM_BOT_CHAT_ID: "7814561115"
+      TELEGRAM_BOT_TOKEN: 8718320333:AAHaR16acifX3M5fYmhE2_p0nndcxtM4ceU
+      TRANSCRIPTION_MODEL: gpt-4o-transcribe
+      TRANSCRIPTION_PROVIDER: openai
+      XDG_CACHE_HOME: /app/data/cache
+    extra_hosts:
+      - host.docker.internal=host-gateway
+    healthcheck:
+      test:
+        - CMD
+        - curl
+        - -fsS
+        - http://localhost:8000/readyz
+      timeout: 5s
+      interval: 10s
+      retries: 12
+    image: roughcut:local
+    networks:
+      default: null
+    ports:
+      - mode: ingress
+        target: 8000
+        published: "38471"
+        protocol: tcp
+    restart: unless-stopped
+    volumes:
+      - type: bind
+        source: E:\WorkSpace\RoughCut\data\output
+        target: /app/data/output
+        bind:
+          create_host_path: true
+      - type: bind
+        source: E:\WorkSpace\RoughCut\data\cache
+        target: /app/data/cache
+        bind:
+          create_host_path: true
+      - type: bind
+        source: E:\WorkSpace\RoughCut\logs
+        target: /app/logs
+        bind:
+          create_host_path: true
+      - type: bind
+        source: E:\WorkSpace\RoughCut\watch
+        target: /app/watch
+        bind:
+          create_host_path: true
+      - type: bind
+        source: F:/roughcut_outputs/heygem
+        target: /code/data
+        bind:
+          create_host_path: true
+  migrate:
+    build:
+      context: E:\WorkSpace\RoughCut
+      dockerfile: Dockerfile
+      args:
+        ROUGHCUT_PYTHON_EXTRAS: ""
+    command:
+      - roughcut
+      - migrate
+    depends_on:
+      minio:
+        condition: service_healthy
+        required: true
+      postgres:
+        condition: service_healthy
+        required: true
+      redis:
+        condition: service_healthy
+        required: true
+    environment:
+      ALLOWED_EXTENSIONS: '[".mp4",".mov",".mkv",".avi",".webm"]'
+      ANTHROPIC_API_KEY: ""
+      ASR_EVIDENCE_ENABLED: "true"
+      AVATAR_API_BASE_URL: http://host.docker.internal:49202
+      AVATAR_TRAINING_API_BASE_URL: http://host.docker.internal:49204
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+      CLEANUP_HEYGEM_TEMP_ON_TERMINAL: "true"
+      CLEANUP_JOB_STORAGE_ON_TERMINAL: "true"
+      CLEANUP_RENDER_DEBUG_ON_TERMINAL: "true"
+      COVER_TITLE_FONT_PATH: /usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc
+      DATABASE_URL: postgresql+asyncpg://roughcut:roughcut@postgres:5432/roughcut
+      ENTITY_GRAPH_ENABLED: "true"
+      FFMPEG_TIMEOUT_SEC: "600"
+      HEYGEM_SHARED_HOST_DIR: F:/roughcut_outputs/heygem
+      HEYGEM_SHARED_ROOT: /code/data
+      HEYGEM_VOICE_ROOT: /code/data/voice/data
+      HF_HOME: /app/data/cache/huggingface
+      JOB_STORAGE_DIR: /app/data/jobs
+      MAX_UPLOAD_SIZE_MB: "2048"
+      MAX_VIDEO_DURATION_SEC: "7200"
+      MINIMAX_API_HOST: https://api.minimaxi.com
+      MINIMAX_API_KEY: sk-cp-NLFhE2PphXtl6XvCxeas1cY66KvMpLjO-bstnpGsknJYHn90TSi8mGj61Ni5TeSzplDYGRGpkNLVNbJNwV4ki5cOJQPAaybZ8XnK-d9w06u2Z6F4F5z6bNg
+      MINIMAX_CODING_PLAN_API_KEY: sk-cp-NLFhE2PphXtl6XvCxeas1cY66KvMpLjO-bstnpGsknJYHn90TSi8mGj61Ni5TeSzplDYGRGpkNLVNbJNwV4ki5cOJQPAaybZ8XnK-d9w06u2Z6F4F5z6bNg
+      OCR_ENABLED: "true"
+      OLLAMA_BASE_URL: http://host.docker.internal:11434
+      OPENAI_API_KEY: ""
+      OUTPUT_DIR: /app/data/output
+      OUTPUT_NAME_PATTERN: '{date}_{stem}'
+      QWEN_ASR_API_BASE_URL: http://host.docker.internal:18096
+      REASONING_MODEL: MiniMax-M2.7-highspeed
+      REASONING_PROVIDER: minimax
+      REDIS_URL: redis://redis:6379/0
+      RENDER_DEBUG_DIR: /app/logs/render-debug
+      RESEARCH_VERIFIER_ENABLED: "true"
+      ROUGHCUT_ACP_BRIDGE_BACKEND: claude
+      ROUGHCUT_ACP_BRIDGE_CLAUDE_MODEL: opus
+      ROUGHCUT_ACP_BRIDGE_CODEX_COMMAND: codex
+      ROUGHCUT_ACP_BRIDGE_CODEX_MODEL: gpt-5.4-mini
+      ROUGHCUT_ACP_BRIDGE_FALLBACK_BACKEND: codex
+      ROUGHCUT_DOCKER_GPUS: all
+      ROUGHCUT_OUTPUT_HOST_ROOT: F:/roughcut_outputs
+      ROUGHCUT_OUTPUT_ROOT: F:/roughcut_outputs
+      ROUGHCUT_REDIS_PORT: "26379"
+      ROUGHCUT_TEST_OUTPUT_ROOT: F:/roughcut_outputs/tests
+      S3_ACCESS_KEY_ID: minioadmin
+      S3_BUCKET_NAME: roughcut
+      S3_ENDPOINT_URL: http://minio:9000
+      S3_REGION: us-east-1
+      S3_SECRET_ACCESS_KEY: minioadmin
+      SEARCH_FALLBACK_PROVIDER: minimax
+      SEARCH_PROVIDER: auto
+      SUBTITLE_FONT: Noto Sans CJK SC
+      TELEGRAM_AGENT_CLAUDE_COMMAND: claude
+      TELEGRAM_AGENT_CLAUDE_ENABLED: "true"
+      TELEGRAM_AGENT_CLAUDE_MODEL: opus
+      TELEGRAM_AGENT_CODEX_COMMAND: codex
+      TELEGRAM_AGENT_ENABLED: "false"
+      TELEGRAM_BOT_CHAT_ID: "7814561115"
+      TELEGRAM_BOT_TOKEN: 8718320333:AAHaR16acifX3M5fYmhE2_p0nndcxtM4ceU
+      TRANSCRIPTION_MODEL: gpt-4o-transcribe
+      TRANSCRIPTION_PROVIDER: openai
+      XDG_CACHE_HOME: /app/data/cache
+    image: roughcut:local
+    networks:
+      default: null
+    restart: "no"
+  minio:
+    command:
+      - server
+      - /data
+      - --console-address
+      - :9001
+    environment:
+      MINIO_ROOT_PASSWORD: minioadmin
+      MINIO_ROOT_USER: minioadmin
+    healthcheck:
+      test:
+        - CMD
+        - curl
+        - -f
+        - http://localhost:9000/minio/health/live
+      timeout: 5s
+      interval: 5s
+      retries: 10
+    image: minio/minio:latest
+    networks:
+      default: null
+    ports:
+      - mode: ingress
+        target: 9000
+        published: "39000"
+        protocol: tcp
+      - mode: ingress
+        target: 9001
+        published: "39001"
+        protocol: tcp
+    volumes:
+      - type: volume
+        source: minio_data
+        target: /data
+        volume: {}
+  orchestrator:
+    build:
+      context: E:\WorkSpace\RoughCut
+      dockerfile: Dockerfile
+      args:
+        ROUGHCUT_PYTHON_EXTRAS: ""
+    command:
+      - roughcut
+      - orchestrator
+      - --poll-interval
+      - "2"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+        required: true
+      minio:
+        condition: service_healthy
+        required: true
+      postgres:
+        condition: service_healthy
+        required: true
+      redis:
+        condition: service_healthy
+        required: true
+    environment:
+      ALLOWED_EXTENSIONS: '[".mp4",".mov",".mkv",".avi",".webm"]'
+      ANTHROPIC_API_KEY: ""
+      ASR_EVIDENCE_ENABLED: "true"
+      AVATAR_API_BASE_URL: http://host.docker.internal:49202
+      AVATAR_TRAINING_API_BASE_URL: http://host.docker.internal:49204
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+      CLEANUP_HEYGEM_TEMP_ON_TERMINAL: "true"
+      CLEANUP_JOB_STORAGE_ON_TERMINAL: "true"
+      CLEANUP_RENDER_DEBUG_ON_TERMINAL: "true"
+      COVER_TITLE_FONT_PATH: /usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc
+      DATABASE_URL: postgresql+asyncpg://roughcut:roughcut@postgres:5432/roughcut
+      ENTITY_GRAPH_ENABLED: "true"
+      FFMPEG_TIMEOUT_SEC: "600"
+      HEYGEM_SHARED_HOST_DIR: F:/roughcut_outputs/heygem
+      HEYGEM_SHARED_ROOT: /code/data
+      HEYGEM_VOICE_ROOT: /code/data/voice/data
+      HF_HOME: /app/data/cache/huggingface
+      JOB_STORAGE_DIR: /app/data/jobs
+      MAX_UPLOAD_SIZE_MB: "2048"
+      MAX_VIDEO_DURATION_SEC: "7200"
+      MINIMAX_API_HOST: https://api.minimaxi.com
+      MINIMAX_API_KEY: sk-cp-NLFhE2PphXtl6XvCxeas1cY66KvMpLjO-bstnpGsknJYHn90TSi8mGj61Ni5TeSzplDYGRGpkNLVNbJNwV4ki5cOJQPAaybZ8XnK-d9w06u2Z6F4F5z6bNg
+      MINIMAX_CODING_PLAN_API_KEY: sk-cp-NLFhE2PphXtl6XvCxeas1cY66KvMpLjO-bstnpGsknJYHn90TSi8mGj61Ni5TeSzplDYGRGpkNLVNbJNwV4ki5cOJQPAaybZ8XnK-d9w06u2Z6F4F5z6bNg
+      OCR_ENABLED: "true"
+      OLLAMA_BASE_URL: http://host.docker.internal:11434
+      OPENAI_API_KEY: ""
+      OUTPUT_DIR: /app/data/output
+      OUTPUT_NAME_PATTERN: '{date}_{stem}'
+      QWEN_ASR_API_BASE_URL: http://host.docker.internal:18096
+      REASONING_MODEL: MiniMax-M2.7-highspeed
+      REASONING_PROVIDER: minimax
+      REDIS_URL: redis://redis:6379/0
+      RENDER_DEBUG_DIR: /app/logs/render-debug
+      RESEARCH_VERIFIER_ENABLED: "true"
+      ROUGHCUT_ACP_BRIDGE_BACKEND: claude
+      ROUGHCUT_ACP_BRIDGE_CLAUDE_MODEL: opus
+      ROUGHCUT_ACP_BRIDGE_CODEX_COMMAND: codex
+      ROUGHCUT_ACP_BRIDGE_CODEX_MODEL: gpt-5.4-mini
+      ROUGHCUT_ACP_BRIDGE_FALLBACK_BACKEND: codex
+      ROUGHCUT_DOCKER_GPUS: all
+      ROUGHCUT_OUTPUT_HOST_ROOT: F:/roughcut_outputs
+      ROUGHCUT_OUTPUT_ROOT: F:/roughcut_outputs
+      ROUGHCUT_REDIS_PORT: "26379"
+      ROUGHCUT_TEST_OUTPUT_ROOT: F:/roughcut_outputs/tests
+      S3_ACCESS_KEY_ID: minioadmin
+      S3_BUCKET_NAME: roughcut
+      S3_ENDPOINT_URL: http://minio:9000
+      S3_REGION: us-east-1
+      S3_SECRET_ACCESS_KEY: minioadmin
+      SEARCH_FALLBACK_PROVIDER: minimax
+      SEARCH_PROVIDER: auto
+      SUBTITLE_FONT: Noto Sans CJK SC
+      TELEGRAM_AGENT_CLAUDE_COMMAND: claude
+      TELEGRAM_AGENT_CLAUDE_ENABLED: "true"
+      TELEGRAM_AGENT_CLAUDE_MODEL: opus
+      TELEGRAM_AGENT_CODEX_COMMAND: codex
+      TELEGRAM_AGENT_ENABLED: "false"
+      TELEGRAM_BOT_CHAT_ID: "7814561115"
+      TELEGRAM_BOT_TOKEN: 8718320333:AAHaR16acifX3M5fYmhE2_p0nndcxtM4ceU
+      TRANSCRIPTION_MODEL: gpt-4o-transcribe
+      TRANSCRIPTION_PROVIDER: openai
+      XDG_CACHE_HOME: /app/data/cache
+    extra_hosts:
+      - host.docker.internal=host-gateway
+    image: roughcut:local
+    networks:
+      default: null
+    restart: unless-stopped
+    volumes:
+      - type: bind
+        source: E:\WorkSpace\RoughCut\data\output
+        target: /app/data/output
+        bind:
+          create_host_path: true
+      - type: bind
+        source: E:\WorkSpace\RoughCut\data\cache
+        target: /app/data/cache
+        bind:
+          create_host_path: true
+      - type: bind
+        source: E:\WorkSpace\RoughCut\logs
+        target: /app/logs
+        bind:
+          create_host_path: true
+      - type: bind
+        source: E:\WorkSpace\RoughCut\watch
+        target: /app/watch
+        bind:
+          create_host_path: true
+      - type: bind
+        source: F:/roughcut_outputs/heygem
+        target: /code/data
+        bind:
+          create_host_path: true
+  postgres:
+    environment:
+      POSTGRES_DB: roughcut
+      POSTGRES_PASSWORD: roughcut
+      POSTGRES_USER: roughcut
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U roughcut
+      timeout: 5s
+      interval: 5s
+      retries: 10
+    image: postgres:16-alpine
+    networks:
+      default: null
+    ports:
+      - mode: ingress
+        target: 5432
+        published: "25432"
+        protocol: tcp
+    volumes:
+      - type: volume
+        source: pg_data
+        target: /var/lib/postgresql/data
+        volume: {}
+  redis:
+    healthcheck:
+      test:
+        - CMD
+        - redis-cli
+        - ping
+      timeout: 5s
+      interval: 5s
+      retries: 10
+    image: redis:7-alpine
+    networks:
+      default: null
+    ports:
+      - mode: ingress
+        target: 6379
+        published: "26379"
+        protocol: tcp
+    volumes:
+      - type: volume
+        source: redis_data
+        target: /data
+        volume: {}
+  worker-llm:
+    build:
+      context: E:\WorkSpace\RoughCut
+      dockerfile: Dockerfile
+      args:
+        ROUGHCUT_PYTHON_EXTRAS: ""
+    command:
+      - roughcut
+      - worker
+      - --queue
+      - llm_queue
+      - --pool
+      - prefork
+      - --concurrency
+      - "2"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+        required: true
+      minio:
+        condition: service_healthy
+        required: true
+      postgres:
+        condition: service_healthy
+        required: true
+      redis:
+        condition: service_healthy
+        required: true
+    environment:
+      ALLOWED_EXTENSIONS: '[".mp4",".mov",".mkv",".avi",".webm"]'
+      ANTHROPIC_API_KEY: ""
+      ASR_EVIDENCE_ENABLED: "true"
+      AVATAR_API_BASE_URL: http://host.docker.internal:49202
+      AVATAR_TRAINING_API_BASE_URL: http://host.docker.internal:49204
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+      CLEANUP_HEYGEM_TEMP_ON_TERMINAL: "true"
+      CLEANUP_JOB_STORAGE_ON_TERMINAL: "true"
+      CLEANUP_RENDER_DEBUG_ON_TERMINAL: "true"
+      COVER_TITLE_FONT_PATH: /usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc
+      DATABASE_URL: postgresql+asyncpg://roughcut:roughcut@postgres:5432/roughcut
+      ENTITY_GRAPH_ENABLED: "true"
+      FFMPEG_TIMEOUT_SEC: "600"
+      HEYGEM_SHARED_HOST_DIR: F:/roughcut_outputs/heygem
+      HEYGEM_SHARED_ROOT: /code/data
+      HEYGEM_VOICE_ROOT: /code/data/voice/data
+      HF_HOME: /app/data/cache/huggingface
+      JOB_STORAGE_DIR: /app/data/jobs
+      MAX_UPLOAD_SIZE_MB: "2048"
+      MAX_VIDEO_DURATION_SEC: "7200"
+      MINIMAX_API_HOST: https://api.minimaxi.com
+      MINIMAX_API_KEY: sk-cp-NLFhE2PphXtl6XvCxeas1cY66KvMpLjO-bstnpGsknJYHn90TSi8mGj61Ni5TeSzplDYGRGpkNLVNbJNwV4ki5cOJQPAaybZ8XnK-d9w06u2Z6F4F5z6bNg
+      MINIMAX_CODING_PLAN_API_KEY: sk-cp-NLFhE2PphXtl6XvCxeas1cY66KvMpLjO-bstnpGsknJYHn90TSi8mGj61Ni5TeSzplDYGRGpkNLVNbJNwV4ki5cOJQPAaybZ8XnK-d9w06u2Z6F4F5z6bNg
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility,video
+      NVIDIA_VISIBLE_DEVICES: all
+      OCR_ENABLED: "true"
+      OLLAMA_BASE_URL: http://host.docker.internal:11434
+      OPENAI_API_KEY: ""
+      OUTPUT_DIR: /app/data/output
+      OUTPUT_NAME_PATTERN: '{date}_{stem}'
+      QWEN_ASR_API_BASE_URL: http://host.docker.internal:18096
+      REASONING_MODEL: MiniMax-M2.7-highspeed
+      REASONING_PROVIDER: minimax
+      REDIS_URL: redis://redis:6379/0
+      RENDER_DEBUG_DIR: /app/logs/render-debug
+      RESEARCH_VERIFIER_ENABLED: "true"
+      ROUGHCUT_ACP_BRIDGE_BACKEND: claude
+      ROUGHCUT_ACP_BRIDGE_CLAUDE_MODEL: opus
+      ROUGHCUT_ACP_BRIDGE_CODEX_COMMAND: codex
+      ROUGHCUT_ACP_BRIDGE_CODEX_MODEL: gpt-5.4-mini
+      ROUGHCUT_ACP_BRIDGE_FALLBACK_BACKEND: codex
+      ROUGHCUT_DOCKER_GPUS: all
+      ROUGHCUT_OUTPUT_HOST_ROOT: F:/roughcut_outputs
+      ROUGHCUT_OUTPUT_ROOT: F:/roughcut_outputs
+      ROUGHCUT_REDIS_PORT: "26379"
+      ROUGHCUT_TEST_OUTPUT_ROOT: F:/roughcut_outputs/tests
+      S3_ACCESS_KEY_ID: minioadmin
+      S3_BUCKET_NAME: roughcut
+      S3_ENDPOINT_URL: http://minio:9000
+      S3_REGION: us-east-1
+      S3_SECRET_ACCESS_KEY: minioadmin
+      SEARCH_FALLBACK_PROVIDER: minimax
+      SEARCH_PROVIDER: auto
+      SUBTITLE_FONT: Noto Sans CJK SC
+      TELEGRAM_AGENT_CLAUDE_COMMAND: claude
+      TELEGRAM_AGENT_CLAUDE_ENABLED: "true"
+      TELEGRAM_AGENT_CLAUDE_MODEL: opus
+      TELEGRAM_AGENT_CODEX_COMMAND: codex
+      TELEGRAM_AGENT_ENABLED: "false"
+      TELEGRAM_BOT_CHAT_ID: "7814561115"
+      TELEGRAM_BOT_TOKEN: 8718320333:AAHaR16acifX3M5fYmhE2_p0nndcxtM4ceU
+      TRANSCRIPTION_MODEL: gpt-4o-transcribe
+      TRANSCRIPTION_PROVIDER: openai
+      XDG_CACHE_HOME: /app/data/cache
+    extra_hosts:
+      - host.docker.internal=host-gateway
+    gpus:
+      - count: -1
+    image: roughcut:local
+    networks:
+      default: null
+    restart: unless-stopped
+    volumes:
+      - type: bind
+        source: E:\WorkSpace\RoughCut\data\output
+        target: /app/data/output
+        bind:
+          create_host_path: true
+      - type: bind
+        source: E:\WorkSpace\RoughCut\data\cache
+        target: /app/data/cache
+        bind:
+          create_host_path: true
+      - type: bind
+        source: E:\WorkSpace\RoughCut\logs
+        target: /app/logs
+        bind:
+          create_host_path: true
+      - type: bind
+        source: E:\WorkSpace\RoughCut\watch
+        target: /app/watch
+        bind:
+          create_host_path: true
+      - type: bind
+        source: F:/roughcut_outputs/heygem
+        target: /code/data
+        bind:
+          create_host_path: true
+  worker-media:
+    build:
+      context: E:\WorkSpace\RoughCut
+      dockerfile: Dockerfile
+      args:
+        ROUGHCUT_PYTHON_EXTRAS: ""
+    command:
+      - roughcut
+      - worker
+      - --queue
+      - media_queue
+      - --pool
+      - prefork
+      - --concurrency
+      - "2"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+        required: true
+      minio:
+        condition: service_healthy
+        required: true
+      postgres:
+        condition: service_healthy
+        required: true
+      redis:
+        condition: service_healthy
+        required: true
+    environment:
+      ALLOWED_EXTENSIONS: '[".mp4",".mov",".mkv",".avi",".webm"]'
+      ANTHROPIC_API_KEY: ""
+      ASR_EVIDENCE_ENABLED: "true"
+      AVATAR_API_BASE_URL: http://host.docker.internal:49202
+      AVATAR_TRAINING_API_BASE_URL: http://host.docker.internal:49204
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+      CLEANUP_HEYGEM_TEMP_ON_TERMINAL: "true"
+      CLEANUP_JOB_STORAGE_ON_TERMINAL: "true"
+      CLEANUP_RENDER_DEBUG_ON_TERMINAL: "true"
+      COVER_TITLE_FONT_PATH: /usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc
+      DATABASE_URL: postgresql+asyncpg://roughcut:roughcut@postgres:5432/roughcut
+      ENTITY_GRAPH_ENABLED: "true"
+      FFMPEG_TIMEOUT_SEC: "600"
+      HEYGEM_SHARED_HOST_DIR: F:/roughcut_outputs/heygem
+      HEYGEM_SHARED_ROOT: /code/data
+      HEYGEM_VOICE_ROOT: /code/data/voice/data
+      HF_HOME: /app/data/cache/huggingface
+      JOB_STORAGE_DIR: /app/data/jobs
+      MAX_UPLOAD_SIZE_MB: "2048"
+      MAX_VIDEO_DURATION_SEC: "7200"
+      MINIMAX_API_HOST: https://api.minimaxi.com
+      MINIMAX_API_KEY: sk-cp-NLFhE2PphXtl6XvCxeas1cY66KvMpLjO-bstnpGsknJYHn90TSi8mGj61Ni5TeSzplDYGRGpkNLVNbJNwV4ki5cOJQPAaybZ8XnK-d9w06u2Z6F4F5z6bNg
+      MINIMAX_CODING_PLAN_API_KEY: sk-cp-NLFhE2PphXtl6XvCxeas1cY66KvMpLjO-bstnpGsknJYHn90TSi8mGj61Ni5TeSzplDYGRGpkNLVNbJNwV4ki5cOJQPAaybZ8XnK-d9w06u2Z6F4F5z6bNg
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility,video
+      NVIDIA_VISIBLE_DEVICES: all
+      OCR_ENABLED: "true"
+      OLLAMA_BASE_URL: http://host.docker.internal:11434
+      OPENAI_API_KEY: ""
+      OUTPUT_DIR: /app/data/output
+      OUTPUT_NAME_PATTERN: '{date}_{stem}'
+      QWEN_ASR_API_BASE_URL: http://host.docker.internal:18096
+      REASONING_MODEL: MiniMax-M2.7-highspeed
+      REASONING_PROVIDER: minimax
+      REDIS_URL: redis://redis:6379/0
+      RENDER_DEBUG_DIR: /app/logs/render-debug
+      RESEARCH_VERIFIER_ENABLED: "true"
+      ROUGHCUT_ACP_BRIDGE_BACKEND: claude
+      ROUGHCUT_ACP_BRIDGE_CLAUDE_MODEL: opus
+      ROUGHCUT_ACP_BRIDGE_CODEX_COMMAND: codex
+      ROUGHCUT_ACP_BRIDGE_CODEX_MODEL: gpt-5.4-mini
+      ROUGHCUT_ACP_BRIDGE_FALLBACK_BACKEND: codex
+      ROUGHCUT_DOCKER_GPUS: all
+      ROUGHCUT_OUTPUT_HOST_ROOT: F:/roughcut_outputs
+      ROUGHCUT_OUTPUT_ROOT: F:/roughcut_outputs
+      ROUGHCUT_REDIS_PORT: "26379"
+      ROUGHCUT_TEST_OUTPUT_ROOT: F:/roughcut_outputs/tests
+      S3_ACCESS_KEY_ID: minioadmin
+      S3_BUCKET_NAME: roughcut
+      S3_ENDPOINT_URL: http://minio:9000
+      S3_REGION: us-east-1
+      S3_SECRET_ACCESS_KEY: minioadmin
+      SEARCH_FALLBACK_PROVIDER: minimax
+      SEARCH_PROVIDER: auto
+      SUBTITLE_FONT: Noto Sans CJK SC
+      TELEGRAM_AGENT_CLAUDE_COMMAND: claude
+      TELEGRAM_AGENT_CLAUDE_ENABLED: "true"
+      TELEGRAM_AGENT_CLAUDE_MODEL: opus
+      TELEGRAM_AGENT_CODEX_COMMAND: codex
+      TELEGRAM_AGENT_ENABLED: "false"
+      TELEGRAM_BOT_CHAT_ID: "7814561115"
+      TELEGRAM_BOT_TOKEN: 8718320333:AAHaR16acifX3M5fYmhE2_p0nndcxtM4ceU
+      TRANSCRIPTION_MODEL: gpt-4o-transcribe
+      TRANSCRIPTION_PROVIDER: openai
+      XDG_CACHE_HOME: /app/data/cache
+    extra_hosts:
+      - host.docker.internal=host-gateway
+    gpus:
+      - count: -1
+    image: roughcut:local
+    networks:
+      default: null
+    restart: unless-stopped
+    volumes:
+      - type: bind
+        source: E:\WorkSpace\RoughCut\data\output
+        target: /app/data/output
+        bind:
+          create_host_path: true
+      - type: bind
+        source: E:\WorkSpace\RoughCut\data\cache
+        target: /app/data/cache
+        bind:
+          create_host_path: true
+      - type: bind
+        source: E:\WorkSpace\RoughCut\logs
+        target: /app/logs
+        bind:
+          create_host_path: true
+      - type: bind
+        source: E:\WorkSpace\RoughCut\watch
+        target: /app/watch
+        bind:
+          create_host_path: true
+      - type: bind
+        source: F:/roughcut_outputs/heygem
+        target: /code/data
+        bind:
+          create_host_path: true
+networks:
+  default:
+    name: roughcut_default
+volumes:
+  minio_data:
+    name: roughcut_minio_data
+  pg_data:
+    name: roughcut_pg_data
+  redis_data:
+    name: roughcut_redis_data
+x-app-common:
+  build:
+    args:
+      ROUGHCUT_PYTHON_EXTRAS: ""
+    context: .
+    dockerfile: Dockerfile
+  depends_on:
+    migrate:
+      condition: service_completed_successfully
+    minio:
+      condition: service_healthy
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+  env_file:
+    - .env
+  environment:
+    AVATAR_API_BASE_URL: http://host.docker.internal:49202
+    AVATAR_TRAINING_API_BASE_URL: http://host.docker.internal:49204
+    CELERY_BROKER_URL: redis://redis:6379/0
+    CELERY_RESULT_BACKEND: redis://redis:6379/1
+    COVER_TITLE_FONT_PATH: /usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc
+    DATABASE_URL: postgresql+asyncpg://roughcut:roughcut@postgres:5432/roughcut
+    HEYGEM_SHARED_ROOT: /code/data
+    HEYGEM_VOICE_ROOT: /code/data/voice/data
+    HF_HOME: /app/data/cache/huggingface
+    JOB_STORAGE_DIR: /app/data/jobs
+    OLLAMA_BASE_URL: http://host.docker.internal:11434
+    OUTPUT_DIR: /app/data/output
+    REDIS_URL: redis://redis:6379/0
+    RENDER_DEBUG_DIR: /app/logs/render-debug
+    ROUGHCUT_DOCKER_GPUS: all
+    S3_ACCESS_KEY_ID: minioadmin
+    S3_BUCKET_NAME: roughcut
+    S3_ENDPOINT_URL: http://minio:9000
+    S3_REGION: us-east-1
+    S3_SECRET_ACCESS_KEY: minioadmin
+    SUBTITLE_FONT: Noto Sans CJK SC
+    XDG_CACHE_HOME: /app/data/cache
+  extra_hosts:
+    - host.docker.internal:host-gateway
+  image: roughcut:local
+  restart: unless-stopped
+  volumes:
+    - ./data/output:/app/data/output
+    - ./data/cache:/app/data/cache
+    - ./logs:/app/logs
+    - ./watch:/app/watch
+    - F:/roughcut_outputs/heygem:/code/data
+x-app-env:
+  AVATAR_API_BASE_URL: http://host.docker.internal:49202
+  AVATAR_TRAINING_API_BASE_URL: http://host.docker.internal:49204
+  CELERY_BROKER_URL: redis://redis:6379/0
+  CELERY_RESULT_BACKEND: redis://redis:6379/1
+  COVER_TITLE_FONT_PATH: /usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc
+  DATABASE_URL: postgresql+asyncpg://roughcut:roughcut@postgres:5432/roughcut
+  HEYGEM_SHARED_ROOT: /code/data
+  HEYGEM_VOICE_ROOT: /code/data/voice/data
+  HF_HOME: /app/data/cache/huggingface
+  JOB_STORAGE_DIR: /app/data/jobs
+  OLLAMA_BASE_URL: http://host.docker.internal:11434
+  OUTPUT_DIR: /app/data/output
+  REDIS_URL: redis://redis:6379/0
+  RENDER_DEBUG_DIR: /app/logs/render-debug
+  ROUGHCUT_DOCKER_GPUS: all
+  S3_ACCESS_KEY_ID: minioadmin
+  S3_BUCKET_NAME: roughcut
+  S3_ENDPOINT_URL: http://minio:9000
+  S3_REGION: us-east-1
+  S3_SECRET_ACCESS_KEY: minioadmin
+  SUBTITLE_FONT: Noto Sans CJK SC
+  XDG_CACHE_HOME: /app/data/cache
+

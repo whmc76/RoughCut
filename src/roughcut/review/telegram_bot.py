@@ -32,8 +32,10 @@ from roughcut.packaging.library import list_packaging_assets, resolve_packaging_
 from roughcut.providers.factory import get_reasoning_provider, get_transcription_provider
 from roughcut.review.downstream_context import select_resolved_downstream_profile
 from roughcut.review.subtitle_memory import build_transcription_prompt
-from roughcut.review.content_profile import build_reviewed_transcript_excerpt
+from roughcut.review.content_profile import build_review_feedback_search_queries, build_reviewed_transcript_excerpt
 from roughcut.review.report import generate_report
+from roughcut.review.content_profile_field_rules import CONTENT_PROFILE_FIELD_GUIDELINES
+from roughcut.review.content_understanding_schema import normalize_video_type
 from roughcut.telegram.commands import handle_telegram_command, handle_telegram_freeform_request
 from roughcut.telegram.policy import (
     is_allowed_chat,
@@ -75,6 +77,8 @@ _FULL_SUBTITLE_ACTION_PATTERN = re.compile(
     r"(?=(?<![A-Za-z0-9])L\d{1,4}(?![A-Za-z0-9])|$)"
 )
 _NEGATED_SUBTITLE_CONTENT_PATTERN = re.compile(r"字幕(?:内容|文本)?(?:本身)?(?:没问题|没有问题|无需修改|不用改)")
+_REVIEW_KEYWORD_SPLIT_RE = re.compile(r"[\s,，、/]+")
+_REVIEW_KEYWORD_TOKEN_LIMIT = 6
 _CONTENT_PROFILE_SUBTITLE_REVIEW_KEYWORDS = (
     "字幕校对",
     "字幕纠错",
@@ -195,14 +199,14 @@ _IDENTITY_SUPPORT_SOURCE_LABELS = {
     "evidence": "外部证据",
 }
 _CONTENT_FIELD_ORDER = (
-    ("subject_type", "视频类型"),
+    ("subject_type", "视频类型（主类型）"),
     ("video_theme", "视频主题"),
     ("hook_line", "标题钩子"),
-    ("visible_text", "画面文字"),
+    ("visible_text", "画面文字（OCR/画面可见词）"),
     ("summary", "内容摘要"),
     ("engagement_question", "互动提问"),
-    ("correction_notes", "校对备注"),
-    ("supplemental_context", "补充上下文"),
+    ("correction_notes", "校对备注（人工纠偏）"),
+    ("supplemental_context", "补充上下文（拍摄与素材补充）"),
 )
 _FINAL_REVIEW_CALLBACK_ACTION_TEXT = {
     "approve": "成片通过",
@@ -218,6 +222,7 @@ _FINAL_REVIEW_CALLBACK_ACK_TEXT = {
     "platform": "已接收平台文案重出",
     "avatar": "已接收数字人口播重做",
 }
+
 _AUDIO_SUFFIX_BY_MIME = {
     "audio/ogg": ".ogg",
     "audio/opus": ".opus",
@@ -1899,8 +1904,6 @@ def _build_content_profile_review_message(
         packaging_assets,
         packaging_config,
     )
-    keywords = _join_non_empty(draft.get("keywords") or draft.get("search_queries") or [])
-
     review_checks = _build_review_checks(
         enhancement_modes=list(review.enhancement_modes or []),
         config=config,
@@ -1908,11 +1911,28 @@ def _build_content_profile_review_message(
         packaging_plan=effective_packaging_plan,
         avatar_materials=avatar_materials,
     )
-    content_lines = [
-        f"- {label}：{_display_value(draft.get(key))}"
-        for key, label in _CONTENT_FIELD_ORDER
-    ]
-    content_lines.append(f"- 关键词：{keywords or '未识别'}")
+    content_lines = []
+    for key, label in _CONTENT_FIELD_ORDER:
+        if key == "subject_type":
+            content_lines.append(f"- {label}：{_display_subject_type(draft.get(key))}")
+        else:
+            content_lines.append(f"- {label}：{_display_value(draft.get(key))}")
+    keyword_candidates = _build_review_keyword_candidates(
+        draft,
+        source_name=source_name,
+    )
+    split_keyword_candidates = _split_review_keywords(keyword_candidates)
+    draft_keywords = _extract_final_review_keywords(
+        draft,
+        source_name=source_name,
+    )
+    if draft_keywords:
+        content_lines.append(f"- 关键词：{_join_non_empty(draft_keywords)}")
+        extra_suggestions = [item for item in split_keyword_candidates if item not in draft_keywords]
+        if extra_suggestions:
+            content_lines.append(f"- 关键词建议：{_join_non_empty(extra_suggestions)}")
+    else:
+        content_lines.append(f"- 关键词：{_join_non_empty(split_keyword_candidates) or '待补充'}")
 
     reference_identity = []
     if str(draft.get("subject_brand") or "").strip():
@@ -1931,6 +1951,11 @@ def _build_content_profile_review_message(
         "",
         "内容核对：",
         *content_lines,
+        "",
+        "字段含义：",
+        "- 画面文字：从字幕/画面中可直接识别的关键可见文本，不是主题总结。",
+        "- 校对备注：记录风险点、误读点或复核结论。",
+        "- 补充上下文：拍摄场景、对比规则、素材异常/后续处理约束。",
     ]
 
     if reference_identity:
@@ -2004,7 +2029,12 @@ def _build_final_review_message(
     rerun_context: dict[str, Any] | None = None,
 ) -> str:
     summary = str((content_profile or {}).get("summary") or (content_profile or {}).get("video_theme") or "").strip()
-    keywords = _join_non_empty(_extract_final_review_keywords(content_profile))
+    keywords = _join_non_empty(
+        _extract_final_review_keywords(
+            content_profile,
+            source_name=source_name,
+        )
+    )
     subtitle_hints = _build_final_review_subtitle_hints(subtitle_report)
     variant_lines = []
     for label, key in (
@@ -2029,8 +2059,8 @@ def _build_final_review_message(
         f"- 封面：{cover_text}",
         *variant_lines,
         "- 审片包：默认发送 3 段压缩预览，不直接上传整片，避免 Telegram 大文件卡顿。",
-        f"- 内容摘要：{summary or '未生成'}",
-        f"- 关键词：{keywords or '未识别'}",
+        f"- 内容摘要：{summary or '待补充'}",
+        f"- 关键词：{keywords or '待补充'}",
     ]
     rerun_lines = _build_final_review_rerun_context_lines(rerun_context)
     if rerun_lines:
@@ -2184,13 +2214,84 @@ def _resolve_final_review_video_source(
     return None
 
 
-def _extract_final_review_keywords(content_profile: dict[str, Any] | None) -> list[str]:
+def _extract_final_review_keywords(
+    content_profile: dict[str, Any] | None,
+    source_name: str = "",
+) -> list[str]:
+    return _split_review_keywords(
+        _resolve_raw_review_keywords(
+            content_profile=content_profile,
+            source_name=source_name,
+        )
+    )
+
+
+def _resolve_raw_review_keywords(
+    content_profile: dict[str, Any] | None,
+    source_name: str = "",
+) -> list[str]:
+    raw_keywords: list[str] = []
     keywords: list[str] = []
     for raw in (content_profile or {}).get("keywords") or (content_profile or {}).get("search_queries") or []:
         value = str(raw or "").strip()
         if value and value not in keywords:
             keywords.append(value)
-    return keywords[:6]
+    if keywords:
+        return keywords
+    source_name = source_name or str((content_profile or {}).get("source_name") or "")
+    for query in (
+        query
+        for query in _build_review_keyword_candidates(content_profile or {}, source_name=source_name)
+        if query and query not in keywords
+    ):
+        raw_keywords.append(query)
+    if raw_keywords:
+        return raw_keywords
+    return ["视频内容"]
+
+
+def _split_review_keywords(values: list[str]) -> list[str]:
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for raw in values:
+        text = str(raw or "").strip()
+        if not text:
+            continue
+        tokens = [token.strip() for token in _REVIEW_KEYWORD_SPLIT_RE.split(text) if token.strip()]
+        if not tokens:
+            tokens = [text]
+        for token in tokens:
+            key = "".join(str(token).upper().split())
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            deduped.append(token)
+            if len(deduped) >= _REVIEW_KEYWORD_TOKEN_LIMIT:
+                return deduped
+    return deduped[:_REVIEW_KEYWORD_TOKEN_LIMIT]
+
+
+def _build_review_keyword_candidates(
+    content_profile: dict[str, Any] | None,
+    *,
+    source_name: str = "",
+    limit: int = 6,
+) -> list[str]:
+    profile = dict(content_profile or {})
+    if source_name and not str(profile.get("source_name") or "").strip():
+        profile["source_name"] = source_name
+    proposals = {
+        "subject_brand": str(profile.get("subject_brand") or "").strip(),
+        "subject_model": str(profile.get("subject_model") or "").strip(),
+        "subject_type": str(profile.get("subject_type") or "").strip(),
+        "video_theme": str(profile.get("video_theme") or "").strip(),
+    }
+    return build_review_feedback_search_queries(
+        draft_profile=profile,
+        proposed_feedback=proposals,
+        source_name=source_name,
+        limit=limit,
+    )
 
 
 def _extract_subtitle_items_from_report(report: Any | None) -> list[dict[str, Any]]:
@@ -2831,7 +2932,40 @@ def _normalize_match_key(value: str) -> str:
 
 def _display_value(value: Any) -> str:
     text = str(value or "").strip()
-    return text or "未识别"
+    return text or "待补充"
+
+
+_SUBJECT_TYPE_LABELS = {
+    "tutorial": "教程(tutorial)",
+    "vlog": "Vlog(vlog)",
+    "commentary": "观点(commentary)",
+    "gameplay": "游戏(gameplay)",
+    "food": "探店(food)",
+    "unboxing": "开箱(unboxing)",
+}
+
+
+def _display_subject_type(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return "待补充"
+    key = text.strip().lower()
+    for known_key, label in _SUBJECT_TYPE_LABELS.items():
+        if known_key in key or label.lower() in key.lower():
+            return label
+    if "unboxing" in key or "开箱" in key:
+        return "开箱(unboxing)"
+    if "tutorial" in key or "教程" in key:
+        return "教程(tutorial)"
+    if "vlog" in key or "生活" in key or "日常" in key:
+        return "Vlog(vlog)"
+    if "commentary" in key or "观点" in key:
+        return "观点(commentary)"
+    if "gameplay" in key or "游戏" in key:
+        return "游戏(gameplay)"
+    if "food" in key or "探店" in key:
+        return "探店(food)"
+    return text
 
 
 def _build_content_profile_evidence_lines(draft: dict[str, Any]) -> list[str]:
@@ -3189,6 +3323,7 @@ async def _interpret_content_profile_reply(review: Any, text: str) -> dict[str, 
     prompt = (
         "你在把 Telegram 里的远程审核回复，转换成与前端内容审核表单完全一致的确认 payload。"
         "用户可能会直接说修改意见，也可能顺手改工作流模式、增强模式、关键词、文案风格。"
+        f"字段规则：{CONTENT_PROFILE_FIELD_GUIDELINES}\n"
         "如果用户没有提某个字段，就不要编造。"
         "如果用户只是补充说明，请把它放进 correction_notes 或 supplemental_context。"
         "输出 JSON，字段只允许来自这个集合："
@@ -3220,11 +3355,14 @@ async def _interpret_content_profile_reply(review: Any, text: str) -> dict[str, 
         payload = {}
 
     normalized_payload: dict[str, Any] = {}
+    normalized_subject_type = normalize_video_type(str(payload.get("subject_type") or ""))
+    if normalized_subject_type:
+        normalized_payload["subject_type"] = normalized_subject_type
+
     for key in (
         "copy_style",
         "subject_brand",
         "subject_model",
-        "subject_type",
         "video_theme",
         "hook_line",
         "visible_text",

@@ -88,7 +88,14 @@ export function JobSummaryReviewOverlay({
             <div className="detail-key">画面与识别证据</div>
             <div className="thumbnail-strip top-gap">
               {[0, 1, 2].map((index) => (
-                <img key={index} className="profile-thumb" src={api.contentProfileThumbnailUrl(jobId, index)} alt={`review-thumbnail-${index}`} />
+                <img
+                  key={index}
+                  className="profile-thumb"
+                  loading="lazy"
+                  decoding="async"
+                  src={api.contentProfileThumbnailUrl(jobId, index)}
+                  alt={`review-thumbnail-${index}`}
+                />
               ))}
             </div>
             <div className="timeline-list top-gap">
@@ -144,6 +151,7 @@ export function JobSummaryReviewOverlay({
         contentDraft={contentDraft}
         contentKeywords={contentKeywords}
         isSaving={isConfirmingProfile}
+        showThumbnails={false}
         reviewMode
         onFieldChange={onContentFieldChange}
         onKeywordsChange={onKeywordsChange}

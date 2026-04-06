@@ -203,6 +203,17 @@ const SAMPLE_PROFILE: ContentProfileReview = {
   memory: {},
 };
 
+const SAMPLE_PROFILE_NO_KEYWORDS: ContentProfileReview = {
+  ...SAMPLE_PROFILE,
+  draft: {
+    title: "草稿标题",
+  },
+  final: {
+    title: "最终标题",
+    search_queries: ["探店", "vlog"],
+  },
+};
+
 describe("useJobWorkspace", () => {
   beforeEach(() => {
     mockApi.listJobs.mockResolvedValue(SAMPLE_JOBS);
@@ -404,6 +415,37 @@ describe("useJobWorkspace", () => {
     expect(mockApi.patchConfig).toHaveBeenCalledWith({
       default_job_workflow_mode: "standard_edit",
       default_job_enhancement_modes: ["avatar_commentary"],
+    });
+  });
+
+  it("uses source search_queries when keywords are missing and keeps confirm payload populated", async () => {
+    mockApi.getContentProfile.mockResolvedValueOnce(SAMPLE_PROFILE_NO_KEYWORDS);
+
+    const { result } = renderHookWithQueryClient(() => useJobWorkspace());
+
+    act(() => {
+      result.current.setSelectedJobId("job_1");
+    });
+
+    await waitFor(() => expect(result.current.contentProfile.data).toEqual(SAMPLE_PROFILE_NO_KEYWORDS));
+    expect(result.current.contentKeywords).toBe("探店, vlog");
+
+    act(() => {
+      result.current.setContentDraft({
+        title: "人工调整标题",
+      });
+    });
+
+    await act(async () => {
+      await result.current.confirmProfile.mutateAsync();
+    });
+
+    expect(mockApi.confirmContentProfile).toHaveBeenCalledWith("job_1", {
+      title: "人工调整标题",
+      keywords: ["探店", "vlog"],
+      workflow_mode: "standard_edit",
+      enhancement_modes: ["avatar_commentary"],
+      copy_style: "attention_grabbing",
     });
   });
 

@@ -482,7 +482,6 @@ export function JobDetailPanel({
                             {event.detail || event.status}
                           </div>
                           <div className="toolbar">
-                            <span className="muted">{formatDate(event.timestamp)}</span>
                             <button type="button" className="button button-sm ghost" onClick={() => jumpToTimelineEvent(index)}>
                               {t("jobs.detail.jumpToTimeline")}
                             </button>
@@ -497,9 +496,10 @@ export function JobDetailPanel({
               <section className="detail-block">
                 <div className="detail-key">{t("jobs.detail.timeline")}</div>
                 <div className="timeline-list">
-                  {visibleTimelineEvents.map((event, index) => (
+                  {visibleTimelineEntries.map(({ event, index }) => (
                     <div
                       key={`${event.timestamp}-${index}`}
+                      id={`timeline-event-${index}`}
                       className={classNames(
                         "timeline-item",
                         `event-${resolveEventSeverityClass(event)}`,

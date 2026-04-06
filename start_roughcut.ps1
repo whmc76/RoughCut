@@ -111,6 +111,66 @@ function Invoke-RoughCutCompose {
     }
 }
 
+function Remove-RoughCutStoppedComposeContainers {
+    param(
+        [string[]]$ServiceNames = @(
+            "postgres",
+            "redis",
+            "minio",
+            "api",
+            "orchestrator",
+            "worker-media",
+            "worker-llm",
+            "watcher",
+            "migrate"
+        )
+    )
+
+    $docker = Get-Command docker -ErrorAction SilentlyContinue
+    if ($null -eq $docker) {
+        return
+    }
+
+    $composeEntries = docker ps -a --format "{{.Names}}|{{.State}}"
+    if (-not $composeEntries) {
+        return
+    }
+
+    $escapedServices = $ServiceNames | ForEach-Object { [regex]::Escape($_) }
+    $serviceRegex = "^(?:[^_]+_)?roughcut-(?:$($escapedServices -join "|"))-\\d+$"
+    $staleContainers = @()
+
+    foreach ($entry in ($composeEntries -split "(`r`n|`n|`r)")) {
+        $trimmed = $entry.Trim()
+        if ([string]::IsNullOrWhiteSpace($trimmed)) {
+            continue
+        }
+
+        $parts = $trimmed -split "\|", 2
+        if ($parts.Count -ne 2) {
+            continue
+        }
+
+        $name = $parts[0]
+        $state = $parts[1].ToLowerInvariant()
+        if ($state -notin @("exited", "created", "dead")) {
+            continue
+        }
+
+        if ($name -match $serviceRegex) {
+            $staleContainers += $name
+        }
+    }
+
+    if ($staleContainers.Count -eq 0) {
+        return
+    }
+
+    $staleContainers = $staleContainers | Sort-Object -Unique
+    Write-Host "Removing stale stopped RoughCut containers before compose startup: $($staleContainers -join ', ')" -ForegroundColor Yellow
+    docker rm -f $staleContainers | Out-Null
+}
+
 function Get-RoughCutComposeStatusEntries {
     param(
         [ValidateSet("infra", "runtime", "full")]
@@ -222,10 +282,12 @@ function Start-RoughCutComposeMode {
     }
     switch ($ComposeMode) {
         "infra" {
+            Remove-RoughCutStoppedComposeContainers -ServiceNames @("postgres", "redis", "minio")
             Invoke-RoughCutCompose -ComposeMode $ComposeMode -ComposeArguments @("up", "-d", "--remove-orphans")
         }
         default {
             try {
+                Remove-RoughCutStoppedComposeContainers
                 Invoke-RoughCutCompose -ComposeMode $ComposeMode -ComposeArguments @("up", "-d", "--build", "--remove-orphans") -DockerPythonExtrasOverride $DockerPythonExtras
             } catch {
                 $existingImage = docker image inspect roughcut:local 2>$null
@@ -233,6 +295,7 @@ function Start-RoughCutComposeMode {
                     throw
                 }
                 Write-Host "Docker build failed, but local image roughcut:local exists. Retrying without --build." -ForegroundColor Yellow
+                Remove-RoughCutStoppedComposeContainers
                 Invoke-RoughCutCompose -ComposeMode $ComposeMode -ComposeArguments @("up", "-d", "--remove-orphans") -DockerPythonExtrasOverride $DockerPythonExtras
             }
         }

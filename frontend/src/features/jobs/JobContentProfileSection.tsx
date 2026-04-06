@@ -15,6 +15,48 @@ function getTextValue(value: unknown) {
   return typeof value === "string" ? value.trim() : "";
 }
 
+const VIDEO_TYPE_LABELS: Record<string, string> = {
+  tutorial: "教程(tutorial)",
+  vlog: "Vlog(vlog)",
+  commentary: "观点(commentary)",
+  gameplay: "游戏(gameplay)",
+  food: "探店(food)",
+  unboxing: "开箱(unboxing)",
+};
+
+function formatVideoType(value: unknown) {
+  const normalized = getTextValue(value).toLowerCase();
+  if (!normalized) {
+    return "";
+  }
+  if (normalized in VIDEO_TYPE_LABELS) {
+    return VIDEO_TYPE_LABELS[normalized];
+  }
+  if (
+    normalized.includes("unboxing")
+    || normalized.includes("开箱")
+    || normalized.includes("机能包")
+  ) {
+    return VIDEO_TYPE_LABELS.unboxing;
+  }
+  if (normalized.includes("tutorial") || normalized.includes("教程")) {
+    return VIDEO_TYPE_LABELS.tutorial;
+  }
+  if (normalized.includes("vlog") || normalized.includes("生活") || normalized.includes("日常")) {
+    return VIDEO_TYPE_LABELS.vlog;
+  }
+  if (normalized.includes("commentary") || normalized.includes("观点") || normalized.includes("口播")) {
+    return VIDEO_TYPE_LABELS.commentary;
+  }
+  if (normalized.includes("gameplay") || normalized.includes("游戏")) {
+    return VIDEO_TYPE_LABELS.gameplay;
+  }
+  if (normalized.includes("food") || normalized.includes("探店")) {
+    return VIDEO_TYPE_LABELS.food;
+  }
+  return getTextValue(value);
+}
+
 type JobContentProfileSectionProps = {
   jobId: string;
   contentProfile?: ContentProfileReview;
@@ -23,6 +65,7 @@ type JobContentProfileSectionProps = {
   contentKeywords: string;
   isSaving: boolean;
   reviewMode?: boolean;
+  showThumbnails?: boolean;
   onFieldChange: (field: string, value: string) => void;
   onKeywordsChange: (value: string) => void;
   onConfirm: () => void;
@@ -36,6 +79,7 @@ export function JobContentProfileSection({
   contentKeywords,
   isSaving,
   reviewMode = false,
+  showThumbnails = true,
   onFieldChange,
   onKeywordsChange,
   onConfirm,
@@ -47,12 +91,18 @@ export function JobContentProfileSection({
     ? (contentSource.content_understanding as Record<string, unknown>)
     : null;
   const effectiveContentSource = contentUnderstanding
-    ? {
+        ? {
         ...contentSource,
         subject_type:
-          getTextValue(contentUnderstanding.subject_type)
-          || getTextValue(contentUnderstanding.primary_subject)
+          formatVideoType(
+            getTextValue(contentUnderstanding.video_type)
+            || getTextValue(contentUnderstanding.subject_type)
+            || getTextValue(contentUnderstanding.primary_subject)
+            || getTextValue(contentSource?.subject_type),
+          )
           || getTextValue(contentUnderstanding.video_type)
+          || getTextValue(contentUnderstanding.subject_type)
+          || getTextValue(contentUnderstanding.primary_subject)
           || getTextValue(contentSource?.subject_type),
         video_theme:
           getTextValue(contentUnderstanding.video_theme)
@@ -98,11 +148,20 @@ export function JobContentProfileSection({
       <div className="detail-key">{t("jobs.contentReview.title")}</div>
       {effectiveContentSource ? (
         <>
-          <div className="thumbnail-strip">
-            {[0, 1, 2].map((index) => (
-              <img key={index} className="profile-thumb" src={api.contentProfileThumbnailUrl(jobId, index)} alt={`thumbnail-${index}`} />
-            ))}
-          </div>
+          {showThumbnails ? (
+            <div className="thumbnail-strip">
+              {[0, 1, 2].map((index) => (
+                <img
+                  key={index}
+                  className="profile-thumb"
+                  loading="lazy"
+                  decoding="async"
+                  src={api.contentProfileThumbnailUrl(jobId, index)}
+                  alt={`thumbnail-${index}`}
+                />
+              ))}
+            </div>
+          ) : null}
           <div className="form-stack">
             {CONTENT_FIELDS.map((field) => (
               <label key={field}>
