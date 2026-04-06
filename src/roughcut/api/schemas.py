@@ -21,6 +21,7 @@ class JobCreate(BaseModel):
     workflow_template: str | None = None
     workflow_mode: str = DEFAULT_WORKFLOW_MODE
     enhancement_modes: list[str] = Field(default_factory=list)
+    output_dir: str | None = None
 
     @field_validator("language", mode="before")
     @classmethod
@@ -47,6 +48,14 @@ class JobCreate(BaseModel):
         if isinstance(value, (list, tuple, set)):
             return normalize_enhancement_modes(list(value))
         raise ValueError("enhancement_modes must be a list of strings")
+
+    @field_validator("output_dir", mode="before")
+    @classmethod
+    def validate_output_dir(cls, value: Any) -> str | None:
+        if value is None:
+            return None
+        normalized = str(value).strip()
+        return normalized or None
 
 
 class JobStepOut(BaseModel):
@@ -77,6 +86,7 @@ class JobOut(BaseModel):
     status: str
     language: str
     workflow_template: str | None
+    output_dir: str | None
     workflow_mode: str
     enhancement_modes: list[str] = Field(default_factory=list)
     file_hash: str | None
@@ -597,6 +607,7 @@ class WatchRootCreate(BaseModel):
     path: str
     config_profile_id: uuid.UUID | None = None
     workflow_template: str | None = None
+    output_dir: str | None = None
     enabled: bool = True
     scan_mode: Literal["fast", "precise"] = "fast"
 
@@ -612,6 +623,14 @@ class WatchRootCreate(BaseModel):
     def validate_workflow_template(cls, value: Any) -> str | None:
         return normalize_workflow_template(value)
 
+    @field_validator("output_dir", mode="before")
+    @classmethod
+    def validate_output_dir(cls, value: Any) -> str | None:
+        if value is None:
+            return None
+        normalized = str(value).strip()
+        return normalized or None
+
 
 class WatchRootOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
@@ -620,6 +639,7 @@ class WatchRootOut(BaseModel):
     path: str
     config_profile_id: uuid.UUID | None
     workflow_template: str | None
+    output_dir: str | None
     enabled: bool
     scan_mode: Literal["fast", "precise"]
     created_at: datetime

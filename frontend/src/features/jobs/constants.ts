@@ -45,6 +45,7 @@ export type UploadForm = {
   workflowTemplate: string;
   workflowMode: string;
   enhancementModes: string[];
+  outputDir: string;
 };
 
 export const WORKFLOW_MODE_LABELS: Record<string, string> = {

@@ -52,20 +52,14 @@ async def _create_jobs_for_watch_root(
     *,
     config_profile_id: uuid.UUID | None,
     workflow_template: str | None,
+    output_dir: str | None = None,
 ):
-    try:
-        return await create_jobs_for_inventory_paths(
-            file_paths,
-            config_profile_id=config_profile_id,
-            workflow_template=workflow_template,
-        )
-    except TypeError as exc:
-        if "config_profile_id" not in str(exc):
-            raise
-        return await create_jobs_for_inventory_paths(
-            file_paths,
-            workflow_template=workflow_template,
-        )
+    return await create_jobs_for_inventory_paths(
+        file_paths,
+        output_dir=output_dir,
+        config_profile_id=config_profile_id,
+        workflow_template=workflow_template,
+    )
 
 
 async def _create_merged_job_for_watch_root(
@@ -73,20 +67,14 @@ async def _create_merged_job_for_watch_root(
     *,
     config_profile_id: uuid.UUID | None,
     workflow_template: str | None,
+    output_dir: str | None = None,
 ):
-    try:
-        return await create_merged_job_for_inventory_paths(
-            file_paths,
-            config_profile_id=config_profile_id,
-            workflow_template=workflow_template,
-        )
-    except TypeError as exc:
-        if "config_profile_id" not in str(exc):
-            raise
-        return await create_merged_job_for_inventory_paths(
-            file_paths,
-            workflow_template=workflow_template,
-        )
+    return await create_merged_job_for_inventory_paths(
+        file_paths,
+        output_dir=output_dir,
+        config_profile_id=config_profile_id,
+        workflow_template=workflow_template,
+    )
 
 
 def _cached_status_payload(root: WatchRoot, *, include_inventory: bool, inventory_limit: int | None) -> dict:
@@ -152,6 +140,7 @@ async def create_watch_root(
         path=body.path,
         config_profile_id=config_profile_id,
         workflow_template=body.workflow_template,
+        output_dir=body.output_dir,
         enabled=body.enabled,
         scan_mode=body.scan_mode,
     )
@@ -174,6 +163,7 @@ async def update_watch_root(
     root.path = body.path
     root.config_profile_id = config_profile_id
     root.workflow_template = body.workflow_template
+    root.output_dir = body.output_dir
     root.enabled = body.enabled
     root.scan_mode = body.scan_mode
     await session.commit()
@@ -196,7 +186,11 @@ async def get_watch_root_inventory(root_id: uuid.UUID, session: AsyncSession = D
     if not root:
         raise HTTPException(status_code=404, detail="Watch root not found")
     try:
-        payload = await scan_watch_root_inventory(root.path, scan_mode=root.scan_mode or "fast")
+        payload = await scan_watch_root_inventory(
+            root.path,
+            scan_mode=root.scan_mode or "fast",
+            output_dir=root.output_dir,
+        )
     except FileNotFoundError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except NotADirectoryError as exc:
@@ -217,6 +211,7 @@ async def start_inventory_scan(
         return start_watch_root_inventory_scan(
             root.path,
             scan_mode=root.scan_mode or "fast",
+            output_dir=root.output_dir,
             force=bool(body and body.force),
         )
     except FileNotFoundError as exc:
@@ -285,6 +280,7 @@ async def enqueue_inventory_items(
         [str(item["path"]) for item in selected_items],
         config_profile_id=root.config_profile_id,
         workflow_template=root.workflow_template,
+        output_dir=root.output_dir,
     )
     job_ids_by_path = {result["path"]: result["job_id"] for result in results}
     created_job_ids = [job_id for job_id in job_ids_by_path.values() if job_id]
@@ -366,6 +362,7 @@ async def merge_inventory_items(
         file_paths,
         config_profile_id=root.config_profile_id,
         workflow_template=root.workflow_template,
+        output_dir=root.output_dir,
     )
     merged_job_ids = [job_id] if job_id else []
 

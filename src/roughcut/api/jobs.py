@@ -319,6 +319,7 @@ async def create_job(
     workflow_template: str | None = Form(None),
     workflow_mode: str | None = Form(None),
     enhancement_modes: list[str] | None = Form(None),
+    output_dir: str | None = Form(None),
     session: AsyncSession = Depends(get_session),
 ):
     settings = get_settings()
@@ -326,6 +327,7 @@ async def create_job(
         language = normalize_job_language(language)
         workflow_template = normalize_workflow_template(workflow_template)
         workflow_mode = normalize_workflow_mode(workflow_mode or settings.default_job_workflow_mode)
+        output_dir = str(output_dir or "").strip() or None
         enhancement_modes = normalize_enhancement_modes(
             enhancement_modes if enhancement_modes is not None else settings.default_job_enhancement_modes,
         )
@@ -367,6 +369,7 @@ async def create_job(
             workflow_template=workflow_template,
             workflow_mode=workflow_mode,
             enhancement_modes=enhancement_modes,
+            output_dir=output_dir,
         )
         session.add(job)
 
@@ -550,7 +553,8 @@ async def get_content_profile(job_id: uuid.UUID, session: AsyncSession = Depends
     job = await session.get(Job, job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    touch_runtime_refresh_hold(reason="content_profile_review", job_id=str(job_id), hold_seconds=90)
+    if str(job.status or "").strip() == "needs_review":
+        touch_runtime_refresh_hold(reason="content_profile_review", job_id=str(job_id), hold_seconds=90)
 
     from roughcut.db.models import Artifact
 
@@ -558,13 +562,18 @@ async def get_content_profile(job_id: uuid.UUID, session: AsyncSession = Depends
         select(Artifact)
         .where(
             Artifact.job_id == job_id,
-            Artifact.artifact_type.in_(["content_profile_draft", "content_profile_final"]),
+            Artifact.artifact_type.in_(_CONTENT_PROFILE_ARTIFACT_TYPES),
         )
         .order_by(Artifact.created_at.desc())
     )
     artifacts = artifact_result.scalars().all()
     draft = next((item.data_json for item in artifacts if item.artifact_type == "content_profile_draft"), None)
     final = next((item.data_json for item in artifacts if item.artifact_type == "content_profile_final"), None)
+    legacy = next((item.data_json for item in artifacts if item.artifact_type == "content_profile"), None)
+    if not isinstance(draft, dict) or not draft:
+        draft = legacy
+    if not isinstance(final, dict) or not final:
+        final = legacy
     settings = get_settings()
     if isinstance(draft, dict):
         draft = apply_current_content_profile_review_policy(draft, settings=settings)

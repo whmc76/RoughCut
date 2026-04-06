@@ -24,6 +24,7 @@ export type Job = {
   workflow_template?: string | null;
   workflow_mode: string;
   enhancement_modes: string[];
+  output_dir?: string | null;
   file_hash?: string | null;
   error_message?: string | null;
   progress_percent?: number;
@@ -253,6 +254,7 @@ export type WatchRoot = {
   path: string;
   config_profile_id?: string | null;
   workflow_template?: string | null;
+  output_dir?: string | null;
   enabled: boolean;
   scan_mode: "fast" | "precise";
   created_at: string;

@@ -42,18 +42,15 @@ async def _call_inventory_job_factory(
     file_paths: list[str],
     *,
     workflow_template: str | None,
+    output_dir: str | None = None,
     config_profile_id: uuid.UUID | str | None = None,
 ) -> Any:
-    try:
-        return await factory(
-            file_paths,
-            workflow_template=workflow_template,
-            config_profile_id=config_profile_id,
-        )
-    except TypeError as exc:
-        if "workflow_template" not in str(exc) and "config_profile_id" not in str(exc):
-            raise
-        return await factory(file_paths, channel_profile=workflow_template)
+    return await factory(
+        file_paths,
+        output_dir=output_dir,
+        workflow_template=workflow_template,
+        config_profile_id=config_profile_id,
+    )
 
 
 @dataclass
@@ -175,10 +172,17 @@ async def scan_watch_root_inventory(
     *,
     recursive: bool = True,
     scan_mode: str = "fast",
+    output_dir: str | None = None,
 ) -> dict[str, list[dict]]:
     mode = _normalize_scan_mode(scan_mode)
     state = _new_scan_state(watch_path, scan_mode=mode)
-    payload = await _scan_watch_root_inventory_impl(watch_path, recursive=recursive, state=state, scan_mode=mode)
+    payload = await _scan_watch_root_inventory_impl(
+        watch_path,
+        recursive=recursive,
+        state=state,
+        scan_mode=mode,
+        output_dir=output_dir,
+    )
     state.status = "done"
     state.current_file = None
     state.current_phase = None
@@ -194,6 +198,7 @@ def start_watch_root_inventory_scan(
     recursive: bool = True,
     scan_mode: str = "fast",
     force: bool = False,
+    output_dir: str | None = None,
 ) -> dict:
     mode = _normalize_scan_mode(scan_mode)
     existing = _SCAN_TASKS.get(watch_path)
@@ -205,7 +210,13 @@ def start_watch_root_inventory_scan(
     state = _new_scan_state(watch_path, scan_mode=mode)
     _SCAN_STATES[watch_path] = state
     _SCAN_TASKS[watch_path] = asyncio.create_task(
-        _run_watch_root_inventory_scan(watch_path, recursive=recursive, state=state, scan_mode=mode)
+        _run_watch_root_inventory_scan(
+            watch_path,
+            recursive=recursive,
+            state=state,
+            scan_mode=mode,
+            output_dir=output_dir,
+        )
     )
     return state.to_dict(include_inventory=False)
 
@@ -250,6 +261,7 @@ async def create_jobs_for_inventory_paths(
     *,
     config_profile_id: uuid.UUID | str | None = None,
     workflow_template: str | None = None,
+    output_dir: str | None = None,
     language: str = "zh-CN",
 ) -> list[dict[str, str | None]]:
     results: list[dict[str, str | None]] = []
@@ -258,6 +270,7 @@ async def create_jobs_for_inventory_paths(
             Path(file_path),
             workflow_template,
             language,
+            output_dir=output_dir,
             config_profile_id=config_profile_id,
         )
         results.append({"path": file_path, "job_id": job_id or None})
@@ -331,6 +344,7 @@ async def _run_watch_root_inventory_scan(
     recursive: bool,
     state: WatchInventoryScanState,
     scan_mode: str,
+    output_dir: str | None = None,
 ) -> None:
     try:
         payload = await _scan_watch_root_inventory_impl(
@@ -338,6 +352,7 @@ async def _run_watch_root_inventory_scan(
             recursive=recursive,
             state=state,
             scan_mode=scan_mode,
+            output_dir=output_dir,
         )
         state.pending = payload["pending"]
         state.deduped = payload["deduped"]
@@ -369,6 +384,7 @@ async def _scan_watch_root_inventory_impl(
     recursive: bool,
     state: WatchInventoryScanState,
     scan_mode: str,
+    output_dir: str | None = None,
 ) -> dict[str, list[dict]]:
     settings = get_settings()
     root = Path(watch_path)
@@ -388,10 +404,10 @@ async def _scan_watch_root_inventory_impl(
     state.total_files = len(candidates)
     state.updated_at = _now_iso()
 
-    output_dir = get_output_dir()
+    output_root = get_output_dir(output_dir=output_dir)
     existing_outputs = {
         path.stem: str(path)
-        for path in output_dir.rglob("*.mp4")
+        for path in output_root.rglob("*.mp4")
     }
 
     from sqlalchemy import select
@@ -627,6 +643,7 @@ async def _create_job_for_file(
     file_path: Path,
     workflow_template: str | None = None,
     language: str = "zh-CN",
+    output_dir: str | None = None,
     *,
     config_profile_id: uuid.UUID | str | None = None,
 ) -> str:
@@ -675,6 +692,7 @@ async def _create_job_for_file(
             file_hash=file_hash,
             status="pending",
             language=language,
+            output_dir=output_dir,
             config_profile_id=profile_uuid,
             config_profile_snapshot_json=profile_settings_snapshot,
             packaging_snapshot_json=profile_packaging_snapshot,
@@ -775,6 +793,7 @@ async def create_merged_job_for_inventory_paths(
     *,
     config_profile_id: uuid.UUID | str | None = None,
     workflow_template: str | None = None,
+    output_dir: str | None = None,
     language: str = "zh-CN",
 ) -> str | None:
     if len(file_paths) < 2:
@@ -794,6 +813,7 @@ async def create_merged_job_for_inventory_paths(
             merged_path,
             workflow_template,
             language,
+            output_dir=output_dir,
             config_profile_id=config_profile_id,
         )
     finally:
@@ -1279,7 +1299,12 @@ async def run_watch_root_auto_duty() -> dict[str, Any]:
             try:
                 if _should_auto_scan_root(root, settings=settings):
                     try:
-                        start_watch_root_inventory_scan(root.path, scan_mode=root.scan_mode or "fast", force=False)
+                        start_watch_root_inventory_scan(
+                            root.path,
+                            scan_mode=root.scan_mode or "fast",
+                            output_dir=root.output_dir,
+                            force=False,
+                        )
                         summary["scan_started"] += 1
                     except Exception as exc:
                         logger.warning("auto duty failed to start scan for %s: %s", root.path, exc)
@@ -1325,6 +1350,7 @@ async def run_watch_root_auto_duty() -> dict[str, Any]:
                             [str(item.get("path") or "") for item in selected_items],
                             config_profile_id=root.config_profile_id,
                             workflow_template=root.workflow_template,
+                            output_dir=root.output_dir,
                         )
                         payload, created_ids = _mark_inventory_items_as_dispatched(
                             payload,
@@ -1366,6 +1392,7 @@ async def run_watch_root_auto_duty() -> dict[str, Any]:
                             [str(item.get("path") or "") for item in selected_items],
                             config_profile_id=root.config_profile_id,
                             workflow_template=root.workflow_template,
+                            output_dir=root.output_dir,
                         )
                         job_ids_by_path = {result["path"]: result["job_id"] for result in results}
                         payload, created_ids = _mark_inventory_items_as_dispatched(
@@ -1431,11 +1458,13 @@ class VideoFileHandler(FileSystemEventHandler):
         self,
         workflow_template: str | None,
         config_profile_id: uuid.UUID | str | None,
+        output_dir: str | None,
         language: str,
         loop: asyncio.AbstractEventLoop,
     ) -> None:
         self._workflow_template = workflow_template
         self._config_profile_id = config_profile_id
+        self._output_dir = output_dir
         self._language = language
         self._loop = loop
         self._settings = get_settings()
@@ -1449,6 +1478,7 @@ class VideoFileHandler(FileSystemEventHandler):
                 file_path,
                 self._workflow_template,
                 self._language,
+                output_dir=self._output_dir,
                 config_profile_id=self._config_profile_id,
             ),
             self._loop,
@@ -1479,6 +1509,7 @@ async def watch_directory(
     watch_path: str,
     workflow_template: str | None = None,
     config_profile_id: uuid.UUID | str | None = None,
+    output_dir: str | None = None,
     language: str = "zh-CN",
 ) -> None:
     """Watch a directory for new video files. Runs until cancelled."""
@@ -1487,7 +1518,7 @@ async def watch_directory(
         raise FileNotFoundError(f"Watch path does not exist: {watch_path}")
 
     loop = asyncio.get_running_loop()
-    handler = VideoFileHandler(workflow_template, config_profile_id, language, loop)
+    handler = VideoFileHandler(workflow_template, config_profile_id, output_dir, language, loop)
     observer = Observer()
     observer.schedule(handler, str(path), recursive=True)
     observer.start()
@@ -1517,7 +1548,12 @@ async def watch_from_db() -> None:
 
     tasks = [
         asyncio.create_task(
-            watch_directory(root.path, root.workflow_template, root.config_profile_id)
+            watch_directory(
+                root.path,
+                root.workflow_template,
+                root.config_profile_id,
+                root.output_dir,
+            )
         )
         for root in roots
     ]

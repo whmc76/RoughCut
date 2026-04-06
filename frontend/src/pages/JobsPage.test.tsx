@@ -217,7 +217,7 @@ describe("JobsPage", () => {
     expect(mockJobReviewOverlay).toHaveBeenCalled();
   });
 
-  it("routes pending jobs with an active summary review step into the dedicated review overlay", () => {
+  it("keeps pending jobs out of the dedicated review overlay even with summary review step", () => {
     mockUseJobWorkspace.mockReturnValue(
       buildWorkspace({
         selectedJobId: "job-review-2",
@@ -259,8 +259,8 @@ describe("JobsPage", () => {
 
     render(<JobsPage />);
 
-    expect(screen.getByTestId("job-review-overlay")).toHaveTextContent("summary_review");
-    expect(screen.queryByTestId("job-detail-modal")).not.toBeInTheDocument();
+    expect(screen.getByTestId("job-detail-modal")).toBeInTheDocument();
+    expect(screen.queryByTestId("job-review-overlay")).not.toBeInTheDocument();
   });
 
   it("keeps non-review jobs in the standard detail modal flow", () => {

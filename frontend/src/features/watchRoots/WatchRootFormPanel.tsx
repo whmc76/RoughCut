@@ -113,6 +113,11 @@ export function WatchRootFormPanel({
           onChange={(event) => onChange({ ...form, workflow_template: event.target.value })}
           options={workflowTemplateOptions}
         />
+        <TextField
+          label={t("watch.form.outputDir")}
+          value={form.output_dir}
+          onChange={(event) => onChange({ ...form, output_dir: event.target.value })}
+        />
         <div className="field-row">
           <SelectField
             label={t("watch.form.scanMode")}

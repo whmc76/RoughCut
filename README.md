@@ -140,6 +140,22 @@ pnpm docker:up
 
 其中基础设施包含 PostgreSQL（5432）和 Redis（6379）。
 
+如果你要一次性起全套服务并带自动重建（推荐开发时默认使用），使用：
+
+```bash
+pnpm docker:auto:auto-up
+```
+
+只起 runtime（不带 automation）并自动重建：
+
+```bash
+pnpm docker:runtime:auto-up
+```
+
+对应的服务访问地址默认为：
+
+- `http://127.0.0.1:38471/`
+
 数字人相关服务现在默认走独立共享服务，不再依赖 RoughCut 内部 Docker：
 
 - HeyGem: `http://127.0.0.1:49202`
@@ -346,6 +362,10 @@ Windows 下当前建议把 [start_roughcut.bat](E:/WorkSpace/RoughCut/start_roug
   启动 runtime 并直接进入 host-side 自动重建/watch 模式（等同于 `runtime-watch`）
 - `start_roughcut.bat full-auto-watch`
   启动 full 并直接进入 host-side 自动重建/watch 模式（等同于 `full-watch`）
+- `pnpm docker:runtime:auto-up`
+  从根目录启动 runtime 服务并自动构建重建（host-side）
+- `pnpm docker:auto:auto-up`
+  从根目录启动 full（runtime + automation）服务并自动构建重建（host-side）
 - `start_roughcut.bat dev`
   直接运行统一入口 `pnpm dev`
 - `start_roughcut.bat test`
@@ -446,9 +466,11 @@ host-side rebuild watch 仍由两层脚本提供：
 ```bash
 pnpm docker:runtime:up
 pnpm docker:runtime:watch
+pnpm docker:runtime:auto-up
 pnpm docker:runtime:up:local-asr
 pnpm docker:runtime:watch:local-asr
 pnpm docker:auto:watch
+pnpm docker:auto:auto-up
 pnpm docker:auto:up:local-asr
 ```
 
@@ -468,6 +490,13 @@ pnpm docker:auto:down
 ./start_roughcut.bat full-watch
 ./start_roughcut.bat runtime-auto-watch
 ./start_roughcut.bat full-auto-watch
+```
+
+如果你要把“启动 + 自动重建”合并为一条命令，可直接用：
+
+```bash
+pnpm docker:runtime:auto-up
+pnpm docker:auto:auto-up
 ```
 
 host-side rebuild watch 方案和 Hydra 的差别是：

@@ -2512,6 +2512,7 @@ async def run_render(job_id: str) -> dict:
         job.source_name,
         job.created_at,
         content_profile=content_profile,
+        output_dir=job.output_dir,
     )
     out_name = out_dir.name
     debug_dir = Path(get_settings().render_debug_dir) / f"{job_id}_{out_name}"

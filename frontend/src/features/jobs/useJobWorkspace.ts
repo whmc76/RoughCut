@@ -10,6 +10,7 @@ const EMPTY_UPLOAD: UploadForm = {
   workflowTemplate: "",
   workflowMode: "standard_edit",
   enhancementModes: [],
+  outputDir: "",
 };
 
 const JOB_STATUS_GROUP_PRIORITY: Record<string, number> = {
@@ -54,6 +55,7 @@ export function useJobWorkspace() {
     queryFn: () => api.getJob(selectedJobId!),
     enabled: Boolean(selectedJobId),
   });
+  const isReviewMode = detail.data?.status === "needs_review";
   const activity = useQuery({
     queryKey: ["job-activity", selectedJobId],
     queryFn: () => api.getJobActivity(selectedJobId!),
@@ -79,7 +81,7 @@ export function useJobWorkspace() {
   const contentProfile = useQuery({
     queryKey: ["job-content-profile", selectedJobId],
     queryFn: () => api.getContentProfile(selectedJobId!),
-    enabled: Boolean(selectedJobId),
+    enabled: Boolean(selectedJobId) && isReviewMode,
   });
   const inheritedUploadDefaults: UploadForm = useMemo(
     () => ({
@@ -203,6 +205,7 @@ export function useJobWorkspace() {
         upload.workflowTemplate || undefined,
         upload.workflowMode,
         upload.enhancementModes,
+        upload.outputDir,
       ),
     onSuccess: async (job) => {
       setUpload(inheritedUploadDefaults);

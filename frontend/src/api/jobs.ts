@@ -25,12 +25,14 @@ export const jobsApi = {
     workflowTemplate?: string,
     workflowMode?: string,
     enhancementModes: string[] = [],
+    outputDir?: string,
   ) => {
     const formData = new FormData();
     formData.append("file", file);
     formData.append("language", language);
     if (workflowTemplate) formData.append("workflow_template", workflowTemplate);
     if (workflowMode) formData.append("workflow_mode", workflowMode);
+    if (outputDir?.trim()) formData.append("output_dir", outputDir.trim());
     enhancementModes.forEach((mode) => formData.append("enhancement_modes", mode));
     return requestForm<Job>("/jobs", formData);
   },

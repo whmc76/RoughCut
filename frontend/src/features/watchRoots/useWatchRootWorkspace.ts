@@ -10,6 +10,7 @@ function serializeRootForm(form: RootForm): string {
     path: form.path,
     config_profile_id: form.config_profile_id,
     workflow_template: form.workflow_template,
+    output_dir: form.output_dir,
     enabled: form.enabled,
     scan_mode: form.scan_mode,
   });
@@ -50,6 +51,7 @@ export function useWatchRootWorkspace() {
         path: selectedRoot.path,
         config_profile_id: selectedRoot.config_profile_id || "",
         workflow_template: selectedRoot.workflow_template || "",
+        output_dir: selectedRoot.output_dir || "",
         enabled: selectedRoot.enabled,
         scan_mode: selectedRoot.scan_mode,
       };
@@ -155,6 +157,7 @@ export function useWatchRootWorkspace() {
             path: updatedRoot.path,
             config_profile_id: updatedRoot.config_profile_id || "",
             workflow_template: updatedRoot.workflow_template || "",
+            output_dir: updatedRoot.output_dir || "",
             enabled: updatedRoot.enabled,
             scan_mode: updatedRoot.scan_mode,
           });

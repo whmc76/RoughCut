@@ -53,6 +53,16 @@ export function JobUploadPanel({
           onChange={(event) => onChange({ ...upload, workflowTemplate: event.target.value })}
           options={workflowTemplateOptions}
         />
+        <label>
+          <span>{t("jobs.upload.outputDir")}</span>
+          <input
+            className="input"
+            type="text"
+            value={upload.outputDir}
+            onChange={(event) => onChange({ ...upload, outputDir: event.target.value })}
+            placeholder={t("jobs.upload.outputDir")}
+          />
+        </label>
         <SelectField
           label={t("jobs.upload.workflowMode")}
           value={upload.workflowMode}

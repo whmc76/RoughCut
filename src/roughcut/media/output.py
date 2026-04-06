@@ -234,9 +234,9 @@ def build_output_name(source_name: str, created_at: datetime | None = None) -> s
     return _sanitize(name)
 
 
-def get_output_dir() -> Path:
+def get_output_dir(output_dir: str | None = None) -> Path:
     settings = get_settings()
-    configured = str(settings.output_dir or "").strip()
+    configured = str(output_dir or settings.output_dir or "").strip()
     p = Path(configured or "output")
     p.mkdir(parents=True, exist_ok=True)
     return p
@@ -270,6 +270,7 @@ def get_output_project_dir(
     *,
     content_profile: dict[str, Any] | None = None,
     title_hint: str | None = None,
+    output_dir: str | None = None,
 ) -> Path:
     project_name = build_output_project_name(
         source_name,
@@ -277,7 +278,7 @@ def get_output_project_dir(
         content_profile=content_profile,
         title_hint=title_hint,
     )
-    project_dir = get_output_dir() / project_name
+    project_dir = get_output_dir(output_dir=output_dir) / project_name
     project_dir.mkdir(parents=True, exist_ok=True)
     return project_dir
 
