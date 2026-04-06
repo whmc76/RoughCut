@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import shutil
 import subprocess
@@ -163,13 +164,17 @@ def _ensure_target_started(*, target: _ManagedDockerTarget, reason: str) -> None
     try:
         if _target_ready(target):
             return
+        services = _resolve_target_services(target)
         logger.info(
             "starting managed gpu target=%s services=%s reason=%s",
             target.key,
-            ",".join(target.services),
+            ",".join(services) if services else "all",
             reason or "-",
         )
-        _run_compose_command(target, "up", "-d", *target.services)
+        if services:
+            _run_compose_command(target, "up", "-d", *services)
+        else:
+            _run_compose_command(target, "up", "-d")
         _wait_until_target_ready(target)
     finally:
         if lock_acquired:
@@ -212,11 +217,15 @@ def _stop_target_if_idle(*, target: _ManagedDockerTarget, reason: str) -> None:
         logger.info(
             "stopping managed gpu target=%s services=%s idle_for=%.1fs reason=%s",
             target.key,
-            ",".join(target.services),
+            ",".join(_resolve_target_services(target)) if _resolve_target_services(target) else "all",
             idle_for,
             reason or "-",
         )
-        _run_compose_command(target, "stop", *target.services)
+        services = _resolve_target_services(target)
+        if services:
+            _run_compose_command(target, "stop", *services)
+        else:
+            _run_compose_command(target, "stop")
     finally:
         _release_operation_lock(target.key, token)
 
@@ -429,3 +438,183 @@ def _release_operation_lock(target_key: str, token: str) -> None:
             client.delete(lock_key)
     except Exception:
         return
+
+
+def _resolve_target_services(target: _ManagedDockerTarget) -> tuple[str, ...]:
+    requested = tuple(svc for svc in target.services if svc)
+    if not requested:
+        return ()
+
+    available = _compose_services(target)
+    if not available:
+        return requested
+
+    normalized_available = {svc: _normalize_service_name(svc) for svc in available}
+    selected: list[str] = []
+    for request in requested:
+        normalized_request = _normalize_service_name(request)
+        direct_match = next((svc for svc in available if _normalize_service_name(svc) == normalized_request), None)
+        if direct_match:
+            if direct_match not in selected:
+                selected.append(direct_match)
+            continue
+
+        contains_match = next(
+            (
+                svc
+                for svc in available
+                if normalized_request in normalized_available[svc] or normalized_available[svc] in normalized_request
+            ),
+            None,
+        )
+        if contains_match and contains_match not in selected:
+            selected.append(contains_match)
+            continue
+
+        if target.key == "qwen_asr":
+            fuzzy_match = next(
+                (
+                    svc
+                    for svc in available
+                    if ("qwen" in normalized_available[svc] and "qwen" in normalized_request)
+                    or ("asr" in normalized_available[svc] and "asr" in normalized_request)
+                ),
+                None,
+            )
+            if fuzzy_match and fuzzy_match not in selected:
+                selected.append(fuzzy_match)
+
+    if target.key == "qwen_asr":
+        port_matched = _resolve_services_by_base_port(target, available=available)
+        for service_name in port_matched:
+            if service_name not in selected:
+                selected.append(service_name)
+
+    if selected:
+        return tuple(selected)
+
+    target_like = [svc for svc in available if _normalize_service_name(target.key) in _normalize_service_name(svc)]
+    if len(target_like) == 1:
+        return (target_like[0],)
+    if len(available) == 1:
+        return (available[0],)
+    return tuple(available)
+
+
+def _compose_services(target: _ManagedDockerTarget) -> tuple[str, ...]:
+    compose_file = _resolve_path(target.compose_file)
+    if compose_file is None:
+        return ()
+    command = ["docker", "compose", "-f", str(compose_file), "config", "--services"]
+    result = subprocess.run(
+        command,
+        cwd=str(compose_file.parent),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="ignore",
+        check=False,
+    )
+    if result.returncode != 0:
+        return ()
+    services = tuple(line.strip() for line in (result.stdout or "").splitlines() if line.strip())
+    return services
+
+
+def _resolve_services_by_base_port(
+    target: _ManagedDockerTarget,
+    *,
+    available: tuple[str, ...],
+) -> tuple[str, ...]:
+    requested_ports = _extract_ports_from_urls(target.base_urls)
+    if not requested_ports or not available:
+        return ()
+
+    compose_file = _resolve_path(target.compose_file)
+    if compose_file is None:
+        return ()
+
+    ps_command = ["docker", "compose", "-f", str(compose_file), "ps", "-q"]
+    ps_result = subprocess.run(
+        ps_command,
+        cwd=str(compose_file.parent),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="ignore",
+        check=False,
+    )
+    if ps_result.returncode != 0:
+        return ()
+
+    container_ids = tuple(line.strip() for line in (ps_result.stdout or "").splitlines() if line.strip())
+    if not container_ids:
+        return ()
+
+    inspect_command = ["docker", "inspect"] + list(container_ids)
+    inspect_result = subprocess.run(
+        inspect_command,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="ignore",
+        check=False,
+    )
+    if inspect_result.returncode != 0:
+        return ()
+
+    try:
+        containers = json.loads(inspect_result.stdout or "[]")
+    except Exception:
+        return ()
+
+    if not isinstance(containers, list):
+        return ()
+
+    matched: list[str] = []
+    available_set = set(available)
+    for container in containers:
+        if not isinstance(container, dict):
+            continue
+        if not bool(container.get("State", {}).get("Running", False)):
+            continue
+        labels = container.get("Config", {}).get("Labels", {}) or {}
+        service_name = str(labels.get("com.docker.compose.service") or "").strip()
+        if not service_name or service_name not in available_set:
+            continue
+
+        ports = container.get("NetworkSettings", {}).get("Ports") or {}
+        if not isinstance(ports, dict):
+            continue
+
+        host_ports = set[str]()
+        for mappings in ports.values():
+            if not isinstance(mappings, list):
+                continue
+            for mapping in mappings:
+                if not isinstance(mapping, dict):
+                    continue
+                host_port = str(mapping.get("HostPort") or "").strip()
+                if host_port:
+                    host_ports.add(host_port)
+        if requested_ports & host_ports and service_name not in matched:
+            matched.append(service_name)
+
+    if not matched:
+        return ()
+    return tuple(matched)
+
+
+def _extract_ports_from_urls(base_urls: tuple[str, ...]) -> set[str]:
+    requested_ports: set[str] = set()
+    for raw in base_urls:
+        parsed = urlparse(raw)
+        if not parsed.scheme or not parsed.netloc:
+            continue
+        if parsed.port:
+            requested_ports.add(str(parsed.port))
+    return requested_ports
+
+
+def _normalize_service_name(value: str) -> str:
+    return "".join(ch for ch in str(value or "").lower() if ch.isalnum())

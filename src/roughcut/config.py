@@ -209,7 +209,7 @@ class Settings(BaseSettings):
     qwen_asr_docker_guard_enabled: bool = True
     qwen_asr_docker_compose_file: str = "E:/WorkSpace/asr-qwen3-asr-1.7b/docker-compose.yml"
     qwen_asr_docker_env_file: str = ""
-    qwen_asr_docker_services: str = "asr"
+    qwen_asr_docker_services: str = "qwen3asr,asr"
     qwen_asr_docker_idle_timeout_sec: int = 900
     funasr_auto_unload_enabled: bool = True
     funasr_idle_unload_sec: int = 600
