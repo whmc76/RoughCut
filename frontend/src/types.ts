@@ -776,6 +776,7 @@ export type WatchAutomationSnapshot = {
 export type HealthDetail = {
   checked_at: string;
   status: string;
+  api_version?: string;
   readiness: {
     status: string;
     checks: Record<string, ReadinessCheck>;

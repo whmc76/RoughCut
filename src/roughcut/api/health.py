@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 
 from roughcut.pipeline.orchestrator import get_orchestrator_lock_snapshot
 from roughcut.runtime_health import build_readiness_payload
@@ -12,7 +12,7 @@ from roughcut.watcher.folder_watcher import get_watch_root_auto_duty_snapshot
 router = APIRouter(prefix="/health", tags=["health"])
 
 
-async def build_health_detail() -> dict[str, object]:
+async def build_health_detail(request: Request) -> dict[str, object]:
     readiness = await build_readiness_payload()
     orchestrator_lock = await get_orchestrator_lock_snapshot()
     managed_services = await get_managed_service_snapshots()
@@ -24,6 +24,7 @@ async def build_health_detail() -> dict[str, object]:
     return {
         "checked_at": datetime.now(timezone.utc).isoformat(),
         "status": "degraded" if degraded else "ok",
+        "api_version": getattr(request.app, "version", "0.1.0"),
         "readiness": readiness,
         "orchestrator_lock": orchestrator_lock,
         "managed_services": managed_services,
@@ -32,5 +33,5 @@ async def build_health_detail() -> dict[str, object]:
 
 
 @router.get("/detail")
-async def health_detail():
-    return await build_health_detail()
+async def health_detail(request: Request):
+    return await build_health_detail(request)

@@ -10,7 +10,8 @@ param(
     [switch]$StopDocker,
     [switch]$NoPause,
     [switch]$NoWatcher,
-    [switch]$NoDockerWatch
+    [switch]$NoDockerWatch,
+    [switch]$AutoDockerWatch
 )
 
 Set-StrictMode -Version Latest
@@ -1414,6 +1415,9 @@ if ($Mode -eq "full-down") {
 
 if ($Mode -ne "local") {
     Start-RoughCutComposeMode -ComposeMode $Mode
+    if ($Mode -in @("runtime", "full") -and $AutoDockerWatch) {
+        Start-RoughCutDockerWatch -ComposeMode $Mode
+    }
     exit 0
 }
 

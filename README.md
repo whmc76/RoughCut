@@ -342,6 +342,10 @@ Windows 下当前建议把 [start_roughcut.bat](E:/WorkSpace/RoughCut/start_roug
   显式启动 host-side rebuild watch，监听 workspace 改动并自动 refresh Docker runtime；适合需要整套镜像重建的开发/维护场景，不适合重任务常驻队列
 - `start_roughcut.bat full-watch`
   显式启动 host-side rebuild watch，监听 workspace 改动并自动 refresh runtime + automation
+- `start_roughcut.bat runtime-auto-watch`
+  启动 runtime 并直接进入 host-side 自动重建/watch 模式（等同于 `runtime-watch`）
+- `start_roughcut.bat full-auto-watch`
+  启动 full 并直接进入 host-side 自动重建/watch 模式（等同于 `full-watch`）
 - `start_roughcut.bat dev`
   直接运行统一入口 `pnpm dev`
 - `start_roughcut.bat test`
@@ -462,6 +466,8 @@ pnpm docker:auto:down
 ```powershell
 ./start_roughcut.bat runtime-watch
 ./start_roughcut.bat full-watch
+./start_roughcut.bat runtime-auto-watch
+./start_roughcut.bat full-auto-watch
 ```
 
 host-side rebuild watch 方案和 Hydra 的差别是：

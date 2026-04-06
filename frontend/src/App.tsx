@@ -1,3 +1,4 @@
+import { useQuery } from "@tanstack/react-query";
 import { Suspense, lazy, useEffect, useRef } from "react";
 import { NavLink, Route, Routes } from "react-router-dom";
 
@@ -42,6 +43,12 @@ const ControlPage = lazy(async () => ({
 export function App() {
   const { locale, setLocale, t } = useI18n();
   const syncedLocaleRef = useRef<string>("");
+  const appVersionQuery = useQuery({
+    queryKey: ["health-detail"],
+    queryFn: api.getHealthDetail,
+    staleTime: 60_000,
+  });
+  const appVersion = appVersionQuery.data?.api_version?.trim();
 
   useFrontendBuildRefresh();
 
@@ -122,6 +129,9 @@ export function App() {
               <option value="en-US">{t("app.language.en-US")}</option>
             </select>
           </label>
+          <div className="top-gap">
+            {t("app.sidebar.version")}: <code>{appVersion || t("app.sidebar.versionUnknown")}</code>
+          </div>
           <div>{t("app.sidebar.apiPrefix")}</div>
           <code>/api/v1</code>
         </div>

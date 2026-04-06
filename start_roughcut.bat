@@ -7,8 +7,10 @@ if /I "%~1"=="dev" goto pnpm_dev
 if /I "%~1"=="infra" goto powershell_infra
 if /I "%~1"=="runtime" goto powershell_runtime
 if /I "%~1"=="runtime-local-asr" goto powershell_runtime_local_asr
+if /I "%~1"=="runtime-auto-watch" goto powershell_runtime_auto_watch
 if /I "%~1"=="full" goto powershell_full
 if /I "%~1"=="full-local-asr" goto powershell_full_local_asr
+if /I "%~1"=="full-auto-watch" goto powershell_full_auto_watch
 if /I "%~1"=="runtime-down" goto powershell_runtime_down
 if /I "%~1"=="full-down" goto powershell_full_down
 if /I "%~1"=="runtime-watch" goto powershell_runtime_watch
@@ -141,6 +143,16 @@ if %ERRORLEVEL%==0 (
 set EXIT_CODE=%ERRORLEVEL%
 goto finish
 
+:powershell_runtime_auto_watch
+where pwsh >nul 2>nul
+if %ERRORLEVEL%==0 (
+  pwsh -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%start_roughcut.ps1" -Mode runtime -AutoDockerWatch
+) else (
+  powershell -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%start_roughcut.ps1" -Mode runtime -AutoDockerWatch
+)
+set EXIT_CODE=%ERRORLEVEL%
+goto finish
+
 :powershell_full
 where pwsh >nul 2>nul
 if %ERRORLEVEL%==0 (
@@ -157,6 +169,16 @@ if %ERRORLEVEL%==0 (
   pwsh -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%start_roughcut.ps1" -Mode full -DockerPythonExtras local-asr
 ) else (
   powershell -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%start_roughcut.ps1" -Mode full -DockerPythonExtras local-asr
+)
+set EXIT_CODE=%ERRORLEVEL%
+goto finish
+
+:powershell_full_auto_watch
+where pwsh >nul 2>nul
+if %ERRORLEVEL%==0 (
+  pwsh -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%start_roughcut.ps1" -Mode full -AutoDockerWatch
+) else (
+  powershell -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%start_roughcut.ps1" -Mode full -AutoDockerWatch
 )
 set EXIT_CODE=%ERRORLEVEL%
 goto finish
@@ -219,8 +241,10 @@ echo   start_roughcut.bat             One-click startup package
 echo   start_roughcut.bat infra       Start only PostgreSQL / Redis / MinIO containers
 echo   start_roughcut.bat runtime     Start recommended Docker runtime with live source sync
 echo   start_roughcut.bat runtime-local-asr  Start runtime with local-asr extras enabled inside Docker
+echo   start_roughcut.bat runtime-auto-watch     Start runtime with host-side Docker auto-refresh/rebuild-on-change
 echo   start_roughcut.bat full        Start runtime plus automation services with live source sync
 echo   start_roughcut.bat full-local-asr     Start full stack with local-asr extras enabled inside Docker
+echo   start_roughcut.bat full-auto-watch     Start full stack with host-side Docker auto-refresh/rebuild-on-change
 echo   start_roughcut.bat runtime-down Stop runtime services
 echo   start_roughcut.bat full-down    Stop runtime plus automation services
 echo   start_roughcut.bat runtime-watch  Start explicit host-side rebuild watch for Docker runtime
