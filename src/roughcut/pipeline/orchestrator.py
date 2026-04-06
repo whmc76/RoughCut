@@ -626,10 +626,41 @@ async def _update_job_statuses(session) -> None:
         failed_steps = [s for s in steps if s.status == "failed" and s.attempt >= MAX_ATTEMPTS]
         if failed_steps:
             job.status = "failed"
-            job.error_message = f"Step {failed_steps[0].step_name} failed after {MAX_ATTEMPTS} attempts"
+            job.error_message = _build_job_failure_message(_latest_failed_step(steps), attempts=MAX_ATTEMPTS)
             job.updated_at = datetime.now(timezone.utc)
             await _cleanup_terminal_job_files(session, job, purge_deliverables=True)
             logger.error(f"Job {job.id} failed: {job.error_message}")
+
+
+def _latest_failed_step(steps: list[JobStep]) -> JobStep | None:
+    step_map = {step.step_name: step for step in steps}
+    for step_name in reversed(PIPELINE_STEPS):
+        step = step_map.get(step_name)
+        if step is not None and step.status == "failed" and step.attempt >= MAX_ATTEMPTS:
+            return step
+    return None
+
+
+def _build_job_failure_message(failed_step: JobStep | None, *, attempts: int) -> str:
+    if failed_step is None:
+        return f"任务失败：检测到失败步骤但未定位到具体步骤，已重试 {attempts} 次仍未恢复。"
+
+    metadata = failed_step.metadata_ or {}
+    details: list[str] = [str(failed_step.error_message or "").strip()]
+    detail = str(metadata.get("detail") or "").strip()
+    if detail:
+        details.append(detail)
+    recovery_summary = str(metadata.get("recovery_summary") or "").strip()
+    if recovery_summary:
+        details.append(f"恢复建议：{recovery_summary}")
+    root_cause = str(metadata.get("recovery_root_cause") or "").strip()
+    if root_cause:
+        details.append(f"恢复根因：{root_cause}")
+
+    cleaned = [item for item in details if item]
+    if cleaned:
+        return f"{failed_step.step_name} 步骤在最大重试（{attempts}）后仍失败：{'; '.join(cleaned)}"
+    return f"{failed_step.step_name} 步骤在最大重试（{attempts}）后仍失败"
 
 
 async def _cleanup_terminal_job_files(session, job: Job, *, purge_deliverables: bool) -> None:

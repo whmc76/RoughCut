@@ -102,6 +102,10 @@ const translations: Record<UiLocale, Record<string, string>> = {
     "jobs.actions.cancelling": "取消中...",
     "jobs.actions.restart": "重新开始",
     "jobs.actions.restarting": "重启中...",
+    "jobs.actions.restartUnavailable": "当前状态不可重新开始",
+    "jobs.actions.restartUnavailableReason.default": "当前状态下不支持重启",
+    "jobs.actions.restartUnavailableReason.pending": "任务还未开始运行，暂不支持从待处理状态重启",
+    "jobs.actions.restartFailed": "重启任务失败：{error}",
     "jobs.actions.delete": "删除任务",
     "jobs.actions.deleting": "删除中...",
 
@@ -138,6 +142,8 @@ const translations: Record<UiLocale, Record<string, string>> = {
     "jobs.detail.tokenUsage.empty": "当前任务还没有 token telemetry。请在新任务或重跑后查看。",
     "jobs.detail.tokenUsage.promptCompletion": "输入 {prompt} / 输出 {completion} / 调用 {calls}",
     "jobs.detail.timeline": "时间线与事件",
+    "jobs.detail.errorEvents": "关键异常事件",
+    "jobs.detail.jobIssue": "任务问题",
     "jobs.detail.timelineJson": "查看剪辑时间线 JSON",
 
     "jobs.contentReview.title": "内容核对",
@@ -521,6 +527,10 @@ const translations: Record<UiLocale, Record<string, string>> = {
     "jobs.actions.cancelling": "Cancelling...",
     "jobs.actions.restart": "Restart",
     "jobs.actions.restarting": "Restarting...",
+    "jobs.actions.restartUnavailable": "Restart not allowed in current status",
+    "jobs.actions.restartUnavailableReason.default": "Restart is not allowed for current status",
+    "jobs.actions.restartUnavailableReason.pending": "Restart is disabled while status is pending",
+    "jobs.actions.restartFailed": "Failed to restart job: {error}",
     "jobs.actions.delete": "Delete Job",
     "jobs.actions.deleting": "Deleting...",
 
@@ -557,6 +567,8 @@ const translations: Record<UiLocale, Record<string, string>> = {
     "jobs.detail.tokenUsage.empty": "This job has no token telemetry yet. Re-run a new job to collect it.",
     "jobs.detail.tokenUsage.promptCompletion": "Prompt {prompt} / Completion {completion} / Calls {calls}",
     "jobs.detail.timeline": "Timeline and Events",
+    "jobs.detail.errorEvents": "Critical Error Events",
+    "jobs.detail.jobIssue": "Job Issue",
     "jobs.detail.timelineJson": "View timeline JSON",
 
     "jobs.contentReview.title": "Content Review",

@@ -76,6 +76,11 @@ export function JobsPage() {
         title="跟进任务队列与审核详情"
         description="搜索、打开详情、重跑、取消和删除都集中在这里，优先保证处理链路顺畅。"
       >
+        {workspace.restartError ? (
+          <div className="notice">
+            {t("jobs.actions.restartFailed").replace("{error}", workspace.restartError)}
+          </div>
+        ) : null}
         <JobQueueTable
           jobs={workspace.filteredJobs}
           selectedJobId={workspace.selectedJobId}

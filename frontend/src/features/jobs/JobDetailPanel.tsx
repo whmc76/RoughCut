@@ -6,7 +6,38 @@ import { classNames, formatDate, statusLabel } from "../../utils";
 import { JobContentProfileSection } from "./JobContentProfileSection";
 import { JobSubtitleReportSection } from "./JobSubtitleReportSection";
 import { JobReviewConfigSection } from "./JobReviewConfigSection";
-import { stepLabel, workflowModeLabel, enhancementModeLabel } from "./constants";
+import { getRestartUnavailableReason, isRestartableJobStatus, stepLabel, workflowModeLabel, enhancementModeLabel } from "./constants";
+
+type ActivityEvent = NonNullable<JobActivity["events"]>[number];
+
+const STUCK_DIAGNOSTIC_TITLE_HINTS = ["卡住诊断", "stuck", "stuck_step", "stuck-step", "stuck diagnostic", "stuck-diagnostic"];
+
+function isStuckDiagnosticEvent(event: ActivityEvent): boolean {
+  const title = (event.title || "").toLowerCase();
+  return event.type === "artifact" && STUCK_DIAGNOSTIC_TITLE_HINTS.some((hint) => title.includes(hint));
+}
+
+function resolveEventSeverity(event: ActivityEvent): string {
+  if (event.type === "error") return "failed";
+  if (event.type === "cancelled") return "cancelled";
+  if (event.status === "failed" || event.status === "cancelled") return event.status;
+  if (isStuckDiagnosticEvent(event)) return "failed";
+  return event.status || "pending";
+}
+
+function isFailureEvent(event: ActivityEvent): boolean {
+  const status = resolveEventSeverity(event);
+  return status === "failed" || status === "cancelled" || isStuckDiagnosticEvent(event);
+}
+
+function resolveEventSeverityClass(event: ActivityEvent): string {
+  const status = resolveEventSeverity(event);
+  if (status === "running" || status === "processing") return "running";
+  if (status === "cancelled") return "cancelled";
+  if (status === "failed") return "failed";
+  if (status === "done") return "done";
+  return "pending";
+}
 
 type JobDetailPanelProps = {
   selectedJobId: string | null;
@@ -73,6 +104,22 @@ export function JobDetailPanel({
 }: JobDetailPanelProps) {
   const { t } = useI18n();
   const isReviewMode = selectedJob?.status === "needs_review";
+  const currentStep = activity?.current_step;
+  const timelineEvents = activity?.events ?? [];
+  const timelineEventEntries = timelineEvents.map((event, index) => ({ event, index }));
+  const criticalEvents = timelineEventEntries.filter(({ event }) => isFailureEvent(event));
+  const visibleTimelineEntries = criticalEvents.length
+    ? timelineEventEntries
+    : timelineEventEntries.slice(
+        0,
+        selectedJob?.status === "failed" || selectedJob?.status === "cancelled" ? 20 : 8,
+      );
+  const hasTerminalFailure =
+    selectedJob?.status === "failed" ||
+    selectedJob?.status === "cancelled" ||
+    currentStep?.status === "failed" ||
+    currentStep?.status === "cancelled";
+  const latestFailureTimelineIndex = criticalEvents.length ? criticalEvents[0].index : -1;
   const topUsageSteps = [...(tokenUsage?.steps ?? [])].sort((a, b) => b.total_tokens - a.total_tokens).slice(0, 3);
   const topUsageModels = [...(tokenUsage?.models ?? [])].sort((a, b) => b.total_tokens - a.total_tokens).slice(0, 3);
   const topUsageOperations = [...(topUsageSteps[0]?.operations ?? [])].sort((a, b) => b.total_tokens - a.total_tokens).slice(0, 3);
@@ -101,6 +148,10 @@ export function JobDetailPanel({
       ? t("jobs.actions.downloadHint.avatarFallback")
       : avatarHeadlineSummary || t("jobs.actions.downloadHint.standard")
     : t("jobs.actions.downloadHint.standard");
+  const jumpToTimelineEvent = (index: number) => {
+    const target = document.getElementById(`timeline-event-${index}`);
+    target?.scrollIntoView({ behavior: "smooth", block: "center" });
+  };
 
   return (
     <aside className={classNames("panel detail-panel", className)}>
@@ -137,14 +188,34 @@ export function JobDetailPanel({
             >
               {isCancelling ? t("jobs.actions.cancelling") : t("jobs.actions.cancel")}
             </button>
-            <button className="button primary" onClick={onRestart} disabled={isRestarting}>
-              {isRestarting ? t("jobs.actions.restarting") : t("jobs.actions.restart")}
+            <button
+              className="button primary"
+              onClick={onRestart}
+              disabled={isRestarting || !isRestartableJobStatus(selectedJob.status)}
+              title={isRestartableJobStatus(selectedJob.status) ? undefined : t(getRestartUnavailableReason(selectedJob.status))}
+            >
+              {isRestarting
+                ? t("jobs.actions.restarting")
+                : isRestartableJobStatus(selectedJob.status) ? t("jobs.actions.restart") : t("jobs.actions.restartUnavailable")}
             </button>
             <button className="button danger" onClick={onDelete} disabled={isDeleting}>
               {isDeleting ? t("jobs.actions.deleting") : t("jobs.actions.delete")}
             </button>
           </div>
           <div className="muted compact-top">{downloadHint}</div>
+
+          {selectedJob?.error_message ? (
+            <section className="detail-block">
+              <div className="detail-key">{t("jobs.detail.jobIssue")}</div>
+              <article className="activity-card activity-alert">
+                <div className="toolbar">
+                  <span className={`status-pill ${selectedJob.status}`}>{statusLabel(selectedJob.status)}</span>
+                  <span className="muted">{formatDate(selectedJob.updated_at)}</span>
+                </div>
+                <div>{selectedJob.error_message}</div>
+              </article>
+            </section>
+          ) : null}
 
           {!isReviewMode && (
             <section className="detail-block">
@@ -175,13 +246,16 @@ export function JobDetailPanel({
             <>
               <section className="detail-block">
                 <div className="detail-key">{t("jobs.detail.currentActivity")}</div>
-                {activity?.current_step ? (
+                {currentStep ? (
                   <div className="activity-card">
-                    <strong>{activity.current_step.label}</strong>
-                    <div className="muted">{activity.current_step.detail || "—"}</div>
-                    {typeof activity.current_step.progress === "number" && (
+                    <div className="toolbar">
+                      <strong>{currentStep.label}</strong>
+                      <span className={classNames("status-pill", currentStep.status)}>{statusLabel(currentStep.status)}</span>
+                    </div>
+                    <div className={classNames("muted", hasTerminalFailure ? "muted-strong" : "")}>{currentStep.detail || "—"}</div>
+                    {typeof currentStep.progress === "number" && (
                       <div className="progress-bar">
-                        <span style={{ width: `${Math.round(activity.current_step.progress * 100)}%` }} />
+                        <span style={{ width: `${Math.round(currentStep.progress * 100)}%` }} />
                       </div>
                     )}
                   </div>
@@ -212,7 +286,15 @@ export function JobDetailPanel({
                 <div className="detail-key">{t("jobs.detail.stepStatus")}</div>
                 <div className="steps-list">
                   {selectedJob.steps.map((step) => (
-                    <div key={step.id} className="step-row">
+                    <div
+                      key={step.id}
+                      className={classNames(
+                        "step-row",
+                        step.status === "failed" && "step-row-error",
+                        step.status === "cancelled" && "step-row-error",
+                        step.status === "running" && "step-row-running",
+                      )}
+                    >
                       <span>{stepLabel(step.step_name)}</span>
                       <span className={`status-chip ${step.status}`}>{statusLabel(step.status)}</span>
                     </div>
@@ -370,12 +452,67 @@ export function JobDetailPanel({
               <JobSubtitleReportSection report={report} isApplying={isApplyingReview} onApplyReview={onApplyReview} />
 
               <section className="detail-block">
+                {criticalEvents.length > 0 ? (
+                  <>
+                    <div className="detail-key error-events-head">
+                      <span>{t("jobs.detail.errorEvents")}</span>
+                      <span className="event-count-badge">{criticalEvents.length}</span>
+                      <button type="button" className="button button-sm ghost" onClick={() => jumpToTimelineEvent(latestFailureTimelineIndex)}>
+                        {t("jobs.detail.jumpToLatestFailure")}
+                      </button>
+                    </div>
+                    <div className="timeline-list">
+                      {criticalEvents.map(({ event, index }) => (
+                        <div
+                          key={`${event.timestamp}-${event.title}-${event.type}-${index}`}
+                          className={classNames(
+                            "timeline-item",
+                            "event-failed",
+                            isStuckDiagnosticEvent(event) && "event-diagnostic",
+                          )}
+                        >
+                          <div className="toolbar">
+                            <span className="muted">{formatDate(event.timestamp)}</span>
+                            <span className={classNames("status-pill", resolveEventSeverityClass(event))}>
+                              {statusLabel(resolveEventSeverity(event))}
+                            </span>
+                          </div>
+                          <strong>{event.title}</strong>
+                          <div className={classNames("muted", isStuckDiagnosticEvent(event) && "muted-strong")}>
+                            {event.detail || event.status}
+                          </div>
+                          <div className="toolbar">
+                            <span className="muted">{formatDate(event.timestamp)}</span>
+                            <button type="button" className="button button-sm ghost" onClick={() => jumpToTimelineEvent(index)}>
+                              {t("jobs.detail.jumpToTimeline")}
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </>
+                ) : null}
+              </section>
+
+              <section className="detail-block">
                 <div className="detail-key">{t("jobs.detail.timeline")}</div>
                 <div className="timeline-list">
-                  {activity?.events?.slice(0, 8).map((event, index) => (
-                    <div key={`${event.timestamp}-${index}`} className="timeline-item">
+                  {visibleTimelineEvents.map((event, index) => (
+                    <div
+                      key={`${event.timestamp}-${index}`}
+                      className={classNames(
+                        "timeline-item",
+                        `event-${resolveEventSeverityClass(event)}`,
+                        isStuckDiagnosticEvent(event) && "event-diagnostic",
+                      )}
+                    >
                       <div className="muted">{formatDate(event.timestamp)}</div>
-                      <strong>{event.title}</strong>
+                      <div className="toolbar">
+                        <strong>{event.title}</strong>
+                        <span className={classNames("status-pill", resolveEventSeverityClass(event))}>
+                          {statusLabel(resolveEventSeverity(event))}
+                        </span>
+                      </div>
                       <div className="muted">{event.detail || event.status}</div>
                     </div>
                   ))}

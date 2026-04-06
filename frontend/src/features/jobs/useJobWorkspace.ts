@@ -40,6 +40,7 @@ export function useJobWorkspace() {
   const [reviewWorkflowMode, setReviewWorkflowMode] = useState("standard_edit");
   const [reviewEnhancementModes, setReviewEnhancementModes] = useState<string[]>([]);
   const [reviewCopyStyle, setReviewCopyStyle] = useState("attention_grabbing");
+  const [restartError, setRestartError] = useState<string | null>(null);
   const previousUploadDefaultsRef = useRef({
     workflowMode: EMPTY_UPLOAD.workflowMode,
     enhancementModes: EMPTY_UPLOAD.enhancementModes,
@@ -178,7 +179,16 @@ export function useJobWorkspace() {
   });
   const restartJob = useMutation({
     mutationFn: async (jobId: string) => api.restartJob(jobId),
-    onSuccess: refreshAll,
+    onMutate: () => {
+      setRestartError(null);
+    },
+    onSuccess: async () => {
+      setRestartError(null);
+      await refreshAll();
+    },
+    onError: (error) => {
+      setRestartError(error instanceof Error ? error.message : String(error));
+    },
   });
   const deleteJob = useMutation({
     mutationFn: async (jobId: string) => api.deleteJob(jobId),
@@ -314,5 +324,6 @@ export function useJobWorkspace() {
     setReviewEnhancementModes,
     reviewCopyStyle,
     setReviewCopyStyle,
+    restartError,
   };
 }

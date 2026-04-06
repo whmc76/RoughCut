@@ -4,7 +4,7 @@ import { EmptyState } from "../../components/ui/EmptyState";
 import { PanelHeader } from "../../components/ui/PanelHeader";
 import { useI18n } from "../../i18n";
 import { classNames, formatDate, statusLabel } from "../../utils";
-import { enhancementModeLabel, stepLabel, workflowModeLabel } from "./constants";
+import { enhancementModeLabel, getRestartUnavailableReason, isRestartableJobStatus, stepLabel, workflowModeLabel } from "./constants";
 
 function resolvePendingReviewStep(job: Job) {
   return job.steps.find((step) => (step.step_name === "summary_review" || step.step_name === "final_review") && step.status === "pending")
@@ -213,13 +213,16 @@ export function JobQueueTable({
                     <button
                       className="button primary button-sm"
                       type="button"
-                      disabled={isRestarting}
+                      disabled={isRestarting || !isRestartableJobStatus(job.status)}
                       onClick={(event) => {
                         event.stopPropagation();
                         onRestart(job.id);
                       }}
+                      title={isRestartableJobStatus(job.status) ? undefined : t(getRestartUnavailableReason(job.status))}
                     >
-                      {isRestarting ? t("jobs.actions.restarting") : t("jobs.actions.restart")}
+                      {isRestarting
+                        ? t("jobs.actions.restarting")
+                        : isRestartableJobStatus(job.status) ? t("jobs.actions.restart") : t("jobs.actions.restartUnavailable")}
                     </button>
                     <button
                       className="button danger button-sm"

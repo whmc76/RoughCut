@@ -48,6 +48,30 @@ export type UploadForm = {
   outputDir: string;
 };
 
+export const RESTARTABLE_JOB_STATUSES = ["done", "running", "processing", "needs_review", "cancelled", "failed"] as const;
+
+function normalizeJobStatus(status: string): string {
+  return String(status ?? "").trim().toLowerCase();
+}
+
+export const RESTART_UNAVAILABLE_REASONS: Record<string, string> = {
+  pending: "jobs.actions.restartUnavailableReason.pending",
+  done: "",
+  running: "",
+  processing: "",
+  needs_review: "",
+  cancelled: "",
+  failed: "",
+};
+
+export function isRestartableJobStatus(status: string): boolean {
+  return (RESTARTABLE_JOB_STATUSES as readonly string[]).includes(normalizeJobStatus(status));
+}
+
+export function getRestartUnavailableReason(status: string): string {
+  return RESTART_UNAVAILABLE_REASONS[normalizeJobStatus(status)] || "jobs.actions.restartUnavailableReason.default";
+}
+
 export const WORKFLOW_MODE_LABELS: Record<string, string> = {
   standard_edit: "标准成片",
   long_text_to_video: "长文本转视频",

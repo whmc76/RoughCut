@@ -56,6 +56,7 @@ from roughcut.pipeline.celery_app import celery_app
 from roughcut.pipeline.orchestrator import PIPELINE_STEPS, create_job_steps
 from roughcut.pipeline.quality import QUALITY_ARTIFACT_TYPE
 from roughcut.media.variant_timeline_bundle import resolve_effective_variant_timeline_bundle
+from roughcut.recovery.stuck_step_recovery import STUCK_STEP_DIAGNOSTIC_ARTIFACT_TYPE
 from roughcut.review.content_profile import _extract_reference_frames
 from roughcut.review.content_profile import apply_content_profile_feedback
 from roughcut.review.content_profile import build_reviewed_transcript_excerpt
@@ -470,8 +471,11 @@ async def restart_job(job_id: uuid.UUID, session: AsyncSession = Depends(get_ses
     job = result.scalar_one_or_none()
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    if job.status not in {"done", "cancelled", "failed", "needs_review"}:
-        raise HTTPException(status_code=409, detail="Only completed, review-paused, cancelled, or failed jobs can be restarted")
+    if job.status not in {"done", "cancelled", "failed", "needs_review", "processing", "running"}:
+        raise HTTPException(
+            status_code=409,
+            detail="Only completed, running, review-paused, cancelled, or failed jobs can be restarted",
+        )
 
     _revoke_running_steps(job.steps or [])
     await _clear_job_runtime_state(job_id, session, source_path=str(job.source_path or "").strip())
@@ -1369,6 +1373,7 @@ async def get_job_activity(job_id: uuid.UUID, session: AsyncSession = Depends(ge
                     "avatar_commentary_plan",
                     "render_outputs",
                     "platform_packaging_md",
+                    STUCK_STEP_DIAGNOSTIC_ARTIFACT_TYPE,
                     QUALITY_ARTIFACT_TYPE,
                 ]
             ),
@@ -1397,7 +1402,7 @@ async def get_job_activity(job_id: uuid.UUID, session: AsyncSession = Depends(ge
 
     current_step = _build_current_step(job)
     decisions = _build_activity_decisions(artifacts, timelines, corrections, render_output)
-    events = _build_activity_events(job.steps or [], artifacts, timelines, render_output)
+    events = _build_activity_events(job.steps or [], artifacts, timelines, render_output, job=job)
 
     render_payload = None
     if render_output is not None:
@@ -1460,6 +1465,30 @@ def _build_current_step(job: Job) -> dict | None:
             "updated_at": meta.get("updated_at") or _iso_or_none(running.started_at),
         }
 
+    if job.status in {"failed", "cancelled"}:
+        terminal_statuses = {"failed", "cancelled"}
+        failed_step = _latest_terminal_step(steps, statuses=terminal_statuses)
+        if failed_step is not None:
+            return {
+                "step_name": failed_step.step_name,
+                "label": STEP_LABELS.get(failed_step.step_name, failed_step.step_name),
+                "status": failed_step.status,
+                "detail": _coalesce_step_error_detail(
+                    failed_step,
+                    fallback=job.error_message,
+                ),
+                "progress": None,
+                "updated_at": _iso_or_none(failed_step.finished_at or failed_step.started_at or job.updated_at),
+            }
+        return {
+            "step_name": steps[0].step_name if steps else "系统",
+            "label": STEP_LABELS.get(steps[0].step_name, "任务") if steps else "任务",
+            "status": job.status,
+            "detail": job.error_message or "任务已结束但未产生可追踪步骤记录",
+            "progress": None,
+            "updated_at": _iso_or_none(job.updated_at),
+        }
+
     if job.status == "needs_review":
         waiting_review = next(
             (
@@ -1494,9 +1523,7 @@ def _build_current_step(job: Job) -> dict | None:
     next_pending = next((step for step in steps if step.status == "pending"), None)
     if next_pending:
         meta = next_pending.metadata_ or {}
-        detail = meta.get("detail")
-        if not detail:
-            detail = "等待调度器派发。" if _are_previous_steps_complete(steps, next_pending.step_name) else "等待前序步骤完成。"
+        detail = _pending_step_transition_detail(meta.get("detail"), next_pending, steps)
         return {
             "step_name": next_pending.step_name,
             "label": STEP_LABELS.get(next_pending.step_name, next_pending.step_name),
@@ -1697,8 +1724,21 @@ def _build_activity_events(
     artifacts: list[Artifact],
     timelines: list[Timeline],
     render_output: RenderOutput | None,
+    *,
+    job: Job | None = None,
 ) -> list[dict]:
     events: list[dict] = []
+
+    if job is not None and job.status in {"failed", "cancelled"} and job.error_message:
+        events.append(
+            {
+                "timestamp": _iso_or_none(job.updated_at),
+                "type": "error" if job.status == "failed" else "cancelled",
+                "status": job.status,
+                "title": "任务失败" if job.status == "failed" else "任务已取消",
+                "detail": job.error_message,
+            }
+        )
 
     for step in steps:
         label = STEP_LABELS.get(step.step_name, step.step_name)
@@ -1715,6 +1755,10 @@ def _build_activity_events(
                 }
             )
         if step.finished_at:
+            if step.status in {"failed", "cancelled"}:
+                detail = _coalesce_step_error_detail(step, fallback=step.error_message)
+            else:
+                detail = step.error_message or metadata.get("detail")
             events.append(
                 {
                     "timestamp": _iso_or_none(step.finished_at),
@@ -1722,7 +1766,7 @@ def _build_activity_events(
                     "status": step.status,
                     "title": f"{label}{'完成' if step.status == 'done' else '结束'}",
                     "detail": _decorate_step_detail(
-                        step.error_message or metadata.get("detail"),
+                        detail,
                         elapsed_seconds,
                         running=False,
                     ),
@@ -1827,6 +1871,8 @@ def _artifact_event_summary(artifact: Artifact) -> dict | None:
                 "title": "数字人成片结果已回写",
                 "detail": str(avatar_result.get("detail") or avatar_result.get("status") or "数字人结果已更新"),
             }
+    if artifact.artifact_type == STUCK_STEP_DIAGNOSTIC_ARTIFACT_TYPE:
+        return _stuck_step_diagnostic_summary(data)
     if artifact.artifact_type == QUALITY_ARTIFACT_TYPE:
         score = data.get("score") if isinstance(data, dict) else None
         grade = str(data.get("grade") or "").strip() if isinstance(data, dict) else ""
@@ -1845,6 +1891,102 @@ def _artifact_event_summary(artifact: Artifact) -> dict | None:
             "detail": detail or "质量评分已写入",
         }
     return None
+
+
+def _latest_terminal_step(
+    steps: list[JobStep],
+    *,
+    statuses: set[str] | None = None,
+) -> JobStep | None:
+    if not steps:
+        return None
+    allowed_statuses = set(statuses or {"done", "failed", "skipped", "cancelled"})
+    for step in reversed(_ordered_steps(steps)):
+        if step.status in allowed_statuses:
+            return step
+    return None
+
+
+def _coalesce_step_error_detail(step: JobStep, *, fallback: str | None = None) -> str | None:
+    metadata = step.metadata_ or {}
+    details = []
+
+    step_error = str(step.error_message or "").strip()
+    if step_error:
+        details.append(step_error)
+
+    detail = str(metadata.get("detail") or "").strip()
+    if detail:
+        details.append(detail)
+
+    recovery_summary = str(metadata.get("recovery_summary") or "").strip()
+    if recovery_summary:
+        details.append(f"恢复建议：{recovery_summary}")
+
+    recovery_root_cause = str(metadata.get("recovery_root_cause") or "").strip()
+    if recovery_root_cause:
+        details.append(f"恢复根因：{recovery_root_cause}")
+
+    if fallback:
+        fallback_text = str(fallback).strip()
+        if fallback_text and fallback_text not in details:
+            details.append(fallback_text)
+
+    cleaned_details = [item for item in details if item]
+    return " · ".join(cleaned_details) if cleaned_details else None
+
+
+def _pending_step_transition_detail(
+    detail: Any,
+    step: JobStep,
+    steps: list[JobStep],
+) -> str:
+    raw_detail = str(detail or "").strip()
+    if raw_detail:
+        return raw_detail
+    if _are_previous_steps_complete(steps, step.step_name):
+        return "等待调度器派发。"
+    return "等待前序步骤完成。"
+
+
+def _stuck_step_diagnostic_summary(data: object) -> dict[str, str] | None:
+    payload = data if isinstance(data, dict) else {}
+    step_name = str(payload.get("step_name") or "未命名步骤").strip()
+    summary = str(payload.get("summary") or "").strip()
+    root_cause = str(payload.get("root_cause") or "").strip()
+    confidence = payload.get("confidence")
+    evidence = payload.get("evidence") if isinstance(payload, dict) else None
+    recommended_action = payload.get("recommended_action") if isinstance(payload, dict) else None
+    action_parts: list[str] = []
+    if isinstance(recommended_action, dict):
+        action_kind = str(recommended_action.get("kind") or "").strip()
+        action_reason = str(recommended_action.get("reason") or "").strip()
+        if action_kind:
+            action_parts.append(action_kind)
+        if action_reason:
+            action_parts.append(action_reason)
+    action = " / ".join(part for part in action_parts if part)
+
+    stale_after = ""
+    if isinstance(evidence, dict):
+        stale_after_sec = evidence.get("stale_after_sec")
+        if stale_after_sec is not None:
+            stale_after = f"（阈值 {stale_after_sec}s）"
+
+    details: list[str] = []
+    if summary:
+        details.append(summary)
+    if root_cause:
+        details.append(f"根因：{root_cause}")
+    if action:
+        details.append(f"恢复建议：{action}{stale_after}")
+    if isinstance(confidence, (float, int)):
+        details.append(f"置信度：{float(confidence):.2f}")
+
+    return {
+        "title": f"{step_name} 卡住诊断",
+        "detail": " · ".join(part for part in details if part) or "检测到步骤卡住并已写入诊断记录。",
+    }
 
 
 def _resolve_avatar_activity_status(

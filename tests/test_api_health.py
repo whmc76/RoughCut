@@ -1570,6 +1570,42 @@ async def test_job_restart_allows_needs_review_jobs(client: AsyncClient):
 
 
 @pytest.mark.asyncio
+async def test_job_restart_allows_processing_jobs(client: AsyncClient):
+    from roughcut.db.models import Job, JobStep
+    from roughcut.db.session import get_session_factory
+
+    job_id = uuid.uuid4()
+
+    async with get_session_factory()() as session:
+        session.add(
+            Job(
+                id=job_id,
+                source_path="jobs/demo/processing.mp4",
+                source_name="processing.mp4",
+                status="processing",
+                language="zh-CN",
+            )
+        )
+        session.add(
+            JobStep(
+                job_id=job_id,
+                step_name="probe",
+                status="running",
+                attempt=1,
+            )
+        )
+        await session.commit()
+
+    response = await client.post(f"/api/v1/jobs/{job_id}/restart")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "pending"
+    assert data["steps"][0]["step_name"] == "probe"
+    assert data["steps"][0]["status"] == "pending"
+    assert data["steps"][0]["attempt"] == 0
+
+
+@pytest.mark.asyncio
 async def test_job_activity_sorts_pending_steps_and_hides_avatar_until_reached(client: AsyncClient):
     from roughcut.db.models import Job, JobStep
     from roughcut.db.session import get_session_factory
@@ -1773,6 +1809,84 @@ async def test_job_activity_stream(client: AsyncClient):
     assert data["current_step"]["detail"].startswith("执行 FFmpeg 渲染成片")
     subtitle_decision = next(item for item in data["decisions"] if item["kind"] == "subtitle_review")
     assert subtitle_decision["detail"] == "待审 1 条，自动/已接受 0 条"
+
+
+@pytest.mark.asyncio
+async def test_job_activity_failed_job_exposes_error_and_stuck_diagnostic(client: AsyncClient):
+    from roughcut.db.models import Artifact, Job, JobStep
+    from roughcut.db.session import get_session_factory
+    from roughcut.recovery.stuck_step_recovery import STUCK_STEP_DIAGNOSTIC_ARTIFACT_TYPE
+
+    job_id = uuid.uuid4()
+    now = datetime.now(timezone.utc)
+
+    async with get_session_factory()() as session:
+        session.add(
+            Job(
+                id=job_id,
+                source_path="jobs/demo/fail.mp4",
+                source_name="fail.mp4",
+                status="failed",
+                language="zh-CN",
+                error_message="render 步骤卡住并已超过重试上限",
+            )
+        )
+        session.add_all(
+            [
+                JobStep(
+                    job_id=job_id,
+                    step_name="probe",
+                    status="done",
+                    attempt=1,
+                    started_at=now,
+                    finished_at=now,
+                    metadata_={"detail": "已写入媒体信息", "updated_at": now.isoformat()},
+                ),
+                JobStep(
+                    job_id=job_id,
+                    step_name="render",
+                    status="failed",
+                    attempt=3,
+                    started_at=now,
+                    finished_at=now,
+                    error_message="FFmpeg 渲染执行失败，返回码 1",
+                    metadata_={"detail": "渲染容器返回失败状态", "updated_at": now.isoformat(), "recovery_summary": "已写入卡住诊断"},
+                ),
+            ]
+        )
+        session.add(
+            Artifact(
+                job_id=job_id,
+                artifact_type=STUCK_STEP_DIAGNOSTIC_ARTIFACT_TYPE,
+                data_json={
+                    "step_name": "render",
+                    "summary": "render step appears stuck",
+                    "root_cause": "GPU 输出队列长期无响应",
+                    "confidence": 0.84,
+                    "recommended_action": {
+                        "kind": "reset_to_pending",
+                        "reason": "清理旧任务状态并重新入队",
+                    },
+                    "evidence": {
+                        "stale_after_sec": 1200,
+                        "attempt": 3,
+                    },
+                },
+            )
+        )
+        await session.commit()
+
+    response = await client.get(f"/api/v1/jobs/{job_id}/activity")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "failed"
+    assert data["current_step"]["step_name"] == "render"
+    assert "FFmpeg 渲染执行失败" in (data["current_step"]["detail"] or "")
+    assert any(
+        event["type"] == "error" and "render 步骤卡住" in (event["detail"] or "")
+        for event in data["events"]
+    )
+    assert any("卡住诊断" in event["title"] and "GPU 输出队列长期无响应" in (event["detail"] or "") for event in data["events"])
 
 
 @pytest.mark.asyncio

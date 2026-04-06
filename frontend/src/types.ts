@@ -70,6 +70,7 @@ export type JobActivity = {
     status: string;
     title: string;
     detail?: string | null;
+    [key: string]: unknown;
   }>;
 };
 
