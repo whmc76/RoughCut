@@ -78,6 +78,7 @@ export function JobQueueTable({
   onCancel,
   onRestart,
   onDelete,
+  onPageChange,
 }: JobQueueTableProps) {
   const { t } = useI18n();
   const canGoPrev = (currentPage ?? 0) > 0 && !isFetchingPage;

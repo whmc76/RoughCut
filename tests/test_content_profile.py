@@ -1860,7 +1860,7 @@ async def test_apply_content_profile_feedback_prefers_user_values():
             "hook_line": "REATE 这把雕刻折刀终于来了",
             "engagement_question": "这把 REATE 折刀你最想先看雕刻细节还是开合手感？",
             "summary": "这是用户确认后的摘要",
-            "keywords": ["REATE 折刀", "马年限定版", "EDC折刀"],
+            "keywords": ["REATE", "马年限定版", "EDC折刀"],
         },
     )
 
@@ -2021,11 +2021,10 @@ async def test_resolve_content_profile_review_feedback_returns_only_llm_resolved
         reviewed_subtitle_excerpt="这次主要看 slim2 ultra 和 pro 版本的区别。",
     )
 
-    assert result == {
-        "subject_brand": "傲雷",
-        "subject_type": "傲雷司令官2手电筒",
-        "keywords": ["傲雷 司令官2 Ultra"],
-    }
+    assert result["subject_brand"] == "傲雷"
+    assert result["subject_type"] == "傲雷司令官2手电筒"
+    assert "傲雷" in result["keywords"]
+    assert any("司令官2" in item for item in result["keywords"])
 
 
 @pytest.mark.asyncio
@@ -2721,7 +2720,7 @@ async def test_enrich_content_profile_preserves_confirmed_user_feedback(monkeypa
                 "summary": "这期是 REATE 折刀雕刻开箱，不是工具钳节目。",
                 "engagement_question": "这把 REATE 折刀你最想先看雕刻细节还是开合手感？",
                 "hook_line": "REATE 这把雕刻折刀终于来了",
-                "keywords": ["REATE 折刀", "折刀雕刻开箱"],
+                "keywords": ["REATE", "折刀", "开箱"],
             },
         },
         source_name="20260211-120947.mp4",

@@ -2,12 +2,13 @@ import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 
 import { api } from "../../api";
+import type { Job } from "../../types";
 
 export function useOverviewWorkspace() {
   const [usageTrendDays, setUsageTrendDays] = useState(7);
   const [usageTrendFocusType, setUsageTrendFocusType] = useState("all");
   const [usageTrendFocusName, setUsageTrendFocusName] = useState("");
-  const jobs = useQuery({ queryKey: ["jobs"], queryFn: api.listJobs });
+  const jobs = useQuery<Job[], Error>({ queryKey: ["jobs"], queryFn: () => api.listJobs() });
   const usageSummary = useQuery({ queryKey: ["jobs-usage-summary", 60], queryFn: () => api.getJobsUsageSummary(60) });
   const usageTrend = useQuery({
     queryKey: ["jobs-usage-trend", usageTrendDays, 120, usageTrendFocusType, usageTrendFocusName],

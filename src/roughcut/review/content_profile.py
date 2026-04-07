@@ -93,6 +93,9 @@ _CONTENT_KIND_DEFAULT_VIDEO_THEME = {
 _VISIBLE_TEXT_EMPTY_DEFAULT = "未识别到稳定画面文字，请人工补充"
 _CORRECTION_NOTES_EMPTY_DEFAULT = "待人工校对：未发现明显模型误读点，建议复核字幕与画面一致性。"
 _SUPPLEMENTAL_CONTEXT_EMPTY_DEFAULT = "待补充：可填写拍摄背景、对比对象或素材约束信息。"
+_REVIEW_KEYWORDS_LIMIT = 10
+_REVIEW_KEYWORDS_MIN_LEN = 2
+_REVIEW_KEYWORD_TOKEN_PATTERN = re.compile(r"[A-Za-z0-9+#\\-]{2,}|[一-龥]{2,}|[A-Za-z0-9]{2,}")
 
 
 def _hint_candidate_key(field_name: str) -> str:
@@ -161,21 +164,15 @@ def _normalize_main_content_type(value: str) -> str:
 
 def _coerce_subject_type_to_supported_main_type(profile: dict[str, Any] | None) -> str:
     candidate = profile or {}
-    resolved_subject_type = _normalize_main_content_type(str(candidate.get("subject_type") or ""))
+    resolved_subject_type = str(candidate.get("subject_type") or "").strip()
     if resolved_subject_type:
-        return resolved_subject_type
-    resolved_content_kind = _normalize_main_content_type(str(candidate.get("content_kind") or ""))
-    if resolved_content_kind:
-        return resolved_content_kind
-    workflow_template = str(candidate.get("workflow_template") or "").strip()
-    if workflow_template:
-        try:
-            resolved_template_kind = _normalize_main_content_type(get_workflow_preset(workflow_template).content_kind)
-        except Exception:
-            resolved_template_kind = ""
-        if resolved_template_kind:
-            return resolved_template_kind
-    return _content_kind_name(candidate) or "unboxing"
+        if _is_generic_subject_type(resolved_subject_type):
+            normalized = _normalize_main_content_type(resolved_subject_type)
+            if normalized:
+                return normalized
+        else:
+            return resolved_subject_type
+    return ""
 
 
 def _ensure_subject_type_main(profile: dict[str, Any]) -> str:
@@ -197,6 +194,91 @@ def _normalize_query_list(values: list[str]) -> list[str]:
         seen.add(key)
         deduped.append(query)
     return deduped
+
+
+def _extract_review_keyword_tokens(text: str) -> list[str]:
+    normalized = _clean_line(text).strip()
+    if not normalized:
+        return []
+    tokens: list[str] = []
+    for chunk in re.split(r"[\\s,，/\\/|]+", normalized):
+        candidate = chunk.strip("：:;；,.!?!?！？`“”‘’'\"()[]{}<>《》").strip()
+        if not candidate:
+            continue
+        if re.search(r"[一-龥]", candidate) and re.search(r"[A-Za-z0-9]", candidate):
+            tokens.append(candidate)
+            continue
+        tokens.extend(_REVIEW_KEYWORD_TOKEN_PATTERN.findall(candidate))
+    return [token for token in tokens if token]
+
+
+def _build_review_keywords(profile: dict[str, Any]) -> list[str]:
+    profile_values = dict(profile or {})
+    brand = str(profile_values.get("subject_brand") or "").strip()
+    model = str(profile_values.get("subject_model") or "").strip()
+    subject_type = str(profile_values.get("subject_type") or "").strip()
+    visible_text = str(profile_values.get("visible_text") or "").strip()
+    video_theme = str(profile_values.get("video_theme") or "").strip()
+    raw_queries = [str(item).strip() for item in (profile_values.get("search_queries") or []) if str(item).strip()]
+    transcript_excerpt = str(profile_values.get("transcript_excerpt") or "").strip()
+
+    candidates: list[tuple[int, int, str]] = []
+    seen: dict[str, int] = {}
+
+    def add(term: str, weight: int) -> None:
+        cleaned = str(term or "").strip()
+        if not cleaned:
+            return
+        normalized = _normalize_profile_value(cleaned)
+        if not normalized or len(normalized) < _REVIEW_KEYWORDS_MIN_LEN:
+            return
+        if _looks_like_camera_stem(normalized):
+            return
+        if re.fullmatch(r"[\d._:-]+", normalized):
+            return
+        if re.fullmatch(r"\d{8}[_-].+", normalized):
+            return
+        norm_key = "".join(normalized.upper().split())
+        if norm_key in seen:
+            return
+        seen[norm_key] = len(candidates)
+        candidates.append((weight, len(candidates), cleaned))
+
+    add(brand, 140)
+    add(model, 130)
+    add(subject_type, 120)
+    for term in _extract_topic_terms(video_theme):
+        add(term, 110)
+    for term in _extract_search_signal_terms(transcript_excerpt, visible_text, _clean_line(profile_values.get("source_name") or "")):
+        add(term, 105)
+    for term in _extract_review_keyword_tokens(visible_text):
+        add(term, 95)
+    for query in raw_queries:
+        for token in _extract_review_keyword_tokens(query):
+            add(token, 90)
+    for term in _extract_query_support_terms(video_theme):
+        add(term, 85)
+    for term in _extract_topic_terms(visible_text):
+        add(term, 80)
+
+    ordered = [item[2] for item in sorted(candidates, key=lambda item: (-item[0], item[1]))]
+    if ordered:
+        return ordered[:_REVIEW_KEYWORDS_LIMIT]
+    fallback = _extract_review_keyword_tokens(
+        " ".join(part for part in (brand, model, subject_type, video_theme, visible_text) if part)
+    )
+    fallback_keywords: list[str] = []
+    fallback_seen: set[str] = set()
+    for token in fallback:
+        normalized = _normalize_profile_value(token)
+        if not normalized:
+            continue
+        key = "".join(normalized.upper().split())
+        if key in fallback_seen:
+            continue
+        fallback_seen.add(key)
+        fallback_keywords.append(token)
+    return fallback_keywords[: _REVIEW_KEYWORDS_LIMIT]
 
 
 def _coerce_subject_type_for_review_display(value: str) -> str:
@@ -234,18 +316,15 @@ def _build_review_field_fallback_visible_text(
     source_name: str,
     transcript_excerpt: str,
 ) -> str:
+    brand = str(profile.get("subject_brand") or "").strip()
+    model = str(profile.get("subject_model") or "").strip()
     candidates = [
         _coerce_subject_type_for_review_display(str(profile.get("subject_type") or "")),
-        str(profile.get("subject_brand") or "").strip(),
-        str(profile.get("subject_model") or "").strip(),
+        brand,
+        model,
     ]
-    source_stem = Path(source_name).stem if source_name else ""
-    if source_stem:
-        candidates.append(source_stem)
-    if transcript_excerpt:
-        excerpt_text = _clean_line(transcript_excerpt)
-        if excerpt_text:
-            candidates.append(excerpt_text[:24])
+    if not (brand or model):
+        return ""
     compact = " ".join(part for part in candidates if part)
     return compact[:80] if compact else _VISIBLE_TEXT_EMPTY_DEFAULT
 
@@ -290,6 +369,10 @@ def _ensure_search_queries(
     transcript_excerpt: str,
     limit: int = 6,
 ) -> list[str]:
+    raw_queries = profile.get("search_queries")
+    if isinstance(raw_queries, list) and not raw_queries:
+        profile["search_queries"] = []
+        return []
     existing = _normalize_query_list([str(item).strip() for item in (profile.get("search_queries") or [])])
     if not existing:
         existing = _normalize_query_list(
@@ -2001,7 +2084,7 @@ async def infer_content_profile(
         profile["visual_semantic_evidence"] = dict(visual_semantic_evidence)
     _ensure_search_queries(profile, source_name, transcript_excerpt=transcript_excerpt)
     _ensure_review_fields_not_empty(profile, source_name=source_name, transcript_excerpt=transcript_excerpt)
-    profile["keywords"] = _normalize_query_list(list(profile.get("search_queries") or []))
+    profile["keywords"] = _build_review_keywords(profile)
 
     preset = select_workflow_template(
         workflow_template=workflow_template,
@@ -2097,13 +2180,12 @@ async def apply_content_profile_feedback(
     resolved_feedback: dict[str, Any] = dict(user_feedback or {})
     merged = dict(draft_profile or {})
     merged["user_feedback"] = dict(resolved_feedback)
+    transcript_excerpt = str(reviewed_subtitle_excerpt or merged.get("transcript_excerpt") or "")
     if not any(value for value in resolved_feedback.values()):
-        transcript_excerpt = str(reviewed_subtitle_excerpt or merged.get("transcript_excerpt") or "")
         _ensure_subject_type_main(merged)
         _ensure_search_queries(merged, source_name, transcript_excerpt=transcript_excerpt)
         _ensure_review_fields_not_empty(merged, source_name=source_name, transcript_excerpt=transcript_excerpt)
-        if merged.get("search_queries"):
-            merged["keywords"] = _normalize_query_list(list(merged.get("search_queries") or []))
+        merged["keywords"] = _build_review_keywords(merged)
         preset = select_workflow_template(
             workflow_template=workflow_template,
             content_kind=_content_kind_name(merged),
@@ -2163,8 +2245,6 @@ async def apply_content_profile_feedback(
             source_name=source_name,
             proposed_feedback=resolved_feedback,
         )
-    if merged.get("search_queries"):
-        merged["keywords"] = _normalize_query_list(list(merged.get("search_queries") or []))
 
     try:
         provider = get_reasoning_provider()
@@ -2270,14 +2350,9 @@ async def apply_content_profile_feedback(
             source_name=source_name,
             proposed_feedback=resolved_feedback,
         )
-    if not resolved_feedback.get("keywords") and result.get("search_queries"):
-        result["keywords"] = _normalize_query_list(list(result.get("search_queries") or []))
-    if resolved_feedback.get("keywords"):
-        result["keywords"] = _normalize_query_list(result.get("keywords") or resolved_feedback["keywords"])
     _ensure_subject_type_main(result)
     _ensure_search_queries(result, source_name, transcript_excerpt=transcript_excerpt)
-    if result.get("search_queries"):
-        result["keywords"] = _normalize_query_list(list(result.get("search_queries") or []))
+    result["keywords"] = _build_review_keywords(result)
     if any(
         resolved_feedback.get(key)
         for key in (
@@ -2567,7 +2642,17 @@ async def resolve_content_profile_review_feedback(
             if value and value not in queries:
                 queries.append(value)
         if queries:
-            resolved["keywords"] = queries
+            resolved["search_queries"] = list(queries)
+            resolved["keywords"] = _build_review_keywords(
+                {
+                    "subject_brand": str(resolved.get("subject_brand") or "").strip(),
+                    "subject_model": str(resolved.get("subject_model") or "").strip(),
+                    "subject_type": str(resolved.get("subject_type") or "").strip(),
+                    "video_theme": str(resolved.get("video_theme") or "").strip(),
+                    "visible_text": str(resolved.get("visible_text") or "").strip(),
+                    "search_queries": list(queries),
+                }
+            )
         return resolved
     except Exception:
         return {}
@@ -2804,9 +2889,14 @@ async def enrich_content_profile(
             "search_queries",
         ):
             if key in llm_profile and llm_profile.get(key):
+                if key == "subject_type":
+                    current_subject_type = str(enriched.get("subject_type") or "").strip()
+                    if current_subject_type and not _is_generic_subject_type(current_subject_type):
+                        continue
                 enriched[key] = llm_profile[key]
         enriched["content_understanding"] = llm_profile.get("content_understanding") or {}
-    _ensure_subject_type_main(enriched)
+    if not str(enriched.get("subject_type") or "").strip():
+        _ensure_subject_type_main(enriched)
 
     preset = select_workflow_template(
         workflow_template=workflow_template or enriched.get("workflow_template"),
@@ -2927,9 +3017,10 @@ async def enrich_content_profile(
             enriched["engagement_question"] = generated_question
     if _is_generic_engagement_question(str(enriched.get("engagement_question") or "")):
         enriched["engagement_question"] = _build_fallback_engagement_question(enriched, preset)
-    _ensure_subject_type_main(enriched)
+    if not str(enriched.get("subject_type") or "").strip():
+        _ensure_subject_type_main(enriched)
     _ensure_search_queries(enriched, source_name, transcript_excerpt=transcript_excerpt)
-    enriched["keywords"] = _normalize_query_list(list(enriched.get("search_queries") or []))
+    enriched["keywords"] = _build_review_keywords(enriched)
     _apply_confirmed_profile_fields(enriched, confirmed_fields)
     if confirmed_fields and any(
         key in confirmed_fields
@@ -4025,6 +4116,7 @@ def _seed_profile_from_user_memory(
             elif field_name in {"subject_type", "video_theme"}:
                 _append_hint_candidate(seeded, field_name, corrected)
 
+    subject_identity_available = bool(_hint_primary_value(seeded, "subject_brand") or _hint_primary_value(seeded, "subject_model"))
     for field_name in ("subject_brand", "subject_model", "subject_type"):
         if field_name in {"subject_brand", "subject_model"} and field_name in seeded:
             continue
@@ -4032,11 +4124,13 @@ def _seed_profile_from_user_memory(
             continue
         for item in field_preferences.get(field_name) or []:
             value = str(item.get("value") or "").strip()
-            if value and _normalize_profile_value(value) in transcript_norm:
-                if field_name in {"subject_brand", "subject_model"}:
+            if field_name in {"subject_brand", "subject_model"}:
+                if value and _normalize_profile_value(value) in transcript_norm:
                     seeded[field_name] = value
-                else:
-                    _append_hint_candidate(seeded, field_name, value)
+                    break
+                continue
+            if value and (subject_identity_available or _normalize_profile_value(value) in transcript_norm):
+                _append_hint_candidate(seeded, field_name, value)
                 break
 
     if not _hint_primary_value(seeded, "video_theme"):
@@ -4093,13 +4187,18 @@ def _seed_profile_from_user_memory(
         if confirmed_entity:
             brand = str(confirmed_entity.get("brand") or "").strip()
             model = str(confirmed_entity.get("model") or "").strip()
+            model_aliases = confirmed_entity.get("model_aliases") or []
             if brand:
                 seeded["subject_brand"] = brand
-            if model and _memory_keyword_matches_transcript(
-                model,
-                transcript_excerpt,
-                transcript_norm,
-            ):
+            alias_hit = any(
+                _memory_value_matches_transcript(
+                    str(item.get("wrong") or "").strip(),
+                    transcript_excerpt,
+                    transcript_norm,
+                )
+                for item in model_aliases
+            )
+            if model and (_memory_keyword_matches_transcript(model, transcript_excerpt, transcript_norm) or alias_hit):
                 seeded["subject_model"] = model
             if confirmed_entity.get("subject_type") and not _hint_primary_value(seeded, "subject_type"):
                 _append_hint_candidate(seeded, "subject_type", confirmed_entity.get("subject_type"))
