@@ -96,6 +96,22 @@ _SUPPLEMENTAL_CONTEXT_EMPTY_DEFAULT = "待补充：可填写拍摄背景、对�
 _REVIEW_KEYWORDS_LIMIT = 10
 _REVIEW_KEYWORDS_MIN_LEN = 2
 _REVIEW_KEYWORD_TOKEN_PATTERN = re.compile(r"[A-Za-z0-9+#\\-]{2,}|[一-龥]{2,}|[A-Za-z0-9]{2,}")
+_REVIEW_KEYWORD_MIN_COUNT = 4
+_REVIEW_KEYWORD_TERM_SPLIT_RE = re.compile(r"[\\s,，、/\\\\|+*×xX·•_=\\-]+")
+_REVIEW_KEYWORD_CONNECTOR_RE = re.compile(r"(?:与|和|及|及其|以及|并|并且|对比|联名|或|还是|以及)")
+_REVIEW_KEYWORD_CHUNK_FALLBACK_PART_RE = re.compile(r"[一-龥]{2,4}|[A-Za-z0-9+#\\-]{2,}", re.IGNORECASE)
+_REVIEW_KEYWORD_NOISE_CHUNKS = {
+    "开箱",
+    "评测",
+    "实测",
+    "介绍",
+    "对比",
+    "上手",
+    "内容",
+    "产品",
+    "视频",
+    "主题",
+}
 
 
 def _hint_candidate_key(field_name: str) -> str:
@@ -166,13 +182,11 @@ def _coerce_subject_type_to_supported_main_type(profile: dict[str, Any] | None) 
     candidate = profile or {}
     resolved_subject_type = str(candidate.get("subject_type") or "").strip()
     if resolved_subject_type:
-        if _is_generic_subject_type(resolved_subject_type):
-            normalized = _normalize_main_content_type(resolved_subject_type)
-            if normalized:
-                return normalized
-        else:
-            return resolved_subject_type
-    return ""
+        normalized = _normalize_main_content_type(resolved_subject_type)
+        if normalized:
+            return normalized
+    normalized_content_kind = _normalize_main_content_type(_content_kind_name(candidate))
+    return normalized_content_kind or "unboxing"
 
 
 def _ensure_subject_type_main(profile: dict[str, Any]) -> str:
@@ -196,20 +210,106 @@ def _normalize_query_list(values: list[str]) -> list[str]:
     return deduped
 
 
-def _extract_review_keyword_tokens(text: str) -> list[str]:
+def _extract_review_keyword_tokens(
+    text: str,
+    *,
+    seed_terms: list[str] | None = None,
+) -> list[str]:
     normalized = _clean_line(text).strip()
     if not normalized:
         return []
+
+    seeds = [str(term or "").strip() for term in (seed_terms or []) if str(term or "").strip()]
+    if seeds:
+        seen_seed_terms = set(seeds)
+        sorted_seeds = [item for item in sorted(seen_seed_terms, key=len, reverse=True) if len(item) >= 2]
+    else:
+        sorted_seeds = []
+
     tokens: list[str] = []
-    for chunk in re.split(r"[\\s,，/\\/|]+", normalized):
+    for chunk in _REVIEW_KEYWORD_TERM_SPLIT_RE.split(normalized):
         candidate = chunk.strip("：:;；,.!?!?！？`“”‘’'\"()[]{}<>《》").strip()
         if not candidate:
             continue
-        if re.search(r"[一-龥]", candidate) and re.search(r"[A-Za-z0-9]", candidate):
-            tokens.append(candidate)
+        normalized_candidate = _REVIEW_KEYWORD_CONNECTOR_RE.sub(" ", candidate)
+        for part in _REVIEW_KEYWORD_TERM_SPLIT_RE.split(normalized_candidate):
+            segment = part.strip("：:;；,.!?!?！？`“”‘’'\"()[]{}<>《》").strip()
+            if not segment:
+                continue
+            if re.search(r"[一-龥]", segment) and re.search(r"[A-Za-z0-9]", segment):
+                tokens.append(segment)
+                continue
+            if re.fullmatch(r"[A-Za-z0-9+#\\-]+", segment):
+                tokens.append(segment)
+                continue
+            if re.fullmatch(r"[一-龥]{2,}", segment) and len(segment) > 6:
+                tokens.extend(_expand_long_review_keyword_chunk(segment, sorted_seeds))
+                continue
+            tokens.extend(_REVIEW_KEYWORD_CHUNK_FALLBACK_PART_RE.findall(segment))
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for token in tokens:
+        if not token or token in _REVIEW_KEYWORD_NOISE_CHUNKS:
             continue
-        tokens.extend(_REVIEW_KEYWORD_TOKEN_PATTERN.findall(candidate))
-    return [token for token in tokens if token]
+        normalized_token = _normalize_profile_value(token)
+        if len(normalized_token) < _REVIEW_KEYWORDS_MIN_LEN:
+            continue
+        if normalized_token in seen:
+            continue
+        seen.add(normalized_token)
+        deduped.append(token)
+    return deduped
+
+
+def _collect_review_keyword_piece(token: str, seen: set[str]) -> list[str]:
+    normalized = _normalize_profile_value(token)
+    if not normalized or len(normalized) < _REVIEW_KEYWORDS_MIN_LEN:
+        return []
+    if normalized in seen:
+        return []
+    seen.add(normalized)
+    return [token]
+
+
+def _expand_long_review_keyword_chunk(chunk: str, seed_terms: list[str]) -> list[str]:
+    normalized_chunk = chunk.strip("：:;；,.!?!?！？`“”‘’'\"()[]{}<>《》").strip()
+    if not normalized_chunk:
+        return []
+    extracted: list[str] = []
+    seen: set[str] = set()
+    remainder = normalized_chunk
+    for term in seed_terms:
+        if len(term) < 2:
+            continue
+        if term in remainder:
+            if re.fullmatch(r"[一-龥]+", term) and len(term) > 4:
+                continue
+            extracted.extend(_collect_review_keyword_piece(term, seen))
+            if not extracted:
+                continue
+            remainder = remainder.replace(term, " ")
+    for part in _REVIEW_KEYWORD_TERM_SPLIT_RE.split(remainder):
+        segment = part.strip()
+        if not segment:
+            continue
+        if len(segment) <= 4:
+            extracted.extend(_collect_review_keyword_piece(segment, seen))
+            continue
+        # 使用更细颗粒度片段兜底，尽量避免“一个词”变成整句。
+        for window in (4, 3, 2):
+            if len(extracted) >= 8:
+                break
+            for index in range(0, max(0, len(segment) - window + 1), 2):
+                token = segment[index : index + window]
+                if token in _REVIEW_KEYWORD_NOISE_CHUNKS:
+                    continue
+                extracted.extend(_collect_review_keyword_piece(token, seen))
+                if len(extracted) >= 8:
+                    break
+        if len(extracted) >= 8:
+            break
+    return extracted
 
 
 def _build_review_keywords(profile: dict[str, Any]) -> list[str]:
@@ -221,6 +321,7 @@ def _build_review_keywords(profile: dict[str, Any]) -> list[str]:
     video_theme = str(profile_values.get("video_theme") or "").strip()
     raw_queries = [str(item).strip() for item in (profile_values.get("search_queries") or []) if str(item).strip()]
     transcript_excerpt = str(profile_values.get("transcript_excerpt") or "").strip()
+    seed_terms = _collect_review_keyword_seed_terms(profile_values)
 
     candidates: list[tuple[int, int, str]] = []
     seen: dict[str, int] = {}
@@ -251,21 +352,30 @@ def _build_review_keywords(profile: dict[str, Any]) -> list[str]:
         add(term, 110)
     for term in _extract_search_signal_terms(transcript_excerpt, visible_text, _clean_line(profile_values.get("source_name") or "")):
         add(term, 105)
-    for term in _extract_review_keyword_tokens(visible_text):
+    for term in _extract_review_keyword_tokens(visible_text, seed_terms=seed_terms):
         add(term, 95)
     for query in raw_queries:
-        for token in _extract_review_keyword_tokens(query):
+        for token in _extract_review_keyword_tokens(query, seed_terms=seed_terms):
             add(token, 90)
     for term in _extract_query_support_terms(video_theme):
         add(term, 85)
     for term in _extract_topic_terms(visible_text):
         add(term, 80)
+    for term in seed_terms:
+        add(term, 70)
 
     ordered = [item[2] for item in sorted(candidates, key=lambda item: (-item[0], item[1]))]
     if ordered:
+        if len(ordered) < _REVIEW_KEYWORDS_MIN_COUNT and seed_terms:
+            for term in seed_terms:
+                add(term, 65)
+            ordered = [item[2] for item in sorted(candidates, key=lambda item: (-item[0], item[1]))]
+        if len(ordered) > _REVIEW_KEYWORDS_LIMIT:
+            return ordered[:_REVIEW_KEYWORDS_LIMIT]
         return ordered[:_REVIEW_KEYWORDS_LIMIT]
     fallback = _extract_review_keyword_tokens(
-        " ".join(part for part in (brand, model, subject_type, video_theme, visible_text) if part)
+        " ".join(part for part in (brand, model, subject_type, video_theme, visible_text) if part),
+        seed_terms=seed_terms,
     )
     fallback_keywords: list[str] = []
     fallback_seen: set[str] = set()
@@ -279,6 +389,28 @@ def _build_review_keywords(profile: dict[str, Any]) -> list[str]:
         fallback_seen.add(key)
         fallback_keywords.append(token)
     return fallback_keywords[: _REVIEW_KEYWORDS_LIMIT]
+
+
+def _collect_review_keyword_seed_terms(profile_values: dict[str, Any]) -> list[str]:
+    raw_terms: list[str] = []
+    for field_name in (
+        "subject_brand",
+        "subject_model",
+        "subject_type",
+        "video_theme",
+        "visible_text",
+        "transcript_excerpt",
+    ):
+        text = str(profile_values.get(field_name) or "").strip()
+        if not text:
+            continue
+        for token in _REVIEW_KEYWORD_TERM_SPLIT_RE.split(text):
+            token = token.strip("：:;；,.!?!?！？`“”‘’'\"()[]{}<>《》").strip()
+            if token:
+                raw_terms.append(token)
+    source_name = str(profile_values.get("source_name") or profile_values.get("source_file_name") or "").strip()
+    raw_terms.extend(_extract_review_keyword_tokens(source_name, seed_terms=[]))
+    return list(dict.fromkeys(raw_terms))
 
 
 def _coerce_subject_type_for_review_display(value: str) -> str:

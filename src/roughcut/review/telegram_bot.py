@@ -32,7 +32,13 @@ from roughcut.packaging.library import list_packaging_assets, resolve_packaging_
 from roughcut.providers.factory import get_reasoning_provider, get_transcription_provider
 from roughcut.review.downstream_context import select_resolved_downstream_profile
 from roughcut.review.subtitle_memory import build_transcription_prompt
-from roughcut.review.content_profile import build_review_feedback_search_queries, build_reviewed_transcript_excerpt
+from roughcut.review.content_profile import (
+    _build_review_keywords,
+    _collect_review_keyword_seed_terms,
+    _extract_review_keyword_tokens,
+    build_review_feedback_search_queries,
+    build_reviewed_transcript_excerpt,
+)
 from roughcut.review.report import generate_report
 from roughcut.review.content_profile_field_rules import CONTENT_PROFILE_FIELD_GUIDELINES
 from roughcut.review.content_understanding_schema import normalize_video_type
@@ -77,8 +83,10 @@ _FULL_SUBTITLE_ACTION_PATTERN = re.compile(
     r"(?=(?<![A-Za-z0-9])L\d{1,4}(?![A-Za-z0-9])|$)"
 )
 _NEGATED_SUBTITLE_CONTENT_PATTERN = re.compile(r"字幕(?:内容|文本)?(?:本身)?(?:没问题|没有问题|无需修改|不用改)")
-_REVIEW_KEYWORD_SPLIT_RE = re.compile(r"[\s,，、/]+")
-_REVIEW_KEYWORD_TOKEN_LIMIT = 6
+_REVIEW_KEYWORD_SPLIT_RE = re.compile(r"[\\s,，、/|+*×xX·•_=\\-]+")
+_REVIEW_KEYWORD_CONNECTOR_RE = re.compile(r"(?:与|和|及|及其|以及|并|并且|对比|联名|还是|或者|以及)")
+_REVIEW_KEYWORD_TOKEN_LIMIT = 10
+_REVIEW_KEYWORD_MIN_COUNT = 4
 _CONTENT_PROFILE_SUBTITLE_REVIEW_KEYWORDS = (
     "字幕校对",
     "字幕纠错",
@@ -1914,9 +1922,17 @@ def _build_content_profile_review_message(
         avatar_materials=avatar_materials,
     )
     content_lines = []
+    summary = _display_value(draft.get("summary"))
+    hook_line = _display_value(draft.get("hook_line"))
+    visible_text = _display_value(draft.get("visible_text"))
+    video_theme = _display_value(draft.get("video_theme"))
+    source_subject_type = _display_value(draft.get("subject_type"))
+    subject_type_contexts = [summary, hook_line, visible_text, video_theme, source_subject_type]
     for key, label in _CONTENT_FIELD_ORDER:
         if key == "subject_type":
-            content_lines.append(f"- {label}：{_display_subject_type(draft.get(key), locale=locale)}")
+            content_lines.append(
+                f"- {label}：{_display_subject_type(draft.get(key), locale=locale, context_texts=subject_type_contexts)}"
+            )
         else:
             content_lines.append(f"- {label}：{_display_value(draft.get(key))}")
     keyword_candidates = _build_review_keyword_candidates(
@@ -2220,11 +2236,14 @@ def _extract_final_review_keywords(
     content_profile: dict[str, Any] | None,
     source_name: str = "",
 ) -> list[str]:
+    profile = dict(content_profile or {})
+    seed_terms = _collect_review_keyword_seed_terms(profile)
     return _split_review_keywords(
         _resolve_raw_review_keywords(
             content_profile=content_profile,
             source_name=source_name,
-        )
+        ),
+        seed_terms=seed_terms,
     )
 
 
@@ -2232,37 +2251,52 @@ def _resolve_raw_review_keywords(
     content_profile: dict[str, Any] | None,
     source_name: str = "",
 ) -> list[str]:
+    profile = dict(content_profile or {})
+    if source_name and not str(profile.get("source_name") or "").strip():
+        profile["source_name"] = source_name
+    seed_terms = _collect_review_keyword_seed_terms(profile)
     raw_keywords: list[str] = []
-    keywords: list[str] = []
-    for raw in (content_profile or {}).get("keywords") or (content_profile or {}).get("search_queries") or []:
+    deduped: set[str] = set()
+
+    def add_keyword(value: str) -> None:
+        text = str(value or "").strip()
+        if not text:
+            return
+        norm = "".join(text.upper().split())
+        if not norm or norm in deduped:
+            return
+        deduped.add(norm)
+        raw_keywords.append(text)
+
+    for raw in (profile.get("keywords") or profile.get("search_queries") or []):
         value = str(raw or "").strip()
-        if value and value not in keywords:
-            keywords.append(value)
-    if keywords:
-        return keywords
-    source_name = source_name or str((content_profile or {}).get("source_name") or "")
-    for query in (
-        query
-        for query in _build_review_keyword_candidates(content_profile or {}, source_name=source_name)
-        if query and query not in keywords
-    ):
-        raw_keywords.append(query)
+        if not value:
+            continue
+        for token in _extract_review_keyword_tokens(value, seed_terms=seed_terms):
+            add_keyword(token)
+
+    if len(raw_keywords) < _REVIEW_KEYWORD_MIN_COUNT:
+        for token in _build_review_keywords(profile):
+            add_keyword(token)
+    if len(raw_keywords) < _REVIEW_KEYWORD_MIN_COUNT:
+        for query in _build_review_keyword_candidates(profile, source_name=source_name):
+            for token in _extract_review_keyword_tokens(query, seed_terms=seed_terms):
+                add_keyword(token)
+
     if raw_keywords:
         return raw_keywords
     return ["视频内容"]
 
 
-def _split_review_keywords(values: list[str]) -> list[str]:
+def _split_review_keywords(values: list[str], *, seed_terms: list[str] | None = None) -> list[str]:
     deduped: list[str] = []
     seen: set[str] = set()
+    normalized_seeds = [str(term or "").strip() for term in (seed_terms or []) if str(term or "").strip()]
     for raw in values:
         text = str(raw or "").strip()
         if not text:
             continue
-        tokens = [token.strip() for token in _REVIEW_KEYWORD_SPLIT_RE.split(text) if token.strip()]
-        if not tokens:
-            tokens = [text]
-        for token in tokens:
+        for token in _extract_review_keyword_tokens(text, seed_terms=normalized_seeds):
             key = "".join(str(token).upper().split())
             if not key or key in seen:
                 continue
@@ -2282,6 +2316,9 @@ def _build_review_keyword_candidates(
     profile = dict(content_profile or {})
     if source_name and not str(profile.get("source_name") or "").strip():
         profile["source_name"] = source_name
+    extracted = _build_review_keywords(profile)
+    if extracted:
+        return extracted[:limit] if limit > 0 else extracted
     proposals = {
         "subject_brand": str(profile.get("subject_brand") or "").strip(),
         "subject_model": str(profile.get("subject_model") or "").strip(),
@@ -2957,29 +2994,34 @@ _SUBJECT_TYPE_LABELS = {
 }
 
 
-def _display_subject_type(value: Any, *, locale: str = "zh-CN") -> str:
-    text = str(value or "").strip()
-    if not text:
-        return "待补充" if str(locale or "").lower().startswith("zh") else "Pending"
+def _display_subject_type(value: Any, *, locale: str = "zh-CN", context_texts: list[str] | None = None) -> str:
     normalized_locale = "en-US" if str(locale or "").lower().startswith("en") else "zh-CN"
     labels = _SUBJECT_TYPE_LABELS[normalized_locale]
-    key = text.strip().lower()
-    for known_key, label in labels.items():
-        if known_key in key or label.lower() in key.lower():
-            return label
-    if "unboxing" in key or "开箱" in key:
-        return labels["unboxing"]
-    if "tutorial" in key or "教程" in key:
-        return labels["tutorial"]
-    if "vlog" in key or "生活" in key or "日常" in key:
-        return labels["vlog"]
-    if "commentary" in key or "观点" in key:
-        return labels["commentary"]
-    if "gameplay" in key or "游戏" in key:
-        return labels["gameplay"]
-    if "food" in key or "探店" in key:
-        return labels["food"]
-    return text
+    texts = [value]
+    texts.extend(context_texts or [])
+
+    for text_value in texts:
+        text = str(text_value or "").strip()
+        if not text:
+            continue
+        key = text.strip().lower()
+        for known_key, label in labels.items():
+            if known_key in key or label.lower() in key.lower():
+                return label
+        if "unboxing" in key or "开箱" in key or "上手" in key:
+            return labels["unboxing"]
+        if "tutorial" in key or "教程" in key or "教学" in key or "演示" in key:
+            return labels["tutorial"]
+        if "vlog" in key or "生活" in key or "日常" in key:
+            return labels["vlog"]
+        if "commentary" in key or "观点" in key or "评论" in key:
+            return labels["commentary"]
+        if "gameplay" in key or "游戏" in key:
+            return labels["gameplay"]
+        if "food" in key or "探店" in key:
+            return labels["food"]
+
+    return "待补充" if normalized_locale == "zh-CN" else "Pending"
 
 
 def _build_content_profile_evidence_lines(draft: dict[str, Any]) -> list[str]:

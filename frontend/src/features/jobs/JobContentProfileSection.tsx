@@ -35,7 +35,7 @@ const VIDEO_TYPE_LABELS: Record<UiLocale, Record<string, string>> = {
   },
 };
 
-function formatVideoType(value: unknown, locale: UiLocale) {
+function normalizeVideoTypeLabel(value: unknown, locale: UiLocale) {
   const normalized = getTextValue(value).toLowerCase();
   if (!normalized) {
     return "";
@@ -66,7 +66,17 @@ function formatVideoType(value: unknown, locale: UiLocale) {
   if (normalized.includes("food") || normalized.includes("探店")) {
     return labels.food;
   }
-  return getTextValue(value);
+  return "";
+}
+
+function formatVideoType(values: unknown[], locale: UiLocale) {
+  for (const value of values) {
+    const label = normalizeVideoTypeLabel(value, locale);
+    if (label) {
+      return label;
+    }
+  }
+  return locale === "en-US" ? "Pending" : "待补充";
 }
 
 type JobContentProfileSectionProps = {
@@ -103,20 +113,28 @@ export function JobContentProfileSection({
     ? (contentSource.content_understanding as Record<string, unknown>)
     : null;
   const effectiveContentSource = contentUnderstanding
-        ? {
+      ? {
         ...contentSource,
         subject_type:
           formatVideoType(
-            getTextValue(contentUnderstanding.video_type)
-            || getTextValue(contentUnderstanding.subject_type)
-            || getTextValue(contentUnderstanding.primary_subject)
-            || getTextValue(contentSource?.subject_type),
+            [
+              getTextValue(contentUnderstanding.video_type),
+              getTextValue(contentUnderstanding.subject_type),
+              getTextValue(contentUnderstanding.primary_subject),
+              getTextValue(contentSource?.subject_type),
+              getTextValue(contentUnderstanding.summary),
+              getTextValue(contentUnderstanding.hook_line),
+              getTextValue(contentUnderstanding.visible_text),
+              getTextValue(contentUnderstanding.video_theme),
+              getTextValue(contentSource?.summary),
+              getTextValue(contentSource?.hook_line),
+              getTextValue(contentSource?.visible_text),
+              getTextValue(contentSource?.video_theme),
+              getTextValue(contentSource?.engagement_question),
+              getTextValue(contentSource?.subject_type),
+            ],
             locale,
-          )
-          || getTextValue(contentUnderstanding.video_type)
-          || getTextValue(contentUnderstanding.subject_type)
-          || getTextValue(contentUnderstanding.primary_subject)
-          || getTextValue(contentSource?.subject_type),
+          ),
         video_theme:
           getTextValue(contentUnderstanding.video_theme)
           || getTextValue(contentSource?.video_theme),
