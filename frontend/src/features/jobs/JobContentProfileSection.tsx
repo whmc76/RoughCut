@@ -1,5 +1,6 @@
 import { api } from "../../api";
 import { useI18n } from "../../i18n";
+import type { UiLocale } from "../../i18n";
 import type { ContentProfileReview } from "../../types";
 import { statusLabel } from "../../utils";
 import { CONTENT_FIELDS, contentFieldLabel } from "./constants";
@@ -15,44 +16,55 @@ function getTextValue(value: unknown) {
   return typeof value === "string" ? value.trim() : "";
 }
 
-const VIDEO_TYPE_LABELS: Record<string, string> = {
-  tutorial: "教程(tutorial)",
-  vlog: "Vlog(vlog)",
-  commentary: "观点(commentary)",
-  gameplay: "游戏(gameplay)",
-  food: "探店(food)",
-  unboxing: "开箱(unboxing)",
+const VIDEO_TYPE_LABELS: Record<UiLocale, Record<string, string>> = {
+  "zh-CN": {
+    tutorial: "教程",
+    vlog: "Vlog",
+    commentary: "观点",
+    gameplay: "游戏",
+    food: "探店",
+    unboxing: "开箱",
+  },
+  "en-US": {
+    tutorial: "Tutorial",
+    vlog: "Vlog",
+    commentary: "Commentary",
+    gameplay: "Gameplay",
+    food: "Food",
+    unboxing: "Unboxing",
+  },
 };
 
-function formatVideoType(value: unknown) {
+function formatVideoType(value: unknown, locale: UiLocale) {
   const normalized = getTextValue(value).toLowerCase();
   if (!normalized) {
     return "";
   }
-  if (normalized in VIDEO_TYPE_LABELS) {
-    return VIDEO_TYPE_LABELS[normalized];
+  const labels = VIDEO_TYPE_LABELS[locale] || VIDEO_TYPE_LABELS["zh-CN"];
+  if (normalized in labels) {
+    return labels[normalized];
   }
   if (
     normalized.includes("unboxing")
     || normalized.includes("开箱")
     || normalized.includes("机能包")
   ) {
-    return VIDEO_TYPE_LABELS.unboxing;
+    return labels.unboxing;
   }
   if (normalized.includes("tutorial") || normalized.includes("教程")) {
-    return VIDEO_TYPE_LABELS.tutorial;
+    return labels.tutorial;
   }
   if (normalized.includes("vlog") || normalized.includes("生活") || normalized.includes("日常")) {
-    return VIDEO_TYPE_LABELS.vlog;
+    return labels.vlog;
   }
   if (normalized.includes("commentary") || normalized.includes("观点") || normalized.includes("口播")) {
-    return VIDEO_TYPE_LABELS.commentary;
+    return labels.commentary;
   }
   if (normalized.includes("gameplay") || normalized.includes("游戏")) {
-    return VIDEO_TYPE_LABELS.gameplay;
+    return labels.gameplay;
   }
   if (normalized.includes("food") || normalized.includes("探店")) {
-    return VIDEO_TYPE_LABELS.food;
+    return labels.food;
   }
   return getTextValue(value);
 }
@@ -84,7 +96,7 @@ export function JobContentProfileSection({
   onKeywordsChange,
   onConfirm,
 }: JobContentProfileSectionProps) {
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
   const contentUnderstanding = contentSource
     && typeof contentSource.content_understanding === "object"
     && !Array.isArray(contentSource.content_understanding)
@@ -99,6 +111,7 @@ export function JobContentProfileSection({
             || getTextValue(contentUnderstanding.subject_type)
             || getTextValue(contentUnderstanding.primary_subject)
             || getTextValue(contentSource?.subject_type),
+            locale,
           )
           || getTextValue(contentUnderstanding.video_type)
           || getTextValue(contentUnderstanding.subject_type)

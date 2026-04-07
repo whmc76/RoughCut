@@ -342,6 +342,7 @@ class TelegramReviewBotService:
             message = _build_content_profile_review_message(
                 source_name=job.source_name,
                 job_id=job.id,
+                locale=job.language,
                 review=review,
                 draft=draft,
                 packaging_assets=packaging_state.get("assets") or {},
@@ -1888,6 +1889,7 @@ def _build_content_profile_review_message(
     *,
     source_name: str,
     job_id: uuid.UUID,
+    locale: str = "zh-CN",
     review: Any,
     draft: dict[str, Any],
     packaging_assets: dict[str, list[dict[str, Any]]],
@@ -1914,7 +1916,7 @@ def _build_content_profile_review_message(
     content_lines = []
     for key, label in _CONTENT_FIELD_ORDER:
         if key == "subject_type":
-            content_lines.append(f"- {label}：{_display_subject_type(draft.get(key))}")
+            content_lines.append(f"- {label}：{_display_subject_type(draft.get(key), locale=locale)}")
         else:
             content_lines.append(f"- {label}：{_display_value(draft.get(key))}")
     keyword_candidates = _build_review_keyword_candidates(
@@ -2936,35 +2938,47 @@ def _display_value(value: Any) -> str:
 
 
 _SUBJECT_TYPE_LABELS = {
-    "tutorial": "教程(tutorial)",
-    "vlog": "Vlog(vlog)",
-    "commentary": "观点(commentary)",
-    "gameplay": "游戏(gameplay)",
-    "food": "探店(food)",
-    "unboxing": "开箱(unboxing)",
+    "zh-CN": {
+        "tutorial": "教程",
+        "vlog": "Vlog",
+        "commentary": "观点",
+        "gameplay": "游戏",
+        "food": "探店",
+        "unboxing": "开箱",
+    },
+    "en-US": {
+        "tutorial": "Tutorial",
+        "vlog": "Vlog",
+        "commentary": "Commentary",
+        "gameplay": "Gameplay",
+        "food": "Food",
+        "unboxing": "Unboxing",
+    },
 }
 
 
-def _display_subject_type(value: Any) -> str:
+def _display_subject_type(value: Any, *, locale: str = "zh-CN") -> str:
     text = str(value or "").strip()
     if not text:
-        return "待补充"
+        return "待补充" if str(locale or "").lower().startswith("zh") else "Pending"
+    normalized_locale = "en-US" if str(locale or "").lower().startswith("en") else "zh-CN"
+    labels = _SUBJECT_TYPE_LABELS[normalized_locale]
     key = text.strip().lower()
-    for known_key, label in _SUBJECT_TYPE_LABELS.items():
+    for known_key, label in labels.items():
         if known_key in key or label.lower() in key.lower():
             return label
     if "unboxing" in key or "开箱" in key:
-        return "开箱(unboxing)"
+        return labels["unboxing"]
     if "tutorial" in key or "教程" in key:
-        return "教程(tutorial)"
+        return labels["tutorial"]
     if "vlog" in key or "生活" in key or "日常" in key:
-        return "Vlog(vlog)"
+        return labels["vlog"]
     if "commentary" in key or "观点" in key:
-        return "观点(commentary)"
+        return labels["commentary"]
     if "gameplay" in key or "游戏" in key:
-        return "游戏(gameplay)"
+        return labels["gameplay"]
     if "food" in key or "探店" in key:
-        return "探店(food)"
+        return labels["food"]
     return text
 
 
