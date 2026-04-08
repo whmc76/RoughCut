@@ -2294,7 +2294,7 @@ async def test_jobs_usage_trend_endpoint_returns_daily_points(client: AsyncClien
         )
         await session.commit()
 
-    response = await client.get("/api/v1/jobs/usage-trend?days=2&limit=10")
+    response = await client.get("/api/v1/jobs/usage-trend?days=2&limit=500")
     assert response.status_code == 200
     data = response.json()
     assert data["days"] == 2

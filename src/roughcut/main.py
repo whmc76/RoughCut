@@ -59,7 +59,7 @@ def create_app() -> FastAPI:
     app = FastAPI(
         title="RoughCut API",
         description="Automated video editing and subtitle review",
-        version="0.1.0",
+        version="0.1.1",
         lifespan=lifespan,
     )
 
