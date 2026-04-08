@@ -4213,6 +4213,367 @@ select.input option:focus {
   font-size: 12px;
 }
 
+.overview-page .page-header,
+.jobs-page .page-header {
+  padding-bottom: 24px;
+  border-bottom: 0;
+}
+
+.overview-page .page-header-copy,
+.jobs-page .page-header-copy {
+  max-width: 960px;
+}
+
+.overview-page .page-header h2,
+.jobs-page .page-header h2 {
+  font-size: clamp(52px, 7vw, 96px);
+  line-height: 0.9;
+  letter-spacing: -0.08em;
+}
+
+.overview-page .page-header .muted,
+.jobs-page .page-header .muted {
+  max-width: 34rem;
+  color: rgba(255, 255, 255, 0.58);
+}
+
+.overview-masthead,
+.jobs-intro-plate {
+  position: relative;
+  overflow: hidden;
+  display: grid;
+  gap: 20px;
+  padding: 28px;
+  border-radius: 32px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background:
+    radial-gradient(circle at 12% 14%, rgba(217, 75, 99, 0.18), transparent 26%),
+    radial-gradient(circle at 82% 18%, rgba(107, 126, 255, 0.14), transparent 28%),
+    linear-gradient(180deg, rgba(10, 12, 17, 0.98), rgba(9, 11, 15, 0.94));
+  box-shadow: 0 30px 80px rgba(0, 0, 0, 0.3);
+}
+
+.overview-masthead::after,
+.jobs-intro-plate::after {
+  content: "";
+  position: absolute;
+  inset: auto 22px 22px auto;
+  width: 120px;
+  height: 1px;
+  background: linear-gradient(90deg, rgba(255,255,255,0), rgba(255,255,255,0.26));
+}
+
+.overview-masthead-copy,
+.jobs-intro-copy {
+  display: grid;
+  gap: 10px;
+  max-width: 56rem;
+}
+
+.overview-masthead-copy h3,
+.jobs-intro-copy h3 {
+  margin: 0;
+  font-size: clamp(40px, 5vw, 76px);
+  line-height: 0.92;
+  letter-spacing: -0.08em;
+}
+
+.overview-masthead-copy p,
+.jobs-intro-copy p {
+  margin: 0;
+  color: rgba(255, 255, 255, 0.6);
+  max-width: 34rem;
+  font-size: 15px;
+  line-height: 1.55;
+}
+
+.overview-masthead-signals,
+.jobs-intro-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.overview-masthead-signal,
+.jobs-intro-metric {
+  display: grid;
+  gap: 8px;
+  padding: 16px 14px;
+  min-height: 88px;
+  border-top: 1px solid rgba(255, 255, 255, 0.12);
+  background: linear-gradient(180deg, rgba(255,255,255,0.04), rgba(255,255,255,0.01));
+}
+
+.overview-masthead-signal span,
+.jobs-intro-metric span {
+  color: rgba(255, 255, 255, 0.52);
+  font-size: 10px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+.overview-masthead-signal strong,
+.jobs-intro-metric strong {
+  align-self: end;
+  font-size: 34px;
+  line-height: 1;
+  letter-spacing: -0.06em;
+}
+
+.overview-decision-surface,
+.jobs-workbench-shell {
+  display: grid;
+  grid-template-columns: minmax(0, 1.55fr) minmax(300px, 0.78fr);
+  gap: 18px;
+  align-items: start;
+}
+
+.overview-activity-feed,
+.jobs-queue-stage {
+  display: grid;
+  gap: 14px;
+  padding: 24px;
+  border-top: 1px solid rgba(255, 255, 255, 0.12);
+  background:
+    linear-gradient(180deg, rgba(12, 15, 20, 0.94), rgba(9, 11, 14, 0.92)),
+    rgba(255, 255, 255, 0.02);
+}
+
+.overview-surface-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+  color: rgba(255,255,255,0.5);
+  font-size: 11px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}
+
+.overview-job-row {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr) auto;
+  gap: 14px;
+  align-items: start;
+  padding: 16px 0;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.overview-job-row:first-of-type {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.overview-job-row-index {
+  font-size: 12px;
+  color: rgba(255,255,255,0.4);
+  letter-spacing: 0.18em;
+  padding-top: 4px;
+}
+
+.overview-job-row-copy {
+  display: grid;
+  gap: 6px;
+}
+
+.overview-job-row-copy strong {
+  font-size: 18px;
+  line-height: 1.1;
+}
+
+.overview-job-row-copy p {
+  margin: 0;
+  color: rgba(255, 255, 255, 0.58);
+  line-height: 1.5;
+}
+
+.overview-job-row-meta {
+  display: grid;
+  gap: 8px;
+  justify-items: end;
+  color: rgba(255,255,255,0.48);
+  font-size: 12px;
+}
+
+.overview-action-rail,
+.jobs-live-rail {
+  display: grid;
+  gap: 18px;
+}
+
+.overview-action-block,
+.overview-runtime-panel,
+.jobs-urgent-rail,
+.jobs-creation-profile,
+.jobs-upload-slot {
+  display: grid;
+  gap: 14px;
+  padding: 20px;
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+  background: linear-gradient(180deg, rgba(9, 11, 15, 0.98), rgba(8, 10, 13, 0.94));
+}
+
+.overview-action-link {
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr);
+  gap: 14px;
+  align-items: start;
+  padding: 14px 0;
+  border-top: 1px solid rgba(255,255,255,0.08);
+  transition: transform 150ms ease, color 150ms ease;
+}
+
+.overview-action-link:first-of-type {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.overview-action-link:hover {
+  transform: translateX(4px);
+}
+
+.overview-action-index {
+  width: 40px;
+  height: 40px;
+  display: grid;
+  place-items: center;
+  border-radius: 999px;
+  border: 1px solid rgba(217, 75, 99, 0.36);
+  color: var(--accent-strong);
+}
+
+.overview-action-link p {
+  margin: 6px 0 0;
+  color: rgba(255, 255, 255, 0.58);
+  line-height: 1.45;
+}
+
+.overview-analysis-band {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px;
+}
+
+.overview-analysis-column,
+.overview-telemetry-band {
+  display: grid;
+  gap: 12px;
+  padding: 22px 24px;
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+  background: linear-gradient(180deg, rgba(10, 12, 16, 0.96), rgba(8, 9, 13, 0.92));
+}
+
+.overview-analysis-list {
+  display: grid;
+  gap: 10px;
+}
+
+.overview-analysis-row,
+.overview-runtime-row,
+.jobs-urgent-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 14px;
+  align-items: start;
+  padding: 12px 0;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.overview-analysis-row:first-of-type,
+.overview-runtime-row:first-of-type,
+.jobs-urgent-row:first-of-type {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.jobs-workbench {
+  gap: 18px;
+}
+
+.jobs-queue-stage .page-section-header,
+.jobs-creation-band .page-section-header,
+.overview-telemetry-band .page-section-header {
+  align-items: start;
+}
+
+.jobs-queue-stage .page-section-body,
+.jobs-creation-band .page-section-body,
+.overview-telemetry-band .page-section-body {
+  gap: 14px;
+}
+
+.jobs-creation-band {
+  display: grid;
+  gap: 14px;
+  padding: 24px;
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+  background: linear-gradient(180deg, rgba(11, 13, 17, 0.96), rgba(8, 10, 14, 0.92));
+}
+
+.jobs-creation-grid {
+  display: grid;
+  grid-template-columns: minmax(280px, 0.74fr) minmax(0, 1.26fr);
+  gap: 16px;
+}
+
+.jobs-creation-profile .config-profile-switcher,
+.jobs-upload-slot > * {
+  min-width: 0;
+}
+
+.watch-command-chip,
+.watch-health-lane,
+.watch-roots-lane,
+.watch-form-lane,
+.style-lab-hero,
+.style-lab-panel,
+.style-lab-mode-column,
+.style-lab-presenter-stage,
+.settings-architecture-deck,
+.settings-stage,
+.settings-summary-panel,
+.settings-core-panel,
+.settings-runtime-panel,
+.settings-extension-panel,
+.settings-quality-panel {
+  border-color: rgba(255, 255, 255, 0.08);
+  background:
+    radial-gradient(circle at 14% 12%, rgba(217, 75, 99, 0.12), transparent 24%),
+    linear-gradient(180deg, rgba(11, 13, 18, 0.96), rgba(8, 10, 14, 0.92));
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.24);
+}
+
+.settings-stage::before,
+.jobs-queue-lane::before,
+.jobs-creation-bay::before,
+.watch-health-lane::before,
+.watch-roots-lane::before,
+.watch-form-lane::before,
+.style-lab-panel::before,
+.settings-architecture-deck::before {
+  background: linear-gradient(180deg, rgba(255, 141, 158, 0.92), rgba(255, 255, 255, 0));
+}
+
+.watch-command-chip strong,
+.style-lab-hero-copy h3,
+.settings-architecture-lead h3 {
+  letter-spacing: -0.05em;
+}
+
+.settings-stage-core::before,
+.settings-stage-quality::before,
+.settings-stage-automation::before {
+  background: linear-gradient(180deg, rgba(255, 141, 158, 0.92), rgba(255, 255, 255, 0));
+}
+
+.style-lab-hero-signals .status-pill,
+.mode-chip.selected,
+.filter-chip.selected,
+.text-link,
+.mode-list-index {
+  color: var(--accent-strong);
+}
+
 @media (max-width: 1280px) {
   .panel-grid.two-up,
   .watch-grid,
@@ -4247,6 +4608,11 @@ select.input option:focus {
   .overview-command-signals,
   .jobs-workbench-grid,
   .jobs-creation-grid,
+  .overview-masthead-signals,
+  .jobs-intro-metrics,
+  .overview-decision-surface,
+  .overview-analysis-band,
+  .jobs-workbench-shell,
   .watch-command-strip,
   .watch-workbench,
   .style-lab-hero,
@@ -4310,13 +4676,18 @@ select.input option:focus {
   }
 
   .app-stage-header {
-    flex-direction: column;
+    grid-template-columns: 1fr;
     align-items: stretch;
   }
 
   .app-stage-controls {
     width: 100%;
     justify-content: flex-start;
+  }
+
+  .app-stage-marquee {
+    justify-self: start;
+    flex-wrap: wrap;
   }
 
   .app-stage-locale,
@@ -4366,6 +4737,21 @@ select.input option:focus {
 
   .overview-command-signals {
     margin-top: 14px;
+  }
+
+  .overview-masthead,
+  .jobs-intro-plate,
+  .overview-analysis-column,
+  .overview-telemetry-band,
+  .jobs-creation-band,
+  .overview-activity-feed,
+  .jobs-queue-stage,
+  .overview-action-block,
+  .overview-runtime-panel,
+  .jobs-urgent-rail,
+  .jobs-creation-profile,
+  .jobs-upload-slot {
+    padding: 20px 18px;
   }
 
   .jobs-queue-lane,

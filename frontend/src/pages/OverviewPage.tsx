@@ -50,145 +50,92 @@ export function OverviewPage() {
         title={t("overview.page.title")}
         description={t("overview.page.description")}
       />
-      <section className="overview-command-deck">
-        <div className="overview-command-main">
-          <div className="overview-command-copy">
-            <div className="page-eyebrow">{t("overview.triage.eyebrow")}</div>
-            <h3>{t("overview.deck.title")}</h3>
-            <p>{deckLead}</p>
-          </div>
-          <div className="overview-command-signals">
-            <article className="overview-signal-strip">
-              <span>{t("overview.deck.queueLabel")}</span>
-              <strong>{workspace.stats.jobs}</strong>
-            </article>
-            <article className="overview-signal-strip">
-              <span>{t("overview.deck.reviewLabel")}</span>
-              <strong>{reviewJobs.length}</strong>
-            </article>
-            <article className="overview-signal-strip">
-              <span>{t("overview.deck.watchLabel")}</span>
-              <strong>{workspace.stats.watchRoots}</strong>
-            </article>
-            <article className="overview-signal-strip">
-              <span>{t("overview.deck.runtimeLabel")}</span>
-              <strong>{serviceEntries.length}</strong>
-            </article>
-          </div>
-          <div className="overview-command-feed">
-            <div className="overview-command-feed-head">
-              <span>{t("overview.deck.actions")}</span>
-              {reviewJobs.length ? <strong>{reviewJobs.length}</strong> : null}
-            </div>
-            {workspace.jobs.isLoading && <EmptyState message={t("overview.recent.loading")} />}
-            {workspace.jobs.isError && <EmptyState message={(workspace.jobs.error as Error).message} tone="error" />}
-            {!workspace.jobs.isLoading && !workspace.jobs.isError && activeJobs.length === 0 ? (
-              <EmptyState message={t("overview.deck.empty")} />
-            ) : null}
-            {activeJobs.map((job) => (
-              <article key={job.id} className="overview-feed-row">
-                <div className="overview-feed-copy">
-                  <strong>{job.source_name}</strong>
-                  <p>{job.content_summary || job.content_subject || t("overview.recent.noSummary")}</p>
-                </div>
-                <div className="overview-feed-meta">
-                  <span className={`status-chip ${job.status}`}>{statusLabel(job.status)}</span>
-                  <span>{formatDate(job.updated_at)}</span>
-                </div>
-              </article>
-            ))}
-          </div>
+      <section className="overview-masthead" data-testid="overview-masthead">
+        <div className="overview-masthead-copy">
+          <div className="page-eyebrow">{t("overview.triage.eyebrow")}</div>
+          <h3>{t("overview.deck.title")}</h3>
+          <p>{deckLead}</p>
         </div>
-
-        <aside className="overview-action-stack">
-          <div className="overview-action-stack-head">
-            <span>{t("overview.deck.summary")}</span>
-            <strong>{t("overview.deck.actions")}</strong>
-          </div>
-          <Link className="overview-action-link" to="/jobs">
-            <span className="overview-action-index">01</span>
-            <div>
-              <strong>{t("overview.focus.jobs.title")}</strong>
-              <p>{t("overview.triage.jobs.description")}</p>
-            </div>
-          </Link>
-          <Link className="overview-action-link" to="/watch-roots">
-            <span className="overview-action-index">02</span>
-            <div>
-              <strong>{t("overview.focus.watch.title")}</strong>
-              <p>{t("overview.triage.watchRoots.description")}</p>
-            </div>
-          </Link>
-          <Link className="overview-action-link" to="/control">
-            <span className="overview-action-index">03</span>
-            <div>
-              <strong>{t("overview.focus.runtime.title")}</strong>
-              <p>{t("overview.triage.system.description")}</p>
-            </div>
-          </Link>
-        </aside>
+        <div className="overview-masthead-signals">
+          <article className="overview-masthead-signal">
+            <span>{t("overview.deck.queueLabel")}</span>
+            <strong>{workspace.stats.jobs}</strong>
+          </article>
+          <article className="overview-masthead-signal">
+            <span>{t("overview.deck.reviewLabel")}</span>
+            <strong>{reviewJobs.length}</strong>
+          </article>
+          <article className="overview-masthead-signal">
+            <span>{t("overview.deck.watchLabel")}</span>
+            <strong>{workspace.stats.watchRoots}</strong>
+          </article>
+          <article className="overview-masthead-signal">
+            <span>{t("overview.deck.runtimeLabel")}</span>
+            <strong>{serviceEntries.length}</strong>
+          </article>
+        </div>
       </section>
 
-      <section className="overview-focus-grid">
-        <section className="overview-focus-lane">
-          <PanelHeader
-            title={t("overview.focus.jobs.title")}
-            description={t("overview.focus.jobs.description")}
-            actions={<Link className="text-link" to="/jobs">{t("overview.triage.jobs.cta")}</Link>}
-          />
-          <div className="overview-lane-body">
-            {activeJobs.length ? (
-              activeJobs.map((job) => (
-                <article key={job.id} className="overview-focus-row">
-                  <div className="overview-focus-copy">
-                    <strong>{job.source_name}</strong>
-                    <p>{job.content_summary || job.content_subject || t("overview.recent.noSummary")}</p>
-                  </div>
-                  <div className="overview-focus-meta">
-                    <span className={`status-chip ${job.status}`}>{statusLabel(job.status)}</span>
-                    <span>{formatDate(job.updated_at)}</span>
-                  </div>
-                </article>
-              ))
-            ) : (
-              <EmptyState message={t("overview.focus.jobs.empty")} />
-            )}
+      <section className="overview-decision-surface" data-testid="overview-decision-surface">
+        <div className="overview-activity-feed" data-testid="overview-activity-feed">
+          <div className="overview-surface-head">
+            <span>{t("overview.deck.actions")}</span>
+            <strong>{reviewJobs.length ? reviewJobs.length : activeJobs.length}</strong>
           </div>
-        </section>
+          {workspace.jobs.isLoading && <EmptyState message={t("overview.recent.loading")} />}
+          {workspace.jobs.isError && <EmptyState message={(workspace.jobs.error as Error).message} tone="error" />}
+          {!workspace.jobs.isLoading && !workspace.jobs.isError && activeJobs.length === 0 ? (
+            <EmptyState message={t("overview.deck.empty")} />
+          ) : null}
+          {activeJobs.map((job, index) => (
+            <article key={job.id} className="overview-job-row" data-testid="overview-job-row">
+              <div className="overview-job-row-index">{`${index + 1}`.padStart(2, "0")}</div>
+              <div className="overview-job-row-copy">
+                <strong>{job.source_name}</strong>
+                <p>{job.content_summary || job.content_subject || t("overview.recent.noSummary")}</p>
+              </div>
+              <div className="overview-job-row-meta">
+                <span className={`status-chip ${job.status}`}>{statusLabel(job.status)}</span>
+                <span>{formatDate(job.updated_at)}</span>
+              </div>
+            </article>
+          ))}
+        </div>
 
-        <section className="overview-focus-lane">
-          <PanelHeader
-            title={t("overview.focus.watch.title")}
-            description={t("overview.focus.watch.description")}
-            actions={<Link className="text-link" to="/watch-roots">{t("overview.triage.watchRoots.cta")}</Link>}
-          />
-          <div className="overview-lane-body">
-            {recentRoots.length ? (
-              recentRoots.map((root) => (
-                <article key={root.id} className="overview-focus-row">
-                  <div className="overview-focus-copy">
-                    <strong>{root.path}</strong>
-                    <p>{root.workflow_template || "—"}</p>
-                  </div>
-                  <div className="overview-focus-meta">
-                    <span className={`status-chip ${root.enabled ? "done" : "cancelled"}`}>{root.enabled ? "enabled" : "disabled"}</span>
-                    <span>{root.scan_mode}</span>
-                  </div>
-                </article>
-              ))
-            ) : (
-              <EmptyState message={t("overview.focus.watch.empty")} />
-            )}
-          </div>
-        </section>
+        <aside className="overview-action-rail" data-testid="overview-action-rail">
+          <section className="overview-action-block">
+            <div className="overview-surface-head">
+              <span>{t("overview.deck.summary")}</span>
+              <strong>{t("overview.deck.actions")}</strong>
+            </div>
+            <Link className="overview-action-link" to="/jobs">
+              <span className="overview-action-index">01</span>
+              <div>
+                <strong>{t("overview.focus.jobs.title")}</strong>
+                <p>{t("overview.triage.jobs.description")}</p>
+              </div>
+            </Link>
+            <Link className="overview-action-link" to="/watch-roots">
+              <span className="overview-action-index">02</span>
+              <div>
+                <strong>{t("overview.focus.watch.title")}</strong>
+                <p>{t("overview.triage.watchRoots.description")}</p>
+              </div>
+            </Link>
+            <Link className="overview-action-link" to="/control">
+              <span className="overview-action-index">03</span>
+              <div>
+                <strong>{t("overview.focus.runtime.title")}</strong>
+                <p>{t("overview.triage.system.description")}</p>
+              </div>
+            </Link>
+          </section>
 
-        <section className="overview-focus-lane">
-          <PanelHeader
-            title={t("overview.focus.runtime.title")}
-            description={t("overview.focus.runtime.description")}
-            actions={<Link className="text-link" to="/control">{t("overview.triage.system.cta")}</Link>}
-          />
-          <div className="overview-lane-body">
+          <section className="overview-runtime-panel">
+            <div className="overview-surface-head">
+              <span>{t("overview.focus.runtime.title")}</span>
+              <strong>{serviceEntries.length}</strong>
+            </div>
             {serviceEntries.length ? (
               <div className="overview-runtime-list">
                 {serviceEntries.map(([key, online]) => (
@@ -214,12 +161,66 @@ export function OverviewPage() {
               <EmptyState message={t("overview.focus.runtime.empty")} />
             ) : null}
             {runtime ? <p className="overview-runtime-note">{runtime.orchestrator_lock?.detail ?? t("overview.focus.runtime.lock")}</p> : null}
+          </section>
+        </aside>
+      </section>
+
+      <section className="overview-analysis-band" data-testid="overview-analysis-band">
+        <section className="overview-analysis-column">
+          <PanelHeader
+            title={t("overview.focus.jobs.title")}
+            description={t("overview.focus.jobs.description")}
+            actions={<Link className="text-link" to="/jobs">{t("overview.triage.jobs.cta")}</Link>}
+          />
+          <div className="overview-analysis-list">
+            {activeJobs.length ? (
+              activeJobs.map((job) => (
+                <article key={job.id} className="overview-analysis-row">
+                  <div className="overview-focus-copy">
+                    <strong>{job.source_name}</strong>
+                    <p>{job.content_summary || job.content_subject || t("overview.recent.noSummary")}</p>
+                  </div>
+                  <div className="overview-focus-meta">
+                    <span className={`status-chip ${job.status}`}>{statusLabel(job.status)}</span>
+                    <span>{formatDate(job.updated_at)}</span>
+                  </div>
+                </article>
+              ))
+            ) : (
+              <EmptyState message={t("overview.focus.jobs.empty")} />
+            )}
+          </div>
+        </section>
+
+        <section className="overview-analysis-column">
+          <PanelHeader
+            title={t("overview.focus.watch.title")}
+            description={t("overview.focus.watch.description")}
+            actions={<Link className="text-link" to="/watch-roots">{t("overview.triage.watchRoots.cta")}</Link>}
+          />
+          <div className="overview-analysis-list">
+            {recentRoots.length ? (
+              recentRoots.map((root) => (
+                <article key={root.id} className="overview-analysis-row">
+                  <div className="overview-focus-copy">
+                    <strong>{root.path}</strong>
+                    <p>{root.workflow_template || "—"}</p>
+                  </div>
+                  <div className="overview-focus-meta">
+                    <span className={`status-chip ${root.enabled ? "done" : "cancelled"}`}>{root.enabled ? "enabled" : "disabled"}</span>
+                    <span>{root.scan_mode}</span>
+                  </div>
+                </article>
+              ))
+            ) : (
+              <EmptyState message={t("overview.focus.watch.empty")} />
+            )}
           </div>
         </section>
       </section>
 
       {workspace.usageSummary.data && (
-        <PageSection eyebrow={t("overview.signals.eyebrow")} title={t("overview.signals.title")}>
+        <PageSection className="overview-telemetry-band" eyebrow={t("overview.signals.eyebrow")} title={t("overview.signals.title")}>
           <>
             <div className="stats-grid compact">
               <StatCard label={t("jobs.summary.totalTokens")} value={workspace.usageSummary.data.total_tokens.toLocaleString()} compact />

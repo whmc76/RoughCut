@@ -149,6 +149,9 @@ describe("OverviewPage", () => {
     render(<OverviewPage />);
 
     expect(screen.getByText("overview.deck.title")).toBeInTheDocument();
+    expect(screen.getByTestId("overview-masthead")).toBeInTheDocument();
+    expect(screen.getByTestId("overview-decision-surface")).toBeInTheDocument();
+    expect(screen.getByTestId("overview-analysis-band")).toBeInTheDocument();
     expect(screen.getAllByText("overview.focus.jobs.title")).toHaveLength(2);
     expect(screen.getAllByText("overview.focus.watch.title")).toHaveLength(2);
     expect(screen.getByText("jobs.summary.topSteps")).toBeInTheDocument();
@@ -179,10 +182,10 @@ describe("OverviewPage", () => {
     render(<OverviewPage />);
 
     expect(screen.getByText("overview.deck.title")).toBeInTheDocument();
-    expect(screen.getAllByText("overview.deck.actions")).toHaveLength(2);
-    expect(screen.getAllByText("overview.focus.jobs.title")).toHaveLength(2);
-    expect(screen.getAllByText("overview.focus.watch.title")).toHaveLength(2);
-    expect(screen.getAllByText("overview.focus.runtime.title")).toHaveLength(2);
+    expect(screen.getByTestId("overview-masthead")).toBeInTheDocument();
+    expect(screen.getByTestId("overview-activity-feed")).toBeInTheDocument();
+    expect(screen.getByTestId("overview-action-rail")).toBeInTheDocument();
+    expect(screen.getAllByTestId("overview-job-row")).toHaveLength(1);
     expect(screen.getAllByText("IMG_0041.MOV")).toHaveLength(2);
     expect(screen.queryByText("overview.triage.title")).not.toBeInTheDocument();
   });

@@ -139,10 +139,10 @@ describe("JobsPage", () => {
 
     const { container } = render(<JobsPage />);
 
-    expect(container.querySelector(".jobs-workbench")).toBeInTheDocument();
-    expect(container.querySelector(".jobs-queue-lane")).toBeInTheDocument();
-    expect(container.querySelector(".jobs-urgent-rail")).toBeInTheDocument();
-    expect(container.querySelector(".jobs-creation-bay")).toBeInTheDocument();
+    expect(container.querySelector(".jobs-intro-plate")).toBeInTheDocument();
+    expect(container.querySelector(".jobs-workbench-shell")).toBeInTheDocument();
+    expect(container.querySelector(".jobs-live-rail")).toBeInTheDocument();
+    expect(container.querySelector(".jobs-creation-band")).toBeInTheDocument();
     expect(screen.getByText("job-queue-table")).toBeInTheDocument();
     expect(screen.getByText("config-profile-switcher")).toBeInTheDocument();
     expect(screen.getByText("job-upload-panel")).toBeInTheDocument();
@@ -158,6 +158,19 @@ describe("JobsPage", () => {
     expect(screen.queryByText("第三步")).not.toBeInTheDocument();
     expect(screen.queryByText("创建任务与设置默认参数")).not.toBeInTheDocument();
     expect(screen.queryByText("跟进任务队列与审核详情")).not.toBeInTheDocument();
+  });
+
+  it("renders the workbench with stronger top-level structure labels", () => {
+    mockUseJobWorkspace.mockReturnValue(buildWorkspace());
+
+    const { container } = render(<JobsPage />);
+
+    expect(screen.getAllByText("jobs.page.queueTitle")).toHaveLength(2);
+    expect(screen.getAllByText("jobs.page.activeWorkTitle").length).toBeGreaterThanOrEqual(2);
+    expect(screen.getAllByText("jobs.page.createTitle").length).toBeGreaterThanOrEqual(1);
+    expect(container.querySelector(".jobs-intro-plate")).toBeInTheDocument();
+    expect(container.querySelector(".jobs-live-rail")).toBeInTheDocument();
+    expect(container.querySelector(".jobs-creation-band")).toBeInTheDocument();
   });
 
   it("does not render the analysis module on the jobs page", () => {
@@ -196,7 +209,7 @@ describe("JobsPage", () => {
 
     expect(screen.queryByText("usage-trend-panel")).not.toBeInTheDocument();
     expect(screen.queryByText("jobs.summary.topSteps")).not.toBeInTheDocument();
-    expect(screen.getByText("jobs.page.queueTitle")).toBeInTheDocument();
+    expect(screen.getAllByText("jobs.page.queueTitle")).toHaveLength(2);
   });
 
   it("routes needs_review jobs into the dedicated review overlay instead of the detail modal", () => {
