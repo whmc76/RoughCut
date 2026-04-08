@@ -36,17 +36,16 @@ export function JobReviewConfigSection({
 
   return (
     <section className="detail-block review-config-block">
-      <div className="detail-key">剪辑配置与审核</div>
+      <div className="detail-key">方案与审核</div>
       <div className="notice">
-        审核卡片不再逐项展开工作流、增强模式、数字人、包装和风格选项，统一改为通过“剪辑配置切换”管理整套默认配置。
-        当前剪辑配置已覆盖工作流、增强模式、数字人绑定、AI 导演语音入口、包装开关与素材池，以及封面、标题、字幕、文案和特效风格。
+        审核页不再展开所有参数，只保留方案切换和审核检查。
       </div>
       <div className="notice compact-top">
-        这里仅保留审核相关信息：配置切换入口，以及资源是否齐全、服务是否可用、最终是否会自动降级等执行风险检查。
+        这里会提示资源是否齐全、服务是否可用，以及是否会自动降级。
       </div>
       <ConfigProfileSwitcher
         compact
-        description="审核页只保留剪辑配置切换入口。切换后，当前任务审核默认值会跟随最新激活配置。"
+        description="切换方案后，当前任务会按最新方案审核。"
       />
 
       <article className="review-config-card top-gap">

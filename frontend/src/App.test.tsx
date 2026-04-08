@@ -24,11 +24,7 @@ vi.mock("./i18n", () => ({
           "app.nav.jobs": "任务",
           "app.nav.watchRoots": "监看目录",
           "app.nav.settings": "设置",
-          "app.sidebar.kicker": "creative operating surface",
-          "app.sidebar.description": "把任务、监看与风格决策收成一个前台。",
           "app.sidebar.language": "语言",
-          "app.sidebar.version": "版本",
-          "app.sidebar.versionUnknown": "未知",
           "app.language.zh-CN": "简体中文",
           "app.language.en-US": "English",
         } satisfies Record<string, string>
@@ -128,8 +124,25 @@ describe("App shell", () => {
     renderApp();
 
     expect(await screen.findByText("RoughCut")).toBeInTheDocument();
-    expect(screen.queryByText("creative operating surface")).not.toBeInTheDocument();
-    expect(screen.queryByText("把任务、监看与风格决策收成一个前台。")).not.toBeInTheDocument();
     expect(screen.queryByText("Workspace")).not.toBeInTheDocument();
+  });
+
+  it("anchors a compact locale switcher in the rail footer and removes the stage header", async () => {
+    const { container } = renderApp();
+
+    await screen.findByText("overview-page");
+
+    const rail = container.querySelector(".app-rail");
+    const railNotes = container.querySelector(".rail-notes");
+    const chineseButton = screen.getByRole("button", { name: "简中" });
+    const englishButton = screen.getByRole("button", { name: "EN" });
+
+    expect(rail).not.toBeNull();
+    expect(railNotes).not.toBeNull();
+    expect(rail?.contains(chineseButton)).toBe(true);
+    expect(railNotes?.contains(chineseButton)).toBe(true);
+    expect(railNotes?.contains(englishButton)).toBe(true);
+    expect(screen.queryByRole("combobox")).not.toBeInTheDocument();
+    expect(container.querySelector(".app-stage-header")).toBeNull();
   });
 });

@@ -166,8 +166,8 @@ describe("JobsPage", () => {
 
     expect(screen.getByText("任务列表")).toBeInTheDocument();
     expect(screen.getByText("需要处理")).toBeInTheDocument();
-    expect(screen.getByText("默认配置")).toBeInTheDocument();
-    expect(screen.getByText("新建任务")).toBeInTheDocument();
+    expect(screen.getAllByText("当前方案").length).toBeGreaterThan(0);
+    expect(screen.getByText("创建")).toBeInTheDocument();
     expect(container.querySelector(".jobs-command-deck")).toBeInTheDocument();
     expect(container.querySelector(".jobs-active-band")).toBeInTheDocument();
     expect(container.querySelector(".jobs-create-grid")).toBeInTheDocument();

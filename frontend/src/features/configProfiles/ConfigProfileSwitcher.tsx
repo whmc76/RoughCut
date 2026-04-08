@@ -17,8 +17,8 @@ type ConfigProfileSwitcherProps = {
 const RECENT_PROFILE_SECTION_SIZE = 3;
 
 export function ConfigProfileSwitcher({
-  title = "剪辑配置切换",
-  description = "把当前转写、推理、审核阈值、增强链路、包装与风格模块保存为一套剪辑配置，并在这里一键切换。",
+  title = "方案",
+  description = "切换这里，新任务就会按这套方案创建。",
   compact = false,
   className,
 }: ConfigProfileSwitcherProps) {
@@ -186,12 +186,12 @@ export function ConfigProfileSwitcher({
         </div>
         {profiles.data?.active_profile_dirty ? (
           <span className="status-pill failed">
-            当前配置已改动{dirtyKeyLabels.length ? ` (${dirtyKeyLabels.length} 项)` : ""}
+            有未保存变更{dirtyKeyLabels.length ? ` (${dirtyKeyLabels.length})` : ""}
           </span>
         ) : activeProfile ? (
-          <span className="status-pill done">已激活 {activeProfile.name}</span>
+          <span className="status-pill done">当前 {activeProfile.name}</span>
         ) : (
-          <span className="status-pill pending">未激活配置</span>
+          <span className="status-pill pending">还没有方案</span>
         )}
       </div>
 
@@ -200,21 +200,21 @@ export function ConfigProfileSwitcher({
           className="input config-profile-filter-input"
           value={listQuery}
           onChange={(event) => setListQuery(event.target.value)}
-          placeholder="按方案名称或备注筛选"
+          placeholder="筛选方案"
         />
         <select
           className="input config-profile-sort-select"
           value={listSort}
           onChange={(event) => setListSort(event.target.value as "updated_desc" | "name_asc")}
         >
-          <option value="updated_desc">最近更新优先</option>
+          <option value="updated_desc">最近改动</option>
           <option value="name_asc">按名称排序</option>
         </select>
       </div>
 
       <div className="config-profile-list-stack top-gap">
-        {!profiles.data?.profiles.length ? <span className="muted">暂无剪辑配置</span> : null}
-        {profiles.data?.profiles.length && !visibleProfiles.length ? <span className="muted">没有匹配的配置方案</span> : null}
+        {!profiles.data?.profiles.length ? <span className="muted">还没有保存的方案</span> : null}
+        {profiles.data?.profiles.length && !visibleProfiles.length ? <span className="muted">没有找到匹配方案</span> : null}
         {profileSections.map((section) => (
           <section key={section.key} className="config-profile-list-section">
             <div className="config-profile-list-section-head">
@@ -269,13 +269,13 @@ export function ConfigProfileSwitcher({
                       </div>
                       {profile.description ? <div className="config-profile-chip-description">{profile.description}</div> : null}
                       <div className="config-profile-chip-meta">
-                        更新时间 {formatProfileUpdatedLabel(profile.updated_at)}
+                        更新于 {formatProfileUpdatedLabel(profile.updated_at)}
                       </div>
                     </div>
                   </button>
                   <div className="config-profile-chip-actions">
                     {profile.is_active ? (
-                      <span className="status-pill done">当前激活</span>
+                      <span className="status-pill done">正在使用</span>
                     ) : (
                       <button
                         className="button ghost button-sm"
@@ -285,7 +285,7 @@ export function ConfigProfileSwitcher({
                           setPreviewProfileId(profile.id);
                         }}
                       >
-                        {compareProfileId === profile.id ? `结束对比 ${profile.name}` : `对比 ${profile.name}`}
+                        {compareProfileId === profile.id ? "关闭对比" : "查看差异"}
                       </button>
                     )}
                   </div>
@@ -299,24 +299,24 @@ export function ConfigProfileSwitcher({
         <div className="config-profile-preview notice top-gap">
           <div className="config-profile-preview-head">
             <div>
-              <div className="stat-label">{previewLocked ? "方案对比" : "切换前预览"}</div>
+              <div className="stat-label">{previewLocked ? "方案差异" : "预览"}</div>
               <div className="muted compact-top">
                 {previewLocked
-                  ? `已锁定“${previewProfile.name}”与当前激活方案的对比视图。`
-                  : `当前悬停的是“${previewProfile.name}”，这里展示它的关键绑定项。`}
+                  ? `正在和“${previewProfile.name}”做对比。`
+                  : `这里显示“${previewProfile.name}”的关键设置。`}
               </div>
               {previewProfile.description ? <div className="muted compact-top">{previewProfile.description}</div> : null}
             </div>
             <div className="config-profile-preview-actions">
               <span className={classNames("status-pill", previewLocked ? "processing" : "pending")}>
-                {previewLocked ? "已锁定对比" : "未激活"}
+                {previewLocked ? "对比中" : "未启用"}
               </span>
               {previewLocked ? (
                 <button
                   className="button ghost button-sm"
                   onClick={() => setCompareProfileId(null)}
                 >
-                  结束对比
+                  关闭对比
                 </button>
               ) : null}
             </div>
@@ -338,8 +338,8 @@ export function ConfigProfileSwitcher({
           {activeProfile ? (
             <div className="notice compact-top">
               <div>
-                与当前激活方案“{activeProfile.name}”相比，
-                {previewComparisonDetails.length ? `主要有 ${previewComparisonDetails.length} 项关键差异。` : "关键绑定项一致。"}
+                和当前方案“{activeProfile.name}”相比，
+                {previewComparisonDetails.length ? `有 ${previewComparisonDetails.length} 处差异。` : "没有关键差异。"}
               </div>
               {previewComparisonDetails.length ? (
                 <div className="config-profile-diff-list compact-top">
@@ -353,7 +353,7 @@ export function ConfigProfileSwitcher({
                   ))}
                   {previewComparisonDetails.length > 6 ? (
                     <div className="muted">
-                      另有 {previewComparisonDetails.length - 6} 项差异未展开。
+                      另外还有 {previewComparisonDetails.length - 6} 处差异。
                     </div>
                   ) : null}
                 </div>
@@ -369,7 +369,7 @@ export function ConfigProfileSwitcher({
             {activeProfile.description ? <div className="muted compact-bottom">{activeProfile.description}</div> : null}
             {profiles.data?.active_profile_dirty ? (
               <>
-                <div>当前运行配置与已保存方案存在差异，切换或覆盖前建议先确认这些变更项。</div>
+                <div>当前设置和已保存方案不一致，切换前先看这些差异。</div>
                 {dirtyDetails.length ? (
                   <div className="config-profile-diff-list compact-top">
                     {dirtyDetails.map((item) => (
@@ -394,7 +394,7 @@ export function ConfigProfileSwitcher({
                 )}
               </>
             ) : null}
-            <div>当前方案已绑定关键生产决策，下面按生产链路分组展示。</div>
+            <div>当前方案包含模型、审核、包装和风格设置。</div>
             <div className="config-profile-summary-grid compact-top">
               {activeSummaryGroups.map((group) => (
                 <article key={group.label} className="config-profile-summary-card">
@@ -410,11 +410,11 @@ export function ConfigProfileSwitcher({
               ))}
             </div>
             <div className="muted compact-top">
-              更新时间 {new Date(activeProfile.updated_at).toLocaleString()}
+              更新于 {new Date(activeProfile.updated_at).toLocaleString()}
             </div>
           </>
         ) : (
-          <div>还没有保存过剪辑配置，先把当前组合保存下来。</div>
+          <div>先把当前组合保存成一套方案。</div>
         )}
       </div>
 
@@ -423,25 +423,25 @@ export function ConfigProfileSwitcher({
           className="input config-profile-name-input"
           value={draftName}
           onChange={(event) => setDraftName(event.target.value)}
-          placeholder="输入配置名称，例如：评测口播增强"
+          placeholder="方案名称，例如：评测口播"
         />
         <input
           className="input config-profile-description-input"
           value={draftDescription}
           onChange={(event) => setDraftDescription(event.target.value)}
-          placeholder="补充适用场景 / 备注，例如：适合测评口播、强调数字人解说和低分复跑"
+          placeholder="补充用途，例如：适合测评口播和数字人解说"
         />
         <button
           className="button primary"
           disabled={!canCreate || !descriptionValidation.valid || pending}
           onClick={() => createProfile.mutate({ name: normalizedName, description: normalizedDescription })}
         >
-          保存为新配置
+          保存为新方案
         </button>
         <button
           className="button ghost"
           disabled={!activeProfile || pending}
-          title={dirtyDetails.length ? `将把当前 ${dirtyDetails.length} 项差异写回方案` : "用当前运行配置覆盖这个方案"}
+          title={dirtyDetails.length ? `把当前 ${dirtyDetails.length} 项差异写回方案` : "用当前设置覆盖这个方案"}
           onClick={() => {
             if (!activeProfile) return;
             if (dirtyDetails.length && !window.confirm(overwriteConfirmMessage)) return;
@@ -453,7 +453,7 @@ export function ConfigProfileSwitcher({
             });
           }}
         >
-          覆盖当前配置
+          覆盖当前方案
         </button>
         <button
           className="button ghost"
@@ -468,24 +468,24 @@ export function ConfigProfileSwitcher({
               })
           }
         >
-          更新方案信息
+          更新方案说明
         </button>
         <button
           className="button danger"
           disabled={!activeProfile || pending}
-          title={activeProfile ? `删除后将失去“${activeProfile.name}”这套方案快照` : "删除当前配置方案"}
+          title={activeProfile ? `删除后将失去“${activeProfile.name}”这套方案快照` : "删除当前方案"}
           onClick={() => {
             if (!activeProfile) return;
             if (!window.confirm(deleteConfirmMessage)) return;
             deleteProfile.mutate(activeProfile.id);
           }}
         >
-          删除当前配置
+          删除方案
         </button>
       </div>
       {activeProfile && dirtyDetails.length ? (
         <div className="muted compact-top">
-          覆盖当前配置会把这{dirtyDetails.length}项差异写回“{activeProfile.name}”，建议确认后再执行。
+          覆盖会把这 {dirtyDetails.length} 项差异写回“{activeProfile.name}”。
         </div>
       ) : null}
       <div className={classNames("compact-top", nameValidation.tone === "warning" ? "notice" : "muted")}>
@@ -496,11 +496,11 @@ export function ConfigProfileSwitcher({
       </div>
       {activeProfile ? (
         <div className="muted compact-top">
-          删除当前配置会移除“{activeProfile.name}”这套方案快照；如果它正处于激活状态，删除后当前运行配置仍保留，但不再有对应方案可回退。
+          删除后会移除“{activeProfile.name}”这套方案，但当前设置不会立刻丢失。
         </div>
       ) : null}
 
-      {profiles.isLoading ? <div className="muted compact-top">正在读取剪辑配置…</div> : null}
+      {profiles.isLoading ? <div className="muted compact-top">正在读取方案…</div> : null}
       {profiles.isError ? <div className="muted compact-top">{(profiles.error as Error).message}</div> : null}
       {mutationError ? <div className="muted compact-top">{mutationError}</div> : null}
     </section>
@@ -576,8 +576,8 @@ function buildProfileSections(
   if (active.length) {
     sections.push({
       key: "active",
-      label: "当前激活",
-      description: "这套方案会跟随当前运行配置的覆盖、差异提示和回滚操作。",
+      label: "当前方案",
+      description: "正在使用。",
       profiles: active,
     });
   }
@@ -585,7 +585,7 @@ function buildProfileSections(
     sections.push({
       key: "recent",
       label: "最近更新",
-      description: "按最近更新时间挑出优先关注的方案，方便继续沿用近期生产链路。",
+      description: "最近改过的方案。",
       profiles: recent,
     });
   }
@@ -593,7 +593,7 @@ function buildProfileSections(
     sections.push({
       key: "others",
       label: "其他方案",
-      description: "剩余方案保留在这里，适合长期归档或低频切换。",
+      description: "其它可切换方案。",
       profiles: others,
     });
   }
@@ -833,7 +833,7 @@ function buildNameValidation(
       canCreate: false,
       canRename: false,
       tone: "info" as const,
-      message: "命名规则：1-60 个字符，建议按工作流、风格或用途命名，例如“评测口播增强”。",
+      message: "名称建议 1-60 个字符，例如“评测口播增强”。",
     };
   }
   if (tooLong) {
@@ -841,7 +841,7 @@ function buildNameValidation(
       canCreate: false,
       canRename: false,
       tone: "warning" as const,
-      message: "配置方案名称最多 60 个字符，请缩短后再保存或重命名。",
+      message: "方案名称最多 60 个字符。",
     };
   }
   if (duplicateProfile || (duplicateAnyProfile && !activeProfile)) {
@@ -849,7 +849,7 @@ function buildNameValidation(
       canCreate: false,
       canRename: false,
       tone: "warning" as const,
-      message: `已存在同名配置方案“${normalizedName}”，请换一个更具体的名称。`,
+      message: `已存在同名方案“${normalizedName}”。`,
     };
   }
   if (unchanged) {
@@ -857,7 +857,7 @@ function buildNameValidation(
       canCreate: false,
       canRename: Boolean(activeProfile),
       tone: "info" as const,
-      message: "当前名称未变化；如果只是想保存当前运行差异，请使用“覆盖当前配置”，如果在改备注则可直接更新方案信息。",
+      message: "名称没变；如果只是想保存当前差异，请用“覆盖当前方案”。",
     };
   }
   return {
@@ -865,8 +865,8 @@ function buildNameValidation(
     canRename: Boolean(activeProfile),
     tone: "info" as const,
     message: activeProfile
-      ? "名称可用；你可以保存为新配置，或更新当前方案的名称和备注。"
-      : "名称可用；可以直接保存为新配置。",
+      ? "名称可用；可以新建，也可以更新当前方案。"
+      : "名称可用；可以直接保存。",
   };
 }
 
@@ -874,13 +874,13 @@ function buildDescriptionValidation(normalizedDescription: string) {
   if (normalizedDescription.length > 160) {
     return {
       valid: false,
-      message: "方案备注最多 160 个字符，请压缩成用途和适用场景摘要。",
+      message: "方案备注最多 160 个字符。",
     };
   }
   return {
     valid: true,
     message: normalizedDescription
-      ? "备注会随配置方案一起持久化，适合记录用途、适用场景和切换提醒。"
-      : "可选备注：建议写清楚用途、适用场景或切换提醒，方便方案多了以后快速识别。",
+      ? "备注会和方案一起保存。"
+      : "备注可选。",
   };
 }

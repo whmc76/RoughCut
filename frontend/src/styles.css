@@ -2,15 +2,15 @@
   font-family: "IBM Plex Sans", "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
   color: #f2f3f5;
   background:
-    radial-gradient(circle at 84% 12%, rgba(87, 103, 128, 0.14), transparent 22%),
-    linear-gradient(180deg, #07080b 0%, #0d1014 48%, #0a0c10 100%);
+    radial-gradient(circle at 80% 10%, rgba(101, 120, 149, 0.1), transparent 20%),
+    linear-gradient(180deg, #07090d 0%, #0b0f14 48%, #090c11 100%);
   color-scheme: dark;
   --panel: rgba(13, 16, 21, 0.9);
   --panel-border: rgba(255, 255, 255, 0.08);
   --line: rgba(255, 255, 255, 0.08);
-  --text-muted: #9aa1ad;
-  --accent: #b5c0cf;
-  --accent-strong: #eef4ff;
+  --text-muted: #99a3b5;
+  --accent: #9ca8bb;
+  --accent-strong: #f4f7fc;
   --danger: #ff7b7b;
   --ok: #7ad7aa;
   --off: #6d7688;
@@ -128,7 +128,7 @@ select {
   min-height: 52px;
   padding: 10px 10px 10px 8px;
   border-radius: 18px;
-  color: #d9cfbf;
+  color: #d8dfeb;
   border: 1px solid transparent;
   background: linear-gradient(180deg, rgba(255, 255, 255, 0.02), rgba(255, 255, 255, 0));
   transition:
@@ -168,11 +168,54 @@ select {
 .rail-notes {
   margin-top: auto;
   display: grid;
-  gap: 6px;
+  gap: 10px;
   padding: 12px 14px;
   border-radius: 18px;
   border: 1px solid rgba(255, 255, 255, 0.06);
   background: rgba(255, 255, 255, 0.025);
+}
+
+.rail-locale {
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
+.rail-locale-options {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.rail-locale-option {
+  min-height: 38px;
+  padding: 8px 0;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.03);
+  color: rgba(243, 246, 251, 0.72);
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  transition:
+    border-color 160ms ease,
+    background 160ms ease,
+    color 160ms ease,
+    transform 160ms ease;
+}
+
+.rail-locale-option:hover {
+  border-color: rgba(255, 255, 255, 0.16);
+  color: #f8fbff;
+  transform: translateY(-1px);
+}
+
+.rail-locale-option.active {
+  border-color: rgba(206, 214, 226, 0.26);
+  background: linear-gradient(135deg, rgba(206, 214, 226, 0.18), rgba(110, 124, 146, 0.16));
+  color: #ffffff;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
 }
 
 .rail-notes code {
@@ -240,32 +283,32 @@ select {
 
 .settings-stage-core {
   background:
-    radial-gradient(circle at top left, rgba(112, 196, 255, 0.16), transparent 32%),
-    linear-gradient(180deg, rgba(12, 18, 28, 0.96), rgba(10, 15, 24, 0.92));
+    radial-gradient(circle at top left, rgba(116, 144, 196, 0.12), transparent 32%),
+    linear-gradient(180deg, rgba(11, 14, 19, 0.96), rgba(8, 10, 14, 0.92));
 }
 
 .settings-stage-core::before {
-  background: linear-gradient(180deg, #74d2ff, rgba(94, 135, 255, 0.24));
+  background: linear-gradient(180deg, rgba(201, 211, 226, 0.92), rgba(255, 255, 255, 0));
 }
 
 .settings-stage-quality {
   background:
-    radial-gradient(circle at top left, rgba(120, 214, 170, 0.14), transparent 30%),
-    linear-gradient(180deg, rgba(10, 24, 22, 0.96), rgba(9, 19, 19, 0.92));
+    radial-gradient(circle at top left, rgba(116, 144, 196, 0.1), transparent 30%),
+    linear-gradient(180deg, rgba(11, 14, 19, 0.96), rgba(8, 10, 14, 0.92));
 }
 
 .settings-stage-quality::before {
-  background: linear-gradient(180deg, #76ddb0, rgba(48, 152, 118, 0.2));
+  background: linear-gradient(180deg, rgba(201, 211, 226, 0.92), rgba(255, 255, 255, 0));
 }
 
 .settings-stage-automation {
   background:
-    radial-gradient(circle at top left, rgba(255, 188, 108, 0.16), transparent 32%),
-    linear-gradient(180deg, rgba(25, 17, 13, 0.96), rgba(19, 14, 11, 0.92));
+    radial-gradient(circle at top left, rgba(116, 144, 196, 0.1), transparent 32%),
+    linear-gradient(180deg, rgba(11, 14, 19, 0.96), rgba(8, 10, 14, 0.92));
 }
 
 .settings-stage-automation::before {
-  background: linear-gradient(180deg, #ffb468, rgba(255, 132, 84, 0.22));
+  background: linear-gradient(180deg, rgba(201, 211, 226, 0.92), rgba(255, 255, 255, 0));
 }
 
 .page-header,
@@ -303,7 +346,7 @@ select {
 }
 
 .page-header h2 {
-  font-size: clamp(28px, 3vw, 40px);
+  font-size: clamp(24px, 2.2vw, 30px);
   line-height: 1;
   letter-spacing: -0.05em;
 }
@@ -364,14 +407,14 @@ select {
 
 .settings-summary-panel {
   background:
-    radial-gradient(circle at top right, rgba(115, 196, 255, 0.15), transparent 34%),
-    rgba(11, 17, 26, 0.92);
+    radial-gradient(circle at top right, rgba(116, 144, 196, 0.12), transparent 34%),
+    rgba(11, 15, 22, 0.92);
 }
 
 .settings-core-panel {
   background:
-    radial-gradient(circle at top left, rgba(255, 186, 92, 0.1), transparent 26%),
-    rgba(13, 17, 24, 0.94);
+    radial-gradient(circle at top left, rgba(116, 144, 196, 0.1), transparent 26%),
+    rgba(12, 15, 22, 0.94);
 }
 
 .settings-runtime-panel,
@@ -381,8 +424,8 @@ select {
 
 .settings-quality-panel {
   background:
-    radial-gradient(circle at top right, rgba(122, 215, 170, 0.12), transparent 30%),
-    rgba(10, 20, 19, 0.92);
+    radial-gradient(circle at top right, rgba(116, 144, 196, 0.1), transparent 30%),
+    rgba(11, 15, 21, 0.92);
 }
 
 .panel-grid {
@@ -455,7 +498,7 @@ select {
 }
 
 .style-section-header[role="button"]:focus-visible {
-  outline: 2px solid rgba(240, 181, 108, 0.34);
+  outline: 2px solid rgba(181, 192, 207, 0.34);
   outline-offset: 4px;
 }
 
@@ -499,7 +542,7 @@ select {
 label {
   display: grid;
   gap: 8px;
-  color: #f8f0e3;
+  color: #dfe6f0;
   font-size: 14px;
 }
 
@@ -584,25 +627,8 @@ select.input option:focus {
 
 .app-stage {
   display: grid;
-  gap: 20px;
   min-width: 0;
-  padding: 24px 26px 30px;
-}
-
-.app-stage-header {
-  display: flex;
-  justify-content: flex-end;
-  gap: 16px;
-  align-items: center;
-  padding: 0 0 18px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-}
-
-.app-stage-controls {
-  display: flex;
-  gap: 12px;
-  align-items: end;
-  flex-wrap: wrap;
+  padding: 18px 26px 30px;
 }
 
 .app-stage-locale,
@@ -1186,7 +1212,7 @@ select.input option:focus {
 .style-lab-page .mode-card {
   border-radius: 20px;
   background:
-    radial-gradient(circle at top right, rgba(255, 181, 108, 0.08), transparent 34%),
+    radial-gradient(circle at top right, rgba(101, 120, 149, 0.1), transparent 34%),
     rgba(255, 255, 255, 0.025);
 }
 
@@ -3500,7 +3526,7 @@ select.input option:focus {
   border: 1px solid var(--line);
   border-radius: 18px;
   background:
-    radial-gradient(circle at top right, rgba(255, 181, 108, 0.1), transparent 34%),
+    radial-gradient(circle at top right, rgba(101, 120, 149, 0.12), transparent 34%),
     rgba(255, 255, 255, 0.025);
   padding: 18px;
   display: grid;
@@ -3516,7 +3542,7 @@ select.input option:focus {
   border: 1px solid var(--line);
   border-radius: 18px;
   background:
-    radial-gradient(circle at top right, rgba(255, 181, 108, 0.12), transparent 32%),
+    radial-gradient(circle at top right, rgba(101, 120, 149, 0.12), transparent 32%),
     rgba(255, 255, 255, 0.03);
   padding: 16px;
 }
@@ -3582,7 +3608,7 @@ select.input option:focus {
 
 .config-profile-chip-button:focus-visible,
 .config-profile-chip-actions .button:focus-visible {
-  outline: 2px solid rgba(240, 181, 108, 0.34);
+  outline: 2px solid rgba(181, 192, 207, 0.34);
   outline-offset: 4px;
 }
 
@@ -3592,15 +3618,15 @@ select.input option:focus {
 }
 
 .config-profile-chip-button:hover .config-profile-chip-title {
-  color: #fff3dc;
+  color: #f3f6fb;
 }
 
 .config-profile-chip-button:hover .config-profile-chip-meta {
-  color: #d7c7b3;
+  color: #c3ccd9;
 }
 
 .config-profile-chip-button:hover .config-profile-chip-description {
-  color: #e2d2be;
+  color: #d4dce8;
 }
 
 .config-profile-chip {
@@ -3610,8 +3636,8 @@ select.input option:focus {
 }
 
 .config-profile-chip.active {
-  border-color: rgba(255, 181, 108, 0.3);
-  background: linear-gradient(135deg, rgba(240, 181, 108, 0.16), rgba(255, 141, 58, 0.12));
+  border-color: rgba(181, 192, 207, 0.3);
+  background: linear-gradient(135deg, rgba(181, 192, 207, 0.14), rgba(101, 120, 149, 0.12));
 }
 
 .config-profile-list-toolbar {
@@ -3646,7 +3672,7 @@ select.input option:focus {
 
 .config-profile-chip-title {
   font-weight: 700;
-  color: #fff7ea;
+  color: #f3f6fb;
 }
 
 .config-profile-chip-description,
@@ -4693,6 +4719,71 @@ select.input option:focus {
   color: var(--accent-strong);
 }
 
+.list-card.selected,
+.selected-row {
+  background: rgba(181, 192, 207, 0.08);
+}
+
+.timeline-item.event-diagnostic {
+  background:
+    linear-gradient(90deg, rgba(181, 192, 207, 0.1), rgba(0, 0, 0, 0)),
+    rgba(181, 192, 207, 0.04);
+}
+
+.style-section-collapsed:focus-visible,
+.config-profile-chip-button:focus-visible,
+.config-profile-chip-actions .button:focus-visible {
+  outline: 2px solid rgba(181, 192, 207, 0.34);
+}
+
+.mode-card,
+.config-profile-switcher {
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.style-selected-card-copy strong,
+.config-profile-chip-title,
+.mock-cover-caption strong,
+.copy-title-plain,
+.rail-notes code {
+  color: #f3f6fb;
+}
+
+.config-profile-chip-button:hover .config-profile-chip-title,
+.config-profile-chip-button:hover .config-profile-chip-meta,
+.config-profile-chip-button:hover .config-profile-chip-description {
+  color: #f3f6fb;
+}
+
+.config-profile-chip.active,
+.style-filter-chip.selected,
+.style-filter-chip:hover,
+.preset-card:hover,
+.preset-card.selected,
+.style-section-subtitle .style-selected-card,
+.style-section-subtitleMotion .style-selected-card,
+.style-section-cover .style-selected-card,
+.style-section-title .style-selected-card,
+.style-section-copy .style-selected-card {
+  border-color: rgba(181, 192, 207, 0.26);
+  background: linear-gradient(160deg, rgba(255, 255, 255, 0.04), rgba(181, 192, 207, 0.05));
+}
+
+.preset-card-subtitle,
+.preset-card-subtitle.selected,
+.preset-card-subtitleMotion,
+.preset-card-subtitleMotion.selected,
+.preset-card-cover,
+.preset-card-cover.selected,
+.preset-card-title,
+.preset-card-title.selected,
+.preset-card-copy,
+.preset-card-copy.selected {
+  border-color: rgba(181, 192, 207, 0.24);
+  background: linear-gradient(160deg, rgba(255, 255, 255, 0.03), rgba(181, 192, 207, 0.05));
+  box-shadow: inset 0 0 0 1px rgba(181, 192, 207, 0.08);
+}
+
 @media (max-width: 1280px) {
   .panel-grid.two-up,
   .watch-grid,
@@ -4802,16 +4893,6 @@ select.input option:focus {
 
   .app-stage {
     padding: 18px 14px 22px;
-  }
-
-  .app-stage-header {
-    grid-template-columns: 1fr;
-    align-items: stretch;
-  }
-
-  .app-stage-controls {
-    width: 100%;
-    justify-content: flex-start;
   }
 
   .app-stage-marquee {

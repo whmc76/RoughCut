@@ -30,7 +30,7 @@ export function WatchRootsPage() {
 
       <section className="watch-command-strip">
         <article className="watch-command-chip">
-          <span className="watch-command-label">当前目录</span>
+          <span className="watch-command-label">已选目录</span>
           <strong>{workspace.selectedRoot ? workspace.selectedRoot.path : t("watch.page.pickRoot")}</strong>
         </article>
         <article className="watch-command-chip">
@@ -38,11 +38,11 @@ export function WatchRootsPage() {
           <strong>{`${(workspace.roots.data ?? []).length} ${t("watch.list.count")}`}</strong>
         </article>
         <article className="watch-command-chip">
-          <span className="watch-command-label">库存</span>
+          <span className="watch-command-label">待处理</span>
           <strong>{workspace.selectedRoot ? t("watch.page.healthTitle") : t("watch.page.pickRoot")}</strong>
         </article>
         <article className="watch-command-chip">
-          <span className="watch-command-label">默认配置</span>
+          <span className="watch-command-label">默认方案</span>
           <strong>{effectiveConfigProfile?.name ?? t("watch.form.followActiveProfileOption")}</strong>
         </article>
       </section>
@@ -51,8 +51,8 @@ export function WatchRootsPage() {
         <div className="watch-main-stage">
           <PageSection
             className="watch-health-lane"
-            title="库存"
-            description={workspace.selectedRoot ? "查看待处理库存。" : t("watch.page.pickRoot")}
+            title="待处理内容"
+            description={workspace.selectedRoot ? "查看这个目录里的内容。" : t("watch.page.pickRoot")}
           >
             {workspace.selectedRoot ? (
               <WatchRootInventoryPanel
@@ -97,7 +97,7 @@ export function WatchRootsPage() {
           <PageSection
             className="watch-form-lane"
             title={workspace.selectedRootId ? "编辑目录" : "新建目录"}
-            description="设置模板、配置和扫描方式。"
+            description="设置模板、方案和扫描规则。"
           >
             <WatchRootFormPanel
               form={workspace.form}

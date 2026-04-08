@@ -107,11 +107,10 @@ describe("OverviewPage", () => {
 
     render(<OverviewPage />);
 
-    expect(screen.queryByText("第一段")).not.toBeInTheDocument();
-    expect(screen.queryByText("第二段")).not.toBeInTheDocument();
-    expect(screen.queryByText("第三段")).not.toBeInTheDocument();
-    expect(screen.queryByText("先判断现在能不能继续跑")).not.toBeInTheDocument();
-    expect(screen.queryByText("最后决定进入哪一页继续处理")).not.toBeInTheDocument();
+    expect(screen.queryByText("分诊")).not.toBeInTheDocument();
+    expect(screen.queryByText("控制台")).not.toBeInTheDocument();
+    expect(screen.queryByText("先判断该去哪里处理")).not.toBeInTheDocument();
+    expect(screen.queryByText("只显示当前最该接手的队列、监看和运行信号。")).not.toBeInTheDocument();
   });
 
   it("renders the full analysis module on the overview page", () => {
@@ -152,10 +151,10 @@ describe("OverviewPage", () => {
     expect(screen.getByTestId("overview-masthead")).toBeInTheDocument();
     expect(screen.getByTestId("overview-decision-surface")).toBeInTheDocument();
     expect(screen.getByTestId("overview-analysis-band")).toBeInTheDocument();
-    expect(screen.getAllByText("overview.focus.watch.title")).toHaveLength(2);
-    expect(screen.getByText("最近任务")).toBeInTheDocument();
-    expect(screen.getByText("jobs.summary.topSteps")).toBeInTheDocument();
-    expect(screen.getByText("jobs.summary.cachePanel")).toBeInTheDocument();
+    expect(screen.getByText("当前任务")).toBeInTheDocument();
+    expect(screen.getByText("下一步")).toBeInTheDocument();
+    expect(screen.getByText("队列")).toBeInTheDocument();
+    expect(screen.getByText("资源用量")).toBeInTheDocument();
   });
 
   it("keeps the overview focused on a single command deck instead of stacked dashboard cards", () => {
@@ -187,7 +186,7 @@ describe("OverviewPage", () => {
     expect(screen.getByTestId("overview-action-rail")).toBeInTheDocument();
     expect(screen.getAllByTestId("overview-job-row")).toHaveLength(1);
     expect(screen.getAllByText("IMG_0041.MOV")).toHaveLength(2);
-    expect(screen.queryByText("overview.triage.title")).not.toBeInTheDocument();
+    expect(screen.queryByText("先判断该去哪里处理")).not.toBeInTheDocument();
   });
 
   it("shows a friendly preview fallback instead of leaking raw transport errors", () => {

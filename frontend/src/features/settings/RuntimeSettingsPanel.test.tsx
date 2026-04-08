@@ -139,9 +139,9 @@ describe("RuntimeSettingsPanel", () => {
       />,
     );
 
-    expect(screen.getByText("运行环境与执行限制")).toBeTruthy();
-    expect(screen.getByText("服务矩阵")).toBeTruthy();
     expect(screen.getByText("运行环境")).toBeTruthy();
+    expect(screen.getByText("服务")).toBeTruthy();
+    expect(screen.getByText("地址")).toBeTruthy();
     expect(screen.getByText("上传与 FFmpeg")).toBeTruthy();
     expect(screen.getByText("Qwen3 ASR")).toBeTruthy();
     expect(screen.getByText("Ollama")).toBeTruthy();

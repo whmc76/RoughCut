@@ -224,7 +224,7 @@ const SAMPLE_AVATAR_MATERIALS: AvatarMaterialLibrary = {
       training_status: "ready_for_manual_training",
       training_provider: "heygem",
       training_api_available: true,
-      next_action: "可直接激活",
+      next_action: "可直接启用",
       capability_status: {},
       blocking_issues: [],
       warnings: [],
@@ -285,7 +285,7 @@ describe("StyleLabPage", () => {
     expect(container.querySelector(".style-lab-hero")).toBeInTheDocument();
     expect(container.querySelector(".style-lab-surface")).toBeInTheDocument();
     expect(container.querySelector(".style-lab-presenter-stage")).toBeInTheDocument();
-    expect(screen.getByText("流程和增强")).toBeInTheDocument();
+    expect(screen.getByText("模式和增强")).toBeInTheDocument();
     expect(screen.getByText("字幕、标题、文案、封面")).toBeInTheDocument();
     expect(screen.queryByText("第一段")).not.toBeInTheDocument();
     expect(screen.queryByText("第二段")).not.toBeInTheDocument();
@@ -304,7 +304,7 @@ describe("StyleLabPage", () => {
   it("toggles enhancement modes and activates creator defaults", async () => {
     renderPage();
 
-    const enhancementButton = await screen.findByRole("button", { name: "激活" });
+    const enhancementButton = await screen.findByRole("button", { name: "启用" });
     fireEvent.click(enhancementButton);
 
     await waitFor(() => {

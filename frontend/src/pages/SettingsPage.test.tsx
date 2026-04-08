@@ -108,14 +108,14 @@ describe("SettingsPage", () => {
     expect(container.querySelector(".settings-core-stack")).toBeInTheDocument();
     expect(container.querySelector(".settings-automation-stack")).toBeInTheDocument();
     expect(container.querySelector(".settings-link-grid")).toBeInTheDocument();
-    expect(screen.getByText("已生效的默认设置")).toBeInTheDocument();
+    expect(screen.getByText("常用设置")).toBeInTheDocument();
     expect(screen.getByText("模型与执行")).toBeInTheDocument();
     expect(screen.getByText("质量与输出")).toBeInTheDocument();
-    expect(screen.getByText("辅助页面")).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "查看包装页" })).toHaveAttribute("href", "/packaging");
-    expect(screen.getByRole("link", { name: "查看记忆页" })).toHaveAttribute("href", "/memory");
-    expect(screen.getByRole("link", { name: "查看词表页" })).toHaveAttribute("href", "/glossary");
-    expect(screen.getByRole("link", { name: "查看 Control" })).toHaveAttribute("href", "/control");
+    expect(screen.getByText("相关页面")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "查看包装" })).toHaveAttribute("href", "/packaging");
+    expect(screen.getByRole("link", { name: "查看记忆" })).toHaveAttribute("href", "/memory");
+    expect(screen.getByRole("link", { name: "查看词表" })).toHaveAttribute("href", "/glossary");
+    expect(screen.getByRole("link", { name: "查看控制页" })).toHaveAttribute("href", "/control");
   });
 
   it("still distinguishes telegram review from telegram agent in the automation summary", () => {
@@ -137,6 +137,6 @@ describe("SettingsPage", () => {
     );
 
     expect(screen.getByText(/Telegram 审核已启用/)).toBeInTheDocument();
-    expect(screen.getByText(/Telegram Agent 关闭/)).toBeInTheDocument();
+    expect(screen.getByText(/远程控制关闭/)).toBeInTheDocument();
   });
 });

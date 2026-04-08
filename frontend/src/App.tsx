@@ -1,4 +1,3 @@
-import { useQuery } from "@tanstack/react-query";
 import { Suspense, lazy, useEffect, useRef } from "react";
 import { NavLink, Route, Routes } from "react-router-dom";
 
@@ -46,12 +45,6 @@ const ControlPage = lazy(async () => ({
 export function App() {
   const { locale, setLocale, t } = useI18n();
   const syncedLocaleRef = useRef<string>("");
-  const appVersionQuery = useQuery({
-    queryKey: ["health-detail"],
-    queryFn: api.getHealthDetail,
-    staleTime: 60_000,
-  });
-  const appVersion = appVersionQuery.data?.api_version?.trim();
 
   useFrontendBuildRefresh();
 
@@ -72,6 +65,10 @@ export function App() {
     { to: "/style-lab", label: "风格实验" },
     { to: "/settings", label: t("app.nav.settings") },
   ];
+  const localeOptions = [
+    { value: "zh-CN" as const, shortLabel: "简中", title: t("app.language.zh-CN") },
+    { value: "en-US" as const, shortLabel: "EN", title: t("app.language.en-US") },
+  ];
 
   return (
     <div className="app-shell">
@@ -80,7 +77,6 @@ export function App() {
           <div className="rail-brand-mark">RC</div>
           <div className="rail-brand-copy">
             <strong>RoughCut</strong>
-            <span>local</span>
           </div>
         </div>
         <nav className="rail-nav" aria-label="Primary">
@@ -97,39 +93,43 @@ export function App() {
           ))}
         </nav>
         <div className="rail-notes">
-          <span className="rail-note-label">{t("app.sidebar.version")}</span>
-          <code>{appVersion || t("app.sidebar.versionUnknown")}</code>
+          <div className="app-stage-locale rail-locale">
+            <span>{t("app.sidebar.language")}</span>
+            <div className="rail-locale-options" role="group" aria-label={t("app.sidebar.language")}>
+              {localeOptions.map((option) => (
+                <button
+                  key={option.value}
+                  type="button"
+                  className={locale === option.value ? "rail-locale-option active" : "rail-locale-option"}
+                  onClick={() => setLocale(option.value)}
+                  title={option.title}
+                  aria-pressed={locale === option.value}
+                >
+                  {option.shortLabel}
+                </button>
+              ))}
+            </div>
+          </div>
         </div>
       </aside>
       <main className="app-stage">
-        <header className="app-stage-header">
-          <div className="app-stage-controls">
-            <label className="app-stage-locale">
-              <span>{t("app.sidebar.language")}</span>
-              <select className="input" value={locale} onChange={(event) => setLocale(event.target.value as "zh-CN" | "en-US")}>
-                <option value="zh-CN">{t("app.language.zh-CN")}</option>
-                <option value="en-US">{t("app.language.en-US")}</option>
-              </select>
-            </label>
-          </div>
-        </header>
         <div className="main-content">
-        <Suspense fallback={<section className="panel">加载页面中…</section>}>
-          <Routes>
-            <Route path="/" element={<OverviewPage />} />
-            <Route path="/jobs" element={<JobsPage />} />
-            <Route path="/watch-roots" element={<WatchRootsPage />} />
-            <Route path="/packaging" element={<PackagingPage />} />
-            <Route path="/style-lab" element={<StyleLabPage />} />
-            <Route path="/style-templates" element={<StyleTemplatesPage />} />
-            <Route path="/creative-modes" element={<CreativeModesPage />} />
-            <Route path="/creator-profiles" element={<CreatorProfilesPage />} />
-            <Route path="/memory" element={<MemoryPage />} />
-            <Route path="/glossary" element={<GlossaryPage />} />
-            <Route path="/settings" element={<SettingsPage />} />
-            <Route path="/control" element={<ControlPage />} />
-          </Routes>
-        </Suspense>
+          <Suspense fallback={<section className="panel">加载页面中…</section>}>
+            <Routes>
+              <Route path="/" element={<OverviewPage />} />
+              <Route path="/jobs" element={<JobsPage />} />
+              <Route path="/watch-roots" element={<WatchRootsPage />} />
+              <Route path="/packaging" element={<PackagingPage />} />
+              <Route path="/style-lab" element={<StyleLabPage />} />
+              <Route path="/style-templates" element={<StyleTemplatesPage />} />
+              <Route path="/creative-modes" element={<CreativeModesPage />} />
+              <Route path="/creator-profiles" element={<CreatorProfilesPage />} />
+              <Route path="/memory" element={<MemoryPage />} />
+              <Route path="/glossary" element={<GlossaryPage />} />
+              <Route path="/settings" element={<SettingsPage />} />
+              <Route path="/control" element={<ControlPage />} />
+            </Routes>
+          </Suspense>
         </div>
       </main>
     </div>

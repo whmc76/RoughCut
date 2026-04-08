@@ -17,7 +17,7 @@ type RuntimeSettingsPanelProps = {
 function getServiceSummary(serviceStatus?: ProviderServiceStatus) {
   const entries = Object.values(serviceStatus?.services ?? {});
   if (!entries.length) {
-    return "尚未拿到服务状态";
+    return "还没有服务状态";
   }
   const okCount = entries.filter((entry) => entry.status === "ok" || entry.status === "configured").length;
   return `${okCount} / ${entries.length} 条链路可用`;
@@ -66,10 +66,10 @@ export function RuntimeSettingsPanel({ form, runtimeEnvironment, serviceStatus, 
 
   return (
     <section className="panel settings-runtime-panel">
-      <PanelHeader title="运行环境与执行限制" description="这里只保留环境地址、本地服务状态和上传执行限制，不再承载核心 Provider 配置。" />
+      <PanelHeader title="运行环境" description="检查本地服务、环境地址和上传限制。" />
       <div className="settings-runtime-grid">
         <article className="settings-runtime-summary-card">
-          <span className="settings-overview-label">服务矩阵</span>
+          <span className="settings-overview-label">服务</span>
           <strong>{getServiceSummary(serviceStatus)}</strong>
           <div className="muted">当前输出目录：{String(runtimeEnvironment?.output_dir ?? DEFAULT_OUTPUT_DIR)}</div>
           <div className="muted">
@@ -101,7 +101,7 @@ export function RuntimeSettingsPanel({ form, runtimeEnvironment, serviceStatus, 
           <div className="settings-chain-card-head">
             <div>
               <span className="settings-overview-label">环境地址</span>
-              <strong>运行环境</strong>
+              <strong>地址</strong>
             </div>
           </div>
           <div className="settings-environment-list">

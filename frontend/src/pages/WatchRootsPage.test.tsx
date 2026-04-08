@@ -87,6 +87,7 @@ describe("WatchRootsPage", () => {
     expect(screen.queryByText("批量处理")).not.toBeInTheDocument();
     expect(screen.queryByText("先维护监听目录")).not.toBeInTheDocument();
     expect(screen.queryByText("扫描、整理并批量入队")).not.toBeInTheDocument();
+    expect(screen.queryByText("默认配置")).not.toBeInTheDocument();
   });
 
   it("uses an ingest deck with inventory as the main workspace", () => {
@@ -94,7 +95,7 @@ describe("WatchRootsPage", () => {
 
     const { container } = render(<WatchRootsPage />);
 
-    expect(screen.getAllByText("库存")).toHaveLength(2);
+    expect(screen.getAllByText("待处理")).toHaveLength(1);
     expect(screen.getByText("目录")).toBeInTheDocument();
     expect(screen.getByText("新建目录")).toBeInTheDocument();
     expect(screen.getAllByText("watch.page.pickRoot")).toHaveLength(3);

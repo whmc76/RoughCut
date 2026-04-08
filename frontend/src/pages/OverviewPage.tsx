@@ -4,9 +4,9 @@ import { EmptyState } from "../components/ui/EmptyState";
 import { PageHeader } from "../components/ui/PageHeader";
 import { PageSection } from "../components/ui/PageSection";
 import { PanelHeader } from "../components/ui/PanelHeader";
-import { useI18n } from "../i18n";
 import { StatCard } from "../components/ui/StatCard";
 import { JobsUsageTrendPanel } from "../features/jobs/JobsUsageTrendPanel";
+import { useI18n } from "../i18n";
 import { useOverviewWorkspace } from "../features/overview/useOverviewWorkspace";
 import { formatDate, statusLabel } from "../utils";
 
@@ -31,13 +31,13 @@ export function OverviewPage() {
       : disabledRoots.length
         ? `${disabledRoots.length} 个目录待处理`
         : "当前运行正常";
-  const deckLead = blockedServices.length
-    ? t("overview.deck.runtimeIssue")
+  const mastheadLead = blockedServices.length
+    ? "先看服务状态。"
     : reviewJobs.length
-      ? t("overview.deck.reviewReady")
+      ? "先处理待审核任务。"
       : disabledRoots.length
-        ? t("overview.deck.watchReady")
-        : t("overview.deck.runtimeReady");
+        ? "先处理目录和库存。"
+        : "现在可以继续处理。";
   const usageTrendStepOptions = workspace.usageSummary.data?.top_steps.slice(0, 5) ?? [];
   const usageTrendModelOptions = workspace.usageSummary.data?.top_models.slice(0, 5) ?? [];
   const usageTrendProviderOptions = workspace.usageSummary.data?.top_providers.slice(0, 5) ?? [];
@@ -52,27 +52,28 @@ export function OverviewPage() {
 
   return (
     <section className="page-stack overview-page">
-      <PageHeader title={t("overview.page.title")} description={t("overview.page.description")} />
+      <PageHeader title="当前状态" description="看任务、目录和服务，再决定下一步。" />
       <section className="overview-masthead" data-testid="overview-masthead">
         <div className="overview-masthead-copy">
-          <h3>{mastheadTitle}</h3>
-          <p>{deckLead}</p>
+          <span className="page-eyebrow">概览</span>
+          <strong>{mastheadTitle}</strong>
+          <p>{mastheadLead}</p>
         </div>
         <div className="overview-masthead-signals">
           <article className="overview-masthead-signal">
-            <span>{t("overview.deck.queueLabel")}</span>
+            <span>任务</span>
             <strong>{workspace.stats.jobs}</strong>
           </article>
           <article className="overview-masthead-signal">
-            <span>{t("overview.deck.reviewLabel")}</span>
+            <span>审核</span>
             <strong>{reviewJobs.length}</strong>
           </article>
           <article className="overview-masthead-signal">
-            <span>{t("overview.deck.watchLabel")}</span>
+            <span>目录</span>
             <strong>{workspace.stats.watchRoots}</strong>
           </article>
           <article className="overview-masthead-signal">
-            <span>{t("overview.deck.runtimeLabel")}</span>
+            <span>服务</span>
             <strong>{serviceEntries.length}</strong>
           </article>
         </div>
@@ -81,20 +82,20 @@ export function OverviewPage() {
       <section className="overview-decision-surface" data-testid="overview-decision-surface">
         <div className="overview-activity-feed" data-testid="overview-activity-feed">
           <div className="overview-surface-head">
-            <span>{t("overview.deck.actions")}</span>
-            <strong>{reviewJobs.length ? reviewJobs.length : activeJobs.length}</strong>
+            <span>当前任务</span>
+            <strong>{activeJobs.length}</strong>
           </div>
-          {workspace.jobs.isLoading && <EmptyState message={t("overview.recent.loading")} />}
+          {workspace.jobs.isLoading && <EmptyState message="正在加载任务。" />}
           {workspace.jobs.isError && <EmptyState message={(workspace.jobs.error as Error).message} tone="error" />}
           {!workspace.jobs.isLoading && !workspace.jobs.isError && activeJobs.length === 0 ? (
-            <EmptyState message={t("overview.deck.empty")} />
+            <EmptyState message="当前没有需要处理的任务。" />
           ) : null}
           {activeJobs.map((job, index) => (
             <article key={job.id} className="overview-job-row" data-testid="overview-job-row">
               <div className="overview-job-row-index">{`${index + 1}`.padStart(2, "0")}</div>
               <div className="overview-job-row-copy">
                 <strong>{job.source_name}</strong>
-                <p>{job.content_summary || job.content_subject || t("overview.recent.noSummary")}</p>
+                <p>{job.content_summary || job.content_subject || "暂无摘要"}</p>
               </div>
               <div className="overview-job-row-meta">
                 <span className={`status-chip ${job.status}`}>{statusLabel(job.status)}</span>
@@ -107,35 +108,35 @@ export function OverviewPage() {
         <aside className="overview-action-rail" data-testid="overview-action-rail">
           <section className="overview-action-block">
             <div className="overview-surface-head">
-              <span>快速入口</span>
-              <strong>{reviewJobs.length ? `${reviewJobs.length} 待处理` : "查看页面"}</strong>
+              <span>下一步</span>
+              <strong>{reviewJobs.length ? `${reviewJobs.length} 待处理` : "先看状态"}</strong>
             </div>
             <Link className="overview-action-link" to="/jobs">
               <span className="overview-action-index">01</span>
               <div>
-                <strong>{t("overview.focus.jobs.title")}</strong>
-                <p>{t("overview.triage.jobs.description")}</p>
+                <strong>任务</strong>
+                <p>看队列和待审核任务。</p>
               </div>
             </Link>
             <Link className="overview-action-link" to="/watch-roots">
               <span className="overview-action-index">02</span>
               <div>
-                <strong>{t("overview.focus.watch.title")}</strong>
-                <p>{t("overview.triage.watchRoots.description")}</p>
+                <strong>监看目录</strong>
+                <p>看监听范围和库存。</p>
               </div>
             </Link>
-            <Link className="overview-action-link" to="/control">
+            <Link className="overview-action-link" to="/settings">
               <span className="overview-action-index">03</span>
               <div>
-                <strong>{t("overview.focus.runtime.title")}</strong>
-                <p>{t("overview.triage.system.description")}</p>
+                <strong>设置</strong>
+                <p>调整模型、质量和运行项。</p>
               </div>
             </Link>
           </section>
 
           <section className="overview-runtime-panel">
             <div className="overview-surface-head">
-              <span>运行状态</span>
+              <span>服务状态</span>
               <strong>{serviceEntries.length}</strong>
             </div>
             {serviceEntries.length ? (
@@ -143,26 +144,26 @@ export function OverviewPage() {
                 {serviceEntries.map(([key, online]) => (
                   <article key={key} className="overview-runtime-row">
                     <span>{key}</span>
-                    <strong className={online ? "status-ok" : "status-off"}>{online ? t("overview.services.online") : t("overview.services.offline")}</strong>
+                    <strong className={online ? "status-ok" : "status-off"}>{online ? "在线" : "离线"}</strong>
                   </article>
                 ))}
                 {runtime?.readiness_status ? (
                   <article className="overview-runtime-row">
-                    <span>runtime ready</span>
+                    <span>运行就绪</span>
                     <strong className={renderRuntimeTone(runtime.readiness_status)}>{runtime.readiness_status}</strong>
                   </article>
                 ) : null}
                 {runtime?.orchestrator_lock?.status ? (
                   <article className="overview-runtime-row">
-                    <span>orchestrator lock</span>
+                    <span>运行锁定</span>
                     <strong className={renderRuntimeTone(runtime.orchestrator_lock.status)}>{runtime.orchestrator_lock.status}</strong>
                   </article>
                 ) : null}
               </div>
             ) : !workspace.services.isLoading ? (
-              <EmptyState message={t("overview.focus.runtime.empty")} />
+              <EmptyState message="暂无服务状态。" />
             ) : null}
-            {runtime ? <p className="overview-runtime-note">{runtime.orchestrator_lock?.detail ?? t("overview.focus.runtime.lock")}</p> : null}
+            {runtime ? <p className="overview-runtime-note">{runtime.orchestrator_lock?.detail ?? "当前没有运行锁定信息。"}</p> : null}
           </section>
         </aside>
       </section>
@@ -170,9 +171,9 @@ export function OverviewPage() {
       <section className="overview-analysis-band" data-testid="overview-analysis-band">
         <section className="overview-analysis-column">
           <PanelHeader
-            title={t("overview.focus.watch.title")}
-            description={t("overview.focus.watch.description")}
-            actions={<Link className="text-link" to="/watch-roots">{t("overview.triage.watchRoots.cta")}</Link>}
+            title="监看目录"
+            description="看监听范围和库存。"
+            actions={<Link className="text-link" to="/watch-roots">打开监看目录</Link>}
           />
           <div className="overview-analysis-list">
             {recentRoots.length ? (
@@ -183,22 +184,22 @@ export function OverviewPage() {
                     <p>{root.workflow_template || "—"}</p>
                   </div>
                   <div className="overview-focus-meta">
-                    <span className={`status-chip ${root.enabled ? "done" : "cancelled"}`}>{root.enabled ? "enabled" : "disabled"}</span>
+                    <span className={`status-chip ${root.enabled ? "done" : "cancelled"}`}>{root.enabled ? "启用" : "停用"}</span>
                     <span>{root.scan_mode}</span>
                   </div>
                 </article>
               ))
             ) : (
-              <EmptyState message={t("overview.focus.watch.empty")} />
+              <EmptyState message="当前没有监看目录。" />
             )}
           </div>
         </section>
 
         <section className="overview-analysis-column">
           <PanelHeader
-            title="最近任务"
-            description="只保留最新需要看的任务。"
-            actions={<Link className="text-link" to="/jobs">{t("overview.triage.jobs.cta")}</Link>}
+            title="队列"
+            description="这里看最新任务。"
+            actions={<Link className="text-link" to="/jobs">打开任务</Link>}
           />
           <div className="overview-analysis-list">
             {activeJobs.length ? (
@@ -206,7 +207,7 @@ export function OverviewPage() {
                 <article key={job.id} className="overview-analysis-row">
                   <div className="overview-focus-copy">
                     <strong>{job.source_name}</strong>
-                    <p>{job.content_summary || job.content_subject || t("overview.recent.noSummary")}</p>
+                    <p>{job.content_summary || job.content_subject || "暂无摘要"}</p>
                   </div>
                   <div className="overview-focus-meta">
                     <span className={`status-chip ${job.status}`}>{statusLabel(job.status)}</span>
@@ -215,14 +216,14 @@ export function OverviewPage() {
                 </article>
               ))
             ) : (
-              <EmptyState message={t("overview.focus.jobs.empty")} />
+              <EmptyState message="当前没有活跃任务。" />
             )}
           </div>
         </section>
       </section>
 
       {workspace.usageSummary.data && (
-        <PageSection className="overview-telemetry-band" title={t("overview.signals.title")}>
+        <PageSection className="overview-telemetry-band" title="资源用量">
           <>
             <div className="stats-grid compact">
               <StatCard label={t("jobs.summary.totalTokens")} value={workspace.usageSummary.data.total_tokens.toLocaleString()} compact />

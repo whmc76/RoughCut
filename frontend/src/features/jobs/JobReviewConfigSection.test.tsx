@@ -125,8 +125,8 @@ describe("JobReviewConfigSection", () => {
   it("keeps only config switching and review checks in the review card", () => {
     renderSection({ profiles: [] });
 
-    expect(screen.getByText("剪辑配置与审核")).toBeTruthy();
-    expect(screen.getByText("剪辑配置切换")).toBeTruthy();
+    expect(screen.getByText("方案与审核")).toBeTruthy();
+    expect(screen.getByText("方案")).toBeTruthy();
     expect(screen.getByText("审核就绪检查")).toBeTruthy();
     expect(screen.queryByText("工作流模式")).toBeNull();
     expect(screen.queryByText("包装素材清单")).toBeNull();

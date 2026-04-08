@@ -94,7 +94,7 @@ describe("ConfigProfileSwitcher", () => {
       profiles: [buildProfile()],
     });
 
-    await waitFor(() => expect(screen.getByText("已激活 高节奏口播")).toBeTruthy());
+    await waitFor(() => expect(screen.getByText("当前 高节奏口播")).toBeTruthy());
 
     expect(screen.getByText("生产链路")).toBeTruthy();
     expect(screen.getByText("审核阈值")).toBeTruthy();
@@ -141,13 +141,13 @@ describe("ConfigProfileSwitcher", () => {
 
     fireEvent.mouseEnter(screen.getByRole("button", { name: /^本地审稿/ }));
 
-    expect(screen.getByText("切换前预览")).toBeTruthy();
-    expect(screen.getByText(/当前悬停的是“本地审稿”/)).toBeTruthy();
+    expect(screen.getByText("预览")).toBeTruthy();
+    expect(screen.getByText(/这里显示“本地审稿”的关键设置/)).toBeTruthy();
     expect(screen.getAllByText("适合本地模型审稿和低成本预审").length).toBeGreaterThan(0);
     expect(screen.getByText(/转写 Faster Whisper \(local\) \/ large-v3/)).toBeTruthy();
     expect(screen.getByText(/推理 ollama \/ qwen3:8b/)).toBeTruthy();
     expect(screen.getByText("包装关闭")).toBeTruthy();
-    expect(screen.getByText(/与当前激活方案“高节奏口播”相比/)).toBeTruthy();
+    expect(screen.getByText(/和当前方案“高节奏口播”相比/)).toBeTruthy();
     expect(screen.getByText("推理 provider")).toBeTruthy();
     expect(screen.getByText(/openai -> ollama/)).toBeTruthy();
   });
@@ -193,7 +193,7 @@ describe("ConfigProfileSwitcher", () => {
       ],
     });
 
-    await waitFor(() => expect(screen.getAllByText("当前激活").length).toBeGreaterThan(0));
+    await waitFor(() => expect(screen.getAllByText("当前方案").length).toBeGreaterThan(0));
     expect(screen.getByText("最近更新")).toBeTruthy();
     expect(screen.getByText("其他方案")).toBeTruthy();
 
@@ -208,7 +208,7 @@ describe("ConfigProfileSwitcher", () => {
     expect(zuluButton.compareDocumentPosition(archiveButton) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(archiveButton.compareDocumentPosition(backupButton) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 
-    fireEvent.change(screen.getByPlaceholderText("按方案名称或备注筛选"), {
+    fireEvent.change(screen.getByPlaceholderText("筛选方案"), {
       target: { value: "批量混剪" },
     });
 
@@ -219,11 +219,11 @@ describe("ConfigProfileSwitcher", () => {
     expect(screen.getByRole("button", { name: /^高节奏口播/ })).toBeTruthy();
     expect(screen.queryByText("其他方案")).toBeNull();
 
-    fireEvent.change(screen.getByDisplayValue("最近更新优先"), {
+    fireEvent.change(screen.getByDisplayValue("最近改动"), {
       target: { value: "name_asc" },
     });
 
-    fireEvent.change(screen.getByPlaceholderText("按方案名称或备注筛选"), {
+    fireEvent.change(screen.getByPlaceholderText("筛选方案"), {
       target: { value: "" },
     });
 
@@ -262,17 +262,17 @@ describe("ConfigProfileSwitcher", () => {
       ],
     });
 
-    await waitFor(() => expect(screen.getByRole("button", { name: "对比 本地审稿" })).toBeTruthy());
+    await waitFor(() => expect(screen.getByRole("button", { name: "查看差异" })).toBeTruthy());
 
-    fireEvent.click(screen.getByRole("button", { name: "对比 本地审稿" }));
+    fireEvent.click(screen.getByRole("button", { name: "查看差异" }));
 
-    expect(screen.getByText("方案对比")).toBeTruthy();
-    expect(screen.getByText("已锁定对比")).toBeTruthy();
-    expect(screen.getByText(/已锁定“本地审稿”与当前激活方案的对比视图/)).toBeTruthy();
+    expect(screen.getByText("方案差异")).toBeTruthy();
+    expect(screen.getByText("对比中")).toBeTruthy();
+    expect(screen.getByText(/正在和“本地审稿”做对比/)).toBeTruthy();
 
-    fireEvent.click(screen.getByRole("button", { name: "结束对比" }));
+    fireEvent.click(screen.getAllByRole("button", { name: "关闭对比" })[0]);
 
-    expect(screen.queryByText("方案对比")).toBeNull();
+    expect(screen.queryByText("方案差异")).toBeNull();
   });
 
   it("activates another profile when its chip is clicked", async () => {
@@ -331,7 +331,7 @@ describe("ConfigProfileSwitcher", () => {
       ],
     });
 
-    await waitFor(() => expect(screen.getByText(/当前配置已改动/)).toBeTruthy());
+    await waitFor(() => expect(screen.getByText(/有未保存变更/)).toBeTruthy());
     expect(screen.getByText("推理模型")).toBeTruthy();
     expect(screen.getByText(/gpt-4.1 -> gpt-4.1-mini/)).toBeTruthy();
 
@@ -386,7 +386,7 @@ describe("ConfigProfileSwitcher", () => {
       ],
     });
 
-    await waitFor(() => expect(screen.getByText(/当前配置已改动/)).toBeTruthy());
+    await waitFor(() => expect(screen.getByText(/有未保存变更/)).toBeTruthy());
 
     fireEvent.click(screen.getByRole("button", { name: /^本地审稿/ }));
 
@@ -430,9 +430,9 @@ describe("ConfigProfileSwitcher", () => {
       ],
     });
 
-    await waitFor(() => expect(screen.getByText(/覆盖当前配置会把这2项差异写回/)).toBeTruthy());
+    await waitFor(() => expect(screen.getByText(/覆盖会把这 2 项差异写回/)).toBeTruthy());
 
-    fireEvent.click(screen.getByRole("button", { name: "覆盖当前配置" }));
+    fireEvent.click(screen.getByRole("button", { name: "覆盖当前方案" }));
 
     await waitFor(() => expect(confirmSpy).toHaveBeenCalled());
     expect(confirmSpy.mock.calls.at(-1)?.[0]).toContain("推理模型: gpt-4.1 -> gpt-4.1-mini");
@@ -482,9 +482,9 @@ describe("ConfigProfileSwitcher", () => {
       ],
     });
 
-    await waitFor(() => expect(screen.getByText(/删除当前配置会移除“高节奏口播”这套方案快照/)).toBeTruthy());
+    await waitFor(() => expect(screen.getByText(/删除后会移除“高节奏口播”这套方案/)).toBeTruthy());
 
-    fireEvent.click(screen.getByRole("button", { name: "删除当前配置" }));
+    fireEvent.click(screen.getByRole("button", { name: "删除方案" }));
 
     await waitFor(() => expect(confirmSpy).toHaveBeenCalled());
     expect(confirmSpy.mock.calls.at(-1)?.[0]).toContain("删除后会失去这套方案快照和后续回滚点");
@@ -521,9 +521,9 @@ describe("ConfigProfileSwitcher", () => {
       ],
     });
 
-    await waitFor(() => expect(screen.getByRole("button", { name: "删除当前配置" })).toBeTruthy());
+    await waitFor(() => expect(screen.getByRole("button", { name: "删除方案" })).toBeTruthy());
 
-    fireEvent.click(screen.getByRole("button", { name: "删除当前配置" }));
+    fireEvent.click(screen.getByRole("button", { name: "删除方案" }));
 
     expect(api.deleteConfigProfile).not.toHaveBeenCalled();
   });
@@ -546,13 +546,13 @@ describe("ConfigProfileSwitcher", () => {
 
     await waitFor(() => expect(screen.getByDisplayValue("高节奏口播")).toBeTruthy());
 
-    fireEvent.change(screen.getByPlaceholderText("输入配置名称，例如：评测口播增强"), {
+    fireEvent.change(screen.getByPlaceholderText("方案名称，例如：评测口播"), {
       target: { value: "专题混剪方案" },
     });
 
-    expect(screen.getByText(/已存在同名配置方案“专题混剪方案”/)).toBeTruthy();
-    expect((screen.getByRole("button", { name: "保存为新配置" }) as HTMLButtonElement).disabled).toBe(true);
-    expect((screen.getByRole("button", { name: "更新方案信息" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByText(/已存在同名方案“专题混剪方案”/)).toBeTruthy();
+    expect((screen.getByRole("button", { name: "保存为新方案" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "更新方案说明" }) as HTMLButtonElement).disabled).toBe(true);
   });
 
   it("updates profile description alongside profile metadata", async () => {
@@ -566,13 +566,13 @@ describe("ConfigProfileSwitcher", () => {
 
     await waitFor(() => expect(screen.getByDisplayValue("高节奏口播")).toBeTruthy());
 
-    fireEvent.change(screen.getByPlaceholderText("补充适用场景 / 备注，例如：适合测评口播、强调数字人解说和低分复跑"), {
+    fireEvent.change(screen.getByPlaceholderText("补充用途，例如：适合测评口播和数字人解说"), {
       target: { value: "适合产品测评、数字人口播和自动复跑" },
     });
 
-    expect(screen.getByText(/备注会随配置方案一起持久化/)).toBeTruthy();
+    expect(screen.getByText(/备注会和方案一起保存/)).toBeTruthy();
 
-    fireEvent.click(screen.getByRole("button", { name: "更新方案信息" }));
+    fireEvent.click(screen.getByRole("button", { name: "更新方案说明" }));
 
     await waitFor(() =>
       expect(api.updateConfigProfile).toHaveBeenCalledWith("profile_active", {

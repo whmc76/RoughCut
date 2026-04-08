@@ -95,7 +95,7 @@ export function JobsPage() {
               {t("jobs.page.refresh")}
             </button>
             <button className="button" onClick={() => setCreateOpen((current) => !current)}>
-              {createOpen ? "收起创建区" : "新建任务"}
+              {createOpen ? "收起" : "新建"}
             </button>
           </>
         }
@@ -120,7 +120,7 @@ export function JobsPage() {
         <article className="jobs-command-card">
           <span>待上传</span>
           <strong>{uploadReadyLabel(workspace.upload.file?.name)}</strong>
-          <p>创建区可直接入队</p>
+          <p>选好素材后创建</p>
         </article>
       </section>
 
@@ -170,7 +170,7 @@ export function JobsPage() {
           <div className="jobs-stage-head">
             <div>
               <h3>需要处理</h3>
-              <p>只保留运行中和待审核任务。</p>
+              <p>运行中和待审核任务在这里。</p>
             </div>
             <div className="jobs-stage-meta">
               <span>当前数量</span>
@@ -208,12 +208,12 @@ export function JobsPage() {
         <section className="jobs-create-stage">
           <div className="jobs-stage-head">
             <div>
-              <h3>新建任务</h3>
+              <h3>创建</h3>
               <p>选择素材、语言、模板和工作流后直接入队。</p>
             </div>
             <div className="jobs-stage-meta">
-              <span>默认配置</span>
-              <strong>新任务会继承当前配置</strong>
+              <span>当前方案</span>
+              <strong>新任务按这里创建</strong>
             </div>
           </div>
 
@@ -221,8 +221,8 @@ export function JobsPage() {
             <section className="jobs-create-panel">
               <ConfigProfileSwitcher
                 compact
-                title="默认配置"
-                description="切换新任务继承的配置。"
+                title="当前方案"
+                description="这里决定新任务怎么创建。"
               />
             </section>
 

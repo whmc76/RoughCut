@@ -209,11 +209,11 @@ describe("SettingsOverviewPanel", () => {
       />,
     );
 
-    expect(screen.getByText("方案状态")).toBeTruthy();
+    expect(screen.getByText("当前方案")).toBeTruthy();
     expect(screen.getByText("标准方案")).toBeTruthy();
     expect(screen.getByText(/当前设置偏离激活方案 2 项/)).toBeTruthy();
     expect(screen.getByText(/设置 database · 方案 database · 包装 database/)).toBeTruthy();
-    expect(screen.getByText("当前执行视图")).toBeTruthy();
+    expect(screen.getByText("当前状态")).toBeTruthy();
     expect(screen.getByText("推理模型")).toBeTruthy();
     expect(screen.getByText(/gpt-4.1 -\> gpt-4.1-mini/)).toBeTruthy();
     expect(screen.getByText("文案风格")).toBeTruthy();

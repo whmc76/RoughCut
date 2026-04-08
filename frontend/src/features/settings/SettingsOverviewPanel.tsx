@@ -22,7 +22,7 @@ type SettingsOverviewPanelProps = {
 function buildServiceSummary(serviceStatus?: ProviderServiceStatus) {
   const entries = Object.entries(serviceStatus?.services ?? {});
   if (!entries.length) {
-    return { title: "服务状态未加载", detail: "等待首次探测结果" };
+    return { title: "还没有状态数据", detail: "连接后会显示可用链路。" };
   }
   const okCount = entries.filter(([, entry]) => entry.status === "ok" || entry.status === "configured").length;
   const highlights = entries
@@ -61,21 +61,21 @@ export function SettingsOverviewPanel({ form, config, runtimeEnvironment, servic
 
   return (
     <section className="panel settings-summary-panel">
-      <PanelHeader title="当前执行视图" description="先看当前路由、服务健康和方案偏移，再进入下面的链路配置。" />
+      <PanelHeader title="当前状态" description="这里显示模型、服务和当前方案。" />
       <div className="settings-summary-grid">
         <article className="settings-command-card">
-          <span className="settings-overview-label">当前执行链路</span>
+          <span className="settings-overview-label">模型组合</span>
           <strong>{getTranscriptionProviderLabel(transcriptionProvider)} + {getProviderLabel(activeReasoningProvider)}</strong>
           <div className="muted">{executionSummary.join(" · ")}</div>
         </article>
         <article className="settings-command-card">
-          <span className="settings-overview-label">服务矩阵</span>
+          <span className="settings-overview-label">服务</span>
           <strong>{serviceSummary.title}</strong>
           <div className="muted">{serviceSummary.detail}</div>
           <div className="muted">{environmentSummary}</div>
         </article>
         <article className="settings-command-card">
-          <span className="settings-overview-label">方案状态</span>
+          <span className="settings-overview-label">当前方案</span>
           <strong>{activeProfile ? activeProfile.name : "未绑定方案"}</strong>
           <div className="muted">{profileSummary}</div>
           <div className="muted">{storageSummary}</div>
@@ -99,7 +99,7 @@ export function SettingsOverviewPanel({ form, config, runtimeEnvironment, servic
       {(config?.persistence.legacy_override_file_present || config?.persistence.legacy_profiles_file_present || config?.persistence.legacy_packaging_manifest_present) ? (
         <div className="notice top-gap">检测到遗留文件，当前仍以数据库持久化结果为准。</div>
       ) : (
-        <div className="notice top-gap">当前配置、方案和包装都已走数据库持久化。</div>
+        <div className="notice top-gap">当前设置已经保存到数据库。</div>
       )}
     </section>
   );

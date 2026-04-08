@@ -34,6 +34,8 @@ export function StyleLabPage() {
   const packaging = styleWorkspace.packaging.data?.config;
   const catalog = options.data?.creative_mode_catalog;
   const activeEnhancementModes = config.data?.default_job_enhancement_modes ?? [];
+  const activeWorkflowMode =
+    catalog?.workflow_modes.find((mode) => mode.key === config.data?.default_job_workflow_mode) ?? null;
   const activePresenterId = String(config.data?.avatar_presenter_id ?? "");
   const presenterProfiles = avatarMaterials.data?.profiles ?? [];
 
@@ -43,7 +45,7 @@ export function StyleLabPage() {
   const selectedCover = findStylePreset(coverStylePresets, packaging?.cover_style ?? "");
   const selectedEffect = findStylePreset(smartEffectPresets, packaging?.smart_effect_style ?? "");
   const activePresenter = presenterProfiles.find((profile) => getPresenterFilePath(profile) === activePresenterId);
-  const activePresenterLabel = activePresenter?.display_name ?? (activePresenterId || "未绑定");
+  const activePresenterLabel = activePresenter?.display_name ?? (activePresenterId || "未选定");
 
   const toggleEnhancementMode = (modeKey: string) => {
     const nextModes = activeEnhancementModes.includes(modeKey)
@@ -67,11 +69,11 @@ export function StyleLabPage() {
     <section className="page-stack style-lab-page">
       <PageHeader
         title="风格"
-        description="调整字幕、标题、文案和默认增强。"
+        description="调整会直接影响出片的项目。"
         actions={
           <div className="toolbar">
             <Link className="button ghost" to="/style-templates">
-              旧风格页
+              风格模板
             </Link>
             <Link className="button ghost" to="/creator-profiles">
               档案库
@@ -81,15 +83,15 @@ export function StyleLabPage() {
       />
 
       {styleWorkspace.packaging.isLoading || options.isLoading || config.isLoading || avatarMaterials.isLoading ? (
-        <section className="panel style-lab-loading">正在加载风格实验面板…</section>
+        <section className="panel style-lab-loading">正在加载风格设置…</section>
       ) : null}
 
       {packaging && catalog && config.data ? (
         <>
           <section className="style-lab-hero">
             <div className="style-lab-hero-copy">
-              <h3>默认风格</h3>
-              <p>直接影响出片的项都在这里。</p>
+              <h3>当前风格</h3>
+              <p>这里只放会直接影响出片的项。</p>
             </div>
             <div className="style-lab-hero-signals">
               <StatusChip label="字幕" value={selectedSubtitle?.label ?? packaging.subtitle_style} />
@@ -106,7 +108,7 @@ export function StyleLabPage() {
             <PageSection
               className="style-lab-panel style-lab-panel-primary"
               title="字幕、标题、文案、封面"
-              description="只看当前默认项和预设。"
+              description="这里只看当前已选项和预设。"
             >
               <div className="style-lab-preset-lanes">
                 <PresetRail
@@ -159,14 +161,14 @@ export function StyleLabPage() {
 
             <PageSection
               className="style-lab-panel style-lab-panel-dual"
-              title="流程和增强"
-              description="主流程选一个，增强按需开启。"
+              title="模式和增强"
+              description="先选主模式，再按需开启增强。"
             >
               <div className="style-lab-mode-grid">
                 <section className="style-lab-mode-column">
                   <div className="toolbar">
-                    <strong>主流程</strong>
-                    <span className="status-pill">{config.data.default_job_workflow_mode}</span>
+                    <strong>主模式</strong>
+                    <span className="status-pill">{activeWorkflowMode?.title ?? config.data.default_job_workflow_mode}</span>
                   </div>
                   <div className="style-lab-mode-list compact-top">
                     {catalog.workflow_modes.map((mode) => (
@@ -183,7 +185,7 @@ export function StyleLabPage() {
                 <section className="style-lab-mode-column">
                   <div className="toolbar">
                     <strong>增强</strong>
-                    <span className="status-pill">{activeEnhancementModes.length} active</span>
+                    <span className="status-pill">{activeEnhancementModes.length}项已启用</span>
                   </div>
                   <div className="style-lab-mode-list compact-top">
                     {catalog.enhancement_modes.map((mode) => (
@@ -192,7 +194,7 @@ export function StyleLabPage() {
                         mode={mode}
                         active={activeEnhancementModes.includes(mode.key)}
                         onClick={() => toggleEnhancementMode(mode.key)}
-                        toggleLabel={activeEnhancementModes.includes(mode.key) ? "移除" : "激活"}
+                        toggleLabel={activeEnhancementModes.includes(mode.key) ? "移除" : "启用"}
                       />
                     ))}
                   </div>
@@ -202,8 +204,8 @@ export function StyleLabPage() {
 
             <PageSection
               className="style-lab-panel style-lab-panel-gallery"
-              title="角色默认"
-              description="只放角色默认。"
+              title="角色"
+              description="这里只保留角色相关设置。"
               actions={<Link className="button ghost" to="/creator-profiles">打开档案库</Link>}
             >
               <section className="style-lab-presenter-stage">
@@ -230,11 +232,11 @@ export function StyleLabPage() {
                             <div>
                               <strong>{profile.display_name}</strong>
                               <div className="muted compact-top">
-                                {profile.creator_profile?.identity?.public_name || profile.presenter_alias || "未命名"} · {profile.training_status}
+                                {profile.creator_profile?.identity?.public_name || profile.presenter_alias || "未命名"} · {describePresenterTrainingStatus(profile.training_status)}
                               </div>
                             </div>
                             <span className={`mode-chip ${isActive ? "" : ready ? "" : "planned"}`}>
-                              {isActive ? "已激活" : ready ? "可激活" : "缺素材"}
+                              {isActive ? "已启用" : ready ? "可启用" : "缺素材"}
                             </span>
                           </div>
                           <p className="muted">{profile.next_action}</p>
@@ -309,7 +311,7 @@ function CreativeModeTile({
   mode,
   active,
   onClick,
-  toggleLabel = "激活",
+  toggleLabel = "启用",
 }: {
   mode: CreativeModeDefinition;
   active: boolean;
@@ -324,7 +326,7 @@ function CreativeModeTile({
           <div className="muted compact-top">{mode.tagline}</div>
         </div>
         <button className={active ? "button primary" : "button ghost"} type="button" onClick={onClick}>
-          {active ? "已选中" : toggleLabel}
+          {active ? "已启用" : toggleLabel}
         </button>
       </div>
       <p className="muted">{mode.summary}</p>
@@ -351,20 +353,25 @@ function StatusChip({ label, value }: { label: string; value: string }) {
 function describeModeOutput(mode: CreativeModeDefinition): string {
   if (mode.kind === "workflow") {
     if (mode.key === "standard_edit") return "直接输出主成片。";
-    if (mode.key === "long_text_to_video") return "规划中，当前还没有实际输出。";
-    return "按工作流直接产出主输出。";
+    if (mode.key === "long_text_to_video") return "还在规划中。";
+    return "按这个模式直接出片。";
   }
 
-  if (mode.key === "avatar_commentary") return "叠加到主成片，可形成含数字人的增强版输出。";
-  if (mode.key === "ai_director") return "改写解说与配音后回写主流程，影响主成片输出。";
-  if (mode.key === "multilingual_translation") return "当前产出字幕翻译等辅助产物，不单独导出新成片。";
-  if (mode.key === "auto_review") return "只改变审核放行方式，不产生额外视频输出。";
-  if (mode.key === "multi_platform_adaptation") return "当前主要写入平台适配配置，尚未自动分叉导出多平台成片。";
-  if (mode.key === "ai_effects") return "当前主要完成配置挂载，暂未接入稳定的视频特效输出。";
+  if (mode.key === "avatar_commentary") return "会叠加数字人口播。";
+  if (mode.key === "ai_director") return "会调整解说和配音，再影响成片。";
+  if (mode.key === "multilingual_translation") return "只提供字幕翻译，不单独出片。";
+  if (mode.key === "auto_review") return "只调整审核放行，不额外出片。";
+  if (mode.key === "multi_platform_adaptation") return "当前只记录平台适配，不自动分发多版本。";
+  if (mode.key === "ai_effects") return "暂未提供稳定特效输出。";
 
   return "当前输出方式待补充。";
 }
 
 function getPresenterFilePath(profile: AvatarMaterialProfile): string {
   return profile.files.find((file) => file.role === "speaking_video")?.path ?? "";
+}
+
+function describePresenterTrainingStatus(status: string): string {
+  if (status === "ready_for_manual_training") return "数字人链路可导入";
+  return "待补素材";
 }
