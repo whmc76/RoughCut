@@ -46,20 +46,34 @@ def test_start_script_uses_dev_overlay_for_runtime_and_full_modes():
     assert 'Write-Host "Docker live source sync is active for this runtime."' in script_text
 
 
-def test_batch_help_describes_live_sync_instead_of_workspace_refresh():
+def test_start_script_avoids_reusing_runtime_api_port_for_local_mode():
+    script_text = Path("start_roughcut.ps1").read_text(encoding="utf-8")
+
+    assert 'Resolve-ContainerMappedPort -ContainerName "roughcut-api-1" -ContainerPort 8000' in script_text
+    assert 'Docker runtime API is already listening on port $runtimeApiPort; local API will use a different port.' in script_text
+
+
+def test_batch_help_describes_local_first_entrypoint():
     script_text = Path("start_roughcut.bat").read_text(encoding="utf-8")
+    usage_text = script_text.split(":usage", 1)[1]
 
-    assert "live source sync" in script_text
-    assert "auto-refresh Docker runtime" not in script_text
+    assert "One-click local development launcher" in usage_text
+    assert "Start local API / orchestrator / workers against local code" in usage_text
+    assert "Start explicit containerized runtime mode" in usage_text
+    assert "Start recommended Docker runtime with live source sync" not in usage_text
+    assert "runtime-auto-watch" not in usage_text
+    assert "full-auto-watch" not in usage_text
 
 
-def test_readme_describes_live_sync_as_default_and_watch_as_explicit_mode():
+def test_readme_describes_local_first_development_flow():
     readme_text = Path("README.md").read_text(encoding="utf-8")
 
-    assert "`runtime/full` 默认会带上 `docker-compose.dev.yml`" in readme_text
-    assert "live source sync" in readme_text
-    assert "`runtime-watch/full-watch`" in readme_text
-    assert "host-side rebuild watch" in readme_text
+    assert "现在推荐的日常开发路径是：本地 Python + 本地前端 + 必要时只起 `infra`" in readme_text
+    assert "`start_roughcut.bat` 作为默认开发入口" in readme_text
+    assert "`runtime/full` 仍保留，但属于显式容器模式" in readme_text
+    assert "Docker 更适合基础依赖、部署验证和显式容器化运行" in readme_text
+    assert "runtime-auto-watch" not in readme_text
+    assert "full-auto-watch" not in readme_text
 
 
 def test_bootstrap_and_docs_prefer_qwen3_asr_over_local_asr_defaults():
@@ -74,6 +88,15 @@ def test_bootstrap_and_docs_prefer_qwen3_asr_over_local_asr_defaults():
     assert "如果你明确要在宿主机里启用 `funasr` / `faster-whisper`" in readme_text
     assert "TRANSCRIPTION_PROVIDER=qwen3_asr" in readme_text
     assert "离线本地依赖可选 `funasr + sensevoice-small` 或 `faster_whisper`" in readme_text
+
+
+def test_package_scripts_demote_ambiguous_docker_up_aliases():
+    package_json = json.loads(Path("package.json").read_text(encoding="utf-8"))
+
+    assert package_json["scripts"]["docker:up"] == "pnpm docker:infra:up"
+    assert package_json["scripts"]["docker:down"] == "pnpm docker:infra:down"
+    assert package_json["scripts"]["docker:runtime:up"] == "pwsh -NoProfile -File start_roughcut.ps1 -Mode runtime"
+    assert package_json["scripts"]["docker:auto:up"] == "pwsh -NoProfile -File start_roughcut.ps1 -Mode full"
 
 
 def test_docker_compose_defaults_do_not_enable_local_asr():

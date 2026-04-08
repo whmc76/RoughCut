@@ -124,7 +124,9 @@ pnpm setup
 - `watch`
 - `.env`（若不存在且 `.env.example` 存在）
 
-### 4. 启动 Docker 服务
+### 4. 启动基础依赖
+
+现在推荐的日常开发路径是：本地 Python + 本地前端 + 必要时只起 `infra`。
 
 最低成本常驻，只起基础设施：
 
@@ -132,15 +134,17 @@ pnpm setup
 pnpm docker:infra:up
 ```
 
-推荐常驻，直接起 `infra + runtime`，默认启用 live source sync：
+这一步主要给本地 API / worker 提供 PostgreSQL、Redis 和 MinIO，不负责承载默认开发入口。
+
+如果你明确要跑容器化 runtime，再显式启动：
 
 ```bash
-pnpm docker:up
+pnpm docker:runtime:up
 ```
 
-其中基础设施包含 PostgreSQL（5432）和 Redis（6379）。
+其中基础设施包含 PostgreSQL（5432）和 Redis（6379），容器化 runtime/full 仍保留，但属于显式容器模式。
 
-如果你要一次性起全套服务并带自动重建（推荐开发时默认使用），使用：
+如果你要一次性起全套服务并带自动重建，使用：
 
 ```bash
 pnpm docker:auto:auto-up
@@ -339,15 +343,15 @@ uv run roughcut clip-test E:/videos/demo.mp4 --channel-profile edc_tactical --sa
 Windows 下当前建议把 [start_roughcut.bat](E:/WorkSpace/RoughCut/start_roughcut.bat) 作为用户入口：
 
 - `start_roughcut.bat`
-  一键启动包模式，后台拉起 API / orchestrator / workers，并自动打开浏览器；这个终端窗口本身就是托管器，直接关窗即可停掉整套服务
+  默认开发入口。后台拉起本地 API / orchestrator / workers，并服务本地构建的 `frontend/dist`；这个终端窗口本身就是托管器，直接关窗即可停掉整套服务
 - `start_roughcut.bat infra`
-  只启动 PostgreSQL / Redis 这套轻量基础设施
+  只启动 PostgreSQL / Redis / MinIO 这套轻量基础设施，供本地服务使用
 - `start_roughcut.bat runtime`
-  启动推荐的常驻 Docker runtime：`api + orchestrator + worker-media + worker-llm`；`runtime/full` 默认会带上 `docker-compose.dev.yml`，通过 bind mount + 容器内 watcher 提供 live source sync；默认不在容器里安装 `local-asr` extras
+  显式容器模式。启动容器化 `api + orchestrator + worker-media + worker-llm`；`runtime/full` 默认会带上 `docker-compose.dev.yml`，通过 bind mount + 容器内 watcher 提供 live source sync；默认不在容器里安装 `local-asr` extras
 - `start_roughcut.bat runtime-local-asr`
   启动 runtime，并显式在 Docker 镜像里启用 `local-asr` extras
 - `start_roughcut.bat full`
-  启动 runtime + automation（当前包含 `watcher`）；`runtime/full` 默认会带上 `docker-compose.dev.yml`，通过 bind mount + 容器内 watcher 提供 live source sync；默认不在容器里安装 `local-asr` extras
+  显式容器模式。启动 runtime + automation（当前包含 `watcher`）；`runtime/full` 默认会带上 `docker-compose.dev.yml`，通过 bind mount + 容器内 watcher 提供 live source sync；默认不在容器里安装 `local-asr` extras
 - `start_roughcut.bat full-local-asr`
   启动 full stack，并显式在 Docker 镜像里启用 `local-asr` extras
 - `start_roughcut.bat runtime-down`
@@ -358,14 +362,10 @@ Windows 下当前建议把 [start_roughcut.bat](E:/WorkSpace/RoughCut/start_roug
   显式启动 host-side rebuild watch，监听 workspace 改动并自动 refresh Docker runtime；适合需要整套镜像重建的开发/维护场景，不适合重任务常驻队列
 - `start_roughcut.bat full-watch`
   显式启动 host-side rebuild watch，监听 workspace 改动并自动 refresh runtime + automation
-- `start_roughcut.bat runtime-auto-watch`
-  启动 runtime 并直接进入 host-side 自动重建/watch 模式（等同于 `runtime-watch`）
-- `start_roughcut.bat full-auto-watch`
-  启动 full 并直接进入 host-side 自动重建/watch 模式（等同于 `full-watch`）
 - `pnpm docker:runtime:auto-up`
-  从根目录启动 runtime 服务并自动构建重建（host-side）
+  从根目录启动显式容器化 runtime，并自动构建重建（host-side）
 - `pnpm docker:auto:auto-up`
-  从根目录启动 full（runtime + automation）服务并自动构建重建（host-side）
+  从根目录启动显式容器化 full（runtime + automation），并自动构建重建（host-side）
 - `start_roughcut.bat dev`
   直接运行统一入口 `pnpm dev`
 - `start_roughcut.bat test`
@@ -376,6 +376,8 @@ Windows 下当前建议把 [start_roughcut.bat](E:/WorkSpace/RoughCut/start_roug
   运行 `pnpm build`
 
 `start_roughcut.ps1` 是当前主脚本，也是一键启动的实际实现。
+
+默认开发建议是把 `start_roughcut.bat` 作为默认开发入口；Docker 更适合基础依赖、部署验证和显式容器化运行。`pnpm docker:up/down` 现在只作为 `infra` 快捷别名保留。
 
 ---
 
@@ -443,8 +445,8 @@ docker compose -f docker-compose.infra.yml -f docker-compose.runtime.yml logs -f
 
 RoughCut 现在保留两种明确分离的代码同步模式：
 
-- 默认模式：`runtime/full` 自动带上 `docker-compose.dev.yml`，通过 bind mount + 容器内 watcher 提供 live source sync。
-- 显式模式：`runtime-watch/full-watch` 使用 host-side rebuild watch，在宿主机监听改动后触发一次 Docker refresh。
+- 容器默认同步模式：`runtime/full` 自动带上 `docker-compose.dev.yml`，通过 bind mount + 容器内 watcher 提供 live source sync。
+- 显式重建模式：`runtime-watch/full-watch` 使用 host-side rebuild watch，在宿主机监听改动后触发一次 Docker refresh。
 
 `docker-compose.dev.yml` 当前负责：
 
@@ -474,7 +476,7 @@ pnpm docker:auto:auto-up
 pnpm docker:auto:up:local-asr
 ```
 
-默认 Docker 启停入口现在直接走 live source sync：
+如果你明确要跑容器化 runtime，显式 Docker 启停入口直接走 live source sync：
 
 ```bash
 pnpm docker:runtime:up
@@ -488,8 +490,6 @@ pnpm docker:auto:down
 ```powershell
 ./start_roughcut.bat runtime-watch
 ./start_roughcut.bat full-watch
-./start_roughcut.bat runtime-auto-watch
-./start_roughcut.bat full-auto-watch
 ```
 
 如果你要把“启动 + 自动重建”合并为一条命令，可直接用：
@@ -507,7 +507,8 @@ host-side rebuild watch 方案和 Hydra 的差别是：
 
 注意：
 
-- `runtime/full` 更适合日常开发，因为同步链路更短，也不依赖隐藏的宿主机 watch 进程
+- 日常开发优先走本地 Python + 本地前端；Docker 更适合基础依赖、部署验证和显式容器化运行
+- `runtime/full` 仍保留，但属于显式容器模式，不再作为默认开发入口
 - `runtime-watch/full-watch` 更适合你明确需要整套镜像重建的场景，但不适合正在跑重任务的稳定常驻队列
 - host-side rebuild watch 每次命中改动都会重建并 `force-recreate` `api / orchestrator / workers`
 - `data/`、`logs/`、`watch/`、`.venv/`、`node_modules/`、`docs/` 默认不会触发 host-side rebuild refresh

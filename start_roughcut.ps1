@@ -1477,10 +1477,12 @@ if ($Mode -eq "full-down") {
 }
 
 if ($Mode -ne "local") {
-    Start-RoughCutComposeMode -ComposeMode $Mode
     if ($Mode -in @("runtime", "full") -and $AutoDockerWatch) {
-        Start-RoughCutDockerWatch -ComposeMode $Mode
+        $watchMode = if ($Mode -eq "full") { "full-watch" } else { "runtime-watch" }
+        Start-RoughCutDockerWatchMode -WatchMode $watchMode
+        exit 0
     }
+    Start-RoughCutComposeMode -ComposeMode $Mode
     exit 0
 }
 
@@ -1488,6 +1490,10 @@ Initialize-RoughCutEnvironment
 Ensure-RoughCutFrontend
 
 Stop-RoughCutServices
+
+Write-Host "Starting local RoughCut development stack..." -ForegroundColor Cyan
+Write-Host "Default workflow: local Python + local frontend + infra containers only when needed." -ForegroundColor DarkGray
+Write-Host "Docker runtime/full remain available as explicit containerized modes." -ForegroundColor DarkGray
 
     if (-not $SkipDocker) {
         Write-Host "Checking Docker services..." -ForegroundColor Cyan
@@ -1508,6 +1514,12 @@ Stop-RoughCutServices
         }
         Write-Host "Removing legacy FastCut containers..." -ForegroundColor Yellow
         docker rm -f $legacy | Out-Host
+    }
+
+    $runtimeApiPort = Resolve-ContainerMappedPort -ContainerName "roughcut-api-1" -ContainerPort 8000
+    if ($null -ne $runtimeApiPort) {
+        $usedPorts[$runtimeApiPort] = $true
+        Write-Host "Docker runtime API is already listening on port $runtimeApiPort; local API will use a different port." -ForegroundColor Yellow
     }
 
     $servicePorts = Resolve-PortSet -UsedPorts $usedPorts
