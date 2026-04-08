@@ -1,19 +1,20 @@
 :root {
   font-family: "IBM Plex Sans", "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
-  color: #f2f3f5;
+  color: #17181b;
   background:
-    radial-gradient(circle at 80% 10%, rgba(101, 120, 149, 0.1), transparent 20%),
-    linear-gradient(180deg, #07090d 0%, #0b0f14 48%, #090c11 100%);
-  color-scheme: dark;
-  --panel: rgba(13, 16, 21, 0.9);
-  --panel-border: rgba(255, 255, 255, 0.08);
-  --line: rgba(255, 255, 255, 0.08);
-  --text-muted: #99a3b5;
-  --accent: #9ca8bb;
-  --accent-strong: #f4f7fc;
-  --danger: #ff7b7b;
-  --ok: #7ad7aa;
-  --off: #6d7688;
+    radial-gradient(circle at 12% 0%, rgba(201, 107, 75, 0.14), transparent 24%),
+    radial-gradient(circle at 88% 8%, rgba(45, 106, 106, 0.12), transparent 22%),
+    linear-gradient(180deg, #f4efe6 0%, #ece6da 50%, #e7e0d2 100%);
+  color-scheme: light;
+  --panel: rgba(239, 233, 223, 0.92);
+  --panel-border: rgba(23, 24, 27, 0.08);
+  --line: rgba(23, 24, 27, 0.08);
+  --text-muted: #66625c;
+  --accent: #2d6a6a;
+  --accent-strong: #c96b4b;
+  --danger: #c14c4c;
+  --ok: #2d7b63;
+  --off: #78756f;
   --rail-width: 154px;
   --stage-max: 1600px;
 }
@@ -51,9 +52,9 @@ select {
 
 .app-rail {
   padding: 18px 14px 16px;
-  border-right: 1px solid rgba(255, 255, 255, 0.06);
+  border-right: 1px solid rgba(23, 24, 27, 0.06);
   background:
-    linear-gradient(180deg, rgba(7, 8, 10, 0.98), rgba(10, 12, 16, 0.96));
+    linear-gradient(180deg, rgba(227, 219, 207, 0.98), rgba(220, 212, 199, 0.96));
   display: grid;
   grid-template-rows: auto auto 1fr auto;
   gap: 16px;
@@ -77,7 +78,7 @@ select {
   font-size: 11px;
   letter-spacing: 0.18em;
   text-transform: uppercase;
-  color: rgba(255, 255, 255, 0.46);
+  color: rgba(23, 24, 27, 0.45);
   margin-bottom: 8px;
 }
 
@@ -92,11 +93,12 @@ select {
   display: grid;
   place-items: center;
   border-radius: 16px;
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(45, 106, 106, 0.18);
   background:
-    linear-gradient(160deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0.03)),
-    rgba(9, 10, 10, 0.95);
-  color: #f7f9fc;
+    radial-gradient(circle at 30% 30%, rgba(201, 107, 75, 0.16), transparent 54%),
+    linear-gradient(160deg, rgba(255, 255, 255, 0.4), rgba(223, 215, 202, 0.8)),
+    rgba(240, 233, 223, 0.96);
+  color: #17181b;
   font-weight: 800;
   letter-spacing: 0.16em;
   font-size: 13px;
@@ -111,6 +113,7 @@ select {
   font-size: 20px;
   line-height: 1.05;
   letter-spacing: -0.03em;
+  color: #17181b;
 }
 
 .rail-brand-copy span {
@@ -128,9 +131,9 @@ select {
   min-height: 52px;
   padding: 10px 10px 10px 8px;
   border-radius: 18px;
-  color: #d8dfeb;
+  color: rgba(23, 24, 27, 0.82);
   border: 1px solid transparent;
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.02), rgba(255, 255, 255, 0));
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.34), rgba(255, 255, 255, 0.08));
   transition:
     transform 160ms ease,
     border-color 160ms ease,
@@ -145,13 +148,15 @@ select {
 
 .rail-link:hover,
 .rail-link.active {
-  color: #f8fbff;
+  color: #17181b;
   transform: translateX(2px);
-  border-color: rgba(255, 255, 255, 0.14);
-  background: linear-gradient(135deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0.02));
+  border-color: rgba(45, 106, 106, 0.24);
+  background:
+    linear-gradient(135deg, rgba(45, 106, 106, 0.16), rgba(255, 255, 255, 0.52)),
+    rgba(255, 255, 255, 0.12);
   box-shadow:
-    inset 0 0 0 1px rgba(255, 255, 255, 0.04),
-    0 12px 24px rgba(0, 0, 0, 0.18);
+    inset 0 0 0 1px rgba(255, 255, 255, 0.22),
+    0 12px 24px rgba(67, 58, 49, 0.1);
 }
 
 .rail-link-index {
@@ -171,8 +176,8 @@ select {
   gap: 10px;
   padding: 12px 14px;
   border-radius: 18px;
-  border: 1px solid rgba(255, 255, 255, 0.06);
-  background: rgba(255, 255, 255, 0.025);
+  border: 1px solid rgba(23, 24, 27, 0.06);
+  background: rgba(255, 255, 255, 0.24);
 }
 
 .rail-locale {
@@ -190,10 +195,10 @@ select {
 .rail-locale-option {
   min-height: 38px;
   padding: 8px 0;
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(23, 24, 27, 0.08);
   border-radius: 12px;
-  background: rgba(255, 255, 255, 0.03);
-  color: rgba(243, 246, 251, 0.72);
+  background: rgba(255, 255, 255, 0.24);
+  color: rgba(23, 24, 27, 0.72);
   font-size: 13px;
   font-weight: 700;
   letter-spacing: 0.02em;
@@ -206,16 +211,16 @@ select {
 }
 
 .rail-locale-option:hover {
-  border-color: rgba(255, 255, 255, 0.16);
-  color: #f8fbff;
+  border-color: rgba(45, 106, 106, 0.18);
+  color: #17181b;
   transform: translateY(-1px);
 }
 
 .rail-locale-option.active {
-  border-color: rgba(206, 214, 226, 0.26);
-  background: linear-gradient(135deg, rgba(206, 214, 226, 0.18), rgba(110, 124, 146, 0.16));
-  color: #ffffff;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  border-color: rgba(45, 106, 106, 0.24);
+  background: linear-gradient(135deg, rgba(45, 106, 106, 0.18), rgba(255, 255, 255, 0.5));
+  color: #17181b;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.36);
 }
 
 .rail-notes code {
@@ -349,6 +354,7 @@ select {
   font-size: clamp(24px, 2.2vw, 30px);
   line-height: 1;
   letter-spacing: -0.05em;
+  color: #17181b;
 }
 
 .page-header-actions,
@@ -390,19 +396,19 @@ select {
 }
 
 .muted-strong {
-  color: #ffd4d4;
+  color: #a64646;
 }
 
 .panel {
   border: 1px solid var(--panel-border);
   background:
-    linear-gradient(180deg, rgba(17, 20, 20, 0.94), rgba(11, 13, 14, 0.88)),
+    linear-gradient(180deg, rgba(245, 239, 231, 0.96), rgba(233, 226, 214, 0.92)),
     var(--panel);
   border-radius: 24px;
   padding: 20px;
   box-shadow:
-    0 20px 44px rgba(0, 0, 0, 0.22),
-    inset 0 1px 0 rgba(255, 255, 255, 0.03);
+    0 20px 44px rgba(77, 66, 53, 0.08),
+    inset 0 1px 0 rgba(255, 255, 255, 0.3);
 }
 
 .settings-summary-panel {
@@ -542,7 +548,7 @@ select {
 label {
   display: grid;
   gap: 8px;
-  color: #dfe6f0;
+  color: #1e2124;
   font-size: 14px;
 }
 
@@ -565,40 +571,41 @@ label {
   padding: 10px 12px;
   border-radius: 12px;
   border: 1px solid var(--line);
-  background: rgba(255, 255, 255, 0.04);
-  color: #f3f6fb;
+  background: rgba(255, 255, 255, 0.45);
+  color: #17181b;
 }
 
 select.input {
   color-scheme: light;
-  background: rgba(15, 18, 24, 0.96);
-  color: #f3f6fb;
+  background: rgba(255, 255, 255, 0.68);
+  color: #17181b;
 }
 
 select.input option {
-  background: #11161d;
-  color: #f3f6fb;
+  background: #f4efe6;
+  color: #17181b;
 }
 
 select.input option:checked,
 select.input option:hover,
 select.input option:focus {
-  background: #1b2430;
-  color: #f7fbff;
+  background: #ddd6c8;
+  color: #17181b;
 }
 
 .button {
   border: 1px solid var(--line);
-  background: rgba(255, 255, 255, 0.03);
-  color: #f3f6fb;
+  background: rgba(255, 255, 255, 0.35);
+  color: #17181b;
   padding: 10px 14px;
   border-radius: 12px;
   cursor: pointer;
 }
 
 .button.primary {
-  border-color: rgba(197, 211, 229, 0.28);
-  background: linear-gradient(135deg, rgba(197, 211, 229, 0.16), rgba(112, 131, 158, 0.2));
+  border-color: rgba(45, 106, 106, 0.24);
+  background: linear-gradient(135deg, rgba(45, 106, 106, 0.82), rgba(55, 122, 122, 0.9));
+  color: #f8f5ef;
 }
 
 .button.button-sm {
@@ -613,7 +620,7 @@ select.input option:focus {
 }
 
 .button.ghost {
-  background: rgba(255, 255, 255, 0.02);
+  background: rgba(255, 255, 255, 0.22);
 }
 
 .button.danger {
@@ -1445,7 +1452,7 @@ select.input option:focus {
 
 .list-card.selected,
 .selected-row {
-  background: rgba(240, 181, 108, 0.08);
+  background: rgba(45, 106, 106, 0.1);
 }
 
 .row-meta {
@@ -1466,11 +1473,14 @@ select.input option:focus {
   border: 1px solid var(--line);
   font-size: 12px;
   width: fit-content;
+  background: rgba(255, 255, 255, 0.34);
 }
 
 .status-chip.done,
 .status-pill.done {
   color: var(--ok);
+  border-color: rgba(45, 123, 99, 0.16);
+  background: rgba(45, 123, 99, 0.08);
 }
 
 .status-chip.failed,
@@ -1478,6 +1488,8 @@ select.input option:focus {
 .status-chip.cancelled,
 .status-pill.cancelled {
   color: var(--danger);
+  border-color: rgba(193, 76, 76, 0.16);
+  background: rgba(193, 76, 76, 0.08);
 }
 
 .status-chip.running,
@@ -1485,6 +1497,8 @@ select.input option:focus {
 .status-chip.processing,
 .status-pill.processing {
   color: var(--accent);
+  border-color: rgba(45, 106, 106, 0.18);
+  background: rgba(45, 106, 106, 0.08);
 }
 
 .status-pill {
@@ -1494,8 +1508,8 @@ select.input option:focus {
 .activity-alert {
   border-left: 3px solid var(--danger);
   background:
-    linear-gradient(90deg, rgba(255, 123, 123, 0.1), transparent),
-    rgba(255, 255, 255, 0.03);
+    linear-gradient(90deg, rgba(193, 76, 76, 0.12), transparent),
+    rgba(255, 255, 255, 0.3);
 }
 
 .timeline-item.event-failed {
@@ -1515,8 +1529,8 @@ select.input option:focus {
 .timeline-item.event-diagnostic {
   border-left-color: var(--accent-strong);
   background:
-    linear-gradient(90deg, rgba(255, 181, 108, 0.14), rgba(0, 0, 0, 0)),
-    rgba(255, 181, 108, 0.05);
+    linear-gradient(90deg, rgba(201, 107, 75, 0.12), rgba(255, 255, 255, 0)),
+    rgba(201, 107, 75, 0.06);
 }
 
 .step-row-error {
@@ -1526,7 +1540,7 @@ select.input option:focus {
 
 .step-row-running {
   border-left: 3px solid var(--accent);
-  background: rgba(123, 210, 255, 0.06);
+  background: rgba(45, 106, 106, 0.08);
 }
 
 .step-mini-list {
@@ -4208,7 +4222,7 @@ select.input option:focus {
   align-items: center;
   justify-content: center;
   border-radius: 999px;
-  background: rgba(255, 181, 108, 0.14);
+  background: rgba(45, 106, 106, 0.12);
   color: var(--accent);
   font-size: 12px;
 }
@@ -4234,7 +4248,7 @@ select.input option:focus {
 .overview-page .page-header .muted,
 .jobs-page .page-header .muted {
   max-width: 28rem;
-  color: rgba(255, 255, 255, 0.58);
+  color: rgba(23, 24, 27, 0.62);
 }
 
 .jobs-command-deck {
@@ -4247,9 +4261,9 @@ select.input option:focus {
 .jobs-queue-stage,
 .jobs-active-band,
 .jobs-create-stage {
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  background: linear-gradient(180deg, rgba(11, 14, 18, 0.96), rgba(8, 10, 14, 0.92));
-  box-shadow: 0 24px 56px rgba(0, 0, 0, 0.2);
+  border: 1px solid rgba(23, 24, 27, 0.08);
+  background: linear-gradient(180deg, rgba(244, 239, 230, 0.96), rgba(232, 224, 211, 0.92));
+  box-shadow: 0 18px 40px rgba(81, 70, 58, 0.08);
 }
 
 .jobs-command-card {
@@ -4261,7 +4275,7 @@ select.input option:focus {
 }
 
 .jobs-command-card span {
-  color: rgba(255, 255, 255, 0.46);
+  color: rgba(23, 24, 27, 0.48);
   font-size: 11px;
   letter-spacing: 0.14em;
   text-transform: uppercase;
@@ -4275,7 +4289,7 @@ select.input option:focus {
 
 .jobs-command-card p {
   margin: 0;
-  color: rgba(255, 255, 255, 0.58);
+  color: rgba(23, 24, 27, 0.58);
   line-height: 1.45;
 }
 
@@ -4304,7 +4318,7 @@ select.input option:focus {
 
 .jobs-stage-head p {
   margin: 8px 0 0;
-  color: rgba(255, 255, 255, 0.58);
+  color: rgba(23, 24, 27, 0.58);
   line-height: 1.5;
 }
 
@@ -4316,7 +4330,7 @@ select.input option:focus {
 }
 
 .jobs-stage-meta span {
-  color: rgba(255, 255, 255, 0.46);
+  color: rgba(23, 24, 27, 0.46);
   font-size: 11px;
   letter-spacing: 0.14em;
   text-transform: uppercase;
@@ -4339,8 +4353,8 @@ select.input option:focus {
   gap: 12px;
   padding: 18px;
   border-radius: 18px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid rgba(23, 24, 27, 0.08);
+  background: rgba(255, 255, 255, 0.36);
 }
 
 .jobs-active-copy {
@@ -4356,7 +4370,7 @@ select.input option:focus {
 
 .jobs-active-copy p {
   margin: 0;
-  color: rgba(255, 255, 255, 0.58);
+  color: rgba(23, 24, 27, 0.58);
   line-height: 1.45;
 }
 
@@ -4365,7 +4379,7 @@ select.input option:focus {
   justify-content: space-between;
   gap: 12px;
   align-items: center;
-  color: rgba(255, 255, 255, 0.48);
+  color: rgba(23, 24, 27, 0.48);
   font-size: 12px;
 }
 
@@ -4382,7 +4396,7 @@ select.input option:focus {
 }
 
 .jobs-create-panel .panel {
-  background: rgba(255, 255, 255, 0.02);
+  background: rgba(255, 255, 255, 0.3);
 }
 
 .overview-masthead,
@@ -4393,11 +4407,12 @@ select.input option:focus {
   gap: 20px;
   padding: 28px;
   border-radius: 32px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(23, 24, 27, 0.08);
   background:
-    radial-gradient(circle at 82% 18%, rgba(86, 101, 127, 0.14), transparent 24%),
-    linear-gradient(180deg, rgba(10, 12, 17, 0.98), rgba(9, 11, 15, 0.94));
-  box-shadow: 0 30px 80px rgba(0, 0, 0, 0.3);
+    radial-gradient(circle at 14% 12%, rgba(201, 107, 75, 0.16), transparent 24%),
+    radial-gradient(circle at 82% 18%, rgba(45, 106, 106, 0.12), transparent 24%),
+    linear-gradient(180deg, rgba(243, 237, 227, 0.98), rgba(232, 223, 210, 0.94));
+  box-shadow: 0 24px 48px rgba(81, 70, 58, 0.1);
 }
 
 .overview-masthead::after,
@@ -4407,7 +4422,7 @@ select.input option:focus {
   inset: auto 22px 22px auto;
   width: 120px;
   height: 1px;
-  background: linear-gradient(90deg, rgba(255,255,255,0), rgba(255,255,255,0.26));
+  background: linear-gradient(90deg, rgba(23,24,27,0), rgba(23,24,27,0.18));
 }
 
 .overview-masthead-copy,
@@ -4428,7 +4443,7 @@ select.input option:focus {
 .overview-masthead-copy p,
 .jobs-intro-copy p {
   margin: 0;
-  color: rgba(255, 255, 255, 0.6);
+  color: rgba(23, 24, 27, 0.64);
   max-width: 34rem;
   font-size: 15px;
   line-height: 1.55;
@@ -4447,13 +4462,13 @@ select.input option:focus {
   gap: 8px;
   padding: 16px 14px;
   min-height: 88px;
-  border-top: 1px solid rgba(255, 255, 255, 0.12);
-  background: linear-gradient(180deg, rgba(255,255,255,0.04), rgba(255,255,255,0.01));
+  border-top: 1px solid rgba(23, 24, 27, 0.1);
+  background: linear-gradient(180deg, rgba(255,255,255,0.26), rgba(255,255,255,0.08));
 }
 
 .overview-masthead-signal span,
 .jobs-intro-metric span {
-  color: rgba(255, 255, 255, 0.52);
+  color: rgba(23, 24, 27, 0.52);
   font-size: 10px;
   letter-spacing: 0.16em;
   text-transform: uppercase;
@@ -4480,10 +4495,10 @@ select.input option:focus {
   display: grid;
   gap: 14px;
   padding: 24px;
-  border-top: 1px solid rgba(255, 255, 255, 0.12);
+  border-top: 1px solid rgba(23, 24, 27, 0.12);
   background:
-    linear-gradient(180deg, rgba(12, 15, 20, 0.94), rgba(9, 11, 14, 0.92)),
-    rgba(255, 255, 255, 0.02);
+    linear-gradient(180deg, rgba(245, 239, 230, 0.94), rgba(235, 227, 214, 0.92)),
+    rgba(255, 255, 255, 0.2);
 }
 
 .overview-surface-head {
@@ -4491,7 +4506,7 @@ select.input option:focus {
   justify-content: space-between;
   gap: 12px;
   align-items: center;
-  color: rgba(255,255,255,0.5);
+  color: rgba(23,24,27,0.5);
   font-size: 11px;
   letter-spacing: 0.18em;
   text-transform: uppercase;
@@ -4503,7 +4518,7 @@ select.input option:focus {
   gap: 14px;
   align-items: start;
   padding: 16px 0;
-  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  border-top: 1px solid rgba(23, 24, 27, 0.08);
 }
 
 .overview-job-row:first-of-type {
@@ -4513,7 +4528,7 @@ select.input option:focus {
 
 .overview-job-row-index {
   font-size: 12px;
-  color: rgba(255,255,255,0.4);
+  color: rgba(23,24,27,0.4);
   letter-spacing: 0.18em;
   padding-top: 4px;
 }
@@ -4530,7 +4545,7 @@ select.input option:focus {
 
 .overview-job-row-copy p {
   margin: 0;
-  color: rgba(255, 255, 255, 0.58);
+  color: rgba(23, 24, 27, 0.58);
   line-height: 1.5;
 }
 
@@ -4538,7 +4553,7 @@ select.input option:focus {
   display: grid;
   gap: 8px;
   justify-items: end;
-  color: rgba(255,255,255,0.48);
+  color: rgba(23,24,27,0.48);
   font-size: 12px;
 }
 
@@ -4984,4 +4999,204 @@ select.input option:focus {
   .style-lab-hero-signals {
     justify-content: flex-start;
   }
+}
+
+/* Mineral Editorial final palette pass */
+.app-stage-locale,
+.app-stage-build {
+  border: 1px solid rgba(23, 24, 27, 0.08);
+  background: rgba(255, 255, 255, 0.42);
+  box-shadow: 0 10px 24px rgba(73, 60, 49, 0.05);
+}
+
+.app-stage-build code {
+  background: rgba(201, 107, 75, 0.12);
+  color: #7b4737;
+}
+
+.overview-command-main,
+.overview-action-stack,
+.overview-focus-lane,
+.jobs-queue-lane,
+.jobs-creation-bay,
+.jobs-urgent-rail,
+.jobs-creation-profile,
+.jobs-upload-slot,
+.jobs-creation-band,
+.overview-action-block,
+.overview-runtime-panel,
+.overview-analysis-column,
+.overview-telemetry-band,
+.watch-command-chip,
+.watch-health-lane,
+.watch-roots-lane,
+.watch-form-lane,
+.style-lab-hero,
+.style-lab-panel,
+.style-lab-mode-column,
+.style-lab-presenter-stage,
+.settings-architecture-deck,
+.settings-stage,
+.settings-summary-panel,
+.settings-core-panel,
+.settings-runtime-panel,
+.settings-extension-panel,
+.settings-quality-panel,
+.mode-card,
+.config-profile-switcher,
+.config-profile-chip,
+.config-profile-summary-card {
+  border-color: rgba(23, 24, 27, 0.08);
+  background:
+    radial-gradient(circle at top right, rgba(45, 106, 106, 0.05), transparent 34%),
+    linear-gradient(180deg, rgba(247, 243, 236, 0.96), rgba(235, 228, 218, 0.92));
+  box-shadow: 0 18px 40px rgba(81, 70, 58, 0.08);
+}
+
+.style-lab-hero,
+.overview-command-main {
+  background:
+    radial-gradient(circle at 12% 18%, rgba(201, 107, 75, 0.14), transparent 28%),
+    radial-gradient(circle at 84% 16%, rgba(45, 106, 106, 0.12), transparent 26%),
+    linear-gradient(180deg, rgba(246, 242, 234, 0.98), rgba(234, 226, 215, 0.94));
+  box-shadow: 0 24px 56px rgba(81, 70, 58, 0.1);
+}
+
+.overview-command-main::before,
+.jobs-queue-lane::before,
+.jobs-creation-bay::before,
+.watch-health-lane::before,
+.watch-roots-lane::before,
+.watch-form-lane::before,
+.style-lab-panel::before,
+.settings-architecture-deck::before,
+.settings-stage::before,
+.settings-stage-core::before,
+.settings-stage-quality::before,
+.settings-stage-automation::before {
+  background: linear-gradient(180deg, rgba(201, 107, 75, 0.8), rgba(45, 106, 106, 0.2));
+}
+
+.overview-signal-strip,
+.overview-action-index,
+.overview-runtime-row,
+.jobs-active-card,
+.jobs-create-panel,
+.jobs-command-card,
+.style-lab-page .mode-card,
+.style-lab-preset-lanes .panel,
+.style-lab-hero-signals .status-pill,
+.jobs-create-panel .panel,
+.jobs-create-panel .config-profile-switcher,
+.mode-card,
+.config-profile-chip,
+.config-profile-summary-card {
+  border-color: rgba(23, 24, 27, 0.08);
+  background: rgba(255, 255, 255, 0.46);
+}
+
+.overview-command-feed,
+.overview-feed-row,
+.overview-action-link,
+.overview-focus-row,
+.overview-runtime-row,
+.jobs-urgent-row,
+.overview-action-block,
+.overview-runtime-panel,
+.overview-analysis-column,
+.overview-telemetry-band,
+.jobs-creation-band {
+  border-top-color: rgba(23, 24, 27, 0.08);
+}
+
+.overview-action-index {
+  color: var(--accent);
+}
+
+.overview-action-link:hover {
+  color: var(--accent);
+}
+
+.overview-action-link p,
+.overview-focus-copy p,
+.overview-runtime-note,
+.overview-runtime-row,
+.overview-command-copy p,
+.overview-feed-copy p,
+.overview-feed-meta,
+.jobs-stage-head p,
+.jobs-command-card p,
+.jobs-active-copy p,
+.jobs-active-meta,
+.watch-command-label,
+.style-lab-hero-copy p,
+.settings-architecture-lead p,
+.config-profile-chip-description,
+.config-profile-chip-meta {
+  color: rgba(23, 24, 27, 0.6);
+}
+
+.watch-command-chip strong,
+.style-lab-hero-copy h3,
+.settings-architecture-lead h3,
+.config-profile-chip-title,
+.style-selected-card-copy strong,
+.mock-cover-caption strong,
+.copy-title-plain,
+.rail-notes code {
+  color: #17181b;
+}
+
+.config-profile-chip-button:hover .config-profile-chip-title,
+.config-profile-chip-button:hover .config-profile-chip-meta,
+.config-profile-chip-button:hover .config-profile-chip-description {
+  color: #17181b;
+}
+
+.mode-list-index,
+.text-link {
+  color: var(--accent);
+}
+
+.list-card.selected,
+.selected-row,
+.config-profile-chip.active,
+.style-filter-chip.selected,
+.style-filter-chip:hover,
+.preset-card:hover,
+.preset-card.selected,
+.style-section-subtitle .style-selected-card,
+.style-section-subtitleMotion .style-selected-card,
+.style-section-cover .style-selected-card,
+.style-section-title .style-selected-card,
+.style-section-copy .style-selected-card {
+  border-color: rgba(45, 106, 106, 0.24);
+  background: linear-gradient(160deg, rgba(45, 106, 106, 0.12), rgba(255, 255, 255, 0.5));
+}
+
+.preset-card-subtitle,
+.preset-card-subtitle.selected,
+.preset-card-subtitleMotion,
+.preset-card-subtitleMotion.selected,
+.preset-card-cover,
+.preset-card-cover.selected,
+.preset-card-title,
+.preset-card-title.selected,
+.preset-card-copy,
+.preset-card-copy.selected {
+  border-color: rgba(23, 24, 27, 0.08);
+  background: linear-gradient(160deg, rgba(201, 107, 75, 0.08), rgba(255, 255, 255, 0.44));
+  box-shadow: inset 0 0 0 1px rgba(201, 107, 75, 0.06);
+}
+
+.timeline-item.event-diagnostic {
+  background:
+    linear-gradient(90deg, rgba(201, 107, 75, 0.12), rgba(255, 255, 255, 0)),
+    rgba(201, 107, 75, 0.06);
+}
+
+.style-section-collapsed:focus-visible,
+.config-profile-chip-button:focus-visible,
+.config-profile-chip-actions .button:focus-visible {
+  outline: 2px solid rgba(45, 106, 106, 0.34);
 }

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -77,6 +78,7 @@ from roughcut.review.content_profile_review_stats import (
     record_content_profile_manual_review,
 )
 from roughcut.review.domain_glossaries import detect_glossary_domains
+from roughcut.review.subtitle_memory import build_subtitle_review_memory
 from roughcut.review.report import generate_report
 from roughcut.runtime_refresh_hold import touch_runtime_refresh_hold
 from roughcut.storage.s3 import get_storage, job_key
@@ -2283,7 +2285,83 @@ def _resolve_job_content_preview(artifacts: list[Artifact]) -> dict[str, str | N
     ]
     subject = " · ".join(part for part in subject_parts if part).strip() or None
     summary = str(data.get("summary") or data.get("hook_line") or "").strip() or None
+    subject = _normalize_preview_text_with_review_memory(subject, data)
+    summary = _normalize_preview_text_with_review_memory(summary, data)
     return {"subject": subject, "summary": summary}
+
+
+def _normalize_preview_text_with_review_memory(text: str | None, data: dict[str, Any]) -> str | None:
+    value = str(text or "").strip() or None
+    if not value:
+        return None
+    if not _preview_has_trusted_review_context(data):
+        return value
+    review_memory = _build_preview_review_memory(data)
+    if not review_memory:
+        return value
+    normalized = _apply_preview_alias_corrections(value, review_memory)
+    return str(normalized or "").strip() or value
+
+
+def _preview_has_trusted_review_context(data: dict[str, Any]) -> bool:
+    payload = data if isinstance(data, dict) else {}
+    content_understanding = payload.get("content_understanding") if isinstance(payload.get("content_understanding"), dict) else {}
+    video_type = normalize_video_type(
+        str(content_understanding.get("video_type") or payload.get("content_kind") or "").strip()
+    )
+    if not video_type:
+        return False
+    explicit_domain = str(content_understanding.get("content_domain") or payload.get("subject_domain") or "").strip()
+    if explicit_domain:
+        return True
+    context_profile = {
+        "subject_type": str(payload.get("subject_type") or "").strip(),
+        "video_theme": str(payload.get("video_theme") or "").strip(),
+    }
+    detected_domains = detect_glossary_domains(
+        workflow_template=str(payload.get("workflow_template") or "").strip() or None,
+        content_profile=context_profile,
+        subtitle_items=None,
+    )
+    return bool(detected_domains)
+
+
+def _build_preview_review_memory(data: dict[str, Any]) -> dict[str, Any] | None:
+    payload = data if isinstance(data, dict) else {}
+    content_understanding = payload.get("content_understanding") if isinstance(payload.get("content_understanding"), dict) else {}
+    subject_domain = str(content_understanding.get("content_domain") or payload.get("subject_domain") or "").strip() or None
+    preview_profile = {
+        "workflow_template": str(payload.get("workflow_template") or "").strip(),
+        "content_kind": str(payload.get("content_kind") or "").strip(),
+        "subject_domain": subject_domain or "",
+        "subject_brand": str(payload.get("subject_brand") or "").strip(),
+        "subject_model": str(payload.get("subject_model") or "").strip(),
+        "subject_type": str(payload.get("subject_type") or "").strip(),
+        "video_theme": str(payload.get("video_theme") or "").strip(),
+    }
+    return build_subtitle_review_memory(
+        workflow_template=preview_profile["workflow_template"] or None,
+        subject_domain=subject_domain,
+        glossary_terms=[],
+        user_memory={},
+        recent_subtitles=[],
+        content_profile=preview_profile,
+        include_recent_terms=False,
+        include_recent_examples=False,
+    )
+
+
+def _apply_preview_alias_corrections(text: str, review_memory: dict[str, Any] | None) -> str:
+    result = str(text or "").strip()
+    if not result:
+        return result
+    for item in (review_memory or {}).get("aliases") or []:
+        wrong = str(item.get("wrong") or "").strip()
+        correct = str(item.get("correct") or "").strip()
+        if not wrong or not correct or wrong == correct:
+            continue
+        result = re.sub(re.escape(wrong), correct, result, flags=re.IGNORECASE)
+    return result
 
 
 def _resolve_job_avatar_preview(job: Job) -> dict[str, str | None]:

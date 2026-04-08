@@ -792,7 +792,7 @@ def test_build_subtitle_review_memory_injects_bag_hotwords_only_with_bag_context
         channel_profile="unboxing_standard",
         glossary_terms=[],
         user_memory={},
-        recent_subtitles=[{"text_final": "这次狐蝠工业阵风机能双肩包，重点看分仓、挂点和背负。"}],
+        recent_subtitles=[{"text_final": "这次狐蝠工业阵风机能双肩包，还有船长和船厂这个牌子，重点看分仓、挂点和背负。"}],
         content_profile={"video_theme": "机能双肩包开箱评测"},
     )
 
@@ -803,6 +803,8 @@ def test_build_subtitle_review_memory_injects_bag_hotwords_only_with_bag_context
     assert "阵风" in terms
     assert "双肩包" in terms
     assert ("FOXBAT", "狐蝠工业") in alias_map
+    assert ("船长", "BOLTBOAT") in alias_map
+    assert ("船厂", "BOLTBOAT") in alias_map
 
 
 def test_build_subtitle_review_memory_does_not_inject_bag_hotwords_into_flashlight_context():
@@ -810,7 +812,7 @@ def test_build_subtitle_review_memory_does_not_inject_bag_hotwords_into_flashlig
         channel_profile="edc_tactical",
         glossary_terms=[],
         user_memory={},
-        recent_subtitles=[{"text_final": "这次主要聊手电的流明和泛光，顺嘴提了一下赫斯郡和船家。"}],
+        recent_subtitles=[{"text_final": "这次主要聊手电的流明和泛光，顺嘴提了一下赫斯郡、船家、船长和船厂。"}],
         content_profile={"video_theme": "EDC手电版本对比评测"},
     )
 
@@ -821,6 +823,8 @@ def test_build_subtitle_review_memory_does_not_inject_bag_hotwords_into_flashlig
     assert "游刃" not in terms
     assert ("赫斯郡", "HSJUN") not in alias_map
     assert ("船家", "BOLTBOAT") not in alias_map
+    assert ("船长", "BOLTBOAT") not in alias_map
+    assert ("船厂", "BOLTBOAT") not in alias_map
 
 
 def test_build_transcription_prompt_prioritizes_bag_identity_hotwords_for_functional_domain():

@@ -44,6 +44,57 @@ def test_job_content_preview_ignores_generic_placeholder_subject_fields():
     assert preview["summary"] == "这条视频当前主题待进一步确认，建议结合字幕、画面文字和人工核对后再继续包装。"
 
 
+def test_job_content_preview_normalizes_bag_aliases_only_with_trusted_context():
+    from roughcut.api.jobs import _resolve_job_content_preview
+    from roughcut.db.models import Artifact
+
+    preview = _resolve_job_content_preview(
+        [
+            Artifact(
+                artifact_type="content_profile_final",
+                data_json={
+                    "content_kind": "unboxing",
+                    "workflow_template": "unboxing_standard",
+                    "subject_domain": "functional",
+                    "subject_type": "EDC机能包",
+                    "video_theme": "机能双肩包开箱评测",
+                    "summary": "up主开箱赫斯郡与船长联名的两款机能双肩包。",
+                    "content_understanding": {
+                        "video_type": "unboxing",
+                        "content_domain": "functional",
+                    },
+                },
+            )
+        ]
+    )
+
+    assert preview["summary"] == "up主开箱HSJUN与BOLTBOAT联名的两款机能双肩包。"
+
+
+def test_job_content_preview_keeps_aliases_without_trusted_context():
+    from roughcut.api.jobs import _resolve_job_content_preview
+    from roughcut.db.models import Artifact
+
+    preview = _resolve_job_content_preview(
+        [
+            Artifact(
+                artifact_type="content_profile",
+                data_json={
+                    "subject_type": "unknown",
+                    "video_theme": "待确认",
+                    "summary": "这次主要聊赫斯郡和船长。",
+                    "content_understanding": {
+                        "video_type": "",
+                        "content_domain": "",
+                    },
+                },
+            )
+        ]
+    )
+
+    assert preview["summary"] == "这次主要聊赫斯郡和船长。"
+
+
 @pytest.mark.asyncio
 async def test_health_detail_reports_runtime_surfaces(client: AsyncClient, monkeypatch: pytest.MonkeyPatch):
     import roughcut.api.health as health_api

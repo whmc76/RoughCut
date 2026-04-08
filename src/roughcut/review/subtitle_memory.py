@@ -245,7 +245,7 @@ _CATEGORY_SCOPE_PRIMARY_DOMAINS: dict[str, tuple[str, ...]] = {
     "bag": ("functional",),
     "flashlight": ("edc",),
     "knife": ("edc",),
-    "tools": ("tools",),
+    "tools": ("tools", "edc", "outdoor"),
 }
 
 _ARABIC_TO_CHINESE_DIGITS = str.maketrans("0123456789", "零一二三四五六七八九")
