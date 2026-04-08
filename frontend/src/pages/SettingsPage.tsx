@@ -86,7 +86,7 @@ export function SettingsPage() {
           : t("autosave.idle");
 
   return (
-    <section className="page-stack settings-page">
+    <section className="page-stack settings-page settings-architecture-page">
       <PageHeader
         eyebrow={t("settings.page.eyebrow")}
         title={t("settings.page.title")}
@@ -102,12 +102,12 @@ export function SettingsPage() {
       />
       {workspace.saveError ? <div className="notice top-gap">{workspace.saveError}</div> : null}
 
-      <PageSection
-        className="settings-stage settings-stage-core"
-        eyebrow="概览"
-        title="当前设置面"
-        description="先看执行链路、包装策略、记忆词表和维护入口，再进入下面的配置章节。"
-      >
+      <section className="settings-architecture-deck">
+        <div className="settings-architecture-lead">
+          <div className="page-eyebrow">概览</div>
+          <h3>当前设置面</h3>
+          <p>先看执行链路、包装策略、记忆词表和维护入口，再进入下面的配置章节。</p>
+        </div>
         <div className="settings-overview-grid">
           {summaryCards.map((card) => (
             <article key={card.label} className="settings-command-card">
@@ -118,15 +118,15 @@ export function SettingsPage() {
             </article>
           ))}
         </div>
-      </PageSection>
+      </section>
 
       <PageSection
-        className="settings-stage settings-stage-core"
+        className="settings-stage settings-stage-core settings-stage-core-grid"
         eyebrow="Core"
         title="核心链路与 Provider"
         description="先决定转写、推理和搜索如何跑，再直接看到每个 Provider 的状态、凭据来源和检测结果。"
       >
-        <div className="settings-section-stack">
+        <div className="settings-core-stack">
           <SettingsOverviewPanel
             form={workspace.form}
             config={workspace.config.data}
@@ -146,7 +146,7 @@ export function SettingsPage() {
       </PageSection>
 
       <PageSection
-        className="settings-stage settings-stage-quality"
+        className="settings-stage settings-stage-quality settings-stage-quality-grid"
         eyebrow="Quality"
         title="输出、术语与复跑"
         description="把审核阈值、包装复核、术语确认和低分复跑放在同一章，避免和 Provider 配置相互干扰。"
@@ -159,12 +159,12 @@ export function SettingsPage() {
       </PageSection>
 
       <PageSection
-        className="settings-stage settings-stage-automation"
+        className="settings-stage settings-stage-automation settings-stage-automation-grid"
         eyebrow="Automation"
         title="扩展与自动化"
         description="运行环境、数字人和 Telegram/Agent 放在后段，但保持语义明确，不再用一个大而空的接入模块承载。"
       >
-        <div className="settings-section-stack">
+        <div className="settings-automation-stack">
           <RuntimeSettingsPanel
             form={workspace.form}
             config={workspace.config.data}
@@ -196,12 +196,12 @@ export function SettingsPage() {
       </PageSection>
 
       <PageSection
-        className="settings-stage settings-stage-automation"
+        className="settings-stage settings-stage-automation settings-stage-links"
         eyebrow="维护"
         title="相关页面与系统控制"
         description="包装、记忆和词表仍保留独立页面，Control 只作为次级维护入口。"
       >
-        <div className="settings-summary-grid">
+        <div className="settings-link-grid">
           <article className="settings-command-card">
             <span className="settings-overview-label">包装素材</span>
             <strong>策略与素材池</strong>

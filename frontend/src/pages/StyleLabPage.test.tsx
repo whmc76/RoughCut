@@ -278,9 +278,13 @@ describe("StyleLabPage", () => {
   });
 
   it("renders the merged control surface without summary cards", async () => {
-    renderPage();
+    const { container } = renderPage();
 
     expect(await screen.findByRole("button", { name: "粗黄描边" })).toBeInTheDocument();
+    expect(container.querySelector(".style-lab-page")).toBeInTheDocument();
+    expect(container.querySelector(".style-lab-hero")).toBeInTheDocument();
+    expect(container.querySelector(".style-lab-surface")).toBeInTheDocument();
+    expect(container.querySelector(".style-lab-presenter-stage")).toBeInTheDocument();
     expect(screen.getByText("主流程和增强项")).toBeInTheDocument();
     expect(screen.getByText("字幕、标题、文案、封面")).toBeInTheDocument();
     expect(screen.queryByText("第一段")).not.toBeInTheDocument();

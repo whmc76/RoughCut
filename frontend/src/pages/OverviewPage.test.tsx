@@ -148,21 +148,60 @@ describe("OverviewPage", () => {
 
     render(<OverviewPage />);
 
-    expect(screen.getByText("overview.triage.title")).toBeInTheDocument();
-    expect(screen.getByText("overview.triage.jobs.title")).toBeInTheDocument();
-    expect(screen.getByText("overview.triage.watchRoots.title")).toBeInTheDocument();
+    expect(screen.getByText("overview.deck.title")).toBeInTheDocument();
+    expect(screen.getAllByText("overview.focus.jobs.title")).toHaveLength(2);
+    expect(screen.getAllByText("overview.focus.watch.title")).toHaveLength(2);
     expect(screen.getByText("jobs.summary.topSteps")).toBeInTheDocument();
     expect(screen.getByText("jobs.summary.cachePanel")).toBeInTheDocument();
   });
 
-  it("keeps the overview focused on triage and next actions", () => {
-    mockUseOverviewWorkspace.mockReturnValue(buildWorkspace());
+  it("keeps the overview focused on a single command deck instead of stacked dashboard cards", () => {
+    mockUseOverviewWorkspace.mockReturnValue(
+      buildWorkspace({
+        jobs: {
+          data: [
+            {
+              id: "job-1",
+              source_name: "IMG_0041.MOV",
+              content_summary: "箱包对比视频",
+              content_subject: "箱包",
+              updated_at: "2026-04-09T00:42:00Z",
+              status: "needs_review",
+            },
+          ],
+          isLoading: false,
+          isError: false,
+          error: null,
+        },
+      }),
+    );
 
     render(<OverviewPage />);
 
-    expect(screen.getByText("overview.triage.title")).toBeInTheDocument();
-    expect(screen.getByText("overview.triage.jobs.title")).toBeInTheDocument();
-    expect(screen.getByText("overview.triage.watchRoots.title")).toBeInTheDocument();
-    expect(screen.getByText("overview.triage.system.title")).toBeInTheDocument();
+    expect(screen.getByText("overview.deck.title")).toBeInTheDocument();
+    expect(screen.getAllByText("overview.deck.actions")).toHaveLength(2);
+    expect(screen.getAllByText("overview.focus.jobs.title")).toHaveLength(2);
+    expect(screen.getAllByText("overview.focus.watch.title")).toHaveLength(2);
+    expect(screen.getAllByText("overview.focus.runtime.title")).toHaveLength(2);
+    expect(screen.getAllByText("IMG_0041.MOV")).toHaveLength(2);
+    expect(screen.queryByText("overview.triage.title")).not.toBeInTheDocument();
+  });
+
+  it("shows a friendly preview fallback instead of leaking raw transport errors", () => {
+    mockUseOverviewWorkspace.mockReturnValue(
+      buildWorkspace({
+        jobs: {
+          data: [],
+          isLoading: false,
+          isError: true,
+          error: new Error("预览模式下实时数据不可用。连接后端后可查看真实数据。"),
+        },
+      }),
+    );
+
+    render(<OverviewPage />);
+
+    expect(screen.getByText("预览模式下实时数据不可用。连接后端后可查看真实数据。")).toBeInTheDocument();
+    expect(screen.queryByText("File not found")).not.toBeInTheDocument();
   });
 });

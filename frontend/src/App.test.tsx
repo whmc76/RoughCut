@@ -112,15 +112,24 @@ describe("App shell", () => {
   it("shows only the five top-level destinations in the sidebar", async () => {
     renderApp();
 
-    expect(await screen.findByRole("link", { name: "总览" })).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "任务" })).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "监看目录" })).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "风格实验" })).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "设置" })).toBeInTheDocument();
+    expect(await screen.findByRole("link", { name: /总览/ })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /任务/ })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /监看目录/ })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /风格实验/ })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /设置/ })).toBeInTheDocument();
     expect(screen.queryByRole("link", { name: /Packaging/i })).not.toBeInTheDocument();
     expect(screen.queryByRole("link", { name: /Creative Modes/i })).not.toBeInTheDocument();
     expect(screen.queryByRole("link", { name: /Creator Profiles/i })).not.toBeInTheDocument();
     expect(screen.queryByRole("link", { name: /Glossary/i })).not.toBeInTheDocument();
     expect(screen.queryByRole("link", { name: /Control/i })).not.toBeInTheDocument();
+  });
+
+  it("drops the old explanatory sidebar copy and keeps the shell minimal", async () => {
+    renderApp();
+
+    expect(await screen.findByText("RoughCut")).toBeInTheDocument();
+    expect(screen.queryByText("creative operating surface")).not.toBeInTheDocument();
+    expect(screen.queryByText("把任务、监看与风格决策收成一个前台。")).not.toBeInTheDocument();
+    expect(screen.queryByText("Workspace")).not.toBeInTheDocument();
   });
 });

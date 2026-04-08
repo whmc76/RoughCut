@@ -76,7 +76,7 @@ export function JobsPage() {
   const reviewNoticeClass = reviewNoticeTone === "error" ? "notice top-gap notice-error" : "notice top-gap";
 
   return (
-    <section className="page-stack">
+    <section className="page-stack jobs-page">
       <PageHeader
         eyebrow={t("jobs.page.eyebrow")}
         title={t("jobs.page.title")}
@@ -96,7 +96,7 @@ export function JobsPage() {
         }
       />
 
-      <PageSection eyebrow={t("jobs.page.queueEyebrow")} title={t("jobs.page.queueTitle")}>
+      <section className="jobs-workbench">
         {workspace.restartError ? (
           <div className="notice">
             {t("jobs.actions.restartFailed").replace("{error}", workspace.restartError)}
@@ -104,71 +104,79 @@ export function JobsPage() {
         ) : null}
         {reviewNotice ? <div className={reviewNoticeClass}>{reviewNotice}</div> : null}
 
-        <div className="panel-grid two-up">
-          <JobQueueTable
-            jobs={workspace.filteredJobs}
-            selectedJobId={workspace.selectedJobId}
-            isLoading={workspace.jobs.isLoading}
-            currentPage={workspace.jobsPage}
-            pageSize={workspace.jobsPageSize}
-            hasMore={workspace.hasMoreJobs}
-            isFetchingPage={workspace.jobs.isFetching}
-            onPageChange={(page) => workspace.setJobsPage(Math.max(0, page))}
-            errorMessage={workspace.jobs.isError ? (workspace.jobs.error as Error).message : undefined}
-            isOpeningFolder={workspace.openFolder.isPending}
-            isCancelling={workspace.cancelJob.isPending}
-            isRestarting={workspace.restartJob.isPending}
-            isDeleting={workspace.deleteJob.isPending}
-            onSelect={workspace.setSelectedJobId}
-            onOpenFolder={(jobId) => workspace.openFolder.mutate(jobId)}
-            onCancel={(jobId) => workspace.cancelJob.mutate(jobId)}
-            onRestart={(jobId) => workspace.restartJob.mutate(jobId)}
-            onDelete={(jobId) => workspace.deleteJob.mutate(jobId)}
-          />
+        <PageSection className="jobs-queue-lane" eyebrow={t("jobs.page.queueEyebrow")} title={t("jobs.page.queueTitle")}>
+          <div className="jobs-workbench-grid">
+            <JobQueueTable
+              jobs={workspace.filteredJobs}
+              selectedJobId={workspace.selectedJobId}
+              isLoading={workspace.jobs.isLoading}
+              currentPage={workspace.jobsPage}
+              pageSize={workspace.jobsPageSize}
+              hasMore={workspace.hasMoreJobs}
+              isFetchingPage={workspace.jobs.isFetching}
+              onPageChange={(page) => workspace.setJobsPage(Math.max(0, page))}
+              errorMessage={workspace.jobs.isError ? (workspace.jobs.error as Error).message : undefined}
+              isOpeningFolder={workspace.openFolder.isPending}
+              isCancelling={workspace.cancelJob.isPending}
+              isRestarting={workspace.restartJob.isPending}
+              isDeleting={workspace.deleteJob.isPending}
+              onSelect={workspace.setSelectedJobId}
+              onOpenFolder={(jobId) => workspace.openFolder.mutate(jobId)}
+              onCancel={(jobId) => workspace.cancelJob.mutate(jobId)}
+              onRestart={(jobId) => workspace.restartJob.mutate(jobId)}
+              onDelete={(jobId) => workspace.deleteJob.mutate(jobId)}
+            />
 
-          <section className="panel">
-            <PanelHeader title={t("jobs.page.activeWorkTitle")} description={t("jobs.page.activeWorkDescription")} />
-            <div className="stats-grid compact">
-              <StatCard label={t("jobs.page.activeWorkRunning")} value={activeJobs.length} compact />
-              <StatCard label={t("jobs.page.activeWorkTotal")} value={workspace.jobs.data?.length ?? 0} compact />
-              <StatCard label={t("jobs.page.selectedJob")} value={workspace.selectedJob?.source_name || "—"} compact />
-            </div>
-            <div className="list-stack">
-              {activeJobs.length ? (
-                activeJobs.map((job) => (
-                  <article key={job.id} className="list-card">
-                    <div>
-                      <div className="row-title">{job.source_name}</div>
-                      <div className="muted">{job.content_summary || job.content_subject || t("jobs.queue.noSummary")}</div>
-                    </div>
-                    <div className="row-meta">
-                      <span className={`status-chip ${job.status}`}>{statusLabel(job.status)}</span>
-                      <span>{formatDate(job.updated_at)}</span>
-                    </div>
-                  </article>
-                ))
-              ) : (
-                <EmptyState message={t("jobs.page.activeWorkEmpty")} />
-              )}
-            </div>
-          </section>
-        </div>
-      </PageSection>
+            <aside className="jobs-urgent-rail">
+              <PanelHeader title={t("jobs.page.activeWorkTitle")} description={t("jobs.page.activeWorkDescription")} />
+              <div className="stats-grid compact">
+                <StatCard label={t("jobs.page.activeWorkRunning")} value={activeJobs.length} compact />
+                <StatCard label={t("jobs.page.activeWorkTotal")} value={workspace.jobs.data?.length ?? 0} compact />
+                <StatCard label={t("jobs.page.selectedJob")} value={workspace.selectedJob?.source_name || "—"} compact />
+              </div>
+              <div className="list-stack">
+                {activeJobs.length ? (
+                  activeJobs.map((job) => (
+                    <article key={job.id} className="jobs-urgent-row">
+                      <div>
+                        <div className="row-title">{job.source_name}</div>
+                        <div className="muted">{job.content_summary || job.content_subject || t("jobs.queue.noSummary")}</div>
+                      </div>
+                      <div className="row-meta">
+                        <span className={`status-chip ${job.status}`}>{statusLabel(job.status)}</span>
+                        <span>{formatDate(job.updated_at)}</span>
+                      </div>
+                    </article>
+                  ))
+                ) : (
+                  <EmptyState message={t("jobs.page.activeWorkEmpty")} />
+                )}
+              </div>
+            </aside>
+          </div>
+        </PageSection>
 
-      <PageSection eyebrow={t("jobs.page.createEyebrow")} title={t("jobs.page.createTitle")}>
-        <ConfigProfileSwitcher compact description={t("jobs.page.profileSwitcherDescription")} />
+        <PageSection className="jobs-creation-bay" eyebrow={t("jobs.page.createEyebrow")} title={t("jobs.page.createTitle")}>
+          <div className="jobs-creation-grid">
+            <section className="jobs-creation-profile">
+              <ConfigProfileSwitcher compact description={t("jobs.page.profileSwitcherDescription")} />
+            </section>
 
-        <JobUploadPanel
-          upload={workspace.upload}
-          languageOptions={languageOptions}
-          workflowTemplateOptions={workflowTemplateOptions}
-          workflowModeOptions={workflowModeOptions}
-          enhancementOptions={enhancementOptions}
-          onChange={workspace.setUpload}
-          onSubmit={() => workspace.uploadJob.mutate()}
-          isSubmitting={workspace.uploadJob.isPending}
-        />
-      </PageSection>
+            <section className="jobs-creation-upload">
+              <JobUploadPanel
+                upload={workspace.upload}
+                languageOptions={languageOptions}
+                workflowTemplateOptions={workflowTemplateOptions}
+                workflowModeOptions={workflowModeOptions}
+                enhancementOptions={enhancementOptions}
+                onChange={workspace.setUpload}
+                onSubmit={() => workspace.uploadJob.mutate()}
+                isSubmitting={workspace.uploadJob.isPending}
+              />
+            </section>
+          </div>
+        </PageSection>
+      </section>
 
       <JobReviewOverlay
         open={Boolean(workspace.selectedJobId && isReviewJob)}

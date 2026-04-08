@@ -21,8 +21,8 @@ vi.mock("../components/ui/PageHeader", () => ({
 }));
 
 vi.mock("../components/ui/PageSection", () => ({
-  PageSection: ({ title, children }: { title: string; children: ReactNode }) => (
-    <section>
+  PageSection: ({ title, className, children }: { title: string; className?: string; children: ReactNode }) => (
+    <section className={className}>
       <h2>{title}</h2>
       {children}
     </section>
@@ -89,14 +89,23 @@ describe("WatchRootsPage", () => {
     expect(screen.queryByText("扫描、整理并批量入队")).not.toBeInTheDocument();
   });
 
-  it("foregrounds ingest health before root management", () => {
+  it("uses an ingest deck with inventory as the main workspace", () => {
     mockUseWatchRootWorkspace.mockReturnValue(buildWorkspace());
 
-    render(<WatchRootsPage />);
+    const { container } = render(<WatchRootsPage />);
 
-    expect(screen.getByText("watch.page.healthTitle")).toBeInTheDocument();
-    expect(screen.getByText("watch.page.rootsTitle")).toBeInTheDocument();
-    expect(screen.getByText("watch.page.pickRoot")).toBeInTheDocument();
+    expect(screen.getAllByText("watch.page.healthTitle")).toHaveLength(2);
+    expect(screen.getAllByText("watch.page.rootsTitle")).toHaveLength(1);
+    expect(screen.getByText("watch.form.createTitle")).toBeInTheDocument();
+    expect(screen.getAllByText("watch.page.pickRoot")).toHaveLength(3);
+    expect(screen.getByRole("button", { name: "watch.page.refresh" })).toBeInTheDocument();
+    expect(screen.getByText("watch-root-list")).toBeInTheDocument();
+    expect(screen.getByText("watch-root-form-panel")).toBeInTheDocument();
+    expect(container.querySelector(".watch-command-strip")).toBeInTheDocument();
+    expect(container.querySelector(".watch-workbench")).toBeInTheDocument();
+    expect(container.querySelector(".watch-health-lane")).toBeInTheDocument();
+    expect(container.querySelector(".watch-roots-lane")).toBeInTheDocument();
+    expect(container.querySelector(".watch-form-lane")).toBeInTheDocument();
   });
 
   it("keeps the inventory actions available when a root is selected", () => {
@@ -108,10 +117,12 @@ describe("WatchRootsPage", () => {
       }),
     );
 
-    render(<WatchRootsPage />);
+    const { container } = render(<WatchRootsPage />);
 
     expect(screen.getByText("watch-root-inventory-panel")).toBeInTheDocument();
     expect(screen.getByText("watch-root-list")).toBeInTheDocument();
     expect(screen.getByText("watch-root-form-panel")).toBeInTheDocument();
+    expect(container.querySelector(".watch-health-lane")).toBeInTheDocument();
+    expect(screen.getByText("watch.form.editTitle")).toBeInTheDocument();
   });
 });

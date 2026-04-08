@@ -96,13 +96,18 @@ describe("SettingsPage", () => {
   it("organizes settings into overview, configuration, and maintenance chapters", () => {
     mockUseSettingsWorkspace.mockReturnValue(buildWorkspace());
 
-    render(
+    const { container } = render(
       <MemoryRouter>
         <SettingsPage />
       </MemoryRouter>,
     );
 
     expect(lastPageHeaderProps?.summary).toBeUndefined();
+    expect(container.querySelector(".settings-architecture-page")).toBeInTheDocument();
+    expect(container.querySelector(".settings-architecture-deck")).toBeInTheDocument();
+    expect(container.querySelector(".settings-core-stack")).toBeInTheDocument();
+    expect(container.querySelector(".settings-automation-stack")).toBeInTheDocument();
+    expect(container.querySelector(".settings-link-grid")).toBeInTheDocument();
     expect(screen.getByText("当前设置面")).toBeInTheDocument();
     expect(screen.getByText("核心链路与 Provider")).toBeInTheDocument();
     expect(screen.getByText("输出、术语与复跑")).toBeInTheDocument();

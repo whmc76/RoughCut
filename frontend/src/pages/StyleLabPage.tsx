@@ -64,7 +64,7 @@ export function StyleLabPage() {
   };
 
   return (
-    <section className="page-stack">
+    <section className="page-stack style-lab-page">
       <PageHeader
         eyebrow="风格实验"
         title="风格实验"
@@ -82,175 +82,187 @@ export function StyleLabPage() {
       />
 
       {styleWorkspace.packaging.isLoading || options.isLoading || config.isLoading || avatarMaterials.isLoading ? (
-        <section className="panel">正在加载风格实验面板…</section>
+        <section className="panel style-lab-loading">正在加载风格实验面板…</section>
       ) : null}
 
       {packaging && catalog && config.data ? (
         <>
-          <PageSection
-            eyebrow="当前方向"
-            title="把默认值收紧到一屏内"
-            description="现在的主成片默认值、增强项和角色默认会在这里集中显示。"
-          >
-            <section className="panel">
-              <div className="toolbar" style={{ flexWrap: "wrap" }}>
-                <StatusChip label="字幕" value={selectedSubtitle?.label ?? packaging.subtitle_style} />
-                <StatusChip label="标题" value={selectedTitle?.label ?? packaging.title_style} />
-                <StatusChip label="文案" value={selectedCopy?.label ?? packaging.copy_style} />
-                <StatusChip label="封面" value={selectedCover?.label ?? packaging.cover_style} />
-                <StatusChip label="特效" value={selectedEffect?.label ?? packaging.smart_effect_style} />
-                <StatusChip label="增强" value={String(activeEnhancementModes.length)} />
-                <StatusChip label="角色" value={activePresenterLabel} />
-              </div>
-            </section>
-          </PageSection>
-
-          <PageSection eyebrow="主风格" title="字幕、标题、文案、封面" description="每个分区只保留当前默认值和可选预设。">
-            <div className="list-stack">
-              <PresetRail
-                title="字幕"
-                currentKey={packaging.subtitle_style}
-                currentLabel={selectedSubtitle?.label ?? packaging.subtitle_style}
-                currentSummary={selectedSubtitle?.summary}
-                presets={subtitleStylePresets}
-                onSelect={(value) => styleWorkspace.saveConfig.mutate({ subtitle_style: value })}
-                busy={styleWorkspace.saveConfig.isPending}
-              />
-              <PresetRail
-                title="标题"
-                currentKey={packaging.title_style}
-                currentLabel={selectedTitle?.label ?? packaging.title_style}
-                currentSummary={selectedTitle?.summary}
-                presets={titleStylePresets}
-                onSelect={(value) => styleWorkspace.saveConfig.mutate({ title_style: value })}
-                busy={styleWorkspace.saveConfig.isPending}
-              />
-              <PresetRail
-                title="文案"
-                currentKey={packaging.copy_style}
-                currentLabel={selectedCopy?.label ?? packaging.copy_style}
-                currentSummary={selectedCopy?.summary}
-                presets={copyStylePresets}
-                onSelect={(value) => styleWorkspace.saveConfig.mutate({ copy_style: value })}
-                busy={styleWorkspace.saveConfig.isPending}
-              />
-              <PresetRail
-                title="封面"
-                currentKey={packaging.cover_style}
-                currentLabel={selectedCover?.label ?? packaging.cover_style}
-                currentSummary={selectedCover?.summary}
-                presets={coverStylePresets}
-                onSelect={(value) => styleWorkspace.saveConfig.mutate({ cover_style: value })}
-                busy={styleWorkspace.saveConfig.isPending}
-              />
-              <PresetRail
-                title="智能特效"
-                currentKey={packaging.smart_effect_style}
-                currentLabel={selectedEffect?.label ?? packaging.smart_effect_style}
-                currentSummary={selectedEffect?.summary}
-                presets={smartEffectPresets}
-                onSelect={(value) => styleWorkspace.saveConfig.mutate({ smart_effect_style: value })}
-                busy={styleWorkspace.saveConfig.isPending}
-              />
+          <section className="style-lab-hero">
+            <div className="style-lab-hero-copy">
+              <div className="page-eyebrow">当前方向</div>
+              <h3>把默认值收紧到一屏内</h3>
+              <p>主成片默认值、增强项和角色默认会在这里集中显示。</p>
             </div>
-          </PageSection>
-
-          <PageSection eyebrow="创作模式" title="主流程和增强项" description="主流程只选一个，增强项只保留常用项。">
-            <div className="preset-grid" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))" }}>
-              <section className="panel" style={{ minHeight: 0 }}>
-                <div className="toolbar">
-                  <strong>主流程</strong>
-                  <span className="status-pill">{config.data.default_job_workflow_mode}</span>
-                </div>
-                <div className="list-stack compact-top">
-                  {catalog.workflow_modes.map((mode) => (
-                    <CreativeModeTile
-                      key={mode.key}
-                      mode={mode}
-                      active={config.data.default_job_workflow_mode === mode.key}
-                      onClick={() => selectWorkflowMode(mode.key)}
-                    />
-                  ))}
-                </div>
-              </section>
-
-              <section className="panel" style={{ minHeight: 0 }}>
-                <div className="toolbar">
-                  <strong>增强</strong>
-                  <span className="status-pill">{activeEnhancementModes.length} active</span>
-                </div>
-                <div className="list-stack compact-top">
-                  {catalog.enhancement_modes.map((mode) => (
-                    <CreativeModeTile
-                      key={mode.key}
-                      mode={mode}
-                      active={activeEnhancementModes.includes(mode.key)}
-                      onClick={() => toggleEnhancementMode(mode.key)}
-                      toggleLabel={activeEnhancementModes.includes(mode.key) ? "移除" : "激活"}
-                    />
-                  ))}
-                </div>
-              </section>
+            <div className="style-lab-hero-signals">
+              <StatusChip label="字幕" value={selectedSubtitle?.label ?? packaging.subtitle_style} />
+              <StatusChip label="标题" value={selectedTitle?.label ?? packaging.title_style} />
+              <StatusChip label="文案" value={selectedCopy?.label ?? packaging.copy_style} />
+              <StatusChip label="封面" value={selectedCover?.label ?? packaging.cover_style} />
+              <StatusChip label="特效" value={selectedEffect?.label ?? packaging.smart_effect_style} />
+              <StatusChip label="增强" value={String(activeEnhancementModes.length)} />
+              <StatusChip label="角色" value={activePresenterLabel} />
             </div>
-          </PageSection>
+          </section>
 
-          <PageSection
-            eyebrow="创作者默认"
-            title="角色和画中预览"
-            description="只保留能直接影响出片的角色默认值。"
-            actions={<Link className="button ghost" to="/creator-profiles">打开档案库</Link>}
-          >
-            <section className="panel">
-              <div className="toolbar" style={{ flexWrap: "wrap" }}>
-                <StatusChip label="当前角色" value={activePresenterLabel} />
-                <StatusChip label="可用档案" value={String(presenterProfiles.length)} />
-                <StatusChip label="已就绪" value={String(presenterProfiles.filter((profile) => getPresenterFilePath(profile)).length)} />
+          <section className="style-lab-surface">
+            <PageSection
+              className="style-lab-panel style-lab-panel-primary"
+              eyebrow="主风格"
+              title="字幕、标题、文案、封面"
+              description="每个分区只保留当前默认值和可选预设。"
+            >
+              <div className="style-lab-preset-lanes">
+                <PresetRail
+                  title="字幕"
+                  currentKey={packaging.subtitle_style}
+                  currentLabel={selectedSubtitle?.label ?? packaging.subtitle_style}
+                  currentSummary={selectedSubtitle?.summary}
+                  presets={subtitleStylePresets}
+                  onSelect={(value) => styleWorkspace.saveConfig.mutate({ subtitle_style: value })}
+                  busy={styleWorkspace.saveConfig.isPending}
+                />
+                <PresetRail
+                  title="标题"
+                  currentKey={packaging.title_style}
+                  currentLabel={selectedTitle?.label ?? packaging.title_style}
+                  currentSummary={selectedTitle?.summary}
+                  presets={titleStylePresets}
+                  onSelect={(value) => styleWorkspace.saveConfig.mutate({ title_style: value })}
+                  busy={styleWorkspace.saveConfig.isPending}
+                />
+                <PresetRail
+                  title="文案"
+                  currentKey={packaging.copy_style}
+                  currentLabel={selectedCopy?.label ?? packaging.copy_style}
+                  currentSummary={selectedCopy?.summary}
+                  presets={copyStylePresets}
+                  onSelect={(value) => styleWorkspace.saveConfig.mutate({ copy_style: value })}
+                  busy={styleWorkspace.saveConfig.isPending}
+                />
+                <PresetRail
+                  title="封面"
+                  currentKey={packaging.cover_style}
+                  currentLabel={selectedCover?.label ?? packaging.cover_style}
+                  currentSummary={selectedCover?.summary}
+                  presets={coverStylePresets}
+                  onSelect={(value) => styleWorkspace.saveConfig.mutate({ cover_style: value })}
+                  busy={styleWorkspace.saveConfig.isPending}
+                />
+                <PresetRail
+                  title="智能特效"
+                  currentKey={packaging.smart_effect_style}
+                  currentLabel={selectedEffect?.label ?? packaging.smart_effect_style}
+                  currentSummary={selectedEffect?.summary}
+                  presets={smartEffectPresets}
+                  onSelect={(value) => styleWorkspace.saveConfig.mutate({ smart_effect_style: value })}
+                  busy={styleWorkspace.saveConfig.isPending}
+                />
               </div>
-              <div className="list-stack top-gap">
-                {presenterProfiles.length ? (
-                  presenterProfiles.slice(0, 6).map((profile) => {
-                    const presenterPath = getPresenterFilePath(profile);
-                    const isActive = presenterPath === activePresenterId;
-                    const ready = Boolean(presenterPath);
-                    return (
-                      <button
-                        key={profile.id}
-                        type="button"
-                        className={classNames("mode-card", isActive && "selected")}
-                        disabled={!ready || saveConfig.isPending}
-                        onClick={() => selectPresenter(profile)}
-                      >
-                        <div className="mode-card-header">
-                          <div>
-                            <strong>{profile.display_name}</strong>
-                            <div className="muted compact-top">
-                              {profile.creator_profile?.identity?.public_name || profile.presenter_alias || "未命名"} · {profile.training_status}
+            </PageSection>
+
+            <PageSection
+              className="style-lab-panel style-lab-panel-dual"
+              eyebrow="创作模式"
+              title="主流程和增强项"
+              description="主流程只选一个，增强项只保留常用项。"
+            >
+              <div className="style-lab-mode-grid">
+                <section className="style-lab-mode-column">
+                  <div className="toolbar">
+                    <strong>主流程</strong>
+                    <span className="status-pill">{config.data.default_job_workflow_mode}</span>
+                  </div>
+                  <div className="style-lab-mode-list compact-top">
+                    {catalog.workflow_modes.map((mode) => (
+                      <CreativeModeTile
+                        key={mode.key}
+                        mode={mode}
+                        active={config.data.default_job_workflow_mode === mode.key}
+                        onClick={() => selectWorkflowMode(mode.key)}
+                      />
+                    ))}
+                  </div>
+                </section>
+
+                <section className="style-lab-mode-column">
+                  <div className="toolbar">
+                    <strong>增强</strong>
+                    <span className="status-pill">{activeEnhancementModes.length} active</span>
+                  </div>
+                  <div className="style-lab-mode-list compact-top">
+                    {catalog.enhancement_modes.map((mode) => (
+                      <CreativeModeTile
+                        key={mode.key}
+                        mode={mode}
+                        active={activeEnhancementModes.includes(mode.key)}
+                        onClick={() => toggleEnhancementMode(mode.key)}
+                        toggleLabel={activeEnhancementModes.includes(mode.key) ? "移除" : "激活"}
+                      />
+                    ))}
+                  </div>
+                </section>
+              </div>
+            </PageSection>
+
+            <PageSection
+              className="style-lab-panel style-lab-panel-gallery"
+              eyebrow="创作者默认"
+              title="角色和画中预览"
+              description="只保留能直接影响出片的角色默认值。"
+              actions={<Link className="button ghost" to="/creator-profiles">打开档案库</Link>}
+            >
+              <section className="style-lab-presenter-stage">
+                <div className="toolbar" style={{ flexWrap: "wrap" }}>
+                  <StatusChip label="当前角色" value={activePresenterLabel} />
+                  <StatusChip label="可用档案" value={String(presenterProfiles.length)} />
+                  <StatusChip label="已就绪" value={String(presenterProfiles.filter((profile) => getPresenterFilePath(profile)).length)} />
+                </div>
+                <div className="style-lab-presenter-grid top-gap">
+                  {presenterProfiles.length ? (
+                    presenterProfiles.slice(0, 6).map((profile) => {
+                      const presenterPath = getPresenterFilePath(profile);
+                      const isActive = presenterPath === activePresenterId;
+                      const ready = Boolean(presenterPath);
+                      return (
+                        <button
+                          key={profile.id}
+                          type="button"
+                          className={classNames("mode-card", isActive && "selected")}
+                          disabled={!ready || saveConfig.isPending}
+                          onClick={() => selectPresenter(profile)}
+                        >
+                          <div className="mode-card-header">
+                            <div>
+                              <strong>{profile.display_name}</strong>
+                              <div className="muted compact-top">
+                                {profile.creator_profile?.identity?.public_name || profile.presenter_alias || "未命名"} · {profile.training_status}
+                              </div>
                             </div>
-                          </div>
-                          <span className={`mode-chip ${isActive ? "" : ready ? "" : "planned"}`}>
-                            {isActive ? "已激活" : ready ? "可激活" : "缺素材"}
-                          </span>
-                        </div>
-                        <p className="muted">{profile.next_action}</p>
-                        <div className="mode-chip-list">
-                          {(profile.creator_profile?.positioning?.expertise ?? []).slice(0, 2).map((item) => (
-                            <span key={item} className="mode-chip subtle">
-                              {item}
+                            <span className={`mode-chip ${isActive ? "" : ready ? "" : "planned"}`}>
+                              {isActive ? "已激活" : ready ? "可激活" : "缺素材"}
                             </span>
-                          ))}
-                          {profile.creator_profile?.publishing?.primary_platform ? (
-                            <span className="mode-chip subtle">{profile.creator_profile.publishing.primary_platform}</span>
-                          ) : null}
-                        </div>
-                      </button>
-                    );
-                  })
-                ) : (
-                  <div className="empty-state">还没有创作者档案。</div>
-                )}
-              </div>
-            </section>
-          </PageSection>
+                          </div>
+                          <p className="muted">{profile.next_action}</p>
+                          <div className="mode-chip-list">
+                            {(profile.creator_profile?.positioning?.expertise ?? []).slice(0, 2).map((item) => (
+                              <span key={item} className="mode-chip subtle">
+                                {item}
+                              </span>
+                            ))}
+                            {profile.creator_profile?.publishing?.primary_platform ? (
+                              <span className="mode-chip subtle">{profile.creator_profile.publishing.primary_platform}</span>
+                            ) : null}
+                          </div>
+                        </button>
+                      );
+                    })
+                  ) : (
+                    <div className="empty-state">还没有创作者档案。</div>
+                  )}
+                </div>
+              </section>
+            </PageSection>
+          </section>
         </>
       ) : null}
     </section>

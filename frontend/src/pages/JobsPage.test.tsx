@@ -23,8 +23,8 @@ vi.mock("../components/ui/PageHeader", () => ({
 }));
 
 vi.mock("../components/ui/PageSection", () => ({
-  PageSection: ({ title, children }: { title: string; children: ReactNode }) => (
-    <section>
+  PageSection: ({ title, children, className }: { title: string; children: ReactNode; className?: string }) => (
+    <section className={className ?? ""}>
       <h2>{title}</h2>
       {children}
     </section>
@@ -134,12 +134,18 @@ describe("JobsPage", () => {
     vi.clearAllMocks();
   });
 
-  it("keeps the config profile switcher on the jobs page", () => {
+  it("keeps the queue, urgent rail, and creation bay inside one workbench", () => {
     mockUseJobWorkspace.mockReturnValue(buildWorkspace());
 
-    render(<JobsPage />);
+    const { container } = render(<JobsPage />);
 
+    expect(container.querySelector(".jobs-workbench")).toBeInTheDocument();
+    expect(container.querySelector(".jobs-queue-lane")).toBeInTheDocument();
+    expect(container.querySelector(".jobs-urgent-rail")).toBeInTheDocument();
+    expect(container.querySelector(".jobs-creation-bay")).toBeInTheDocument();
+    expect(screen.getByText("job-queue-table")).toBeInTheDocument();
     expect(screen.getByText("config-profile-switcher")).toBeInTheDocument();
+    expect(screen.getByText("job-upload-panel")).toBeInTheDocument();
   });
 
   it("does not render the old summary strip or instructional copy on the jobs page", () => {

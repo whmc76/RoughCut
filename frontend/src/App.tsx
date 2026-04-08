@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { Suspense, lazy, useEffect, useRef } from "react";
-import { NavLink, Route, Routes } from "react-router-dom";
+import { NavLink, Route, Routes, useLocation } from "react-router-dom";
 
 import { api } from "./api";
 import { useFrontendBuildRefresh } from "./hooks/useFrontendBuildRefresh";
@@ -45,6 +45,7 @@ const ControlPage = lazy(async () => ({
 
 export function App() {
   const { locale, setLocale, t } = useI18n();
+  const location = useLocation();
   const syncedLocaleRef = useRef<string>("");
   const appVersionQuery = useQuery({
     queryKey: ["health-detail"],
@@ -72,45 +73,59 @@ export function App() {
     { to: "/style-lab", label: "风格实验" },
     { to: "/settings", label: t("app.nav.settings") },
   ];
+  const currentSection =
+    navigationItems.find((item) => item.to !== "/" && location.pathname.startsWith(item.to)) ??
+    navigationItems.find((item) => item.to === "/");
 
   return (
     <div className="app-shell">
-      <aside className="sidebar">
-        <div className="sidebar-brand">
-          <div className="brand-kicker">{t("app.sidebar.kicker")}</div>
-          <h1>RoughCut</h1>
-          <p className="muted sidebar-tagline">{t("app.sidebar.description")}</p>
+      <aside className="app-rail">
+        <div className="rail-brand">
+          <div className="rail-brand-mark">RC</div>
+          <div className="rail-brand-copy">
+            <strong>RoughCut</strong>
+            <span>{currentSection?.label ?? t("app.nav.overview")}</span>
+          </div>
         </div>
-        <nav className="nav-list">
-          <div className="sidebar-section-label">Workspace</div>
-          <div className="nav-group-links nav-group-links-primary">
-            {navigationItems.map((item) => (
-              <NavLink
-                key={item.to}
-                to={item.to}
-                end={item.to === "/"}
-                className={({ isActive }) => (isActive ? "nav-link active" : "nav-link")}
-              >
-                <span>{item.label}</span>
-              </NavLink>
-            ))}
-          </div>
+        <nav className="rail-nav" aria-label="Primary">
+          {navigationItems.map((item, index) => (
+            <NavLink
+              key={item.to}
+              to={item.to}
+              end={item.to === "/"}
+              className={({ isActive }) => (isActive ? "rail-link active" : "rail-link")}
+            >
+              <span className="rail-link-index">{`${index + 1}`.padStart(2, "0")}</span>
+              <span className="rail-link-label">{item.label}</span>
+            </NavLink>
+          ))}
         </nav>
-        <div className="sidebar-footer">
-          <label className="form-stack sidebar-footnote">
-            <span className="sidebar-footer-label">{t("app.sidebar.language")}</span>
-            <select className="input" value={locale} onChange={(event) => setLocale(event.target.value as "zh-CN" | "en-US")}>
-              <option value="zh-CN">{t("app.language.zh-CN")}</option>
-              <option value="en-US">{t("app.language.en-US")}</option>
-            </select>
-          </label>
-          <div className="sidebar-version">
-            <span className="sidebar-footer-label">{t("app.sidebar.version")}</span>
-            <code>{appVersion || t("app.sidebar.versionUnknown")}</code>
-          </div>
+        <div className="rail-notes">
+          <span className="rail-note-label">{t("app.sidebar.version")}</span>
+          <code>{appVersion || t("app.sidebar.versionUnknown")}</code>
         </div>
       </aside>
-      <main className="main-content">
+      <main className="app-stage">
+        <header className="app-stage-header">
+          <div className="app-stage-heading">
+            <span className="page-eyebrow">RoughCut Console</span>
+            <strong>{currentSection?.label ?? t("app.nav.overview")}</strong>
+          </div>
+          <div className="app-stage-controls">
+            <label className="app-stage-locale">
+              <span>{t("app.sidebar.language")}</span>
+              <select className="input" value={locale} onChange={(event) => setLocale(event.target.value as "zh-CN" | "en-US")}>
+                <option value="zh-CN">{t("app.language.zh-CN")}</option>
+                <option value="en-US">{t("app.language.en-US")}</option>
+              </select>
+            </label>
+            <div className="app-stage-build">
+              <span>{t("app.sidebar.version")}</span>
+              <code>{appVersion || t("app.sidebar.versionUnknown")}</code>
+            </div>
+          </div>
+        </header>
+        <div className="main-content">
         <Suspense fallback={<section className="panel">加载页面中…</section>}>
           <Routes>
             <Route path="/" element={<OverviewPage />} />
@@ -127,6 +142,7 @@ export function App() {
             <Route path="/control" element={<ControlPage />} />
           </Routes>
         </Suspense>
+        </div>
       </main>
     </div>
   );
