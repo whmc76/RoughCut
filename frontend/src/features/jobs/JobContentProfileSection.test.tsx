@@ -29,6 +29,13 @@ describe("contentProfile helpers", () => {
       ]),
     ).toEqual(["字幕", "文件名", "画面文字", "外部证据"]);
   });
+
+  it("deduplicates support-source labels after normalization", () => {
+    expect(formatIdentityEvidenceSources(["transcript", "subtitle_snippets", "source_name", "source_name_terms"])).toEqual([
+      "字幕",
+      "文件名",
+    ]);
+  });
 });
 
 describe("JobContentProfileSection", () => {

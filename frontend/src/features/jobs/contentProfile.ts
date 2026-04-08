@@ -1,4 +1,5 @@
 import type { UiLocale } from "../../i18n";
+import { IDENTITY_SUPPORT_SOURCE_LABELS } from "./constants";
 
 const VIDEO_TYPE_LABELS: Record<UiLocale, Record<string, string>> = {
   "zh-CN": {
@@ -19,17 +20,6 @@ const VIDEO_TYPE_LABELS: Record<UiLocale, Record<string, string>> = {
   },
 };
 
-const IDENTITY_SUPPORT_SOURCE_LABELS: Record<string, string> = {
-  transcript: "字幕",
-  subtitle_snippets: "字幕",
-  source_name: "文件名",
-  source_name_terms: "文件名",
-  visible_text: "画面文字",
-  visible_text_terms: "画面文字",
-  evidence: "外部证据",
-  evidence_terms: "外部证据",
-};
-
 function normalizeTextKey(value: unknown) {
   return getTextValue(value).toUpperCase().replace(/\s+/g, "");
 }
@@ -38,7 +28,7 @@ export function getTextValue(value: unknown) {
   return typeof value === "string" ? value.trim() : "";
 }
 
-export function normalizeKeywordList(value: unknown) {
+function normalizeUniqueStringArray(value: unknown): string[] {
   if (!Array.isArray(value)) {
     return [];
   }
@@ -54,6 +44,14 @@ export function normalizeKeywordList(value: unknown) {
     normalized.push(text);
   }
   return normalized;
+}
+
+export function normalizeKeywordList(value: unknown) {
+  return normalizeUniqueStringArray(value);
+}
+
+export function normalizeSourceList(value: unknown) {
+  return normalizeUniqueStringArray(value);
 }
 
 export function normalizeVideoTypeLabel(value: unknown, locale: UiLocale) {
@@ -104,16 +102,13 @@ export function formatIdentityEvidenceSourceLabel(value: unknown) {
   return IDENTITY_SUPPORT_SOURCE_LABELS[normalized] ?? normalized;
 }
 
-export function formatIdentityEvidenceSources(values: unknown[]) {
+export function formatIdentityEvidenceSources(values: unknown) {
   const labels: string[] = [];
   const seen = new Set<string>();
-  for (const value of values) {
-    const key = normalizeTextKey(value);
-    if (!key || seen.has(key)) {
-      continue;
-    }
+  for (const value of normalizeSourceList(values)) {
     const label = formatIdentityEvidenceSourceLabel(value);
-    if (!label) {
+    const key = normalizeTextKey(label);
+    if (!key || seen.has(key)) {
       continue;
     }
     seen.add(key);
@@ -158,7 +153,7 @@ export function hasIdentityEvidence(identityReview: {
     identityReview
     && (
       identityReview.required
-      || (identityReview.support_sources ?? []).length
+      || normalizeSourceList(identityReview.support_sources ?? []).length
       || (evidenceBundle?.matched_subtitle_snippets ?? []).length
       || formatIdentityEvidenceGlossaryAliases(evidenceBundle).length
       || (evidenceBundle?.matched_source_name_terms ?? []).length
