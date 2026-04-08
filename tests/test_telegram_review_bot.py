@@ -66,6 +66,15 @@ def test_extract_review_callback_reference_reads_final_review_action():
     assert result == ("final_review", job_id, "cover")
 
 
+def test_extract_review_callback_reference_rejects_malformed_callback_data():
+    job_id = uuid.uuid4()
+
+    assert _extract_review_callback_reference(f"RCB:final_review:{job_id}:cover") is None
+    assert _extract_review_callback_reference(f"RCB:final:{job_id}:cover:extra") is None
+    assert _extract_review_callback_reference("RCB:final:not-a-uuid:cover") is None
+    assert _extract_review_callback_reference(f"RCB:final:{job_id}:Cover") is None
+
+
 def test_build_final_review_reply_markup_contains_expected_buttons():
     job_id = uuid.uuid4()
 
@@ -180,6 +189,49 @@ def test_interpret_full_subtitle_review_reply_parses_line_updates():
     ]
 
 
+def test_interpret_full_subtitle_review_reply_keeps_mixed_order_stable():
+    lines = [
+        TelegramSubtitleLineCandidate(
+            slot="L1",
+            subtitle_item_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            subtitle_index=0,
+            text="第一句",
+        ),
+        TelegramSubtitleLineCandidate(
+            slot="L2",
+            subtitle_item_id="bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+            subtitle_index=1,
+            text="第二句",
+        ),
+        TelegramSubtitleLineCandidate(
+            slot="L3",
+            subtitle_item_id="cccccccc-cccc-cccc-cccc-cccccccccccc",
+            subtitle_index=2,
+            text="第三句",
+        ),
+    ]
+
+    accept_all, actions = _interpret_full_subtitle_review_reply("L2通过，L1改成 新第一句，L3改成 新第三句", lines)
+
+    assert accept_all is False
+    assert actions == [
+        {
+            "subtitle_item_id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+            "action": "accepted",
+        },
+        {
+            "subtitle_item_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            "action": "updated",
+            "override_text": "新第一句",
+        },
+        {
+            "subtitle_item_id": "cccccccc-cccc-cccc-cccc-cccccccccccc",
+            "action": "updated",
+            "override_text": "新第三句",
+        },
+    ]
+
+
 @pytest.mark.asyncio
 async def test_interpret_content_profile_reply_maps_to_frontend_like_payload(monkeypatch):
     class FakeResponse:
@@ -213,6 +265,33 @@ async def test_interpret_content_profile_reply_maps_to_frontend_like_payload(mon
     assert payload["video_theme"] == "夜骑补光对比"
     assert payload["keywords"] == ["夜骑", "补光"]
     assert payload["correction_notes"] == "品牌和主题都改一下"
+
+
+@pytest.mark.asyncio
+async def test_interpret_content_profile_reply_freeform_updates_modes_keywords_safely(monkeypatch):
+    class FakeResponse:
+        def as_json(self):
+            return {}
+
+    class FakeProvider:
+        async def complete(self, *args, **kwargs):
+            return FakeResponse()
+
+    monkeypatch.setattr(telegram_bot, "get_reasoning_provider", lambda: FakeProvider())
+    review = SimpleNamespace(
+        workflow_mode="standard_edit",
+        enhancement_modes=[],
+        draft={"keywords": ["旧关键词"]},
+        final=None,
+    )
+
+    text = "工作流改成标准成片，增强模式开AI导演、自动审核和未知增强，关键词改成 夜骑、补光、夜骑。"
+    payload = await _interpret_content_profile_reply(review, text)
+
+    assert payload["workflow_mode"] == "standard_edit"
+    assert payload["enhancement_modes"] == ["auto_review", "ai_director"]
+    assert payload["keywords"] == ["夜骑", "补光"]
+    assert payload["correction_notes"] == text
 
 
 @pytest.mark.asyncio
@@ -1593,6 +1672,92 @@ async def test_handle_update_dispatches_final_review_callback(monkeypatch):
 
     assert answered == [("cb-1", "已接收 BGM 重出")]
     assert handled == [(job_id, "只改BGM", "123")]
+
+
+@pytest.mark.asyncio
+async def test_handle_update_callback_rejects_malformed_reference_without_dispatch(monkeypatch):
+    service = TelegramReviewBotService()
+    handled: list[tuple[uuid.UUID, str, str]] = []
+    answered: list[tuple[str, str]] = []
+    job_id = uuid.uuid4()
+
+    monkeypatch.setattr(
+        telegram_bot,
+        "get_settings",
+        lambda: SimpleNamespace(
+            telegram_agent_enabled=True,
+            telegram_remote_review_enabled=False,
+            telegram_bot_chat_id="123",
+            telegram_bot_token="token",
+            telegram_bot_api_base_url="https://api.telegram.org",
+        ),
+    )
+
+    async def fake_handle(job_id_value: uuid.UUID, text: str, *, reply_chat_id: str = ""):
+        handled.append((job_id_value, text, reply_chat_id))
+
+    async def fake_answer(callback_query_id: str, *, text: str = ""):
+        answered.append((callback_query_id, text))
+
+    service._handle_final_review_reply = fake_handle
+    service._answer_callback_query = fake_answer
+
+    await service._handle_update(
+        {
+            "callback_query": {
+                "id": "cb-2",
+                "data": f"RCB:final:{job_id}:approve:extra",
+                "message": {"chat": {"id": "123"}},
+            }
+        }
+    )
+
+    assert answered == [("cb-2", "未识别审核操作。")]
+    assert handled == []
+
+
+@pytest.mark.asyncio
+async def test_handle_update_review_reference_short_approval_uses_reply_caption_token(monkeypatch):
+    service = TelegramReviewBotService()
+    job_id = uuid.uuid4()
+    handled: list[tuple[uuid.UUID, str, str]] = []
+    sent: list[str] = []
+
+    monkeypatch.setattr(
+        telegram_bot,
+        "get_settings",
+        lambda: SimpleNamespace(
+            telegram_agent_enabled=False,
+            telegram_remote_review_enabled=True,
+            telegram_bot_chat_id="123",
+            telegram_bot_token="token",
+            telegram_bot_api_base_url="https://api.telegram.org",
+        ),
+    )
+
+    async def fake_handle(job_id_value: uuid.UUID, text: str, *, reply_chat_id: str = ""):
+        handled.append((job_id_value, text, reply_chat_id))
+
+    async def fake_send(text: str, *, chat_id: str):
+        sent.append(text)
+
+    service._handle_content_profile_reply = fake_handle
+    service._send_chat_text = fake_send
+
+    await service._handle_update(
+        {
+            "message": {
+                "text": "通过",
+                "chat": {"id": "123"},
+                "reply_to_message": {
+                    "caption": f"【RC:content_profile:{job_id}】\n参考缩略图 1/3",
+                },
+            }
+        }
+    )
+
+    assert handled == [(job_id, "通过", "123")]
+    assert sent == []
 
 
 @pytest.mark.asyncio

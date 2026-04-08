@@ -32,6 +32,7 @@ from roughcut.packaging.library import list_packaging_assets, resolve_packaging_
 from roughcut.providers.factory import get_reasoning_provider, get_transcription_provider
 from roughcut.review.downstream_context import select_resolved_downstream_profile
 from roughcut.review.subtitle_memory import build_transcription_prompt
+from roughcut.review import telegram_review_parsing
 from roughcut.review.content_profile import (
     _build_review_keywords,
     _collect_review_keyword_seed_terms,
@@ -58,53 +59,16 @@ from roughcut.providers.reasoning.base import Message
 
 logger = logging.getLogger(__name__)
 
-_REVIEW_KIND_CONTENT = "content_profile"
-_REVIEW_KIND_SUBTITLE = "subtitle_review"
-_REVIEW_KIND_FINAL = "final_review"
-_REVIEW_REF_PATTERN = re.compile(
-    r"RC:(?P<kind>content_profile|subtitle_review|final_review):(?P<job_id>[0-9a-fA-F-]{36})"
-)
-_REVIEW_CALLBACK_PATTERN = re.compile(
-    r"^RCB:(?P<kind>final):(?P<job_id>[0-9a-fA-F-]{36}):(?P<action>[a-z_]+)$"
-)
-_SIMPLE_APPROVAL_PATTERN = re.compile(r"^(通过|确认|继续|好的|ok|okay|yes|y|pass)[！!。.，,\s]*$", re.IGNORECASE)
-_FINAL_APPROVAL_PATTERN = re.compile(
-    r"(?:(?:整体|整片|成片|片子|视频)\s*(?:通过|确认|继续)|(?:通过|确认|继续)\s*(?:整体|整片|成片|片子|视频))",
-    re.IGNORECASE,
-)
-_ACCEPT_ALL_PATTERN = re.compile(r"(全部|全都|都)(通过|接受|采纳)|全部接受|全部通过", re.IGNORECASE)
-_REJECT_ALL_PATTERN = re.compile(r"(全部|全都|都)(拒绝|驳回)|全部拒绝", re.IGNORECASE)
-_SUBTITLE_SLOT_PATTERN = re.compile(r"(?i)(?<![A-Za-z0-9])S\d{1,3}(?![A-Za-z0-9])")
-_FULL_SUBTITLE_SLOT_PATTERN = re.compile(r"(?i)(?<![A-Za-z0-9])L\d{1,4}(?![A-Za-z0-9])")
-_FULL_SUBTITLE_ACTION_PATTERN = re.compile(
-    r"(?is)(?<![A-Za-z0-9])L(?P<slot>\d{1,4})(?![A-Za-z0-9])\s*"
-    r"(?:(?P<pass>通过|ok|okay|没问题|无误|无需修改|不用改)"
-    r"|(?:(?:改成|改为|修改为|替换为)\s*[:：]?\s*(?P<replace>.*?)))"
-    r"(?=(?<![A-Za-z0-9])L\d{1,4}(?![A-Za-z0-9])|$)"
-)
-_NEGATED_SUBTITLE_CONTENT_PATTERN = re.compile(r"字幕(?:内容|文本)?(?:本身)?(?:没问题|没有问题|无需修改|不用改)")
+_REVIEW_KIND_CONTENT = telegram_review_parsing.REVIEW_KIND_CONTENT
+_REVIEW_KIND_SUBTITLE = telegram_review_parsing.REVIEW_KIND_SUBTITLE
+_REVIEW_KIND_FINAL = telegram_review_parsing.REVIEW_KIND_FINAL
+_SIMPLE_APPROVAL_PATTERN = telegram_review_parsing.SIMPLE_APPROVAL_PATTERN
+_FINAL_APPROVAL_PATTERN = telegram_review_parsing.FINAL_APPROVAL_PATTERN
+_NEGATED_SUBTITLE_CONTENT_PATTERN = telegram_review_parsing.NEGATED_SUBTITLE_CONTENT_PATTERN
 _REVIEW_KEYWORD_SPLIT_RE = re.compile(r"[\\s,，、/|+*×xX·•_=\\-]+")
 _REVIEW_KEYWORD_CONNECTOR_RE = re.compile(r"(?:与|和|及|及其|以及|并|并且|对比|联名|还是|或者|以及)")
 _REVIEW_KEYWORD_TOKEN_LIMIT = 10
 _REVIEW_KEYWORD_MIN_COUNT = 4
-_CONTENT_PROFILE_SUBTITLE_REVIEW_KEYWORDS = (
-    "字幕校对",
-    "字幕纠错",
-    "字幕复核",
-    "字幕确认",
-    "字幕还需要",
-    "字幕还有问题",
-    "字幕不太对",
-    "字幕不对",
-    "字幕有问题",
-    "字幕有错",
-    "字幕错别字",
-    "字幕术语",
-    "字幕时间",
-    "字幕不同步",
-    "术语还要",
-    "错别字还要",
-)
 _WORKFLOW_MODE_LABELS = {
     "standard_edit": "标准成片",
     "long_text_to_video": "长文本转视频",
@@ -1454,43 +1418,27 @@ def _telegram_review_ready(settings: Any) -> bool:
 
 
 def _extract_review_reference(text: str) -> tuple[str, uuid.UUID] | None:
-    match = _REVIEW_REF_PATTERN.search(str(text or ""))
-    if match is None:
-        return None
-    try:
-        return match.group("kind"), uuid.UUID(match.group("job_id"))
-    except ValueError:
-        return None
+    return telegram_review_parsing.extract_review_reference(text)
 
 
 def _extract_review_reference_from_message(message: dict[str, Any]) -> tuple[str, uuid.UUID] | None:
-    for candidate in (
-        _message_text(message),
-        _message_text(message.get("reply_to_message") or {}),
-    ):
-        review_ref = _extract_review_reference(candidate)
-        if review_ref is not None:
-            return review_ref
-    return None
+    return telegram_review_parsing.extract_review_reference_from_message(message)
 
 
 def _extract_review_callback_reference(data: str) -> tuple[str, uuid.UUID, str] | None:
-    match = _REVIEW_CALLBACK_PATTERN.match(str(data or "").strip())
-    if match is None:
-        return None
-    try:
-        return _REVIEW_KIND_FINAL, uuid.UUID(match.group("job_id")), match.group("action")
-    except ValueError:
-        return None
+    return telegram_review_parsing.extract_review_callback_reference(
+        data,
+        allowed_actions=_FINAL_REVIEW_CALLBACK_ACTION_TEXT,
+    )
 
 
 def _build_review_callback_data(kind: str, job_id: uuid.UUID, action: str) -> str | None:
-    if kind != _REVIEW_KIND_FINAL:
-        return None
-    normalized_action = str(action or "").strip().lower()
-    if normalized_action not in _FINAL_REVIEW_CALLBACK_ACTION_TEXT:
-        return None
-    return f"RCB:final:{job_id}:{normalized_action}"
+    return telegram_review_parsing.build_review_callback_data(
+        kind,
+        job_id,
+        action,
+        allowed_actions=_FINAL_REVIEW_CALLBACK_ACTION_TEXT,
+    )
 
 
 def _build_final_review_reply_markup(job_id: uuid.UUID) -> dict[str, Any]:
@@ -1590,25 +1538,11 @@ def _compact_text(text: str) -> str:
 
 
 def _looks_like_subtitle_review_reply(text: str) -> bool:
-    normalized = str(text or "").strip()
-    if not normalized:
-        return False
-    return bool(
-        _ACCEPT_ALL_PATTERN.search(normalized)
-        or _REJECT_ALL_PATTERN.search(normalized)
-        or _SUBTITLE_SLOT_PATTERN.search(normalized)
-    )
+    return telegram_review_parsing.looks_like_subtitle_review_reply(text)
 
 
 def _looks_like_content_profile_subtitle_followup(text: str) -> bool:
-    normalized = str(text or "").strip().lower()
-    if not normalized:
-        return False
-    if _NEGATED_SUBTITLE_CONTENT_PATTERN.search(normalized):
-        return False
-    if _looks_like_subtitle_review_reply(normalized):
-        return True
-    return any(keyword in normalized for keyword in _CONTENT_PROFILE_SUBTITLE_REVIEW_KEYWORDS)
+    return telegram_review_parsing.looks_like_content_profile_subtitle_followup(text)
 
 
 def _build_final_review_rerun_plan(note: str) -> FinalReviewRerunPlan | None:
@@ -2259,14 +2193,12 @@ def _resolve_raw_review_keywords(
     deduped: set[str] = set()
 
     def add_keyword(value: str) -> None:
-        text = str(value or "").strip()
-        if not text:
-            return
-        norm = "".join(text.upper().split())
-        if not norm or norm in deduped:
-            return
-        deduped.add(norm)
-        raw_keywords.append(text)
+        for text in _expand_review_keyword_token(value):
+            norm = "".join(text.upper().split())
+            if not norm or norm in deduped:
+                continue
+            deduped.add(norm)
+            raw_keywords.append(text)
 
     for raw in (profile.get("keywords") or profile.get("search_queries") or []):
         value = str(raw or "").strip()
@@ -2286,6 +2218,21 @@ def _resolve_raw_review_keywords(
     if raw_keywords:
         return raw_keywords
     return ["视频内容"]
+
+
+def _expand_review_keyword_token(value: str) -> list[str]:
+    text = str(value or "").strip()
+    if not text:
+        return []
+    compact = "".join(text.split())
+    if not compact:
+        return []
+    if re.search(r"[A-Za-z]", compact) and re.search(r"[\u4e00-\u9fff]", compact):
+        parts = re.findall(r"[A-Za-z]+(?:\d+)?|[\u4e00-\u9fff]+(?:\d+)?", compact)
+        normalized = [str(part).strip() for part in parts if str(part).strip()]
+        if len(normalized) > 1:
+            return normalized
+    return [text]
 
 
 def _split_review_keywords(values: list[str], *, seed_terms: list[str] | None = None) -> list[str]:
@@ -3220,36 +3167,7 @@ def _interpret_full_subtitle_review_reply(
     text: str,
     subtitle_lines: list[TelegramSubtitleLineCandidate],
 ) -> tuple[bool, list[dict[str, str]]]:
-    normalized = str(text or "").strip()
-    if not normalized:
-        return False, []
-    if _ACCEPT_ALL_PATTERN.search(normalized):
-        return True, []
-
-    line_by_slot = {item.slot.lower(): item for item in subtitle_lines}
-    actions: list[dict[str, str]] = []
-    for match in _FULL_SUBTITLE_ACTION_PATTERN.finditer(normalized):
-        slot = f"L{match.group('slot')}".lower()
-        candidate = line_by_slot.get(slot)
-        if candidate is None:
-            continue
-        replacement = str(match.group("replace") or "").strip().rstrip("，。,；; ")
-        if match.group("pass"):
-            actions.append(
-                {
-                    "subtitle_item_id": candidate.subtitle_item_id,
-                    "action": "accepted",
-                }
-            )
-        elif replacement:
-            actions.append(
-                {
-                    "subtitle_item_id": candidate.subtitle_item_id,
-                    "action": "updated",
-                    "override_text": replacement,
-                }
-            )
-    return False, actions
+    return telegram_review_parsing.interpret_full_subtitle_review_reply(text, subtitle_lines)
 
 
 async def _apply_full_subtitle_review_actions(
@@ -3291,175 +3209,25 @@ async def _interpret_subtitle_review_reply(
     text: str,
     candidates: list[TelegramReviewCandidate],
 ) -> list[dict[str, str]]:
-    normalized = str(text or "").strip()
-    if not normalized:
-        return []
-
-    if _ACCEPT_ALL_PATTERN.search(normalized):
-        return [
-            {"correction_id": item.correction_id, "action": "accepted"}
-            for item in candidates
-        ]
-    if _REJECT_ALL_PATTERN.search(normalized):
-        return [
-            {"correction_id": item.correction_id, "action": "rejected"}
-            for item in candidates
-        ]
-
-    provider = get_reasoning_provider()
-    candidate_payload = [
-        {
-            "slot": item.slot,
-            "correction_id": item.correction_id,
-            "subtitle_index": item.subtitle_index,
-            "original": item.original,
-            "suggested": item.suggested,
-            "change_type": item.change_type,
-            "confidence": item.confidence,
-            "source": item.source,
-        }
-        for item in candidates
-    ]
-    prompt = (
-        "你在解析 Telegram 里的字幕审核回复。"
-        "用户会针对若干待审核纠错项给出接受、拒绝或改写意见。"
-        "如果用户要求“改成 xxx”，请输出 action=accepted 且 override_text=xxx。"
-        "不要编造候选项，必须只使用我提供的 correction_id。"
-        "输出 JSON："
-        '{"actions":[{"correction_id":"","action":"accepted","override_text":""}]}'
-        f"\n待审核候选：{json.dumps(candidate_payload, ensure_ascii=False)}"
-        f"\n用户回复：{normalized}"
+    return await telegram_review_parsing.interpret_subtitle_review_reply(
+        text,
+        candidates,
+        provider=get_reasoning_provider(),
+        message_cls=Message,
     )
-    response = await provider.complete(
-        [
-            Message(role="system", content="你是严谨的字幕审核动作解析助手。"),
-            Message(role="user", content=prompt),
-        ],
-        temperature=0.0,
-        max_tokens=900,
-        json_mode=True,
-    )
-    payload = response.as_json()
-    actions = payload.get("actions") if isinstance(payload, dict) else []
-    if not isinstance(actions, list):
-        return []
-
-    allowed_ids = {item.correction_id for item in candidates}
-    normalized_actions: list[dict[str, str]] = []
-    seen_ids: set[str] = set()
-    for item in actions:
-        if not isinstance(item, dict):
-            continue
-        correction_id = str(item.get("correction_id") or "").strip()
-        action = str(item.get("action") or "").strip().lower()
-        if correction_id not in allowed_ids or correction_id in seen_ids:
-            continue
-        if action not in {"accepted", "rejected"}:
-            continue
-        seen_ids.add(correction_id)
-        record = {
-            "correction_id": correction_id,
-            "action": action,
-        }
-        override_text = str(item.get("override_text") or "").strip()
-        if action == "accepted" and override_text:
-            record["override_text"] = override_text
-        normalized_actions.append(record)
-    return normalized_actions
 
 
 async def _interpret_content_profile_reply(review: Any, text: str) -> dict[str, Any]:
-    normalized = str(text or "").strip()
-    if not normalized:
-        return {}
-
-    provider = get_reasoning_provider()
-    allowed_workflow_modes = [item["value"] for item in build_active_workflow_mode_options()]
-    allowed_enhancement_modes = [item["value"] for item in build_active_enhancement_mode_options()]
-    prompt = (
-        "你在把 Telegram 里的远程审核回复，转换成与前端内容审核表单完全一致的确认 payload。"
-        "用户可能会直接说修改意见，也可能顺手改工作流模式、增强模式、关键词、文案风格。"
-        f"字段规则：{CONTENT_PROFILE_FIELD_GUIDELINES}\n"
-        "如果用户没有提某个字段，就不要编造。"
-        "如果用户只是补充说明，请把它放进 correction_notes 或 supplemental_context。"
-        "输出 JSON，字段只允许来自这个集合："
-        '{"workflow_mode":"","enhancement_modes":[],"copy_style":"","subject_brand":"","subject_model":"","subject_type":"",'
-        '"video_theme":"","hook_line":"","visible_text":"","summary":"","engagement_question":"","keywords":[],'
-        '"correction_notes":"","supplemental_context":""}'
-        f"\n当前工作流模式：{review.workflow_mode}"
-        f"\n当前增强模式：{json.dumps(list(review.enhancement_modes or []), ensure_ascii=False)}"
-        f"\n当前草稿：{json.dumps(review.final or review.draft or {}, ensure_ascii=False)}"
-        f"\n允许的 workflow_mode：{json.dumps(allowed_workflow_modes, ensure_ascii=False)}"
-        f"\n允许的 enhancement_modes：{json.dumps(allowed_enhancement_modes, ensure_ascii=False)}"
-        f"\n用户回复：{normalized}"
+    return await telegram_review_parsing.interpret_content_profile_reply(
+        review,
+        text,
+        provider=get_reasoning_provider(),
+        message_cls=Message,
+        field_guidelines=CONTENT_PROFILE_FIELD_GUIDELINES,
+        normalize_subject_type=normalize_video_type,
+        allowed_workflow_modes=[item["value"] for item in build_active_workflow_mode_options()],
+        allowed_enhancement_modes=[item["value"] for item in build_active_enhancement_mode_options()],
     )
-    try:
-        response = await provider.complete(
-            [
-                Message(role="system", content="你是严谨的审核表单解析助手。"),
-                Message(role="user", content=prompt),
-            ],
-            temperature=0.0,
-            max_tokens=1000,
-            json_mode=True,
-        )
-        payload = response.as_json()
-    except Exception:
-        payload = {}
-
-    if not isinstance(payload, dict):
-        payload = {}
-
-    normalized_payload: dict[str, Any] = {}
-    normalized_subject_type = normalize_video_type(str(payload.get("subject_type") or ""))
-    if normalized_subject_type:
-        normalized_payload["subject_type"] = normalized_subject_type
-
-    for key in (
-        "copy_style",
-        "subject_brand",
-        "subject_model",
-        "video_theme",
-        "hook_line",
-        "visible_text",
-        "summary",
-        "engagement_question",
-        "correction_notes",
-        "supplemental_context",
-    ):
-        value = str(payload.get(key) or "").strip()
-        if value:
-            normalized_payload[key] = value
-
-    workflow_mode = str(payload.get("workflow_mode") or "").strip()
-    if workflow_mode in allowed_workflow_modes:
-        normalized_payload["workflow_mode"] = workflow_mode
-
-    enhancement_modes = payload.get("enhancement_modes") or []
-    if isinstance(enhancement_modes, list):
-        filtered_modes: list[str] = []
-        for item in enhancement_modes:
-            value = str(item or "").strip()
-            if value and value in allowed_enhancement_modes and value not in filtered_modes:
-                filtered_modes.append(value)
-        if filtered_modes:
-            normalized_payload["enhancement_modes"] = filtered_modes
-
-    keywords = payload.get("keywords") or []
-    if isinstance(keywords, list):
-        normalized_keywords: list[str] = []
-        for item in keywords:
-            value = str(item or "").strip()
-            if value and value not in normalized_keywords:
-                normalized_keywords.append(value)
-        if normalized_keywords:
-            normalized_payload["keywords"] = normalized_keywords
-
-    if not normalized_payload:
-        return {"correction_notes": normalized}
-    if "correction_notes" not in normalized_payload:
-        normalized_payload["correction_notes"] = normalized
-    return normalized_payload
 
 
 _telegram_review_bot_service: TelegramReviewBotService | None = None
