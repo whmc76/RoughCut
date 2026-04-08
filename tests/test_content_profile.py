@@ -257,7 +257,9 @@ def test_build_review_keywords_preserves_mixed_chinese_latin_product_tokens_and_
         }
     )
 
-    assert any(token == "DJI Mini 4 Pro" for token in keywords)
+    mixed_token_matches = [token for token in keywords if token.replace(" ", "").casefold() == "djimini4pro"]
+    assert mixed_token_matches == ["DJI Mini 4 Pro"]
+    assert keywords[0] == "DJI Mini 4 Pro"
     assert not any(token in {"开箱", "评测"} for token in keywords)
 
 
@@ -916,7 +918,7 @@ def test_ensure_search_queries_rebuilds_deduped_fallback_queries_from_empty_sear
     profile = {
         "subject_type": "开箱",
         "content_kind": "unboxing",
-        "search_queries": [],
+        "search_queries": [" 开箱 ", "开箱", "开箱 "],
     }
 
     queries = _ensure_search_queries(
@@ -2081,6 +2083,8 @@ async def test_apply_content_profile_feedback_preserves_workflow_mode_enhancemen
             "subject_type": profile.get("subject_type", ""),
             "video_theme": profile.get("video_theme", ""),
             "summary": profile.get("summary", ""),
+            "workflow_mode": profile.get("workflow_mode", ""),
+            "enhancement_modes": list(profile.get("enhancement_modes") or []),
             "search_queries": list(profile.get("search_queries") or []),
             "transcript_excerpt": transcript_excerpt,
         }
@@ -2109,8 +2113,7 @@ async def test_apply_content_profile_feedback_preserves_workflow_mode_enhancemen
 
     assert result["workflow_mode"] == "review"
     assert result["enhancement_modes"] == ["semantic_search", "subtitle_polish"]
-    assert "DJI Mini 4 Pro" in result["keywords"]
-    assert "开箱" in result["keywords"]
+    assert result["keywords"][:2] == ["DJI Mini 4 Pro", "开箱"]
 
 
 @pytest.mark.asyncio
@@ -2497,7 +2500,7 @@ async def test_infer_content_profile_uses_neutral_review_fallback_when_content_u
         include_research=False,
     )
 
-    assert result["subject_type"] == "unboxing"
+    assert result["subject_type"] == ""
     assert result["video_theme"] == ""
     assert result["summary"] == "这条视频当前主题待进一步确认，建议结合字幕、画面文字和人工核对后再继续包装。"
     assert result["content_understanding"]["needs_review"] is True
@@ -2690,7 +2693,7 @@ async def test_enrich_content_profile_backfills_identity_from_glossary_seed(monk
 
     assert result["subject_brand"] == "FOXBAT狐蝠工业"
     assert result["subject_model"] == "F21小副包"
-    assert result.get("subject_type", "") == "unboxing"
+    assert result.get("subject_type", "") == ""
 
 
 @pytest.mark.asyncio
@@ -2721,7 +2724,7 @@ async def test_enrich_content_profile_does_not_classify_subject_type_from_contex
 
     assert result["subject_brand"] == "FOXBAT狐蝠工业"
     assert result["subject_model"] == "F21小副包"
-    assert result.get("subject_type", "") == "unboxing"
+    assert result.get("subject_type", "") == ""
 
 
 @pytest.mark.asyncio
