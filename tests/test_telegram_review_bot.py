@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 import roughcut.review.telegram_bot as telegram_bot
+from roughcut.review import telegram_review_parsing
 from roughcut.review.telegram_bot import (
     FinalReviewRerunPlan,
     TelegramFinalReviewClip,
@@ -73,6 +74,13 @@ def test_extract_review_callback_reference_rejects_malformed_callback_data():
     assert _extract_review_callback_reference(f"RCB:final:{job_id}:cover:extra") is None
     assert _extract_review_callback_reference("RCB:final:not-a-uuid:cover") is None
     assert _extract_review_callback_reference(f"RCB:final:{job_id}:Cover") is None
+
+
+def test_review_callback_helpers_respect_explicit_empty_allowed_actions():
+    job_id = uuid.uuid4()
+
+    assert telegram_review_parsing.build_review_callback_data("final_review", job_id, "cover", allowed_actions=[]) is None
+    assert telegram_review_parsing.extract_review_callback_reference(f"RCB:final:{job_id}:cover", allowed_actions=[]) is None
 
 
 def test_build_final_review_reply_markup_contains_expected_buttons():

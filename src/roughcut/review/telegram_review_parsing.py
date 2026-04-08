@@ -116,7 +116,11 @@ def extract_review_callback_reference(
     if match is None:
         return None
     action = str(match.group("action") or "").strip().lower()
-    accepted_actions = tuple(allowed_actions or FINAL_REVIEW_CALLBACK_ACTIONS)
+    accepted_actions = (
+        tuple(FINAL_REVIEW_CALLBACK_ACTIONS)
+        if allowed_actions is None
+        else tuple(str(item).strip().lower() for item in allowed_actions if str(item).strip())
+    )
     if action not in accepted_actions:
         return None
     try:
@@ -135,7 +139,11 @@ def build_review_callback_data(
     if kind != REVIEW_KIND_FINAL:
         return None
     normalized_action = str(action or "").strip().lower()
-    accepted_actions = tuple(allowed_actions or FINAL_REVIEW_CALLBACK_ACTIONS)
+    accepted_actions = (
+        tuple(FINAL_REVIEW_CALLBACK_ACTIONS)
+        if allowed_actions is None
+        else tuple(str(item).strip().lower() for item in allowed_actions if str(item).strip())
+    )
     if normalized_action not in accepted_actions:
         return None
     return f"RCB:final:{job_id}:{normalized_action}"
