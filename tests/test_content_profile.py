@@ -256,6 +256,47 @@ def test_content_profile_keywords_module_exports_public_keyword_helpers():
     assert normalize_query_list.__module__ == "roughcut.review.content_profile_keywords"
 
 
+def test_content_profile_keywords_build_review_keywords_direct_helper_keeps_mixed_product_token():
+    from roughcut.review.content_profile_keywords import build_review_keywords
+
+    keywords = build_review_keywords(
+        {
+            "subject_brand": "DJI",
+            "subject_model": "Mini 4 Pro",
+            "subject_type": "无人机",
+            "video_theme": "DJI Mini 4 Pro 开箱评测",
+            "visible_text": "DJI Mini 4 Pro",
+            "transcript_excerpt": "这次是 DJI Mini 4 Pro 开箱评测。",
+            "search_queries": ["开箱", "评测", "DJI Mini 4 Pro", "dji mini 4 pro"],
+        }
+    )
+
+    mixed_token_matches = [token for token in keywords if token.replace(" ", "").casefold() == "djimini4pro"]
+    assert len(mixed_token_matches) == 1
+    assert "开箱" not in keywords
+    assert "评测" not in keywords
+    assert not all(fragment in keywords for fragment in ("MINI", "PRO"))
+
+
+def test_content_profile_keywords_fallback_search_queries_for_profile_direct_helper_synthesizes_from_subject_type():
+    from roughcut.review.content_profile_keywords import fallback_search_queries_for_profile
+
+    queries = fallback_search_queries_for_profile(
+        {
+            "subject_type": "开箱",
+            "content_kind": "unboxing",
+            "subject_brand": "DJI",
+            "subject_model": "Mini 4 Pro",
+        },
+        "IMG_20260130_140529.mp4",
+    )
+
+    assert "开箱" in queries
+    assert "DJI" in queries
+    assert "Mini 4 Pro" in queries
+    assert "IMG_20260130_140529" not in queries
+
+
 def test_build_review_keywords_preserves_mixed_chinese_latin_product_tokens_and_downranks_noise():
     from roughcut.review.content_profile import _build_review_keywords
 

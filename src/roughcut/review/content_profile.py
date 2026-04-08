@@ -208,43 +208,15 @@ def _extract_review_keyword_tokens(
     *,
     seed_terms: list[str] | None = None,
 ) -> list[str]:
-    return _extract_review_keyword_tokens_public(
-        text,
-        seed_terms=seed_terms,
-        clean_line=_clean_line,
-        normalize_value=_normalize_profile_value,
-        min_len=_REVIEW_KEYWORDS_MIN_LEN,
-        noise_chunks=_REVIEW_KEYWORD_NOISE_CHUNKS,
-    )
+    return _extract_review_keyword_tokens_public(text, seed_terms=seed_terms)
 
 
 def _build_review_keywords(profile: dict[str, Any]) -> list[str]:
-    return _build_review_keywords_public(
-        profile,
-        collect_seed_terms=_collect_review_keyword_seed_terms_public,
-        extract_tokens=_extract_review_keyword_tokens_public,
-        clean_line=_clean_line,
-        normalize_value=_normalize_profile_value,
-        looks_like_camera_stem=_looks_like_camera_stem,
-        extract_topic_terms=_extract_topic_terms,
-        extract_search_signal_terms=_extract_search_signal_terms,
-        extract_query_support_terms=_extract_query_support_terms,
-        keywords_limit=_REVIEW_KEYWORDS_LIMIT,
-        min_keyword_len=_REVIEW_KEYWORDS_MIN_LEN,
-        min_keyword_count=_REVIEW_KEYWORD_MIN_COUNT,
-        noise_chunks=_REVIEW_KEYWORD_NOISE_CHUNKS,
-    )
+    return _build_review_keywords_public(profile)
 
 
 def _collect_review_keyword_seed_terms(profile_values: dict[str, Any]) -> list[str]:
-    return _collect_review_keyword_seed_terms_public(
-        profile_values,
-        extract_tokens=_extract_review_keyword_tokens_public,
-        clean_line=_clean_line,
-        normalize_value=_normalize_profile_value,
-        min_len=_REVIEW_KEYWORDS_MIN_LEN,
-        noise_chunks=_REVIEW_KEYWORD_NOISE_CHUNKS,
-    )
+    return _collect_review_keyword_seed_terms_public(profile_values)
 
 
 def _coerce_subject_type_for_review_display(value: str) -> str:
@@ -296,15 +268,7 @@ def _build_review_field_fallback_visible_text(
 
 
 def _fallback_search_queries_for_profile(profile: dict[str, Any], source_name: str) -> list[str]:
-    return _fallback_search_queries_for_profile_public(
-        profile,
-        source_name,
-        normalize_main_content_type=_normalize_main_content_type,
-        content_kind_default_subject_type=_CONTENT_KIND_DEFAULT_SUBJECT_TYPE,
-        is_informative_source_hint=_is_informative_source_hint,
-        clean_line=_clean_line,
-        default_query="视频内容",
-    )
+    return _fallback_search_queries_for_profile_public(profile, source_name)
 
 
 def _ensure_search_queries(
