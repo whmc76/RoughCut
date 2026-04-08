@@ -366,7 +366,7 @@ def _build_review_keywords(profile: dict[str, Any]) -> list[str]:
 
     ordered = [item[2] for item in sorted(candidates, key=lambda item: (-item[0], item[1]))]
     if ordered:
-        if len(ordered) < _REVIEW_KEYWORDS_MIN_COUNT and seed_terms:
+        if len(ordered) < _REVIEW_KEYWORD_MIN_COUNT and seed_terms:
             for term in seed_terms:
                 add(term, 65)
             ordered = [item[2] for item in sorted(candidates, key=lambda item: (-item[0], item[1]))]
@@ -2314,7 +2314,10 @@ async def apply_content_profile_feedback(
     merged["user_feedback"] = dict(resolved_feedback)
     transcript_excerpt = str(reviewed_subtitle_excerpt or merged.get("transcript_excerpt") or "")
     if not any(value for value in resolved_feedback.values()):
+        specific_subject_type = str(merged.get("subject_type") or "").strip()
         _ensure_subject_type_main(merged)
+        if specific_subject_type and not _is_generic_subject_type(specific_subject_type):
+            merged["subject_type"] = specific_subject_type
         _ensure_search_queries(merged, source_name, transcript_excerpt=transcript_excerpt)
         _ensure_review_fields_not_empty(merged, source_name=source_name, transcript_excerpt=transcript_excerpt)
         merged["keywords"] = _build_review_keywords(merged)

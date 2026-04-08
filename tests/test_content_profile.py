@@ -1842,6 +1842,37 @@ async def test_apply_content_profile_feedback_accepts_draft_without_reenrichment
 
 
 @pytest.mark.asyncio
+async def test_apply_content_profile_feedback_keeps_specific_subject_type_on_empty_feedback(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from roughcut.review import content_profile as content_profile_module
+
+    async def fail_enrich(*args, **kwargs):
+        raise AssertionError("empty confirm should not re-enrich draft")
+
+    monkeypatch.setattr(content_profile_module, "enrich_content_profile", fail_enrich)
+
+    result = await apply_content_profile_feedback(
+        draft_profile={
+            "subject_type": "EDC机能包",
+            "subject_brand": "狐蝠工业",
+            "subject_model": "FXX1小副包",
+            "summary": "现有草稿摘要",
+            "transcript_excerpt": "测试字幕",
+        },
+        source_name="video.mp4",
+        channel_profile=None,
+        user_feedback={},
+    )
+
+    assert result["subject_type"] == "EDC机能包"
+    assert result["subject_brand"] == "狐蝠工业"
+    assert result["subject_model"] == "FXX1小副包"
+    assert result["review_mode"] == "manual_confirmed"
+    assert result["user_feedback"] == {}
+
+
+@pytest.mark.asyncio
 async def test_apply_content_profile_feedback_prefers_user_values():
     result = await apply_content_profile_feedback(
         draft_profile={
