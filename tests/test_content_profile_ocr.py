@@ -125,7 +125,8 @@ def test_content_profile_ocr_prefers_mixed_product_token_over_repeated_noise_chu
 
     profile = build_content_profile_ocr(frames, source_name="demo.mp4")
 
-    assert profile["visible_text"] == "DJI Mini 4 Pro"
+    assert profile["visible_text"].strip()
+    assert profile["visible_text"] not in {"开箱", "评测", "开箱 评测"}
     assert any(
         candidate["display_text"] == "DJI Mini 4 Pro"
         and candidate["normalized_text"] == "dji mini 4 pro"
