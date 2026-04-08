@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -852,9 +852,16 @@ async def test_watch_roots_crud_persists_bound_config_profile(client: AsyncClien
 async def test_watch_root_inventory(client: AsyncClient, monkeypatch: pytest.MonkeyPatch):
     import roughcut.api.review as review_api
 
-    async def fake_scan_watch_root_inventory(path: str, *, recursive: bool = True, scan_mode: str = "fast"):
+    async def fake_scan_watch_root_inventory(
+        path: str,
+        *,
+        recursive: bool = True,
+        scan_mode: str = "fast",
+        output_dir: str | None = None,
+    ):
         assert path == "/tmp/videos"
         assert scan_mode == "precise"
+        assert output_dir is None
         return {
             "pending": [
                 {
@@ -903,10 +910,12 @@ async def test_watch_root_inventory_scan_status(client: AsyncClient, monkeypatch
         force: bool = False,
         recursive: bool = True,
         scan_mode: str = "fast",
+        output_dir: str | None = None,
     ):
         assert path == watch_path
         assert force is True
         assert scan_mode == "precise"
+        assert output_dir is None
         return {
             "root_path": path,
             "scan_mode": scan_mode,
@@ -1043,9 +1052,18 @@ async def test_watch_root_inventory_enqueue_selected_item(client: AsyncClient, m
     from roughcut.db.models import WatchRoot
     from roughcut.db.session import get_session_factory
 
-    async def fake_create_jobs_for_inventory_paths(file_paths: list[str], *, workflow_template: str | None = None, language: str = "zh-CN"):
+    async def fake_create_jobs_for_inventory_paths(
+        file_paths: list[str],
+        *,
+        workflow_template: str | None = None,
+        language: str = "zh-CN",
+        output_dir: str | None = None,
+        config_profile_id: uuid.UUID | None = None,
+    ):
         assert file_paths == ["/tmp/videos-enqueue/a.mp4"]
         assert workflow_template == "edc_tactical"
+        assert output_dir is None
+        assert config_profile_id is None
         return [{"path": "/tmp/videos-enqueue/a.mp4", "job_id": "job-123"}]
 
     monkeypatch.setattr(review_api, "create_jobs_for_inventory_paths", fake_create_jobs_for_inventory_paths)
@@ -1139,8 +1157,17 @@ async def test_watch_root_inventory_enqueue_all(client: AsyncClient, monkeypatch
     from roughcut.db.models import WatchRoot
     from roughcut.db.session import get_session_factory
 
-    async def fake_create_jobs_for_inventory_paths(file_paths: list[str], *, workflow_template: str | None = None, language: str = "zh-CN"):
+    async def fake_create_jobs_for_inventory_paths(
+        file_paths: list[str],
+        *,
+        workflow_template: str | None = None,
+        language: str = "zh-CN",
+        output_dir: str | None = None,
+        config_profile_id: uuid.UUID | None = None,
+    ):
         assert file_paths == ["/tmp/videos-batch/a.mp4", "/tmp/videos-batch/b.mp4"]
+        assert output_dir is None
+        assert config_profile_id is None
         return [
             {"path": "/tmp/videos-batch/a.mp4", "job_id": "job-a"},
             {"path": "/tmp/videos-batch/b.mp4", "job_id": None},
@@ -2181,27 +2208,29 @@ async def test_jobs_usage_trend_endpoint_returns_daily_points(client: AsyncClien
     from roughcut.db.models import Job, JobStep
     from roughcut.db.session import get_session_factory
 
+    now = datetime.now(timezone.utc).replace(hour=10, minute=0, second=0, microsecond=0)
+
     async with get_session_factory()() as session:
         first_job_id = uuid.uuid4()
         second_job_id = uuid.uuid4()
         session.add_all(
             [
-                Job(
-                    id=first_job_id,
-                    source_path="jobs/demo/one.mp4",
-                    source_name="one.mp4",
-                    status="done",
-                    language="zh-CN",
-                    updated_at=datetime(2026, 3, 21, 10, 0, tzinfo=timezone.utc),
-                ),
-                Job(
-                    id=second_job_id,
-                    source_path="jobs/demo/two.mp4",
-                    source_name="two.mp4",
-                    status="done",
-                    language="zh-CN",
-                    updated_at=datetime(2026, 3, 22, 10, 0, tzinfo=timezone.utc),
-                ),
+                    Job(
+                        id=first_job_id,
+                        source_path="jobs/demo/one.mp4",
+                        source_name="one.mp4",
+                        status="done",
+                        language="zh-CN",
+                        updated_at=now - timedelta(days=1),
+                    ),
+                    Job(
+                        id=second_job_id,
+                        source_path="jobs/demo/two.mp4",
+                        source_name="two.mp4",
+                        status="done",
+                        language="zh-CN",
+                        updated_at=now,
+                    ),
                 JobStep(
                     job_id=first_job_id,
                     step_name="content_profile",

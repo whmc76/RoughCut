@@ -389,8 +389,6 @@ def fallback_search_queries_for_profile(profile: Mapping[str, Any], source_name:
         fallback.append(content_kind_fallback)
     if source_stem and _is_informative_source_hint(source_stem):
         fallback.append(_clean_line(source_stem))
-    if not fallback:
-        fallback.append("视频内容")
     return [query for query in fallback if query]
 
 

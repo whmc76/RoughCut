@@ -171,7 +171,7 @@ describe("JobContentProfileSection", () => {
       },
     });
 
-    expect(screen.getByDisplayValue("nested_subject")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("待补充")).toBeInTheDocument();
     expect(screen.getByDisplayValue("nested_theme")).toBeInTheDocument();
     expect(screen.getByDisplayValue("nested_hook")).toBeInTheDocument();
     expect(screen.getByDisplayValue("nested_summary")).toBeInTheDocument();

@@ -199,10 +199,25 @@ def _coerce_subject_type_to_supported_main_type(profile: dict[str, Any] | None) 
     candidate = profile or {}
     resolved_subject_type = str(candidate.get("subject_type") or "").strip()
     if not resolved_subject_type:
-        normalized_content_kind = _normalize_main_content_type(_content_kind_name(candidate))
-        return normalized_content_kind or ""
+        return ""
     normalized = _normalize_main_content_type(resolved_subject_type)
-    if normalized:
+    generic_aliases = {
+        "tutorial",
+        "教程",
+        "vlog",
+        "commentary",
+        "观点",
+        "gameplay",
+        "游戏",
+        "food",
+        "探店",
+        "unboxing",
+        "开箱",
+    }
+    if normalized and (
+        resolved_subject_type.strip().lower() in generic_aliases
+        or _is_generic_subject_type(resolved_subject_type)
+    ):
         return normalized
     return ""
 
@@ -300,7 +315,7 @@ def _ensure_search_queries(
     if not existing:
         existing = _normalize_query_list(_fallback_search_queries_for_profile(profile, source_name))
     if not existing:
-        existing = ["视频内容"]
+        existing = []
     if limit and len(existing) > limit:
         existing = existing[:limit]
     profile["search_queries"] = existing
