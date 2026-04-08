@@ -102,6 +102,18 @@ describe("OverviewPage", () => {
     expect(screen.queryByText("统一剪辑配置")).not.toBeInTheDocument();
   });
 
+  it("does not render the old summary strip or instructional copy on the overview page", () => {
+    mockUseOverviewWorkspace.mockReturnValue(buildWorkspace());
+
+    render(<OverviewPage />);
+
+    expect(screen.queryByText("第一段")).not.toBeInTheDocument();
+    expect(screen.queryByText("第二段")).not.toBeInTheDocument();
+    expect(screen.queryByText("第三段")).not.toBeInTheDocument();
+    expect(screen.queryByText("先判断现在能不能继续跑")).not.toBeInTheDocument();
+    expect(screen.queryByText("最后决定进入哪一页继续处理")).not.toBeInTheDocument();
+  });
+
   it("renders the full analysis module on the overview page", () => {
     mockUseOverviewWorkspace.mockReturnValue(
       buildWorkspace({
@@ -136,21 +148,21 @@ describe("OverviewPage", () => {
 
     render(<OverviewPage />);
 
+    expect(screen.getByText("overview.triage.title")).toBeInTheDocument();
+    expect(screen.getByText("overview.triage.jobs.title")).toBeInTheDocument();
+    expect(screen.getByText("overview.triage.watchRoots.title")).toBeInTheDocument();
     expect(screen.getByText("jobs.summary.topSteps")).toBeInTheDocument();
     expect(screen.getByText("jobs.summary.cachePanel")).toBeInTheDocument();
-    expect(screen.getByText("jobs.summary.topModels")).toBeInTheDocument();
-    expect(screen.getByText("jobs.summary.topProviders")).toBeInTheDocument();
   });
 
-  it("uses responsibility-first copy for overview sections", () => {
+  it("keeps the overview focused on triage and next actions", () => {
     mockUseOverviewWorkspace.mockReturnValue(buildWorkspace());
 
     render(<OverviewPage />);
 
-    expect(screen.getByText("系统状态")).toBeInTheDocument();
-    expect(screen.getByText("任务分析")).toBeInTheDocument();
-    expect(screen.getByText("下一步入口")).toBeInTheDocument();
-    expect(screen.getByText("先判断现在能不能继续跑")).toBeInTheDocument();
-    expect(screen.getByText("最后决定进入哪一页继续处理")).toBeInTheDocument();
+    expect(screen.getByText("overview.triage.title")).toBeInTheDocument();
+    expect(screen.getByText("overview.triage.jobs.title")).toBeInTheDocument();
+    expect(screen.getByText("overview.triage.watchRoots.title")).toBeInTheDocument();
+    expect(screen.getByText("overview.triage.system.title")).toBeInTheDocument();
   });
 });

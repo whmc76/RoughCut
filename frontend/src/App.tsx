@@ -21,6 +21,9 @@ const PackagingPage = lazy(async () => ({
 const StyleTemplatesPage = lazy(async () => ({
   default: (await import("./pages/StyleTemplatesPage")).StyleTemplatesPage,
 }));
+const StyleLabPage = lazy(async () => ({
+  default: (await import("./pages/StyleLabPage")).StyleLabPage,
+}));
 const CreativeModesPage = lazy(async () => ({
   default: (await import("./pages/CreativeModesPage")).CreativeModesPage,
 }));
@@ -62,78 +65,49 @@ export function App() {
     });
   }, [locale]);
 
-  const navigationGroups = [
-    {
-      label: "工作台",
-      items: [
-        { to: "/", label: t("app.nav.overview") },
-        { to: "/jobs", label: t("app.nav.jobs") },
-        { to: "/watch-roots", label: t("app.nav.watchRoots") },
-      ],
-    },
-    {
-      label: "包装与风格",
-      items: [
-        { to: "/packaging", label: t("app.nav.packaging") },
-        { to: "/style-templates", label: t("app.nav.styleTemplates") },
-        { to: "/creative-modes", label: t("app.nav.creativeModes") },
-        { to: "/creator-profiles", label: t("app.nav.creatorProfiles") },
-      ],
-    },
-    {
-      label: "知识与配置",
-      items: [
-        { to: "/memory", label: t("app.nav.memory") },
-        { to: "/glossary", label: t("app.nav.glossary") },
-        { to: "/settings", label: t("app.nav.settings") },
-      ],
-    },
-    {
-      label: "系统",
-      items: [{ to: "/control", label: t("app.nav.control") }],
-    },
+  const navigationItems = [
+    { to: "/", label: t("app.nav.overview") },
+    { to: "/jobs", label: t("app.nav.jobs") },
+    { to: "/watch-roots", label: "监看目录" },
+    { to: "/style-lab", label: "风格实验" },
+    { to: "/settings", label: t("app.nav.settings") },
   ];
 
   return (
     <div className="app-shell">
       <aside className="sidebar">
-        <div>
+        <div className="sidebar-brand">
           <div className="brand-kicker">{t("app.sidebar.kicker")}</div>
           <h1>RoughCut</h1>
-          <p className="muted">{t("app.sidebar.description")}</p>
+          <p className="muted sidebar-tagline">{t("app.sidebar.description")}</p>
         </div>
         <nav className="nav-list">
-          {navigationGroups.map((group) => (
-            <div key={group.label} className="nav-group">
-              <div className="sidebar-section-label">{group.label}</div>
-              <div className="nav-group-links">
-                {group.items.map((item) => (
-                  <NavLink
-                    key={item.to}
-                    to={item.to}
-                    end={item.to === "/"}
-                    className={({ isActive }) => (isActive ? "nav-link active" : "nav-link")}
-                  >
-                    {item.label}
-                  </NavLink>
-                ))}
-              </div>
-            </div>
-          ))}
+          <div className="sidebar-section-label">Workspace</div>
+          <div className="nav-group-links nav-group-links-primary">
+            {navigationItems.map((item) => (
+              <NavLink
+                key={item.to}
+                to={item.to}
+                end={item.to === "/"}
+                className={({ isActive }) => (isActive ? "nav-link active" : "nav-link")}
+              >
+                <span>{item.label}</span>
+              </NavLink>
+            ))}
+          </div>
         </nav>
         <div className="sidebar-footer">
-          <label className="form-stack">
-            <span>{t("app.sidebar.language")}</span>
+          <label className="form-stack sidebar-footnote">
+            <span className="sidebar-footer-label">{t("app.sidebar.language")}</span>
             <select className="input" value={locale} onChange={(event) => setLocale(event.target.value as "zh-CN" | "en-US")}>
               <option value="zh-CN">{t("app.language.zh-CN")}</option>
               <option value="en-US">{t("app.language.en-US")}</option>
             </select>
           </label>
-          <div className="top-gap">
-            {t("app.sidebar.version")}: <code>{appVersion || t("app.sidebar.versionUnknown")}</code>
+          <div className="sidebar-version">
+            <span className="sidebar-footer-label">{t("app.sidebar.version")}</span>
+            <code>{appVersion || t("app.sidebar.versionUnknown")}</code>
           </div>
-          <div>{t("app.sidebar.apiPrefix")}</div>
-          <code>/api/v1</code>
         </div>
       </aside>
       <main className="main-content">
@@ -143,6 +117,7 @@ export function App() {
             <Route path="/jobs" element={<JobsPage />} />
             <Route path="/watch-roots" element={<WatchRootsPage />} />
             <Route path="/packaging" element={<PackagingPage />} />
+            <Route path="/style-lab" element={<StyleLabPage />} />
             <Route path="/style-templates" element={<StyleTemplatesPage />} />
             <Route path="/creative-modes" element={<CreativeModesPage />} />
             <Route path="/creator-profiles" element={<CreatorProfilesPage />} />

@@ -142,6 +142,18 @@ describe("JobsPage", () => {
     expect(screen.getByText("config-profile-switcher")).toBeInTheDocument();
   });
 
+  it("does not render the old summary strip or instructional copy on the jobs page", () => {
+    mockUseJobWorkspace.mockReturnValue(buildWorkspace());
+
+    render(<JobsPage />);
+
+    expect(screen.queryByText("第一步")).not.toBeInTheDocument();
+    expect(screen.queryByText("第二步")).not.toBeInTheDocument();
+    expect(screen.queryByText("第三步")).not.toBeInTheDocument();
+    expect(screen.queryByText("创建任务与设置默认参数")).not.toBeInTheDocument();
+    expect(screen.queryByText("跟进任务队列与审核详情")).not.toBeInTheDocument();
+  });
+
   it("does not render the analysis module on the jobs page", () => {
     mockUseJobWorkspace.mockReturnValue(
       buildWorkspace({
@@ -178,6 +190,7 @@ describe("JobsPage", () => {
 
     expect(screen.queryByText("usage-trend-panel")).not.toBeInTheDocument();
     expect(screen.queryByText("jobs.summary.topSteps")).not.toBeInTheDocument();
+    expect(screen.getByText("jobs.page.queueTitle")).toBeInTheDocument();
   });
 
   it("routes needs_review jobs into the dedicated review overlay instead of the detail modal", () => {

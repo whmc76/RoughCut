@@ -1,9 +1,11 @@
 import type { ReactNode } from "react";
 import { render, screen } from "@testing-library/react";
+import { MemoryRouter } from "react-router-dom";
 
 import { SettingsPage } from "./SettingsPage";
 
 const mockUseSettingsWorkspace = vi.fn();
+let lastPageHeaderProps: { summary?: unknown[] } | null = null;
 
 vi.mock("../i18n", () => ({
   useI18n: () => ({
@@ -12,12 +14,15 @@ vi.mock("../i18n", () => ({
 }));
 
 vi.mock("../components/ui/PageHeader", () => ({
-  PageHeader: ({ title, actions }: { title: string; actions?: ReactNode }) => (
+  PageHeader: ({ title, actions, summary }: { title: string; actions?: ReactNode; summary?: unknown[] }) => {
+    lastPageHeaderProps = { summary };
+    return (
     <header>
       <h1>{title}</h1>
       {actions}
     </header>
-  ),
+    );
+  },
 }));
 
 vi.mock("../components/ui/PanelHeader", () => ({
@@ -85,17 +90,27 @@ function buildWorkspace(overrides: Record<string, unknown> = {}) {
 describe("SettingsPage", () => {
   afterEach(() => {
     vi.clearAllMocks();
+    lastPageHeaderProps = null;
   });
 
-  it("organizes settings into core, quality, and automation chapters", () => {
+  it("organizes settings into overview, configuration, and maintenance chapters", () => {
     mockUseSettingsWorkspace.mockReturnValue(buildWorkspace());
 
-    render(<SettingsPage />);
+    render(
+      <MemoryRouter>
+        <SettingsPage />
+      </MemoryRouter>,
+    );
 
+    expect(lastPageHeaderProps?.summary).toBeUndefined();
+    expect(screen.getByText("当前设置面")).toBeInTheDocument();
     expect(screen.getByText("核心链路与 Provider")).toBeInTheDocument();
-    expect(screen.getByText("质量与默认策略")).toBeInTheDocument();
-    expect(screen.getByText("扩展与自动化")).toBeInTheDocument();
-    expect(screen.queryByText("接入与执行设置")).not.toBeInTheDocument();
+    expect(screen.getByText("输出、术语与复跑")).toBeInTheDocument();
+    expect(screen.getByText("相关页面与系统控制")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "查看包装页" })).toHaveAttribute("href", "/packaging");
+    expect(screen.getByRole("link", { name: "查看记忆页" })).toHaveAttribute("href", "/memory");
+    expect(screen.getByRole("link", { name: "查看词表页" })).toHaveAttribute("href", "/glossary");
+    expect(screen.getByRole("link", { name: "查看 Control" })).toHaveAttribute("href", "/control");
   });
 
   it("still distinguishes telegram review from telegram agent in the automation summary", () => {
@@ -110,7 +125,11 @@ describe("SettingsPage", () => {
       }),
     );
 
-    render(<SettingsPage />);
+    render(
+      <MemoryRouter>
+        <SettingsPage />
+      </MemoryRouter>,
+    );
 
     expect(screen.getByText(/Telegram 审核已启用/)).toBeInTheDocument();
     expect(screen.getByText(/Telegram Agent 关闭/)).toBeInTheDocument();

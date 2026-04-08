@@ -109,7 +109,7 @@ export function useJobWorkspace() {
   const contentProfile = useQuery({
     queryKey: ["job-content-profile", selectedJobId],
     queryFn: () => api.getContentProfile(selectedJobId!),
-    enabled: Boolean(selectedJobId) && isReviewMode,
+    enabled: Boolean(selectedJobId),
   });
   const selectedJob = detail.data;
   const contentSource = contentProfile.data?.final ?? contentProfile.data?.draft ?? null;

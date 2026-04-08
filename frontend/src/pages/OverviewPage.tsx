@@ -18,6 +18,9 @@ export function OverviewPage() {
   const { t } = useI18n();
   const workspace = useOverviewWorkspace();
   const runtime = workspace.services.data?.runtime;
+  const activeJobs = (workspace.jobs.data ?? []).filter((job) => job.status === "running" || job.status === "processing" || job.status === "needs_review").slice(0, 3);
+  const recentRoots = workspace.watchRoots.data?.slice(0, 3) ?? [];
+  const serviceEntries = Object.entries(workspace.services.data?.services ?? {});
   const usageTrendStepOptions = workspace.usageSummary.data?.top_steps.slice(0, 5) ?? [];
   const usageTrendModelOptions = workspace.usageSummary.data?.top_models.slice(0, 5) ?? [];
   const usageTrendProviderOptions = workspace.usageSummary.data?.top_providers.slice(0, 5) ?? [];
@@ -36,31 +39,108 @@ export function OverviewPage() {
         eyebrow={t("overview.page.eyebrow")}
         title={t("overview.page.title")}
         description={t("overview.page.description")}
-        summary={[
-          { label: "第一段", value: "系统状态", detail: "先判断现在能不能继续跑，是否需要先处理系统问题" },
-          { label: "第二段", value: "任务分析", detail: "再看成本、缓存和热点步骤，判断是否存在异常消耗" },
-          { label: "第三段", value: "下一步入口", detail: "最后再决定进入任务页还是系统页，不重复展示模块" },
-        ]}
       />
-      <PageSection
-        eyebrow="运行"
-        title="先判断现在能不能继续跑"
-        description="这里只回答系统当前是否适合继续处理任务，不做配置，不做队列操作，也不承担分析复盘。"
-      >
-        <div className="stats-grid">
-          <StatCard label={t("overview.stats.jobs")} value={workspace.stats.jobs} />
-          <StatCard label={t("overview.stats.running")} value={workspace.stats.running} />
-          <StatCard label={t("overview.stats.watchRoots")} value={workspace.stats.watchRoots} />
-          <StatCard label={t("overview.stats.glossary")} value={workspace.stats.glossary} />
+      <PageSection eyebrow={t("overview.triage.eyebrow")} title={t("overview.triage.title")}>
+        <div className="panel-grid two-up">
+          <section className="panel">
+            <PanelHeader
+              title={t("overview.triage.jobs.title")}
+              description={t("overview.triage.jobs.description")}
+              actions={<Link className="text-link" to="/jobs">{t("overview.triage.jobs.cta")}</Link>}
+            />
+            <div className="stats-grid compact">
+              <StatCard label={t("overview.stats.jobs")} value={workspace.stats.jobs} compact />
+              <StatCard label={t("overview.stats.running")} value={workspace.stats.running} compact />
+              <StatCard label={t("overview.stats.watchRoots")} value={workspace.stats.watchRoots} compact />
+              <StatCard label={t("overview.stats.glossary")} value={workspace.stats.glossary} compact />
+            </div>
+            <div className="list-stack">
+              {workspace.jobs.isLoading && <EmptyState message={t("overview.recent.loading")} />}
+              {workspace.jobs.isError && <EmptyState message={(workspace.jobs.error as Error).message} tone="error" />}
+              {!workspace.jobs.isLoading && !workspace.jobs.isError && activeJobs.length === 0 ? (
+                <EmptyState message={t("overview.recent.noSummary")} />
+              ) : null}
+              {activeJobs.map((job) => (
+                <article key={job.id} className="list-card">
+                  <div>
+                    <div className="row-title">{job.source_name}</div>
+                    <div className="muted">{job.content_summary || job.content_subject || t("overview.recent.noSummary")}</div>
+                  </div>
+                  <div className="row-meta">
+                    <span className={`status-chip ${job.status}`}>{statusLabel(job.status)}</span>
+                    <span>{formatDate(job.updated_at)}</span>
+                  </div>
+                </article>
+              ))}
+            </div>
+          </section>
+
+          <div className="list-stack">
+            <section className="panel">
+              <PanelHeader
+                title={t("overview.triage.watchRoots.title")}
+                description={t("overview.triage.watchRoots.description")}
+                actions={<Link className="text-link" to="/watch-roots">{t("overview.triage.watchRoots.cta")}</Link>}
+              />
+              <div className="stats-grid compact">
+                <StatCard label={t("overview.stats.watchRoots")} value={workspace.stats.watchRoots} compact />
+                <StatCard label={t("overview.stats.glossary")} value={workspace.stats.glossary} compact />
+              </div>
+              <div className="list-stack">
+                {recentRoots.length ? (
+                  recentRoots.map((root) => (
+                    <article key={root.id} className="list-card">
+                      <div>
+                        <div className="row-title">{root.path}</div>
+                        <div className="muted">{root.workflow_template || "—"}</div>
+                      </div>
+                      <div className="row-meta">
+                        <span className={`status-chip ${root.enabled ? "done" : "cancelled"}`}>{root.enabled ? "enabled" : "disabled"}</span>
+                        <span>{root.scan_mode}</span>
+                      </div>
+                    </article>
+                  ))
+                ) : (
+                  <EmptyState message={t("watch.list.empty")} />
+                )}
+              </div>
+            </section>
+
+            <section className="panel">
+              <PanelHeader
+                title={t("overview.triage.system.title")}
+                description={t("overview.triage.system.description")}
+                actions={<Link className="text-link" to="/control">{t("overview.triage.system.cta")}</Link>}
+              />
+              <div className="service-grid">
+                {serviceEntries.map(([key, online]) => (
+                  <article key={key} className="service-card">
+                    <span>{key}</span>
+                    <strong className={online ? "status-ok" : "status-off"}>{online ? t("overview.services.online") : t("overview.services.offline")}</strong>
+                  </article>
+                ))}
+                {runtime?.readiness_status && (
+                  <article className="service-card">
+                    <span>runtime ready</span>
+                    <strong className={renderRuntimeTone(runtime.readiness_status)}>{runtime.readiness_status}</strong>
+                  </article>
+                )}
+                {runtime?.orchestrator_lock?.status && (
+                  <article className="service-card">
+                    <span>orchestrator lock</span>
+                    <strong className={renderRuntimeTone(runtime.orchestrator_lock.status)}>{runtime.orchestrator_lock.status}</strong>
+                  </article>
+                )}
+                {!workspace.services.data && !workspace.services.isLoading && <EmptyState message={t("overview.services.empty")} />}
+              </div>
+              {runtime ? <div className="top-gap muted">{runtime.orchestrator_lock?.detail ?? "未返回 orchestrator lock 详情。"}</div> : null}
+            </section>
+          </div>
         </div>
       </PageSection>
 
       {workspace.usageSummary.data && (
-        <PageSection
-          eyebrow="分析"
-          title="再看成本、缓存和热点"
-          description="任务分析只保留在概览页，用来复盘资源消耗、定位异常步骤，并判断默认策略是否需要调整。"
-        >
+        <PageSection eyebrow={t("overview.signals.eyebrow")} title={t("overview.signals.title")}>
           <>
             <div className="stats-grid compact">
               <StatCard label={t("jobs.summary.totalTokens")} value={workspace.usageSummary.data.total_tokens.toLocaleString()} compact />
@@ -174,7 +254,7 @@ export function OverviewPage() {
                     ))}
                   </div>
                   <div className="mode-chip-list">
-                  {[
+                    {[
                       { value: "all", label: t("jobs.summary.allDimensions") },
                       { value: "step", label: t("jobs.summary.dimensionSteps") },
                       { value: "model", label: t("jobs.summary.dimensionModels") },
@@ -219,64 +299,6 @@ export function OverviewPage() {
           </>
         </PageSection>
       )}
-
-      <PageSection
-        eyebrow="入口"
-        title="最后决定进入哪一页继续处理"
-        description="最近任务和服务入口放在末段，用来承接前面的判断结果，再进入任务页或系统页继续操作。"
-      >
-        <div className="panel-grid two-up">
-          <section className="panel">
-            <PanelHeader title={t("overview.recent.title")} description={t("overview.recent.description")} actions={<Link className="text-link" to="/jobs">{t("overview.recent.viewAll")}</Link>} />
-            <div className="list-stack">
-              {workspace.jobs.isLoading && <EmptyState message={t("overview.recent.loading")} />}
-              {workspace.jobs.isError && <EmptyState message={(workspace.jobs.error as Error).message} tone="error" />}
-              {workspace.jobs.data?.slice(0, 6).map((job) => (
-                <article key={job.id} className="list-card">
-                  <div>
-                    <div className="row-title">{job.source_name}</div>
-                    <div className="muted">{job.content_summary || job.content_subject || t("overview.recent.noSummary")}</div>
-                  </div>
-                  <div className="row-meta">
-                    <span className={`status-chip ${job.status}`}>{statusLabel(job.status)}</span>
-                    <span>{formatDate(job.updated_at)}</span>
-                  </div>
-                </article>
-              ))}
-            </div>
-          </section>
-
-          <section className="panel">
-            <PanelHeader title={t("overview.services.title")} description={t("overview.services.description")} actions={<Link className="text-link" to="/control">{t("overview.services.open")}</Link>} />
-            <div className="service-grid">
-              {Object.entries(workspace.services.data?.services ?? {}).map(([key, online]) => (
-                <article key={key} className="service-card">
-                  <span>{key}</span>
-                  <strong className={online ? "status-ok" : "status-off"}>{online ? t("overview.services.online") : t("overview.services.offline")}</strong>
-                </article>
-              ))}
-              {runtime?.readiness_status && (
-                <article className="service-card">
-                  <span>runtime ready</span>
-                  <strong className={renderRuntimeTone(runtime.readiness_status)}>{runtime.readiness_status}</strong>
-                </article>
-              )}
-              {runtime?.orchestrator_lock?.status && (
-                <article className="service-card">
-                  <span>orchestrator lock</span>
-                  <strong className={renderRuntimeTone(runtime.orchestrator_lock.status)}>{runtime.orchestrator_lock.status}</strong>
-                </article>
-              )}
-              {!workspace.services.data && !workspace.services.isLoading && <EmptyState message={t("overview.services.empty")} />}
-            </div>
-            {runtime && (
-              <div className="top-gap muted">
-                {runtime.orchestrator_lock?.detail ?? "未返回 orchestrator lock 详情。"}
-              </div>
-            )}
-          </section>
-        </div>
-      </PageSection>
     </section>
   );
 }

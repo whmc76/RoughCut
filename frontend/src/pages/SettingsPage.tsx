@@ -10,6 +10,7 @@ import { SettingsOverviewPanel } from "../features/settings/SettingsOverviewPane
 import { QualitySettingsPanel } from "../features/settings/QualitySettingsPanel";
 import { getActiveReasoningProvider, getProviderLabel, getSearchSummary } from "../features/settings/helpers";
 import { useSettingsWorkspace } from "../features/settings/useSettingsWorkspace";
+import { Link } from "react-router-dom";
 
 export function SettingsPage() {
   const { t } = useI18n();
@@ -17,6 +18,52 @@ export function SettingsPage() {
   const activeReasoningProvider = getActiveReasoningProvider(workspace.form);
   const telegramReviewEnabled = Boolean(workspace.form.telegram_remote_review_enabled);
   const telegramAgentEnabled = Boolean(workspace.form.telegram_agent_enabled);
+  const packagingReviewGap = Number(workspace.form.packaging_selection_review_gap ?? 0.08);
+  const packagingMinScore = Number(workspace.form.packaging_selection_min_score ?? 0.6);
+  const glossaryThreshold = Number(workspace.form.glossary_correction_review_threshold ?? 0.9);
+  const outputDir = String(workspace.runtimeEnvironment.data?.output_dir ?? "output");
+  const summaryCards = [
+    {
+      label: "执行链路",
+      value: `${getProviderLabel(activeReasoningProvider)} · ${getSearchSummary(workspace.form)}`,
+      detail: `推理 ${getProviderLabel(activeReasoningProvider)}，输出 ${outputDir}`,
+    },
+    {
+      label: "包装策略",
+      value: `复核间隔 ${packagingReviewGap.toFixed(2)} · 最低分 ${packagingMinScore.toFixed(2)} · 术语 ${glossaryThreshold.toFixed(2)}`,
+      detail: "包装和术语阈值已经并入本页的质量章节",
+      action: (
+        <Link className="button ghost" to="/packaging">
+          打开包装页
+        </Link>
+      ),
+    },
+    {
+      label: "记忆与词表",
+      value: "记忆统计 · 术语维护",
+      detail: "反馈闭环留在记忆页，词条编辑留在词表页",
+      action: (
+        <div className="toolbar">
+          <Link className="button ghost" to="/memory">
+            记忆页
+          </Link>
+          <Link className="button ghost" to="/glossary">
+            词表页
+          </Link>
+        </div>
+      ),
+    },
+    {
+      label: "维护入口",
+      value: "Control",
+      detail: "服务状态和停机动作只保留为次级入口",
+      action: (
+        <Link className="button ghost" to="/control">
+          打开 Control
+        </Link>
+      ),
+    },
+  ];
   const automationSummary = [
     `${String(workspace.form.avatar_provider ?? "未设置")} + ${String(workspace.form.voice_provider ?? "未设置")}`,
     telegramReviewEnabled ? "Telegram 审核已启用" : "Telegram 审核关闭",
@@ -25,7 +72,7 @@ export function SettingsPage() {
   const environmentSummary = [
     `推理 ${getProviderLabel(activeReasoningProvider)}`,
     getSearchSummary(workspace.form),
-    `输出 ${String(workspace.runtimeEnvironment.data?.output_dir ?? "output")}`,
+    `输出 ${outputDir}`,
   ].join(" · ");
   const saveTone =
     workspace.saveState === "saving" ? "running" : workspace.saveState === "error" ? "failed" : workspace.saveState === "saved" ? "done" : "";
@@ -44,11 +91,6 @@ export function SettingsPage() {
         eyebrow={t("settings.page.eyebrow")}
         title={t("settings.page.title")}
         description={t("settings.page.description")}
-        summary={[
-          { label: "核心链路", value: "转写 / 推理 / 搜索", detail: "配置、Provider 状态和检测动作在同一章完成" },
-          { label: "质量策略", value: "审核 / 复跑 / 默认行为", detail: "把影响产出的规则与接入概念分开" },
-          { label: "扩展自动化", value: "环境 / 数字人 / Telegram", detail: "保留工程能力，但不再藏在模糊的接入区" },
-        ]}
         actions={
           <>
             <button className="button ghost" onClick={() => workspace.reset.mutate()} disabled={workspace.reset.isPending}>
@@ -59,6 +101,24 @@ export function SettingsPage() {
         }
       />
       {workspace.saveError ? <div className="notice top-gap">{workspace.saveError}</div> : null}
+
+      <PageSection
+        className="settings-stage settings-stage-core"
+        eyebrow="概览"
+        title="当前设置面"
+        description="先看执行链路、包装策略、记忆词表和维护入口，再进入下面的配置章节。"
+      >
+        <div className="settings-overview-grid">
+          {summaryCards.map((card) => (
+            <article key={card.label} className="settings-command-card">
+              <span className="settings-overview-label">{card.label}</span>
+              <strong>{card.value}</strong>
+              <div className="muted">{card.detail}</div>
+              {card.action ? <div className="top-gap">{card.action}</div> : null}
+            </article>
+          ))}
+        </div>
+      </PageSection>
 
       <PageSection
         className="settings-stage settings-stage-core"
@@ -88,8 +148,8 @@ export function SettingsPage() {
       <PageSection
         className="settings-stage settings-stage-quality"
         eyebrow="Quality"
-        title="质量与默认策略"
-        description="把审核阈值、低分复跑和默认规则单独放一章，避免和 Provider 配置相互干扰。"
+        title="输出、术语与复跑"
+        description="把审核阈值、包装复核、术语确认和低分复跑放在同一章，避免和 Provider 配置相互干扰。"
       >
         <QualitySettingsPanel
           form={workspace.form}
@@ -132,6 +192,51 @@ export function SettingsPage() {
               />
             </section>
           </div>
+        </div>
+      </PageSection>
+
+      <PageSection
+        className="settings-stage settings-stage-automation"
+        eyebrow="维护"
+        title="相关页面与系统控制"
+        description="包装、记忆和词表仍保留独立页面，Control 只作为次级维护入口。"
+      >
+        <div className="settings-summary-grid">
+          <article className="settings-command-card">
+            <span className="settings-overview-label">包装素材</span>
+            <strong>策略与素材池</strong>
+            <div className="muted">包装页面继续管理素材池，但它的默认策略由本页的质量章节控制。</div>
+            <div className="top-gap">
+              <Link className="button ghost" to="/packaging">
+                查看包装页
+              </Link>
+            </div>
+          </article>
+          <article className="settings-command-card">
+            <span className="settings-overview-label">行为记忆</span>
+            <strong>纠错统计与偏好</strong>
+            <div className="muted">记忆页面继续查看长期偏差，设置页只保留它的入口和上下文。</div>
+            <div className="top-gap">
+              <Link className="button ghost" to="/memory">
+                查看记忆页
+              </Link>
+            </div>
+          </article>
+          <article className="settings-command-card">
+            <span className="settings-overview-label">术语词表</span>
+            <strong>术语维护与导入</strong>
+            <div className="muted">词表页继续编辑词条，本页只保留自动接受阈值和入口。</div>
+            <div className="top-gap">
+              <Link className="button ghost" to="/glossary">
+                查看词表页
+              </Link>
+            </div>
+          </article>
+        </div>
+        <div className="top-gap">
+          <Link className="button ghost" to="/control">
+            查看 Control
+          </Link>
         </div>
       </PageSection>
     </section>

@@ -110,6 +110,7 @@ describe("useWatchRootWorkspace", () => {
       path: "D:/videos/source",
       config_profile_id: "profile_fas",
       workflow_template: "edc_tactical",
+      output_dir: "",
       enabled: true,
       scan_mode: "fast",
     });

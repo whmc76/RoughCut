@@ -116,21 +116,11 @@ export function JobContentProfileSection({
       ? {
         ...contentSource,
         subject_type:
-          formatVideoType(
+          getTextValue(contentUnderstanding.primary_subject)
+          || formatVideoType(
             [
               getTextValue(contentUnderstanding.video_type),
               getTextValue(contentUnderstanding.subject_type),
-              getTextValue(contentUnderstanding.primary_subject),
-              getTextValue(contentSource?.subject_type),
-              getTextValue(contentUnderstanding.summary),
-              getTextValue(contentUnderstanding.hook_line),
-              getTextValue(contentUnderstanding.visible_text),
-              getTextValue(contentUnderstanding.video_theme),
-              getTextValue(contentSource?.summary),
-              getTextValue(contentSource?.hook_line),
-              getTextValue(contentSource?.visible_text),
-              getTextValue(contentSource?.video_theme),
-              getTextValue(contentSource?.engagement_question),
               getTextValue(contentSource?.subject_type),
             ],
             locale,

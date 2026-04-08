@@ -1,14 +1,19 @@
+import { useState } from "react";
+
+import { EmptyState } from "../components/ui/EmptyState";
 import { PageHeader } from "../components/ui/PageHeader";
 import { PageSection } from "../components/ui/PageSection";
-import { useState } from "react";
+import { PanelHeader } from "../components/ui/PanelHeader";
+import { StatCard } from "../components/ui/StatCard";
 import { ConfigProfileSwitcher } from "../features/configProfiles/ConfigProfileSwitcher";
-import { useI18n } from "../i18n";
-import { JobDetailPanel } from "../features/jobs/JobDetailPanel";
 import { JobDetailModal } from "../features/jobs/JobDetailModal";
-import { JobReviewOverlay } from "../features/jobs/JobReviewOverlay";
+import { JobDetailPanel } from "../features/jobs/JobDetailPanel";
 import { JobQueueTable } from "../features/jobs/JobQueueTable";
+import { JobReviewOverlay } from "../features/jobs/JobReviewOverlay";
 import { JobUploadPanel } from "../features/jobs/JobUploadPanel";
 import { useJobWorkspace } from "../features/jobs/useJobWorkspace";
+import { useI18n } from "../i18n";
+import { formatDate, statusLabel } from "../utils";
 
 export function JobsPage() {
   const { t } = useI18n();
@@ -17,6 +22,9 @@ export function JobsPage() {
   const workflowTemplateOptions = workspace.options.data?.workflow_templates ?? [{ value: "", label: t("watch.page.autoMatch") }];
   const workflowModeOptions = workspace.options.data?.workflow_modes ?? [{ value: "standard_edit", label: t("creative.workflow.standard_edit") }];
   const enhancementOptions = workspace.options.data?.enhancement_modes ?? [];
+  const activeJobs = workspace.filteredJobs
+    .filter((job) => job.status === "running" || job.status === "processing" || job.status === "needs_review")
+    .slice(0, 4);
   const isReviewContext =
     workspace.activity.data?.current_step?.status === "needs_review" || workspace.selectedJob?.status === "needs_review";
   const activeReviewStep =
@@ -31,6 +39,7 @@ export function JobsPage() {
   const isReviewJob = Boolean(workspace.selectedJobId && isReviewContext && activeReviewStep);
   const [reviewNotice, setReviewNotice] = useState<string | null>(null);
   const [reviewNoticeTone, setReviewNoticeTone] = useState<"success" | "error">("success");
+
   const showReviewNotice = (tone: "success" | "error", message: string) => {
     setReviewNoticeTone(tone);
     setReviewNotice(message);
@@ -38,12 +47,14 @@ export function JobsPage() {
       setReviewNotice((current) => (current === message ? null : current));
     }, 5000);
   };
+
   const closeReviewOverlay = (shouldClearNotice = true) => {
     if (isReviewJob) workspace.setSelectedJobId(null);
     if (shouldClearNotice) {
       setReviewNotice(null);
     }
   };
+
   const confirmReviewProfile = () => {
     workspace.confirmProfile.mutate(undefined, {
       onSuccess: async () => {
@@ -61,6 +72,7 @@ export function JobsPage() {
       },
     });
   };
+
   const reviewNoticeClass = reviewNoticeTone === "error" ? "notice top-gap notice-error" : "notice top-gap";
 
   return (
@@ -69,14 +81,14 @@ export function JobsPage() {
         eyebrow={t("jobs.page.eyebrow")}
         title={t("jobs.page.title")}
         description={t("jobs.page.description")}
-        summary={[
-          { label: "第一步", value: "上传并创建任务", detail: "语言、模式和增强项都在这里一次选完" },
-          { label: "第二步", value: "筛选并跟进队列", detail: "搜索、状态和详情面板集中在任务表格" },
-          { label: "第三步", value: "复盘用量", detail: "只在需要时查看模型、步骤和缓存消耗" },
-        ]}
         actions={
           <>
-            <input className="input" value={workspace.keyword} onChange={(event) => workspace.setKeyword(event.target.value)} placeholder={t("jobs.page.searchPlaceholder")} />
+            <input
+              className="input"
+              value={workspace.keyword}
+              onChange={(event) => workspace.setKeyword(event.target.value)}
+              placeholder={t("jobs.page.searchPlaceholder")}
+            />
             <button className="button ghost" onClick={workspace.refreshAll}>
               {t("jobs.page.refresh")}
             </button>
@@ -84,14 +96,67 @@ export function JobsPage() {
         }
       />
 
-      <PageSection
-        eyebrow="创建"
-        title="创建任务与设置默认参数"
-        description="新任务的语言、工作流、增强项和当前配置基线都在这一段完成，不需要先滚到队列表尾。"
-      >
-        <ConfigProfileSwitcher
-          description="任务创建和审核确认都会继承这里激活的剪辑配置，数字人卡片只是其中一个配置模块，切换后新任务默认参数会立刻跟随。"
-        />
+      <PageSection eyebrow={t("jobs.page.queueEyebrow")} title={t("jobs.page.queueTitle")}>
+        {workspace.restartError ? (
+          <div className="notice">
+            {t("jobs.actions.restartFailed").replace("{error}", workspace.restartError)}
+          </div>
+        ) : null}
+        {reviewNotice ? <div className={reviewNoticeClass}>{reviewNotice}</div> : null}
+
+        <div className="panel-grid two-up">
+          <JobQueueTable
+            jobs={workspace.filteredJobs}
+            selectedJobId={workspace.selectedJobId}
+            isLoading={workspace.jobs.isLoading}
+            currentPage={workspace.jobsPage}
+            pageSize={workspace.jobsPageSize}
+            hasMore={workspace.hasMoreJobs}
+            isFetchingPage={workspace.jobs.isFetching}
+            onPageChange={(page) => workspace.setJobsPage(Math.max(0, page))}
+            errorMessage={workspace.jobs.isError ? (workspace.jobs.error as Error).message : undefined}
+            isOpeningFolder={workspace.openFolder.isPending}
+            isCancelling={workspace.cancelJob.isPending}
+            isRestarting={workspace.restartJob.isPending}
+            isDeleting={workspace.deleteJob.isPending}
+            onSelect={workspace.setSelectedJobId}
+            onOpenFolder={(jobId) => workspace.openFolder.mutate(jobId)}
+            onCancel={(jobId) => workspace.cancelJob.mutate(jobId)}
+            onRestart={(jobId) => workspace.restartJob.mutate(jobId)}
+            onDelete={(jobId) => workspace.deleteJob.mutate(jobId)}
+          />
+
+          <section className="panel">
+            <PanelHeader title={t("jobs.page.activeWorkTitle")} description={t("jobs.page.activeWorkDescription")} />
+            <div className="stats-grid compact">
+              <StatCard label={t("jobs.page.activeWorkRunning")} value={activeJobs.length} compact />
+              <StatCard label={t("jobs.page.activeWorkTotal")} value={workspace.jobs.data?.length ?? 0} compact />
+              <StatCard label={t("jobs.page.selectedJob")} value={workspace.selectedJob?.source_name || "—"} compact />
+            </div>
+            <div className="list-stack">
+              {activeJobs.length ? (
+                activeJobs.map((job) => (
+                  <article key={job.id} className="list-card">
+                    <div>
+                      <div className="row-title">{job.source_name}</div>
+                      <div className="muted">{job.content_summary || job.content_subject || t("jobs.queue.noSummary")}</div>
+                    </div>
+                    <div className="row-meta">
+                      <span className={`status-chip ${job.status}`}>{statusLabel(job.status)}</span>
+                      <span>{formatDate(job.updated_at)}</span>
+                    </div>
+                  </article>
+                ))
+              ) : (
+                <EmptyState message={t("jobs.page.activeWorkEmpty")} />
+              )}
+            </div>
+          </section>
+        </div>
+      </PageSection>
+
+      <PageSection eyebrow={t("jobs.page.createEyebrow")} title={t("jobs.page.createTitle")}>
+        <ConfigProfileSwitcher compact description={t("jobs.page.profileSwitcherDescription")} />
 
         <JobUploadPanel
           upload={workspace.upload}
@@ -102,39 +167,6 @@ export function JobsPage() {
           onChange={workspace.setUpload}
           onSubmit={() => workspace.uploadJob.mutate()}
           isSubmitting={workspace.uploadJob.isPending}
-        />
-      </PageSection>
-
-      <PageSection
-        eyebrow="执行"
-        title="跟进任务队列与审核详情"
-        description="搜索、打开详情、重跑、取消和删除都集中在这里，优先保证处理链路顺畅。"
-      >
-        {workspace.restartError ? (
-          <div className="notice">
-            {t("jobs.actions.restartFailed").replace("{error}", workspace.restartError)}
-          </div>
-        ) : null}
-        {reviewNotice ? <div className={reviewNoticeClass}>{reviewNotice}</div> : null}
-        <JobQueueTable
-          jobs={workspace.filteredJobs}
-          selectedJobId={workspace.selectedJobId}
-          isLoading={workspace.jobs.isLoading}
-          currentPage={workspace.jobsPage}
-          pageSize={workspace.jobsPageSize}
-          hasMore={workspace.hasMoreJobs}
-          isFetchingPage={workspace.jobs.isFetching}
-          onPageChange={(page) => workspace.setJobsPage(Math.max(0, page))}
-          errorMessage={workspace.jobs.isError ? (workspace.jobs.error as Error).message : undefined}
-          isOpeningFolder={workspace.openFolder.isPending}
-          isCancelling={workspace.cancelJob.isPending}
-          isRestarting={workspace.restartJob.isPending}
-          isDeleting={workspace.deleteJob.isPending}
-          onSelect={workspace.setSelectedJobId}
-          onOpenFolder={(jobId) => workspace.openFolder.mutate(jobId)}
-          onCancel={(jobId) => workspace.cancelJob.mutate(jobId)}
-          onRestart={(jobId) => workspace.restartJob.mutate(jobId)}
-          onDelete={(jobId) => workspace.deleteJob.mutate(jobId)}
         />
       </PageSection>
 
@@ -166,7 +198,7 @@ export function JobsPage() {
         onApproveFinalReview={() => workspace.finalReviewDecision.mutate({ decision: "approve" })}
         onRejectFinalReview={(note) => workspace.finalReviewDecision.mutate({ decision: "reject", note })}
         onOpenFolder={() => workspace.selectedJob && workspace.openFolder.mutate(workspace.selectedJob.id)}
-      onClose={() => closeReviewOverlay()}
+        onClose={() => closeReviewOverlay()}
       />
 
       <JobDetailModal
