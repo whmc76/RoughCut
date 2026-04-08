@@ -39,6 +39,17 @@ export const CONTENT_FIELD_LABELS: Record<(typeof CONTENT_FIELDS)[number] | "key
   keywords: "关键词",
 };
 
+export const IDENTITY_SUPPORT_SOURCE_LABELS: Record<string, string> = {
+  transcript: "字幕",
+  subtitle_snippets: "字幕",
+  source_name: "文件名",
+  source_name_terms: "文件名",
+  visible_text: "画面文字",
+  visible_text_terms: "画面文字",
+  evidence: "外部证据",
+  evidence_terms: "外部证据",
+};
+
 export type UploadForm = {
   file: File | null;
   language: string;

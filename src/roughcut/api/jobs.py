@@ -59,8 +59,9 @@ from roughcut.pipeline.quality import QUALITY_ARTIFACT_TYPE
 from roughcut.media.variant_timeline_bundle import resolve_effective_variant_timeline_bundle
 from roughcut.recovery.stuck_step_recovery import STUCK_STEP_DIAGNOSTIC_ARTIFACT_TYPE
 from roughcut.review.content_understanding_schema import normalize_video_type
-from roughcut.review.content_profile import apply_content_profile_feedback
 from roughcut.review.content_profile import build_reviewed_transcript_excerpt
+from roughcut.review.content_profile_feedback import apply_content_profile_feedback
+from roughcut.review.content_profile_keywords import normalize_query_list
 from roughcut.review.content_profile_memory import (
     _build_field_preferences,
     _build_keyword_preferences,
@@ -144,26 +145,79 @@ class FinalReviewVariantTimelineRerenderOut(BaseModel):
 def _ensure_content_understanding_payload(profile: dict[str, Any] | None) -> dict[str, Any] | None:
     if not isinstance(profile, dict):
         return profile
-    if isinstance(profile.get("content_understanding"), dict):
-        return profile
-
     enriched = dict(profile)
-    enriched["content_understanding"] = {
-        "video_type": normalize_video_type(enriched.get("content_kind")),
-        "content_domain": str(enriched.get("subject_domain") or "").strip(),
-        "primary_subject": str(enriched.get("subject_type") or "").strip(),
-        "subject_entities": [],
-        "video_theme": str(enriched.get("video_theme") or "").strip(),
-        "summary": str(enriched.get("summary") or "").strip(),
-        "hook_line": str(enriched.get("hook_line") or "").strip(),
-        "engagement_question": str(enriched.get("engagement_question") or "").strip(),
-        "search_queries": [str(item).strip() for item in (enriched.get("search_queries") or []) if str(item).strip()],
-        "evidence_spans": [],
-        "uncertainties": [],
-        "confidence": {},
-        "needs_review": bool(enriched.get("review_required") or False),
-        "review_reasons": [str(item).strip() for item in (enriched.get("review_reasons") or []) if str(item).strip()],
-    }
+    existing_block = profile.get("content_understanding") if isinstance(profile.get("content_understanding"), dict) else {}
+    content_understanding = dict(existing_block)
+
+    def _first_text(*values: Any) -> str:
+        for value in values:
+            text = str(value or "").strip()
+            if text:
+                return text
+        return ""
+
+    def _list_value(value: Any) -> list[Any]:
+        return list(value) if isinstance(value, list) else []
+
+    normalized_search_queries = normalize_query_list(
+        [str(item).strip() for item in _list_value(content_understanding.get("search_queries")) if str(item).strip()]
+    )
+    if not normalized_search_queries:
+        normalized_search_queries = normalize_query_list(
+            [str(item).strip() for item in _list_value(enriched.get("search_queries")) if str(item).strip()]
+        )
+
+    if "needs_review" in content_understanding:
+        needs_review = bool(content_understanding.get("needs_review"))
+    else:
+        needs_review = bool(enriched.get("review_required") or False)
+
+    review_reasons = _list_value(content_understanding.get("review_reasons"))
+    if not review_reasons:
+        review_reasons = [str(item).strip() for item in _list_value(enriched.get("review_reasons")) if str(item).strip()]
+    else:
+        review_reasons = [str(item).strip() for item in review_reasons if str(item).strip()]
+
+    content_understanding.update(
+        {
+            "video_type": normalize_video_type(
+                _first_text(
+                    content_understanding.get("video_type"),
+                    enriched.get("content_kind"),
+                    enriched.get("video_type"),
+                    enriched.get("subject_type"),
+                    content_understanding.get("subject_type"),
+                )
+            ),
+            "content_domain": _first_text(
+                content_understanding.get("content_domain"),
+                enriched.get("subject_domain"),
+                enriched.get("content_domain"),
+            ),
+            "primary_subject": _first_text(
+                content_understanding.get("primary_subject"),
+                enriched.get("primary_subject"),
+                enriched.get("subject_type"),
+            ),
+            "subject_entities": _list_value(content_understanding.get("subject_entities")),
+            "video_theme": _first_text(content_understanding.get("video_theme"), enriched.get("video_theme")),
+            "summary": _first_text(content_understanding.get("summary"), enriched.get("summary")),
+            "hook_line": _first_text(content_understanding.get("hook_line"), enriched.get("hook_line")),
+            "engagement_question": _first_text(
+                content_understanding.get("engagement_question"),
+                content_understanding.get("question"),
+                enriched.get("engagement_question"),
+                enriched.get("question"),
+            ),
+            "search_queries": normalized_search_queries,
+            "evidence_spans": _list_value(content_understanding.get("evidence_spans")),
+            "uncertainties": _list_value(content_understanding.get("uncertainties")),
+            "confidence": dict(content_understanding.get("confidence")) if isinstance(content_understanding.get("confidence"), dict) else {},
+            "needs_review": needs_review,
+            "review_reasons": review_reasons,
+        }
+    )
+    enriched["content_understanding"] = content_understanding
     return enriched
 
 
@@ -924,6 +978,8 @@ async def confirm_content_profile(
     automation_review = final_profile.get("automation_review") if isinstance(final_profile, dict) else {}
     identity_review = final_profile.get("identity_review") if isinstance(final_profile, dict) else None
     evidence = await _load_content_profile_review_evidence(job_id, session)
+    draft_profile = _ensure_content_understanding_payload(draft_artifact.data_json)
+    final_profile = _ensure_content_understanding_payload(final_profile)
 
     return ContentProfileReviewOut(
         job_id=str(job_id),
@@ -936,7 +992,7 @@ async def confirm_content_profile(
         **evidence,
         workflow_mode=job.workflow_mode,
         enhancement_modes=list(job.enhancement_modes or []),
-        draft=draft_artifact.data_json,
+        draft=draft_profile,
         final=final_profile,
         memory=memory,
     )

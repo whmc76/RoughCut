@@ -146,15 +146,36 @@ def _select_stable_visible_text(
         stable = [item for item in candidates if len(set(item.get("frame_indexes") or [])) >= 2]
         if stable:
             preferred = stable
+            high_signal = [item for item in candidates if _is_high_signal_visible_text(str(item.get("display_text") or ""))]
+            if high_signal:
+                preferred = high_signal + [
+                    item for item in stable if item not in high_signal
+                ]
     ordered = sorted(
         preferred,
         key=lambda item: (
+            -int(_is_high_signal_visible_text(str(item.get("display_text") or ""))),
             -int(item.get("support_count", 0)),
             -float(item.get("confidence", 0.0)),
             -len(str(item.get("display_text", ""))),
         ),
     )
     return [str(item.get("display_text") or "").strip() for item in ordered if str(item.get("display_text") or "").strip()]
+
+
+def _is_high_signal_visible_text(text: str) -> bool:
+    value = str(text or "").strip()
+    if not value:
+        return False
+    normalized = unicodedata.normalize("NFKC", value)
+    has_alpha = any(char.isalpha() and char.isascii() for char in normalized)
+    has_digit = any(char.isdigit() for char in normalized)
+    if has_alpha and has_digit:
+        return True
+    token = re.sub(r"\s+", "", normalized)
+    if token in {"开箱", "评测", "测评", "上手", "体验"}:
+        return False
+    return False
 
 
 def _compact_visible_text(parts: Sequence[str]) -> str:

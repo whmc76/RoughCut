@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -852,9 +852,16 @@ async def test_watch_roots_crud_persists_bound_config_profile(client: AsyncClien
 async def test_watch_root_inventory(client: AsyncClient, monkeypatch: pytest.MonkeyPatch):
     import roughcut.api.review as review_api
 
-    async def fake_scan_watch_root_inventory(path: str, *, recursive: bool = True, scan_mode: str = "fast"):
+    async def fake_scan_watch_root_inventory(
+        path: str,
+        *,
+        recursive: bool = True,
+        scan_mode: str = "fast",
+        output_dir: str | None = None,
+    ):
         assert path == "/tmp/videos"
         assert scan_mode == "precise"
+        assert output_dir is None
         return {
             "pending": [
                 {
@@ -903,10 +910,12 @@ async def test_watch_root_inventory_scan_status(client: AsyncClient, monkeypatch
         force: bool = False,
         recursive: bool = True,
         scan_mode: str = "fast",
+        output_dir: str | None = None,
     ):
         assert path == watch_path
         assert force is True
         assert scan_mode == "precise"
+        assert output_dir is None
         return {
             "root_path": path,
             "scan_mode": scan_mode,
@@ -1043,9 +1052,18 @@ async def test_watch_root_inventory_enqueue_selected_item(client: AsyncClient, m
     from roughcut.db.models import WatchRoot
     from roughcut.db.session import get_session_factory
 
-    async def fake_create_jobs_for_inventory_paths(file_paths: list[str], *, workflow_template: str | None = None, language: str = "zh-CN"):
+    async def fake_create_jobs_for_inventory_paths(
+        file_paths: list[str],
+        *,
+        workflow_template: str | None = None,
+        language: str = "zh-CN",
+        output_dir: str | None = None,
+        config_profile_id: uuid.UUID | None = None,
+    ):
         assert file_paths == ["/tmp/videos-enqueue/a.mp4"]
         assert workflow_template == "edc_tactical"
+        assert output_dir is None
+        assert config_profile_id is None
         return [{"path": "/tmp/videos-enqueue/a.mp4", "job_id": "job-123"}]
 
     monkeypatch.setattr(review_api, "create_jobs_for_inventory_paths", fake_create_jobs_for_inventory_paths)
@@ -1139,8 +1157,17 @@ async def test_watch_root_inventory_enqueue_all(client: AsyncClient, monkeypatch
     from roughcut.db.models import WatchRoot
     from roughcut.db.session import get_session_factory
 
-    async def fake_create_jobs_for_inventory_paths(file_paths: list[str], *, workflow_template: str | None = None, language: str = "zh-CN"):
+    async def fake_create_jobs_for_inventory_paths(
+        file_paths: list[str],
+        *,
+        workflow_template: str | None = None,
+        language: str = "zh-CN",
+        output_dir: str | None = None,
+        config_profile_id: uuid.UUID | None = None,
+    ):
         assert file_paths == ["/tmp/videos-batch/a.mp4", "/tmp/videos-batch/b.mp4"]
+        assert output_dir is None
+        assert config_profile_id is None
         return [
             {"path": "/tmp/videos-batch/a.mp4", "job_id": "job-a"},
             {"path": "/tmp/videos-batch/b.mp4", "job_id": None},
@@ -2181,27 +2208,29 @@ async def test_jobs_usage_trend_endpoint_returns_daily_points(client: AsyncClien
     from roughcut.db.models import Job, JobStep
     from roughcut.db.session import get_session_factory
 
+    now = datetime.now(timezone.utc).replace(hour=10, minute=0, second=0, microsecond=0)
+
     async with get_session_factory()() as session:
         first_job_id = uuid.uuid4()
         second_job_id = uuid.uuid4()
         session.add_all(
             [
-                Job(
-                    id=first_job_id,
-                    source_path="jobs/demo/one.mp4",
-                    source_name="one.mp4",
-                    status="done",
-                    language="zh-CN",
-                    updated_at=datetime(2026, 3, 21, 10, 0, tzinfo=timezone.utc),
-                ),
-                Job(
-                    id=second_job_id,
-                    source_path="jobs/demo/two.mp4",
-                    source_name="two.mp4",
-                    status="done",
-                    language="zh-CN",
-                    updated_at=datetime(2026, 3, 22, 10, 0, tzinfo=timezone.utc),
-                ),
+                    Job(
+                        id=first_job_id,
+                        source_path="jobs/demo/one.mp4",
+                        source_name="one.mp4",
+                        status="done",
+                        language="zh-CN",
+                        updated_at=now - timedelta(days=1),
+                    ),
+                    Job(
+                        id=second_job_id,
+                        source_path="jobs/demo/two.mp4",
+                        source_name="two.mp4",
+                        status="done",
+                        language="zh-CN",
+                        updated_at=now,
+                    ),
                 JobStep(
                     job_id=first_job_id,
                     step_name="content_profile",
@@ -2609,6 +2638,107 @@ async def test_content_profile_endpoint_returns_memory_cloud(client: AsyncClient
     assert data["memory"]["field_preferences"]["subject_brand"][0]["value"] == "LEATHERMAN"
     assert data["memory"]["cloud"]["words"]
     assert any(word["label"] == "LEATHERMAN ARC" for word in data["memory"]["cloud"]["words"])
+
+
+@pytest.mark.asyncio
+async def test_content_profile_endpoint_normalizes_content_understanding_block_for_draft_and_final(client: AsyncClient):
+    from roughcut.db.models import Artifact, Job, JobStep
+    from roughcut.db.session import get_session_factory
+
+    job_id = uuid.uuid4()
+    now = datetime.now(timezone.utc)
+
+    async with get_session_factory()() as session:
+        session.add(
+            Job(
+                id=job_id,
+                source_path="jobs/demo/understanding.mp4",
+                source_name="understanding.mp4",
+                status="needs_review",
+                language="zh-CN",
+                workflow_template="edc_tactical",
+                workflow_mode="standard_edit",
+            )
+        )
+        session.add(
+            JobStep(
+                job_id=job_id,
+                step_name="summary_review",
+                status="running",
+                started_at=now,
+                metadata_={"detail": "等待人工确认。"},
+            )
+        )
+        session.add(
+            Artifact(
+                job_id=job_id,
+                artifact_type="content_profile_draft",
+                data_json={
+                    "subject_type": "旧字段",
+                    "content_understanding": {
+                        "video_type": "开箱体验",
+                        "primary_subject": "EDC机能包",
+                        "search_queries": ["LEATHERMAN ARC", " leatherman arc ", "多功能工具钳"],
+                        "confidence": {"overall": 0.8},
+                        "needs_review": True,
+                    },
+                },
+            )
+        )
+        session.add(
+            Artifact(
+                job_id=job_id,
+                artifact_type="content_profile_final",
+                data_json={
+                    "subject_type": "最终字段",
+                    "video_theme": "最终主题",
+                    "summary": "最终摘要",
+                    "hook_line": "最终钩子",
+                    "engagement_question": "最终提问",
+                    "content_understanding": {
+                        "video_type": " tutorial ",
+                        "search_queries": ["  教程 ", "教程", "流程"],
+                        "confidence": {"overall": 0.95},
+                    },
+                },
+            )
+        )
+        await session.commit()
+
+    response = await client.get(f"/api/v1/jobs/{job_id}/content-profile")
+    assert response.status_code == 200
+    data = response.json()
+    draft_understanding = data["draft"]["content_understanding"]
+    assert draft_understanding["video_type"] == "unboxing"
+    assert draft_understanding["content_domain"] == ""
+    assert draft_understanding["primary_subject"] == "EDC机能包"
+    assert draft_understanding["subject_entities"] == []
+    assert draft_understanding["video_theme"] == ""
+    assert draft_understanding["summary"] == ""
+    assert draft_understanding["hook_line"] == ""
+    assert draft_understanding["engagement_question"] == ""
+    assert draft_understanding["search_queries"] == ["LEATHERMAN ARC", "多功能工具钳"]
+    assert draft_understanding["evidence_spans"] == []
+    assert draft_understanding["uncertainties"] == []
+    assert draft_understanding["confidence"] == {"overall": 0.8}
+    assert draft_understanding["needs_review"] is True
+    assert draft_understanding["review_reasons"] == []
+
+    final_understanding = data["final"]["content_understanding"]
+    assert final_understanding["video_type"] == "tutorial"
+    assert final_understanding["content_domain"] == ""
+    assert final_understanding["primary_subject"] == "最终字段"
+    assert final_understanding["subject_entities"] == []
+    assert final_understanding["video_theme"] == "最终主题"
+    assert final_understanding["summary"] == "最终摘要"
+    assert final_understanding["hook_line"] == "最终钩子"
+    assert final_understanding["engagement_question"] == "最终提问"
+    assert final_understanding["search_queries"] == ["教程", "流程"]
+    assert final_understanding["evidence_spans"] == []
+    assert final_understanding["uncertainties"] == []
+    assert final_understanding["confidence"] == {"overall": 0.95}
+    assert final_understanding["needs_review"] is False
+    assert final_understanding["review_reasons"] == []
 
 
 @pytest.mark.asyncio

@@ -497,6 +497,22 @@ export type AvatarMaterialLibrary = {
   profiles: AvatarMaterialProfile[];
 };
 
+export type IdentitySupportSourceKey =
+  | "transcript"
+  | "subtitle_snippets"
+  | "source_name"
+  | "source_name_terms"
+  | "visible_text"
+  | "visible_text_terms"
+  | "evidence"
+  | "evidence_terms";
+
+export type ContentProfilePayload = Record<string, any> & {
+  content_understanding?: Partial<ContentUnderstanding> | null;
+  keywords?: string[];
+  search_queries?: string[];
+};
+
 export type ContentProfileReview = {
   job_id: string;
   status: string;
@@ -509,7 +525,7 @@ export type ContentProfileReview = {
     first_seen_brand?: boolean;
     first_seen_model?: boolean;
     conservative_summary?: boolean;
-    support_sources?: string[];
+    support_sources?: IdentitySupportSourceKey[];
     evidence_strength?: string;
     reason?: string;
     evidence_bundle?: {
@@ -530,8 +546,8 @@ export type ContentProfileReview = {
   entity_resolution_trace: Record<string, any>;
   workflow_mode: string;
   enhancement_modes: string[];
-  draft: Record<string, any> | null;
-  final: Record<string, any> | null;
+  draft: ContentProfilePayload | null;
+  final: ContentProfilePayload | null;
   memory: Record<string, any> | null;
 };
 

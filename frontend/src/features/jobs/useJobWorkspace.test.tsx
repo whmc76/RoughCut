@@ -2,6 +2,7 @@ import { act, waitFor } from "@testing-library/react";
 
 import { renderHookWithQueryClient } from "../../test/renderWithQueryClient";
 import type { ContentProfileReview, Job, JobActivity, JobTimeline, Report, TokenUsageReport } from "../../types";
+import { normalizeKeywordList } from "./contentProfile";
 import { useJobWorkspace } from "./useJobWorkspace";
 
 const mockApi = vi.hoisted(() => ({
@@ -18,6 +19,7 @@ const mockApi = vi.hoisted(() => ({
   getJobTokenUsage: vi.fn(),
   getJobTimeline: vi.fn(),
   getContentProfile: vi.fn(),
+  warmContentProfileThumbnails: vi.fn(),
   patchConfig: vi.fn(),
   patchPackagingConfig: vi.fn(),
   openJobFolder: vi.fn(),
@@ -75,6 +77,11 @@ const SAMPLE_ACTIVITY: JobActivity = {
   render: null,
   decisions: [],
   events: [],
+};
+
+const SAMPLE_REVIEW_JOB: Job = {
+  ...SAMPLE_JOBS[0],
+  status: "needs_review",
 };
 
 const SAMPLE_REPORT: Report = {
@@ -210,7 +217,7 @@ const SAMPLE_PROFILE_NO_KEYWORDS: ContentProfileReview = {
   },
   final: {
     title: "最终标题",
-    search_queries: ["探店", "vlog"],
+    search_queries: ["VLOG", "vlog", " vlog ", "开箱"],
   },
 };
 
@@ -333,6 +340,7 @@ describe("useJobWorkspace", () => {
     mockApi.getJobTokenUsage.mockResolvedValue(SAMPLE_TOKEN_USAGE);
     mockApi.getJobTimeline.mockResolvedValue(SAMPLE_TIMELINE);
     mockApi.getContentProfile.mockResolvedValue(SAMPLE_PROFILE);
+    mockApi.warmContentProfileThumbnails.mockResolvedValue(undefined);
     mockApi.openJobFolder.mockResolvedValue({});
     mockApi.patchConfig.mockResolvedValue({});
     mockApi.patchPackagingConfig.mockResolvedValue({});
@@ -376,6 +384,8 @@ describe("useJobWorkspace", () => {
   });
 
   it("hydrates content draft from selected profile and confirms edits", async () => {
+    mockApi.getJob.mockResolvedValue(SAMPLE_REVIEW_JOB);
+
     const { result } = renderHookWithQueryClient(() => useJobWorkspace());
 
     act(() => {
@@ -383,7 +393,8 @@ describe("useJobWorkspace", () => {
     });
 
     await waitFor(() => expect(result.current.contentProfile.data).toEqual(SAMPLE_PROFILE));
-    await waitFor(() => expect(result.current.tokenUsage.data).toEqual(SAMPLE_TOKEN_USAGE));
+    expect(result.current.tokenUsage.data).toBeUndefined();
+    expect(mockApi.getJobTokenUsage).not.toHaveBeenCalled();
     await waitFor(() => expect(result.current.contentDraft).toEqual(SAMPLE_PROFILE.final));
     expect(result.current.contentKeywords).toBe("开箱, 升级, 限定");
 
@@ -419,6 +430,7 @@ describe("useJobWorkspace", () => {
   });
 
   it("uses source search_queries when keywords are missing and keeps confirm payload populated", async () => {
+    mockApi.getJob.mockResolvedValue(SAMPLE_REVIEW_JOB);
     mockApi.getContentProfile.mockResolvedValueOnce(SAMPLE_PROFILE_NO_KEYWORDS);
 
     const { result } = renderHookWithQueryClient(() => useJobWorkspace());
@@ -428,7 +440,7 @@ describe("useJobWorkspace", () => {
     });
 
     await waitFor(() => expect(result.current.contentProfile.data).toEqual(SAMPLE_PROFILE_NO_KEYWORDS));
-    expect(result.current.contentKeywords).toBe("探店, vlog");
+    expect(result.current.contentKeywords).toBe("VLOG, 开箱");
 
     act(() => {
       result.current.setContentDraft({
@@ -442,7 +454,7 @@ describe("useJobWorkspace", () => {
 
     expect(mockApi.confirmContentProfile).toHaveBeenCalledWith("job_1", {
       title: "人工调整标题",
-      keywords: ["探店", "vlog"],
+      keywords: ["VLOG", "开箱"],
       workflow_mode: "standard_edit",
       enhancement_modes: ["avatar_commentary"],
       copy_style: "attention_grabbing",
@@ -478,5 +490,11 @@ describe("useJobWorkspace", () => {
 
     expect(mockApi.getJobsUsageSummary).not.toHaveBeenCalled();
     expect(mockApi.getJobsUsageTrend).not.toHaveBeenCalled();
+  });
+});
+
+describe("contentProfile keyword normalization", () => {
+  it("deduplicates keyword arrays once and preserves order", () => {
+    expect(normalizeKeywordList(["开箱", "开箱", " 教程 ", "", "教程", "配置"])).toEqual(["开箱", "教程", "配置"]);
   });
 });

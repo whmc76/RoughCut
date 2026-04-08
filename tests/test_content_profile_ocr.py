@@ -64,6 +64,76 @@ def test_content_profile_ocr_aggregation_preserves_raw_snippets_and_normalized_c
     )
 
 
+def test_content_profile_ocr_prefers_mixed_product_token_over_repeated_noise_chunks():
+    frames = [
+        OCRFrameResult(
+            frame_index=0,
+            timestamp=0.0,
+            lines=[
+                OCRLine(
+                    text="DJI Mini 4 Pro",
+                    confidence=0.62,
+                    box=(12.0, 34.0, 210.0, 78.0),
+                )
+            ],
+        ),
+        OCRFrameResult(
+            frame_index=1,
+            timestamp=1.0,
+            lines=[
+                OCRLine(
+                    text="开箱",
+                    confidence=0.98,
+                    box=(14.0, 36.0, 88.0, 52.0),
+                )
+            ],
+        ),
+        OCRFrameResult(
+            frame_index=2,
+            timestamp=2.0,
+            lines=[
+                OCRLine(
+                    text="评测",
+                    confidence=0.97,
+                    box=(16.0, 38.0, 92.0, 54.0),
+                )
+            ],
+        ),
+        OCRFrameResult(
+            frame_index=3,
+            timestamp=3.0,
+            lines=[
+                OCRLine(
+                    text="开箱",
+                    confidence=0.96,
+                    box=(18.0, 40.0, 90.0, 56.0),
+                )
+            ],
+        ),
+        OCRFrameResult(
+            frame_index=4,
+            timestamp=4.0,
+            lines=[
+                OCRLine(
+                    text="评测",
+                    confidence=0.95,
+                    box=(20.0, 42.0, 94.0, 58.0),
+                )
+            ],
+        ),
+    ]
+
+    profile = build_content_profile_ocr(frames, source_name="demo.mp4")
+
+    assert profile["visible_text"].strip()
+    assert profile["visible_text"] not in {"开箱", "评测", "开箱 评测"}
+    assert any(
+        candidate["display_text"] == "DJI Mini 4 Pro"
+        and candidate["normalized_text"] == "dji mini 4 pro"
+        for candidate in profile["normalized_subject_candidates"]
+    )
+
+
 def test_content_profile_ocr_filters_filename_like_and_timestamp_lines():
     frames = [
         OCRFrameResult(
