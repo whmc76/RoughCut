@@ -59,8 +59,8 @@ from roughcut.pipeline.quality import QUALITY_ARTIFACT_TYPE
 from roughcut.media.variant_timeline_bundle import resolve_effective_variant_timeline_bundle
 from roughcut.recovery.stuck_step_recovery import STUCK_STEP_DIAGNOSTIC_ARTIFACT_TYPE
 from roughcut.review.content_understanding_schema import normalize_video_type
-from roughcut.review.content_profile import apply_content_profile_feedback
 from roughcut.review.content_profile import build_reviewed_transcript_excerpt
+from roughcut.review.content_profile_feedback import apply_content_profile_feedback
 from roughcut.review.content_profile_memory import (
     _build_field_preferences,
     _build_keyword_preferences,

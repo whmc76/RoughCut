@@ -35,6 +35,11 @@ from roughcut.review.content_profile import (
     infer_content_profile,
     polish_subtitle_items,
 )
+from roughcut.review.content_profile_feedback import (
+    apply_content_profile_feedback as extracted_apply_content_profile_feedback,
+    build_review_feedback_search_queries as extracted_build_review_feedback_search_queries,
+    build_review_feedback_verification_snapshot,
+)
 
 
 def test_build_cover_title_avoids_generic_main_line():
@@ -2496,6 +2501,99 @@ def test_build_review_feedback_verification_snapshot_strips_blank_fragments():
             "source_type": "电商详情页",
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_extracted_apply_content_profile_feedback_applies_accepted_corrections_to_transcript_excerpt_deterministically():
+    draft_profile = {
+        "subject_brand": "锐特",
+        "subject_model": "EX0-M",
+        "subject_type": "折刀",
+        "transcript_excerpt": "这段字幕把锐特写成了锐特，型号写成EX0-M。",
+    }
+
+    kwargs = {
+        "draft_profile": draft_profile,
+        "source_name": "review.mp4",
+        "workflow_template": None,
+        "user_feedback": {},
+        "accepted_corrections": [
+            {"original": "锐特", "accepted": "REATE"},
+            {"original": "EX0-M", "accepted": "EXO-M"},
+        ],
+    }
+    first = await extracted_apply_content_profile_feedback(**kwargs)
+    second = await extracted_apply_content_profile_feedback(**kwargs)
+
+    expected_excerpt = "这段字幕把REATE写成了REATE，型号写成EXO-M。"
+    assert first["transcript_excerpt"] == expected_excerpt
+    assert second["transcript_excerpt"] == expected_excerpt
+
+
+def test_extracted_build_review_feedback_verification_snapshot_keeps_only_normalized_non_empty_values():
+    snapshot = build_review_feedback_verification_snapshot(
+        SimpleNamespace(
+            search_queries=[" 傲雷 司令官2 Ultra ", "  ", ""],
+            online_results=[
+                {
+                    "query": "  傲雷 司令官2 Ultra  ",
+                    "title": " 旗舰新品 ",
+                    "snippet": " 司令官2 Ultra 旗舰新品 ",
+                    "url": " https://example.test/item ",
+                },
+                {"query": "", "title": "", "snippet": "", "url": ""},
+            ],
+            database_results=[
+                {
+                    "brand": " 傲雷 ",
+                    "model": " 司令官2 Ultra ",
+                    "primary_subject": " 司令官2 Ultra 手电 ",
+                    "subject_type": " EDC手电 ",
+                    "source_type": " 电商详情页 ",
+                },
+                {"brand": "", "model": "", "primary_subject": "", "subject_type": "", "source_type": ""},
+            ],
+        )
+    )
+
+    assert snapshot["search_queries"] == ["傲雷 司令官2 Ultra"]
+    assert snapshot["online_results"] == [
+        {
+            "query": "傲雷 司令官2 Ultra",
+            "title": "旗舰新品",
+            "snippet": "司令官2 Ultra 旗舰新品",
+            "url": "https://example.test/item",
+        }
+    ]
+    assert snapshot["database_results"] == [
+        {
+            "brand": "傲雷",
+            "model": "司令官2 Ultra",
+            "primary_subject": "司令官2 Ultra 手电",
+            "subject_type": "EDC手电",
+            "source_type": "电商详情页",
+        }
+    ]
+
+
+def test_extracted_build_review_feedback_search_queries_prefers_explicit_review_edits_over_stale_draft_keywords():
+    queries = extracted_build_review_feedback_search_queries(
+        draft_profile={
+            "subject_brand": "旧品牌",
+            "subject_model": "旧型号",
+            "subject_type": "EDC手电",
+            "search_queries": ["旧品牌 旧型号 开箱", "旧品牌 旧型号 对比"],
+        },
+        proposed_feedback={
+            "subject_brand": "傲雷",
+            "subject_model": "司令官2Ultra",
+            "subject_type": "EDC手电",
+        },
+    )
+
+    assert queries[0] == "傲雷 司令官2Ultra"
+    assert "傲雷 司令官2Ultra EDC手电" in queries
+    assert queries.index("傲雷 司令官2Ultra") < queries.index("旧品牌 旧型号 开箱")
 
 
 @pytest.mark.asyncio

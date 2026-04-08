@@ -50,6 +50,13 @@ from roughcut.review.content_profile_keywords import (
     fallback_search_queries_for_profile as _fallback_search_queries_for_profile_public,
     normalize_query_list as _normalize_query_list_public,
 )
+from roughcut.review.content_profile_feedback import (
+    apply_content_profile_feedback as _apply_content_profile_feedback_public,
+    build_review_feedback_search_queries as _build_review_feedback_search_queries_public,
+    build_review_feedback_verification_bundle as _build_review_feedback_verification_bundle_public,
+    build_review_feedback_verification_snapshot as _build_review_feedback_verification_snapshot_public,
+    resolve_content_profile_review_feedback as _resolve_content_profile_review_feedback_public,
+)
 from roughcut.review.content_profile_resolve import resolve_identity_candidates
 from roughcut.review.content_profile_review_stats import build_content_profile_auto_review_gate
 from roughcut.review.content_profile_scoring import score_identity_candidates
@@ -2090,205 +2097,15 @@ async def apply_content_profile_feedback(
     reviewed_subtitle_excerpt: str | None = None,
     accepted_corrections: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    if workflow_template is None and channel_profile is not None:
-        workflow_template = channel_profile
-    resolved_feedback: dict[str, Any] = dict(user_feedback or {})
-    merged = dict(draft_profile or {})
-    merged["user_feedback"] = dict(resolved_feedback)
-    transcript_excerpt = str(reviewed_subtitle_excerpt or merged.get("transcript_excerpt") or "")
-    if not any(value for value in resolved_feedback.values()):
-        specific_subject_type = str(merged.get("subject_type") or "").strip()
-        _ensure_subject_type_main(merged)
-        if specific_subject_type and not _is_generic_subject_type(specific_subject_type):
-            merged["subject_type"] = specific_subject_type
-        _ensure_search_queries(merged, source_name, transcript_excerpt=transcript_excerpt)
-        _ensure_review_fields_not_empty(merged, source_name=source_name, transcript_excerpt=transcript_excerpt)
-        merged["keywords"] = _build_review_keywords(merged)
-        preset = select_workflow_template(
-            workflow_template=workflow_template,
-            content_kind=_content_kind_name(merged),
-            subject_domain=str(merged.get("subject_domain") or ""),
-            subject_model=str(merged.get("subject_model", "")),
-            subject_type=str(merged.get("subject_type", "")),
-            transcript_hint=transcript_excerpt,
-        )
-        if not str(merged.get("hook_line") or "").strip() or _is_generic_cover_line(str(merged.get("hook_line") or "")):
-            merged["hook_line"] = _build_cover_hook(
-                hook=str(merged.get("hook_line") or ""),
-                brand=_clean_line(merged.get("subject_brand") or merged.get("brand") or ""),
-                model=_clean_line(merged.get("subject_model") or merged.get("model") or ""),
-                subject_type=_clean_line(merged.get("subject_type") or ""),
-                theme=_clean_line(str(merged.get("video_theme") or "").strip()),
-                transcript_excerpt=transcript_excerpt,
-                copy_style=str(merged.get("copy_style") or "attention_grabbing").strip() or "attention_grabbing",
-                preset=preset,
-            )
-        merged["review_mode"] = "manual_confirmed"
-        return merged
-    for key in (
-        "subject_brand",
-        "subject_model",
-        "subject_type",
-        "video_theme",
-        "hook_line",
-        "visible_text",
-    ):
-        value = resolved_feedback.get(key)
-        if value:
-            merged[key] = str(value).strip()
-
-    if resolved_feedback.get("keywords"):
-        merged["search_queries"] = [str(item).strip() for item in resolved_feedback["keywords"] if str(item).strip()]
-    elif isinstance(merged.get("search_queries"), list):
-        existing_queries = [str(item).strip() for item in (merged.get("search_queries") or []) if str(item).strip()]
-        if existing_queries:
-            resolved_feedback["keywords"] = existing_queries
-    if resolved_feedback.get("summary"):
-        merged["summary"] = str(resolved_feedback["summary"]).strip()
-    if resolved_feedback.get("engagement_question"):
-        merged["engagement_question"] = str(resolved_feedback["engagement_question"]).strip()
-    if resolved_feedback.get("copy_style"):
-        merged["copy_style"] = str(resolved_feedback["copy_style"]).strip()
-    if resolved_feedback.get("correction_notes"):
-        merged["correction_notes"] = str(resolved_feedback["correction_notes"]).strip()
-    if resolved_feedback.get("supplemental_context"):
-        merged["supplemental_context"] = str(resolved_feedback["supplemental_context"]).strip()
-    if not resolved_feedback.get("correction_notes"):
-        merged.setdefault("correction_notes", "")
-    if not resolved_feedback.get("supplemental_context"):
-        merged.setdefault("supplemental_context", "")
-    if not merged.get("search_queries"):
-        merged["search_queries"] = build_review_feedback_search_queries(
-            draft_profile=merged,
-            source_name=source_name,
-            proposed_feedback=resolved_feedback,
-        )
-
-    try:
-        provider = get_reasoning_provider()
-        accepted_examples = [
-            {
-                "original": str(item.get("original") or "").strip(),
-                "accepted": str(item.get("accepted") or "").strip(),
-            }
-            for item in (accepted_corrections or [])
-            if str(item.get("original") or "").strip() and str(item.get("accepted") or "").strip()
-        ]
-        reviewed_excerpt = str(reviewed_subtitle_excerpt or merged.get("transcript_excerpt") or "").strip()
-        prompt = (
-            "你在整理一条中文短视频的人工确认摘要。请结合模型草稿和用户修正，"
-            "输出一个后续可直接用于搜索、字幕修正和剪辑规划的确认版摘要。"
-            "用户修正优先级最高，不要忽略用户手动填写的信息。\n"
-            f"字段规则（通用）：\n"
-            "subject_brand：视频主体品牌，不是频道名；subject_model：视频主体型号、版本或系列名，不要回填文件名或时间戳。\n"
-            f"{CONTENT_PROFILE_FIELD_GUIDELINES}"
-            "输出 JSON："
-            '{"subject_brand":"","subject_model":"","subject_type":"","video_theme":"",'
-            '"hook_line":"","visible_text":"","summary":"","engagement_question":"","search_queries":[]}'
-            f"\n模型草稿：{json.dumps(draft_profile or {}, ensure_ascii=False)}"
-            f"\n用户修正：{json.dumps(user_feedback, ensure_ascii=False)}"
-            f"\n源文件名：{source_name}"
-        )
-        if reviewed_excerpt:
-            prompt += f"\n人工复检后的字幕摘录：{reviewed_excerpt}"
-        if accepted_examples:
-            prompt += f"\n已接受的字幕校对：{json.dumps(accepted_examples[:12], ensure_ascii=False)}"
-        with track_usage_operation("content_profile.manual_feedback_normalize"):
-            response = await provider.complete(
-                [
-                    Message(role="system", content="你是严谨的中文视频内容摘要整理助手。"),
-                    Message(role="user", content=prompt),
-                ],
-                temperature=0.1,
-                max_tokens=700,
-                json_mode=True,
-            )
-        normalized = response.as_json()
-        merged.update({k: v for k, v in normalized.items() if v})
-        for key in (
-            "subject_brand",
-            "subject_model",
-            "subject_type",
-            "video_theme",
-            "hook_line",
-            "visible_text",
-            "summary",
-            "engagement_question",
-            "copy_style",
-        ):
-            value = str((normalized or {}).get(key) or "").strip()
-            if value and not str(resolved_feedback.get(key) or "").strip():
-                resolved_feedback[key] = value
-        normalized_queries: list[str] = []
-        for item in list((normalized or {}).get("search_queries") or []):
-            query = str(item).strip()
-            if query and query not in normalized_queries:
-                normalized_queries.append(query)
-        if normalized_queries and not list(resolved_feedback.get("keywords") or []):
-            resolved_feedback["keywords"] = normalized_queries
-    except Exception:
-        pass
-    merged["user_feedback"] = dict(resolved_feedback)
-
-    transcript_excerpt = str(reviewed_subtitle_excerpt or merged.get("transcript_excerpt") or "")
-    result = await enrich_content_profile(
-        profile=merged,
+    return await _apply_content_profile_feedback_public(
+        draft_profile=draft_profile,
         source_name=source_name,
-        channel_profile=workflow_template,
-        transcript_excerpt=transcript_excerpt,
-        include_research=False,
+        workflow_template=workflow_template,
+        channel_profile=channel_profile,
+        user_feedback=user_feedback,
+        reviewed_subtitle_excerpt=reviewed_subtitle_excerpt,
+        accepted_corrections=accepted_corrections,
     )
-    result["user_feedback"] = dict(resolved_feedback)
-    result["review_mode"] = "manual_confirmed"
-    for key in (
-        "subject_brand",
-        "subject_model",
-        "subject_type",
-        "video_theme",
-        "hook_line",
-        "visible_text",
-        "summary",
-        "engagement_question",
-        "copy_style",
-    ):
-        value = resolved_feedback.get(key)
-        if value:
-            result[key] = str(value).strip()
-    if resolved_feedback.get("keywords"):
-        manual_queries: list[str] = []
-        for item in resolved_feedback["keywords"]:
-            query = str(item).strip()
-            if query and query not in manual_queries:
-                manual_queries.append(query)
-        if manual_queries:
-            result["search_queries"] = manual_queries
-    if not result.get("search_queries"):
-        result["search_queries"] = build_review_feedback_search_queries(
-            draft_profile=result,
-            source_name=source_name,
-            proposed_feedback=resolved_feedback,
-        )
-    resolved_specific_subject_type = str(result.get("subject_type") or "").strip()
-    _ensure_subject_type_main(result)
-    if resolved_specific_subject_type and not _is_generic_subject_type(resolved_specific_subject_type):
-        result["subject_type"] = resolved_specific_subject_type
-    _ensure_search_queries(result, source_name, transcript_excerpt=transcript_excerpt)
-    result["keywords"] = _build_review_keywords(result)
-    if any(
-        resolved_feedback.get(key)
-        for key in (
-            "subject_brand",
-            "subject_model",
-            "subject_type",
-            "video_theme",
-            "hook_line",
-            "visible_text",
-        )
-    ):
-        preset = get_workflow_preset(str(result.get("workflow_template") or workflow_template or "unboxing_standard"))
-        result["cover_title"] = build_cover_title(result, preset)
-    _ensure_review_fields_not_empty(result, source_name=source_name, transcript_excerpt=transcript_excerpt)
-    return result
 
 
 def build_review_feedback_search_queries(
@@ -2298,92 +2115,12 @@ def build_review_feedback_search_queries(
     source_name: str | None = None,
     limit: int = 6,
 ) -> list[str]:
-    proposed = dict(proposed_feedback or {})
-    brand = str(proposed.get("subject_brand") or draft_profile.get("subject_brand") or "").strip()
-    model = str(proposed.get("subject_model") or draft_profile.get("subject_model") or "").strip()
-    subject_type = str(
-        proposed.get("subject_type") or draft_profile.get("subject_type") or ""
-    ).strip()
-    video_theme = str(
-        proposed.get("video_theme") or draft_profile.get("video_theme") or ""
-    ).strip()
-    profile_source_name = str(
-        source_name
-        or draft_profile.get("source_name")
-        or draft_profile.get("source_file_name")
-        or ""
-    ).strip()
-    source_stem = Path(profile_source_name).stem if profile_source_name else ""
-    queries: list[str] = []
-    profile_with_feedback = dict(draft_profile)
-    if brand:
-        profile_with_feedback["subject_brand"] = brand
-    if model:
-        profile_with_feedback["subject_model"] = model
-    if subject_type:
-        profile_with_feedback["subject_type"] = subject_type
-    if video_theme:
-        profile_with_feedback["video_theme"] = video_theme
-    if source_stem:
-        profile_with_feedback["source_name"] = source_stem
-    transcript_excerpt = str(draft_profile.get("transcript_excerpt") or "").strip()
-
-    def _append(value: str) -> None:
-        query = str(value or "").strip()
-        if query and query not in queries and len(queries) < limit:
-            queries.append(query)
-
-    if brand and model:
-        _append(f"{brand} {model}")
-        if subject_type:
-            _append(f"{brand} {model} {subject_type}")
-    if model and subject_type:
-        _append(f"{model} {subject_type}")
-    if brand and subject_type:
-        _append(f"{brand} {subject_type}")
-    if subject_type and not _is_generic_subject_type(subject_type):
-        _append(subject_type)
-    if model:
-        _append(model)
-    if brand:
-        _append(brand)
-    if video_theme:
-        _append(video_theme)
-    for term in _extract_topic_terms(video_theme):
-        _append(term)
-
-    for item in list(draft_profile.get("search_queries") or []):
-        query = str(item).strip()
-        if not query:
-            continue
-        _append(query)
-        if brand:
-            _append(f"{brand} {query}")
-        if model:
-            _append(f"{model} {query}")
-        if brand and model:
-            _append(f"{brand} {model} {query}")
-        if len(queries) >= limit:
-            break
-
-    if len(queries) < limit and source_stem:
-        _append(_clean_line(source_stem))
-
-    if len(queries) < limit:
-        for query in _build_search_queries(
-            profile_with_feedback,
-            profile_source_name,
-            transcript_excerpt=transcript_excerpt,
-        ):
-            _append(query)
-            if len(queries) >= limit:
-                break
-
-    if len(queries) < limit:
-        for query in _fallback_search_queries_for_profile(profile_with_feedback, profile_source_name):
-            _append(query)
-
-    return queries
+    return _build_review_feedback_search_queries_public(
+        draft_profile=draft_profile,
+        proposed_feedback=proposed_feedback,
+        source_name=source_name,
+        limit=limit,
+    )
 
 
 async def build_review_feedback_verification_bundle(
@@ -2392,17 +2129,9 @@ async def build_review_feedback_verification_bundle(
     proposed_feedback: dict[str, Any] | None = None,
     session: AsyncSession | None = None,
 ) -> HybridVerificationBundle | None:
-    search_queries = build_review_feedback_search_queries(
+    return await _build_review_feedback_verification_bundle_public(
         draft_profile=draft_profile,
         proposed_feedback=proposed_feedback,
-        source_name=str(draft_profile.get("source_name") or ""),
-    )
-    if not search_queries:
-        return None
-    return await build_hybrid_verification_bundle(
-        search_queries=search_queries,
-        online_search=_online_search_content_understanding,
-        internal_search=None,
         session=session,
     )
 
@@ -2417,166 +2146,15 @@ async def resolve_content_profile_review_feedback(
     accepted_corrections: list[dict[str, Any]] | None = None,
     verification_bundle: HybridVerificationBundle | None = None,
 ) -> dict[str, Any]:
-    note = str(review_feedback or "").strip()
-    proposed = dict(proposed_feedback or {})
-    if not note and not any(proposed.values()):
-        return {}
-
-    try:
-        provider = get_reasoning_provider()
-        reviewed_excerpt = str(reviewed_subtitle_excerpt or draft_profile.get("transcript_excerpt") or "").strip()
-        current_snapshot = {
-            "subject_brand": str(draft_profile.get("subject_brand") or "").strip(),
-            "subject_model": str(draft_profile.get("subject_model") or "").strip(),
-            "subject_type": str(draft_profile.get("subject_type") or "").strip(),
-            "video_theme": str(draft_profile.get("video_theme") or "").strip(),
-            "summary": str(draft_profile.get("summary") or "").strip(),
-        }
-        understanding = draft_profile.get("content_understanding") if isinstance(draft_profile.get("content_understanding"), dict) else {}
-        understanding_snapshot = {
-            "primary_subject": str(understanding.get("primary_subject") or "").strip(),
-            "resolved_primary_subject": str(understanding.get("resolved_primary_subject") or "").strip(),
-            "subject_entities": list(understanding.get("subject_entities") or [])[:6],
-            "observed_entities": list(understanding.get("observed_entities") or [])[:6],
-            "resolved_entities": list(understanding.get("resolved_entities") or [])[:6],
-        }
-        verification_snapshot = _build_review_feedback_verification_snapshot(verification_bundle)
-        accepted_examples = [
-            {
-                "original": str(item.get("original") or "").strip(),
-                "accepted": str(item.get("accepted") or "").strip(),
-            }
-            for item in (accepted_corrections or [])
-            if str(item.get("original") or "").strip() and str(item.get("accepted") or "").strip()
-        ]
-        prompt = (
-            "你在解析成片审核意见，目标是判断这条审核意见是否应该作用到当前视频主体，并输出可执行修正补丁。"
-            "审核意见是高优先级证据，但不能机械照抄；你必须先判断它是不是在修正当前主对象。"
-            "如果视频围绕单一主产品展开，或围绕同一产品族做版本对比，而审核意见只是在修正该主产品的品牌、型号、系列或版本，通常应当应用。"
-            "只有当审核意见明显指向另一个对象，或当前证据不足以判断作用对象时，才拒绝应用。"
-            "不要被旧草稿中的错误品牌型号绑住，也不要因为 ASR 噪声而忽略人工修正。"
-            "当前草稿里的品牌/型号可能本身就是错的，它们不能作为否决人工审核修正的主要依据。"
-            "如果审核意见明确写了“品牌改成X、型号改成Y”，并且当前视频主题仍是同一类产品的开箱、评测、版本对比或上手体验，应优先把 X/Y 视为当前主对象的候选修正。"
-            "返回 apply_feedback=true 时，才在 patch 中填入应应用字段；否则 patch 保持为空。"
-            "输出 JSON："
-            '{"apply_feedback":false,"reason":"","subject_brand":"","subject_model":"","subject_type":"","video_theme":"",'
-            '"hook_line":"","visible_text":"","summary":"","engagement_question":"","search_queries":[]}'
-            f"\n当前主对象快照：{json.dumps(current_snapshot, ensure_ascii=False)}"
-            f"\n当前内容理解快照：{json.dumps(understanding_snapshot, ensure_ascii=False)}"
-            f"\n审核意见原文：{note or '无'}"
-            f"\n从审核意见提取的候选修正：{json.dumps(proposed, ensure_ascii=False)}"
-            f"\n源文件名：{source_name}"
-        )
-        if reviewed_excerpt:
-            prompt += f"\n当前字幕摘录：{reviewed_excerpt}"
-        if accepted_examples:
-            prompt += f"\n已接受的字幕校对：{json.dumps(accepted_examples[:12], ensure_ascii=False)}"
-        if verification_bundle is not None:
-            prompt += (
-                "\n针对审核修正的混合检索结果（弱佐证，不能单独决定结论）："
-                f"{json.dumps(verification_snapshot, ensure_ascii=False)}"
-            )
-        with track_usage_operation("content_profile.review_feedback_resolve"):
-            response = await provider.complete(
-                [
-                    Message(role="system", content="你是严谨的中文视频内容审核修正助手。"),
-                    Message(role="user", content=prompt),
-                ],
-                temperature=0.1,
-                max_tokens=700,
-                json_mode=True,
-            )
-        payload = await _load_review_feedback_json_payload(provider, response)
-        if not bool((payload or {}).get("apply_feedback")) and _review_feedback_has_strong_verification_signal(
-            proposed,
-            verification_bundle,
-        ):
-            repair_prompt = (
-                "第一次判断偏保守。现在你已经拿到较强的外部佐证，请重新判断审核修正是否应作用于当前主对象。"
-                "如果混合检索已经稳定支持 proposed_feedback，且当前视频仍围绕同一产品族展开，应优先应用审核修正。"
-                "只有当检索结果明确指向别的对象时，才继续拒绝。"
-                "输出同样的 JSON，并明确 apply_feedback。"
-                f"\n当前主对象快照：{json.dumps(current_snapshot, ensure_ascii=False)}"
-                f"\n当前内容理解快照：{json.dumps(understanding_snapshot, ensure_ascii=False)}"
-                f"\n审核意见原文：{note or '无'}"
-                f"\n候选修正：{json.dumps(proposed, ensure_ascii=False)}"
-                f"\n混合检索结果：{json.dumps(verification_snapshot, ensure_ascii=False)}"
-            )
-            with track_usage_operation("content_profile.review_feedback_resolve_repair"):
-                repair_response = await provider.complete(
-                    [
-                        Message(role="system", content="你是严谨的中文视频内容审核修正助手。"),
-                        Message(role="user", content=repair_prompt),
-                    ],
-                    temperature=0.0,
-                    max_tokens=700,
-                    json_mode=True,
-                )
-            payload = await _load_review_feedback_json_payload(provider, repair_response)
-        if not bool((payload or {}).get("apply_feedback")) and _review_feedback_has_strong_verification_signal(
-            proposed,
-            verification_bundle,
-        ):
-            minimal_prompt = (
-                "当前任务只做最小修正判断。"
-                "你只需要判断 proposed_feedback 中的品牌/型号是否应作用于当前视频主对象。"
-                "前两轮未能稳定输出结果，但外部佐证已经较强。"
-                "如果当前视频仍围绕同一产品族展开，且 proposed_feedback 与混合检索一致，就应 apply_feedback=true。"
-                "只输出严格 JSON。"
-                '{"apply_feedback":false,"reason":"","subject_brand":"","subject_model":"","subject_type":"","video_theme":"",'
-                '"hook_line":"","visible_text":"","summary":"","engagement_question":"","search_queries":[]}'
-                f"\n当前主对象快照：{json.dumps(current_snapshot, ensure_ascii=False)}"
-                f"\n审核意见原文：{note or '无'}"
-                f"\n候选修正：{json.dumps(proposed, ensure_ascii=False)}"
-                f"\n混合检索结果：{json.dumps(verification_snapshot, ensure_ascii=False)}"
-            )
-            with track_usage_operation("content_profile.review_feedback_resolve_minimal_patch"):
-                minimal_response = await provider.complete(
-                    [
-                        Message(role="system", content="你是严谨的中文视频内容审核修正助手。"),
-                        Message(role="user", content=minimal_prompt),
-                    ],
-                    temperature=0.0,
-                    max_tokens=500,
-                    json_mode=True,
-                )
-            payload = await _load_review_feedback_json_payload(provider, minimal_response)
-        if not bool((payload or {}).get("apply_feedback")):
-            return {}
-        resolved: dict[str, Any] = {}
-        for key in (
-            "subject_brand",
-            "subject_model",
-            "subject_type",
-            "video_theme",
-            "hook_line",
-            "visible_text",
-            "summary",
-            "engagement_question",
-        ):
-            value = str((payload or {}).get(key) or "").strip()
-            if value:
-                resolved[key] = value
-        queries: list[str] = []
-        for item in list((payload or {}).get("search_queries") or []):
-            value = str(item).strip()
-            if value and value not in queries:
-                queries.append(value)
-        if queries:
-            resolved["search_queries"] = list(queries)
-            resolved["keywords"] = _build_review_keywords(
-                {
-                    "subject_brand": str(resolved.get("subject_brand") or "").strip(),
-                    "subject_model": str(resolved.get("subject_model") or "").strip(),
-                    "subject_type": str(resolved.get("subject_type") or "").strip(),
-                    "video_theme": str(resolved.get("video_theme") or "").strip(),
-                    "visible_text": str(resolved.get("visible_text") or "").strip(),
-                    "search_queries": list(queries),
-                }
-            )
-        return resolved
-    except Exception:
-        return {}
+    return await _resolve_content_profile_review_feedback_public(
+        draft_profile=draft_profile,
+        source_name=source_name,
+        review_feedback=review_feedback,
+        proposed_feedback=proposed_feedback,
+        reviewed_subtitle_excerpt=reviewed_subtitle_excerpt,
+        accepted_corrections=accepted_corrections,
+        verification_bundle=verification_bundle,
+    )
 
 
 async def _load_review_feedback_json_payload(
@@ -2616,38 +2194,7 @@ async def _load_review_feedback_json_payload(
 def _build_review_feedback_verification_snapshot(
     verification_bundle: HybridVerificationBundle | None,
 ) -> dict[str, Any]:
-    if verification_bundle is None:
-        return {
-            "search_queries": [],
-            "online_count": 0,
-            "database_count": 0,
-            "online_results": [],
-            "database_results": [],
-        }
-    return {
-        "search_queries": list(verification_bundle.search_queries or [])[:6],
-        "online_count": len(verification_bundle.online_results),
-        "database_count": len(verification_bundle.database_results),
-        "online_results": [
-            {
-                "query": str((item or {}).get("query") or "").strip(),
-                "title": str((item or {}).get("title") or "").strip(),
-                "snippet": str((item or {}).get("snippet") or "").strip(),
-                "url": str((item or {}).get("url") or "").strip(),
-            }
-            for item in list(verification_bundle.online_results or [])[:4]
-        ],
-        "database_results": [
-            {
-                "brand": str((item or {}).get("brand") or "").strip(),
-                "model": str((item or {}).get("model") or "").strip(),
-                "primary_subject": str((item or {}).get("primary_subject") or "").strip(),
-                "subject_type": str((item or {}).get("subject_type") or "").strip(),
-                "source_type": str((item or {}).get("source_type") or "").strip(),
-            }
-            for item in list(verification_bundle.database_results or [])[:3]
-        ],
-    }
+    return _build_review_feedback_verification_snapshot_public(verification_bundle)
 
 
 def _review_feedback_has_strong_verification_signal(
