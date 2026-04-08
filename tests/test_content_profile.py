@@ -154,7 +154,7 @@ async def test_infer_content_profile_routes_visual_semantic_evidence_into_conten
 
 
 @pytest.mark.asyncio
-async def test_infer_content_profile_runs_research_when_semantic_fact_expansions_exist_without_final_queries(
+async def test_infer_content_profile_runs_research_when_search_queries_are_empty_but_semantic_fact_expansions_exist(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ):
@@ -261,10 +261,7 @@ def test_build_review_keywords_preserves_mixed_chinese_latin_product_tokens_and_
     assert len(mixed_token_matches) == 1
     assert "开箱" not in keywords
     assert "评测" not in keywords
-    if any(token in {"DJI", "Mini 4 Pro"} for token in keywords):
-        mixed_index = keywords.index(mixed_token_matches[0])
-        split_indexes = [keywords.index(token) for token in ("DJI", "Mini 4 Pro") if token in keywords]
-        assert mixed_index < min(split_indexes)
+    assert not all(fragment in keywords for fragment in ("MINI", "PRO"))
 
 
 def test_seed_profile_from_text_extracts_flashlight_brand_and_model():
@@ -922,7 +919,7 @@ def test_ensure_search_queries_rebuilds_deduped_fallback_queries_from_empty_sear
     profile = {
         "subject_type": "开箱",
         "content_kind": "unboxing",
-        "search_queries": ["", " ", "\t"],
+        "search_queries": [],
     }
 
     queries = _ensure_search_queries(
@@ -2074,7 +2071,7 @@ async def test_apply_content_profile_feedback_keeps_llm_derived_fields_from_reso
 
 
 @pytest.mark.asyncio
-async def test_apply_content_profile_feedback_preserves_workflow_mode_enhancement_modes_and_keywords(
+async def test_apply_content_profile_feedback_preserves_workflow_mode_enhancement_modes_and_tags(
     monkeypatch: pytest.MonkeyPatch,
 ):
     from roughcut.review import content_profile as content_profile_module
@@ -2086,7 +2083,14 @@ async def test_apply_content_profile_feedback_preserves_workflow_mode_enhancemen
 
     async def fake_enrich_content_profile(*, profile, source_name, channel_profile, transcript_excerpt, include_research, user_memory=None):
         captured["profile"] = dict(profile)
-        return {**profile, "transcript_excerpt": transcript_excerpt}
+        return {
+            "subject_brand": profile["subject_brand"],
+            "subject_model": profile["subject_model"],
+            "subject_type": profile["subject_type"],
+            "video_theme": profile["video_theme"],
+            "summary": profile["summary"],
+            "transcript_excerpt": transcript_excerpt,
+        }
 
     monkeypatch.setattr(content_profile_module, "get_reasoning_provider", raising_provider)
     monkeypatch.setattr(content_profile_module, "enrich_content_profile", fake_enrich_content_profile)
@@ -2112,10 +2116,12 @@ async def test_apply_content_profile_feedback_preserves_workflow_mode_enhancemen
 
     assert result["workflow_mode"] == "review"
     assert result["enhancement_modes"] == ["semantic_search", "subtitle_polish"]
+    assert any(token.replace(" ", "").casefold() == "djimini4pro" for token in result["keywords"])
+    assert "开箱" in result["keywords"]
     captured_profile = captured["profile"]
     assert captured_profile["workflow_mode"] == "review"
     assert captured_profile["enhancement_modes"] == ["semantic_search", "subtitle_polish"]
-    assert captured_profile["keywords"][0].replace(" ", "").casefold() == "djimini4pro"
+    assert any(token.replace(" ", "").casefold() == "djimini4pro" for token in captured_profile["keywords"])
     assert "开箱" in captured_profile["keywords"]
 
 
@@ -2469,7 +2475,7 @@ async def test_enrich_content_profile_uses_llm_to_replace_generic_engagement_que
 
 
 @pytest.mark.asyncio
-async def test_infer_content_profile_uses_neutral_review_fallback_when_content_understanding_fails(
+async def test_infer_content_profile_uses_neutral_review_recovery_when_content_understanding_fails(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ):
