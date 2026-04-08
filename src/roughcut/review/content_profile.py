@@ -37,6 +37,13 @@ from roughcut.review.content_profile_ocr import build_content_profile_ocr
 from roughcut.review.content_profile_candidates import build_identity_candidates
 from roughcut.review.content_profile_evidence import IdentityEvidenceBundle
 from roughcut.review.content_profile_keywords import (
+    _clean_line as _clean_line_keywords,
+    _extract_query_support_terms as _extract_query_support_terms_keywords,
+    _extract_search_signal_terms as _extract_search_signal_terms_keywords,
+    _extract_topic_terms as _extract_topic_terms_keywords,
+    _is_informative_source_hint as _is_informative_source_hint_keywords,
+    _looks_like_camera_stem as _looks_like_camera_stem_keywords,
+    _normalize_profile_value as _normalize_profile_value_keywords,
     build_review_keywords as _build_review_keywords_public,
     collect_review_keyword_seed_terms as _collect_review_keyword_seed_terms_public,
     extract_review_keyword_tokens as _extract_review_keyword_tokens_public,
@@ -1735,7 +1742,7 @@ def _query_is_identity_supported(query: str, *, transcript_excerpt: str, source_
 
 
 def _normalize_profile_value(value: object) -> str:
-    return "".join(str(value or "").strip().upper().split())
+    return _normalize_profile_value_keywords(value)
 
 
 def _text_has_unsupported_identity(
@@ -3769,22 +3776,7 @@ def _is_software_like_subject(
 
 
 def _extract_search_signal_terms(*texts: str) -> list[str]:
-    terms: list[str] = []
-    seen: set[str] = set()
-    for text in texts:
-        if not text:
-            continue
-        normalized = text.upper()
-        for match in re.finditer(r"(?<![A-Z0-9])([A-Z][A-Z0-9-]{1,17})(?![A-Z0-9])", normalized):
-            token = match.group(1).strip("-")
-            if not token or token in _SEARCH_SIGNAL_STOPWORDS:
-                continue
-            if re.fullmatch(r"\d+", token) or _looks_like_camera_stem(token):
-                continue
-            if token not in seen:
-                seen.add(token)
-                terms.append(token)
-    return terms
+    return _extract_search_signal_terms_keywords(*texts)
 
 
 def _select_excerpt_items(subtitle_items: list[dict], *, max_items: int) -> list[dict]:
@@ -4648,13 +4640,7 @@ def _extract_generic_product_model(normalized_text: str, original_text: str) -> 
 
 
 def _extract_topic_terms(text: str) -> list[str]:
-    terms: list[str] = []
-    seen: set[str] = set()
-    for label, pattern in _TECH_TOPIC_PATTERNS:
-        if pattern.search(text) and label not in seen:
-            seen.add(label)
-            terms.append(label)
-    return terms
+    return _extract_topic_terms_keywords(text)
 
 
 def _detect_primary_tech_brand(transcript: str, *, topic_terms: list[str]) -> str:
@@ -5835,26 +5821,15 @@ def _extract_guard_tokens(text: str) -> set[str]:
 
 
 def _clean_line(text: str) -> str:
-    return re.sub(r"\s+", "", str(text)).strip("，。！？：:;；、")
+    return _clean_line_keywords(text)
 
 
 def _looks_like_camera_stem(text: str) -> bool:
-    normalized = text.strip().lower()
-    return bool(
-        re.fullmatch(r"(img|dsc|mvimg|pxl|cimg|vid)[-_]?\d+", normalized)
-        or re.fullmatch(r"\d{8}[_-].+", normalized)
-    )
+    return _looks_like_camera_stem_keywords(text)
 
 
 def _is_informative_source_hint(text: str) -> bool:
-    normalized = _clean_line(text)
-    if not normalized:
-        return False
-    if _looks_like_camera_stem(normalized):
-        return False
-    if re.fullmatch(r"[\d_-]+", normalized):
-        return False
-    return True
+    return _is_informative_source_hint_keywords(text)
 
 
 def _cover_title_is_usable(cover_title: dict[str, Any]) -> bool:
@@ -6387,18 +6362,7 @@ def _summary_theme_fragment(
 
 
 def _extract_query_support_terms(text: str) -> list[str]:
-    terms: list[str] = []
-    seen: set[str] = set()
-    for match in re.finditer(r"[\u4e00-\u9fff]{2,8}|[A-Za-z][A-Za-z0-9+-]{1,23}", str(text or "")):
-        token = match.group(0).strip()
-        if len(token) < 2:
-            continue
-        if token in {"主要围绕", "内容方向", "产品开箱与上手体验"}:
-            continue
-        if token not in seen:
-            seen.add(token)
-            terms.append(token)
-    return terms
+    return _extract_query_support_terms_keywords(text)
 
 
 def _build_neutral_profile_summary() -> str:
