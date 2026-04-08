@@ -21,9 +21,13 @@ const VIDEO_TYPE_LABELS: Record<UiLocale, Record<string, string>> = {
 
 const IDENTITY_SUPPORT_SOURCE_LABELS: Record<string, string> = {
   transcript: "字幕",
+  subtitle_snippets: "字幕",
   source_name: "文件名",
+  source_name_terms: "文件名",
   visible_text: "画面文字",
+  visible_text_terms: "画面文字",
   evidence: "外部证据",
+  evidence_terms: "外部证据",
 };
 
 function normalizeTextKey(value: unknown) {
