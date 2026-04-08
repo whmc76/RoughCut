@@ -181,12 +181,13 @@ def _normalize_main_content_type(value: str) -> str:
 def _coerce_subject_type_to_supported_main_type(profile: dict[str, Any] | None) -> str:
     candidate = profile or {}
     resolved_subject_type = str(candidate.get("subject_type") or "").strip()
-    if resolved_subject_type:
-        normalized = _normalize_main_content_type(resolved_subject_type)
-        if normalized:
-            return normalized
-    normalized_content_kind = _normalize_main_content_type(_content_kind_name(candidate))
-    return normalized_content_kind or "unboxing"
+    if not resolved_subject_type:
+        normalized_content_kind = _normalize_main_content_type(_content_kind_name(candidate))
+        return normalized_content_kind or ""
+    normalized = _normalize_main_content_type(resolved_subject_type)
+    if normalized:
+        return normalized
+    return ""
 
 
 def _ensure_subject_type_main(profile: dict[str, Any]) -> str:
@@ -1019,6 +1020,7 @@ def apply_identity_review_guard(
     source_name: str = "",
 ) -> dict[str, Any]:
     guarded = dict(profile or {})
+    resolved_specific_subject_type = str(guarded.get("subject_type") or "").strip()
     transcript_excerpt = str(guarded.get("transcript_excerpt") or "").strip()
     if not transcript_excerpt and subtitle_items:
         transcript_excerpt = build_transcript_excerpt(list(subtitle_items), max_items=24, max_chars=900)
@@ -1037,6 +1039,8 @@ def apply_identity_review_guard(
                 subtitle_items=subtitle_items,
             )
         _ensure_subject_type_main(guarded)
+        if resolved_specific_subject_type and not _is_generic_subject_type(resolved_specific_subject_type):
+            guarded["subject_type"] = resolved_specific_subject_type
         _ensure_review_fields_not_empty(guarded, source_name=source_name, transcript_excerpt=transcript_excerpt)
         return guarded
     memory_hints = _seed_profile_from_user_memory(
@@ -2485,7 +2489,10 @@ async def apply_content_profile_feedback(
             source_name=source_name,
             proposed_feedback=resolved_feedback,
         )
+    resolved_specific_subject_type = str(result.get("subject_type") or "").strip()
     _ensure_subject_type_main(result)
+    if resolved_specific_subject_type and not _is_generic_subject_type(resolved_specific_subject_type):
+        result["subject_type"] = resolved_specific_subject_type
     _ensure_search_queries(result, source_name, transcript_excerpt=transcript_excerpt)
     result["keywords"] = _build_review_keywords(result)
     if any(

@@ -12,6 +12,7 @@ from roughcut.review.content_profile import (
     _apply_visual_subject_guard,
     _probe_duration,
     _build_conservative_identity_summary,
+    _coerce_subject_type_to_supported_main_type,
     _build_profile_summary,
     _extract_reference_frames,
     _infer_visual_profile_hints,
@@ -1095,6 +1096,15 @@ def test_apply_identity_review_guard_does_not_override_llm_understanding_identit
     assert guarded["summary"] == "这条视频主要围绕 VX07 机能包的装载和背负体验展开。"
     assert guarded["content_understanding"]["primary_subject"] == "EDC机能包"
     assert guarded["identity_review"]["required"] is False
+
+
+def test_coerce_subject_type_to_supported_main_type_returns_canonical_main_type_empty_for_specific_subject_type():
+    assert _coerce_subject_type_to_supported_main_type(
+        {
+            "subject_type": "EDC机能包",
+            "workflow_template": "edc_tactical",
+        }
+    ) == ""
 
 
 def test_build_profile_summary_falls_back_when_theme_only_repeats_identity():

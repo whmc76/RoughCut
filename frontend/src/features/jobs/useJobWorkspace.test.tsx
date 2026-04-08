@@ -18,6 +18,7 @@ const mockApi = vi.hoisted(() => ({
   getJobTokenUsage: vi.fn(),
   getJobTimeline: vi.fn(),
   getContentProfile: vi.fn(),
+  warmContentProfileThumbnails: vi.fn(),
   patchConfig: vi.fn(),
   patchPackagingConfig: vi.fn(),
   openJobFolder: vi.fn(),
@@ -75,6 +76,11 @@ const SAMPLE_ACTIVITY: JobActivity = {
   render: null,
   decisions: [],
   events: [],
+};
+
+const SAMPLE_REVIEW_JOB: Job = {
+  ...SAMPLE_JOBS[0],
+  status: "needs_review",
 };
 
 const SAMPLE_REPORT: Report = {
@@ -333,6 +339,7 @@ describe("useJobWorkspace", () => {
     mockApi.getJobTokenUsage.mockResolvedValue(SAMPLE_TOKEN_USAGE);
     mockApi.getJobTimeline.mockResolvedValue(SAMPLE_TIMELINE);
     mockApi.getContentProfile.mockResolvedValue(SAMPLE_PROFILE);
+    mockApi.warmContentProfileThumbnails.mockResolvedValue(undefined);
     mockApi.openJobFolder.mockResolvedValue({});
     mockApi.patchConfig.mockResolvedValue({});
     mockApi.patchPackagingConfig.mockResolvedValue({});
@@ -376,6 +383,8 @@ describe("useJobWorkspace", () => {
   });
 
   it("hydrates content draft from selected profile and confirms edits", async () => {
+    mockApi.getJob.mockResolvedValue(SAMPLE_REVIEW_JOB);
+
     const { result } = renderHookWithQueryClient(() => useJobWorkspace());
 
     act(() => {
@@ -383,7 +392,8 @@ describe("useJobWorkspace", () => {
     });
 
     await waitFor(() => expect(result.current.contentProfile.data).toEqual(SAMPLE_PROFILE));
-    await waitFor(() => expect(result.current.tokenUsage.data).toEqual(SAMPLE_TOKEN_USAGE));
+    expect(result.current.tokenUsage.data).toBeUndefined();
+    expect(mockApi.getJobTokenUsage).not.toHaveBeenCalled();
     await waitFor(() => expect(result.current.contentDraft).toEqual(SAMPLE_PROFILE.final));
     expect(result.current.contentKeywords).toBe("开箱, 升级, 限定");
 
@@ -419,6 +429,7 @@ describe("useJobWorkspace", () => {
   });
 
   it("uses source search_queries when keywords are missing and keeps confirm payload populated", async () => {
+    mockApi.getJob.mockResolvedValue(SAMPLE_REVIEW_JOB);
     mockApi.getContentProfile.mockResolvedValueOnce(SAMPLE_PROFILE_NO_KEYWORDS);
 
     const { result } = renderHookWithQueryClient(() => useJobWorkspace());

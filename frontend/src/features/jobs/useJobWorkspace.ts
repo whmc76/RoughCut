@@ -88,7 +88,7 @@ export function useJobWorkspace() {
     (step) => step.step_name === "final_review" && step.status !== "done",
   ) || activity.data?.current_step?.step_name === "final_review";
   const shouldLoadReport = Boolean(selectedJobId) && (!isReviewMode || isFinalReviewStep);
-  const shouldLoadTokenUsage = Boolean(selectedJobId) && !isReviewMode;
+  const shouldLoadTokenUsage = Boolean(selectedJobId) && Boolean(detail.data) && !isReviewMode;
   const shouldLoadTimeline = Boolean(selectedJobId) && !isReviewMode;
   const report = useQuery({
     queryKey: ["job-report", selectedJobId],
