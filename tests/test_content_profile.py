@@ -242,6 +242,25 @@ def test_build_reviewed_transcript_excerpt_applies_accepted_corrections():
     assert "锐特" not in excerpt
 
 
+def test_build_review_keywords_preserves_mixed_chinese_latin_product_tokens_and_downranks_noise():
+    from roughcut.review.content_profile import _build_review_keywords
+
+    keywords = _build_review_keywords(
+        {
+            "subject_brand": "DJI",
+            "subject_model": "Mini 4 Pro",
+            "subject_type": "无人机",
+            "video_theme": "DJI Mini 4 Pro 开箱评测",
+            "visible_text": "DJI Mini 4 Pro",
+            "transcript_excerpt": "这次是 DJI Mini 4 Pro 开箱评测。",
+            "search_queries": ["开箱", "评测", "DJI Mini 4 Pro", "dji mini 4 pro"],
+        }
+    )
+
+    assert "DJI Mini 4 Pro" in keywords
+    assert not any(token in {"开箱", "评测"} for token in keywords[:3])
+
+
 def test_seed_profile_from_text_extracts_flashlight_brand_and_model():
     seeded = _seed_profile_from_text("陆虎SK零五二代Pro UV版手电筒开箱，对比一代的变化。")
 
@@ -889,6 +908,25 @@ def test_build_search_queries_anchors_model_only_product_with_subject_type():
     assert "MT33 EDC折刀" in queries
     assert "MT33 折刀" in queries
     assert "MT33 开箱" not in queries
+
+
+def test_ensure_search_queries_rebuilds_deduped_fallback_queries_from_empty_search_query_list():
+    from roughcut.review.content_profile import _ensure_search_queries
+
+    profile = {
+        "subject_type": "开箱",
+        "content_kind": "unboxing",
+        "search_queries": [],
+    }
+
+    queries = _ensure_search_queries(
+        profile,
+        "开箱.mp4",
+        transcript_excerpt="",
+    )
+
+    assert queries == ["开箱"]
+    assert profile["search_queries"] == ["开箱"]
 
 
 def test_apply_identity_review_guard_drops_stale_search_queries_without_current_support():
@@ -2028,6 +2066,54 @@ async def test_apply_content_profile_feedback_keeps_llm_derived_fields_from_reso
 
 
 @pytest.mark.asyncio
+async def test_apply_content_profile_feedback_preserves_workflow_mode_enhancement_modes_and_keywords(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from roughcut.review import content_profile as content_profile_module
+
+    def raising_provider():
+        raise RuntimeError("provider unavailable")
+
+    async def fake_enrich_content_profile(*, profile, source_name, channel_profile, transcript_excerpt, include_research, user_memory=None):
+        return {
+            "subject_brand": profile.get("subject_brand", ""),
+            "subject_model": profile.get("subject_model", ""),
+            "subject_type": profile.get("subject_type", ""),
+            "video_theme": profile.get("video_theme", ""),
+            "summary": profile.get("summary", ""),
+            "search_queries": list(profile.get("search_queries") or []),
+            "transcript_excerpt": transcript_excerpt,
+        }
+
+    monkeypatch.setattr(content_profile_module, "get_reasoning_provider", raising_provider)
+    monkeypatch.setattr(content_profile_module, "enrich_content_profile", fake_enrich_content_profile)
+
+    result = await apply_content_profile_feedback(
+        draft_profile={
+            "subject_brand": "DJI",
+            "subject_model": "Mini 4 Pro",
+            "subject_type": "无人机",
+            "video_theme": "DJI Mini 4 Pro 开箱评测",
+            "summary": "原始摘要",
+            "workflow_mode": "review",
+            "enhancement_modes": ["semantic_search", "subtitle_polish"],
+            "keywords": ["DJI Mini 4 Pro", "开箱"],
+            "transcript_excerpt": "这次先看 DJI Mini 4 Pro 的开箱和评测。",
+        },
+        source_name="demo.mp4",
+        channel_profile=None,
+        user_feedback={
+            "summary": "确认后摘要",
+        },
+    )
+
+    assert result["workflow_mode"] == "review"
+    assert result["enhancement_modes"] == ["semantic_search", "subtitle_polish"]
+    assert "DJI Mini 4 Pro" in result["keywords"]
+    assert "开箱" in result["keywords"]
+
+
+@pytest.mark.asyncio
 async def test_resolve_content_profile_review_feedback_returns_only_llm_resolved_patch(monkeypatch: pytest.MonkeyPatch):
     from roughcut.review import content_profile as content_profile_module
 
@@ -2286,6 +2372,62 @@ def test_build_review_feedback_search_queries_expands_brand_model_and_subject_co
     assert "司令官2Ultra EDC手电" in queries
 
 
+def test_build_review_feedback_verification_snapshot_strips_blank_fragments():
+    from roughcut.review.content_profile import _build_review_feedback_verification_snapshot
+
+    snapshot = _build_review_feedback_verification_snapshot(
+        SimpleNamespace(
+            search_queries=[" 傲雷 司令官2Ultra ", "  "],
+            online_results=[
+                {
+                    "query": "  傲雷 司令官2 Ultra  ",
+                    "title": " ",
+                    "snippet": " 旗舰新品 ",
+                    "url": " https://example.test/item ",
+                },
+                {
+                    "query": "",
+                    "title": "",
+                    "snippet": "",
+                    "url": "",
+                },
+            ],
+            database_results=[
+                {
+                    "brand": " 傲雷 ",
+                    "model": " 司令官2 Ultra ",
+                    "primary_subject": " ",
+                    "subject_type": " EDC手电 ",
+                    "source_type": " ",
+                },
+                {
+                    "brand": " ",
+                    "model": " ",
+                    "primary_subject": "",
+                    "subject_type": "",
+                    "source_type": "",
+                },
+            ],
+        )
+    )
+
+    assert snapshot["search_queries"] == ["傲雷 司令官2Ultra"]
+    assert snapshot["online_results"] == [
+        {
+            "query": "傲雷 司令官2 Ultra",
+            "snippet": "旗舰新品",
+            "url": "https://example.test/item",
+        }
+    ]
+    assert snapshot["database_results"] == [
+        {
+            "brand": "傲雷",
+            "model": "司令官2 Ultra",
+            "subject_type": "EDC手电",
+        }
+    ]
+
+
 @pytest.mark.asyncio
 async def test_enrich_content_profile_uses_llm_to_replace_generic_engagement_question(monkeypatch: pytest.MonkeyPatch):
     from roughcut.review import content_profile as content_profile_module
@@ -2352,7 +2494,7 @@ async def test_infer_content_profile_uses_neutral_review_fallback_when_content_u
         include_research=False,
     )
 
-    assert result["subject_type"] == ""
+    assert result["subject_type"] == "unboxing"
     assert result["video_theme"] == ""
     assert result["summary"] == "这条视频当前主题待进一步确认，建议结合字幕、画面文字和人工核对后再继续包装。"
     assert result["content_understanding"]["needs_review"] is True
@@ -2545,7 +2687,7 @@ async def test_enrich_content_profile_backfills_identity_from_glossary_seed(monk
 
     assert result["subject_brand"] == "FOXBAT狐蝠工业"
     assert result["subject_model"] == "F21小副包"
-    assert result.get("subject_type", "") == ""
+    assert result.get("subject_type", "") == "unboxing"
 
 
 @pytest.mark.asyncio
@@ -2576,7 +2718,7 @@ async def test_enrich_content_profile_does_not_classify_subject_type_from_contex
 
     assert result["subject_brand"] == "FOXBAT狐蝠工业"
     assert result["subject_model"] == "F21小副包"
-    assert result.get("subject_type", "") == ""
+    assert result.get("subject_type", "") == "unboxing"
 
 
 @pytest.mark.asyncio

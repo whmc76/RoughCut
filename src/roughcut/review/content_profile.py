@@ -273,6 +273,17 @@ def _collect_review_keyword_piece(token: str, seen: set[str]) -> list[str]:
     return [token]
 
 
+def _is_review_keyword_noise_chunk(token: str) -> bool:
+    normalized = _normalize_profile_value(token)
+    if not normalized:
+        return False
+    if normalized in _REVIEW_KEYWORD_NOISE_CHUNKS:
+        return True
+    if not re.search(r"[A-Za-z0-9]", normalized) and any(chunk in normalized for chunk in _REVIEW_KEYWORD_NOISE_CHUNKS):
+        return True
+    return False
+
+
 def _expand_long_review_keyword_chunk(chunk: str, seed_terms: list[str]) -> list[str]:
     normalized_chunk = chunk.strip("：:;；,.!?!?！？`“”‘’'\"()[]{}<>《》").strip()
     if not normalized_chunk:
@@ -340,6 +351,8 @@ def _build_review_keywords(profile: dict[str, Any]) -> list[str]:
             return
         if re.fullmatch(r"\d{8}[_-].+", normalized):
             return
+        if _is_review_keyword_noise_chunk(cleaned):
+            return
         norm_key = "".join(normalized.upper().split())
         if norm_key in seen:
             return
@@ -348,6 +361,8 @@ def _build_review_keywords(profile: dict[str, Any]) -> list[str]:
 
     add(brand, 140)
     add(model, 130)
+    if brand and model:
+        add(f"{brand} {model}", 135)
     add(subject_type, 120)
     for term in _extract_topic_terms(video_theme):
         add(term, 110)
@@ -356,6 +371,7 @@ def _build_review_keywords(profile: dict[str, Any]) -> list[str]:
     for term in _extract_review_keyword_tokens(visible_text, seed_terms=seed_terms):
         add(term, 95)
     for query in raw_queries:
+        add(query, 92)
         for token in _extract_review_keyword_tokens(query, seed_terms=seed_terms):
             add(token, 90)
     for term in _extract_query_support_terms(video_theme):
@@ -490,8 +506,6 @@ def _fallback_search_queries_for_profile(profile: dict[str, Any], source_name: s
         fallback.append(content_kind_fallback)
     if source_stem and _is_informative_source_hint(source_stem):
         fallback.append(_clean_line(source_stem))
-    if not fallback:
-        fallback.append("视频内容")
     return [query for query in fallback if query]
 
 
@@ -502,10 +516,6 @@ def _ensure_search_queries(
     transcript_excerpt: str,
     limit: int = 6,
 ) -> list[str]:
-    raw_queries = profile.get("search_queries")
-    if isinstance(raw_queries, list) and not raw_queries:
-        profile["search_queries"] = []
-        return []
     existing = _normalize_query_list([str(item).strip() for item in (profile.get("search_queries") or [])])
     if not existing:
         existing = _normalize_query_list(
@@ -513,8 +523,6 @@ def _ensure_search_queries(
         )
     if not existing:
         existing = _normalize_query_list(_fallback_search_queries_for_profile(profile, source_name))
-    if not existing:
-        existing = ["视频内容"]
     if limit and len(existing) > limit:
         existing = existing[:limit]
     profile["search_queries"] = existing
@@ -2315,6 +2323,17 @@ async def apply_content_profile_feedback(
         workflow_template = channel_profile
     resolved_feedback: dict[str, Any] = dict(user_feedback or {})
     merged = dict(draft_profile or {})
+    preserved_workflow_mode = str(merged.get("workflow_mode") or "").strip()
+    preserved_enhancement_modes = [
+        str(item).strip()
+        for item in (merged.get("enhancement_modes") or [])
+        if str(item).strip()
+    ]
+    preserved_keywords = [
+        str(item).strip()
+        for item in (merged.get("keywords") or [])
+        if str(item).strip()
+    ]
     merged["user_feedback"] = dict(resolved_feedback)
     transcript_excerpt = str(reviewed_subtitle_excerpt or merged.get("transcript_excerpt") or "")
     if not any(value for value in resolved_feedback.values()):
@@ -2494,7 +2513,26 @@ async def apply_content_profile_feedback(
     if resolved_specific_subject_type and not _is_generic_subject_type(resolved_specific_subject_type):
         result["subject_type"] = resolved_specific_subject_type
     _ensure_search_queries(result, source_name, transcript_excerpt=transcript_excerpt)
-    result["keywords"] = _build_review_keywords(result)
+    def _merge_keywords(*keyword_lists: list[str]) -> list[str]:
+        merged_keywords: list[str] = []
+        seen: set[str] = set()
+        for keyword_list in keyword_lists:
+            for item in keyword_list:
+                value = str(item or "").strip()
+                if not value:
+                    continue
+                key = "".join(_normalize_profile_value(value).upper().split())
+                if key in seen:
+                    continue
+                seen.add(key)
+                merged_keywords.append(value)
+        return merged_keywords
+
+    result["keywords"] = _merge_keywords(preserved_keywords, _build_review_keywords(result))
+    if preserved_workflow_mode and not str(result.get("workflow_mode") or "").strip():
+        result["workflow_mode"] = preserved_workflow_mode
+    if preserved_enhancement_modes and not list(result.get("enhancement_modes") or []):
+        result["enhancement_modes"] = list(preserved_enhancement_modes)
     if any(
         resolved_feedback.get(key)
         for key in (
@@ -2845,28 +2883,49 @@ def _build_review_feedback_verification_snapshot(
             "online_results": [],
             "database_results": [],
         }
+
+    def _normalize_fragment(value: Any) -> str:
+        return str(value or "").strip()
+
     return {
-        "search_queries": list(verification_bundle.search_queries or [])[:6],
+        "search_queries": [
+            query
+            for query in (
+                _normalize_fragment(item)
+                for item in list(verification_bundle.search_queries or [])[:6]
+            )
+            if query
+        ],
         "online_count": len(verification_bundle.online_results),
         "database_count": len(verification_bundle.database_results),
         "online_results": [
             {
-                "query": str((item or {}).get("query") or "").strip(),
-                "title": str((item or {}).get("title") or "").strip(),
-                "snippet": str((item or {}).get("snippet") or "").strip(),
-                "url": str((item or {}).get("url") or "").strip(),
+                key: value
+                for key, value in (
+                    ("query", _normalize_fragment((item or {}).get("query"))),
+                    ("title", _normalize_fragment((item or {}).get("title"))),
+                    ("snippet", _normalize_fragment((item or {}).get("snippet"))),
+                    ("url", _normalize_fragment((item or {}).get("url"))),
+                )
+                if value
             }
             for item in list(verification_bundle.online_results or [])[:4]
+            if any(_normalize_fragment((item or {}).get(key)) for key in ("query", "title", "snippet", "url"))
         ],
         "database_results": [
             {
-                "brand": str((item or {}).get("brand") or "").strip(),
-                "model": str((item or {}).get("model") or "").strip(),
-                "primary_subject": str((item or {}).get("primary_subject") or "").strip(),
-                "subject_type": str((item or {}).get("subject_type") or "").strip(),
-                "source_type": str((item or {}).get("source_type") or "").strip(),
+                key: value
+                for key, value in (
+                    ("brand", _normalize_fragment((item or {}).get("brand"))),
+                    ("model", _normalize_fragment((item or {}).get("model"))),
+                    ("primary_subject", _normalize_fragment((item or {}).get("primary_subject"))),
+                    ("subject_type", _normalize_fragment((item or {}).get("subject_type"))),
+                    ("source_type", _normalize_fragment((item or {}).get("source_type"))),
+                )
+                if value
             }
             for item in list(verification_bundle.database_results or [])[:3]
+            if any(_normalize_fragment((item or {}).get(key)) for key in ("brand", "model", "primary_subject", "subject_type", "source_type"))
         ],
     }
 

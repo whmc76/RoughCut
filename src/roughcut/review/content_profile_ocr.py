@@ -134,6 +134,41 @@ def _is_ocr_timestamp_like(text: str) -> bool:
     return False
 
 
+def _is_ocr_noise_candidate(item: dict[str, Any]) -> bool:
+    normalized = str(item.get("normalized_text") or "").strip()
+    display = str(item.get("display_text") or "").strip()
+    if not normalized and not display:
+        return False
+    noise_chunks = {"开箱", "评测", "实测", "介绍", "对比", "上手", "内容", "产品", "视频", "主题"}
+    if normalized in noise_chunks or display in noise_chunks:
+        return True
+    combined = normalized or display
+    if not re.search(r"[A-Za-z0-9]", combined) and any(chunk in combined for chunk in noise_chunks):
+        return True
+    return False
+
+
+def _score_ocr_candidate(item: dict[str, Any]) -> tuple[int, int, float, int]:
+    display = str(item.get("display_text") or "").strip()
+    normalized = str(item.get("normalized_text") or "").strip()
+    score = 0
+    if _is_ocr_noise_candidate(item):
+        score -= 8
+    if re.search(r"[A-Za-z]", display):
+        score += 2
+    if re.search(r"\d", display):
+        score += 2
+    if re.search(r"[\u4e00-\u9fff]", display):
+        score += 1
+    if re.search(r"[A-Za-z]", display) and re.search(r"\d", display):
+        score += 1
+    if re.search(r"[A-Za-z]", display) and re.search(r"[\u4e00-\u9fff]", display):
+        score += 2
+    if len(normalized) >= 8:
+        score += 1
+    return (score, int(item.get("support_count", 0)), float(item.get("confidence", 0.0)), len(display))
+
+
 def _select_stable_visible_text(
     candidates: list[dict[str, Any]],
     *,
@@ -144,17 +179,20 @@ def _select_stable_visible_text(
     preferred = candidates
     if frame_count > 1:
         stable = [item for item in candidates if len(set(item.get("frame_indexes") or [])) >= 2]
-        if stable:
-            preferred = stable
+        informative_stable = [item for item in stable if not _is_ocr_noise_candidate(item)]
+        if informative_stable:
+            preferred = informative_stable
+        elif stable:
+            preferred = candidates
     ordered = sorted(
         preferred,
-        key=lambda item: (
-            -int(item.get("support_count", 0)),
-            -float(item.get("confidence", 0.0)),
-            -len(str(item.get("display_text", ""))),
-        ),
+        key=lambda item: _score_ocr_candidate(item),
+        reverse=True,
     )
-    return [str(item.get("display_text") or "").strip() for item in ordered if str(item.get("display_text") or "").strip()]
+    visible_candidates = [item for item in ordered if not _is_ocr_noise_candidate(item)]
+    if not visible_candidates:
+        visible_candidates = ordered
+    return [str(item.get("display_text") or "").strip() for item in visible_candidates if str(item.get("display_text") or "").strip()]
 
 
 def _compact_visible_text(parts: Sequence[str]) -> str:
