@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { Suspense, lazy, useEffect, useRef } from "react";
-import { NavLink, Route, Routes, useLocation } from "react-router-dom";
+import { NavLink, Route, Routes } from "react-router-dom";
 
 import { api } from "./api";
 import { useFrontendBuildRefresh } from "./hooks/useFrontendBuildRefresh";
@@ -45,7 +45,6 @@ const ControlPage = lazy(async () => ({
 
 export function App() {
   const { locale, setLocale, t } = useI18n();
-  const location = useLocation();
   const syncedLocaleRef = useRef<string>("");
   const appVersionQuery = useQuery({
     queryKey: ["health-detail"],
@@ -73,9 +72,6 @@ export function App() {
     { to: "/style-lab", label: "风格实验" },
     { to: "/settings", label: t("app.nav.settings") },
   ];
-  const currentSection =
-    navigationItems.find((item) => item.to !== "/" && location.pathname.startsWith(item.to)) ??
-    navigationItems.find((item) => item.to === "/");
 
   return (
     <div className="app-shell">
@@ -84,7 +80,7 @@ export function App() {
           <div className="rail-brand-mark">RC</div>
           <div className="rail-brand-copy">
             <strong>RoughCut</strong>
-            <span>{currentSection?.label ?? t("app.nav.overview")}</span>
+            <span>local</span>
           </div>
         </div>
         <nav className="rail-nav" aria-label="Primary">
@@ -107,10 +103,6 @@ export function App() {
       </aside>
       <main className="app-stage">
         <header className="app-stage-header">
-          <div className="app-stage-heading">
-            <span className="page-eyebrow">RoughCut Console</span>
-            <strong>{currentSection?.label ?? t("app.nav.overview")}</strong>
-          </div>
           <div className="app-stage-controls">
             <label className="app-stage-locale">
               <span>{t("app.sidebar.language")}</span>
@@ -119,10 +111,6 @@ export function App() {
                 <option value="en-US">{t("app.language.en-US")}</option>
               </select>
             </label>
-            <div className="app-stage-build">
-              <span>{t("app.sidebar.version")}</span>
-              <code>{appVersion || t("app.sidebar.versionUnknown")}</code>
-            </div>
           </div>
         </header>
         <div className="main-content">

@@ -148,12 +148,12 @@ describe("OverviewPage", () => {
 
     render(<OverviewPage />);
 
-    expect(screen.getByText("overview.deck.title")).toBeInTheDocument();
+    expect(screen.getByText("当前运行正常")).toBeInTheDocument();
     expect(screen.getByTestId("overview-masthead")).toBeInTheDocument();
     expect(screen.getByTestId("overview-decision-surface")).toBeInTheDocument();
     expect(screen.getByTestId("overview-analysis-band")).toBeInTheDocument();
-    expect(screen.getAllByText("overview.focus.jobs.title")).toHaveLength(2);
     expect(screen.getAllByText("overview.focus.watch.title")).toHaveLength(2);
+    expect(screen.getByText("最近任务")).toBeInTheDocument();
     expect(screen.getByText("jobs.summary.topSteps")).toBeInTheDocument();
     expect(screen.getByText("jobs.summary.cachePanel")).toBeInTheDocument();
   });
@@ -181,7 +181,7 @@ describe("OverviewPage", () => {
 
     render(<OverviewPage />);
 
-    expect(screen.getByText("overview.deck.title")).toBeInTheDocument();
+    expect(screen.getByText("1 个任务待审核")).toBeInTheDocument();
     expect(screen.getByTestId("overview-masthead")).toBeInTheDocument();
     expect(screen.getByTestId("overview-activity-feed")).toBeInTheDocument();
     expect(screen.getByTestId("overview-action-rail")).toBeInTheDocument();

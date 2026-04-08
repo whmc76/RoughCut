@@ -108,10 +108,10 @@ describe("SettingsPage", () => {
     expect(container.querySelector(".settings-core-stack")).toBeInTheDocument();
     expect(container.querySelector(".settings-automation-stack")).toBeInTheDocument();
     expect(container.querySelector(".settings-link-grid")).toBeInTheDocument();
-    expect(screen.getByText("当前设置面")).toBeInTheDocument();
-    expect(screen.getByText("核心链路与 Provider")).toBeInTheDocument();
-    expect(screen.getByText("输出、术语与复跑")).toBeInTheDocument();
-    expect(screen.getByText("相关页面与系统控制")).toBeInTheDocument();
+    expect(screen.getByText("已生效的默认设置")).toBeInTheDocument();
+    expect(screen.getByText("模型与执行")).toBeInTheDocument();
+    expect(screen.getByText("质量与输出")).toBeInTheDocument();
+    expect(screen.getByText("辅助页面")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "查看包装页" })).toHaveAttribute("href", "/packaging");
     expect(screen.getByRole("link", { name: "查看记忆页" })).toHaveAttribute("href", "/memory");
     expect(screen.getByRole("link", { name: "查看词表页" })).toHaveAttribute("href", "/glossary");

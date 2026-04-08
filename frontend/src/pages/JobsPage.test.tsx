@@ -134,15 +134,14 @@ describe("JobsPage", () => {
     vi.clearAllMocks();
   });
 
-  it("keeps the queue, urgent rail, and creation bay inside one workbench", () => {
+  it("keeps the queue and create area in one full-width work surface", () => {
     mockUseJobWorkspace.mockReturnValue(buildWorkspace());
 
     const { container } = render(<JobsPage />);
 
-    expect(container.querySelector(".jobs-intro-plate")).toBeInTheDocument();
-    expect(container.querySelector(".jobs-workbench-shell")).toBeInTheDocument();
-    expect(container.querySelector(".jobs-live-rail")).toBeInTheDocument();
-    expect(container.querySelector(".jobs-creation-band")).toBeInTheDocument();
+    expect(container.querySelector(".jobs-command-deck")).toBeInTheDocument();
+    expect(container.querySelector(".jobs-queue-stage")).toBeInTheDocument();
+    expect(container.querySelector(".jobs-create-stage")).toBeInTheDocument();
     expect(screen.getByText("job-queue-table")).toBeInTheDocument();
     expect(screen.getByText("config-profile-switcher")).toBeInTheDocument();
     expect(screen.getByText("job-upload-panel")).toBeInTheDocument();
@@ -160,17 +159,18 @@ describe("JobsPage", () => {
     expect(screen.queryByText("跟进任务队列与审核详情")).not.toBeInTheDocument();
   });
 
-  it("renders the workbench with stronger top-level structure labels", () => {
+  it("renders the queue-first structure with a separate create section", () => {
     mockUseJobWorkspace.mockReturnValue(buildWorkspace());
 
     const { container } = render(<JobsPage />);
 
-    expect(screen.getAllByText("jobs.page.queueTitle")).toHaveLength(2);
-    expect(screen.getAllByText("jobs.page.activeWorkTitle").length).toBeGreaterThanOrEqual(2);
-    expect(screen.getAllByText("jobs.page.createTitle").length).toBeGreaterThanOrEqual(1);
-    expect(container.querySelector(".jobs-intro-plate")).toBeInTheDocument();
-    expect(container.querySelector(".jobs-live-rail")).toBeInTheDocument();
-    expect(container.querySelector(".jobs-creation-band")).toBeInTheDocument();
+    expect(screen.getByText("任务列表")).toBeInTheDocument();
+    expect(screen.getByText("需要处理")).toBeInTheDocument();
+    expect(screen.getByText("默认配置")).toBeInTheDocument();
+    expect(screen.getByText("新建任务")).toBeInTheDocument();
+    expect(container.querySelector(".jobs-command-deck")).toBeInTheDocument();
+    expect(container.querySelector(".jobs-active-band")).toBeInTheDocument();
+    expect(container.querySelector(".jobs-create-grid")).toBeInTheDocument();
   });
 
   it("does not render the analysis module on the jobs page", () => {
@@ -209,7 +209,7 @@ describe("JobsPage", () => {
 
     expect(screen.queryByText("usage-trend-panel")).not.toBeInTheDocument();
     expect(screen.queryByText("jobs.summary.topSteps")).not.toBeInTheDocument();
-    expect(screen.getAllByText("jobs.page.queueTitle")).toHaveLength(2);
+    expect(screen.getByText("任务列表")).toBeInTheDocument();
   });
 
   it("routes needs_review jobs into the dedicated review overlay instead of the detail modal", () => {

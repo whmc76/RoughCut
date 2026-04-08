@@ -94,9 +94,9 @@ describe("WatchRootsPage", () => {
 
     const { container } = render(<WatchRootsPage />);
 
-    expect(screen.getAllByText("watch.page.healthTitle")).toHaveLength(2);
-    expect(screen.getAllByText("watch.page.rootsTitle")).toHaveLength(1);
-    expect(screen.getByText("watch.form.createTitle")).toBeInTheDocument();
+    expect(screen.getAllByText("库存")).toHaveLength(2);
+    expect(screen.getByText("目录")).toBeInTheDocument();
+    expect(screen.getByText("新建目录")).toBeInTheDocument();
     expect(screen.getAllByText("watch.page.pickRoot")).toHaveLength(3);
     expect(screen.getByRole("button", { name: "watch.page.refresh" })).toBeInTheDocument();
     expect(screen.getByText("watch-root-list")).toBeInTheDocument();
@@ -123,6 +123,6 @@ describe("WatchRootsPage", () => {
     expect(screen.getByText("watch-root-list")).toBeInTheDocument();
     expect(screen.getByText("watch-root-form-panel")).toBeInTheDocument();
     expect(container.querySelector(".watch-health-lane")).toBeInTheDocument();
-    expect(screen.getByText("watch.form.editTitle")).toBeInTheDocument();
+    expect(screen.getByText("编辑目录")).toBeInTheDocument();
   });
 });

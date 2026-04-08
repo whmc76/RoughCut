@@ -285,7 +285,7 @@ describe("StyleLabPage", () => {
     expect(container.querySelector(".style-lab-hero")).toBeInTheDocument();
     expect(container.querySelector(".style-lab-surface")).toBeInTheDocument();
     expect(container.querySelector(".style-lab-presenter-stage")).toBeInTheDocument();
-    expect(screen.getByText("主流程和增强项")).toBeInTheDocument();
+    expect(screen.getByText("流程和增强")).toBeInTheDocument();
     expect(screen.getByText("字幕、标题、文案、封面")).toBeInTheDocument();
     expect(screen.queryByText("第一段")).not.toBeInTheDocument();
     expect(screen.queryByText("第二段")).not.toBeInTheDocument();

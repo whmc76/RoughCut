@@ -66,9 +66,8 @@ export function StyleLabPage() {
   return (
     <section className="page-stack style-lab-page">
       <PageHeader
-        eyebrow="风格实验"
-        title="风格实验"
-        description="先定字幕、标题、文案、封面，再收紧增强和角色默认值。"
+        title="风格"
+        description="调整字幕、标题、文案和默认增强。"
         actions={
           <div className="toolbar">
             <Link className="button ghost" to="/style-templates">
@@ -89,9 +88,8 @@ export function StyleLabPage() {
         <>
           <section className="style-lab-hero">
             <div className="style-lab-hero-copy">
-              <div className="page-eyebrow">当前方向</div>
-              <h3>把默认值收紧到一屏内</h3>
-              <p>主成片默认值、增强项和角色默认会在这里集中显示。</p>
+              <h3>默认风格</h3>
+              <p>直接影响出片的项都在这里。</p>
             </div>
             <div className="style-lab-hero-signals">
               <StatusChip label="字幕" value={selectedSubtitle?.label ?? packaging.subtitle_style} />
@@ -107,9 +105,8 @@ export function StyleLabPage() {
           <section className="style-lab-surface">
             <PageSection
               className="style-lab-panel style-lab-panel-primary"
-              eyebrow="主风格"
               title="字幕、标题、文案、封面"
-              description="每个分区只保留当前默认值和可选预设。"
+              description="只看当前默认项和预设。"
             >
               <div className="style-lab-preset-lanes">
                 <PresetRail
@@ -162,9 +159,8 @@ export function StyleLabPage() {
 
             <PageSection
               className="style-lab-panel style-lab-panel-dual"
-              eyebrow="创作模式"
-              title="主流程和增强项"
-              description="主流程只选一个，增强项只保留常用项。"
+              title="流程和增强"
+              description="主流程选一个，增强按需开启。"
             >
               <div className="style-lab-mode-grid">
                 <section className="style-lab-mode-column">
@@ -206,9 +202,8 @@ export function StyleLabPage() {
 
             <PageSection
               className="style-lab-panel style-lab-panel-gallery"
-              eyebrow="创作者默认"
-              title="角色和画中预览"
-              description="只保留能直接影响出片的角色默认值。"
+              title="角色默认"
+              description="只放角色默认。"
               actions={<Link className="button ghost" to="/creator-profiles">打开档案库</Link>}
             >
               <section className="style-lab-presenter-stage">

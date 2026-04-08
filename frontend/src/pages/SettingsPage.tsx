@@ -31,7 +31,7 @@ export function SettingsPage() {
     {
       label: "包装策略",
       value: `复核间隔 ${packagingReviewGap.toFixed(2)} · 最低分 ${packagingMinScore.toFixed(2)} · 术语 ${glossaryThreshold.toFixed(2)}`,
-      detail: "包装和术语阈值已经并入本页的质量章节",
+      detail: "去包装页调整素材。",
       action: (
         <Link className="button ghost" to="/packaging">
           打开包装页
@@ -41,7 +41,7 @@ export function SettingsPage() {
     {
       label: "记忆与词表",
       value: "记忆统计 · 术语维护",
-      detail: "反馈闭环留在记忆页，词条编辑留在词表页",
+      detail: "记忆和词表分开维护。",
       action: (
         <div className="toolbar">
           <Link className="button ghost" to="/memory">
@@ -56,7 +56,7 @@ export function SettingsPage() {
     {
       label: "维护入口",
       value: "Control",
-      detail: "服务状态和停机动作只保留为次级入口",
+      detail: "维护动作放在单独页面。",
       action: (
         <Link className="button ghost" to="/control">
           打开 Control
@@ -88,7 +88,6 @@ export function SettingsPage() {
   return (
     <section className="page-stack settings-page settings-architecture-page">
       <PageHeader
-        eyebrow={t("settings.page.eyebrow")}
         title={t("settings.page.title")}
         description={t("settings.page.description")}
         actions={
@@ -104,9 +103,8 @@ export function SettingsPage() {
 
       <section className="settings-architecture-deck">
         <div className="settings-architecture-lead">
-          <div className="page-eyebrow">概览</div>
-          <h3>当前设置面</h3>
-          <p>先看执行链路、包装策略、记忆词表和维护入口，再进入下面的配置章节。</p>
+          <h3>已生效的默认设置</h3>
+          <p>这里只放会影响出片和运行的默认项。</p>
         </div>
         <div className="settings-overview-grid">
           {summaryCards.map((card) => (
@@ -122,9 +120,8 @@ export function SettingsPage() {
 
       <PageSection
         className="settings-stage settings-stage-core settings-stage-core-grid"
-        eyebrow="Core"
-        title="核心链路与 Provider"
-        description="先决定转写、推理和搜索如何跑，再直接看到每个 Provider 的状态、凭据来源和检测结果。"
+        title="模型与执行"
+        description="设置转写、推理、搜索和 Provider。"
       >
         <div className="settings-core-stack">
           <SettingsOverviewPanel
@@ -147,9 +144,8 @@ export function SettingsPage() {
 
       <PageSection
         className="settings-stage settings-stage-quality settings-stage-quality-grid"
-        eyebrow="Quality"
-        title="输出、术语与复跑"
-        description="把审核阈值、包装复核、术语确认和低分复跑放在同一章，避免和 Provider 配置相互干扰。"
+        title="质量与输出"
+        description="调整审核阈值、包装复核和术语规则。"
       >
         <QualitySettingsPanel
           form={workspace.form}
@@ -160,9 +156,8 @@ export function SettingsPage() {
 
       <PageSection
         className="settings-stage settings-stage-automation settings-stage-automation-grid"
-        eyebrow="Automation"
-        title="扩展与自动化"
-        description="运行环境、数字人和 Telegram/Agent 放在后段，但保持语义明确，不再用一个大而空的接入模块承载。"
+        title="自动化与扩展"
+        description="调整运行环境、数字人和 Telegram。"
       >
         <div className="settings-automation-stack">
           <RuntimeSettingsPanel
@@ -197,15 +192,14 @@ export function SettingsPage() {
 
       <PageSection
         className="settings-stage settings-stage-automation settings-stage-links"
-        eyebrow="维护"
-        title="相关页面与系统控制"
-        description="包装、记忆和词表仍保留独立页面，Control 只作为次级维护入口。"
+        title="辅助页面"
+        description="素材、记忆、词表和维护入口。"
       >
         <div className="settings-link-grid">
           <article className="settings-command-card">
             <span className="settings-overview-label">包装素材</span>
             <strong>策略与素材池</strong>
-            <div className="muted">包装页面继续管理素材池，但它的默认策略由本页的质量章节控制。</div>
+            <div className="muted">素材池和包装细项放在独立页面。</div>
             <div className="top-gap">
               <Link className="button ghost" to="/packaging">
                 查看包装页
@@ -215,7 +209,7 @@ export function SettingsPage() {
           <article className="settings-command-card">
             <span className="settings-overview-label">行为记忆</span>
             <strong>纠错统计与偏好</strong>
-            <div className="muted">记忆页面继续查看长期偏差，设置页只保留它的入口和上下文。</div>
+            <div className="muted">长期偏差和偏好单独维护。</div>
             <div className="top-gap">
               <Link className="button ghost" to="/memory">
                 查看记忆页
@@ -225,7 +219,7 @@ export function SettingsPage() {
           <article className="settings-command-card">
             <span className="settings-overview-label">术语词表</span>
             <strong>术语维护与导入</strong>
-            <div className="muted">词表页继续编辑词条，本页只保留自动接受阈值和入口。</div>
+            <div className="muted">词条维护和导入单独处理。</div>
             <div className="top-gap">
               <Link className="button ghost" to="/glossary">
                 查看词表页

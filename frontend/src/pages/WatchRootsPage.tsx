@@ -23,7 +23,6 @@ export function WatchRootsPage() {
   return (
     <section className="page-stack watch-roots-page">
       <PageHeader
-        eyebrow={t("watch.page.eyebrow")}
         title={t("watch.page.title")}
         description={t("watch.page.description")}
         actions={<button className="button ghost" onClick={workspace.refreshRoots}>{t("watch.page.refresh")}</button>}
@@ -31,19 +30,19 @@ export function WatchRootsPage() {
 
       <section className="watch-command-strip">
         <article className="watch-command-chip">
-          <span className="watch-command-label">{t("watch.page.healthEyebrow")}</span>
+          <span className="watch-command-label">当前目录</span>
           <strong>{workspace.selectedRoot ? workspace.selectedRoot.path : t("watch.page.pickRoot")}</strong>
         </article>
         <article className="watch-command-chip">
-          <span className="watch-command-label">{t("watch.page.rootsEyebrow")}</span>
+          <span className="watch-command-label">目录数</span>
           <strong>{`${(workspace.roots.data ?? []).length} ${t("watch.list.count")}`}</strong>
         </article>
         <article className="watch-command-chip">
-          <span className="watch-command-label">{t("watch.page.healthTitle")}</span>
+          <span className="watch-command-label">库存</span>
           <strong>{workspace.selectedRoot ? t("watch.page.healthTitle") : t("watch.page.pickRoot")}</strong>
         </article>
         <article className="watch-command-chip">
-          <span className="watch-command-label">{t("watch.form.followActiveProfileOption")}</span>
+          <span className="watch-command-label">默认配置</span>
           <strong>{effectiveConfigProfile?.name ?? t("watch.form.followActiveProfileOption")}</strong>
         </article>
       </section>
@@ -52,9 +51,8 @@ export function WatchRootsPage() {
         <div className="watch-main-stage">
           <PageSection
             className="watch-health-lane"
-            eyebrow={t("watch.page.healthEyebrow")}
-            title={t("watch.page.healthTitle")}
-            description={workspace.selectedRoot ? t("watch.page.pickRoot") : t("watch.page.description")}
+            title="库存"
+            description={workspace.selectedRoot ? "查看待处理库存。" : t("watch.page.pickRoot")}
           >
             {workspace.selectedRoot ? (
               <WatchRootInventoryPanel
@@ -85,8 +83,7 @@ export function WatchRootsPage() {
         <aside className="watch-side-rail">
           <PageSection
             className="watch-roots-lane"
-            eyebrow={t("watch.page.rootsEyebrow")}
-            title={t("watch.page.rootsTitle")}
+            title="目录"
             description={`${(workspace.roots.data ?? []).length} ${t("watch.list.count")}`}
           >
             <WatchRootList
@@ -99,8 +96,8 @@ export function WatchRootsPage() {
 
           <PageSection
             className="watch-form-lane"
-            title={workspace.selectedRootId ? t("watch.form.editTitle") : t("watch.form.createTitle")}
-            description={t("watch.form.description")}
+            title={workspace.selectedRootId ? "编辑目录" : "新建目录"}
+            description="设置模板、配置和扫描方式。"
           >
             <WatchRootFormPanel
               form={workspace.form}

@@ -24,6 +24,13 @@ export function OverviewPage() {
   const blockedServices = serviceEntries.filter(([, online]) => !online);
   const reviewJobs = activeJobs.filter((job) => job.status === "needs_review");
   const disabledRoots = recentRoots.filter((root) => !root.enabled);
+  const mastheadTitle = blockedServices.length
+    ? "需要先处理运行问题"
+    : reviewJobs.length
+      ? `${reviewJobs.length} 个任务待审核`
+      : disabledRoots.length
+        ? `${disabledRoots.length} 个目录待处理`
+        : "当前运行正常";
   const deckLead = blockedServices.length
     ? t("overview.deck.runtimeIssue")
     : reviewJobs.length
@@ -45,15 +52,10 @@ export function OverviewPage() {
 
   return (
     <section className="page-stack overview-page">
-      <PageHeader
-        eyebrow={t("overview.page.eyebrow")}
-        title={t("overview.page.title")}
-        description={t("overview.page.description")}
-      />
+      <PageHeader title={t("overview.page.title")} description={t("overview.page.description")} />
       <section className="overview-masthead" data-testid="overview-masthead">
         <div className="overview-masthead-copy">
-          <div className="page-eyebrow">{t("overview.triage.eyebrow")}</div>
-          <h3>{t("overview.deck.title")}</h3>
+          <h3>{mastheadTitle}</h3>
           <p>{deckLead}</p>
         </div>
         <div className="overview-masthead-signals">
@@ -105,8 +107,8 @@ export function OverviewPage() {
         <aside className="overview-action-rail" data-testid="overview-action-rail">
           <section className="overview-action-block">
             <div className="overview-surface-head">
-              <span>{t("overview.deck.summary")}</span>
-              <strong>{t("overview.deck.actions")}</strong>
+              <span>快速入口</span>
+              <strong>{reviewJobs.length ? `${reviewJobs.length} 待处理` : "查看页面"}</strong>
             </div>
             <Link className="overview-action-link" to="/jobs">
               <span className="overview-action-index">01</span>
@@ -133,7 +135,7 @@ export function OverviewPage() {
 
           <section className="overview-runtime-panel">
             <div className="overview-surface-head">
-              <span>{t("overview.focus.runtime.title")}</span>
+              <span>运行状态</span>
               <strong>{serviceEntries.length}</strong>
             </div>
             {serviceEntries.length ? (
@@ -168,32 +170,6 @@ export function OverviewPage() {
       <section className="overview-analysis-band" data-testid="overview-analysis-band">
         <section className="overview-analysis-column">
           <PanelHeader
-            title={t("overview.focus.jobs.title")}
-            description={t("overview.focus.jobs.description")}
-            actions={<Link className="text-link" to="/jobs">{t("overview.triage.jobs.cta")}</Link>}
-          />
-          <div className="overview-analysis-list">
-            {activeJobs.length ? (
-              activeJobs.map((job) => (
-                <article key={job.id} className="overview-analysis-row">
-                  <div className="overview-focus-copy">
-                    <strong>{job.source_name}</strong>
-                    <p>{job.content_summary || job.content_subject || t("overview.recent.noSummary")}</p>
-                  </div>
-                  <div className="overview-focus-meta">
-                    <span className={`status-chip ${job.status}`}>{statusLabel(job.status)}</span>
-                    <span>{formatDate(job.updated_at)}</span>
-                  </div>
-                </article>
-              ))
-            ) : (
-              <EmptyState message={t("overview.focus.jobs.empty")} />
-            )}
-          </div>
-        </section>
-
-        <section className="overview-analysis-column">
-          <PanelHeader
             title={t("overview.focus.watch.title")}
             description={t("overview.focus.watch.description")}
             actions={<Link className="text-link" to="/watch-roots">{t("overview.triage.watchRoots.cta")}</Link>}
@@ -217,10 +193,36 @@ export function OverviewPage() {
             )}
           </div>
         </section>
+
+        <section className="overview-analysis-column">
+          <PanelHeader
+            title="最近任务"
+            description="只保留最新需要看的任务。"
+            actions={<Link className="text-link" to="/jobs">{t("overview.triage.jobs.cta")}</Link>}
+          />
+          <div className="overview-analysis-list">
+            {activeJobs.length ? (
+              activeJobs.map((job) => (
+                <article key={job.id} className="overview-analysis-row">
+                  <div className="overview-focus-copy">
+                    <strong>{job.source_name}</strong>
+                    <p>{job.content_summary || job.content_subject || t("overview.recent.noSummary")}</p>
+                  </div>
+                  <div className="overview-focus-meta">
+                    <span className={`status-chip ${job.status}`}>{statusLabel(job.status)}</span>
+                    <span>{formatDate(job.updated_at)}</span>
+                  </div>
+                </article>
+              ))
+            ) : (
+              <EmptyState message={t("overview.focus.jobs.empty")} />
+            )}
+          </div>
+        </section>
       </section>
 
       {workspace.usageSummary.data && (
-        <PageSection className="overview-telemetry-band" eyebrow={t("overview.signals.eyebrow")} title={t("overview.signals.title")}>
+        <PageSection className="overview-telemetry-band" title={t("overview.signals.title")}>
           <>
             <div className="stats-grid compact">
               <StatCard label={t("jobs.summary.totalTokens")} value={workspace.usageSummary.data.total_tokens.toLocaleString()} compact />

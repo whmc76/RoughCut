@@ -1,18 +1,16 @@
 :root {
   font-family: "IBM Plex Sans", "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
-  color: #f4efe7;
+  color: #f2f3f5;
   background:
-    radial-gradient(circle at 12% 8%, rgba(227, 181, 99, 0.16), transparent 28%),
-    radial-gradient(circle at 88% 0%, rgba(111, 153, 122, 0.12), transparent 24%),
-    radial-gradient(circle at 50% 100%, rgba(15, 23, 28, 0.68), transparent 42%),
-    linear-gradient(180deg, #050607 0%, #0a0d0d 42%, #050606 100%);
+    radial-gradient(circle at 84% 12%, rgba(87, 103, 128, 0.14), transparent 22%),
+    linear-gradient(180deg, #07080b 0%, #0d1014 48%, #0a0c10 100%);
   color-scheme: dark;
-  --panel: rgba(13, 16, 16, 0.88);
-  --panel-border: rgba(226, 188, 126, 0.16);
+  --panel: rgba(13, 16, 21, 0.9);
+  --panel-border: rgba(255, 255, 255, 0.08);
   --line: rgba(255, 255, 255, 0.08);
-  --text-muted: #a89d8c;
-  --accent: #e0ab61;
-  --accent-strong: #f3cd88;
+  --text-muted: #9aa1ad;
+  --accent: #b5c0cf;
+  --accent-strong: #eef4ff;
   --danger: #ff7b7b;
   --ok: #7ad7aa;
   --off: #6d7688;
@@ -55,8 +53,7 @@ select {
   padding: 18px 14px 16px;
   border-right: 1px solid rgba(255, 255, 255, 0.06);
   background:
-    linear-gradient(180deg, rgba(8, 10, 11, 0.98), rgba(9, 11, 11, 0.96)),
-    radial-gradient(circle at top, rgba(240, 199, 130, 0.08), transparent 48%);
+    linear-gradient(180deg, rgba(7, 8, 10, 0.98), rgba(10, 12, 16, 0.96));
   display: grid;
   grid-template-rows: auto auto 1fr auto;
   gap: 16px;
@@ -80,7 +77,7 @@ select {
   font-size: 11px;
   letter-spacing: 0.18em;
   text-transform: uppercase;
-  color: var(--accent);
+  color: rgba(255, 255, 255, 0.46);
   margin-bottom: 8px;
 }
 
@@ -95,11 +92,11 @@ select {
   display: grid;
   place-items: center;
   border-radius: 16px;
-  border: 1px solid rgba(240, 199, 130, 0.25);
+  border: 1px solid rgba(255, 255, 255, 0.1);
   background:
-    linear-gradient(160deg, rgba(239, 194, 124, 0.2), rgba(255, 255, 255, 0.03)),
+    linear-gradient(160deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0.03)),
     rgba(9, 10, 10, 0.95);
-  color: #fff5df;
+  color: #f7f9fc;
   font-weight: 800;
   letter-spacing: 0.16em;
   font-size: 13px;
@@ -148,10 +145,10 @@ select {
 
 .rail-link:hover,
 .rail-link.active {
-  color: #fff7ea;
+  color: #f8fbff;
   transform: translateX(2px);
-  border-color: rgba(231, 191, 125, 0.3);
-  background: linear-gradient(135deg, rgba(202, 146, 67, 0.18), rgba(255, 227, 178, 0.06));
+  border-color: rgba(255, 255, 255, 0.14);
+  background: linear-gradient(135deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0.02));
   box-shadow:
     inset 0 0 0 1px rgba(255, 255, 255, 0.04),
     0 12px 24px rgba(0, 0, 0, 0.18);
@@ -306,9 +303,9 @@ select {
 }
 
 .page-header h2 {
-  font-size: clamp(30px, 3vw, 42px);
-  line-height: 1.02;
-  letter-spacing: -0.04em;
+  font-size: clamp(28px, 3vw, 40px);
+  line-height: 1;
+  letter-spacing: -0.05em;
 }
 
 .page-header-actions,
@@ -526,41 +523,39 @@ label {
   border-radius: 12px;
   border: 1px solid var(--line);
   background: rgba(255, 255, 255, 0.04);
-  color: #fff7ea;
+  color: #f3f6fb;
 }
 
 select.input {
   color-scheme: light;
-  background:
-    linear-gradient(180deg, rgba(255, 248, 235, 0.08), rgba(255, 255, 255, 0.03)),
-    rgba(33, 28, 24, 0.96);
-  color: #fff7ea;
+  background: rgba(15, 18, 24, 0.96);
+  color: #f3f6fb;
 }
 
 select.input option {
-  background: #f8efe1;
-  color: #2b2118;
+  background: #11161d;
+  color: #f3f6fb;
 }
 
 select.input option:checked,
 select.input option:hover,
 select.input option:focus {
-  background: #efc993;
-  color: #241a12;
+  background: #1b2430;
+  color: #f7fbff;
 }
 
 .button {
   border: 1px solid var(--line);
-  background: rgba(255, 255, 255, 0.04);
-  color: #fff7ea;
+  background: rgba(255, 255, 255, 0.03);
+  color: #f3f6fb;
   padding: 10px 14px;
   border-radius: 12px;
   cursor: pointer;
 }
 
 .button.primary {
-  border-color: rgba(255, 181, 108, 0.28);
-  background: linear-gradient(135deg, rgba(240, 181, 108, 0.2), rgba(255, 141, 58, 0.22));
+  border-color: rgba(197, 211, 229, 0.28);
+  background: linear-gradient(135deg, rgba(197, 211, 229, 0.16), rgba(112, 131, 158, 0.2));
 }
 
 .button.button-sm {
@@ -589,36 +584,18 @@ select.input option:focus {
 
 .app-stage {
   display: grid;
-  gap: 18px;
+  gap: 20px;
   min-width: 0;
   padding: 24px 26px 30px;
 }
 
 .app-stage-header {
   display: flex;
-  justify-content: space-between;
+  justify-content: flex-end;
   gap: 16px;
-  align-items: end;
-  padding: 18px 20px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 28px;
-  background:
-    radial-gradient(circle at top left, rgba(235, 193, 120, 0.14), transparent 36%),
-    linear-gradient(135deg, rgba(14, 16, 17, 0.94), rgba(10, 12, 12, 0.86));
-  box-shadow:
-    0 22px 54px rgba(0, 0, 0, 0.26),
-    inset 0 1px 0 rgba(255, 255, 255, 0.03);
-}
-
-.app-stage-heading {
-  display: grid;
-  gap: 8px;
-}
-
-.app-stage-heading strong {
-  font-size: clamp(26px, 2.5vw, 36px);
-  line-height: 1;
-  letter-spacing: -0.04em;
+  align-items: center;
+  padding: 0 0 18px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
 }
 
 .app-stage-controls {
@@ -671,10 +648,7 @@ select.input option:focus {
   padding: 28px;
   border-radius: 30px;
   border: 1px solid rgba(255, 255, 255, 0.09);
-  background:
-    radial-gradient(circle at top left, rgba(237, 197, 123, 0.14), transparent 32%),
-    radial-gradient(circle at 86% 16%, rgba(120, 179, 149, 0.1), transparent 28%),
-    linear-gradient(180deg, rgba(15, 18, 18, 0.96), rgba(8, 10, 10, 0.9));
+  background: linear-gradient(180deg, rgba(12, 15, 19, 0.96), rgba(8, 10, 13, 0.92));
   box-shadow:
     0 28px 72px rgba(0, 0, 0, 0.3),
     inset 0 1px 0 rgba(255, 255, 255, 0.03);
@@ -686,7 +660,7 @@ select.input option:focus {
   inset: 18px auto 18px 18px;
   width: 3px;
   border-radius: 999px;
-  background: linear-gradient(180deg, rgba(240, 199, 126, 0.92), rgba(255, 255, 255, 0));
+  background: linear-gradient(180deg, rgba(200, 211, 225, 0.82), rgba(255, 255, 255, 0));
 }
 
 .overview-command-copy {
@@ -1143,9 +1117,9 @@ select.input option:focus {
 .style-lab-hero-copy h3,
 .settings-architecture-lead h3 {
   margin: 0;
-  font-size: clamp(30px, 3vw, 46px);
-  line-height: 0.98;
-  letter-spacing: -0.05em;
+  font-size: clamp(24px, 2.6vw, 32px);
+  line-height: 1.05;
+  letter-spacing: -0.04em;
 }
 
 .style-lab-hero-copy p,
@@ -1326,9 +1300,9 @@ select.input option:focus {
   align-items: center;
   padding: 5px 10px;
   border-radius: 999px;
-  border: 1px solid rgba(255, 181, 108, 0.18);
-  background: rgba(255, 181, 108, 0.1);
-  color: #ffe4bf;
+  border: 1px solid rgba(188, 199, 214, 0.18);
+  background: rgba(188, 199, 214, 0.08);
+  color: #dbe6f3;
   font-size: 12px;
   line-height: 1;
 }
@@ -1346,9 +1320,9 @@ select.input option:focus {
 }
 
 .filter-chip.selected {
-  border-color: rgba(255, 181, 108, 0.28);
-  background: rgba(255, 181, 108, 0.12);
-  color: #ffe4bf;
+  border-color: rgba(188, 199, 214, 0.24);
+  background: rgba(188, 199, 214, 0.12);
+  color: #edf4ff;
 }
 
 .mode-chip.planned {
@@ -2253,9 +2227,9 @@ select.input option:focus {
 
 .style-filter-chip.selected,
 .style-filter-chip:hover {
-  border-color: rgba(255, 181, 108, 0.4);
-  color: #ffe4bf;
-  background: rgba(255, 181, 108, 0.12);
+  border-color: rgba(188, 199, 214, 0.3);
+  color: #edf4ff;
+  background: rgba(188, 199, 214, 0.08);
 }
 
 .style-section-strip {
@@ -2288,8 +2262,8 @@ select.input option:focus {
 .preset-card:hover,
 .preset-card.selected {
   transform: translateY(-1px);
-  border-color: rgba(255, 181, 108, 0.34);
-  background: rgba(255, 181, 108, 0.06);
+  border-color: rgba(188, 199, 214, 0.24);
+  background: rgba(188, 199, 214, 0.05);
 }
 
 .preset-card-subtitle {
@@ -4226,15 +4200,163 @@ select.input option:focus {
 
 .overview-page .page-header h2,
 .jobs-page .page-header h2 {
-  font-size: clamp(52px, 7vw, 96px);
-  line-height: 0.9;
-  letter-spacing: -0.08em;
+  font-size: clamp(28px, 3vw, 40px);
+  line-height: 1;
+  letter-spacing: -0.05em;
 }
 
 .overview-page .page-header .muted,
 .jobs-page .page-header .muted {
-  max-width: 34rem;
+  max-width: 28rem;
   color: rgba(255, 255, 255, 0.58);
+}
+
+.jobs-command-deck {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.jobs-command-card,
+.jobs-queue-stage,
+.jobs-active-band,
+.jobs-create-stage {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: linear-gradient(180deg, rgba(11, 14, 18, 0.96), rgba(8, 10, 14, 0.92));
+  box-shadow: 0 24px 56px rgba(0, 0, 0, 0.2);
+}
+
+.jobs-command-card {
+  display: grid;
+  gap: 8px;
+  min-height: 112px;
+  padding: 18px;
+  border-radius: 18px;
+}
+
+.jobs-command-card span {
+  color: rgba(255, 255, 255, 0.46);
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.jobs-command-card strong {
+  font-size: 26px;
+  line-height: 1;
+  letter-spacing: -0.04em;
+}
+
+.jobs-command-card p {
+  margin: 0;
+  color: rgba(255, 255, 255, 0.58);
+  line-height: 1.45;
+}
+
+.jobs-queue-stage,
+.jobs-active-band,
+.jobs-create-stage {
+  display: grid;
+  gap: 16px;
+  padding: 22px;
+  border-radius: 24px;
+}
+
+.jobs-stage-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: start;
+  gap: 16px;
+}
+
+.jobs-stage-head h3 {
+  margin: 0;
+  font-size: 22px;
+  line-height: 1.05;
+  letter-spacing: -0.03em;
+}
+
+.jobs-stage-head p {
+  margin: 8px 0 0;
+  color: rgba(255, 255, 255, 0.58);
+  line-height: 1.5;
+}
+
+.jobs-stage-meta {
+  display: grid;
+  gap: 4px;
+  justify-items: end;
+  text-align: right;
+}
+
+.jobs-stage-meta span {
+  color: rgba(255, 255, 255, 0.46);
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.jobs-stage-meta strong {
+  font-size: 15px;
+  line-height: 1.35;
+}
+
+.jobs-active-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.jobs-active-card,
+.jobs-create-panel {
+  display: grid;
+  gap: 12px;
+  padding: 18px;
+  border-radius: 18px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.jobs-active-copy {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.jobs-active-copy strong {
+  font-size: 18px;
+  line-height: 1.15;
+}
+
+.jobs-active-copy p {
+  margin: 0;
+  color: rgba(255, 255, 255, 0.58);
+  line-height: 1.45;
+}
+
+.jobs-active-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+  color: rgba(255, 255, 255, 0.48);
+  font-size: 12px;
+}
+
+.jobs-create-grid {
+  display: grid;
+  grid-template-columns: minmax(280px, 0.8fr) minmax(0, 1.2fr);
+  gap: 18px;
+  align-items: start;
+}
+
+.jobs-create-panel .config-profile-switcher,
+.jobs-create-panel .panel.top-gap {
+  margin-top: 0;
+}
+
+.jobs-create-panel .panel {
+  background: rgba(255, 255, 255, 0.02);
 }
 
 .overview-masthead,
@@ -4247,8 +4369,7 @@ select.input option:focus {
   border-radius: 32px;
   border: 1px solid rgba(255, 255, 255, 0.08);
   background:
-    radial-gradient(circle at 12% 14%, rgba(217, 75, 99, 0.18), transparent 26%),
-    radial-gradient(circle at 82% 18%, rgba(107, 126, 255, 0.14), transparent 28%),
+    radial-gradient(circle at 82% 18%, rgba(86, 101, 127, 0.14), transparent 24%),
     linear-gradient(180deg, rgba(10, 12, 17, 0.98), rgba(9, 11, 15, 0.94));
   box-shadow: 0 30px 80px rgba(0, 0, 0, 0.3);
 }
@@ -4273,9 +4394,9 @@ select.input option:focus {
 .overview-masthead-copy h3,
 .jobs-intro-copy h3 {
   margin: 0;
-  font-size: clamp(40px, 5vw, 76px);
-  line-height: 0.92;
-  letter-spacing: -0.08em;
+  font-size: clamp(24px, 2.8vw, 34px);
+  line-height: 1.05;
+  letter-spacing: -0.04em;
 }
 
 .overview-masthead-copy p,
@@ -4315,9 +4436,9 @@ select.input option:focus {
 .overview-masthead-signal strong,
 .jobs-intro-metric strong {
   align-self: end;
-  font-size: 34px;
+  font-size: 22px;
   line-height: 1;
-  letter-spacing: -0.06em;
+  letter-spacing: -0.03em;
 }
 
 .overview-decision-surface,
@@ -4438,8 +4559,8 @@ select.input option:focus {
   display: grid;
   place-items: center;
   border-radius: 999px;
-  border: 1px solid rgba(217, 75, 99, 0.36);
-  color: var(--accent-strong);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  color: rgba(255, 255, 255, 0.72);
 }
 
 .overview-action-link p {
@@ -4537,9 +4658,7 @@ select.input option:focus {
 .settings-extension-panel,
 .settings-quality-panel {
   border-color: rgba(255, 255, 255, 0.08);
-  background:
-    radial-gradient(circle at 14% 12%, rgba(217, 75, 99, 0.12), transparent 24%),
-    linear-gradient(180deg, rgba(11, 13, 18, 0.96), rgba(8, 10, 14, 0.92));
+  background: linear-gradient(180deg, rgba(11, 13, 18, 0.96), rgba(8, 10, 14, 0.92));
   box-shadow: 0 24px 64px rgba(0, 0, 0, 0.24);
 }
 
@@ -4551,7 +4670,7 @@ select.input option:focus {
 .watch-form-lane::before,
 .style-lab-panel::before,
 .settings-architecture-deck::before {
-  background: linear-gradient(180deg, rgba(255, 141, 158, 0.92), rgba(255, 255, 255, 0));
+  background: linear-gradient(180deg, rgba(206, 214, 226, 0.9), rgba(255, 255, 255, 0));
 }
 
 .watch-command-chip strong,
@@ -4563,7 +4682,7 @@ select.input option:focus {
 .settings-stage-core::before,
 .settings-stage-quality::before,
 .settings-stage-automation::before {
-  background: linear-gradient(180deg, rgba(255, 141, 158, 0.92), rgba(255, 255, 255, 0));
+  background: linear-gradient(180deg, rgba(206, 214, 226, 0.9), rgba(255, 255, 255, 0));
 }
 
 .style-lab-hero-signals .status-pill,
@@ -4604,6 +4723,7 @@ select.input option:focus {
   }
 
   .overview-command-deck,
+  .jobs-command-deck,
   .overview-focus-grid,
   .overview-command-signals,
   .jobs-workbench-grid,
@@ -4613,6 +4733,8 @@ select.input option:focus {
   .overview-decision-surface,
   .overview-analysis-band,
   .jobs-workbench-shell,
+  .jobs-active-grid,
+  .jobs-create-grid,
   .watch-command-strip,
   .watch-workbench,
   .style-lab-hero,
@@ -4632,6 +4754,13 @@ select.input option:focus {
 }
 
 @media (max-width: 960px) {
+  .jobs-stage-head,
+  .jobs-active-meta {
+    display: grid;
+    justify-items: start;
+    text-align: left;
+  }
+
   .detail-modal-backdrop {
     left: 0 !important;
     padding: 12px;
