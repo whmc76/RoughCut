@@ -242,6 +242,20 @@ def test_build_reviewed_transcript_excerpt_applies_accepted_corrections():
     assert "锐特" not in excerpt
 
 
+def test_content_profile_keywords_module_exports_public_keyword_helpers():
+    from roughcut.review.content_profile_keywords import (
+        build_review_keywords,
+        collect_review_keyword_seed_terms,
+        extract_review_keyword_tokens,
+        normalize_query_list,
+    )
+
+    assert build_review_keywords.__module__ == "roughcut.review.content_profile_keywords"
+    assert collect_review_keyword_seed_terms.__module__ == "roughcut.review.content_profile_keywords"
+    assert extract_review_keyword_tokens.__module__ == "roughcut.review.content_profile_keywords"
+    assert normalize_query_list.__module__ == "roughcut.review.content_profile_keywords"
+
+
 def test_build_review_keywords_preserves_mixed_chinese_latin_product_tokens_and_downranks_noise():
     from roughcut.review.content_profile import _build_review_keywords
 
