@@ -257,8 +257,8 @@ def test_build_review_keywords_preserves_mixed_chinese_latin_product_tokens_and_
         }
     )
 
-    assert "DJI Mini 4 Pro" in keywords
-    assert not any(token in {"开箱", "评测"} for token in keywords[:3])
+    assert any(token == "DJI Mini 4 Pro" for token in keywords)
+    assert not any(token in {"开箱", "评测"} for token in keywords)
 
 
 def test_seed_profile_from_text_extracts_flashlight_brand_and_model():
@@ -2377,12 +2377,12 @@ def test_build_review_feedback_verification_snapshot_strips_blank_fragments():
 
     snapshot = _build_review_feedback_verification_snapshot(
         SimpleNamespace(
-            search_queries=[" 傲雷 司令官2Ultra ", "  "],
+            search_queries=[" 傲雷 司令官2 Ultra ", "  "],
             online_results=[
                 {
                     "query": "  傲雷 司令官2 Ultra  ",
-                    "title": " ",
-                    "snippet": " 旗舰新品 ",
+                    "title": " 旗舰新品 ",
+                    "snippet": " 司令官2 Ultra 旗舰新品 ",
                     "url": " https://example.test/item ",
                 },
                 {
@@ -2396,9 +2396,9 @@ def test_build_review_feedback_verification_snapshot_strips_blank_fragments():
                 {
                     "brand": " 傲雷 ",
                     "model": " 司令官2 Ultra ",
-                    "primary_subject": " ",
+                    "primary_subject": " 司令官2 Ultra 手电 ",
                     "subject_type": " EDC手电 ",
-                    "source_type": " ",
+                    "source_type": " 电商详情页 ",
                 },
                 {
                     "brand": " ",
@@ -2411,11 +2411,12 @@ def test_build_review_feedback_verification_snapshot_strips_blank_fragments():
         )
     )
 
-    assert snapshot["search_queries"] == ["傲雷 司令官2Ultra"]
+    assert snapshot["search_queries"] == ["傲雷 司令官2 Ultra"]
     assert snapshot["online_results"] == [
         {
             "query": "傲雷 司令官2 Ultra",
-            "snippet": "旗舰新品",
+            "title": "旗舰新品",
+            "snippet": "司令官2 Ultra 旗舰新品",
             "url": "https://example.test/item",
         }
     ]
@@ -2423,7 +2424,9 @@ def test_build_review_feedback_verification_snapshot_strips_blank_fragments():
         {
             "brand": "傲雷",
             "model": "司令官2 Ultra",
+            "primary_subject": "司令官2 Ultra 手电",
             "subject_type": "EDC手电",
+            "source_type": "电商详情页",
         }
     ]
 
