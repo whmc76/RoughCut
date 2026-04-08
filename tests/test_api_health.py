@@ -2612,6 +2612,107 @@ async def test_content_profile_endpoint_returns_memory_cloud(client: AsyncClient
 
 
 @pytest.mark.asyncio
+async def test_content_profile_endpoint_normalizes_content_understanding_block_for_draft_and_final(client: AsyncClient):
+    from roughcut.db.models import Artifact, Job, JobStep
+    from roughcut.db.session import get_session_factory
+
+    job_id = uuid.uuid4()
+    now = datetime.now(timezone.utc)
+
+    async with get_session_factory()() as session:
+        session.add(
+            Job(
+                id=job_id,
+                source_path="jobs/demo/understanding.mp4",
+                source_name="understanding.mp4",
+                status="needs_review",
+                language="zh-CN",
+                workflow_template="edc_tactical",
+                workflow_mode="standard_edit",
+            )
+        )
+        session.add(
+            JobStep(
+                job_id=job_id,
+                step_name="summary_review",
+                status="running",
+                started_at=now,
+                metadata_={"detail": "等待人工确认。"},
+            )
+        )
+        session.add(
+            Artifact(
+                job_id=job_id,
+                artifact_type="content_profile_draft",
+                data_json={
+                    "subject_type": "旧字段",
+                    "content_understanding": {
+                        "video_type": "开箱体验",
+                        "primary_subject": "EDC机能包",
+                        "search_queries": ["LEATHERMAN ARC", " leatherman arc ", "多功能工具钳"],
+                        "confidence": {"overall": 0.8},
+                        "needs_review": True,
+                    },
+                },
+            )
+        )
+        session.add(
+            Artifact(
+                job_id=job_id,
+                artifact_type="content_profile_final",
+                data_json={
+                    "subject_type": "最终字段",
+                    "video_theme": "最终主题",
+                    "summary": "最终摘要",
+                    "hook_line": "最终钩子",
+                    "engagement_question": "最终提问",
+                    "content_understanding": {
+                        "video_type": " tutorial ",
+                        "search_queries": ["  教程 ", "教程", "流程"],
+                        "confidence": {"overall": 0.95},
+                    },
+                },
+            )
+        )
+        await session.commit()
+
+    response = await client.get(f"/api/v1/jobs/{job_id}/content-profile")
+    assert response.status_code == 200
+    data = response.json()
+    draft_understanding = data["draft"]["content_understanding"]
+    assert draft_understanding["video_type"] == "unboxing"
+    assert draft_understanding["content_domain"] == ""
+    assert draft_understanding["primary_subject"] == "EDC机能包"
+    assert draft_understanding["subject_entities"] == []
+    assert draft_understanding["video_theme"] == ""
+    assert draft_understanding["summary"] == ""
+    assert draft_understanding["hook_line"] == ""
+    assert draft_understanding["engagement_question"] == ""
+    assert draft_understanding["search_queries"] == ["LEATHERMAN ARC", "多功能工具钳"]
+    assert draft_understanding["evidence_spans"] == []
+    assert draft_understanding["uncertainties"] == []
+    assert draft_understanding["confidence"] == {"overall": 0.8}
+    assert draft_understanding["needs_review"] is True
+    assert draft_understanding["review_reasons"] == []
+
+    final_understanding = data["final"]["content_understanding"]
+    assert final_understanding["video_type"] == "tutorial"
+    assert final_understanding["content_domain"] == ""
+    assert final_understanding["primary_subject"] == "最终字段"
+    assert final_understanding["subject_entities"] == []
+    assert final_understanding["video_theme"] == "最终主题"
+    assert final_understanding["summary"] == "最终摘要"
+    assert final_understanding["hook_line"] == "最终钩子"
+    assert final_understanding["engagement_question"] == "最终提问"
+    assert final_understanding["search_queries"] == ["教程", "流程"]
+    assert final_understanding["evidence_spans"] == []
+    assert final_understanding["uncertainties"] == []
+    assert final_understanding["confidence"] == {"overall": 0.95}
+    assert final_understanding["needs_review"] is False
+    assert final_understanding["review_reasons"] == []
+
+
+@pytest.mark.asyncio
 async def test_content_profile_endpoint_exposes_evidence_artifacts(client: AsyncClient):
     from roughcut.db.models import Artifact, Job, JobStep
     from roughcut.db.session import get_session_factory

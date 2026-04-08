@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { api } from "../../api";
+import { normalizeKeywordList } from "./contentProfile";
 import type { UploadForm } from "./constants";
 
 const EMPTY_UPLOAD: UploadForm = {
@@ -25,20 +26,6 @@ const JOB_STATUS_GROUP_PRIORITY: Record<string, number> = {
 function sameStringArray(left: string[], right: string[]) {
   if (left.length !== right.length) return false;
   return left.every((item, index) => item === right[index]);
-}
-
-function normalizeKeywordList(value: unknown): string[] {
-  if (!Array.isArray(value)) {
-    return [];
-  }
-  const normalized: string[] = [];
-  for (const item of value) {
-    const normalizedItem = String(item ?? "").trim();
-    if (normalizedItem && !normalized.includes(normalizedItem)) {
-      normalized.push(normalizedItem);
-    }
-  }
-  return normalized;
 }
 
 function compareJobs(a: { status: string; updated_at: string }, b: { status: string; updated_at: string }) {

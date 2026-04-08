@@ -2,6 +2,7 @@ import { act, waitFor } from "@testing-library/react";
 
 import { renderHookWithQueryClient } from "../../test/renderWithQueryClient";
 import type { ContentProfileReview, Job, JobActivity, JobTimeline, Report, TokenUsageReport } from "../../types";
+import { normalizeKeywordList } from "./contentProfile";
 import { useJobWorkspace } from "./useJobWorkspace";
 
 const mockApi = vi.hoisted(() => ({
@@ -216,7 +217,7 @@ const SAMPLE_PROFILE_NO_KEYWORDS: ContentProfileReview = {
   },
   final: {
     title: "最终标题",
-    search_queries: ["探店", "vlog"],
+    search_queries: ["VLOG", "vlog", " vlog ", "开箱"],
   },
 };
 
@@ -439,7 +440,7 @@ describe("useJobWorkspace", () => {
     });
 
     await waitFor(() => expect(result.current.contentProfile.data).toEqual(SAMPLE_PROFILE_NO_KEYWORDS));
-    expect(result.current.contentKeywords).toBe("探店, vlog");
+    expect(result.current.contentKeywords).toBe("VLOG, 开箱");
 
     act(() => {
       result.current.setContentDraft({
@@ -453,7 +454,7 @@ describe("useJobWorkspace", () => {
 
     expect(mockApi.confirmContentProfile).toHaveBeenCalledWith("job_1", {
       title: "人工调整标题",
-      keywords: ["探店", "vlog"],
+      keywords: ["VLOG", "开箱"],
       workflow_mode: "standard_edit",
       enhancement_modes: ["avatar_commentary"],
       copy_style: "attention_grabbing",
@@ -489,5 +490,11 @@ describe("useJobWorkspace", () => {
 
     expect(mockApi.getJobsUsageSummary).not.toHaveBeenCalled();
     expect(mockApi.getJobsUsageTrend).not.toHaveBeenCalled();
+  });
+});
+
+describe("contentProfile keyword normalization", () => {
+  it("deduplicates keyword arrays once and preserves order", () => {
+    expect(normalizeKeywordList(["开箱", "开箱", " 教程 ", "", "教程", "配置"])).toEqual(["开箱", "教程", "配置"]);
   });
 });
