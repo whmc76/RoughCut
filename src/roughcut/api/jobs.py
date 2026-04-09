@@ -921,6 +921,7 @@ async def confirm_content_profile(
         user_feedback=user_feedback,
         reviewed_subtitle_excerpt=reviewed_subtitle_excerpt,
         accepted_corrections=accepted_corrections,
+        skip_model_refinement=True,
     )
     final_profile["user_feedback"] = user_feedback
     manual_review_outcome = record_content_profile_manual_review(

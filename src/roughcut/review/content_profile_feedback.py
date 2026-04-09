@@ -474,6 +474,7 @@ async def apply_content_profile_feedback(
     user_feedback: dict[str, Any],
     reviewed_subtitle_excerpt: str | None = None,
     accepted_corrections: list[dict[str, Any]] | None = None,
+    skip_model_refinement: bool = False,
 ) -> dict[str, Any]:
     cp = _content_profile_module()
     if workflow_template is None and channel_profile is not None:
@@ -569,6 +570,47 @@ async def apply_content_profile_feedback(
             source_name=source_name,
             proposed_feedback=resolved_feedback,
         )
+
+    if skip_model_refinement:
+        specific_subject_type = str(merged.get("subject_type") or "").strip()
+        cp._ensure_subject_type_main(merged)
+        if specific_subject_type and not cp._is_generic_subject_type(specific_subject_type):
+            merged["subject_type"] = specific_subject_type
+        cp._ensure_search_queries(merged, source_name, transcript_excerpt=transcript_excerpt)
+        merged["keywords"] = cp._build_review_keywords(merged)
+        merged_keywords = [str(item).strip() for item in (draft_profile.get("keywords") or []) if str(item).strip()]
+        for keyword in merged_keywords:
+            if keyword not in merged["keywords"]:
+                merged["keywords"].append(keyword)
+        preset = select_workflow_template(
+            workflow_template=workflow_template,
+            content_kind=cp._content_kind_name(merged),
+            subject_domain=str(merged.get("subject_domain") or ""),
+            subject_model=str(merged.get("subject_model") or ""),
+            subject_type=str(merged.get("subject_type") or ""),
+            transcript_hint=transcript_excerpt,
+        )
+        if not str(merged.get("hook_line") or "").strip() or cp._is_generic_cover_line(str(merged.get("hook_line") or "")):
+            merged["hook_line"] = cp._build_cover_hook(
+                hook=str(merged.get("hook_line") or ""),
+                brand=cp._clean_line(merged.get("subject_brand") or merged.get("brand") or ""),
+                model=cp._clean_line(merged.get("subject_model") or merged.get("model") or ""),
+                subject_type=cp._clean_line(merged.get("subject_type") or ""),
+                theme=cp._clean_line(str(merged.get("video_theme") or "").strip()),
+                transcript_excerpt=transcript_excerpt,
+                copy_style=str(merged.get("copy_style") or "attention_grabbing").strip() or "attention_grabbing",
+                preset=preset,
+            )
+        cover_title = merged.get("cover_title")
+        if not isinstance(cover_title, dict) or not cp._cover_title_is_usable(cover_title):
+            merged["cover_title"] = cp.build_cover_title(merged, preset)
+        if not str(merged.get("summary") or "").strip():
+            merged["summary"] = cp._build_profile_summary(merged)
+        if cp._is_generic_engagement_question(str(merged.get("engagement_question") or "")):
+            merged["engagement_question"] = cp._build_fallback_engagement_question(merged, preset)
+        cp._ensure_review_fields_not_empty(merged, source_name=source_name, transcript_excerpt=transcript_excerpt)
+        merged["review_mode"] = "manual_confirmed"
+        return merged
 
     try:
         provider = cp.get_reasoning_provider()

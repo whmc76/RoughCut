@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import logging
 import os
@@ -16,6 +17,11 @@ from roughcut.config import get_settings
 
 logger = logging.getLogger(__name__)
 _WINDOWS_CMD_SOFT_LIMIT = 30000
+_DEFAULT_SMART_EFFECT_STYLE = "smart_effect_commercial"
+_LEGACY_SMART_EFFECT_STYLE_ALIASES = {
+    "smart_effect_rhythm": _DEFAULT_SMART_EFFECT_STYLE,
+    "smart_effect_ai_impact": "smart_effect_commercial_ai",
+}
 
 _EXPORT_RESOLUTION_PRESETS: dict[str, tuple[int, int]] = {
     "1080p": (1920, 1080),
@@ -48,6 +54,105 @@ def _resolve_ffmpeg_timeout(
         return minimum
     adaptive_timeout = int(source_duration_sec * multiplier + buffer_sec)
     return max(minimum, adaptive_timeout)
+
+
+def _audio_encode_args(*, sample_rate: int | None = None, channels: int | None = None) -> list[str]:
+    settings = get_settings()
+    args = ["-c:a", "aac", "-b:a", str(settings.render_audio_bitrate or "192k")]
+    if sample_rate is not None:
+        args.extend(["-ar", str(sample_rate)])
+    if channels is not None:
+        args.extend(["-ac", str(channels)])
+    return args
+
+
+def _video_encode_args(*, prefer_hardware: bool = True) -> list[str]:
+    settings = get_settings()
+    encoder = _resolve_video_encoder(prefer_hardware=prefer_hardware)
+    if encoder == "h264_nvenc":
+        return [
+            "-c:v",
+            "h264_nvenc",
+            "-preset",
+            str(settings.render_nvenc_preset or "p5"),
+            "-cq:v",
+            str(int(settings.render_nvenc_cq or 21)),
+            "-b:v",
+            "0",
+            "-pix_fmt",
+            "yuv420p",
+        ]
+    return [
+        "-c:v",
+        "libx264",
+        "-preset",
+        str(settings.render_cpu_preset or "veryfast"),
+        "-crf",
+        str(int(settings.render_crf or 19)),
+        "-pix_fmt",
+        "yuv420p",
+    ]
+
+
+def _resolve_video_encoder(*, prefer_hardware: bool) -> str:
+    requested = str(get_settings().render_video_encoder or "auto").strip().lower()
+    if requested not in {"auto", "libx264", "h264_nvenc"}:
+        logger.warning("Unknown render_video_encoder=%s; falling back to auto", requested)
+        requested = "auto"
+    if requested == "libx264":
+        return "libx264"
+    if requested == "h264_nvenc":
+        if _nvenc_available():
+            return "h264_nvenc"
+        logger.warning("render_video_encoder=h264_nvenc requested but NVENC is unavailable; falling back to libx264")
+        return "libx264"
+    if prefer_hardware and _nvenc_available():
+        return "h264_nvenc"
+    return "libx264"
+
+
+@functools.lru_cache(maxsize=1)
+def _nvenc_available() -> bool:
+    return _nvidia_device_available() and _ffmpeg_encoder_available("h264_nvenc")
+
+
+@functools.lru_cache(maxsize=1)
+def _nvidia_device_available() -> bool:
+    if shutil.which("nvidia-smi") is None:
+        return False
+    try:
+        result = subprocess.run(
+            ["nvidia-smi", "-L"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0 and bool(str(result.stdout or "").strip())
+
+
+@functools.lru_cache(maxsize=8)
+def _ffmpeg_encoder_available(encoder_name: str) -> bool:
+    if shutil.which("ffmpeg") is None:
+        return False
+    try:
+        result = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-encoders"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=15,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    stdout = str(result.stdout or "").lower()
+    return encoder_name.lower() in stdout
 
 
 async def render_video(
@@ -177,16 +282,8 @@ async def render_video(
         video_map,
         "-map",
         "[afinal]",
-        "-c:v",
-        "libx264",
-        "-preset",
-        "fast",
-        "-crf",
-        "18",
-        "-c:a",
-        "aac",
-        "-b:a",
-        "192k",
+        *_video_encode_args(),
+        *_audio_encode_args(),
         str(base_output_path),
     ]
     _write_debug_text(debug_dir, "render.ffmpeg.txt", _format_command(cmd))
@@ -353,7 +450,9 @@ def _build_sound_effect_filters(
             f"volume={volume},afade=t=out:st={fade_out_start}:d=0.04,"
             f"adelay={delay_ms}|{delay_ms}[{fx_label}]"
         )
-        parts.append(f"[{current_audio}][{fx_label}]amix=inputs=2:duration=first:dropout_transition=0[{mixed_label}]")
+        parts.append(
+            f"[{current_audio}][{fx_label}]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[{mixed_label}]"
+        )
         current_audio = mixed_label
     return parts, current_audio
 
@@ -443,29 +542,53 @@ def _build_smart_effect_video_filters(
     zoom_size = f"{expected_width}x{expected_height}"
     parts: list[str] = []
     current_video = video_label
+    max_full_transforms = max(0, int(tokens.get("max_full_transforms") or 0))
+    primary_transform_indexes: set[int] = set()
+    if max_full_transforms > 0:
+        ranked_indexes = [
+            index
+            for index, overlay in sorted(
+                enumerate(overlays),
+                key=lambda item: (
+                    0 if str(item[1].get("text") or "").strip() else 1,
+                    -max(
+                        0.0,
+                        float(item[1].get("end_time") or 0.0) - float(item[1].get("start_time") or 0.0),
+                    ),
+                    float(item[1].get("start_time") or 0.0),
+                ),
+            )
+        ]
+        primary_transform_indexes = set(ranked_indexes[:max_full_transforms])
 
     for index, overlay in enumerate(overlays):
         start_time = max(0.0, float(overlay.get("start_time") or 0.0))
         end_time = max(start_time + 0.24, float(overlay.get("end_time") or start_time + 1.0))
         attack_end = min(end_time, start_time + max(0.08, (end_time - start_time) * 0.38))
         enable_expr = f"between(t\\,{start_time}\\,{end_time})"
-        zoom_expr = (
-            f"if(lte(in_time\\,{start_time})\\,1\\,"
-            f"if(lte(in_time\\,{attack_end})\\,1+((in_time-{start_time})/{max(attack_end - start_time, 0.01)})*{tokens['zoom_peak']}\\,"
-            f"1+(({end_time}-in_time)/{max(end_time - attack_end, 0.01)})*{tokens['zoom_decay']}))"
-        )
         output_label = f"vsmart{index}"
-        parts.append(
-            f"[{current_video}]scale=iw*{tokens['pre_scale']}:ih*{tokens['pre_scale']},"
-            f"crop=w=iw/{tokens['pre_scale']}:h=ih/{tokens['pre_scale']}:"
-            f"x='(iw-iw/{tokens['pre_scale']})/2':y='(ih-ih/{tokens['pre_scale']})/2',"
-            f"zoompan=z='{zoom_expr}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':"
-            f"d=1:s={zoom_size}:fps=30000/1001,"
-            f"eq=contrast={tokens['contrast']}:saturation={tokens['saturation']}:brightness={tokens['brightness']},"
-            f"unsharp={tokens['unsharp']},"
-            f"drawbox=x=0:y=0:w=iw:h=ih:color={tokens['flash_color']}:t=fill:enable='{enable_expr}':replace=0"
-            f"[{output_label}]"
-        )
+        if index in primary_transform_indexes:
+            zoom_expr = (
+                f"if(lte(in_time\\,{start_time})\\,1\\,"
+                f"if(lte(in_time\\,{attack_end})\\,1+((in_time-{start_time})/{max(attack_end - start_time, 0.01)})*{tokens['zoom_peak']}\\,"
+                f"1+(({end_time}-in_time)/{max(end_time - attack_end, 0.01)})*{tokens['zoom_decay']}))"
+            )
+            parts.append(
+                f"[{current_video}]scale=iw*{tokens['pre_scale']}:ih*{tokens['pre_scale']},"
+                f"crop=w=iw/{tokens['pre_scale']}:h=ih/{tokens['pre_scale']}:"
+                f"x='(iw-iw/{tokens['pre_scale']})/2':y='(ih-ih/{tokens['pre_scale']})/2',"
+                f"zoompan=z='{zoom_expr}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':"
+                f"d=1:s={zoom_size}:fps=30000/1001,"
+                f"eq=contrast={tokens['contrast']}:saturation={tokens['saturation']}:brightness={tokens['brightness']},"
+                f"unsharp={tokens['unsharp']},"
+                f"drawbox=x=0:y=0:w=iw:h=ih:color={tokens['flash_color']}:t=fill:enable='{enable_expr}':replace=0"
+                f"[{output_label}]"
+            )
+        else:
+            parts.append(
+                f"[{current_video}]drawbox=x=0:y=0:w=iw:h=ih:color={tokens['flash_color']}:t=fill:"
+                f"enable='{enable_expr}':replace=0[{output_label}]"
+            )
         current_video = output_label
     return parts, current_video
 
@@ -473,7 +596,7 @@ def _build_smart_effect_video_filters(
 def _build_overlay_only_editing_accents(editing_accents: dict[str, Any] | None) -> dict[str, Any]:
     base = dict(editing_accents or {})
     return {
-        "style": str(base.get("style") or "smart_effect_rhythm"),
+        "style": _normalize_smart_effect_style(str(base.get("style") or "")),
         "emphasis_overlays": [dict(item) for item in base.get("emphasis_overlays") or []],
         "sound_effects": [dict(item) for item in base.get("sound_effects") or []],
     }
@@ -555,18 +678,16 @@ async def _apply_timed_overlays_to_video(
         video_map,
         "-map",
         audio_map,
-        "-c:v",
-        "libx264",
-        "-preset",
-        "fast",
-        "-crf",
-        "18",
-        "-c:a",
-        "aac",
-        "-b:a",
-        "192k",
         str(output_path),
     ]
+    if video_map == "0:v":
+        cmd[-1:-1] = ["-c:v", "copy"]
+    else:
+        cmd[-1:-1] = _video_encode_args()
+    if audio_map == "0:a":
+        cmd[-1:-1] = ["-c:a", "copy"]
+    else:
+        cmd[-1:-1] = _audio_encode_args()
     _write_debug_text(debug_dir, "render.overlays.ffmpeg.txt", _format_command(cmd))
     result = await _run_process(
         cmd,
@@ -585,7 +706,7 @@ async def _apply_timed_overlays_to_video(
 
 def _resolve_effect_overlay_tokens(style: str) -> dict[str, Any]:
     mapping: dict[str, dict[str, Any]] = {
-        "smart_effect_rhythm": {
+        _DEFAULT_SMART_EFFECT_STYLE: {
             "fontsize": 72,
             "fontcolor": "white",
             "boxcolor": "black@0.45",
@@ -621,6 +742,15 @@ def _resolve_effect_overlay_tokens(style: str) -> dict[str, Any]:
             "bordercolor": "0xe2b471@0.34",
             "y_ratio": 0.2,
         },
+        "smart_effect_atmosphere": {
+            "fontsize": 74,
+            "fontcolor": "0xfff6ea",
+            "boxcolor": "0x1a1310@0.46",
+            "boxborderw": 18,
+            "borderw": 2,
+            "bordercolor": "0xf0c38a@0.34",
+            "y_ratio": 0.19,
+        },
         "smart_effect_minimal": {
             "fontsize": 62,
             "fontcolor": "white",
@@ -630,8 +760,63 @@ def _resolve_effect_overlay_tokens(style: str) -> dict[str, Any]:
             "bordercolor": "white@0.12",
             "y_ratio": 0.2,
         },
+        "smart_effect_commercial_ai": {
+            "fontsize": 92,
+            "fontcolor": "0xf8fbff",
+            "boxcolor": "0x111317@0.62",
+            "boxborderw": 28,
+            "borderw": 3,
+            "bordercolor": "0xff6a3d@0.58",
+            "y_ratio": 0.145,
+        },
+        "smart_effect_punch_ai": {
+            "fontsize": 94,
+            "fontcolor": "0xf7fbff",
+            "boxcolor": "0x0b1220@0.68",
+            "boxborderw": 28,
+            "borderw": 3,
+            "bordercolor": "0xff6a3d@0.62",
+            "y_ratio": 0.145,
+        },
+        "smart_effect_glitch_ai": {
+            "fontsize": 90,
+            "fontcolor": "0xf5f7ff",
+            "boxcolor": "0x11162f@0.72",
+            "boxborderw": 26,
+            "borderw": 3,
+            "bordercolor": "0x7b8dff@0.6",
+            "y_ratio": 0.15,
+        },
+        "smart_effect_cinematic_ai": {
+            "fontsize": 82,
+            "fontcolor": "0xfff4e8",
+            "boxcolor": "0x140e09@0.52",
+            "boxborderw": 22,
+            "borderw": 2,
+            "bordercolor": "0xe2b471@0.42",
+            "y_ratio": 0.18,
+        },
+        "smart_effect_atmosphere_ai": {
+            "fontsize": 86,
+            "fontcolor": "0xfff8ef",
+            "boxcolor": "0x18120e@0.56",
+            "boxborderw": 24,
+            "borderw": 2,
+            "bordercolor": "0xf0c38a@0.48",
+            "y_ratio": 0.175,
+        },
+        "smart_effect_minimal_ai": {
+            "fontsize": 72,
+            "fontcolor": "white",
+            "boxcolor": "black@0.36",
+            "boxborderw": 16,
+            "borderw": 1,
+            "bordercolor": "white@0.18",
+            "y_ratio": 0.19,
+        },
     }
-    return mapping.get(style, mapping["smart_effect_rhythm"])
+    normalized = _normalize_smart_effect_style(style)
+    return mapping.get(normalized, mapping[_DEFAULT_SMART_EFFECT_STYLE])
 
 
 def _resolve_smart_effect_video_tokens(style: str) -> dict[str, Any]:
@@ -644,9 +829,10 @@ def _resolve_smart_effect_video_tokens(style: str) -> dict[str, Any]:
         "brightness": 0.015,
         "unsharp": "5:5:0.8:3:3:0.0",
         "flash_color": "white@0.08",
+        "max_full_transforms": 2,
     }
     mapping: dict[str, dict[str, Any]] = {
-        "smart_effect_rhythm": {
+        _DEFAULT_SMART_EFFECT_STYLE: {
             **base,
             "pre_scale": 1.14,
             "zoom_peak": 0.05,
@@ -688,6 +874,17 @@ def _resolve_smart_effect_video_tokens(style: str) -> dict[str, Any]:
             "unsharp": "5:5:0.45:3:3:0.0",
             "flash_color": "0xf2c07a@0.035",
         },
+        "smart_effect_atmosphere": {
+            **base,
+            "pre_scale": 1.11,
+            "zoom_peak": 0.045,
+            "zoom_decay": 0.022,
+            "contrast": 1.025,
+            "saturation": 1.035,
+            "brightness": 0.006,
+            "unsharp": "5:5:0.38:3:3:0.0",
+            "flash_color": "0xffe0b2@0.05",
+        },
         "smart_effect_minimal": {
             **base,
             "pre_scale": 1.08,
@@ -699,8 +896,88 @@ def _resolve_smart_effect_video_tokens(style: str) -> dict[str, Any]:
             "unsharp": "5:5:0.25:3:3:0.0",
             "flash_color": "white@0.02",
         },
+        "smart_effect_commercial_ai": {
+            **base,
+            "pre_scale": 1.17,
+            "zoom_peak": 0.095,
+            "zoom_decay": 0.05,
+            "contrast": 1.04,
+            "saturation": 1.075,
+            "brightness": 0.012,
+            "unsharp": "5:5:0.48:3:3:0.0",
+            "flash_color": "0xfff2cc@0.14",
+            "max_full_transforms": 2,
+        },
+        "smart_effect_punch_ai": {
+            **base,
+            "pre_scale": 1.18,
+            "zoom_peak": 0.11,
+            "zoom_decay": 0.06,
+            "contrast": 1.045,
+            "saturation": 1.08,
+            "brightness": 0.012,
+            "unsharp": "5:5:0.5:3:3:0.0",
+            "flash_color": "0xfff2cc@0.16",
+            "max_full_transforms": 2,
+        },
+        "smart_effect_glitch_ai": {
+            **base,
+            "pre_scale": 1.17,
+            "zoom_peak": 0.1,
+            "zoom_decay": 0.055,
+            "contrast": 1.05,
+            "saturation": 1.12,
+            "brightness": 0.01,
+            "unsharp": "5:5:0.52:3:3:0.0",
+            "flash_color": "0x9f8cff@0.16",
+            "max_full_transforms": 2,
+        },
+        "smart_effect_cinematic_ai": {
+            **base,
+            "pre_scale": 1.12,
+            "zoom_peak": 0.06,
+            "zoom_decay": 0.03,
+            "contrast": 1.028,
+            "saturation": 1.03,
+            "brightness": 0.006,
+            "unsharp": "5:5:0.4:3:3:0.0",
+            "flash_color": "0xf2c07a@0.06",
+            "max_full_transforms": 2,
+        },
+        "smart_effect_atmosphere_ai": {
+            **base,
+            "pre_scale": 1.13,
+            "zoom_peak": 0.065,
+            "zoom_decay": 0.032,
+            "contrast": 1.03,
+            "saturation": 1.04,
+            "brightness": 0.008,
+            "unsharp": "5:5:0.42:3:3:0.0",
+            "flash_color": "0xffdfb2@0.08",
+            "max_full_transforms": 2,
+        },
+        "smart_effect_minimal_ai": {
+            **base,
+            "pre_scale": 1.09,
+            "zoom_peak": 0.028,
+            "zoom_decay": 0.016,
+            "contrast": 1.015,
+            "saturation": 1.02,
+            "brightness": 0.002,
+            "unsharp": "5:5:0.28:3:3:0.0",
+            "flash_color": "white@0.04",
+            "max_full_transforms": 1,
+        },
     }
-    return mapping.get(style, mapping["smart_effect_rhythm"])
+    normalized = _normalize_smart_effect_style(style)
+    return mapping.get(normalized, mapping[_DEFAULT_SMART_EFFECT_STYLE])
+
+
+def _normalize_smart_effect_style(style: str) -> str:
+    normalized = str(style or "").strip().lower()
+    if not normalized:
+        return _DEFAULT_SMART_EFFECT_STYLE
+    return _LEGACY_SMART_EFFECT_STYLE_ALIASES.get(normalized, normalized)
 
 
 def _should_apply_smart_effect_video_transforms(avatar_plan: dict[str, Any]) -> bool:
@@ -885,16 +1162,8 @@ async def _apply_insert_clip(
         "[vout]",
         "-map",
         "[aout]",
-        "-c:v",
-        "libx264",
-        "-preset",
-        "fast",
-        "-crf",
-        "18",
-        "-c:a",
-        "aac",
-        "-b:a",
-        "192k",
+        *_video_encode_args(),
+        *_audio_encode_args(),
         str(output_path),
     ]
     _write_debug_text(debug_dir, "packaging.insert.ffmpeg.txt", _format_command(cmd))
@@ -948,6 +1217,13 @@ async def _apply_intro_outro(
     if len(prepared_paths) == 1:
         return source_path
 
+    if await _concat_prepared_bookends(
+        prepared_paths,
+        output_path=output_path,
+        debug_dir=debug_dir,
+    ):
+        return output_path
+
     cmd = ["ffmpeg", "-y"]
     for path in prepared_paths:
         cmd.extend(["-i", str(path)])
@@ -961,16 +1237,8 @@ async def _apply_intro_outro(
             "[vout]",
             "-map",
             "[aout]",
-            "-c:v",
-            "libx264",
-            "-preset",
-            "fast",
-            "-crf",
-            "18",
-            "-c:a",
-            "aac",
-            "-b:a",
-            "192k",
+            *_video_encode_args(),
+            *_audio_encode_args(),
             str(output_path),
         ]
     )
@@ -1072,11 +1340,11 @@ async def _apply_music_and_watermark(
     if video_map == "0:v:0":
         cmd.extend(["-c:v", "copy"])
     else:
-        cmd.extend(["-c:v", "libx264", "-preset", "fast", "-crf", "18"])
+        cmd.extend(_video_encode_args())
     if audio_map == "0:a:0":
         cmd.extend(["-c:a", "copy"])
     else:
-        cmd.extend(["-c:a", "aac", "-b:a", "192k"])
+        cmd.extend(_audio_encode_args())
     if source_duration > 0:
         cmd.extend(["-t", f"{source_duration:.6f}"])
     cmd.append(str(output_path))
@@ -1126,10 +1394,7 @@ async def _prepare_multi_track_music_loop(
             f"{concat_inputs}concat=n={len(unique_paths)}:v=0:a=1[aout]",
             "-map",
             "[aout]",
-            "-c:a",
-            "aac",
-            "-b:a",
-            "192k",
+            *_audio_encode_args(),
             str(output_path),
         ]
     )
@@ -1181,18 +1446,8 @@ async def _prepare_packaging_clip(
         [
             "-vf",
             scale_filter,
-            "-c:v",
-            "libx264",
-            "-preset",
-            "fast",
-            "-crf",
-            "18",
-            "-c:a",
-            "aac",
-            "-ar",
-            "48000",
-            "-ac",
-            "2",
+            *_video_encode_args(),
+            *_audio_encode_args(sample_rate=48000, channels=2),
         ]
     )
     if not has_audio:
@@ -1203,6 +1458,54 @@ async def _prepare_packaging_clip(
     if result.returncode != 0:
         raise RuntimeError(f"ffmpeg packaging clip prepare failed: {result.stderr[-2000:]}")
     return output_path
+
+
+async def _concat_prepared_bookends(
+    prepared_paths: list[Path],
+    *,
+    output_path: Path,
+    debug_dir: Path | None,
+) -> bool:
+    if len(prepared_paths) <= 1:
+        return False
+
+    concat_list = output_path.with_name(f"{output_path.stem}.concat.txt")
+    concat_lines = [
+        "file '{}'".format(path.resolve().as_posix().replace("'", r"'\''"))
+        for path in prepared_paths
+    ]
+    concat_list.write_text("\n".join(concat_lines), encoding="utf-8")
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-f",
+        "concat",
+        "-safe",
+        "0",
+        "-i",
+        str(concat_list),
+        "-c",
+        "copy",
+        str(output_path),
+    ]
+    _write_debug_text(debug_dir, "packaging.bookends.concat.ffmpeg.txt", _format_command(cmd))
+    try:
+        result = await _run_process(
+            cmd,
+            timeout=_resolve_ffmpeg_timeout(
+                source_duration_sec=max((_probe_duration(path) for path in prepared_paths), default=0.0),
+                multiplier=0.35,
+                buffer_sec=90,
+                minimum_timeout=120,
+            ),
+        )
+    finally:
+        concat_list.unlink(missing_ok=True)
+    _write_process_debug(debug_dir, "packaging.bookends.concat", result)
+    if result.returncode != 0 or not output_path.exists():
+        logger.info("Falling back to re-encoded intro/outro packaging after concat copy failed")
+        return False
+    return True
 
 
 def _watermark_overlay_position(position: str) -> tuple[str, str]:
@@ -1267,12 +1570,7 @@ async def _normalize_rendered_output(
             "0:a?",
             "-vf",
             bake_filter,
-            "-c:v",
-            "libx264",
-            "-preset",
-            "fast",
-            "-crf",
-            "18",
+            *_video_encode_args(),
             "-c:a",
             "copy",
             str(baked),
@@ -1365,6 +1663,13 @@ def _probe_duration(path: Path) -> float:
 
 
 def _ffprobe_json(path: Path) -> dict[str, Any]:
+    resolved = path.resolve()
+    stat = resolved.stat()
+    return _ffprobe_json_cached(str(resolved), int(stat.st_mtime_ns), int(stat.st_size))
+
+
+@functools.lru_cache(maxsize=512)
+def _ffprobe_json_cached(path_str: str, _mtime_ns: int, _size: int) -> dict[str, Any]:
     settings = get_settings()
     result = subprocess.run(
         [
@@ -1375,7 +1680,7 @@ def _ffprobe_json(path: Path) -> dict[str, Any]:
             "json",
             "-show_streams",
             "-show_format",
-            str(path),
+            path_str,
         ],
         capture_output=True,
         text=True,
@@ -1384,7 +1689,7 @@ def _ffprobe_json(path: Path) -> dict[str, Any]:
         timeout=min(settings.ffmpeg_timeout_sec, 60),
     )
     if result.returncode != 0:
-        raise RuntimeError(f"ffprobe failed for {path}: {result.stderr[-500:]}")
+        raise RuntimeError(f"ffprobe failed for {path_str}: {result.stderr[-500:]}")
     return json.loads(result.stdout or "{}")
 
 

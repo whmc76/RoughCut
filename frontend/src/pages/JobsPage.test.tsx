@@ -162,6 +162,18 @@ function buildWorkspace(overrides: Record<string, unknown> = {}) {
   return {
     keyword: "",
     setKeyword: vi.fn(),
+    queueFilter: "all",
+    setQueueFilter: vi.fn(),
+    queueStats: {
+      total: 0,
+      pending: 0,
+      running: 0,
+      done: 0,
+      attention: 0,
+      needsReview: 0,
+      failed: 0,
+      cancelled: 0,
+    },
     refreshAll: vi.fn(),
     usageSummary: { data: undefined },
     usageTrend: { data: [] },
@@ -218,10 +230,12 @@ describe("JobsPage", () => {
     const createButton = screen.getByRole("button", { name: "创建任务" });
     const refreshButton = screen.getByRole("button", { name: "jobs.page.refresh" });
 
-    expect(container.querySelector(".jobs-command-deck")).toBeInTheDocument();
+    expect(container.querySelector(".jobs-dashboard-row")).toBeInTheDocument();
     expect(container.querySelector(".jobs-queue-stage")).toBeInTheDocument();
     expect(container.querySelector(".jobs-header-toolbar")).toBeInTheDocument();
     expect(container.querySelector(".jobs-header-search-input")).toBeInTheDocument();
+    expect(screen.getByText("任务队列仪表盘")).toBeInTheDocument();
+    expect(screen.getByText("待处理事项")).toBeInTheDocument();
     expect(refreshButton).toHaveClass("jobs-header-subtle-button");
     expect(refreshButton).not.toHaveClass("ghost");
     expect(createButton).toHaveClass("primary", "jobs-header-create-button");
@@ -251,9 +265,8 @@ describe("JobsPage", () => {
     fireEvent.click(screen.getByRole("button", { name: "创建任务" }));
 
     expect(screen.getByText("任务列表")).toBeInTheDocument();
-    expect(screen.getByText("需要处理")).toBeInTheDocument();
-    expect(container.querySelector(".jobs-command-deck")).toBeInTheDocument();
-    expect(container.querySelector(".jobs-active-band")).toBeInTheDocument();
+    expect(screen.getByText("待处理事项")).toBeInTheDocument();
+    expect(container.querySelector(".jobs-dashboard-row")).toBeInTheDocument();
     expect(screen.getByRole("dialog", { name: "创建任务" })).toBeInTheDocument();
     expect(screen.getByText("剪辑方案 + 创建任务")).toBeInTheDocument();
     expect(screen.getByText("config-profile-switcher")).toBeInTheDocument();
@@ -326,6 +339,16 @@ describe("JobsPage", () => {
 
     mockUseJobWorkspace.mockReturnValue(
       buildWorkspace({
+        queueStats: {
+          total: 1,
+          pending: 0,
+          running: 0,
+          done: 0,
+          attention: 1,
+          needsReview: 1,
+          failed: 0,
+          cancelled: 0,
+        },
         filteredJobs: [
           {
             id: "job-review-1",
@@ -392,6 +415,16 @@ describe("JobsPage", () => {
 
     mockUseJobWorkspace.mockReturnValue(
       buildWorkspace({
+        queueStats: {
+          total: 1,
+          pending: 0,
+          running: 0,
+          done: 0,
+          attention: 1,
+          needsReview: 1,
+          failed: 0,
+          cancelled: 0,
+        },
         filteredJobs: [
           {
             id: "job-review-3",
@@ -469,6 +502,16 @@ describe("JobsPage", () => {
 
     mockUseJobWorkspace.mockReturnValue(
       buildWorkspace({
+        queueStats: {
+          total: 1,
+          pending: 0,
+          running: 0,
+          done: 0,
+          attention: 1,
+          needsReview: 1,
+          failed: 0,
+          cancelled: 0,
+        },
         filteredJobs: [
           {
             id: "job-review-4",
@@ -616,6 +659,16 @@ describe("JobsPage", () => {
 
     mockUseJobWorkspace.mockReturnValue(
       buildWorkspace({
+        queueStats: {
+          total: 1,
+          pending: 0,
+          running: 0,
+          done: 1,
+          attention: 0,
+          needsReview: 0,
+          failed: 0,
+          cancelled: 0,
+        },
         filteredJobs: [
           {
             id: "job-restart-1",
@@ -649,6 +702,16 @@ describe("JobsPage", () => {
 
     mockUseJobWorkspace.mockReturnValue(
       buildWorkspace({
+        queueStats: {
+          total: 1,
+          pending: 0,
+          running: 0,
+          done: 1,
+          attention: 0,
+          needsReview: 0,
+          failed: 0,
+          cancelled: 0,
+        },
         filteredJobs: [
           {
             id: "job-delete-1",
@@ -689,5 +752,30 @@ describe("JobsPage", () => {
 
     expect(confirmSpy).toHaveBeenCalledWith(expect.stringContaining("确认删除“delete-me.mp4”？"));
     expect(deleteMutate).toHaveBeenCalledWith("job-delete-1");
+  });
+
+  it("routes the attention entry card into the queue filter", () => {
+    const setQueueFilter = vi.fn();
+
+    mockUseJobWorkspace.mockReturnValue(
+      buildWorkspace({
+        setQueueFilter,
+        queueStats: {
+          total: 3,
+          pending: 0,
+          running: 1,
+          done: 1,
+          attention: 1,
+          needsReview: 1,
+          failed: 0,
+          cancelled: 0,
+        },
+      }),
+    );
+
+    render(<JobsPage />);
+    fireEvent.click(screen.getByText("待处理事项"));
+
+    expect(setQueueFilter).toHaveBeenCalledWith("attention");
   });
 });

@@ -15,7 +15,7 @@ from typing import Any
 import httpx
 
 from roughcut.avatar.materials import resolve_avatar_material_path
-from roughcut.config import DEFAULT_HEYGEM_SHARED_ROOT, DEFAULT_HEYGEM_VOICE_ROOT, get_settings
+from roughcut.config import DEFAULT_HEYGEM_SHARED_ROOT, DEFAULT_HEYGEM_VOICE_ROOT, get_settings, resolve_heygem_shared_root
 from roughcut.docker_gpu_guard import hold_managed_gpu_services_async
 from roughcut.media.probe import probe
 from roughcut.providers.voice.indextts2 import build_indextts2_speech_payload
@@ -32,16 +32,7 @@ _HEYGEM_PREVIEW_SERVICE_CACHE: dict[str, bool | None] = {}
 
 
 def heygem_shared_root() -> Path:
-    root_env = os.getenv("HEYGEM_SHARED_ROOT")
-    if root_env:
-        root = Path(root_env)
-    else:
-        root = _DEFAULT_HEYGEM_ROOT
-    (root / "inputs" / "audio").mkdir(parents=True, exist_ok=True)
-    (root / "inputs" / "video").mkdir(parents=True, exist_ok=True)
-    (root / "temp").mkdir(parents=True, exist_ok=True)
-    (root / "result").mkdir(parents=True, exist_ok=True)
-    return root
+    return resolve_heygem_shared_root()
 
 
 def heygem_voice_root() -> Path:

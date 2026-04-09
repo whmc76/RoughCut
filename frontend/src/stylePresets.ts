@@ -16,6 +16,10 @@ export type StylePreset = {
   sampleFoot: string;
 };
 
+const legacyStyleAliases: Record<string, string> = {
+  smart_effect_rhythm: "smart_effect_commercial",
+};
+
 export const subtitleStyleGroups: StyleGroup[] = [
   { id: "shortvideo", label: "短视频爆点", description: "高对比、高识别度，适合开箱、强情绪口播和高 CTR 剪法。" },
   { id: "clean", label: "清爽信息流", description: "更克制的阅读型字幕，适合教程、知识流和录屏讲解。" },
@@ -31,9 +35,10 @@ export const subtitleMotionGroups: StyleGroup[] = [
 ];
 
 export const smartEffectGroups: StyleGroup[] = [
-  { id: "rhythm", label: "节奏强化", description: "优先卡点、镜头切换和轻强调，适合大多数短视频。" },
-  { id: "impact", label: "爆点冲击", description: "更强的缩放、震动和击打感，适合高能片段。" },
-  { id: "texture", label: "氛围质感", description: "更偏氛围、暗角、光晕和电影式推进。" },
+  { id: "impact", label: "商业爆点", description: "强调爆点、冲击转场和强结论镜头，适合高能短视频。" },
+  { id: "cyber", label: "赛博视觉", description: "色偏、故障、数字感和机械气氛更明显，适合科技和潮流内容。" },
+  { id: "atmosphere", label: "氛围推进", description: "强调情绪、层次、光感和镜头推进，适合预告和质感表达。" },
+  { id: "restrained", label: "克制表达", description: "保留风格化，但不让特效盖过主体和信息。" },
 ];
 
 export const coverStyleGroups: StyleGroup[] = [
@@ -103,11 +108,12 @@ export const subtitleMotionPresets: StylePreset[] = [
 ];
 
 export const smartEffectPresets: StylePreset[] = [
-  { key: "smart_effect_rhythm", label: "节奏卡点", groupId: "rhythm", summary: "优先在切点、重音和字幕节拍上做轻强化。", accent: "#66d4ff", badge: "推荐", sampleTop: "切点更准", sampleBottom: "节奏更顺", sampleFoot: "默认通用型" },
-  { key: "smart_effect_punch", label: "爆点冲击", groupId: "impact", summary: "遇到强结论和高能镜头时强化缩放、闪白和击打感。", accent: "#ff7b5f", badge: "爆点", sampleTop: "重点来了", sampleBottom: "镜头更炸", sampleFoot: "适合短视频高能段" },
-  { key: "smart_effect_glitch", label: "故障赛博", groupId: "impact", summary: "轻故障、色偏和抖动，适合科技、电竞和硬核内容。", accent: "#7d89ff", badge: "赛博", sampleTop: "故障切换", sampleBottom: "记忆更强", sampleFoot: "适合数码和潮流" },
-  { key: "smart_effect_cinematic", label: "电影推进", groupId: "texture", summary: "更偏暗场、呼吸感和镜头推进，不走夸张抖动。", accent: "#f2b56b", badge: "电影", sampleTop: "情绪铺垫", sampleBottom: "更有层次", sampleFoot: "适合预告和氛围片" },
-  { key: "smart_effect_minimal", label: "克制轻特效", groupId: "rhythm", summary: "只保留必要的切点强化和轻提示，避免太花。", accent: "#b6c3d9", badge: "克制", sampleTop: "少一点动效", sampleBottom: "更干净", sampleFoot: "适合说明和教程" },
+  { key: "smart_effect_commercial", label: "商业高能", groupId: "impact", summary: "强化爆点、卖点和结论镜头，转场、字幕和 punch 更像成熟商业短视频。", accent: "#ff8b63", badge: "默认", sampleTop: "卖点要炸出来", sampleBottom: "镜头更有击中感", sampleFoot: "适合作为新默认风格" },
+  { key: "smart_effect_punch", label: "爆点冲击", groupId: "impact", summary: "缩放、闪白、重击字幕和强转场更明显，适合开箱、对比和强观点。", accent: "#ff6d57", badge: "高能", sampleTop: "重点来了", sampleBottom: "镜头更炸", sampleFoot: "适合强结论内容" },
+  { key: "smart_effect_glitch", label: "故障赛博", groupId: "cyber", summary: "RGB 偏移、故障切换和数字感字幕更明显，适合科技、机能和潮流题材。", accent: "#7d89ff", badge: "赛博", sampleTop: "故障切换", sampleBottom: "记忆点更强", sampleFoot: "适合数码和潮流" },
+  { key: "smart_effect_cinematic", label: "电影推进", groupId: "atmosphere", summary: "更偏镜头推进、明暗层次和情绪铺垫，不靠高频抖动。", accent: "#f2b56b", badge: "电影", sampleTop: "情绪先铺开", sampleBottom: "再推到重点", sampleFoot: "适合预告和叙事" },
+  { key: "smart_effect_atmosphere", label: "氛围塑形", groupId: "atmosphere", summary: "强调光感、呼吸感和局部氛围变化，适合质感向和生活方式内容。", accent: "#f1c58b", badge: "氛围", sampleTop: "不是炸点", sampleBottom: "是氛围上来", sampleFoot: "适合高级感内容" },
+  { key: "smart_effect_minimal", label: "克制轻特效", groupId: "restrained", summary: "保留必要转场和提示，但整体更干净，不抢主体。", accent: "#b6c3d9", badge: "克制", sampleTop: "少一点动效", sampleBottom: "更干净", sampleFoot: "适合说明和教程" },
 ];
 
 export const coverStylePresets: StylePreset[] = [
@@ -163,7 +169,8 @@ export const copyStylePresets: StylePreset[] = [
 ];
 
 export function findStylePreset(presets: StylePreset[], key: string): StylePreset | undefined {
-  return presets.find((preset) => preset.key === key);
+  const normalizedKey = legacyStyleAliases[key] ?? key;
+  return presets.find((preset) => preset.key === normalizedKey);
 }
 
 export function styleLabel(presets: StylePreset[], key: string): string {

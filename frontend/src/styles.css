@@ -1209,13 +1209,16 @@ select.input option:focus {
 }
 
 .style-lab-preset-lanes,
-.style-lab-mode-list {
+.style-lab-mode-list,
+.style-lab-mode-stack {
   display: grid;
   gap: 14px;
 }
 
 .style-lab-preset-lanes .panel,
 .style-lab-mode-column,
+.style-lab-mode-summary,
+.style-lab-enhancement-grid,
 .style-lab-presenter-stage {
   min-height: 0;
   padding: 18px;
@@ -1224,15 +1227,82 @@ select.input option:focus {
   background: rgba(255, 255, 255, 0.026);
 }
 
+.style-lab-mode-overview {
+  display: grid;
+  grid-template-columns: minmax(320px, 1.1fr) minmax(260px, 0.9fr);
+  gap: 14px;
+  align-items: start;
+}
+
 .style-lab-mode-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 16px;
 }
 
-.style-lab-mode-column {
+.style-lab-mode-column,
+.style-lab-mode-summary {
   display: grid;
   gap: 12px;
+}
+
+.style-lab-workflow-switcher {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 10px;
+}
+
+.style-lab-workflow-option {
+  display: grid;
+  gap: 4px;
+  align-content: start;
+  min-height: 0;
+  padding: 12px 14px;
+  border-radius: 16px;
+  border: 1px solid rgba(23, 24, 27, 0.08);
+  background: rgba(255, 255, 255, 0.42);
+  color: #17181b;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    border-color 160ms ease,
+    background 160ms ease,
+    transform 160ms ease,
+    box-shadow 160ms ease;
+}
+
+.style-lab-workflow-option strong,
+.style-lab-workflow-option span,
+.style-lab-workflow-option small {
+  display: block;
+}
+
+.style-lab-workflow-option span,
+.style-lab-workflow-option small {
+  color: var(--text-muted);
+}
+
+.style-lab-workflow-option small {
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.style-lab-workflow-option:hover {
+  transform: translateY(-1px);
+  border-color: rgba(45, 106, 106, 0.18);
+}
+
+.style-lab-workflow-option.selected {
+  border-color: rgba(45, 106, 106, 0.26);
+  background: linear-gradient(160deg, rgba(45, 106, 106, 0.1), rgba(255, 255, 255, 0.52));
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.2);
+}
+
+.style-lab-enhancement-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 12px;
+  align-items: start;
 }
 
 .style-lab-presenter-grid {
@@ -1246,6 +1316,32 @@ select.input option:focus {
   background:
     radial-gradient(circle at top right, rgba(101, 120, 149, 0.1), transparent 34%),
     rgba(255, 255, 255, 0.025);
+}
+
+.mode-card-compact {
+  gap: 10px;
+  padding: 16px;
+}
+
+.mode-card-compact-header {
+  align-items: start;
+}
+
+.mode-card-compact-summary,
+.mode-card-compact-output {
+  margin: 0;
+  line-height: 1.5;
+}
+
+.mode-card-compact-summary {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.mode-card-compact-output {
+  font-size: 13px;
 }
 
 .settings-architecture-page {
@@ -1702,7 +1798,7 @@ select.input option:focus {
   top: 0;
   right: 0;
   bottom: 0;
-  left: var(--sidebar-width);
+  left: 0;
   z-index: 60;
   display: flex;
   justify-content: flex-end;
@@ -1839,6 +1935,12 @@ select.input option:focus {
   justify-content: space-between;
   align-items: start;
   gap: 12px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.step-row-head::-webkit-details-marker {
+  display: none;
 }
 
 .step-row-title {
@@ -1859,6 +1961,11 @@ select.input option:focus {
 
 .step-row-progress {
   margin-top: 0;
+}
+
+.step-row-body {
+  display: grid;
+  gap: 12px;
 }
 
 .step-event-list {
@@ -4703,50 +4810,138 @@ select.input option:focus {
   filter: saturate(1.04) brightness(1.02);
 }
 
-.jobs-command-deck {
+.jobs-dashboard-row {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: minmax(0, 1.4fr) minmax(280px, 0.72fr);
   gap: 14px;
 }
 
-.jobs-command-card,
+.jobs-dashboard-card,
+.jobs-attention-card,
 .jobs-queue-stage,
-.jobs-active-band,
 .jobs-create-stage {
   border: 1px solid rgba(23, 24, 27, 0.08);
   background: linear-gradient(180deg, rgba(244, 239, 230, 0.96), rgba(232, 224, 211, 0.92));
   box-shadow: 0 18px 40px rgba(81, 70, 58, 0.08);
 }
 
-.jobs-command-card {
+.jobs-dashboard-card,
+.jobs-attention-card {
   display: grid;
-  gap: 8px;
-  min-height: 112px;
+  gap: 16px;
   padding: 18px;
   border-radius: 18px;
 }
 
-.jobs-command-card span {
+.jobs-dashboard-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: start;
+}
+
+.jobs-dashboard-head h3 {
+  margin: 6px 0 0;
+  font-size: 24px;
+  line-height: 1.08;
+  letter-spacing: -0.04em;
+}
+
+.jobs-dashboard-head p {
+  margin: 0;
+  max-width: 14rem;
+  text-align: right;
+  color: rgba(23, 24, 27, 0.58);
+  line-height: 1.5;
+}
+
+.jobs-dashboard-eyebrow,
+.jobs-dashboard-metric span {
   color: rgba(23, 24, 27, 0.48);
   font-size: 11px;
   letter-spacing: 0.14em;
   text-transform: uppercase;
 }
 
-.jobs-command-card strong {
+.jobs-dashboard-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.jobs-dashboard-metric,
+.jobs-attention-card {
+  appearance: none;
+  width: 100%;
+  border: 1px solid rgba(23, 24, 27, 0.08);
+  background: rgba(255, 255, 255, 0.42);
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    transform 120ms ease,
+    border-color 120ms ease,
+    box-shadow 120ms ease,
+    background 120ms ease;
+}
+
+.jobs-dashboard-metric {
+  display: grid;
+  gap: 8px;
+  min-height: 120px;
+  padding: 16px;
+  border-radius: 18px;
+}
+
+.jobs-dashboard-metric strong,
+.jobs-attention-card strong {
   font-size: 26px;
   line-height: 1;
   letter-spacing: -0.04em;
 }
 
-.jobs-command-card p {
+.jobs-dashboard-metric p,
+.jobs-attention-card p {
   margin: 0;
   color: rgba(23, 24, 27, 0.58);
   line-height: 1.45;
 }
 
+.jobs-dashboard-metric:hover,
+.jobs-attention-card:hover {
+  transform: translateY(-1px);
+  border-color: rgba(45, 106, 106, 0.22);
+  box-shadow: 0 12px 24px rgba(81, 70, 58, 0.1);
+}
+
+.jobs-dashboard-metric.is-active,
+.jobs-attention-card.is-active {
+  border-color: rgba(45, 106, 106, 0.32);
+  background: linear-gradient(180deg, rgba(235, 244, 241, 0.86), rgba(255, 255, 255, 0.52));
+  box-shadow: 0 14px 28px rgba(45, 106, 106, 0.12);
+}
+
+.jobs-attention-card {
+  min-height: 100%;
+  align-content: start;
+}
+
+.jobs-attention-breakdown {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.jobs-attention-breakdown span {
+  padding: 6px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(201, 107, 75, 0.16);
+  background: rgba(255, 255, 255, 0.46);
+  color: rgba(23, 24, 27, 0.72);
+  font-size: 12px;
+}
+
 .jobs-queue-stage,
-.jobs-active-band,
 .jobs-create-stage {
   display: grid;
   gap: 16px;
@@ -4793,13 +4988,12 @@ select.input option:focus {
   line-height: 1.35;
 }
 
-.jobs-active-grid {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 12px;
+.jobs-queue-stage-note {
+  margin: -8px 0 0;
+  color: rgba(23, 24, 27, 0.58);
+  line-height: 1.5;
 }
 
-.jobs-active-card,
 .jobs-create-panel {
   display: grid;
   gap: 12px;
@@ -4807,32 +5001,6 @@ select.input option:focus {
   border-radius: 18px;
   border: 1px solid rgba(23, 24, 27, 0.08);
   background: rgba(255, 255, 255, 0.36);
-}
-
-.jobs-active-copy {
-  display: grid;
-  gap: 8px;
-  min-width: 0;
-}
-
-.jobs-active-copy strong {
-  font-size: 18px;
-  line-height: 1.15;
-}
-
-.jobs-active-copy p {
-  margin: 0;
-  color: rgba(23, 24, 27, 0.58);
-  line-height: 1.45;
-}
-
-.jobs-active-meta {
-  display: flex;
-  justify-content: space-between;
-  gap: 12px;
-  align-items: center;
-  color: rgba(23, 24, 27, 0.48);
-  font-size: 12px;
 }
 
 .jobs-create-grid {
@@ -5281,7 +5449,8 @@ select.input option:focus {
   }
 
   .overview-command-deck,
-  .jobs-command-deck,
+  .jobs-dashboard-row,
+  .jobs-dashboard-metrics,
   .overview-focus-grid,
   .overview-command-signals,
   .jobs-workbench-grid,
@@ -5291,13 +5460,13 @@ select.input option:focus {
   .overview-decision-surface,
   .overview-analysis-band,
   .jobs-workbench-shell,
-  .jobs-active-grid,
   .jobs-create-modal-grid,
   .jobs-create-grid,
   .watch-command-strip,
   .watch-workbench,
   .style-lab-hero,
   .style-lab-mode-grid,
+  .style-lab-mode-overview,
   .style-lab-presenter-grid,
   .settings-link-grid {
     grid-template-columns: 1fr;
@@ -5314,7 +5483,7 @@ select.input option:focus {
 
 @media (max-width: 960px) {
   .jobs-stage-head,
-  .jobs-active-meta {
+  .jobs-dashboard-head {
     display: grid;
     justify-items: start;
     text-align: left;
@@ -5462,12 +5631,19 @@ select.input option:focus {
   .jobs-urgent-rail,
   .style-lab-hero,
   .style-lab-mode-column,
+  .style-lab-mode-summary,
+  .style-lab-enhancement-grid,
   .style-lab-presenter-stage {
     padding: 18px 16px;
   }
 
   .style-lab-hero-signals {
     justify-content: flex-start;
+  }
+
+  .style-lab-workflow-switcher,
+  .style-lab-enhancement-grid {
+    grid-template-columns: 1fr;
   }
 }
 
@@ -5518,6 +5694,8 @@ select.input option:focus {
 .style-lab-hero,
 .style-lab-panel,
 .style-lab-mode-column,
+.style-lab-mode-summary,
+.style-lab-enhancement-grid,
 .style-lab-presenter-stage,
 .settings-architecture-deck,
 .settings-stage,
@@ -5564,10 +5742,11 @@ select.input option:focus {
 .overview-signal-strip,
 .overview-action-index,
 .overview-runtime-row,
-.jobs-active-card,
+.jobs-dashboard-metric,
+.jobs-attention-card,
 .jobs-create-panel,
-.jobs-command-card,
 .style-lab-page .mode-card,
+.style-lab-workflow-option,
 .style-lab-preset-lanes .panel,
 .style-lab-hero-signals .status-pill,
 .jobs-create-panel .panel,
@@ -5609,9 +5788,10 @@ select.input option:focus {
 .overview-feed-copy p,
 .overview-feed-meta,
 .jobs-stage-head p,
-.jobs-command-card p,
-.jobs-active-copy p,
-.jobs-active-meta,
+.jobs-dashboard-head p,
+.jobs-dashboard-metric p,
+.jobs-attention-card p,
+.jobs-queue-stage-note,
 .watch-command-label,
 .style-lab-hero-copy p,
 .settings-architecture-lead p,
@@ -5683,4 +5863,175 @@ select.input option:focus {
 .config-profile-chip-button:focus-visible,
 .config-profile-chip-actions .button:focus-visible {
   outline: 2px solid rgba(45, 106, 106, 0.34);
+}
+
+:is(
+    .overview-command-main,
+    .overview-action-stack,
+    .overview-focus-lane,
+    .jobs-queue-lane,
+    .jobs-creation-bay,
+    .jobs-urgent-rail,
+    .watch-health-lane,
+    .watch-roots-lane,
+    .watch-form-lane,
+    .style-lab-panel,
+    .settings-stage,
+    .settings-summary-panel,
+    .settings-core-panel,
+    .settings-runtime-panel,
+    .settings-extension-panel,
+    .settings-quality-panel
+  ) {
+  color: #17181b;
+}
+
+:is(
+    .overview-command-main,
+    .overview-action-stack,
+    .overview-focus-lane,
+    .jobs-queue-lane,
+    .jobs-creation-bay,
+    .jobs-urgent-rail,
+    .watch-health-lane,
+    .watch-roots-lane,
+    .watch-form-lane,
+    .style-lab-panel,
+    .settings-stage,
+    .settings-summary-panel,
+    .settings-core-panel,
+    .settings-runtime-panel,
+    .settings-extension-panel,
+    .settings-quality-panel
+  )
+  :is(
+    .stat-card,
+    .service-card,
+    .list-card,
+    .activity-card,
+    .notice,
+    .settings-command-card,
+    .settings-overview-card,
+    .settings-subsection,
+    .settings-provider-card,
+    .settings-chain-card,
+    .settings-service-card,
+    .settings-runtime-summary-card,
+    .settings-module-chip,
+    .settings-tool-card,
+    .settings-disclosure
+  ) {
+  border-color: rgba(23, 24, 27, 0.08);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.78), rgba(246, 241, 234, 0.72)),
+    rgba(255, 255, 255, 0.58);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.34),
+    0 10px 24px rgba(81, 70, 58, 0.04);
+}
+
+:is(
+    .overview-command-main,
+    .overview-action-stack,
+    .overview-focus-lane,
+    .jobs-queue-lane,
+    .jobs-creation-bay,
+    .jobs-urgent-rail,
+    .watch-health-lane,
+    .watch-roots-lane,
+    .watch-form-lane,
+    .style-lab-panel,
+    .settings-stage,
+    .settings-summary-panel,
+    .settings-core-panel,
+    .settings-runtime-panel,
+    .settings-extension-panel,
+    .settings-quality-panel
+  )
+  :is(.muted, .panel-header p, .page-section-description, .settings-overview-label, .stat-label) {
+  color: rgba(23, 24, 27, 0.64);
+}
+
+:is(
+    .overview-command-main,
+    .overview-action-stack,
+    .overview-focus-lane,
+    .jobs-queue-lane,
+    .jobs-creation-bay,
+    .jobs-urgent-rail,
+    .watch-health-lane,
+    .watch-roots-lane,
+    .watch-form-lane,
+    .style-lab-panel,
+    .settings-stage,
+    .settings-summary-panel,
+    .settings-core-panel,
+    .settings-runtime-panel,
+    .settings-extension-panel,
+    .settings-quality-panel
+  )
+  :is(.input, select.input, .button.ghost) {
+  border-color: rgba(23, 24, 27, 0.1);
+  background: rgba(255, 255, 255, 0.76);
+  color: #17181b;
+}
+
+.settings-page .settings-provider-summary {
+  color: rgba(23, 24, 27, 0.74);
+}
+
+.settings-page .settings-provider-meta-row,
+.settings-page .settings-environment-row {
+  border-top-color: rgba(23, 24, 27, 0.08);
+}
+
+.settings-page .settings-provider-meta-row span,
+.settings-page .settings-environment-row span,
+.settings-page .settings-disclosure-trigger::after {
+  color: rgba(23, 24, 27, 0.6);
+}
+
+.settings-page .settings-provider-meta-row strong,
+.settings-page .settings-environment-row strong {
+  color: #17181b;
+}
+
+.settings-page .settings-extension-shell-creative {
+  background:
+    radial-gradient(circle at top left, rgba(125, 211, 255, 0.18), transparent 36%),
+    linear-gradient(180deg, rgba(248, 250, 252, 0.96), rgba(233, 239, 244, 0.92));
+}
+
+.settings-page .settings-extension-shell-bot {
+  background:
+    radial-gradient(circle at top left, rgba(255, 187, 108, 0.18), transparent 34%),
+    linear-gradient(180deg, rgba(252, 246, 239, 0.96), rgba(241, 231, 219, 0.92));
+}
+
+.settings-page .settings-tool-card-review {
+  background:
+    linear-gradient(180deg, rgba(109, 198, 255, 0.12), rgba(255, 255, 255, 0.7)),
+    rgba(255, 255, 255, 0.64);
+}
+
+.settings-page .settings-tool-card-agent {
+  background:
+    linear-gradient(180deg, rgba(255, 183, 108, 0.14), rgba(255, 255, 255, 0.7)),
+    rgba(255, 255, 255, 0.64);
+}
+
+.settings-page .settings-chain-note,
+.settings-page .notice,
+.settings-page .activity-card {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.8), rgba(245, 239, 231, 0.72)),
+    rgba(255, 255, 255, 0.62);
+}
+
+.settings-page .notice.notice-error {
+  border-color: rgba(193, 76, 76, 0.24);
+  background:
+    linear-gradient(180deg, rgba(255, 214, 214, 0.94), rgba(255, 245, 242, 0.9)),
+    rgba(255, 255, 255, 0.8);
+  color: #8e3030;
 }

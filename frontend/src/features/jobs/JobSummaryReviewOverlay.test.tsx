@@ -177,13 +177,35 @@ describe("JobContentProfileSection", () => {
     expect(screen.queryByDisplayValue("legacy_visible_text")).not.toBeInTheDocument();
   });
 
-  it("prefers nested content_understanding fields over legacy flat fields", async () => {
+  it("prefers review-page flat fields over nested content_understanding fields", async () => {
     await renderActualSection({
+      video_type: "commentary",
       subject_type: "legacy_subject",
       video_theme: "legacy_theme",
       hook_line: "legacy_hook",
       summary: "legacy_summary",
       engagement_question: "legacy_question",
+      content_understanding: {
+        video_type: "tutorial",
+        primary_subject: "nested_subject",
+        video_theme: "nested_theme",
+        hook_line: "nested_hook",
+        summary: "nested_summary",
+        question: "nested_question",
+      },
+    });
+
+    expect(screen.getByDisplayValue("legacy_theme")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("legacy_hook")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("legacy_summary")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("legacy_question")).toBeInTheDocument();
+    expect(screen.getByRole("combobox")).toHaveValue("commentary");
+    expect(screen.queryByDisplayValue("nested_subject")).not.toBeInTheDocument();
+  });
+
+  it("falls back to nested content_understanding fields when review-page fields are missing", async () => {
+    await renderActualSection({
+      subject_type: "legacy_subject",
       content_understanding: {
         primary_subject: "nested_subject",
         video_theme: "nested_theme",

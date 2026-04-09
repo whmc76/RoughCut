@@ -24,6 +24,25 @@ const JOB_STATUS_GROUP_PRIORITY: Record<string, number> = {
   pending: 1,
 };
 
+export type JobQueueFilter = "all" | "pending" | "running" | "done" | "attention";
+
+function isRunningJob(status: string) {
+  return status === "running" || status === "processing";
+}
+
+function isAttentionJob(status: string) {
+  return status === "needs_review" || status === "failed" || status === "cancelled";
+}
+
+function matchesQueueFilter(status: string, filter: JobQueueFilter) {
+  if (filter === "all") return true;
+  if (filter === "pending") return status === "pending";
+  if (filter === "running") return isRunningJob(status);
+  if (filter === "done") return status === "done";
+  if (filter === "attention") return isAttentionJob(status);
+  return true;
+}
+
 function sameStringArray(left: string[], right: string[]) {
   if (left.length !== right.length) return false;
   return left.every((item, index) => item === right[index]);
@@ -39,6 +58,7 @@ export function useJobWorkspace() {
   const queryClient = useQueryClient();
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
   const [keyword, setKeyword] = useState("");
+  const [queueFilter, setQueueFilter] = useState<JobQueueFilter>("all");
   const [jobsPage, setJobsPage] = useState(0);
   const [upload, setUpload] = useState<UploadForm>(EMPTY_UPLOAD);
   const [contentDraft, setContentDraft] = useState<Record<string, unknown>>({});
@@ -124,7 +144,7 @@ export function useJobWorkspace() {
 
   useEffect(() => {
     setJobsPage(0);
-  }, [keyword]);
+  }, [keyword, queueFilter]);
 
   useEffect(() => {
     const previousDefaults = previousUploadDefaultsRef.current;
@@ -304,7 +324,7 @@ export function useJobWorkspace() {
     onSuccess: refreshAll,
   });
 
-  const filteredJobs = useMemo(() => {
+  const searchMatchedJobs = useMemo(() => {
     const needle = keyword.trim().toLowerCase();
     const visibleJobs = !needle
       ? jobs.data ?? []
@@ -315,6 +335,20 @@ export function useJobWorkspace() {
     );
     return [...visibleJobs].sort(compareJobs);
   }, [jobs.data, keyword]);
+  const queueStats = useMemo(() => ({
+    total: searchMatchedJobs.length,
+    pending: searchMatchedJobs.filter((job) => job.status === "pending").length,
+    running: searchMatchedJobs.filter((job) => isRunningJob(job.status)).length,
+    done: searchMatchedJobs.filter((job) => job.status === "done").length,
+    attention: searchMatchedJobs.filter((job) => isAttentionJob(job.status)).length,
+    needsReview: searchMatchedJobs.filter((job) => job.status === "needs_review").length,
+    failed: searchMatchedJobs.filter((job) => job.status === "failed").length,
+    cancelled: searchMatchedJobs.filter((job) => job.status === "cancelled").length,
+  }), [searchMatchedJobs]);
+  const filteredJobs = useMemo(
+    () => searchMatchedJobs.filter((job) => matchesQueueFilter(job.status, queueFilter)),
+    [queueFilter, searchMatchedJobs],
+  );
   const hasMoreJobs = (jobs.data?.length ?? 0) === JOBS_PAGE_SIZE;
   const contentKeywordsList =
     contentDraftKeywords.length
@@ -329,6 +363,9 @@ export function useJobWorkspace() {
     setSelectedJobId,
     keyword,
     setKeyword,
+    queueFilter,
+    setQueueFilter,
+    queueStats,
     upload,
     setUpload,
     contentDraft,

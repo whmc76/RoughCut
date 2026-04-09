@@ -117,8 +117,8 @@ export function buildReviewChecks({
       status: packagingEnabled ? "ready" : "warning",
       detail: packagingEnabled
         ? hasInsert
-          ? `已启用智能剪辑特效，当前风格为 ${findStylePreset(smartEffectPresets, packaging?.config.smart_effect_style ?? "")?.label ?? (packaging?.config.smart_effect_style ?? "未设置")}；包装配置里也包含插片/转场素材，可直接叠加节奏强化效果。`
-          : `已启用智能剪辑特效，当前风格为 ${findStylePreset(smartEffectPresets, packaging?.config.smart_effect_style ?? "")?.label ?? (packaging?.config.smart_effect_style ?? "未设置")}；将基于剪辑时间线自动补转场、强调动画与局部视觉强化。`
+          ? `已启用智能剪辑特效，当前风格为 ${findStylePreset(smartEffectPresets, packaging?.config.smart_effect_style ?? "")?.label ?? (packaging?.config.smart_effect_style ?? "未设置")}；包装配置里也包含插片/转场素材，可进一步放大转场、画面特效和氛围强化。`
+          : `已启用智能剪辑特效，当前风格为 ${findStylePreset(smartEffectPresets, packaging?.config.smart_effect_style ?? "")?.label ?? (packaging?.config.smart_effect_style ?? "未设置")}；将基于剪辑时间线自动补转场、字幕动效、局部画面强化与氛围特效。`
         : "已启用智能剪辑特效，但当前全局包装关闭，最终只会保留基础剪辑层，特效空间较有限。",
     });
   }

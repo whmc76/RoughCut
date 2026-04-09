@@ -62,6 +62,7 @@ from roughcut.review.content_profile_review_stats import build_content_profile_a
 from roughcut.review.content_profile_scoring import score_identity_candidates
 from roughcut.review.content_profile_field_rules import CONTENT_PROFILE_FIELD_GUIDELINES
 from roughcut.review.domain_glossaries import detect_glossary_domains, select_primary_subject_domain
+from roughcut.review.platform_copy import build_transcript_for_packaging
 from roughcut.review.subtitle_memory import (
     _extract_compound_components,
     apply_domain_term_corrections,
@@ -75,7 +76,7 @@ from roughcut.speech.postprocess import (
 )
 
 _CONTENT_PROFILE_INFER_CACHE_VERSION = "2026-04-09.infer.v35"
-_CONTENT_PROFILE_ENRICH_CACHE_VERSION = "2026-04-09.enrich.v35"
+_CONTENT_PROFILE_ENRICH_CACHE_VERSION = "2026-04-09.enrich.v36"
 _INGESTIBLE_PRODUCT_SIGNALS = (
     "luckykiss",
     "kisspod",
@@ -112,8 +113,6 @@ _CONTENT_KIND_DEFAULT_VIDEO_THEME = {
     "food": "探店试吃与性价比判断",
 }
 _VISIBLE_TEXT_EMPTY_DEFAULT = "未识别到稳定画面文字，请人工补充"
-_CORRECTION_NOTES_EMPTY_DEFAULT = "待人工校对：未发现明显模型误读点，建议复核字幕与画面一致性。"
-_SUPPLEMENTAL_CONTEXT_EMPTY_DEFAULT = "待补充：可填写拍摄背景、对比对象或素材约束信息。"
 _REVIEW_KEYWORDS_LIMIT = 10
 _REVIEW_KEYWORDS_MIN_LEN = 2
 _REVIEW_KEYWORD_MIN_COUNT = 4
@@ -267,14 +266,190 @@ def _coerce_subject_type_for_review_display(value: str) -> str:
     return value.strip()
 
 
+def _build_review_field_subject(profile: dict[str, Any]) -> str:
+    brand = _clean_line(profile.get("subject_brand") or profile.get("brand") or "")
+    model = _clean_line(profile.get("subject_model") or profile.get("model") or "")
+    subject_type = _clean_line(profile.get("subject_type") or "")
+    theme = _clean_line(profile.get("video_theme") or "")
+    if brand and model:
+        return f"{brand} {model}".strip()
+    if model and subject_type and not _is_generic_subject_type(subject_type):
+        return f"{model}{subject_type}"[:24]
+    if brand and subject_type and not _is_generic_subject_type(subject_type):
+        return f"{brand}{subject_type}"[:24]
+    if model:
+        return model[:24]
+    if brand:
+        return brand[:24]
+    if subject_type and not _is_generic_subject_type(subject_type):
+        return subject_type[:24]
+    if theme:
+        return theme[:24]
+    return "这条视频"
+
+
+def _collect_review_context_terms(profile: dict[str, Any]) -> list[str]:
+    candidates: list[str] = []
+    for key in ("subject_model", "subject_type"):
+        value = _clean_line(profile.get(key) or "")
+        if value:
+            candidates.append(value)
+    theme = str(profile.get("video_theme") or "").strip()
+    if theme:
+        candidates.extend(_extract_topic_terms_keywords(theme))
+    for query in list(profile.get("search_queries") or [])[:3]:
+        candidates.extend(_extract_review_keyword_tokens_public(str(query or "").strip(), seed_terms=[]))
+
+    terms: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        term = _clean_line(candidate)
+        normalized = _normalize_profile_value(term)
+        if not term or not normalized or normalized in seen:
+            continue
+        if term in _REVIEW_KEYWORD_NOISE_CHUNKS:
+            continue
+        if len(term) > 18:
+            continue
+        seen.add(normalized)
+        terms.append(term)
+        if len(terms) >= 3:
+            break
+    return terms
+
+
+def _build_contextual_correction_notes(profile: dict[str, Any], *, transcript_excerpt: str) -> str:
+    brand = _clean_line(profile.get("subject_brand") or profile.get("brand") or "")
+    model = _clean_line(profile.get("subject_model") or profile.get("model") or "")
+    subject_type = _clean_line(profile.get("subject_type") or "")
+    focus_terms = _collect_review_context_terms(profile)
+    named_terms = [term for term in (brand, model, subject_type) if term and not (term == subject_type and _is_generic_subject_type(term))]
+    focus_phrase = "、".join(focus_terms[:2])
+    if named_terms and focus_phrase:
+        return f"重点核对字幕里的{'、'.join(named_terms[:3])}写法，以及{focus_phrase}相关表述是否与画面和调研证据一致。"
+    if named_terms:
+        return f"重点核对字幕里的{'、'.join(named_terms[:3])}写法，确认 ASR 术语、版本信息和画面表达一致。"
+    if focus_phrase:
+        return f"重点复核字幕中的{focus_phrase}相关表述，确认 ASR 术语、版本差异和画面信息一致。"
+    if _clean_line(transcript_excerpt):
+        return "重点复核完整字幕中的主体名称、术语和版本信息，确认没有 ASR 误听或误写。"
+    return "重点复核画面与字幕中的主体名称和关键术语，确认没有识别误差。"
+
+
+def _build_contextual_supplemental_context(profile: dict[str, Any], *, transcript_excerpt: str) -> str:
+    subject = _build_review_field_subject(profile)
+    theme = _clean_line(profile.get("video_theme") or "")
+    focus_terms = _collect_review_context_terms(profile)
+    focus_phrase = "、".join(focus_terms[:2])
+    if theme and focus_phrase:
+        return f"当前稿件主要围绕{subject if subject != '这条视频' else theme}展开，审核时重点关注{focus_phrase}，并结合完整字幕与调研证据确认使用场景和对比关系。"
+    if theme:
+        return f"当前稿件主要围绕{theme}展开，建议结合完整字幕与调研证据补充拍摄目标、使用场景和审核关注点。"
+    if subject != "这条视频":
+        return f"当前稿件以{subject}为主要对象，建议结合完整字幕与调研证据确认拍摄目标、使用场景和需要重点核对的版本差异。"
+    if _clean_line(transcript_excerpt):
+        return "当前稿件上下文仍需结合完整字幕补充，审核时建议同步确认拍摄目标、对比对象和使用场景。"
+    return "当前稿件上下文仍不完整，建议结合画面和调研证据补充拍摄目标、对比对象与使用场景。"
+
+
 def _ensure_review_fields_not_empty(profile: dict[str, Any], *, source_name: str, transcript_excerpt: str) -> None:
     if not str(profile.get("visible_text") or "").strip():
         fallback = _build_review_field_fallback_visible_text(profile=profile, source_name=source_name, transcript_excerpt=transcript_excerpt)
         profile["visible_text"] = fallback
     if not str(profile.get("correction_notes") or "").strip():
-        profile["correction_notes"] = _CORRECTION_NOTES_EMPTY_DEFAULT
+        profile["correction_notes"] = _build_contextual_correction_notes(profile, transcript_excerpt=transcript_excerpt)
     if not str(profile.get("supplemental_context") or "").strip():
-        profile["supplemental_context"] = _SUPPLEMENTAL_CONTEXT_EMPTY_DEFAULT
+        profile["supplemental_context"] = _build_contextual_supplemental_context(profile, transcript_excerpt=transcript_excerpt)
+
+
+def _normalize_review_payload_keywords(values: Any) -> list[str]:
+    return _normalize_query_list([str(item).strip() for item in (values or []) if str(item).strip()])[:_REVIEW_KEYWORDS_LIMIT]
+
+
+async def _generate_llm_review_page_payload(
+    *,
+    profile: dict[str, Any],
+    source_name: str,
+    transcript_excerpt: str,
+    transcript_text: str,
+    evidence: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    provider = get_reasoning_provider()
+    evidence_payload = [dict(item) for item in (evidence or [])[:6] if isinstance(item, dict)]
+    content_understanding = dict(profile.get("content_understanding") or {}) if isinstance(profile.get("content_understanding"), dict) else {}
+    semantic_facts = dict(content_understanding.get("semantic_facts") or {}) if isinstance(content_understanding.get("semantic_facts"), dict) else {}
+    review_focus_payload = {
+        "subject_brand": str(profile.get("subject_brand") or "").strip(),
+        "subject_model": str(profile.get("subject_model") or "").strip(),
+        "subject_type": str(profile.get("subject_type") or "").strip(),
+        "video_theme": str(profile.get("video_theme") or "").strip(),
+        "visible_text": str(profile.get("visible_text") or "").strip(),
+        "search_queries": [str(item).strip() for item in (profile.get("search_queries") or []) if str(item).strip()][:6],
+    }
+    prompt = (
+        "你在生成短视频审核页面的最终展示内容。"
+        "必须以完整 ASR/字幕和调研证据为主，输出给人工审核直接看的结构化结果。"
+        "不要输出解释，只输出严格 JSON。"
+        "字段必须包括：video_type, video_theme, hook_line, summary, engagement_question, correction_notes, supplemental_context, keywords, search_queries。"
+        "要求："
+        "0. video_type 只能输出 tutorial / vlog / commentary / gameplay / food / unboxing 之一；"
+        "1. 所有字段都基于完整字幕和调研证据，不要沿用泛化默认文案；"
+        "2. keywords 必须是 4-10 个高价值短词，优先品牌、型号、主体类型、联名关系、核心卖点、版本差异；"
+        "3. keywords 不能硬切中文碎片，不能输出“开箱”“评测”“视频”“内容”这种单独噪声词，除非它是更长短语的一部分；"
+        "4. search_queries 保留 1-6 条可用于检索核验的自然短语；"
+        "5. correction_notes 要给审核者明确校对关注点，基于 ASR 可能误听、术语、型号、字幕一致性来写；"
+        "6. supplemental_context 要补充这条视频的拍摄目标、对比关系、使用场景或审核关注背景；"
+        "7. 如果证据不足，宁可保守简洁，也不要编造。"
+        f"\n当前识别出的主体信息：{json.dumps(review_focus_payload, ensure_ascii=False)}"
+        f"\n当前内容理解：{json.dumps(content_understanding, ensure_ascii=False)}"
+        f"\n语义事实：{json.dumps(semantic_facts, ensure_ascii=False)}"
+        f"\n源文件名：{source_name}"
+        f"\n完整字幕：{transcript_text or transcript_excerpt or '无'}"
+    )
+    if transcript_excerpt and transcript_text.strip() != transcript_excerpt.strip():
+        prompt += f"\n字幕节选：{transcript_excerpt}"
+    if evidence_payload:
+        prompt += f"\n调研证据：{json.dumps(evidence_payload, ensure_ascii=False)}"
+    prompt += (
+        '\n输出 JSON：{"video_type":"","video_theme":"","hook_line":"","summary":"","engagement_question":"",'
+        '"correction_notes":"","supplemental_context":"","keywords":[],"search_queries":[]}'
+    )
+
+    with track_usage_operation("content_profile.review_page_payload"):
+        response = await provider.complete(
+            [
+                Message(role="system", content="你是严谨的中文短视频审核页内容生成器，只输出严格 JSON。"),
+                Message(role="user", content=prompt),
+            ],
+            temperature=0.1,
+            max_tokens=900,
+            json_mode=True,
+        )
+    payload = response.as_json()
+    if not isinstance(payload, dict):
+        return {}
+    normalized: dict[str, Any] = {}
+    video_type = normalize_video_type(str(payload.get("video_type") or "").strip())
+    if video_type:
+        normalized["video_type"] = video_type
+    for key in (
+        "video_theme",
+        "hook_line",
+        "summary",
+        "engagement_question",
+        "correction_notes",
+        "supplemental_context",
+    ):
+        value = str(payload.get(key) or "").strip()
+        if value:
+            normalized[key] = value
+    keywords = _normalize_review_payload_keywords(payload.get("keywords"))
+    if keywords:
+        normalized["keywords"] = keywords
+    search_queries = _normalize_query_list([str(item).strip() for item in (payload.get("search_queries") or []) if str(item).strip()])[:6]
+    if search_queries:
+        normalized["search_queries"] = search_queries
+    return normalized
 
 
 def _build_review_field_fallback_visible_text(
@@ -2135,6 +2310,7 @@ async def apply_content_profile_feedback(
     user_feedback: dict[str, Any],
     reviewed_subtitle_excerpt: str | None = None,
     accepted_corrections: list[dict[str, Any]] | None = None,
+    skip_model_refinement: bool = False,
 ) -> dict[str, Any]:
     return await _apply_content_profile_feedback_public(
         draft_profile=draft_profile,
@@ -2144,6 +2320,7 @@ async def apply_content_profile_feedback(
         user_feedback=user_feedback,
         reviewed_subtitle_excerpt=reviewed_subtitle_excerpt,
         accepted_corrections=accepted_corrections,
+        skip_model_refinement=skip_model_refinement,
     )
 
 
@@ -2320,6 +2497,7 @@ async def enrich_content_profile(
     workflow_template: str | None = None,
     channel_profile: str | None = None,
     transcript_excerpt: str,
+    subtitle_items: list[dict[str, Any]] | None = None,
     glossary_terms: list[dict[str, Any]] | None = None,
     user_memory: dict[str, Any] | None = None,
     include_research: bool = True,
@@ -2427,6 +2605,8 @@ async def enrich_content_profile(
         allow_video_theme_inference=False,
     )
 
+    evidence: list[dict[str, Any]] = []
+    review_payload_fields: set[str] = set()
     if include_research:
         evidence = await _search_evidence(enriched, source_name, transcript_excerpt=transcript_excerpt)
         evidence = _filter_evidence_by_visual_subject(
@@ -2484,9 +2664,42 @@ async def enrich_content_profile(
             except Exception:
                 pass
 
+        try:
+            review_payload = await _generate_llm_review_page_payload(
+                profile=enriched,
+                source_name=source_name,
+                transcript_excerpt=transcript_excerpt,
+                transcript_text=build_transcript_for_packaging(subtitle_items or [], max_chars=6000) or transcript_excerpt,
+                evidence=evidence,
+            )
+            video_type = normalize_video_type(str(review_payload.get("video_type") or "").strip())
+            if video_type and "video_type" not in confirmed_fields:
+                enriched["video_type"] = video_type
+                review_payload_fields.add("video_type")
+            for key in (
+                "video_theme",
+                "hook_line",
+                "summary",
+                "engagement_question",
+                "correction_notes",
+                "supplemental_context",
+            ):
+                value = str(review_payload.get(key) or "").strip()
+                if value and key not in confirmed_fields:
+                    enriched[key] = value
+                    review_payload_fields.add(key)
+            if review_payload.get("search_queries") and "search_queries" not in confirmed_fields:
+                enriched["search_queries"] = list(review_payload.get("search_queries") or [])
+                review_payload_fields.add("search_queries")
+            if review_payload.get("keywords"):
+                enriched["keywords"] = list(review_payload.get("keywords") or [])
+                review_payload_fields.add("keywords")
+        except Exception:
+            pass
+
     _apply_confirmed_profile_fields(enriched, confirmed_fields)
 
-    if "hook_line" not in confirmed_fields:
+    if "hook_line" not in confirmed_fields and "hook_line" not in review_payload_fields:
         current_hook = str(enriched.get("hook_line") or "").strip()
         if not current_hook or _is_generic_cover_line(current_hook):
             enriched["hook_line"] = _build_cover_hook(
@@ -2510,9 +2723,11 @@ async def enrich_content_profile(
             "bottom": _clean_line(cover_title.get("bottom") or "")[:18],
         }
     enriched["cover_title"] = cover_title
-    if not enriched.get("summary") or _is_generic_profile_summary(str(enriched.get("summary") or "")):
+    if "summary" not in review_payload_fields and (
+        not enriched.get("summary") or _is_generic_profile_summary(str(enriched.get("summary") or ""))
+    ):
         enriched["summary"] = _build_profile_summary(enriched)
-    if _is_generic_engagement_question(str(enriched.get("engagement_question") or "")):
+    if "engagement_question" not in review_payload_fields and _is_generic_engagement_question(str(enriched.get("engagement_question") or "")):
         generated_question = await _generate_engagement_question(
             profile=enriched,
             transcript_excerpt=transcript_excerpt,
@@ -2522,12 +2737,13 @@ async def enrich_content_profile(
         )
         if generated_question:
             enriched["engagement_question"] = generated_question
-    if _is_generic_engagement_question(str(enriched.get("engagement_question") or "")):
+    if "engagement_question" not in review_payload_fields and _is_generic_engagement_question(str(enriched.get("engagement_question") or "")):
         enriched["engagement_question"] = _build_fallback_engagement_question(enriched, preset)
     if not str(enriched.get("subject_type") or "").strip():
         _ensure_subject_type_main(enriched)
     _ensure_search_queries(enriched, source_name, transcript_excerpt=transcript_excerpt)
-    enriched["keywords"] = _build_review_keywords(enriched)
+    if not list(enriched.get("keywords") or []):
+        enriched["keywords"] = _build_review_keywords(enriched)
     _apply_confirmed_profile_fields(enriched, confirmed_fields)
     if confirmed_fields and any(
         key in confirmed_fields

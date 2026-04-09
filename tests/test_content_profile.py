@@ -302,6 +302,79 @@ def test_content_profile_keywords_build_review_keywords_direct_helper_keeps_mixe
     assert not all(fragment in keywords for fragment in ("MINI", "PRO"))
 
 
+def test_content_profile_keywords_extract_review_keyword_tokens_does_not_hard_cut_long_chinese_chunk():
+    from roughcut.review.content_profile_keywords import extract_review_keyword_tokens
+
+    tokens = extract_review_keyword_tokens(
+        "hsjun×boltboat联名机能双肩包游刃黑白双色开箱对比测评",
+        seed_terms=["游刃", "双肩包", "机能包", "联名"],
+    )
+
+    assert "游刃" in tokens
+    assert "双肩包" in tokens
+    assert "联名" in tokens
+    assert "机能双肩" not in tokens
+    assert "肩包游刃" not in tokens
+    assert "黑白双色开" not in tokens
+
+
+def test_content_profile_keywords_build_review_keywords_prefers_semantic_fact_terms_for_bag_scene():
+    from roughcut.review.content_profile_keywords import build_review_keywords
+
+    keywords = build_review_keywords(
+        {
+            "subject_brand": "hsjun",
+            "subject_model": "游刃",
+            "subject_type": "EDC机能包",
+            "video_theme": "hsjun×boltboat联名机能双肩包游刃黑白双色开箱对比测评",
+            "transcript_excerpt": "hsjun 和 boltboat 这次联名做了一款游刃双肩包，主打机能和通勤背负。",
+            "search_queries": ["hsjun×boltboat联名机能双肩包游刃黑白双色开箱对比"],
+            "content_understanding": {
+                "semantic_facts": {
+                    "brand_candidates": ["hsjun", "boltboat"],
+                    "product_name_candidates": ["游刃"],
+                    "product_type_candidates": ["双肩包", "机能包"],
+                    "aspect_candidates": ["机能", "黑白双色"],
+                    "collaboration_pairs": ["联名"],
+                },
+            },
+        }
+    )
+
+    assert "游刃" in keywords
+    assert "双肩包" in keywords
+    assert "机能包" in keywords
+    assert "联名" in keywords
+    assert "机能双肩" not in keywords
+    assert "肩包游刃" not in keywords
+    assert not any("联名机能双肩包" in item for item in keywords)
+
+
+def test_ensure_review_fields_not_empty_populates_contextual_review_text_for_empty_fields():
+    from roughcut.review import content_profile as content_profile_module
+
+    profile = {
+        "subject_brand": "hsjun",
+        "subject_model": "游刃",
+        "subject_type": "双肩包",
+        "video_theme": "hsjun×boltboat联名游刃双肩包通勤与背负对比",
+        "search_queries": ["hsjun boltboat 游刃 双肩包", "游刃 机能双肩包 联名"],
+        "correction_notes": "",
+        "supplemental_context": "",
+    }
+
+    content_profile_module._ensure_review_fields_not_empty(
+        profile,
+        source_name="bag.mp4",
+        transcript_excerpt="这期看 hsjun 和 boltboat 联名的游刃双肩包，重点看通勤背负和结构分仓。",
+    )
+
+    assert profile["correction_notes"]
+    assert "hsjun" in profile["correction_notes"] or "游刃" in profile["correction_notes"]
+    assert profile["supplemental_context"]
+    assert "双肩包" in profile["supplemental_context"] or "联名" in profile["supplemental_context"]
+
+
 def test_content_profile_keywords_fallback_search_queries_for_profile_direct_helper_synthesizes_from_subject_type():
     from roughcut.review.content_profile_keywords import fallback_search_queries_for_profile
 
@@ -2039,6 +2112,55 @@ async def test_apply_content_profile_feedback_prefers_user_values():
 
 
 @pytest.mark.asyncio
+async def test_apply_content_profile_feedback_skips_model_refinement_for_fast_manual_confirm(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from roughcut.review import content_profile as content_profile_module
+
+    def fail_provider():
+        raise AssertionError("fast manual confirm should not call reasoning provider")
+
+    async def fail_enrich(*args, **kwargs):
+        raise AssertionError("fast manual confirm should not re-enrich profile")
+
+    monkeypatch.setattr(content_profile_module, "get_reasoning_provider", fail_provider)
+    monkeypatch.setattr(content_profile_module, "enrich_content_profile", fail_enrich)
+
+    result = await apply_content_profile_feedback(
+        draft_profile={
+            "subject_brand": "FAS",
+            "subject_model": "旧型号",
+            "subject_type": "工具钳",
+            "video_theme": "开箱评测",
+            "summary": "原始摘要",
+            "transcript_excerpt": "测试字幕",
+            "workflow_template": "edc_tactical",
+        },
+        source_name="video.mp4",
+        channel_profile=None,
+        user_feedback={
+            "subject_brand": "REATE",
+            "subject_model": "马年限定版",
+            "subject_type": "EDC折刀",
+            "summary": "这是用户确认后的摘要",
+            "engagement_question": "这把 REATE 折刀你最想先看雕刻细节还是开合手感？",
+            "keywords": ["REATE", "马年限定版", "EDC折刀"],
+        },
+        skip_model_refinement=True,
+    )
+
+    assert result["subject_brand"] == "REATE"
+    assert result["subject_model"] == "马年限定版"
+    assert result["subject_type"] == "EDC折刀"
+    assert result["summary"] == "这是用户确认后的摘要"
+    assert result["engagement_question"] == "这把 REATE 折刀你最想先看雕刻细节还是开合手感？"
+    assert result["review_mode"] == "manual_confirmed"
+    assert result["search_queries"]
+    assert "cover_title" in result
+    assert result["keywords"]
+
+
+@pytest.mark.asyncio
 async def test_apply_content_profile_feedback_prefers_reviewed_subtitle_excerpt(monkeypatch: pytest.MonkeyPatch):
     from roughcut.review import content_profile as content_profile_module
 
@@ -2752,6 +2874,98 @@ async def test_enrich_content_profile_uses_content_understanding_inference(monke
     assert result["video_theme"] == "FOXBAT狐蝠工业F21小副包开箱与分仓挂点评测"
     assert result["summary"] == "这条视频主要围绕 FOXBAT狐蝠工业 F21小副包 的分仓和挂点展开。"
     assert result["content_understanding"]["primary_subject"] == "EDC机能包"
+
+
+@pytest.mark.asyncio
+async def test_enrich_content_profile_prefers_llm_review_payload_when_research_enabled(monkeypatch: pytest.MonkeyPatch):
+    from roughcut.review import content_profile as content_profile_module
+    from roughcut.review.content_understanding_schema import ContentUnderstanding, SubjectEntity
+
+    class FakeResponse:
+        def as_json(self):
+            return {
+                "video_type": "unboxing",
+                "video_theme": "hsjun×boltboat联名游刃双肩包通勤与背负对比",
+                "hook_line": "这包通勤和轻户外到底差在哪",
+                "summary": "视频围绕 hsjun×boltboat 联名游刃双肩包展开，重点看通勤背负、结构分仓和黑白双色差异。",
+                "engagement_question": "你买这种机能双肩包会先看背负还是分仓？",
+                "correction_notes": "重点核对字幕里的品牌拼写、联名写法，以及“游刃”“双肩包”等名词是否和画面一致。",
+                "supplemental_context": "这是一条联名机能双肩包审核稿，核心看点是通勤背负、结构分仓和黑白双色版本表达。",
+                "keywords": ["hsjun", "boltboat", "游刃", "双肩包", "机能包", "联名", "黑白双色"],
+                "search_queries": ["hsjun boltboat 游刃 双肩包", "游刃 机能双肩包 联名"],
+            }
+
+    class FakeProvider:
+        async def complete(self, *args, **kwargs):
+            return FakeResponse()
+
+    async def fake_infer_content_understanding_for_enrich(**kwargs):
+        return ContentUnderstanding(
+            video_type="unboxing",
+            content_domain="bag",
+            primary_subject="EDC机能包",
+            subject_entities=[SubjectEntity(kind="product", name="游刃双肩包", brand="hsjun", model="游刃")],
+            video_theme="机能双肩包开箱",
+            summary="围绕机能双肩包展开。",
+            hook_line="机能双肩包开箱",
+            engagement_question="你最想先看哪项细节？",
+            search_queries=["机能双肩包 开箱"],
+            needs_review=False,
+            review_reasons=[],
+        )
+
+    async def fake_search_evidence(*args, **kwargs):
+        return []
+
+    async def fail_generate_engagement_question(*args, **kwargs):
+        raise AssertionError("llm review payload should prevent local engagement-question fallback")
+
+    monkeypatch.setattr(content_profile_module, "_infer_content_understanding_for_enrich", fake_infer_content_understanding_for_enrich)
+    monkeypatch.setattr(content_profile_module, "_search_evidence", fake_search_evidence)
+    monkeypatch.setattr(content_profile_module, "get_reasoning_provider", lambda: FakeProvider())
+    monkeypatch.setattr(content_profile_module, "_generate_engagement_question", fail_generate_engagement_question)
+
+    result = await enrich_content_profile(
+        profile={
+            "subject_brand": "hsjun",
+            "subject_model": "游刃",
+            "subject_type": "EDC机能包",
+            "video_theme": "机能双肩包开箱",
+            "summary": "围绕机能双肩包展开。",
+        },
+        source_name="bag.mp4",
+        workflow_template="edc_tactical",
+        transcript_excerpt="这期看 hsjun 和 boltboat 联名的游刃双肩包。",
+        subtitle_items=[
+            {
+                "index": 0,
+                "start_time": 0.0,
+                "end_time": 2.0,
+                "text_raw": "这期看 hsjun 和 boltboat 联名的游刃双肩包。",
+                "text_norm": "这期看 hsjun 和 boltboat 联名的游刃双肩包。",
+                "text_final": "这期看 hsjun 和 boltboat 联名的游刃双肩包。",
+            },
+            {
+                "index": 1,
+                "start_time": 2.0,
+                "end_time": 4.0,
+                "text_raw": "重点看通勤背负、结构分仓和黑白双色。",
+                "text_norm": "重点看通勤背负、结构分仓和黑白双色。",
+                "text_final": "重点看通勤背负、结构分仓和黑白双色。",
+            },
+        ],
+        include_research=True,
+    )
+
+    assert result["video_type"] == "unboxing"
+    assert result["video_theme"] == "hsjun×boltboat联名游刃双肩包通勤与背负对比"
+    assert result["hook_line"] == "这包通勤和轻户外到底差在哪"
+    assert result["summary"] == "视频围绕 hsjun×boltboat 联名游刃双肩包展开，重点看通勤背负、结构分仓和黑白双色差异。"
+    assert result["engagement_question"] == "你买这种机能双肩包会先看背负还是分仓？"
+    assert result["correction_notes"].startswith("重点核对字幕里的品牌拼写")
+    assert result["supplemental_context"].startswith("这是一条联名机能双肩包审核稿")
+    assert result["keywords"] == ["hsjun", "boltboat", "游刃", "双肩包", "机能包", "联名", "黑白双色"]
+    assert result["search_queries"] == ["hsjun boltboat 游刃 双肩包", "游刃 机能双肩包 联名"]
 
 
 @pytest.mark.asyncio

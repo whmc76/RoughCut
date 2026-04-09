@@ -5,6 +5,7 @@ import mimetypes
 import math
 import random
 import re
+import shutil
 from collections import Counter
 import uuid
 from datetime import datetime, timezone
@@ -15,13 +16,23 @@ from io import BytesIO
 import numpy as np
 from sqlalchemy import select
 
-from roughcut.config import DEFAULT_TEST_OUTPUT_ROOT, get_settings
+from roughcut.config import DEFAULT_OUTPUT_ROOT, get_settings
 from roughcut.edit.presets import normalize_workflow_template_name
 from roughcut.review.domain_glossaries import detect_glossary_domains, normalize_subject_domain, select_primary_subject_domain
 from roughcut.state_store import PACKAGING_CONFIG_KEY, run_db_operation
 
 
-PACKAGING_ROOT = DEFAULT_TEST_OUTPUT_ROOT / "packaging"
+def _default_packaging_root() -> Path:
+    try:
+        output_dir = Path(str(get_settings().output_dir or "")).expanduser()
+    except Exception:
+        output_dir = DEFAULT_OUTPUT_ROOT / "output"
+    if not str(output_dir or "").strip():
+        output_dir = DEFAULT_OUTPUT_ROOT / "output"
+    return output_dir / "_packaging"
+
+
+PACKAGING_ROOT = _default_packaging_root()
 MANIFEST_PATH = PACKAGING_ROOT / "manifest.json"
 
 ASSET_EXTENSIONS: dict[str, set[str]] = {
@@ -48,7 +59,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "title_style": "preset_default",
     "copy_style": "attention_grabbing",
     "subtitle_motion_style": "motion_static",
-    "smart_effect_style": "smart_effect_rhythm",
+    "smart_effect_style": "smart_effect_commercial",
     "music_volume": 0.12,
     "watermark_position": "top_left",
     "watermark_opacity": 0.82,
@@ -105,11 +116,13 @@ SUBTITLE_MOTION_OPTIONS = {
 }
 
 SMART_EFFECT_STYLE_OPTIONS = {
-    "smart_effect_rhythm",
+    "smart_effect_commercial",
     "smart_effect_punch",
     "smart_effect_glitch",
     "smart_effect_cinematic",
+    "smart_effect_atmosphere",
     "smart_effect_minimal",
+    "smart_effect_rhythm",
 }
 
 EXPORT_RESOLUTION_MODE_OPTIONS = {"source", "specified"}
@@ -226,9 +239,9 @@ GENERIC_INSERT_TOKENS = {"BROLL", "DETAIL", "MACRO", "CLOSEUP", "BOX", "PACKAGE"
 
 def list_packaging_assets() -> dict[str, Any]:
     state = _load_state()
-    assets_by_id = {item["id"]: item for item in state["assets"]}
+    assets_by_id = _existing_packaging_assets_by_id(state["assets"])
     state["config"] = _normalize_config(dict(state["config"]), assets_by_id)
-    assets = sorted(state["assets"], key=lambda item: item.get("created_at", ""), reverse=True)
+    assets = sorted(assets_by_id.values(), key=lambda item: item.get("created_at", ""), reverse=True)
     by_type = {
         asset_type: [item for item in assets if item.get("asset_type") == asset_type]
         for asset_type in ASSET_EXTENSIONS
@@ -401,7 +414,7 @@ def delete_packaging_asset(asset_id: str) -> None:
 def update_packaging_config(patch: dict[str, Any]) -> dict[str, Any]:
     state = _load_state()
     config = state["config"]
-    assets_by_id = {item["id"]: item for item in state["assets"]}
+    assets_by_id = _existing_packaging_assets_by_id(state["assets"])
 
     for key, value in patch.items():
         if key not in DEFAULT_CONFIG:
@@ -426,7 +439,7 @@ def update_packaging_config(patch: dict[str, Any]) -> dict[str, Any]:
 
 def reset_packaging_config() -> dict[str, Any]:
     state = _load_state()
-    assets_by_id = {item["id"]: item for item in state["assets"]}
+    assets_by_id = _existing_packaging_assets_by_id(state["assets"])
     state["config"] = _normalize_config(dict(DEFAULT_CONFIG), assets_by_id)
     _save_state(state)
     return state["config"]
@@ -531,7 +544,7 @@ def _load_job_packaging_snapshot(job_id: str) -> dict[str, Any] | None:
 
 def get_packaging_asset(asset_id: str) -> dict[str, Any]:
     state = _load_state()
-    asset = next((item for item in state["assets"] if item.get("id") == asset_id), None)
+    asset = _existing_packaging_assets_by_id(state["assets"]).get(asset_id)
     if not asset:
         raise KeyError(asset_id)
     return asset
@@ -656,12 +669,24 @@ def _load_state() -> dict[str, Any]:
     }
     try:
         state, has_data = _load_state_from_db()
+        state, changed = _repair_loaded_state(state)
+        if changed:
+            try:
+                _save_state_to_db(state)
+            except Exception:
+                pass
         if has_data:
             return state
     except Exception:
         state = default_state
 
     legacy_state = _load_legacy_state()
+    legacy_state, changed = _repair_loaded_state(legacy_state)
+    if changed:
+        try:
+            _save_state_to_db(legacy_state)
+        except Exception:
+            pass
     if legacy_state["assets"] or legacy_state["config"] != dict(DEFAULT_CONFIG):
         try:
             _save_state_to_db(legacy_state)
@@ -671,9 +696,90 @@ def _load_state() -> dict[str, Any]:
     return state
 
 
+def _repair_loaded_state(state: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+    repaired_state = {
+        "assets": [],
+        "config": dict(state.get("config") or {}),
+    }
+    changed = False
+    for asset in state.get("assets") or []:
+        repaired_asset, asset_changed = _repair_packaging_asset_record(dict(asset or {}))
+        repaired_state["assets"].append(repaired_asset)
+        changed = changed or asset_changed
+    return repaired_state, changed
+
+
+def _repair_packaging_asset_record(asset: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+    asset_type = str(asset.get("asset_type") or "").strip().lower()
+    stored_name = str(asset.get("stored_name") or "").strip()
+    raw_path = str(asset.get("path") or "").strip()
+    changed = False
+
+    canonical_path: Path | None = None
+    if asset_type in ASSET_EXTENSIONS and stored_name:
+        canonical_path = PACKAGING_ROOT / asset_type / stored_name
+
+    existing_candidate = _first_existing_packaging_asset_path(raw_path, canonical_path=canonical_path)
+    if canonical_path is not None:
+        if canonical_path.exists():
+            existing_candidate = canonical_path
+        elif existing_candidate is not None and existing_candidate != canonical_path:
+            canonical_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(existing_candidate, canonical_path)
+            existing_candidate = canonical_path
+            changed = True
+
+    resolved_path = existing_candidate or canonical_path or (Path(raw_path) if raw_path else None)
+    normalized_path = str(resolved_path.resolve()) if resolved_path is not None else raw_path
+    if normalized_path != raw_path:
+        asset["path"] = normalized_path
+        changed = True
+    return asset, changed
+
+
+def _first_existing_packaging_asset_path(raw_path: str, *, canonical_path: Path | None) -> Path | None:
+    candidates: list[Path] = []
+    if canonical_path is not None:
+        candidates.append(canonical_path)
+
+    normalized_raw = str(raw_path or "").strip()
+    if normalized_raw:
+        candidates.append(Path(normalized_raw))
+        if normalized_raw.startswith("/app/"):
+            candidates.append(Path(normalized_raw.removeprefix("/app/")))
+
+    seen: set[str] = set()
+    for candidate in candidates:
+        key = str(candidate)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _existing_packaging_assets_by_id(assets: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    return {
+        item["id"]: item
+        for item in assets
+        if Path(str(item.get("path") or "")).exists()
+    }
+
+
 def _normalize_config(config: dict[str, Any], assets_by_id: dict[str, dict[str, Any]]) -> dict[str, Any]:
     normalized = dict(DEFAULT_CONFIG)
     normalized.update(config or {})
+
+    for asset_key, asset_type in (
+        ("intro_asset_id", "intro"),
+        ("outro_asset_id", "outro"),
+        ("insert_asset_id", "insert"),
+        ("watermark_asset_id", "watermark"),
+    ):
+        asset_id = normalized.get(asset_key)
+        if assets_by_id.get(asset_id, {}).get("asset_type") != asset_type:
+            normalized[asset_key] = None
 
     insert_ids = [
         item for item in (normalized.get("insert_asset_ids") or [])
@@ -731,6 +837,8 @@ def _normalize_config(config: dict[str, Any], assets_by_id: dict[str, dict[str, 
     smart_effect_style = str(
         normalized.get("smart_effect_style") or DEFAULT_CONFIG["smart_effect_style"]
     ).strip() or DEFAULT_CONFIG["smart_effect_style"]
+    if smart_effect_style == "smart_effect_rhythm":
+        smart_effect_style = DEFAULT_CONFIG["smart_effect_style"]
     if smart_effect_style not in SMART_EFFECT_STYLE_OPTIONS:
         smart_effect_style = DEFAULT_CONFIG["smart_effect_style"]
     normalized["smart_effect_style"] = smart_effect_style

@@ -30,7 +30,7 @@ def test_build_render_plan_defaults():
     assert plan["creative_profile"] is None
     assert plan["ai_director"] is None
     assert plan["avatar_commentary"] is None
-    assert plan["editing_accents"]["style"] == "smart_effect_rhythm"
+    assert plan["editing_accents"]["style"] == "smart_effect_commercial"
     assert plan["editing_accents"]["emphasis_overlays"] == []
 
 
@@ -141,17 +141,56 @@ def test_build_avatar_render_plan_keeps_packaging_but_disables_accents():
 def test_build_ai_effect_render_plan_drops_avatar_but_keeps_effects():
     plan = build_ai_effect_render_plan(
         {
+            "subtitles": {"style": "bold_yellow_outline", "motion_style": "motion_static"},
             "avatar_commentary": {"mode": "full_track_audio_passthrough"},
             "editing_accents": {
-                "style": "restrained",
+                "style": "smart_effect_glitch",
                 "transitions": {"enabled": True, "transition": "fade", "duration_sec": 0.12, "boundary_indexes": [0]},
-                "emphasis_overlays": [{"text": "注意"}],
+                "emphasis_overlays": [{"text": "注意", "start_time": 1.0, "end_time": 1.6}],
                 "sound_effects": [{"start_time": 1.0}],
             },
-        }
+        },
+        keep_segments=[
+            {"start": 0.0, "end": 3.0},
+            {"start": 4.0, "end": 7.0},
+            {"start": 9.0, "end": 12.0},
+            {"start": 14.5, "end": 18.0},
+        ],
+        subtitle_items=[
+            {"start_time": 0.8, "end_time": 2.1, "text_final": "这点一定要注意"},
+            {"start_time": 5.0, "end_time": 6.4, "text_final": "直接上 PRO"},
+            {"start_time": 9.2, "end_time": 10.4, "text_final": "黑白双色都很能打"},
+            {"start_time": 13.0, "end_time": 14.0, "text_final": "普通描述一下"},
+        ],
     )
 
     assert plan["avatar_commentary"] is None
+    assert plan["subtitles"]["motion_style"] == "motion_glitch"
+    assert plan["editing_accents"]["style"] == "smart_effect_glitch_ai"
     assert plan["editing_accents"]["transitions"]["enabled"] is True
-    assert plan["editing_accents"]["transitions"]["boundary_indexes"] == [0]
-    assert plan["editing_accents"]["emphasis_overlays"] == [{"text": "注意"}]
+    assert plan["editing_accents"]["transitions"]["transition"] == "pixelize"
+    assert plan["editing_accents"]["transitions"]["duration_sec"] == 0.16
+    assert plan["editing_accents"]["transitions"]["boundary_indexes"] == [0, 1, 2]
+    assert any(item["text"] == "注意" for item in plan["editing_accents"]["emphasis_overlays"])
+    assert any(item["text"] == "这点一定要注意" for item in plan["editing_accents"]["emphasis_overlays"])
+    assert any(item["text"] == "" for item in plan["editing_accents"]["emphasis_overlays"])
+    assert len(plan["editing_accents"]["sound_effects"]) == len(plan["editing_accents"]["emphasis_overlays"])
+
+
+def test_build_ai_effect_render_plan_maps_legacy_rhythm_to_commercial_ai():
+    plan = build_ai_effect_render_plan(
+        {
+            "subtitles": {"style": "bold_yellow_outline", "motion_style": "motion_static"},
+            "editing_accents": {"style": "smart_effect_rhythm"},
+        },
+        keep_segments=[
+            {"start": 0.0, "end": 3.0},
+            {"start": 4.0, "end": 8.0},
+        ],
+        subtitle_items=[
+            {"start_time": 0.8, "end_time": 2.1, "text_final": "这点一定要注意"},
+        ],
+    )
+
+    assert plan["editing_accents"]["style"] == "smart_effect_commercial_ai"
+    assert plan["subtitles"]["motion_style"] == "motion_strobe"

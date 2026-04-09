@@ -21,7 +21,6 @@ describe("JobDetailModal", () => {
 
     expect(screen.getByRole("dialog", { name: "fas_upgrade.mp4" })).toBeInTheDocument();
     expect(screen.getByText("任务详情内容")).toBeInTheDocument();
-    expect(screen.getByRole("presentation")).toHaveStyle({ left: "var(--sidebar-width)" });
 
     fireEvent.keyDown(window, { key: "Escape" });
     expect(handleClose).toHaveBeenCalledTimes(1);

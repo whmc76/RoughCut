@@ -1,6 +1,5 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 
-import { EmptyState } from "../components/ui/EmptyState";
 import { PageHeader } from "../components/ui/PageHeader";
 import { ConfigProfileSwitcher } from "../features/configProfiles/ConfigProfileSwitcher";
 import { JobCreateModal } from "../features/jobs/JobCreateModal";
@@ -9,9 +8,18 @@ import { JobDetailPanel } from "../features/jobs/JobDetailPanel";
 import { JobQueueTable } from "../features/jobs/JobQueueTable";
 import { JobReviewOverlay } from "../features/jobs/JobReviewOverlay";
 import { JobUploadPanel } from "../features/jobs/JobUploadPanel";
+import type { JobQueueFilter } from "../features/jobs/useJobWorkspace";
 import { useJobWorkspace } from "../features/jobs/useJobWorkspace";
 import { useI18n } from "../i18n";
-import { formatDate, statusLabel } from "../utils";
+import { classNames } from "../utils";
+
+const QUEUE_FILTER_META: Record<JobQueueFilter, { label: string; description: string }> = {
+  all: { label: "全部任务", description: "当前搜索范围内的全部任务。" },
+  pending: { label: "排队中", description: "等待进入执行链路的任务。" },
+  running: { label: "运行中", description: "正在执行中的任务。" },
+  done: { label: "已完成", description: "已完成并可继续查看结果的任务。" },
+  attention: { label: "待处理事项", description: "失败、待核对、已取消等需要人工介入的任务。" },
+};
 
 export function JobsPage() {
   const { t } = useI18n();
@@ -21,17 +29,13 @@ export function JobsPage() {
   const [reviewNoticeTone, setReviewNoticeTone] = useState<"success" | "error">("success");
   const [detailModalOpen, setDetailModalOpen] = useState(false);
   const [reviewOverlayOpen, setReviewOverlayOpen] = useState(false);
+  const queueStageRef = useRef<HTMLElement | null>(null);
 
   const languageOptions = workspace.options.data?.job_languages ?? [{ value: "zh-CN", label: "简体中文" }];
   const workflowTemplateOptions = workspace.options.data?.workflow_templates ?? [{ value: "", label: t("watch.page.autoMatch") }];
   const workflowModeOptions = workspace.options.data?.workflow_modes ?? [{ value: "standard_edit", label: t("creative.workflow.standard_edit") }];
   const enhancementOptions = workspace.options.data?.enhancement_modes ?? [];
-
-  const reviewJobs = workspace.filteredJobs.filter((job) => job.status === "needs_review");
-  const runningJobs = workspace.filteredJobs.filter((job) => job.status === "running" || job.status === "processing");
-  const activeJobs = workspace.filteredJobs
-    .filter((job) => job.status === "running" || job.status === "processing" || job.status === "needs_review")
-    .slice(0, 3);
+  const queueFilterMeta = QUEUE_FILTER_META[workspace.queueFilter];
 
   const isReviewContext =
     workspace.activity.data?.current_step?.status === "needs_review" || workspace.selectedJob?.status === "needs_review";
@@ -101,6 +105,11 @@ export function JobsPage() {
     }
   };
 
+  const focusQueue = (filter: JobQueueFilter) => {
+    workspace.setQueueFilter(filter);
+    queueStageRef.current?.scrollIntoView?.({ behavior: "smooth", block: "start" });
+  };
+
   const confirmReviewProfile = () => {
     workspace.confirmProfile.mutate(undefined, {
       onSuccess: async () => {
@@ -144,40 +153,76 @@ export function JobsPage() {
         }
       />
 
-      <section className="jobs-command-deck">
-        <article className="jobs-command-card">
-          <span>队列</span>
-          <strong>{workspace.filteredJobs.length}</strong>
-          <p>当前列表</p>
+      <section className="jobs-dashboard-row">
+        <article className="jobs-dashboard-card">
+          <div className="jobs-dashboard-head">
+            <div>
+              <span className="jobs-dashboard-eyebrow">任务队列仪表盘</span>
+              <h3>把任务流转和处理压力收在一个面板里</h3>
+            </div>
+            <p>{workspace.keyword.trim() ? `搜索“${workspace.keyword.trim()}”后的统计` : "当前页任务队列统计"}</p>
+          </div>
+          <div className="jobs-dashboard-metrics">
+            {[
+              { key: "all" as const, label: "队列总数", value: workspace.queueStats.total, hint: "当前列表" },
+              { key: "pending" as const, label: "排队中", value: workspace.queueStats.pending, hint: "等待执行" },
+              { key: "running" as const, label: "运行中", value: workspace.queueStats.running, hint: "正在处理" },
+              { key: "done" as const, label: "已完成", value: workspace.queueStats.done, hint: "可回看结果" },
+            ].map((item) => (
+              <button
+                key={item.key}
+                type="button"
+                className={classNames("jobs-dashboard-metric", workspace.queueFilter === item.key && "is-active")}
+                onClick={() => focusQueue(item.key)}
+              >
+                <span>{item.label}</span>
+                <strong>{item.value}</strong>
+                <p>{item.hint}</p>
+              </button>
+            ))}
+          </div>
         </article>
-        <article className="jobs-command-card">
-          <span>待审核</span>
-          <strong>{reviewJobs.length}</strong>
-          <p>优先处理</p>
-        </article>
-        <article className="jobs-command-card">
-          <span>运行中</span>
-          <strong>{runningJobs.length}</strong>
-          <p>正在处理</p>
-        </article>
-        <article className="jobs-command-card">
-          <span>待上传</span>
-          <strong>{uploadReadyLabel(workspace.upload.file?.name)}</strong>
-          <p>选好素材后创建</p>
-        </article>
+
+        <button
+          type="button"
+          className={classNames("jobs-attention-card", workspace.queueFilter === "attention" && "is-active")}
+          onClick={() => focusQueue("attention")}
+        >
+          <span className="jobs-dashboard-eyebrow">待处理事项</span>
+          <strong>{workspace.queueStats.attention}</strong>
+          <p>失败、待核对、已取消等需要人工介入的任务统一从这里进入。</p>
+          <div className="jobs-attention-breakdown">
+            <span>待核对 {workspace.queueStats.needsReview}</span>
+            <span>失败 {workspace.queueStats.failed}</span>
+            <span>取消 {workspace.queueStats.cancelled}</span>
+          </div>
+        </button>
       </section>
 
-      <section className="jobs-queue-stage">
+      <section className="jobs-queue-stage" ref={queueStageRef}>
         <div className="jobs-stage-head">
           <div>
             <h3>任务列表</h3>
-            <p>{workspace.filteredJobs.length ? `${workspace.filteredJobs.length} 个任务` : "当前没有任务"}</p>
+            <p>
+              {workspace.filteredJobs.length
+                ? `${queueFilterMeta.label} · ${workspace.filteredJobs.length} 个任务`
+                : `${queueFilterMeta.label} · 当前没有任务`}
+            </p>
           </div>
           <div className="jobs-stage-meta">
-            <span>当前选中</span>
-            <strong>{workspace.selectedJob?.source_name || "—"}</strong>
+            <span>当前筛选</span>
+            <strong>{queueFilterMeta.label}</strong>
+            <button
+              type="button"
+              className="button ghost button-sm"
+              onClick={() => focusQueue("all")}
+              disabled={workspace.queueFilter === "all"}
+            >
+              查看全部
+            </button>
           </div>
         </div>
+        <p className="jobs-queue-stage-note">{queueFilterMeta.description}</p>
 
         <JobQueueTable
           jobs={workspace.filteredJobs}
@@ -208,45 +253,6 @@ export function JobsPage() {
         </div>
       ) : null}
       {reviewNotice ? <div className={reviewNoticeClass}>{reviewNotice}</div> : null}
-
-      {activeJobs.length ? (
-        <section className="jobs-active-band">
-          <div className="jobs-stage-head">
-            <div>
-              <h3>需要处理</h3>
-              <p>运行中和待审核任务在这里。</p>
-            </div>
-            <div className="jobs-stage-meta">
-              <span>当前数量</span>
-              <strong>{activeJobs.length}</strong>
-            </div>
-          </div>
-          <div className="jobs-active-grid">
-            {activeJobs.map((job) => (
-              <article key={job.id} className="jobs-active-card">
-                <div className="jobs-active-copy">
-                  <strong>{job.source_name}</strong>
-                  <p>{job.content_summary || job.content_subject || t("jobs.queue.noSummary")}</p>
-                </div>
-                <div className="jobs-active-meta">
-                  <span className={`status-chip ${job.status}`}>{statusLabel(job.status)}</span>
-                  <span>{formatDate(job.updated_at)}</span>
-                </div>
-              </article>
-            ))}
-          </div>
-        </section>
-      ) : (
-        <section className="jobs-active-band">
-          <div className="jobs-stage-head">
-            <div>
-              <h3>需要处理</h3>
-              <p>当前没有运行中或待审核任务。</p>
-            </div>
-          </div>
-          <EmptyState message={t("jobs.page.activeWorkEmpty")} />
-        </section>
-      )}
 
       <JobCreateModal open={createOpen} onClose={() => setCreateOpen(false)}>
         <section className="jobs-create-modal-content">
@@ -405,9 +411,4 @@ export function JobsPage() {
       />
     </section>
   );
-}
-
-function uploadReadyLabel(fileName?: string) {
-  if (!fileName) return "未选择素材";
-  return fileName.length > 20 ? `${fileName.slice(0, 17)}…` : fileName;
 }

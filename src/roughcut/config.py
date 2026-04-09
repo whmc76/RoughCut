@@ -86,6 +86,49 @@ TRANSCRIPTION_MODEL_OPTIONS: dict[str, list[str]] = {
         "qwen3-asr-1.7b",
     ],
 }
+
+
+def resolve_heygem_shared_root(*, ensure_exists: bool = True) -> Path:
+    """Resolve the host-accessible HeyGem shared directory.
+
+    Prefer an existing `HEYGEM_SHARED_ROOT` first. If that path is a container-only
+    mount like `/code/data` from a host process, fall back to `HEYGEM_SHARED_HOST_DIR`
+    before creating any directories.
+    """
+
+    raw_root = str(os.getenv("HEYGEM_SHARED_ROOT") or "").strip()
+    raw_host_dir = str(os.getenv("HEYGEM_SHARED_HOST_DIR") or "").strip()
+
+    candidates: list[Path] = []
+    if raw_root:
+        candidates.append(Path(raw_root).expanduser())
+    if raw_host_dir:
+        host_path = Path(raw_host_dir).expanduser()
+        if all(host_path != candidate for candidate in candidates):
+            candidates.append(host_path)
+
+    for candidate in candidates:
+        if candidate.exists():
+            if ensure_exists:
+                (candidate / "inputs" / "audio").mkdir(parents=True, exist_ok=True)
+                (candidate / "inputs" / "video").mkdir(parents=True, exist_ok=True)
+                (candidate / "temp").mkdir(parents=True, exist_ok=True)
+                (candidate / "result").mkdir(parents=True, exist_ok=True)
+            return candidate
+
+    if raw_host_dir:
+        resolved = Path(raw_host_dir).expanduser()
+    elif raw_root:
+        resolved = Path(raw_root).expanduser()
+    else:
+        resolved = DEFAULT_HEYGEM_SHARED_ROOT
+
+    if ensure_exists:
+        (resolved / "inputs" / "audio").mkdir(parents=True, exist_ok=True)
+        (resolved / "inputs" / "video").mkdir(parents=True, exist_ok=True)
+        (resolved / "temp").mkdir(parents=True, exist_ok=True)
+        (resolved / "result").mkdir(parents=True, exist_ok=True)
+    return resolved
 DEFAULT_TRANSCRIPTION_PROVIDER = "openai"
 DEFAULT_TRANSCRIPTION_MODELS: dict[str, str] = {
     "funasr": "sensevoice-small",
@@ -266,6 +309,12 @@ class Settings(BaseSettings):
     max_upload_size_mb: int = 2048
     max_video_duration_sec: int = 7200
     ffmpeg_timeout_sec: int = 600
+    render_video_encoder: str = "auto"          # auto | libx264 | h264_nvenc
+    render_cpu_preset: str = "veryfast"         # x264 preset for CPU fallback
+    render_crf: int = 19                        # x264 constant quality target
+    render_nvenc_preset: str = "p5"             # NVENC preset balancing speed/quality
+    render_nvenc_cq: int = 21                   # NVENC constant quality target
+    render_audio_bitrate: str = "192k"
     allowed_extensions: list[str] = [".mp4", ".mov", ".mkv", ".avi", ".webm"]
 
     # Output

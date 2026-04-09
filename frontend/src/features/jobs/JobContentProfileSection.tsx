@@ -54,8 +54,8 @@ export function JobContentProfileSection({
     : null;
   const resolvedVideoType = normalizeVideoTypeValue(
     [
-      getTextValue(contentUnderstanding?.video_type),
       getTextValue(contentSource?.video_type),
+      getTextValue(contentUnderstanding?.video_type),
       getTextValue(contentSource?.content_kind),
       getTextValue(contentSource?.subject_type),
     ].find(Boolean),
@@ -69,19 +69,20 @@ export function JobContentProfileSection({
           getTextValue(contentUnderstanding.primary_subject)
           || (normalizeVideoTypeValue(fallbackSubjectType) ? "" : fallbackSubjectType),
         video_theme:
-          getTextValue(contentUnderstanding.video_theme)
-          || getTextValue(contentSource?.video_theme),
+          getTextValue(contentSource?.video_theme)
+          || getTextValue(contentUnderstanding.video_theme),
         summary:
-          getTextValue(contentUnderstanding.summary)
-          || getTextValue(contentSource?.summary),
+          getTextValue(contentSource?.summary)
+          || getTextValue(contentUnderstanding.summary),
         hook_line:
-          getTextValue(contentUnderstanding.hook_line)
-          || getTextValue(contentSource?.hook_line),
-        engagement_question:
-          getTextValue(contentUnderstanding.question)
+          getTextValue(contentSource?.hook_line)
+          || getTextValue(contentUnderstanding.hook_line),
+        engagement_question: (
+          getTextValue(contentSource?.engagement_question)
+          || getTextValue(contentSource?.question)
+          || getTextValue(contentUnderstanding.question)
           || getTextValue(contentUnderstanding.engagement_question)
-          || getTextValue(contentSource?.engagement_question)
-          || getTextValue(contentSource?.question),
+        ),
       }
     : {
       ...(contentSource ?? {}),

@@ -158,10 +158,12 @@ _TITLE_STYLE_LABELS = {
     "neon_night": "夜霓虹",
 }
 _SMART_EFFECT_STYLE_LABELS = {
-    "smart_effect_rhythm": "节奏卡点",
+    "smart_effect_commercial": "商业高能",
+    "smart_effect_rhythm": "商业高能",
     "smart_effect_punch": "爆点冲击",
     "smart_effect_glitch": "故障赛博",
     "smart_effect_cinematic": "电影推进",
+    "smart_effect_atmosphere": "氛围塑形",
     "smart_effect_minimal": "克制轻特效",
 }
 _IDENTITY_SUPPORT_SOURCE_LABELS = {
@@ -2786,9 +2788,9 @@ def _build_review_checks(
         )
         if packaging_enabled:
             detail = (
-                f"已启用智能剪辑特效，当前风格为 {smart_effect_style}；包装配置里也包含插片/转场素材，可直接叠加节奏强化效果。"
+                f"已启用智能剪辑特效，当前风格为 {smart_effect_style}；包装配置里也包含插片/转场素材，可进一步放大转场、画面特效和氛围强化。"
                 if has_insert
-                else f"已启用智能剪辑特效，当前风格为 {smart_effect_style}；将基于剪辑时间线自动补转场、强调动画与局部视觉强化。"
+                else f"已启用智能剪辑特效，当前风格为 {smart_effect_style}；将基于剪辑时间线自动补转场、字幕动效、局部画面强化与氛围特效。"
             )
             status = "齐全"
         else:

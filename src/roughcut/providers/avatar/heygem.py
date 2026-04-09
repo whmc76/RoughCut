@@ -10,7 +10,7 @@ from typing import Any
 
 import httpx
 
-from roughcut.config import DEFAULT_HEYGEM_SHARED_ROOT, get_settings
+from roughcut.config import DEFAULT_HEYGEM_SHARED_ROOT, get_settings, resolve_heygem_shared_root
 from roughcut.docker_gpu_guard import hold_managed_gpu_services
 from roughcut.providers.avatar.base import AvatarProvider
 
@@ -505,11 +505,9 @@ def _resolve_audio_source(
 
 def _detect_shared_root() -> Path | None:
     env_root = os.getenv("HEYGEM_SHARED_ROOT")
-    if env_root:
-        env_path = Path(env_root)
-        if not env_path.exists():
-            env_path.mkdir(parents=True, exist_ok=True)
-        return env_path
+    env_host_root = os.getenv("HEYGEM_SHARED_HOST_DIR")
+    if env_root or env_host_root:
+        return resolve_heygem_shared_root()
     for root in _DEFAULT_SHARED_ROOTS:
         if root.exists():
             return root

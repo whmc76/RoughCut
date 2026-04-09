@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from pathlib import Path
 
 import pytest
 
@@ -297,3 +298,98 @@ async def test_packaging_library_uses_job_packaging_snapshot_when_present(db_eng
     assert plan["copy_style"] == "attention_grabbing"
     assert plan["subtitle_style"] == "bold_yellow_outline"
     assert plan["cover_style"] == "preset_default"
+    assert plan["smart_effect_style"] == "smart_effect_commercial"
+
+
+@pytest.mark.asyncio
+async def test_packaging_library_migrates_legacy_container_asset_paths_to_shared_root(db_engine, tmp_path, monkeypatch):
+    from datetime import datetime, timezone
+
+    from roughcut.db.models import AppSetting, PackagingAsset
+    from roughcut.db.session import get_session_factory
+
+    shared_root = tmp_path / "shared-packaging"
+    monkeypatch.setattr(library, "PACKAGING_ROOT", shared_root)
+    monkeypatch.setattr(library, "MANIFEST_PATH", shared_root / "manifest.json")
+
+    legacy_file = tmp_path / "legacy-private" / "outro" / "legacy-outro.mp4"
+    legacy_file.parent.mkdir(parents=True, exist_ok=True)
+    legacy_file.write_bytes(b"legacy-outro")
+
+    asset_id = "legacy-outro-asset"
+    stored_name = "legacy-outro.mp4"
+    async with get_session_factory()() as session:
+        session.add(
+            PackagingAsset(
+                id=asset_id,
+                asset_type="outro",
+                original_name="legacy-outro.mp4",
+                stored_name=stored_name,
+                path=f"/app/{legacy_file.as_posix()}",
+                size_bytes=len(b"legacy-outro"),
+                content_type="video/mp4",
+                watermark_preprocessed=None,
+                created_at=datetime.now(timezone.utc),
+            )
+        )
+        session.add(
+            AppSetting(
+                key="packaging_config",
+                value_json={
+                    "enabled": True,
+                    "outro_asset_id": asset_id,
+                },
+            )
+        )
+        await session.commit()
+
+    plan = library.resolve_packaging_plan_for_job(str(uuid.uuid4()), content_profile={"workflow_template": "tutorial_standard"})
+
+    assert plan["outro"] is not None
+    resolved_path = Path(plan["outro"]["path"])
+    assert resolved_path == shared_root / "outro" / stored_name
+    assert resolved_path.exists()
+    assert resolved_path.read_bytes() == b"legacy-outro"
+
+
+@pytest.mark.asyncio
+async def test_packaging_library_hides_missing_assets_from_config_and_listing(db_engine, tmp_path, monkeypatch):
+    from datetime import datetime, timezone
+
+    from roughcut.db.models import AppSetting, PackagingAsset
+    from roughcut.db.session import get_session_factory
+
+    shared_root = tmp_path / "shared-packaging"
+    monkeypatch.setattr(library, "PACKAGING_ROOT", shared_root)
+    monkeypatch.setattr(library, "MANIFEST_PATH", shared_root / "manifest.json")
+
+    asset_id = "missing-watermark-asset"
+    async with get_session_factory()() as session:
+        session.add(
+            PackagingAsset(
+                id=asset_id,
+                asset_type="watermark",
+                original_name="missing-logo.png",
+                stored_name="missing-logo.png",
+                path=str(tmp_path / "missing" / "missing-logo.png"),
+                size_bytes=12,
+                content_type="image/png",
+                watermark_preprocessed=None,
+                created_at=datetime.now(timezone.utc),
+            )
+        )
+        session.add(
+            AppSetting(
+                key="packaging_config",
+                value_json={
+                    "enabled": True,
+                    "watermark_asset_id": asset_id,
+                },
+            )
+        )
+        await session.commit()
+
+    payload = library.list_packaging_assets()
+
+    assert payload["assets"]["watermark"] == []
+    assert payload["config"]["watermark_asset_id"] is None

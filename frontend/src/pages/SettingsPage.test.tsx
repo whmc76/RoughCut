@@ -112,10 +112,10 @@ describe("SettingsPage", () => {
     expect(screen.getByText("模型与执行")).toBeInTheDocument();
     expect(screen.getByText("质量与输出")).toBeInTheDocument();
     expect(screen.getByText("相关页面")).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "查看包装" })).toHaveAttribute("href", "/packaging");
     expect(screen.getByRole("link", { name: "查看记忆" })).toHaveAttribute("href", "/memory");
     expect(screen.getByRole("link", { name: "查看词表" })).toHaveAttribute("href", "/glossary");
     expect(screen.getByRole("link", { name: "查看控制页" })).toHaveAttribute("href", "/control");
+    expect(screen.queryByRole("link", { name: "查看包装" })).not.toBeInTheDocument();
   });
 
   it("still distinguishes telegram review from telegram agent in the automation summary", () => {

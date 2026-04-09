@@ -36,6 +36,8 @@ export function StyleLabPage() {
   const activeEnhancementModes = config.data?.default_job_enhancement_modes ?? [];
   const activeWorkflowMode =
     catalog?.workflow_modes.find((mode) => mode.key === config.data?.default_job_workflow_mode) ?? null;
+  const activeEnhancementLabels =
+    catalog?.enhancement_modes.filter((mode) => activeEnhancementModes.includes(mode.key)).map((mode) => mode.title) ?? [];
   const activePresenterId = String(config.data?.avatar_presenter_id ?? "");
   const presenterProfiles = avatarMaterials.data?.profiles ?? [];
 
@@ -109,6 +111,11 @@ export function StyleLabPage() {
               className="style-lab-panel style-lab-panel-primary"
               title="字幕、标题、文案、封面"
               description="这里只看当前已选项和预设。"
+              actions={
+                <Link className="button ghost" to="/packaging">
+                  打开包装
+                </Link>
+              }
             >
               <div className="style-lab-preset-lanes">
                 <PresetRail
@@ -157,6 +164,18 @@ export function StyleLabPage() {
                   busy={styleWorkspace.saveConfig.isPending}
                 />
               </div>
+              <div className="top-gap">
+                <div className="settings-command-card">
+                  <span className="settings-overview-label">包装</span>
+                  <strong>素材和策略</strong>
+                  <div className="muted">包装素材池和输出规则在这里单独维护。</div>
+                  <div className="top-gap">
+                    <Link className="button ghost" to="/packaging">
+                      查看包装
+                    </Link>
+                  </div>
+                </div>
+              </div>
             </PageSection>
 
             <PageSection
@@ -164,40 +183,59 @@ export function StyleLabPage() {
               title="模式和增强"
               description="先选主模式，再按需开启增强。"
             >
-              <div className="style-lab-mode-grid">
-                <section className="style-lab-mode-column">
-                  <div className="toolbar">
-                    <strong>主模式</strong>
-                    <span className="status-pill">{activeWorkflowMode?.title ?? config.data.default_job_workflow_mode}</span>
-                  </div>
-                  <div className="style-lab-mode-list compact-top">
-                    {catalog.workflow_modes.map((mode) => (
-                      <CreativeModeTile
-                        key={mode.key}
-                        mode={mode}
-                        active={config.data.default_job_workflow_mode === mode.key}
-                        onClick={() => selectWorkflowMode(mode.key)}
-                      />
-                    ))}
-                  </div>
+              <div className="style-lab-mode-stack">
+                <section className="style-lab-mode-overview">
+                  <article className="style-lab-mode-summary">
+                    <div className="toolbar">
+                      <strong>主模式</strong>
+                      <span className="status-pill">{activeWorkflowMode?.title ?? config.data.default_job_workflow_mode}</span>
+                    </div>
+                    <p className="muted">
+                      {activeWorkflowMode?.summary ?? "主模式决定任务的基础产出路径，默认只保留一条稳定主流程。"}
+                    </p>
+                    <div className="style-lab-workflow-switcher top-gap">
+                      {catalog.workflow_modes.map((mode) => (
+                        <WorkflowModeOption
+                          key={mode.key}
+                          mode={mode}
+                          active={config.data.default_job_workflow_mode === mode.key}
+                          onClick={() => selectWorkflowMode(mode.key)}
+                        />
+                      ))}
+                    </div>
+                  </article>
+
+                  <article className="style-lab-mode-summary">
+                    <div className="toolbar">
+                      <strong>增强</strong>
+                      <span className="status-pill">{activeEnhancementModes.length}项已启用</span>
+                    </div>
+                    <p className="muted">{describeEnhancementState(activeEnhancementModes.length)}</p>
+                    <div className="mode-chip-list top-gap">
+                      {activeEnhancementLabels.length ? (
+                        activeEnhancementLabels.map((label) => (
+                          <span key={label} className="mode-chip subtle selected">
+                            {label}
+                          </span>
+                        ))
+                      ) : (
+                        <span className="mode-chip subtle">当前只使用主模式</span>
+                      )}
+                    </div>
+                  </article>
                 </section>
 
-                <section className="style-lab-mode-column">
-                  <div className="toolbar">
-                    <strong>增强</strong>
-                    <span className="status-pill">{activeEnhancementModes.length}项已启用</span>
-                  </div>
-                  <div className="style-lab-mode-list compact-top">
-                    {catalog.enhancement_modes.map((mode) => (
-                      <CreativeModeTile
-                        key={mode.key}
-                        mode={mode}
-                        active={activeEnhancementModes.includes(mode.key)}
-                        onClick={() => toggleEnhancementMode(mode.key)}
-                        toggleLabel={activeEnhancementModes.includes(mode.key) ? "移除" : "启用"}
-                      />
-                    ))}
-                  </div>
+                <section className="style-lab-enhancement-grid">
+                  {catalog.enhancement_modes.map((mode) => (
+                    <CreativeModeTile
+                      key={mode.key}
+                      mode={mode}
+                      active={activeEnhancementModes.includes(mode.key)}
+                      onClick={() => toggleEnhancementMode(mode.key)}
+                      toggleLabel={activeEnhancementModes.includes(mode.key) ? "移除" : "启用"}
+                      compact
+                    />
+                  ))}
                 </section>
               </div>
             </PageSection>
@@ -312,12 +350,39 @@ function CreativeModeTile({
   active,
   onClick,
   toggleLabel = "启用",
+  compact = false,
 }: {
   mode: CreativeModeDefinition;
   active: boolean;
   onClick: () => void;
   toggleLabel?: string;
+  compact?: boolean;
 }) {
+  if (compact) {
+    return (
+      <article className={classNames("mode-card", "mode-card-compact", active && "selected")}>
+        <div className="mode-card-header mode-card-compact-header">
+          <div>
+            <strong>{mode.title}</strong>
+            <div className="muted compact-top">{mode.tagline}</div>
+          </div>
+          <button className={active ? "button primary button-sm" : "button ghost button-sm"} type="button" onClick={onClick}>
+            {active ? "已启用" : toggleLabel}
+          </button>
+        </div>
+        <p className="muted mode-card-compact-summary">{mode.summary}</p>
+        <div className="mode-chip-list compact-top">
+          {mode.suitable_for.slice(0, 3).map((item) => (
+            <span key={item} className="mode-chip subtle">
+              {item}
+            </span>
+          ))}
+        </div>
+        <div className="muted compact-top mode-card-compact-output">{describeModeOutput(mode)}</div>
+      </article>
+    );
+  }
+
   return (
     <article className={classNames("mode-card", active && "selected")}>
       <div className="mode-card-header">
@@ -348,6 +413,34 @@ function StatusChip({ label, value }: { label: string; value: string }) {
       {label}: {value}
     </span>
   );
+}
+
+function WorkflowModeOption({
+  mode,
+  active,
+  onClick,
+}: {
+  mode: CreativeModeDefinition;
+  active: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      className={classNames("style-lab-workflow-option", active && "selected")}
+      onClick={onClick}
+    >
+      <strong>{mode.title}</strong>
+      <span>{mode.tagline}</span>
+      <small>{mode.delivery_scope || describeModeOutput(mode)}</small>
+    </button>
+  );
+}
+
+function describeEnhancementState(enabledCount: number): string {
+  if (enabledCount === 0) return "默认只跑主流程，需要时再叠加增强，避免把任务入口变成重配置面板。";
+  if (enabledCount === 1) return "当前保留 1 个默认增强项，主流程保持清晰，增强仍按需叠加。";
+  return `当前默认挂 ${enabledCount} 个增强项，建议只保留真正高频的增强能力。`;
 }
 
 function describeModeOutput(mode: CreativeModeDefinition): string {

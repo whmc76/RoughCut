@@ -287,6 +287,7 @@ describe("StyleLabPage", () => {
     expect(container.querySelector(".style-lab-presenter-stage")).toBeInTheDocument();
     expect(screen.getByText("模式和增强")).toBeInTheDocument();
     expect(screen.getByText("字幕、标题、文案、封面")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "查看包装" })).toHaveAttribute("href", "/packaging");
     expect(screen.queryByText("第一段")).not.toBeInTheDocument();
     expect(screen.queryByText("第二段")).not.toBeInTheDocument();
     expect(screen.queryByText("第三段")).not.toBeInTheDocument();

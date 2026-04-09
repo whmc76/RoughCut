@@ -53,6 +53,7 @@ from roughcut.media.output import (
     load_cover_selection_summary,
     write_srt_file,
 )
+from roughcut.media.scene import detect_scenes
 from roughcut.media.subtitles import remap_subtitles_to_timeline
 from roughcut.media.probe import probe, validate_media
 from roughcut.media.render import render_video
@@ -235,6 +236,49 @@ def _resolve_subtitle_split_profile(*, width: int | None, height: int | None) ->
         "max_chars": 18,
         "max_duration": 3.4,
     }
+
+
+def _build_edit_plan_transcript_segments(
+    transcript_rows: list[TranscriptSegment],
+    transcript_evidence: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    artifact_segments = []
+    if isinstance(transcript_evidence, dict):
+        artifact_segments = list(transcript_evidence.get("segments") or [])
+    if artifact_segments:
+        normalized: list[dict[str, Any]] = []
+        for index, item in enumerate(artifact_segments):
+            if not isinstance(item, dict):
+                continue
+            normalized.append(
+                {
+                    "index": int(item.get("index", index) or index),
+                    "start": float(item.get("start") or 0.0),
+                    "end": float(item.get("end") or 0.0),
+                    "text": str(item.get("text") or item.get("raw_text") or ""),
+                    "speaker": item.get("speaker"),
+                    "confidence": item.get("confidence"),
+                    "logprob": item.get("logprob"),
+                    "alignment": item.get("alignment"),
+                    "words": list(item.get("words") or []),
+                }
+            )
+        if normalized:
+            return normalized
+
+    fallback_segments: list[dict[str, Any]] = []
+    for row in transcript_rows:
+        fallback_segments.append(
+            {
+                "index": int(row.segment_index),
+                "start": float(row.start_time),
+                "end": float(row.end_time),
+                "text": str(row.text or ""),
+                "speaker": row.speaker,
+                "words": list(row.words_json or []),
+            }
+        )
+    return fallback_segments
 
 
 def _job_creative_profile(job: Job) -> dict[str, object]:
@@ -1309,6 +1353,7 @@ async def run_content_profile(job_id: str) -> dict:
                         source_name=job.source_name,
                         workflow_template=job.workflow_template,
                         transcript_excerpt=transcript_excerpt,
+                        subtitle_items=subtitle_dicts,
                         glossary_terms=effective_glossary_terms,
                         user_memory=user_memory,
                         include_research=include_research,
@@ -1366,11 +1411,27 @@ async def run_content_profile(job_id: str) -> dict:
                     copy_style=copy_style,
                     seeded_profile=content_profile,
                 )
+                enrich_cache_key = build_cache_key(enrich_cache_namespace, enrich_cache_fingerprint)
+                usage_before = await _read_persisted_step_usage_snapshot(step.id if step else None)
+                with track_step_usage(job_id=job.id, step_id=step.id, step_name="content_profile"):
+                    content_profile = await enrich_content_profile(
+                        profile=content_profile,
+                        source_name=job.source_name,
+                        workflow_template=job.workflow_template,
+                        transcript_excerpt=transcript_excerpt,
+                        subtitle_items=subtitle_dicts,
+                        glossary_terms=effective_glossary_terms,
+                        user_memory=user_memory,
+                        include_research=include_research,
+                    )
+                usage_after = await _read_persisted_step_usage_snapshot(step.id if step else None)
+                usage_baseline = _usage_delta(usage_after, usage_before)
                 save_cached_json(
                     enrich_cache_namespace,
-                    build_cache_key(enrich_cache_namespace, enrich_cache_fingerprint),
+                    enrich_cache_key,
                     fingerprint=enrich_cache_fingerprint,
                     result=content_profile,
+                    usage_baseline=usage_baseline,
                 )
         content_profile = apply_identity_review_guard(
             content_profile,
@@ -1719,6 +1780,7 @@ async def run_glossary_review(job_id: str) -> dict:
                     source_name=job.source_name,
                     workflow_template=job.workflow_template,
                     transcript_excerpt=str(content_profile.get("transcript_excerpt") or ""),
+                    subtitle_items=subtitle_dicts,
                     glossary_terms=effective_glossary_terms,
                     user_memory=user_memory,
                     include_research=include_research,
@@ -2265,6 +2327,12 @@ async def run_edit_plan(job_id: str) -> dict:
             .order_by(SubtitleItem.item_index)
         )
         subtitle_items = item_result.scalars().all()
+        transcript_result = await session.execute(
+            select(TranscriptSegment)
+            .where(TranscriptSegment.job_id == job.id, TranscriptSegment.version == 1)
+            .order_by(TranscriptSegment.segment_index)
+        )
+        transcript_rows = transcript_result.scalars().all()
         subtitle_dicts = [
             {
                 "index": si.item_index,
@@ -2276,6 +2344,15 @@ async def run_edit_plan(job_id: str) -> dict:
             }
             for si in subtitle_items
         ]
+        transcript_evidence_artifact = await _load_latest_optional_artifact(
+            session,
+            job_id=job.id,
+            artifact_types=("transcript_evidence",),
+        )
+        transcript_segment_dicts = _build_edit_plan_transcript_segments(
+            transcript_rows,
+            transcript_evidence_artifact.data_json if transcript_evidence_artifact is not None else None,
+        )
 
         profile_artifact, content_profile = await _load_preferred_downstream_profile(session, job_id=job.id)
         ai_director_artifact = await _load_latest_optional_artifact(
@@ -2390,6 +2467,20 @@ async def run_edit_plan(job_id: str) -> dict:
             )
             await _set_step_progress(session, step, detail="检测静音和明显废话段", progress=0.5)
             silences = detect_silence(audio_path)
+            scene_boundaries = []
+            local_source_candidate = Path(str(job.source_path or "")).expanduser()
+            if not local_source_candidate.exists():
+                storage = get_storage()
+                resolve_path = getattr(storage, "resolve_path", None)
+                if callable(resolve_path):
+                    resolved_source = resolve_path(str(job.source_path or ""))
+                    if resolved_source.exists():
+                        local_source_candidate = resolved_source
+            if local_source_candidate.exists():
+                try:
+                    scene_boundaries = detect_scenes(local_source_candidate)
+                except Exception:
+                    logger.exception("Scene detection failed during edit_plan for job %s", job.id)
 
         decision = build_edit_decision(
             source_path=job.source_path,
@@ -2397,6 +2488,8 @@ async def run_edit_plan(job_id: str) -> dict:
             silence_segments=silences,
             subtitle_items=subtitle_dicts,
             content_profile=content_profile,
+            transcript_segments=transcript_segment_dicts,
+            scene_boundaries=scene_boundaries,
         )
         await _set_step_progress(session, step, detail="生成剪辑时间线与渲染计划", progress=0.85)
 
@@ -2592,7 +2685,6 @@ async def run_render(job_id: str) -> dict:
         tmp_cover_plain_mp4 = Path(tmpdir) / "output_cover_plain.mp4"
         plain_render_plan = build_plain_render_plan(render_plan_timeline.data_json)
         avatar_render_plan = build_avatar_render_plan(render_plan_timeline.data_json)
-        ai_effect_render_plan = build_ai_effect_render_plan(render_plan_timeline.data_json)
         await render_video(
             source_path=source_path,
             render_plan=plain_render_plan,
@@ -2608,6 +2700,11 @@ async def run_render(job_id: str) -> dict:
             if s.get("type") == "keep"
         ]
         remapped_subtitles = remap_subtitles_to_timeline(subtitle_dicts, keep_segments)
+        ai_effect_render_plan = build_ai_effect_render_plan(
+            render_plan_timeline.data_json,
+            keep_segments=keep_segments,
+            subtitle_items=remapped_subtitles,
+        )
         packaged_subtitles = await _map_subtitles_to_packaged_timeline(
             remapped_subtitles,
             render_plan_timeline.data_json,

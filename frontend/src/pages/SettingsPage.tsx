@@ -32,11 +32,6 @@ export function SettingsPage() {
       label: "包装设置",
       value: `复核间隔 ${packagingReviewGap.toFixed(2)} · 最低分 ${packagingMinScore.toFixed(2)} · 术语 ${glossaryThreshold.toFixed(2)}`,
       detail: "素材和输出规则。",
-      action: (
-        <Link className="button ghost" to="/packaging">
-          打开包装
-        </Link>
-      ),
     },
     {
       label: "记忆与词表",
@@ -193,19 +188,9 @@ export function SettingsPage() {
       <PageSection
         className="settings-stage settings-stage-automation settings-stage-links"
         title="相关页面"
-        description="包装、记忆、词表和控制页。"
+        description="记忆、词表和控制页。"
       >
         <div className="settings-link-grid">
-          <article className="settings-command-card">
-            <span className="settings-overview-label">包装</span>
-            <strong>素材和策略</strong>
-            <div className="muted">查看素材和输出规则。</div>
-            <div className="top-gap">
-              <Link className="button ghost" to="/packaging">
-                查看包装
-              </Link>
-            </div>
-          </article>
           <article className="settings-command-card">
             <span className="settings-overview-label">记忆</span>
             <strong>偏差和偏好</strong>

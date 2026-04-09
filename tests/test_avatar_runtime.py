@@ -9,6 +9,7 @@ from roughcut.avatar.runtime import (
     _is_heygem_training_only_service,
     _prepare_direct_preview_audio,
     _submit_heygem_preview_to_base,
+    heygem_shared_root,
 )
 
 
@@ -311,6 +312,23 @@ async def test_is_heygem_training_only_service_does_not_treat_404_preview_probe_
     monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
 
     assert await _is_heygem_training_only_service("http://127.0.0.1:49204") is True
+
+
+def test_heygem_shared_root_prefers_host_dir_when_container_root_is_unavailable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    host_shared_root = tmp_path / "host-heygem"
+    monkeypatch.setenv("HEYGEM_SHARED_ROOT", "/code/data")
+    monkeypatch.setenv("HEYGEM_SHARED_HOST_DIR", str(host_shared_root))
+
+    resolved = heygem_shared_root()
+
+    assert resolved == host_shared_root
+    assert (host_shared_root / "inputs" / "audio").exists()
+    assert (host_shared_root / "inputs" / "video").exists()
+    assert (host_shared_root / "temp").exists()
+    assert (host_shared_root / "result").exists()
 
 
 @pytest.mark.asyncio

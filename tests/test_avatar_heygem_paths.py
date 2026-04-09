@@ -71,6 +71,29 @@ def test_resolve_audio_source_namespaces_staged_file_by_job(tmp_path: Path, monk
     assert (shared_root / "inputs" / "audio" / "job_123_avatar_full_track_drive.wav").exists()
 
 
+def test_resolve_audio_source_prefers_host_shared_dir_when_container_root_is_unavailable(tmp_path: Path, monkeypatch):
+    import roughcut.providers.avatar.heygem as heygem_mod
+
+    host_shared_root = tmp_path / "host-heygem"
+    host_shared_root.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(heygem_mod, "_DEFAULT_SHARED_ROOTS", ())
+    monkeypatch.setenv("HEYGEM_SHARED_ROOT", "/code/data")
+    monkeypatch.setenv("HEYGEM_SHARED_HOST_DIR", str(host_shared_root))
+
+    source = tmp_path / "drive.wav"
+    source.write_bytes(b"audio")
+
+    audio_source = _resolve_audio_source(
+        str(source),
+        job_id="job-123",
+        segment_id="avatar_full_track",
+    )
+
+    assert audio_source == "/code/data/inputs/audio/job_123_avatar_full_track_drive.wav"
+    assert (host_shared_root / "inputs" / "audio" / "job_123_avatar_full_track_drive.wav").exists()
+    assert not Path("/code/data/inputs/audio/job_123_avatar_full_track_drive.wav").exists()
+
+
 def test_heygem_poll_task_surfaces_non_success_code():
     provider = HeyGemAvatarProvider()
 

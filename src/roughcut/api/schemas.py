@@ -430,7 +430,7 @@ class PackagingConfigOut(BaseModel):
     music_loop_mode: str = "loop_single"
     subtitle_style: str = "bold_yellow_outline"
     subtitle_motion_style: str = "motion_static"
-    smart_effect_style: str = "smart_effect_rhythm"
+    smart_effect_style: str = "smart_effect_commercial"
     cover_style: str = "preset_default"
     title_style: str = "preset_default"
     copy_style: str = "attention_grabbing"

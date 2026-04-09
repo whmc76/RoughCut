@@ -321,58 +321,61 @@ export function JobDetailPanel({
                         : stepItems[0]?.detail || step.error_message || null;
 
                     return (
-                    <div
-                      key={step.id}
-                      className={classNames(
-                        "step-row",
-                        isCurrentStep && "step-row-current",
-                        step.status === "failed" && "step-row-error",
-                        step.status === "cancelled" && "step-row-error",
-                        step.status === "running" && "step-row-running",
-                      )}
-                    >
-                      <div className="step-row-head">
-                        <div className="step-row-title">
-                          <strong>{stepLabel(step.step_name)}</strong>
-                          {summaryText ? (
-                            <div className={classNames("muted", hasTerminalFailure && isCurrentStep ? "muted-strong" : "")}>
-                              {summaryText}
+                      <details
+                        key={step.id}
+                        open={isCurrentStep}
+                        className={classNames(
+                          "step-row",
+                          isCurrentStep && "step-row-current",
+                          step.status === "failed" && "step-row-error",
+                          step.status === "cancelled" && "step-row-error",
+                          step.status === "running" && "step-row-running",
+                        )}
+                      >
+                        <summary className="step-row-head">
+                          <div className="step-row-title">
+                            <strong>{stepLabel(step.step_name)}</strong>
+                            {summaryText ? (
+                              <div className={classNames("muted", hasTerminalFailure && isCurrentStep ? "muted-strong" : "")}>
+                                {summaryText}
+                              </div>
+                            ) : null}
+                          </div>
+                          <span className={`status-chip ${step.status}`}>{statusLabel(step.status)}</span>
+                        </summary>
+                        <div className="step-row-body">
+                          {hasRunningProgress ? (
+                            <div className="progress-bar step-row-progress">
+                              <span style={{ width: `${currentStepProgressPercent}%` }} />
                             </div>
                           ) : null}
+                          {stepItems.length ? (
+                            <div className="step-event-list">
+                              {stepItems.slice(0, 4).map((item) => (
+                                <article
+                                  key={item.id}
+                                  className={classNames(
+                                    "step-event-card",
+                                    item.toneClass === "failed" && "event-failed",
+                                    item.toneClass === "cancelled" && "event-cancelled",
+                                    item.toneClass === "running" && "event-running",
+                                    item.title.includes("卡住诊断") && "event-diagnostic",
+                                  )}
+                                >
+                                  <div className="toolbar">
+                                    <strong>{item.title}</strong>
+                                    <span className={classNames("status-pill", item.toneClass)}>{statusLabel(item.status)}</span>
+                                  </div>
+                                  {item.timestamp ? <div className="muted">{formatDate(item.timestamp)}</div> : null}
+                                  {item.detail ? <div className="muted">{item.detail}</div> : null}
+                                </article>
+                              ))}
+                            </div>
+                          ) : (
+                            <div className="muted compact-top">暂无步骤事件。</div>
+                          )}
                         </div>
-                        <span className={`status-chip ${step.status}`}>{statusLabel(step.status)}</span>
-                      </div>
-                      {hasRunningProgress ? (
-                        <div className="progress-bar step-row-progress">
-                          <span style={{ width: `${currentStepProgressPercent}%` }} />
-                        </div>
-                      ) : null}
-                      {stepItems.length ? (
-                        <div className="step-event-list">
-                          {stepItems.slice(0, 4).map((item) => (
-                            <article
-                              key={item.id}
-                              className={classNames(
-                                "step-event-card",
-                                item.toneClass === "failed" && "event-failed",
-                                item.toneClass === "cancelled" && "event-cancelled",
-                                item.toneClass === "running" && "event-running",
-                                item.title.includes("卡住诊断") && "event-diagnostic",
-                              )}
-                            >
-                              <div className="toolbar">
-                                <strong>{item.title}</strong>
-                                <span className={classNames("status-pill", item.toneClass)}>{statusLabel(item.status)}</span>
-                              </div>
-                              {item.timestamp ? <div className="muted">{formatDate(item.timestamp)}</div> : null}
-                              {item.detail ? <div className="muted">{item.detail}</div> : null}
-                            </article>
-                          ))}
-                        </div>
-                      ) : (
-                        <div className="muted compact-top">暂无步骤事件。</div>
-                      )}
-                    </div>
+                      </details>
                     );
                   })}
                 </div>
@@ -380,19 +383,21 @@ export function JobDetailPanel({
             </>
           ) : null}
 
-          <JobContentProfileSection
-            jobId={selectedJob.id}
-            thumbnailVersion={selectedJob.updated_at}
-            contentProfile={contentProfile}
-            contentSource={contentSource}
-            contentDraft={contentDraft}
-            contentKeywords={contentKeywords}
-            isSaving={isConfirmingProfile}
-            reviewMode={isReviewMode}
-            onFieldChange={onContentFieldChange}
-            onKeywordsChange={onKeywordsChange}
-            onConfirm={onConfirmProfile}
-          />
+          {!flowOnly ? (
+            <JobContentProfileSection
+              jobId={selectedJob.id}
+              thumbnailVersion={selectedJob.updated_at}
+              contentProfile={contentProfile}
+              contentSource={contentSource}
+              contentDraft={contentDraft}
+              contentKeywords={contentKeywords}
+              isSaving={isConfirmingProfile}
+              reviewMode={isReviewMode}
+              onFieldChange={onContentFieldChange}
+              onKeywordsChange={onKeywordsChange}
+              onConfirm={onConfirmProfile}
+            />
+          ) : null}
 
           {showFlowSections && (
             <>
@@ -526,7 +531,9 @@ export function JobDetailPanel({
                 )}
               </section>
 
-              <JobSubtitleReportSection report={report} isApplying={isApplyingReview} onApplyReview={onApplyReview} />
+              {!flowOnly ? (
+                <JobSubtitleReportSection report={report} isApplying={isApplyingReview} onApplyReview={onApplyReview} />
+              ) : null}
             </>
           )}
         </>

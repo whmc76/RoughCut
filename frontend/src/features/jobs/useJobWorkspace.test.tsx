@@ -383,6 +383,77 @@ describe("useJobWorkspace", () => {
     expect(result.current.filteredJobs.map((job) => job.id)).toEqual(["job_1"]);
   });
 
+  it("builds queue stats from the search result set and filters attention queues separately", async () => {
+    mockApi.listJobs.mockResolvedValue([
+      ...SAMPLE_JOBS,
+      {
+        id: "job_3",
+        source_name: "needs-review.mp4",
+        content_subject: "人工核对",
+        content_summary: "等待人工确认后继续",
+        status: "needs_review",
+        language: "zh-CN",
+        workflow_mode: "standard_edit",
+        enhancement_modes: [],
+        file_hash: "hash3",
+        error_message: null,
+        created_at: "2026-03-12T12:00:00Z",
+        updated_at: "2026-03-12T12:10:00Z",
+        steps: [],
+      },
+      {
+        id: "job_4",
+        source_name: "failed.mp4",
+        content_subject: "执行失败",
+        content_summary: "任务执行异常",
+        status: "failed",
+        language: "zh-CN",
+        workflow_mode: "standard_edit",
+        enhancement_modes: [],
+        file_hash: "hash4",
+        error_message: "boom",
+        created_at: "2026-03-12T13:00:00Z",
+        updated_at: "2026-03-12T13:10:00Z",
+        steps: [],
+      },
+      {
+        id: "job_5",
+        source_name: "pending.mp4",
+        content_subject: "等待排队",
+        content_summary: "尚未开始处理",
+        status: "pending",
+        language: "zh-CN",
+        workflow_mode: "standard_edit",
+        enhancement_modes: [],
+        file_hash: "hash5",
+        error_message: null,
+        created_at: "2026-03-12T14:00:00Z",
+        updated_at: "2026-03-12T14:10:00Z",
+        steps: [],
+      },
+    ]);
+
+    const { result } = renderHookWithQueryClient(() => useJobWorkspace());
+
+    await waitFor(() => expect(result.current.jobs.data).toHaveLength(5));
+    expect(result.current.queueStats).toEqual({
+      total: 5,
+      pending: 1,
+      running: 1,
+      done: 1,
+      attention: 2,
+      needsReview: 1,
+      failed: 1,
+      cancelled: 0,
+    });
+
+    act(() => {
+      result.current.setQueueFilter("attention");
+    });
+
+    expect(result.current.filteredJobs.map((job) => job.id)).toEqual(["job_3", "job_4"]);
+  });
+
   it("hydrates content draft from selected profile and confirms edits", async () => {
     mockApi.getJob.mockResolvedValue(SAMPLE_REVIEW_JOB);
 
