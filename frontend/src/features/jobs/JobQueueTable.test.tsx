@@ -56,7 +56,7 @@ describe("JobQueueTable", () => {
     );
 
     expect(screen.getByText("最终核对")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "成片审核" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "需要最终审核" })).toHaveClass("job-review-cta", "job-review-cta-active");
   });
 
   it("shows summary-review jobs as 预审核 in the status column", () => {
@@ -81,7 +81,33 @@ describe("JobQueueTable", () => {
     );
 
     expect(screen.getByText("预审核")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "信息核对" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "需要预审核" })).toHaveClass("job-review-cta", "job-review-cta-active");
+  });
+
+  it("keeps non-review jobs on the generic review action without highlight", () => {
+    render(
+      <JobQueueTable
+        jobs={[
+          buildJob({
+            id: "job-3",
+            status: "running",
+            steps: [
+              { id: "s3", step_name: "transcribe", status: "running", attempt: 0, started_at: null, finished_at: null, error_message: null },
+            ],
+          }),
+        ]}
+        selectedJobId={null}
+        isLoading={false}
+        onSelect={vi.fn()}
+        onOpenFolder={vi.fn()}
+        onCancel={vi.fn()}
+        onRestart={vi.fn()}
+        onDelete={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "jobs.actions.review" })).toHaveClass("job-review-cta");
+    expect(screen.getByRole("button", { name: "jobs.actions.review" })).not.toHaveClass("job-review-cta-active");
   });
 
   it("keeps existing row actions clickable", () => {
@@ -93,7 +119,7 @@ describe("JobQueueTable", () => {
         jobs={[
           buildJob({
             steps: [
-              { id: "s3", step_name: "final_review", status: "pending", attempt: 0, started_at: null, finished_at: null, error_message: null },
+              { id: "s4", step_name: "final_review", status: "pending", attempt: 0, started_at: null, finished_at: null, error_message: null },
             ],
           }),
         ]}

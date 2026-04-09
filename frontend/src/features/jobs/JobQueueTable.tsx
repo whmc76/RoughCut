@@ -15,9 +15,15 @@ function resolvePendingReviewStep(job: Job) {
 function reviewActionLabel(job: Job, t: (key: string) => string) {
   if (job.status !== "needs_review") return t("jobs.actions.review");
   const reviewStep = resolvePendingReviewStep(job);
-  if (reviewStep?.step_name === "final_review") return "成片审核";
-  if (reviewStep?.step_name === "summary_review") return "信息核对";
+  if (reviewStep?.step_name === "final_review") return "需要最终审核";
+  if (reviewStep?.step_name === "summary_review") return "需要预审核";
   return "打开审核";
+}
+
+function isHighlightedReviewAction(job: Job) {
+  if (job.status !== "needs_review") return false;
+  const reviewStep = resolvePendingReviewStep(job);
+  return reviewStep?.step_name === "summary_review" || reviewStep?.step_name === "final_review";
 }
 
 function reviewStatusLabel(job: Job): string {
@@ -54,6 +60,7 @@ type JobQueueTableProps = {
   isRestarting?: boolean;
   isDeleting?: boolean;
   onSelect: (jobId: string) => void;
+  onOpenReview?: (jobId: string) => void;
   onOpenFolder: (jobId: string) => void;
   onCancel: (jobId: string) => void;
   onRestart: (jobId: string) => void;
@@ -74,6 +81,7 @@ export function JobQueueTable({
   isRestarting,
   isDeleting,
   onSelect,
+  onOpenReview,
   onOpenFolder,
   onCancel,
   onRestart,
@@ -126,135 +134,147 @@ export function JobQueueTable({
                 </td>
               </tr>
             )}
-            {jobs.map((job) => (
-              <tr key={job.id} className={classNames(selectedJobId === job.id && "selected-row")} onClick={() => onSelect(job.id)}>
-                <td>
-                  <div className="job-file-cell">
-                    <img
-                      className="job-queue-thumb"
-                      src={api.contentProfileThumbnailUrl(job.id, 0)}
-                      alt={job.source_name}
-                      loading="lazy"
-                      decoding="async"
-                      onError={(event) => {
-                        event.currentTarget.style.display = "none";
-                        event.currentTarget.nextElementSibling?.classList.add("visible");
-                      }}
-                    />
-                    <div className="job-queue-thumb job-queue-thumb-fallback" aria-hidden="true">
-                      {t("jobs.queue.noThumbnail")}
-                    </div>
-                    <div className="job-file-copy">
-                      <div className="row-title">{job.source_name}</div>
-                      <div className="muted line-clamp-2">{reviewPreviewText(job, t)}</div>
-                      <div className="mode-chip-list compact-top">
-                        <span className="mode-chip">{workflowModeLabel(job.workflow_mode)}</span>
-                        {job.enhancement_modes.map((mode) => (
-                          <span key={mode} className="mode-chip subtle">
-                            {enhancementModeLabel(mode)}
-                          </span>
-                        ))}
+            {jobs.map((job) => {
+              const highlightedReviewAction = isHighlightedReviewAction(job);
+
+              return (
+                <tr key={job.id} className={classNames(selectedJobId === job.id && "selected-row")} onClick={() => onSelect(job.id)}>
+                  <td>
+                    <div className="job-file-cell">
+                      <img
+                        className="job-queue-thumb"
+                        src={api.contentProfileThumbnailUrl(job.id, 0)}
+                        alt={job.source_name}
+                        loading="lazy"
+                        decoding="async"
+                        onError={(event) => {
+                          event.currentTarget.style.display = "none";
+                          event.currentTarget.nextElementSibling?.classList.add("visible");
+                        }}
+                      />
+                      <div className="job-queue-thumb job-queue-thumb-fallback" aria-hidden="true">
+                        {t("jobs.queue.noThumbnail")}
                       </div>
-                      {job.avatar_delivery_summary ? (
-                        <div className="compact-top">
-                          <span className={`status-pill ${job.avatar_delivery_status || "pending"}`}>
-                            数字人
-                          </span>
-                          <span className="muted"> {job.avatar_delivery_summary}</span>
+                      <div className="job-file-copy">
+                        <div className="row-title">{job.source_name}</div>
+                        <div className="muted line-clamp-2">{reviewPreviewText(job, t)}</div>
+                        <div className="mode-chip-list compact-top">
+                          <span className="mode-chip">{workflowModeLabel(job.workflow_mode)}</span>
+                          {job.enhancement_modes.map((mode) => (
+                            <span key={mode} className="mode-chip subtle">
+                              {enhancementModeLabel(mode)}
+                            </span>
+                          ))}
                         </div>
-                      ) : null}
+                        {job.avatar_delivery_summary ? (
+                          <div className="compact-top">
+                            <span className={`status-pill ${job.avatar_delivery_status || "pending"}`}>
+                              数字人
+                            </span>
+                            <span className="muted"> {job.avatar_delivery_summary}</span>
+                          </div>
+                        ) : null}
+                      </div>
                     </div>
-                  </div>
-                </td>
-                <td>
-                  <div className="form-stack compact-top">
-                    <span className={`status-chip ${job.status}`}>{reviewStatusLabel(job)}</span>
-                    <span className="muted">{job.progress_percent ?? 0}%</span>
-                  </div>
-                </td>
-                <td>
-                  <div className="step-mini-list">
-                    {job.steps.slice(0, 4).map((step) => (
-                      <span key={step.id} className={`status-pill ${step.status}`}>
-                        {stepLabel(step.step_name)}
-                      </span>
-                    ))}
-                    {job.steps.length > 4 && <span className="muted">+{job.steps.length - 4}</span>}
-                  </div>
-                </td>
-                <td>{formatDate(job.updated_at)}</td>
-                <td>
-                  <div className="job-queue-actions">
-                    <button
-                      className="button ghost button-sm"
-                      type="button"
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        onSelect(job.id);
-                      }}
-                    >
-                      {reviewActionLabel(job, t)}
-                    </button>
-                    <button
-                      className="button ghost button-sm"
-                      type="button"
-                      disabled={isOpeningFolder}
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        onOpenFolder(job.id);
-                      }}
-                    >
-                      {t("jobs.actions.openFolder")}
-                    </button>
-                    <a
-                      className="button ghost button-sm"
-                      href={`/api/v1/jobs/${job.id}/download`}
-                      target="_blank"
-                      rel="noreferrer"
-                      onClick={(event) => event.stopPropagation()}
-                    >
-                      {t("jobs.actions.download")}
-                    </a>
-                    <button
-                      className="button ghost button-sm"
-                      type="button"
-                      disabled={job.status === "done" || job.status === "failed" || job.status === "cancelled" || isCancelling}
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        onCancel(job.id);
-                      }}
-                    >
-                      {isCancelling ? t("jobs.actions.cancelling") : t("jobs.actions.cancel")}
-                    </button>
-                    <button
-                      className="button primary button-sm"
-                      type="button"
-                      disabled={isRestarting || !isRestartableJobStatus(job.status)}
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        onRestart(job.id);
-                      }}
-                      title={isRestartableJobStatus(job.status) ? undefined : t(getRestartUnavailableReason(job.status))}
-                    >
-                      {isRestarting
-                        ? t("jobs.actions.restarting")
-                        : isRestartableJobStatus(job.status) ? t("jobs.actions.restart") : t("jobs.actions.restartUnavailable")}
-                    </button>
-                    <button
-                      className="button danger button-sm"
-                      type="button"
-                      disabled={isDeleting}
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        onDelete(job.id);
-                      }}
-                    >
-                      {isDeleting ? t("jobs.actions.deleting") : t("jobs.actions.delete")}
-                    </button>
-                  </div>
-                </td>
-              </tr>
-            ))}
+                  </td>
+                  <td>
+                    <div className="form-stack compact-top">
+                      <span className={`status-chip ${job.status}`}>{reviewStatusLabel(job)}</span>
+                      <span className="muted">{job.progress_percent ?? 0}%</span>
+                    </div>
+                  </td>
+                  <td>
+                    <div className="step-mini-list">
+                      {job.steps.slice(0, 4).map((step) => (
+                        <span key={step.id} className={`status-pill ${step.status}`}>
+                          {stepLabel(step.step_name)}
+                        </span>
+                      ))}
+                      {job.steps.length > 4 && <span className="muted">+{job.steps.length - 4}</span>}
+                    </div>
+                  </td>
+                  <td>{formatDate(job.updated_at)}</td>
+                  <td>
+                    <div className="job-queue-actions">
+                      <button
+                        className={classNames(
+                          "button ghost button-sm",
+                          "job-review-cta",
+                          highlightedReviewAction && "job-review-cta-active",
+                        )}
+                        type="button"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          if (job.status === "needs_review") {
+                            onOpenReview?.(job.id);
+                            return;
+                          }
+                          onSelect(job.id);
+                        }}
+                      >
+                        {reviewActionLabel(job, t)}
+                      </button>
+                      <button
+                        className="button ghost button-sm"
+                        type="button"
+                        disabled={isOpeningFolder}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          onOpenFolder(job.id);
+                        }}
+                      >
+                        {t("jobs.actions.openFolder")}
+                      </button>
+                      <a
+                        className="button ghost button-sm"
+                        href={`/api/v1/jobs/${job.id}/download`}
+                        target="_blank"
+                        rel="noreferrer"
+                        onClick={(event) => event.stopPropagation()}
+                      >
+                        {t("jobs.actions.download")}
+                      </a>
+                      <button
+                        className="button ghost button-sm"
+                        type="button"
+                        disabled={job.status === "done" || job.status === "failed" || job.status === "cancelled" || isCancelling}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          onCancel(job.id);
+                        }}
+                      >
+                        {isCancelling ? t("jobs.actions.cancelling") : t("jobs.actions.cancel")}
+                      </button>
+                      <button
+                        className="button primary button-sm"
+                        type="button"
+                        disabled={isRestarting || !isRestartableJobStatus(job.status)}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          onRestart(job.id);
+                        }}
+                        title={isRestartableJobStatus(job.status) ? undefined : t(getRestartUnavailableReason(job.status))}
+                      >
+                        {isRestarting
+                          ? t("jobs.actions.restarting")
+                          : isRestartableJobStatus(job.status) ? t("jobs.actions.restart") : t("jobs.actions.restartUnavailable")}
+                      </button>
+                      <button
+                        className="button danger button-sm"
+                        type="button"
+                        disabled={isDeleting}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          onDelete(job.id);
+                        }}
+                      >
+                        {isDeleting ? t("jobs.actions.deleting") : t("jobs.actions.delete")}
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       </div>

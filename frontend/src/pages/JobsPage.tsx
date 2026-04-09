@@ -3,6 +3,7 @@ import { useState } from "react";
 import { EmptyState } from "../components/ui/EmptyState";
 import { PageHeader } from "../components/ui/PageHeader";
 import { ConfigProfileSwitcher } from "../features/configProfiles/ConfigProfileSwitcher";
+import { JobCreateModal } from "../features/jobs/JobCreateModal";
 import { JobDetailModal } from "../features/jobs/JobDetailModal";
 import { JobDetailPanel } from "../features/jobs/JobDetailPanel";
 import { JobQueueTable } from "../features/jobs/JobQueueTable";
@@ -15,9 +16,10 @@ import { formatDate, statusLabel } from "../utils";
 export function JobsPage() {
   const { t } = useI18n();
   const workspace = useJobWorkspace();
-  const [createOpen, setCreateOpen] = useState(true);
+  const [createOpen, setCreateOpen] = useState(false);
   const [reviewNotice, setReviewNotice] = useState<string | null>(null);
   const [reviewNoticeTone, setReviewNoticeTone] = useState<"success" | "error">("success");
+  const [selectedSurface, setSelectedSurface] = useState<"detail" | "review">("detail");
 
   const languageOptions = workspace.options.data?.job_languages ?? [{ value: "zh-CN", label: "简体中文" }];
   const workflowTemplateOptions = workspace.options.data?.workflow_templates ?? [{ value: "", label: t("watch.page.autoMatch") }];
@@ -41,7 +43,18 @@ export function JobsPage() {
           && step.status !== "done",
       )?.step_name;
   const reviewStep = activeReviewStep === "final_review" ? "final_review" : "summary_review";
-  const isReviewJob = Boolean(workspace.selectedJobId && isReviewContext && activeReviewStep);
+  const showReviewOverlay = Boolean(workspace.selectedJobId && selectedSurface === "review" && isReviewContext && activeReviewStep);
+  const showDetailModal = Boolean(workspace.selectedJobId && !showReviewOverlay);
+
+  const openJobDetail = (jobId: string) => {
+    setSelectedSurface("detail");
+    workspace.setSelectedJobId(jobId);
+  };
+
+  const openJobReview = (jobId: string) => {
+    setSelectedSurface("review");
+    workspace.setSelectedJobId(jobId);
+  };
 
   const showReviewNotice = (tone: "success" | "error", message: string) => {
     setReviewNoticeTone(tone);
@@ -52,7 +65,10 @@ export function JobsPage() {
   };
 
   const closeReviewOverlay = (shouldClearNotice = true) => {
-    if (isReviewJob) workspace.setSelectedJobId(null);
+    if (showReviewOverlay) {
+      setSelectedSurface("detail");
+      workspace.setSelectedJobId(null);
+    }
     if (shouldClearNotice) {
       setReviewNotice(null);
     }
@@ -84,20 +100,20 @@ export function JobsPage() {
         title={t("jobs.page.title")}
         description={t("jobs.page.description")}
         actions={
-          <>
+          <div className="jobs-header-toolbar">
             <input
-              className="input"
+              className="input jobs-header-search-input"
               value={workspace.keyword}
               onChange={(event) => workspace.setKeyword(event.target.value)}
               placeholder={t("jobs.page.searchPlaceholder")}
             />
-            <button className="button ghost" onClick={workspace.refreshAll}>
+            <button className="button jobs-header-subtle-button" onClick={workspace.refreshAll}>
               {t("jobs.page.refresh")}
             </button>
-            <button className="button" onClick={() => setCreateOpen((current) => !current)}>
-              {createOpen ? "收起" : "新建"}
+            <button className="button primary jobs-header-create-button" onClick={() => setCreateOpen(true)}>
+              创建任务
             </button>
-          </>
+          </div>
         }
       />
 
@@ -150,7 +166,8 @@ export function JobsPage() {
           isCancelling={workspace.cancelJob.isPending}
           isRestarting={workspace.restartJob.isPending}
           isDeleting={workspace.deleteJob.isPending}
-          onSelect={workspace.setSelectedJobId}
+          onSelect={openJobDetail}
+          onOpenReview={openJobReview}
           onOpenFolder={(jobId) => workspace.openFolder.mutate(jobId)}
           onCancel={(jobId) => workspace.cancelJob.mutate(jobId)}
           onRestart={(jobId) => workspace.restartJob.mutate(jobId)}
@@ -204,29 +221,29 @@ export function JobsPage() {
         </section>
       )}
 
-      {createOpen ? (
-        <section className="jobs-create-stage">
+      <JobCreateModal open={createOpen} onClose={() => setCreateOpen(false)}>
+        <section className="jobs-create-modal-content">
           <div className="jobs-stage-head">
             <div>
-              <h3>创建</h3>
-              <p>选择素材、语言、模板和工作流后直接入队。</p>
+              <h3>创建任务</h3>
+              <p>先选剪辑方案，再上传素材创建新任务。</p>
             </div>
             <div className="jobs-stage-meta">
-              <span>当前方案</span>
-              <strong>新任务按这里创建</strong>
+              <span>创建流程</span>
+              <strong>剪辑方案 + 创建任务</strong>
             </div>
           </div>
 
-          <div className="jobs-create-grid">
-            <section className="jobs-create-panel">
+          <div className="jobs-create-modal-grid">
+            <section className="jobs-create-modal-panel">
               <ConfigProfileSwitcher
                 compact
-                title="当前方案"
-                description="这里决定新任务怎么创建。"
+                title="剪辑方案"
+                description="这里决定新任务默认按哪套方案创建。"
               />
             </section>
 
-            <section className="jobs-create-panel">
+            <section className="jobs-create-modal-panel">
               <JobUploadPanel
                 upload={workspace.upload}
                 languageOptions={languageOptions}
@@ -234,16 +251,20 @@ export function JobsPage() {
                 workflowModeOptions={workflowModeOptions}
                 enhancementOptions={enhancementOptions}
                 onChange={workspace.setUpload}
-                onSubmit={() => workspace.uploadJob.mutate()}
+                onSubmit={() =>
+                  workspace.uploadJob.mutate(undefined, {
+                    onSuccess: () => setCreateOpen(false),
+                  })
+                }
                 isSubmitting={workspace.uploadJob.isPending}
               />
             </section>
           </div>
         </section>
-      ) : null}
+      </JobCreateModal>
 
       <JobReviewOverlay
-        open={Boolean(workspace.selectedJobId && isReviewJob)}
+        open={showReviewOverlay}
         reviewStep={reviewStep}
         selectedJob={workspace.selectedJob}
         activity={workspace.activity.data}
@@ -274,9 +295,12 @@ export function JobsPage() {
       />
 
       <JobDetailModal
-        open={Boolean(workspace.selectedJobId && !isReviewJob)}
+        open={showDetailModal}
         title={workspace.selectedJob?.source_name}
-        onClose={() => workspace.setSelectedJobId(null)}
+        onClose={() => {
+          setSelectedSurface("detail");
+          workspace.setSelectedJobId(null);
+        }}
       >
         <JobDetailPanel
           className="detail-panel-modal"

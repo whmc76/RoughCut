@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 
 import { JobsPage } from "./JobsPage";
 
@@ -11,6 +11,7 @@ vi.mock("../i18n", () => ({
   useI18n: () => ({
     t: (key: string) => key,
   }),
+  getCurrentUiLocale: () => "zh-CN",
 }));
 
 vi.mock("../components/ui/PageHeader", () => ({
@@ -49,11 +50,40 @@ vi.mock("../features/configProfiles/ConfigProfileSwitcher", () => ({
 }));
 
 vi.mock("../features/jobs/JobUploadPanel", () => ({
-  JobUploadPanel: () => <div>job-upload-panel</div>,
+  JobUploadPanel: ({ onSubmit }: { onSubmit: () => void }) => (
+    <div>
+      <div>job-upload-panel</div>
+      <button type="button" onClick={onSubmit}>
+        submit-job
+      </button>
+    </div>
+  ),
 }));
 
 vi.mock("../features/jobs/JobQueueTable", () => ({
-  JobQueueTable: () => <div>job-queue-table</div>,
+  JobQueueTable: ({
+    jobs,
+    onSelect,
+    onOpenReview,
+  }: {
+    jobs?: Array<{ id: string; source_name: string }>;
+    onSelect?: (jobId: string) => void;
+    onOpenReview?: (jobId: string) => void;
+  }) => (
+    <div>
+      <div>job-queue-table</div>
+      {jobs?.map((job) => (
+        <div key={job.id}>
+          <button type="button" onClick={() => onSelect?.(job.id)}>
+            {`select-${job.source_name}`}
+          </button>
+          <button type="button" onClick={() => onOpenReview?.(job.id)}>
+            {`review-${job.source_name}`}
+          </button>
+        </div>
+      ))}
+    </div>
+  ),
 }));
 
 vi.mock("../features/jobs/JobDetailPanel", () => ({
@@ -134,17 +164,24 @@ describe("JobsPage", () => {
     vi.clearAllMocks();
   });
 
-  it("keeps the queue and create area in one full-width work surface", () => {
+  it("keeps the queue surface visible while create modules stay hidden by default", () => {
     mockUseJobWorkspace.mockReturnValue(buildWorkspace());
 
     const { container } = render(<JobsPage />);
+    const createButton = screen.getByRole("button", { name: "创建任务" });
+    const refreshButton = screen.getByRole("button", { name: "jobs.page.refresh" });
 
     expect(container.querySelector(".jobs-command-deck")).toBeInTheDocument();
     expect(container.querySelector(".jobs-queue-stage")).toBeInTheDocument();
-    expect(container.querySelector(".jobs-create-stage")).toBeInTheDocument();
+    expect(container.querySelector(".jobs-header-toolbar")).toBeInTheDocument();
+    expect(container.querySelector(".jobs-header-search-input")).toBeInTheDocument();
+    expect(refreshButton).toHaveClass("jobs-header-subtle-button");
+    expect(refreshButton).not.toHaveClass("ghost");
+    expect(createButton).toHaveClass("primary", "jobs-header-create-button");
     expect(screen.getByText("job-queue-table")).toBeInTheDocument();
-    expect(screen.getByText("config-profile-switcher")).toBeInTheDocument();
-    expect(screen.getByText("job-upload-panel")).toBeInTheDocument();
+    expect(screen.queryByText("config-profile-switcher")).not.toBeInTheDocument();
+    expect(screen.queryByText("job-upload-panel")).not.toBeInTheDocument();
+    expect(screen.queryByRole("dialog", { name: "创建任务" })).not.toBeInTheDocument();
   });
 
   it("does not render the old summary strip or instructional copy on the jobs page", () => {
@@ -159,18 +196,43 @@ describe("JobsPage", () => {
     expect(screen.queryByText("跟进任务队列与审核详情")).not.toBeInTheDocument();
   });
 
-  it("renders the queue-first structure with a separate create section", () => {
+  it("opens the create modal from the header button", () => {
     mockUseJobWorkspace.mockReturnValue(buildWorkspace());
 
     const { container } = render(<JobsPage />);
 
+    fireEvent.click(screen.getByRole("button", { name: "创建任务" }));
+
     expect(screen.getByText("任务列表")).toBeInTheDocument();
     expect(screen.getByText("需要处理")).toBeInTheDocument();
-    expect(screen.getAllByText("当前方案").length).toBeGreaterThan(0);
-    expect(screen.getByText("创建")).toBeInTheDocument();
     expect(container.querySelector(".jobs-command-deck")).toBeInTheDocument();
     expect(container.querySelector(".jobs-active-band")).toBeInTheDocument();
-    expect(container.querySelector(".jobs-create-grid")).toBeInTheDocument();
+    expect(screen.getByRole("dialog", { name: "创建任务" })).toBeInTheDocument();
+    expect(screen.getByText("剪辑方案 + 创建任务")).toBeInTheDocument();
+    expect(screen.getByText("config-profile-switcher")).toBeInTheDocument();
+    expect(screen.getByText("job-upload-panel")).toBeInTheDocument();
+  });
+
+  it("closes the create modal after a successful job creation", () => {
+    const uploadMutate = vi.fn((_: unknown, options?: { onSuccess?: (job: { id: string }) => void }) => {
+      options?.onSuccess?.({ id: "job-created-1" });
+    });
+
+    mockUseJobWorkspace.mockReturnValue(
+      buildWorkspace({
+        uploadJob: { mutate: uploadMutate, isPending: false },
+      }),
+    );
+
+    render(<JobsPage />);
+
+    fireEvent.click(screen.getByRole("button", { name: "创建任务" }));
+    expect(screen.getByRole("dialog", { name: "创建任务" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "submit-job" }));
+
+    expect(uploadMutate).toHaveBeenCalled();
+    expect(screen.queryByRole("dialog", { name: "创建任务" })).not.toBeInTheDocument();
   });
 
   it("does not render the analysis module on the jobs page", () => {
@@ -212,9 +274,36 @@ describe("JobsPage", () => {
     expect(screen.getByText("任务列表")).toBeInTheDocument();
   });
 
-  it("routes needs_review jobs into the dedicated review overlay instead of the detail modal", () => {
+  it("opens final-review jobs in the dedicated review overlay only from the review action button", () => {
+    const setSelectedJobId = vi.fn();
+
     mockUseJobWorkspace.mockReturnValue(
       buildWorkspace({
+        filteredJobs: [
+          {
+            id: "job-review-1",
+            source_name: "needs_review.mp4",
+            content_subject: "测试主题",
+            content_summary: "测试摘要",
+            status: "needs_review",
+            language: "zh-CN",
+            workflow_mode: "standard_edit",
+            enhancement_modes: [],
+            created_at: "2026-04-02T02:00:00Z",
+            updated_at: "2026-04-02T02:10:00Z",
+            steps: [
+              {
+                id: "final-step",
+                step_name: "final_review",
+                status: "pending",
+                attempt: 0,
+                started_at: null,
+                finished_at: null,
+                error_message: null,
+              },
+            ],
+          },
+        ],
         selectedJobId: "job-review-1",
         selectedJob: {
           id: "job-review-1",
@@ -239,14 +328,169 @@ describe("JobsPage", () => {
             },
           },
         },
+        setSelectedJobId,
       }),
     );
 
     render(<JobsPage />);
+    fireEvent.click(screen.getByRole("button", { name: "review-needs_review.mp4" }));
 
+    expect(setSelectedJobId).toHaveBeenCalledWith("job-review-1");
     expect(screen.getByTestId("job-review-overlay")).toHaveTextContent("final_review");
     expect(screen.queryByTestId("job-detail-modal")).not.toBeInTheDocument();
     expect(mockJobReviewOverlay).toHaveBeenCalled();
+  });
+
+  it("opens the detail modal when clicking a needs_review task row", () => {
+    const setSelectedJobId = vi.fn();
+
+    mockUseJobWorkspace.mockReturnValue(
+      buildWorkspace({
+        filteredJobs: [
+          {
+            id: "job-review-3",
+            source_name: "summary-review.mp4",
+            content_subject: "测试主题",
+            content_summary: "测试摘要",
+            status: "needs_review",
+            language: "zh-CN",
+            workflow_mode: "standard_edit",
+            enhancement_modes: [],
+            created_at: "2026-04-02T02:00:00Z",
+            updated_at: "2026-04-02T02:10:00Z",
+            steps: [
+              {
+                id: "summary-step",
+                step_name: "summary_review",
+                status: "pending",
+                attempt: 0,
+                started_at: null,
+                finished_at: null,
+                error_message: null,
+              },
+            ],
+          },
+        ],
+        selectedJobId: "job-review-3",
+        selectedJob: {
+          id: "job-review-3",
+          source_name: "summary-review.mp4",
+          content_subject: "测试主题",
+          content_summary: "测试摘要",
+          status: "needs_review",
+          language: "zh-CN",
+          workflow_mode: "standard_edit",
+          enhancement_modes: [],
+          created_at: "2026-04-02T02:00:00Z",
+          updated_at: "2026-04-02T02:10:00Z",
+          steps: [
+            {
+              id: "summary-step",
+              step_name: "summary_review",
+              status: "pending",
+              attempt: 0,
+              started_at: null,
+              finished_at: null,
+              error_message: null,
+            },
+          ],
+        },
+        activity: {
+          data: {
+            current_step: {
+              step_name: "summary_review",
+              label: "信息核对",
+              status: "pending",
+              detail: "等待校对内容信息后继续。",
+            },
+          },
+        },
+        setSelectedJobId,
+      }),
+    );
+
+    render(<JobsPage />);
+    fireEvent.click(screen.getByRole("button", { name: "select-summary-review.mp4" }));
+
+    expect(setSelectedJobId).toHaveBeenCalledWith("job-review-3");
+    expect(screen.getByTestId("job-detail-modal")).toBeInTheDocument();
+    expect(screen.queryByTestId("job-review-overlay")).not.toBeInTheDocument();
+  });
+
+  it("opens the dedicated review overlay only from the review action button", () => {
+    const setSelectedJobId = vi.fn();
+
+    mockUseJobWorkspace.mockReturnValue(
+      buildWorkspace({
+        filteredJobs: [
+          {
+            id: "job-review-4",
+            source_name: "summary-review-action.mp4",
+            content_subject: "测试主题",
+            content_summary: "测试摘要",
+            status: "needs_review",
+            language: "zh-CN",
+            workflow_mode: "standard_edit",
+            enhancement_modes: [],
+            created_at: "2026-04-02T02:00:00Z",
+            updated_at: "2026-04-02T02:10:00Z",
+            steps: [
+              {
+                id: "summary-step",
+                step_name: "summary_review",
+                status: "pending",
+                attempt: 0,
+                started_at: null,
+                finished_at: null,
+                error_message: null,
+              },
+            ],
+          },
+        ],
+        selectedJobId: "job-review-4",
+        selectedJob: {
+          id: "job-review-4",
+          source_name: "summary-review-action.mp4",
+          content_subject: "测试主题",
+          content_summary: "测试摘要",
+          status: "needs_review",
+          language: "zh-CN",
+          workflow_mode: "standard_edit",
+          enhancement_modes: [],
+          created_at: "2026-04-02T02:00:00Z",
+          updated_at: "2026-04-02T02:10:00Z",
+          steps: [
+            {
+              id: "summary-step",
+              step_name: "summary_review",
+              status: "pending",
+              attempt: 0,
+              started_at: null,
+              finished_at: null,
+              error_message: null,
+            },
+          ],
+        },
+        activity: {
+          data: {
+            current_step: {
+              step_name: "summary_review",
+              label: "信息核对",
+              status: "pending",
+              detail: "等待校对内容信息后继续。",
+            },
+          },
+        },
+        setSelectedJobId,
+      }),
+    );
+
+    render(<JobsPage />);
+    fireEvent.click(screen.getByRole("button", { name: "review-summary-review-action.mp4" }));
+
+    expect(setSelectedJobId).toHaveBeenCalledWith("job-review-4");
+    expect(screen.getByTestId("job-review-overlay")).toHaveTextContent("summary_review");
+    expect(screen.queryByTestId("job-detail-modal")).not.toBeInTheDocument();
   });
 
   it("keeps pending jobs out of the dedicated review overlay even with summary review step", () => {
