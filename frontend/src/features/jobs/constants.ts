@@ -17,6 +17,7 @@ export const STEP_LABELS: Record<string, string> = {
 };
 
 export const CONTENT_FIELDS = [
+  "video_type",
   "subject_type",
   "video_theme",
   "hook_line",
@@ -28,7 +29,8 @@ export const CONTENT_FIELDS = [
 ] as const;
 
 export const CONTENT_FIELD_LABELS: Record<(typeof CONTENT_FIELDS)[number] | "keywords", string> = {
-  subject_type: "视频类型",
+  video_type: "视频类型",
+  subject_type: "主体类型",
   video_theme: "视频主题",
   hook_line: "标题钩子",
   visible_text: "画面文字",

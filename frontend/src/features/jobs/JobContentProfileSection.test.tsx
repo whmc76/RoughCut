@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 
 import type { ContentProfileReview } from "../../types";
 import {
@@ -6,6 +6,7 @@ import {
   formatVideoType,
   getTextValue,
   normalizeKeywordList,
+  normalizeVideoTypeValue,
   normalizeVideoTypeLabel,
 } from "./contentProfile";
 import { JobContentProfileSection } from "./JobContentProfileSection";
@@ -13,6 +14,7 @@ import { JobContentProfileSection } from "./JobContentProfileSection";
 describe("contentProfile helpers", () => {
   it("normalizes text, video-type labels, and keyword arrays", () => {
     expect(getTextValue("  开箱  ")).toBe("开箱");
+    expect(normalizeVideoTypeValue(" tutorial ")).toBe("tutorial");
     expect(normalizeVideoTypeLabel(" tutorial ", "zh-CN")).toBe("教程");
     expect(formatVideoType(["", "tutorial"], "zh-CN")).toBe("教程");
     expect(normalizeKeywordList(["VLOG", "vlog", " vlog ", "开箱"])).toEqual(["VLOG", "开箱"]);
@@ -56,20 +58,46 @@ describe("JobContentProfileSection", () => {
     );
   }
 
-  it("uses normalized video-type labels instead of inferring from summary/hook text", () => {
+  it("uses a localized video-type dropdown instead of showing the raw enum value", () => {
     renderSection({
-      subject_type: "",
-      summary: "这是一条开箱视频",
-      hook_line: "先开箱再展示细节",
       content_understanding: {
-        video_type: "",
-        summary: "开箱画面很多",
-        hook_line: "开箱先看细节",
+        video_type: "unboxing",
+        primary_subject: "EDC机能包",
       },
     });
 
-    expect(screen.getByDisplayValue("待补充")).toBeInTheDocument();
-    expect(screen.queryByDisplayValue("开箱")).not.toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "视频类型" })).toHaveValue("unboxing");
+    expect(screen.getByDisplayValue("开箱")).toBeInTheDocument();
+    expect(screen.queryByDisplayValue("unboxing")).not.toBeInTheDocument();
+    expect(screen.getByDisplayValue("EDC机能包")).toBeInTheDocument();
+  });
+
+  it("emits canonical video_type values from the dropdown", () => {
+    const onFieldChange = vi.fn();
+
+    render(
+      <JobContentProfileSection
+        jobId="job_1"
+        contentSource={{
+          content_understanding: {
+            video_type: "unboxing",
+          },
+        }}
+        contentDraft={{}}
+        contentKeywords=""
+        isSaving={false}
+        showThumbnails={false}
+        onFieldChange={onFieldChange}
+        onKeywordsChange={vi.fn()}
+        onConfirm={vi.fn()}
+      />,
+    );
+
+    fireEvent.change(screen.getByRole("combobox", { name: "视频类型" }), {
+      target: { value: "tutorial" },
+    });
+
+    expect(onFieldChange).toHaveBeenCalledWith("video_type", "tutorial");
   });
 
   it("renders identity evidence labels consistently from structured support-source keys", () => {

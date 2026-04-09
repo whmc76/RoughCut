@@ -364,6 +364,7 @@ class ContentProfileConfirmIn(BaseModel):
     workflow_mode: str | None = None
     enhancement_modes: list[str] | None = None
     copy_style: str | None = None
+    video_type: str | None = None
     subject_brand: str | None = None
     subject_model: str | None = None
     subject_type: str | None = None

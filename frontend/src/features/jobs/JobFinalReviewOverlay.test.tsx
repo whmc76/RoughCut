@@ -80,6 +80,21 @@ const SAMPLE_REPORT = {
 };
 
 describe("JobFinalReviewOverlay", () => {
+  it("renders the final review inside the solid review work surface", () => {
+    const { container } = render(
+      <JobFinalReviewOverlay
+        selectedJob={SAMPLE_JOB}
+        report={SAMPLE_REPORT}
+        onPreview={vi.fn()}
+        onDownload={vi.fn()}
+        onOpenFolder={vi.fn()}
+      />,
+    );
+
+    expect(container.querySelector(".final-review-surface.panel")).toBeInTheDocument();
+    expect(container.querySelector(".final-review-action-card")).toBeInTheDocument();
+  });
+
   it("shows the final-review quality summary, subtitle spot-check, and action buttons", async () => {
     const onPreview = vi.fn();
     const onDownload = vi.fn();

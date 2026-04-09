@@ -1,6 +1,8 @@
 import type { UiLocale } from "../../i18n";
 import { IDENTITY_SUPPORT_SOURCE_LABELS } from "./constants";
 
+const SUPPORTED_VIDEO_TYPES = ["tutorial", "vlog", "commentary", "gameplay", "food", "unboxing"] as const;
+
 const VIDEO_TYPE_LABELS: Record<UiLocale, Record<string, string>> = {
   "zh-CN": {
     tutorial: "教程",
@@ -54,34 +56,53 @@ export function normalizeSourceList(value: unknown) {
   return normalizeUniqueStringArray(value);
 }
 
-export function normalizeVideoTypeLabel(value: unknown, locale: UiLocale) {
+export function normalizeVideoTypeValue(value: unknown) {
   const normalized = getTextValue(value).toLowerCase();
   if (!normalized) {
     return "";
   }
-  const labels = VIDEO_TYPE_LABELS[locale] || VIDEO_TYPE_LABELS["zh-CN"];
-  if (normalized in labels) {
-    return labels[normalized];
+  if ((SUPPORTED_VIDEO_TYPES as readonly string[]).includes(normalized)) {
+    return normalized;
   }
   if (normalized.includes("unboxing") || normalized.includes("开箱") || normalized.includes("机能包")) {
-    return labels.unboxing;
+    return "unboxing";
   }
   if (normalized.includes("tutorial") || normalized.includes("教程")) {
-    return labels.tutorial;
+    return "tutorial";
   }
   if (normalized.includes("vlog") || normalized.includes("生活") || normalized.includes("日常")) {
-    return labels.vlog;
+    return "vlog";
   }
   if (normalized.includes("commentary") || normalized.includes("观点") || normalized.includes("口播")) {
-    return labels.commentary;
+    return "commentary";
   }
   if (normalized.includes("gameplay") || normalized.includes("游戏")) {
-    return labels.gameplay;
+    return "gameplay";
   }
   if (normalized.includes("food") || normalized.includes("探店")) {
-    return labels.food;
+    return "food";
   }
   return "";
+}
+
+export function normalizeVideoTypeLabel(value: unknown, locale: UiLocale) {
+  const normalized = normalizeVideoTypeValue(value);
+  if (!normalized) {
+    return "";
+  }
+  const labels = VIDEO_TYPE_LABELS[locale] || VIDEO_TYPE_LABELS["zh-CN"];
+  return labels[normalized] ?? "";
+}
+
+export function getVideoTypeOptions(locale: UiLocale) {
+  const labels = VIDEO_TYPE_LABELS[locale] || VIDEO_TYPE_LABELS["zh-CN"];
+  return [
+    { value: "", label: locale === "en-US" ? "Pending" : "待补充" },
+    ...SUPPORTED_VIDEO_TYPES.map((value) => ({
+      value,
+      label: labels[value],
+    })),
+  ];
 }
 
 export function formatVideoType(values: unknown[], locale: UiLocale) {

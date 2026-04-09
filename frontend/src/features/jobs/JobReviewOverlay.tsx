@@ -110,12 +110,29 @@ export function JobReviewOverlay({
 
   return (
     <div className="floating-modal-backdrop review-overlay-backdrop" role="presentation">
-      <div className="floating-modal-shell review-overlay-shell" role="dialog" aria-modal="true" aria-label={selectedJob.source_name} onClick={(event) => event.stopPropagation()}>
+      <div
+        className={[
+          "floating-modal-shell",
+          "review-overlay-shell",
+          reviewStep === "summary_review" ? "summary-review-overlay-shell" : "",
+          reviewStep === "final_review" ? "final-review-overlay-shell" : "",
+        ].filter(Boolean).join(" ")}
+        role="dialog"
+        aria-modal="true"
+        aria-label={selectedJob.source_name}
+        onClick={(event) => event.stopPropagation()}
+      >
         <button className="button ghost floating-modal-close" type="button" onClick={onClose} aria-label={t("jobs.modal.closeAria")}>
           {t("jobs.modal.close")}
         </button>
 
-        <section className="review-overlay-content">
+        <section
+          className={[
+            "review-overlay-content",
+            reviewStep === "summary_review" ? "summary-review-overlay-content" : "",
+            reviewStep === "final_review" ? "final-review-overlay-content" : "",
+          ].filter(Boolean).join(" ")}
+        >
           {reviewStep === "summary_review" ? (
             <JobSummaryReviewOverlay
               jobId={selectedJob.id}

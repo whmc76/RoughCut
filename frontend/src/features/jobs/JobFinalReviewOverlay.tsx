@@ -101,7 +101,7 @@ export function JobFinalReviewOverlay({
     .join(" · ");
 
   return (
-    <aside className={["panel detail-panel final-review-overlay", className].filter(Boolean).join(" ")}>
+    <aside className={["panel detail-panel final-review-overlay final-review-surface", className].filter(Boolean).join(" ")}>
       <PanelHeader
         title="最终审核"
         description={[selectedJob.source_name, selectedJob.id].filter(Boolean).join(" · ")}
@@ -121,7 +121,7 @@ export function JobFinalReviewOverlay({
       />
 
       {previewSrc ? (
-        <section className="detail-block">
+        <section className="detail-block final-review-section-card">
           <div className="detail-key">成片预览</div>
           <div className="final-review-preview-frame" data-testid="final-review-preview-frame">
             <video
@@ -136,7 +136,7 @@ export function JobFinalReviewOverlay({
         </section>
       ) : null}
 
-      <section className="detail-block">
+      <section className="detail-block final-review-section-card">
         <div className="detail-key">审核证据</div>
         <div className="final-review-evidence-grid">
           <article className="activity-card final-review-evidence-card">
@@ -175,9 +175,9 @@ export function JobFinalReviewOverlay({
         </div>
       </section>
 
-      <section className="detail-block">
+      <section className="detail-block final-review-section-card">
         <div className="detail-key">当前需要你确认</div>
-        <div className="activity-card">
+        <div className="activity-card final-review-action-card">
           <strong>请决定这版成片是否可以继续后续包装</strong>
           <div className="muted compact-top">{reviewDetail || "优先检查质量评分、扣分项和字幕抽检，再决定通过或退回。"}</div>
           {(onApprove || onReject) ? (
@@ -224,7 +224,7 @@ export function JobFinalReviewOverlay({
         </div>
       </section>
 
-      <section className="detail-block">
+      <section className="detail-block final-review-section-card">
         <div className="detail-key">质量结果</div>
         {hasQuality ? (
           <>
@@ -249,7 +249,7 @@ export function JobFinalReviewOverlay({
         )}
       </section>
 
-      <section className="detail-block">
+      <section className="detail-block final-review-section-card">
         <div className="detail-key">字幕抽检</div>
         {report ? (
           <>
@@ -316,7 +316,7 @@ export function JobFinalReviewOverlay({
         )}
       </section>
 
-      <section className="detail-block">
+      <section className="detail-block final-review-section-card">
         <div className="detail-key">辅助信息</div>
         <div className="muted">{workflowDetails}</div>
       </section>

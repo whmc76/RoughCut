@@ -4,7 +4,6 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import { JobsPage } from "./JobsPage";
 
 const mockUseJobWorkspace = vi.fn();
-const mockJobDetailModal = vi.fn();
 const mockJobReviewOverlay = vi.fn();
 
 vi.mock("../i18n", () => ({
@@ -84,17 +83,6 @@ vi.mock("../features/jobs/JobQueueTable", () => ({
       ))}
     </div>
   ),
-}));
-
-vi.mock("../features/jobs/JobDetailPanel", () => ({
-  JobDetailPanel: () => <div>job-detail-panel</div>,
-}));
-
-vi.mock("../features/jobs/JobDetailModal", () => ({
-  JobDetailModal: ({ children, open }: { children: ReactNode; open: boolean }) => {
-    mockJobDetailModal({ open });
-    return open ? <div data-testid="job-detail-modal">{children}</div> : null;
-  },
 }));
 
 vi.mock("../features/jobs/JobReviewOverlay", () => ({
@@ -337,11 +325,10 @@ describe("JobsPage", () => {
 
     expect(setSelectedJobId).toHaveBeenCalledWith("job-review-1");
     expect(screen.getByTestId("job-review-overlay")).toHaveTextContent("final_review");
-    expect(screen.queryByTestId("job-detail-modal")).not.toBeInTheDocument();
     expect(mockJobReviewOverlay).toHaveBeenCalled();
   });
 
-  it("opens the detail modal when clicking a needs_review task row", () => {
+  it("does not open any task detail modal when clicking a task row", () => {
     const setSelectedJobId = vi.fn();
 
     mockUseJobWorkspace.mockReturnValue(
@@ -413,7 +400,6 @@ describe("JobsPage", () => {
     fireEvent.click(screen.getByRole("button", { name: "select-summary-review.mp4" }));
 
     expect(setSelectedJobId).toHaveBeenCalledWith("job-review-3");
-    expect(screen.getByTestId("job-detail-modal")).toBeInTheDocument();
     expect(screen.queryByTestId("job-review-overlay")).not.toBeInTheDocument();
   });
 
@@ -490,10 +476,9 @@ describe("JobsPage", () => {
 
     expect(setSelectedJobId).toHaveBeenCalledWith("job-review-4");
     expect(screen.getByTestId("job-review-overlay")).toHaveTextContent("summary_review");
-    expect(screen.queryByTestId("job-detail-modal")).not.toBeInTheDocument();
   });
 
-  it("keeps pending jobs out of the dedicated review overlay even with summary review step", () => {
+  it("keeps pending jobs out of the dedicated review overlay without falling back to a detail modal", () => {
     mockUseJobWorkspace.mockReturnValue(
       buildWorkspace({
         selectedJobId: "job-review-2",
@@ -535,11 +520,10 @@ describe("JobsPage", () => {
 
     render(<JobsPage />);
 
-    expect(screen.getByTestId("job-detail-modal")).toBeInTheDocument();
     expect(screen.queryByTestId("job-review-overlay")).not.toBeInTheDocument();
   });
 
-  it("keeps non-review jobs in the standard detail modal flow", () => {
+  it("does not render a legacy detail modal for non-review jobs", () => {
     mockUseJobWorkspace.mockReturnValue(
       buildWorkspace({
         selectedJobId: "job-running-1",
@@ -561,7 +545,6 @@ describe("JobsPage", () => {
 
     render(<JobsPage />);
 
-    expect(screen.getByTestId("job-detail-modal")).toBeInTheDocument();
     expect(screen.queryByTestId("job-review-overlay")).not.toBeInTheDocument();
   });
 });

@@ -2977,6 +2977,60 @@ async def test_confirm_content_profile_persists_identity_alias_memory_on_simple_
 
 
 @pytest.mark.asyncio
+async def test_confirm_content_profile_persists_explicit_video_type_feedback(client: AsyncClient):
+    from roughcut.db.models import Artifact, Job, JobStep
+    from roughcut.db.session import get_session_factory
+
+    job_id = uuid.uuid4()
+    now = datetime.now(timezone.utc)
+
+    async with get_session_factory()() as session:
+        session.add(
+            Job(
+                id=job_id,
+                source_path="jobs/demo/review.mp4",
+                source_name="review.mp4",
+                status="needs_review",
+                language="zh-CN",
+                workflow_template="unboxing_standard",
+                workflow_mode="standard_edit",
+            )
+        )
+        session.add(
+            JobStep(
+                job_id=job_id,
+                step_name="summary_review",
+                status="pending",
+                started_at=now,
+            )
+        )
+        session.add(
+            Artifact(
+                job_id=job_id,
+                artifact_type="content_profile_draft",
+                data_json={
+                    "subject_type": "AI创作工具",
+                    "summary": "待人工确认后继续。",
+                    "content_understanding": {
+                        "video_type": "unboxing",
+                        "primary_subject": "AI创作工具",
+                        "needs_review": True,
+                    },
+                },
+            )
+        )
+        await session.commit()
+
+    response = await client.post(
+        f"/api/v1/jobs/{job_id}/content-profile/confirm",
+        json={"video_type": "tutorial"},
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["final"]["content_understanding"]["video_type"] == "tutorial"
+
+
+@pytest.mark.asyncio
 async def test_confirm_content_profile_touches_runtime_refresh_hold(
     client: AsyncClient,
     monkeypatch: pytest.MonkeyPatch,

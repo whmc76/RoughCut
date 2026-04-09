@@ -70,10 +70,10 @@ export function JobSummaryReviewOverlay({
   const stepDetail = reviewDetail ?? contentProfile?.review_step_detail ?? contentProfile?.identity_review?.reason ?? "";
 
   return (
-    <section className="detail-block">
+    <section className="detail-block summary-review-surface panel">
       <div className="detail-key">摘要核对</div>
-      <div className="timeline-item">
-        <div className="toolbar">
+      <div className="summary-review-status-card">
+        <div className="toolbar summary-review-heading">
           <div>
             <strong>{jobTitle}</strong>
             <div className="muted">任务 {jobId}</div>
@@ -81,10 +81,10 @@ export function JobSummaryReviewOverlay({
           <span className={`status-pill ${stepStatus}`}>{stepStatus}</span>
         </div>
 
-        {stepDetail ? <div className="top-gap">{stepDetail}</div> : null}
+        {stepDetail ? <div className="top-gap summary-review-lead">{stepDetail}</div> : null}
 
         {hasEvidence ? (
-          <div className="top-gap">
+          <div className="top-gap summary-review-evidence">
             <div className="detail-key">画面与识别证据</div>
             <div className="thumbnail-strip top-gap">
               {[0, 1, 2].map((index) => (
@@ -100,14 +100,14 @@ export function JobSummaryReviewOverlay({
             </div>
             <div className="timeline-list top-gap">
               {ocrSummary ? (
-                <div className="timeline-item">
+                <div className="timeline-item summary-review-evidence-card">
                   <strong>OCR 文字</strong>
                   <div>{ocrSummary}</div>
                   {ocrDetail ? <div className="muted">{ocrDetail}</div> : null}
                 </div>
               ) : null}
               {transcriptSummary ? (
-                <div className="timeline-item">
+                <div className="timeline-item summary-review-evidence-card">
                   <strong>转写证据</strong>
                   <div>{transcriptSummary}</div>
                   {transcriptPrompt ? <div className="muted">{transcriptPrompt}</div> : null}
@@ -115,7 +115,7 @@ export function JobSummaryReviewOverlay({
                 </div>
               ) : null}
               {traceSummary ? (
-                <div className="timeline-item">
+                <div className="timeline-item summary-review-evidence-card">
                   <strong>解析轨迹</strong>
                   <div>{traceSummary}</div>
                 </div>
@@ -125,11 +125,11 @@ export function JobSummaryReviewOverlay({
         ) : null}
 
         {summaryReasons.length ? (
-          <div className="top-gap">
+          <div className="top-gap summary-review-reasons">
             <div className="muted">核对原因</div>
             <div className="timeline-list">
               {summaryReasons.map((reason) => (
-                <div key={reason} className="timeline-item">
+                <div key={reason} className="timeline-item summary-review-evidence-card">
                   {reason}
                 </div>
               ))}
@@ -137,7 +137,7 @@ export function JobSummaryReviewOverlay({
           </div>
         ) : null}
 
-        <div className="toolbar top-gap">
+        <div className="toolbar top-gap summary-review-actions">
           <button className="button primary" onClick={onConfirmProfile} disabled={isConfirmingProfile}>
             {isConfirmingProfile ? "正在保存..." : "确认摘要并继续执行"}
           </button>

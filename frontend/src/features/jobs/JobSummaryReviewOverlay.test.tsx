@@ -50,6 +50,26 @@ describe("JobSummaryReviewOverlay", () => {
     mockJobContentProfileSection.mockClear();
   });
 
+  it("renders the summary review inside a dedicated solid work surface", () => {
+    const { container } = render(
+      <JobSummaryReviewOverlay
+        jobId="job_1"
+        jobTitle="needs_review.mp4"
+        contentProfile={contentProfile}
+        contentSource={{ title: "最终标题" }}
+        contentDraft={{ title: "草稿标题" }}
+        contentKeywords="开箱,升级"
+        isConfirmingProfile={false}
+        onContentFieldChange={vi.fn()}
+        onKeywordsChange={vi.fn()}
+        onConfirmProfile={vi.fn()}
+      />,
+    );
+
+    expect(container.querySelector(".summary-review-surface.panel")).toBeInTheDocument();
+    expect(container.querySelector(".summary-review-evidence-card")).toBeInTheDocument();
+  });
+
   it("foregrounds the decision summary before the evidence editor", () => {
     render(
       <JobSummaryReviewOverlay

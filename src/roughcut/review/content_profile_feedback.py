@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from roughcut.edit.presets import get_workflow_preset, select_workflow_template
 from roughcut.providers.reasoning.base import Message
 from roughcut.review.content_profile_field_rules import CONTENT_PROFILE_FIELD_GUIDELINES
+from roughcut.review.content_understanding_schema import normalize_video_type
 from roughcut.review.content_understanding_verify import (
     HybridVerificationBundle,
     build_hybrid_verification_bundle,
@@ -487,6 +488,18 @@ async def apply_content_profile_feedback(
         or ""
     )
     merged["transcript_excerpt"] = transcript_excerpt
+    content_understanding = dict(merged.get("content_understanding") or {}) if isinstance(merged.get("content_understanding"), dict) else {}
+    feedback_video_type = normalize_video_type(str(resolved_feedback.get("video_type") or "").strip())
+    current_video_type = normalize_video_type(
+        str(content_understanding.get("video_type") or merged.get("content_kind") or "").strip()
+    )
+    effective_video_type = feedback_video_type or current_video_type
+    if effective_video_type:
+        merged["content_kind"] = effective_video_type
+        content_understanding["video_type"] = effective_video_type
+        merged["content_understanding"] = content_understanding
+    if feedback_video_type:
+        resolved_feedback["video_type"] = feedback_video_type
 
     if not any(value for value in resolved_feedback.values()):
         specific_subject_type = str(merged.get("subject_type") or "").strip()
@@ -636,6 +649,11 @@ async def apply_content_profile_feedback(
         result["workflow_mode"] = str(merged.get("workflow_mode") or "")
     if "enhancement_modes" in merged and "enhancement_modes" not in result:
         result["enhancement_modes"] = list(merged.get("enhancement_modes") or [])
+    if effective_video_type:
+        result["content_kind"] = effective_video_type
+        result_understanding = dict(result.get("content_understanding") or {}) if isinstance(result.get("content_understanding"), dict) else {}
+        result_understanding["video_type"] = effective_video_type
+        result["content_understanding"] = result_understanding
 
     for key in (
         "subject_brand",
