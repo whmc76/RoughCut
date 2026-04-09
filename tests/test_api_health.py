@@ -802,6 +802,31 @@ async def test_job_upload_rejects_unknown_enhancement_mode(client: AsyncClient):
 
 
 @pytest.mark.asyncio
+async def test_job_upload_persists_video_description_to_content_profile_step(client: AsyncClient, db_engine):
+    from sqlalchemy import select
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from roughcut.db.models import JobStep
+
+    response = await client.post(
+        "/api/v1/jobs",
+        files={"file": ("demo.mp4", b"video", "video/mp4")},
+        data={"video_description": "这是一期数码开箱，保留按键手感和细节近景，节奏偏快。"},
+    )
+
+    assert response.status_code == 201
+    job_id = response.json()["id"]
+
+    factory = async_sessionmaker(db_engine, expire_on_commit=False)
+    async with factory() as session:
+        result = await session.execute(
+            select(JobStep).where(JobStep.job_id == uuid.UUID(job_id), JobStep.step_name == "content_profile")
+        )
+        step = result.scalar_one()
+        assert step.metadata_["source_context"]["video_description"] == "这是一期数码开箱，保留按键手感和细节近景，节奏偏快。"
+
+
+@pytest.mark.asyncio
 async def test_glossary_crud(client: AsyncClient):
     # Create
     resp = await client.post(
@@ -1559,12 +1584,14 @@ async def test_job_list_includes_content_preview(client: AsyncClient):
 
 
 @pytest.mark.asyncio
-async def test_job_restart_allows_done_jobs(client: AsyncClient):
+async def test_job_restart_allows_done_jobs(client: AsyncClient, monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    import roughcut.api.jobs as jobs_api
     from roughcut.db.models import Artifact, Job, JobStep
     from roughcut.db.session import get_session_factory
 
     job_id = uuid.uuid4()
     now = datetime.now(timezone.utc)
+    monkeypatch.setattr(jobs_api.tempfile, "gettempdir", lambda: str(tmp_path))
 
     async with get_session_factory()() as session:
         session.add(
@@ -1596,6 +1623,11 @@ async def test_job_restart_allows_done_jobs(client: AsyncClient):
         )
         await session.commit()
 
+    cached_dir = tmp_path / "roughcut_content_profile_frames" / "v2" / str(job_id)
+    cached_dir.mkdir(parents=True, exist_ok=True)
+    cached_thumb = cached_dir / "profile_00.jpg"
+    cached_thumb.write_bytes(b"stale-black-thumb")
+
     response = await client.post(f"/api/v1/jobs/{job_id}/restart")
     assert response.status_code == 200
     data = response.json()
@@ -1603,6 +1635,7 @@ async def test_job_restart_allows_done_jobs(client: AsyncClient):
     assert data["file_hash"] is None
     assert data["steps"][0]["status"] == "pending"
     assert data["steps"][0]["attempt"] == 0
+    assert not cached_thumb.exists()
 
     activity = await client.get(f"/api/v1/jobs/{job_id}/activity")
     assert activity.status_code == 200

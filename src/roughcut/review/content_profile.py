@@ -74,8 +74,8 @@ from roughcut.speech.postprocess import (
     normalize_display_text,
 )
 
-_CONTENT_PROFILE_INFER_CACHE_VERSION = "2026-04-04.infer.v34"
-_CONTENT_PROFILE_ENRICH_CACHE_VERSION = "2026-04-04.enrich.v34"
+_CONTENT_PROFILE_INFER_CACHE_VERSION = "2026-04-09.infer.v35"
+_CONTENT_PROFILE_ENRICH_CACHE_VERSION = "2026-04-09.enrich.v35"
 _INGESTIBLE_PRODUCT_SIGNALS = (
     "luckykiss",
     "kisspod",
@@ -352,6 +352,7 @@ def _normalize_seeded_profile_for_cache(profile: dict[str, Any] | None) -> dict[
     ]
     visual_hints = seeded.get("visual_hints") if isinstance(seeded.get("visual_hints"), dict) else {}
     visual_cluster_hints = seeded.get("visual_cluster_hints") if isinstance(seeded.get("visual_cluster_hints"), dict) else visual_hints
+    source_context = _normalize_source_context_payload(seeded.get("source_context"))
     normalized = {
         "subject_brand": str(seeded.get("subject_brand") or "").strip(),
         "subject_model": str(seeded.get("subject_model") or "").strip(),
@@ -388,6 +389,7 @@ def _normalize_seeded_profile_for_cache(profile: dict[str, Any] | None) -> dict[
             "subject_model": str(visual_cluster_hints.get("subject_model") or "").strip(),
             "visible_text": str(visual_cluster_hints.get("visible_text") or "").strip(),
         },
+        "source_context": source_context,
     }
     if not any(
         (
@@ -410,9 +412,24 @@ def _normalize_seeded_profile_for_cache(profile: dict[str, Any] | None) -> dict[
             any(normalized["cover_title"].values()),
             any(normalized["visual_hints"].values()),
             any(normalized["visual_cluster_hints"].values()),
+            normalized["source_context"],
         )
     ):
         return {}
+    return normalized
+
+
+def _normalize_source_context_payload(value: Any) -> dict[str, Any]:
+    payload = dict(value) if isinstance(value, dict) else {}
+    video_description = str(payload.get("video_description") or "").strip()
+    if len(video_description) > 4000:
+        video_description = video_description[:4000]
+    resolved_feedback = dict(payload.get("resolved_feedback") or {}) if isinstance(payload.get("resolved_feedback"), dict) else {}
+    normalized: dict[str, Any] = {}
+    if video_description:
+        normalized["video_description"] = video_description
+    if resolved_feedback:
+        normalized["resolved_feedback"] = resolved_feedback
     return normalized
 
 
@@ -429,6 +446,7 @@ def build_content_profile_cache_fingerprint(
     include_research: bool,
     copy_style: str | None = None,
     seeded_profile: dict[str, Any] | None = None,
+    source_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if workflow_template is None and channel_profile is not None:
         workflow_template = channel_profile
@@ -461,6 +479,7 @@ def build_content_profile_cache_fingerprint(
         "include_research": bool(include_research),
         "copy_style": str(copy_style or "").strip(),
         "seeded_profile_sha256": digest_payload(normalized_seeded_profile) if normalized_seeded_profile else "",
+        "source_context_sha256": digest_payload(_normalize_source_context_payload(source_context)),
     }
 
 
@@ -1929,6 +1948,7 @@ async def infer_content_profile(
     glossary_terms: list[dict[str, Any]] | None = None,
     include_research: bool = True,
     copy_style: str = "attention_grabbing",
+    source_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if workflow_template is None and channel_profile is not None:
         workflow_template = channel_profile
@@ -1972,6 +1992,7 @@ async def infer_content_profile(
         ocr_profile=initial_profile.get("ocr_profile") if isinstance(initial_profile.get("ocr_profile"), dict) else {},
         visual_semantic_evidence=visual_semantic_evidence,
         visual_hints=visual_hints,
+        candidate_hints=_source_context_candidate_hints(source_context),
     )
 
     try:
@@ -2019,6 +2040,9 @@ async def infer_content_profile(
         profile["visual_cluster_hints"] = dict(visual_hints)
     if visual_semantic_evidence:
         profile["visual_semantic_evidence"] = dict(visual_semantic_evidence)
+    normalized_source_context = _normalize_source_context_payload(source_context)
+    if normalized_source_context:
+        profile["source_context"] = normalized_source_context
     _ensure_search_queries(profile, source_name, transcript_excerpt=transcript_excerpt)
     _ensure_review_fields_not_empty(profile, source_name=source_name, transcript_excerpt=transcript_excerpt)
     profile["keywords"] = _build_review_keywords(profile)
@@ -2531,8 +2555,8 @@ async def _infer_content_understanding_for_enrich(
         if isinstance(profile.get("visual_semantic_evidence"), dict)
         else {},
         visual_hints=_profile_visual_cluster_hints(profile),
+        candidate_hints=_enrich_candidate_hints(profile),
     )
-    evidence_bundle["candidate_hints"] = _enrich_candidate_hints(profile)
     try:
         with track_usage_operation("content_profile.enrich_universal_infer"):
             understanding = await infer_content_understanding(evidence_bundle)
@@ -2572,7 +2596,7 @@ def _enrich_ocr_profile(profile: dict[str, Any] | None) -> dict[str, Any]:
 def _enrich_candidate_hints(profile: dict[str, Any] | None) -> dict[str, Any]:
     candidate = profile or {}
     search_queries = [str(item).strip() for item in (candidate.get("search_queries") or []) if str(item).strip()]
-    return {
+    hints = {
         "subject_brand": str(candidate.get("subject_brand") or "").strip(),
         "subject_model": str(candidate.get("subject_model") or "").strip(),
         "subject_type": str(candidate.get("subject_type") or "").strip(),
@@ -2583,6 +2607,35 @@ def _enrich_candidate_hints(profile: dict[str, Any] | None) -> dict[str, Any]:
         "search_queries": search_queries,
         "visual_hints": _profile_visual_cluster_hints(candidate),
     }
+    source_context = _normalize_source_context_payload(candidate.get("source_context"))
+    if source_context:
+        hints["source_context"] = source_context
+    return hints
+
+
+def _source_context_candidate_hints(source_context: dict[str, Any] | None) -> dict[str, Any]:
+    payload = _normalize_source_context_payload(source_context)
+    if not payload:
+        return {}
+    hints: dict[str, Any] = {"source_context": payload}
+    resolved_feedback = dict(payload.get("resolved_feedback") or {}) if isinstance(payload.get("resolved_feedback"), dict) else {}
+    for key in (
+        "subject_brand",
+        "subject_model",
+        "subject_type",
+        "video_theme",
+        "summary",
+        "hook_line",
+        "visible_text",
+        "engagement_question",
+    ):
+        text = str(resolved_feedback.get(key) or "").strip()
+        if text:
+            hints[key] = text
+    search_queries = [str(item).strip() for item in (resolved_feedback.get("search_queries") or []) if str(item).strip()]
+    if search_queries:
+        hints["search_queries"] = search_queries[:6]
+    return hints
 
 
 async def _infer_visual_profile_hints(frame_paths: list[Path]) -> dict[str, Any]:

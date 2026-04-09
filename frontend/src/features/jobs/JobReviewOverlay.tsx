@@ -137,6 +137,7 @@ export function JobReviewOverlay({
             <JobSummaryReviewOverlay
               jobId={selectedJob.id}
               jobTitle={selectedJob.source_name}
+              thumbnailVersion={selectedJob.updated_at}
               contentProfile={contentProfile}
               contentSource={contentSource}
               contentDraft={contentDraft}

@@ -4,9 +4,11 @@ import asyncio
 import base64
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -60,7 +62,7 @@ from roughcut.pipeline.quality import QUALITY_ARTIFACT_TYPE
 from roughcut.media.variant_timeline_bundle import resolve_effective_variant_timeline_bundle
 from roughcut.recovery.stuck_step_recovery import STUCK_STEP_DIAGNOSTIC_ARTIFACT_TYPE
 from roughcut.review.content_understanding_schema import normalize_video_type
-from roughcut.review.content_profile import build_reviewed_transcript_excerpt
+from roughcut.review.content_profile import _probe_duration, build_reviewed_transcript_excerpt
 from roughcut.review.content_profile_feedback import apply_content_profile_feedback
 from roughcut.review.content_profile_keywords import normalize_query_list
 from roughcut.review.content_profile_memory import (
@@ -120,6 +122,7 @@ _CONTENT_PROFILE_THUMBNAIL_CACHE_VERSION = "v2"
 _CONTENT_PROFILE_THUMBNAIL_LOCKS: dict[str, asyncio.Lock] = {}
 _CONTENT_PROFILE_THUMBNAIL_GENERATION_SEMAPHORE = asyncio.Semaphore(2)
 _CONTENT_PROFILE_THUMBNAIL_WARM_TASKS: dict[str, asyncio.Task] = {}
+_CONTENT_PROFILE_PLACEHOLDER_RETRY_SECONDS = 300
 
 
 class FinalReviewDecisionIn(BaseModel):
@@ -387,6 +390,7 @@ async def create_job(
     workflow_mode: str | None = Form(None),
     enhancement_modes: list[str] | None = Form(None),
     output_dir: str | None = Form(None),
+    video_description: str | None = Form(None),
     session: AsyncSession = Depends(get_session),
 ):
     settings = get_settings()
@@ -395,6 +399,7 @@ async def create_job(
         workflow_template = normalize_workflow_template(workflow_template)
         workflow_mode = normalize_workflow_mode(workflow_mode or settings.default_job_workflow_mode)
         output_dir = str(output_dir or "").strip() or None
+        video_description = _normalize_video_description(video_description)
         enhancement_modes = normalize_enhancement_modes(
             enhancement_modes if enhancement_modes is not None else settings.default_job_enhancement_modes,
         )
@@ -443,6 +448,13 @@ async def create_job(
         # Create all pipeline steps
         steps = create_job_steps(job_id)
         for step in steps:
+            if step.step_name == "content_profile" and video_description:
+                step.metadata_ = {
+                    **(step.metadata_ or {}),
+                    "source_context": {
+                        "video_description": video_description,
+                    },
+                }
             session.add(step)
 
         await session.commit()
@@ -459,6 +471,13 @@ async def create_job(
         tmp_path.unlink(missing_ok=True)
 
     return job
+
+
+def _normalize_video_description(value: str | None) -> str | None:
+    normalized = str(value or "").strip()
+    if not normalized:
+        return None
+    return normalized[:4000]
 
 
 @router.get("/{job_id}", response_model=JobOut)
@@ -1098,6 +1117,7 @@ async def _clear_job_runtime_state(job_id: uuid.UUID, session: AsyncSession, *, 
         purge_deliverables=True,
         preserve_storage_keys=[source_path] if source_path else [],
     )
+    _clear_content_profile_thumbnail_cache(job_id)
 
     await session.execute(
         delete(FactEvidence).where(FactEvidence.claim_id.in_(select(FactClaim.id).where(FactClaim.job_id == job_id)))
@@ -2597,20 +2617,15 @@ def _open_in_file_manager(target_path: Path) -> None:
 
 
 async def _ensure_content_profile_thumbnail(job: Job, *, index: int) -> Path:
-    cache_dir = (
-        Path(tempfile.gettempdir())
-        / "roughcut_content_profile_frames"
-        / _CONTENT_PROFILE_THUMBNAIL_CACHE_VERSION
-        / str(job.id)
-    )
+    cache_dir = _content_profile_thumbnail_cache_dir(job.id)
     cache_dir.mkdir(parents=True, exist_ok=True)
     cached = cache_dir / f"profile_{index:02d}.jpg"
-    if cached.exists():
+    if cached.exists() and not _should_retry_placeholder_thumbnail(cached):
         return cached
 
     lock = _CONTENT_PROFILE_THUMBNAIL_LOCKS.setdefault(f"{job.id}:{index}", asyncio.Lock())
     async with lock:
-        if cached.exists():
+        if cached.exists() and not _should_retry_placeholder_thumbnail(cached):
             return cached
         with tempfile.TemporaryDirectory() as tmpdir:
             try:
@@ -2634,6 +2649,27 @@ async def _ensure_content_profile_thumbnail(job: Job, *, index: int) -> Path:
         if not cached.exists():
             _write_content_profile_placeholder_thumbnail(job, cached, index=index)
     return cached
+
+
+def _content_profile_thumbnail_cache_dir(job_id: uuid.UUID | str) -> Path:
+    return (
+        Path(tempfile.gettempdir())
+        / "roughcut_content_profile_frames"
+        / _CONTENT_PROFILE_THUMBNAIL_CACHE_VERSION
+        / str(job_id)
+    )
+
+
+def _clear_content_profile_thumbnail_cache(job_id: uuid.UUID | str) -> None:
+    job_id_str = str(job_id)
+    prefix = f"{job_id_str}:"
+    for key in [key for key in _CONTENT_PROFILE_THUMBNAIL_WARM_TASKS if key.startswith(prefix)]:
+        task = _CONTENT_PROFILE_THUMBNAIL_WARM_TASKS.pop(key, None)
+        if task and not task.done():
+            task.cancel()
+    for key in [key for key in _CONTENT_PROFILE_THUMBNAIL_LOCKS if key.startswith(prefix)]:
+        _CONTENT_PROFILE_THUMBNAIL_LOCKS.pop(key, None)
+    shutil.rmtree(_content_profile_thumbnail_cache_dir(job_id_str), ignore_errors=True)
 
 
 def _spawn_content_profile_thumbnail_generation(job: Job, *, index: int) -> bool:
@@ -2759,6 +2795,25 @@ async def _resolve_job_source(job: Job, tmpdir: str) -> Path:
 def _write_content_profile_placeholder_thumbnail(job: Job, target_path: Path, *, index: int) -> None:
     target_path.parent.mkdir(parents=True, exist_ok=True)
     target_path.write_bytes(_CONTENT_PROFILE_PLACEHOLDER_JPEG)
+
+
+def _is_content_profile_placeholder_thumbnail(path: Path) -> bool:
+    try:
+        return path.is_file() and path.read_bytes() == _CONTENT_PROFILE_PLACEHOLDER_JPEG
+    except OSError:
+        return False
+
+
+def _should_retry_placeholder_thumbnail(path: Path) -> bool:
+    if not path.exists():
+        return True
+    if not _is_content_profile_placeholder_thumbnail(path):
+        return False
+    try:
+        age_seconds = max(0.0, time.time() - path.stat().st_mtime)
+    except OSError:
+        return True
+    return age_seconds >= _CONTENT_PROFILE_PLACEHOLDER_RETRY_SECONDS
 
 
 def _iso_or_none(value: datetime | None) -> str | None:

@@ -92,8 +92,25 @@ def test_build_content_profile_cache_fingerprint_uses_infer_version_without_seed
         copy_style="attention_grabbing",
     )
 
-    assert fingerprint["version"].startswith("2026-04-04.infer.v34")
+    assert fingerprint["version"].startswith("2026-04-09.infer.v35")
     assert fingerprint["seeded_profile_sha256"] == ""
+    assert fingerprint["source_context_sha256"]
+
+
+def test_build_content_profile_cache_fingerprint_hashes_source_context():
+    fingerprint = build_content_profile_cache_fingerprint(
+        source_name="demo.mp4",
+        source_file_hash="demo-hash",
+        workflow_template="",
+        transcript_excerpt="测试转写",
+        glossary_terms=[],
+        user_memory={},
+        include_research=False,
+        copy_style="attention_grabbing",
+        source_context={"video_description": "用户要求保留近景细节并加快节奏。"},
+    )
+
+    assert fingerprint["source_context_sha256"]
 
 
 @pytest.mark.asyncio
@@ -151,11 +168,13 @@ async def test_infer_content_profile_routes_visual_semantic_evidence_into_conten
         source_name="bag.mp4",
         subtitle_items=[],
         include_research=False,
+        source_context={"video_description": "这是一期机能双肩包展示，重点强调背负和结构分仓。"},
     )
 
     evidence_bundle = captured["evidence_bundle"]
     assert evidence_bundle["visual_semantic_evidence"]["object_categories"] == ["backpack"]
     assert evidence_bundle["visual_semantic_evidence"]["visible_brands"] == ["HSJUN"]
+    assert evidence_bundle["candidate_hints"]["source_context"]["video_description"] == "这是一期机能双肩包展示，重点强调背负和结构分仓。"
 
 
 @pytest.mark.asyncio

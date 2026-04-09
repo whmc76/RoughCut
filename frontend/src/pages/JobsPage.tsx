@@ -4,6 +4,8 @@ import { EmptyState } from "../components/ui/EmptyState";
 import { PageHeader } from "../components/ui/PageHeader";
 import { ConfigProfileSwitcher } from "../features/configProfiles/ConfigProfileSwitcher";
 import { JobCreateModal } from "../features/jobs/JobCreateModal";
+import { JobDetailModal } from "../features/jobs/JobDetailModal";
+import { JobDetailPanel } from "../features/jobs/JobDetailPanel";
 import { JobQueueTable } from "../features/jobs/JobQueueTable";
 import { JobReviewOverlay } from "../features/jobs/JobReviewOverlay";
 import { JobUploadPanel } from "../features/jobs/JobUploadPanel";
@@ -17,6 +19,7 @@ export function JobsPage() {
   const [createOpen, setCreateOpen] = useState(false);
   const [reviewNotice, setReviewNotice] = useState<string | null>(null);
   const [reviewNoticeTone, setReviewNoticeTone] = useState<"success" | "error">("success");
+  const [detailModalOpen, setDetailModalOpen] = useState(false);
   const [reviewOverlayOpen, setReviewOverlayOpen] = useState(false);
 
   const languageOptions = workspace.options.data?.job_languages ?? [{ value: "zh-CN", label: "简体中文" }];
@@ -41,11 +44,36 @@ export function JobsPage() {
           && step.status !== "done",
       )?.step_name;
   const reviewStep = activeReviewStep === "final_review" ? "final_review" : "summary_review";
+  const showDetailModal = Boolean(detailModalOpen && workspace.selectedJobId);
   const showReviewOverlay = Boolean(reviewOverlayOpen && workspace.selectedJobId && isReviewContext && activeReviewStep);
 
   const openJobReview = (jobId: string) => {
+    setDetailModalOpen(false);
     setReviewOverlayOpen(true);
     workspace.setSelectedJobId(jobId);
+  };
+
+  const openJobDetail = (jobId: string) => {
+    setReviewOverlayOpen(false);
+    setDetailModalOpen(true);
+    workspace.setSelectedJobId(jobId);
+  };
+
+  const resolveJobName = (jobId: string) =>
+    workspace.filteredJobs.find((job) => job.id === jobId)?.source_name
+    ?? (workspace.selectedJob?.id === jobId ? workspace.selectedJob.source_name : null)
+    ?? t("jobs.actions.targetFallback");
+
+  const confirmAndRestartJob = (jobId: string) => {
+    const message = t("jobs.actions.restartConfirm").replace("{name}", resolveJobName(jobId));
+    if (!window.confirm(message)) return;
+    workspace.restartJob.mutate(jobId);
+  };
+
+  const confirmAndDeleteJob = (jobId: string) => {
+    const message = t("jobs.actions.deleteConfirm").replace("{name}", resolveJobName(jobId));
+    if (!window.confirm(message)) return;
+    workspace.deleteJob.mutate(jobId);
   };
 
   const showReviewNotice = (tone: "success" | "error", message: string) => {
@@ -63,6 +91,13 @@ export function JobsPage() {
     }
     if (shouldClearNotice) {
       setReviewNotice(null);
+    }
+  };
+
+  const closeDetailModal = () => {
+    if (showDetailModal) {
+      setDetailModalOpen(false);
+      workspace.setSelectedJobId(null);
     }
   };
 
@@ -158,15 +193,12 @@ export function JobsPage() {
           isCancelling={workspace.cancelJob.isPending}
           isRestarting={workspace.restartJob.isPending}
           isDeleting={workspace.deleteJob.isPending}
-          onSelect={(jobId) => {
-            setReviewOverlayOpen(false);
-            workspace.setSelectedJobId(jobId);
-          }}
+          onSelect={openJobDetail}
           onOpenReview={openJobReview}
           onOpenFolder={(jobId) => workspace.openFolder.mutate(jobId)}
           onCancel={(jobId) => workspace.cancelJob.mutate(jobId)}
-          onRestart={(jobId) => workspace.restartJob.mutate(jobId)}
-          onDelete={(jobId) => workspace.deleteJob.mutate(jobId)}
+          onRestart={confirmAndRestartJob}
+          onDelete={confirmAndDeleteJob}
         />
       </section>
 
@@ -257,6 +289,71 @@ export function JobsPage() {
           </div>
         </section>
       </JobCreateModal>
+
+      <JobDetailModal
+        open={showDetailModal}
+        title={workspace.selectedJob?.source_name}
+        onClose={closeDetailModal}
+      >
+        <JobDetailPanel
+          selectedJobId={workspace.selectedJobId}
+          className="detail-panel-modal"
+          flowOnly
+          selectedJob={workspace.selectedJob}
+          isLoading={workspace.detail.isLoading}
+          activity={workspace.activity.data}
+          report={workspace.report.data}
+          tokenUsage={workspace.tokenUsage.data}
+          timeline={workspace.timeline.data}
+          contentProfile={workspace.contentProfile.data}
+          config={workspace.config.data}
+          packaging={workspace.packaging.data}
+          avatarMaterials={workspace.avatarMaterials.data}
+          contentSource={workspace.contentSource}
+          contentDraft={workspace.contentDraft}
+          contentKeywords={workspace.contentKeywords}
+          reviewEnhancementModes={workspace.reviewEnhancementModes}
+          isConfirmingProfile={workspace.confirmProfile.isPending}
+          isApplyingReview={workspace.applyReview.isPending}
+          isCancelling={workspace.cancelJob.isPending}
+          isRestarting={workspace.restartJob.isPending}
+          isDeleting={workspace.deleteJob.isPending}
+          onContentFieldChange={(field, value) =>
+            workspace.setContentDraft((prev) => {
+              if (field !== "video_type") {
+                return { ...prev, [field]: value };
+              }
+              const previousUnderstanding =
+                typeof prev.content_understanding === "object" && !Array.isArray(prev.content_understanding)
+                  ? (prev.content_understanding as Record<string, unknown>)
+                  : {};
+              return {
+                ...prev,
+                video_type: value,
+                content_understanding: {
+                  ...previousUnderstanding,
+                  video_type: value,
+                },
+              };
+            })
+          }
+          onKeywordsChange={(value) =>
+            workspace.setContentDraft((prev) => ({
+              ...prev,
+              keywords: value
+                .split(",")
+                .map((item) => item.trim())
+                .filter(Boolean),
+            }))
+          }
+          onConfirmProfile={confirmReviewProfile}
+          onOpenFolder={() => workspace.selectedJob && workspace.openFolder.mutate(workspace.selectedJob.id)}
+          onCancel={() => workspace.selectedJob && workspace.cancelJob.mutate(workspace.selectedJob.id)}
+          onRestart={() => workspace.selectedJob && confirmAndRestartJob(workspace.selectedJob.id)}
+          onDelete={() => workspace.selectedJob && confirmAndDeleteJob(workspace.selectedJob.id)}
+          onApplyReview={(targetId, action) => workspace.applyReview.mutate({ targetId, action })}
+        />
+      </JobDetailModal>
 
       <JobReviewOverlay
         open={showReviewOverlay}

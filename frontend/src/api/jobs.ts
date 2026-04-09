@@ -27,6 +27,7 @@ export const jobsApi = {
     workflowMode?: string,
     enhancementModes: string[] = [],
     outputDir?: string,
+    videoDescription?: string,
   ) => {
     const formData = new FormData();
     formData.append("file", file);
@@ -34,6 +35,7 @@ export const jobsApi = {
     if (workflowTemplate) formData.append("workflow_template", workflowTemplate);
     if (workflowMode) formData.append("workflow_mode", workflowMode);
     if (outputDir?.trim()) formData.append("output_dir", outputDir.trim());
+    if (videoDescription?.trim()) formData.append("video_description", videoDescription.trim());
     enhancementModes.forEach((mode) => formData.append("enhancement_modes", mode));
     return requestForm<Job>("/jobs", formData);
   },
@@ -49,7 +51,8 @@ export const jobsApi = {
     request<FinalReviewDecisionResponse>(`/jobs/${jobId}/final-review`, { method: "POST", body: JSON.stringify(body) }),
   applyReview: (jobId: string, actions: Array<{ target_type: string; target_id: string; action: string; override_text?: string }>) =>
     request<{ applied: number }>(`/jobs/${jobId}/review/apply`, { method: "POST", body: JSON.stringify({ actions }) }),
-  contentProfileThumbnailUrl: (jobId: string, index: number) => apiPath(`/jobs/${jobId}/content-profile/thumbnail?index=${index}`),
+  contentProfileThumbnailUrl: (jobId: string, index: number, version?: string | null) =>
+    apiPath(`/jobs/${jobId}/content-profile/thumbnail?index=${index}${version ? `&v=${encodeURIComponent(version)}` : ""}`),
   warmContentProfileThumbnails: (jobId: string) => request<{ status: string; job_id: string }>(`/jobs/${jobId}/content-profile/thumbnails/warm`, {
     method: "POST",
   }),

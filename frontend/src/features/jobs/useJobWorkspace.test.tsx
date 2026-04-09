@@ -482,6 +482,35 @@ describe("useJobWorkspace", () => {
     await waitFor(() => expect(result.current.upload.enhancementModes).toEqual(["ai_director"]));
   });
 
+  it("passes video description when creating a job", async () => {
+    const file = new File(["video"], "demo.mp4", { type: "video/mp4" });
+    const { result } = renderHookWithQueryClient(() => useJobWorkspace());
+
+    await waitFor(() => expect(result.current.upload.enhancementModes).toEqual(["avatar_commentary"]));
+
+    act(() => {
+      result.current.setUpload({
+        ...result.current.upload,
+        file,
+        videoDescription: "这是一期工具开箱，重点保留锁定结构、开合手感和近景细节，整体节奏要更利落。",
+      });
+    });
+
+    await act(async () => {
+      await result.current.uploadJob.mutateAsync();
+    });
+
+    expect(mockApi.createJob).toHaveBeenCalledWith(
+      file,
+      "zh-CN",
+      undefined,
+      "standard_edit",
+      ["avatar_commentary"],
+      "",
+      "这是一期工具开箱，重点保留锁定结构、开合手感和近景细节，整体节奏要更利落。",
+    );
+  });
+
   it("does not fetch usage analysis in the jobs workspace", async () => {
     renderHookWithQueryClient(() => useJobWorkspace());
 

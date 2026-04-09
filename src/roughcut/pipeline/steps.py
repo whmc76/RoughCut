@@ -1238,6 +1238,7 @@ async def run_content_profile(job_id: str) -> dict:
         )
         include_research = bool(getattr(settings, "research_verifier_enabled", False))
         packaging_config = (list_packaging_assets().get("config") or {})
+        source_context = dict(step.metadata_.get("source_context") or {}) if isinstance(step.metadata_, dict) else {}
         # Reruns must re-infer from the current transcript and frames instead of
         # recycling a stale same-job profile artifact.
         seeded_profile: dict[str, Any] = {}
@@ -1253,6 +1254,7 @@ async def run_content_profile(job_id: str) -> dict:
             user_memory=user_memory,
             include_research=include_research,
             copy_style=copy_style,
+            source_context=source_context,
         )
         infer_cache_key = build_cache_key(infer_cache_namespace, infer_cache_fingerprint)
         cached_infer_entry = load_cached_entry(infer_cache_namespace, infer_cache_key)
@@ -1340,6 +1342,7 @@ async def run_content_profile(job_id: str) -> dict:
                         glossary_terms=effective_glossary_terms,
                         include_research=include_research,
                         copy_style=copy_style,
+                        source_context=source_context,
                     )
                 usage_after = await _read_persisted_step_usage_snapshot(step.id if step else None)
                 usage_baseline = _usage_delta(usage_after, usage_before)
@@ -1376,6 +1379,37 @@ async def run_content_profile(job_id: str) -> dict:
             glossary_terms=effective_glossary_terms,
             source_name=job.source_name,
         )
+        source_context_description = str(source_context.get("video_description") or "").strip()
+        resolved_source_context_feedback: dict[str, Any] = {}
+        if source_context_description:
+            source_context_verification_bundle = await build_review_feedback_verification_bundle(
+                draft_profile=content_profile,
+                proposed_feedback=None,
+                session=session,
+            )
+            resolved_source_context_feedback = await resolve_content_profile_review_feedback(
+                draft_profile=content_profile,
+                source_name=job.source_name,
+                review_feedback=source_context_description,
+                proposed_feedback=None,
+                reviewed_subtitle_excerpt=transcript_excerpt,
+                accepted_corrections=[],
+                verification_bundle=source_context_verification_bundle,
+            )
+            if resolved_source_context_feedback:
+                content_profile = await apply_content_profile_feedback(
+                    draft_profile=content_profile,
+                    source_name=job.source_name,
+                    workflow_template=job.workflow_template,
+                    user_feedback=resolved_source_context_feedback,
+                    reviewed_subtitle_excerpt=transcript_excerpt,
+                    accepted_corrections=[],
+                )
+        if source_context:
+            content_profile["source_context"] = {
+                **source_context,
+                **({"resolved_feedback": dict(resolved_source_context_feedback)} if resolved_source_context_feedback else {}),
+            }
         manual_review_feedback = dict(step.metadata_.get("review_user_feedback") or {}) if isinstance(step.metadata_, dict) else {}
         review_feedback_note = str(step.metadata_.get("review_feedback") or "").strip() if isinstance(step.metadata_, dict) else ""
         resolved_manual_review_feedback: dict[str, Any] = {}

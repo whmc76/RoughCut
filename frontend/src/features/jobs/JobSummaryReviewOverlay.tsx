@@ -5,6 +5,7 @@ import { JobContentProfileSection } from "./JobContentProfileSection";
 type JobSummaryReviewOverlayProps = {
   jobId: string;
   jobTitle: string;
+  thumbnailVersion?: string | null;
   contentProfile?: ContentProfileReview;
   contentSource: Record<string, unknown> | null;
   contentDraft: Record<string, unknown>;
@@ -30,6 +31,7 @@ function uniqueNonEmptyStrings(values: Array<string | null | undefined>) {
 export function JobSummaryReviewOverlay({
   jobId,
   jobTitle,
+  thumbnailVersion,
   contentProfile,
   contentSource,
   contentDraft,
@@ -93,7 +95,7 @@ export function JobSummaryReviewOverlay({
                   className="profile-thumb"
                   loading="lazy"
                   decoding="async"
-                  src={api.contentProfileThumbnailUrl(jobId, index)}
+                  src={api.contentProfileThumbnailUrl(jobId, index, thumbnailVersion)}
                   alt={`review-thumbnail-${index}`}
                 />
               ))}
@@ -144,10 +146,11 @@ export function JobSummaryReviewOverlay({
         </div>
       </div>
 
-      <JobContentProfileSection
-        jobId={jobId}
-        contentProfile={contentProfile}
-        contentSource={contentSource}
+        <JobContentProfileSection
+          jobId={jobId}
+          thumbnailVersion={thumbnailVersion}
+          contentProfile={contentProfile}
+          contentSource={contentSource}
         contentDraft={contentDraft}
         contentKeywords={contentKeywords}
         isSaving={isConfirmingProfile}

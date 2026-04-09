@@ -39,9 +39,27 @@ function resolveEventSeverityClass(event: ActivityEvent): string {
   return "pending";
 }
 
+type StepActivityItem = {
+  id: string;
+  title: string;
+  detail?: string | null;
+  status: string;
+  timestamp?: string | null;
+  toneClass: string;
+};
+
+function resolveItemToneClass(status: string): string {
+  if (status === "running" || status === "processing" || status === "started") return "running";
+  if (status === "cancelled") return "cancelled";
+  if (status === "failed") return "failed";
+  if (status === "done") return "done";
+  return "pending";
+}
+
 type JobDetailPanelProps = {
   selectedJobId: string | null;
   className?: string;
+  flowOnly?: boolean;
   selectedJob?: Job;
   isLoading: boolean;
   activity?: JobActivity;
@@ -74,6 +92,7 @@ type JobDetailPanelProps = {
 export function JobDetailPanel({
   selectedJobId,
   className,
+  flowOnly = false,
   selectedJob,
   isLoading,
   activity,
@@ -104,22 +123,15 @@ export function JobDetailPanel({
 }: JobDetailPanelProps) {
   const { t } = useI18n();
   const isReviewMode = selectedJob?.status === "needs_review";
+  const showReviewConfig = isReviewMode && !flowOnly;
+  const showFlowSections = !isReviewMode || flowOnly;
   const currentStep = activity?.current_step;
   const timelineEvents = activity?.events ?? [];
-  const timelineEventEntries = timelineEvents.map((event, index) => ({ event, index }));
-  const criticalEvents = timelineEventEntries.filter(({ event }) => isFailureEvent(event));
-  const visibleTimelineEntries = criticalEvents.length
-    ? timelineEventEntries
-    : timelineEventEntries.slice(
-        0,
-        selectedJob?.status === "failed" || selectedJob?.status === "cancelled" ? 20 : 8,
-      );
   const hasTerminalFailure =
     selectedJob?.status === "failed" ||
     selectedJob?.status === "cancelled" ||
     currentStep?.status === "failed" ||
     currentStep?.status === "cancelled";
-  const latestFailureTimelineIndex = criticalEvents.length ? criticalEvents[0].index : -1;
   const topUsageSteps = [...(tokenUsage?.steps ?? [])].sort((a, b) => b.total_tokens - a.total_tokens).slice(0, 3);
   const topUsageModels = [...(tokenUsage?.models ?? [])].sort((a, b) => b.total_tokens - a.total_tokens).slice(0, 3);
   const topUsageOperations = [...(topUsageSteps[0]?.operations ?? [])].sort((a, b) => b.total_tokens - a.total_tokens).slice(0, 3);
@@ -148,10 +160,60 @@ export function JobDetailPanel({
       ? t("jobs.actions.downloadHint.avatarFallback")
       : avatarHeadlineSummary || t("jobs.actions.downloadHint.standard")
     : t("jobs.actions.downloadHint.standard");
-  const jumpToTimelineEvent = (index: number) => {
-    const target = document.getElementById(`timeline-event-${index}`);
-    target?.scrollIntoView({ behavior: "smooth", block: "center" });
+  const stepEntries = selectedJob?.steps ?? [];
+  const stepLabelEntries = stepEntries
+    .map((step) => ({ stepName: step.step_name, label: stepLabel(step.step_name) }))
+    .sort((left, right) => right.label.length - left.label.length);
+  const fallbackStepName =
+    currentStep?.step_name
+    ?? stepEntries.find((step) => step.status === "running" || step.status === "failed" || step.status === "cancelled")?.step_name
+    ?? null;
+  const resolveStepNameForText = (text: string) => {
+    for (const entry of stepLabelEntries) {
+      if (text.includes(entry.label)) return entry.stepName;
+    }
+    if (text.includes("时间线")) return "edit_plan";
+    if (text.includes("渲染")) return "render";
+    if (text.includes("数字人")) return "avatar_commentary";
+    if (text.includes("任务失败") || text.includes("任务已取消")) return fallbackStepName;
+    return null;
   };
+  const stepItemsMap = new Map<string, StepActivityItem[]>();
+  const pushStepItem = (stepName: string | null, item: StepActivityItem) => {
+    if (!stepName) return;
+    const next = stepItemsMap.get(stepName) ?? [];
+    next.push(item);
+    stepItemsMap.set(stepName, next);
+  };
+
+  timelineEvents.forEach((event, index) => {
+    const matchedStepName = resolveStepNameForText(`${event.title || ""} ${event.detail || ""}`);
+    pushStepItem(matchedStepName, {
+      id: `event-${index}-${event.timestamp || "na"}`,
+      title: event.title,
+      detail: event.detail,
+      status: resolveEventSeverity(event),
+      timestamp: event.timestamp,
+      toneClass: resolveEventSeverityClass(event),
+    });
+  });
+
+  (activity?.decisions ?? []).forEach((decision, index) => {
+    const matchedStepName =
+      resolveStepNameForText(`${decision.title || ""} ${decision.summary || ""} ${decision.detail || ""}`)
+      ?? (decision.kind === "avatar_commentary" ? "avatar_commentary" : decision.kind === "edit_plan" ? "edit_plan" : null);
+    pushStepItem(matchedStepName, {
+      id: `decision-${index}-${decision.kind}`,
+      title: decision.title,
+      detail: decision.detail || decision.summary,
+      status: decision.status,
+      timestamp: decision.updated_at,
+      toneClass: resolveItemToneClass(decision.status),
+    });
+  });
+
+  const currentStepProgressPercent =
+    typeof currentStep?.progress === "number" ? Math.round(currentStep.progress * 100) : null;
 
   return (
     <aside className={classNames("panel detail-panel", className)}>
@@ -217,7 +279,7 @@ export function JobDetailPanel({
             </section>
           ) : null}
 
-          {!isReviewMode && (
+          {showFlowSections && (
             <section className="detail-block">
               <div className="detail-key">{t("jobs.detail.creativeMode")}</div>
               <div className="mode-chip-list">
@@ -235,77 +297,92 @@ export function JobDetailPanel({
             </section>
           )}
 
-          {isReviewMode ? (
+          {showReviewConfig ? (
             <JobReviewConfigSection
               config={config}
               packaging={packaging}
               avatarMaterials={avatarMaterials}
               enhancementModes={reviewEnhancementModes}
             />
-          ) : (
+          ) : showFlowSections ? (
             <>
-              <section className="detail-block">
-                <div className="detail-key">{t("jobs.detail.currentActivity")}</div>
-                {currentStep ? (
-                  <div className="activity-card">
-                    <div className="toolbar">
-                      <strong>{currentStep.label}</strong>
-                      <span className={classNames("status-pill", currentStep.status)}>{statusLabel(currentStep.status)}</span>
-                    </div>
-                    <div className={classNames("muted", hasTerminalFailure ? "muted-strong" : "")}>{currentStep.detail || "—"}</div>
-                    {typeof currentStep.progress === "number" && (
-                      <div className="progress-bar">
-                        <span style={{ width: `${Math.round(currentStep.progress * 100)}%` }} />
-                      </div>
-                    )}
-                  </div>
-                ) : (
-                  <div className="muted">{t("jobs.detail.noActivity")}</div>
-                )}
-              </section>
-
-              {!!activity?.decisions?.length && (
-                <section className="detail-block">
-                  <div className="detail-key">{t("jobs.detail.decisions")}</div>
-                  <div className="timeline-list">
-                    {activity.decisions.map((decision, index) => (
-                      <div key={`${decision.kind}-${index}`} className="timeline-item">
-                        <div className="toolbar">
-                          <strong>{decision.title}</strong>
-                          <span className={`status-pill ${decision.status}`}>{statusLabel(decision.status)}</span>
-                        </div>
-                        <div>{decision.summary}</div>
-                        {decision.detail && <div className="muted">{decision.detail}</div>}
-                      </div>
-                    ))}
-                  </div>
-                </section>
-              )}
-
               <section className="detail-block">
                 <div className="detail-key">{t("jobs.detail.stepStatus")}</div>
                 <div className="steps-list">
-                  {selectedJob.steps.map((step) => (
+                  {selectedJob.steps.map((step) => {
+                    const stepItems = [...(stepItemsMap.get(step.step_name) ?? [])].sort((left, right) =>
+                      String(right.timestamp || "").localeCompare(String(left.timestamp || "")),
+                    );
+                    const isCurrentStep = currentStep?.step_name === step.step_name;
+                    const hasRunningProgress = isCurrentStep && currentStepProgressPercent !== null;
+                    const summaryText =
+                      isCurrentStep && currentStep?.detail
+                        ? currentStep.detail
+                        : stepItems[0]?.detail || step.error_message || null;
+
+                    return (
                     <div
                       key={step.id}
                       className={classNames(
                         "step-row",
+                        isCurrentStep && "step-row-current",
                         step.status === "failed" && "step-row-error",
                         step.status === "cancelled" && "step-row-error",
                         step.status === "running" && "step-row-running",
                       )}
                     >
-                      <span>{stepLabel(step.step_name)}</span>
-                      <span className={`status-chip ${step.status}`}>{statusLabel(step.status)}</span>
+                      <div className="step-row-head">
+                        <div className="step-row-title">
+                          <strong>{stepLabel(step.step_name)}</strong>
+                          {summaryText ? (
+                            <div className={classNames("muted", hasTerminalFailure && isCurrentStep ? "muted-strong" : "")}>
+                              {summaryText}
+                            </div>
+                          ) : null}
+                        </div>
+                        <span className={`status-chip ${step.status}`}>{statusLabel(step.status)}</span>
+                      </div>
+                      {hasRunningProgress ? (
+                        <div className="progress-bar step-row-progress">
+                          <span style={{ width: `${currentStepProgressPercent}%` }} />
+                        </div>
+                      ) : null}
+                      {stepItems.length ? (
+                        <div className="step-event-list">
+                          {stepItems.slice(0, 4).map((item) => (
+                            <article
+                              key={item.id}
+                              className={classNames(
+                                "step-event-card",
+                                item.toneClass === "failed" && "event-failed",
+                                item.toneClass === "cancelled" && "event-cancelled",
+                                item.toneClass === "running" && "event-running",
+                                item.title.includes("卡住诊断") && "event-diagnostic",
+                              )}
+                            >
+                              <div className="toolbar">
+                                <strong>{item.title}</strong>
+                                <span className={classNames("status-pill", item.toneClass)}>{statusLabel(item.status)}</span>
+                              </div>
+                              {item.timestamp ? <div className="muted">{formatDate(item.timestamp)}</div> : null}
+                              {item.detail ? <div className="muted">{item.detail}</div> : null}
+                            </article>
+                          ))}
+                        </div>
+                      ) : (
+                        <div className="muted compact-top">暂无步骤事件。</div>
+                      )}
                     </div>
-                  ))}
+                    );
+                  })}
                 </div>
               </section>
             </>
-          )}
+          ) : null}
 
           <JobContentProfileSection
             jobId={selectedJob.id}
+            thumbnailVersion={selectedJob.updated_at}
             contentProfile={contentProfile}
             contentSource={contentSource}
             contentDraft={contentDraft}
@@ -317,7 +394,7 @@ export function JobDetailPanel({
             onConfirm={onConfirmProfile}
           />
 
-          {!isReviewMode && (
+          {showFlowSections && (
             <>
               <section className="detail-block">
                 <div className="detail-key">{t("jobs.detail.tokenUsage")}</div>
@@ -450,78 +527,6 @@ export function JobDetailPanel({
               </section>
 
               <JobSubtitleReportSection report={report} isApplying={isApplyingReview} onApplyReview={onApplyReview} />
-
-              <section className="detail-block">
-                {criticalEvents.length > 0 ? (
-                  <>
-                    <div className="detail-key error-events-head">
-                      <span>{t("jobs.detail.errorEvents")}</span>
-                      <span className="event-count-badge">{criticalEvents.length}</span>
-                      <button type="button" className="button button-sm ghost" onClick={() => jumpToTimelineEvent(latestFailureTimelineIndex)}>
-                        {t("jobs.detail.jumpToLatestFailure")}
-                      </button>
-                    </div>
-                    <div className="timeline-list">
-                      {criticalEvents.map(({ event, index }) => (
-                        <div
-                          key={`${event.timestamp}-${event.title}-${event.type}-${index}`}
-                          className={classNames(
-                            "timeline-item",
-                            "event-failed",
-                            isStuckDiagnosticEvent(event) && "event-diagnostic",
-                          )}
-                        >
-                          <div className="toolbar">
-                            <span className="muted">{formatDate(event.timestamp)}</span>
-                            <span className={classNames("status-pill", resolveEventSeverityClass(event))}>
-                              {statusLabel(resolveEventSeverity(event))}
-                            </span>
-                          </div>
-                          <strong>{event.title}</strong>
-                          <div className={classNames("muted", isStuckDiagnosticEvent(event) && "muted-strong")}>
-                            {event.detail || event.status}
-                          </div>
-                          <div className="toolbar">
-                            <button type="button" className="button button-sm ghost" onClick={() => jumpToTimelineEvent(index)}>
-                              {t("jobs.detail.jumpToTimeline")}
-                            </button>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  </>
-                ) : null}
-              </section>
-
-              <section className="detail-block">
-                <div className="detail-key">{t("jobs.detail.timeline")}</div>
-                <div className="timeline-list">
-                  {visibleTimelineEntries.map(({ event, index }) => (
-                    <div
-                      key={`${event.timestamp}-${index}`}
-                      id={`timeline-event-${index}`}
-                      className={classNames(
-                        "timeline-item",
-                        `event-${resolveEventSeverityClass(event)}`,
-                        isStuckDiagnosticEvent(event) && "event-diagnostic",
-                      )}
-                    >
-                      <div className="muted">{formatDate(event.timestamp)}</div>
-                      <div className="toolbar">
-                        <strong>{event.title}</strong>
-                        <span className={classNames("status-pill", resolveEventSeverityClass(event))}>
-                          {statusLabel(resolveEventSeverity(event))}
-                        </span>
-                      </div>
-                      <div className="muted">{event.detail || event.status}</div>
-                    </div>
-                  ))}
-                </div>
-                <details className="top-gap">
-                  <summary>{t("jobs.detail.timelineJson")}</summary>
-                  <pre className="json-preview">{JSON.stringify(timeline?.data ?? {}, null, 2)}</pre>
-                </details>
-              </section>
             </>
           )}
         </>

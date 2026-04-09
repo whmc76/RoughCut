@@ -159,20 +159,22 @@ describe("JobContentProfileSection", () => {
     );
   }
 
-  it("keeps legacy content_profile fields visible when no nested understanding is present", async () => {
+  it("keeps the core editable content_profile fields visible when no nested understanding is present", async () => {
     await renderActualSection({
       subject_type: "legacy_subject",
       video_theme: "legacy_theme",
       hook_line: "legacy_hook",
+      visible_text: "legacy_visible_text",
       summary: "legacy_summary",
       engagement_question: "legacy_question",
     });
 
-    expect(screen.getByDisplayValue("legacy_subject")).toBeInTheDocument();
     expect(screen.getByDisplayValue("legacy_theme")).toBeInTheDocument();
     expect(screen.getByDisplayValue("legacy_hook")).toBeInTheDocument();
     expect(screen.getByDisplayValue("legacy_summary")).toBeInTheDocument();
     expect(screen.getByDisplayValue("legacy_question")).toBeInTheDocument();
+    expect(screen.queryByDisplayValue("legacy_subject")).not.toBeInTheDocument();
+    expect(screen.queryByDisplayValue("legacy_visible_text")).not.toBeInTheDocument();
   });
 
   it("prefers nested content_understanding fields over legacy flat fields", async () => {
@@ -191,10 +193,10 @@ describe("JobContentProfileSection", () => {
       },
     });
 
-    expect(screen.getByDisplayValue("nested_subject")).toBeInTheDocument();
     expect(screen.getByDisplayValue("nested_theme")).toBeInTheDocument();
     expect(screen.getByDisplayValue("nested_hook")).toBeInTheDocument();
     expect(screen.getByDisplayValue("nested_summary")).toBeInTheDocument();
     expect(screen.getByDisplayValue("nested_question")).toBeInTheDocument();
+    expect(screen.queryByDisplayValue("nested_subject")).not.toBeInTheDocument();
   });
 });

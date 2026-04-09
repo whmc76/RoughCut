@@ -22,6 +22,7 @@ class JobCreate(BaseModel):
     workflow_mode: str = DEFAULT_WORKFLOW_MODE
     enhancement_modes: list[str] = Field(default_factory=list)
     output_dir: str | None = None
+    video_description: str | None = None
 
     @field_validator("language", mode="before")
     @classmethod
@@ -56,6 +57,14 @@ class JobCreate(BaseModel):
             return None
         normalized = str(value).strip()
         return normalized or None
+
+    @field_validator("video_description", mode="before")
+    @classmethod
+    def validate_video_description(cls, value: Any) -> str | None:
+        if value is None:
+            return None
+        normalized = str(value).strip()
+        return normalized[:4000] or None
 
 
 class JobStepOut(BaseModel):

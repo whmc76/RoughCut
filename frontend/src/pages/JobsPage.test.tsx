@@ -5,10 +5,16 @@ import { JobsPage } from "./JobsPage";
 
 const mockUseJobWorkspace = vi.fn();
 const mockJobReviewOverlay = vi.fn();
+const mockJobDetailModal = vi.fn();
 
 vi.mock("../i18n", () => ({
   useI18n: () => ({
-    t: (key: string) => key,
+    t: (key: string) =>
+      ({
+        "jobs.actions.restartConfirm": "确认重新开始“{name}”？\n这会清空当前运行进度，并从头重新派发任务。",
+        "jobs.actions.deleteConfirm": "确认删除“{name}”？\n这会删除任务记录和相关运行产物，且无法恢复。",
+        "jobs.actions.targetFallback": "当前任务",
+      }[key] ?? key),
   }),
   getCurrentUiLocale: () => "zh-CN",
 }));
@@ -64,10 +70,14 @@ vi.mock("../features/jobs/JobQueueTable", () => ({
     jobs,
     onSelect,
     onOpenReview,
+    onRestart,
+    onDelete,
   }: {
     jobs?: Array<{ id: string; source_name: string }>;
     onSelect?: (jobId: string) => void;
     onOpenReview?: (jobId: string) => void;
+    onRestart?: (jobId: string) => void;
+    onDelete?: (jobId: string) => void;
   }) => (
     <div>
       <div>job-queue-table</div>
@@ -78,6 +88,12 @@ vi.mock("../features/jobs/JobQueueTable", () => ({
           </button>
           <button type="button" onClick={() => onOpenReview?.(job.id)}>
             {`review-${job.source_name}`}
+          </button>
+          <button type="button" onClick={() => onRestart?.(job.id)}>
+            {`restart-${job.source_name}`}
+          </button>
+          <button type="button" onClick={() => onDelete?.(job.id)}>
+            {`delete-${job.source_name}`}
           </button>
         </div>
       ))}
@@ -90,6 +106,48 @@ vi.mock("../features/jobs/JobReviewOverlay", () => ({
     mockJobReviewOverlay({ open, reviewStep });
     return open ? <div data-testid="job-review-overlay">{reviewStep}</div> : null;
   },
+}));
+
+vi.mock("../features/jobs/JobDetailModal", () => ({
+  JobDetailModal: ({
+    open,
+    title,
+    children,
+  }: {
+    open: boolean;
+    title?: string;
+    children?: ReactNode;
+  }) => {
+    mockJobDetailModal({ open, title });
+    return open ? (
+      <div data-testid="job-detail-modal">
+        <div>{title}</div>
+        {children}
+      </div>
+    ) : null;
+  },
+}));
+
+vi.mock("../features/jobs/JobDetailPanel", () => ({
+  JobDetailPanel: ({
+    selectedJobId,
+    onRestart,
+    onDelete,
+  }: {
+    selectedJobId: string | null;
+    onRestart?: () => void;
+    onDelete?: () => void;
+  }) => (
+    <div data-testid="job-detail-panel">
+      <div>{selectedJobId}</div>
+      <button type="button" onClick={onRestart}>
+        detail-restart
+      </button>
+      <button type="button" onClick={onDelete}>
+        detail-delete
+      </button>
+    </div>
+  ),
 }));
 
 vi.mock("../features/jobs/JobsUsageTrendPanel", () => ({
@@ -150,6 +208,7 @@ function buildWorkspace(overrides: Record<string, unknown> = {}) {
 describe("JobsPage", () => {
   afterEach(() => {
     vi.clearAllMocks();
+    vi.restoreAllMocks();
   });
 
   it("keeps the queue surface visible while create modules stay hidden by default", () => {
@@ -328,7 +387,7 @@ describe("JobsPage", () => {
     expect(mockJobReviewOverlay).toHaveBeenCalled();
   });
 
-  it("does not open any task detail modal when clicking a task row", () => {
+  it("opens the task detail modal when clicking a task row", () => {
     const setSelectedJobId = vi.fn();
 
     mockUseJobWorkspace.mockReturnValue(
@@ -400,6 +459,8 @@ describe("JobsPage", () => {
     fireEvent.click(screen.getByRole("button", { name: "select-summary-review.mp4" }));
 
     expect(setSelectedJobId).toHaveBeenCalledWith("job-review-3");
+    expect(screen.getByTestId("job-detail-modal")).toBeInTheDocument();
+    expect(screen.getByTestId("job-detail-panel")).toHaveTextContent("job-review-3");
     expect(screen.queryByTestId("job-review-overlay")).not.toBeInTheDocument();
   });
 
@@ -523,7 +584,7 @@ describe("JobsPage", () => {
     expect(screen.queryByTestId("job-review-overlay")).not.toBeInTheDocument();
   });
 
-  it("does not render a legacy detail modal for non-review jobs", () => {
+  it("does not auto-render a detail modal for non-review jobs before any click", () => {
     mockUseJobWorkspace.mockReturnValue(
       buildWorkspace({
         selectedJobId: "job-running-1",
@@ -545,6 +606,88 @@ describe("JobsPage", () => {
 
     render(<JobsPage />);
 
+    expect(screen.queryByTestId("job-detail-modal")).not.toBeInTheDocument();
     expect(screen.queryByTestId("job-review-overlay")).not.toBeInTheDocument();
+  });
+
+  it("requires confirmation before restarting a job from the queue", () => {
+    const restartMutate = vi.fn();
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+
+    mockUseJobWorkspace.mockReturnValue(
+      buildWorkspace({
+        filteredJobs: [
+          {
+            id: "job-restart-1",
+            source_name: "restart-me.mp4",
+            content_subject: "测试主题",
+            content_summary: "测试摘要",
+            status: "done",
+            language: "zh-CN",
+            workflow_mode: "standard_edit",
+            enhancement_modes: [],
+            created_at: "2026-04-02T02:00:00Z",
+            updated_at: "2026-04-02T02:10:00Z",
+            steps: [],
+          },
+        ],
+        restartJob: { mutate: restartMutate, isPending: false },
+      }),
+    );
+
+    render(<JobsPage />);
+    fireEvent.click(screen.getByRole("button", { name: "restart-restart-me.mp4" }));
+
+    expect(confirmSpy).toHaveBeenCalledWith(expect.stringContaining("确认重新开始“restart-me.mp4”？"));
+    expect(restartMutate).not.toHaveBeenCalled();
+  });
+
+  it("requires confirmation before deleting a selected job from the detail panel", () => {
+    const deleteMutate = vi.fn();
+    const setSelectedJobId = vi.fn();
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+
+    mockUseJobWorkspace.mockReturnValue(
+      buildWorkspace({
+        filteredJobs: [
+          {
+            id: "job-delete-1",
+            source_name: "delete-me.mp4",
+            content_subject: "测试主题",
+            content_summary: "测试摘要",
+            status: "done",
+            language: "zh-CN",
+            workflow_mode: "standard_edit",
+            enhancement_modes: [],
+            created_at: "2026-04-02T02:00:00Z",
+            updated_at: "2026-04-02T02:10:00Z",
+            steps: [],
+          },
+        ],
+        selectedJobId: "job-delete-1",
+        selectedJob: {
+          id: "job-delete-1",
+          source_name: "delete-me.mp4",
+          content_subject: "测试主题",
+          content_summary: "测试摘要",
+          status: "done",
+          language: "zh-CN",
+          workflow_mode: "standard_edit",
+          enhancement_modes: [],
+          created_at: "2026-04-02T02:00:00Z",
+          updated_at: "2026-04-02T02:10:00Z",
+          steps: [],
+        },
+        deleteJob: { mutate: deleteMutate, isPending: false },
+        setSelectedJobId,
+      }),
+    );
+
+    render(<JobsPage />);
+    fireEvent.click(screen.getByRole("button", { name: "select-delete-me.mp4" }));
+    fireEvent.click(screen.getByRole("button", { name: "detail-delete" }));
+
+    expect(confirmSpy).toHaveBeenCalledWith(expect.stringContaining("确认删除“delete-me.mp4”？"));
+    expect(deleteMutate).toHaveBeenCalledWith("job-delete-1");
   });
 });

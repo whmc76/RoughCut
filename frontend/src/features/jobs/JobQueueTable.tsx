@@ -143,10 +143,14 @@ export function JobQueueTable({
                     <div className="job-file-cell">
                       <img
                         className="job-queue-thumb"
-                        src={api.contentProfileThumbnailUrl(job.id, 0)}
+                        src={api.contentProfileThumbnailUrl(job.id, 0, job.updated_at)}
                         alt={job.source_name}
                         loading="lazy"
                         decoding="async"
+                        onLoad={(event) => {
+                          event.currentTarget.style.display = "";
+                          event.currentTarget.nextElementSibling?.classList.remove("visible");
+                        }}
                         onError={(event) => {
                           event.currentTarget.style.display = "none";
                           event.currentTarget.nextElementSibling?.classList.add("visible");

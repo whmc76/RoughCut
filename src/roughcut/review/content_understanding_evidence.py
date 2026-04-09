@@ -546,6 +546,7 @@ def build_evidence_bundle(
     ocr_profile: dict[str, Any] | None = None,
     visual_semantic_evidence: dict[str, Any] | None = None,
     visual_hints: dict[str, Any] | None = None,
+    candidate_hints: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return normalize_evidence_bundle(
         {
@@ -556,5 +557,6 @@ def build_evidence_bundle(
             "ocr_profile": ocr_profile or {},
             "visual_semantic_evidence": visual_semantic_evidence or {},
             "visual_hints": visual_hints or {},
+            "candidate_hints": candidate_hints or {},
         }
     )

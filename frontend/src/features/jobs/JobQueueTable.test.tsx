@@ -2,6 +2,10 @@ import { fireEvent, render, screen } from "@testing-library/react";
 
 import { JobQueueTable } from "./JobQueueTable";
 
+const { mockContentProfileThumbnailUrl } = vi.hoisted(() => ({
+  mockContentProfileThumbnailUrl: vi.fn(() => "/thumb.png"),
+}));
+
 vi.mock("../../i18n", () => ({
   useI18n: () => ({
     t: (key: string) => key,
@@ -12,7 +16,7 @@ vi.mock("../../i18n", () => ({
 
 vi.mock("../../api", () => ({
   api: {
-    contentProfileThumbnailUrl: () => "/thumb.png",
+    contentProfileThumbnailUrl: mockContentProfileThumbnailUrl,
   },
 }));
 
@@ -35,6 +39,11 @@ function buildJob(overrides: Record<string, unknown> = {}) {
 }
 
 describe("JobQueueTable", () => {
+  beforeEach(() => {
+    mockContentProfileThumbnailUrl.mockClear();
+    mockContentProfileThumbnailUrl.mockReturnValue("/thumb.png");
+  });
+
   it("shows final-review jobs as 最终核对 in the status column", () => {
     render(
       <JobQueueTable
@@ -135,5 +144,22 @@ describe("JobQueueTable", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "jobs.actions.openFolder" }));
     expect(onOpenFolder).toHaveBeenCalledWith("job-1");
+  });
+
+  it("adds updated_at as the thumbnail cache-busting version", () => {
+    render(
+      <JobQueueTable
+        jobs={[buildJob({ updated_at: "2026-04-09T03:21:00Z" })]}
+        selectedJobId={null}
+        isLoading={false}
+        onSelect={vi.fn()}
+        onOpenFolder={vi.fn()}
+        onCancel={vi.fn()}
+        onRestart={vi.fn()}
+        onDelete={vi.fn()}
+      />,
+    );
+
+    expect(mockContentProfileThumbnailUrl).toHaveBeenCalledWith("job-1", 0, "2026-04-09T03:21:00Z");
   });
 });

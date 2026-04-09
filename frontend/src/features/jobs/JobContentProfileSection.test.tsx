@@ -69,7 +69,7 @@ describe("JobContentProfileSection", () => {
     expect(screen.getByRole("combobox", { name: "视频类型" })).toHaveValue("unboxing");
     expect(screen.getByDisplayValue("开箱")).toBeInTheDocument();
     expect(screen.queryByDisplayValue("unboxing")).not.toBeInTheDocument();
-    expect(screen.getByDisplayValue("EDC机能包")).toBeInTheDocument();
+    expect(screen.queryByDisplayValue("EDC机能包")).not.toBeInTheDocument();
   });
 
   it("emits canonical video_type values from the dropdown", () => {

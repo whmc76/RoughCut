@@ -14,6 +14,7 @@ import {
 
 type JobContentProfileSectionProps = {
   jobId: string;
+  thumbnailVersion?: string | null;
   contentProfile?: ContentProfileReview;
   contentSource: Record<string, unknown> | null;
   contentDraft: Record<string, unknown>;
@@ -28,6 +29,7 @@ type JobContentProfileSectionProps = {
 
 export function JobContentProfileSection({
   jobId,
+  thumbnailVersion,
   contentProfile,
   contentSource,
   contentDraft,
@@ -91,12 +93,64 @@ export function JobContentProfileSection({
   const supportSources = formatIdentityEvidenceSources(identityReview?.support_sources ?? []);
   const matchedGlossaryAliases = formatIdentityEvidenceGlossaryAliases(evidenceBundle);
   const hasIdentityEvidence = hasIdentityEvidenceReview(identityReview);
+  const sourceContext = extractSourceContext(contentDraft, effectiveContentSource);
+  const sourceContextFeedback =
+    typeof sourceContext.resolved_feedback === "object" && !Array.isArray(sourceContext.resolved_feedback)
+      ? (sourceContext.resolved_feedback as Record<string, unknown>)
+      : null;
+  const sourceContextKeyPoints = [
+    getTextValue(sourceContextFeedback?.video_theme),
+    ...(Array.isArray(sourceContextFeedback?.search_queries)
+      ? (sourceContextFeedback.search_queries as unknown[])
+        .map((item) => String(item || "").trim())
+        .filter(Boolean)
+      : []),
+  ];
+  const sourceContextStrategy = [
+    getTextValue(sourceContextFeedback?.correction_notes),
+    getTextValue(sourceContextFeedback?.supplemental_context),
+  ].filter(Boolean);
 
   return (
     <section className={["detail-block", reviewMode ? "summary-review-editor" : ""].filter(Boolean).join(" ")}>
       <div className="detail-key">{t("jobs.contentReview.title")}</div>
       {effectiveContentSource ? (
         <>
+          {sourceContext.video_description || sourceContextFeedback ? (
+            <div className="timeline-list top-gap">
+              <div className={["timeline-item", reviewMode ? "summary-review-evidence-card" : ""].filter(Boolean).join(" ")}>
+                <div className="toolbar">
+                  <strong>{t("jobs.sourceContext.title")}</strong>
+                </div>
+                {sourceContext.video_description ? (
+                  <div className="compact-top">
+                    <div className="muted">{t("jobs.sourceContext.raw")}</div>
+                    <div>{String(sourceContext.video_description)}</div>
+                  </div>
+                ) : null}
+                {getTextValue(sourceContextFeedback?.summary) ? (
+                  <div className="compact-top">
+                    <div className="muted">{t("jobs.sourceContext.summary")}</div>
+                    <div>{getTextValue(sourceContextFeedback?.summary)}</div>
+                  </div>
+                ) : null}
+                {sourceContextKeyPoints.length ? (
+                  <div className="compact-top">
+                    <div className="muted">{t("jobs.sourceContext.keyPoints")}</div>
+                    <div>{[...new Set(sourceContextKeyPoints)].join("、")}</div>
+                  </div>
+                ) : null}
+                {sourceContextStrategy.length ? (
+                  <div className="compact-top">
+                    <div className="muted">{t("jobs.sourceContext.strategy")}</div>
+                    {sourceContextStrategy.map((item) => (
+                      <div key={item}>{item}</div>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
+            </div>
+          ) : null}
           {showThumbnails ? (
             <div className="thumbnail-strip">
               {[0, 1, 2].map((index) => (
@@ -105,7 +159,7 @@ export function JobContentProfileSection({
                   className="profile-thumb"
                   loading="lazy"
                   decoding="async"
-                  src={api.contentProfileThumbnailUrl(jobId, index)}
+                  src={api.contentProfileThumbnailUrl(jobId, index, thumbnailVersion)}
                   alt={`thumbnail-${index}`}
                 />
               ))}
@@ -190,4 +244,19 @@ export function JobContentProfileSection({
       )}
     </section>
   );
+}
+
+function extractSourceContext(
+  contentDraft: Record<string, unknown>,
+  effectiveContentSource: Record<string, unknown>,
+): Record<string, unknown> {
+  const draftValue = contentDraft.source_context;
+  if (draftValue && typeof draftValue === "object" && !Array.isArray(draftValue)) {
+    return draftValue as Record<string, unknown>;
+  }
+  const sourceValue = effectiveContentSource.source_context;
+  if (sourceValue && typeof sourceValue === "object" && !Array.isArray(sourceValue)) {
+    return sourceValue as Record<string, unknown>;
+  }
+  return {};
 }

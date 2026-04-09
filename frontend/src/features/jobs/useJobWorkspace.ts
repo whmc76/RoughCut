@@ -12,6 +12,7 @@ const EMPTY_UPLOAD: UploadForm = {
   workflowMode: "standard_edit",
   enhancementModes: [],
   outputDir: "",
+  videoDescription: "",
 };
 
 const JOBS_PAGE_SIZE = 20;
@@ -244,6 +245,7 @@ export function useJobWorkspace() {
         upload.workflowMode,
         upload.enhancementModes,
         upload.outputDir,
+        upload.videoDescription,
       ),
     onSuccess: async (job) => {
       setUpload(inheritedUploadDefaults);

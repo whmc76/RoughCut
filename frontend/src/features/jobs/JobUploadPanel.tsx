@@ -1,6 +1,9 @@
+import { useEffect, useState } from "react";
+
 import type { UploadForm } from "./constants";
 import type { SelectOption } from "../../types";
 import { CheckboxField } from "../../components/forms/CheckboxField";
+import { Field } from "../../components/forms/Field";
 import { SelectField } from "../../components/forms/SelectField";
 import { PanelHeader } from "../../components/ui/PanelHeader";
 import { useI18n } from "../../i18n";
@@ -27,6 +30,22 @@ export function JobUploadPanel({
   isSubmitting,
 }: JobUploadPanelProps) {
   const { t } = useI18n();
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!upload.file || typeof URL.createObjectURL !== "function") {
+      setPreviewUrl(null);
+      return undefined;
+    }
+
+    const objectUrl = URL.createObjectURL(upload.file);
+    setPreviewUrl(objectUrl);
+    return () => {
+      if (typeof URL.revokeObjectURL === "function") {
+        URL.revokeObjectURL(objectUrl);
+      }
+    };
+  }, [upload.file]);
 
   return (
     <section className="panel top-gap">
@@ -93,6 +112,33 @@ export function JobUploadPanel({
           })}
         </div>
       </div>
+      <Field label={t("jobs.upload.videoDescription")}>
+        <textarea
+          className="input"
+          rows={5}
+          value={upload.videoDescription}
+          onChange={(event) => onChange({ ...upload, videoDescription: event.target.value })}
+          placeholder={t("jobs.upload.videoDescriptionPlaceholder")}
+        />
+      </Field>
+      <section className="job-upload-preview top-gap" aria-label={t("jobs.upload.previewTitle")}>
+        <div className="job-upload-preview-header">
+          <strong>{t("jobs.upload.previewTitle")}</strong>
+          <span className="muted">{t("jobs.upload.previewDescription")}</span>
+        </div>
+        {previewUrl ? (
+          <video
+            className="packaging-video-preview job-upload-preview-player"
+            controls
+            playsInline
+            preload="metadata"
+            src={previewUrl}
+            data-testid="job-upload-video-preview"
+          />
+        ) : (
+          <div className="job-upload-preview-empty muted">{t("jobs.upload.previewEmpty")}</div>
+        )}
+      </section>
       <div className="toolbar top-gap">
         <button className="button primary" disabled={!upload.file || isSubmitting} onClick={onSubmit}>
           {isSubmitting ? t("jobs.upload.submitting") : t("jobs.upload.submit")}

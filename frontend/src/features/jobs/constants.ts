@@ -18,10 +18,8 @@ export const STEP_LABELS: Record<string, string> = {
 
 export const CONTENT_FIELDS = [
   "video_type",
-  "subject_type",
   "video_theme",
   "hook_line",
-  "visible_text",
   "summary",
   "engagement_question",
   "correction_notes",
@@ -30,10 +28,8 @@ export const CONTENT_FIELDS = [
 
 export const CONTENT_FIELD_LABELS: Record<(typeof CONTENT_FIELDS)[number] | "keywords", string> = {
   video_type: "视频类型",
-  subject_type: "主体类型",
   video_theme: "视频主题",
   hook_line: "标题钩子",
-  visible_text: "画面文字",
   summary: "内容摘要",
   engagement_question: "互动提问",
   correction_notes: "校对备注",
@@ -59,6 +55,7 @@ export type UploadForm = {
   workflowMode: string;
   enhancementModes: string[];
   outputDir: string;
+  videoDescription: string;
 };
 
 export const RESTARTABLE_JOB_STATUSES = ["done", "running", "processing", "needs_review", "cancelled", "failed"] as const;
