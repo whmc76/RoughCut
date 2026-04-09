@@ -499,6 +499,61 @@ async def test_update_job_statuses_triggers_quality_rerun_for_generic_low_detail
 
 
 @pytest.mark.asyncio
+async def test_update_job_statuses_reconciles_pending_job_steps_from_progress_metadata(db_engine):
+    import roughcut.pipeline.orchestrator as orchestrator_mod
+    from roughcut.db.models import Job
+    from roughcut.db.session import get_session_factory
+
+    job_id = uuid.uuid4()
+    now = datetime.now(timezone.utc)
+    factory = get_session_factory()
+
+    async with factory() as session:
+        session.add(
+            Job(
+                id=job_id,
+                source_path="jobs/demo/manual-sync.mp4",
+                source_name="manual-sync.mp4",
+                status="pending",
+                language="zh-CN",
+                enhancement_modes=[],
+            )
+        )
+        for step in orchestrator_mod.create_job_steps(job_id):
+            if step.step_name == "content_profile":
+                step.status = "pending"
+                step.started_at = now - timedelta(minutes=1)
+                step.metadata_ = {
+                    "detail": "已生成内容摘要：待人工确认",
+                    "progress": 1.0,
+                    "updated_at": now.isoformat(),
+                }
+            elif step.step_name == "summary_review":
+                step.status = "pending"
+            else:
+                step.status = "pending"
+            session.add(step)
+        await session.commit()
+
+    async with factory() as session:
+        await orchestrator_mod._update_job_statuses(session)
+        await session.commit()
+
+    async with factory() as session:
+        job = (await session.execute(orchestrator_mod.select(Job).where(Job.id == job_id))).scalar_one()
+        steps = (
+            await session.execute(
+                orchestrator_mod.select(orchestrator_mod.JobStep).where(orchestrator_mod.JobStep.job_id == job_id)
+            )
+        ).scalars().all()
+        step_map = {step.step_name: step for step in steps}
+
+    assert step_map["content_profile"].status == "done"
+    assert step_map["content_profile"].finished_at is not None
+    assert job.status == "needs_review"
+
+
+@pytest.mark.asyncio
 async def test_update_job_statuses_respects_quality_rerun_max_attempts(monkeypatch, db_engine):
     import roughcut.pipeline.orchestrator as orchestrator_mod
     from roughcut.db.models import Artifact, Job, SubtitleItem

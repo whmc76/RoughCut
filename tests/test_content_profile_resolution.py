@@ -243,6 +243,32 @@ def test_score_identity_candidates_prefers_current_video_evidence_over_graph_mem
     assert "graph_confirmed" not in brand.all_sources
 
 
+def test_build_identity_candidates_includes_source_context_identity_hints():
+    bundle = IdentityEvidenceBundle(
+        transcript_excerpt="这条片子主要是同一支工具钳的连续镜头。",
+        source_name="20260130-140529.mp4",
+        transcript_hints={},
+        source_hints={},
+        source_context_hints={
+            "subject_brand": "LEATHERMAN",
+            "subject_model": "ARC",
+            "subject_type": "多功能工具钳",
+            "related_source_names": ["20260130-134317.mp4"],
+        },
+        visual_hints={},
+        visual_cluster_hints={},
+        visible_text_hints={},
+        profile_identity={},
+        memory_confirmed_hints={},
+    )
+
+    candidates = build_identity_candidates(bundle)
+    source_pairs = {(item.field_name, item.value, item.source_type) for item in candidates}
+
+    assert ("subject_brand", "LEATHERMAN", "source_context") in source_pairs
+    assert ("subject_model", "ARC", "source_context") in source_pairs
+
+
 def test_resolve_identity_candidates_clears_brand_and_model_when_current_ocr_and_transcript_conflict():
     bundle = IdentityEvidenceBundle(
         transcript_excerpt="这期主要看挂点和分仓。",

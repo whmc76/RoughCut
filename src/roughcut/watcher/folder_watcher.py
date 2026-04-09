@@ -658,6 +658,7 @@ async def _create_job_for_file(
     output_dir: str | None = None,
     *,
     config_profile_id: uuid.UUID | str | None = None,
+    content_profile_source_context: dict[str, Any] | None = None,
 ) -> str:
     """Upload file to S3, create job + steps in DB. Returns job_id."""
     # Compute hash first for dedup
@@ -714,6 +715,11 @@ async def _create_job_for_file(
         )
         session.add(job)
         for step in create_job_steps(job_id):
+            if step.step_name == "content_profile" and isinstance(content_profile_source_context, dict) and content_profile_source_context:
+                step.metadata_ = {
+                    **(step.metadata_ or {}),
+                    "source_context": dict(content_profile_source_context),
+                }
             session.add(step)
         await session.commit()
 
@@ -807,6 +813,7 @@ async def create_merged_job_for_inventory_paths(
     workflow_template: str | None = None,
     output_dir: str | None = None,
     language: str = "zh-CN",
+    allow_related_profiles: bool = False,
 ) -> str | None:
     if len(file_paths) < 2:
         raise ValueError("At least two files are required to create a merged job")
@@ -818,6 +825,14 @@ async def create_merged_job_for_inventory_paths(
 
     output_dir = DEFAULT_TEST_OUTPUT_ROOT / "watch-merged"
     output_path = output_dir / f"watch_merge_{uuid.uuid4().hex}.mp4"
+    content_profile_source_context = (
+        {
+            "allow_related_profiles": True,
+            "merged_source_names": [path.name for path in resolved_paths],
+        }
+        if allow_related_profiles
+        else None
+    )
 
     merged_path = await _merge_videos_for_job(resolved_paths, output_path=output_path)
     try:
@@ -827,6 +842,7 @@ async def create_merged_job_for_inventory_paths(
             language,
             output_dir=output_dir,
             config_profile_id=config_profile_id,
+            content_profile_source_context=content_profile_source_context,
         )
     finally:
         if merged_path.exists():
@@ -897,16 +913,67 @@ def _extract_name_tokens(value: str) -> set[str]:
     return tokens
 
 
+_SUBJECT_STOPWORDS = {
+    "开箱",
+    "测评",
+    "评测",
+    "视频",
+    "展示",
+    "分享",
+    "推荐",
+    "对比",
+    "使用",
+    "体验",
+    "功能",
+    "这个",
+    "那个",
+    "日常",
+    "真正",
+    "适合",
+    "作者",
+    "博主",
+    "up主",
+}
+_SUBJECT_MODEL_RE = re.compile(r"[A-Za-z]{1,12}\d{1,6}[A-Za-z0-9\u4e00-\u9fff-]{0,12}", re.IGNORECASE)
+_SUBJECT_LATIN_RE = re.compile(r"[A-Za-z][A-Za-z0-9-]{2,}")
+
+
+def _extract_subject_tokens(*values: str) -> set[str]:
+    tokens: set[str] = set()
+    for value in values:
+        text = str(value or "").strip()
+        if not text:
+            continue
+        for raw in _SUBJECT_MODEL_RE.findall(text):
+            normalized = raw.strip().lower()
+            if len(normalized) >= 2:
+                tokens.add(normalized)
+        for raw in _SUBJECT_LATIN_RE.findall(text):
+            normalized = raw.strip().lower()
+            if len(normalized) >= 3:
+                tokens.add(normalized)
+        compact = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", " ", text.lower())
+        for part in compact.split():
+            if len(part) < 2 or part in _SUBJECT_STOPWORDS:
+                continue
+            tokens.add(part)
+    return tokens
+
+
 def _reason_tags(scores: dict[str, float]) -> list[str]:
     reasons: list[str] = []
     if scores["time"] >= 0.55:
         reasons.append("拍摄时间接近")
+    if scores["identity"] >= 0.3:
+        reasons.append("主体关键词相似")
     if scores["name"] >= 0.35:
         reasons.append("文件名关键词相似")
     if scores["duration"] >= 0.55:
         reasons.append("时长接近")
     if scores["summary"] >= 0.30:
         reasons.append("摘要文本相似")
+    if scores["visual"] >= 0.55:
+        reasons.append("画面特征相似")
     if not reasons:
         reasons.append("整体特征接近")
     return reasons
@@ -1016,8 +1083,14 @@ async def suggest_merge_groups_for_inventory_items(
                 "size": int(item.get("size_bytes") or 0),
                 "source_name": str(item.get("source_name") or path.name),
                 "summary": _safe_parse_summary(path),
+                "summary_hint": _build_inventory_summary_hint(path),
                 "signature": None,
                 "name_tokens": _extract_name_tokens(str(item.get("source_name") or path.name)),
+                "subject_tokens": _extract_subject_tokens(
+                    str(item.get("source_name") or path.name),
+                    _safe_parse_summary(path),
+                    _build_inventory_summary_hint(path),
+                ),
             }
         )
 
@@ -1065,15 +1138,20 @@ async def suggest_merge_groups_for_inventory_items(
             duration_gap = abs(left_item["duration"] - right_item["duration"])
             duration_score = 1 - min(duration_gap / 90.0, 1.0)
             name_score = _token_similarity(left_item["name_tokens"], right_item["name_tokens"])
-            summary_score = _summary_similarity(left_item["summary"], right_item["summary"])
+            summary_score = max(
+                _summary_similarity(left_item["summary"], right_item["summary"]),
+                _summary_similarity(left_item["summary_hint"], right_item["summary_hint"]),
+            )
+            identity_score = _token_similarity(left_item["subject_tokens"], right_item["subject_tokens"])
             visual_score = _signature_similarity(left_item["signature"], right_item["signature"])
 
             score = (
-                time_score * 0.46
-                + summary_score * 0.24
-                + visual_score * 0.2
+                time_score * 0.34
+                + summary_score * 0.22
+                + identity_score * 0.21
+                + visual_score * 0.16
                 + name_score * 0.06
-                + duration_score * 0.04
+                + duration_score * 0.01
             )
             if score < min_score:
                 continue
@@ -1083,6 +1161,7 @@ async def suggest_merge_groups_for_inventory_items(
             pair_reasons[pair] = _reason_tags(
                 {
                     "time": time_score,
+                    "identity": identity_score,
                     "name": name_score,
                     "duration": duration_score,
                     "summary": summary_score,

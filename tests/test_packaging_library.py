@@ -61,6 +61,8 @@ def test_packaging_library_saves_and_resolves_assets(tmp_path, monkeypatch):
     )
     assert plan["intro"]["asset_id"] == intro["id"]
     assert plan["insert"]["asset_id"] == insert["id"]
+    assert plan["insert"]["insert_archetype"] == "demo_step"
+    assert plan["insert"]["candidate_assets"][0]["insert_motion_profile"] == "guided_hold"
     assert plan["music"]["asset_id"] == music_a["id"]
     assert plan["music"]["loop_mode"] == "loop_all"
     assert len(plan["music"]["candidate_paths"]) == 2
@@ -71,6 +73,49 @@ def test_packaging_library_saves_and_resolves_assets(tmp_path, monkeypatch):
     assert plan["copy_style"] == "trusted_expert"
     assert plan["export_resolution_mode"] == "specified"
     assert plan["export_resolution_preset"] == "1080p"
+
+
+def test_packaging_library_describes_insert_candidate_archetypes(tmp_path, monkeypatch):
+    monkeypatch.setattr(library, "PACKAGING_ROOT", tmp_path)
+    monkeypatch.setattr(library, "MANIFEST_PATH", tmp_path / "manifest.json")
+
+    macro = library.save_packaging_asset(
+        asset_type="insert",
+        filename="product_macro_detail_insert.mp4",
+        payload=b"macro",
+    )
+    lifestyle = library.save_packaging_asset(
+        asset_type="insert",
+        filename="city_lifestyle_cutaway_insert.mp4",
+        payload=b"lifestyle",
+    )
+
+    library.update_packaging_config(
+        {
+            "insert_asset_id": macro["id"],
+            "insert_asset_ids": [macro["id"], lifestyle["id"]],
+            "insert_selection_mode": "random",
+        }
+    )
+
+    plan = library.resolve_packaging_plan_for_job(
+        str(uuid.uuid4()),
+        content_profile={"preset_name": "daily_vlog", "video_theme": "城市通勤日常"},
+    )
+
+    candidate_archetypes = {item["asset_id"]: item["insert_archetype"] for item in plan["insert"]["candidate_assets"]}
+    assert candidate_archetypes[macro["id"]] == "macro_detail"
+    assert candidate_archetypes[lifestyle["id"]] == "lifestyle_context"
+
+
+def test_packaging_library_resolves_insert_prepare_and_runtime_duration():
+    plan = {
+        "insert_target_duration_sec": 1.2,
+        "insert_motion_profile": "quick_punch",
+    }
+
+    assert library.resolve_insert_prepare_duration(plan, source_duration=3.4) == 1.296
+    assert library.resolve_insert_effective_duration(plan, source_duration=3.4) == 1.2
 
 
 def test_packaging_library_delete_clears_selected_ids(tmp_path, monkeypatch):

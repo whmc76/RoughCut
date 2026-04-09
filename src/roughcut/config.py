@@ -398,6 +398,8 @@ class Settings(BaseSettings):
 
     @property
     def max_upload_size_bytes(self) -> int:
+        if self.max_upload_size_mb <= 0:
+            return 0
         return self.max_upload_size_mb * 1024 * 1024
 
     @property

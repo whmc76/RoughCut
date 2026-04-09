@@ -79,6 +79,11 @@ def test_max_upload_size_bytes():
     assert s.max_upload_size_bytes == 100 * 1024 * 1024
 
 
+def test_max_upload_size_bytes_zero_disables_limit():
+    s = Settings(_env_file=None, max_upload_size_mb=0)
+    assert s.max_upload_size_bytes == 0
+
+
 def test_get_settings_sanitizes_invalid_transcription_override(tmp_path, monkeypatch):
     overrides_file = tmp_path / "roughcut_config.json"
     overrides_file.write_text(

@@ -2528,6 +2528,277 @@ async def test_run_content_profile_reuses_strict_cache_for_identical_inputs(db_e
 
 
 @pytest.mark.asyncio
+async def test_run_content_profile_does_not_inject_related_profile_source_context_for_independent_clip(
+    db_engine,
+    monkeypatch,
+    tmp_path: Path,
+):
+    import roughcut.pipeline.steps as steps_mod
+
+    factory = async_sessionmaker(db_engine, expire_on_commit=False)
+    job_id = uuid.uuid4()
+    related_job_id = uuid.uuid4()
+    source_path = tmp_path / "source.mp4"
+    source_path.write_bytes(b"video")
+    fake_review_bot = _FakeTelegramReviewBotService()
+    settings = SimpleNamespace(
+        auto_confirm_content_profile=False,
+        content_profile_review_threshold=0.72,
+        content_profile_auto_review_min_accuracy=0.9,
+        content_profile_auto_review_min_samples=20,
+    )
+    captured: dict[str, object] = {}
+
+    async with factory() as session:
+        session.add(
+            Job(
+                id=job_id,
+                source_path="jobs/demo/current.mp4",
+                source_name="20260130-140529.mp4",
+                file_hash="hash-current",
+                status="processing",
+                language="zh-CN",
+                channel_profile="edc_tactical",
+                output_dir=str(tmp_path / "out"),
+            )
+        )
+        session.add(
+            Job(
+                id=related_job_id,
+                source_path="jobs/demo/related.mp4",
+                source_name="20260130-134317.mp4",
+                file_hash="hash-related",
+                status="needs_review",
+                language="zh-CN",
+                channel_profile="edc_tactical",
+                output_dir=str(tmp_path / "out"),
+            )
+        )
+        session.add(JobStep(job_id=job_id, step_name="content_profile", status="running"))
+        session.add(JobStep(job_id=job_id, step_name="summary_review", status="pending"))
+        session.add(
+            Artifact(
+                job_id=related_job_id,
+                artifact_type="content_profile_final",
+                data_json={
+                    "subject_brand": "LEATHERMAN",
+                    "subject_model": "ARC",
+                    "subject_type": "多功能工具钳",
+                    "video_theme": "LEATHERMAN ARC 多功能工具钳开箱测评",
+                    "summary": "这条视频主要围绕 LEATHERMAN ARC 展开。",
+                    "search_queries": ["LEATHERMAN ARC 开箱"],
+                },
+            )
+        )
+        for index, text in enumerate(
+            [
+                "这条主要继续看这把工具钳的单手开合",
+                "后面再补一下钳头结构和批头替换",
+            ]
+        ):
+            session.add(
+                SubtitleItem(
+                    job_id=job_id,
+                    version=1,
+                    item_index=index,
+                    start_time=float(index),
+                    end_time=float(index) + 1.0,
+                    text_raw=text,
+                    text_norm=text,
+                    text_final=text,
+                )
+            )
+        await session.commit()
+
+    monkeypatch.setattr(steps_mod, "get_session_factory", lambda: factory)
+    monkeypatch.setattr(steps_mod, "get_settings", lambda: settings)
+    monkeypatch.setattr(steps_mod, "get_telegram_review_bot_service", lambda: fake_review_bot)
+    monkeypatch.setattr(steps_mod, "list_packaging_assets", lambda: {"config": {"copy_style": "attention_grabbing"}})
+
+    async def fake_load_content_profile_user_memory(*args, **kwargs):
+        return {}
+
+    async def fake_resolve_source(*args, **kwargs):
+        return source_path
+
+    async def fake_infer_content_profile(**kwargs):
+        captured["source_context"] = kwargs.get("source_context") or {}
+        return {
+            "subject_brand": "",
+            "subject_model": "",
+            "subject_type": "多功能工具钳",
+            "video_theme": "",
+            "summary": "这条视频主要围绕多功能工具钳展开，内容方向偏产品开箱与上手体验，适合后续做搜索校验、字幕纠错和剪辑包装。",
+            "search_queries": [],
+            "source_context": dict(kwargs.get("source_context") or {}),
+            "workflow_template": "edc_tactical",
+        }
+
+    async def fake_enrich_content_profile(**kwargs):
+        return dict(kwargs["profile"])
+
+    monkeypatch.setattr(steps_mod, "load_content_profile_user_memory", fake_load_content_profile_user_memory)
+    monkeypatch.setattr(steps_mod, "_resolve_source", fake_resolve_source)
+    monkeypatch.setattr(steps_mod, "infer_content_profile", fake_infer_content_profile)
+    monkeypatch.setattr(steps_mod, "enrich_content_profile", fake_enrich_content_profile)
+
+    result = await run_content_profile(str(job_id))
+
+    related_profiles = list((captured["source_context"] or {}).get("related_profiles") or [])
+    assert related_profiles == []
+    assert result["subject_brand"] == ""
+    assert result["subject_model"] == ""
+    assert "ARC" not in str(result.get("video_theme") or "")
+
+    async with factory() as session:
+        draft_result = await session.execute(
+            select(Artifact)
+            .where(Artifact.job_id == job_id, Artifact.artifact_type == "content_profile_draft")
+            .order_by(Artifact.created_at.desc(), Artifact.id.desc())
+        )
+        draft = draft_result.scalars().first()
+        assert draft is not None
+        assert "ARC" not in str((draft.data_json or {}).get("summary") or "")
+
+
+@pytest.mark.asyncio
+async def test_run_content_profile_injects_related_profile_source_context_only_for_manual_merged_clip(
+    db_engine,
+    monkeypatch,
+    tmp_path: Path,
+):
+    import roughcut.pipeline.steps as steps_mod
+
+    factory = async_sessionmaker(db_engine, expire_on_commit=False)
+    job_id = uuid.uuid4()
+    related_job_id = uuid.uuid4()
+    source_path = tmp_path / "watch_merge_demo.mp4"
+    source_path.write_bytes(b"video")
+    fake_review_bot = _FakeTelegramReviewBotService()
+    settings = SimpleNamespace(
+        auto_confirm_content_profile=False,
+        content_profile_review_threshold=0.72,
+        content_profile_auto_review_min_accuracy=0.9,
+        content_profile_auto_review_min_samples=20,
+    )
+    captured: dict[str, object] = {}
+
+    async with factory() as session:
+        session.add(
+            Job(
+                id=job_id,
+                source_path="jobs/demo/watch_merge_demo.mp4",
+                source_name="watch_merge_demo.mp4",
+                file_hash="hash-current",
+                status="processing",
+                language="zh-CN",
+                channel_profile="edc_tactical",
+                output_dir=str(tmp_path / "out"),
+            )
+        )
+        session.add(
+            Job(
+                id=related_job_id,
+                source_path="jobs/demo/related.mp4",
+                source_name="20260130-134317.mp4",
+                file_hash="hash-related",
+                status="needs_review",
+                language="zh-CN",
+                channel_profile="edc_tactical",
+                output_dir=str(tmp_path / "out"),
+            )
+        )
+        session.add(
+            JobStep(
+                job_id=job_id,
+                step_name="content_profile",
+                status="running",
+                metadata_={
+                    "source_context": {
+                        "allow_related_profiles": True,
+                        "merged_source_names": ["20260130-134317.mp4"],
+                    }
+                },
+            )
+        )
+        session.add(JobStep(job_id=job_id, step_name="summary_review", status="pending"))
+        session.add(
+            Artifact(
+                job_id=related_job_id,
+                artifact_type="content_profile_final",
+                data_json={
+                    "subject_brand": "LEATHERMAN",
+                    "subject_model": "ARC",
+                    "subject_type": "多功能工具钳",
+                    "video_theme": "LEATHERMAN ARC 多功能工具钳开箱测评",
+                    "summary": "这条视频主要围绕 LEATHERMAN ARC 展开。",
+                    "search_queries": ["LEATHERMAN ARC 开箱"],
+                },
+            )
+        )
+        for index, text in enumerate(
+            [
+                "这条主要继续看这把工具钳的单手开合",
+                "后面再补一下钳头结构和批头替换",
+            ]
+        ):
+            session.add(
+                SubtitleItem(
+                    job_id=job_id,
+                    version=1,
+                    item_index=index,
+                    start_time=float(index),
+                    end_time=float(index) + 1.0,
+                    text_raw=text,
+                    text_norm=text,
+                    text_final=text,
+                )
+            )
+        await session.commit()
+
+    monkeypatch.setattr(steps_mod, "get_session_factory", lambda: factory)
+    monkeypatch.setattr(steps_mod, "get_settings", lambda: settings)
+    monkeypatch.setattr(steps_mod, "get_telegram_review_bot_service", lambda: fake_review_bot)
+    monkeypatch.setattr(steps_mod, "list_packaging_assets", lambda: {"config": {"copy_style": "attention_grabbing"}})
+
+    async def fake_load_content_profile_user_memory(*args, **kwargs):
+        return {}
+
+    async def fake_resolve_source(*args, **kwargs):
+        return source_path
+
+    async def fake_infer_content_profile(**kwargs):
+        captured["source_context"] = kwargs.get("source_context") or {}
+        return {
+            "subject_brand": "",
+            "subject_model": "",
+            "subject_type": "多功能工具钳",
+            "video_theme": "",
+            "summary": "这条视频主要围绕多功能工具钳展开，内容方向偏产品开箱与上手体验，适合后续做搜索校验、字幕纠错和剪辑包装。",
+            "search_queries": [],
+            "source_context": dict(kwargs.get("source_context") or {}),
+            "workflow_template": "edc_tactical",
+        }
+
+    async def fake_enrich_content_profile(**kwargs):
+        return dict(kwargs["profile"])
+
+    monkeypatch.setattr(steps_mod, "load_content_profile_user_memory", fake_load_content_profile_user_memory)
+    monkeypatch.setattr(steps_mod, "_resolve_source", fake_resolve_source)
+    monkeypatch.setattr(steps_mod, "infer_content_profile", fake_infer_content_profile)
+    monkeypatch.setattr(steps_mod, "enrich_content_profile", fake_enrich_content_profile)
+
+    result = await run_content_profile(str(job_id))
+
+    related_profiles = list((captured["source_context"] or {}).get("related_profiles") or [])
+    assert related_profiles
+    assert related_profiles[0]["subject_model"] == "ARC"
+    assert result["subject_brand"] == "LEATHERMAN"
+    assert result["subject_model"] == "ARC"
+    assert "ARC" in str(result.get("video_theme") or "")
+
+
+@pytest.mark.asyncio
 async def test_run_content_profile_ignores_stale_infer_cache_after_framework_version_bump(
     db_engine,
     monkeypatch,
@@ -3135,6 +3406,164 @@ async def test_run_edit_plan_falls_back_when_llm_polish_or_insert_slot_times_out
             )
         ).scalar_one()
         assert subtitle.text_final == "这次拿到一个新的手电筒。"
+
+
+@pytest.mark.asyncio
+async def test_run_edit_plan_applies_review_rerun_focus_to_editing_skill(
+    db_engine,
+    monkeypatch,
+    tmp_path: Path,
+):
+    import roughcut.pipeline.steps as steps_mod
+
+    factory = async_sessionmaker(db_engine, expire_on_commit=False)
+    job_id = uuid.uuid4()
+    editorial_timeline_id = uuid.uuid4()
+    audio_path = tmp_path / "audio.wav"
+    audio_path.write_bytes(b"fake-audio")
+    captured: dict[str, object] = {}
+
+    class FakeDecision:
+        analysis = {}
+
+        def to_dict(self):
+            return {"segments": [{"type": "keep", "start": 0.0, "end": 2.0}]}
+
+    async with factory() as session:
+        session.add(
+            Job(
+                id=job_id,
+                source_path="jobs/demo/source.mp4",
+                source_name="source.mp4",
+                status="processing",
+                language="zh-CN",
+                workflow_template="unboxing_standard",
+            )
+        )
+        session.add(
+            JobStep(
+                job_id=job_id,
+                step_name="edit_plan",
+                status="running",
+                metadata_={"review_rerun_focus": "hook_boundary"},
+            )
+        )
+        session.add(
+            Artifact(
+                job_id=job_id,
+                artifact_type="media_meta",
+                data_json={"duration": 12.0},
+            )
+        )
+        session.add(
+            Artifact(
+                job_id=job_id,
+                artifact_type="audio_wav",
+                storage_path="jobs/demo/audio.wav",
+            )
+        )
+        session.add(
+            Artifact(
+                job_id=job_id,
+                artifact_type="content_profile_final",
+                data_json={"workflow_template": "unboxing_standard"},
+            )
+        )
+        session.add(
+            SubtitleItem(
+                job_id=job_id,
+                version=1,
+                item_index=0,
+                start_time=0.0,
+                end_time=2.0,
+                text_raw="先说结论这把很稳。",
+                text_norm="先说结论这把很稳。",
+                text_final="先说结论这把很稳。",
+            )
+        )
+        await session.commit()
+
+    monkeypatch.setattr(steps_mod, "get_session_factory", lambda: factory)
+
+    async def fake_resolve_storage_reference(*args, **kwargs):
+        return audio_path
+
+    async def fake_load_content_profile_user_memory(*args, **kwargs):
+        return {}
+
+    async def fake_load_recent_subtitle_examples(*args, **kwargs):
+        return []
+
+    async def fake_load_related_profile_subtitle_examples(*args, **kwargs):
+        return []
+
+    async def fake_polish_subtitle_items(*args, **kwargs):
+        return 0
+
+    def fake_build_edit_decision(**kwargs):
+        captured["decision_skill"] = kwargs["editing_skill"]
+        return FakeDecision()
+
+    def fake_infer_timeline_analysis(*args, **kwargs):
+        captured["timeline_skill"] = kwargs["editing_skill"]
+        return {
+            "hook_end_sec": 2.0,
+            "cta_start_sec": None,
+            "semantic_sections": [],
+            "section_directives": [],
+            "section_actions": [],
+            "editing_skill": kwargs["editing_skill"],
+            "emphasis_candidates": [],
+        }
+
+    async def fake_save_editorial_timeline(*args, **kwargs):
+        return SimpleNamespace(id=editorial_timeline_id, data_json={"segments": []}, otio_data=None)
+
+    async def fake_plan_insert_asset_slot(**kwargs):
+        return None
+
+    async def fake_plan_music_entry(**kwargs):
+        return None
+
+    async def fake_save_render_plan(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(steps_mod, "_resolve_storage_reference", fake_resolve_storage_reference)
+    monkeypatch.setattr(steps_mod, "detect_silence", lambda *args, **kwargs: [])
+    monkeypatch.setattr(steps_mod, "load_content_profile_user_memory", fake_load_content_profile_user_memory)
+    monkeypatch.setattr(steps_mod, "_load_recent_subtitle_examples", fake_load_recent_subtitle_examples)
+    monkeypatch.setattr(steps_mod, "_load_related_profile_subtitle_examples", fake_load_related_profile_subtitle_examples)
+    monkeypatch.setattr(steps_mod, "build_subtitle_review_memory", lambda **kwargs: {})
+    monkeypatch.setattr(steps_mod, "polish_subtitle_items", fake_polish_subtitle_items)
+    monkeypatch.setattr(steps_mod, "build_edit_decision", fake_build_edit_decision)
+    monkeypatch.setattr(steps_mod, "infer_timeline_analysis", fake_infer_timeline_analysis)
+    monkeypatch.setattr(steps_mod, "save_editorial_timeline", fake_save_editorial_timeline)
+    monkeypatch.setattr(steps_mod, "export_to_otio", lambda *args, **kwargs: "otio")
+    monkeypatch.setattr(
+        steps_mod,
+        "resolve_packaging_plan_for_job",
+        lambda *args, **kwargs: {
+            "subtitle_style": "bold_yellow_outline",
+            "subtitle_motion_style": "motion_static",
+            "smart_effect_style": "smart_effect_rhythm",
+        },
+    )
+    monkeypatch.setattr(steps_mod, "remap_subtitles_to_timeline", lambda subtitles, segments: subtitles)
+    monkeypatch.setattr(steps_mod, "_plan_insert_asset_slot", fake_plan_insert_asset_slot)
+    monkeypatch.setattr(steps_mod, "_plan_music_entry", fake_plan_music_entry)
+    monkeypatch.setattr(steps_mod, "build_render_plan", lambda **kwargs: {"ok": True})
+    monkeypatch.setattr(steps_mod, "build_smart_editing_accents", lambda **kwargs: {})
+    monkeypatch.setattr(steps_mod, "save_render_plan", fake_save_render_plan)
+
+    result = await steps_mod.run_edit_plan(str(job_id))
+
+    assert result["timeline_id"] == str(editorial_timeline_id)
+    decision_skill = dict(captured["decision_skill"] or {})
+    timeline_skill = dict(captured["timeline_skill"] or {})
+    assert decision_skill["review_focus"] == "hook_boundary"
+    assert decision_skill["silence_floor_sec"] > 0.5
+    assert decision_skill["section_policy"]["hook"]["trim_intensity"] == "preserve"
+    assert timeline_skill["review_focus"] == "hook_boundary"
 
 
 @pytest.mark.asyncio

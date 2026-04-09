@@ -15,6 +15,7 @@ from roughcut.review.content_profile import (
     _is_generic_profile_summary,
     _is_generic_subject_type,
     _is_specific_video_theme,
+    _text_conflicts_with_verified_identity,
 )
 
 QUALITY_ARTIFACT_TYPE = "quality_assessment"
@@ -80,6 +81,7 @@ _NUMERIC_DETAIL_RE = re.compile(
     r"\d+(?:\.\d+)?(?:代|档|倍|lm|mah|w|v|mm|cm|g|kg|分钟|小时|秒|元|版)",
     re.IGNORECASE,
 )
+_IDENTITY_NARRATIVE_FIELDS = ("video_theme", "summary", "hook_line", "visible_text")
 
 
 @dataclass(slots=True)
@@ -228,6 +230,17 @@ def assess_job_quality(
                     blocking=True,
                 )
             )
+        identity_narrative_conflicts = _collect_identity_narrative_conflicts(profile)
+        if identity_narrative_conflicts:
+            issues.append(
+                QualityIssue(
+                    "identity_narrative_conflict",
+                    f"内容画像字段与已识别主体身份冲突：{', '.join(identity_narrative_conflicts)}",
+                    20.0,
+                    auto_fix_step="content_profile",
+                    blocking=True,
+                )
+            )
 
     pending_corrections = sum(1 for item in corrections if item.human_decision not in {"accepted", "rejected"})
     if pending_corrections > 0:
@@ -293,6 +306,7 @@ def assess_job_quality(
             "effective_status": effective_status,
             "step_completion_ratio": round(step_completion_ratio, 3),
             "subtitle_sync": sync_check,
+            "identity_narrative_conflicts": _collect_identity_narrative_conflicts(profile),
         },
     }
 
@@ -348,6 +362,39 @@ def _build_profile_text(profile: dict[str, Any]) -> str:
             )
         )
     )
+
+
+def _collect_identity_narrative_conflicts(profile: dict[str, Any]) -> list[str]:
+    if not isinstance(profile, dict):
+        return []
+    brand = str(profile.get("subject_brand") or "").strip()
+    model = str(profile.get("subject_model") or "").strip()
+    if not (brand or model):
+        return []
+    conflicts: list[str] = []
+    for field_name in _IDENTITY_NARRATIVE_FIELDS:
+        value = profile.get(field_name)
+        if not isinstance(value, str) or not value.strip():
+            continue
+        if _text_conflicts_with_verified_identity(
+            value,
+            brand=brand,
+            model=model,
+            glossary_terms=None,
+        ):
+            conflicts.append(field_name)
+    cover_title = profile.get("cover_title")
+    if isinstance(cover_title, dict):
+        cover_text = " ".join(str(cover_title.get(key) or "").strip() for key in ("top", "main", "bottom")).strip()
+        if cover_text and _text_conflicts_with_verified_identity(
+            cover_text,
+            brand=brand,
+            model=model,
+            glossary_terms=None,
+        ):
+            conflicts.append("cover_title")
+    seen: set[str] = set()
+    return [field for field in conflicts if not (field in seen or seen.add(field))]
 
 
 def _extract_detail_cues(text: str) -> list[str]:

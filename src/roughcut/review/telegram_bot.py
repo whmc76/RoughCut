@@ -184,6 +184,10 @@ _CONTENT_FIELD_ORDER = (
 )
 _FINAL_REVIEW_CALLBACK_ACTION_TEXT = {
     "approve": "成片通过",
+    "edit_hook": "重剪 Hook 边界",
+    "edit_mid": "重剪中段衔接",
+    "edit_cta": "重剪 CTA 衔接",
+    "edit": "高风险边界重剪",
     "cover": "只改封面",
     "music": "只改BGM",
     "platform": "只改平台文案",
@@ -191,6 +195,10 @@ _FINAL_REVIEW_CALLBACK_ACTION_TEXT = {
 }
 _FINAL_REVIEW_CALLBACK_ACK_TEXT = {
     "approve": "已接收成片通过",
+    "edit_hook": "已接收 Hook 边界重剪",
+    "edit_mid": "已接收中段衔接重剪",
+    "edit_cta": "已接收 CTA 衔接重剪",
+    "edit": "已接收边界重剪",
     "cover": "已接收封面重出",
     "music": "已接收 BGM 重出",
     "platform": "已接收平台文案重出",
@@ -273,6 +281,7 @@ class FinalReviewRerunPlan:
     trigger_step: str
     rerun_steps: tuple[str, ...]
     targets: tuple[str, ...] = ()
+    focus: str = ""
 
 
 class TelegramReviewBotService:
@@ -506,7 +515,13 @@ class TelegramReviewBotService:
                 subtitle_report=subtitle_report,
                 variant_timeline_bundle=variant_timeline_bundle,
             )
-        await self._send_review_message(_REVIEW_KIND_FINAL, job_id, message, videos=videos)
+        await self._send_review_message(
+            _REVIEW_KIND_FINAL,
+            job_id,
+            message,
+            videos=videos,
+            variant_timeline_bundle=variant_timeline_bundle,
+        )
 
     async def _run(self) -> None:
         while True:
@@ -940,6 +955,7 @@ class TelegramReviewBotService:
                             "updated_at": now.isoformat(),
                             "review_feedback": note,
                             "review_rerun_category": rerun_plan.category,
+                            "review_rerun_focus": rerun_plan.focus,
                             "review_rerun_steps": list(rerun_plan.rerun_steps),
                             "review_rerun_targets": list(rerun_plan.targets),
                         }
@@ -1085,6 +1101,7 @@ class TelegramReviewBotService:
         *,
         thumbnails: list[TelegramReviewThumbnail] | None = None,
         videos: list[TelegramReviewVideo] | None = None,
+        variant_timeline_bundle: dict[str, Any] | None = None,
     ) -> None:
         settings = get_settings()
         chat_id = str(getattr(settings, "telegram_bot_chat_id", "") or "").strip()
@@ -1119,7 +1136,7 @@ class TelegramReviewBotService:
         chunks = _split_review_message(decorated_body)
         total = len(chunks)
         anchor_message_id: int | None = None
-        reply_markup = _build_review_reply_markup(kind, job_id)
+        reply_markup = _build_review_reply_markup(kind, job_id, variant_timeline_bundle=variant_timeline_bundle)
         for index, chunk in enumerate(chunks, start=1):
             header = f"【RC:{kind}:{job_id}】"
             prefix = f"{header} ({index}/{total})" if total > 1 else header
@@ -1443,19 +1460,34 @@ def _build_review_callback_data(kind: str, job_id: uuid.UUID, action: str) -> st
     )
 
 
-def _build_final_review_reply_markup(job_id: uuid.UUID) -> dict[str, Any]:
+def _build_final_review_reply_markup(
+    job_id: uuid.UUID,
+    *,
+    variant_timeline_bundle: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    first_row = [
+        {
+            "text": "成片通过",
+            "callback_data": _build_review_callback_data(_REVIEW_KIND_FINAL, job_id, "approve"),
+        },
+    ]
+    if _final_review_has_high_risk_cuts(variant_timeline_bundle):
+        edit_action = _final_review_edit_button_action(variant_timeline_bundle)
+        first_row.append(
+            {
+                "text": _FINAL_REVIEW_CALLBACK_ACTION_TEXT.get(edit_action, _final_review_edit_button_text(variant_timeline_bundle)),
+                "callback_data": _build_review_callback_data(_REVIEW_KIND_FINAL, job_id, edit_action),
+            }
+        )
+    first_row.append(
+        {
+            "text": "只改封面",
+            "callback_data": _build_review_callback_data(_REVIEW_KIND_FINAL, job_id, "cover"),
+        }
+    )
     return {
         "inline_keyboard": [
-            [
-                {
-                    "text": "成片通过",
-                    "callback_data": _build_review_callback_data(_REVIEW_KIND_FINAL, job_id, "approve"),
-                },
-                {
-                    "text": "只改封面",
-                    "callback_data": _build_review_callback_data(_REVIEW_KIND_FINAL, job_id, "cover"),
-                },
-            ],
+            first_row,
             [
                 {
                     "text": "只改BGM",
@@ -1476,9 +1508,14 @@ def _build_final_review_reply_markup(job_id: uuid.UUID) -> dict[str, Any]:
     }
 
 
-def _build_review_reply_markup(kind: str, job_id: uuid.UUID) -> dict[str, Any] | None:
+def _build_review_reply_markup(
+    kind: str,
+    job_id: uuid.UUID,
+    *,
+    variant_timeline_bundle: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
     if kind == _REVIEW_KIND_FINAL:
-        return _build_final_review_reply_markup(job_id)
+        return _build_final_review_reply_markup(job_id, variant_timeline_bundle=variant_timeline_bundle)
     return None
 
 
@@ -1599,10 +1636,29 @@ def _build_final_review_rerun_plans(note: str) -> list[FinalReviewRerunPlan]:
 
     subtitle_style_keywords = ("字幕样式", "字幕风格", "字幕颜色", "字幕描边", "字幕特效")
     subtitle_text_keywords = ("术语", "错别字", "翻译", "字幕时间", "字幕不同步", "字幕内容", "字幕文本")
+    diagnostic_edit_keywords = (
+        "高风险cut",
+        "高风险 cut",
+        "高风险边界",
+        "边界不顺",
+        "边界不对",
+        "边界太硬",
+        "衔接不顺",
+        "衔接生硬",
+        "开场节奏",
+        "hook 节奏",
+        "hook不对",
+        "hook 不对",
+        "开头节奏",
+        "前半段节奏",
+        "剪辑边界",
+    )
     has_subtitle_style_request = any(keyword in normalized for keyword in subtitle_style_keywords)
     has_subtitle_text_request = any(keyword in normalized for keyword in subtitle_text_keywords) and not bool(
         _NEGATED_SUBTITLE_CONTENT_PATTERN.search(normalized)
     )
+    has_diagnostic_edit_request = any(keyword in normalized for keyword in diagnostic_edit_keywords)
+    edit_focus = _final_review_edit_focus(normalized)
 
     plans: list[FinalReviewRerunPlan] = []
     for category, label, trigger_step, keywords, targets in (
@@ -1611,7 +1667,7 @@ def _build_final_review_rerun_plans(note: str) -> list[FinalReviewRerunPlan]:
         ("content_profile", "内容摘要与文案定位调整", "content_profile", ("摘要", "主题", "关键词", "文案方向", "内容定位", "主体识别", "标题钩子"), ("summary", "keywords", "content_profile")),
         ("ai_director", "AI 导演文案与配音重做", "ai_director", ("旁白", "解说词", "口播文案", "ai导演", "ai 导演", "重配音", "配音文案"), ("voiceover", "director_script")),
         ("avatar_commentary", "数字人解说重做", "avatar_commentary", ("数字人", "口播人", "虚拟人", "画中画", "主播形象", "讲解人"), ("avatar",)),
-        ("edit_plan", "剪辑结构重做", "edit_plan", ("节奏", "结构", "镜头", "重剪", "重新剪", "剪辑", "删掉", "前面太长", "后面太长", "卡点"), ("timeline", "pacing")),
+        ("edit_plan", "剪辑结构重做", "edit_plan", ("节奏", "结构", "镜头", "重剪", "重新剪", "剪辑", "删掉", "前面太长", "后面太长", "卡点", *diagnostic_edit_keywords), ("timeline", "pacing", "cut_boundary")),
         ("cover_render", "封面重出", "render", ("封面", "缩略图", "标题图", "封面字", "封面标题"), ("cover",)),
         ("packaging_render", "包装素材重出", "render", ("片头", "片尾", "转场", "水印", "包装"), ("intro", "outro", "transition", "watermark")),
         ("music_render", "背景音乐重出", "render", ("bgm", "背景音乐", "音乐"), ("music",)),
@@ -1622,15 +1678,32 @@ def _build_final_review_rerun_plans(note: str) -> list[FinalReviewRerunPlan]:
                 continue
             if has_subtitle_style_request and not has_subtitle_text_request:
                 continue
+            if has_diagnostic_edit_request:
+                continue
         elif not any(keyword in normalized for keyword in keywords):
             continue
+        resolved_label = label
+        resolved_targets = targets
+        resolved_focus = ""
+        if category == "edit_plan":
+            resolved_focus = edit_focus
+            if edit_focus == "hook_boundary":
+                resolved_label = "Hook 边界重剪"
+                resolved_targets = ("timeline", "pacing", "cut_boundary", "hook_boundary")
+            elif edit_focus == "cta_transition":
+                resolved_label = "CTA 衔接重剪"
+                resolved_targets = ("timeline", "pacing", "cut_boundary", "cta_transition")
+            elif edit_focus == "mid_transition":
+                resolved_label = "中段衔接重剪"
+                resolved_targets = ("timeline", "pacing", "cut_boundary", "mid_transition")
         plans.append(
             FinalReviewRerunPlan(
                 category=category,
-                label=label,
+                label=resolved_label,
                 trigger_step=trigger_step,
                 rerun_steps=_rerun_chain_from_step(trigger_step),
-                targets=targets,
+                targets=resolved_targets,
+                focus=resolved_focus,
             )
         )
     if _extract_final_review_content_profile_feedback(note) and not any(plan.category == "content_profile" for plan in plans):
@@ -1663,11 +1736,14 @@ def _combine_final_review_rerun_plans(plans: list[FinalReviewRerunPlan]) -> Fina
     labels: list[str] = []
     categories: list[str] = []
     targets: list[str] = []
+    focuses: list[str] = []
     for _, plan in indexed:
         if plan.label not in labels:
             labels.append(plan.label)
         if plan.category not in categories:
             categories.append(plan.category)
+        if plan.focus and plan.focus not in focuses:
+            focuses.append(plan.focus)
         for target in plan.targets:
             if target not in targets:
                 targets.append(target)
@@ -1677,7 +1753,21 @@ def _combine_final_review_rerun_plans(plans: list[FinalReviewRerunPlan]) -> Fina
         trigger_step=earliest.trigger_step,
         rerun_steps=earliest.rerun_steps,
         targets=tuple(targets),
+        focus=focuses[0] if len(focuses) == 1 else "+".join(focuses),
     )
+
+
+def _final_review_edit_focus(normalized_note: str) -> str:
+    text = str(normalized_note or "").strip().lower()
+    if not text:
+        return ""
+    if "hook" in text or "开场节奏" in text or "开头节奏" in text:
+        return "hook_boundary"
+    if "cta" in text or "收尾衔接" in text or "结尾衔接" in text:
+        return "cta_transition"
+    if any(token in text for token in ("中段衔接", "边界不顺", "边界不对", "边界太硬", "衔接不顺", "衔接生硬", "高风险边界", "高风险 cut", "高风险cut", "剪辑边界")):
+        return "mid_transition"
+    return ""
 
 
 def _extract_latest_final_review_rerun_context(steps: list[JobStep]) -> dict[str, Any] | None:
@@ -1698,6 +1788,7 @@ def _extract_latest_final_review_rerun_context(steps: list[JobStep]) -> dict[str
             "targets": [str(item).strip() for item in targets if str(item).strip()],
             "feedback": feedback,
             "label": str(metadata.get("detail") or "").strip(),
+            "focus": str(metadata.get("review_rerun_focus") or "").strip(),
         }
         if latest is None or updated > latest[0]:
             latest = (updated, payload)
@@ -1714,6 +1805,9 @@ def _build_final_review_rerun_context_lines(context: dict[str, Any] | None) -> l
     step_name = str(context.get("step_name") or "").strip()
     if step_name:
         lines.append(f"- 触发起点：{step_name}")
+    focus = str(context.get("focus") or "").strip()
+    if focus:
+        lines.append(f"- 风险焦点：{focus}")
     feedback = str(context.get("feedback") or "").strip()
     if feedback:
         snippet = feedback if len(feedback) <= 80 else feedback[:79].rstrip() + "…"
@@ -2033,6 +2127,15 @@ def _build_final_review_message(
                 *subtitle_hints,
             ]
         )
+    diagnostics_lines = _build_final_review_diagnostics_lines(variant_timeline_bundle)
+    if diagnostics_lines:
+        lines.extend(
+            [
+                "",
+                "剪辑风险提示：",
+                *diagnostics_lines,
+            ]
+        )
     validation_lines = _build_final_review_validation_lines(variant_timeline_bundle)
     if validation_lines:
         lines.extend(
@@ -2062,6 +2165,63 @@ def _build_final_review_message(
         ]
     )
     return "\n".join(lines)
+
+
+def _build_final_review_diagnostics_lines(variant_timeline_bundle: dict[str, Any] | None) -> list[str]:
+    timeline_rules = (
+        variant_timeline_bundle.get("timeline_rules")
+        if isinstance(variant_timeline_bundle, dict)
+        else None
+    )
+    diagnostics = (
+        timeline_rules.get("diagnostics")
+        if isinstance(timeline_rules, dict)
+        else None
+    )
+    if not isinstance(diagnostics, dict):
+        return []
+
+    review_flags = diagnostics.get("review_flags") if isinstance(diagnostics.get("review_flags"), dict) else {}
+    high_risk_cuts = [
+        item
+        for item in (diagnostics.get("high_risk_cuts") or [])
+        if isinstance(item, dict)
+    ]
+    high_energy_keeps = [
+        item
+        for item in (diagnostics.get("high_energy_keeps") or [])
+        if isinstance(item, dict)
+    ]
+
+    lines: list[str] = []
+    if review_flags.get("review_recommended"):
+        reasons = [str(item).strip() for item in (review_flags.get("review_reasons") or []) if str(item).strip()]
+        if reasons:
+            lines.append(f"- 建议人工复核：{'；'.join(reasons[:2])}")
+        else:
+            lines.append("- 建议人工复核：检测到高风险剪辑边界。")
+
+    for item in high_risk_cuts[:2]:
+        start = round(float(item.get("start", 0.0) or 0.0), 2)
+        end = round(float(item.get("end", 0.0) or 0.0), 2)
+        boundary_keep_energy = round(float(item.get("boundary_keep_energy", 0.0) or 0.0), 2)
+        left_role = str(item.get("left_keep_role") or "unknown")
+        right_role = str(item.get("right_keep_role") or "unknown")
+        lines.append(
+            f"- 高风险 cut {start:.2f}s-{end:.2f}s：边界能量 {boundary_keep_energy:.2f}，"
+            f"左侧 {left_role} / 右侧 {right_role}"
+        )
+
+    if not lines and high_energy_keeps:
+        top_keep = max(high_energy_keeps, key=lambda item: float(item.get("keep_energy", 0.0) or 0.0))
+        start = round(float(top_keep.get("start", 0.0) or 0.0), 2)
+        end = round(float(top_keep.get("end", 0.0) or 0.0), 2)
+        keep_energy = round(float(top_keep.get("keep_energy", 0.0) or 0.0), 2)
+        section_role = str(top_keep.get("section_role") or "unknown")
+        lines.append(
+            f"- 最高能量保留段 {start:.2f}s-{end:.2f}s：{section_role}，保留能量 {keep_energy:.2f}"
+        )
+    return lines
 
 
 def _build_final_review_validation_lines(variant_timeline_bundle: dict[str, Any] | None) -> list[str]:
@@ -2117,6 +2277,7 @@ async def _build_final_review_videos(
         duration_sec=float(meta.duration or 0.0),
         subtitle_items=subtitle_items,
         keywords=_extract_final_review_keywords(content_profile),
+        variant_timeline_bundle=variant_timeline_bundle,
     )
     videos: list[TelegramReviewVideo] = []
     for index, clip in enumerate(clip_specs, start=1):
@@ -2425,13 +2586,25 @@ def _build_final_review_clip_specs(
     duration_sec: float,
     subtitle_items: list[dict[str, Any]],
     keywords: list[str],
+    variant_timeline_bundle: dict[str, Any] | None = None,
 ) -> list[TelegramFinalReviewClip]:
     if duration_sec <= 0:
         return []
     clip_duration = min(8.0, max(5.0, duration_sec / 5.0))
+    diagnostic_anchor = _pick_high_risk_cut_anchor(
+        variant_timeline_bundle,
+        subtitle_items=subtitle_items,
+    )
+    hook_anchor = _pick_high_energy_hook_anchor(
+        variant_timeline_bundle,
+        subtitle_items=subtitle_items,
+    )
     anchor_plan = [
-        ("开头节奏", _pick_subtitle_anchor(subtitle_items, duration_sec * 0.12)),
-        ("中段重点", _pick_keyword_anchor(subtitle_items, duration_sec, keywords) or _pick_subtitle_anchor(subtitle_items, duration_sec * 0.50)),
+        ("开头节奏", hook_anchor or _pick_subtitle_anchor(subtitle_items, duration_sec * 0.12)),
+        (
+            "高风险边界" if diagnostic_anchor else "中段重点",
+            diagnostic_anchor or _pick_keyword_anchor(subtitle_items, duration_sec, keywords) or _pick_subtitle_anchor(subtitle_items, duration_sec * 0.50),
+        ),
         ("结尾收口", _pick_subtitle_anchor(subtitle_items, duration_sec * 0.84)),
     ]
     clips: list[TelegramFinalReviewClip] = []
@@ -2462,6 +2635,111 @@ def _build_final_review_clip_specs(
             )
         )
     return clips
+
+
+def _pick_high_risk_cut_anchor(
+    variant_timeline_bundle: dict[str, Any] | None,
+    *,
+    subtitle_items: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    diagnostics = _final_review_diagnostics_payload(variant_timeline_bundle)
+    if not diagnostics:
+        return None
+    best: dict[str, Any] | None = None
+    best_score: tuple[float, float] | None = None
+    for item in diagnostics.get("high_risk_cuts") or []:
+        if not isinstance(item, dict):
+            continue
+        start_sec = float(item.get("start", 0.0) or 0.0)
+        end_sec = max(start_sec, float(item.get("end", start_sec) or start_sec))
+        center = start_sec + max(0.0, end_sec - start_sec) * 0.5
+        boundary_keep_energy = float(item.get("boundary_keep_energy", 0.0) or 0.0)
+        anchor = _pick_subtitle_anchor(subtitle_items, center) or {}
+        anchor = dict(anchor)
+        anchor["center"] = float(anchor.get("center") or center)
+        anchor["matched_keyword"] = "高风险cut"
+        score = (boundary_keep_energy, -abs(float(anchor["center"]) - center))
+        if best_score is None or score > best_score:
+            best = anchor
+            best_score = score
+    return best
+
+
+def _pick_high_energy_hook_anchor(
+    variant_timeline_bundle: dict[str, Any] | None,
+    *,
+    subtitle_items: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    diagnostics = _final_review_diagnostics_payload(variant_timeline_bundle)
+    if not diagnostics:
+        return None
+    best: dict[str, Any] | None = None
+    best_score: tuple[float, float] | None = None
+    for item in diagnostics.get("high_energy_keeps") or []:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("section_role") or "").strip().lower() != "hook":
+            continue
+        start_sec = float(item.get("start", 0.0) or 0.0)
+        end_sec = max(start_sec, float(item.get("end", start_sec) or start_sec))
+        center = start_sec + max(0.0, end_sec - start_sec) * 0.35
+        keep_energy = float(item.get("keep_energy", 0.0) or 0.0)
+        anchor = _pick_subtitle_anchor(subtitle_items, center) or {}
+        anchor = dict(anchor)
+        anchor["center"] = float(anchor.get("center") or center)
+        anchor["matched_keyword"] = str(anchor.get("matched_keyword") or "高能量hook")
+        score = (keep_energy, -abs(float(anchor["center"]) - center))
+        if best_score is None or score > best_score:
+            best = anchor
+            best_score = score
+    return best
+
+
+def _final_review_diagnostics_payload(variant_timeline_bundle: dict[str, Any] | None) -> dict[str, Any] | None:
+    timeline_rules = (
+        variant_timeline_bundle.get("timeline_rules")
+        if isinstance(variant_timeline_bundle, dict)
+        else None
+    )
+    diagnostics = timeline_rules.get("diagnostics") if isinstance(timeline_rules, dict) else None
+    return diagnostics if isinstance(diagnostics, dict) else None
+
+
+def _final_review_has_high_risk_cuts(variant_timeline_bundle: dict[str, Any] | None) -> bool:
+    diagnostics = _final_review_diagnostics_payload(variant_timeline_bundle)
+    if not diagnostics:
+        return False
+    return any(isinstance(item, dict) for item in (diagnostics.get("high_risk_cuts") or []))
+
+
+def _final_review_edit_button_action(variant_timeline_bundle: dict[str, Any] | None) -> str:
+    diagnostics = _final_review_diagnostics_payload(variant_timeline_bundle)
+    if not diagnostics:
+        return "edit"
+
+    roles: set[str] = set()
+    for item in diagnostics.get("high_risk_cuts") or []:
+        if not isinstance(item, dict):
+            continue
+        left_role = str(item.get("left_keep_role") or "").strip().lower()
+        right_role = str(item.get("right_keep_role") or "").strip().lower()
+        if left_role:
+            roles.add(left_role)
+        if right_role:
+            roles.add(right_role)
+
+    if "hook" in roles:
+        return "edit_hook"
+    if "cta" in roles:
+        return "edit_cta"
+    if roles & {"detail", "body"}:
+        return "edit_mid"
+    return "edit"
+
+
+def _final_review_edit_button_text(variant_timeline_bundle: dict[str, Any] | None) -> str:
+    action = _final_review_edit_button_action(variant_timeline_bundle)
+    return _FINAL_REVIEW_CALLBACK_ACTION_TEXT.get(action, "重剪高风险边界")
 
 
 def _pick_subtitle_anchor(subtitle_items: list[dict[str, Any]], target_time: float) -> dict[str, Any] | None:

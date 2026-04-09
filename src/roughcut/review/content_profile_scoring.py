@@ -7,6 +7,7 @@ from roughcut.review.content_profile_candidates import IdentityCandidate
 
 _CURRENT_EVIDENCE_WEIGHTS: dict[str, int] = {
     "transcript_labels": 5,
+    "source_context": 2,
     "ocr": 4,
     "transcript": 4,
     "source_name": 3,

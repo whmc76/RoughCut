@@ -35,18 +35,23 @@ async def test_build_hybrid_verification_bundle_keeps_online_and_database_hits()
         assert search_queries == ["ComfyUI workflow"]
         return [SimpleNamespace(title="ComfyUI 官方文档")]
 
-    async def fake_internal(*, search_queries):
+    async def fake_internal(*, search_queries, subject_domain=None, evidence_texts=None, glossary_terms=None, confirmed_entities=None):
         assert search_queries == ["ComfyUI workflow"]
+        assert subject_domain == "ai"
+        assert evidence_texts == ["ComfyUI 工作流实操"]
         return [SimpleNamespace(primary_subject="ComfyUI 工作流")]
 
     bundle = await build_hybrid_verification_bundle(
         search_queries=["ComfyUI workflow"],
         online_search=fake_online,
         internal_search=fake_internal,
+        subject_domain="ai",
+        evidence_texts=["ComfyUI 工作流实操"],
     )
 
     assert bundle.online_results[0].title == "ComfyUI 官方文档"
     assert bundle.database_results[0].primary_subject == "ComfyUI 工作流"
+    assert bundle.entity_catalog_candidates[0].primary_subject == "ComfyUI 工作流"
 
 
 @pytest.mark.asyncio
@@ -57,7 +62,7 @@ async def test_verify_content_understanding_merges_search_queries_with_semantic_
         captured_queries.extend(search_queries)
         return []
 
-    async def fake_internal(*, search_queries):
+    async def fake_internal(*, search_queries, **kwargs):
         return []
 
     understanding = ContentUnderstanding(

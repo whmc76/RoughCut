@@ -46,8 +46,10 @@ def build_review_feedback_verification_snapshot(
             "search_queries": [],
             "online_count": 0,
             "database_count": 0,
+            "entity_catalog_count": 0,
             "online_results": [],
             "database_results": [],
+            "entity_catalog_candidates": [],
         }
 
     search_queries = [
@@ -82,12 +84,26 @@ def build_review_feedback_verification_snapshot(
         if any(normalized.values()):
             database_results.append(normalized)
 
+    entity_catalog_candidates: list[dict[str, Any]] = []
+    for item in list(getattr(verification_bundle, "entity_catalog_candidates", None) or [])[:4]:
+        normalized = {
+            "brand": str((item or {}).get("brand") or "").strip(),
+            "model": str((item or {}).get("model") or "").strip(),
+            "primary_subject": str((item or {}).get("primary_subject") or "").strip(),
+            "evidence_strength": str((item or {}).get("evidence_strength") or "").strip(),
+            "support_score": str((item or {}).get("support_score") or "").strip(),
+        }
+        if any(normalized.values()):
+            entity_catalog_candidates.append(normalized)
+
     return {
         "search_queries": search_queries,
         "online_count": len(verification_bundle.online_results),
         "database_count": len(verification_bundle.database_results),
+        "entity_catalog_count": len(getattr(verification_bundle, "entity_catalog_candidates", None) or []),
         "online_results": online_results,
         "database_results": database_results,
+        "entity_catalog_candidates": entity_catalog_candidates,
     }
 
 
@@ -289,6 +305,14 @@ async def build_review_feedback_verification_bundle(
         online_search=cp._online_search_content_understanding,
         internal_search=None,
         session=session,
+        subject_domain=str(draft_profile.get("subject_domain") or "").strip(),
+        evidence_texts=[
+            str(draft_profile.get("transcript_excerpt") or "").strip(),
+            str(draft_profile.get("visible_text") or "").strip(),
+            str(draft_profile.get("summary") or "").strip(),
+            str(draft_profile.get("video_theme") or "").strip(),
+            str(draft_profile.get("source_name") or "").strip(),
+        ],
     )
 
 

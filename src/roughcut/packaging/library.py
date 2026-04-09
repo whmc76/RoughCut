@@ -235,6 +235,58 @@ DOMAIN_MOOD_KEYWORDS: dict[str, set[str]] = {
 
 GENERIC_MUSIC_TOKENS = {"BGM", "MUSIC", "LOOP", "TRACK", "BEAT", "INSTRUMENTAL", "AMBIENT"}
 GENERIC_INSERT_TOKENS = {"BROLL", "DETAIL", "MACRO", "CLOSEUP", "BOX", "PACKAGE", "PRODUCT", "SHOT", "INSERT", "CUTAWAY", "细节", "特写", "包装"}
+INSERT_ARCHETYPE_KEYWORDS: dict[str, set[str]] = {
+    "macro_detail": {"MACRO", "DETAIL", "CLOSEUP", "PRODUCT", "UNBOX", "BOX", "PACKAGE", "细节", "特写", "近景", "开箱"},
+    "demo_step": {"DEMO", "STEP", "SCREEN", "UI", "FLOW", "GUIDE", "TUTORIAL", "录屏", "演示", "步骤", "教程", "操作"},
+    "lifestyle_context": {"LIFESTYLE", "CITY", "TRAVEL", "AMBIENT", "STORE", "DESK", "WORKSPACE", "CAFE", "街景", "环境", "日常", "场景", "探店"},
+    "reaction_cutaway": {"REACTION", "FACECAM", "MEME", "HYPE", "REPLAY", "EMOTE", "表情", "反应", "高光", "回放"},
+}
+INSERT_RUNTIME_PROFILES: dict[str, dict[str, Any]] = {
+    "macro_detail": {"motion_profile": "quick_punch", "target_duration_sec": 1.4, "transition_style": "punch_cut"},
+    "demo_step": {"motion_profile": "guided_hold", "target_duration_sec": 2.2, "transition_style": "clean_hold"},
+    "lifestyle_context": {"motion_profile": "ambient_hold", "target_duration_sec": 2.6, "transition_style": "soft_fade"},
+    "reaction_cutaway": {"motion_profile": "impact_hit", "target_duration_sec": 1.15, "transition_style": "impact_cut"},
+    "generic_broll": {"motion_profile": "balanced_hold", "target_duration_sec": 1.8, "transition_style": "straight_cut"},
+}
+INSERT_MOTION_BEHAVIORS: dict[str, dict[str, float]] = {
+    "quick_punch": {"playback_rate": 1.08},
+    "guided_hold": {"playback_rate": 1.0},
+    "ambient_hold": {"playback_rate": 0.94},
+    "impact_hit": {"playback_rate": 1.12},
+    "balanced_hold": {"playback_rate": 1.0},
+}
+INSERT_TRANSITION_BASE_SEC: dict[str, float] = {
+    "straight_cut": 0.0,
+    "punch_cut": 0.024,
+    "impact_cut": 0.02,
+    "clean_hold": 0.06,
+    "soft_fade": 0.14,
+}
+INSERT_TRANSITION_MODE_SCALE: dict[str, float] = {
+    "accented": 1.28,
+    "restrained": 0.92,
+    "protect": 0.58,
+}
+SECTION_ARCHETYPE_WEIGHTS: dict[str, dict[str, float]] = {
+    "hook": {"reaction_cutaway": 1.0, "macro_detail": 0.8, "demo_step": 0.5, "lifestyle_context": 0.35, "generic_broll": 0.45},
+    "detail": {"macro_detail": 1.0, "demo_step": 0.95, "lifestyle_context": 0.45, "reaction_cutaway": 0.3, "generic_broll": 0.5},
+    "body": {"lifestyle_context": 1.0, "demo_step": 0.82, "macro_detail": 0.72, "reaction_cutaway": 0.4, "generic_broll": 0.58},
+    "cta": {"generic_broll": 0.05, "lifestyle_context": 0.05, "macro_detail": 0.0, "demo_step": 0.0, "reaction_cutaway": 0.0},
+}
+CONTENT_KIND_ARCHETYPE_BONUS: dict[str, dict[str, float]] = {
+    "tutorial": {"demo_step": 0.3, "macro_detail": 0.06},
+    "unboxing": {"macro_detail": 0.22, "demo_step": 0.08},
+    "commentary": {"lifestyle_context": 0.1},
+    "gameplay": {"reaction_cutaway": 0.26},
+    "vlog": {"lifestyle_context": 0.22, "reaction_cutaway": 0.08},
+    "food": {"macro_detail": 0.22, "lifestyle_context": 0.16},
+}
+PACKAGING_INTENT_ARCHETYPE_BONUS: dict[str, dict[str, float]] = {
+    "detail_support": {"macro_detail": 0.16, "demo_step": 0.12},
+    "body_support": {"lifestyle_context": 0.18, "demo_step": 0.08},
+    "hook_focus": {"reaction_cutaway": 0.18, "macro_detail": 0.1},
+    "cta_protect": {"generic_broll": -0.3, "macro_detail": -0.4, "demo_step": -0.4, "lifestyle_context": -0.4, "reaction_cutaway": -0.4},
+}
 
 
 def list_packaging_assets() -> dict[str, Any]:
@@ -286,6 +338,8 @@ def save_packaging_asset(*, asset_type: str, filename: str, payload: bytes) -> d
         "watermark_preprocessed": watermark_preprocessed if asset_type == "watermark" else None,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
+    if asset_type == "insert":
+        item.update(describe_insert_asset(item))
 
     state = _load_state()
     state["assets"] = [existing for existing in state["assets"] if existing.get("id") != asset_id]
@@ -622,6 +676,7 @@ def _resolve_insert_asset(
     content_profile: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     insert_ids = [item for item in config.get("insert_asset_ids") or [] if item in assets_by_id]
+    ranking_map: dict[str, dict[str, Any]] = {}
     if config.get("insert_selection_mode") == "manual":
         selected_id = config.get("insert_asset_id")
         if selected_id not in insert_ids and selected_id in assets_by_id:
@@ -636,23 +691,216 @@ def _resolve_insert_asset(
             content_profile=content_profile,
             random_seed=f"insert:{job_id}",
         )
+        ranking_map = {str(item.get("asset_id") or ""): item for item in rankings}
         insert_ids = [item["asset_id"] for item in rankings]
         selected_id = insert_ids[0] if insert_ids else None
         selection_summary = _build_packaging_selection_summary(rankings)
     if not selected_id:
         return None
     asset = assets_by_id[selected_id]
+    candidate_assets = [
+        _build_insert_candidate_asset(assets_by_id[item], ranking_map.get(item))
+        for item in insert_ids
+        if item in assets_by_id
+    ]
+    selected_asset = _build_insert_candidate_asset(asset, ranking_map.get(selected_id))
     return {
         "asset_id": asset["id"],
         "asset_type": "insert",
         "path": asset["path"],
         "original_name": asset["original_name"],
         "candidate_asset_ids": insert_ids,
+        "candidate_assets": candidate_assets,
         "selection_mode": config.get("insert_selection_mode") or "manual",
         "position_mode": config.get("insert_position_mode") or "llm",
         "selection_strategy": "manual_override" if config.get("insert_selection_mode") == "manual" else "auto_ranked_pool",
         "selection_summary": selection_summary,
+        "insert_archetype": selected_asset["insert_archetype"],
+        "insert_motion_profile": selected_asset["insert_motion_profile"],
+        "insert_transition_style": selected_asset["insert_transition_style"],
+        "insert_target_duration_sec": selected_asset["insert_target_duration_sec"],
     }
+
+
+def _build_insert_candidate_asset(asset: dict[str, Any], ranking: dict[str, Any] | None = None) -> dict[str, Any]:
+    described = describe_insert_asset(asset)
+    return {
+        "asset_id": str(asset.get("id") or ""),
+        "path": str(asset.get("path") or ""),
+        "original_name": str(asset.get("original_name") or ""),
+        "insert_archetype": described["insert_archetype"],
+        "insert_motion_profile": described["insert_motion_profile"],
+        "insert_transition_style": described["insert_transition_style"],
+        "insert_target_duration_sec": described["insert_target_duration_sec"],
+        "selection_score": round(float((ranking or {}).get("score") or 0.0), 3),
+        "selection_reasons": list((ranking or {}).get("reasons") or []),
+    }
+
+
+def describe_insert_asset(asset: dict[str, Any] | None) -> dict[str, Any]:
+    asset_tokens = _tokenize_packaging_text(
+        " ".join(
+            [
+                str((asset or {}).get("original_name") or ""),
+                str(Path(str((asset or {}).get("original_name") or "")).stem),
+            ]
+        )
+    )
+    archetype = "generic_broll"
+    archetype_score = 0
+    for candidate, keywords in INSERT_ARCHETYPE_KEYWORDS.items():
+        score = len(asset_tokens & keywords)
+        if score > archetype_score:
+            archetype = candidate
+            archetype_score = score
+    runtime = dict(INSERT_RUNTIME_PROFILES.get(archetype, INSERT_RUNTIME_PROFILES["generic_broll"]))
+    return {
+        "insert_archetype": archetype,
+        "insert_motion_profile": str(runtime["motion_profile"]),
+        "insert_transition_style": str(runtime["transition_style"]),
+        "insert_target_duration_sec": round(float(runtime["target_duration_sec"]), 3),
+    }
+
+
+def rank_insert_candidates_for_section(
+    candidates: list[dict[str, Any]],
+    *,
+    section_role: str = "",
+    packaging_intent: str = "",
+    content_profile: dict[str, Any] | None = None,
+    editing_skill: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    resolved_role = str(section_role or "").strip().lower()
+    resolved_intent = str(packaging_intent or "").strip().lower()
+    profile = content_profile or {}
+    content_kind = str((editing_skill or {}).get("content_kind") or "").strip().lower()
+    if not content_kind:
+        preset_name = normalize_workflow_template_name(str(profile.get("workflow_template") or profile.get("preset_name") or "").strip())
+        content_kind = (
+            "tutorial" if "tutorial" in preset_name else
+            "vlog" if "vlog" in preset_name else
+            "commentary" if "commentary" in preset_name else
+            "gameplay" if "gameplay" in preset_name else
+            "food" if "food" in preset_name else
+            "unboxing"
+        )
+
+    rankings: list[dict[str, Any]] = []
+    for candidate in candidates:
+        described = describe_insert_asset(candidate)
+        archetype = str(candidate.get("insert_archetype") or described["insert_archetype"])
+        base_score = float(candidate.get("selection_score", 0.0) or 0.0)
+        score = base_score
+        reasons = list(candidate.get("selection_reasons") or [])
+        role_bonus = float(SECTION_ARCHETYPE_WEIGHTS.get(resolved_role, {}).get(archetype, 0.0))
+        if role_bonus:
+            score += role_bonus
+            reasons.append(f"素材类型贴合 {resolved_role or '章节'} 段")
+        kind_bonus = float(CONTENT_KIND_ARCHETYPE_BONUS.get(content_kind, {}).get(archetype, 0.0))
+        if kind_bonus:
+            score += kind_bonus
+            reasons.append(f"素材类型贴合 {content_kind} 内容")
+        intent_bonus = float(PACKAGING_INTENT_ARCHETYPE_BONUS.get(resolved_intent, {}).get(archetype, 0.0))
+        if intent_bonus:
+            score += intent_bonus
+            reasons.append("素材类型贴合当前包装意图")
+        rankings.append(
+            {
+                "candidate": {
+                    **candidate,
+                    **described,
+                },
+                "score": round(score, 3),
+                "reasons": reasons,
+            }
+        )
+    rankings.sort(
+        key=lambda item: (
+            -float(item["score"]),
+            str(item["candidate"].get("original_name") or ""),
+        )
+    )
+    return rankings
+
+
+def resolve_insert_effective_duration(
+    insert_plan: dict[str, Any] | None,
+    *,
+    source_duration: float,
+) -> float:
+    duration = resolve_insert_prepare_duration(insert_plan, source_duration=source_duration)
+    playback_rate = float(resolve_insert_motion_behavior(insert_plan).get("playback_rate", 1.0) or 1.0)
+    return round(max(0.08, duration / max(playback_rate, 0.5)), 3)
+
+
+def resolve_insert_prepare_duration(
+    insert_plan: dict[str, Any] | None,
+    *,
+    source_duration: float,
+) -> float:
+    duration = max(0.0, float(source_duration or 0.0))
+    target = float((insert_plan or {}).get("insert_target_duration_sec", 0.0) or 0.0)
+    if target <= 0.0:
+        return duration
+    playback_rate = float(resolve_insert_motion_behavior(insert_plan).get("playback_rate", 1.0) or 1.0)
+    prepared = min(duration, max(0.08, target * max(playback_rate, 0.5)))
+    return round(prepared, 3)
+
+
+def resolve_insert_motion_behavior(insert_plan: dict[str, Any] | None) -> dict[str, float]:
+    profile = str((insert_plan or {}).get("insert_motion_profile") or "balanced_hold").strip().lower()
+    behavior = INSERT_MOTION_BEHAVIORS.get(profile) or INSERT_MOTION_BEHAVIORS["balanced_hold"]
+    return {"playback_rate": round(float(behavior.get("playback_rate", 1.0) or 1.0), 3)}
+
+
+def resolve_insert_transition_overlap(
+    insert_plan: dict[str, Any] | None,
+    *,
+    runtime_duration_sec: float,
+    insert_after_sec: float | None = None,
+    source_duration: float | None = None,
+) -> dict[str, float]:
+    transition_style = str((insert_plan or {}).get("insert_transition_style") or "straight_cut").strip().lower()
+    transition_mode = str((insert_plan or {}).get("insert_transition_mode") or "restrained").strip().lower()
+    base = float(INSERT_TRANSITION_BASE_SEC.get(transition_style, 0.0) or 0.0)
+    base *= float(INSERT_TRANSITION_MODE_SCALE.get(transition_mode, 1.0) or 1.0)
+
+    runtime = max(0.0, float(runtime_duration_sec or 0.0))
+    pre_duration = None if insert_after_sec is None else max(0.0, float(insert_after_sec or 0.0))
+    post_duration = None if source_duration is None or pre_duration is None else max(0.0, float(source_duration or 0.0) - pre_duration)
+
+    if pre_duration is None:
+        entry_sec = min(base, runtime / 3.0)
+    else:
+        entry_sec = min(base, runtime / 3.0, pre_duration / 3.0 if pre_duration > 0 else 0.0)
+    if post_duration is None:
+        exit_sec = min(base, runtime / 3.0)
+    else:
+        exit_sec = min(base, runtime / 3.0, post_duration / 3.0 if post_duration > 0 else 0.0)
+
+    entry_sec = round(max(0.0, entry_sec), 3)
+    exit_sec = round(max(0.0, exit_sec), 3)
+    return {
+        "entry_sec": entry_sec,
+        "exit_sec": exit_sec,
+        "total_sec": round(entry_sec + exit_sec, 3),
+    }
+
+
+def resolve_insert_added_duration(
+    insert_plan: dict[str, Any] | None,
+    *,
+    runtime_duration_sec: float,
+    insert_after_sec: float | None = None,
+    source_duration: float | None = None,
+) -> float:
+    overlap = resolve_insert_transition_overlap(
+        insert_plan,
+        runtime_duration_sec=runtime_duration_sec,
+        insert_after_sec=insert_after_sec,
+        source_duration=source_duration,
+    )
+    return round(max(0.08, max(0.0, float(runtime_duration_sec or 0.0) - float(overlap["total_sec"] or 0.0))), 3)
 
 
 def _normalize_asset_type(asset_type: str) -> str:

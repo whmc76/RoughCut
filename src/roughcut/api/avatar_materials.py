@@ -128,7 +128,7 @@ async def upload_avatar_material_profile(
         payload = await upload.read()
         if not payload:
             continue
-        if len(payload) > settings.max_upload_size_bytes:
+        if settings.max_upload_size_bytes > 0 and len(payload) > settings.max_upload_size_bytes:
             raise HTTPException(
                 status_code=400,
                 detail=f"{upload.filename or 'file'} exceeds max upload size",
@@ -218,7 +218,7 @@ async def replace_avatar_material_file(
         raise HTTPException(status_code=400, detail="Replace file is empty")
 
     settings = get_settings()
-    if len(payload) > settings.max_upload_size_bytes:
+    if settings.max_upload_size_bytes > 0 and len(payload) > settings.max_upload_size_bytes:
         raise HTTPException(status_code=400, detail=f"{file.filename or 'file'} exceeds max upload size")
 
     profile_dir = resolve_avatar_material_path(profile.get("profile_dir"))

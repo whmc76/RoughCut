@@ -13,6 +13,12 @@ from pathlib import Path
 from typing import Any, Callable
 
 from roughcut.config import get_settings
+from roughcut.packaging.library import (
+    resolve_insert_effective_duration,
+    resolve_insert_motion_behavior,
+    resolve_insert_prepare_duration,
+    resolve_insert_transition_overlap,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -231,10 +237,22 @@ async def render_video(
 
     filter_parts: list[str] = []
     editing_accents = render_plan.get("editing_accents") or {}
+    section_choreography = render_plan.get("section_choreography") or {}
+    choreographed_subtitles = _build_choreographed_subtitle_items(
+        subtitle_items,
+        subtitles_plan=render_plan.get("subtitles") or {},
+    ) if subtitle_items and render_plan.get("subtitles") else []
+    video_transform_accents = _build_video_transform_editing_accents(
+        editing_accents,
+        subtitle_items=choreographed_subtitles,
+        section_choreography=section_choreography,
+    )
     segment_filters, video_label, audio_label = _build_segment_filter_chain(
         keep_segments,
         transpose_suffix=transpose_suffix,
         editing_accents=editing_accents,
+        section_choreography=section_choreography,
+        subtitle_items=choreographed_subtitles,
     )
     filter_parts.extend(segment_filters)
 
@@ -250,10 +268,10 @@ async def render_video(
     filter_parts.append(audio_filter)
     video_map = f"[{video_label}]"
 
-    if editing_accents.get("emphasis_overlays") and _should_apply_smart_effect_video_transforms(render_plan.get("avatar_commentary") or {}):
+    if video_transform_accents.get("emphasis_overlays") and _should_apply_smart_effect_video_transforms(render_plan.get("avatar_commentary") or {}):
         smart_effect_filters, video_label = _build_smart_effect_video_filters(
             video_label,
-            editing_accents,
+            video_transform_accents,
             expected_width=render_w,
             expected_height=render_h,
         )
@@ -328,7 +346,8 @@ async def render_video(
         current_output = output_path
 
     overlay_plan = _build_overlay_only_editing_accents(
-        overlay_editing_accents if isinstance(overlay_editing_accents, dict) else editing_accents
+        overlay_editing_accents if isinstance(overlay_editing_accents, dict) else editing_accents,
+        section_choreography=section_choreography,
     )
     if subtitle_items or overlay_plan.get("emphasis_overlays") or overlay_plan.get("sound_effects"):
         overlay_output_path = output_path
@@ -354,11 +373,15 @@ def _build_segment_filter_chain(
     *,
     transpose_suffix: str,
     editing_accents: dict[str, Any],
+    section_choreography: dict[str, Any] | None = None,
+    subtitle_items: list[dict[str, Any]] | None = None,
 ) -> tuple[list[str], str, str]:
     parts: list[str] = []
     transition_map = _resolve_transition_map(
         keep_segments,
         editing_accents.get("transitions") or {},
+        section_choreography=section_choreography,
+        subtitle_items=subtitle_items,
     )
     needs_constant_fps = bool(transition_map)
     video_timing_suffix = f"{transpose_suffix},fps=30000/1001,settb=AVTB" if needs_constant_fps else transpose_suffix
@@ -408,6 +431,9 @@ def _build_segment_filter_chain(
 def _resolve_transition_map(
     keep_segments: list[dict[str, Any]],
     transitions: dict[str, Any],
+    *,
+    section_choreography: dict[str, Any] | None = None,
+    subtitle_items: list[dict[str, Any]] | None = None,
 ) -> dict[int, float]:
     if not transitions.get("enabled"):
         return {}
@@ -424,10 +450,47 @@ def _resolve_transition_map(
         current_duration = float(current["end"]) - float(current["start"])
         next_duration = float(following["end"]) - float(following["start"])
         transition_duration = min(max(raw_duration, 0.08), current_duration / 4, next_duration / 4, 0.18)
+        transition_mode = _resolve_choreography_transition_mode(
+            keep_segments,
+            boundary_index=index,
+            section_choreography=section_choreography,
+        )
+        if transition_mode == "accented":
+            transition_duration = min(0.22, transition_duration * 1.18)
+        elif transition_mode == "protect":
+            transition_duration = max(0.08, transition_duration * 0.72)
+        elif transition_mode == "restrained":
+            transition_duration = max(0.08, transition_duration * 0.9)
+        transition_duration *= _resolve_boundary_transition_energy_multiplier(
+            keep_segments,
+            boundary_index=index,
+            section_choreography=section_choreography,
+        )
+        transition_duration *= _resolve_boundary_unit_transition_multiplier(
+            keep_segments,
+            boundary_index=index,
+            subtitle_items=subtitle_items,
+            section_choreography=section_choreography,
+        )
+        transition_duration = min(0.24, transition_duration)
         if transition_duration < 0.08:
             continue
         resolved[index] = round(transition_duration, 3)
     return resolved
+
+
+def _resolve_boundary_transition_energy_multiplier(
+    keep_segments: list[dict[str, Any]],
+    *,
+    boundary_index: int,
+    section_choreography: dict[str, Any] | None = None,
+) -> float:
+    boundary_time_sec = _resolve_boundary_time_sec(keep_segments, boundary_index=boundary_index)
+    section = _section_choreography_for_time(boundary_time_sec, section_choreography=section_choreography)
+    if section is None:
+        return 1.0
+    bias = float(section.get("transition_energy_bias", 0.0) or 0.0)
+    return max(0.72, min(1.18, 1.0 + bias))
 
 
 def _build_sound_effect_filters(
@@ -455,6 +518,258 @@ def _build_sound_effect_filters(
         )
         current_audio = mixed_label
     return parts, current_audio
+
+
+def _resolve_choreography_transition_mode(
+    keep_segments: list[dict[str, Any]],
+    *,
+    boundary_index: int,
+    section_choreography: dict[str, Any] | None = None,
+) -> str | None:
+    sections = list((section_choreography or {}).get("sections") or [])
+    if not sections or boundary_index < 0 or boundary_index >= len(keep_segments) - 1:
+        return None
+
+    boundary_time_sec = _resolve_boundary_time_sec(keep_segments, boundary_index=boundary_index)
+
+    nearest_mode: str | None = None
+    nearest_distance = float("inf")
+    for section in sections:
+        if not isinstance(section, dict):
+            continue
+        anchor_sec = float(section.get("transition_anchor_sec", section.get("start_sec", 0.0)) or 0.0)
+        distance = abs(anchor_sec - boundary_time_sec)
+        if distance < nearest_distance:
+            nearest_distance = distance
+            nearest_mode = str(section.get("transition_mode") or "").strip() or None
+    return nearest_mode
+
+
+def _resolve_boundary_time_sec(
+    keep_segments: list[dict[str, Any]],
+    *,
+    boundary_index: int,
+) -> float:
+    if boundary_index < 0:
+        return 0.0
+    boundary_time_sec = 0.0
+    for segment in keep_segments[: boundary_index + 1]:
+        boundary_time_sec += max(0.0, float(segment.get("end", 0.0) or 0.0) - float(segment.get("start", 0.0) or 0.0))
+    return boundary_time_sec
+
+
+def _resolve_boundary_unit_transition_multiplier(
+    keep_segments: list[dict[str, Any]],
+    *,
+    boundary_index: int,
+    subtitle_items: list[dict[str, Any]] | None = None,
+    section_choreography: dict[str, Any] | None = None,
+) -> float:
+    if not subtitle_items or boundary_index < 0 or boundary_index >= len(keep_segments) - 1:
+        return 1.0
+
+    boundary_time_sec = _resolve_boundary_time_sec(keep_segments, boundary_index=boundary_index)
+    best_multiplier = 1.0
+    best_score = 0.0
+    for item in subtitle_items:
+        if not isinstance(item, dict):
+            continue
+        unit_role = str(item.get("subtitle_unit_role") or "").strip().lower()
+        if unit_role not in {"lead", "focus"}:
+            continue
+        start_time = max(0.0, float(item.get("start_time", 0.0) or 0.0))
+        end_time = max(start_time + 0.2, float(item.get("end_time", start_time) or start_time))
+        midpoint = (start_time + end_time) / 2.0
+        distance = min(
+            abs(boundary_time_sec - start_time),
+            abs(boundary_time_sec - midpoint),
+            abs(boundary_time_sec - end_time),
+        )
+        if distance > 1.0:
+            continue
+        section = _section_choreography_for_time(midpoint, section_choreography=section_choreography)
+        if section is None:
+            section = _section_choreography_for_time(boundary_time_sec, section_choreography=section_choreography)
+        transform_intensity = _resolve_unit_transform_intensity(unit_role=unit_role, section=section)
+        proximity = max(0.0, 1.0 - distance / 1.0)
+        role_drive = {
+            "lead": 0.08,
+            "focus": 0.045,
+        }.get(unit_role, 0.04)
+        context_drive = (transform_intensity - 1.0) * 0.72
+        multiplier = max(0.82, min(1.28, 1.0 + (role_drive + context_drive) * proximity))
+        score = proximity * max(0.85, transform_intensity) * (1.15 if unit_role == "lead" else 1.0)
+        if score > best_score:
+            best_score = score
+            best_multiplier = multiplier
+    return best_multiplier
+
+
+def _section_choreography_for_time(
+    time_sec: float,
+    *,
+    section_choreography: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    for section in list((section_choreography or {}).get("sections") or []):
+        if not isinstance(section, dict):
+            continue
+        start_sec = float(section.get("start_sec", 0.0) or 0.0)
+        end_sec = float(section.get("end_sec", start_sec) or start_sec)
+        if start_sec - 1e-6 <= time_sec <= end_sec + 1e-6:
+            return section
+    return None
+
+
+def _subtitle_profile_for_time(
+    time_sec: float,
+    *,
+    subtitles_plan: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    for profile in list((subtitles_plan or {}).get("section_profiles") or []):
+        if not isinstance(profile, dict):
+            continue
+        start_sec = float(profile.get("start_sec", 0.0) or 0.0)
+        end_sec = float(profile.get("end_sec", start_sec) or start_sec)
+        if start_sec - 1e-6 <= time_sec <= end_sec + 1e-6:
+            return profile
+    return None
+
+
+def _build_choreographed_subtitle_items(
+    subtitle_items: list[dict[str, Any]] | None,
+    *,
+    subtitles_plan: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    if not subtitle_items:
+        return []
+    choreographed = sorted(
+        [dict(item) for item in subtitle_items if isinstance(item, dict)],
+        key=lambda item: float(item.get("start_time", 0.0) or 0.0),
+    )
+    if not isinstance(subtitles_plan, dict) or not list(subtitles_plan.get("section_profiles") or []):
+        return choreographed
+
+    default_linger_sec = max(0.0, float(subtitles_plan.get("default_linger_sec", 0.04) or 0.04))
+    default_guard_sec = max(0.03, float(subtitles_plan.get("timing_guard_sec", 0.07) or 0.07))
+    for index, item in enumerate(choreographed):
+        start_time = float(item.get("start_time", 0.0) or 0.0)
+        end_time = max(start_time, float(item.get("end_time", start_time) or start_time))
+        midpoint = (start_time + end_time) / 2.0
+        profile = _subtitle_profile_for_time(midpoint, subtitles_plan=subtitles_plan)
+        if not profile:
+            continue
+        item["subtitle_section_role"] = str(profile.get("role") or "")
+        if profile.get("style_name"):
+            item["style_name"] = str(profile.get("style_name"))
+        if profile.get("motion_style"):
+            item["motion_style"] = str(profile.get("motion_style"))
+        if profile.get("margin_v_delta") not in (None, ""):
+            item["margin_v_delta"] = int(profile.get("margin_v_delta") or 0)
+
+        unit_choreography = _resolve_subtitle_unit_choreography(item)
+        if unit_choreography.get("style_name"):
+            item["style_name"] = str(unit_choreography["style_name"])
+        if unit_choreography.get("motion_style"):
+            item["motion_style"] = str(unit_choreography["motion_style"])
+        if unit_choreography.get("margin_v_delta") not in (None, ""):
+            item["margin_v_delta"] = int(unit_choreography["margin_v_delta"] or 0)
+        linger_value = profile.get("linger_sec")
+        guard_value = profile.get("guard_sec")
+        linger_sec = max(0.0, float(default_linger_sec if linger_value is None else linger_value))
+        guard_sec = max(0.03, float(default_guard_sec if guard_value is None else guard_value))
+        linger_sec += float(unit_choreography.get("linger_delta_sec", 0.0) or 0.0)
+        guard_sec = max(0.03, guard_sec + float(unit_choreography.get("guard_delta_sec", 0.0) or 0.0))
+        if linger_sec <= 0.0:
+            continue
+        extended_end = end_time + linger_sec
+        profile_end_sec = max(start_time, float(profile.get("end_sec", extended_end) or extended_end))
+        extended_end = min(extended_end, profile_end_sec + 0.02)
+        if index + 1 < len(choreographed):
+            next_start = float(choreographed[index + 1].get("start_time", extended_end) or extended_end)
+            extended_end = min(extended_end, max(start_time + 0.05, next_start - guard_sec))
+        item["end_time"] = round(max(end_time, extended_end), 3)
+    return choreographed
+
+
+def _resolve_subtitle_unit_choreography(item: dict[str, Any]) -> dict[str, Any]:
+    section_role = str(item.get("subtitle_section_role") or "").strip().lower()
+    unit_role = str(item.get("subtitle_unit_role") or "").strip().lower()
+    if not unit_role:
+        return {}
+    if section_role == "hook":
+        if unit_role == "lead":
+            return {
+                "motion_style": "motion_strobe",
+                "style_name": "cobalt_pop" if str(item.get("style_name") or "") == "teaser_glow" else item.get("style_name"),
+                "margin_v_delta": int(item.get("margin_v_delta", 0) or 0) - 2,
+                "linger_delta_sec": 0.04,
+                "guard_delta_sec": -0.01,
+            }
+        if unit_role == "support":
+            return {
+                "motion_style": "motion_slide",
+                "style_name": "clean_box",
+                "margin_v_delta": int(item.get("margin_v_delta", 0) or 0) + 6,
+                "linger_delta_sec": -0.02,
+                "guard_delta_sec": 0.02,
+            }
+    if section_role == "detail":
+        if unit_role == "setup":
+            return {
+                "motion_style": "motion_slide",
+                "style_name": "clean_box",
+                "margin_v_delta": int(item.get("margin_v_delta", 0) or 0),
+                "linger_delta_sec": -0.01,
+            }
+        if unit_role == "focus":
+            return {
+                "motion_style": "motion_pop",
+                "style_name": "keyword_highlight",
+                "margin_v_delta": int(item.get("margin_v_delta", 0) or 0) + 8,
+                "linger_delta_sec": 0.05,
+                "guard_delta_sec": -0.01,
+            }
+    if section_role == "cta":
+        if unit_role == "action":
+            return {
+                "motion_style": "motion_static",
+                "style_name": "white_minimal",
+                "margin_v_delta": int(item.get("margin_v_delta", 0) or 0) + 6,
+                "linger_delta_sec": 0.0,
+            }
+        if unit_role == "signoff":
+            return {
+                "motion_style": "motion_echo",
+                "style_name": "soft_shadow",
+                "margin_v_delta": int(item.get("margin_v_delta", 0) or 0) + 14,
+                "linger_delta_sec": -0.02,
+                "guard_delta_sec": 0.02,
+            }
+    return {}
+
+
+def _choreography_allows_overlay(
+    time_sec: float,
+    *,
+    section_choreography: dict[str, Any] | None = None,
+) -> bool:
+    section = _section_choreography_for_time(time_sec, section_choreography=section_choreography)
+    if section is None:
+        return True
+    if bool(section.get("cta_protection")):
+        return False
+    return str(section.get("overlay_focus") or "medium") != "none"
+
+
+def _choreography_allows_sound(
+    time_sec: float,
+    *,
+    section_choreography: dict[str, Any] | None = None,
+) -> bool:
+    section = _section_choreography_for_time(time_sec, section_choreography=section_choreography)
+    if section is None:
+        return True
+    return not bool(section.get("cta_protection"))
 
 
 def _db_to_linear_gain(db_value: float) -> float:
@@ -550,6 +865,7 @@ def _build_smart_effect_video_filters(
             for index, overlay in sorted(
                 enumerate(overlays),
                 key=lambda item: (
+                    -float(item[1].get("transform_intensity", 1.0) or 1.0),
                     0 if str(item[1].get("text") or "").strip() else 1,
                     -max(
                         0.0,
@@ -562,6 +878,7 @@ def _build_smart_effect_video_filters(
         primary_transform_indexes = set(ranked_indexes[:max_full_transforms])
 
     for index, overlay in enumerate(overlays):
+        overlay_tokens = _resolve_overlay_video_transform_tokens(tokens, overlay)
         start_time = max(0.0, float(overlay.get("start_time") or 0.0))
         end_time = max(start_time + 0.24, float(overlay.get("end_time") or start_time + 1.0))
         attack_end = min(end_time, start_time + max(0.08, (end_time - start_time) * 0.38))
@@ -570,36 +887,275 @@ def _build_smart_effect_video_filters(
         if index in primary_transform_indexes:
             zoom_expr = (
                 f"if(lte(in_time\\,{start_time})\\,1\\,"
-                f"if(lte(in_time\\,{attack_end})\\,1+((in_time-{start_time})/{max(attack_end - start_time, 0.01)})*{tokens['zoom_peak']}\\,"
-                f"1+(({end_time}-in_time)/{max(end_time - attack_end, 0.01)})*{tokens['zoom_decay']}))"
+                f"if(lte(in_time\\,{attack_end})\\,1+((in_time-{start_time})/{max(attack_end - start_time, 0.01)})*{overlay_tokens['zoom_peak']}\\,"
+                f"1+(({end_time}-in_time)/{max(end_time - attack_end, 0.01)})*{overlay_tokens['zoom_decay']}))"
             )
             parts.append(
-                f"[{current_video}]scale=iw*{tokens['pre_scale']}:ih*{tokens['pre_scale']},"
-                f"crop=w=iw/{tokens['pre_scale']}:h=ih/{tokens['pre_scale']}:"
-                f"x='(iw-iw/{tokens['pre_scale']})/2':y='(ih-ih/{tokens['pre_scale']})/2',"
+                f"[{current_video}]scale=iw*{overlay_tokens['pre_scale']}:ih*{overlay_tokens['pre_scale']},"
+                f"crop=w=iw/{overlay_tokens['pre_scale']}:h=ih/{overlay_tokens['pre_scale']}:"
+                f"x='(iw-iw/{overlay_tokens['pre_scale']})/2':y='(ih-ih/{overlay_tokens['pre_scale']})/2',"
                 f"zoompan=z='{zoom_expr}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':"
                 f"d=1:s={zoom_size}:fps=30000/1001,"
-                f"eq=contrast={tokens['contrast']}:saturation={tokens['saturation']}:brightness={tokens['brightness']},"
-                f"unsharp={tokens['unsharp']},"
-                f"drawbox=x=0:y=0:w=iw:h=ih:color={tokens['flash_color']}:t=fill:enable='{enable_expr}':replace=0"
+                f"eq=contrast={overlay_tokens['contrast']}:saturation={overlay_tokens['saturation']}:brightness={overlay_tokens['brightness']},"
+                f"unsharp={overlay_tokens['unsharp']},"
+                f"drawbox=x=0:y=0:w=iw:h=ih:color={overlay_tokens['flash_color']}:t=fill:enable='{enable_expr}':replace=0"
                 f"[{output_label}]"
             )
         else:
             parts.append(
-                f"[{current_video}]drawbox=x=0:y=0:w=iw:h=ih:color={tokens['flash_color']}:t=fill:"
+                f"[{current_video}]drawbox=x=0:y=0:w=iw:h=ih:color={overlay_tokens['flash_color']}:t=fill:"
                 f"enable='{enable_expr}':replace=0[{output_label}]"
             )
         current_video = output_label
     return parts, current_video
 
 
-def _build_overlay_only_editing_accents(editing_accents: dict[str, Any] | None) -> dict[str, Any]:
+def _resolve_overlay_video_transform_tokens(
+    base_tokens: dict[str, Any],
+    overlay: dict[str, Any],
+) -> dict[str, Any]:
+    intensity = max(0.65, min(1.35, float(overlay.get("transform_intensity", 1.0) or 1.0)))
+    resolved = dict(base_tokens)
+    resolved["zoom_peak"] = round(float(base_tokens.get("zoom_peak", 0.08) or 0.08) * intensity, 4)
+    resolved["zoom_decay"] = round(float(base_tokens.get("zoom_decay", 0.04) or 0.04) * intensity, 4)
+    resolved["contrast"] = round(1.0 + (float(base_tokens.get("contrast", 1.04) or 1.04) - 1.0) * intensity, 4)
+    resolved["saturation"] = round(1.0 + (float(base_tokens.get("saturation", 1.08) or 1.08) - 1.0) * intensity, 4)
+    resolved["brightness"] = round(float(base_tokens.get("brightness", 0.015) or 0.015) * intensity, 4)
+    resolved["flash_color"] = _scale_flash_color_alpha(
+        str(base_tokens.get("flash_color") or "white@0.08"),
+        intensity=intensity,
+    )
+    return resolved
+
+
+def _scale_flash_color_alpha(color: str, *, intensity: float) -> str:
+    value = str(color or "").strip()
+    if "@" not in value:
+        return value
+    prefix, alpha = value.rsplit("@", 1)
+    try:
+        alpha_value = float(alpha)
+    except ValueError:
+        return value
+    scaled_alpha = max(0.01, min(0.28, alpha_value * intensity))
+    return f"{prefix}@{scaled_alpha:.3f}".rstrip("0").rstrip(".")
+
+
+def _build_overlay_only_editing_accents(
+    editing_accents: dict[str, Any] | None,
+    *,
+    subtitle_items: list[dict[str, Any]] | None = None,
+    section_choreography: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     base = dict(editing_accents or {})
+    emphasis_overlays = _prune_events_by_choreography_density([
+        dict(item)
+        for item in base.get("emphasis_overlays") or []
+        if _choreography_allows_overlay(
+            float((item or {}).get("start_time", 0.0) or 0.0),
+            section_choreography=section_choreography,
+        )
+    ], section_choreography=section_choreography)
+    sound_effects = _prune_events_by_choreography_density([
+        dict(item)
+        for item in base.get("sound_effects") or []
+        if _choreography_allows_sound(
+            float((item or {}).get("start_time", 0.0) or 0.0),
+            section_choreography=section_choreography,
+        )
+    ], section_choreography=section_choreography)
+    synthesized = _synthesize_subtitle_unit_accents(
+        subtitle_items,
+        existing_overlays=emphasis_overlays,
+        existing_sounds=sound_effects,
+        section_choreography=section_choreography,
+    )
     return {
         "style": _normalize_smart_effect_style(str(base.get("style") or "")),
-        "emphasis_overlays": [dict(item) for item in base.get("emphasis_overlays") or []],
-        "sound_effects": [dict(item) for item in base.get("sound_effects") or []],
+        "emphasis_overlays": emphasis_overlays + synthesized["emphasis_overlays"],
+        "sound_effects": sound_effects + synthesized["sound_effects"],
     }
+
+
+def _synthesize_subtitle_unit_accents(
+    subtitle_items: list[dict[str, Any]] | None,
+    *,
+    existing_overlays: list[dict[str, Any]],
+    existing_sounds: list[dict[str, Any]],
+    section_choreography: dict[str, Any] | None = None,
+) -> dict[str, list[dict[str, Any]]]:
+    if not subtitle_items:
+        return {"emphasis_overlays": [], "sound_effects": []}
+
+    synthesized_overlays: list[dict[str, Any]] = []
+    synthesized_sounds: list[dict[str, Any]] = []
+    for item in subtitle_items:
+        if not isinstance(item, dict):
+            continue
+        unit_role = str(item.get("subtitle_unit_role") or "").strip().lower()
+        if unit_role not in {"lead", "focus", "action"}:
+            continue
+        start_time = max(0.0, float(item.get("start_time", 0.0) or 0.0))
+        end_time = max(start_time + 0.2, float(item.get("end_time", start_time) or start_time))
+        midpoint = (start_time + end_time) / 2.0
+        if not _choreography_allows_overlay(midpoint, section_choreography=section_choreography):
+            continue
+        if _choreography_suppresses_unit_accent(
+            midpoint,
+            unit_role=unit_role,
+            section_choreography=section_choreography,
+        ):
+            continue
+        text = str(item.get("text_final") or item.get("text_norm") or item.get("text_raw") or "").strip()
+        if not text:
+            continue
+        if any(abs(float(existing.get("start_time", 0.0) or 0.0) - start_time) <= 0.18 for existing in existing_overlays + synthesized_overlays):
+            continue
+        overlay_duration = {
+            "lead": 0.56,
+            "focus": 0.62,
+            "action": 0.5,
+        }.get(unit_role, 0.52)
+        overlay_text = text if unit_role != "action" else ""
+        synthesized_overlays.append(
+            {
+                "text": overlay_text,
+                "start_time": round(start_time, 3),
+                "end_time": round(min(end_time, start_time + overlay_duration), 3),
+                "source": "subtitle_unit",
+                "subtitle_unit_role": unit_role,
+            }
+        )
+        if not _choreography_allows_sound(midpoint, section_choreography=section_choreography):
+            continue
+        if any(abs(float(existing.get("start_time", 0.0) or 0.0) - start_time) <= 0.16 for existing in existing_sounds + synthesized_sounds):
+            continue
+        sound_tokens = {
+            "lead": {"frequency": 1180, "volume": 0.058, "duration_sec": 0.1},
+            "focus": {"frequency": 1020, "volume": 0.052, "duration_sec": 0.09},
+            "action": {"frequency": 840, "volume": 0.04, "duration_sec": 0.08},
+        }.get(unit_role, {"frequency": 960, "volume": 0.045, "duration_sec": 0.08})
+        synthesized_sounds.append(
+            {
+                "start_time": round(start_time, 3),
+                **sound_tokens,
+                "source": "subtitle_unit",
+                "subtitle_unit_role": unit_role,
+            }
+        )
+    return {
+        "emphasis_overlays": _prune_events_by_choreography_density(
+            synthesized_overlays,
+            section_choreography=section_choreography,
+        ),
+        "sound_effects": _prune_events_by_choreography_density(
+            synthesized_sounds,
+            section_choreography=section_choreography,
+        ),
+    }
+
+
+def _prune_events_by_choreography_density(
+    events: list[dict[str, Any]],
+    *,
+    section_choreography: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    if not events:
+        return []
+    pruned: list[dict[str, Any]] = []
+    last_kept_by_section: dict[int, float] = {}
+    for event in sorted(events, key=lambda item: float((item or {}).get("start_time", 0.0) or 0.0)):
+        start_time = float((event or {}).get("start_time", 0.0) or 0.0)
+        section = _section_choreography_for_time(start_time, section_choreography=section_choreography)
+        section_index = int((section or {}).get("index", -1) or -1)
+        density_bias = int((section or {}).get("overlay_density_bias", 0) or 0)
+        if density_bias <= -1:
+            last_kept = last_kept_by_section.get(section_index)
+            if last_kept is not None and start_time - last_kept < 1.05:
+                continue
+        pruned.append(event)
+        last_kept_by_section[section_index] = start_time
+    return pruned
+
+
+def _choreography_suppresses_unit_accent(
+    time_sec: float,
+    *,
+    unit_role: str,
+    section_choreography: dict[str, Any] | None = None,
+) -> bool:
+    section = _section_choreography_for_time(time_sec, section_choreography=section_choreography)
+    density_bias = int((section or {}).get("overlay_density_bias", 0) or 0)
+    if density_bias <= -1 and str(unit_role or "").strip().lower() in {"focus", "action"}:
+        return True
+    return False
+
+
+def _build_video_transform_editing_accents(
+    editing_accents: dict[str, Any] | None,
+    *,
+    subtitle_items: list[dict[str, Any]] | None,
+    section_choreography: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    base = dict(editing_accents or {})
+    existing_overlays = [dict(item) for item in base.get("emphasis_overlays") or [] if isinstance(item, dict)]
+    synthesized_overlays: list[dict[str, Any]] = []
+    for item in subtitle_items or []:
+        if not isinstance(item, dict):
+            continue
+        unit_role = str(item.get("subtitle_unit_role") or "").strip().lower()
+        if unit_role not in {"lead", "focus"}:
+            continue
+        start_time = max(0.0, float(item.get("start_time", 0.0) or 0.0))
+        end_time = max(start_time + 0.24, float(item.get("end_time", start_time) or start_time))
+        midpoint = (start_time + end_time) / 2.0
+        section = _section_choreography_for_time(midpoint, section_choreography=section_choreography)
+        if not _choreography_allows_overlay(midpoint, section_choreography=section_choreography):
+            continue
+        if any(abs(float(existing.get("start_time", 0.0) or 0.0) - start_time) <= 0.18 for existing in existing_overlays + synthesized_overlays):
+            continue
+        transform_intensity = _resolve_unit_transform_intensity(unit_role=unit_role, section=section)
+        synthesized_overlays.append(
+            {
+                "text": str(item.get("text_final") or ""),
+                "start_time": round(start_time, 3),
+                "end_time": round(min(end_time, start_time + (0.72 if unit_role == "lead" else 0.64)), 3),
+                "source": "subtitle_unit_video",
+                "subtitle_unit_role": unit_role,
+                "transition_mode": str((section or {}).get("transition_mode") or ""),
+                "packaging_intent": str((section or {}).get("packaging_intent") or ""),
+                "transform_intensity": round(transform_intensity, 3),
+            }
+        )
+    return {
+        **base,
+        "emphasis_overlays": existing_overlays + synthesized_overlays,
+        "sound_effects": [dict(item) for item in base.get("sound_effects") or [] if isinstance(item, dict)],
+    }
+
+
+def _resolve_unit_transform_intensity(
+    *,
+    unit_role: str,
+    section: dict[str, Any] | None,
+) -> float:
+    intensity = {
+        "lead": 1.14,
+        "focus": 1.08,
+    }.get(str(unit_role or "").strip().lower(), 1.0)
+    transition_mode = str((section or {}).get("transition_mode") or "").strip().lower()
+    packaging_intent = str((section or {}).get("packaging_intent") or "").strip().lower()
+    if transition_mode == "accented":
+        intensity *= 1.12
+    elif transition_mode == "protect":
+        intensity *= 0.74
+    elif transition_mode == "restrained":
+        intensity *= 0.92
+    if packaging_intent in {"hook_focus", "detail_support"}:
+        intensity *= 1.06
+    elif packaging_intent == "cta_protect":
+        intensity *= 0.72
+    return max(0.65, min(1.35, intensity))
 
 
 async def _apply_timed_overlays_to_video(
@@ -619,7 +1175,15 @@ async def _apply_timed_overlays_to_video(
     source_info = _probe_video_stream(source_path)
     render_w = int(source_info.get("display_width") or source_info.get("width") or 0)
     render_h = int(source_info.get("display_height") or source_info.get("height") or 0)
-    overlay_plan = _build_overlay_only_editing_accents(overlay_editing_accents)
+    choreographed_subtitles = _build_choreographed_subtitle_items(
+        subtitle_items,
+        subtitles_plan=render_plan.get("subtitles") or {},
+    ) if subtitle_items and render_plan.get("subtitles") else []
+    overlay_plan = _build_overlay_only_editing_accents(
+        overlay_editing_accents,
+        subtitle_items=choreographed_subtitles,
+        section_choreography=render_plan.get("section_choreography") or {},
+    )
 
     filter_parts: list[str] = []
     video_label = "0:v"
@@ -628,9 +1192,14 @@ async def _apply_timed_overlays_to_video(
     audio_map = "0:a"
 
     if subtitle_items and render_plan.get("subtitles"):
+        subtitle_margin_override = await _resolve_subtitle_margin_with_avatar(
+            expected_width=render_w,
+            expected_height=render_h,
+            avatar_plan=render_plan.get("avatar_commentary") or {},
+        )
         ass_path = output_path.parent / f"{output_path.stem}.subtitle.ass"
         write_ass_file(
-            subtitle_items,
+            choreographed_subtitles,
             ass_path,
             style_name=str((render_plan.get("subtitles") or {}).get("style") or "bold_yellow_outline"),
             font_name=settings.subtitle_font,
@@ -638,11 +1207,7 @@ async def _apply_timed_overlays_to_video(
             text_color_rgb=settings.subtitle_color,
             outline_color_rgb=settings.subtitle_outline_color,
             outline_width=settings.subtitle_outline_width,
-            margin_v_override=await _resolve_subtitle_margin_with_avatar(
-                expected_width=render_w,
-                expected_height=render_h,
-                avatar_plan=render_plan.get("avatar_commentary") or {},
-            ),
+            margin_v_override=subtitle_margin_override,
             motion_style=str((render_plan.get("subtitles") or {}).get("motion_style") or "motion_static"),
             play_res_x=render_w,
             play_res_y=render_h,
@@ -1124,31 +1689,71 @@ async def _apply_insert_clip(
     output_path: Path,
     debug_dir: Path | None,
 ) -> Path:
-    insert_after_sec = float(insert_plan.get("insert_after_sec", 0.0) or 0.0)
     source_duration = _probe_duration(source_path)
     if source_duration <= 0.0:
         return source_path
-    insert_after_sec = max(0.0, min(insert_after_sec, max(0.0, source_duration - 0.1)))
+    insert_after_sec = _resolve_insert_after_sec(
+        float(insert_plan.get("insert_after_sec", 0.0) or 0.0),
+        source_duration=source_duration,
+        insert_plan=insert_plan,
+    )
 
     prepared_insert = output_path.with_name("insert_asset.prepared.mp4")
+    insert_source_duration = _probe_duration(Path(insert_plan["path"]))
+    prepare_insert_duration = resolve_insert_prepare_duration(insert_plan, source_duration=insert_source_duration)
+    effective_insert_duration = resolve_insert_effective_duration(insert_plan, source_duration=insert_source_duration)
+    transition_overlap = resolve_insert_transition_overlap(
+        insert_plan,
+        runtime_duration_sec=effective_insert_duration,
+        insert_after_sec=insert_after_sec,
+        source_duration=source_duration,
+    )
+    entry_overlap_sec = float(transition_overlap.get("entry_sec", 0.0) or 0.0)
+    exit_overlap_sec = float(transition_overlap.get("exit_sec", 0.0) or 0.0)
     await _prepare_packaging_clip(
         Path(insert_plan["path"]),
         prepared_insert,
         expected_width=expected_width,
         expected_height=expected_height,
+        trim_duration_sec=prepare_insert_duration,
+    )
+    insert_video_filter, insert_audio_filter = _build_insert_packaging_filter_chain(
+        insert_plan=insert_plan,
+        runtime_duration_sec=effective_insert_duration,
     )
 
-    filter_complex = (
-        "[0:v]split[vpre][vpost];"
-        "[0:a]asplit[apre][apost];"
-        f"[vpre]trim=start=0:end={insert_after_sec},setpts=PTS-STARTPTS[v0];"
-        f"[apre]atrim=start=0:end={insert_after_sec},asetpts=PTS-STARTPTS[a0];"
-        f"[vpost]trim=start={insert_after_sec},setpts=PTS-STARTPTS[v2];"
-        f"[apost]atrim=start={insert_after_sec},asetpts=PTS-STARTPTS[a2];"
-        "[1:v]setpts=PTS-STARTPTS[v1];"
-        "[1:a]asetpts=PTS-STARTPTS[a1];"
-        "[v0][a0][v1][a1][v2][a2]concat=n=3:v=1:a=1[vout][aout]"
-    )
+    filter_parts = [
+        "[0:v]split[vpre][vpost]",
+        "[0:a]asplit[apre][apost]",
+        f"[vpre]trim=start=0:end={insert_after_sec},setpts=PTS-STARTPTS[v0]",
+        f"[apre]atrim=start=0:end={insert_after_sec},asetpts=PTS-STARTPTS[a0]",
+        f"[vpost]trim=start={insert_after_sec},setpts=PTS-STARTPTS[v2]",
+        f"[apost]atrim=start={insert_after_sec},asetpts=PTS-STARTPTS[a2]",
+        f"[1:v]{insert_video_filter}[v1]",
+        f"[1:a]{insert_audio_filter}[a1]",
+    ]
+    if entry_overlap_sec > 0:
+        filter_parts.append(
+            f"[v0][v1]xfade=transition=fade:duration={entry_overlap_sec:.3f}:offset={max(0.0, insert_after_sec - entry_overlap_sec):.3f}[v01]"
+        )
+        filter_parts.append(f"[a0][a1]acrossfade=d={entry_overlap_sec:.3f}:c1=tri:c2=tri[a01]")
+        current_video = "v01"
+        current_audio = "a01"
+        current_duration = insert_after_sec + effective_insert_duration - entry_overlap_sec
+    else:
+        filter_parts.append("[v0][a0][v1][a1]concat=n=2:v=1:a=1[v01][a01]")
+        current_video = "v01"
+        current_audio = "a01"
+        current_duration = insert_after_sec + effective_insert_duration
+
+    if exit_overlap_sec > 0:
+        filter_parts.append(
+            f"[{current_video}][v2]xfade=transition=fade:duration={exit_overlap_sec:.3f}:offset={max(0.0, current_duration - exit_overlap_sec):.3f}[vout]"
+        )
+        filter_parts.append(f"[{current_audio}][a2]acrossfade=d={exit_overlap_sec:.3f}:c1=tri:c2=tri[aout]")
+    else:
+        filter_parts.append(f"[{current_video}][{current_audio}][v2][a2]concat=n=2:v=1:a=1[vout][aout]")
+    filter_complex = ";".join(filter_parts)
     cmd = [
         "ffmpeg",
         "-y",
@@ -1179,6 +1784,92 @@ async def _apply_insert_clip(
     if result.returncode != 0:
         raise RuntimeError(f"ffmpeg insert packaging failed: {result.stderr[-2000:]}")
     return output_path
+
+
+def _build_insert_packaging_filter_chain(
+    *,
+    insert_plan: dict[str, Any] | None,
+    runtime_duration_sec: float,
+) -> tuple[str, str]:
+    transition_style = str((insert_plan or {}).get("insert_transition_style") or "straight_cut").strip().lower()
+    transition_mode = str((insert_plan or {}).get("insert_transition_mode") or "restrained").strip().lower()
+    playback_rate = float(resolve_insert_motion_behavior(insert_plan).get("playback_rate", 1.0) or 1.0)
+    fade_tokens = _resolve_insert_transition_tokens(
+        transition_style,
+        runtime_duration_sec=runtime_duration_sec,
+        transition_mode=transition_mode,
+    )
+
+    video_filters = ["setpts=PTS-STARTPTS"]
+    audio_filters = ["asetpts=PTS-STARTPTS"]
+
+    if abs(playback_rate - 1.0) > 1e-3:
+        video_filters.append(f"setpts=PTS/{playback_rate:.3f}")
+        audio_filters.append(f"atempo={playback_rate:.3f}")
+
+    if fade_tokens["video_fade_in"] > 0:
+        video_filters.append(f"fade=t=in:st=0:d={fade_tokens['video_fade_in']:.3f}")
+    if fade_tokens["video_fade_out"] > 0:
+        video_filters.append(
+            f"fade=t=out:st={max(0.0, runtime_duration_sec - fade_tokens['video_fade_out']):.3f}:d={fade_tokens['video_fade_out']:.3f}"
+        )
+    if fade_tokens["audio_fade_in"] > 0:
+        audio_filters.append(f"afade=t=in:st=0:d={fade_tokens['audio_fade_in']:.3f}")
+    if fade_tokens["audio_fade_out"] > 0:
+        audio_filters.append(
+            f"afade=t=out:st={max(0.0, runtime_duration_sec - fade_tokens['audio_fade_out']):.3f}:d={fade_tokens['audio_fade_out']:.3f}"
+        )
+
+    return ",".join(video_filters), ",".join(audio_filters)
+
+
+def _resolve_insert_transition_tokens(
+    transition_style: str,
+    *,
+    runtime_duration_sec: float,
+    transition_mode: str = "restrained",
+) -> dict[str, float]:
+    overlap = resolve_insert_transition_overlap(
+        {
+            "insert_transition_style": transition_style,
+            "insert_transition_mode": transition_mode,
+        },
+        runtime_duration_sec=runtime_duration_sec,
+    )
+    max_fade = float(overlap.get("entry_sec", 0.0) or 0.0)
+    return {
+        "video_fade_in": round(max_fade, 3),
+        "video_fade_out": round(max_fade, 3),
+        "audio_fade_in": round(min(max_fade, 0.08), 3),
+        "audio_fade_out": round(min(max_fade, 0.08), 3),
+    }
+
+
+def _resolve_insert_after_sec(
+    insert_after_sec: float,
+    *,
+    source_duration: float,
+    insert_plan: dict[str, Any] | None = None,
+) -> float:
+    max_insert_sec = max(0.0, source_duration - 0.1)
+    resolved_sec = max(0.0, min(float(insert_after_sec or 0.0), max_insert_sec))
+    broll_window = (insert_plan or {}).get("broll_window") or {}
+    if not isinstance(broll_window, dict):
+        return resolved_sec
+
+    window_start = float(broll_window.get("start_sec", resolved_sec) or resolved_sec)
+    window_end = float(broll_window.get("end_sec", resolved_sec) or resolved_sec)
+    window_anchor = float(broll_window.get("anchor_sec", resolved_sec) or resolved_sec)
+    if window_end < window_start:
+        window_start, window_end = window_end, window_start
+    window_start = max(0.0, min(window_start, max_insert_sec))
+    window_end = max(window_start, min(window_end, max_insert_sec))
+    if window_anchor < window_start - 1e-6 or window_anchor > window_end + 1e-6:
+        window_anchor = max(window_start, min(window_anchor, window_end))
+
+    if resolved_sec < window_start - 1e-6 or resolved_sec > window_end + 1e-6:
+        resolved_sec = window_anchor
+    return max(window_start, min(resolved_sec, window_end))
 
 
 async def _apply_intro_outro(
@@ -1293,13 +1984,22 @@ async def _apply_music_and_watermark(
         cmd.extend(["-i", str(music_input_path)])
         volume = float(music_plan.get("volume", 0.12) or 0.12)
         enter_sec = max(0.0, float(music_plan.get("enter_sec", 0.0) or 0.0))
+        bgm_volume_expr = _build_music_volume_expression(
+            base_volume=volume,
+            duck_windows=list(music_plan.get("duck_windows") or []),
+        )
+        entry_fade_sec = float(music_plan.get("music_entry_fade_sec", 0.0) or 0.0)
         if enter_sec > 0:
             delay_ms = int(round(enter_sec * 1000))
             filter_parts.append(
-                f"[{next_input_index}:a]volume={volume},highpass=f=120,lowpass=f=6000,adelay={delay_ms}|{delay_ms}[bgm_pre]"
+                f"[{next_input_index}:a]volume='{bgm_volume_expr}',highpass=f=120,lowpass=f=6000,adelay={delay_ms}|{delay_ms}"
+                f"{',afade=t=in:st=' + f'{enter_sec:.3f}' + ':d=' + f'{entry_fade_sec:.3f}' if entry_fade_sec > 0 else ''}[bgm_pre]"
             )
         else:
-            filter_parts.append(f"[{next_input_index}:a]volume={volume},highpass=f=120,lowpass=f=6000[bgm_pre]")
+            filter_parts.append(
+                f"[{next_input_index}:a]volume='{bgm_volume_expr}',highpass=f=120,lowpass=f=6000"
+                f"{',afade=t=in:st=0:d=' + f'{entry_fade_sec:.3f}' if entry_fade_sec > 0 else ''}[bgm_pre]"
+            )
         filter_parts.append(
             "[bgm_pre][0:a]sidechaincompress=threshold=0.02:ratio=10:attack=15:release=350:makeup=1[bgm]"
         )
@@ -1365,6 +2065,24 @@ async def _apply_music_and_watermark(
     return output_path
 
 
+def _build_music_volume_expression(
+    *,
+    base_volume: float,
+    duck_windows: list[dict[str, Any]],
+) -> str:
+    expr = f"{float(base_volume):.3f}"
+    for window in sorted(
+        [dict(item) for item in duck_windows if isinstance(item, dict)],
+        key=lambda item: float(item.get("start_sec", 0.0) or 0.0),
+        reverse=True,
+    ):
+        start_sec = max(0.0, float(window.get("start_sec", 0.0) or 0.0))
+        end_sec = max(start_sec, float(window.get("end_sec", start_sec) or start_sec))
+        target_volume = max(0.0, float(window.get("target_volume", base_volume) or base_volume))
+        expr = f"if(between(t\\,{start_sec:.3f}\\,{end_sec:.3f})\\,{target_volume:.3f}\\,{expr})"
+    return expr
+
+
 async def _prepare_multi_track_music_loop(
     *,
     candidate_paths: list[Path],
@@ -1420,6 +2138,7 @@ async def _prepare_packaging_clip(
     *,
     expected_width: int,
     expected_height: int,
+    trim_duration_sec: float | None = None,
 ) -> Path:
     media_info = _ffprobe_json(source_path)
     has_audio = any(stream.get("codec_type") == "audio" for stream in media_info.get("streams", []))
@@ -1442,6 +2161,8 @@ async def _prepare_packaging_clip(
                 "anullsrc=channel_layout=stereo:sample_rate=48000",
             ]
         )
+    if trim_duration_sec is not None and float(trim_duration_sec or 0.0) > 0.0:
+        cmd.extend(["-t", f"{float(trim_duration_sec):.3f}"])
     cmd.extend(
         [
             "-vf",

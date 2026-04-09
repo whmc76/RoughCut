@@ -9,6 +9,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import re
 import subprocess
 import tempfile
 import time
@@ -33,7 +34,7 @@ from roughcut.creative import (
 )
 from roughcut.db.models import Artifact, GlossaryTerm, Job, JobStep, RenderOutput, SubtitleItem, Timeline, TranscriptSegment
 from roughcut.db.session import get_session_factory
-from roughcut.edit.decisions import build_edit_decision
+from roughcut.edit.decisions import build_edit_decision, infer_timeline_analysis
 from roughcut.edit.otio_export import export_to_otio
 from roughcut.edit.presets import normalize_workflow_template_name
 from roughcut.edit.render_plan import (
@@ -44,6 +45,7 @@ from roughcut.edit.render_plan import (
     build_smart_editing_accents,
     save_render_plan,
 )
+from roughcut.edit.skills import apply_review_focus_overrides, resolve_editing_skill
 from roughcut.edit.timeline import save_editorial_timeline
 from roughcut.media.audio import NoAudioStreamError, extract_audio, extract_audio_clip
 from roughcut.media.output import (
@@ -59,7 +61,14 @@ from roughcut.media.probe import probe, validate_media
 from roughcut.media.render import render_video
 from roughcut.media.silence import detect_silence
 from roughcut.llm_cache import build_cache_key, build_cache_metadata, digest_payload, load_cached_entry, save_cached_json
-from roughcut.packaging.library import list_packaging_assets, resolve_packaging_plan_for_job
+from roughcut.packaging.library import (
+    list_packaging_assets,
+    rank_insert_candidates_for_section,
+    resolve_insert_added_duration,
+    resolve_insert_effective_duration,
+    resolve_insert_transition_overlap,
+    resolve_packaging_plan_for_job,
+)
 from roughcut.providers.factory import get_avatar_provider, get_reasoning_provider, get_voice_provider
 from roughcut.providers.reasoning.base import Message
 from roughcut.pipeline.quality import _compute_subtitle_sync_check
@@ -110,7 +119,7 @@ from roughcut.review.subtitle_translation import (
     translate_subtitle_items,
 )
 from roughcut.review.telegram_bot import get_telegram_review_bot_service
-from roughcut.speech.postprocess import save_subtitle_items, split_into_subtitles
+from roughcut.speech.postprocess import normalize_display_text, save_subtitle_items, split_into_subtitles
 from roughcut.speech.transcribe import persist_empty_transcript_result, transcribe_audio
 from roughcut.storage.s3 import get_storage, job_key
 from roughcut.usage import track_step_usage, track_usage_operation
@@ -133,12 +142,53 @@ STEP_LABELS = {
     "platform_package": "平台文案",
 }
 
+_SUBTITLE_COPY_GENERIC_PREFIX_RE = re.compile(
+    r"^(?:这里(?:开始|先)?|这边(?:开始|先)?|接下来(?:再)?|然后(?:再)?|那我们|我们(?:先|再)?|现在(?:先)?|再看|重点看|主要看)"
+)
+_SUBTITLE_COPY_CTA_PATTERNS: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("点赞", "收藏", "关注"), "记得点赞收藏关注。"),
+    (("点赞", "收藏"), "记得点赞收藏。"),
+    (("关注",), "记得关注。"),
+)
+_SUBTITLE_COPY_DETAIL_TERMS = (
+    "参数",
+    "细节",
+    "重点",
+    "尺寸",
+    "接口",
+    "版本",
+    "续航",
+    "流明",
+    "材质",
+    "做工",
+    "手感",
+    "节点",
+    "工作流",
+    "模型",
+    "画布",
+    "分仓",
+    "挂点",
+    "收纳",
+    "对比",
+    "区别",
+    "差异",
+)
+_SUBTITLE_COPY_HOOK_LEADS = (
+    "先说结论",
+    "先给结论",
+    "先抛一个结论",
+    "一句话",
+    "直接说结论",
+)
+
 logger = logging.getLogger(__name__)
 
 _CONTENT_PROFILE_ARTIFACT_TYPES = ("content_profile_final", "content_profile", "content_profile_draft")
 _DOWNSTREAM_PROFILE_ARTIFACT_TYPES = ("downstream_context",) + _CONTENT_PROFILE_ARTIFACT_TYPES
 _EDIT_PLAN_SUBTITLE_POLISH_TIMEOUT_SEC = 45.0
 _EDIT_PLAN_INSERT_SLOT_TIMEOUT_SEC = 20.0
+_SOURCE_NAME_TIMESTAMP_RE = re.compile(r"(?<!\d)(?P<date>\d{8})[-_ ]?(?P<time>\d{6})(?!\d)")
+_SOURCE_NAME_SEQUENCE_RE = re.compile(r"(?P<prefix>[A-Za-z]+)[-_ ]?(?P<number>\d{3,6})(?!.*\d)")
 
 
 def _workflow_template_subject_domain(workflow_template: str | None) -> str | None:
@@ -173,6 +223,156 @@ def _infer_subject_domain_for_memory(
     if detected_subject_domain:
         return detected_subject_domain
     return _workflow_template_subject_domain(workflow_template)
+
+
+def _parse_source_name_timestamp(source_name: str) -> datetime | None:
+    match = _SOURCE_NAME_TIMESTAMP_RE.search(Path(str(source_name or "")).stem)
+    if not match:
+        return None
+    try:
+        return datetime.strptime(f"{match.group('date')}{match.group('time')}", "%Y%m%d%H%M%S").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def _parse_source_name_sequence(source_name: str) -> tuple[str, int] | None:
+    stem = Path(str(source_name or "")).stem
+    match = _SOURCE_NAME_SEQUENCE_RE.search(stem)
+    if not match:
+        return None
+    prefix = str(match.group("prefix") or "").strip().lower()
+    if not prefix:
+        return None
+    try:
+        return prefix, int(match.group("number"))
+    except (TypeError, ValueError):
+        return None
+
+
+def _source_name_continuity_score(left_source_name: str, right_source_name: str) -> float:
+    left_timestamp = _parse_source_name_timestamp(left_source_name)
+    right_timestamp = _parse_source_name_timestamp(right_source_name)
+    if left_timestamp and right_timestamp:
+        gap = abs((left_timestamp - right_timestamp).total_seconds())
+        if gap <= 180:
+            return 1.0
+        if gap <= 600:
+            return 0.92
+        if gap <= 1800:
+            return 0.82
+        if gap <= 3600:
+            return 0.68
+        return 0.0
+
+    left_sequence = _parse_source_name_sequence(left_source_name)
+    right_sequence = _parse_source_name_sequence(right_source_name)
+    if left_sequence and right_sequence and left_sequence[0] == right_sequence[0]:
+        gap = abs(left_sequence[1] - right_sequence[1])
+        if gap <= 1:
+            return 1.0
+        if gap == 2:
+            return 0.9
+        if gap == 3:
+            return 0.82
+        if gap <= 5:
+            return 0.7
+    return 0.0
+
+
+def _resolve_edit_plan_review_focus(step: JobStep | None) -> str:
+    if step is None or not isinstance(step.metadata_, dict):
+        return ""
+    return str(step.metadata_.get("review_rerun_focus") or "").strip().lower()
+
+
+async def _load_related_profile_source_context(
+    session,
+    *,
+    job: Job,
+    source_context: dict[str, Any] | None = None,
+    limit: int = 3,
+) -> dict[str, Any]:
+    payload = dict(source_context or {}) if isinstance(source_context, dict) else {}
+    if not bool(payload.get("allow_related_profiles")):
+        return {}
+    merged_source_names = [
+        str(item).strip()
+        for item in (payload.get("merged_source_names") or payload.get("related_source_names") or [])
+        if str(item).strip()
+    ]
+    preferred_source_names: list[str] = []
+    seen_source_names: set[str] = set()
+    for source_name in merged_source_names:
+        if source_name and source_name != str(job.source_name or "").strip() and source_name not in seen_source_names:
+            preferred_source_names.append(source_name)
+            seen_source_names.add(source_name)
+    if not preferred_source_names:
+        return {}
+
+    candidates_result = await session.execute(
+        select(Job)
+        .where(Job.source_name.in_(preferred_source_names), Job.id != job.id)
+        .order_by(Job.created_at.desc(), Job.id.desc())
+    )
+    candidates = list(candidates_result.scalars().all())
+    jobs_by_source_name: dict[str, Job] = {}
+    for candidate in candidates:
+        candidate_source_name = str(candidate.source_name or "").strip()
+        if candidate_source_name and candidate_source_name not in jobs_by_source_name:
+            jobs_by_source_name[candidate_source_name] = candidate
+    scored_jobs: list[tuple[Job, float]] = []
+    for source_name in preferred_source_names:
+        candidate = jobs_by_source_name.get(source_name)
+        if candidate is not None:
+            scored_jobs.append((candidate, 1.0))
+    if not scored_jobs:
+        return {}
+
+    candidate_ids = [candidate.id for candidate, _score in scored_jobs]
+    artifacts_result = await session.execute(
+        select(Artifact)
+        .where(
+            Artifact.job_id.in_(candidate_ids),
+            Artifact.artifact_type.in_(_CONTENT_PROFILE_ARTIFACT_TYPES),
+        )
+        .order_by(Artifact.created_at.desc(), Artifact.id.desc())
+    )
+    artifacts_by_job_id: dict[uuid.UUID, list[Artifact]] = {}
+    for artifact in artifacts_result.scalars().all():
+        artifacts_by_job_id.setdefault(artifact.job_id, []).append(artifact)
+
+    related_profiles: list[dict[str, Any]] = []
+    for candidate, score in sorted(scored_jobs, key=lambda item: item[1], reverse=True):
+        artifact = _select_preferred_content_profile_artifact(artifacts_by_job_id.get(candidate.id, []))
+        profile = dict((artifact.data_json if artifact else None) or {})
+        if not profile:
+            continue
+        related_profile = {
+            "source_name": str(candidate.source_name or "").strip(),
+            "subject_brand": str(profile.get("subject_brand") or "").strip(),
+            "subject_model": str(profile.get("subject_model") or "").strip(),
+            "subject_type": str(profile.get("subject_type") or "").strip(),
+            "video_theme": str(profile.get("video_theme") or "").strip(),
+            "summary": str(profile.get("summary") or "").strip(),
+            "search_queries": [str(item).strip() for item in (profile.get("search_queries") or []) if str(item).strip()][:6],
+            "score": score,
+        }
+        if any(
+            (
+                related_profile["subject_brand"],
+                related_profile["subject_model"],
+                related_profile["subject_type"],
+                related_profile["video_theme"],
+                related_profile["summary"],
+                related_profile["search_queries"],
+            )
+        ):
+            related_profiles.append(related_profile)
+        if len(related_profiles) >= limit:
+            break
+    if not related_profiles:
+        return {}
+    return {"related_profiles": related_profiles[:limit]}
 
 
 def _expand_subject_domain_scope(subject_domain: str | None) -> set[str]:
@@ -1283,6 +1483,27 @@ async def run_content_profile(job_id: str) -> dict:
         include_research = bool(getattr(settings, "research_verifier_enabled", False))
         packaging_config = (list_packaging_assets().get("config") or {})
         source_context = dict(step.metadata_.get("source_context") or {}) if isinstance(step.metadata_, dict) else {}
+        if not bool(source_context.get("allow_related_profiles")):
+            source_context.pop("related_profiles", None)
+            source_context.pop("adjacent_profiles", None)
+        related_source_context = await _load_related_profile_source_context(session, job=job, source_context=source_context)
+        if bool(source_context.get("allow_related_profiles")) and related_source_context:
+            existing_related = [
+                dict(item)
+                for item in (source_context.get("related_profiles") or [])
+                if isinstance(item, dict)
+            ]
+            existing_names = {str(item.get("source_name") or "").strip() for item in existing_related}
+            for item in related_source_context.get("related_profiles") or []:
+                source_name = str(item.get("source_name") or "").strip()
+                if source_name and source_name not in existing_names:
+                    existing_related.append(dict(item))
+                    existing_names.add(source_name)
+            if existing_related:
+                source_context = {
+                    **source_context,
+                    "related_profiles": existing_related[:3],
+                }
         # Reruns must re-infer from the current transcript and frames instead of
         # recycling a stale same-job profile artifact.
         seeded_profile: dict[str, Any] = {}
@@ -2482,6 +2703,14 @@ async def run_edit_plan(job_id: str) -> dict:
                 except Exception:
                     logger.exception("Scene detection failed during edit_plan for job %s", job.id)
 
+        review_rerun_focus = _resolve_edit_plan_review_focus(step)
+        editing_skill = apply_review_focus_overrides(
+            resolve_editing_skill(
+                workflow_template=job.workflow_template or "unboxing_standard",
+                content_profile=content_profile,
+            ),
+            review_focus=review_rerun_focus,
+        )
         decision = build_edit_decision(
             source_path=job.source_path,
             duration=duration,
@@ -2490,6 +2719,7 @@ async def run_edit_plan(job_id: str) -> dict:
             content_profile=content_profile,
             transcript_segments=transcript_segment_dicts,
             scene_boundaries=scene_boundaries,
+            editing_skill=editing_skill,
         )
         await _set_step_progress(session, step, detail="生成剪辑时间线与渲染计划", progress=0.85)
 
@@ -2505,6 +2735,12 @@ async def run_edit_plan(job_id: str) -> dict:
         packaging_plan = resolve_packaging_plan_for_job(str(job.id), content_profile=content_profile)
         keep_segments = [segment for segment in decision.to_dict().get("segments", []) if segment.get("type") == "keep"]
         remapped_subtitles = remap_subtitles_to_timeline(subtitle_dicts, keep_segments)
+        packaged_timeline_analysis = infer_timeline_analysis(
+            remapped_subtitles,
+            content_profile=content_profile,
+            duration=max((float(item.get("end_time", 0.0) or 0.0) for item in remapped_subtitles), default=0.0),
+            editing_skill=editing_skill,
+        )
         with track_step_usage(job_id=job.id, step_id=step.id, step_name="edit_plan"):
             try:
                 packaging_plan["insert"] = await asyncio.wait_for(
@@ -2513,6 +2749,7 @@ async def run_edit_plan(job_id: str) -> dict:
                         insert_plan=packaging_plan.get("insert"),
                         subtitle_items=remapped_subtitles,
                         content_profile=content_profile,
+                        timeline_analysis=packaged_timeline_analysis,
                         allow_llm=True,
                     ),
                     timeout=_EDIT_PLAN_INSERT_SLOT_TIMEOUT_SEC,
@@ -2527,12 +2764,14 @@ async def run_edit_plan(job_id: str) -> dict:
                     insert_plan=packaging_plan.get("insert"),
                     subtitle_items=remapped_subtitles,
                     content_profile=content_profile,
+                    timeline_analysis=packaged_timeline_analysis,
                     allow_llm=False,
                 )
         packaging_plan["music"] = await _plan_music_entry(
             music_plan=packaging_plan.get("music"),
             subtitle_items=remapped_subtitles,
             content_profile=content_profile,
+            timeline_analysis=packaged_timeline_analysis,
         )
 
         render_plan_dict = build_render_plan(
@@ -2552,9 +2791,13 @@ async def run_edit_plan(job_id: str) -> dict:
             insert=packaging_plan.get("insert"),
             watermark=packaging_plan.get("watermark"),
             music=packaging_plan.get("music"),
+            timeline_analysis=packaged_timeline_analysis,
+            editing_skill=editing_skill,
             editing_accents=build_smart_editing_accents(
                 keep_segments=keep_segments,
                 subtitle_items=remapped_subtitles,
+                timeline_analysis=packaged_timeline_analysis,
+                editing_skill=editing_skill,
                 style=str(packaging_plan.get("smart_effect_style") or "smart_effect_rhythm"),
             ),
             export_resolution_mode=str(packaging_plan.get("export_resolution_mode") or "source"),
@@ -3118,6 +3361,7 @@ async def run_render(job_id: str) -> dict:
         editorial_timeline_id=editorial_timeline.id,
         render_plan_timeline_id=render_plan_timeline.id,
         keep_segments=keep_segments,
+        editorial_analysis=(editorial_timeline.data_json or {}).get("analysis") or {},
         render_plan=render_plan_timeline.data_json,
         variants={
             "plain": _build_variant_timeline_entry(
@@ -3445,6 +3689,315 @@ def _subtitle_text(item: dict[str, Any]) -> str:
     return str(item.get("text_final") or item.get("text_norm") or item.get("text_raw") or "").strip()
 
 
+def _subtitle_section_profile_for_time(
+    render_plan: dict[str, Any],
+    time_sec: float,
+) -> dict[str, Any] | None:
+    for profile in list(((render_plan.get("subtitles") or {}).get("section_profiles") or [])):
+        if not isinstance(profile, dict):
+            continue
+        start_sec = float(profile.get("start_sec", 0.0) or 0.0)
+        end_sec = float(profile.get("end_sec", start_sec) or start_sec)
+        if start_sec - 1e-6 <= time_sec <= end_sec + 1e-6:
+            return profile
+    directive = _section_directive_for_time(render_plan.get("timeline_analysis") or {}, time_sec)
+    if not isinstance(directive, dict):
+        return None
+    return {
+        "role": str(directive.get("role") or ""),
+        "start_sec": float(directive.get("start_sec", 0.0) or 0.0),
+        "end_sec": float(directive.get("end_sec", 0.0) or 0.0),
+    }
+
+
+def _extract_subtitle_copy_clauses(text: str) -> list[str]:
+    normalized = normalize_display_text(str(text or ""))
+    if not normalized:
+        return []
+    clauses = [
+        clause.strip()
+        for clause in re.split(r"[，,。！？!?；;：:\s]+", normalized)
+        if clause and clause.strip()
+    ]
+    if clauses:
+        return clauses
+    return [normalized]
+
+
+def _strip_subtitle_copy_prefix(text: str) -> str:
+    cleaned = _SUBTITLE_COPY_GENERIC_PREFIX_RE.sub("", str(text or "").strip()).strip("，,：: ")
+    if re.match(r"^[讲说看](?:参数|细节|尺寸|接口|版本|续航|流明|材质|做工|手感|节点|工作流|模型|画布|分仓|挂点|收纳|对比|区别|差异)", cleaned):
+        cleaned = cleaned[1:]
+    return cleaned or str(text or "").strip()
+
+
+def _finalize_packaged_subtitle_text(text: str) -> str:
+    normalized = normalize_display_text(str(text or ""))
+    if not normalized:
+        return ""
+    if normalized[-1] not in "。！？!?；;":
+        normalized += "。"
+    return normalized
+
+
+def _rewrite_hook_subtitle_text(text: str, clauses: list[str]) -> str:
+    if not clauses:
+        return ""
+    first_clause = clauses[0]
+    if first_clause.startswith(_SUBTITLE_COPY_HOOK_LEADS) and len(clauses) >= 2:
+        first_clause = clauses[1]
+    elif len(first_clause) <= 4 and len(clauses) >= 2:
+        first_clause = f"{first_clause}{clauses[1]}"
+    return _finalize_packaged_subtitle_text(_strip_subtitle_copy_prefix(first_clause))
+
+
+def _score_detail_clause(clause: str) -> float:
+    score = 0.0
+    compact = str(clause or "").strip()
+    if not compact:
+        return score
+    if re.search(r"\d", compact):
+        score += 1.2
+    if re.search(r"[A-Z]{2,}", compact):
+        score += 1.0
+    if 5 <= len(compact) <= 18:
+        score += 0.6
+    elif len(compact) <= 24:
+        score += 0.2
+    if compact.startswith(("重点", "主要", "参数", "区别", "差异")):
+        score += 0.8
+    if _SUBTITLE_COPY_GENERIC_PREFIX_RE.match(compact):
+        score -= 0.4
+    score += min(
+        1.6,
+        sum(0.35 for term in _SUBTITLE_COPY_DETAIL_TERMS if term in compact),
+    )
+    return score
+
+
+def _rewrite_detail_subtitle_text(text: str, clauses: list[str]) -> str:
+    if not clauses:
+        return ""
+    scored = sorted(
+        ((_score_detail_clause(clause), clause) for clause in clauses),
+        key=lambda item: (-item[0], len(item[1])),
+    )
+    best_clause = scored[0][1]
+    stripped = _strip_subtitle_copy_prefix(best_clause)
+    if len(stripped) >= 4:
+        best_clause = stripped
+    return _finalize_packaged_subtitle_text(best_clause)
+
+
+def _rewrite_cta_subtitle_text(text: str) -> str:
+    normalized = normalize_display_text(str(text or ""))
+    compact = normalized.replace(" ", "")
+    for keywords, rewritten in _SUBTITLE_COPY_CTA_PATTERNS:
+        if all(keyword in compact for keyword in keywords):
+            return rewritten
+    clauses = _extract_subtitle_copy_clauses(normalized)
+    return _finalize_packaged_subtitle_text(clauses[0] if clauses else normalized)
+
+
+def _rewrite_packaged_subtitle_copy(
+    subtitle_items: list[dict[str, Any]],
+    *,
+    render_plan: dict[str, Any],
+) -> list[dict[str, Any]]:
+    rewritten_items: list[dict[str, Any]] = []
+    for item in subtitle_items:
+        rewritten = dict(item)
+        original_text = _subtitle_text(rewritten)
+        if not original_text:
+            rewritten_items.append(rewritten)
+            continue
+        midpoint = (
+            float(rewritten.get("start_time", 0.0) or 0.0)
+            + float(rewritten.get("end_time", rewritten.get("start_time", 0.0)) or 0.0)
+        ) / 2.0
+        profile = _subtitle_section_profile_for_time(render_plan, midpoint)
+        if not isinstance(profile, dict):
+            rewritten_items.append(rewritten)
+            continue
+        role = str(profile.get("role") or "").strip().lower()
+        clauses = _extract_subtitle_copy_clauses(original_text)
+        rewritten_text = ""
+        strategy = ""
+        if role == "hook":
+            rewritten_text = _rewrite_hook_subtitle_text(original_text, clauses)
+            strategy = "hook_compact"
+        elif role == "detail":
+            rewritten_text = _rewrite_detail_subtitle_text(original_text, clauses)
+            strategy = "detail_focus"
+        elif role == "cta":
+            rewritten_text = _rewrite_cta_subtitle_text(original_text)
+            strategy = "cta_compact"
+        if rewritten_text and rewritten_text != original_text:
+            rewritten.setdefault("text_original_final", original_text)
+            rewritten["text_final"] = rewritten_text
+            rewritten["subtitle_copy_strategy"] = strategy
+            rewritten["subtitle_section_role"] = role
+        rewritten_items.append(rewritten)
+    return rewritten_items
+
+
+def _subtitle_signoff_clause(text: str) -> str:
+    for clause in _extract_subtitle_copy_clauses(text):
+        candidate = _finalize_packaged_subtitle_text(_strip_subtitle_copy_prefix(clause))
+        compact = candidate.replace(" ", "")
+        if any(keyword in compact for keyword in ("点赞", "收藏", "关注")):
+            continue
+        if len(compact.rstrip("。！？!?；;")) >= 4:
+            return candidate
+    return ""
+
+
+def _detail_setup_clause(text: str, *, focused_text: str) -> str:
+    candidates: list[tuple[float, str]] = []
+    for clause in _extract_subtitle_copy_clauses(text):
+        candidate = _finalize_packaged_subtitle_text(_strip_subtitle_copy_prefix(clause))
+        if not candidate or candidate == focused_text:
+            continue
+        compact = candidate.rstrip("。！？!?；;")
+        if len(compact) < 4:
+            continue
+        score = _score_detail_clause(compact)
+        if score <= 0.4:
+            continue
+        candidates.append((score, candidate))
+    if not candidates:
+        return ""
+    candidates.sort(key=lambda item: (-item[0], len(item[1])))
+    return candidates[0][1]
+
+
+def _hook_support_clause(text: str, *, primary_text: str) -> str:
+    for clause in _extract_subtitle_copy_clauses(text):
+        raw_clause = str(clause or "").strip()
+        if raw_clause.startswith(_SUBTITLE_COPY_HOOK_LEADS):
+            continue
+        candidate = _finalize_packaged_subtitle_text(_strip_subtitle_copy_prefix(clause))
+        if not candidate or candidate == primary_text:
+            continue
+        compact = candidate.rstrip("。！？!?；;")
+        if len(compact) >= 4:
+            return candidate
+    return ""
+
+
+def _resolve_resegmented_subtitle_texts(
+    item: dict[str, Any],
+    *,
+    role: str,
+) -> list[str]:
+    primary_text = _subtitle_text(item)
+    if not primary_text:
+        return []
+    original_text = str(item.get("text_original_final") or primary_text)
+    duration_sec = max(
+        0.0,
+        float(item.get("end_time", item.get("start_time", 0.0)) or 0.0)
+        - float(item.get("start_time", 0.0) or 0.0),
+    )
+    if role == "hook" and duration_sec >= 2.6:
+        support = _hook_support_clause(original_text, primary_text=primary_text)
+        if support:
+            return [primary_text, support]
+    if role == "detail" and duration_sec >= 2.8:
+        setup = _detail_setup_clause(original_text, focused_text=primary_text)
+        if setup:
+            return [setup, primary_text]
+    if role == "cta" and duration_sec >= 2.2:
+        signoff = _subtitle_signoff_clause(original_text)
+        if signoff and signoff != primary_text:
+            return [primary_text, signoff]
+    return [primary_text]
+
+
+def _resolve_subtitle_unit_roles(role: str, count: int) -> list[str]:
+    normalized_role = str(role or "").strip().lower()
+    if count <= 1:
+        return [normalized_role or "single"]
+    if normalized_role == "hook":
+        return ["lead", "support"][:count]
+    if normalized_role == "detail":
+        return ["setup", "focus"][:count]
+    if normalized_role == "cta":
+        return ["action", "signoff"][:count]
+    return [f"unit_{index}" for index in range(count)]
+
+
+def _allocate_subtitle_unit_durations(
+    total_duration_sec: float,
+    texts: list[str],
+    *,
+    min_unit_sec: float = 0.62,
+) -> list[float]:
+    count = len(texts)
+    if count <= 1:
+        return [round(max(0.0, total_duration_sec), 3)]
+    minimum_total = min_unit_sec * count
+    if total_duration_sec <= minimum_total + 0.02:
+        return [round(max(0.0, total_duration_sec / count), 3) for _ in texts]
+    weights = [max(1.0, float(len(text.rstrip("。！？!?；;")))) for text in texts]
+    remaining = float(total_duration_sec)
+    remaining_weight = float(sum(weights))
+    durations: list[float] = []
+    for index, weight in enumerate(weights):
+        slots_left = count - index - 1
+        minimum_for_rest = min_unit_sec * slots_left
+        ideal = total_duration_sec * (weight / remaining_weight) if remaining_weight > 0 else total_duration_sec / count
+        duration = min(
+            max(min_unit_sec, ideal),
+            max(min_unit_sec, remaining - minimum_for_rest),
+        )
+        duration = round(duration, 3)
+        durations.append(duration)
+        remaining -= duration
+        remaining_weight -= weight
+    if durations:
+        durations[-1] = round(max(min_unit_sec, durations[-1] + remaining), 3)
+    return durations
+
+
+def _resegment_packaged_subtitles(
+    subtitle_items: list[dict[str, Any]],
+    *,
+    render_plan: dict[str, Any],
+) -> list[dict[str, Any]]:
+    resegmented: list[dict[str, Any]] = []
+    for item in subtitle_items:
+        original_start = float(item.get("start_time", 0.0) or 0.0)
+        original_end = max(original_start, float(item.get("end_time", original_start) or original_start))
+        midpoint = (original_start + original_end) / 2.0
+        profile = _subtitle_section_profile_for_time(render_plan, midpoint)
+        role = str((profile or {}).get("role") or "").strip().lower()
+        texts = _resolve_resegmented_subtitle_texts(item, role=role)
+        if len(texts) <= 1:
+            resegmented.append(dict(item))
+            continue
+        unit_roles = _resolve_subtitle_unit_roles(role, len(texts))
+        durations = _allocate_subtitle_unit_durations(original_end - original_start, texts)
+        cursor = original_start
+        for index, (text, duration_sec) in enumerate(zip(texts, durations)):
+            unit = dict(item)
+            unit["start_time"] = round(cursor, 3)
+            next_cursor = original_end if index == len(texts) - 1 else min(original_end, cursor + max(0.18, duration_sec))
+            unit["end_time"] = round(next_cursor, 3)
+            unit["text_final"] = text
+            unit["subtitle_copy_strategy"] = (
+                f"{str(item.get('subtitle_copy_strategy') or role or 'packaged')}_resegmented"
+            )
+            unit["subtitle_unit_index"] = index
+            unit["subtitle_unit_count"] = len(texts)
+            unit["subtitle_unit_role"] = unit_roles[index] if index < len(unit_roles) else f"unit_{index}"
+            resegmented.append(unit)
+            cursor = next_cursor
+    for index, item in enumerate(resegmented):
+        item["index"] = index
+    return resegmented
+
+
 def _score_music_entry_candidates(
     subtitle_items: list[dict],
     *,
@@ -3525,11 +4078,26 @@ def _build_timing_summary(
     }
 
 
+def _section_directive_for_time(
+    timeline_analysis: dict[str, Any] | None,
+    time_sec: float,
+) -> dict[str, Any] | None:
+    for directive in list((timeline_analysis or {}).get("section_directives") or []):
+        if not isinstance(directive, dict):
+            continue
+        start_sec = float(directive.get("start_sec", 0.0) or 0.0)
+        end_sec = float(directive.get("end_sec", start_sec) or start_sec)
+        if start_sec - 1e-6 <= time_sec <= end_sec + 1e-6:
+            return directive
+    return None
+
+
 async def _plan_music_entry(
     *,
     music_plan: dict | None,
     subtitle_items: list[dict],
     content_profile: dict | None,
+    timeline_analysis: dict[str, Any] | None = None,
 ) -> dict | None:
     if not music_plan:
         return None
@@ -3546,7 +4114,35 @@ async def _plan_music_entry(
         return music_plan
 
     settings = get_settings()
-    rankings = _score_music_entry_candidates(subtitle_items, content_profile=content_profile)
+    hook_end_sec = float((timeline_analysis or {}).get("hook_end_sec") or 0.0)
+    cta_start_sec = (timeline_analysis or {}).get("cta_start_sec")
+    rankings = [
+        dict(item) for item in _score_music_entry_candidates(subtitle_items, content_profile=content_profile)
+        if float(item.get("enter_sec", 0.0) or 0.0) >= max(0.0, hook_end_sec - 0.05)
+        and (
+            cta_start_sec is None
+            or float(item.get("enter_sec", 0.0) or 0.0) <= max(float(hook_end_sec), float(cta_start_sec) - 0.35)
+        )
+    ]
+    allowed_rankings: list[dict[str, Any]] = []
+    for item in rankings:
+        directive = _section_directive_for_time(timeline_analysis, float(item.get("enter_sec", 0.0) or 0.0))
+        if directive is None:
+            allowed_rankings.append(item)
+            continue
+        if not bool(directive.get("music_entry_allowed", True)):
+            continue
+        item["score"] = round(
+            min(0.99, float(item.get("score", 0.0) or 0.0) + float(directive.get("music_entry_bonus", 0.08) or 0.08)),
+            3,
+        )
+        reasons = list(item.get("reasons") or [])
+        reasons.append(f"落在 {str(directive.get('role') or '主体')} 段的安全音乐区间")
+        item["reasons"] = reasons
+        allowed_rankings.append(item)
+    if allowed_rankings:
+        allowed_rankings.sort(key=lambda item: (-float(item["score"]), float(item["enter_sec"])))
+        rankings = allowed_rankings
     if not rankings:
         fallback_sec = round(float(subtitle_items[0].get("end_time", 0.0) or 0.0), 2)
         music_plan["enter_sec"] = max(0.0, fallback_sec)
@@ -3577,6 +4173,7 @@ async def _plan_insert_asset_slot(
     insert_plan: dict | None,
     subtitle_items: list[dict],
     content_profile: dict | None,
+    timeline_analysis: dict[str, Any] | None = None,
     allow_llm: bool = True,
 ) -> dict | None:
     if not insert_plan:
@@ -3593,10 +4190,226 @@ async def _plan_insert_asset_slot(
         )
         return insert_plan
 
+    hook_end_sec = float((timeline_analysis or {}).get("hook_end_sec") or 0.0)
+    cta_start_sec = (timeline_analysis or {}).get("cta_start_sec")
+    semantic_sections = list((timeline_analysis or {}).get("semantic_sections") or [])
+    section_directives = list((timeline_analysis or {}).get("section_directives") or [])
+    section_actions = list((timeline_analysis or {}).get("section_actions") or [])
+    resolved_editing_skill = (timeline_analysis or {}).get("editing_skill") or {}
+
     candidates = [
         item for item in subtitle_items
-        if float(item.get("end_time", 0.0) or 0.0) > 8.0
+        if float(item.get("end_time", 0.0) or 0.0) > max(8.0, hook_end_sec + 0.15)
+        and (
+            cta_start_sec is None
+            or float(item.get("end_time", 0.0) or 0.0) < float(cta_start_sec) - 0.4
+        )
     ]
+    detail_starts = {
+        round(float(section.get("start_sec", 0.0) or 0.0), 2)
+        for section in semantic_sections
+        if str(section.get("role") or "") in {"detail", "body"}
+    }
+    allowed_windows = [
+        {
+            "index": int(section.get("index", -1) or -1),
+            "role": str(section.get("role") or ""),
+            "start_sec": float(section.get("start_sec", 0.0) or 0.0),
+            "end_sec": float(section.get("end_sec", 0.0) or 0.0),
+            "priority": float(section.get("insert_priority", 0.0) or 0.0),
+            "anchor_sec": float(
+                section.get(
+                    "anchor_sec",
+                    (float(section.get("start_sec", 0.0) or 0.0) + float(section.get("end_sec", 0.0) or 0.0)) / 2.0,
+                )
+                or 0.0
+            ),
+        }
+        for section in section_directives
+        if isinstance(section, dict) and bool(section.get("insert_allowed"))
+    ]
+    action_windows = [
+        {
+            "index": int(action.get("index", -1) or -1),
+            "role": str(action.get("role") or ""),
+            "start_sec": float(action.get("start_sec", 0.0) or 0.0),
+            "end_sec": float(action.get("end_sec", 0.0) or 0.0),
+            "priority": float(action.get("action_priority", 0.0) or 0.0),
+            "anchor_sec": float(action.get("broll_anchor_sec", action.get("start_sec", 0.0)) or 0.0),
+            "packaging_intent": str(action.get("packaging_intent") or ""),
+        }
+        for action in section_actions
+        if isinstance(action, dict) and bool(action.get("broll_allowed"))
+    ]
+
+    def _windows_containing_time(windows: list[dict[str, float | int | str]], time_sec: float) -> list[dict[str, float | int | str]]:
+        return [
+            window
+            for window in windows
+            if float(window.get("start_sec", 0.0) or 0.0) - 1e-6 <= time_sec <= float(window.get("end_sec", 0.0) or 0.0) + 1e-6
+        ]
+
+    def _nearest_window(windows: list[dict[str, float | int | str]], time_sec: float) -> dict[str, float | int | str] | None:
+        if not windows:
+            return None
+        return sorted(
+            windows,
+            key=lambda window: (
+                -float(window.get("priority", 0.0) or 0.0),
+                abs(time_sec - float(window.get("anchor_sec", 0.0) or 0.0)),
+                float(window.get("start_sec", 0.0) or 0.0),
+            ),
+        )[0]
+
+    preferred_insert_windows: list[dict[str, float | int | str]] = []
+
+    def _apply_insert_window(plan: dict, chosen_sec: float) -> dict:
+        primary_windows = preferred_insert_windows or action_windows or allowed_windows
+        primary_match = _nearest_window(_windows_containing_time(primary_windows, chosen_sec), chosen_sec)
+        selected_window = primary_match or _nearest_window(primary_windows, chosen_sec)
+        if not selected_window:
+            plan["insert_after_sec"] = round(float(chosen_sec), 3)
+            return plan
+
+        window_start = float(selected_window.get("start_sec", chosen_sec) or chosen_sec)
+        window_end = float(selected_window.get("end_sec", chosen_sec) or chosen_sec)
+        window_anchor = float(selected_window.get("anchor_sec", chosen_sec) or chosen_sec)
+        if window_end < window_start:
+            window_start, window_end = window_end, window_start
+        resolved_sec = float(chosen_sec)
+        if resolved_sec < window_start - 1e-6 or resolved_sec > window_end + 1e-6:
+            resolved_sec = window_anchor
+        resolved_sec = max(window_start, min(resolved_sec, window_end))
+        plan["insert_after_sec"] = round(resolved_sec, 3)
+        plan["insert_section_role"] = str(selected_window.get("role") or "")
+        plan["insert_packaging_intent"] = str(selected_window.get("packaging_intent") or "")
+        if int(selected_window.get("index", -1) or -1) >= 0:
+            plan["insert_section_index"] = int(selected_window.get("index", -1) or -1)
+        plan["broll_window"] = {
+            "start_sec": round(window_start, 3),
+            "end_sec": round(window_end, 3),
+            "anchor_sec": round(max(window_start, min(window_anchor, window_end)), 3),
+            "priority": round(float(selected_window.get("priority", 0.0) or 0.0), 3),
+        }
+        return plan
+
+    def _apply_insert_asset_strategy(plan: dict) -> dict:
+        candidate_assets = list(plan.get("candidate_assets") or [])
+        if not candidate_assets:
+            if plan.get("asset_id") and plan.get("path"):
+                candidate_assets = [
+                    {
+                        "asset_id": str(plan.get("asset_id") or ""),
+                        "path": str(plan.get("path") or ""),
+                        "original_name": str(plan.get("original_name") or ""),
+                        "insert_archetype": str(plan.get("insert_archetype") or ""),
+                        "insert_motion_profile": str(plan.get("insert_motion_profile") or ""),
+                        "insert_transition_style": str(plan.get("insert_transition_style") or ""),
+                        "insert_target_duration_sec": float(plan.get("insert_target_duration_sec", 0.0) or 0.0),
+                        "selection_score": 0.0,
+                        "selection_reasons": [],
+                    }
+                ]
+            else:
+                return plan
+
+        rankings = rank_insert_candidates_for_section(
+            candidate_assets,
+            section_role=str(plan.get("insert_section_role") or ""),
+            packaging_intent=str(plan.get("insert_packaging_intent") or ""),
+            content_profile=content_profile,
+            editing_skill=resolved_editing_skill if isinstance(resolved_editing_skill, dict) else None,
+        )
+        if not rankings:
+            return plan
+        selected = dict(rankings[0]["candidate"])
+        plan["asset_id"] = str(selected.get("asset_id") or plan.get("asset_id") or "")
+        plan["path"] = str(selected.get("path") or plan.get("path") or "")
+        plan["original_name"] = str(selected.get("original_name") or plan.get("original_name") or "")
+        plan["insert_archetype"] = str(selected.get("insert_archetype") or plan.get("insert_archetype") or "generic_broll")
+        plan["insert_motion_profile"] = str(selected.get("insert_motion_profile") or plan.get("insert_motion_profile") or "balanced_hold")
+        plan["insert_transition_style"] = str(selected.get("insert_transition_style") or plan.get("insert_transition_style") or "straight_cut")
+        plan["insert_target_duration_sec"] = round(float(selected.get("insert_target_duration_sec", 0.0) or 0.0), 3)
+        plan["insert_strategy_summary"] = {
+            "selected_asset_id": plan["asset_id"],
+            "selected_score": round(float(rankings[0].get("score", 0.0) or 0.0), 3),
+            "reasons": list(rankings[0].get("reasons") or []),
+        }
+        return plan
+    if detail_starts:
+        prioritized = [
+            item for item in candidates
+            if round(float(item.get("start_time", 0.0) or 0.0), 2) in detail_starts
+            or round(float(item.get("end_time", 0.0) or 0.0), 2) in detail_starts
+        ]
+        if prioritized:
+            candidates = prioritized
+    elif action_windows:
+        action_windows.sort(key=lambda item: (-float(item.get("priority", 0.0) or 0.0), float(item.get("start_sec", 0.0) or 0.0)))
+        top_priority = float(action_windows[0].get("priority", 0.0) or 0.0)
+        preferred_windows = [
+            window
+            for window in action_windows
+            if abs(float(window.get("priority", 0.0) or 0.0) - top_priority) < 1e-6
+        ]
+        prioritized = [
+            item for item in candidates
+            if any(
+                float(window.get("start_sec", 0.0) or 0.0) - 1e-6
+                <= float(item.get("end_time", 0.0) or 0.0)
+                <= float(window.get("end_sec", 0.0) or 0.0) + 1e-6
+                for window in preferred_windows
+            )
+        ]
+        if prioritized:
+            preferred_insert_windows = preferred_windows
+            candidates = sorted(
+                prioritized,
+                key=lambda item: min(
+                    abs(float(item.get("end_time", 0.0) or 0.0) - float(window.get("anchor_sec", 0.0) or 0.0))
+                    for window in preferred_windows
+                ),
+            )
+    elif allowed_windows:
+        allowed_windows.sort(key=lambda item: (-float(item.get("priority", 0.0) or 0.0), float(item.get("start_sec", 0.0) or 0.0)))
+        prioritized = [
+            item for item in candidates
+            if any(
+                float(window.get("start_sec", 0.0) or 0.0) - 1e-6
+                <= float(item.get("end_time", 0.0) or 0.0)
+                <= float(window.get("end_sec", 0.0) or 0.0) + 1e-6
+                for window in allowed_windows
+            )
+        ]
+        if prioritized:
+            top_priority = max(
+                (
+                    float(window.get("priority", 0.0) or 0.0)
+                    for window in allowed_windows
+                    if any(
+                        float(window.get("start_sec", 0.0) or 0.0) - 1e-6
+                        <= float(item.get("end_time", 0.0) or 0.0)
+                        <= float(window.get("end_sec", 0.0) or 0.0) + 1e-6
+                        for item in prioritized
+                    )
+                ),
+                default=0.0,
+            )
+            preferred_insert_windows = [
+                window
+                for window in allowed_windows
+                if abs(float(window.get("priority", 0.0) or 0.0) - top_priority) < 1e-6
+            ]
+            candidates = [
+                item for item in prioritized
+                if any(
+                    float(window.get("start_sec", 0.0) or 0.0) - 1e-6
+                    <= float(item.get("end_time", 0.0) or 0.0)
+                    <= float(window.get("end_sec", 0.0) or 0.0) + 1e-6
+                    and abs(float(window.get("priority", 0.0) or 0.0) - top_priority) < 1e-6
+                    for window in allowed_windows
+                )
+            ] or prioritized
     if not candidates:
         first = subtitle_items[min(len(subtitle_items) - 1, max(0, len(subtitle_items) // 2))]
         insert_plan["insert_after_sec"] = float(first.get("end_time", 0.0) or 0.0)
@@ -3607,14 +4420,14 @@ async def _plan_insert_asset_slot(
             min_score=float(settings.packaging_selection_min_score),
             low_confidence_reason="字幕太短，建议确认插入位置。",
         )
-        return insert_plan
+        return _apply_insert_asset_strategy(_apply_insert_window(insert_plan, float(insert_plan["insert_after_sec"] or 0.0)))
 
     transcript_excerpt = "\n".join(
         f"[{float(item.get('start_time', 0.0)):.1f}-{float(item.get('end_time', 0.0)):.1f}] "
         f"{_subtitle_text(item)}"
         for item in candidates[:48]
     )
-    fallback = candidates[len(candidates) // 2]
+    fallback = candidates[0] if action_windows else candidates[len(candidates) // 2]
     fallback_sec = float(fallback.get("end_time", 0.0) or 0.0)
     fallback_plan = dict(insert_plan)
     fallback_plan["insert_after_sec"] = fallback_sec
@@ -3627,7 +4440,7 @@ async def _plan_insert_asset_slot(
     )
 
     if not allow_llm:
-        return fallback_plan
+        return _apply_insert_asset_strategy(_apply_insert_window(fallback_plan, float(fallback_plan["insert_after_sec"] or 0.0)))
 
     try:
         provider = get_reasoning_provider()
@@ -3655,7 +4468,11 @@ async def _plan_insert_asset_slot(
         data = response.as_json()
         chosen = float(data.get("insert_after_sec", fallback_sec) or fallback_sec)
         max_sec = float(candidates[-1].get("end_time", fallback_sec) or fallback_sec)
-        insert_plan["insert_after_sec"] = max(8.0, min(chosen, max_sec))
+        insert_plan = _apply_insert_window(insert_plan, chosen)
+        insert_plan["insert_after_sec"] = round(
+            max(8.0, min(float(insert_plan.get("insert_after_sec", fallback_sec) or fallback_sec), max_sec)),
+            3,
+        )
         insert_plan["reason"] = str(data.get("reason") or "").strip() or "LLM 选择了较自然的转场点。"
         rankings = [
             {"score": 0.78, "enter_sec": insert_plan["insert_after_sec"]},
@@ -3667,10 +4484,10 @@ async def _plan_insert_asset_slot(
             min_score=float(settings.packaging_selection_min_score),
             low_confidence_reason="插入点候选分差过小或语义证据不足，建议确认。",
         )
-        return insert_plan
+        return _apply_insert_asset_strategy(insert_plan)
     except Exception:
         fallback_plan["reason"] = "LLM 未返回可靠结果，回退到中间自然停顿。"
-        return fallback_plan
+        return _apply_insert_asset_strategy(_apply_insert_window(fallback_plan, float(fallback_plan["insert_after_sec"] or 0.0)))
 
 
 async def _map_subtitles_to_packaged_timeline(
@@ -3704,14 +4521,34 @@ async def _map_subtitles_to_packaged_timeline(
     if insert_plan and insert_plan.get("path"):
         insert_duration = await _probe_media_duration(Path(insert_plan["path"]))
         insert_after_sec = float(insert_plan.get("insert_after_sec", 0.0) or 0.0) + leading_offset
-        if insert_duration > 0:
+        effective_insert_duration = resolve_insert_effective_duration(insert_plan, source_duration=insert_duration)
+        current_timeline_duration = max(
+            (
+                float(item.get("end_time", item.get("start_time", 0.0)) or 0.0)
+                for item in mapped
+            ),
+            default=insert_after_sec,
+        )
+        added_insert_duration = resolve_insert_added_duration(
+            insert_plan,
+            runtime_duration_sec=effective_insert_duration,
+            insert_after_sec=insert_after_sec,
+            source_duration=current_timeline_duration,
+        )
+        if added_insert_duration > 0:
             mapped = _shift_subtitles_for_insert(
                 mapped,
                 insert_after_sec=insert_after_sec,
-                insert_duration=insert_duration,
+                insert_duration=added_insert_duration,
             )
 
-    return mapped
+    return _resegment_packaged_subtitles(
+        _rewrite_packaged_subtitle_copy(
+            mapped,
+            render_plan=render_plan,
+        ),
+        render_plan=render_plan,
+    )
 
 
 async def _map_editing_accents_to_packaged_timeline(
@@ -3757,19 +4594,151 @@ async def _map_editing_accents_to_packaged_timeline(
     if insert_plan and insert_plan.get("path"):
         insert_duration = await _probe_media_duration(Path(insert_plan["path"]))
         insert_after_sec = float(insert_plan.get("insert_after_sec", 0.0) or 0.0) + leading_offset
-        if insert_duration > 0:
+        effective_insert_duration = resolve_insert_effective_duration(insert_plan, source_duration=insert_duration)
+        current_timeline_duration = max(
+            (
+                float(
+                    item.get(
+                        "end_time",
+                        float(item.get("start_time", 0.0) or 0.0) + float(item.get("duration_sec", 0.0) or 0.0),
+                    )
+                    or 0.0
+                )
+                for collection_name in ("emphasis_overlays", "sound_effects")
+                for item in mapped.get(collection_name) or []
+            ),
+            default=insert_after_sec,
+        )
+        added_insert_duration = resolve_insert_added_duration(
+            insert_plan,
+            runtime_duration_sec=effective_insert_duration,
+            insert_after_sec=insert_after_sec,
+            source_duration=current_timeline_duration,
+        )
+        if added_insert_duration > 0:
             mapped["emphasis_overlays"] = _shift_timed_items_for_insert(
                 mapped.get("emphasis_overlays") or [],
                 insert_after_sec=insert_after_sec,
-                insert_duration=insert_duration,
+                insert_duration=added_insert_duration,
             )
             mapped["sound_effects"] = _shift_sound_effects_for_insert(
                 mapped.get("sound_effects") or [],
                 insert_after_sec=insert_after_sec,
-                insert_duration=insert_duration,
+                insert_duration=added_insert_duration,
             )
+        mapped = _apply_insert_accent_choreography(
+            mapped,
+            insert_plan=insert_plan,
+            insert_after_sec=insert_after_sec,
+            effective_insert_duration=effective_insert_duration,
+            source_duration=max(current_timeline_duration, insert_after_sec),
+        )
 
     return mapped
+
+
+def _apply_insert_accent_choreography(
+    editing_accents: dict[str, Any],
+    *,
+    insert_plan: dict[str, Any] | None,
+    insert_after_sec: float,
+    effective_insert_duration: float,
+    source_duration: float,
+) -> dict[str, Any]:
+    if not isinstance(editing_accents, dict):
+        return {}
+    focus = str((insert_plan or {}).get("insert_overlay_focus") or "medium").strip().lower()
+    packaging_intent = str((insert_plan or {}).get("insert_packaging_intent") or "").strip().lower()
+    cta_protection = bool((insert_plan or {}).get("insert_cta_protection"))
+    if not cta_protection and focus not in {"none", "medium", "high"}:
+        return editing_accents
+
+    overlap = resolve_insert_transition_overlap(
+        insert_plan,
+        runtime_duration_sec=effective_insert_duration,
+        insert_after_sec=insert_after_sec,
+        source_duration=source_duration,
+    )
+    window_start = round(max(0.0, insert_after_sec - float(overlap.get("entry_sec", 0.0) or 0.0)), 3)
+    window_end = round(max(window_start, window_start + max(0.0, float(effective_insert_duration or 0.0))), 3)
+    guard = 0.28 if focus == "high" else 0.1 if focus == "medium" else 0.16
+    nearby_start = max(0.0, window_start - guard)
+    nearby_end = window_end + guard
+
+    def _overlay_midpoint(item: dict[str, Any]) -> float:
+        start_time = float(item.get("start_time", 0.0) or 0.0)
+        end_time = float(item.get("end_time", start_time) or start_time)
+        return (start_time + end_time) / 2.0
+
+    overlays = [dict(item) for item in editing_accents.get("emphasis_overlays") or []]
+    sounds = [dict(item) for item in editing_accents.get("sound_effects") or []]
+    near_overlays = [item for item in overlays if nearby_start - 1e-6 <= _overlay_midpoint(item) <= nearby_end + 1e-6]
+    far_overlays = [item for item in overlays if item not in near_overlays]
+    near_sounds = [
+        item
+        for item in sounds
+        if nearby_start - 1e-6 <= float(item.get("start_time", 0.0) or 0.0) <= nearby_end + 1e-6
+    ]
+    far_sounds = [item for item in sounds if item not in near_sounds]
+
+    if cta_protection or focus == "none":
+        editing_accents["emphasis_overlays"] = far_overlays
+        editing_accents["sound_effects"] = far_sounds
+        return editing_accents
+
+    if focus == "medium":
+        editing_accents["emphasis_overlays"] = [
+            item
+            for item in overlays
+            if not (window_start - 1e-6 <= _overlay_midpoint(item) <= window_end + 1e-6)
+        ]
+        editing_accents["sound_effects"] = [
+            item
+            for item in sounds
+            if not (window_start - 1e-6 <= float(item.get("start_time", 0.0) or 0.0) <= window_end + 1e-6)
+        ]
+        return editing_accents
+
+    anchor_start = round(min(window_end, window_start + min(0.08, max(0.04, effective_insert_duration * 0.15))), 3)
+    primary_overlay = None
+    if near_overlays:
+        primary_overlay = min(
+            near_overlays,
+            key=lambda item: abs(_overlay_midpoint(item) - anchor_start),
+        )
+        primary_overlay = dict(primary_overlay)
+        original_duration = max(
+            0.32,
+            float(primary_overlay.get("end_time", anchor_start + 0.45) or anchor_start + 0.45)
+            - float(primary_overlay.get("start_time", anchor_start) or anchor_start),
+        )
+        overlay_duration = min(max(original_duration, 0.38), max(0.4, min(0.72, effective_insert_duration * 0.6)))
+        primary_overlay["start_time"] = anchor_start
+        primary_overlay["end_time"] = round(min(window_end, anchor_start + overlay_duration), 3)
+        far_overlays.append(primary_overlay)
+
+    if near_sounds or primary_overlay is not None:
+        sound_tokens = _resolve_insert_sound_tokens(packaging_intent)
+        primary_sound = dict(near_sounds[0]) if near_sounds else {}
+        primary_sound["start_time"] = anchor_start
+        primary_sound["duration_sec"] = sound_tokens["duration_sec"]
+        primary_sound["frequency"] = sound_tokens["frequency"]
+        primary_sound["volume"] = sound_tokens["volume"]
+        far_sounds.append(primary_sound)
+
+    editing_accents["emphasis_overlays"] = sorted(far_overlays, key=lambda item: float(item.get("start_time", 0.0) or 0.0))
+    editing_accents["sound_effects"] = sorted(far_sounds, key=lambda item: float(item.get("start_time", 0.0) or 0.0))
+    return editing_accents
+
+
+def _resolve_insert_sound_tokens(packaging_intent: str) -> dict[str, float]:
+    intent = str(packaging_intent or "").strip().lower()
+    mapping = {
+        "detail_support": {"duration_sec": 0.07, "frequency": 1120.0, "volume": 0.045},
+        "body_support": {"duration_sec": 0.075, "frequency": 980.0, "volume": 0.042},
+        "hook_focus": {"duration_sec": 0.08, "frequency": 1240.0, "volume": 0.048},
+    }
+    return mapping.get(intent, {"duration_sec": 0.075, "frequency": 1040.0, "volume": 0.042})
 
 
 def _resolve_packaged_render_variant(
@@ -4342,14 +5311,24 @@ def _build_variant_timeline_bundle(
     editorial_timeline_id: Any,
     render_plan_timeline_id: Any,
     keep_segments: list[dict[str, Any]],
+    editorial_analysis: dict[str, Any] | None = None,
     render_plan: dict[str, Any],
     variants: dict[str, dict[str, Any]],
 ) -> dict[str, Any]:
+    cloned_editorial_analysis = _clone_json_like(editorial_analysis or {})
     bundle = {
         "timeline_rules": {
             "editorial_timeline_id": str(editorial_timeline_id or "").strip() or None,
             "render_plan_timeline_id": str(render_plan_timeline_id or "").strip() or None,
             "keep_segments": [dict(segment) for segment in keep_segments],
+            "editorial_analysis": cloned_editorial_analysis,
+            "timeline_analysis": _clone_json_like(render_plan.get("timeline_analysis") or {}),
+            "editing_skill": _clone_json_like(render_plan.get("editing_skill") or {}),
+            "section_choreography": _clone_json_like(render_plan.get("section_choreography") or {}),
+            "diagnostics": _build_variant_timeline_diagnostics(
+                editorial_analysis=cloned_editorial_analysis,
+                timeline_analysis=render_plan.get("timeline_analysis") or {},
+            ),
             "packaging": {
                 "intro": _clone_json_like(render_plan.get("intro")),
                 "outro": _clone_json_like(render_plan.get("outro")),
@@ -4363,6 +5342,66 @@ def _build_variant_timeline_bundle(
     }
     bundle["validation"] = _validate_variant_timeline_bundle(bundle)
     return bundle
+
+
+def _build_variant_timeline_diagnostics(
+    *,
+    editorial_analysis: dict[str, Any] | None,
+    timeline_analysis: dict[str, Any] | None,
+) -> dict[str, Any]:
+    keep_energy_segments = [
+        dict(item)
+        for item in list((editorial_analysis or {}).get("keep_energy_segments") or [])
+        if isinstance(item, dict)
+    ]
+    accepted_cuts = [
+        dict(item)
+        for item in list((editorial_analysis or {}).get("accepted_cuts") or [])
+        if isinstance(item, dict)
+    ]
+    high_energy_keeps = [
+        {
+            "start": round(float(item.get("start", 0.0) or 0.0), 3),
+            "end": round(float(item.get("end", 0.0) or 0.0), 3),
+            "keep_energy": round(float(item.get("keep_energy", 0.0) or 0.0), 3),
+            "section_role": str(item.get("section_role") or ""),
+            "packaging_intent": str(item.get("packaging_intent") or ""),
+        }
+        for item in keep_energy_segments
+        if float(item.get("keep_energy", 0.0) or 0.0) >= 1.0
+    ]
+    high_risk_cuts = [
+        {
+            "start": round(float(item.get("start", 0.0) or 0.0), 3),
+            "end": round(float(item.get("end", 0.0) or 0.0), 3),
+            "reason": str(item.get("reason") or ""),
+            "boundary_keep_energy": round(float(item.get("boundary_keep_energy", 0.0) or 0.0), 3),
+            "left_keep_role": str(item.get("left_keep_role") or ""),
+            "right_keep_role": str(item.get("right_keep_role") or ""),
+        }
+        for item in accepted_cuts
+        if float(item.get("boundary_keep_energy", 0.0) or 0.0) >= 1.0
+    ]
+    review_reasons: list[str] = []
+    if high_risk_cuts:
+        review_reasons.append("存在贴近高能量保留段的 cut，建议复核边界。")
+    if any(str(item.get("section_role") or "") == "hook" for item in high_energy_keeps):
+        review_reasons.append("Hook 段存在高能量保留片段，建议确认开场节奏。")
+    return {
+        "keep_energy_summary": _clone_json_like((editorial_analysis or {}).get("keep_energy_summary") or {}),
+        "high_energy_keeps": high_energy_keeps[:8],
+        "high_risk_cuts": high_risk_cuts[:8],
+        "review_flags": {
+            "review_recommended": bool(high_risk_cuts),
+            "review_reasons": review_reasons,
+            "hook_end_sec": round(float((timeline_analysis or {}).get("hook_end_sec") or 0.0), 3),
+            "cta_start_sec": (
+                round(float((timeline_analysis or {}).get("cta_start_sec") or 0.0), 3)
+                if (timeline_analysis or {}).get("cta_start_sec") is not None
+                else None
+            ),
+        },
+    }
 
 
 def _build_variant_timeline_entry(
@@ -4462,6 +5501,89 @@ def _validate_variant_timeline_bundle(bundle: dict[str, Any]) -> dict[str, Any]:
             if duration_sec > 0 and end_time > duration_sec + 0.05:
                 issues.append(f"{variant_name}: subtitle event {index} extends beyond media duration")
             previous_end = max(previous_end or end_time, end_time)
+
+    timeline_rules = bundle.get("timeline_rules")
+    if isinstance(timeline_rules, dict):
+        timeline_analysis = timeline_rules.get("timeline_analysis")
+        if isinstance(timeline_analysis, dict):
+            previous_section_end: float | None = None
+            for section_index, section in enumerate(timeline_analysis.get("semantic_sections") or [], start=1):
+                if not isinstance(section, dict):
+                    issues.append(f"timeline_analysis: semantic section {section_index} is not a dict")
+                    continue
+                start_sec = float(section.get("start_sec") or 0.0)
+                end_sec = float(section.get("end_sec") or 0.0)
+                if end_sec < start_sec:
+                    issues.append(f"timeline_analysis: semantic section {section_index} has end before start")
+                if previous_section_end is not None and start_sec < previous_section_end - 1e-6:
+                    issues.append(f"timeline_analysis: semantic sections are not monotonic at index {section_index}")
+                previous_section_end = max(previous_section_end or end_sec, end_sec)
+            previous_directive_end: float | None = None
+            for directive_index, directive in enumerate(timeline_analysis.get("section_directives") or [], start=1):
+                if not isinstance(directive, dict):
+                    issues.append(f"timeline_analysis: section directive {directive_index} is not a dict")
+                    continue
+                start_sec = float(directive.get("start_sec") or 0.0)
+                end_sec = float(directive.get("end_sec") or 0.0)
+                if end_sec < start_sec:
+                    issues.append(f"timeline_analysis: section directive {directive_index} has end before start")
+                if previous_directive_end is not None and start_sec < previous_directive_end - 1e-6:
+                    issues.append(f"timeline_analysis: section directives are not monotonic at index {directive_index}")
+                previous_directive_end = max(previous_directive_end or end_sec, end_sec)
+            previous_action_end: float | None = None
+            for action_index, action in enumerate(timeline_analysis.get("section_actions") or [], start=1):
+                if not isinstance(action, dict):
+                    issues.append(f"timeline_analysis: section action {action_index} is not a dict")
+                    continue
+                start_sec = float(action.get("start_sec") or 0.0)
+                end_sec = float(action.get("end_sec") or 0.0)
+                anchor_sec = float(action.get("broll_anchor_sec", start_sec) or start_sec)
+                transition_anchor_sec = float(action.get("transition_anchor_sec", start_sec) or start_sec)
+                if end_sec < start_sec:
+                    issues.append(f"timeline_analysis: section action {action_index} has end before start")
+                if not (start_sec - 1e-6 <= anchor_sec <= end_sec + 1e-6):
+                    issues.append(f"timeline_analysis: section action {action_index} has anchor outside section window")
+                if not (start_sec - 1e-6 <= transition_anchor_sec <= end_sec + 1e-6):
+                    issues.append(f"timeline_analysis: section action {action_index} has transition anchor outside section window")
+                if previous_action_end is not None and start_sec < previous_action_end - 1e-6:
+                    issues.append(f"timeline_analysis: section actions are not monotonic at index {action_index}")
+                previous_action_end = max(previous_action_end or end_sec, end_sec)
+        editing_skill = timeline_rules.get("editing_skill")
+        if isinstance(editing_skill, dict):
+            if not str(editing_skill.get("key") or "").strip():
+                issues.append("editing_skill: key missing")
+            section_policy = editing_skill.get("section_policy")
+            if section_policy is not None and not isinstance(section_policy, dict):
+                issues.append("editing_skill: section_policy is not a dict")
+        section_choreography = timeline_rules.get("section_choreography")
+        if isinstance(section_choreography, dict):
+            previous_section_end: float | None = None
+            for section_index, section in enumerate(section_choreography.get("sections") or [], start=1):
+                if not isinstance(section, dict):
+                    issues.append(f"section_choreography: section {section_index} is not a dict")
+                    continue
+                start_sec = float(section.get("start_sec") or 0.0)
+                end_sec = float(section.get("end_sec") or 0.0)
+                transition_anchor_sec = float(section.get("transition_anchor_sec", start_sec) or start_sec)
+                if end_sec < start_sec:
+                    issues.append(f"section_choreography: section {section_index} has end before start")
+                if not (start_sec - 1e-6 <= transition_anchor_sec <= end_sec + 1e-6):
+                    issues.append(f"section_choreography: section {section_index} has transition anchor outside section window")
+                if previous_section_end is not None and start_sec < previous_section_end - 1e-6:
+                    issues.append(f"section_choreography: sections are not monotonic at index {section_index}")
+                previous_section_end = max(previous_section_end or end_sec, end_sec)
+        diagnostics = timeline_rules.get("diagnostics")
+        if isinstance(diagnostics, dict):
+            keep_energy_summary = diagnostics.get("keep_energy_summary")
+            if keep_energy_summary is not None and not isinstance(keep_energy_summary, dict):
+                issues.append("diagnostics: keep_energy_summary is not a dict")
+            for field_name in ("high_energy_keeps", "high_risk_cuts"):
+                items = diagnostics.get(field_name)
+                if items is not None and not isinstance(items, list):
+                    issues.append(f"diagnostics: {field_name} is not a list")
+            review_flags = diagnostics.get("review_flags")
+            if review_flags is not None and not isinstance(review_flags, dict):
+                issues.append("diagnostics: review_flags is not a dict")
 
     return {"status": "warning" if issues else "ok", "issues": issues}
 

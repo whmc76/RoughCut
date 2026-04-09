@@ -391,3 +391,59 @@ def test_assess_job_quality_blocks_subject_conflict_between_subtitles_and_profil
     assert "subject_conflict" in assessment["issue_codes"]
     assert assessment["auto_fixable"] is False
     assert assessment["recommended_rerun_step"] == "content_profile"
+
+
+def test_assess_job_quality_blocks_identity_narrative_conflict_inside_profile():
+    job = Job(
+        id=uuid.uuid4(),
+        source_path="jobs/demo/arc.mp4",
+        source_name="arc.mp4",
+        status="processing",
+        language="zh-CN",
+    )
+    steps = [
+        JobStep(job_id=job.id, step_name="content_profile", status="done"),
+    ]
+    artifacts = [
+        Artifact(
+            job_id=job.id,
+            artifact_type="content_profile_final",
+            data_json={
+                "subject_brand": "LuckyKiss",
+                "subject_model": "KissPod",
+                "subject_type": "LuckyKiss KissPod 益生菌含片",
+                "video_theme": "LEATHERMAN ARC 多功能工具钳开箱",
+                "summary": "这条视频主要围绕 LEATHERMAN ARC 多功能钳展开，补充上手体验和结构细节。",
+                "hook_line": "ARC 到底值不值",
+                "engagement_question": "你会买 ARC 吗？",
+                "preset_name": "edc_tactical",
+                "review_mode": "manual_confirmed",
+                "automation_review": {"score": 0.95},
+            },
+            created_at=_now(),
+        ),
+    ]
+    subtitles = [
+        SubtitleItem(
+            job_id=job.id,
+            version=1,
+            item_index=0,
+            start_time=0.0,
+            end_time=3.0,
+            text_raw="今天给大家介绍 LuckyKiss 的 KissPod 益生菌含片，主打弹射入口和口气清新。",
+        )
+    ]
+
+    assessment = assess_job_quality(
+        job=job,
+        steps=steps,
+        artifacts=artifacts,
+        subtitle_items=subtitles,
+        corrections=[],
+        completion_candidate=False,
+    )
+
+    assert "identity_narrative_conflict" in assessment["issue_codes"]
+    assert assessment["auto_fixable"] is False
+    assert assessment["recommended_rerun_step"] == "content_profile"
+    assert "summary" in assessment["signals"]["identity_narrative_conflicts"]

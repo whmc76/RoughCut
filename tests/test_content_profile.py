@@ -204,9 +204,14 @@ async def test_infer_content_profile_runs_research_when_search_queries_are_empty
             needs_review=True,
         )
 
-    async def fake_build_hybrid_verification_bundle(*, search_queries, online_search=None, internal_search=None, session=None):
+    async def fake_build_hybrid_verification_bundle(*, search_queries, online_search=None, internal_search=None, session=None, **kwargs):
         captured_queries.extend(search_queries)
-        return SimpleNamespace(search_queries=list(search_queries), online_results=[], database_results=[])
+        return SimpleNamespace(
+            search_queries=list(search_queries),
+            online_results=[],
+            database_results=[],
+            entity_catalog_candidates=[],
+        )
 
     async def fake_verify_content_understanding(*, understanding, evidence_bundle, verification_bundle):
         return understanding
@@ -436,6 +441,22 @@ def test_seed_profile_from_text_extracts_olight_slim2_ultra_identity():
     assert seeded["subject_model"] == "SLIM2代ULTRA版本"
     assert seeded["subject_type_candidates"] == ["EDC手电"]
     assert any("OLIGHT" in item for item in seeded["search_queries"])
+
+
+def test_seed_profile_from_text_maps_leatherman_arc_asr_alias():
+    seeded = _seed_profile_from_text("这把莱泽曼 ASC 工具钳主要看单手开合和钳头结构。")
+
+    assert seeded["subject_brand"] == "LEATHERMAN"
+    assert seeded["subject_model"] == "ARC"
+    assert "多功能工具钳" in (seeded.get("subject_type_candidates") or [])
+
+
+def test_seed_profile_from_text_extracts_ingestible_brand_and_model():
+    seeded = _seed_profile_from_text("今天给大家介绍一个 LuckyKiss 的益生菌含片，产品名叫 KissPod。")
+
+    assert seeded["subject_brand"] == "LuckyKiss"
+    assert seeded["subject_model"] == "KissPod"
+    assert "弹射益生菌含片" in (seeded.get("subject_type_candidates") or [])
 
 
 def test_seed_profile_from_text_keeps_physical_product_subject_when_stray_tech_brand_appears():
@@ -1288,9 +1309,221 @@ def test_apply_identity_review_guard_does_not_override_llm_understanding_identit
     assert guarded["subject_model"] == "VX07"
     assert guarded["subject_type"] == "EDC机能包"
     assert guarded["video_theme"] == "VX07机能包开箱对比评测"
-    assert guarded["summary"] == "这条视频主要围绕 VX07 机能包的装载和背负体验展开。"
-    assert guarded["content_understanding"]["primary_subject"] == "EDC机能包"
-    assert guarded["identity_review"]["required"] is False
+
+
+def test_apply_identity_review_guard_rewrites_ingestible_conflict_profile_to_consistent_subject():
+    guarded = apply_identity_review_guard(
+        {
+            "subject_type": "多功能工具钳",
+            "video_theme": "战术笔伪装式防身工具上手",
+            "summary": "这条视频主要围绕战术笔展开，重点看防身伪装和随身携带。",
+            "engagement_question": "这类战术笔你会随身带吗？",
+            "search_queries": ["战术笔 防身"],
+            "cover_title": {"top": "战术笔", "main": "伪装防身工具", "bottom": "随身带方便吗"},
+            "transcript_excerpt": "今天给大家介绍一个 LuckyKiss 的益生菌含片，产品名叫 KissPod。",
+        },
+        subtitle_items=[
+            {"text_raw": "今天给大家介绍一个 LuckyKiss 的。"},
+            {"text_raw": "益生菌含片这个产品它叫 KissPod。"},
+            {"text_raw": "这个含片直接给它放进去。"},
+            {"text_raw": "口气清新的能力还是相当不错。"},
+        ],
+        source_name="IMG_0024.MOV",
+    )
+
+    assert guarded["subject_brand"] == "LuckyKiss"
+    assert guarded["subject_model"] == "KissPod"
+    assert guarded["subject_type"] == "弹射益生菌含片"
+    assert "战术笔" not in guarded["summary"]
+    assert "KissPod" in guarded["summary"]
+    assert all("战术笔" not in query for query in guarded["search_queries"])
+    assert "含片" in guarded["video_theme"]
+    assert "战术笔" not in guarded["engagement_question"]
+
+
+def test_apply_identity_review_guard_backfills_missing_identity_from_current_subtitles_with_content_understanding():
+    guarded = apply_identity_review_guard(
+        {
+            "subject_brand": "",
+            "subject_model": "",
+            "subject_type": "多功能工具钳",
+            "video_theme": "",
+            "summary": "这条视频主要围绕多功能工具钳展开，内容方向偏产品开箱与上手体验，适合后续做搜索校验、字幕纠错和剪辑包装。",
+            "search_queries": ["AC 多功能钳"],
+            "transcript_excerpt": "这把莱泽曼 ASC 工具钳主要看单手开合和钳头结构。",
+            "content_understanding": {
+                "video_type": "unboxing",
+                "content_domain": "gear",
+                "primary_subject": "多功能工具钳",
+                "subject_entities": [],
+                "video_theme": "",
+                "summary": "",
+                "hook_line": "",
+                "engagement_question": "",
+                "search_queries": [],
+                "evidence_spans": [],
+                "uncertainties": [],
+                "confidence": {"overall": 0.63},
+                "needs_review": False,
+                "review_reasons": [],
+            },
+        },
+        subtitle_items=[
+            {"text_raw": "这把莱泽曼 ASC 工具钳主要看单手开合和钳头结构。"},
+            {"text_raw": "定位上还是高端多功能工具钳。"},
+        ],
+        source_name="20260130-140529.mp4",
+    )
+
+    assert guarded["subject_brand"] == "LEATHERMAN"
+    assert guarded["subject_model"] == "ARC"
+    assert "ARC" in guarded["summary"]
+    assert any("LEATHERMAN ARC" in query for query in guarded["search_queries"])
+
+
+def test_apply_identity_review_guard_exposes_identity_extraction_with_confidence_and_sources():
+    guarded = apply_identity_review_guard(
+        {
+            "subject_brand": "",
+            "subject_model": "",
+            "subject_type": "",
+            "video_theme": "",
+            "summary": "",
+            "transcript_excerpt": "这期主要看狐蝠工业 FXX1 小副包的分仓和挂点设计。",
+            "ocr_evidence": {
+                "visible_text": "狐蝠工业 FXX1小副包 开箱",
+            },
+            "transcript_evidence": {
+                "source_labels": {
+                    "subject_brand": "狐蝠工业",
+                    "subject_model": "FXX1小副包",
+                    "subject_type": "EDC机能包",
+                }
+            },
+        },
+        source_name="foxbat-fxx1.mp4",
+    )
+
+    extraction = guarded["identity_extraction"]
+
+    assert extraction["resolved"]["subject_brand"] == "狐蝠工业"
+    assert extraction["resolved"]["subject_model"] == "FXX1小副包"
+    assert extraction["confidence"]["subject_brand"] >= 0.9
+    assert "transcript_labels" in extraction["sources"]["subject_brand"]
+    assert extraction["candidates"]["subject_model"][0]["selected"] is True
+
+
+def test_apply_identity_review_guard_identity_extraction_reports_current_conflict():
+    guarded = apply_identity_review_guard(
+        {
+            "subject_brand": "",
+            "subject_model": "",
+            "subject_type": "",
+            "video_theme": "",
+            "summary": "",
+            "transcript_excerpt": "这期主要看挂点和分仓。",
+            "ocr_evidence": {
+                "visible_text": "NOC MT33",
+            },
+            "transcript_evidence": {
+                "source_labels": {
+                    "subject_brand": "狐蝠工业",
+                    "subject_model": "FXX1小副包",
+                }
+            },
+        },
+        source_name="demo.mp4",
+    )
+
+    extraction = guarded["identity_extraction"]
+
+    assert "current_identity_conflict" in extraction["conflicts"]
+    assert extraction["resolved"]["subject_brand"] == ""
+    assert extraction["resolved"]["subject_model"] == ""
+
+
+def test_apply_identity_review_guard_rewrites_conflicting_narrative_from_identity_extraction():
+    guarded = apply_identity_review_guard(
+        {
+            "subject_brand": "LuckyKiss",
+            "subject_model": "KissPod",
+            "subject_type": "LuckyKiss KissPod 益生菌含片",
+            "video_theme": "LEATHERMAN ARC 多功能工具钳开箱",
+            "summary": "这条视频主要围绕 LEATHERMAN ARC 多功能钳展开，补充上手体验和结构细节。",
+            "hook_line": "ARC 到底值不值",
+            "engagement_question": "你会买 ARC 吗？",
+            "search_queries": ["LEATHERMAN ARC 开箱"],
+            "transcript_excerpt": "今天给大家介绍 LuckyKiss 的 KissPod 益生菌含片，主打弹射入口和口气清新。",
+        },
+        subtitle_items=[
+            {"text_raw": "今天给大家介绍 LuckyKiss 的 KissPod 益生菌含片。"},
+            {"text_raw": "主打弹射入口和口气清新。"},
+        ],
+        source_name="IMG_0024.MOV",
+    )
+
+    assert "LEATHERMAN" not in guarded["summary"]
+    assert "KissPod" in guarded["summary"]
+    assert "LEATHERMAN" not in guarded["video_theme"]
+    assert all("LEATHERMAN" not in query for query in guarded["search_queries"])
+    assert any("KissPod" in query for query in guarded["search_queries"])
+
+
+def test_apply_identity_review_guard_rebuilds_queries_from_identity_extraction_when_current_queries_conflict():
+    guarded = apply_identity_review_guard(
+        {
+            "subject_brand": "狐蝠工业",
+            "subject_model": "FXX1小副包",
+            "subject_type": "EDC机能包",
+            "video_theme": "狐蝠工业FXX1小副包开箱与挂点评测",
+            "summary": "这条视频主要围绕狐蝠工业 FXX1 小副包展开。",
+            "search_queries": ["ComfyUI 工作流 教程", "NOC MT33 开箱"],
+            "transcript_excerpt": "这期主要看狐蝠工业 FXX1 小副包的分仓、挂点和背负设计。",
+        },
+        source_name="foxbat-fxx1.mp4",
+    )
+
+    assert all("ComfyUI" not in query for query in guarded["search_queries"])
+    assert all("MT33" not in query for query in guarded["search_queries"])
+    assert any("狐蝠工业" in query for query in guarded["search_queries"])
+
+
+def test_apply_identity_review_guard_uses_related_source_context_identity_to_rewrite_generic_profile():
+    guarded = apply_identity_review_guard(
+        {
+            "subject_brand": "",
+            "subject_model": "",
+            "subject_type": "多功能工具钳",
+            "video_theme": "",
+            "summary": "这条视频主要围绕多功能工具钳展开，内容方向偏产品开箱与上手体验，适合后续做搜索校验、字幕纠错和剪辑包装。",
+            "search_queries": [],
+            "source_context": {
+                "related_profiles": [
+                    {
+                        "source_name": "20260130-134317.mp4",
+                        "subject_brand": "LEATHERMAN",
+                        "subject_model": "ARC",
+                        "subject_type": "多功能工具钳",
+                        "video_theme": "LEATHERMAN ARC 多功能工具钳开箱测评",
+                        "summary": "这条视频主要围绕 LEATHERMAN ARC 展开。",
+                        "search_queries": ["LEATHERMAN ARC 开箱"],
+                        "score": 0.91,
+                    }
+                ]
+            },
+            "transcript_excerpt": "这条主要继续看这把工具钳的单手开合、钳头结构和批头替换。",
+        },
+        subtitle_items=[
+            {"text_raw": "这条主要继续看这把工具钳的单手开合。"},
+            {"text_raw": "后面再补一下钳头结构和批头替换。"},
+        ],
+        source_name="20260130-140529.mp4",
+    )
+
+    assert guarded["subject_brand"] == "LEATHERMAN"
+    assert guarded["subject_model"] == "ARC"
+    assert "ARC" in guarded["summary"]
+    assert any("LEATHERMAN ARC" in query for query in guarded["search_queries"])
 
 
 def test_coerce_subject_type_to_supported_main_type_returns_canonical_main_type_empty_for_specific_subject_type():

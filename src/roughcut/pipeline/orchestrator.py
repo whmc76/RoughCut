@@ -566,7 +566,7 @@ async def _dispatch_step(step: JobStep, session) -> None:
 async def _update_job_statuses(session) -> None:
     """Mark jobs as done or failed based on their steps."""
     result = await session.execute(
-        select(Job).where(Job.status.in_(["processing", "needs_review"]))
+        select(Job).where(Job.status.in_(["pending", "processing", "needs_review"]))
     )
     jobs = result.scalars().all()
 

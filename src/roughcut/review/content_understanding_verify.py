@@ -26,6 +26,7 @@ class HybridVerificationBundle:
     search_queries: list[str] = field(default_factory=list)
     online_results: list[Any] = field(default_factory=list)
     database_results: list[Any] = field(default_factory=list)
+    entity_catalog_candidates: list[Any] = field(default_factory=list)
 
 
 def build_verification_search_queries(
@@ -55,6 +56,10 @@ async def build_hybrid_verification_bundle(
     online_search: SearchCallable | None = None,
     internal_search: SearchCallable | None = None,
     session: AsyncSession | None = None,
+    subject_domain: str | None = None,
+    evidence_texts: list[str] | None = None,
+    glossary_terms: list[dict[str, Any]] | None = None,
+    confirmed_entities: list[dict[str, Any]] | None = None,
 ) -> HybridVerificationBundle:
     normalized_queries = [str(query).strip() for query in search_queries if str(query).strip()]
     online_results = await _run_search(online_search, search_queries=normalized_queries)
@@ -62,11 +67,16 @@ async def build_hybrid_verification_bundle(
         internal_search,
         session=session,
         search_queries=normalized_queries,
+        subject_domain=subject_domain,
+        evidence_texts=evidence_texts,
+        glossary_terms=glossary_terms,
+        confirmed_entities=confirmed_entities,
     )
     return HybridVerificationBundle(
         search_queries=normalized_queries,
         online_results=list(online_results),
         database_results=list(database_results),
+        entity_catalog_candidates=list(database_results),
     )
 
 
@@ -90,12 +100,14 @@ async def verify_content_understanding(
         online_search=online_search,
         internal_search=internal_search,
         session=session,
+        subject_domain=understanding.content_domain,
     )
     reasoning_provider = provider or get_reasoning_provider()
     prompt_payload = _bundle_to_prompt_payload(bundle)
     prompt = (
-        "你是内容理解核验器。请结合在线搜索结果与内部已确认实体，判断内容在讲什么，并输出 JSON。"
-        "联网搜索和数据库命中都只是弱佐证，不能覆盖当前视频的直接证据。"
+        "你是内容理解核验器。请结合在线搜索结果、实体资料库候选和内部已确认实体，判断内容在讲什么，并输出 JSON。"
+        "联网搜索和实体资料库都只是次级佐证，不能覆盖当前视频的直接证据。"
+        "实体资料库候选里会包含品牌、型号、别名命中、视频证据命中和支持分，请优先利用这些结构化证据判断归一化结果。"
         "要求："
         "1. 只输出可核验的内容，不要编造。"
         "2. primary_subject 要尽量具体，且优先对应视频真正围绕的主对象或主产品。"
@@ -162,12 +174,29 @@ async def _run_internal_search(
     *,
     session: AsyncSession | None,
     search_queries: list[str],
+    subject_domain: str | None = None,
+    evidence_texts: list[str] | None = None,
+    glossary_terms: list[dict[str, Any]] | None = None,
+    confirmed_entities: list[dict[str, Any]] | None = None,
 ) -> list[Any]:
     if internal_search is not None:
-        return await internal_search(search_queries=search_queries)
+        return await internal_search(
+            search_queries=search_queries,
+            subject_domain=subject_domain,
+            evidence_texts=evidence_texts,
+            glossary_terms=glossary_terms,
+            confirmed_entities=confirmed_entities,
+        )
     if session is None:
         return []
-    return await search_confirmed_content_entities(session, search_queries=search_queries)
+    return await search_confirmed_content_entities(
+        session,
+        search_queries=search_queries,
+        subject_domain=subject_domain,
+        evidence_texts=evidence_texts,
+        glossary_terms=glossary_terms,
+        confirmed_entities=confirmed_entities,
+    )
 
 
 def _bundle_to_prompt_payload(bundle: HybridVerificationBundle) -> dict[str, Any]:
@@ -175,6 +204,7 @@ def _bundle_to_prompt_payload(bundle: HybridVerificationBundle) -> dict[str, Any
         "search_queries": list(bundle.search_queries),
         "online_results": [_result_to_dict(item) for item in bundle.online_results],
         "database_results": [_result_to_dict(item) for item in bundle.database_results],
+        "entity_catalog_candidates": [_result_to_dict(item) for item in bundle.entity_catalog_candidates],
     }
 
 

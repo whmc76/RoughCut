@@ -5,6 +5,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from roughcut.edit.skills import apply_review_focus_overrides, resolve_editing_skill
 from roughcut.media.scene import SceneBoundary
 from roughcut.media.silence import SilenceSegment
 
@@ -170,6 +171,29 @@ _SILENCE_DURATION_SCORE_MAX = 0.55
 _SCENE_SNAP_TOLERANCE_SEC = 0.24
 _MIN_CUT_DURATION_SEC = 0.08
 _TRANSCRIPT_EVIDENCE_WINDOW_SEC = 0.45
+_TRIM_INTENSITY_PROFILES = {
+    "tight": {
+        "pad_multiplier": 0.72,
+        "max_edge_trim_multiplier": 1.15,
+        "micro_keep_no_subtitle_max_sec": 0.92,
+        "micro_keep_bridge_max_sec": 0.75,
+        "short_keep_audio_safe_sec": 1.15,
+    },
+    "balanced": {
+        "pad_multiplier": 1.0,
+        "max_edge_trim_multiplier": 1.0,
+        "micro_keep_no_subtitle_max_sec": _MICRO_KEEP_NO_SUBTITLE_MAX_SEC,
+        "micro_keep_bridge_max_sec": _MICRO_KEEP_BRIDGE_MAX_SEC,
+        "short_keep_audio_safe_sec": _SHORT_KEEP_AUDIO_SAFE_SEC,
+    },
+    "preserve": {
+        "pad_multiplier": 1.38,
+        "max_edge_trim_multiplier": 0.72,
+        "micro_keep_no_subtitle_max_sec": 0.42,
+        "micro_keep_bridge_max_sec": 0.34,
+        "short_keep_audio_safe_sec": 1.95,
+    },
+}
 
 
 @dataclass
@@ -229,9 +253,19 @@ def build_edit_decision(
     *,
     transcript_segments: list[dict] | None = None,
     scene_boundaries: list[SceneBoundary | dict[str, Any] | float] | None = None,
+    editing_skill: dict[str, Any] | None = None,
     min_silence_to_cut: float = 0.5,
     cut_fillers: bool = True,
 ) -> EditDecision:
+    resolved_skill = editing_skill or resolve_editing_skill(
+        workflow_template=str((content_profile or {}).get("workflow_template") or ""),
+        content_profile=content_profile,
+    )
+    resolved_skill = apply_review_focus_overrides(
+        resolved_skill,
+        review_focus=(editing_skill or {}).get("review_focus"),
+    )
+    effective_min_silence_to_cut = max(0.12, float(resolved_skill.get("silence_floor_sec", min_silence_to_cut) or min_silence_to_cut))
     normalized_subtitles = _normalize_subtitle_items(subtitle_items or [])
     normalized_transcript = _normalize_transcript_segments(transcript_segments or [])
     enriched_subtitles = _enrich_subtitle_items_with_transcript_evidence(
@@ -241,6 +275,12 @@ def build_edit_decision(
     scene_points = _normalize_scene_points(scene_boundaries or [])
 
     candidates: list[CutCandidate] = []
+    timeline_analysis = infer_timeline_analysis(
+        enriched_subtitles,
+        content_profile=content_profile,
+        duration=duration,
+        editing_skill=resolved_skill,
+    )
     candidates.extend(
         _build_silence_cut_candidates(
             silence_segments,
@@ -248,7 +288,9 @@ def build_edit_decision(
             transcript_segments=normalized_transcript,
             content_profile=content_profile,
             scene_points=scene_points,
-            min_silence_to_cut=min_silence_to_cut,
+            min_silence_to_cut=effective_min_silence_to_cut,
+            editing_skill=resolved_skill,
+            timeline_analysis=timeline_analysis,
         )
     )
     if cut_fillers and enriched_subtitles:
@@ -273,8 +315,15 @@ def build_edit_decision(
             transcript_segments=normalized_transcript,
             content_profile=content_profile,
             duration=duration,
+            timeline_analysis=timeline_analysis,
         )
     segments = _merge_adjacent_segments(segments)
+    keep_energy_segments = _build_keep_energy_segments_analysis(
+        segments,
+        subtitle_items=enriched_subtitles,
+        timeline_analysis=timeline_analysis,
+        content_profile=content_profile,
+    )
     return EditDecision(
         source=source_path,
         segments=segments,
@@ -282,9 +331,90 @@ def build_edit_decision(
             "candidate_count": len(candidates),
             "scene_boundary_count": len(scene_points),
             "transcript_segment_count": len(normalized_transcript),
-            "accepted_cuts": [candidate.to_dict() for candidate in candidates],
+            "effective_min_silence_to_cut": round(effective_min_silence_to_cut, 3),
+            "review_focus": str(resolved_skill.get("review_focus") or ""),
+            "accepted_cuts": _annotate_cut_candidates_with_keep_energy(
+                candidates,
+                keep_energy_segments=keep_energy_segments,
+            ),
+            "keep_energy_segments": keep_energy_segments,
+            "keep_energy_summary": _summarize_keep_energy_segments(keep_energy_segments),
+            **timeline_analysis,
         },
     )
+
+
+def infer_timeline_analysis(
+    subtitle_items: list[dict[str, Any]] | None,
+    *,
+    content_profile: dict | None = None,
+    duration: float | None = None,
+    editing_skill: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    normalized = _normalize_subtitle_items(list(subtitle_items or []))
+    resolved_skill = editing_skill or resolve_editing_skill(
+        workflow_template=str((content_profile or {}).get("workflow_template") or ""),
+        content_profile=content_profile,
+    )
+    resolved_skill = apply_review_focus_overrides(
+        resolved_skill,
+        review_focus=(editing_skill or {}).get("review_focus"),
+    )
+    total_duration = float(duration or 0.0)
+    if total_duration <= 0.0 and normalized:
+        total_duration = max(float(item.get("end_time", 0.0) or 0.0) for item in normalized)
+    if not normalized:
+        return {
+            "hook_end_sec": 0.0,
+            "cta_start_sec": None,
+            "semantic_sections": [],
+            "section_directives": [],
+            "section_actions": [],
+            "editing_skill": resolved_skill,
+            "emphasis_candidates": [],
+        }
+
+    annotated = []
+    for index, item in enumerate(normalized):
+        text = _subtitle_text(item)
+        role = _classify_semantic_role(
+            item,
+            index=index,
+            total_items=len(normalized),
+            total_duration=total_duration,
+        )
+        annotated.append(
+            {
+                "index": index,
+                "start_time": float(item.get("start_time", 0.0) or 0.0),
+                "end_time": float(item.get("end_time", 0.0) or 0.0),
+                "text": text,
+                "role": role,
+                "signal": round(_subtitle_signal_score(text, content_profile=content_profile), 3),
+            }
+        )
+
+    sections = _merge_semantic_sections(annotated)
+    hook_end_sec = 0.0
+    for section in sections:
+        if section["role"] == "hook":
+            hook_end_sec = max(hook_end_sec, float(section["end_sec"]))
+    if hook_end_sec <= 0.0:
+        hook_end_sec = min(total_duration, float(normalized[min(1, len(normalized) - 1)].get("end_time", 0.0) or 0.0))
+
+    cta_candidates = [section for section in sections if section["role"] == "cta"]
+    cta_start_sec = float(cta_candidates[0]["start_sec"]) if cta_candidates else None
+
+    emphasis_candidates = _build_emphasis_candidates(annotated)
+    return {
+        "hook_end_sec": round(hook_end_sec, 3),
+        "cta_start_sec": round(cta_start_sec, 3) if cta_start_sec is not None else None,
+        "semantic_sections": sections,
+        "section_directives": _build_section_directives(sections, editing_skill=resolved_skill),
+        "section_actions": _build_section_actions(sections, editing_skill=resolved_skill),
+        "editing_skill": resolved_skill,
+        "emphasis_candidates": emphasis_candidates,
+    }
 
 
 def _build_silence_cut_candidates(
@@ -295,6 +425,8 @@ def _build_silence_cut_candidates(
     content_profile: dict | None,
     scene_points: list[float],
     min_silence_to_cut: float,
+    editing_skill: dict[str, Any] | None,
+    timeline_analysis: dict[str, Any] | None,
 ) -> list[CutCandidate]:
     candidates: list[CutCandidate] = []
     for silence in silence_segments:
@@ -307,6 +439,8 @@ def _build_silence_cut_candidates(
             content_profile=content_profile,
             scene_points=scene_points,
             min_silence_to_cut=min_silence_to_cut,
+            editing_skill=editing_skill,
+            timeline_analysis=timeline_analysis,
         )
         if candidate.score >= _SILENCE_CUT_SCORE_THRESHOLD and candidate.end - candidate.start >= _MIN_CUT_DURATION_SEC:
             candidates.append(candidate)
@@ -321,11 +455,16 @@ def _score_silence_cut(
     content_profile: dict | None,
     scene_points: list[float],
     min_silence_to_cut: float,
+    editing_skill: dict[str, Any] | None,
+    timeline_analysis: dict[str, Any] | None,
 ) -> CutCandidate:
+    skill_score_bias = float((editing_skill or {}).get("silence_score_bias", 0.0) or 0.0)
+    continuation_guard_penalty = float((editing_skill or {}).get("continuation_guard_penalty", 0.35) or 0.35)
     score = min(
         _SILENCE_DURATION_SCORE_MAX,
         _SILENCE_DURATION_SCORE_BASE + max(0.0, silence.duration - min_silence_to_cut) * _SILENCE_DURATION_SCORE_PER_SEC,
     )
+    score += skill_score_bias
     signals = [f"silence_duration={silence.duration:.2f}s"]
     previous_item = _find_previous_subtitle(silence.start, subtitle_items)
     next_item = _find_next_subtitle(silence.end, subtitle_items)
@@ -347,8 +486,8 @@ def _score_silence_cut(
         score += 0.18
         signals.append("restart_cue_next")
     if _looks_like_sentence_continuation(previous_item, next_item):
-        score -= 0.35
-        signals.append("continuation_guard")
+        score -= continuation_guard_penalty
+        signals.append(f"continuation_guard={continuation_guard_penalty:.2f}")
     if _looks_like_semantic_bridge(previous_item, next_item, content_profile=content_profile):
         score -= 0.08
         signals.append("semantic_bridge")
@@ -372,6 +511,15 @@ def _score_silence_cut(
     if confidence_penalty:
         score += confidence_penalty
         signals.append(f"confidence_guard={confidence_penalty:.2f}")
+
+    focus_guard_penalty, focus_guard_signal = _review_focus_boundary_penalty(
+        silence,
+        timeline_analysis=timeline_analysis,
+        editing_skill=editing_skill,
+    )
+    if focus_guard_penalty > 0:
+        score -= focus_guard_penalty
+        signals.append(f"{focus_guard_signal}={focus_guard_penalty:.2f}")
 
     cut_start = silence.start
     cut_end = silence.end
@@ -435,6 +583,175 @@ def _build_hard_cut_candidates(cuts: list[tuple[float, float, str]]) -> list[Cut
         for start, end, reason in cuts
         if end > start
     ]
+
+
+def _classify_semantic_role(
+    item: dict[str, Any],
+    *,
+    index: int,
+    total_items: int,
+    total_duration: float,
+) -> str:
+    text = _subtitle_text(item)
+    start_time = float(item.get("start_time", 0.0) or 0.0)
+    end_time = float(item.get("end_time", 0.0) or 0.0)
+    cta_keywords = ("点赞", "关注", "收藏", "评论", "下期", "下次", "记得", "转发", "关注我")
+    detail_keywords = ("参数", "细节", "体验", "对比", "测试", "上手", "演示", "区别", "优点", "缺点")
+    hook_keywords = ("先说", "先看", "直接", "今天", "这次", "先给", "先抛", "先讲", "结论")
+
+    if any(keyword in text for keyword in cta_keywords):
+        return "cta"
+    if total_duration > 0 and start_time >= total_duration * 0.78 and index >= max(0, total_items - 2):
+        return "cta"
+    if index <= 1 or end_time <= min(8.5, max(4.5, total_duration * 0.3 if total_duration > 0 else 8.5)):
+        if any(keyword in text for keyword in hook_keywords) or index == 0:
+            return "hook"
+    if any(keyword in text for keyword in detail_keywords):
+        return "detail"
+    return "body"
+
+
+def _merge_semantic_sections(annotated: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not annotated:
+        return []
+    sections: list[dict[str, Any]] = []
+    current = {
+        "role": annotated[0]["role"],
+        "start_sec": annotated[0]["start_time"],
+        "end_sec": annotated[0]["end_time"],
+        "summary": annotated[0]["text"][:24],
+        "item_indexes": [annotated[0]["index"]],
+    }
+    for item in annotated[1:]:
+        if item["role"] == current["role"]:
+            current["end_sec"] = item["end_time"]
+            current["item_indexes"].append(item["index"])
+            if len(str(current["summary"])) < 12:
+                current["summary"] = str(current["summary"]) + " / " + item["text"][:12]
+            continue
+        sections.append(
+            {
+                "role": current["role"],
+                "start_sec": round(float(current["start_sec"]), 3),
+                "end_sec": round(float(current["end_sec"]), 3),
+                "summary": str(current["summary"])[:48],
+                "item_indexes": list(current["item_indexes"]),
+            }
+        )
+        current = {
+            "role": item["role"],
+            "start_sec": item["start_time"],
+            "end_sec": item["end_time"],
+            "summary": item["text"][:24],
+            "item_indexes": [item["index"]],
+        }
+    sections.append(
+        {
+            "role": current["role"],
+            "start_sec": round(float(current["start_sec"]), 3),
+            "end_sec": round(float(current["end_sec"]), 3),
+            "summary": str(current["summary"])[:48],
+            "item_indexes": list(current["item_indexes"]),
+        }
+    )
+    return sections
+
+
+def _build_emphasis_candidates(annotated: list[dict[str, Any]], *, max_count: int = 6) -> list[dict[str, Any]]:
+    ranked: list[tuple[float, dict[str, Any]]] = []
+    for item in annotated:
+        score = float(item["signal"])
+        text = str(item["text"] or "")
+        if any(keyword in text for keyword in ("注意", "重点", "关键", "直接", "一定", "参数", "对比")):
+            score += 1.2
+        if any(ch.isdigit() for ch in text):
+            score += 0.8
+        if item["role"] == "hook":
+            score += 0.7
+        if score <= 0.8:
+            continue
+        ranked.append(
+            (
+                score,
+                {
+                    "text": text[:18],
+                    "start_time": round(float(item["start_time"]), 3),
+                    "end_time": round(float(item["end_time"]), 3),
+                    "role": item["role"],
+                    "score": round(score, 3),
+                },
+            )
+        )
+    chosen: list[dict[str, Any]] = []
+    for _score, candidate in sorted(ranked, key=lambda item: (-item[0], float(item[1]["start_time"]))):
+        if any(abs(float(candidate["start_time"]) - float(existing["start_time"])) < 1.6 for existing in chosen):
+            continue
+        chosen.append(candidate)
+        if len(chosen) >= max_count:
+            break
+    return chosen
+
+
+def _build_section_directives(
+    sections: list[dict[str, Any]],
+    *,
+    editing_skill: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    section_policy = dict((editing_skill or {}).get("section_policy") or {})
+    directives: list[dict[str, Any]] = []
+    for index, section in enumerate(sections):
+        role = str(section.get("role") or "")
+        policy = dict(section_policy.get(role) or {})
+        overlay_weight = float(policy.get("overlay_weight", 0.0) or 0.0)
+        music_entry_allowed = bool(policy.get("music_entry_allowed", role != "cta"))
+        insert_allowed = bool(policy.get("insert_allowed", role in {"detail", "body"}))
+        directives.append(
+            {
+                "index": index,
+                "role": role,
+                "start_sec": round(float(section.get("start_sec") or 0.0), 3),
+                "end_sec": round(float(section.get("end_sec") or 0.0), 3),
+                "overlay_weight": overlay_weight,
+                "music_entry_allowed": music_entry_allowed,
+                "music_entry_bonus": round(float(policy.get("music_entry_bonus", 0.0) or 0.0), 3),
+                "insert_allowed": insert_allowed,
+                "insert_priority": round(float(policy.get("insert_priority", 0.0) or 0.0), 3),
+            }
+        )
+    return directives
+
+
+def _build_section_actions(
+    sections: list[dict[str, Any]],
+    *,
+    editing_skill: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    section_policy = dict((editing_skill or {}).get("section_policy") or {})
+    actions: list[dict[str, Any]] = []
+    for index, section in enumerate(sections):
+        role = str(section.get("role") or "")
+        start_sec = round(float(section.get("start_sec") or 0.0), 3)
+        end_sec = round(float(section.get("end_sec") or 0.0), 3)
+        duration_sec = max(0.0, end_sec - start_sec)
+        policy = dict(section_policy.get(role) or {})
+        anchor_bias = min(1.0, max(0.0, float(policy.get("broll_anchor_bias", 0.5) or 0.5)))
+        actions.append(
+            {
+                "index": index,
+                "role": role,
+                "start_sec": start_sec,
+                "end_sec": end_sec,
+                "duration_sec": round(duration_sec, 3),
+                "trim_intensity": str(policy.get("trim_intensity") or "balanced"),
+                "packaging_intent": str(policy.get("packaging_intent") or f"{role}_support"),
+                "transition_boost": round(float(policy.get("transition_boost", 0.0) or 0.0), 3),
+                "transition_anchor_sec": start_sec,
+                "broll_allowed": bool(policy.get("broll_allowed", False)),
+                "broll_anchor_sec": round(start_sec + duration_sec * anchor_bias, 3),
+                "action_priority": round(float(policy.get("insert_priority", 0.0) or 0.0), 3),
+            }
+        )
+    return actions
 
 
 def _normalize_subtitle_items(subtitle_items: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -607,6 +924,7 @@ def _refine_segments_for_pacing(
     transcript_segments: list[dict[str, Any]],
     content_profile: dict | None,
     duration: float,
+    timeline_analysis: dict[str, Any] | None = None,
 ) -> list[EditSegment]:
     refined: list[EditSegment] = []
     for segment in segments:
@@ -615,15 +933,22 @@ def _refine_segments_for_pacing(
             continue
 
         seg_duration = max(0.0, segment.end - segment.start)
+        trim_profile = _resolve_trim_profile_for_segment(segment, timeline_analysis=timeline_analysis)
         overlaps = _overlapping_subtitle_items(segment.start, segment.end, subtitle_items)
         if not overlaps:
             transcript_overlaps = _overlapping_transcript_segments(segment.start, segment.end, transcript_segments)
-            if seg_duration <= _MICRO_KEEP_NO_SUBTITLE_MAX_SEC and not transcript_overlaps:
+            if seg_duration <= float(trim_profile["micro_keep_no_subtitle_max_sec"]) and not transcript_overlaps:
                 refined.append(EditSegment(start=segment.start, end=segment.end, type="remove", reason="micro_keep"))
             else:
                 refined.append(segment)
             continue
 
+        keep_energy = _resolve_keep_energy_for_segment(
+            segment,
+            overlaps=overlaps,
+            timeline_analysis=timeline_analysis,
+            content_profile=content_profile,
+        )
         max_signal = max(_subtitle_signal_score(_subtitle_text(item), content_profile=content_profile) for item in overlaps)
         overlap_start = min(float(item.get("start_time", 0.0) or 0.0) for item in overlaps)
         overlap_end = max(float(item.get("end_time", 0.0) or 0.0) for item in overlaps)
@@ -631,6 +956,12 @@ def _refine_segments_for_pacing(
         pad_before = _KEEP_TRIM_PAD_BEFORE_STRONG_SEC if max_signal >= _STRONG_SUBTITLE_SIGNAL_SCORE else _KEEP_TRIM_PAD_BEFORE_SEC
         pad_after = _KEEP_TRIM_PAD_AFTER_STRONG_SEC if max_signal >= _STRONG_SUBTITLE_SIGNAL_SCORE else _KEEP_TRIM_PAD_AFTER_SEC
         max_edge_trim = _KEEP_EDGE_TRIM_MAX_STRONG_SEC if max_signal >= _STRONG_SUBTITLE_SIGNAL_SCORE else _KEEP_EDGE_TRIM_MAX_SEC
+        pad_before *= float(trim_profile["pad_multiplier"])
+        pad_after *= float(trim_profile["pad_multiplier"])
+        max_edge_trim *= float(trim_profile["max_edge_trim_multiplier"])
+        pad_before += min(0.14, keep_energy * 0.05)
+        pad_after += min(0.18, keep_energy * 0.06)
+        max_edge_trim *= max(0.5, 1.0 - min(0.42, keep_energy * 0.16))
         if overlap_duration <= _SHORT_SUBTITLE_SPAN_SEC:
             pad_before += _SHORT_SUBTITLE_PAD_BEFORE_BONUS_SEC
             pad_after += _SHORT_SUBTITLE_PAD_AFTER_BONUS_SEC
@@ -641,7 +972,8 @@ def _refine_segments_for_pacing(
         if _looks_like_incomplete_tail(_subtitle_text(last_overlap)):
             pad_after += _KEEP_INCOMPLETE_PAD_AFTER_BONUS_SEC
 
-        if seg_duration <= _SHORT_KEEP_AUDIO_SAFE_SEC:
+        short_keep_audio_safe_sec = float(trim_profile["short_keep_audio_safe_sec"]) + min(0.55, keep_energy * 0.24)
+        if seg_duration <= short_keep_audio_safe_sec:
             refined.append(segment)
             continue
 
@@ -671,13 +1003,25 @@ def _refine_segments_for_pacing(
             (_subtitle_signal_score(_subtitle_text(item), content_profile=content_profile) for item in overlaps),
             default=0.0,
         )
+        keep_energy = _resolve_keep_energy_for_segment(
+            segment,
+            overlaps=overlaps,
+            timeline_analysis=timeline_analysis,
+            content_profile=content_profile,
+        )
         surrounded_by_removes = (
             index > 0
             and index < len(refined) - 1
             and refined[index - 1].type == "remove"
             and refined[index + 1].type == "remove"
         )
-        if surrounded_by_removes and seg_duration <= _MICRO_KEEP_BRIDGE_MAX_SEC and max_signal < _STRONG_SUBTITLE_SIGNAL_SCORE:
+        trim_profile = _resolve_trim_profile_for_segment(segment, timeline_analysis=timeline_analysis)
+        if (
+            surrounded_by_removes
+            and seg_duration <= float(trim_profile["micro_keep_bridge_max_sec"])
+            and max_signal < _STRONG_SUBTITLE_SIGNAL_SCORE
+            and keep_energy < 0.82
+        ):
             collapsed.append(EditSegment(start=segment.start, end=segment.end, type="remove", reason="micro_keep_bridge"))
             continue
         collapsed.append(segment)
@@ -688,6 +1032,224 @@ def _refine_segments_for_pacing(
     if merged and merged[-1].end < duration:
         merged.append(EditSegment(start=merged[-1].end, end=duration, type="remove", reason="gap_fill"))
     return _merge_adjacent_segments(merged)
+
+
+def _resolve_keep_energy_for_segment(
+    segment: EditSegment,
+    *,
+    overlaps: list[dict[str, Any]],
+    timeline_analysis: dict[str, Any] | None = None,
+    content_profile: dict | None = None,
+) -> float:
+    energy = 0.0
+    midpoint = segment.start + max(0.0, segment.end - segment.start) * 0.5
+    trim_intensity = "balanced"
+    max_signal = max(
+        (_subtitle_signal_score(_subtitle_text(item), content_profile=content_profile) for item in overlaps),
+        default=0.0,
+    )
+    if max_signal >= _STRONG_SUBTITLE_SIGNAL_SCORE:
+        energy += 0.82 + min(0.42, (max_signal - _STRONG_SUBTITLE_SIGNAL_SCORE) * 0.22)
+    elif max_signal >= 1.0:
+        energy += 0.34 + min(0.22, (max_signal - 1.0) * 0.18)
+    elif overlaps:
+        energy += 0.12
+
+    emphasis_candidates = list((timeline_analysis or {}).get("emphasis_candidates") or [])
+    for candidate in emphasis_candidates:
+        if not isinstance(candidate, dict):
+            continue
+        candidate_start = float(candidate.get("start_time", 0.0) or 0.0)
+        if abs(candidate_start - midpoint) <= 0.65:
+            energy += 0.24
+            break
+
+    for action in list((timeline_analysis or {}).get("section_actions") or []):
+        if not isinstance(action, dict):
+            continue
+        start_sec = float(action.get("start_sec", 0.0) or 0.0)
+        end_sec = float(action.get("end_sec", start_sec) or start_sec)
+        if not (start_sec - 1e-6 <= midpoint <= end_sec + 1e-6):
+            continue
+        role = str(action.get("role") or "").strip().lower()
+        packaging_intent = str(action.get("packaging_intent") or "").strip().lower()
+        trim_intensity = str(action.get("trim_intensity") or "balanced")
+        energy += {
+            "hook": 0.38,
+            "detail": 0.24,
+            "body": 0.12,
+            "cta": 0.16,
+        }.get(role, 0.0)
+        energy += min(0.22, max(0.0, float(action.get("transition_boost", 0.0) or 0.0)) * 0.28)
+        if packaging_intent in {"hook_focus", "detail_support"}:
+            energy += 0.12
+        elif packaging_intent == "cta_protect":
+            energy += 0.08
+        focus_bonus = float(((timeline_analysis or {}).get("editing_skill") or {}).get("focus_keep_energy_bonus", {}).get(role, 0.0) or 0.0)
+        if focus_bonus > 0:
+            energy += focus_bonus
+        break
+
+    energy *= {
+        "tight": 0.52,
+        "balanced": 1.0,
+        "preserve": 1.18,
+    }.get(trim_intensity, 1.0)
+    return max(0.0, min(2.4, energy))
+
+
+def _review_focus_boundary_penalty(
+    silence: SilenceSegment,
+    *,
+    timeline_analysis: dict[str, Any] | None,
+    editing_skill: dict[str, Any] | None,
+) -> tuple[float, str]:
+    focus_cut_guard = dict((editing_skill or {}).get("focus_cut_guard") or {})
+    if not focus_cut_guard:
+        return 0.0, ""
+    midpoint = silence.start + max(0.0, silence.end - silence.start) * 0.5
+    action = _section_action_for_time(midpoint, timeline_analysis=timeline_analysis)
+    role = str((action or {}).get("role") or "").strip().lower()
+    if not role:
+        return 0.0, ""
+    penalty = float(focus_cut_guard.get(role, 0.0) or 0.0)
+    if penalty <= 0:
+        return 0.0, ""
+    return penalty, f"review_focus_{role}_guard"
+
+
+def _build_keep_energy_segments_analysis(
+    segments: list[EditSegment],
+    *,
+    subtitle_items: list[dict[str, Any]],
+    timeline_analysis: dict[str, Any] | None = None,
+    content_profile: dict | None = None,
+) -> list[dict[str, Any]]:
+    analysis: list[dict[str, Any]] = []
+    for segment in segments:
+        if segment.type != "keep":
+            continue
+        overlaps = _overlapping_subtitle_items(segment.start, segment.end, subtitle_items)
+        if not overlaps:
+            continue
+        midpoint = segment.start + max(0.0, segment.end - segment.start) * 0.5
+        keep_energy = _resolve_keep_energy_for_segment(
+            segment,
+            overlaps=overlaps,
+            timeline_analysis=timeline_analysis,
+            content_profile=content_profile,
+        )
+        section_action = _section_action_for_time(midpoint, timeline_analysis=timeline_analysis)
+        max_signal = max(
+            (_subtitle_signal_score(_subtitle_text(item), content_profile=content_profile) for item in overlaps),
+            default=0.0,
+        )
+        emphasis_count = sum(
+            1
+            for candidate in list((timeline_analysis or {}).get("emphasis_candidates") or [])
+            if isinstance(candidate, dict) and abs(float(candidate.get("start_time", 0.0) or 0.0) - midpoint) <= 0.65
+        )
+        analysis.append(
+            {
+                "start": round(segment.start, 3),
+                "end": round(segment.end, 3),
+                "duration_sec": round(max(0.0, segment.end - segment.start), 3),
+                "keep_energy": round(keep_energy, 3),
+                "max_signal": round(max_signal, 3),
+                "subtitle_count": len(overlaps),
+                "section_role": str((section_action or {}).get("role") or ""),
+                "trim_intensity": str((section_action or {}).get("trim_intensity") or "balanced"),
+                "packaging_intent": str((section_action or {}).get("packaging_intent") or ""),
+                "emphasis_hits": emphasis_count,
+            }
+        )
+    return analysis
+
+
+def _annotate_cut_candidates_with_keep_energy(
+    candidates: list[CutCandidate],
+    *,
+    keep_energy_segments: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    annotated: list[dict[str, Any]] = []
+    for candidate in candidates:
+        payload = candidate.to_dict()
+        previous_keep = None
+        next_keep = None
+        for segment in keep_energy_segments:
+            seg_end = float(segment.get("end", 0.0) or 0.0)
+            seg_start = float(segment.get("start", 0.0) or 0.0)
+            if seg_end <= candidate.start + 1e-6:
+                previous_keep = segment
+                continue
+            if seg_start >= candidate.end - 1e-6:
+                next_keep = segment
+                break
+        if previous_keep is not None:
+            payload["left_keep_energy"] = round(float(previous_keep.get("keep_energy", 0.0) or 0.0), 3)
+            payload["left_keep_role"] = str(previous_keep.get("section_role") or "")
+        if next_keep is not None:
+            payload["right_keep_energy"] = round(float(next_keep.get("keep_energy", 0.0) or 0.0), 3)
+            payload["right_keep_role"] = str(next_keep.get("section_role") or "")
+        payload["boundary_keep_energy"] = round(
+            max(
+                float((previous_keep or {}).get("keep_energy", 0.0) or 0.0),
+                float((next_keep or {}).get("keep_energy", 0.0) or 0.0),
+            ),
+            3,
+        )
+        annotated.append(payload)
+    return annotated
+
+
+def _summarize_keep_energy_segments(keep_energy_segments: list[dict[str, Any]]) -> dict[str, Any]:
+    if not keep_energy_segments:
+        return {
+            "count": 0,
+            "high_energy_count": 0,
+            "max_keep_energy": 0.0,
+            "avg_keep_energy": 0.0,
+        }
+    energies = [float(segment.get("keep_energy", 0.0) or 0.0) for segment in keep_energy_segments]
+    return {
+        "count": len(keep_energy_segments),
+        "high_energy_count": sum(1 for energy in energies if energy >= 1.0),
+        "max_keep_energy": round(max(energies), 3),
+        "avg_keep_energy": round(sum(energies) / len(energies), 3),
+    }
+
+
+def _section_action_for_time(
+    time_sec: float,
+    *,
+    timeline_analysis: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    for action in list((timeline_analysis or {}).get("section_actions") or []):
+        if not isinstance(action, dict):
+            continue
+        start_sec = float(action.get("start_sec", 0.0) or 0.0)
+        end_sec = float(action.get("end_sec", start_sec) or start_sec)
+        if start_sec - 1e-6 <= time_sec <= end_sec + 1e-6:
+            return action
+    return None
+
+
+def _resolve_trim_profile_for_segment(
+    segment: EditSegment,
+    *,
+    timeline_analysis: dict[str, Any] | None = None,
+) -> dict[str, float]:
+    trim_intensity = "balanced"
+    midpoint = segment.start + max(0.0, segment.end - segment.start) * 0.5
+    for action in list((timeline_analysis or {}).get("section_actions") or []):
+        if not isinstance(action, dict):
+            continue
+        start_sec = float(action.get("start_sec", 0.0) or 0.0)
+        end_sec = float(action.get("end_sec", start_sec) or start_sec)
+        if start_sec - 1e-6 <= midpoint <= end_sec + 1e-6:
+            trim_intensity = str(action.get("trim_intensity") or "balanced")
+            break
+    return dict(_TRIM_INTENSITY_PROFILES.get(trim_intensity, _TRIM_INTENSITY_PROFILES["balanced"]))
 
 
 def _merge_adjacent_segments(segments: list[EditSegment]) -> list[EditSegment]:

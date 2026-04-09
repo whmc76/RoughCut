@@ -418,7 +418,7 @@ async def create_job(
     with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
         tmp_path = Path(tmp.name)
         content = await file.read()
-        if len(content) > settings.max_upload_size_bytes:
+        if settings.max_upload_size_bytes > 0 and len(content) > settings.max_upload_size_bytes:
             tmp_path.unlink(missing_ok=True)
             raise HTTPException(status_code=413, detail="File too large")
         tmp.write(content)

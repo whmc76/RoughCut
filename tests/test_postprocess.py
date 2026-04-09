@@ -216,6 +216,60 @@ def test_split_into_subtitles_collapses_adjacent_near_duplicates():
     assert entries[0].end == 1.9
 
 
+def test_split_into_subtitles_bridges_long_pause_for_short_sentence_tail():
+    segs = [
+        _mock_segment(0, 0.0, 1.6, "这个结构我觉得已经很顺手"),
+        _mock_segment(1, 4.3, 4.9, "了"),
+    ]
+
+    entries = split_into_subtitles(segs, max_chars=12, max_duration=2.6)
+
+    assert len(entries) == 1
+    assert entries[0].text_raw == "这个结构我觉得已经很顺手了"
+    assert entries[0].start == 0.0
+    assert entries[0].end == 4.9
+
+
+def test_split_into_subtitles_rebalances_leading_fragment_back_to_previous_sentence():
+    segs = [
+        _mock_segment(
+            0,
+            0.0,
+            2.4,
+            "这个纹理处理得很细",
+            words=[
+                {"word": "这个", "start": 0.0, "end": 0.4},
+                {"word": "纹理", "start": 0.4, "end": 0.9},
+                {"word": "处理", "start": 0.9, "end": 1.4},
+                {"word": "得", "start": 1.4, "end": 1.6},
+                {"word": "很", "start": 1.6, "end": 1.9},
+                {"word": "细", "start": 1.9, "end": 2.4},
+            ],
+        ),
+        _mock_segment(
+            1,
+            4.0,
+            5.9,
+            "腻而且握持更稳",
+            words=[
+                {"word": "腻", "start": 4.0, "end": 4.3},
+                {"word": "而且", "start": 4.3, "end": 4.8},
+                {"word": "握持", "start": 4.8, "end": 5.2},
+                {"word": "更", "start": 5.2, "end": 5.4},
+                {"word": "稳", "start": 5.4, "end": 5.9},
+            ],
+        ),
+    ]
+
+    entries = split_into_subtitles(segs, max_chars=12, max_duration=2.6)
+
+    assert len(entries) == 2
+    assert entries[0].text_raw == "这个纹理处理得很细腻"
+    assert entries[0].end == 4.3
+    assert entries[1].text_raw == "而且握持更稳"
+    assert entries[1].start == 4.3
+
+
 def test_split_into_subtitles_normalizes_filler_words_and_numbers_for_display():
     segs = [_mock_segment(0, 0.0, 2.0, "呃然后这个包装小了一圈有两个档位吧")]
 

@@ -9,6 +9,19 @@ import re
 from pathlib import Path
 
 _SUBTITLE_FONT_SCALE = 1.9
+_WRAP_NO_SPLIT_ENDINGS = (
+    "的", "了", "呢", "吗", "嘛", "啊", "呀", "着", "把", "给", "在", "向", "和", "与", "及",
+    "就", "也", "还", "很", "都", "又", "才", "再", "并", "跟", "让", "被",
+    "然后", "所以", "但是", "而且", "并且", "会", "想", "要", "能",
+)
+_WRAP_NO_SPLIT_PREFIXES = (
+    "的", "了", "呢", "吗", "嘛", "啊", "呀", "着", "把", "给", "在", "向", "和", "与", "及",
+    "就", "也", "还", "很", "都", "又", "才", "再", "并", "跟", "让", "被", "地", "得",
+    "起来", "下来", "上来", "下去", "一下", "喜欢",
+)
+_WRAP_GOOD_BREAK_PREFIXES = (
+    "但是", "不过", "所以", "然后", "而且", "并且", "如果", "因为", "另外", "同时",
+)
 
 SUBTITLE_STYLE_PRESETS: dict[str, dict[str, object]] = {
     "bold_yellow_outline": {
@@ -437,28 +450,8 @@ def write_ass_file(
     The outline creates the fluorescent glow effect around each character.
     BorderStyle=1 (outline only, no background box).
     """
-    style = dict(SUBTITLE_STYLE_PRESETS.get(style_name, SUBTITLE_STYLE_PRESETS["bold_yellow_outline"]))
-    font_name = str(style.get("font_name") or font_name)
-    base_font_size = int(style.get("font_size") or font_size)
-    font_size = max(int(font_size), int(round(base_font_size * _SUBTITLE_FONT_SCALE)))
-    font_size = _resolve_subtitle_font_size(
-        play_res_x=play_res_x,
-        play_res_y=play_res_y,
-        font_size=font_size,
-    )
-    text_color_rgb = str(style.get("text_color_rgb") or text_color_rgb)
-    outline_color_rgb = str(style.get("outline_color_rgb") or outline_color_rgb)
     motion_style = _normalize_motion_style(motion_style)
-    outline_width = int(style.get("outline_width") or outline_width)
-    margin_v = int(style.get("margin_v") or margin_v)
-    if margin_v_override is not None:
-        margin_v = max(margin_v, int(margin_v_override))
-    margin_h = _resolve_subtitle_horizontal_margin(play_res_x=play_res_x)
-    bold_flag = -1 if style.get("bold", True) else 0
-    shadow = int(style.get("shadow") or 0)
-    border_style = int(style.get("border_style") or 1)
-    back_color_rgb = str(style.get("back_color_rgb") or "000000")
-    back_alpha = int(style.get("back_alpha") or 0)
+    base_style_name = str(style_name or "bold_yellow_outline")
 
     # ASS color format: &HAABBGGRR (alpha, blue, green, red)
     def _rgb_to_ass(rgb_hex: str, alpha: int = 0) -> str:
@@ -467,10 +460,43 @@ def write_ass_file(
         b = int(rgb_hex[4:6], 16)
         return f"&H{alpha:02X}{b:02X}{g:02X}{r:02X}"
 
-    primary  = _rgb_to_ass(text_color_rgb)
-    outline  = _rgb_to_ass(outline_color_rgb)
-    secondary = "&H000000FF"                     # not displayed
-    back      = _rgb_to_ass(back_color_rgb, alpha=back_alpha)
+    style_definitions: dict[str, dict[str, object]] = {
+        "Default": _resolve_ass_style_definition(
+            base_style_name,
+            font_name=font_name,
+            font_size=font_size,
+            text_color_rgb=text_color_rgb,
+            outline_color_rgb=outline_color_rgb,
+            outline_width=outline_width,
+            margin_v=margin_v,
+            margin_v_override=margin_v_override,
+            play_res_x=play_res_x,
+            play_res_y=play_res_y,
+        )
+    }
+    for item in subtitle_items:
+        item_style_name = str((item or {}).get("style_name") or "").strip()
+        if not item_style_name or item_style_name == base_style_name:
+            continue
+        if item_style_name in style_definitions:
+            continue
+        style_definitions[item_style_name] = _resolve_ass_style_definition(
+            item_style_name,
+            font_name=font_name,
+            font_size=font_size,
+            text_color_rgb=text_color_rgb,
+            outline_color_rgb=outline_color_rgb,
+            outline_width=outline_width,
+            margin_v=margin_v,
+            margin_v_override=margin_v_override,
+            play_res_x=play_res_x,
+            play_res_y=play_res_y,
+        )
+
+    style_lines = [
+        _build_ass_style_line(style_id, style_definition, rgb_to_ass=_rgb_to_ass)
+        for style_id, style_definition in style_definitions.items()
+    ]
 
     header = (
         "[Script Info]\n"
@@ -485,13 +511,7 @@ def write_ass_file(
         "OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, "
         "ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
         "Alignment, MarginL, MarginR, MarginV, Encoding\n"
-        # BorderStyle=1: text outline (not background box)
-        # Outline=outline_width: thick border = fluorescent glow
-        # Shadow=0: no drop shadow
-        # Bold=-1, Alignment=2 (bottom center)
-        f"Style: Default,{font_name},{font_size},"
-        f"{primary},{secondary},{outline},{back},"
-        f"{bold_flag},0,0,0,100,100,0,0,{border_style},{outline_width},{shadow},2,{margin_h},{margin_h},{margin_v},1\n"
+        f"{chr(10).join(style_lines)}\n"
         "\n"
         "[Events]\n"
         "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text"
@@ -501,6 +521,10 @@ def write_ass_file(
     for item in subtitle_items:
         start = _ass_time(item["start_time"])
         end   = _ass_time(item["end_time"])
+        style_id = str(item.get("style_name") or "").strip()
+        if not style_id or style_id not in style_definitions:
+            style_id = "Default"
+        style_definition = style_definitions[style_id]
         text  = (
             item.get("text_final")
             or item.get("text_norm")
@@ -510,15 +534,85 @@ def write_ass_file(
             str(text),
             max_chars_per_line=_estimate_subtitle_line_capacity(
                 play_res_x=play_res_x,
-                font_size=font_size,
+                font_size=int(style_definition["font_size"]),
             ),
             max_lines=2,
         )
         text = text.replace("{", r"\{").replace("\n", r"\N")
-        lines.append(f"Dialogue: 0,{start},{end},Default,,0,0,0,,{_build_motion_tag(text, motion_style)}")
+        resolved_motion_style = _normalize_motion_style(str(item.get("motion_style") or motion_style))
+        margin_floor = int(style_definition["margin_v"])
+        margin_delta = int(item.get("margin_v_delta", 0) or 0)
+        item_margin_v_override = item.get("margin_v_override")
+        if item_margin_v_override is None:
+            item_margin_v_override = margin_floor + margin_delta
+        item_margin_v = max(margin_floor, int(item_margin_v_override or 0))
+        lines.append(
+            f"Dialogue: 0,{start},{end},{style_id},,0,0,{item_margin_v},,"
+            f"{_build_motion_tag(text, resolved_motion_style)}"
+        )
 
     ass_path.write_text("\n".join(lines), encoding="utf-8-sig")
     return ass_path
+
+
+def _resolve_ass_style_definition(
+    style_name: str,
+    *,
+    font_name: str,
+    font_size: int,
+    text_color_rgb: str,
+    outline_color_rgb: str,
+    outline_width: int,
+    margin_v: int,
+    margin_v_override: int | None,
+    play_res_x: int,
+    play_res_y: int,
+) -> dict[str, object]:
+    style = dict(SUBTITLE_STYLE_PRESETS.get(style_name, SUBTITLE_STYLE_PRESETS["bold_yellow_outline"]))
+    resolved_font_name = str(style.get("font_name") or font_name)
+    base_font_size = int(style.get("font_size") or font_size)
+    resolved_font_size = max(int(font_size), int(round(base_font_size * _SUBTITLE_FONT_SCALE)))
+    resolved_font_size = _resolve_subtitle_font_size(
+        play_res_x=play_res_x,
+        play_res_y=play_res_y,
+        font_size=resolved_font_size,
+    )
+    resolved_margin_v = int(style.get("margin_v") or margin_v)
+    if margin_v_override is not None:
+        resolved_margin_v = max(resolved_margin_v, int(margin_v_override))
+    return {
+        "font_name": resolved_font_name,
+        "font_size": resolved_font_size,
+        "text_color_rgb": str(style.get("text_color_rgb") or text_color_rgb),
+        "outline_color_rgb": str(style.get("outline_color_rgb") or outline_color_rgb),
+        "outline_width": int(style.get("outline_width") or outline_width),
+        "margin_v": resolved_margin_v,
+        "bold_flag": -1 if style.get("bold", True) else 0,
+        "shadow": int(style.get("shadow") or 0),
+        "border_style": int(style.get("border_style") or 1),
+        "back_color_rgb": str(style.get("back_color_rgb") or "000000"),
+        "back_alpha": int(style.get("back_alpha") or 0),
+        "margin_h": _resolve_subtitle_horizontal_margin(play_res_x=play_res_x),
+    }
+
+
+def _build_ass_style_line(
+    style_id: str,
+    style_definition: dict[str, object],
+    *,
+    rgb_to_ass,
+) -> str:
+    primary = rgb_to_ass(str(style_definition["text_color_rgb"]))
+    outline = rgb_to_ass(str(style_definition["outline_color_rgb"]))
+    secondary = "&H000000FF"
+    back = rgb_to_ass(str(style_definition["back_color_rgb"]), alpha=int(style_definition["back_alpha"]))
+    return (
+        f"Style: {style_id},{style_definition['font_name']},{style_definition['font_size']},"
+        f"{primary},{secondary},{outline},{back},"
+        f"{style_definition['bold_flag']},0,0,0,100,100,0,0,{style_definition['border_style']},"
+        f"{style_definition['outline_width']},{style_definition['shadow']},2,"
+        f"{style_definition['margin_h']},{style_definition['margin_h']},{style_definition['margin_v']},1"
+    )
 
 
 def _normalize_motion_style(value: str) -> str:
@@ -631,12 +725,36 @@ def _wrap_subtitle_text(text: str, *, max_chars_per_line: int, max_lines: int = 
 
 def _find_subtitle_wrap_index(text: str, target: int) -> int:
     punctuation = "，。！？；：,.!?、）)]】》> "
-    lower = max(1, target - 4)
-    upper = min(len(text), target + 2)
-    for index in range(upper, lower - 1, -1):
+    lower = max(2, target - 4)
+    upper = min(len(text) - 1, target + 2)
+    best_index = min(len(text) - 1, max(1, target))
+    best_score = float("-inf")
+    for index in range(lower, upper + 1):
+        left = text[:index].strip()
+        right = text[index:].strip()
+        if not left or not right:
+            continue
+        score = -abs(index - target)
         if text[index - 1] in punctuation:
-            return index
-    return min(len(text), target)
+            score += 8
+        if any(right.startswith(prefix) for prefix in _WRAP_GOOD_BREAK_PREFIXES):
+            score += 6
+        if any(left.endswith(token) for token in _WRAP_NO_SPLIT_ENDINGS):
+            score -= 10
+        if any(right.startswith(token) for token in _WRAP_NO_SPLIT_PREFIXES):
+            score -= 10
+        if re.match(r"^[，。！？、：；,.!?]", right):
+            score -= 12
+        if len(right) <= 2:
+            score -= 6
+        if len(left) <= 2:
+            score -= 4
+        if len(left) <= len(right) + 2:
+            score += 1.5
+        if score > best_score:
+            best_score = score
+            best_index = index
+    return best_index
 
 
 def escape_path_for_ffmpeg_filter(path: Path) -> str:

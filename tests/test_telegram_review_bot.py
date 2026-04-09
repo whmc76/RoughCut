@@ -95,6 +95,58 @@ def test_build_final_review_reply_markup_contains_expected_buttons():
     assert callback_values[-1] == f"RCB:final:{job_id}:avatar"
 
 
+def test_build_final_review_reply_markup_shows_edit_button_for_high_risk_cuts():
+    job_id = uuid.uuid4()
+
+    markup = _build_final_review_reply_markup(
+        job_id,
+        variant_timeline_bundle={
+            "timeline_rules": {
+                "diagnostics": {
+                    "high_risk_cuts": [
+                        {
+                            "start": 2.8,
+                            "end": 3.12,
+                            "boundary_keep_energy": 1.18,
+                            "left_keep_role": "hook",
+                            "right_keep_role": "detail",
+                        },
+                    ]
+                }
+            }
+        },
+    )
+    button_texts = [button["text"] for row in markup["inline_keyboard"] for button in row]
+
+    assert "重剪 Hook 边界" in button_texts
+
+
+def test_build_final_review_reply_markup_uses_mid_section_edit_label_for_non_hook_risk():
+    job_id = uuid.uuid4()
+
+    markup = _build_final_review_reply_markup(
+        job_id,
+        variant_timeline_bundle={
+            "timeline_rules": {
+                "diagnostics": {
+                    "high_risk_cuts": [
+                        {
+                            "start": 12.8,
+                            "end": 13.12,
+                            "boundary_keep_energy": 1.08,
+                            "left_keep_role": "detail",
+                            "right_keep_role": "body",
+                        },
+                    ]
+                }
+            }
+        },
+    )
+    button_texts = [button["text"] for row in markup["inline_keyboard"] for button in row]
+
+    assert "重剪中段衔接" in button_texts
+
+
 def test_split_review_message_preserves_all_lines():
     text = "\n".join(f"line {index}" for index in range(20))
 
@@ -1143,6 +1195,57 @@ def test_build_final_review_message_includes_variant_timeline_warning():
     assert "ai_effect: sync metrics indicate a large subtitle gap" in message
 
 
+def test_build_final_review_message_includes_edit_diagnostics_review_flags():
+    message = _build_final_review_message(
+        source_name="final.mp4",
+        job_id=uuid.uuid4(),
+        workflow_mode="standard_edit",
+        enhancement_modes=[],
+        render_outputs={
+            "packaged_mp4": r"E:\output\final.mp4",
+        },
+        content_profile=None,
+        subtitle_report=None,
+        variant_timeline_bundle={
+            "timeline_rules": {
+                "diagnostics": {
+                    "high_energy_keeps": [
+                        {"start": 0.0, "end": 2.8, "keep_energy": 1.22, "section_role": "hook"},
+                    ],
+                    "high_risk_cuts": [
+                        {
+                            "start": 2.8,
+                            "end": 3.12,
+                            "reason": "silence",
+                            "boundary_keep_energy": 1.18,
+                            "left_keep_role": "hook",
+                            "right_keep_role": "detail",
+                        }
+                    ],
+                    "review_flags": {
+                        "review_recommended": True,
+                        "review_reasons": [
+                            "存在贴近高能量保留段的 cut，建议复核边界。",
+                            "Hook 段存在高能量保留片段，建议确认开场节奏。",
+                        ],
+                    },
+                }
+            },
+            "variants": {
+                "packaged": {
+                    "media": {"path": r"E:\output\final.mp4"},
+                    "subtitle_events": [],
+                }
+            },
+            "validation": {"status": "ok", "issues": []},
+        },
+    )
+
+    assert "剪辑风险提示：" in message
+    assert "建议人工复核：存在贴近高能量保留段的 cut，建议复核边界。；Hook 段存在高能量保留片段，建议确认开场节奏。" in message
+    assert "高风险 cut 2.80s-3.12s：边界能量 1.18，左侧 hook / 右侧 detail" in message
+
+
 @pytest.mark.asyncio
 async def test_send_review_message_attaches_final_review_reply_markup(monkeypatch):
     service = TelegramReviewBotService()
@@ -1180,10 +1283,30 @@ async def test_send_review_message_attaches_final_review_reply_markup(monkeypatc
         job_id,
         "\n".join(f"line {index}" for index in range(800)),
         videos=[telegram_bot.TelegramReviewVideo(path=telegram_bot.Path(__file__), caption="预览 1")],
+        variant_timeline_bundle={
+            "timeline_rules": {
+                "diagnostics": {
+                    "high_risk_cuts": [
+                        {"start": 2.8, "end": 3.12, "boundary_keep_energy": 1.18},
+                    ]
+                }
+            }
+        },
     )
 
     assert len(sent_texts) >= 2
-    assert sent_texts[0][1] == _build_final_review_reply_markup(job_id)
+    assert sent_texts[0][1] == _build_final_review_reply_markup(
+        job_id,
+        variant_timeline_bundle={
+            "timeline_rules": {
+                "diagnostics": {
+                    "high_risk_cuts": [
+                        {"start": 2.8, "end": 3.12, "boundary_keep_energy": 1.18},
+                    ]
+                }
+            }
+        },
+    )
     assert all(reply_markup is None for _, reply_markup in sent_texts[1:])
     assert "审核阶段：第三次复核" in sent_texts[0][0]
     assert sent_videos == [("预览 1\n审核阶段：第三次复核", 99)]
@@ -1278,6 +1401,41 @@ def test_build_final_review_clip_specs_prefers_keyword_segment():
     assert all(isinstance(clip, TelegramFinalReviewClip) for clip in clips)
 
 
+def test_build_final_review_clip_specs_prioritizes_diagnostics_for_hook_and_risk_cut():
+    clips = _build_final_review_clip_specs(
+        duration_sec=60.0,
+        subtitle_items=[
+            {"index": 1, "start": 2.0, "end": 4.0, "text": "先说结论这次更稳"},
+            {"index": 2, "start": 26.5, "end": 29.0, "text": "这里正好跨过一个关键剪辑边界"},
+            {"index": 3, "start": 50.0, "end": 54.0, "text": "最后总结值不值得买"},
+        ],
+        keywords=["扁桶手电", "亮度"],
+        variant_timeline_bundle={
+            "timeline_rules": {
+                "diagnostics": {
+                    "high_energy_keeps": [
+                        {"start": 0.0, "end": 4.0, "keep_energy": 1.24, "section_role": "hook"},
+                    ],
+                    "high_risk_cuts": [
+                        {
+                            "start": 27.0,
+                            "end": 27.3,
+                            "boundary_keep_energy": 1.18,
+                            "left_keep_role": "hook",
+                            "right_keep_role": "detail",
+                        }
+                    ],
+                }
+            }
+        },
+    )
+
+    assert len(clips) == 3
+    assert clips[0].matched_keyword == "高能量hook"
+    assert clips[1].label == "高风险边界"
+    assert clips[1].matched_keyword == "高风险cut"
+
+
 def test_build_final_review_rerun_plan_maps_common_feedback():
     cases = {
         "封面要重做，标题字太弱": ("render", "封面重出"),
@@ -1319,6 +1477,27 @@ def test_build_final_review_rerun_plans_distinguishes_subtitle_style_from_subtit
     assert [plan.category for plan in plans] == ["subtitle_style"]
     assert plans[0].trigger_step == "render"
     assert plans[0].targets == ("subtitle_style",)
+
+
+def test_build_final_review_rerun_plan_maps_diagnostic_cut_feedback_to_edit_plan():
+    plan = _build_final_review_rerun_plan("高风险 cut 这一刀不顺，hook 节奏也不对，前半段重剪")
+
+    assert plan is not None
+    assert plan.category == "edit_plan"
+    assert plan.trigger_step == "edit_plan"
+    assert plan.focus == "hook_boundary"
+    assert plan.label == "Hook 边界重剪"
+    assert "cut_boundary" in plan.targets
+    assert "hook_boundary" in plan.targets
+
+
+def test_build_final_review_rerun_plans_prefers_diagnostic_edit_feedback_over_subtitle_path():
+    plans = _build_final_review_rerun_plans("高风险边界这里字幕也有点挤，但主要是衔接生硬")
+
+    assert plans
+    assert plans[0].category == "edit_plan"
+    assert plans[0].focus == "mid_transition"
+    assert all(plan.category != "subtitle" for plan in plans)
 
 
 def test_extract_final_review_content_profile_feedback_parses_brand_and_model_corrections():
@@ -1680,6 +1859,48 @@ async def test_handle_update_dispatches_final_review_callback(monkeypatch):
 
     assert answered == [("cb-1", "已接收 BGM 重出")]
     assert handled == [(job_id, "只改BGM", "123")]
+
+
+@pytest.mark.asyncio
+async def test_handle_update_dispatches_diagnostic_edit_callback(monkeypatch):
+    service = TelegramReviewBotService()
+    job_id = uuid.uuid4()
+    handled: list[tuple[uuid.UUID, str, str]] = []
+    answered: list[tuple[str, str]] = []
+
+    monkeypatch.setattr(
+        telegram_bot,
+        "get_settings",
+        lambda: SimpleNamespace(
+            telegram_agent_enabled=True,
+            telegram_remote_review_enabled=False,
+            telegram_bot_chat_id="123",
+            telegram_bot_token="token",
+            telegram_bot_api_base_url="https://api.telegram.org",
+        ),
+    )
+
+    async def fake_handle(job_id_value: uuid.UUID, text: str, *, reply_chat_id: str = ""):
+        handled.append((job_id_value, text, reply_chat_id))
+
+    async def fake_answer(callback_query_id: str, *, text: str = ""):
+        answered.append((callback_query_id, text))
+
+    service._handle_final_review_reply = fake_handle
+    service._answer_callback_query = fake_answer
+
+    await service._handle_update(
+        {
+            "callback_query": {
+                "id": "cb-edit",
+                "data": _build_review_callback_data("final_review", job_id, "edit_hook"),
+                "message": {"chat": {"id": "123"}},
+            }
+        }
+    )
+
+    assert answered == [("cb-edit", "已接收 Hook 边界重剪")]
+    assert handled == [(job_id, "重剪 Hook 边界", "123")]
 
 
 @pytest.mark.asyncio
@@ -2091,6 +2312,66 @@ async def test_handle_final_review_reply_triggers_structured_rerun(db_engine):
 
     assert sent == [
         f"已记录任务 {job_id} 的成片修改意见，目标：avatar；并按“数字人解说重做”触发重跑：avatar_commentary -> edit_plan -> render -> final_review -> platform_package。"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_handle_final_review_reply_persists_structured_edit_focus_metadata(db_engine):
+    import roughcut.pipeline.orchestrator as orchestrator_mod
+    from roughcut.db.models import Job, JobStep
+    from roughcut.db.session import get_session_factory
+
+    service = TelegramReviewBotService()
+    sent: list[str] = []
+    job_id = uuid.uuid4()
+
+    async def fake_send_text(text: str, *, chat_id: str) -> None:
+        sent.append(text)
+
+    service._send_chat_text = fake_send_text
+
+    async with get_session_factory()() as session:
+        session.add(
+            Job(
+                id=job_id,
+                source_path="jobs/demo/final.mp4",
+                source_name="final.mp4",
+                status="needs_review",
+                language="zh-CN",
+            )
+        )
+        for step in orchestrator_mod.create_job_steps(job_id):
+            step.status = "done"
+            session.add(step)
+        final_review_step = (
+            await session.execute(
+                telegram_bot.select(JobStep).where(
+                    JobStep.job_id == job_id,
+                    JobStep.step_name == "final_review",
+                )
+            )
+        ).scalar_one()
+        final_review_step.status = "pending"
+        await session.commit()
+
+    await service._handle_final_review_reply(job_id, "重剪 Hook 边界", reply_chat_id="123")
+
+    async with get_session_factory()() as session:
+        steps = (
+            await session.execute(
+                telegram_bot.select(JobStep).where(JobStep.job_id == job_id)
+            )
+        ).scalars().all()
+        step_map = {step.step_name: step for step in steps}
+        edit_step_meta = dict(step_map["edit_plan"].metadata_ or {})
+
+        assert step_map["edit_plan"].status == "pending"
+        assert edit_step_meta["review_rerun_focus"] == "hook_boundary"
+        assert "hook_boundary" in list(edit_step_meta["review_rerun_targets"] or [])
+        assert edit_step_meta["detail"] == "人工成片审核要求重跑：Hook 边界重剪"
+
+    assert sent == [
+        f"已记录任务 {job_id} 的成片修改意见，目标：timeline, pacing, cut_boundary, hook_boundary；并按“Hook 边界重剪”触发重跑：edit_plan -> render -> final_review -> platform_package。"
     ]
 
 

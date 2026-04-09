@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 
-from roughcut.edit.decisions import build_edit_decision
+from roughcut.edit.decisions import _resolve_keep_energy_for_segment, EditSegment, build_edit_decision
+from roughcut.edit.skills import apply_review_focus_overrides, resolve_editing_skill
 from roughcut.media.silence import SilenceSegment
 
 
@@ -293,6 +294,29 @@ def test_build_edit_decision_preserves_short_anchor_keep_between_cuts():
     assert keep_segments[0].end - keep_segments[0].start > 0.3
 
 
+def test_build_edit_decision_preserves_hook_micro_keep_bridge_with_keep_energy():
+    decision = build_edit_decision(
+        source_path="test.mp4",
+        duration=2.0,
+        silence_segments=[
+            SilenceSegment(start=0.0, end=1.0),
+            SilenceSegment(start=1.34, end=2.0),
+        ],
+        subtitle_items=[
+            {
+                "start_time": 1.06,
+                "end_time": 1.22,
+                "text_final": "先说尺寸更稳",
+            }
+        ],
+    )
+
+    keep_segments = [segment for segment in decision.segments if segment.type == "keep"]
+    assert len(keep_segments) == 1
+    assert keep_segments[0].start == 1.0
+    assert keep_segments[0].end == 1.34
+
+
 def test_build_edit_decision_preserves_short_portability_comparison_keep():
     silences = [
         SilenceSegment(start=0.0, end=1.0),
@@ -396,6 +420,44 @@ def test_build_edit_decision_keeps_wider_audio_safe_padding_for_long_keep():
     assert keep.end >= 2.44
 
 
+def test_build_edit_decision_gameplay_skill_trims_keep_more_aggressively():
+    silences = [
+        SilenceSegment(start=0.0, end=1.0),
+        SilenceSegment(start=3.0, end=4.0),
+    ]
+    subtitle_items = [
+        {
+            "index": 0,
+            "start_time": 1.5,
+            "end_time": 2.2,
+            "text_raw": "这波操作非常关键",
+            "text_norm": "这波操作非常关键",
+            "text_final": "这波操作非常关键",
+        }
+    ]
+
+    gameplay = build_edit_decision(
+        source_path="test.mp4",
+        duration=4.0,
+        silence_segments=silences,
+        subtitle_items=subtitle_items,
+        content_profile={"content_kind": "gameplay"},
+    )
+    commentary = build_edit_decision(
+        source_path="test.mp4",
+        duration=4.0,
+        silence_segments=silences,
+        subtitle_items=subtitle_items,
+        content_profile={"content_kind": "commentary"},
+    )
+
+    gameplay_keep = next(segment for segment in gameplay.segments if segment.type == "keep")
+    commentary_keep = next(segment for segment in commentary.segments if segment.type == "keep")
+    assert gameplay_keep.start >= commentary_keep.start
+    assert gameplay_keep.end <= commentary_keep.end
+    assert (gameplay_keep.end - gameplay_keep.start) < (commentary_keep.end - commentary_keep.start)
+
+
 def test_build_edit_decision_preserves_more_tail_for_incomplete_sentence():
     silences = [
         SilenceSegment(start=0.0, end=1.0),
@@ -421,6 +483,43 @@ def test_build_edit_decision_preserves_more_tail_for_incomplete_sentence():
     keep_segments = [segment for segment in decision.segments if segment.type == "keep"]
     assert len(keep_segments) == 1
     assert keep_segments[0].end >= 2.48
+
+
+def test_build_edit_decision_commentary_skill_preserves_micro_bridge_keep():
+    silences = [
+        SilenceSegment(start=0.0, end=1.0),
+        SilenceSegment(start=1.48, end=2.0),
+    ]
+    subtitle_items = [
+        {
+            "index": 0,
+            "start_time": 1.1,
+            "end_time": 1.36,
+            "text_raw": "这个参数一定要看",
+            "text_norm": "这个参数一定要看",
+            "text_final": "这个参数一定要看",
+        }
+    ]
+
+    gameplay = build_edit_decision(
+        source_path="test.mp4",
+        duration=2.0,
+        silence_segments=silences,
+        subtitle_items=subtitle_items,
+        content_profile={"content_kind": "gameplay"},
+    )
+    commentary = build_edit_decision(
+        source_path="test.mp4",
+        duration=2.0,
+        silence_segments=silences,
+        subtitle_items=subtitle_items,
+        content_profile={"content_kind": "commentary"},
+    )
+
+    gameplay_keeps = [segment for segment in gameplay.segments if segment.type == "keep"]
+    commentary_keeps = [segment for segment in commentary.segments if segment.type == "keep"]
+    assert gameplay_keeps == []
+    assert len(commentary_keeps) == 1
 
 
 def test_build_edit_decision_keeps_sentence_continuation_across_short_silence():
@@ -498,6 +597,95 @@ def test_build_edit_decision_prefers_speaker_change_cut():
     assert silence_cut.end == 1.5
 
 
+def test_build_edit_decision_hook_boundary_focus_suppresses_hook_cut():
+    silences = [SilenceSegment(start=0.9, end=1.48)]
+    subtitle_items = [
+        {
+            "index": 0,
+            "start_time": 0.0,
+            "end_time": 0.82,
+            "text_raw": "先说结论这把很稳",
+            "text_norm": "先说结论这把很稳",
+            "text_final": "先说结论这把很稳",
+        },
+        {
+            "index": 1,
+            "start_time": 1.48,
+            "end_time": 2.2,
+            "text_raw": "直接说结论亮度也够",
+            "text_norm": "直接说结论亮度也够",
+            "text_final": "直接说结论亮度也够",
+        },
+    ]
+
+    default_decision = build_edit_decision(
+        source_path="test.mp4",
+        duration=3.0,
+        silence_segments=silences,
+        subtitle_items=subtitle_items,
+    )
+    focused_decision = build_edit_decision(
+        source_path="test.mp4",
+        duration=3.0,
+        silence_segments=silences,
+        subtitle_items=subtitle_items,
+        editing_skill=apply_review_focus_overrides(
+            resolve_editing_skill(workflow_template="unboxing_standard", content_profile={}),
+            review_focus="hook_boundary",
+        ),
+    )
+
+    default_cuts = [segment for segment in default_decision.segments if segment.type == "remove" and segment.reason == "silence"]
+    focused_cuts = [segment for segment in focused_decision.segments if segment.type == "remove" and segment.reason == "silence"]
+    assert len(default_cuts) == 1
+    assert focused_cuts == []
+    assert focused_decision.analysis["review_focus"] == "hook_boundary"
+
+
+def test_build_edit_decision_mid_transition_focus_suppresses_mid_cut():
+    silences = [SilenceSegment(start=0.92, end=1.48)]
+    subtitle_items = [
+        {
+            "index": 0,
+            "start_time": 0.0,
+            "end_time": 0.84,
+            "text_raw": "重点看参数部分",
+            "text_norm": "重点看参数部分",
+            "text_final": "重点看参数部分",
+        },
+        {
+            "index": 1,
+            "start_time": 1.48,
+            "end_time": 2.3,
+            "text_raw": "细节对比这里更关键",
+            "text_norm": "细节对比这里更关键",
+            "text_final": "细节对比这里更关键",
+        },
+    ]
+
+    default_decision = build_edit_decision(
+        source_path="test.mp4",
+        duration=3.0,
+        silence_segments=silences,
+        subtitle_items=subtitle_items,
+    )
+    focused_decision = build_edit_decision(
+        source_path="test.mp4",
+        duration=3.0,
+        silence_segments=silences,
+        subtitle_items=subtitle_items,
+        editing_skill=apply_review_focus_overrides(
+            resolve_editing_skill(workflow_template="unboxing_standard", content_profile={}),
+            review_focus="mid_transition",
+        ),
+    )
+
+    default_cuts = [segment for segment in default_decision.segments if segment.type == "remove" and segment.reason == "silence"]
+    focused_cuts = [segment for segment in focused_decision.segments if segment.type == "remove" and segment.reason == "silence"]
+    assert len(default_cuts) == 1
+    assert focused_cuts == []
+
+
 def test_build_edit_decision_snaps_silence_cut_to_scene_boundary():
     silences = [SilenceSegment(start=1.0, end=1.5)]
     decision = build_edit_decision(
@@ -511,3 +699,104 @@ def test_build_edit_decision_snaps_silence_cut_to_scene_boundary():
     silence_cut = next(segment for segment in decision.segments if segment.type == "remove" and segment.reason == "silence")
     assert silence_cut.start == 0.96
     assert silence_cut.end == 1.46
+
+
+def test_build_edit_decision_uses_aggressive_gameplay_silence_profile():
+    decision = build_edit_decision(
+        source_path="test.mp4",
+        duration=2.0,
+        silence_segments=[SilenceSegment(start=0.8, end=1.2)],
+        content_profile={"content_kind": "gameplay"},
+    )
+
+    silence_cut = next(segment for segment in decision.segments if segment.type == "remove" and segment.reason == "silence")
+    assert silence_cut.start == 0.8
+    assert silence_cut.end == 1.2
+    assert decision.to_dict()["analysis"]["effective_min_silence_to_cut"] == 0.34
+
+
+def test_build_edit_decision_uses_conservative_commentary_silence_profile():
+    decision = build_edit_decision(
+        source_path="test.mp4",
+        duration=2.0,
+        silence_segments=[SilenceSegment(start=0.8, end=1.2)],
+        content_profile={"content_kind": "commentary"},
+    )
+
+    silence_cuts = [segment for segment in decision.segments if segment.type == "remove" and segment.reason == "silence"]
+    assert silence_cuts == []
+    assert decision.to_dict()["analysis"]["effective_min_silence_to_cut"] == 0.68
+
+
+def test_build_edit_decision_emits_timeline_analysis():
+    decision = build_edit_decision(
+        source_path="test.mp4",
+        duration=12.0,
+        silence_segments=[],
+        subtitle_items=[
+            {"start_time": 0.0, "end_time": 2.8, "text_final": "先说结论，这个方案更稳。"},
+            {"start_time": 3.0, "end_time": 6.2, "text_final": "接着看参数和细节。"},
+            {"start_time": 9.5, "end_time": 11.8, "text_final": "记得点赞收藏。"},
+        ],
+    )
+
+    analysis = decision.to_dict()["analysis"]
+    assert analysis["hook_end_sec"] >= 2.8
+    assert analysis["cta_start_sec"] == 9.5
+    assert analysis["semantic_sections"]
+    assert analysis["section_directives"]
+    assert analysis["section_actions"]
+    assert analysis["editing_skill"]["key"] == "unboxing_standard"
+    assert any(action["packaging_intent"] == "hook_focus" for action in analysis["section_actions"] if action["role"] == "hook")
+    assert any(not directive["insert_allowed"] for directive in analysis["section_directives"] if directive["role"] == "hook")
+    assert analysis["emphasis_candidates"]
+    assert analysis["keep_energy_segments"]
+    assert analysis["keep_energy_summary"]["count"] >= 1
+    assert analysis["keep_energy_summary"]["max_keep_energy"] >= 1.0
+
+
+def test_build_edit_decision_annotates_accepted_cuts_with_boundary_keep_energy():
+    decision = build_edit_decision(
+        source_path="test.mp4",
+        duration=7.0,
+        silence_segments=[SilenceSegment(start=2.8, end=3.55)],
+        subtitle_items=[
+            {"start_time": 0.0, "end_time": 2.5, "text_final": "先说结论，这个方案更稳。"},
+            {"start_time": 3.8, "end_time": 6.1, "text_final": "接着看参数和细节。"},
+        ],
+    )
+
+    silence_cut = next(cut for cut in decision.to_dict()["analysis"]["accepted_cuts"] if cut["reason"] == "silence")
+    assert silence_cut["boundary_keep_energy"] >= 1.0
+    assert silence_cut["left_keep_role"] == "hook"
+    assert silence_cut["right_keep_role"] == "detail"
+
+
+def test_resolve_keep_energy_for_segment_combines_signal_section_and_emphasis():
+    energy = _resolve_keep_energy_for_segment(
+        EditSegment(start=1.0, end=1.36, type="keep"),
+        overlaps=[
+            {
+                "start_time": 1.04,
+                "end_time": 1.24,
+                "text_final": "先说这个更稳",
+            }
+        ],
+        content_profile=None,
+        timeline_analysis={
+            "emphasis_candidates": [
+                {"start_time": 1.18, "end_time": 1.4, "text": "这个更稳", "role": "hook", "score": 1.6}
+            ],
+            "section_actions": [
+                {
+                    "role": "hook",
+                    "start_sec": 0.0,
+                    "end_sec": 2.0,
+                    "packaging_intent": "hook_focus",
+                    "transition_boost": 0.8,
+                }
+            ],
+        },
+    )
+
+    assert energy > 1.0

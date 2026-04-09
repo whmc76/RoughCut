@@ -68,12 +68,14 @@ async def _create_merged_job_for_watch_root(
     config_profile_id: uuid.UUID | None,
     workflow_template: str | None,
     output_dir: str | None = None,
+    allow_related_profiles: bool = False,
 ):
     return await create_merged_job_for_inventory_paths(
         file_paths,
         output_dir=output_dir,
         config_profile_id=config_profile_id,
         workflow_template=workflow_template,
+        allow_related_profiles=allow_related_profiles,
     )
 
 
@@ -363,6 +365,7 @@ async def merge_inventory_items(
         config_profile_id=root.config_profile_id,
         workflow_template=root.workflow_template,
         output_dir=root.output_dir,
+        allow_related_profiles=True,
     )
     merged_job_ids = [job_id] if job_id else []
 
