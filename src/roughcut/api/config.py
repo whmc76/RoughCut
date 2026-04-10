@@ -71,6 +71,8 @@ class ConfigOut(BaseModel):
     transcription_provider: str
     transcription_model: str
     transcription_dialect: str
+    transcription_alignment_mode: str
+    transcription_alignment_min_word_coverage: float
     # Reasoning
     llm_mode: str
     reasoning_provider: str
@@ -279,6 +281,8 @@ class ConfigPatch(BaseModel):
     transcription_provider: str | None = None
     transcription_model: str | None = None
     transcription_dialect: str | None = None
+    transcription_alignment_mode: str | None = None
+    transcription_alignment_min_word_coverage: float | None = None
     llm_mode: str | None = None
     reasoning_provider: str | None = None
     reasoning_model: str | None = None
@@ -380,6 +384,8 @@ def get_config():
         transcription_provider=s.transcription_provider,
         transcription_model=s.transcription_model,
         transcription_dialect=s.transcription_dialect,
+        transcription_alignment_mode=s.transcription_alignment_mode,
+        transcription_alignment_min_word_coverage=s.transcription_alignment_min_word_coverage,
         llm_mode=s.llm_mode,
         reasoning_provider=s.reasoning_provider,
         reasoning_model=s.reasoning_model,
@@ -593,6 +599,19 @@ def patch_config(body: ConfigPatch):
                 detail=f"Unsupported transcription_dialect. Use one of: {', '.join(item['value'] for item in build_transcription_dialect_options())}",
             )
         updates["transcription_dialect"] = normalized_dialect or DEFAULT_TRANSCRIPTION_DIALECT
+    if "transcription_alignment_mode" in updates:
+        alignment_mode = str(updates["transcription_alignment_mode"] or "").strip().lower()
+        if alignment_mode not in {"auto", "provider_only", "synthetic"}:
+            raise HTTPException(
+                status_code=400,
+                detail="transcription_alignment_mode must be auto, provider_only, or synthetic",
+            )
+        updates["transcription_alignment_mode"] = alignment_mode
+    if "transcription_alignment_min_word_coverage" in updates:
+        updates["transcription_alignment_min_word_coverage"] = max(
+            0.0,
+            min(1.0, float(updates["transcription_alignment_min_word_coverage"])),
+        )
     if "avatar_provider" in updates:
         avatar_provider = str(updates["avatar_provider"]).strip().lower()
         if avatar_provider not in AVATAR_PROVIDER_OPTIONS:

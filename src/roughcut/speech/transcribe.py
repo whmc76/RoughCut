@@ -16,6 +16,7 @@ from roughcut.providers.factory import get_transcription_provider, resolve_trans
 from roughcut.providers.transcription.base import TranscriptResult, TranscriptSegment as ProviderTranscriptSegment, TranscriptionProgressCallback, WordTiming
 from roughcut.review.evidence_types import ARTIFACT_TYPE_TRANSCRIPT_EVIDENCE
 from roughcut.review.subtitle_memory import apply_domain_term_corrections
+from roughcut.speech.alignment import AlignmentSettings, enhance_transcript_alignment
 
 
 def _is_brand_like_term(term: dict) -> bool:
@@ -155,6 +156,10 @@ async def persist_transcript_result(
         result,
         glossary_terms=glossary_terms or [],
         review_memory=review_memory,
+        alignment_settings=AlignmentSettings(
+            mode=str(getattr(settings, "transcription_alignment_mode", "auto") or "auto"),
+            min_word_coverage=float(getattr(settings, "transcription_alignment_min_word_coverage", 0.72) or 0.72),
+        ),
     )
 
     # Replace the previous transcript-derived rows on rerun instead of appending
@@ -174,7 +179,7 @@ async def persist_transcript_result(
             end_time=seg.end,
             speaker=seg.speaker,
             text=seg.text,
-            words_json=[{"word": w.word, "start": w.start, "end": w.end} for w in seg.words],
+            words_json=[_serialize_word_timing(w) for w in seg.words],
         )
         session.add(db_seg)
 
@@ -189,6 +194,7 @@ async def persist_transcript_result(
             "segment_count": len(result.segments),
             "provider": selected_provider or result.provider,
             "model": selected_model or result.model,
+            "alignment": _json_safe_value(deepcopy(result.alignment)),
             "attempts": [
                 *attempt_errors,
                 *(
@@ -214,6 +220,7 @@ async def persist_transcript_result(
                     "prompt": str(prompt or ""),
                     "context": result.context,
                     "hotword": result.hotword,
+                    "alignment": _json_safe_value(deepcopy(result.alignment)),
                     "attempts": [
                         *attempt_errors,
                         *(
@@ -238,6 +245,7 @@ def _normalize_transcript_result(
     *,
     glossary_terms: list[dict],
     review_memory: dict | None,
+    alignment_settings: AlignmentSettings | None = None,
 ) -> TranscriptResult:
     raw_segments = deepcopy(result.raw_segments or result.segments)
     normalized = deepcopy(result)
@@ -283,7 +291,7 @@ def _normalize_transcript_result(
                     text = text.replace(wrong, correct_form)
         text = apply_domain_term_corrections(text, review_memory)
         seg.text = text
-    return normalized
+    return enhance_transcript_alignment(normalized, settings=alignment_settings)
 
 
 def _serialize_word_timing(word: WordTiming) -> dict[str, object]:

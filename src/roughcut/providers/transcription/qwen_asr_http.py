@@ -12,6 +12,7 @@ from roughcut.providers.transcription.base import (
     TranscriptResult,
     TranscriptSegment,
     TranscriptionProvider,
+    WordTiming,
     payload_to_dict,
 )
 
@@ -64,11 +65,13 @@ class QwenASRHTTPProvider(TranscriptionProvider):
                 continue
             start = max(0.0, float(item.get("start") or 0.0))
             end = max(start, float(item.get("end") or start))
+            words = self._parse_words(item, context=context)
             segment = TranscriptSegment(
                 index=len(segments),
                 start=start,
                 end=end,
                 text=text,
+                words=words,
                 provider="qwen3_asr",
                 model=self._model_name,
                 raw_payload=dict(item),
@@ -224,3 +227,36 @@ class QwenASRHTTPProvider(TranscriptionProvider):
     @staticmethod
     def _text_units(text: str) -> int:
         return len(re.sub(r"\s+", "", text))
+
+    def _parse_words(self, item: dict, *, context: str | None) -> list[WordTiming]:
+        raw_words = (
+            item.get("words")
+            or item.get("word_timestamps")
+            or item.get("timestamps")
+            or []
+        )
+        parsed: list[WordTiming] = []
+        for raw_word in raw_words:
+            if not isinstance(raw_word, dict):
+                continue
+            word_text = str(raw_word.get("word") or raw_word.get("text") or raw_word.get("token") or "").strip()
+            if not word_text:
+                continue
+            start = max(0.0, float(raw_word.get("start") or raw_word.get("begin") or raw_word.get("start_time") or 0.0))
+            end = max(start, float(raw_word.get("end") or raw_word.get("finish") or raw_word.get("end_time") or start))
+            parsed.append(
+                WordTiming(
+                    word=word_text,
+                    start=start,
+                    end=end,
+                    provider="qwen3_asr",
+                    model=self._model_name,
+                    raw_payload=dict(raw_word),
+                    raw_text=str(raw_word.get("raw_text") or word_text),
+                    context=context,
+                    confidence=raw_word.get("confidence"),
+                    logprob=raw_word.get("logprob"),
+                    alignment=raw_word.get("alignment"),
+                )
+            )
+        return parsed

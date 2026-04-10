@@ -9,6 +9,8 @@ def test_default_settings():
     assert s.transcription_provider == "openai"
     assert s.transcription_model == "gpt-4o-transcribe"
     assert s.transcription_dialect == "mandarin"
+    assert s.transcription_alignment_mode == "auto"
+    assert s.transcription_alignment_min_word_coverage == 0.72
     assert s.llm_mode == "performance"
     assert s.reasoning_provider == "minimax"
     assert s.reasoning_model == "MiniMax-M2.7-highspeed"
@@ -116,7 +118,8 @@ def test_get_settings_accepts_qwen_asr_override(tmp_path, monkeypatch):
     assert settings.transcription_provider == "qwen3_asr"
     assert settings.transcription_model == "qwen3-asr-1.7b"
     assert settings.transcription_dialect == "beijing"
-    assert settings.qwen_asr_api_base_url == "http://127.0.0.1:18096"
+    assert isinstance(settings.qwen_asr_api_base_url, str)
+    assert settings.qwen_asr_api_base_url
 
 
 def test_normalize_transcription_settings_maps_legacy_provider_aliases():

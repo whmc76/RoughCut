@@ -290,18 +290,6 @@ _ATTACHED_FRAGMENT_PREFIXES = (
     "啦",
     "来",
     "去",
-    "很",
-    "更",
-    "也",
-    "都",
-    "就",
-    "又",
-    "还",
-    "才",
-    "并",
-    "并且",
-    "而且",
-    "以及",
     "起来",
     "下来",
     "上来",
@@ -647,6 +635,14 @@ def split_into_subtitles(
     Split transcript segments into subtitle display units.
     Each subtitle has at most max_chars characters and max_duration seconds.
     """
+    if _can_use_global_word_segmentation(segments):
+        entries = _segment_subtitles_from_global_words(segments, max_chars=max_chars, max_duration=max_duration)
+        merged = _merge_continuation_entries(entries, max_chars=max_chars, max_duration=max_duration)
+        rebalanced = _rebalance_semantic_boundaries(merged, max_chars=max_chars, max_duration=max_duration)
+        return _cleanup_subtitle_entries(
+            _merge_continuation_entries(rebalanced, max_chars=max_chars, max_duration=max_duration)
+        )
+
     subtitles: list[SubtitleEntry] = []
     idx = 0
 
@@ -683,6 +679,187 @@ def split_into_subtitles(
     merged = _merge_continuation_entries(subtitles, max_chars=max_chars, max_duration=max_duration)
     rebalanced = _rebalance_semantic_boundaries(merged, max_chars=max_chars, max_duration=max_duration)
     return _cleanup_subtitle_entries(_merge_continuation_entries(rebalanced, max_chars=max_chars, max_duration=max_duration))
+
+
+def _can_use_global_word_segmentation(segments: list[TranscriptSegment]) -> bool:
+    if len(segments) <= 1:
+        return False
+    non_empty_segments = 0
+    total_words = 0
+    for seg in segments:
+        words = list(getattr(seg, "words_json", []) or [])
+        if not words:
+            return False
+        total_words += len([item for item in words if str(item.get("word", "")).strip()])
+        non_empty_segments += 1
+    return non_empty_segments >= 2 and total_words >= 4
+
+
+def _segment_subtitles_from_global_words(
+    segments: list[TranscriptSegment],
+    *,
+    max_chars: int,
+    max_duration: float,
+) -> list[SubtitleEntry]:
+    words = _flatten_segment_words(segments)
+    if len(words) <= 1:
+        return []
+
+    limit_cache: dict[int, int] = {}
+    scores: list[float] = [float("-inf")] * (len(words) + 1)
+    jumps: list[int] = [len(words)] * (len(words) + 1)
+    scores[len(words)] = 0.0
+
+    for start_index in range(len(words) - 1, -1, -1):
+        end_limit = limit_cache.setdefault(
+            start_index,
+            _candidate_end_limit(words, start_index, max_chars=max_chars, max_duration=max_duration),
+        )
+        for end_index in range(start_index + 1, end_limit + 1):
+            candidate = _build_word_candidate(
+                words,
+                start_index,
+                end_index,
+                max_chars=max_chars,
+                max_duration=max_duration,
+            )
+            if candidate is None:
+                continue
+            total_score = candidate["score"] + scores[end_index]
+            if total_score > scores[start_index]:
+                scores[start_index] = total_score
+                jumps[start_index] = end_index
+
+    if scores[0] == float("-inf"):
+        return []
+
+    entries: list[SubtitleEntry] = []
+    cursor = 0
+    while cursor < len(words):
+        next_cursor = jumps[cursor]
+        if next_cursor <= cursor or next_cursor > len(words):
+            break
+        candidate_words = words[cursor:next_cursor]
+        entries.append(
+            _make_subtitle_entry(
+                len(entries),
+                float(candidate_words[0]["start"]),
+                float(candidate_words[-1]["end"]),
+                _words_to_text(candidate_words),
+                words=candidate_words,
+            )
+        )
+        cursor = next_cursor
+    return entries
+
+
+def _flatten_segment_words(segments: list[TranscriptSegment]) -> list[dict]:
+    flattened: list[dict] = []
+    for segment_index, seg in enumerate(segments):
+        for word_index, raw_word in enumerate(list(getattr(seg, "words_json", []) or [])):
+            if not isinstance(raw_word, dict):
+                continue
+            word_text = re.sub(r"\s+", "", str(raw_word.get("word", "")))
+            if not word_text:
+                continue
+            start = float(raw_word.get("start") or 0.0)
+            end = max(start, float(raw_word.get("end") or start))
+            flattened.append(
+                {
+                    **dict(raw_word),
+                    "word": word_text,
+                    "start": start,
+                    "end": end,
+                    "segment_index": segment_index,
+                    "word_index": word_index,
+                }
+            )
+    return flattened
+
+
+def _candidate_end_limit(words: list[dict], start_index: int, *, max_chars: int, max_duration: float) -> int:
+    hard_chars = max_chars + 10
+    hard_duration = _semantic_hold_duration_limit(
+        text_length=max_chars + 8,
+        max_chars=max_chars,
+        max_duration=max_duration,
+    )
+    total_chars = 0
+    for end_index in range(start_index, len(words)):
+        total_chars += len(str(words[end_index].get("word") or ""))
+        duration = float(words[end_index]["end"]) - float(words[start_index]["start"])
+        if total_chars > hard_chars or duration > hard_duration:
+            return max(start_index + 1, end_index)
+    return len(words)
+
+
+def _build_word_candidate(
+    words: list[dict],
+    start_index: int,
+    end_index: int,
+    *,
+    max_chars: int,
+    max_duration: float,
+) -> dict[str, float | int | str] | None:
+    candidate_words = words[start_index:end_index]
+    if not candidate_words:
+        return None
+    text = _words_to_text(candidate_words)
+    if not text:
+        return None
+
+    start = float(candidate_words[0]["start"])
+    end = float(candidate_words[-1]["end"])
+    duration = max(0.0, end - start)
+    if duration <= 0.0:
+        return None
+
+    next_preview = _preview_words_text(words[end_index:end_index + 4])
+    previous_preview = _preview_words_text(words[max(0, start_index - 3):start_index])
+    gap_after = max(0.0, float(words[end_index]["start"]) - end) if end_index < len(words) else 0.0
+    max_internal_gap = 0.0
+    for index in range(start_index + 1, end_index):
+        internal_gap = float(words[index]["start"]) - float(words[index - 1]["end"])
+        if internal_gap > max_internal_gap:
+            max_internal_gap = internal_gap
+
+    score = 0.0
+    target_chars = min(max_chars, max(8, int(max_chars * 0.82)))
+    score -= abs(len(text) - target_chars) * 1.2
+    if len(text) <= max_chars:
+        score += 6.0
+    else:
+        score -= (len(text) - max_chars) * 3.5
+
+    if duration <= max_duration:
+        score += 4.0
+    else:
+        score -= (duration - max_duration) * 4.0
+
+    boundary_quality = _semantic_boundary_quality(text, next_preview) if next_preview else 4.0
+    score += boundary_quality * 4.5
+    if any(text.endswith(token) for token in _NO_SPLIT_ENDINGS) and next_preview:
+        score -= 8.0
+    if _starts_with_attached_fragment(next_preview):
+        score -= 8.0
+    if _boundary_splits_protected_term(text, next_preview):
+        score -= 12.0
+
+    if gap_after >= 0.25:
+        score += min(gap_after, 1.5) * (6.0 if boundary_quality >= 0 else -3.0)
+    if max_internal_gap >= 0.45:
+        score -= min(max_internal_gap, 1.5) * (5.0 if len(text) > max_chars else 3.0)
+    if previous_preview and _starts_with_attached_fragment(text):
+        score -= 10.0
+    if re.match(r"^[，。！？、：；,.!?]", text):
+        score -= 16.0
+
+    return {"score": score, "start": start, "end": end, "text": text}
+
+
+def _preview_words_text(words: list[dict]) -> str:
+    preview = _words_to_text(words)
+    return preview[:10]
 
 
 def _split_with_words(
@@ -936,6 +1113,8 @@ def _rebalance_semantic_pair(
             improvement += 3.0
         if _boundary_splits_protected_term(left.text_raw, right.text_raw) and not _boundary_splits_protected_term(new_left_text, suffix_text):
             improvement += 4.0
+        if len(prefix_text) <= 1 and any(suffix_text.startswith(prefix) for prefix in _GOOD_BREAK_PREFIXES):
+            improvement += 3.0
         if gap >= 0.8 and len(prefix_text) <= 4:
             improvement += 1.0
 
@@ -972,7 +1151,7 @@ def _should_bridge_semantic_gap(
     max_duration: float,
 ) -> bool:
     gap = float(right.start) - float(left.end)
-    if gap < 0.0 or gap > _MAX_SEMANTIC_BRIDGE_GAP_SEC:
+    if gap <= 0.18 or gap > _MAX_SEMANTIC_BRIDGE_GAP_SEC:
         return False
 
     combined_text = f"{left.text_raw}{right.text_raw}"

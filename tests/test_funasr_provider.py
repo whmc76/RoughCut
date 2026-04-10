@@ -65,6 +65,27 @@ def test_funasr_transcribe_parses_sentence_info(monkeypatch):
     assert result.segments[1].text == "再看 REATE。"
     assert result.segments[1].start == 1.3
     assert result.segments[1].end == 2.4
+    assert [word.word for word in result.segments[1].words] == ["再看", "REATE"]
+    assert result.segments[1].words[0].start == 1.3
+    assert result.segments[1].words[1].end == 2.4
+
+
+def test_funasr_extracts_word_timings_from_dense_timestamp_text():
+    provider = FunASRProvider(model_name="sensevoice-small")
+
+    words = provider._extract_word_timings(
+        {
+            "text": "磁吸尾盖夜骑补光",
+            "timestamp": [[0, 220], [220, 460], [460, 760], [760, 1080]],
+        },
+        text="磁吸尾盖夜骑补光",
+        context="热词：夜骑",
+        hotword="夜骑",
+    )
+
+    assert [word.word for word in words] == ["磁吸", "尾盖", "夜骑", "补光"]
+    assert words[0].start == 0.0
+    assert words[-1].end == 1.08
 
 
 def test_funasr_splits_single_long_segment_without_timestamps(monkeypatch):

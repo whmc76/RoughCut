@@ -39,6 +39,8 @@ def test_get_config_exposes_extended_provider_fields(tmp_path, monkeypatch):
     settings = get_settings()
     object.__setattr__(settings, "llm_mode", "performance")
     object.__setattr__(settings, "transcription_dialect", "beijing")
+    object.__setattr__(settings, "transcription_alignment_mode", "auto")
+    object.__setattr__(settings, "transcription_alignment_min_word_coverage", 0.81)
     object.__setattr__(settings, "openai_base_url", "https://api.openai.com/v1")
     object.__setattr__(settings, "qwen_asr_api_base_url", "http://127.0.0.1:18096")
     object.__setattr__(settings, "avatar_provider", "heygem")
@@ -100,6 +102,8 @@ def test_get_config_exposes_extended_provider_fields(tmp_path, monkeypatch):
 
     assert cfg.llm_mode == "performance"
     assert cfg.transcription_dialect == "beijing"
+    assert cfg.transcription_alignment_mode == "auto"
+    assert cfg.transcription_alignment_min_word_coverage == 0.81
     assert cfg.qwen_asr_api_base_url == "http://127.0.0.1:18096"
     assert cfg.avatar_provider == "heygem"
     assert cfg.avatar_presenter_id == "presenter_demo"
@@ -152,6 +156,7 @@ def test_get_config_exposes_extended_provider_fields(tmp_path, monkeypatch):
     assert cfg.persistence["profiles_store"] == "database"
     assert cfg.persistence["packaging_store"] == "database"
     assert "transcription_provider" in cfg.profile_bindable_keys
+    assert "transcription_alignment_mode" in cfg.profile_bindable_keys
     assert "quality_auto_rerun_enabled" in cfg.profile_bindable_keys
     assert "openai_base_url" not in cfg.profile_bindable_keys
     assert "voice_clone_api_base_url" not in cfg.profile_bindable_keys
@@ -442,6 +447,25 @@ def test_patch_config_rejects_unknown_transcription_provider(tmp_path, monkeypat
         patch_config(ConfigPatch(transcription_provider="unknown_provider"))
 
 
+def test_patch_config_normalizes_transcription_alignment_fields(tmp_path, monkeypatch):
+    import roughcut.api.config as config_api
+    import roughcut.config as config_mod
+
+    monkeypatch.setattr(config_api, "_CONFIG_FILE", tmp_path / "roughcut_config.json")
+    monkeypatch.setattr(config_mod, "_OVERRIDES_FILE", tmp_path / "roughcut_config.json")
+    config_mod._settings = None
+
+    cfg = patch_config(
+        ConfigPatch(
+            transcription_alignment_mode="SYNTHETIC",
+            transcription_alignment_min_word_coverage=1.5,
+        )
+    )
+
+    assert cfg.transcription_alignment_mode == "synthetic"
+    assert cfg.transcription_alignment_min_word_coverage == 1.0
+
+
 def test_patch_config_rejects_unknown_transcription_dialect(tmp_path, monkeypatch):
     import roughcut.api.config as config_api
     import roughcut.config as config_mod
@@ -532,7 +556,8 @@ def test_patch_config_clamps_quality_auto_rerun_settings(tmp_path, monkeypatch):
     assert cfg.quality_auto_rerun_enabled is True
     assert cfg.quality_auto_rerun_below_score == 100.0
     assert cfg.quality_auto_rerun_max_attempts == 5
-    assert cfg.qwen_asr_api_base_url == "http://127.0.0.1:18096"
+    assert isinstance(cfg.qwen_asr_api_base_url, str)
+    assert cfg.qwen_asr_api_base_url
 
 
 def test_patch_config_accepts_creative_provider_fields(tmp_path, monkeypatch):

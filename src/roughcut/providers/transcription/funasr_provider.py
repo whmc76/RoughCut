@@ -17,6 +17,7 @@ from roughcut.providers.transcription.base import (
     TranscriptResult,
     TranscriptSegment,
     TranscriptionProvider,
+    WordTiming,
     payload_to_dict,
 )
 
@@ -90,11 +91,18 @@ class FunASRProvider(TranscriptionProvider):
                 if not text:
                     continue
                 start, end = self._extract_timing(item, fallback_start=segments[-1].end if segments else 0.0)
+                words = self._extract_word_timings(
+                    item,
+                    text=text,
+                    context=context,
+                    hotword=hotword,
+                )
                 segment = TranscriptSegment(
                     index=len(segments),
                     start=start,
                     end=end,
                     text=text,
+                    words=words,
                     provider="funasr",
                     model=self._resolved_model,
                     raw_payload=payload_to_dict(item),
@@ -249,6 +257,100 @@ class FunASRProvider(TranscriptionProvider):
                 return cls._normalize_time_value(start, fallback=fallback_start), cls._normalize_time_value(end, fallback=fallback_start)
 
         return fallback_start, fallback_start
+
+    def _extract_word_timings(
+        self,
+        payload: dict[str, Any],
+        *,
+        text: str,
+        context: str | None,
+        hotword: str | None,
+    ) -> list[WordTiming]:
+        timestamps = payload.get("timestamp")
+        if not isinstance(timestamps, list) or not timestamps:
+            return []
+
+        normalized_text = self._normalize_text(text)
+        text_tokens = self._tokenize_alignment_text(normalized_text)
+        timing_pairs = self._extract_timing_pairs(timestamps)
+        if not timing_pairs:
+            return []
+
+        aligned_tokens = self._fit_tokens_to_timings(text_tokens, len(timing_pairs))
+        words: list[WordTiming] = []
+        for token, (start, end), raw_payload in zip(aligned_tokens, timing_pairs, timestamps):
+            if not token:
+                continue
+            words.append(
+                WordTiming(
+                    word=token,
+                    start=self._normalize_time_value(start, fallback=0.0),
+                    end=self._normalize_time_value(end, fallback=self._normalize_time_value(start, fallback=0.0)),
+                    provider="funasr",
+                    model=self._resolved_model,
+                    raw_payload=payload_to_dict(raw_payload),
+                    raw_text=token,
+                    context=context,
+                    hotword=hotword,
+                    confidence=payload.get("confidence"),
+                    logprob=payload.get("logprob"),
+                    alignment=payload.get("alignment"),
+                )
+            )
+        return words
+
+    @classmethod
+    def _extract_timing_pairs(cls, timestamps: list[Any]) -> list[tuple[float, float]]:
+        pairs: list[tuple[float, float]] = []
+        for item in timestamps:
+            values = cls._flatten_numeric_values(item)
+            if len(values) >= 2:
+                pairs.append((values[0], values[-1]))
+        return pairs
+
+    @staticmethod
+    def _tokenize_alignment_text(text: str) -> list[str]:
+        normalized = str(text or "").strip()
+        if not normalized:
+            return []
+
+        space_chunks = [chunk.strip("，。！？!?；;：:,.()[]{}\"'") for chunk in normalized.split() if chunk.strip()]
+        space_chunks = [chunk for chunk in space_chunks if chunk]
+        if len(space_chunks) >= 2:
+            return space_chunks
+
+        tokens: list[str] = []
+        for match in re.finditer(r"[A-Za-z0-9\-_]+|[\u4e00-\u9fff]", normalized):
+            token = str(match.group(0) or "").strip()
+            if token:
+                tokens.append(token)
+        return tokens
+
+    @classmethod
+    def _fit_tokens_to_timings(cls, tokens: list[str], timing_count: int) -> list[str]:
+        if timing_count <= 0:
+            return []
+        if not tokens:
+            return [""] * timing_count
+        if len(tokens) == timing_count:
+            return tokens
+        if len(tokens) < timing_count:
+            expanded = list(tokens)
+            while len(expanded) < timing_count:
+                expanded.append("")
+            return expanded
+
+        grouped: list[str] = []
+        remaining_tokens = list(tokens)
+        remaining_slots = timing_count
+        while remaining_slots > 0:
+            take = max(1, round(len(remaining_tokens) / remaining_slots))
+            grouped.append("".join(remaining_tokens[:take]))
+            remaining_tokens = remaining_tokens[take:]
+            remaining_slots -= 1
+        if remaining_tokens:
+            grouped[-1] = f"{grouped[-1]}{''.join(remaining_tokens)}"
+        return grouped[:timing_count]
 
     @staticmethod
     def _flatten_numeric_values(value: Any) -> list[float]:

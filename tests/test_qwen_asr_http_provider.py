@@ -38,7 +38,16 @@ async def test_qwen_asr_http_provider_parses_segments(tmp_path: Path, monkeypatc
                     "language": "Chinese",
                     "duration": 12.5,
                     "segments": [
-                        {"start": 0.0, "end": 3.0, "text": "第一句"},
+                        {
+                            "start": 0.0,
+                            "end": 3.0,
+                            "text": "第一句",
+                            "alignment": {"type": "forced"},
+                            "words": [
+                                {"word": "第一", "start": 0.0, "end": 0.8, "confidence": 0.98},
+                                {"word": "句", "start": 0.8, "end": 1.2, "alignment": {"phone": "ju4"}},
+                            ],
+                        },
                         {"start": 3.0, "end": 12.5, "text": "第二句"},
                     ],
                 },
@@ -61,6 +70,10 @@ async def test_qwen_asr_http_provider_parses_segments(tmp_path: Path, monkeypatc
     assert result.language == "Chinese"
     assert result.duration == 12.5
     assert [segment.text for segment in result.segments] == ["第一句", "第二句"]
+    assert [word.word for word in result.segments[0].words] == ["第一", "句"]
+    assert result.segments[0].words[0].confidence == 0.98
+    assert result.segments[0].words[1].alignment == {"phone": "ju4"}
+    assert result.segments[0].alignment == {"type": "forced"}
     assert progress[-1]["progress"] == 1.0
 
 

@@ -106,6 +106,7 @@ async def test_transcribe_audio_persists_transcript_evidence_artifact_when_enabl
         assert artifact.data_json["model"] == "qwen3-asr-1.7b"
         assert artifact.data_json["prompt"] == "热词：傲雷,司令官2 Ultra"
         assert artifact.data_json["attempts"][0]["provider"] == "openai"
+        assert artifact.data_json["alignment"]["segments_total"] == 1
         assert artifact.data_json["raw_payload"] == {"segments": [{"text": "奥雷 司令官二"}]}
         assert artifact.data_json["raw_segments"][0]["raw_text"] == "奥雷 司令官二"
         assert artifact.data_json["raw_segments"][0]["words"][0]["raw_payload"] == {"word": "奥雷"}

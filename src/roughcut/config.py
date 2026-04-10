@@ -150,6 +150,8 @@ PROFILE_BINDABLE_SETTINGS: tuple[str, ...] = (
     "transcription_provider",
     "transcription_model",
     "transcription_dialect",
+    "transcription_alignment_mode",
+    "transcription_alignment_min_word_coverage",
     "qwen_asr_api_base_url",
     "llm_mode",
     "reasoning_provider",
@@ -219,6 +221,8 @@ class Settings(BaseSettings):
     transcription_provider: str = DEFAULT_TRANSCRIPTION_PROVIDER  # openai | qwen3_asr | funasr | faster_whisper
     transcription_model: str = DEFAULT_TRANSCRIPTION_MODELS[DEFAULT_TRANSCRIPTION_PROVIDER]
     transcription_dialect: str = DEFAULT_TRANSCRIPTION_DIALECT
+    transcription_alignment_mode: str = "auto"  # auto | provider_only | synthetic
+    transcription_alignment_min_word_coverage: float = 0.72
     qwen_asr_api_base_url: str = "http://127.0.0.1:18096"
     watch_auto_scan_interval_sec: int = 45
     watch_auto_settle_seconds: int = 45
