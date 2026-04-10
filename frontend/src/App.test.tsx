@@ -4,6 +4,12 @@ import { MemoryRouter } from "react-router-dom";
 
 vi.mock("./api", () => ({
   api: {
+    getConfig: vi.fn().mockResolvedValue({
+      llm_mode: "performance",
+      llm_routing_mode: "bundled",
+      hybrid_analysis_provider: "openai",
+      hybrid_copy_provider: "minimax",
+    }),
     getHealthDetail: vi.fn().mockResolvedValue({ api_version: "test-version" }),
     patchConfig: vi.fn().mockResolvedValue({}),
   },

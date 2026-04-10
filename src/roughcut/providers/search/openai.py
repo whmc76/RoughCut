@@ -6,6 +6,11 @@ import openai
 
 from roughcut.config import get_settings
 from roughcut.providers.auth import resolve_credential
+from roughcut.providers.openai_responses import (
+    build_reasoning_options,
+    build_text_options,
+    extract_response_output_text,
+)
 from roughcut.providers.reasoning.base import extract_json_text
 from roughcut.providers.search.base import SearchProvider, SearchResult
 
@@ -31,13 +36,21 @@ class OpenAISearchProvider(SearchProvider):
             'Each item must contain "title", "url", and "snippet". '
             "Do not return any extra text."
         )
-        response = await self._client.responses.create(
-            model=self._model,
-            tools=[{"type": "web_search"}],
-            input=prompt,
-            max_output_tokens=1200,
-        )
-        text = response.output_text or ""
+        kwargs: dict = {
+            "model": self._model,
+            "tools": [{"type": "web_search"}],
+            "input": prompt,
+            "max_output_tokens": 1200,
+        }
+        text_options = build_text_options(json_mode=True)
+        if text_options:
+            kwargs["text"] = text_options
+        reasoning_options = build_reasoning_options(self._model, effort="medium")
+        if reasoning_options:
+            kwargs["reasoning"] = reasoning_options
+
+        response = await self._client.responses.create(**kwargs)
+        text = extract_response_output_text(response)
         data = json.loads(extract_json_text(text))
 
         results: list[SearchResult] = []

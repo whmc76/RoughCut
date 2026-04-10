@@ -7,16 +7,39 @@ import type { SettingsForm } from "./constants";
 const EMPTY_SECRET_KEYS = ["openai_api_key", "anthropic_api_key", "minimax_api_key", "minimax_coding_plan_api_key", "ollama_api_key", "telegram_bot_token"] as const;
 const CREATIVE_SECRET_KEYS = ["avatar_api_key", "voice_clone_api_key"] as const;
 
+function normalizeBundledForm(form: SettingsForm): SettingsForm {
+  const nextForm = { ...form };
+  nextForm.llm_routing_mode = String(nextForm.llm_routing_mode ?? "bundled").trim() || "bundled";
+  nextForm.hybrid_analysis_provider = String(nextForm.hybrid_analysis_provider ?? "openai").trim() || "openai";
+  nextForm.hybrid_analysis_model = String(nextForm.hybrid_analysis_model ?? "gpt-5.4-mini").trim() || "gpt-5.4-mini";
+  nextForm.hybrid_analysis_search_mode = String(nextForm.hybrid_analysis_search_mode ?? "entity_gated").trim() || "entity_gated";
+  nextForm.hybrid_copy_provider = String(nextForm.hybrid_copy_provider ?? "minimax").trim() || "minimax";
+  nextForm.hybrid_copy_model = String(nextForm.hybrid_copy_model ?? "MiniMax-M2.7-highspeed").trim() || "MiniMax-M2.7-highspeed";
+  nextForm.hybrid_copy_search_mode = String(nextForm.hybrid_copy_search_mode ?? "follow_provider").trim() || "follow_provider";
+  nextForm.search_provider = "auto";
+  nextForm.search_fallback_provider = String(nextForm.search_fallback_provider ?? "searxng").trim() || "searxng";
+  nextForm.multimodal_fallback_provider = String(nextForm.multimodal_fallback_provider ?? "ollama").trim() || "ollama";
+  nextForm.model_search_helper = String(nextForm.model_search_helper ?? "").trim();
+  return nextForm;
+}
+
 function buildSettingsForm(config: NonNullable<ReturnType<typeof api.getConfig> extends Promise<infer T> ? T : never>): SettingsForm {
-  return {
+  return normalizeBundledForm({
     transcription_provider: config.transcription_provider,
     transcription_model: config.transcription_model,
     transcription_dialect: config.transcription_dialect,
     llm_mode: config.llm_mode,
+    llm_routing_mode: config.llm_routing_mode ?? "bundled",
     reasoning_provider: config.reasoning_provider,
     reasoning_model: config.reasoning_model,
     local_reasoning_model: config.local_reasoning_model,
     local_vision_model: config.local_vision_model,
+    hybrid_analysis_provider: config.hybrid_analysis_provider ?? "openai",
+    hybrid_analysis_model: config.hybrid_analysis_model ?? "gpt-5.4-mini",
+    hybrid_analysis_search_mode: config.hybrid_analysis_search_mode ?? "entity_gated",
+    hybrid_copy_provider: config.hybrid_copy_provider ?? "minimax",
+    hybrid_copy_model: config.hybrid_copy_model ?? "MiniMax-M2.7-highspeed",
+    hybrid_copy_search_mode: config.hybrid_copy_search_mode ?? "follow_provider",
     multimodal_fallback_provider: config.multimodal_fallback_provider,
     multimodal_fallback_model: config.multimodal_fallback_model,
     search_provider: config.search_provider,
@@ -75,11 +98,11 @@ function buildSettingsForm(config: NonNullable<ReturnType<typeof api.getConfig> 
     telegram_bot_api_base_url: config.telegram_bot_api_base_url,
     telegram_bot_token: "",
     telegram_bot_chat_id: config.telegram_bot_chat_id,
-  };
+  });
 }
 
 function sanitizeSettingsForm(form: SettingsForm): Record<string, string | number | boolean> {
-  const payload = { ...form };
+  const payload = { ...normalizeBundledForm(form) };
   for (const key of [...EMPTY_SECRET_KEYS, ...CREATIVE_SECRET_KEYS]) {
     if (!String(payload[key] ?? "").trim()) {
       delete payload[key];

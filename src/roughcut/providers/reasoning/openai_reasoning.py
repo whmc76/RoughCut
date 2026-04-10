@@ -4,6 +4,13 @@ import openai
 
 from roughcut.config import get_settings
 from roughcut.providers.auth import resolve_credential
+from roughcut.providers.openai_responses import (
+    build_message_input,
+    build_reasoning_options,
+    build_text_options,
+    extract_response_output_text,
+    extract_response_usage,
+)
 from roughcut.providers.reasoning.base import Message, ReasoningProvider, ReasoningResponse
 from roughcut.usage import record_usage_event
 
@@ -32,19 +39,19 @@ class OpenAIReasoningProvider(ReasoningProvider):
     ) -> ReasoningResponse:
         kwargs: dict = {
             "model": self._model,
-            "messages": [{"role": m.role, "content": m.content} for m in messages],
+            "input": build_message_input(messages),
             "temperature": temperature,
-            "max_tokens": max_tokens,
+            "max_output_tokens": max_tokens,
         }
-        if json_mode:
-            kwargs["response_format"] = {"type": "json_object"}
+        text_options = build_text_options(json_mode=json_mode)
+        if text_options:
+            kwargs["text"] = text_options
+        reasoning_options = build_reasoning_options(self._model, effort="medium")
+        if reasoning_options:
+            kwargs["reasoning"] = reasoning_options
 
-        response = await self._client.chat.completions.create(**kwargs)
-        choice = response.choices[0]
-        usage = {
-            "prompt_tokens": response.usage.prompt_tokens,
-            "completion_tokens": response.usage.completion_tokens,
-        }
+        response = await self._client.responses.create(**kwargs)
+        usage = extract_response_usage(response)
         await record_usage_event(
             provider="openai",
             model=response.model,
@@ -52,7 +59,7 @@ class OpenAIReasoningProvider(ReasoningProvider):
             kind="reasoning",
         )
         return ReasoningResponse(
-            content=choice.message.content or "",
+            content=extract_response_output_text(response),
             usage=usage,
             model=response.model,
         )

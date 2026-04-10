@@ -19,9 +19,12 @@ import {
   getActiveReasoningModel,
   getActiveReasoningProvider,
   getCredentialSourceLabel,
+  getHybridSearchModeLabel,
+  getLlmRoutingMode,
   getProviderLabel,
   formatProviderDetail,
   getProviderStatusLabel,
+  getRoutingSummary,
   getSearchSummary,
   getTranscriptionProviderLabel,
   isLocalTranscriptionProvider,
@@ -230,14 +233,17 @@ export function ModelSettingsPanel({ form, config, options, runtimeEnvironment, 
   const queryClient = useQueryClient();
   const [lastChecks, setLastChecks] = useState<Record<string, ProviderCheckResult>>({});
   const llmMode = readFormString(form, "llm_mode", "performance");
+  const llmRoutingMode = getLlmRoutingMode(form);
   const transcriptionProvider = readFormString(form, "transcription_provider");
   const activeReasoningProvider = getActiveReasoningProvider(form);
   const activeReasoningModel = getActiveReasoningModel(form);
-  const searchProvider = readFormString(form, "search_provider", "auto");
+  const hybridAnalysisProvider = readFormString(form, "hybrid_analysis_provider", "openai");
+  const hybridCopyProvider = readFormString(form, "hybrid_copy_provider", "minimax");
+  const hybridAnalysisSearchMode = readFormString(form, "hybrid_analysis_search_mode", "entity_gated");
+  const hybridCopySearchMode = readFormString(form, "hybrid_copy_search_mode", "follow_provider");
   const searchFallbackProvider = readFormString(form, "search_fallback_provider", "searxng");
   const transcriptionDialects = options?.transcription_dialects ?? [{ value: "mandarin", label: "普通话" }];
   const multimodalFallbackProviders = options?.multimodal_fallback_providers ?? [{ value: "ollama", label: "Ollama" }];
-  const searchProviders = options?.search_providers ?? [{ value: "auto", label: "自动选择" }];
   const searchFallbackProviders = options?.search_fallback_providers ?? [{ value: "searxng", label: "SearXNG" }];
   const transcriptionProviderOptions = Object.keys(options?.transcription_models ?? {}).map((provider) => ({
     value: provider,
@@ -261,9 +267,21 @@ export function ModelSettingsPanel({ form, config, options, runtimeEnvironment, 
     queryFn: () => api.getModelCatalog({ provider: fallbackProvider, kind: "vision_fallback" }),
     enabled: llmMode === "performance" && Boolean(fallbackProvider),
   });
+  const hybridAnalysisCatalog = useQuery({
+    queryKey: ["config-model-catalog", "hybrid_analysis", hybridAnalysisProvider],
+    queryFn: () => api.getModelCatalog({ provider: hybridAnalysisProvider, kind: "reasoning" }),
+    enabled: llmMode === "performance" && Boolean(hybridAnalysisProvider),
+  });
+  const hybridCopyCatalog = useQuery({
+    queryKey: ["config-model-catalog", "hybrid_copy", hybridCopyProvider],
+    queryFn: () => api.getModelCatalog({ provider: hybridCopyProvider, kind: "reasoning" }),
+    enabled: llmMode === "performance" && Boolean(hybridCopyProvider),
+  });
   const transcriptionModels = transcriptionCatalog.data?.models ?? options?.transcription_models?.[transcriptionProvider] ?? [];
   const reasoningModels = reasoningCatalog.data?.models ?? [];
   const fallbackModels = fallbackCatalog.data?.models ?? [];
+  const hybridAnalysisModels = hybridAnalysisCatalog.data?.models ?? [];
+  const hybridCopyModels = hybridCopyCatalog.data?.models ?? [];
 
   const refreshCatalog = async (provider: string, kind: string) => {
     const next = await api.getModelCatalog({ provider, kind, refresh: true });
@@ -287,10 +305,10 @@ export function ModelSettingsPanel({ form, config, options, runtimeEnvironment, 
 
     pushUnique(transcriptionProvider);
     pushUnique(activeReasoningProvider);
-    if (searchProvider !== "auto") {
-      pushUnique(searchProvider);
-    } else {
-      pushUnique(searchFallbackProvider);
+    pushUnique(searchFallbackProvider);
+    if (llmMode === "performance" && llmRoutingMode === "hybrid_performance") {
+      pushUnique(hybridAnalysisProvider);
+      pushUnique(hybridCopyProvider);
     }
 
     const cards: ProviderCardDescriptor[] = orderedProviders.map((provider) => {
@@ -315,8 +333,8 @@ export function ModelSettingsPanel({ form, config, options, runtimeEnvironment, 
               ? llmMode === "local"
                 ? `当前本地推理 Provider`
                 : `当前推理 Provider`
-              : provider === searchProvider || provider === searchFallbackProvider
-                ? "搜索链路关联 Provider"
+              : provider === searchFallbackProvider
+                ? "搜索回退链路"
                 : "当前活跃 Provider",
         tone: getProviderTone(provider),
         status: summary.status,
@@ -334,10 +352,10 @@ export function ModelSettingsPanel({ form, config, options, runtimeEnvironment, 
       title: "搜索路由",
       subtitle: "当前搜索策略",
       tone: "route",
-      status: searchProvider === "auto" ? "自动跟随" : "固定 Provider",
+      status: "自动跟随",
       detail: getSearchSummary(form),
       baseUrl: "",
-      credentialSource: searchProvider === "auto" ? "按推理 Provider 自动路由" : "",
+      credentialSource: "按推理 Provider 自动路由",
       refreshActions: [],
     });
 
@@ -346,24 +364,26 @@ export function ModelSettingsPanel({ form, config, options, runtimeEnvironment, 
     activeReasoningProvider,
     config,
     form,
+    hybridAnalysisProvider,
+    hybridCopyProvider,
     lastChecks,
     llmMode,
+    llmRoutingMode,
     reasoningCatalogProvider,
     runtimeEnvironment,
     searchFallbackProvider,
-    searchProvider,
     serviceStatus,
     transcriptionProvider,
   ]);
 
   return (
     <section className="panel settings-core-panel">
-      <PanelHeader title="核心链路配置" description="把配置、Provider 卡、检测动作和模型刷新放到同一块里。" />
+      <PanelHeader title="核心链路配置" description="把配置、Provider 卡、检测动作、混合路由和模型刷新放到同一块里。" />
       <div className="settings-provider-deck-head">
         <div>
           <strong>活跃 Provider</strong>
           <div className="muted">
-            当前链路：转写 {getTranscriptionProviderLabel(transcriptionProvider)} · 推理 {getProviderLabel(activeReasoningProvider)} · 搜索 {getSearchSummary(form)}
+            当前链路：转写 {getTranscriptionProviderLabel(transcriptionProvider)} · {getRoutingSummary(form)} · 搜索 {getSearchSummary(form)}
           </div>
         </div>
       </div>
@@ -446,6 +466,88 @@ export function ModelSettingsPanel({ form, config, options, runtimeEnvironment, 
         <section className="settings-chain-card">
           <div className="settings-chain-card-head">
             <div>
+              <span className="settings-overview-label">混合模式</span>
+              <strong>任务路由</strong>
+            </div>
+            <div className="muted">
+              {llmMode === "local"
+                ? "本地模式下固定 bundled"
+                : llmRoutingMode === "hybrid_performance"
+                  ? `摘要/字幕 ${getProviderLabel(hybridAnalysisProvider)} · 文案 ${getProviderLabel(hybridCopyProvider)}`
+                  : "所有能力跟随主 Provider"}
+            </div>
+          </div>
+          <div className="settings-chain-card-body form-grid three-up">
+            <SelectField
+              label="路由模式"
+              value={llmRoutingMode}
+              onChange={(event) => onChange("llm_routing_mode", event.target.value)}
+              options={[
+                { value: "bundled", label: "Bundled" },
+                { value: "hybrid_performance", label: "Hybrid Performance" },
+              ]}
+            />
+            {llmMode === "local" ? (
+              <div className="settings-chain-note muted">本地模式下不启用高性能混合路由，所有推理和视觉都走本地 Provider。</div>
+            ) : llmRoutingMode === "hybrid_performance" ? (
+              <>
+                <SelectField
+                  label="摘要/字幕 Provider"
+                  value={hybridAnalysisProvider}
+                  onChange={(event) => onChange("hybrid_analysis_provider", event.target.value)}
+                  options={REASONING_PROVIDER_OPTIONS.map((provider) => ({ value: provider, label: getProviderLabel(provider) }))}
+                />
+                <SelectField
+                  label="摘要/字幕模型"
+                  value={String(form.hybrid_analysis_model ?? "")}
+                  onChange={(event) => onChange("hybrid_analysis_model", event.target.value)}
+                  options={buildModelOptions(hybridAnalysisModels, String(form.hybrid_analysis_model ?? ""))}
+                />
+                <SelectField
+                  label="摘要/字幕搜索"
+                  value={hybridAnalysisSearchMode}
+                  onChange={(event) => onChange("hybrid_analysis_search_mode", event.target.value)}
+                  options={[
+                    { value: "off", label: "关闭" },
+                    { value: "entity_gated", label: "主体明确时启用" },
+                    { value: "follow_provider", label: "始终跟随链路" },
+                  ]}
+                />
+                <SelectField
+                  label="平台文案 Provider"
+                  value={hybridCopyProvider}
+                  onChange={(event) => onChange("hybrid_copy_provider", event.target.value)}
+                  options={REASONING_PROVIDER_OPTIONS.map((provider) => ({ value: provider, label: getProviderLabel(provider) }))}
+                />
+                <SelectField
+                  label="平台文案模型"
+                  value={String(form.hybrid_copy_model ?? "")}
+                  onChange={(event) => onChange("hybrid_copy_model", event.target.value)}
+                  options={buildModelOptions(hybridCopyModels, String(form.hybrid_copy_model ?? ""))}
+                />
+                <SelectField
+                  label="平台文案搜索"
+                  value={hybridCopySearchMode}
+                  onChange={(event) => onChange("hybrid_copy_search_mode", event.target.value)}
+                  options={[
+                    { value: "off", label: "关闭" },
+                    { value: "entity_gated", label: "主体明确时启用" },
+                    { value: "follow_provider", label: "始终跟随链路" },
+                  ]}
+                />
+                <div className="settings-chain-note muted">
+                  高性能混合默认建议：摘要/字幕走 {getProviderLabel(hybridAnalysisProvider)}，搜索 {getHybridSearchModeLabel(hybridAnalysisSearchMode)}；平台文案走 {getProviderLabel(hybridCopyProvider)}，搜索 {getHybridSearchModeLabel(hybridCopySearchMode)}。视觉理解会自动跟随各自链路 Provider。
+                </div>
+              </>
+            ) : (
+              <div className="settings-chain-note muted">Bundled 模式下，摘要、字幕、视觉和搜索统一跟随主推理 Provider，只保留搜索与视觉兜底链路。</div>
+            )}
+          </div>
+        </section>
+
+        <section className="settings-chain-card">
+          <div className="settings-chain-card-head">
+            <div>
               <span className="settings-overview-label">转写</span>
               <strong>转写链路</strong>
             </div>
@@ -510,17 +612,18 @@ export function ModelSettingsPanel({ form, config, options, runtimeEnvironment, 
                   options={buildModelOptions(reasoningModels, String(form.reasoning_model ?? ""))}
                 />
                 <SelectField
-                  label="视觉回退 Provider"
+                  label="视觉兜底 Provider"
                   value={String(form.multimodal_fallback_provider ?? "")}
                   onChange={(event) => onChange("multimodal_fallback_provider", event.target.value)}
                   options={multimodalFallbackProviders}
                 />
                 <SelectField
-                  label="视觉回退模型"
+                  label="视觉兜底模型"
                   value={String(form.multimodal_fallback_model ?? "")}
                   onChange={(event) => onChange("multimodal_fallback_model", event.target.value)}
                   options={buildModelOptions(fallbackModels, String(form.multimodal_fallback_model ?? ""))}
                 />
+                <div className="settings-chain-note muted">主视觉理解始终跟随当前推理 Provider，只有兜底链路可单独配置。</div>
               </>
             ) : (
               <>
@@ -550,21 +653,14 @@ export function ModelSettingsPanel({ form, config, options, runtimeEnvironment, 
             <div className="muted">{getSearchSummary(form)}</div>
           </div>
           <div className="settings-chain-card-body form-grid three-up">
+            <div className="settings-chain-note muted">主搜索始终跟随当前推理 Provider：{getProviderLabel(activeReasoningProvider)}。</div>
             <SelectField
-              label="搜索 Provider"
-              value={searchProvider}
-              onChange={(event) => onChange("search_provider", event.target.value)}
-              options={searchProviders}
+              label="搜索回退 Provider"
+              value={searchFallbackProvider}
+              onChange={(event) => onChange("search_fallback_provider", event.target.value)}
+              options={searchFallbackProviders}
             />
-            {searchProvider === "auto" ? (
-              <SelectField
-                label="搜索回退 Provider"
-                value={searchFallbackProvider}
-                onChange={(event) => onChange("search_fallback_provider", event.target.value)}
-                options={searchFallbackProviders}
-              />
-            ) : null}
-            {(searchProvider === "model" || (searchProvider === "auto" && searchFallbackProvider === "model")) ? (
+            {searchFallbackProvider === "model" ? (
               <TextField
                 label="搜索辅助模型"
                 value={String(form.model_search_helper ?? "")}

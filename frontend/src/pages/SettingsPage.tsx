@@ -8,7 +8,7 @@ import { ModelSettingsPanel } from "../features/settings/ModelSettingsPanel";
 import { RuntimeSettingsPanel } from "../features/settings/RuntimeSettingsPanel";
 import { SettingsOverviewPanel } from "../features/settings/SettingsOverviewPanel";
 import { QualitySettingsPanel } from "../features/settings/QualitySettingsPanel";
-import { getActiveReasoningProvider, getProviderLabel, getSearchSummary } from "../features/settings/helpers";
+import { getActiveReasoningProvider, getProviderLabel, getRoutingSummary, getSearchSummary, isHybridRoutingEnabled } from "../features/settings/helpers";
 import { useSettingsWorkspace } from "../features/settings/useSettingsWorkspace";
 import { Link } from "react-router-dom";
 
@@ -22,11 +22,12 @@ export function SettingsPage() {
   const packagingMinScore = Number(workspace.form.packaging_selection_min_score ?? 0.6);
   const glossaryThreshold = Number(workspace.form.glossary_correction_review_threshold ?? 0.9);
   const outputDir = String(workspace.runtimeEnvironment.data?.output_dir ?? "output");
+  const hybridEnabled = isHybridRoutingEnabled(workspace.form);
   const summaryCards = [
     {
       label: "执行设置",
-      value: `${getProviderLabel(activeReasoningProvider)} · ${getSearchSummary(workspace.form)}`,
-      detail: `模型 ${getProviderLabel(activeReasoningProvider)}，搜索 ${getSearchSummary(workspace.form)}，输出 ${outputDir}`,
+      value: `${getRoutingSummary(workspace.form)} · ${getSearchSummary(workspace.form)}`,
+      detail: `主推理 ${getProviderLabel(activeReasoningProvider)}，搜索 ${getSearchSummary(workspace.form)}，输出 ${outputDir}`,
     },
     {
       label: "包装设置",
@@ -65,7 +66,7 @@ export function SettingsPage() {
     telegramAgentEnabled ? "远程控制已启用" : "远程控制关闭",
   ].join(" · ");
   const environmentSummary = [
-    `推理 ${getProviderLabel(activeReasoningProvider)}`,
+    hybridEnabled ? getRoutingSummary(workspace.form) : `推理 ${getProviderLabel(activeReasoningProvider)}`,
     getSearchSummary(workspace.form),
     `输出路径 ${outputDir}`,
   ].join(" · ");

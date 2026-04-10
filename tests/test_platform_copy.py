@@ -5,6 +5,7 @@ import pytest
 from roughcut.pipeline.orchestrator import PIPELINE_STEPS, create_job_steps
 from roughcut.review.platform_copy import (
     _build_packaging_fact_queries,
+    audit_platform_packaging_titles,
     build_packaging_prompt_brief,
     build_packaging_fact_sheet_cache_fingerprint,
     generate_platform_packaging,
@@ -56,12 +57,191 @@ def test_render_platform_packaging_markdown_outputs_all_platforms():
     markdown = render_platform_packaging_markdown(packaging)
 
     assert "# 视频爆点提炼" in markdown
+    assert "# 标题审核" in markdown
     assert "# B站" in markdown
     assert "# 小红书" in markdown
     assert "# 抖音" in markdown
     assert "# 快手" in markdown
     assert "# 视频号" in markdown
     assert "#EDC" in markdown
+
+
+def test_normalize_platform_packaging_attaches_title_audit():
+    packaging = normalize_platform_packaging(
+        {
+            "highlights": {},
+            "platforms": {
+                "bilibili": {
+                    "titles": [
+                        "Loop露普 SK05二代Pro UV版开箱实测，值不值一次说清",
+                        "Loop露普 SK05二代Pro UV版到底值不值",
+                        "Loop露普 SK05二代Pro UV版上手体验，细节一次看清",
+                        "等了很久，Loop露普 SK05二代Pro UV版终于到手了",
+                        "Loop露普 SK05二代Pro UV版开箱记录与真实判断",
+                    ],
+                    "description": "简介",
+                    "tags": ["EDC"],
+                }
+            },
+        },
+        content_profile={"subject_brand": "Loop露普", "subject_model": "SK05二代Pro UV版", "subject_type": "EDC手电"},
+    )
+
+    assert packaging["title_audit"]["summary"]["status"] in {"pass", "warning"}
+    assert packaging["title_audit"]["platforms"]["bilibili"]["summary"]["title_count"] == 5
+    assert packaging["title_audit"]["platforms"]["bilibili"]["titles"][0]["char_count"] > 0
+
+
+def test_audit_platform_packaging_titles_flags_length_encoding_and_style_issues():
+    audit = audit_platform_packaging_titles(
+        {
+            "platforms": {
+                "xiaohongshu": {
+                    "titles": [
+                        "这是一条超过二十字而且完全不像小红书分享标题的超长技术公告",
+                        "参数白皮书\r\n完整版",
+                        "官方公告！！！",
+                        "纯参数规格说明",
+                        "最终通知",
+                    ]
+                },
+                "wechat_channels": {
+                    "titles": [
+                        "这也太炸裂了吧",
+                        "视频号封神标题",
+                        "离谱到不行",
+                        "绝绝子开箱",
+                        "杀疯了",
+                    ]
+                },
+            }
+        },
+        content_profile={"subject_brand": "Loop露普", "subject_model": "SK05二代Pro UV版", "subject_type": "EDC手电"},
+    )
+
+    xhs_issues = audit["platforms"]["xiaohongshu"]["issues"]
+    assert any(issue["code"] == "hard_length_overflow" for issue in xhs_issues)
+    assert any(issue["code"] == "control_char" for issue in xhs_issues)
+    assert any(issue["code"] in {"style_mismatch", "share_feel_weak", "audience_mismatch"} for issue in xhs_issues)
+
+    wechat_issues = audit["platforms"]["wechat_channels"]["issues"]
+    assert any(issue["code"] in {"tone_too_hyped", "audience_mismatch"} for issue in wechat_issues)
+    assert audit["summary"]["status"] in {"warning", "error"}
+
+
+def test_audit_platform_packaging_titles_warns_when_angle_diversity_is_low():
+    audit = audit_platform_packaging_titles(
+        {
+            "platforms": {
+                "douyin": {
+                    "titles": [
+                        "Loop露普 SK05二代Pro UV版到底值不值",
+                        "Loop露普 SK05二代Pro UV版到底值不值",
+                        "Loop露普 SK05二代Pro UV版到底值不值",
+                        "Loop露普 SK05二代Pro UV版到底值不值",
+                        "Loop露普 SK05二代Pro UV版到底值不值",
+                    ]
+                }
+            }
+        },
+        content_profile={"subject_brand": "Loop露普", "subject_model": "SK05二代Pro UV版", "subject_type": "EDC手电"},
+    )
+
+    issues = audit["platforms"]["douyin"]["issues"]
+    assert any(issue["code"] == "angle_diversity_low" for issue in issues)
+
+
+def test_audit_platform_packaging_titles_uses_weighted_mixed_language_counting():
+    audit = audit_platform_packaging_titles(
+        {
+            "platforms": {
+                "xiaohongshu": {
+                    "titles": [
+                        "Olight SR2 Pro UV到手",
+                        "Olight SR2 Pro UV细节",
+                        "Olight SR2 Pro UV值不值",
+                        "Olight SR2 Pro UV开箱",
+                        "Olight SR2 Pro UV分享",
+                    ]
+                }
+            }
+        },
+        content_profile={"subject_brand": "Olight", "subject_model": "SR2 Pro UV", "subject_type": "EDC手电"},
+    )
+
+    title = audit["platforms"]["xiaohongshu"]["titles"][0]
+    assert title["char_count"] > title["display_units"]
+    assert not any(issue["code"] == "hard_length_overflow" for issue in audit["platforms"]["xiaohongshu"]["issues"])
+
+
+def test_normalize_platform_packaging_localizes_known_english_brand_for_cn_platform_titles():
+    packaging = normalize_platform_packaging(
+        {"highlights": {}, "platforms": {"bilibili": {"titles": [], "description": "", "tags": []}}},
+        content_profile={"subject_brand": "OLIGHT", "subject_model": "SR2 Pro UV", "subject_type": "EDC手电"},
+    )
+
+    assert packaging["highlights"]["product"].startswith("傲雷OLIGHT SR2 Pro UV")
+    assert packaging["platforms"]["bilibili"]["titles"][0].startswith("傲雷OLIGHT SR2 Pro UV")
+    assert "傲雷" in packaging["platforms"]["xiaohongshu"]["titles"][0]
+    assert "OLIGHT" not in packaging["platforms"]["xiaohongshu"]["titles"][0]
+    assert packaging["platforms"]["bilibili"]["tags"][:2] == ["傲雷", "OLIGHT"]
+
+
+def test_audit_platform_packaging_titles_warns_when_cn_platform_title_uses_english_brand_only():
+    audit = audit_platform_packaging_titles(
+        {
+            "platforms": {
+                "xiaohongshu": {
+                    "titles": [
+                        "OLIGHT SR2 Pro UV到手",
+                        "OLIGHT SR2 Pro UV细节",
+                        "OLIGHT SR2 Pro UV值不值",
+                        "OLIGHT SR2 Pro UV开箱",
+                        "OLIGHT SR2 Pro UV分享",
+                    ]
+                }
+            }
+        },
+        content_profile={"subject_brand": "OLIGHT", "subject_model": "SR2 Pro UV", "subject_type": "EDC手电"},
+    )
+
+    assert any(issue["code"] == "brand_localization_weak" for issue in audit["platforms"]["xiaohongshu"]["issues"])
+
+
+def test_normalize_platform_packaging_enriches_existing_english_brand_tags_with_cn_alias():
+    packaging = normalize_platform_packaging(
+        {
+            "highlights": {},
+            "platforms": {
+                "bilibili": {
+                    "titles": ["OLIGHT SR2 Pro UV开箱实测"],
+                    "description": "简介",
+                    "tags": ["OLIGHT", "手电", "开箱"],
+                }
+            },
+        },
+        content_profile={"subject_brand": "OLIGHT", "subject_model": "SR2 Pro UV", "subject_type": "EDC手电"},
+    )
+
+    assert packaging["platforms"]["bilibili"]["tags"][:4] == ["傲雷", "OLIGHT", "手电", "开箱"]
+
+
+def test_normalize_platform_packaging_prefers_upstream_brand_display_fields():
+    packaging = normalize_platform_packaging(
+        {"highlights": {}, "platforms": {"bilibili": {"titles": [], "description": "", "tags": []}}},
+        content_profile={
+            "subject_brand": "NexTool",
+            "subject_brand_cn": "纳拓",
+            "subject_brand_bilingual": "纳拓NexTool",
+            "subject_model": "F12",
+            "subject_type": "多功能工具钳",
+        },
+    )
+
+    assert packaging["highlights"]["product"].startswith("纳拓NexTool F12")
+    assert packaging["platforms"]["bilibili"]["titles"][0].startswith("纳拓NexTool F12")
+    assert packaging["platforms"]["xiaohongshu"]["titles"][0].startswith("纳拓")
+    assert packaging["platforms"]["bilibili"]["tags"][:2] == ["纳拓", "NexTool"]
 
 
 def test_normalize_platform_packaging_backfills_missing_titles():
@@ -103,9 +283,9 @@ def test_normalize_platform_packaging_preserves_specific_identity_when_available
         content_profile={"subject_brand": "REATE", "subject_type": "EDC折刀", "video_theme": "折刀雕刻开箱"},
     )
 
-    assert packaging["highlights"]["product"] == "REATE EDC折刀"
-    assert packaging["platforms"]["bilibili"]["titles"][0].startswith("REATE EDC折刀：")
-    assert packaging["platforms"]["bilibili"]["tags"][:4] == ["REATE", "EDC折刀", "折刀雕刻开箱", "EDC"]
+    assert packaging["highlights"]["product"] == "锐特REATE EDC折刀"
+    assert packaging["platforms"]["bilibili"]["titles"][0].startswith("锐特REATE EDC折刀：")
+    assert packaging["platforms"]["bilibili"]["tags"][:5] == ["锐特", "REATE", "EDC折刀", "折刀雕刻开箱", "EDC"]
 
 
 def test_normalize_platform_packaging_prefers_brand_model_in_fallback_copy():
@@ -116,7 +296,8 @@ def test_normalize_platform_packaging_prefers_brand_model_in_fallback_copy():
 
     assert packaging["platforms"]["bilibili"]["titles"][0].startswith("Loop露普 SK05二代Pro UV版：")
     assert "Loop露普 SK05二代Pro UV版" in packaging["platforms"]["bilibili"]["description"]
-    assert packaging["platforms"]["xiaohongshu"]["titles"][0] == "Loop露普 SK05二代Pro UV版终于到手，细节直接封神"
+    assert len(packaging["platforms"]["xiaohongshu"]["titles"][0]) <= 20
+    assert any(token in packaging["platforms"]["xiaohongshu"]["titles"][0] for token in ("Loop露普", "SK05二代Pro UV版"))
 
 
 def test_normalize_platform_packaging_applies_global_copy_style_to_fallbacks():

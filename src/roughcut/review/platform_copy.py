@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from difflib import SequenceMatcher
 import json
+import math
 import re
+import unicodedata
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -22,6 +24,90 @@ PLATFORM_ORDER = [
     ("kuaishou", "快手", "简介", "标签"),
     ("wechat_channels", "视频号", "简介", "标签"),
 ]
+
+_TITLE_AUDIT_VERSION = "2026-04-10.title-audit.v1"
+_TITLE_ANGLE_PATTERNS = (
+    ("question", re.compile(r"[？?]|怎么|值不值|要不要|到底|买吗|如何|选哪|选谁")),
+    ("emotion", re.compile(r"终于|真香|封神|上头|离谱|惊到|杀疯|爽飞|感动|等了很久")),
+    ("conclusion", re.compile(r"结论|建议|劝退|推荐|不推荐|可买|别买|直说|实话")),
+    ("explosive", re.compile(r"直接|居然|原来|先看|一条|炸场|太狠|暴击|开箱")),
+    ("informational", re.compile(r"实测|对比|体验|评测|细节|拆解|记录|总结|重点|判断")),
+)
+_TITLE_AUDIT_RULES: dict[str, dict[str, Any]] = {
+    "bilibili": {
+        "label": "B站",
+        "hard_max_chars": None,
+        "recommended_min_chars": 10,
+        "recommended_max_chars": 30,
+        "display_max_chars": 30,
+        "max_emojis": 0,
+        "max_exclamations": 1,
+        "style_hint": "偏信息密度和搜索友好，最好带主体、判断或问题角度。",
+        "audience_hint": "用户更愿意点开能快速判断主题、差异和结论的信息型标题。",
+        "preferred_tokens": ("开箱", "实测", "对比", "评测", "体验", "细节", "值不值", "怎么选", "总结", "判断"),
+        "avoid_tokens": ("绝绝子", "yyds", "杀疯", "封神"),
+    },
+    "xiaohongshu": {
+        "label": "小红书",
+        "hard_max_chars": 20,
+        "recommended_min_chars": 8,
+        "recommended_max_chars": 20,
+        "display_max_chars": 20,
+        "max_emojis": 2,
+        "max_exclamations": 1,
+        "style_hint": "偏真实分享、到手感受和审美表达，适合像笔记标题。",
+        "audience_hint": "用户更吃“到手体验、细节感受、种草/劝退”这类生活化表达。",
+        "preferred_tokens": ("到手", "分享", "开箱", "细节", "质感", "记录", "真的", "被", "种草", "劝退", "值不值"),
+        "avoid_tokens": ("官方公告", "技术白皮书"),
+    },
+    "douyin": {
+        "label": "抖音",
+        "hard_max_chars": 55,
+        "recommended_min_chars": 6,
+        "recommended_max_chars": 22,
+        "display_max_chars": 22,
+        "max_emojis": 1,
+        "max_exclamations": 1,
+        "style_hint": "偏短促直给，先给结果或最强记忆点。",
+        "audience_hint": "用户更容易被强钩子、结果先行、节奏快的标题带进播放。",
+        "preferred_tokens": ("直接", "到底", "值不值", "结果", "真相", "先看", "一条", "开箱", "居然", "原来"),
+        "avoid_tokens": ("长文解析", "慢慢聊", "完整白皮书"),
+    },
+    "kuaishou": {
+        "label": "快手",
+        "hard_max_chars": None,
+        "recommended_min_chars": 6,
+        "recommended_max_chars": 26,
+        "display_max_chars": 26,
+        "max_emojis": 1,
+        "max_exclamations": 1,
+        "style_hint": "偏直给、口语化、像当面把真实体验讲明白。",
+        "audience_hint": "用户更偏好有实话感、少包装、能马上知道你想说什么的标题。",
+        "preferred_tokens": ("给你们看", "真东西", "实话", "直说", "值不值", "到底", "不整虚的", "咱"),
+        "avoid_tokens": ("封神", "杂志感", "氛围感大片"),
+    },
+    "wechat_channels": {
+        "label": "视频号",
+        "hard_max_chars": None,
+        "recommended_min_chars": 6,
+        "recommended_max_chars": 16,
+        "display_max_chars": 20,
+        "max_emojis": 0,
+        "max_exclamations": 1,
+        "style_hint": "偏稳妥、可信、总结式，少一点网感黑话。",
+        "audience_hint": "用户更偏好结论清楚、重点明确、方便快速判断是否值得看的标题。",
+        "preferred_tokens": ("总结", "结论", "实测", "体验", "判断", "开箱", "值不值", "怎么选", "重点", "记录"),
+        "avoid_tokens": ("封神", "炸裂", "杀疯", "绝绝子", "离谱"),
+    },
+}
+
+_CN_PLATFORM_KEYS = {"bilibili", "xiaohongshu", "douyin", "kuaishou", "wechat_channels"}
+_BRAND_CN_ALIASES = {
+    "OLIGHT": "傲雷",
+    "Olight": "傲雷",
+    "LEATHERMAN": "莱泽曼",
+    "REATE": "锐特",
+}
 
 
 def build_transcript_for_packaging(subtitle_items: list[dict[str, Any]], *, max_chars: int = 6000) -> str:
@@ -386,12 +472,17 @@ def normalize_platform_packaging(
         fact_sheet=fact_sheet,
         author_profile=author_profile,
     )
-    return _enforce_platform_description_variation(
+    varied = _enforce_platform_description_variation(
         guarded,
         content_profile=content_profile,
         copy_style=copy_style,
         author_profile=author_profile,
     )
+    varied["title_audit"] = audit_platform_packaging_titles(
+        varied,
+        content_profile=content_profile,
+    )
+    return varied
 
 
 def render_platform_packaging_markdown(packaging: dict[str, Any]) -> str:
@@ -406,6 +497,37 @@ def render_platform_packaging_markdown(packaging: dict[str, Any]) -> str:
         f"- 最适合评论区的问题：{highlights.get('engagement_question', '')}",
         "",
     ]
+
+    title_audit = packaging.get("title_audit") if isinstance(packaging.get("title_audit"), dict) else {}
+    audit_platforms = title_audit.get("platforms") if isinstance(title_audit.get("platforms"), dict) else {}
+    if audit_platforms:
+        summary = title_audit.get("summary") if isinstance(title_audit.get("summary"), dict) else {}
+        lines.extend(
+            [
+                "# 标题审核",
+                (
+                    f"- 总体：{str(summary.get('status') or 'unknown')}，"
+                    f"{int(summary.get('platforms_with_errors') or 0)} 个平台报错，"
+                    f"{int(summary.get('platforms_with_warnings') or 0)} 个平台预警"
+                ),
+                f"- 审计版本：{title_audit.get('version') or _TITLE_AUDIT_VERSION}",
+                "- 计数方式：中文/全角按 1，英文数字半角按 0.5，长度判断向上取整",
+                "",
+            ]
+        )
+        for key, label, _, _ in PLATFORM_ORDER:
+            platform_audit = audit_platforms.get(key)
+            if not isinstance(platform_audit, dict):
+                continue
+            lines.append(f"## {label}")
+            lines.append(f"- 结果：{_render_title_audit_platform_summary(platform_audit)}")
+            for issue in (platform_audit.get("issues") or [])[:3]:
+                if not isinstance(issue, dict):
+                    continue
+                lines.append(
+                    f"- {str(issue.get('severity') or 'warning').upper()}: {str(issue.get('message') or '').strip()}"
+                )
+            lines.append("")
 
     platforms = packaging.get("platforms") or {}
     for key, label, body_label, tag_label in PLATFORM_ORDER:
@@ -677,16 +799,26 @@ def _enforce_packaging_fact_guardrails(
 
     for key, label, _, _ in PLATFORM_ORDER:
         platform = guarded["platforms"].get(key) or {}
-        fallback_titles = build_fallback_titles(label=label, content_profile=content_profile, copy_style=copy_style)
+        fallback_titles = _fit_titles_to_platform(
+            build_fallback_titles(label=label, content_profile=content_profile, copy_style=copy_style),
+            label=label,
+            content_profile=content_profile,
+            copy_style=copy_style,
+        )
         titles = list(platform.get("titles") or [])
         guarded_titles: list[str] = []
         for idx, title in enumerate(titles[:5]):
-            replacement = fallback_titles[idx]
+            replacement = fallback_titles[min(idx, len(fallback_titles) - 1)] if fallback_titles else _sanitize_title_text(title)
             if _contains_unverified_claim(title, verified_blob) or not _contains_confirmed_product_anchor(title, content_profile):
                 guarded_titles.append(replacement)
             else:
                 guarded_titles.append(title)
-        platform["titles"] = guarded_titles + fallback_titles[len(guarded_titles):5]
+        platform["titles"] = _fit_titles_to_platform(
+            guarded_titles + fallback_titles[len(guarded_titles):5],
+            label=label,
+            content_profile=content_profile,
+            copy_style=copy_style,
+        )
         description = str(platform.get("description") or "").strip()
         if _contains_unverified_claim(description, verified_blob):
             platform["description"] = build_fallback_description(
@@ -767,7 +899,7 @@ def _looks_like_fact_sensitive_claim(text: str) -> bool:
 def _normalize_titles(value: Any, *, label: str, content_profile: dict[str, Any] | None, copy_style: str) -> list[str]:
     titles = [str(item).strip() for item in (value or []) if str(item).strip()]
     if len(titles) >= 5:
-        return titles[:5]
+        return _fit_titles_to_platform(titles[:5], label=label, content_profile=content_profile, copy_style=copy_style)
 
     fallback = build_fallback_titles(label=label, content_profile=content_profile, copy_style=copy_style)
     seen: set[str] = set()
@@ -778,18 +910,327 @@ def _normalize_titles(value: Any, *, label: str, content_profile: dict[str, Any]
             merged.append(title)
         if len(merged) >= 5:
             break
-    return merged
+    return _fit_titles_to_platform(merged, label=label, content_profile=content_profile, copy_style=copy_style)
+
+
+def _fit_titles_to_platform(
+    titles: list[str],
+    *,
+    label: str,
+    content_profile: dict[str, Any] | None,
+    copy_style: str,
+) -> list[str]:
+    key = _platform_key_from_label(label)
+    rule = _TITLE_AUDIT_RULES.get(key) or {}
+    max_chars = (
+        rule.get("hard_max_chars")
+        or rule.get("recommended_max_chars")
+        or rule.get("display_max_chars")
+    )
+    compact_fallbacks = _build_compact_fallback_titles(label=label, content_profile=content_profile, copy_style=copy_style)
+    seen: set[str] = set()
+    fitted: list[str] = []
+    fallback_cursor = 0
+    for raw_title in titles:
+        title = _sanitize_title_text(raw_title)
+        if isinstance(max_chars, int) and _text_display_units_ceiling(title) > max_chars:
+            replacement = ""
+            while fallback_cursor < len(compact_fallbacks):
+                candidate = _sanitize_title_text(compact_fallbacks[fallback_cursor])
+                fallback_cursor += 1
+                if candidate and _text_display_units_ceiling(candidate) <= max_chars and candidate not in seen:
+                    replacement = candidate
+                    break
+            title = replacement or _truncate_title(title, max_chars)
+        if not title or title in seen:
+            continue
+        seen.add(title)
+        fitted.append(title)
+        if len(fitted) >= 5:
+            return fitted
+
+    for candidate in compact_fallbacks:
+        title = _sanitize_title_text(candidate)
+        if not title or title in seen:
+            continue
+        if isinstance(max_chars, int) and _text_display_units_ceiling(title) > max_chars:
+            title = _truncate_title(title, max_chars)
+        if not title or title in seen:
+            continue
+        seen.add(title)
+        fitted.append(title)
+        if len(fitted) >= 5:
+            break
+    return fitted
+
+
+def _build_compact_fallback_titles(
+    *,
+    label: str,
+    content_profile: dict[str, Any] | None,
+    copy_style: str,
+) -> list[str]:
+    del copy_style
+    if not _has_specific_subject_identity(content_profile):
+        if label == "小红书":
+            return ["终于到手了", "先看开箱细节", "这次质感真不错", "细节先看清", "值不值先聊聊"]
+        if label == "抖音":
+            return ["先看这次开箱", "这次值不值", "重点直接看", "细节先看", "上手先说结论"]
+        if label == "快手":
+            return ["给你们看个真东西", "这次我说实话", "值不值我直说", "先看细节", "到底咋样"]
+        if label == "视频号":
+            return ["开箱重点记录", "到手体验总结", "值不值先看", "细节重点", "上手记录"]
+        return ["开箱重点先看", "值不值一次说清", "这次先看细节", "上手体验记录", "开箱真实判断"]
+
+    product = _compact_product_label(content_profile, label=label)
+    subject = _compact_subject_label(content_profile, label=label)
+    if label == "小红书":
+        return [
+            f"{product}终于到手",
+            f"{product}细节先看",
+            f"{subject}开箱看细节",
+            f"{product}值不值",
+            "等很久才到手",
+        ]
+    if label == "抖音":
+        return [
+            f"{product}先看重点",
+            f"{product}值不值",
+            f"{product}终于到手",
+            "这次开箱先看细节",
+            f"{subject}先看细节",
+        ]
+    if label == "快手":
+        return [
+            "给你们看个真东西",
+            f"{product}值不值我直说",
+            f"{product}到底咋样",
+            "这次开箱我说实话",
+            f"{subject}先看细节",
+        ]
+    if label == "视频号":
+        return [
+            f"{product}开箱记录",
+            f"{product}到手体验",
+            f"{product}值不值",
+            f"{subject}开箱重点",
+            f"{product}细节总结",
+        ]
+    return [
+        f"{product}开箱实测",
+        f"{product}值不值",
+        f"{product}上手体验",
+        f"{subject}重点细节",
+        f"{product}真实判断",
+    ]
+
+
+def _compact_product_label(content_profile: dict[str, Any] | None, *, label: str) -> str:
+    brand = _localized_brand_label(
+        str((content_profile or {}).get("subject_brand") or "").strip(),
+        label=label,
+        content_profile=content_profile,
+    )
+    model = str((content_profile or {}).get("subject_model") or "").strip()
+    subject = _specific_subject_type(content_profile) or str((content_profile or {}).get("subject_type") or "").strip() or "这款产品"
+    max_chars = 12 if label in {"小红书", "视频号"} else 14
+    for candidate in (
+        " ".join(part for part in (brand, model) if part).strip(),
+        model,
+        brand,
+        subject,
+        "这款产品",
+    ):
+        text = _sanitize_title_text(candidate)
+        if text and _text_display_units_ceiling(text) <= max_chars:
+            return text
+    return _truncate_title(_sanitize_title_text(model or brand or subject or "这款产品"), max_chars)
+
+
+def _compact_subject_label(content_profile: dict[str, Any] | None, *, label: str) -> str:
+    subject = _specific_subject_type(content_profile) or str((content_profile or {}).get("subject_type") or "").strip() or "这次开箱"
+    max_chars = 8 if label == "视频号" else 10
+    return _truncate_title(_sanitize_title_text(subject), max_chars) or "这次开箱"
+
+
+def _sanitize_title_text(value: Any) -> str:
+    text = str(value or "").strip()
+    text = re.sub(r"[\r\n\t]+", " ", text)
+    text = re.sub(r"[\x00-\x1f\x7f]", "", text)
+    text = re.sub(r"[\u200b-\u200f\u2060\ufeff]", "", text)
+    text = text.replace("#", "")
+    text = re.sub(r"\s+", " ", text)
+    return text.strip(" ，。；：!！?？")
+
+
+def _truncate_title(text: str, max_chars: int) -> str:
+    if max_chars <= 0:
+        return ""
+    sanitized = _sanitize_title_text(text)
+    if _text_display_units_ceiling(sanitized) <= max_chars:
+        return sanitized
+    current_units = 0.0
+    truncated_chars: list[str] = []
+    for char in sanitized:
+        char_units = _char_display_units(char)
+        if math.ceil(current_units + char_units) > max_chars:
+            break
+        truncated_chars.append(char)
+        current_units += char_units
+    return "".join(truncated_chars).rstrip(" ，。；：!！?？")
+
+
+def _text_length_metrics(text: str) -> dict[str, Any]:
+    ascii_count = 0
+    cjk_count = 0
+    fullwidth_count = 0
+    emoji_count = 0
+    other_count = 0
+    display_units_raw = 0.0
+    for char in str(text or ""):
+        if _is_emoji_char(char):
+            emoji_count += 1
+            display_units_raw += 1.0
+            continue
+        east_asian_width = unicodedata.east_asian_width(char)
+        if east_asian_width in {"W", "F"}:
+            fullwidth_count += 1
+            if _is_cjk_char(char):
+                cjk_count += 1
+            display_units_raw += 1.0
+        elif ord(char) < 128:
+            ascii_count += 1
+            display_units_raw += 0.5
+        else:
+            other_count += 1
+            display_units_raw += 1.0
+    return {
+        "char_count": len(text),
+        "ascii_count": ascii_count,
+        "cjk_count": cjk_count,
+        "fullwidth_count": fullwidth_count,
+        "emoji_count": emoji_count,
+        "other_count": other_count,
+        "display_units_raw": round(display_units_raw, 2),
+        "display_units": math.ceil(display_units_raw),
+    }
+
+
+def _text_display_units_ceiling(text: str) -> int:
+    return int(_text_length_metrics(text).get("display_units") or 0)
+
+
+def _char_display_units(char: str) -> float:
+    if _is_emoji_char(char):
+        return 1.0
+    if unicodedata.east_asian_width(char) in {"W", "F"}:
+        return 1.0
+    if ord(char) < 128:
+        return 0.5
+    return 1.0
+
+
+def _is_cjk_char(char: str) -> bool:
+    return bool(re.match(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]", char))
+
+
+def _is_emoji_char(char: str) -> bool:
+    return bool(re.match(r"[\U0001F300-\U0001FAFF\u2600-\u27BF]", char))
+
+
+def _platform_key_from_label(label: str) -> str:
+    for key, current_label, _, _ in PLATFORM_ORDER:
+        if current_label == label:
+            return key
+    return ""
+
+
+def _is_cn_platform(label: str) -> bool:
+    return _platform_key_from_label(label) in _CN_PLATFORM_KEYS
+
+
+def _contains_cjk_text(text: str) -> bool:
+    return bool(re.search(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]", str(text or "")))
+
+
+def _looks_ascii_brand(text: str) -> bool:
+    normalized = re.sub(r"[^A-Za-z0-9]+", "", str(text or ""))
+    return bool(normalized) and normalized == re.sub(r"\s+", "", str(text or ""))
+
+
+def _brand_cn_alias(brand: str, content_profile: dict[str, Any] | None = None) -> str:
+    profile = content_profile or {}
+    preferred = str(profile.get("subject_brand_cn") or "").strip()
+    if preferred:
+        return preferred
+    return str(_BRAND_CN_ALIASES.get(str(brand or "").strip()) or "").strip()
+
+
+def _brand_bilingual_alias(brand: str, content_profile: dict[str, Any] | None = None) -> str:
+    profile = content_profile or {}
+    preferred = str(profile.get("subject_brand_bilingual") or "").strip()
+    if preferred:
+        return preferred
+    alias = _brand_cn_alias(brand, content_profile)
+    normalized_brand = str(brand or "").strip()
+    if alias and normalized_brand and alias != normalized_brand:
+        return f"{alias}{normalized_brand}"
+    return normalized_brand
+
+
+def _localized_brand_label(brand: str, *, label: str, content_profile: dict[str, Any] | None = None) -> str:
+    normalized_brand = str(brand or "").strip()
+    if not normalized_brand:
+        return ""
+    if not _is_cn_platform(label):
+        return normalized_brand
+    if _contains_cjk_text(normalized_brand):
+        return normalized_brand
+    alias = _brand_cn_alias(normalized_brand, content_profile)
+    if not alias:
+        return normalized_brand
+    if label == "B站":
+        return _brand_bilingual_alias(normalized_brand, content_profile)
+    return alias
+
+
+def _localized_product_label(content_profile: dict[str, Any] | None, *, label: str) -> str:
+    brand = _localized_brand_label(
+        str((content_profile or {}).get("subject_brand") or "").strip(),
+        label=label,
+        content_profile=content_profile,
+    )
+    model = str((content_profile or {}).get("subject_model") or "").strip()
+    subject = _specific_subject_type(content_profile)
+    return " ".join(part for part in (brand, model or subject) if part).strip()
+
+
+def _localized_brand_tag_candidates(content_profile: dict[str, Any] | None) -> list[str]:
+    brand = str((content_profile or {}).get("subject_brand") or "").strip()
+    if not brand:
+        return []
+    if _contains_cjk_text(brand):
+        return [brand]
+    alias = _brand_cn_alias(brand, content_profile)
+    if alias:
+        return [alias, brand]
+    return [brand]
 
 
 def _normalize_tags(value: Any, content_profile: dict[str, Any] | None) -> list[str]:
     tags = [str(item).strip().lstrip("#") for item in (value or []) if str(item).strip()]
+    brand_candidates = _localized_brand_tag_candidates(content_profile)
     if tags:
-        return tags
+        enriched = list(tags)
+        raw_brand = str((content_profile or {}).get("subject_brand") or "").strip()
+        alias = _brand_cn_alias(raw_brand, content_profile)
+        if raw_brand and alias and raw_brand in tags and alias not in tags:
+            enriched.insert(0, alias)
+        return _dedupe_non_empty(enriched)[:8]
 
-    brand = str((content_profile or {}).get("subject_brand") or "").strip()
     subject = _specific_subject_type(content_profile)
     theme = str((content_profile or {}).get("video_theme") or "").strip()
-    fallback = [brand, subject, theme]
+    fallback = [*brand_candidates, subject, theme]
     if _profile_mentions_edc(content_profile):
         fallback.append("EDC")
     fallback.extend(["开箱", "上手体验", "玩家分享"])
@@ -850,6 +1291,483 @@ def _enforce_platform_description_variation(
             description = str(platform.get("description") or "").strip()
         seen_descriptions.append(description)
     return packaging
+
+
+def audit_platform_packaging_titles(
+    packaging: dict[str, Any],
+    *,
+    content_profile: dict[str, Any] | None,
+) -> dict[str, Any]:
+    platforms = packaging.get("platforms") if isinstance(packaging.get("platforms"), dict) else {}
+    audit_platforms: dict[str, Any] = {}
+    platforms_with_errors = 0
+    platforms_with_warnings = 0
+    total_errors = 0
+    total_warnings = 0
+    for key, label, _, _ in PLATFORM_ORDER:
+        platform = platforms.get(key) if isinstance(platforms.get(key), dict) else {}
+        platform_audit = _audit_platform_titles(
+            key=key,
+            label=label,
+            titles=platform.get("titles") if isinstance(platform, dict) else [],
+            content_profile=content_profile,
+        )
+        audit_platforms[key] = platform_audit
+        summary = platform_audit.get("summary") if isinstance(platform_audit.get("summary"), dict) else {}
+        total_errors += int(summary.get("error_count") or 0)
+        total_warnings += int(summary.get("warning_count") or 0)
+        if int(summary.get("error_count") or 0) > 0:
+            platforms_with_errors += 1
+        elif int(summary.get("warning_count") or 0) > 0:
+            platforms_with_warnings += 1
+
+    overall_status = "pass"
+    if platforms_with_errors:
+        overall_status = "error"
+    elif platforms_with_warnings or total_warnings:
+        overall_status = "warning"
+    return {
+        "version": _TITLE_AUDIT_VERSION,
+        "summary": {
+            "status": overall_status,
+            "platform_count": len(PLATFORM_ORDER),
+            "platforms_with_errors": platforms_with_errors,
+            "platforms_with_warnings": platforms_with_warnings,
+            "error_count": total_errors,
+            "warning_count": total_warnings,
+        },
+        "platforms": audit_platforms,
+    }
+
+
+def _audit_platform_titles(
+    *,
+    key: str,
+    label: str,
+    titles: Any,
+    content_profile: dict[str, Any] | None,
+) -> dict[str, Any]:
+    rule = dict(_TITLE_AUDIT_RULES.get(key) or {})
+    normalized_titles = [str(item).strip() for item in (titles or []) if str(item).strip()]
+    title_results: list[dict[str, Any]] = []
+    issues: list[dict[str, Any]] = []
+    error_count = 0
+    warning_count = 0
+    primary_angles: list[str] = []
+    anchored_titles = 0
+    for index, title in enumerate(normalized_titles, start=1):
+        title_result = _audit_single_title(
+            key=key,
+            label=label,
+            title=title,
+            index=index,
+            rule=rule,
+            content_profile=content_profile,
+        )
+        title_results.append(title_result)
+        primary_angles.append(str(title_result.get("primary_angle") or "generic"))
+        if _contains_confirmed_product_anchor(title, content_profile):
+            anchored_titles += 1
+        for issue in title_result.get("issues") or []:
+            if not isinstance(issue, dict):
+                continue
+            issues.append(issue)
+            if issue.get("severity") == "error":
+                error_count += 1
+            else:
+                warning_count += 1
+
+    diversity = _audit_title_diversity(
+        key=key,
+        label=label,
+        primary_angles=primary_angles,
+        title_count=len(normalized_titles),
+    )
+    if diversity:
+        issues.append(diversity)
+        if diversity.get("severity") == "error":
+            error_count += 1
+        else:
+            warning_count += 1
+
+    if _has_specific_subject_identity(content_profile) and normalized_titles and anchored_titles < 2:
+        issue = _build_audit_issue(
+            severity="warning",
+            code="identity_anchor_weak",
+            message=f"{label} 5 个标题里只有 {anchored_titles} 个带明显主体锚点，搜索和识别会偏弱。",
+        )
+        issues.append(issue)
+        warning_count += 1
+
+    status = "pass"
+    if error_count:
+        status = "error"
+    elif warning_count:
+        status = "warning"
+    return {
+        "label": label,
+        "rules": {
+            "hard_max_chars": rule.get("hard_max_chars"),
+            "recommended_min_chars": rule.get("recommended_min_chars"),
+            "recommended_max_chars": rule.get("recommended_max_chars"),
+            "display_max_chars": rule.get("display_max_chars"),
+            "encoding": "utf-8 single-line",
+            "counting_mode": "中文/全角=1，英文数字半角=0.5，向上取整",
+            "style_hint": rule.get("style_hint") or "",
+            "audience_hint": rule.get("audience_hint") or "",
+        },
+        "summary": {
+            "status": status,
+            "title_count": len(normalized_titles),
+            "error_count": error_count,
+            "warning_count": warning_count,
+            "anchored_title_count": anchored_titles,
+            "unique_primary_angles": len({item for item in primary_angles if item}),
+        },
+        "titles": title_results,
+        "issues": issues,
+    }
+
+
+def _audit_single_title(
+    *,
+    key: str,
+    label: str,
+    title: str,
+    index: int,
+    rule: dict[str, Any],
+    content_profile: dict[str, Any] | None,
+) -> dict[str, Any]:
+    issues: list[dict[str, Any]] = []
+    metrics = _text_length_metrics(title)
+    char_count = int(metrics.get("char_count") or 0)
+    display_units = int(metrics.get("display_units") or 0)
+    display_units_raw = float(metrics.get("display_units_raw") or 0.0)
+    utf8_bytes = 0
+    try:
+        utf8_bytes = len(title.encode("utf-8"))
+    except UnicodeEncodeError:
+        issues.append(
+            _build_audit_issue(
+                severity="error",
+                code="invalid_utf8",
+                message=f"{label} 标题 {index} 不能稳定编码为 UTF-8。",
+                title_index=index,
+            )
+        )
+    if any(0xD800 <= ord(char) <= 0xDFFF for char in title):
+        issues.append(
+            _build_audit_issue(
+                severity="error",
+                code="surrogate_char",
+                message=f"{label} 标题 {index} 含有非法代理字符。",
+                title_index=index,
+            )
+        )
+    if re.search(r"[\r\n\t]", title) or re.search(r"[\x00-\x1f\x7f]", title):
+        issues.append(
+            _build_audit_issue(
+                severity="error",
+                code="control_char",
+                message=f"{label} 标题 {index} 含换行、Tab 或控制字符，不适合直接发布。",
+                title_index=index,
+            )
+        )
+    if re.search(r"[\u200b-\u200f\u2060\ufeff]", title):
+        issues.append(
+            _build_audit_issue(
+                severity="warning",
+                code="invisible_char",
+                message=f"{label} 标题 {index} 含零宽或不可见字符，建议清理。",
+                title_index=index,
+            )
+        )
+    if "�" in title:
+        issues.append(
+            _build_audit_issue(
+                severity="error",
+                code="replacement_char",
+                message=f"{label} 标题 {index} 出现替换字符，说明原始文本可能有编码损坏。",
+                title_index=index,
+            )
+        )
+
+    hard_max_chars = rule.get("hard_max_chars")
+    if isinstance(hard_max_chars, int) and display_units > hard_max_chars:
+        issues.append(
+            _build_audit_issue(
+                severity="error",
+                code="hard_length_overflow",
+                message=f"{label} 标题 {index} 加权长度 {display_units}，超过硬限制 {hard_max_chars}。",
+                title_index=index,
+            )
+        )
+    recommended_min_chars = rule.get("recommended_min_chars")
+    if isinstance(recommended_min_chars, int) and display_units < recommended_min_chars:
+        issues.append(
+            _build_audit_issue(
+                severity="warning",
+                code="too_short",
+                message=f"{label} 标题 {index} 加权长度只有 {display_units}，信息量偏弱。",
+                title_index=index,
+            )
+        )
+    recommended_max_chars = rule.get("recommended_max_chars")
+    if isinstance(recommended_max_chars, int) and display_units > recommended_max_chars:
+        issues.append(
+            _build_audit_issue(
+                severity="warning",
+                code="recommended_length_overflow",
+                message=f"{label} 标题 {index} 加权长度 {display_units}，超过建议上限 {recommended_max_chars}。",
+                title_index=index,
+            )
+        )
+    display_max_chars = rule.get("display_max_chars")
+    if isinstance(display_max_chars, int) and display_units > display_max_chars:
+        issues.append(
+            _build_audit_issue(
+                severity="warning",
+                code="display_length_overflow",
+                message=f"{label} 标题 {index} 加权长度 {display_units}，超出常见展示舒适区 {display_max_chars}。",
+                title_index=index,
+            )
+        )
+
+    emoji_count = int(metrics.get("emoji_count") or 0)
+    max_emojis = int(rule.get("max_emojis") or 0)
+    if emoji_count > max_emojis:
+        issues.append(
+            _build_audit_issue(
+                severity="warning",
+                code="emoji_overuse",
+                message=f"{label} 标题 {index} 含 {emoji_count} 个 emoji，超出建议值 {max_emojis}。",
+                title_index=index,
+            )
+        )
+    exclamation_count = len(re.findall(r"[!！]", title))
+    max_exclamations = int(rule.get("max_exclamations") or 0)
+    if exclamation_count > max_exclamations:
+        issues.append(
+            _build_audit_issue(
+                severity="warning",
+                code="punctuation_overuse",
+                message=f"{label} 标题 {index} 感叹号偏多，当前 {exclamation_count} 个。",
+                title_index=index,
+            )
+        )
+    if re.search(r"[!！?？]{2,}", title):
+        issues.append(
+            _build_audit_issue(
+                severity="warning",
+                code="repeated_punctuation",
+                message=f"{label} 标题 {index} 有连续标点，平台感不稳。",
+                title_index=index,
+            )
+        )
+    if "#" in title:
+        issues.append(
+            _build_audit_issue(
+                severity="warning",
+                code="title_has_hashtag",
+                message=f"{label} 标题 {index} 把 hashtag 写进了标题，建议留给标签区。",
+                title_index=index,
+            )
+        )
+
+    style_issue = _audit_platform_style(title=title, key=key, label=label, index=index, rule=rule)
+    if style_issue:
+        issues.append(style_issue)
+    audience_issue = _audit_platform_audience_fit(
+        title=title,
+        key=key,
+        label=label,
+        index=index,
+        rule=rule,
+        content_profile=content_profile,
+    )
+    if audience_issue:
+        issues.append(audience_issue)
+
+    primary_angle = _title_primary_angle(title)
+    status = "pass"
+    if any(issue.get("severity") == "error" for issue in issues):
+        status = "error"
+    elif issues:
+        status = "warning"
+    return {
+        "index": index,
+        "title": title,
+        "char_count": char_count,
+        "display_units": display_units,
+        "display_units_raw": display_units_raw,
+        "ascii_count": int(metrics.get("ascii_count") or 0),
+        "cjk_count": int(metrics.get("cjk_count") or 0),
+        "utf8_bytes": utf8_bytes,
+        "status": status,
+        "primary_angle": primary_angle,
+        "angles": _title_angles(title),
+        "issues": issues,
+    }
+
+
+def _audit_platform_style(
+    *,
+    title: str,
+    key: str,
+    label: str,
+    index: int,
+    rule: dict[str, Any],
+) -> dict[str, Any] | None:
+    preferred_tokens = tuple(rule.get("preferred_tokens") or ())
+    if preferred_tokens and not any(token in title for token in preferred_tokens):
+        return _build_audit_issue(
+            severity="warning",
+            code="style_mismatch",
+            message=f"{label} 标题 {index} 缺少平台常见表达信号，当前更像通用标题。",
+            title_index=index,
+        )
+    if key == "douyin" and len(title) > 24:
+        return _build_audit_issue(
+            severity="warning",
+            code="pace_too_slow",
+            message=f"{label} 标题 {index} 偏长，短视频首屏节奏会慢。",
+            title_index=index,
+        )
+    if key == "wechat_channels" and re.search(r"封神|炸裂|杀疯|绝绝子|离谱", title):
+        return _build_audit_issue(
+            severity="warning",
+            code="tone_too_hyped",
+            message=f"{label} 标题 {index} 网感词偏重，不够稳妥可信。",
+            title_index=index,
+        )
+    if key == "kuaishou" and re.search(r"杂志感|氛围感|高级感", title):
+        return _build_audit_issue(
+            severity="warning",
+            code="tone_too_polished",
+            message=f"{label} 标题 {index} 太像精修种草文，不够直给。",
+            title_index=index,
+        )
+    return None
+
+
+def _audit_platform_audience_fit(
+    *,
+    title: str,
+    key: str,
+    label: str,
+    index: int,
+    rule: dict[str, Any],
+    content_profile: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    avoid_tokens = tuple(rule.get("avoid_tokens") or ())
+    if avoid_tokens and any(token in title for token in avoid_tokens):
+        return _build_audit_issue(
+            severity="warning",
+            code="audience_mismatch",
+            message=f"{label} 标题 {index} 含 {', '.join(token for token in avoid_tokens if token in title)}，和平台主流受众预期不太一致。",
+            title_index=index,
+        )
+    if key == "bilibili" and not re.search(r"开箱|实测|对比|评测|值不值|体验|怎么选|总结|判断|细节", title):
+        return _build_audit_issue(
+            severity="warning",
+            code="search_signal_weak",
+            message=f"{label} 标题 {index} 缺少主题或判断词，搜索可见性偏弱。",
+            title_index=index,
+        )
+    if key == "xiaohongshu" and not re.search(r"到手|分享|细节|质感|记录|真的|种草|劝退|喜欢|被", title):
+        return _build_audit_issue(
+            severity="warning",
+            code="share_feel_weak",
+            message=f"{label} 标题 {index} 分享感偏弱，更像通用分发标题。",
+            title_index=index,
+        )
+    if key == "kuaishou" and not re.search(r"给你们看|真东西|实话|直说|值不值|到底|咱", title):
+        return _build_audit_issue(
+            severity="warning",
+            code="plainspoken_weak",
+            message=f"{label} 标题 {index} 少了点“当面讲实话”的口语感。",
+            title_index=index,
+        )
+    brand = str((content_profile or {}).get("subject_brand") or "").strip()
+    brand_alias = _brand_cn_alias(brand, content_profile)
+    if key in _CN_PLATFORM_KEYS and brand_alias and brand in title and brand_alias not in title:
+        return _build_audit_issue(
+            severity="warning",
+            code="brand_localization_weak",
+            message=f"{label} 标题 {index} 直接用了英文品牌 {brand}，更建议写成中文或中英双语，例如 {brand_alias}。",
+            title_index=index,
+        )
+    return None
+
+
+def _audit_title_diversity(
+    *,
+    key: str,
+    label: str,
+    primary_angles: list[str],
+    title_count: int,
+) -> dict[str, Any] | None:
+    if title_count < 5:
+        return _build_audit_issue(
+            severity="error",
+            code="title_count_missing",
+            message=f"{label} 只有 {title_count} 个标题，没满足 5 个版本输出要求。",
+        )
+    unique_angles = {item for item in primary_angles if item and item != "generic"}
+    if len(unique_angles) >= 4:
+        return None
+    return _build_audit_issue(
+        severity="warning",
+        code="angle_diversity_low",
+        message=f"{label} 5 个标题只有 {len(unique_angles)} 种明显角度，版本差异不够开。",
+    )
+
+
+def _title_angles(title: str) -> list[str]:
+    return [name for name, pattern in _TITLE_ANGLE_PATTERNS if pattern.search(title)]
+
+
+def _title_primary_angle(title: str) -> str:
+    matches = _title_angles(title)
+    return matches[0] if matches else "generic"
+
+
+def _build_audit_issue(
+    *,
+    severity: str,
+    code: str,
+    message: str,
+    title_index: int | None = None,
+) -> dict[str, Any]:
+    issue = {
+        "severity": severity,
+        "code": code,
+        "message": message,
+    }
+    if title_index is not None:
+        issue["title_index"] = title_index
+    return issue
+
+
+def _render_title_audit_platform_summary(platform_audit: dict[str, Any]) -> str:
+    summary = platform_audit.get("summary") if isinstance(platform_audit.get("summary"), dict) else {}
+    rules = platform_audit.get("rules") if isinstance(platform_audit.get("rules"), dict) else {}
+    limit_fragments = []
+    if isinstance(rules.get("hard_max_chars"), int):
+        limit_fragments.append(f"硬上限 {rules['hard_max_chars']} 字")
+    if isinstance(rules.get("recommended_max_chars"), int):
+        limit_fragments.append(f"建议不超过 {rules['recommended_max_chars']} 字")
+    if isinstance(rules.get("display_max_chars"), int):
+        limit_fragments.append(f"常见展示舒适区 {rules['display_max_chars']} 字")
+    limit_text = "；".join(limit_fragments) or "长度按平台风格检查"
+    return (
+        f"{summary.get('status') or 'unknown'}，"
+        f"{int(summary.get('error_count') or 0)} 个错误，"
+        f"{int(summary.get('warning_count') or 0)} 个预警，"
+        f"{limit_text}（混合中英文加权）"
+        f"，"
+        f"角度数 {int(summary.get('unique_primary_angles') or 0)}"
+    )
 
 
 def _description_similarity(left: str, right: str) -> float:
@@ -1087,7 +2005,7 @@ def build_fallback_titles(*, label: str, content_profile: dict[str, Any] | None,
     if not _has_specific_subject_identity(content_profile):
         return _build_neutral_fallback_titles(label=label, copy_style=copy_style)
 
-    product = _preferred_product_label(content_profile) or "这款产品"
+    product = _preferred_product_label(content_profile, label=label) or "这款产品"
     subject = _preferred_subject_label(content_profile) or "产品"
     hook = _build_confirmed_title_hook(content_profile)
     headline_hook = _copy_style_headline_hook(copy_style, hook=hook, brand=product, subject=subject)
@@ -1157,7 +2075,7 @@ def build_fallback_description(
         description = f"{_copy_style_opening(copy_style)}这期先看开箱过程、细节表现和真实上手感受，不编产品名，只说视频里能确认的内容和最值得讨论的重点。{question}"
         return _inject_author_context_into_description(label, description, author_profile)
 
-    product = _preferred_product_label(content_profile) or "这款产品"
+    product = _preferred_product_label(content_profile, label=label) or "这款产品"
     if label == "小红书":
         description = f"{_copy_style_opening(copy_style)}{product}终于到手，重点看外观、细节和上手感受。不是硬广，更像一次有质感的真实开箱分享。{question}"
         return _inject_author_context_into_description(label, description, author_profile)
@@ -1174,15 +2092,16 @@ def build_fallback_description(
     return _inject_author_context_into_description(label, description, author_profile)
 
 
-def _fallback_product(content_profile: dict[str, Any] | None) -> str:
-    brand = str((content_profile or {}).get("subject_brand") or "").strip()
+def _fallback_product(content_profile: dict[str, Any] | None, *, label: str | None = None) -> str:
+    brand_raw = str((content_profile or {}).get("subject_brand") or "").strip()
+    brand = _localized_brand_label(brand_raw, label=label or "", content_profile=content_profile) if label else brand_raw
     model = str((content_profile or {}).get("subject_model") or "").strip()
     subject = _specific_subject_type(content_profile)
     return " ".join(part for part in (brand, model or subject) if part).strip()
 
 
-def _preferred_product_label(content_profile: dict[str, Any] | None) -> str:
-    return _fallback_product(content_profile)
+def _preferred_product_label(content_profile: dict[str, Any] | None, label: str | None = None) -> str:
+    return _fallback_product(content_profile, label=label)
 
 
 def _preferred_subject_label(content_profile: dict[str, Any] | None) -> str:
@@ -1198,7 +2117,7 @@ def _preferred_subject_label(content_profile: dict[str, Any] | None) -> str:
 def _normalize_highlight_product(value: Any, content_profile: dict[str, Any] | None) -> str:
     if not _has_specific_subject_identity(content_profile):
         return ""
-    return str(value or _fallback_product(content_profile)).strip()
+    return str(value or _fallback_product(content_profile, label="B站")).strip()
 
 
 def _fallback_video_type(content_profile: dict[str, Any] | None) -> str:

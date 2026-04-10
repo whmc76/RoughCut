@@ -220,10 +220,19 @@ OpenAI 兼容替代配置：
 ```env
 OPENAI_API_KEY=sk-...
 REASONING_PROVIDER=openai
-REASONING_MODEL=gpt-4o-mini
+REASONING_MODEL=gpt-5.4
 TRANSCRIPTION_PROVIDER=openai
 TRANSCRIPTION_MODEL=gpt-4o-transcribe
 ```
+
+如果你希望 RoughCut 走 Codex / GPT-5 系列的工程型模型链路，当前 OpenAI Provider 已统一切到 `Responses API`，
+因此这条链路会同时覆盖：
+
+- 推理生成
+- 多帧图像理解
+- `web_search` 搜索增强
+
+兼容模式下可以继续使用 `OPENAI_AUTH_MODE=codex_compat` + helper 命令输出凭据。
 
 推荐本地中文 ASR 服务：
 

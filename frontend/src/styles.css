@@ -180,6 +180,47 @@ select {
   background: rgba(255, 255, 255, 0.24);
 }
 
+.rail-mode-card {
+  display: grid;
+  gap: 8px;
+}
+
+.rail-mode-card strong {
+  font-size: 13px;
+  letter-spacing: 0.01em;
+}
+
+.rail-mode-toggle {
+  min-height: 38px;
+  padding: 9px 12px;
+  border: 1px solid rgba(23, 24, 27, 0.08);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.32);
+  color: #17181b;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  transition:
+    border-color 160ms ease,
+    background 160ms ease,
+    transform 160ms ease;
+}
+
+.rail-mode-toggle:hover:not(:disabled) {
+  border-color: rgba(45, 106, 106, 0.22);
+  transform: translateY(-1px);
+}
+
+.rail-mode-toggle.active {
+  border-color: rgba(45, 106, 106, 0.28);
+  background: linear-gradient(135deg, rgba(45, 106, 106, 0.18), rgba(255, 255, 255, 0.54));
+}
+
+.rail-mode-toggle:disabled {
+  opacity: 0.56;
+  cursor: not-allowed;
+}
+
 .rail-locale {
   padding: 0;
   border: 0;

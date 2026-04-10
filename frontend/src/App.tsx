@@ -1,7 +1,9 @@
 import { Suspense, lazy, useEffect, useRef } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { NavLink, Route, Routes } from "react-router-dom";
 
 import { api } from "./api";
+import { getProviderLabel } from "./features/settings/helpers";
 import { useFrontendBuildRefresh } from "./hooks/useFrontendBuildRefresh";
 import { useI18n } from "./i18n";
 
@@ -44,9 +46,19 @@ const ControlPage = lazy(async () => ({
 
 export function App() {
   const { locale, setLocale, t } = useI18n();
+  const queryClient = useQueryClient();
   const syncedLocaleRef = useRef<string>("");
+  const config = useQuery({ queryKey: ["config"], queryFn: api.getConfig });
 
   useFrontendBuildRefresh();
+
+  const routingToggle = useMutation({
+    mutationFn: (nextMode: string) => api.patchConfig({ llm_routing_mode: nextMode }),
+    onSuccess: async (nextConfig) => {
+      queryClient.setQueryData(["config"], nextConfig);
+      await queryClient.invalidateQueries({ queryKey: ["config"] });
+    },
+  });
 
   useEffect(() => {
     if (syncedLocaleRef.current === locale) {
@@ -69,6 +81,9 @@ export function App() {
     { value: "zh-CN" as const, shortLabel: "简中", title: t("app.language.zh-CN") },
     { value: "en-US" as const, shortLabel: "EN", title: t("app.language.en-US") },
   ];
+  const hybridEnabled = config.data?.llm_mode === "performance" && config.data?.llm_routing_mode === "hybrid_performance";
+  const hybridAnalysisProvider = String(config.data?.hybrid_analysis_provider ?? "openai");
+  const hybridCopyProvider = String(config.data?.hybrid_copy_provider ?? "minimax");
 
   return (
     <div className="app-shell">
@@ -93,6 +108,25 @@ export function App() {
           ))}
         </nav>
         <div className="rail-notes">
+          <div className="rail-mode-card">
+            <span className="rail-note-label">混合模式</span>
+            <strong>{hybridEnabled ? "高性能已启用" : "当前 Bundled"}</strong>
+            <div className="muted">
+              {config.data?.llm_mode === "local"
+                ? "本地模式下固定 bundled。"
+                : hybridEnabled
+                  ? `摘要/字幕 ${getProviderLabel(hybridAnalysisProvider)} · 文案 ${getProviderLabel(hybridCopyProvider)}`
+                  : "摘要、字幕、视觉和搜索都跟随主 Provider。"}
+            </div>
+            <button
+              type="button"
+              className={hybridEnabled ? "rail-mode-toggle active" : "rail-mode-toggle"}
+              disabled={routingToggle.isPending || config.data?.llm_mode === "local"}
+              onClick={() => routingToggle.mutate(hybridEnabled ? "bundled" : "hybrid_performance")}
+            >
+              {routingToggle.isPending ? "切换中" : hybridEnabled ? "切回 Bundled" : "启用 Hybrid"}
+            </button>
+          </div>
           <div className="app-stage-locale rail-locale">
             <span>{t("app.sidebar.language")}</span>
             <div className="rail-locale-options" role="group" aria-label={t("app.sidebar.language")}>

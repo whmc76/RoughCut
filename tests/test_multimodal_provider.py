@@ -71,34 +71,50 @@ class _DummyAsyncClient:
         return self._responses.pop(0)
 
 
+class _DummyResponsesAPI:
+    def __init__(self, responses: list[SimpleNamespace], calls: list[dict]) -> None:
+        self._responses = responses
+        self._calls = calls
+
+    async def create(self, **kwargs):
+        self._calls.append(kwargs)
+        if not self._responses:
+            raise AssertionError("Unexpected extra OpenAI responses request")
+        return self._responses.pop(0)
+
+
+class _DummyOpenAIClient:
+    def __init__(self, responses: list[SimpleNamespace], calls: list[dict], *args, **kwargs) -> None:
+        del args, kwargs
+        self.responses = _DummyResponsesAPI(responses, calls)
+
+
 @pytest.mark.asyncio
 async def test_complete_with_images_reuses_cached_result(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     image_path = tmp_path / "frame.jpg"
     image_path.write_bytes(b"same-frame")
 
     calls: list[dict] = []
-    responses = [
-        httpx.Response(
-            200,
-            request=httpx.Request("POST", "https://api.openai.com/v1/chat/completions"),
-            json={
-                "model": "gpt-4.1-mini",
-                "choices": [{"message": {"content": "cached multimodal answer"}}],
-                "usage": {"prompt_tokens": 12, "completion_tokens": 34},
-            },
-        )
-    ]
+    responses = [SimpleNamespace(
+        model="gpt-5.4",
+        output_text="cached multimodal answer",
+        usage=SimpleNamespace(input_tokens=12, output_tokens=34),
+        output=[],
+    )]
 
     async def _noop_record_usage_event(**kwargs):
         del kwargs
 
-    monkeypatch.setattr(multimodal_mod, "get_settings", lambda: _make_settings())
-    monkeypatch.setattr(multimodal_mod, "resolve_credential", lambda **kwargs: "openai-test-key")
+    monkeypatch.setattr(
+        multimodal_mod,
+        "get_settings",
+        lambda: _make_settings(active_reasoning_provider="openai", active_vision_model="gpt-5.4"),
+    )
     monkeypatch.setattr(multimodal_mod, "record_usage_event", _noop_record_usage_event)
     monkeypatch.setattr(
-        multimodal_mod.httpx,
-        "AsyncClient",
-        lambda *args, **kwargs: _DummyAsyncClient(responses, calls, *args, **kwargs),
+        multimodal_mod.openai,
+        "AsyncOpenAI",
+        lambda *args, **kwargs: _DummyOpenAIClient(responses, calls, *args, **kwargs),
     )
 
     first = await multimodal_mod.complete_with_images("describe frame", [image_path], json_mode=False)
@@ -107,7 +123,10 @@ async def test_complete_with_images_reuses_cached_result(tmp_path: Path, monkeyp
     assert first == "cached multimodal answer"
     assert second == "cached multimodal answer"
     assert len(calls) == 1
-    assert calls[0]["url"] == "https://api.openai.com/v1/chat/completions"
+    assert calls[0]["model"] == "gpt-5.4"
+    assert calls[0]["input"][0]["content"][0] == {"type": "input_text", "text": "describe frame"}
+    assert calls[0]["input"][0]["content"][1]["type"] == "input_image"
+    assert calls[0]["reasoning"] == {"effort": "medium"}
 
 
 @pytest.mark.asyncio
@@ -115,31 +134,28 @@ async def test_complete_with_images_cools_down_minimax_and_falls_back(tmp_path: 
     image_path = tmp_path / "frame.jpg"
     image_path.write_bytes(b"frame-a")
 
-    calls: list[dict] = []
-    responses = [
+    http_calls: list[dict] = []
+    openai_calls: list[dict] = []
+    minimax_responses = [
         httpx.Response(
             429,
             headers={"retry-after": "2"},
             request=httpx.Request("POST", "https://api.minimaxi.com/v1/chat/completions"),
             json={"error": {"message": "Too many requests. Retry after 2 seconds."}},
         ),
-        httpx.Response(
-            200,
-            request=httpx.Request("POST", "https://api.openai.com/v1/chat/completions"),
-            json={
-                "model": "gpt-4.1-mini",
-                "choices": [{"message": {"content": "fallback answer"}}],
-                "usage": {"prompt_tokens": 10, "completion_tokens": 20},
-            },
+    ]
+    openai_responses = [
+        SimpleNamespace(
+            model="gpt-5.4-mini",
+            output_text="fallback answer",
+            usage=SimpleNamespace(input_tokens=10, output_tokens=20),
+            output=[],
         ),
-        httpx.Response(
-            200,
-            request=httpx.Request("POST", "https://api.openai.com/v1/chat/completions"),
-            json={
-                "model": "gpt-4.1-mini",
-                "choices": [{"message": {"content": "second fallback answer"}}],
-                "usage": {"prompt_tokens": 11, "completion_tokens": 21},
-            },
+        SimpleNamespace(
+            model="gpt-5.4-mini",
+            output_text="second fallback answer",
+            usage=SimpleNamespace(input_tokens=11, output_tokens=21),
+            output=[],
         ),
     ]
 
@@ -153,15 +169,19 @@ async def test_complete_with_images_cools_down_minimax_and_falls_back(tmp_path: 
             active_reasoning_provider="minimax",
             active_vision_model="MiniMax-VL-01",
             multimodal_fallback_provider="openai",
-            multimodal_fallback_model="gpt-4.1-mini",
+            multimodal_fallback_model="gpt-5.4-mini",
         ),
     )
-    monkeypatch.setattr(multimodal_mod, "resolve_credential", lambda **kwargs: "openai-test-key")
     monkeypatch.setattr(multimodal_mod, "record_usage_event", _noop_record_usage_event)
     monkeypatch.setattr(
         multimodal_mod.httpx,
         "AsyncClient",
-        lambda *args, **kwargs: _DummyAsyncClient(responses, calls, *args, **kwargs),
+        lambda *args, **kwargs: _DummyAsyncClient(minimax_responses, http_calls, *args, **kwargs),
+    )
+    monkeypatch.setattr(
+        multimodal_mod.openai,
+        "AsyncOpenAI",
+        lambda *args, **kwargs: _DummyOpenAIClient(openai_responses, openai_calls, *args, **kwargs),
     )
 
     first = await multimodal_mod.complete_with_images("rank cover", [image_path], json_mode=False)
@@ -169,11 +189,8 @@ async def test_complete_with_images_cools_down_minimax_and_falls_back(tmp_path: 
 
     assert first == "fallback answer"
     assert second == "second fallback answer"
-    assert [call["url"] for call in calls] == [
-        "https://api.minimaxi.com/v1/chat/completions",
-        "https://api.openai.com/v1/chat/completions",
-        "https://api.openai.com/v1/chat/completions",
-    ]
+    assert [call["url"] for call in http_calls] == ["https://api.minimaxi.com/v1/chat/completions"]
+    assert [call["model"] for call in openai_calls] == ["gpt-5.4-mini", "gpt-5.4-mini"]
     cooldown = multimodal_mod._provider_cooldown_status("minimax")
     assert cooldown is not None
     assert cooldown[0] >= 40
@@ -187,17 +204,17 @@ async def test_complete_with_images_cache_key_tracks_provider_configuration(tmp_
     async def _noop_record_usage_event(**kwargs):
         del kwargs
 
-    calls: list[dict] = []
-    responses = [
-        httpx.Response(
-            200,
-            request=httpx.Request("POST", "https://api.openai.com/v1/chat/completions"),
-            json={
-                "model": "gpt-4.1-mini",
-                "choices": [{"message": {"content": "openai answer"}}],
-                "usage": {"prompt_tokens": 8, "completion_tokens": 16},
-            },
+    http_calls: list[dict] = []
+    openai_calls: list[dict] = []
+    openai_responses = [
+        SimpleNamespace(
+            model="gpt-5.4",
+            output_text="openai answer",
+            usage=SimpleNamespace(input_tokens=8, output_tokens=16),
+            output=[],
         ),
+    ]
+    minimax_responses = [
         httpx.Response(
             200,
             request=httpx.Request("POST", "https://api.minimaxi.com/v1/chat/completions"),
@@ -213,16 +230,20 @@ async def test_complete_with_images_cache_key_tracks_provider_configuration(tmp_
 
     def _settings():
         if state["provider"] == "openai":
-            return _make_settings(active_reasoning_provider="openai", active_vision_model="gpt-4.1-mini")
+            return _make_settings(active_reasoning_provider="openai", active_vision_model="gpt-5.4")
         return _make_settings(active_reasoning_provider="minimax", active_vision_model="MiniMax-VL-01")
 
     monkeypatch.setattr(multimodal_mod, "get_settings", _settings)
-    monkeypatch.setattr(multimodal_mod, "resolve_credential", lambda **kwargs: "openai-test-key")
     monkeypatch.setattr(multimodal_mod, "record_usage_event", _noop_record_usage_event)
     monkeypatch.setattr(
         multimodal_mod.httpx,
         "AsyncClient",
-        lambda *args, **kwargs: _DummyAsyncClient(responses, calls, *args, **kwargs),
+        lambda *args, **kwargs: _DummyAsyncClient(minimax_responses, http_calls, *args, **kwargs),
+    )
+    monkeypatch.setattr(
+        multimodal_mod.openai,
+        "AsyncOpenAI",
+        lambda *args, **kwargs: _DummyOpenAIClient(openai_responses, openai_calls, *args, **kwargs),
     )
 
     openai_answer = await multimodal_mod.complete_with_images("same prompt", [image_path], json_mode=False)
@@ -231,10 +252,8 @@ async def test_complete_with_images_cache_key_tracks_provider_configuration(tmp_
 
     assert openai_answer == "openai answer"
     assert minimax_answer == "minimax answer"
-    assert [call["url"] for call in calls] == [
-        "https://api.openai.com/v1/chat/completions",
-        "https://api.minimaxi.com/v1/chat/completions",
-    ]
+    assert [call["model"] for call in openai_calls] == ["gpt-5.4"]
+    assert [call["url"] for call in http_calls] == ["https://api.minimaxi.com/v1/chat/completions"]
 
 
 @pytest.mark.asyncio

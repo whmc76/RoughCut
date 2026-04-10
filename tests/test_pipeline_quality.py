@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime, timezone
 
 from roughcut.db.models import Artifact, Job, JobStep, SubtitleCorrection, SubtitleItem
-from roughcut.pipeline.quality import assess_job_quality
+from roughcut.pipeline.quality import assess_job_quality, evaluate_profile_identity_gate
 
 
 def _now() -> datetime:
@@ -447,3 +447,260 @@ def test_assess_job_quality_blocks_identity_narrative_conflict_inside_profile():
     assert assessment["auto_fixable"] is False
     assert assessment["recommended_rerun_step"] == "content_profile"
     assert "summary" in assessment["signals"]["identity_narrative_conflicts"]
+
+
+def test_assess_job_quality_blocks_entity_catalog_conflict_from_verification_evidence():
+    job = Job(
+        id=uuid.uuid4(),
+        source_path="jobs/demo/fxx1.mp4",
+        source_name="fxx1.mp4",
+        status="processing",
+        language="zh-CN",
+    )
+    steps = [
+        JobStep(job_id=job.id, step_name="content_profile", status="done"),
+    ]
+    artifacts = [
+        Artifact(
+            job_id=job.id,
+            artifact_type="content_profile_final",
+            data_json={
+                "subject_brand": "LEATHERMAN",
+                "subject_model": "ARC",
+                "subject_type": "多功能工具钳",
+                "video_theme": "工具钳开箱",
+                "summary": "这条视频主要围绕工具钳展开。",
+                "verification_evidence": {
+                    "entity_catalog_candidates": [
+                        {
+                            "brand": "狐蝠工业",
+                            "model": "FXX1小副包",
+                            "primary_subject": "狐蝠工业 FXX1小副包",
+                            "matched_fields": ["video_evidence", "brand_alias", "model_alias"],
+                            "matched_evidence_texts": ["这期鸿福 F叉二一小副包做个开箱测评。"],
+                            "evidence_strength": "strong",
+                            "support_score": 0.86,
+                            "confidence": 0.9,
+                        }
+                    ]
+                },
+            },
+            created_at=_now(),
+        ),
+    ]
+    subtitles = [
+        SubtitleItem(
+            job_id=job.id,
+            version=1,
+            item_index=0,
+            start_time=0.0,
+            end_time=2.0,
+            text_raw="这期鸿福 F叉二一小副包做个开箱测评。",
+        )
+    ]
+
+    assessment = assess_job_quality(
+        job=job,
+        steps=steps,
+        artifacts=artifacts,
+        subtitle_items=subtitles,
+        corrections=[],
+        completion_candidate=False,
+    )
+
+    assert "entity_catalog_conflict" in assessment["issue_codes"]
+    assert assessment["signals"]["entity_identity_gate"]["blocking"] is True
+    assert assessment["signals"]["entity_identity_gate"]["conflicts"] == ["subject_brand", "subject_model"]
+
+
+def test_evaluate_profile_identity_gate_marks_missing_fields_when_catalog_has_strong_candidate():
+    gate = evaluate_profile_identity_gate(
+        {
+            "subject_brand": "",
+            "subject_model": "",
+            "verification_evidence": {
+                "entity_catalog_candidates": [
+                    {
+                        "brand": "狐蝠工业",
+                        "model": "FXX1小副包",
+                        "primary_subject": "狐蝠工业 FXX1小副包",
+                        "matched_fields": ["video_evidence", "brand_alias"],
+                        "matched_evidence_texts": ["这期鸿福 F叉二一小副包做个开箱测评。"],
+                        "evidence_strength": "strong",
+                        "support_score": 0.81,
+                        "confidence": 0.86,
+                    }
+                ]
+            },
+        }
+    )
+
+    assert gate["needs_review"] is True
+    assert gate["blocking"] is False
+    assert gate["missing_supported_fields"] == ["subject_brand", "subject_model"]
+
+
+def test_evaluate_profile_identity_gate_blocks_narrative_conflict_from_catalog_candidate():
+    gate = evaluate_profile_identity_gate(
+        {
+            "subject_brand": "",
+            "subject_model": "FXX1小副包",
+            "subject_type": "LEATHERMAN FXX1小副包",
+            "summary": "这条视频主要围绕 FXX1小副包 展开。",
+            "verification_evidence": {
+                "entity_catalog_candidates": [
+                    {
+                        "brand": "狐蝠工业",
+                        "model": "FXX1小副包",
+                        "primary_subject": "狐蝠工业 FXX1小副包",
+                        "matched_fields": ["video_evidence", "brand_alias", "model_alias", "supporting_keyword"],
+                        "matched_evidence_texts": ["这期鸿福 F叉二一小副包做个开箱测评，重点看分仓和挂点。"],
+                        "matched_aliases": {"brand": ["鸿福"], "model": ["F叉二一小副包"]},
+                        "evidence_strength": "strong",
+                        "support_score": 0.89,
+                        "confidence": 0.93,
+                    }
+                ]
+            },
+        }
+    )
+
+    assert gate["needs_review"] is True
+    assert gate["blocking"] is True
+    assert gate["narrative_conflicts"] == ["subject_type"]
+
+
+def test_evaluate_profile_identity_gate_treats_model_family_variant_as_compatible():
+    gate = evaluate_profile_identity_gate(
+        {
+            "subject_brand": "",
+            "subject_model": "FXX1",
+            "subject_type": "狐蝠工业 FXX1小副包",
+            "verification_evidence": {
+                "entity_catalog_candidates": [
+                    {
+                        "brand": "狐蝠工业",
+                        "model": "FXX1小副包",
+                        "primary_subject": "狐蝠工业 FXX1小副包",
+                        "matched_fields": ["video_evidence", "brand_alias", "model_alias", "supporting_keyword"],
+                        "matched_evidence_texts": ["这期鸿福 F叉二一小副包做个开箱测评，重点看分仓和挂点。"],
+                        "matched_aliases": {"brand": ["鸿福"], "model": ["F叉二一小副包"]},
+                        "evidence_strength": "strong",
+                        "support_score": 0.89,
+                        "confidence": 0.93,
+                    }
+                ]
+            },
+        }
+    )
+
+    assert gate["conflicts"] == []
+    assert gate["missing_supported_fields"] == ["subject_brand"]
+
+
+def test_evaluate_profile_identity_gate_prefers_model_aligned_candidate_over_glossary_noise():
+    gate = evaluate_profile_identity_gate(
+        {
+            "subject_brand": "",
+            "subject_model": "FXX1小副包",
+            "subject_type": "狐蝠工业FXX1小副包",
+            "verification_evidence": {
+                "entity_catalog_candidates": [
+                    {
+                        "brand": "LEATHERMAN",
+                        "model": "FXX1",
+                        "primary_subject": "LEATHERMAN FXX1",
+                        "matched_fields": ["glossary_alias", "search_queries", "video_evidence"],
+                        "matched_evidence_texts": ["这期鸿福 FXX1 小副包做个开箱测评。"],
+                        "matched_aliases": {"brand": ["LEATHERMAN"], "model": ["FXX1"]},
+                        "evidence_strength": "moderate",
+                        "support_score": 0.76,
+                        "confidence": 0.8,
+                        "subject_domain": "edc",
+                    },
+                    {
+                        "brand": "狐蝠工业",
+                        "model": "FXX1",
+                        "primary_subject": "狐蝠工业 FXX1",
+                        "matched_fields": ["glossary_alias", "brand_alias", "model_alias", "video_evidence", "supporting_keyword"],
+                        "matched_evidence_texts": ["这期鸿福 FXX1 小副包做个开箱测评。"],
+                        "matched_aliases": {"brand": ["鸿福"], "model": ["FXX1"]},
+                        "evidence_strength": "moderate",
+                        "support_score": 0.76,
+                        "confidence": 0.8,
+                        "subject_domain": "bag",
+                        "subject_type": "机能副包",
+                    },
+                ]
+            },
+        }
+    )
+
+    assert gate["top_candidate"]["brand"] == "狐蝠工业"
+    assert gate["missing_supported_fields"] == ["subject_brand"]
+    assert gate["narrative_conflicts"] == []
+
+
+def test_assess_job_quality_blocks_entity_catalog_narrative_conflict():
+    job = Job(
+        id=uuid.uuid4(),
+        source_path="jobs/demo/fxx1.mp4",
+        source_name="fxx1.mp4",
+        status="processing",
+        language="zh-CN",
+    )
+    steps = [
+        JobStep(job_id=job.id, step_name="content_profile", status="done"),
+    ]
+    artifacts = [
+        Artifact(
+            job_id=job.id,
+            artifact_type="content_profile_final",
+            data_json={
+                "subject_brand": "",
+                "subject_model": "FXX1小副包",
+                "subject_type": "LEATHERMAN FXX1小副包",
+                "video_theme": "FXX1小副包开箱",
+                "summary": "这条视频主要围绕 FXX1小副包 展开。",
+                "verification_evidence": {
+                    "entity_catalog_candidates": [
+                        {
+                            "brand": "狐蝠工业",
+                            "model": "FXX1小副包",
+                            "primary_subject": "狐蝠工业 FXX1小副包",
+                            "matched_fields": ["video_evidence", "brand_alias", "model_alias", "supporting_keyword"],
+                            "matched_evidence_texts": ["这期鸿福 F叉二一小副包做个开箱测评。"],
+                            "matched_aliases": {"brand": ["鸿福"], "model": ["F叉二一小副包"]},
+                            "evidence_strength": "strong",
+                            "support_score": 0.89,
+                            "confidence": 0.93,
+                        }
+                    ]
+                },
+            },
+            created_at=_now(),
+        ),
+    ]
+    subtitles = [
+        SubtitleItem(
+            job_id=job.id,
+            version=1,
+            item_index=0,
+            start_time=0.0,
+            end_time=2.0,
+            text_raw="这期鸿福 F叉二一小副包做个开箱测评。",
+        )
+    ]
+
+    assessment = assess_job_quality(
+        job=job,
+        steps=steps,
+        artifacts=artifacts,
+        subtitle_items=subtitles,
+        corrections=[],
+        completion_candidate=False,
+    )
+
+    assert "entity_catalog_narrative_conflict" in assessment["issue_codes"]
+    assert assessment["signals"]["entity_identity_gate"]["blocking"] is True
+    assert assessment["signals"]["entity_identity_gate"]["narrative_conflicts"] == ["subject_type"]

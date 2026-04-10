@@ -75,10 +75,17 @@ class ConfigOut(BaseModel):
     transcription_alignment_min_word_coverage: float
     # Reasoning
     llm_mode: str
+    llm_routing_mode: str
     reasoning_provider: str
     reasoning_model: str
     local_reasoning_model: str
     local_vision_model: str
+    hybrid_analysis_provider: str
+    hybrid_analysis_model: str
+    hybrid_analysis_search_mode: str
+    hybrid_copy_provider: str
+    hybrid_copy_model: str
+    hybrid_copy_search_mode: str
     multimodal_fallback_provider: str
     multimodal_fallback_model: str
     search_provider: str
@@ -284,10 +291,17 @@ class ConfigPatch(BaseModel):
     transcription_alignment_mode: str | None = None
     transcription_alignment_min_word_coverage: float | None = None
     llm_mode: str | None = None
+    llm_routing_mode: str | None = None
     reasoning_provider: str | None = None
     reasoning_model: str | None = None
     local_reasoning_model: str | None = None
     local_vision_model: str | None = None
+    hybrid_analysis_provider: str | None = None
+    hybrid_analysis_model: str | None = None
+    hybrid_analysis_search_mode: str | None = None
+    hybrid_copy_provider: str | None = None
+    hybrid_copy_model: str | None = None
+    hybrid_copy_search_mode: str | None = None
     multimodal_fallback_provider: str | None = None
     multimodal_fallback_model: str | None = None
     search_provider: str | None = None
@@ -387,10 +401,17 @@ def get_config():
         transcription_alignment_mode=s.transcription_alignment_mode,
         transcription_alignment_min_word_coverage=s.transcription_alignment_min_word_coverage,
         llm_mode=s.llm_mode,
+        llm_routing_mode=s.llm_routing_mode,
         reasoning_provider=s.reasoning_provider,
         reasoning_model=s.reasoning_model,
         local_reasoning_model=s.local_reasoning_model,
         local_vision_model=s.local_vision_model,
+        hybrid_analysis_provider=s.hybrid_analysis_provider,
+        hybrid_analysis_model=s.hybrid_analysis_model,
+        hybrid_analysis_search_mode=s.hybrid_analysis_search_mode,
+        hybrid_copy_provider=s.hybrid_copy_provider,
+        hybrid_copy_model=s.hybrid_copy_model,
+        hybrid_copy_search_mode=s.hybrid_copy_search_mode,
         multimodal_fallback_provider=s.multimodal_fallback_provider,
         multimodal_fallback_model=s.multimodal_fallback_model,
         search_provider=s.search_provider,
@@ -612,6 +633,31 @@ def patch_config(body: ConfigPatch):
             0.0,
             min(1.0, float(updates["transcription_alignment_min_word_coverage"])),
         )
+    if "llm_mode" in updates:
+        llm_mode = str(updates["llm_mode"] or "").strip().lower()
+        if llm_mode not in {"performance", "local"}:
+            raise HTTPException(status_code=400, detail="llm_mode must be performance or local")
+        updates["llm_mode"] = llm_mode
+    if "llm_routing_mode" in updates:
+        routing_mode = str(updates["llm_routing_mode"] or "").strip().lower()
+        if routing_mode not in {"bundled", "hybrid_performance"}:
+            raise HTTPException(status_code=400, detail="llm_routing_mode must be bundled or hybrid_performance")
+        updates["llm_routing_mode"] = routing_mode
+    for key in ("hybrid_analysis_provider", "hybrid_copy_provider"):
+        if key in updates:
+            provider_name = str(updates[key] or "").strip().lower()
+            if provider_name not in {"openai", "anthropic", "minimax", "ollama"}:
+                raise HTTPException(status_code=400, detail=f"{key} must be openai, anthropic, minimax, or ollama")
+            updates[key] = provider_name
+    for key in ("hybrid_analysis_model", "hybrid_copy_model"):
+        if key in updates:
+            updates[key] = str(updates[key] or "").strip()
+    for key in ("hybrid_analysis_search_mode", "hybrid_copy_search_mode"):
+        if key in updates:
+            search_mode = str(updates[key] or "").strip().lower()
+            if search_mode not in {"off", "entity_gated", "follow_provider"}:
+                raise HTTPException(status_code=400, detail=f"{key} must be off, entity_gated, or follow_provider")
+            updates[key] = search_mode
     if "avatar_provider" in updates:
         avatar_provider = str(updates["avatar_provider"]).strip().lower()
         if avatar_provider not in AVATAR_PROVIDER_OPTIONS:

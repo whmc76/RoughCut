@@ -437,12 +437,33 @@ def _normalize_config_snapshot(config: dict[str, Any]) -> dict[str, Any]:
         normalized.get("qwen_asr_api_base_url") or settings.qwen_asr_api_base_url
     ).strip()
     normalized["llm_mode"] = str(normalized.get("llm_mode") or settings.llm_mode).strip().lower() or settings.llm_mode
+    normalized["llm_routing_mode"] = str(
+        normalized.get("llm_routing_mode") or settings.llm_routing_mode
+    ).strip().lower() or settings.llm_routing_mode
     normalized["reasoning_provider"] = str(normalized.get("reasoning_provider") or settings.reasoning_provider).strip().lower()
     normalized["reasoning_model"] = str(normalized.get("reasoning_model") or settings.reasoning_model).strip()
     normalized["local_reasoning_model"] = str(
         normalized.get("local_reasoning_model") or settings.local_reasoning_model
     ).strip()
     normalized["local_vision_model"] = str(normalized.get("local_vision_model") or settings.local_vision_model).strip()
+    normalized["hybrid_analysis_provider"] = str(
+        normalized.get("hybrid_analysis_provider") or settings.hybrid_analysis_provider
+    ).strip().lower()
+    normalized["hybrid_analysis_model"] = str(
+        normalized.get("hybrid_analysis_model") or settings.hybrid_analysis_model
+    ).strip()
+    normalized["hybrid_analysis_search_mode"] = str(
+        normalized.get("hybrid_analysis_search_mode") or settings.hybrid_analysis_search_mode
+    ).strip().lower()
+    normalized["hybrid_copy_provider"] = str(
+        normalized.get("hybrid_copy_provider") or settings.hybrid_copy_provider
+    ).strip().lower()
+    normalized["hybrid_copy_model"] = str(
+        normalized.get("hybrid_copy_model") or settings.hybrid_copy_model
+    ).strip()
+    normalized["hybrid_copy_search_mode"] = str(
+        normalized.get("hybrid_copy_search_mode") or settings.hybrid_copy_search_mode
+    ).strip().lower()
     normalized["multimodal_fallback_provider"] = str(
         normalized.get("multimodal_fallback_provider") or settings.multimodal_fallback_provider
     ).strip().lower()

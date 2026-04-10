@@ -129,6 +129,10 @@ _REVIEW_KEYWORD_NOISE_CHUNKS = {
     "视频",
     "主题",
 }
+_MODEL_FAMILY_RE = re.compile(
+    r"(?<![A-Za-z0-9])([A-Za-z]{1,10}\d{1,6}[A-Za-z0-9-]{0,12}|[A-Za-z]{2,12})(?![A-Za-z0-9])",
+    re.IGNORECASE,
+)
 
 
 def _hint_candidate_key(field_name: str) -> str:
@@ -531,6 +535,8 @@ def _normalize_seeded_profile_for_cache(profile: dict[str, Any] | None) -> dict[
     source_context = _normalize_source_context_payload(seeded.get("source_context"))
     normalized = {
         "subject_brand": str(seeded.get("subject_brand") or "").strip(),
+        "subject_brand_cn": str(seeded.get("subject_brand_cn") or "").strip(),
+        "subject_brand_bilingual": str(seeded.get("subject_brand_bilingual") or "").strip(),
         "subject_model": str(seeded.get("subject_model") or "").strip(),
         "subject_type": str(seeded.get("subject_type") or "").strip(),
         "subject_type_candidates": [str(item).strip() for item in (seeded.get("subject_type_candidates") or []) if str(item).strip()],
@@ -910,16 +916,32 @@ def build_cover_title(profile: dict[str, Any], preset: WorkflowPreset) -> dict[s
     visible_text = str(profile.get("visible_text") or "").strip()
     transcript_excerpt = str(profile.get("transcript_excerpt") or "").strip()
     copy_style = str(profile.get("copy_style") or "attention_grabbing").strip() or "attention_grabbing"
+    display_subject_type = _cover_subject_type_label(subject_type)
+    cover_top_brand = _select_cover_brand_display(
+        profile,
+        visible_text=visible_text,
+        max_length=14,
+        prefer_bilingual=True,
+    )
+    cover_main_brand = _select_cover_brand_display(
+        profile,
+        visible_text=visible_text,
+        max_length=max(0, 18 - len(display_subject_type)) if display_subject_type else 18,
+        prefer_bilingual=False,
+    )
     anchor = _extract_cover_entity_anchor(
         brand=brand,
         model=model,
         subject_type=subject_type,
         theme=raw_theme,
         visible_text=visible_text,
+        brand_top_label=cover_top_brand,
+        brand_main_label=cover_main_brand,
     )
 
     top = _pick_cover_top(
         brand=brand,
+        brand_label=cover_top_brand,
         subject_type=subject_type,
         visible_text=visible_text,
         preset=preset,
@@ -927,6 +949,7 @@ def build_cover_title(profile: dict[str, Any], preset: WorkflowPreset) -> dict[s
     )
     main = _pick_cover_main(
         brand=brand,
+        brand_label=cover_main_brand,
         model=model,
         subject_type=subject_type,
         theme=theme,
@@ -1264,6 +1287,12 @@ def apply_identity_review_guard(
             glossary_terms=glossary_terms,
             user_memory=user_memory,
         )
+        guarded = _apply_verification_candidate_backfill(
+            guarded,
+            transcript_excerpt=transcript_excerpt,
+            source_name=source_name,
+            glossary_terms=glossary_terms,
+        )
         _ensure_review_fields_not_empty(guarded, source_name=source_name, transcript_excerpt=transcript_excerpt)
         return guarded
     memory_hints = _seed_profile_from_user_memory(
@@ -1345,6 +1374,12 @@ def apply_identity_review_guard(
         glossary_terms=glossary_terms,
         user_memory=user_memory,
     )
+    guarded = _apply_verification_candidate_backfill(
+        guarded,
+        transcript_excerpt=transcript_excerpt,
+        source_name=source_name,
+        glossary_terms=glossary_terms,
+    )
     return guarded
 
 
@@ -1396,7 +1431,20 @@ def _assess_identity_review_requirement(
     has_external_evidence = "evidence" in support_sources
     evidence_strength = "strong" if has_external_evidence or support_count >= 2 else "weak"
     required = first_seen_brand or first_seen_model
-    conservative_summary = required and evidence_strength != "strong"
+    current_source_support = {
+        label
+        for label in support_sources
+        if label in {"transcript", "transcript_labels", "source_name", "ocr", "visible_text"}
+    }
+    identity_bearing_non_transcript_support = current_source_support & {"source_name", "ocr", "visible_text"}
+    has_multisource_current_evidence = len(current_source_support) >= 2 and bool(
+        identity_bearing_non_transcript_support
+    )
+    # External retrieval can help fact-checking, but it should not remove the
+    # manual-confirmation cue for a first-seen product identity. We only relax
+    # the conservative summary when the current clip itself provides multiple
+    # identity-bearing signals.
+    conservative_summary = required and not has_multisource_current_evidence
 
     reason = ""
     if required and conservative_summary:
@@ -2202,7 +2250,7 @@ def _sanitize_profile_identity(
             evidence.append(item)
         sanitized["evidence"] = evidence
 
-    return sanitized
+    return _apply_brand_display_fields(sanitized)
 
 
 def _profile_transcript_source_labels(profile: dict[str, Any] | None) -> dict[str, Any]:
@@ -2253,24 +2301,22 @@ def _graph_confirmed_entities(user_memory: dict[str, Any] | None) -> list[dict[s
 
 
 def _mapped_brand_for_model(model: object) -> str:
-    normalized_model = _normalize_profile_value(model)
-    if not normalized_model:
+    if not str(model or "").strip():
         return ""
     for candidate, brand in _MODEL_TO_BRAND.items():
-        if _normalize_profile_value(candidate) == normalized_model:
+        if _identity_values_compatible(candidate, model):
             return brand
     return ""
 
 
 def _first_supported_identity_value(primary: Any, *candidates: Any) -> str:
-    normalized_candidates = {
-        _normalize_profile_value(candidate): str(candidate).strip()
-        for candidate in candidates
-        if _normalize_profile_value(candidate)
-    }
-    primary_key = _normalize_profile_value(primary)
-    if primary_key and primary_key in normalized_candidates:
-        return normalized_candidates[primary_key]
+    primary_value = str(primary or "").strip()
+    if not primary_value:
+        return ""
+    for candidate in candidates:
+        candidate_value = str(candidate or "").strip()
+        if candidate_value and _identity_values_compatible(primary_value, candidate_value):
+            return candidate_value
     return ""
 
 
@@ -2301,12 +2347,13 @@ def _supported_identity_value(primary: Any, *candidates: Any) -> str:
 
 
 def _identity_support_count(primary: Any, *candidates: Any) -> int:
-    primary_key = _normalize_profile_value(primary)
-    if not primary_key:
+    primary_value = str(primary or "").strip()
+    if not primary_value:
         return 0
     count = 0
     for candidate in candidates:
-        if _normalize_profile_value(candidate) == primary_key:
+        candidate_value = str(candidate or "").strip()
+        if candidate_value and _identity_values_compatible(primary_value, candidate_value):
             count += 1
     return count
 
@@ -2321,6 +2368,38 @@ def _query_is_identity_supported(query: str, *, transcript_excerpt: str, source_
 
 def _normalize_profile_value(value: object) -> str:
     return _normalize_profile_value_keywords(value)
+
+
+def _model_family_key(value: object) -> str:
+    normalized = _normalize_profile_value(value)
+    if not normalized:
+        return ""
+    matches = [match.group(1) for match in _MODEL_FAMILY_RE.finditer(str(value or ""))]
+    normalized_matches = [_normalize_profile_value(item) for item in matches if _normalize_profile_value(item)]
+    if normalized_matches:
+        normalized_matches.sort(key=len, reverse=True)
+        return normalized_matches[0]
+    compact = re.sub(r"[^A-Z0-9]", "", str(value or "").upper())
+    if re.search(r"[A-Z]", compact) and re.search(r"\d", compact):
+        return compact
+    return normalized
+
+
+def _identity_values_compatible(left: object, right: object) -> bool:
+    normalized_left = _normalize_profile_value(left)
+    normalized_right = _normalize_profile_value(right)
+    if not normalized_left or not normalized_right:
+        return False
+    if normalized_left == normalized_right:
+        return True
+    left_family = _model_family_key(left)
+    right_family = _model_family_key(right)
+    if left_family and right_family and left_family == right_family:
+        return True
+    if len(normalized_left) >= 4 and len(normalized_right) >= 4:
+        if normalized_left in normalized_right or normalized_right in normalized_left:
+            return True
+    return False
 
 
 def _text_has_unsupported_identity(
@@ -2373,13 +2452,13 @@ def _text_conflicts_with_verified_identity(
     seeded = _seed_profile_from_text(text, glossary_terms=glossary_terms)
     seeded_brand = str(seeded.get("subject_brand") or "").strip()
     seeded_model = str(seeded.get("subject_model") or "").strip()
-    if seeded_brand and brand and _normalize_profile_value(seeded_brand) != _normalize_profile_value(brand):
+    if seeded_brand and brand and not _identity_values_compatible(seeded_brand, brand):
         return True
-    if seeded_model and model and _normalize_profile_value(seeded_model) != _normalize_profile_value(model):
+    if seeded_model and model and not _identity_values_compatible(seeded_model, model):
         return True
     mapped_brand = _mapped_brand_for_model(seeded_model or model)
     effective_brand = seeded_brand or brand
-    if mapped_brand and effective_brand and _normalize_profile_value(effective_brand) != _normalize_profile_value(mapped_brand):
+    if mapped_brand and effective_brand and not _identity_values_compatible(effective_brand, mapped_brand):
         return True
     return False
 
@@ -2568,6 +2647,7 @@ async def infer_content_profile(
                         evidence_bundle=evidence_bundle,
                         verification_bundle=verification_bundle,
                     )
+                initial_profile["verification_evidence"] = _build_profile_verification_snapshot(verification_bundle)
         except Exception:
             pass
 
@@ -2586,6 +2666,8 @@ async def infer_content_profile(
         profile["visual_cluster_hints"] = dict(visual_hints)
     if visual_semantic_evidence:
         profile["visual_semantic_evidence"] = dict(visual_semantic_evidence)
+    if initial_profile.get("verification_evidence"):
+        profile["verification_evidence"] = dict(initial_profile.get("verification_evidence") or {})
     normalized_source_context = _normalize_source_context_payload(source_context)
     if normalized_source_context:
         profile["source_context"] = normalized_source_context
@@ -2680,8 +2762,288 @@ def _collect_verification_evidence_texts(
     return fragments[:18]
 
 
+def _build_profile_verification_snapshot(
+    verification_bundle: HybridVerificationBundle | None,
+) -> dict[str, Any]:
+    if verification_bundle is None:
+        return {}
+
+    online_results: list[dict[str, Any]] = []
+    for item in list(verification_bundle.online_results or [])[:4]:
+        if isinstance(item, dict):
+            normalized = {
+                "query": str(item.get("query") or "").strip(),
+                "title": str(item.get("title") or "").strip(),
+                "snippet": str(item.get("snippet") or "").strip(),
+                "url": str(item.get("url") or "").strip(),
+            }
+        else:
+            normalized = {"value": str(item)}
+        if any(normalized.values()):
+            online_results.append(normalized)
+
+    database_results: list[dict[str, Any]] = []
+    for item in list(verification_bundle.database_results or [])[:4]:
+        if isinstance(item, dict):
+            normalized = {
+                "brand": str(item.get("brand") or "").strip(),
+                "model": str(item.get("model") or "").strip(),
+                "primary_subject": str(item.get("primary_subject") or "").strip(),
+                "subject_type": str(item.get("subject_type") or "").strip(),
+                "source_type": str(item.get("source_type") or "").strip(),
+            }
+        else:
+            normalized = {"value": str(item)}
+        if any(normalized.values()):
+            database_results.append(normalized)
+
+    entity_catalog_candidates: list[dict[str, Any]] = []
+    for item in list(verification_bundle.entity_catalog_candidates or [])[:5]:
+        if isinstance(item, dict):
+            normalized = {
+                "brand": str(item.get("brand") or "").strip(),
+                "model": str(item.get("model") or "").strip(),
+                "primary_subject": str(item.get("primary_subject") or "").strip(),
+                "subject_type": str(item.get("subject_type") or "").strip(),
+                "subject_domain": str(item.get("subject_domain") or "").strip(),
+                "source_type": str(item.get("source_type") or "").strip(),
+                "source_origins": [str(value).strip() for value in list(item.get("source_origins") or []) if str(value).strip()],
+                "matched_fields": [str(value).strip() for value in list(item.get("matched_fields") or []) if str(value).strip()],
+                "matched_queries": [str(value).strip() for value in list(item.get("matched_queries") or []) if str(value).strip()],
+                "matched_evidence_texts": [str(value).strip() for value in list(item.get("matched_evidence_texts") or []) if str(value).strip()],
+                "matched_aliases": {
+                    key: [str(value).strip() for value in list(values or []) if str(value).strip()]
+                    for key, values in dict(item.get("matched_aliases") or {}).items()
+                    if [str(value).strip() for value in list(values or []) if str(value).strip()]
+                },
+                "evidence_strength": str(item.get("evidence_strength") or "").strip(),
+                "support_score": float(item.get("support_score") or 0.0),
+                "confidence": float(item.get("confidence") or 0.0),
+            }
+        else:
+            normalized = {"value": str(item)}
+        if any(value for key, value in normalized.items() if key != "matched_aliases"):
+            entity_catalog_candidates.append(normalized)
+
+    return {
+        "search_queries": [str(item).strip() for item in list(verification_bundle.search_queries or []) if str(item).strip()],
+        "online_count": len(list(verification_bundle.online_results or [])),
+        "database_count": len(list(verification_bundle.database_results or [])),
+        "entity_catalog_count": len(list(verification_bundle.entity_catalog_candidates or [])),
+        "online_results": online_results,
+        "database_results": database_results,
+        "entity_catalog_candidates": entity_catalog_candidates,
+    }
+
+
+def _select_verification_backfill_candidate(profile: dict[str, Any]) -> dict[str, Any] | None:
+    snapshot = profile.get("verification_evidence")
+    if not isinstance(snapshot, dict):
+        return None
+    candidates = [
+        item
+        for item in list(snapshot.get("entity_catalog_candidates") or [])
+        if isinstance(item, dict)
+    ]
+    if not candidates:
+        return None
+
+    current_brand = str(profile.get("subject_brand") or "").strip()
+    current_model = str(profile.get("subject_model") or "").strip()
+    current_subject_type = str(profile.get("subject_type") or "").strip()
+    current_subject_domain = str(profile.get("subject_domain") or "").strip() or _subject_domain_from_subject_type(current_subject_type)
+
+    def _is_viable(item: dict[str, Any]) -> bool:
+        support_score = float(item.get("support_score") or 0.0)
+        evidence_strength = str(item.get("evidence_strength") or "").strip().lower()
+        matched_evidence = [str(value).strip() for value in list(item.get("matched_evidence_texts") or []) if str(value).strip()]
+        matched_fields = [str(value).strip() for value in list(item.get("matched_fields") or []) if str(value).strip()]
+        return (
+            support_score >= 0.7
+            and evidence_strength in {"moderate", "strong"}
+            and (
+                matched_evidence
+                or "video_evidence" in matched_fields
+                or "brand_alias" in matched_fields
+                or "model_alias" in matched_fields
+                or "supporting_keyword" in matched_fields
+            )
+            and bool(str(item.get("brand") or "").strip() or str(item.get("model") or "").strip())
+        )
+
+    def _alignment_score(item: dict[str, Any]) -> int:
+        score = 0
+        candidate_brand = str(item.get("brand") or "").strip()
+        candidate_model = str(item.get("model") or "").strip()
+        candidate_subject_type = str(item.get("subject_type") or "").strip()
+        candidate_domain = str(item.get("subject_domain") or "").strip() or _subject_domain_from_subject_type(candidate_subject_type)
+
+        if current_model and candidate_model:
+            if _identity_values_compatible(current_model, candidate_model):
+                score += 6
+            else:
+                score -= 3
+        if current_brand and candidate_brand:
+            if _identity_values_compatible(current_brand, candidate_brand):
+                score += 4
+            else:
+                score -= 2
+        mapped_brand = _mapped_brand_for_model(current_model or candidate_model)
+        effective_brand = current_brand or candidate_brand
+        if mapped_brand and effective_brand and _identity_values_compatible(mapped_brand, effective_brand):
+            score += 2
+        if current_subject_domain and candidate_domain:
+            if current_subject_domain == candidate_domain:
+                score += 2
+            else:
+                score -= 1
+        if current_subject_type and candidate_subject_type:
+            if _normalize_profile_value(current_subject_type) == _normalize_profile_value(candidate_subject_type):
+                score += 2
+            elif current_model and _text_conflicts_with_verified_identity(
+                current_subject_type,
+                brand=candidate_brand or current_brand,
+                model=candidate_model or current_model,
+                glossary_terms=None,
+            ):
+                score -= 2
+        return score
+
+    viable = [item for item in candidates if _is_viable(item)]
+    if not viable:
+        return None
+    viable.sort(
+        key=lambda item: (
+            -_alignment_score(item),
+            -float(item.get("support_score") or 0.0),
+            -float(item.get("confidence") or 0.0),
+            0 if str(item.get("source_type") or "").strip() == "builtin_entity_catalog" else 1,
+            -len(str(item.get("model") or "").strip()),
+            -len(str(item.get("subject_type") or "").strip()),
+            -(len(item.get("matched_evidence_texts") or [])),
+        )
+    )
+    return dict(viable[0])
+
+
+def _apply_verification_candidate_backfill(
+    profile: dict[str, Any],
+    *,
+    transcript_excerpt: str,
+    source_name: str,
+    glossary_terms: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    guarded = dict(profile or {})
+    candidate = _select_verification_backfill_candidate(guarded)
+    if not candidate:
+        return guarded
+
+    candidate_brand = str(candidate.get("brand") or "").strip()
+    candidate_model = str(candidate.get("model") or "").strip()
+    candidate_subject_type = str(candidate.get("subject_type") or "").strip()
+    current_brand = str(guarded.get("subject_brand") or "").strip()
+    current_model = str(guarded.get("subject_model") or "").strip()
+    effective_model = current_model or candidate_model
+    mapped_brand = _mapped_brand_for_model(effective_model)
+    allow_brand_override = bool(
+        current_brand
+        and candidate_brand
+        and effective_model
+        and _identity_values_compatible(effective_model, candidate_model or effective_model)
+        and mapped_brand
+        and _identity_values_compatible(mapped_brand, candidate_brand)
+        and not _identity_values_compatible(mapped_brand, current_brand)
+    )
+    if current_brand and candidate_brand and not _identity_values_compatible(current_brand, candidate_brand) and not allow_brand_override:
+        return guarded
+    if current_model and candidate_model and not _identity_values_compatible(current_model, candidate_model):
+        return guarded
+
+    backfilled_fields: list[str] = []
+    effective_brand = current_brand or candidate_brand
+    resolved_candidate_brand = candidate_brand or mapped_brand
+    if (not current_brand or allow_brand_override) and resolved_candidate_brand:
+        guarded["subject_brand"] = resolved_candidate_brand
+        backfilled_fields.append("subject_brand")
+    if not current_model and candidate_model:
+        guarded["subject_model"] = candidate_model
+        backfilled_fields.append("subject_model")
+    effective_brand = str(guarded.get("subject_brand") or "").strip()
+    effective_model = str(guarded.get("subject_model") or "").strip()
+
+    current_subject_type = str(guarded.get("subject_type") or "").strip()
+    current_subject_type_lacks_identity = bool(current_subject_type) and not any(
+        _text_matches_identity_value(
+            value,
+            normalized_text=_normalize_profile_value(current_subject_type),
+            glossary_terms=glossary_terms,
+        )
+        for value in (effective_brand, effective_model)
+        if value
+    )
+    if candidate_subject_type and (
+        not current_subject_type
+        or _is_generic_subject_type(current_subject_type)
+        or current_subject_type_lacks_identity
+        or _text_conflicts_with_verified_identity(
+            current_subject_type,
+            brand=effective_brand,
+            model=effective_model,
+            glossary_terms=glossary_terms,
+        )
+    ):
+        guarded["subject_type"] = candidate_subject_type
+        backfilled_fields.append("subject_type")
+
+    if backfilled_fields:
+        verification_gate = dict(guarded.get("verification_gate") or {}) if isinstance(guarded.get("verification_gate"), dict) else {}
+        verification_gate["backfilled_fields"] = list(dict.fromkeys([*list(verification_gate.get("backfilled_fields") or []), *backfilled_fields]))
+        verification_gate["backfill_candidate"] = candidate
+        guarded["verification_gate"] = verification_gate
+
+    summary = str(guarded.get("summary") or "").strip()
+    if not summary or _is_generic_profile_summary(summary) or not any(
+        _text_matches_identity_value(
+            value,
+            normalized_text=_normalize_profile_value(summary),
+            glossary_terms=glossary_terms,
+        )
+        for value in (
+            str(guarded.get("subject_brand") or "").strip(),
+            str(guarded.get("subject_model") or "").strip(),
+        )
+        if value
+    ):
+        guarded["summary"] = _build_profile_summary(guarded)
+    current_video_theme = str(guarded.get("video_theme") or "").strip()
+    if (
+        not current_video_theme
+        or not _is_specific_video_theme_for_context(
+            current_video_theme,
+            preset_name=_workflow_template_name(guarded),
+            content_kind=_content_kind_name(guarded),
+            subject_domain=str(guarded.get("subject_domain") or ""),
+        )
+        or _text_conflicts_with_verified_identity(
+            current_video_theme,
+            brand=str(guarded.get("subject_brand") or "").strip(),
+            model=str(guarded.get("subject_model") or "").strip(),
+            glossary_terms=glossary_terms,
+        )
+    ):
+        rebuilt_theme = _build_identity_driven_video_theme(guarded, transcript_excerpt=transcript_excerpt)
+        if rebuilt_theme:
+            guarded["video_theme"] = rebuilt_theme
+
+    _ensure_search_queries(guarded, source_name, transcript_excerpt=transcript_excerpt)
+    return guarded
+
+
 async def _online_search_content_understanding(*, search_queries: list[str]) -> list[dict[str, Any]]:
-    provider = get_search_provider()
+    try:
+        provider = get_search_provider()
+    except Exception:
+        return []
     results: list[dict[str, Any]] = []
     for query in search_queries[:4]:
         for item in await provider.search(query):
@@ -3157,6 +3519,14 @@ async def enrich_content_profile(
         enriched["engagement_question"] = _build_fallback_engagement_question(enriched, preset)
     if not str(enriched.get("subject_type") or "").strip():
         _ensure_subject_type_main(enriched)
+    if isinstance(enriched.get("verification_evidence"), dict) or isinstance(enriched.get("content_understanding"), dict):
+        enriched = apply_identity_review_guard(
+            enriched,
+            subtitle_items=subtitle_items,
+            user_memory=user_memory,
+            glossary_terms=glossary_terms,
+            source_name=source_name,
+        )
     _ensure_search_queries(enriched, source_name, transcript_excerpt=transcript_excerpt)
     if not list(enriched.get("keywords") or []):
         enriched["keywords"] = _build_review_keywords(enriched)
@@ -3218,6 +3588,7 @@ async def _infer_content_understanding_for_enrich(
                         evidence_bundle=evidence_bundle,
                         verification_bundle=verification_bundle,
                     )
+                profile["verification_evidence"] = _build_profile_verification_snapshot(verification_bundle)
         except Exception:
             pass
     return understanding
@@ -3885,6 +4256,7 @@ def _build_search_queries(
     transcript_excerpt: str = "",
 ) -> list[str]:
     brand = str(profile.get("subject_brand") or "").strip()
+    brand_aliases = _brand_search_aliases(profile, include_canonical=False)
     model = str(profile.get("subject_model") or "").strip()
     subject_type = str(profile.get("subject_type") or "").strip()
     video_theme = str(profile.get("video_theme") or "").strip()
@@ -3906,11 +4278,23 @@ def _build_search_queries(
             query_candidates.append(f"{brand} {model} 功能")
         else:
             query_candidates.append(f"{brand} {model} 开箱")
+        for brand_alias in brand_aliases:
+            query_candidates.append(f"{brand_alias} {model}")
+            if software_like:
+                query_candidates.append(f"{brand_alias} {model} 教程")
+                query_candidates.append(f"{brand_alias} {model} 功能")
+            else:
+                query_candidates.append(f"{brand_alias} {model} 开箱")
     elif brand:
         for term in signal_terms[:2]:
             query_candidates.append(f"{brand} {term}")
             if subject_type:
                 query_candidates.append(f"{brand} {term} {subject_type}")
+        for brand_alias in brand_aliases:
+            for term in signal_terms[:2]:
+                query_candidates.append(f"{brand_alias} {term}")
+                if subject_type:
+                    query_candidates.append(f"{brand_alias} {term} {subject_type}")
     elif model:
         if subject_type and not _is_generic_subject_type(subject_type):
             query_candidates.append(f"{model} {subject_type}")
@@ -3924,6 +4308,8 @@ def _build_search_queries(
             query_candidates.append(f"{model} {subject_type}")
     if brand and subject_type:
         query_candidates.append(f"{brand} {subject_type}")
+        for brand_alias in brand_aliases:
+            query_candidates.append(f"{brand_alias} {subject_type}")
     if model and subject_type:
         query_candidates.append(f"{model} {subject_type}")
     if software_like and brand and model and any(term in {"无限画布", "漫剧工作流", "工作流", "节点编排", "智能体"} for term in topic_terms):
@@ -3931,8 +4317,15 @@ def _build_search_queries(
             if topic != model:
                 query_candidates.append(f"{brand} {topic}")
             query_candidates.append(f"{brand} {topic} 教程")
+        for brand_alias in brand_aliases:
+            for topic in topic_terms[:3]:
+                if topic != model:
+                    query_candidates.append(f"{brand_alias} {topic}")
+                query_candidates.append(f"{brand_alias} {topic} 教程")
         if "无限画布" in topic_terms or model == "无限画布":
             query_candidates.append(f"{brand} 无限画布 漫剧")
+            for brand_alias in brand_aliases:
+                query_candidates.append(f"{brand_alias} 无限画布 漫剧")
     if not brand and not model:
         for term in signal_terms[:3]:
             suffix = "教程" if software_like else "开箱"
@@ -3944,6 +4337,7 @@ def _build_search_queries(
 
     support_kwargs = {
         "brand": brand,
+        "brand_aliases": brand_aliases,
         "model": model,
         "subject_type": subject_type,
         "video_theme": video_theme,
@@ -3975,6 +4369,7 @@ def _search_query_support_score(
     transcript_excerpt: str,
     source_name: str,
     brand: str = "",
+    brand_aliases: list[str] | None = None,
     model: str = "",
     subject_type: str = "",
     video_theme: str = "",
@@ -4000,12 +4395,16 @@ def _search_query_support_score(
     if source_norm and normalized_query in source_norm:
         score += 4
 
-    for value, weight in (
-        (brand, 3),
-        (model, 3),
-        (subject_type, 2),
-        (_subject_type_search_anchor(subject_type), 1),
-    ):
+    support_values: list[tuple[str, int]] = [(brand, 3)]
+    support_values.extend((alias, 2) for alias in (brand_aliases or []))
+    support_values.extend(
+        [
+            (model, 3),
+            (subject_type, 2),
+            (_subject_type_search_anchor(subject_type), 1),
+        ]
+    )
+    for value, weight in support_values:
         normalized_value = _normalize_profile_value(value)
         if normalized_value and normalized_value in normalized_query:
             score += weight
@@ -4144,6 +4543,13 @@ _BRAND_ALIAS_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("LuckyKiss", re.compile(r"(LUCKYKISS|LuckyKiss|luckykiss)", re.IGNORECASE)),
 ]
 
+_BRAND_CN_DISPLAY_MAP: dict[str, str] = {
+    "LEATHERMAN": "莱泽曼",
+    "REATE": "锐特",
+    "OLIGHT": "傲雷",
+    "NexTool": "纳拓",
+}
+
 _TECH_BRAND_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("RunningHub", re.compile(r"(RUNNINGHUB|RunningHub|runninghub|(?<![A-Za-z0-9])RH(?![A-Za-z0-9]))", re.IGNORECASE)),
     ("ComfyUI", re.compile(r"(COMFYUI|ComfyUI|comfyui)", re.IGNORECASE)),
@@ -4184,9 +4590,13 @@ _SEARCH_SIGNAL_STOPWORDS: set[str] = {
 
 _MODEL_TO_BRAND: dict[str, str] = {
     "ARC": "LEATHERMAN",
+    "F12": "NexTool",
+    "F2": "NexTool",
     "FXX1": "狐蝠工业",
     "FXX1小副包": "狐蝠工业",
     "KissPod": "LuckyKiss",
+    "S11 PRO": "NexTool",
+    "S11PRO": "NexTool",
     "SK05二代ProUV版": "Loop露普",
     "SK05二代Pro UV版": "Loop露普",
     "SK05二代UV版": "Loop露普",
@@ -4777,7 +5187,7 @@ def _seed_profile_from_text(
                 queries.append(item)
     if queries:
         seeded["search_queries"] = queries
-    return seeded
+    return _apply_brand_display_fields(seeded)
 
 
 def _canonicalize_spoken_identity_text(text: str) -> str:
@@ -5230,6 +5640,132 @@ def _canonical_brand_display_name(value: str) -> str:
     if english_tokens:
         return english_tokens[0].upper()
     return text
+
+
+def _brand_cn_display_name(value: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    mapped = str(_BRAND_CN_DISPLAY_MAP.get(text) or "").strip()
+    if mapped:
+        return mapped
+    chinese_tokens = re.findall(r"[\u4e00-\u9fff]{2,12}", text)
+    if chinese_tokens:
+        return chinese_tokens[-1]
+    return ""
+
+
+def _brand_bilingual_display_name(value: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if re.search(r"[\u4e00-\u9fff]", text) and re.search(r"[A-Za-z]", text):
+        return "".join(text.split())
+    cn_name = _brand_cn_display_name(text)
+    if cn_name and cn_name != text:
+        return f"{cn_name}{text}"
+    return text
+
+
+def _normalize_brand_display_label(value: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    parenthetical_english = re.search(r"[（(]\s*([A-Za-z][A-Za-z0-9 .+-]{1,20})\s*[)）]", text)
+    if parenthetical_english:
+        return parenthetical_english.group(1).strip().upper()[:18]
+    if re.fullmatch(r"[A-Za-z][A-Za-z0-9 .+-]{1,20}", text):
+        return text.strip().upper()[:18]
+    if re.search(r"[\u4e00-\u9fff]", text) and re.search(r"[A-Za-z]", text):
+        return "".join(text.split())[:18]
+    return _clean_line(text)
+
+
+def _brand_display_candidates(
+    profile: dict[str, Any],
+    *,
+    prefer_bilingual: bool,
+    include_canonical: bool = True,
+) -> list[str]:
+    ordered_keys = (
+        ("subject_brand_bilingual", "subject_brand_cn", "subject_brand")
+        if prefer_bilingual
+        else ("subject_brand_cn", "subject_brand_bilingual", "subject_brand")
+    )
+    candidates: list[str] = []
+    seen: set[str] = set()
+    for key in ordered_keys:
+        if key == "subject_brand" and not include_canonical:
+            continue
+        candidate = _normalize_brand_display_label(profile.get(key) or "")
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
+        candidates.append(candidate)
+    return candidates
+
+
+def _select_cover_brand_display(
+    profile: dict[str, Any],
+    *,
+    visible_text: str,
+    max_length: int,
+    prefer_bilingual: bool,
+) -> str:
+    if max_length <= 0:
+        return ""
+    for candidate in _brand_display_candidates(profile, prefer_bilingual=prefer_bilingual):
+        if len(candidate) <= max_length:
+            return candidate
+
+    brand = _clean_line(profile.get("subject_brand") or profile.get("brand") or "")
+    compact_brand = _compact_brand_name(brand, visible_text=visible_text)
+    if compact_brand:
+        return compact_brand[:max_length]
+
+    fallback_candidates = _brand_display_candidates(
+        profile,
+        prefer_bilingual=prefer_bilingual,
+        include_canonical=False,
+    )
+    if fallback_candidates:
+        return fallback_candidates[0][:max_length]
+    return ""
+
+
+def _brand_search_aliases(profile: dict[str, Any], *, include_canonical: bool = True) -> list[str]:
+    aliases: list[str] = []
+    seen: set[str] = set()
+    for candidate in _brand_display_candidates(
+        profile,
+        prefer_bilingual=False,
+        include_canonical=include_canonical,
+    ):
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        aliases.append(candidate)
+    return aliases
+
+
+def _apply_brand_display_fields(profile: dict[str, Any]) -> dict[str, Any]:
+    updated = dict(profile or {})
+    brand = str(updated.get("subject_brand") or "").strip()
+    if not brand:
+        updated.pop("subject_brand_cn", None)
+        updated.pop("subject_brand_bilingual", None)
+        return updated
+    cn_name = _brand_cn_display_name(brand)
+    bilingual = _brand_bilingual_display_name(brand)
+    if cn_name:
+        updated["subject_brand_cn"] = cn_name
+    else:
+        updated.pop("subject_brand_cn", None)
+    if bilingual and bilingual != brand:
+        updated["subject_brand_bilingual"] = bilingual
+    else:
+        updated.pop("subject_brand_bilingual", None)
+    return updated
 
 
 def _subject_type_from_glossary_category(category: str) -> str:
@@ -6219,6 +6755,7 @@ def _is_generic_cover_line(text: str) -> bool:
 def _pick_cover_top(
     *,
     brand: str,
+    brand_label: str = "",
     subject_type: str,
     visible_text: str,
     preset: WorkflowPreset,
@@ -6227,6 +6764,9 @@ def _pick_cover_top(
     anchor_brand = _clean_line((anchor or {}).get("brand") or "")
     if anchor_brand:
         return anchor_brand[:14]
+    normalized_brand_label = _normalize_brand_display_label(brand_label)
+    if normalized_brand_label:
+        return normalized_brand_label[:14]
     compact_brand = _compact_brand_name(brand, visible_text=visible_text)
     if compact_brand:
         return compact_brand
@@ -6248,6 +6788,7 @@ def _pick_cover_top(
 def _pick_cover_main(
     *,
     brand: str,
+    brand_label: str = "",
     model: str,
     subject_type: str,
     theme: str,
@@ -6263,8 +6804,11 @@ def _pick_cover_main(
     if anchor_main and not _is_generic_cover_line(anchor_main):
         return anchor_main[:18]
 
-    compact_brand = _compact_brand_name(brand, visible_text=visible_text)
     display_subject_type = _cover_subject_type_label(subject_type)
+    compact_brand = _normalize_brand_display_label(brand_label) or _compact_brand_name(
+        brand,
+        visible_text=visible_text,
+    )
     if compact_brand and display_subject_type:
         return f"{compact_brand}{display_subject_type}"[:18]
 
@@ -6289,22 +6833,29 @@ def _extract_cover_entity_anchor(
     subject_type: str,
     theme: str,
     visible_text: str,
+    brand_top_label: str = "",
+    brand_main_label: str = "",
 ) -> dict[str, str]:
     cleaned_brand = _clean_line(brand)
     cleaned_model = _clean_line(model)
     if _is_generic_cover_line(cleaned_model):
         cleaned_model = ""
     display_subject_type = _cover_subject_type_label(subject_type)
+    anchor_brand = _normalize_brand_display_label(brand_top_label) or _compact_brand_name(
+        cleaned_brand,
+        visible_text=visible_text,
+    )
+    anchor_main_brand = _normalize_brand_display_label(brand_main_label) or cleaned_brand
 
     if cleaned_brand and cleaned_model and display_subject_type:
         return {
-            "brand": _compact_brand_name(cleaned_brand, visible_text=visible_text),
-            "main": f"{cleaned_brand} {cleaned_model}{display_subject_type}".replace("  ", " ").strip(),
+            "brand": anchor_brand[:14],
+            "main": f"{anchor_main_brand} {cleaned_model}{display_subject_type}".replace("  ", " ").strip(),
         }
     if cleaned_brand and cleaned_model:
         return {
-            "brand": _compact_brand_name(cleaned_brand, visible_text=visible_text),
-            "main": f"{cleaned_brand} {cleaned_model}".replace("  ", " ").strip(),
+            "brand": anchor_brand[:14],
+            "main": f"{anchor_main_brand} {cleaned_model}".replace("  ", " ").strip(),
         }
 
     if not theme or not display_subject_type:

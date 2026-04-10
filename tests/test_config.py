@@ -71,6 +71,25 @@ def test_local_mode_switches_active_provider():
     assert s.active_search_provider == "auto"
 
 
+def test_get_settings_normalizes_legacy_search_provider_override_to_auto(tmp_path, monkeypatch):
+    overrides_file = tmp_path / "roughcut_config.json"
+    overrides_file.write_text(
+        '{"reasoning_provider":"openai","search_provider":"openai","search_fallback_provider":"model","model_search_helper":"  helper  "}',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(config_mod, "_OVERRIDES_FILE", overrides_file)
+    config_mod._settings = None
+
+    settings = get_settings()
+    persisted = config_mod.load_runtime_overrides()
+
+    assert settings.search_provider == "auto"
+    assert settings.search_fallback_provider == "model"
+    assert settings.model_search_helper == "helper"
+    assert persisted["search_provider"] == "auto"
+    assert persisted["search_fallback_provider"] == "model"
+
+
 def test_parse_extensions_from_string():
     s = Settings(_env_file=None, allowed_extensions=".mp4,.mov,.mkv")
     assert s.allowed_extensions == [".mp4", ".mov", ".mkv"]

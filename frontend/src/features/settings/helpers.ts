@@ -6,6 +6,7 @@ export const PROVIDER_LABELS: Record<string, string> = {
   heygem: "HeyGem",
   indextts2: "IndexTTS2",
   minimax: "MiniMax",
+  model: "模型代理",
   ollama: "Ollama",
   openai: "OpenAI",
   qwen3_asr: "Qwen3 ASR",
@@ -22,6 +23,14 @@ export const TRANSCRIPTION_PROVIDER_LABELS: Record<string, string> = {
 
 function readString(form: SettingsForm, key: string, fallback = ""): string {
   return String(form[key] ?? fallback).trim();
+}
+
+export function getLlmRoutingMode(form: SettingsForm): string {
+  return readString(form, "llm_routing_mode", "bundled");
+}
+
+export function isHybridRoutingEnabled(form: SettingsForm): boolean {
+  return readString(form, "llm_mode", "performance") === "performance" && getLlmRoutingMode(form) === "hybrid_performance";
 }
 
 export function getProviderLabel(value: string): string {
@@ -129,11 +138,29 @@ export function getCredentialSourceLabel(
 }
 
 export function getSearchSummary(form: SettingsForm): string {
-  const searchProvider = readString(form, "search_provider", "auto");
-  if (searchProvider !== "auto") {
-    return getProviderLabel(searchProvider);
-  }
   const activeReasoningProvider = getActiveReasoningProvider(form);
   const fallbackProvider = readString(form, "search_fallback_provider", "searxng");
   return `自动跟随 ${getProviderLabel(activeReasoningProvider)}，失败回退 ${getProviderLabel(fallbackProvider)}`;
+}
+
+export function getHybridSearchModeLabel(value: string): string {
+  switch (value) {
+    case "off":
+      return "关闭";
+    case "entity_gated":
+      return "主体明确时启用";
+    case "follow_provider":
+      return "跟随链路";
+    default:
+      return value || "未设置";
+  }
+}
+
+export function getRoutingSummary(form: SettingsForm): string {
+  if (!isHybridRoutingEnabled(form)) {
+    return `Bundled · 推理 ${getProviderLabel(getActiveReasoningProvider(form))}`;
+  }
+  const analysisProvider = readString(form, "hybrid_analysis_provider", "openai");
+  const copyProvider = readString(form, "hybrid_copy_provider", "minimax");
+  return `Hybrid · 摘要/字幕 ${getProviderLabel(analysisProvider)} · 文案 ${getProviderLabel(copyProvider)}`;
 }

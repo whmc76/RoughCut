@@ -48,11 +48,11 @@ class _FakeTelegramReviewBotService:
         self.content_profile_notifications.append(job_id)
 
 
-def test_workflow_template_subject_domain_defaults_edc_tactical_to_edc():
-    assert _workflow_template_subject_domain("edc_tactical") == "edc"
+def test_workflow_template_subject_domain_does_not_scope_edc_tactical_without_current_evidence():
+    assert _workflow_template_subject_domain("edc_tactical") is None
 
 
-def test_infer_subject_domain_for_memory_falls_back_to_workflow_template_scope():
+def test_infer_subject_domain_for_memory_does_not_fall_back_to_workflow_template_scope_without_evidence():
     assert (
         _infer_subject_domain_for_memory(
             workflow_template="edc_tactical",
@@ -60,7 +60,7 @@ def test_infer_subject_domain_for_memory_falls_back_to_workflow_template_scope()
             content_profile={},
             source_name="20260301-171443.mp4",
         )
-        == "edc"
+        is None
     )
 
 
@@ -496,6 +496,114 @@ async def test_run_glossary_review_passes_include_research_when_enabled(db_engin
     await run_glossary_review(str(job_id))
 
     assert captured["include_research"] is True
+
+
+@pytest.mark.asyncio
+async def test_run_glossary_review_marks_profile_needs_review_when_entity_gate_conflicts(db_engine, monkeypatch):
+    import roughcut.pipeline.steps as steps_mod
+
+    factory = async_sessionmaker(db_engine, expire_on_commit=False)
+    job_id = uuid.uuid4()
+
+    async with factory() as session:
+        session.add(
+            Job(
+                id=job_id,
+                source_path="jobs/demo/source.mp4",
+                source_name="source.mp4",
+                status="processing",
+                language="zh-CN",
+                workflow_template="unboxing_standard",
+            )
+        )
+        session.add(JobStep(job_id=job_id, step_name="glossary_review", status="running"))
+        session.add(
+            SubtitleItem(
+                job_id=job_id,
+                version=1,
+                item_index=0,
+                start_time=0.0,
+                end_time=1.0,
+                text_raw="这期鸿福 F叉二一小副包做个开箱测评。",
+                text_norm="这期鸿福 F叉二一小副包做个开箱测评。",
+                text_final="这期鸿福 F叉二一小副包做个开箱测评。",
+            )
+        )
+        session.add(
+            Artifact(
+                job_id=job_id,
+                artifact_type="content_profile_final",
+                data_json={
+                    "subject_brand": "LEATHERMAN",
+                    "subject_model": "ARC",
+                    "summary": "这条视频主要围绕 LEATHERMAN ARC 展开。",
+                },
+            )
+        )
+        await session.commit()
+
+    monkeypatch.setattr(steps_mod, "get_session_factory", lambda: factory)
+
+    async def fake_apply_glossary_corrections(*args, **kwargs):
+        return []
+
+    async def fake_load_content_profile_user_memory(*args, **kwargs):
+        return {}
+
+    async def fake_load_recent_subtitle_examples(*args, **kwargs):
+        return []
+
+    async def fake_load_related_profile_subtitle_examples(*args, **kwargs):
+        return []
+
+    async def fake_enrich_content_profile(**kwargs):
+        profile = dict(kwargs["profile"])
+        profile["verification_evidence"] = {
+            "entity_catalog_candidates": [
+                {
+                    "brand": "狐蝠工业",
+                    "model": "FXX1小副包",
+                    "primary_subject": "狐蝠工业 FXX1小副包",
+                    "matched_fields": ["video_evidence", "brand_alias", "model_alias"],
+                    "matched_evidence_texts": ["这期鸿福 F叉二一小副包做个开箱测评。"],
+                    "evidence_strength": "strong",
+                    "support_score": 0.88,
+                    "confidence": 0.91,
+                }
+            ]
+        }
+        return profile
+
+    def fake_build_subtitle_review_memory(**kwargs):
+        return {}
+
+    async def fake_polish_subtitle_items(*args, **kwargs):
+        return 0
+
+    monkeypatch.setattr(steps_mod, "apply_glossary_corrections", fake_apply_glossary_corrections)
+    monkeypatch.setattr(steps_mod, "load_content_profile_user_memory", fake_load_content_profile_user_memory)
+    monkeypatch.setattr(steps_mod, "_load_recent_subtitle_examples", fake_load_recent_subtitle_examples)
+    monkeypatch.setattr(steps_mod, "_load_related_profile_subtitle_examples", fake_load_related_profile_subtitle_examples)
+    monkeypatch.setattr(steps_mod, "enrich_content_profile", fake_enrich_content_profile)
+    monkeypatch.setattr(steps_mod, "build_subtitle_review_memory", fake_build_subtitle_review_memory)
+    monkeypatch.setattr(steps_mod, "polish_subtitle_items", fake_polish_subtitle_items)
+
+    result = await run_glossary_review(str(job_id))
+
+    assert result["review_required"] is True
+    assert result["identity_gate_conflicts"] == ["subject_brand", "subject_model"]
+
+    async with factory() as session:
+        artifact_result = await session.execute(
+            select(Artifact)
+            .where(Artifact.job_id == job_id, Artifact.artifact_type == "content_profile")
+            .order_by(Artifact.created_at.desc())
+        )
+        artifact = artifact_result.scalars().first()
+
+    assert artifact is not None
+    assert artifact.data_json["needs_review"] is True
+    assert artifact.data_json["verification_gate"]["blocking"] is True
 
 
 @pytest.mark.asyncio

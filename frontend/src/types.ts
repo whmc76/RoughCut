@@ -645,10 +645,17 @@ export type Config = {
   transcription_model: string;
   transcription_dialect: string;
   llm_mode: string;
+  llm_routing_mode?: string;
   reasoning_provider: string;
   reasoning_model: string;
   local_reasoning_model: string;
   local_vision_model: string;
+  hybrid_analysis_provider?: string;
+  hybrid_analysis_model?: string;
+  hybrid_analysis_search_mode?: string;
+  hybrid_copy_provider?: string;
+  hybrid_copy_model?: string;
+  hybrid_copy_search_mode?: string;
   multimodal_fallback_provider: string;
   multimodal_fallback_model: string;
   search_provider: string;

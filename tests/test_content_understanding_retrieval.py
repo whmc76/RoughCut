@@ -53,3 +53,76 @@ async def test_search_confirmed_content_entities_can_build_glossary_only_candida
         and item["source_type"] == "glossary_entity_candidate"
         for item in results
     )
+
+
+@pytest.mark.asyncio
+async def test_search_confirmed_content_entities_surfaces_builtin_entity_catalog_candidate(db_session):
+    results = await search_confirmed_content_entities(
+        db_session,
+        search_queries=["LEATHERMAN ARC 开箱"],
+        subject_domain="tools",
+        evidence_texts=["这把莱德曼 ASC 工具钳主要看单手开合和钳口细节。"],
+    )
+
+    assert results
+    assert any(
+        item["brand"] == "LEATHERMAN"
+        and item["model"] == "ARC"
+        and item["source_type"] == "builtin_entity_catalog"
+        and "ASC" in list((item.get("matched_aliases") or {}).get("model") or [])
+        and "supporting_keyword" in list(item.get("matched_fields") or [])
+        for item in results
+    )
+
+
+@pytest.mark.asyncio
+async def test_search_confirmed_content_entities_enriches_graph_candidate_with_cn_brand_aliases(db_session):
+    await upsert_content_profile_entity(
+        db_session,
+        subject_domain="knife",
+        brand="REATE",
+        model="EXO",
+        subject_type="EDC折刀",
+        source_name="20260411_reate_exo.mp4",
+    )
+    await db_session.flush()
+
+    results = await search_confirmed_content_entities(
+        db_session,
+        search_queries=["锐特"],
+        subject_domain="knife",
+        evidence_texts=[],
+    )
+
+    assert results
+    best = results[0]
+    assert best["brand"] == "REATE"
+    assert best["brand_cn"] == "锐特"
+    assert best["brand_bilingual"] == "锐特REATE"
+    assert "锐特" in list((best.get("matched_aliases") or {}).get("brand") or [])
+
+
+@pytest.mark.asyncio
+async def test_search_confirmed_content_entities_enriches_memory_candidate_with_localized_brand_display(db_session):
+    results = await search_confirmed_content_entities(
+        db_session,
+        search_queries=["锐特"],
+        subject_domain="knife",
+        confirmed_entities=[
+            {
+                "brand": "REATE",
+                "model": "EXO",
+                "subject_type": "EDC折刀",
+                "phrases": [],
+                "brand_aliases": [],
+            }
+        ],
+        evidence_texts=[],
+    )
+
+    assert results
+    best = results[0]
+    assert best["brand"] == "REATE"
+    assert best["brand_cn"] == "锐特"
+    assert best["brand_bilingual"] == "锐特REATE"
+    assert "锐特" in list((best.get("matched_aliases") or {}).get("brand") or [])

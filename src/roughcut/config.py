@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
+from contextvars import ContextVar
 import json
 import os
 from pathlib import Path
@@ -86,6 +88,11 @@ TRANSCRIPTION_MODEL_OPTIONS: dict[str, list[str]] = {
         "qwen3-asr-1.7b",
     ],
 }
+SEARCH_FALLBACK_PROVIDER_VALUES: tuple[str, ...] = ("openai", "anthropic", "minimax", "ollama", "model", "searxng")
+MULTIMODAL_FALLBACK_PROVIDER_VALUES: tuple[str, ...] = ("openai", "anthropic", "minimax", "ollama")
+HYBRID_REASONING_PROVIDER_VALUES: tuple[str, ...] = ("openai", "anthropic", "minimax", "ollama")
+LLM_ROUTING_MODE_VALUES: tuple[str, ...] = ("bundled", "hybrid_performance")
+HYBRID_SEARCH_MODE_VALUES: tuple[str, ...] = ("off", "entity_gated", "follow_provider")
 
 
 def resolve_heygem_shared_root(*, ensure_exists: bool = True) -> Path:
@@ -154,10 +161,17 @@ PROFILE_BINDABLE_SETTINGS: tuple[str, ...] = (
     "transcription_alignment_min_word_coverage",
     "qwen_asr_api_base_url",
     "llm_mode",
+    "llm_routing_mode",
     "reasoning_provider",
     "reasoning_model",
     "local_reasoning_model",
     "local_vision_model",
+    "hybrid_analysis_provider",
+    "hybrid_analysis_model",
+    "hybrid_analysis_search_mode",
+    "hybrid_copy_provider",
+    "hybrid_copy_model",
+    "hybrid_copy_search_mode",
     "multimodal_fallback_provider",
     "multimodal_fallback_model",
     "search_provider",
@@ -263,10 +277,17 @@ class Settings(BaseSettings):
 
     # Reasoning
     llm_mode: str = "performance"  # performance | local
+    llm_routing_mode: str = "bundled"  # bundled | hybrid_performance
     reasoning_provider: str = "minimax"  # openai | anthropic | minimax | ollama
     reasoning_model: str = "MiniMax-M2.7-highspeed"
     local_reasoning_model: str = "qwen3.5:9b"
     local_vision_model: str = ""
+    hybrid_analysis_provider: str = "openai"
+    hybrid_analysis_model: str = "gpt-5.4-mini"
+    hybrid_analysis_search_mode: str = "entity_gated"  # off | entity_gated | follow_provider
+    hybrid_copy_provider: str = "minimax"
+    hybrid_copy_model: str = "MiniMax-M2.7-highspeed"
+    hybrid_copy_search_mode: str = "follow_provider"  # off | entity_gated | follow_provider
     multimodal_fallback_provider: str = "ollama"  # local backup for visual tasks
     multimodal_fallback_model: str = ""
 
@@ -408,25 +429,38 @@ class Settings(BaseSettings):
 
     @property
     def active_reasoning_provider(self) -> str:
+        route_provider = str(_get_llm_route_override("reasoning_provider") or "").strip().lower()
+        if route_provider:
+            return route_provider
         return "ollama" if self.llm_mode == "local" else self.reasoning_provider
 
     @property
     def active_reasoning_model(self) -> str:
+        route_model = str(_get_llm_route_override("reasoning_model") or "").strip()
+        if route_model:
+            return route_model
         return self.local_reasoning_model if self.llm_mode == "local" else self.reasoning_model
 
     @property
     def active_vision_model(self) -> str:
+        route_model = str(_get_llm_route_override("vision_model") or "").strip()
+        if route_model:
+            return route_model
         if self.llm_mode == "local":
             return self.local_vision_model or self.vision_model
         return self.vision_model or self.reasoning_model
 
     @property
     def active_search_provider(self) -> str:
+        route_provider = str(_get_llm_route_override("search_provider") or "").strip().lower()
+        if route_provider:
+            return route_provider
         return self.search_provider
 
 
 _settings: Settings | None = None
 _session_secret_overrides: dict[str, Any] = {}
+_llm_route_overrides: ContextVar[dict[str, Any]] = ContextVar("roughcut_llm_route_overrides", default={})
 
 
 def canonicalize_transcription_provider_name(provider: object) -> str:
@@ -479,7 +513,7 @@ def get_settings() -> Settings:
 
 
 def load_runtime_overrides() -> dict[str, Any]:
-    legacy = _load_runtime_overrides_from_legacy_file()
+    legacy = _normalize_runtime_override_values(_load_runtime_overrides_from_legacy_file())
     legacy_persisted, legacy_secrets = _split_runtime_overrides(legacy)
     _update_session_secret_overrides(legacy_secrets)
     try:
@@ -487,9 +521,10 @@ def load_runtime_overrides() -> dict[str, Any]:
 
         payload = get_json_setting(RUNTIME_OVERRIDES_KEY, default=None)
         if isinstance(payload, dict):
-            persisted, secrets = _split_runtime_overrides(payload)
+            normalized_payload = _normalize_runtime_override_values(payload)
+            persisted, secrets = _split_runtime_overrides(normalized_payload)
             _update_session_secret_overrides(secrets)
-            if persisted != payload:
+            if persisted != normalized_payload:
                 if persisted:
                     set_json_setting(RUNTIME_OVERRIDES_KEY, persisted)
                 else:
@@ -514,7 +549,8 @@ def load_runtime_overrides() -> dict[str, Any]:
 
 
 def save_runtime_overrides(data: dict[str, Any]) -> None:
-    persisted, secrets = _split_runtime_overrides(data)
+    normalized_data = _normalize_runtime_override_values(data)
+    persisted, secrets = _split_runtime_overrides(normalized_data)
     _update_session_secret_overrides(secrets)
     try:
         from roughcut.state_store import RUNTIME_OVERRIDES_KEY, delete_setting, set_json_setting
@@ -545,7 +581,7 @@ def clear_runtime_overrides() -> None:
 
 
 def apply_runtime_overrides(updates: dict[str, Any]) -> Settings:
-    filtered_updates = _strip_env_managed_updates(updates)
+    filtered_updates = _normalize_runtime_override_values(_strip_env_managed_updates(updates))
     overrides = load_runtime_overrides()
     overrides.update(filtered_updates)
     save_runtime_overrides(overrides)
@@ -585,7 +621,7 @@ def apply_in_memory_runtime_overrides(updates: dict[str, Any] | None = None) -> 
     _apply_settings_overrides(_settings, load_runtime_overrides())
     _apply_settings_overrides(_settings, _session_secret_overrides)
     if updates:
-        _apply_settings_overrides(_settings, _strip_env_managed_updates(dict(updates)))
+        _apply_settings_overrides(_settings, _normalize_runtime_override_values(_strip_env_managed_updates(dict(updates))))
     _normalize_settings(_settings)
     return _settings
 
@@ -646,6 +682,208 @@ def _normalize_settings(settings: Settings) -> None:
         "default_job_enhancement_modes",
         _normalize_default_enhancement_modes(getattr(settings, "default_job_enhancement_modes", []) or []),
     )
+    _normalize_llm_capability_bundle_settings(settings)
+
+
+def _normalize_runtime_override_values(data: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(data)
+
+    if "llm_routing_mode" in normalized:
+        routing_mode = str(normalized.get("llm_routing_mode") or "").strip().lower()
+        normalized["llm_routing_mode"] = routing_mode if routing_mode in LLM_ROUTING_MODE_VALUES else "bundled"
+
+    if "search_provider" in normalized:
+        normalized["search_provider"] = "auto"
+
+    if "search_fallback_provider" in normalized:
+        fallback = str(normalized.get("search_fallback_provider") or "").strip().lower()
+        normalized["search_fallback_provider"] = (
+            fallback if fallback in SEARCH_FALLBACK_PROVIDER_VALUES else "searxng"
+        )
+
+    if "multimodal_fallback_provider" in normalized:
+        fallback = str(normalized.get("multimodal_fallback_provider") or "").strip().lower()
+        normalized["multimodal_fallback_provider"] = (
+            fallback if fallback in MULTIMODAL_FALLBACK_PROVIDER_VALUES else "ollama"
+        )
+
+    if "model_search_helper" in normalized:
+        normalized["model_search_helper"] = str(normalized.get("model_search_helper") or "").strip()
+
+    if "reasoning_provider" in normalized:
+        normalized["reasoning_provider"] = str(normalized.get("reasoning_provider") or "").strip().lower()
+
+    for key in ("hybrid_analysis_provider", "hybrid_copy_provider"):
+        if key in normalized:
+            provider = str(normalized.get(key) or "").strip().lower()
+            normalized[key] = provider if provider in HYBRID_REASONING_PROVIDER_VALUES else (
+                "openai" if key == "hybrid_analysis_provider" else "minimax"
+            )
+
+    for key in ("hybrid_analysis_model", "hybrid_copy_model"):
+        if key in normalized:
+            normalized[key] = str(normalized.get(key) or "").strip()
+
+    for key in ("hybrid_analysis_search_mode", "hybrid_copy_search_mode"):
+        if key in normalized:
+            search_mode = str(normalized.get(key) or "").strip().lower()
+            normalized[key] = search_mode if search_mode in HYBRID_SEARCH_MODE_VALUES else (
+                "entity_gated" if key == "hybrid_analysis_search_mode" else "follow_provider"
+            )
+
+    if "llm_mode" in normalized:
+        llm_mode = str(normalized.get("llm_mode") or "").strip().lower()
+        normalized["llm_mode"] = llm_mode if llm_mode in {"performance", "local"} else "performance"
+
+    return normalized
+
+
+def _normalize_llm_capability_bundle_settings(settings: Settings) -> None:
+    routing_mode = str(getattr(settings, "llm_routing_mode", "") or "").strip().lower()
+    if routing_mode not in LLM_ROUTING_MODE_VALUES:
+        routing_mode = "bundled"
+    object.__setattr__(settings, "llm_routing_mode", routing_mode)
+
+    analysis_provider = str(getattr(settings, "hybrid_analysis_provider", "") or "").strip().lower()
+    if analysis_provider not in HYBRID_REASONING_PROVIDER_VALUES:
+        analysis_provider = "openai"
+    object.__setattr__(settings, "hybrid_analysis_provider", analysis_provider)
+
+    copy_provider = str(getattr(settings, "hybrid_copy_provider", "") or "").strip().lower()
+    if copy_provider not in HYBRID_REASONING_PROVIDER_VALUES:
+        copy_provider = "minimax"
+    object.__setattr__(settings, "hybrid_copy_provider", copy_provider)
+
+    object.__setattr__(
+        settings,
+        "hybrid_analysis_model",
+        str(getattr(settings, "hybrid_analysis_model", "") or "").strip() or "gpt-5.4-mini",
+    )
+    object.__setattr__(
+        settings,
+        "hybrid_copy_model",
+        str(getattr(settings, "hybrid_copy_model", "") or "").strip() or "MiniMax-M2.7-highspeed",
+    )
+
+    analysis_search_mode = str(getattr(settings, "hybrid_analysis_search_mode", "") or "").strip().lower()
+    if analysis_search_mode not in HYBRID_SEARCH_MODE_VALUES:
+        analysis_search_mode = "entity_gated"
+    object.__setattr__(settings, "hybrid_analysis_search_mode", analysis_search_mode)
+
+    copy_search_mode = str(getattr(settings, "hybrid_copy_search_mode", "") or "").strip().lower()
+    if copy_search_mode not in HYBRID_SEARCH_MODE_VALUES:
+        copy_search_mode = "follow_provider"
+    object.__setattr__(settings, "hybrid_copy_search_mode", copy_search_mode)
+
+    search_fallback = str(getattr(settings, "search_fallback_provider", "") or "").strip().lower()
+    if search_fallback not in SEARCH_FALLBACK_PROVIDER_VALUES:
+        search_fallback = "searxng"
+    object.__setattr__(settings, "search_provider", "auto")
+    object.__setattr__(settings, "search_fallback_provider", search_fallback)
+
+    multimodal_fallback = str(getattr(settings, "multimodal_fallback_provider", "") or "").strip().lower()
+    if multimodal_fallback not in MULTIMODAL_FALLBACK_PROVIDER_VALUES:
+        multimodal_fallback = "ollama"
+    object.__setattr__(settings, "multimodal_fallback_provider", multimodal_fallback)
+
+
+def _get_llm_route_override(key: str) -> Any:
+    overrides = _llm_route_overrides.get({})
+    return overrides.get(key)
+
+
+def _profile_has_specific_identity(profile: dict[str, Any] | None) -> bool:
+    candidate = profile or {}
+    brand = str(candidate.get("subject_brand") or "").strip()
+    model = str(candidate.get("subject_model") or "").strip()
+    subject_type = str(candidate.get("subject_type") or "").strip()
+    if brand and model:
+        return True
+    if model and len(model) >= 3:
+        return True
+    if subject_type and all(token not in subject_type for token in ("内容", "视频", "产品", "口播", "素材")):
+        return True
+    return False
+
+
+def is_hybrid_routing_enabled(settings: Settings | None = None) -> bool:
+    current = settings or get_settings()
+    llm_mode = str(getattr(current, "llm_mode", "performance") or "performance").strip().lower()
+    routing_mode = str(getattr(current, "llm_routing_mode", "bundled") or "bundled").strip().lower()
+    return llm_mode == "performance" and routing_mode == "hybrid_performance"
+
+
+def resolve_llm_task_route(task_name: str, *, settings: Settings | None = None) -> dict[str, Any]:
+    current = settings or get_settings()
+    if not is_hybrid_routing_enabled(current):
+        return {}
+
+    normalized_task = str(task_name or "").strip().lower()
+    if normalized_task in {"subtitle", "subtitle_translation", "content_profile", "copy_verify"}:
+        return {
+            "reasoning_provider": str(getattr(current, "hybrid_analysis_provider", "openai") or "openai").strip().lower(),
+            "reasoning_model": str(getattr(current, "hybrid_analysis_model", "gpt-5.4-mini") or "gpt-5.4-mini").strip(),
+        }
+    if normalized_task == "copy":
+        return {
+            "reasoning_provider": str(getattr(current, "hybrid_copy_provider", "minimax") or "minimax").strip().lower(),
+            "reasoning_model": str(
+                getattr(current, "hybrid_copy_model", "MiniMax-M2.7-highspeed") or "MiniMax-M2.7-highspeed"
+            ).strip(),
+        }
+    return {}
+
+
+def should_enable_task_search(
+    task_name: str,
+    *,
+    default_enabled: bool,
+    profile: dict[str, Any] | None = None,
+    settings: Settings | None = None,
+) -> bool:
+    current = settings or get_settings()
+    if not default_enabled:
+        return False
+    if not is_hybrid_routing_enabled(current):
+        return default_enabled
+
+    normalized_task = str(task_name or "").strip().lower()
+    if normalized_task in {"subtitle", "subtitle_translation", "content_profile", "copy_verify"}:
+        search_mode = str(getattr(current, "hybrid_analysis_search_mode", "entity_gated") or "entity_gated").strip().lower()
+    elif normalized_task == "copy":
+        search_mode = str(getattr(current, "hybrid_copy_search_mode", "follow_provider") or "follow_provider").strip().lower()
+    else:
+        return default_enabled
+
+    if search_mode == "off":
+        return False
+    if search_mode == "follow_provider":
+        return True
+    if search_mode == "entity_gated":
+        return _profile_has_specific_identity(profile)
+    return default_enabled
+
+
+@contextmanager
+def llm_task_route(
+    task_name: str,
+    *,
+    search_enabled: bool | None = None,
+    settings: Settings | None = None,
+):
+    current = settings or get_settings()
+    overrides = dict(resolve_llm_task_route(task_name, settings=current))
+    if overrides:
+        effective_search_enabled = True if search_enabled is None else bool(search_enabled)
+        if not effective_search_enabled:
+            overrides["search_provider"] = "disabled"
+    existing = dict(_llm_route_overrides.get({}))
+    merged = {**existing, **overrides}
+    token = _llm_route_overrides.set(merged)
+    try:
+        yield
+    finally:
+        _llm_route_overrides.reset(token)
 
 
 def _split_runtime_overrides(data: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:

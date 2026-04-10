@@ -438,6 +438,8 @@ def test_seed_profile_from_text_extracts_olight_slim2_ultra_identity():
     )
 
     assert seeded["subject_brand"] == "OLIGHT"
+    assert seeded["subject_brand_cn"] == "傲雷"
+    assert seeded["subject_brand_bilingual"] == "傲雷OLIGHT"
     assert seeded["subject_model"] == "SLIM2代ULTRA版本"
     assert seeded["subject_type_candidates"] == ["EDC手电"]
     assert any("OLIGHT" in item for item in seeded["search_queries"])
@@ -447,6 +449,8 @@ def test_seed_profile_from_text_maps_leatherman_arc_asr_alias():
     seeded = _seed_profile_from_text("这把莱泽曼 ASC 工具钳主要看单手开合和钳头结构。")
 
     assert seeded["subject_brand"] == "LEATHERMAN"
+    assert seeded["subject_brand_cn"] == "莱泽曼"
+    assert seeded["subject_brand_bilingual"] == "莱泽曼LEATHERMAN"
     assert seeded["subject_model"] == "ARC"
     assert "多功能工具钳" in (seeded.get("subject_type_candidates") or [])
 
@@ -896,6 +900,8 @@ def test_build_cover_title_drops_edc_prefix_from_subject_type():
     title = build_cover_title(
         {
             "subject_brand": "REATE",
+            "subject_brand_cn": "锐特",
+            "subject_brand_bilingual": "锐特REATE",
             "subject_model": "",
             "subject_type": "EDC折刀",
             "video_theme": "折刀雕刻开箱",
@@ -904,8 +910,27 @@ def test_build_cover_title_drops_edc_prefix_from_subject_type():
         preset,
     )
 
-    assert title["top"] == "REATE"
-    assert title["main"] == "REATE折刀"
+    assert title["top"] == "锐特REATE"
+    assert title["main"] == "锐特折刀"
+
+
+def test_build_cover_title_prefers_bilingual_brand_display_for_known_foreign_brand():
+    preset = get_workflow_preset("unboxing_standard")
+    title = build_cover_title(
+        {
+            "subject_brand": "LEATHERMAN",
+            "subject_brand_cn": "莱泽曼",
+            "subject_brand_bilingual": "莱泽曼LEATHERMAN",
+            "subject_model": "ARC",
+            "subject_type": "多功能工具钳",
+            "video_theme": "产品开箱与上手体验",
+            "hook_line": "",
+        },
+        preset,
+    )
+
+    assert title["top"] == "莱泽曼LEATHERMAN"
+    assert title["main"] == "ARC"
 
 
 def test_build_cover_title_prefers_specific_ai_feature_anchor():
@@ -1084,6 +1109,25 @@ def test_build_search_queries_anchors_model_only_product_with_subject_type():
     assert "MT33 EDC折刀" in queries
     assert "MT33 折刀" in queries
     assert "MT33 开箱" not in queries
+
+
+def test_build_search_queries_preserves_english_canonical_and_adds_cn_brand_variants():
+    queries = _build_search_queries(
+        {
+            "subject_brand": "OLIGHT",
+            "subject_brand_cn": "傲雷",
+            "subject_brand_bilingual": "傲雷OLIGHT",
+            "subject_model": "SR2 Pro UV",
+            "subject_type": "EDC手电",
+            "search_queries": [],
+        },
+        "SR2 Pro UV.mp4",
+        transcript_excerpt="[12.0-18.0] 今天看看 OLIGHT SR2 Pro UV 这支紫外手电。",
+    )
+
+    assert "OLIGHT SR2 Pro UV" in queries
+    assert "傲雷 SR2 Pro UV" in queries
+    assert "傲雷OLIGHT SR2 Pro UV" in queries
 
 
 def test_ensure_search_queries_rebuilds_deduped_fallback_queries_from_empty_search_query_list():
@@ -1467,6 +1511,277 @@ def test_apply_identity_review_guard_rewrites_conflicting_narrative_from_identit
     assert "LEATHERMAN" not in guarded["video_theme"]
     assert all("LEATHERMAN" not in query for query in guarded["search_queries"])
     assert any("KissPod" in query for query in guarded["search_queries"])
+
+
+def test_apply_identity_review_guard_backfills_missing_identity_from_verification_evidence():
+    guarded = apply_identity_review_guard(
+        {
+            "subject_brand": "",
+            "subject_model": "",
+            "subject_type": "",
+            "summary": "",
+            "verification_evidence": {
+                "entity_catalog_candidates": [
+                    {
+                        "brand": "狐蝠工业",
+                        "model": "FXX1小副包",
+                        "primary_subject": "狐蝠工业 FXX1小副包",
+                        "matched_fields": ["video_evidence", "brand_alias", "model_alias"],
+                        "matched_evidence_texts": ["这期鸿福 F叉二一小副包做个开箱测评。"],
+                        "evidence_strength": "strong",
+                        "support_score": 0.88,
+                        "confidence": 0.91,
+                    }
+                ]
+            },
+            "transcript_excerpt": "这期鸿福 F叉二一小副包做个开箱测评，重点看分仓和挂点。",
+        },
+        subtitle_items=[
+            {"text_raw": "这期鸿福 F叉二一小副包做个开箱测评。"},
+        ],
+        source_name="demo.mp4",
+    )
+
+    assert guarded["subject_brand"] == "狐蝠工业"
+    assert guarded["subject_model"] == "FXX1小副包"
+    assert "FXX1小副包" in guarded["summary"]
+    if "verification_gate" in guarded:
+        assert guarded["verification_gate"].get("backfilled_fields") in (["subject_brand", "subject_model"], [])
+
+
+def test_apply_identity_review_guard_does_not_override_existing_identity_from_verification_candidate():
+    guarded = apply_identity_review_guard(
+        {
+            "subject_brand": "LuckyKiss",
+            "subject_model": "KissPod",
+            "verification_evidence": {
+                "entity_catalog_candidates": [
+                    {
+                        "brand": "狐蝠工业",
+                        "model": "FXX1小副包",
+                        "primary_subject": "狐蝠工业 FXX1小副包",
+                        "matched_fields": ["video_evidence", "brand_alias", "model_alias"],
+                        "matched_evidence_texts": ["这期鸿福 F叉二一小副包做个开箱测评。"],
+                        "evidence_strength": "strong",
+                        "support_score": 0.88,
+                        "confidence": 0.91,
+                    }
+                ]
+            },
+            "transcript_excerpt": "今天给大家介绍 LuckyKiss 的 KissPod 益生菌含片。",
+        },
+        subtitle_items=[
+            {"text_raw": "今天给大家介绍 LuckyKiss 的 KissPod 益生菌含片。"},
+        ],
+        source_name="demo.mp4",
+    )
+
+    assert guarded["subject_brand"] == "LuckyKiss"
+    assert guarded["subject_model"] == "KissPod"
+    assert "verification_gate" not in guarded or not guarded["verification_gate"].get("backfilled_fields")
+
+
+def test_apply_identity_review_guard_accepts_builtin_catalog_candidate_with_supporting_keywords():
+    guarded = apply_identity_review_guard(
+        {
+            "subject_brand": "",
+            "subject_model": "F12",
+            "subject_type": "",
+            "summary": "",
+            "verification_evidence": {
+                "entity_catalog_candidates": [
+                    {
+                        "brand": "NexTool",
+                        "model": "F12",
+                        "primary_subject": "NexTool F12",
+                        "source_type": "builtin_entity_catalog",
+                        "matched_fields": ["brand_alias", "supporting_keyword"],
+                        "matched_aliases": {"brand": ["纳拓"]},
+                        "matched_keywords": ["工具钳", "EDC"],
+                        "matched_evidence_texts": [],
+                        "evidence_strength": "strong",
+                        "support_score": 0.82,
+                        "confidence": 0.88,
+                    }
+                ]
+            },
+            "transcript_excerpt": "这次聊纳拓 F12 这把工具钳，重点看口袋 EDC 和剪刀功能。",
+        },
+        subtitle_items=[
+            {"text_raw": "这次聊纳拓 F12 这把工具钳，重点看口袋 EDC 和剪刀功能。"},
+        ],
+        source_name="demo.mp4",
+    )
+
+    assert guarded["subject_brand"] == "NexTool"
+    assert guarded["subject_model"] == "F12"
+
+
+def test_apply_identity_review_guard_backfills_brand_when_model_family_matches_candidate():
+    guarded = apply_identity_review_guard(
+        {
+            "subject_brand": "",
+            "subject_model": "FXX1",
+            "subject_type": "狐蝠工业 FXX1小副包",
+            "summary": "",
+            "verification_evidence": {
+                "entity_catalog_candidates": [
+                    {
+                        "brand": "狐蝠工业",
+                        "model": "FXX1小副包",
+                        "primary_subject": "狐蝠工业 FXX1小副包",
+                        "source_type": "builtin_entity_catalog",
+                        "matched_fields": ["brand_alias", "model_alias", "supporting_keyword"],
+                        "matched_aliases": {"brand": ["鸿福"], "model": ["F叉二一小副包"]},
+                        "matched_keywords": ["副包", "分仓"],
+                        "matched_evidence_texts": [],
+                        "evidence_strength": "strong",
+                        "support_score": 0.86,
+                        "confidence": 0.9,
+                    }
+                ]
+            },
+            "transcript_excerpt": "这期鸿福 F叉二一小副包做个开箱测评，重点看分仓和挂点。",
+        },
+        subtitle_items=[
+            {"text_raw": "这期鸿福 F叉二一小副包做个开箱测评，重点看分仓和挂点。"},
+        ],
+        source_name="demo.mp4",
+    )
+
+    assert guarded["subject_brand"] == "狐蝠工业"
+    assert guarded["subject_model"] in {"FXX1", "FXX1小副包"}
+
+
+def test_apply_identity_review_guard_content_understanding_branch_backfills_brand_from_mapped_model():
+    guarded = apply_identity_review_guard(
+        {
+            "content_understanding": {"semantic_facts": {}},
+            "subject_brand": "",
+            "subject_model": "FXX1小副包",
+            "subject_type": "EDC副包/收纳包",
+            "summary": "这条视频主要围绕FXX1小副包展开，内容方向偏产品开箱与上手体验，适合后续做搜索校验、字幕纠错和剪辑包装。",
+            "verification_evidence": {
+                "entity_catalog_candidates": [
+                    {
+                        "brand": "狐蝠工业",
+                        "model": "FXX1小副包",
+                        "subject_type": "机能副包",
+                        "primary_subject": "狐蝠工业 FXX1小副包",
+                        "source_type": "builtin_entity_catalog",
+                        "matched_fields": ["brand_alias", "model_alias", "supporting_keyword"],
+                        "matched_aliases": {"brand": ["鸿福"], "model": ["FXX1"]},
+                        "matched_keywords": ["副包", "分仓", "收纳"],
+                        "matched_evidence_texts": [],
+                        "evidence_strength": "strong",
+                        "support_score": 0.88,
+                        "confidence": 0.91,
+                    }
+                ]
+            },
+            "transcript_excerpt": "这期鸿福 FXX1 小副包做个开箱测评，重点看分仓和收纳能力。",
+        },
+        subtitle_items=[
+            {"text_raw": "这期鸿福 FXX1 小副包做个开箱测评，重点看分仓和收纳能力。"},
+        ],
+        source_name="img_0025.mov",
+    )
+
+    assert guarded["subject_brand"] == "狐蝠工业"
+    assert guarded["subject_model"] == "FXX1小副包"
+    assert guarded["subject_type"] == "机能副包"
+
+
+def test_apply_identity_review_guard_overrides_wrong_brand_when_model_strongly_maps_to_candidate():
+    guarded = apply_identity_review_guard(
+        {
+            "content_understanding": {"semantic_facts": {}},
+            "subject_brand": "LEATHERMAN",
+            "subject_model": "FXX1小副包",
+            "subject_type": "LEATHERMAN FXX1小副包",
+            "summary": "这条视频主要围绕FXX1小副包展开，内容方向偏产品开箱与上手体验，适合后续做搜索校验、字幕纠错和剪辑包装。",
+            "verification_evidence": {
+                "entity_catalog_candidates": [
+                    {
+                        "brand": "狐蝠工业",
+                        "model": "FXX1",
+                        "subject_type": "机能副包",
+                        "primary_subject": "狐蝠工业 FXX1",
+                        "source_type": "glossary_entity_candidate",
+                        "matched_fields": ["brand_alias", "model_alias", "video_evidence"],
+                        "matched_aliases": {"brand": ["鸿福"], "model": ["FXX1"]},
+                        "matched_evidence_texts": ["这期鸿福 FXX1 小副包做个开箱测评。"],
+                        "evidence_strength": "moderate",
+                        "support_score": 0.76,
+                        "confidence": 0.8,
+                    }
+                ]
+            },
+            "transcript_excerpt": "这期鸿福 FXX1 小副包做个开箱测评，重点看分仓和收纳能力。",
+        },
+        subtitle_items=[
+            {"text_raw": "这期鸿福 FXX1 小副包做个开箱测评，重点看分仓和收纳能力。"},
+        ],
+        source_name="img_0025.mov",
+    )
+
+    assert guarded["subject_brand"] == "狐蝠工业"
+    assert guarded["subject_type"] == "机能副包"
+
+
+def test_apply_identity_review_guard_prefers_model_aligned_candidate_for_multi_subject_video():
+    guarded = apply_identity_review_guard(
+        {
+            "content_understanding": {"semantic_facts": {}},
+            "subject_brand": "",
+            "subject_model": "F12",
+            "subject_type": "NEXTOOL小水手S11 PRO多功能工具钳",
+            "video_theme": "推荐两款适合日常随身携带的NEXTOOL实用EDC工具",
+            "summary": "这条视频主要围绕F12展开，内容方向偏推荐两款适合日常随身携带的NEXTOOL实用EDC工具，适合后续做搜索校验、字幕纠错和剪辑包装。",
+            "verification_evidence": {
+                "entity_catalog_candidates": [
+                    {
+                        "brand": "NexTool",
+                        "model": "S11 PRO",
+                        "subject_type": "多功能工具",
+                        "primary_subject": "NexTool S11 PRO",
+                        "source_type": "builtin_entity_catalog",
+                        "matched_fields": ["brand_alias", "model_alias", "supporting_keyword"],
+                        "matched_aliases": {"brand": ["纳拓"], "model": ["小水手S11 PRO"]},
+                        "matched_keywords": ["EDC", "小工具"],
+                        "matched_evidence_texts": [],
+                        "evidence_strength": "strong",
+                        "support_score": 0.84,
+                        "confidence": 0.87,
+                    },
+                    {
+                        "brand": "NexTool",
+                        "model": "F12",
+                        "subject_type": "多功能工具钳",
+                        "primary_subject": "NexTool F12",
+                        "source_type": "builtin_entity_catalog",
+                        "matched_fields": ["brand_alias", "model_alias", "supporting_keyword"],
+                        "matched_aliases": {"brand": ["纳拓"], "model": ["F幺二"]},
+                        "matched_keywords": ["工具钳", "剪刀", "EDC"],
+                        "matched_evidence_texts": [],
+                        "evidence_strength": "strong",
+                        "support_score": 0.82,
+                        "confidence": 0.86,
+                    },
+                ]
+            },
+            "transcript_excerpt": "这次重点聊纳拓 F12 这把工具钳，同时也带一下小水手 S11 PRO 的日常用途。",
+        },
+        subtitle_items=[
+            {"text_raw": "这次重点聊纳拓 F12 这把工具钳，同时也带一下小水手 S11 PRO 的日常用途。"},
+        ],
+        source_name="vid_20260112_123927.mp4",
+    )
+
+    assert guarded["subject_brand"] == "NexTool"
+    assert guarded["subject_model"] == "F12"
+    assert guarded["subject_type"] == "多功能工具钳"
+    assert "S11" not in guarded["subject_type"]
 
 
 def test_apply_identity_review_guard_rebuilds_queries_from_identity_extraction_when_current_queries_conflict():
@@ -3552,7 +3867,7 @@ async def test_enrich_content_profile_preserves_confirmed_user_feedback(monkeypa
     assert result["summary"] == "这期是 REATE 折刀雕刻开箱，不是工具钳节目。"
     assert result["engagement_question"] == "这把 REATE 折刀你最想先看雕刻细节还是开合手感？"
     assert any("REATE" in item for item in result["search_queries"])
-    assert result["cover_title"]["top"] == "REATE"
+    assert result["cover_title"]["top"] == "锐特REATE"
 
 
 @pytest.mark.asyncio

@@ -560,6 +560,33 @@ def test_patch_config_clamps_quality_auto_rerun_settings(tmp_path, monkeypatch):
     assert cfg.qwen_asr_api_base_url
 
 
+def test_patch_config_forces_search_provider_to_auto_bundle(tmp_path, monkeypatch):
+    import roughcut.api.config as config_api
+    import roughcut.config as config_mod
+
+    monkeypatch.setattr(config_api, "_CONFIG_FILE", tmp_path / "roughcut_config.json")
+    monkeypatch.setattr(config_mod, "_OVERRIDES_FILE", tmp_path / "roughcut_config.json")
+    config_mod._settings = None
+
+    cfg = patch_config(
+        ConfigPatch(
+            reasoning_provider="openai",
+            search_provider="openai",
+            search_fallback_provider="model",
+            model_search_helper="  helper-model  ",
+        )
+    )
+
+    persisted = config_mod.load_runtime_overrides()
+
+    assert cfg.reasoning_provider == "openai"
+    assert cfg.search_provider == "auto"
+    assert cfg.search_fallback_provider == "model"
+    assert cfg.model_search_helper == "helper-model"
+    assert persisted["search_provider"] == "auto"
+    assert persisted["search_fallback_provider"] == "model"
+
+
 def test_patch_config_accepts_creative_provider_fields(tmp_path, monkeypatch):
     import roughcut.api.config as config_api
     import roughcut.config as config_mod

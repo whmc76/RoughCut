@@ -183,7 +183,7 @@ describe("ModelSettingsPanel", () => {
     expect(screen.getByLabelText("本地视觉模型")).toHaveValue("qwen2.5vl:7b");
     expect(screen.getAllByText("http://127.0.0.1:11434").length).toBeGreaterThan(0);
     expect(screen.queryByLabelText("推理 Provider")).not.toBeInTheDocument();
-    expect(screen.queryByLabelText("视觉回退 Provider")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("视觉兜底 Provider")).not.toBeInTheDocument();
   });
 
   it("shows active provider cards and runs a real connectivity check action", async () => {
@@ -208,5 +208,29 @@ describe("ModelSettingsPanel", () => {
 
     await waitFor(() => expect(api.checkProvider).toHaveBeenCalledWith("openai"));
     expect(screen.getByText((content) => content.includes("OpenAI models endpoint reachable"))).toBeInTheDocument();
+  });
+
+  it("locks primary search to the active reasoning provider and only exposes fallback controls", async () => {
+    const form: SettingsForm = {
+      transcription_provider: "openai",
+      transcription_model: "gpt-4o-transcribe",
+      transcription_dialect: "mandarin",
+      llm_mode: "performance",
+      reasoning_provider: "openai",
+      reasoning_model: "gpt-5.4",
+      multimodal_fallback_provider: "ollama",
+      multimodal_fallback_model: "qwen2.5vl:7b",
+      search_provider: "auto",
+      search_fallback_provider: "model",
+      model_search_helper: "helper-model",
+    };
+
+    renderPanel(form);
+
+    expect(screen.queryByLabelText("搜索 Provider")).not.toBeInTheDocument();
+    expect(screen.getByText("主搜索始终跟随当前推理 Provider：OpenAI。")).toBeInTheDocument();
+    expect(screen.getByLabelText("搜索回退 Provider")).toHaveValue("model");
+    expect(screen.getByLabelText("搜索辅助模型")).toHaveValue("helper-model");
+    expect(screen.getByText("主视觉理解始终跟随当前推理 Provider，只有兜底链路可单独配置。")).toBeInTheDocument();
   });
 });

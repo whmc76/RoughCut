@@ -138,6 +138,9 @@ def get_search_provider():
     settings = get_settings()
     provider = settings.active_search_provider.lower()
 
+    if provider == "disabled":
+        raise RuntimeError("Search disabled for current task route")
+
     if provider == "auto":
         native_provider = settings.active_reasoning_provider.lower()
         try:

@@ -10,9 +10,17 @@ from pathlib import Path
 from threading import Lock
 
 import httpx
+import openai
 
 from roughcut.config import get_settings
 from roughcut.providers.auth import resolve_credential
+from roughcut.providers.openai_responses import (
+    build_multimodal_input,
+    build_reasoning_options,
+    build_text_options,
+    extract_response_output_text,
+    extract_response_usage,
+)
 from roughcut.providers.reasoning.base import extract_json_text
 from roughcut.usage import record_usage_event
 
@@ -226,7 +234,40 @@ async def _complete_once_unthrottled(
         )
         return _finalize_text(data.get("message", {}).get("content", ""), json_mode=json_mode)
 
-    if provider in {"openai", "minimax"}:
+    if provider == "openai":
+        client = openai.AsyncOpenAI(
+            api_key=resolve_credential(
+                mode=settings.openai_auth_mode,
+                direct_value=settings.openai_api_key,
+                helper_command=settings.openai_api_key_helper,
+                provider_name="OpenAI",
+            ),
+            base_url=settings.openai_base_url.rstrip("/"),
+        )
+        data_urls = [f"data:image/jpeg;base64,{image}" for image in images_b64]
+        payload: dict[str, object] = {
+            "model": model,
+            "input": build_multimodal_input(prompt, data_urls),
+            "temperature": temperature,
+            "max_output_tokens": max_tokens,
+        }
+        text_options = build_text_options(json_mode=json_mode)
+        if text_options:
+            payload["text"] = text_options
+        reasoning_options = build_reasoning_options(model, effort="medium")
+        if reasoning_options:
+            payload["reasoning"] = reasoning_options
+        response = await client.responses.create(**payload)
+        _clear_provider_cooldown(provider)
+        await record_usage_event(
+            provider=provider,
+            model=str(response.model or model),
+            usage=extract_response_usage(response),
+            kind="multimodal",
+        )
+        return _finalize_text(extract_response_output_text(response), json_mode=json_mode)
+
+    if provider == "minimax":
         base_url, token = _resolve_openai_compatible(provider)
         content: list[dict] = [{"type": "text", "text": prompt}]
         for image in images_b64:

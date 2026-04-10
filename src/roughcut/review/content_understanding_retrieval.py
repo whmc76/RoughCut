@@ -10,6 +10,13 @@ from sqlalchemy.orm import selectinload
 
 from roughcut.db.models import ContentProfileEntity
 from roughcut.review.domain_glossaries import list_builtin_glossary_packs
+from roughcut.review.entity_catalog import list_builtin_entity_catalog
+
+_BRAND_CN_DISPLAY_MAP: dict[str, str] = {
+    "LEATHERMAN": "莱泽曼",
+    "REATE": "锐特",
+    "OLIGHT": "傲雷",
+}
 
 
 def _normalize_text(value: object) -> str:
@@ -23,9 +30,18 @@ def _tokenize(value: object) -> set[str]:
     return {token for token in re.findall(r"[A-Za-z0-9]+|[\u4e00-\u9fff]+", text) if token}
 
 
+def _candidate_specificity_score(candidate: dict[str, Any]) -> int:
+    model = str(candidate.get("model") or "").strip()
+    subject_type = str(candidate.get("subject_type") or "").strip()
+    primary_subject = str(candidate.get("primary_subject") or "").strip()
+    return len(model) * 2 + len(subject_type) + len(primary_subject)
+
+
 @dataclass(frozen=True)
 class EntityCatalogCandidate:
     brand: str = ""
+    brand_cn: str = ""
+    brand_bilingual: str = ""
     model: str = ""
     primary_subject: str = ""
     subject_type: str = ""
@@ -35,10 +51,75 @@ class EntityCatalogCandidate:
     matched_queries: list[str] | None = None
     matched_evidence_texts: list[str] | None = None
     matched_aliases: dict[str, list[str]] | None = None
+    matched_keywords: list[str] | None = None
     matched_fields: list[str] | None = None
     evidence_strength: str = "weak"
     support_score: float = 0.0
     confidence: float = 0.0
+
+
+def _brand_cn_display_name(brand: str, aliases: list[str] | None = None) -> str:
+    text = str(brand or "").strip()
+    if not text:
+        return ""
+    mapped = str(_BRAND_CN_DISPLAY_MAP.get(text) or "").strip()
+    if mapped:
+        return mapped
+    if re.search(r"[\u4e00-\u9fff]", text):
+        return text
+    chinese_aliases = [
+        str(alias).strip()
+        for alias in list(aliases or [])
+        if re.search(r"[\u4e00-\u9fff]", str(alias or "").strip())
+    ]
+    if chinese_aliases:
+        chinese_aliases.sort(key=len, reverse=True)
+        return chinese_aliases[0]
+    return ""
+
+
+def _brand_bilingual_display_name(brand: str, aliases: list[str] | None = None) -> str:
+    text = str(brand or "").strip()
+    if not text:
+        return ""
+    if re.search(r"[\u4e00-\u9fff]", text) and re.search(r"[A-Za-z]", text):
+        return "".join(text.split())
+    cn_name = _brand_cn_display_name(text, aliases=aliases)
+    if cn_name and cn_name != text and re.search(r"[A-Za-z]", text):
+        return f"{cn_name}{text}"
+    return text
+
+
+def _enrich_brand_aliases(brand: str, aliases: list[str] | None = None) -> list[str]:
+    enriched = [str(alias).strip() for alias in list(aliases or []) if str(alias).strip()]
+    cn_name = _brand_cn_display_name(brand, aliases=enriched)
+    bilingual = _brand_bilingual_display_name(brand, aliases=enriched)
+    for candidate in (cn_name, bilingual):
+        normalized = str(candidate or "").strip()
+        if normalized and normalized != str(brand or "").strip():
+            enriched.append(normalized)
+    return list(dict.fromkeys(enriched))
+
+
+def _enrich_candidate_phrases(
+    *,
+    brand: str,
+    brand_aliases: list[str],
+    model: str,
+    subject_type: str,
+    phrases: list[str] | None = None,
+) -> list[str]:
+    enriched = [str(value).strip() for value in list(phrases or []) if str(value).strip()]
+    localized_brands = [str(value).strip() for value in [*brand_aliases] if str(value).strip()]
+    for localized_brand in localized_brands:
+        for candidate in (
+            f"{localized_brand} {model}".strip() if model else "",
+            f"{localized_brand} {subject_type}".strip() if subject_type else "",
+        ):
+            normalized = str(candidate or "").strip()
+            if normalized:
+                enriched.append(normalized)
+    return list(dict.fromkeys(enriched))
 
 
 async def search_confirmed_content_entities(
@@ -66,6 +147,7 @@ async def search_confirmed_content_entities(
     entities = result.scalars().all()
     raw_candidates = _build_graph_candidates(entities)
     raw_candidates.extend(_build_confirmed_entity_candidates(confirmed_entities))
+    raw_candidates.extend(_build_builtin_catalog_candidates(subject_domain=subject_domain))
 
     glossary_library = _collect_glossary_terms(glossary_terms, subject_domain=subject_domain)
     glossary_hits = _match_glossary_terms(
@@ -102,6 +184,7 @@ async def search_confirmed_content_entities(
             -float(item.get("support_score") or 0.0),
             -len(item.get("matched_evidence_texts") or []),
             -len(item.get("matched_queries") or []),
+            -_candidate_specificity_score(item),
             item.get("primary_subject") or "",
             item.get("brand") or "",
             item.get("model") or "",
@@ -131,15 +214,28 @@ def _build_graph_candidates(entities: list[ContentProfileEntity]) -> list[dict[s
                 brand_aliases.append(alias_value)
             elif str(alias.field_name or "").strip() == "subject_model":
                 model_aliases.append(alias_value)
-        primary_subject = _primary_subject_for_entity(entity.brand, entity.model, entity.subject_type)
+        brand = str(entity.brand or "").strip()
+        model = str(entity.model or "").strip()
+        subject_type = str(entity.subject_type or "").strip()
+        brand_aliases = _enrich_brand_aliases(brand, brand_aliases)
+        primary_subject = _primary_subject_for_entity(brand, model, subject_type)
+        phrases = _enrich_candidate_phrases(
+            brand=brand,
+            brand_aliases=brand_aliases,
+            model=model,
+            subject_type=subject_type,
+            phrases=[item for item in [primary_subject, f"{brand} {model}".strip(), model] if str(item).strip()],
+        )
         candidates.append(
             {
-                "brand": str(entity.brand or "").strip(),
-                "model": str(entity.model or "").strip(),
+                "brand": brand,
+                "brand_cn": _brand_cn_display_name(brand, aliases=brand_aliases),
+                "brand_bilingual": _brand_bilingual_display_name(brand, aliases=brand_aliases),
+                "model": model,
                 "primary_subject": primary_subject,
-                "subject_type": str(entity.subject_type or "").strip(),
+                "subject_type": subject_type,
                 "subject_domain": str(entity.subject_domain or "").strip(),
-                "phrases": [item for item in [primary_subject, f"{entity.brand} {entity.model}".strip(), entity.model] if str(item).strip()],
+                "phrases": phrases,
                 "brand_aliases": brand_aliases,
                 "model_aliases": model_aliases,
                 "source_type": "confirmed_entity",
@@ -157,19 +253,77 @@ def _build_confirmed_entity_candidates(confirmed_entities: list[dict[str, Any]] 
         brand = str(item.get("brand") or "").strip()
         model = str(item.get("model") or "").strip()
         subject_type = str(item.get("subject_type") or "").strip()
+        brand_aliases = _enrich_brand_aliases(
+            brand,
+            [str(value).strip() for value in list(item.get("brand_aliases") or []) if str(value).strip()],
+        )
         primary_subject = _primary_subject_for_entity(brand, model, subject_type)
         candidates.append(
             {
                 "brand": brand,
+                "brand_cn": _brand_cn_display_name(brand, aliases=brand_aliases),
+                "brand_bilingual": _brand_bilingual_display_name(brand, aliases=brand_aliases),
                 "model": model,
                 "primary_subject": primary_subject,
                 "subject_type": subject_type,
                 "subject_domain": str(item.get("subject_domain") or "").strip(),
-                "phrases": [str(value).strip() for value in list(item.get("phrases") or []) if str(value).strip()],
-                "brand_aliases": [str(value).strip() for value in list(item.get("brand_aliases") or []) if str(value).strip()],
+                "phrases": _enrich_candidate_phrases(
+                    brand=brand,
+                    brand_aliases=brand_aliases,
+                    model=model,
+                    subject_type=subject_type,
+                    phrases=[str(value).strip() for value in list(item.get("phrases") or []) if str(value).strip()],
+                ),
+                "brand_aliases": brand_aliases,
                 "model_aliases": _normalize_model_aliases(item.get("model_aliases")),
                 "source_type": "memory_confirmed_entity",
                 "source_origins": ["content_profile_memory"],
+            }
+        )
+    return candidates
+
+
+def _build_builtin_catalog_candidates(*, subject_domain: str | None) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    for item in list_builtin_entity_catalog(subject_domain=subject_domain):
+        if not isinstance(item, dict):
+            continue
+        brand = str(item.get("brand") or "").strip()
+        model = str(item.get("model") or "").strip()
+        subject_type = str(item.get("subject_type") or "").strip()
+        brand_aliases = _enrich_brand_aliases(
+            brand,
+            [str(value).strip() for value in list(item.get("brand_aliases") or []) if str(value).strip()],
+        )
+        primary_subject = _primary_subject_for_entity(brand, model, subject_type)
+        phrases = [str(value).strip() for value in list(item.get("phrases") or []) if str(value).strip()]
+        if primary_subject and primary_subject not in phrases:
+            phrases.insert(0, primary_subject)
+        combined = f"{brand} {model}".strip()
+        if combined and combined not in phrases:
+            phrases.insert(0, combined)
+        phrases = _enrich_candidate_phrases(
+            brand=brand,
+            brand_aliases=brand_aliases,
+            model=model,
+            subject_type=subject_type,
+            phrases=phrases,
+        )
+        candidates.append(
+            {
+                "brand": brand,
+                "brand_cn": _brand_cn_display_name(brand, aliases=brand_aliases),
+                "brand_bilingual": _brand_bilingual_display_name(brand, aliases=brand_aliases),
+                "model": model,
+                "primary_subject": primary_subject,
+                "subject_type": subject_type,
+                "subject_domain": str(item.get("subject_domain") or "").strip(),
+                "phrases": phrases,
+                "brand_aliases": brand_aliases,
+                "model_aliases": [str(value).strip() for value in list(item.get("model_aliases") or []) if str(value).strip()],
+                "supporting_keywords": [str(value).strip() for value in list(item.get("supporting_keywords") or []) if str(value).strip()],
+                "source_type": str(item.get("source_type") or "builtin_entity_catalog"),
+                "source_origins": ["builtin_entity_catalog"],
             }
         )
     return candidates
@@ -275,6 +429,8 @@ def _score_entity_candidate(
     glossary_hits: dict[str, dict[str, Any]],
 ) -> dict[str, Any] | None:
     brand = str(candidate.get("brand") or "").strip()
+    brand_cn = str(candidate.get("brand_cn") or "").strip()
+    brand_bilingual = str(candidate.get("brand_bilingual") or "").strip()
     model = str(candidate.get("model") or "").strip()
     subject_type = str(candidate.get("subject_type") or "").strip()
     subject_domain_value = str(candidate.get("subject_domain") or "").strip()
@@ -282,7 +438,8 @@ def _score_entity_candidate(
     phrases = [str(item).strip() for item in list(candidate.get("phrases") or []) if str(item).strip()]
     brand_aliases = [str(item).strip() for item in list(candidate.get("brand_aliases") or []) if str(item).strip()]
     model_aliases = [str(item).strip() for item in list(candidate.get("model_aliases") or []) if str(item).strip()]
-    searchable_parts = [brand, model, subject_type, primary_subject, *phrases, *brand_aliases, *model_aliases]
+    supporting_keywords = [str(item).strip() for item in list(candidate.get("supporting_keywords") or []) if str(item).strip()]
+    searchable_parts = [brand, brand_cn, brand_bilingual, model, subject_type, primary_subject, *phrases, *brand_aliases, *model_aliases]
     searchable_tokens = set().union(*(_tokenize(part) for part in searchable_parts if _normalize_text(part)))
     searchable_text = " ".join(_normalize_text(part) for part in searchable_parts if _normalize_text(part))
     if not searchable_tokens and not searchable_text:
@@ -307,6 +464,11 @@ def _score_entity_candidate(
         "brand": [alias for alias in brand_aliases if _alias_hits_fragments(alias, evidence_texts, search_queries)],
         "model": [alias for alias in model_aliases if _alias_hits_fragments(alias, evidence_texts, search_queries)],
     }
+    matched_keywords = [
+        keyword
+        for keyword in supporting_keywords
+        if _alias_hits_fragments(keyword, evidence_texts, search_queries)
+    ]
     if brand and brand in glossary_hits["brands"]:
         matched_aliases["brand"].extend(glossary_hits["brands"][brand]["matched_aliases"])
     if model and model in glossary_hits["models"]:
@@ -320,7 +482,14 @@ def _score_entity_candidate(
     query_score = min(0.3, 0.08 * len(matched_queries))
     evidence_score = min(0.35, 0.1 * len(matched_evidence_texts))
     alias_score = min(0.2, 0.06 * sum(len(value) for value in matched_aliases.values()))
-    source_bonus = 0.18 if "entity_graph" in list(candidate.get("source_origins") or []) else 0.14
+    keyword_score = min(0.15, 0.04 * len(matched_keywords))
+    source_origins = list(candidate.get("source_origins") or [])
+    if "entity_graph" in source_origins:
+        source_bonus = 0.18
+    elif "builtin_entity_catalog" in source_origins:
+        source_bonus = 0.16
+    else:
+        source_bonus = 0.14
     domain_bonus = 0.08 if subject_domain and subject_domain_value and subject_domain_value == str(subject_domain).strip() else 0.0
     exact_bonus = 0.0
     for fragment in [*search_queries, *evidence_texts]:
@@ -331,7 +500,10 @@ def _score_entity_candidate(
             break
         if primary_subject and _normalize_text(primary_subject) in normalized_fragment:
             exact_bonus = max(exact_bonus, 0.14)
-    support_score = min(0.99, source_bonus + query_score + evidence_score + alias_score + domain_bonus + exact_bonus)
+    support_score = min(
+        0.99,
+        source_bonus + query_score + evidence_score + alias_score + keyword_score + domain_bonus + exact_bonus,
+    )
     if support_score < 0.18:
         return None
 
@@ -344,12 +516,16 @@ def _score_entity_candidate(
         matched_fields.append("brand_alias")
     if matched_aliases.get("model"):
         matched_fields.append("model_alias")
+    if matched_keywords:
+        matched_fields.append("supporting_keyword")
     if subject_domain and subject_domain_value == str(subject_domain).strip():
         matched_fields.append("subject_domain")
 
     evidence_strength = "strong" if support_score >= 0.78 else "moderate" if support_score >= 0.48 else "weak"
     payload = EntityCatalogCandidate(
         brand=brand,
+        brand_cn=brand_cn,
+        brand_bilingual=brand_bilingual,
         model=model,
         primary_subject=primary_subject,
         subject_type=subject_type,
@@ -359,6 +535,7 @@ def _score_entity_candidate(
         matched_queries=list(dict.fromkeys(matched_queries)),
         matched_evidence_texts=list(dict.fromkeys(matched_evidence_texts))[:6],
         matched_aliases=matched_aliases,
+        matched_keywords=list(dict.fromkeys(matched_keywords)),
         matched_fields=matched_fields,
         evidence_strength=evidence_strength,
         support_score=round(support_score, 3),
@@ -451,6 +628,8 @@ def _build_glossary_only_candidates(
             support_score += 0.12
         payload = EntityCatalogCandidate(
             brand=brand,
+            brand_cn=_brand_cn_display_name(brand, aliases=list(brand_payload.get("matched_aliases") or [])),
+            brand_bilingual=_brand_bilingual_display_name(brand, aliases=list(brand_payload.get("matched_aliases") or [])),
             model=model,
             primary_subject=_primary_subject_for_entity(brand, model, ""),
             subject_type="",
@@ -483,6 +662,9 @@ def _merge_candidate(candidate_map: dict[tuple[str, str, str, str], dict[str, An
     for field_name in ("matched_queries", "matched_evidence_texts", "matched_fields", "source_origins"):
         merged = list(dict.fromkeys([*list(existing.get(field_name) or []), *list(candidate.get(field_name) or [])]))
         existing[field_name] = merged
+    existing["matched_keywords"] = list(
+        dict.fromkeys([*list(existing.get("matched_keywords") or []), *list(candidate.get("matched_keywords") or [])])
+    )
     merged_aliases: dict[str, list[str]] = {}
     for field_name in ("brand", "model"):
         merged_aliases[field_name] = list(

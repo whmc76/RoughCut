@@ -22,7 +22,7 @@ from typing import Any
 from sqlalchemy import select
 
 from roughcut.avatar import list_avatar_material_profiles
-from roughcut.config import get_settings
+from roughcut.config import get_settings, llm_task_route, should_enable_task_search
 from roughcut.creative import (
     ai_director_mode_enabled,
     auto_review_mode_enabled,
@@ -71,8 +71,9 @@ from roughcut.packaging.library import (
 )
 from roughcut.providers.factory import get_avatar_provider, get_reasoning_provider, get_voice_provider
 from roughcut.providers.reasoning.base import Message
-from roughcut.pipeline.quality import _compute_subtitle_sync_check
+from roughcut.pipeline.quality import _compute_subtitle_sync_check, evaluate_profile_identity_gate
 from roughcut.review.content_profile import (
+    _build_conservative_identity_summary,
     apply_content_profile_feedback,
     apply_identity_review_guard,
     assess_content_profile_automation,
@@ -92,7 +93,6 @@ from roughcut.review.downstream_context import (
 from roughcut.review.domain_glossaries import (
     _CANONICAL_DOMAIN_SOURCES,
     _DOMAIN_COMPATIBILITY,
-    _WORKFLOW_TEMPLATE_DOMAINS,
     detect_glossary_domains,
     filter_scoped_glossary_terms,
     merge_glossary_terms,
@@ -192,15 +192,9 @@ _SOURCE_NAME_SEQUENCE_RE = re.compile(r"(?P<prefix>[A-Za-z]+)[-_ ]?(?P<number>\d
 
 
 def _workflow_template_subject_domain(workflow_template: str | None) -> str | None:
-    normalized = normalize_workflow_template_name(workflow_template)
-    if not normalized:
-        return None
-    if normalized == "edc_tactical":
-        return "edc"
-    domains = _WORKFLOW_TEMPLATE_DOMAINS.get(normalized, ())
-    if not domains:
-        return None
-    return select_primary_subject_domain(domains)
+    # Workflow presets are too broad to scope memory by themselves.
+    normalize_workflow_template_name(workflow_template)
+    return None
 
 
 def _infer_subject_domain_for_memory(
@@ -1486,6 +1480,15 @@ async def run_content_profile(job_id: str) -> dict:
         if not bool(source_context.get("allow_related_profiles")):
             source_context.pop("related_profiles", None)
             source_context.pop("adjacent_profiles", None)
+        existing_profile_artifact_result = await session.execute(
+            select(Artifact.id)
+            .where(
+                Artifact.job_id == job.id,
+                Artifact.artifact_type.in_(_CONTENT_PROFILE_ARTIFACT_TYPES),
+            )
+            .limit(1)
+        )
+        has_existing_profile_artifact = existing_profile_artifact_result.scalar_one_or_none() is not None
         related_source_context = await _load_related_profile_source_context(session, job=job, source_context=source_context)
         if bool(source_context.get("allow_related_profiles")) and related_source_context:
             existing_related = [
@@ -1568,17 +1571,24 @@ async def run_content_profile(job_id: str) -> dict:
                 content_profile = dict(cached_profile_entry.get("result") or {})
             else:
                 usage_before = await _read_persisted_step_usage_snapshot(step.id if step else None)
-                with track_step_usage(job_id=job.id, step_id=step.id, step_name="content_profile"):
-                    content_profile = await enrich_content_profile(
-                        profile=seeded_profile,
-                        source_name=job.source_name,
-                        workflow_template=job.workflow_template,
-                        transcript_excerpt=transcript_excerpt,
-                        subtitle_items=subtitle_dicts,
-                        glossary_terms=effective_glossary_terms,
-                        user_memory=user_memory,
-                        include_research=include_research,
-                    )
+                seeded_search_enabled = should_enable_task_search(
+                    "content_profile",
+                    default_enabled=include_research,
+                    profile=seeded_profile,
+                    settings=settings,
+                )
+                with llm_task_route("content_profile", search_enabled=seeded_search_enabled, settings=settings):
+                    with track_step_usage(job_id=job.id, step_id=step.id, step_name="content_profile"):
+                        content_profile = await enrich_content_profile(
+                            profile=seeded_profile,
+                            source_name=job.source_name,
+                            workflow_template=job.workflow_template,
+                            transcript_excerpt=transcript_excerpt,
+                            subtitle_items=subtitle_dicts,
+                            glossary_terms=effective_glossary_terms,
+                            user_memory=user_memory,
+                            include_research=seeded_search_enabled,
+                        )
                 usage_after = await _read_persisted_step_usage_snapshot(step.id if step else None)
                 usage_baseline = _usage_delta(usage_after, usage_before)
                 save_cached_json(
@@ -1598,18 +1608,25 @@ async def run_content_profile(job_id: str) -> dict:
                 source_path = await _resolve_source(job, tmpdir, expected_hash=job.file_hash)
                 await _set_step_progress(session, step, detail="抽取画面并分析主题、主体与处理模板", progress=0.55)
                 usage_before = await _read_persisted_step_usage_snapshot(step.id if step else None)
-                with track_step_usage(job_id=job.id, step_id=step.id, step_name="content_profile"):
-                    content_profile = await infer_content_profile(
-                        source_path=source_path,
-                        source_name=job.source_name,
-                        subtitle_items=subtitle_dicts,
-                        workflow_template=job.workflow_template,
-                        user_memory=user_memory,
-                        glossary_terms=effective_glossary_terms,
-                        include_research=include_research,
-                        copy_style=copy_style,
-                        source_context=source_context,
-                    )
+                initial_search_enabled = should_enable_task_search(
+                    "content_profile",
+                    default_enabled=include_research,
+                    profile=seeded_profile or None,
+                    settings=settings,
+                )
+                with llm_task_route("content_profile", search_enabled=initial_search_enabled, settings=settings):
+                    with track_step_usage(job_id=job.id, step_id=step.id, step_name="content_profile"):
+                        content_profile = await infer_content_profile(
+                            source_path=source_path,
+                            source_name=job.source_name,
+                            subtitle_items=subtitle_dicts,
+                            workflow_template=job.workflow_template,
+                            user_memory=user_memory,
+                            glossary_terms=effective_glossary_terms,
+                            include_research=initial_search_enabled,
+                            copy_style=copy_style,
+                            source_context=source_context,
+                        )
                 usage_after = await _read_persisted_step_usage_snapshot(step.id if step else None)
                 usage_baseline = _usage_delta(usage_after, usage_before)
                 save_cached_json(
@@ -1619,41 +1636,49 @@ async def run_content_profile(job_id: str) -> dict:
                     result=content_profile,
                     usage_baseline=usage_baseline,
                 )
-                enrich_cache_namespace = "content_profile.enrich"
-                enrich_cache_fingerprint = build_content_profile_cache_fingerprint(
-                    source_name=job.source_name,
-                    source_file_hash=job.file_hash,
-                    workflow_template=job.workflow_template,
-                    transcript_excerpt=transcript_excerpt,
-                    subtitle_digest=subtitle_digest,
-                    glossary_terms=effective_glossary_terms,
-                    user_memory=user_memory,
-                    include_research=include_research,
-                    copy_style=copy_style,
-                    seeded_profile=content_profile,
-                )
-                enrich_cache_key = build_cache_key(enrich_cache_namespace, enrich_cache_fingerprint)
-                usage_before = await _read_persisted_step_usage_snapshot(step.id if step else None)
-                with track_step_usage(job_id=job.id, step_id=step.id, step_name="content_profile"):
-                    content_profile = await enrich_content_profile(
-                        profile=content_profile,
+                if not has_existing_profile_artifact:
+                    enrich_cache_namespace = "content_profile.enrich"
+                    enrich_cache_fingerprint = build_content_profile_cache_fingerprint(
                         source_name=job.source_name,
+                        source_file_hash=job.file_hash,
                         workflow_template=job.workflow_template,
                         transcript_excerpt=transcript_excerpt,
-                        subtitle_items=subtitle_dicts,
+                        subtitle_digest=subtitle_digest,
                         glossary_terms=effective_glossary_terms,
                         user_memory=user_memory,
                         include_research=include_research,
+                        copy_style=copy_style,
+                        seeded_profile=content_profile,
                     )
-                usage_after = await _read_persisted_step_usage_snapshot(step.id if step else None)
-                usage_baseline = _usage_delta(usage_after, usage_before)
-                save_cached_json(
-                    enrich_cache_namespace,
-                    enrich_cache_key,
-                    fingerprint=enrich_cache_fingerprint,
-                    result=content_profile,
-                    usage_baseline=usage_baseline,
-                )
+                    enrich_cache_key = build_cache_key(enrich_cache_namespace, enrich_cache_fingerprint)
+                    usage_before = await _read_persisted_step_usage_snapshot(step.id if step else None)
+                    enrich_search_enabled = should_enable_task_search(
+                        "content_profile",
+                        default_enabled=include_research,
+                        profile=content_profile,
+                        settings=settings,
+                    )
+                    with llm_task_route("content_profile", search_enabled=enrich_search_enabled, settings=settings):
+                        with track_step_usage(job_id=job.id, step_id=step.id, step_name="content_profile"):
+                            content_profile = await enrich_content_profile(
+                                profile=content_profile,
+                                source_name=job.source_name,
+                                workflow_template=job.workflow_template,
+                                transcript_excerpt=transcript_excerpt,
+                                subtitle_items=subtitle_dicts,
+                                glossary_terms=effective_glossary_terms,
+                                user_memory=user_memory,
+                                include_research=enrich_search_enabled,
+                            )
+                    usage_after = await _read_persisted_step_usage_snapshot(step.id if step else None)
+                    usage_baseline = _usage_delta(usage_after, usage_before)
+                    save_cached_json(
+                        enrich_cache_namespace,
+                        enrich_cache_key,
+                        fingerprint=enrich_cache_fingerprint,
+                        result=content_profile,
+                        usage_baseline=usage_baseline,
+                    )
         content_profile = apply_identity_review_guard(
             content_profile,
             subtitle_items=subtitle_dicts,
@@ -1664,29 +1689,36 @@ async def run_content_profile(job_id: str) -> dict:
         source_context_description = str(source_context.get("video_description") or "").strip()
         resolved_source_context_feedback: dict[str, Any] = {}
         if source_context_description:
-            source_context_verification_bundle = await build_review_feedback_verification_bundle(
-                draft_profile=content_profile,
-                proposed_feedback=None,
-                session=session,
+            feedback_search_enabled = should_enable_task_search(
+                "content_profile",
+                default_enabled=include_research,
+                profile=content_profile,
+                settings=settings,
             )
-            resolved_source_context_feedback = await resolve_content_profile_review_feedback(
-                draft_profile=content_profile,
-                source_name=job.source_name,
-                review_feedback=source_context_description,
-                proposed_feedback=None,
-                reviewed_subtitle_excerpt=transcript_excerpt,
-                accepted_corrections=[],
-                verification_bundle=source_context_verification_bundle,
-            )
-            if resolved_source_context_feedback:
-                content_profile = await apply_content_profile_feedback(
+            with llm_task_route("content_profile", search_enabled=feedback_search_enabled, settings=settings):
+                source_context_verification_bundle = await build_review_feedback_verification_bundle(
+                    draft_profile=content_profile,
+                    proposed_feedback=None,
+                    session=session,
+                )
+                resolved_source_context_feedback = await resolve_content_profile_review_feedback(
                     draft_profile=content_profile,
                     source_name=job.source_name,
-                    workflow_template=job.workflow_template,
-                    user_feedback=resolved_source_context_feedback,
+                    review_feedback=source_context_description,
+                    proposed_feedback=None,
                     reviewed_subtitle_excerpt=transcript_excerpt,
                     accepted_corrections=[],
+                    verification_bundle=source_context_verification_bundle,
                 )
+                if resolved_source_context_feedback:
+                    content_profile = await apply_content_profile_feedback(
+                        draft_profile=content_profile,
+                        source_name=job.source_name,
+                        workflow_template=job.workflow_template,
+                        user_feedback=resolved_source_context_feedback,
+                        reviewed_subtitle_excerpt=transcript_excerpt,
+                        accepted_corrections=[],
+                    )
         if source_context:
             content_profile["source_context"] = {
                 **source_context,
@@ -1735,6 +1767,30 @@ async def run_content_profile(job_id: str) -> dict:
             auto_confirm_enabled=auto_review_enabled,
             threshold=settings.content_profile_review_threshold,
         )
+        if bool((automation.get("identity_review") or {}).get("conservative_summary")):
+            content_profile = apply_identity_review_guard(
+                content_profile,
+                subtitle_items=subtitle_dicts,
+                user_memory=user_memory,
+                glossary_terms=effective_glossary_terms,
+                source_name=job.source_name,
+            )
+            automation = assess_content_profile_automation(
+                content_profile,
+                subtitle_items=subtitle_dicts,
+                user_memory=user_memory,
+                glossary_terms=effective_glossary_terms,
+                source_name=job.source_name,
+                auto_confirm_enabled=auto_review_enabled,
+                threshold=settings.content_profile_review_threshold,
+            )
+        if bool((automation.get("identity_review") or {}).get("required")):
+            summary = str(content_profile.get("summary") or "").strip()
+            if "具体品牌型号待人工确认" not in summary:
+                content_profile["summary"] = _build_conservative_identity_summary(
+                    content_profile,
+                    subtitle_items=subtitle_dicts,
+                )
         content_profile["automation_review"] = automation
         ocr_profile = None
         if bool(getattr(settings, "ocr_enabled", False)):
@@ -1977,17 +2033,24 @@ async def run_glossary_review(job_id: str) -> dict:
             with tempfile.TemporaryDirectory() as tmpdir:
                 source_path = await _resolve_source(job, tmpdir, expected_hash=job.file_hash)
                 packaging_config = (list_packaging_assets().get("config") or {})
-                with track_step_usage(job_id=job.id, step_id=step.id, step_name="glossary_review"):
-                    content_profile = await infer_content_profile(
-                        source_path=source_path,
-                        source_name=job.source_name,
-                        subtitle_items=subtitle_dicts,
-                        workflow_template=job.workflow_template,
-                        user_memory=user_memory,
-                        glossary_terms=effective_glossary_terms,
-                        include_research=include_research,
-                        copy_style=str(packaging_config.get("copy_style") or "attention_grabbing"),
-                    )
+                initial_search_enabled = should_enable_task_search(
+                    "content_profile",
+                    default_enabled=include_research,
+                    profile=content_profile,
+                    settings=settings,
+                )
+                with llm_task_route("content_profile", search_enabled=initial_search_enabled, settings=settings):
+                    with track_step_usage(job_id=job.id, step_id=step.id, step_name="glossary_review"):
+                        content_profile = await infer_content_profile(
+                            source_path=source_path,
+                            source_name=job.source_name,
+                            subtitle_items=subtitle_dicts,
+                            workflow_template=job.workflow_template,
+                            user_memory=user_memory,
+                            glossary_terms=effective_glossary_terms,
+                            include_research=initial_search_enabled,
+                            copy_style=str(packaging_config.get("copy_style") or "attention_grabbing"),
+                        )
         else:
             packaging_config = (list_packaging_assets().get("config") or {})
             content_profile["copy_style"] = str(
@@ -1995,17 +2058,24 @@ async def run_glossary_review(job_id: str) -> dict:
                 or content_profile.get("copy_style")
                 or "attention_grabbing"
             )
-            with track_step_usage(job_id=job.id, step_id=step.id, step_name="glossary_review"):
-                content_profile = await enrich_content_profile(
-                    profile=content_profile,
-                    source_name=job.source_name,
-                    workflow_template=job.workflow_template,
-                    transcript_excerpt=str(content_profile.get("transcript_excerpt") or ""),
-                    subtitle_items=subtitle_dicts,
-                    glossary_terms=effective_glossary_terms,
-                    user_memory=user_memory,
-                    include_research=include_research,
-                )
+            enrich_search_enabled = should_enable_task_search(
+                "content_profile",
+                default_enabled=include_research,
+                profile=content_profile,
+                settings=settings,
+            )
+            with llm_task_route("content_profile", search_enabled=enrich_search_enabled, settings=settings):
+                with track_step_usage(job_id=job.id, step_id=step.id, step_name="glossary_review"):
+                    content_profile = await enrich_content_profile(
+                        profile=content_profile,
+                        source_name=job.source_name,
+                        workflow_template=job.workflow_template,
+                        transcript_excerpt=str(content_profile.get("transcript_excerpt") or ""),
+                        subtitle_items=subtitle_dicts,
+                        glossary_terms=effective_glossary_terms,
+                        user_memory=user_memory,
+                        include_research=enrich_search_enabled,
+                    )
         subject_domain = _infer_subject_domain_for_memory(
             workflow_template=job.workflow_template,
             subtitle_items=subtitle_dicts,
@@ -2049,6 +2119,21 @@ async def run_glossary_review(job_id: str) -> dict:
             allow_llm=False,
         )
 
+        identity_gate = evaluate_profile_identity_gate(content_profile)
+        gate_reasons = [str(item).strip() for item in list(identity_gate.get("review_reasons") or []) if str(item).strip()]
+        if identity_gate.get("needs_review"):
+            content_profile["needs_review"] = True
+            review_reasons = [
+                str(item).strip()
+                for item in list(content_profile.get("review_reasons") or [])
+                if str(item).strip()
+            ]
+            for reason in gate_reasons:
+                if reason not in review_reasons:
+                    review_reasons.append(reason)
+            content_profile["review_reasons"] = review_reasons
+        content_profile["verification_gate"] = identity_gate
+
         artifact = Artifact(
             job_id=job.id,
             step_id=None,
@@ -2070,6 +2155,7 @@ async def run_glossary_review(job_id: str) -> dict:
             detail=(
                 f"字幕润色完成，更新 {polished_count} 条；"
                 f"术语自动接受 {auto_accepted_corrections} 条，待确认 {pending_corrections} 条"
+                + ("；实体身份需复核" if identity_gate.get("needs_review") else "")
             ),
             progress=1.0,
         )
@@ -2085,6 +2171,9 @@ async def run_glossary_review(job_id: str) -> dict:
             "auto_accepted_correction_count": auto_accepted_corrections,
             "pending_correction_count": pending_corrections,
             "polished_count": polished_count,
+            "review_required": bool(identity_gate.get("needs_review")),
+            "identity_gate_conflicts": list(identity_gate.get("conflicts") or []),
+            "identity_gate_missing_supported_fields": list(identity_gate.get("missing_supported_fields") or []),
             "workflow_template": content_profile.get("workflow_template"),
             "subject": " ".join(
                 part for part in [
@@ -2159,12 +2248,13 @@ async def run_subtitle_translation(job_id: str) -> dict:
             detail=f"翻译校对后的字幕（{source_language} -> {target_language}）",
             progress=0.72,
         )
-        with track_step_usage(job_id=job.id, step_id=step.id, step_name="subtitle_translation"):
-            translation = await translate_subtitle_items(
-                subtitle_dicts,
-                target_language_mode="auto",
-                preferred_ui_language=preferred_ui_language,
-            )
+        with llm_task_route("subtitle_translation", search_enabled=False, settings=get_settings()):
+            with track_step_usage(job_id=job.id, step_id=step.id, step_name="subtitle_translation"):
+                translation = await translate_subtitle_items(
+                    subtitle_dicts,
+                    target_language_mode="auto",
+                    preferred_ui_language=preferred_ui_language,
+                )
         session.add(
             Artifact(
                 job_id=job.id,
@@ -3486,6 +3576,7 @@ async def run_platform_package(job_id: str) -> dict:
     factory = get_session_factory()
     async with factory() as session:
         job = await session.get(Job, uuid.UUID(job_id))
+        settings = get_settings()
         if not job:
             raise ValueError(f"Job {job_id} not found")
 
@@ -3557,12 +3648,19 @@ async def run_platform_package(job_id: str) -> dict:
             fact_sheet = dict(cached_fact_sheet_entry.get("result") or {})
         else:
             usage_before = await _read_persisted_step_usage_snapshot(step.id if step else None)
-            with track_step_usage(job_id=job.id, step_id=step.id if step else None, step_name="platform_package"):
-                fact_sheet = await build_packaging_fact_sheet(
-                    source_name=job.source_name,
-                    content_profile=content_profile,
-                    subtitle_items=subtitle_dicts,
-                )
+            fact_search_enabled = should_enable_task_search(
+                "copy_verify",
+                default_enabled=True,
+                profile=content_profile,
+                settings=settings,
+            )
+            with llm_task_route("copy_verify", search_enabled=fact_search_enabled, settings=settings):
+                with track_step_usage(job_id=job.id, step_id=step.id if step else None, step_name="platform_package"):
+                    fact_sheet = await build_packaging_fact_sheet(
+                        source_name=job.source_name,
+                        content_profile=content_profile,
+                        subtitle_items=subtitle_dicts,
+                    )
             usage_after = await _read_persisted_step_usage_snapshot(step.id if step else None)
             usage_baseline = _usage_delta(usage_after, usage_before)
             save_cached_json(
@@ -3573,12 +3671,19 @@ async def run_platform_package(job_id: str) -> dict:
                 usage_baseline=usage_baseline,
             )
     else:
-        with track_step_usage(job_id=job.id, step_id=step.id if step else None, step_name="platform_package"):
-            fact_sheet = await build_packaging_fact_sheet(
-                source_name=job.source_name,
-                content_profile=content_profile,
-                subtitle_items=subtitle_dicts,
-            )
+        fact_search_enabled = should_enable_task_search(
+            "copy_verify",
+            default_enabled=True,
+            profile=content_profile,
+            settings=settings,
+        )
+        with llm_task_route("copy_verify", search_enabled=fact_search_enabled, settings=settings):
+            with track_step_usage(job_id=job.id, step_id=step.id if step else None, step_name="platform_package"):
+                fact_sheet = await build_packaging_fact_sheet(
+                    source_name=job.source_name,
+                    content_profile=content_profile,
+                    subtitle_items=subtitle_dicts,
+                )
 
     packaging_cache_namespace = "platform_package.generate"
     packaging_cache_fingerprint = build_platform_packaging_cache_fingerprint(
@@ -3601,16 +3706,23 @@ async def run_platform_package(job_id: str) -> dict:
         packaging["fact_sheet"] = fact_sheet
     else:
         usage_before = await _read_persisted_step_usage_snapshot(step.id if step else None)
-        with track_step_usage(job_id=job.id, step_id=step.id if step else None, step_name="platform_package"):
-            packaging = await generate_platform_packaging(
-                source_name=job.source_name,
-                content_profile=content_profile,
-                subtitle_items=subtitle_dicts,
-                copy_style=copy_style,
-                author_profile=author_profile,
-                prompt_brief=prompt_brief,
-                fact_sheet=fact_sheet,
-            )
+        copy_search_enabled = should_enable_task_search(
+            "copy",
+            default_enabled=True,
+            profile=content_profile,
+            settings=settings,
+        )
+        with llm_task_route("copy", search_enabled=copy_search_enabled, settings=settings):
+            with track_step_usage(job_id=job.id, step_id=step.id if step else None, step_name="platform_package"):
+                packaging = await generate_platform_packaging(
+                    source_name=job.source_name,
+                    content_profile=content_profile,
+                    subtitle_items=subtitle_dicts,
+                    copy_style=copy_style,
+                    author_profile=author_profile,
+                    prompt_brief=prompt_brief,
+                    fact_sheet=fact_sheet,
+                )
         usage_after = await _read_persisted_step_usage_snapshot(step.id if step else None)
         usage_baseline = _usage_delta(usage_after, usage_before)
         save_cached_json(

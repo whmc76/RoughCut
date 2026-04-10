@@ -11,10 +11,13 @@ from roughcut.db.models import Artifact, Job, JobStep, SubtitleCorrection, Subti
 from roughcut.media.variant_timeline_bundle import resolve_effective_variant_timeline_bundle
 from roughcut.review.content_profile import (
     _has_ingestible_product_subject_conflict,
+    _identity_values_compatible,
     _is_generic_engagement_question,
     _is_generic_profile_summary,
     _is_generic_subject_type,
     _is_specific_video_theme,
+    _mapped_brand_for_model,
+    _subject_domain_from_subject_type,
     _text_conflicts_with_verified_identity,
 )
 
@@ -82,6 +85,7 @@ _NUMERIC_DETAIL_RE = re.compile(
     re.IGNORECASE,
 )
 _IDENTITY_NARRATIVE_FIELDS = ("video_theme", "summary", "hook_line", "visible_text")
+_ENTITY_CANDIDATE_MIN_SCORE = 0.55
 
 
 @dataclass(slots=True)
@@ -91,6 +95,39 @@ class QualityIssue:
     penalty: float
     auto_fix_step: str | None = None
     blocking: bool = False
+
+
+def evaluate_profile_identity_gate(profile: dict[str, Any] | None) -> dict[str, Any]:
+    candidate = profile if isinstance(profile, dict) else {}
+    signals = _collect_entity_catalog_signals(candidate)
+    conflicts = list(signals.get("conflicts") or [])
+    narrative_conflicts = list(signals.get("narrative_conflicts") or [])
+    missing_supported_fields = list(signals.get("missing_supported_fields") or [])
+    top_candidate = dict(signals.get("top_candidate") or {})
+    blocking = bool(conflicts or narrative_conflicts)
+    needs_review = blocking or bool(missing_supported_fields)
+    review_reasons: list[str] = []
+    if conflicts:
+        review_reasons.append(
+            f"实体证据候选与当前画像主体冲突：{', '.join(conflicts)}"
+        )
+    if narrative_conflicts:
+        review_reasons.append(
+            f"实体证据候选与当前叙事字段冲突：{', '.join(narrative_conflicts)}"
+        )
+    if missing_supported_fields:
+        review_reasons.append(
+            f"实体证据已给出更强身份线索，但当前画像仍缺失：{', '.join(missing_supported_fields)}"
+        )
+    return {
+        "blocking": blocking,
+        "needs_review": needs_review,
+        "conflicts": conflicts,
+        "narrative_conflicts": narrative_conflicts,
+        "missing_supported_fields": missing_supported_fields,
+        "top_candidate": top_candidate,
+        "review_reasons": review_reasons,
+    }
 
 
 def assess_job_quality(
@@ -241,6 +278,39 @@ def assess_job_quality(
                     blocking=True,
                 )
             )
+        identity_gate = evaluate_profile_identity_gate(profile)
+        entity_catalog_conflicts = list(identity_gate.get("conflicts") or [])
+        entity_catalog_narrative_conflicts = list(identity_gate.get("narrative_conflicts") or [])
+        missing_supported_fields = list(identity_gate.get("missing_supported_fields") or [])
+        if entity_catalog_conflicts:
+            issues.append(
+                QualityIssue(
+                    "entity_catalog_conflict",
+                    f"实体资料库强证据与当前主体字段冲突：{', '.join(entity_catalog_conflicts)}",
+                    20.0,
+                    auto_fix_step="content_profile",
+                    blocking=True,
+                )
+            )
+        elif entity_catalog_narrative_conflicts:
+            issues.append(
+                QualityIssue(
+                    "entity_catalog_narrative_conflict",
+                    f"实体资料库强证据与当前叙事字段冲突：{', '.join(entity_catalog_narrative_conflicts)}",
+                    18.0,
+                    auto_fix_step="content_profile",
+                    blocking=True,
+                )
+            )
+        elif missing_supported_fields:
+            issues.append(
+                QualityIssue(
+                    "entity_catalog_identity_gap",
+                    f"实体资料库已有强身份线索但画像仍未回填：{', '.join(missing_supported_fields)}",
+                    10.0,
+                    auto_fix_step="content_profile",
+                )
+            )
 
     pending_corrections = sum(1 for item in corrections if item.human_decision not in {"accepted", "rejected"})
     if pending_corrections > 0:
@@ -307,6 +377,7 @@ def assess_job_quality(
             "step_completion_ratio": round(step_completion_ratio, 3),
             "subtitle_sync": sync_check,
             "identity_narrative_conflicts": _collect_identity_narrative_conflicts(profile),
+            "entity_identity_gate": evaluate_profile_identity_gate(profile),
         },
     }
 
@@ -395,6 +466,143 @@ def _collect_identity_narrative_conflicts(profile: dict[str, Any]) -> list[str]:
             conflicts.append("cover_title")
     seen: set[str] = set()
     return [field for field in conflicts if not (field in seen or seen.add(field))]
+
+
+def _collect_entity_catalog_signals(profile: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(profile, dict):
+        return {"conflicts": [], "narrative_conflicts": [], "missing_supported_fields": [], "top_candidate": {}}
+    snapshot = profile.get("verification_evidence")
+    if not isinstance(snapshot, dict):
+        return {"conflicts": [], "narrative_conflicts": [], "missing_supported_fields": [], "top_candidate": {}}
+    raw_candidates = list(snapshot.get("entity_catalog_candidates") or [])
+    candidates = [
+        item for item in raw_candidates
+        if isinstance(item, dict) and _candidate_is_strong(item)
+    ]
+    if not candidates:
+        return {"conflicts": [], "narrative_conflicts": [], "missing_supported_fields": [], "top_candidate": {}}
+    candidates.sort(
+        key=lambda item: (
+            -_candidate_identity_alignment_score(profile, item),
+            -(_safe_float(item.get("support_score")) or 0.0),
+            -(_safe_float(item.get("confidence")) or 0.0),
+            -(len(item.get("matched_evidence_texts") or [])),
+            -len(str(item.get("model") or "").strip()),
+            -len(str(item.get("subject_type") or "").strip()),
+        )
+    )
+    top_candidate = dict(candidates[0])
+    current_brand = str(profile.get("subject_brand") or "").strip()
+    current_model = str(profile.get("subject_model") or "").strip()
+    candidate_brand = str(top_candidate.get("brand") or "").strip()
+    candidate_model = str(top_candidate.get("model") or "").strip()
+
+    conflicts: list[str] = []
+    if current_brand and candidate_brand and not _identity_values_compatible(current_brand, candidate_brand):
+        conflicts.append("subject_brand")
+    if current_model and candidate_model and not _identity_values_compatible(current_model, candidate_model):
+        conflicts.append("subject_model")
+
+    missing_supported_fields: list[str] = []
+    if not current_brand and candidate_brand:
+        missing_supported_fields.append("subject_brand")
+    if not current_model and candidate_model:
+        missing_supported_fields.append("subject_model")
+
+    candidate_narrative_conflicts: list[str] = []
+    if candidate_brand or candidate_model:
+        for field_name in ("subject_type", "video_theme", "summary", "hook_line", "visible_text"):
+            value = profile.get(field_name)
+            if not isinstance(value, str) or not value.strip():
+                continue
+            if _text_conflicts_with_verified_identity(
+                value,
+                brand=candidate_brand,
+                model=candidate_model,
+                glossary_terms=None,
+            ):
+                candidate_narrative_conflicts.append(field_name)
+        cover_title = profile.get("cover_title")
+        if isinstance(cover_title, dict):
+            cover_text = " ".join(
+                str(cover_title.get(key) or "").strip()
+                for key in ("top", "main", "bottom")
+            ).strip()
+            if cover_text and _text_conflicts_with_verified_identity(
+                cover_text,
+                brand=candidate_brand,
+                model=candidate_model,
+                glossary_terms=None,
+            ):
+                candidate_narrative_conflicts.append("cover_title")
+
+    return {
+        "conflicts": conflicts,
+        "narrative_conflicts": list(dict.fromkeys(candidate_narrative_conflicts)),
+        "missing_supported_fields": missing_supported_fields,
+        "top_candidate": top_candidate,
+    }
+
+
+def _candidate_identity_alignment_score(profile: dict[str, Any], candidate: dict[str, Any]) -> int:
+    current_brand = str(profile.get("subject_brand") or "").strip()
+    current_model = str(profile.get("subject_model") or "").strip()
+    current_subject_type = str(profile.get("subject_type") or "").strip()
+    current_subject_domain = str(profile.get("subject_domain") or "").strip() or _subject_domain_from_subject_type(current_subject_type)
+    candidate_brand = str(candidate.get("brand") or "").strip()
+    candidate_model = str(candidate.get("model") or "").strip()
+    candidate_subject_type = str(candidate.get("subject_type") or "").strip()
+    candidate_domain = str(candidate.get("subject_domain") or "").strip() or _subject_domain_from_subject_type(candidate_subject_type)
+    score = 0
+
+    if current_model and candidate_model:
+        if _identity_values_compatible(current_model, candidate_model):
+            score += 6
+        else:
+            score -= 3
+    if current_brand and candidate_brand:
+        if _identity_values_compatible(current_brand, candidate_brand):
+            score += 4
+        else:
+            score -= 2
+    mapped_brand = _mapped_brand_for_model(current_model or candidate_model)
+    effective_brand = current_brand or candidate_brand
+    if mapped_brand and effective_brand:
+        if _identity_values_compatible(mapped_brand, effective_brand):
+            score += 2
+        else:
+            score -= 3
+    if current_subject_domain and candidate_domain:
+        if current_subject_domain == candidate_domain:
+            score += 2
+        else:
+            score -= 1
+    if current_subject_type and candidate_subject_type:
+        if _identity_values_compatible(current_subject_type, candidate_subject_type):
+            score += 2
+        elif _text_conflicts_with_verified_identity(
+            current_subject_type,
+            brand=candidate_brand or current_brand,
+            model=candidate_model or current_model,
+            glossary_terms=None,
+        ):
+            score -= 2
+    return score
+
+
+def _candidate_is_strong(candidate: dict[str, Any]) -> bool:
+    support_score = _safe_float(candidate.get("support_score")) or 0.0
+    evidence_strength = str(candidate.get("evidence_strength") or "").strip().lower()
+    matched_evidence = list(candidate.get("matched_evidence_texts") or [])
+    matched_fields = [str(item).strip() for item in list(candidate.get("matched_fields") or []) if str(item).strip()]
+    has_local_support = (
+        bool(matched_evidence)
+        or "video_evidence" in matched_fields
+        or "brand_alias" in matched_fields
+        or "model_alias" in matched_fields
+        or "supporting_keyword" in matched_fields
+    )
+    return support_score >= _ENTITY_CANDIDATE_MIN_SCORE and evidence_strength in {"moderate", "strong"} and has_local_support
 
 
 def _extract_detail_cues(text: str) -> list[str]:

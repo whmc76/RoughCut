@@ -296,6 +296,44 @@ describe("useSettingsWorkspace", () => {
     expect(result.current.form.acp_bridge_fallback_backend).toBe("claude");
   });
 
+  it("normalizes bundled search settings back to auto in the form and autosave payload", async () => {
+    mockApi.getConfig.mockResolvedValueOnce({
+      ...SAMPLE_CONFIG,
+      search_provider: "openai",
+      search_fallback_provider: "model",
+      model_search_helper: "  helper-model  ",
+    });
+
+    const { result } = renderHookWithQueryClient(() => useSettingsWorkspace());
+
+    await waitFor(() => expect(result.current.config.data?.search_provider).toBe("openai"));
+    await waitFor(() => expect(result.current.form.search_provider).toBe("auto"));
+    expect(result.current.form.search_fallback_provider).toBe("model");
+    expect(result.current.form.model_search_helper).toBe("helper-model");
+
+    act(() => {
+      result.current.setForm((prev) => ({
+        ...prev,
+        max_upload_size_mb: 1024,
+      }));
+    });
+
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 700));
+    });
+
+    await waitFor(() =>
+      expect(mockApi.patchConfig).toHaveBeenCalledWith(
+        expect.objectContaining({
+          search_provider: "auto",
+          search_fallback_provider: "model",
+          model_search_helper: "helper-model",
+          max_upload_size_mb: 1024,
+        }),
+      ),
+    );
+  });
+
   it("resets config and packaging-backed settings together", async () => {
     const { result } = renderHookWithQueryClient(() => useSettingsWorkspace());
 
