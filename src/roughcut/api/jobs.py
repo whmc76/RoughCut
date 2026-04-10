@@ -384,7 +384,8 @@ async def get_jobs_usage_trend(
 
 @router.post("", response_model=JobOut, status_code=status.HTTP_201_CREATED)
 async def create_job(
-    file: UploadFile = File(...),
+    file: UploadFile | None = File(None),
+    files: list[UploadFile] | None = File(None),
     language: str = Form("zh-CN"),
     workflow_template: str | None = Form(None),
     workflow_mode: str | None = Form(None),
@@ -394,6 +395,10 @@ async def create_job(
     session: AsyncSession = Depends(get_session),
 ):
     settings = get_settings()
+    uploaded_files = _normalize_uploaded_sources(file=file, files=files)
+    if not uploaded_files:
+        raise HTTPException(status_code=422, detail="At least one file is required")
+
     try:
         language = normalize_job_language(language)
         workflow_template = normalize_workflow_template(workflow_template)
@@ -406,36 +411,35 @@ async def create_job(
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-    # Validate extension
-    suffix = Path(file.filename or "").suffix.lower()
-    if suffix not in settings.allowed_extensions:
-        raise HTTPException(
-            status_code=400,
-            detail=f"File extension {suffix!r} not allowed. Allowed: {settings.allowed_extensions}",
+    with tempfile.TemporaryDirectory() as tmpdir:
+        temp_root = Path(tmpdir)
+        local_source_files = [
+            await _save_uploaded_file(upload, target_dir=temp_root, index=index, settings=settings)
+            for index, upload in enumerate(uploaded_files)
+        ]
+
+        if len(local_source_files) == 1:
+            source_path = local_source_files[0]
+            source_name = Path(uploaded_files[0].filename or source_path.name).name
+        else:
+            source_name = _build_merged_source_name(uploaded_files)
+            source_path = await _merge_upload_files_for_job(local_source_files, output_path=temp_root / source_name)
+
+        source_context = _build_job_source_context(
+            uploaded_files=uploaded_files,
+            video_description=video_description,
         )
 
-    # Save to temp file and check size
-    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
-        tmp_path = Path(tmp.name)
-        content = await file.read()
-        if settings.max_upload_size_bytes > 0 and len(content) > settings.max_upload_size_bytes:
-            tmp_path.unlink(missing_ok=True)
-            raise HTTPException(status_code=413, detail="File too large")
-        tmp.write(content)
-
-    try:
-        # Upload to S3
         job_id = uuid.uuid4()
         storage = get_storage()
         storage.ensure_bucket()
-        s3_key = job_key(str(job_id), file.filename or f"video{suffix}")
-        storage.upload_file(tmp_path, s3_key)
+        s3_key = job_key(str(job_id), source_name)
+        storage.upload_file(source_path, s3_key)
 
-        # Create job
         job = Job(
             id=job_id,
             source_path=s3_key,
-            source_name=file.filename or f"video{suffix}",
+            source_name=source_name,
             status="pending",
             language=language,
             workflow_template=workflow_template,
@@ -445,30 +449,23 @@ async def create_job(
         )
         session.add(job)
 
-        # Create all pipeline steps
         steps = create_job_steps(job_id)
         for step in steps:
-            if step.step_name == "content_profile" and video_description:
+            if step.step_name == "content_profile" and source_context:
                 step.metadata_ = {
                     **(step.metadata_ or {}),
-                    "source_context": {
-                        "video_description": video_description,
-                    },
+                    "source_context": source_context,
                 }
             session.add(step)
 
         await session.commit()
         await session.refresh(job)
 
-        # Reload with steps
         result = await session.execute(
             select(Job).options(selectinload(Job.steps), selectinload(Job.artifacts)).where(Job.id == job_id)
         )
         job = result.scalar_one()
         _attach_job_preview(job)
-
-    finally:
-        tmp_path.unlink(missing_ok=True)
 
     return job
 
@@ -478,6 +475,156 @@ def _normalize_video_description(value: str | None) -> str | None:
     if not normalized:
         return None
     return normalized[:4000]
+
+
+def _normalize_uploaded_sources(
+    *,
+    file: UploadFile | None,
+    files: list[UploadFile] | None,
+) -> list[UploadFile]:
+    normalized = [item for item in (files or []) if item is not None]
+    if normalized:
+        return normalized
+    if file is not None:
+        return [file]
+    return []
+
+
+def _concat_list_entry(path: Path) -> str:
+    normalized = str(path).replace("\\", "/")
+    escaped = normalized.replace("'", "\\'")
+    return f"file '{escaped}'"
+
+
+async def _run_concat_ffmpeg(
+    list_file: Path,
+    output_path: Path,
+    *,
+    transcode: bool,
+) -> subprocess.CompletedProcess[str]:
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-f",
+        "concat",
+        "-safe",
+        "0",
+        "-i",
+        str(list_file),
+        "-movflags",
+        "+faststart",
+    ]
+    if transcode:
+        cmd.extend(
+            [
+                "-c:v",
+                "libx264",
+                "-preset",
+                "fast",
+                "-crf",
+                "18",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "192k",
+            ]
+        )
+    else:
+        cmd.extend(["-c", "copy"])
+    cmd.append(str(output_path))
+
+    settings = get_settings()
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        None,
+        lambda: subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=settings.ffmpeg_timeout_sec,
+        ),
+    )
+
+
+async def _merge_upload_files_for_job(file_paths: list[Path], *, output_path: Path) -> Path:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        list_file = Path(tmpdir) / "files.txt"
+        with list_file.open("w", encoding="utf-8") as handle:
+            for path in file_paths:
+                handle.write(_concat_list_entry(path))
+                handle.write("\n")
+
+        result = await _run_concat_ffmpeg(list_file, output_path, transcode=False)
+        if result.returncode != 0:
+            if output_path.exists():
+                output_path.unlink()
+            result = await _run_concat_ffmpeg(list_file, output_path, transcode=True)
+
+    if result.returncode != 0 or not output_path.exists():
+        raise RuntimeError(f"ffmpeg concat merge failed: {result.stderr[-500:]}")
+    return output_path
+
+
+def _build_merged_source_name(uploaded_files: list[UploadFile]) -> str:
+    first_name = str(uploaded_files[0].filename or "").strip() if uploaded_files else ""
+    first_stem = Path(first_name or "video").stem or "video"
+    safe_stem = re.sub(r"[^A-Za-z0-9._-]+", "_", first_stem).strip("._-") or "video"
+    return f"merged_{len(uploaded_files)}_{safe_stem[:48]}.mp4"
+
+
+def _build_job_source_context(
+    *,
+    uploaded_files: list[UploadFile],
+    video_description: str | None,
+) -> dict[str, Any] | None:
+    source_context: dict[str, Any] = {}
+    if video_description:
+        source_context["video_description"] = video_description
+    if len(uploaded_files) > 1:
+        source_context["allow_related_profiles"] = True
+        source_context["merged_source_names"] = [
+            str(item.filename or "").strip()
+            for item in uploaded_files
+            if str(item.filename or "").strip()
+        ]
+    return source_context or None
+
+
+async def _save_uploaded_file(
+    upload: UploadFile,
+    *,
+    target_dir: Path,
+    index: int,
+    settings,
+) -> Path:
+    suffix = Path(upload.filename or "").suffix.lower()
+    if suffix not in settings.allowed_extensions:
+        raise HTTPException(
+            status_code=400,
+            detail=f"File extension {suffix!r} not allowed. Allowed: {settings.allowed_extensions}",
+        )
+
+    original_name = Path(upload.filename or f"video_{index + 1}{suffix}").name
+    target_path = target_dir / f"{index:02d}_{original_name}"
+    total_size = 0
+
+    try:
+        with target_path.open("wb") as handle:
+            while True:
+                chunk = await upload.read(1024 * 1024)
+                if not chunk:
+                    break
+                total_size += len(chunk)
+                if settings.max_upload_size_bytes > 0 and total_size > settings.max_upload_size_bytes:
+                    raise HTTPException(status_code=413, detail="File too large")
+                handle.write(chunk)
+    finally:
+        await upload.close()
+
+    return target_path
 
 
 @router.get("/{job_id}", response_model=JobOut)
@@ -2205,6 +2352,7 @@ def _attach_job_previews(jobs: list[Job]) -> None:
 def _attach_job_preview(job: Job) -> None:
     if job.steps:
         job.steps.sort(key=_step_sort_key)
+    job.merged_source_names = _resolve_job_merged_source_names(job)
     preview = _resolve_job_content_preview(job.artifacts or [])
     job.content_subject = preview["subject"]
     job.content_summary = preview["summary"]
@@ -2217,6 +2365,23 @@ def _attach_job_preview(job: Job) -> None:
     job.avatar_delivery_status = avatar_preview["status"]
     job.avatar_delivery_summary = avatar_preview["summary"]
     job.progress_percent = _calculate_job_progress_percent(job)
+
+
+def _resolve_job_merged_source_names(job: Job) -> list[str]:
+    for step in list(job.steps or []):
+        if step.step_name != "content_profile" or not isinstance(step.metadata_, dict):
+            continue
+        source_context = step.metadata_.get("source_context")
+        if not isinstance(source_context, dict):
+            continue
+        merged_source_names = [
+            str(item).strip()
+            for item in (source_context.get("merged_source_names") or [])
+            if str(item).strip()
+        ]
+        if merged_source_names:
+            return merged_source_names
+    return []
 
 
 def _calculate_job_progress_percent(job: Job) -> int:

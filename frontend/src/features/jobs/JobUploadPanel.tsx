@@ -19,6 +19,16 @@ type JobUploadPanelProps = {
   isSubmitting: boolean;
 };
 
+function moveFile(files: File[], fromIndex: number, toIndex: number): File[] {
+  if (toIndex < 0 || toIndex >= files.length || fromIndex === toIndex) {
+    return files;
+  }
+  const next = [...files];
+  const [file] = next.splice(fromIndex, 1);
+  next.splice(toIndex, 0, file);
+  return next;
+}
+
 export function JobUploadPanel({
   upload,
   languageOptions,
@@ -30,22 +40,29 @@ export function JobUploadPanel({
   isSubmitting,
 }: JobUploadPanelProps) {
   const { t } = useI18n();
+  const previewFile = upload.files[0] ?? null;
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const reorderFile = (fromIndex: number, toIndex: number) => {
+    onChange({
+      ...upload,
+      files: moveFile(upload.files, fromIndex, toIndex),
+    });
+  };
 
   useEffect(() => {
-    if (!upload.file || typeof URL.createObjectURL !== "function") {
+    if (!previewFile || typeof URL.createObjectURL !== "function") {
       setPreviewUrl(null);
       return undefined;
     }
 
-    const objectUrl = URL.createObjectURL(upload.file);
+    const objectUrl = URL.createObjectURL(previewFile);
     setPreviewUrl(objectUrl);
     return () => {
       if (typeof URL.revokeObjectURL === "function") {
         URL.revokeObjectURL(objectUrl);
       }
     };
-  }, [upload.file]);
+  }, [previewFile]);
 
   return (
     <section className="panel top-gap">
@@ -57,8 +74,10 @@ export function JobUploadPanel({
             className="input"
             type="file"
             accept="video/*"
-            onChange={(event) => onChange({ ...upload, file: event.target.files?.[0] ?? null })}
+            multiple
+            onChange={(event) => onChange({ ...upload, files: Array.from(event.target.files ?? []) })}
           />
+          <span className="muted">{t("jobs.upload.fileHint")}</span>
         </label>
         <SelectField
           label={t("jobs.upload.language")}
@@ -124,7 +143,9 @@ export function JobUploadPanel({
       <section className="job-upload-preview top-gap" aria-label={t("jobs.upload.previewTitle")}>
         <div className="job-upload-preview-header">
           <strong>{t("jobs.upload.previewTitle")}</strong>
-          <span className="muted">{t("jobs.upload.previewDescription")}</span>
+          <span className="muted">
+            {upload.files.length > 1 ? t("jobs.upload.previewMultipleDescription") : t("jobs.upload.previewDescription")}
+          </span>
         </div>
         {previewUrl ? (
           <video
@@ -140,11 +161,50 @@ export function JobUploadPanel({
         )}
       </section>
       <div className="toolbar top-gap">
-        <button className="button primary" disabled={!upload.file || isSubmitting} onClick={onSubmit}>
+        <button className="button primary" disabled={upload.files.length === 0 || isSubmitting} onClick={onSubmit}>
           {isSubmitting ? t("jobs.upload.submitting") : t("jobs.upload.submit")}
         </button>
-        {upload.file && <span className="muted">{upload.file.name}</span>}
+        {upload.files.length > 0 ? (
+          <span className="muted">
+            {t("jobs.upload.selectedCount").replace("{count}", String(upload.files.length))}
+          </span>
+        ) : null}
       </div>
+      {upload.files.length > 0 ? (
+        <div className="job-upload-file-list top-gap" aria-label={t("jobs.upload.selectedList")}>
+          {upload.files.map((file, index) => (
+            <div key={`${file.name}-${file.size}-${index}`} className="job-upload-file-list-item">
+              <div className="job-upload-file-list-copy">
+                <span>{file.name}</span>
+                <div className="job-upload-file-list-meta muted">
+                  <span>{t("jobs.upload.fileOrder").replace("{index}", String(index + 1))}</span>
+                  {index === 0 && previewUrl ? <span>{t("jobs.upload.previewBadge")}</span> : null}
+                </div>
+              </div>
+              <div className="job-upload-file-list-actions">
+                <button
+                  type="button"
+                  className="button ghost button-sm"
+                  onClick={() => reorderFile(index, index - 1)}
+                  disabled={index === 0}
+                  aria-label={t("jobs.upload.moveUp")}
+                >
+                  {t("jobs.upload.moveUp")}
+                </button>
+                <button
+                  type="button"
+                  className="button ghost button-sm"
+                  onClick={() => reorderFile(index, index + 1)}
+                  disabled={index === upload.files.length - 1}
+                  aria-label={t("jobs.upload.moveDown")}
+                >
+                  {t("jobs.upload.moveDown")}
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : null}
     </section>
   );
 }

@@ -49,7 +49,7 @@ export const IDENTITY_SUPPORT_SOURCE_LABELS: Record<string, string> = {
 };
 
 export type UploadForm = {
-  file: File | null;
+  files: File[];
   language: string;
   workflowTemplate: string;
   workflowMode: string;

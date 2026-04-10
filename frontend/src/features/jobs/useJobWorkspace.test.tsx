@@ -562,7 +562,7 @@ describe("useJobWorkspace", () => {
     act(() => {
       result.current.setUpload({
         ...result.current.upload,
-        file,
+        files: [file],
         videoDescription: "这是一期工具开箱，重点保留锁定结构、开合手感和近景细节，整体节奏要更利落。",
       });
     });
@@ -572,7 +572,7 @@ describe("useJobWorkspace", () => {
     });
 
     expect(mockApi.createJob).toHaveBeenCalledWith(
-      file,
+      [file],
       "zh-CN",
       undefined,
       "standard_edit",

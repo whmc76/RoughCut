@@ -145,6 +145,8 @@ export function JobDetailPanel({
   const avatarDecision = activity?.decisions?.find((item) => item.kind === "avatar_commentary");
   const avatarHeadlineStatus = avatarDecision?.status ?? selectedJob?.avatar_delivery_status ?? null;
   const avatarHeadlineSummary = avatarDecision?.summary ?? selectedJob?.avatar_delivery_summary ?? null;
+  const mergedSourceNames = selectedJob?.merged_source_names ?? [];
+  const isMergedTask = mergedSourceNames.length > 1;
   const avatarEnabled = Boolean(selectedJob?.enhancement_modes.includes("avatar_commentary"));
   const downloadLabel = avatarEnabled
     ? avatarHeadlineStatus === "done"
@@ -265,6 +267,25 @@ export function JobDetailPanel({
             </button>
           </div>
           <div className="muted compact-top">{downloadHint}</div>
+
+          {isMergedTask ? (
+            <section className="detail-block">
+              <div className="detail-key">{t("jobs.detail.sourceBundle")}</div>
+              <div className="mode-chip-list">
+                <span className="mode-chip">{t("jobs.detail.mergedTask")}</span>
+                <span className="mode-chip subtle">
+                  {t("jobs.detail.mergedTaskCount").replace("{count}", String(mergedSourceNames.length))}
+                </span>
+              </div>
+              <div className="job-merged-source-list compact-top">
+                {mergedSourceNames.map((sourceName) => (
+                  <span key={sourceName} className="job-merged-source-item muted">
+                    {sourceName}
+                  </span>
+                ))}
+              </div>
+            </section>
+          ) : null}
 
           {selectedJob?.error_message ? (
             <section className="detail-block">

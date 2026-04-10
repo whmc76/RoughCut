@@ -21,7 +21,7 @@ export const jobsApi = {
       `/jobs/usage-trend?days=${days}&limit=${limit}${focusType ? `&focus_type=${encodeURIComponent(focusType)}` : ""}${focusName ? `&focus_name=${encodeURIComponent(focusName)}` : ""}`,
     ),
   createJob: async (
-    file: File,
+    files: File[],
     language: string,
     workflowTemplate?: string,
     workflowMode?: string,
@@ -30,7 +30,7 @@ export const jobsApi = {
     videoDescription?: string,
   ) => {
     const formData = new FormData();
-    formData.append("file", file);
+    files.forEach((file) => formData.append("files", file));
     formData.append("language", language);
     if (workflowTemplate) formData.append("workflow_template", workflowTemplate);
     if (workflowMode) formData.append("workflow_mode", workflowMode);

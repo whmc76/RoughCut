@@ -6,7 +6,7 @@ import { normalizeKeywordList } from "./contentProfile";
 import type { UploadForm } from "./constants";
 
 const EMPTY_UPLOAD: UploadForm = {
-  file: null,
+  files: [],
   language: "zh-CN",
   workflowTemplate: "",
   workflowMode: "standard_edit",
@@ -259,7 +259,7 @@ export function useJobWorkspace() {
   const uploadJob = useMutation({
     mutationFn: async () =>
       api.createJob(
-        upload.file!,
+        upload.files,
         upload.language,
         upload.workflowTemplate || undefined,
         upload.workflowMode,

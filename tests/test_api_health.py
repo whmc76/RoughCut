@@ -16,6 +16,100 @@ async def test_health(client: AsyncClient):
     assert response.json() == {"status": "ok"}
 
 
+@pytest.mark.asyncio
+async def test_create_job_accepts_multiple_uploaded_files_as_merged_task(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import roughcut.api.jobs as jobs_api
+    from roughcut.db.models import JobStep
+    from roughcut.db.session import get_session_factory
+    from sqlalchemy import select
+
+    uploaded_payloads: dict[str, bytes] = {}
+
+    class FakeStorage:
+        def ensure_bucket(self) -> None:
+            return None
+
+        def upload_file(self, local_path: Path, key: str) -> str:
+            uploaded_payloads[key] = Path(local_path).read_bytes()
+            return key
+
+    async def fake_merge_upload_files(file_paths: list[Path], *, output_path: Path) -> Path:
+        output_path.write_bytes(b"|".join(path.read_bytes() for path in file_paths))
+        return output_path
+
+    monkeypatch.setattr(jobs_api, "get_storage", lambda: FakeStorage())
+    monkeypatch.setattr(jobs_api, "_merge_upload_files_for_job", fake_merge_upload_files)
+
+    response = await client.post(
+        "/api/v1/jobs",
+        data={
+            "language": "zh-CN",
+            "workflow_mode": "standard_edit",
+            "video_description": "保留前后两段关键镜头",
+        },
+        files=[
+            ("files", ("part-1.mp4", b"video-part-1", "video/mp4")),
+            ("files", ("part-2.mp4", b"video-part-2", "video/mp4")),
+        ],
+    )
+
+    assert response.status_code == 201
+    payload = response.json()
+    assert payload["source_name"] == "merged_2_part-1.mp4"
+    assert payload["merged_source_names"] == ["part-1.mp4", "part-2.mp4"]
+    assert payload["status"] == "pending"
+    assert any(key.endswith("/merged_2_part-1.mp4") for key in uploaded_payloads)
+
+    async with get_session_factory()() as session:
+        result = await session.execute(
+            select(JobStep).where(
+                JobStep.job_id == uuid.UUID(payload["id"]),
+                JobStep.step_name == "content_profile",
+            )
+        )
+        step = result.scalar_one()
+
+    assert step.metadata_["source_context"]["video_description"] == "保留前后两段关键镜头"
+    assert step.metadata_["source_context"]["allow_related_profiles"] is True
+    assert step.metadata_["source_context"]["merged_source_names"] == ["part-1.mp4", "part-2.mp4"]
+
+
+@pytest.mark.asyncio
+async def test_create_job_keeps_legacy_single_file_field(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import roughcut.api.jobs as jobs_api
+
+    uploaded_payloads: dict[str, bytes] = {}
+
+    class FakeStorage:
+        def ensure_bucket(self) -> None:
+            return None
+
+        def upload_file(self, local_path: Path, key: str) -> str:
+            uploaded_payloads[key] = Path(local_path).read_bytes()
+            return key
+
+    monkeypatch.setattr(jobs_api, "get_storage", lambda: FakeStorage())
+
+    response = await client.post(
+        "/api/v1/jobs",
+        data={"language": "zh-CN"},
+        files={"file": ("single.mp4", b"single-video", "video/mp4")},
+    )
+
+    assert response.status_code == 201
+    payload = response.json()
+    assert payload["source_name"] == "single.mp4"
+    assert payload["merged_source_names"] == []
+    assert payload["status"] == "pending"
+    assert any(key.endswith("/single.mp4") for key in uploaded_payloads)
+
+
 def test_job_content_preview_ignores_generic_placeholder_subject_fields():
     from roughcut.api.jobs import _resolve_job_content_preview
     from roughcut.db.models import Artifact

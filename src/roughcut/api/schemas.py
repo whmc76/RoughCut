@@ -84,6 +84,7 @@ class JobOut(BaseModel):
 
     id: uuid.UUID
     source_name: str
+    merged_source_names: list[str] = Field(default_factory=list)
     content_subject: str | None = None
     content_summary: str | None = None
     quality_score: float | None = None

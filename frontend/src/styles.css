@@ -544,6 +544,64 @@ select {
   background: rgba(255, 255, 255, 0.02);
 }
 
+.job-upload-file-list {
+  display: grid;
+  gap: 8px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.job-upload-file-list-item {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+}
+
+.job-upload-file-list-copy {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.job-upload-file-list-meta {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.job-upload-file-list-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.job-merged-source-list {
+  display: grid;
+  gap: 6px;
+}
+
+.job-merged-source-item {
+  display: block;
+  padding-left: 14px;
+  position: relative;
+}
+
+.job-merged-source-item::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0.55em;
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: currentColor;
+  opacity: 0.55;
+}
+
 .toolbar,
 .detail-actions,
 .field-row {

@@ -11,6 +11,7 @@ export type JobStep = {
 export type Job = {
   id: string;
   source_name: string;
+  merged_source_names?: string[];
   content_subject?: string | null;
   content_summary?: string | null;
   quality_score?: number | null;
