@@ -18,6 +18,17 @@ const SAMPLE_JOB = {
   quality_grade: "A-",
   quality_summary: "整体稳定，仅有少量术语不一致。",
   quality_issue_codes: ["subtitle_timing", "terminology"],
+  timeline_diagnostics: {
+    review_recommended: true,
+    review_reasons: ["存在贴近高能量保留段的 cut，建议复核边界。", "Hook 段存在高能量保留片段。"],
+    high_risk_cut_count: 2,
+    high_energy_keep_count: 1,
+    llm_reviewed: true,
+    llm_candidate_count: 3,
+    llm_restored_cut_count: 1,
+    llm_provider: "minimax",
+    llm_summary: "恢复了 1 个展示型误删。",
+  },
 };
 
 const SAMPLE_REPORT = {
@@ -133,6 +144,13 @@ describe("JobFinalReviewOverlay", () => {
     expect(screen.getByText("整体稳定，仅有少量术语不一致。")).toBeInTheDocument();
     expect(screen.getByText("subtitle_timing")).toBeInTheDocument();
     expect(screen.getByText("terminology")).toBeInTheDocument();
+    expect(screen.getByText("剪辑诊断")).toBeInTheDocument();
+    expect(screen.getByText("高风险 Cut")).toBeInTheDocument();
+    expect(screen.getByText("人工复核建议")).toBeInTheDocument();
+    expect(screen.getByText("存在贴近高能量保留段的 cut，建议复核边界。")).toBeInTheDocument();
+    expect(screen.getByText("LLM 复核摘要")).toBeInTheDocument();
+    expect(screen.getByText("minimax · 恢复 1 个 cut")).toBeInTheDocument();
+    expect(screen.getByText("已复核 3 个高风险 cut：恢复了 1 个展示型误删。")).toBeInTheDocument();
 
     expect(screen.getByText("字幕抽检")).toBeInTheDocument();
     expect(screen.getByText("#1 这里是第一句成稿")).toBeInTheDocument();

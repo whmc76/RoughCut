@@ -84,6 +84,28 @@ _NOISE_MARKER_TERMS = (
     "咳嗽",
 )
 _NOISE_INTERJECTION_CHARS = frozenset("啊嗯呃哦哎诶欸哈呵咳")
+_VISUAL_SHOWCASE_TERMS = (
+    "放一起",
+    "放在一起",
+    "并排",
+    "同框",
+    "对比看",
+    "尺寸对比",
+    "左边",
+    "右边",
+    "近看",
+    "特写",
+    "展示",
+    "看一下",
+    "看细节",
+    "镜面",
+    "雾面",
+    "上手看",
+    "开合",
+    "展开看",
+    "收纳",
+    "收纳看",
+)
 _RESTART_CUE_TERMS = (
     "重来",
     "重讲",
@@ -102,6 +124,26 @@ _RESTART_CUE_TERMS = (
     "刚才不对",
 )
 _RESTART_SHORT_CUES = frozenset({"重来", "重讲", "重说", "重新", "再来", "再说", "口误", "说错", "讲错"})
+_RESTART_PREFIX_TERMS = (
+    "等一下",
+    "等会",
+    "等会儿",
+    "不好意思",
+    "前面不算",
+    "刚才不对",
+    "口误",
+    "口误了",
+    "说错了",
+    "讲错了",
+    "重来",
+    "重讲",
+    "重说",
+    "重新讲",
+    "重新说",
+    "再来一遍",
+    "再讲一遍",
+    "再说一遍",
+)
 _TERMINAL_PUNCTUATION_CHARS = "。！？!?…~"
 _INCOMPLETE_TAIL_SUFFIXES = (
     "的",
@@ -164,6 +206,10 @@ _RETAKE_MAX_GAP_SEC = 4.5
 _RETAKE_MAX_WINDOW_ITEMS = 4
 _RETAKE_MIN_PREFIX_LEN = 4
 _RETAKE_MAX_FRAGMENT_CHARS = 24
+_SHOWCASE_CONTEXT_MAX_GAP_SEC = 0.55
+_VISUAL_SHOWCASE_GAP_MIN_SEC = 0.45
+_VISUAL_SHOWCASE_GAP_MAX_SEC = 3.2
+_LONG_INVALID_NO_DIALOGUE_MIN_SEC = 1.2
 _SILENCE_CUT_SCORE_THRESHOLD = 0.32
 _SILENCE_DURATION_SCORE_BASE = 0.22
 _SILENCE_DURATION_SCORE_PER_SEC = 0.35
@@ -193,6 +239,16 @@ _TRIM_INTENSITY_PROFILES = {
         "micro_keep_bridge_max_sec": 0.34,
         "short_keep_audio_safe_sec": 1.95,
     },
+}
+
+_CREATIVE_PREFERENCE_LABELS = {
+    "comparison_focus": "突出差异对比",
+    "detail_focus": "突出细节做工",
+    "closeup_focus": "突出近景特写",
+    "practical_demo": "突出上手实测",
+    "workflow_breakdown": "突出流程拆解",
+    "fast_paced": "节奏偏快",
+    "conclusion_first": "先给结论",
 }
 
 
@@ -316,6 +372,7 @@ def build_edit_decision(
             content_profile=content_profile,
             duration=duration,
             timeline_analysis=timeline_analysis,
+            scene_points=scene_points,
         )
     segments = _merge_adjacent_segments(segments)
     keep_energy_segments = _build_keep_energy_segments_analysis(
@@ -491,6 +548,24 @@ def _score_silence_cut(
     if _looks_like_semantic_bridge(previous_item, next_item, content_profile=content_profile):
         score -= 0.08
         signals.append("semantic_bridge")
+    if _is_visual_showcase_gap(
+        start_time=silence.start,
+        end_time=silence.end,
+        previous_item=previous_item,
+        next_item=next_item,
+        content_profile=content_profile,
+        timeline_analysis=timeline_analysis,
+        scene_points=scene_points,
+    ):
+        score -= 0.42
+        signals.append("visual_showcase_gap")
+    elif (
+        transcript_segments
+        and not _overlapping_transcript_segments(silence.start, silence.end, transcript_segments)
+        and silence.duration >= _LONG_INVALID_NO_DIALOGUE_MIN_SEC
+    ):
+        score += 0.16
+        signals.append("long_invalid_gap")
 
     previous_speaker = str((previous_item or {}).get("dominant_speaker") or "").strip()
     next_speaker = str((next_item or {}).get("dominant_speaker") or "").strip()
@@ -698,6 +773,7 @@ def _build_section_directives(
     editing_skill: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     section_policy = dict((editing_skill or {}).get("section_policy") or {})
+    creative_tags = _editing_skill_creative_preferences(editing_skill)
     directives: list[dict[str, Any]] = []
     for index, section in enumerate(sections):
         role = str(section.get("role") or "")
@@ -705,6 +781,7 @@ def _build_section_directives(
         overlay_weight = float(policy.get("overlay_weight", 0.0) or 0.0)
         music_entry_allowed = bool(policy.get("music_entry_allowed", role != "cta"))
         insert_allowed = bool(policy.get("insert_allowed", role in {"detail", "body"}))
+        preference_labels, rationale = _section_creative_preference_annotation(role=role, creative_tags=creative_tags)
         directives.append(
             {
                 "index": index,
@@ -716,6 +793,8 @@ def _build_section_directives(
                 "music_entry_bonus": round(float(policy.get("music_entry_bonus", 0.0) or 0.0), 3),
                 "insert_allowed": insert_allowed,
                 "insert_priority": round(float(policy.get("insert_priority", 0.0) or 0.0), 3),
+                "creative_preferences": preference_labels,
+                "creative_rationale": rationale,
             }
         )
     return directives
@@ -727,6 +806,7 @@ def _build_section_actions(
     editing_skill: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     section_policy = dict((editing_skill or {}).get("section_policy") or {})
+    creative_tags = _editing_skill_creative_preferences(editing_skill)
     actions: list[dict[str, Any]] = []
     for index, section in enumerate(sections):
         role = str(section.get("role") or "")
@@ -735,6 +815,7 @@ def _build_section_actions(
         duration_sec = max(0.0, end_sec - start_sec)
         policy = dict(section_policy.get(role) or {})
         anchor_bias = min(1.0, max(0.0, float(policy.get("broll_anchor_bias", 0.5) or 0.5)))
+        preference_labels, rationale = _section_creative_preference_annotation(role=role, creative_tags=creative_tags)
         actions.append(
             {
                 "index": index,
@@ -749,9 +830,51 @@ def _build_section_actions(
                 "broll_allowed": bool(policy.get("broll_allowed", False)),
                 "broll_anchor_sec": round(start_sec + duration_sec * anchor_bias, 3),
                 "action_priority": round(float(policy.get("insert_priority", 0.0) or 0.0), 3),
+                "creative_preferences": preference_labels,
+                "creative_rationale": rationale,
             }
         )
     return actions
+
+
+def _editing_skill_creative_preferences(editing_skill: dict[str, Any] | None) -> set[str]:
+    return {
+        str(item or "").strip()
+        for item in (editing_skill or {}).get("creative_preferences") or []
+        if str(item or "").strip()
+    }
+
+
+def _section_creative_preference_annotation(*, role: str, creative_tags: set[str]) -> tuple[list[str], str]:
+    if not creative_tags:
+        return [], ""
+    normalized_role = str(role or "").strip().lower()
+    labels = [_CREATIVE_PREFERENCE_LABELS.get(tag, tag) for tag in sorted(creative_tags)]
+    reasons: list[str] = []
+    if normalized_role == "hook":
+        if "conclusion_first" in creative_tags:
+            reasons.append("开头优先前置结论")
+        if "fast_paced" in creative_tags:
+            reasons.append("开头节奏收紧，尽快给重点")
+        if "comparison_focus" in creative_tags:
+            reasons.append("开头先抛出关键差异")
+    elif normalized_role == "detail":
+        if "detail_focus" in creative_tags or "closeup_focus" in creative_tags:
+            reasons.append("细节段优先保留近景和做工镜头")
+        if "comparison_focus" in creative_tags:
+            reasons.append("细节段优先承载版本差异")
+        if "practical_demo" in creative_tags:
+            reasons.append("细节段优先承载上手实测")
+    elif normalized_role == "body":
+        if "workflow_breakdown" in creative_tags:
+            reasons.append("主体段优先保留流程拆解")
+        if "comparison_focus" in creative_tags:
+            reasons.append("主体段优先展开取舍逻辑")
+        if "practical_demo" in creative_tags:
+            reasons.append("主体段优先保留实际使用场景")
+    elif normalized_role == "cta" and "conclusion_first" in creative_tags:
+        reasons.append("结尾延续结论式收口")
+    return labels, "；".join(reasons)
 
 
 def _normalize_subtitle_items(subtitle_items: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -925,6 +1048,7 @@ def _refine_segments_for_pacing(
     content_profile: dict | None,
     duration: float,
     timeline_analysis: dict[str, Any] | None = None,
+    scene_points: list[float] | None = None,
 ) -> list[EditSegment]:
     refined: list[EditSegment] = []
     for segment in segments:
@@ -937,8 +1061,33 @@ def _refine_segments_for_pacing(
         overlaps = _overlapping_subtitle_items(segment.start, segment.end, subtitle_items)
         if not overlaps:
             transcript_overlaps = _overlapping_transcript_segments(segment.start, segment.end, transcript_segments)
-            if seg_duration <= float(trim_profile["micro_keep_no_subtitle_max_sec"]) and not transcript_overlaps:
+            previous_item = _find_previous_subtitle(segment.start, subtitle_items)
+            next_item = _find_next_subtitle(segment.end, subtitle_items)
+            if transcript_overlaps:
+                refined.append(segment)
+                continue
+            if _is_visual_showcase_gap(
+                start_time=segment.start,
+                end_time=segment.end,
+                previous_item=previous_item,
+                next_item=next_item,
+                content_profile=content_profile,
+                timeline_analysis=timeline_analysis,
+                scene_points=scene_points or [],
+            ):
+                refined.append(segment)
+                continue
+            if seg_duration <= float(trim_profile["micro_keep_no_subtitle_max_sec"]):
                 refined.append(EditSegment(start=segment.start, end=segment.end, type="remove", reason="micro_keep"))
+            elif _should_remove_long_non_dialogue_keep(
+                segment,
+                subtitle_items=subtitle_items,
+                transcript_segments=transcript_segments,
+                content_profile=content_profile,
+                timeline_analysis=timeline_analysis,
+                scene_points=scene_points or [],
+            ):
+                refined.append(EditSegment(start=segment.start, end=segment.end, type="remove", reason="long_non_dialogue"))
             else:
                 refined.append(segment)
             continue
@@ -1234,6 +1383,40 @@ def _section_action_for_time(
     return None
 
 
+def _contextual_section_action_for_range(
+    start_time: float,
+    end_time: float,
+    *,
+    timeline_analysis: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    midpoint = start_time + max(0.0, end_time - start_time) * 0.5
+    direct = _section_action_for_time(midpoint, timeline_analysis=timeline_analysis)
+    if direct is not None:
+        return direct
+
+    touching: list[tuple[int, float, float, dict[str, Any]]] = []
+    for action in list((timeline_analysis or {}).get("section_actions") or []):
+        if not isinstance(action, dict):
+            continue
+        action_start = float(action.get("start_sec", 0.0) or 0.0)
+        action_end = float(action.get("end_sec", action_start) or action_start)
+        boundary_distance = min(abs(action_end - start_time), abs(action_start - end_time))
+        if boundary_distance > 0.18:
+            continue
+        touching.append(
+            (
+                0 if bool(action.get("broll_allowed")) else 1,
+                boundary_distance,
+                abs(midpoint - (action_start + action_end) * 0.5),
+                action,
+            )
+        )
+    if not touching:
+        return None
+    touching.sort(key=lambda item: (item[0], item[1], item[2]))
+    return touching[0][3]
+
+
 def _resolve_trim_profile_for_segment(
     segment: EditSegment,
     *,
@@ -1331,6 +1514,8 @@ def _subtitle_signal_score(text: str, *, content_profile: dict | None) -> float:
         score += 1.0
     if any(keyword in compact for keyword in _ANCHOR_KEYWORDS):
         score += 1.5
+    if _has_visual_showcase_signal(compact, content_profile=content_profile):
+        score += 1.1
     for token in _extract_subject_tokens(content_profile or {}):
         if token and token in compact.upper():
             score += 2.5
@@ -1354,10 +1539,20 @@ def _is_low_signal_subtitle_text(text: str, *, content_profile: dict | None = No
         return True
     if len(compact) <= 2:
         return True
-    if len(compact) <= 8 and any(compact.startswith(prefix) for prefix in _BRIDGE_OPENERS) and not _has_anchor_signal(compact, content_profile=content_profile):
+    if (
+        len(compact) <= 8
+        and any(compact.startswith(prefix) for prefix in _BRIDGE_OPENERS)
+        and not _has_anchor_signal(compact, content_profile=content_profile)
+        and not _has_visual_showcase_signal(compact, content_profile=content_profile)
+    ):
         return True
     repeated_chunk = re.search(r"(.{2,8})\1{1,}", compact)
-    if repeated_chunk:
+    if (
+        repeated_chunk
+        and len(repeated_chunk.group(0)) >= max(4, int(len(compact) * 0.55))
+        and not _has_anchor_signal(compact, content_profile=content_profile)
+        and not _has_visual_showcase_signal(compact, content_profile=content_profile)
+    ):
         return True
     unique_chars = len(set(compact))
     if len(compact) >= 8 and unique_chars <= max(2, len(compact) // 5):
@@ -1366,15 +1561,36 @@ def _is_low_signal_subtitle_text(text: str, *, content_profile: dict | None = No
     if repeated_token_match and compact.count(repeated_token_match.group(1)) >= 3:
         return True
     stripped_hedge = HEDGE_PATTERN.sub("", compact)
-    if len(compact) <= 12 and len(stripped_hedge) <= 4 and not re.search(r"[A-Za-z0-9]", stripped_hedge):
+    if (
+        len(compact) <= 12
+        and len(stripped_hedge) <= 4
+        and not re.search(r"[A-Za-z0-9]", stripped_hedge)
+        and not _has_visual_showcase_signal(compact, content_profile=content_profile)
+    ):
         return True
-    if len(compact) <= 18 and len(stripped_hedge) <= max(4, int(len(compact) * 0.38)):
+    if (
+        len(compact) <= 18
+        and len(stripped_hedge) <= max(4, int(len(compact) * 0.38))
+        and not _has_visual_showcase_signal(compact, content_profile=content_profile)
+    ):
         return True
-    if len(compact) <= 14 and len(stripped_hedge) <= 5 and not _has_anchor_signal(compact, content_profile=content_profile):
+    if (
+        len(compact) <= 14
+        and len(stripped_hedge) <= 5
+        and not _has_anchor_signal(compact, content_profile=content_profile)
+        and not _has_visual_showcase_signal(compact, content_profile=content_profile)
+    ):
         return True
     if _looks_like_subject_conflict_subtitle(compact, content_profile=content_profile):
         return True
     return False
+
+
+def _has_visual_showcase_signal(text: str, *, content_profile: dict | None) -> bool:
+    normalized = PUNCTUATION_PATTERN.sub("", str(text or "").strip())
+    if not normalized:
+        return False
+    return any(term in normalized for term in _VISUAL_SHOWCASE_TERMS)
 
 
 def _looks_like_noise_subtitle(text: str) -> bool:
@@ -1464,9 +1680,10 @@ def _collect_restart_retake_cuts(
         if (
             len(fragment_compact) < _RETAKE_MIN_PREFIX_LEN
             or len(fragment_compact) > _RETAKE_MAX_FRAGMENT_CHARS
-            or not _looks_like_incomplete_tail(fragment_text)
+            or _is_restart_cue_text(fragment_text)
         ):
             continue
+        fragment_incomplete = _looks_like_incomplete_tail(fragment_text)
         fragment_start = float(item.get("start_time", 0.0) or 0.0)
         fragment_end = float(item.get("end_time", 0.0) or 0.0)
         lookahead_stop = min(len(ordered), start_index + _RETAKE_MAX_WINDOW_ITEMS + 1)
@@ -1476,8 +1693,10 @@ def _collect_restart_retake_cuts(
             if next_start - fragment_end > _RETAKE_MAX_GAP_SEC:
                 break
             next_text = _subtitle_text(next_item)
-            next_compact = _compact_subtitle_text(next_text)
+            next_compact = _strip_restart_prefix(_compact_subtitle_text(next_text))
             if not _looks_like_retake_match(fragment_compact, next_compact):
+                continue
+            if not (fragment_incomplete or _window_has_restart_cue(ordered, start_index=start_index, next_index=next_index)):
                 continue
             if not _retake_window_is_disposable(
                 ordered,
@@ -1503,6 +1722,30 @@ def _looks_like_retake_match(fragment_compact: str, next_compact: str) -> bool:
             break
         prefix_len += 1
     return prefix_len >= min(len(fragment_compact), 8) and prefix_len >= _RETAKE_MIN_PREFIX_LEN
+
+
+def _strip_restart_prefix(compact_text: str) -> str:
+    stripped = str(compact_text or "")
+    previous = None
+    while stripped and stripped != previous:
+        previous = stripped
+        for prefix in _RESTART_PREFIX_TERMS:
+            if stripped.startswith(prefix):
+                stripped = stripped[len(prefix):]
+                break
+    return stripped
+
+
+def _window_has_restart_cue(
+    ordered: list[dict],
+    *,
+    start_index: int,
+    next_index: int,
+) -> bool:
+    for item in ordered[start_index:next_index + 1]:
+        if _is_restart_cue_text(_subtitle_text(item)):
+            return True
+    return False
 
 
 def _retake_window_is_disposable(
@@ -1533,6 +1776,64 @@ def _is_restart_cue_text(text: str) -> bool:
     if any(term in compact for term in _RESTART_CUE_TERMS):
         return True
     return compact in _RESTART_SHORT_CUES
+
+
+def _is_visual_showcase_gap(
+    *,
+    start_time: float,
+    end_time: float,
+    previous_item: dict[str, Any] | None,
+    next_item: dict[str, Any] | None,
+    content_profile: dict | None,
+    timeline_analysis: dict[str, Any] | None,
+    scene_points: list[float],
+) -> bool:
+    duration = max(0.0, end_time - start_time)
+    if duration < _VISUAL_SHOWCASE_GAP_MIN_SEC or duration > _VISUAL_SHOWCASE_GAP_MAX_SEC:
+        return False
+    action = _contextual_section_action_for_range(start_time, end_time, timeline_analysis=timeline_analysis)
+    if not bool((action or {}).get("broll_allowed")):
+        return False
+    close_prev = previous_item is not None and start_time - float(previous_item.get("end_time", 0.0) or 0.0) <= _SHOWCASE_CONTEXT_MAX_GAP_SEC
+    close_next = next_item is not None and float(next_item.get("start_time", 0.0) or 0.0) - end_time <= _SHOWCASE_CONTEXT_MAX_GAP_SEC
+    if not (close_prev or close_next):
+        return False
+    context_texts = [_subtitle_text(item) for item in (previous_item, next_item) if item is not None]
+    if not any(_has_visual_showcase_signal(text, content_profile=content_profile) for text in context_texts):
+        return False
+    scene_hits = sum(1 for point in scene_points if start_time - 0.12 <= point <= end_time + 0.12)
+    role = str((action or {}).get("role") or "").strip().lower()
+    return scene_hits >= 1 or (close_prev and close_next and role in {"detail", "body"})
+
+
+def _should_remove_long_non_dialogue_keep(
+    segment: EditSegment,
+    *,
+    subtitle_items: list[dict[str, Any]],
+    transcript_segments: list[dict[str, Any]],
+    content_profile: dict | None,
+    timeline_analysis: dict[str, Any] | None,
+    scene_points: list[float],
+) -> bool:
+    if not transcript_segments:
+        return False
+    if max(0.0, segment.end - segment.start) < _LONG_INVALID_NO_DIALOGUE_MIN_SEC:
+        return False
+    previous_item = _find_previous_subtitle(segment.start, subtitle_items)
+    next_item = _find_next_subtitle(segment.end, subtitle_items)
+    if _looks_like_sentence_continuation(previous_item, next_item):
+        return False
+    if _is_visual_showcase_gap(
+        start_time=segment.start,
+        end_time=segment.end,
+        previous_item=previous_item,
+        next_item=next_item,
+        content_profile=content_profile,
+        timeline_analysis=timeline_analysis,
+        scene_points=scene_points,
+    ):
+        return False
+    return True
 
 
 def _has_anchor_signal(text: str, *, content_profile: dict | None) -> bool:
@@ -1593,6 +1894,7 @@ def _cut_reason_priority(reason: str) -> int:
         "noise_subtitle": 4,
         "low_signal_subtitle": 4,
         "filler_word": 4,
+        "long_non_dialogue": 3,
         "timing_trim": 3,
         "silence": 2,
         "micro_keep": 1,

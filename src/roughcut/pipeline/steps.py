@@ -14,7 +14,7 @@ import subprocess
 import tempfile
 import time
 import uuid
-from contextlib import suppress
+from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -34,7 +34,14 @@ from roughcut.creative import (
 )
 from roughcut.db.models import Artifact, GlossaryTerm, Job, JobStep, RenderOutput, SubtitleItem, Timeline, TranscriptSegment
 from roughcut.db.session import get_session_factory
-from roughcut.edit.decisions import build_edit_decision, infer_timeline_analysis
+from roughcut.edit.decisions import (
+    EditDecision,
+    EditSegment,
+    _build_keep_energy_segments_analysis,
+    _summarize_keep_energy_segments,
+    build_edit_decision,
+    infer_timeline_analysis,
+)
 from roughcut.edit.otio_export import export_to_otio
 from roughcut.edit.presets import normalize_workflow_template_name
 from roughcut.edit.render_plan import (
@@ -69,6 +76,7 @@ from roughcut.packaging.library import (
     resolve_insert_transition_overlap,
     resolve_packaging_plan_for_job,
 )
+from roughcut.prompts.edit_decision import build_high_risk_cut_review_prompt
 from roughcut.providers.factory import get_avatar_provider, get_reasoning_provider, get_voice_provider
 from roughcut.providers.reasoning.base import Message
 from roughcut.pipeline.quality import _compute_subtitle_sync_check, evaluate_profile_identity_gate
@@ -85,7 +93,11 @@ from roughcut.review.content_profile import (
     polish_subtitle_items,
     resolve_content_profile_review_feedback,
 )
-from roughcut.review.content_profile_memory import load_content_profile_user_memory
+from roughcut.review.content_profile_memory import (
+    load_content_profile_user_memory,
+    merge_content_profile_creative_preferences,
+    record_content_profile_feedback_memory,
+)
 from roughcut.review.downstream_context import (
     build_downstream_context,
     resolve_downstream_profile,
@@ -119,7 +131,15 @@ from roughcut.review.subtitle_translation import (
     translate_subtitle_items,
 )
 from roughcut.review.telegram_bot import get_telegram_review_bot_service
-from roughcut.speech.postprocess import normalize_display_text, save_subtitle_items, split_into_subtitles
+from roughcut.speech.postprocess import (
+    analyze_subtitle_segmentation,
+    generate_subtitle_window_candidates,
+    normalize_display_text,
+    resegment_subtitle_window_from_cuts,
+    save_subtitle_items,
+    score_subtitle_entries,
+    segment_subtitles,
+)
 from roughcut.speech.transcribe import persist_empty_transcript_result, transcribe_audio
 from roughcut.storage.s3 import get_storage, job_key
 from roughcut.usage import track_step_usage, track_usage_operation
@@ -187,8 +207,21 @@ _CONTENT_PROFILE_ARTIFACT_TYPES = ("content_profile_final", "content_profile", "
 _DOWNSTREAM_PROFILE_ARTIFACT_TYPES = ("downstream_context",) + _CONTENT_PROFILE_ARTIFACT_TYPES
 _EDIT_PLAN_SUBTITLE_POLISH_TIMEOUT_SEC = 45.0
 _EDIT_PLAN_INSERT_SLOT_TIMEOUT_SEC = 20.0
+_EDIT_PLAN_CUT_REVIEW_TIMEOUT_SEC = 18.0
+_SUBTITLE_POSTPROCESS_BOUNDARY_REFINE_TIMEOUT_SEC = 20.0
+_SUBTITLE_BOUNDARY_REFINE_MIN_SCORE_GAIN = 2.0
+_SUBTITLE_BOUNDARY_LOCAL_FALLBACK_MIN_SCORE_GAIN = 8.0
+_SUBTITLE_BOUNDARY_LOCAL_EARLY_ACCEPT_SCORE_GAIN = 12.0
 _SOURCE_NAME_TIMESTAMP_RE = re.compile(r"(?<!\d)(?P<date>\d{8})[-_ ]?(?P<time>\d{6})(?!\d)")
 _SOURCE_NAME_SEQUENCE_RE = re.compile(r"(?P<prefix>[A-Za-z]+)[-_ ]?(?P<number>\d{3,6})(?!.*\d)")
+_EDIT_DECISION_REVIEW_CONTEXT_WINDOW_SEC = 1.2
+_EDIT_DECISION_REVIEW_MAX_CONTEXT_ITEMS = 2
+_EDIT_DECISION_REVIEW_REASON_PRIORITY = {
+    "restart_retake": 0,
+    "low_signal_subtitle": 1,
+    "long_non_dialogue": 2,
+    "silence": 3,
+}
 
 
 def _workflow_template_subject_domain(workflow_template: str | None) -> str | None:
@@ -279,6 +312,378 @@ def _resolve_edit_plan_review_focus(step: JobStep | None) -> str:
     return str(step.metadata_.get("review_rerun_focus") or "").strip().lower()
 
 
+def _cut_review_candidate_id(item: dict[str, Any]) -> str:
+    return (
+        f"{str(item.get('reason') or '').strip()}:"
+        f"{float(item.get('start', 0.0) or 0.0):.3f}:"
+        f"{float(item.get('end', 0.0) or 0.0):.3f}"
+    )
+
+
+def _segment_cut_key(segment: EditSegment) -> str:
+    return f"{segment.reason}:{float(segment.start):.3f}:{float(segment.end):.3f}"
+
+
+def _review_candidate_priority(item: dict[str, Any]) -> tuple[int, float, float]:
+    return (
+        _EDIT_DECISION_REVIEW_REASON_PRIORITY.get(str(item.get("reason") or "").strip(), 99),
+        -float(item.get("boundary_keep_energy", 0.0) or 0.0),
+        -(float(item.get("end", 0.0) or 0.0) - float(item.get("start", 0.0) or 0.0)),
+    )
+
+
+def _find_section_action_for_cut(
+    start_sec: float,
+    end_sec: float,
+    *,
+    timeline_analysis: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    midpoint = start_sec + max(0.0, end_sec - start_sec) * 0.5
+    for action in list((timeline_analysis or {}).get("section_actions") or []):
+        if not isinstance(action, dict):
+            continue
+        action_start = float(action.get("start_sec", 0.0) or 0.0)
+        action_end = float(action.get("end_sec", action_start) or action_start)
+        if action_start - 1e-6 <= midpoint <= action_end + 1e-6:
+            return action
+    return None
+
+
+def _context_items_around_cut(
+    *,
+    start_sec: float,
+    end_sec: float,
+    subtitle_items: list[dict[str, Any]],
+    transcript_segments: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    previous_subtitles = [
+        dict(item)
+        for item in subtitle_items
+        if float(item.get("end_time", 0.0) or 0.0) <= start_sec + 1e-6
+        and start_sec - float(item.get("end_time", 0.0) or 0.0) <= _EDIT_DECISION_REVIEW_CONTEXT_WINDOW_SEC
+    ][-_EDIT_DECISION_REVIEW_MAX_CONTEXT_ITEMS:]
+    next_subtitles = [
+        dict(item)
+        for item in subtitle_items
+        if float(item.get("start_time", 0.0) or 0.0) >= end_sec - 1e-6
+        and float(item.get("start_time", 0.0) or 0.0) - end_sec <= _EDIT_DECISION_REVIEW_CONTEXT_WINDOW_SEC
+    ][:_EDIT_DECISION_REVIEW_MAX_CONTEXT_ITEMS]
+    transcript_context = [
+        dict(item)
+        for item in transcript_segments
+        if float(item.get("end", 0.0) or 0.0) >= start_sec - _EDIT_DECISION_REVIEW_CONTEXT_WINDOW_SEC
+        and float(item.get("start", 0.0) or 0.0) <= end_sec + _EDIT_DECISION_REVIEW_CONTEXT_WINDOW_SEC
+    ][: 2 * _EDIT_DECISION_REVIEW_MAX_CONTEXT_ITEMS + 1]
+    return previous_subtitles, next_subtitles, transcript_context
+
+
+def _should_review_cut_with_llm(item: dict[str, Any]) -> bool:
+    reason = str(item.get("reason") or "").strip()
+    if reason in {"restart_retake", "low_signal_subtitle", "long_non_dialogue"}:
+        return True
+    if reason != "silence":
+        return False
+    if float(item.get("boundary_keep_energy", 0.0) or 0.0) >= 1.0:
+        return True
+    return any(
+        token in str(signal or "")
+        for signal in (item.get("signals") or [])
+        for token in ("semantic_bridge", "visual_showcase_gap", "continuation_guard")
+    )
+
+
+def _build_edit_decision_llm_review_candidates(
+    *,
+    decision: EditDecision,
+    subtitle_items: list[dict[str, Any]],
+    transcript_segments: list[dict[str, Any]],
+    settings,
+) -> list[dict[str, Any]]:
+    analysis = dict(getattr(decision, "analysis", {}) or {})
+    accepted_cuts = [
+        dict(item)
+        for item in list(analysis.get("accepted_cuts") or [])
+        if isinstance(item, dict) and _should_review_cut_with_llm(item)
+    ]
+    accepted_cuts.sort(key=_review_candidate_priority)
+    max_candidates = max(0, int(getattr(settings, "edit_decision_llm_review_max_candidates", 6) or 6))
+    candidates: list[dict[str, Any]] = []
+    for item in accepted_cuts[:max_candidates]:
+        start_sec = float(item.get("start", 0.0) or 0.0)
+        end_sec = float(item.get("end", 0.0) or 0.0)
+        previous_subtitles, next_subtitles, transcript_context = _context_items_around_cut(
+            start_sec=start_sec,
+            end_sec=end_sec,
+            subtitle_items=subtitle_items,
+            transcript_segments=transcript_segments,
+        )
+        action = _find_section_action_for_cut(start_sec, end_sec, timeline_analysis=analysis)
+        candidates.append(
+            {
+                "candidate_id": _cut_review_candidate_id(item),
+                "start": round(start_sec, 3),
+                "end": round(end_sec, 3),
+                "duration_sec": round(max(0.0, end_sec - start_sec), 3),
+                "reason": str(item.get("reason") or ""),
+                "boundary_keep_energy": round(float(item.get("boundary_keep_energy", 0.0) or 0.0), 3),
+                "signals": [str(signal) for signal in (item.get("signals") or []) if str(signal)],
+                "left_keep_role": str(item.get("left_keep_role") or ""),
+                "right_keep_role": str(item.get("right_keep_role") or ""),
+                "section_role": str((action or {}).get("role") or ""),
+                "broll_allowed": bool((action or {}).get("broll_allowed")),
+                "packaging_intent": str((action or {}).get("packaging_intent") or ""),
+                "previous_subtitles": [
+                    {
+                        "start_time": round(float(entry.get("start_time", 0.0) or 0.0), 3),
+                        "end_time": round(float(entry.get("end_time", 0.0) or 0.0), 3),
+                        "text": str(entry.get("text_final") or entry.get("text_norm") or entry.get("text_raw") or ""),
+                    }
+                    for entry in previous_subtitles
+                ],
+                "next_subtitles": [
+                    {
+                        "start_time": round(float(entry.get("start_time", 0.0) or 0.0), 3),
+                        "end_time": round(float(entry.get("end_time", 0.0) or 0.0), 3),
+                        "text": str(entry.get("text_final") or entry.get("text_norm") or entry.get("text_raw") or ""),
+                    }
+                    for entry in next_subtitles
+                ],
+                "transcript_context": [
+                    {
+                        "start": round(float(entry.get("start", 0.0) or 0.0), 3),
+                        "end": round(float(entry.get("end", 0.0) or 0.0), 3),
+                        "text": str(entry.get("text") or ""),
+                        "speaker": str(entry.get("speaker") or ""),
+                        "confidence": round(float(entry.get("confidence", 0.0) or 0.0), 3)
+                        if entry.get("confidence") is not None
+                        else None,
+                    }
+                    for entry in transcript_context
+                ],
+            }
+        )
+    return candidates
+
+
+def _merge_edit_segments(segments: list[EditSegment]) -> list[EditSegment]:
+    ordered = sorted(
+        (segment for segment in segments if segment.end > segment.start),
+        key=lambda segment: (segment.start, segment.end),
+    )
+    merged: list[EditSegment] = []
+    for segment in ordered:
+        if (
+            merged
+            and merged[-1].type == segment.type
+            and abs(merged[-1].end - segment.start) <= 1e-6
+            and (merged[-1].type != "remove" or merged[-1].reason == segment.reason)
+        ):
+            merged[-1].end = segment.end
+            continue
+        merged.append(EditSegment(start=segment.start, end=segment.end, type=segment.type, reason=segment.reason))
+    return merged
+
+
+def _normalize_cut_review_decisions(payload: dict[str, Any] | None) -> list[dict[str, Any]]:
+    decisions: list[dict[str, Any]] = []
+    for item in list((payload or {}).get("decisions") or []):
+        if not isinstance(item, dict):
+            continue
+        candidate_id = str(item.get("candidate_id") or "").strip()
+        verdict = str(item.get("verdict") or "").strip().lower()
+        if not candidate_id or verdict not in {"cut", "keep", "unsure"}:
+            continue
+        try:
+            confidence = max(0.0, min(1.0, float(item.get("confidence", 0.0) or 0.0)))
+        except (TypeError, ValueError):
+            confidence = 0.0
+        evidence = [str(entry).strip() for entry in (item.get("evidence") or []) if str(entry).strip()]
+        decisions.append(
+            {
+                "candidate_id": candidate_id,
+                "verdict": verdict,
+                "confidence": round(confidence, 3),
+                "reason": str(item.get("reason") or "").strip(),
+                "evidence": evidence[:4],
+            }
+        )
+    return decisions
+
+
+def _apply_llm_cut_review_to_decision(
+    *,
+    decision: EditDecision,
+    review_result: dict[str, Any],
+    subtitle_items: list[dict[str, Any]],
+    content_profile: dict[str, Any] | None,
+) -> EditDecision:
+    if not hasattr(decision, "analysis") or not isinstance(getattr(decision, "analysis", None), dict):
+        setattr(decision, "analysis", {})
+    normalized_reviews = _normalize_cut_review_decisions(review_result)
+    review_by_id = {item["candidate_id"]: item for item in normalized_reviews}
+    min_confidence = float(review_result.get("min_confidence", 0.72) or 0.72)
+    restore_ids = {
+        candidate_id
+        for candidate_id, item in review_by_id.items()
+        if str(item.get("verdict") or "") == "keep" and float(item.get("confidence", 0.0) or 0.0) >= min_confidence
+    }
+
+    if restore_ids:
+        updated_segments: list[EditSegment] = []
+        for segment in decision.segments:
+            if segment.type == "remove" and _segment_cut_key(segment) in restore_ids:
+                updated_segments.append(EditSegment(start=segment.start, end=segment.end, type="keep"))
+            else:
+                updated_segments.append(EditSegment(start=segment.start, end=segment.end, type=segment.type, reason=segment.reason))
+        decision.segments = _merge_edit_segments(updated_segments)
+
+    accepted_cuts: list[dict[str, Any]] = []
+    for item in list((decision.analysis or {}).get("accepted_cuts") or []):
+        if not isinstance(item, dict):
+            continue
+        candidate_id = _cut_review_candidate_id(item)
+        if candidate_id in restore_ids:
+            continue
+        payload = dict(item)
+        if candidate_id in review_by_id:
+            payload["llm_review"] = dict(review_by_id[candidate_id])
+        accepted_cuts.append(payload)
+    decision.analysis["accepted_cuts"] = accepted_cuts
+
+    keep_energy_segments = _build_keep_energy_segments_analysis(
+        decision.segments,
+        subtitle_items=subtitle_items,
+        timeline_analysis=decision.analysis,
+        content_profile=content_profile,
+    )
+    decision.analysis["keep_energy_segments"] = keep_energy_segments
+    decision.analysis["keep_energy_summary"] = _summarize_keep_energy_segments(keep_energy_segments)
+    decision.analysis["llm_cut_review"] = {
+        "reviewed": bool(normalized_reviews),
+        "candidate_count": len(list(review_result.get("candidates") or [])),
+        "decision_count": len(normalized_reviews),
+        "restored_cut_count": len(restore_ids),
+        "cached": bool(review_result.get("cached")),
+        "provider": str(review_result.get("provider") or ""),
+        "model": str(review_result.get("model") or ""),
+        "summary": str(review_result.get("summary") or ""),
+        "decisions": normalized_reviews,
+    }
+    return decision
+
+
+async def _maybe_review_edit_decision_cuts_with_llm(
+    *,
+    job_id: uuid.UUID,
+    source_name: str,
+    decision: EditDecision,
+    subtitle_items: list[dict[str, Any]],
+    transcript_segments: list[dict[str, Any]],
+    content_profile: dict[str, Any] | None,
+) -> EditDecision:
+    if not hasattr(decision, "analysis") or not isinstance(getattr(decision, "analysis", None), dict):
+        setattr(decision, "analysis", {})
+    settings = get_settings()
+    if not bool(getattr(settings, "edit_decision_llm_review_enabled", True)):
+        decision.analysis["llm_cut_review"] = {"reviewed": False, "disabled": True}
+        return decision
+
+    candidates = _build_edit_decision_llm_review_candidates(
+        decision=decision,
+        subtitle_items=subtitle_items,
+        transcript_segments=transcript_segments,
+        settings=settings,
+    )
+    if not candidates:
+        decision.analysis["llm_cut_review"] = {"reviewed": False, "candidate_count": 0}
+        return decision
+
+    source_meta = {
+        "job_id": str(job_id),
+        "source_name": str(source_name or "").strip(),
+        "subject_brand": str((content_profile or {}).get("subject_brand") or "").strip(),
+        "subject_model": str((content_profile or {}).get("subject_model") or "").strip(),
+        "subject_type": str((content_profile or {}).get("subject_type") or "").strip(),
+    }
+    cache_namespace = "edit_plan.cut_review"
+    with llm_task_route("edit_plan", search_enabled=False, settings=settings):
+        active_provider = get_settings().active_reasoning_provider
+        active_model = get_settings().active_reasoning_model
+    fingerprint = {
+        "source_meta": source_meta,
+        "provider": active_provider,
+        "model": active_model,
+        "candidates_sha256": digest_payload(candidates),
+        "min_confidence": float(getattr(settings, "edit_decision_llm_review_min_confidence", 0.72) or 0.72),
+    }
+    cache_key = build_cache_key(cache_namespace, fingerprint)
+    cached_entry = load_cached_entry(cache_namespace, cache_key)
+    if cached_entry is not None:
+        cached_result = dict(cached_entry.get("result") or {})
+        cached_result["cached"] = True
+        cached_result["candidates"] = candidates
+        cached_result["min_confidence"] = float(getattr(settings, "edit_decision_llm_review_min_confidence", 0.72) or 0.72)
+        return _apply_llm_cut_review_to_decision(
+            decision=decision,
+            review_result=cached_result,
+            subtitle_items=subtitle_items,
+            content_profile=content_profile,
+        )
+
+    prompt_messages = build_high_risk_cut_review_prompt(source_meta=source_meta, candidates=candidates)
+    try:
+        with llm_task_route("edit_plan", search_enabled=False, settings=settings):
+            provider = get_reasoning_provider()
+            with track_usage_operation("edit_plan.cut_review"):
+                response = await asyncio.wait_for(
+                    provider.complete(
+                        [Message(role=str(item["role"]), content=str(item["content"])) for item in prompt_messages],
+                        temperature=0.1,
+                        max_tokens=1200,
+                        json_mode=True,
+                    ),
+                    timeout=_EDIT_PLAN_CUT_REVIEW_TIMEOUT_SEC,
+                )
+            review_payload = response.as_json()
+            if not isinstance(review_payload, dict):
+                raise ValueError("edit decision cut review payload was not a JSON object")
+            result = {
+                "provider": str(get_settings().active_reasoning_provider or ""),
+                "model": str(get_settings().active_reasoning_model or ""),
+                "summary": str(review_payload.get("summary") or "").strip(),
+                "decisions": _normalize_cut_review_decisions(review_payload),
+                "cached": False,
+                "candidates": candidates,
+                "min_confidence": float(getattr(settings, "edit_decision_llm_review_min_confidence", 0.72) or 0.72),
+            }
+            save_cached_json(
+                cache_namespace,
+                cache_key,
+                fingerprint=fingerprint,
+                result={
+                    "provider": result["provider"],
+                    "model": result["model"],
+                    "summary": result["summary"],
+                    "decisions": list(result["decisions"]),
+                },
+                usage_baseline=response.usage,
+            )
+            return _apply_llm_cut_review_to_decision(
+                decision=decision,
+                review_result=result,
+                subtitle_items=subtitle_items,
+                content_profile=content_profile,
+            )
+    except Exception:
+        logger.exception("LLM cut review failed during edit_plan for job %s", job_id)
+        decision.analysis["llm_cut_review"] = {
+            "reviewed": False,
+            "candidate_count": len(candidates),
+            "error": "llm_cut_review_failed",
+        }
+        return decision
+
+
 async def _load_related_profile_source_context(
     session,
     *,
@@ -309,20 +714,10 @@ async def _load_related_profile_source_context(
         .order_by(Job.created_at.desc(), Job.id.desc())
     )
     candidates = list(candidates_result.scalars().all())
-    jobs_by_source_name: dict[str, Job] = {}
-    for candidate in candidates:
-        candidate_source_name = str(candidate.source_name or "").strip()
-        if candidate_source_name and candidate_source_name not in jobs_by_source_name:
-            jobs_by_source_name[candidate_source_name] = candidate
-    scored_jobs: list[tuple[Job, float]] = []
-    for source_name in preferred_source_names:
-        candidate = jobs_by_source_name.get(source_name)
-        if candidate is not None:
-            scored_jobs.append((candidate, 1.0))
-    if not scored_jobs:
+    if not candidates:
         return {}
 
-    candidate_ids = [candidate.id for candidate, _score in scored_jobs]
+    candidate_ids = [candidate.id for candidate in candidates]
     artifacts_result = await session.execute(
         select(Artifact)
         .where(
@@ -335,12 +730,44 @@ async def _load_related_profile_source_context(
     for artifact in artifacts_result.scalars().all():
         artifacts_by_job_id.setdefault(artifact.job_id, []).append(artifact)
 
-    related_profiles: list[dict[str, Any]] = []
-    for candidate, score in sorted(scored_jobs, key=lambda item: item[1], reverse=True):
+    profiles_by_source_name: dict[str, dict[str, Any]] = {}
+    for candidate in candidates:
+        candidate_source_name = str(candidate.source_name or "").strip()
+        if not candidate_source_name:
+            continue
         artifact = _select_preferred_content_profile_artifact(artifacts_by_job_id.get(candidate.id, []))
         profile = dict((artifact.data_json if artifact else None) or {})
         if not profile:
             continue
+        review_mode = str(profile.get("review_mode") or "").strip().lower()
+        artifact_type = str(artifact.artifact_type or "").strip().lower() if artifact is not None else ""
+        rank = (
+            2 if review_mode == "manual_confirmed" else 1 if review_mode == "auto_confirmed" else 0,
+            2 if artifact_type == "content_profile_final" else 1 if artifact_type == "content_profile" else 0,
+            candidate.created_at or datetime.min.replace(tzinfo=timezone.utc),
+            candidate.id,
+        )
+        existing = profiles_by_source_name.get(candidate_source_name)
+        if existing is not None and tuple(existing.get("_rank") or ()) >= rank:
+            continue
+        profiles_by_source_name[candidate_source_name] = {
+            "_rank": rank,
+            "job": candidate,
+            "artifact": artifact,
+            "profile": profile,
+        }
+
+    scored_jobs: list[tuple[Job, float, Artifact | None, dict[str, Any]]] = []
+    for source_name in preferred_source_names:
+        selected = profiles_by_source_name.get(source_name)
+        if selected is not None:
+            scored_jobs.append((selected["job"], 1.0, selected["artifact"], selected["profile"]))
+    if not scored_jobs:
+        return {}
+
+    related_profiles: list[dict[str, Any]] = []
+    for candidate, score, artifact, profile in sorted(scored_jobs, key=lambda item: item[1], reverse=True):
+        review_mode = str(profile.get("review_mode") or "").strip().lower()
         related_profile = {
             "source_name": str(candidate.source_name or "").strip(),
             "subject_brand": str(profile.get("subject_brand") or "").strip(),
@@ -350,6 +777,8 @@ async def _load_related_profile_source_context(
             "summary": str(profile.get("summary") or "").strip(),
             "search_queries": [str(item).strip() for item in (profile.get("search_queries") or []) if str(item).strip()][:6],
             "score": score,
+            "review_mode": review_mode,
+            "manual_confirmed": review_mode == "manual_confirmed",
         }
         if any(
             (
@@ -432,6 +861,505 @@ def _resolve_subtitle_split_profile(*, width: int | None, height: int | None) ->
     }
 
 
+def _subtitle_window_text_excerpt(window: dict[str, Any]) -> str:
+    texts = [str(item).strip() for item in (window.get("texts") or []) if str(item).strip()]
+    return " / ".join(texts)
+
+
+def _tokenize_subtitle_text_for_boundary_refine(text: str) -> list[str]:
+    compact = re.sub(r"\s+", "", str(text or "").strip())
+    if not compact:
+        return []
+    return [token for token in re.findall(r"[A-Za-z0-9]+|[\u4e00-\u9fff]|.", compact) if token.strip()]
+
+
+def _flatten_subtitle_window_words(entries: list[Any]) -> list[dict[str, Any]]:
+    flattened: list[dict[str, Any]] = []
+    word_index = 0
+    for entry_index, entry in enumerate(entries):
+        entry_words = tuple(getattr(entry, "words", ()) or ())
+        if entry_words:
+            for word in entry_words:
+                text = str(word.get("word") or "").strip()
+                if not text:
+                    continue
+                flattened.append(
+                    {
+                        "word_index": word_index,
+                        "entry_index": entry_index,
+                        "text": text,
+                        "start": float(word.get("start") or 0.0),
+                        "end": float(word.get("end") or 0.0),
+                    }
+                )
+                word_index += 1
+            continue
+
+        fallback_tokens = _tokenize_subtitle_text_for_boundary_refine(getattr(entry, "text_raw", ""))
+        if not fallback_tokens:
+            continue
+        entry_start = float(getattr(entry, "start", 0.0) or 0.0)
+        entry_end = float(getattr(entry, "end", entry_start) or entry_start)
+        duration = max(entry_end - entry_start, 0.001)
+        token_span = duration / max(len(fallback_tokens), 1)
+        for token_position, token in enumerate(fallback_tokens):
+            token_start = entry_start + token_position * token_span
+            token_end = min(entry_end, token_start + token_span)
+            flattened.append(
+                {
+                    "word_index": word_index,
+                    "entry_index": entry_index,
+                    "text": token,
+                    "start": token_start,
+                    "end": token_end,
+                }
+            )
+            word_index += 1
+    return flattened
+
+
+def _subtitle_boundary_refine_llm_supported() -> bool:
+    return True
+
+
+def _subtitle_window_current_cut_indices(flattened_words: list[dict[str, Any]], entry_count: int) -> list[int]:
+    if entry_count <= 1 or len(flattened_words) < 2:
+        return []
+    entry_last_word_index: dict[int, int] = {}
+    for item in flattened_words:
+        entry_last_word_index[int(item["entry_index"])] = int(item["word_index"])
+    cuts: list[int] = []
+    last_allowed = len(flattened_words) - 2
+    for entry_index in range(max(0, entry_count - 1)):
+        cut = entry_last_word_index.get(entry_index)
+        if cut is None or cut > last_allowed:
+            continue
+        if cuts and cut <= cuts[-1]:
+            continue
+        cuts.append(cut)
+    return cuts
+
+
+def _subtitle_boundary_token_line(flattened_words: list[dict[str, Any]]) -> str:
+    return " ".join(f"{int(item['word_index'])}:{str(item['text'])}" for item in flattened_words)
+
+
+def _normalize_subtitle_cut_indices(raw_value: Any) -> list[int] | None:
+    if raw_value is None:
+        return None
+    if not isinstance(raw_value, (list, tuple)):
+        return None
+    normalized: list[int] = []
+    for raw_item in raw_value:
+        try:
+            cut = int(raw_item)
+        except (TypeError, ValueError):
+            return None
+        if normalized and cut <= normalized[-1]:
+            return None
+        normalized.append(cut)
+    return normalized
+
+
+def _iter_subtitle_boundary_cut_candidates(data: dict[str, Any], *, current_cuts: list[int]) -> list[list[int]]:
+    raw_candidates = [
+        data.get("best_cut_after_word_indices"),
+        data.get("cut_after_word_indices"),
+        data.get("alternate_cut_after_word_indices"),
+    ]
+    alternates = data.get("alternate_candidates")
+    if isinstance(alternates, (list, tuple)):
+        raw_candidates.extend(alternates)
+    raw_candidates.append(current_cuts)
+
+    normalized_candidates: list[list[int]] = []
+    seen: set[tuple[int, ...]] = set()
+    for raw_candidate in raw_candidates:
+        normalized = _normalize_subtitle_cut_indices(raw_candidate)
+        if normalized is None:
+            continue
+        key = tuple(normalized)
+        if key in seen:
+            continue
+        seen.add(key)
+        normalized_candidates.append(normalized)
+    return normalized_candidates
+
+
+def _normalize_subtitle_candidate_index(raw_value: Any, *, limit: int) -> int | None:
+    try:
+        candidate_index = int(raw_value)
+    except (TypeError, ValueError):
+        return None
+    if candidate_index < 0 or candidate_index >= limit:
+        return None
+    return candidate_index
+
+
+def _iter_subtitle_candidate_selection_indices(
+    data: dict[str, Any],
+    *,
+    current_index: int,
+    limit: int,
+) -> list[int]:
+    raw_candidates = [
+        data.get("best_candidate_index"),
+        data.get("selected_candidate_index"),
+        data.get("alternate_candidate_index"),
+    ]
+    normalized: list[int] = []
+    seen: set[int] = set()
+    for raw_candidate in raw_candidates:
+        candidate_index = _normalize_subtitle_candidate_index(raw_candidate, limit=limit)
+        if candidate_index is None or candidate_index in seen:
+            continue
+        seen.add(candidate_index)
+        normalized.append(candidate_index)
+    if current_index not in seen and 0 <= current_index < limit:
+        normalized.append(current_index)
+    return normalized
+
+
+def _should_accept_strong_local_boundary_candidate(
+    *,
+    current_score: float,
+    current_entry_count: int,
+    best_local_candidate: list[Any] | None,
+    best_local_score: float,
+    min_score_gain: float,
+) -> bool:
+    return (
+        best_local_candidate is not None
+        and current_score < 0.0
+        and len(best_local_candidate) <= current_entry_count
+        and best_local_score >= current_score + min_score_gain
+    )
+
+
+async def _complete_subtitle_boundary_json(
+    *,
+    provider: object,
+    messages: list[Message],
+    followup_retry_message: str | None = None,
+    final_retry_message: str | None = None,
+) -> dict[str, Any] | None:
+    response = await provider.complete(
+        messages,
+        temperature=0.1,
+        max_tokens=600,
+        json_mode=True,
+    )
+    try:
+        data = response.as_json()
+        return data if isinstance(data, dict) else None
+    except Exception:
+        raw_content = str(getattr(response, "raw_content", "") or "").strip()
+        if not raw_content:
+            return None
+
+    followup_messages = list(messages)
+    followup_messages.append(Message(role="assistant", content=raw_content))
+    followup_messages.append(
+        Message(
+            role="user",
+            content=followup_retry_message
+            or (
+                "停止继续分析。现在只输出最终 JSON 对象 "
+                "{\"best_cut_after_word_indices\":[...],"
+                "\"alternate_cut_after_word_indices\":[...]}。"
+                "不要解释，不要 markdown，不要代码块。"
+            ),
+        )
+    )
+    followup = await provider.complete(
+        followup_messages,
+        temperature=0.0,
+        max_tokens=180,
+        json_mode=False,
+    )
+    try:
+        data = followup.as_json()
+    except Exception:
+        data = None
+    if isinstance(data, dict):
+        return data
+
+    if not final_retry_message:
+        return None
+    final_messages = list(messages)
+    final_messages.append(
+        Message(
+            role="user",
+            content=final_retry_message,
+        )
+    )
+    final_response = await provider.complete(
+        final_messages,
+        temperature=0.0,
+        max_tokens=120,
+        json_mode=False,
+    )
+    try:
+        data = final_response.as_json()
+    except Exception:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+async def _llm_refine_subtitle_window(
+    *,
+    provider: object,
+    window_entries: list[Any],
+    window_summary: dict[str, Any],
+    max_chars: int,
+    max_duration: float,
+    content_profile: dict[str, Any] | None,
+) -> list[Any] | None:
+    flattened_words = _flatten_subtitle_window_words(window_entries)
+    if len(flattened_words) < 2:
+        return None
+
+    current_score = score_subtitle_entries(
+        window_entries,
+        max_chars=max_chars,
+        max_duration=max_duration,
+    )
+    relaxed_max_chars = max_chars + 2
+    relaxed_max_duration = max_duration + 0.5
+    local_candidates = generate_subtitle_window_candidates(
+        window_entries,
+        max_chars=relaxed_max_chars,
+        max_duration=relaxed_max_duration,
+        top_k=4,
+    )
+    current_candidate = list(window_entries)
+    current_key = tuple(str(getattr(entry, "text_raw", "") or "") for entry in window_entries)
+    deduped_candidates: list[list[Any]] = []
+    seen_candidate_keys = {current_key}
+    for candidate in local_candidates:
+        key = tuple(str(getattr(entry, "text_raw", "") or "") for entry in candidate)
+        if not key or key in seen_candidate_keys:
+            continue
+        seen_candidate_keys.add(key)
+        deduped_candidates.append(candidate)
+
+    ranked_candidates: list[tuple[float, int, int, list[Any]]] = []
+    for candidate in deduped_candidates:
+        candidate_score = score_subtitle_entries(
+            candidate,
+            max_chars=max_chars,
+            max_duration=max_duration,
+        )
+        entry_delta = abs(len(candidate) - len(window_entries))
+        ranked_candidates.append(
+            (
+                candidate_score,
+                1 if len(candidate) <= len(window_entries) else 0,
+                -entry_delta,
+                candidate,
+            )
+        )
+    ranked_candidates.sort(key=lambda item: (item[1], item[0], item[2]), reverse=True)
+
+    candidate_pool: list[list[Any]] = [current_candidate] + [candidate for _score, _same_or_less, _delta, candidate in ranked_candidates[:4]]
+    if len(candidate_pool) <= 1:
+        return None
+
+    candidate_scores = [
+        score_subtitle_entries(
+            candidate,
+            max_chars=max_chars,
+            max_duration=max_duration,
+        )
+        for candidate in candidate_pool
+    ]
+    candidate_descriptions = []
+    for candidate_index, candidate in enumerate(candidate_pool):
+        candidate_analysis = analyze_subtitle_segmentation(candidate).as_dict()
+        candidate_descriptions.append(
+            {
+                "candidate_index": candidate_index,
+                "entry_count": len(candidate),
+                "score_delta_vs_current": round(candidate_scores[candidate_index] - current_score, 3),
+                "fragment_start_count": int(candidate_analysis.get("fragment_start_count") or 0),
+                "fragment_end_count": int(candidate_analysis.get("fragment_end_count") or 0),
+                "suspicious_boundary_count": int(candidate_analysis.get("suspicious_boundary_count") or 0),
+                "texts": [str(getattr(entry, "text_raw", "") or "") for entry in candidate],
+            }
+        )
+    best_local_candidate: list[Any] | None = None
+    best_local_score = current_score
+    for candidate_index, candidate in enumerate(candidate_pool[1:], start=1):
+        candidate_score = candidate_scores[candidate_index]
+        if candidate_score <= best_local_score:
+            continue
+        best_local_candidate = candidate
+        best_local_score = candidate_score
+    if _should_accept_strong_local_boundary_candidate(
+        current_score=current_score,
+        current_entry_count=len(window_entries),
+        best_local_candidate=best_local_candidate,
+        best_local_score=best_local_score,
+        min_score_gain=_SUBTITLE_BOUNDARY_LOCAL_EARLY_ACCEPT_SCORE_GAIN,
+    ):
+        return best_local_candidate
+    prompt = (
+        "任务：从候选方案中选择最好的中文字幕断句。\n"
+        "你不能改写文本，也不能生成新方案，只能在给定候选里选编号。\n"
+        f"约束：避免断词、断固定短语、断残句；尽量保持单条<= {max_chars}字、{max_duration:.1f}秒；"
+        "必要时可轻微超限以避免残句。\n"
+        "优先选择 fragment_start_count、fragment_end_count、suspicious_boundary_count 更低的方案；"
+        "如果分数提升明显且条数不增加，优先考虑该候选。\n"
+        "输出 JSON："
+        "{\"best_candidate_index\":0,\"alternate_candidate_index\":1}。\n"
+        "如果当前分段已经最好，best_candidate_index 选 0。\n"
+        f"窗口：{_subtitle_window_text_excerpt(window_summary)}\n"
+        f"tokens：{_subtitle_boundary_token_line(flattened_words)}\n"
+        f"候选：{json.dumps(candidate_descriptions, ensure_ascii=False)}"
+    )
+    data = await _complete_subtitle_boundary_json(
+        provider=provider,
+        messages=[
+            Message(role="system", content="你是严谨的中文字幕断句助手，只输出 JSON。"),
+            Message(role="user", content=prompt),
+        ],
+        followup_retry_message=(
+            "停止继续分析。现在只输出最终 JSON 对象 "
+            "{\"best_candidate_index\":0,\"alternate_candidate_index\":0}。"
+            "不要解释，不要 markdown，不要代码块。"
+        ),
+        final_retry_message=(
+            "最后一次，不要解释，不要思考过程。"
+            "直接输出一行 JSON，对象格式必须是 "
+            "{\"best_candidate_index\":0,\"alternate_candidate_index\":0}。"
+            f"如果当前分段已经最好，就输出 {json.dumps({'best_candidate_index': 0, 'alternate_candidate_index': 0}, ensure_ascii=False)}。"
+        ),
+    )
+    current_cuts = _subtitle_window_current_cut_indices(flattened_words, len(window_entries))
+    if not data:
+        if _should_accept_strong_local_boundary_candidate(
+            current_score=current_score,
+            current_entry_count=len(window_entries),
+            best_local_candidate=best_local_candidate,
+            best_local_score=best_local_score,
+            min_score_gain=_SUBTITLE_BOUNDARY_LOCAL_FALLBACK_MIN_SCORE_GAIN,
+        ):
+            return best_local_candidate
+        return None
+
+    best_candidate: list[Any] | None = None
+    best_score = current_score
+    selected_indices = _iter_subtitle_candidate_selection_indices(
+        data,
+        current_index=0,
+        limit=len(candidate_pool),
+    )
+    for candidate_index in selected_indices:
+        candidate = candidate_pool[candidate_index]
+        if len(candidate) > len(window_entries):
+            continue
+        candidate_score = candidate_scores[candidate_index]
+        if candidate_score <= best_score:
+            continue
+        best_candidate = candidate
+        best_score = candidate_score
+
+    if best_candidate is None:
+        for cut_indices in _iter_subtitle_boundary_cut_candidates(data, current_cuts=current_cuts):
+            candidate = resegment_subtitle_window_from_cuts(
+                window_entries,
+                cut_after_word_indices=cut_indices,
+            )
+            if not candidate:
+                continue
+            if len(candidate) > len(window_entries):
+                continue
+            candidate_score = score_subtitle_entries(
+                candidate,
+                max_chars=max_chars,
+                max_duration=max_duration,
+            )
+            if candidate_score <= best_score:
+                continue
+            best_candidate = candidate
+            best_score = candidate_score
+
+    if best_candidate is None and _should_accept_strong_local_boundary_candidate(
+        current_score=current_score,
+        current_entry_count=len(window_entries),
+        best_local_candidate=best_local_candidate,
+        best_local_score=best_local_score,
+        min_score_gain=_SUBTITLE_BOUNDARY_LOCAL_FALLBACK_MIN_SCORE_GAIN,
+    ):
+        best_candidate = best_local_candidate
+        best_score = best_local_score
+
+    if best_candidate is None:
+        return None
+    if best_score < current_score + _SUBTITLE_BOUNDARY_REFINE_MIN_SCORE_GAIN:
+        return None
+    return best_candidate
+
+
+async def _maybe_refine_subtitle_boundaries_with_llm(
+    *,
+    job: Job,
+    step: JobStep | None,
+    entries: list[Any],
+    segmentation_analysis: dict[str, Any],
+    split_profile: dict[str, Any],
+    content_profile: dict[str, Any] | None,
+) -> tuple[list[Any], dict[str, int]]:
+    windows = [
+        dict(item)
+        for item in (segmentation_analysis.get("sample_low_confidence_windows") or [])
+        if isinstance(item, dict)
+    ]
+    if not windows:
+        return entries, {"attempted_windows": 0, "accepted_windows": 0}
+    if not _subtitle_boundary_refine_llm_supported():
+        return entries, {"attempted_windows": 0, "accepted_windows": 0}
+
+    try:
+        provider = get_reasoning_provider()
+    except Exception:
+        return entries, {"attempted_windows": 0, "accepted_windows": 0}
+
+    refined_entries = list(entries)
+    attempted_windows = 0
+    accepted_windows = 0
+    for window in sorted(windows, key=lambda item: int(item.get("start_index") or 0), reverse=True)[:6]:
+        start_index = int(window.get("start_index") or 0)
+        end_index = int(window.get("end_index") or start_index)
+        if start_index < 0 or end_index >= len(refined_entries) or start_index >= end_index:
+            continue
+        window_entries = refined_entries[start_index:end_index + 1]
+        if len(_flatten_subtitle_window_words(window_entries)) < 2:
+            continue
+        attempted_windows += 1
+        try:
+            with llm_task_route("subtitle_postprocess", search_enabled=False, settings=get_settings()):
+                with track_step_usage(job_id=job.id, step_id=step.id if step else None, step_name="subtitle_postprocess"):
+                    candidate = await asyncio.wait_for(
+                        _llm_refine_subtitle_window(
+                            provider=provider,
+                            window_entries=window_entries,
+                            window_summary=window,
+                            max_chars=int(split_profile["max_chars"]),
+                            max_duration=float(split_profile["max_duration"]),
+                            content_profile=content_profile,
+                        ),
+                        timeout=_SUBTITLE_POSTPROCESS_BOUNDARY_REFINE_TIMEOUT_SEC,
+                    )
+        except Exception:
+            candidate = None
+        if not candidate:
+            continue
+        refined_entries = refined_entries[:start_index] + candidate + refined_entries[end_index + 1:]
+        accepted_windows += 1
+    return refined_entries, {"attempted_windows": attempted_windows, "accepted_windows": accepted_windows}
+
+
 def _build_edit_plan_transcript_segments(
     transcript_rows: list[TranscriptSegment],
     transcript_evidence: dict[str, Any] | None,
@@ -505,6 +1433,76 @@ async def _set_step_progress(
     await session.commit()
 
 
+def _build_content_profile_learning_fingerprint(
+    *,
+    feedback_source: str,
+    user_feedback: dict[str, Any],
+    final_profile: dict[str, Any],
+) -> str:
+    payload = {
+        "feedback_source": feedback_source,
+        "user_feedback": dict(user_feedback or {}),
+        "subject_brand": str((final_profile or {}).get("subject_brand") or "").strip(),
+        "subject_model": str((final_profile or {}).get("subject_model") or "").strip(),
+        "subject_type": str((final_profile or {}).get("subject_type") or "").strip(),
+        "subject_domain": str((final_profile or {}).get("subject_domain") or "").strip(),
+        "search_queries": list((final_profile or {}).get("search_queries") or []),
+    }
+    return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+async def _persist_content_profile_learning_once(
+    session,
+    *,
+    step: JobStep | None,
+    job: Job,
+    draft_profile: dict[str, Any],
+    final_profile: dict[str, Any],
+    user_feedback: dict[str, Any],
+    feedback_source: str,
+    observation_type: str,
+    context_hint: str,
+) -> bool:
+    normalized_feedback = dict(user_feedback or {})
+    if not normalized_feedback:
+        return False
+
+    fingerprint = _build_content_profile_learning_fingerprint(
+        feedback_source=feedback_source,
+        user_feedback=normalized_feedback,
+        final_profile=final_profile,
+    )
+    metadata = dict(step.metadata_ or {}) if step is not None and isinstance(step.metadata_, dict) else {}
+    learning_fingerprints = dict(metadata.get("learning_fingerprints") or {})
+    if learning_fingerprints.get(feedback_source) == fingerprint:
+        return False
+
+    await record_content_profile_feedback_memory(
+        session,
+        job=job,
+        draft_profile=draft_profile,
+        final_profile=final_profile,
+        user_feedback=normalized_feedback,
+        observation_type=observation_type,
+        feedback_source=feedback_source,
+    )
+    from roughcut.api.jobs import _persist_confirmed_content_profile_glossary_terms
+
+    await _persist_confirmed_content_profile_glossary_terms(
+        session,
+        job=job,
+        draft_profile=draft_profile,
+        final_profile=final_profile,
+        user_feedback=normalized_feedback,
+        context_hint=context_hint,
+    )
+    if step is not None:
+        learning_fingerprints[feedback_source] = fingerprint
+        metadata["learning_fingerprints"] = learning_fingerprints
+        step.metadata_ = metadata
+    return True
+
+
 def _set_step_cache_metadata(step: JobStep | None, cache_name: str, cache_metadata: dict[str, Any]) -> None:
     if step is None:
         return
@@ -573,7 +1571,8 @@ def _spawn_step_heartbeat(
     if step_id is None:
         return None
 
-    interval_sec = max(5, int(get_settings().step_heartbeat_interval_sec or 20))
+    settings = get_settings()
+    interval_sec = max(5, int(getattr(settings, "step_heartbeat_interval_sec", 20) or 20))
 
     async def _heartbeat_loop() -> None:
         factory = get_session_factory()
@@ -586,6 +1585,33 @@ def _spawn_step_heartbeat(
                 await _set_step_progress(session, step_ref, detail=detail, progress=progress)
 
     return asyncio.create_task(_heartbeat_loop())
+
+
+def _current_step_heartbeat_progress(step: JobStep | None) -> float | None:
+    metadata = dict((step.metadata_ or {}) if step is not None else {})
+    raw_progress = metadata.get("progress")
+    if raw_progress is None:
+        return None
+    try:
+        return float(raw_progress)
+    except (TypeError, ValueError):
+        return None
+
+
+@asynccontextmanager
+async def _maintain_step_heartbeat(step: JobStep | None):
+    heartbeat = _spawn_step_heartbeat(
+        step_id=step.id if step is not None else None,
+        detail=str((step.metadata_ or {}).get("detail") or STEP_LABELS.get(step.step_name, step.step_name) if step else ""),
+        progress=_current_step_heartbeat_progress(step),
+    )
+    try:
+        yield
+    finally:
+        if heartbeat is not None:
+            heartbeat.cancel()
+            with suppress(asyncio.CancelledError):
+                await heartbeat
 
 
 def _resolve_transcribe_runtime_timeout_seconds(settings: object) -> float:
@@ -1302,11 +2328,33 @@ async def run_subtitle_postprocess(job_id: str) -> dict:
         )
 
         split_started = time.perf_counter()
-        entries = split_into_subtitles(
+        segmentation_result = segment_subtitles(
             segments,
             max_chars=int(split_profile["max_chars"]),
             max_duration=float(split_profile["max_duration"]),
         )
+        entries = segmentation_result.entries
+        _profile_artifact, content_profile = await _load_preferred_downstream_profile(session, job_id=job.id)
+        llm_boundary_refine = {"attempted_windows": 0, "accepted_windows": 0}
+        if segmentation_result.analysis.low_confidence_window_count > 0:
+            await _set_step_progress(
+                session,
+                step,
+                detail=(
+                    f"检测到 {segmentation_result.analysis.low_confidence_window_count} 个低置信度断句窗口，"
+                    "尝试做边界复判"
+                ),
+                progress=0.55,
+            )
+            entries, llm_boundary_refine = await _maybe_refine_subtitle_boundaries_with_llm(
+                job=job,
+                step=step,
+                entries=entries,
+                segmentation_analysis=segmentation_result.analysis.as_dict(),
+                split_profile=split_profile,
+                content_profile=content_profile,
+            )
+            segmentation_result.analysis = analyze_subtitle_segmentation(entries)
         split_elapsed = time.perf_counter() - split_started
         await _set_step_progress(
             session,
@@ -1317,11 +2365,14 @@ async def run_subtitle_postprocess(job_id: str) -> dict:
             ),
             progress=0.7,
         )
+        step_metadata = dict(step.metadata_ or {})
+        step_metadata["subtitle_segmentation"] = segmentation_result.analysis.as_dict()
+        step_metadata["subtitle_boundary_refine"] = llm_boundary_refine
+        step.metadata_ = step_metadata
         save_started = time.perf_counter()
         items = await save_subtitle_items(job.id, entries, session)
         glossary_result = await session.execute(select(GlossaryTerm))
         glossary_terms = glossary_result.scalars().all()
-        _profile_artifact, content_profile = await _load_preferred_downstream_profile(session, job_id=job.id)
         subject_domain = _infer_subject_domain_for_memory(
             workflow_template=job.workflow_template,
             subtitle_items=[
@@ -1405,6 +2456,8 @@ async def run_subtitle_postprocess(job_id: str) -> dict:
             "subtitle_count": len(items),
             "polished_count": polished_count,
             "subtitle_profile": split_profile,
+            "subtitle_segmentation": segmentation_result.analysis.as_dict(),
+            "subtitle_boundary_refine": llm_boundary_refine,
             "elapsed_seconds": round(total_elapsed, 3),
             "load_seconds": round(load_elapsed, 3),
             "split_seconds": round(split_elapsed, 3),
@@ -1577,18 +2630,19 @@ async def run_content_profile(job_id: str) -> dict:
                     profile=seeded_profile,
                     settings=settings,
                 )
-                with llm_task_route("content_profile", search_enabled=seeded_search_enabled, settings=settings):
-                    with track_step_usage(job_id=job.id, step_id=step.id, step_name="content_profile"):
-                        content_profile = await enrich_content_profile(
-                            profile=seeded_profile,
-                            source_name=job.source_name,
-                            workflow_template=job.workflow_template,
-                            transcript_excerpt=transcript_excerpt,
-                            subtitle_items=subtitle_dicts,
-                            glossary_terms=effective_glossary_terms,
-                            user_memory=user_memory,
-                            include_research=seeded_search_enabled,
-                        )
+                async with _maintain_step_heartbeat(step):
+                    with llm_task_route("content_profile", search_enabled=seeded_search_enabled, settings=settings):
+                        with track_step_usage(job_id=job.id, step_id=step.id, step_name="content_profile"):
+                            content_profile = await enrich_content_profile(
+                                profile=seeded_profile,
+                                source_name=job.source_name,
+                                workflow_template=job.workflow_template,
+                                transcript_excerpt=transcript_excerpt,
+                                subtitle_items=subtitle_dicts,
+                                glossary_terms=effective_glossary_terms,
+                                user_memory=user_memory,
+                                include_research=seeded_search_enabled,
+                            )
                 usage_after = await _read_persisted_step_usage_snapshot(step.id if step else None)
                 usage_baseline = _usage_delta(usage_after, usage_before)
                 save_cached_json(
@@ -1614,19 +2668,20 @@ async def run_content_profile(job_id: str) -> dict:
                     profile=seeded_profile or None,
                     settings=settings,
                 )
-                with llm_task_route("content_profile", search_enabled=initial_search_enabled, settings=settings):
-                    with track_step_usage(job_id=job.id, step_id=step.id, step_name="content_profile"):
-                        content_profile = await infer_content_profile(
-                            source_path=source_path,
-                            source_name=job.source_name,
-                            subtitle_items=subtitle_dicts,
-                            workflow_template=job.workflow_template,
-                            user_memory=user_memory,
-                            glossary_terms=effective_glossary_terms,
-                            include_research=initial_search_enabled,
-                            copy_style=copy_style,
-                            source_context=source_context,
-                        )
+                async with _maintain_step_heartbeat(step):
+                    with llm_task_route("content_profile", search_enabled=initial_search_enabled, settings=settings):
+                        with track_step_usage(job_id=job.id, step_id=step.id, step_name="content_profile"):
+                            content_profile = await infer_content_profile(
+                                source_path=source_path,
+                                source_name=job.source_name,
+                                subtitle_items=subtitle_dicts,
+                                workflow_template=job.workflow_template,
+                                user_memory=user_memory,
+                                glossary_terms=effective_glossary_terms,
+                                include_research=initial_search_enabled,
+                                copy_style=copy_style,
+                                source_context=source_context,
+                            )
                 usage_after = await _read_persisted_step_usage_snapshot(step.id if step else None)
                 usage_baseline = _usage_delta(usage_after, usage_before)
                 save_cached_json(
@@ -1658,18 +2713,19 @@ async def run_content_profile(job_id: str) -> dict:
                         profile=content_profile,
                         settings=settings,
                     )
-                    with llm_task_route("content_profile", search_enabled=enrich_search_enabled, settings=settings):
-                        with track_step_usage(job_id=job.id, step_id=step.id, step_name="content_profile"):
-                            content_profile = await enrich_content_profile(
-                                profile=content_profile,
-                                source_name=job.source_name,
-                                workflow_template=job.workflow_template,
-                                transcript_excerpt=transcript_excerpt,
-                                subtitle_items=subtitle_dicts,
-                                glossary_terms=effective_glossary_terms,
-                                user_memory=user_memory,
-                                include_research=enrich_search_enabled,
-                            )
+                    async with _maintain_step_heartbeat(step):
+                        with llm_task_route("content_profile", search_enabled=enrich_search_enabled, settings=settings):
+                            with track_step_usage(job_id=job.id, step_id=step.id, step_name="content_profile"):
+                                content_profile = await enrich_content_profile(
+                                    profile=content_profile,
+                                    source_name=job.source_name,
+                                    workflow_template=job.workflow_template,
+                                    transcript_excerpt=transcript_excerpt,
+                                    subtitle_items=subtitle_dicts,
+                                    glossary_terms=effective_glossary_terms,
+                                    user_memory=user_memory,
+                                    include_research=enrich_search_enabled,
+                                )
                     usage_after = await _read_persisted_step_usage_snapshot(step.id if step else None)
                     usage_baseline = _usage_delta(usage_after, usage_before)
                     save_cached_json(
@@ -1689,6 +2745,7 @@ async def run_content_profile(job_id: str) -> dict:
         source_context_description = str(source_context.get("video_description") or "").strip()
         resolved_source_context_feedback: dict[str, Any] = {}
         if source_context_description:
+            source_context_draft_profile = dict(content_profile)
             feedback_search_enabled = should_enable_task_search(
                 "content_profile",
                 default_enabled=include_research,
@@ -1719,6 +2776,17 @@ async def run_content_profile(job_id: str) -> dict:
                         reviewed_subtitle_excerpt=transcript_excerpt,
                         accepted_corrections=[],
                     )
+                    await _persist_content_profile_learning_once(
+                        session,
+                        step=step,
+                        job=job,
+                        draft_profile=source_context_draft_profile,
+                        final_profile=content_profile,
+                        user_feedback=resolved_source_context_feedback,
+                        feedback_source="task_description",
+                        observation_type="task_description",
+                        context_hint=f"task_description:{job.workflow_template or 'auto'}",
+                    )
         if source_context:
             content_profile["source_context"] = {
                 **source_context,
@@ -1727,6 +2795,7 @@ async def run_content_profile(job_id: str) -> dict:
         manual_review_feedback = dict(step.metadata_.get("review_user_feedback") or {}) if isinstance(step.metadata_, dict) else {}
         review_feedback_note = str(step.metadata_.get("review_feedback") or "").strip() if isinstance(step.metadata_, dict) else ""
         resolved_manual_review_feedback: dict[str, Any] = {}
+        manual_review_draft_profile = dict(content_profile)
         if manual_review_feedback:
             review_feedback_verification_bundle = await build_review_feedback_verification_bundle(
                 draft_profile=content_profile,
@@ -1753,6 +2822,10 @@ async def run_content_profile(job_id: str) -> dict:
             )
             content_profile["review_user_feedback"] = dict(manual_review_feedback)
             content_profile["resolved_review_user_feedback"] = dict(resolved_manual_review_feedback)
+        content_profile["creative_preferences"] = merge_content_profile_creative_preferences(
+            content_profile,
+            user_memory=user_memory,
+        )
         content_profile["creative_profile"] = _job_creative_profile(job)
 
         auto_review_enabled = bool(settings.auto_confirm_content_profile) and auto_review_mode_enabled(
@@ -1824,6 +2897,17 @@ async def run_content_profile(job_id: str) -> dict:
             final_profile = dict(content_profile)
             final_profile["review_mode"] = "manual_confirmed"
             context_source_profile = dict(final_profile)
+            await _persist_content_profile_learning_once(
+                session,
+                step=step,
+                job=job,
+                draft_profile=manual_review_draft_profile,
+                final_profile=final_profile,
+                user_feedback=resolved_manual_review_feedback,
+                feedback_source="final_review_feedback",
+                observation_type="manual_confirm",
+                context_hint=f"final_review_feedback:{job.workflow_template or 'auto'}",
+            )
             session.add(
                 Artifact(
                     job_id=job.id,
@@ -2030,27 +3114,28 @@ async def run_glossary_review(job_id: str) -> dict:
         )
         include_research = bool(getattr(settings, "research_verifier_enabled", False))
         if not content_profile:
-            with tempfile.TemporaryDirectory() as tmpdir:
-                source_path = await _resolve_source(job, tmpdir, expected_hash=job.file_hash)
-                packaging_config = (list_packaging_assets().get("config") or {})
-                initial_search_enabled = should_enable_task_search(
-                    "content_profile",
-                    default_enabled=include_research,
-                    profile=content_profile,
-                    settings=settings,
-                )
-                with llm_task_route("content_profile", search_enabled=initial_search_enabled, settings=settings):
-                    with track_step_usage(job_id=job.id, step_id=step.id, step_name="glossary_review"):
-                        content_profile = await infer_content_profile(
-                            source_path=source_path,
-                            source_name=job.source_name,
-                            subtitle_items=subtitle_dicts,
-                            workflow_template=job.workflow_template,
-                            user_memory=user_memory,
-                            glossary_terms=effective_glossary_terms,
-                            include_research=initial_search_enabled,
-                            copy_style=str(packaging_config.get("copy_style") or "attention_grabbing"),
-                        )
+            async with _maintain_step_heartbeat(step):
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    source_path = await _resolve_source(job, tmpdir, expected_hash=job.file_hash)
+                    packaging_config = (list_packaging_assets().get("config") or {})
+                    initial_search_enabled = should_enable_task_search(
+                        "content_profile",
+                        default_enabled=include_research,
+                        profile=content_profile,
+                        settings=settings,
+                    )
+                    with llm_task_route("content_profile", search_enabled=initial_search_enabled, settings=settings):
+                        with track_step_usage(job_id=job.id, step_id=step.id, step_name="glossary_review"):
+                            content_profile = await infer_content_profile(
+                                source_path=source_path,
+                                source_name=job.source_name,
+                                subtitle_items=subtitle_dicts,
+                                workflow_template=job.workflow_template,
+                                user_memory=user_memory,
+                                glossary_terms=effective_glossary_terms,
+                                include_research=initial_search_enabled,
+                                copy_style=str(packaging_config.get("copy_style") or "attention_grabbing"),
+                            )
         else:
             packaging_config = (list_packaging_assets().get("config") or {})
             content_profile["copy_style"] = str(
@@ -2064,18 +3149,19 @@ async def run_glossary_review(job_id: str) -> dict:
                 profile=content_profile,
                 settings=settings,
             )
-            with llm_task_route("content_profile", search_enabled=enrich_search_enabled, settings=settings):
-                with track_step_usage(job_id=job.id, step_id=step.id, step_name="glossary_review"):
-                    content_profile = await enrich_content_profile(
-                        profile=content_profile,
-                        source_name=job.source_name,
-                        workflow_template=job.workflow_template,
-                        transcript_excerpt=str(content_profile.get("transcript_excerpt") or ""),
-                        subtitle_items=subtitle_dicts,
-                        glossary_terms=effective_glossary_terms,
-                        user_memory=user_memory,
-                        include_research=enrich_search_enabled,
-                    )
+            async with _maintain_step_heartbeat(step):
+                with llm_task_route("content_profile", search_enabled=enrich_search_enabled, settings=settings):
+                    with track_step_usage(job_id=job.id, step_id=step.id, step_name="glossary_review"):
+                        content_profile = await enrich_content_profile(
+                            profile=content_profile,
+                            source_name=job.source_name,
+                            workflow_template=job.workflow_template,
+                            transcript_excerpt=str(content_profile.get("transcript_excerpt") or ""),
+                            subtitle_items=subtitle_dicts,
+                            glossary_terms=effective_glossary_terms,
+                            user_memory=user_memory,
+                            include_research=enrich_search_enabled,
+                        )
         subject_domain = _infer_subject_domain_for_memory(
             workflow_template=job.workflow_template,
             subtitle_items=subtitle_dicts,
@@ -2248,13 +3334,14 @@ async def run_subtitle_translation(job_id: str) -> dict:
             detail=f"翻译校对后的字幕（{source_language} -> {target_language}）",
             progress=0.72,
         )
-        with llm_task_route("subtitle_translation", search_enabled=False, settings=get_settings()):
-            with track_step_usage(job_id=job.id, step_id=step.id, step_name="subtitle_translation"):
-                translation = await translate_subtitle_items(
-                    subtitle_dicts,
-                    target_language_mode="auto",
-                    preferred_ui_language=preferred_ui_language,
-                )
+        async with _maintain_step_heartbeat(step):
+            with llm_task_route("subtitle_translation", search_enabled=False, settings=get_settings()):
+                with track_step_usage(job_id=job.id, step_id=step.id, step_name="subtitle_translation"):
+                    translation = await translate_subtitle_items(
+                        subtitle_dicts,
+                        target_language_mode="auto",
+                        preferred_ui_language=preferred_ui_language,
+                    )
         session.add(
             Artifact(
                 job_id=job.id,
@@ -2810,6 +3897,14 @@ async def run_edit_plan(job_id: str) -> dict:
             transcript_segments=transcript_segment_dicts,
             scene_boundaries=scene_boundaries,
             editing_skill=editing_skill,
+        )
+        decision = await _maybe_review_edit_decision_cuts_with_llm(
+            job_id=job.id,
+            source_name=str(job.source_name or ""),
+            decision=decision,
+            subtitle_items=subtitle_dicts,
+            transcript_segments=transcript_segment_dicts,
+            content_profile=content_profile,
         )
         await _set_step_progress(session, step, detail="生成剪辑时间线与渲染计划", progress=0.85)
 
@@ -5494,6 +6589,21 @@ def _build_variant_timeline_diagnostics(
         for item in accepted_cuts
         if float(item.get("boundary_keep_energy", 0.0) or 0.0) >= 1.0
     ]
+    raw_llm_cut_review = (editorial_analysis or {}).get("llm_cut_review")
+    llm_cut_review = (
+        {
+            "reviewed": bool(raw_llm_cut_review.get("reviewed")),
+            "candidate_count": int(raw_llm_cut_review.get("candidate_count") or 0),
+            "decision_count": int(raw_llm_cut_review.get("decision_count") or 0),
+            "restored_cut_count": int(raw_llm_cut_review.get("restored_cut_count") or 0),
+            "cached": bool(raw_llm_cut_review.get("cached")),
+            "provider": str(raw_llm_cut_review.get("provider") or ""),
+            "model": str(raw_llm_cut_review.get("model") or ""),
+            "summary": str(raw_llm_cut_review.get("summary") or ""),
+        }
+        if isinstance(raw_llm_cut_review, dict)
+        else {}
+    )
     review_reasons: list[str] = []
     if high_risk_cuts:
         review_reasons.append("存在贴近高能量保留段的 cut，建议复核边界。")
@@ -5503,6 +6613,7 @@ def _build_variant_timeline_diagnostics(
         "keep_energy_summary": _clone_json_like((editorial_analysis or {}).get("keep_energy_summary") or {}),
         "high_energy_keeps": high_energy_keeps[:8],
         "high_risk_cuts": high_risk_cuts[:8],
+        "llm_cut_review": llm_cut_review,
         "review_flags": {
             "review_recommended": bool(high_risk_cuts),
             "review_reasons": review_reasons,
@@ -5693,6 +6804,9 @@ def _validate_variant_timeline_bundle(bundle: dict[str, Any]) -> dict[str, Any]:
                 items = diagnostics.get(field_name)
                 if items is not None and not isinstance(items, list):
                     issues.append(f"diagnostics: {field_name} is not a list")
+            llm_cut_review = diagnostics.get("llm_cut_review")
+            if llm_cut_review is not None and not isinstance(llm_cut_review, dict):
+                issues.append("diagnostics: llm_cut_review is not a dict")
             review_flags = diagnostics.get("review_flags")
             if review_flags is not None and not isinstance(review_flags, dict):
                 issues.append("diagnostics: review_flags is not a dict")

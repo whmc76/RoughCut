@@ -194,6 +194,45 @@ def test_build_edit_decision_removes_restart_retake_window():
     assert restart_cut.end == 2.2
 
 
+def test_build_edit_decision_removes_restart_retake_window_when_restart_cue_marks_complete_prefix():
+    subtitle_items = [
+        {
+            "index": 0,
+            "start_time": 1.0,
+            "end_time": 1.6,
+            "text_raw": "这个包最大的优点",
+            "text_norm": "这个包最大的优点",
+            "text_final": "这个包最大的优点",
+        },
+        {
+            "index": 1,
+            "start_time": 1.6,
+            "end_time": 2.0,
+            "text_raw": "等一下重来",
+            "text_norm": "等一下重来",
+            "text_final": "等一下重来",
+        },
+        {
+            "index": 2,
+            "start_time": 2.2,
+            "end_time": 3.4,
+            "text_raw": "这个包最大的优点就是容量很大",
+            "text_norm": "这个包最大的优点就是容量很大",
+            "text_final": "这个包最大的优点就是容量很大",
+        },
+    ]
+    decision = build_edit_decision(
+        source_path="test.mp4",
+        duration=4.0,
+        silence_segments=[],
+        subtitle_items=subtitle_items,
+    )
+
+    restart_cut = next(segment for segment in decision.segments if segment.reason == "restart_retake")
+    assert restart_cut.start == 1.0
+    assert restart_cut.end == 2.2
+
+
 def test_edit_decision_to_dict():
     silences = [SilenceSegment(start=2.0, end=3.0)]
     decision = build_edit_decision("test.mp4", 5.0, silences)
@@ -294,6 +333,28 @@ def test_build_edit_decision_preserves_short_anchor_keep_between_cuts():
     assert keep_segments[0].end - keep_segments[0].start > 0.3
 
 
+def test_build_edit_decision_preserves_short_visual_showcase_cue_subtitle():
+    subtitle_items = [
+        {
+            "index": 0,
+            "start_time": 1.0,
+            "end_time": 1.4,
+            "text_raw": "放一起看",
+            "text_norm": "放一起看",
+            "text_final": "放一起看",
+        }
+    ]
+    decision = build_edit_decision(
+        source_path="test.mp4",
+        duration=3.0,
+        silence_segments=[],
+        subtitle_items=subtitle_items,
+    )
+
+    remove_segments = [segment for segment in decision.segments if segment.type == "remove" and segment.reason == "low_signal_subtitle"]
+    assert remove_segments == []
+
+
 def test_build_edit_decision_preserves_hook_micro_keep_bridge_with_keep_energy():
     decision = build_edit_decision(
         source_path="test.mp4",
@@ -350,6 +411,43 @@ def test_build_edit_decision_preserves_short_portability_comparison_keep():
     assert keep.start < 1.08
     assert keep.end > 1.46
     assert keep.end - keep.start >= 0.45
+
+
+def test_build_edit_decision_preserves_visual_showcase_silence_gap():
+    silences = [SilenceSegment(start=1.0, end=2.2)]
+    subtitle_items = [
+        {
+            "index": 0,
+            "start_time": 0.0,
+            "end_time": 1.0,
+            "text_raw": "先说参数",
+            "text_norm": "先说参数",
+            "text_final": "先说参数",
+        },
+        {
+            "index": 1,
+            "start_time": 2.2,
+            "end_time": 3.3,
+            "text_raw": "放一起看尺寸差异",
+            "text_norm": "放一起看尺寸差异",
+            "text_final": "放一起看尺寸差异",
+        },
+    ]
+    transcript_segments = [
+        {"index": 0, "start": 0.0, "end": 1.0, "text": "先说参数", "speaker": "A", "confidence": 0.95},
+        {"index": 1, "start": 2.2, "end": 3.3, "text": "放一起看尺寸差异", "speaker": "A", "confidence": 0.95},
+    ]
+
+    decision = build_edit_decision(
+        source_path="test.mp4",
+        duration=4.0,
+        silence_segments=silences,
+        subtitle_items=subtitle_items,
+        transcript_segments=transcript_segments,
+    )
+
+    silence_cuts = [segment for segment in decision.segments if segment.type == "remove" and segment.reason == "silence"]
+    assert silence_cuts == []
 
 
 def test_build_edit_decision_skips_edge_trim_for_short_keep_audio_safety():
@@ -418,6 +516,32 @@ def test_build_edit_decision_keeps_wider_audio_safe_padding_for_long_keep():
     keep = keep_segments[0]
     assert keep.start <= 1.32
     assert keep.end >= 2.44
+
+
+def test_build_edit_decision_removes_long_non_dialogue_keep_without_transcript_or_showcase_support():
+    silences = [
+        SilenceSegment(start=0.0, end=1.0),
+        SilenceSegment(start=2.6, end=4.0),
+    ]
+    transcript_segments = [
+        {"index": 0, "start": 0.0, "end": 0.9, "text": "开头", "speaker": "A", "confidence": 0.95},
+        {"index": 1, "start": 2.7, "end": 3.6, "text": "结尾", "speaker": "A", "confidence": 0.95},
+    ]
+
+    decision = build_edit_decision(
+        source_path="test.mp4",
+        duration=4.0,
+        silence_segments=silences,
+        subtitle_items=[],
+        transcript_segments=transcript_segments,
+    )
+
+    keep_segments = [segment for segment in decision.segments if segment.type == "keep"]
+    assert keep_segments == []
+    assert len(decision.segments) == 1
+    assert decision.segments[0].type == "remove"
+    assert decision.segments[0].start == 0.0
+    assert decision.segments[0].end == 4.0
 
 
 def test_build_edit_decision_gameplay_skill_trims_keep_more_aggressively():
@@ -753,6 +877,35 @@ def test_build_edit_decision_emits_timeline_analysis():
     assert analysis["keep_energy_segments"]
     assert analysis["keep_energy_summary"]["count"] >= 1
     assert analysis["keep_energy_summary"]["max_keep_energy"] >= 1.0
+
+
+def test_build_edit_decision_emits_creative_preference_rationale_in_timeline_analysis():
+    decision = build_edit_decision(
+        source_path="test.mp4",
+        duration=12.0,
+        silence_segments=[],
+        subtitle_items=[
+            {"start_time": 0.0, "end_time": 2.8, "text_final": "先说结论，这个方案更稳。"},
+            {"start_time": 3.0, "end_time": 6.2, "text_final": "接着看参数和细节。"},
+            {"start_time": 9.5, "end_time": 11.8, "text_final": "记得点赞收藏。"},
+        ],
+        content_profile={
+            "creative_preferences": [
+                {"tag": "conclusion_first", "count": 3},
+                {"tag": "comparison_focus", "count": 2},
+                {"tag": "closeup_focus", "count": 2},
+            ],
+        },
+    )
+
+    analysis = decision.to_dict()["analysis"]
+    hook_directive = next(item for item in analysis["section_directives"] if item["role"] == "hook")
+    detail_action = next(item for item in analysis["section_actions"] if item["role"] == "detail")
+
+    assert "先给结论" in hook_directive["creative_preferences"]
+    assert "关键差异" in hook_directive["creative_rationale"]
+    assert "突出近景特写" in detail_action["creative_preferences"]
+    assert "细节段优先保留近景和做工镜头" in detail_action["creative_rationale"]
 
 
 def test_build_edit_decision_annotates_accepted_cuts_with_boundary_keep_energy():

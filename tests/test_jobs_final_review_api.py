@@ -64,7 +64,39 @@ async def _seed_job_with_variant_bundle(job_id: uuid.UUID) -> None:
                 job_id=job_id,
                 artifact_type="variant_timeline_bundle",
                 data_json={
-                    "timeline_rules": {"lead_in_sec": 1.5},
+                    "timeline_rules": {
+                        "lead_in_sec": 1.5,
+                        "diagnostics": {
+                            "keep_energy_summary": {
+                                "count": 1,
+                                "high_energy_count": 1,
+                                "max_keep_energy": 1.22,
+                                "avg_keep_energy": 1.22,
+                            },
+                            "high_energy_keeps": [
+                                {
+                                    "start": 0.0,
+                                    "end": 2.8,
+                                    "keep_energy": 1.22,
+                                    "section_role": "hook",
+                                }
+                            ],
+                            "high_risk_cuts": [
+                                {
+                                    "start": 2.8,
+                                    "end": 3.12,
+                                    "reason": "silence",
+                                    "boundary_keep_energy": 1.18,
+                                    "left_keep_role": "hook",
+                                    "right_keep_role": "detail",
+                                }
+                            ],
+                            "review_flags": {
+                                "review_recommended": True,
+                                "review_reasons": ["存在贴近高能量保留段的 cut，建议复核边界。"],
+                            },
+                        },
+                    },
                     "variants": {
                         "packaged": {
                             "media": {"path": "E:/tmp/bundle-preview.mp4"},
@@ -400,6 +432,27 @@ async def test_job_detail_quality_summary_includes_variant_timeline_warning_for_
     assert response.status_code == 200
     data = response.json()
     assert "时间轴告警 1 项" in data["quality_summary"]
+
+
+@pytest.mark.asyncio
+async def test_job_detail_includes_timeline_diagnostics_preview(client: AsyncClient):
+    job_id = uuid.uuid4()
+    await _seed_job_with_variant_bundle(job_id)
+
+    response = await client.get(f"/api/v1/jobs/{job_id}")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["timeline_diagnostics"] == {
+        "review_recommended": True,
+        "review_reasons": ["存在贴近高能量保留段的 cut，建议复核边界。"],
+        "high_risk_cut_count": 1,
+        "high_energy_keep_count": 1,
+        "llm_reviewed": False,
+        "llm_candidate_count": 0,
+        "llm_restored_cut_count": 0,
+        "llm_provider": None,
+        "llm_summary": None,
+    }
 
 
 @pytest.mark.asyncio

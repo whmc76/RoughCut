@@ -806,10 +806,11 @@ async def get_content_profile(job_id: uuid.UUID, session: AsyncSession = Depends
     draft = next((item.data_json for item in artifacts if item.artifact_type == "content_profile_draft"), None)
     final = next((item.data_json for item in artifacts if item.artifact_type == "content_profile_final"), None)
     legacy = next((item.data_json for item in artifacts if item.artifact_type == "content_profile"), None)
+    has_draft_artifact = isinstance(draft, dict) and bool(draft)
     if not isinstance(draft, dict) or not draft:
         draft = legacy
     if not isinstance(final, dict) or not final:
-        final = legacy
+        final = None if has_draft_artifact else legacy
     settings = get_settings()
     if isinstance(draft, dict):
         draft = apply_current_content_profile_review_policy(draft, settings=settings)
@@ -1115,6 +1116,13 @@ async def confirm_content_profile(
     )
     session.add(artifact)
     await record_content_profile_feedback_memory(
+        session,
+        job=job,
+        draft_profile=draft_artifact.data_json or {},
+        final_profile=final_profile,
+        user_feedback=user_feedback,
+    )
+    await _persist_confirmed_content_profile_glossary_terms(
         session,
         job=job,
         draft_profile=draft_artifact.data_json or {},
@@ -1601,6 +1609,227 @@ async def _persist_reviewed_glossary_term(
         if original not in wrong_forms and original != suggested:
             wrong_forms.append(original)
             term.wrong_forms = wrong_forms
+
+
+def _normalize_review_glossary_value(value: Any, *, max_length: int = 64) -> str:
+    return " ".join(str(value or "").strip().split())[:max_length]
+
+
+def _is_generic_review_hotword(value: str) -> bool:
+    normalized = _normalize_review_glossary_value(value, max_length=64)
+    lowered = normalized.lower()
+    return lowered in {
+        "",
+        "unknown",
+        "待确认",
+        "未确认",
+        "产品",
+        "开箱产品",
+        "主体",
+        "视频主题",
+        "内容主题",
+    }
+
+
+def _should_persist_review_alias(original: Any, corrected: Any) -> bool:
+    original_text = _normalize_review_glossary_value(original, max_length=48)
+    corrected_text = _normalize_review_glossary_value(corrected, max_length=48)
+    if not original_text or not corrected_text or original_text == corrected_text:
+        return False
+    if _is_generic_review_hotword(original_text) or _is_generic_review_hotword(corrected_text):
+        return False
+    return True
+
+
+def _should_persist_review_hotword(value: Any, *, allow_phrase: bool = False) -> bool:
+    text = _normalize_review_glossary_value(value, max_length=64 if allow_phrase else 48)
+    if not text or _is_generic_review_hotword(text):
+        return False
+    if "\n" in text or "\r" in text:
+        return False
+    if not allow_phrase and len(text) < 2:
+        return False
+    if allow_phrase and len(text) < 2:
+        return False
+    return True
+
+
+def _extract_confirmed_content_profile_alias_rows(final_profile: dict[str, Any] | None) -> list[tuple[str, str, str]]:
+    if not isinstance(final_profile, dict):
+        return []
+    identity_review = final_profile.get("identity_review")
+    if not isinstance(identity_review, dict):
+        return []
+    evidence_bundle = identity_review.get("evidence_bundle")
+    if not isinstance(evidence_bundle, dict):
+        return []
+    matched_glossary_aliases = evidence_bundle.get("matched_glossary_aliases")
+    if not isinstance(matched_glossary_aliases, dict):
+        return []
+
+    rows: list[tuple[str, str, str]] = []
+    field_specs = (
+        ("subject_brand", "brand", "candidate_brand"),
+        ("subject_model", "model", "candidate_model"),
+    )
+    for field_name, alias_key, candidate_key in field_specs:
+        final_value = _normalize_review_glossary_value((final_profile or {}).get(field_name), max_length=48)
+        candidate_value = _normalize_review_glossary_value(evidence_bundle.get(candidate_key), max_length=48)
+        if not final_value or not candidate_value or final_value != candidate_value:
+            continue
+        for alias in matched_glossary_aliases.get(alias_key) or []:
+            alias_value = _normalize_review_glossary_value(alias, max_length=48)
+            if _should_persist_review_alias(alias_value, final_value):
+                rows.append((field_name, alias_value, final_value))
+    return rows
+
+
+def _resolve_content_profile_glossary_scopes(
+    *,
+    job: Job,
+    content_profile: dict[str, Any] | None,
+) -> list[tuple[str, str]]:
+    detected_domains = detect_glossary_domains(
+        workflow_template=job.workflow_template,
+        content_profile=content_profile or {},
+    )
+    scopes: list[tuple[str, str]] = []
+    for domain in detected_domains:
+        pair = ("domain", domain)
+        if pair not in scopes:
+            scopes.append(pair)
+    return scopes
+
+
+async def _upsert_review_glossary_term(
+    session: AsyncSession,
+    *,
+    scope_type: str,
+    scope_value: str,
+    correct_form: str,
+    wrong_form: str | None = None,
+    category: str | None = None,
+    context_hint: str | None = None,
+) -> None:
+    normalized_correct = _normalize_review_glossary_value(correct_form, max_length=64)
+    normalized_wrong = _normalize_review_glossary_value(wrong_form, max_length=48) if wrong_form else ""
+    if not normalized_correct:
+        return
+
+    result = await session.execute(
+        select(GlossaryTerm).where(
+            GlossaryTerm.scope_type == scope_type,
+            GlossaryTerm.scope_value == scope_value,
+            GlossaryTerm.correct_form == normalized_correct,
+        )
+    )
+    term = result.scalar_one_or_none()
+    if term is None:
+        wrong_forms = [normalized_wrong] if normalized_wrong and normalized_wrong != normalized_correct else []
+        session.add(
+            GlossaryTerm(
+                scope_type=scope_type,
+                scope_value=scope_value,
+                wrong_forms=wrong_forms,
+                correct_form=normalized_correct,
+                category=category,
+                context_hint=context_hint,
+            )
+        )
+        return
+
+    wrong_forms = [str(item or "").strip() for item in (term.wrong_forms or []) if str(item or "").strip()]
+    if normalized_wrong and normalized_wrong != normalized_correct and normalized_wrong not in wrong_forms:
+        wrong_forms.append(normalized_wrong)
+        term.wrong_forms = wrong_forms
+    if not term.category and category:
+        term.category = category
+    if not term.context_hint and context_hint:
+        term.context_hint = context_hint
+
+
+async def _persist_confirmed_content_profile_glossary_terms(
+    session: AsyncSession,
+    *,
+    job: Job,
+    draft_profile: dict[str, Any] | None,
+    final_profile: dict[str, Any] | None,
+    user_feedback: dict[str, Any] | None,
+    context_hint: str | None = None,
+) -> None:
+    scopes = _resolve_content_profile_glossary_scopes(job=job, content_profile=final_profile)
+    if not scopes:
+        return
+
+    draft_payload = draft_profile if isinstance(draft_profile, dict) else {}
+    final_payload = final_profile if isinstance(final_profile, dict) else {}
+    feedback_payload = user_feedback if isinstance(user_feedback, dict) else {}
+    resolved_context_hint = context_hint or f"manual_content_profile_review:{job.workflow_template or 'auto'}"
+
+    alias_rows: list[tuple[str, str, str, str]] = []
+    for field_name, category in (("subject_brand", "brand"), ("subject_model", "model")):
+        original_value = _normalize_review_glossary_value(draft_payload.get(field_name), max_length=48)
+        corrected_value = _normalize_review_glossary_value(final_payload.get(field_name), max_length=48)
+        if _should_persist_review_alias(original_value, corrected_value):
+            alias_rows.append((field_name, original_value, corrected_value, category))
+
+    for field_name, alias_value, canonical_value in _extract_confirmed_content_profile_alias_rows(final_payload):
+        category = "brand" if field_name == "subject_brand" else "model"
+        if _should_persist_review_alias(alias_value, canonical_value):
+            alias_rows.append((field_name, alias_value, canonical_value, category))
+
+    seen_alias_pairs: set[tuple[str, str, str]] = set()
+    for field_name, wrong_value, correct_value, category in alias_rows:
+        key = (field_name, wrong_value, correct_value)
+        if key in seen_alias_pairs:
+            continue
+        seen_alias_pairs.add(key)
+        for scope_type, scope_value in scopes:
+            await _upsert_review_glossary_term(
+                session,
+                scope_type=scope_type,
+                scope_value=scope_value,
+                correct_form=correct_value,
+                wrong_form=wrong_value,
+                category=category,
+                context_hint=resolved_context_hint,
+            )
+
+    canonical_terms: list[tuple[str, str]] = []
+    for field_name, category in (
+        ("subject_brand", "brand"),
+        ("subject_model", "model"),
+        ("subject_type", "subject_type"),
+    ):
+        value = _normalize_review_glossary_value(final_payload.get(field_name), max_length=48)
+        if _should_persist_review_hotword(value):
+            canonical_terms.append((value, category))
+
+    keywords = feedback_payload.get("keywords")
+    if not isinstance(keywords, list) or not keywords:
+        keywords = final_payload.get("search_queries") or []
+    normalized_keywords = normalize_query_list(
+        [_normalize_review_glossary_value(item, max_length=64) for item in keywords if str(item or "").strip()]
+    )
+    for keyword in normalized_keywords:
+        if _should_persist_review_hotword(keyword, allow_phrase=True):
+            canonical_terms.append((keyword, "hotword"))
+
+    seen_terms: set[tuple[str, str]] = set()
+    for correct_value, category in canonical_terms:
+        key = (correct_value, category)
+        if key in seen_terms:
+            continue
+        seen_terms.add(key)
+        for scope_type, scope_value in scopes:
+            await _upsert_review_glossary_term(
+                session,
+                scope_type=scope_type,
+                scope_value=scope_value,
+                correct_form=correct_value,
+                category=category,
+                context_hint=resolved_context_hint,
+            )
 
 
 @router.get("/{job_id}/activity", response_model=JobActivityOut)
@@ -2361,9 +2590,15 @@ def _attach_job_preview(job: Job) -> None:
     job.quality_grade = quality_preview["grade"]
     job.quality_summary = quality_preview["summary"]
     job.quality_issue_codes = quality_preview["issue_codes"]
+    job.timeline_diagnostics = _resolve_job_timeline_diagnostics_preview(job.artifacts or [])
     avatar_preview = _resolve_job_avatar_preview(job)
     job.avatar_delivery_status = avatar_preview["status"]
     job.avatar_delivery_summary = avatar_preview["summary"]
+    auto_review_preview = _resolve_job_auto_review_preview(job)
+    job.auto_review_mode_enabled = bool(auto_review_preview["mode_enabled"])
+    job.auto_review_status = auto_review_preview["status"]
+    job.auto_review_summary = auto_review_preview["summary"]
+    job.auto_review_reasons = list(auto_review_preview["reasons"] or [])
     job.progress_percent = _calculate_job_progress_percent(job)
 
 
@@ -2605,6 +2840,92 @@ def _resolve_job_avatar_preview(job: Job) -> dict[str, str | None]:
     return {"status": "running", "summary": "数字人计划已生成，等待渲染落地"}
 
 
+def _resolve_job_auto_review_preview(job: Job) -> dict[str, Any]:
+    enabled_modes = set(getattr(job, "enhancement_modes", []) or [])
+    if "auto_review" not in enabled_modes:
+        return {
+            "mode_enabled": False,
+            "status": None,
+            "summary": None,
+            "reasons": [],
+        }
+
+    review_step = _find_step(list(job.steps or []), "summary_review")
+    profile_artifact = _select_preview_artifact(list(job.artifacts or []))
+    profile_payload = profile_artifact.data_json if profile_artifact and isinstance(profile_artifact.data_json, dict) else {}
+    automation = profile_payload.get("automation_review") if isinstance(profile_payload.get("automation_review"), dict) else {}
+
+    auto_confirmed = bool((review_step.metadata_ or {}).get("auto_confirmed")) if review_step is not None else False
+    if not auto_confirmed:
+        auto_confirmed = str(profile_payload.get("review_mode") or "").strip().lower() == "auto_confirmed"
+    if auto_confirmed:
+        detail = str((review_step.metadata_ or {}).get("detail") or "").strip() if review_step is not None else ""
+        return {
+            "mode_enabled": True,
+            "status": "applied",
+            "summary": detail or "已自动确认预审核并继续执行。",
+            "reasons": [],
+        }
+
+    if not profile_payload:
+        waiting_detail = "已启用，等待内容画像后评估是否自动放行。"
+        if _has_reached_step(job, "content_profile"):
+            waiting_detail = "已启用，等待系统完成自动审核评估。"
+        return {
+            "mode_enabled": True,
+            "status": "enabled",
+            "summary": waiting_detail,
+            "reasons": [],
+        }
+
+    blocking_reasons = [
+        str(item).strip()
+        for item in (automation.get("blocking_reasons") or [])
+        if str(item).strip()
+    ]
+    review_reasons = [
+        str(item).strip()
+        for item in (automation.get("review_reasons") or [])
+        if str(item).strip()
+    ]
+    approval_accuracy_detail = str(automation.get("approval_accuracy_detail") or "").strip()
+    quality_gate_passed = bool(automation.get("quality_gate_passed"))
+    accuracy_gate_passed = bool(automation.get("approval_accuracy_gate_passed"))
+    score = _coerce_float(automation.get("score"))
+    threshold = _coerce_float(automation.get("threshold"))
+
+    reasons: list[str] = []
+    if blocking_reasons:
+        reasons.extend(blocking_reasons)
+    elif review_reasons:
+        reasons.extend(review_reasons)
+    if approval_accuracy_detail and not accuracy_gate_passed and approval_accuracy_detail not in reasons:
+        reasons.append(approval_accuracy_detail)
+
+    if blocking_reasons:
+        summary = "已启用，但本次命中人工复核条件，未自动放行。"
+        status = "blocked"
+    elif not quality_gate_passed:
+        if score is not None and threshold is not None:
+            summary = f"已启用，但当前摘要得分 {score:.2f} 未达到自动放行阈值 {threshold:.2f}。"
+        else:
+            summary = "已启用，但当前摘要未达到自动放行阈值。"
+        status = "blocked"
+    elif not accuracy_gate_passed:
+        summary = approval_accuracy_detail or "已启用，但自动放行准确率门槛尚未通过。"
+        status = "blocked"
+    else:
+        summary = "已启用，等待系统在摘要阶段自动判定是否直接放行。"
+        status = "enabled"
+
+    return {
+        "mode_enabled": True,
+        "status": status,
+        "summary": summary,
+        "reasons": reasons,
+    }
+
+
 def _resolve_job_quality_preview(artifacts: list[Artifact]) -> dict[str, Any]:
     quality = next(
         (artifact for artifact in artifacts if artifact.artifact_type == QUALITY_ARTIFACT_TYPE and artifact.data_json),
@@ -2640,6 +2961,45 @@ def _resolve_job_quality_preview(artifacts: list[Artifact]) -> dict[str, Any]:
         "summary": summary,
         "issue_codes": issue_codes,
     }
+
+
+def _resolve_job_timeline_diagnostics_preview(artifacts: list[Artifact]) -> dict[str, Any] | None:
+    bundle = _resolve_effective_variant_bundle_from_artifacts(artifacts)
+    timeline_rules = bundle.get("timeline_rules") if isinstance(bundle, dict) else None
+    diagnostics = timeline_rules.get("diagnostics") if isinstance(timeline_rules, dict) else None
+    if not isinstance(diagnostics, dict):
+        return None
+
+    review_flags = diagnostics.get("review_flags") if isinstance(diagnostics.get("review_flags"), dict) else {}
+    llm_cut_review = diagnostics.get("llm_cut_review") if isinstance(diagnostics.get("llm_cut_review"), dict) else {}
+    high_risk_cuts = [item for item in (diagnostics.get("high_risk_cuts") or []) if isinstance(item, dict)]
+    high_energy_keeps = [item for item in (diagnostics.get("high_energy_keeps") or []) if isinstance(item, dict)]
+    review_reasons = [str(item).strip() for item in (review_flags.get("review_reasons") or []) if str(item).strip()]
+
+    preview = {
+        "review_recommended": bool(review_flags.get("review_recommended")),
+        "review_reasons": review_reasons[:3],
+        "high_risk_cut_count": len(high_risk_cuts),
+        "high_energy_keep_count": len(high_energy_keeps),
+        "llm_reviewed": bool(llm_cut_review.get("reviewed")),
+        "llm_candidate_count": int(llm_cut_review.get("candidate_count") or 0),
+        "llm_restored_cut_count": int(llm_cut_review.get("restored_cut_count") or 0),
+        "llm_provider": str(llm_cut_review.get("provider") or "").strip() or None,
+        "llm_summary": str(llm_cut_review.get("summary") or "").strip() or None,
+    }
+    if any(
+        (
+            preview["review_recommended"],
+            preview["high_risk_cut_count"],
+            preview["high_energy_keep_count"],
+            preview["llm_reviewed"],
+            preview["llm_restored_cut_count"],
+            preview["review_reasons"],
+            preview["llm_summary"],
+        )
+    ):
+        return preview
+    return None
 
 
 def _resolve_effective_variant_bundle_from_artifacts(artifacts: list[Artifact]) -> dict[str, Any] | None:

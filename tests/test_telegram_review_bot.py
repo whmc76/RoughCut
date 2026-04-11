@@ -1209,6 +1209,13 @@ def test_build_final_review_message_includes_edit_diagnostics_review_flags():
         variant_timeline_bundle={
             "timeline_rules": {
                 "diagnostics": {
+                    "llm_cut_review": {
+                        "reviewed": True,
+                        "candidate_count": 3,
+                        "restored_cut_count": 1,
+                        "provider": "minimax",
+                        "summary": "恢复了 1 个展示型误删。",
+                    },
                     "high_energy_keeps": [
                         {"start": 0.0, "end": 2.8, "keep_energy": 1.22, "section_role": "hook"},
                     ],
@@ -1243,6 +1250,7 @@ def test_build_final_review_message_includes_edit_diagnostics_review_flags():
 
     assert "剪辑风险提示：" in message
     assert "建议人工复核：存在贴近高能量保留段的 cut，建议复核边界。；Hook 段存在高能量保留片段，建议确认开场节奏。" in message
+    assert "LLM 复核（minimax）：审了 3 个高风险 cut，恢复 1 个，当前剩余 1 个高风险 cut。 恢复了 1 个展示型误删。" in message
     assert "高风险 cut 2.80s-3.12s：边界能量 1.18，左侧 hook / 右侧 detail" in message
 
 

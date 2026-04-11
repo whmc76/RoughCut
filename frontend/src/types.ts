@@ -18,6 +18,17 @@ export type Job = {
   quality_grade?: string | null;
   quality_summary?: string | null;
   quality_issue_codes?: string[] | null;
+  timeline_diagnostics?: {
+    review_recommended?: boolean;
+    review_reasons?: string[];
+    high_risk_cut_count?: number;
+    high_energy_keep_count?: number;
+    llm_reviewed?: boolean;
+    llm_candidate_count?: number;
+    llm_restored_cut_count?: number;
+    llm_provider?: string | null;
+    llm_summary?: string | null;
+  } | null;
   avatar_delivery_status?: string | null;
   avatar_delivery_summary?: string | null;
   status: string;
@@ -25,6 +36,10 @@ export type Job = {
   workflow_template?: string | null;
   workflow_mode: string;
   enhancement_modes: string[];
+  auto_review_mode_enabled?: boolean;
+  auto_review_status?: string | null;
+  auto_review_summary?: string | null;
+  auto_review_reasons?: string[];
   output_dir?: string | null;
   file_hash?: string | null;
   error_message?: string | null;

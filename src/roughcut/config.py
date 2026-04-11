@@ -253,6 +253,7 @@ class Settings(BaseSettings):
     step_heartbeat_interval_sec: int = 20
     step_stale_recovery_enabled: bool = True
     step_stale_timeout_sec: int = 900
+    step_dispatch_stale_timeout_sec: int = 3600
     transcribe_runtime_timeout_sec: int = 900
     render_step_stale_timeout_sec: int = 5400
     docker_gpu_guard_enabled: bool = True
@@ -390,6 +391,9 @@ class Settings(BaseSettings):
     cover_selection_review_gap: float = 0.08
     packaging_selection_review_gap: float = 0.08
     packaging_selection_min_score: float = 0.6
+    edit_decision_llm_review_enabled: bool = True
+    edit_decision_llm_review_max_candidates: int = 6
+    edit_decision_llm_review_min_confidence: float = 0.72
     subtitle_filler_cleanup_enabled: bool = True
     quality_auto_rerun_enabled: bool = True
     quality_auto_rerun_below_score: float = 75.0
@@ -819,7 +823,7 @@ def resolve_llm_task_route(task_name: str, *, settings: Settings | None = None) 
         return {}
 
     normalized_task = str(task_name or "").strip().lower()
-    if normalized_task in {"subtitle", "subtitle_translation", "content_profile", "copy_verify"}:
+    if normalized_task in {"subtitle", "subtitle_postprocess", "subtitle_translation", "content_profile", "copy_verify", "edit_plan"}:
         return {
             "reasoning_provider": str(getattr(current, "hybrid_analysis_provider", "openai") or "openai").strip().lower(),
             "reasoning_model": str(getattr(current, "hybrid_analysis_model", "gpt-5.4-mini") or "gpt-5.4-mini").strip(),

@@ -514,6 +514,16 @@ def test_build_variant_timeline_bundle_contains_variants_and_rules():
                 "max_keep_energy": 1.22,
                 "avg_keep_energy": 1.22,
             },
+            "llm_cut_review": {
+                "reviewed": True,
+                "candidate_count": 3,
+                "decision_count": 3,
+                "restored_cut_count": 1,
+                "cached": False,
+                "provider": "minimax",
+                "model": "MiniMax-M2.7-highspeed",
+                "summary": "恢复了 1 个展示型误删。",
+            },
         },
         render_plan=render_plan,
         variants={
@@ -549,6 +559,7 @@ def test_build_variant_timeline_bundle_contains_variants_and_rules():
     assert bundle["timeline_rules"]["timeline_analysis"]["section_actions"][0]["broll_anchor_sec"] == 0.8
     assert bundle["timeline_rules"]["diagnostics"]["high_energy_keeps"][0]["section_role"] == "hook"
     assert bundle["timeline_rules"]["diagnostics"]["high_risk_cuts"][0]["boundary_keep_energy"] == 1.18
+    assert bundle["timeline_rules"]["diagnostics"]["llm_cut_review"]["restored_cut_count"] == 1
     assert bundle["timeline_rules"]["diagnostics"]["review_flags"]["review_recommended"] is True
     assert bundle["timeline_rules"]["packaging"]["insert"]["insert_after_sec"] == 3.8
     assert set(bundle["variants"]) == {"plain", "packaged"}
@@ -749,6 +760,7 @@ def test_validate_variant_timeline_bundle_reports_bad_diagnostics_payload():
                 "keep_energy_summary": [],
                 "high_energy_keeps": {},
                 "high_risk_cuts": "bad",
+                "llm_cut_review": [],
                 "review_flags": [],
             }
         },
@@ -767,6 +779,7 @@ def test_validate_variant_timeline_bundle_reports_bad_diagnostics_payload():
     assert any("diagnostics: keep_energy_summary is not a dict" in issue for issue in result["issues"])
     assert any("diagnostics: high_energy_keeps is not a list" in issue for issue in result["issues"])
     assert any("diagnostics: high_risk_cuts is not a list" in issue for issue in result["issues"])
+    assert any("diagnostics: llm_cut_review is not a dict" in issue for issue in result["issues"])
     assert any("diagnostics: review_flags is not a dict" in issue for issue in result["issues"])
 
 

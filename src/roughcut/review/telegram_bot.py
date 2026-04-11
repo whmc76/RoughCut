@@ -2187,6 +2187,7 @@ def _build_final_review_diagnostics_lines(variant_timeline_bundle: dict[str, Any
         for item in (diagnostics.get("high_risk_cuts") or [])
         if isinstance(item, dict)
     ]
+    llm_cut_review = diagnostics.get("llm_cut_review") if isinstance(diagnostics.get("llm_cut_review"), dict) else {}
     high_energy_keeps = [
         item
         for item in (diagnostics.get("high_energy_keeps") or [])
@@ -2200,6 +2201,21 @@ def _build_final_review_diagnostics_lines(variant_timeline_bundle: dict[str, Any
             lines.append(f"- 建议人工复核：{'；'.join(reasons[:2])}")
         else:
             lines.append("- 建议人工复核：检测到高风险剪辑边界。")
+
+    if llm_cut_review.get("reviewed"):
+        candidate_count = int(llm_cut_review.get("candidate_count") or 0)
+        restored_cut_count = int(llm_cut_review.get("restored_cut_count") or 0)
+        remaining_high_risk = len(high_risk_cuts)
+        summary = str(llm_cut_review.get("summary") or "").strip()
+        provider = str(llm_cut_review.get("provider") or "").strip()
+        provider_text = f"（{provider}）" if provider else ""
+        line = (
+            f"- LLM 复核{provider_text}：审了 {candidate_count} 个高风险 cut，"
+            f"恢复 {restored_cut_count} 个，当前剩余 {remaining_high_risk} 个高风险 cut。"
+        )
+        if summary:
+            line = f"{line} {summary}"
+        lines.append(line)
 
     for item in high_risk_cuts[:2]:
         start = round(float(item.get("start", 0.0) or 0.0), 2)

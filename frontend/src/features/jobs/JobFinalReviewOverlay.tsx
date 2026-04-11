@@ -93,6 +93,8 @@ export function JobFinalReviewOverlay({
   const qualityGrade = selectedJob.quality_grade?.trim() || null;
   const qualitySummary = selectedJob.quality_summary?.trim() || null;
   const issueCodes = (selectedJob.quality_issue_codes ?? []).filter(Boolean);
+  const timelineDiagnostics = selectedJob.timeline_diagnostics ?? null;
+  const reviewReasons = (timelineDiagnostics?.review_reasons ?? []).filter(Boolean);
   const hasQuality = qualityScore !== null || Boolean(qualityGrade) || Boolean(qualitySummary) || issueCodes.length > 0;
   const spotCheckItems = buildSpotCheckItems(report);
   const previewTranscriptItems = buildPreviewTranscriptItems(report);
@@ -248,6 +250,49 @@ export function JobFinalReviewOverlay({
           <div className="muted">暂无质量结果</div>
         )}
       </section>
+
+      {timelineDiagnostics ? (
+        <section className="detail-block final-review-section-card">
+          <div className="detail-key">剪辑诊断</div>
+          <div className="stats-grid compact">
+            <StatCard label="高风险 Cut" value={timelineDiagnostics.high_risk_cut_count ?? 0} />
+            <StatCard label="高能量保留段" value={timelineDiagnostics.high_energy_keep_count ?? 0} />
+            <StatCard label="LLM 复核" value={timelineDiagnostics.llm_reviewed ? (timelineDiagnostics.llm_candidate_count ?? 0) : "未启用"} />
+            <StatCard label="恢复 Cut" value={timelineDiagnostics.llm_restored_cut_count ?? 0} />
+          </div>
+          {timelineDiagnostics.review_recommended || reviewReasons.length || timelineDiagnostics.llm_summary ? (
+            <div className="list-stack top-gap">
+              {timelineDiagnostics.review_recommended ? (
+                <article className="activity-card final-review-evidence-card">
+                  <div className="detail-key">人工复核建议</div>
+                  <div className="final-review-evidence-copy">
+                    <strong>{reviewReasons[0] || "检测到高风险剪辑边界，建议人工复核。"}</strong>
+                    {reviewReasons.slice(1).map((reason) => (
+                      <div key={reason} className="muted">
+                        {reason}
+                      </div>
+                    ))}
+                  </div>
+                </article>
+              ) : null}
+              {timelineDiagnostics.llm_reviewed ? (
+                <article className="activity-card final-review-evidence-card">
+                  <div className="detail-key">LLM 复核摘要</div>
+                  <div className="final-review-evidence-copy">
+                    <strong>
+                      {(timelineDiagnostics.llm_provider?.trim() || "模型复核")} · 恢复 {timelineDiagnostics.llm_restored_cut_count ?? 0} 个 cut
+                    </strong>
+                    <div className="muted">
+                      已复核 {timelineDiagnostics.llm_candidate_count ?? 0} 个高风险 cut
+                      {timelineDiagnostics.llm_summary ? `：${timelineDiagnostics.llm_summary}` : "。"}
+                    </div>
+                  </div>
+                </article>
+              ) : null}
+            </div>
+          ) : null}
+        </section>
+      ) : null}
 
       <section className="detail-block final-review-section-card">
         <div className="detail-key">字幕抽检</div>

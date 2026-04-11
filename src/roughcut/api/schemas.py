@@ -91,6 +91,7 @@ class JobOut(BaseModel):
     quality_grade: str | None = None
     quality_summary: str | None = None
     quality_issue_codes: list[str] = Field(default_factory=list)
+    timeline_diagnostics: dict[str, Any] | None = None
     avatar_delivery_status: str | None = None
     avatar_delivery_summary: str | None = None
     status: str
@@ -99,6 +100,10 @@ class JobOut(BaseModel):
     output_dir: str | None
     workflow_mode: str
     enhancement_modes: list[str] = Field(default_factory=list)
+    auto_review_mode_enabled: bool = False
+    auto_review_status: str | None = None
+    auto_review_summary: str | None = None
+    auto_review_reasons: list[str] = Field(default_factory=list)
     file_hash: str | None
     error_message: str | None
     progress_percent: int = 0
