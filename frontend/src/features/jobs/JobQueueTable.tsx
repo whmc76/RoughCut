@@ -4,7 +4,15 @@ import { EmptyState } from "../../components/ui/EmptyState";
 import { PanelHeader } from "../../components/ui/PanelHeader";
 import { useI18n } from "../../i18n";
 import { classNames, formatDate, statusLabel } from "../../utils";
-import { enhancementModeLabel, getRestartUnavailableReason, isRestartableJobStatus, stepLabel, workflowModeLabel } from "./constants";
+import {
+  autoReviewBadgeLabel,
+  autoReviewTone,
+  enhancementModeLabel,
+  getRestartUnavailableReason,
+  isRestartableJobStatus,
+  stepLabel,
+  workflowModeLabel,
+} from "./constants";
 
 function resolvePendingReviewStep(job: Job) {
   return job.steps.find((step) => (step.step_name === "summary_review" || step.step_name === "final_review") && step.status === "pending")
@@ -43,6 +51,11 @@ function reviewPreviewText(job: Job, t: (key: string) => string) {
     return job.quality_summary || "等待审核成片后继续。";
   }
   return job.content_summary || job.content_subject || "等待信息核对后继续。";
+}
+
+function enhancementBadgeLabel(job: Job, mode: string) {
+  if (mode === "auto_review") return autoReviewBadgeLabel(job);
+  return enhancementModeLabel(mode);
 }
 
 type JobQueueTableProps = {
@@ -166,10 +179,18 @@ export function JobQueueTable({
                           <span className="mode-chip">{workflowModeLabel(job.workflow_mode)}</span>
                           {job.enhancement_modes.map((mode) => (
                             <span key={mode} className="mode-chip subtle">
-                              {enhancementModeLabel(mode)}
+                              {enhancementBadgeLabel(job, mode)}
                             </span>
                           ))}
                         </div>
+                        {job.auto_review_mode_enabled && job.auto_review_summary ? (
+                          <div className="compact-top">
+                            <span className={`status-pill ${autoReviewTone(job.auto_review_status)}`}>
+                              {autoReviewBadgeLabel(job)}
+                            </span>
+                            <span className="muted"> {job.auto_review_summary}</span>
+                          </div>
+                        ) : null}
                         {job.avatar_delivery_summary ? (
                           <div className="compact-top">
                             <span className={`status-pill ${job.avatar_delivery_status || "pending"}`}>

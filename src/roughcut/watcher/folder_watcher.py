@@ -823,8 +823,8 @@ async def create_merged_job_for_inventory_paths(
         if not path.exists() or not path.is_file():
             raise FileNotFoundError(str(path))
 
-    output_dir = DEFAULT_TEST_OUTPUT_ROOT / "watch-merged"
-    output_path = output_dir / f"watch_merge_{uuid.uuid4().hex}.mp4"
+    temp_output_dir = DEFAULT_TEST_OUTPUT_ROOT / "watch-merged"
+    output_path = temp_output_dir / f"watch_merge_{uuid.uuid4().hex}.mp4"
     content_profile_source_context = (
         {
             "allow_related_profiles": True,
@@ -913,6 +913,7 @@ def _extract_name_tokens(value: str) -> set[str]:
     return tokens
 
 
+_SEQUENCED_CAPTURE_RE = re.compile(r"(?P<date>\d{8})[-_](?P<time>\d{6})(?:$|[^0-9])")
 _SUBJECT_STOPWORDS = {
     "开箱",
     "测评",
@@ -964,6 +965,8 @@ def _reason_tags(scores: dict[str, float]) -> list[str]:
     reasons: list[str] = []
     if scores["time"] >= 0.55:
         reasons.append("拍摄时间接近")
+    if scores.get("continuity", 0.0) >= 0.6:
+        reasons.append("连续拍摄片段")
     if scores["identity"] >= 0.3:
         reasons.append("主体关键词相似")
     if scores["name"] >= 0.35:
@@ -1042,6 +1045,74 @@ def _summary_similarity(left: str, right: str) -> float:
     return SequenceMatcher(None, left.lower(), right.lower()).ratio()
 
 
+def _parse_capture_sequence_time(value: str | None) -> datetime | None:
+    stem = Path(str(value or "")).stem
+    match = _SEQUENCED_CAPTURE_RE.search(stem)
+    if not match:
+        return None
+    try:
+        return datetime.strptime(f"{match.group('date')}{match.group('time')}", "%Y%m%d%H%M%S").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def _capture_continuity_score(left_item: dict[str, Any], right_item: dict[str, Any], *, time_score: float, visual_score: float) -> float:
+    left_capture_time = _parse_capture_sequence_time(left_item.get("source_name"))
+    right_capture_time = _parse_capture_sequence_time(right_item.get("source_name"))
+    if left_capture_time is None or right_capture_time is None:
+        return 0.0
+    if left_capture_time.date() != right_capture_time.date():
+        return 0.0
+    if time_score < 0.55 or visual_score < 0.55:
+        return 0.0
+
+    capture_gap = abs((left_capture_time - right_capture_time).total_seconds())
+    score = 0.0
+    if capture_gap <= 3 * 60:
+        score += 0.52
+    elif capture_gap <= 8 * 60:
+        score += 0.34
+    elif capture_gap <= 20 * 60:
+        score += 0.18
+    elif time_score >= 0.75:
+        # Some creator exports preserve same-day timestamp stems but not exact
+        # in-camera seconds. When filesystem times still show back-to-back
+        # settling and the visuals are close, keep treating them as a likely
+        # continuous shoot.
+        score += 0.42
+    else:
+        return 0.0
+
+    left_parent = str(Path(str(left_item.get("path") or "")).parent)
+    right_parent = str(Path(str(right_item.get("path") or "")).parent)
+    if left_parent and left_parent == right_parent:
+        score += 0.12
+
+    if visual_score >= 0.7:
+        score += 0.2
+    elif visual_score >= 0.6:
+        score += 0.12
+
+    left_width = int(left_item.get("width") or 0)
+    left_height = int(left_item.get("height") or 0)
+    right_width = int(right_item.get("width") or 0)
+    right_height = int(right_item.get("height") or 0)
+    if left_width and left_height and right_width and right_height:
+        if left_width == right_width and left_height == right_height:
+            score += 0.08
+        elif abs((left_width / max(left_height, 1)) - (right_width / max(right_height, 1))) <= 0.05:
+            score += 0.04
+
+    left_size = int(left_item.get("size") or 0)
+    right_size = int(right_item.get("size") or 0)
+    if left_size > 0 and right_size > 0:
+        size_ratio = min(left_size, right_size) / max(left_size, right_size)
+        if size_ratio >= 0.45:
+            score += 0.08
+
+    return min(score, 1.0)
+
+
 def _find(parent: list[int], index: int) -> int:
     while parent[index] != index:
         parent[index] = parent[parent[index]]
@@ -1081,6 +1152,8 @@ async def suggest_merge_groups_for_inventory_items(
                 "modified": _to_unix_timestamp(str(item.get("modified_at"))) or modified_at,
                 "duration": float(item.get("duration_sec") or 0.0),
                 "size": int(item.get("size_bytes") or 0),
+                "width": int(item.get("width") or 0),
+                "height": int(item.get("height") or 0),
                 "source_name": str(item.get("source_name") or path.name),
                 "summary": _safe_parse_summary(path),
                 "summary_hint": _build_inventory_summary_hint(path),
@@ -1144,6 +1217,12 @@ async def suggest_merge_groups_for_inventory_items(
             )
             identity_score = _token_similarity(left_item["subject_tokens"], right_item["subject_tokens"])
             visual_score = _signature_similarity(left_item["signature"], right_item["signature"])
+            continuity_score = _capture_continuity_score(
+                left_item,
+                right_item,
+                time_score=time_score,
+                visual_score=visual_score,
+            )
 
             score = (
                 time_score * 0.34
@@ -1152,6 +1231,7 @@ async def suggest_merge_groups_for_inventory_items(
                 + visual_score * 0.16
                 + name_score * 0.06
                 + duration_score * 0.01
+                + continuity_score * 0.14
             )
             if score < min_score:
                 continue
@@ -1166,6 +1246,7 @@ async def suggest_merge_groups_for_inventory_items(
                     "duration": duration_score,
                     "summary": summary_score,
                     "visual": visual_score,
+                    "continuity": continuity_score,
                 }
             )
             _union(parent, left, right)

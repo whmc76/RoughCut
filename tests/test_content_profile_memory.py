@@ -167,6 +167,45 @@ async def test_content_profile_memory_builds_confirmed_entities_from_manual_iden
 
 
 @pytest.mark.asyncio
+async def test_content_profile_memory_learns_creative_preferences_from_manual_guidance(db_session):
+    job = Job(
+        id=uuid.uuid4(),
+        source_path="E:/videos/commander.mp4",
+        source_name="20260412_司令官2Ultra.mp4",
+        status="needs_review",
+        channel_profile="edc_tactical",
+    )
+    db_session.add(job)
+    await db_session.flush()
+
+    await record_content_profile_feedback_memory(
+        db_session,
+        job=job,
+        draft_profile={
+            "subject_type": "EDC手电",
+        },
+        final_profile={
+            "subject_brand": "傲雷",
+            "subject_model": "司令官2Ultra",
+            "subject_type": "EDC手电",
+            "video_theme": "司令官2Ultra版本对比与近景细节实测",
+            "correction_notes": "节奏快一点，重点拍近景细节和版本差异。",
+            "supplemental_context": "保留上手实测片段和最后结论。",
+        },
+        user_feedback={
+            "correction_notes": "节奏快一点，重点拍近景细节和版本差异。",
+            "supplemental_context": "保留上手实测片段和最后结论。",
+        },
+    )
+    await db_session.flush()
+
+    memory = await load_content_profile_user_memory(db_session, channel_profile="edc_tactical")
+    tags = {str(item.get("tag") or "") for item in memory["creative_preferences"]}
+
+    assert {"comparison_focus", "closeup_focus", "practical_demo", "fast_paced"} <= tags
+
+
+@pytest.mark.asyncio
 async def test_content_profile_memory_includes_confirmed_entities_when_subject_domain_is_explicit(db_session):
     job = Job(
         id=uuid.uuid4(),

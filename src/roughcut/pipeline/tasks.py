@@ -56,11 +56,13 @@ def _can_transition_step(
     step_status: str,
     target_status: str,
     current_task_id: str | None,
+    last_task_id: str | None,
     task_id: str | None,
 ) -> bool:
     normalized_job_status = str(job_status or "").strip().lower()
     normalized_step_status = str(step_status or "").strip().lower()
     current_task = str(current_task_id or "").strip()
+    last_task = str(last_task_id or "").strip()
     incoming_task = str(task_id or "").strip()
 
     if target_status == "running":
@@ -69,8 +71,12 @@ def _can_transition_step(
         if current_task and incoming_task and current_task != incoming_task:
             return False
         if normalized_step_status == "pending":
+            if incoming_task and last_task and incoming_task == last_task:
+                return False
             return True
         if normalized_step_status == "running" and current_task and incoming_task and current_task == incoming_task:
+            return True
+        if normalized_step_status == "failed" and incoming_task and last_task and incoming_task == last_task:
             return True
         return False
 
@@ -132,12 +138,15 @@ def _update_step_status(
             )
             step = result.scalar_one_or_none()
             if step:
-                current_task_id = (step.metadata_ or {}).get("task_id")
+                metadata = dict(step.metadata_ or {})
+                current_task_id = metadata.get("task_id")
+                last_task_id = metadata.get("last_task_id")
                 if not _can_transition_step(
                     job_status=str(job.status or ""),
                     step_status=str(step.status or ""),
                     target_status=status,
                     current_task_id=str(current_task_id or ""),
+                    last_task_id=str(last_task_id or ""),
                     task_id=str(task_id or ""),
                 ):
                     return False
@@ -154,9 +163,10 @@ def _update_step_status(
                     elapsed_seconds = max(0.0, (end_time - start_time).total_seconds())
                 step.metadata_ = _finalize_step_metadata(
                     {
-                    **(step.metadata_ or {}),
-                    "updated_at": now.isoformat(),
-                    **({"elapsed_seconds": round(elapsed_seconds, 3)} if elapsed_seconds is not None else {}),
+                        **(step.metadata_ or {}),
+                        "updated_at": now.isoformat(),
+                        **({"worker_started_at": now.isoformat()} if status == "running" else {}),
+                        **({"elapsed_seconds": round(elapsed_seconds, 3)} if elapsed_seconds is not None else {}),
                     },
                     status=status,
                     current_task_id=str(current_task_id or ""),
@@ -201,12 +211,15 @@ def _update_step_retry_waiting(
             step = result.scalar_one_or_none()
             if step is None:
                 return False
-            current_task_id = (step.metadata_ or {}).get("task_id")
+            metadata = dict(step.metadata_ or {})
+            current_task_id = metadata.get("task_id")
+            last_task_id = metadata.get("last_task_id")
             if not _can_transition_step(
                 job_status=str(job.status or ""),
                 step_status=str(step.status or ""),
                 target_status="pending",
                 current_task_id=str(current_task_id or ""),
+                last_task_id=str(last_task_id or ""),
                 task_id=str(task_id or ""),
             ):
                 return False
@@ -222,6 +235,73 @@ def _update_step_retry_waiting(
                 "retry_wait_until": (now.timestamp() + countdown),
                 "updated_at": now.isoformat(),
             }
+            await session.commit()
+            return True
+
+    return bool(asyncio.run(_update()))
+
+
+def _finalize_ignored_dispatched_step(
+    job_id: str,
+    step_name: str,
+    *,
+    task_id: str | None = None,
+) -> bool:
+    import asyncio
+    import uuid
+    from sqlalchemy import select
+    from roughcut.db.models import JobStep
+    from roughcut.db.session import get_session_factory
+
+    _reset_db_session_state()
+
+    async def _update():
+        from roughcut.db.models import Job
+
+        factory = get_session_factory()
+        async with factory() as session:
+            job = await session.get(Job, uuid.UUID(job_id))
+            result = await session.execute(
+                select(JobStep).where(JobStep.job_id == job.id, JobStep.step_name == step_name)
+            )
+            step = result.scalar_one_or_none()
+            if step is None:
+                return False
+            metadata = dict(step.metadata_ or {})
+            current_task_id = str(metadata.get("task_id") or "").strip()
+            incoming_task_id = str(task_id or "").strip()
+            if current_task_id and incoming_task_id and current_task_id != incoming_task_id:
+                return False
+
+            normalized_job_status = str(job.status or "").strip().lower()
+            if normalized_job_status in {"failed", "cancelled"}:
+                target_status = "cancelled"
+                detail = "任务到达时作业已终止，当前步骤已停止。"
+            elif normalized_job_status in {"done", "needs_review"}:
+                progress = float(metadata.get("progress") or 0.0)
+                target_status = "done" if progress >= 1.0 else "skipped"
+                detail = (
+                    "任务到达时作业已完成，当前步骤无需继续执行。"
+                    if target_status == "skipped"
+                    else str(metadata.get("detail") or "").strip() or "步骤已完成。"
+                )
+            else:
+                return False
+
+            now = datetime.now(timezone.utc)
+            step.status = target_status
+            step.finished_at = now
+            step.error_message = None
+            step.metadata_ = _finalize_step_metadata(
+                {
+                    **metadata,
+                    "detail": detail,
+                    "updated_at": now.isoformat(),
+                },
+                status=target_status,
+                current_task_id=current_task_id,
+                task_id=incoming_task_id,
+            )
             await session.commit()
             return True
 
@@ -389,7 +469,14 @@ def _apply_job_runtime_snapshot(job_id: str) -> None:
 def _run_task_step(task, job_id: str, step_name: str, *, retry_countdown: int):
     task_id = task.request.id
     if not _update_step_status(job_id, step_name, "running", task_id=task_id):
-        logger.info("step ignored before start step=%s job=%s task_id=%s", step_name, job_id, task_id)
+        normalized = _finalize_ignored_dispatched_step(job_id, step_name, task_id=task_id)
+        logger.info(
+            "step ignored before start step=%s job=%s task_id=%s normalized=%s",
+            step_name,
+            job_id,
+            task_id,
+            normalized,
+        )
         return {"ignored": True}
 
     _apply_job_runtime_snapshot(job_id)

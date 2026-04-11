@@ -5,6 +5,7 @@ from typing import Any
 from roughcut.config import get_settings
 from roughcut.providers.factory import get_reasoning_provider, get_voice_provider
 from roughcut.providers.reasoning.base import Message
+from roughcut.review.content_profile_memory import merge_content_profile_creative_preferences
 from roughcut.usage import track_usage_operation
 
 
@@ -76,14 +77,20 @@ def _build_heuristic_director_plan(
     subject = str(content_profile.get("subject_type") or content_profile.get("subject_model") or "这条内容").strip()
     summary = str(content_profile.get("summary") or content_profile.get("video_theme") or "").strip()
     question = str(content_profile.get("engagement_question") or "").strip()
+    creative_preferences = merge_content_profile_creative_preferences(content_profile)
+    preference_tags = {
+        str(item.get("tag") or "").strip()
+        for item in creative_preferences
+        if str(item.get("tag") or "").strip()
+    }
     opening_source = _subtitle_text(subtitle_items, 0)
     middle_source = _subtitle_text(subtitle_items, max(1, len(subtitle_items) // 2 - 1))
     closing_source = _subtitle_text(subtitle_items, max(0, len(subtitle_items) - 1))
 
-    hook = f"如果你只看一分钟，这条{subject}最值回票价的点我先给你挑出来。"
-    bridge = summary or "接下来别只看表面流程，更关键的是它背后的逻辑为什么成立。"
-    science = f"如果要把这条{subject}讲透，最好顺手补一句原理、对比或使用条件。"
-    closing = question or f"看到最后，你更在意这条{subject}的结论，还是它中间给出的判断依据？"
+    hook = _director_opening_hook(subject, preference_tags=preference_tags)
+    bridge = _director_bridge_line(subject, summary=summary, preference_tags=preference_tags)
+    science = _director_science_boost(subject, preference_tags=preference_tags)
+    closing = question or _director_closing_prompt(subject, preference_tags=preference_tags)
 
     voiceover_segments = [
         {
@@ -129,11 +136,7 @@ def _build_heuristic_director_plan(
         "bridge_line": bridge,
         "science_boost": science,
         "closing_prompt": closing,
-        "rewrite_strategy": [
-            "优先增强开头钩子，前 5 秒给出明确观看收益。",
-            "中段补逻辑桥和背景解释，减少信息跳跃。",
-            "结尾加入互动性收口，形成评论区问题。",
-        ],
+        "rewrite_strategy": _director_rewrite_strategy(preference_tags),
         "voiceover_segments": voiceover_segments,
     }
 
@@ -157,3 +160,69 @@ def _end_time(subtitle_items: list[dict[str, Any]]) -> float:
     if not subtitle_items:
         return 20.0
     return float(subtitle_items[-1].get("end_time", 20.0) or 20.0)
+
+
+def _director_opening_hook(subject: str, *, preference_tags: set[str]) -> str:
+    if "comparison_focus" in preference_tags:
+        return f"这条{subject}别从头猜，我先把最关键的差异和怎么选给你拎出来。"
+    if "workflow_breakdown" in preference_tags:
+        return f"这条{subject}别急着记步骤，我先把最关键的流程节点给你挑出来。"
+    if "conclusion_first" in preference_tags or "fast_paced" in preference_tags:
+        return f"这条{subject}先讲结论，最值回票价的重点我先替你拎出来。"
+    return f"如果你只看一分钟，这条{subject}最值回票价的点我先给你挑出来。"
+
+
+def _director_bridge_line(subject: str, *, summary: str, preference_tags: set[str]) -> str:
+    if summary:
+        if "comparison_focus" in preference_tags and "差异" not in summary and "对比" not in summary:
+            return f"{summary} 接下来把关键差异、适合谁和怎么选拆开说。"
+        if "workflow_breakdown" in preference_tags and "流程" not in summary and "步骤" not in summary:
+            return f"{summary} 接下来把关键步骤和每一步为什么这样安排讲清楚。"
+        return summary
+    if "workflow_breakdown" in preference_tags:
+        return f"接下来别只记{subject}表面流程，更关键的是把节点顺序和判断逻辑拆清楚。"
+    if "comparison_focus" in preference_tags:
+        return f"接下来别只看热闹，更关键的是把这条{subject}的差异、取舍和判断依据说透。"
+    return f"接下来别只看表面流程，更关键的是它背后的逻辑为什么成立。"
+
+
+def _director_science_boost(subject: str, *, preference_tags: set[str]) -> str:
+    focus_parts: list[str] = []
+    if "comparison_focus" in preference_tags:
+        focus_parts.append("核心差异、适用人群和取舍逻辑")
+    if "workflow_breakdown" in preference_tags:
+        focus_parts.append("关键步骤为什么这样接、哪里最容易踩坑")
+    if "detail_focus" in preference_tags or "closeup_focus" in preference_tags:
+        focus_parts.append("关键细节、做工和近景特写到底该看哪里")
+    if "practical_demo" in preference_tags:
+        focus_parts.append("真实上手场景里最影响判断的那条标准")
+    if focus_parts:
+        return f"如果要把这条{subject}讲透，最好顺手补一句" + "，再讲".join(focus_parts) + "。"
+    return f"如果要把这条{subject}讲透，最好顺手补一句原理、对比或使用条件。"
+
+
+def _director_closing_prompt(subject: str, *, preference_tags: set[str]) -> str:
+    if "comparison_focus" in preference_tags:
+        return f"看到最后，你会更偏这条{subject}里讲到的哪种版本和取舍逻辑？"
+    if "workflow_breakdown" in preference_tags:
+        return f"看到最后，你觉得这条{subject}里哪个关键步骤最值得单独展开讲？"
+    return f"看到最后，你更在意这条{subject}的结论，还是它中间给出的判断依据？"
+
+
+def _director_rewrite_strategy(preference_tags: set[str]) -> list[str]:
+    strategy = [
+        "优先增强开头钩子，前 5 秒给出明确观看收益。",
+        "中段补逻辑桥和背景解释，减少信息跳跃。",
+        "结尾加入互动性收口，形成评论区问题。",
+    ]
+    if "conclusion_first" in preference_tags or "fast_paced" in preference_tags:
+        strategy[0] = "优先把结论和观看收益前置，减少铺垫，前 5 秒直接进重点。"
+    if "comparison_focus" in preference_tags:
+        strategy[1] = "中段优先拆版本差异、适合人群和选择取舍，不只复述表面信息。"
+    elif "workflow_breakdown" in preference_tags:
+        strategy[1] = "中段优先把流程拆成关键节点，说明每一步为什么这样做。"
+    if "detail_focus" in preference_tags or "closeup_focus" in preference_tags:
+        strategy.insert(2, "补写关键细节、做工和近景特写的观看提示，让镜头重点更明确。")
+    elif "practical_demo" in preference_tags:
+        strategy.insert(2, "补写真实上手和实际使用场景，让判断依据落到体验上。")
+    return strategy[:4]

@@ -62,4 +62,5 @@ class OpenAIReasoningProvider(ReasoningProvider):
             content=extract_response_output_text(response),
             usage=usage,
             model=response.model,
+            raw_content=extract_response_output_text(response),
         )

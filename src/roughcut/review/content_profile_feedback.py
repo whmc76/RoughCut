@@ -735,6 +735,10 @@ async def apply_content_profile_feedback(
         value = resolved_feedback.get(key)
         if value:
             result[key] = str(value).strip()
+    for key in ("correction_notes", "supplemental_context"):
+        value = str(resolved_feedback.get(key) or merged.get(key) or "").strip()
+        if value:
+            result[key] = value
     if resolved_feedback.get("keywords"):
         manual_queries: list[str] = []
         for item in resolved_feedback["keywords"]:

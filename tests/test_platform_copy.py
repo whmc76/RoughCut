@@ -556,6 +556,8 @@ def test_build_packaging_prompt_brief_exposes_resolved_review_feedback():
                 "subject_model": "司令官2Ultra",
                 "video_theme": "傲雷司令官2Ultra版本选购与参数对比",
                 "hook_line": "司令官2Ultra到底值不值",
+                "correction_notes": "重点核对品牌和型号写法。",
+                "supplemental_context": "这是 EDC 手电版本对比稿。",
                 "search_queries": ["傲雷 司令官2Ultra", "傲雷 司令官2Ultra 手电"],
             },
         },
@@ -565,7 +567,46 @@ def test_build_packaging_prompt_brief_exposes_resolved_review_feedback():
     assert brief["manual_review_applied"] is True
     assert brief["resolved_review_user_feedback"]["subject_brand"] == "傲雷"
     assert brief["resolved_review_user_feedback"]["subject_model"] == "司令官2Ultra"
+    assert brief["resolved_review_user_feedback"]["correction_notes"] == "重点核对品牌和型号写法。"
+    assert brief["resolved_review_user_feedback"]["supplemental_context"] == "这是 EDC 手电版本对比稿。"
     assert brief["resolved_review_user_feedback"]["search_queries"] == ["傲雷 司令官2Ultra", "傲雷 司令官2Ultra 手电"]
+
+
+def test_build_packaging_prompt_brief_exposes_creative_preferences():
+    brief = build_packaging_prompt_brief(
+        source_name="flashlight.mp4",
+        content_profile={
+            "subject_brand": "傲雷",
+            "subject_model": "司令官2Ultra",
+            "creative_preferences": [
+                {"tag": "comparison_focus", "count": 3, "label": "突出差异对比"},
+                {"tag": "closeup_focus", "count": 2, "label": "突出近景特写"},
+            ],
+        },
+        subtitle_items=[],
+    )
+
+    assert brief["creative_preferences"][0]["tag"] == "comparison_focus"
+    assert brief["creative_preferences"][1]["tag"] == "closeup_focus"
+
+
+def test_normalize_platform_packaging_uses_creative_preferences_in_fallback_copy():
+    packaging = normalize_platform_packaging(
+        {"highlights": {}, "platforms": {"bilibili": {"titles": [], "description": "", "tags": []}}},
+        content_profile={
+            "subject_brand": "傲雷",
+            "subject_model": "司令官2Ultra",
+            "subject_type": "EDC手电",
+            "creative_preferences": [
+                {"tag": "comparison_focus", "count": 3, "label": "突出差异对比"},
+                {"tag": "closeup_focus", "count": 2, "label": "突出近景特写"},
+            ],
+        },
+    )
+
+    assert any("差异" in title for title in packaging["platforms"]["bilibili"]["titles"])
+    assert "版本差异和选择取舍" in packaging["platforms"]["bilibili"]["description"]
+    assert "近景细节和做工特写" in packaging["platforms"]["bilibili"]["description"]
 
 
 def test_build_packaging_fact_queries_prefers_resolved_review_feedback_identity():

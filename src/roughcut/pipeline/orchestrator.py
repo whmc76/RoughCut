@@ -9,8 +9,10 @@ State in DB, Celery only executes individual steps.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import math
+import os
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -97,6 +99,8 @@ _QUALITY_RERUN_STEPS = {
 }
 _REVIEW_ROUND_STEPS = {"summary_review", "glossary_review", "final_review"}
 _ORCHESTRATOR_ADVISORY_LOCK_KEY = 22032026
+_ORCHESTRATOR_HEARTBEAT_PATH = Path("logs/orchestrator-heartbeat.json")
+_ORCHESTRATOR_HEARTBEAT_MIN_FRESH_SEC = 30.0
 
 
 class _SingleActiveOrchestratorLease:
@@ -162,6 +166,80 @@ def _supports_postgres_orchestrator_lock() -> bool:
     return scheme in {"postgresql", "postgresql+asyncpg", "postgres"}
 
 
+def _write_orchestrator_heartbeat(
+    *,
+    phase: str,
+    poll_interval: float,
+    has_lock: bool,
+    last_tick_started_at: datetime | None = None,
+    last_tick_finished_at: datetime | None = None,
+    detail: str | None = None,
+) -> None:
+    now = datetime.now(timezone.utc)
+    payload = {
+        "updated_at": now.isoformat(),
+        "phase": phase,
+        "has_lock": has_lock,
+        "poll_interval_sec": float(poll_interval),
+        "pid": os.getpid(),
+    }
+    if last_tick_started_at is not None:
+        payload["last_tick_started_at"] = last_tick_started_at.isoformat()
+    if last_tick_finished_at is not None:
+        payload["last_tick_finished_at"] = last_tick_finished_at.isoformat()
+    if detail:
+        payload["detail"] = detail
+
+    try:
+        _ORCHESTRATOR_HEARTBEAT_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = _ORCHESTRATOR_HEARTBEAT_PATH.with_suffix(".tmp")
+        tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp_path.replace(_ORCHESTRATOR_HEARTBEAT_PATH)
+    except Exception:
+        logger.debug("Failed to persist orchestrator heartbeat", exc_info=True)
+
+
+def _read_orchestrator_heartbeat() -> dict[str, object] | None:
+    try:
+        raw = json.loads(_ORCHESTRATOR_HEARTBEAT_PATH.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except Exception:
+        logger.debug("Failed to load orchestrator heartbeat", exc_info=True)
+        return None
+    return raw if isinstance(raw, dict) else None
+
+
+def _augment_orchestrator_lock_snapshot(snapshot: dict[str, object]) -> dict[str, object]:
+    heartbeat = _read_orchestrator_heartbeat()
+    if not heartbeat:
+        return snapshot
+
+    augmented = dict(snapshot)
+    augmented["heartbeat"] = heartbeat
+    updated_at_raw = heartbeat.get("updated_at")
+    if not isinstance(updated_at_raw, str) or not updated_at_raw.strip():
+        return augmented
+    try:
+        updated_at = _coerce_utc(datetime.fromisoformat(updated_at_raw))
+    except ValueError:
+        return augmented
+
+    poll_interval = float(heartbeat.get("poll_interval_sec") or 0.0)
+    stale_after = max(_ORCHESTRATOR_HEARTBEAT_MIN_FRESH_SEC, poll_interval * 3 if poll_interval > 0 else 0.0)
+    age_sec = max(0.0, (datetime.now(timezone.utc) - updated_at).total_seconds())
+    augmented["heartbeat_age_sec"] = round(age_sec, 3)
+    augmented["heartbeat_stale_after_sec"] = stale_after
+    if augmented.get("status") == "held" and age_sec > stale_after:
+        augmented["status"] = "stale"
+        augmented["leader_active"] = False
+        augmented["detail"] = (
+            f"An orchestrator still holds the single-active lock, but its heartbeat is stale "
+            f"({int(round(age_sec))}s old)."
+        )
+    return augmented
+
+
 async def get_orchestrator_lock_snapshot() -> dict[str, object]:
     if not _supports_postgres_orchestrator_lock():
         return {
@@ -191,22 +269,22 @@ async def get_orchestrator_lock_snapshot() -> dict[str, object]:
                     text("SELECT pg_advisory_unlock(:lock_key)"),
                     {"lock_key": _ORCHESTRATOR_ADVISORY_LOCK_KEY},
                 )
-                return {
+                return _augment_orchestrator_lock_snapshot({
                     "status": "free",
                     "leader_active": False,
                     "detail": "No active orchestrator lock holder detected.",
-                }
-            return {
+                })
+            return _augment_orchestrator_lock_snapshot({
                 "status": "held",
                 "leader_active": True,
                 "detail": "An active orchestrator currently holds the single-active lock.",
-            }
+            })
     except Exception as exc:
-        return {
+        return _augment_orchestrator_lock_snapshot({
             "status": "unknown",
             "leader_active": None,
             "detail": str(exc),
-        }
+        })
     finally:
         await engine.dispose()
 
@@ -279,6 +357,10 @@ async def tick() -> None:
                 continue
 
             await _dispatch_step(step, session)
+            # Persist dispatch state before the worker can finish and write a newer
+            # terminal status, otherwise this session can overwrite that update at
+            # the end of the tick with a stale "running" row.
+            await session.commit()
             if _step_requires_local_gpu_for_dispatch(step.step_name):
                 running_gpu_steps += 1
 
@@ -321,8 +403,68 @@ def _step_stale_timeout_seconds(step_name: str) -> int:
     return max(300, int(getattr(settings, "step_stale_timeout_sec", 900) or 900))
 
 
+def _step_dispatch_stale_timeout_seconds(step_name: str) -> int:
+    settings = get_settings()
+    return max(
+        _step_stale_timeout_seconds(step_name),
+        max(300, int(getattr(settings, "step_dispatch_stale_timeout_sec", 3600) or 3600)),
+    )
+
+
+def _step_worker_started_at(step: JobStep) -> datetime | None:
+    metadata = step.metadata_ or {}
+    worker_started_at = metadata.get("worker_started_at")
+    if not isinstance(worker_started_at, str) or not worker_started_at.strip():
+        if step.started_at is None:
+            return None
+        started_at = _coerce_utc(step.started_at)
+        dispatched_at = metadata.get("dispatched_at")
+        if isinstance(dispatched_at, str) and dispatched_at.strip():
+            try:
+                dispatched = _coerce_utc(datetime.fromisoformat(dispatched_at))
+            except ValueError:
+                return started_at
+            if started_at > dispatched:
+                return started_at
+            return None
+        return started_at
+    try:
+        return _coerce_utc(datetime.fromisoformat(worker_started_at))
+    except ValueError:
+        return None
+
+
 def _step_last_heartbeat_at(step: JobStep) -> datetime | None:
     metadata = step.metadata_ or {}
+    started_at = _step_worker_started_at(step)
+    if started_at is not None:
+        updated_at = metadata.get("updated_at")
+        if isinstance(updated_at, str) and updated_at.strip():
+            try:
+                return max(started_at, _coerce_utc(datetime.fromisoformat(updated_at)))
+            except ValueError:
+                return started_at
+        return started_at
+
+    dispatched_at = metadata.get("dispatched_at")
+    if isinstance(dispatched_at, str) and dispatched_at.strip():
+        try:
+            dispatched = _coerce_utc(datetime.fromisoformat(dispatched_at))
+        except ValueError:
+            dispatched = None
+        updated_at = metadata.get("updated_at")
+        if isinstance(updated_at, str) and updated_at.strip():
+            try:
+                updated = _coerce_utc(datetime.fromisoformat(updated_at))
+            except ValueError:
+                updated = None
+            else:
+                if dispatched is None:
+                    return updated
+                return max(dispatched, updated)
+        if dispatched is not None:
+            return dispatched
+
     updated_at = metadata.get("updated_at")
     if isinstance(updated_at, str) and updated_at.strip():
         try:
@@ -330,6 +472,22 @@ def _step_last_heartbeat_at(step: JobStep) -> datetime | None:
         except ValueError:
             return None
     return _coerce_utc(step.started_at) if step.started_at is not None else None
+
+
+def _terminal_running_step_target_status(job: Job, step: JobStep) -> str:
+    normalized_job_status = str(getattr(job, "status", "") or "").strip().lower()
+    if normalized_job_status in {"failed", "cancelled"}:
+        return "cancelled"
+    progress = float(((step.metadata_ or {}).get("progress") or 0.0))
+    return "done" if progress >= 1.0 else "skipped"
+
+
+def _terminal_running_step_detail(job: Job, step: JobStep, *, target_status: str) -> str:
+    if target_status == "cancelled":
+        return "所属任务已终止，调度器已清理遗留运行步骤。"
+    if target_status == "done":
+        return str(((step.metadata_ or {}).get("detail") or "")).strip() or "所属任务已完成，调度器已自动收口该步骤。"
+    return "所属任务已结束，调度器已将遗留运行步骤标记为跳过。"
 
 
 async def _recover_stale_running_steps(session) -> None:
@@ -341,23 +499,51 @@ async def _recover_stale_running_steps(session) -> None:
     result = await session.execute(
         select(JobStep)
         .join(Job, Job.id == JobStep.job_id)
-        .where(
-            JobStep.status == "running",
-            Job.status.notin_(["cancelled", "failed", "done"]),
-        )
+        .where(JobStep.status == "running")
     )
     stale_steps = result.scalars().all()
     for step in stale_steps:
+        job = await session.get(Job, step.job_id)
+        if job is None:
+            continue
+        if str(job.status or "").strip().lower() in {"done", "failed", "cancelled", "needs_review"}:
+            metadata = dict(step.metadata_ or {})
+            previous_task_id = metadata.pop("task_id", None)
+            metadata.pop("retry_wait_until", None)
+            metadata.pop("retry_after_sec", None)
+            target_status = _terminal_running_step_target_status(job, step)
+            metadata["detail"] = _terminal_running_step_detail(job, step, target_status=target_status)
+            metadata["updated_at"] = now.isoformat()
+            step.status = target_status
+            step.finished_at = step.finished_at or now
+            step.error_message = None
+            if previous_task_id:
+                metadata["last_task_id"] = previous_task_id
+            step.metadata_ = metadata
+            logger.warning(
+                "Recovered running step on terminal job job=%s step=%s job_status=%s previous_task_id=%s target_status=%s",
+                step.job_id,
+                step.step_name,
+                job.status,
+                previous_task_id,
+                target_status,
+            )
+            continue
+
         last_heartbeat_at = _step_last_heartbeat_at(step)
         if last_heartbeat_at is None:
             continue
-        stale_after = _step_stale_timeout_seconds(step.step_name)
+        worker_started_at = _step_worker_started_at(step)
+        stale_after = (
+            _step_stale_timeout_seconds(step.step_name)
+            if worker_started_at is not None
+            else _step_dispatch_stale_timeout_seconds(step.step_name)
+        )
         if (now - last_heartbeat_at).total_seconds() < stale_after:
             continue
 
         from roughcut.recovery import stuck_step_recovery as stuck_step_recovery_mod
 
-        job = await session.get(Job, step.job_id)
         if job is not None:
             await stuck_step_recovery_mod.record_stuck_step_diagnostic(
                 session,
@@ -366,12 +552,18 @@ async def _recover_stale_running_steps(session) -> None:
                 stale_after_sec=stale_after,
                 applied_action="reset_to_pending",
                 now=now,
+                allow_acp=False,
             )
         metadata = dict(step.metadata_ or {})
         previous_task_id = metadata.pop("task_id", None)
         metadata.pop("retry_wait_until", None)
         metadata.pop("retry_after_sec", None)
-        metadata["detail"] = f"检测到步骤心跳超时({stale_after}s)，调度器已自动回收并重新入队。"
+        if previous_task_id:
+            metadata["last_task_id"] = previous_task_id
+        if worker_started_at is not None:
+            metadata["detail"] = f"检测到步骤心跳超时({stale_after}s)，调度器已自动回收并重新入队。"
+        else:
+            metadata["detail"] = f"检测到步骤派发后长期未被工作进程领取({stale_after}s)，调度器已自动回收并重新入队。"
         metadata["updated_at"] = now.isoformat()
         if step.step_name == "render":
             metadata["progress"] = 0.0
@@ -540,10 +732,13 @@ async def _dispatch_step(step: JobStep, session) -> None:
     task_name = STEP_TASK_MAP[step.step_name]
     queue = STEP_QUEUES[step.step_name]
     job_id = str(step.job_id)
+    now = datetime.now(timezone.utc)
 
     # Mark as dispatched (running will be set by worker)
     step.status = "running"
-    step.started_at = datetime.now(timezone.utc)
+    step.started_at = now
+    step.finished_at = None
+    step.error_message = None
     step.attempt += 1
 
     # Send to Celery
@@ -552,7 +747,8 @@ async def _dispatch_step(step: JobStep, session) -> None:
         **(step.metadata_ or {}),
         "task_id": async_result.id,
         "queue": queue,
-        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "dispatched_at": now.isoformat(),
+        "updated_at": now.isoformat(),
     }
     logger.info(f"Dispatched {step.step_name} for job {job_id} → {queue}")
 
@@ -560,7 +756,7 @@ async def _dispatch_step(step: JobStep, session) -> None:
     job = await session.get(Job, step.job_id)
     if job and job.status == "pending":
         job.status = "processing"
-        job.updated_at = datetime.now(timezone.utc)
+        job.updated_at = now
 
 
 async def _update_job_statuses(session) -> None:
@@ -1008,12 +1204,22 @@ async def run_orchestrator(poll_interval: float = 5.0) -> None:
     lease = _SingleActiveOrchestratorLease()
     waiting_for_lock = False
     recovered = False
+    last_tick_started_at: datetime | None = None
+    last_tick_finished_at: datetime | None = None
     try:
         while True:
             try:
                 has_lock = await lease.try_acquire()
             except Exception:
                 logger.exception("Orchestrator lock acquisition error")
+                _write_orchestrator_heartbeat(
+                    phase="lock_error",
+                    poll_interval=poll_interval,
+                    has_lock=False,
+                    last_tick_started_at=last_tick_started_at,
+                    last_tick_finished_at=last_tick_finished_at,
+                    detail="lock_acquisition_error",
+                )
                 await asyncio.sleep(poll_interval)
                 continue
 
@@ -1021,21 +1227,66 @@ async def run_orchestrator(poll_interval: float = 5.0) -> None:
                 if not waiting_for_lock:
                     logger.warning("Another RoughCut orchestrator is active; waiting for single-active lock")
                     waiting_for_lock = True
+                _write_orchestrator_heartbeat(
+                    phase="waiting_for_lock",
+                    poll_interval=poll_interval,
+                    has_lock=False,
+                    last_tick_started_at=last_tick_started_at,
+                    last_tick_finished_at=last_tick_finished_at,
+                )
                 await asyncio.sleep(poll_interval)
                 continue
 
             if waiting_for_lock:
                 logger.info("Single-active orchestrator lock acquired")
                 waiting_for_lock = False
+            _write_orchestrator_heartbeat(
+                phase="leader_idle",
+                poll_interval=poll_interval,
+                has_lock=True,
+                last_tick_started_at=last_tick_started_at,
+                last_tick_finished_at=last_tick_finished_at,
+            )
             if not recovered:
                 await _recover_incomplete_jobs()
                 recovered = True
             try:
+                last_tick_started_at = datetime.now(timezone.utc)
+                _write_orchestrator_heartbeat(
+                    phase="tick_running",
+                    poll_interval=poll_interval,
+                    has_lock=True,
+                    last_tick_started_at=last_tick_started_at,
+                    last_tick_finished_at=last_tick_finished_at,
+                )
                 await tick()
+                last_tick_finished_at = datetime.now(timezone.utc)
+                _write_orchestrator_heartbeat(
+                    phase="tick_idle",
+                    poll_interval=poll_interval,
+                    has_lock=True,
+                    last_tick_started_at=last_tick_started_at,
+                    last_tick_finished_at=last_tick_finished_at,
+                )
             except Exception:
                 logger.exception("Orchestrator tick error")
+                _write_orchestrator_heartbeat(
+                    phase="tick_error",
+                    poll_interval=poll_interval,
+                    has_lock=True,
+                    last_tick_started_at=last_tick_started_at,
+                    last_tick_finished_at=last_tick_finished_at,
+                    detail="tick_error",
+                )
             await asyncio.sleep(poll_interval)
     finally:
+        _write_orchestrator_heartbeat(
+            phase="stopped",
+            poll_interval=poll_interval,
+            has_lock=False,
+            last_tick_started_at=last_tick_started_at,
+            last_tick_finished_at=last_tick_finished_at,
+        )
         await lease.release()
 
 

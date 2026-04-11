@@ -120,7 +120,9 @@ export function useJobWorkspace() {
     enabled: Boolean(selectedJobId),
   });
   const selectedJob = detail.data;
-  const contentSource = contentProfile.data?.final ?? contentProfile.data?.draft ?? null;
+  const contentSource = isReviewMode
+    ? (contentProfile.data?.draft ?? contentProfile.data?.final ?? null)
+    : (contentProfile.data?.final ?? contentProfile.data?.draft ?? null);
   const contentDraftKeywords = normalizeKeywordList(contentDraft.keywords);
   const contentSourceKeywords = normalizeKeywordList(contentSource?.keywords);
   const contentSourceSearchQueries = normalizeKeywordList((contentSource as Record<string, unknown> | null)?.search_queries);
@@ -134,8 +136,12 @@ export function useJobWorkspace() {
   );
 
   useEffect(() => {
-    setContentDraft(contentProfile.data?.final ?? contentProfile.data?.draft ?? {});
-  }, [contentProfile.data]);
+    setContentDraft(
+      isReviewMode
+        ? (contentProfile.data?.draft ?? contentProfile.data?.final ?? {})
+        : (contentProfile.data?.final ?? contentProfile.data?.draft ?? {}),
+    );
+  }, [contentProfile.data, isReviewMode]);
 
   useEffect(() => {
     if (!selectedJobId || !isReviewMode) return;

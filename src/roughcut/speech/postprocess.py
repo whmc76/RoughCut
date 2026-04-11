@@ -21,6 +21,200 @@ class SubtitleEntry:
     words: tuple[dict, ...] = ()
 
 
+@dataclass(frozen=True)
+class BoundaryDecision:
+    left_index: int
+    right_index: int
+    decision: str
+    score: float
+    reason_tags: tuple[str, ...] = ()
+    source: str = "rule"
+    left_text: str = ""
+    right_text: str = ""
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "left_index": self.left_index,
+            "right_index": self.right_index,
+            "decision": self.decision,
+            "score": round(float(self.score), 3),
+            "reason_tags": list(self.reason_tags),
+            "source": self.source,
+            "left_text": self.left_text,
+            "right_text": self.right_text,
+        }
+
+
+@dataclass
+class SubtitleSegmentationAnalysis:
+    entry_count: int
+    fragment_start_count: int
+    fragment_end_count: int
+    protected_term_split_count: int
+    suspicious_boundary_count: int
+    consecutive_fragment_window_count: int
+    low_confidence_window_count: int
+    boundary_decisions: tuple[BoundaryDecision, ...] = ()
+    low_confidence_windows: tuple[dict[str, object], ...] = ()
+
+    def as_dict(self) -> dict[str, object]:
+        suspicious = [decision.as_dict() for decision in self.boundary_decisions if decision.decision != "natural_break"]
+        return {
+            "entry_count": self.entry_count,
+            "fragment_start_count": self.fragment_start_count,
+            "fragment_end_count": self.fragment_end_count,
+            "protected_term_split_count": self.protected_term_split_count,
+            "suspicious_boundary_count": self.suspicious_boundary_count,
+            "consecutive_fragment_window_count": self.consecutive_fragment_window_count,
+            "low_confidence_window_count": self.low_confidence_window_count,
+            "sample_suspicious_boundaries": suspicious[:12],
+            "sample_low_confidence_windows": list(self.low_confidence_windows[:8]),
+        }
+
+
+@dataclass
+class SubtitleSegmentationResult:
+    entries: list[SubtitleEntry]
+    analysis: SubtitleSegmentationAnalysis
+
+
+def score_subtitle_entries(
+    entries: list[SubtitleEntry],
+    *,
+    max_chars: int,
+    max_duration: float,
+) -> float:
+    return _score_entry_sequence(entries, max_chars=max_chars, max_duration=max_duration)
+
+
+def generate_subtitle_window_candidates(
+    entries: list[SubtitleEntry],
+    *,
+    max_chars: int,
+    max_duration: float,
+    top_k: int = 4,
+) -> list[list[SubtitleEntry]]:
+    return _search_fragment_window_segmentations(
+        entries,
+        max_chars=max_chars,
+        max_duration=max_duration,
+        top_k=top_k,
+    )
+
+
+def _tokenize_entry_text_for_resegmentation(text: str) -> list[str]:
+    compact = re.sub(r"\s+", "", str(text or "").strip())
+    if not compact:
+        return []
+    return [token for token in re.findall(r"[A-Za-z0-9]+|[\u4e00-\u9fff]|.", compact) if token.strip()]
+
+
+def _window_words_for_resegmentation(
+    entries: list[SubtitleEntry],
+    *,
+    use_text_fallback_only: bool = False,
+) -> list[dict[str, float | str]]:
+    window_words: list[dict[str, float | str]] = []
+    for entry in list(entries or []):
+        entry_words = tuple(entry.words or ())
+        if entry_words and not use_text_fallback_only:
+            for word in entry_words:
+                text = str(word.get("word") or "").strip()
+                if not text:
+                    continue
+                window_words.append(
+                    {
+                        "word": text,
+                        "start": float(word.get("start") or 0.0),
+                        "end": float(word.get("end") or 0.0),
+                    }
+                )
+            continue
+        fallback_tokens = _tokenize_entry_text_for_resegmentation(entry.text_raw)
+        if not fallback_tokens:
+            continue
+        duration = max(float(entry.end) - float(entry.start), 0.001)
+        token_span = duration / max(len(fallback_tokens), 1)
+        for token_index, token in enumerate(fallback_tokens):
+            token_start = float(entry.start) + token_index * token_span
+            token_end = min(float(entry.end), token_start + token_span)
+            window_words.append(
+                {
+                    "word": token,
+                    "start": token_start,
+                    "end": token_end,
+                }
+                )
+    return window_words
+
+
+def _window_word_streams_for_resegmentation(entries: list[SubtitleEntry]) -> list[list[dict[str, float | str]]]:
+    streams: list[list[dict[str, float | str]]] = []
+    seen: set[tuple[str, ...]] = set()
+    for use_text_fallback_only in (False, True):
+        stream = _window_words_for_resegmentation(entries, use_text_fallback_only=use_text_fallback_only)
+        if len(stream) < 2:
+            continue
+        key = tuple(str(item.get("word") or "") for item in stream)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        streams.append(stream)
+    return streams
+
+
+def resegment_subtitle_window_from_cuts(
+    entries: list[SubtitleEntry],
+    *,
+    cut_after_word_indices: list[int],
+) -> list[SubtitleEntry] | None:
+    window_entries = list(entries or [])
+    if not window_entries:
+        return None
+    window_words = _window_words_for_resegmentation(window_entries)
+    if len(window_words) < 2:
+        return None
+
+    normalized_cuts: list[int] = []
+    last_allowed_index = len(window_words) - 2
+    for raw_cut in cut_after_word_indices:
+        try:
+            cut = int(raw_cut)
+        except (TypeError, ValueError):
+            return None
+        if cut < 0 or cut > last_allowed_index:
+            return None
+        if normalized_cuts and cut <= normalized_cuts[-1]:
+            return None
+        normalized_cuts.append(cut)
+
+    ranges: list[tuple[int, int]] = []
+    start_index = 0
+    for cut in normalized_cuts:
+        ranges.append((start_index, cut + 1))
+        start_index = cut + 1
+    ranges.append((start_index, len(window_words)))
+
+    rebuilt: list[SubtitleEntry] = []
+    for index, (start_index, end_index) in enumerate(ranges):
+        candidate_words = window_words[start_index:end_index]
+        if not candidate_words:
+            return None
+        text = _words_to_text(candidate_words)
+        if not text:
+            return None
+        rebuilt.append(
+            _make_subtitle_entry(
+                index,
+                float(candidate_words[0]["start"]),
+                float(candidate_words[-1]["end"]),
+                text,
+                words=candidate_words,
+            )
+        )
+    return _cleanup_subtitle_entries(rebuilt)
+
+
 _ER_FILLER_RE = re.compile(r"呃+")
 _CHINESE_DIGIT_VALUES = {
     "零": 0,
@@ -237,6 +431,22 @@ _TRAILING_KEEPABLE_PARTICLE_RE = re.compile(r"(?:啊+|吧+)$")
 _TERMINAL_PUNCTUATION = "。！？!?"
 _HARD_BREAK_CHARS = "。！？!?；;"
 _SOFT_BREAK_CHARS = "，,、：:"
+_BOUNDARY_LEADING_PARTICLES = ("呃", "嗯", "啊", "吧", "呢", "吗", "嘛", "呀", "哈", "哦", "诶", "欸", "哎")
+_PARTICLE_LED_RESTART_PREFIXES = (
+    "这期",
+    "这个",
+    "我们",
+    "我先",
+    "我再",
+    "你看",
+    "大家",
+    "接下来",
+    "下面",
+    "现在",
+    "今天",
+    "那我们",
+    "然后我们",
+)
 _NO_SPLIT_ENDINGS = (
     "的", "了", "呢", "吗", "嘛", "啊", "呀", "着", "把", "给", "在", "向", "和", "与", "及",
     "就", "也", "还", "很", "都", "又", "才", "再", "并", "跟", "让", "被",
@@ -296,6 +506,78 @@ _ATTACHED_FRAGMENT_PREFIXES = (
     "下去",
     "一下",
 )
+_SOFT_FRAGMENTARY_ENDINGS = (
+    "这个",
+    "那个",
+    "这边",
+    "那边",
+    "大家",
+    "我们",
+    "你们",
+    "相当",
+    "一个",
+)
+_SOFT_ATTACHED_FRAGMENT_PREFIXES = (
+    "要",
+    "觉",
+    "冷",
+    "人",
+    "边",
+    "备",
+    "名",
+    "隔",
+    "看",
+    "们",
+    "品",
+    "常",
+    "么",
+    "以",
+)
+_BOUNDARY_COMPOUND_SPLITS: tuple[tuple[str, str], ...] = (
+    ("需", "要"),
+    ("那", "种"),
+    ("这", "个"),
+    ("那", "个"),
+    ("我", "们"),
+    ("你", "们"),
+    ("它", "们"),
+    ("或", "者"),
+    ("制", "冷"),
+    ("产", "品"),
+    ("顾", "名"),
+    ("建", "议"),
+    ("介", "绍"),
+    ("一", "下"),
+    ("角", "度"),
+    ("口", "香糖"),
+    ("一", "颗"),
+    ("一", "定"),
+    ("没", "有"),
+    ("压", "胶"),
+    ("大", "网兜"),
+    ("大", "家"),
+    ("K", "片"),
+    ("我", "自己"),
+    ("这", "边"),
+)
+
+_SPLIT_MEASURE_LEFT_RE = re.compile(
+    rf"(?:{_DISPLAY_NUM_TOKEN}|这|那|每|某|另|前|后|首|第|几)$"
+)
+_SPLIT_MEASURE_RIGHT_RE = re.compile(
+    r"^(?:个|只|把|条|点|件|款|袋|盒|包|支|瓶|片|颗|次|种|位|类|份|套|台|张|米|寸|段|步|层|页|代|号)"
+)
+_UNCLOSED_NOMINAL_TAIL_RE = re.compile(
+    r"(?:"
+    r"第(?:[0-9]+|[一二两三四五六七八九十])个|"
+    r"(?:[0-9]+|[一二两三四五六七八九十])个|"
+    r"(?:这|那)(?:个|种|类|边)|"
+    r"(?:每|某)个|"
+    r"另一个|前一个|后一个|最后一个|"
+    r"的(?:这|那)?(?:个|种|类)?"
+    r")$"
+)
+_NOMINAL_HEAD_RE = re.compile(r"^[\u4e00-\u9fffA-Za-z0-9]{1,8}")
 _MAX_SEMANTIC_BRIDGE_GAP_SEC = 3.2
 _MAX_SEMANTIC_TRANSFER_WORDS = 4
 _MAX_SEMANTIC_TRANSFER_CHARS = 8
@@ -631,16 +913,34 @@ def split_into_subtitles(
     max_chars: int = 30,
     max_duration: float = 5.0,
 ) -> list[SubtitleEntry]:
+    return segment_subtitles(
+        segments,
+        max_chars=max_chars,
+        max_duration=max_duration,
+    ).entries
+
+
+def segment_subtitles(
+    segments: list[TranscriptSegment],
+    *,
+    max_chars: int = 30,
+    max_duration: float = 5.0,
+) -> SubtitleSegmentationResult:
     """
     Split transcript segments into subtitle display units.
     Each subtitle has at most max_chars characters and max_duration seconds.
     """
     if _can_use_global_word_segmentation(segments):
         entries = _segment_subtitles_from_global_words(segments, max_chars=max_chars, max_duration=max_duration)
-        merged = _merge_continuation_entries(entries, max_chars=max_chars, max_duration=max_duration)
-        rebalanced = _rebalance_semantic_boundaries(merged, max_chars=max_chars, max_duration=max_duration)
-        return _cleanup_subtitle_entries(
-            _merge_continuation_entries(rebalanced, max_chars=max_chars, max_duration=max_duration)
+        resolved = _resolve_subtitle_entry_sequence(
+            entries,
+            max_chars=max_chars,
+            max_duration=max_duration,
+            allow_window_refine=True,
+        )
+        return SubtitleSegmentationResult(
+            entries=resolved,
+            analysis=analyze_subtitle_segmentation(resolved),
         )
 
     subtitles: list[SubtitleEntry] = []
@@ -676,9 +976,16 @@ def split_into_subtitles(
                     char_offset += len(chunk)
                     idx += 1
 
-    merged = _merge_continuation_entries(subtitles, max_chars=max_chars, max_duration=max_duration)
-    rebalanced = _rebalance_semantic_boundaries(merged, max_chars=max_chars, max_duration=max_duration)
-    return _cleanup_subtitle_entries(_merge_continuation_entries(rebalanced, max_chars=max_chars, max_duration=max_duration))
+    resolved = _resolve_subtitle_entry_sequence(
+        subtitles,
+        max_chars=max_chars,
+        max_duration=max_duration,
+        allow_window_refine=True,
+    )
+    return SubtitleSegmentationResult(
+        entries=resolved,
+        analysis=analyze_subtitle_segmentation(resolved),
+    )
 
 
 def _can_use_global_word_segmentation(segments: list[TranscriptSegment]) -> bool:
@@ -702,6 +1009,15 @@ def _segment_subtitles_from_global_words(
     max_duration: float,
 ) -> list[SubtitleEntry]:
     words = _flatten_segment_words(segments)
+    return _segment_entries_from_words(words, max_chars=max_chars, max_duration=max_duration)
+
+
+def _segment_entries_from_words(
+    words: list[dict],
+    *,
+    max_chars: int,
+    max_duration: float,
+) -> list[SubtitleEntry]:
     if len(words) <= 1:
         return []
 
@@ -751,6 +1067,104 @@ def _segment_subtitles_from_global_words(
         )
         cursor = next_cursor
     return entries
+
+
+def _resolve_subtitle_entry_sequence(
+    entries: list[SubtitleEntry],
+    *,
+    max_chars: int,
+    max_duration: float,
+    allow_window_refine: bool,
+) -> list[SubtitleEntry]:
+    merged = _merge_continuation_entries(entries, max_chars=max_chars, max_duration=max_duration)
+    rebalanced = _rebalance_semantic_boundaries(merged, max_chars=max_chars, max_duration=max_duration)
+    resolved = _merge_continuation_entries(rebalanced, max_chars=max_chars, max_duration=max_duration)
+    if allow_window_refine:
+        resolved = _refine_low_confidence_windows(resolved, max_chars=max_chars, max_duration=max_duration)
+        resolved = _merge_continuation_entries(resolved, max_chars=max_chars, max_duration=max_duration)
+        resolved = _rebalance_semantic_boundaries(resolved, max_chars=max_chars, max_duration=max_duration)
+        resolved = _merge_continuation_entries(resolved, max_chars=max_chars, max_duration=max_duration)
+    return _cleanup_subtitle_entries(resolved)
+
+
+def analyze_subtitle_segmentation(entries: list[SubtitleEntry]) -> SubtitleSegmentationAnalysis:
+    if not entries:
+        return SubtitleSegmentationAnalysis(
+            entry_count=0,
+            fragment_start_count=0,
+            fragment_end_count=0,
+            protected_term_split_count=0,
+            suspicious_boundary_count=0,
+            consecutive_fragment_window_count=0,
+            low_confidence_window_count=0,
+            boundary_decisions=(),
+            low_confidence_windows=(),
+        )
+
+    fragment_end_count = sum(1 for entry in entries if _is_incomplete_subtitle_text(entry.text_raw))
+    boundary_decisions: list[BoundaryDecision] = []
+    fragment_start_count = 0
+    protected_term_split_count = 0
+    suspicious_boundary_count = 0
+    consecutive_fragment_window_count = 0
+    inside_suspicious_window = False
+
+    for left, right in zip(entries, entries[1:]):
+        tags: list[str] = []
+        score = _semantic_boundary_quality(left.text_raw, right.text_raw)
+        if _starts_with_attached_fragment(right.text_raw):
+            tags.append("attached_fragment_start")
+            fragment_start_count += 1
+        elif _starts_with_soft_attached_fragment(right.text_raw):
+            tags.append("soft_fragment_start")
+            fragment_start_count += 1
+        if _looks_like_split_measure_phrase(left.text_raw, right.text_raw):
+            tags.append("measure_phrase_split")
+            fragment_start_count += 1
+        if _is_incomplete_subtitle_text(left.text_raw):
+            tags.append("incomplete_left")
+        elif _looks_like_soft_fragmentary_tail(left.text_raw):
+            tags.append("soft_incomplete_left")
+        if _boundary_splits_protected_term(left.text_raw, right.text_raw):
+            tags.append("protected_term_split")
+            protected_term_split_count += 1
+        if score <= -1.5:
+            tags.append("low_boundary_score")
+        if _is_low_confidence_boundary(left, right):
+            suspicious_boundary_count += 1
+            if not inside_suspicious_window:
+                consecutive_fragment_window_count += 1
+                inside_suspicious_window = True
+        else:
+            inside_suspicious_window = False
+        boundary_decisions.append(
+            BoundaryDecision(
+                left_index=left.index,
+                right_index=right.index,
+                decision="natural_break" if not tags else "low_confidence_break",
+                score=score,
+                reason_tags=tuple(tags),
+                left_text=left.text_raw,
+                right_text=right.text_raw,
+            )
+        )
+
+    low_confidence_windows = _collect_low_confidence_windows(entries)
+    low_confidence_window_count = len(low_confidence_windows)
+    return SubtitleSegmentationAnalysis(
+        entry_count=len(entries),
+        fragment_start_count=fragment_start_count,
+        fragment_end_count=fragment_end_count,
+        protected_term_split_count=protected_term_split_count,
+        suspicious_boundary_count=suspicious_boundary_count,
+        consecutive_fragment_window_count=consecutive_fragment_window_count,
+        low_confidence_window_count=low_confidence_window_count,
+        boundary_decisions=tuple(boundary_decisions),
+        low_confidence_windows=tuple(
+            _build_low_confidence_window_summary(entries, start, end)
+            for start, end in low_confidence_windows
+        ),
+    )
 
 
 def _flatten_segment_words(segments: list[TranscriptSegment]) -> list[dict]:
@@ -842,6 +1256,12 @@ def _build_word_candidate(
         score -= 8.0
     if _starts_with_attached_fragment(next_preview):
         score -= 8.0
+    if _starts_with_soft_attached_fragment(next_preview):
+        score -= 4.0
+    if _looks_like_soft_fragmentary_tail(text):
+        score -= 4.0
+    if _boundary_splits_compound_term(text, next_preview):
+        score -= 10.0
     if _boundary_splits_protected_term(text, next_preview):
         score -= 12.0
 
@@ -971,6 +1391,12 @@ def _choose_word_split_index(words: list[dict], *, max_chars: int, max_duration:
             score += min(pause_after, 1.2) * (6.0 if boundary_quality >= 0 else -4.0)
         if len(right) <= 4 and boundary_quality < 0:
             score -= 12
+        if _boundary_splits_compound_term(left, right):
+            score -= 10
+        if _starts_with_soft_attached_fragment(right):
+            score -= 6
+        if _looks_like_soft_fragmentary_tail(left):
+            score -= 6
         if len(left) > max_chars + 2:
             score -= (len(left) - max_chars) * 6
         if score > best_score:
@@ -988,15 +1414,91 @@ def _semantic_hold_duration_limit(*, text_length: int, max_chars: int, max_durat
     return min(_MAX_SEMANTIC_BRIDGE_DURATION_SEC, limit)
 
 
+def _looks_like_split_measure_phrase(left: str, right: str) -> bool:
+    left_text = str(left or "").strip()
+    right_text = str(right or "").strip()
+    if not left_text or not right_text:
+        return False
+    return bool(_SPLIT_MEASURE_LEFT_RE.search(left_text) and _SPLIT_MEASURE_RIGHT_RE.match(right_text))
+
+
+def _is_strong_fragment_boundary(left: str, right: str, *, gap: float) -> bool:
+    left_text = str(left or "").strip()
+    right_text = str(right or "").strip()
+    if not left_text or not right_text:
+        return False
+    if _looks_like_split_measure_phrase(left_text, right_text):
+        return True
+    if _should_merge_subtitle_pair(left_text, right_text):
+        return True
+    return gap <= 0.05 and len(left_text) <= 5 and _semantic_boundary_quality(left_text, right_text) <= -2.5
+
+
+def _fragmented_display_hold_duration_limit(
+    *,
+    text_length: int,
+    max_chars: int,
+    max_duration: float,
+    gap: float,
+    strong_fragment_boundary: bool,
+) -> float:
+    limit = _semantic_hold_duration_limit(
+        text_length=text_length,
+        max_chars=max_chars,
+        max_duration=max_duration,
+    )
+    if strong_fragment_boundary:
+        limit += 1.6
+    if gap <= 0.05:
+        limit += 0.8
+    elif gap <= 0.4:
+        limit += 0.4
+    if text_length <= max_chars + 2:
+        limit += 0.6
+    return min(_MAX_SEMANTIC_BRIDGE_DURATION_SEC, limit)
+
+
 def _is_incomplete_subtitle_text(text: str) -> bool:
     candidate = str(text or "").strip()
     if not candidate:
         return False
     if candidate[-1] in (_HARD_BREAK_CHARS + _SOFT_BREAK_CHARS):
         return False
+    if _looks_like_unclosed_nominal_tail(candidate):
+        return True
     if any(candidate.endswith(token) for token in _NO_SPLIT_ENDINGS):
         return True
     return bool(re.search(r"(?:得很|会有|还有|没有|以及|为了|对于|因为|如果|或者|还是|就是|不是)$", candidate))
+
+
+def _looks_like_unclosed_nominal_tail(text: str) -> bool:
+    candidate = str(text or "").strip()
+    if not candidate:
+        return False
+    if candidate[-1] in (_HARD_BREAK_CHARS + _SOFT_BREAK_CHARS):
+        return False
+    return bool(_UNCLOSED_NOMINAL_TAIL_RE.search(candidate))
+
+
+def _starts_with_nominal_head(text: str) -> bool:
+    candidate = str(text or "").strip()
+    if not candidate:
+        return False
+    if re.match(r"^[，。！？、：；,.!?]", candidate):
+        return False
+    if any(candidate.startswith(prefix) for prefix in _GOOD_BREAK_PREFIXES):
+        return False
+    if any(candidate.startswith(token) for token in _NO_SPLIT_PREFIXES):
+        return False
+    return bool(_NOMINAL_HEAD_RE.match(candidate))
+
+
+def _boundary_splits_nominal_phrase(left: str, right: str) -> bool:
+    left_text = str(left or "").strip()
+    right_text = str(right or "").strip()
+    if not left_text or not right_text:
+        return False
+    return _looks_like_unclosed_nominal_tail(left_text) and _starts_with_nominal_head(right_text)
 
 
 def _semantic_boundary_quality(left: str, right: str) -> float:
@@ -1008,7 +1510,15 @@ def _semantic_boundary_quality(left: str, right: str) -> float:
     score = 0.0
     if _is_incomplete_subtitle_text(left_text):
         score -= 5.0
+    if _looks_like_soft_fragmentary_tail(left_text):
+        score -= 2.0
     if _starts_with_attached_fragment(right_text):
+        score -= 5.0
+    if _starts_with_soft_attached_fragment(right_text):
+        score -= 2.0
+    if _boundary_splits_nominal_phrase(left_text, right_text):
+        score -= 5.0
+    if _boundary_splits_compound_term(left_text, right_text):
         score -= 5.0
     if _boundary_splits_protected_term(left_text, right_text):
         score -= 8.0
@@ -1115,10 +1625,26 @@ def _rebalance_semantic_pair(
             improvement += 4.0
         if len(prefix_text) <= 1 and any(suffix_text.startswith(prefix) for prefix in _GOOD_BREAK_PREFIXES):
             improvement += 3.0
+        if (
+            prefix_count == 1
+            and gap <= 0.05
+            and len(left.text_raw) <= max(10, max_chars - 2)
+            and len(right.text_raw) >= 8
+            and not any(suffix_text.startswith(prefix) for prefix in _GOOD_BREAK_PREFIXES)
+        ):
+            improvement += 2.4
         if gap >= 0.8 and len(prefix_text) <= 4:
             improvement += 1.0
 
-        if improvement < 3.5:
+        required_improvement = 3.5
+        if _is_incomplete_subtitle_text(left.text_raw):
+            required_improvement -= 0.9
+        if gap >= 0.8 and len(prefix_text) <= 4:
+            required_improvement -= 0.5
+        if _looks_like_split_measure_phrase(left.text_raw, right.text_raw):
+            required_improvement -= 0.8
+
+        if improvement < max(2.0, required_improvement):
             continue
 
         new_left = _make_subtitle_entry(
@@ -1157,22 +1683,27 @@ def _should_bridge_semantic_gap(
     combined_text = f"{left.text_raw}{right.text_raw}"
     if len(combined_text) > max_chars + 8:
         return False
-    if float(right.end) - float(left.start) > _semantic_hold_duration_limit(
-        text_length=len(combined_text),
-        max_chars=max_chars,
-        max_duration=max_duration,
-    ):
-        return False
 
     attached = _starts_with_attached_fragment(right.text_raw)
     incomplete = _is_incomplete_subtitle_text(left.text_raw)
     protected = _boundary_splits_protected_term(left.text_raw, right.text_raw)
     tiny_right = len(right.text_raw) <= 4
-    if not (attached or incomplete or protected or tiny_right):
+    strong_fragment_boundary = _is_strong_fragment_boundary(left.text_raw, right.text_raw, gap=gap)
+    if not (attached or incomplete or protected or tiny_right or strong_fragment_boundary):
         return False
-    if gap > 0.8 and not (tiny_right or protected or attached):
+    if gap > 1.2 and not (tiny_right or protected or attached):
         return False
-    return _should_merge_subtitle_pair(left.text_raw, right.text_raw) or _semantic_boundary_quality(left.text_raw, right.text_raw) <= -4.0
+    if gap > 0.8 and not (tiny_right or protected or attached or (strong_fragment_boundary and incomplete)):
+        return False
+    if float(right.end) - float(left.start) > _fragmented_display_hold_duration_limit(
+        text_length=len(combined_text),
+        max_chars=max_chars,
+        max_duration=max_duration,
+        gap=gap,
+        strong_fragment_boundary=strong_fragment_boundary,
+    ):
+        return False
+    return strong_fragment_boundary or _semantic_boundary_quality(left.text_raw, right.text_raw) <= -4.0
 
 
 def _merge_subtitle_entries(left: SubtitleEntry, right: SubtitleEntry) -> SubtitleEntry:
@@ -1205,6 +1736,12 @@ def _score_break_boundary(left: str, right: str, *, index: int, target: int) -> 
         score -= 24
     if any(right_text.startswith(token) for token in _NO_SPLIT_PREFIXES):
         score -= 26
+    if _starts_with_soft_attached_fragment(right_text):
+        score -= 14
+    if _looks_like_soft_fragmentary_tail(left_text):
+        score -= 12
+    if _boundary_splits_compound_term(left_text, right_text):
+        score -= 30
     if _boundary_splits_protected_term(left_text, right_text):
         score -= 64
 
@@ -1230,8 +1767,10 @@ def _merge_continuation_entries(
         prev = merged[-1]
         combined_text = f"{prev.text_raw}{entry.text_raw}"
         combined_duration = float(entry.end) - float(prev.start)
+        gap = max(0.0, float(entry.start) - float(prev.end))
         protected_boundary = _boundary_splits_protected_term(prev.text_raw, entry.text_raw)
         fragment_boundary = _starts_with_attached_fragment(entry.text_raw)
+        strong_fragment_boundary = _is_strong_fragment_boundary(prev.text_raw, entry.text_raw, gap=gap)
         allowed_chars = max_chars + 6 + (4 if protected_boundary else 0)
         short_text_bonus = 2.0 if len(combined_text) <= max(16, max_chars - 8) else 0.0
         allowed_duration = (
@@ -1241,11 +1780,21 @@ def _merge_continuation_entries(
             + (0.6 if fragment_boundary else 0.0)
             + short_text_bonus
         )
+        allowed_duration = max(
+            allowed_duration,
+            _fragmented_display_hold_duration_limit(
+                text_length=len(combined_text),
+                max_chars=max_chars,
+                max_duration=max_duration,
+                gap=gap,
+                strong_fragment_boundary=strong_fragment_boundary,
+            ),
+        )
         if (
-            entry.start - prev.end <= 0.18
+            gap <= 0.18
             and len(combined_text) <= allowed_chars
             and combined_duration <= allowed_duration
-            and _should_merge_subtitle_pair(prev.text_raw, entry.text_raw)
+            and (strong_fragment_boundary or _should_merge_subtitle_pair(prev.text_raw, entry.text_raw))
         ):
             merged[-1] = _make_subtitle_entry(
                 prev.index,
@@ -1265,7 +1814,32 @@ def _cleanup_subtitle_entries(entries: list[SubtitleEntry]) -> list[SubtitleEntr
         duration = float(entry.end) - float(entry.start)
         if duration <= 0.08:
             continue
+        text_raw = str(entry.text_raw or "").strip()
+        if cleaned:
+            previous = cleaned[-1]
+            gap = float(entry.start) - float(previous.end)
+            if gap <= 0.9:
+                for _ in range(3):
+                    overlap = _shared_edge_overlap_text(previous.text_raw, text_raw, max_overlap=10)
+                    if overlap and 4 <= len(overlap) <= 10 and len(text_raw) >= len(overlap) + 2:
+                        trimmed = text_raw[len(overlap):].lstrip("，。！？!?、：:；;,. ")
+                        if len(trimmed) >= 2:
+                            text_raw = trimmed
+                            continue
+                    repeated_prefix = _leading_repeated_prefix_text(text_raw)
+                    if (
+                        repeated_prefix
+                        and len(text_raw) >= len(repeated_prefix) + 2
+                        and repeated_prefix in previous.text_raw[max(0, len(previous.text_raw) - len(repeated_prefix) - 3):]
+                    ):
+                        trimmed = text_raw[len(repeated_prefix):].lstrip("，。！？!?、：:；;,. ")
+                        if len(trimmed) >= 2:
+                            text_raw = trimmed
+                            continue
+                    break
         normalized_text = normalize_text(entry.text_raw)
+        if text_raw != str(entry.text_raw or "").strip():
+            normalized_text = normalize_text(text_raw)
         if not normalized_text.strip("，。！？!?、,.；;：:\"'()（）[]【】"):
             continue
         if cleaned:
@@ -1298,12 +1872,424 @@ def _cleanup_subtitle_entries(entries: list[SubtitleEntry]) -> list[SubtitleEntr
                 index=len(cleaned),
                 start=entry.start,
                 end=entry.end,
-                text_raw=entry.text_raw,
+                text_raw=text_raw,
                 text_norm=normalized_text,
                 words=tuple(entry.words or ()),
             )
         )
     return _collapse_repeated_sequence_entries(cleaned)
+
+
+def _is_low_confidence_boundary(left: SubtitleEntry, right: SubtitleEntry) -> bool:
+    gap = max(0.0, float(right.start) - float(left.end))
+    if _looks_like_particle_led_sentence_restart(right.text_raw) and not (
+        _boundary_splits_nominal_phrase(left.text_raw, right.text_raw)
+        or _boundary_splits_protected_term(left.text_raw, right.text_raw)
+        or _looks_like_split_measure_phrase(left.text_raw, right.text_raw)
+        or _boundary_splits_compound_term(left.text_raw, right.text_raw)
+    ):
+        return False
+    if gap > _MAX_SEMANTIC_BRIDGE_GAP_SEC and not (
+        _boundary_splits_nominal_phrase(left.text_raw, right.text_raw)
+        or _boundary_splits_protected_term(left.text_raw, right.text_raw)
+        or _looks_like_split_measure_phrase(left.text_raw, right.text_raw)
+        or _boundary_splits_compound_term(left.text_raw, right.text_raw)
+        or _starts_with_attached_fragment(right.text_raw)
+    ):
+        return False
+    score = _semantic_boundary_quality(left.text_raw, right.text_raw)
+    if score <= -1.5:
+        return True
+    if _boundary_splits_nominal_phrase(left.text_raw, right.text_raw):
+        return True
+    if _boundary_splits_protected_term(left.text_raw, right.text_raw):
+        return True
+    if _looks_like_split_measure_phrase(left.text_raw, right.text_raw):
+        return True
+    if _boundary_splits_compound_term(left.text_raw, right.text_raw):
+        return True
+    if _starts_with_attached_fragment(right.text_raw):
+        return True
+    if _starts_with_soft_attached_fragment(right.text_raw):
+        return True
+    if _looks_like_soft_fragmentary_tail(left.text_raw):
+        return True
+    if _is_incomplete_subtitle_text(left.text_raw) and not any(
+        right.text_raw.startswith(prefix) for prefix in _GOOD_BREAK_PREFIXES
+    ):
+        return True
+    if (
+        len(left.text_raw) <= 5
+        and len(right.text_raw) >= 8
+        and gap <= 0.18
+        and score <= -0.5
+    ):
+        return True
+    return False
+
+
+def _collect_low_confidence_windows(entries: list[SubtitleEntry]) -> list[tuple[int, int]]:
+    if len(entries) <= 1:
+        return []
+
+    suspicious_boundaries = [
+        index
+        for index, (left, right) in enumerate(zip(entries, entries[1:]))
+        if _is_low_confidence_boundary(left, right)
+    ]
+    if not suspicious_boundaries:
+        return []
+
+    windows: list[tuple[int, int]] = []
+    group_start = suspicious_boundaries[0]
+    group_end = suspicious_boundaries[0]
+    for boundary_index in suspicious_boundaries[1:]:
+        if boundary_index <= group_end + 1:
+            group_end = boundary_index
+            continue
+        windows.append((max(0, group_start - 1), min(len(entries) - 1, group_end + 2)))
+        group_start = group_end = boundary_index
+    windows.append((max(0, group_start - 1), min(len(entries) - 1, group_end + 2)))
+
+    merged_windows: list[tuple[int, int]] = []
+    for start, end in windows:
+        if not merged_windows or start > merged_windows[-1][1]:
+            merged_windows.append((start, end))
+            continue
+        previous_start, previous_end = merged_windows[-1]
+        merged_windows[-1] = (previous_start, max(previous_end, end))
+    return merged_windows
+
+
+def _build_low_confidence_window_summary(
+    entries: list[SubtitleEntry],
+    start: int,
+    end: int,
+) -> dict[str, object]:
+    window_entries = entries[start:end + 1]
+    return {
+        "start_index": start,
+        "end_index": end,
+        "entry_count": max(0, end - start + 1),
+        "texts": [entry.text_raw for entry in window_entries],
+        "start_time": round(float(window_entries[0].start), 3) if window_entries else 0.0,
+        "end_time": round(float(window_entries[-1].end), 3) if window_entries else 0.0,
+    }
+
+
+def _refine_low_confidence_windows(
+    entries: list[SubtitleEntry],
+    *,
+    max_chars: int,
+    max_duration: float,
+) -> list[SubtitleEntry]:
+    windows = _collect_low_confidence_windows(entries)
+    if not windows:
+        return entries
+
+    refined: list[SubtitleEntry] = []
+    cursor = 0
+    for start, end in windows:
+        refined.extend(entries[cursor:start])
+        window_entries = entries[start:end + 1]
+        candidate_entries = _resolve_fragment_window(
+            window_entries,
+            max_chars=max_chars,
+            max_duration=max_duration,
+        )
+        refined.extend(candidate_entries if candidate_entries is not None else window_entries)
+        cursor = end + 1
+    refined.extend(entries[cursor:])
+    return _reindex_subtitle_entries(refined)
+
+
+def _resolve_fragment_window(
+    entries: list[SubtitleEntry],
+    *,
+    max_chars: int,
+    max_duration: float,
+) -> list[SubtitleEntry] | None:
+    if len(entries) <= 1:
+        return None
+
+    current_score = _score_entry_sequence(entries, max_chars=max_chars, max_duration=max_duration)
+    candidate_entries = _resplit_fragment_window(entries, max_chars=max_chars, max_duration=max_duration)
+    if not candidate_entries:
+        return None
+
+    candidate_score = _score_entry_sequence(candidate_entries, max_chars=max_chars, max_duration=max_duration)
+    if candidate_score < current_score + 2.0:
+        return None
+    return candidate_entries
+
+
+def _resplit_fragment_window(
+    entries: list[SubtitleEntry],
+    *,
+    max_chars: int,
+    max_duration: float,
+) -> list[SubtitleEntry] | None:
+    relaxed_max_chars = max_chars + 2
+    relaxed_max_duration = max_duration + 0.5
+    searched_candidates = _search_fragment_window_segmentations(
+        entries,
+        max_chars=relaxed_max_chars,
+        max_duration=relaxed_max_duration,
+        top_k=1,
+    )
+    searched_entries = searched_candidates[0] if searched_candidates else None
+    if searched_entries:
+        return _resolve_subtitle_entry_sequence(
+            searched_entries,
+            max_chars=relaxed_max_chars,
+            max_duration=relaxed_max_duration,
+            allow_window_refine=False,
+        )
+
+    combined_words = [word for entry in entries for word in tuple(entry.words or ())]
+    if len(combined_words) >= 2:
+        candidate_entries = _segment_entries_from_words(
+            combined_words,
+            max_chars=relaxed_max_chars,
+            max_duration=relaxed_max_duration,
+        )
+    else:
+        candidate_entries = _segment_entries_from_text(entries, max_chars=relaxed_max_chars)
+    if not candidate_entries:
+        return None
+    return _resolve_subtitle_entry_sequence(
+        candidate_entries,
+        max_chars=relaxed_max_chars,
+        max_duration=relaxed_max_duration,
+        allow_window_refine=False,
+    )
+
+
+def _segment_entries_from_text(entries: list[SubtitleEntry], *, max_chars: int) -> list[SubtitleEntry]:
+    combined_text = "".join(entry.text_raw for entry in entries)
+    if not combined_text:
+        return []
+    window_start = float(entries[0].start)
+    window_end = float(entries[-1].end)
+    if len(combined_text) <= max_chars:
+        return [_make_subtitle_entry(0, window_start, window_end, combined_text)]
+
+    chunks = _split_plain_text(combined_text, max_chars=max_chars)
+    if not chunks:
+        return []
+    duration = max(window_end - window_start, 0.001)
+    time_per_char = duration / max(len(combined_text), 1)
+    char_offset = 0
+    resolved: list[SubtitleEntry] = []
+    for index, chunk in enumerate(chunks):
+        start = window_start + char_offset * time_per_char
+        end = start + len(chunk) * time_per_char
+        resolved.append(_make_subtitle_entry(index, start, min(end, window_end), chunk))
+        char_offset += len(chunk)
+    return resolved
+
+
+def _score_single_entry(
+    entry: SubtitleEntry,
+    *,
+    max_chars: int,
+    max_duration: float,
+) -> float:
+    duration = max(0.0, float(entry.end) - float(entry.start))
+    score = 0.0
+    score -= max(0, len(entry.text_raw) - max_chars) * 8.0
+    score -= max(0.0, duration - max_duration) * 6.0
+    if _starts_with_attached_fragment(entry.text_raw):
+        score -= 14.0
+    if _starts_with_soft_attached_fragment(entry.text_raw):
+        score -= 6.0
+    if _is_incomplete_subtitle_text(entry.text_raw):
+        score -= 12.0
+    if _looks_like_unclosed_nominal_tail(entry.text_raw):
+        score -= 8.0
+    if _looks_like_soft_fragmentary_tail(entry.text_raw):
+        score -= 6.0
+    if len(entry.text_raw) <= 2:
+        score -= 5.0
+    return score
+
+
+def _score_boundary_pair(left: SubtitleEntry, right: SubtitleEntry) -> float:
+    score = _semantic_boundary_quality(left.text_raw, right.text_raw) * 5.0
+    if _boundary_splits_nominal_phrase(left.text_raw, right.text_raw):
+        score -= 14.0
+    if _boundary_splits_protected_term(left.text_raw, right.text_raw):
+        score -= 16.0
+    if _looks_like_split_measure_phrase(left.text_raw, right.text_raw):
+        score -= 12.0
+    if _boundary_splits_compound_term(left.text_raw, right.text_raw):
+        score -= 20.0
+    return score
+
+
+def _search_fragment_window_segmentations(
+    entries: list[SubtitleEntry],
+    *,
+    max_chars: int,
+    max_duration: float,
+    top_k: int = 4,
+) -> list[list[SubtitleEntry]]:
+    all_candidates: list[tuple[float, list[SubtitleEntry]]] = []
+    seen: set[tuple[str, ...]] = set()
+    for window_words in _window_word_streams_for_resegmentation(entries):
+        for candidate_score, raw_entries in _search_fragment_window_segmentations_for_word_stream(
+            window_words,
+            max_chars=max_chars,
+            max_duration=max_duration,
+        ):
+            if not raw_entries:
+                continue
+            cleaned_entries = _cleanup_subtitle_entries(raw_entries)
+            key = tuple(entry.text_raw for entry in cleaned_entries)
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            all_candidates.append((candidate_score, cleaned_entries))
+    if not all_candidates:
+        return []
+    ranked = sorted(all_candidates, key=lambda item: item[0], reverse=True)
+    current_entry_count = len(entries)
+    selected: list[list[SubtitleEntry]] = []
+    selected_keys: set[tuple[str, ...]] = set()
+
+    def _add_candidate(candidate: list[SubtitleEntry]) -> None:
+        key = tuple(entry.text_raw for entry in candidate)
+        if not key or key in selected_keys:
+            return
+        selected_keys.add(key)
+        selected.append(candidate)
+
+    primary_slots = max(1, top_k // 2)
+    for _score, candidate in ranked[:primary_slots]:
+        _add_candidate(candidate)
+
+    best_same_or_less_by_count: dict[int, tuple[float, list[SubtitleEntry]]] = {}
+    for score, candidate in ranked:
+        entry_count = len(candidate)
+        if entry_count > current_entry_count:
+            continue
+        existing = best_same_or_less_by_count.get(entry_count)
+        if existing is None or score > existing[0]:
+            best_same_or_less_by_count[entry_count] = (score, candidate)
+    for entry_count in sorted(best_same_or_less_by_count):
+        _add_candidate(best_same_or_less_by_count[entry_count][1])
+        if len(selected) >= max(1, top_k):
+            return selected[: max(1, top_k)]
+
+    for _score, candidate in ranked:
+        _add_candidate(candidate)
+        if len(selected) >= max(1, top_k):
+            break
+    return selected[: max(1, top_k)]
+
+
+def _search_fragment_window_segmentations_for_word_stream(
+    window_words: list[dict[str, float | str]],
+    *,
+    max_chars: int,
+    max_duration: float,
+) -> list[tuple[float, list[SubtitleEntry]]]:
+    if len(window_words) < 2:
+        return []
+
+    hard_char_limit = max(max_chars + 8, int(max_chars * 1.7))
+    hard_duration_limit = max_duration + 2.0
+    options_by_start: dict[int, list[tuple[int, SubtitleEntry, float]]] = {}
+    for start_index in range(len(window_words)):
+        options: list[tuple[int, SubtitleEntry, float]] = []
+        for end_index in range(start_index + 1, len(window_words) + 1):
+            candidate_words = window_words[start_index:end_index]
+            text = _words_to_text(candidate_words)
+            if not text:
+                continue
+            duration = max(0.0, float(candidate_words[-1]["end"]) - float(candidate_words[0]["start"]))
+            if len(text) > hard_char_limit or duration > hard_duration_limit:
+                break
+            entry = _make_subtitle_entry(
+                0,
+                float(candidate_words[0]["start"]),
+                float(candidate_words[-1]["end"]),
+                text,
+                words=candidate_words,
+            )
+            options.append((end_index, entry, _score_single_entry(entry, max_chars=max_chars, max_duration=max_duration)))
+        options_by_start[start_index] = options
+
+    beam_width = 48
+    beams: dict[int, list[tuple[float, list[SubtitleEntry]]]] = {0: [(0.0, [])]}
+    for start_index in range(len(window_words)):
+        current_beam = list(beams.get(start_index) or [])
+        if not current_beam:
+            continue
+        advanced_positions: set[int] = set()
+        for score_so_far, built_entries in current_beam:
+            previous_entry = built_entries[-1] if built_entries else None
+            for end_index, template_entry, entry_score in options_by_start.get(start_index, []):
+                new_entry = SubtitleEntry(
+                    index=len(built_entries),
+                    start=template_entry.start,
+                    end=template_entry.end,
+                    text_raw=template_entry.text_raw,
+                    text_norm=template_entry.text_norm,
+                    words=tuple(template_entry.words or ()),
+                )
+                new_score = score_so_far + entry_score
+                if previous_entry is not None:
+                    new_score += _score_boundary_pair(previous_entry, new_entry) - 0.4
+                beams.setdefault(end_index, []).append((new_score, built_entries + [new_entry]))
+                advanced_positions.add(end_index)
+        for end_index in advanced_positions:
+            ranked = sorted(
+                beams.get(end_index) or [],
+                key=lambda item: item[0],
+                reverse=True,
+            )
+            beams[end_index] = ranked[:beam_width]
+
+    final_candidates = list(beams.get(len(window_words)) or [])
+    if not final_candidates:
+        return []
+
+    ranked = sorted(final_candidates, key=lambda item: item[0], reverse=True)
+    unique_candidates: list[tuple[float, list[SubtitleEntry]]] = []
+    seen: set[tuple[str, ...]] = set()
+    for _score, raw_entries in ranked:
+        if not raw_entries:
+            continue
+        cleaned_entries = _cleanup_subtitle_entries(raw_entries)
+        key = tuple(entry.text_raw for entry in cleaned_entries)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        unique_candidates.append(
+            (_score_entry_sequence(cleaned_entries, max_chars=max_chars, max_duration=max_duration), cleaned_entries)
+        )
+        if len(unique_candidates) >= 48:
+            break
+    return unique_candidates
+
+
+def _score_entry_sequence(
+    entries: list[SubtitleEntry],
+    *,
+    max_chars: int,
+    max_duration: float,
+) -> float:
+    if not entries:
+        return float("-inf")
+
+    score = 0.0
+    for entry in entries:
+        score += _score_single_entry(entry, max_chars=max_chars, max_duration=max_duration)
+    for left, right in zip(entries, entries[1:]):
+        score += _score_boundary_pair(left, right)
+    score -= max(0, len(entries) - 1) * 0.4
+    return score
 
 
 def _collapse_repeated_sequence_entries(entries: list[SubtitleEntry]) -> list[SubtitleEntry]:
@@ -1366,6 +2352,31 @@ def _collapse_exact_repeated_phrase(text: str) -> str | None:
     return None
 
 
+def _shared_edge_overlap_text(left: str, right: str, *, max_overlap: int = 8) -> str:
+    left_text = str(left or "").strip()
+    right_text = str(right or "").strip()
+    if not left_text or not right_text:
+        return ""
+    upper = min(len(left_text), len(right_text), max_overlap)
+    for size in range(upper, 2, -1):
+        suffix = left_text[-size:]
+        if right_text.startswith(suffix):
+            return suffix
+    return ""
+
+
+def _leading_repeated_prefix_text(text: str, *, max_unit: int = 6) -> str:
+    candidate = str(text or "").strip()
+    if len(candidate) < 4:
+        return ""
+    upper = min(max_unit, len(candidate) // 2)
+    for size in range(upper, 1, -1):
+        prefix = candidate[:size]
+        if candidate.startswith(prefix * 2):
+            return prefix
+    return ""
+
+
 def _should_merge_subtitle_pair(left: str, right: str) -> bool:
     left_text = str(left or "").strip()
     right_text = str(right or "").strip()
@@ -1391,6 +2402,10 @@ def _should_merge_subtitle_pair(left: str, right: str) -> bool:
         return True
     if _boundary_splits_protected_term(left_text, right_text):
         return True
+    if _boundary_splits_compound_term(left_text, right_text):
+        return True
+    if _boundary_splits_nominal_phrase(left_text, right_text):
+        return True
     if _starts_with_attached_fragment(right_text):
         return True
     if re.match(r"^[，。！？、：；,.!?]", right_text):
@@ -1414,19 +2429,72 @@ def _starts_with_attached_fragment(text: str) -> bool:
     right_text = str(text or "").strip()
     if not right_text:
         return False
-    if re.match(r"^[，。！？、：；,.!?]", right_text):
+    stripped_text = _strip_boundary_leading_particles(right_text)
+    candidate = stripped_text or right_text
+    if re.match(r"^[，。！？、：；,.!?]", candidate):
         return True
-    if any(right_text.startswith(token) for token in _ATTACHED_FRAGMENT_PREFIXES):
+    if any(candidate.startswith(token) for token in _ATTACHED_FRAGMENT_PREFIXES):
         return True
-    if len(right_text) <= 2 and not any(right_text.startswith(prefix) for prefix in _GOOD_BREAK_PREFIXES):
+    if len(candidate) <= 2 and not any(candidate.startswith(prefix) for prefix in _GOOD_BREAK_PREFIXES):
         return True
-    match = re.match(r"^([\u4e00-\u9fffA-Za-z0-9])[，、：,.!?]", right_text)
+    match = re.match(r"^([\u4e00-\u9fffA-Za-z0-9])[，、：,.!?]", candidate)
     if not match:
         return False
     token = match.group(1)
     if token in _GOOD_BREAK_PREFIXES or token in _NO_SPLIT_PREFIXES:
         return False
     return True
+
+
+def _starts_with_soft_attached_fragment(text: str) -> bool:
+    candidate = str(text or "").strip()
+    if not candidate:
+        return False
+    if _starts_with_attached_fragment(candidate):
+        return True
+    stripped = _strip_boundary_leading_particles(candidate) or candidate
+    return any(stripped.startswith(prefix) for prefix in _SOFT_ATTACHED_FRAGMENT_PREFIXES)
+
+
+def _strip_boundary_leading_particles(text: str) -> str:
+    result = str(text or "").strip()
+    changed = True
+    while result and changed:
+        changed = False
+        result = result.lstrip("，,。！？!?、：:；; ")
+        for token in _BOUNDARY_LEADING_PARTICLES:
+            if result.startswith(token) and len(result) > len(token):
+                result = result[len(token):].lstrip("，,。！？!?、：:；; ")
+                changed = True
+                break
+    return result
+
+
+def _looks_like_particle_led_sentence_restart(text: str) -> bool:
+    candidate = str(text or "").strip()
+    stripped = _strip_boundary_leading_particles(candidate)
+    if not stripped or stripped == candidate:
+        return False
+    if any(stripped.startswith(prefix) for prefix in _PARTICLE_LED_RESTART_PREFIXES):
+        return True
+    return False
+
+
+def _looks_like_soft_fragmentary_tail(text: str) -> bool:
+    candidate = str(text or "").strip()
+    if not candidate:
+        return False
+    if _is_incomplete_subtitle_text(candidate):
+        return True
+    return any(candidate.endswith(token) for token in _SOFT_FRAGMENTARY_ENDINGS)
+
+
+def _boundary_splits_compound_term(left: str, right: str) -> bool:
+    left_text = str(left or "").strip()
+    right_text = str(right or "").strip()
+    if not left_text or not right_text:
+        return False
+    return any(left_text.endswith(prefix) and right_text.startswith(suffix) for prefix, suffix in _BOUNDARY_COMPOUND_SPLITS)
 
 
 def _compact_compare_text(text: str) -> str:

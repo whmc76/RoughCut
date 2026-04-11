@@ -498,9 +498,70 @@ def _resolve_audio_source(
     prefix_parts = [part for part in (_normalize_job_path_prefix(job_id), _sanitize_stage_name(segment_id)) if part]
     target_name = local_path.name if not prefix_parts else f"{'_'.join(prefix_parts)}_{local_path.name}"
     target_path = shared_audio_dir / target_name
-    if local_path.resolve() != target_path.resolve():
-        shutil.copy2(local_path, target_path)
+    _stage_audio_file(local_path=local_path, target_path=target_path)
     return str((Path("/code/data/inputs/audio") / target_path.name).as_posix())
+
+
+def _stage_audio_file(*, local_path: Path, target_path: Path) -> None:
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    if local_path.resolve() == target_path.resolve():
+        if _probe_audio_duration_seconds(target_path) is None:
+            raise RuntimeError(f"staged_audio_unreadable: {target_path}")
+        _settle_shared_audio_mount(target_path)
+        return
+
+    temp_target = target_path.with_name(f"{target_path.name}.{uuid.uuid4().hex}.partial")
+    try:
+        shutil.copy2(local_path, temp_target)
+        if _probe_audio_duration_seconds(temp_target) is None:
+            raise RuntimeError(f"staged_audio_unreadable: {temp_target}")
+        os.replace(temp_target, target_path)
+    finally:
+        if temp_target.exists():
+            temp_target.unlink(missing_ok=True)
+
+    _settle_shared_audio_mount(target_path)
+
+
+def _probe_audio_duration_seconds(path: Path) -> float | None:
+    result = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            str(path),
+        ],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    if result.returncode != 0:
+        return None
+    try:
+        duration = float(str(result.stdout or "").strip())
+    except (TypeError, ValueError):
+        return None
+    if duration <= 0:
+        return None
+    return duration
+
+
+def _settle_shared_audio_mount(path: Path) -> None:
+    try:
+        size_bytes = max(0, int(path.stat().st_size))
+    except OSError:
+        return
+    # Docker Desktop bind mounts can briefly expose a just-written file before the
+    # guest sees the final contents. Keep the final name hidden until replace, then
+    # pause for a short size-based window before submitting to HeyGem.
+    settle_seconds = min(1.5, max(0.35, size_bytes / (32 * 1024 * 1024)))
+    time.sleep(settle_seconds)
 
 
 def _detect_shared_root() -> Path | None:

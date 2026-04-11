@@ -76,6 +76,7 @@ async def record_stuck_step_diagnostic(
     applied_action: str = "reset_to_pending",
     now: datetime | None = None,
     repo_root: str | Path | None = None,
+    allow_acp: bool = True,
 ) -> dict[str, Any]:
     diagnosis = build_stuck_step_diagnostic(
         job=job,
@@ -84,6 +85,7 @@ async def record_stuck_step_diagnostic(
         applied_action=applied_action,
         now=now,
         repo_root=repo_root,
+        allow_acp=allow_acp,
     )
     recorded_at = _coerce_utc(now or datetime.now(timezone.utc))
     data_json = {

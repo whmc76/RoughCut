@@ -45,10 +45,12 @@ class MiniMaxReasoningProvider(ReasoningProvider):
                 usage=usage,
                 kind="reasoning",
             )
+            raw_content = choice.message.content or ""
             return ReasoningResponse(
-                content=strip_reasoning_tags(choice.message.content or ""),
+                content=strip_reasoning_tags(raw_content),
                 usage=usage,
                 model=response.model,
+                raw_content=raw_content,
             )
         finally:
             await client.close()

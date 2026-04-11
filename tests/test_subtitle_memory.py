@@ -416,6 +416,46 @@ def test_build_transcription_prompt_includes_beijing_dialect_guidance():
     assert "儿化音" in prompt
 
 
+def test_build_subtitle_review_memory_absorbs_source_context_and_manual_review_guidance():
+    memory = build_subtitle_review_memory(
+        channel_profile="tutorial_standard",
+        subject_domain="ai",
+        glossary_terms=[],
+        user_memory={},
+        recent_subtitles=[],
+        content_profile={
+            "subject_type": "AI工作流",
+            "subject_domain": "ai",
+            "source_context": {
+                "video_description": "这是一条 ComfyUI 工作流演示，重点看节点编排和工作流结构。",
+                "resolved_feedback": {
+                    "subject_brand": "ComfyUI",
+                    "search_queries": ["ComfyUI 工作流", "节点编排"],
+                },
+            },
+            "resolved_review_user_feedback": {
+                "correction_notes": "品牌统一用 ComfyUI，不要写成康飞UI。",
+                "supplemental_context": "重点保留节点编排和工作流结构细节。",
+            },
+        },
+        include_recent_terms=False,
+        include_recent_examples=False,
+    )
+
+    terms = {item["term"] for item in memory["terms"]}
+    prompt = build_transcription_prompt(
+        source_name="workflow-demo.mp4",
+        channel_profile="tutorial_standard",
+        review_memory=memory,
+    )
+
+    assert "ComfyUI" in terms
+    assert "节点编排" in terms
+    assert "工作流" in terms
+    assert "ComfyUI" in prompt
+    assert "节点编排" in prompt
+
+
 def test_apply_domain_term_corrections_fixes_edc_aliases_and_near_matches():
     corrected = apply_domain_term_corrections(
         "来自慢这把多功能工具前的单手开和和主到都很顺",

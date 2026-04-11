@@ -32,3 +32,24 @@ def test_apply_review_focus_overrides_adjusts_skill_for_hook_boundary():
     assert skill["continuation_guard_penalty"] > 0.35
     assert skill["section_policy"]["hook"]["trim_intensity"] == "preserve"
     assert skill["focus_cut_guard"]["hook"] > 0.0
+
+
+def test_resolve_editing_skill_applies_creative_preference_overrides():
+    skill = resolve_editing_skill(
+        workflow_template="unboxing_standard",
+        content_profile={
+            "creative_preferences": [
+                {"tag": "comparison_focus", "count": 3},
+                {"tag": "closeup_focus", "count": 2},
+                {"tag": "fast_paced", "count": 2},
+            ],
+        },
+    )
+
+    assert skill["silence_floor_sec"] < 0.5
+    assert skill["transition_max_count"] > 3
+    assert "comparison_focus" in skill["creative_preferences"]
+    assert "closeup_focus" in skill["creative_preferences"]
+    assert skill["section_policy"]["detail"]["trim_intensity"] == "balanced"
+    assert skill["section_policy"]["detail"]["insert_priority"] > 1.0
+    assert skill["section_policy"]["detail"]["broll_anchor_bias"] < 0.48

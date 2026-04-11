@@ -184,6 +184,163 @@ async def test_run_task_step_accepts_dispatched_running_step_with_same_task_id(d
         ).scalar_one()
         assert step.status == "done"
         assert step.metadata_["last_task_id"] == "dispatched-task"
+        assert step.metadata_["worker_started_at"] is not None
+
+
+@pytest.mark.asyncio
+async def test_run_task_step_ignores_late_message_for_recovered_pending_step(db_engine, monkeypatch):
+    import roughcut.pipeline.tasks as tasks_mod
+    from roughcut.db.models import Job, JobStep
+    from roughcut.db.session import get_session_factory
+
+    job_id = uuid.uuid4()
+    now = datetime.now(timezone.utc)
+    factory = get_session_factory()
+    async with factory() as session:
+        session.add(
+            Job(
+                id=job_id,
+                source_path="jobs/demo/recovered-pending.mp4",
+                source_name="recovered-pending.mp4",
+                status="processing",
+                language="zh-CN",
+            )
+        )
+        session.add(
+            JobStep(
+                job_id=job_id,
+                step_name="transcribe",
+                status="pending",
+                metadata_={
+                    "last_task_id": "stale-task",
+                    "updated_at": now.isoformat(),
+                    "detail": "检测到步骤心跳超时，调度器已自动回收并重新入队。",
+                },
+            )
+        )
+        await session.commit()
+
+    monkeypatch.setattr(tasks_mod, "run_step_sync", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("stale recovered task should not execute")))
+
+    fake_task = SimpleNamespace(request=SimpleNamespace(id="stale-task", retries=0))
+    result = await asyncio.to_thread(
+        functools.partial(tasks_mod._run_task_step, fake_task, str(job_id), "transcribe", retry_countdown=30)
+    )
+
+    assert result == {"ignored": True}
+
+    async with factory() as session:
+        step = (
+            await session.execute(
+                select(JobStep).where(JobStep.job_id == job_id, JobStep.step_name == "transcribe")
+            )
+        ).scalar_one()
+        assert step.status == "pending"
+        assert step.metadata_["last_task_id"] == "stale-task"
+
+
+@pytest.mark.asyncio
+async def test_run_task_step_allows_celery_retry_to_resume_failed_step(db_engine, monkeypatch):
+    import roughcut.pipeline.tasks as tasks_mod
+    from roughcut.db.models import Job, JobStep
+    from roughcut.db.session import get_session_factory
+
+    job_id = uuid.uuid4()
+    now = datetime.now(timezone.utc)
+    factory = get_session_factory()
+    async with factory() as session:
+        session.add(
+            Job(
+                id=job_id,
+                source_path="jobs/demo/retry-resume.mp4",
+                source_name="retry-resume.mp4",
+                status="processing",
+                language="zh-CN",
+            )
+        )
+        session.add(
+            JobStep(
+                job_id=job_id,
+                step_name="content_profile",
+                status="failed",
+                attempt=1,
+                started_at=now,
+                finished_at=now,
+                error_message="temporary upstream failure",
+                metadata_={"last_task_id": "retry-task", "updated_at": now.isoformat()},
+            )
+        )
+        await session.commit()
+
+    monkeypatch.setattr(tasks_mod, "_probe_local_gpu_pressure", lambda step_name: None)
+    monkeypatch.setattr(tasks_mod, "run_step_sync", lambda step_name, current_job_id: {"ok": True, "step_name": step_name})
+
+    fake_task = SimpleNamespace(request=SimpleNamespace(id="retry-task", retries=1))
+    result = await asyncio.to_thread(
+        functools.partial(tasks_mod._run_task_step, fake_task, str(job_id), "content_profile", retry_countdown=15)
+    )
+
+    assert result == {"ok": True, "step_name": "content_profile"}
+
+    async with factory() as session:
+        step = (
+            await session.execute(
+                select(JobStep).where(JobStep.job_id == job_id, JobStep.step_name == "content_profile")
+            )
+        ).scalar_one()
+        assert step.status == "done"
+        assert step.error_message is None
+        assert step.metadata_["last_task_id"] == "retry-task"
+
+
+@pytest.mark.asyncio
+async def test_run_task_step_normalizes_dispatched_step_when_job_is_already_done(db_engine, monkeypatch):
+    import roughcut.pipeline.tasks as tasks_mod
+    from roughcut.db.models import Job, JobStep
+    from roughcut.db.session import get_session_factory
+
+    job_id = uuid.uuid4()
+    now = datetime.now(timezone.utc)
+    factory = get_session_factory()
+    async with factory() as session:
+        session.add(
+            Job(
+                id=job_id,
+                source_path="jobs/demo/already-done.mp4",
+                source_name="already-done.mp4",
+                status="done",
+                language="zh-CN",
+            )
+        )
+        session.add(
+            JobStep(
+                job_id=job_id,
+                step_name="subtitle_translation",
+                status="running",
+                started_at=now,
+                metadata_={"task_id": "done-task", "updated_at": now.isoformat()},
+            )
+        )
+        await session.commit()
+
+    monkeypatch.setattr(tasks_mod, "run_step_sync", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("should not run")))
+
+    fake_task = SimpleNamespace(request=SimpleNamespace(id="done-task", retries=0))
+    result = await asyncio.to_thread(
+        functools.partial(tasks_mod._run_task_step, fake_task, str(job_id), "subtitle_translation", retry_countdown=10)
+    )
+
+    assert result == {"ignored": True}
+
+    async with factory() as session:
+        step = (
+            await session.execute(
+                select(JobStep).where(JobStep.job_id == job_id, JobStep.step_name == "subtitle_translation")
+            )
+        ).scalar_one()
+        assert step.status == "skipped"
+        assert "task_id" not in (step.metadata_ or {})
+        assert step.metadata_["last_task_id"] == "done-task"
 
 
 @pytest.mark.asyncio

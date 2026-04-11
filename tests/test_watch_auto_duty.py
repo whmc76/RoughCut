@@ -318,6 +318,49 @@ async def test_suggest_merge_groups_uses_subject_tokens_and_visual_similarity(tm
 
 
 @pytest.mark.asyncio
+async def test_suggest_merge_groups_boosts_timestamp_sequence_clips_without_sidecar_summary(tmp_path, monkeypatch):
+    import roughcut.watcher.folder_watcher as watcher_mod
+
+    clip_a = tmp_path / "20260209-124735.mp4"
+    clip_b = tmp_path / "20260209-131541.mp4"
+    clip_a.write_bytes(b"video-a")
+    clip_b.write_bytes(b"video-b")
+    base_time = time.time() - 180
+    os.utime(clip_a, (base_time, base_time))
+    os.utime(clip_b, (base_time + 98, base_time + 98))
+
+    async def fake_signature(path: Path) -> str | None:
+        if path == clip_a:
+            return "1" * 256
+        if path == clip_b:
+            return "1" * 216 + "0" * 40
+        return None
+
+    monkeypatch.setattr(watcher_mod, "_safe_parse_summary", lambda path: "")
+    monkeypatch.setattr(watcher_mod, "_extract_visual_signature", fake_signature)
+
+    items = [_pending_item(clip_a), _pending_item(clip_b)]
+    items[0]["duration_sec"] = 140.0
+    items[1]["duration_sec"] = 118.0
+    items[0]["width"] = 1080
+    items[0]["height"] = 1920
+    items[1]["width"] = 1080
+    items[1]["height"] = 1920
+
+    groups = await watcher_mod.suggest_merge_groups_for_inventory_items(
+        items,
+        time_window_seconds=480,
+        min_score=0.62,
+    )
+
+    assert len(groups) == 1
+    assert groups[0]["relative_paths"] == [clip_a.name, clip_b.name]
+    assert groups[0]["score"] >= 0.62
+    assert "连续拍摄片段" in groups[0]["reasons"]
+    assert "画面特征相似" in groups[0]["reasons"]
+
+
+@pytest.mark.asyncio
 async def test_create_merged_job_for_inventory_paths_only_manual_merge_enables_related_profiles(tmp_path, monkeypatch):
     import roughcut.watcher.folder_watcher as watcher_mod
 
@@ -344,6 +387,7 @@ async def test_create_merged_job_for_inventory_paths_only_manual_merge_enables_r
     ) -> str:
         captured["file_path"] = file_path
         captured["source_context"] = content_profile_source_context
+        captured["output_dir"] = output_dir
         return "job-merged-1"
 
     monkeypatch.setattr(watcher_mod, "_merge_videos_for_job", fake_merge)
@@ -351,10 +395,12 @@ async def test_create_merged_job_for_inventory_paths_only_manual_merge_enables_r
 
     job_id = await watcher_mod.create_merged_job_for_inventory_paths(
         [str(clip_a), str(clip_b)],
+        output_dir=str(tmp_path / "final-out"),
         allow_related_profiles=True,
     )
     assert job_id == "job-merged-1"
     assert captured["file_path"] == merged_output
+    assert captured["output_dir"] == str(tmp_path / "final-out")
     assert captured["source_context"] == {
         "allow_related_profiles": True,
         "merged_source_names": [clip_a.name, clip_b.name],

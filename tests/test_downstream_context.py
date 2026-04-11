@@ -17,6 +17,12 @@ def test_build_downstream_context_prefers_manual_review_over_base_profile():
                 "subject_model": "司令官2Ultra",
                 "subject_type": "司令官2Ultra手电筒",
                 "video_theme": "傲雷司令官2Ultra版本选购与参数对比",
+                "correction_notes": "重点核对品牌和型号写法。",
+                "supplemental_context": "这是 EDC 手电版本对比稿。",
+                "creative_preferences": [
+                    {"tag": "comparison_focus", "label": "突出差异对比"},
+                    {"tag": "closeup_focus", "label": "突出近景特写"},
+                ],
             },
             "evidence": [{"title": "Spec 1", "url": "https://example.com/spec1"}],
         }
@@ -28,8 +34,13 @@ def test_build_downstream_context_prefers_manual_review_over_base_profile():
     assert resolved["subject_model"] == "司令官2Ultra"
     assert resolved["subject_type"] == "司令官2Ultra手电筒"
     assert resolved["video_theme"] == "傲雷司令官2Ultra版本选购与参数对比"
+    assert resolved["correction_notes"] == "重点核对品牌和型号写法。"
+    assert resolved["supplemental_context"] == "这是 EDC 手电版本对比稿。"
+    assert resolved["creative_preferences"][0]["tag"] == "comparison_focus"
     assert context["field_sources"]["subject_brand"] == "manual_review"
     assert context["field_sources"]["video_theme"] == "manual_review"
+    assert context["field_sources"]["correction_notes"] == "manual_review"
+    assert context["field_sources"]["creative_preferences"] == "manual_review"
     assert context["manual_review_applied"] is True
     assert context["research_applied"] is True
 

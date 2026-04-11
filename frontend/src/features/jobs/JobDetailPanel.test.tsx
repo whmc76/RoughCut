@@ -57,6 +57,8 @@ vi.mock("./JobReviewConfigSection", () => ({
 }));
 
 vi.mock("./constants", () => ({
+  autoReviewBadgeLabel: (job: { auto_review_status?: string | null }) => (job.auto_review_status === "applied" ? "自动审核已生效" : "自动审核已启用"),
+  autoReviewTone: (status: string | null | undefined) => (status === "applied" ? "done" : status === "blocked" ? "pending" : "running"),
   getRestartUnavailableReason: () => "jobs.actions.restartUnavailable",
   isRestartableJobStatus: () => true,
   stepLabel: (stepName: string) => stepName,
@@ -81,6 +83,10 @@ function buildProps(overrides: Record<string, unknown> = {}) {
       language: "zh-CN",
       workflow_mode: "standard_edit",
       enhancement_modes: [],
+      auto_review_mode_enabled: false,
+      auto_review_status: null,
+      auto_review_summary: null,
+      auto_review_reasons: [],
       created_at: "2026-04-10T00:00:00Z",
       updated_at: "2026-04-10T00:05:00Z",
       steps: [],
@@ -140,5 +146,34 @@ describe("JobDetailPanel", () => {
 
     expect(screen.queryByText("素材来源")).not.toBeInTheDocument();
     expect(screen.queryByText("这是合并任务")).not.toBeInTheDocument();
+  });
+
+  it("shows whether auto-review is enabled or already applied in the creative mode section", () => {
+    render(
+      <JobDetailPanel
+        {...buildProps({
+          selectedJob: {
+            id: "job-3",
+            source_name: "auto-review.mp4",
+            merged_source_names: [],
+            status: "needs_review",
+            language: "zh-CN",
+            workflow_mode: "standard_edit",
+            enhancement_modes: ["auto_review"],
+            auto_review_mode_enabled: true,
+            auto_review_status: "blocked",
+            auto_review_summary: "已启用，但本次命中人工复核条件，未自动放行。",
+            auto_review_reasons: ["首次品牌/型号证据不足，需人工确认"],
+            created_at: "2026-04-10T00:00:00Z",
+            updated_at: "2026-04-10T00:05:00Z",
+            steps: [],
+          },
+        })}
+      />,
+    );
+
+    expect(screen.getAllByText("自动审核已启用").length).toBeGreaterThan(0);
+    expect(screen.getByText("已启用，但本次命中人工复核条件，未自动放行。")).toBeInTheDocument();
+    expect(screen.getByText("首次品牌/型号证据不足，需人工确认")).toBeInTheDocument();
   });
 });

@@ -30,6 +30,10 @@ function buildJob(overrides: Record<string, unknown> = {}) {
     language: "zh-CN",
     workflow_mode: "standard_edit",
     enhancement_modes: [],
+    auto_review_mode_enabled: false,
+    auto_review_status: null,
+    auto_review_summary: null,
+    auto_review_reasons: [],
     created_at: "2026-04-02T02:00:00Z",
     updated_at: "2026-04-02T02:10:00Z",
     progress_percent: 86,
@@ -161,5 +165,59 @@ describe("JobQueueTable", () => {
     );
 
     expect(mockContentProfileThumbnailUrl).toHaveBeenCalledWith("job-1", 0, "2026-04-09T03:21:00Z");
+  });
+
+  it("shows auto-review as enabled with the blocking summary when it has not taken effect", () => {
+    render(
+      <JobQueueTable
+        jobs={[
+          buildJob({
+            id: "job-auto-review-blocked",
+            status: "processing",
+            enhancement_modes: ["auto_review"],
+            auto_review_mode_enabled: true,
+            auto_review_status: "blocked",
+            auto_review_summary: "已启用，但本次命中人工复核条件，未自动放行。",
+          }),
+        ]}
+        selectedJobId={null}
+        isLoading={false}
+        onSelect={vi.fn()}
+        onOpenFolder={vi.fn()}
+        onCancel={vi.fn()}
+        onRestart={vi.fn()}
+        onDelete={vi.fn()}
+      />,
+    );
+
+    expect(screen.getAllByText("自动审核已启用").length).toBeGreaterThan(0);
+    expect(screen.getByText("已启用，但本次命中人工复核条件，未自动放行。")).toBeInTheDocument();
+  });
+
+  it("shows auto-review as applied after the summary review has been auto-confirmed", () => {
+    render(
+      <JobQueueTable
+        jobs={[
+          buildJob({
+            id: "job-auto-review-applied",
+            status: "processing",
+            enhancement_modes: ["auto_review"],
+            auto_review_mode_enabled: true,
+            auto_review_status: "applied",
+            auto_review_summary: "已自动确认预审核并继续执行。",
+          }),
+        ]}
+        selectedJobId={null}
+        isLoading={false}
+        onSelect={vi.fn()}
+        onOpenFolder={vi.fn()}
+        onCancel={vi.fn()}
+        onRestart={vi.fn()}
+        onDelete={vi.fn()}
+      />,
+    );
+
+    expect(screen.getAllByText("自动审核已生效").length).toBeGreaterThan(0);
+    expect(screen.getByText("已自动确认预审核并继续执行。")).toBeInTheDocument();
   });
 });

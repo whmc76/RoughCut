@@ -13,8 +13,11 @@ _TRACKED_FIELDS = (
     "hook_line",
     "engagement_question",
     "visible_text",
+    "correction_notes",
+    "supplemental_context",
     "search_queries",
     "cover_title",
+    "creative_preferences",
 )
 
 _ARTIFACT_PRIORITY = {

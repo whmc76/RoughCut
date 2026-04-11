@@ -490,6 +490,16 @@ def _bind_insert_to_section_choreography(
         or matched_section.get("packaging_intent")
         or ""
     )
+    resolved_insert["insert_creative_preferences"] = list(
+        matched_section.get("creative_preferences")
+        or resolved_insert.get("insert_creative_preferences")
+        or []
+    )
+    resolved_insert["insert_creative_rationale"] = str(
+        matched_section.get("creative_rationale")
+        or resolved_insert.get("insert_creative_rationale")
+        or ""
+    )
     return resolved_insert
 
 
@@ -801,6 +811,8 @@ def _build_section_choreography(
                 "review_focus_mode": str(focus_bias.get("mode") or ""),
                 "transition_energy_bias": round(float(focus_bias.get("transition_energy_bias", 0.0) or 0.0), 3),
                 "overlay_density_bias": int(focus_bias.get("overlay_density_bias", 0) or 0),
+                "creative_preferences": list(action.get("creative_preferences") or directive.get("creative_preferences") or []),
+                "creative_rationale": str(action.get("creative_rationale") or directive.get("creative_rationale") or ""),
             }
         )
 
@@ -813,6 +825,7 @@ def _build_section_choreography(
             "section_count": len(sections),
             "broll_section_count": sum(1 for item in sections if bool((item.get("broll_window") or {}).get("enabled"))),
             "cta_protected": any(bool(item.get("cta_protection")) for item in sections),
+            "creative_preference_count": len(list((editing_skill or {}).get("creative_preferences") or [])),
         },
     }
 

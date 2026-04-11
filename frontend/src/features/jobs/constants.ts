@@ -1,3 +1,4 @@
+import type { Job } from "../../types";
 import { getCurrentUiLocale, translate } from "../../i18n";
 
 export const STEP_LABELS: Record<string, string> = {
@@ -118,4 +119,15 @@ export function enhancementModeLabel(mode: string): string {
   const key = `creative.enhancement.${mode}`;
   const translated = translate(getCurrentUiLocale(), key);
   return translated === key ? ENHANCEMENT_MODE_LABELS[mode] ?? mode : translated;
+}
+
+export function autoReviewBadgeLabel(job: Pick<Job, "auto_review_mode_enabled" | "auto_review_status">): string {
+  if (!job.auto_review_mode_enabled) return ENHANCEMENT_MODE_LABELS.auto_review;
+  return job.auto_review_status === "applied" ? "自动审核已生效" : "自动审核已启用";
+}
+
+export function autoReviewTone(status: string | null | undefined): string {
+  if (status === "applied") return "done";
+  if (status === "blocked") return "pending";
+  return "running";
 }

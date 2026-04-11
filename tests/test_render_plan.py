@@ -139,19 +139,64 @@ def test_build_render_plan_binds_insert_to_section_choreography():
                     "transition_anchor_sec": 4.2,
                     "broll_allowed": True,
                     "broll_anchor_sec": 5.1,
+                    "creative_preferences": ["突出近景特写", "突出差异对比"],
+                    "creative_rationale": "细节段优先保留近景和做工镜头；细节段优先承载版本差异",
                 },
             ],
             "section_directives": [
                 {"index": 0, "role": "hook", "start_sec": 0.0, "end_sec": 3.0, "overlay_weight": 1.3},
-                {"index": 1, "role": "detail", "start_sec": 4.0, "end_sec": 7.0, "overlay_weight": 1.0},
+                {"index": 1, "role": "detail", "start_sec": 4.0, "end_sec": 7.0, "overlay_weight": 1.0, "creative_preferences": ["突出近景特写", "突出差异对比"]},
             ],
         },
-        editing_skill={"key": "tutorial_standard"},
+        editing_skill={"key": "tutorial_standard", "creative_preferences": ["closeup_focus", "comparison_focus"]},
     )
 
     assert plan["insert"]["insert_transition_mode"] == "accented"
     assert plan["insert"]["insert_packaging_intent"] == "detail_support"
     assert plan["insert"]["insert_overlay_focus"] == "high"
+    assert "突出近景特写" in plan["insert"]["insert_creative_preferences"]
+    assert "版本差异" in plan["insert"]["insert_creative_rationale"]
+
+
+def test_build_render_plan_exposes_creative_preference_rationale_in_section_choreography():
+    plan = build_render_plan(
+        uuid.uuid4(),
+        timeline_analysis={
+            "section_directives": [
+                {
+                    "index": 0,
+                    "role": "hook",
+                    "start_sec": 0.0,
+                    "end_sec": 2.0,
+                    "overlay_weight": 1.3,
+                    "creative_preferences": ["先给结论", "节奏偏快"],
+                    "creative_rationale": "开头优先前置结论；开头节奏收紧，尽快给重点",
+                },
+            ],
+            "section_actions": [
+                {
+                    "index": 0,
+                    "role": "hook",
+                    "start_sec": 0.0,
+                    "end_sec": 2.0,
+                    "trim_intensity": "tight",
+                    "packaging_intent": "hook_focus",
+                    "transition_boost": 0.8,
+                    "transition_anchor_sec": 0.6,
+                    "broll_allowed": False,
+                    "broll_anchor_sec": 0.4,
+                    "creative_preferences": ["先给结论", "节奏偏快"],
+                    "creative_rationale": "开头优先前置结论；开头节奏收紧，尽快给重点",
+                },
+            ],
+        },
+        editing_skill={"key": "unboxing_standard", "creative_preferences": ["conclusion_first", "fast_paced"]},
+    )
+
+    section = plan["section_choreography"]["sections"][0]
+    assert "先给结论" in section["creative_preferences"]
+    assert "开头优先前置结论" in section["creative_rationale"]
+    assert plan["section_choreography"]["summary"]["creative_preference_count"] == 2
 
 
 def test_build_render_plan_binds_music_to_section_and_insert_ducking():

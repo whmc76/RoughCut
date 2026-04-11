@@ -617,6 +617,8 @@ def _normalize_source_context_payload(value: Any) -> dict[str, Any]:
         video_theme = str(profile.get("video_theme") or "").strip()
         summary = str(profile.get("summary") or "").strip()
         search_queries = [str(query).strip() for query in (profile.get("search_queries") or []) if str(query).strip()]
+        review_mode = str(profile.get("review_mode") or "").strip().lower()
+        manual_confirmed = bool(profile.get("manual_confirmed")) or review_mode == "manual_confirmed"
         try:
             score = round(float(profile.get("score") or 0.0), 3)
         except (TypeError, ValueError):
@@ -630,6 +632,8 @@ def _normalize_source_context_payload(value: Any) -> dict[str, Any]:
             "summary": summary,
             "search_queries": search_queries[:6],
             "score": max(0.0, min(1.0, score)),
+            "review_mode": review_mode,
+            "manual_confirmed": manual_confirmed,
         }
         if any(
             (
@@ -1426,10 +1430,26 @@ def _assess_identity_review_requirement(
         glossary_terms=glossary_terms,
         source_name=source_name,
     )
+    related_identity_matches = [
+        dict(item)
+        for item in (evidence_bundle.get("matched_related_profile_sources") or [])
+        if isinstance(item, dict)
+    ]
+    if first_seen_brand and any(
+        bool(item.get("brand_match")) and _related_profile_review_priority(item) > 0
+        for item in related_identity_matches
+    ):
+        first_seen_brand = False
+    if first_seen_model and any(
+        bool(item.get("model_match")) and _related_profile_review_priority(item) > 0
+        for item in related_identity_matches
+    ):
+        first_seen_model = False
     support_sources = _collect_identity_support_sources(evidence_bundle)
     support_count = len(support_sources)
     has_external_evidence = "evidence" in support_sources
-    evidence_strength = "strong" if has_external_evidence or support_count >= 2 else "weak"
+    has_related_manual_review = "related_manual_review" in support_sources
+    evidence_strength = "strong" if has_external_evidence or has_related_manual_review or support_count >= 2 else "weak"
     required = first_seen_brand or first_seen_model
     current_source_support = {
         label
@@ -1495,6 +1515,75 @@ def _identity_seen_before(
     return False
 
 
+def _related_profile_review_priority(item: dict[str, Any] | None) -> int:
+    payload = item or {}
+    review_mode = str(payload.get("review_mode") or "").strip().lower()
+    if bool(payload.get("manual_confirmed")) or review_mode == "manual_confirmed":
+        return 2
+    if review_mode == "auto_confirmed":
+        return 1
+    return 0
+
+
+def _collect_matching_related_identity_profiles(
+    profile: dict[str, Any] | None,
+    *,
+    brand: str,
+    model: str,
+) -> list[dict[str, Any]]:
+    source_context = _normalize_source_context_payload((profile or {}).get("source_context"))
+    if not source_context:
+        return []
+    brand_normalized = _normalize_profile_value(brand)
+    model_normalized = _normalize_profile_value(model)
+    if not brand_normalized and not model_normalized:
+        return []
+
+    matches: list[dict[str, Any]] = []
+    for item in source_context.get("related_profiles") or []:
+        if not isinstance(item, dict):
+            continue
+        priority = _related_profile_review_priority(item)
+        if priority <= 0:
+            continue
+        candidate_brand = str(item.get("subject_brand") or "").strip()
+        candidate_model = str(item.get("subject_model") or "").strip()
+        candidate_brand_normalized = _normalize_profile_value(candidate_brand)
+        candidate_model_normalized = _normalize_profile_value(candidate_model)
+        brand_match = bool(brand_normalized) and candidate_brand_normalized == brand_normalized
+        model_match = bool(model_normalized) and candidate_model_normalized == model_normalized
+        if brand_normalized and candidate_brand_normalized and not brand_match:
+            continue
+        if model_normalized and candidate_model_normalized and not model_match:
+            continue
+        if not brand_match and not model_match:
+            continue
+        matches.append(
+            {
+                "source_name": str(item.get("source_name") or "").strip(),
+                "subject_brand": candidate_brand,
+                "subject_model": candidate_model,
+                "review_mode": str(item.get("review_mode") or "").strip(),
+                "manual_confirmed": bool(item.get("manual_confirmed")),
+                "score": float(item.get("score") or 0.0),
+                "brand_match": brand_match,
+                "model_match": model_match,
+            }
+        )
+    if not matches:
+        return []
+    matches.sort(
+        key=lambda item: (
+            _related_profile_review_priority(item),
+            float(item.get("score") or 0.0),
+            bool(item.get("model_match")),
+            bool(item.get("brand_match")),
+        ),
+        reverse=True,
+    )
+    return matches[:4]
+
+
 def _collect_identity_support_sources(evidence_bundle: dict[str, Any] | None) -> list[str]:
     bundle = evidence_bundle or {}
     support_sources: list[str] = []
@@ -1509,7 +1598,24 @@ def _collect_identity_support_sources(evidence_bundle: dict[str, Any] | None) ->
     for label, hits in source_flags:
         if hits and label not in support_sources:
             support_sources.append(label)
+    related_profiles = [
+        dict(item)
+        for item in (bundle.get("matched_related_profile_sources") or [])
+        if isinstance(item, dict)
+    ]
+    if any(_related_profile_review_priority(item) >= 2 for item in related_profiles):
+        support_sources.append("related_manual_review")
+    elif related_profiles:
+        support_sources.append("related_profile")
     return support_sources
+
+
+def _trusted_identity_visible_text(profile: dict[str, Any] | None, *, ocr_hints: dict[str, Any] | None) -> str:
+    ocr_visible_text = str((ocr_hints or {}).get("visible_text") or "").strip()
+    if ocr_visible_text:
+        return ocr_visible_text
+    visual_hints = _profile_visual_cluster_hints(profile)
+    return str(visual_hints.get("visible_text") or "").strip()
 
 
 def _collect_identity_evidence_bundle(
@@ -1526,7 +1632,7 @@ def _collect_identity_evidence_bundle(
     matched_model_aliases = _collect_identity_aliases(model, glossary_terms=glossary_terms) if model else []
     transcript_source_labels = _profile_transcript_source_labels(profile)
     ocr_hints = _profile_ocr_hints(profile, glossary_terms=glossary_terms)
-    visible_text = str(profile.get("visible_text") or ocr_hints.get("visible_text") or "").strip()
+    visible_text = _trusted_identity_visible_text(profile, ocr_hints=ocr_hints)
     evidence_text = " ".join(
         " ".join(
             str(item.get(key) or "")
@@ -1535,6 +1641,11 @@ def _collect_identity_evidence_bundle(
         for item in (profile.get("evidence") or [])
         if isinstance(item, dict)
     ).strip()
+    related_profiles = _collect_matching_related_identity_profiles(
+        profile,
+        brand=brand,
+        model=model,
+    )
     return {
         "candidate_brand": brand or None,
         "candidate_model": model or None,
@@ -1602,6 +1713,7 @@ def _collect_identity_evidence_bundle(
             text=evidence_text,
             glossary_terms=glossary_terms,
         ),
+        "matched_related_profile_sources": related_profiles,
         "brand_aliases": matched_brand_aliases,
         "model_aliases": matched_model_aliases,
     }
@@ -3651,15 +3763,26 @@ def _source_context_candidate_hints(source_context: dict[str, Any] | None) -> di
         if isinstance(item, dict)
     ]
     if related_profiles:
-        related_profiles.sort(key=lambda item: float(item.get("score") or 0.0), reverse=True)
+        def _related_profile_priority(item: dict[str, Any]) -> tuple[int, float]:
+            review_mode = str(item.get("review_mode") or "").strip().lower()
+            if bool(item.get("manual_confirmed")) or review_mode == "manual_confirmed":
+                return (2, float(item.get("score") or 0.0))
+            if review_mode == "auto_confirmed":
+                return (1, float(item.get("score") or 0.0))
+            return (0, float(item.get("score") or 0.0))
+
+        related_profiles.sort(key=_related_profile_priority, reverse=True)
         primary = related_profiles[0]
         primary_score = float(primary.get("score") or 0.0)
+        primary_priority = _related_profile_priority(primary)[0]
         primary_brand = _normalize_profile_value(primary.get("subject_brand"))
         primary_model = _normalize_profile_value(primary.get("subject_model"))
         conflicting_neighbor = False
         for candidate in related_profiles[1:]:
             candidate_score = float(candidate.get("score") or 0.0)
             if candidate_score < 0.75:
+                continue
+            if _related_profile_priority(candidate)[0] < primary_priority:
                 continue
             candidate_brand = _normalize_profile_value(candidate.get("subject_brand"))
             candidate_model = _normalize_profile_value(candidate.get("subject_model"))
@@ -4077,12 +4200,12 @@ async def polish_subtitle_items(
                 ]
                 prompt = (
                     "你在精修中文短视频字幕。请根据视频主体、主题和搜索证据，"
-                    "只做最小必要的字幕纠错。"
+                    "只做最小必要的字幕文本纠错。"
                     "要求：\n"
-                    "1. 只允许修正 ASR 错字、同音词、品牌型号、行业术语、明显断句问题。\n"
-                    "2. 禁止总结、改写、扩写、缩写、换说法、重排信息、添加没说过的品牌型号或参数。\n"
-                    "3. 如果原句基本可用，就保持原句，只修正错别字即可。\n"
-                    "4. 结合 prev_text / next_text 只做邻句消歧，不要借邻句重写本句。\n"
+                    "1. 只允许修正 ASR 错字、同音词、品牌型号、行业术语和标点微调，不要做结构性重切分。\n"
+                    "2. 禁止合并或拆分字幕条目，禁止总结、改写、扩写、缩写、换说法、重排信息，禁止添加没说过的品牌型号或参数。\n"
+                    "3. 如果原句基本可用，就保持原句，只修正错别字或明显标点即可，不要把未说完的碎片补成完整句。\n"
+                    "4. 结合 prev_text / next_text 只做邻句消歧，不要借邻句重写本句，也不要用邻句补结构。\n"
                     "5. 单条输出必须和原句表达同一件事，禁止写成标题、摘要、卖点文案。\n"
                     "6. 优先保证品牌、型号、版本名、EDC/工具钳相关术语正确。\n"
                     "7. 数字写法按展示语境润色：字母+数字组合、日期时间、型号规格、版本代号、价格、档位、序号优先用阿拉伯数字；"
@@ -5215,6 +5338,12 @@ def _canonicalize_spoken_identity_text(text: str) -> str:
 
 def _extract_edc_flashlight_model(text: str) -> str:
     normalized = _canonicalize_spoken_identity_text(text)
+    if (
+        re.search(r"(?:司令官|COMMANDER)\s*(?:2|II)", str(text or ""), re.IGNORECASE)
+        or re.search(r"(?:司令官|COMMANDER)\s*(?:2|II)", normalized, re.IGNORECASE)
+    ) and "ULTRA" in normalized:
+        return "司令官2Ultra"
+
     if "SK05" in normalized:
         suffixes: list[str] = ["SK05"]
         if "2代" in normalized or "二代" in text or "II" in normalized:
@@ -5231,9 +5360,6 @@ def _extract_edc_flashlight_model(text: str) -> str:
         if "PRO" in normalized:
             return "SLIM2 PRO"
         return "SLIM2"
-
-    if "司令官2" in str(text or "") and "ULTRA" in normalized:
-        return "司令官2Ultra"
 
     return ""
 
@@ -6324,6 +6450,10 @@ def _fallback_polish_text(
             polished,
             cleanup_fillers=get_settings().subtitle_filler_cleanup_enabled,
         )
+    polished = _strip_terminal_punctuation_for_fragmentary_subtitle(
+        original_text=text,
+        polished_text=polished,
+    )
     polished = re.sub(r"(。){2,}", "。", polished)
     polished = re.sub(r"(，){2,}", "，", polished)
     return polished
@@ -6345,6 +6475,48 @@ def _cleanup_polished_text(text: str, *, preserve_display_numbers: bool = False)
     text = re.sub(r"[!！]{2,}", "！", text)
     text = re.sub(r"[?？]{2,}", "？", text)
     return text
+
+
+_FRAGMENTARY_SUBTITLE_ENDINGS = (
+    "如果",
+    "因为",
+    "所以",
+    "但是",
+    "然后",
+    "或者",
+    "以及",
+    "比如",
+    "比如说",
+    "这边",
+    "这里",
+    "这个",
+    "那个",
+    "这种",
+    "这样",
+    "那种",
+    "那些",
+    "这些",
+    "一点",
+    "一下",
+)
+_FRAGMENTARY_SUBTITLE_END_CHARS = tuple("的了着呢吧啊吗呀哦嘛呗喽啦么我你他她它们这那要会能可把给在对向从到为被和跟与及或而但又再还也就是去来看的做用说买拆装")
+
+
+def _strip_terminal_punctuation_for_fragmentary_subtitle(*, original_text: str, polished_text: str) -> str:
+    source = str(original_text or "").strip()
+    result = str(polished_text or "").strip()
+    if not source or not result:
+        return result
+    if re.search(r"[。.!！？?…]$", source):
+        return result
+    compact = re.sub(r"\s+", "", source)
+    if not compact:
+        return result
+    if compact.endswith(_FRAGMENTARY_SUBTITLE_END_CHARS) or any(
+        compact.endswith(suffix) for suffix in _FRAGMENTARY_SUBTITLE_ENDINGS
+    ):
+        return re.sub(r"[。.!！？?…]+$", "", result)
+    return result
 
 
 def _normalize_display_numbers_for_polish(text: str) -> str:

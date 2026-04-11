@@ -54,4 +54,4 @@ class OllamaReasoningProvider(ReasoningProvider):
             usage=usage,
             kind="reasoning",
         )
-        return ReasoningResponse(content=content, usage=usage, model=self._model)
+        return ReasoningResponse(content=content, usage=usage, model=self._model, raw_content=content)

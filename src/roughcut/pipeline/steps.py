@@ -1027,12 +1027,72 @@ def _should_accept_strong_local_boundary_candidate(
     best_local_candidate: list[Any] | None,
     best_local_score: float,
     min_score_gain: float,
+    current_analysis: dict[str, Any] | None = None,
+    best_local_analysis: dict[str, Any] | None = None,
 ) -> bool:
-    return (
+    base_accept = (
         best_local_candidate is not None
         and current_score < 0.0
         and len(best_local_candidate) <= current_entry_count
         and best_local_score >= current_score + min_score_gain
+    )
+    if base_accept:
+        return True
+    if (
+        best_local_candidate is None
+        or current_score >= 0.0
+        or len(best_local_candidate) > current_entry_count
+        or best_local_score < current_score + _SUBTITLE_BOUNDARY_REFINE_MIN_SCORE_GAIN
+        or not isinstance(current_analysis, dict)
+        or not isinstance(best_local_analysis, dict)
+    ):
+        return False
+
+    current_metrics = (
+        int(current_analysis.get("fragment_start_count") or 0),
+        int(current_analysis.get("fragment_end_count") or 0),
+        int(current_analysis.get("suspicious_boundary_count") or 0),
+        int(current_analysis.get("low_confidence_window_count") or 0),
+    )
+    candidate_metrics = (
+        int(best_local_analysis.get("fragment_start_count") or 0),
+        int(best_local_analysis.get("fragment_end_count") or 0),
+        int(best_local_analysis.get("suspicious_boundary_count") or 0),
+        int(best_local_analysis.get("low_confidence_window_count") or 0),
+    )
+    if candidate_metrics < current_metrics and len(best_local_candidate) <= current_entry_count:
+        return True
+    return (
+        candidate_metrics < current_metrics
+        and len(best_local_candidate) == current_entry_count + 1
+        and current_score <= -120.0
+        and best_local_score >= current_score + max(min_score_gain, 24.0)
+    )
+
+
+def _subtitle_boundary_candidate_rank(
+    *,
+    candidate: list[Any],
+    candidate_score: float,
+    candidate_analysis: dict[str, Any],
+    current_score: float,
+    current_entry_count: int,
+    current_analysis: dict[str, Any],
+) -> tuple[float, ...]:
+    current_fragment_total = int(current_analysis.get("fragment_start_count") or 0) + int(current_analysis.get("fragment_end_count") or 0)
+    candidate_fragment_total = int(candidate_analysis.get("fragment_start_count") or 0) + int(candidate_analysis.get("fragment_end_count") or 0)
+    current_suspicious = int(current_analysis.get("suspicious_boundary_count") or 0)
+    candidate_suspicious = int(candidate_analysis.get("suspicious_boundary_count") or 0)
+    current_low_conf = int(current_analysis.get("low_confidence_window_count") or 0)
+    candidate_low_conf = int(candidate_analysis.get("low_confidence_window_count") or 0)
+    entry_delta = len(candidate) - current_entry_count
+    return (
+        float(current_low_conf - candidate_low_conf),
+        float(current_suspicious - candidate_suspicious),
+        float(current_fragment_total - candidate_fragment_total),
+        float(1 if entry_delta <= 0 else 0),
+        float(-abs(entry_delta)),
+        float(candidate_score - current_score),
     )
 
 
@@ -1130,7 +1190,7 @@ async def _llm_refine_subtitle_window(
         window_entries,
         max_chars=relaxed_max_chars,
         max_duration=relaxed_max_duration,
-        top_k=4,
+        top_k=8,
     )
     current_candidate = list(window_entries)
     current_key = tuple(str(getattr(entry, "text_raw", "") or "") for entry in window_entries)
@@ -1161,7 +1221,7 @@ async def _llm_refine_subtitle_window(
         )
     ranked_candidates.sort(key=lambda item: (item[1], item[0], item[2]), reverse=True)
 
-    candidate_pool: list[list[Any]] = [current_candidate] + [candidate for _score, _same_or_less, _delta, candidate in ranked_candidates[:4]]
+    candidate_pool: list[list[Any]] = [current_candidate] + [candidate for _score, _same_or_less, _delta, candidate in ranked_candidates[:8]]
     if len(candidate_pool) <= 1:
         return None
 
@@ -1174,6 +1234,7 @@ async def _llm_refine_subtitle_window(
         for candidate in candidate_pool
     ]
     candidate_descriptions = []
+    current_analysis = analyze_subtitle_segmentation(current_candidate).as_dict()
     for candidate_index, candidate in enumerate(candidate_pool):
         candidate_analysis = analyze_subtitle_segmentation(candidate).as_dict()
         candidate_descriptions.append(
@@ -1184,23 +1245,50 @@ async def _llm_refine_subtitle_window(
                 "fragment_start_count": int(candidate_analysis.get("fragment_start_count") or 0),
                 "fragment_end_count": int(candidate_analysis.get("fragment_end_count") or 0),
                 "suspicious_boundary_count": int(candidate_analysis.get("suspicious_boundary_count") or 0),
+                "low_confidence_window_count": int(candidate_analysis.get("low_confidence_window_count") or 0),
                 "texts": [str(getattr(entry, "text_raw", "") or "") for entry in candidate],
             }
         )
     best_local_candidate: list[Any] | None = None
     best_local_score = current_score
+    best_local_analysis: dict[str, Any] | None = None
+    best_local_rank: tuple[float, ...] | None = None
     for candidate_index, candidate in enumerate(candidate_pool[1:], start=1):
         candidate_score = candidate_scores[candidate_index]
-        if candidate_score <= best_local_score:
+        candidate_analysis = candidate_descriptions[candidate_index]
+        candidate_rank = _subtitle_boundary_candidate_rank(
+            candidate=candidate,
+            candidate_score=candidate_score,
+            candidate_analysis=candidate_analysis,
+            current_score=current_score,
+            current_entry_count=len(window_entries),
+            current_analysis=current_analysis,
+        )
+        if (
+            candidate_score <= current_score
+            and int(candidate_analysis.get("low_confidence_window_count") or 0) >= int(current_analysis.get("low_confidence_window_count") or 0)
+            and int(candidate_analysis.get("suspicious_boundary_count") or 0) >= int(current_analysis.get("suspicious_boundary_count") or 0)
+            and (
+                int(candidate_analysis.get("fragment_start_count") or 0) + int(candidate_analysis.get("fragment_end_count") or 0)
+            ) >= (
+                int(current_analysis.get("fragment_start_count") or 0) + int(current_analysis.get("fragment_end_count") or 0)
+            )
+        ):
+            continue
+        if best_local_rank is not None and candidate_rank <= best_local_rank:
             continue
         best_local_candidate = candidate
         best_local_score = candidate_score
+        best_local_analysis = candidate_analysis
+        best_local_rank = candidate_rank
     if _should_accept_strong_local_boundary_candidate(
         current_score=current_score,
         current_entry_count=len(window_entries),
         best_local_candidate=best_local_candidate,
         best_local_score=best_local_score,
         min_score_gain=_SUBTITLE_BOUNDARY_LOCAL_EARLY_ACCEPT_SCORE_GAIN,
+        current_analysis=current_analysis,
+        best_local_analysis=best_local_analysis,
     ):
         return best_local_candidate
     prompt = (
@@ -1243,6 +1331,8 @@ async def _llm_refine_subtitle_window(
             best_local_candidate=best_local_candidate,
             best_local_score=best_local_score,
             min_score_gain=_SUBTITLE_BOUNDARY_LOCAL_FALLBACK_MIN_SCORE_GAIN,
+            current_analysis=current_analysis,
+            best_local_analysis=best_local_analysis,
         ):
             return best_local_candidate
         return None
@@ -1290,6 +1380,8 @@ async def _llm_refine_subtitle_window(
         best_local_candidate=best_local_candidate,
         best_local_score=best_local_score,
         min_score_gain=_SUBTITLE_BOUNDARY_LOCAL_FALLBACK_MIN_SCORE_GAIN,
+        current_analysis=current_analysis,
+        best_local_analysis=best_local_analysis,
     ):
         best_candidate = best_local_candidate
         best_score = best_local_score

@@ -12,6 +12,7 @@ from urllib.parse import urlparse
 from roughcut.llm_cache import digest_payload
 from roughcut.providers.factory import get_reasoning_provider, get_search_provider
 from roughcut.providers.reasoning.base import Message
+from roughcut.review.content_profile_memory import merge_content_profile_creative_preferences
 from roughcut.usage import track_usage_operation
 
 _PLATFORM_FACT_SHEET_CACHE_VERSION = "2026-04-03.fact-sheet.v2"
@@ -160,6 +161,7 @@ def build_packaging_prompt_brief(
     profile = content_profile or {}
     cover_title = profile.get("cover_title") if isinstance(profile.get("cover_title"), dict) else {}
     resolved_feedback = _resolved_review_feedback_payload(profile)
+    creative_preferences = merge_content_profile_creative_preferences(profile)
     return {
         "source_name": source_name,
         "subject_brand": str(profile.get("subject_brand") or "").strip(),
@@ -171,9 +173,20 @@ def build_packaging_prompt_brief(
         "hook_line": str(profile.get("hook_line") or "").strip(),
         "visible_text": str(profile.get("visible_text") or "").strip(),
         "engagement_question": str(profile.get("engagement_question") or "").strip(),
+        "correction_notes": str(profile.get("correction_notes") or "").strip(),
+        "supplemental_context": str(profile.get("supplemental_context") or "").strip(),
         "copy_style": str(profile.get("copy_style") or "").strip(),
         "workflow_template": str(profile.get("workflow_template") or profile.get("preset_name") or "").strip(),
         "search_queries": [str(item).strip() for item in (profile.get("search_queries") or []) if str(item).strip()][:3],
+        "creative_preferences": [
+            {
+                "tag": str(item.get("tag") or "").strip(),
+                "label": str(item.get("label") or item.get("tag") or "").strip(),
+                "guidance": str(item.get("guidance") or "").strip(),
+            }
+            for item in creative_preferences[:6]
+            if str(item.get("tag") or "").strip()
+        ],
         "cover_title": {
             "top": str(cover_title.get("top") or "").strip(),
             "main": str(cover_title.get("main") or "").strip(),
@@ -355,6 +368,7 @@ async def generate_platform_packaging(
     )
     fact_guardrail_text = _build_fact_guardrail_text(fact_sheet)
     author_prompt_text = _build_author_prompt_text(author_profile)
+    creative_guidance_text = _build_packaging_creative_guidance_text(content_profile)
     prompt = (
         "你是多平台视频包装官，负责把字幕整理成适合不同平台发布的标题、简介和标签。"
         f"{_domain_prompt_voice_instruction(content_profile)}"
@@ -377,6 +391,7 @@ async def generate_platform_packaging(
         f"本次统一文案风格：{_copy_style_instruction(copy_style)}\n\n"
         f"{fact_guardrail_text}\n\n"
         f"{author_prompt_text}\n\n"
+        f"{creative_guidance_text}\n\n"
         "默认平台偏置：\n"
         f"- B站：{_platform_bias_instruction('B站')}\n"
         f"- 小红书：{_platform_bias_instruction('小红书')}\n"
@@ -642,8 +657,11 @@ def _resolved_review_feedback_payload(content_profile: dict[str, Any] | None) ->
         "subject_type",
         "video_theme",
         "hook_line",
+        "visible_text",
         "summary",
         "engagement_question",
+        "correction_notes",
+        "supplemental_context",
     ):
         value = str(payload.get(key) or "").strip()
         if value:
@@ -2001,6 +2019,90 @@ def _author_description_strategy(author_profile: dict[str, Any] | None) -> str:
     return str(publishing.get("description_strategy") or "").strip()
 
 
+def _build_packaging_creative_guidance_text(content_profile: dict[str, Any] | None) -> str:
+    preferences = merge_content_profile_creative_preferences(content_profile)
+    if not preferences:
+        return "已学习创作偏好：无。"
+    lines = ["已学习创作偏好（优先体现在标题角度、简介重点和表达节奏上）："]
+    for item in preferences[:6]:
+        label = str(item.get("label") or item.get("tag") or "").strip()
+        guidance = str(item.get("guidance") or "").strip()
+        if label and guidance:
+            lines.append(f"- {label}：{guidance}")
+        elif label:
+            lines.append(f"- {label}")
+    return "\n".join(lines)
+
+
+def _creative_preference_tags(content_profile: dict[str, Any] | None) -> set[str]:
+    return {
+        str(item.get("tag") or "").strip()
+        for item in merge_content_profile_creative_preferences(content_profile)
+        if str(item.get("tag") or "").strip()
+    }
+
+
+def _creative_preference_title_angle(content_profile: dict[str, Any] | None, *, label: str) -> str:
+    tags = _creative_preference_tags(content_profile)
+    if "workflow_breakdown" in tags:
+        mapping = {
+            "B站": "关键步骤拆开讲",
+            "小红书": "流程重点先看",
+            "抖音": "步骤先拆给你看",
+            "快手": "流程我给你讲明白",
+            "视频号": "流程重点总结",
+        }
+        return mapping.get(label, "")
+    if "comparison_focus" in tags:
+        mapping = {
+            "B站": "版本差异一次说清",
+            "小红书": "版本差异先看",
+            "抖音": "差异直接看",
+            "快手": "差异我直说",
+            "视频号": "版本差异总结",
+        }
+        return mapping.get(label, "")
+    if "closeup_focus" in tags:
+        mapping = {
+            "B站": "近景细节一次看清",
+            "小红书": "近景细节先看",
+            "抖音": "近景细节直接看",
+            "快手": "细节我拉近给你看",
+            "视频号": "近景细节记录",
+        }
+        return mapping.get(label, "")
+    if "practical_demo" in tags:
+        mapping = {
+            "B站": "上手实测重点看",
+            "小红书": "上手实测先看",
+            "抖音": "实测结果先看",
+            "快手": "上手实测我直说",
+            "视频号": "上手实测总结",
+        }
+        return mapping.get(label, "")
+    return ""
+
+
+def _creative_preference_description_focus(content_profile: dict[str, Any] | None) -> str:
+    tags = _creative_preference_tags(content_profile)
+    if not tags:
+        return ""
+    if "workflow_breakdown" in tags:
+        return "流程步骤、节点逻辑和关键判断"
+    parts: list[str] = []
+    if "comparison_focus" in tags:
+        parts.append("版本差异和选择取舍")
+    if "closeup_focus" in tags:
+        parts.append("近景细节和做工特写")
+    elif "detail_focus" in tags:
+        parts.append("细节、做工和结构")
+    if "practical_demo" in tags:
+        parts.append("上手实测和实际使用场景")
+    if "conclusion_first" in tags and not parts:
+        parts.append("核心判断和关键依据")
+    return "、".join(parts[:3])
+
+
 def build_fallback_titles(*, label: str, content_profile: dict[str, Any] | None, copy_style: str = "attention_grabbing") -> list[str]:
     if not _has_specific_subject_identity(content_profile):
         return _build_neutral_fallback_titles(label=label, copy_style=copy_style)
@@ -2009,11 +2111,12 @@ def build_fallback_titles(*, label: str, content_profile: dict[str, Any] | None,
     subject = _preferred_subject_label(content_profile) or "产品"
     hook = _build_confirmed_title_hook(content_profile)
     headline_hook = _copy_style_headline_hook(copy_style, hook=hook, brand=product, subject=subject)
+    creative_title_angle = _creative_preference_title_angle(content_profile, label=label)
 
     if label == "B站":
         return [
             f"{product}：{headline_hook}",
-            f"{product}{_copy_style_bilibili_angle(copy_style)}",
+            f"{product}{creative_title_angle or _copy_style_bilibili_angle(copy_style)}",
             f"{product}上手体验，{_copy_style_explainer(copy_style)}",
             f"{_copy_style_waiting_angle(copy_style, subject)}",
             f"{product}{_copy_style_record_angle(copy_style)}",
@@ -2022,14 +2125,14 @@ def build_fallback_titles(*, label: str, content_profile: dict[str, Any] | None,
         return [
             _copy_style_xhs_title(copy_style, brand=product, subject=subject),
             f"{product}{_copy_style_texture_angle(copy_style)}",
-            _copy_style_waiting_angle(copy_style, subject),
+            creative_title_angle or _copy_style_waiting_angle(copy_style, subject),
             f"玩家向{subject}开箱，{_copy_style_detail_angle(copy_style)}",
             f"{product}到手分享，{_copy_style_judgement_angle(copy_style)}",
         ]
     if label == "抖音":
         return [
             f"{product}{_copy_style_short_burst(copy_style)}",
-            _copy_style_waiting_angle(copy_style, subject),
+            creative_title_angle or _copy_style_waiting_angle(copy_style, subject),
             f"{product}{_copy_style_judgement_angle(copy_style)}",
             f"{_copy_style_unboxing_burst(copy_style)}",
             f"{subject}到手先看{_copy_style_detail_focus(copy_style)}",
@@ -2037,7 +2140,7 @@ def build_fallback_titles(*, label: str, content_profile: dict[str, Any] | None,
     if label == "快手":
         return [
             f"给你们看个真东西：{product}",
-            _copy_style_waiting_angle(copy_style, subject),
+            creative_title_angle or _copy_style_waiting_angle(copy_style, subject),
             f"{product}{_copy_style_judgement_angle(copy_style)}",
             f"这次开箱我{_copy_style_explainer(copy_style)}",
             f"{subject}{_copy_style_truth_angle(copy_style)}",
@@ -2059,7 +2162,23 @@ def build_fallback_description(
     author_profile: dict[str, Any] | None = None,
 ) -> str:
     question = _fallback_question_with_author(content_profile, author_profile)
+    creative_focus = _creative_preference_description_focus(content_profile)
     if not _has_specific_subject_identity(content_profile):
+        if creative_focus:
+            if label == "小红书":
+                description = f"{_copy_style_opening(copy_style)}这期先看开箱过程、{creative_focus}。不硬写产品名，只聊这次最值得分享的几个重点。{question}"
+                return _inject_author_context_into_description(label, description, author_profile)
+            if label == "抖音":
+                description = f"{_copy_style_opening(copy_style)}这条直接看{creative_focus}，最值得继续看的重点都压在这一条里。{question}"
+                return _inject_author_context_into_description(label, description, author_profile)
+            if label == "快手":
+                description = f"{_copy_style_opening(copy_style)}这期不瞎补产品信息，直接看{creative_focus}，能看懂的地方我都给你摆明白。{question}"
+                return _inject_author_context_into_description(label, description, author_profile)
+            if label == "视频号":
+                description = f"{_copy_style_opening(copy_style)}这次分享一条开箱上手视频，重点看{creative_focus}，方便你快速做判断。{question}"
+                return _inject_author_context_into_description(label, description, author_profile)
+            description = f"{_copy_style_opening(copy_style)}这期先看开箱过程、{creative_focus}，只说视频里能确认的内容和最值得讨论的重点。{question}"
+            return _inject_author_context_into_description(label, description, author_profile)
         if label == "小红书":
             description = f"{_copy_style_opening(copy_style)}这期先看开箱过程、外观细节和真实上手感受。不硬写产品名，只聊这次到手后最值得分享的那几个瞬间。{question}"
             return _inject_author_context_into_description(label, description, author_profile)
@@ -2076,6 +2195,21 @@ def build_fallback_description(
         return _inject_author_context_into_description(label, description, author_profile)
 
     product = _preferred_product_label(content_profile, label=label) or "这款产品"
+    if creative_focus:
+        if label == "小红书":
+            description = f"{_copy_style_opening(copy_style)}{product}终于到手，重点看{creative_focus}。不是硬广，更像一次有质感的真实开箱分享。{question}"
+            return _inject_author_context_into_description(label, description, author_profile)
+        if label == "抖音":
+            description = f"{_copy_style_opening(copy_style)}这次就看{product}到底值不值，重点看{creative_focus}，最狠的内容都压进这一条里了。{question}"
+            return _inject_author_context_into_description(label, description, author_profile)
+        if label == "快手":
+            description = f"{_copy_style_opening(copy_style)}给大家看个真东西，这次开箱的是{product}，重点就聊{creative_focus}，我按实话给你讲。{question}"
+            return _inject_author_context_into_description(label, description, author_profile)
+        if label == "视频号":
+            description = f"{_copy_style_opening(copy_style)}这次分享一条{product}开箱视频，重点看{creative_focus}，方便快速做判断。{question}"
+            return _inject_author_context_into_description(label, description, author_profile)
+        description = f"{_copy_style_opening(copy_style)}这次开箱的是{product}，视频里重点看{creative_focus}和核心判断。{question}"
+        return _inject_author_context_into_description(label, description, author_profile)
     if label == "小红书":
         description = f"{_copy_style_opening(copy_style)}{product}终于到手，重点看外观、细节和上手感受。不是硬广，更像一次有质感的真实开箱分享。{question}"
         return _inject_author_context_into_description(label, description, author_profile)

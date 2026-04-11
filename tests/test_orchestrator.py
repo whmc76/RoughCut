@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import uuid
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -59,6 +60,71 @@ async def test_get_orchestrator_lock_snapshot_reports_unsupported_for_non_postgr
 
     assert snapshot["status"] == "unsupported"
     assert snapshot["leader_active"] is None
+
+
+def test_augment_orchestrator_lock_snapshot_marks_stale_leader(monkeypatch, tmp_path):
+    import roughcut.pipeline.orchestrator as orchestrator_mod
+
+    heartbeat_path = tmp_path / "orchestrator-heartbeat.json"
+    stale_at = datetime.now(timezone.utc) - timedelta(minutes=3)
+    heartbeat_path.write_text(
+        json.dumps(
+            {
+                "updated_at": stale_at.isoformat(),
+                "phase": "tick_running",
+                "has_lock": True,
+                "poll_interval_sec": 2.0,
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(orchestrator_mod, "_ORCHESTRATOR_HEARTBEAT_PATH", heartbeat_path)
+
+    snapshot = orchestrator_mod._augment_orchestrator_lock_snapshot(
+        {
+            "status": "held",
+            "leader_active": True,
+            "detail": "An active orchestrator currently holds the single-active lock.",
+        }
+    )
+
+    assert snapshot["status"] == "stale"
+    assert snapshot["leader_active"] is False
+    assert snapshot["heartbeat_age_sec"] >= 180
+    assert snapshot["heartbeat_stale_after_sec"] == orchestrator_mod._ORCHESTRATOR_HEARTBEAT_MIN_FRESH_SEC
+
+
+def test_augment_orchestrator_lock_snapshot_keeps_fresh_leader(monkeypatch, tmp_path):
+    import roughcut.pipeline.orchestrator as orchestrator_mod
+
+    heartbeat_path = tmp_path / "orchestrator-heartbeat.json"
+    fresh_at = datetime.now(timezone.utc) - timedelta(seconds=4)
+    heartbeat_path.write_text(
+        json.dumps(
+            {
+                "updated_at": fresh_at.isoformat(),
+                "phase": "tick_idle",
+                "has_lock": True,
+                "poll_interval_sec": 2.0,
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(orchestrator_mod, "_ORCHESTRATOR_HEARTBEAT_PATH", heartbeat_path)
+
+    snapshot = orchestrator_mod._augment_orchestrator_lock_snapshot(
+        {
+            "status": "held",
+            "leader_active": True,
+            "detail": "An active orchestrator currently holds the single-active lock.",
+        }
+    )
+
+    assert snapshot["status"] == "held"
+    assert snapshot["leader_active"] is True
+    assert snapshot["heartbeat_age_sec"] < snapshot["heartbeat_stale_after_sec"]
 
 
 @pytest.mark.asyncio
@@ -188,13 +254,14 @@ async def test_recover_stale_running_steps_records_stuck_step_diagnostic(db_engi
     factory = get_session_factory()
     calls: list[dict[str, object]] = []
 
-    async def fake_record_stuck_step_diagnostic(session, job, step, *, stale_after_sec, applied_action, now):
+    async def fake_record_stuck_step_diagnostic(session, job, step, *, stale_after_sec, applied_action, now, allow_acp):
         calls.append(
             {
                 "job_id": str(job.id),
                 "step_name": step.step_name,
                 "stale_after_sec": stale_after_sec,
                 "applied_action": applied_action,
+                "allow_acp": allow_acp,
             }
         )
         step.metadata_ = {
@@ -231,6 +298,7 @@ async def test_recover_stale_running_steps_records_stuck_step_diagnostic(db_engi
                 started_at=datetime.now(timezone.utc) - timedelta(hours=2),
                 metadata_={
                     "task_id": "stale-task",
+                    "worker_started_at": (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat(),
                     "updated_at": (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat(),
                 },
             )
@@ -251,17 +319,367 @@ async def test_recover_stale_running_steps_records_stuck_step_diagnostic(db_engi
             )
         ).scalar_one()
 
-    assert calls == [
-        {
-            "job_id": str(job_id),
-            "step_name": "transcribe",
-            "stale_after_sec": orchestrator_mod._step_stale_timeout_seconds("transcribe"),
-            "applied_action": "reset_to_pending",
-        }
-    ]
+    assert {
+        "job_id": str(job_id),
+        "step_name": "transcribe",
+        "stale_after_sec": orchestrator_mod._step_stale_timeout_seconds("transcribe"),
+        "applied_action": "reset_to_pending",
+        "allow_acp": False,
+    } in calls
     assert step.status == "pending"
     assert step.metadata_["recovery_action"] == "reset_to_pending"
     assert step.metadata_["recovery_source"] == "local"
+
+
+@pytest.mark.asyncio
+async def test_recover_stale_running_steps_recovers_dispatched_but_unclaimed_step(db_engine, monkeypatch):
+    import roughcut.pipeline.orchestrator as orchestrator_mod
+    from roughcut.config import Settings
+    from roughcut.db.models import Job, JobStep
+    from roughcut.db.session import get_session_factory
+
+    job_id = uuid.uuid4()
+    factory = get_session_factory()
+    dispatched_at = datetime.now(timezone.utc) - timedelta(hours=2)
+
+    monkeypatch.setattr(
+        orchestrator_mod,
+        "get_settings",
+        lambda: Settings(
+            _env_file=None,
+            step_stale_timeout_sec=900,
+            step_dispatch_stale_timeout_sec=3600,
+        ),
+    )
+
+    async with factory() as session:
+        session.add(
+            Job(
+                id=job_id,
+                source_path="jobs/demo/dispatched-only.mp4",
+                source_name="dispatched-only.mp4",
+                status="processing",
+                language="zh-CN",
+            )
+        )
+        session.add(
+            JobStep(
+                job_id=job_id,
+                step_name="content_profile",
+                status="running",
+                attempt=1,
+                started_at=dispatched_at,
+                metadata_={
+                    "task_id": "queued-task",
+                    "queue": "llm_queue",
+                    "dispatched_at": dispatched_at.isoformat(),
+                    "updated_at": dispatched_at.isoformat(),
+                },
+            )
+        )
+        await session.commit()
+
+    async with factory() as session:
+        await orchestrator_mod._recover_stale_running_steps(session)
+        await session.commit()
+
+    async with factory() as session:
+        step = (
+            await session.execute(
+                orchestrator_mod.select(JobStep).where(
+                    JobStep.job_id == job_id,
+                    JobStep.step_name == "content_profile",
+                )
+            )
+        ).scalar_one()
+
+    assert step.status == "pending"
+    assert "task_id" not in (step.metadata_ or {})
+    assert step.metadata_["dispatched_at"] == dispatched_at.isoformat()
+    assert step.metadata_["last_task_id"] == "queued-task"
+    assert step.metadata_["recovery_action"] == "reset_to_pending"
+
+
+@pytest.mark.asyncio
+async def test_recover_stale_running_steps_keeps_queued_dispatch_below_dispatch_timeout(db_engine, monkeypatch):
+    import roughcut.pipeline.orchestrator as orchestrator_mod
+    from roughcut.config import Settings
+    from roughcut.db.models import Job, JobStep
+    from roughcut.db.session import get_session_factory
+
+    job_id = uuid.uuid4()
+    factory = get_session_factory()
+    dispatched_at = datetime.now(timezone.utc) - timedelta(minutes=20)
+
+    monkeypatch.setattr(
+        orchestrator_mod,
+        "get_settings",
+        lambda: Settings(
+            _env_file=None,
+            step_stale_timeout_sec=900,
+            step_dispatch_stale_timeout_sec=3600,
+        ),
+    )
+
+    async with factory() as session:
+        session.add(
+            Job(
+                id=job_id,
+                source_path="jobs/demo/queued-not-stale.mp4",
+                source_name="queued-not-stale.mp4",
+                status="processing",
+                language="zh-CN",
+            )
+        )
+        session.add(
+            JobStep(
+                job_id=job_id,
+                step_name="content_profile",
+                status="running",
+                attempt=1,
+                started_at=dispatched_at,
+                metadata_={
+                    "task_id": "queued-task",
+                    "queue": "llm_queue",
+                    "dispatched_at": dispatched_at.isoformat(),
+                    "updated_at": dispatched_at.isoformat(),
+                },
+            )
+        )
+        await session.commit()
+
+    async with factory() as session:
+        await orchestrator_mod._recover_stale_running_steps(session)
+        await session.commit()
+
+    async with factory() as session:
+        step = (
+            await session.execute(
+                orchestrator_mod.select(JobStep).where(
+                    JobStep.job_id == job_id,
+                    JobStep.step_name == "content_profile",
+                )
+            )
+        ).scalar_one()
+
+    assert step.status == "running"
+    assert (step.metadata_ or {}).get("task_id") == "queued-task"
+
+
+@pytest.mark.asyncio
+async def test_recover_stale_running_steps_respects_worker_started_at_fallback_from_started_at(db_engine, monkeypatch):
+    import roughcut.pipeline.orchestrator as orchestrator_mod
+    from roughcut.config import Settings
+    from roughcut.db.models import Job, JobStep
+    from roughcut.db.session import get_session_factory
+
+    job_id = uuid.uuid4()
+    factory = get_session_factory()
+    dispatched_at = datetime.now(timezone.utc) - timedelta(hours=2)
+    worker_started_at = datetime.now(timezone.utc) - timedelta(minutes=5)
+
+    monkeypatch.setattr(
+        orchestrator_mod,
+        "get_settings",
+        lambda: Settings(
+            _env_file=None,
+            step_stale_timeout_sec=900,
+            step_dispatch_stale_timeout_sec=3600,
+        ),
+    )
+
+    async with factory() as session:
+        session.add(
+            Job(
+                id=job_id,
+                source_path="jobs/demo/claimed-no-heartbeat-meta.mp4",
+                source_name="claimed-no-heartbeat-meta.mp4",
+                status="processing",
+                language="zh-CN",
+            )
+        )
+        session.add(
+            JobStep(
+                job_id=job_id,
+                step_name="content_profile",
+                status="running",
+                attempt=1,
+                started_at=worker_started_at,
+                metadata_={
+                    "task_id": "claimed-task",
+                    "queue": "llm_queue",
+                    "dispatched_at": dispatched_at.isoformat(),
+                    "updated_at": dispatched_at.isoformat(),
+                },
+            )
+        )
+        await session.commit()
+
+    async with factory() as session:
+        await orchestrator_mod._recover_stale_running_steps(session)
+        await session.commit()
+
+    async with factory() as session:
+        step = (
+            await session.execute(
+                orchestrator_mod.select(JobStep).where(
+                    JobStep.job_id == job_id,
+                    JobStep.step_name == "content_profile",
+                )
+            )
+        ).scalar_one()
+
+    assert step.status == "running"
+    assert (step.metadata_ or {}).get("task_id") == "claimed-task"
+
+
+@pytest.mark.asyncio
+async def test_recover_stale_running_steps_closes_running_step_on_terminal_job(db_engine):
+    import roughcut.pipeline.orchestrator as orchestrator_mod
+    from roughcut.db.models import Job, JobStep
+    from roughcut.db.session import get_session_factory
+
+    job_id = uuid.uuid4()
+    factory = get_session_factory()
+    started_at = datetime.now(timezone.utc) - timedelta(minutes=30)
+
+    async with factory() as session:
+        session.add(
+            Job(
+                id=job_id,
+                source_path="jobs/demo/terminal-running.mp4",
+                source_name="terminal-running.mp4",
+                status="done",
+                language="zh-CN",
+            )
+        )
+        session.add(
+            JobStep(
+                job_id=job_id,
+                step_name="subtitle_translation",
+                status="running",
+                attempt=1,
+                started_at=started_at,
+                metadata_={
+                    "task_id": "orphan-task",
+                    "updated_at": started_at.isoformat(),
+                },
+            )
+        )
+        await session.commit()
+
+    async with factory() as session:
+        await orchestrator_mod._recover_stale_running_steps(session)
+        await session.commit()
+
+    async with factory() as session:
+        step = (
+            await session.execute(
+                orchestrator_mod.select(JobStep).where(
+                    JobStep.job_id == job_id,
+                    JobStep.step_name == "subtitle_translation",
+                )
+            )
+        ).scalar_one()
+
+    assert step.status == "skipped"
+    assert step.finished_at is not None
+    assert "task_id" not in (step.metadata_ or {})
+    assert step.metadata_["last_task_id"] == "orphan-task"
+
+
+@pytest.mark.asyncio
+async def test_tick_does_not_overwrite_fast_worker_step_completion(monkeypatch, db_engine):
+    import roughcut.pipeline.orchestrator as orchestrator_mod
+    import roughcut.runtime_preflight as runtime_preflight_mod
+    import roughcut.watcher.folder_watcher as watcher_mod
+    import roughcut.pipeline.celery_app as celery_app_mod
+    from roughcut.db.models import Job, JobStep
+    from roughcut.db.session import get_session_factory
+
+    job_id = uuid.uuid4()
+    factory = get_session_factory()
+
+    async with factory() as session:
+        session.add(
+            Job(
+                id=job_id,
+                source_path="jobs/demo/fast-worker.mp4",
+                source_name="fast-worker.mp4",
+                status="processing",
+                language="zh-CN",
+            )
+        )
+        session.add(JobStep(job_id=job_id, step_name="transcribe", status="pending"))
+        await session.commit()
+
+    class FakeAsyncResult:
+        id = "task-fast-worker"
+
+    async def fake_runtime_ready(*, reason: str):
+        return None
+
+    async def fake_watch_duty():
+        return {"roots_total": 0, "scan_started": 0, "auto_merged_jobs": 0, "auto_enqueued_jobs": 0, "idle_slots": 0}
+
+    async def fake_recover_stale(_session):
+        return None
+
+    async def fake_count_running_gpu_steps(_session):
+        return 0
+
+    async def fake_ensure_job_steps(_job, _session):
+        return None
+
+    async def fake_is_step_ready(step, _session):
+        return step.job_id == job_id and step.step_name == "transcribe"
+
+    async def fake_update_job_statuses(_session):
+        async with factory() as worker_session:
+            step = (
+                await worker_session.execute(
+                    orchestrator_mod.select(JobStep).where(
+                        JobStep.job_id == job_id,
+                        JobStep.step_name == "transcribe",
+                    )
+                )
+            ).scalar_one()
+            step.status = "done"
+            step.finished_at = datetime.now(timezone.utc)
+            step.metadata_ = {
+                "label": "语音转写",
+                "detail": "转写完成，共 3 段",
+                "progress": 1.0,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+                "last_task_id": FakeAsyncResult.id,
+            }
+            await worker_session.commit()
+
+    monkeypatch.setattr(runtime_preflight_mod, "ensure_runtime_services_ready", fake_runtime_ready)
+    monkeypatch.setattr(watcher_mod, "run_watch_root_auto_duty", fake_watch_duty)
+    monkeypatch.setattr(orchestrator_mod, "_ensure_job_steps", fake_ensure_job_steps)
+    monkeypatch.setattr(orchestrator_mod, "_recover_stale_running_steps", fake_recover_stale)
+    monkeypatch.setattr(orchestrator_mod, "_count_running_gpu_steps", fake_count_running_gpu_steps)
+    monkeypatch.setattr(orchestrator_mod, "_update_job_statuses", fake_update_job_statuses)
+    monkeypatch.setattr(orchestrator_mod, "_is_step_ready", fake_is_step_ready)
+    monkeypatch.setattr(celery_app_mod.celery_app, "send_task", lambda *args, **kwargs: FakeAsyncResult())
+
+    await orchestrator_mod.tick()
+
+    async with factory() as session:
+        step = (
+            await session.execute(
+                orchestrator_mod.select(JobStep).where(
+                    JobStep.job_id == job_id,
+                    JobStep.step_name == "transcribe",
+                )
+            )
+        ).scalar_one()
+
+    assert step.status == "done"
+    assert step.finished_at is not None
+    assert step.metadata_["last_task_id"] == FakeAsyncResult.id
+    assert "task_id" not in step.metadata_
 
 
 @pytest.mark.asyncio

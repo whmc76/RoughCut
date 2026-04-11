@@ -445,6 +445,18 @@ def test_seed_profile_from_text_extracts_olight_slim2_ultra_identity():
     assert any("OLIGHT" in item for item in seeded["search_queries"])
 
 
+def test_seed_profile_from_text_extracts_olight_commander2_ultra_identity():
+    seeded = _seed_profile_from_text(
+        "今天看奥雷 Commander 2 Ultra 这支手电。"
+        "主要聊司令官2 Ultra 的上手和版本差异。"
+    )
+
+    assert seeded["subject_brand"] == "OLIGHT"
+    assert seeded["subject_brand_cn"] == "傲雷"
+    assert seeded["subject_model"] == "司令官2Ultra"
+    assert all("SLIM2" not in str(item) for item in [seeded["subject_model"], *(seeded.get("search_queries") or [])])
+
+
 def test_seed_profile_from_text_maps_leatherman_arc_asr_alias():
     seeded = _seed_profile_from_text("这把莱泽曼 ASC 工具钳主要看单手开合和钳头结构。")
 
@@ -1841,6 +1853,100 @@ def test_apply_identity_review_guard_uses_related_source_context_identity_to_rew
     assert any("LEATHERMAN ARC" in query for query in guarded["search_queries"])
 
 
+def test_apply_identity_review_guard_prefers_manual_related_profile_over_conflicting_unreviewed_neighbor():
+    guarded = apply_identity_review_guard(
+        {
+            "subject_brand": "",
+            "subject_model": "",
+            "subject_type": "EDC手电",
+            "video_theme": "",
+            "summary": "这条视频主要围绕一支 EDC 手电展开。",
+            "search_queries": [],
+            "source_context": {
+                "related_profiles": [
+                    {
+                        "source_name": "20260209-124735.mp4",
+                        "subject_brand": "OLIGHT",
+                        "subject_model": "Commander 2 Ultra",
+                        "subject_type": "EDC手电",
+                        "video_theme": "OLIGHT Commander 2 Ultra 开箱上手",
+                        "summary": "这条视频主要围绕 OLIGHT Commander 2 Ultra 展开。",
+                        "search_queries": ["OLIGHT Commander 2 Ultra"],
+                        "score": 1.0,
+                        "review_mode": "manual_confirmed",
+                        "manual_confirmed": True,
+                    },
+                    {
+                        "source_name": "20260209-131541.mp4",
+                        "subject_brand": "OLIGHT",
+                        "subject_model": "Arkfeld PRO",
+                        "subject_type": "EDC手电",
+                        "video_theme": "OLIGHT Arkfeld PRO 对比",
+                        "summary": "这条视频主要围绕 OLIGHT Arkfeld PRO 展开。",
+                        "search_queries": ["OLIGHT Arkfeld PRO"],
+                        "score": 1.0,
+                    },
+                ]
+            },
+            "transcript_excerpt": "这一条继续补前一条那支手电的版本差异和上手细节。",
+        },
+        subtitle_items=[
+            {"text_raw": "这一条继续补前一条那支手电的版本差异和上手细节。"},
+        ],
+        source_name="20260209-merged.mp4",
+    )
+
+    assert guarded["subject_brand"] == "OLIGHT"
+    assert guarded["subject_model"] == "Commander 2 Ultra"
+    assert "Commander 2 Ultra" in str(guarded.get("summary") or "")
+
+
+def test_assess_content_profile_automation_treats_manual_related_profile_as_identity_evidence():
+    assessment = assess_content_profile_automation(
+        {
+            "preset_name": "edc_tactical",
+            "subject_brand": "OLIGHT",
+            "subject_model": "Commander 2 Ultra",
+            "subject_type": "EDC手电",
+            "video_theme": "OLIGHT Commander 2 Ultra 价格展示",
+            "summary": "这条视频主要围绕 OLIGHT Commander 2 Ultra 的价格和版本差异展开。",
+            "engagement_question": "你更在意价格还是配件组合？",
+            "search_queries": ["OLIGHT Commander 2 Ultra"],
+            "source_context": {
+                "merged_source_names": ["20260209-124735.mp4", "20260209-131541.mp4"],
+                "allow_related_profiles": True,
+                "related_profiles": [
+                    {
+                        "source_name": "20260209-124735.mp4",
+                        "subject_brand": "OLIGHT",
+                        "subject_model": "Commander 2 Ultra",
+                        "subject_type": "EDC手电",
+                        "video_theme": "OLIGHT Commander 2 Ultra 开箱上手",
+                        "summary": "这条视频主要围绕 OLIGHT Commander 2 Ultra 展开。",
+                        "search_queries": ["OLIGHT Commander 2 Ultra"],
+                        "score": 1.0,
+                        "review_mode": "manual_confirmed",
+                        "manual_confirmed": True,
+                    }
+                ],
+            },
+            "transcript_excerpt": "这一条继续补前一条那支手电的版本差异和价格信息。",
+        },
+        subtitle_items=[
+            {"text_raw": "这一条继续补前一条那支手电的版本差异和价格信息。"},
+        ],
+        source_name="20260209-merged.mp4",
+    )
+
+    assert assessment["identity_review"]["required"] is False
+    assert assessment["identity_review"]["first_seen_model"] is False
+    assert "related_manual_review" in assessment["identity_review"]["support_sources"]
+    assert assessment["identity_review"]["evidence_strength"] == "strong"
+    related_sources = assessment["identity_review"]["evidence_bundle"]["matched_related_profile_sources"]
+    assert related_sources[0]["source_name"] == "20260209-124735.mp4"
+    assert related_sources[0]["manual_confirmed"] is True
+
+
 def test_coerce_subject_type_to_supported_main_type_returns_canonical_main_type_empty_for_specific_subject_type():
     assert _coerce_subject_type_to_supported_main_type(
         {
@@ -2564,6 +2670,32 @@ def test_assess_content_profile_automation_identity_evidence_bundle_reads_graph_
     assert evidence_bundle["matched_transcript_source_labels"]["subject_model"] == "FXX1小副包"
 
 
+def test_assess_content_profile_automation_does_not_treat_review_fallback_visible_text_as_visual_evidence():
+    assessment = assess_content_profile_automation(
+        {
+            "preset_name": "edc_tactical",
+            "subject_brand": "胡服",
+            "subject_model": "蜜獾二代",
+            "subject_type": "EDC机能包",
+            "video_theme": "机能包开箱",
+            "summary": "围绕一款机能包展开。",
+            "engagement_question": "你更看重分仓还是背负？",
+            "search_queries": ["机能包 开箱"],
+            "visible_text": "胡服 蜜獾二代",
+        },
+        subtitle_items=[
+            {"text_raw": "今天来看三款包。"},
+            {"text_raw": "先看结构和背负。"},
+        ],
+        source_name="bag-review.mp4",
+    )
+
+    evidence_bundle = assessment["identity_review"]["evidence_bundle"]
+
+    assert evidence_bundle["matched_visible_text_terms"] == []
+    assert "visible_text" not in assessment["identity_review"]["support_sources"]
+
+
 @pytest.mark.asyncio
 async def test_apply_content_profile_feedback_accepts_draft_without_reenrichment(
     monkeypatch: pytest.MonkeyPatch,
@@ -2817,6 +2949,58 @@ async def test_apply_content_profile_feedback_keeps_llm_derived_fields_from_reso
     assert result["engagement_question"] == "你会选司令官2Ultra还是更便宜的版本？"
     assert result["search_queries"] == ["傲雷 司令官2Ultra", "司令官2Ultra 参数对比"]
     assert "傲雷" in result["cover_title"]["top"] or "傲雷" in result["cover_title"]["main"]
+
+
+@pytest.mark.asyncio
+async def test_apply_content_profile_feedback_preserves_manual_notes_after_enrich(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from roughcut.review import content_profile as content_profile_module
+
+    class FakeResponse:
+        def as_json(self):
+            return {
+                "summary": "围绕傲雷司令官2Ultra展开。",
+                "search_queries": ["傲雷 司令官2Ultra"],
+            }
+
+    class FakeProvider:
+        async def complete(self, *args, **kwargs):
+            return FakeResponse()
+
+    async def fake_enrich_content_profile(*, profile, source_name, channel_profile, transcript_excerpt, include_research, user_memory=None):
+        return {
+            **profile,
+            "subject_brand": "傲雷",
+            "subject_model": "司令官2Ultra",
+            "subject_type": "EDC手电",
+            "summary": "围绕傲雷司令官2Ultra展开。",
+            "search_queries": ["傲雷 司令官2Ultra"],
+        }
+
+    monkeypatch.setattr(content_profile_module, "get_reasoning_provider", lambda: FakeProvider())
+    monkeypatch.setattr(content_profile_module, "enrich_content_profile", fake_enrich_content_profile)
+
+    result = await apply_content_profile_feedback(
+        draft_profile={
+            "subject_brand": "OLIGHT",
+            "subject_model": "Commander 2 Ultra",
+            "transcript_excerpt": "这次主要看 commander 2 ultra。",
+        },
+        source_name="video.mp4",
+        channel_profile=None,
+        user_feedback={
+            "subject_brand": "傲雷",
+            "subject_model": "司令官2Ultra",
+            "correction_notes": "重点核对品牌和型号写法。",
+            "supplemental_context": "这是 EDC 手电版本对比稿。",
+        },
+    )
+
+    assert result["correction_notes"] == "重点核对品牌和型号写法。"
+    assert result["supplemental_context"] == "这是 EDC 手电版本对比稿。"
+    assert result["user_feedback"]["correction_notes"] == "重点核对品牌和型号写法。"
+    assert result["user_feedback"]["supplemental_context"] == "这是 EDC 手电版本对比稿。"
 
 
 @pytest.mark.asyncio
@@ -4120,6 +4304,9 @@ async def test_polish_subtitle_items_llm_prompt_includes_display_number_guidance
     class FakeProvider:
         async def complete(self, messages, **kwargs):
             prompt = messages[1].content
+            assert "只做最小必要的字幕文本纠错" in prompt
+            assert "禁止合并或拆分字幕条目" in prompt
+            assert "不要把未说完的碎片补成完整句" in prompt
             assert "阿拉伯数字" in prompt
             assert "中文数字" in prompt
             assert "字母+数字" in prompt
@@ -4146,6 +4333,36 @@ async def test_polish_subtitle_items_llm_prompt_includes_display_number_guidance
 
     assert polished == 1
     assert item.text_final == "这次拿到一个新的手电筒。"
+
+
+@pytest.mark.asyncio
+async def test_polish_subtitle_items_fallback_strips_terminal_punctuation_from_fragmentary_text(monkeypatch: pytest.MonkeyPatch):
+    from roughcut.review import content_profile as content_profile_module
+
+    def raising_provider():
+        raise RuntimeError("provider unavailable")
+
+    monkeypatch.setattr(content_profile_module, "get_reasoning_provider", raising_provider)
+
+    item = SimpleNamespace(
+        item_index=0,
+        start_time=0.0,
+        end_time=2.0,
+        text_raw="包装可以把你的",
+        text_norm="包装可以把你的",
+        text_final=None,
+    )
+
+    polished = await polish_subtitle_items(
+        [item],
+        content_profile={"preset_name": "edc_tactical"},
+        glossary_terms=[],
+        review_memory={"terms": [], "aliases": [], "style_examples": []},
+    )
+
+    assert polished == 1
+    assert item.text_final == "包装可以把你的"
+    assert not item.text_final.endswith(("。", "！", "?", "？", "!", "…"))
 
 
 @pytest.mark.asyncio

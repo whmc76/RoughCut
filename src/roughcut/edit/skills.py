@@ -4,6 +4,7 @@ from copy import deepcopy
 from typing import Any
 
 from roughcut.edit.presets import get_workflow_preset, normalize_workflow_template_name
+from roughcut.review.content_profile_memory import merge_content_profile_creative_preferences
 
 _DEFAULT_SECTION_POLICY = {
     "hook": {
@@ -264,15 +265,24 @@ def resolve_editing_skill(
 ) -> dict[str, Any]:
     normalized_template = normalize_workflow_template_name(workflow_template)
     if normalized_template in _EDITING_SKILLS:
-        return deepcopy(_EDITING_SKILLS[normalized_template])
+        return _apply_creative_preference_overrides(
+            deepcopy(_EDITING_SKILLS[normalized_template]),
+            content_profile=content_profile,
+        )
 
     profile = content_profile or {}
     content_kind = str(profile.get("content_kind") or "").strip().lower()
     if content_kind in _CONTENT_KIND_TO_SKILL:
-        return deepcopy(_EDITING_SKILLS[_CONTENT_KIND_TO_SKILL[content_kind]])
+        return _apply_creative_preference_overrides(
+            deepcopy(_EDITING_SKILLS[_CONTENT_KIND_TO_SKILL[content_kind]]),
+            content_profile=content_profile,
+        )
 
     preset = get_workflow_preset(workflow_template)
-    return deepcopy(_EDITING_SKILLS.get(preset.name, _EDITING_SKILLS[_CONTENT_KIND_TO_SKILL.get(preset.content_kind, "unboxing_standard")]))
+    return _apply_creative_preference_overrides(
+        deepcopy(_EDITING_SKILLS.get(preset.name, _EDITING_SKILLS[_CONTENT_KIND_TO_SKILL.get(preset.content_kind, "unboxing_standard")])),
+        content_profile=content_profile,
+    )
 
 
 def apply_review_focus_overrides(
@@ -326,6 +336,79 @@ def apply_review_focus_overrides(
         section_policy["cta"] = cta_policy
         skill["focus_cut_guard"] = {"cta": 0.24}
         skill["focus_keep_energy_bonus"] = {"cta": 0.24}
+
+    skill["section_policy"] = section_policy
+    return skill
+
+
+def _apply_creative_preference_overrides(
+    editing_skill: dict[str, Any],
+    *,
+    content_profile: dict[str, Any] | None,
+) -> dict[str, Any]:
+    skill = deepcopy(editing_skill or _EDITING_SKILLS["unboxing_standard"])
+    preferences = merge_content_profile_creative_preferences(content_profile)
+    tags = {
+        str(item.get("tag") or "").strip()
+        for item in preferences
+        if str(item.get("tag") or "").strip()
+    }
+    if not tags:
+        return skill
+
+    section_policy = {
+        role: dict(policy or {})
+        for role, policy in dict(skill.get("section_policy") or {}).items()
+    }
+    skill["creative_preferences"] = sorted(tags)
+
+    if "fast_paced" in tags:
+        skill["silence_floor_sec"] = round(max(0.18, float(skill.get("silence_floor_sec", 0.5) or 0.5) - 0.08), 3)
+        skill["silence_score_bias"] = round(float(skill.get("silence_score_bias", 0.0) or 0.0) + 0.04, 3)
+        skill["transition_max_count"] = int(skill.get("transition_max_count") or 0) + 1
+        skill["overlay_max_count"] = int(skill.get("overlay_max_count") or 0) + 1
+        for role in ("hook", "body"):
+            role_policy = dict(section_policy.get(role) or {})
+            role_policy["trim_intensity"] = "tight"
+            section_policy[role] = role_policy
+
+    if "conclusion_first" in tags:
+        hook_policy = dict(section_policy.get("hook") or {})
+        hook_policy["overlay_weight"] = round(float(hook_policy.get("overlay_weight", 1.3) or 1.3) + 0.25, 3)
+        hook_policy["transition_boost"] = round(float(hook_policy.get("transition_boost", 0.55) or 0.55) + 0.2, 3)
+        hook_policy["trim_intensity"] = "tight" if "fast_paced" in tags else "balanced"
+        section_policy["hook"] = hook_policy
+
+    if "comparison_focus" in tags or "workflow_breakdown" in tags:
+        skill["continuation_guard_penalty"] = round(
+            float(skill.get("continuation_guard_penalty", 0.35) or 0.35) + 0.08,
+            3,
+        )
+        for role in ("detail", "body"):
+            role_policy = dict(section_policy.get(role) or {})
+            role_policy["trim_intensity"] = "preserve"
+            role_policy["overlay_weight"] = round(float(role_policy.get("overlay_weight", 0.8) or 0.8) + 0.15, 3)
+            role_policy["insert_priority"] = round(float(role_policy.get("insert_priority", 0.75) or 0.75) + 0.15, 3)
+            section_policy[role] = role_policy
+
+    if "detail_focus" in tags or "closeup_focus" in tags:
+        detail_policy = dict(section_policy.get("detail") or {})
+        detail_policy["overlay_weight"] = round(float(detail_policy.get("overlay_weight", 1.0) or 1.0) + 0.2, 3)
+        detail_policy["transition_boost"] = round(float(detail_policy.get("transition_boost", 1.2) or 1.2) + 0.12, 3)
+        detail_policy["insert_priority"] = round(float(detail_policy.get("insert_priority", 1.0) or 1.0) + 0.18, 3)
+        detail_policy["trim_intensity"] = "preserve" if "fast_paced" not in tags else "balanced"
+        if "closeup_focus" in tags:
+            detail_policy["broll_anchor_bias"] = min(1.0, round(float(detail_policy.get("broll_anchor_bias", 0.48) or 0.48) - 0.12, 3))
+        section_policy["detail"] = detail_policy
+
+    if "practical_demo" in tags:
+        for role in ("detail", "body"):
+            role_policy = dict(section_policy.get(role) or {})
+            role_policy["insert_allowed"] = True
+            role_policy["broll_allowed"] = True
+            role_policy["insert_priority"] = round(float(role_policy.get("insert_priority", 0.75) or 0.75) + 0.12, 3)
+            role_policy["trim_intensity"] = "preserve"
+            section_policy[role] = role_policy
 
     skill["section_policy"] = section_policy
     return skill

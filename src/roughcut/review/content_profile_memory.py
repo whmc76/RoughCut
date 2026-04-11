@@ -37,6 +37,18 @@ CONTENT_PROFILE_MEMORY_FIELD_LABELS = {
     "video_theme": "视频主题",
 }
 
+CREATIVE_PREFERENCE_FIELD = "creative_preference"
+
+_CREATIVE_PREFERENCE_SPECS = (
+    ("comparison_focus", "突出差异对比", "优先突出版本差异、参数取舍或横向比较", ("对比", "差异", "区别", "版本", "横评", "参数对比", "怎么选", "选哪", "取舍")),
+    ("detail_focus", "突出细节做工", "优先强调细节、结构、做工和质感", ("细节", "做工", "质感", "结构", "工艺", "纹理", "细看", "拆细节")),
+    ("closeup_focus", "突出近景特写", "优先展示近景、特写和关键局部镜头", ("近景", "特写", "微距", "怼细节", "拉近", "局部特写")),
+    ("practical_demo", "突出上手实测", "优先强调上手、实测和真实使用场景", ("上手", "实测", "实战", "场景", "使用场景", "演示", "实际使用")),
+    ("workflow_breakdown", "突出流程拆解", "优先把流程、步骤、节点或工作流逻辑拆清楚", ("流程", "步骤", "节点", "工作流", "搭建", "拆解", "逻辑")),
+    ("fast_paced", "节奏偏快", "尽快给重点或结果，减少铺垫", ("节奏快", "节奏偏快", "短平快", "直接点", "别拖", "快一点", "先上重点")),
+    ("conclusion_first", "先给结论", "先给判断或结论，再展开细节", ("先说结论", "先给结论", "先讲结论", "先下结论", "先给判断", "先说重点", "结论前置")),
+)
+
 
 def _normalize_subject_domain_hint(value: str | None) -> str | None:
     normalized = str(value or "").strip().lower()
@@ -88,18 +100,34 @@ async def load_content_profile_user_memory(
         subject_domain=subject_domain,
         limit=keyword_limit,
     )
+    creative_preferences = _build_creative_preferences(
+        filtered_corrections,
+        subject_domain=subject_domain,
+        limit=6,
+    )
     style_preferences = _build_style_preferences(filtered_corrections, subject_domain=subject_domain, limit=6)
     confirmed_entities = await load_graph_confirmed_entities(session, subject_domains=subject_domains, limit=6)
     if not confirmed_entities:
         confirmed_entities = _build_confirmed_entities(filtered_corrections, subject_domain=subject_domain, limit=6)
 
-    if not any([field_preferences, recent_corrections, keyword_preferences, phrase_preferences, style_preferences, confirmed_entities]):
+    if not any(
+        [
+            field_preferences,
+            recent_corrections,
+            keyword_preferences,
+            phrase_preferences,
+            creative_preferences,
+            style_preferences,
+            confirmed_entities,
+        ]
+    ):
         return {}
     return {
         "field_preferences": field_preferences,
         "recent_corrections": recent_corrections,
         "keyword_preferences": keyword_preferences,
         "phrase_preferences": phrase_preferences,
+        "creative_preferences": creative_preferences,
         "style_preferences": style_preferences,
         "confirmed_entities": confirmed_entities,
     }
@@ -172,6 +200,7 @@ def build_content_profile_memory_cloud(user_memory: dict[str, Any] | None) -> di
         "words": ranked_words[:18],
         "recent_corrections": list(user_memory.get("recent_corrections") or [])[:6],
         "phrases": phrase_preferences[:8],
+        "creative_preferences": list(user_memory.get("creative_preferences") or [])[:6],
         "styles": list(user_memory.get("style_preferences") or [])[:6],
     }
 
@@ -183,6 +212,8 @@ async def record_content_profile_feedback_memory(
     draft_profile: dict[str, Any],
     final_profile: dict[str, Any],
     user_feedback: dict[str, Any],
+    observation_type: str = "manual_confirm",
+    feedback_source: str = "content_profile_feedback",
 ) -> None:
     recorded_pairs: set[tuple[str, str, str]] = set()
     fallback_subject_domain = _normalize_subject_domain_hint(
@@ -224,6 +255,12 @@ async def record_content_profile_feedback_memory(
     for field_name, alias_value, corrected_value in _extract_identity_alias_feedback_rows(final_profile):
         remember_correction(field_name, alias_value, corrected_value)
 
+    for tag, example in _extract_creative_preference_feedback_rows(
+        final_profile=final_profile,
+        user_feedback=user_feedback,
+    ):
+        remember_correction(CREATIVE_PREFERENCE_FIELD, example, tag)
+
     entity = await upsert_content_profile_entity(
         session,
         subject_domain=fallback_subject_domain or "",
@@ -232,8 +269,8 @@ async def record_content_profile_feedback_memory(
         subject_type=_clean_memory_value((final_profile or {}).get("subject_type")),
         job_id=job.id,
         source_name=job.source_name,
-        observation_type="manual_confirm",
-        payload={"source": "content_profile_feedback"},
+        observation_type=observation_type,
+        payload={"source": feedback_source},
     )
     alias_outcomes = _extract_identity_alias_outcomes(final_profile)
     accepted_brand_aliases = [item["alias_value"] for item in alias_outcomes if item["field_name"] == "subject_brand" and item["status"] == "accepted"]
@@ -468,6 +505,8 @@ def _build_recent_corrections(
     for item in corrections:
         if not _subject_domain_visible(subject_domain, item.subject_domain):
             continue
+        if item.field_name == CREATIVE_PREFERENCE_FIELD:
+            continue
         items.append(
             {
                 "field_name": item.field_name,
@@ -565,10 +604,17 @@ def _build_style_preferences(
     counts: Counter[str] = Counter()
     examples: dict[str, str] = {}
     for item in corrections:
-        if item.field_name not in {"video_theme"}:
-            continue
         weight = _subject_domain_weight(subject_domain, item.subject_domain)
         if weight <= 0:
+            continue
+        if item.field_name == CREATIVE_PREFERENCE_FIELD:
+            tag = _clean_memory_value(item.corrected_value)
+            if not tag:
+                continue
+            counts[tag] += weight
+            examples.setdefault(tag, _clean_memory_value(item.original_value))
+            continue
+        if item.field_name != "video_theme":
             continue
         value = _clean_memory_value(item.corrected_value)
         for tag in _infer_style_tags(value):
@@ -576,6 +622,37 @@ def _build_style_preferences(
             examples.setdefault(tag, value)
     return [
         {"tag": tag, "count": count, "example": examples.get(tag, "")}
+        for tag, count in counts.most_common(limit)
+    ]
+
+
+def _build_creative_preferences(
+    corrections: list[ContentProfileCorrection],
+    *,
+    subject_domain: str | None,
+    limit: int,
+) -> list[dict[str, Any]]:
+    counts: Counter[str] = Counter()
+    examples: dict[str, str] = {}
+    for item in corrections:
+        if item.field_name != CREATIVE_PREFERENCE_FIELD:
+            continue
+        tag = _clean_memory_value(item.corrected_value)
+        if not tag:
+            continue
+        weight = _subject_domain_weight(subject_domain, item.subject_domain)
+        if weight <= 0:
+            continue
+        counts[tag] += weight
+        examples.setdefault(tag, _clean_memory_value(item.original_value))
+    return [
+        {
+            "tag": tag,
+            "count": count,
+            "label": _creative_preference_label(tag),
+            "guidance": _creative_preference_guidance(tag),
+            "example": examples.get(tag, ""),
+        }
         for tag, count in counts.most_common(limit)
     ]
 
@@ -759,6 +836,166 @@ def _infer_style_tags(value: Any) -> list[str]:
     if any(token in text for token in ("细节", "质感", "做工", "工艺")):
         tags.append("detail_focused")
     return tags
+
+
+def merge_content_profile_creative_preferences(
+    content_profile: dict[str, Any] | None,
+    *,
+    user_memory: dict[str, Any] | None = None,
+    limit: int = 6,
+) -> list[dict[str, Any]]:
+    merged: dict[str, dict[str, Any]] = {}
+
+    for item in _normalize_creative_preference_items((user_memory or {}).get("creative_preferences")):
+        tag = str(item.get("tag") or "").strip()
+        if not tag:
+            continue
+        merged[tag] = dict(item)
+
+    for item in _normalize_creative_preference_items((content_profile or {}).get("creative_preferences")):
+        tag = str(item.get("tag") or "").strip()
+        if not tag:
+            continue
+        current = merged.get(tag)
+        if current is None or int(item.get("count") or 0) >= int(current.get("count") or 0):
+            merged[tag] = dict(item)
+
+    for item in _extract_creative_preference_items_from_profile(content_profile):
+        tag = str(item.get("tag") or "").strip()
+        if not tag:
+            continue
+        current = merged.get(tag) or {
+            "tag": tag,
+            "count": 0,
+            "label": _creative_preference_label(tag),
+            "guidance": _creative_preference_guidance(tag),
+            "example": "",
+        }
+        current["count"] = max(1, int(current.get("count") or 0) + 1)
+        if item.get("example"):
+            current["example"] = item["example"]
+        current["label"] = _creative_preference_label(tag)
+        current["guidance"] = _creative_preference_guidance(tag)
+        merged[tag] = current
+
+    ranked = sorted(
+        merged.values(),
+        key=lambda item: (-int(item.get("count") or 0), str(item.get("tag") or "")),
+    )
+    return ranked[:limit]
+
+
+def _extract_creative_preference_feedback_rows(
+    *,
+    final_profile: dict[str, Any],
+    user_feedback: dict[str, Any],
+) -> list[tuple[str, str]]:
+    values: list[Any] = []
+    values.extend(
+        user_feedback.get(key)
+        for key in ("video_theme", "summary", "hook_line", "correction_notes", "supplemental_context")
+    )
+    values.extend(
+        final_profile.get(key)
+        for key in ("video_theme", "summary", "hook_line", "correction_notes", "supplemental_context")
+    )
+    return [
+        (str(item.get("tag") or "").strip(), str(item.get("example") or "").strip())
+        for item in _extract_creative_preference_items_from_texts(values)
+        if str(item.get("tag") or "").strip()
+    ]
+
+
+def _extract_creative_preference_items_from_profile(
+    content_profile: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    profile = content_profile or {}
+    values: list[Any] = []
+    values.extend(
+        profile.get(key)
+        for key in ("video_theme", "summary", "hook_line", "correction_notes", "supplemental_context")
+    )
+    source_context = profile.get("source_context")
+    if isinstance(source_context, dict):
+        values.append(source_context.get("video_description"))
+        resolved_feedback = source_context.get("resolved_feedback")
+        if isinstance(resolved_feedback, dict):
+            values.extend(
+                resolved_feedback.get(key)
+                for key in ("video_theme", "summary", "hook_line", "correction_notes", "supplemental_context")
+            )
+    resolved_review_feedback = profile.get("resolved_review_user_feedback")
+    if isinstance(resolved_review_feedback, dict):
+        values.extend(
+            resolved_review_feedback.get(key)
+            for key in ("video_theme", "summary", "hook_line", "correction_notes", "supplemental_context")
+        )
+    return _extract_creative_preference_items_from_texts(values)
+
+
+def _extract_creative_preference_items_from_texts(values: list[Any]) -> list[dict[str, Any]]:
+    texts = [_clean_memory_value(value) for value in values if _clean_memory_value(value)]
+    items: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for tag, label, guidance, patterns in _CREATIVE_PREFERENCE_SPECS:
+        example = ""
+        for text in texts:
+            if any(token in text for token in patterns):
+                example = text[:120]
+                break
+        if not example or tag in seen:
+            continue
+        seen.add(tag)
+        items.append(
+            {
+                "tag": tag,
+                "count": 1,
+                "label": label,
+                "guidance": guidance,
+                "example": example,
+            }
+        )
+    return items
+
+
+def _normalize_creative_preference_items(value: Any) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    for raw in value or []:
+        if not isinstance(raw, dict):
+            continue
+        tag = _clean_memory_value(raw.get("tag"))
+        if not tag:
+            continue
+        try:
+            count = int(raw.get("count") or 0)
+        except (TypeError, ValueError):
+            count = 0
+        items.append(
+            {
+                "tag": tag,
+                "count": max(1, count),
+                "label": _creative_preference_label(tag),
+                "guidance": _creative_preference_guidance(tag),
+                "example": _clean_memory_value(raw.get("example")),
+            }
+        )
+    return items
+
+
+def _creative_preference_label(tag: str) -> str:
+    normalized = _clean_memory_value(tag)
+    for spec_tag, label, _, _ in _CREATIVE_PREFERENCE_SPECS:
+        if spec_tag == normalized:
+            return label
+    return normalized
+
+
+def _creative_preference_guidance(tag: str) -> str:
+    normalized = _clean_memory_value(tag)
+    for spec_tag, _, guidance, _ in _CREATIVE_PREFERENCE_SPECS:
+        if spec_tag == normalized:
+            return guidance
+    return ""
 
 
 def _remember_cloud_word(

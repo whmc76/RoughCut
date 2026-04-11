@@ -17,6 +17,7 @@ class ReasoningResponse:
     content: str
     usage: dict[str, int]
     model: str
+    raw_content: str | None = None
 
     def as_json(self) -> Any:
         import json

@@ -70,4 +70,5 @@ class AnthropicReasoningProvider(ReasoningProvider):
             content=text,
             usage=usage,
             model=data.get("model", self._model),
+            raw_content=text,
         )

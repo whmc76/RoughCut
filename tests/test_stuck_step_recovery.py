@@ -49,6 +49,41 @@ def test_diagnose_stuck_step_falls_back_to_local_reason_when_acp_bridge_is_unava
     assert "heartbeat" in diagnosis["root_cause"].lower()
 
 
+def test_record_diagnostic_can_disable_acp_bridge(monkeypatch):
+    import roughcut.recovery.stuck_step_recovery as recovery_mod
+
+    monkeypatch.setattr(
+        recovery_mod,
+        "run_bridge",
+        lambda payload: (_ for _ in ()).throw(AssertionError("ACP bridge should not be called")),
+    )
+
+    now = datetime(2026, 4, 2, 12, 0, tzinfo=timezone.utc)
+    job = SimpleNamespace(id=uuid.UUID("7a4156d8-19a8-46ae-8c86-b4bc8909258d"))
+    step = SimpleNamespace(
+        id=uuid.UUID("aa4fd6e8-c6c2-461c-9b5a-0e21656786fa"),
+        step_name="transcribe",
+        status="running",
+        attempt=1,
+        started_at=now - timedelta(minutes=20),
+        finished_at=None,
+        error_message=None,
+        metadata_={"updated_at": (now - timedelta(minutes=20)).isoformat()},
+    )
+
+    diagnosis = recovery_mod.build_stuck_step_diagnostic(
+        job=job,
+        step=step,
+        stale_after_sec=900,
+        applied_action="reset_to_pending",
+        now=now,
+        allow_acp=False,
+    )
+
+    assert diagnosis["source"] == "local"
+    assert diagnosis["recommended_action"]["kind"] == "reset_to_pending"
+
+
 @pytest.mark.asyncio
 async def test_record_stuck_step_diagnostic_persists_artifact_and_step_metadata(db_engine, monkeypatch):
     import roughcut.recovery.stuck_step_recovery as recovery_mod

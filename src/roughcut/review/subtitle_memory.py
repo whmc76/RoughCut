@@ -17,6 +17,7 @@ from roughcut.review.domain_glossaries import (
     resolve_builtin_glossary_terms,
     select_primary_subject_domain,
 )
+from roughcut.review.content_profile_memory import merge_content_profile_creative_preferences
 from roughcut.speech.dialects import resolve_transcription_dialect
 from roughcut.edit.presets import normalize_workflow_template_name
 
@@ -333,10 +334,12 @@ def build_subtitle_review_memory(
         effective_glossary_terms,
         confirmed_entities=confirmed_entities,
     )
+    manual_guidance_texts = _collect_manual_guidance_texts(content_profile)
     context_text = " ".join(
         str(item or "")
         for item in [
             *((content_profile or {}).get(key) or "" for key in ("subject_brand", "subject_model", "subject_type", "video_theme", "summary", "hook_line")),
+            *manual_guidance_texts,
             *(row.get("text_final") or row.get("text_norm") or row.get("text_raw") or "" for row in (recent_subtitles or [])),
         ]
     )
@@ -351,6 +354,15 @@ def build_subtitle_review_memory(
 
     for key in ("subject_brand", "subject_model", "subject_type", "video_theme"):
         remember_term((content_profile or {}).get(key), 5)
+
+    for text in manual_guidance_texts:
+        remember_term(text, 4)
+        for token in _extract_domain_terms(text):
+            remember_term(token, 4)
+        for token in _extract_hotword_candidates(text):
+            remember_term(token, 3)
+        for token in _extract_compound_domain_terms(text):
+            remember_term(token, 10)
 
     for entity in confirmed_entities:
         remember_term(entity.get("brand"), 8)
@@ -574,8 +586,69 @@ def build_subtitle_review_memory(
         "negative_alias_pairs": list((user_memory or {}).get("negative_alias_pairs") or [])[:40],
         "style_examples": examples[:example_limit],
         "phrase_preferences": list((user_memory or {}).get("phrase_preferences") or [])[:12],
+        "creative_preferences": merge_content_profile_creative_preferences(
+            content_profile,
+            user_memory=user_memory,
+        ),
         "style_preferences": list((user_memory or {}).get("style_preferences") or [])[:8],
     }
+
+
+def _collect_manual_guidance_texts(content_profile: dict[str, Any] | None) -> list[str]:
+    profile = content_profile or {}
+    values: list[str] = []
+    seen: set[str] = set()
+
+    def append(value: Any) -> None:
+        text = " ".join(str(value or "").strip().split())
+        if not text or text in seen:
+            return
+        seen.add(text)
+        values.append(text)
+
+    for key in ("correction_notes", "supplemental_context"):
+        append(profile.get(key))
+
+    source_context = profile.get("source_context")
+    if isinstance(source_context, dict):
+        append(source_context.get("video_description"))
+        resolved_feedback = source_context.get("resolved_feedback")
+        if isinstance(resolved_feedback, dict):
+            for key in (
+                "subject_brand",
+                "subject_model",
+                "subject_type",
+                "video_theme",
+                "summary",
+                "hook_line",
+                "engagement_question",
+                "correction_notes",
+                "supplemental_context",
+            ):
+                append(resolved_feedback.get(key))
+            for field_name in ("keywords", "search_queries"):
+                for item in resolved_feedback.get(field_name) or []:
+                    append(item)
+
+    resolved_review_user_feedback = profile.get("resolved_review_user_feedback")
+    if isinstance(resolved_review_user_feedback, dict):
+        for key in (
+            "subject_brand",
+            "subject_model",
+            "subject_type",
+            "video_theme",
+            "summary",
+            "hook_line",
+            "engagement_question",
+            "correction_notes",
+            "supplemental_context",
+        ):
+            append(resolved_review_user_feedback.get(key))
+        for field_name in ("keywords", "search_queries"):
+            for item in resolved_review_user_feedback.get(field_name) or []:
+                append(item)
+
+    return values
 
 
 def _merge_confirmed_entities(*entity_groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -712,6 +785,16 @@ def _summarize_subtitle_review_memory(
         )
         if values:
             lines.append(f"- 表达风格偏好: {values}")
+
+    creative_preferences = review_memory.get("creative_preferences") or []
+    if creative_preferences:
+        values = " / ".join(
+            str(item.get("label") or item.get("tag") or "")
+            for item in creative_preferences[:6]
+            if str(item.get("label") or item.get("tag") or "").strip()
+        )
+        if values:
+            lines.append(f"- 创作偏好: {values}")
 
     examples = review_memory.get("style_examples") or []
     if include_examples and examples:

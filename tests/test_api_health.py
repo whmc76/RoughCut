@@ -1673,6 +1673,7 @@ async def test_job_list_includes_content_preview(client: AsyncClient):
     assert item["quality_grade"] == "B"
     assert item["quality_summary"] == "B 82.5 · 2 个扣分项"
     assert item["quality_issue_codes"] == ["detail_blind", "generic_video_theme"]
+    assert item["timeline_diagnostics"] is None
     assert item["avatar_delivery_status"] == "done"
     assert item["avatar_delivery_summary"] == "数字人口播已作为画中画写入成片。"
 
@@ -2920,6 +2921,69 @@ async def test_content_profile_endpoint_normalizes_content_understanding_block_f
 
 
 @pytest.mark.asyncio
+async def test_content_profile_endpoint_keeps_review_draft_when_legacy_profile_is_stale(client: AsyncClient):
+    from roughcut.db.models import Artifact, Job, JobStep
+    from roughcut.db.session import get_session_factory
+
+    job_id = uuid.uuid4()
+    now = datetime.now(timezone.utc)
+
+    async with get_session_factory()() as session:
+        session.add(
+            Job(
+                id=job_id,
+                source_path="jobs/demo/stale-legacy.mp4",
+                source_name="stale-legacy.mp4",
+                status="needs_review",
+                language="zh-CN",
+                workflow_template="edc_tactical",
+                workflow_mode="standard_edit",
+            )
+        )
+        session.add(
+            JobStep(
+                job_id=job_id,
+                step_name="summary_review",
+                status="pending",
+                started_at=now,
+                metadata_={"detail": "等待人工确认。"},
+            )
+        )
+        session.add(
+            Artifact(
+                job_id=job_id,
+                artifact_type="content_profile",
+                data_json={
+                    "summary": "旧摘要里混进了脏数据",
+                    "keywords": ["LOGOLOGO", "2.5]好开始吧[3.7, 6.3]今天今天是一个。"],
+                },
+            )
+        )
+        session.add(
+            Artifact(
+                job_id=job_id,
+                artifact_type="content_profile_draft",
+                data_json={
+                    "summary": "新 draft 摘要",
+                    "keywords": ["DCF", "PF"],
+                    "content_understanding": {
+                        "summary": "新 draft 摘要",
+                        "search_queries": ["DCF 开箱", "PF 开箱"],
+                    },
+                },
+            )
+        )
+        await session.commit()
+
+    response = await client.get(f"/api/v1/jobs/{job_id}/content-profile")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["draft"]["summary"] == "新 draft 摘要"
+    assert data["draft"]["keywords"] == ["DCF", "PF"]
+    assert data["final"] is None
+
+
+@pytest.mark.asyncio
 async def test_content_profile_endpoint_exposes_evidence_artifacts(client: AsyncClient):
     from roughcut.db.models import Artifact, Job, JobStep
     from roughcut.db.session import get_session_factory
@@ -3101,6 +3165,171 @@ async def test_confirm_content_profile_persists_identity_alias_memory_on_simple_
         and item["corrected_value"] == "FXX1小副包"
         for item in data["memory"]["recent_corrections"]
     )
+
+
+@pytest.mark.asyncio
+async def test_confirm_content_profile_persists_identity_alias_terms_to_domain_glossary(client: AsyncClient):
+    from sqlalchemy import select
+
+    from roughcut.db.models import Artifact, GlossaryTerm, Job, JobStep
+    from roughcut.db.session import get_session_factory
+
+    job_id = uuid.uuid4()
+    now = datetime.now(timezone.utc)
+
+    async with get_session_factory()() as session:
+        session.add(
+            Job(
+                id=job_id,
+                source_path="jobs/demo/fxx1-glossary.mp4",
+                source_name="20260316_鸿福_F叉二一小副包_开箱测评.mp4",
+                status="needs_review",
+                language="zh-CN",
+                workflow_template="edc_tactical",
+                workflow_mode="standard_edit",
+            )
+        )
+        session.add(
+            JobStep(
+                job_id=job_id,
+                step_name="summary_review",
+                status="pending",
+                started_at=now,
+                metadata_={"detail": "首次品牌/型号证据不足，需人工确认后再继续。"},
+            )
+        )
+        session.add(
+            Artifact(
+                job_id=job_id,
+                artifact_type="content_profile_draft",
+                data_json={
+                    "subject_brand": "狐蝠工业",
+                    "subject_model": "FXX1小副包",
+                    "subject_type": "EDC机能包",
+                    "subject_domain": "edc",
+                    "video_theme": "狐蝠工业FXX1小副包开箱与上手评测",
+                    "summary": "这条视频主要围绕一款EDC机能包展开，具体品牌型号待人工确认。",
+                    "search_queries": ["狐蝠工业 FXX1小副包"],
+                    "identity_review": {
+                        "required": True,
+                        "first_seen_brand": True,
+                        "first_seen_model": True,
+                        "conservative_summary": True,
+                        "support_sources": ["transcript", "source_name"],
+                        "evidence_strength": "weak",
+                        "reason": "开箱类视频命中首次品牌/型号且缺少交叉印证，需人工确认",
+                        "evidence_bundle": {
+                            "candidate_brand": "狐蝠工业",
+                            "candidate_model": "FXX1小副包",
+                            "matched_subtitle_snippets": ["[0.0-1.8] 这期鸿福 F叉二一小副包做个开箱测评。"],
+                            "matched_glossary_aliases": {
+                                "brand": ["鸿福"],
+                                "model": ["F叉二一小副包"],
+                            },
+                            "matched_source_name_terms": ["鸿福", "F叉二一小副包"],
+                            "matched_visible_text_terms": [],
+                            "matched_evidence_terms": [],
+                        },
+                    },
+                },
+            )
+        )
+        await session.commit()
+
+    response = await client.post(f"/api/v1/jobs/{job_id}/content-profile/confirm", json={})
+    assert response.status_code == 200
+
+    async with get_session_factory()() as session:
+        result = await session.execute(
+            select(GlossaryTerm).where(
+                GlossaryTerm.correct_form.in_(["狐蝠工业", "FXX1小副包"]),
+            )
+        )
+        terms = result.scalars().all()
+
+    brand_term = next(item for item in terms if item.correct_form == "狐蝠工业" and item.scope_type == "domain")
+    model_term = next(item for item in terms if item.correct_form == "FXX1小副包" and item.scope_type == "domain")
+    assert "鸿福" in brand_term.wrong_forms
+    assert "F叉二一小副包" in model_term.wrong_forms
+    assert all(item.scope_type != "workflow_template" for item in terms)
+
+
+@pytest.mark.asyncio
+async def test_confirm_content_profile_persists_reviewed_terms_and_keywords_to_domain_glossary(client: AsyncClient):
+    from sqlalchemy import select
+
+    from roughcut.db.models import Artifact, GlossaryTerm, Job, JobStep
+    from roughcut.db.session import get_session_factory
+
+    job_id = uuid.uuid4()
+    now = datetime.now(timezone.utc)
+
+    async with get_session_factory()() as session:
+        session.add(
+            Job(
+                id=job_id,
+                source_path="jobs/demo/comfyui-review.mp4",
+                source_name="comfyui-review.mp4",
+                status="needs_review",
+                language="zh-CN",
+                workflow_template="tutorial_standard",
+                workflow_mode="standard_edit",
+            )
+        )
+        session.add(
+            JobStep(
+                job_id=job_id,
+                step_name="summary_review",
+                status="pending",
+                started_at=now,
+                metadata_={"detail": "等待人工确认。"},
+            )
+        )
+        session.add(
+            Artifact(
+                job_id=job_id,
+                artifact_type="content_profile_draft",
+                data_json={
+                    "subject_brand": "康飞UI",
+                    "subject_model": "节点流",
+                    "subject_type": "AI工作流",
+                    "subject_domain": "ai",
+                    "video_theme": "AI 工作流演示",
+                    "summary": "主要介绍康飞UI的节点流和工作流搭建。",
+                    "search_queries": ["康飞UI 工作流"],
+                },
+            )
+        )
+        await session.commit()
+
+    response = await client.post(
+        f"/api/v1/jobs/{job_id}/content-profile/confirm",
+        json={
+            "subject_brand": "ComfyUI",
+            "subject_model": "节点编排",
+            "subject_type": "AI工作流",
+            "keywords": ["ComfyUI 工作流", "节点编排"],
+        },
+    )
+    assert response.status_code == 200
+
+    async with get_session_factory()() as session:
+        result = await session.execute(
+            select(GlossaryTerm).where(
+                GlossaryTerm.scope_type == "domain",
+                GlossaryTerm.scope_value == "ai",
+            )
+        )
+        terms = result.scalars().all()
+
+    brand_term = next(item for item in terms if item.correct_form == "ComfyUI")
+    model_term = next(item for item in terms if item.correct_form == "节点编排")
+    subject_term = next(item for item in terms if item.correct_form == "AI工作流")
+    keyword_term = next(item for item in terms if item.correct_form == "ComfyUI 工作流")
+    assert "康飞UI" in brand_term.wrong_forms
+    assert "节点流" in model_term.wrong_forms
+    assert subject_term.wrong_forms == []
+    assert keyword_term.wrong_forms == []
 
 
 @pytest.mark.asyncio

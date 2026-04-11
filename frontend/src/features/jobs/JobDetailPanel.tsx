@@ -6,7 +6,15 @@ import { classNames, formatDate, statusLabel } from "../../utils";
 import { JobContentProfileSection } from "./JobContentProfileSection";
 import { JobSubtitleReportSection } from "./JobSubtitleReportSection";
 import { JobReviewConfigSection } from "./JobReviewConfigSection";
-import { getRestartUnavailableReason, isRestartableJobStatus, stepLabel, workflowModeLabel, enhancementModeLabel } from "./constants";
+import {
+  autoReviewBadgeLabel,
+  autoReviewTone,
+  enhancementModeLabel,
+  getRestartUnavailableReason,
+  isRestartableJobStatus,
+  stepLabel,
+  workflowModeLabel,
+} from "./constants";
 
 type ActivityEvent = NonNullable<JobActivity["events"]>[number];
 
@@ -148,6 +156,8 @@ export function JobDetailPanel({
   const mergedSourceNames = selectedJob?.merged_source_names ?? [];
   const isMergedTask = mergedSourceNames.length > 1;
   const avatarEnabled = Boolean(selectedJob?.enhancement_modes.includes("avatar_commentary"));
+  const autoReviewVisible = Boolean(selectedJob?.auto_review_mode_enabled);
+  const autoReviewReasons = selectedJob?.auto_review_reasons ?? [];
   const downloadLabel = avatarEnabled
     ? avatarHeadlineStatus === "done"
       ? t("jobs.actions.downloadVideo.avatarIncluded")
@@ -300,23 +310,40 @@ export function JobDetailPanel({
             </section>
           ) : null}
 
-          {showFlowSections && (
-            <section className="detail-block">
-              <div className="detail-key">{t("jobs.detail.creativeMode")}</div>
-              <div className="mode-chip-list">
-                <span className="mode-chip">{workflowModeLabel(selectedJob.workflow_mode)}</span>
-                {selectedJob.enhancement_modes.length ? (
-                  selectedJob.enhancement_modes.map((mode) => (
-                    <span key={mode} className="mode-chip subtle">
-                      {enhancementModeLabel(mode)}
-                    </span>
-                  ))
-                ) : (
-                  <span className="muted">{t("jobs.detail.noEnhancements")}</span>
-                )}
+          <section className="detail-block">
+            <div className="detail-key">{t("jobs.detail.creativeMode")}</div>
+            <div className="mode-chip-list">
+              <span className="mode-chip">{workflowModeLabel(selectedJob.workflow_mode)}</span>
+              {selectedJob.enhancement_modes.length ? (
+                selectedJob.enhancement_modes.map((mode) => (
+                  <span key={mode} className="mode-chip subtle">
+                    {mode === "auto_review" ? autoReviewBadgeLabel(selectedJob) : enhancementModeLabel(mode)}
+                  </span>
+                ))
+              ) : (
+                <span className="muted">{t("jobs.detail.noEnhancements")}</span>
+              )}
+            </div>
+            {autoReviewVisible ? (
+              <div className="compact-top">
+                <span className={`status-pill ${autoReviewTone(selectedJob.auto_review_status)}`}>
+                  {autoReviewBadgeLabel(selectedJob)}
+                </span>
+                {selectedJob.auto_review_summary ? (
+                  <div className="muted compact-top">{selectedJob.auto_review_summary}</div>
+                ) : null}
+                {autoReviewReasons.length ? (
+                  <div className="timeline-list top-gap">
+                    {autoReviewReasons.slice(0, 4).map((reason) => (
+                      <div key={reason} className="timeline-item">
+                        {reason}
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
               </div>
-            </section>
-          )}
+            ) : null}
+          </section>
 
           {showReviewConfig ? (
             <JobReviewConfigSection
