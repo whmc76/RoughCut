@@ -23,13 +23,13 @@ const QUEUE_FILTER_META: Record<JobQueueFilter, { label: string; description: st
 
 export function JobsPage() {
   const { t } = useI18n();
-  const workspace = useJobWorkspace();
   const [createOpen, setCreateOpen] = useState(false);
   const [reviewNotice, setReviewNotice] = useState<string | null>(null);
   const [reviewNoticeTone, setReviewNoticeTone] = useState<"success" | "error">("success");
   const [detailModalOpen, setDetailModalOpen] = useState(false);
   const [reviewOverlayOpen, setReviewOverlayOpen] = useState(false);
   const queueStageRef = useRef<HTMLElement | null>(null);
+  const workspace = useJobWorkspace({ isCreateOpen: createOpen });
 
   const languageOptions = workspace.options.data?.job_languages ?? [{ value: "zh-CN", label: "简体中文" }];
   const workflowTemplateOptions = workspace.options.data?.workflow_templates ?? [{ value: "", label: t("watch.page.autoMatch") }];

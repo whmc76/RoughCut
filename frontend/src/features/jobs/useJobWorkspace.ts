@@ -26,6 +26,10 @@ const JOB_STATUS_GROUP_PRIORITY: Record<string, number> = {
 
 export type JobQueueFilter = "all" | "pending" | "running" | "done" | "attention";
 
+type UseJobWorkspaceOptions = {
+  isCreateOpen?: boolean;
+};
+
 function isRunningJob(status: string) {
   return status === "running" || status === "processing";
 }
@@ -54,7 +58,7 @@ function compareJobs(a: { status: string; updated_at: string }, b: { status: str
   return new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime();
 }
 
-export function useJobWorkspace() {
+export function useJobWorkspace({ isCreateOpen = false }: UseJobWorkspaceOptions = {}) {
   const queryClient = useQueryClient();
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
   const [keyword, setKeyword] = useState("");
@@ -76,14 +80,31 @@ export function useJobWorkspace() {
     queryFn: () => api.listJobs(JOBS_PAGE_SIZE, jobsPage * JOBS_PAGE_SIZE),
     refetchInterval: 8_000,
   });
-  const options = useQuery({ queryKey: ["config-options"], queryFn: api.getConfigOptions });
-  const config = useQuery({ queryKey: ["config"], queryFn: api.getConfig });
-  const packaging = useQuery({ queryKey: ["packaging"], queryFn: api.getPackaging });
-  const avatarMaterials = useQuery({ queryKey: ["avatar-materials"], queryFn: api.getAvatarMaterials });
   const detail = useQuery({
     queryKey: ["job", selectedJobId],
     queryFn: () => api.getJob(selectedJobId!),
     enabled: Boolean(selectedJobId),
+  });
+  const isReviewJob = detail.data?.status === "needs_review";
+  const options = useQuery({
+    queryKey: ["config-options"],
+    queryFn: api.getConfigOptions,
+    enabled: isCreateOpen,
+  });
+  const config = useQuery({
+    queryKey: ["config"],
+    queryFn: api.getConfig,
+    enabled: isCreateOpen || isReviewJob,
+  });
+  const packaging = useQuery({
+    queryKey: ["packaging"],
+    queryFn: api.getPackaging,
+    enabled: isReviewJob,
+  });
+  const avatarMaterials = useQuery({
+    queryKey: ["avatar-materials"],
+    queryFn: api.getAvatarMaterials,
+    enabled: isReviewJob,
   });
   const activity = useQuery({
     queryKey: ["job-activity", selectedJobId],
@@ -120,12 +141,17 @@ export function useJobWorkspace() {
     enabled: Boolean(selectedJobId),
   });
   const selectedJob = detail.data;
+  const contentFallbackSource = (contentProfile.data?.final ?? contentProfile.data?.draft ?? null) as Record<string, unknown> | null;
   const contentSource = isReviewMode
     ? (contentProfile.data?.draft ?? contentProfile.data?.final ?? null)
     : (contentProfile.data?.final ?? contentProfile.data?.draft ?? null);
   const contentDraftKeywords = normalizeKeywordList(contentDraft.keywords);
-  const contentSourceKeywords = normalizeKeywordList(contentSource?.keywords);
-  const contentSourceSearchQueries = normalizeKeywordList((contentSource as Record<string, unknown> | null)?.search_queries);
+  const contentSourceKeywords = normalizeKeywordList(
+    contentSource?.keywords ?? contentFallbackSource?.keywords,
+  );
+  const contentSourceSearchQueries = normalizeKeywordList(
+    (contentSource as Record<string, unknown> | null)?.search_queries ?? contentFallbackSource?.search_queries,
+  );
   const inheritedUploadDefaults: UploadForm = useMemo(
     () => ({
       ...EMPTY_UPLOAD,

@@ -19,6 +19,7 @@ from fastapi.responses import FileResponse
 from sqlalchemy import delete, distinct, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
+from sqlalchemy.orm.attributes import set_committed_value
 from pydantic import BaseModel
 
 from roughcut.api.options import normalize_job_language, normalize_workflow_template
@@ -111,6 +112,15 @@ STEP_LABELS = {
 }
 
 STEP_ORDER = {step_name: index for index, step_name in enumerate(PIPELINE_STEPS)}
+_LIST_PREVIEW_ARTIFACT_TYPES = (
+    "content_profile_final",
+    "content_profile",
+    "content_profile_draft",
+    QUALITY_ARTIFACT_TYPE,
+    "variant_timeline_bundle",
+    "render_outputs",
+    "avatar_commentary_plan",
+)
 
 PROFILE_ARTIFACT_PRIORITY = {
     "content_profile_final": 3,
@@ -314,13 +324,28 @@ async def list_jobs(
 ):
     result = await session.execute(
         select(Job)
-        .options(selectinload(Job.steps), selectinload(Job.artifacts))
+        .options(selectinload(Job.steps))
         .order_by(Job.updated_at.desc(), Job.created_at.desc())
         .limit(limit)
         .offset(offset)
     )
     jobs = result.scalars().all()
-    _attach_job_previews(jobs)
+    if jobs:
+        job_ids = [job.id for job in jobs]
+        artifact_result = await session.execute(
+            select(Artifact)
+            .where(
+                Artifact.job_id.in_(job_ids),
+                Artifact.artifact_type.in_(_LIST_PREVIEW_ARTIFACT_TYPES),
+            )
+            .order_by(Artifact.job_id.asc(), Artifact.created_at.desc(), Artifact.id.desc())
+        )
+        artifacts_by_job: dict[uuid.UUID, list[Artifact]] = {}
+        for artifact in artifact_result.scalars().all():
+            artifacts_by_job.setdefault(artifact.job_id, []).append(artifact)
+        for job in jobs:
+            set_committed_value(job, "artifacts", artifacts_by_job.get(job.id, []))
+    _attach_job_previews(jobs, lightweight=True)
     return jobs
 
 
@@ -2573,16 +2598,16 @@ def _coerce_utc(value: datetime) -> datetime:
     return value.astimezone(timezone.utc)
 
 
-def _attach_job_previews(jobs: list[Job]) -> None:
+def _attach_job_previews(jobs: list[Job], *, lightweight: bool = False) -> None:
     for job in jobs:
-        _attach_job_preview(job)
+        _attach_job_preview(job, lightweight=lightweight)
 
 
-def _attach_job_preview(job: Job) -> None:
+def _attach_job_preview(job: Job, *, lightweight: bool = False) -> None:
     if job.steps:
         job.steps.sort(key=_step_sort_key)
     job.merged_source_names = _resolve_job_merged_source_names(job)
-    preview = _resolve_job_content_preview(job.artifacts or [])
+    preview = _resolve_job_content_preview(job.artifacts or [], apply_review_memory=not lightweight)
     job.content_subject = preview["subject"]
     job.content_summary = preview["summary"]
     quality_preview = _resolve_job_quality_preview(job.artifacts or [])
@@ -2677,7 +2702,11 @@ def _has_reached_step(job: Job, step_name: str) -> bool:
     )
 
 
-def _resolve_job_content_preview(artifacts: list[Artifact]) -> dict[str, str | None]:
+def _resolve_job_content_preview(
+    artifacts: list[Artifact],
+    *,
+    apply_review_memory: bool = True,
+) -> dict[str, str | None]:
     profile = _select_preview_artifact(artifacts)
     if not profile or not profile.data_json:
         return {"subject": None, "summary": None}
@@ -2706,8 +2735,9 @@ def _resolve_job_content_preview(artifacts: list[Artifact]) -> dict[str, str | N
     ]
     subject = " · ".join(part for part in subject_parts if part).strip() or None
     summary = str(data.get("summary") or data.get("hook_line") or "").strip() or None
-    subject = _normalize_preview_text_with_review_memory(subject, data)
-    summary = _normalize_preview_text_with_review_memory(summary, data)
+    if apply_review_memory:
+        subject = _normalize_preview_text_with_review_memory(subject, data)
+        summary = _normalize_preview_text_with_review_memory(summary, data)
     return {"subject": subject, "summary": summary}
 
 
@@ -2783,6 +2813,13 @@ def _apply_preview_alias_corrections(text: str, review_memory: dict[str, Any] | 
             continue
         result = re.sub(re.escape(wrong), correct, result, flags=re.IGNORECASE)
     return result
+
+
+def _coerce_float(value: Any) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _resolve_job_avatar_preview(job: Job) -> dict[str, str | None]:

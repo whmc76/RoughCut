@@ -466,8 +466,11 @@ describe("useJobWorkspace", () => {
     await waitFor(() => expect(result.current.contentProfile.data).toEqual(SAMPLE_PROFILE));
     expect(result.current.tokenUsage.data).toBeUndefined();
     expect(mockApi.getJobTokenUsage).not.toHaveBeenCalled();
-    await waitFor(() => expect(result.current.contentDraft).toEqual(SAMPLE_PROFILE.final));
-    expect(result.current.contentKeywords).toBe("开箱, 升级, 限定");
+    await waitFor(() => expect(mockApi.getConfig).toHaveBeenCalled());
+    await waitFor(() => expect(mockApi.getPackaging).toHaveBeenCalled());
+    await waitFor(() => expect(mockApi.getAvatarMaterials).toHaveBeenCalled());
+    await waitFor(() => expect(result.current.contentDraft).toEqual(SAMPLE_PROFILE.draft));
+    expect(result.current.contentKeywords).toBe("开箱, 升级");
 
     act(() => {
       result.current.setContentDraft({
@@ -533,8 +536,10 @@ describe("useJobWorkspace", () => {
   });
 
   it("updates upload defaults when inherited config defaults change", async () => {
-    const { result } = renderHookWithQueryClient(() => useJobWorkspace());
+    let isCreateOpen = true;
+    const { result, rerender } = renderHookWithQueryClient(() => useJobWorkspace({ isCreateOpen }));
 
+    rerender();
     await waitFor(() => expect(result.current.upload.enhancementModes).toEqual(["avatar_commentary"]));
 
     mockApi.getConfig.mockResolvedValue({
@@ -555,8 +560,10 @@ describe("useJobWorkspace", () => {
 
   it("passes video description when creating a job", async () => {
     const file = new File(["video"], "demo.mp4", { type: "video/mp4" });
-    const { result } = renderHookWithQueryClient(() => useJobWorkspace());
+    let isCreateOpen = true;
+    const { result, rerender } = renderHookWithQueryClient(() => useJobWorkspace({ isCreateOpen }));
 
+    rerender();
     await waitFor(() => expect(result.current.upload.enhancementModes).toEqual(["avatar_commentary"]));
 
     act(() => {
@@ -582,14 +589,38 @@ describe("useJobWorkspace", () => {
     );
   });
 
-  it("does not fetch usage analysis in the jobs workspace", async () => {
-    renderHookWithQueryClient(() => useJobWorkspace());
+  it("keeps the heavy jobs workspace queries idle until a real need appears", async () => {
+    let isCreateOpen = false;
+    const { rerender } = renderHookWithQueryClient(() => useJobWorkspace({ isCreateOpen }));
 
     await waitFor(() => expect(mockApi.listJobs).toHaveBeenCalled());
-    await waitFor(() => expect(mockApi.getConfigOptions).toHaveBeenCalled());
 
+    expect(mockApi.getConfigOptions).not.toHaveBeenCalled();
+    expect(mockApi.getConfig).not.toHaveBeenCalled();
+    expect(mockApi.getPackaging).not.toHaveBeenCalled();
+    expect(mockApi.getAvatarMaterials).not.toHaveBeenCalled();
     expect(mockApi.getJobsUsageSummary).not.toHaveBeenCalled();
     expect(mockApi.getJobsUsageTrend).not.toHaveBeenCalled();
+
+    isCreateOpen = true;
+    rerender();
+
+    await waitFor(() => expect(mockApi.getConfigOptions).toHaveBeenCalled());
+    await waitFor(() => expect(mockApi.getConfig).toHaveBeenCalled());
+  });
+
+  it("loads review-time config data after selecting a review job", async () => {
+    mockApi.getJob.mockResolvedValue(SAMPLE_REVIEW_JOB);
+    const { result } = renderHookWithQueryClient(() => useJobWorkspace());
+
+    act(() => {
+      result.current.setSelectedJobId("job_1");
+    });
+
+    await waitFor(() => expect(result.current.detail.data).toEqual(SAMPLE_REVIEW_JOB));
+    await waitFor(() => expect(mockApi.getConfig).toHaveBeenCalled());
+    await waitFor(() => expect(mockApi.getPackaging).toHaveBeenCalled());
+    await waitFor(() => expect(mockApi.getAvatarMaterials).toHaveBeenCalled());
   });
 });
 
