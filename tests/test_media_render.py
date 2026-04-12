@@ -767,13 +767,20 @@ def test_sound_effect_filters_do_not_normalize_down_main_audio():
     assert sum("normalize=0" in part for part in filters) == 2
 
 
-def test_video_encode_args_prefers_nvenc_when_available(monkeypatch: pytest.MonkeyPatch):
+def test_video_encode_args_falls_back_to_nvenc_when_integrated_encoders_are_unavailable(monkeypatch: pytest.MonkeyPatch):
     import roughcut.media.render as render_mod
 
     render_mod._nvenc_available.cache_clear()
+    render_mod._qsv_available.cache_clear()
+    render_mod._amf_available.cache_clear()
     render_mod._nvidia_device_available.cache_clear()
+    render_mod._intel_device_available.cache_clear()
+    render_mod._amd_device_available.cache_clear()
+    render_mod._host_graphics_adapter_text.cache_clear()
     render_mod._ffmpeg_encoder_available.cache_clear()
+    monkeypatch.setattr(render_mod, "_qsv_available", lambda: False)
     monkeypatch.setattr(render_mod, "_nvenc_available", lambda: True)
+    monkeypatch.setattr(render_mod, "_amf_available", lambda: False)
     monkeypatch.setattr(render_mod.get_settings(), "render_video_encoder", "auto")
 
     assert _resolve_video_encoder(prefer_hardware=True) == "h264_nvenc"
@@ -786,15 +793,105 @@ def test_video_encode_args_falls_back_to_cpu_when_nvenc_unavailable(monkeypatch:
     import roughcut.media.render as render_mod
 
     render_mod._nvenc_available.cache_clear()
+    render_mod._qsv_available.cache_clear()
+    render_mod._amf_available.cache_clear()
     render_mod._nvidia_device_available.cache_clear()
+    render_mod._intel_device_available.cache_clear()
+    render_mod._amd_device_available.cache_clear()
+    render_mod._host_graphics_adapter_text.cache_clear()
     render_mod._ffmpeg_encoder_available.cache_clear()
+    monkeypatch.setattr(render_mod, "_qsv_available", lambda: False)
     monkeypatch.setattr(render_mod, "_nvenc_available", lambda: False)
+    monkeypatch.setattr(render_mod, "_amf_available", lambda: False)
     monkeypatch.setattr(render_mod.get_settings(), "render_video_encoder", "auto")
 
     assert _resolve_video_encoder(prefer_hardware=True) == "libx264"
     args = _video_encode_args()
     assert args[:2] == ["-c:v", "libx264"]
     assert "-crf" in args
+
+
+def test_video_encode_args_supports_explicit_qsv(monkeypatch: pytest.MonkeyPatch):
+    import roughcut.media.render as render_mod
+
+    render_mod._nvenc_available.cache_clear()
+    render_mod._qsv_available.cache_clear()
+    render_mod._amf_available.cache_clear()
+    render_mod._nvidia_device_available.cache_clear()
+    render_mod._intel_device_available.cache_clear()
+    render_mod._amd_device_available.cache_clear()
+    render_mod._host_graphics_adapter_text.cache_clear()
+    render_mod._ffmpeg_encoder_available.cache_clear()
+    monkeypatch.setattr(render_mod, "_qsv_available", lambda: True)
+    monkeypatch.setattr(render_mod.get_settings(), "render_video_encoder", "h264_qsv")
+    monkeypatch.setattr(render_mod.get_settings(), "render_crf", 19)
+
+    assert _resolve_video_encoder(prefer_hardware=True) == "h264_qsv"
+    args = _video_encode_args()
+    assert args[:2] == ["-c:v", "h264_qsv"]
+    assert "-global_quality" in args
+    assert "nv12" in args
+
+
+def test_video_encode_args_supports_explicit_amf(monkeypatch: pytest.MonkeyPatch):
+    import roughcut.media.render as render_mod
+
+    render_mod._nvenc_available.cache_clear()
+    render_mod._qsv_available.cache_clear()
+    render_mod._amf_available.cache_clear()
+    render_mod._nvidia_device_available.cache_clear()
+    render_mod._intel_device_available.cache_clear()
+    render_mod._amd_device_available.cache_clear()
+    render_mod._host_graphics_adapter_text.cache_clear()
+    render_mod._ffmpeg_encoder_available.cache_clear()
+    monkeypatch.setattr(render_mod, "_amf_available", lambda: True)
+    monkeypatch.setattr(render_mod.get_settings(), "render_video_encoder", "h264_amf")
+    monkeypatch.setattr(render_mod.get_settings(), "render_crf", 19)
+
+    assert _resolve_video_encoder(prefer_hardware=True) == "h264_amf"
+    args = _video_encode_args()
+    assert args[:2] == ["-c:v", "h264_amf"]
+    assert "-rc" in args
+    assert "cqp" in args
+    assert "-qp_i" in args
+
+
+def test_video_encode_args_auto_prefers_qsv_over_other_hardware(monkeypatch: pytest.MonkeyPatch):
+    import roughcut.media.render as render_mod
+
+    render_mod._nvenc_available.cache_clear()
+    render_mod._qsv_available.cache_clear()
+    render_mod._amf_available.cache_clear()
+    render_mod._nvidia_device_available.cache_clear()
+    render_mod._intel_device_available.cache_clear()
+    render_mod._amd_device_available.cache_clear()
+    render_mod._host_graphics_adapter_text.cache_clear()
+    render_mod._ffmpeg_encoder_available.cache_clear()
+    monkeypatch.setattr(render_mod, "_qsv_available", lambda: True)
+    monkeypatch.setattr(render_mod, "_nvenc_available", lambda: True)
+    monkeypatch.setattr(render_mod, "_amf_available", lambda: True)
+    monkeypatch.setattr(render_mod.get_settings(), "render_video_encoder", "auto")
+
+    assert _resolve_video_encoder(prefer_hardware=True) == "h264_qsv"
+
+
+def test_video_encode_args_auto_prefers_amf_before_nvenc(monkeypatch: pytest.MonkeyPatch):
+    import roughcut.media.render as render_mod
+
+    render_mod._nvenc_available.cache_clear()
+    render_mod._qsv_available.cache_clear()
+    render_mod._amf_available.cache_clear()
+    render_mod._nvidia_device_available.cache_clear()
+    render_mod._intel_device_available.cache_clear()
+    render_mod._amd_device_available.cache_clear()
+    render_mod._host_graphics_adapter_text.cache_clear()
+    render_mod._ffmpeg_encoder_available.cache_clear()
+    monkeypatch.setattr(render_mod, "_qsv_available", lambda: False)
+    monkeypatch.setattr(render_mod, "_nvenc_available", lambda: False)
+    monkeypatch.setattr(render_mod, "_amf_available", lambda: True)
+    monkeypatch.setattr(render_mod.get_settings(), "render_video_encoder", "auto")
+
+    assert _resolve_video_encoder(prefer_hardware=True) == "h264_amf"
 
 
 def test_resolve_delivery_resolution_supports_source_and_specified_modes():

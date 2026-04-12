@@ -70,7 +70,7 @@ probe → extract_audio → transcribe → subtitle_postprocess
 - Python 3.11+
 - `pnpm`
 - `uv`（项目内部 Python 依赖与 CLI 仍使用它）
-- FFmpeg（需在 PATH 中，支持 libx264 / libass）
+- FFmpeg（需在 PATH 中，支持 libx264 / libass；如需硬编码，可额外启用 h264_qsv / h264_amf / h264_nvenc）
 - Docker / Docker Compose（推荐用于基础服务或完整部署）
 - LLM 后端之一：MiniMax API Key、Ollama（本地）或 OpenAI API Key
 
@@ -187,6 +187,7 @@ ROUGHCUT_OUTPUT_ROOT=F:/roughcut_outputs
 JOB_STORAGE_DIR=F:/roughcut_outputs/jobs
 OUTPUT_DIR=F:/roughcut_outputs/output
 RENDER_DEBUG_DIR=F:/roughcut_outputs/render-debug
+RENDER_VIDEO_ENCODER=auto
 AUTO_CONFIRM_CONTENT_PROFILE=true
 CONTENT_PROFILE_REVIEW_THRESHOLD=0.72
 AUTO_ACCEPT_GLOSSARY_CORRECTIONS=true
@@ -204,6 +205,8 @@ QWEN_ASR_API_BASE_URL=http://127.0.0.1:18096
 VOICE_PROVIDER=indextts2
 VOICE_CLONE_API_BASE_URL=http://127.0.0.1:49204
 ```
+
+`RENDER_VIDEO_ENCODER` 当前支持 `auto`、`libx264`、`h264_qsv`、`h264_amf`、`h264_nvenc`。`auto` 会优先选择 Intel `QSV` 或 AMD `AMF` 这类集显编码方案，只有集显不可用时才回退到 `NVENC`，最后才是 `libx264`。
 
 其中 `49204` 当前约定为独立 `IndexTTS2 accel` 正式入口。不要再并行常驻 `baseline / sage / accel` 多个实例去争抢同一块 GPU。
 

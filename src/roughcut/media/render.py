@@ -75,6 +75,20 @@ def _audio_encode_args(*, sample_rate: int | None = None, channels: int | None =
 def _video_encode_args(*, prefer_hardware: bool = True) -> list[str]:
     settings = get_settings()
     encoder = _resolve_video_encoder(prefer_hardware=prefer_hardware)
+    if encoder == "h264_qsv":
+        quality = max(1, min(51, int(settings.render_crf or 19)))
+        return [
+            "-c:v",
+            "h264_qsv",
+            "-preset",
+            "medium",
+            "-global_quality",
+            str(quality),
+            "-look_ahead",
+            "0",
+            "-pix_fmt",
+            "nv12",
+        ]
     if encoder == "h264_nvenc":
         return [
             "-c:v",
@@ -85,6 +99,26 @@ def _video_encode_args(*, prefer_hardware: bool = True) -> list[str]:
             str(int(settings.render_nvenc_cq or 21)),
             "-b:v",
             "0",
+            "-pix_fmt",
+            "yuv420p",
+        ]
+    if encoder == "h264_amf":
+        qp = max(0, min(51, int(settings.render_crf or 19)))
+        return [
+            "-c:v",
+            "h264_amf",
+            "-usage",
+            "transcoding",
+            "-quality",
+            "balanced",
+            "-rc",
+            "cqp",
+            "-qp_i",
+            str(qp),
+            "-qp_p",
+            str(min(51, qp + 2)),
+            "-qp_b",
+            str(min(51, qp + 4)),
             "-pix_fmt",
             "yuv420p",
         ]
@@ -102,16 +136,30 @@ def _video_encode_args(*, prefer_hardware: bool = True) -> list[str]:
 
 def _resolve_video_encoder(*, prefer_hardware: bool) -> str:
     requested = str(get_settings().render_video_encoder or "auto").strip().lower()
-    if requested not in {"auto", "libx264", "h264_nvenc"}:
+    if requested not in {"auto", "libx264", "h264_qsv", "h264_nvenc", "h264_amf"}:
         logger.warning("Unknown render_video_encoder=%s; falling back to auto", requested)
         requested = "auto"
     if requested == "libx264":
+        return "libx264"
+    if requested == "h264_qsv":
+        if _qsv_available():
+            return "h264_qsv"
+        logger.warning("render_video_encoder=h264_qsv requested but QSV is unavailable; falling back to libx264")
         return "libx264"
     if requested == "h264_nvenc":
         if _nvenc_available():
             return "h264_nvenc"
         logger.warning("render_video_encoder=h264_nvenc requested but NVENC is unavailable; falling back to libx264")
         return "libx264"
+    if requested == "h264_amf":
+        if _amf_available():
+            return "h264_amf"
+        logger.warning("render_video_encoder=h264_amf requested but AMF is unavailable; falling back to libx264")
+        return "libx264"
+    if prefer_hardware and _qsv_available():
+        return "h264_qsv"
+    if prefer_hardware and _amf_available():
+        return "h264_amf"
     if prefer_hardware and _nvenc_available():
         return "h264_nvenc"
     return "libx264"
@@ -120,6 +168,16 @@ def _resolve_video_encoder(*, prefer_hardware: bool) -> str:
 @functools.lru_cache(maxsize=1)
 def _nvenc_available() -> bool:
     return _nvidia_device_available() and _ffmpeg_encoder_available("h264_nvenc")
+
+
+@functools.lru_cache(maxsize=1)
+def _qsv_available() -> bool:
+    return _intel_device_available() and _ffmpeg_encoder_available("h264_qsv")
+
+
+@functools.lru_cache(maxsize=1)
+def _amf_available() -> bool:
+    return _amd_device_available() and _ffmpeg_encoder_available("h264_amf")
 
 
 @functools.lru_cache(maxsize=1)
@@ -139,6 +197,56 @@ def _nvidia_device_available() -> bool:
     except (OSError, subprocess.SubprocessError):
         return False
     return result.returncode == 0 and bool(str(result.stdout or "").strip())
+
+
+@functools.lru_cache(maxsize=1)
+def _host_graphics_adapter_text() -> str:
+    probe_commands: list[list[str]] = []
+    if os.name == "nt":
+        powershell = shutil.which("powershell") or shutil.which("pwsh")
+        if powershell:
+            probe_commands.append(
+                [
+                    powershell,
+                    "-NoProfile",
+                    "-Command",
+                    "Get-CimInstance Win32_VideoController | Select-Object Name,AdapterCompatibility,VideoProcessor | Format-List",
+                ]
+            )
+    else:
+        lspci = shutil.which("lspci")
+        if lspci is not None:
+            probe_commands.append([lspci])
+
+    for cmd in probe_commands:
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=10,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            continue
+        haystack = f"{result.stdout}\n{result.stderr}".strip().lower()
+        if haystack:
+            return haystack
+    return ""
+
+
+@functools.lru_cache(maxsize=1)
+def _intel_device_available() -> bool:
+    haystack = _host_graphics_adapter_text()
+    return "intel" in haystack or "uhd graphics" in haystack or "iris" in haystack
+
+
+@functools.lru_cache(maxsize=1)
+def _amd_device_available() -> bool:
+    haystack = _host_graphics_adapter_text()
+    return "advanced micro devices" in haystack or "amd" in haystack or "radeon" in haystack
 
 
 @functools.lru_cache(maxsize=8)

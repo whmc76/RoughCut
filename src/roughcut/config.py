@@ -335,7 +335,7 @@ class Settings(BaseSettings):
     max_upload_size_mb: int = 2048
     max_video_duration_sec: int = 7200
     ffmpeg_timeout_sec: int = 600
-    render_video_encoder: str = "auto"          # auto | libx264 | h264_nvenc
+    render_video_encoder: str = "auto"          # auto | libx264 | h264_qsv | h264_amf | h264_nvenc
     render_cpu_preset: str = "veryfast"         # x264 preset for CPU fallback
     render_crf: int = 19                        # x264 constant quality target
     render_nvenc_preset: str = "p5"             # NVENC preset balancing speed/quality
