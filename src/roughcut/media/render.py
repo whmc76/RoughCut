@@ -375,6 +375,8 @@ async def render_video(
     )
     filter_parts.append(audio_filter)
     video_map = f"[{video_label}]"
+    audio_label = "afinal"
+    audio_map = f"[{audio_label}]"
 
     if video_transform_accents.get("emphasis_overlays") and _should_apply_smart_effect_video_transforms(render_plan.get("avatar_commentary") or {}):
         smart_effect_filters, video_label = _build_smart_effect_video_filters(
@@ -394,6 +396,34 @@ async def render_video(
         video_label = "vscaled"
         video_map = f"[{video_label}]"
 
+    overlay_plan = _build_overlay_only_editing_accents(
+        overlay_editing_accents if isinstance(overlay_editing_accents, dict) else editing_accents,
+        section_choreography=section_choreography,
+    )
+    needs_timed_overlays = bool(
+        subtitle_items
+        or overlay_plan.get("emphasis_overlays")
+        or overlay_plan.get("sound_effects")
+    )
+    if needs_timed_overlays and not packaging_enabled:
+        overlay_filter_parts, overlay_video_label, overlay_audio_label = await _build_timed_overlay_filter_chain(
+            render_plan=render_plan,
+            subtitle_items=subtitle_items,
+            overlay_plan=overlay_plan,
+            output_path=output_path,
+            render_w=render_w,
+            render_h=render_h,
+            video_label=video_label,
+            audio_label=audio_label,
+            debug_dir=debug_dir,
+        )
+        if overlay_filter_parts:
+            filter_parts.extend(overlay_filter_parts)
+            video_label = overlay_video_label
+            audio_label = overlay_audio_label
+            video_map = f"[{video_label}]"
+            audio_map = f"[{audio_label}]"
+
     filter_complex = ";".join(filter_parts)
 
     cmd = [
@@ -407,7 +437,7 @@ async def render_video(
         "-map",
         video_map,
         "-map",
-        "[afinal]",
+        audio_map,
         *_video_encode_args(),
         *_audio_encode_args(),
         str(base_output_path),
@@ -453,11 +483,7 @@ async def render_video(
         _finalize_output_file(base_output_path, output_path)
         current_output = output_path
 
-    overlay_plan = _build_overlay_only_editing_accents(
-        overlay_editing_accents if isinstance(overlay_editing_accents, dict) else editing_accents,
-        section_choreography=section_choreography,
-    )
-    if subtitle_items or overlay_plan.get("emphasis_overlays") or overlay_plan.get("sound_effects"):
+    if needs_timed_overlays and packaging_enabled:
         overlay_output_path = output_path
         if current_output == output_path:
             overlay_output_path = output_path.with_name(f"{output_path.stem}.overlay{output_path.suffix}")
@@ -806,9 +832,14 @@ def _resolve_subtitle_unit_choreography(item: dict[str, Any]) -> dict[str, Any]:
         return {}
     if section_role == "hook":
         if unit_role == "lead":
+            current_style_name = str(item.get("style_name") or "").strip()
             return {
                 "motion_style": "motion_strobe",
-                "style_name": "cobalt_pop" if str(item.get("style_name") or "") == "teaser_glow" else item.get("style_name"),
+                "style_name": (
+                    "sale_banner"
+                    if current_style_name in {"teaser_glow", "cobalt_pop", "sale_banner"}
+                    else item.get("style_name")
+                ),
                 "margin_v_delta": int(item.get("margin_v_delta", 0) or 0) - 2,
                 "linger_delta_sec": 0.04,
                 "guard_delta_sec": -0.01,
@@ -816,7 +847,7 @@ def _resolve_subtitle_unit_choreography(item: dict[str, Any]) -> dict[str, Any]:
         if unit_role == "support":
             return {
                 "motion_style": "motion_slide",
-                "style_name": "clean_box",
+                "style_name": "coupon_green",
                 "margin_v_delta": int(item.get("margin_v_delta", 0) or 0) + 6,
                 "linger_delta_sec": -0.02,
                 "guard_delta_sec": 0.02,
@@ -832,7 +863,7 @@ def _resolve_subtitle_unit_choreography(item: dict[str, Any]) -> dict[str, Any]:
         if unit_role == "focus":
             return {
                 "motion_style": "motion_pop",
-                "style_name": "keyword_highlight",
+                "style_name": "cyber_orange",
                 "margin_v_delta": int(item.get("margin_v_delta", 0) or 0) + 8,
                 "linger_delta_sec": 0.05,
                 "guard_delta_sec": -0.01,
@@ -1275,29 +1306,91 @@ async def _apply_timed_overlays_to_video(
     overlay_editing_accents: dict[str, Any] | None,
     debug_dir: Path | None,
 ) -> Path:
-    from roughcut.media.subtitles import escape_path_for_ffmpeg_filter, write_ass_file
-
-    settings = get_settings()
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     source_info = _probe_video_stream(source_path)
     render_w = int(source_info.get("display_width") or source_info.get("width") or 0)
     render_h = int(source_info.get("display_height") or source_info.get("height") or 0)
+    overlay_plan = _build_overlay_only_editing_accents(
+        overlay_editing_accents,
+        section_choreography=render_plan.get("section_choreography") or {},
+    )
+    filter_parts, video_label, audio_label = await _build_timed_overlay_filter_chain(
+        render_plan=render_plan,
+        subtitle_items=subtitle_items,
+        overlay_plan=overlay_plan,
+        output_path=output_path,
+        render_w=render_w,
+        render_h=render_h,
+        video_label="0:v",
+        audio_label="0:a",
+        debug_dir=debug_dir,
+    )
+
+    if not filter_parts:
+        if source_path != output_path:
+            _finalize_output_file(source_path, output_path)
+        return output_path
+
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        str(source_path),
+        "-filter_complex",
+        ";".join(filter_parts),
+        "-map",
+        f"[{video_label}]",
+        "-map",
+        f"[{audio_label}]",
+        str(output_path),
+    ]
+    if video_label == "0:v":
+        cmd[-1:-1] = ["-c:v", "copy"]
+    else:
+        cmd[-1:-1] = _video_encode_args()
+    if audio_label == "0:a":
+        cmd[-1:-1] = ["-c:a", "copy"]
+    else:
+        cmd[-1:-1] = _audio_encode_args()
+    _write_debug_text(debug_dir, "render.overlays.ffmpeg.txt", _format_command(cmd))
+    result = await _run_process(
+        cmd,
+        timeout=_resolve_ffmpeg_timeout(
+            source_duration_sec=_probe_duration(source_path),
+            multiplier=1.2,
+            buffer_sec=180,
+            minimum_timeout=300,
+        ),
+    )
+    _write_process_debug(debug_dir, "render_overlays", result)
+    if result.returncode != 0:
+        raise RuntimeError(f"ffmpeg timed overlay render failed: {result.stderr[-2000:]}")
+    return output_path
+
+
+async def _build_timed_overlay_filter_chain(
+    *,
+    render_plan: dict[str, Any],
+    subtitle_items: list[dict] | None,
+    overlay_plan: dict[str, Any] | None,
+    output_path: Path,
+    render_w: int,
+    render_h: int,
+    video_label: str,
+    audio_label: str,
+    debug_dir: Path | None,
+) -> tuple[list[str], str, str]:
+    from roughcut.media.subtitles import escape_path_for_ffmpeg_filter, write_ass_file
+
+    settings = get_settings()
+    overlay_plan = overlay_plan or {}
     choreographed_subtitles = _build_choreographed_subtitle_items(
         subtitle_items,
         subtitles_plan=render_plan.get("subtitles") or {},
     ) if subtitle_items and render_plan.get("subtitles") else []
-    overlay_plan = _build_overlay_only_editing_accents(
-        overlay_editing_accents,
-        subtitle_items=choreographed_subtitles,
-        section_choreography=render_plan.get("section_choreography") or {},
-    )
 
     filter_parts: list[str] = []
-    video_label = "0:v"
-    audio_label = "0:a"
-    video_map = "0:v"
-    audio_map = "0:a"
 
     if subtitle_items and render_plan.get("subtitles"):
         subtitle_margin_override = await _resolve_subtitle_margin_with_avatar(
@@ -1323,58 +1416,16 @@ async def _apply_timed_overlays_to_video(
         escaped = escape_path_for_ffmpeg_filter(ass_path)
         filter_parts.append(f"[{video_label}]subtitles='{escaped}'[vsub]")
         video_label = "vsub"
-        video_map = f"[{video_label}]"
 
     if overlay_plan.get("emphasis_overlays"):
         overlay_filters, video_label = _build_emphasis_overlay_filters(video_label, overlay_plan)
         filter_parts.extend(overlay_filters)
-        video_map = f"[{video_label}]"
 
     if overlay_plan.get("sound_effects"):
         sfx_filters, audio_label = _build_sound_effect_filters(audio_label, overlay_plan)
         filter_parts.extend(sfx_filters)
-        audio_map = f"[{audio_label}]"
 
-    if not filter_parts:
-        if source_path != output_path:
-            _finalize_output_file(source_path, output_path)
-        return output_path
-
-    cmd = [
-        "ffmpeg",
-        "-y",
-        "-i",
-        str(source_path),
-        "-filter_complex",
-        ";".join(filter_parts),
-        "-map",
-        video_map,
-        "-map",
-        audio_map,
-        str(output_path),
-    ]
-    if video_map == "0:v":
-        cmd[-1:-1] = ["-c:v", "copy"]
-    else:
-        cmd[-1:-1] = _video_encode_args()
-    if audio_map == "0:a":
-        cmd[-1:-1] = ["-c:a", "copy"]
-    else:
-        cmd[-1:-1] = _audio_encode_args()
-    _write_debug_text(debug_dir, "render.overlays.ffmpeg.txt", _format_command(cmd))
-    result = await _run_process(
-        cmd,
-        timeout=_resolve_ffmpeg_timeout(
-            source_duration_sec=_probe_duration(source_path),
-            multiplier=1.2,
-            buffer_sec=180,
-            minimum_timeout=300,
-        ),
-    )
-    _write_process_debug(debug_dir, "render_overlays", result)
-    if result.returncode != 0:
-        raise RuntimeError(f"ffmpeg timed overlay render failed: {result.stderr[-2000:]}")
-    return output_path
+    return filter_parts, video_label, audio_label
 
 
 def _resolve_effect_overlay_tokens(style: str) -> dict[str, Any]:

@@ -22,6 +22,65 @@ _WRAP_NO_SPLIT_PREFIXES = (
 _WRAP_GOOD_BREAK_PREFIXES = (
     "但是", "不过", "所以", "然后", "而且", "并且", "如果", "因为", "另外", "同时",
 )
+_KEYWORD_HIGHLIGHT_QUIET_STYLES = {
+    "white_minimal",
+    "soft_shadow",
+    "slate_caption",
+    "doc_gray",
+    "film_subtle",
+    "archive_type",
+}
+_KEYWORD_HIGHLIGHT_PRIORITY_TERMS = (
+    "黑白双色",
+    "点赞",
+    "收藏",
+    "关注",
+    "注意",
+    "重点",
+    "关键",
+    "参数",
+    "细节",
+    "结论",
+    "接口",
+    "尺寸",
+    "续航",
+    "流明",
+    "旗舰",
+    "升级",
+    "亮点",
+    "对比",
+    "实测",
+    "新款",
+    "版本",
+    "开箱",
+)
+_KEYWORD_HIGHLIGHT_ACTION_TERMS = ("点赞", "收藏", "关注")
+_KEYWORD_HIGHLIGHT_PALETTES: dict[str, dict[str, str]] = {
+    "default": {
+        "primary_text": "FFF3A6",
+        "primary_outline": "FF5A36",
+        "secondary_text": "FFFCEE",
+        "secondary_outline": "FFB347",
+    },
+    "hook": {
+        "primary_text": "FFF0B0",
+        "primary_outline": "FF4B2B",
+        "secondary_text": "FFF6DA",
+        "secondary_outline": "FF9B3D",
+    },
+    "detail": {
+        "primary_text": "C8F6FF",
+        "primary_outline": "2E8CFF",
+        "secondary_text": "FFF1D8",
+        "secondary_outline": "FF9C38",
+    },
+    "cta": {
+        "primary_text": "D9FFD2",
+        "primary_outline": "38FF66",
+        "secondary_text": "F2FFE8",
+        "secondary_outline": "8DFF4A",
+    },
+}
 
 SUBTITLE_STYLE_PRESETS: dict[str, dict[str, object]] = {
     "bold_yellow_outline": {
@@ -92,14 +151,14 @@ SUBTITLE_STYLE_PRESETS: dict[str, dict[str, object]] = {
     "keyword_highlight": {
         "font_name": "Microsoft YaHei",
         "font_size": 76,
-        "text_color_rgb": "FFFFFF",
-        "outline_color_rgb": "FF9A3D",
-        "outline_width": 4,
+        "text_color_rgb": "FFF9EF",
+        "outline_color_rgb": "FF7A2F",
+        "outline_width": 5,
         "margin_v": 30,
         "bold": True,
-        "shadow": 0,
-        "back_color_rgb": "000000",
-        "back_alpha": 0,
+        "shadow": 2,
+        "back_color_rgb": "311109",
+        "back_alpha": 52,
         "border_style": 1,
     },
     "amber_news": {
@@ -198,12 +257,12 @@ SUBTITLE_STYLE_PRESETS: dict[str, dict[str, object]] = {
         "font_size": 78,
         "text_color_rgb": "F8FBFF",
         "outline_color_rgb": "3B6BFF",
-        "outline_width": 4,
+        "outline_width": 5,
         "margin_v": 30,
         "bold": True,
-        "shadow": 1,
+        "shadow": 2,
         "back_color_rgb": "0A1230",
-        "back_alpha": 45,
+        "back_alpha": 58,
         "border_style": 1,
     },
     "rose_gold": {
@@ -250,12 +309,12 @@ SUBTITLE_STYLE_PRESETS: dict[str, dict[str, object]] = {
         "font_size": 78,
         "text_color_rgb": "FFF9F1",
         "outline_color_rgb": "FF8A1F",
-        "outline_width": 4,
+        "outline_width": 5,
         "margin_v": 30,
         "bold": True,
-        "shadow": 1,
+        "shadow": 2,
         "back_color_rgb": "1A0F08",
-        "back_alpha": 40,
+        "back_alpha": 56,
         "border_style": 1,
     },
     "streamer_duo": {
@@ -289,12 +348,12 @@ SUBTITLE_STYLE_PRESETS: dict[str, dict[str, object]] = {
         "font_size": 80,
         "text_color_rgb": "FFFBEF",
         "outline_color_rgb": "FF6238",
-        "outline_width": 5,
+        "outline_width": 6,
         "margin_v": 28,
         "bold": True,
-        "shadow": 1,
+        "shadow": 2,
         "back_color_rgb": "5A140A",
-        "back_alpha": 55,
+        "back_alpha": 72,
         "border_style": 1,
     },
     "coupon_green": {
@@ -302,12 +361,12 @@ SUBTITLE_STYLE_PRESETS: dict[str, dict[str, object]] = {
         "font_size": 76,
         "text_color_rgb": "11210F",
         "outline_color_rgb": "7DFF7A",
-        "outline_width": 4,
+        "outline_width": 5,
         "margin_v": 30,
         "bold": True,
-        "shadow": 0,
+        "shadow": 1,
         "back_color_rgb": "D6FFD1",
-        "back_alpha": 36,
+        "back_alpha": 48,
         "border_style": 3,
     },
     "luxury_caps": {
@@ -537,8 +596,19 @@ def write_ass_file(
                 font_size=int(style_definition["font_size"]),
             ),
             max_lines=2,
+            preserve_terms=_collect_highlight_preserve_terms(
+                str(text),
+                item=item,
+                style_name=str(item.get("style_name") or style_id or "Default").strip() or "Default",
+            ),
         )
-        text = text.replace("{", r"\{").replace("\n", r"\N")
+        text = _apply_keyword_highlight_markup(
+            text,
+            item=item,
+            style_id=style_id,
+            style_definition=style_definition,
+            rgb_to_ass=_rgb_to_ass,
+        )
         resolved_motion_style = _normalize_motion_style(str(item.get("motion_style") or motion_style))
         margin_floor = int(style_definition["margin_v"])
         margin_delta = int(item.get("margin_v_delta", 0) or 0)
@@ -627,45 +697,255 @@ def _build_motion_tag(text: str, motion_style: str) -> str:
         return text
     if motion_style == "motion_typewriter":
         return (
-            "{\\an2\\move(0,22,0,0)\\t(0,220,\\fscx118\\fscy118)\\t(220,420,\\fscx100\\fscy100)}"
+            "{\\an2\\fsp18\\blur2\\alpha&H22&\\fscx92\\fscy92\\t(0,160,\\fsp0\\blur0\\alpha&H00&\\fscx112\\fscy112)\\t(160,280,\\fscx100\\fscy100)}"
             f"{text}"
         )
     if motion_style == "motion_pop":
         return (
-            "{\\an2\\t(0,120,\\fscx122\\fscy122\\bord2)\\t(120,240,\\fscx100\\fscy100\\bord1)\\t(240,420,\\bord1)}"
+            "{\\an2\\fscx84\\fscy84\\blur3\\bord7\\shad2\\t(0,120,\\fscx132\\fscy132\\blur0.6\\bord8)\\t(120,220,\\fscx100\\fscy100\\bord5\\shad1)}"
             f"{text}"
         )
     if motion_style == "motion_wave":
         return (
-            "{\\an2\\t(0,140,\\fscx102\\fscy98)\\t(140,280,\\fscx100\\fscy102)\\t(280,420,\\fscx98\\fscy102)\\t(420,520,\\fscx100\\fscy100)}"
+            "{\\an2\\fscx94\\fscy94\\frz-2\\t(0,120,\\fscx108\\fscy108\\frz1)\\t(120,240,\\fscx102\\fscy102\\frz-1)\\t(240,360,\\fscx100\\fscy100\\frz0)}"
             f"{text}"
         )
     if motion_style == "motion_slide":
         return (
-            "{\\an2\\move(280,120,0,2)\\t(0,360,\\fad(220,0))\\t(360,520,\\move(0,2,0,2))}"
+            "{\\an2\\fsp26\\alpha&H66&\\blur3\\fscx108\\fscy108\\t(0,160,\\fsp0\\alpha&H00&\\blur0\\fscx102\\fscy102)\\t(160,300,\\fscx100\\fscy100)}"
             f"{text}"
         )
     if motion_style == "motion_glitch":
         return (
-            "{\\an2\\t(0,100,\\frz8)\\t(100,220,\\frz-8\\fscx102\\fscy102)\\t(220,340,\\frz0\\fscx100\\fscy100)}"
+            "{\\an2\\frz-3\\blur1.4\\t(0,70,\\frz5\\alpha&H22&\\bord6)\\t(70,150,\\frz-4\\alpha&H00&\\bord5)\\t(150,260,\\frz0\\blur0.4)}"
             f"{text}"
         )
     if motion_style == "motion_ripple":
         return (
-            "{\\an2\\t(0,110,\\fscx105\\fscy105\\frz0)\\t(110,220,\\fscx130\\fscy100\\bord0)\\t(220,340,\\bord2\\frz0)}"
+            "{\\an2\\fscx90\\fscy90\\blur4\\bord8\\shad0\\t(0,110,\\fscx124\\fscy124\\blur1.2\\bord10)\\t(110,210,\\fscx108\\fscy108\\blur0\\bord6\\shad2)\\t(210,320,\\fscx100\\fscy100\\bord4\\shad1)}"
             f"{text}"
         )
     if motion_style == "motion_strobe":
         return (
-            "{\\an2\\t(0,40,\\fscx90\\fscy90\\bord1\\alpha&H88&)\\t(40,100,\\fscx100\\fscy100\\bord2\\alpha&H00&)\\t(100,160,\\fscx108\\fscy108\\alpha&H44&)\\t(160,260,\\fscx100\\fscy100\\alpha&H00&)}"
+            "{\\an2\\fscx88\\fscy88\\alpha&H88&\\blur3\\t(0,45,\\fscx104\\fscy104\\alpha&H10&\\blur0.8)\\t(45,100,\\fscx118\\fscy118\\alpha&H00&\\bord7)\\t(100,180,\\fscx102\\fscy102\\alpha&H22&)\\t(180,260,\\fscx100\\fscy100\\alpha&H00&\\bord5)}"
             f"{text}"
         )
     if motion_style == "motion_echo":
         return (
-            "{\\an2\\t(0,110,\\move(-10,2,-4,0)\\fscx102\\fscy98)\\t(110,220,\\move(-4,0,0,0)\\fscx100\\fscy100)\\t(220,360,\\move(0,0,6,-1)\\fscx99\\fscy99)}"
+            "{\\an2\\fsp10\\blur2\\fscx96\\fscy96\\alpha&H18&\\t(0,140,\\fsp2\\blur0.5\\fscx108\\fscy108\\alpha&H00&)\\t(140,260,\\fsp0\\fscx100\\fscy100)\\t(260,420,\\blur1\\alpha&H10&)}"
             f"{text}"
         )
     return text
+
+
+def _apply_keyword_highlight_markup(
+    text: str,
+    *,
+    item: dict[str, object],
+    style_id: str,
+    style_definition: dict[str, object],
+    rgb_to_ass,
+) -> str:
+    lines = str(text or "").split("\n")
+    rendered_lines: list[str] = []
+    style_name = str(item.get("style_name") or style_id or "Default").strip() or "Default"
+    section_role = str(item.get("subtitle_section_role") or "").strip().lower()
+    unit_role = str(item.get("subtitle_unit_role") or "").strip().lower()
+    explicit_terms = [
+        str(value).strip()
+        for value in (item.get("highlight_terms") or [])
+        if str(value).strip()
+    ]
+    allow_auto_highlight = style_name not in _KEYWORD_HIGHLIGHT_QUIET_STYLES or unit_role in {"lead", "focus", "action"}
+    for line in lines:
+        spans: list[tuple[int, int]] = []
+        if allow_auto_highlight or explicit_terms:
+            spans = _select_keyword_highlight_spans(line, unit_role=unit_role, explicit_terms=explicit_terms)
+        rendered_lines.append(
+            _render_highlighted_subtitle_line(
+                line,
+                highlight_spans=spans,
+                style_definition=style_definition,
+                palette=_resolve_keyword_highlight_palette(section_role=section_role, unit_role=unit_role),
+                rgb_to_ass=rgb_to_ass,
+            )
+        )
+    return r"\N".join(rendered_lines)
+
+
+def _select_keyword_highlight_spans(
+    line: str,
+    *,
+    unit_role: str,
+    explicit_terms: list[str],
+) -> list[tuple[int, int]]:
+    candidates = _build_keyword_highlight_candidates(line, unit_role=unit_role, explicit_terms=explicit_terms)
+    return _pick_non_overlapping_highlight_spans(line, candidates)
+
+
+def _build_keyword_highlight_candidates(
+    line: str,
+    *,
+    unit_role: str,
+    explicit_terms: list[str],
+) -> list[tuple[str, float]]:
+    stripped = str(line or "").strip()
+    if len(stripped) < 2:
+        return []
+    candidates: list[tuple[str, float]] = []
+    for index, term in enumerate(sorted(explicit_terms, key=len, reverse=True)):
+        if term in stripped:
+            candidates.append((term, 120.0 - index))
+    if unit_role == "action":
+        for index, term in enumerate(_KEYWORD_HIGHLIGHT_ACTION_TERMS):
+            if term in stripped:
+                candidates.append((term, 96.0 - index))
+    upper_token = re.search(r"\b[A-Z][A-Z0-9+\-]{1,}\b", stripped)
+    if upper_token:
+        candidates.append((upper_token.group(0), 92.0))
+    mixed_token = re.search(r"\b[A-Za-z]*\d+[A-Za-z0-9+\-]*\b", stripped)
+    if mixed_token:
+        candidates.append((mixed_token.group(0), 88.0))
+    for index, term in enumerate(_KEYWORD_HIGHLIGHT_PRIORITY_TERMS):
+        if term in stripped:
+            candidates.append((term, 80.0 - index * 0.5))
+    compact = "".join(stripped.split())
+    if unit_role in {"lead", "focus"} and 3 <= len(compact) <= 6 and _contains_cjk(compact):
+        candidates.append((compact, 60.0))
+    return candidates
+
+
+def _collect_highlight_preserve_terms(
+    text: str,
+    *,
+    item: dict[str, object],
+    style_name: str,
+) -> list[str]:
+    unit_role = str(item.get("subtitle_unit_role") or "").strip().lower()
+    explicit_terms = [
+        str(value).strip()
+        for value in (item.get("highlight_terms") or [])
+        if str(value).strip()
+    ]
+    allow_auto_highlight = style_name not in _KEYWORD_HIGHLIGHT_QUIET_STYLES or unit_role in {"lead", "focus", "action"}
+    if not (allow_auto_highlight or explicit_terms):
+        return []
+    candidates = _build_keyword_highlight_candidates(text, unit_role=unit_role, explicit_terms=explicit_terms)
+    seen: set[str] = set()
+    terms: list[str] = []
+    for term, _score in sorted(candidates, key=lambda item: (-item[1], -len(item[0]), text.find(item[0]))):
+        normalized = str(term).strip()
+        if not normalized or normalized in seen or normalized not in text:
+            continue
+        seen.add(normalized)
+        terms.append(normalized)
+        if len(terms) >= 4:
+            break
+    return terms
+
+
+def _pick_non_overlapping_highlight_spans(
+    line: str,
+    candidates: list[tuple[str, float]],
+) -> list[tuple[int, int]]:
+    ranked: list[tuple[float, int, int, str]] = []
+    seen_terms: set[str] = set()
+    for term, score in candidates:
+        normalized_term = str(term or "").strip()
+        if not normalized_term or normalized_term in seen_terms:
+            continue
+        start = line.find(normalized_term)
+        if start < 0:
+            continue
+        seen_terms.add(normalized_term)
+        ranked.append((score, start, len(normalized_term), normalized_term))
+    ranked.sort(key=lambda item: (-item[0], -item[2], item[1]))
+    selected: list[tuple[int, int]] = []
+    for _score, start, length, _term in ranked:
+        end = start + length
+        if any(not (end <= existing_start or start >= existing_end) for existing_start, existing_end in selected):
+            continue
+        selected.append((start, end))
+        if len(selected) >= 2:
+            break
+    selected.sort(key=lambda item: item[0])
+    return selected
+
+
+def _render_highlighted_subtitle_line(
+    line: str,
+    *,
+    highlight_spans: list[tuple[int, int]],
+    style_definition: dict[str, object],
+    palette: dict[str, str],
+    rgb_to_ass,
+) -> str:
+    if not highlight_spans:
+        return _escape_ass_text(line)
+    base_primary = rgb_to_ass(str(style_definition["text_color_rgb"]))
+    base_outline = rgb_to_ass(str(style_definition["outline_color_rgb"]))
+    base_outline_width = int(style_definition["outline_width"])
+    base_shadow = int(style_definition["shadow"])
+    parts: list[str] = []
+    cursor = 0
+    for highlight_index, (start, end) in enumerate(highlight_spans):
+        if start < cursor or end <= start:
+            continue
+        parts.append(_escape_ass_text(line[cursor:start]))
+        focus = _escape_ass_text(line[start:end])
+        if highlight_index == 0:
+            highlight_primary = rgb_to_ass(str(palette["primary_text"]))
+            highlight_outline = rgb_to_ass(str(palette["primary_outline"]))
+            border = min(10, base_outline_width + 2)
+            shadow = max(1, base_shadow + 1)
+            scale = 108
+            blur = "0.6"
+            intro = "\\alpha&H55&\\fscx96\\fscy96\\t(60,160,\\alpha&H00&\\fscx114\\fscy114)\\t(160,280,\\fscx108\\fscy108)"
+        else:
+            highlight_primary = rgb_to_ass(str(palette["secondary_text"]))
+            highlight_outline = rgb_to_ass(str(palette["secondary_outline"]))
+            border = min(9, base_outline_width + 1)
+            shadow = max(1, base_shadow)
+            scale = 104
+            blur = "0.4"
+            intro = "\\alpha&H44&\\fscx98\\fscy98\\t(110,210,\\alpha&H00&\\fscx108\\fscy108)\\t(210,320,\\fscx104\\fscy104)"
+        parts.append(
+            "{"
+            + f"\\1c{highlight_primary}\\3c{highlight_outline}"
+            + f"\\bord{border}\\shad{shadow}"
+            + f"\\blur{blur}\\fscx{scale}\\fscy{scale}"
+            + intro
+            + "}"
+            + focus
+            + "{"
+            + f"\\1c{base_primary}\\3c{base_outline}"
+            + f"\\bord{base_outline_width}\\shad{base_shadow}"
+            + "\\blur0\\alpha&H00&\\fscx100\\fscy100"
+            + "}"
+        )
+        cursor = end
+    parts.append(_escape_ass_text(line[cursor:]))
+    return "".join(parts)
+
+
+def _escape_ass_text(text: str) -> str:
+    return str(text or "").replace("{", r"\{").replace("}", r"\}").replace("\n", r"\N")
+
+
+def _resolve_keyword_highlight_palette(*, section_role: str, unit_role: str) -> dict[str, str]:
+    if section_role in _KEYWORD_HIGHLIGHT_PALETTES:
+        return _KEYWORD_HIGHLIGHT_PALETTES[section_role]
+    if unit_role == "action":
+        return _KEYWORD_HIGHLIGHT_PALETTES["cta"]
+    if unit_role in {"lead", "support"}:
+        return _KEYWORD_HIGHLIGHT_PALETTES["hook"]
+    if unit_role in {"focus", "setup"}:
+        return _KEYWORD_HIGHLIGHT_PALETTES["detail"]
+    return _KEYWORD_HIGHLIGHT_PALETTES["default"]
+
+
+def _contains_cjk(text: str) -> bool:
+    return any("\u4e00" <= ch <= "\u9fff" for ch in str(text or ""))
 
 
 def _estimate_subtitle_line_capacity(*, play_res_x: int, font_size: int) -> int:
@@ -692,11 +972,22 @@ def _resolve_subtitle_horizontal_margin(*, play_res_x: int) -> int:
     return max(28, int(play_res_x * 0.06))
 
 
-def _wrap_subtitle_text(text: str, *, max_chars_per_line: int, max_lines: int = 2) -> str:
+def _wrap_subtitle_text(
+    text: str,
+    *,
+    max_chars_per_line: int,
+    max_lines: int = 2,
+    preserve_terms: list[str] | None = None,
+) -> str:
     raw = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
     if "\n" in raw:
         return "\n".join(
-            _wrap_subtitle_text(part, max_chars_per_line=max_chars_per_line, max_lines=max_lines)
+            _wrap_subtitle_text(
+                part,
+                max_chars_per_line=max_chars_per_line,
+                max_lines=max_lines,
+                preserve_terms=preserve_terms,
+            )
             for part in raw.split("\n")
         )
     compact = raw.strip()
@@ -706,7 +997,7 @@ def _wrap_subtitle_text(text: str, *, max_chars_per_line: int, max_lines: int = 
     segments: list[str] = []
     remaining = compact
     while len(remaining) > max_chars_per_line and len(segments) < max_lines - 1:
-        split_at = _find_subtitle_wrap_index(remaining, max_chars_per_line)
+        split_at = _find_subtitle_wrap_index(remaining, max_chars_per_line, preserve_terms=preserve_terms)
         if split_at <= 0 or split_at >= len(remaining):
             break
         segments.append(remaining[:split_at].strip())
@@ -723,12 +1014,13 @@ def _wrap_subtitle_text(text: str, *, max_chars_per_line: int, max_lines: int = 
     return "\n".join(part for part in segments if part)
 
 
-def _find_subtitle_wrap_index(text: str, target: int) -> int:
+def _find_subtitle_wrap_index(text: str, target: int, *, preserve_terms: list[str] | None = None) -> int:
     punctuation = "，。！？；：,.!?、）)]】》> "
     lower = max(2, target - 4)
     upper = min(len(text) - 1, target + 2)
     best_index = min(len(text) - 1, max(1, target))
     best_score = float("-inf")
+    protected_ranges = _term_ranges_in_text(text, preserve_terms or [])
     for index in range(lower, upper + 1):
         left = text[:index].strip()
         right = text[index:].strip()
@@ -751,10 +1043,28 @@ def _find_subtitle_wrap_index(text: str, target: int) -> int:
             score -= 4
         if len(left) <= len(right) + 2:
             score += 1.5
+        if any(start < index < end for start, end in protected_ranges):
+            score -= 30
         if score > best_score:
             best_score = score
             best_index = index
     return best_index
+
+
+def _term_ranges_in_text(text: str, terms: list[str]) -> list[tuple[int, int]]:
+    ranges: list[tuple[int, int]] = []
+    for term in terms:
+        normalized = str(term or "").strip()
+        if len(normalized) < 2:
+            continue
+        search_start = 0
+        while search_start < len(text):
+            index = text.find(normalized, search_start)
+            if index < 0:
+                break
+            ranges.append((index, index + len(normalized)))
+            search_start = index + len(normalized)
+    return ranges
 
 
 def escape_path_for_ffmpeg_filter(path: Path) -> str:

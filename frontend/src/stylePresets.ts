@@ -16,6 +16,25 @@ export type StylePreset = {
   sampleFoot: string;
 };
 
+export type StyleTemplateBundle = {
+  key: string;
+  label: string;
+  badge: string;
+  summary: string;
+  previewPath: string;
+  comparePreviewPath: string;
+  audience: string;
+  outcome: string;
+  configPatch: {
+    subtitle_style: string;
+    subtitle_motion_style: string;
+    smart_effect_style: string;
+    cover_style: string;
+    title_style: string;
+    copy_style: string;
+  };
+};
+
 const legacyStyleAliases: Record<string, string> = {
   smart_effect_rhythm: "smart_effect_commercial",
 };
@@ -26,6 +45,81 @@ export const subtitleStyleGroups: StyleGroup[] = [
   { id: "premium", label: "品牌质感", description: "偏审美和质感表达，适合精品、收藏、生活方式内容。" },
   { id: "documentary", label: "纪实说明", description: "稳定、可信、弱打扰，适合复盘、纪录和说明型视频。" },
   { id: "campaign", label: "促销活动", description: "价格、优惠、活动提醒更强，适合卖货和节点推广。" },
+];
+
+export const subtitleTemplateBundles: StyleTemplateBundle[] = [
+  {
+    key: "impact_commerce",
+    label: "爆点带货",
+    badge: "高转化",
+    summary: "开场就给结论，重点词爆出更狠，适合优惠、卖点、升级型内容。",
+    previewPath: "/style-template-previews/impact-commerce.png",
+    comparePreviewPath: "/style-template-previews/compare-impact-commerce.png",
+    audience: "适合开箱卖点、活动提醒、利益点导向的视频。",
+    outcome: "客户会先看到主词爆点，再看到 CTA 词接力出现。",
+    configPatch: {
+      subtitle_style: "sale_banner",
+      subtitle_motion_style: "motion_strobe",
+      smart_effect_style: "smart_effect_punch",
+      cover_style: "ecommerce_sale",
+      title_style: "double_banner",
+      copy_style: "attention_grabbing",
+    },
+  },
+  {
+    key: "hardcore_specs",
+    label: "硬核参数",
+    badge: "参数党",
+    summary: "型号、参数、接口和结论更清楚，适合测评、教程和硬件拆解。",
+    previewPath: "/style-template-previews/hardcore-specs.png",
+    comparePreviewPath: "/style-template-previews/compare-hardcore-specs.png",
+    audience: "适合数码评测、结构分析、知识流和操作讲解。",
+    outcome: "客户会先看到参数主词，再看到补充词弱一档跟进。",
+    configPatch: {
+      subtitle_style: "keyword_highlight",
+      subtitle_motion_style: "motion_glitch",
+      smart_effect_style: "smart_effect_glitch",
+      cover_style: "clean_lab",
+      title_style: "tutorial_blueprint",
+      copy_style: "trusted_expert",
+    },
+  },
+  {
+    key: "suspense_teaser",
+    label: "悬念预告",
+    badge: "情绪钩子",
+    summary: "先压住信息，再让关键结论补一拍炸出来，适合预告和剧情式展开。",
+    previewPath: "/style-template-previews/suspense-teaser.png",
+    comparePreviewPath: "/style-template-previews/compare-suspense-teaser.png",
+    audience: "适合悬念导向、情绪铺垫、升级揭秘和片段预告。",
+    outcome: "客户会看到热橙钩子和后置爆词，明显比普通口播更吊胃口。",
+    configPatch: {
+      subtitle_style: "teaser_glow",
+      subtitle_motion_style: "motion_echo",
+      smart_effect_style: "smart_effect_cinematic",
+      cover_style: "cinema_teaser",
+      title_style: "neon_night",
+      copy_style: "emotional_story",
+    },
+  },
+  {
+    key: "restrained_explainer",
+    label: "克制说明",
+    badge: "稳读型",
+    summary: "信息优先，但重点词仍然有层级，不会再整句平铺过去。",
+    previewPath: "/style-template-previews/restrained-explainer.png",
+    comparePreviewPath: "/style-template-previews/compare-restrained-explainer.png",
+    audience: "适合教程、工作流、复盘和长口播说明型视频。",
+    outcome: "客户会感觉清楚、专业、稳，但重点词仍然能被一眼抓住。",
+    configPatch: {
+      subtitle_style: "amber_news",
+      subtitle_motion_style: "motion_slide",
+      smart_effect_style: "smart_effect_minimal",
+      cover_style: "tutorial_card",
+      title_style: "documentary_stamp",
+      copy_style: "balanced",
+    },
+  },
 ];
 
 export const subtitleMotionGroups: StyleGroup[] = [

@@ -74,6 +74,50 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "enabled": True,
 }
 
+STYLE_TEMPLATE_BUNDLE_FIELDS = (
+    "subtitle_style",
+    "subtitle_motion_style",
+    "smart_effect_style",
+    "cover_style",
+    "title_style",
+    "copy_style",
+)
+
+STYLE_TEMPLATE_BUNDLES: dict[str, dict[str, str]] = {
+    "impact_commerce": {
+        "subtitle_style": "sale_banner",
+        "subtitle_motion_style": "motion_strobe",
+        "smart_effect_style": "smart_effect_punch",
+        "cover_style": "ecommerce_sale",
+        "title_style": "double_banner",
+        "copy_style": "attention_grabbing",
+    },
+    "hardcore_specs": {
+        "subtitle_style": "keyword_highlight",
+        "subtitle_motion_style": "motion_glitch",
+        "smart_effect_style": "smart_effect_glitch",
+        "cover_style": "clean_lab",
+        "title_style": "tutorial_blueprint",
+        "copy_style": "trusted_expert",
+    },
+    "suspense_teaser": {
+        "subtitle_style": "teaser_glow",
+        "subtitle_motion_style": "motion_echo",
+        "smart_effect_style": "smart_effect_cinematic",
+        "cover_style": "cinema_teaser",
+        "title_style": "neon_night",
+        "copy_style": "emotional_story",
+    },
+    "restrained_explainer": {
+        "subtitle_style": "amber_news",
+        "subtitle_motion_style": "motion_slide",
+        "smart_effect_style": "smart_effect_minimal",
+        "cover_style": "tutorial_card",
+        "title_style": "documentary_stamp",
+        "copy_style": "balanced",
+    },
+}
+
 SUBTITLE_STYLE_OPTIONS = {
     "bold_yellow_outline",
     "white_minimal",
@@ -518,6 +562,9 @@ def resolve_packaging_plan_for_job(job_id: str, *, content_profile: dict[str, An
             "cover_style": DEFAULT_CONFIG["cover_style"],
             "title_style": DEFAULT_CONFIG["title_style"],
             "copy_style": DEFAULT_CONFIG["copy_style"],
+            "style_template_bundle_key": None,
+            "style_template_bundle_recommended_key": None,
+            "style_template_bundle_auto_applied": False,
             "subtitle_motion_style": DEFAULT_CONFIG["subtitle_motion_style"],
             "smart_effect_style": DEFAULT_CONFIG["smart_effect_style"],
             "export_resolution_mode": DEFAULT_CONFIG["export_resolution_mode"],
@@ -529,6 +576,16 @@ def resolve_packaging_plan_for_job(job_id: str, *, content_profile: dict[str, An
         if Path(item.get("path") or "").exists()
     }
     config = _normalize_config(config, assets_by_id)
+    recommended_bundle_key = recommend_style_template_bundle(content_profile)
+    auto_applied_bundle_key = None
+    if (
+        recommended_bundle_key
+        and not (isinstance(job_packaging_snapshot, dict) and job_packaging_snapshot)
+        and _style_template_fields_are_default(config)
+    ):
+        config = _apply_style_template_bundle(config, recommended_bundle_key)
+        auto_applied_bundle_key = recommended_bundle_key
+    active_bundle_key = resolve_style_template_bundle_key(config)
 
     intro = _resolve_single_asset(assets_by_id, config.get("intro_asset_id"), expected_type="intro")
     outro = _resolve_single_asset(assets_by_id, config.get("outro_asset_id"), expected_type="outro")
@@ -566,6 +623,9 @@ def resolve_packaging_plan_for_job(job_id: str, *, content_profile: dict[str, An
         "cover_style": config["cover_style"],
         "title_style": config["title_style"],
         "copy_style": config["copy_style"],
+        "style_template_bundle_key": active_bundle_key,
+        "style_template_bundle_recommended_key": recommended_bundle_key,
+        "style_template_bundle_auto_applied": auto_applied_bundle_key is not None,
         "avatar_overlay_position": config["avatar_overlay_position"],
         "avatar_overlay_scale": config["avatar_overlay_scale"],
         "avatar_overlay_corner_radius": config["avatar_overlay_corner_radius"],
@@ -574,6 +634,103 @@ def resolve_packaging_plan_for_job(job_id: str, *, content_profile: dict[str, An
         "export_resolution_mode": config["export_resolution_mode"],
         "export_resolution_preset": config["export_resolution_preset"],
     }
+
+
+def resolve_style_template_bundle_key(config: dict[str, Any] | None) -> str | None:
+    for bundle_key, patch in STYLE_TEMPLATE_BUNDLES.items():
+        if all(str((config or {}).get(field) or "") == value for field, value in patch.items()):
+            return bundle_key
+    return None
+
+
+def recommend_style_template_bundle(content_profile: dict[str, Any] | None) -> str | None:
+    profile = content_profile or {}
+    if not isinstance(profile, dict) or not profile:
+        return None
+    subject_domain = _resolve_packaging_subject_domain(profile)
+    preset_name = normalize_workflow_template_name(
+        str(profile.get("workflow_template") or profile.get("preset_name") or "").strip()
+    )
+    haystack = " ".join(_collect_style_template_profile_strings(profile)).lower()
+    tokens = {token.lower() for token in _tokenize_packaging_text(haystack)}
+
+    suspense_terms = {
+        "悬念", "预告", "反转", "结局", "后面", "最后", "别划走", "等等", "大招",
+        "teaser", "trailer", "twist", "ending", "later", "reveal", "secret", "hook",
+    }
+    explainer_terms = {
+        "教程", "讲解", "流程", "工作流", "步骤", "复盘", "说明", "演示", "入门", "拆解", "科普",
+        "tutorial", "guide", "explainer", "workflow", "step", "recap", "walkthrough", "how", "analysis",
+    }
+    specs_terms = {
+        "参数", "评测", "测试", "对比", "接口", "续航", "配置", "性能", "版本", "型号", "pro", "max", "ultra",
+        "spec", "review", "benchmark", "compare", "ports", "battery", "performance", "version", "model",
+    }
+    commerce_terms = {
+        "开箱", "升级", "优惠", "活动", "赠品", "值", "划算", "必买", "限时", "联名", "新品", "推荐",
+        "unbox", "sale", "deal", "discount", "launch", "upgrade", "worth", "buy", "promo", "offer",
+    }
+
+    has_explainer_signal = _matches_style_template_terms(haystack, tokens, explainer_terms) or "tutorial" in preset_name or "commentary" in preset_name
+
+    if _matches_style_template_terms(haystack, tokens, suspense_terms) or preset_name in {"trailer_dark", "cinema_teaser"}:
+        return "suspense_teaser"
+    if _matches_style_template_terms(haystack, tokens, commerce_terms):
+        return "impact_commerce"
+    if subject_domain in {"finance", "news", "sports"}:
+        return "restrained_explainer"
+    if subject_domain == "ai" and has_explainer_signal:
+        return "restrained_explainer"
+    if _matches_style_template_terms(haystack, tokens, specs_terms) or subject_domain in {"tech", "tools"}:
+        return "hardcore_specs"
+    if subject_domain in {"ai"}:
+        return "restrained_explainer"
+    if has_explainer_signal:
+        return "restrained_explainer"
+    if subject_domain in {"edc", "functional", "outdoor", "food"}:
+        return "impact_commerce"
+    return "restrained_explainer"
+
+
+def _collect_style_template_profile_strings(profile: dict[str, Any]) -> list[str]:
+    strings: list[str] = []
+    for key in (
+        "subject_brand",
+        "subject_model",
+        "subject_type",
+        "subject_domain",
+        "video_theme",
+        "summary",
+        "task_description",
+        "workflow_template",
+        "preset_name",
+    ):
+        value = profile.get(key)
+        if value:
+            strings.append(str(value))
+    for key in ("keywords", "review_keywords", "highlight_terms", "search_queries"):
+        value = profile.get(key)
+        if isinstance(value, (list, tuple, set)):
+            strings.extend(str(item) for item in value if str(item or "").strip())
+    return strings
+
+
+def _style_template_fields_are_default(config: dict[str, Any]) -> bool:
+    return all(str(config.get(field) or "") == str(DEFAULT_CONFIG[field]) for field in STYLE_TEMPLATE_BUNDLE_FIELDS)
+
+
+def _apply_style_template_bundle(config: dict[str, Any], bundle_key: str) -> dict[str, Any]:
+    patch = STYLE_TEMPLATE_BUNDLES.get(bundle_key)
+    if not patch:
+        return dict(config)
+    merged = dict(config)
+    merged.update(patch)
+    return merged
+
+
+def _matches_style_template_terms(haystack: str, tokens: set[str], terms: set[str]) -> bool:
+    normalized_terms = {str(term or "").strip().lower() for term in terms if str(term or "").strip()}
+    return bool(tokens & normalized_terms) or any(term in haystack for term in normalized_terms)
 
 
 def _load_job_packaging_snapshot(job_id: str) -> dict[str, Any] | None:

@@ -260,6 +260,79 @@ def test_packaging_library_music_selection_prefers_ai_domain_over_template_name(
     assert plan["music"]["asset_id"] == ai_music["id"]
 
 
+def test_packaging_library_auto_applies_commerce_bundle_for_default_style_fields(tmp_path, monkeypatch):
+    monkeypatch.setattr(library, "PACKAGING_ROOT", tmp_path)
+    monkeypatch.setattr(library, "MANIFEST_PATH", tmp_path / "manifest.json")
+
+    plan = library.resolve_packaging_plan_for_job(
+        str(uuid.uuid4()),
+        content_profile={
+            "subject_domain": "edc",
+            "video_theme": "新品开箱升级 限时优惠提醒",
+            "summary": "这波升级值不值",
+        },
+    )
+
+    assert plan["subtitle_style"] == "sale_banner"
+    assert plan["subtitle_motion_style"] == "motion_strobe"
+    assert plan["smart_effect_style"] == "smart_effect_punch"
+    assert plan["style_template_bundle_key"] == "impact_commerce"
+    assert plan["style_template_bundle_recommended_key"] == "impact_commerce"
+    assert plan["style_template_bundle_auto_applied"] is True
+
+
+def test_packaging_library_recommends_explainer_bundle_for_workflow_content_without_overriding_custom_choice(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setattr(library, "PACKAGING_ROOT", tmp_path)
+    monkeypatch.setattr(library, "MANIFEST_PATH", tmp_path / "manifest.json")
+
+    library.update_packaging_config(
+        {
+            "subtitle_style": "keyword_highlight",
+            "subtitle_motion_style": "motion_glitch",
+            "smart_effect_style": "smart_effect_glitch",
+            "cover_style": "clean_lab",
+            "title_style": "tutorial_blueprint",
+            "copy_style": "trusted_expert",
+        }
+    )
+
+    plan = library.resolve_packaging_plan_for_job(
+        str(uuid.uuid4()),
+        content_profile={
+            "subject_domain": "ai",
+            "workflow_template": "tutorial_standard",
+            "video_theme": "AI 工作流搭建教程",
+            "summary": "把步骤和配置先讲清楚",
+        },
+    )
+
+    assert plan["subtitle_style"] == "keyword_highlight"
+    assert plan["style_template_bundle_key"] == "hardcore_specs"
+    assert plan["style_template_bundle_recommended_key"] == "restrained_explainer"
+    assert plan["style_template_bundle_auto_applied"] is False
+
+
+def test_packaging_library_recommends_suspense_bundle_for_teaser_language(tmp_path, monkeypatch):
+    monkeypatch.setattr(library, "PACKAGING_ROOT", tmp_path)
+    monkeypatch.setattr(library, "MANIFEST_PATH", tmp_path / "manifest.json")
+
+    plan = library.resolve_packaging_plan_for_job(
+        str(uuid.uuid4()),
+        content_profile={
+            "video_theme": "真正的大招还在后面",
+            "summary": "先别划走 最后的反转更狠",
+        },
+    )
+
+    assert plan["subtitle_style"] == "teaser_glow"
+    assert plan["style_template_bundle_key"] == "suspense_teaser"
+    assert plan["style_template_bundle_recommended_key"] == "suspense_teaser"
+    assert plan["style_template_bundle_auto_applied"] is True
+
+
 def test_packaging_library_music_selection_prefers_tech_domain_over_template_name(tmp_path, monkeypatch):
     monkeypatch.setattr(library, "PACKAGING_ROOT", tmp_path)
     monkeypatch.setattr(library, "MANIFEST_PATH", tmp_path / "manifest.json")

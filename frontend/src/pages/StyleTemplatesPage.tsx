@@ -11,7 +11,9 @@ import {
   findStylePreset,
   smartEffectGroups,
   smartEffectPresets,
+  styleLabel,
   subtitleStyleGroups,
+  subtitleTemplateBundles,
   subtitleStylePresets,
   subtitleMotionGroups,
   subtitleMotionPresets,
@@ -19,8 +21,10 @@ import {
   titleStylePresets,
   type StyleGroup,
   type StylePreset,
+  type StyleTemplateBundle,
 } from "../stylePresets";
 import { classNames } from "../utils";
+import type { PackagingConfig } from "../types";
 
 type SectionKind = "subtitle" | "subtitleMotion" | "cover" | "title" | "copy" | "effects" | "avatar";
 
@@ -46,6 +50,19 @@ export function StyleTemplatesPage() {
 
       {config && (
         <>
+          <PageSection
+            eyebrow="一键方案"
+            title="先让客户看到最终字幕成片是什么样"
+            description="这里不是示意图，而是基于当前字幕引擎真实渲染出来的效果图。每张卡都会一键套用字幕、动效、特效、封面标题和文案组合。"
+          >
+            <TemplateBundleSection
+              config={config}
+              bundles={subtitleTemplateBundles}
+              isSaving={workspace.saveConfig.isPending}
+              onApply={(patch) => workspace.saveConfig.mutate(patch)}
+            />
+          </PageSection>
+
           <PageSection
             eyebrow="主样式"
             title="先确定主成片的基础观感"
@@ -131,6 +148,202 @@ export function StyleTemplatesPage() {
         </>
       )}
     </section>
+  );
+}
+
+function TemplateBundleSection({
+  config,
+  bundles,
+  isSaving,
+  onApply,
+}: {
+  config: PackagingConfig;
+  bundles: StyleTemplateBundle[];
+  isSaving: boolean;
+  onApply: (patch: StyleTemplateBundle["configPatch"]) => void;
+}) {
+  const [compareMode, setCompareMode] = useState(false);
+  const [previewBundleKey, setPreviewBundleKey] = useState<string | null>(null);
+  const previewBundle = bundles.find((bundle) => bundle.key === previewBundleKey) ?? null;
+  const compareSample = "同一句样句：重点词一炸，客户立刻看懂";
+
+  return (
+    <>
+      <div className="template-bundle-toolbar">
+        <div className="template-bundle-toolbar-copy">
+          <strong>{compareMode ? "同句真实对照" : "真实成片预览"}</strong>
+          <p className="muted">
+            {compareMode
+              ? `${compareSample}。四套方案用同一条字幕渲染，方便客户横向比较。`
+              : "每张图都来自真实字幕渲染。先看效果，再决定是否一键套用整套模板。 "}
+          </p>
+        </div>
+        <button
+          type="button"
+          className={classNames("button", "button-sm", compareMode && "selected")}
+          onClick={() => setCompareMode((value) => !value)}
+        >
+          {compareMode ? "返回成片图" : "切到同句对照"}
+        </button>
+      </div>
+
+      {compareMode ? (
+        <div className="template-bundle-compare-note">
+          <span className="status-pill">同句对照</span>
+          <span>{compareSample}</span>
+        </div>
+      ) : null}
+
+      <div className={classNames("template-bundle-grid", compareMode && "compare-mode")}>
+        {bundles.map((bundle) => {
+          const selected = isBundleActive(config, bundle);
+          const imagePath = compareMode ? bundle.comparePreviewPath : bundle.previewPath;
+          const imageAlt = compareMode ? `${bundle.label} 同句真实对照图` : `${bundle.label} 字幕真实效果图`;
+          return (
+            <article
+              key={bundle.key}
+              className={classNames("template-bundle-card", selected && "selected")}
+            >
+              <button
+                type="button"
+                className="template-bundle-media-button"
+                onClick={() => setPreviewBundleKey(bundle.key)}
+              >
+                <div className="template-bundle-media">
+                  <img
+                    src={imagePath}
+                    alt={imageAlt}
+                    className="template-bundle-image"
+                    loading="lazy"
+                  />
+                  <div className="template-bundle-overlay">
+                    <span className="status-pill">{bundle.badge}</span>
+                    <span className="template-bundle-real-tag">{compareMode ? "同句实拍" : "真实渲染"}</span>
+                  </div>
+                </div>
+              </button>
+              <div className="template-bundle-copy">
+                <div className="toolbar">
+                  <strong>{bundle.label}</strong>
+                  {selected ? <span className="status-pill done">当前方案</span> : null}
+                </div>
+                <p className="muted">{bundle.summary}</p>
+                <div className="template-bundle-meta">
+                  <span>适合：{bundle.audience}</span>
+                  <span>结果：{bundle.outcome}</span>
+                </div>
+                <div className="template-bundle-config">
+                  <span>{styleLabel(subtitleStylePresets, bundle.configPatch.subtitle_style)}</span>
+                  <span>{styleLabel(subtitleMotionPresets, bundle.configPatch.subtitle_motion_style)}</span>
+                  <span>{styleLabel(smartEffectPresets, bundle.configPatch.smart_effect_style)}</span>
+                  <span>{styleLabel(titleStylePresets, bundle.configPatch.title_style)}</span>
+                  <span>{styleLabel(coverStylePresets, bundle.configPatch.cover_style)}</span>
+                  <span>{styleLabel(copyStylePresets, bundle.configPatch.copy_style)}</span>
+                </div>
+                <div className="template-bundle-actions">
+                  <button
+                    type="button"
+                    className="button button-sm"
+                    onClick={() => setPreviewBundleKey(bundle.key)}
+                  >
+                    放大查看
+                  </button>
+                  <button
+                    type="button"
+                    className={classNames("button", "button-sm", selected && "selected")}
+                    onClick={() => onApply(bundle.configPatch)}
+                    disabled={isSaving}
+                  >
+                    {selected ? "当前方案" : "套用这套"}
+                  </button>
+                </div>
+              </div>
+            </article>
+          );
+        })}
+      </div>
+
+      {previewBundle ? (
+        <div
+          className="floating-modal-backdrop"
+          onClick={() => setPreviewBundleKey(null)}
+          role="presentation"
+        >
+          <div
+            className="floating-modal-shell template-bundle-modal-shell"
+            role="dialog"
+            aria-modal="true"
+            aria-label={`${previewBundle.label} 真实效果图`}
+            onClick={(event) => event.stopPropagation()}
+          >
+            <button
+              type="button"
+              className="button button-sm floating-modal-close"
+              onClick={() => setPreviewBundleKey(null)}
+            >
+              关闭
+            </button>
+            <section className="panel template-bundle-modal">
+              <div className="template-bundle-modal-media">
+                <img
+                  src={compareMode ? previewBundle.comparePreviewPath : previewBundle.previewPath}
+                  alt={compareMode ? `${previewBundle.label} 同句真实对照图` : `${previewBundle.label} 字幕真实效果图`}
+                  className="template-bundle-modal-image"
+                />
+              </div>
+              <div className="template-bundle-modal-copy">
+                <div className="toolbar">
+                  <strong>{previewBundle.label}</strong>
+                  <span className="status-pill">{compareMode ? "同句对照" : "真实渲染"}</span>
+                </div>
+                <p className="muted">{previewBundle.summary}</p>
+                <div className="template-bundle-meta">
+                  <span>适合：{previewBundle.audience}</span>
+                  <span>结果：{previewBundle.outcome}</span>
+                </div>
+                <div className="template-bundle-config">
+                  <span>{styleLabel(subtitleStylePresets, previewBundle.configPatch.subtitle_style)}</span>
+                  <span>{styleLabel(subtitleMotionPresets, previewBundle.configPatch.subtitle_motion_style)}</span>
+                  <span>{styleLabel(smartEffectPresets, previewBundle.configPatch.smart_effect_style)}</span>
+                  <span>{styleLabel(titleStylePresets, previewBundle.configPatch.title_style)}</span>
+                  <span>{styleLabel(coverStylePresets, previewBundle.configPatch.cover_style)}</span>
+                  <span>{styleLabel(copyStylePresets, previewBundle.configPatch.copy_style)}</span>
+                </div>
+                <div className="template-bundle-actions">
+                  <button
+                    type="button"
+                    className={classNames("button", "button-sm", compareMode && "selected")}
+                    onClick={() => setCompareMode((value) => !value)}
+                  >
+                    {compareMode ? "回到成片图" : "切到同句对照"}
+                  </button>
+                  <button
+                    type="button"
+                    className={classNames("button", "button-sm", isBundleActive(config, previewBundle) && "selected")}
+                    onClick={() => onApply(previewBundle.configPatch)}
+                    disabled={isSaving}
+                  >
+                    {isBundleActive(config, previewBundle) ? "当前方案" : "套用这套"}
+                  </button>
+                </div>
+              </div>
+            </section>
+          </div>
+        </div>
+      ) : null}
+    </>
+  );
+}
+
+function isBundleActive(config: PackagingConfig, bundle: StyleTemplateBundle): boolean {
+  const patch = bundle.configPatch;
+  return (
+    config.subtitle_style === patch.subtitle_style
+    && config.subtitle_motion_style === patch.subtitle_motion_style
+    && config.smart_effect_style === patch.smart_effect_style
+    && config.cover_style === patch.cover_style
+    && config.title_style === patch.title_style
+    && config.copy_style === patch.copy_style
   );
 }
 

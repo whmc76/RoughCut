@@ -599,6 +599,11 @@ def test_build_ai_effect_render_plan_drops_avatar_but_keeps_effects():
     assert plan["editing_accents"]["transitions"]["duration_sec"] == 0.16
     assert plan["editing_accents"]["transitions"]["boundary_indexes"] == [0]
     assert plan["section_choreography"]["style_variant"] == "ai_effect"
+    profiles = plan["subtitles"]["section_profiles"]
+    assert profiles[0]["style_name"] == "sale_banner"
+    assert profiles[0]["motion_style"] == "motion_strobe"
+    assert profiles[1]["style_name"] == "cyber_orange"
+    assert profiles[1]["motion_style"] == "motion_glitch"
     assert any(item["text"] == "注意" for item in plan["editing_accents"]["emphasis_overlays"])
     assert any(item["text"] == "这点一定要注意" for item in plan["editing_accents"]["emphasis_overlays"])
     assert any(item["text"] == "" for item in plan["editing_accents"]["emphasis_overlays"])

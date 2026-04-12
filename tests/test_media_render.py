@@ -642,11 +642,11 @@ def test_build_choreographed_subtitle_items_applies_unit_level_motion_choreograp
     )
 
     assert choreographed[0]["motion_style"] == "motion_strobe"
-    assert choreographed[0]["style_name"] == "cobalt_pop"
+    assert choreographed[0]["style_name"] == "sale_banner"
     assert choreographed[1]["motion_style"] == "motion_slide"
-    assert choreographed[1]["style_name"] == "clean_box"
+    assert choreographed[1]["style_name"] == "coupon_green"
     assert choreographed[3]["motion_style"] == "motion_pop"
-    assert choreographed[3]["style_name"] == "keyword_highlight"
+    assert choreographed[3]["style_name"] == "cyber_orange"
     assert choreographed[3]["margin_v_delta"] == 14
     assert choreographed[5]["motion_style"] == "motion_echo"
     assert choreographed[5]["style_name"] == "soft_shadow"
@@ -1119,7 +1119,7 @@ async def test_apply_music_and_watermark_applies_insert_ducking_and_entry_fade(
 
 
 @pytest.mark.asyncio
-async def test_render_video_applies_smart_effects_before_subtitle_overlay(
+async def test_render_video_keeps_subtitle_and_effect_overlays_in_single_pass_when_packaging_is_disabled(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -1203,14 +1203,12 @@ async def test_render_video_applies_smart_effects_before_subtitle_overlay(
         },
     )
 
-    assert len(commands) == 2
-    base_filter = commands[0][commands[0].index("-filter_complex") + 1]
-    overlay_filter = commands[1][commands[1].index("-filter_complex") + 1]
+    assert len(commands) == 1
+    filter_complex = commands[0][commands[0].index("-filter_complex") + 1]
 
-    assert "zoompan=" in base_filter
-    assert "subtitles='" not in base_filter
-    assert "subtitles='" in overlay_filter
-    assert "drawtext=" in overlay_filter
+    assert "zoompan=" in filter_complex
+    assert "subtitles='" in filter_complex
+    assert "drawtext=" in filter_complex
 
 
 @pytest.mark.asyncio
@@ -1315,7 +1313,7 @@ async def test_render_video_uses_subtitle_units_to_drive_base_smart_effects(
 
 
 @pytest.mark.asyncio
-async def test_render_video_overlay_copies_audio_when_no_audio_effects(
+async def test_render_video_keeps_overlay_work_in_base_pass_when_packaging_is_disabled(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -1396,6 +1394,7 @@ async def test_render_video_overlay_copies_audio_when_no_audio_effects(
         overlay_editing_accents={"style": "smart_effect_rhythm", "emphasis_overlays": [], "sound_effects": []},
     )
 
-    assert len(commands) == 2
-    overlay_cmd = commands[1]
-    assert overlay_cmd[overlay_cmd.index("-c:a") + 1] == "copy"
+    assert len(commands) == 1
+    filter_complex = commands[0][commands[0].index("-filter_complex") + 1]
+    assert "subtitles='" in filter_complex
+    assert commands[0][commands[0].index("-c:a") + 1] == "aac"

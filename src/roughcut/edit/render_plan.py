@@ -630,7 +630,7 @@ def _resolve_subtitle_section_profile(
         guard_sec = 0.08
         emphasis_level = "quiet"
     elif packaging_intent == "hook_focus" or role == "hook":
-        style_name = "teaser_glow" if style_variant != "ai_effect" else "cobalt_pop"
+        style_name = "teaser_glow" if style_variant != "ai_effect" else "sale_banner"
         if style_variant == "ai_effect":
             motion_style = "motion_strobe"
         else:
@@ -640,7 +640,10 @@ def _resolve_subtitle_section_profile(
         guard_sec = 0.04
         emphasis_level = "hero"
     elif packaging_intent == "detail_support" or role == "detail":
-        style_name = "keyword_highlight" if overlay_focus == "high" else "clean_box"
+        if style_variant == "ai_effect":
+            style_name = "cyber_orange" if overlay_focus == "high" else "coupon_green"
+        else:
+            style_name = "keyword_highlight" if overlay_focus == "high" else "clean_box"
         if style_variant == "ai_effect":
             motion_style = "motion_glitch" if transition_mode == "accented" else "motion_strobe"
         else:
@@ -650,7 +653,7 @@ def _resolve_subtitle_section_profile(
         guard_sec = 0.05
         emphasis_level = "support"
     elif role == "body":
-        style_name = base_style if style_variant != "ai_effect" else "slate_caption"
+        style_name = base_style if style_variant != "ai_effect" else "amber_news"
         motion_style = "motion_echo" if energetic_skill and transition_mode == "accented" else base_motion
         margin_v_delta = 4 if overlay_focus == "medium" else 0
         linger_sec = 0.06 if energetic_skill else 0.04
