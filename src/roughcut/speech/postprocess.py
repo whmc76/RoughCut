@@ -56,6 +56,11 @@ class SubtitleSegmentationAnalysis:
     low_confidence_window_count: int
     boundary_decisions: tuple[BoundaryDecision, ...] = ()
     low_confidence_windows: tuple[dict[str, object], ...] = ()
+    provider_word_segment_count: int = 0
+    synthetic_word_segment_count: int = 0
+    untrusted_word_segment_count: int = 0
+    text_only_segment_count: int = 0
+    global_word_segmentation_used: bool = False
 
     def as_dict(self) -> dict[str, object]:
         suspicious = [decision.as_dict() for decision in self.boundary_decisions if decision.decision != "natural_break"]
@@ -67,6 +72,11 @@ class SubtitleSegmentationAnalysis:
             "suspicious_boundary_count": self.suspicious_boundary_count,
             "consecutive_fragment_window_count": self.consecutive_fragment_window_count,
             "low_confidence_window_count": self.low_confidence_window_count,
+            "provider_word_segment_count": self.provider_word_segment_count,
+            "synthetic_word_segment_count": self.synthetic_word_segment_count,
+            "untrusted_word_segment_count": self.untrusted_word_segment_count,
+            "text_only_segment_count": self.text_only_segment_count,
+            "global_word_segmentation_used": self.global_word_segmentation_used,
             "sample_suspicious_boundaries": suspicious[:12],
             "sample_low_confidence_windows": list(self.low_confidence_windows[:8]),
         }
@@ -219,6 +229,7 @@ _ER_FILLER_RE = re.compile(r"呃+")
 _CHINESE_DIGIT_VALUES = {
     "零": 0,
     "〇": 0,
+    "幺": 1,
     "一": 1,
     "二": 2,
     "两": 2,
@@ -305,7 +316,7 @@ _DISPLAY_QUANTITY_UNITS = (
     "伏",
     "安",
 )
-_DISPLAY_NUM_TOKEN = r"[零〇一二两三四五六七八九十百千万\d]+"
+_DISPLAY_NUM_TOKEN = r"[零〇幺一二两三四五六七八九十百千万\d]+"
 _DISPLAY_ORDINAL_UNIT_PATTERN = "|".join(
     sorted((re.escape(unit) for unit in _DISPLAY_ORDINAL_UNITS), key=len, reverse=True)
 )
@@ -335,7 +346,10 @@ _COLLOQUIAL_PRICE_RE = re.compile(
     rf"(?P<integer>{_DISPLAY_NUM_TOKEN})块(?P<fraction>{_DISPLAY_NUM_TOKEN})(?![\u4e00-\u9fffA-Za-z0-9])"
 )
 _ALPHA_NUMERIC_COMBO_RE = re.compile(
-    rf"(?P<prefix>[A-Za-z])(?P<number>{_DISPLAY_NUM_TOKEN})(?=[\u4e00-\u9fff]|$)"
+    rf"(?<![A-Za-z0-9])(?P<prefix>[A-Za-z]{{1,8}})(?P<number>{_DISPLAY_NUM_TOKEN})(?=[\u4e00-\u9fff]|$)"
+)
+_REPEATED_MODEL_NUMBER_RE = re.compile(
+    r"(?<![A-Za-z0-9])(?P<prefix>[A-Za-z]{1,8})(?P<number>\d{2,4})(?P=number)(?=[\u4e00-\u9fff])"
 )
 _SPACED_MODEL_TOKEN_RE = re.compile(
     rf"(?<![A-Za-z0-9])(?P<letters>(?:[A-Za-z]\s+){{1,7}}[A-Za-z])\s+"
@@ -449,12 +463,12 @@ _PARTICLE_LED_RESTART_PREFIXES = (
 )
 _NO_SPLIT_ENDINGS = (
     "的", "了", "呢", "吗", "嘛", "啊", "呀", "着", "把", "给", "在", "向", "和", "与", "及",
-    "就", "也", "还", "很", "都", "又", "才", "再", "并", "跟", "让", "被",
+    "就", "也", "还", "很", "都", "又", "才", "再", "并", "跟", "让", "被", "是",
     "然后", "所以", "但是", "而且", "并且", "会", "想", "要", "能",
 )
 _NO_SPLIT_PREFIXES = (
     "的", "了", "呢", "吗", "嘛", "啊", "呀", "着", "把", "给", "在", "向", "和", "与", "及",
-    "就", "也", "还", "很", "都", "又", "才", "再", "并", "跟", "让", "被", "地", "得",
+    "就", "也", "还", "很", "都", "又", "才", "再", "并", "跟", "让", "被", "地", "得", "是",
     "起来", "下来", "上来", "下去", "一下", "喜欢",
 )
 _GOOD_BREAK_PREFIXES = (
@@ -473,6 +487,7 @@ _BOUNDARY_PROTECTED_TERMS = (
     "华丽",
     "极致华丽",
     "EDC",
+    "手电",
     "FAS",
     "彩雕",
     "深雕",
@@ -516,6 +531,9 @@ _SOFT_FRAGMENTARY_ENDINGS = (
     "你们",
     "相当",
     "一个",
+    "一直",
+    "之前",
+    "之后",
 )
 _SOFT_ATTACHED_FRAGMENT_PREFIXES = (
     "要",
@@ -538,6 +556,12 @@ _BOUNDARY_COMPOUND_SPLITS: tuple[tuple[str, str], ...] = (
     ("那", "种"),
     ("这", "个"),
     ("那", "个"),
+    ("可", "以"),
+    ("因", "为"),
+    ("另", "外"),
+    ("之", "前"),
+    ("应", "该"),
+    ("没", "啥"),
     ("我", "们"),
     ("你", "们"),
     ("它", "们"),
@@ -548,6 +572,19 @@ _BOUNDARY_COMPOUND_SPLITS: tuple[tuple[str, str], ...] = (
     ("建", "议"),
     ("介", "绍"),
     ("一", "下"),
+    ("手", "电"),
+    ("内", "容"),
+    ("东", "西"),
+    ("随", "身"),
+    ("功", "能"),
+    ("流", "明"),
+    ("亮", "度"),
+    ("日", "用"),
+    ("小", "兄弟"),
+    ("兄", "弟"),
+    ("耐", "克尔"),
+    ("耐克", "尔"),
+    ("对", "比"),
     ("角", "度"),
     ("口", "香糖"),
     ("一", "颗"),
@@ -582,6 +619,11 @@ _MAX_SEMANTIC_BRIDGE_GAP_SEC = 3.2
 _MAX_SEMANTIC_TRANSFER_WORDS = 4
 _MAX_SEMANTIC_TRANSFER_CHARS = 8
 _MAX_SEMANTIC_BRIDGE_DURATION_SEC = 8.6
+_SYNTHETIC_WORD_SOURCES = {"synthetic", "segment_only", "provider_missing", "roughcut_synthesized"}
+_SINGLE_CHAR_CONTINUATION_START_RE = re.compile(
+    r"^(?P<head>[\u4e00-\u9fff])(?P<rest>也|都|就|是|有|会|要|在|来|去|从|跟|把|被|里|上|下)"
+)
+_SINGLE_CHAR_FREE_STARTERS = {"我", "你", "他", "她", "它", "这", "那", "可", "但", "先", "再"}
 
 
 def _make_subtitle_entry(
@@ -615,6 +657,121 @@ def _reindex_subtitle_entries(entries: list[SubtitleEntry]) -> list[SubtitleEntr
         )
         for index, item in enumerate(entries)
     ]
+
+
+def _extract_word_alignment_source(raw_word: dict) -> str:
+    if not isinstance(raw_word, dict):
+        return ""
+    alignment = raw_word.get("alignment")
+    if isinstance(alignment, dict):
+        roughcut = alignment.get("_roughcut")
+        if isinstance(roughcut, dict):
+            source = str(roughcut.get("source") or "").strip().lower()
+            if source:
+                return source
+        source = str(alignment.get("source") or "").strip().lower()
+        if source:
+            return source
+    raw_payload = raw_word.get("raw_payload")
+    if isinstance(raw_payload, dict):
+        for key in ("source", "_roughcut_source"):
+            source = str(raw_payload.get(key) or "").strip().lower()
+            if source:
+                return source
+    return ""
+
+
+def _build_text_fallback_words(text: str, *, start: float, end: float) -> list[dict]:
+    tokens = _tokenize_entry_text_for_resegmentation(text)
+    if not tokens:
+        return []
+    duration = max(float(end) - float(start), 0.001)
+    token_span = duration / max(len(tokens), 1)
+    rebuilt: list[dict] = []
+    for token_index, token in enumerate(tokens):
+        token_start = float(start) + token_index * token_span
+        token_end = min(float(end), token_start + token_span)
+        rebuilt.append(
+            {
+                "word": token,
+                "start": token_start,
+                "end": token_end,
+                "alignment": {"source": "postprocess_text_fallback"},
+            }
+        )
+    return rebuilt
+
+
+def _words_are_usable_for_segmentation(text: str, words: list[dict]) -> bool:
+    cleaned_words = [word for word in list(words or []) if isinstance(word, dict) and str(word.get("word") or "").strip()]
+    if len(cleaned_words) < 2:
+        return False
+    if any(_extract_word_alignment_source(word) in _SYNTHETIC_WORD_SOURCES for word in cleaned_words):
+        return False
+
+    compact_text = re.sub(r"[\s，。！？!?；;：:,、（）()【】\[\]{}\"'《》<>]+", "", str(text or "").strip())
+    compact_words = re.sub(
+        r"[\s，。！？!?；;：:,、（）()【】\[\]{}\"'《》<>]+",
+        "",
+        "".join(str(word.get("word") or "").strip() for word in cleaned_words),
+    )
+    if compact_text and compact_words:
+        coverage = difflib.SequenceMatcher(a=compact_words, b=compact_text).ratio()
+        if coverage < 0.86:
+            return False
+    return True
+
+
+def _words_for_segmentation(seg: TranscriptSegment) -> list[dict]:
+    raw_words = list(getattr(seg, "words_json", []) or [])
+    if not raw_words:
+        return []
+    if _words_are_usable_for_segmentation(getattr(seg, "text", ""), raw_words):
+        normalized: list[dict] = []
+        for raw_word in raw_words:
+            if not isinstance(raw_word, dict):
+                continue
+            word_text = re.sub(r"\s+", "", str(raw_word.get("word", "")))
+            if not word_text:
+                continue
+            start = float(raw_word.get("start") or 0.0)
+            end = max(start, float(raw_word.get("end") or start))
+            normalized.append(
+                {
+                    **dict(raw_word),
+                    "word": word_text,
+                    "start": start,
+                    "end": end,
+                }
+            )
+        return normalized
+    return _build_text_fallback_words(
+        getattr(seg, "text", ""),
+        start=float(getattr(seg, "start_time", 0.0) or 0.0),
+        end=float(getattr(seg, "end_time", 0.0) or 0.0),
+    )
+
+
+def _collect_segmentation_input_stats(segments: list[TranscriptSegment]) -> dict[str, int]:
+    stats = {
+        "provider_word_segment_count": 0,
+        "synthetic_word_segment_count": 0,
+        "untrusted_word_segment_count": 0,
+        "text_only_segment_count": 0,
+    }
+    for seg in list(segments or []):
+        raw_words = list(getattr(seg, "words_json", []) or [])
+        if not raw_words:
+            stats["text_only_segment_count"] += 1
+            continue
+        if _words_are_usable_for_segmentation(getattr(seg, "text", ""), raw_words):
+            stats["provider_word_segment_count"] += 1
+            continue
+        if any(_extract_word_alignment_source(word) in _SYNTHETIC_WORD_SOURCES for word in raw_words if isinstance(word, dict)):
+            stats["synthetic_word_segment_count"] += 1
+            continue
+        stats["untrusted_word_segment_count"] += 1
+    return stats
 
 
 def normalize_text(text: str) -> str:
@@ -709,6 +866,7 @@ def _normalize_display_numbers(text: str) -> str:
     result = _normalize_spaced_model_tokens(text)
     result = _normalize_colloquial_price_tokens(result)
     result = _normalize_alpha_numeric_tokens(result)
+    result = _collapse_repeated_model_number_tokens(result)
     result = _normalize_time_tokens(result)
 
     def replace_percent(match: re.Match[str]) -> str:
@@ -771,6 +929,13 @@ def _normalize_alpha_numeric_tokens(text: str) -> str:
     return _ALPHA_NUMERIC_COMBO_RE.sub(replace_alpha_numeric, text)
 
 
+def _collapse_repeated_model_number_tokens(text: str) -> str:
+    return _REPEATED_MODEL_NUMBER_RE.sub(
+        lambda match: f"{match.group('prefix').upper()}{match.group('number')}",
+        text,
+    )
+
+
 def _normalize_time_tokens(text: str) -> str:
     def replace_time_with_minute(match: re.Match[str]) -> str:
         prefix = str(match.group("prefix") or "")
@@ -822,7 +987,7 @@ def _normalize_numeric_token(token: str) -> str:
         return value
     if value.isdigit():
         return value
-    if re.fullmatch(r"[零〇一二两三四五六七八九]+", value):
+    if re.fullmatch(r"[零〇幺一二两三四五六七八九]+", value):
         return "".join(str(_CHINESE_DIGIT_VALUES[char]) for char in value)
     parsed = _parse_chinese_number(value)
     return str(parsed) if parsed is not None else value
@@ -930,7 +1095,9 @@ def segment_subtitles(
     Split transcript segments into subtitle display units.
     Each subtitle has at most max_chars characters and max_duration seconds.
     """
-    if _can_use_global_word_segmentation(segments):
+    input_stats = _collect_segmentation_input_stats(segments)
+    global_word_segmentation_used = _can_use_global_word_segmentation(segments)
+    if global_word_segmentation_used:
         entries = _segment_subtitles_from_global_words(segments, max_chars=max_chars, max_duration=max_duration)
         resolved = _resolve_subtitle_entry_sequence(
             entries,
@@ -938,10 +1105,17 @@ def segment_subtitles(
             max_duration=max_duration,
             allow_window_refine=True,
         )
-        return SubtitleSegmentationResult(
-            entries=resolved,
-            analysis=analyze_subtitle_segmentation(resolved),
-        )
+        if resolved:
+            analysis = analyze_subtitle_segmentation(resolved)
+            analysis.provider_word_segment_count = int(input_stats["provider_word_segment_count"])
+            analysis.synthetic_word_segment_count = int(input_stats["synthetic_word_segment_count"])
+            analysis.untrusted_word_segment_count = int(input_stats["untrusted_word_segment_count"])
+            analysis.text_only_segment_count = int(input_stats["text_only_segment_count"])
+            analysis.global_word_segmentation_used = True
+            return SubtitleSegmentationResult(
+                entries=resolved,
+                analysis=analysis,
+            )
 
     subtitles: list[SubtitleEntry] = []
     idx = 0
@@ -951,7 +1125,7 @@ def segment_subtitles(
         if not text:
             continue
 
-        words = seg.words_json or []
+        words = _words_for_segmentation(seg)
 
         # If we have word-level timing, split by words
         if words:
@@ -982,9 +1156,15 @@ def segment_subtitles(
         max_duration=max_duration,
         allow_window_refine=True,
     )
+    analysis = analyze_subtitle_segmentation(resolved)
+    analysis.provider_word_segment_count = int(input_stats["provider_word_segment_count"])
+    analysis.synthetic_word_segment_count = int(input_stats["synthetic_word_segment_count"])
+    analysis.untrusted_word_segment_count = int(input_stats["untrusted_word_segment_count"])
+    analysis.text_only_segment_count = int(input_stats["text_only_segment_count"])
+    analysis.global_word_segmentation_used = bool(global_word_segmentation_used)
     return SubtitleSegmentationResult(
         entries=resolved,
-        analysis=analyze_subtitle_segmentation(resolved),
+        analysis=analysis,
     )
 
 
@@ -994,7 +1174,7 @@ def _can_use_global_word_segmentation(segments: list[TranscriptSegment]) -> bool
     non_empty_segments = 0
     total_words = 0
     for seg in segments:
-        words = list(getattr(seg, "words_json", []) or [])
+        words = _words_for_segmentation(seg)
         if not words:
             return False
         total_words += len([item for item in words if str(item.get("word", "")).strip()])
@@ -1170,9 +1350,7 @@ def analyze_subtitle_segmentation(entries: list[SubtitleEntry]) -> SubtitleSegme
 def _flatten_segment_words(segments: list[TranscriptSegment]) -> list[dict]:
     flattened: list[dict] = []
     for segment_index, seg in enumerate(segments):
-        for word_index, raw_word in enumerate(list(getattr(seg, "words_json", []) or [])):
-            if not isinstance(raw_word, dict):
-                continue
+        for word_index, raw_word in enumerate(_words_for_segmentation(seg)):
             word_text = re.sub(r"\s+", "", str(raw_word.get("word", "")))
             if not word_text:
                 continue
@@ -1368,7 +1546,7 @@ def _choose_char_split_index(text: str, *, max_chars: int) -> int:
         if score > best_score:
             best_score = score
             best_index = index
-    return max(1, min(best_index, len(text) - 1))
+    return max(1, min(best_index, max_chars, len(text) - 1))
 
 
 def _choose_word_split_index(words: list[dict], *, max_chars: int, max_duration: float) -> int:
@@ -1464,6 +1642,8 @@ def _is_incomplete_subtitle_text(text: str) -> bool:
         return False
     if candidate[-1] in (_HARD_BREAK_CHARS + _SOFT_BREAK_CHARS):
         return False
+    if re.search(r"[A-Za-z]{2,8}$", candidate):
+        return True
     if _looks_like_unclosed_nominal_tail(candidate):
         return True
     if any(candidate.endswith(token) for token in _NO_SPLIT_ENDINGS):
@@ -1932,33 +2112,80 @@ def _collect_low_confidence_windows(entries: list[SubtitleEntry]) -> list[tuple[
     if len(entries) <= 1:
         return []
 
-    suspicious_boundaries = [
+    suspicious_boundaries = {
         index
         for index, (left, right) in enumerate(zip(entries, entries[1:]))
         if _is_low_confidence_boundary(left, right)
-    ]
-    if not suspicious_boundaries:
+    }
+    fragment_entry_indexes = {
+        index
+        for index, entry in enumerate(entries)
+        if _entry_needs_residual_repair(
+            previous=entries[index - 1] if index > 0 else None,
+            current=entry,
+            following=entries[index + 1] if index + 1 < len(entries) else None,
+        )
+    }
+    if not suspicious_boundaries and not fragment_entry_indexes:
         return []
 
     windows: list[tuple[int, int]] = []
-    group_start = suspicious_boundaries[0]
-    group_end = suspicious_boundaries[0]
-    for boundary_index in suspicious_boundaries[1:]:
+    sorted_boundaries = sorted(suspicious_boundaries)
+    if sorted_boundaries:
+        group_start = sorted_boundaries[0]
+        group_end = sorted_boundaries[0]
+    else:
+        group_start = group_end = -1
+    for boundary_index in sorted_boundaries[1:]:
         if boundary_index <= group_end + 1:
             group_end = boundary_index
             continue
         windows.append((max(0, group_start - 1), min(len(entries) - 1, group_end + 2)))
         group_start = group_end = boundary_index
-    windows.append((max(0, group_start - 1), min(len(entries) - 1, group_end + 2)))
+    if sorted_boundaries:
+        windows.append((max(0, group_start - 1), min(len(entries) - 1, group_end + 2)))
+    for entry_index in sorted(fragment_entry_indexes):
+        windows.append((max(0, entry_index - 1), min(len(entries) - 1, entry_index + 1)))
 
     merged_windows: list[tuple[int, int]] = []
-    for start, end in windows:
+    for start, end in sorted(windows):
         if not merged_windows or start > merged_windows[-1][1]:
             merged_windows.append((start, end))
             continue
         previous_start, previous_end = merged_windows[-1]
         merged_windows[-1] = (previous_start, max(previous_end, end))
     return merged_windows
+
+
+def _entry_needs_residual_repair(
+    *,
+    previous: SubtitleEntry | None,
+    current: SubtitleEntry,
+    following: SubtitleEntry | None,
+) -> bool:
+    candidate = str(current.text_raw or "").strip()
+    if not candidate:
+        return False
+    near_neighbor = False
+    if previous is not None and 0.0 <= float(current.start) - float(previous.end) <= _MAX_SEMANTIC_BRIDGE_GAP_SEC:
+        near_neighbor = True
+    if following is not None and 0.0 <= float(following.start) - float(current.end) <= _MAX_SEMANTIC_BRIDGE_GAP_SEC:
+        near_neighbor = True
+    if not near_neighbor:
+        return False
+    if _starts_with_attached_fragment(candidate):
+        return True
+    if _looks_like_unclosed_nominal_tail(candidate):
+        return True
+    if len(candidate) > 8:
+        return False
+    if _starts_with_soft_attached_fragment(candidate):
+        return True
+    if _is_incomplete_subtitle_text(candidate):
+        return True
+    if _looks_like_soft_fragmentary_tail(candidate):
+        return True
+    return False
 
 
 def _build_low_confidence_window_summary(
@@ -2388,6 +2615,8 @@ def _should_merge_subtitle_pair(left: str, right: str) -> bool:
         return True
     if any(right_text.startswith(token) for token in _NO_SPLIT_PREFIXES):
         return True
+    if re.search(r"[A-Za-z]{2,8}$", left_text) and re.match(r"^[\u4e00-\u9fffA-Za-z0-9]", right_text):
+        return True
     if (
         left_text[-1] not in (_HARD_BREAK_CHARS + _SOFT_BREAK_CHARS)
         and len(left_text) <= 6
@@ -2425,6 +2654,18 @@ def _boundary_splits_protected_term(left: str, right: str) -> bool:
     return False
 
 
+def _boundary_splits_model_token(left: str, right: str) -> bool:
+    left_text = str(left or "").strip()
+    right_text = _strip_boundary_leading_particles(right) or str(right or "").strip()
+    if not left_text or not right_text:
+        return False
+    if re.search(rf"[A-Za-z]{{2,8}}(?:{_DISPLAY_NUM_TOKEN})?$", left_text):
+        return bool(re.match(rf"(?:{_DISPLAY_NUM_TOKEN}|[A-Za-z0-9]+)", right_text))
+    if re.search(rf"[A-Za-z]{{1,8}}(?:{_DISPLAY_NUM_TOKEN}){{1,2}}$", left_text):
+        return bool(re.match(rf"(?:{_DISPLAY_NUM_TOKEN}|\d+|[A-Za-z]+)", right_text))
+    return False
+
+
 def _starts_with_attached_fragment(text: str) -> bool:
     right_text = str(text or "").strip()
     if not right_text:
@@ -2436,6 +2677,9 @@ def _starts_with_attached_fragment(text: str) -> bool:
     if any(candidate.startswith(token) for token in _ATTACHED_FRAGMENT_PREFIXES):
         return True
     if len(candidate) <= 2 and not any(candidate.startswith(prefix) for prefix in _GOOD_BREAK_PREFIXES):
+        return True
+    single_char_continuation = _SINGLE_CHAR_CONTINUATION_START_RE.match(candidate)
+    if single_char_continuation and single_char_continuation.group("head") not in _SINGLE_CHAR_FREE_STARTERS:
         return True
     match = re.match(r"^([\u4e00-\u9fffA-Za-z0-9])[，、：,.!?]", candidate)
     if not match:
@@ -2494,6 +2738,8 @@ def _boundary_splits_compound_term(left: str, right: str) -> bool:
     right_text = str(right or "").strip()
     if not left_text or not right_text:
         return False
+    if _boundary_splits_model_token(left_text, right_text):
+        return True
     return any(left_text.endswith(prefix) and right_text.startswith(suffix) for prefix, suffix in _BOUNDARY_COMPOUND_SPLITS)
 
 

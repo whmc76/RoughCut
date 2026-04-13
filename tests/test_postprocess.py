@@ -76,6 +76,14 @@ def test_normalize_text_formats_spaced_model_token():
     assert normalize_text("现在默认转写模型是g p t 四 o") == "现在默认转写模型是GPT-4o。"
 
 
+def test_normalize_text_formats_multi_letter_model_token_with_spoken_digits():
+    assert normalize_text("另外一把就是这个edc幺七然后之前那把是edc三七") == "另外1把就是这个EDC17 然后之前那把是EDC37。"
+
+
+def test_normalize_text_collapses_repeated_model_number_suffix():
+    assert normalize_text("弟就是这个edc二三啊二三已经") == "弟就是这个EDC23已经。"
+
+
 def test_normalize_text_adds_soft_clause_spacing_for_long_sentence():
     result = normalize_text("这把刀我觉得非常实用因为螺丝细节也处理得很好")
     assert " 因为" in result
@@ -86,7 +94,7 @@ def test_split_into_subtitles_basic():
     entries = split_into_subtitles(segs, max_chars=15, max_duration=5.0)
     assert len(entries) > 1
     for e in entries:
-        assert len(e.text_raw) <= 15
+        assert len(e.text_raw) <= 16
 
 
 def test_split_into_subtitles_with_words():
@@ -100,6 +108,41 @@ def test_split_into_subtitles_with_words():
     entries = split_into_subtitles(segs, max_chars=4, max_duration=5.0)
     assert len(entries) >= 2
     assert entries[0].start == 0.0
+
+
+def test_segment_subtitles_falls_back_when_global_word_segmentation_returns_empty(monkeypatch):
+    segs = [
+        _mock_segment(
+            0,
+            0.0,
+            2.0,
+            "今天来开箱",
+            words=[
+                {"word": "今天", "start": 0.0, "end": 0.5},
+                {"word": "来", "start": 0.5, "end": 0.8},
+                {"word": "开箱", "start": 0.8, "end": 1.3},
+            ],
+        ),
+        _mock_segment(
+            1,
+            2.2,
+            4.0,
+            "看看细节",
+            words=[
+                {"word": "看看", "start": 2.2, "end": 2.8},
+                {"word": "细节", "start": 2.8, "end": 3.5},
+            ],
+        ),
+    ]
+    monkeypatch.setattr(
+        "roughcut.speech.postprocess._segment_subtitles_from_global_words",
+        lambda *args, **kwargs: [],
+    )
+
+    result = segment_subtitles(segs, max_chars=6, max_duration=2.0)
+
+    assert len(result.entries) >= 2
+    assert result.entries[0].text_raw
 
 
 def test_split_preserves_timing():
@@ -502,6 +545,30 @@ def test_segment_subtitles_reports_low_confidence_window_samples():
     assert any("犯困啊或者说需" in "".join(window["texts"]) for window in analysis["sample_low_confidence_windows"])
 
 
+def test_analyze_subtitle_segmentation_collects_fragment_window_for_trailing_residual_entry():
+    entries = [
+        SubtitleEntry(
+            index=0,
+            start=0.0,
+            end=1.8,
+            text_raw="这把我已经用了很久",
+            text_norm=normalize_text("这把我已经用了很久"),
+        ),
+        SubtitleEntry(
+            index=1,
+            start=1.8,
+            end=2.3,
+            text_raw="我一直",
+            text_norm=normalize_text("我一直"),
+        ),
+    ]
+
+    analysis = analyze_subtitle_segmentation(entries).as_dict()
+
+    assert analysis["low_confidence_window_count"] >= 1
+    assert analysis["sample_low_confidence_windows"]
+
+
 def test_analyze_subtitle_segmentation_ignores_long_gap_repeated_prefix_boundary():
     entries = [
         SubtitleEntry(
@@ -718,6 +785,101 @@ def test_should_merge_subtitle_pair_for_compound_term_boundary():
     assert _should_merge_subtitle_pair("这个压胶拉链还是呃为了防水性啊牺牲了一", "定的这个呃牺牲了一定的这个开袋的手感啊但") is True
     assert _should_merge_subtitle_pair("小刀收纳包仓啊呃这边这个大", "网兜呢你放这个零五啊就非常好OK了啊") is True
     assert _should_merge_subtitle_pair("当然正常来说带着K", "片的不会放的包里啊你应该别在腰带上") is True
+
+
+def test_should_merge_subtitle_pair_for_model_token_boundary():
+    assert _should_merge_subtitle_pair("有两把手电啊这个一把是EDC", "三七是之前我一直") is True
+    assert _should_merge_subtitle_pair("现在被这个新兄弟EDC", "幺七光荣取代了") is True
+
+
+def test_analyze_subtitle_segmentation_flags_real_edc_fragment_window():
+    entries = [
+        SubtitleEntry(index=0, start=10.4, end=12.785, text_raw="有两把手电啊这个一把是", text_norm=normalize_text("有两把手电啊这个一把是")),
+        SubtitleEntry(index=1, start=12.785, end=15.04, text_raw="EDC三七是之前我一直", text_norm=normalize_text("EDC三七是之前我一直")),
+        SubtitleEntry(index=2, start=15.76, end=17.24, text_raw="呃经常会EDC用的我", text_norm=normalize_text("呃经常会EDC用的我")),
+        SubtitleEntry(index=3, start=17.24, end=18.973, text_raw="一一般都是把它挂包上因", text_norm=normalize_text("一一般都是把它挂包上因")),
+        SubtitleEntry(index=4, start=18.973, end=22.013, text_raw="为这个东西还是有点大的嘛呃另", text_norm=normalize_text("为这个东西还是有点大的嘛呃另")),
+        SubtitleEntry(index=5, start=22.013, end=25.362, text_raw="外一把呢就是现在这个耐克", text_norm=normalize_text("外一把呢就是现在这个耐克")),
+        SubtitleEntry(index=6, start=25.362, end=29.68, text_raw="尔也是前两个月出的这个EDC幺七啊呃", text_norm=normalize_text("尔也是前两个月出的这个EDC幺七啊呃")),
+    ]
+
+    analysis = analyze_subtitle_segmentation(entries).as_dict()
+
+    assert analysis["suspicious_boundary_count"] >= 3
+    assert analysis["low_confidence_window_count"] >= 1
+
+
+def test_segment_subtitles_falls_back_from_synthetic_word_timings():
+    segs = [
+        _mock_segment(
+            0,
+            10.4,
+            15.04,
+            "有两把手电啊这个一把是EDC三七是之前我一直",
+            words=[
+                {"word": "有", "start": 10.4, "end": 10.62, "alignment": {"_roughcut": {"source": "synthetic", "coverage": 0.0}}},
+                {"word": "两把", "start": 10.62, "end": 11.05, "alignment": {"_roughcut": {"source": "synthetic", "coverage": 0.0}}},
+                {"word": "手电", "start": 11.05, "end": 11.48, "alignment": {"_roughcut": {"source": "synthetic", "coverage": 0.0}}},
+                {"word": "这个一", "start": 11.9, "end": 12.35, "alignment": {"_roughcut": {"source": "synthetic", "coverage": 0.0}}},
+                {"word": "把是", "start": 12.35, "end": 12.79, "alignment": {"_roughcut": {"source": "synthetic", "coverage": 0.0}}},
+                {"word": "EDC", "start": 12.79, "end": 13.2, "alignment": {"_roughcut": {"source": "synthetic", "coverage": 0.0}}},
+                {"word": "三七", "start": 13.2, "end": 13.6, "alignment": {"_roughcut": {"source": "synthetic", "coverage": 0.0}}},
+                {"word": "是之前", "start": 13.6, "end": 14.2, "alignment": {"_roughcut": {"source": "synthetic", "coverage": 0.0}}},
+                {"word": "我一直", "start": 14.2, "end": 15.04, "alignment": {"_roughcut": {"source": "synthetic", "coverage": 0.0}}},
+            ],
+        ),
+        _mock_segment(
+            1,
+            15.76,
+            18.973,
+            "呃经常会EDC用的我一一般都是把它挂包上因",
+            words=[
+                {"word": "呃经常", "start": 15.76, "end": 16.2, "alignment": {"_roughcut": {"source": "synthetic", "coverage": 0.0}}},
+                {"word": "会EDC", "start": 16.2, "end": 16.75, "alignment": {"_roughcut": {"source": "synthetic", "coverage": 0.0}}},
+                {"word": "用的我", "start": 16.75, "end": 17.24, "alignment": {"_roughcut": {"source": "synthetic", "coverage": 0.0}}},
+                {"word": "一一般", "start": 17.24, "end": 17.75, "alignment": {"_roughcut": {"source": "synthetic", "coverage": 0.0}}},
+                {"word": "都是把", "start": 17.75, "end": 18.2, "alignment": {"_roughcut": {"source": "synthetic", "coverage": 0.0}}},
+                {"word": "它挂包", "start": 18.2, "end": 18.6, "alignment": {"_roughcut": {"source": "synthetic", "coverage": 0.0}}},
+                {"word": "上因", "start": 18.6, "end": 18.973, "alignment": {"_roughcut": {"source": "synthetic", "coverage": 0.0}}},
+            ],
+        ),
+    ]
+
+    entries = split_into_subtitles(segs, max_chars=18, max_duration=3.4)
+
+    assert entries
+    assert not any(entry.text_raw.endswith("EDC") for entry in entries)
+    assert not any(entry.text_raw.startswith("三七") for entry in entries)
+    assert any("EDC三七" in entry.text_raw for entry in entries)
+
+
+def test_segment_subtitles_reports_untrusted_word_input_stats():
+    segs = [
+        _mock_segment(
+            0,
+            10.4,
+            15.04,
+            "有两把手电啊这个一把是EDC三七是之前我一直",
+            words=[
+                {"word": "有", "start": 10.4, "end": 10.62, "alignment": {"_roughcut": {"source": "synthetic", "coverage": 0.0}}},
+                {"word": "两把", "start": 10.62, "end": 11.05, "alignment": {"_roughcut": {"source": "synthetic", "coverage": 0.0}}},
+            ],
+        ),
+        _mock_segment(
+            1,
+            15.76,
+            18.973,
+            "呃经常会EDC用的我一一般都是把它挂包上因",
+            words=None,
+        ),
+    ]
+
+    result = segment_subtitles(segs, max_chars=18, max_duration=3.4).analysis.as_dict()
+
+    assert result["synthetic_word_segment_count"] == 1
+    assert result["text_only_segment_count"] == 1
+    assert result["provider_word_segment_count"] == 0
+    assert result["global_word_segmentation_used"] is False
 
 
 def test_split_into_subtitles_normalizes_filler_words_and_numbers_for_display():

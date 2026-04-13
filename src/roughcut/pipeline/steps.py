@@ -2616,6 +2616,14 @@ async def run_subtitle_postprocess(job_id: str) -> dict:
             detail=(
                 f"按{split_profile['orientation']}节奏生成字幕 {len(entries)} 条，"
                 f"每条最多 {int(split_profile['max_chars'])} 字 / {float(split_profile['max_duration']):.1f}s"
+                + (
+                    f"，已回退 {int(segmentation_result.analysis.synthetic_word_segment_count) + int(segmentation_result.analysis.untrusted_word_segment_count)} 段不可信词级时间戳"
+                    if (
+                        int(segmentation_result.analysis.synthetic_word_segment_count)
+                        + int(segmentation_result.analysis.untrusted_word_segment_count)
+                    ) > 0
+                    else ""
+                )
             ),
             progress=0.7,
         )
