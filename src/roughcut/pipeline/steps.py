@@ -4728,14 +4728,20 @@ async def run_render(job_id: str) -> dict:
         if tmp_avatar_mp4.exists() and local_avatar_srt is not None:
             write_srt_file(packaged_subtitles, local_avatar_srt)
         write_srt_file(packaged_subtitles, local_ai_effect_srt)
-        packaged_trailing_allowance = await _resolve_packaging_trailing_gap_allowance(render_plan_timeline.data_json)
-        ai_effect_trailing_allowance = await _resolve_packaging_trailing_gap_allowance(ai_effect_render_plan)
+        plain_subtitle_sync = _compute_subtitle_sync_check(local_plain_mp4, local_plain_srt)
+        packaged_trailing_allowance = _variant_expected_trailing_gap(
+            base_sync_check=plain_subtitle_sync,
+            packaging_allowance_sec=await _resolve_packaging_trailing_gap_allowance(render_plan_timeline.data_json),
+        )
+        ai_effect_trailing_allowance = _variant_expected_trailing_gap(
+            base_sync_check=plain_subtitle_sync,
+            packaging_allowance_sec=await _resolve_packaging_trailing_gap_allowance(ai_effect_render_plan),
+        )
         packaged_subtitle_sync = _compute_subtitle_sync_check(
             local_packaged_mp4,
             local_packaged_srt,
             allowed_trailing_gap_sec=packaged_trailing_allowance,
         )
-        plain_subtitle_sync = _compute_subtitle_sync_check(local_plain_mp4, local_plain_srt)
         avatar_subtitle_sync = (
             _compute_subtitle_sync_check(local_avatar_mp4, local_avatar_srt)
             if local_avatar_mp4 is not None and local_avatar_srt is not None and tmp_avatar_mp4.exists()
@@ -6145,12 +6151,33 @@ def _variant_sync_is_blocking(sync_check: dict[str, Any] | None) -> bool:
     return effective_trailing_gap > 1.0 or effective_duration_gap > 1.0
 
 
+def _variant_expected_trailing_gap(
+    *,
+    base_sync_check: dict[str, Any] | None,
+    packaging_allowance_sec: float = 0.0,
+) -> float:
+    base_gap = 0.0
+    if isinstance(base_sync_check, dict):
+        base_gap = float(base_sync_check.get("trailing_gap_sec", 0.0) or 0.0)
+    return max(0.0, base_gap + max(0.0, float(packaging_allowance_sec or 0.0)))
+
+
 def _collect_blocking_variant_sync_issues(sync_checks: dict[str, dict[str, Any] | None]) -> list[str]:
     issues: list[str] = []
     for variant_name, sync_check in sync_checks.items():
         if not _variant_sync_is_blocking(sync_check):
             continue
-        warning_codes = ", ".join(str(code) for code in sync_check.get("warning_codes") or []) or "unknown"
+        warning_codes = ", ".join(str(code) for code in sync_check.get("warning_codes") or [])
+        if not warning_codes and isinstance(sync_check, dict):
+            trailing_gap = float(
+                sync_check.get("effective_trailing_gap_sec", sync_check.get("trailing_gap_sec", 0.0)) or 0.0
+            )
+            duration_gap = float(
+                sync_check.get("effective_duration_gap_sec", sync_check.get("duration_gap_sec", 0.0)) or 0.0
+            )
+            warning_codes = f"effective_trailing_gap={trailing_gap:.3f}s,effective_duration_gap={duration_gap:.3f}s"
+        if not warning_codes:
+            warning_codes = "unknown"
         issues.append(f"{variant_name}: {warning_codes}")
     return issues
 

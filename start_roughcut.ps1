@@ -1321,7 +1321,9 @@ function Stop-RoughCutServices {
     Write-Host "Stopping existing RoughCut services..." -ForegroundColor Cyan
     Stop-RoughCutProcess -Name "API" -Pattern "roughcut\.cli api --host 127\.0\.0\.1 --port"
     Stop-RoughCutProcess -Name "Orchestrator" -Pattern "roughcut\.cli orchestrator --poll-interval"
+    Stop-RoughCutProcess -Name "Media worker" -Pattern "roughcut\.cli worker --queue media_queue"
     Stop-RoughCutProcess -Name "Media worker" -Pattern "celery -A roughcut\.pipeline\.celery_app:celery_app worker --queues=media_queue"
+    Stop-RoughCutProcess -Name "LLM worker" -Pattern "roughcut\.cli worker --queue llm_queue"
     Stop-RoughCutProcess -Name "LLM worker" -Pattern "celery -A roughcut\.pipeline\.celery_app:celery_app worker --queues=llm_queue"
     Stop-RoughCutProcess -Name "Watcher" -Pattern "roughcut\.cli watcher"
 
@@ -1346,7 +1348,8 @@ function Start-RoughCutProcess {
         [string[]]$Arguments,
         [string]$MatchPattern,
         [string]$StdoutPath,
-        [string]$StderrPath
+        [string]$StderrPath,
+        [switch]$HiddenWindow
     )
 
     $matches = @(Get-ProcessMatches -Pattern $MatchPattern)
@@ -1366,14 +1369,21 @@ function Start-RoughCutProcess {
         return
     }
 
-    $process = Start-Process `
-        -FilePath $Python `
-        -ArgumentList $Arguments `
-        -WorkingDirectory $RepoRoot `
-        -NoNewWindow `
-        -PassThru `
-        -RedirectStandardOutput $StdoutPath `
-        -RedirectStandardError $StderrPath
+    $startProcessSplat = @{
+        FilePath = $Python
+        ArgumentList = $Arguments
+        WorkingDirectory = $RepoRoot
+        PassThru = $true
+        RedirectStandardOutput = $StdoutPath
+        RedirectStandardError = $StderrPath
+    }
+    if ($HiddenWindow) {
+        $startProcessSplat["WindowStyle"] = "Hidden"
+    } else {
+        $startProcessSplat["NoNewWindow"] = $true
+    }
+
+    $process = Start-Process @startProcessSplat
 
     [RoughCutJobObject]::Assign($script:ProcessJob, $process.Handle)
     $script:ManagedProcesses += [pscustomobject]@{
@@ -1382,6 +1392,138 @@ function Start-RoughCutProcess {
     }
 
     Write-Host "$Name started (PID $($process.Id))." -ForegroundColor Green
+}
+
+function Get-RoughCutWorkerNodeName {
+    param(
+        [ValidateSet("media_queue", "llm_queue")]
+        [string]$Queue
+    )
+
+    $suffix = if ($Queue -eq "media_queue") { "media-local" } else { "llm-local" }
+    return "$suffix@localhost"
+}
+
+function Test-RoughCutWorkerReady {
+    param(
+        [string]$WorkerNode,
+        [string]$Queue
+    )
+
+    $pingOutput = & $Python -m celery -A roughcut.pipeline.celery_app:celery_app inspect ping -d $WorkerNode --timeout=2 --json 2>$null
+    if ($LASTEXITCODE -ne 0 -or -not $pingOutput) {
+        return $false
+    }
+
+    $queueOutput = & $Python -m celery -A roughcut.pipeline.celery_app:celery_app inspect active_queues -d $WorkerNode --timeout=2 --json 2>$null
+    if ($LASTEXITCODE -ne 0 -or -not $queueOutput) {
+        return $false
+    }
+
+    try {
+        $queueMap = (($queueOutput -join [Environment]::NewLine) | ConvertFrom-Json)
+    } catch {
+        return $false
+    }
+
+    foreach ($property in $queueMap.PSObject.Properties) {
+        foreach ($queueEntry in @($property.Value)) {
+            if ($queueEntry.name -eq $Queue) {
+                return $true
+            }
+        }
+    }
+
+    return $false
+}
+
+function Wait-RoughCutWorkerReady {
+    param(
+        [string]$Name,
+        [string]$MatchPattern,
+        [string]$WorkerNode,
+        [string]$Queue,
+        [string]$StdoutPath,
+        [string]$StderrPath,
+        [int]$TimeoutSec = 30
+    )
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    while ((Get-Date) -lt $deadline) {
+        $matches = @(Get-ProcessMatches -Pattern $MatchPattern)
+        if ($matches.Count -eq 0) {
+            break
+        }
+        if (Test-RoughCutWorkerReady -WorkerNode $WorkerNode -Queue $Queue) {
+            Write-Host "$Name is ready as $WorkerNode." -ForegroundColor Green
+            return
+        }
+        Start-Sleep -Milliseconds 750
+    }
+
+    $stdout = if (Test-Path $StdoutPath) { (Get-Content $StdoutPath -Tail 80 -ErrorAction SilentlyContinue) -join [Environment]::NewLine } else { "" }
+    $stderr = if (Test-Path $StderrPath) { (Get-Content $StderrPath -Tail 80 -ErrorAction SilentlyContinue) -join [Environment]::NewLine } else { "" }
+    if (-not [string]::IsNullOrWhiteSpace($stderr)) {
+        throw "$Name failed to become ready. stderr:`n$stderr"
+    }
+    if (-not [string]::IsNullOrWhiteSpace($stdout)) {
+        throw "$Name failed to become ready. stdout:`n$stdout"
+    }
+    throw "$Name failed to become ready."
+}
+
+function Start-RoughCutWorkerProcess {
+    param(
+        [string]$Name,
+        [ValidateSet("media_queue", "llm_queue")]
+        [string]$Queue,
+        [string]$StdoutPath,
+        [string]$StderrPath
+    )
+
+    $workerNode = Get-RoughCutWorkerNodeName -Queue $Queue
+    $matchPatterns = @(
+        [regex]::Escape("roughcut.cli worker --queue $Queue"),
+        [regex]::Escape("celery -A roughcut.pipeline.celery_app:celery_app worker --queues=$Queue")
+    )
+
+    foreach ($pattern in $matchPatterns) {
+        $matches = @(Get-ProcessMatches -Pattern $pattern)
+        if ($matches.Count -gt 0) {
+            if (Test-RoughCutWorkerReady -WorkerNode $workerNode -Queue $Queue) {
+                Write-Host "$Name is already running and ready. Skipping." -ForegroundColor Yellow
+                return
+            }
+            Stop-RoughCutProcess -Name $Name -Pattern $pattern
+        }
+    }
+
+    $arguments = @(
+        "-m", "roughcut.cli", "worker",
+        "--queue", $Queue,
+        "--pool", "solo",
+        "--concurrency", "1",
+        "--hostname", $workerNode,
+        "--without-gossip",
+        "--without-mingle"
+    )
+    $matchPattern = [regex]::Escape("roughcut.cli worker --queue $Queue --pool solo --concurrency 1 --hostname $workerNode --without-gossip --without-mingle")
+
+    Start-RoughCutProcess `
+        -Name $Name `
+        -Arguments $arguments `
+        -MatchPattern $matchPattern `
+        -StdoutPath $StdoutPath `
+        -StderrPath $StderrPath `
+        -HiddenWindow
+
+    Wait-RoughCutWorkerReady `
+        -Name $Name `
+        -MatchPattern $matchPattern `
+        -WorkerNode $workerNode `
+        -Queue $Queue `
+        -StdoutPath $StdoutPath `
+        -StderrPath $StderrPath
 }
 
 function Wait-ApiReady {
@@ -1589,16 +1731,14 @@ Start-RoughCutProcess `
     -MatchPattern ([regex]::Escape("roughcut.cli orchestrator --poll-interval 2")) `
     -StdoutPath (Join-Path $RepoRoot "logs\orchestrator.out.log") `
     -StderrPath (Join-Path $RepoRoot "logs\orchestrator.err.log")
-Start-RoughCutProcess `
+Start-RoughCutWorkerProcess `
     -Name "Media worker" `
-    -Arguments @("-m", "celery", "-A", "roughcut.pipeline.celery_app:celery_app", "worker", "--queues=media_queue", "--pool=solo", "--concurrency=1", "--loglevel=info") `
-    -MatchPattern ([regex]::Escape("celery -A roughcut.pipeline.celery_app:celery_app worker --queues=media_queue --pool=solo --concurrency=1 --loglevel=info")) `
+    -Queue "media_queue" `
     -StdoutPath (Join-Path $RepoRoot "logs\media-worker.out.log") `
     -StderrPath (Join-Path $RepoRoot "logs\media-worker.err.log")
-Start-RoughCutProcess `
+Start-RoughCutWorkerProcess `
     -Name "LLM worker" `
-    -Arguments @("-m", "celery", "-A", "roughcut.pipeline.celery_app:celery_app", "worker", "--queues=llm_queue", "--pool=solo", "--concurrency=1", "--loglevel=info") `
-    -MatchPattern ([regex]::Escape("celery -A roughcut.pipeline.celery_app:celery_app worker --queues=llm_queue --pool=solo --concurrency=1 --loglevel=info")) `
+    -Queue "llm_queue" `
     -StdoutPath (Join-Path $RepoRoot "logs\llm-worker.out.log") `
     -StderrPath (Join-Path $RepoRoot "logs\llm-worker.err.log")
 

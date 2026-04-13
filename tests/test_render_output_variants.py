@@ -472,6 +472,29 @@ def test_collect_blocking_variant_sync_issues_flags_large_drift():
     assert issues == ["packaged: audio_video_duration_gap_large"]
 
 
+def test_collect_blocking_variant_sync_issues_reports_effective_gaps_when_no_warning_codes():
+    issues = steps_mod._collect_blocking_variant_sync_issues(
+        {
+            "packaged": {
+                "warning_codes": [],
+                "effective_trailing_gap_sec": 1.022,
+                "effective_duration_gap_sec": 1.022,
+            }
+        }
+    )
+
+    assert issues == ["packaged: effective_trailing_gap=1.022s,effective_duration_gap=1.022s"]
+
+
+def test_variant_expected_trailing_gap_includes_base_plain_gap():
+    allowance = steps_mod._variant_expected_trailing_gap(
+        base_sync_check={"trailing_gap_sec": 0.602},
+        packaging_allowance_sec=3.1,
+    )
+
+    assert allowance == pytest.approx(3.702)
+
+
 def test_build_variant_timeline_bundle_contains_variants_and_rules():
     keep_segments = [
         {"type": "keep", "start": 0.0, "end": 4.0},

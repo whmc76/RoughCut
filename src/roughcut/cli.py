@@ -251,21 +251,40 @@ def watcher(path: str, workflow_template: str | None, language: str):
     type=click.Choice(["solo", "prefork"]),
     show_default=True,
 )
-def worker(queue: str, concurrency: int, pool: str):
+@click.option("--hostname", default=None, help="Explicit Celery node name")
+@click.option("--without-gossip", is_flag=True, default=False, help="Disable worker gossip")
+@click.option("--without-mingle", is_flag=True, default=False, help="Disable startup mingle")
+def worker(
+    queue: str,
+    concurrency: int,
+    pool: str,
+    hostname: str | None,
+    without_gossip: bool,
+    without_mingle: bool,
+):
     """Start a Celery worker for the specified queue."""
     from roughcut.pipeline.celery_app import celery_app
 
     queues = ["media_queue", "llm_queue"] if queue == "all" else [queue]
-    click.echo(f"Starting worker for queues: {queues} (pool={pool}, concurrency={concurrency})")
-    celery_app.worker_main(
-        argv=[
-            "worker",
-            f"--queues={','.join(queues)}",
-            f"--concurrency={concurrency}",
-            f"--pool={pool}",
-            "--loglevel=info",
-        ]
+    node_label = hostname or "auto"
+    click.echo(
+        f"Starting worker for queues: {queues} "
+        f"(pool={pool}, concurrency={concurrency}, hostname={node_label})"
     )
+    argv = [
+        "worker",
+        f"--queues={','.join(queues)}",
+        f"--concurrency={concurrency}",
+        f"--pool={pool}",
+        "--loglevel=info",
+    ]
+    if hostname:
+        argv.append(f"--hostname={hostname}")
+    if without_gossip:
+        argv.append("--without-gossip")
+    if without_mingle:
+        argv.append("--without-mingle")
+    celery_app.worker_main(argv=argv)
 
 
 @cli.command("telegram-agent")

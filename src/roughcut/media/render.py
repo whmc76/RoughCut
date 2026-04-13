@@ -2072,11 +2072,22 @@ async def _apply_intro_outro(
     for path in prepared_paths:
         cmd.extend(["-i", str(path)])
 
-    concat_inputs = "".join(f"[{index}:v][{index}:a]" for index in range(len(prepared_paths)))
+    filter_parts: list[str] = []
+    concat_inputs = ""
+    for index in range(len(prepared_paths)):
+        filter_parts.append(
+            f"[{index}:v]scale={expected_width}:{expected_height}:force_original_aspect_ratio=decrease,"
+            f"pad={expected_width}:{expected_height}:(ow-iw)/2:(oh-ih)/2:black,"
+            f"setsar=1,format=yuv420p[v{index}]"
+        )
+        filter_parts.append(
+            f"[{index}:a]aformat=sample_rates=48000:channel_layouts=stereo,asetpts=N/SR/TB[a{index}]"
+        )
+        concat_inputs += f"[v{index}][a{index}]"
     cmd.extend(
         [
             "-filter_complex",
-            f"{concat_inputs}concat=n={len(prepared_paths)}:v=1:a=1[vout][aout]",
+            f"{';'.join(filter_parts)};{concat_inputs}concat=n={len(prepared_paths)}:v=1:a=1[vout][aout]",
             "-map",
             "[vout]",
             "-map",

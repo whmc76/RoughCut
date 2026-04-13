@@ -5,6 +5,7 @@ import pytest
 
 from roughcut.media.render import (
     _apply_insert_clip,
+    _apply_intro_outro,
     _apply_music_and_watermark,
     _build_choreographed_subtitle_items,
     _build_music_volume_expression,
@@ -1004,6 +1005,61 @@ async def test_concat_prepared_bookends_prefers_stream_copy(
     assert copied is True
     assert captured["cmd"][0:7] == ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i"]
     assert captured["cmd"][-2:] == ["-c", "copy"] or captured["cmd"][-3:-1] == ["-c", "copy"]
+
+
+@pytest.mark.asyncio
+async def test_apply_intro_outro_normalizes_all_inputs_before_concat(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import roughcut.media.render as render_mod
+
+    captured: dict[str, object] = {}
+
+    async def fake_prepare_packaging_clip(source_path, output_path, *, expected_width, expected_height, trim_duration_sec=None):
+        output_path.write_bytes(b"prepared")
+        return output_path
+
+    class Result:
+        returncode = 0
+        stderr = ""
+
+    async def fake_run_process(cmd: list[str], timeout: int):
+        captured["cmd"] = cmd
+        output = Path(cmd[-1])
+        output.write_bytes(b"video")
+        return Result()
+
+    monkeypatch.setattr(render_mod, "_prepare_packaging_clip", fake_prepare_packaging_clip)
+    monkeypatch.setattr(render_mod, "_run_process", fake_run_process)
+    monkeypatch.setattr(render_mod, "_probe_duration", lambda path: 8.0)
+    monkeypatch.setattr(render_mod, "_write_debug_text", lambda *args, **kwargs: None)
+    monkeypatch.setattr(render_mod, "_write_process_debug", lambda *args, **kwargs: None)
+
+    source = tmp_path / "body.mp4"
+    intro = tmp_path / "intro.mp4"
+    outro = tmp_path / "outro.mp4"
+    source.write_bytes(b"video")
+    intro.write_bytes(b"video")
+    outro.write_bytes(b"video")
+    output = tmp_path / "packaged.mp4"
+
+    await _apply_intro_outro(
+        source,
+        intro_plan={"path": str(intro)},
+        outro_plan={"path": str(outro)},
+        expected_width=1920,
+        expected_height=1080,
+        output_path=output,
+        debug_dir=None,
+    )
+
+    filter_complex = captured["cmd"][captured["cmd"].index("-filter_complex") + 1]
+    assert "setsar=1,format=yuv420p[v0]" in filter_complex
+    assert "setsar=1,format=yuv420p[v1]" in filter_complex
+    assert "setsar=1,format=yuv420p[v2]" in filter_complex
+    assert "aformat=sample_rates=48000:channel_layouts=stereo,asetpts=N/SR/TB[a0]" in filter_complex
+    assert "concat=n=3:v=1:a=1[vout][aout]" in filter_complex
 
 
 @pytest.mark.asyncio
