@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shutil
 import subprocess
 import uuid
 from contextlib import nullcontext, suppress
@@ -2370,6 +2371,35 @@ async def test_run_content_profile_passes_effective_glossary_terms_into_inferenc
         item.get("correct_form") == "狐蝠工业"
         for item in list(captured.get("glossary_terms") or [])
     )
+
+
+def test_build_effective_glossary_terms_adds_source_identity_constraints():
+    from roughcut.pipeline.steps import _build_effective_glossary_terms
+
+    terms = _build_effective_glossary_terms(
+        glossary_terms=[],
+        workflow_template="edc_tactical",
+        content_profile={
+            "subject_brand": "REATEREATE",
+            "subject_model": "EXO",
+            "source_context": {
+                "video_description": "任务说明依据文件名：继续讲解 REATE EXO 重力刀和 FAS 新款 EDC 整备卷轴的新品预告。",
+                "resolved_feedback": {
+                    "subject_brand": "REATE",
+                    "subject_model": "EXO",
+                    "subject_type": "重力刀",
+                },
+            },
+        },
+        subtitle_items=[],
+        source_name="watch_merge_reate_exo.mp4",
+        subject_domain="knife",
+    )
+
+    by_correct = {str(item.get("correct_form") or ""): item for item in terms}
+    assert "REATE" in by_correct
+    assert "REATEREATE" in list(by_correct["REATE"].get("wrong_forms") or [])
+    assert "EXO" in by_correct
 
 
 @pytest.mark.asyncio
@@ -5718,6 +5748,7 @@ async def test_run_avatar_commentary_segmented_passthrough_renders_only_once(db_
     job_id = uuid.uuid4()
     audio_source = tmp_path / "source.wav"
     audio_source.write_bytes(b"wav")
+    storage_root = tmp_path / "jobs-root"
     provider_calls: list[dict] = []
 
     async with factory() as session:
@@ -5782,11 +5813,23 @@ async def test_run_avatar_commentary_segmented_passthrough_renders_only_once(db_
         }
 
     class FakeStorage:
+        def resolve_path(self, key):
+            return storage_root / Path(key)
+
         async def async_download_file(self, storage_path, local_path):
             Path(local_path).write_bytes(audio_source.read_bytes())
 
+        async def async_upload_file(self, local_path, key):
+            target = self.resolve_path(key)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(local_path, target)
+            return key
+
     async def fake_extract_audio_clip(source_audio_path, clip_path, start_time, end_time):
         Path(clip_path).write_bytes(b"clip")
+
+    async def fake_probe(path):
+        return SimpleNamespace(duration=2.0, width=1080, height=1080)
 
     def fake_select_default_avatar_profile():
         return {"id": "profile-1", "display_name": "测试数字人"}
@@ -5799,6 +5842,8 @@ async def test_run_avatar_commentary_segmented_passthrough_renders_only_once(db_
     class FakeAvatarProvider:
         def execute_render(self, *, job_id, request):
             provider_calls.append(request)
+            rendered = tmp_path / "avatar_seg_001.mp4"
+            rendered.write_bytes(b"video")
             return {
                 "provider": "heygem",
                 "status": "success",
@@ -5807,7 +5852,7 @@ async def test_run_avatar_commentary_segmented_passthrough_renders_only_once(db_
                         "segment_id": "avatar_seg_001",
                         "status": "success",
                         "result": "/avatar_seg_001.mp4",
-                        "local_result_path": str(tmp_path / "avatar_seg_001.mp4"),
+                        "local_result_path": str(rendered),
                     }
                 ],
             }
@@ -5815,6 +5860,7 @@ async def test_run_avatar_commentary_segmented_passthrough_renders_only_once(db_
     monkeypatch.setattr(steps_mod, "build_avatar_commentary_plan", fake_build_avatar_commentary_plan)
     monkeypatch.setattr(steps_mod, "get_storage", lambda: FakeStorage())
     monkeypatch.setattr(steps_mod, "extract_audio_clip", fake_extract_audio_clip)
+    monkeypatch.setattr(steps_mod, "probe", fake_probe)
     monkeypatch.setattr(steps_mod, "_select_default_avatar_profile", fake_select_default_avatar_profile)
     monkeypatch.setattr(steps_mod, "_pick_avatar_profile_speaking_video_path", fake_pick_avatar_profile_speaking_video_path)
     monkeypatch.setattr(steps_mod, "get_avatar_provider", lambda: FakeAvatarProvider())
@@ -5830,7 +5876,160 @@ async def test_run_avatar_commentary_segmented_passthrough_renders_only_once(db_
         assert artifact is not None
         assert artifact.data_json["render_execution"]["status"] == "success"
         assert artifact.data_json["segments"][0]["video_status"] == "success"
-        assert artifact.data_json["segments"][0]["video_local_path"].endswith("avatar_seg_001.mp4")
+        assert artifact.data_json["segments"][0]["video_local_path"].endswith("avatar_segments\\avatar_seg_001.mp4")
+        assert Path(artifact.data_json["segments"][0]["video_local_path"]).exists()
+
+
+@pytest.mark.asyncio
+async def test_run_render_ai_effect_variant_inherits_avatar_pip_source(db_engine, monkeypatch, tmp_path: Path):
+    import roughcut.pipeline.steps as steps_mod
+
+    factory = async_sessionmaker(db_engine, expire_on_commit=False)
+    job_id = uuid.uuid4()
+    created_at = datetime(2026, 4, 14, tzinfo=timezone.utc)
+    source_path = tmp_path / "source.mp4"
+    source_path.write_bytes(b"source")
+    out_dir = tmp_path / "exports" / "demo"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    avatar_rendered = tmp_path / "avatar_track.mp4"
+    avatar_rendered.write_bytes(b"avatar")
+    render_calls: list[dict[str, Any]] = []
+
+    async with factory() as session:
+        session.add(
+            Job(
+                id=job_id,
+                source_path=str(source_path),
+                source_name="demo.mp4",
+                created_at=created_at,
+                status="processing",
+                language="zh-CN",
+                enhancement_modes=["avatar_commentary"],
+            )
+        )
+        session.add(JobStep(job_id=job_id, step_name="render", status="running"))
+        session.add(
+            Timeline(
+                job_id=job_id,
+                version=1,
+                timeline_type="editorial",
+                data_json={"segments": [{"type": "keep", "start": 2.0, "end": 10.0}]},
+            )
+        )
+        session.add(
+            Timeline(
+                job_id=job_id,
+                version=1,
+                timeline_type="render_plan",
+                data_json={
+                    "avatar_commentary": {
+                        "mode": "full_track_audio_passthrough",
+                        "integration_mode": "picture_in_picture",
+                        "provider": "heygem",
+                        "overlay_position": "bottom_right",
+                        "overlay_scale": 0.22,
+                        "overlay_margin": 28,
+                        "safe_margin": 0.1,
+                    },
+                    "editing_accents": {"style": "smart_effect_rhythm"},
+                    "subtitles": {"style": "bold_yellow_outline"},
+                },
+            )
+        )
+        session.add(
+            SubtitleItem(
+                job_id=job_id,
+                version=1,
+                item_index=0,
+                start_time=2.0,
+                end_time=3.5,
+                text_raw="测试字幕",
+                text_norm="测试字幕",
+                text_final="测试字幕",
+            )
+        )
+        await session.commit()
+
+    monkeypatch.setattr(steps_mod, "get_session_factory", lambda: factory)
+    monkeypatch.setattr(steps_mod, "_load_preferred_downstream_profile", AsyncMock(return_value=(None, {})))
+    monkeypatch.setattr(steps_mod, "get_output_project_dir", lambda *args, **kwargs: out_dir)
+    monkeypatch.setattr(steps_mod, "get_settings", lambda: SimpleNamespace(render_debug_dir=str(tmp_path / "debug")))
+    monkeypatch.setattr(steps_mod, "_set_step_progress", AsyncMock())
+    monkeypatch.setattr(steps_mod, "_spawn_step_heartbeat", lambda **kwargs: None)
+    monkeypatch.setattr(steps_mod, "_resolve_source", AsyncMock(return_value=source_path))
+    monkeypatch.setattr(steps_mod, "build_plain_render_plan", lambda plan: {"style": "plain"})
+    monkeypatch.setattr(
+        steps_mod,
+        "build_ai_effect_render_plan",
+        lambda *args, **kwargs: {
+            "editing_accents": {"style": "smart_effect_rhythm"},
+            "avatar_commentary": None,
+            "subtitles": {"style": "bold_yellow_outline"},
+        },
+    )
+    monkeypatch.setattr(
+        steps_mod,
+        "remap_subtitles_to_timeline",
+        lambda subtitles, keep_segments: [{"start_time": 0.0, "end_time": 1.5, "text_final": "测试字幕"}],
+    )
+    monkeypatch.setattr(
+        steps_mod,
+        "_map_subtitles_to_packaged_timeline",
+        AsyncMock(return_value=[{"start_time": 0.0, "end_time": 1.5, "text_final": "包装字幕"}]),
+    )
+    monkeypatch.setattr(
+        steps_mod,
+        "_map_editing_accents_to_packaged_timeline",
+        AsyncMock(return_value={"emphasis_overlays": [], "sound_effects": []}),
+    )
+    monkeypatch.setattr(steps_mod, "_resolve_transition_overlap_offsets", lambda *args, **kwargs: [])
+    monkeypatch.setattr(steps_mod, "_render_full_track_avatar_video", AsyncMock(return_value=avatar_rendered))
+
+    async def fake_overlay_avatar_picture_in_picture(*, output_path: Path, **kwargs):
+        Path(output_path).write_bytes(b"avatar-pip")
+
+    async def fake_render_video(*, source_path: Path, render_plan: dict[str, Any], editorial_timeline: dict[str, Any], output_path: Path, subtitle_items, **kwargs):
+        render_calls.append(
+            {
+                "source_path": Path(source_path),
+                "render_plan": render_plan,
+                "editorial_timeline": editorial_timeline,
+                "output_path": Path(output_path),
+                "subtitle_items": subtitle_items,
+            }
+        )
+        Path(output_path).write_bytes(b"video")
+
+    async def fake_probe(path):
+        name = Path(path).name
+        duration = 8.0 if "avatar_pip" in name else 8.0
+        return SimpleNamespace(duration=duration, width=1080, height=1920)
+
+    async def fake_extract_cover_frame(source, output_path, **kwargs):
+        Path(output_path).write_bytes(b"cover")
+        return []
+
+    monkeypatch.setattr(steps_mod, "_overlay_avatar_picture_in_picture", fake_overlay_avatar_picture_in_picture)
+    monkeypatch.setattr(steps_mod, "render_video", fake_render_video)
+    monkeypatch.setattr(steps_mod, "probe", fake_probe)
+    monkeypatch.setattr(steps_mod, "write_srt_file", lambda items, path: Path(path).write_text("1\n00:00:00,000 --> 00:00:01,000\n测试\n", encoding="utf-8"))
+    monkeypatch.setattr(steps_mod, "_compute_subtitle_sync_check", lambda *args, **kwargs: {"status": "ok"})
+    monkeypatch.setattr(steps_mod, "_variant_expected_trailing_gap", lambda *args, **kwargs: 0.0)
+    monkeypatch.setattr(steps_mod, "_resolve_packaging_trailing_gap_allowance", AsyncMock(return_value=0.0))
+    monkeypatch.setattr(steps_mod, "_collect_blocking_variant_sync_issues", lambda checks: [])
+    monkeypatch.setattr(steps_mod, "_get_cover_seek", AsyncMock(return_value=0.0))
+    monkeypatch.setattr(steps_mod, "extract_cover_frame", fake_extract_cover_frame)
+    monkeypatch.setattr(steps_mod, "load_cover_selection_summary", lambda path: None)
+
+    await steps_mod.run_render(str(job_id))
+
+    ai_effect_call = next(call for call in render_calls if call["output_path"].name == "output_ai_effect.mp4")
+    packaged_call = next(call for call in render_calls if call["output_path"].name == "output_packaged.mp4")
+
+    assert ai_effect_call["source_path"].name == "output_plain.avatar_pip.mp4"
+    assert packaged_call["source_path"].name == "output_plain.avatar_pip.mp4"
+    assert ai_effect_call["editorial_timeline"] == {"segments": [{"type": "keep", "start": 0.0, "end": 8.0}]}
+    assert ai_effect_call["render_plan"]["avatar_commentary"]["integration_mode"] == "picture_in_picture"
 
 
 @pytest.mark.asyncio
@@ -6040,6 +6239,64 @@ async def test_overlay_avatar_picture_in_picture_applies_rounded_corners_and_bor
     assert masked_corner_pixel == (0, 0, 0)
     assert border_pixel != (0, 0, 0)
     assert avatar_pixel[0] > 150 and avatar_pixel[1] < 80 and avatar_pixel[2] < 80
+
+
+@pytest.mark.asyncio
+async def test_overlay_avatar_segments_picture_in_picture_limits_overlay_to_segment_window(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import roughcut.pipeline.steps as steps_mod
+
+    base_video = tmp_path / "base.mp4"
+    avatar_video = tmp_path / "avatar_seg_001.mp4"
+    output_video = tmp_path / "output.mp4"
+    base_video.write_bytes(b"base")
+    avatar_video.write_bytes(b"avatar")
+
+    captured: dict[str, Any] = {}
+
+    async def fake_probe(path: Path):
+        if Path(path) == base_video:
+            return SimpleNamespace(width=360, height=640, duration=10.0, fps=30.0)
+        return SimpleNamespace(width=120, height=160, duration=2.0, fps=25.0)
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(steps_mod, "probe", fake_probe)
+    monkeypatch.setattr(steps_mod.subprocess, "run", fake_run)
+    monkeypatch.setattr(steps_mod, "get_settings", lambda: SimpleNamespace(ffmpeg_timeout_sec=30))
+
+    await steps_mod._overlay_avatar_segments_picture_in_picture(
+        base_video_path=base_video,
+        avatar_segments=[
+            {
+                "segment_id": "avatar_seg_001",
+                "start_time": 2.0,
+                "end_time": 4.0,
+                "duration_sec": 2.0,
+                "video_local_path": str(avatar_video),
+            }
+        ],
+        output_path=output_video,
+        position="bottom_right",
+        scale=0.28,
+        margin=20,
+        corner_radius=26,
+        border_width=4,
+        border_color="#F4E4B8",
+    )
+
+    filter_complex = captured["cmd"][captured["cmd"].index("-filter_complex") + 1]
+
+    assert "color=c=0xF4E4B8" in filter_complex
+    assert ":d=2.000000" in filter_complex
+    assert "trim=duration=2.000000" in filter_complex
+    assert "setpts=PTS-STARTPTS+2.000000/TB" in filter_complex
+    assert "enable='between(t,2.000000,4.000000)'" in filter_complex
+    assert "repeatlast=0" in filter_complex
 
 
 def test_build_avatar_picture_in_picture_filters_retunes_duration_and_fps():

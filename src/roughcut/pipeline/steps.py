@@ -5,6 +5,7 @@ These are called by Celery tasks (which handle the async→sync bridge).
 """
 from __future__ import annotations
 
+import copy
 import asyncio
 import hashlib
 import json
@@ -4440,10 +4441,9 @@ async def run_render(job_id: str) -> dict:
             )
         avatar_result: dict[str, Any] | None = None
         avatar_variant_source_path: Path | None = None
+        avatar_variant_duration_sec: float | None = None
         avatar_variant_editorial_timeline: dict[str, Any] | None = None
         avatar_overlay_accents: dict[str, Any] | None = None
-        packaged_source_path = tmp_plain_mp4
-        packaged_editorial_timeline = plain_variant_editorial_timeline
         if (
             "avatar_commentary" in set(getattr(job, "enhancement_modes", []) or [])
             and str(avatar_plan.get("mode") or "") == "full_track_audio_passthrough"
@@ -4479,9 +4479,8 @@ async def run_render(job_id: str) -> dict:
                     )
                     pip_duration = float((await probe(pip_output_path)).duration or 0.0)
                     avatar_variant_source_path = pip_output_path
+                    avatar_variant_duration_sec = pip_duration
                     avatar_variant_editorial_timeline = _build_full_length_variant_timeline(pip_duration)
-                    packaged_source_path = avatar_variant_source_path
-                    packaged_editorial_timeline = avatar_variant_editorial_timeline
                     tmp_avatar_mp4 = avatar_variant_source_path
                     avatar_result = {
                         **(avatar_result or {}),
@@ -4538,9 +4537,8 @@ async def run_render(job_id: str) -> dict:
                     )
                     pip_duration = float((await probe(pip_output_path)).duration or 0.0)
                     avatar_variant_source_path = pip_output_path
+                    avatar_variant_duration_sec = pip_duration
                     avatar_variant_editorial_timeline = _build_full_length_variant_timeline(pip_duration)
-                    packaged_source_path = avatar_variant_source_path
-                    packaged_editorial_timeline = avatar_variant_editorial_timeline
                     tmp_avatar_mp4 = avatar_variant_source_path
                     avatar_result = {
                         **(avatar_result or {}),
@@ -4597,12 +4595,30 @@ async def run_render(job_id: str) -> dict:
                 detail="素版已完成，开始生成包装版",
                 progress=0.55,
             )
+        packaged_source_path, packaged_editorial_timeline, packaged_subtitles = _resolve_packaged_render_variant(
+            original_source_path=tmp_plain_mp4,
+            original_editorial_timeline=plain_variant_editorial_timeline,
+            original_subtitle_items=packaged_subtitles,
+            variant_source_path=avatar_variant_source_path,
+            variant_duration_sec=avatar_variant_duration_sec,
+            variant_subtitle_items=packaged_subtitles,
+        )
+        ai_effect_source_path, ai_effect_editorial_timeline, ai_effect_subtitles = _resolve_packaged_render_variant(
+            original_source_path=tmp_plain_mp4,
+            original_editorial_timeline=plain_variant_editorial_timeline,
+            original_subtitle_items=packaged_subtitles,
+            variant_source_path=avatar_variant_source_path,
+            variant_duration_sec=avatar_variant_duration_sec,
+            variant_subtitle_items=packaged_subtitles,
+        )
+        if avatar_variant_source_path is not None and avatar_variant_duration_sec is not None:
+            ai_effect_render_plan["avatar_commentary"] = copy.deepcopy(avatar_plan)
         await render_video(
-            source_path=tmp_plain_mp4,
+            source_path=ai_effect_source_path,
             render_plan=ai_effect_render_plan,
-            editorial_timeline=plain_variant_editorial_timeline,
+            editorial_timeline=ai_effect_editorial_timeline,
             output_path=tmp_ai_effect_mp4,
-            subtitle_items=packaged_subtitles,
+            subtitle_items=ai_effect_subtitles,
             overlay_editing_accents=ai_effect_overlay_accents,
             debug_dir=debug_dir / "ai_effect_variant",
         )
@@ -4727,7 +4743,7 @@ async def run_render(job_id: str) -> dict:
         write_srt_file(remapped_subtitles, local_plain_srt)
         if tmp_avatar_mp4.exists() and local_avatar_srt is not None:
             write_srt_file(packaged_subtitles, local_avatar_srt)
-        write_srt_file(packaged_subtitles, local_ai_effect_srt)
+        write_srt_file(ai_effect_subtitles, local_ai_effect_srt)
         plain_subtitle_sync = _compute_subtitle_sync_check(local_plain_mp4, local_plain_srt)
         packaged_trailing_allowance = _variant_expected_trailing_gap(
             base_sync_check=plain_subtitle_sync,
@@ -4837,9 +4853,9 @@ async def run_render(job_id: str) -> dict:
                 media_path=local_ai_effect_mp4,
                 srt_path=local_ai_effect_srt,
                 media_meta=ai_effect_meta,
-                subtitle_events=packaged_subtitles,
+                subtitle_events=ai_effect_subtitles,
                 transition_offsets=ai_effect_transition_offsets,
-                segments=editorial_timeline.data_json.get("segments") or [],
+                segments=ai_effect_editorial_timeline.get("segments") or [],
                 overlay_events=ai_effect_overlay_accents,
                 quality_check=ai_effect_subtitle_sync or {},
             ),
@@ -6592,31 +6608,49 @@ async def _overlay_avatar_segments_picture_in_picture(
     current_label = "0:v"
     for index, segment in enumerate(available_segments, start=1):
         start_time = max(0.0, float(segment.get("start_time") or 0.0))
+        end_time = max(start_time, float(segment.get("end_time") or start_time))
+        segment_duration = max(
+            0.1,
+            float(segment.get("duration_sec") or 0.0) or max(0.0, end_time - start_time),
+        )
+        if end_time <= start_time:
+            end_time = start_time + segment_duration
+        enable_expr = f"between(t,{start_time:.6f},{end_time:.6f})"
         avatar_filter = _build_rounded_rgba_filter(
             input_label=f"{index}:v",
             output_label=f"pipfg{index}",
             width=overlay_width,
             height=overlay_height,
             corner_radius=avatar_corner_radius,
-            extra_filters=f"setpts=PTS+{start_time}/TB,scale={overlay_width}:{overlay_height}",
+            extra_filters=(
+                f"trim=duration={segment_duration:.6f},"
+                f"setpts=PTS-STARTPTS+{start_time:.6f}/TB,"
+                f"scale={overlay_width}:{overlay_height}"
+            ),
         )
         filter_parts.append(avatar_filter)
         if resolved_border_width > 0:
-            filter_parts.append(_build_rounded_color_filter(
-                output_label=f"pipbg{index}",
-                color=border_rgb,
-                width=frame_width,
-                height=frame_height,
-                corner_radius=resolved_corner_radius,
-            ))
             filter_parts.append(
-                f"[pipbg{index}][pipfg{index}]overlay={resolved_border_width}:{resolved_border_width}:format=auto:alpha=straight[pip{index}]"
+                _build_timed_rounded_color_filter(
+                    output_label=f"pipbg{index}",
+                    color=border_rgb,
+                    width=frame_width,
+                    height=frame_height,
+                    corner_radius=resolved_corner_radius,
+                    start_time=start_time,
+                    duration=segment_duration,
+                )
+            )
+            filter_parts.append(
+                f"[pipbg{index}][pipfg{index}]overlay={resolved_border_width}:{resolved_border_width}:"
+                f"eof_action=pass:repeatlast=0:format=auto:alpha=straight[pip{index}]"
             )
         else:
             filter_parts.append(f"[pipfg{index}]copy[pip{index}]")
         next_label = f"vseg{index}"
         filter_parts.append(
-            f"[{current_label}][pip{index}]overlay=x={overlay_x}:y={overlay_y}:eof_action=pass:format=auto:alpha=straight[{next_label}]"
+            f"[{current_label}][pip{index}]overlay=x={overlay_x}:y={overlay_y}:enable='{enable_expr}':"
+            f"eof_action=pass:repeatlast=0:format=auto:alpha=straight[{next_label}]"
         )
         current_label = next_label
 
@@ -6827,6 +6861,30 @@ def _build_rounded_color_filter(
     alpha_expr = _build_rounded_alpha_expr(width=width, height=height, corner_radius=corner_radius)
     return (
         f"color=c={color}:s={width}x{height},format=yuva444p,"
+        f"geq=lum='lum(X,Y)':cb='cb(X,Y)':cr='cr(X,Y)':alpha_expr='{alpha_expr}'[{output_label}]"
+    )
+
+
+def _build_timed_rounded_color_filter(
+    *,
+    output_label: str,
+    color: str,
+    width: int,
+    height: int,
+    corner_radius: int,
+    start_time: float,
+    duration: float,
+) -> str:
+    duration_expr = max(0.1, float(duration or 0.0))
+    filter_prefix = (
+        f"color=c={color}:s={width}x{height}:d={duration_expr:.6f},"
+        f"setpts=PTS-STARTPTS+{max(0.0, float(start_time or 0.0)):.6f}/TB"
+    )
+    if corner_radius <= 0:
+        return f"{filter_prefix},format=rgba[{output_label}]"
+    alpha_expr = _build_rounded_alpha_expr(width=width, height=height, corner_radius=corner_radius)
+    return (
+        f"{filter_prefix},format=yuva444p,"
         f"geq=lum='lum(X,Y)':cb='cb(X,Y)':cr='cr(X,Y)':alpha_expr='{alpha_expr}'[{output_label}]"
     )
 
