@@ -705,10 +705,16 @@ def _resolve_subtitle_sync_check(render_outputs: dict[str, Any]) -> dict[str, An
     return _compute_subtitle_sync_check(Path(packaged_mp4), Path(packaged_srt))
 
 
-def _compute_subtitle_sync_check(video_path: Path, subtitle_path: Path) -> dict[str, Any] | None:
+def _compute_subtitle_sync_check(
+    video_path: Path,
+    subtitle_path: Path,
+    *,
+    allowed_trailing_gap_sec: float = 0.0,
+) -> dict[str, Any] | None:
     if not video_path.exists() or not subtitle_path.exists():
         return None
     video_duration = _probe_media_duration(video_path)
+    stream_durations = _probe_media_stream_durations(video_path)
     subtitle_ranges = _parse_srt_ranges(subtitle_path)
     if video_duration <= 0 or not subtitle_ranges:
         return None
@@ -718,17 +724,24 @@ def _compute_subtitle_sync_check(video_path: Path, subtitle_path: Path) -> dict[
     out_of_bounds_count = sum(1 for start, end in subtitle_ranges if start < -0.05 or end > video_duration + 0.35 or end < start)
     leading_gap = max(0.0, first_start)
     trailing_gap = max(0.0, video_duration - last_end)
+    effective_trailing_gap = max(0.0, trailing_gap - max(0.0, float(allowed_trailing_gap_sec or 0.0)))
     duration_gap = abs(video_duration - last_end)
+    effective_duration_gap = max(0.0, duration_gap - max(0.0, float(allowed_trailing_gap_sec or 0.0)))
+    audio_duration = stream_durations.get("audio_duration_sec") or video_duration
+    video_stream_duration = stream_durations.get("video_duration_sec") or video_duration
+    audio_video_duration_gap = abs(video_stream_duration - audio_duration)
 
     warning_codes: list[str] = []
     if out_of_bounds_count > 0:
         warning_codes.append("subtitle_out_of_bounds")
-    if trailing_gap > max(2.0, video_duration * 0.12):
+    if effective_trailing_gap > max(2.0, video_duration * 0.12):
         warning_codes.append("subtitle_trailing_gap_large")
     if leading_gap > max(2.5, video_duration * 0.15):
         warning_codes.append("subtitle_leading_gap_large")
-    if duration_gap > max(2.5, video_duration * 0.15):
+    if effective_duration_gap > max(2.5, video_duration * 0.15):
         warning_codes.append("subtitle_duration_gap_large")
+    if audio_video_duration_gap > max(0.35, video_duration * 0.02):
+        warning_codes.append("audio_video_duration_gap_large")
 
     status = "warning" if warning_codes else "ok"
     message = (
@@ -744,7 +757,12 @@ def _compute_subtitle_sync_check(video_path: Path, subtitle_path: Path) -> dict[
         "subtitle_last_end_sec": round(last_end, 3),
         "leading_gap_sec": round(leading_gap, 3),
         "trailing_gap_sec": round(trailing_gap, 3),
+        "allowed_trailing_gap_sec": round(max(0.0, float(allowed_trailing_gap_sec or 0.0)), 3),
+        "effective_trailing_gap_sec": round(effective_trailing_gap, 3),
         "duration_gap_sec": round(duration_gap, 3),
+        "effective_duration_gap_sec": round(effective_duration_gap, 3),
+        "audio_duration_sec": round(audio_duration, 3),
+        "audio_video_duration_gap_sec": round(audio_video_duration_gap, 3),
         "subtitle_out_of_bounds_count": out_of_bounds_count,
         "warning_codes": warning_codes,
     }
@@ -770,6 +788,43 @@ def _probe_media_duration(path: Path) -> float:
         return float(payload.get("format", {}).get("duration", 0.0) or 0.0)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _probe_media_stream_durations(path: Path) -> dict[str, float]:
+    result = subprocess.run(
+        ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_format", "-show_streams", str(path)],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=10,
+        check=False,
+    )
+    if result.returncode != 0:
+        return {}
+    try:
+        payload = json.loads(result.stdout or "{}")
+    except Exception:
+        return {}
+
+    streams = payload.get("streams") or []
+    video_stream = next((stream for stream in streams if stream.get("codec_type") == "video"), {})
+    audio_stream = next((stream for stream in streams if stream.get("codec_type") == "audio"), {})
+
+    def _coerce(value: Any) -> float | None:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    durations: dict[str, float] = {}
+    video_duration = _coerce(video_stream.get("duration"))
+    audio_duration = _coerce(audio_stream.get("duration"))
+    if video_duration is not None:
+        durations["video_duration_sec"] = video_duration
+    if audio_duration is not None:
+        durations["audio_duration_sec"] = audio_duration
+    return durations
 
 
 def _parse_srt_ranges(path: Path) -> list[tuple[float, float]]:

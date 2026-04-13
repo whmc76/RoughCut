@@ -10,6 +10,7 @@ import hashlib
 import json
 import logging
 import re
+import shutil
 import subprocess
 import tempfile
 import time
@@ -32,6 +33,8 @@ from roughcut.creative import (
     build_job_creative_profile,
     multilingual_translation_mode_enabled,
 )
+from roughcut.creative.avatar import refine_avatar_commentary_segments_for_media_duration
+from roughcut.docker_gpu_guard import _acquire_operation_lock, _release_operation_lock
 from roughcut.db.models import Artifact, GlossaryTerm, Job, JobStep, RenderOutput, SubtitleItem, Timeline, TranscriptSegment
 from roughcut.db.session import get_session_factory
 from roughcut.edit.decisions import (
@@ -46,7 +49,6 @@ from roughcut.edit.otio_export import export_to_otio
 from roughcut.edit.presets import normalize_workflow_template_name
 from roughcut.edit.render_plan import (
     build_ai_effect_render_plan,
-    build_avatar_render_plan,
     build_plain_render_plan,
     build_render_plan,
     build_smart_editing_accents,
@@ -82,12 +84,14 @@ from roughcut.providers.reasoning.base import Message
 from roughcut.pipeline.quality import _compute_subtitle_sync_check, evaluate_profile_identity_gate
 from roughcut.review.content_profile import (
     _build_conservative_identity_summary,
+    apply_source_identity_constraints,
     apply_content_profile_feedback,
     apply_identity_review_guard,
     assess_content_profile_automation,
     build_content_profile_cache_fingerprint,
     build_review_feedback_verification_bundle,
     build_transcript_excerpt,
+    extract_source_identity_constraints,
     enrich_content_profile,
     infer_content_profile,
     polish_subtitle_items,
@@ -143,6 +147,9 @@ from roughcut.speech.postprocess import (
 from roughcut.speech.transcribe import persist_empty_transcript_result, transcribe_audio
 from roughcut.storage.s3 import get_storage, job_key
 from roughcut.usage import track_step_usage, track_usage_operation
+
+_AVATAR_SEGMENT_READY_RETRIES = 60
+_AVATAR_SEGMENT_READY_RETRY_SECONDS = 1.0
 
 
 STEP_LABELS = {
@@ -1919,6 +1926,72 @@ def _serialize_glossary_terms(terms: list[GlossaryTerm]) -> list[dict[str, str |
     ]
 
 
+def _dedupe_glossary_wrong_forms(*values: Any, correct_form: str) -> list[str]:
+    deduped: list[str] = []
+    seen: set[str] = set()
+    normalized_correct = _normalize_profile_value(correct_form)
+    for raw in values:
+        candidates = list(raw) if isinstance(raw, (list, tuple, set)) else [raw]
+        for item in candidates:
+            text = str(item or "").strip()
+            normalized = _normalize_profile_value(text)
+            if not text or not normalized or normalized == normalized_correct or normalized in seen:
+                continue
+            seen.add(normalized)
+            deduped.append(text)
+    return deduped
+
+
+def _build_source_identity_glossary_terms(
+    content_profile: dict[str, Any] | None,
+    *,
+    raw_profile: dict[str, Any] | None = None,
+    source_name: str = "",
+) -> list[dict[str, Any]]:
+    effective_profile = dict(content_profile or {})
+    original_profile = dict(raw_profile or {})
+    constraints = extract_source_identity_constraints(effective_profile, source_name=source_name)
+    if not constraints:
+        return []
+
+    context_hint = "文件名/任务说明经 LLM 解析后的品牌型号约束，后续字幕与文案必须按此校正。"
+    terms: list[dict[str, Any]] = []
+    for field_name in ("subject_brand", "subject_model"):
+        correct_form = str(constraints.get(field_name) or "").strip()
+        if not correct_form:
+            continue
+        wrong_forms = _dedupe_glossary_wrong_forms(
+            constraints.get(f"{field_name}_candidates"),
+            original_profile.get(field_name),
+            correct_form=correct_form,
+        )
+        terms.append(
+            {
+                "correct_form": correct_form,
+                "wrong_forms": wrong_forms,
+                "category": "source_identity",
+                "context_hint": context_hint,
+            }
+        )
+
+    brand = str(constraints.get("subject_brand") or "").strip()
+    model = str(constraints.get("subject_model") or "").strip()
+    if brand and model:
+        combined_correct = f"{brand} {model}".strip()
+        terms.append(
+            {
+                "correct_form": combined_correct,
+                "wrong_forms": _dedupe_glossary_wrong_forms(
+                    [f"{brand}{model}", f"{brand}·{model}", f"{brand}-{model}"],
+                    correct_form=combined_correct,
+                ),
+                "category": "source_identity",
+                "context_hint": context_hint,
+            }
+        )
+    return terms
+
+
 def _build_effective_glossary_terms(
     *,
     glossary_terms: list[GlossaryTerm] | list[dict[str, Any]],
@@ -1928,7 +2001,11 @@ def _build_effective_glossary_terms(
     source_name: str | None = None,
     subject_domain: str | None = None,
 ) -> list[dict[str, str | list[str] | None]]:
-    effective_content_profile = dict(content_profile or {})
+    raw_content_profile = dict(content_profile or {})
+    effective_content_profile = apply_source_identity_constraints(
+        raw_content_profile,
+        source_name=source_name or "",
+    )
     if subject_domain and not effective_content_profile.get("subject_domain"):
         effective_content_profile["subject_domain"] = subject_domain
     serialized = [
@@ -1958,6 +2035,14 @@ def _build_effective_glossary_terms(
         source_name=source_name,
     )
     merged_terms = merge_glossary_terms(serialized, builtin)
+    merged_terms = merge_glossary_terms(
+        merged_terms,
+        _build_source_identity_glossary_terms(
+            effective_content_profile,
+            raw_profile=raw_content_profile,
+            source_name=source_name or "",
+        ),
+    )
     if not subject_domain:
         return merged_terms
     return [term for term in merged_terms if _glossary_term_matches_subject_domain(term, subject_domain)]
@@ -1989,6 +2074,82 @@ def _merge_execution_into_segments(
                 segment_copy["video_local_path"] = execution.get("local_result_path")
         merged.append(segment_copy)
     return merged
+
+
+async def _persist_avatar_segment_outputs(
+    job_id: str,
+    execution_segments: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    if not execution_segments:
+        return list(execution_segments or [])
+    storage = get_storage()
+    persisted: list[dict[str, Any]] = []
+    for segment in execution_segments:
+        segment_copy = dict(segment)
+        local_result_raw = str(segment_copy.get("local_result_path") or "").strip()
+        if segment_copy.get("status") != "success" or not local_result_raw:
+            persisted.append(segment_copy)
+            continue
+        local_result_path = Path(local_result_raw).expanduser()
+        for _ in range(_AVATAR_SEGMENT_READY_RETRIES):
+            if local_result_path.exists():
+                break
+            await asyncio.sleep(_AVATAR_SEGMENT_READY_RETRY_SECONDS)
+        if not local_result_path.exists():
+            persisted.append(segment_copy)
+            continue
+        segment_id = str(segment_copy.get("segment_id") or uuid.uuid4().hex).strip() or uuid.uuid4().hex
+        suffix = local_result_path.suffix or ".avi"
+        target_key = job_key(job_id, f"avatar_segments/{segment_id}{suffix}")
+        try:
+            resolved_local_path = storage.resolve_path(target_key) if hasattr(storage, "resolve_path") else local_result_path
+            if Path(resolved_local_path).resolve() != local_result_path.resolve():
+                await storage.async_upload_file(local_result_path, target_key)
+            segment_copy["video_storage_key"] = target_key
+            segment_copy["local_result_path"] = str(resolved_local_path)
+        except Exception:
+            logger.exception(
+                "Failed to persist avatar segment output for job %s segment %s",
+                job_id,
+                segment_id,
+            )
+        persisted.append(segment_copy)
+    return persisted
+
+
+async def _materialize_avatar_plan_segments(
+    job_id: str,
+    avatar_segments: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    if not avatar_segments:
+        return list(avatar_segments or [])
+    execution_like_segments = [
+        {
+            "segment_id": segment.get("segment_id"),
+            "status": "success" if str(segment.get("video_local_path") or "").strip() else segment.get("video_status"),
+            "local_result_path": segment.get("video_local_path"),
+            "result": segment.get("video_result"),
+            "video_storage_key": segment.get("video_storage_key"),
+        }
+        for segment in avatar_segments
+    ]
+    materialized = await _persist_avatar_segment_outputs(job_id, execution_like_segments)
+    materialized_by_id = {
+        str(item.get("segment_id") or ""): item
+        for item in materialized
+        if str(item.get("segment_id") or "").strip()
+    }
+    updated_segments: list[dict[str, Any]] = []
+    for segment in avatar_segments:
+        segment_copy = dict(segment)
+        persisted = materialized_by_id.get(str(segment.get("segment_id") or ""))
+        if persisted and str(persisted.get("local_result_path") or "").strip():
+            segment_copy["video_local_path"] = persisted.get("local_result_path")
+            segment_copy["video_storage_key"] = persisted.get("video_storage_key")
+            if persisted.get("result") is not None:
+                segment_copy["video_result"] = persisted.get("result")
+        updated_segments.append(segment_copy)
+    return updated_segments
 
 
 async def _load_recent_subtitle_examples(
@@ -2914,6 +3075,11 @@ async def run_content_profile(job_id: str) -> dict:
             )
             content_profile["review_user_feedback"] = dict(manual_review_feedback)
             content_profile["resolved_review_user_feedback"] = dict(resolved_manual_review_feedback)
+        content_profile = apply_source_identity_constraints(
+            content_profile,
+            source_name=job.source_name,
+            transcript_excerpt=transcript_excerpt,
+        )
         content_profile["creative_preferences"] = merge_content_profile_creative_preferences(
             content_profile,
             user_memory=user_memory,
@@ -3661,6 +3827,13 @@ async def run_avatar_commentary(job_id: str) -> dict:
                         tmpdir=tmpdir,
                         default_name="avatar_reference.wav",
                     )
+                    source_audio_meta = await probe(source_audio_path)
+                    source_audio_duration = float(getattr(source_audio_meta, "duration", 0.0) or 0.0)
+                    avatar_segments = refine_avatar_commentary_segments_for_media_duration(
+                        avatar_segments,
+                        subtitle_dicts,
+                        media_duration_sec=source_audio_duration,
+                    )
                     staged_segments: list[dict[str, Any]] = []
                     for segment in avatar_segments:
                         clip_path = tmp_root / f"{segment.get('segment_id')}.wav"
@@ -3689,6 +3862,10 @@ async def run_avatar_commentary(job_id: str) -> dict:
                         get_avatar_provider().execute_render,
                         job_id=str(job.id),
                         request=render_request,
+                    )
+                    render_execution["segments"] = await _persist_avatar_segment_outputs(
+                        str(job.id),
+                        render_execution.get("segments") if render_execution else None,
                     )
                     render_executed_in_mode = True
                     plan["render_execution"] = render_execution
@@ -3759,6 +3936,10 @@ async def run_avatar_commentary(job_id: str) -> dict:
                     get_avatar_provider().execute_render,
                     job_id=str(job.id),
                     request=render_request,
+                )
+                render_execution["segments"] = await _persist_avatar_segment_outputs(
+                    str(job.id),
+                    render_execution.get("segments") if render_execution else None,
                 )
                 plan["render_execution"] = render_execution
                 plan["segments"] = _merge_execution_into_segments(
@@ -4204,7 +4385,6 @@ async def run_render(job_id: str) -> dict:
         tmp_packaged_mp4 = Path(tmpdir) / "output_packaged.mp4"
         tmp_cover_plain_mp4 = Path(tmpdir) / "output_cover_plain.mp4"
         plain_render_plan = build_plain_render_plan(render_plan_timeline.data_json)
-        avatar_render_plan = build_avatar_render_plan(render_plan_timeline.data_json)
         await render_video(
             source_path=source_path,
             render_plan=plain_render_plan,
@@ -4213,8 +4393,9 @@ async def run_render(job_id: str) -> dict:
             subtitle_items=None,
             debug_dir=debug_dir / "plain",
         )
-        import shutil
         shutil.copy2(tmp_plain_mp4, tmp_cover_plain_mp4)
+        plain_duration = float((await probe(tmp_plain_mp4)).duration or 0.0)
+        plain_variant_editorial_timeline = _build_full_length_variant_timeline(plain_duration)
         keep_segments = [
             s for s in editorial_timeline.data_json.get("segments", [])
             if s.get("type") == "keep"
@@ -4249,20 +4430,20 @@ async def run_render(job_id: str) -> dict:
             keep_segments=keep_segments,
         )
         avatar_plan = render_plan_timeline.data_json.get("avatar_commentary") or {}
+        if (
+            "avatar_commentary" in set(getattr(job, "enhancement_modes", []) or [])
+            and str(avatar_plan.get("mode") or "") == "segmented_audio_passthrough"
+        ):
+            avatar_plan["segments"] = await _materialize_avatar_plan_segments(
+                str(job.id),
+                list(avatar_plan.get("segments") or []),
+            )
         avatar_result: dict[str, Any] | None = None
         avatar_variant_source_path: Path | None = None
         avatar_variant_editorial_timeline: dict[str, Any] | None = None
-        avatar_variant_subtitle_items: list[dict[str, Any]] | None = None
         avatar_overlay_accents: dict[str, Any] | None = None
-        (
-            packaged_source_path,
-            packaged_editorial_timeline,
-            packaged_subtitle_items,
-        ) = _resolve_packaged_render_variant(
-            original_source_path=source_path,
-            original_editorial_timeline=editorial_timeline.data_json,
-            original_subtitle_items=subtitle_dicts,
-        )
+        packaged_source_path = tmp_plain_mp4
+        packaged_editorial_timeline = plain_variant_editorial_timeline
         if (
             "avatar_commentary" in set(getattr(job, "enhancement_modes", []) or [])
             and str(avatar_plan.get("mode") or "") == "full_track_audio_passthrough"
@@ -4297,20 +4478,11 @@ async def run_render(job_id: str) -> dict:
                         border_color=str(avatar_plan.get("overlay_border_color") or "#F4E4B8"),
                     )
                     pip_duration = float((await probe(pip_output_path)).duration or 0.0)
-                    (
-                        avatar_variant_source_path,
-                        avatar_variant_editorial_timeline,
-                        avatar_variant_subtitle_items,
-                    ) = _resolve_packaged_render_variant(
-                        original_source_path=source_path,
-                        original_editorial_timeline=editorial_timeline.data_json,
-                        original_subtitle_items=subtitle_dicts,
-                        variant_source_path=pip_output_path,
-                        variant_duration_sec=pip_duration,
-                        variant_subtitle_items=remapped_subtitles,
-                    )
+                    avatar_variant_source_path = pip_output_path
+                    avatar_variant_editorial_timeline = _build_full_length_variant_timeline(pip_duration)
                     packaged_source_path = avatar_variant_source_path
                     packaged_editorial_timeline = avatar_variant_editorial_timeline
+                    tmp_avatar_mp4 = avatar_variant_source_path
                     avatar_result = {
                         **(avatar_result or {}),
                         "status": "done",
@@ -4365,20 +4537,11 @@ async def run_render(job_id: str) -> dict:
                         border_color=str(avatar_plan.get("overlay_border_color") or "#F4E4B8"),
                     )
                     pip_duration = float((await probe(pip_output_path)).duration or 0.0)
-                    (
-                        avatar_variant_source_path,
-                        avatar_variant_editorial_timeline,
-                        avatar_variant_subtitle_items,
-                    ) = _resolve_packaged_render_variant(
-                        original_source_path=source_path,
-                        original_editorial_timeline=editorial_timeline.data_json,
-                        original_subtitle_items=subtitle_dicts,
-                        variant_source_path=pip_output_path,
-                        variant_duration_sec=pip_duration,
-                        variant_subtitle_items=remapped_subtitles,
-                    )
+                    avatar_variant_source_path = pip_output_path
+                    avatar_variant_editorial_timeline = _build_full_length_variant_timeline(pip_duration)
                     packaged_source_path = avatar_variant_source_path
                     packaged_editorial_timeline = avatar_variant_editorial_timeline
+                    tmp_avatar_mp4 = avatar_variant_source_path
                     avatar_result = {
                         **(avatar_result or {}),
                         "status": "done",
@@ -4434,29 +4597,10 @@ async def run_render(job_id: str) -> dict:
                 detail="素版已完成，开始生成包装版",
                 progress=0.55,
             )
-        if (
-            avatar_variant_source_path is not None
-            and avatar_variant_editorial_timeline is not None
-            and avatar_variant_subtitle_items is not None
-        ):
-            avatar_overlay_accents = await _map_editing_accents_to_packaged_timeline(
-                avatar_render_plan.get("editing_accents"),
-                avatar_render_plan,
-                keep_segments=keep_segments,
-            )
-            await render_video(
-                source_path=avatar_variant_source_path,
-                render_plan=avatar_render_plan,
-                editorial_timeline=avatar_variant_editorial_timeline,
-                output_path=tmp_avatar_mp4,
-                subtitle_items=packaged_subtitles,
-                overlay_editing_accents=avatar_overlay_accents,
-                debug_dir=debug_dir / "avatar_variant",
-            )
         await render_video(
-            source_path=source_path,
+            source_path=tmp_plain_mp4,
             render_plan=ai_effect_render_plan,
-            editorial_timeline=editorial_timeline.data_json,
+            editorial_timeline=plain_variant_editorial_timeline,
             output_path=tmp_ai_effect_mp4,
             subtitle_items=packaged_subtitles,
             overlay_editing_accents=ai_effect_overlay_accents,
@@ -4584,14 +4728,37 @@ async def run_render(job_id: str) -> dict:
         if tmp_avatar_mp4.exists() and local_avatar_srt is not None:
             write_srt_file(packaged_subtitles, local_avatar_srt)
         write_srt_file(packaged_subtitles, local_ai_effect_srt)
-        packaged_subtitle_sync = _compute_subtitle_sync_check(local_packaged_mp4, local_packaged_srt)
+        packaged_trailing_allowance = await _resolve_packaging_trailing_gap_allowance(render_plan_timeline.data_json)
+        ai_effect_trailing_allowance = await _resolve_packaging_trailing_gap_allowance(ai_effect_render_plan)
+        packaged_subtitle_sync = _compute_subtitle_sync_check(
+            local_packaged_mp4,
+            local_packaged_srt,
+            allowed_trailing_gap_sec=packaged_trailing_allowance,
+        )
         plain_subtitle_sync = _compute_subtitle_sync_check(local_plain_mp4, local_plain_srt)
         avatar_subtitle_sync = (
             _compute_subtitle_sync_check(local_avatar_mp4, local_avatar_srt)
             if local_avatar_mp4 is not None and local_avatar_srt is not None and tmp_avatar_mp4.exists()
             else None
         )
-        ai_effect_subtitle_sync = _compute_subtitle_sync_check(local_ai_effect_mp4, local_ai_effect_srt)
+        ai_effect_subtitle_sync = _compute_subtitle_sync_check(
+            local_ai_effect_mp4,
+            local_ai_effect_srt,
+            allowed_trailing_gap_sec=ai_effect_trailing_allowance,
+        )
+        blocking_sync_issues = _collect_blocking_variant_sync_issues(
+            {
+                "packaged": packaged_subtitle_sync,
+                "plain": plain_subtitle_sync,
+                "avatar": avatar_subtitle_sync,
+                "ai_effect": ai_effect_subtitle_sync,
+            }
+        )
+        if blocking_sync_issues:
+            raise RuntimeError(
+                "render_variant_sync_blocked: "
+                + "; ".join(blocking_sync_issues)
+            )
 
         # Extract cover frame from the plain render so burned subtitles never leak into thumbnails.
         try:
@@ -5936,6 +6103,58 @@ async def _map_editing_accents_to_packaged_timeline(
     return mapped
 
 
+def _build_full_length_variant_timeline(duration_sec: float) -> dict[str, Any]:
+    duration = max(0.0, float(duration_sec or 0.0))
+    if duration <= 0.0:
+        raise ValueError("variant duration must be positive")
+    return {
+        "segments": [
+            {
+                "type": "keep",
+                "start": 0.0,
+                "end": duration,
+            }
+        ]
+    }
+
+
+async def _resolve_packaging_trailing_gap_allowance(render_plan: dict[str, Any] | None) -> float:
+    plan = render_plan or {}
+    outro_plan = plan.get("outro") if isinstance(plan, dict) else None
+    outro_path = str((outro_plan or {}).get("path") or "").strip()
+    if not outro_path:
+        return 0.0
+    try:
+        return max(0.0, float((await probe(Path(outro_path))).duration or 0.0))
+    except Exception:
+        return 0.0
+
+
+def _variant_sync_is_blocking(sync_check: dict[str, Any] | None) -> bool:
+    if not isinstance(sync_check, dict):
+        return False
+    warning_codes = {str(code) for code in sync_check.get("warning_codes") or []}
+    if "audio_video_duration_gap_large" in warning_codes or "subtitle_out_of_bounds" in warning_codes:
+        return True
+    effective_trailing_gap = float(
+        sync_check.get("effective_trailing_gap_sec", sync_check.get("trailing_gap_sec", 0.0)) or 0.0
+    )
+    effective_duration_gap = float(
+        sync_check.get("effective_duration_gap_sec", sync_check.get("duration_gap_sec", 0.0)) or 0.0
+    )
+    return effective_trailing_gap > 1.0 or effective_duration_gap > 1.0
+
+
+def _collect_blocking_variant_sync_issues(sync_checks: dict[str, dict[str, Any] | None]) -> list[str]:
+    issues: list[str] = []
+    for variant_name, sync_check in sync_checks.items():
+        if not _variant_sync_is_blocking(sync_check):
+            continue
+        warning_codes = ", ".join(str(code) for code in sync_check.get("warning_codes") or []) or "unknown"
+        issues.append(f"{variant_name}: {warning_codes}")
+    return issues
+
+
 def _apply_insert_accent_choreography(
     editing_accents: dict[str, Any],
     *,
@@ -6110,10 +6329,9 @@ async def _render_full_track_avatar_video(
             }
         ],
     }
-    render_execution = await asyncio.to_thread(
-        get_avatar_provider().execute_render,
+    render_execution = await _execute_avatar_full_track_render_request(
         job_id=job_id,
-        request=render_request,
+        render_request=render_request,
     )
     segments = list(render_execution.get("segments") or [])
     if not segments:
@@ -6134,6 +6352,118 @@ async def _render_full_track_avatar_video(
             )
         return None
     return result_path
+
+
+_AVATAR_FULL_TRACK_RETRY_DELAYS_SECONDS = (5.0, 10.0, 20.0, 30.0)
+_AVATAR_FULL_TRACK_SLOT_KEY = "avatar_full_track"
+_AVATAR_FULL_TRACK_SLOT_TIMEOUT_SEC = 7200
+_AVATAR_FULL_TRACK_BUSY_MAX_WAIT_SECONDS = 900.0
+
+
+@asynccontextmanager
+async def _hold_avatar_full_track_slot(*, job_id: str):
+    logger.info("Waiting for avatar full-track slot job=%s", job_id)
+    acquired, token = await asyncio.to_thread(
+        _acquire_operation_lock,
+        _AVATAR_FULL_TRACK_SLOT_KEY,
+        timeout_sec=_AVATAR_FULL_TRACK_SLOT_TIMEOUT_SEC,
+    )
+    if not acquired:
+        raise RuntimeError("avatar_full_track_slot_timeout")
+    logger.info("Avatar full-track slot acquired job=%s", job_id)
+    try:
+        yield
+    finally:
+        await asyncio.to_thread(_release_operation_lock, _AVATAR_FULL_TRACK_SLOT_KEY, token)
+        logger.info("Avatar full-track slot released job=%s", job_id)
+
+
+def _is_avatar_service_busy_message(message: object) -> bool:
+    normalized = str(message or "").strip().lower()
+    if not normalized:
+        return False
+    busy_tokens = (
+        "busy",
+        "resource busy",
+        "device busy",
+        "service unavailable",
+        "temporarily unavailable",
+        "all connection attempts failed",
+        "忙碌",
+        "繁忙",
+        "请稍后",
+        "稍后重试",
+    )
+    return any(token in normalized for token in busy_tokens)
+
+
+async def _execute_avatar_full_track_render_request(
+    *,
+    job_id: str,
+    render_request: dict[str, Any],
+) -> dict[str, Any]:
+    async with _hold_avatar_full_track_slot(job_id=job_id):
+        last_error: Exception | None = None
+        attempt = 0
+        busy_waited_seconds = 0.0
+        while True:
+            try:
+                render_execution = await asyncio.to_thread(
+                    get_avatar_provider().execute_render,
+                    job_id=job_id,
+                    request=render_request,
+                )
+            except Exception as exc:
+                last_error = exc
+                if _is_avatar_service_busy_message(exc):
+                    delay = _AVATAR_FULL_TRACK_RETRY_DELAYS_SECONDS[
+                        min(attempt, len(_AVATAR_FULL_TRACK_RETRY_DELAYS_SECONDS) - 1)
+                    ]
+                    if busy_waited_seconds + delay > _AVATAR_FULL_TRACK_BUSY_MAX_WAIT_SECONDS:
+                        raise
+                    attempt += 1
+                    busy_waited_seconds += delay
+                    logger.warning(
+                        "Avatar full-track render retrying after busy response job=%s attempt=%s waited=%.1fs/%.1fs delay=%.1fs",
+                        job_id,
+                        attempt + 1,
+                        busy_waited_seconds,
+                        _AVATAR_FULL_TRACK_BUSY_MAX_WAIT_SECONDS,
+                        delay,
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+                raise
+            segments = list(render_execution.get("segments") or [])
+            if not segments:
+                return render_execution
+            first_segment = segments[0] or {}
+            if str(first_segment.get("status") or "") == "success":
+                return render_execution
+            error_text = str(first_segment.get("error") or render_execution.get("error") or "avatar_full_track_render_failed")
+            if _is_avatar_service_busy_message(error_text):
+                delay = _AVATAR_FULL_TRACK_RETRY_DELAYS_SECONDS[
+                    min(attempt, len(_AVATAR_FULL_TRACK_RETRY_DELAYS_SECONDS) - 1)
+                ]
+                if busy_waited_seconds + delay > _AVATAR_FULL_TRACK_BUSY_MAX_WAIT_SECONDS:
+                    raise RuntimeError(error_text)
+                attempt += 1
+                busy_waited_seconds += delay
+                last_error = RuntimeError(error_text)
+                logger.warning(
+                    "Avatar full-track render retrying after busy response job=%s attempt=%s waited=%.1fs/%.1fs delay=%.1fs",
+                    job_id,
+                    attempt + 1,
+                    busy_waited_seconds,
+                    _AVATAR_FULL_TRACK_BUSY_MAX_WAIT_SECONDS,
+                    delay,
+                )
+                await asyncio.sleep(delay)
+                continue
+            raise RuntimeError(error_text)
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("avatar_full_track_render_failed")
 
 
 def _remap_avatar_segments_to_timeline(

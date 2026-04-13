@@ -436,6 +436,42 @@ async def test_map_editing_accents_to_packaged_timeline_offsets_transition_overl
     assert mapped["sound_effects"][0]["start_time"] == pytest.approx(4.48)
 
 
+@pytest.mark.asyncio
+async def test_resolve_packaging_trailing_gap_allowance_uses_outro_duration(monkeypatch: pytest.MonkeyPatch):
+    class DummyMeta:
+        def __init__(self, duration: float) -> None:
+            self.duration = duration
+
+    async def fake_probe(path):
+        assert str(path) == "outro.mp4"
+        return DummyMeta(3.1)
+
+    monkeypatch.setattr(steps_mod, "probe", fake_probe)
+
+    allowance = await steps_mod._resolve_packaging_trailing_gap_allowance(
+        {"outro": {"path": "outro.mp4"}}
+    )
+
+    assert allowance == pytest.approx(3.1)
+
+
+def test_collect_blocking_variant_sync_issues_flags_large_drift():
+    issues = steps_mod._collect_blocking_variant_sync_issues(
+        {
+            "packaged": {
+                "warning_codes": ["audio_video_duration_gap_large"],
+                "audio_video_duration_gap_sec": 12.0,
+            },
+            "plain": {
+                "warning_codes": ["subtitle_duration_gap_large"],
+                "effective_duration_gap_sec": 0.8,
+            },
+        }
+    )
+
+    assert issues == ["packaged: audio_video_duration_gap_large"]
+
+
 def test_build_variant_timeline_bundle_contains_variants_and_rules():
     keep_segments = [
         {"type": "keep", "start": 0.0, "end": 4.0},

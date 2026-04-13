@@ -3,6 +3,8 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
+import pytest
+import roughcut.pipeline.quality as quality_mod
 from roughcut.db.models import Artifact, Job, JobStep, SubtitleCorrection, SubtitleItem
 from roughcut.pipeline.quality import assess_job_quality, evaluate_profile_identity_gate
 
@@ -232,6 +234,57 @@ def test_assess_job_quality_penalizes_subtitle_sync_issue_and_prefers_render_rer
     assert "subtitle_sync_issue" in assessment["issue_codes"]
     assert assessment["recommended_rerun_step"] == "render"
     assert assessment["recommended_rerun_steps"] == ["render", "final_review", "platform_package"]
+
+
+def test_compute_subtitle_sync_check_allows_expected_outro_gap(monkeypatch, tmp_path):
+    video_path = tmp_path / "packaged.mp4"
+    srt_path = tmp_path / "packaged.srt"
+    video_path.write_text("placeholder", encoding="utf-8")
+    srt_path.write_text(
+        "1\n00:00:00,000 --> 00:00:10,000\n测试\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(quality_mod, "_probe_media_duration", lambda path: 13.0)
+    monkeypatch.setattr(
+        quality_mod,
+        "_probe_media_stream_durations",
+        lambda path: {"video_duration_sec": 13.0, "audio_duration_sec": 13.0},
+    )
+
+    result = quality_mod._compute_subtitle_sync_check(
+        video_path,
+        srt_path,
+        allowed_trailing_gap_sec=3.1,
+    )
+
+    assert result is not None
+    assert result["status"] == "ok"
+    assert result["effective_trailing_gap_sec"] == pytest.approx(0.0)
+
+
+def test_compute_subtitle_sync_check_flags_audio_video_duration_gap(monkeypatch, tmp_path):
+    video_path = tmp_path / "packaged.mp4"
+    srt_path = tmp_path / "packaged.srt"
+    video_path.write_text("placeholder", encoding="utf-8")
+    srt_path.write_text(
+        "1\n00:00:00,000 --> 00:00:10,000\n测试\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(quality_mod, "_probe_media_duration", lambda path: 10.0)
+    monkeypatch.setattr(
+        quality_mod,
+        "_probe_media_stream_durations",
+        lambda path: {"video_duration_sec": 20.0, "audio_duration_sec": 10.0},
+    )
+
+    result = quality_mod._compute_subtitle_sync_check(video_path, srt_path)
+
+    assert result is not None
+    assert result["status"] == "warning"
+    assert "audio_video_duration_gap_large" in result["warning_codes"]
+    assert result["audio_video_duration_gap_sec"] == pytest.approx(10.0)
 
 
 def test_assess_job_quality_prefers_variant_bundle_packaged_quality_checks():

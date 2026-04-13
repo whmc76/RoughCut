@@ -1343,6 +1343,7 @@ async def _apply_timed_overlays_to_video(
         f"[{video_label}]",
         "-map",
         f"[{audio_label}]",
+        "-shortest",
         str(output_path),
     ]
     if video_label == "0:v":
@@ -2066,13 +2067,6 @@ async def _apply_intro_outro(
 
     if len(prepared_paths) == 1:
         return source_path
-
-    if await _concat_prepared_bookends(
-        prepared_paths,
-        output_path=output_path,
-        debug_dir=debug_dir,
-    ):
-        return output_path
 
     cmd = ["ffmpeg", "-y"]
     for path in prepared_paths:
