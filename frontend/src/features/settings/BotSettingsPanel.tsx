@@ -11,6 +11,7 @@ type BotSettingsPanelProps = {
 };
 
 export function BotSettingsPanel({ form, config, onChange }: BotSettingsPanelProps) {
+  const persistedConfig = config;
   const reviewEnabled = Boolean(form.telegram_remote_review_enabled);
   const agentEnabled = Boolean(form.telegram_agent_enabled);
   const claudeEnabled = Boolean(form.telegram_agent_claude_enabled);
@@ -115,13 +116,14 @@ export function BotSettingsPanel({ form, config, onChange }: BotSettingsPanelPro
               <div className="field-row">
                 <TextField
                   label="Codex Command"
-                  value={String(form.telegram_agent_codex_command ?? "codex")}
+                  value={String(form.telegram_agent_codex_command ?? persistedConfig?.telegram_agent_codex_command ?? "codex")}
                   onChange={(event) => onChange("telegram_agent_codex_command", event.target.value)}
                 />
                 <TextField
                   label="Codex Model"
-                  value={String(form.telegram_agent_codex_model ?? "gpt-5.4-mini")}
+                  value={String(form.telegram_agent_codex_model ?? persistedConfig?.telegram_agent_codex_model ?? "")}
                   onChange={(event) => onChange("telegram_agent_codex_model", event.target.value)}
+                  placeholder="留空则自动跟随当前 OpenAI 混合模型"
                 />
               </div>
               <details className="settings-disclosure" open={claudeEnabled}>
@@ -143,13 +145,14 @@ export function BotSettingsPanel({ form, config, onChange }: BotSettingsPanelPro
                       <div className="field-row">
                         <TextField
                           label="Claude Command"
-                          value={String(form.telegram_agent_claude_command ?? "claude")}
+                          value={String(form.telegram_agent_claude_command ?? persistedConfig?.telegram_agent_claude_command ?? "claude")}
                           onChange={(event) => onChange("telegram_agent_claude_command", event.target.value)}
                         />
                         <TextField
                           label="Claude Model"
-                          value={String(form.telegram_agent_claude_model ?? "opus")}
+                          value={String(form.telegram_agent_claude_model ?? persistedConfig?.telegram_agent_claude_model ?? "")}
                           onChange={(event) => onChange("telegram_agent_claude_model", event.target.value)}
+                          placeholder="留空则自动跟随当前 Anthropic 混合模型"
                         />
                       </div>
                     )}
@@ -162,34 +165,43 @@ export function BotSettingsPanel({ form, config, onChange }: BotSettingsPanelPro
                     <div className="field-row">
                       <SelectField
                         label="ACP 主后端"
-                        value={String(form.acp_bridge_backend ?? "codex")}
+                        value={String(form.acp_bridge_backend ?? persistedConfig?.acp_bridge_backend ?? "")}
                         onChange={(event) => onChange("acp_bridge_backend", event.target.value)}
-                        options={ACP_BRIDGE_BACKEND_OPTIONS.map((backend) => ({ value: backend, label: backend }))}
+                        options={ACP_BRIDGE_BACKEND_OPTIONS.map((backend) => ({
+                          value: backend,
+                          label: backend ? backend : "auto",
+                        }))}
                       />
                       <SelectField
                         label="ACP 回退后端"
-                        value={String(form.acp_bridge_fallback_backend ?? "claude")}
+                        value={String(form.acp_bridge_fallback_backend ?? persistedConfig?.acp_bridge_fallback_backend ?? "")}
                         onChange={(event) => onChange("acp_bridge_fallback_backend", event.target.value)}
-                        options={ACP_BRIDGE_BACKEND_OPTIONS.map((backend) => ({ value: backend, label: backend }))}
+                        options={ACP_BRIDGE_BACKEND_OPTIONS.map((backend) => ({
+                          value: backend,
+                          label: backend ? backend : "auto",
+                        }))}
                       />
                     </div>
+                    <div className="muted">ACP 主后端和回退后端留为 auto 时，会自动跟随当前混合模型里可用的 OpenAI / Anthropic 路由。</div>
                     <div className="field-row">
                       <TextField
                         label="ACP Claude Model"
-                        value={String(form.acp_bridge_claude_model ?? "opus")}
+                        value={String(form.acp_bridge_claude_model ?? persistedConfig?.acp_bridge_claude_model ?? "")}
                         onChange={(event) => onChange("acp_bridge_claude_model", event.target.value)}
+                        placeholder="留空则自动跟随当前 Anthropic 混合模型"
                       />
                       <TextField
                         label="ACP Codex Command"
-                        value={String(form.acp_bridge_codex_command ?? "codex")}
+                        value={String(form.acp_bridge_codex_command ?? persistedConfig?.acp_bridge_codex_command ?? "codex")}
                         onChange={(event) => onChange("acp_bridge_codex_command", event.target.value)}
                       />
                     </div>
                     <div className="field-row">
                       <TextField
                         label="ACP Codex Model"
-                        value={String(form.acp_bridge_codex_model ?? "gpt-5.4-mini")}
+                        value={String(form.acp_bridge_codex_model ?? persistedConfig?.acp_bridge_codex_model ?? "")}
                         onChange={(event) => onChange("acp_bridge_codex_model", event.target.value)}
+                        placeholder="留空则自动跟随当前 OpenAI 混合模型"
                       />
                       <TextField
                         label="Agent 状态目录"

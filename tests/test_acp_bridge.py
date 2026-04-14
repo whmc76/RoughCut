@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import roughcut.telegram.acp_bridge as bridge_mod
 
@@ -10,6 +11,20 @@ def test_build_backend_command_uses_codex_defaults(monkeypatch, tmp_path: Path):
     monkeypatch.delenv("ROUGHCUT_ACP_BRIDGE_CODEX_COMMAND", raising=False)
     monkeypatch.delenv("ROUGHCUT_ACP_BRIDGE_CODEX_MODEL", raising=False)
     monkeypatch.delenv("TELEGRAM_AGENT_CODEX_MODEL", raising=False)
+    monkeypatch.setattr(
+        bridge_mod,
+        "get_settings",
+        lambda: SimpleNamespace(
+            llm_routing_mode="hybrid_performance",
+            hybrid_analysis_provider="openai",
+            hybrid_analysis_model="gpt-5.4",
+            hybrid_copy_provider="minimax",
+            hybrid_copy_model="MiniMax-M2.7-highspeed",
+            active_reasoning_provider="minimax",
+            active_reasoning_model="MiniMax-M2.7-highspeed",
+            telegram_agent_claude_enabled=False,
+        ),
+    )
     monkeypatch.setattr(bridge_mod.shutil, "which", lambda name: "C:/tools/codex.exe")
 
     command, cwd, timeout = bridge_mod.build_backend_command(
@@ -17,6 +32,8 @@ def test_build_backend_command_uses_codex_defaults(monkeypatch, tmp_path: Path):
     )
 
     assert command[0] == "C:/tools/codex.exe"
+    assert "-m" in command
+    assert command[command.index("-m") + 1] == "gpt-5.4"
     assert "exec" in command
     assert cwd == tmp_path.resolve()
     assert timeout == 900
@@ -185,11 +202,25 @@ def test_run_bridge_falls_back_to_codex_when_claude_fails(monkeypatch, tmp_path:
     assert result["excerpt"] == "bridge codex fallback ok"
 
 
-def test_run_bridge_uses_codex_and_falls_back_to_claude_by_default(monkeypatch, tmp_path: Path):
+def test_run_bridge_auto_follows_configured_provider_families(monkeypatch, tmp_path: Path):
     monkeypatch.delenv("ROUGHCUT_ACP_BRIDGE_BACKEND", raising=False)
     monkeypatch.delenv("ROUGHCUT_ACP_BRIDGE_FALLBACK_BACKEND", raising=False)
-    monkeypatch.setenv("ROUGHCUT_ACP_BRIDGE_CLAUDE_MODEL", "opus")
-    monkeypatch.setenv("ROUGHCUT_ACP_BRIDGE_CODEX_MODEL", "gpt-5.4-mini")
+    monkeypatch.delenv("ROUGHCUT_ACP_BRIDGE_CLAUDE_MODEL", raising=False)
+    monkeypatch.delenv("ROUGHCUT_ACP_BRIDGE_CODEX_MODEL", raising=False)
+    monkeypatch.setattr(
+        bridge_mod,
+        "get_settings",
+        lambda: SimpleNamespace(
+            llm_routing_mode="hybrid_performance",
+            hybrid_analysis_provider="openai",
+            hybrid_analysis_model="gpt-5.4",
+            hybrid_copy_provider="anthropic",
+            hybrid_copy_model="claude-sonnet-4-20250514",
+            active_reasoning_provider="openai",
+            active_reasoning_model="gpt-5.4",
+            telegram_agent_claude_enabled=True,
+        ),
+    )
     monkeypatch.setattr(
         bridge_mod.shutil,
         "which",

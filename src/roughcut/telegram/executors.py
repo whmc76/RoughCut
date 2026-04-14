@@ -10,7 +10,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from roughcut.config import get_settings
+from roughcut.config import (
+    get_settings,
+    infer_coding_backends,
+    normalize_coding_backend_name,
+    resolve_coding_backend_model,
+)
 from roughcut.telegram.output_codec import decode_process_output
 from roughcut.telegram.presets import get_preset
 from roughcut.telegram.task_store import TelegramAgentTaskStore
@@ -81,10 +86,14 @@ def _execute_claude_preset(
     resolved_command = shutil.which(command_name)
     if not resolved_command:
         raise RuntimeError(f"Claude command not found in PATH: {command_name}")
-    model_name = str(
-        getattr(settings, "telegram_agent_claude_model", "")
-        or os.getenv("TELEGRAM_AGENT_CLAUDE_MODEL", "")
-    ).strip()
+    model_name = resolve_coding_backend_model(
+        "claude",
+        settings=settings,
+        explicit_model=(
+            getattr(settings, "telegram_agent_claude_model", "")
+            or os.getenv("TELEGRAM_AGENT_CLAUDE_MODEL", "")
+        ),
+    )
 
     repo_root = _repo_root()
     scope_value = _normalize_scope(scope_path, repo_root)
@@ -160,10 +169,14 @@ def _execute_codex_preset(
     resolved_command = shutil.which(command_name)
     if not resolved_command:
         raise RuntimeError(f"Codex command not found in PATH: {command_name}")
-    model_name = str(
-        getattr(settings, "telegram_agent_codex_model", "")
-        or os.getenv("TELEGRAM_AGENT_CODEX_MODEL", "")
-    ).strip()
+    model_name = resolve_coding_backend_model(
+        "codex",
+        settings=settings,
+        explicit_model=(
+            getattr(settings, "telegram_agent_codex_model", "")
+            or os.getenv("TELEGRAM_AGENT_CODEX_MODEL", "")
+        ),
+    )
 
     repo_root = _repo_root()
     scope_value = _normalize_scope(scope_path, repo_root)
@@ -279,12 +292,16 @@ def _execute_acp_preset(
     bridge_backend = backends[0]
     bridge_fallback_backend = backends[1] if len(backends) > 1 else ""
     claude_command = str(getattr(settings, "telegram_agent_claude_command", "claude") or "claude").strip()
-    claude_model = str(
-        getattr(settings, "acp_bridge_claude_model", "")
-        or getattr(settings, "telegram_agent_claude_model", "")
-        or os.getenv("TELEGRAM_AGENT_CLAUDE_MODEL", "")
-        or os.getenv("ROUGHCUT_ACP_BRIDGE_CLAUDE_MODEL", "")
-    ).strip()
+    claude_model = resolve_coding_backend_model(
+        "claude",
+        settings=settings,
+        explicit_model=(
+            getattr(settings, "acp_bridge_claude_model", "")
+            or getattr(settings, "telegram_agent_claude_model", "")
+            or os.getenv("TELEGRAM_AGENT_CLAUDE_MODEL", "")
+            or os.getenv("ROUGHCUT_ACP_BRIDGE_CLAUDE_MODEL", "")
+        ),
+    )
     codex_command = str(
         getattr(settings, "acp_bridge_codex_command", "")
         or getattr(settings, "telegram_agent_codex_command", "")
@@ -292,13 +309,16 @@ def _execute_acp_preset(
         or os.getenv("TELEGRAM_AGENT_CODEX_COMMAND", "codex")
         or "codex"
     ).strip()
-    codex_model = str(
-        getattr(settings, "acp_bridge_codex_model", "")
-        or getattr(settings, "telegram_agent_codex_model", "")
-        or os.getenv("ROUGHCUT_ACP_BRIDGE_CODEX_MODEL", "")
-        or os.getenv("TELEGRAM_AGENT_CODEX_MODEL", "")
-        or "gpt-5.4-mini"
-    ).strip()
+    codex_model = resolve_coding_backend_model(
+        "codex",
+        settings=settings,
+        explicit_model=(
+            getattr(settings, "acp_bridge_codex_model", "")
+            or getattr(settings, "telegram_agent_codex_model", "")
+            or os.getenv("ROUGHCUT_ACP_BRIDGE_CODEX_MODEL", "")
+            or os.getenv("TELEGRAM_AGENT_CODEX_MODEL", "")
+        ),
+    )
     env["ROUGHCUT_ACP_BRIDGE_BACKEND"] = bridge_backend
     if bridge_fallback_backend:
         env["ROUGHCUT_ACP_BRIDGE_FALLBACK_BACKEND"] = bridge_fallback_backend
@@ -486,21 +506,24 @@ def _default_acp_bridge_command(repo_root: Path) -> str:
 def _configured_acp_backends(settings) -> list[str]:
     backends: list[str] = []
     claude_enabled = bool(getattr(settings, "telegram_agent_claude_enabled", False))
-    primary = str(
+    explicit_primary = normalize_coding_backend_name(
         getattr(settings, "acp_bridge_backend", "")
-        or os.getenv("ROUGHCUT_ACP_BRIDGE_BACKEND", "codex")
-        or "codex"
-    ).strip().lower()
-    fallback = str(
+        or os.getenv("ROUGHCUT_ACP_BRIDGE_BACKEND", "")
+    )
+    explicit_fallback = normalize_coding_backend_name(
         getattr(settings, "acp_bridge_fallback_backend", "")
-        or os.getenv("ROUGHCUT_ACP_BRIDGE_FALLBACK_BACKEND", "claude")
-        or "claude"
-    ).strip().lower()
-    for item in (primary, fallback):
-        if item not in {"claude", "codex"}:
+        or os.getenv("ROUGHCUT_ACP_BRIDGE_FALLBACK_BACKEND", "")
+    )
+    for item in (
+        explicit_primary,
+        explicit_fallback,
+        *infer_coding_backends(settings, claude_enabled=claude_enabled),
+    ):
+        normalized = normalize_coding_backend_name(item)
+        if normalized not in {"claude", "codex"}:
             continue
-        if item == "claude" and not claude_enabled:
+        if normalized == "claude" and not claude_enabled:
             continue
-        if item not in backends:
-            backends.append(item)
+        if normalized not in backends:
+            backends.append(normalized)
     return backends

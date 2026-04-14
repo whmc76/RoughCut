@@ -687,11 +687,11 @@ def patch_config(body: ConfigPatch):
     if "telegram_agent_claude_command" in updates:
         updates["telegram_agent_claude_command"] = str(updates["telegram_agent_claude_command"] or "").strip() or "claude"
     if "telegram_agent_claude_model" in updates:
-        updates["telegram_agent_claude_model"] = str(updates["telegram_agent_claude_model"] or "").strip() or "opus"
+        updates["telegram_agent_claude_model"] = str(updates["telegram_agent_claude_model"] or "").strip()
     if "telegram_agent_codex_command" in updates:
         updates["telegram_agent_codex_command"] = str(updates["telegram_agent_codex_command"] or "").strip() or "codex"
     if "telegram_agent_codex_model" in updates:
-        updates["telegram_agent_codex_model"] = str(updates["telegram_agent_codex_model"] or "").strip() or "gpt-5.4-mini"
+        updates["telegram_agent_codex_model"] = str(updates["telegram_agent_codex_model"] or "").strip()
     if "telegram_agent_acp_command" in updates:
         updates["telegram_agent_acp_command"] = str(updates["telegram_agent_acp_command"] or "").strip()
     if "telegram_agent_state_dir" in updates:
@@ -702,20 +702,20 @@ def patch_config(body: ConfigPatch):
         updates["telegram_agent_state_dir"] = state_dir
     if "acp_bridge_backend" in updates:
         backend = str(updates["acp_bridge_backend"] or "").strip().lower()
-        if backend not in {"claude", "codex"}:
-            raise HTTPException(status_code=400, detail="acp_bridge_backend must be claude or codex")
+        if backend not in {"", "claude", "codex"}:
+            raise HTTPException(status_code=400, detail="acp_bridge_backend must be auto, claude or codex")
         updates["acp_bridge_backend"] = backend
     if "acp_bridge_fallback_backend" in updates:
         fallback_backend = str(updates["acp_bridge_fallback_backend"] or "").strip().lower()
-        if fallback_backend not in {"claude", "codex"}:
-            raise HTTPException(status_code=400, detail="acp_bridge_fallback_backend must be claude or codex")
+        if fallback_backend not in {"", "claude", "codex"}:
+            raise HTTPException(status_code=400, detail="acp_bridge_fallback_backend must be auto, claude or codex")
         updates["acp_bridge_fallback_backend"] = fallback_backend
     if "acp_bridge_claude_model" in updates:
-        updates["acp_bridge_claude_model"] = str(updates["acp_bridge_claude_model"] or "").strip() or "opus"
+        updates["acp_bridge_claude_model"] = str(updates["acp_bridge_claude_model"] or "").strip()
     if "acp_bridge_codex_command" in updates:
         updates["acp_bridge_codex_command"] = str(updates["acp_bridge_codex_command"] or "").strip() or "codex"
     if "acp_bridge_codex_model" in updates:
-        updates["acp_bridge_codex_model"] = str(updates["acp_bridge_codex_model"] or "").strip() or "gpt-5.4-mini"
+        updates["acp_bridge_codex_model"] = str(updates["acp_bridge_codex_model"] or "").strip()
     if "telegram_bot_chat_id" in updates:
         updates["telegram_bot_chat_id"] = str(updates["telegram_bot_chat_id"] or "").strip()
     if "default_job_workflow_mode" in updates:

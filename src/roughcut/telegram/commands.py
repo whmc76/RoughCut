@@ -16,6 +16,7 @@ from roughcut.api.control import _has_process, build_service_status
 from roughcut.api.jobs import apply_review, confirm_content_profile, get_content_profile
 from roughcut.api.schemas import ContentProfileConfirmIn, ReviewActionCreate, ReviewApplyRequest
 from roughcut.config import get_settings
+from roughcut.config import infer_coding_backends, normalize_coding_backend_name
 from roughcut.db.models import Job
 from roughcut.db.session import get_session_factory
 from roughcut.review.report import generate_report
@@ -713,26 +714,32 @@ def _codex_command_name(settings) -> str:
 
 
 def _configured_acp_backend(settings) -> str:
-    return str(
-        getattr(settings, "acp_bridge_backend", "")
-        or os.getenv("ROUGHCUT_ACP_BRIDGE_BACKEND", "codex")
-        or "codex"
-    ).strip().lower()
+    backends = _configured_acp_backends(settings)
+    return backends[0] if backends else ""
 
 
 def _configured_acp_fallback_backend(settings) -> str:
-    return str(
-        getattr(settings, "acp_bridge_fallback_backend", "")
-        or os.getenv("ROUGHCUT_ACP_BRIDGE_FALLBACK_BACKEND", "claude")
-        or "claude"
-    ).strip().lower()
+    backends = _configured_acp_backends(settings)
+    return backends[1] if len(backends) > 1 else ""
 
 
 def _configured_acp_backends(settings) -> list[str]:
     backends: list[str] = []
     claude_enabled = bool(getattr(settings, "telegram_agent_claude_enabled", False))
-    for item in (_configured_acp_backend(settings), _configured_acp_fallback_backend(settings)):
-        normalized = str(item or "").strip().lower()
+    explicit_primary = normalize_coding_backend_name(
+        getattr(settings, "acp_bridge_backend", "")
+        or os.getenv("ROUGHCUT_ACP_BRIDGE_BACKEND", "")
+    )
+    explicit_fallback = normalize_coding_backend_name(
+        getattr(settings, "acp_bridge_fallback_backend", "")
+        or os.getenv("ROUGHCUT_ACP_BRIDGE_FALLBACK_BACKEND", "")
+    )
+    for item in (
+        explicit_primary,
+        explicit_fallback,
+        *infer_coding_backends(settings, claude_enabled=claude_enabled),
+    ):
+        normalized = normalize_coding_backend_name(item)
         if normalized not in {"claude", "codex"}:
             continue
         if normalized == "claude" and not claude_enabled:

@@ -1,7 +1,14 @@
 from __future__ import annotations
 
 import roughcut.config as config_mod
-from roughcut.config import DEFAULT_OUTPUT_ROOT, Settings, get_settings, normalize_transcription_settings
+from roughcut.config import (
+    DEFAULT_OUTPUT_ROOT,
+    Settings,
+    get_settings,
+    infer_coding_backends,
+    normalize_transcription_settings,
+    resolve_coding_backend_model,
+)
 
 
 def test_default_settings():
@@ -29,14 +36,14 @@ def test_default_settings():
     assert s.telegram_agent_enabled is False
     assert s.telegram_agent_claude_enabled is False
     assert s.telegram_agent_claude_command == "claude"
-    assert s.telegram_agent_claude_model == "opus"
+    assert s.telegram_agent_claude_model == ""
     assert s.telegram_agent_codex_command == "codex"
-    assert s.telegram_agent_codex_model == "gpt-5.4-mini"
-    assert s.acp_bridge_backend == "codex"
-    assert s.acp_bridge_fallback_backend == "claude"
-    assert s.acp_bridge_claude_model == "opus"
+    assert s.telegram_agent_codex_model == ""
+    assert s.acp_bridge_backend == ""
+    assert s.acp_bridge_fallback_backend == ""
+    assert s.acp_bridge_claude_model == ""
     assert s.acp_bridge_codex_command == "codex"
-    assert s.acp_bridge_codex_model == "gpt-5.4-mini"
+    assert s.acp_bridge_codex_model == ""
     assert s.telegram_agent_acp_command == ""
     assert s.telegram_agent_task_timeout_sec == 900
     assert s.transcribe_runtime_timeout_sec == 900
@@ -69,6 +76,33 @@ def test_local_mode_switches_active_provider():
     assert s.active_reasoning_provider == "ollama"
     assert s.active_reasoning_model == "qwen3.5:9b"
     assert s.active_search_provider == "auto"
+
+
+def test_infer_coding_backends_prefers_hybrid_routes():
+    s = Settings(
+        _env_file=None,
+        llm_routing_mode="hybrid_performance",
+        hybrid_analysis_provider="openai",
+        hybrid_analysis_model="gpt-5.4",
+        hybrid_copy_provider="anthropic",
+        hybrid_copy_model="claude-sonnet-4-20250514",
+        telegram_agent_claude_enabled=True,
+    )
+
+    assert infer_coding_backends(s) == ["codex", "claude"]
+    assert resolve_coding_backend_model("codex", settings=s) == "gpt-5.4"
+    assert resolve_coding_backend_model("claude", settings=s) == "claude-sonnet-4-20250514"
+
+
+def test_resolve_coding_backend_model_uses_explicit_value_before_auto():
+    s = Settings(
+        _env_file=None,
+        llm_routing_mode="hybrid_performance",
+        hybrid_analysis_provider="openai",
+        hybrid_analysis_model="gpt-5.4",
+    )
+
+    assert resolve_coding_backend_model("codex", settings=s, explicit_model="gpt-5.4-mini") == "gpt-5.4-mini"
 
 
 def test_get_settings_normalizes_legacy_search_provider_override_to_auto(tmp_path, monkeypatch):

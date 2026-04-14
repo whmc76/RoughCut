@@ -364,6 +364,8 @@ async def test_provider_check_reports_live_openai_models(client, monkeypatch):
     config_mod._settings = None
     settings = get_settings()
     object.__setattr__(settings, "openai_base_url", "https://api.openai.com/v1")
+    object.__setattr__(settings, "openai_auth_mode", "api_key")
+    object.__setattr__(settings, "openai_api_key_helper", "")
     object.__setattr__(settings, "openai_api_key", "openai-test-key")
 
     requests: list[tuple[str, dict[str, str]]] = []
@@ -696,8 +698,35 @@ def test_patch_config_rejects_unknown_acp_bridge_backend(tmp_path, monkeypatch):
     monkeypatch.setattr(config_mod, "_OVERRIDES_FILE", tmp_path / "roughcut_config.json")
     config_mod._settings = None
 
-    with pytest.raises(HTTPException, match="acp_bridge_backend must be claude or codex"):
+    with pytest.raises(HTTPException, match="acp_bridge_backend must be auto, claude or codex"):
         patch_config(ConfigPatch(acp_bridge_backend="unsupported"))
+
+
+def test_patch_config_accepts_blank_acp_backend_and_model_overrides(tmp_path, monkeypatch):
+    import roughcut.api.config as config_api
+    import roughcut.config as config_mod
+
+    monkeypatch.setattr(config_api, "_CONFIG_FILE", tmp_path / "roughcut_config.json")
+    monkeypatch.setattr(config_mod, "_OVERRIDES_FILE", tmp_path / "roughcut_config.json")
+    config_mod._settings = None
+
+    cfg = patch_config(
+        ConfigPatch(
+            telegram_agent_codex_model="",
+            telegram_agent_claude_model="",
+            acp_bridge_backend="",
+            acp_bridge_fallback_backend="",
+            acp_bridge_claude_model="",
+            acp_bridge_codex_model="",
+        )
+    )
+
+    assert cfg.telegram_agent_codex_model == ""
+    assert cfg.telegram_agent_claude_model == ""
+    assert cfg.acp_bridge_backend == ""
+    assert cfg.acp_bridge_fallback_backend == ""
+    assert cfg.acp_bridge_claude_model == ""
+    assert cfg.acp_bridge_codex_model == ""
 
 
 def test_patch_config_clamps_transcribe_runtime_timeout(tmp_path, monkeypatch):

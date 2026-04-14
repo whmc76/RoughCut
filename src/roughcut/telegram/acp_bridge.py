@@ -11,23 +11,42 @@ from typing import Any
 
 import httpx
 
+from roughcut.config import infer_coding_backends, get_settings, normalize_coding_backend_name, resolve_coding_backend_model
 from roughcut.telegram.output_codec import decode_process_output
 
 
 def _configured_backend() -> str:
-    return str(os.getenv("ROUGHCUT_ACP_BRIDGE_BACKEND", "codex") or "codex").strip().lower()
+    explicit = normalize_coding_backend_name(os.getenv("ROUGHCUT_ACP_BRIDGE_BACKEND", ""))
+    if explicit:
+        return explicit
+    try:
+        backends = infer_coding_backends(get_settings())
+    except Exception:
+        backends = ["codex"]
+    return backends[0] if backends else "codex"
 
 
 def _configured_fallback_backend() -> str:
-    return str(os.getenv("ROUGHCUT_ACP_BRIDGE_FALLBACK_BACKEND", "claude") or "claude").strip().lower()
+    explicit = normalize_coding_backend_name(os.getenv("ROUGHCUT_ACP_BRIDGE_FALLBACK_BACKEND", ""))
+    if explicit:
+        return explicit
+    try:
+        backends = infer_coding_backends(get_settings())
+    except Exception:
+        backends = ["codex"]
+    return backends[1] if len(backends) > 1 else ""
 
 
 def build_backend_command(payload: dict[str, Any], *, backend: str | None = None) -> tuple[list[str], Path, int]:
-    backend = str(backend or _configured_backend() or "claude").strip().lower()
+    backend = normalize_coding_backend_name(backend or _configured_backend() or "codex") or "codex"
     repo_root = Path(str(payload.get("repo_root") or ".")).resolve()
     prompt = str(payload.get("prompt") or payload.get("task") or "").strip()
     if not prompt:
         raise ValueError("payload.prompt is required")
+    try:
+        settings = get_settings()
+    except Exception:
+        settings = None
 
     timeout = int(
         os.getenv(
@@ -47,9 +66,13 @@ def build_backend_command(payload: dict[str, Any], *, backend: str | None = None
             raise RuntimeError(f"Claude command not found in PATH: {command_name}")
 
         permission_mode = str(os.getenv("ROUGHCUT_ACP_BRIDGE_PERMISSION_MODE", "acceptEdits") or "acceptEdits").strip()
-        model_name = (
-            str(os.getenv("ROUGHCUT_ACP_BRIDGE_CLAUDE_MODEL", "")).strip()
-            or str(os.getenv("TELEGRAM_AGENT_CLAUDE_MODEL", "")).strip()
+        model_name = resolve_coding_backend_model(
+            "claude",
+            settings=settings,
+            explicit_model=(
+                str(os.getenv("ROUGHCUT_ACP_BRIDGE_CLAUDE_MODEL", "")).strip()
+                or str(os.getenv("TELEGRAM_AGENT_CLAUDE_MODEL", "")).strip()
+            ),
         )
         command = [
             resolved,
@@ -76,9 +99,13 @@ def build_backend_command(payload: dict[str, Any], *, backend: str | None = None
             raise RuntimeError(f"Codex command not found in PATH: {command_name}")
 
         sandbox_mode = str(os.getenv("ROUGHCUT_ACP_BRIDGE_CODEX_SANDBOX", "danger-full-access") or "danger-full-access").strip()
-        model_name = (
-            str(os.getenv("ROUGHCUT_ACP_BRIDGE_CODEX_MODEL", "")).strip()
-            or str(os.getenv("TELEGRAM_AGENT_CODEX_MODEL", "")).strip()
+        model_name = resolve_coding_backend_model(
+            "codex",
+            settings=settings,
+            explicit_model=(
+                str(os.getenv("ROUGHCUT_ACP_BRIDGE_CODEX_MODEL", "")).strip()
+                or str(os.getenv("TELEGRAM_AGENT_CODEX_MODEL", "")).strip()
+            ),
         )
         command = [
             resolved,
@@ -122,9 +149,13 @@ def _run_backend(payload: dict[str, Any], *, backend: str) -> dict[str, Any]:
                 json={
                     "repo_root": str(Path(str(payload.get("repo_root") or ".")).resolve()),
                     "prompt": str(payload.get("prompt") or payload.get("task") or "").strip(),
-                    "model": (
-                        str(os.getenv("ROUGHCUT_ACP_BRIDGE_CODEX_MODEL", "")).strip()
-                        or str(os.getenv("TELEGRAM_AGENT_CODEX_MODEL", "")).strip()
+                    "model": resolve_coding_backend_model(
+                        "codex",
+                        settings=get_settings(),
+                        explicit_model=(
+                            str(os.getenv("ROUGHCUT_ACP_BRIDGE_CODEX_MODEL", "")).strip()
+                            or str(os.getenv("TELEGRAM_AGENT_CODEX_MODEL", "")).strip()
+                        ),
                     ),
                     "sandbox": str(os.getenv("ROUGHCUT_ACP_BRIDGE_CODEX_SANDBOX", "danger-full-access") or "danger-full-access").strip(),
                     "timeout_sec": max(30, timeout),
@@ -189,7 +220,7 @@ def run_bridge(payload: dict[str, Any]) -> dict[str, Any]:
         if normalized and normalized not in backends:
             backends.append(normalized)
     if not backends:
-        backends = ["claude"]
+        backends = ["codex"]
 
     last_error: Exception | None = None
     for index, backend in enumerate(backends):

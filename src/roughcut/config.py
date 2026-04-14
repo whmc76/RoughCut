@@ -94,6 +94,14 @@ HYBRID_REASONING_PROVIDER_VALUES: tuple[str, ...] = ("openai", "anthropic", "min
 LLM_ROUTING_MODE_VALUES: tuple[str, ...] = ("bundled", "hybrid_performance")
 HYBRID_SEARCH_MODE_VALUES: tuple[str, ...] = ("off", "entity_gated", "follow_provider")
 REASONING_EFFORT_VALUES: tuple[str, ...] = ("minimal", "low", "medium", "high")
+CODING_BACKEND_PROVIDER_FAMILIES: dict[str, tuple[str, ...]] = {
+    "codex": ("openai",),
+    "claude": ("anthropic",),
+}
+LEGACY_CODING_BACKEND_MODELS: dict[str, str] = {
+    "codex": "gpt-5.4-mini",
+    "claude": "opus",
+}
 
 
 def resolve_heygem_shared_root(*, ensure_exists: bool = True) -> Path:
@@ -361,18 +369,18 @@ class Settings(BaseSettings):
     telegram_agent_enabled: bool = False
     telegram_agent_claude_enabled: bool = False
     telegram_agent_claude_command: str = "claude"
-    telegram_agent_claude_model: str = "opus"
+    telegram_agent_claude_model: str = ""
     telegram_agent_codex_command: str = "codex"
-    telegram_agent_codex_model: str = "gpt-5.4-mini"
+    telegram_agent_codex_model: str = ""
     telegram_agent_acp_command: str = ""
     telegram_agent_task_timeout_sec: int = 900
     telegram_agent_result_max_chars: int = 3500
     telegram_agent_state_dir: str = str((DEFAULT_OUTPUT_ROOT / "telegram-agent").as_posix())
-    acp_bridge_backend: str = Field(default="codex", validation_alias="ROUGHCUT_ACP_BRIDGE_BACKEND")
-    acp_bridge_fallback_backend: str = Field(default="claude", validation_alias="ROUGHCUT_ACP_BRIDGE_FALLBACK_BACKEND")
-    acp_bridge_claude_model: str = Field(default="opus", validation_alias="ROUGHCUT_ACP_BRIDGE_CLAUDE_MODEL")
+    acp_bridge_backend: str = Field(default="", validation_alias="ROUGHCUT_ACP_BRIDGE_BACKEND")
+    acp_bridge_fallback_backend: str = Field(default="", validation_alias="ROUGHCUT_ACP_BRIDGE_FALLBACK_BACKEND")
+    acp_bridge_claude_model: str = Field(default="", validation_alias="ROUGHCUT_ACP_BRIDGE_CLAUDE_MODEL")
     acp_bridge_codex_command: str = Field(default="codex", validation_alias="ROUGHCUT_ACP_BRIDGE_CODEX_COMMAND")
-    acp_bridge_codex_model: str = Field(default="gpt-5.4-mini", validation_alias="ROUGHCUT_ACP_BRIDGE_CODEX_MODEL")
+    acp_bridge_codex_model: str = Field(default="", validation_alias="ROUGHCUT_ACP_BRIDGE_CODEX_MODEL")
     telegram_remote_review_enabled: bool = False
     telegram_bot_api_base_url: str = "https://api.telegram.org"
     telegram_bot_token: str = ""
@@ -708,6 +716,99 @@ def _normalize_settings(settings: Settings) -> None:
     _normalize_llm_capability_bundle_settings(settings)
 
 
+def normalize_coding_backend_name(value: object) -> str:
+    normalized = str(value or "").strip().lower()
+    return normalized if normalized in CODING_BACKEND_PROVIDER_FAMILIES else ""
+
+
+def coding_backend_for_provider(provider: object) -> str:
+    normalized_provider = str(provider or "").strip().lower()
+    for backend, providers in CODING_BACKEND_PROVIDER_FAMILIES.items():
+        if normalized_provider in providers:
+            return backend
+    return ""
+
+
+def _iter_coding_model_route_candidates(settings: Settings | None = None) -> list[tuple[str, str]]:
+    current = settings or get_settings()
+    reasoning_candidate = (
+        str(getattr(current, "active_reasoning_provider", "") or "").strip().lower(),
+        str(getattr(current, "active_reasoning_model", "") or "").strip(),
+    )
+    hybrid_candidates = [
+        (
+            str(getattr(current, "hybrid_analysis_provider", "") or "").strip().lower(),
+            str(getattr(current, "hybrid_analysis_model", "") or "").strip(),
+        ),
+        (
+            str(getattr(current, "hybrid_copy_provider", "") or "").strip().lower(),
+            str(getattr(current, "hybrid_copy_model", "") or "").strip(),
+        ),
+    ]
+    ordered_candidates = (
+        [*hybrid_candidates, reasoning_candidate]
+        if is_hybrid_routing_enabled(current)
+        else [reasoning_candidate, *hybrid_candidates]
+    )
+    deduped: list[tuple[str, str]] = []
+    for provider, model in ordered_candidates:
+        if not provider or not model:
+            continue
+        candidate = (provider, model)
+        if candidate not in deduped:
+            deduped.append(candidate)
+    return deduped
+
+
+def infer_coding_backends(
+    settings: Settings | None = None,
+    *,
+    claude_enabled: bool | None = None,
+) -> list[str]:
+    current = settings or get_settings()
+    allow_claude = (
+        bool(getattr(current, "telegram_agent_claude_enabled", False))
+        if claude_enabled is None
+        else bool(claude_enabled)
+    )
+    backends: list[str] = []
+    for provider, _model in _iter_coding_model_route_candidates(current):
+        backend = coding_backend_for_provider(provider)
+        if not backend:
+            continue
+        if backend == "claude" and not allow_claude:
+            continue
+        if backend not in backends:
+            backends.append(backend)
+    if not backends:
+        backends.append("codex")
+        if allow_claude:
+            backends.append("claude")
+    return backends
+
+
+def resolve_coding_backend_model(
+    backend: str,
+    *,
+    settings: Settings | None = None,
+    explicit_model: object = "",
+    allow_legacy_default: bool = True,
+) -> str:
+    normalized_backend = normalize_coding_backend_name(backend)
+    explicit = str(explicit_model or "").strip()
+    if explicit:
+        return explicit
+    if not normalized_backend:
+        return ""
+    allowed_providers = CODING_BACKEND_PROVIDER_FAMILIES.get(normalized_backend, ())
+    for provider, model in _iter_coding_model_route_candidates(settings):
+        if provider in allowed_providers and model:
+            return model
+    if allow_legacy_default:
+        return LEGACY_CODING_BACKEND_MODELS.get(normalized_backend, "")
+    return ""
+
+
 def _normalize_runtime_override_values(data: dict[str, Any]) -> dict[str, Any]:
     normalized = dict(data)
 
@@ -752,6 +853,19 @@ def _normalize_runtime_override_values(data: dict[str, Any]) -> dict[str, Any]:
     for key in ("hybrid_analysis_model", "hybrid_copy_model"):
         if key in normalized:
             normalized[key] = str(normalized.get(key) or "").strip()
+
+    for key in (
+        "telegram_agent_claude_model",
+        "telegram_agent_codex_model",
+        "acp_bridge_claude_model",
+        "acp_bridge_codex_model",
+    ):
+        if key in normalized:
+            normalized[key] = str(normalized.get(key) or "").strip()
+
+    for key in ("acp_bridge_backend", "acp_bridge_fallback_backend"):
+        if key in normalized:
+            normalized[key] = normalize_coding_backend_name(normalized.get(key))
 
     for key in ("hybrid_analysis_search_mode", "hybrid_copy_search_mode"):
         if key in normalized:
