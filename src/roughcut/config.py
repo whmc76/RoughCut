@@ -868,7 +868,7 @@ def resolve_llm_task_route(task_name: str, *, settings: Settings | None = None) 
             "reasoning_provider": str(getattr(current, "hybrid_analysis_provider", "openai") or "openai").strip().lower(),
             "reasoning_model": str(getattr(current, "hybrid_analysis_model", "gpt-5.4-mini") or "gpt-5.4-mini").strip(),
         }
-        effort = _normalize_reasoning_effort(getattr(current, "hybrid_analysis_effort", "medium"))
+        effort = _normalize_reasoning_effort(getattr(current, "hybrid_analysis_effort", ""))
         if effort:
             route["reasoning_effort"] = effort
         return route
@@ -879,7 +879,7 @@ def resolve_llm_task_route(task_name: str, *, settings: Settings | None = None) 
                 getattr(current, "hybrid_copy_model", "MiniMax-M2.7-highspeed") or "MiniMax-M2.7-highspeed"
             ).strip(),
         }
-        effort = _normalize_reasoning_effort(getattr(current, "hybrid_copy_effort", "high"))
+        effort = _normalize_reasoning_effort(getattr(current, "hybrid_copy_effort", ""))
         if effort:
             route["reasoning_effort"] = effort
         return route
