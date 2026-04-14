@@ -97,6 +97,35 @@ describe("JobQueueTable", () => {
     expect(screen.getByRole("button", { name: "需要预审核" })).toHaveClass("job-review-cta", "job-review-cta-active");
   });
 
+  it("keeps quality-stage needs_review jobs on the final-review path", () => {
+    render(
+      <JobQueueTable
+        jobs={[
+          buildJob({
+            id: "job-final-stage",
+            quality_score: 92.4,
+            quality_grade: "A",
+            quality_summary: "剪辑已经进入终审，重点检查成片质量。",
+            steps: [
+              { id: "s5", step_name: "summary_review", status: "done", attempt: 0, started_at: null, finished_at: null, error_message: null },
+              { id: "s6", step_name: "final_review", status: "pending", attempt: 0, started_at: null, finished_at: null, error_message: null },
+            ],
+          }),
+        ]}
+        selectedJobId={null}
+        isLoading={false}
+        onSelect={vi.fn()}
+        onOpenFolder={vi.fn()}
+        onCancel={vi.fn()}
+        onRestart={vi.fn()}
+        onDelete={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("最终核对")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "需要最终审核" })).toHaveClass("job-review-cta", "job-review-cta-active");
+  });
+
   it("keeps non-review jobs on the generic review action without highlight", () => {
     render(
       <JobQueueTable
@@ -219,5 +248,32 @@ describe("JobQueueTable", () => {
 
     expect(screen.getAllByText("自动审核已生效").length).toBeGreaterThan(0);
     expect(screen.getByText("已自动确认预审核并继续执行。")).toBeInTheDocument();
+  });
+
+  it("surfaces filename-derived descriptions as a separate labeled hint in the queue", () => {
+    render(
+      <JobQueueTable
+        jobs={[
+          buildJob({
+            id: "job-filename-hint",
+            status: "processing",
+            content_summary: null,
+            content_subject: null,
+            video_description: "任务说明依据文件名：狐蝠工业 FXX1小副包 开箱测评。\n重点保留近景细节和开合手感。",
+          }),
+        ]}
+        selectedJobId={null}
+        isLoading={false}
+        onSelect={vi.fn()}
+        onOpenFolder={vi.fn()}
+        onCancel={vi.fn()}
+        onRestart={vi.fn()}
+        onDelete={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("重点保留近景细节和开合手感。")).toBeInTheDocument();
+    expect(screen.getByText("jobs.queue.filenameDerivedBadge")).toBeInTheDocument();
+    expect(screen.getByText("狐蝠工业 FXX1小副包 开箱测评。")).toBeInTheDocument();
   });
 });

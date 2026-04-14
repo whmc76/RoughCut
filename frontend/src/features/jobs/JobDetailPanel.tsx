@@ -1,4 +1,7 @@
 import type { AvatarMaterialLibrary, Config, ContentProfileReview, Job, JobActivity, JobTimeline, PackagingLibrary, Report, TokenUsageReport } from "../../types";
+import type { SelectOption } from "../../types";
+import { CheckboxField } from "../../components/forms/CheckboxField";
+import { SelectField } from "../../components/forms/SelectField";
 import { EmptyState } from "../../components/ui/EmptyState";
 import { PanelHeader } from "../../components/ui/PanelHeader";
 import { useI18n } from "../../i18n";
@@ -17,6 +20,43 @@ import {
 } from "./constants";
 
 type ActivityEvent = NonNullable<JobActivity["events"]>[number];
+const FILENAME_DESCRIPTION_PREFIX_RE = /^(?:任务说明依据文件名|Task description from filename)[:：]\s*/i;
+
+function splitVideoDescription(value: string | null | undefined): {
+  filenameDescription: string | null;
+  manualDescription: string | null;
+} {
+  const text = String(value ?? "").trim();
+  if (!text) {
+    return {
+      filenameDescription: null,
+      manualDescription: null,
+    };
+  }
+  const lines = text
+    .split(/\r?\n+/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (!lines.length) {
+    return {
+      filenameDescription: null,
+      manualDescription: null,
+    };
+  }
+  const firstLine = lines[0] ?? "";
+  if (!FILENAME_DESCRIPTION_PREFIX_RE.test(firstLine)) {
+    return {
+      filenameDescription: null,
+      manualDescription: text,
+    };
+  }
+  const filenameDescription = firstLine.replace(FILENAME_DESCRIPTION_PREFIX_RE, "").trim() || null;
+  const manualDescription = lines.slice(1).join("\n").trim() || null;
+  return {
+    filenameDescription,
+    manualDescription,
+  };
+}
 
 const STUCK_DIAGNOSTIC_TITLE_HINTS = ["卡住诊断", "stuck", "stuck_step", "stuck-step", "stuck diagnostic", "stuck-diagnostic"];
 
@@ -82,14 +122,36 @@ type JobDetailPanelProps = {
   contentDraft: Record<string, unknown>;
   contentKeywords: string;
   reviewEnhancementModes: string[];
+  languageOptions: SelectOption[];
+  workflowTemplateOptions: SelectOption[];
+  workflowModeOptions: SelectOption[];
+  enhancementOptions: SelectOption[];
+  pendingInitialization: {
+    language: string;
+    workflowTemplate: string;
+    workflowMode: string;
+    enhancementModes: string[];
+    outputDir: string;
+    videoDescription: string;
+  };
   isConfirmingProfile: boolean;
+  isInitializing: boolean;
   isApplyingReview: boolean;
   isCancelling: boolean;
   isRestarting: boolean;
   isDeleting: boolean;
   onContentFieldChange: (field: string, value: string) => void;
   onKeywordsChange: (value: string) => void;
+  onPendingInitializationChange: (value: {
+    language: string;
+    workflowTemplate: string;
+    workflowMode: string;
+    enhancementModes: string[];
+    outputDir: string;
+    videoDescription: string;
+  }) => void;
   onConfirmProfile: () => void;
+  onInitialize: () => void;
   onOpenFolder: () => void;
   onCancel: () => void;
   onRestart: () => void;
@@ -115,14 +177,22 @@ export function JobDetailPanel({
   contentDraft,
   contentKeywords,
   reviewEnhancementModes,
+  languageOptions,
+  workflowTemplateOptions,
+  workflowModeOptions,
+  enhancementOptions,
+  pendingInitialization,
   isConfirmingProfile,
+  isInitializing,
   isApplyingReview,
   isCancelling,
   isRestarting,
   isDeleting,
   onContentFieldChange,
   onKeywordsChange,
+  onPendingInitializationChange,
   onConfirmProfile,
+  onInitialize,
   onOpenFolder,
   onCancel,
   onRestart,
@@ -131,6 +201,7 @@ export function JobDetailPanel({
 }: JobDetailPanelProps) {
   const { t } = useI18n();
   const isReviewMode = selectedJob?.status === "needs_review";
+  const isAwaitingInitialization = Boolean(selectedJob?.awaiting_initialization || selectedJob?.status === "awaiting_init");
   const showReviewConfig = isReviewMode && !flowOnly;
   const showFlowSections = !isReviewMode || flowOnly;
   const currentStep = activity?.current_step;
@@ -155,6 +226,7 @@ export function JobDetailPanel({
   const avatarHeadlineSummary = avatarDecision?.summary ?? selectedJob?.avatar_delivery_summary ?? null;
   const mergedSourceNames = selectedJob?.merged_source_names ?? [];
   const isMergedTask = mergedSourceNames.length > 1;
+  const { filenameDescription, manualDescription } = splitVideoDescription(selectedJob?.video_description);
   const avatarEnabled = Boolean(selectedJob?.enhancement_modes.includes("avatar_commentary"));
   const autoReviewVisible = Boolean(selectedJob?.auto_review_mode_enabled);
   const autoReviewReasons = selectedJob?.auto_review_reasons ?? [];
@@ -173,23 +245,6 @@ export function JobDetailPanel({
       : avatarHeadlineSummary || t("jobs.actions.downloadHint.standard")
     : t("jobs.actions.downloadHint.standard");
   const stepEntries = selectedJob?.steps ?? [];
-  const stepLabelEntries = stepEntries
-    .map((step) => ({ stepName: step.step_name, label: stepLabel(step.step_name) }))
-    .sort((left, right) => right.label.length - left.label.length);
-  const fallbackStepName =
-    currentStep?.step_name
-    ?? stepEntries.find((step) => step.status === "running" || step.status === "failed" || step.status === "cancelled")?.step_name
-    ?? null;
-  const resolveStepNameForText = (text: string) => {
-    for (const entry of stepLabelEntries) {
-      if (text.includes(entry.label)) return entry.stepName;
-    }
-    if (text.includes("时间线")) return "edit_plan";
-    if (text.includes("渲染")) return "render";
-    if (text.includes("数字人")) return "avatar_commentary";
-    if (text.includes("任务失败") || text.includes("任务已取消")) return fallbackStepName;
-    return null;
-  };
   const stepItemsMap = new Map<string, StepActivityItem[]>();
   const pushStepItem = (stepName: string | null, item: StepActivityItem) => {
     if (!stepName) return;
@@ -199,8 +254,7 @@ export function JobDetailPanel({
   };
 
   timelineEvents.forEach((event, index) => {
-    const matchedStepName = resolveStepNameForText(`${event.title || ""} ${event.detail || ""}`);
-    pushStepItem(matchedStepName, {
+    pushStepItem(event.step_name ?? null, {
       id: `event-${index}-${event.timestamp || "na"}`,
       title: event.title,
       detail: event.detail,
@@ -211,10 +265,7 @@ export function JobDetailPanel({
   });
 
   (activity?.decisions ?? []).forEach((decision, index) => {
-    const matchedStepName =
-      resolveStepNameForText(`${decision.title || ""} ${decision.summary || ""} ${decision.detail || ""}`)
-      ?? (decision.kind === "avatar_commentary" ? "avatar_commentary" : decision.kind === "edit_plan" ? "edit_plan" : null);
-    pushStepItem(matchedStepName, {
+    pushStepItem(decision.step_name ?? null, {
       id: `decision-${index}-${decision.kind}`,
       title: decision.title,
       detail: decision.detail || decision.summary,
@@ -264,13 +315,23 @@ export function JobDetailPanel({
             </button>
             <button
               className="button primary"
-              onClick={onRestart}
-              disabled={isRestarting || !isRestartableJobStatus(selectedJob.status)}
-              title={isRestartableJobStatus(selectedJob.status) ? undefined : t(getRestartUnavailableReason(selectedJob.status))}
+              onClick={isAwaitingInitialization ? onInitialize : onRestart}
+              disabled={
+                isAwaitingInitialization
+                  ? isInitializing || !pendingInitialization.videoDescription.trim()
+                  : isRestarting || !isRestartableJobStatus(selectedJob.status)
+              }
+              title={
+                isAwaitingInitialization
+                  ? undefined
+                  : isRestartableJobStatus(selectedJob.status) ? undefined : t(getRestartUnavailableReason(selectedJob.status))
+              }
             >
-              {isRestarting
-                ? t("jobs.actions.restarting")
-                : isRestartableJobStatus(selectedJob.status) ? t("jobs.actions.restart") : t("jobs.actions.restartUnavailable")}
+              {isAwaitingInitialization
+                ? (isInitializing ? t("jobs.init.submitting") : t("jobs.init.submit"))
+                : isRestarting
+                  ? t("jobs.actions.restarting")
+                  : isRestartableJobStatus(selectedJob.status) ? t("jobs.actions.restart") : t("jobs.actions.restartUnavailable")}
             </button>
             <button className="button danger" onClick={onDelete} disabled={isDeleting}>
               {isDeleting ? t("jobs.actions.deleting") : t("jobs.actions.delete")}
@@ -294,6 +355,29 @@ export function JobDetailPanel({
                   </span>
                 ))}
               </div>
+            </section>
+          ) : null}
+
+          {filenameDescription || manualDescription ? (
+            <section className="detail-block">
+              <div className="detail-key">{t("jobs.detail.videoDescription")}</div>
+              {filenameDescription ? (
+                <article className="activity-card">
+                  <div className="toolbar">
+                    <strong>{t("jobs.detail.filenameDerivedDescription")}</strong>
+                    <span className="status-pill pending">{t("jobs.detail.filenameDerivedBadge")}</span>
+                  </div>
+                  <div>{filenameDescription}</div>
+                </article>
+              ) : null}
+              {manualDescription ? (
+                <article className={classNames("activity-card", filenameDescription && "compact-top")}>
+                  <div className="toolbar">
+                    <strong>{filenameDescription ? t("jobs.detail.manualDescription") : t("jobs.detail.videoDescription")}</strong>
+                  </div>
+                  <div>{manualDescription}</div>
+                </article>
+              ) : null}
             </section>
           ) : null}
 
@@ -352,6 +436,72 @@ export function JobDetailPanel({
               avatarMaterials={avatarMaterials}
               enhancementModes={reviewEnhancementModes}
             />
+          ) : isAwaitingInitialization ? (
+            <section className="detail-block">
+              <div className="detail-key">{t("jobs.init.title")}</div>
+              <div className="muted compact-top">{t("jobs.init.description")}</div>
+              <div className="form-grid three-up compact-top">
+                <SelectField
+                  label={t("jobs.upload.language")}
+                  value={pendingInitialization.language}
+                  onChange={(event) => onPendingInitializationChange({ ...pendingInitialization, language: event.target.value })}
+                  options={languageOptions}
+                />
+                <SelectField
+                  label={t("jobs.upload.channelProfile")}
+                  value={pendingInitialization.workflowTemplate}
+                  onChange={(event) => onPendingInitializationChange({ ...pendingInitialization, workflowTemplate: event.target.value })}
+                  options={workflowTemplateOptions}
+                />
+                <label>
+                  <span>{t("jobs.upload.outputDir")}</span>
+                  <input
+                    className="input"
+                    type="text"
+                    value={pendingInitialization.outputDir}
+                    onChange={(event) => onPendingInitializationChange({ ...pendingInitialization, outputDir: event.target.value })}
+                  />
+                </label>
+                <SelectField
+                  label={t("jobs.upload.workflowMode")}
+                  value={pendingInitialization.workflowMode}
+                  onChange={(event) => onPendingInitializationChange({ ...pendingInitialization, workflowMode: event.target.value })}
+                  options={workflowModeOptions}
+                />
+              </div>
+              <div className="upload-enhancement-panel compact-top">
+                <div className="stat-label">{t("jobs.upload.enhancements")}</div>
+                <div className="checklist-grid compact-top">
+                  {enhancementOptions.map((option) => {
+                    const checked = pendingInitialization.enhancementModes.includes(option.value);
+                    return (
+                      <CheckboxField
+                        key={option.value}
+                        label={option.label}
+                        checked={checked}
+                        onChange={(event) =>
+                          onPendingInitializationChange({
+                            ...pendingInitialization,
+                            enhancementModes: event.target.checked
+                              ? [...pendingInitialization.enhancementModes, option.value]
+                              : pendingInitialization.enhancementModes.filter((item) => item !== option.value),
+                          })}
+                      />
+                    );
+                  })}
+                </div>
+              </div>
+              <label className="compact-top">
+                <span>{t("jobs.upload.videoDescription")}</span>
+                <textarea
+                  className="input"
+                  rows={5}
+                  value={pendingInitialization.videoDescription}
+                  onChange={(event) => onPendingInitializationChange({ ...pendingInitialization, videoDescription: event.target.value })}
+                  placeholder={t("jobs.upload.videoDescriptionPlaceholder")}
+                />
+              </label>
+            </section>
           ) : showFlowSections ? (
             <>
               <section className="detail-block">
@@ -431,7 +581,7 @@ export function JobDetailPanel({
             </>
           ) : null}
 
-          {!flowOnly ? (
+          {!flowOnly && !isAwaitingInitialization ? (
             <JobContentProfileSection
               jobId={selectedJob.id}
               thumbnailVersion={selectedJob.updated_at}
@@ -447,7 +597,7 @@ export function JobDetailPanel({
             />
           ) : null}
 
-          {showFlowSections && (
+          {showFlowSections && !isAwaitingInitialization && (
             <>
               <section className="detail-block">
                 <div className="detail-key">{t("jobs.detail.tokenUsage")}</div>

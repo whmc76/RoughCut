@@ -4,6 +4,7 @@ import { EmptyState } from "../../components/ui/EmptyState";
 import { PanelHeader } from "../../components/ui/PanelHeader";
 import { useI18n } from "../../i18n";
 import { classNames, formatDate, statusLabel } from "../../utils";
+import { resolveJobReviewStep } from "./useJobWorkspace";
 import {
   autoReviewBadgeLabel,
   autoReviewTone,
@@ -14,7 +15,50 @@ import {
   workflowModeLabel,
 } from "./constants";
 
+const FILENAME_DESCRIPTION_PREFIX_RE = /^(?:任务说明依据文件名|Task description from filename)[:：]\s*/i;
+
+function splitVideoDescription(value: string | null | undefined): {
+  filenameDescription: string | null;
+  manualDescription: string | null;
+} {
+  const text = String(value ?? "").trim();
+  if (!text) {
+    return {
+      filenameDescription: null,
+      manualDescription: null,
+    };
+  }
+  const lines = text
+    .split(/\r?\n+/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (!lines.length) {
+    return {
+      filenameDescription: null,
+      manualDescription: null,
+    };
+  }
+  const firstLine = lines[0] ?? "";
+  if (!FILENAME_DESCRIPTION_PREFIX_RE.test(firstLine)) {
+    return {
+      filenameDescription: null,
+      manualDescription: text,
+    };
+  }
+  return {
+    filenameDescription: firstLine.replace(FILENAME_DESCRIPTION_PREFIX_RE, "").trim() || null,
+    manualDescription: lines.slice(1).join("\n").trim() || null,
+  };
+}
+
 function resolvePendingReviewStep(job: Job) {
+  const reviewStep = resolveJobReviewStep(job);
+  if (reviewStep === "final_review") {
+    return job.steps.find((step) => step.step_name === "final_review" && step.status !== "done") ?? null;
+  }
+  if (reviewStep === "summary_review") {
+    return job.steps.find((step) => step.step_name === "summary_review" && step.status !== "done") ?? null;
+  }
   return job.steps.find((step) => (step.step_name === "summary_review" || step.step_name === "final_review") && step.status === "pending")
     ?? job.steps.find((step) => (step.step_name === "summary_review" || step.step_name === "final_review") && step.status !== "done")
     ?? null;
@@ -43,14 +87,15 @@ function reviewStatusLabel(job: Job): string {
 }
 
 function reviewPreviewText(job: Job, t: (key: string) => string) {
+  const { manualDescription, filenameDescription } = splitVideoDescription(job.video_description);
   if (job.status !== "needs_review") {
-    return job.content_summary || job.content_subject || t("jobs.queue.noSummary");
+    return job.content_summary || job.content_subject || manualDescription || filenameDescription || t("jobs.queue.noSummary");
   }
   const reviewStep = resolvePendingReviewStep(job);
   if (reviewStep?.step_name === "final_review") {
-    return job.quality_summary || "等待审核成片后继续。";
+    return job.quality_summary || job.review_detail || "等待审核成片后继续生成平台文案。";
   }
-  return job.content_summary || job.content_subject || "等待信息核对后继续。";
+  return job.content_summary || job.content_subject || job.review_detail || "等待确认摘要后继续剪辑与渲染。";
 }
 
 function enhancementBadgeLabel(job: Job, mode: string) {
@@ -149,6 +194,7 @@ export function JobQueueTable({
             )}
             {jobs.map((job) => {
               const highlightedReviewAction = isHighlightedReviewAction(job);
+              const { filenameDescription } = splitVideoDescription(job.video_description);
 
               return (
                 <tr key={job.id} className={classNames(selectedJobId === job.id && "selected-row")} onClick={() => onSelect(job.id)}>
@@ -175,6 +221,12 @@ export function JobQueueTable({
                       <div className="job-file-copy">
                         <div className="row-title">{job.source_name}</div>
                         <div className="muted line-clamp-2">{reviewPreviewText(job, t)}</div>
+                        {job.status !== "needs_review" && filenameDescription ? (
+                          <div className="compact-top">
+                            <span className="status-pill pending">{t("jobs.queue.filenameDerivedBadge")}</span>
+                            <span className="muted"> {filenameDescription}</span>
+                          </div>
+                        ) : null}
                         <div className="mode-chip-list compact-top">
                           <span className="mode-chip">{workflowModeLabel(job.workflow_mode)}</span>
                           {job.enhancement_modes.map((mode) => (

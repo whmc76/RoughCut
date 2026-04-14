@@ -921,6 +921,31 @@ async def test_job_upload_persists_video_description_to_content_profile_step(cli
 
 
 @pytest.mark.asyncio
+async def test_job_upload_extracts_filename_brief_into_video_description(client: AsyncClient, db_engine):
+    from sqlalchemy import select
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from roughcut.db.models import JobStep
+
+    response = await client.post(
+        "/api/v1/jobs",
+        files={"file": ("20260316_狐蝠工业_FXX1小副包_开箱测评.mp4", b"video", "video/mp4")},
+    )
+
+    assert response.status_code == 201
+    job_id = response.json()["id"]
+
+    factory = async_sessionmaker(db_engine, expire_on_commit=False)
+    async with factory() as session:
+        result = await session.execute(
+            select(JobStep).where(JobStep.job_id == uuid.UUID(job_id), JobStep.step_name == "content_profile")
+        )
+        step = result.scalar_one()
+        assert step.metadata_["source_context"]["video_description"].startswith("任务说明依据文件名：")
+        assert "狐蝠工业 FXX1小副包 开箱测评" in step.metadata_["source_context"]["video_description"]
+
+
+@pytest.mark.asyncio
 async def test_glossary_crud(client: AsyncClient):
     # Create
     resp = await client.post(
@@ -956,17 +981,18 @@ async def test_glossary_crud(client: AsyncClient):
 async def test_watch_roots_crud(client: AsyncClient):
     resp = await client.post(
         "/api/v1/watch-roots",
-        json={"path": "/tmp/videos", "enabled": True},
+        json={"path": "/tmp/videos", "enabled": True, "ingest_mode": "task_only"},
     )
     assert resp.status_code == 201
     created = resp.json()
     root_id = created["id"]
     assert created["scan_mode"] == "fast"
+    assert created["ingest_mode"] == "task_only"
 
     resp = await client.get("/api/v1/watch-roots")
     assert resp.status_code == 200
     roots = resp.json()
-    assert any(r["id"] == root_id and r["scan_mode"] == "fast" for r in roots)
+    assert any(r["id"] == root_id and r["scan_mode"] == "fast" and r["ingest_mode"] == "task_only" for r in roots)
 
     resp = await client.delete(f"/api/v1/watch-roots/{root_id}")
     assert resp.status_code == 204
@@ -1229,11 +1255,13 @@ async def test_watch_root_inventory_enqueue_selected_item(client: AsyncClient, m
         language: str = "zh-CN",
         output_dir: str | None = None,
         config_profile_id: uuid.UUID | None = None,
+        awaiting_initialization: bool = False,
     ):
         assert file_paths == ["/tmp/videos-enqueue/a.mp4"]
         assert workflow_template == "edc_tactical"
         assert output_dir is None
         assert config_profile_id is None
+        assert awaiting_initialization is False
         return [{"path": "/tmp/videos-enqueue/a.mp4", "job_id": "job-123"}]
 
     monkeypatch.setattr(review_api, "create_jobs_for_inventory_paths", fake_create_jobs_for_inventory_paths)
@@ -1334,10 +1362,12 @@ async def test_watch_root_inventory_enqueue_all(client: AsyncClient, monkeypatch
         language: str = "zh-CN",
         output_dir: str | None = None,
         config_profile_id: uuid.UUID | None = None,
+        awaiting_initialization: bool = False,
     ):
         assert file_paths == ["/tmp/videos-batch/a.mp4", "/tmp/videos-batch/b.mp4"]
         assert output_dir is None
         assert config_profile_id is None
+        assert awaiting_initialization is False
         return [
             {"path": "/tmp/videos-batch/a.mp4", "job_id": "job-a"},
             {"path": "/tmp/videos-batch/b.mp4", "job_id": None},
@@ -1809,6 +1839,99 @@ async def test_job_restart_allows_processing_jobs(client: AsyncClient):
     assert data["steps"][0]["step_name"] == "probe"
     assert data["steps"][0]["status"] == "pending"
     assert data["steps"][0]["attempt"] == 0
+
+
+@pytest.mark.asyncio
+async def test_job_initialize_starts_awaiting_init_job(client: AsyncClient):
+    from roughcut.db.models import Job, JobStep
+    from roughcut.db.session import get_session_factory
+
+    job_id = uuid.uuid4()
+
+    async with get_session_factory()() as session:
+        session.add(
+            Job(
+                id=job_id,
+                source_path="jobs/demo/task-only.mp4",
+                source_name="task-only.mp4",
+                status="awaiting_init",
+                language="zh-CN",
+                workflow_mode="standard_edit",
+                enhancement_modes=[],
+            )
+        )
+        session.add(JobStep(job_id=job_id, step_name="probe", status="pending"))
+        session.add(
+            JobStep(
+                job_id=job_id,
+                step_name="content_profile",
+                status="pending",
+                metadata_={"source_context": {"merged_source_names": ["task-only.mp4"]}},
+            )
+        )
+        await session.commit()
+
+    response = await client.post(
+        f"/api/v1/jobs/{job_id}/initialize",
+        json={
+            "language": "zh-CN",
+            "workflow_template": "edc_tactical",
+            "workflow_mode": "standard_edit",
+            "enhancement_modes": ["auto_review"],
+            "output_dir": "/tmp/output-init",
+            "video_description": "这是一期工具开箱，重点保留近景细节和开合手感。",
+        },
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "pending"
+    assert data["awaiting_initialization"] is False
+    assert data["video_description"] == "这是一期工具开箱，重点保留近景细节和开合手感。"
+    assert data["workflow_template"] == "edc_tactical"
+    assert data["enhancement_modes"] == ["auto_review"]
+
+    activity = await client.get(f"/api/v1/jobs/{job_id}/activity")
+    assert activity.status_code == 200
+    activity_data = activity.json()
+    assert activity_data["current_step"]["step_name"] == "probe"
+    assert activity_data["current_step"]["detail"] == "任务已初始化，等待调度器派发。"
+
+
+@pytest.mark.asyncio
+async def test_get_job_exposes_standardized_review_context(client: AsyncClient):
+    from roughcut.db.models import Artifact, Job, JobStep
+    from roughcut.db.session import get_session_factory
+
+    job_id = uuid.uuid4()
+
+    async with get_session_factory()() as session:
+        session.add(
+            Job(
+                id=job_id,
+                source_path="jobs/demo/final-review-card.mp4",
+                source_name="final-review-card.mp4",
+                status="needs_review",
+                language="zh-CN",
+            )
+        )
+        session.add(JobStep(job_id=job_id, step_name="summary_review", status="done"))
+        session.add(JobStep(job_id=job_id, step_name="final_review", status="pending"))
+        session.add(
+            Artifact(
+                job_id=job_id,
+                artifact_type="quality_assessment",
+                data_json={"score": 91.2, "grade": "A", "issue_codes": []},
+            )
+        )
+        await session.commit()
+
+    response = await client.get(f"/api/v1/jobs/{job_id}")
+    assert response.status_code == 200
+    data = response.json()
+
+    assert data["review_step"] == "final_review"
+    assert data["review_label"] == "成片审核"
+    assert data["review_detail"] == "等待审核成片后继续生成平台文案。"
 
 
 @pytest.mark.asyncio
@@ -2711,10 +2834,106 @@ async def test_job_activity_reports_quality_assessment_decision(client: AsyncCli
     assert response.status_code == 200
     data = response.json()
     quality_decision = next(item for item in data["decisions"] if item["kind"] == "quality_assessment")
+    quality_event = next(item for item in data["events"] if item["title"] == "质量评分已更新")
+    assert quality_decision["step_name"] == "final_review"
     assert quality_decision["summary"] == "C 64.0 · 2 个扣分项"
     assert "detail_blind" in quality_decision["detail"]
     assert "content_profile" in quality_decision["detail"]
-    assert any(event["title"] == "质量评分已更新" for event in data["events"])
+    assert quality_event["step_name"] == "final_review"
+
+
+@pytest.mark.asyncio
+async def test_job_activity_prefers_confirmed_content_profile_and_review_specific_waiting_detail(client: AsyncClient):
+    from roughcut.db.models import Artifact, Job, JobStep
+    from roughcut.db.session import get_session_factory
+
+    job_id = uuid.uuid4()
+
+    async with get_session_factory()() as session:
+        session.add(
+            Job(
+                id=job_id,
+                source_path="jobs/demo/final-review-activity.mp4",
+                source_name="final-review-activity.mp4",
+                status="needs_review",
+                language="zh-CN",
+            )
+        )
+        session.add(
+            JobStep(
+                job_id=job_id,
+                step_name="final_review",
+                status="pending",
+                metadata_={"detail": "等待审核成片后继续。"},
+            )
+        )
+        session.add(
+            Artifact(
+                job_id=job_id,
+                artifact_type="content_profile_draft",
+                created_at=datetime.now(timezone.utc),
+                data_json={
+                    "subject_type": "草稿主题",
+                    "video_theme": "草稿视频主题",
+                    "summary": "这是一版不该出现在终审活动流里的草稿摘要。",
+                },
+            )
+        )
+        session.add(
+            Artifact(
+                job_id=job_id,
+                artifact_type="content_profile_final",
+                created_at=datetime.now(timezone.utc),
+                data_json={
+                    "subject_type": "确认后主题",
+                    "video_theme": "确认后视频主题",
+                    "summary": "这是一版已经确认过的最终摘要。",
+                },
+            )
+        )
+        await session.commit()
+
+    response = await client.get(f"/api/v1/jobs/{job_id}/activity")
+    assert response.status_code == 200
+    data = response.json()
+
+    assert data["review_step"] == "final_review"
+    assert data["review_detail"] == "等待审核成片后继续生成平台文案。"
+    assert data["current_step"]["step_name"] == "final_review"
+    assert data["current_step"]["detail"] == "等待审核成片后继续生成平台文案。"
+
+    profile_decision = next(item for item in data["decisions"] if item["kind"] == "content_profile")
+    assert profile_decision["status"] == "done"
+    assert "确认后主题" in profile_decision["summary"]
+    assert "这是一版已经确认过的最终摘要。" in profile_decision["detail"]
+
+
+@pytest.mark.asyncio
+async def test_job_activity_standardizes_platform_package_pending_detail(client: AsyncClient):
+    from roughcut.db.models import Job, JobStep
+    from roughcut.db.session import get_session_factory
+
+    job_id = uuid.uuid4()
+
+    async with get_session_factory()() as session:
+        session.add(
+            Job(
+                id=job_id,
+                source_path="jobs/demo/platform-package.mp4",
+                source_name="platform-package.mp4",
+                status="processing",
+                language="zh-CN",
+            )
+        )
+        session.add(JobStep(job_id=job_id, step_name="platform_package", status="pending"))
+        await session.commit()
+
+    response = await client.get(f"/api/v1/jobs/{job_id}/activity")
+    assert response.status_code == 200
+    data = response.json()
+
+    assert data["current_step"]["step_name"] == "platform_package"
+    assert data["current_step"]["detail"] == "等待调度器派发生成平台文案。"
 
 
 @pytest.mark.asyncio
@@ -3081,6 +3300,8 @@ async def test_content_profile_endpoint_exposes_evidence_artifacts(client: Async
 
 @pytest.mark.asyncio
 async def test_confirm_content_profile_persists_identity_alias_memory_on_simple_approval(client: AsyncClient):
+    from sqlalchemy import select
+
     from roughcut.db.models import Artifact, Job, JobStep
     from roughcut.db.session import get_session_factory
 
@@ -3165,6 +3386,19 @@ async def test_confirm_content_profile_persists_identity_alias_memory_on_simple_
         and item["corrected_value"] == "FXX1小副包"
         for item in data["memory"]["recent_corrections"]
     )
+
+    async with get_session_factory()() as session:
+        downstream_context = (
+            await session.execute(
+                select(Artifact)
+                .where(Artifact.job_id == job_id, Artifact.artifact_type == "downstream_context")
+                .order_by(Artifact.created_at.desc(), Artifact.id.desc())
+            )
+        ).scalars().first()
+
+    assert downstream_context is not None
+    assert downstream_context.data_json["resolved_profile"]["subject_brand"] == "狐蝠工业"
+    assert downstream_context.data_json["manual_review_applied"] is True
 
 
 @pytest.mark.asyncio

@@ -28,6 +28,7 @@ from roughcut.db.session import get_session_factory
 from roughcut.media.probe import probe
 from roughcut.media.output import get_output_dir
 from roughcut.pipeline.orchestrator import create_job_steps
+from roughcut.source_context import enrich_source_context_with_filename_hints
 from roughcut.storage.s3 import get_storage, job_key
 
 logger = logging.getLogger(__name__)
@@ -46,12 +47,14 @@ async def _call_inventory_job_factory(
     workflow_template: str | None,
     output_dir: str | None = None,
     config_profile_id: uuid.UUID | str | None = None,
+    awaiting_initialization: bool = False,
 ) -> Any:
     return await factory(
         file_paths,
         output_dir=output_dir,
         workflow_template=workflow_template,
         config_profile_id=config_profile_id,
+        awaiting_initialization=awaiting_initialization,
     )
 
 
@@ -265,6 +268,7 @@ async def create_jobs_for_inventory_paths(
     workflow_template: str | None = None,
     output_dir: str | None = None,
     language: str = "zh-CN",
+    awaiting_initialization: bool = False,
 ) -> list[dict[str, str | None]]:
     results: list[dict[str, str | None]] = []
     for file_path in file_paths:
@@ -274,6 +278,7 @@ async def create_jobs_for_inventory_paths(
             language,
             output_dir=output_dir,
             config_profile_id=config_profile_id,
+            awaiting_initialization=awaiting_initialization,
         )
         results.append({"path": file_path, "job_id": job_id or None})
     return results
@@ -627,6 +632,12 @@ def _normalize_scan_mode(scan_mode: str | None) -> str:
     return "fast"
 
 
+def _normalize_watch_root_ingest_mode(ingest_mode: str | None) -> str:
+    if str(ingest_mode or "").strip() == "task_only":
+        return "task_only"
+    return "full_auto"
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -659,6 +670,7 @@ async def _create_job_for_file(
     *,
     config_profile_id: uuid.UUID | str | None = None,
     content_profile_source_context: dict[str, Any] | None = None,
+    awaiting_initialization: bool = False,
 ) -> str:
     """Upload file to S3, create job + steps in DB. Returns job_id."""
     # Compute hash first for dedup
@@ -674,6 +686,11 @@ async def _create_job_for_file(
     s3_key = job_key(str(job_id), file_path.name)
     storage.upload_file(file_path, s3_key)
     logger.info(f"Uploaded {file_path.name} → {s3_key}")
+
+    resolved_source_context = enrich_source_context_with_filename_hints(
+        content_profile_source_context,
+        source_name=file_path.name,
+    )
 
     factory = get_session_factory()
     async with factory() as session:
@@ -703,7 +720,7 @@ async def _create_job_for_file(
             source_path=s3_key,
             source_name=file_path.name,
             file_hash=file_hash,
-            status="pending",
+            status="awaiting_init" if awaiting_initialization else "pending",
             language=language,
             output_dir=output_dir,
             config_profile_id=profile_uuid,
@@ -715,10 +732,16 @@ async def _create_job_for_file(
         )
         session.add(job)
         for step in create_job_steps(job_id):
-            if step.step_name == "content_profile" and isinstance(content_profile_source_context, dict) and content_profile_source_context:
+            if awaiting_initialization and step.step_name == "probe":
                 step.metadata_ = {
                     **(step.metadata_ or {}),
-                    "source_context": dict(content_profile_source_context),
+                    "detail": "等待填写任务说明后开始。",
+                    "updated_at": _now_iso(),
+                }
+            if step.step_name == "content_profile" and resolved_source_context:
+                step.metadata_ = {
+                    **(step.metadata_ or {}),
+                    "source_context": dict(resolved_source_context),
                 }
             session.add(step)
         await session.commit()
@@ -814,6 +837,7 @@ async def create_merged_job_for_inventory_paths(
     output_dir: str | None = None,
     language: str = "zh-CN",
     allow_related_profiles: bool = False,
+    awaiting_initialization: bool = False,
 ) -> str | None:
     if len(file_paths) < 2:
         raise ValueError("At least two files are required to create a merged job")
@@ -843,6 +867,7 @@ async def create_merged_job_for_inventory_paths(
             output_dir=output_dir,
             config_profile_id=config_profile_id,
             content_profile_source_context=content_profile_source_context,
+            awaiting_initialization=awaiting_initialization,
         )
     finally:
         if merged_path.exists():
@@ -1469,6 +1494,7 @@ async def run_watch_root_auto_duty() -> dict[str, Any]:
 
         for root in roots:
             try:
+                ingest_mode = _normalize_watch_root_ingest_mode(getattr(root, "ingest_mode", "full_auto"))
                 if _should_auto_scan_root(root, settings=settings):
                     try:
                         start_watch_root_inventory_scan(
@@ -1499,12 +1525,16 @@ async def run_watch_root_auto_duty() -> dict[str, Any]:
                     continue
 
                 idle_slots = _available_auto_slots(scheduler_state, settings)
-                if idle_slots <= 0:
+                if ingest_mode == "full_auto" and idle_slots <= 0:
                     continue
 
                 max_jobs_per_root = max(1, int(getattr(settings, "watch_auto_max_jobs_per_root", 1)))
 
-                if bool(getattr(settings, "watch_auto_merge_enabled", True)) and idle_slots > 0:
+                if (
+                    ingest_mode == "full_auto"
+                    and bool(getattr(settings, "watch_auto_merge_enabled", True))
+                    and idle_slots > 0
+                ):
                     merge_groups = await suggest_merge_groups_for_inventory_items(
                         settled_pending,
                         min_score=float(getattr(settings, "watch_auto_merge_min_score", 0.72)),
@@ -1523,6 +1553,7 @@ async def run_watch_root_auto_duty() -> dict[str, Any]:
                             config_profile_id=root.config_profile_id,
                             workflow_template=root.workflow_template,
                             output_dir=root.output_dir,
+                            awaiting_initialization=False,
                         )
                         payload, created_ids = _mark_inventory_items_as_dispatched(
                             payload,
@@ -1550,14 +1581,15 @@ async def run_watch_root_auto_duty() -> dict[str, Any]:
 
                 if (
                     bool(getattr(settings, "watch_auto_enqueue_enabled", True))
-                    and idle_slots > 0
                     and settled_pending
+                    and (ingest_mode == "task_only" or idle_slots > 0)
                 ):
                     eligible = sorted(
                         settled_pending,
                         key=lambda item: _to_unix_timestamp(str(item.get("modified_at") or "")),
                     )
-                    selected_items = eligible[: min(idle_slots, max_jobs_per_root)]
+                    dispatch_limit = max_jobs_per_root if ingest_mode == "task_only" else min(idle_slots, max_jobs_per_root)
+                    selected_items = eligible[:dispatch_limit]
                     if selected_items:
                         results = await _call_inventory_job_factory(
                             create_jobs_for_inventory_paths,
@@ -1565,20 +1597,23 @@ async def run_watch_root_auto_duty() -> dict[str, Any]:
                             config_profile_id=root.config_profile_id,
                             workflow_template=root.workflow_template,
                             output_dir=root.output_dir,
+                            awaiting_initialization=ingest_mode == "task_only",
                         )
                         job_ids_by_path = {result["path"]: result["job_id"] for result in results}
                         payload, created_ids = _mark_inventory_items_as_dispatched(
                             payload,
                             selected_items,
                             job_ids_by_path=job_ids_by_path,
-                            dedupe_reason="job:auto_enqueued",
+                            dedupe_reason="job:auto_initialized" if ingest_mode == "task_only" else "job:auto_enqueued",
                         )
                         if created_ids:
                             summary["auto_enqueued_jobs"] += len(created_ids)
-                            scheduler_state["active_jobs"] += len(created_ids)
+                            if ingest_mode == "full_auto":
+                                scheduler_state["active_jobs"] += len(created_ids)
                             logger.info(
-                                "auto duty enqueued root=%s files=%s job_ids=%s",
+                                "auto duty enqueued root=%s mode=%s files=%s job_ids=%s",
                                 root.path,
+                                ingest_mode,
                                 ",".join(str(item.get("relative_path") or "") for item in selected_items),
                                 ",".join(created_ids),
                             )

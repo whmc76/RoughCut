@@ -29,6 +29,7 @@ from roughcut.api.schemas import (
     ContentProfileConfirmIn,
     ContentProfileReviewOut,
     JobActivityOut,
+    JobInitializeIn,
     JobOut,
     JobsUsageSummaryOut,
     JobsUsageTrendOut,
@@ -74,6 +75,8 @@ from roughcut.review.content_profile_memory import (
     load_content_profile_user_memory,
     record_content_profile_feedback_memory,
 )
+from roughcut.review.downstream_context import build_downstream_context
+from roughcut.review.model_identity import model_numbers_conflict
 from roughcut.review.content_profile_review_stats import (
     apply_current_content_profile_review_policy,
     build_content_profile_auto_review_gate,
@@ -86,6 +89,7 @@ from roughcut.review.report import generate_report
 from roughcut.runtime_refresh_hold import touch_runtime_refresh_hold
 from roughcut.storage.s3 import get_storage, job_key
 from roughcut.storage.runtime_cleanup import cleanup_job_runtime_files
+from roughcut.source_context import enrich_source_context_with_filename_hints
 from roughcut.usage import build_job_token_report, build_jobs_usage_summary, build_jobs_usage_trend
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
@@ -452,6 +456,7 @@ async def create_job(
 
         source_context = _build_job_source_context(
             uploaded_files=uploaded_files,
+            source_name=source_name,
             video_description=video_description,
         )
 
@@ -602,20 +607,33 @@ def _build_merged_source_name(uploaded_files: list[UploadFile]) -> str:
 
 def _build_job_source_context(
     *,
-    uploaded_files: list[UploadFile],
+    uploaded_files: list[UploadFile] | None = None,
+    source_name: str | None = None,
     video_description: str | None,
+    merged_source_names: list[str] | None = None,
+    allow_related_profiles: bool = False,
 ) -> dict[str, Any] | None:
     source_context: dict[str, Any] = {}
     if video_description:
         source_context["video_description"] = video_description
-    if len(uploaded_files) > 1:
-        source_context["allow_related_profiles"] = True
-        source_context["merged_source_names"] = [
+    resolved_merged_source_names = [
+        str(item).strip()
+        for item in (merged_source_names or [])
+        if str(item).strip()
+    ]
+    if uploaded_files and len(uploaded_files) > 1 and not resolved_merged_source_names:
+        resolved_merged_source_names = [
             str(item.filename or "").strip()
             for item in uploaded_files
             if str(item.filename or "").strip()
         ]
-    return source_context or None
+    if resolved_merged_source_names:
+        source_context["allow_related_profiles"] = bool(allow_related_profiles or len(resolved_merged_source_names) > 1)
+    return enrich_source_context_with_filename_hints(
+        source_context,
+        source_name=source_name,
+        merged_source_names=resolved_merged_source_names,
+    )
 
 
 async def _save_uploaded_file(
@@ -761,6 +779,76 @@ async def restart_job(job_id: uuid.UUID, session: AsyncSession = Depends(get_ses
     if ordered_steps:
         ordered_steps[0].metadata_ = {
             "detail": "任务已重新开始，等待调度器派发。",
+            "updated_at": now.isoformat(),
+        }
+
+    await session.commit()
+    result = await session.execute(
+        select(Job).options(selectinload(Job.steps), selectinload(Job.artifacts)).where(Job.id == job_id)
+    )
+    job = result.scalar_one()
+    _attach_job_preview(job)
+    return job
+
+
+@router.post("/{job_id}/initialize", response_model=JobOut)
+async def initialize_job(
+    job_id: uuid.UUID,
+    body: JobInitializeIn,
+    session: AsyncSession = Depends(get_session),
+):
+    result = await session.execute(
+        select(Job).options(selectinload(Job.steps), selectinload(Job.artifacts)).where(Job.id == job_id)
+    )
+    job = result.scalar_one_or_none()
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if job.status != "awaiting_init":
+        raise HTTPException(status_code=409, detail="Only awaiting-init jobs can be initialized")
+
+    now = datetime.now(timezone.utc)
+    existing_source_context = _extract_job_source_context_from_steps(job.steps or [])
+    source_context = _build_job_source_context(
+        source_name=job.source_name,
+        video_description=body.video_description,
+        merged_source_names=[
+            str(item).strip()
+            for item in (existing_source_context.get("merged_source_names") or [])
+            if str(item).strip()
+        ],
+        allow_related_profiles=bool(existing_source_context.get("allow_related_profiles")),
+    )
+
+    job.status = "pending"
+    job.error_message = None
+    job.updated_at = now
+    job.language = body.language
+    job.workflow_template = body.workflow_template
+    job.workflow_mode = body.workflow_mode
+    job.enhancement_modes = body.enhancement_modes
+    job.output_dir = body.output_dir
+
+    existing_step_names = {step.step_name for step in job.steps or []}
+    for step_name in PIPELINE_STEPS:
+        if step_name in existing_step_names:
+            continue
+        step = JobStep(job_id=job.id, step_name=step_name, status="pending")
+        session.add(step)
+        (job.steps or []).append(step)
+
+    ordered_steps = _ordered_steps(job.steps or [])
+    for step in ordered_steps:
+        preserved_source_context = source_context if step.step_name == "content_profile" and source_context else None
+        step.status = "pending"
+        step.attempt = 0
+        step.started_at = None
+        step.finished_at = None
+        step.error_message = None
+        step.metadata_ = {"source_context": preserved_source_context} if preserved_source_context else None
+    if ordered_steps:
+        ordered_steps[0].metadata_ = {
+            **(ordered_steps[0].metadata_ or {}),
+            "detail": "任务已初始化，等待调度器派发。",
             "updated_at": now.isoformat(),
         }
 
@@ -1140,6 +1228,14 @@ async def confirm_content_profile(
         data_json=final_profile,
     )
     session.add(artifact)
+    session.add(
+        Artifact(
+            job_id=job.id,
+            step_id=review_step.id if review_step else None,
+            artifact_type="downstream_context",
+            data_json=build_downstream_context(final_profile),
+        )
+    )
     await record_content_profile_feedback_memory(
         session,
         job=job,
@@ -1661,6 +1757,8 @@ def _should_persist_review_alias(original: Any, corrected: Any) -> bool:
     corrected_text = _normalize_review_glossary_value(corrected, max_length=48)
     if not original_text or not corrected_text or original_text == corrected_text:
         return False
+    if model_numbers_conflict(original_text, corrected_text):
+        return False
     if _is_generic_review_hotword(original_text) or _is_generic_review_hotword(corrected_text):
         return False
     return True
@@ -1738,6 +1836,9 @@ async def _upsert_review_glossary_term(
 ) -> None:
     normalized_correct = _normalize_review_glossary_value(correct_form, max_length=64)
     normalized_wrong = _normalize_review_glossary_value(wrong_form, max_length=48) if wrong_form else ""
+    conflicting_model_alias = bool(
+        normalized_wrong and model_numbers_conflict(normalized_wrong, normalized_correct)
+    )
     if not normalized_correct:
         return
 
@@ -1750,7 +1851,11 @@ async def _upsert_review_glossary_term(
     )
     term = result.scalar_one_or_none()
     if term is None:
-        wrong_forms = [normalized_wrong] if normalized_wrong and normalized_wrong != normalized_correct else []
+        wrong_forms = (
+            [normalized_wrong]
+            if normalized_wrong and normalized_wrong != normalized_correct and not conflicting_model_alias
+            else []
+        )
         session.add(
             GlossaryTerm(
                 scope_type=scope_type,
@@ -1764,7 +1869,12 @@ async def _upsert_review_glossary_term(
         return
 
     wrong_forms = [str(item or "").strip() for item in (term.wrong_forms or []) if str(item or "").strip()]
-    if normalized_wrong and normalized_wrong != normalized_correct and normalized_wrong not in wrong_forms:
+    if (
+        normalized_wrong
+        and normalized_wrong != normalized_correct
+        and not conflicting_model_alias
+        and normalized_wrong not in wrong_forms
+    ):
         wrong_forms.append(normalized_wrong)
         term.wrong_forms = wrong_forms
     if not term.category and category:
@@ -1888,6 +1998,8 @@ async def get_job_activity(job_id: uuid.UUID, session: AsyncSession = Depends(ge
         .order_by(Artifact.created_at.desc())
     )
     artifacts = artifact_result.scalars().all()
+    set_committed_value(job, "artifacts", artifacts)
+    _attach_job_preview(job, lightweight=True)
 
     timeline_result = await session.execute(
         select(Timeline).where(
@@ -1923,6 +2035,8 @@ async def get_job_activity(job_id: uuid.UUID, session: AsyncSession = Depends(ge
     return JobActivityOut(
         job_id=str(job.id),
         status=job.status,
+        review_step=job.review_step,
+        review_detail=job.review_detail,
         current_step=current_step,
         render=render_payload,
         decisions=decisions,
@@ -1997,24 +2111,13 @@ def _build_current_step(job: Job) -> dict | None:
         }
 
     if job.status == "needs_review":
-        waiting_review = next(
-            (
-                step for step in steps
-                if step.step_name in {"summary_review", "final_review"} and step.status == "pending"
-            ),
-            None,
-        )
-        if waiting_review is not None:
-            review_detail = (
-                "等待核对内容信息后继续。"
-                if waiting_review.step_name == "summary_review"
-                else "等待审核成片后继续。"
-            )
+        review_context = _resolve_job_review_context(job)
+        if review_context["step_name"] is not None:
             return {
-                "step_name": waiting_review.step_name,
-                "label": STEP_LABELS[waiting_review.step_name],
+                "step_name": review_context["step_name"],
+                "label": review_context["label"],
                 "status": "needs_review",
-                "detail": review_detail,
+                "detail": review_context["detail"],
                 "progress": None,
                 "updated_at": _iso_or_none(job.updated_at),
             }
@@ -2022,7 +2125,7 @@ def _build_current_step(job: Job) -> dict | None:
             "step_name": "summary_review",
             "label": STEP_LABELS["summary_review"],
             "status": "needs_review",
-            "detail": "等待核对内容信息后继续。",
+            "detail": _review_step_waiting_detail("summary_review"),
             "progress": None,
             "updated_at": _iso_or_none(job.updated_at),
         }
@@ -2053,13 +2156,11 @@ def _build_activity_decisions(
     render_outputs_artifact = next((artifact for artifact in artifacts if artifact.artifact_type == "render_outputs"), None)
     render_outputs = render_outputs_artifact.data_json if render_outputs_artifact and render_outputs_artifact.data_json else {}
 
-    profile = next(
-        (
-            artifact for artifact in artifacts
-            if artifact.artifact_type in {"content_profile", "content_profile_final", "content_profile_draft"}
-        ),
-        None,
-    )
+    profile = _select_preferred_content_profile_artifact([
+        artifact
+        for artifact in artifacts
+        if artifact.artifact_type in {"content_profile", "content_profile_final", "content_profile_draft"}
+    ])
     if profile and profile.data_json:
         data = profile.data_json
         subject = " · ".join(
@@ -2074,6 +2175,7 @@ def _build_activity_decisions(
         decisions.append(
             {
                 "kind": "content_profile",
+                "step_name": "content_profile",
                 "title": "内容识别",
                 "status": "done" if profile.artifact_type != "content_profile_draft" else "needs_review",
                 "summary": subject,
@@ -2088,6 +2190,7 @@ def _build_activity_decisions(
         decisions.append(
             {
                 "kind": "subtitle_review",
+                "step_name": "glossary_review",
                 "title": "字幕与术语",
                 "status": "done",
                 "summary": f"识别出 {len(corrections)} 处术语/字幕纠错候选",
@@ -2111,6 +2214,7 @@ def _build_activity_decisions(
         decisions.append(
             {
                 "kind": "edit_plan",
+                "step_name": "edit_plan",
                 "title": "剪辑决策",
                 "status": "done",
                 "summary": f"建议移除 {len(remove_segments)} 段，共 {total_cut:.1f} 秒",
@@ -2123,6 +2227,7 @@ def _build_activity_decisions(
         decisions.append(
             {
                 "kind": "render",
+                "step_name": "render",
                 "title": "渲染状态",
                 "status": render_output.status,
                 "summary": f"成片输出进度 {round(float(render_output.progress or 0.0) * 100)}%",
@@ -2137,6 +2242,7 @@ def _build_activity_decisions(
         decisions.append(
             {
                 "kind": "ai_director",
+                "step_name": "ai_director",
                 "title": "AI导演",
                 "status": "done",
                 "summary": f"生成 {len(plan.get('voiceover_segments') or [])} 段导演重配音建议",
@@ -2153,6 +2259,7 @@ def _build_activity_decisions(
         decisions.append(
             {
                 "kind": "avatar_commentary",
+                "step_name": "avatar_commentary",
                 "title": "数字人解说",
                 "status": avatar_status["status"],
                 "summary": avatar_status["summary"],
@@ -2174,6 +2281,7 @@ def _build_activity_decisions(
         decisions.append(
             {
                 "kind": "platform_package",
+                "step_name": "platform_package",
                 "title": "平台文案",
                 "status": "done",
                 "summary": "已生成发布文案包",
@@ -2205,6 +2313,7 @@ def _build_activity_decisions(
         decisions.append(
             {
                 "kind": "quality_assessment",
+                "step_name": "final_review",
                 "title": "质量评分",
                 "status": "done",
                 "summary": " · ".join(part for part in summary_parts if part).strip() or "质量评分已更新",
@@ -2235,6 +2344,7 @@ def _build_activity_events(
     job: Job | None = None,
 ) -> list[dict]:
     events: list[dict] = []
+    terminal_step = _latest_terminal_step(steps, statuses={"failed", "cancelled"}) if steps else None
 
     if job is not None and job.status in {"failed", "cancelled"} and job.error_message:
         events.append(
@@ -2242,6 +2352,7 @@ def _build_activity_events(
                 "timestamp": _iso_or_none(job.updated_at),
                 "type": "error" if job.status == "failed" else "cancelled",
                 "status": job.status,
+                "step_name": terminal_step.step_name if terminal_step is not None else None,
                 "title": "任务失败" if job.status == "failed" else "任务已取消",
                 "detail": job.error_message,
             }
@@ -2257,6 +2368,7 @@ def _build_activity_events(
                     "timestamp": _iso_or_none(step.started_at),
                     "type": "step",
                     "status": "running" if step.status == "running" else "started",
+                    "step_name": step.step_name,
                     "title": f"{label}开始",
                     "detail": None,
                 }
@@ -2271,6 +2383,7 @@ def _build_activity_events(
                     "timestamp": _iso_or_none(step.finished_at),
                     "type": "step",
                     "status": step.status,
+                    "step_name": step.step_name,
                     "title": f"{label}{'完成' if step.status == 'done' else '结束'}",
                     "detail": _decorate_step_detail(
                         detail,
@@ -2286,6 +2399,7 @@ def _build_activity_events(
                     "timestamp": updated_at,
                     "type": "progress",
                     "status": step.status,
+                    "step_name": step.step_name,
                     "title": label,
                     "detail": _decorate_step_detail(metadata.get("detail"), elapsed_seconds, running=True),
                 }
@@ -2299,6 +2413,7 @@ def _build_activity_events(
                     "timestamp": _iso_or_none(artifact.created_at),
                     "type": "artifact",
                     "status": "done",
+                    "step_name": summary.get("step_name"),
                     "title": summary["title"],
                     "detail": summary["detail"],
                 }
@@ -2311,6 +2426,7 @@ def _build_activity_events(
                     "timestamp": _iso_or_none(timeline.created_at),
                     "type": "decision",
                     "status": "done",
+                    "step_name": "edit_plan",
                     "title": "剪辑时间线已生成",
                     "detail": "系统已产出保留/删除片段决策。",
                 }
@@ -2322,6 +2438,7 @@ def _build_activity_events(
                 "timestamp": _iso_or_none(render_output.created_at),
                 "type": "render",
                 "status": render_output.status,
+                "step_name": "render",
                 "title": "渲染输出",
                 "detail": f"当前进度 {round(float(render_output.progress or 0.0) * 100)}%",
             }
@@ -2339,32 +2456,38 @@ def _artifact_event_summary(artifact: Artifact) -> dict | None:
         height = data.get("height")
         duration = data.get("duration")
         return {
+            "step_name": "probe",
             "title": "媒体参数已识别",
             "detail": f"{width}×{height} · {duration:.1f}s" if width and height and duration else "媒体信息已写入",
         }
     if artifact.artifact_type == "content_profile_draft":
         return {
+            "step_name": "content_profile",
             "title": "内容摘要草稿已生成",
             "detail": str(data.get("summary") or data.get("video_theme") or "等待人工确认"),
         }
     if artifact.artifact_type in {"content_profile", "content_profile_final"}:
         return {
+            "step_name": "summary_review" if artifact.artifact_type == "content_profile_final" else "content_profile",
             "title": "内容摘要已确认",
             "detail": str(data.get("summary") or data.get("video_theme") or "内容识别完成"),
         }
     if artifact.artifact_type == "platform_packaging_md":
         return {
+            "step_name": "platform_package",
             "title": "平台文案已生成",
             "detail": artifact.storage_path or "发布文案已写入 Markdown",
         }
     if artifact.artifact_type == "ai_director_plan":
         return {
+            "step_name": "ai_director",
             "title": "AI 导演建议已生成",
             "detail": str(data.get("opening_hook") or "已输出改写与重配音计划"),
         }
     if artifact.artifact_type == "avatar_commentary_plan":
         placement = str(data.get("overlay_position") or data.get("layout_template") or "").strip()
         return {
+            "step_name": "avatar_commentary",
             "title": "数字人解说计划已生成",
             "detail": (
                 f"{len(data.get('segments') or [])} 段解说位待渲染"
@@ -2375,6 +2498,7 @@ def _artifact_event_summary(artifact: Artifact) -> dict | None:
         avatar_result = data.get("avatar_result") if isinstance(data, dict) else None
         if isinstance(avatar_result, dict) and avatar_result.get("status"):
             return {
+                "step_name": "avatar_commentary",
                 "title": "数字人成片结果已回写",
                 "detail": str(avatar_result.get("detail") or avatar_result.get("status") or "数字人结果已更新"),
             }
@@ -2394,6 +2518,7 @@ def _artifact_event_summary(artifact: Artifact) -> dict | None:
             if part
         )
         return {
+            "step_name": "final_review",
             "title": title,
             "detail": detail or "质量评分已写入",
         }
@@ -2452,6 +2577,9 @@ def _pending_step_transition_detail(
     if raw_detail:
         return raw_detail
     if _are_previous_steps_complete(steps, step.step_name):
+        standardized_detail = _pending_step_standard_detail(step.step_name)
+        if standardized_detail:
+            return standardized_detail
         return "等待调度器派发。"
     return "等待前序步骤完成。"
 
@@ -2491,6 +2619,7 @@ def _stuck_step_diagnostic_summary(data: object) -> dict[str, str] | None:
         details.append(f"置信度：{float(confidence):.2f}")
 
     return {
+        "step_name": step_name or None,
         "title": f"{step_name} 卡住诊断",
         "detail": " · ".join(part for part in details if part) or "检测到步骤卡住并已写入诊断记录。",
     }
@@ -2606,7 +2735,9 @@ def _attach_job_previews(jobs: list[Job], *, lightweight: bool = False) -> None:
 def _attach_job_preview(job: Job, *, lightweight: bool = False) -> None:
     if job.steps:
         job.steps.sort(key=_step_sort_key)
+    source_context = _extract_job_source_context_from_steps(job.steps or [])
     job.merged_source_names = _resolve_job_merged_source_names(job)
+    job.video_description = str(source_context.get("video_description") or "").strip() or None
     preview = _resolve_job_content_preview(job.artifacts or [], apply_review_memory=not lightweight)
     job.content_subject = preview["subject"]
     job.content_summary = preview["summary"]
@@ -2624,23 +2755,33 @@ def _attach_job_preview(job: Job, *, lightweight: bool = False) -> None:
     job.auto_review_status = auto_review_preview["status"]
     job.auto_review_summary = auto_review_preview["summary"]
     job.auto_review_reasons = list(auto_review_preview["reasons"] or [])
+    review_preview = _resolve_job_review_context(job)
+    job.review_step = review_preview["step_name"]
+    job.review_label = review_preview["label"]
+    job.review_detail = review_preview["detail"]
+    job.awaiting_initialization = str(job.status or "").strip() == "awaiting_init"
     job.progress_percent = _calculate_job_progress_percent(job)
 
 
-def _resolve_job_merged_source_names(job: Job) -> list[str]:
-    for step in list(job.steps or []):
+def _extract_job_source_context_from_steps(steps: list[JobStep]) -> dict[str, Any]:
+    for step in list(steps or []):
         if step.step_name != "content_profile" or not isinstance(step.metadata_, dict):
             continue
         source_context = step.metadata_.get("source_context")
-        if not isinstance(source_context, dict):
-            continue
-        merged_source_names = [
-            str(item).strip()
-            for item in (source_context.get("merged_source_names") or [])
-            if str(item).strip()
-        ]
-        if merged_source_names:
-            return merged_source_names
+        if isinstance(source_context, dict):
+            return dict(source_context)
+    return {}
+
+
+def _resolve_job_merged_source_names(job: Job) -> list[str]:
+    source_context = _extract_job_source_context_from_steps(job.steps or [])
+    merged_source_names = [
+        str(item).strip()
+        for item in (source_context.get("merged_source_names") or [])
+        if str(item).strip()
+    ]
+    if merged_source_names:
+        return merged_source_names
     return []
 
 
@@ -3037,6 +3178,78 @@ def _resolve_job_timeline_diagnostics_preview(artifacts: list[Artifact]) -> dict
     ):
         return preview
     return None
+
+
+def _resolve_waiting_review_step(steps: list[JobStep]) -> JobStep | None:
+    return next(
+        (
+            step for step in steps
+            if step.step_name in {"summary_review", "final_review"} and step.status == "pending"
+        ),
+        None,
+    )
+
+
+def _review_step_waiting_detail(step_name: str) -> str:
+    normalized = str(step_name or "").strip().lower()
+    if normalized == "final_review":
+        return "等待审核成片后继续生成平台文案。"
+    return "等待确认摘要后继续剪辑与渲染。"
+
+
+def _pending_step_standard_detail(step_name: str) -> str | None:
+    normalized = str(step_name or "").strip().lower()
+    if normalized == "summary_review":
+        return "等待人工确认摘要。"
+    if normalized == "final_review":
+        return "等待人工审核成片。"
+    if normalized == "platform_package":
+        return "等待调度器派发生成平台文案。"
+    return None
+
+
+def _job_has_final_review_signals(job: Job | None) -> bool:
+    if job is None:
+        return False
+    return bool(
+        getattr(job, "quality_score", None) is not None
+        or str(getattr(job, "quality_grade", "") or "").strip()
+        or str(getattr(job, "quality_summary", "") or "").strip()
+        or list(getattr(job, "quality_issue_codes", []) or [])
+        or getattr(job, "timeline_diagnostics", None)
+    )
+
+
+def _resolve_job_review_context(job: Job) -> dict[str, str | None]:
+    if str(job.status or "").strip() != "needs_review":
+        return {"step_name": None, "label": None, "detail": None}
+
+    steps = _ordered_steps(job.steps or [])
+    review_step = _resolve_waiting_review_step(steps)
+    if review_step is None:
+        final_review_step = _find_step(steps, "final_review")
+        summary_review_step = _find_step(steps, "summary_review")
+        if final_review_step is not None and final_review_step.status != "done" and (
+            _job_has_final_review_signals(job) or summary_review_step is None
+        ):
+            review_step = final_review_step
+        elif summary_review_step is not None and summary_review_step.status != "done":
+            review_step = summary_review_step
+        elif final_review_step is not None and final_review_step.status != "done":
+            review_step = final_review_step
+
+    if review_step is None:
+        return {
+            "step_name": "summary_review",
+            "label": STEP_LABELS["summary_review"],
+            "detail": _review_step_waiting_detail("summary_review"),
+        }
+
+    return {
+        "step_name": review_step.step_name,
+        "label": STEP_LABELS.get(review_step.step_name, review_step.step_name),
+        "detail": _review_step_waiting_detail(review_step.step_name),
+    }
 
 
 def _resolve_effective_variant_bundle_from_artifacts(artifacts: list[Artifact]) -> dict[str, Any] | None:

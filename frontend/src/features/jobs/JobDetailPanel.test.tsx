@@ -14,6 +14,10 @@ vi.mock("../../i18n", () => ({
           "jobs.detail.sourceBundle": "素材来源",
           "jobs.detail.mergedTask": "这是合并任务",
           "jobs.detail.mergedTaskCount": "共 {count} 段素材",
+          "jobs.detail.videoDescription": "任务说明",
+          "jobs.detail.filenameDerivedDescription": "文件名提取",
+          "jobs.detail.filenameDerivedBadge": "来自文件名",
+          "jobs.detail.manualDescription": "补充说明",
           "jobs.detail.noEnhancements": "未启用增强模式",
           "jobs.actions.openFolder": "打开文件夹",
           "jobs.actions.downloadVideo": "下载成片",
@@ -23,6 +27,8 @@ vi.mock("../../i18n", () => ({
           "jobs.actions.restart": "重新开始",
           "jobs.actions.restarting": "重启中...",
           "jobs.actions.restartUnavailable": "当前状态不可重新开始",
+          "jobs.init.submit": "填写说明并开始处理",
+          "jobs.init.submitting": "正在启动...",
           "jobs.actions.delete": "删除任务",
           "jobs.actions.deleting": "删除中...",
         } satisfies Record<string, string>
@@ -96,14 +102,29 @@ function buildProps(overrides: Record<string, unknown> = {}) {
     contentDraft: {},
     contentKeywords: "",
     reviewEnhancementModes: [],
+    languageOptions: [{ value: "zh-CN", label: "简体中文" }],
+    workflowTemplateOptions: [{ value: "", label: "自动选择模板" }],
+    workflowModeOptions: [{ value: "standard_edit", label: "标准成片" }],
+    enhancementOptions: [],
+    pendingInitialization: {
+      language: "zh-CN",
+      workflowTemplate: "",
+      workflowMode: "standard_edit",
+      enhancementModes: [],
+      outputDir: "",
+      videoDescription: "",
+    },
     isConfirmingProfile: false,
+    isInitializing: false,
     isApplyingReview: false,
     isCancelling: false,
     isRestarting: false,
     isDeleting: false,
     onContentFieldChange: vi.fn(),
     onKeywordsChange: vi.fn(),
+    onPendingInitializationChange: vi.fn(),
     onConfirmProfile: vi.fn(),
+    onInitialize: vi.fn(),
     onOpenFolder: vi.fn(),
     onCancel: vi.fn(),
     onRestart: vi.fn(),
@@ -148,6 +169,35 @@ describe("JobDetailPanel", () => {
     expect(screen.queryByText("这是合并任务")).not.toBeInTheDocument();
   });
 
+  it("separates filename-derived description from manual notes in the detail panel", () => {
+    render(
+      <JobDetailPanel
+        {...buildProps({
+          selectedJob: {
+            id: "job-2b",
+            source_name: "20260316_狐蝠工业_FXX1小副包_开箱测评.mp4",
+            merged_source_names: [],
+            video_description: "任务说明依据文件名：狐蝠工业 FXX1小副包 开箱测评。\n重点保留近景细节和开合手感。",
+            status: "pending",
+            language: "zh-CN",
+            workflow_mode: "standard_edit",
+            enhancement_modes: [],
+            created_at: "2026-04-10T00:00:00Z",
+            updated_at: "2026-04-10T00:05:00Z",
+            steps: [],
+          },
+        })}
+      />,
+    );
+
+    expect(screen.getByText("任务说明")).toBeInTheDocument();
+    expect(screen.getByText("文件名提取")).toBeInTheDocument();
+    expect(screen.getByText("来自文件名")).toBeInTheDocument();
+    expect(screen.getByText("狐蝠工业 FXX1小副包 开箱测评。")).toBeInTheDocument();
+    expect(screen.getByText("补充说明")).toBeInTheDocument();
+    expect(screen.getByText("重点保留近景细节和开合手感。")).toBeInTheDocument();
+  });
+
   it("shows whether auto-review is enabled or already applied in the creative mode section", () => {
     render(
       <JobDetailPanel
@@ -175,5 +225,77 @@ describe("JobDetailPanel", () => {
     expect(screen.getAllByText("自动审核已启用").length).toBeGreaterThan(0);
     expect(screen.getByText("已启用，但本次命中人工复核条件，未自动放行。")).toBeInTheDocument();
     expect(screen.getByText("首次品牌/型号证据不足，需人工确认")).toBeInTheDocument();
+  });
+
+  it("groups activity items by structured step_name instead of parsing titles", () => {
+    render(
+      <JobDetailPanel
+        {...buildProps({
+          selectedJob: {
+            id: "job-4",
+            source_name: "render-activity.mp4",
+            merged_source_names: [],
+            status: "processing",
+            language: "zh-CN",
+            workflow_mode: "standard_edit",
+            enhancement_modes: [],
+            created_at: "2026-04-10T00:00:00Z",
+            updated_at: "2026-04-10T00:05:00Z",
+            steps: [
+              {
+                id: "render-step",
+                step_name: "render",
+                status: "running",
+                attempt: 1,
+                started_at: "2026-04-10T00:04:00Z",
+                finished_at: null,
+                error_message: null,
+              },
+            ],
+          },
+          activity: {
+            job_id: "job-4",
+            status: "processing",
+            review_step: null,
+            review_detail: null,
+            current_step: {
+              step_name: "render",
+              label: "render",
+              status: "running",
+              detail: "执行 FFmpeg 渲染成片",
+              progress: 0.6,
+              updated_at: "2026-04-10T00:05:00Z",
+            },
+            render: null,
+            decisions: [
+              {
+                kind: "render",
+                step_name: "render",
+                title: "完全自定义决策标题",
+                status: "running",
+                summary: "这条摘要不包含任何步骤关键词",
+                detail: "但仍应归到 render 步骤下展示。",
+                updated_at: "2026-04-10T00:05:00Z",
+              },
+            ],
+            events: [
+              {
+                timestamp: "2026-04-10T00:05:00Z",
+                type: "progress",
+                status: "running",
+                step_name: "render",
+                title: "任意事件标题",
+                detail: "这条事件也不依赖中文标题匹配。",
+              },
+            ],
+          },
+        })}
+      />,
+    );
+
+    expect(screen.getByText("完全自定义决策标题")).toBeInTheDocument();
+    expect(screen.getByText("任意事件标题")).toBeInTheDocument();
+    expect(screen.getByText("但仍应归到 render 步骤下展示。")).toBeInTheDocument();
+    expect(screen.getByText("这条事件也不依赖中文标题匹配。")).toBeInTheDocument();
   });
 });
