@@ -101,6 +101,29 @@ def test_resolve_identity_candidates_prefers_current_evidence_video_theme():
     assert resolved.video_theme == "手电开箱与版本对比"
 
 
+def test_resolve_identity_candidates_prefers_more_specific_compatible_model_value():
+    bundle = IdentityEvidenceBundle(
+        transcript_excerpt="这次开箱 FOXBAT F21 小副包，重点看分仓和挂点。",
+        source_name="f21.mp4",
+        transcript_hints={"subject_model": "FXX1小副包"},
+        source_hints={"subject_model": "F21"},
+        visual_hints={},
+        visual_cluster_hints={},
+        visible_text_hints={},
+        profile_identity={},
+        memory_confirmed_hints={},
+    )
+
+    scored = score_identity_candidates(build_identity_candidates(bundle), normalize=_normalize)
+    resolved = resolve_identity_candidates(
+        scored,
+        normalize=_normalize,
+        mapped_brand_for_model=lambda value: "",
+    )
+
+    assert resolved.subject_model == "FXX1小副包"
+
+
 def test_resolve_identity_candidates_drops_profile_only_video_theme():
     bundle = IdentityEvidenceBundle(
         transcript_excerpt="这次主要聊桌面布光。",
@@ -267,6 +290,28 @@ def test_build_identity_candidates_includes_source_context_identity_hints():
 
     assert ("subject_brand", "LEATHERMAN", "source_context") in source_pairs
     assert ("subject_model", "ARC", "source_context") in source_pairs
+
+
+def test_score_identity_candidates_prefers_exact_source_and_visual_overlap_for_unknown_brand():
+    bundle = IdentityEvidenceBundle(
+        transcript_excerpt="这期主要看这尊铜貔貅的细节。",
+        source_name="IMG_0026 琢匠年度旗舰铜貔貅铜雕像.MOV",
+        transcript_hints={},
+        source_hints={},
+        source_visual_overlap_hints={"subject_brand": "琢匠", "visible_text": "琢匠 铜貔貅"},
+        visual_hints={},
+        visual_cluster_hints={},
+        visible_text_hints={},
+        ocr_hints={"subject_brand": "卓匠", "visible_text": "卓匠 铜貔貅"},
+        profile_identity={},
+        memory_confirmed_hints={},
+    )
+
+    scored = score_identity_candidates(build_identity_candidates(bundle), normalize=_normalize)
+
+    assert scored["subject_brand"][0].value == "琢匠"
+    assert "source_visual_overlap" in scored["subject_brand"][0].all_sources
+    assert scored["subject_brand"][0].current_evidence_score == 6
 
 
 def test_resolve_identity_candidates_clears_brand_and_model_when_current_ocr_and_transcript_conflict():

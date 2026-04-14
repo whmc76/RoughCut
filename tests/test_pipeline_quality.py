@@ -236,6 +236,142 @@ def test_assess_job_quality_penalizes_subtitle_sync_issue_and_prefers_render_rer
     assert assessment["recommended_rerun_steps"] == ["render", "final_review", "platform_package"]
 
 
+def test_assess_job_quality_surfaces_edit_plan_llm_cut_review_timeout():
+    job = Job(
+        id=uuid.uuid4(),
+        source_path="jobs/demo/edit_plan_timeout.mp4",
+        source_name="edit_plan_timeout.mp4",
+        status="done",
+        language="zh-CN",
+    )
+    steps = [
+        JobStep(job_id=job.id, step_name="content_profile", status="done"),
+        JobStep(job_id=job.id, step_name="edit_plan", status="done"),
+        JobStep(job_id=job.id, step_name="render", status="done"),
+    ]
+    artifacts = [
+        Artifact(
+            job_id=job.id,
+            artifact_type="content_profile_final",
+            data_json={
+                "subject_brand": "FOXBAT狐蝠工业",
+                "subject_model": "FXX1小副包",
+                "subject_type": "EDC机能包",
+                "video_theme": "FOXBAT狐蝠工业FXX1小副包开箱与分仓挂点评测",
+                "summary": "这条视频主要围绕 FOXBAT狐蝠工业 FXX1小副包 的分仓和挂点展开。",
+                "engagement_question": "你更在意分仓还是挂点？",
+                "preset_name": "edc_tactical",
+                "review_mode": "auto_confirmed",
+                "automation_review": {"score": 0.95},
+            },
+            created_at=_now(),
+        ),
+        Artifact(
+            job_id=job.id,
+            artifact_type="variant_timeline_bundle",
+            data_json={
+                "variants": {},
+                "timeline_rules": {
+                    "diagnostics": {
+                        "llm_cut_review": {
+                            "reviewed": False,
+                            "candidate_count": 2,
+                            "error": "llm_cut_review_timeout",
+                            "timeout": True,
+                        }
+                    }
+                }
+            },
+            created_at=_now(),
+        ),
+    ]
+    subtitles = [
+        SubtitleItem(
+            job_id=job.id,
+            version=1,
+            item_index=0,
+            start_time=0.0,
+            end_time=4.0,
+            text_raw="今天开箱狐蝠工业 F21 小副包，重点看分仓和挂点。",
+        )
+    ]
+
+    assessment = assess_job_quality(
+        job=job,
+        steps=steps,
+        artifacts=artifacts,
+        subtitle_items=subtitles,
+        corrections=[],
+        completion_candidate=True,
+    )
+
+    assert "edit_plan_llm_cut_review_timeout" in assessment["issue_codes"]
+    assert "edit_plan" in assessment["recommended_rerun_steps"]
+    assert assessment["signals"]["llm_cut_review"]["timeout"] is True
+
+
+def test_assess_job_quality_uses_content_understanding_detail_evidence_for_coverage():
+    job = Job(
+        id=uuid.uuid4(),
+        source_path="jobs/demo/mt34.mp4",
+        source_name="mt34.mp4",
+        status="done",
+        language="zh-CN",
+    )
+    steps = [
+        JobStep(job_id=job.id, step_name="content_profile", status="done"),
+    ]
+    artifacts = [
+        Artifact(
+            job_id=job.id,
+            artifact_type="content_profile_final",
+            data_json={
+                "subject_brand": "NOC",
+                "subject_model": "MT34",
+                "subject_type": "NOC MT34 EDC折刀",
+                "video_theme": "MT34开箱与功能实测",
+                "summary": "这条视频主要围绕NOC MT34展开，内容方向偏产品开箱与上手体验。",
+                "engagement_question": "你更喜欢哪种快开方式？",
+                "content_understanding": {
+                    "summary": "UP主补充演示NOC MT34快开组件可拆卸的DIY玩法，体验按压、抠、拧三种快开方式的手感差异。",
+                    "video_theme": "NOC MT34快开组件可拆卸DIY实测与手感体验",
+                    "semantic_facts": {
+                        "aspect_candidates": ["DIY可玩性", "拆卸便捷性", "手感", "重量"],
+                        "component_candidates": ["快开组件", "前置组件"],
+                    },
+                    "evidence_spans": [
+                        {"text": "三个快开方式都是可以拆的"},
+                        {"text": "它是一个独立的件儿它是可以完全可以拧开"},
+                        {"text": "一个很好的手感和反馈然后加上它一个合适的重量"},
+                    ],
+                },
+            },
+            created_at=_now(),
+        ),
+    ]
+    subtitles = [
+        SubtitleItem(
+            job_id=job.id,
+            version=1,
+            item_index=0,
+            start_time=0.0,
+            end_time=4.0,
+            text_raw="三个快开方式都是可以拆的，而且有很好的手感和反馈，加上它一个合适的重量。",
+        )
+    ]
+
+    assessment = assess_job_quality(
+        job=job,
+        steps=steps,
+        artifacts=artifacts,
+        subtitle_items=subtitles,
+        corrections=[],
+        completion_candidate=True,
+    )
+
+    assert "detail_blind" not in assessment["issue_codes"]
+
+
 def test_compute_subtitle_sync_check_allows_expected_outro_gap(monkeypatch, tmp_path):
     video_path = tmp_path / "packaged.mp4"
     srt_path = tmp_path / "packaged.srt"
@@ -285,6 +421,43 @@ def test_compute_subtitle_sync_check_flags_audio_video_duration_gap(monkeypatch,
     assert result["status"] == "warning"
     assert "audio_video_duration_gap_large" in result["warning_codes"]
     assert result["audio_video_duration_gap_sec"] == pytest.approx(10.0)
+
+
+def test_compute_subtitle_sync_check_flags_timestamp_disorder_and_overlap(monkeypatch, tmp_path):
+    video_path = tmp_path / "packaged.mp4"
+    srt_path = tmp_path / "packaged.srt"
+    video_path.write_text("placeholder", encoding="utf-8")
+    srt_path.write_text(
+        "\n".join(
+            [
+                "1",
+                "00:00:04,000 --> 00:00:05,000",
+                "后面",
+                "",
+                "2",
+                "00:00:02,500 --> 00:00:04,500",
+                "前面但重叠",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(quality_mod, "_probe_media_duration", lambda path: 10.0)
+    monkeypatch.setattr(
+        quality_mod,
+        "_probe_media_stream_durations",
+        lambda path: {"video_duration_sec": 10.0, "audio_duration_sec": 10.0},
+    )
+
+    result = quality_mod._compute_subtitle_sync_check(video_path, srt_path)
+
+    assert result is not None
+    assert result["status"] == "warning"
+    assert "subtitle_timestamp_disorder" in result["warning_codes"]
+    assert "subtitle_overlap_detected" in result["warning_codes"]
+    assert result["subtitle_timestamp_disorder_count"] == 1
+    assert result["subtitle_overlap_count"] == 1
 
 
 def test_assess_job_quality_prefers_variant_bundle_packaged_quality_checks():

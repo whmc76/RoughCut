@@ -107,6 +107,7 @@ from roughcut.review.downstream_context import (
     build_downstream_context,
     resolve_downstream_profile,
 )
+from roughcut.review.model_identity import filter_conflicting_model_wrong_forms as _shared_filter_conflicting_model_wrong_forms
 from roughcut.review.domain_glossaries import (
     _CANONICAL_DOMAIN_SOURCES,
     _DOMAIN_COMPATIBILITY,
@@ -137,6 +138,7 @@ from roughcut.review.subtitle_translation import (
 )
 from roughcut.review.telegram_bot import get_telegram_review_bot_service
 from roughcut.speech.postprocess import (
+    _reindex_subtitle_entries,
     analyze_subtitle_segmentation,
     generate_subtitle_window_candidates,
     normalize_display_text,
@@ -213,13 +215,13 @@ logger = logging.getLogger(__name__)
 
 _CONTENT_PROFILE_ARTIFACT_TYPES = ("content_profile_final", "content_profile", "content_profile_draft")
 _DOWNSTREAM_PROFILE_ARTIFACT_TYPES = ("downstream_context",) + _CONTENT_PROFILE_ARTIFACT_TYPES
-_EDIT_PLAN_SUBTITLE_POLISH_TIMEOUT_SEC = 45.0
 _EDIT_PLAN_INSERT_SLOT_TIMEOUT_SEC = 20.0
 _EDIT_PLAN_CUT_REVIEW_TIMEOUT_SEC = 18.0
 _SUBTITLE_POSTPROCESS_BOUNDARY_REFINE_TIMEOUT_SEC = 20.0
 _SUBTITLE_BOUNDARY_REFINE_MIN_SCORE_GAIN = 2.0
 _SUBTITLE_BOUNDARY_LOCAL_FALLBACK_MIN_SCORE_GAIN = 8.0
 _SUBTITLE_BOUNDARY_LOCAL_EARLY_ACCEPT_SCORE_GAIN = 12.0
+_SUBTITLE_BOUNDARY_REFINE_MAX_WINDOWS = 8
 _SOURCE_NAME_TIMESTAMP_RE = re.compile(r"(?<!\d)(?P<date>\d{8})[-_ ]?(?P<time>\d{6})(?!\d)")
 _SOURCE_NAME_SEQUENCE_RE = re.compile(r"(?P<prefix>[A-Za-z]+)[-_ ]?(?P<number>\d{3,6})(?!.*\d)")
 _EDIT_DECISION_REVIEW_CONTEXT_WINDOW_SEC = 1.2
@@ -238,6 +240,49 @@ def _workflow_template_subject_domain(workflow_template: str | None) -> str | No
     return None
 
 
+def _supported_memory_subject_domain(value: str | None) -> str | None:
+    normalized = normalize_subject_domain(value)
+    if not normalized:
+        return None
+    known_domains = {
+        "edc",
+        "outdoor",
+        "tech",
+        "ai",
+        "functional",
+        "tools",
+        "travel",
+        "food",
+        "finance",
+        "news",
+        "sports",
+        "gear",
+        "knife",
+        "flashlight",
+        "bag",
+        "lighter",
+        "tactical",
+        "functional_wear",
+        "toy",
+        "coding",
+    }
+    return normalized if normalized in known_domains else None
+
+
+def _infer_subject_domain_from_profile_subject_type(content_profile: dict[str, Any] | None) -> str | None:
+    profile = content_profile or {}
+    subject_type = str(profile.get("subject_type") or "").strip()
+    if not subject_type:
+        return None
+    detected_domains = detect_glossary_domains(
+        workflow_template=None,
+        content_profile={"subject_type": subject_type},
+        subtitle_items=None,
+    )
+    detected = select_primary_subject_domain(detected_domains)
+    return _supported_memory_subject_domain(detected)
+
+
 def _infer_subject_domain_for_memory(
     *,
     workflow_template: str | None,
@@ -246,9 +291,12 @@ def _infer_subject_domain_for_memory(
     source_name: str | None = None,
     subject_domain: str | None = None,
 ) -> str | None:
-    explicit_subject_domain = normalize_subject_domain(subject_domain or (content_profile or {}).get("subject_domain"))
+    explicit_subject_domain = _supported_memory_subject_domain(subject_domain or (content_profile or {}).get("subject_domain"))
     if explicit_subject_domain:
         return explicit_subject_domain
+    subject_type_domain = _infer_subject_domain_from_profile_subject_type(content_profile)
+    if subject_type_domain:
+        return subject_type_domain
     detected_subject_domain = select_primary_subject_domain(detect_glossary_domains(
         workflow_template=None,
         content_profile=content_profile,
@@ -682,6 +730,15 @@ async def _maybe_review_edit_decision_cuts_with_llm(
                 subtitle_items=subtitle_items,
                 content_profile=content_profile,
             )
+    except asyncio.TimeoutError:
+        logger.warning("LLM cut review timed out during edit_plan for job %s", job_id)
+        decision.analysis["llm_cut_review"] = {
+            "reviewed": False,
+            "candidate_count": len(candidates),
+            "error": "llm_cut_review_timeout",
+            "timeout": True,
+        }
+        return decision
     except Exception:
         logger.exception("LLM cut review failed during edit_plan for job %s", job_id)
         decision.analysis["llm_cut_review"] = {
@@ -1401,6 +1458,41 @@ async def _llm_refine_subtitle_window(
     return best_candidate
 
 
+def _select_low_confidence_windows_for_llm(
+    windows: list[dict[str, Any]],
+    *,
+    limit: int,
+) -> list[dict[str, Any]]:
+    if limit <= 0:
+        return []
+    ordered = sorted(
+        [dict(item) for item in windows if isinstance(item, dict)],
+        key=lambda item: (int(item.get("start_index") or 0), int(item.get("end_index") or 0)),
+    )
+    usable = [
+        item
+        for item in ordered
+        if int(item.get("end_index") or 0) > int(item.get("start_index") or 0)
+    ]
+    candidates = usable or ordered
+    if len(candidates) <= limit:
+        return candidates
+
+    def _priority(item: dict[str, Any]) -> tuple[int, int]:
+        entry_count = int(item.get("entry_count") or 0)
+        total_chars = sum(len(str(text or "").strip()) for text in list(item.get("texts") or []))
+        return entry_count, total_chars
+
+    selected: list[dict[str, Any]] = []
+    total = len(candidates)
+    for bucket_index in range(limit):
+        bucket_start = round(bucket_index * total / limit)
+        bucket_end = round((bucket_index + 1) * total / limit)
+        bucket = candidates[bucket_start:bucket_end] or [candidates[min(bucket_start, total - 1)]]
+        selected.append(max(bucket, key=_priority))
+    return selected
+
+
 async def _maybe_refine_subtitle_boundaries_with_llm(
     *,
     job: Job,
@@ -1410,11 +1502,8 @@ async def _maybe_refine_subtitle_boundaries_with_llm(
     split_profile: dict[str, Any],
     content_profile: dict[str, Any] | None,
 ) -> tuple[list[Any], dict[str, int]]:
-    windows = [
-        dict(item)
-        for item in (segmentation_analysis.get("sample_low_confidence_windows") or [])
-        if isinstance(item, dict)
-    ]
+    raw_windows = segmentation_analysis.get("low_confidence_windows") or segmentation_analysis.get("sample_low_confidence_windows") or []
+    windows = [dict(item) for item in raw_windows if isinstance(item, dict)]
     if not windows:
         return entries, {"attempted_windows": 0, "accepted_windows": 0}
     if not _subtitle_boundary_refine_llm_supported():
@@ -1425,10 +1514,14 @@ async def _maybe_refine_subtitle_boundaries_with_llm(
     except Exception:
         return entries, {"attempted_windows": 0, "accepted_windows": 0}
 
+    selected_windows = _select_low_confidence_windows_for_llm(
+        windows,
+        limit=_SUBTITLE_BOUNDARY_REFINE_MAX_WINDOWS,
+    )
     refined_entries = list(entries)
     attempted_windows = 0
     accepted_windows = 0
-    for window in sorted(windows, key=lambda item: int(item.get("start_index") or 0), reverse=True)[:6]:
+    for window in sorted(selected_windows, key=lambda item: int(item.get("start_index") or 0), reverse=True):
         start_index = int(window.get("start_index") or 0)
         end_index = int(window.get("end_index") or start_index)
         if start_index < 0 or end_index >= len(refined_entries) or start_index >= end_index:
@@ -1456,6 +1549,7 @@ async def _maybe_refine_subtitle_boundaries_with_llm(
         if not candidate:
             continue
         refined_entries = refined_entries[:start_index] + candidate + refined_entries[end_index + 1:]
+        refined_entries = _reindex_subtitle_entries(refined_entries)
         accepted_windows += 1
     return refined_entries, {"attempted_windows": attempted_windows, "accepted_windows": accepted_windows}
 
@@ -1766,6 +1860,21 @@ def _select_preferred_downstream_profile_artifact(artifacts: list[Artifact]) -> 
     if not artifacts:
         return None
     epoch = datetime.min.replace(tzinfo=timezone.utc)
+    latest_downstream_context = max(
+        (artifact for artifact in artifacts if str(artifact.artifact_type or "").strip() == "downstream_context"),
+        key=lambda artifact: artifact.created_at or epoch,
+        default=None,
+    )
+    latest_content_profile_final = max(
+        (artifact for artifact in artifacts if str(artifact.artifact_type or "").strip() == "content_profile_final"),
+        key=lambda artifact: artifact.created_at or epoch,
+        default=None,
+    )
+    if latest_content_profile_final is not None and (
+        latest_downstream_context is None
+        or (latest_content_profile_final.created_at or epoch) > (latest_downstream_context.created_at or epoch)
+    ):
+        return latest_content_profile_final
     return max(
         artifacts,
         key=lambda artifact: (
@@ -1943,6 +2052,29 @@ def _dedupe_glossary_wrong_forms(*values: Any, correct_form: str) -> list[str]:
     return deduped
 
 
+def _filter_conflicting_model_wrong_forms(*, correct_form: str, wrong_forms: list[str]) -> list[str]:
+    return _shared_filter_conflicting_model_wrong_forms(correct_form=correct_form, wrong_forms=wrong_forms)
+
+
+def _suppress_conflicting_model_glossary_terms(
+    terms: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    filtered: list[dict[str, Any]] = []
+    for term in terms:
+        correct_form = str(term.get("correct_form") or "").strip()
+        wrong_forms = [str(item or "").strip() for item in (term.get("wrong_forms") or []) if str(item or "").strip()]
+        if not correct_form or not wrong_forms:
+            filtered.append(term)
+            continue
+        next_term = dict(term)
+        next_term["wrong_forms"] = _filter_conflicting_model_wrong_forms(
+            correct_form=correct_form,
+            wrong_forms=wrong_forms,
+        )
+        filtered.append(next_term)
+    return filtered
+
+
 def _build_source_identity_glossary_terms(
     content_profile: dict[str, Any] | None,
     *,
@@ -1966,6 +2098,11 @@ def _build_source_identity_glossary_terms(
             original_profile.get(field_name),
             correct_form=correct_form,
         )
+        if field_name == "subject_model":
+            wrong_forms = _filter_conflicting_model_wrong_forms(
+                correct_form=correct_form,
+                wrong_forms=wrong_forms,
+            )
         terms.append(
             {
                 "correct_form": correct_form,
@@ -2044,6 +2181,7 @@ def _build_effective_glossary_terms(
             source_name=source_name or "",
         ),
     )
+    merged_terms = _suppress_conflicting_model_glossary_terms(merged_terms)
     if not subject_domain:
         return merged_terms
     return [term for term in merged_terms if _glossary_term_matches_subject_domain(term, subject_domain)]
@@ -2589,8 +2727,21 @@ async def run_subtitle_postprocess(job_id: str) -> dict:
         )
         entries = segmentation_result.entries
         _profile_artifact, content_profile = await _load_preferred_downstream_profile(session, job_id=job.id)
+        segmentation_input_stats = {
+            "provider_word_segment_count": int(segmentation_result.analysis.provider_word_segment_count or 0),
+            "synthetic_word_segment_count": int(segmentation_result.analysis.synthetic_word_segment_count or 0),
+            "untrusted_word_segment_count": int(segmentation_result.analysis.untrusted_word_segment_count or 0),
+            "text_only_segment_count": int(segmentation_result.analysis.text_only_segment_count or 0),
+            "global_word_segmentation_used": bool(segmentation_result.analysis.global_word_segmentation_used),
+        }
         llm_boundary_refine = {"attempted_windows": 0, "accepted_windows": 0}
         if segmentation_result.analysis.low_confidence_window_count > 0:
+            segmentation_analysis_payload = segmentation_result.analysis.as_dict()
+            segmentation_analysis_payload["low_confidence_windows"] = [
+                dict(item)
+                for item in (segmentation_result.analysis.low_confidence_windows or ())
+                if isinstance(item, dict)
+            ]
             await _set_step_progress(
                 session,
                 step,
@@ -2604,11 +2755,16 @@ async def run_subtitle_postprocess(job_id: str) -> dict:
                 job=job,
                 step=step,
                 entries=entries,
-                segmentation_analysis=segmentation_result.analysis.as_dict(),
+                segmentation_analysis=segmentation_analysis_payload,
                 split_profile=split_profile,
                 content_profile=content_profile,
             )
             segmentation_result.analysis = analyze_subtitle_segmentation(entries)
+            segmentation_result.analysis.provider_word_segment_count = segmentation_input_stats["provider_word_segment_count"]
+            segmentation_result.analysis.synthetic_word_segment_count = segmentation_input_stats["synthetic_word_segment_count"]
+            segmentation_result.analysis.untrusted_word_segment_count = segmentation_input_stats["untrusted_word_segment_count"]
+            segmentation_result.analysis.text_only_segment_count = segmentation_input_stats["text_only_segment_count"]
+            segmentation_result.analysis.global_word_segmentation_used = segmentation_input_stats["global_word_segmentation_used"]
         split_elapsed = time.perf_counter() - split_started
         await _set_step_progress(
             session,
@@ -2617,10 +2773,15 @@ async def run_subtitle_postprocess(job_id: str) -> dict:
                 f"按{split_profile['orientation']}节奏生成字幕 {len(entries)} 条，"
                 f"每条最多 {int(split_profile['max_chars'])} 字 / {float(split_profile['max_duration']):.1f}s"
                 + (
-                    f"，已回退 {int(segmentation_result.analysis.synthetic_word_segment_count) + int(segmentation_result.analysis.untrusted_word_segment_count)} 段不可信词级时间戳"
+                    f"，已使用 {int(segmentation_result.analysis.synthetic_word_segment_count)} 段合成词级锚点"
+                    if int(segmentation_result.analysis.synthetic_word_segment_count) > 0
+                    else ""
+                )
+                + (
+                    f"，另有 {int(segmentation_result.analysis.untrusted_word_segment_count) + int(segmentation_result.analysis.text_only_segment_count)} 段文本回退对齐"
                     if (
-                        int(segmentation_result.analysis.synthetic_word_segment_count)
-                        + int(segmentation_result.analysis.untrusted_word_segment_count)
+                        int(segmentation_result.analysis.untrusted_word_segment_count)
+                        + int(segmentation_result.analysis.text_only_segment_count)
                     ) > 0
                     else ""
                 )
@@ -2744,7 +2905,13 @@ async def run_content_profile(job_id: str) -> dict:
             .where(SubtitleItem.job_id == job.id, SubtitleItem.version == 1)
             .order_by(SubtitleItem.item_index)
         )
+        transcript_result = await session.execute(
+            select(TranscriptSegment)
+            .where(TranscriptSegment.job_id == job.id, TranscriptSegment.version == 1)
+            .order_by(TranscriptSegment.segment_index)
+        )
         subtitle_items = item_result.scalars().all()
+        transcript_rows = transcript_result.scalars().all()
         subtitle_dicts = [
             {
                 "index": item.item_index,
@@ -2756,7 +2923,16 @@ async def run_content_profile(job_id: str) -> dict:
             }
             for item in subtitle_items
         ]
-        transcript_excerpt = build_transcript_excerpt(subtitle_dicts)
+        transcript_evidence_artifact = await _load_latest_optional_artifact(
+            session,
+            job_id=job.id,
+            artifact_types=("transcript_evidence",),
+        )
+        transcript_dicts = _build_edit_plan_transcript_segments(
+            transcript_rows,
+            transcript_evidence_artifact.data_json if transcript_evidence_artifact is not None else None,
+        )
+        transcript_excerpt = build_transcript_excerpt(transcript_dicts or subtitle_dicts)
         subtitle_digest = digest_payload(
             [
                 {
@@ -2768,6 +2944,18 @@ async def run_content_profile(job_id: str) -> dict:
                     "text_final": item["text_final"],
                 }
                 for item in subtitle_dicts
+            ]
+        )
+        transcript_digest = digest_payload(
+            [
+                {
+                    "index": item.get("index"),
+                    "start": item.get("start"),
+                    "end": item.get("end"),
+                    "text": item.get("text"),
+                    "speaker": item.get("speaker"),
+                }
+                for item in transcript_dicts
             ]
         )
         glossary_result = await session.execute(select(GlossaryTerm))
@@ -2833,6 +3021,7 @@ async def run_content_profile(job_id: str) -> dict:
             workflow_template=job.workflow_template,
             transcript_excerpt=transcript_excerpt,
             subtitle_digest=subtitle_digest,
+            transcript_digest=transcript_digest,
             glossary_terms=effective_glossary_terms,
             user_memory=user_memory,
             include_research=include_research,
@@ -2864,6 +3053,7 @@ async def run_content_profile(job_id: str) -> dict:
                 workflow_template=job.workflow_template,
                 transcript_excerpt=transcript_excerpt,
                 subtitle_digest=subtitle_digest,
+                transcript_digest=transcript_digest,
                 glossary_terms=effective_glossary_terms,
                 user_memory=user_memory,
                 include_research=include_research,
@@ -2901,6 +3091,7 @@ async def run_content_profile(job_id: str) -> dict:
                                 workflow_template=job.workflow_template,
                                 transcript_excerpt=transcript_excerpt,
                                 subtitle_items=subtitle_dicts,
+                                transcript_items=transcript_dicts,
                                 glossary_terms=effective_glossary_terms,
                                 user_memory=user_memory,
                                 include_research=seeded_search_enabled,
@@ -2937,6 +3128,7 @@ async def run_content_profile(job_id: str) -> dict:
                                 source_path=source_path,
                                 source_name=job.source_name,
                                 subtitle_items=subtitle_dicts,
+                                transcript_items=transcript_dicts,
                                 workflow_template=job.workflow_template,
                                 user_memory=user_memory,
                                 glossary_terms=effective_glossary_terms,
@@ -2961,6 +3153,7 @@ async def run_content_profile(job_id: str) -> dict:
                         workflow_template=job.workflow_template,
                         transcript_excerpt=transcript_excerpt,
                         subtitle_digest=subtitle_digest,
+                        transcript_digest=transcript_digest,
                         glossary_terms=effective_glossary_terms,
                         user_memory=user_memory,
                         include_research=include_research,
@@ -2984,6 +3177,7 @@ async def run_content_profile(job_id: str) -> dict:
                                     workflow_template=job.workflow_template,
                                     transcript_excerpt=transcript_excerpt,
                                     subtitle_items=subtitle_dicts,
+                                    transcript_items=transcript_dicts,
                                     glossary_terms=effective_glossary_terms,
                                     user_memory=user_memory,
                                     include_research=enrich_search_enabled,
@@ -3316,7 +3510,13 @@ async def run_glossary_review(job_id: str) -> dict:
             .where(SubtitleItem.job_id == job.id, SubtitleItem.version == 1)
             .order_by(SubtitleItem.item_index)
         )
+        transcript_result = await session.execute(
+            select(TranscriptSegment)
+            .where(TranscriptSegment.job_id == job.id, TranscriptSegment.version == 1)
+            .order_by(TranscriptSegment.segment_index)
+        )
         subtitle_items = item_result.scalars().all()
+        transcript_rows = transcript_result.scalars().all()
 
         subtitle_dicts = [
             {
@@ -3329,6 +3529,15 @@ async def run_glossary_review(job_id: str) -> dict:
             }
             for item in subtitle_items
         ]
+        transcript_evidence_artifact = await _load_latest_optional_artifact(
+            session,
+            job_id=job.id,
+            artifact_types=("transcript_evidence",),
+        )
+        transcript_segment_dicts = _build_edit_plan_transcript_segments(
+            transcript_rows,
+            transcript_evidence_artifact.data_json if transcript_evidence_artifact is not None else None,
+        )
         _profile_artifact, content_profile = await _load_preferred_downstream_profile(session, job_id=job.id)
         if not content_profile:
             profile_result = await session.execute(
@@ -3397,6 +3606,7 @@ async def run_glossary_review(job_id: str) -> dict:
                                 source_path=source_path,
                                 source_name=job.source_name,
                                 subtitle_items=subtitle_dicts,
+                                transcript_items=transcript_segment_dicts,
                                 workflow_template=job.workflow_template,
                                 user_memory=user_memory,
                                 glossary_terms=effective_glossary_terms,
@@ -3425,6 +3635,7 @@ async def run_glossary_review(job_id: str) -> dict:
                             workflow_template=job.workflow_template,
                             transcript_excerpt=str(content_profile.get("transcript_excerpt") or ""),
                             subtitle_items=subtitle_dicts,
+                            transcript_items=transcript_segment_dicts,
                             glossary_terms=effective_glossary_terms,
                             user_memory=user_memory,
                             include_research=enrich_search_enabled,
@@ -3991,7 +4202,7 @@ async def run_edit_plan(job_id: str) -> dict:
             select(JobStep).where(JobStep.job_id == job.id, JobStep.step_name == "edit_plan")
         )
         step = step_result.scalar_one()
-        await _set_step_progress(session, step, detail="加载媒体参数、字幕与音频", progress=0.15)
+        await _set_step_progress(session, step, detail="加载媒体参数、冻结字幕与音频", progress=0.15)
 
         # Get media meta for duration
         meta_artifact = await _load_latest_artifact(session, job.id, "media_meta")
@@ -4045,99 +4256,6 @@ async def run_edit_plan(job_id: str) -> dict:
             job_id=job.id,
             artifact_types=("avatar_commentary_plan",),
         )
-
-        if (
-            profile_artifact is not None
-            and str(profile_artifact.artifact_type or "").strip().lower() in {"content_profile_final", "downstream_context"}
-            and isinstance(content_profile, dict)
-        ):
-            try:
-                subject_domain = _infer_subject_domain_for_memory(
-                    workflow_template=job.workflow_template,
-                    subtitle_items=subtitle_dicts,
-                    content_profile=content_profile,
-                    source_name=job.source_name,
-                )
-                glossary_result = await session.execute(select(GlossaryTerm))
-                glossary_terms = glossary_result.scalars().all()
-                effective_glossary_terms = _build_effective_glossary_terms(
-                    glossary_terms=glossary_terms,
-                    workflow_template=job.workflow_template,
-                    content_profile=content_profile,
-                    subtitle_items=subtitle_dicts,
-                    source_name=job.source_name,
-                    subject_domain=subject_domain,
-                )
-                user_memory = await load_content_profile_user_memory(
-                    session,
-                    subject_domain=subject_domain,
-                )
-                recent_subtitles = await _load_recent_subtitle_examples(
-                    session,
-                    workflow_template=job.workflow_template,
-                    exclude_job_id=job.id,
-                )
-                related_subtitles = await _load_related_profile_subtitle_examples(
-                    session,
-                    content_profile=content_profile,
-                    exclude_job_id=job.id,
-                )
-                review_memory = build_subtitle_review_memory(
-                    workflow_template=job.workflow_template,
-                    subject_domain=subject_domain,
-                    glossary_terms=effective_glossary_terms,
-                    user_memory=user_memory,
-                    recent_subtitles=subtitle_dicts + related_subtitles + recent_subtitles,
-                    content_profile=content_profile,
-                    include_recent_terms=False,
-                    include_recent_examples=False,
-                )
-                try:
-                    await asyncio.wait_for(
-                        polish_subtitle_items(
-                            subtitle_items,
-                            content_profile=content_profile,
-                            glossary_terms=effective_glossary_terms,
-                            review_memory=review_memory,
-                            allow_llm=True,
-                        ),
-                        timeout=_EDIT_PLAN_SUBTITLE_POLISH_TIMEOUT_SEC,
-                    )
-                except asyncio.TimeoutError:
-                    logger.warning(
-                        "Formal subtitle polish timed out during edit_plan for job %s; using rule-based fallback",
-                        job.id,
-                    )
-                    await polish_subtitle_items(
-                        subtitle_items,
-                        content_profile=content_profile,
-                        glossary_terms=effective_glossary_terms,
-                        review_memory=review_memory,
-                        allow_llm=False,
-                    )
-                except Exception:
-                    logger.exception("LLM subtitle polish failed during edit_plan for job %s", job.id)
-                    await polish_subtitle_items(
-                        subtitle_items,
-                        content_profile=content_profile,
-                        glossary_terms=effective_glossary_terms,
-                        review_memory=review_memory,
-                        allow_llm=False,
-                    )
-            except Exception:
-                logger.exception("Formal subtitle polish failed during edit_plan for job %s", job.id)
-            finally:
-                subtitle_dicts = [
-                    {
-                        "index": si.item_index,
-                        "start_time": si.start_time,
-                        "end_time": si.end_time,
-                        "text_raw": si.text_raw,
-                        "text_norm": si.text_norm,
-                        "text_final": si.text_final,
-                    }
-                    for si in subtitle_items
-                ]
 
         with tempfile.TemporaryDirectory() as tmpdir:
             audio_path = await _resolve_storage_reference(
@@ -4804,6 +4922,7 @@ async def run_render(job_id: str) -> dict:
             )
             cover_selection = load_cover_selection_summary(local_cover)
         except Exception:
+            logger.exception("Cover export failed for job %s", job_id)
             local_cover = None  # Cover is non-critical
             cover_variants = []
             cover_selection = None
@@ -5236,6 +5355,21 @@ def _finalize_packaged_subtitle_text(text: str) -> str:
     return normalized
 
 
+def _normalize_packaged_subtitle_copy_signature(text: str) -> str:
+    normalized = normalize_display_text(str(text or ""))
+    normalized = re.sub(r"\s+", "", normalized)
+    normalized = normalized.rstrip("。！？!?；;，,：:")
+    return normalized
+
+
+def _packaged_subtitle_copy_rewrite_is_material(original_text: str, rewritten_text: str) -> bool:
+    original_signature = _normalize_packaged_subtitle_copy_signature(original_text)
+    rewritten_signature = _normalize_packaged_subtitle_copy_signature(rewritten_text)
+    if not original_signature or not rewritten_signature:
+        return False
+    return original_signature != rewritten_signature
+
+
 def _rewrite_hook_subtitle_text(text: str, clauses: list[str]) -> str:
     if not clauses:
         return ""
@@ -5328,7 +5462,7 @@ def _rewrite_packaged_subtitle_copy(
         elif role == "cta":
             rewritten_text = _rewrite_cta_subtitle_text(original_text)
             strategy = "cta_compact"
-        if rewritten_text and rewritten_text != original_text:
+        if rewritten_text and _packaged_subtitle_copy_rewrite_is_material(original_text, rewritten_text):
             rewritten.setdefault("text_original_final", original_text)
             rewritten["text_final"] = rewritten_text
             rewritten["subtitle_copy_strategy"] = strategy
@@ -5390,6 +5524,8 @@ def _resolve_resegmented_subtitle_texts(
     if not primary_text:
         return []
     original_text = str(item.get("text_original_final") or primary_text)
+    if not _packaged_subtitle_copy_rewrite_is_material(original_text, primary_text):
+        return [primary_text]
     duration_sec = max(
         0.0,
         float(item.get("end_time", item.get("start_time", 0.0)) or 0.0)
@@ -6164,7 +6300,15 @@ def _variant_sync_is_blocking(sync_check: dict[str, Any] | None) -> bool:
     if not isinstance(sync_check, dict):
         return False
     warning_codes = {str(code) for code in sync_check.get("warning_codes") or []}
-    if "audio_video_duration_gap_large" in warning_codes or "subtitle_out_of_bounds" in warning_codes:
+    if warning_codes.intersection(
+        {
+            "audio_video_duration_gap_large",
+            "subtitle_out_of_bounds",
+            "subtitle_timestamp_disorder",
+            "subtitle_overlap_detected",
+            "subtitle_invalid_range",
+        }
+    ):
         return True
     effective_trailing_gap = float(
         sync_check.get("effective_trailing_gap_sec", sync_check.get("trailing_gap_sec", 0.0)) or 0.0
@@ -7115,6 +7259,8 @@ def _build_variant_timeline_diagnostics(
             "provider": str(raw_llm_cut_review.get("provider") or ""),
             "model": str(raw_llm_cut_review.get("model") or ""),
             "summary": str(raw_llm_cut_review.get("summary") or ""),
+            "error": str(raw_llm_cut_review.get("error") or ""),
+            "timeout": bool(raw_llm_cut_review.get("timeout")),
         }
         if isinstance(raw_llm_cut_review, dict)
         else {}

@@ -10,6 +10,10 @@ from roughcut.review.content_profile import (
     _merge_specific_profile_hints,
     _aggregate_visual_profile_hints,
     _apply_visual_subject_guard,
+    _assess_identity_review_requirement,
+    _canonicalize_spoken_identity_text,
+    _prefer_content_understanding_summary,
+    _prefer_content_understanding_video_theme,
     _probe_duration,
     _build_conservative_identity_summary,
     _coerce_subject_type_to_supported_main_type,
@@ -17,7 +21,9 @@ from roughcut.review.content_profile import (
     _extract_reference_frames,
     _infer_visual_profile_hints,
     _sanitize_profile_identity,
+    apply_source_identity_constraints,
     _seed_profile_from_text,
+    _source_context_candidate_hints,
     _build_search_queries,
     _filter_evidence_by_visual_subject,
     _fallback_profile,
@@ -80,6 +86,225 @@ def test_probe_duration_uses_configured_ffmpeg_timeout(monkeypatch: pytest.Monke
     assert captured["timeout"] == 45
 
 
+def test_source_context_candidate_hints_extracts_identity_from_merged_source_names():
+    hints = _source_context_candidate_hints(
+        {
+            "merged_source_names": [
+                "20260130-134317 LEATHERMAN ARC unboxing part1.mp4",
+                "20260130-140529 LEATHERMAN ARC detail followup.mp4",
+            ]
+        }
+    )
+
+    assert hints["filename_entries"][0].startswith("LEATHERMAN ARC")
+    assert "ARC" in (hints.get("subject_model_candidates") or [])
+    assert any("多功能工具钳" in item for item in (hints.get("subject_type_candidates") or []))
+
+
+def test_assess_identity_review_requirement_trusts_merged_source_name_identity():
+    review = _assess_identity_review_requirement(
+        {
+            "subject_brand": "LEATHERMAN",
+            "subject_model": "ARC",
+            "subject_type": "多功能工具钳",
+            "source_context": {
+                "merged_source_names": [
+                    "20260130-134317 LEATHERMAN ARC unboxing part1.mp4",
+                ]
+            },
+        },
+        source_name="watch_merge_demo.mp4",
+        subtitle_items=[],
+        user_memory=None,
+        glossary_terms=None,
+    )
+
+    assert review["required"] is False
+    assert review["reason"] == ""
+
+
+def test_assess_identity_review_requirement_trusts_descriptive_source_name_identity():
+    review = _assess_identity_review_requirement(
+        {
+            "subject_brand": "狐蝠工业",
+            "subject_model": "FXX1小副包",
+            "subject_type": "EDC机能包",
+        },
+        source_name="20260316_狐蝠工业_FXX1小副包_开箱测评.mp4",
+        subtitle_items=[],
+        user_memory=None,
+        glossary_terms=None,
+    )
+
+    assert review["required"] is False
+    assert review["reason"] == ""
+
+
+def test_assess_content_profile_automation_uses_task_description_as_review_basis():
+    profile = {
+        "workflow_template": "edc_tactical",
+        "subject_brand": "LEATHERMAN",
+        "subject_model": "ARC",
+        "subject_type": "多功能工具钳",
+        "video_theme": "LEATHERMAN ARC unboxing and detail followup",
+        "summary": "This episode focuses on LEATHERMAN ARC unboxing and detail followup.",
+        "engagement_question": "Which ARC detail matters most to you?",
+        "source_context": {
+            "video_description": "Task description from filename: LEATHERMAN ARC unboxing with a detailed followup; review should trust the filename-provided product identity.",
+            "merged_source_names": [
+                "20260130-134317 LEATHERMAN ARC unboxing part1.mp4",
+            ],
+        },
+        "content_understanding": {
+            "needs_review": True,
+            "review_reasons": [
+                "semantic_facts全字段为空，信息极度依赖文件名hint推断",
+                "建议补充原视频画面帧截图或完整字幕转写以确认内容准确性",
+            ],
+        },
+    }
+
+    automation = assess_content_profile_automation(profile, subtitle_items=[])
+
+    assert "缺少外部证据" not in automation["review_reasons"]
+    assert automation["blocking_reasons"] == []
+
+
+def test_assess_content_profile_automation_uses_descriptive_source_name_as_review_basis():
+    profile = {
+        "workflow_template": "edc_tactical",
+        "subject_brand": "狐蝠工业",
+        "subject_model": "FXX1小副包",
+        "subject_type": "EDC机能包",
+        "video_theme": "狐蝠工业FXX1小副包开箱与上手评测",
+        "summary": "这条视频主要围绕狐蝠工业FXX1小副包展开，重点看分仓、挂点和收纳体验。",
+        "engagement_question": "你更看重副包的分仓还是挂点？",
+        "content_understanding": {
+            "needs_review": True,
+            "review_reasons": [
+                "semantic_facts全字段为空，信息极度依赖文件名hint推断",
+                "建议补充原视频画面帧截图或完整字幕转写以确认内容准确性",
+            ],
+        },
+    }
+
+    automation = assess_content_profile_automation(
+        profile,
+        subtitle_items=[],
+        source_name="20260316 狐蝠工业 FXX1小副包 开箱测评.mp4",
+    )
+
+    assert "缺少外部证据" not in automation["review_reasons"]
+    assert automation["blocking_reasons"] == []
+
+
+def test_apply_source_identity_constraints_uses_source_context_feedback_to_refresh_profile():
+    constrained = apply_source_identity_constraints(
+        {
+            "workflow_template": "edc_tactical",
+            "subject_brand": "REATEREATE",
+            "subject_model": "EXO",
+            "subject_type": "键盘",
+            "video_theme": "泛化主题",
+            "summary": "这条视频主要围绕键盘展开，内容方向偏产品开箱与上手体验，适合后续做搜索校验、字幕纠错和剪辑包装。",
+            "source_context": {
+                "video_description": "任务说明依据文件名：继续讲解 REATE EXO 重力刀和 FAS 新款 EDC 整备卷轴的新品预告。",
+                "resolved_feedback": {
+                    "subject_brand": "REATE",
+                    "subject_model": "EXO",
+                    "subject_type": "重力刀",
+                    "video_theme": "REATE EXO重力刀讲解与FAS新品预告",
+                    "search_queries": ["REATE EXO", "FAS EDC整备卷轴"],
+                },
+            },
+        },
+        source_name="watch_merge_reate_exo.mp4",
+        transcript_excerpt="今天继续讲这把 EXO 重力刀，还有 FAS 的新品预告。",
+    )
+
+    assert constrained["subject_brand"] == "REATE"
+    assert constrained["subject_type"] == "重力刀"
+    assert "REATE" in constrained["summary"]
+    assert "EXO" in constrained["summary"]
+    assert "REATE EXO" in " ".join(constrained.get("search_queries") or [])
+    assert constrained["source_identity_constraints"]["authoritative"] is True
+
+
+def test_apply_source_identity_constraints_supports_single_source_filename():
+    constrained = apply_source_identity_constraints(
+        {
+            "workflow_template": "edc_tactical",
+            "subject_type": "产品",
+            "summary": "",
+        },
+        source_name="20260130-134317 LEATHERMAN ARC unboxing part1.mp4",
+    )
+
+    assert constrained["subject_brand"] == "LEATHERMAN"
+    assert constrained["subject_model"] == "ARC"
+    assert any("LEATHERMAN ARC" in item for item in constrained["source_identity_constraints"]["filename_entries"])
+
+
+def test_apply_source_identity_constraints_does_not_override_specific_theme_with_weak_filename_hint():
+    constrained = apply_source_identity_constraints(
+        {
+            "workflow_template": "edc_tactical",
+            "subject_brand": "FOXBAT狐蝠工业",
+            "subject_model": "FXX1小副包",
+            "subject_type": "EDC机能包",
+            "video_theme": "FOXBAT狐蝠工业FXX1小副包开箱与分仓挂点评测",
+            "summary": "这条视频主要围绕 FOXBAT狐蝠工业 FXX1小副包 的分仓和挂点展开。",
+        },
+        source_name="f21.mp4",
+        transcript_excerpt="今天开箱 FOXBAT 狐蝠工业 F21 小副包，重点看分仓和挂点。",
+    )
+
+    assert constrained["video_theme"] == "FOXBAT狐蝠工业FXX1小副包开箱与分仓挂点评测"
+
+
+def test_prefer_content_understanding_video_theme_when_current_theme_misses_detail_terms():
+    preferred = _prefer_content_understanding_video_theme(
+        {
+            "workflow_template": "edc_tactical",
+            "subject_domain": "edc刀具",
+            "subject_brand": "NOC",
+            "subject_model": "MT34",
+            "video_theme": "MT34开箱与功能实测",
+            "content_understanding": {
+                "video_theme": "NOC MT34快开组件可拆卸DIY实测与手感体验",
+                "semantic_facts": {
+                    "aspect_candidates": ["DIY可玩性", "拆卸便捷性", "手感"],
+                    "component_candidates": ["快开组件", "前置组件"],
+                },
+            },
+        },
+        transcript_excerpt="补充说明 NOC MT34 的快开组件、前置组件和DIY玩法。",
+    )
+
+    assert preferred["video_theme"] == "NOC MT34快开组件可拆卸DIY实测与手感体验"
+
+
+def test_prefer_content_understanding_summary_when_review_payload_is_generic():
+    preferred = _prefer_content_understanding_summary(
+        {
+            "subject_brand": "NOC",
+            "subject_model": "MT34",
+            "summary": "这条视频主要围绕NOC MT34展开，内容方向偏产品开箱与上手体验。",
+            "content_understanding": {
+                "summary": "UP主补充演示NOC MT34快开组件可拆卸的DIY玩法，体验按压、抠、拧三种快开方式的手感差异。",
+                "semantic_facts": {
+                    "aspect_candidates": ["DIY", "手感", "按压", "抠", "拧"],
+                    "component_candidates": ["快开组件", "可拆卸"],
+                },
+            },
+        },
+        confirmed_fields={},
+        allow_override=False,
+    )
+
+    assert preferred["summary"] == "UP主补充演示NOC MT34快开组件可拆卸的DIY玩法，体验按压、抠、拧三种快开方式的手感差异。"
+
+
 def test_build_content_profile_cache_fingerprint_uses_infer_version_without_seeded_profile():
     fingerprint = build_content_profile_cache_fingerprint(
         source_name="8ab62636b25b4b6ba8398467ddfb371a.mp4",
@@ -92,8 +317,9 @@ def test_build_content_profile_cache_fingerprint_uses_infer_version_without_seed
         copy_style="attention_grabbing",
     )
 
-    assert fingerprint["version"].startswith("2026-04-09.infer.v35")
+    assert fingerprint["version"].startswith("2026-04-14.infer.v36")
     assert fingerprint["seeded_profile_sha256"] == ""
+    assert fingerprint["transcript_digest"] == ""
     assert fingerprint["source_context_sha256"]
 
 
@@ -533,9 +759,14 @@ def test_seed_profile_from_text_uses_glossary_brand_and_generic_model():
     )
 
     assert seeded["subject_brand"] == "FOXBAT狐蝠工业"
-    assert seeded["subject_model"] == "F21小副包"
+    assert seeded["subject_model"] == "FXX1小副包"
     assert seeded["subject_type_candidates"] == ["EDC机能包"]
-    assert any("F21" in item for item in seeded["search_queries"])
+    assert any("FXX1" in item for item in seeded["search_queries"])
+
+
+def test_canonicalize_spoken_identity_text_handles_colloquial_digits_and_letters():
+    assert _canonicalize_spoken_identity_text("F叉叉幺") == "FXX1"
+    assert _canonicalize_spoken_identity_text("MT拐洞欧7") == "MTG0O7"
 
 
 def test_seed_profile_from_text_uses_bag_hotwords_as_scoped_search_evidence():
@@ -768,9 +999,30 @@ def test_sanitize_profile_identity_does_not_infer_type_or_theme_by_default():
     )
 
     assert sanitized["subject_brand"] == "FOXBAT狐蝠工业"
-    assert sanitized["subject_model"] == "F21小副包"
+    assert sanitized["subject_model"] == "FXX1小副包"
     assert sanitized["subject_type"] == ""
     assert sanitized["video_theme"] == ""
+
+
+def test_sanitize_profile_identity_prefers_exact_filename_logo_overlap_for_unknown_chinese_brand():
+    sanitized = _sanitize_profile_identity(
+        {
+            "subject_brand": "卓匠",
+            "video_theme": "卓匠年度旗舰铜貔貅展示",
+            "summary": "这条视频主要围绕卓匠年度旗舰铜貔貅展开。",
+            "ocr_evidence": {
+                "visible_text": "琢匠 铜貔貅",
+            },
+        },
+        transcript_excerpt="这期主要看这尊铜貔貅的分量和细节。",
+        source_name="IMG_0026 琢匠年度旗舰铜貔貅铜雕像.MOV",
+        glossary_terms=[],
+        memory_hints=None,
+    )
+
+    assert sanitized["subject_brand"] == "琢匠"
+    assert sanitized["video_theme"] == ""
+    assert sanitized["summary"] == ""
 
 
 def test_seed_profile_from_user_memory_uses_recent_brand_model_corrections():
@@ -1199,7 +1451,7 @@ def test_apply_identity_review_guard_clears_visible_text_that_conflicts_with_ver
     guarded = apply_identity_review_guard(
         {
             "subject_brand": "FOXBAT狐蝠工业",
-            "subject_model": "F21小副包",
+            "subject_model": "FXX1小副包",
             "subject_type": "EDC机能包",
             "video_theme": "分仓挂点与上手体验",
             "visible_text": "WOLF F21",
@@ -1208,7 +1460,7 @@ def test_apply_identity_review_guard_clears_visible_text_that_conflicts_with_ver
         source_name="foxbat-f21.mp4",
         glossary_terms=[
             {"correct_form": "FOXBAT狐蝠工业", "wrong_forms": ["狐蝠工业", "FOXBAT"], "category": "bag_brand"},
-            {"correct_form": "F21小副包", "wrong_forms": ["F21", "F21 小副包"], "category": "bag_model"},
+            {"correct_form": "FXX1小副包", "wrong_forms": ["F21", "F21 小副包"], "category": "bag_model"},
         ],
     )
 
@@ -2114,6 +2366,17 @@ def test_build_transcript_excerpt_pulls_high_signal_items_from_later_segments():
     assert "ARC" in excerpt
 
 
+def test_build_transcript_excerpt_accepts_transcript_segment_shape():
+    transcript_segments = [
+        {"index": 0, "start": 0.0, "end": 1.2, "text": "开场闲聊"},
+        {"index": 1, "start": 8.0, "end": 10.0, "text": "ARC 这把工具的单手开合很舒服"},
+    ]
+
+    excerpt = build_transcript_excerpt(transcript_segments, max_items=3, max_chars=200)
+
+    assert "[8.0-10.0] ARC 这把工具的单手开合很舒服" in excerpt
+
+
 def test_seed_profile_from_subtitles_handles_edc_asr_aliases():
     profile = _seed_profile_from_subtitles(
         [
@@ -2215,7 +2478,7 @@ async def test_infer_visual_profile_hints_extracts_visible_identity(monkeypatch:
     from roughcut.review import content_profile as content_profile_module
 
     async def fake_complete_with_images(*args, **kwargs):
-        return '{"subject_type":"EDC机能包","subject_brand":"FOXBAT狐蝠工业","subject_model":"F21小副包","visible_text":"FOXBAT F21","reason":"包装正面可见品牌和型号"}'
+        return '{"subject_type":"EDC机能包","subject_brand":"FOXBAT狐蝠工业","subject_model":"FXX1小副包","visible_text":"FOXBAT F21","reason":"包装正面可见品牌和型号"}'
 
     monkeypatch.setattr(content_profile_module, "complete_with_images", fake_complete_with_images)
 
@@ -2231,7 +2494,7 @@ async def test_infer_visual_profile_hints_prompt_includes_bag_and_flashlight_cat
 
     async def fake_complete_with_images(prompt, *args, **kwargs):
         captured["prompt"] = prompt
-        return '{"subject_type":"EDC机能包","subject_brand":"FOXBAT狐蝠工业","subject_model":"F21小副包","visible_text":"FOXBAT F21","reason":"包装正面可见品牌和型号"}'
+        return '{"subject_type":"EDC机能包","subject_brand":"FOXBAT狐蝠工业","subject_model":"FXX1小副包","visible_text":"FOXBAT F21","reason":"包装正面可见品牌和型号"}'
 
     monkeypatch.setattr(content_profile_module, "complete_with_images", fake_complete_with_images)
 
@@ -2293,9 +2556,9 @@ async def test_infer_visual_profile_hints_votes_across_frames(monkeypatch: pytes
     async def fake_complete_with_images(prompt, image_paths, **kwargs):
         frame_name = image_paths[0].name
         if frame_name == "frame_01.jpg":
-            return '{"subject_type":"EDC机能包","subject_brand":"FOXBAT狐蝠工业","subject_model":"F21小副包","visible_text":"FOXBAT F21","reason":"包装正面清晰"}'
+            return '{"subject_type":"EDC机能包","subject_brand":"FOXBAT狐蝠工业","subject_model":"FXX1小副包","visible_text":"FOXBAT F21","reason":"包装正面清晰"}'
         if frame_name == "frame_02.jpg":
-            return '{"subject_type":"EDC机能包","subject_brand":"FOXBAT狐蝠工业","subject_model":"F21小副包","visible_text":"F21","reason":"侧面型号可见"}'
+            return '{"subject_type":"EDC机能包","subject_brand":"FOXBAT狐蝠工业","subject_model":"FXX1小副包","visible_text":"F21","reason":"侧面型号可见"}'
         if frame_name == "frame_03.jpg":
             return '{"subject_type":"EDC机能包","subject_brand":"头狼工业","subject_model":"副包","visible_text":"WOLF","reason":"背景卡片误识别"}'
         return "{}"
@@ -2308,7 +2571,7 @@ async def test_infer_visual_profile_hints_votes_across_frames(monkeypatch: pytes
 
     assert hints["subject_type"] == "EDC机能包"
     assert hints["subject_brand"] == "FOXBAT狐蝠工业"
-    assert hints["subject_model"] == "F21小副包"
+    assert hints["subject_model"] == "FXX1小副包"
     assert hints["visible_text"] == "FOXBAT F21"
 
 
@@ -2318,14 +2581,14 @@ def test_aggregate_visual_profile_hints_prefers_visible_text_supported_by_identi
             {
                 "subject_type": "EDC机能包",
                 "subject_brand": "FOXBAT狐蝠工业",
-                "subject_model": "F21小副包",
+                "subject_model": "FXX1小副包",
                 "visible_text": "FOXBAT F21",
                 "reason": "包装正面清晰",
             },
             {
                 "subject_type": "EDC机能包",
                 "subject_brand": "FOXBAT狐蝠工业",
-                "subject_model": "F21小副包",
+                "subject_model": "FXX1小副包",
                 "visible_text": "F21",
                 "reason": "侧面型号可见",
             },
@@ -2343,7 +2606,7 @@ def test_aggregate_visual_profile_hints_prefers_visible_text_supported_by_identi
     )
 
     assert hints["subject_brand"] == "FOXBAT狐蝠工业"
-    assert hints["subject_model"] == "F21小副包"
+    assert hints["subject_model"] == "FXX1小副包"
     assert hints["visible_text"] == "FOXBAT F21"
 
 
@@ -2560,13 +2823,13 @@ def test_assess_content_profile_automation_respects_content_understanding_needs_
         {
             "preset_name": "unboxing_default",
             "subject_brand": "狐蝠工业",
-            "subject_model": "F21小副包",
+            "subject_model": "FXX1小副包",
             "subject_type": "EDC机能包",
-            "video_theme": "狐蝠工业F21小副包开箱与上手评测",
-            "summary": "这条视频主要围绕狐蝠工业 F21小副包展开。",
+            "video_theme": "狐蝠工业FXX1小副包开箱与上手评测",
+            "summary": "这条视频主要围绕狐蝠工业 FXX1小副包展开。",
             "engagement_question": "你更看重分仓还是挂点？",
-            "search_queries": ["狐蝠工业 F21小副包"],
-            "cover_title": {"top": "狐蝠工业", "main": "F21小副包", "bottom": "开箱上手"},
+            "search_queries": ["狐蝠工业 FXX1小副包"],
+            "cover_title": {"top": "狐蝠工业", "main": "FXX1小副包", "bottom": "开箱上手"},
             "content_understanding": {
                 "needs_review": True,
                 "review_reasons": ["联网搜索与内部已确认实体存在冲突，需人工复核"],
@@ -3557,18 +3820,18 @@ async def test_enrich_content_profile_uses_content_understanding_inference(monke
             content_domain="gear",
             primary_subject="EDC机能包",
             subject_entities=[
-                SubjectEntity(
-                    kind="product",
-                    name="FOXBAT狐蝠工业 F21小副包",
-                    brand="FOXBAT狐蝠工业",
-                    model="F21小副包",
-                )
-            ],
-            video_theme="FOXBAT狐蝠工业F21小副包开箱与分仓挂点评测",
-            summary="这条视频主要围绕 FOXBAT狐蝠工业 F21小副包 的分仓和挂点展开。",
+                    SubjectEntity(
+                        kind="product",
+                        name="FOXBAT狐蝠工业 FXX1小副包",
+                        brand="FOXBAT狐蝠工业",
+                        model="FXX1小副包",
+                    )
+                ],
+            video_theme="FOXBAT狐蝠工业FXX1小副包开箱与分仓挂点评测",
+            summary="这条视频主要围绕 FOXBAT狐蝠工业 FXX1小副包 的分仓和挂点展开。",
             hook_line="分仓挂点直接看",
             engagement_question="你更在意分仓还是挂点？",
-            search_queries=["FOXBAT F21 小副包"],
+            search_queries=["FOXBAT FXX1 小副包"],
             evidence_spans=[{"source": "ocr", "text": "FOXBAT F21"}],
             uncertainties=[],
             confidence={"overall": 0.91},
@@ -3588,7 +3851,7 @@ async def test_enrich_content_profile_uses_content_understanding_inference(monke
             },
             "visual_cluster_hints": {
                 "subject_brand": "FOXBAT狐蝠工业",
-                "subject_model": "F21小副包",
+                "subject_model": "FXX1小副包",
                 "visible_text": "FOXBAT F21",
             },
         },
@@ -3601,10 +3864,10 @@ async def test_enrich_content_profile_uses_content_understanding_inference(monke
     evidence_bundle = captured["evidence_bundle"]
     assert evidence_bundle["candidate_hints"]["subject_type"] == "开箱产品"
     assert evidence_bundle["candidate_hints"]["video_theme"] == "产品开箱与上手体验"
-    assert result["subject_model"] == "F21小副包"
+    assert result["subject_model"] == "FXX1小副包"
     assert result["subject_type"] == "EDC机能包"
-    assert result["video_theme"] == "FOXBAT狐蝠工业F21小副包开箱与分仓挂点评测"
-    assert result["summary"] == "这条视频主要围绕 FOXBAT狐蝠工业 F21小副包 的分仓和挂点展开。"
+    assert result["video_theme"] == "FOXBAT狐蝠工业FXX1小副包开箱与分仓挂点评测"
+    assert result["summary"] == "这条视频主要围绕 FOXBAT狐蝠工业 FXX1小副包 的分仓和挂点展开。"
     assert result["content_understanding"]["primary_subject"] == "EDC机能包"
 
 
@@ -3713,16 +3976,16 @@ async def test_enrich_content_profile_keeps_confirmed_fields_over_content_unders
             subject_entities=[
                 SubjectEntity(
                     kind="product",
-                    name="FOXBAT狐蝠工业 F21小副包",
+                    name="FOXBAT狐蝠工业 FXX1小副包",
                     brand="FOXBAT狐蝠工业",
-                    model="F21小副包",
+                    model="FXX1小副包",
                 )
             ],
-            video_theme="FOXBAT狐蝠工业F21小副包开箱与分仓挂点评测",
-            summary="这条视频主要围绕 FOXBAT狐蝠工业 F21小副包 的分仓和挂点展开。",
+            video_theme="FOXBAT狐蝠工业FXX1小副包开箱与分仓挂点评测",
+            summary="这条视频主要围绕 FOXBAT狐蝠工业 FXX1小副包 的分仓和挂点展开。",
             hook_line="分仓挂点直接看",
             engagement_question="你更在意分仓还是挂点？",
-            search_queries=["FOXBAT F21 小副包"],
+            search_queries=["FOXBAT FXX1 小副包"],
             evidence_spans=[],
             uncertainties=[],
             confidence={"overall": 0.91},
@@ -3819,7 +4082,7 @@ async def test_enrich_content_profile_backfills_identity_from_glossary_seed(monk
     )
 
     assert result["subject_brand"] == "FOXBAT狐蝠工业"
-    assert result["subject_model"] == "F21小副包"
+    assert result["subject_model"] == "FXX1小副包"
     assert result.get("subject_type", "") == ""
 
 
@@ -3850,7 +4113,7 @@ async def test_enrich_content_profile_does_not_classify_subject_type_from_contex
     )
 
     assert result["subject_brand"] == "FOXBAT狐蝠工业"
-    assert result["subject_model"] == "F21小副包"
+    assert result["subject_model"] == "FXX1小副包"
     assert result.get("subject_type", "") == ""
 
 
@@ -3884,7 +4147,7 @@ async def test_enrich_content_profile_does_not_upgrade_generic_theme_from_contex
     )
 
     assert result["subject_brand"] == "FOXBAT狐蝠工业"
-    assert result["subject_model"] == "F21小副包"
+    assert result["subject_model"] == "FXX1小副包"
     assert result["subject_type"] == "开箱产品"
     assert result["video_theme"] == "产品开箱与上手体验"
 
@@ -4166,6 +4429,39 @@ async def test_polish_subtitle_items_fallback_rewrites_sentence_slot_with_learne
 
 
 @pytest.mark.asyncio
+async def test_polish_subtitle_items_fallback_repairs_misheard_episode_intro(monkeypatch: pytest.MonkeyPatch):
+    from roughcut.review import content_profile as content_profile_module
+
+    def raising_provider():
+        raise RuntimeError("provider unavailable")
+
+    monkeypatch.setattr(content_profile_module, "get_reasoning_provider", raising_provider)
+
+    item = SimpleNamespace(
+        item_index=0,
+        start_time=0.0,
+        end_time=2.0,
+        text_raw="这七个咱给大家讲讲吧",
+        text_norm="这七个咱给大家讲讲吧",
+        text_final=None,
+    )
+
+    polished = await polish_subtitle_items(
+        [item],
+        content_profile={"preset_name": "edc_tactical"},
+        glossary_terms=[],
+        review_memory={
+            "terms": [],
+            "aliases": [],
+            "style_examples": [],
+        },
+    )
+
+    assert polished == 1
+    assert item.text_final == "这期给大家讲讲吧"
+
+
+@pytest.mark.asyncio
 async def test_polish_subtitle_items_fallback_repairs_collapsed_predicate_clause(monkeypatch: pytest.MonkeyPatch):
     from roughcut.review import content_profile as content_profile_module
 
@@ -4196,6 +4492,64 @@ async def test_polish_subtitle_items_fallback_repairs_collapsed_predicate_clause
 
     assert polished == 1
     assert item.text_final == "光线会更好。"
+
+
+@pytest.mark.asyncio
+async def test_polish_subtitle_items_fallback_collapses_repeated_phrase_fragment(monkeypatch: pytest.MonkeyPatch):
+    from roughcut.review import content_profile as content_profile_module
+
+    def raising_provider():
+        raise RuntimeError("provider unavailable")
+
+    monkeypatch.setattr(content_profile_module, "get_reasoning_provider", raising_provider)
+
+    item = SimpleNamespace(
+        item_index=0,
+        start_time=0.0,
+        end_time=2.0,
+        text_raw="少了一个小兄弟少了一个小兄弟那。",
+        text_norm="少了一个小兄弟少了一个小兄弟那。",
+        text_final=None,
+    )
+
+    polished = await polish_subtitle_items(
+        [item],
+        content_profile={"preset_name": "edc_tactical"},
+        glossary_terms=[],
+        review_memory={"terms": [], "aliases": [], "style_examples": []},
+    )
+
+    assert polished == 1
+    assert item.text_final == "少了一个小兄弟那。"
+
+
+@pytest.mark.asyncio
+async def test_polish_subtitle_items_fallback_trims_repeated_boundary_char(monkeypatch: pytest.MonkeyPatch):
+    from roughcut.review import content_profile as content_profile_module
+
+    def raising_provider():
+        raise RuntimeError("provider unavailable")
+
+    monkeypatch.setattr(content_profile_module, "get_reasoning_provider", raising_provider)
+
+    item = SimpleNamespace(
+        item_index=1,
+        start_time=2.0,
+        end_time=4.0,
+        text_raw="讲也算一个简单的开箱这个内容。",
+        text_norm="讲也算一个简单的开箱这个内容。",
+        text_final=None,
+    )
+
+    polished = await polish_subtitle_items(
+        [SimpleNamespace(item_index=0, start_time=0.0, end_time=2.0, text_raw="那么为什么这期给大家讲。", text_norm="那么为什么这期给大家讲。", text_final="那么为什么这期给大家讲。"), item],
+        content_profile={"preset_name": "edc_tactical"},
+        glossary_terms=[],
+        review_memory={"terms": [], "aliases": [], "style_examples": []},
+    )
+
+    assert polished == 2
+    assert item.text_final == "也算一个简单的开箱这个内容。"
 
 
 @pytest.mark.asyncio

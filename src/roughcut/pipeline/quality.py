@@ -336,6 +336,20 @@ def assess_job_quality(
                 auto_fix_step="render",
             )
         )
+    llm_cut_review = _resolve_variant_llm_cut_review(variant_bundle)
+    if (
+        llm_cut_review
+        and not bool(llm_cut_review.get("reviewed"))
+        and str(llm_cut_review.get("error") or "").strip() == "llm_cut_review_timeout"
+    ):
+        issues.append(
+            QualityIssue(
+                "edit_plan_llm_cut_review_timeout",
+                "edit_plan 的高风险 cut LLM 复核超时，当前使用未复核的确定性剪辑结果",
+                6.0,
+                auto_fix_step="edit_plan",
+            )
+        )
 
     for issue in issues:
         score -= issue.penalty
@@ -376,6 +390,7 @@ def assess_job_quality(
             "effective_status": effective_status,
             "step_completion_ratio": round(step_completion_ratio, 3),
             "subtitle_sync": sync_check,
+            "llm_cut_review": llm_cut_review,
             "identity_narrative_conflicts": _collect_identity_narrative_conflicts(profile),
             "entity_identity_gate": evaluate_profile_identity_gate(profile),
         },
@@ -418,21 +433,39 @@ def _subtitle_item_to_dict(item: SubtitleItem) -> dict[str, Any]:
 
 
 def _build_profile_text(profile: dict[str, Any]) -> str:
-    return _normalize_text(
-        " ".join(
-            str(profile.get(key) or "").strip()
-            for key in (
-                "subject_brand",
-                "subject_model",
-                "subject_type",
-                "video_theme",
-                "hook_line",
-                "summary",
-                "engagement_question",
-                "cover_title",
-            )
+    parts = [
+        str(profile.get(key) or "").strip()
+        for key in (
+            "subject_brand",
+            "subject_model",
+            "subject_type",
+            "video_theme",
+            "hook_line",
+            "summary",
+            "engagement_question",
+            "cover_title",
         )
-    )
+    ]
+    content_understanding = profile.get("content_understanding")
+    if isinstance(content_understanding, dict):
+        parts.extend(
+            str(content_understanding.get(key) or "").strip()
+            for key in ("video_theme", "summary", "hook_line", "engagement_question", "primary_subject")
+        )
+        semantic_facts = content_understanding.get("semantic_facts")
+        if isinstance(semantic_facts, dict):
+            for key in ("aspect_candidates", "component_candidates", "entity_candidates", "product_type_candidates"):
+                for item in list(semantic_facts.get(key) or [])[:12]:
+                    value = str(item or "").strip()
+                    if value:
+                        parts.append(value)
+        for span in list(content_understanding.get("evidence_spans") or [])[:10]:
+            if not isinstance(span, dict):
+                continue
+            value = str(span.get("text") or "").strip()
+            if value:
+                parts.append(value)
+    return _normalize_text(" ".join(part for part in parts if part))
 
 
 def _collect_identity_narrative_conflicts(profile: dict[str, Any]) -> list[str]:
@@ -542,6 +575,19 @@ def _collect_entity_catalog_signals(profile: dict[str, Any]) -> dict[str, Any]:
         "missing_supported_fields": missing_supported_fields,
         "top_candidate": top_candidate,
     }
+
+
+def _resolve_variant_llm_cut_review(variant_bundle: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(variant_bundle, dict):
+        return {}
+    timeline_rules = variant_bundle.get("timeline_rules")
+    if not isinstance(timeline_rules, dict):
+        return {}
+    diagnostics = timeline_rules.get("diagnostics")
+    if not isinstance(diagnostics, dict):
+        return {}
+    llm_cut_review = diagnostics.get("llm_cut_review")
+    return dict(llm_cut_review) if isinstance(llm_cut_review, dict) else {}
 
 
 def _candidate_identity_alignment_score(profile: dict[str, Any], candidate: dict[str, Any]) -> int:
@@ -715,7 +761,8 @@ def _compute_subtitle_sync_check(
         return None
     video_duration = _probe_media_duration(video_path)
     stream_durations = _probe_media_stream_durations(video_path)
-    subtitle_ranges = _parse_srt_ranges(subtitle_path)
+    subtitle_timeline = _parse_srt_timeline(subtitle_path)
+    subtitle_ranges = subtitle_timeline["ranges"]
     if video_duration <= 0 or not subtitle_ranges:
         return None
 
@@ -732,6 +779,12 @@ def _compute_subtitle_sync_check(
     audio_video_duration_gap = abs(video_stream_duration - audio_duration)
 
     warning_codes: list[str] = []
+    if int(subtitle_timeline.get("timestamp_disorder_count") or 0) > 0:
+        warning_codes.append("subtitle_timestamp_disorder")
+    if int(subtitle_timeline.get("overlap_count") or 0) > 0:
+        warning_codes.append("subtitle_overlap_detected")
+    if int(subtitle_timeline.get("invalid_range_count") or 0) > 0:
+        warning_codes.append("subtitle_invalid_range")
     if out_of_bounds_count > 0:
         warning_codes.append("subtitle_out_of_bounds")
     if effective_trailing_gap > max(2.0, video_duration * 0.12):
@@ -764,6 +817,9 @@ def _compute_subtitle_sync_check(
         "audio_duration_sec": round(audio_duration, 3),
         "audio_video_duration_gap_sec": round(audio_video_duration_gap, 3),
         "subtitle_out_of_bounds_count": out_of_bounds_count,
+        "subtitle_timestamp_disorder_count": int(subtitle_timeline.get("timestamp_disorder_count") or 0),
+        "subtitle_overlap_count": int(subtitle_timeline.get("overlap_count") or 0),
+        "subtitle_invalid_range_count": int(subtitle_timeline.get("invalid_range_count") or 0),
         "warning_codes": warning_codes,
     }
 
@@ -827,9 +883,14 @@ def _probe_media_stream_durations(path: Path) -> dict[str, float]:
     return durations
 
 
-def _parse_srt_ranges(path: Path) -> list[tuple[float, float]]:
+def _parse_srt_timeline(path: Path) -> dict[str, Any]:
     text = path.read_text(encoding="utf-8", errors="replace")
     ranges: list[tuple[float, float]] = []
+    timestamp_disorder_count = 0
+    overlap_count = 0
+    invalid_range_count = 0
+    previous_start_end: tuple[float, float] | None = None
+    previous_end = -1.0
     for line in text.splitlines():
         if "-->" not in line:
             continue
@@ -838,8 +899,25 @@ def _parse_srt_ranges(path: Path) -> list[tuple[float, float]]:
         end_sec = _parse_srt_timestamp(end_text)
         if start_sec is None or end_sec is None:
             continue
+        if end_sec < start_sec:
+            invalid_range_count += 1
+        if previous_start_end is not None and (start_sec, end_sec) < previous_start_end:
+            timestamp_disorder_count += 1
+        if previous_end >= 0.0 and start_sec < previous_end - 0.001:
+            overlap_count += 1
         ranges.append((start_sec, end_sec))
-    return ranges
+        previous_start_end = (start_sec, end_sec)
+        previous_end = max(previous_end, end_sec)
+    return {
+        "ranges": ranges,
+        "timestamp_disorder_count": timestamp_disorder_count,
+        "overlap_count": overlap_count,
+        "invalid_range_count": invalid_range_count,
+    }
+
+
+def _parse_srt_ranges(path: Path) -> list[tuple[float, float]]:
+    return list(_parse_srt_timeline(path).get("ranges") or [])
 
 
 def _parse_srt_timestamp(value: str) -> float | None:

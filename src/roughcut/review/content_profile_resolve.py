@@ -32,12 +32,12 @@ def resolve_identity_candidates(
             conflicts=tuple(conflicts),
         )
     brand = _pick_supported_candidate(scored.get("subject_brand") or [])
-    model = _pick_supported_candidate(scored.get("subject_model") or [])
+    model = _pick_supported_model_candidate(scored.get("subject_model") or [], normalize=normalize)
     subject_type = _pick_supported_candidate(scored.get("subject_type") or [])
     video_theme = _pick_supported_candidate(scored.get("video_theme") or [])
 
     mapped_brand = mapped_brand_for_model(model) if model else ""
-    if mapped_brand and brand and normalize(mapped_brand) != normalize(brand):
+    if mapped_brand and brand and not _compatible_normalized_values(mapped_brand, brand, normalize=normalize):
         conflicts.append("brand_model_conflict")
         brand = ""
     elif mapped_brand and not brand:
@@ -59,6 +59,58 @@ def _pick_supported_candidate(candidates: list[ScoredIdentityCandidate]) -> str:
     if best.current_source_count <= 0 or best.current_evidence_score <= 0:
         return ""
     return best.value
+
+
+def _pick_supported_model_candidate(
+    candidates: list[ScoredIdentityCandidate],
+    *,
+    normalize: Callable[[object], str],
+) -> str:
+    if not candidates:
+        return ""
+    supported = [
+        candidate
+        for candidate in candidates
+        if candidate.current_source_count > 0 and candidate.current_evidence_score > 0
+    ]
+    if not supported:
+        return ""
+    best = supported[0]
+    for candidate in supported[1:]:
+        if not _compatible_model_family(best, candidate, normalize=normalize):
+            continue
+        if len(str(candidate.value or "")) <= len(str(best.value or "")):
+            continue
+        if candidate.current_evidence_score < max(1, best.current_evidence_score - 2):
+            continue
+        best = candidate
+    return best.value
+
+
+def _compatible_model_family(
+    left: ScoredIdentityCandidate,
+    right: ScoredIdentityCandidate,
+    *,
+    normalize: Callable[[object], str],
+) -> bool:
+    left_normalized = normalize(left.value)
+    right_normalized = normalize(right.value)
+    if not left_normalized or not right_normalized:
+        return False
+    return left_normalized in right_normalized or right_normalized in left_normalized
+
+
+def _compatible_normalized_values(
+    left: object,
+    right: object,
+    *,
+    normalize: Callable[[object], str],
+) -> bool:
+    left_normalized = normalize(left)
+    right_normalized = normalize(right)
+    if not left_normalized or not right_normalized:
+        return False
+    return left_normalized == right_normalized or left_normalized in right_normalized or right_normalized in left_normalized
 
 
 def _has_current_identity_conflict(

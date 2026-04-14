@@ -25,6 +25,7 @@ from roughcut.pipeline.steps import (
     _infer_subject_domain_for_memory,
     _load_latest_artifact,
     _load_latest_optional_artifact,
+    _load_preferred_downstream_profile,
     _maybe_review_edit_decision_cuts_with_llm,
     _llm_refine_subtitle_window,
     _maybe_refine_subtitle_boundaries_with_llm,
@@ -32,6 +33,7 @@ from roughcut.pipeline.steps import (
     _subtitle_boundary_refine_llm_supported,
     _load_latest_timeline,
     _record_source_integrity,
+    _select_low_confidence_windows_for_llm,
     _select_cover_source_video,
     _select_preferred_content_profile_artifact,
     _workflow_template_subject_domain,
@@ -286,6 +288,79 @@ async def test_maybe_refine_subtitle_boundaries_with_llm_uses_fallback_tokens_wi
     assert called_windows == [["犯困啊或者说需", "要提神的时候"]]
     assert refine_stats == {"attempted_windows": 1, "accepted_windows": 1}
     assert [entry.text_raw for entry in result_entries] == ["犯困啊或者说需要提神的时候"]
+
+
+@pytest.mark.asyncio
+async def test_maybe_refine_subtitle_boundaries_with_llm_prefers_full_windows_and_reindexes(monkeypatch):
+    import roughcut.pipeline.steps as steps_mod
+
+    entries = [
+        SubtitleEntry(index=0, start=0.0, end=1.0, text_raw="第一句", text_norm="第一句", words=()),
+        SubtitleEntry(index=1, start=1.0, end=2.0, text_raw="少了一个小", text_norm="少了一个小", words=()),
+        SubtitleEntry(index=2, start=2.0, end=3.0, text_raw="兄弟", text_norm="兄弟", words=()),
+        SubtitleEntry(index=3, start=3.0, end=4.0, text_raw="最后一句", text_norm="最后一句", words=()),
+    ]
+    refined_window = [
+        SubtitleEntry(index=0, start=1.0, end=3.0, text_raw="少了一个小兄弟", text_norm="少了一个小兄弟", words=()),
+    ]
+    called_windows: list[list[str]] = []
+
+    async def fake_llm_refine_subtitle_window(**kwargs):
+        called_windows.append([entry.text_raw for entry in kwargs["window_entries"]])
+        return list(refined_window)
+
+    monkeypatch.setattr(steps_mod, "get_reasoning_provider", lambda: object())
+    monkeypatch.setattr(steps_mod, "llm_task_route", lambda *args, **kwargs: nullcontext())
+    monkeypatch.setattr(steps_mod, "track_step_usage", lambda *args, **kwargs: nullcontext())
+    monkeypatch.setattr(steps_mod, "get_settings", lambda: SimpleNamespace())
+    monkeypatch.setattr(steps_mod, "_llm_refine_subtitle_window", fake_llm_refine_subtitle_window)
+
+    result_entries, refine_stats = await _maybe_refine_subtitle_boundaries_with_llm(
+        job=SimpleNamespace(id=uuid.uuid4()),
+        step=SimpleNamespace(id=uuid.uuid4()),
+        entries=list(entries),
+        segmentation_analysis={
+            "low_confidence_windows": [
+                {
+                    "start_index": 1,
+                    "end_index": 2,
+                    "entry_count": 2,
+                    "texts": ["少了一个小", "兄弟"],
+                    "start_time": 1.0,
+                    "end_time": 3.0,
+                }
+            ],
+            "sample_low_confidence_windows": [],
+        },
+        split_profile={"max_chars": 12, "max_duration": 2.5},
+        content_profile={},
+    )
+
+    assert called_windows == [["少了一个小", "兄弟"]]
+    assert refine_stats == {"attempted_windows": 1, "accepted_windows": 1}
+    assert [entry.text_raw for entry in result_entries] == ["第一句", "少了一个小兄弟", "最后一句"]
+    assert [entry.index for entry in result_entries] == [0, 1, 2]
+
+
+def test_select_low_confidence_windows_for_llm_spreads_across_timeline():
+    windows = [
+        {
+            "start_index": index,
+            "end_index": index if index in {2, 8} else index + 1,
+            "entry_count": 1 if index in {2, 8} else 2,
+            "texts": [f"窗口{index}", f"窗口{index + 1}"],
+            "start_time": float(index),
+            "end_time": float(index + 1),
+        }
+        for index in range(12)
+    ]
+
+    selected = _select_low_confidence_windows_for_llm(windows, limit=4)
+
+    assert len(selected) == 4
+    assert all(int(item["end_index"]) > int(item["start_index"]) for item in selected)
+    assert int(selected[0]["start_index"]) <= 1
+    assert int(selected[-1]["start_index"]) >= 9
 
 
 def test_subtitle_boundary_refine_llm_supported_skips_minimax_highspeed(monkeypatch):
@@ -882,6 +957,77 @@ async def test_maybe_review_edit_decision_cuts_with_llm_restores_high_risk_cut(m
 
 
 @pytest.mark.asyncio
+async def test_maybe_review_edit_decision_cuts_with_llm_marks_timeout_without_failing(monkeypatch):
+    from roughcut.edit.decisions import EditDecision, EditSegment
+
+    class SlowProvider:
+        async def complete(self, messages, **kwargs):
+            raise asyncio.TimeoutError()
+
+    decision = EditDecision(
+        source="demo.mp4",
+        segments=[
+            EditSegment(start=0.0, end=1.0, type="keep"),
+            EditSegment(start=1.0, end=1.5, type="remove", reason="silence"),
+            EditSegment(start=1.5, end=3.0, type="keep"),
+        ],
+        analysis={
+            "accepted_cuts": [
+                {
+                    "start": 1.0,
+                    "end": 1.5,
+                    "reason": "silence",
+                    "boundary_keep_energy": 1.18,
+                    "left_keep_role": "detail",
+                    "right_keep_role": "detail",
+                }
+            ]
+        },
+    )
+
+    settings = SimpleNamespace(
+        edit_decision_llm_review_enabled=True,
+        edit_decision_llm_review_max_candidates=6,
+        edit_decision_llm_review_min_confidence=0.72,
+        active_reasoning_provider="minimax",
+        active_reasoning_model="MiniMax-M2.7-highspeed",
+    )
+
+    monkeypatch.setattr("roughcut.pipeline.steps.get_settings", lambda: settings)
+    monkeypatch.setattr("roughcut.pipeline.steps.get_reasoning_provider", lambda: SlowProvider())
+    monkeypatch.setattr("roughcut.pipeline.steps.llm_task_route", lambda *args, **kwargs: nullcontext())
+    monkeypatch.setattr("roughcut.pipeline.steps.load_cached_entry", lambda *args, **kwargs: None)
+    monkeypatch.setattr("roughcut.pipeline.steps.save_cached_json", lambda *args, **kwargs: None)
+
+    reviewed = await _maybe_review_edit_decision_cuts_with_llm(
+        job_id=uuid.uuid4(),
+        source_name="demo.mp4",
+        decision=decision,
+        subtitle_items=[
+            {"start_time": 0.0, "end_time": 1.0, "text_final": "先看这里的细节。"},
+            {"start_time": 1.5, "end_time": 2.6, "text_final": "再放一起看对比差异。"},
+        ],
+        transcript_segments=[
+            {"start": 0.0, "end": 1.0, "text": "先看这里的细节", "speaker": "A", "confidence": 0.95},
+            {"start": 1.5, "end": 2.6, "text": "再放一起看对比差异", "speaker": "A", "confidence": 0.95},
+        ],
+        content_profile={"subject_type": "EDC机能包"},
+    )
+
+    assert [(segment.start, segment.end, segment.type, segment.reason) for segment in reviewed.segments] == [
+        (0.0, 1.0, "keep", ""),
+        (1.0, 1.5, "remove", "silence"),
+        (1.5, 3.0, "keep", ""),
+    ]
+    assert reviewed.analysis["llm_cut_review"] == {
+        "reviewed": False,
+        "candidate_count": 1,
+        "error": "llm_cut_review_timeout",
+        "timeout": True,
+    }
+
+
+@pytest.mark.asyncio
 async def test_run_probe_starts_and_cleans_up_step_heartbeat(db_engine, monkeypatch, tmp_path: Path):
     import roughcut.pipeline.steps as steps_mod
 
@@ -1016,6 +1162,15 @@ def test_infer_subject_domain_for_memory_uses_current_content_evidence():
         content_profile={},
         source_name="tool.mp4",
     ) == "tools"
+
+
+def test_infer_subject_domain_for_memory_ignores_generic_explicit_domain_when_current_evidence_is_specific():
+    assert _infer_subject_domain_for_memory(
+        workflow_template="edc_tactical",
+        subtitle_items=[{"text_final": "今天开箱这个手电，重点看泛光、聚光和流明。"}],
+        content_profile={"subject_domain": "电子产品", "subject_type": "EDC手电"},
+        source_name="nitecore.mp4",
+    ) == "edc"
 
 
 def test_record_source_integrity_writes_debug_report(tmp_path: Path):
@@ -2400,6 +2555,43 @@ def test_build_effective_glossary_terms_adds_source_identity_constraints():
     assert "REATE" in by_correct
     assert "REATEREATE" in list(by_correct["REATE"].get("wrong_forms") or [])
     assert "EXO" in by_correct
+
+
+def test_build_effective_glossary_terms_filters_conflicting_model_aliases():
+    from roughcut.pipeline.steps import _build_effective_glossary_terms
+
+    terms = _build_effective_glossary_terms(
+        glossary_terms=[
+            {
+                "scope_type": "domain",
+                "scope_value": "edc",
+                "correct_form": "EDC17",
+                "wrong_forms": ["EDC37", "EDC幺七"],
+                "category": "model",
+                "context_hint": "legacy",
+            }
+        ],
+        workflow_template="edc_tactical",
+        content_profile={
+            "subject_model": "EDC37",
+            "source_context": {
+                "video_description": "任务说明依据文件名：本期讲 NITECORE EDC17，并和 EDC37 对比。",
+                "resolved_feedback": {
+                    "subject_brand": "NITECORE",
+                    "subject_model": "EDC17",
+                    "subject_type": "EDC手电",
+                },
+            },
+        },
+        subtitle_items=[],
+        source_name="nitecore_edc17_vs_edc37.mp4",
+        subject_domain="edc",
+    )
+
+    by_correct = {str(item.get("correct_form") or ""): item for item in terms}
+    assert "EDC17" in by_correct
+    assert "EDC37" not in list(by_correct["EDC17"].get("wrong_forms") or [])
+    assert "EDC幺七" in list(by_correct["EDC17"].get("wrong_forms") or [])
 
 
 @pytest.mark.asyncio
@@ -4568,6 +4760,112 @@ async def test_run_content_profile_ignores_stale_infer_cache_after_framework_ver
 
 
 @pytest.mark.asyncio
+async def test_run_content_profile_prefers_transcript_segments_as_primary_evidence(
+    db_engine,
+    monkeypatch,
+    tmp_path: Path,
+):
+    import roughcut.pipeline.steps as steps_mod
+    from roughcut.db.models import TranscriptSegment as TranscriptSegmentRow
+
+    factory = async_sessionmaker(db_engine, expire_on_commit=False)
+    job_id = uuid.uuid4()
+    source_path = tmp_path / "source.mp4"
+    source_path.write_bytes(b"video")
+    fake_review_bot = _FakeTelegramReviewBotService()
+    settings = SimpleNamespace(
+        auto_confirm_content_profile=False,
+        content_profile_review_threshold=0.72,
+        content_profile_auto_review_min_accuracy=0.9,
+        content_profile_auto_review_min_samples=20,
+        research_verifier_enabled=False,
+    )
+    captured: dict[str, Any] = {}
+
+    async with factory() as session:
+        session.add(
+            Job(
+                id=job_id,
+                source_path="jobs/demo/source.mp4",
+                source_name="source.mp4",
+                file_hash="source-hash",
+                status="processing",
+                language="zh-CN",
+                workflow_template="edc_tactical",
+            )
+        )
+        session.add(JobStep(job_id=job_id, step_name="content_profile", status="running"))
+        session.add(JobStep(job_id=job_id, step_name="summary_review", status="pending"))
+        session.add(
+            SubtitleItem(
+                job_id=job_id,
+                version=1,
+                item_index=0,
+                start_time=0.0,
+                end_time=1.0,
+                text_raw="开场闲聊",
+                text_norm="开场闲聊",
+                text_final="开场闲聊",
+            )
+        )
+        session.add(
+            TranscriptSegmentRow(
+                job_id=job_id,
+                version=1,
+                segment_index=0,
+                start_time=8.0,
+                end_time=10.0,
+                text="ARC 这把工具的单手开合很舒服",
+            )
+        )
+        await session.commit()
+
+    monkeypatch.setattr(steps_mod, "get_session_factory", lambda: factory)
+    monkeypatch.setattr(steps_mod, "get_settings", lambda: settings)
+    monkeypatch.setattr(steps_mod, "get_telegram_review_bot_service", lambda: fake_review_bot)
+    monkeypatch.setattr(steps_mod, "list_packaging_assets", lambda: {"config": {"copy_style": "attention_grabbing"}})
+
+    async def fake_load_content_profile_user_memory(*args, **kwargs):
+        return {}
+
+    async def fake_resolve_source(*args, **kwargs):
+        return source_path
+
+    async def fake_infer_content_profile(**kwargs):
+        captured.update(kwargs)
+        return {
+            "workflow_template": "edc_tactical",
+            "content_kind": "unboxing",
+            "subject_type": "多功能工具钳",
+            "video_theme": "ARC 上手体验",
+            "summary": "这条视频重点看 ARC 的上手体验和单手开合。",
+            "engagement_question": "你会在意这类工具的单手开合吗？",
+            "search_queries": ["ARC 单手开合"],
+            "cover_title": {"top": "LEATHERMAN", "main": "ARC", "bottom": "单手开合体验"},
+            "transcript_excerpt": steps_mod.build_transcript_excerpt(kwargs["transcript_items"]),
+        }
+
+    monkeypatch.setattr(steps_mod, "load_content_profile_user_memory", fake_load_content_profile_user_memory)
+    monkeypatch.setattr(steps_mod, "_resolve_source", fake_resolve_source)
+    monkeypatch.setattr(steps_mod, "infer_content_profile", fake_infer_content_profile)
+
+    await run_content_profile(str(job_id))
+
+    assert captured["transcript_items"][0]["text"] == "ARC 这把工具的单手开合很舒服"
+
+    async with factory() as session:
+        artifact_result = await session.execute(
+            select(Artifact)
+            .where(Artifact.job_id == job_id, Artifact.artifact_type == "content_profile_draft")
+            .order_by(Artifact.created_at.desc(), Artifact.id.desc())
+        )
+        draft = artifact_result.scalars().first()
+        assert draft is not None
+        assert "ARC 这把工具的单手开合很舒服" in str(draft.data_json.get("transcript_excerpt") or "")
+        assert "开场闲聊" not in str(draft.data_json.get("transcript_excerpt") or "")
+
+
+@pytest.mark.asyncio
 async def test_run_content_profile_rebuilds_cache_when_non_excerpt_subtitles_change(
     db_engine,
     monkeypatch,
@@ -4685,7 +4983,7 @@ async def test_run_content_profile_rebuilds_cache_when_non_excerpt_subtitles_cha
 
 
 @pytest.mark.asyncio
-async def test_run_edit_plan_repolishes_subtitles_with_llm_after_content_profile_confirmed(
+async def test_run_edit_plan_uses_confirmed_profile_without_mutating_subtitles(
     db_engine,
     monkeypatch,
     tmp_path: Path,
@@ -4698,7 +4996,7 @@ async def test_run_edit_plan_repolishes_subtitles_with_llm_after_content_profile
     audio_path = tmp_path / "audio.wav"
     audio_path.write_bytes(b"fake-audio")
     keep_segments = [{"type": "keep", "start_time": 0.0, "end_time": 2.0}]
-    polish_calls: dict[str, object] = {}
+    captured: dict[str, object] = {}
 
     class FakeDecision:
         def to_dict(self):
@@ -4792,14 +5090,12 @@ async def test_run_edit_plan_repolishes_subtitles_with_llm_after_content_profile
     async def fake_load_related_profile_subtitle_examples(*args, **kwargs):
         return []
 
-    def fake_build_subtitle_review_memory(**kwargs):
-        return {"mode": "formal_polish"}
+    async def fake_polish_subtitle_items(*args, **kwargs):
+        raise AssertionError("edit_plan must not rewrite subtitles after review freeze")
 
-    async def fake_polish_subtitle_items(subtitle_items, **kwargs):
-        polish_calls["allow_llm"] = kwargs["allow_llm"]
-        polish_calls["content_profile"] = kwargs["content_profile"]
-        subtitle_items[0].text_final = "这次拿到一个新的手电筒。"
-        return 1
+    def fake_build_edit_decision(**kwargs):
+        captured["content_profile"] = dict(kwargs["content_profile"])
+        return FakeDecision()
 
     async def fake_save_editorial_timeline(*args, **kwargs):
         return SimpleNamespace(id=editorial_timeline_id, data_json={"segments": keep_segments}, otio_data=None)
@@ -4818,9 +5114,8 @@ async def test_run_edit_plan_repolishes_subtitles_with_llm_after_content_profile
     monkeypatch.setattr(steps_mod, "load_content_profile_user_memory", fake_load_content_profile_user_memory)
     monkeypatch.setattr(steps_mod, "_load_recent_subtitle_examples", fake_load_recent_subtitle_examples)
     monkeypatch.setattr(steps_mod, "_load_related_profile_subtitle_examples", fake_load_related_profile_subtitle_examples)
-    monkeypatch.setattr(steps_mod, "build_subtitle_review_memory", fake_build_subtitle_review_memory)
     monkeypatch.setattr(steps_mod, "polish_subtitle_items", fake_polish_subtitle_items)
-    monkeypatch.setattr(steps_mod, "build_edit_decision", lambda **kwargs: FakeDecision())
+    monkeypatch.setattr(steps_mod, "build_edit_decision", fake_build_edit_decision)
     monkeypatch.setattr(steps_mod, "save_editorial_timeline", fake_save_editorial_timeline)
     monkeypatch.setattr(steps_mod, "export_to_otio", lambda *args, **kwargs: "otio")
     monkeypatch.setattr(
@@ -4842,9 +5137,8 @@ async def test_run_edit_plan_repolishes_subtitles_with_llm_after_content_profile
     result = await steps_mod.run_edit_plan(str(job_id))
 
     assert result["timeline_id"] == str(editorial_timeline_id)
-    assert polish_calls["allow_llm"] is True
-    assert polish_calls["content_profile"]["subject_brand"] == "傲雷校对版"
-    assert polish_calls["content_profile"]["subject_model"] == "司令官2 Ultra 校对版"
+    assert captured["content_profile"]["subject_brand"] == "傲雷校对版"
+    assert captured["content_profile"]["subject_model"] == "司令官2 Ultra 校对版"
 
     async with factory() as session:
         subtitle = (
@@ -4852,11 +5146,11 @@ async def test_run_edit_plan_repolishes_subtitles_with_llm_after_content_profile
                 select(SubtitleItem).where(SubtitleItem.job_id == job_id, SubtitleItem.item_index == 0)
             )
         ).scalar_one()
-        assert subtitle.text_final == "这次拿到一个新的手电筒。"
+        assert subtitle.text_final == "这次拿到1个新的手电筒。"
 
 
 @pytest.mark.asyncio
-async def test_run_edit_plan_falls_back_when_llm_polish_or_insert_slot_times_out(
+async def test_run_edit_plan_falls_back_when_insert_slot_times_out_without_rewriting_subtitles(
     db_engine,
     monkeypatch,
     tmp_path: Path,
@@ -4869,7 +5163,6 @@ async def test_run_edit_plan_falls_back_when_llm_polish_or_insert_slot_times_out
     audio_path = tmp_path / "audio.wav"
     audio_path.write_bytes(b"fake-audio")
     keep_segments = [{"type": "keep", "start_time": 0.0, "end_time": 12.0}]
-    polish_modes: list[bool] = []
     insert_modes: list[bool] = []
     saved_render_plan: dict[str, object] = {}
 
@@ -4931,7 +5224,6 @@ async def test_run_edit_plan_falls_back_when_llm_polish_or_insert_slot_times_out
         await session.commit()
 
     monkeypatch.setattr(steps_mod, "get_session_factory", lambda: factory)
-    monkeypatch.setattr(steps_mod, "_EDIT_PLAN_SUBTITLE_POLISH_TIMEOUT_SEC", 0.01)
     monkeypatch.setattr(steps_mod, "_EDIT_PLAN_INSERT_SLOT_TIMEOUT_SEC", 0.01)
 
     async def fake_resolve_storage_reference(*args, **kwargs):
@@ -4946,16 +5238,8 @@ async def test_run_edit_plan_falls_back_when_llm_polish_or_insert_slot_times_out
     async def fake_load_related_profile_subtitle_examples(*args, **kwargs):
         return []
 
-    def fake_build_subtitle_review_memory(**kwargs):
-        return {"mode": "formal_polish"}
-
-    async def fake_polish_subtitle_items(subtitle_items, **kwargs):
-        allow_llm = bool(kwargs["allow_llm"])
-        polish_modes.append(allow_llm)
-        if allow_llm:
-            await asyncio.sleep(0.05)
-        subtitle_items[0].text_final = "这次拿到一个新的手电筒。"
-        return 1
+    async def fake_polish_subtitle_items(*args, **kwargs):
+        raise AssertionError("edit_plan must not rewrite subtitles after review freeze")
 
     async def fake_save_editorial_timeline(*args, **kwargs):
         return SimpleNamespace(id=editorial_timeline_id, data_json={"segments": keep_segments}, otio_data=None)
@@ -4982,7 +5266,6 @@ async def test_run_edit_plan_falls_back_when_llm_polish_or_insert_slot_times_out
     monkeypatch.setattr(steps_mod, "load_content_profile_user_memory", fake_load_content_profile_user_memory)
     monkeypatch.setattr(steps_mod, "_load_recent_subtitle_examples", fake_load_recent_subtitle_examples)
     monkeypatch.setattr(steps_mod, "_load_related_profile_subtitle_examples", fake_load_related_profile_subtitle_examples)
-    monkeypatch.setattr(steps_mod, "build_subtitle_review_memory", fake_build_subtitle_review_memory)
     monkeypatch.setattr(steps_mod, "polish_subtitle_items", fake_polish_subtitle_items)
     monkeypatch.setattr(steps_mod, "build_edit_decision", lambda **kwargs: FakeDecision())
     monkeypatch.setattr(steps_mod, "save_editorial_timeline", fake_save_editorial_timeline)
@@ -5007,7 +5290,6 @@ async def test_run_edit_plan_falls_back_when_llm_polish_or_insert_slot_times_out
     result = await steps_mod.run_edit_plan(str(job_id))
 
     assert result["timeline_id"] == str(editorial_timeline_id)
-    assert polish_modes == [True, False]
     assert insert_modes == [True, False]
     assert saved_render_plan["insert"]["insert_after_sec"] == 9.0
 
@@ -5017,7 +5299,7 @@ async def test_run_edit_plan_falls_back_when_llm_polish_or_insert_slot_times_out
                 select(SubtitleItem).where(SubtitleItem.job_id == job_id, SubtitleItem.item_index == 0)
             )
         ).scalar_one()
-        assert subtitle.text_final == "这次拿到一个新的手电筒。"
+        assert subtitle.text_final == "这次拿到1个新的手电筒。"
 
 
 @pytest.mark.asyncio
@@ -5543,6 +5825,55 @@ async def test_run_platform_package_prefers_downstream_context_profile(
 
     assert captured["fact_sheet_content_profile"]["subject_brand"] == "傲雷"
     assert captured["generate_content_profile"]["subject_model"] == "司令官2Ultra"
+
+
+@pytest.mark.asyncio
+async def test_load_preferred_downstream_profile_prefers_newer_content_profile_final_over_stale_context(
+    db_engine,
+):
+    factory = async_sessionmaker(db_engine, expire_on_commit=False)
+    job_id = uuid.uuid4()
+    now = datetime.now(timezone.utc)
+
+    async with factory() as session:
+        session.add(
+            Artifact(
+                job_id=job_id,
+                artifact_type="downstream_context",
+                created_at=now - timedelta(minutes=5),
+                data_json={
+                    "resolved_profile": {
+                        "subject_brand": "狐蝠工业",
+                        "subject_model": "LEG-16 MKII",
+                        "video_theme": "狐蝠工业开箱对比评测",
+                    },
+                    "field_sources": {"subject_brand": "base_profile", "subject_model": "base_profile"},
+                    "manual_review_applied": False,
+                    "research_applied": False,
+                },
+            )
+        )
+        session.add(
+            Artifact(
+                job_id=job_id,
+                artifact_type="content_profile_final",
+                created_at=now,
+                data_json={
+                    "subject_brand": "狐蝠工业 FOXBAT",
+                    "subject_model": "蜜獾2代",
+                    "video_theme": "FOXBAT 蜜獾2代戒备款与黑绿款开箱对比，并对比 PSIGEAR 粗苯胸包",
+                },
+            )
+        )
+        await session.commit()
+
+    async with factory() as session:
+        artifact, profile = await _load_preferred_downstream_profile(session, job_id=job_id)
+
+    assert artifact is not None
+    assert artifact.artifact_type == "content_profile_final"
+    assert profile["subject_brand"] == "狐蝠工业 FOXBAT"
+    assert profile["subject_model"] == "蜜獾2代"
 
 
 @pytest.mark.asyncio

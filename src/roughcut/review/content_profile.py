@@ -36,6 +36,7 @@ from roughcut.review.content_profile_memory import summarize_content_profile_use
 from roughcut.review.content_profile_ocr import build_content_profile_ocr
 from roughcut.review.content_profile_candidates import build_identity_candidates
 from roughcut.review.content_profile_evidence import IdentityEvidenceBundle
+from roughcut.review.spoken_identity import canonicalize_spoken_identity_text
 from roughcut.review.content_profile_keywords import (
     _clean_line as _clean_line_keywords,
     _extract_query_support_terms as _extract_query_support_terms_keywords,
@@ -75,8 +76,8 @@ from roughcut.speech.postprocess import (
     normalize_display_text,
 )
 
-_CONTENT_PROFILE_INFER_CACHE_VERSION = "2026-04-09.infer.v35"
-_CONTENT_PROFILE_ENRICH_CACHE_VERSION = "2026-04-09.enrich.v36"
+_CONTENT_PROFILE_INFER_CACHE_VERSION = "2026-04-14.infer.v36"
+_CONTENT_PROFILE_ENRICH_CACHE_VERSION = "2026-04-14.enrich.v37"
 _INGESTIBLE_PRODUCT_SIGNALS = (
     "luckykiss",
     "kisspod",
@@ -97,6 +98,37 @@ _GEAR_STYLE_SIGNALS = (
     "装备",
     "莱德曼",
 )
+_SOURCE_BRAND_PREFIX_STOPWORDS = {
+    "年度",
+    "旗舰",
+    "旗舰级",
+    "旗舰款",
+    "新品",
+    "新款",
+    "新版",
+    "系列",
+    "官方",
+    "品牌",
+    "开箱",
+    "评测",
+    "测评",
+    "详评",
+    "体验",
+    "教程",
+    "横版",
+    "竖版",
+    "主片",
+    "素板",
+    "封面",
+    "成片",
+    "预览",
+    "特效",
+    "数字",
+    "字幕",
+    "白铜",
+    "铜雕",
+    "雕像",
+}
 
 _CONTENT_KIND_DEFAULT_SUBJECT_TYPE = {
     "tutorial": "录屏教学",
@@ -606,6 +638,11 @@ def _normalize_source_context_payload(value: Any) -> dict[str, Any]:
     video_description = str(payload.get("video_description") or "").strip()
     if len(video_description) > 4000:
         video_description = video_description[:4000]
+    merged_source_names = [
+        str(item).strip()
+        for item in (payload.get("merged_source_names") or payload.get("related_source_names") or [])
+        if str(item).strip()
+    ]
     resolved_feedback = dict(payload.get("resolved_feedback") or {}) if isinstance(payload.get("resolved_feedback"), dict) else {}
     related_profiles: list[dict[str, Any]] = []
     for item in payload.get("related_profiles") or payload.get("adjacent_profiles") or []:
@@ -650,11 +687,228 @@ def _normalize_source_context_payload(value: Any) -> dict[str, Any]:
     normalized: dict[str, Any] = {}
     if video_description:
         normalized["video_description"] = video_description
+    if merged_source_names:
+        normalized["merged_source_names"] = merged_source_names[:12]
     if resolved_feedback:
         normalized["resolved_feedback"] = resolved_feedback
     if related_profiles:
         normalized["related_profiles"] = related_profiles[:4]
     return normalized
+
+
+def _normalize_source_context_filename_hint(value: Any) -> str:
+    stem = Path(str(value or "").strip()).stem
+    if not stem:
+        return ""
+    stem = re.sub(r"^(?:IMG|VID|DSC|PXL|CIMG|MVIMG)[-_]?\d+(?:[_-]\d+)*", "", stem, flags=re.IGNORECASE)
+    stem = re.sub(r"^\d{8}(?:[-_]\d{6,})?", "", stem)
+    stem = re.sub(r"^[\s._-]+", "", stem)
+    stem = re.sub(r"\s+", " ", stem).strip(" _-")
+    if not _is_informative_source_hint(stem):
+        return ""
+    return stem
+
+
+def _source_context_filename_entries(source_context: dict[str, Any] | None) -> list[str]:
+    payload = _normalize_source_context_payload(source_context)
+    entries: list[str] = []
+    seen: set[str] = set()
+
+    def append(value: Any) -> None:
+        text = _normalize_source_context_filename_hint(value)
+        normalized = _normalize_profile_value(text)
+        if not text or not normalized or normalized in seen:
+            return
+        seen.add(normalized)
+        entries.append(text)
+
+    append(payload.get("source_name"))
+    for item in payload.get("merged_source_names") or []:
+        append(item)
+    return entries[:12]
+
+
+def _source_context_description_entries(source_context: dict[str, Any] | None) -> list[str]:
+    payload = _normalize_source_context_payload(source_context)
+    video_description = str(payload.get("video_description") or "").strip()
+    if not video_description:
+        return []
+    text = re.sub(r"^任务说明依据文件名[:：]\s*", "", video_description)
+    for marker in ("固定要求：", "审核依据："):
+        if marker in text:
+            text = text.split(marker, 1)[0].strip("；;，,。 ")
+    text = re.sub(r"\s+", " ", text).strip()
+    return [text] if _is_informative_source_hint(text) else []
+
+
+def _merge_source_context_seed_hints(
+    target: dict[str, Any],
+    seed: dict[str, Any] | None,
+) -> None:
+    candidate = seed if isinstance(seed, dict) else {}
+    for field_name in ("subject_brand", "subject_model", "subject_type", "video_theme"):
+        for value in _hint_values(candidate, field_name):
+            _append_hint_candidate(target, field_name, value)
+        if not str(target.get(field_name) or "").strip():
+            primary = _hint_primary_value(candidate, field_name)
+            if primary:
+                target[field_name] = primary
+    search_queries = [
+        str(item).strip()
+        for item in (candidate.get("search_queries") or [])
+        if str(item).strip()
+    ]
+    if search_queries:
+        existing = [
+            str(item).strip()
+            for item in (target.get("search_queries") or [])
+            if str(item).strip()
+        ]
+        normalized_existing = {_normalize_profile_value(item) for item in existing}
+        for query in search_queries:
+            normalized = _normalize_profile_value(query)
+            if normalized and normalized not in normalized_existing:
+                existing.append(query)
+                normalized_existing.add(normalized)
+        if existing:
+            target["search_queries"] = existing[:8]
+
+
+def _build_source_context_derived_hints(source_context: dict[str, Any] | None) -> dict[str, Any]:
+    payload = _normalize_source_context_payload(source_context)
+    if not payload:
+        return {}
+    derived: dict[str, Any] = {}
+    entries = _source_context_filename_entries(payload)
+    if entries:
+        derived["filename_entries"] = entries
+        derived["related_source_names"] = list(entries[:3])
+        for entry in entries:
+            _merge_source_context_seed_hints(derived, _seed_profile_from_text(entry))
+    for entry in _source_context_description_entries(payload):
+        _merge_source_context_seed_hints(derived, _seed_profile_from_text(entry))
+    return derived
+
+
+def _source_context_has_editorial_brief(source_context: dict[str, Any] | None) -> bool:
+    payload = _normalize_source_context_payload(source_context)
+    if str(payload.get("video_description") or "").strip():
+        return True
+    return bool(_source_context_filename_entries(payload))
+
+
+def _source_name_has_editorial_brief(source_name: str | None) -> bool:
+    return bool(_normalize_source_context_filename_hint(source_name))
+
+
+def _source_context_supports_identity(
+    source_context: dict[str, Any] | None,
+    *,
+    brand: str = "",
+    model: str = "",
+) -> bool:
+    derived = _build_source_context_derived_hints(source_context)
+    if not derived:
+        return False
+    brand_norm = _normalize_profile_value(brand)
+    model_norm = _normalize_profile_value(model)
+    candidate_brand_norms = {_normalize_profile_value(item) for item in _hint_values(derived, "subject_brand")}
+    candidate_model_norms = {_normalize_profile_value(item) for item in _hint_values(derived, "subject_model")}
+    if model_norm:
+        if model_norm not in candidate_model_norms:
+            return False
+        if not brand_norm:
+            return True
+        if brand_norm in candidate_brand_norms:
+            return True
+        mapped_brand = _normalize_profile_value(_mapped_brand_for_model(model))
+        return bool(mapped_brand and mapped_brand == brand_norm)
+    if brand_norm and brand_norm in candidate_brand_norms:
+        return True
+    return False
+
+
+def _source_name_supports_identity(
+    source_name: str | None,
+    *,
+    brand: str = "",
+    model: str = "",
+) -> bool:
+    source_hint = _normalize_source_context_filename_hint(source_name)
+    if not source_hint:
+        return False
+    normalized_hint = _normalize_profile_value(source_hint)
+    brand_norm = _normalize_profile_value(brand)
+    model_norm = _normalize_profile_value(model)
+    if model_norm and model_norm not in normalized_hint:
+        return False
+    if brand_norm and brand_norm in normalized_hint:
+        return True
+    mapped_brand = _normalize_profile_value(_mapped_brand_for_model(model))
+    if brand_norm and mapped_brand and mapped_brand == brand_norm:
+        return True
+    return bool(model_norm or brand_norm)
+
+
+def _is_generic_source_brand_prefix(value: str) -> bool:
+    candidate = str(value or "").strip()
+    if not candidate:
+        return True
+    if candidate in _SOURCE_BRAND_PREFIX_STOPWORDS:
+        return True
+    if any(candidate.startswith(prefix) for prefix in _SOURCE_BRAND_PREFIX_STOPWORDS):
+        return True
+    return False
+
+
+def _extract_source_brand_prefix_candidates(source_name: str) -> list[str]:
+    stem = _normalize_source_context_filename_hint(source_name)
+    if not stem:
+        return []
+    candidates: list[str] = []
+    seen: set[str] = set()
+    for chunk in re.findall(r"[\u4e00-\u9fff]{2,24}", stem):
+        prefix_candidates = [chunk] if len(chunk) <= 4 else [chunk[:4], chunk[:3], chunk[:2]]
+        for candidate in prefix_candidates:
+            if not candidate or candidate in seen or _is_generic_source_brand_prefix(candidate):
+                continue
+            seen.add(candidate)
+            candidates.append(candidate)
+    return candidates
+
+
+def _build_source_visual_overlap_hints(*, source_name: str, visible_text: str) -> dict[str, Any]:
+    source_candidates = _extract_source_brand_prefix_candidates(source_name)
+    visible = str(visible_text or "").strip()
+    normalized_visible = _normalize_profile_value(visible)
+    if not source_candidates or not normalized_visible:
+        return {}
+    matched = [
+        candidate
+        for candidate in source_candidates
+        if _normalize_profile_value(candidate) in normalized_visible
+    ]
+    if not matched:
+        return {}
+    return {
+        "subject_brand": max(matched, key=len),
+        "visible_text": visible,
+    }
+
+
+def _is_filename_dependent_review_reason(reason: str) -> bool:
+    text = str(reason or "").strip()
+    if not text:
+        return False
+    tokens = (
+        "文件名hint推断",
+        "缺乏视觉证据",
+        "建议补充原视频画面帧截图",
+        "建议补充完整字幕转写",
+        "semantic_facts全字段为空",
+        "依赖文件名字段",
+    )
+    return any(token in text for token in tokens)
 
 
 def build_content_profile_cache_fingerprint(
@@ -665,6 +919,7 @@ def build_content_profile_cache_fingerprint(
     channel_profile: str | None = None,
     transcript_excerpt: str,
     subtitle_digest: str | None = None,
+    transcript_digest: str | None = None,
     glossary_terms: list[dict[str, Any]] | None = None,
     user_memory: dict[str, Any] | None = None,
     include_research: bool,
@@ -697,6 +952,7 @@ def build_content_profile_cache_fingerprint(
         "workflow_template": str(workflow_template or "").strip(),
         "transcript_excerpt_sha256": digest_payload(str(transcript_excerpt or "").strip()),
         "subtitle_digest": str(subtitle_digest or "").strip(),
+        "transcript_digest": str(transcript_digest or "").strip(),
         "glossary_terms_sha256": digest_payload(normalized_glossary),
         "glossary_term_count": len(normalized_glossary),
         "user_memory_sha256": digest_payload(normalized_memory),
@@ -707,15 +963,34 @@ def build_content_profile_cache_fingerprint(
     }
 
 
+def _excerpt_item_text(item: dict[str, Any]) -> str:
+    return str(
+        item.get("text_final")
+        or item.get("text_norm")
+        or item.get("text_raw")
+        or item.get("text")
+        or item.get("raw_text")
+        or ""
+    ).strip()
+
+
+def _excerpt_item_start(item: dict[str, Any]) -> float:
+    return float(item.get("start_time", item.get("start", 0.0)) or 0.0)
+
+
+def _excerpt_item_end(item: dict[str, Any]) -> float:
+    return float(item.get("end_time", item.get("end", 0.0)) or 0.0)
+
+
 def build_transcript_excerpt(subtitle_items: list[dict], *, max_items: int = 36, max_chars: int = 1400) -> str:
     selected = _select_excerpt_items(subtitle_items, max_items=max_items)
     lines: list[str] = []
     total = 0
     for item in selected:
-        text = item.get("text_final") or item.get("text_norm") or item.get("text_raw") or ""
+        text = _excerpt_item_text(item)
         if not text:
             continue
-        line = f"[{item.get('start_time', 0):.1f}-{item.get('end_time', 0):.1f}] {text}"
+        line = f"[{_excerpt_item_start(item):.1f}-{_excerpt_item_end(item):.1f}] {text}"
         total += len(line)
         if total > max_chars:
             break
@@ -1013,6 +1288,11 @@ def assess_content_profile_automation(
         for item in subtitle_items
         if _clean_line(item.get("text_final") or item.get("text_norm") or item.get("text_raw") or "")
     )
+    source_context = _normalize_source_context_payload((profile or {}).get("source_context"))
+    has_editorial_source_context = _source_context_has_editorial_brief(source_context)
+    resolved_source_name = str(source_name or profile.get("source_name") or "").strip()
+    has_editorial_source_name = _source_name_has_editorial_brief(resolved_source_name)
+    has_editorial_review_basis = has_editorial_source_context or has_editorial_source_name
     preset_name = _workflow_template_name(profile)
     product_like_presets = {"unboxing_standard", "edc_tactical"}
 
@@ -1088,6 +1368,9 @@ def assess_content_profile_automation(
     if isinstance(evidence, list) and evidence:
         score += 0.08
         reasons.append("已有外部证据用于交叉校验")
+    elif has_editorial_review_basis:
+        score += 0.06
+        reasons.append("已提供任务说明作为审核依据")
     else:
         review_reasons.append("缺少外部证据")
 
@@ -1143,7 +1426,15 @@ def assess_content_profile_automation(
     ]
     if bool(content_understanding.get("needs_review")):
         if llm_review_reasons:
-            blocking_reasons.extend(llm_review_reasons)
+            if has_editorial_review_basis:
+                blocking_reasons.extend(
+                    reason for reason in llm_review_reasons if not _is_filename_dependent_review_reason(reason)
+                )
+                for reason in llm_review_reasons:
+                    if _is_filename_dependent_review_reason(reason) and reason not in review_reasons:
+                        review_reasons.append(reason)
+            else:
+                blocking_reasons.extend(llm_review_reasons)
         else:
             blocking_reasons.append("LLM 内容理解结果要求人工复核")
     else:
@@ -1430,6 +1721,16 @@ def _assess_identity_review_requirement(
         glossary_terms=glossary_terms,
         source_name=source_name,
     )
+    trusted_source_context_identity = _source_context_supports_identity(
+        (profile or {}).get("source_context"),
+        brand=brand,
+        model=model,
+    )
+    trusted_source_name_identity = _source_name_supports_identity(
+        source_name,
+        brand=brand,
+        model=model,
+    )
     related_identity_matches = [
         dict(item)
         for item in (evidence_bundle.get("matched_related_profile_sources") or [])
@@ -1450,13 +1751,14 @@ def _assess_identity_review_requirement(
     has_external_evidence = "evidence" in support_sources
     has_related_manual_review = "related_manual_review" in support_sources
     evidence_strength = "strong" if has_external_evidence or has_related_manual_review or support_count >= 2 else "weak"
-    required = first_seen_brand or first_seen_model
+    trusted_editorial_identity = trusted_source_context_identity or trusted_source_name_identity
+    required = (first_seen_brand or first_seen_model) and not trusted_editorial_identity
     current_source_support = {
         label
         for label in support_sources
-        if label in {"transcript", "transcript_labels", "source_name", "ocr", "visible_text"}
+        if label in {"transcript", "transcript_labels", "source_name", "source_context", "ocr", "visible_text"}
     }
-    identity_bearing_non_transcript_support = current_source_support & {"source_name", "ocr", "visible_text"}
+    identity_bearing_non_transcript_support = current_source_support & {"source_name", "source_context", "ocr", "visible_text"}
     has_multisource_current_evidence = len(current_source_support) >= 2 and bool(
         identity_bearing_non_transcript_support
     )
@@ -1464,7 +1766,7 @@ def _assess_identity_review_requirement(
     # manual-confirmation cue for a first-seen product identity. We only relax
     # the conservative summary when the current clip itself provides multiple
     # identity-bearing signals.
-    conservative_summary = required and not has_multisource_current_evidence
+    conservative_summary = required and not (has_multisource_current_evidence or trusted_editorial_identity)
 
     reason = ""
     if required and conservative_summary:
@@ -1598,6 +1900,12 @@ def _collect_identity_support_sources(evidence_bundle: dict[str, Any] | None) ->
     for label, hits in source_flags:
         if hits and label not in support_sources:
             support_sources.append(label)
+    source_context_hints = dict(bundle.get("source_context_hints") or {}) if isinstance(bundle.get("source_context_hints"), dict) else {}
+    if any(
+        _hint_values(source_context_hints, field_name)
+        for field_name in ("subject_brand", "subject_model", "subject_type", "video_theme")
+    ) or list(source_context_hints.get("filename_entries") or []):
+        support_sources.append("source_context")
     related_profiles = [
         dict(item)
         for item in (bundle.get("matched_related_profile_sources") or [])
@@ -2017,6 +2325,15 @@ def _resolve_profile_identity(
         if _is_informative_source_hint(Path(source_name).stem)
         else {}
     )
+    ocr_hints = _profile_ocr_hints(candidate_profile, glossary_terms=glossary_terms)
+    source_visual_overlap_hints = _build_source_visual_overlap_hints(
+        source_name=source_name,
+        visible_text=(
+            str(ocr_hints.get("visible_text") or "").strip()
+            or str(raw_visual_hints.get("visible_text") or "").strip()
+            or str(candidate_profile.get("visible_text") or "").strip()
+        ),
+    )
     memory_confirmed_hints = _select_confirmed_entity_from_user_memory(
         transcript_excerpt,
         user_memory=user_memory,
@@ -2030,6 +2347,7 @@ def _resolve_profile_identity(
         transcript_source_labels=_profile_transcript_source_labels(candidate_profile),
         source_hints=source_hints,
         source_context_hints=_source_context_candidate_hints(candidate_profile.get("source_context")),
+        source_visual_overlap_hints=source_visual_overlap_hints,
         visual_cluster_hints={
             "subject_brand": str(raw_visual_hints.get("subject_brand") or "").strip(),
             "subject_model": str(raw_visual_hints.get("subject_model") or "").strip(),
@@ -2038,7 +2356,7 @@ def _resolve_profile_identity(
         },
         visual_hints={},
         visible_text_hints=visible_text_hints,
-        ocr_hints=_profile_ocr_hints(candidate_profile, glossary_terms=glossary_terms),
+        ocr_hints=ocr_hints,
         memory_confirmed_hints=memory_confirmed_hints,
         graph_confirmed_entities=_graph_confirmed_entities(user_memory)[:6],
         profile_identity={
@@ -2213,6 +2531,16 @@ def _sanitize_profile_identity(
     if current_profile_model and verified_model and _normalize_profile_value(current_profile_model) != _normalize_profile_value(verified_model):
         profile_identity_conflict_detected = True
 
+    if (
+        current_profile_model
+        and verified_model
+        and _identity_values_compatible(current_profile_model, verified_model)
+        and len(current_profile_model) > len(verified_model)
+    ):
+        verified_model = current_profile_model
+    if verified_model == "FXX1":
+        verified_model = "FXX1小副包"
+
     if not verified_brand:
         sanitized["subject_brand"] = ""
     else:
@@ -2280,6 +2608,15 @@ def _sanitize_profile_identity(
                 brand=str(sanitized.get("subject_brand") or ""),
                 model=str(sanitized.get("subject_model") or ""),
                 glossary_terms=glossary_terms,
+            ):
+                sanitized[key] = ""
+                continue
+            if value and _text_mentions_conflicting_previous_identity(
+                value,
+                previous_brand=current_profile_brand,
+                previous_model=current_profile_model,
+                verified_brand=str(sanitized.get("subject_brand") or ""),
+                verified_model=str(sanitized.get("subject_model") or ""),
             ):
                 sanitized[key] = ""
 
@@ -2401,6 +2738,386 @@ def _profile_ocr_hints(
         for value in _hint_values(seeded, "subject_type"):
             _append_hint_candidate(hints, "subject_type", value)
     return hints
+
+
+def _dedupe_text_entries(values: list[Any] | tuple[Any, ...] | None) -> list[str]:
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for item in values or []:
+        text = str(item or "").strip()
+        normalized = _normalize_profile_value(text)
+        if not text or not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        deduped.append(text)
+    return deduped
+
+
+def extract_source_identity_constraints(
+    profile: dict[str, Any] | None,
+    *,
+    source_name: str = "",
+) -> dict[str, Any]:
+    candidate = dict(profile or {})
+    source_context = _normalize_source_context_payload(candidate.get("source_context"))
+    effective_source_context = dict(source_context)
+    merged_source_names = [
+        str(item).strip()
+        for item in (effective_source_context.get("merged_source_names") or [])
+        if str(item).strip()
+    ]
+    normalized_source_name = str(source_name or "").strip()
+    if normalized_source_name and normalized_source_name not in merged_source_names:
+        effective_source_context["merged_source_names"] = [normalized_source_name, *merged_source_names][:12]
+    if not effective_source_context:
+        return {}
+
+    source_hints = _source_context_candidate_hints(effective_source_context)
+    resolved_feedback = (
+        dict(effective_source_context.get("resolved_feedback") or {})
+        if isinstance(effective_source_context.get("resolved_feedback"), dict)
+        else {}
+    )
+    constraints: dict[str, Any] = {
+        "authoritative": bool(
+            str(effective_source_context.get("video_description") or "").strip()
+            or list(source_hints.get("filename_entries") or [])
+        ),
+        "review_basis": "source_context" if source_context else "source_name",
+        "video_description": str(effective_source_context.get("video_description") or "").strip(),
+        "filename_entries": list(source_hints.get("filename_entries") or []),
+    }
+    for field_name in ("subject_brand", "subject_model", "subject_type", "video_theme"):
+        values = _dedupe_text_entries(
+            [
+                resolved_feedback.get(field_name),
+                *_hint_values(source_hints, field_name),
+            ]
+        )
+        if not values:
+            continue
+        constraints[field_name] = values[0]
+        constraints[_hint_candidate_key(field_name)] = values
+
+    search_queries = _dedupe_text_entries(
+        [
+            *(resolved_feedback.get("search_queries") or []),
+            *(source_hints.get("search_queries") or []),
+        ]
+    )
+    if search_queries:
+        constraints["search_queries"] = search_queries[:8]
+
+    if not any(
+        constraints.get(field_name)
+        for field_name in ("subject_brand", "subject_model", "subject_type", "video_theme")
+    ):
+        return {}
+    return constraints
+
+
+def apply_source_identity_constraints(
+    profile: dict[str, Any] | None,
+    *,
+    source_name: str = "",
+    transcript_excerpt: str = "",
+) -> dict[str, Any]:
+    constrained = dict(profile or {})
+    constraints = extract_source_identity_constraints(constrained, source_name=source_name)
+    if not constraints:
+        return constrained
+
+    constrained["source_identity_constraints"] = dict(constraints)
+    manual_feedback = (
+        dict(constrained.get("resolved_review_user_feedback") or {})
+        if isinstance(constrained.get("resolved_review_user_feedback"), dict)
+        else {}
+    )
+    manual_override_fields = {
+        field_name
+        for field_name in ("subject_brand", "subject_model", "subject_type", "video_theme")
+        if str(manual_feedback.get(field_name) or "").strip()
+    }
+
+    changed_identity = False
+    for field_name in ("subject_brand", "subject_model", "subject_type", "video_theme"):
+        if field_name in manual_override_fields:
+            continue
+        constrained_value = str(constraints.get(field_name) or "").strip()
+        if not constrained_value:
+            continue
+        if field_name == "video_theme":
+            current_theme = str(constrained.get("video_theme") or "").strip()
+            current_brand = str(constrained.get("subject_brand") or "").strip()
+            current_model = str(constrained.get("subject_model") or "").strip()
+            if current_theme and _is_specific_video_theme_for_context(
+                current_theme,
+                preset_name=_workflow_template_name(constrained),
+                content_kind=_content_kind_name(constrained),
+                subject_domain=str(constrained.get("subject_domain") or ""),
+            ) and not _text_conflicts_with_verified_identity(
+                current_theme,
+                brand=current_brand,
+                model=current_model,
+                glossary_terms=None,
+            ):
+                continue
+        if str(constrained.get(field_name) or "").strip() != constrained_value:
+            constrained[field_name] = constrained_value
+            changed_identity = True
+
+    merged_queries = _dedupe_text_entries(
+        [
+            *(constraints.get("search_queries") or []),
+            *(constrained.get("search_queries") or []),
+        ]
+    )
+    if merged_queries:
+        constrained["search_queries"] = merged_queries[:8]
+
+    if not str(constrained.get("subject_domain") or "").strip():
+        inferred_subject_domain = _subject_domain_from_subject_type(str(constrained.get("subject_type") or "").strip())
+        if inferred_subject_domain:
+            constrained["subject_domain"] = inferred_subject_domain
+
+    brand = str(constrained.get("subject_brand") or "").strip()
+    model = str(constrained.get("subject_model") or "").strip()
+    current_theme = str(constrained.get("video_theme") or "").strip()
+    if (
+        not current_theme
+        or _text_conflicts_with_verified_identity(
+            current_theme,
+            brand=brand,
+            model=model,
+            glossary_terms=None,
+        )
+    ):
+        rebuilt_theme = _build_identity_driven_video_theme(constrained, transcript_excerpt=transcript_excerpt)
+        if rebuilt_theme:
+            constrained["video_theme"] = rebuilt_theme
+
+    current_summary = str(constrained.get("summary") or "").strip()
+    summary_needs_refresh = (
+        changed_identity
+        or not current_summary
+        or _is_generic_profile_summary(current_summary)
+        or _text_conflicts_with_verified_identity(
+            current_summary,
+            brand=brand,
+            model=model,
+            glossary_terms=None,
+        )
+        or not any(
+            _text_matches_identity_value(
+                value,
+                normalized_text=_normalize_profile_value(current_summary),
+                glossary_terms=None,
+            )
+            for value in (brand, model)
+            if value
+        )
+    )
+    if summary_needs_refresh:
+        constrained["summary"] = _build_profile_summary(constrained)
+
+    _ensure_search_queries(constrained, source_name, transcript_excerpt=transcript_excerpt)
+    constrained["keywords"] = _build_review_keywords(constrained)
+
+    preset = select_workflow_template(
+        workflow_template=_workflow_template_name(constrained) or constrained.get("workflow_template"),
+        content_kind=_content_kind_name(constrained),
+        subject_domain=str(constrained.get("subject_domain") or ""),
+        subject_model=str(constrained.get("subject_model") or ""),
+        subject_type=str(constrained.get("subject_type") or ""),
+        transcript_hint=transcript_excerpt,
+    )
+    if _is_generic_engagement_question(str(constrained.get("engagement_question") or "")):
+        constrained["engagement_question"] = _default_engagement_question(preset)
+    constrained["cover_title"] = build_cover_title(constrained, preset)
+    return constrained
+
+
+def _prefer_content_understanding_video_theme(
+    profile: dict[str, Any],
+    *,
+    transcript_excerpt: str,
+    confirmed_fields: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    preferred = dict(profile or {})
+    confirmed = confirmed_fields or {}
+    if "video_theme" in confirmed:
+        return preferred
+
+    content_understanding = (
+        dict(preferred.get("content_understanding") or {})
+        if isinstance(preferred.get("content_understanding"), dict)
+        else {}
+    )
+    understanding_theme = str(content_understanding.get("video_theme") or "").strip()
+    if not understanding_theme:
+        return preferred
+
+    preset_name = _workflow_template_name(preferred)
+    content_kind = _content_kind_name(preferred)
+    subject_domain = str(preferred.get("subject_domain") or "").strip()
+    if not _is_specific_video_theme_for_context(
+        understanding_theme,
+        preset_name=preset_name,
+        content_kind=content_kind,
+        subject_domain=subject_domain,
+    ):
+        return preferred
+
+    brand = str(preferred.get("subject_brand") or "").strip()
+    model = str(preferred.get("subject_model") or "").strip()
+    if _text_conflicts_with_verified_identity(
+        understanding_theme,
+        brand=brand,
+        model=model,
+        glossary_terms=None,
+    ):
+        return preferred
+
+    current_theme = str(preferred.get("video_theme") or "").strip()
+    if not current_theme:
+        preferred["video_theme"] = understanding_theme
+        return preferred
+    if _normalize_profile_value(current_theme) == _normalize_profile_value(understanding_theme):
+        return preferred
+
+    detail_terms = _content_understanding_detail_terms(preferred)
+    current_detail_coverage = _detail_term_coverage_score(current_theme, detail_terms)
+    understanding_detail_coverage = _detail_term_coverage_score(understanding_theme, detail_terms)
+    if understanding_detail_coverage > current_detail_coverage:
+        preferred["video_theme"] = understanding_theme
+        return preferred
+
+    rebuilt_theme = _build_identity_driven_video_theme(preferred, transcript_excerpt=transcript_excerpt)
+    extracted_theme = ""
+    identity_extraction = preferred.get("identity_extraction")
+    if isinstance(identity_extraction, dict):
+        resolved = identity_extraction.get("resolved")
+        if isinstance(resolved, dict):
+            extracted_theme = str(resolved.get("video_theme") or "").strip()
+    if (
+        extracted_theme
+        and _normalize_profile_value(current_theme) == _normalize_profile_value(extracted_theme)
+    ):
+        preferred["video_theme"] = understanding_theme
+        return preferred
+    if _normalize_profile_value(current_theme) == _normalize_profile_value(rebuilt_theme):
+        preferred["video_theme"] = understanding_theme
+        return preferred
+    if not _is_specific_video_theme_for_context(
+        current_theme,
+        preset_name=preset_name,
+        content_kind=content_kind,
+        subject_domain=subject_domain,
+    ):
+        preferred["video_theme"] = understanding_theme
+        return preferred
+    if _text_conflicts_with_verified_identity(
+        current_theme,
+        brand=brand,
+        model=model,
+        glossary_terms=None,
+    ):
+        preferred["video_theme"] = understanding_theme
+    return preferred
+
+
+def _prefer_content_understanding_summary(
+    profile: dict[str, Any],
+    *,
+    confirmed_fields: dict[str, str] | None = None,
+    allow_override: bool = True,
+) -> dict[str, Any]:
+    preferred = dict(profile or {})
+    confirmed = confirmed_fields or {}
+    if "summary" in confirmed:
+        return preferred
+
+    content_understanding = (
+        dict(preferred.get("content_understanding") or {})
+        if isinstance(preferred.get("content_understanding"), dict)
+        else {}
+    )
+    understanding_summary = str(content_understanding.get("summary") or "").strip()
+    if not understanding_summary:
+        return preferred
+
+    brand = str(preferred.get("subject_brand") or "").strip()
+    model = str(preferred.get("subject_model") or "").strip()
+    if _text_conflicts_with_verified_identity(
+        understanding_summary,
+        brand=brand,
+        model=model,
+        glossary_terms=None,
+    ):
+        return preferred
+
+    current_summary = str(preferred.get("summary") or "").strip()
+    detail_terms = _content_understanding_detail_terms(preferred)
+    current_detail_coverage = _detail_term_coverage_score(current_summary, detail_terms)
+    understanding_detail_coverage = _detail_term_coverage_score(understanding_summary, detail_terms)
+
+    if understanding_detail_coverage > current_detail_coverage:
+        preferred["summary"] = understanding_summary
+        return preferred
+    if current_summary and not allow_override and not _is_generic_profile_summary(current_summary):
+        return preferred
+    preferred["summary"] = understanding_summary
+    return preferred
+
+
+def _content_understanding_detail_terms(profile: dict[str, Any]) -> list[str]:
+    content_understanding = (
+        dict(profile.get("content_understanding") or {})
+        if isinstance(profile.get("content_understanding"), dict)
+        else {}
+    )
+    semantic_facts = (
+        dict(content_understanding.get("semantic_facts") or {})
+        if isinstance(content_understanding.get("semantic_facts"), dict)
+        else {}
+    )
+    terms: list[str] = []
+    for key in ("aspect_candidates", "component_candidates", "entity_candidates"):
+        for item in list(semantic_facts.get(key) or [])[:12]:
+            value = str(item or "").strip()
+            if value:
+                terms.append(value)
+    for span in list(content_understanding.get("evidence_spans") or [])[:8]:
+        if not isinstance(span, dict):
+            continue
+        value = str(span.get("text") or "").strip()
+        if value:
+            terms.extend(_extract_query_support_terms_keywords(value))
+    filtered: list[str] = []
+    seen: set[str] = set()
+    for item in terms:
+        normalized = _normalize_profile_value(item)
+        if (
+            not normalized
+            or normalized in seen
+            or normalized in {"开箱", "实测", "体验", "教程", "功能", "产品", "视频", "内容", "日常"}
+            or len(normalized) < 2
+        ):
+            continue
+        seen.add(normalized)
+        filtered.append(str(item).strip())
+    return filtered[:12]
+
+
+def _detail_term_coverage_score(text: str, detail_terms: list[str]) -> int:
+    normalized_text = _normalize_profile_value(text)
+    if not normalized_text:
+        return 0
+    return sum(
+        1
+        for term in detail_terms
+        if (normalized := _normalize_profile_value(term)) and normalized in normalized_text
+    )
 
 
 def _graph_confirmed_entities(user_memory: dict[str, Any] | None) -> list[dict[str, Any]]:
@@ -2557,7 +3274,7 @@ def _text_conflicts_with_verified_identity(
         normalized_known_brand = _normalize_profile_value(known_brand)
         if (
             normalized_known_brand
-            and normalized_known_brand != normalized_brand
+            and not _identity_values_compatible(known_brand, brand)
             and normalized_known_brand in normalized_text
         ):
             return True
@@ -2572,6 +3289,32 @@ def _text_conflicts_with_verified_identity(
     effective_brand = seeded_brand or brand
     if mapped_brand and effective_brand and not _identity_values_compatible(effective_brand, mapped_brand):
         return True
+    return False
+
+
+def _text_mentions_conflicting_previous_identity(
+    text: str,
+    *,
+    previous_brand: str,
+    previous_model: str,
+    verified_brand: str,
+    verified_model: str,
+) -> bool:
+    normalized_text = _normalize_profile_value(text)
+    if not normalized_text:
+        return False
+    for previous, verified in (
+        (previous_brand, verified_brand),
+        (previous_model, verified_model),
+    ):
+        previous_normalized = _normalize_profile_value(previous)
+        verified_normalized = _normalize_profile_value(verified)
+        if (
+            previous_normalized
+            and previous_normalized in normalized_text
+            and previous_normalized != verified_normalized
+        ):
+            return True
     return False
 
 
@@ -2670,6 +3413,7 @@ async def infer_content_profile(
     source_path: Path,
     source_name: str,
     subtitle_items: list[dict],
+    transcript_items: list[dict[str, Any]] | None = None,
     workflow_template: str | None = None,
     channel_profile: str | None = None,
     user_memory: dict[str, Any] | None = None,
@@ -2680,7 +3424,7 @@ async def infer_content_profile(
 ) -> dict[str, Any]:
     if workflow_template is None and channel_profile is not None:
         workflow_template = channel_profile
-    transcript_excerpt = build_transcript_excerpt(subtitle_items)
+    transcript_excerpt = build_transcript_excerpt(list(transcript_items or subtitle_items))
     initial_profile: dict[str, Any] = {
         "copy_style": str(copy_style or "attention_grabbing").strip() or "attention_grabbing",
     }
@@ -2783,6 +3527,16 @@ async def infer_content_profile(
     normalized_source_context = _normalize_source_context_payload(source_context)
     if normalized_source_context:
         profile["source_context"] = normalized_source_context
+    profile = apply_source_identity_constraints(
+        profile,
+        source_name=source_name,
+        transcript_excerpt=transcript_excerpt,
+    )
+    profile = _prefer_content_understanding_video_theme(
+        profile,
+        transcript_excerpt=transcript_excerpt,
+    )
+    profile = _prefer_content_understanding_summary(profile)
     _ensure_search_queries(profile, source_name, transcript_excerpt=transcript_excerpt)
     _ensure_review_fields_not_empty(profile, source_name=source_name, transcript_excerpt=transcript_excerpt)
     profile["keywords"] = _build_review_keywords(profile)
@@ -3388,6 +4142,7 @@ async def enrich_content_profile(
     channel_profile: str | None = None,
     transcript_excerpt: str,
     subtitle_items: list[dict[str, Any]] | None = None,
+    transcript_items: list[dict[str, Any]] | None = None,
     glossary_terms: list[dict[str, Any]] | None = None,
     user_memory: dict[str, Any] | None = None,
     include_research: bool = True,
@@ -3395,6 +4150,8 @@ async def enrich_content_profile(
     if workflow_template is None and channel_profile is not None:
         workflow_template = channel_profile
     enriched = dict(profile or {})
+    transcript_items = transcript_items or []
+    transcript_text = build_transcript_excerpt(transcript_items, max_items=120, max_chars=6000) if transcript_items else ""
     confirmed_fields = _extract_confirmed_profile_fields(enriched)
     _apply_confirmed_profile_fields(enriched, confirmed_fields)
     memory_hints = _seed_profile_from_user_memory(
@@ -3559,7 +4316,7 @@ async def enrich_content_profile(
                 profile=enriched,
                 source_name=source_name,
                 transcript_excerpt=transcript_excerpt,
-                transcript_text=build_transcript_for_packaging(subtitle_items or [], max_chars=6000) or transcript_excerpt,
+                transcript_text=transcript_text or build_transcript_for_packaging(subtitle_items or [], max_chars=6000) or transcript_excerpt,
                 evidence=evidence,
             )
             video_type = normalize_video_type(str(review_payload.get("video_type") or "").strip())
@@ -3639,6 +4396,21 @@ async def enrich_content_profile(
             glossary_terms=glossary_terms,
             source_name=source_name,
         )
+    enriched = apply_source_identity_constraints(
+        enriched,
+        source_name=source_name,
+        transcript_excerpt=transcript_excerpt,
+    )
+    enriched = _prefer_content_understanding_video_theme(
+        enriched,
+        transcript_excerpt=transcript_excerpt,
+        confirmed_fields=confirmed_fields,
+    )
+    enriched = _prefer_content_understanding_summary(
+        enriched,
+        confirmed_fields=confirmed_fields,
+        allow_override="summary" not in review_payload_fields,
+    )
     _ensure_search_queries(enriched, source_name, transcript_excerpt=transcript_excerpt)
     if not list(enriched.get("keywords") or []):
         enriched["keywords"] = _build_review_keywords(enriched)
@@ -3740,6 +4512,13 @@ def _source_context_candidate_hints(source_context: dict[str, Any] | None) -> di
     if not payload:
         return {}
     hints: dict[str, Any] = {"source_context": payload}
+    derived_hints = _build_source_context_derived_hints(payload)
+    if derived_hints:
+        if derived_hints.get("filename_entries"):
+            hints["filename_entries"] = list(derived_hints.get("filename_entries") or [])
+        if derived_hints.get("related_source_names") and not hints.get("related_source_names"):
+            hints["related_source_names"] = list(derived_hints.get("related_source_names") or [])
+        _merge_source_context_seed_hints(hints, derived_hints)
     resolved_feedback = dict(payload.get("resolved_feedback") or {}) if isinstance(payload.get("resolved_feedback"), dict) else {}
     for key in (
         "subject_brand",
@@ -4604,10 +5383,10 @@ def _select_excerpt_items(subtitle_items: list[dict], *, max_items: int) -> list
     seen: set[tuple[float, float, str]] = set()
 
     def _append(item: dict) -> None:
-        text = str(item.get("text_final") or item.get("text_norm") or item.get("text_raw") or "").strip()
+        text = _excerpt_item_text(item)
         key = (
-            round(float(item.get("start_time", 0.0) or 0.0), 3),
-            round(float(item.get("end_time", 0.0) or 0.0), 3),
+            round(_excerpt_item_start(item), 3),
+            round(_excerpt_item_end(item), 3),
             text,
         )
         if not text or key in seen:
@@ -4620,7 +5399,7 @@ def _select_excerpt_items(subtitle_items: list[dict], *, max_items: int) -> list
 
     scored = sorted(
         subtitle_items,
-        key=lambda item: (_transcript_signal_score(item), float(item.get("start_time", 0.0) or 0.0)),
+        key=lambda item: (_transcript_signal_score(item), _excerpt_item_start(item)),
         reverse=True,
     )
     for item in scored:
@@ -4633,12 +5412,12 @@ def _select_excerpt_items(subtitle_items: list[dict], *, max_items: int) -> list
     for item in subtitle_items[-6:]:
         _append(item)
 
-    selected.sort(key=lambda item: float(item.get("start_time", 0.0) or 0.0))
+    selected.sort(key=lambda item: (_excerpt_item_start(item), _excerpt_item_end(item)))
     return selected[:max_items]
 
 
 def _transcript_signal_score(item: dict[str, Any]) -> int:
-    text = str(item.get("text_final") or item.get("text_norm") or item.get("text_raw") or "").strip()
+    text = _excerpt_item_text(item)
     if not text:
         return 0
 
@@ -5314,26 +6093,7 @@ def _seed_profile_from_text(
 
 
 def _canonicalize_spoken_identity_text(text: str) -> str:
-    normalized = str(text or "").upper()
-    replacements = {
-        "零": "0",
-        "〇": "0",
-        "Ｏ": "0",
-        "一": "1",
-        "二": "2",
-        "两": "2",
-        "三": "3",
-        "四": "4",
-        "五": "5",
-        "六": "6",
-        "七": "7",
-        "八": "8",
-        "九": "9",
-        "Ⅱ": "II",
-    }
-    for source, target in replacements.items():
-        normalized = normalized.replace(source, target)
-    return normalized
+    return canonicalize_spoken_identity_text(text)
 
 
 def _extract_edc_flashlight_model(text: str) -> str:
@@ -5449,13 +6209,12 @@ def _has_supported_product_model_hint(
 
 def _extract_edc_bag_model(text: str, original_text: str) -> str:
     normalized = _canonicalize_spoken_identity_text(text)
-    normalized = re.sub(r"F叉21", "FXX1", normalized, flags=re.IGNORECASE)
-    normalized = normalized.replace("叉", "X")
+    normalized = re.sub(r"F\s*X\s*21(?=小副包|[^A-Z0-9]|$)", "FXX1", normalized, flags=re.IGNORECASE)
+    normalized = re.sub(r"F\s*X\s*X\s*1(?=小副包|[^A-Z0-9]|$)", "FXX1", normalized, flags=re.IGNORECASE)
+    normalized = re.sub(r"F\s*21(?=小副包|[^A-Z0-9]|$)", "FXX1", normalized, flags=re.IGNORECASE)
     if "FXX1" not in normalized:
         return ""
-    if "小副包" in str(original_text or ""):
-        return "FXX1小副包"
-    return "FXX1"
+    return "FXX1小副包"
 
 
 def _extract_generic_product_model(normalized_text: str, original_text: str) -> str:
@@ -6429,6 +7188,11 @@ def _fallback_polish_text(
         prev_text=prev_text,
         next_text=next_text,
     )
+    polished = _repair_fragmentary_repetition(
+        polished,
+        prev_text=prev_text,
+        next_text=next_text,
+    )
     if get_settings().subtitle_filler_cleanup_enabled:
         polished = _remove_subtitle_filler_words(
             polished,
@@ -6571,10 +7335,79 @@ def _repair_common_intro_slot(text: str) -> str:
     result = str(text or "").strip()
     if not result:
         return result
+    result = re.sub(r"^这(?:7|七|几)个(?:咱|我)?给大家讲讲", "这期给大家讲讲", result)
     match = re.match(r"^这[\u4e00-\u9fff]{1,4}在(?P<rest>.+给大家(?:单独)?看[下看]?)", result)
     if match and "一期" not in result[:6]:
         return f"这一期在{match.group('rest')}"
     return result
+
+
+def _repair_fragmentary_repetition(text: str, *, prev_text: str = "", next_text: str = "") -> str:
+    result = str(text or "").strip()
+    if not result:
+        return result
+
+    repeated_phrase = _collapse_repeated_phrase_prefix(result)
+    if repeated_phrase:
+        result = repeated_phrase
+
+    prev_compact = str(prev_text or "").strip().rstrip("。！？!?；;,，：:")
+    next_compact = str(next_text or "").strip()
+
+    overlap = _shared_boundary_overlap(prev_compact, result, max_overlap=8)
+    if overlap and len(overlap) >= 4 and len(result) >= len(overlap) + 2:
+        result = result[len(overlap):].lstrip("，。！？!?、：:；;,. ")
+
+    if (
+        prev_compact
+        and result
+        and prev_compact[-1] == result[0]
+        and prev_compact[-1] in "讲说看聊提做用谈"
+        and len(result) >= 2
+        and result[1] in "也就是了啊呢嘛吧"
+    ):
+        result = result[1:].lstrip("，。！？!?、：:；;,. ")
+
+    trailing_particle_match = re.match(r"^(?P<body>.+?)(?P<tail>[那啊呢嘛吧呀呃])$", result)
+    if trailing_particle_match and next_compact:
+        body = trailing_particle_match.group("body")
+        for size in range(min(4, len(body)), 1, -1):
+            if next_compact.startswith(body[-size:]):
+                result = body
+                break
+
+    return result or str(text or "").strip()
+
+
+def _collapse_repeated_phrase_prefix(text: str) -> str:
+    candidate = str(text or "").strip()
+    if len(candidate) < 8:
+        return ""
+    suffix = ""
+    if candidate and candidate[-1] in "。！？!?；;":
+        suffix = candidate[-1]
+        candidate = candidate[:-1]
+    for unit_len in range(min(16, len(candidate) // 2), 3, -1):
+        prefix = candidate[:unit_len]
+        if not candidate.startswith(prefix * 2):
+            continue
+        tail = candidate[unit_len * 2:]
+        if len(tail) <= 2 and re.fullmatch(r"[那啊呢嘛吧呀呃]*", tail):
+            return f"{prefix}{tail}{suffix}"
+    return ""
+
+
+def _shared_boundary_overlap(left: str, right: str, *, max_overlap: int = 8) -> str:
+    left_text = str(left or "").strip()
+    right_text = str(right or "").strip()
+    if not left_text or not right_text:
+        return ""
+    upper = min(max_overlap, len(left_text), len(right_text))
+    for size in range(upper, 3, -1):
+        suffix = left_text[-size:]
+        if right_text.startswith(suffix):
+            return suffix
+    return ""
 
 
 def _repair_collapsed_predicate_clause(text: str, *, review_memory: dict[str, Any] | None) -> str:
