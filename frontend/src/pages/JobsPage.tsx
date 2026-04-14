@@ -9,7 +9,7 @@ import { JobQueueTable } from "../features/jobs/JobQueueTable";
 import { JobReviewOverlay } from "../features/jobs/JobReviewOverlay";
 import { JobUploadPanel } from "../features/jobs/JobUploadPanel";
 import type { JobQueueFilter } from "../features/jobs/useJobWorkspace";
-import { useJobWorkspace } from "../features/jobs/useJobWorkspace";
+import { resolveJobReviewStep, type JobReviewStep, useJobWorkspace } from "../features/jobs/useJobWorkspace";
 import { useI18n } from "../i18n";
 import { classNames } from "../utils";
 
@@ -28,8 +28,12 @@ export function JobsPage() {
   const [reviewNoticeTone, setReviewNoticeTone] = useState<"success" | "error">("success");
   const [detailModalOpen, setDetailModalOpen] = useState(false);
   const [reviewOverlayOpen, setReviewOverlayOpen] = useState(false);
+  const [reviewStepOverride, setReviewStepOverride] = useState<JobReviewStep | null>(null);
   const queueStageRef = useRef<HTMLElement | null>(null);
   const workspace = useJobWorkspace({ isCreateOpen: createOpen });
+  const selectedReviewJob =
+    workspace.filteredJobs.find((job) => job.id === workspace.selectedJobId)
+    ?? workspace.selectedJob;
 
   const languageOptions = workspace.options.data?.job_languages ?? [{ value: "zh-CN", label: "简体中文" }];
   const workflowTemplateOptions = workspace.options.data?.workflow_templates ?? [{ value: "", label: t("watch.page.autoMatch") }];
@@ -37,28 +41,23 @@ export function JobsPage() {
   const enhancementOptions = workspace.options.data?.enhancement_modes ?? [];
   const queueFilterMeta = QUEUE_FILTER_META[workspace.queueFilter];
 
-  const isReviewContext =
-    workspace.activity.data?.current_step?.status === "needs_review" || workspace.selectedJob?.status === "needs_review";
-  const activeReviewStep =
-    workspace.activity.data?.current_step?.step_name === "summary_review" || workspace.activity.data?.current_step?.step_name === "final_review"
-      ? workspace.activity.data.current_step.step_name
-      : workspace.selectedJob?.steps.find(
-        (step) =>
-          (step.step_name === "summary_review" || step.step_name === "final_review")
-          && step.status !== "done",
-      )?.step_name;
-  const reviewStep = activeReviewStep === "final_review" ? "final_review" : "summary_review";
+  const reviewStep = reviewStepOverride ?? workspace.reviewStep ?? resolveJobReviewStep(selectedReviewJob, workspace.activity.data);
+  const activeReviewStep: JobReviewStep = reviewStep ?? "summary_review";
+  const isReviewContext = selectedReviewJob?.status === "needs_review" && reviewStep !== null;
   const showDetailModal = Boolean(detailModalOpen && workspace.selectedJobId);
-  const showReviewOverlay = Boolean(reviewOverlayOpen && workspace.selectedJobId && isReviewContext && activeReviewStep);
+  const showReviewOverlay = Boolean(reviewOverlayOpen && workspace.selectedJobId && isReviewContext && reviewStep);
 
   const openJobReview = (jobId: string) => {
+    const queuedJob = workspace.filteredJobs.find((job) => job.id === jobId) ?? (workspace.selectedJob?.id === jobId ? workspace.selectedJob : null);
     setDetailModalOpen(false);
+    setReviewStepOverride(resolveJobReviewStep(queuedJob));
     setReviewOverlayOpen(true);
     workspace.setSelectedJobId(jobId);
   };
 
   const openJobDetail = (jobId: string) => {
     setReviewOverlayOpen(false);
+    setReviewStepOverride(null);
     setDetailModalOpen(true);
     workspace.setSelectedJobId(jobId);
   };
@@ -93,6 +92,7 @@ export function JobsPage() {
       setReviewOverlayOpen(false);
       workspace.setSelectedJobId(null);
     }
+    setReviewStepOverride(null);
     if (shouldClearNotice) {
       setReviewNotice(null);
     }
@@ -103,6 +103,7 @@ export function JobsPage() {
       setDetailModalOpen(false);
       workspace.setSelectedJobId(null);
     }
+    setReviewStepOverride(null);
   };
 
   const focusQueue = (filter: JobQueueFilter) => {
@@ -319,7 +320,13 @@ export function JobsPage() {
           contentDraft={workspace.contentDraft}
           contentKeywords={workspace.contentKeywords}
           reviewEnhancementModes={workspace.reviewEnhancementModes}
+          languageOptions={languageOptions}
+          workflowTemplateOptions={workflowTemplateOptions}
+          workflowModeOptions={workflowModeOptions}
+          enhancementOptions={enhancementOptions}
+          pendingInitialization={workspace.pendingInitialization}
           isConfirmingProfile={workspace.confirmProfile.isPending}
+          isInitializing={workspace.initializeJob.isPending}
           isApplyingReview={workspace.applyReview.isPending}
           isCancelling={workspace.cancelJob.isPending}
           isRestarting={workspace.restartJob.isPending}
@@ -352,7 +359,9 @@ export function JobsPage() {
                 .filter(Boolean),
             }))
           }
+          onPendingInitializationChange={workspace.setPendingInitialization}
           onConfirmProfile={confirmReviewProfile}
+          onInitialize={() => workspace.initializeJob.mutate()}
           onOpenFolder={() => workspace.selectedJob && workspace.openFolder.mutate(workspace.selectedJob.id)}
           onCancel={() => workspace.selectedJob && workspace.cancelJob.mutate(workspace.selectedJob.id)}
           onRestart={() => workspace.selectedJob && confirmAndRestartJob(workspace.selectedJob.id)}
@@ -363,8 +372,8 @@ export function JobsPage() {
 
       <JobReviewOverlay
         open={showReviewOverlay}
-        reviewStep={reviewStep}
-        selectedJob={workspace.selectedJob}
+        reviewStep={activeReviewStep}
+        selectedJob={selectedReviewJob}
         activity={workspace.activity.data}
         report={workspace.report.data}
         contentProfile={workspace.contentProfile.data}
@@ -406,7 +415,7 @@ export function JobsPage() {
         onApplyReview={(targetId, action) => workspace.applyReview.mutate({ targetId, action })}
         onApproveFinalReview={() => workspace.finalReviewDecision.mutate({ decision: "approve" })}
         onRejectFinalReview={(note) => workspace.finalReviewDecision.mutate({ decision: "reject", note })}
-        onOpenFolder={() => workspace.selectedJob && workspace.openFolder.mutate(workspace.selectedJob.id)}
+        onOpenFolder={() => selectedReviewJob && workspace.openFolder.mutate(selectedReviewJob.id)}
         onClose={() => closeReviewOverlay()}
       />
     </section>

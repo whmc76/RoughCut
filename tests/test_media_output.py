@@ -5,6 +5,8 @@ from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 import roughcut.media.output as output_mod
 
 
@@ -89,6 +91,32 @@ def test_build_cover_variant_output_path_includes_version_and_strategy(tmp_path:
     path = output_mod.build_cover_variant_output_path(tmp_path / "demo_cover.jpg", 1, "bilibili")
 
     assert path.name == "demo_cover_v2_bilibili.jpg"
+
+
+def test_write_srt_file_rejects_timestamp_disorder(tmp_path: Path):
+    output_path = tmp_path / "bad.srt"
+
+    with pytest.raises(ValueError, match="timestamp_disorder"):
+        output_mod.write_srt_file(
+            [
+                {"index": 0, "start_time": 4.0, "end_time": 5.0, "text_final": "后面"},
+                {"index": 1, "start_time": 1.0, "end_time": 2.0, "text_final": "前面"},
+            ],
+            output_path,
+        )
+
+
+def test_write_srt_file_rejects_overlap(tmp_path: Path):
+    output_path = tmp_path / "overlap.srt"
+
+    with pytest.raises(ValueError, match="overlap"):
+        output_mod.write_srt_file(
+            [
+                {"index": 0, "start_time": 1.0, "end_time": 3.0, "text_final": "第一句"},
+                {"index": 1, "start_time": 2.5, "end_time": 4.0, "text_final": "第二句"},
+            ],
+            output_path,
+        )
 
 
 def test_write_cover_variant_manifest_writes_canonical_and_legacy_names(tmp_path: Path):
@@ -332,3 +360,46 @@ def test_drawtext_escapes_commas_in_safe_zone_expressions():
 
     assert ":x=max(370\\,min((w-text_w)/2\\,910-text_w))" in layer
     assert ":y=max(86\\,min(h-text_h-84\\,620-text_h))" in layer
+
+
+@pytest.mark.asyncio
+async def test_extract_cover_frame_falls_back_to_basic_frame_when_planning_fails(tmp_path: Path, monkeypatch):
+    output_path = tmp_path / "demo_cover.jpg"
+
+    monkeypatch.setattr(
+        output_mod,
+        "get_settings",
+        lambda: SimpleNamespace(
+            cover_output_variants=5,
+            cover_candidate_count=10,
+            ffmpeg_timeout_sec=30,
+            auto_select_cover_variant=True,
+            cover_selection_review_gap=0.08,
+            cover_title="",
+        ),
+    )
+    monkeypatch.setattr(output_mod, "_probe_duration", lambda path: 42.0)
+    monkeypatch.setattr(output_mod, "_sample_cover_candidates", lambda *args, **kwargs: [{"seek": 9.5, "preview": None}])
+
+    async def _raise_ranker(*args, **kwargs):
+        raise RuntimeError("cover ranker unavailable")
+
+    async def _fake_extract_frame(video_path: Path, output_path_value: Path, seek_sec: float) -> None:
+        output_path_value.write_bytes(f"frame@{seek_sec}".encode("utf-8"))
+
+    monkeypatch.setattr(output_mod, "_rank_cover_candidates", _raise_ranker)
+    monkeypatch.setattr(output_mod, "_extract_frame", _fake_extract_frame)
+
+    outputs = await output_mod.extract_cover_frame(
+        tmp_path / "demo.mp4",
+        output_path,
+        seek_sec=9.5,
+        content_profile=None,
+    )
+
+    manifest = json.loads(output_mod.get_cover_manifest_path(output_path).read_text(encoding="utf-8"))
+
+    assert outputs == [output_path]
+    assert output_path.exists()
+    assert manifest[0]["path"] == str(output_path)
+    assert manifest[0]["review_recommended"] is False

@@ -46,7 +46,10 @@ class OpenAIReasoningProvider(ReasoningProvider):
         text_options = build_text_options(json_mode=json_mode)
         if text_options:
             kwargs["text"] = text_options
-        reasoning_options = build_reasoning_options(self._model, effort="medium")
+        reasoning_options = build_reasoning_options(
+            self._model,
+            effort=str(getattr(get_settings(), "active_reasoning_effort", "medium") or "medium"),
+        )
         if reasoning_options:
             kwargs["reasoning"] = reasoning_options
 

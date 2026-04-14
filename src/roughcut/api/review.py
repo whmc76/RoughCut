@@ -53,12 +53,14 @@ async def _create_jobs_for_watch_root(
     config_profile_id: uuid.UUID | None,
     workflow_template: str | None,
     output_dir: str | None = None,
+    ingest_mode: str = "full_auto",
 ):
     return await create_jobs_for_inventory_paths(
         file_paths,
         output_dir=output_dir,
         config_profile_id=config_profile_id,
         workflow_template=workflow_template,
+        awaiting_initialization=ingest_mode == "task_only",
     )
 
 
@@ -69,6 +71,7 @@ async def _create_merged_job_for_watch_root(
     workflow_template: str | None,
     output_dir: str | None = None,
     allow_related_profiles: bool = False,
+    ingest_mode: str = "full_auto",
 ):
     return await create_merged_job_for_inventory_paths(
         file_paths,
@@ -76,6 +79,7 @@ async def _create_merged_job_for_watch_root(
         config_profile_id=config_profile_id,
         workflow_template=workflow_template,
         allow_related_profiles=allow_related_profiles,
+        awaiting_initialization=ingest_mode == "task_only",
     )
 
 
@@ -145,6 +149,7 @@ async def create_watch_root(
         output_dir=body.output_dir,
         enabled=body.enabled,
         scan_mode=body.scan_mode,
+        ingest_mode=body.ingest_mode,
     )
     session.add(root)
     await session.commit()
@@ -168,6 +173,7 @@ async def update_watch_root(
     root.output_dir = body.output_dir
     root.enabled = body.enabled
     root.scan_mode = body.scan_mode
+    root.ingest_mode = body.ingest_mode
     await session.commit()
     await session.refresh(root)
     return root
@@ -283,6 +289,7 @@ async def enqueue_inventory_items(
         config_profile_id=root.config_profile_id,
         workflow_template=root.workflow_template,
         output_dir=root.output_dir,
+        ingest_mode=root.ingest_mode or "full_auto",
     )
     job_ids_by_path = {result["path"]: result["job_id"] for result in results}
     created_job_ids = [job_id for job_id in job_ids_by_path.values() if job_id]
@@ -366,6 +373,7 @@ async def merge_inventory_items(
         workflow_template=root.workflow_template,
         output_dir=root.output_dir,
         allow_related_profiles=True,
+        ingest_mode=root.ingest_mode or "full_auto",
     )
     merged_job_ids = [job_id] if job_id else []
 

@@ -657,3 +657,38 @@ async def test_content_profile_memory_falls_back_to_legacy_corrections_when_grap
         and item["corrected_value"] == "LEATHERMAN"
         for item in memory["recent_corrections"]
     )
+
+
+@pytest.mark.asyncio
+async def test_content_profile_memory_does_not_learn_conflicting_comparison_model_as_alias(db_session):
+    job = await _create_job(
+        db_session,
+        source_name="nitecore-edc17-vs-edc37.mp4",
+        workflow_template="edc_tactical",
+    )
+
+    await record_content_profile_feedback_memory(
+        db_session,
+        job=job,
+        draft_profile={
+            "subject_domain": "电子产品",
+            "subject_model": "EDC37",
+        },
+        final_profile={
+            "subject_domain": "电子产品",
+            "subject_model": "EDC17",
+        },
+        user_feedback={
+            "subject_model": "EDC17",
+        },
+    )
+    await db_session.flush()
+
+    memory = await load_content_profile_user_memory(db_session, subject_domain="edc")
+
+    assert not any(
+        item["field_name"] == "subject_model"
+        and item["original_value"] == "EDC37"
+        and item["corrected_value"] == "EDC17"
+        for item in memory.get("recent_corrections") or []
+    )

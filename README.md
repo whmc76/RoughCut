@@ -2,7 +2,7 @@
 
 面向口播/开箱视频的自动剪辑 + 字幕审校系统。
 
-上传原始视频后，流水线自动完成：转写 → 术语纠错 → 静音/语气词剪辑 → 字幕烧录 → 渲染输出，每个任务产出一组成片文件：`{YYYYMMDD}_{文件名}.mp4` + `.srt` + `_cover.jpg`。
+上传原始视频后，流水线按固定审核关口推进：转写 → 字幕后处理 → 术语纠错 → 内容画像 → 摘要确认 → 剪辑决策 → 渲染输出 → 成片审核 → 平台文案。摘要确认之后，下游默认只消费已确认版本，不再在 `edit_plan` 阶段回写字幕。完整的阶段顺序、人工关口、冻结规则和各阶段输入输出见 [剪辑校对流程](docs/2026-04-14-edit-review-flow.md)。
 
 ---
 
@@ -59,9 +59,13 @@ watcher      — 目录监听，自动入队
 
 ```
 probe → extract_audio → transcribe → subtitle_postprocess
-      → content_profile → summary_review → glossary_review
-      → edit_plan → render → platform_package
+      → glossary_review → subtitle_translation → content_profile
+      → summary_review → ai_director → avatar_commentary
+      → edit_plan → render → final_review → platform_package
 ```
+
+这条顺序是当前的统一执行主线；详细的人工关口与冻结规则以 [剪辑校对流程](docs/2026-04-14-edit-review-flow.md) 为准。
+同时，任务接口现在直接暴露 `review_step / review_detail`，前端不再自行猜测当前处于摘要审核还是成片审核。
 
 ---
 

@@ -93,6 +93,7 @@ MULTIMODAL_FALLBACK_PROVIDER_VALUES: tuple[str, ...] = ("openai", "anthropic", "
 HYBRID_REASONING_PROVIDER_VALUES: tuple[str, ...] = ("openai", "anthropic", "minimax", "ollama")
 LLM_ROUTING_MODE_VALUES: tuple[str, ...] = ("bundled", "hybrid_performance")
 HYBRID_SEARCH_MODE_VALUES: tuple[str, ...] = ("off", "entity_gated", "follow_provider")
+REASONING_EFFORT_VALUES: tuple[str, ...] = ("minimal", "low", "medium", "high")
 
 
 def resolve_heygem_shared_root(*, ensure_exists: bool = True) -> Path:
@@ -164,13 +165,16 @@ PROFILE_BINDABLE_SETTINGS: tuple[str, ...] = (
     "llm_routing_mode",
     "reasoning_provider",
     "reasoning_model",
+    "reasoning_effort",
     "local_reasoning_model",
     "local_vision_model",
     "hybrid_analysis_provider",
     "hybrid_analysis_model",
+    "hybrid_analysis_effort",
     "hybrid_analysis_search_mode",
     "hybrid_copy_provider",
     "hybrid_copy_model",
+    "hybrid_copy_effort",
     "hybrid_copy_search_mode",
     "multimodal_fallback_provider",
     "multimodal_fallback_model",
@@ -255,7 +259,10 @@ class Settings(BaseSettings):
     step_stale_timeout_sec: int = 900
     step_dispatch_stale_timeout_sec: int = 3600
     transcribe_runtime_timeout_sec: int = 900
+    render_dispatch_concurrency: int = 1
     render_step_stale_timeout_sec: int = 5400
+    render_step_prepackaging_stale_timeout_sec: int = 1500
+    render_step_packaging_stale_timeout_sec: int = 2400
     docker_gpu_guard_enabled: bool = True
     docker_gpu_guard_idle_timeout_sec: int = 900
     heygem_docker_guard_enabled: bool = True
@@ -281,13 +288,16 @@ class Settings(BaseSettings):
     llm_routing_mode: str = "bundled"  # bundled | hybrid_performance
     reasoning_provider: str = "minimax"  # openai | anthropic | minimax | ollama
     reasoning_model: str = "MiniMax-M2.7-highspeed"
+    reasoning_effort: str = "medium"
     local_reasoning_model: str = "qwen3.5:9b"
     local_vision_model: str = ""
     hybrid_analysis_provider: str = "openai"
     hybrid_analysis_model: str = "gpt-5.4-mini"
+    hybrid_analysis_effort: str = "medium"
     hybrid_analysis_search_mode: str = "entity_gated"  # off | entity_gated | follow_provider
     hybrid_copy_provider: str = "minimax"
     hybrid_copy_model: str = "MiniMax-M2.7-highspeed"
+    hybrid_copy_effort: str = "high"
     hybrid_copy_search_mode: str = "follow_provider"  # off | entity_gated | follow_provider
     multimodal_fallback_provider: str = "ollama"  # local backup for visual tasks
     multimodal_fallback_model: str = ""
@@ -444,6 +454,15 @@ class Settings(BaseSettings):
         if route_model:
             return route_model
         return self.local_reasoning_model if self.llm_mode == "local" else self.reasoning_model
+
+    @property
+    def active_reasoning_effort(self) -> str:
+        route_effort = _normalize_reasoning_effort(_get_llm_route_override("reasoning_effort"))
+        if route_effort:
+            return route_effort
+        if self.llm_mode == "local":
+            return "medium"
+        return _normalize_reasoning_effort(self.reasoning_effort) or "medium"
 
     @property
     def active_vision_model(self) -> str:
@@ -717,6 +736,12 @@ def _normalize_runtime_override_values(data: dict[str, Any]) -> dict[str, Any]:
     if "reasoning_provider" in normalized:
         normalized["reasoning_provider"] = str(normalized.get("reasoning_provider") or "").strip().lower()
 
+    for key in ("reasoning_effort", "hybrid_analysis_effort", "hybrid_copy_effort"):
+        if key in normalized:
+            normalized[key] = _normalize_reasoning_effort(normalized.get(key)) or (
+                "high" if key == "hybrid_copy_effort" else "medium"
+            )
+
     for key in ("hybrid_analysis_provider", "hybrid_copy_provider"):
         if key in normalized:
             provider = str(normalized.get(key) or "").strip().lower()
@@ -765,8 +790,23 @@ def _normalize_llm_capability_bundle_settings(settings: Settings) -> None:
     )
     object.__setattr__(
         settings,
+        "hybrid_analysis_effort",
+        _normalize_reasoning_effort(getattr(settings, "hybrid_analysis_effort", "medium")) or "medium",
+    )
+    object.__setattr__(
+        settings,
         "hybrid_copy_model",
         str(getattr(settings, "hybrid_copy_model", "") or "").strip() or "MiniMax-M2.7-highspeed",
+    )
+    object.__setattr__(
+        settings,
+        "hybrid_copy_effort",
+        _normalize_reasoning_effort(getattr(settings, "hybrid_copy_effort", "high")) or "high",
+    )
+    object.__setattr__(
+        settings,
+        "reasoning_effort",
+        _normalize_reasoning_effort(getattr(settings, "reasoning_effort", "medium")) or "medium",
     )
 
     analysis_search_mode = str(getattr(settings, "hybrid_analysis_search_mode", "") or "").strip().lower()
@@ -824,18 +864,33 @@ def resolve_llm_task_route(task_name: str, *, settings: Settings | None = None) 
 
     normalized_task = str(task_name or "").strip().lower()
     if normalized_task in {"subtitle", "subtitle_postprocess", "subtitle_translation", "content_profile", "copy_verify", "edit_plan"}:
-        return {
+        route = {
             "reasoning_provider": str(getattr(current, "hybrid_analysis_provider", "openai") or "openai").strip().lower(),
             "reasoning_model": str(getattr(current, "hybrid_analysis_model", "gpt-5.4-mini") or "gpt-5.4-mini").strip(),
         }
+        effort = _normalize_reasoning_effort(getattr(current, "hybrid_analysis_effort", "medium"))
+        if effort:
+            route["reasoning_effort"] = effort
+        return route
     if normalized_task == "copy":
-        return {
+        route = {
             "reasoning_provider": str(getattr(current, "hybrid_copy_provider", "minimax") or "minimax").strip().lower(),
             "reasoning_model": str(
                 getattr(current, "hybrid_copy_model", "MiniMax-M2.7-highspeed") or "MiniMax-M2.7-highspeed"
             ).strip(),
         }
+        effort = _normalize_reasoning_effort(getattr(current, "hybrid_copy_effort", "high"))
+        if effort:
+            route["reasoning_effort"] = effort
+        return route
     return {}
+
+
+def _normalize_reasoning_effort(value: object) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized in REASONING_EFFORT_VALUES:
+        return normalized
+    return ""
 
 
 def should_enable_task_search(

@@ -27,6 +27,15 @@ _TASK_TIMEOUT_AUDIO_RATIO = 3.0
 _TASK_TIMEOUT_BUFFER_SECONDS = 180.0
 _HEYGEM_TRAINING_PROBE_TIMEOUT_SECONDS = 2.0
 _HEYGEM_PREVIEW_SERVICE_CACHE: dict[str, bool] = {}
+_SHARED_AUDIO_READY_RETRIES = 12
+_SHARED_AUDIO_READY_RETRY_SECONDS = 1.0
+_SHARED_AUDIO_SETTLE_FLOOR_SECONDS = 0.5
+_SHARED_AUDIO_SETTLE_MAX_SECONDS = 8.0
+_SHARED_AUDIO_SETTLE_BYTES_PER_SECOND = 8 * 1024 * 1024
+_SEGMENT_BUSY_RETRY_DELAYS_SECONDS = (2.0, 4.0, 6.0, 8.0, 10.0)
+_SEGMENT_BUSY_MAX_WAIT_SECONDS = 90.0
+_RESULT_READY_RETRIES = 30
+_RESULT_READY_RETRY_SECONDS = 2.0
 
 
 class HeyGemAvatarProvider(AvatarProvider):
@@ -189,17 +198,38 @@ class HeyGemAvatarProvider(AvatarProvider):
         last_error: Exception | None = None
         for endpoints in submit_endpoints:
             task_started = False
+            busy_waited_seconds = 0.0
+            busy_attempt = 0
             try:
-                response = client.post(endpoints["submit"], headers=headers, json=payload)
-                response.raise_for_status()
-                submit_payload = response.json()
-                submit_code = int(submit_payload.get("code") or -1)
-                if submit_code != 10000:
+                while True:
+                    response = client.post(endpoints["submit"], headers=headers, json=payload)
+                    response.raise_for_status()
+                    submit_payload = response.json()
+                    submit_code = int(submit_payload.get("code") or -1)
+                    submit_message = str(submit_payload.get("msg") or "").strip()
+                    if submit_code == 10000:
+                        break
+                    if _is_heygem_busy_message(submit_message):
+                        delay = _SEGMENT_BUSY_RETRY_DELAYS_SECONDS[
+                            min(busy_attempt, len(_SEGMENT_BUSY_RETRY_DELAYS_SECONDS) - 1)
+                        ]
+                        if busy_waited_seconds + delay > _SEGMENT_BUSY_MAX_WAIT_SECONDS:
+                            return {
+                                "segment_id": segment.get("segment_id"),
+                                "status": "failed",
+                                "task_code": task_code,
+                                "error": submit_message or "submit_failed",
+                                "response": submit_payload,
+                            }
+                        busy_attempt += 1
+                        busy_waited_seconds += delay
+                        time.sleep(delay)
+                        continue
                     return {
                         "segment_id": segment.get("segment_id"),
                         "status": "failed",
                         "task_code": task_code,
-                        "error": submit_payload.get("msg") or "submit_failed",
+                        "error": submit_message or "submit_failed",
                         "response": submit_payload,
                     }
 
@@ -214,13 +244,17 @@ class HeyGemAvatarProvider(AvatarProvider):
                 data = query_payload.get("data") or {}
                 result_value = str(data.get("result") or "").strip()
                 local_result_path = _resolve_local_result_path(result_value)
+                is_completed = int(data.get("status") or 0) == 2 or _is_completed_task_payload(data)
+                ready_local_result_path = (
+                    _wait_for_result_file_ready(local_result_path) if is_completed and local_result_path else None
+                )
                 return {
                     "segment_id": segment.get("segment_id"),
-                    "status": "success" if int(data.get("status") or 0) == 2 else "failed",
+                    "status": "success" if is_completed and ready_local_result_path else "failed",
                     "task_code": task_code,
                     "progress": data.get("progress"),
                     "result": result_value,
-                    "local_result_path": local_result_path,
+                    "local_result_path": ready_local_result_path,
                     "staged_audio_path": _resolve_container_local_path(audio_source),
                     "staged_presenter_path": _resolve_container_local_path(presenter_source),
                     "video_duration": data.get("video_duration"),
@@ -276,7 +310,7 @@ class HeyGemAvatarProvider(AvatarProvider):
                 raise RuntimeError(payload.get("msg") or f"HeyGem task failed: {task_code}")
             data = payload.get("data") or {}
             status_value = int(data.get("status") or 0)
-            if status_value == 2:
+            if status_value == 2 or _is_completed_task_payload(data):
                 return payload
             if status_value == 3:
                 raise RuntimeError(payload.get("msg") or data.get("msg") or f"HeyGem task failed: {task_code}")
@@ -288,6 +322,35 @@ def _resolve_task_timeout_seconds(segment: dict[str, Any]) -> float:
     duration_sec = max(0.0, float(segment.get("duration_sec") or 0.0))
     scaled_timeout = duration_sec * _TASK_TIMEOUT_AUDIO_RATIO + _TASK_TIMEOUT_BUFFER_SECONDS
     return min(_TASK_TIMEOUT_MAX_SECONDS, max(_TASK_TIMEOUT_MIN_SECONDS, scaled_timeout))
+
+
+def _is_completed_task_payload(data: dict[str, Any]) -> bool:
+    result = str(data.get("result") or "").strip()
+    if not result:
+        return False
+    progress = data.get("progress")
+    try:
+        progress_value = float(progress)
+    except (TypeError, ValueError):
+        progress_value = None
+    status_value = int(data.get("status") or 0)
+    return status_value == 1 and progress_value is not None and progress_value >= 100.0
+
+
+def _is_heygem_busy_message(message: object) -> bool:
+    normalized = str(message or "").strip().lower()
+    if not normalized:
+        return False
+    busy_tokens = (
+        "busy",
+        "resource busy",
+        "device busy",
+        "繁忙",
+        "忙碌",
+        "稍后",
+        "请稍后",
+    )
+    return any(token in normalized for token in busy_tokens)
 
 
 def _build_heygem_endpoints(submit_like_url: str) -> list[dict[str, str]]:
@@ -453,13 +516,25 @@ def _prepare_presenter_video(*, local_path: Path, shared_video_dir: Path, job_id
 def _resolve_local_result_path(result_value: str) -> str | None:
     if not result_value:
         return None
+    direct_path = Path(str(result_value))
+    if direct_path.exists():
+        return str(direct_path)
     shared_root = _detect_shared_root()
     if shared_root is None:
         return None
+    normalized = str(result_value).strip().replace("\\", "/")
+    relative_candidates: list[str] = []
+    if normalized.startswith("/code/data/"):
+        relative_candidates.append(normalized.removeprefix("/code/data/").lstrip("/"))
+    relative_candidates.append(normalized.lstrip("/"))
     candidate_paths = [
-        shared_root / "result" / result_value.lstrip("/"),
-        shared_root / "temp" / result_value.lstrip("/"),
-        shared_root / result_value.lstrip("/"),
+        candidate
+        for relative_value in relative_candidates
+        for candidate in (
+            shared_root / relative_value,
+            shared_root / "temp" / relative_value,
+            shared_root / "result" / relative_value,
+        )
     ]
     for candidate in candidate_paths:
         if candidate.exists():
@@ -505,7 +580,9 @@ def _resolve_audio_source(
 def _stage_audio_file(*, local_path: Path, target_path: Path) -> None:
     target_path.parent.mkdir(parents=True, exist_ok=True)
     if local_path.resolve() == target_path.resolve():
-        if _probe_audio_duration_seconds(target_path) is None:
+        if _wait_for_staged_audio_ready(target_path) is None:
+            _rewrite_audio_to_staged_wav(source_path=local_path, target_path=target_path)
+        if _wait_for_staged_audio_ready(target_path) is None:
             raise RuntimeError(f"staged_audio_unreadable: {target_path}")
         _settle_shared_audio_mount(target_path)
         return
@@ -513,14 +590,58 @@ def _stage_audio_file(*, local_path: Path, target_path: Path) -> None:
     temp_target = target_path.with_name(f"{target_path.name}.{uuid.uuid4().hex}.partial")
     try:
         shutil.copy2(local_path, temp_target)
-        if _probe_audio_duration_seconds(temp_target) is None:
-            raise RuntimeError(f"staged_audio_unreadable: {temp_target}")
+        if _wait_for_staged_audio_ready(temp_target) is None:
+            try:
+                _rewrite_audio_to_staged_wav(source_path=local_path, target_path=temp_target)
+            except RuntimeError:
+                pass
+            if _wait_for_staged_audio_ready(temp_target) is None:
+                raise RuntimeError(f"staged_audio_unreadable: {target_path}")
         os.replace(temp_target, target_path)
     finally:
         if temp_target.exists():
             temp_target.unlink(missing_ok=True)
 
+    if _wait_for_staged_audio_ready(target_path) is None:
+        try:
+            _rewrite_audio_to_staged_wav(source_path=local_path, target_path=target_path)
+        except RuntimeError:
+            pass
+    if _wait_for_staged_audio_ready(target_path) is None:
+        raise RuntimeError(f"staged_audio_unreadable: {target_path}")
     _settle_shared_audio_mount(target_path)
+
+
+def _rewrite_audio_to_staged_wav(*, source_path: Path, target_path: Path) -> None:
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-i",
+        str(source_path),
+        "-vn",
+        "-ac",
+        "1",
+        "-ar",
+        "16000",
+        "-c:a",
+        "pcm_s16le",
+        str(target_path),
+    ]
+    result = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    if result.returncode != 0:
+        stderr = str(result.stderr or "").strip()
+        raise RuntimeError(f"failed to normalize staged audio: {stderr[-2000:]}")
 
 
 def _probe_audio_duration_seconds(path: Path) -> float | None:
@@ -552,6 +673,31 @@ def _probe_audio_duration_seconds(path: Path) -> float | None:
     return duration
 
 
+def _wait_for_staged_audio_ready(path: Path) -> float | None:
+    for attempt in range(_SHARED_AUDIO_READY_RETRIES):
+        duration = _probe_audio_duration_seconds(path)
+        if duration is not None:
+            return duration
+        if attempt + 1 < _SHARED_AUDIO_READY_RETRIES:
+            time.sleep(_SHARED_AUDIO_READY_RETRY_SECONDS)
+    return None
+
+
+def _wait_for_result_file_ready(path_value: str | None) -> str | None:
+    if not path_value:
+        return None
+    path = Path(str(path_value))
+    for attempt in range(_RESULT_READY_RETRIES):
+        try:
+            if path.exists() and path.stat().st_size > 0:
+                return str(path)
+        except OSError:
+            pass
+        if attempt + 1 < _RESULT_READY_RETRIES:
+            time.sleep(_RESULT_READY_RETRY_SECONDS)
+    return None
+
+
 def _settle_shared_audio_mount(path: Path) -> None:
     try:
         size_bytes = max(0, int(path.stat().st_size))
@@ -560,11 +706,17 @@ def _settle_shared_audio_mount(path: Path) -> None:
     # Docker Desktop bind mounts can briefly expose a just-written file before the
     # guest sees the final contents. Keep the final name hidden until replace, then
     # pause for a short size-based window before submitting to HeyGem.
-    settle_seconds = min(1.5, max(0.35, size_bytes / (32 * 1024 * 1024)))
+    settle_seconds = min(
+        _SHARED_AUDIO_SETTLE_MAX_SECONDS,
+        max(_SHARED_AUDIO_SETTLE_FLOOR_SECONDS, size_bytes / _SHARED_AUDIO_SETTLE_BYTES_PER_SECOND),
+    )
     time.sleep(settle_seconds)
 
 
 def _detect_shared_root() -> Path | None:
+    configured_root = _resolve_docker_configured_shared_root()
+    if configured_root is not None:
+        return configured_root
     env_root = os.getenv("HEYGEM_SHARED_ROOT")
     env_host_root = os.getenv("HEYGEM_SHARED_HOST_DIR")
     if env_root or env_host_root:
@@ -572,6 +724,34 @@ def _detect_shared_root() -> Path | None:
     for root in _DEFAULT_SHARED_ROOTS:
         if root.exists():
             return root
+    return None
+
+
+def _resolve_docker_configured_shared_root() -> Path | None:
+    settings = get_settings()
+    env_file = Path(str(getattr(settings, "heygem_docker_env_file", "") or "")).expanduser()
+    if not env_file.exists():
+        return None
+    raw_data_dir = _read_env_file_value(env_file, "HEYGEM_DATA_DIR")
+    if not raw_data_dir:
+        return None
+    candidate = Path(raw_data_dir).expanduser()
+    return candidate if candidate.exists() else None
+
+
+def _read_env_file_value(path: Path, key: str) -> str | None:
+    try:
+        for raw_line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            current_key, value = line.split("=", 1)
+            if current_key.strip() != key:
+                continue
+            cleaned = value.strip().strip('"').strip("'")
+            return cleaned or None
+    except OSError:
+        return None
     return None
 
 

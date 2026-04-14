@@ -49,6 +49,17 @@ export const jobsApi = {
     request<ContentProfileReview>(`/jobs/${jobId}/content-profile/confirm`, { method: "POST", body: JSON.stringify(body) }),
   finalReviewDecision: (jobId: string, body: { decision: FinalReviewDecision; note?: string }) =>
     request<FinalReviewDecisionResponse>(`/jobs/${jobId}/final-review`, { method: "POST", body: JSON.stringify(body) }),
+  initializeJob: (
+    jobId: string,
+    body: {
+      language: string;
+      workflow_template?: string;
+      workflow_mode: string;
+      enhancement_modes: string[];
+      output_dir?: string;
+      video_description: string;
+    },
+  ) => request<Job>(`/jobs/${jobId}/initialize`, { method: "POST", body: JSON.stringify(body) }),
   applyReview: (jobId: string, actions: Array<{ target_type: string; target_id: string; action: string; override_text?: string }>) =>
     request<{ applied: number }>(`/jobs/${jobId}/review/apply`, { method: "POST", body: JSON.stringify({ actions }) }),
   contentProfileThumbnailUrl: (jobId: string, index: number, version?: string | null) =>

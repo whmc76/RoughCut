@@ -331,6 +331,33 @@ async def test_recover_stale_running_steps_records_stuck_step_diagnostic(db_engi
     assert step.metadata_["recovery_source"] == "local"
 
 
+def test_render_step_runtime_stale_timeout_seconds_uses_phase_specific_thresholds(monkeypatch):
+    import roughcut.pipeline.orchestrator as orchestrator_mod
+    from roughcut.config import Settings
+    from roughcut.db.models import JobStep
+
+    monkeypatch.setattr(
+        orchestrator_mod,
+        "get_settings",
+        lambda: Settings(
+            _env_file=None,
+            render_step_stale_timeout_sec=5400,
+            render_step_prepackaging_stale_timeout_sec=1500,
+            render_step_packaging_stale_timeout_sec=2400,
+        ),
+    )
+
+    assert orchestrator_mod._step_runtime_stale_timeout_seconds(
+        JobStep(step_name="render", metadata_={"progress": 0.35})
+    ) == 1500
+    assert orchestrator_mod._step_runtime_stale_timeout_seconds(
+        JobStep(step_name="render", metadata_={"progress": 0.55})
+    ) == 2400
+    assert orchestrator_mod._step_runtime_stale_timeout_seconds(
+        JobStep(step_name="render", metadata_={"progress": 0.82})
+    ) == 5400
+
+
 @pytest.mark.asyncio
 async def test_recover_stale_running_steps_recovers_dispatched_but_unclaimed_step(db_engine, monkeypatch):
     import roughcut.pipeline.orchestrator as orchestrator_mod
@@ -813,6 +840,40 @@ async def test_tick_defers_gpu_sensitive_step_when_dispatch_gpu_guard_blocks(mon
         ).scalar_one()
         assert step.status == "pending"
         assert "外部 GPU 占用" in str((step.metadata_ or {}).get("detail") or "")
+
+
+def test_gpu_dispatch_wait_reason_allows_second_render_when_render_concurrency_is_two(monkeypatch):
+    import roughcut.pipeline.orchestrator as orchestrator_mod
+
+    settings = orchestrator_mod.get_settings()
+    original = settings.render_dispatch_concurrency
+    object.__setattr__(settings, "render_dispatch_concurrency", 2)
+    try:
+        wait_reason = orchestrator_mod._gpu_dispatch_wait_reason(
+            "render",
+            running_gpu_steps={"render": 1},
+        )
+    finally:
+        object.__setattr__(settings, "render_dispatch_concurrency", original)
+
+    assert wait_reason is None
+
+
+def test_gpu_dispatch_wait_reason_blocks_render_when_concurrency_limit_is_reached(monkeypatch):
+    import roughcut.pipeline.orchestrator as orchestrator_mod
+
+    settings = orchestrator_mod.get_settings()
+    original = settings.render_dispatch_concurrency
+    object.__setattr__(settings, "render_dispatch_concurrency", 2)
+    try:
+        wait_reason = orchestrator_mod._gpu_dispatch_wait_reason(
+            "render",
+            running_gpu_steps={"render": 2},
+        )
+    finally:
+        object.__setattr__(settings, "render_dispatch_concurrency", original)
+
+    assert "渲染并发已满" in str(wait_reason or "")
 
 
 @pytest.mark.asyncio

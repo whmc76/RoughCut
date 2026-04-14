@@ -5,6 +5,14 @@ import uuid
 import pytest
 from httpx import AsyncClient
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import async_sessionmaker
+
+
+def test_should_persist_review_alias_rejects_conflicting_model_rewrite():
+    from roughcut.api.jobs import _should_persist_review_alias
+
+    assert _should_persist_review_alias("EDC幺七", "EDC17") is True
+    assert _should_persist_review_alias("EDC37", "EDC17") is False
 
 
 async def _seed_final_review_job(job_id: uuid.UUID) -> None:
@@ -32,6 +40,39 @@ async def _seed_final_review_job(job_id: uuid.UUID) -> None:
             )
         )
         await session.commit()
+
+
+@pytest.mark.asyncio
+async def test_upsert_review_glossary_term_skips_conflicting_model_alias(db_engine):
+    from roughcut.api.jobs import _upsert_review_glossary_term
+    from roughcut.db.models import GlossaryTerm
+
+    factory = async_sessionmaker(db_engine, expire_on_commit=False)
+
+    async with factory() as session:
+        await _upsert_review_glossary_term(
+            session,
+            scope_type="domain",
+            scope_value="edc",
+            correct_form="EDC17",
+            wrong_form="EDC37",
+            category="model",
+            context_hint="task_description:edc_tactical",
+        )
+        await session.commit()
+
+    async with factory() as session:
+        term = (
+            await session.execute(
+                select(GlossaryTerm).where(
+                    GlossaryTerm.scope_type == "domain",
+                    GlossaryTerm.scope_value == "edc",
+                    GlossaryTerm.correct_form == "EDC17",
+                )
+            )
+        ).scalar_one()
+
+    assert term.wrong_forms == []
 
 
 async def _seed_job_with_variant_bundle(job_id: uuid.UUID) -> None:

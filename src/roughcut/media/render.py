@@ -992,7 +992,10 @@ def _build_smart_effect_video_filters(
         return [], video_label
 
     style = str(editing_accents.get("style") or "smart_effect_rhythm")
-    tokens = _resolve_smart_effect_video_tokens(style)
+    tokens = _resolve_smart_effect_video_tokens(
+        style,
+        preserve_color=bool(editing_accents.get("preserve_color")),
+    )
     zoom_size = f"{expected_width}x{expected_height}"
     parts: list[str] = []
     current_video = video_label
@@ -1544,7 +1547,7 @@ def _resolve_effect_overlay_tokens(style: str) -> dict[str, Any]:
     return mapping.get(normalized, mapping[_DEFAULT_SMART_EFFECT_STYLE])
 
 
-def _resolve_smart_effect_video_tokens(style: str) -> dict[str, Any]:
+def _resolve_smart_effect_video_tokens(style: str, *, preserve_color: bool = False) -> dict[str, Any]:
     base = {
         "pre_scale": 1.18,
         "zoom_peak": 0.08,
@@ -1695,7 +1698,21 @@ def _resolve_smart_effect_video_tokens(style: str) -> dict[str, Any]:
         },
     }
     normalized = _normalize_smart_effect_style(style)
-    return mapping.get(normalized, mapping[_DEFAULT_SMART_EFFECT_STYLE])
+    resolved = dict(mapping.get(normalized, mapping[_DEFAULT_SMART_EFFECT_STYLE]))
+    if preserve_color:
+        resolved["contrast"] = 1.0
+        resolved["saturation"] = 1.0
+        resolved["brightness"] = 0.0
+        resolved["flash_color"] = _neutralize_flash_color(str(resolved.get("flash_color") or "white@0.08"))
+    return resolved
+
+
+def _neutralize_flash_color(color: str) -> str:
+    value = str(color or "").strip()
+    if "@" not in value:
+        return "white"
+    _prefix, alpha = value.rsplit("@", 1)
+    return f"white@{alpha}"
 
 
 def _normalize_smart_effect_style(style: str) -> str:

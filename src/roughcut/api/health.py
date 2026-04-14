@@ -24,7 +24,7 @@ async def build_health_detail(request: Request) -> dict[str, object]:
     return {
         "checked_at": datetime.now(timezone.utc).isoformat(),
         "status": "degraded" if degraded else "ok",
-        "api_version": getattr(request.app, "version", "0.1.1"),
+        "api_version": getattr(request.app, "version", "0.1.3"),
         "readiness": readiness,
         "orchestrator_lock": orchestrator_lock,
         "managed_services": managed_services,

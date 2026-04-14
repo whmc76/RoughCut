@@ -155,6 +155,31 @@ vi.mock("../features/jobs/JobsUsageTrendPanel", () => ({
 }));
 
 vi.mock("../features/jobs/useJobWorkspace", () => ({
+  resolveJobReviewStep: (job: {
+    status?: string;
+    steps?: Array<{ step_name: string; status: string }>;
+    quality_score?: number | null;
+    quality_grade?: string | null;
+    quality_summary?: string | null;
+    quality_issue_codes?: string[] | null;
+    timeline_diagnostics?: unknown;
+  } | null | undefined) => {
+    if (!job || job.status !== "needs_review") return null;
+    if (
+      job.quality_score != null
+      || job.quality_grade
+      || job.quality_summary
+      || (job.quality_issue_codes ?? []).some(Boolean)
+      || job.timeline_diagnostics
+    ) {
+      return "final_review";
+    }
+    const finalReviewStep = job.steps?.find((step) => step.step_name === "final_review" && step.status !== "done");
+    if (finalReviewStep) return "final_review";
+    const summaryReviewStep = job.steps?.find((step) => step.step_name === "summary_review" && step.status !== "done");
+    if (summaryReviewStep) return "summary_review";
+    return null;
+  },
   useJobWorkspace: () => mockUseJobWorkspace(),
 }));
 
@@ -174,6 +199,7 @@ function buildWorkspace(overrides: Record<string, unknown> = {}) {
       failed: 0,
       cancelled: 0,
     },
+    reviewStep: null,
     refreshAll: vi.fn(),
     usageSummary: { data: undefined },
     usageTrend: { data: [] },
@@ -186,7 +212,17 @@ function buildWorkspace(overrides: Record<string, unknown> = {}) {
     options: { data: undefined },
     upload: {},
     setUpload: vi.fn(),
+    pendingInitialization: {
+      language: "zh-CN",
+      workflowTemplate: "",
+      workflowMode: "standard_edit",
+      enhancementModes: [],
+      outputDir: "",
+      videoDescription: "",
+    },
+    setPendingInitialization: vi.fn(),
     uploadJob: { mutate: vi.fn(), isPending: false },
+    initializeJob: { mutate: vi.fn(), isPending: false },
     filteredJobs: [],
     jobs: { isLoading: false, isError: false, error: null },
     selectedJobId: null,
@@ -375,19 +411,6 @@ describe("JobsPage", () => {
           },
         ],
         selectedJobId: "job-review-1",
-        selectedJob: {
-          id: "job-review-1",
-          source_name: "needs_review.mp4",
-          content_subject: "测试主题",
-          content_summary: "测试摘要",
-          status: "needs_review",
-          language: "zh-CN",
-          workflow_mode: "standard_edit",
-          enhancement_modes: [],
-          created_at: "2026-04-02T02:00:00Z",
-          updated_at: "2026-04-02T02:10:00Z",
-          steps: [],
-        },
         activity: {
           data: {
             current_step: {

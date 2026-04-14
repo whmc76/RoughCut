@@ -5,6 +5,7 @@ from typing import Any
 from roughcut.config import get_settings
 from roughcut.providers.factory import get_reasoning_provider, get_voice_provider
 from roughcut.providers.reasoning.base import Message
+from roughcut.review.content_profile import apply_source_identity_constraints, extract_source_identity_constraints
 from roughcut.review.content_profile_memory import merge_content_profile_creative_preferences
 from roughcut.usage import track_usage_operation
 
@@ -20,21 +21,49 @@ async def build_ai_director_plan(
     subtitle_items: list[dict[str, Any]],
     content_profile: dict[str, Any] | None,
 ) -> dict[str, Any]:
+    effective_content_profile = apply_source_identity_constraints(
+        content_profile or {},
+        source_name=source_name,
+    )
     heuristic = _build_heuristic_director_plan(
         source_name=source_name,
         subtitle_items=subtitle_items,
-        content_profile=content_profile or {},
+        content_profile=effective_content_profile,
+    )
+    identity_constraints = extract_source_identity_constraints(
+        effective_content_profile,
+        source_name=source_name,
     )
 
     try:
         provider = get_reasoning_provider()
+        constraint_lines: list[str] = []
+        if identity_constraints:
+            for field_name, label in (
+                ("subject_brand", "品牌"),
+                ("subject_model", "型号"),
+                ("subject_type", "主体类型"),
+                ("video_theme", "视频主题"),
+            ):
+                value = str(identity_constraints.get(field_name) or "").strip()
+                if value:
+                    constraint_lines.append(f"{label}：{value}")
+            filename_entries = list(identity_constraints.get("filename_entries") or [])
+            if filename_entries:
+                constraint_lines.append(f"来源文件名：{filename_entries}")
+            video_description = str(identity_constraints.get("video_description") or "").strip()
+            if video_description:
+                constraint_lines.append(f"任务说明：{video_description}")
+        constraint_section = f"\n强约束：{constraint_lines}" if constraint_lines else ""
         prompt = (
             "你是短视频 AI 导演。请根据字幕和内容画像，输出 JSON，给出："
             "opening_hook、bridge_line、science_boost、closing_prompt、rewrite_strategy、voiceover_segments。"
             "voiceover_segments 最多 4 段，每段包含 purpose/source_text/rewritten_text/suggested_start_time/target_duration_sec/reason。"
             "要求：补逻辑、补信息、补情绪，但不要编造事实；尽量保留说话人口吻。"
+            "如果任务说明或文件名已经明确品牌、型号、主体类型、对比关系，这些都是强约束，不得改写成别的产品。"
             f"\n源文件：{source_name}"
-            f"\n内容画像：{content_profile or {}}"
+            f"\n内容画像：{effective_content_profile or {}}"
+            f"{constraint_section}"
             f"\n字幕：{subtitle_items[:14]}"
             f"\n当前启发式草案：{heuristic}"
         )
@@ -62,7 +91,7 @@ async def build_ai_director_plan(
         metadata={
             "source_name": source_name,
             "rewrite_strength": get_settings().director_rewrite_strength,
-            "subject": str((content_profile or {}).get("subject_type") or ""),
+            "subject": str((effective_content_profile or {}).get("subject_type") or ""),
         },
     )
     return heuristic

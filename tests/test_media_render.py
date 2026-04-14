@@ -111,6 +111,15 @@ def test_ai_effect_tokens_are_more_aggressive_than_packaged_defaults():
     assert ai_video["flash_color"] == "0xfff2cc@0.14"
 
 
+def test_preserve_color_tokens_neutralize_unboxing_color_shift():
+    tokens = _resolve_smart_effect_video_tokens("smart_effect_glitch_ai", preserve_color=True)
+
+    assert tokens["contrast"] == 1.0
+    assert tokens["saturation"] == 1.0
+    assert tokens["brightness"] == 0.0
+    assert tokens["flash_color"] == "white@0.16"
+
+
 def test_ai_effect_video_filters_limit_full_frame_transforms_to_primary_event():
     parts, output_label = _build_smart_effect_video_filters(
         "v0",

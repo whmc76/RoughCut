@@ -6,7 +6,7 @@ import json
 import sys
 import time
 import uuid
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -18,9 +18,10 @@ from sqlalchemy import select
 
 from roughcut.config import get_settings
 from roughcut.creative.modes import normalize_enhancement_modes
-from roughcut.db.models import Artifact, Job, JobStep, RenderOutput, SubtitleCorrection, SubtitleItem, Timeline
+from roughcut.db.models import Artifact, Job, JobStep, RenderOutput, SubtitleCorrection, SubtitleItem, Timeline, TranscriptSegment
 from roughcut.media.output import get_cover_manifest_path, get_legacy_cover_manifest_path
 from roughcut.db.session import get_session_factory
+from roughcut.pipeline.quality import assess_job_quality
 from roughcut.pipeline.steps import run_step_sync
 from roughcut.review.content_profile import apply_content_profile_feedback
 from roughcut.review.content_profile_memory import record_content_profile_feedback_memory
@@ -53,18 +54,32 @@ class StepRun:
 
 
 @dataclass
+class LiveStageValidation:
+    stage: str
+    status: str
+    summary: str
+    issue_codes: list[str] = field(default_factory=list)
+
+
+@dataclass
 class JobRunReport:
     job_id: str
     source_path: str
     source_name: str
     status: str
     output_path: str | None
+    cover_path: str | None
     output_duration_sec: float
+    transcript_segment_count: int
     subtitle_count: int
     correction_count: int
     keep_ratio: float
     cover_variant_count: int
     platform_doc: str | None
+    quality_score: float | None
+    quality_grade: str | None
+    quality_issue_codes: list[str]
+    live_stage_validations: list[LiveStageValidation]
     content_profile: dict[str, Any] | None
     steps: list[StepRun]
     notes: list[str]
@@ -198,7 +213,7 @@ async def prepare_job_for_source(
 
     created = await create_jobs_for_inventory_paths(
         [str(source_path)],
-        channel_profile=channel_profile,
+        workflow_template=channel_profile,
         language=language,
     )
     return str(created[0].get("job_id") or "").strip() or None
@@ -388,10 +403,18 @@ async def collect_job_report(
         )
         subtitles = subtitle_result.scalars().all()
 
+        transcript_result = await session.execute(
+            select(TranscriptSegment).where(TranscriptSegment.job_id == job_uuid, TranscriptSegment.version == 1)
+        )
+        transcript_segments = transcript_result.scalars().all()
+
         correction_result = await session.execute(
             select(SubtitleCorrection).where(SubtitleCorrection.job_id == job_uuid)
         )
         corrections = correction_result.scalars().all()
+
+        step_result = await session.execute(select(JobStep).where(JobStep.job_id == job_uuid))
+        steps = step_result.scalars().all()
 
         render_result = await session.execute(
             select(RenderOutput)
@@ -400,15 +423,20 @@ async def collect_job_report(
         )
         render_output = render_result.scalars().first()
 
-        profile_result = await session.execute(
-            select(Artifact)
-            .where(
-                Artifact.job_id == job.id,
-                Artifact.artifact_type.in_(["content_profile_final", "content_profile", "content_profile_draft"]),
-            )
-            .order_by(Artifact.created_at.desc())
+        artifact_result = await session.execute(
+            select(Artifact).where(Artifact.job_id == job.id).order_by(Artifact.created_at.desc(), Artifact.id.desc())
         )
-        profile_artifact = profile_result.scalars().first()
+        artifacts = artifact_result.scalars().all()
+        render_artifact = next((artifact for artifact in artifacts if artifact.artifact_type == "render_outputs"), None)
+        packaging_artifact = next((artifact for artifact in artifacts if artifact.artifact_type == "platform_packaging_md"), None)
+        profile_artifact = next(
+            (
+                artifact
+                for artifact in artifacts
+                if artifact.artifact_type in {"content_profile_final", "content_profile", "content_profile_draft"}
+            ),
+            None,
+        )
 
         timeline_result = await session.execute(
             select(Timeline).where(Timeline.job_id == job_uuid, Timeline.timeline_type == "editorial")
@@ -418,26 +446,58 @@ async def collect_job_report(
     keep_ratio = compute_keep_ratio(editorial_timeline.data_json if editorial_timeline else None)
     output_path = str(render_output.output_path) if render_output and render_output.output_path else None
     output_duration = probe_duration(Path(output_path)) if output_path else 0.0
-    platform_doc = str(Path(output_path).with_name(f"{Path(output_path).stem}_publish.md")) if output_path else None
-    cover_manifest = get_cover_manifest_path(Path(output_path)) if output_path else None
+    render_payload = render_artifact.data_json if render_artifact and isinstance(render_artifact.data_json, dict) else {}
+    cover_path = str(render_payload.get("cover") or "").strip() or None
+    platform_doc = str(packaging_artifact.storage_path or "").strip() or None
+    if not platform_doc and output_path:
+        platform_doc = str(Path(output_path).with_name(f"{Path(output_path).stem}_publish.md"))
+
+    cover_variants = [
+        str(item).strip()
+        for item in (render_payload.get("cover_variants") or [])
+        if str(item).strip()
+    ]
+    cover_manifest = get_cover_manifest_path(Path(cover_path)) if cover_path else None
     if cover_manifest and not cover_manifest.exists():
-        legacy_manifest = get_legacy_cover_manifest_path(Path(output_path))
+        legacy_manifest = get_legacy_cover_manifest_path(Path(cover_path))
         cover_manifest = legacy_manifest if legacy_manifest.exists() else cover_manifest
-    cover_variant_count = 0
-    if cover_manifest and cover_manifest.exists():
+    cover_variant_count = len(cover_variants)
+    if cover_variant_count == 0 and cover_manifest and cover_manifest.exists():
         try:
             cover_variant_count = len(json.loads(cover_manifest.read_text(encoding="utf-8")))
         except Exception:
             cover_variant_count = 0
 
+    quality_assessment = assess_job_quality(
+        job=job,
+        steps=steps,
+        artifacts=artifacts,
+        subtitle_items=subtitles,
+        corrections=corrections,
+        completion_candidate=(status == "done"),
+    )
+    live_stage_validations = build_live_stage_validations(
+        step_statuses={step.step_name: step.status for step in steps},
+        transcript_segment_count=len(transcript_segments),
+        subtitle_count=len(subtitles),
+        keep_ratio=keep_ratio,
+        profile=profile_artifact.data_json if profile_artifact else None,
+        platform_doc=platform_doc,
+        quality_assessment=quality_assessment,
+    )
+
     notes = build_job_notes(
         status=status,
         output_duration=output_duration,
+        transcript_segment_count=len(transcript_segments),
         subtitle_count=len(subtitles),
         correction_count=len(corrections),
         keep_ratio=keep_ratio,
+        cover_path=cover_path,
         cover_variant_count=cover_variant_count,
         platform_doc=platform_doc,
+        quality_assessment=quality_assessment,
+        live_stage_validations=live_stage_validations,
     )
 
     return JobRunReport(
@@ -446,12 +506,18 @@ async def collect_job_report(
         source_name=str(item.get("source_name") or job.source_name),
         status=status,
         output_path=output_path,
+        cover_path=cover_path if cover_path and Path(cover_path).exists() else None,
         output_duration_sec=round(output_duration, 3),
+        transcript_segment_count=len(transcript_segments),
         subtitle_count=len(subtitles),
         correction_count=len(corrections),
         keep_ratio=round(keep_ratio, 3),
         cover_variant_count=cover_variant_count,
         platform_doc=platform_doc if platform_doc and Path(platform_doc).exists() else None,
+        quality_score=quality_assessment.get("score"),
+        quality_grade=quality_assessment.get("grade"),
+        quality_issue_codes=list(quality_assessment.get("issue_codes") or []),
+        live_stage_validations=live_stage_validations,
         content_profile=profile_artifact.data_json if profile_artifact else None,
         steps=step_runs,
         notes=notes,
@@ -474,15 +540,87 @@ def compute_keep_ratio(editorial_timeline: dict[str, Any] | None) -> float:
     return (kept / total) if total > 0 else 0.0
 
 
+def build_live_stage_validations(
+    *,
+    step_statuses: dict[str, str],
+    transcript_segment_count: int,
+    subtitle_count: int,
+    keep_ratio: float,
+    profile: dict[str, Any] | None,
+    platform_doc: str | None,
+    quality_assessment: dict[str, Any] | None,
+) -> list[LiveStageValidation]:
+    issue_codes = {str(code) for code in (quality_assessment or {}).get("issue_codes") or []}
+    profile_issue_codes = [
+        code
+        for code in (
+            "missing_content_profile",
+            "low_profile_confidence",
+            "profile_unconfirmed",
+            "generic_subject_type",
+            "generic_video_theme",
+            "generic_summary",
+            "thin_summary",
+            "detail_blind",
+            "detail_coverage_low",
+            "comparison_blind",
+        )
+        if code in issue_codes
+    ]
+    validations = [
+        LiveStageValidation(
+            stage="transcribe",
+            status="pass" if step_statuses.get("transcribe") == "done" and transcript_segment_count > 0 else "fail",
+            summary=f"ASR 产出 {transcript_segment_count} 条 transcript segment",
+            issue_codes=["missing_transcript"] if transcript_segment_count <= 0 else [],
+        ),
+        LiveStageValidation(
+            stage="subtitle_postprocess",
+            status="pass" if step_statuses.get("subtitle_postprocess") == "done" and subtitle_count > 0 else "fail",
+            summary=f"字幕后处理产出 {subtitle_count} 条字幕",
+            issue_codes=["missing_subtitles"] if subtitle_count <= 0 else [],
+        ),
+        LiveStageValidation(
+            stage="content_profile",
+            status="pass" if step_statuses.get("content_profile") == "done" and profile and not profile_issue_codes else "fail",
+            summary="内容画像已通过 live 质量门禁" if profile and not profile_issue_codes else "内容画像存在质量问题",
+            issue_codes=profile_issue_codes,
+        ),
+        LiveStageValidation(
+            stage="edit_plan",
+            status="pass" if step_statuses.get("edit_plan") == "done" and keep_ratio > 0 else "fail",
+            summary=f"剪辑保留比 {keep_ratio:.0%}" if keep_ratio > 0 else "剪辑保留段为空或未生成",
+            issue_codes=["empty_edit_plan"] if keep_ratio <= 0 else [],
+        ),
+        LiveStageValidation(
+            stage="render",
+            status="pass" if step_statuses.get("render") == "done" and "subtitle_sync_issue" not in issue_codes else "fail",
+            summary="导出成片字幕同步正常" if "subtitle_sync_issue" not in issue_codes else "导出层存在字幕同步/结构问题",
+            issue_codes=["subtitle_sync_issue"] if "subtitle_sync_issue" in issue_codes else [],
+        ),
+        LiveStageValidation(
+            stage="platform_package",
+            status="pass" if step_statuses.get("platform_package") == "done" and platform_doc and Path(platform_doc).exists() else "fail",
+            summary="平台包装文案已导出" if platform_doc and Path(platform_doc).exists() else "平台包装文案未导出",
+            issue_codes=["missing_platform_package"] if not (platform_doc and Path(platform_doc).exists()) else [],
+        ),
+    ]
+    return validations
+
+
 def build_job_notes(
     *,
     status: str,
     output_duration: float,
+    transcript_segment_count: int,
     subtitle_count: int,
     correction_count: int,
     keep_ratio: float,
+    cover_path: str | None,
     cover_variant_count: int,
     platform_doc: str | None,
+    quality_assessment: dict[str, Any] | None,
+    live_stage_validations: list[LiveStageValidation],
 ) -> list[str]:
     notes: list[str] = []
     if status == "done":
@@ -491,16 +629,30 @@ def build_job_notes(
         notes.append("任务未完整跑通")
     if output_duration > 0:
         notes.append(f"成片时长 {output_duration:.1f}s")
+    if transcript_segment_count > 0:
+        notes.append(f"ASR片段 {transcript_segment_count} 条")
     if subtitle_count > 0:
         notes.append(f"字幕 {subtitle_count} 条")
     if correction_count > 0:
         notes.append(f"术语/字幕纠正 {correction_count} 处")
     if keep_ratio > 0:
         notes.append(f"保留比 {keep_ratio:.0%}")
+    if cover_path and Path(cover_path).exists():
+        notes.append("封面已导出")
     if cover_variant_count >= 5:
         notes.append(f"封面候选 {cover_variant_count} 张")
     if platform_doc and Path(platform_doc).exists():
         notes.append("平台文案已导出")
+    if isinstance(quality_assessment, dict):
+        grade = str(quality_assessment.get("grade") or "").strip()
+        score = quality_assessment.get("score")
+        if grade and score is not None:
+            notes.append(f"质量分 {grade} {float(score):.1f}")
+    failing_stages = [item.stage for item in live_stage_validations if item.status != "pass"]
+    if failing_stages:
+        notes.append("live校验失败: " + "、".join(failing_stages[:4]))
+    elif live_stage_validations:
+        notes.append("live校验通过")
     return notes
 
 
@@ -533,6 +685,8 @@ def build_console_summary(summary: dict[str, Any]) -> dict[str, Any]:
                 "source_name": job["source_name"],
                 "status": job["status"],
                 "output_duration_sec": job["output_duration_sec"],
+                "quality_score": job.get("quality_score"),
+                "quality_grade": job.get("quality_grade"),
                 "subtitle_count": job["subtitle_count"],
                 "keep_ratio": job["keep_ratio"],
                 "notes": job["notes"][:4],
@@ -557,11 +711,25 @@ def render_markdown(summary: dict[str, Any]) -> str:
         lines.append(f"## {job['source_name']}")
         lines.append(f"- status: {job['status']}")
         lines.append(f"- output_path: {job['output_path'] or ''}")
+        lines.append(f"- cover_path: {job.get('cover_path') or ''}")
         lines.append(f"- output_duration_sec: {job['output_duration_sec']}")
+        lines.append(f"- transcript_segment_count: {job.get('transcript_segment_count', 0)}")
         lines.append(f"- subtitle_count: {job['subtitle_count']}")
         lines.append(f"- correction_count: {job['correction_count']}")
         lines.append(f"- keep_ratio: {job['keep_ratio']}")
         lines.append(f"- cover_variant_count: {job['cover_variant_count']}")
+        if job.get("quality_score") is not None:
+            lines.append(f"- quality: {job.get('quality_grade') or ''} {job['quality_score']}")
+        if job.get("quality_issue_codes"):
+            lines.append("- quality_issue_codes: " + ", ".join(job["quality_issue_codes"]))
+        if job.get("live_stage_validations"):
+            lines.append(
+                "- live_stage_validations: "
+                + " / ".join(
+                    f"{item['stage']}={item['status']}"
+                    for item in job["live_stage_validations"]
+                )
+            )
         if job.get("content_profile"):
             profile = job["content_profile"]
             lines.append(

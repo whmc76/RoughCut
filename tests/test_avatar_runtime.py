@@ -380,3 +380,182 @@ async def test_render_full_track_avatar_video_raises_segment_error_instead_of_pr
             source_plain_video_path=source_video,
             debug_dir=tmp_path / "debug",
         )
+
+
+@pytest.mark.asyncio
+async def test_render_full_track_avatar_video_retries_busy_error_before_success(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import roughcut.pipeline.steps as steps_mod
+
+    source_video = tmp_path / "plain.mp4"
+    source_video.write_bytes(b"video")
+    source_audio = tmp_path / "plain.avatar_drive.wav"
+    source_audio.write_bytes(b"audio")
+    avatar_result = tmp_path / "avatar-result.mp4"
+    avatar_result.write_bytes(b"video")
+
+    async def fake_extract_audio(source_path: Path, output_path: Path):
+        assert source_path == source_video
+        output_path.write_bytes(source_audio.read_bytes())
+
+    class ProbeResult:
+        def __init__(self, duration: float):
+            self.duration = duration
+
+    async def fake_probe(path: Path):
+        if path == source_video:
+            return ProbeResult(12.5)
+        raise AssertionError(f"unexpected probe path: {path}")
+
+    calls = {"count": 0}
+
+    class FakeProvider:
+        def execute_render(self, *, job_id: str, request: dict[str, object]):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                return {
+                    "status": "failed",
+                    "segments": [
+                        {
+                            "segment_id": "avatar_full_track",
+                            "status": "failed",
+                            "error": "忙碌中",
+                            "local_result_path": "",
+                        }
+                    ],
+                }
+            return {
+                "status": "success",
+                "segments": [
+                    {
+                        "segment_id": "avatar_full_track",
+                        "status": "success",
+                        "local_result_path": str(avatar_result),
+                    }
+                ],
+            }
+
+    sleep_calls: list[float] = []
+
+    async def fake_sleep(delay: float):
+        sleep_calls.append(delay)
+
+    monkeypatch.setattr(steps_mod, "extract_audio", fake_extract_audio)
+    monkeypatch.setattr(steps_mod, "probe", fake_probe)
+    monkeypatch.setattr(steps_mod, "get_avatar_provider", lambda: FakeProvider())
+    monkeypatch.setattr(steps_mod.asyncio, "sleep", fake_sleep)
+
+    result = await steps_mod._render_full_track_avatar_video(
+        job_id="job-1",
+        avatar_plan={"presenter_id": "presenter.mp4"},
+        source_plain_video_path=source_video,
+        debug_dir=tmp_path / "debug",
+    )
+
+    assert result == avatar_result
+    assert calls["count"] == 2
+    assert sleep_calls == [steps_mod._AVATAR_FULL_TRACK_RETRY_DELAYS_SECONDS[0]]
+
+
+@pytest.mark.asyncio
+async def test_execute_avatar_full_track_render_request_uses_global_slot_lock(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import roughcut.pipeline.steps as steps_mod
+
+    lock_events: list[tuple[str, str, object]] = []
+
+    def fake_acquire_operation_lock(target_key: str, *, timeout_sec: int):
+        lock_events.append(("acquire", target_key, timeout_sec))
+        return True, "token-1"
+
+    def fake_release_operation_lock(target_key: str, token: str):
+        lock_events.append(("release", target_key, token))
+
+    class FakeProvider:
+        def execute_render(self, *, job_id: str, request: dict[str, object]):
+            assert job_id == "job-1"
+            assert request["job_id"] == "job-1"
+            return {
+                "status": "success",
+                "segments": [
+                    {
+                        "segment_id": "avatar_full_track",
+                        "status": "success",
+                        "local_result_path": "C:/tmp/avatar.mp4",
+                    }
+                ],
+            }
+
+    monkeypatch.setattr(steps_mod, "_acquire_operation_lock", fake_acquire_operation_lock)
+    monkeypatch.setattr(steps_mod, "_release_operation_lock", fake_release_operation_lock)
+    monkeypatch.setattr(steps_mod, "get_avatar_provider", lambda: FakeProvider())
+
+    result = await steps_mod._execute_avatar_full_track_render_request(
+        job_id="job-1",
+        render_request={"job_id": "job-1", "segments": [{"segment_id": "avatar_full_track"}]},
+    )
+
+    assert result["status"] == "success"
+    assert lock_events == [
+        ("acquire", steps_mod._AVATAR_FULL_TRACK_SLOT_KEY, steps_mod._AVATAR_FULL_TRACK_SLOT_TIMEOUT_SEC),
+        ("release", steps_mod._AVATAR_FULL_TRACK_SLOT_KEY, "token-1"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_execute_avatar_full_track_render_request_keeps_waiting_on_busy_until_budget_allows_success(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import roughcut.pipeline.steps as steps_mod
+
+    class FakeProvider:
+        def __init__(self):
+            self.calls = 0
+
+        def execute_render(self, *, job_id: str, request: dict[str, object]):
+            self.calls += 1
+            if self.calls <= 5:
+                return {
+                    "status": "failed",
+                    "segments": [
+                        {
+                            "segment_id": "avatar_full_track",
+                            "status": "failed",
+                            "error": "忙碌中",
+                            "local_result_path": "",
+                        }
+                    ],
+                }
+            return {
+                "status": "success",
+                "segments": [
+                    {
+                        "segment_id": "avatar_full_track",
+                        "status": "success",
+                        "local_result_path": "C:/tmp/avatar.mp4",
+                    }
+                ],
+            }
+
+    provider = FakeProvider()
+    sleep_calls: list[float] = []
+
+    async def fake_sleep(delay: float):
+        sleep_calls.append(delay)
+
+    monkeypatch.setattr(steps_mod, "get_avatar_provider", lambda: provider)
+    monkeypatch.setattr(steps_mod.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(steps_mod, "_acquire_operation_lock", lambda *args, **kwargs: (True, "token-1"))
+    monkeypatch.setattr(steps_mod, "_release_operation_lock", lambda *args, **kwargs: None)
+
+    result = await steps_mod._execute_avatar_full_track_render_request(
+        job_id="job-1",
+        render_request={"job_id": "job-1", "segments": [{"segment_id": "avatar_full_track"}]},
+    )
+
+    assert result["status"] == "success"
+    assert provider.calls == 6
+    assert sleep_calls == [5.0, 10.0, 20.0, 30.0, 30.0]

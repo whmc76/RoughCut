@@ -19,6 +19,7 @@ from roughcut.review.entity_graph import (
     record_entity_rejection,
     upsert_content_profile_entity,
 )
+from roughcut.review.model_identity import model_numbers_conflict
 from roughcut.review.domain_glossaries import _DOMAIN_COMPATIBILITY, normalize_subject_domain
 from roughcut.usage import track_usage_operation
 
@@ -49,7 +50,6 @@ _CREATIVE_PREFERENCE_SPECS = (
     ("conclusion_first", "先给结论", "先给判断或结论，再展开细节", ("先说结论", "先给结论", "先讲结论", "先下结论", "先给判断", "先说重点", "结论前置")),
 )
 
-
 def _normalize_subject_domain_hint(value: str | None) -> str | None:
     normalized = str(value or "").strip().lower()
     if not normalized:
@@ -61,6 +61,10 @@ def _normalize_subject_domain_hint(value: str | None) -> str | None:
     if normalized == "gameplay_highlight":
         return "game"
     return normalize_subject_domain(normalized)
+
+
+def _is_conflicting_model_rewrite(original_value: Any, corrected_value: Any) -> bool:
+    return model_numbers_conflict(original_value, corrected_value)
 
 
 async def load_content_profile_user_memory(
@@ -225,6 +229,8 @@ async def record_content_profile_feedback_memory(
         original = _clean_memory_value(original_value)
         corrected = _clean_memory_value(corrected_value)
         if not corrected:
+            return
+        if field_name == "subject_model" and _is_conflicting_model_rewrite(original, corrected):
             return
         correction_key = (field_name, original, corrected)
         if correction_key in recorded_pairs:
@@ -506,6 +512,11 @@ def _build_recent_corrections(
         if not _subject_domain_visible(subject_domain, item.subject_domain):
             continue
         if item.field_name == CREATIVE_PREFERENCE_FIELD:
+            continue
+        if item.field_name == "subject_model" and _is_conflicting_model_rewrite(
+            item.original_value,
+            item.corrected_value,
+        ):
             continue
         items.append(
             {

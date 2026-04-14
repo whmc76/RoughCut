@@ -98,6 +98,12 @@ def test_assess_glossary_correction_automation_accepts_low_risk_brand_normalizat
     assert assessment["blocking_reasons"] == []
 
 
+def test_api_glossary_sanitize_wrong_forms_filters_conflicting_model_aliases():
+    from roughcut.api.glossary import _sanitize_glossary_wrong_forms
+
+    assert _sanitize_glossary_wrong_forms("EDC17", ["EDC37", "EDC幺七", "EDC幺七"]) == ["EDC幺七"]
+
+
 @pytest.mark.asyncio
 async def test_apply_glossary_corrections_auto_accepts_safe_matches(db_session, monkeypatch):
     import roughcut.review.glossary_engine as glossary_engine_module
@@ -137,6 +143,45 @@ async def test_apply_glossary_corrections_auto_accepts_safe_matches(db_session, 
     assert len(corrections) == 1
     assert corrections[0].auto_applied is True
     assert corrections[0].human_decision == "accepted"
+
+
+@pytest.mark.asyncio
+async def test_apply_glossary_corrections_skips_conflicting_model_aliases(db_session, monkeypatch):
+    import roughcut.review.glossary_engine as glossary_engine_module
+
+    settings = type(
+        "SettingsStub",
+        (),
+        {
+            "auto_accept_glossary_corrections": True,
+            "glossary_correction_review_threshold": 0.9,
+        },
+    )()
+    monkeypatch.setattr(glossary_engine_module, "get_settings", lambda: settings)
+
+    subtitle_item = SubtitleItem(
+        job_id=uuid.uuid4(),
+        version=1,
+        item_index=0,
+        start_time=0.0,
+        end_time=1.0,
+        text_raw="我之前一直用的是EDC37。",
+        text_norm="我之前一直用的是EDC37。",
+        text_final=None,
+    )
+    db_session.add(subtitle_item)
+    db_session.add(
+        GlossaryTerm(
+            correct_form="EDC17",
+            wrong_forms=["EDC37", "EDC幺七"],
+            category="model",
+        )
+    )
+    await db_session.flush()
+
+    corrections = await apply_glossary_corrections(subtitle_item.job_id, [subtitle_item], db_session)
+
+    assert corrections == []
 
 
 @pytest.mark.asyncio

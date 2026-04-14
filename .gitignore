@@ -49,4 +49,6 @@ __pycache__/
 .worktrees/
 tmp_*/
 tmp_*.py
+.tmp_*.py
+roughcut.db
 logs/*.env

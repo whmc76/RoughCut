@@ -180,8 +180,8 @@ export function JobFinalReviewOverlay({
       <section className="detail-block final-review-section-card">
         <div className="detail-key">当前需要你确认</div>
         <div className="activity-card final-review-action-card">
-          <strong>请决定这版成片是否可以继续后续包装</strong>
-          <div className="muted compact-top">{reviewDetail || "优先检查质量评分、扣分项和字幕抽检，再决定通过或退回。"}</div>
+          <strong>请决定这版成片是否通过最终审核</strong>
+          <div className="muted compact-top">{reviewDetail || "优先检查质量评分、扣分项和字幕抽检；通过后只继续生成平台文案与交付说明。"}</div>
           {(onApprove || onReject) ? (
             <>
               {onRejectNoteChange ? (
@@ -212,7 +212,7 @@ export function JobFinalReviewOverlay({
               <div className="toolbar top-gap">
                 {onApprove ? (
                   <button className="button primary" onClick={onApprove} disabled={Boolean(isSubmittingDecision)}>
-                    {isSubmittingDecision ? "提交中..." : "通过并继续"}
+                    {isSubmittingDecision ? "提交中..." : "通过并生成平台文案"}
                   </button>
                 ) : null}
                 {onReject ? (

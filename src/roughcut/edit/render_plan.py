@@ -7,13 +7,19 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from roughcut.edit.presets import get_workflow_preset
+from roughcut.edit.presets import get_workflow_preset, normalize_workflow_template_name
 from roughcut.db.models import Timeline
 from roughcut.packaging.library import resolve_insert_transition_overlap
 
 _DEFAULT_SMART_EFFECT_STYLE = "smart_effect_commercial"
 _LEGACY_SMART_EFFECT_STYLE_ALIASES = {
     "smart_effect_rhythm": _DEFAULT_SMART_EFFECT_STYLE,
+}
+_UNBOXING_WORKFLOW_PRESETS = {"unboxing_standard", "edc_tactical"}
+_COLOR_SHIFTING_SMART_EFFECT_STYLES = {
+    "smart_effect_glitch",
+    "smart_effect_cinematic",
+    "smart_effect_atmosphere",
 }
 _AI_SMART_EFFECT_STYLE_VARIANTS = {
     "smart_effect_commercial": "smart_effect_commercial_ai",
@@ -53,7 +59,11 @@ def build_render_plan(
     export_resolution_preset: str = "1080p",
 ) -> dict:
     preset = get_workflow_preset(workflow_preset)
-    resolved_effect_style = _normalize_smart_effect_style(smart_effect_style)
+    preserve_color = _should_preserve_smart_effect_color(workflow_preset=preset.name)
+    resolved_effect_style = _resolve_workflow_smart_effect_style(
+        smart_effect_style,
+        workflow_preset=preset.name,
+    )
     resolved_timeline_analysis = timeline_analysis or {}
     resolved_editing_skill = editing_skill or {}
     section_choreography = _build_section_choreography(
@@ -70,6 +80,28 @@ def build_render_plan(
         section_choreography=section_choreography,
         editing_skill=resolved_editing_skill,
     )
+    if isinstance(editing_accents, dict):
+        resolved_editing_accents = copy.deepcopy(editing_accents)
+        resolved_editing_accents["style"] = _resolve_workflow_smart_effect_style(
+            str(resolved_editing_accents.get("style") or resolved_effect_style),
+            workflow_preset=preset.name,
+        )
+        if preserve_color:
+            resolved_editing_accents["preserve_color"] = True
+    else:
+        resolved_editing_accents = {
+            "style": resolved_effect_style,
+            "transitions": {
+                "enabled": True,
+                "transition": "fade",
+                "duration_sec": 0.12,
+                "boundary_indexes": [],
+            },
+            "emphasis_overlays": [],
+            "sound_effects": [],
+        }
+        if preserve_color:
+            resolved_editing_accents["preserve_color"] = True
     return {
         "editorial_timeline_id": str(editorial_timeline_id),
         "workflow_preset": preset.name,
@@ -93,17 +125,7 @@ def build_render_plan(
         "creative_profile": creative_profile,
         "ai_director": ai_director_plan,
         "avatar_commentary": avatar_commentary_plan,
-        "editing_accents": editing_accents or {
-            "style": resolved_effect_style,
-            "transitions": {
-                "enabled": True,
-                "transition": "fade",
-                "duration_sec": 0.12,
-                "boundary_indexes": [],
-            },
-            "emphasis_overlays": [],
-            "sound_effects": [],
-        },
+        "editing_accents": resolved_editing_accents,
         "cover": {
             "style": cover_style or preset.cover_style,
             "title_style": title_style,
@@ -208,6 +230,10 @@ def build_ai_effect_render_plan(
 ) -> dict[str, Any]:
     ai_plan = copy.deepcopy(render_plan)
     ai_plan["avatar_commentary"] = None
+    workflow_preset = str(ai_plan.get("workflow_preset") or "").strip()
+    preserve_color = bool((ai_plan.get("editing_accents") or {}).get("preserve_color")) or _should_preserve_smart_effect_color(
+        workflow_preset=workflow_preset
+    )
     resolved_timeline_analysis = timeline_analysis or (ai_plan.get("timeline_analysis") if isinstance(ai_plan.get("timeline_analysis"), dict) else {})
     resolved_editing_skill = editing_skill or (ai_plan.get("editing_skill") if isinstance(ai_plan.get("editing_skill"), dict) else {})
     ai_plan["section_choreography"] = _build_section_choreography(
@@ -224,7 +250,10 @@ def build_ai_effect_render_plan(
         section_choreography=ai_plan.get("section_choreography") or {},
         insert=ai_plan.get("insert"),
     )
-    base_effect_style = _normalize_smart_effect_style(str((ai_plan.get("editing_accents") or {}).get("style") or ""))
+    base_effect_style = _resolve_workflow_smart_effect_style(
+        str((ai_plan.get("editing_accents") or {}).get("style") or ""),
+        workflow_preset=workflow_preset,
+    )
     subtitles = copy.deepcopy(ai_plan.get("subtitles") or {})
     if subtitles:
         subtitles["motion_style"] = _resolve_ai_effect_motion_style(
@@ -242,6 +271,8 @@ def build_ai_effect_render_plan(
         subtitle_items=subtitle_items or [],
         timeline_analysis=resolved_timeline_analysis,
         editing_skill=resolved_editing_skill,
+        workflow_preset=workflow_preset,
+        preserve_color=preserve_color,
     )
     return ai_plan
 
@@ -314,6 +345,21 @@ def _normalize_smart_effect_style(style: str) -> str:
     if not normalized:
         return _DEFAULT_SMART_EFFECT_STYLE
     return _LEGACY_SMART_EFFECT_STYLE_ALIASES.get(normalized, normalized)
+
+
+def _should_preserve_smart_effect_color(*, workflow_preset: str | None) -> bool:
+    normalized = normalize_workflow_template_name(workflow_preset)
+    return normalized in _UNBOXING_WORKFLOW_PRESETS
+
+
+def _resolve_workflow_smart_effect_style(style: str, *, workflow_preset: str | None) -> str:
+    normalized = _normalize_smart_effect_style(style)
+    if (
+        _should_preserve_smart_effect_color(workflow_preset=workflow_preset)
+        and normalized in _COLOR_SHIFTING_SMART_EFFECT_STYLES
+    ):
+        return _DEFAULT_SMART_EFFECT_STYLE
+    return normalized
 
 
 def _resolve_effect_editing_skill(
@@ -1162,9 +1208,14 @@ def _build_ai_effect_editing_accents(
     subtitle_items: list[dict[str, Any]],
     timeline_analysis: dict[str, Any] | None,
     editing_skill: dict[str, Any] | None,
+    workflow_preset: str | None,
+    preserve_color: bool,
 ) -> dict[str, Any]:
     base = copy.deepcopy(editing_accents) if isinstance(editing_accents, dict) else {}
-    base_style = _normalize_smart_effect_style(str(base.get("style") or ""))
+    base_style = _resolve_workflow_smart_effect_style(
+        str(base.get("style") or ""),
+        workflow_preset=workflow_preset,
+    )
     effect_style = _resolve_ai_effect_style_variant(base_style)
     tokens = _smart_effect_tokens(effect_style)
     resolved_skill = _resolve_effect_editing_skill(editing_skill, timeline_analysis=timeline_analysis)
@@ -1252,6 +1303,7 @@ def _build_ai_effect_editing_accents(
     return {
         **base,
         "style": effect_style,
+        "preserve_color": preserve_color,
         "transitions": {
             **base_transitions,
             "enabled": bool(transition_boundaries),

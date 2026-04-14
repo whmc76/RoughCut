@@ -5,6 +5,7 @@ export type RootForm = {
   output_dir: string;
   enabled: boolean;
   scan_mode: "fast" | "precise";
+  ingest_mode: "task_only" | "full_auto";
 };
 
 export const EMPTY_ROOT_FORM: RootForm = {
@@ -14,4 +15,5 @@ export const EMPTY_ROOT_FORM: RootForm = {
   output_dir: "",
   enabled: true,
   scan_mode: "fast",
+  ingest_mode: "full_auto",
 };

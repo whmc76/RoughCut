@@ -23,3 +23,19 @@ def test_resolve_output_title_hint_skips_conflicting_theme_identity():
     )
 
     assert resolved == "Loop露普_SK05二代Pro_UV版"
+
+
+def test_resolve_output_title_hint_accepts_compatible_model_variant_prefix():
+    resolved = _resolve_output_title_hint(
+        "20260301-162038 狐蝠工业foxbat 蜜獾2代 戒备和全新黑绿款开箱对比 以及psigear粗苯胸包对比.mp4",
+        content_profile={
+            "subject_brand": "狐蝠工业",
+            "subject_model": "LEG-16 MKII",
+            "subject_type": "EDC机能包",
+            "video_theme": "狐蝠工业开箱对比评测",
+            "summary": "这条视频主要围绕一款EDC机能包展开，重点看开合，具体品牌型号待人工确认。",
+            "cover_title": {"top": "狐蝠工业", "main": "LEG-16MKII", "bottom": "开合手感直接看"},
+        },
+    )
+
+    assert resolved == "狐蝠工业_LEG-16_MKII_开箱对比评测"

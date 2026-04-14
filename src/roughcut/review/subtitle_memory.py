@@ -18,6 +18,7 @@ from roughcut.review.domain_glossaries import (
     select_primary_subject_domain,
 )
 from roughcut.review.content_profile_memory import merge_content_profile_creative_preferences
+from roughcut.review.model_identity import model_numbers_conflict
 from roughcut.speech.dialects import resolve_transcription_dialect
 from roughcut.edit.presets import normalize_workflow_template_name
 
@@ -177,6 +178,18 @@ _GENERIC_SAFE_REPLACEMENTS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"(?:静面|净面)(?=(?:处理|效果|质感|工艺|版|板|层|一下|了|的|,|，|。|$))"), "镜面"),
     (re.compile(r"华丽历(?=(?:很|也|都|更|,|，|。|$))"), "华丽"),
     (re.compile(r"华历(?=(?:感|风格|路线|效果|,|，|。|$))"), "华丽"),
+    (
+        re.compile(
+            r"(?P<prefix>[A-Za-z]{2,8})(?P<a>[0-9零〇幺一二两三四五六七八九])(?P<b>[0-9零〇幺一二两三四五六七八九])(?:啊|呀|呃|呢|嘛)?(?P=a)(?P=b)(?=(?:已经|退役|取代|上市|发布|来了|就|被))",
+            re.IGNORECASE,
+        ),
+        r"\g<prefix>\g<a>\g<b>",
+    ),
+    (
+        re.compile(r"(?P<prefix>[A-Za-z]{2,8})(?P<digits>\d{2,4})(?P=digits)(?!\d)", re.IGNORECASE),
+        r"\g<prefix>\g<digits>",
+    ),
+    (re.compile(r"这(?:七|7)个咱给大家讲"), "这期给大家讲"),
 )
 
 _PRESERVE_CASE_TERMS = {
@@ -253,6 +266,7 @@ _ARABIC_TO_CHINESE_DIGITS = str.maketrans("0123456789", "零一二三四五六�
 _CHINESE_TO_ARABIC_DIGITS = {
     "零": "0",
     "〇": "0",
+    "幺": "1",
     "一": "1",
     "二": "2",
     "三": "3",
@@ -262,6 +276,41 @@ _CHINESE_TO_ARABIC_DIGITS = {
     "七": "7",
     "八": "8",
     "九": "9",
+}
+
+_KNOWN_BRAND_SUBTITLE_ALIASES: dict[str, tuple[str, ...]] = {
+    "NITECORE": ("奈特科尔", "耐克尔", "奈特核心", "Nitecore", "NITE CORE"),
+    "OLIGHT": ("傲雷", "奥雷", "O LIGHT"),
+    "LEATHERMAN": ("莱泽曼", "莱德曼", "来泽曼", "雷泽曼"),
+    "REATE": ("锐特", "瑞特", "睿特"),
+    "NEXTOOL": ("纳拓", "纳特", "Nextool", "NEXT TOOL"),
+    "FENIX": ("菲尼克斯", "fenix", "Fenix"),
+}
+_MODEL_LIKE_NUMERIC_RE = re.compile(
+    r"^(?P<prefix>[A-Za-z]{1,8})(?P<number>[0-9零〇幺一二两三四五六七八九十百千万]{1,6})(?P<suffix>[A-Za-z0-9\u4e00-\u9fff-]*)$",
+    re.IGNORECASE,
+)
+_SUPPORTED_MEMORY_DOMAINS = {
+    "edc",
+    "outdoor",
+    "tech",
+    "ai",
+    "functional",
+    "tools",
+    "travel",
+    "food",
+    "finance",
+    "news",
+    "sports",
+    "gear",
+    "knife",
+    "flashlight",
+    "bag",
+    "lighter",
+    "tactical",
+    "functional_wear",
+    "toy",
+    "coding",
 }
 
 
@@ -679,6 +728,8 @@ def _select_user_memory_confirmed_entities(
 
     current_subject_type = _compact_subject_text((content_profile or {}).get("subject_type"))
     current_domain = str(normalize_subject_domain(subject_domain or (content_profile or {}).get("subject_domain")) or "").strip().lower()
+    if current_domain and current_domain not in _SUPPORTED_MEMORY_DOMAINS:
+        current_domain = ""
     if not current_domain:
         detected_domains = detect_glossary_domains(
             workflow_template=workflow_template,
@@ -962,8 +1013,18 @@ def _resolve_review_subject_domain(
     recent_subtitles: list[dict[str, Any]] | None,
 ) -> str | None:
     explicit_subject_domain = normalize_subject_domain(subject_domain or (content_profile or {}).get("subject_domain"))
-    if explicit_subject_domain:
+    if explicit_subject_domain in _SUPPORTED_MEMORY_DOMAINS:
         return explicit_subject_domain
+    subject_type = str((content_profile or {}).get("subject_type") or "").strip()
+    if subject_type:
+        subject_type_domains = detect_glossary_domains(
+            workflow_template=None,
+            content_profile={"subject_type": subject_type},
+            subtitle_items=None,
+        )
+        subject_type_domain = select_primary_subject_domain(subject_type_domains)
+        if subject_type_domain in _SUPPORTED_MEMORY_DOMAINS:
+            return subject_type_domain
     return select_primary_subject_domain(
         detect_glossary_domains(
             workflow_template=workflow_template,
@@ -1141,6 +1202,8 @@ def apply_domain_term_corrections(
         if _is_compound_domain_term(str(item.get("term") or "").strip())
     ]
     for term in compound_terms:
+        if _should_skip_confirmed_display_term(term, review_memory):
+            continue
         result = _replace_compound_phrase_match(result, term)
 
     for item in review_memory.get("aliases") or []:
@@ -1149,6 +1212,8 @@ def apply_domain_term_corrections(
         if not wrong or not correct:
             continue
         category = str(item.get("category") or "").strip()
+        if _should_skip_confirmed_display_alias(wrong, correct, review_memory):
+            continue
         if (
             _is_brand_like_category(category)
             or _is_protected_brand_term(correct)
@@ -1158,6 +1223,8 @@ def apply_domain_term_corrections(
 
     terms = [str(item.get("term") or "").strip() for item in review_memory.get("terms") or []]
     for term in terms:
+        if _should_skip_confirmed_display_term(term, review_memory):
+            continue
         if _is_protected_brand_term(term):
             if re.fullmatch(r"[A-Za-z][A-Za-z0-9 .+-]{1,24}", term):
                 result = re.sub(re.escape(term), term, result, flags=re.IGNORECASE)
@@ -1170,6 +1237,62 @@ def apply_domain_term_corrections(
         if not aliases or re.fullmatch(r"[A-Za-z][A-Za-z0-9 .+-]{1,24}", term):
             result = _replace_near_match(result, term)
     return result
+
+
+def _should_skip_confirmed_display_term(term: str, review_memory: dict[str, Any] | None) -> bool:
+    compact_term = _compact_subject_text(term)
+    if not compact_term:
+        return False
+    for entity in (review_memory or {}).get("confirmed_entities") or []:
+        display_brand = _compact_subject_text(entity.get("brand"))
+        if not display_brand or not re.search(r"[\u4e00-\u9fff]", display_brand):
+            continue
+        model = _compact_subject_text(entity.get("model"))
+        alias_values = [
+            display_brand,
+            *(
+                _compact_subject_text(item)
+                for item in entity.get("brand_aliases") or []
+            ),
+        ]
+        alias_values = [value for value in alias_values if value]
+        if compact_term == display_brand or compact_term == model:
+            return False
+        if compact_term in alias_values and compact_term != display_brand:
+            return True
+        if model:
+            display_combo = f"{display_brand}{model}"
+            if compact_term == display_combo:
+                return False
+            if any(compact_term == f"{alias}{model}" for alias in alias_values if alias and alias != display_brand):
+                return True
+    return False
+
+
+def _should_skip_confirmed_display_alias(
+    wrong: str,
+    correct: str,
+    review_memory: dict[str, Any] | None,
+) -> bool:
+    compact_wrong = _compact_subject_text(wrong)
+    compact_correct = _compact_subject_text(correct)
+    if not compact_wrong or not compact_correct:
+        return False
+    for entity in (review_memory or {}).get("confirmed_entities") or []:
+        display_brand = _compact_subject_text(entity.get("brand"))
+        if not display_brand or not re.search(r"[\u4e00-\u9fff]", display_brand):
+            continue
+        alias_values = [
+            display_brand,
+            *(
+                _compact_subject_text(item)
+                for item in entity.get("brand_aliases") or []
+            ),
+        ]
+        alias_values = [value for value in alias_values if value]
+        if compact_wrong in alias_values and compact_correct in alias_values and compact_correct != display_brand:
+            return True
+    return False
 
 
 def _extract_domain_terms(text: str) -> list[str]:
@@ -1330,6 +1453,8 @@ def _extract_confirmed_profile_fields(content_profile: dict[str, Any] | None) ->
         sources.append(feedback)
     if _content_profile_is_confirmed(profile):
         sources.append(profile)
+    elif _content_profile_has_usable_subject_identity(profile):
+        sources.append(profile)
     if not sources:
         return {}
 
@@ -1363,29 +1488,86 @@ def _content_profile_is_confirmed(profile: dict[str, Any] | None) -> bool:
     return False
 
 
+def _content_profile_has_usable_subject_identity(profile: dict[str, Any] | None) -> bool:
+    if not isinstance(profile, dict):
+        return False
+    if not (str(profile.get("subject_brand") or "").strip() or str(profile.get("subject_model") or "").strip()):
+        return False
+    identity_review = profile.get("identity_review")
+    if isinstance(identity_review, dict):
+        evidence_strength = str(identity_review.get("evidence_strength") or "").strip().lower()
+        if evidence_strength in {"strong", "medium"}:
+            return True
+        if identity_review.get("support_sources"):
+            return True
+    return True
+
+
 def _build_confirmed_feedback_entities(content_profile: dict[str, Any] | None) -> list[dict[str, Any]]:
     confirmed = _extract_confirmed_profile_fields(content_profile)
-    brand = _compact_subject_text(confirmed.get("subject_brand"))
+    raw_brand = _compact_subject_text(confirmed.get("subject_brand"))
     model = _compact_subject_text(confirmed.get("subject_model"))
+    brand_aliases = _build_confirmed_brand_aliases(content_profile, raw_brand)
+    brand = _select_confirmed_brand_display(raw_brand, brand_aliases)
     phrases: list[str] = []
     for item in confirmed.get("keywords") or []:
         value = _compact_subject_text(item)
         if value and value not in phrases:
             phrases.append(value)
-    if brand and model:
-        combined = f"{brand}{model}"
-        if combined not in phrases:
-            phrases.insert(0, combined)
-    if not brand and not model and not phrases:
+    if not brand and not raw_brand and not model and not phrases:
         return []
     return [
         {
             "brand": brand,
             "model": model,
             "phrases": phrases[:8],
+            "brand_aliases": [
+                alias for alias in brand_aliases
+                if _compact_subject_text(alias) != _compact_subject_text(brand)
+            ],
             "model_aliases": _build_confirmed_model_aliases(model),
         }
     ]
+
+
+def _build_confirmed_brand_aliases(content_profile: dict[str, Any] | None, brand: str) -> list[str]:
+    aliases: list[str] = []
+    profile = content_profile or {}
+    for candidate in (
+        brand,
+        profile.get("subject_brand_cn"),
+        profile.get("subject_brand_bilingual"),
+    ):
+        value = _compact_subject_text(candidate)
+        if value and value not in aliases:
+            aliases.append(value)
+
+    review_buckets = [profile.get("identity_review")]
+    automation_review = profile.get("automation_review")
+    if isinstance(automation_review, dict):
+        review_buckets.append(automation_review.get("identity_review"))
+    for bucket in review_buckets:
+        evidence_bundle = (bucket or {}).get("evidence_bundle") if isinstance(bucket, dict) else None
+        if not isinstance(evidence_bundle, dict):
+            continue
+        for candidate in evidence_bundle.get("brand_aliases") or []:
+            value = _compact_subject_text(candidate)
+            if value and value not in aliases:
+                aliases.append(value)
+
+    for candidate in _KNOWN_BRAND_SUBTITLE_ALIASES.get(str(brand or "").strip().upper(), ()):
+        value = _compact_subject_text(candidate)
+        if value and value not in aliases:
+            aliases.append(value)
+    return aliases
+
+
+def _select_confirmed_brand_display(brand: str, aliases: list[str]) -> str:
+    compact_brand = _compact_subject_text(brand)
+    for candidate in aliases:
+        if re.search(r"[\u4e00-\u9fff]", candidate):
+            return candidate
+    return compact_brand
 
 
 def _suppress_conflicting_brand_terms(
@@ -1610,6 +1792,7 @@ def _apply_confirmed_entity_corrections(
                 wrong=wrong,
                 correct=correct,
                 brand=brand,
+                brand_aliases=[brand, *brand_aliases],
                 negative_alias_pairs=negative_alias_pairs,
             )
         anchor_forms = _build_confirmed_model_anchor_forms(model)
@@ -1619,6 +1802,7 @@ def _apply_confirmed_entity_corrections(
                 wrong=anchor,
                 correct=anchor,
                 brand=brand,
+                brand_aliases=[brand, *brand_aliases],
                 negative_alias_pairs=negative_alias_pairs,
             )
         fuzzy_anchor_forms = [
@@ -1641,6 +1825,7 @@ def _replace_confirmed_subject_anchor(
     wrong: str,
     correct: str,
     brand: str,
+    brand_aliases: list[str] | None = None,
     negative_alias_pairs: set[tuple[str, str]] | None = None,
 ) -> str:
     if not text or not wrong or not correct:
@@ -1655,7 +1840,7 @@ def _replace_confirmed_subject_anchor(
     if (
         prefix
         and _alias_supports_brand_prefix(wrong, correct)
-        and _looks_like_brand_candidate_prefix(prefix)
+        and _looks_like_brand_candidate_prefix(prefix, brand=brand, brand_aliases=brand_aliases)
     ):
         if (
             _normalize_conflict_key(prefix),
@@ -1728,15 +1913,33 @@ def _is_generic_subject_prefix(value: str) -> bool:
     return token in _GENERIC_SUBJECT_PREFIXES
 
 
-def _looks_like_brand_candidate_prefix(value: str) -> bool:
+def _looks_like_brand_candidate_prefix(
+    value: str,
+    *,
+    brand: str = "",
+    brand_aliases: list[str] | None = None,
+) -> bool:
     token = str(value or "").strip()
     if not token:
         return False
     if _is_generic_subject_prefix(token) or token in _NON_BRAND_CONTEXT_PREFIXES:
         return False
+    alias_values = {
+        _compact_subject_text(alias)
+        for alias in (brand_aliases or [])
+        if _compact_subject_text(alias)
+    }
+    if alias_values and _compact_subject_text(token) in alias_values:
+        return True
     if re.search(r"[A-Za-z0-9]", token):
         return True
-    return len(token) <= 2
+    if (
+        len(token) <= 2
+        and re.fullmatch(r"[\u4e00-\u9fff]{1,2}", token)
+        and re.search(r"[A-Za-z]", str(brand or ""))
+    ):
+        return True
+    return False
 
 
 def _trim_brand_candidate_prefix(value: str) -> str:
@@ -1808,6 +2011,8 @@ def _replace_fuzzy_confirmed_model_anchors(
             wrong = candidate.group(0)
             if wrong == canonical:
                 continue
+            if _model_like_numbers_conflict(wrong, canonical):
+                continue
             if not _fuzzy_model_anchor_has_context_support(
                 wrong=wrong,
                 canonical=canonical,
@@ -1832,14 +2037,14 @@ def _anchor_supports_fuzzy_match(value: str) -> bool:
     return bool(
         compact
         and re.search(r"[A-Za-z]", compact)
-        and re.search(r"[\d零〇一二三四五六七八九十]", compact)
+        and re.search(r"[\d零〇幺一二三四五六七八九十]", compact)
     )
 
 
 def _find_fuzzy_model_like_candidates(text: str) -> list[re.Match[str]]:
     return list(
         re.finditer(
-            r"(?<![A-Za-z0-9])([A-Za-z][A-Za-z0-9零〇一二三四五六七八九十]{2,8})(?![A-Za-z0-9])",
+            r"(?<![A-Za-z0-9])([A-Za-z][A-Za-z0-9零〇幺一二三四五六七八九十]{2,8})(?![A-Za-z0-9])",
             str(text or ""),
         )
     )
@@ -1893,6 +2098,10 @@ def _extract_context_support_tokens(entity: dict[str, Any]) -> list[str]:
     return tokens[:12]
 
 
+def _model_like_numbers_conflict(source: Any, target: Any) -> bool:
+    return model_numbers_conflict(source, target)
+
+
 def _replace_near_match(text: str, term: str) -> str:
     if not text or not term:
         return text
@@ -1928,6 +2137,8 @@ def _replace_near_match(text: str, term: str) -> str:
 def _replace_near_latin_token(text: str, term: str) -> str:
     best: tuple[float, str] | None = None
     for token in re.findall(r"(?<![A-Za-z0-9])([A-Za-z][A-Za-z0-9+-]{2,23})(?![A-Za-z0-9])", text):
+        if _model_like_numbers_conflict(token, term):
+            continue
         score = SequenceMatcher(None, token.upper(), term.upper()).ratio()
         if best is None or score > best[0]:
             best = (score, token)

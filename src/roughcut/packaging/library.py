@@ -74,6 +74,13 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "enabled": True,
 }
 
+_UNBOXING_WORKFLOW_TEMPLATES = {"unboxing_standard", "edc_tactical"}
+_COLOR_SHIFTING_SMART_EFFECT_STYLES = {
+    "smart_effect_glitch",
+    "smart_effect_cinematic",
+    "smart_effect_atmosphere",
+}
+
 STYLE_TEMPLATE_BUNDLE_FIELDS = (
     "subtitle_style",
     "subtitle_motion_style",
@@ -569,13 +576,14 @@ def resolve_packaging_plan_for_job(job_id: str, *, content_profile: dict[str, An
             "smart_effect_style": DEFAULT_CONFIG["smart_effect_style"],
             "export_resolution_mode": DEFAULT_CONFIG["export_resolution_mode"],
             "export_resolution_preset": DEFAULT_CONFIG["export_resolution_preset"],
-        }
+    }
 
     assets_by_id = {
         item["id"]: item for item in state["assets"]
         if Path(item.get("path") or "").exists()
     }
     config = _normalize_config(config, assets_by_id)
+    config = _normalize_packaging_config_for_content(config, content_profile=content_profile)
     recommended_bundle_key = recommend_style_template_bundle(content_profile)
     auto_applied_bundle_key = None
     if (
@@ -584,6 +592,7 @@ def resolve_packaging_plan_for_job(job_id: str, *, content_profile: dict[str, An
         and _style_template_fields_are_default(config)
     ):
         config = _apply_style_template_bundle(config, recommended_bundle_key)
+        config = _normalize_packaging_config_for_content(config, content_profile=content_profile)
         auto_applied_bundle_key = recommended_bundle_key
     active_bundle_key = resolve_style_template_bundle_key(config)
 
@@ -647,6 +656,7 @@ def recommend_style_template_bundle(content_profile: dict[str, Any] | None) -> s
     profile = content_profile or {}
     if not isinstance(profile, dict) or not profile:
         return None
+    is_unboxing = _profile_is_unboxing_content(profile)
     subject_domain = _resolve_packaging_subject_domain(profile)
     preset_name = normalize_workflow_template_name(
         str(profile.get("workflow_template") or profile.get("preset_name") or "").strip()
@@ -674,6 +684,8 @@ def recommend_style_template_bundle(content_profile: dict[str, Any] | None) -> s
     has_explainer_signal = _matches_style_template_terms(haystack, tokens, explainer_terms) or "tutorial" in preset_name or "commentary" in preset_name
 
     if _matches_style_template_terms(haystack, tokens, suspense_terms) or preset_name in {"trailer_dark", "cinema_teaser"}:
+        if is_unboxing:
+            return "impact_commerce"
         return "suspense_teaser"
     if _matches_style_template_terms(haystack, tokens, commerce_terms):
         return "impact_commerce"
@@ -682,6 +694,8 @@ def recommend_style_template_bundle(content_profile: dict[str, Any] | None) -> s
     if subject_domain == "ai" and has_explainer_signal:
         return "restrained_explainer"
     if _matches_style_template_terms(haystack, tokens, specs_terms) or subject_domain in {"tech", "tools"}:
+        if is_unboxing:
+            return "restrained_explainer"
         return "hardcore_specs"
     if subject_domain in {"ai"}:
         return "restrained_explainer"
@@ -713,6 +727,31 @@ def _collect_style_template_profile_strings(profile: dict[str, Any]) -> list[str
         if isinstance(value, (list, tuple, set)):
             strings.extend(str(item) for item in value if str(item or "").strip())
     return strings
+
+
+def _profile_is_unboxing_content(profile: dict[str, Any] | None) -> bool:
+    if not isinstance(profile, dict) or not profile:
+        return False
+    preset_name = normalize_workflow_template_name(
+        str(profile.get("workflow_template") or profile.get("preset_name") or "").strip()
+    )
+    if preset_name in _UNBOXING_WORKFLOW_TEMPLATES:
+        return True
+    content_kind = str(profile.get("content_kind") or profile.get("video_type") or "").strip().lower()
+    return content_kind == "unboxing"
+
+
+def _normalize_packaging_config_for_content(
+    config: dict[str, Any],
+    *,
+    content_profile: dict[str, Any] | None,
+) -> dict[str, Any]:
+    normalized = dict(config)
+    if _profile_is_unboxing_content(content_profile):
+        smart_effect_style = str(normalized.get("smart_effect_style") or DEFAULT_CONFIG["smart_effect_style"]).strip()
+        if smart_effect_style in _COLOR_SHIFTING_SMART_EFFECT_STYLES:
+            normalized["smart_effect_style"] = DEFAULT_CONFIG["smart_effect_style"]
+    return normalized
 
 
 def _style_template_fields_are_default(config: dict[str, Any]) -> bool:

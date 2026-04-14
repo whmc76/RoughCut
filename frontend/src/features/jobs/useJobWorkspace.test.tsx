@@ -25,6 +25,7 @@ const mockApi = vi.hoisted(() => ({
   openJobFolder: vi.fn(),
   cancelJob: vi.fn(),
   restartJob: vi.fn(),
+  initializeJob: vi.fn(),
   createJob: vi.fn(),
   confirmContentProfile: vi.fn(),
   finalReviewDecision: vi.fn(),
@@ -82,6 +83,52 @@ const SAMPLE_ACTIVITY: JobActivity = {
 const SAMPLE_REVIEW_JOB: Job = {
   ...SAMPLE_JOBS[0],
   status: "needs_review",
+};
+
+const SAMPLE_SUMMARY_REVIEW_JOB: Job = {
+  ...SAMPLE_REVIEW_JOB,
+  review_step: "summary_review",
+  review_detail: "等待确认摘要后继续剪辑与渲染。",
+  steps: [
+    {
+      id: "summary-step",
+      step_name: "summary_review",
+      status: "pending",
+      attempt: 0,
+      started_at: null,
+      finished_at: null,
+      error_message: null,
+    },
+  ],
+};
+
+const SAMPLE_FINAL_REVIEW_JOB: Job = {
+  ...SAMPLE_REVIEW_JOB,
+  review_step: "final_review",
+  review_detail: "等待审核成片后继续生成平台文案。",
+  quality_score: 93.6,
+  quality_grade: "A",
+  quality_summary: "成片可通过，保留少量字幕抽检即可。",
+  steps: [
+    {
+      id: "summary-step",
+      step_name: "summary_review",
+      status: "done",
+      attempt: 0,
+      started_at: null,
+      finished_at: null,
+      error_message: null,
+    },
+    {
+      id: "final-step",
+      step_name: "final_review",
+      status: "pending",
+      attempt: 0,
+      started_at: null,
+      finished_at: null,
+      error_message: null,
+    },
+  ],
 };
 
 const SAMPLE_REPORT: Report = {
@@ -455,7 +502,8 @@ describe("useJobWorkspace", () => {
   });
 
   it("hydrates content draft from selected profile and confirms edits", async () => {
-    mockApi.getJob.mockResolvedValue(SAMPLE_REVIEW_JOB);
+    mockApi.listJobs.mockResolvedValue([SAMPLE_SUMMARY_REVIEW_JOB, SAMPLE_JOBS[1]]);
+    mockApi.getJob.mockResolvedValue(SAMPLE_SUMMARY_REVIEW_JOB);
 
     const { result } = renderHookWithQueryClient(() => useJobWorkspace());
 
@@ -464,11 +512,15 @@ describe("useJobWorkspace", () => {
     });
 
     await waitFor(() => expect(result.current.contentProfile.data).toEqual(SAMPLE_PROFILE));
+    expect(result.current.reviewStep).toBe("summary_review");
     expect(result.current.tokenUsage.data).toBeUndefined();
     expect(mockApi.getJobTokenUsage).not.toHaveBeenCalled();
+    expect(mockApi.getJobReport).not.toHaveBeenCalled();
+    expect(mockApi.getJobTimeline).not.toHaveBeenCalled();
     await waitFor(() => expect(mockApi.getConfig).toHaveBeenCalled());
     await waitFor(() => expect(mockApi.getPackaging).toHaveBeenCalled());
     await waitFor(() => expect(mockApi.getAvatarMaterials).toHaveBeenCalled());
+    expect(mockApi.warmContentProfileThumbnails).toHaveBeenCalledWith("job_1");
     await waitFor(() => expect(result.current.contentDraft).toEqual(SAMPLE_PROFILE.draft));
     expect(result.current.contentKeywords).toBe("开箱, 升级");
 
@@ -503,8 +555,85 @@ describe("useJobWorkspace", () => {
     });
   });
 
+  it("loads final-review data without routing through summary-review helpers", async () => {
+    mockApi.listJobs.mockResolvedValue([SAMPLE_FINAL_REVIEW_JOB, SAMPLE_JOBS[1]]);
+    mockApi.getJob.mockResolvedValue(SAMPLE_FINAL_REVIEW_JOB);
+    mockApi.getJobActivity.mockResolvedValue({
+      job_id: "job_1",
+      status: "needs_review",
+      review_step: "final_review",
+      review_detail: "等待审核成片后继续生成平台文案。",
+      current_step: {
+        step_name: "final_review",
+        label: "成片审核",
+        status: "pending",
+        detail: "等待审核成片后继续。",
+      },
+      render: null,
+      decisions: [],
+      events: [],
+    });
+
+    const { result } = renderHookWithQueryClient(() => useJobWorkspace());
+
+    act(() => {
+      result.current.setSelectedJobId("job_1");
+    });
+
+    await waitFor(() => expect(result.current.reviewStep).toBe("final_review"));
+    await waitFor(() => expect(result.current.report.data).toEqual(SAMPLE_REPORT));
+    await waitFor(() => expect(result.current.tokenUsage.data).toEqual(SAMPLE_TOKEN_USAGE));
+    await waitFor(() => expect(result.current.timeline.data).toEqual(SAMPLE_TIMELINE));
+    expect(mockApi.getConfig).not.toHaveBeenCalled();
+    expect(mockApi.getPackaging).not.toHaveBeenCalled();
+    expect(mockApi.getAvatarMaterials).not.toHaveBeenCalled();
+    expect(result.current.contentDraft).toEqual(SAMPLE_PROFILE.final);
+  });
+
+  it("prefers explicit backend review_step over local heuristics", async () => {
+    const explicitFinalReviewJob: Job = {
+      ...SAMPLE_REVIEW_JOB,
+      review_step: "final_review",
+      review_detail: "等待审核成片后继续生成平台文案。",
+      steps: [
+        {
+          id: "summary-step",
+          step_name: "summary_review",
+          status: "pending",
+          attempt: 0,
+          started_at: null,
+          finished_at: null,
+          error_message: null,
+        },
+      ],
+    };
+    mockApi.listJobs.mockResolvedValue([explicitFinalReviewJob, SAMPLE_JOBS[1]]);
+    mockApi.getJob.mockResolvedValue(explicitFinalReviewJob);
+    mockApi.getJobActivity.mockResolvedValue({
+      job_id: "job_1",
+      status: "needs_review",
+      review_step: "final_review",
+      review_detail: "等待审核成片后继续生成平台文案。",
+      current_step: null,
+      render: null,
+      decisions: [],
+      events: [],
+    });
+
+    const { result } = renderHookWithQueryClient(() => useJobWorkspace());
+
+    act(() => {
+      result.current.setSelectedJobId("job_1");
+    });
+
+    await waitFor(() => expect(result.current.reviewStep).toBe("final_review"));
+    await waitFor(() => expect(mockApi.getJobReport).toHaveBeenCalled());
+    expect(mockApi.getConfig).not.toHaveBeenCalled();
+  });
+
   it("uses source search_queries when keywords are missing and keeps confirm payload populated", async () => {
-    mockApi.getJob.mockResolvedValue(SAMPLE_REVIEW_JOB);
+    mockApi.listJobs.mockResolvedValue([SAMPLE_SUMMARY_REVIEW_JOB, SAMPLE_JOBS[1]]);
+    mockApi.getJob.mockResolvedValue(SAMPLE_SUMMARY_REVIEW_JOB);
     mockApi.getContentProfile.mockResolvedValueOnce(SAMPLE_PROFILE_NO_KEYWORDS);
 
     const { result } = renderHookWithQueryClient(() => useJobWorkspace());
@@ -609,15 +738,16 @@ describe("useJobWorkspace", () => {
     await waitFor(() => expect(mockApi.getConfig).toHaveBeenCalled());
   });
 
-  it("loads review-time config data after selecting a review job", async () => {
-    mockApi.getJob.mockResolvedValue(SAMPLE_REVIEW_JOB);
+  it("loads summary-review config data after selecting a review job", async () => {
+    mockApi.listJobs.mockResolvedValue([SAMPLE_SUMMARY_REVIEW_JOB, SAMPLE_JOBS[1]]);
+    mockApi.getJob.mockResolvedValue(SAMPLE_SUMMARY_REVIEW_JOB);
     const { result } = renderHookWithQueryClient(() => useJobWorkspace());
 
     act(() => {
       result.current.setSelectedJobId("job_1");
     });
 
-    await waitFor(() => expect(result.current.detail.data).toEqual(SAMPLE_REVIEW_JOB));
+    await waitFor(() => expect(result.current.reviewStep).toBe("summary_review"));
     await waitFor(() => expect(mockApi.getConfig).toHaveBeenCalled());
     await waitFor(() => expect(mockApi.getPackaging).toHaveBeenCalled());
     await waitFor(() => expect(mockApi.getAvatarMaterials).toHaveBeenCalled());

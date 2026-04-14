@@ -11,6 +11,7 @@ from roughcut.db.models import FactClaim, SubtitleCorrection, SubtitleItem
 from roughcut.speech.postprocess import (
     SubtitleEntry,
     _cleanup_subtitle_entries,
+    _looks_like_split_measure_phrase,
     _resolve_fragment_window,
     analyze_subtitle_segmentation,
     generate_subtitle_window_candidates,
@@ -809,6 +810,59 @@ def test_analyze_subtitle_segmentation_flags_real_edc_fragment_window():
     assert analysis["low_confidence_window_count"] >= 1
 
 
+def test_analyze_subtitle_segmentation_flags_dense_short_nominal_tail_split():
+    entries = [
+        SubtitleEntry(index=0, start=30.72, end=33.2, text_raw="可以大家之前看过我们节目的应该", text_norm=normalize_text("可以大家之前看过我们节目的应该")),
+        SubtitleEntry(index=1, start=33.2, end=35.12, text_raw="可以看出来啊少了一个小", text_norm=normalize_text("可以看出来啊少了一个小")),
+        SubtitleEntry(index=2, start=35.12, end=35.52, text_raw="兄弟", text_norm=normalize_text("兄弟")),
+        SubtitleEntry(index=3, start=38.48, end=42.88, text_raw="少了一个小兄弟啊那小兄弟就是这个EDC二三啊二", text_norm=normalize_text("少了一个小兄弟啊那小兄弟就是这个EDC二三啊二")),
+    ]
+
+    analysis = analyze_subtitle_segmentation(entries).as_dict()
+
+    assert analysis["low_confidence_window_count"] >= 1
+    assert any("少了一个小" in "".join(window["texts"]) for window in analysis["sample_low_confidence_windows"])
+
+
+def test_analyze_subtitle_segmentation_chunks_oversized_dense_windows():
+    entries = [
+        SubtitleEntry(index=0, start=30.72, end=33.2, text_raw="可以大家之前看过我们节目的应该", text_norm=normalize_text("可以大家之前看过我们节目的应该")),
+        SubtitleEntry(index=1, start=33.2, end=35.12, text_raw="可以看出来啊少了一个小", text_norm=normalize_text("可以看出来啊少了一个小")),
+        SubtitleEntry(index=2, start=35.12, end=35.52, text_raw="兄弟", text_norm=normalize_text("兄弟")),
+        SubtitleEntry(index=3, start=35.62, end=37.52, text_raw="少了一个小兄弟啊那", text_norm=normalize_text("少了一个小兄弟啊那")),
+        SubtitleEntry(index=4, start=37.62, end=39.52, text_raw="小兄弟就是这个EDC二三", text_norm=normalize_text("小兄弟就是这个EDC二三")),
+        SubtitleEntry(index=5, start=39.62, end=41.52, text_raw="现在被这个新兄弟取代", text_norm=normalize_text("现在被这个新兄弟取代")),
+        SubtitleEntry(index=6, start=41.62, end=43.52, text_raw="那么这一期给大家讲讲", text_norm=normalize_text("那么这一期给大家讲讲")),
+        SubtitleEntry(index=7, start=43.62, end=45.52, text_raw="也算一个简单的开箱", text_norm=normalize_text("也算一个简单的开箱")),
+        SubtitleEntry(index=8, start=45.62, end=47.52, text_raw="盒子里面东西不算复杂", text_norm=normalize_text("盒子里面东西不算复杂")),
+        SubtitleEntry(index=9, start=47.62, end=49.52, text_raw="我们直接来看手电本体", text_norm=normalize_text("我们直接来看手电本体")),
+        SubtitleEntry(index=10, start=49.62, end=51.52, text_raw="先看一下尾部结构", text_norm=normalize_text("先看一下尾部结构")),
+        SubtitleEntry(index=11, start=51.62, end=53.52, text_raw="再看一下正面的按键", text_norm=normalize_text("再看一下正面的按键")),
+    ]
+
+    analysis_obj = analyze_subtitle_segmentation(entries)
+
+    assert analysis_obj.low_confidence_window_count >= 2
+    assert analysis_obj.low_confidence_windows
+    assert max(int(window["entry_count"]) for window in analysis_obj.low_confidence_windows) <= 6
+
+
+def test_merge_and_cleanup_trim_repeated_overlap_after_pause():
+    entries = [
+        SubtitleEntry(index=0, start=32.58, end=35.52, text_raw="目的应该可以看出来啊少了一个小兄弟", text_norm=normalize_text("目的应该可以看出来啊少了一个小兄弟")),
+        SubtitleEntry(index=1, start=38.48, end=40.13, text_raw="少了一个小兄弟啊那", text_norm=normalize_text("少了一个小兄弟啊那")),
+        SubtitleEntry(index=2, start=40.13, end=42.33, text_raw="小兄弟就是这个EDC二三啊二", text_norm=normalize_text("小兄弟就是这个EDC二三啊二")),
+    ]
+
+    merged = _merge_continuation_entries(entries, max_chars=18, max_duration=3.4)
+    cleaned = _cleanup_subtitle_entries(merged)
+
+    assert [entry.text_raw for entry in cleaned] == [
+        "目的应该可以看出来啊少了一个小兄弟",
+        "啊那小兄弟就是这个EDC二三啊二",
+    ]
+
+
 def test_segment_subtitles_falls_back_from_synthetic_word_timings():
     segs = [
         _mock_segment(
@@ -853,6 +907,119 @@ def test_segment_subtitles_falls_back_from_synthetic_word_timings():
     assert any("EDC三七" in entry.text_raw for entry in entries)
 
 
+def test_segment_subtitles_uses_synthetic_word_anchors_for_global_boundaries():
+    segs = [
+        _mock_segment(
+            0,
+            21.767,
+            23.74,
+            "另外一把呢就是现",
+            words=[
+                {"word": "另外", "start": 21.767, "end": 22.205, "alignment": {"_roughcut": {"source": "synthetic", "coverage": 0.0}}},
+                {"word": "一把呢", "start": 22.205, "end": 22.863, "alignment": {"_roughcut": {"source": "synthetic", "coverage": 0.0}}},
+                {"word": "就是", "start": 22.863, "end": 23.301, "alignment": {"_roughcut": {"source": "synthetic", "coverage": 0.0}}},
+                {"word": "现", "start": 23.301, "end": 23.74, "alignment": {"_roughcut": {"source": "synthetic", "coverage": 0.0}}},
+            ],
+        ),
+        _mock_segment(
+            1,
+            23.74,
+            29.68,
+            "在这个耐克尔也是前两个月出的这个EDC幺七啊",
+            words=[
+                {"word": "在这个", "start": 23.74, "end": 24.401, "alignment": {"_roughcut": {"source": "synthetic", "coverage": 0.0}}},
+                {"word": "耐克尔", "start": 24.401, "end": 25.061, "alignment": {"_roughcut": {"source": "synthetic", "coverage": 0.0}}},
+                {"word": "也是", "start": 25.061, "end": 25.722, "alignment": {"_roughcut": {"source": "synthetic", "coverage": 0.0}}},
+                {"word": "前两", "start": 25.722, "end": 26.382, "alignment": {"_roughcut": {"source": "synthetic", "coverage": 0.0}}},
+                {"word": "个月", "start": 26.382, "end": 27.042, "alignment": {"_roughcut": {"source": "synthetic", "coverage": 0.0}}},
+                {"word": "出的", "start": 27.042, "end": 27.703, "alignment": {"_roughcut": {"source": "synthetic", "coverage": 0.0}}},
+                {"word": "这个", "start": 27.703, "end": 28.363, "alignment": {"_roughcut": {"source": "synthetic", "coverage": 0.0}}},
+                {"word": "EDC", "start": 28.363, "end": 29.022, "alignment": {"_roughcut": {"source": "synthetic", "coverage": 0.0}}},
+                {"word": "幺七啊", "start": 29.022, "end": 29.68, "alignment": {"_roughcut": {"source": "synthetic", "coverage": 0.0}}},
+            ],
+        ),
+    ]
+
+    entries = split_into_subtitles(segs, max_chars=18, max_duration=3.4)
+
+    assert entries
+    assert not any(entry.text_raw.endswith("另") for entry in entries)
+    assert not any(entry.text_raw.startswith("外一把") for entry in entries[1:])
+    assert not any(entry.text_raw.endswith("现") for entry in entries)
+    assert not any(entry.text_raw.startswith("在这个") for entry in entries[1:])
+    assert not any(entry.text_raw.endswith("另外一") for entry in entries)
+    assert not any(entry.text_raw.startswith("把呢") for entry in entries[1:])
+    assert not any(entry.text_raw.endswith("前两") for entry in entries)
+    assert not any(entry.text_raw.startswith("个月") for entry in entries[1:])
+
+
+def test_segment_subtitles_avoids_predicate_phrase_split():
+    segs = [
+        _mock_segment(
+            0,
+            30.72,
+            35.12,
+            "大家之前看过我们节目的应该可以看出来少了一个小兄弟",
+            words=[
+                {"word": "大家之前", "start": 30.72, "end": 31.48, "alignment": {"_roughcut": {"source": "synthetic", "coverage": 0.0}}},
+                {"word": "看过我们", "start": 31.48, "end": 32.24, "alignment": {"_roughcut": {"source": "synthetic", "coverage": 0.0}}},
+                {"word": "节目的", "start": 32.24, "end": 32.98, "alignment": {"_roughcut": {"source": "synthetic", "coverage": 0.0}}},
+                {"word": "应该", "start": 32.98, "end": 33.38, "alignment": {"_roughcut": {"source": "synthetic", "coverage": 0.0}}},
+                {"word": "可以看出来", "start": 33.38, "end": 34.24, "alignment": {"_roughcut": {"source": "synthetic", "coverage": 0.0}}},
+                {"word": "少了", "start": 34.24, "end": 34.62, "alignment": {"_roughcut": {"source": "synthetic", "coverage": 0.0}}},
+                {"word": "一个小兄弟", "start": 34.62, "end": 35.12, "alignment": {"_roughcut": {"source": "synthetic", "coverage": 0.0}}},
+            ],
+        ),
+    ]
+
+    entries = split_into_subtitles(segs, max_chars=18, max_duration=3.4)
+
+    assert entries
+    assert any("应该可以看出来" in entry.text_raw for entry in entries)
+    assert not any(entry.text_raw.endswith("应该") for entry in entries)
+    assert not any(entry.text_raw.startswith("可以看出来") for entry in entries[1:])
+
+
+def test_merge_continuation_entries_repairs_compound_and_possessive_splits():
+    entries = [
+        SubtitleEntry(index=0, start=22.1, end=23.6, text_raw="好说的耐克尔", text_norm=normalize_text("好说的耐克尔")),
+        SubtitleEntry(index=1, start=23.64, end=25.68, text_raw="家的这个特色都在这个东西", text_norm=normalize_text("家的这个特色都在这个东西")),
+        SubtitleEntry(index=2, start=30.72, end=33.2, text_raw="可以大家之前看过我们节", text_norm=normalize_text("可以大家之前看过我们节")),
+        SubtitleEntry(index=3, start=33.2, end=35.12, text_raw="目的应该可以看出来少了一个小兄弟", text_norm=normalize_text("目的应该可以看出来少了一个小兄弟")),
+        SubtitleEntry(index=4, start=35.18, end=36.88, text_raw="那小兄弟就是这个新", text_norm=normalize_text("那小兄弟就是这个新")),
+        SubtitleEntry(index=5, start=36.9, end=38.8, text_raw="兄弟EDC17", text_norm=normalize_text("兄弟EDC17")),
+    ]
+
+    merged = _merge_continuation_entries(entries, max_chars=18, max_duration=3.4)
+
+    assert [entry.text_raw for entry in merged] == [
+        "好说的耐克尔家的这个特色都在这个东西",
+        "可以大家之前看过我们节目的应该可以看出来少了一个小兄弟",
+        "那小兄弟就是这个新兄弟EDC17",
+    ]
+
+
+def test_split_measure_phrase_detects_front_two_month_boundary():
+    assert _looks_like_split_measure_phrase("另外一把呢就是现在这个耐克尔也是前", "两个月出的这个EDC幺七啊呃") is True
+
+
+def test_predicate_phrase_detects_seen_our_program_boundary():
+    assert _should_merge_subtitle_pair("可以大家之前看过", "我们节目的应该可以看出来啊少了一个小兄弟") is True
+
+
+def test_compound_phrase_detects_our_program_boundary():
+    assert _should_merge_subtitle_pair("可以大家之前看过我们", "节目的应该可以看出来啊少了一个小兄弟") is True
+
+
+def test_model_suffix_boundary_detects_repeated_digit_continuation():
+    assert _should_merge_subtitle_pair("啊那小兄弟就是这个EDC二三啊二", "三已经呃荣誉退") is True
+
+
+def test_should_merge_subtitle_pair_for_honor_transition_phrase():
+    assert _should_merge_subtitle_pair("那小兄弟就是这个EDC23已经", "荣誉退役了它现在被这个新") is True
+    assert _should_merge_subtitle_pair("兄弟EDC17光荣", "取代了那么为什么这期给大家讲") is True
+
+
 def test_segment_subtitles_reports_untrusted_word_input_stats():
     segs = [
         _mock_segment(
@@ -879,7 +1046,7 @@ def test_segment_subtitles_reports_untrusted_word_input_stats():
     assert result["synthetic_word_segment_count"] == 1
     assert result["text_only_segment_count"] == 1
     assert result["provider_word_segment_count"] == 0
-    assert result["global_word_segmentation_used"] is False
+    assert result["global_word_segmentation_used"] is True
 
 
 def test_split_into_subtitles_normalizes_filler_words_and_numbers_for_display():

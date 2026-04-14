@@ -333,6 +333,55 @@ def test_packaging_library_recommends_suspense_bundle_for_teaser_language(tmp_pa
     assert plan["style_template_bundle_auto_applied"] is True
 
 
+def test_packaging_library_disables_color_shift_effects_for_unboxing_profiles(tmp_path, monkeypatch):
+    monkeypatch.setattr(library, "PACKAGING_ROOT", tmp_path)
+    monkeypatch.setattr(library, "MANIFEST_PATH", tmp_path / "manifest.json")
+
+    library.update_packaging_config(
+        {
+            "smart_effect_style": "smart_effect_glitch",
+        }
+    )
+
+    plan = library.resolve_packaging_plan_for_job(
+        str(uuid.uuid4()),
+        content_profile={
+            "workflow_template": "unboxing_standard",
+            "video_type": "unboxing",
+            "video_theme": "参数开箱评测",
+        },
+    )
+
+    assert plan["smart_effect_style"] not in {
+        "smart_effect_glitch",
+        "smart_effect_cinematic",
+        "smart_effect_atmosphere",
+    }
+
+
+def test_packaging_library_avoids_color_shift_styles_for_unboxing_specs(tmp_path, monkeypatch):
+    monkeypatch.setattr(library, "PACKAGING_ROOT", tmp_path)
+    monkeypatch.setattr(library, "MANIFEST_PATH", tmp_path / "manifest.json")
+
+    plan = library.resolve_packaging_plan_for_job(
+        str(uuid.uuid4()),
+        content_profile={
+            "workflow_template": "unboxing_standard",
+            "video_type": "unboxing",
+            "subject_domain": "tools",
+            "video_theme": "多功能工具钳参数评测",
+            "summary": "重点看参数、版本和接口差异",
+        },
+    )
+
+    assert plan["style_template_bundle_recommended_key"] != "hardcore_specs"
+    assert plan["smart_effect_style"] not in {
+        "smart_effect_glitch",
+        "smart_effect_cinematic",
+        "smart_effect_atmosphere",
+    }
+
+
 def test_packaging_library_music_selection_prefers_tech_domain_over_template_name(tmp_path, monkeypatch):
     monkeypatch.setattr(library, "PACKAGING_ROOT", tmp_path)
     monkeypatch.setattr(library, "MANIFEST_PATH", tmp_path / "manifest.json")

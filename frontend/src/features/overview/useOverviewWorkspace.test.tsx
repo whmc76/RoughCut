@@ -75,6 +75,7 @@ const SAMPLE_ROOTS: WatchRoot[] = [
     workflow_template: "edc_tactical",
     enabled: true,
     scan_mode: "fast",
+    ingest_mode: "full_auto",
     created_at: "2026-03-12T10:00:00Z",
   },
 ];

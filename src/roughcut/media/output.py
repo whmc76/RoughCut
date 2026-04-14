@@ -23,7 +23,12 @@ from typing import Any
 from roughcut.config import get_settings
 from roughcut.providers.multimodal import complete_with_images
 from roughcut.providers.reasoning.base import extract_json_text
-from roughcut.review.content_profile import _mapped_brand_for_model, _normalize_profile_value, _seed_profile_from_text
+from roughcut.review.content_profile import (
+    _identity_values_compatible,
+    _mapped_brand_for_model,
+    _normalize_profile_value,
+    _seed_profile_from_text,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -214,13 +219,13 @@ def _candidate_conflicts_with_subject(text: str, *, brand: str, model: str) -> b
     seeded = _seed_profile_from_text(candidate)
     candidate_brand = str(seeded.get("subject_brand") or "").strip()
     candidate_model = str(seeded.get("subject_model") or "").strip()
-    if candidate_brand and brand and _normalize_profile_value(candidate_brand) != _normalize_profile_value(brand):
+    if candidate_brand and brand and not _identity_values_compatible(candidate_brand, brand):
         return True
-    if candidate_model and model and _normalize_profile_value(candidate_model) != _normalize_profile_value(model):
+    if candidate_model and model and not _identity_values_compatible(candidate_model, model):
         return True
     mapped_brand = _mapped_brand_for_model(candidate_model or model)
     effective_brand = candidate_brand or brand
-    if mapped_brand and effective_brand and _normalize_profile_value(effective_brand) != _normalize_profile_value(mapped_brand):
+    if mapped_brand and effective_brand and not _identity_values_compatible(effective_brand, mapped_brand):
         return True
     return False
 
@@ -340,104 +345,130 @@ async def extract_cover_frame(
     """
     settings = get_settings()
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    fallback_title = _resolve_cover_title(content_profile)
+    resolved_cover_style = (
+        str(cover_style).strip()
+        if cover_style and str(cover_style).strip() and str(cover_style) != "preset_default"
+        else (content_profile or {}).get("preset", {}).get("cover_style", "tech_showcase")
+    )
+    resolved_title_style = str(title_style or "preset_default").strip() or "preset_default"
 
-    duration = _probe_duration(video_path)
-    variant_count = max(5, settings.cover_output_variants)
+    try:
+        duration = _probe_duration(video_path)
+        variant_count = max(5, settings.cover_output_variants)
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        tmp = Path(tmpdir)
-        if duration > 0:
-            candidates = _sample_cover_candidates(
-                video_path,
-                duration=duration,
-                anchor_seek=seek_sec,
-                candidate_count=max(settings.cover_candidate_count, variant_count),
-                tmpdir=tmp,
-            )
-        else:
-            candidates = []
-
-        if not candidates:
-            candidates = [{"seek": seek_sec, "preview": None}]
-
-        ranked_candidates = await _rank_cover_candidates(
-            candidates,
-            content_profile=content_profile,
-            variant_count=variant_count,
-        )
-        selected_rankings = [item for item in ranked_candidates[:variant_count] if int(item.get("index", -1)) < len(candidates)]
-        selected = [candidates[int(item["index"])] for item in selected_rankings]
-        if not selected:
-            selected_rankings = [{"index": 0, "score": 0.0, "reason": "", "source": "fallback"}]
-            selected = [candidates[0]]
-        if len(selected) < variant_count:
-            chosen_indices = {int(item.get("index", -1)) for item in selected_rankings}
-            for idx, candidate in enumerate(candidates):
-                if idx in chosen_indices:
-                    continue
-                selected.append(candidate)
-                selected_rankings.append(
-                    {
-                        "index": idx,
-                        "score": 0.0,
-                        "reason": "",
-                        "source": "fallback_fill",
-                    }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            if duration > 0:
+                candidates = _sample_cover_candidates(
+                    video_path,
+                    duration=duration,
+                    anchor_seek=seek_sec,
+                    candidate_count=max(settings.cover_candidate_count, variant_count),
+                    tmpdir=tmp,
                 )
-                if len(selected) >= variant_count:
-                    break
+            else:
+                candidates = []
 
-        fallback_title = _resolve_cover_title(content_profile)
-        title_variants = await _generate_cover_title_variants(
-            selected,
-            content_profile=content_profile,
-            fallback=fallback_title,
-            variant_count=variant_count,
-        )
-        resolved_cover_style = (
-            str(cover_style).strip()
-            if cover_style and str(cover_style).strip() and str(cover_style) != "preset_default"
-            else (content_profile or {}).get("preset", {}).get("cover_style", "tech_showcase")
-        )
-        resolved_title_style = str(title_style or "preset_default").strip() or "preset_default"
-        dimensions = _probe_video_dimensions(video_path)
-        is_portrait = bool(dimensions and dimensions[1] > dimensions[0])
-        selected, selected_rankings, title_variants = _prioritize_cover_variants(
-            selected,
-            selected_rankings,
-            title_variants,
-            is_portrait=is_portrait,
-        )
+            if not candidates:
+                candidates = [{"seek": seek_sec, "preview": None}]
 
-        outputs: list[Path] = []
-        for i, candidate in enumerate(selected):
-            plan = title_variants[i] if i < len(title_variants) else None
-            strategy_key = plan.get("strategy_key") if isinstance(plan, dict) else None
-            target = build_cover_variant_output_path(output_path, i, strategy_key)
-            await _extract_frame(video_path, target, candidate["seek"])
-            title_lines = plan.get("title") if isinstance(plan, dict) else fallback_title
-            resolved_variant_title_style = resolved_title_style
-            if resolved_variant_title_style == "preset_default" and isinstance(plan, dict):
-                resolved_variant_title_style = str(plan.get("title_style") or "preset_default")
-            if title_lines:
-                try:
-                    await _overlay_title_layout(target, title_lines, resolved_cover_style, resolved_variant_title_style)
-                except Exception:
-                    pass
-            outputs.append(target)
-        if outputs:
-            shutil.copy2(outputs[0], output_path)
-        selection_summary = _build_cover_selection_summary(selected_rankings)
+            ranked_candidates = await _rank_cover_candidates(
+                candidates,
+                content_profile=content_profile,
+                variant_count=variant_count,
+            )
+            selected_rankings = [item for item in ranked_candidates[:variant_count] if int(item.get("index", -1)) < len(candidates)]
+            selected = [candidates[int(item["index"])] for item in selected_rankings]
+            if not selected:
+                selected_rankings = [{"index": 0, "score": 0.0, "reason": "", "source": "fallback"}]
+                selected = [candidates[0]]
+            if len(selected) < variant_count:
+                chosen_indices = {int(item.get("index", -1)) for item in selected_rankings}
+                for idx, candidate in enumerate(candidates):
+                    if idx in chosen_indices:
+                        continue
+                    selected.append(candidate)
+                    selected_rankings.append(
+                        {
+                            "index": idx,
+                            "score": 0.0,
+                            "reason": "",
+                            "source": "fallback_fill",
+                        }
+                    )
+                    if len(selected) >= variant_count:
+                        break
+
+            title_variants = await _generate_cover_title_variants(
+                selected,
+                content_profile=content_profile,
+                fallback=fallback_title,
+                variant_count=variant_count,
+            )
+            dimensions = _probe_video_dimensions(video_path)
+            is_portrait = bool(dimensions and dimensions[1] > dimensions[0])
+            selected, selected_rankings, title_variants = _prioritize_cover_variants(
+                selected,
+                selected_rankings,
+                title_variants,
+                is_portrait=is_portrait,
+            )
+
+            outputs: list[Path] = []
+            for i, candidate in enumerate(selected):
+                plan = title_variants[i] if i < len(title_variants) else None
+                strategy_key = plan.get("strategy_key") if isinstance(plan, dict) else None
+                target = build_cover_variant_output_path(output_path, i, strategy_key)
+                await _extract_frame(video_path, target, candidate["seek"])
+                title_lines = plan.get("title") if isinstance(plan, dict) else fallback_title
+                resolved_variant_title_style = resolved_title_style
+                if resolved_variant_title_style == "preset_default" and isinstance(plan, dict):
+                    resolved_variant_title_style = str(plan.get("title_style") or "preset_default")
+                if title_lines:
+                    try:
+                        await _overlay_title_layout(target, title_lines, resolved_cover_style, resolved_variant_title_style)
+                    except Exception:
+                        pass
+                outputs.append(target)
+            if outputs:
+                shutil.copy2(outputs[0], output_path)
+            selection_summary = _build_cover_selection_summary(selected_rankings)
+            _write_cover_variant_manifest(
+                output_path,
+                selected,
+                title_variants,
+                outputs,
+                rankings=selected_rankings,
+                selection_summary=selection_summary,
+            )
+
+        return outputs
+    except Exception:
+        logger.exception("Cover generation failed for %s, falling back to a basic extracted frame", video_path)
+        await _extract_frame(video_path, output_path, seek_sec)
+        if fallback_title:
+            try:
+                await _overlay_title_layout(output_path, fallback_title, resolved_cover_style, resolved_title_style)
+            except Exception:
+                logger.debug("Fallback cover title overlay failed for %s", output_path, exc_info=True)
         _write_cover_variant_manifest(
             output_path,
-            selected,
-            title_variants,
-            outputs,
-            rankings=selected_rankings,
-            selection_summary=selection_summary,
+            selected=[{"seek": seek_sec, "preview": None}],
+            title_variants=[
+                {
+                    "strategy_key": "fallback",
+                    "strategy_label": "基础兜底",
+                    "reason": "cover_generation_fallback",
+                    "title_style": resolved_title_style,
+                    "title": fallback_title,
+                }
+            ],
+            outputs=[output_path],
+            rankings=[{"index": 0, "score": 0.0, "reason": "cover_generation_fallback", "source": "fallback"}],
+            selection_summary={},
         )
-
-    return outputs
+        return [output_path]
 
 
 def _probe_duration(video_path: Path) -> float:
@@ -1898,14 +1929,56 @@ def _escape_drawtext(text: str) -> str:
 
 
 def write_srt_file(subtitle_items: list[dict], output_path: Path) -> Path:
+    validation_issues = _collect_srt_timeline_issues(subtitle_items)
+    if validation_issues:
+        raise ValueError("invalid_subtitle_timeline: " + "; ".join(validation_issues))
+    ordered_items = sorted(subtitle_items, key=_subtitle_srt_sort_key)
     lines: list[str] = []
-    for i, item in enumerate(subtitle_items, 1):
+    for i, item in enumerate(ordered_items, 1):
         start = _srt_time(item["start_time"])
         end = _srt_time(item["end_time"])
         text = item.get("text_final") or item.get("text_norm") or item.get("text_raw", "")
         lines.append(f"{i}\n{start} --> {end}\n{text}\n")
     output_path.write_text("\n".join(lines), encoding="utf-8-sig")
     return output_path
+
+
+def _subtitle_srt_sort_key(item: dict[str, Any]) -> tuple[float, float, int]:
+    try:
+        start = float(item.get("start_time", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        start = 0.0
+    try:
+        end = float(item.get("end_time", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        end = start
+    try:
+        index = int(item.get("index", item.get("item_index", 0)) or 0)
+    except (TypeError, ValueError):
+        index = 0
+    return (start, end, index)
+
+
+def _collect_srt_timeline_issues(subtitle_items: list[dict[str, Any]]) -> list[str]:
+    issues: list[str] = []
+    previous_sort_key: tuple[float, float, int] | None = None
+    for position, item in enumerate(subtitle_items, 1):
+        sort_key = _subtitle_srt_sort_key(item)
+        start, end, _ = sort_key
+        if end < start:
+            issues.append(f"cue_{position}_negative_duration")
+        if previous_sort_key is not None and sort_key < previous_sort_key:
+            issues.append(f"cue_{position}_timestamp_disorder")
+        previous_sort_key = sort_key
+
+    ordered_items = sorted(subtitle_items, key=_subtitle_srt_sort_key)
+    previous_end = 0.0
+    for position, item in enumerate(ordered_items, 1):
+        start, end, _ = _subtitle_srt_sort_key(item)
+        if position > 1 and start < previous_end - 0.001:
+            issues.append(f"cue_{position}_overlap")
+        previous_end = max(previous_end, end)
+    return issues
 
 
 def _srt_time(seconds: float) -> str:

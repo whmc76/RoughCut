@@ -10,8 +10,24 @@ from roughcut.api.schemas import BuiltinGlossaryPackOut, GlossaryTermCreate, Glo
 from roughcut.db.models import GlossaryTerm
 from roughcut.db.session import get_session
 from roughcut.review.domain_glossaries import list_builtin_glossary_packs
+from roughcut.review.model_identity import model_numbers_conflict
 
 router = APIRouter(prefix="/glossary", tags=["glossary"])
+
+
+def _sanitize_glossary_wrong_forms(correct_form: str, wrong_forms: list[str] | None) -> list[str]:
+    sanitized: list[str] = []
+    seen: set[str] = set()
+    canonical = str(correct_form or "").strip()
+    for item in wrong_forms or []:
+        value = str(item or "").strip()
+        if not value or value == canonical or value in seen:
+            continue
+        if model_numbers_conflict(value, canonical):
+            continue
+        seen.add(value)
+        sanitized.append(value)
+    return sanitized
 
 
 @router.get("", response_model=list[GlossaryTermOut])
@@ -42,7 +58,7 @@ async def create_term(
     term = GlossaryTerm(
         scope_type=body.scope_type,
         scope_value=body.scope_value,
-        wrong_forms=body.wrong_forms,
+        wrong_forms=_sanitize_glossary_wrong_forms(body.correct_form, body.wrong_forms),
         correct_form=body.correct_form,
         category=body.category,
         context_hint=body.context_hint,
@@ -72,7 +88,10 @@ async def update_term(
         raise HTTPException(status_code=404, detail="Term not found")
 
     if body.wrong_forms is not None:
-        term.wrong_forms = body.wrong_forms
+        term.wrong_forms = _sanitize_glossary_wrong_forms(
+            body.correct_form if body.correct_form is not None else term.correct_form,
+            body.wrong_forms,
+        )
     if body.scope_type is not None:
         term.scope_type = body.scope_type
     if body.scope_value is not None:
@@ -83,6 +102,8 @@ async def update_term(
         term.category = body.category
     if body.context_hint is not None:
         term.context_hint = body.context_hint
+
+    term.wrong_forms = _sanitize_glossary_wrong_forms(term.correct_form, term.wrong_forms)
 
     await session.commit()
     await session.refresh(term)

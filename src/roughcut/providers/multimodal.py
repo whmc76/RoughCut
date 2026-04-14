@@ -254,7 +254,10 @@ async def _complete_once_unthrottled(
         text_options = build_text_options(json_mode=json_mode)
         if text_options:
             payload["text"] = text_options
-        reasoning_options = build_reasoning_options(model, effort="medium")
+        reasoning_options = build_reasoning_options(
+            model,
+            effort=str(getattr(settings, "active_reasoning_effort", "medium") or "medium"),
+        )
         if reasoning_options:
             payload["reasoning"] = reasoning_options
         response = await client.responses.create(**payload)

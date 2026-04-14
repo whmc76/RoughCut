@@ -43,6 +43,7 @@ x-app-common: &app-common
     - ./logs:/app/logs
     - ./watch:/app/watch
     - ${HEYGEM_SHARED_HOST_DIR:-E:/WorkSpace/heygem/data}:/code/data
+    - ${ROUGHCUT_CODEX_AUTH_HOST_DIR:-C:/Users/28687/.codex}:/host-codex:ro
   depends_on:
     postgres:
       condition: service_healthy

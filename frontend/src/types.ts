@@ -12,6 +12,7 @@ export type Job = {
   id: string;
   source_name: string;
   merged_source_names?: string[];
+  video_description?: string | null;
   content_subject?: string | null;
   content_summary?: string | null;
   quality_score?: number | null;
@@ -40,6 +41,10 @@ export type Job = {
   auto_review_status?: string | null;
   auto_review_summary?: string | null;
   auto_review_reasons?: string[];
+  review_step?: "summary_review" | "final_review" | null;
+  review_label?: string | null;
+  review_detail?: string | null;
+  awaiting_initialization?: boolean;
   output_dir?: string | null;
   file_hash?: string | null;
   error_message?: string | null;
@@ -58,6 +63,8 @@ export type JobTimeline = {
 export type JobActivity = {
   job_id: string;
   status: string;
+  review_step?: "summary_review" | "final_review" | null;
+  review_detail?: string | null;
   current_step: {
     step_name: string;
     label: string;
@@ -74,6 +81,7 @@ export type JobActivity = {
   } | null;
   decisions: Array<{
     kind: string;
+    step_name?: string | null;
     title: string;
     status: string;
     summary: string;
@@ -84,6 +92,7 @@ export type JobActivity = {
     timestamp: string;
     type: string;
     status: string;
+    step_name?: string | null;
     title: string;
     detail?: string | null;
     [key: string]: unknown;
@@ -274,6 +283,7 @@ export type WatchRoot = {
   output_dir?: string | null;
   enabled: boolean;
   scan_mode: "fast" | "precise";
+  ingest_mode: "task_only" | "full_auto";
   created_at: string;
 };
 

@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from roughcut.config import get_settings
 from roughcut.db.models import GlossaryTerm, SubtitleCorrection, SubtitleItem
+from roughcut.review.model_identity import filter_conflicting_model_wrong_forms as _shared_filter_conflicting_model_wrong_forms
 
 
 @dataclass
@@ -99,6 +100,10 @@ def _is_low_risk_brand_normalization(original: str, suggested: str) -> bool:
     return bool(source and target and source == target and source != str(original or "").strip())
 
 
+def _filter_conflicting_model_wrong_forms(correct_form: str, wrong_forms: list[Any]) -> list[str]:
+    return _shared_filter_conflicting_model_wrong_forms(correct_form=correct_form, wrong_forms=wrong_forms)
+
+
 async def apply_glossary_corrections(
     job_id: uuid.UUID,
     subtitle_items: list[SubtitleItem],
@@ -126,6 +131,7 @@ async def apply_glossary_corrections(
         for term in terms:
             correct_form = str(term.correct_form if isinstance(term, GlossaryTerm) else term.get("correct_form") or "").strip()
             wrong_forms = term.wrong_forms if isinstance(term, GlossaryTerm) else list(term.get("wrong_forms") or [])
+            wrong_forms = _filter_conflicting_model_wrong_forms(correct_form, list(wrong_forms or []))
             category = str(term.category if isinstance(term, GlossaryTerm) else term.get("category") or "")
             if not correct_form:
                 continue

@@ -14,6 +14,7 @@ class IdentityEvidenceBundle:
     visible_text_hints: dict[str, Any]
     profile_identity: dict[str, Any]
     source_context_hints: dict[str, Any] = field(default_factory=dict)
+    source_visual_overlap_hints: dict[str, Any] = field(default_factory=dict)
     visual_cluster_hints: dict[str, Any] = field(default_factory=dict)
     memory_confirmed_hints: dict[str, Any] = field(default_factory=dict)
     transcript_source_labels: dict[str, Any] = field(default_factory=dict)

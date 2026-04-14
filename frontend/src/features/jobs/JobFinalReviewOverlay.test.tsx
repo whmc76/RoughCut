@@ -208,6 +208,7 @@ describe("JobFinalReviewOverlay", () => {
     expect(screen.getByRole("button", { name: "打开成片" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "下载" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "打开文件夹" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "通过并生成平台文案" })).toBeInTheDocument();
     expect(screen.queryByTestId("final-review-preview-player")).not.toBeInTheDocument();
   });
 

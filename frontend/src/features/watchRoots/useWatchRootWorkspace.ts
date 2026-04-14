@@ -13,6 +13,7 @@ function serializeRootForm(form: RootForm): string {
     output_dir: form.output_dir,
     enabled: form.enabled,
     scan_mode: form.scan_mode,
+    ingest_mode: form.ingest_mode,
   });
 }
 
@@ -54,6 +55,7 @@ export function useWatchRootWorkspace() {
         output_dir: selectedRoot.output_dir || "",
         enabled: selectedRoot.enabled,
         scan_mode: selectedRoot.scan_mode,
+        ingest_mode: selectedRoot.ingest_mode,
       };
       lastPersistedRef.current = serializeRootForm(nextForm);
       setForm(nextForm);
@@ -160,6 +162,7 @@ export function useWatchRootWorkspace() {
             output_dir: updatedRoot.output_dir || "",
             enabled: updatedRoot.enabled,
             scan_mode: updatedRoot.scan_mode,
+            ingest_mode: updatedRoot.ingest_mode,
           });
           preserveSavedStateRef.current = true;
           queryClient.setQueryData(["watch-roots"], (current: typeof roots.data) =>

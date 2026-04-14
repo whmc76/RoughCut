@@ -442,6 +442,7 @@ def _normalize_config_snapshot(config: dict[str, Any]) -> dict[str, Any]:
     ).strip().lower() or settings.llm_routing_mode
     normalized["reasoning_provider"] = str(normalized.get("reasoning_provider") or settings.reasoning_provider).strip().lower()
     normalized["reasoning_model"] = str(normalized.get("reasoning_model") or settings.reasoning_model).strip()
+    normalized["reasoning_effort"] = str(normalized.get("reasoning_effort") or settings.reasoning_effort).strip().lower()
     normalized["local_reasoning_model"] = str(
         normalized.get("local_reasoning_model") or settings.local_reasoning_model
     ).strip()
@@ -452,6 +453,9 @@ def _normalize_config_snapshot(config: dict[str, Any]) -> dict[str, Any]:
     normalized["hybrid_analysis_model"] = str(
         normalized.get("hybrid_analysis_model") or settings.hybrid_analysis_model
     ).strip()
+    normalized["hybrid_analysis_effort"] = str(
+        normalized.get("hybrid_analysis_effort") or settings.hybrid_analysis_effort
+    ).strip().lower()
     normalized["hybrid_analysis_search_mode"] = str(
         normalized.get("hybrid_analysis_search_mode") or settings.hybrid_analysis_search_mode
     ).strip().lower()
@@ -461,6 +465,9 @@ def _normalize_config_snapshot(config: dict[str, Any]) -> dict[str, Any]:
     normalized["hybrid_copy_model"] = str(
         normalized.get("hybrid_copy_model") or settings.hybrid_copy_model
     ).strip()
+    normalized["hybrid_copy_effort"] = str(
+        normalized.get("hybrid_copy_effort") or settings.hybrid_copy_effort
+    ).strip().lower()
     normalized["hybrid_copy_search_mode"] = str(
         normalized.get("hybrid_copy_search_mode") or settings.hybrid_copy_search_mode
     ).strip().lower()

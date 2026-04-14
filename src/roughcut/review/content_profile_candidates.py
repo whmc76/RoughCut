@@ -18,6 +18,7 @@ def build_identity_candidates(bundle: IdentityEvidenceBundle) -> list[IdentityCa
     source_maps: list[tuple[str, dict[str, str]]] = [
         ("transcript_labels", bundle.transcript_source_labels),
         ("source_context", bundle.source_context_hints),
+        ("source_visual_overlap", bundle.source_visual_overlap_hints),
         ("ocr", bundle.ocr_hints),
         ("profile", bundle.profile_identity),
         ("memory_confirmed", bundle.memory_confirmed_hints),
@@ -72,6 +73,11 @@ def _source_excerpt(bundle: IdentityEvidenceBundle, source_type: str) -> str:
         if source_names:
             return " | ".join(source_names[:3])
         return str((bundle.source_context_hints or {}).get("video_description") or "").strip()
+    if source_type == "source_visual_overlap":
+        visible_text = str((bundle.source_visual_overlap_hints or {}).get("visible_text") or "").strip()
+        if visible_text:
+            return f"{bundle.source_name} | {visible_text}"
+        return bundle.source_name
     if source_type == "visible_text":
         return str((bundle.visible_text_hints or {}).get("visible_text") or "").strip()
     if source_type == "ocr":

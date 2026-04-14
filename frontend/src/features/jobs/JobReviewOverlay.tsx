@@ -144,7 +144,7 @@ export function JobReviewOverlay({
               contentKeywords={contentKeywords}
               isConfirmingProfile={isConfirmingProfile}
               reviewStepStatus={contentProfile?.review_step_status ?? activity?.current_step?.status ?? null}
-              reviewDetail={contentProfile?.review_step_detail ?? activity?.current_step?.detail ?? null}
+              reviewDetail={contentProfile?.review_step_detail ?? activity?.review_detail ?? activity?.current_step?.detail ?? null}
               reviewReasons={contentProfile?.review_reasons}
               blockingReasons={contentProfile?.blocking_reasons}
               onContentFieldChange={onContentFieldChange}
@@ -155,7 +155,7 @@ export function JobReviewOverlay({
             <JobFinalReviewOverlay
               selectedJob={selectedJob}
               report={report}
-              reviewDetail={activity?.current_step?.detail ?? null}
+              reviewDetail={activity?.review_detail ?? activity?.current_step?.detail ?? selectedJob.review_detail ?? null}
               rejectNote={rejectNote}
               previewSrc={previewSrc}
               selectedRejectReasons={selectedRejectReasons}

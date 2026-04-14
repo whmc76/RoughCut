@@ -37,6 +37,7 @@ export function WatchRootList({ roots, selectedRootId, onSelect, onCreateNew }: 
             </div>
             <div className="row-meta">
               <span className={`status-chip ${root.enabled ? "done" : "cancelled"}`}>{root.enabled ? t("watch.list.enabled") : t("watch.list.disabled")}</span>
+              <span>{root.ingest_mode === "task_only" ? t("watch.list.modeTaskOnly") : t("watch.list.modeFullAuto")}</span>
               <span>{root.scan_mode}</span>
             </div>
           </ListCard>

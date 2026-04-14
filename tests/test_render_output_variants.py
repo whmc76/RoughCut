@@ -393,6 +393,36 @@ async def test_map_subtitles_to_packaged_timeline_resegments_copy_by_section(mon
 
 
 @pytest.mark.asyncio
+async def test_map_subtitles_to_packaged_timeline_does_not_resegment_punctuation_only_change(monkeypatch: pytest.MonkeyPatch):
+    class DummyMeta:
+        def __init__(self, duration: float) -> None:
+            self.duration = duration
+
+    async def fake_probe(path):
+        return DummyMeta(0.0)
+
+    monkeypatch.setattr(steps_mod, "probe", fake_probe)
+
+    mapped = await steps_mod._map_subtitles_to_packaged_timeline(
+        [
+            {"start_time": 0.0, "end_time": 4.2, "text_final": "那小兄弟就是这个EDC23已经"}
+        ],
+        {
+            "subtitles": {
+                "section_profiles": [
+                    {"role": "detail", "start_sec": 0.0, "end_sec": 4.3},
+                ]
+            }
+        },
+    )
+
+    assert len(mapped) == 1
+    assert mapped[0]["text_final"] == "那小兄弟就是这个EDC23已经"
+    assert "text_original_final" not in mapped[0]
+    assert "subtitle_copy_strategy" not in mapped[0]
+
+
+@pytest.mark.asyncio
 async def test_map_editing_accents_to_packaged_timeline_offsets_transition_overlap(monkeypatch: pytest.MonkeyPatch):
     class DummyMeta:
         def __init__(self, duration: float) -> None:

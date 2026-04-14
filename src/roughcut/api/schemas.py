@@ -67,6 +67,18 @@ class JobCreate(BaseModel):
         return normalized[:4000] or None
 
 
+class JobInitializeIn(JobCreate):
+    video_description: str
+
+    @field_validator("video_description", mode="before")
+    @classmethod
+    def require_video_description(cls, value: Any) -> str:
+        normalized = str(value or "").strip()
+        if not normalized:
+            raise ValueError("video_description is required")
+        return normalized[:4000]
+
+
 class JobStepOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -85,6 +97,7 @@ class JobOut(BaseModel):
     id: uuid.UUID
     source_name: str
     merged_source_names: list[str] = Field(default_factory=list)
+    video_description: str | None = None
     content_subject: str | None = None
     content_summary: str | None = None
     quality_score: float | None = None
@@ -104,6 +117,10 @@ class JobOut(BaseModel):
     auto_review_status: str | None = None
     auto_review_summary: str | None = None
     auto_review_reasons: list[str] = Field(default_factory=list)
+    review_step: Literal["summary_review", "final_review"] | None = None
+    review_label: str | None = None
+    review_detail: str | None = None
+    awaiting_initialization: bool = False
     file_hash: str | None
     error_message: str | None
     progress_percent: int = 0
@@ -123,6 +140,7 @@ class JobActivityCurrentStepOut(BaseModel):
 
 class JobActivityDecisionOut(BaseModel):
     kind: str
+    step_name: str | None = None
     title: str
     status: str
     summary: str
@@ -134,6 +152,7 @@ class JobActivityEventOut(BaseModel):
     timestamp: str
     type: str
     status: str
+    step_name: str | None = None
     title: str
     detail: str | None = None
 
@@ -148,6 +167,8 @@ class JobActivityRenderOut(BaseModel):
 class JobActivityOut(BaseModel):
     job_id: str
     status: str
+    review_step: Literal["summary_review", "final_review"] | None = None
+    review_detail: str | None = None
     current_step: JobActivityCurrentStepOut | None = None
     render: JobActivityRenderOut | None = None
     decisions: list[JobActivityDecisionOut]
@@ -626,6 +647,7 @@ class WatchRootCreate(BaseModel):
     output_dir: str | None = None
     enabled: bool = True
     scan_mode: Literal["fast", "precise"] = "fast"
+    ingest_mode: Literal["task_only", "full_auto"] = "full_auto"
 
     @field_validator("config_profile_id", mode="before")
     @classmethod
@@ -658,6 +680,7 @@ class WatchRootOut(BaseModel):
     output_dir: str | None
     enabled: bool
     scan_mode: Literal["fast", "precise"]
+    ingest_mode: Literal["task_only", "full_auto"]
     created_at: datetime
 
 

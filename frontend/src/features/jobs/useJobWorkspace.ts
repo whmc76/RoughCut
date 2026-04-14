@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { api } from "../../api";
+import type { Job, JobActivity } from "../../types";
 import { normalizeKeywordList } from "./contentProfile";
 import type { UploadForm } from "./constants";
 
@@ -15,9 +16,21 @@ const EMPTY_UPLOAD: UploadForm = {
   videoDescription: "",
 };
 
+type PendingInitializationForm = Omit<UploadForm, "files">;
+
+const EMPTY_PENDING_INITIALIZATION: PendingInitializationForm = {
+  language: "zh-CN",
+  workflowTemplate: "",
+  workflowMode: "standard_edit",
+  enhancementModes: [],
+  outputDir: "",
+  videoDescription: "",
+};
+
 const JOBS_PAGE_SIZE = 20;
 
 const JOB_STATUS_GROUP_PRIORITY: Record<string, number> = {
+  awaiting_init: 1,
   needs_review: 0,
   running: 1,
   processing: 1,
@@ -30,8 +43,64 @@ type UseJobWorkspaceOptions = {
   isCreateOpen?: boolean;
 };
 
+export type JobReviewStep = "summary_review" | "final_review";
+
+type ReviewSignalJob = Pick<Job, "quality_score" | "quality_grade" | "quality_summary" | "quality_issue_codes" | "timeline_diagnostics">;
+type ReviewStepJob = ReviewSignalJob & Pick<Job, "status" | "steps" | "review_step">;
+
+function hasFinalReviewSignals(job?: ReviewSignalJob | null) {
+  if (!job) return false;
+  return Boolean(
+    job.quality_score != null
+      || job.quality_grade?.trim()
+      || job.quality_summary?.trim()
+      || (job.quality_issue_codes ?? []).some(Boolean)
+      || job.timeline_diagnostics,
+  );
+}
+
+export function resolveJobReviewStep(job?: ReviewStepJob | null, activity?: Pick<JobActivity, "current_step" | "review_step"> | null): JobReviewStep | null {
+  const explicitReviewStep = activity?.review_step ?? job?.review_step;
+  if (explicitReviewStep === "summary_review" || explicitReviewStep === "final_review") {
+    return explicitReviewStep;
+  }
+
+  const currentStepName = activity?.current_step?.step_name;
+  if (currentStepName === "summary_review" || currentStepName === "final_review") {
+    return currentStepName;
+  }
+
+  if (!job || job.status !== "needs_review") return null;
+
+  const reviewSteps = job.steps.filter((step) => step.step_name === "summary_review" || step.step_name === "final_review");
+  const finalReviewStep = reviewSteps.find((step) => step.step_name === "final_review" && step.status !== "done");
+  const summaryReviewStep = reviewSteps.find((step) => step.step_name === "summary_review" && step.status !== "done");
+
+  if (finalReviewStep && (hasFinalReviewSignals(job) || !summaryReviewStep)) {
+    return "final_review";
+  }
+
+  if (summaryReviewStep) {
+    return "summary_review";
+  }
+
+  if (finalReviewStep) {
+    return "final_review";
+  }
+
+  if (hasFinalReviewSignals(job)) {
+    return "final_review";
+  }
+
+  return null;
+}
+
 function isRunningJob(status: string) {
   return status === "running" || status === "processing";
+}
+
+function isPendingJob(status: string) {
+  return status === "pending" || status === "awaiting_init";
 }
 
 function isAttentionJob(status: string) {
@@ -40,7 +109,7 @@ function isAttentionJob(status: string) {
 
 function matchesQueueFilter(status: string, filter: JobQueueFilter) {
   if (filter === "all") return true;
-  if (filter === "pending") return status === "pending";
+  if (filter === "pending") return isPendingJob(status);
   if (filter === "running") return isRunningJob(status);
   if (filter === "done") return status === "done";
   if (filter === "attention") return isAttentionJob(status);
@@ -65,6 +134,7 @@ export function useJobWorkspace({ isCreateOpen = false }: UseJobWorkspaceOptions
   const [queueFilter, setQueueFilter] = useState<JobQueueFilter>("all");
   const [jobsPage, setJobsPage] = useState(0);
   const [upload, setUpload] = useState<UploadForm>(EMPTY_UPLOAD);
+  const [pendingInitialization, setPendingInitialization] = useState<PendingInitializationForm>(EMPTY_PENDING_INITIALIZATION);
   const [contentDraft, setContentDraft] = useState<Record<string, unknown>>({});
   const [reviewWorkflowMode, setReviewWorkflowMode] = useState("standard_edit");
   const [reviewEnhancementModes, setReviewEnhancementModes] = useState<string[]>([]);
@@ -85,40 +155,43 @@ export function useJobWorkspace({ isCreateOpen = false }: UseJobWorkspaceOptions
     queryFn: () => api.getJob(selectedJobId!),
     enabled: Boolean(selectedJobId),
   });
-  const isReviewJob = detail.data?.status === "needs_review";
-  const options = useQuery({
-    queryKey: ["config-options"],
-    queryFn: api.getConfigOptions,
-    enabled: isCreateOpen,
-  });
-  const config = useQuery({
-    queryKey: ["config"],
-    queryFn: api.getConfig,
-    enabled: isCreateOpen || isReviewJob,
-  });
-  const packaging = useQuery({
-    queryKey: ["packaging"],
-    queryFn: api.getPackaging,
-    enabled: isReviewJob,
-  });
-  const avatarMaterials = useQuery({
-    queryKey: ["avatar-materials"],
-    queryFn: api.getAvatarMaterials,
-    enabled: isReviewJob,
-  });
+  const selectedJobPreview = jobs.data?.find((job) => job.id === selectedJobId) ?? null;
   const activity = useQuery({
     queryKey: ["job-activity", selectedJobId],
     queryFn: () => api.getJobActivity(selectedJobId!),
     enabled: Boolean(selectedJobId),
     refetchInterval: selectedJobId ? 5_000 : false,
   });
-  const isReviewMode = detail.data?.status === "needs_review";
-  const isFinalReviewStep = (detail.data?.steps ?? []).some(
-    (step) => step.step_name === "final_review" && step.status !== "done",
-  ) || activity.data?.current_step?.step_name === "final_review";
-  const shouldLoadReport = Boolean(selectedJobId) && (!isReviewMode || isFinalReviewStep);
-  const shouldLoadTokenUsage = Boolean(selectedJobId) && Boolean(detail.data) && !isReviewMode;
-  const shouldLoadTimeline = Boolean(selectedJobId) && !isReviewMode;
+  const selectedJobSnapshot = detail.data ?? selectedJobPreview;
+  const reviewStep = resolveJobReviewStep(selectedJobSnapshot, activity.data);
+  const isReviewJob = selectedJobSnapshot?.status === "needs_review";
+  const isSummaryReviewJob = isReviewJob && reviewStep === "summary_review";
+  const isFinalReviewJob = isReviewJob && reviewStep === "final_review";
+  const isAwaitingInitializationJob = selectedJobSnapshot?.status === "awaiting_init";
+  const selectedJobStatus = selectedJobSnapshot?.status ?? null;
+  const options = useQuery({
+    queryKey: ["config-options"],
+    queryFn: api.getConfigOptions,
+    enabled: isCreateOpen || isAwaitingInitializationJob,
+  });
+  const config = useQuery({
+    queryKey: ["config"],
+    queryFn: api.getConfig,
+    enabled: isCreateOpen || isSummaryReviewJob,
+  });
+  const packaging = useQuery({
+    queryKey: ["packaging"],
+    queryFn: api.getPackaging,
+    enabled: isSummaryReviewJob,
+  });
+  const avatarMaterials = useQuery({
+    queryKey: ["avatar-materials"],
+    queryFn: api.getAvatarMaterials,
+    enabled: isSummaryReviewJob,
+  });
+  const shouldLoadReport = Boolean(selectedJobSnapshot) && (selectedJobStatus !== "needs_review" || isFinalReviewJob);
+  const shouldLoadTokenUsage = Boolean(selectedJobSnapshot) && (selectedJobStatus !== "needs_review" || isFinalReviewJob);
+  const shouldLoadTimeline = Boolean(selectedJobSnapshot) && (selectedJobStatus !== "needs_review" || isFinalReviewJob);
   const report = useQuery({
     queryKey: ["job-report", selectedJobId],
     queryFn: () => api.getJobReport(selectedJobId!),
@@ -142,7 +215,7 @@ export function useJobWorkspace({ isCreateOpen = false }: UseJobWorkspaceOptions
   });
   const selectedJob = detail.data;
   const contentFallbackSource = (contentProfile.data?.final ?? contentProfile.data?.draft ?? null) as Record<string, unknown> | null;
-  const contentSource = isReviewMode
+  const contentSource = isSummaryReviewJob
     ? (contentProfile.data?.draft ?? contentProfile.data?.final ?? null)
     : (contentProfile.data?.final ?? contentProfile.data?.draft ?? null);
   const contentDraftKeywords = normalizeKeywordList(contentDraft.keywords);
@@ -163,16 +236,31 @@ export function useJobWorkspace({ isCreateOpen = false }: UseJobWorkspaceOptions
 
   useEffect(() => {
     setContentDraft(
-      isReviewMode
+      isSummaryReviewJob
         ? (contentProfile.data?.draft ?? contentProfile.data?.final ?? {})
         : (contentProfile.data?.final ?? contentProfile.data?.draft ?? {}),
     );
-  }, [contentProfile.data, isReviewMode]);
+  }, [contentProfile.data, isSummaryReviewJob]);
 
   useEffect(() => {
-    if (!selectedJobId || !isReviewMode) return;
+    if (!selectedJobId || !isAwaitingInitializationJob || !detail.data) {
+      setPendingInitialization(EMPTY_PENDING_INITIALIZATION);
+      return;
+    }
+    setPendingInitialization({
+      language: detail.data.language || "zh-CN",
+      workflowTemplate: detail.data.workflow_template || "",
+      workflowMode: detail.data.workflow_mode || "standard_edit",
+      enhancementModes: detail.data.enhancement_modes || [],
+      outputDir: detail.data.output_dir || "",
+      videoDescription: detail.data.video_description || "",
+    });
+  }, [detail.data, isAwaitingInitializationJob, selectedJobId]);
+
+  useEffect(() => {
+    if (!selectedJobId || !isSummaryReviewJob) return;
     void api.warmContentProfileThumbnails(selectedJobId);
-  }, [selectedJobId, isReviewMode]);
+  }, [selectedJobId, isSummaryReviewJob]);
 
   useEffect(() => {
     setJobsPage(0);
@@ -233,9 +321,9 @@ export function useJobWorkspace({ isCreateOpen = false }: UseJobWorkspaceOptions
     config.data?.default_job_workflow_mode,
     config.data?.default_job_enhancement_modes,
     contentProfile.data?.final,
-    contentProfile.data?.draft,
-    packaging.data?.config.copy_style,
-  ]);
+      contentProfile.data?.draft,
+      packaging.data?.config.copy_style,
+    ]);
 
   const refreshAll = () => {
     void queryClient.invalidateQueries({ queryKey: ["jobs"] });
@@ -309,6 +397,25 @@ export function useJobWorkspace({ isCreateOpen = false }: UseJobWorkspaceOptions
       ]);
     },
   });
+  const initializeJob = useMutation({
+    mutationFn: async () =>
+      api.initializeJob(selectedJobId!, {
+        language: pendingInitialization.language,
+        workflow_template: pendingInitialization.workflowTemplate || undefined,
+        workflow_mode: pendingInitialization.workflowMode,
+        enhancement_modes: pendingInitialization.enhancementModes,
+        output_dir: pendingInitialization.outputDir || undefined,
+        video_description: pendingInitialization.videoDescription,
+      }),
+    onSuccess: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["jobs"] }),
+        queryClient.invalidateQueries({ queryKey: ["job", selectedJobId] }),
+        queryClient.invalidateQueries({ queryKey: ["job-activity", selectedJobId] }),
+        queryClient.invalidateQueries({ queryKey: ["job-content-profile", selectedJobId] }),
+      ]);
+    },
+  });
   const confirmProfile = useMutation({
     mutationFn: async () => {
       await api.patchConfig({
@@ -361,7 +468,7 @@ export function useJobWorkspace({ isCreateOpen = false }: UseJobWorkspaceOptions
     const visibleJobs = !needle
       ? jobs.data ?? []
       : (jobs.data ?? []).filter((job) =>
-        [job.source_name, job.content_subject, job.content_summary, job.status].some((field) =>
+        [job.source_name, job.content_subject, job.content_summary, job.video_description, job.status].some((field) =>
           String(field ?? "").toLowerCase().includes(needle),
         ),
     );
@@ -369,7 +476,7 @@ export function useJobWorkspace({ isCreateOpen = false }: UseJobWorkspaceOptions
   }, [jobs.data, keyword]);
   const queueStats = useMemo(() => ({
     total: searchMatchedJobs.length,
-    pending: searchMatchedJobs.filter((job) => job.status === "pending").length,
+    pending: searchMatchedJobs.filter((job) => isPendingJob(job.status)).length,
     running: searchMatchedJobs.filter((job) => isRunningJob(job.status)).length,
     done: searchMatchedJobs.filter((job) => job.status === "done").length,
     attention: searchMatchedJobs.filter((job) => isAttentionJob(job.status)).length,
@@ -400,6 +507,8 @@ export function useJobWorkspace({ isCreateOpen = false }: UseJobWorkspaceOptions
     queueStats,
     upload,
     setUpload,
+    pendingInitialization,
+    setPendingInitialization,
     contentDraft,
     setContentDraft,
     jobs,
@@ -419,11 +528,13 @@ export function useJobWorkspace({ isCreateOpen = false }: UseJobWorkspaceOptions
     restartJob,
     deleteJob,
     uploadJob,
+    initializeJob,
     confirmProfile,
     applyReview,
     finalReviewDecision,
     filteredJobs,
     selectedJob,
+    reviewStep,
     contentSource,
     contentKeywords,
       reviewWorkflowMode,

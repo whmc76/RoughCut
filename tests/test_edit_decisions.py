@@ -57,7 +57,7 @@ def test_build_edit_decision_filler_detection():
     assert filler_cuts[0].start == 3.0
 
 
-def test_build_edit_decision_removes_low_signal_repeated_subtitles():
+def test_build_edit_decision_keeps_low_signal_repeated_subtitles_for_manual_review():
     subtitle_items = [
         {
             "index": 0,
@@ -76,11 +76,10 @@ def test_build_edit_decision_removes_low_signal_repeated_subtitles():
     )
 
     remove_segments = [s for s in decision.segments if s.type == "remove"]
-    assert len(remove_segments) == 1
-    assert remove_segments[0].reason == "low_signal_subtitle"
+    assert all(segment.reason != "low_signal_subtitle" for segment in remove_segments)
 
 
-def test_build_edit_decision_removes_short_hedge_heavy_subtitles():
+def test_build_edit_decision_keeps_short_hedge_heavy_subtitles_for_manual_review():
     subtitle_items = [
         {
             "index": 0,
@@ -99,11 +98,10 @@ def test_build_edit_decision_removes_short_hedge_heavy_subtitles():
     )
 
     remove_segments = [s for s in decision.segments if s.type == "remove"]
-    assert len(remove_segments) == 1
-    assert remove_segments[0].reason == "low_signal_subtitle"
+    assert all(segment.reason != "low_signal_subtitle" for segment in remove_segments)
 
 
-def test_build_edit_decision_removes_noise_like_subtitle():
+def test_build_edit_decision_keeps_noise_like_subtitle_without_explicit_filler_rule():
     subtitle_items = [
         {
             "index": 0,
@@ -122,11 +120,10 @@ def test_build_edit_decision_removes_noise_like_subtitle():
     )
 
     remove_segments = [s for s in decision.segments if s.type == "remove"]
-    assert len(remove_segments) == 1
-    assert remove_segments[0].reason == "low_signal_subtitle"
+    assert all(segment.reason != "low_signal_subtitle" for segment in remove_segments)
 
 
-def test_build_edit_decision_removes_subject_conflict_short_subtitle():
+def test_build_edit_decision_keeps_subject_conflict_short_subtitle_without_explicit_restart_signal():
     subtitle_items = [
         {
             "index": 0,
@@ -151,8 +148,7 @@ def test_build_edit_decision_removes_subject_conflict_short_subtitle():
     )
 
     remove_segments = [s for s in decision.segments if s.type == "remove"]
-    assert len(remove_segments) == 1
-    assert remove_segments[0].reason == "low_signal_subtitle"
+    assert all(segment.reason != "low_signal_subtitle" for segment in remove_segments)
 
 
 def test_build_edit_decision_removes_restart_retake_window():

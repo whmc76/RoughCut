@@ -362,7 +362,7 @@ async def tick() -> None:
             # the end of the tick with a stale "running" row.
             await session.commit()
             if _step_requires_local_gpu_for_dispatch(step.step_name):
-                running_gpu_steps += 1
+                running_gpu_steps = _increment_running_gpu_steps(running_gpu_steps, step.step_name)
 
         # Check for failed jobs (all steps failed)
         await _update_job_statuses(session)
@@ -382,7 +382,50 @@ def _step_retry_wait_remaining(step: JobStep) -> int:
     return max(0, int(math.ceil(remaining)))
 
 
-async def _count_running_gpu_steps(session) -> int:
+def _render_dispatch_concurrency() -> int:
+    settings = get_settings()
+    try:
+        configured = int(getattr(settings, "render_dispatch_concurrency", 1) or 1)
+    except (TypeError, ValueError):
+        configured = 1
+    return max(1, configured)
+
+
+def _running_gpu_step_count(running_gpu_steps: object, step_name: str) -> int:
+    normalized = str(step_name or "").strip().lower()
+    if isinstance(running_gpu_steps, dict):
+        try:
+            return max(0, int(running_gpu_steps.get(normalized, 0) or 0))
+        except (TypeError, ValueError):
+            return 0
+    try:
+        return max(0, int(running_gpu_steps or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _running_gpu_step_total(running_gpu_steps: object) -> int:
+    if isinstance(running_gpu_steps, dict):
+        total = 0
+        for value in running_gpu_steps.values():
+            try:
+                total += max(0, int(value or 0))
+            except (TypeError, ValueError):
+                continue
+        return total
+    return _running_gpu_step_count(running_gpu_steps, "")
+
+
+def _increment_running_gpu_steps(running_gpu_steps: object, step_name: str) -> object:
+    normalized = str(step_name or "").strip().lower()
+    if isinstance(running_gpu_steps, dict):
+        updated = dict(running_gpu_steps)
+        updated[normalized] = _running_gpu_step_count(updated, normalized) + 1
+        return updated
+    return _running_gpu_step_total(running_gpu_steps) + 1
+
+
+async def _count_running_gpu_steps(session) -> dict[str, int]:
     result = await session.execute(
         select(JobStep.step_name)
         .join(Job, Job.id == JobStep.job_id)
@@ -392,8 +435,13 @@ async def _count_running_gpu_steps(session) -> int:
             Job.status.notin_(["cancelled", "failed", "done"]),
         )
     )
-    running_step_names = [str(step_name or "").strip().lower() for step_name in result.scalars().all()]
-    return sum(1 for step_name in running_step_names if _step_requires_local_gpu_for_dispatch(step_name))
+    running_counts: dict[str, int] = {}
+    for step_name in result.scalars().all():
+        normalized = str(step_name or "").strip().lower()
+        if not _step_requires_local_gpu_for_dispatch(normalized):
+            continue
+        running_counts[normalized] = running_counts.get(normalized, 0) + 1
+    return running_counts
 
 
 def _step_stale_timeout_seconds(step_name: str) -> int:
@@ -401,6 +449,32 @@ def _step_stale_timeout_seconds(step_name: str) -> int:
     if step_name == "render":
         return max(600, int(getattr(settings, "render_step_stale_timeout_sec", 5400) or 5400))
     return max(300, int(getattr(settings, "step_stale_timeout_sec", 900) or 900))
+
+
+def _render_step_runtime_stale_timeout_seconds(step: JobStep) -> int:
+    settings = get_settings()
+    metadata = dict(step.metadata_ or {})
+    try:
+        progress = float(metadata.get("progress") or 0.0)
+    except (TypeError, ValueError):
+        progress = 0.0
+    if progress < 0.5:
+        return max(
+            600,
+            int(getattr(settings, "render_step_prepackaging_stale_timeout_sec", 1500) or 1500),
+        )
+    if progress < 0.75:
+        return max(
+            900,
+            int(getattr(settings, "render_step_packaging_stale_timeout_sec", 2400) or 2400),
+        )
+    return _step_stale_timeout_seconds("render")
+
+
+def _step_runtime_stale_timeout_seconds(step: JobStep) -> int:
+    if step.step_name == "render":
+        return _render_step_runtime_stale_timeout_seconds(step)
+    return _step_stale_timeout_seconds(step.step_name)
 
 
 def _step_dispatch_stale_timeout_seconds(step_name: str) -> int:
@@ -535,7 +609,7 @@ async def _recover_stale_running_steps(session) -> None:
             continue
         worker_started_at = _step_worker_started_at(step)
         stale_after = (
-            _step_stale_timeout_seconds(step.step_name)
+            _step_runtime_stale_timeout_seconds(step)
             if worker_started_at is not None
             else _step_dispatch_stale_timeout_seconds(step.step_name)
         )
@@ -594,10 +668,19 @@ async def _recover_stale_running_steps(session) -> None:
         )
 
 
-def _gpu_dispatch_wait_reason(step_name: str, *, running_gpu_steps: int) -> str | None:
+def _gpu_dispatch_wait_reason(step_name: str, *, running_gpu_steps: int | dict[str, int]) -> str | None:
     if not _step_requires_local_gpu_for_dispatch(step_name):
         return None
-    if running_gpu_steps > 0:
+    normalized = str(step_name or "").strip().lower()
+    render_running = _running_gpu_step_count(running_gpu_steps, "render")
+    total_running = _running_gpu_step_total(running_gpu_steps)
+    if normalized == "render":
+        non_render_running = max(0, total_running - render_running)
+        if non_render_running > 0:
+            return "检测到 RoughCut 仍有 GPU 步骤运行，当前渲染等待空闲后再派发。"
+        if render_running >= _render_dispatch_concurrency():
+            return "检测到 RoughCut 当前渲染并发已满，当前渲染等待空闲后再派发。"
+    elif total_running > 0:
         return "检测到 RoughCut 仍有 GPU 步骤运行，当前步骤等待空闲后再派发。"
     try:
         from roughcut.pipeline.tasks import _probe_local_gpu_pressure
@@ -658,7 +741,7 @@ async def _recover_incomplete_jobs() -> None:
                 if step.status == "running":
                     last_heartbeat_at = _step_last_heartbeat_at(step)
                     if last_heartbeat_at is not None:
-                        stale_after = _step_stale_timeout_seconds(step.step_name)
+                        stale_after = _step_runtime_stale_timeout_seconds(step)
                         if (now - last_heartbeat_at).total_seconds() < stale_after:
                             continue
                     metadata = dict(step.metadata_ or {})

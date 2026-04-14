@@ -30,6 +30,7 @@ const SAMPLE_ROOTS: WatchRoot[] = [
     workflow_template: "edc_tactical",
     enabled: true,
     scan_mode: "fast",
+    ingest_mode: "full_auto",
     created_at: "2026-03-12T10:00:00Z",
   },
   {
@@ -38,6 +39,7 @@ const SAMPLE_ROOTS: WatchRoot[] = [
     workflow_template: null,
     enabled: false,
     scan_mode: "precise",
+    ingest_mode: "task_only",
     created_at: "2026-03-12T11:00:00Z",
   },
 ];
@@ -113,6 +115,7 @@ describe("useWatchRootWorkspace", () => {
       output_dir: "",
       enabled: true,
       scan_mode: "fast",
+      ingest_mode: "full_auto",
     });
   });
 

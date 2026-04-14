@@ -638,17 +638,6 @@ def _build_subtitle_cut_candidates(
                         signals=["pure_filler"],
                     )
                 )
-                continue
-        if _is_low_signal_subtitle_text(text, content_profile=content_profile):
-            candidates.append(
-                CutCandidate(
-                    start=float(item["start_time"]),
-                    end=float(item["end_time"]),
-                    reason="low_signal_subtitle",
-                    hard=True,
-                    signals=["low_signal_text"],
-                )
-            )
     return candidates
 
 

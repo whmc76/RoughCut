@@ -120,6 +120,15 @@ export function WatchRootFormPanel({
         />
         <div className="field-row">
           <SelectField
+            label={t("watch.form.ingestMode")}
+            value={form.ingest_mode}
+            onChange={(event) => onChange({ ...form, ingest_mode: event.target.value as RootForm["ingest_mode"] })}
+            options={[
+              { value: "task_only", label: t("watch.form.ingestModeTaskOnly") },
+              { value: "full_auto", label: t("watch.form.ingestModeFullAuto") },
+            ]}
+          />
+          <SelectField
             label={t("watch.form.scanMode")}
             value={form.scan_mode}
             onChange={(event) => onChange({ ...form, scan_mode: event.target.value as RootForm["scan_mode"] })}
@@ -128,6 +137,16 @@ export function WatchRootFormPanel({
               { value: "precise", label: t("watch.form.precise") },
             ]}
           />
+        </div>
+        <div className="notice">
+          <div className="stat-label">{t("watch.form.ingestModeSummaryTitle")}</div>
+          <div className="muted compact-top">
+            {form.ingest_mode === "task_only"
+              ? t("watch.form.ingestModeTaskOnlyDescription")
+              : t("watch.form.ingestModeFullAutoDescription")}
+          </div>
+        </div>
+        <div className="field-row">
           <CheckboxField label={t("watch.form.enabled")} checked={form.enabled} onChange={(event) => onChange({ ...form, enabled: event.target.checked })} />
         </div>
         {autosaveError && isEditing && <div className="notice">{autosaveError}</div>}

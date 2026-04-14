@@ -522,6 +522,116 @@ def test_apply_domain_term_corrections_does_not_overcorrect_long_config_terms():
     assert "次顶配" not in corrected
 
 
+def test_apply_domain_term_corrections_keeps_distinct_model_numbers():
+    corrected = apply_domain_term_corrections(
+        "EDC37是之前我一直在用的。",
+        {
+            "terms": [{"term": "EDC17"}],
+            "aliases": [],
+            "confirmed_entities": [
+                {
+                    "brand": "NITECORE",
+                    "model": "EDC17",
+                    "phrases": ["NITECORE EDC17"],
+                    "model_aliases": [],
+                }
+            ],
+            "style_examples": [],
+        },
+    )
+
+    assert corrected == "EDC37是之前我一直在用的。"
+
+
+def test_build_subtitle_review_memory_applies_confirmed_cn_brand_aliases():
+    memory = build_subtitle_review_memory(
+        channel_profile="edc_tactical",
+        glossary_terms=[],
+        user_memory={},
+        recent_subtitles=[{"text_final": "另外一把就是现在这个耐克尔也是前两个月出的这个EDC17。"}],
+        content_profile={
+            "subject_brand": "NITECORE",
+            "subject_model": "EDC17",
+            "identity_review": {
+                "evidence_bundle": {
+                    "brand_aliases": ["NITECORE", "奈特科尔"],
+                }
+            },
+        },
+    )
+
+    corrected = apply_domain_term_corrections(
+        "另外一把就是现在这个耐克尔也是前两个月出的这个EDC17。",
+        memory,
+    )
+
+    assert corrected == "另外一把就是现在这个奈特科尔也是前两个月出的这个EDC17。"
+
+
+def test_apply_domain_term_corrections_does_not_inject_brand_into_generic_prefix():
+    corrected = apply_domain_term_corrections(
+        "兄弟EDC17光荣取代了。",
+        {
+            "terms": [],
+            "aliases": [],
+            "confirmed_entities": [
+                {
+                    "brand": "奈特科尔",
+                    "model": "EDC17",
+                    "phrases": [],
+                    "brand_aliases": ["NITECORE", "耐克尔"],
+                    "model_aliases": [],
+                }
+            ],
+            "style_examples": [],
+        },
+    )
+
+    assert corrected == "兄弟EDC17光荣取代了。"
+
+
+def test_apply_domain_term_corrections_repairs_issue_phrase():
+    corrected = apply_domain_term_corrections(
+        "那么为什么这7个咱给大家讲讲",
+        {
+            "terms": [],
+            "aliases": [],
+            "confirmed_entities": [],
+            "style_examples": [],
+        },
+    )
+
+    assert corrected == "那么为什么这期给大家讲讲"
+
+
+def test_apply_domain_term_corrections_collapses_repeated_model_digits_before_continuation():
+    corrected = apply_domain_term_corrections(
+        "那小兄弟就是这个EDC23啊23已经光荣退役了。",
+        {
+            "terms": [],
+            "aliases": [],
+            "confirmed_entities": [],
+            "style_examples": [],
+        },
+    )
+
+    assert corrected == "那小兄弟就是这个EDC23已经光荣退役了。"
+
+
+def test_apply_domain_term_corrections_collapses_repeated_ascii_model_digits():
+    corrected = apply_domain_term_corrections(
+        "那小兄弟就是这个EDC2323。",
+        {
+            "terms": [],
+            "aliases": [],
+            "confirmed_entities": [],
+            "style_examples": [],
+        },
+    )
+
+    assert corrected == "那小兄弟就是这个EDC23。"
+
+
 def test_build_transcription_prompt_includes_new_edc_visual_hotword():
     prompt = build_transcription_prompt(
         source_name="mirror_finish.mp4",
@@ -990,6 +1100,24 @@ def test_detect_glossary_domains_returns_canonical_domains_from_content_evidence
         subtitle_items=[{"text_final": "今天开箱这把工具钳，重点看钳头、批头和螺丝刀。"}],
         source_name="tool.mp4",
     ) == ["tools"]
+
+
+def test_detect_glossary_domains_recognizes_bag_hardware_hotwords():
+    assert detect_glossary_domains(
+        workflow_template="unboxing_standard",
+        content_profile={},
+        subtitle_items=[{"text_final": "这次机能包重点看 FIDLOCK 磁扣、分仓和快拆体验。"}],
+        source_name="bag.mp4",
+    ) == ["functional"]
+
+
+def test_detect_glossary_domains_recognizes_flashlight_optics_hotwords():
+    assert detect_glossary_domains(
+        workflow_template="edc_tactical",
+        content_profile={},
+        subtitle_items=[{"text_final": "这支 edc 手电重点看内置电池、月光档、透镜和光杯。"}],
+        source_name="flashlight.mp4",
+    ) == ["edc"]
 
 
 def test_build_subtitle_review_memory_does_not_inject_ai_terms_without_domain_signal():

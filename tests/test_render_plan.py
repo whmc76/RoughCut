@@ -627,3 +627,24 @@ def test_build_ai_effect_render_plan_maps_legacy_rhythm_to_commercial_ai():
 
     assert plan["editing_accents"]["style"] == "smart_effect_commercial_ai"
     assert plan["subtitles"]["motion_style"] == "motion_strobe"
+
+
+def test_build_ai_effect_render_plan_preserves_color_for_unboxing_workflows():
+    plan = build_ai_effect_render_plan(
+        {
+            "workflow_preset": "unboxing_standard",
+            "subtitles": {"style": "bold_yellow_outline", "motion_style": "motion_static"},
+            "editing_accents": {"style": "smart_effect_glitch"},
+        },
+        keep_segments=[
+            {"start": 0.0, "end": 3.0},
+            {"start": 4.0, "end": 8.0},
+        ],
+        subtitle_items=[
+            {"start_time": 0.8, "end_time": 2.1, "text_final": "这点一定要注意"},
+        ],
+    )
+
+    assert plan["editing_accents"]["style"] == "smart_effect_commercial_ai"
+    assert plan["editing_accents"]["preserve_color"] is True
+    assert plan["subtitles"]["motion_style"] == "motion_strobe"
