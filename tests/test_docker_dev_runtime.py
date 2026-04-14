@@ -53,12 +53,20 @@ def test_start_script_avoids_reusing_runtime_api_port_for_local_mode():
     assert 'Docker runtime API is already listening on port $runtimeApiPort; local API will use a different port.' in script_text
 
 
+def test_local_mode_does_not_auto_start_docker_infra():
+    script_text = Path("start_roughcut.ps1").read_text(encoding="utf-8")
+
+    assert 'docker compose up -d $dockerServices' not in script_text
+    assert "Docker infra is opt-in; local mode will not start containers for you." in script_text
+    assert "Local mode does not start Docker infra automatically." in script_text
+
+
 def test_batch_help_describes_local_first_entrypoint():
     script_text = Path("start_roughcut.bat").read_text(encoding="utf-8")
     usage_text = script_text.split(":usage", 1)[1]
 
     assert "One-click local development launcher" in usage_text
-    assert "Start local API / orchestrator / workers against local code" in usage_text
+    assert "Start local API / orchestrator / workers against local code without auto-starting Docker" in usage_text
     assert "Start explicit containerized runtime mode" in usage_text
     assert "Start recommended Docker runtime with live source sync" not in usage_text
     assert "runtime-auto-watch" not in usage_text
@@ -70,6 +78,7 @@ def test_readme_describes_local_first_development_flow():
 
     assert "现在推荐的日常开发路径是：本地 Python + 本地前端 + 必要时只起 `infra`" in readme_text
     assert "`start_roughcut.bat` 作为默认开发入口" in readme_text
+    assert "本地模式不再隐式拉起任何 Docker 容器" in readme_text
     assert "`runtime/full` 仍保留，但属于显式容器模式" in readme_text
     assert "Docker 更适合基础依赖、部署验证和显式容器化运行" in readme_text
     assert "runtime-auto-watch" not in readme_text

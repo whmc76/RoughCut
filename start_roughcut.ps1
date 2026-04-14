@@ -1571,6 +1571,38 @@ function Wait-LocalPortListening {
     return $false
 }
 
+function Assert-LocalInfrastructureReady {
+    param(
+        [hashtable]$ServicePorts
+    )
+
+    $requiredServices = @(
+        @{ Name = "PostgreSQL"; Port = $ServicePorts.Postgres }
+        @{ Name = "Redis"; Port = $ServicePorts.Redis }
+        @{ Name = "MinIO API"; Port = $ServicePorts.MinioApi }
+    )
+
+    $missingServices = @()
+    foreach ($service in $requiredServices) {
+        if (-not (Test-PortListening -TestPort $service.Port)) {
+            $missingServices += "$($service.Name) (port $($service.Port))"
+        }
+    }
+
+    if ($missingServices.Count -eq 0) {
+        Write-Host "Required local infra endpoints are already reachable." -ForegroundColor Green
+        if (Test-PortListening -TestPort $ServicePorts.MinioConsole) {
+            Write-Host "MinIO Console is listening on port $($ServicePorts.MinioConsole)." -ForegroundColor Green
+        } else {
+            Write-Host "MinIO Console is not listening on port $($ServicePorts.MinioConsole); API access will still work." -ForegroundColor DarkGray
+        }
+        return
+    }
+
+    $detail = $missingServices -join ", "
+    throw "Local mode does not start Docker infra automatically. Missing required services: $detail. Start them explicitly with './start_roughcut.bat infra' or provide equivalent local services before rerunning local mode."
+}
+
 function Wait-LauncherClose {
     if ($StopOnly) {
         return
@@ -1634,20 +1666,24 @@ Ensure-RoughCutFrontend
 Stop-RoughCutServices
 
 Write-Host "Starting local RoughCut development stack..." -ForegroundColor Cyan
-Write-Host "Default workflow: local Python + local frontend + infra containers only when needed." -ForegroundColor DarkGray
+Write-Host "Default workflow: local Python + local frontend only." -ForegroundColor DarkGray
+Write-Host "Docker infra is opt-in; local mode will not start containers for you." -ForegroundColor DarkGray
 Write-Host "Docker runtime/full remain available as explicit containerized modes." -ForegroundColor DarkGray
 
-    if (-not $SkipDocker) {
-        Write-Host "Checking Docker services..." -ForegroundColor Cyan
-    $dockerContainers = @("roughcut-postgres-1", "roughcut-redis-1", "roughcut-minio-1")
-    $dockerServices = @("postgres", "redis", "minio")
-        $legacyDockerNames = @("fastcut-postgres-1", "fastcut-redis-1", "fastcut-minio-1")
-    $usedPorts = @{}
+$legacyDockerNames = @("fastcut-postgres-1", "fastcut-redis-1", "fastcut-minio-1")
+Write-Host "Checking local infra endpoints..." -ForegroundColor Cyan
+$usedPorts = @{}
+$running = @()
+$dockerCommand = Get-Command docker -ErrorAction SilentlyContinue
+if ($null -ne $dockerCommand) {
     try {
-        $running = docker ps -a --format "{{.Names}}"
+        $running = & $dockerCommand.Source ps -a --format "{{.Names}}"
     } catch {
-        throw "Failed to run docker. Make sure Docker Desktop is running."
+        Write-Host "Docker discovery failed; continuing with explicit local infra checks only." -ForegroundColor DarkGray
     }
+} else {
+    Write-Host "Docker CLI not found; continuing with explicit local infra checks only." -ForegroundColor DarkGray
+}
 
     $legacy = @($legacyDockerNames | Where-Object { $_ -in $running })
     if ($legacy.Count -gt 0) {
@@ -1671,35 +1707,18 @@ Write-Host "Docker runtime/full remain available as explicit containerized modes
     Update-LocalServiceEnv -PostgresPort $servicePorts.Postgres -RedisPort $servicePorts.Redis -MinioApiPort $servicePorts.MinioApi -MinioConsolePort $servicePorts.MinioConsole -HeygemApiPort $servicePorts.HeygemApi -HeygemTrainingPort $servicePorts.HeygemTraining -ApiPort $resolvedApiPort
     $Port = $resolvedApiPort
 
-    Write-Host "Starting docker compose services..." -ForegroundColor Yellow
-    docker compose up -d $dockerServices | Out-Host
-
-    if (-not (Wait-LocalPortListening -TestPort $servicePorts.Postgres -ServiceName "PostgreSQL" -TimeoutSec 60)) {
-        throw "PostgreSQL failed to start in time."
+Assert-LocalInfrastructureReady -ServicePorts $servicePorts
+if (Wait-LocalPortListening -TestPort $servicePorts.HeygemApi -ServiceName "HeyGem API (external)" -TimeoutSec 2) {
+    Write-Host "External HeyGem preview service is already running." -ForegroundColor Green
+} else {
+    Write-Host "External HeyGem preview service is currently stopped; RoughCut will start the managed Docker stack on first demand." -ForegroundColor Yellow
+}
+if (Wait-LocalPortListening -TestPort $servicePorts.HeygemTraining -ServiceName "IndexTTS2 / Voice Synthesis" -TimeoutSec 2) {
+    if (-not (Test-IndexTTS2ServiceHealthy -Port $servicePorts.HeygemTraining -TimeoutSec 20)) {
+        Write-Host "External IndexTTS2 port is open but health payload is not ready yet; RoughCut will retry on first demand." -ForegroundColor Yellow
     }
-    if (-not (Wait-LocalPortListening -TestPort $servicePorts.Redis -ServiceName "Redis" -TimeoutSec 60)) {
-        throw "Redis failed to start in time."
-    }
-    if (-not (Wait-LocalPortListening -TestPort $servicePorts.MinioApi -ServiceName "MinIO API" -TimeoutSec 90)) {
-        throw "MinIO failed to start in time."
-    }
-    if (-not (Wait-LocalPortListening -TestPort $servicePorts.MinioConsole -ServiceName "MinIO Console" -TimeoutSec 90)) {
-        throw "MinIO Console failed to start in time."
-    }
-    if (Wait-LocalPortListening -TestPort $servicePorts.HeygemApi -ServiceName "HeyGem API (external)" -TimeoutSec 2) {
-        Write-Host "External HeyGem preview service is already running." -ForegroundColor Green
-    } else {
-        Write-Host "External HeyGem preview service is currently stopped; RoughCut will start the managed Docker stack on first demand." -ForegroundColor Yellow
-    }
-    if (Wait-LocalPortListening -TestPort $servicePorts.HeygemTraining -ServiceName "IndexTTS2 / Voice Synthesis" -TimeoutSec 2) {
-        if (-not (Test-IndexTTS2ServiceHealthy -Port $servicePorts.HeygemTraining -TimeoutSec 20)) {
-            Write-Host "External IndexTTS2 port is open but health payload is not ready yet; RoughCut will retry on first demand." -ForegroundColor Yellow
-        }
-    } else {
-        Write-Host "IndexTTS2 service is currently stopped; RoughCut will start the managed Docker stack on first demand." -ForegroundColor Yellow
-    }
-
-    Write-Host "Docker services are ready." -ForegroundColor Green
+} else {
+    Write-Host "IndexTTS2 service is currently stopped; RoughCut will start the managed Docker stack on first demand." -ForegroundColor Yellow
 }
 
 if (-not $SkipMigrate) {

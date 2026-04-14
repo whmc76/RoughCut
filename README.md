@@ -359,7 +359,7 @@ uv run roughcut clip-test E:/videos/demo.mp4 --channel-profile edc_tactical --sa
 Windows 下当前建议把 [start_roughcut.bat](E:/WorkSpace/RoughCut/start_roughcut.bat) 作为用户入口：
 
 - `start_roughcut.bat`
-  默认开发入口。后台拉起本地 API / orchestrator / workers，并服务本地构建的 `frontend/dist`；这个终端窗口本身就是托管器，直接关窗即可停掉整套服务
+  默认开发入口。后台拉起本地 API / orchestrator / workers，并服务本地构建的 `frontend/dist`；不会再隐式启动 Docker 基础设施；这个终端窗口本身就是托管器，直接关窗即可停掉整套服务
 - `start_roughcut.bat infra`
   只启动 PostgreSQL / Redis / MinIO 这套轻量基础设施，供本地服务使用
 - `start_roughcut.bat runtime`
@@ -393,7 +393,7 @@ Windows 下当前建议把 [start_roughcut.bat](E:/WorkSpace/RoughCut/start_roug
 
 `start_roughcut.ps1` 是当前主脚本，也是一键启动的实际实现。
 
-默认开发建议是把 `start_roughcut.bat` 作为默认开发入口；Docker 更适合基础依赖、部署验证和显式容器化运行。`pnpm docker:up/down` 现在只作为 `infra` 快捷别名保留。
+默认开发建议是把 `start_roughcut.bat` 作为默认开发入口；本地模式不再隐式拉起任何 Docker 容器，需要时请显式执行 `start_roughcut.bat infra`。Docker 更适合基础依赖、部署验证和显式容器化运行。`pnpm docker:up/down` 现在只作为 `infra` 快捷别名保留。
 
 ---
 

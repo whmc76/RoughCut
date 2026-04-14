@@ -247,7 +247,7 @@ echo   start_roughcut.bat runtime-down Stop runtime services
 echo   start_roughcut.bat full-down    Stop runtime plus automation services
 echo   start_roughcut.bat runtime-watch  Start explicit host-side rebuild watch for Docker runtime
 echo   start_roughcut.bat full-watch     Start explicit host-side rebuild watch for runtime + automation
-echo   start_roughcut.bat             Start local API / orchestrator / workers against local code
+echo   start_roughcut.bat             Start local API / orchestrator / workers against local code without auto-starting Docker
 echo   start_roughcut.bat dev         Run unified pnpm dev
 echo   start_roughcut.bat build       Run pnpm build
 echo   start_roughcut.bat test        Run pnpm test
