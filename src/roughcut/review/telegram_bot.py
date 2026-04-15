@@ -31,7 +31,24 @@ from roughcut.media.variant_timeline_bundle import resolve_effective_variant_tim
 from roughcut.packaging.library import list_packaging_assets, resolve_packaging_plan_for_job
 from roughcut.providers.factory import get_reasoning_provider, get_transcription_provider
 from roughcut.review.downstream_context import select_resolved_downstream_profile
+from roughcut.review.final_review_rerun import (
+    FinalReviewRerunPlan,
+    build_final_review_rerun_plan as _build_final_review_rerun_plan,
+    build_final_review_rerun_plans as _build_final_review_rerun_plans,
+    combine_final_review_rerun_plans as _combine_final_review_rerun_plans,
+    extract_final_review_content_profile_feedback as _extract_final_review_content_profile_feedback,
+)
+from roughcut.review.final_review_state import (
+    apply_final_review_rerun_metadata,
+    mark_final_review_approved,
+    mark_final_review_pending,
+)
 from roughcut.review.subtitle_memory import build_transcription_prompt
+from roughcut.review.subtitle_review_actions import (
+    build_subtitle_consistency_action,
+    build_subtitle_quality_action,
+    build_subtitle_term_resolution_action,
+)
 from roughcut.review import telegram_review_parsing
 from roughcut.review.content_profile import (
     _build_review_keywords,
@@ -227,6 +244,11 @@ _REVIEW_STEP_NAME_BY_KIND = {
     _REVIEW_KIND_SUBTITLE: "glossary_review",
     _REVIEW_KIND_FINAL: "final_review",
 }
+_SUBTITLE_REVIEW_ARTIFACT_TYPES = (
+    "subtitle_term_resolution_patch",
+    "subtitle_consistency_report",
+    "subtitle_quality_report",
+)
 
 
 @dataclass
@@ -272,16 +294,6 @@ class TelegramFinalReviewClip:
     duration_sec: float
     transcript_excerpt: str
     matched_keyword: str | None = None
-
-
-@dataclass(frozen=True)
-class FinalReviewRerunPlan:
-    category: str
-    label: str
-    trigger_step: str
-    rerun_steps: tuple[str, ...]
-    targets: tuple[str, ...] = ()
-    focus: str = ""
 
 
 class TelegramReviewBotService:
@@ -355,6 +367,7 @@ class TelegramReviewBotService:
             if job is None:
                 return
             report = await generate_report(job_id, session)
+            subtitle_review_artifacts = await _load_subtitle_review_artifacts(job_id, session)
             pending_candidates = _build_pending_subtitle_candidates(report)
             if pending_candidates:
                 lines = [
@@ -381,6 +394,15 @@ class TelegramReviewBotService:
                             "",
                         ]
                     )
+                artifact_lines = _build_subtitle_review_artifact_lines(subtitle_review_artifacts)
+                if artifact_lines:
+                    lines.extend(
+                        [
+                            "",
+                            "字幕审校状态：",
+                            *artifact_lines,
+                        ]
+                    )
                 message = "\n".join(lines).strip()
             elif force_full_review:
                 subtitle_lines = await _load_full_subtitle_review_lines(job_id, session)
@@ -390,6 +412,16 @@ class TelegramReviewBotService:
                         f"Job ID：{job.id}\n\n"
                         "当前没有可供复核的字幕内容。"
                     )
+                    artifact_lines = _build_subtitle_review_artifact_lines(subtitle_review_artifacts)
+                    if artifact_lines:
+                        message = "\n".join(
+                            [
+                                message,
+                                "",
+                                "字幕审校状态：",
+                                *artifact_lines,
+                            ]
+                        ).strip()
                 else:
                     preview_excerpt = build_reviewed_transcript_excerpt(
                         [
@@ -420,6 +452,16 @@ class TelegramReviewBotService:
                             preview_excerpt or "无",
                         ]
                     ).strip()
+                    artifact_lines = _build_subtitle_review_artifact_lines(subtitle_review_artifacts)
+                    if artifact_lines:
+                        message = "\n".join(
+                            [
+                                message,
+                                "",
+                                "字幕审校状态：",
+                                *artifact_lines,
+                            ]
+                        ).strip()
                     attachment_path = _write_full_subtitle_review_attachment(job.id, subtitle_lines)
             else:
                 return
@@ -804,10 +846,27 @@ class TelegramReviewBotService:
         factory = get_session_factory()
         async with factory() as session:
             report = await generate_report(job_id, session)
+            subtitle_review_artifacts = await _load_subtitle_review_artifacts(job_id, session)
             candidates = _build_pending_subtitle_candidates(report)
             if not candidates:
                 full_review_lines = await _load_full_subtitle_review_lines(job_id, session)
                 if not full_review_lines:
+                    artifact_lines = _build_subtitle_review_artifact_lines(subtitle_review_artifacts)
+                    if artifact_lines:
+                        await self._send_chat_text(
+                            "\n".join(
+                                [
+                                    f"任务 {job_id} 当前没有可复核的字幕内容。",
+                                    "",
+                                    "最新字幕审校状态：",
+                                    *artifact_lines,
+                                    "",
+                                    "字幕审核只处理字幕行和术语候选；如果你要改的是摘要，请回到内容摘要审核消息。",
+                                ]
+                            ),
+                            chat_id=reply_chat_id,
+                        )
+                        return
                     await self._send_chat_text(f"任务 {job_id} 当前没有可复核的字幕内容。", chat_id=reply_chat_id)
                     return
                 accept_all, actions = _interpret_full_subtitle_review_reply(text, full_review_lines)
@@ -903,20 +962,13 @@ class TelegramReviewBotService:
                         await session.refresh(review_step)
 
             if _SIMPLE_APPROVAL_PATTERN.match(note) or _FINAL_APPROVAL_PATTERN.search(note):
-                review_step.status = "done"
-                review_step.finished_at = now
-                review_step.error_message = None
-                metadata.update(
-                    {
-                        "detail": "成片已人工审核通过，继续生成平台文案。",
-                        "updated_at": now.isoformat(),
-                        "approved_via": "telegram",
-                    }
+                mark_final_review_approved(
+                    review_step=review_step,
+                    job=job,
+                    now=now,
+                    approved_via="telegram",
+                    metadata_updates=metadata,
                 )
-                review_step.metadata_ = metadata
-                job.status = "processing"
-                job.error_message = None
-                job.updated_at = now
                 await session.commit()
                 if subtitle_applied > 0:
                     await self._send_chat_text(
@@ -927,8 +979,6 @@ class TelegramReviewBotService:
                     await self._send_chat_text(f"已确认任务 {job_id} 的成片，系统继续后续流程。", chat_id=reply_chat_id)
                 return
 
-            feedback_history = list(metadata.get("feedback_history") or [])
-            feedback_history.append({"text": note, "at": now.isoformat(), "via": "telegram"})
             rerun_plan = _combine_final_review_rerun_plans(_build_final_review_rerun_plans(note))
             if rerun_plan is not None:
                 review_user_feedback = _extract_final_review_content_profile_feedback(note)
@@ -947,22 +997,13 @@ class TelegramReviewBotService:
                     issue_codes=[f"manual_review:{rerun_plan.category}"],
                 )
                 first_step = next((step for step in steps if step.step_name == rerun_plan.trigger_step), None)
-                if first_step is not None:
-                    first_metadata = dict(first_step.metadata_ or {})
-                    first_metadata.update(
-                        {
-                            "detail": f"人工成片审核要求重跑：{rerun_plan.label}",
-                            "updated_at": now.isoformat(),
-                            "review_feedback": note,
-                            "review_rerun_category": rerun_plan.category,
-                            "review_rerun_focus": rerun_plan.focus,
-                            "review_rerun_steps": list(rerun_plan.rerun_steps),
-                            "review_rerun_targets": list(rerun_plan.targets),
-                        }
-                    )
-                    if review_user_feedback:
-                        first_metadata["review_user_feedback"] = review_user_feedback
-                    first_step.metadata_ = first_metadata
+                apply_final_review_rerun_metadata(
+                    first_step=first_step,
+                    rerun_plan=rerun_plan,
+                    note=note,
+                    now=now,
+                    review_user_feedback=review_user_feedback,
+                )
                 await session.commit()
                 target_text = f"目标：{', '.join(rerun_plan.targets)}；" if rerun_plan.targets else ""
                 await self._send_chat_text(
@@ -972,22 +1013,19 @@ class TelegramReviewBotService:
                 )
                 return
 
-            metadata.update(
-                {
-                    "detail": (
-                        f"已应用 {subtitle_applied} 条字幕审核意见，任务保持暂停，等待人工确认成片后再继续。"
-                        if subtitle_applied > 0
-                        else "已收到成片修改意见，任务保持暂停，等待人工处理后再继续。"
-                    ),
-                    "updated_at": now.isoformat(),
-                    "feedback_history": feedback_history[-10:],
-                    "latest_feedback": note,
-                }
+            mark_final_review_pending(
+                review_step=review_step,
+                job=job,
+                now=now,
+                detail=(
+                    f"已应用 {subtitle_applied} 条字幕审核意见，任务保持暂停，等待人工确认成片后再继续。"
+                    if subtitle_applied > 0
+                    else "已收到成片修改意见，任务保持暂停，等待人工处理后再继续。"
+                ),
+                note=note,
+                via="telegram",
+                metadata_updates=metadata,
             )
-            review_step.metadata_ = metadata
-            review_step.started_at = review_step.started_at or now
-            job.status = "needs_review"
-            job.updated_at = now
             await session.commit()
         if subtitle_applied > 0:
             await self._send_chat_text(
@@ -1582,194 +1620,6 @@ def _looks_like_subtitle_review_reply(text: str) -> bool:
 
 def _looks_like_content_profile_subtitle_followup(text: str) -> bool:
     return telegram_review_parsing.looks_like_content_profile_subtitle_followup(text)
-
-
-def _build_final_review_rerun_plan(note: str) -> FinalReviewRerunPlan | None:
-    plans = _build_final_review_rerun_plans(note)
-    return plans[0] if plans else None
-
-
-def _extract_final_review_content_profile_feedback(note: str) -> dict[str, Any]:
-    text = str(note or "").strip()
-    if not text:
-        return {}
-
-    def _clean(value: str) -> str:
-        cleaned = re.sub(r"^[\s\u3000]+|[\s\u3000]+$", "", str(value or ""))
-        return cleaned.strip().strip("，,。；;：:、")
-
-    def _extract(patterns: tuple[str, ...], limit: int) -> str:
-        for pattern in patterns:
-            match = re.search(pattern, text, flags=re.IGNORECASE)
-            if not match:
-                continue
-            value = _clean(str(match.group(1) or ""))
-            if value:
-                return value[:limit]
-        return ""
-
-    subject_brand = _extract(
-        (
-            r"(?:品牌|牌子)\s*(?:改成|改为|是|为|写成|应为|应该是|[:：])\s*([A-Za-z0-9\u4e00-\u9fff·+\-/]{1,40})",
-        ),
-        40,
-    )
-    subject_model = _extract(
-        (
-            r"(?:型号|款式|产品名|名字|名称|系列|版本)\s*(?:改成|改为|是|为|写成|应为|应该是|[:：])\s*([A-Za-z0-9\u4e00-\u9fff·+\-/]{1,60})",
-        ),
-        60,
-    )
-
-    feedback: dict[str, Any] = {}
-    if subject_brand:
-        feedback["subject_brand"] = subject_brand
-    if subject_model:
-        feedback["subject_model"] = subject_model
-    return feedback
-
-
-def _build_final_review_rerun_plans(note: str) -> list[FinalReviewRerunPlan]:
-    normalized = str(note or "").strip().lower()
-    if not normalized:
-        return []
-
-    subtitle_style_keywords = ("字幕样式", "字幕风格", "字幕颜色", "字幕描边", "字幕特效")
-    subtitle_text_keywords = ("术语", "错别字", "翻译", "字幕时间", "字幕不同步", "字幕内容", "字幕文本")
-    diagnostic_edit_keywords = (
-        "高风险cut",
-        "高风险 cut",
-        "高风险边界",
-        "边界不顺",
-        "边界不对",
-        "边界太硬",
-        "衔接不顺",
-        "衔接生硬",
-        "开场节奏",
-        "hook 节奏",
-        "hook不对",
-        "hook 不对",
-        "开头节奏",
-        "前半段节奏",
-        "剪辑边界",
-    )
-    has_subtitle_style_request = any(keyword in normalized for keyword in subtitle_style_keywords)
-    has_subtitle_text_request = any(keyword in normalized for keyword in subtitle_text_keywords) and not bool(
-        _NEGATED_SUBTITLE_CONTENT_PATTERN.search(normalized)
-    )
-    has_diagnostic_edit_request = any(keyword in normalized for keyword in diagnostic_edit_keywords)
-    edit_focus = _final_review_edit_focus(normalized)
-
-    plans: list[FinalReviewRerunPlan] = []
-    for category, label, trigger_step, keywords, targets in (
-        ("subtitle", "字幕与术语修订", "subtitle_postprocess", ("字幕", "术语", "错别字", "翻译", "字幕时间", "字幕不同步", "字幕内容", "字幕文本"), ("subtitle_text", "subtitle_timing")),
-        ("subtitle_style", "字幕样式重出", "render", subtitle_style_keywords, ("subtitle_style",)),
-        ("content_profile", "内容摘要与文案定位调整", "content_profile", ("摘要", "主题", "关键词", "文案方向", "内容定位", "主体识别", "标题钩子"), ("summary", "keywords", "content_profile")),
-        ("ai_director", "AI 导演文案与配音重做", "ai_director", ("旁白", "解说词", "口播文案", "ai导演", "ai 导演", "重配音", "配音文案"), ("voiceover", "director_script")),
-        ("avatar_commentary", "数字人解说重做", "avatar_commentary", ("数字人", "口播人", "虚拟人", "画中画", "主播形象", "讲解人"), ("avatar",)),
-        ("edit_plan", "剪辑结构重做", "edit_plan", ("节奏", "结构", "镜头", "重剪", "重新剪", "剪辑", "删掉", "前面太长", "后面太长", "卡点", *diagnostic_edit_keywords), ("timeline", "pacing", "cut_boundary")),
-        ("cover_render", "封面重出", "render", ("封面", "缩略图", "标题图", "封面字", "封面标题"), ("cover",)),
-        ("packaging_render", "包装素材重出", "render", ("片头", "片尾", "转场", "水印", "包装"), ("intro", "outro", "transition", "watermark")),
-        ("music_render", "背景音乐重出", "render", ("bgm", "背景音乐", "音乐"), ("music",)),
-        ("platform_package", "平台文案与发布文案重出", "platform_package", ("平台文案", "发布文案", "发布标题", "简介", "话题", "标签", "hashtags", "hashtag"), ("publish_copy", "hashtags", "platform_copy")),
-    ):
-        if category == "subtitle":
-            if "字幕" not in normalized and not has_subtitle_text_request:
-                continue
-            if has_subtitle_style_request and not has_subtitle_text_request:
-                continue
-            if has_diagnostic_edit_request:
-                continue
-        elif not any(keyword in normalized for keyword in keywords):
-            continue
-        resolved_label = label
-        resolved_targets = targets
-        resolved_focus = ""
-        if category == "edit_plan":
-            resolved_focus = edit_focus
-            if edit_focus == "hook_boundary":
-                resolved_label = "Hook 边界重剪"
-                resolved_targets = ("timeline", "pacing", "cut_boundary", "hook_boundary")
-            elif edit_focus == "cta_transition":
-                resolved_label = "CTA 衔接重剪"
-                resolved_targets = ("timeline", "pacing", "cut_boundary", "cta_transition")
-            elif edit_focus == "mid_transition":
-                resolved_label = "中段衔接重剪"
-                resolved_targets = ("timeline", "pacing", "cut_boundary", "mid_transition")
-        plans.append(
-            FinalReviewRerunPlan(
-                category=category,
-                label=resolved_label,
-                trigger_step=trigger_step,
-                rerun_steps=_rerun_chain_from_step(trigger_step),
-                targets=resolved_targets,
-                focus=resolved_focus,
-            )
-        )
-    if _extract_final_review_content_profile_feedback(note) and not any(plan.category == "content_profile" for plan in plans):
-        plans.append(
-            FinalReviewRerunPlan(
-                category="content_profile",
-                label="内容摘要与文案定位调整",
-                trigger_step="content_profile",
-                rerun_steps=_rerun_chain_from_step("content_profile"),
-                targets=("summary", "keywords", "content_profile"),
-            )
-        )
-    return plans
-
-
-def _combine_final_review_rerun_plans(plans: list[FinalReviewRerunPlan]) -> FinalReviewRerunPlan | None:
-    if not plans:
-        return None
-    from roughcut.pipeline.orchestrator import PIPELINE_STEPS
-
-    indexed = []
-    for plan in plans:
-        if plan.trigger_step not in PIPELINE_STEPS:
-            continue
-        indexed.append((PIPELINE_STEPS.index(plan.trigger_step), plan))
-    if not indexed:
-        return None
-    indexed.sort(key=lambda item: item[0])
-    _, earliest = indexed[0]
-    labels: list[str] = []
-    categories: list[str] = []
-    targets: list[str] = []
-    focuses: list[str] = []
-    for _, plan in indexed:
-        if plan.label not in labels:
-            labels.append(plan.label)
-        if plan.category not in categories:
-            categories.append(plan.category)
-        if plan.focus and plan.focus not in focuses:
-            focuses.append(plan.focus)
-        for target in plan.targets:
-            if target not in targets:
-                targets.append(target)
-    return FinalReviewRerunPlan(
-        category="+".join(categories),
-        label=" + ".join(labels),
-        trigger_step=earliest.trigger_step,
-        rerun_steps=earliest.rerun_steps,
-        targets=tuple(targets),
-        focus=focuses[0] if len(focuses) == 1 else "+".join(focuses),
-    )
-
-
-def _final_review_edit_focus(normalized_note: str) -> str:
-    text = str(normalized_note or "").strip().lower()
-    if not text:
-        return ""
-    if "hook" in text or "开场节奏" in text or "开头节奏" in text:
-        return "hook_boundary"
-    if "cta" in text or "收尾衔接" in text or "结尾衔接" in text:
-        return "cta_transition"
-    if any(token in text for token in ("中段衔接", "边界不顺", "边界不对", "边界太硬", "衔接不顺", "衔接生硬", "高风险边界", "高风险 cut", "高风险cut", "剪辑边界")):
-        return "mid_transition"
-    return ""
-
-
 def _extract_latest_final_review_rerun_context(steps: list[JobStep]) -> dict[str, Any] | None:
     latest: tuple[datetime, dict[str, Any]] | None = None
     for step in steps or []:
@@ -1813,15 +1663,6 @@ def _build_final_review_rerun_context_lines(context: dict[str, Any] | None) -> l
         snippet = feedback if len(feedback) <= 80 else feedback[:79].rstrip() + "…"
         lines.append(f"- 上次修改意见：{snippet}")
     return lines
-
-
-def _rerun_chain_from_step(step_name: str) -> tuple[str, ...]:
-    from roughcut.pipeline.orchestrator import PIPELINE_STEPS
-
-    if step_name not in PIPELINE_STEPS:
-        return ()
-    start_index = PIPELINE_STEPS.index(step_name)
-    return tuple(PIPELINE_STEPS[start_index:])
 
 
 def _extract_message_id(data: dict[str, Any]) -> int | None:
@@ -2053,7 +1894,7 @@ def _build_content_profile_review_message(
         [
             "",
             "字幕摘录：",
-            str(draft.get("transcript_excerpt") or "无"),
+            str(draft.get("reviewed_subtitle_excerpt") or draft.get("transcript_excerpt") or "无"),
             "",
             "回复方式：",
             "1. 直接回复“通过”即可继续后续流程。",
@@ -3524,6 +3365,115 @@ async def _interpret_content_profile_reply(review: Any, text: str) -> dict[str, 
         allowed_workflow_modes=[item["value"] for item in build_active_workflow_mode_options()],
         allowed_enhancement_modes=[item["value"] for item in build_active_enhancement_mode_options()],
     )
+
+
+async def _load_subtitle_review_artifacts(job_id: uuid.UUID, session: Any) -> dict[str, dict[str, Any]]:
+    result = await session.execute(
+        select(Artifact)
+        .where(
+            Artifact.job_id == job_id,
+            Artifact.artifact_type.in_(_SUBTITLE_REVIEW_ARTIFACT_TYPES),
+        )
+        .order_by(Artifact.created_at.desc())
+    )
+    artifacts = result.scalars().all()
+    return {
+        artifact_type: payload
+        for artifact_type in _SUBTITLE_REVIEW_ARTIFACT_TYPES
+        if (payload := _select_latest_artifact_payload(artifacts, artifact_type))
+    }
+
+
+def _select_latest_artifact_payload(artifacts: list[Artifact], artifact_type: str) -> dict[str, Any]:
+    selected_payload: dict[str, Any] | None = None
+    selected_created_at = datetime.min.replace(tzinfo=timezone.utc)
+    for artifact in artifacts or []:
+        if str(getattr(artifact, "artifact_type", "") or "").strip() != artifact_type:
+            continue
+        payload = getattr(artifact, "data_json", None)
+        if not isinstance(payload, dict):
+            continue
+        created_at = getattr(artifact, "created_at", None) or selected_created_at
+        if selected_payload is None or created_at > selected_created_at:
+            selected_payload = dict(payload)
+            selected_created_at = created_at
+    return selected_payload or {}
+
+
+def _build_subtitle_review_artifact_lines(artifacts: dict[str, dict[str, Any]] | None) -> list[str]:
+    if not isinstance(artifacts, dict) or not artifacts:
+        return []
+
+    lines: list[str] = []
+
+    term_patch = artifacts.get("subtitle_term_resolution_patch") or {}
+    if isinstance(term_patch, dict) and term_patch:
+        metrics = dict(term_patch.get("metrics") or {})
+        candidate_terms = [str(item).strip() for item in (term_patch.get("candidate_terms") or []) if str(item).strip()]
+        patch_count = int(metrics.get("patch_count") or len(term_patch.get("patches") or []))
+        accepted_count = int(metrics.get("accepted_count") or 0)
+        pending_count = int(metrics.get("pending_count") or 0)
+        auto_applied_count = int(metrics.get("auto_applied_count") or 0)
+        lines.append(
+            f"- 术语修复：{patch_count} 条候选，已接受 {accepted_count}，待审 {pending_count}，自动应用 {auto_applied_count}"
+        )
+        if candidate_terms:
+            lines.append(f"- 术语候选：{_join_non_empty(candidate_terms[:4])}")
+        if term_patch.get("blocking"):
+            lines.append("- 术语状态：仍有待确认候选，优先处理字幕审核")
+        action_payload = build_subtitle_term_resolution_action(term_patch)
+        if action_payload.get("recommended_action"):
+            lines.append(f"- 处理动作：{action_payload['recommended_action']}")
+
+    consistency_report = artifacts.get("subtitle_consistency_report") or {}
+    if isinstance(consistency_report, dict) and consistency_report:
+        blocking = bool(consistency_report.get("blocking"))
+        score = consistency_report.get("score")
+        score_text = f"{float(score):.2f}" if isinstance(score, (int, float)) else "未评"
+        blocking_reasons = [
+            str(item).strip()
+            for item in (consistency_report.get("blocking_reasons") or [])
+            if str(item).strip()
+        ]
+        warning_reasons = [
+            str(item).strip()
+            for item in (consistency_report.get("warning_reasons") or [])
+            if str(item).strip()
+        ]
+        lines.append(f"- 一致性：{score_text} 分，{'阻断' if blocking else '通过'}")
+        if blocking_reasons:
+            lines.append(f"- 一致性阻断：{_join_non_empty(blocking_reasons[:2])}")
+        elif warning_reasons:
+            lines.append(f"- 一致性提醒：{_join_non_empty(warning_reasons[:2])}")
+        action_payload = build_subtitle_consistency_action(consistency_report)
+        if action_payload.get("recommended_action"):
+            lines.append(f"- 处理动作：{action_payload['recommended_action']}")
+
+    quality_report = artifacts.get("subtitle_quality_report") or {}
+    if isinstance(quality_report, dict) and quality_report:
+        blocking = bool(quality_report.get("blocking"))
+        score = quality_report.get("score")
+        score_text = f"{float(score):.2f}" if isinstance(score, (int, float)) else "未评"
+        blocking_reasons = [
+            str(item).strip()
+            for item in (quality_report.get("blocking_reasons") or [])
+            if str(item).strip()
+        ]
+        warning_reasons = [
+            str(item).strip()
+            for item in (quality_report.get("warning_reasons") or [])
+            if str(item).strip()
+        ]
+        lines.append(f"- 质量：{score_text} 分，{'阻断' if blocking else '通过'}")
+        if blocking_reasons:
+            lines.append(f"- 质量阻断：{_join_non_empty(blocking_reasons[:2])}")
+        elif warning_reasons:
+            lines.append(f"- 质量提醒：{_join_non_empty(warning_reasons[:2])}")
+        action_payload = build_subtitle_quality_action(quality_report)
+        if action_payload.get("recommended_action"):
+            lines.append(f"- 处理动作：{action_payload['recommended_action']}")
+
+    return lines
 
 
 _telegram_review_bot_service: TelegramReviewBotService | None = None

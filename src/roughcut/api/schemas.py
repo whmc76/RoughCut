@@ -145,6 +145,13 @@ class JobActivityDecisionOut(BaseModel):
     status: str
     summary: str
     detail: str | None = None
+    blocking: bool | None = None
+    review_route: str | None = None
+    review_label: str | None = None
+    recommended_action: str | None = None
+    rerun_start_step: str | None = None
+    rerun_steps: list[str] = Field(default_factory=list)
+    issue_codes: list[str] = Field(default_factory=list)
     updated_at: str | None = None
 
 

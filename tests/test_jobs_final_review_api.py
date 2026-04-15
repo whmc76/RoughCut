@@ -423,6 +423,10 @@ async def test_final_review_endpoint_attaches_structured_content_profile_feedbac
         "subject_brand": "傲雷",
         "subject_model": "司令官2Ultra",
     }
+    assert step.metadata_["review_rerun_category"] == "content_profile"
+    assert step.metadata_["review_rerun_focus"] == ""
+    assert step.metadata_["review_rerun_targets"] == ["summary", "keywords", "content_profile"]
+    assert step.metadata_["detail"] == "人工成片审核要求重跑：内容摘要与文案定位调整"
 
 
 @pytest.mark.asyncio

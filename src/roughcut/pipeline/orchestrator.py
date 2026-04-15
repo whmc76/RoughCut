@@ -3,6 +3,7 @@ Orchestrator: single-process loop that reads job_steps and advances the state ma
 State in DB, Celery only executes individual steps.
 
  Pipeline: probe → extract_audio → transcribe → subtitle_postprocess
+        → subtitle_term_resolution → subtitle_consistency_review
         → glossary_review → subtitle_translation → content_profile → summary_review → ai_director
         → avatar_commentary → edit_plan → render → final_review → platform_package
 """
@@ -26,11 +27,14 @@ from roughcut.config import get_settings
 from roughcut.db.models import Artifact, Job, JobStep, RenderOutput, SubtitleCorrection, SubtitleItem, Timeline
 from roughcut.db.session import get_session_factory
 from roughcut.pipeline.quality import QUALITY_ARTIFACT_TYPE, assess_job_quality
+from roughcut.pipeline.rerun_actions import QUALITY_RERUN_STEPS
 from roughcut.review.evidence_types import (
     ARTIFACT_TYPE_CONTENT_PROFILE_OCR,
     ARTIFACT_TYPE_ENTITY_RESOLUTION_TRACE,
     ARTIFACT_TYPE_TRANSCRIPT_EVIDENCE,
 )
+from roughcut.review.subtitle_consistency import ARTIFACT_TYPE_SUBTITLE_CONSISTENCY_REPORT
+from roughcut.review.subtitle_term_resolution import ARTIFACT_TYPE_SUBTITLE_TERM_RESOLUTION_PATCH
 from roughcut.storage.runtime_cleanup import cleanup_job_runtime_files
 
 logger = logging.getLogger(__name__)
@@ -41,6 +45,8 @@ PIPELINE_STEPS = [
     "extract_audio",
     "transcribe",
     "subtitle_postprocess",
+    "subtitle_term_resolution",
+    "subtitle_consistency_review",
     "glossary_review",
     "subtitle_translation",
     "content_profile",
@@ -58,6 +64,8 @@ STEP_TASK_MAP = {
     "extract_audio": "roughcut.pipeline.tasks.media_extract_audio",
     "transcribe": "roughcut.pipeline.tasks.llm_transcribe",
     "subtitle_postprocess": "roughcut.pipeline.tasks.llm_subtitle_postprocess",
+    "subtitle_term_resolution": "roughcut.pipeline.tasks.llm_subtitle_term_resolution",
+    "subtitle_consistency_review": "roughcut.pipeline.tasks.llm_subtitle_consistency_review",
     "subtitle_translation": "roughcut.pipeline.tasks.llm_subtitle_translation",
     "content_profile": "roughcut.pipeline.tasks.llm_content_profile",
     "glossary_review": "roughcut.pipeline.tasks.llm_glossary_review",
@@ -73,6 +81,8 @@ STEP_QUEUES = {
     "extract_audio": "media_queue",
     "transcribe": "llm_queue",
     "subtitle_postprocess": "llm_queue",
+    "subtitle_term_resolution": "llm_queue",
+    "subtitle_consistency_review": "llm_queue",
     "subtitle_translation": "llm_queue",
     "content_profile": "llm_queue",
     "glossary_review": "llm_queue",
@@ -85,18 +95,6 @@ STEP_QUEUES = {
 
 MAX_ATTEMPTS = 3
 _GPU_SENSITIVE_STEPS = {"transcribe", "avatar_commentary", "render"}
-_QUALITY_RERUN_STEPS = {
-    "subtitle_postprocess",
-    "glossary_review",
-    "subtitle_translation",
-    "content_profile",
-    "ai_director",
-    "avatar_commentary",
-    "edit_plan",
-    "render",
-    "final_review",
-    "platform_package",
-}
 _REVIEW_ROUND_STEPS = {"summary_review", "glossary_review", "final_review"}
 _ORCHESTRATOR_ADVISORY_LOCK_KEY = 22032026
 _ORCHESTRATOR_HEARTBEAT_PATH = Path("logs/orchestrator-heartbeat.json")
@@ -1048,7 +1046,7 @@ async def _assess_and_maybe_rerun_job(session, job: Job, steps: list[JobStep]) -
     recommended_steps = [
         str(step_name).strip()
         for step_name in assessment.get("recommended_rerun_steps") or []
-        if str(step_name).strip() in _QUALITY_RERUN_STEPS
+        if str(step_name).strip() in QUALITY_RERUN_STEPS
     ]
     recommended_step = recommended_steps[0] if recommended_steps else ""
     issue_codes = [str(code) for code in assessment.get("issue_codes") or [] if str(code).strip()]
@@ -1174,6 +1172,8 @@ async def _reset_job_for_quality_rerun(
     if "subtitle_postprocess" in rerun_step_set:
         await session.execute(delete(SubtitleCorrection).where(SubtitleCorrection.job_id == job.id))
         await session.execute(delete(SubtitleItem).where(SubtitleItem.job_id == job.id))
+    elif "subtitle_term_resolution" in rerun_step_set:
+        await session.execute(delete(SubtitleCorrection).where(SubtitleCorrection.job_id == job.id))
     elif "glossary_review" in rerun_step_set:
         await session.execute(delete(SubtitleCorrection).where(SubtitleCorrection.job_id == job.id))
 
@@ -1221,6 +1221,10 @@ def _artifact_types_for_quality_rerun(rerun_steps: set[str]) -> set[str]:
     settings = get_settings()
     if "subtitle_translation" in rerun_steps:
         artifact_types.add("subtitle_translation")
+    if "subtitle_term_resolution" in rerun_steps:
+        artifact_types.add(ARTIFACT_TYPE_SUBTITLE_TERM_RESOLUTION_PATCH)
+    if "subtitle_consistency_review" in rerun_steps:
+        artifact_types.add(ARTIFACT_TYPE_SUBTITLE_CONSISTENCY_REPORT)
     if "transcribe" in rerun_steps and bool(getattr(settings, "asr_evidence_enabled", False)):
         artifact_types.add(ARTIFACT_TYPE_TRANSCRIPT_EVIDENCE)
     if "content_profile" in rerun_steps:

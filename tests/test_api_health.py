@@ -1709,6 +1709,73 @@ async def test_job_list_includes_content_preview(client: AsyncClient):
 
 
 @pytest.mark.asyncio
+async def test_jobs_list_quality_preview_falls_back_to_subtitle_stage_reports(client: AsyncClient):
+    from roughcut.db.models import Artifact, Job
+    from roughcut.db.session import get_session_factory
+
+    job_id = uuid.uuid4()
+
+    async with get_session_factory()() as session:
+        session.add(
+            Job(
+                id=job_id,
+                source_path="jobs/demo/subtitle-preview.mp4",
+                source_name="subtitle-preview.mp4",
+                status="done",
+                language="zh-CN",
+            )
+        )
+        session.add_all(
+            [
+                Artifact(
+                    job_id=job_id,
+                    artifact_type="content_profile_final",
+                    data_json={
+                        "subject_brand": "Loop露普",
+                        "subject_model": "SK05二代UV版",
+                        "subject_type": "EDC手电",
+                        "video_theme": "SK05二代UV版与一代亮度续航对比",
+                        "summary": "围绕 Loop露普 SK05二代UV版 和一代做亮度、续航与 UV 功能差异对比。",
+                        "engagement_question": "你更在意二代的 UV 功能还是亮度升级？",
+                        "review_mode": "auto_confirmed",
+                        "automation_review": {"score": 0.95},
+                    },
+                ),
+                Artifact(
+                    job_id=job_id,
+                    artifact_type="subtitle_term_resolution_patch",
+                    data_json={
+                        "metrics": {
+                            "patch_count": 3,
+                            "pending_count": 2,
+                            "auto_applied_count": 1,
+                        }
+                    },
+                ),
+                Artifact(
+                    job_id=job_id,
+                    artifact_type="subtitle_consistency_report",
+                    data_json={
+                        "score": 87.0,
+                        "blocking": False,
+                        "blocking_reasons": [],
+                        "warning_reasons": ["字幕术语已自动纠偏 1 处"],
+                    },
+                ),
+            ]
+        )
+        await session.commit()
+
+    response = await client.get("/api/v1/jobs")
+    assert response.status_code == 200
+    item = next(job for job in response.json() if job["id"] == str(job_id))
+    assert item["quality_score"] == 87.0
+    assert item["quality_grade"] == "B"
+    assert item["quality_summary"] == "术语解析 3 条 · 一致性审校 87.0"
+    assert item["quality_issue_codes"] == ["术语解析待确认 2 条", "字幕术语已自动纠偏 1 处"]
+
+
+@pytest.mark.asyncio
 async def test_job_restart_allows_done_jobs(client: AsyncClient, monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     import roughcut.api.jobs as jobs_api
     from roughcut.db.models import Artifact, Job, JobStep
@@ -2843,6 +2910,161 @@ async def test_job_activity_reports_quality_assessment_decision(client: AsyncCli
 
 
 @pytest.mark.asyncio
+async def test_job_activity_reports_subtitle_stage_decisions_and_events(client: AsyncClient):
+    from roughcut.db.models import Artifact, Job
+    from roughcut.db.session import get_session_factory
+
+    job_id = uuid.uuid4()
+
+    async with get_session_factory()() as session:
+        session.add(
+            Job(
+                id=job_id,
+                source_path="jobs/demo/subtitle-activity.mp4",
+                source_name="subtitle-activity.mp4",
+                status="processing",
+                language="zh-CN",
+            )
+        )
+        session.add_all(
+            [
+                Artifact(
+                    job_id=job_id,
+                    artifact_type="subtitle_quality_report",
+                    data_json={
+                        "score": 61.5,
+                        "blocking": True,
+                        "blocking_reasons": ["热词/型号错词残留 2 处"],
+                        "warning_reasons": ["独立语气词偏多 1.2%"],
+                        "metrics": {"identity_missing": False},
+                    },
+                ),
+                Artifact(
+                    job_id=job_id,
+                    artifact_type="subtitle_term_resolution_patch",
+                    data_json={
+                        "metrics": {
+                            "patch_count": 3,
+                            "pending_count": 2,
+                            "auto_applied_count": 1,
+                        }
+                    },
+                ),
+                Artifact(
+                    job_id=job_id,
+                    artifact_type="subtitle_consistency_report",
+                    data_json={
+                        "score": 87.0,
+                        "blocking": False,
+                        "blocking_reasons": [],
+                        "warning_reasons": ["字幕术语已自动纠偏 1 处"],
+                    },
+                ),
+            ]
+        )
+        await session.commit()
+
+    response = await client.get(f"/api/v1/jobs/{job_id}/activity")
+    assert response.status_code == 200
+    data = response.json()
+
+    decision_kinds = [item["kind"] for item in data["decisions"]]
+    assert "subtitle_quality" in decision_kinds
+    assert "subtitle_term_resolution" in decision_kinds
+    assert "subtitle_consistency_review" in decision_kinds
+
+    subtitle_quality_decision = next(item for item in data["decisions"] if item["kind"] == "subtitle_quality")
+    assert subtitle_quality_decision["status"] == "needs_review"
+    assert subtitle_quality_decision["summary"] == "字幕质检 61.5 分"
+    assert subtitle_quality_decision["detail"] == "热词/型号错词残留 2 处"
+    assert subtitle_quality_decision["review_route"] == "subtitle_review"
+    assert subtitle_quality_decision["review_label"] == "字幕质量复核"
+    assert subtitle_quality_decision["recommended_action"].startswith("先处理字幕质量阻断")
+    assert subtitle_quality_decision["rerun_start_step"] == "subtitle_postprocess"
+    assert subtitle_quality_decision["rerun_steps"][0] == "subtitle_postprocess"
+    assert subtitle_quality_decision["issue_codes"] == ["subtitle_quality_blocking"]
+
+    subtitle_term_resolution_decision = next(
+        item for item in data["decisions"] if item["kind"] == "subtitle_term_resolution"
+    )
+    assert subtitle_term_resolution_decision["review_route"] == "subtitle_review"
+    assert subtitle_term_resolution_decision["review_label"] == "术语候选确认"
+    assert subtitle_term_resolution_decision["rerun_start_step"] == "subtitle_term_resolution"
+    assert subtitle_term_resolution_decision["issue_codes"] == ["subtitle_terms_pending"]
+
+    subtitle_consistency_decision = next(
+        item for item in data["decisions"] if item["kind"] == "subtitle_consistency_review"
+    )
+    assert subtitle_consistency_decision["review_route"] is None
+    assert subtitle_consistency_decision["review_label"] == "一致性提示"
+    assert subtitle_consistency_decision["rerun_start_step"] == "subtitle_consistency_review"
+    assert subtitle_consistency_decision["issue_codes"] == ["subtitle_consistency_warning"]
+
+    assert any(event["title"] == "字幕阶段验收已生成" for event in data["events"])
+    assert any(event["title"] == "字幕术语解析已生成" for event in data["events"])
+    assert any(event["title"] == "字幕一致性审校已生成" for event in data["events"])
+
+
+@pytest.mark.asyncio
+async def test_job_activity_reports_quality_rerun_event_with_source_and_reason(client: AsyncClient):
+    from roughcut.db.models import Artifact, Job
+    from roughcut.db.session import get_session_factory
+    from roughcut.pipeline.orchestrator import create_job_steps
+
+    job_id = uuid.uuid4()
+
+    async with get_session_factory()() as session:
+        session.add(
+            Job(
+                id=job_id,
+                source_path="jobs/demo/rerun-activity.mp4",
+                source_name="rerun-activity.mp4",
+                status="done",
+                language="zh-CN",
+            )
+        )
+        for step in create_job_steps(job_id):
+            step.status = "done"
+            session.add(step)
+        session.add(
+            Artifact(
+                job_id=job_id,
+                artifact_type="quality_assessment",
+                data_json={
+                    "score": 72.0,
+                    "grade": "C",
+                    "issue_codes": ["subtitle_quality_blocking"],
+                    "recommended_rerun_step": "subtitle_postprocess",
+                    "recommended_rerun_steps": [
+                        "subtitle_postprocess",
+                        "subtitle_term_resolution",
+                        "subtitle_consistency_review",
+                    ],
+                },
+            )
+        )
+        await session.commit()
+
+    rerun_response = await client.post(
+        f"/api/v1/jobs/{job_id}/rerun",
+        json={"issue_code": "subtitle_quality_blocking", "note": "回退字幕链重新处理"},
+    )
+    assert rerun_response.status_code == 200
+
+    response = await client.get(f"/api/v1/jobs/{job_id}/activity")
+    assert response.status_code == 200
+    data = response.json()
+
+    rerun_event = next(item for item in data["events"] if item["title"] == "已请求从 subtitle_postprocess 重跑")
+    assert rerun_event["type"] == "review_action"
+    assert rerun_event["status"] == "processing"
+    assert rerun_event["step_name"] == "subtitle_postprocess"
+    assert "触发来源：Web" in rerun_event["detail"]
+    assert "问题：subtitle_quality_blocking" in rerun_event["detail"]
+    assert "回退链路：subtitle_postprocess -> subtitle_term_resolution -> subtitle_consistency_review" in rerun_event["detail"]
+
+
+@pytest.mark.asyncio
 async def test_job_activity_prefers_confirmed_content_profile_and_review_specific_waiting_detail(client: AsyncClient):
     from roughcut.db.models import Artifact, Job, JobStep
     from roughcut.db.session import get_session_factory
@@ -2906,6 +3128,48 @@ async def test_job_activity_prefers_confirmed_content_profile_and_review_specifi
     assert profile_decision["status"] == "done"
     assert "确认后主题" in profile_decision["summary"]
     assert "这是一版已经确认过的最终摘要。" in profile_decision["detail"]
+
+
+@pytest.mark.asyncio
+async def test_job_preview_uses_subtitle_review_context_when_summary_review_is_blocked_by_subtitle_gate(client: AsyncClient):
+    from roughcut.db.models import Artifact, Job, JobStep
+    from roughcut.db.session import get_session_factory
+
+    job_id = uuid.uuid4()
+
+    async with get_session_factory()() as session:
+        session.add(
+            Job(
+                id=job_id,
+                source_path="jobs/demo/subtitle-review-context.mp4",
+                source_name="subtitle-review-context.mp4",
+                status="needs_review",
+                language="zh-CN",
+            )
+        )
+        session.add(JobStep(job_id=job_id, step_name="summary_review", status="pending"))
+        session.add(
+            Artifact(
+                job_id=job_id,
+                artifact_type="subtitle_term_resolution_patch",
+                data_json={
+                    "metrics": {
+                        "patch_count": 4,
+                        "pending_count": 2,
+                        "auto_applied_count": 1,
+                    }
+                },
+            )
+        )
+        await session.commit()
+
+    response = await client.get(f"/api/v1/jobs/{job_id}")
+    assert response.status_code == 200
+    data = response.json()
+
+    assert data["review_step"] == "summary_review"
+    assert data["review_label"] == "字幕复核"
+    assert "先人工确认 2 条术语候选" in data["review_detail"]
 
 
 @pytest.mark.asyncio

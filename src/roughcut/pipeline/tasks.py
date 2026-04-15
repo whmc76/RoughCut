@@ -583,6 +583,16 @@ def llm_subtitle_postprocess(self, job_id: str):
     return _run_task_step(self, job_id, "subtitle_postprocess", retry_countdown=10)
 
 
+@celery_app.task(name="roughcut.pipeline.tasks.llm_subtitle_term_resolution", bind=True, max_retries=3)
+def llm_subtitle_term_resolution(self, job_id: str):
+    return _run_task_step(self, job_id, "subtitle_term_resolution", retry_countdown=10)
+
+
+@celery_app.task(name="roughcut.pipeline.tasks.llm_subtitle_consistency_review", bind=True, max_retries=3)
+def llm_subtitle_consistency_review(self, job_id: str):
+    return _run_task_step(self, job_id, "subtitle_consistency_review", retry_countdown=10)
+
+
 @celery_app.task(name="roughcut.pipeline.tasks.llm_subtitle_translation", bind=True, max_retries=3)
 def llm_subtitle_translation(self, job_id: str):
     return _run_task_step(self, job_id, "subtitle_translation", retry_countdown=15)

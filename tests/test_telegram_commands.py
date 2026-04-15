@@ -1,12 +1,48 @@
 from __future__ import annotations
 
 import uuid
+from typing import Any
 from types import SimpleNamespace
 
 import pytest
+from sqlalchemy import select
 
 import roughcut.telegram.commands as commands_mod
+import roughcut.review.telegram_bot as telegram_bot_mod
 from roughcut.telegram.commands import handle_telegram_command, handle_telegram_freeform_request, parse_telegram_command
+
+
+async def _seed_job_for_telegram_rerun(
+    job_id: uuid.UUID,
+    *,
+    quality_artifact: dict[str, Any] | None = None,
+) -> None:
+    from roughcut.db.models import Artifact, Job
+    from roughcut.db.session import get_session_factory
+    from roughcut.pipeline.orchestrator import create_job_steps
+
+    async with get_session_factory()() as session:
+        session.add(
+            Job(
+                id=job_id,
+                source_path="jobs/demo/telegram-rerun.mp4",
+                source_name="telegram-rerun.mp4",
+                status="done",
+                language="zh-CN",
+            )
+        )
+        for step in create_job_steps(job_id):
+            step.status = "done"
+            session.add(step)
+        if quality_artifact is not None:
+            session.add(
+                Artifact(
+                    job_id=job_id,
+                    artifact_type="quality_assessment",
+                    data_json=quality_artifact,
+                )
+            )
+        await session.commit()
 
 
 def test_parse_telegram_command_trims_bot_suffix():
@@ -151,6 +187,123 @@ async def test_handle_review_content_pass(monkeypatch):
     assert handled is True
     assert confirmed == [{}]
     assert "已提交任务" in sent[0]
+
+
+@pytest.mark.asyncio
+async def test_apply_subtitle_review_returns_artifact_summary_when_no_pending_candidates(monkeypatch):
+    async def fake_generate_report(job_id, session):
+        return SimpleNamespace(items=[])
+
+    async def fake_load_subtitle_review_artifacts(job_id, session):
+        return {
+            "subtitle_term_resolution_patch": {
+                "metrics": {"patch_count": 2, "pending_count": 1, "accepted_count": 0, "auto_applied_count": 1},
+            }
+        }
+
+    monkeypatch.setattr(commands_mod, "generate_report", fake_generate_report)
+    monkeypatch.setattr(telegram_bot_mod, "_build_pending_subtitle_candidates", lambda report: [])
+    monkeypatch.setattr(telegram_bot_mod, "_load_subtitle_review_artifacts", fake_load_subtitle_review_artifacts)
+    monkeypatch.setattr(
+        telegram_bot_mod,
+        "_build_subtitle_review_artifact_lines",
+        lambda artifacts: ["- 处理动作：先人工确认 1 条术语候选，再继续后续摘要与成片流程。"],
+    )
+
+    message = await commands_mod._apply_subtitle_review(
+        session=SimpleNamespace(),
+        job_id=uuid.UUID("00000000-0000-0000-0000-000000000001"),
+        action="pass",
+        note="",
+    )
+
+    assert "当前没有待审核字幕纠错候选" in message
+    assert "最新字幕审校状态：" in message
+    assert "先人工确认 1 条术语候选" in message
+
+
+@pytest.mark.asyncio
+async def test_handle_rerun_command_uses_quality_assessment_default_plan(db_engine):
+    from roughcut.db.models import Job, JobStep, ReviewAction
+    from roughcut.db.session import get_session_factory
+
+    sent: list[str] = []
+
+    async def fake_send_text(text: str) -> None:
+        sent.append(text)
+
+    job_id = uuid.uuid4()
+    await _seed_job_for_telegram_rerun(
+        job_id,
+        quality_artifact={
+            "score": 84.0,
+            "grade": "B",
+            "issue_codes": ["subtitle_sync_issue"],
+            "recommended_rerun_step": "render",
+            "recommended_rerun_steps": ["render", "final_review", "platform_package"],
+        },
+    )
+
+    handled = await handle_telegram_command(f"/rerun {job_id}", send_text=fake_send_text)
+
+    assert handled is True
+    assert sent
+    assert f"任务 {job_id}：" in sent[0]
+    assert "已接受重跑请求，等待调度器从 render 接管。" in sent[0]
+    assert "render -> final_review -> platform_package" in sent[0]
+
+    async with get_session_factory()() as session:
+        job = await session.get(Job, job_id)
+        steps = (
+            await session.execute(select(JobStep).where(JobStep.job_id == job_id).order_by(JobStep.id.asc()))
+        ).scalars().all()
+        actions = (
+            await session.execute(select(ReviewAction).where(ReviewAction.job_id == job_id))
+        ).scalars().all()
+
+    assert job is not None
+    assert job.status == "processing"
+    step_map = {step.step_name: step for step in steps}
+    assert step_map["render"].status == "pending"
+    assert step_map["render"].metadata_["rerun_requested_via"] == "telegram"
+    assert step_map["render"].metadata_["rerun_issue_codes"] == ["subtitle_sync_issue"]
+    assert len(actions) == 1
+    assert actions[0].target_type == "quality_rerun"
+
+
+@pytest.mark.asyncio
+async def test_handle_rerun_command_supports_explicit_step(db_engine):
+    from roughcut.db.models import JobStep
+    from roughcut.db.session import get_session_factory
+
+    sent: list[str] = []
+
+    async def fake_send_text(text: str) -> None:
+        sent.append(text)
+
+    job_id = uuid.uuid4()
+    await _seed_job_for_telegram_rerun(job_id)
+
+    handled = await handle_telegram_command(
+        f"/rerun {job_id} --step subtitle_term_resolution 术语链路重跑",
+        send_text=fake_send_text,
+    )
+
+    assert handled is True
+    assert sent
+    assert "已接受重跑请求，等待调度器从 subtitle_term_resolution 接管。" in sent[0]
+    assert "备注：术语链路重跑" in sent[0]
+
+    async with get_session_factory()() as session:
+        steps = (
+            await session.execute(select(JobStep).where(JobStep.job_id == job_id).order_by(JobStep.id.asc()))
+        ).scalars().all()
+
+    step_map = {step.step_name: step for step in steps}
+    assert step_map["subtitle_term_resolution"].status == "pending"
+    assert step_map["subtitle_term_resolution"].metadata_["rerun_requested_via"] == "telegram"
+    assert step_map["subtitle_term_resolution"].metadata_["rerun_start_step"] == "subtitle_term_resolution"
+    assert step_map["subtitle_term_resolution"].metadata_["rerun_request_note"] == "术语链路重跑"
 
 
 @pytest.mark.asyncio

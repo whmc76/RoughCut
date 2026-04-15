@@ -7,9 +7,15 @@ from unittest.mock import AsyncMock
 import pytest
 
 import roughcut.review.telegram_bot as telegram_bot
+from roughcut.review.final_review_rerun import (
+    FinalReviewRerunPlan,
+    build_final_review_rerun_plan as _build_final_review_rerun_plan,
+    build_final_review_rerun_plans as _build_final_review_rerun_plans,
+    combine_final_review_rerun_plans as _combine_final_review_rerun_plans,
+    extract_final_review_content_profile_feedback as _extract_final_review_content_profile_feedback,
+)
 from roughcut.review import telegram_review_parsing
 from roughcut.review.telegram_bot import (
-    FinalReviewRerunPlan,
     TelegramFinalReviewClip,
     TelegramSubtitleLineCandidate,
     TelegramReviewThumbnail,
@@ -19,10 +25,6 @@ from roughcut.review.telegram_bot import (
     _build_final_review_clip_specs,
     _build_final_review_message,
     _build_final_review_reply_markup,
-    _build_final_review_rerun_plan,
-    _build_final_review_rerun_plans,
-    _combine_final_review_rerun_plans,
-    _extract_final_review_content_profile_feedback,
     _build_pending_subtitle_candidates,
     _select_final_review_content_profile,
     _build_review_callback_data,
@@ -489,6 +491,129 @@ async def test_handle_content_profile_reply_dispatches_full_subtitle_review_when
     assert sent[0] == f"已收到任务 {job_id} 的审核意见，正在处理，请稍候。"
     assert sent[1] == f"已确认任务 {job_id} 的内容摘要；自动字幕纠错没有产出候选，我现在改发全量字幕人工复核包。"
     assert notified == [(job_id, True)]
+
+
+@pytest.mark.asyncio
+async def test_notify_subtitle_review_includes_artifact_status_summary(db_engine, monkeypatch):
+    from roughcut.db.models import Artifact, Job
+    from roughcut.db.session import get_session_factory
+
+    service = TelegramReviewBotService()
+    job_id = uuid.uuid4()
+    captured: list[tuple[str, uuid.UUID, str]] = []
+
+    async def fake_send_review_message(kind: str, job_id_value: uuid.UUID, body: str, **kwargs):
+        captured.append((kind, job_id_value, body))
+        return {"sent": True, "round_number": 1, "round_label": "第一次审核"}
+
+    monkeypatch.setattr(
+        telegram_bot,
+        "generate_report",
+        AsyncMock(
+            return_value=SimpleNamespace(
+                total_corrections=1,
+                accepted_count=0,
+                rejected_count=0,
+                items=[
+                    {
+                        "index": 1,
+                        "start": 0.0,
+                        "end": 1.2,
+                        "corrections": [
+                            {
+                                "id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                                "original": "鸿福",
+                                "suggested": "狐蝠工业",
+                                "type": "term",
+                                "confidence": 0.82,
+                                "source": "glossary",
+                                "decision": None,
+                            }
+                        ],
+                    }
+                ],
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        telegram_bot,
+        "get_settings",
+        lambda: SimpleNamespace(
+            telegram_remote_review_enabled=True,
+            telegram_review_enabled=True,
+            telegram_bot_chat_id="123",
+            telegram_bot_token="token",
+            telegram_bot_api_base_url="https://api.telegram.org",
+        ),
+    )
+    service._send_review_message = fake_send_review_message
+
+    async with get_session_factory()() as session:
+        session.add(
+            Job(
+                id=job_id,
+                source_path="jobs/demo/subtitle.mp4",
+                source_name="subtitle.mp4",
+                status="needs_review",
+                language="zh-CN",
+            )
+        )
+        session.add(
+            Artifact(
+                job_id=job_id,
+                step_id=None,
+                artifact_type="subtitle_term_resolution_patch",
+                data_json={
+                    "candidate_terms": ["狐蝠工业", "FXX1小副包"],
+                    "blocking": True,
+                    "metrics": {
+                        "patch_count": 2,
+                        "accepted_count": 1,
+                        "pending_count": 1,
+                        "auto_applied_count": 0,
+                    },
+                },
+            )
+        )
+        session.add(
+            Artifact(
+                job_id=job_id,
+                step_id=None,
+                artifact_type="subtitle_consistency_report",
+                data_json={
+                    "score": 88.2,
+                    "blocking": True,
+                    "blocking_reasons": ["字幕与文件名品牌不一致"],
+                },
+            )
+        )
+        session.add(
+            Artifact(
+                job_id=job_id,
+                step_id=None,
+                artifact_type="subtitle_quality_report",
+                data_json={
+                    "score": 91.5,
+                    "blocking": False,
+                    "warning_reasons": ["短碎句率偏高 1.20%"],
+                },
+            )
+        )
+        await session.commit()
+
+    await service.notify_subtitle_review(job_id)
+
+    assert captured
+    kind, captured_job_id, body = captured[0]
+    assert kind == telegram_bot._REVIEW_KIND_SUBTITLE
+    assert captured_job_id == job_id
+    assert "字幕审校状态：" in body
+    assert "术语修复：2 条候选，已接受 1，待审 1，自动应用 0" in body
+    assert "一致性：88.20 分，阻断" in body
+    assert "质量：91.50 分，通过" in body
+    assert "处理动作：先人工确认 1 条术语候选，再继续后续摘要与成片流程。" in body
+    assert "处理动作：先复核一致性冲突：字幕与文件名品牌不一致；确认后如需自动回退，从 subtitle_consistency_review 起重跑。" in body
+
 
 @pytest.mark.asyncio
 async def test_handle_update_help_responds_without_chat_match(monkeypatch):
@@ -2180,6 +2305,89 @@ async def test_handle_subtitle_reply_applies_full_review_line_updates_without_ca
 
 
 @pytest.mark.asyncio
+async def test_handle_subtitle_reply_reports_artifact_status_when_no_subtitle_candidates(db_engine, monkeypatch):
+    from roughcut.db.models import Artifact, Job
+    from roughcut.db.session import get_session_factory
+
+    service = TelegramReviewBotService()
+    sent: list[str] = []
+    job_id = uuid.uuid4()
+
+    async def fake_send_text(text: str, *, chat_id: str) -> None:
+        sent.append(text)
+
+    service._send_chat_text = fake_send_text
+    monkeypatch.setattr(
+        telegram_bot,
+        "generate_report",
+        AsyncMock(return_value=SimpleNamespace(items=[])),
+    )
+
+    async with get_session_factory()() as session:
+        session.add(
+            Job(
+                id=job_id,
+                source_path="jobs/demo/source.mp4",
+                source_name="source.mp4",
+                status="needs_review",
+                language="zh-CN",
+            )
+        )
+        session.add(
+            Artifact(
+                job_id=job_id,
+                step_id=None,
+                artifact_type="subtitle_term_resolution_patch",
+                data_json={
+                    "candidate_terms": ["狐蝠工业"],
+                    "blocking": True,
+                    "metrics": {
+                        "patch_count": 1,
+                        "accepted_count": 0,
+                        "pending_count": 1,
+                        "auto_applied_count": 0,
+                    },
+                },
+            )
+        )
+        session.add(
+            Artifact(
+                job_id=job_id,
+                step_id=None,
+                artifact_type="subtitle_consistency_report",
+                data_json={
+                    "score": 76.0,
+                    "blocking": True,
+                    "blocking_reasons": ["字幕与文件名品牌不一致"],
+                },
+            )
+        )
+        session.add(
+            Artifact(
+                job_id=job_id,
+                step_id=None,
+                artifact_type="subtitle_quality_report",
+                data_json={
+                    "score": 89.1,
+                    "blocking": False,
+                    "warning_reasons": ["短碎句率偏高 1.20%"],
+                },
+            )
+        )
+        await session.commit()
+
+    await service._handle_subtitle_reply(job_id, "全部通过", reply_chat_id="123")
+
+    assert sent
+    assert "当前没有可复核的字幕内容。" in sent[0]
+    assert "最新字幕审校状态：" in sent[0]
+    assert "术语修复：1 条候选，已接受 0，待审 1，自动应用 0" in sent[0]
+    assert "一致性：76.00 分，阻断" in sent[0]
+    assert "质量：89.10 分，通过" in sent[0]
+    assert "字幕审核只处理字幕行和术语候选" in sent[0]
+
+
+@pytest.mark.asyncio
 async def test_handle_final_review_reply_applies_subtitle_actions_and_passes(db_engine, monkeypatch):
     from roughcut.db.models import Job, JobStep
     from roughcut.db.session import get_session_factory
@@ -2375,11 +2583,82 @@ async def test_handle_final_review_reply_persists_structured_edit_focus_metadata
 
         assert step_map["edit_plan"].status == "pending"
         assert edit_step_meta["review_rerun_focus"] == "hook_boundary"
+        assert edit_step_meta["review_rerun_category"] == "edit_plan"
         assert "hook_boundary" in list(edit_step_meta["review_rerun_targets"] or [])
         assert edit_step_meta["detail"] == "人工成片审核要求重跑：Hook 边界重剪"
 
     assert sent == [
         f"已记录任务 {job_id} 的成片修改意见，目标：timeline, pacing, cut_boundary, hook_boundary；并按“Hook 边界重剪”触发重跑：edit_plan -> render -> final_review -> platform_package。"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_handle_final_review_reply_persists_structured_content_profile_metadata(db_engine):
+    import roughcut.pipeline.orchestrator as orchestrator_mod
+    from roughcut.db.models import Job, JobStep
+    from roughcut.db.session import get_session_factory
+
+    service = TelegramReviewBotService()
+    sent: list[str] = []
+    job_id = uuid.uuid4()
+
+    async def fake_send_text(text: str, *, chat_id: str) -> None:
+        sent.append(text)
+
+    service._send_chat_text = fake_send_text
+
+    async with get_session_factory()() as session:
+        session.add(
+            Job(
+                id=job_id,
+                source_path="jobs/demo/final.mp4",
+                source_name="final.mp4",
+                status="needs_review",
+                language="zh-CN",
+            )
+        )
+        for step in orchestrator_mod.create_job_steps(job_id):
+            step.status = "done"
+            session.add(step)
+        final_review_step = (
+            await session.execute(
+                telegram_bot.select(JobStep).where(
+                    JobStep.job_id == job_id,
+                    JobStep.step_name == "final_review",
+                )
+            )
+        ).scalar_one()
+        final_review_step.status = "pending"
+        await session.commit()
+
+    await service._handle_final_review_reply(job_id, "品牌改成傲雷，型号改成司令官2Ultra。", reply_chat_id="123")
+
+    async with get_session_factory()() as session:
+        steps = (
+            await session.execute(
+                telegram_bot.select(JobStep).where(JobStep.job_id == job_id)
+            )
+        ).scalars().all()
+        step_map = {step.step_name: step for step in steps}
+        content_profile_meta = dict(step_map["content_profile"].metadata_ or {})
+
+        assert step_map["content_profile"].status == "pending"
+        assert content_profile_meta["review_rerun_category"] == "content_profile"
+        assert content_profile_meta["review_rerun_focus"] == ""
+        assert list(content_profile_meta["review_rerun_targets"] or []) == [
+            "summary",
+            "keywords",
+            "content_profile",
+        ]
+        assert content_profile_meta["review_feedback"] == "品牌改成傲雷，型号改成司令官2Ultra。"
+        assert content_profile_meta["review_user_feedback"] == {
+            "subject_brand": "傲雷",
+            "subject_model": "司令官2Ultra",
+        }
+        assert content_profile_meta["detail"] == "人工成片审核要求重跑：内容摘要与文案定位调整"
+
+    assert sent == [
+        f"已记录任务 {job_id} 的成片修改意见，目标：summary, keywords, content_profile；并按“内容摘要与文案定位调整”触发重跑：content_profile -> summary_review -> ai_director -> avatar_commentary -> edit_plan -> render -> final_review -> platform_package。"
     ]
 
 

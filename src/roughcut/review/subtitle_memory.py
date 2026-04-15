@@ -134,7 +134,7 @@ _DEFAULT_TERM_ALIASES: dict[str, tuple[str, ...]] = {
     "极致华丽": ("经质的华历", "经质华历", "经致的华历", "精质的华历", "经质的华丽", "经致的华丽"),
     "镜面": ("静面", "净面"),
     "顶配": ("定配", "顶陪"),
-    "次顶配": ("次定配", "次顶陪"),
+    "次顶配": ("次定配", "次顶陪", "四顶配"),
     "标配": ("表配",),
     "高配": ("高陪",),
     "低配": ("低陪",),
@@ -176,6 +176,8 @@ _GENERIC_SAFE_REPLACEMENTS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"极致的华历"), "极致华丽"),
     (re.compile(r"极致华历"), "极致华丽"),
     (re.compile(r"(?:静面|净面)(?=(?:处理|效果|质感|工艺|版|板|层|一下|了|的|,|，|。|$))"), "镜面"),
+    (re.compile(r"威虎版(?=(?:的|这个|本|外观|手感|处理|工艺|版本|区别|对比|,|，|。|$))"), "微弧版"),
+    (re.compile(r"(?<![A-Za-z0-9])CAC(?=(?:的|外壳|壳体|机身|工艺|切削|精雕|加工|结构|边角|铝合金|中框|骨架))", re.IGNORECASE), "CNC"),
     (re.compile(r"华丽历(?=(?:很|也|都|更|,|，|。|$))"), "华丽"),
     (re.compile(r"华历(?=(?:感|风格|路线|效果|,|，|。|$))"), "华丽"),
     (
@@ -189,8 +191,18 @@ _GENERIC_SAFE_REPLACEMENTS: tuple[tuple[re.Pattern[str], str], ...] = (
         re.compile(r"(?P<prefix>[A-Za-z]{2,8})(?P<digits>\d{2,4})(?P=digits)(?!\d)", re.IGNORECASE),
         r"\g<prefix>\g<digits>",
     ),
+    (re.compile(r"(?<![A-Za-z])开枪(?=(?:吧|了|这个|这一期|这期|视频|测评|评测|拆|看|体验|介绍|讲|来|先|。|，|,|$))"), "开箱"),
+    (re.compile(r"NZ家"), "NOC家"),
     (re.compile(r"这(?:七|7)个咱给大家讲"), "这期给大家讲"),
 )
+
+_MODEL_LETTER_CONFUSIONS: dict[str, tuple[str, ...]] = {
+    "T": ("P",),
+    "P": ("T",),
+    "O": ("0",),
+    "I": ("1", "L"),
+    "L": ("1", "I"),
+}
 
 _PRESERVE_CASE_TERMS = {
     "RunningHub",
@@ -1451,6 +1463,9 @@ def _extract_confirmed_profile_fields(content_profile: dict[str, Any] | None) ->
     sources: list[dict[str, Any]] = []
     if isinstance(feedback, dict):
         sources.append(feedback)
+    source_context_fields = _extract_source_context_confirmed_fields(profile)
+    if source_context_fields:
+        sources.append(source_context_fields)
     if _content_profile_is_confirmed(profile):
         sources.append(profile)
     elif _content_profile_has_usable_subject_identity(profile):
@@ -1459,11 +1474,21 @@ def _extract_confirmed_profile_fields(content_profile: dict[str, Any] | None) ->
         return {}
 
     confirmed: dict[str, Any] = {}
+    candidate_values: dict[str, list[str]] = {}
     for source in sources:
         for key in ("subject_brand", "subject_model", "subject_type", "video_theme"):
             value = str(source.get(key) or "").strip()
-            if value and key not in confirmed:
+            if not value:
+                continue
+            if key not in confirmed:
                 confirmed[key] = value
+            bucket = candidate_values.setdefault(key, [])
+            if value not in bucket:
+                bucket.append(value)
+            for item in source.get(f"{key}_candidates") or []:
+                candidate = str(item or "").strip()
+                if candidate and candidate not in bucket:
+                    bucket.append(candidate)
 
     keywords: list[str] = []
     for source in sources:
@@ -1475,6 +1500,40 @@ def _extract_confirmed_profile_fields(content_profile: dict[str, Any] | None) ->
 
     if keywords:
         confirmed["keywords"] = keywords
+    for key, values in candidate_values.items():
+        if values:
+            confirmed[f"{key}_candidates"] = values
+    return confirmed
+
+
+def _extract_source_context_confirmed_fields(content_profile: dict[str, Any] | None) -> dict[str, Any]:
+    profile = content_profile or {}
+    source_context = profile.get("source_context")
+    if not isinstance(source_context, dict) or not source_context:
+        return {}
+    try:
+        from roughcut.review.content_profile import _hint_values, _source_context_candidate_hints
+    except Exception:
+        return {}
+
+    hints = _source_context_candidate_hints(source_context)
+    if not hints:
+        return {}
+
+    confirmed: dict[str, Any] = {}
+    for key in ("subject_brand", "subject_model", "subject_type", "video_theme"):
+        values = [str(item).strip() for item in _hint_values(hints, key) if str(item).strip()]
+        if not values:
+            continue
+        confirmed[key] = values[0]
+        confirmed[f"{key}_candidates"] = values
+    search_queries = [
+        str(item).strip()
+        for item in (hints.get("search_queries") or [])
+        if str(item).strip()
+    ]
+    if search_queries:
+        confirmed["search_queries"] = search_queries[:8]
     return confirmed
 
 
@@ -1516,6 +1575,20 @@ def _build_confirmed_feedback_entities(content_profile: dict[str, Any] | None) -
             phrases.append(value)
     if not brand and not raw_brand and not model and not phrases:
         return []
+    model_aliases = _build_confirmed_model_aliases(model)
+    seen_model_alias_pairs = {
+        (_compact_subject_text(item.get("wrong")), _compact_subject_text(item.get("correct")))
+        for item in model_aliases
+    }
+    for candidate in confirmed.get("subject_model_candidates") or []:
+        wrong = _compact_subject_text(candidate)
+        if not wrong or wrong == model:
+            continue
+        pair = (wrong, model)
+        if pair in seen_model_alias_pairs or model_numbers_conflict(wrong, model):
+            continue
+        seen_model_alias_pairs.add(pair)
+        model_aliases.append({"wrong": wrong, "correct": model})
     return [
         {
             "brand": brand,
@@ -1525,7 +1598,7 @@ def _build_confirmed_feedback_entities(content_profile: dict[str, Any] | None) -
                 alias for alias in brand_aliases
                 if _compact_subject_text(alias) != _compact_subject_text(brand)
             ],
-            "model_aliases": _build_confirmed_model_aliases(model),
+            "model_aliases": model_aliases[:48],
         }
     ]
 
@@ -1725,6 +1798,27 @@ def _generate_confirmed_model_wrong_forms(canonical: str) -> list[str]:
         forms.add(re.sub("UV版", "五眼版", canonical, flags=re.IGNORECASE))
     if "五眼" in canonical:
         forms.add(canonical.replace("五眼", "UV"))
+    generation_variant = re.sub(
+        r"(?P<prefix>[\u4e00-\u9fff]{2,12})(?P<number>\d+)(?P<suffix>[A-Za-z][A-Za-z0-9\u4e00-\u9fff]*)$",
+        r"\g<prefix>\g<number>代\g<suffix>",
+        canonical,
+    )
+    if generation_variant and generation_variant != canonical:
+        forms.add(generation_variant)
+        generation_zh_variant = generation_variant.translate(_ARABIC_TO_CHINESE_DIGITS)
+        if generation_zh_variant:
+            forms.add(generation_zh_variant)
+    compact = _compact_subject_text(canonical)
+    if compact and re.search(r"[A-Za-z]", compact) and re.search(r"[\d零〇幺一二三四五六七八九十]", compact):
+        letter_indices = [index for index, char in enumerate(compact) if char.upper() in _MODEL_LETTER_CONFUSIONS]
+        for index in letter_indices:
+            source = compact[index].upper()
+            for candidate in _MODEL_LETTER_CONFUSIONS.get(source, ()):
+                forms.add(compact[:index] + candidate + compact[index + 1:])
+                if digit_to_chinese:
+                    zh_variant = digit_to_chinese
+                    if index < len(zh_variant):
+                        forms.add(zh_variant[:index] + candidate + zh_variant[index + 1:])
     return sorted(forms, key=lambda item: (-len(item), item))
 
 

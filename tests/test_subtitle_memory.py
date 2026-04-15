@@ -456,6 +456,43 @@ def test_build_subtitle_review_memory_absorbs_source_context_and_manual_review_g
     assert "节点编排" in prompt
 
 
+def test_build_subtitle_review_memory_promotes_source_context_identity_into_confirmed_entities():
+    memory = build_subtitle_review_memory(
+        channel_profile="edc_tactical",
+        subject_domain="edc",
+        glossary_terms=[],
+        user_memory={},
+        recent_subtitles=[],
+        content_profile={
+            "subject_type": "EDC手电",
+            "subject_domain": "edc",
+            "source_context": {
+                "video_description": "任务说明依据文件名：傲雷司令官2代Ultra开箱，并与EDC23做对比。",
+                "resolved_feedback": {
+                    "subject_brand": "傲雷",
+                    "subject_model": "司令官2Ultra",
+                    "search_queries": ["傲雷 司令官2Ultra", "司令官2Ultra EDC手电"],
+                },
+            },
+        },
+        include_recent_terms=False,
+        include_recent_examples=False,
+    )
+
+    confirmed = memory["confirmed_entities"][0]
+    alias_map = {(item["wrong"], item["correct"]) for item in memory["aliases"]}
+    prompt = build_transcription_prompt(
+        source_name="Commander2Ultra-unboxing.mp4",
+        channel_profile="edc_tactical",
+        review_memory=memory,
+    )
+
+    assert confirmed["brand"] == "傲雷"
+    assert confirmed["model"] == "司令官2Ultra"
+    assert ("司令官2代Ultra", "司令官2Ultra") in alias_map
+    assert "司令官2Ultra" in prompt
+
+
 def test_apply_domain_term_corrections_fixes_edc_aliases_and_near_matches():
     corrected = apply_domain_term_corrections(
         "来自慢这把多功能工具前的单手开和和主到都很顺",
@@ -695,6 +732,31 @@ def test_apply_domain_term_corrections_fixes_edc_flashlight_terms():
     assert "即EDC" in corrected
     assert "非常好" in corrected
     assert "金光闪闪" in corrected
+
+
+def test_apply_domain_term_corrections_fixes_mt34_unboxing_hotwords():
+    corrected = apply_domain_term_corrections(
+        "我们赶紧开枪吧 这写着镜面啊说明它是一个四顶配镜面版本 MP三四完梗了这个NZ家的镜面研磨",
+        {
+            "terms": [{"term": "MT34"}, {"term": "次顶配"}, {"term": "镜面"}, {"term": "NOC"}],
+            "aliases": [],
+            "confirmed_entities": [
+                {
+                    "brand": "NOC",
+                    "model": "MT34",
+                    "phrases": ["NOC MT34"],
+                    "brand_aliases": [],
+                    "model_aliases": [],
+                }
+            ],
+            "style_examples": [],
+        },
+    )
+
+    assert "开箱" in corrected
+    assert "次顶配镜面版本" in corrected
+    assert "MT34" in corrected
+    assert "NOC家的镜面研磨" in corrected
 
 
 def test_build_subtitle_review_memory_injects_default_edc_glossary():

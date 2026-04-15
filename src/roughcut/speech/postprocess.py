@@ -355,6 +355,10 @@ _SPACED_MODEL_TOKEN_RE = re.compile(
     rf"(?<![A-Za-z0-9])(?P<letters>(?:[A-Za-z]\s+){{1,7}}[A-Za-z])\s+"
     rf"(?P<number>{_DISPLAY_NUM_TOKEN})(?:\s+(?P<suffix>[A-Za-z]+))?(?![A-Za-z0-9])"
 )
+_SAFE_DISPLAY_TERM_REPLACEMENTS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"威虎版(?=(?:的|这个|本|外观|手感|处理|工艺|版本|区别|对比|,|，|。|$))"), "微弧版"),
+    (re.compile(r"(?<![A-Za-z0-9])CAC(?=(?:的|外壳|壳体|机身|工艺|切削|精雕|加工|结构|边角|铝合金|中框|骨架))", re.IGNORECASE), "CNC"),
+)
 _NATURAL_SINGLE_UNITS = {"个", "次", "年", "月", "天", "小时", "分钟", "秒"}
 _VAGUE_NUMBER_TOKENS = {
     "一两",
@@ -438,6 +442,21 @@ _SUBTITLE_FILLER_WHOLE_CLAUSE_TOKENS = {
     "所以说",
     "总的来说",
 }
+_LOW_SIGNAL_SHORT_CLAUSE_TOKENS = {
+    "今天",
+    "开始",
+    "花了",
+    "强行",
+    "然后",
+    "对",
+    "什么",
+    "哎哦对",
+    "待会再说",
+    "没事",
+}
+_LOW_SIGNAL_SHORT_CLAUSE_RE = re.compile(
+    r"^(?:好开始|这个什么|那个什么|什么|待会再说(?:那个刀)?|完梗了(?:啊这个)?|今天|开始|花了|强行|然后|对|哎哦对|没事)$"
+)
 _INLINE_FILLER_RE = re.compile(r"(?:呃|嗯|诶|欸|哎|哈|哦)+")
 _INLINE_PARTICLE_RE = re.compile(r"(?<=[\u4e00-\u9fffA-Za-z0-9])(?:啊|吧|呢|吗|嘛|呀)(?=[\u4e00-\u9fffA-Za-z0-9])")
 _TRAILING_FILLER_RE = re.compile(r"(?:呢|吗|嘛|呀|哈|哦|诶|欸|哎)+$")
@@ -900,6 +919,7 @@ def normalize_display_text(text: str, *, cleanup_fillers: bool = True) -> str:
     result = re.sub(r"([\u4e00-\u9fff])\s+(?=[\u4e00-\u9fff])", r"\1", result)
     if cleanup_fillers:
         result = cleanup_subtitle_fillers(result)
+    result = _normalize_safe_display_terms(result)
     result = _normalize_display_numbers(result)
     result = apply_subtitle_clause_spacing(result)
     result = re.sub(r"\s+([，,。.!！？；;：:])", r"\1", result)
@@ -945,7 +965,11 @@ def cleanup_subtitle_fillers(text: str) -> str:
         )
         clause = _strip_subtitle_filler_prefixes(clause)
         clause = clause.strip("，, ")
-        if not clause or clause in _SUBTITLE_FILLER_WHOLE_CLAUSE_TOKENS:
+        if (
+            not clause
+            or clause in _SUBTITLE_FILLER_WHOLE_CLAUSE_TOKENS
+            or _is_low_signal_short_clause(clause)
+        ):
             continue
         cleaned.append(clause)
 
@@ -953,6 +977,20 @@ def cleanup_subtitle_fillers(text: str) -> str:
     collapsed = re.sub(r"([，,；;]){2,}", lambda match: match.group(0)[0], collapsed)
     collapsed = re.sub(r"[，,]+([。！？!?；;])", r"\1", collapsed)
     return collapsed
+
+
+def _is_low_signal_short_clause(text: str) -> bool:
+    clause = str(text or "").strip()
+    if not clause:
+        return True
+    if clause in _LOW_SIGNAL_SHORT_CLAUSE_TOKENS or _LOW_SIGNAL_SHORT_CLAUSE_RE.fullmatch(clause):
+        return True
+    if re.search(r"[A-Za-z0-9]", clause):
+        return False
+    compact = re.sub(r"\s+", "", clause)
+    if len(compact) <= 2:
+        return compact in {"今天", "开始", "花了", "强行", "对"}
+    return False
 
 
 def apply_subtitle_clause_spacing(text: str) -> str:
@@ -1000,6 +1038,13 @@ def _normalize_display_numbers(text: str) -> str:
     result = _PERCENT_NUMBER_RE.sub(replace_percent, result)
     result = _ORDINAL_NUMBER_RE.sub(replace_ordinal, result)
     result = _QUANTITY_NUMBER_RE.sub(replace_quantity, result)
+    return result
+
+
+def _normalize_safe_display_terms(text: str) -> str:
+    result = str(text or "")
+    for pattern, replacement in _SAFE_DISPLAY_TERM_REPLACEMENTS:
+        result = pattern.sub(replacement, result)
     return result
 
 

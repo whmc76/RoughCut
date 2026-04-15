@@ -19,6 +19,12 @@ from roughcut.config import get_settings
 from roughcut.config import infer_coding_backends, normalize_coding_backend_name
 from roughcut.db.models import Job
 from roughcut.db.session import get_session_factory
+from roughcut.pipeline.job_rerun import (
+    JobRerunRequest,
+    build_job_rerun_detail,
+    execute_job_rerun_plan,
+    resolve_job_rerun_request,
+)
 from roughcut.review.report import generate_report
 from roughcut.telegram.presets import get_preset
 from roughcut.telegram.task_service import (
@@ -144,6 +150,9 @@ async def handle_telegram_command(text: str, *, send_text: SendText) -> bool:
     if command.name == "review":
         await _handle_review_command(command.args, send_text)
         return True
+    if command.name == "rerun":
+        await _handle_rerun_command(command.args, send_text)
+        return True
     if command.name in {"start", "help", "whoami", "id"}:
         return False
 
@@ -158,7 +167,8 @@ async def handle_telegram_command(text: str, *, send_text: SendText) -> bool:
         "未知命令。可用命令：/status、/jobs [limit]、/job <job_id>、"
         "/run <claude|codex|acp> <preset> --task \"...\" [--path ...] [--job ...]、"
         "/task <task_id> [--full]、/tasks [limit]、/presets、/confirm <task_id>、/cancel <task_id>、"
-        "/review [content|subtitle] <job_id> <pass|reject|note> [备注]"
+        "/review [content|subtitle] <job_id> <pass|reject|note> [备注]、"
+        "/rerun <job_id> [issue_code|--step <step_name>] [备注]"
     )
     return True
 
@@ -456,6 +466,34 @@ async def _handle_review_command(args: list[str], send_text: SendText) -> None:
     await send_text(message)
 
 
+async def _handle_rerun_command(args: list[str], send_text: SendText) -> None:
+    if not args:
+        await send_text("用法：/rerun <job_id> [issue_code|--step <step_name>] [备注]")
+        return
+
+    try:
+        job_id = uuid.UUID(str(args[0]).strip())
+    except ValueError:
+        await send_text("job_id 格式无效。")
+        return
+
+    request = _parse_rerun_request_args(args[1:])
+    if isinstance(request, str):
+        await send_text(request)
+        return
+
+    factory = get_session_factory()
+    async with factory() as session:
+        try:
+            message = await _apply_job_rerun(session, job_id, request)
+        except HTTPException as exc:
+            message = str(exc.detail)
+        except Exception as exc:
+            message = f"重跑命令执行失败：{exc}"
+
+    await send_text(message)
+
+
 def _parse_run_args(args: list[str]) -> dict[str, str] | str:
     if len(args) < 2:
         return (
@@ -485,6 +523,24 @@ def _parse_run_args(args: list[str]) -> dict[str, str] | str:
             break
         return f"无法解析参数：{token}"
     return values
+
+
+def _parse_rerun_request_args(args: list[str]) -> JobRerunRequest | str:
+    if not args:
+        return JobRerunRequest()
+
+    if str(args[0]).strip() == "--step":
+        if len(args) < 2:
+            return "用法：/rerun <job_id> [issue_code|--step <step_name>] [备注]"
+        return JobRerunRequest(
+            rerun_start_step=str(args[1]).strip() or None,
+            note=" ".join(args[2:]).strip() or None,
+        )
+
+    return JobRerunRequest(
+        issue_code=str(args[0]).strip() or None,
+        note=" ".join(args[1:]).strip() or None,
+    )
 
 
 async def _infer_review_kind(session, job_id: uuid.UUID) -> str | None:
@@ -525,12 +581,24 @@ async def _apply_content_review(session, job_id: uuid.UUID, action: str, note: s
 async def _apply_subtitle_review(session, job_id: uuid.UUID, action: str, note: str) -> str:
     report = await generate_report(job_id, session)
     from roughcut.review.telegram_bot import (
+        _build_subtitle_review_artifact_lines,
         _build_pending_subtitle_candidates,
         _interpret_subtitle_review_reply,
+        _load_subtitle_review_artifacts,
     )
 
     candidates = _build_pending_subtitle_candidates(report)
     if not candidates:
+        artifact_lines = _build_subtitle_review_artifact_lines(await _load_subtitle_review_artifacts(job_id, session))
+        if artifact_lines:
+            return "\n".join(
+                [
+                    f"任务 {job_id} 当前没有待审核字幕纠错候选。",
+                    "",
+                    "最新字幕审校状态：",
+                    *artifact_lines,
+                ]
+            )
         return f"任务 {job_id} 当前没有待审核字幕纠错候选。"
 
     normalized_action = _normalize_review_action(action)
@@ -565,6 +633,30 @@ async def _apply_subtitle_review(session, job_id: uuid.UUID, action: str, note: 
     )
     result = await apply_review(job_id, request, session)
     return f"已应用任务 {job_id} 的 {int(result.get('applied') or 0)} 条字幕审核意见。"
+
+
+async def _apply_job_rerun(session, job_id: uuid.UUID, request: JobRerunRequest) -> str:
+    result = await session.execute(
+        select(Job).options(selectinload(Job.steps), selectinload(Job.artifacts)).where(Job.id == job_id)
+    )
+    job = result.scalar_one_or_none()
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    steps = list(job.steps or [])
+    if not steps:
+        raise HTTPException(status_code=409, detail="Job steps are missing")
+
+    plan = resolve_job_rerun_request(request=request, artifacts=list(job.artifacts or []))
+    await execute_job_rerun_plan(
+        session,
+        job=job,
+        steps=steps,
+        plan=plan,
+        via="telegram",
+    )
+    await session.commit()
+    return f"任务 {job_id}：{build_job_rerun_detail(plan)}"
 
 
 def _normalize_review_action(action: str) -> str:

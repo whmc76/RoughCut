@@ -59,6 +59,13 @@ from roughcut.db.models import (
 )
 from roughcut.db.session import get_session
 from roughcut.pipeline.celery_app import celery_app
+from roughcut.pipeline.job_rerun import (
+    JobRerunPlan,
+    JobRerunRequest,
+    build_job_rerun_detail,
+    execute_job_rerun_plan,
+    resolve_job_rerun_request,
+)
 from roughcut.pipeline.orchestrator import PIPELINE_STEPS, create_job_steps
 from roughcut.pipeline.quality import QUALITY_ARTIFACT_TYPE
 from roughcut.media.variant_timeline_bundle import resolve_effective_variant_timeline_bundle
@@ -76,6 +83,16 @@ from roughcut.review.content_profile_memory import (
     record_content_profile_feedback_memory,
 )
 from roughcut.review.downstream_context import build_downstream_context
+from roughcut.review.final_review_rerun import (
+    build_final_review_rerun_plans,
+    combine_final_review_rerun_plans,
+    extract_final_review_content_profile_feedback,
+)
+from roughcut.review.final_review_state import (
+    apply_final_review_rerun_metadata,
+    mark_final_review_approved,
+    mark_final_review_pending,
+)
 from roughcut.review.model_identity import model_numbers_conflict
 from roughcut.review.content_profile_review_stats import (
     apply_current_content_profile_review_policy,
@@ -85,6 +102,17 @@ from roughcut.review.content_profile_review_stats import (
 )
 from roughcut.review.domain_glossaries import detect_glossary_domains
 from roughcut.review.subtitle_memory import build_subtitle_review_memory
+from roughcut.review.subtitle_consistency import ARTIFACT_TYPE_SUBTITLE_CONSISTENCY_REPORT
+from roughcut.review.subtitle_quality import ARTIFACT_TYPE_SUBTITLE_QUALITY_REPORT
+from roughcut.review.subtitle_review_actions import (
+    build_subtitle_candidate_action,
+    build_subtitle_consistency_action,
+    build_subtitle_quality_action,
+    build_subtitle_review_context,
+    build_subtitle_term_resolution_action,
+    select_latest_subtitle_artifact_payloads,
+)
+from roughcut.review.subtitle_term_resolution import ARTIFACT_TYPE_SUBTITLE_TERM_RESOLUTION_PATCH
 from roughcut.review.report import generate_report
 from roughcut.runtime_refresh_hold import touch_runtime_refresh_hold
 from roughcut.storage.s3 import get_storage, job_key
@@ -103,6 +131,8 @@ STEP_LABELS = {
     "extract_audio": "提取音频",
     "transcribe": "语音转写",
     "subtitle_postprocess": "字幕后处理",
+    "subtitle_term_resolution": "术语解析",
+    "subtitle_consistency_review": "一致性审校",
     "subtitle_translation": "字幕翻译",
     "content_profile": "内容摘要",
     "summary_review": "信息核对",
@@ -120,6 +150,9 @@ _LIST_PREVIEW_ARTIFACT_TYPES = (
     "content_profile_final",
     "content_profile",
     "content_profile_draft",
+    ARTIFACT_TYPE_SUBTITLE_QUALITY_REPORT,
+    ARTIFACT_TYPE_SUBTITLE_TERM_RESOLUTION_PATCH,
+    ARTIFACT_TYPE_SUBTITLE_CONSISTENCY_REPORT,
     QUALITY_ARTIFACT_TYPE,
     "variant_timeline_bundle",
     "render_outputs",
@@ -159,6 +192,22 @@ class FinalReviewVariantTimelineRerenderOut(BaseModel):
     rerun_steps: list[str]
     validation_status: str | None = None
     validation_issue_count: int = 0
+
+
+class JobRerunActionIn(BaseModel):
+    issue_code: str | None = None
+    rerun_start_step: str | None = None
+    note: str | None = None
+
+
+class JobRerunActionOut(BaseModel):
+    job_id: str
+    job_status: str
+    rerun_start_step: str
+    rerun_steps: list[str]
+    issue_codes: list[str]
+    note: str | None = None
+    detail: str | None = None
 
 
 def _ensure_content_understanding_payload(profile: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -789,6 +838,54 @@ async def restart_job(job_id: uuid.UUID, session: AsyncSession = Depends(get_ses
     job = result.scalar_one()
     _attach_job_preview(job)
     return job
+
+
+@router.post("/{job_id}/rerun", response_model=JobRerunActionOut)
+async def rerun_job_from_quality_action(
+    job_id: uuid.UUID,
+    request: JobRerunActionIn | None = None,
+    session: AsyncSession = Depends(get_session),
+):
+    result = await session.execute(
+        select(Job).options(selectinload(Job.steps), selectinload(Job.artifacts)).where(Job.id == job_id)
+    )
+    job = result.scalar_one_or_none()
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    steps = _ordered_steps(list(job.steps or []))
+    if not steps:
+        raise HTTPException(status_code=409, detail="Job steps are missing")
+
+    plan: JobRerunPlan = resolve_job_rerun_request(
+        request=JobRerunRequest(
+            issue_code=request.issue_code if request else None,
+            rerun_start_step=request.rerun_start_step if request else None,
+            note=request.note if request else None,
+        ),
+        artifacts=list(job.artifacts or []),
+    )
+    if not plan.rerun_steps:
+        raise HTTPException(status_code=409, detail="No rerun steps resolved for this request")
+
+    await execute_job_rerun_plan(
+        session,
+        job=job,
+        steps=steps,
+        plan=plan,
+        via="web",
+    )
+    await session.commit()
+
+    return JobRerunActionOut(
+        job_id=str(job.id),
+        job_status=str(job.status),
+        rerun_start_step=plan.rerun_start_step,
+        rerun_steps=list(plan.rerun_steps),
+        issue_codes=list(plan.issue_codes),
+        note=plan.note,
+        detail=build_job_rerun_detail(plan),
+    )
 
 
 @router.post("/{job_id}/initialize", response_model=JobOut)
@@ -1498,21 +1595,12 @@ async def apply_final_review_decision(
     )
 
     if decision == "approve":
-        metadata = dict(review_step.metadata_ or {})
-        metadata.update(
-            {
-                "detail": "成片已人工审核通过，继续生成平台文案。",
-                "updated_at": now.isoformat(),
-                "approved_via": "web",
-            }
+        mark_final_review_approved(
+            review_step=review_step,
+            job=job,
+            now=now,
+            approved_via="web",
         )
-        review_step.metadata_ = metadata
-        review_step.status = "done"
-        review_step.finished_at = now
-        review_step.error_message = None
-        job.status = "processing"
-        job.error_message = None
-        job.updated_at = now
         await session.commit()
         return FinalReviewDecisionOut(
             job_id=str(job.id),
@@ -1522,21 +1610,13 @@ async def apply_final_review_decision(
             rerun_triggered=False,
             note=note,
         )
-
-    feedback_history = list((review_step.metadata_ or {}).get("feedback_history") or [])
-    feedback_history.append({"text": note, "at": now.isoformat(), "via": "web"})
     rerun_triggered = False
 
     from roughcut.pipeline.orchestrator import _reset_job_for_quality_rerun
-    from roughcut.review.telegram_bot import (
-        _build_final_review_rerun_plans,
-        _combine_final_review_rerun_plans,
-        _extract_final_review_content_profile_feedback,
-    )
 
-    rerun_plan = _combine_final_review_rerun_plans(_build_final_review_rerun_plans(note))
+    rerun_plan = combine_final_review_rerun_plans(build_final_review_rerun_plans(note))
     if rerun_plan is not None:
-        review_user_feedback = _extract_final_review_content_profile_feedback(note)
+        review_user_feedback = extract_final_review_content_profile_feedback(note)
         steps = (
             await session.execute(
                 select(JobStep).where(JobStep.job_id == job.id).order_by(JobStep.id.asc())
@@ -1550,21 +1630,13 @@ async def apply_final_review_decision(
             issue_codes=[f"manual_review:{rerun_plan.category}"],
         )
         first_step = next((step for step in steps if step.step_name == rerun_plan.trigger_step), None)
-        if first_step is not None:
-            first_metadata = dict(first_step.metadata_ or {})
-            first_metadata.update(
-                {
-                    "detail": f"人工成片审核要求重跑：{rerun_plan.label}",
-                    "updated_at": now.isoformat(),
-                    "review_feedback": note,
-                    "review_rerun_category": rerun_plan.category,
-                    "review_rerun_steps": list(rerun_plan.rerun_steps),
-                    "review_rerun_targets": list(rerun_plan.targets),
-                }
-            )
-            if review_user_feedback:
-                first_metadata["review_user_feedback"] = review_user_feedback
-            first_step.metadata_ = first_metadata
+        apply_final_review_rerun_metadata(
+            first_step=first_step,
+            rerun_plan=rerun_plan,
+            note=note,
+            now=now,
+            review_user_feedback=review_user_feedback,
+        )
         rerun_triggered = True
         await session.commit()
         return FinalReviewDecisionOut(
@@ -1575,20 +1647,14 @@ async def apply_final_review_decision(
             rerun_triggered=rerun_triggered,
             note=note,
         )
-
-    metadata = dict(review_step.metadata_ or {})
-    metadata.update(
-        {
-            "detail": "已收到成片修改意见，任务保持暂停，等待人工处理后再继续。",
-            "updated_at": now.isoformat(),
-            "feedback_history": feedback_history[-10:],
-            "latest_feedback": note,
-        }
+    mark_final_review_pending(
+        review_step=review_step,
+        job=job,
+        now=now,
+        detail="已收到成片修改意见，任务保持暂停，等待人工处理后再继续。",
+        note=note,
+        via="web",
     )
-    review_step.metadata_ = metadata
-    review_step.started_at = review_step.started_at or now
-    job.status = "needs_review"
-    job.updated_at = now
     await session.commit()
     return FinalReviewDecisionOut(
         job_id=str(job.id),
@@ -1986,6 +2052,9 @@ async def get_job_activity(job_id: uuid.UUID, session: AsyncSession = Depends(ge
                     "content_profile_draft",
                     "content_profile_final",
                     "content_profile",
+                    ARTIFACT_TYPE_SUBTITLE_QUALITY_REPORT,
+                    ARTIFACT_TYPE_SUBTITLE_TERM_RESOLUTION_PATCH,
+                    ARTIFACT_TYPE_SUBTITLE_CONSISTENCY_REPORT,
                     "ai_director_plan",
                     "avatar_commentary_plan",
                     "render_outputs",
@@ -2018,10 +2087,14 @@ async def get_job_activity(job_id: uuid.UUID, session: AsyncSession = Depends(ge
         select(SubtitleCorrection).where(SubtitleCorrection.job_id == job_id)
     )
     corrections = correction_result.scalars().all()
+    review_action_result = await session.execute(
+        select(ReviewAction).where(ReviewAction.job_id == job_id).order_by(ReviewAction.created_at.desc(), ReviewAction.id.desc())
+    )
+    review_actions = review_action_result.scalars().all()
 
     current_step = _build_current_step(job)
     decisions = _build_activity_decisions(artifacts, timelines, corrections, render_output)
-    events = _build_activity_events(job.steps or [], artifacts, timelines, render_output, job=job)
+    events = _build_activity_events(job.steps or [], artifacts, timelines, render_output, job=job, review_actions=review_actions)
 
     render_payload = None
     if render_output is not None:
@@ -2155,6 +2228,30 @@ def _build_activity_decisions(
     decisions: list[dict] = []
     render_outputs_artifact = next((artifact for artifact in artifacts if artifact.artifact_type == "render_outputs"), None)
     render_outputs = render_outputs_artifact.data_json if render_outputs_artifact and render_outputs_artifact.data_json else {}
+    subtitle_quality_artifact = next(
+        (
+            artifact
+            for artifact in reversed(artifacts)
+            if artifact.artifact_type == ARTIFACT_TYPE_SUBTITLE_QUALITY_REPORT and isinstance(artifact.data_json, dict)
+        ),
+        None,
+    )
+    subtitle_term_resolution_artifact = next(
+        (
+            artifact
+            for artifact in reversed(artifacts)
+            if artifact.artifact_type == ARTIFACT_TYPE_SUBTITLE_TERM_RESOLUTION_PATCH and isinstance(artifact.data_json, dict)
+        ),
+        None,
+    )
+    subtitle_consistency_artifact = next(
+        (
+            artifact
+            for artifact in reversed(artifacts)
+            if artifact.artifact_type == ARTIFACT_TYPE_SUBTITLE_CONSISTENCY_REPORT and isinstance(artifact.data_json, dict)
+        ),
+        None,
+    )
 
     profile = _select_preferred_content_profile_artifact([
         artifact
@@ -2184,18 +2281,93 @@ def _build_activity_decisions(
             }
         )
 
+    if subtitle_quality_artifact and subtitle_quality_artifact.data_json:
+        data = subtitle_quality_artifact.data_json
+        score_raw = data.get("score")
+        try:
+            score = float(score_raw) if score_raw is not None else None
+        except (TypeError, ValueError):
+            score = None
+        blocking = bool(data.get("blocking"))
+        blocking_reasons = [str(item).strip() for item in (data.get("blocking_reasons") or []) if str(item).strip()]
+        warning_reasons = [str(item).strip() for item in (data.get("warning_reasons") or []) if str(item).strip()]
+        action_payload = build_subtitle_quality_action(data)
+        quality_status = "needs_review" if bool(action_payload.get("blocking")) else "done"
+        decisions.append(
+            {
+                "kind": "subtitle_quality",
+                "step_name": "subtitle_postprocess",
+                "title": "字幕阶段验收",
+                "status": quality_status,
+                "summary": (
+                    f"字幕质检 {score:.1f} 分"
+                    if score is not None
+                    else ("字幕质检未通过" if blocking else "字幕质检通过")
+                ),
+                "detail": "；".join(blocking_reasons or warning_reasons) or None,
+                "updated_at": _iso_or_none(subtitle_quality_artifact.created_at),
+                **action_payload,
+            }
+        )
+
+    if subtitle_term_resolution_artifact and subtitle_term_resolution_artifact.data_json:
+        data = subtitle_term_resolution_artifact.data_json
+        metrics = data.get("metrics") if isinstance(data.get("metrics"), dict) else {}
+        patch_count = int(metrics.get("patch_count") or 0)
+        pending = int(metrics.get("pending_count") or 0)
+        auto_applied = int(metrics.get("auto_applied_count") or 0)
+        action_payload = build_subtitle_term_resolution_action(data)
+        decisions.append(
+            {
+                "kind": "subtitle_term_resolution",
+                "step_name": "subtitle_term_resolution",
+                "title": "字幕术语解析",
+                "status": "needs_review" if pending > 0 else "done",
+                "summary": f"识别出 {patch_count} 条术语纠偏 patch",
+                "detail": f"待确认 {pending} 条，自动接受 {auto_applied} 条",
+                "updated_at": _iso_or_none(subtitle_term_resolution_artifact.created_at),
+                **action_payload,
+            }
+        )
+
+    if subtitle_consistency_artifact and subtitle_consistency_artifact.data_json:
+        data = subtitle_consistency_artifact.data_json
+        score_raw = data.get("score")
+        try:
+            score = float(score_raw) if score_raw is not None else None
+        except (TypeError, ValueError):
+            score = None
+        blocking = bool(data.get("blocking"))
+        blocking_reasons = [str(item).strip() for item in (data.get("blocking_reasons") or []) if str(item).strip()]
+        warning_reasons = [str(item).strip() for item in (data.get("warning_reasons") or []) if str(item).strip()]
+        action_payload = build_subtitle_consistency_action(data)
+        decisions.append(
+            {
+                "kind": "subtitle_consistency_review",
+                "step_name": "subtitle_consistency_review",
+                "title": "字幕一致性审校",
+                "status": "needs_review" if blocking else "done",
+                "summary": f"一致性得分 {score:.1f}" if score is not None else ("一致性未通过" if blocking else "一致性通过"),
+                "detail": "；".join(blocking_reasons or warning_reasons) or None,
+                "updated_at": _iso_or_none(subtitle_consistency_artifact.created_at),
+                **action_payload,
+            }
+        )
+
     if corrections:
         accepted = sum(1 for item in corrections if item.auto_applied or item.human_decision == "accepted")
         pending = sum(1 for item in corrections if item.human_decision not in {"accepted", "rejected"})
+        action_payload = build_subtitle_candidate_action(pending_count=pending)
         decisions.append(
             {
                 "kind": "subtitle_review",
                 "step_name": "glossary_review",
                 "title": "字幕与术语",
-                "status": "done",
+                "status": "needs_review" if pending > 0 else "done",
                 "summary": f"识别出 {len(corrections)} 处术语/字幕纠错候选",
                 "detail": f"待审 {pending} 条，自动/已接受 {accepted} 条",
                 "updated_at": _iso_or_none(max((item.created_at for item in corrections), default=None)),
+                **action_payload,
             }
         )
 
@@ -2342,6 +2514,7 @@ def _build_activity_events(
     render_output: RenderOutput | None,
     *,
     job: Job | None = None,
+    review_actions: list[ReviewAction] | None = None,
 ) -> list[dict]:
     events: list[dict] = []
     terminal_step = _latest_terminal_step(steps, statuses={"failed", "cancelled"}) if steps else None
@@ -2444,9 +2617,54 @@ def _build_activity_events(
             }
         )
 
+    for action in review_actions or []:
+        summary = _review_action_event_summary(action, steps)
+        if summary:
+            events.append(
+                {
+                    "timestamp": _iso_or_none(action.created_at),
+                    "type": "review_action",
+                    "status": summary["status"],
+                    "step_name": summary.get("step_name"),
+                    "title": summary["title"],
+                    "detail": summary.get("detail"),
+                }
+            )
+
     events = [event for event in events if event["timestamp"]]
     events.sort(key=lambda item: item["timestamp"], reverse=True)
     return events[:20]
+
+
+def _review_action_event_summary(action: ReviewAction, steps: list[JobStep]) -> dict[str, str] | None:
+    if str(action.target_type or "").strip() != "quality_rerun":
+        return None
+
+    rerun_step_name = str(action.action or "").strip()
+    rerun_step = next((step for step in steps if step.step_name == rerun_step_name), None)
+    metadata = dict((rerun_step.metadata_ or {}) if rerun_step is not None else {})
+    via = str(metadata.get("rerun_requested_via") or "").strip()
+    issue_codes = [str(item).strip() for item in (metadata.get("rerun_issue_codes") or []) if str(item).strip()]
+    note = str(metadata.get("rerun_request_note") or "").strip()
+    rerun_steps = [str(item).strip() for item in (metadata.get("rerun_steps") or []) if str(item).strip()]
+
+    via_label = {
+        "web": "Web",
+        "telegram": "Telegram",
+    }.get(via, via or "系统")
+    chain_text = " -> ".join(rerun_steps) if rerun_steps else rerun_step_name
+    detail_parts = [
+        f"触发来源：{via_label}",
+        f"问题：{', '.join(issue_codes)}" if issue_codes else "",
+        f"回退链路：{chain_text}" if chain_text else "",
+        f"备注：{note}" if note else "",
+    ]
+    return {
+        "step_name": rerun_step_name or None,
+        "title": f"已请求从 {rerun_step_name} 重跑" if rerun_step_name else "已请求重跑",
+        "detail": "；".join(part for part in detail_parts if part) or None,
+        "status": "processing",
+    }
 
 
 def _artifact_event_summary(artifact: Artifact) -> dict | None:
@@ -2471,6 +2689,56 @@ def _artifact_event_summary(artifact: Artifact) -> dict | None:
             "step_name": "summary_review" if artifact.artifact_type == "content_profile_final" else "content_profile",
             "title": "内容摘要已确认",
             "detail": str(data.get("summary") or data.get("video_theme") or "内容识别完成"),
+        }
+    if artifact.artifact_type == ARTIFACT_TYPE_SUBTITLE_QUALITY_REPORT:
+        score_raw = data.get("score")
+        try:
+            score = float(score_raw) if score_raw is not None else None
+        except (TypeError, ValueError):
+            score = None
+        blocking = bool(data.get("blocking"))
+        reasons = [str(item).strip() for item in (data.get("blocking_reasons") or []) if str(item).strip()]
+        warnings = [str(item).strip() for item in (data.get("warning_reasons") or []) if str(item).strip()]
+        detail = (
+            (f"未通过：{reasons[0]}" if reasons else "字幕阶段质检未通过")
+            if blocking
+            else (warnings[0] if warnings else "字幕阶段质检通过")
+        )
+        prefix = f"{score:.1f}分" if score is not None else "字幕质检"
+        return {
+            "step_name": "subtitle_postprocess",
+            "title": "字幕阶段验收已生成",
+            "detail": f"{prefix} · {detail}",
+        }
+    if artifact.artifact_type == ARTIFACT_TYPE_SUBTITLE_TERM_RESOLUTION_PATCH:
+        metrics = data.get("metrics") if isinstance(data.get("metrics"), dict) else {}
+        patch_count = int(metrics.get("patch_count") or 0)
+        pending = int(metrics.get("pending_count") or 0)
+        auto_applied = int(metrics.get("auto_applied_count") or 0)
+        return {
+            "step_name": "subtitle_term_resolution",
+            "title": "字幕术语解析已生成",
+            "detail": f"patch {patch_count} 条 · 待确认 {pending} 条 · 自动接受 {auto_applied} 条",
+        }
+    if artifact.artifact_type == ARTIFACT_TYPE_SUBTITLE_CONSISTENCY_REPORT:
+        score_raw = data.get("score")
+        try:
+            score = float(score_raw) if score_raw is not None else None
+        except (TypeError, ValueError):
+            score = None
+        blocking = bool(data.get("blocking"))
+        reasons = [str(item).strip() for item in (data.get("blocking_reasons") or []) if str(item).strip()]
+        warnings = [str(item).strip() for item in (data.get("warning_reasons") or []) if str(item).strip()]
+        detail = (
+            (f"未通过：{reasons[0]}" if reasons else "字幕一致性未通过")
+            if blocking
+            else (warnings[0] if warnings else "字幕一致性通过")
+        )
+        prefix = f"{score:.1f}分" if score is not None else "一致性审校"
+        return {
+            "step_name": "subtitle_consistency_review",
+            "title": "字幕一致性审校已生成",
+            "detail": f"{prefix} · {detail}",
         }
     if artifact.artifact_type == "platform_packaging_md":
         return {
@@ -3110,7 +3378,116 @@ def _resolve_job_quality_preview(artifacts: list[Artifact]) -> dict[str, Any]:
         None,
     )
     if quality is None or not isinstance(quality.data_json, dict):
-        return {"score": None, "grade": None, "summary": None, "issue_codes": []}
+        subtitle_quality = next(
+            (
+                artifact
+                for artifact in reversed(artifacts)
+                if artifact.artifact_type == ARTIFACT_TYPE_SUBTITLE_QUALITY_REPORT and isinstance(artifact.data_json, dict)
+            ),
+            None,
+        )
+        subtitle_term_resolution = next(
+            (
+                artifact
+                for artifact in reversed(artifacts)
+                if artifact.artifact_type == ARTIFACT_TYPE_SUBTITLE_TERM_RESOLUTION_PATCH
+                and isinstance(artifact.data_json, dict)
+            ),
+            None,
+        )
+        subtitle_consistency = next(
+            (
+                artifact
+                for artifact in reversed(artifacts)
+                if artifact.artifact_type == ARTIFACT_TYPE_SUBTITLE_CONSISTENCY_REPORT
+                and isinstance(artifact.data_json, dict)
+            ),
+            None,
+        )
+        if subtitle_quality is None and subtitle_term_resolution is None and subtitle_consistency is None:
+            return {"score": None, "grade": None, "summary": None, "issue_codes": []}
+
+        subtitle_score: float | None = None
+        subtitle_grade: str | None = None
+        summary_parts: list[str] = []
+        issue_codes: list[str] = []
+
+        if subtitle_quality is not None:
+            data = subtitle_quality.data_json
+            score_raw = data.get("score")
+            try:
+                subtitle_score = float(score_raw) if score_raw is not None else None
+            except (TypeError, ValueError):
+                subtitle_score = None
+            blocking = bool(data.get("blocking"))
+            blocking_reasons = [str(item).strip() for item in (data.get("blocking_reasons") or []) if str(item).strip()]
+            warning_reasons = [str(item).strip() for item in (data.get("warning_reasons") or []) if str(item).strip()]
+            issue_codes = blocking_reasons or warning_reasons
+            if subtitle_score is not None:
+                if subtitle_score >= 95:
+                    subtitle_grade = "A"
+                elif subtitle_score >= 85:
+                    subtitle_grade = "B"
+                elif subtitle_score >= 70:
+                    subtitle_grade = "C"
+                else:
+                    subtitle_grade = "D"
+            summary_parts.append(
+                f"字幕质检 {subtitle_grade} {subtitle_score:.1f}"
+                if subtitle_grade and subtitle_score is not None
+                else (f"字幕质检 {subtitle_score:.1f}" if subtitle_score is not None else "字幕质检")
+            )
+            if blocking:
+                summary_parts.append("已阻断自动放行")
+        if subtitle_term_resolution is not None:
+            data = subtitle_term_resolution.data_json
+            metrics = data.get("metrics") if isinstance(data.get("metrics"), dict) else {}
+            patch_count = int(metrics.get("patch_count") or 0)
+            pending = int(metrics.get("pending_count") or 0)
+            auto_applied = int(metrics.get("auto_applied_count") or 0)
+            if patch_count or pending or auto_applied:
+                summary_parts.append(f"术语解析 {patch_count} 条")
+            if pending > 0:
+                issue_codes.append(f"术语解析待确认 {pending} 条")
+            elif auto_applied > 0:
+                issue_codes.append(f"术语解析自动接受 {auto_applied} 条")
+        if subtitle_consistency is not None:
+            data = subtitle_consistency.data_json
+            score_raw = data.get("score")
+            try:
+                consistency_score = float(score_raw) if score_raw is not None else None
+            except (TypeError, ValueError):
+                consistency_score = None
+            blocking = bool(data.get("blocking"))
+            blocking_reasons = [str(item).strip() for item in (data.get("blocking_reasons") or []) if str(item).strip()]
+            warning_reasons = [str(item).strip() for item in (data.get("warning_reasons") or []) if str(item).strip()]
+            if consistency_score is not None and subtitle_score is None:
+                subtitle_score = consistency_score
+                if subtitle_score >= 95:
+                    subtitle_grade = "A"
+                elif subtitle_score >= 85:
+                    subtitle_grade = "B"
+                elif subtitle_score >= 70:
+                    subtitle_grade = "C"
+                else:
+                    subtitle_grade = "D"
+            summary_parts.append(
+                f"一致性审校 {consistency_score:.1f}"
+                if consistency_score is not None
+                else "一致性审校"
+            )
+            if blocking:
+                issue_codes.extend(blocking_reasons or ["一致性审校未通过"])
+            elif warning_reasons:
+                issue_codes.extend(warning_reasons)
+
+        summary = " · ".join(part for part in summary_parts if part).strip() or None
+        return {
+            "score": subtitle_score,
+            "grade": subtitle_grade,
+            "summary": summary,
+            "issue_codes": issue_codes,
+        }
 
     data = quality.data_json
     score_raw = data.get("score")
@@ -3225,6 +3602,7 @@ def _resolve_job_review_context(job: Job) -> dict[str, str | None]:
         return {"step_name": None, "label": None, "detail": None}
 
     steps = _ordered_steps(job.steps or [])
+    subtitle_artifacts = select_latest_subtitle_artifact_payloads(list(job.artifacts or []))
     review_step = _resolve_waiting_review_step(steps)
     if review_step is None:
         final_review_step = _find_step(steps, "final_review")
@@ -3244,6 +3622,15 @@ def _resolve_job_review_context(job: Job) -> dict[str, str | None]:
             "label": STEP_LABELS["summary_review"],
             "detail": _review_step_waiting_detail("summary_review"),
         }
+
+    subtitle_review_context = build_subtitle_review_context(
+        subtitle_quality_report=subtitle_artifacts.get(ARTIFACT_TYPE_SUBTITLE_QUALITY_REPORT),
+        subtitle_term_resolution_patch=subtitle_artifacts.get(ARTIFACT_TYPE_SUBTITLE_TERM_RESOLUTION_PATCH),
+        subtitle_consistency_report=subtitle_artifacts.get(ARTIFACT_TYPE_SUBTITLE_CONSISTENCY_REPORT),
+        pending_candidate_count=0,
+    )
+    if review_step.step_name == "summary_review" and subtitle_review_context["label"]:
+        return subtitle_review_context
 
     return {
         "step_name": review_step.step_name,

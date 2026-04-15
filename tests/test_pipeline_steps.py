@@ -16,7 +16,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from roughcut.db.models import Artifact, GlossaryTerm, Job, JobStep, RenderOutput, SubtitleItem, Timeline
+from roughcut.db.models import Artifact, GlossaryTerm, Job, JobStep, RenderOutput, SubtitleCorrection, SubtitleItem, Timeline
 from roughcut.media.audio import NoAudioStreamError
 from roughcut.media.probe import MediaMeta
 from roughcut.pipeline.steps import (
@@ -44,10 +44,15 @@ from roughcut.pipeline.steps import (
     run_glossary_review,
     run_platform_package,
     run_probe,
+    run_subtitle_consistency_review,
     run_subtitle_postprocess,
+    run_subtitle_term_resolution,
     run_transcribe,
 )
 from roughcut.speech.postprocess import SubtitleEntry, SubtitleSegmentationAnalysis, SubtitleSegmentationResult
+from roughcut.review.subtitle_quality import ARTIFACT_TYPE_SUBTITLE_QUALITY_REPORT
+from roughcut.review.subtitle_consistency import ARTIFACT_TYPE_SUBTITLE_CONSISTENCY_REPORT
+from roughcut.review.subtitle_term_resolution import ARTIFACT_TYPE_SUBTITLE_TERM_RESOLUTION_PATCH
 from roughcut.providers.transcription.base import TranscriptResult, TranscriptSegment
 
 
@@ -212,13 +217,157 @@ async def test_run_subtitle_postprocess_records_boundary_refine_metadata(db_engi
                 select(JobStep).where(JobStep.job_id == job_id, JobStep.step_name == "subtitle_postprocess")
             )
         ).scalar_one()
+        quality_artifact = (
+            await session.execute(
+                select(Artifact).where(
+                    Artifact.job_id == job_id,
+                    Artifact.artifact_type == ARTIFACT_TYPE_SUBTITLE_QUALITY_REPORT,
+                )
+            )
+        ).scalar_one()
         subtitles = (
             await session.execute(select(SubtitleItem).where(SubtitleItem.job_id == job_id).order_by(SubtitleItem.item_index))
         ).scalars().all()
 
     assert step.metadata_["subtitle_boundary_refine"] == {"attempted_windows": 1, "accepted_windows": 1}
     assert step.metadata_["subtitle_segmentation"]["entry_count"] == 1
+    assert step.metadata_["subtitle_quality_report"]["score"] is not None
+    assert quality_artifact.data_json["metrics"]["subtitle_count"] == 1
     assert [item.text_raw for item in subtitles] == ["犯困啊或者说需要提神"]
+
+
+@pytest.mark.asyncio
+async def test_run_subtitle_term_resolution_records_patch_and_corrections(db_engine, monkeypatch):
+    import roughcut.pipeline.steps as steps_mod
+    import roughcut.review.glossary_engine as glossary_mod
+
+    factory = async_sessionmaker(db_engine, expire_on_commit=False)
+    job_id = uuid.uuid4()
+
+    async with factory() as session:
+        session.add(
+            Job(
+                id=job_id,
+                source_path="jobs/demo/source.mp4",
+                source_name="20260212-134637 开箱NOC MT34 也叫S06mini.mp4",
+                status="processing",
+                language="zh-CN",
+                workflow_template="edc_tactical",
+            )
+        )
+        session.add(JobStep(job_id=job_id, step_name="subtitle_term_resolution", status="running"))
+        session.add(GlossaryTerm(wrong_forms=["开枪"], correct_form="开箱", category="video_topic"))
+        session.add(GlossaryTerm(wrong_forms=["NZ家"], correct_form="NOC", category="edc_brand"))
+        session.add(GlossaryTerm(wrong_forms=["MP三四"], correct_form="MT34", category="edc_model"))
+        session.add(
+            SubtitleItem(
+                job_id=job_id,
+                version=1,
+                item_index=0,
+                start_time=0.0,
+                end_time=1.0,
+                text_raw="我们赶紧开枪看看这个NZ家的MP三四。",
+                text_norm="我们赶紧开枪看看这个NZ家的MP三四。",
+                text_final="我们赶紧开枪看看这个NZ家的MP三四。",
+            )
+        )
+        await session.commit()
+
+    monkeypatch.setattr(steps_mod, "get_session_factory", lambda: factory)
+    monkeypatch.setattr(
+        glossary_mod,
+        "get_settings",
+        lambda: SimpleNamespace(auto_accept_glossary_corrections=True, glossary_correction_review_threshold=0.9),
+    )
+
+    result = await run_subtitle_term_resolution(str(job_id))
+
+    assert result["patch_count"] >= 3
+
+    async with factory() as session:
+        patch_artifact = (
+            await session.execute(
+                select(Artifact).where(
+                    Artifact.job_id == job_id,
+                    Artifact.artifact_type == ARTIFACT_TYPE_SUBTITLE_TERM_RESOLUTION_PATCH,
+                )
+            )
+        ).scalar_one()
+        correction_rows = (
+            await session.execute(select(SubtitleCorrection).where(SubtitleCorrection.job_id == job_id))
+        ).scalars().all()
+        step = (
+            await session.execute(
+                select(JobStep).where(JobStep.job_id == job_id, JobStep.step_name == "subtitle_term_resolution")
+            )
+        ).scalar_one()
+
+    assert len(correction_rows) == patch_artifact.data_json["metrics"]["patch_count"]
+    assert step.metadata_["term_resolution_patch"]["patch_count"] == len(correction_rows)
+
+
+@pytest.mark.asyncio
+async def test_run_subtitle_consistency_review_records_blocking_report_from_pending_corrections(db_engine, monkeypatch):
+    import roughcut.pipeline.steps as steps_mod
+
+    factory = async_sessionmaker(db_engine, expire_on_commit=False)
+    job_id = uuid.uuid4()
+
+    async with factory() as session:
+        session.add(
+            Job(
+                id=job_id,
+                source_path="jobs/demo/source.mp4",
+                source_name="20260212-134637 开箱NOC MT34 也叫S06mini.mp4",
+                status="processing",
+                language="zh-CN",
+            )
+        )
+        session.add(JobStep(job_id=job_id, step_name="subtitle_consistency_review", status="running"))
+        session.add(
+            SubtitleItem(
+                job_id=job_id,
+                version=1,
+                item_index=0,
+                start_time=0.0,
+                end_time=1.0,
+                text_raw="我们赶紧开枪看看这个NZ家的MP三四。",
+                text_norm="我们赶紧开枪看看这个NZ家的MP三四。",
+                text_final="我们赶紧开枪看看这个NZ家的MP三四。",
+            )
+        )
+        session.add(
+            SubtitleCorrection(
+                job_id=job_id,
+                original_span="开枪",
+                suggested_span="开箱",
+                change_type="glossary",
+                confidence=0.95,
+                source="glossary_match",
+                auto_applied=False,
+                human_decision="pending",
+            )
+        )
+        await session.commit()
+
+    monkeypatch.setattr(steps_mod, "get_session_factory", lambda: factory)
+
+    result = await run_subtitle_consistency_review(str(job_id))
+
+    assert result["blocking"] is True
+
+    async with factory() as session:
+        artifact = (
+            await session.execute(
+                select(Artifact).where(
+                    Artifact.job_id == job_id,
+                    Artifact.artifact_type == ARTIFACT_TYPE_SUBTITLE_CONSISTENCY_REPORT,
+                )
+            )
+        ).scalar_one()
+
+    assert artifact.data_json["blocking"] is True
+    assert artifact.data_json["metrics"]["pending_patch_count"] == 1
 
 
 @pytest.mark.asyncio
@@ -2185,9 +2334,10 @@ async def test_run_content_profile_keeps_manual_review_until_accuracy_gate_passe
         )
         artifacts = artifact_result.scalars().all()
         artifact_map = {item.artifact_type: item.data_json for item in artifacts}
-        assert set(artifact_map) == {"content_profile_draft", "downstream_context"}
+        assert set(artifact_map) == {"content_profile_draft", "downstream_context", "subtitle_quality_report"}
 
         draft = artifact_map["content_profile_draft"]
+        assert artifact_map["subtitle_quality_report"]["blocking"] is False
         assert artifact_map["downstream_context"]["resolved_profile"]["subject_type"] == draft["subject_type"]
         assert draft["automation_review"]["enabled"] is True
         assert draft["automation_review"]["quality_gate_passed"] is True
@@ -2317,10 +2467,16 @@ async def test_run_content_profile_auto_confirms_high_confidence_profile_when_ac
         )
         artifacts = artifact_result.scalars().all()
         artifact_map = {item.artifact_type: item.data_json for item in artifacts}
-        assert set(artifact_map) == {"content_profile_draft", "content_profile_final", "downstream_context"}
+        assert set(artifact_map) == {
+            "content_profile_draft",
+            "content_profile_final",
+            "downstream_context",
+            "subtitle_quality_report",
+        }
 
         draft = artifact_map["content_profile_draft"]
         final = artifact_map["content_profile_final"]
+        assert artifact_map["subtitle_quality_report"]["blocking"] is False
         assert artifact_map["downstream_context"]["resolved_profile"]["review_mode"] == "auto_confirmed"
         assert draft["automation_review"]["auto_confirm"] is True
         assert draft["automation_review"]["approval_accuracy_gate_passed"] is True
@@ -2337,6 +2493,136 @@ async def test_run_content_profile_auto_confirms_high_confidence_profile_when_ac
         assert review_step.metadata_["auto_confirmed"] is True
 
     assert fake_review_bot.content_profile_notifications == []
+
+
+@pytest.mark.asyncio
+async def test_run_content_profile_blocks_auto_confirm_when_subtitle_quality_report_blocks(
+    db_engine,
+    monkeypatch,
+    tmp_path: Path,
+):
+    import roughcut.pipeline.steps as steps_mod
+    from roughcut.review import content_profile as content_profile_mod
+
+    factory = async_sessionmaker(db_engine, expire_on_commit=False)
+    job_id = uuid.uuid4()
+    source_path = tmp_path / "source.mp4"
+    source_path.write_bytes(b"video")
+    fake_review_bot = _FakeTelegramReviewBotService()
+    settings = SimpleNamespace(
+        auto_confirm_content_profile=True,
+        content_profile_review_threshold=0.72,
+        content_profile_auto_review_min_accuracy=0.9,
+        content_profile_auto_review_min_samples=20,
+    )
+
+    async with factory() as session:
+        session.add(
+            Job(
+                id=job_id,
+                source_path="jobs/demo/source.mp4",
+                source_name="20260212-134637 开箱NOC MT34 也叫S06mini 折刀，还有玩法展示.mp4",
+                status="processing",
+                language="zh-CN",
+                channel_profile="screen_tutorial",
+                enhancement_modes=["auto_review"],
+            )
+        )
+        session.add(JobStep(job_id=job_id, step_name="content_profile", status="running"))
+        session.add(JobStep(job_id=job_id, step_name="summary_review", status="pending"))
+        for index, text in enumerate(
+            [
+                "我们今天继续开枪看看这个东西。",
+                "这个MP三四的镜面版本先开枪。",
+                "NZ家的这个版本我再说一下。",
+            ]
+        ):
+            session.add(
+                SubtitleItem(
+                    job_id=job_id,
+                    version=1,
+                    item_index=index,
+                    start_time=float(index),
+                    end_time=float(index) + 1.0,
+                    text_raw=text,
+                    text_norm=text,
+                    text_final=text,
+                )
+            )
+        await session.commit()
+
+    monkeypatch.setattr(steps_mod, "get_session_factory", lambda: factory)
+    monkeypatch.setattr(steps_mod, "get_settings", lambda: settings)
+    monkeypatch.setattr(steps_mod, "get_telegram_review_bot_service", lambda: fake_review_bot)
+    monkeypatch.setattr(content_profile_mod, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        content_profile_mod,
+        "build_content_profile_auto_review_gate",
+        lambda **kwargs: {
+            "gate_passed": True,
+            "detail": "自动放行候选样本人工确认准确率 95.0%，已达到 90% 门槛。",
+            "measured_accuracy": 0.95,
+            "required_accuracy": float(kwargs["min_accuracy"]),
+            "sample_size": 24,
+            "minimum_sample_size": int(kwargs["min_samples"]),
+            "manual_review_total": 30,
+        },
+    )
+
+    async def fake_load_content_profile_user_memory(*args, **kwargs):
+        return {}
+
+    async def fake_resolve_source(*args, **kwargs):
+        return source_path
+
+    async def fake_infer_content_profile(**kwargs):
+        return {
+            "preset_name": "screen_tutorial",
+            "subject_brand": "NOC",
+            "subject_model": "MT34",
+            "subject_type": "折刀开箱对比",
+            "video_theme": "NOC MT34 开箱展示",
+            "summary": "本期围绕 NOC MT34 / S06mini 的开箱展示展开，重点看镜面版本、结构细节和开箱体验。",
+            "engagement_question": "你更在意镜面工艺还是开箱手感？",
+            "search_queries": ["NOC MT34 开箱", "S06mini 镜面版"],
+            "cover_title": {"top": "NOC", "main": "MT34 开箱", "bottom": "镜面版展示"},
+            "evidence": [{"title": "NOC MT34"}],
+        }
+
+    monkeypatch.setattr(steps_mod, "load_content_profile_user_memory", fake_load_content_profile_user_memory)
+    monkeypatch.setattr(steps_mod, "_resolve_source", fake_resolve_source)
+    monkeypatch.setattr(steps_mod, "infer_content_profile", fake_infer_content_profile)
+
+    result = await run_content_profile(str(job_id))
+
+    assert result["auto_confirmed"] is False
+    assert result["subtitle_quality_blocking"] is True
+
+    async with factory() as session:
+        artifacts = (
+            await session.execute(select(Artifact).where(Artifact.job_id == job_id).order_by(Artifact.created_at.asc()))
+        ).scalars().all()
+        artifact_map = {}
+        for artifact in artifacts:
+            artifact_map.setdefault(artifact.artifact_type, []).append(artifact.data_json)
+
+        assert "content_profile_final" not in artifact_map
+        assert ARTIFACT_TYPE_SUBTITLE_QUALITY_REPORT in artifact_map
+        draft = artifact_map["content_profile_draft"][0]
+        assert draft["automation_review"]["auto_confirm"] is False
+        assert draft["automation_review"]["quality_gate_passed"] is False
+        assert draft["subtitle_quality_report"]["blocking"] is True
+        assert any("字幕质检未通过" in reason for reason in draft["automation_review"]["blocking_reasons"])
+
+        review_step = (
+            await session.execute(
+                select(JobStep).where(JobStep.job_id == job_id, JobStep.step_name == "summary_review")
+            )
+        ).scalar_one()
+        assert review_step.status == "pending"
+        assert "字幕质检未通过" in str(review_step.metadata_["detail"])
+
+    assert fake_review_bot.content_profile_notifications == [job_id]
 
 
 @pytest.mark.asyncio
@@ -2432,7 +2718,8 @@ async def test_run_content_profile_keeps_manual_review_when_auto_review_mode_dis
         )
         artifacts = artifact_result.scalars().all()
         artifact_map = {item.artifact_type: item.data_json for item in artifacts}
-        assert set(artifact_map) == {"content_profile_draft", "downstream_context"}
+        assert set(artifact_map) == {"content_profile_draft", "downstream_context", "subtitle_quality_report"}
+        assert artifact_map["subtitle_quality_report"]["blocking"] is False
         assert artifact_map["content_profile_draft"]["automation_review"]["auto_confirm"] is False
         assert artifact_map["downstream_context"]["manual_review_applied"] is False
 
@@ -3360,7 +3647,13 @@ async def test_run_content_profile_applies_llm_resolved_final_review_feedback_an
         )
         artifacts = artifact_result.scalars().all()
         artifact_map = {item.artifact_type: item.data_json for item in artifacts}
-        assert set(artifact_map) == {"content_profile_draft", "content_profile_final", "downstream_context"}
+        assert set(artifact_map) == {
+            "content_profile_draft",
+            "content_profile_final",
+            "downstream_context",
+            "subtitle_quality_report",
+        }
+        assert artifact_map["subtitle_quality_report"]["blocking"] is False
         assert artifact_map["content_profile_final"]["review_mode"] == "manual_confirmed"
         assert artifact_map["content_profile_final"]["subject_brand"] == "傲雷"
         assert artifact_map["content_profile_final"]["subject_model"] == "司令官2Ultra"
@@ -3484,7 +3777,8 @@ async def test_run_content_profile_keeps_summary_review_pending_when_final_revie
         )
         artifacts = artifact_result.scalars().all()
         artifact_map = {item.artifact_type: item.data_json for item in artifacts}
-        assert set(artifact_map) == {"content_profile_draft", "downstream_context"}
+        assert set(artifact_map) == {"content_profile_draft", "downstream_context", "subtitle_quality_report"}
+        assert artifact_map["subtitle_quality_report"]["blocking"] is False
         assert (
             artifact_map["downstream_context"]["resolved_profile"]["subject_brand"]
             == artifact_map["content_profile_draft"]["subject_brand"]
@@ -4760,7 +5054,7 @@ async def test_run_content_profile_ignores_stale_infer_cache_after_framework_ver
 
 
 @pytest.mark.asyncio
-async def test_run_content_profile_prefers_transcript_segments_as_primary_evidence(
+async def test_run_content_profile_prefers_reviewed_subtitle_excerpt_over_raw_transcript_segments(
     db_engine,
     monkeypatch,
     tmp_path: Path,
@@ -4861,8 +5155,8 @@ async def test_run_content_profile_prefers_transcript_segments_as_primary_eviden
         )
         draft = artifact_result.scalars().first()
         assert draft is not None
-        assert "ARC 这把工具的单手开合很舒服" in str(draft.data_json.get("transcript_excerpt") or "")
-        assert "开场闲聊" not in str(draft.data_json.get("transcript_excerpt") or "")
+        assert "开场闲聊" in str(draft.data_json.get("transcript_excerpt") or "")
+        assert "ARC 这把工具的单手开合很舒服" not in str(draft.data_json.get("transcript_excerpt") or "")
 
 
 @pytest.mark.asyncio

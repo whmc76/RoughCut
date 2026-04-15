@@ -14,6 +14,7 @@ from roughcut.speech.postprocess import (
     _looks_like_split_measure_phrase,
     _resolve_fragment_window,
     analyze_subtitle_segmentation,
+    cleanup_subtitle_fillers,
     generate_subtitle_window_candidates,
     _merge_continuation_entries,
     _should_merge_subtitle_pair,
@@ -83,6 +84,19 @@ def test_normalize_text_formats_multi_letter_model_token_with_spoken_digits():
 
 def test_normalize_text_collapses_repeated_model_number_suffix():
     assert normalize_text("弟就是这个edc二三啊二三已经") == "弟就是这个EDC23已经。"
+
+
+def test_normalize_text_repairs_common_hot_term_aliases():
+    assert normalize_text("这次主要看威虎版的外观处理") == "这次主要看微弧版的外观处理。"
+    assert normalize_text("呃铝合金CAC的这个外壳") == "铝合金CNC的这个外壳。"
+
+
+def test_cleanup_subtitle_fillers_drops_low_signal_short_clauses():
+    assert cleanup_subtitle_fillers("嗯今天，啊这个什么呢，待会再说那个刀，哎哦对") == ""
+
+
+def test_cleanup_subtitle_fillers_keeps_meaningful_short_domain_clause():
+    assert cleanup_subtitle_fillers("镜面") == "镜面"
 
 
 def test_normalize_text_adds_soft_clause_spacing_for_long_sentence():

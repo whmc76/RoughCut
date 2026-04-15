@@ -5,12 +5,63 @@ from datetime import datetime, timezone
 
 import pytest
 import roughcut.pipeline.quality as quality_mod
+import roughcut.pipeline.rerun_actions as rerun_actions_mod
 from roughcut.db.models import Artifact, Job, JobStep, SubtitleCorrection, SubtitleItem
 from roughcut.pipeline.quality import assess_job_quality, evaluate_profile_identity_gate
 
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def test_rerun_actions_resolve_shared_issue_mapping_and_chain():
+    assert rerun_actions_mod.rerun_start_step_for_issue("subtitle_quality_warning") == "subtitle_postprocess"
+    assert rerun_actions_mod.rerun_steps_for_issue_code("subtitle_quality_warning") == [
+        "subtitle_postprocess",
+        "subtitle_term_resolution",
+        "subtitle_consistency_review",
+        "glossary_review",
+        "subtitle_translation",
+        "content_profile",
+        "ai_director",
+        "avatar_commentary",
+        "edit_plan",
+        "render",
+        "final_review",
+        "platform_package",
+    ]
+
+
+def test_pick_recommended_rerun_steps_prefers_shared_override_over_auto_fix_step():
+    issues = [
+        quality_mod.QualityIssue(
+            code="subtitle_quality_warning",
+            message="字幕质量存在警告",
+            penalty=6.0,
+            auto_fix_step="render",
+        ),
+        quality_mod.QualityIssue(
+            code="missing_content_profile",
+            message="缺少内容画像结果",
+            penalty=30.0,
+            auto_fix_step="content_profile",
+        ),
+    ]
+
+    assert rerun_actions_mod.pick_recommended_rerun_steps(issues) == [
+        "subtitle_postprocess",
+        "subtitle_term_resolution",
+        "subtitle_consistency_review",
+        "glossary_review",
+        "subtitle_translation",
+        "content_profile",
+        "ai_director",
+        "avatar_commentary",
+        "edit_plan",
+        "render",
+        "final_review",
+        "platform_package",
+    ]
 
 
 def test_assess_job_quality_penalizes_generic_profile_and_missed_detail():
@@ -150,6 +201,8 @@ def test_assess_job_quality_prefers_subtitle_rerun_when_subtitles_missing():
     assert assessment["recommended_rerun_step"] == "subtitle_postprocess"
     assert assessment["recommended_rerun_steps"] == [
         "subtitle_postprocess",
+        "subtitle_term_resolution",
+        "subtitle_consistency_review",
         "glossary_review",
         "subtitle_translation",
         "content_profile",
@@ -159,6 +212,106 @@ def test_assess_job_quality_prefers_subtitle_rerun_when_subtitles_missing():
         "render",
         "final_review",
         "platform_package",
+    ]
+
+
+def test_assess_job_quality_uses_subtitle_stage_reports_for_rerun_paths():
+    job = Job(
+        id=uuid.uuid4(),
+        source_path="jobs/demo/subtitle-stage.mp4",
+        source_name="subtitle-stage.mp4",
+        status="processing",
+        language="zh-CN",
+    )
+    steps = [
+        JobStep(job_id=job.id, step_name="subtitle_postprocess", status="done"),
+        JobStep(job_id=job.id, step_name="subtitle_term_resolution", status="done"),
+        JobStep(job_id=job.id, step_name="subtitle_consistency_review", status="done"),
+        JobStep(job_id=job.id, step_name="content_profile", status="done"),
+    ]
+    artifacts = [
+        Artifact(
+            job_id=job.id,
+            artifact_type="content_profile_final",
+            data_json={
+                "subject_brand": "Loop露普",
+                "subject_model": "SK05二代UV版",
+                "subject_type": "EDC手电",
+                "video_theme": "SK05二代UV版与一代亮度续航对比",
+                "summary": "围绕 Loop露普 SK05二代UV版 和一代做亮度、续航与 UV 功能差异对比。",
+                "engagement_question": "你更在意二代的 UV 功能还是亮度升级？",
+                "preset_name": "edc_tactical",
+                "review_mode": "auto_confirmed",
+                "automation_review": {"score": 0.95},
+            },
+            created_at=_now(),
+        ),
+        Artifact(
+            job_id=job.id,
+            artifact_type="subtitle_quality_report",
+            data_json={
+                "score": 61.5,
+                "blocking": True,
+                "blocking_reasons": ["热词/型号错词残留 2 处"],
+                "warning_reasons": ["独立语气词偏多 1.2%"],
+                "metrics": {"identity_missing": False},
+            },
+            created_at=_now(),
+        ),
+        Artifact(
+            job_id=job.id,
+            artifact_type="subtitle_term_resolution_patch",
+            data_json={
+                "metrics": {
+                    "patch_count": 3,
+                    "pending_count": 2,
+                    "auto_applied_count": 1,
+                }
+            },
+            created_at=_now(),
+        ),
+        Artifact(
+            job_id=job.id,
+            artifact_type="subtitle_consistency_report",
+            data_json={
+                "score": 87.0,
+                "blocking": False,
+                "blocking_reasons": [],
+                "warning_reasons": ["字幕术语已自动纠偏 1 处"],
+            },
+            created_at=_now(),
+        ),
+    ]
+    subtitles = [
+        SubtitleItem(
+            job_id=job.id,
+            version=1,
+            item_index=0,
+            start_time=0.0,
+            end_time=4.0,
+            text_raw="这次重点看二代 UV 版和一代在亮度和续航上的区别。",
+        )
+    ]
+
+    assessment = assess_job_quality(
+        job=job,
+        steps=steps,
+        artifacts=artifacts,
+        subtitle_items=subtitles,
+        corrections=[],
+        completion_candidate=True,
+    )
+
+    assert assessment["issue_codes"] == [
+        "subtitle_terms_pending",
+        "subtitle_consistency_warning",
+        "subtitle_quality_blocking",
+    ]
+    assert assessment["recommended_rerun_step"] == "subtitle_postprocess"
+    assert assessment["recommended_rerun_steps"][:3] == [
+        "subtitle_postprocess",
+        "subtitle_term_resolution",
+        "subtitle_consistency_review",
     ]
 
 

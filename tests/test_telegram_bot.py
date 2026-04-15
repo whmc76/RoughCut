@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from types import SimpleNamespace
 
-from roughcut.review.telegram_bot import _build_content_profile_review_message
+from roughcut.review.telegram_bot import _build_content_profile_review_message, _build_subtitle_review_artifact_lines
 
 
 def test_build_content_profile_review_message_includes_identity_evidence_bundle():
@@ -95,3 +95,40 @@ def test_build_content_profile_review_message_includes_compact_ocr_and_transcrip
     assert "- 转写证据：qwen_asr / qwen3-asr-1.7b" in message
     assert "Prompt 轨迹：优先识别品牌、型号、颜色与规格。" in message
     assert "raw_payload" not in message
+
+
+def test_build_subtitle_review_artifact_lines_summarizes_patch_consistency_and_quality():
+    lines = _build_subtitle_review_artifact_lines(
+        {
+            "subtitle_term_resolution_patch": {
+                "candidate_terms": ["狐蝠工业", "FXX1小副包"],
+                "blocking": True,
+                "metrics": {
+                    "patch_count": 2,
+                    "accepted_count": 1,
+                    "pending_count": 1,
+                    "auto_applied_count": 0,
+                },
+            },
+            "subtitle_consistency_report": {
+                "score": 88.2,
+                "blocking": True,
+                "blocking_reasons": ["字幕与文件名品牌不一致"],
+            },
+            "subtitle_quality_report": {
+                "score": 91.5,
+                "blocking": False,
+                "warning_reasons": ["短碎句率偏高 1.20%"],
+            },
+        }
+    )
+
+    assert "- 术语修复：2 条候选，已接受 1，待审 1，自动应用 0" in lines
+    assert "- 术语候选：狐蝠工业，FXX1小副包" in lines
+    assert "- 处理动作：先人工确认 1 条术语候选，再继续后续摘要与成片流程。" in lines
+    assert "- 一致性：88.20 分，阻断" in lines
+    assert "- 一致性阻断：字幕与文件名品牌不一致" in lines
+    assert "- 处理动作：先复核一致性冲突：字幕与文件名品牌不一致；确认后如需自动回退，从 subtitle_consistency_review 起重跑。" in lines
+    assert "- 质量：91.50 分，通过" in lines
+    assert "- 质量提醒：短碎句率偏高 1.20%" in lines
+    assert "- 处理动作：如需消除字幕质量提醒，可从 subtitle_postprocess 起重跑。" in lines

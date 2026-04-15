@@ -21,7 +21,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
 from roughcut.avatar import list_avatar_material_profiles
 from roughcut.config import get_settings, llm_task_route, should_enable_task_search
@@ -36,7 +36,7 @@ from roughcut.creative import (
 )
 from roughcut.creative.avatar import refine_avatar_commentary_segments_for_media_duration
 from roughcut.docker_gpu_guard import _acquire_operation_lock, _release_operation_lock
-from roughcut.db.models import Artifact, GlossaryTerm, Job, JobStep, RenderOutput, SubtitleItem, Timeline, TranscriptSegment
+from roughcut.db.models import Artifact, GlossaryTerm, Job, JobStep, RenderOutput, SubtitleCorrection, SubtitleItem, Timeline, TranscriptSegment
 from roughcut.db.session import get_session_factory
 from roughcut.edit.decisions import (
     EditDecision,
@@ -91,6 +91,7 @@ from roughcut.review.content_profile import (
     assess_content_profile_automation,
     build_content_profile_cache_fingerprint,
     build_review_feedback_verification_bundle,
+    build_reviewed_transcript_excerpt,
     build_transcript_excerpt,
     extract_source_identity_constraints,
     enrich_content_profile,
@@ -103,6 +104,7 @@ from roughcut.review.content_profile_memory import (
     merge_content_profile_creative_preferences,
     record_content_profile_feedback_memory,
 )
+from roughcut.review.content_profile_artifacts import persist_content_profile_artifacts
 from roughcut.review.downstream_context import (
     build_downstream_context,
     resolve_downstream_profile,
@@ -128,8 +130,20 @@ from roughcut.review.platform_copy import (
     packaging_fact_sheet_cache_allowed,
     save_platform_packaging_markdown,
 )
-from roughcut.review.evidence_types import ARTIFACT_TYPE_CONTENT_PROFILE_OCR, build_correction_framework_trace
+from roughcut.review.evidence_types import build_correction_framework_trace
 from roughcut.review.subtitle_memory import build_subtitle_review_memory, build_transcription_prompt
+from roughcut.review.subtitle_consistency import (
+    ARTIFACT_TYPE_SUBTITLE_CONSISTENCY_REPORT,
+    build_subtitle_consistency_report,
+)
+from roughcut.review.subtitle_quality import (
+    ARTIFACT_TYPE_SUBTITLE_QUALITY_REPORT,
+    build_subtitle_quality_report_from_items,
+)
+from roughcut.review.subtitle_term_resolution import (
+    ARTIFACT_TYPE_SUBTITLE_TERM_RESOLUTION_PATCH,
+    build_subtitle_term_resolution_patch,
+)
 from roughcut.review.subtitle_translation import (
     detect_subtitle_language,
     languages_equivalent,
@@ -160,6 +174,8 @@ STEP_LABELS = {
     "extract_audio": "提取音频",
     "transcribe": "语音转写",
     "subtitle_postprocess": "字幕后处理",
+    "subtitle_term_resolution": "术语解析",
+    "subtitle_consistency_review": "一致性审校",
     "subtitle_translation": "字幕翻译",
     "content_profile": "内容摘要",
     "summary_review": "人工确认",
@@ -1900,6 +1916,699 @@ async def _load_preferred_downstream_profile(session, *, job_id: uuid.UUID) -> t
     return artifact, resolve_downstream_profile(artifact.data_json if isinstance(artifact.data_json, dict) else {})
 
 
+async def _load_content_profile_source_context(session, *, job_id: uuid.UUID) -> dict[str, Any]:
+    result = await session.execute(
+        select(JobStep).where(JobStep.job_id == job_id, JobStep.step_name == "content_profile")
+    )
+    step = result.scalar_one_or_none()
+    if step is None or not isinstance(step.metadata_, dict):
+        return {}
+    payload = step.metadata_.get("source_context")
+    return dict(payload) if isinstance(payload, dict) else {}
+
+
+def _subtitle_item_payload(item: SubtitleItem) -> dict[str, Any]:
+    return {
+        "index": item.item_index,
+        "start_time": item.start_time,
+        "end_time": item.end_time,
+        "text_raw": item.text_raw,
+        "text_norm": item.text_norm,
+        "text_final": item.text_final,
+    }
+
+
+async def _load_subtitle_corrections(session, *, job_id: uuid.UUID) -> list[SubtitleCorrection]:
+    result = await session.execute(
+        select(SubtitleCorrection)
+        .where(SubtitleCorrection.job_id == job_id)
+        .order_by(SubtitleCorrection.created_at.asc())
+    )
+    return list(result.scalars().all())
+
+
+async def _load_subtitle_transcript_context(
+    session,
+    *,
+    job_id: uuid.UUID,
+) -> tuple[list[SubtitleItem], list[dict[str, Any]], list[TranscriptSegment], list[dict[str, Any]]]:
+    item_result = await session.execute(
+        select(SubtitleItem)
+        .where(SubtitleItem.job_id == job_id, SubtitleItem.version == 1)
+        .order_by(SubtitleItem.item_index)
+    )
+    transcript_result = await session.execute(
+        select(TranscriptSegment)
+        .where(TranscriptSegment.job_id == job_id, TranscriptSegment.version == 1)
+        .order_by(TranscriptSegment.segment_index)
+    )
+    subtitle_items = list(item_result.scalars().all())
+    transcript_rows = list(transcript_result.scalars().all())
+    subtitle_dicts = [_subtitle_item_payload(item) for item in subtitle_items]
+    transcript_evidence_artifact = await _load_latest_optional_artifact(
+        session,
+        job_id=job_id,
+        artifact_types=("transcript_evidence",),
+    )
+    transcript_segment_dicts = _build_edit_plan_transcript_segments(
+        transcript_rows,
+        transcript_evidence_artifact.data_json if transcript_evidence_artifact is not None else None,
+    )
+    return subtitle_items, subtitle_dicts, transcript_rows, transcript_segment_dicts
+
+
+async def _load_current_content_profile(session, *, job_id: uuid.UUID) -> dict[str, Any] | None:
+    _profile_artifact, content_profile = await _load_preferred_downstream_profile(session, job_id=job_id)
+    if content_profile:
+        return dict(content_profile)
+    profile_result = await session.execute(
+        select(Artifact)
+        .where(
+            Artifact.job_id == job_id,
+            Artifact.artifact_type.in_(["content_profile_final", "content_profile_draft"]),
+        )
+        .order_by(Artifact.created_at.desc())
+    )
+    profile_artifacts = profile_result.scalars().all()
+    if not profile_artifacts:
+        return None
+    data_json = profile_artifacts[0].data_json
+    return dict(data_json) if isinstance(data_json, dict) else None
+
+
+async def _resolve_glossary_review_content_profile(
+    *,
+    session,
+    job: Job,
+    step: JobStep,
+    settings,
+    content_profile: dict[str, Any] | None,
+    subtitle_dicts: list[dict[str, Any]],
+    transcript_segment_dicts: list[dict[str, Any]],
+    effective_glossary_terms: list[GlossaryTerm | dict[str, Any]],
+    user_memory: dict[str, Any],
+) -> dict[str, Any]:
+    include_research = bool(getattr(settings, "research_verifier_enabled", False))
+    packaging_config = (list_packaging_assets().get("config") or {})
+    if not content_profile:
+        async with _maintain_step_heartbeat(step):
+            with tempfile.TemporaryDirectory() as tmpdir:
+                source_path = await _resolve_source(job, tmpdir, expected_hash=job.file_hash)
+                initial_search_enabled = should_enable_task_search(
+                    "content_profile",
+                    default_enabled=include_research,
+                    profile=content_profile,
+                    settings=settings,
+                )
+                with llm_task_route("content_profile", search_enabled=initial_search_enabled, settings=settings):
+                    with track_step_usage(job_id=job.id, step_id=step.id, step_name="glossary_review"):
+                        return await infer_content_profile(
+                            source_path=source_path,
+                            source_name=job.source_name,
+                            subtitle_items=subtitle_dicts,
+                            transcript_items=transcript_segment_dicts,
+                            workflow_template=job.workflow_template,
+                            user_memory=user_memory,
+                            glossary_terms=effective_glossary_terms,
+                            include_research=initial_search_enabled,
+                            copy_style=str(packaging_config.get("copy_style") or "attention_grabbing"),
+                        )
+
+    profile = dict(content_profile)
+    profile["copy_style"] = str(
+        packaging_config.get("copy_style")
+        or profile.get("copy_style")
+        or "attention_grabbing"
+    )
+    enrich_search_enabled = should_enable_task_search(
+        "content_profile",
+        default_enabled=include_research,
+        profile=profile,
+        settings=settings,
+    )
+    async with _maintain_step_heartbeat(step):
+        with llm_task_route("content_profile", search_enabled=enrich_search_enabled, settings=settings):
+            with track_step_usage(job_id=job.id, step_id=step.id, step_name="glossary_review"):
+                return await enrich_content_profile(
+                    profile=profile,
+                    source_name=job.source_name,
+                    workflow_template=job.workflow_template,
+                    transcript_excerpt=str(profile.get("transcript_excerpt") or ""),
+                    subtitle_items=subtitle_dicts,
+                    transcript_items=transcript_segment_dicts,
+                    glossary_terms=effective_glossary_terms,
+                    user_memory=user_memory,
+                    include_research=enrich_search_enabled,
+                )
+
+
+async def _evaluate_content_profile_automation_and_reports(
+    session,
+    *,
+    job: Job,
+    settings,
+    content_profile: dict[str, Any],
+    subtitle_items: list[SubtitleItem],
+    subtitle_dicts: list[dict[str, Any]],
+    user_memory: dict[str, Any],
+    effective_glossary_terms: list[GlossaryTerm | dict[str, Any]],
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
+    auto_review_enabled = bool(settings.auto_confirm_content_profile) and auto_review_mode_enabled(
+        getattr(job, "enhancement_modes", [])
+    )
+    automation = assess_content_profile_automation(
+        content_profile,
+        subtitle_items=subtitle_dicts,
+        user_memory=user_memory,
+        glossary_terms=effective_glossary_terms,
+        source_name=job.source_name,
+        auto_confirm_enabled=auto_review_enabled,
+        threshold=settings.content_profile_review_threshold,
+    )
+    if bool((automation.get("identity_review") or {}).get("conservative_summary")):
+        content_profile = apply_identity_review_guard(
+            content_profile,
+            subtitle_items=subtitle_dicts,
+            user_memory=user_memory,
+            glossary_terms=effective_glossary_terms,
+            source_name=job.source_name,
+        )
+        automation = assess_content_profile_automation(
+            content_profile,
+            subtitle_items=subtitle_dicts,
+            user_memory=user_memory,
+            glossary_terms=effective_glossary_terms,
+            source_name=job.source_name,
+            auto_confirm_enabled=auto_review_enabled,
+            threshold=settings.content_profile_review_threshold,
+        )
+    if bool((automation.get("identity_review") or {}).get("required")):
+        summary = str(content_profile.get("summary") or "").strip()
+        if "具体品牌型号待人工确认" not in summary:
+            content_profile["summary"] = _build_conservative_identity_summary(
+                content_profile,
+                subtitle_items=subtitle_dicts,
+            )
+    subtitle_quality_report = build_subtitle_quality_report_from_items(
+        subtitle_items=subtitle_items,
+        source_name=job.source_name,
+        content_profile=content_profile,
+    )
+    corrections = await _load_subtitle_corrections(session, job_id=job.id)
+    consistency_artifact = await _load_latest_optional_artifact(
+        session,
+        job_id=job.id,
+        artifact_types=(ARTIFACT_TYPE_SUBTITLE_CONSISTENCY_REPORT,),
+    )
+    subtitle_consistency_report = (
+        consistency_artifact.data_json
+        if consistency_artifact is not None and isinstance(consistency_artifact.data_json, dict)
+        else build_subtitle_consistency_report(
+            subtitle_items=subtitle_dicts,
+            corrections=corrections,
+            source_name=job.source_name,
+            content_profile=content_profile,
+            subtitle_quality_report=subtitle_quality_report,
+        )
+    )
+    if subtitle_quality_report.get("blocking"):
+        content_profile, automation = _apply_blocking_report_to_content_profile(
+            content_profile=content_profile,
+            automation=automation,
+            blocking_reasons=list(subtitle_quality_report.get("blocking_reasons") or []),
+            prefix="字幕质检未通过",
+        )
+    if subtitle_consistency_report.get("blocking"):
+        content_profile, automation = _apply_blocking_report_to_content_profile(
+            content_profile=content_profile,
+            automation=automation,
+            blocking_reasons=list(subtitle_consistency_report.get("blocking_reasons") or []),
+            prefix="字幕一致性未通过",
+        )
+    updated_profile = dict(content_profile)
+    updated_profile["automation_review"] = automation
+    updated_profile["subtitle_quality_report"] = subtitle_quality_report
+    updated_profile["subtitle_consistency_report"] = subtitle_consistency_report
+    return updated_profile, automation, subtitle_quality_report, subtitle_consistency_report
+
+
+async def _apply_source_context_feedback_to_content_profile(
+    session,
+    *,
+    job: Job,
+    step: JobStep,
+    settings,
+    content_profile: dict[str, Any],
+    source_context: dict[str, Any],
+    transcript_excerpt: str,
+    include_research: bool,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    source_context_description = str(source_context.get("video_description") or "").strip()
+    resolved_source_context_feedback: dict[str, Any] = {}
+    if not source_context_description:
+        return dict(content_profile), resolved_source_context_feedback
+
+    source_context_draft_profile = dict(content_profile)
+    feedback_search_enabled = should_enable_task_search(
+        "content_profile",
+        default_enabled=include_research,
+        profile=content_profile,
+        settings=settings,
+    )
+    with llm_task_route("content_profile", search_enabled=feedback_search_enabled, settings=settings):
+        source_context_verification_bundle = await build_review_feedback_verification_bundle(
+            draft_profile=content_profile,
+            proposed_feedback=None,
+            session=session,
+        )
+        resolved_source_context_feedback = await resolve_content_profile_review_feedback(
+            draft_profile=content_profile,
+            source_name=job.source_name,
+            review_feedback=source_context_description,
+            proposed_feedback=None,
+            reviewed_subtitle_excerpt=transcript_excerpt,
+            accepted_corrections=[],
+            verification_bundle=source_context_verification_bundle,
+        )
+        if resolved_source_context_feedback:
+            content_profile = await apply_content_profile_feedback(
+                draft_profile=content_profile,
+                source_name=job.source_name,
+                workflow_template=job.workflow_template,
+                user_feedback=resolved_source_context_feedback,
+                reviewed_subtitle_excerpt=transcript_excerpt,
+                accepted_corrections=[],
+            )
+            await _persist_content_profile_learning_once(
+                session,
+                step=step,
+                job=job,
+                draft_profile=source_context_draft_profile,
+                final_profile=content_profile,
+                user_feedback=resolved_source_context_feedback,
+                feedback_source="task_description",
+                observation_type="task_description",
+                context_hint=f"task_description:{job.workflow_template or 'auto'}",
+            )
+    updated_profile = dict(content_profile)
+    if source_context:
+        updated_profile["source_context"] = {
+            **source_context,
+            **({"resolved_feedback": dict(resolved_source_context_feedback)} if resolved_source_context_feedback else {}),
+        }
+    return updated_profile, resolved_source_context_feedback
+
+
+async def _apply_manual_review_feedback_to_content_profile(
+    session,
+    *,
+    job: Job,
+    step: JobStep,
+    content_profile: dict[str, Any],
+    transcript_excerpt: str,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
+    manual_review_feedback = dict(step.metadata_.get("review_user_feedback") or {}) if isinstance(step.metadata_, dict) else {}
+    review_feedback_note = str(step.metadata_.get("review_feedback") or "").strip() if isinstance(step.metadata_, dict) else ""
+    resolved_manual_review_feedback: dict[str, Any] = {}
+    manual_review_draft_profile = dict(content_profile)
+    if manual_review_feedback:
+        review_feedback_verification_bundle = await build_review_feedback_verification_bundle(
+            draft_profile=content_profile,
+            proposed_feedback=manual_review_feedback,
+            session=session,
+        )
+        resolved_manual_review_feedback = await resolve_content_profile_review_feedback(
+            draft_profile=content_profile,
+            source_name=job.source_name,
+            review_feedback=review_feedback_note,
+            proposed_feedback=manual_review_feedback,
+            reviewed_subtitle_excerpt=transcript_excerpt,
+            accepted_corrections=[],
+            verification_bundle=review_feedback_verification_bundle,
+        )
+    updated_profile = dict(content_profile)
+    if resolved_manual_review_feedback:
+        updated_profile = await apply_content_profile_feedback(
+            draft_profile=content_profile,
+            source_name=job.source_name,
+            workflow_template=job.workflow_template,
+            user_feedback=resolved_manual_review_feedback,
+            reviewed_subtitle_excerpt=transcript_excerpt,
+            accepted_corrections=[],
+        )
+        updated_profile["review_user_feedback"] = dict(manual_review_feedback)
+        updated_profile["resolved_review_user_feedback"] = dict(resolved_manual_review_feedback)
+    return updated_profile, manual_review_feedback, resolved_manual_review_feedback, manual_review_draft_profile
+
+
+def _apply_identity_gate_to_content_profile(content_profile: dict[str, Any]) -> dict[str, Any]:
+    identity_gate = evaluate_profile_identity_gate(content_profile)
+    gate_reasons = [str(item).strip() for item in list(identity_gate.get("review_reasons") or []) if str(item).strip()]
+    updated_profile = dict(content_profile)
+    if identity_gate.get("needs_review"):
+        updated_profile["needs_review"] = True
+        review_reasons = [
+            str(item).strip()
+            for item in list(updated_profile.get("review_reasons") or [])
+            if str(item).strip()
+        ]
+        for reason in gate_reasons:
+            if reason not in review_reasons:
+                review_reasons.append(reason)
+        updated_profile["review_reasons"] = review_reasons
+    updated_profile["verification_gate"] = identity_gate
+    return updated_profile
+
+
+def _merge_review_step_detail(existing_detail: str, new_detail: str) -> str:
+    existing = str(existing_detail or "").strip()
+    incoming = str(new_detail or "").strip()
+    if not existing:
+        return incoming
+    if not incoming or incoming in existing:
+        return existing
+    return f"{existing}；{incoming}"
+
+
+def _set_summary_review_state(
+    review_step: JobStep,
+    *,
+    now: datetime,
+    status: str,
+    detail: str,
+    progress: float,
+    metadata_updates: dict[str, Any] | None = None,
+    clear_finished_at: bool = False,
+) -> None:
+    review_step.status = status
+    review_step.started_at = review_step.started_at or now
+    review_step.finished_at = None if clear_finished_at else now if status == "done" else review_step.finished_at
+    if status == "pending":
+        review_step.finished_at = None
+    review_step.error_message = None
+    review_step.metadata_ = {
+        **(review_step.metadata_ or {}),
+        "label": STEP_LABELS.get("summary_review", "summary_review"),
+        "detail": detail,
+        "progress": progress,
+        "updated_at": now.isoformat(),
+        **(metadata_updates or {}),
+    }
+
+
+def _set_summary_review_done_for_manual_profile(
+    review_step: JobStep,
+    *,
+    now: datetime,
+    manual_review_feedback: dict[str, Any],
+    resolved_manual_review_feedback: dict[str, Any],
+) -> None:
+    _set_summary_review_state(
+        review_step,
+        now=now,
+        status="done",
+        detail="已应用成片审核修正并确认内容摘要，继续后续流程。",
+        progress=1.0,
+        metadata_updates={
+            "auto_confirmed": False,
+            "manual_confirmed": True,
+            "review_user_feedback": dict(manual_review_feedback),
+            "resolved_review_user_feedback": dict(resolved_manual_review_feedback),
+        },
+    )
+
+
+def _set_summary_review_done_for_auto_profile(
+    review_step: JobStep,
+    *,
+    now: datetime,
+    automation: dict[str, Any],
+) -> None:
+    _set_summary_review_state(
+        review_step,
+        now=now,
+        status="done",
+        detail=f"已自动确认内容摘要（置信度 {automation['score']:.2f}）",
+        progress=1.0,
+        metadata_updates={
+            "auto_confirmed": True,
+            "confidence_score": automation["score"],
+            "threshold": automation["threshold"],
+            "review_reasons": automation["review_reasons"],
+            "blocking_reasons": automation["blocking_reasons"],
+        },
+    )
+
+
+def _set_summary_review_pending_for_identity(
+    review_step: JobStep,
+    *,
+    now: datetime,
+    automation: dict[str, Any],
+) -> None:
+    _set_summary_review_state(
+        review_step,
+        now=now,
+        status="pending",
+        detail=str((automation.get("identity_review") or {}).get("reason") or "内容摘要待人工确认"),
+        progress=0.0,
+        metadata_updates={
+            "auto_confirmed": False,
+            "identity_review": automation.get("identity_review"),
+            "review_reasons": automation["review_reasons"],
+            "blocking_reasons": automation["blocking_reasons"],
+        },
+        clear_finished_at=True,
+    )
+
+
+def _set_summary_review_pending_for_manual_feedback(
+    review_step: JobStep,
+    *,
+    now: datetime,
+    manual_review_feedback: dict[str, Any],
+) -> None:
+    _set_summary_review_state(
+        review_step,
+        now=now,
+        status="pending",
+        detail="成片审核修正尚未确认到当前主体，等待人工继续确认。",
+        progress=0.0,
+        metadata_updates={
+            "auto_confirmed": False,
+            "manual_confirmed": False,
+            "review_user_feedback": dict(manual_review_feedback),
+            "resolved_review_user_feedback": {},
+        },
+        clear_finished_at=True,
+    )
+
+
+def _set_summary_review_pending_for_subtitle_gate(
+    review_step: JobStep,
+    *,
+    now: datetime,
+    automation: dict[str, Any],
+    subtitle_quality_report: dict[str, Any],
+    subtitle_consistency_report: dict[str, Any],
+) -> None:
+    detail_bits: list[str] = []
+    if subtitle_quality_report.get("blocking"):
+        detail_bits.append("字幕质检未通过")
+    if subtitle_consistency_report.get("blocking"):
+        detail_bits.append("字幕一致性未通过")
+    subtitle_review_detail = "、".join(detail_bits) + "，等待人工确认后再继续后续流程。"
+    existing_detail = str((review_step.metadata_ or {}).get("detail") or "").strip()
+    _set_summary_review_state(
+        review_step,
+        now=now,
+        status="pending",
+        detail=_merge_review_step_detail(existing_detail, subtitle_review_detail),
+        progress=0.0,
+        metadata_updates={
+            "auto_confirmed": False,
+            "manual_confirmed": False,
+            "subtitle_quality_report": {
+                "score": subtitle_quality_report.get("score"),
+                "blocking_reasons": list(subtitle_quality_report.get("blocking_reasons") or []),
+                "warning_reasons": list(subtitle_quality_report.get("warning_reasons") or []),
+            },
+            "subtitle_consistency_report": {
+                "score": subtitle_consistency_report.get("score"),
+                "blocking_reasons": list(subtitle_consistency_report.get("blocking_reasons") or []),
+                "warning_reasons": list(subtitle_consistency_report.get("warning_reasons") or []),
+            },
+            "review_reasons": list(automation.get("review_reasons") or []),
+            "blocking_reasons": list(automation.get("blocking_reasons") or []),
+        },
+        clear_finished_at=True,
+    )
+
+
+def _apply_blocking_report_to_content_profile(
+    *,
+    content_profile: dict[str, Any],
+    automation: dict[str, Any],
+    blocking_reasons: list[str],
+    prefix: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    if not blocking_reasons:
+        return dict(content_profile), dict(automation)
+
+    updated_profile = dict(content_profile)
+    updated_profile["needs_review"] = True
+    review_reasons = [
+        str(item).strip()
+        for item in list(updated_profile.get("review_reasons") or [])
+        if str(item).strip()
+    ]
+    automation_review_reasons = [
+        str(item).strip()
+        for item in list(automation.get("review_reasons") or [])
+        if str(item).strip()
+    ]
+    automation_blocking_reasons = [
+        str(item).strip()
+        for item in list(automation.get("blocking_reasons") or [])
+        if str(item).strip()
+    ]
+    for reason in blocking_reasons:
+        normalized = f"{prefix}：{str(reason).strip()}"
+        if normalized not in review_reasons:
+            review_reasons.append(normalized)
+        if normalized not in automation_review_reasons:
+            automation_review_reasons.append(normalized)
+        if normalized not in automation_blocking_reasons:
+            automation_blocking_reasons.append(normalized)
+    updated_profile["review_reasons"] = review_reasons
+    updated_automation = dict(automation)
+    updated_automation["review_reasons"] = automation_review_reasons
+    updated_automation["blocking_reasons"] = automation_blocking_reasons
+    updated_automation["quality_gate_passed"] = False
+    updated_automation["auto_confirm"] = False
+    return updated_profile, updated_automation
+
+
+async def _finalize_content_profile_review_state(
+    session,
+    *,
+    job: Job,
+    step: JobStep,
+    review_step: JobStep | None,
+    content_profile: dict[str, Any],
+    automation: dict[str, Any],
+    manual_review_feedback: dict[str, Any],
+    resolved_manual_review_feedback: dict[str, Any],
+    manual_review_draft_profile: dict[str, Any],
+) -> tuple[bool, dict[str, Any] | None, dict[str, Any]]:
+    auto_confirmed = bool(automation.get("auto_confirm"))
+    context_source_profile: dict[str, Any] = dict(content_profile)
+    final_profile: dict[str, Any] | None = None
+
+    if resolved_manual_review_feedback:
+        now = datetime.now(timezone.utc)
+        final_profile = dict(content_profile)
+        final_profile["review_mode"] = "manual_confirmed"
+        context_source_profile = dict(final_profile)
+        await _persist_content_profile_learning_once(
+            session,
+            step=step,
+            job=job,
+            draft_profile=manual_review_draft_profile,
+            final_profile=final_profile,
+            user_feedback=resolved_manual_review_feedback,
+            feedback_source="final_review_feedback",
+            observation_type="manual_confirm",
+            context_hint=f"final_review_feedback:{job.workflow_template or 'auto'}",
+        )
+        if review_step is not None:
+            _set_summary_review_done_for_manual_profile(
+                review_step,
+                now=now,
+                manual_review_feedback=manual_review_feedback,
+                resolved_manual_review_feedback=resolved_manual_review_feedback,
+            )
+        job.status = "processing"
+        return auto_confirmed, final_profile, context_source_profile
+
+    if auto_confirmed:
+        now = datetime.now(timezone.utc)
+        final_profile = dict(content_profile)
+        final_profile["review_mode"] = "auto_confirmed"
+        context_source_profile = dict(final_profile)
+        if review_step is not None:
+            _set_summary_review_done_for_auto_profile(
+                review_step,
+                now=now,
+                automation=automation,
+            )
+        job.status = "processing"
+        return auto_confirmed, final_profile, context_source_profile
+
+    if review_step is not None and bool((automation.get("identity_review") or {}).get("required")):
+        _set_summary_review_pending_for_identity(
+            review_step,
+            now=datetime.now(timezone.utc),
+            automation=automation,
+        )
+    return auto_confirmed, final_profile, context_source_profile
+
+
+def _build_content_profile_step_outcome(
+    *,
+    content_profile: dict[str, Any],
+    automation: dict[str, Any],
+    auto_confirmed: bool,
+    resolved_manual_review_feedback: dict[str, Any],
+    manual_review_feedback: dict[str, Any],
+    review_step: JobStep | None,
+    subtitle_quality_report: dict[str, Any],
+    subtitle_consistency_report: dict[str, Any],
+) -> tuple[str, dict[str, Any]]:
+    subject = " / ".join(
+        part
+        for part in [
+            content_profile.get("subject_type"),
+            content_profile.get("video_theme"),
+        ]
+        if part
+    ).strip()
+    if resolved_manual_review_feedback:
+        detail = f"已应用人工修正后的内容摘要：{subject or '人工修正完成'}"
+    elif auto_confirmed:
+        detail = f"已自动确认内容摘要：{subject or '自动识别完成'}"
+    else:
+        if manual_review_feedback and review_step is not None:
+            _set_summary_review_pending_for_manual_feedback(
+                review_step,
+                now=datetime.now(timezone.utc),
+                manual_review_feedback=manual_review_feedback,
+            )
+        elif review_step is not None and (
+            subtitle_quality_report.get("blocking") or subtitle_consistency_report.get("blocking")
+        ):
+            _set_summary_review_pending_for_subtitle_gate(
+                review_step,
+                now=datetime.now(timezone.utc),
+                automation=automation,
+                subtitle_quality_report=subtitle_quality_report,
+                subtitle_consistency_report=subtitle_consistency_report,
+            )
+        detail = f"已生成内容摘要：{subject or '待人工确认'}"
+    return detail, {
+        "subject_brand": content_profile.get("subject_brand"),
+        "subject_model": content_profile.get("subject_model"),
+        "subject_type": content_profile.get("subject_type"),
+        "video_theme": content_profile.get("video_theme"),
+        "auto_confirmed": auto_confirmed,
+        "automation_score": automation["score"],
+        "subtitle_quality_score": subtitle_quality_report.get("score"),
+        "subtitle_quality_blocking": bool(subtitle_quality_report.get("blocking")),
+        "subtitle_consistency_score": subtitle_consistency_report.get("score"),
+        "subtitle_consistency_blocking": bool(subtitle_consistency_report.get("blocking")),
+    }
+
+
 def _compute_step_elapsed_seconds(step: JobStep | None, *, now: datetime | None = None) -> float | None:
     if step is None or step.started_at is None:
         return None
@@ -2518,10 +3227,12 @@ async def run_transcribe(job_id: str) -> dict:
 
         glossary_result = await session.execute(select(GlossaryTerm))
         glossary_terms = glossary_result.scalars().all()
+        source_context = await _load_content_profile_source_context(session, job_id=job.id)
+        source_context_profile = {"source_context": source_context} if source_context else {}
         subject_domain = _infer_subject_domain_for_memory(
             workflow_template=job.workflow_template,
             subtitle_items=None,
-            content_profile={},
+            content_profile=source_context_profile,
             source_name=job.source_name,
         )
         user_memory = await load_content_profile_user_memory(
@@ -2539,6 +3250,7 @@ async def run_transcribe(job_id: str) -> dict:
         effective_glossary_terms = _build_effective_glossary_terms(
             glossary_terms=glossary_terms,
             workflow_template=job.workflow_template,
+            content_profile=source_context_profile,
             subtitle_items=recent_subtitles or None,
             source_name=job.source_name if subject_domain else None,
             subject_domain=subject_domain,
@@ -2549,6 +3261,7 @@ async def run_transcribe(job_id: str) -> dict:
             glossary_terms=effective_glossary_terms,
             user_memory=user_memory,
             recent_subtitles=recent_subtitles,
+            content_profile=source_context_profile,
             include_recent_terms=False,
             include_recent_examples=False,
         )
@@ -2727,6 +3440,19 @@ async def run_subtitle_postprocess(job_id: str) -> dict:
         )
         entries = segmentation_result.entries
         _profile_artifact, content_profile = await _load_preferred_downstream_profile(session, job_id=job.id)
+        source_context = await _load_content_profile_source_context(session, job_id=job.id)
+        if source_context:
+            content_profile = {
+                **dict(content_profile or {}),
+                "source_context": {
+                    **source_context,
+                    **(
+                        dict((content_profile or {}).get("source_context") or {})
+                        if isinstance((content_profile or {}).get("source_context"), dict)
+                        else {}
+                    ),
+                },
+            }
         segmentation_input_stats = {
             "provider_word_segment_count": int(segmentation_result.analysis.provider_word_segment_count or 0),
             "synthetic_word_segment_count": int(segmentation_result.analysis.synthetic_word_segment_count or 0),
@@ -2854,6 +3580,27 @@ async def run_subtitle_postprocess(job_id: str) -> dict:
             review_memory=review_memory,
             allow_llm=False,
         )
+        subtitle_quality_report = build_subtitle_quality_report_from_items(
+            subtitle_items=items,
+            source_name=job.source_name,
+            content_profile=content_profile,
+        )
+        session.add(
+            Artifact(
+                job_id=job.id,
+                step_id=step.id,
+                artifact_type=ARTIFACT_TYPE_SUBTITLE_QUALITY_REPORT,
+                data_json=subtitle_quality_report,
+            )
+        )
+        step_metadata = dict(step.metadata_ or {})
+        step_metadata["subtitle_quality_report"] = {
+            "score": subtitle_quality_report.get("score"),
+            "blocking": bool(subtitle_quality_report.get("blocking")),
+            "blocking_reasons": list(subtitle_quality_report.get("blocking_reasons") or []),
+            "warning_reasons": list(subtitle_quality_report.get("warning_reasons") or []),
+        }
+        step.metadata_ = step_metadata
         save_elapsed = time.perf_counter() - save_started
         total_elapsed = time.perf_counter() - started
         await _set_step_progress(
@@ -2878,6 +3625,9 @@ async def run_subtitle_postprocess(job_id: str) -> dict:
             "segment_count": len(segments),
             "subtitle_count": len(items),
             "polished_count": polished_count,
+            "subtitle_quality_score": subtitle_quality_report.get("score"),
+            "subtitle_quality_blocking": bool(subtitle_quality_report.get("blocking")),
+            "subtitle_quality_blocking_reasons": list(subtitle_quality_report.get("blocking_reasons") or []),
             "subtitle_profile": split_profile,
             "subtitle_segmentation": segmentation_result.analysis.as_dict(),
             "subtitle_boundary_refine": llm_boundary_refine,
@@ -2885,6 +3635,171 @@ async def run_subtitle_postprocess(job_id: str) -> dict:
             "load_seconds": round(load_elapsed, 3),
             "split_seconds": round(split_elapsed, 3),
             "save_seconds": round(save_elapsed, 3),
+        }
+
+
+async def run_subtitle_term_resolution(job_id: str) -> dict:
+    factory = get_session_factory()
+    async with factory() as session:
+        job = await session.get(Job, uuid.UUID(job_id))
+        step_result = await session.execute(
+            select(JobStep).where(JobStep.job_id == job.id, JobStep.step_name == "subtitle_term_resolution")
+        )
+        step = step_result.scalar_one()
+        await _set_step_progress(session, step, detail="解析术语候选并生成纠偏 patch", progress=0.1)
+
+        item_result = await session.execute(
+            select(SubtitleItem)
+            .where(SubtitleItem.job_id == job.id, SubtitleItem.version == 1)
+            .order_by(SubtitleItem.item_index)
+        )
+        subtitle_items = item_result.scalars().all()
+        subtitle_dicts = [_subtitle_item_payload(item) for item in subtitle_items]
+
+        _profile_artifact, content_profile = await _load_preferred_downstream_profile(session, job_id=job.id)
+        source_context = await _load_content_profile_source_context(session, job_id=job.id)
+        if source_context:
+            content_profile = {
+                **dict(content_profile or {}),
+                "source_context": {
+                    **source_context,
+                    **(
+                        dict((content_profile or {}).get("source_context") or {})
+                        if isinstance((content_profile or {}).get("source_context"), dict)
+                        else {}
+                    ),
+                },
+            }
+        subject_domain = _infer_subject_domain_for_memory(
+            workflow_template=job.workflow_template,
+            subtitle_items=subtitle_dicts,
+            content_profile=content_profile or {},
+            source_name=job.source_name,
+        )
+        glossary_result = await session.execute(select(GlossaryTerm))
+        glossary_terms = glossary_result.scalars().all()
+        effective_glossary_terms = _build_effective_glossary_terms(
+            glossary_terms=glossary_terms,
+            workflow_template=job.workflow_template,
+            content_profile=content_profile or {},
+            subtitle_items=subtitle_dicts,
+            source_name=job.source_name,
+            subject_domain=subject_domain,
+        )
+
+        await session.execute(delete(SubtitleCorrection).where(SubtitleCorrection.job_id == job.id))
+        corrections = await apply_glossary_corrections(
+            job.id,
+            subtitle_items,
+            session,
+            glossary_terms=effective_glossary_terms,
+        )
+        patch = build_subtitle_term_resolution_patch(
+            corrections=corrections,
+            source_name=job.source_name,
+            content_profile=content_profile,
+        )
+        session.add(
+            Artifact(
+                job_id=job.id,
+                step_id=step.id,
+                artifact_type=ARTIFACT_TYPE_SUBTITLE_TERM_RESOLUTION_PATCH,
+                data_json=patch,
+            )
+        )
+        step.metadata_ = {
+            **(step.metadata_ or {}),
+            "term_resolution_patch": {
+                "patch_count": patch["metrics"]["patch_count"],
+                "pending_count": patch["metrics"]["pending_count"],
+                "auto_applied_count": patch["metrics"]["auto_applied_count"],
+                "confidence": patch.get("confidence"),
+            },
+        }
+        await _set_step_progress(
+            session,
+            step,
+            detail=(
+                f"术语候选 {patch['metrics']['patch_count']} 条，"
+                f"自动接受 {patch['metrics']['auto_applied_count']} 条，"
+                f"待确认 {patch['metrics']['pending_count']} 条"
+            ),
+            progress=1.0,
+        )
+        await session.commit()
+        return {
+            "patch_count": patch["metrics"]["patch_count"],
+            "auto_applied_count": patch["metrics"]["auto_applied_count"],
+            "pending_count": patch["metrics"]["pending_count"],
+            "blocking": bool(patch.get("blocking")),
+        }
+
+
+async def run_subtitle_consistency_review(job_id: str) -> dict:
+    factory = get_session_factory()
+    async with factory() as session:
+        job = await session.get(Job, uuid.UUID(job_id))
+        step_result = await session.execute(
+            select(JobStep).where(JobStep.job_id == job.id, JobStep.step_name == "subtitle_consistency_review")
+        )
+        step = step_result.scalar_one()
+        await _set_step_progress(session, step, detail="检查字幕与文件名/纠偏结果是否一致", progress=0.12)
+
+        item_result = await session.execute(
+            select(SubtitleItem)
+            .where(SubtitleItem.job_id == job.id, SubtitleItem.version == 1)
+            .order_by(SubtitleItem.item_index)
+        )
+        subtitle_items = item_result.scalars().all()
+        subtitle_dicts = [_subtitle_item_payload(item) for item in subtitle_items]
+        corrections = await _load_subtitle_corrections(session, job_id=job.id)
+        _profile_artifact, content_profile = await _load_preferred_downstream_profile(session, job_id=job.id)
+        quality_artifact = await _load_latest_optional_artifact(
+            session,
+            job_id=job.id,
+            artifact_types=(ARTIFACT_TYPE_SUBTITLE_QUALITY_REPORT,),
+        )
+        quality_report = quality_artifact.data_json if quality_artifact and isinstance(quality_artifact.data_json, dict) else None
+        consistency_report = build_subtitle_consistency_report(
+            subtitle_items=subtitle_dicts,
+            corrections=corrections,
+            source_name=job.source_name,
+            content_profile=content_profile,
+            subtitle_quality_report=quality_report,
+        )
+        session.add(
+            Artifact(
+                job_id=job.id,
+                step_id=step.id,
+                artifact_type=ARTIFACT_TYPE_SUBTITLE_CONSISTENCY_REPORT,
+                data_json=consistency_report,
+            )
+        )
+        step.metadata_ = {
+            **(step.metadata_ or {}),
+            "subtitle_consistency_report": {
+                "score": consistency_report.get("score"),
+                "blocking": bool(consistency_report.get("blocking")),
+                "blocking_reasons": list(consistency_report.get("blocking_reasons") or []),
+                "warning_reasons": list(consistency_report.get("warning_reasons") or []),
+            },
+        }
+        await _set_step_progress(
+            session,
+            step,
+            detail=(
+                "字幕一致性存在阻断项，已等待后续人工复核"
+                if consistency_report.get("blocking")
+                else "字幕一致性审校通过"
+            ),
+            progress=1.0,
+        )
+        await session.commit()
+        return {
+            "score": consistency_report.get("score"),
+            "blocking": bool(consistency_report.get("blocking")),
+            "blocking_reasons": list(consistency_report.get("blocking_reasons") or []),
+            "warning_reasons": list(consistency_report.get("warning_reasons") or []),
         }
 
 
@@ -2899,40 +3814,12 @@ async def run_content_profile(job_id: str) -> dict:
         step = step_result.scalar_one()
         _set_step_correction_framework_metadata(step, settings)
         await _set_step_progress(session, step, detail="整理字幕上下文并识别视频类型", progress=0.15)
-
-        item_result = await session.execute(
-            select(SubtitleItem)
-            .where(SubtitleItem.job_id == job.id, SubtitleItem.version == 1)
-            .order_by(SubtitleItem.item_index)
-        )
-        transcript_result = await session.execute(
-            select(TranscriptSegment)
-            .where(TranscriptSegment.job_id == job.id, TranscriptSegment.version == 1)
-            .order_by(TranscriptSegment.segment_index)
-        )
-        subtitle_items = item_result.scalars().all()
-        transcript_rows = transcript_result.scalars().all()
-        subtitle_dicts = [
-            {
-                "index": item.item_index,
-                "start_time": item.start_time,
-                "end_time": item.end_time,
-                "text_raw": item.text_raw,
-                "text_norm": item.text_norm,
-                "text_final": item.text_final,
-            }
-            for item in subtitle_items
-        ]
-        transcript_evidence_artifact = await _load_latest_optional_artifact(
+        subtitle_items, subtitle_dicts, _transcript_rows, transcript_dicts = await _load_subtitle_transcript_context(
             session,
             job_id=job.id,
-            artifact_types=("transcript_evidence",),
         )
-        transcript_dicts = _build_edit_plan_transcript_segments(
-            transcript_rows,
-            transcript_evidence_artifact.data_json if transcript_evidence_artifact is not None else None,
-        )
-        transcript_excerpt = build_transcript_excerpt(transcript_dicts or subtitle_dicts)
+        reviewed_subtitle_excerpt = build_reviewed_transcript_excerpt(subtitle_dicts)
+        transcript_excerpt = reviewed_subtitle_excerpt or build_transcript_excerpt(transcript_dicts or subtitle_dicts)
         subtitle_digest = digest_payload(
             [
                 {
@@ -3198,86 +4085,28 @@ async def run_content_profile(job_id: str) -> dict:
             glossary_terms=effective_glossary_terms,
             source_name=job.source_name,
         )
-        source_context_description = str(source_context.get("video_description") or "").strip()
-        resolved_source_context_feedback: dict[str, Any] = {}
-        if source_context_description:
-            source_context_draft_profile = dict(content_profile)
-            feedback_search_enabled = should_enable_task_search(
-                "content_profile",
-                default_enabled=include_research,
-                profile=content_profile,
-                settings=settings,
-            )
-            with llm_task_route("content_profile", search_enabled=feedback_search_enabled, settings=settings):
-                source_context_verification_bundle = await build_review_feedback_verification_bundle(
-                    draft_profile=content_profile,
-                    proposed_feedback=None,
-                    session=session,
-                )
-                resolved_source_context_feedback = await resolve_content_profile_review_feedback(
-                    draft_profile=content_profile,
-                    source_name=job.source_name,
-                    review_feedback=source_context_description,
-                    proposed_feedback=None,
-                    reviewed_subtitle_excerpt=transcript_excerpt,
-                    accepted_corrections=[],
-                    verification_bundle=source_context_verification_bundle,
-                )
-                if resolved_source_context_feedback:
-                    content_profile = await apply_content_profile_feedback(
-                        draft_profile=content_profile,
-                        source_name=job.source_name,
-                        workflow_template=job.workflow_template,
-                        user_feedback=resolved_source_context_feedback,
-                        reviewed_subtitle_excerpt=transcript_excerpt,
-                        accepted_corrections=[],
-                    )
-                    await _persist_content_profile_learning_once(
-                        session,
-                        step=step,
-                        job=job,
-                        draft_profile=source_context_draft_profile,
-                        final_profile=content_profile,
-                        user_feedback=resolved_source_context_feedback,
-                        feedback_source="task_description",
-                        observation_type="task_description",
-                        context_hint=f"task_description:{job.workflow_template or 'auto'}",
-                    )
-        if source_context:
-            content_profile["source_context"] = {
-                **source_context,
-                **({"resolved_feedback": dict(resolved_source_context_feedback)} if resolved_source_context_feedback else {}),
-            }
-        manual_review_feedback = dict(step.metadata_.get("review_user_feedback") or {}) if isinstance(step.metadata_, dict) else {}
-        review_feedback_note = str(step.metadata_.get("review_feedback") or "").strip() if isinstance(step.metadata_, dict) else ""
-        resolved_manual_review_feedback: dict[str, Any] = {}
-        manual_review_draft_profile = dict(content_profile)
-        if manual_review_feedback:
-            review_feedback_verification_bundle = await build_review_feedback_verification_bundle(
-                draft_profile=content_profile,
-                proposed_feedback=manual_review_feedback,
-                session=session,
-            )
-            resolved_manual_review_feedback = await resolve_content_profile_review_feedback(
-                draft_profile=content_profile,
-                source_name=job.source_name,
-                review_feedback=review_feedback_note,
-                proposed_feedback=manual_review_feedback,
-                reviewed_subtitle_excerpt=transcript_excerpt,
-                accepted_corrections=[],
-                verification_bundle=review_feedback_verification_bundle,
-            )
-        if resolved_manual_review_feedback:
-            content_profile = await apply_content_profile_feedback(
-                draft_profile=content_profile,
-                source_name=job.source_name,
-                workflow_template=job.workflow_template,
-                user_feedback=resolved_manual_review_feedback,
-                reviewed_subtitle_excerpt=transcript_excerpt,
-                accepted_corrections=[],
-            )
-            content_profile["review_user_feedback"] = dict(manual_review_feedback)
-            content_profile["resolved_review_user_feedback"] = dict(resolved_manual_review_feedback)
+        content_profile, _resolved_source_context_feedback = await _apply_source_context_feedback_to_content_profile(
+            session,
+            job=job,
+            step=step,
+            settings=settings,
+            content_profile=content_profile,
+            source_context=source_context,
+            transcript_excerpt=transcript_excerpt,
+            include_research=include_research,
+        )
+        (
+            content_profile,
+            manual_review_feedback,
+            resolved_manual_review_feedback,
+            manual_review_draft_profile,
+        ) = await _apply_manual_review_feedback_to_content_profile(
+            session,
+            job=job,
+            step=step,
+            content_profile=content_profile,
+            transcript_excerpt=transcript_excerpt,
+        )
         content_profile = apply_source_identity_constraints(
             content_profile,
             source_name=job.source_name,
@@ -3288,193 +4117,63 @@ async def run_content_profile(job_id: str) -> dict:
             user_memory=user_memory,
         )
         content_profile["creative_profile"] = _job_creative_profile(job)
-
-        auto_review_enabled = bool(settings.auto_confirm_content_profile) and auto_review_mode_enabled(
-            getattr(job, "enhancement_modes", [])
-        )
-        automation = assess_content_profile_automation(
+        (
             content_profile,
-            subtitle_items=subtitle_dicts,
+            automation,
+            subtitle_quality_report,
+            subtitle_consistency_report,
+        ) = await _evaluate_content_profile_automation_and_reports(
+            session,
+            job=job,
+            settings=settings,
+            content_profile=content_profile,
+            subtitle_items=subtitle_items,
+            subtitle_dicts=subtitle_dicts,
             user_memory=user_memory,
-            glossary_terms=effective_glossary_terms,
-            source_name=job.source_name,
-            auto_confirm_enabled=auto_review_enabled,
-            threshold=settings.content_profile_review_threshold,
+            effective_glossary_terms=effective_glossary_terms,
         )
-        if bool((automation.get("identity_review") or {}).get("conservative_summary")):
-            content_profile = apply_identity_review_guard(
-                content_profile,
-                subtitle_items=subtitle_dicts,
-                user_memory=user_memory,
-                glossary_terms=effective_glossary_terms,
-                source_name=job.source_name,
-            )
-            automation = assess_content_profile_automation(
-                content_profile,
-                subtitle_items=subtitle_dicts,
-                user_memory=user_memory,
-                glossary_terms=effective_glossary_terms,
-                source_name=job.source_name,
-                auto_confirm_enabled=auto_review_enabled,
-                threshold=settings.content_profile_review_threshold,
-            )
-        if bool((automation.get("identity_review") or {}).get("required")):
-            summary = str(content_profile.get("summary") or "").strip()
-            if "具体品牌型号待人工确认" not in summary:
-                content_profile["summary"] = _build_conservative_identity_summary(
-                    content_profile,
-                    subtitle_items=subtitle_dicts,
-                )
-        content_profile["automation_review"] = automation
         ocr_profile = None
         if bool(getattr(settings, "ocr_enabled", False)):
             candidate_ocr_profile = content_profile.pop("ocr_profile", None)
             if isinstance(candidate_ocr_profile, dict):
                 ocr_profile = candidate_ocr_profile
-                session.add(
-                    Artifact(
-                        job_id=job.id,
-                        step_id=step.id,
-                        artifact_type=ARTIFACT_TYPE_CONTENT_PROFILE_OCR,
-                        data_json=ocr_profile,
-                    )
-                )
-        artifact = Artifact(
-            job_id=job.id,
-            step_id=step.id,
-            artifact_type="content_profile_draft",
-            data_json=content_profile,
-        )
-        session.add(artifact)
         review_step_result = await session.execute(
             select(JobStep).where(JobStep.job_id == job.id, JobStep.step_name == "summary_review")
         )
         review_step = review_step_result.scalar_one_or_none()
-
-        auto_confirmed = bool(automation.get("auto_confirm"))
-        context_source_profile: dict[str, Any] = dict(content_profile)
-        if resolved_manual_review_feedback:
-            now = datetime.now(timezone.utc)
-            final_profile = dict(content_profile)
-            final_profile["review_mode"] = "manual_confirmed"
-            context_source_profile = dict(final_profile)
-            await _persist_content_profile_learning_once(
-                session,
-                step=step,
-                job=job,
-                draft_profile=manual_review_draft_profile,
-                final_profile=final_profile,
-                user_feedback=resolved_manual_review_feedback,
-                feedback_source="final_review_feedback",
-                observation_type="manual_confirm",
-                context_hint=f"final_review_feedback:{job.workflow_template or 'auto'}",
-            )
-            session.add(
-                Artifact(
-                    job_id=job.id,
-                    step_id=review_step.id if review_step else None,
-                    artifact_type="content_profile_final",
-                    data_json=final_profile,
-                )
-            )
-            if review_step is not None:
-                review_step.status = "done"
-                review_step.started_at = review_step.started_at or now
-                review_step.finished_at = now
-                review_step.error_message = None
-                review_step.metadata_ = {
-                    **(review_step.metadata_ or {}),
-                    "label": STEP_LABELS.get("summary_review", "summary_review"),
-                    "detail": "已应用成片审核修正并确认内容摘要，继续后续流程。",
-                    "progress": 1.0,
-                    "updated_at": now.isoformat(),
-                    "auto_confirmed": False,
-                    "manual_confirmed": True,
-                    "review_user_feedback": dict(manual_review_feedback),
-                    "resolved_review_user_feedback": dict(resolved_manual_review_feedback),
-                }
-            job.status = "processing"
-        elif auto_confirmed:
-            now = datetime.now(timezone.utc)
-            final_profile = dict(content_profile)
-            final_profile["review_mode"] = "auto_confirmed"
-            context_source_profile = dict(final_profile)
-            session.add(
-                Artifact(
-                    job_id=job.id,
-                    step_id=review_step.id if review_step else None,
-                    artifact_type="content_profile_final",
-                    data_json=final_profile,
-                )
-            )
-            if review_step is not None:
-                review_step.status = "done"
-                review_step.started_at = review_step.started_at or now
-                review_step.finished_at = now
-                review_step.error_message = None
-                review_step.metadata_ = {
-                    **(review_step.metadata_ or {}),
-                    "label": STEP_LABELS.get("summary_review", "summary_review"),
-                    "detail": f"已自动确认内容摘要（置信度 {automation['score']:.2f}）",
-                    "progress": 1.0,
-                    "updated_at": now.isoformat(),
-                    "auto_confirmed": True,
-                    "confidence_score": automation["score"],
-                    "threshold": automation["threshold"],
-                    "review_reasons": automation["review_reasons"],
-                    "blocking_reasons": automation["blocking_reasons"],
-                }
-            job.status = "processing"
-        elif review_step is not None and bool((automation.get("identity_review") or {}).get("required")):
-            now = datetime.now(timezone.utc)
-            review_step.metadata_ = {
-                **(review_step.metadata_ or {}),
-                "label": STEP_LABELS.get("summary_review", "summary_review"),
-                "detail": str((automation.get("identity_review") or {}).get("reason") or "内容摘要待人工确认"),
-                "progress": 0.0,
-                "updated_at": now.isoformat(),
-                "auto_confirmed": False,
-                "identity_review": automation.get("identity_review"),
-                "review_reasons": automation["review_reasons"],
-                "blocking_reasons": automation["blocking_reasons"],
-            }
-
-        session.add(
-            Artifact(
-                job_id=job.id,
-                step_id=step.id,
-                artifact_type="downstream_context",
-                data_json=build_downstream_context(context_source_profile),
-            )
+        auto_confirmed, final_profile, context_source_profile = await _finalize_content_profile_review_state(
+            session,
+            job=job,
+            step=step,
+            review_step=review_step,
+            content_profile=content_profile,
+            automation=automation,
+            manual_review_feedback=manual_review_feedback,
+            resolved_manual_review_feedback=resolved_manual_review_feedback,
+            manual_review_draft_profile=manual_review_draft_profile,
         )
 
-        subject = " / ".join(
-            part for part in [
-                content_profile.get("subject_type"),
-                content_profile.get("video_theme"),
-            ] if part
-        ).strip()
-        if resolved_manual_review_feedback:
-            detail = f"已应用人工修正后的内容摘要：{subject or '人工修正完成'}"
-        elif auto_confirmed:
-            detail = f"已自动确认内容摘要：{subject or '自动识别完成'}"
-        else:
-            if manual_review_feedback and review_step is not None:
-                review_step.status = "pending"
-                review_step.finished_at = None
-                review_step.error_message = None
-                review_step.metadata_ = {
-                    **(review_step.metadata_ or {}),
-                    "label": STEP_LABELS.get("summary_review", "summary_review"),
-                    "detail": "成片审核修正尚未确认到当前主体，等待人工继续确认。",
-                    "updated_at": datetime.now(timezone.utc).isoformat(),
-                    "progress": 0.0,
-                    "auto_confirmed": False,
-                    "manual_confirmed": False,
-                    "review_user_feedback": dict(manual_review_feedback),
-                    "resolved_review_user_feedback": {},
-                }
-            detail = f"已生成内容摘要：{subject or '待人工确认'}"
+        persist_content_profile_artifacts(
+            session,
+            job=job,
+            step=step,
+            review_step=review_step,
+            draft_profile=content_profile,
+            final_profile=final_profile,
+            downstream_profile=context_source_profile,
+            subtitle_quality_report=subtitle_quality_report,
+            ocr_profile=ocr_profile,
+        )
+        detail, result_payload = _build_content_profile_step_outcome(
+            content_profile=content_profile,
+            automation=automation,
+            auto_confirmed=auto_confirmed,
+            resolved_manual_review_feedback=resolved_manual_review_feedback,
+            manual_review_feedback=manual_review_feedback,
+            review_step=review_step,
+            subtitle_quality_report=subtitle_quality_report,
+            subtitle_consistency_report=subtitle_consistency_report,
+        )
         await _set_step_progress(session, step, detail=detail, progress=1.0)
         await session.commit()
         if not auto_confirmed and not resolved_manual_review_feedback:
@@ -3483,14 +4182,7 @@ async def run_content_profile(job_id: str) -> dict:
             except Exception:
                 logger.exception("Failed to send Telegram content profile review for job %s", job.id)
 
-        return {
-            "subject_brand": content_profile.get("subject_brand"),
-            "subject_model": content_profile.get("subject_model"),
-            "subject_type": content_profile.get("subject_type"),
-            "video_theme": content_profile.get("video_theme"),
-            "auto_confirmed": auto_confirmed,
-            "automation_score": automation["score"],
-        }
+        return result_payload
 
 
 async def run_glossary_review(job_id: str) -> dict:
@@ -3504,52 +4196,11 @@ async def run_glossary_review(job_id: str) -> dict:
         step = step_result.scalar_one()
         _set_step_correction_framework_metadata(step, settings)
         await _set_step_progress(session, step, detail="应用术语词表并收集字幕上下文", progress=0.15)
-
-        item_result = await session.execute(
-            select(SubtitleItem)
-            .where(SubtitleItem.job_id == job.id, SubtitleItem.version == 1)
-            .order_by(SubtitleItem.item_index)
-        )
-        transcript_result = await session.execute(
-            select(TranscriptSegment)
-            .where(TranscriptSegment.job_id == job.id, TranscriptSegment.version == 1)
-            .order_by(TranscriptSegment.segment_index)
-        )
-        subtitle_items = item_result.scalars().all()
-        transcript_rows = transcript_result.scalars().all()
-
-        subtitle_dicts = [
-            {
-                "index": item.item_index,
-                "start_time": item.start_time,
-                "end_time": item.end_time,
-                "text_raw": item.text_raw,
-                "text_norm": item.text_norm,
-                "text_final": item.text_final,
-            }
-            for item in subtitle_items
-        ]
-        transcript_evidence_artifact = await _load_latest_optional_artifact(
+        subtitle_items, subtitle_dicts, _transcript_rows, transcript_segment_dicts = await _load_subtitle_transcript_context(
             session,
             job_id=job.id,
-            artifact_types=("transcript_evidence",),
         )
-        transcript_segment_dicts = _build_edit_plan_transcript_segments(
-            transcript_rows,
-            transcript_evidence_artifact.data_json if transcript_evidence_artifact is not None else None,
-        )
-        _profile_artifact, content_profile = await _load_preferred_downstream_profile(session, job_id=job.id)
-        if not content_profile:
-            profile_result = await session.execute(
-                select(Artifact)
-                .where(
-                    Artifact.job_id == job.id,
-                    Artifact.artifact_type.in_(["content_profile_final", "content_profile_draft"]),
-                )
-                .order_by(Artifact.created_at.desc())
-            )
-            profile_artifacts = profile_result.scalars().all()
-            content_profile = profile_artifacts[0].data_json if profile_artifacts else None
+        content_profile = await _load_current_content_profile(session, job_id=job.id)
         subject_domain = _infer_subject_domain_for_memory(
             workflow_template=job.workflow_template,
             subtitle_items=subtitle_dicts,
@@ -3566,12 +4217,14 @@ async def run_glossary_review(job_id: str) -> dict:
             source_name=job.source_name,
             subject_domain=subject_domain,
         )
-        corrections = await apply_glossary_corrections(
-            job.id,
-            subtitle_items,
-            session,
-            glossary_terms=effective_glossary_terms,
-        )
+        corrections = await _load_subtitle_corrections(session, job_id=job.id)
+        if not corrections:
+            corrections = await apply_glossary_corrections(
+                job.id,
+                subtitle_items,
+                session,
+                glossary_terms=effective_glossary_terms,
+            )
         auto_accepted_corrections = sum(
             1 for item in corrections if item.auto_applied or item.human_decision == "accepted"
         )
@@ -3584,62 +4237,18 @@ async def run_glossary_review(job_id: str) -> dict:
             detail=f"已识别 {len(corrections)} 处术语纠错候选，自动接受 {auto_accepted_corrections} 条",
             progress=0.45,
         )
-        user_memory = await load_content_profile_user_memory(
-            session,
-            subject_domain=subject_domain,
+        user_memory = await load_content_profile_user_memory(session, subject_domain=subject_domain)
+        content_profile = await _resolve_glossary_review_content_profile(
+            session=session,
+            job=job,
+            step=step,
+            settings=settings,
+            content_profile=content_profile,
+            subtitle_dicts=subtitle_dicts,
+            transcript_segment_dicts=transcript_segment_dicts,
+            effective_glossary_terms=effective_glossary_terms,
+            user_memory=user_memory,
         )
-        include_research = bool(getattr(settings, "research_verifier_enabled", False))
-        if not content_profile:
-            async with _maintain_step_heartbeat(step):
-                with tempfile.TemporaryDirectory() as tmpdir:
-                    source_path = await _resolve_source(job, tmpdir, expected_hash=job.file_hash)
-                    packaging_config = (list_packaging_assets().get("config") or {})
-                    initial_search_enabled = should_enable_task_search(
-                        "content_profile",
-                        default_enabled=include_research,
-                        profile=content_profile,
-                        settings=settings,
-                    )
-                    with llm_task_route("content_profile", search_enabled=initial_search_enabled, settings=settings):
-                        with track_step_usage(job_id=job.id, step_id=step.id, step_name="glossary_review"):
-                            content_profile = await infer_content_profile(
-                                source_path=source_path,
-                                source_name=job.source_name,
-                                subtitle_items=subtitle_dicts,
-                                transcript_items=transcript_segment_dicts,
-                                workflow_template=job.workflow_template,
-                                user_memory=user_memory,
-                                glossary_terms=effective_glossary_terms,
-                                include_research=initial_search_enabled,
-                                copy_style=str(packaging_config.get("copy_style") or "attention_grabbing"),
-                            )
-        else:
-            packaging_config = (list_packaging_assets().get("config") or {})
-            content_profile["copy_style"] = str(
-                packaging_config.get("copy_style")
-                or content_profile.get("copy_style")
-                or "attention_grabbing"
-            )
-            enrich_search_enabled = should_enable_task_search(
-                "content_profile",
-                default_enabled=include_research,
-                profile=content_profile,
-                settings=settings,
-            )
-            async with _maintain_step_heartbeat(step):
-                with llm_task_route("content_profile", search_enabled=enrich_search_enabled, settings=settings):
-                    with track_step_usage(job_id=job.id, step_id=step.id, step_name="glossary_review"):
-                        content_profile = await enrich_content_profile(
-                            profile=content_profile,
-                            source_name=job.source_name,
-                            workflow_template=job.workflow_template,
-                            transcript_excerpt=str(content_profile.get("transcript_excerpt") or ""),
-                            subtitle_items=subtitle_dicts,
-                            transcript_items=transcript_segment_dicts,
-                            glossary_terms=effective_glossary_terms,
-                            user_memory=user_memory,
-                            include_research=enrich_search_enabled,
-                        )
         subject_domain = _infer_subject_domain_for_memory(
             workflow_template=job.workflow_template,
             subtitle_items=subtitle_dicts,
@@ -3683,20 +4292,8 @@ async def run_glossary_review(job_id: str) -> dict:
             allow_llm=False,
         )
 
-        identity_gate = evaluate_profile_identity_gate(content_profile)
-        gate_reasons = [str(item).strip() for item in list(identity_gate.get("review_reasons") or []) if str(item).strip()]
-        if identity_gate.get("needs_review"):
-            content_profile["needs_review"] = True
-            review_reasons = [
-                str(item).strip()
-                for item in list(content_profile.get("review_reasons") or [])
-                if str(item).strip()
-            ]
-            for reason in gate_reasons:
-                if reason not in review_reasons:
-                    review_reasons.append(reason)
-            content_profile["review_reasons"] = review_reasons
-        content_profile["verification_gate"] = identity_gate
+        content_profile = _apply_identity_gate_to_content_profile(content_profile)
+        identity_gate = content_profile.get("verification_gate") if isinstance(content_profile.get("verification_gate"), dict) else {}
 
         artifact = Artifact(
             job_id=job.id,
@@ -7660,11 +8257,13 @@ def run_step_sync(step_name: str, job_id: str) -> dict:
 
     step_map = {
         "probe": run_probe,
-        "extract_audio": run_extract_audio,
-        "transcribe": run_transcribe,
-        "subtitle_postprocess": run_subtitle_postprocess,
-        "subtitle_translation": run_subtitle_translation,
-        "content_profile": run_content_profile,
+    "extract_audio": run_extract_audio,
+    "transcribe": run_transcribe,
+    "subtitle_postprocess": run_subtitle_postprocess,
+    "subtitle_term_resolution": run_subtitle_term_resolution,
+    "subtitle_consistency_review": run_subtitle_consistency_review,
+    "subtitle_translation": run_subtitle_translation,
+    "content_profile": run_content_profile,
         "glossary_review": run_glossary_review,
         "ai_director": run_ai_director,
         "avatar_commentary": run_avatar_commentary,

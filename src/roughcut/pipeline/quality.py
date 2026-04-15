@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from roughcut.db.models import Artifact, Job, JobStep, SubtitleCorrection, SubtitleItem
+from roughcut.pipeline.rerun_actions import pick_recommended_rerun_steps
 from roughcut.media.variant_timeline_bundle import resolve_effective_variant_timeline_bundle
 from roughcut.review.content_profile import (
     _has_ingestible_product_subject_conflict,
@@ -20,37 +21,11 @@ from roughcut.review.content_profile import (
     _subject_domain_from_subject_type,
     _text_conflicts_with_verified_identity,
 )
+from roughcut.review.subtitle_consistency import ARTIFACT_TYPE_SUBTITLE_CONSISTENCY_REPORT
+from roughcut.review.subtitle_quality import ARTIFACT_TYPE_SUBTITLE_QUALITY_REPORT
+from roughcut.review.subtitle_term_resolution import ARTIFACT_TYPE_SUBTITLE_TERM_RESOLUTION_PATCH
 
 QUALITY_ARTIFACT_TYPE = "quality_assessment"
-
-_AUTO_FIX_STEP_PRIORITY = ("subtitle_postprocess", "glossary_review", "content_profile", "render")
-_STEP_RERUN_CHAINS: dict[str, tuple[str, ...]] = {
-    "subtitle_postprocess": (
-        "subtitle_postprocess",
-        "glossary_review",
-        "subtitle_translation",
-        "content_profile",
-        "ai_director",
-        "avatar_commentary",
-        "edit_plan",
-        "render",
-        "final_review",
-        "platform_package",
-    ),
-    "glossary_review": (
-        "glossary_review",
-        "subtitle_translation",
-        "content_profile",
-        "ai_director",
-        "avatar_commentary",
-        "edit_plan",
-        "render",
-        "final_review",
-        "platform_package",
-    ),
-    "content_profile": ("content_profile", "ai_director", "avatar_commentary", "edit_plan", "render", "final_review", "platform_package"),
-    "render": ("render", "final_review", "platform_package"),
-}
 _COMPARISON_KEYWORDS = (
     "对比",
     "一代",
@@ -154,6 +129,8 @@ def assess_job_quality(
     )
     render_artifact = _latest_artifact(artifacts, "render_outputs")
     variant_bundle_artifact = _latest_artifact(artifacts, "variant_timeline_bundle")
+    term_resolution_artifact = _latest_artifact(artifacts, ARTIFACT_TYPE_SUBTITLE_TERM_RESOLUTION_PATCH)
+    consistency_artifact = _latest_artifact(artifacts, ARTIFACT_TYPE_SUBTITLE_CONSISTENCY_REPORT)
     profile = profile_artifact.data_json if profile_artifact and isinstance(profile_artifact.data_json, dict) else {}
     render_outputs = render_artifact.data_json if render_artifact and isinstance(render_artifact.data_json, dict) else {}
     variant_bundle = (
@@ -166,6 +143,98 @@ def assess_job_quality(
     subtitle_items = list(subtitle_items or [])
     subtitle_text = _build_subtitle_text(subtitle_items)
     profile_text = _build_profile_text(profile)
+
+    if term_resolution_artifact and isinstance(term_resolution_artifact.data_json, dict):
+        pending_patch_count = int(((term_resolution_artifact.data_json.get("metrics") or {}).get("pending_count") or 0))
+        if pending_patch_count > 0:
+            issues.append(
+                QualityIssue(
+                    "subtitle_terms_pending",
+                    f"字幕术语纠偏仍有 {pending_patch_count} 处待人工确认",
+                    min(18.0, 4.0 + pending_patch_count * 2.0),
+                    auto_fix_step="subtitle_term_resolution",
+                    blocking=True,
+                )
+            )
+
+    if consistency_artifact and isinstance(consistency_artifact.data_json, dict):
+        consistency_data = consistency_artifact.data_json
+        consistency_blocking_reasons = [
+            str(item).strip()
+            for item in (consistency_data.get("blocking_reasons") or [])
+            if str(item).strip()
+        ]
+        consistency_warning_reasons = [
+            str(item).strip()
+            for item in (consistency_data.get("warning_reasons") or [])
+            if str(item).strip()
+        ]
+        if bool(consistency_data.get("blocking")) and consistency_blocking_reasons:
+            issues.append(
+                QualityIssue(
+                    "subtitle_consistency_blocking",
+                    consistency_blocking_reasons[0],
+                    18.0,
+                    auto_fix_step="subtitle_consistency_review",
+                    blocking=True,
+                )
+            )
+        elif consistency_warning_reasons:
+            issues.append(
+                QualityIssue(
+                    "subtitle_consistency_warning",
+                    consistency_warning_reasons[0],
+                    6.0,
+                auto_fix_step="subtitle_consistency_review",
+            )
+        )
+
+    subtitle_quality_artifact = _latest_artifact(artifacts, ARTIFACT_TYPE_SUBTITLE_QUALITY_REPORT)
+    if subtitle_quality_artifact and isinstance(subtitle_quality_artifact.data_json, dict):
+        subtitle_quality_data = subtitle_quality_artifact.data_json
+        subtitle_quality_blocking_reasons = [
+            str(item).strip()
+            for item in (subtitle_quality_data.get("blocking_reasons") or [])
+            if str(item).strip()
+        ]
+        subtitle_quality_warning_reasons = [
+            str(item).strip()
+            for item in (subtitle_quality_data.get("warning_reasons") or [])
+            if str(item).strip()
+        ]
+        subtitle_quality_metrics = (
+            subtitle_quality_data.get("metrics") if isinstance(subtitle_quality_data.get("metrics"), dict) else {}
+        )
+        subtitle_quality_score = _safe_float(subtitle_quality_data.get("score"))
+        if subtitle_quality_blocking_reasons:
+            issues.append(
+                QualityIssue(
+                    "subtitle_quality_blocking",
+                    subtitle_quality_blocking_reasons[0],
+                    14.0 if subtitle_quality_score is None else min(16.0, max(8.0, 100.0 - subtitle_quality_score)),
+                    auto_fix_step="subtitle_postprocess",
+                    blocking=True,
+                )
+            )
+        elif subtitle_quality_warning_reasons:
+            issues.append(
+                QualityIssue(
+                    "subtitle_quality_warning",
+                    subtitle_quality_warning_reasons[0],
+                    6.0,
+                    auto_fix_step="subtitle_postprocess",
+                )
+            )
+        elif bool(subtitle_quality_metrics.get("identity_missing")):
+            issues.append(
+                QualityIssue(
+                    "subtitle_identity_missing",
+                    "字幕与文件名中的品牌型号线索尚未稳定对齐",
+                    8.0,
+                    auto_fix_step="subtitle_postprocess",
+                    blocking=True,
+                )
+            )
 
     if not subtitle_items:
         issues.append(
@@ -356,7 +425,7 @@ def assess_job_quality(
 
     score = max(0.0, min(100.0, round(score, 1)))
     grade = _grade_for_score(score)
-    recommended_rerun_steps = _pick_recommended_rerun_steps(issues)
+    recommended_rerun_steps = pick_recommended_rerun_steps(issues)
     recommended_rerun_step = recommended_rerun_steps[0] if recommended_rerun_steps else None
     issue_codes = [issue.code for issue in issues]
 
@@ -693,18 +762,6 @@ def _safe_float(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
-
-
-def _pick_recommended_rerun_steps(issues: Sequence[QualityIssue]) -> list[str]:
-    candidate_steps = {issue.auto_fix_step for issue in issues if issue.auto_fix_step}
-    rerun_steps: list[str] = []
-    for step_name in _AUTO_FIX_STEP_PRIORITY:
-        if step_name not in candidate_steps:
-            continue
-        for chain_step in _STEP_RERUN_CHAINS.get(step_name, (step_name,)):
-            if chain_step not in rerun_steps:
-                rerun_steps.append(chain_step)
-    return rerun_steps
 
 
 def _grade_for_score(score: float) -> str:
