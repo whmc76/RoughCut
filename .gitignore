@@ -46,6 +46,7 @@ __pycache__/
 .superpowers/**/content/waiting-*.html
 .playwright-cli/
 .tmp/
+.tmp_jobs*.json
 .worktrees/
 tmp_*/
 tmp_*.py
