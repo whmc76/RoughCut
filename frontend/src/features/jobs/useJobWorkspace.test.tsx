@@ -30,6 +30,7 @@ const mockApi = vi.hoisted(() => ({
   confirmContentProfile: vi.fn(),
   finalReviewDecision: vi.fn(),
   applyReview: vi.fn(),
+  rerunJob: vi.fn(),
 }));
 
 vi.mock("../../api", () => ({
@@ -411,6 +412,15 @@ describe("useJobWorkspace", () => {
       note: null,
     });
     mockApi.applyReview.mockResolvedValue({});
+    mockApi.rerunJob.mockResolvedValue({
+      job_id: "job_1",
+      job_status: "processing",
+      rerun_start_step: "subtitle_postprocess",
+      rerun_steps: ["subtitle_postprocess", "subtitle_term_resolution", "subtitle_consistency_review"],
+      issue_codes: ["subtitle_quality_blocking"],
+      note: null,
+      detail: "已接受重跑请求，等待调度器从 subtitle_postprocess 接管。",
+    });
   });
 
   afterEach(() => {
@@ -751,6 +761,32 @@ describe("useJobWorkspace", () => {
     await waitFor(() => expect(mockApi.getConfig).toHaveBeenCalled());
     await waitFor(() => expect(mockApi.getPackaging).toHaveBeenCalled());
     await waitFor(() => expect(mockApi.getAvatarMaterials).toHaveBeenCalled());
+  });
+
+  it("triggers subtitle rerun actions through the shared rerun endpoint", async () => {
+    mockApi.listJobs.mockResolvedValue([SAMPLE_FINAL_REVIEW_JOB, SAMPLE_JOBS[1]]);
+    mockApi.getJob.mockResolvedValue(SAMPLE_FINAL_REVIEW_JOB);
+
+    const { result } = renderHookWithQueryClient(() => useJobWorkspace());
+
+    act(() => {
+      result.current.setSelectedJobId("job_1");
+    });
+
+    await waitFor(() => expect(result.current.selectedJob?.id).toBe("job_1"));
+
+    await act(async () => {
+      await result.current.rerunSubtitleDecision.mutateAsync({
+        issueCode: "subtitle_quality_blocking",
+        rerunStartStep: "subtitle_postprocess",
+      });
+    });
+
+    expect(mockApi.rerunJob).toHaveBeenCalledWith("job_1", {
+      issue_code: "subtitle_quality_blocking",
+      rerun_start_step: "subtitle_postprocess",
+      note: undefined,
+    });
   });
 });
 

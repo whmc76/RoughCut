@@ -242,6 +242,7 @@ function buildWorkspace(overrides: Record<string, unknown> = {}) {
     reviewEnhancementModes: [],
     confirmProfile: { mutate: vi.fn(), isPending: false },
     applyReview: { mutate: vi.fn(), isPending: false },
+    rerunSubtitleDecision: { mutate: vi.fn(), isPending: false },
     finalReviewDecision: { mutate: vi.fn(), isPending: false },
     cancelJob: { mutate: vi.fn(), isPending: false },
     restartJob: { mutate: vi.fn(), isPending: false },

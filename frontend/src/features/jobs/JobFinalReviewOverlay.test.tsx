@@ -31,6 +31,42 @@ const SAMPLE_JOB = {
   },
 };
 
+const SAMPLE_ACTIVITY = {
+  decisions: [
+    {
+      kind: "subtitle_term_resolution",
+      step_name: "subtitle_term_resolution",
+      title: "术语解析已完成",
+      status: "done",
+      summary: "已给出字幕术语修正建议。",
+      detail: "还有 1 处品牌别名需要人工确认。",
+      review_route: "subtitle_review",
+      review_label: "术语候选确认",
+      recommended_action: "先人工确认 1 条术语候选，再继续后续摘要与成片流程。",
+      rerun_start_step: "subtitle_term_resolution",
+      rerun_steps: ["subtitle_term_resolution", "subtitle_consistency_review", "glossary_review"],
+      issue_codes: ["subtitle_terms_pending"],
+      updated_at: "2026-04-02T02:04:00Z",
+    },
+    {
+      kind: "subtitle_quality",
+      step_name: "subtitle_quality",
+      title: "字幕质量阻断",
+      status: "failed",
+      summary: "字幕质量分低于自动放行阈值。",
+      detail: "术语一致性与重音保留存在冲突。",
+      review_route: "subtitle_review",
+      review_label: "字幕质量复核",
+      recommended_action: "先处理字幕质量阻断：术语一致性与重音保留存在冲突。；确认后如需自动回退，从 subtitle_postprocess 起重跑。",
+      rerun_start_step: "subtitle_postprocess",
+      rerun_steps: ["subtitle_postprocess", "subtitle_term_resolution", "subtitle_consistency_review"],
+      issue_codes: ["subtitle_quality_blocking"],
+      updated_at: "2026-04-02T02:05:00Z",
+    },
+  ],
+  events: [],
+};
+
 const SAMPLE_REPORT = {
   job_id: "job-final-1",
   generated_at: "2026-04-02T02:05:00Z",
@@ -95,6 +131,7 @@ describe("JobFinalReviewOverlay", () => {
     const { container } = render(
       <JobFinalReviewOverlay
         selectedJob={SAMPLE_JOB}
+        activity={SAMPLE_ACTIVITY}
         report={SAMPLE_REPORT}
         onPreview={vi.fn()}
         onDownload={vi.fn()}
@@ -115,10 +152,12 @@ describe("JobFinalReviewOverlay", () => {
     const onReject = vi.fn();
     const onRejectNoteChange = vi.fn();
     const onApplySubtitleReview = vi.fn();
+    const onTriggerSubtitleRerun = vi.fn();
 
     render(
       <JobFinalReviewOverlay
         selectedJob={SAMPLE_JOB}
+        activity={SAMPLE_ACTIVITY}
         report={SAMPLE_REPORT}
         previewSrc="/api/v1/jobs/job-final-1/download/file?variant=packaged"
         selectedRejectReasons={["字幕问题"]}
@@ -128,6 +167,7 @@ describe("JobFinalReviewOverlay", () => {
         onToggleRejectReason={onToggleRejectReason}
         onRejectNoteChange={onRejectNoteChange}
         onApplySubtitleReview={onApplySubtitleReview}
+        onTriggerSubtitleRerun={onTriggerSubtitleRerun}
         onApprove={onApprove}
         onReject={onReject}
       />,
@@ -144,6 +184,11 @@ describe("JobFinalReviewOverlay", () => {
     expect(screen.getByText("整体稳定，仅有少量术语不一致。")).toBeInTheDocument();
     expect(screen.getByText("subtitle_timing")).toBeInTheDocument();
     expect(screen.getByText("terminology")).toBeInTheDocument();
+    expect(screen.getByText("字幕决策与阻断")).toBeInTheDocument();
+    expect(screen.getByText("术语纠偏")).toBeInTheDocument();
+    expect(screen.getByText("字幕质量")).toBeInTheDocument();
+    expect(screen.getByText("术语一致性与重音保留存在冲突。")).toBeInTheDocument();
+    expect(screen.getByText("处理动作：先处理字幕质量阻断：术语一致性与重音保留存在冲突。；确认后如需自动回退，从 subtitle_postprocess 起重跑。")).toBeInTheDocument();
     expect(screen.getByText("剪辑诊断")).toBeInTheDocument();
     expect(screen.getByText("高风险 Cut")).toBeInTheDocument();
     expect(screen.getByText("人工复核建议")).toBeInTheDocument();
@@ -169,6 +214,7 @@ describe("JobFinalReviewOverlay", () => {
     fireEvent.click(screen.getByRole("button", { name: "封面包装" }));
     fireEvent.click(screen.getAllByRole("button", { name: "通过字幕" })[0]);
     fireEvent.click(screen.getAllByRole("button", { name: "退回字幕" })[0]);
+    fireEvent.click(screen.getAllByRole("button", { name: "按建议重跑" })[0]);
 
     expect(onPreview).toHaveBeenCalledTimes(1);
     expect(onDownload).toHaveBeenCalledTimes(1);
@@ -176,6 +222,10 @@ describe("JobFinalReviewOverlay", () => {
     expect(onToggleRejectReason).toHaveBeenCalledWith("封面包装");
     expect(onApplySubtitleReview).toHaveBeenNthCalledWith(1, "corr-1", "accepted");
     expect(onApplySubtitleReview).toHaveBeenNthCalledWith(2, "corr-1", "rejected");
+    expect(onTriggerSubtitleRerun).toHaveBeenCalledWith(expect.objectContaining({
+      kind: "subtitle_term_resolution",
+      rerun_start_step: "subtitle_term_resolution",
+    }));
   });
 
   it("keeps workflow details secondary and renders fallbacks when quality or report data is absent", () => {
@@ -192,6 +242,7 @@ describe("JobFinalReviewOverlay", () => {
           updated_at: "2026-04-02T03:05:00Z",
           steps: [],
         }}
+        activity={{ decisions: [] }}
         onPreview={vi.fn()}
         onDownload={vi.fn()}
         onOpenFolder={vi.fn()}
@@ -216,6 +267,7 @@ describe("JobFinalReviewOverlay", () => {
     render(
       <JobFinalReviewOverlay
         selectedJob={SAMPLE_JOB}
+        activity={SAMPLE_ACTIVITY}
         previewSrc="/api/v1/jobs/job-final-1/download/file?variant=packaged"
         onPreview={vi.fn()}
         onDownload={vi.fn()}
@@ -226,5 +278,24 @@ describe("JobFinalReviewOverlay", () => {
     expect(screen.getByTestId("final-review-preview-player")).toHaveAttribute("src", "/api/v1/jobs/job-final-1/download/file?variant=packaged");
     expect(screen.getByTestId("final-review-preview-frame")).toBeInTheDocument();
     expect(screen.getByText("AI创作工具")).toBeInTheDocument();
+  });
+
+  it("marks subtitle rerun cards as requested immediately after a rerun is queued", () => {
+    render(
+      <JobFinalReviewOverlay
+        selectedJob={SAMPLE_JOB}
+        activity={SAMPLE_ACTIVITY}
+        report={SAMPLE_REPORT}
+        pendingRerunStartStep="subtitle_postprocess"
+        pendingRerunIssueCode="subtitle_quality_blocking"
+        onTriggerSubtitleRerun={vi.fn()}
+        onPreview={vi.fn()}
+        onDownload={vi.fn()}
+        onOpenFolder={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("已请求重跑，等待调度器从 subtitle_postprocess 继续。")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "已请求重跑" })).toBeDisabled();
   });
 });

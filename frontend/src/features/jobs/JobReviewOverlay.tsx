@@ -20,10 +20,14 @@ type JobReviewOverlayProps = {
   isConfirmingProfile: boolean;
   isApplyingReview: boolean;
   isSubmittingFinalReview?: boolean;
+  isTriggeringSubtitleRerun?: boolean;
+  pendingRerunStartStep?: string | null;
+  pendingRerunIssueCode?: string | null;
   onContentFieldChange: (field: string, value: string) => void;
   onKeywordsChange: (value: string) => void;
   onConfirmProfile: () => void;
   onApplyReview: (targetId: string, action: "accepted" | "rejected") => void;
+  onTriggerSubtitleRerun?: (decision: NonNullable<JobActivity["decisions"]>[number]) => void;
   onApproveFinalReview?: () => void;
   onRejectFinalReview?: (note: string) => void;
   onOpenFolder: () => void;
@@ -43,10 +47,14 @@ export function JobReviewOverlay({
   isConfirmingProfile,
   isApplyingReview,
   isSubmittingFinalReview = false,
+  isTriggeringSubtitleRerun = false,
+  pendingRerunStartStep = null,
+  pendingRerunIssueCode = null,
   onContentFieldChange,
   onKeywordsChange,
   onConfirmProfile,
   onApplyReview,
+  onTriggerSubtitleRerun,
   onApproveFinalReview,
   onRejectFinalReview,
   onOpenFolder,
@@ -154,6 +162,7 @@ export function JobReviewOverlay({
           ) : (
             <JobFinalReviewOverlay
               selectedJob={selectedJob}
+              activity={activity}
               report={report}
               reviewDetail={activity?.review_detail ?? activity?.current_step?.detail ?? selectedJob.review_detail ?? null}
               rejectNote={rejectNote}
@@ -164,12 +173,16 @@ export function JobReviewOverlay({
               isPreviewing={false}
               isSubmittingDecision={isSubmittingFinalReview}
               isApplyingSubtitleReview={isApplyingReview}
+              isTriggeringSubtitleRerun={isTriggeringSubtitleRerun}
+              pendingRerunStartStep={pendingRerunStartStep}
+              pendingRerunIssueCode={pendingRerunIssueCode}
               onPreview={openPreview}
               onDownload={download}
               onOpenFolder={onOpenFolder}
               onRejectNoteChange={setRejectNote}
               onToggleRejectReason={toggleRejectReason}
               onApplySubtitleReview={onApplyReview}
+              onTriggerSubtitleRerun={onTriggerSubtitleRerun}
               onApprove={onApproveFinalReview}
               onReject={handleRejectFinalReview}
             />

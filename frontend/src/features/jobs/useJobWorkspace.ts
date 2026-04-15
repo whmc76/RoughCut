@@ -457,6 +457,15 @@ export function useJobWorkspace({ isCreateOpen = false }: UseJobWorkspaceOptions
       api.applyReview(selectedJobId!, [{ target_type: "subtitle_correction", target_id: payload.targetId, action: payload.action }]),
     onSuccess: refreshAll,
   });
+  const rerunSubtitleDecision = useMutation({
+    mutationFn: async (payload: { issueCode?: string; rerunStartStep?: string; note?: string }) =>
+      api.rerunJob(selectedJobId!, {
+        issue_code: payload.issueCode,
+        rerun_start_step: payload.rerunStartStep,
+        note: payload.note,
+      }),
+    onSuccess: refreshAll,
+  });
   const finalReviewDecision = useMutation({
     mutationFn: async (payload: { decision: "approve" | "reject"; note?: string }) =>
       api.finalReviewDecision(selectedJobId!, payload),
@@ -531,6 +540,7 @@ export function useJobWorkspace({ isCreateOpen = false }: UseJobWorkspaceOptions
     initializeJob,
     confirmProfile,
     applyReview,
+    rerunSubtitleDecision,
     finalReviewDecision,
     filteredJobs,
     selectedJob,

@@ -12,6 +12,16 @@ type FinalReviewDecisionResponse = {
   note?: string | null;
 };
 
+type JobRerunResponse = {
+  job_id: string;
+  job_status: string;
+  rerun_start_step: string;
+  rerun_steps: string[];
+  issue_codes: string[];
+  note?: string | null;
+  detail?: string | null;
+};
+
 export const jobsApi = {
   listJobs: (limit = 50, offset = 0) =>
     request<Job[]>(`/jobs?${new URLSearchParams({ limit: String(limit), offset: String(offset) })}`),
@@ -49,6 +59,8 @@ export const jobsApi = {
     request<ContentProfileReview>(`/jobs/${jobId}/content-profile/confirm`, { method: "POST", body: JSON.stringify(body) }),
   finalReviewDecision: (jobId: string, body: { decision: FinalReviewDecision; note?: string }) =>
     request<FinalReviewDecisionResponse>(`/jobs/${jobId}/final-review`, { method: "POST", body: JSON.stringify(body) }),
+  rerunJob: (jobId: string, body: { issue_code?: string; rerun_start_step?: string; note?: string }) =>
+    request<JobRerunResponse>(`/jobs/${jobId}/rerun`, { method: "POST", body: JSON.stringify(body) }),
   initializeJob: (
     jobId: string,
     body: {

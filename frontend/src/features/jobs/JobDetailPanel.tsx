@@ -7,6 +7,7 @@ import { PanelHeader } from "../../components/ui/PanelHeader";
 import { useI18n } from "../../i18n";
 import { classNames, formatDate, statusLabel } from "../../utils";
 import { JobContentProfileSection } from "./JobContentProfileSection";
+import { JobSubtitleDiagnosticsSection } from "./JobSubtitleDiagnosticsSection";
 import { JobSubtitleReportSection } from "./JobSubtitleReportSection";
 import { JobReviewConfigSection } from "./JobReviewConfigSection";
 import {
@@ -94,6 +95,7 @@ type StepActivityItem = {
   status: string;
   timestamp?: string | null;
   toneClass: string;
+  eventType?: string | null;
 };
 
 function resolveItemToneClass(status: string): string {
@@ -137,6 +139,9 @@ type JobDetailPanelProps = {
   isConfirmingProfile: boolean;
   isInitializing: boolean;
   isApplyingReview: boolean;
+  isTriggeringSubtitleRerun?: boolean;
+  pendingRerunStartStep?: string | null;
+  pendingRerunIssueCode?: string | null;
   isCancelling: boolean;
   isRestarting: boolean;
   isDeleting: boolean;
@@ -157,6 +162,7 @@ type JobDetailPanelProps = {
   onRestart: () => void;
   onDelete: () => void;
   onApplyReview: (targetId: string, action: "accepted" | "rejected") => void;
+  onTriggerSubtitleRerun?: (decision: NonNullable<JobActivity["decisions"]>[number]) => void;
 };
 
 export function JobDetailPanel({
@@ -185,6 +191,9 @@ export function JobDetailPanel({
   isConfirmingProfile,
   isInitializing,
   isApplyingReview,
+  isTriggeringSubtitleRerun = false,
+  pendingRerunStartStep = null,
+  pendingRerunIssueCode = null,
   isCancelling,
   isRestarting,
   isDeleting,
@@ -198,6 +207,7 @@ export function JobDetailPanel({
   onRestart,
   onDelete,
   onApplyReview,
+  onTriggerSubtitleRerun,
 }: JobDetailPanelProps) {
   const { t } = useI18n();
   const isReviewMode = selectedJob?.status === "needs_review";
@@ -261,6 +271,7 @@ export function JobDetailPanel({
       status: resolveEventSeverity(event),
       timestamp: event.timestamp,
       toneClass: resolveEventSeverityClass(event),
+      eventType: event.type,
     });
   });
 
@@ -272,6 +283,7 @@ export function JobDetailPanel({
       status: decision.status,
       timestamp: decision.updated_at,
       toneClass: resolveItemToneClass(decision.status),
+      eventType: "decision",
     });
   });
 
@@ -429,6 +441,15 @@ export function JobDetailPanel({
             ) : null}
           </section>
 
+          <JobSubtitleDiagnosticsSection
+            activity={activity}
+            job={selectedJob}
+            isTriggeringRerun={isTriggeringSubtitleRerun}
+            pendingRerunStartStep={pendingRerunStartStep}
+            pendingRerunIssueCode={pendingRerunIssueCode}
+            onTriggerRerun={onTriggerSubtitleRerun}
+          />
+
           {showReviewConfig ? (
             <JobReviewConfigSection
               config={config}
@@ -557,11 +578,17 @@ export function JobDetailPanel({
                                     item.toneClass === "failed" && "event-failed",
                                     item.toneClass === "cancelled" && "event-cancelled",
                                     item.toneClass === "running" && "event-running",
+                                    item.eventType === "review_action" && "event-rerun",
                                     item.title.includes("卡住诊断") && "event-diagnostic",
                                   )}
                                 >
                                   <div className="toolbar">
-                                    <strong>{item.title}</strong>
+                                    <div className="toolbar">
+                                      <strong>{item.title}</strong>
+                                      {item.eventType === "review_action" ? (
+                                        <span className="status-pill pending">重跑请求</span>
+                                      ) : null}
+                                    </div>
                                     <span className={classNames("status-pill", item.toneClass)}>{statusLabel(item.status)}</span>
                                   </div>
                                   {item.timestamp ? <div className="muted">{formatDate(item.timestamp)}</div> : null}

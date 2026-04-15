@@ -8,6 +8,33 @@ export type JobStep = {
   error_message: string | null;
 };
 
+export type JobActivityDecision = {
+  kind: string;
+  step_name?: string | null;
+  title: string;
+  status: string;
+  summary: string;
+  detail?: string | null;
+  blocking?: boolean | null;
+  review_route?: string | null;
+  review_label?: string | null;
+  recommended_action?: string | null;
+  rerun_start_step?: string | null;
+  rerun_steps?: string[];
+  issue_codes?: string[];
+  updated_at?: string | null;
+};
+
+export type JobActivityEvent = {
+  timestamp: string;
+  type: string;
+  status: string;
+  step_name?: string | null;
+  title: string;
+  detail?: string | null;
+  [key: string]: unknown;
+};
+
 export type Job = {
   id: string;
   source_name: string;
@@ -79,24 +106,8 @@ export type JobActivity = {
     output_path?: string | null;
     updated_at?: string | null;
   } | null;
-  decisions: Array<{
-    kind: string;
-    step_name?: string | null;
-    title: string;
-    status: string;
-    summary: string;
-    detail?: string | null;
-    updated_at?: string | null;
-  }>;
-  events: Array<{
-    timestamp: string;
-    type: string;
-    status: string;
-    step_name?: string | null;
-    title: string;
-    detail?: string | null;
-    [key: string]: unknown;
-  }>;
+  decisions: JobActivityDecision[];
+  events: JobActivityEvent[];
 };
 
 export type TokenUsageReport = {

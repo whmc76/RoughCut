@@ -1,6 +1,7 @@
-import type { Job, Report } from "../../types";
+import type { Job, JobActivity, Report } from "../../types";
 import { PanelHeader } from "../../components/ui/PanelHeader";
 import { StatCard } from "../../components/ui/StatCard";
+import { JobSubtitleDiagnosticsSection } from "./JobSubtitleDiagnosticsSection";
 
 export type FinalReviewJob = Job & {
   quality_score?: number | null;
@@ -11,6 +12,7 @@ export type FinalReviewJob = Job & {
 
 type JobFinalReviewOverlayProps = {
   selectedJob: FinalReviewJob;
+  activity?: Pick<JobActivity, "decisions">;
   report?: Report;
   className?: string;
   reviewDetail?: string | null;
@@ -22,12 +24,16 @@ type JobFinalReviewOverlayProps = {
   isOpeningFolder?: boolean;
   isSubmittingDecision?: boolean;
   isApplyingSubtitleReview?: boolean;
+  isTriggeringSubtitleRerun?: boolean;
+  pendingRerunStartStep?: string | null;
+  pendingRerunIssueCode?: string | null;
   onPreview: () => void;
   onDownload: () => void;
   onOpenFolder: () => void;
   onRejectNoteChange?: (value: string) => void;
   onToggleRejectReason?: (reason: string) => void;
   onApplySubtitleReview?: (targetId: string, action: "accepted" | "rejected") => void;
+  onTriggerSubtitleRerun?: (decision: NonNullable<JobActivity["decisions"]>[number]) => void;
   onApprove?: () => void;
   onReject?: () => void;
 };
@@ -69,6 +75,7 @@ function formatTime(seconds: number) {
 
 export function JobFinalReviewOverlay({
   selectedJob,
+  activity,
   report,
   className,
   reviewDetail,
@@ -80,12 +87,16 @@ export function JobFinalReviewOverlay({
   isOpeningFolder,
   isSubmittingDecision,
   isApplyingSubtitleReview = false,
+  isTriggeringSubtitleRerun = false,
+  pendingRerunStartStep = null,
+  pendingRerunIssueCode = null,
   onPreview,
   onDownload,
   onOpenFolder,
   onRejectNoteChange,
   onToggleRejectReason,
   onApplySubtitleReview,
+  onTriggerSubtitleRerun,
   onApprove,
   onReject,
 }: JobFinalReviewOverlayProps) {
@@ -250,6 +261,16 @@ export function JobFinalReviewOverlay({
           <div className="muted">暂无质量结果</div>
         )}
       </section>
+
+      <JobSubtitleDiagnosticsSection
+        activity={activity}
+        job={selectedJob}
+        showQualitySnapshot={false}
+        isTriggeringRerun={isTriggeringSubtitleRerun}
+        pendingRerunStartStep={pendingRerunStartStep}
+        pendingRerunIssueCode={pendingRerunIssueCode}
+        onTriggerRerun={onTriggerSubtitleRerun}
+      />
 
       {timelineDiagnostics ? (
         <section className="detail-block final-review-section-card">

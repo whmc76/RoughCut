@@ -26,6 +26,7 @@ export function JobsPage() {
   const [createOpen, setCreateOpen] = useState(false);
   const [reviewNotice, setReviewNotice] = useState<string | null>(null);
   const [reviewNoticeTone, setReviewNoticeTone] = useState<"success" | "error">("success");
+  const [pendingSubtitleRerun, setPendingSubtitleRerun] = useState<{ rerunStartStep: string | null; issueCode: string | null } | null>(null);
   const [detailModalOpen, setDetailModalOpen] = useState(false);
   const [reviewOverlayOpen, setReviewOverlayOpen] = useState(false);
   const [reviewStepOverride, setReviewStepOverride] = useState<JobReviewStep | null>(null);
@@ -46,6 +47,34 @@ export function JobsPage() {
   const isReviewContext = selectedReviewJob?.status === "needs_review" && reviewStep !== null;
   const showDetailModal = Boolean(detailModalOpen && workspace.selectedJobId);
   const showReviewOverlay = Boolean(reviewOverlayOpen && workspace.selectedJobId && isReviewContext && reviewStep);
+  const triggerSubtitleRerun = (decision: { issue_codes?: string[]; rerun_start_step?: string | null }) => {
+    const issueCode = decision.issue_codes?.[0] || null;
+    const rerunStartStep = decision.rerun_start_step || null;
+    setPendingSubtitleRerun({ issueCode, rerunStartStep });
+    workspace.rerunSubtitleDecision.mutate(
+      {
+        issueCode: issueCode || undefined,
+        rerunStartStep: rerunStartStep || undefined,
+      },
+      {
+        onSuccess: (result) => {
+          showReviewNotice(
+            "success",
+            result.detail?.trim() || `已请求从 ${rerunStartStep || "推荐起点"} 重跑，任务会在调度器接管后继续。`,
+          );
+        },
+        onError: (error) => {
+          setPendingSubtitleRerun(null);
+          showReviewNotice(
+            "error",
+            error instanceof Error
+              ? error.message
+              : `字幕重跑触发失败：${String(error) || "请稍后重试。"}`,
+          );
+        },
+      },
+    );
+  };
 
   const openJobReview = (jobId: string) => {
     const queuedJob = workspace.filteredJobs.find((job) => job.id === jobId) ?? (workspace.selectedJob?.id === jobId ? workspace.selectedJob : null);
@@ -93,6 +122,7 @@ export function JobsPage() {
       workspace.setSelectedJobId(null);
     }
     setReviewStepOverride(null);
+    setPendingSubtitleRerun(null);
     if (shouldClearNotice) {
       setReviewNotice(null);
     }
@@ -104,6 +134,7 @@ export function JobsPage() {
       workspace.setSelectedJobId(null);
     }
     setReviewStepOverride(null);
+    setPendingSubtitleRerun(null);
   };
 
   const focusQueue = (filter: JobQueueFilter) => {
@@ -328,6 +359,9 @@ export function JobsPage() {
           isConfirmingProfile={workspace.confirmProfile.isPending}
           isInitializing={workspace.initializeJob.isPending}
           isApplyingReview={workspace.applyReview.isPending}
+          isTriggeringSubtitleRerun={workspace.rerunSubtitleDecision.isPending}
+          pendingRerunStartStep={pendingSubtitleRerun?.rerunStartStep ?? null}
+          pendingRerunIssueCode={pendingSubtitleRerun?.issueCode ?? null}
           isCancelling={workspace.cancelJob.isPending}
           isRestarting={workspace.restartJob.isPending}
           isDeleting={workspace.deleteJob.isPending}
@@ -367,6 +401,7 @@ export function JobsPage() {
           onRestart={() => workspace.selectedJob && confirmAndRestartJob(workspace.selectedJob.id)}
           onDelete={() => workspace.selectedJob && confirmAndDeleteJob(workspace.selectedJob.id)}
           onApplyReview={(targetId, action) => workspace.applyReview.mutate({ targetId, action })}
+          onTriggerSubtitleRerun={triggerSubtitleRerun}
         />
       </JobDetailModal>
 
@@ -382,6 +417,9 @@ export function JobsPage() {
         contentKeywords={workspace.contentKeywords}
         isConfirmingProfile={workspace.confirmProfile.isPending}
         isApplyingReview={workspace.applyReview.isPending}
+        isTriggeringSubtitleRerun={workspace.rerunSubtitleDecision.isPending}
+        pendingRerunStartStep={pendingSubtitleRerun?.rerunStartStep ?? null}
+        pendingRerunIssueCode={pendingSubtitleRerun?.issueCode ?? null}
         isSubmittingFinalReview={workspace.finalReviewDecision.isPending}
         onContentFieldChange={(field, value) =>
           workspace.setContentDraft((prev) => {
@@ -413,6 +451,7 @@ export function JobsPage() {
         }
         onConfirmProfile={confirmReviewProfile}
         onApplyReview={(targetId, action) => workspace.applyReview.mutate({ targetId, action })}
+        onTriggerSubtitleRerun={triggerSubtitleRerun}
         onApproveFinalReview={() => workspace.finalReviewDecision.mutate({ decision: "approve" })}
         onRejectFinalReview={(note) => workspace.finalReviewDecision.mutate({ decision: "reject", note })}
         onOpenFolder={() => selectedReviewJob && workspace.openFolder.mutate(selectedReviewJob.id)}
