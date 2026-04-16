@@ -36,6 +36,8 @@ $RuntimeComposeFile = Join-Path $RepoRoot "docker-compose.runtime.yml"
 $DevComposeFile = Join-Path $RepoRoot "docker-compose.dev.yml"
 $AutomationComposeFile = Join-Path $RepoRoot "docker-compose.automation.yml"
 $DockerWatchScript = Join-Path $RepoRoot "scripts\watch-roughcut-docker-runtime.ps1"
+$EnsureTelegramAgentScript = Join-Path $RepoRoot "scripts\ensure-roughcut-telegram-agent.ps1"
+$StopTelegramAgentScript = Join-Path $RepoRoot "scripts\stop-roughcut-telegram-agent.ps1"
 $CodexHostBridgeScript = Join-Path $RepoRoot "scripts\codex_host_bridge.py"
 $CodexHostBridgeEnvFile = Join-Path $RepoRoot "logs\codex-host-bridge.env"
 $CodexHostBridgeOutLog = Join-Path $RepoRoot "logs\codex-host-bridge.out.log"
@@ -121,6 +123,7 @@ function Remove-RoughCutStoppedComposeContainers {
             "orchestrator",
             "worker-media",
             "worker-llm",
+            "worker-agent",
             "watcher",
             "migrate"
         )
@@ -214,7 +217,7 @@ function Wait-RoughCutComposeModeReady {
         [int]$TimeoutSec = 120
     )
 
-    $requiredRunningServices = @("postgres", "redis", "minio", "api", "orchestrator", "worker-media", "worker-llm")
+    $requiredRunningServices = @("postgres", "redis", "minio", "api", "orchestrator", "worker-media", "worker-llm", "worker-agent")
     if ($ComposeMode -eq "full") {
         $requiredRunningServices += "watcher"
     }
@@ -1325,6 +1328,8 @@ function Stop-RoughCutServices {
     Stop-RoughCutProcess -Name "Media worker" -Pattern "celery -A roughcut\.pipeline\.celery_app:celery_app worker --queues=media_queue"
     Stop-RoughCutProcess -Name "LLM worker" -Pattern "roughcut\.cli worker --queue llm_queue"
     Stop-RoughCutProcess -Name "LLM worker" -Pattern "celery -A roughcut\.pipeline\.celery_app:celery_app worker --queues=llm_queue"
+    Stop-RoughCutProcess -Name "Agent worker" -Pattern "roughcut\.cli worker --queue agent_queue"
+    Stop-RoughCutProcess -Name "Agent worker" -Pattern "celery -A roughcut\.pipeline\.celery_app:celery_app worker --queues=agent_queue"
     Stop-RoughCutProcess -Name "Watcher" -Pattern "roughcut\.cli watcher"
 
     if ($StopDockerServices) {
@@ -1394,13 +1399,51 @@ function Start-RoughCutProcess {
     Write-Host "$Name started (PID $($process.Id))." -ForegroundColor Green
 }
 
+function Start-RoughCutHostTelegramAgent {
+    if (-not (Test-Path $EnsureTelegramAgentScript)) {
+        Write-Host "Telegram agent ensure script not found: $EnsureTelegramAgentScript" -ForegroundColor Yellow
+        return
+    }
+
+    $powerShellCommand = Get-PowerShellCommand
+    Invoke-NativeCommandChecked -FilePath $powerShellCommand.Source -Arguments @(
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        $EnsureTelegramAgentScript,
+        "-Restart"
+    ) -FailureMessage "Failed to start host Telegram agent"
+}
+
+function Stop-RoughCutHostTelegramAgent {
+    if (-not (Test-Path $StopTelegramAgentScript)) {
+        Write-Host "Telegram agent stop script not found: $StopTelegramAgentScript" -ForegroundColor Yellow
+        return
+    }
+
+    $powerShellCommand = Get-PowerShellCommand
+    Invoke-NativeCommandChecked -FilePath $powerShellCommand.Source -Arguments @(
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        $StopTelegramAgentScript
+    ) -FailureMessage "Failed to stop host Telegram agent"
+}
+
 function Get-RoughCutWorkerNodeName {
     param(
-        [ValidateSet("media_queue", "llm_queue")]
+        [ValidateSet("media_queue", "llm_queue", "agent_queue")]
         [string]$Queue
     )
 
-    $suffix = if ($Queue -eq "media_queue") { "media-local" } else { "llm-local" }
+    $suffix = switch ($Queue) {
+        "media_queue" { "media-local" }
+        "llm_queue" { "llm-local" }
+        "agent_queue" { "agent-local" }
+        default { "worker-local" }
+    }
     return "$suffix@localhost"
 }
 
@@ -1475,7 +1518,7 @@ function Wait-RoughCutWorkerReady {
 function Start-RoughCutWorkerProcess {
     param(
         [string]$Name,
-        [ValidateSet("media_queue", "llm_queue")]
+        [ValidateSet("media_queue", "llm_queue", "agent_queue")]
         [string]$Queue,
         [string]$StdoutPath,
         [string]$StderrPath
@@ -1631,6 +1674,7 @@ function Wait-LauncherClose {
 if ($StopOnly) {
 Stop-RoughCutServices -StopDockerServices:$StopDocker
 Stop-RoughCutDockerWatch -ComposeMode all -SilentlyContinue
+Stop-RoughCutHostTelegramAgent
 Remove-LegacyHeygemMockContainer
     exit 0
 }
@@ -1646,6 +1690,7 @@ if ($Mode -eq "runtime-down") {
 }
 
 if ($Mode -eq "full-down") {
+    Stop-RoughCutHostTelegramAgent
     Stop-RoughCutComposeMode -ComposeMode "full"
     exit 0
 }
@@ -1657,6 +1702,9 @@ if ($Mode -ne "local") {
         exit 0
     }
     Start-RoughCutComposeMode -ComposeMode $Mode
+    if ($Mode -eq "full") {
+        Start-RoughCutHostTelegramAgent
+    }
     exit 0
 }
 
@@ -1760,6 +1808,11 @@ Start-RoughCutWorkerProcess `
     -Queue "llm_queue" `
     -StdoutPath (Join-Path $RepoRoot "logs\llm-worker.out.log") `
     -StderrPath (Join-Path $RepoRoot "logs\llm-worker.err.log")
+Start-RoughCutWorkerProcess `
+    -Name "Agent worker" `
+    -Queue "agent_queue" `
+    -StdoutPath (Join-Path $RepoRoot "logs\agent-worker.out.log") `
+    -StderrPath (Join-Path $RepoRoot "logs\agent-worker.err.log")
 
 Write-Host ""
 Write-Host "RoughCut started." -ForegroundColor Green

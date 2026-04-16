@@ -55,6 +55,15 @@ _AGENT_REQUEST_KEYWORDS = (
     "review",
     "plan",
     "implement",
+    "build",
+    "compile",
+    "package",
+    "pack",
+    "bundle",
+    "test",
+    "verify",
+    "check",
+    "smoke",
     "optimize",
     "refactor",
     "unsupported",
@@ -73,6 +82,16 @@ _AGENT_REQUEST_KEYWORDS = (
     "实现",
     "链路",
     "结构",
+    "构建",
+    "编译",
+    "打包",
+    "构建一下",
+    "跑测试",
+    "测试一下",
+    "验证",
+    "校验",
+    "检查一下",
+    "看看报错",
 )
 _EDIT_REQUEST_KEYWORDS = (
     "fix",
@@ -91,6 +110,30 @@ _EDIT_REQUEST_KEYWORDS = (
     "重构",
     "改造",
     "补齐",
+)
+_BUILD_REQUEST_KEYWORDS = (
+    "build",
+    "compile",
+    "package",
+    "pack",
+    "bundle",
+    "test",
+    "verify",
+    "check",
+    "smoke",
+    "ci",
+    "构建",
+    "编译",
+    "打包",
+    "跑测试",
+    "测试一下",
+    "测试",
+    "验证",
+    "校验",
+    "检查",
+    "报错",
+    "前端打包",
+    "后端构建",
 )
 
 
@@ -347,6 +390,15 @@ async def _handle_task_command(args: list[str], send_text: SendText) -> None:
     result_path = str(payload.get("result_path") or "").strip()
     if result_path:
         lines.append(f"- 结果文件：{result_path}")
+    workspace_mode = str(payload.get("workspace_mode") or "").strip()
+    workspace_root = str(payload.get("workspace_root") or "").strip()
+    execution_cwd = str(payload.get("execution_cwd") or payload.get("cwd") or "").strip()
+    if workspace_mode:
+        lines.append(f"- 工作区模式：{workspace_mode}")
+    if workspace_root:
+        lines.append(f"- 工作区路径：{workspace_root}")
+    if execution_cwd and execution_cwd != workspace_root:
+        lines.append(f"- 执行目录：{execution_cwd}")
     result_excerpt = str(payload.get("result_excerpt") or "").strip()
     error_text = str(payload.get("error_text") or "").strip()
     if result_excerpt:
@@ -714,7 +766,7 @@ async def _dispatch_agent_request(text: str, *, send_text: SendText, source: str
     if preset is None:
         return False
 
-    task_text = _build_agent_request_task_text(normalized, source=source)
+    task_text = _build_agent_request_task_text(normalized, source=source, preset_name=preset_name)
     record = create_task_record(
         chat_id=_chat_id_from_sender(send_text),
         provider=provider,
@@ -742,7 +794,13 @@ async def _dispatch_agent_request(text: str, *, send_text: SendText, source: str
     return True
 
 
-def _build_agent_request_task_text(text: str, *, source: str) -> str:
+def _build_agent_request_task_text(text: str, *, source: str, preset_name: str) -> str:
+    if preset_name == "build":
+        return (
+            f"这是来自 Telegram agent 的自然语言构建/验证请求：{text}\n"
+            "请优先复用仓库现有脚本完成构建、编译、测试或校验；"
+            "输出必须包含执行命令、成功/失败结论、关键报错和产物位置。"
+        )
     if source == "unknown_command":
         return (
             f"Telegram 收到未支持命令：{text}\n"
@@ -774,6 +832,8 @@ def _select_agent_provider(settings) -> str | None:
 
 
 def _select_agent_preset(provider: str, text: str, *, source: str) -> str:
+    if _looks_like_build_request(text):
+        return "build"
     if source == "unknown_command" or _looks_like_edit_request(text):
         return "extend" if provider == "acp" else "implement"
     return "triage" if provider == "acp" else "plan"
@@ -784,6 +844,13 @@ def _looks_like_edit_request(text: str) -> bool:
     if not lowered:
         return False
     return any(keyword in lowered for keyword in _EDIT_REQUEST_KEYWORDS)
+
+
+def _looks_like_build_request(text: str) -> bool:
+    lowered = str(text or "").strip().lower()
+    if not lowered:
+        return False
+    return any(keyword in lowered for keyword in _BUILD_REQUEST_KEYWORDS)
 
 
 def _truncate_request_text(text: str, *, max_chars: int = 180) -> str:

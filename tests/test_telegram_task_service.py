@@ -60,6 +60,7 @@ def test_confirm_agent_task_submits_celery_job(tmp_path: Path, monkeypatch):
     assert updated.status == "queued"
     assert sent
     assert sent[0]["task_id"] == record.task_id
+    assert sent[0]["queue"] == "agent_queue"
 
 
 def test_cancel_agent_task_marks_cancelled(tmp_path: Path, monkeypatch):
@@ -111,7 +112,13 @@ def test_get_agent_task_status_persists_terminal_result(tmp_path: Path, monkeypa
 
     class FakeAsyncResult:
         state = "SUCCESS"
-        result = {"stdout": "done", "excerpt": "done"}
+        result = {
+            "stdout": "done",
+            "excerpt": "done",
+            "cwd": str(tmp_path / "worktree"),
+            "workspace_mode": "git_worktree",
+            "workspace_root": str(tmp_path / "worktree"),
+        }
 
     monkeypatch.setattr(task_service_mod, "AsyncResult", lambda task_id, app=None: FakeAsyncResult())
 
@@ -119,6 +126,9 @@ def test_get_agent_task_status_persists_terminal_result(tmp_path: Path, monkeypa
 
     assert payload["status"] == "success"
     assert payload["result_path"]
+    assert payload["workspace_mode"] == "git_worktree"
+    assert payload["workspace_root"] == str(tmp_path / "worktree")
+    assert payload["execution_cwd"] == str(tmp_path / "worktree")
     persisted = task_service_mod.load_agent_task_result(record.task_id)
     assert persisted is not None
     assert persisted["stdout"] == "done"

@@ -28,6 +28,9 @@ class TelegramAgentTaskRecord:
     result_excerpt: str = ""
     error_text: str = ""
     result_path: str = ""
+    execution_cwd: str = ""
+    workspace_mode: str = ""
+    workspace_root: str = ""
 
 
 class TelegramAgentTaskStore:

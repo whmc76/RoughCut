@@ -19,6 +19,8 @@ $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $lockDir = Join-Path $repoRoot "logs"
 $lockPath = Join-Path $lockDir ("docker-refresh-{0}.lock" -f $ComposeMode)
 $codexHostBridgeEnvPath = Join-Path $lockDir "codex-host-bridge.env"
+$ensureTelegramAgentScript = Join-Path $repoRoot "scripts\ensure-roughcut-telegram-agent.ps1"
+$stopTelegramAgentScript = Join-Path $repoRoot "scripts\stop-roughcut-telegram-agent.ps1"
 $runtimeRefreshHoldPath = if ([string]::IsNullOrWhiteSpace($env:ROUGHCUT_RUNTIME_REFRESH_HOLD_PATH)) {
     Join-Path $lockDir "runtime-refresh-hold.json"
 } else {
@@ -187,6 +189,36 @@ function Invoke-Step {
     }
 }
 
+function Get-PowerShellCommand {
+    $command = Get-Command pwsh -ErrorAction SilentlyContinue
+    if ($null -eq $command) {
+        $command = Get-Command powershell -ErrorAction SilentlyContinue
+    }
+    if ($null -eq $command) {
+        throw "Neither pwsh nor powershell is available."
+    }
+    return $command
+}
+
+function Invoke-TelegramAgentScript {
+    param(
+        [string]$ScriptPath,
+        [string]$FailureMessage,
+        [string[]]$ExtraArguments = @()
+    )
+
+    if (-not (Test-Path $ScriptPath)) {
+        Write-Warning ("Telegram agent helper script not found: {0}" -f $ScriptPath)
+        return
+    }
+
+    $powerShellCommand = Get-PowerShellCommand
+    & $powerShellCommand.Source -NoProfile -ExecutionPolicy Bypass -File $ScriptPath @ExtraArguments
+    if ($LASTEXITCODE -ne 0) {
+        throw $FailureMessage
+    }
+}
+
 function Get-RoughCutComposeFiles {
     param(
         [ValidateSet("runtime", "full")]
@@ -214,7 +246,8 @@ function Get-RoughCutRefreshServices {
         "api",
         "orchestrator",
         "worker-media",
-        "worker-llm"
+        "worker-llm",
+        "worker-agent"
     )
     if ($Mode -eq "full") {
         $services += "watcher"
@@ -319,10 +352,20 @@ try {
     $extrasLabel = if ([string]::IsNullOrWhiteSpace($DockerPythonExtras)) { "<none>" } else { $DockerPythonExtras }
     try {
         [Environment]::SetEnvironmentVariable("ROUGHCUT_DOCKER_PYTHON_EXTRAS", $DockerPythonExtras, "Process")
+        if ($ComposeMode -eq "full") {
+            Invoke-Step "Stop host Telegram agent before full refresh" {
+                Invoke-TelegramAgentScript -ScriptPath $stopTelegramAgentScript -FailureMessage "Failed to stop host Telegram agent before refresh"
+            }
+        }
         Invoke-Step ("Refresh Docker {0} runtime via docker compose {1} (python extras: {2})" -f $ComposeMode, ($upArgs -join " "), $extrasLabel) {
             docker @composeArgs @upArgs
             if ($LASTEXITCODE -ne 0) {
                 throw "docker compose refresh failed for $ComposeMode with exit code $LASTEXITCODE"
+            }
+        }
+        if ($ComposeMode -eq "full") {
+            Invoke-Step "Restart host Telegram agent after full refresh" {
+                Invoke-TelegramAgentScript -ScriptPath $ensureTelegramAgentScript -FailureMessage "Failed to restart host Telegram agent after refresh" -ExtraArguments @("-Restart")
             }
         }
     } finally {

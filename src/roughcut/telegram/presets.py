@@ -11,6 +11,7 @@ class TelegramAgentPreset:
     requires_task: bool
     requires_confirmation: bool
     allow_edits: bool
+    isolated_workspace: bool
     prompt_template: str
 
 
@@ -22,6 +23,7 @@ _PRESETS = {
         requires_task=True,
         requires_confirmation=False,
         allow_edits=False,
+        isolated_workspace=False,
         prompt_template=(
             "请检查当前 RoughCut 仓库并完成下列分析任务。\n"
             "只做阅读和总结，不要修改文件。\n"
@@ -38,6 +40,7 @@ _PRESETS = {
         requires_task=False,
         requires_confirmation=False,
         allow_edits=False,
+        isolated_workspace=False,
         prompt_template=(
             "你在 RoughCut 仓库里做代码审查。\n"
             "优先输出 bug、行为回归、风险点和缺失测试；不要修改文件。\n"
@@ -54,6 +57,7 @@ _PRESETS = {
         requires_task=True,
         requires_confirmation=False,
         allow_edits=False,
+        isolated_workspace=False,
         prompt_template=(
             "请为 RoughCut 仓库中的需求生成可执行计划。\n"
             "只输出实施方案和风险，不要修改文件。\n"
@@ -70,12 +74,30 @@ _PRESETS = {
         requires_task=True,
         requires_confirmation=True,
         allow_edits=True,
+        isolated_workspace=True,
         prompt_template=(
             "请在 RoughCut 仓库中直接实现以下改动，并在结束时说明修改内容和验证结果。\n"
             "任务：{task}\n"
             "{scope_block}"
             "{job_block}"
             "要求：改动保持收敛；优先最小可行实现；如果能跑测试就执行相关测试。"
+        ),
+    ),
+    ("claude", "build"): TelegramAgentPreset(
+        name="build",
+        provider="claude",
+        description="在隔离工作区执行构建/测试诊断，不修改主工作树。",
+        requires_task=True,
+        requires_confirmation=False,
+        allow_edits=False,
+        isolated_workspace=True,
+        prompt_template=(
+            "请在 RoughCut 仓库的隔离工作区中完成构建或验证任务。\n"
+            "不要修改主工作树；优先复用现有脚本和命令。\n"
+            "任务：{task}\n"
+            "{scope_block}"
+            "{job_block}"
+            "输出要求：必须包含构建状态、执行过的命令、失败原因或产物位置。"
         ),
     ),
     ("codex", "inspect"): TelegramAgentPreset(
@@ -85,6 +107,7 @@ _PRESETS = {
         requires_task=True,
         requires_confirmation=False,
         allow_edits=False,
+        isolated_workspace=False,
         prompt_template=(
             "请检查当前 RoughCut 仓库并完成下列分析任务。\n"
             "只做阅读和总结，不要修改文件。\n"
@@ -101,6 +124,7 @@ _PRESETS = {
         requires_task=False,
         requires_confirmation=False,
         allow_edits=False,
+        isolated_workspace=False,
         prompt_template=(
             "你在 RoughCut 仓库里做代码审查。\n"
             "优先输出 bug、行为回归、风险点和缺失测试；不要修改文件。\n"
@@ -117,6 +141,7 @@ _PRESETS = {
         requires_task=True,
         requires_confirmation=False,
         allow_edits=False,
+        isolated_workspace=False,
         prompt_template=(
             "请为 RoughCut 仓库中的需求生成可执行计划。\n"
             "只输出实施方案和风险，不要修改文件。\n"
@@ -133,12 +158,30 @@ _PRESETS = {
         requires_task=True,
         requires_confirmation=True,
         allow_edits=True,
+        isolated_workspace=True,
         prompt_template=(
             "请在 RoughCut 仓库中直接实现以下改动，并在结束时说明修改内容和验证结果。\n"
             "任务：{task}\n"
             "{scope_block}"
             "{job_block}"
             "要求：改动保持收敛；优先最小可行实现；如果能跑测试就执行相关测试。"
+        ),
+    ),
+    ("codex", "build"): TelegramAgentPreset(
+        name="build",
+        provider="codex",
+        description="在隔离工作区执行构建/测试诊断，不修改主工作树。",
+        requires_task=True,
+        requires_confirmation=False,
+        allow_edits=False,
+        isolated_workspace=True,
+        prompt_template=(
+            "请在 RoughCut 仓库的隔离工作区中完成构建或验证任务。\n"
+            "不要修改主工作树；优先复用现有脚本和命令。\n"
+            "任务：{task}\n"
+            "{scope_block}"
+            "{job_block}"
+            "输出要求：必须包含构建状态、执行过的命令、失败原因或产物位置。"
         ),
     ),
     ("acp", "triage"): TelegramAgentPreset(
@@ -148,6 +191,7 @@ _PRESETS = {
         requires_task=True,
         requires_confirmation=False,
         allow_edits=False,
+        isolated_workspace=False,
         prompt_template=(
             "你在处理来自 Telegram agent 的复杂请求或未知命令。\n"
             "先判断是否已有现成功能或命令可以满足；如果没有，再指出最小改动方案。\n"
@@ -165,6 +209,7 @@ _PRESETS = {
         requires_task=True,
         requires_confirmation=True,
         allow_edits=True,
+        isolated_workspace=True,
         prompt_template=(
             "任务：{task}\n"
             "{scope_block}"
@@ -179,6 +224,7 @@ _PRESETS = {
         requires_task=True,
         requires_confirmation=True,
         allow_edits=True,
+        isolated_workspace=True,
         prompt_template=(
             "你在 RoughCut 仓库里扩展 Telegram agent 能力，或修复复杂错误、结构问题、链路问题。\n"
             "如果请求对应未知命令，优先把它沉淀成可复用的命令、路由或兜底能力。\n"
@@ -187,6 +233,23 @@ _PRESETS = {
             "{scope_block}"
             "{job_block}"
             "要求：改动收敛、优先复用现有组件、必要时补测试。"
+        ),
+    ),
+    ("acp", "build"): TelegramAgentPreset(
+        name="build",
+        provider="acp",
+        description="通过 ACP 在隔离工作区执行构建/测试诊断。",
+        requires_task=True,
+        requires_confirmation=False,
+        allow_edits=False,
+        isolated_workspace=True,
+        prompt_template=(
+            "你在 RoughCut 仓库的隔离工作区里执行构建或验证任务。\n"
+            "不要修改主工作树；优先用仓库现有脚本和命令定位问题。\n"
+            "任务：{task}\n"
+            "{scope_block}"
+            "{job_block}"
+            "输出要求：必须包含构建状态、执行命令、失败原因或产物位置。"
         ),
     ),
 }

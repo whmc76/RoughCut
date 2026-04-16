@@ -113,3 +113,7 @@ services:
       NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-all}
       NVIDIA_DRIVER_CAPABILITIES: ${NVIDIA_DRIVER_CAPABILITIES:-compute,utility,video}
     command: ["roughcut", "worker", "--queue", "llm_queue", "--pool", "prefork", "--concurrency", "2"]
+
+  worker-agent:
+    <<: *app-common
+    command: ["roughcut", "worker", "--queue", "agent_queue", "--pool", "prefork", "--concurrency", "2"]

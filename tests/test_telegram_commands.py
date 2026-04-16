@@ -339,6 +339,43 @@ async def test_handle_run_implement_requires_confirmation(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_handle_run_build_submits_agent_task_without_confirmation(monkeypatch):
+    sent: list[str] = []
+
+    async def fake_send_text(text: str) -> None:
+        sent.append(text)
+
+    setattr(fake_send_text, "_telegram_chat_id", "321")
+
+    created = []
+    submitted = []
+
+    def fake_create_task_record(**kwargs):
+        created.append(kwargs)
+        return SimpleNamespace(task_id="task-build", **kwargs)
+
+    monkeypatch.setattr(
+        commands_mod,
+        "get_settings",
+        lambda: SimpleNamespace(telegram_agent_claude_enabled=False, telegram_agent_acp_command="", telegram_agent_codex_command="codex"),
+    )
+    monkeypatch.setattr(commands_mod.shutil, "which", lambda name: "C:/tools/codex.exe" if name == "codex" else None)
+    monkeypatch.setattr(commands_mod, "create_task_record", fake_create_task_record)
+    monkeypatch.setattr(commands_mod, "submit_agent_task", lambda record: submitted.append(record) or record)
+
+    handled = await handle_telegram_command(
+        '/run codex build --task "执行 pnpm build 并汇总失败原因"',
+        send_text=fake_send_text,
+    )
+
+    assert handled is True
+    assert created[0]["preset"] == "build"
+    assert created[0]["status"] == "queued"
+    assert submitted
+    assert "任务已提交" in sent[0]
+
+
+@pytest.mark.asyncio
 async def test_handle_unknown_command_creates_extension_task(monkeypatch):
     sent: list[str] = []
 
@@ -409,6 +446,46 @@ async def test_handle_freeform_request_queues_triage_task(monkeypatch):
     assert created[0]["provider"] == "acp"
     assert created[0]["preset"] == "triage"
     assert created[0]["status"] == "queued"
+    assert submitted
+    assert "已将请求交给 Telegram agent" in sent[0]
+
+
+@pytest.mark.asyncio
+async def test_handle_freeform_build_request_queues_build_task(monkeypatch):
+    sent: list[str] = []
+
+    async def fake_send_text(text: str) -> None:
+        sent.append(text)
+
+    setattr(fake_send_text, "_telegram_chat_id", "321")
+
+    created = []
+    submitted = []
+
+    def fake_create_task_record(**kwargs):
+        created.append(kwargs)
+        return SimpleNamespace(task_id="task-build-freeform", **kwargs)
+
+    monkeypatch.setattr(
+        commands_mod,
+        "get_settings",
+        lambda: SimpleNamespace(
+            telegram_agent_enabled=True,
+            telegram_agent_claude_enabled=False,
+            telegram_agent_claude_command="claude",
+            telegram_agent_acp_command="python scripts/acp_bridge.py",
+        ),
+    )
+    monkeypatch.setattr(commands_mod, "create_task_record", fake_create_task_record)
+    monkeypatch.setattr(commands_mod, "submit_agent_task", lambda record: submitted.append(record) or record)
+
+    handled = await handle_telegram_freeform_request("帮我把前端构建一下，顺便看看报错", send_text=fake_send_text)
+
+    assert handled is True
+    assert created[0]["provider"] == "acp"
+    assert created[0]["preset"] == "build"
+    assert created[0]["status"] == "queued"
+    assert "构建/验证请求" in created[0]["task_text"]
     assert submitted
     assert "已将请求交给 Telegram agent" in sent[0]
 

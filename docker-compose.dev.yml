@@ -41,6 +41,12 @@ services:
     command: ["python", "-m", "watchfiles", "--filter", "python", "roughcut worker --queue llm_queue --pool prefork --concurrency 2", "/app/src"]
     volumes: *dev-source-sync-volumes
 
+  worker-agent:
+    environment:
+      <<: *dev-app-env
+    command: ["python", "-m", "watchfiles", "--filter", "python", "roughcut worker --queue agent_queue --pool prefork --concurrency 2", "/app/src"]
+    volumes: *dev-source-sync-volumes
+
   frontend-watch:
     image: node:22-bookworm-slim
     working_dir: /workspace

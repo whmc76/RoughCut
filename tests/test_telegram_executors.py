@@ -7,7 +7,24 @@ from types import SimpleNamespace
 import roughcut.telegram.executors as executors_mod
 
 
+def _stub_isolated_workspace(monkeypatch, tmp_path: Path) -> Path:
+    workspace = tmp_path / "worktree"
+    workspace.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(
+        executors_mod,
+        "_prepare_execution_workspace",
+        lambda **kwargs: executors_mod.ExecutionWorkspace(
+            repo_root=tmp_path,
+            cwd=workspace,
+            workspace_mode="git_worktree",
+            workspace_root=workspace,
+        ),
+    )
+    return workspace
+
+
 def test_execute_acp_preset_parses_bridge_json(monkeypatch, tmp_path):
+    workspace = _stub_isolated_workspace(monkeypatch, tmp_path)
     monkeypatch.setattr(
         executors_mod,
         "get_settings",
@@ -43,9 +60,12 @@ def test_execute_acp_preset_parses_bridge_json(monkeypatch, tmp_path):
     assert result["provider"] == "acp"
     assert result["stdout"] == "bridge output"
     assert result["excerpt"] == "short summary"
+    assert result["workspace_mode"] == "git_worktree"
+    assert result["workspace_root"] == str(workspace)
 
 
 def test_execute_acp_preset_falls_back_to_builtin_bridge(monkeypatch, tmp_path):
+    _stub_isolated_workspace(monkeypatch, tmp_path)
     monkeypatch.setattr(
         executors_mod,
         "get_settings",
@@ -82,6 +102,7 @@ def test_execute_acp_preset_falls_back_to_builtin_bridge(monkeypatch, tmp_path):
 
 
 def test_execute_acp_preset_passes_claude_model_to_bridge_env(monkeypatch, tmp_path):
+    _stub_isolated_workspace(monkeypatch, tmp_path)
     monkeypatch.setattr(
         executors_mod,
         "get_settings",
@@ -131,6 +152,7 @@ def test_execute_acp_preset_passes_claude_model_to_bridge_env(monkeypatch, tmp_p
 
 
 def test_execute_acp_preset_auto_follows_hybrid_models_when_fields_blank(monkeypatch, tmp_path):
+    _stub_isolated_workspace(monkeypatch, tmp_path)
     monkeypatch.setattr(
         executors_mod,
         "get_settings",
@@ -187,6 +209,7 @@ def test_execute_acp_preset_auto_follows_hybrid_models_when_fields_blank(monkeyp
 
 
 def test_execute_acp_preset_includes_task_context_in_bridge_payload(monkeypatch, tmp_path):
+    workspace = _stub_isolated_workspace(monkeypatch, tmp_path)
     monkeypatch.setattr(
         executors_mod,
         "get_settings",
@@ -252,10 +275,12 @@ def test_execute_acp_preset_includes_task_context_in_bridge_payload(monkeypatch,
     assert captured["env"]["ROUGHCUT_AGENT_CHAT_ID"] == "chat-1"
     assert captured["env"]["ROUGHCUT_ACP_BRIDGE_BACKEND"] == "codex"
     assert captured["env"]["ROUGHCUT_ACP_BRIDGE_FALLBACK_BACKEND"] == "claude"
+    assert str(workspace) in captured["payload"]["prompt"]
     assert result["excerpt"] == "ok"
 
 
 def test_execute_acp_preset_skips_disabled_claude_backend(monkeypatch, tmp_path):
+    _stub_isolated_workspace(monkeypatch, tmp_path)
     monkeypatch.setattr(
         executors_mod,
         "get_settings",
@@ -422,6 +447,68 @@ def test_execute_codex_preset_auto_follows_openai_hybrid_model(monkeypatch, tmp_
     assert result["excerpt"] == "codex final output"
 
 
+def test_execute_codex_build_preset_uses_isolated_workspace_and_writable_sandbox(monkeypatch, tmp_path: Path):
+    workspace = _stub_isolated_workspace(monkeypatch, tmp_path)
+    monkeypatch.setenv("TELEGRAM_AGENT_CODEX_COMMAND", "codex")
+    monkeypatch.setattr(
+        executors_mod,
+        "get_settings",
+        lambda: SimpleNamespace(
+            telegram_agent_codex_model="",
+            telegram_agent_task_timeout_sec=900,
+            telegram_agent_result_max_chars=3500,
+        ),
+    )
+    monkeypatch.setattr(executors_mod.shutil, "which", lambda name: "C:/tools/codex.exe")
+
+    class FakeTempDir:
+        def __init__(self, path: Path):
+            self.name = str(path)
+
+        def __enter__(self):
+            return self.name
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+    def fake_tempdir(prefix: str):
+        path = tmp_path / "codex-build-temp"
+        path.mkdir(parents=True, exist_ok=True)
+        return FakeTempDir(path)
+
+    class FakeResult:
+        returncode = 0
+        stdout = b"stream output"
+        stderr = b""
+
+    captured = {}
+
+    def fake_run(command, *args, **kwargs):
+        captured["command"] = command
+        captured["cwd"] = kwargs.get("cwd")
+        output_path = Path(command[command.index("-o") + 1])
+        output_path.write_text("build ok", encoding="utf-8")
+        return FakeResult()
+
+    monkeypatch.setattr(executors_mod.tempfile, "TemporaryDirectory", fake_tempdir)
+    monkeypatch.setattr(executors_mod.subprocess, "run", fake_run)
+
+    result = executors_mod.execute_agent_preset(
+        task_id="build-task",
+        provider="codex",
+        preset="build",
+        task_text="执行 pnpm build 并回报结果",
+        scope_path="frontend",
+        job_id="job-build",
+    )
+
+    assert captured["command"][captured["command"].index("-C") + 1] == str(workspace)
+    assert captured["command"][captured["command"].index("-s") + 1] == "danger-full-access"
+    assert captured["cwd"] == str(workspace)
+    assert result["workspace_mode"] == "git_worktree"
+    assert result["workspace_root"] == str(workspace)
+
+
 def test_execute_claude_preset_decodes_gb18030_stdout(monkeypatch):
     monkeypatch.setattr(
         executors_mod,
@@ -457,7 +544,8 @@ def test_execute_claude_preset_decodes_gb18030_stdout(monkeypatch):
     assert result["excerpt"] == expected
 
 
-def test_execute_acp_preset_decodes_non_utf8_bridge_json(monkeypatch):
+def test_execute_acp_preset_decodes_non_utf8_bridge_json(monkeypatch, tmp_path: Path):
+    workspace = tmp_path / "worktree"
     monkeypatch.setattr(
         executors_mod,
         "get_settings",
@@ -479,6 +567,16 @@ def test_execute_acp_preset_decodes_non_utf8_bridge_json(monkeypatch):
         stdout = json.dumps(payload, ensure_ascii=False).encode("gb18030")
         stderr = b""
 
+    monkeypatch.setattr(
+        executors_mod,
+        "_prepare_execution_workspace",
+        lambda **kwargs: executors_mod.ExecutionWorkspace(
+            repo_root=workspace,
+            cwd=workspace,
+            workspace_mode="git_worktree",
+            workspace_root=workspace,
+        ),
+    )
     monkeypatch.setattr(executors_mod.subprocess, "run", lambda *args, **kwargs: FakeResult())
 
     result = executors_mod.execute_agent_preset(
@@ -491,6 +589,7 @@ def test_execute_acp_preset_decodes_non_utf8_bridge_json(monkeypatch):
 
     assert result["stdout"] == payload["stdout"]
     assert result["excerpt"] == payload["excerpt"]
+    assert result["workspace_mode"] == "git_worktree"
 
 
 def test_render_prompt_appends_project_rules_and_recent_task_memory(monkeypatch, tmp_path: Path):
@@ -521,9 +620,12 @@ def test_render_prompt_appends_project_rules_and_recent_task_memory(monkeypatch,
         task_text="增强工程能力",
         scope_path="src/roughcut/telegram",
         job_id="job-2",
+        workspace_mode="git_worktree",
+        workspace_root=str(tmp_path / "worktree"),
     )
 
     assert "项目规则与默认约束" in prompt
     assert "同会话近期任务记忆" in prompt
     assert "缺少记忆注入" in prompt
     assert "当前优先关注范围：src/roughcut/telegram" in prompt
+    assert "当前在隔离 worktree 中执行" in prompt

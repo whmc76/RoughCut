@@ -46,12 +46,13 @@ api          — FastAPI API + 生产环境静态托管 frontend/dist
 - 优先保证结构收敛、代码可维护，再考虑迁移成本
 - 只有确认进入正式版后，才开始补兼容策略
 
-后台仍由 4 个长期进程推进任务，通过数据库协调状态：
+后台仍由 5 个长期进程推进任务，通过数据库协调状态：
 
 ```
 orchestrator — 状态机，轮询 job_steps 推进流水线
 worker-media — FFmpeg 媒体处理（Celery）
 worker-llm   — 转写后处理 / LLM 推理（Celery）
+worker-agent — Telegram/ACP/Codex 远程工程任务（Celery）
 watcher      — 目录监听，自动入队
 ```
 
@@ -290,6 +291,7 @@ pnpm dev:api
 pnpm dev:orchestrator
 pnpm dev:worker:media
 pnpm dev:worker:llm
+pnpm dev:worker:agent
 pnpm dev:watcher
 pnpm dev:telegram-agent
 ```
@@ -318,6 +320,7 @@ pnpm dev:telegram-agent
 - 优先走 ACP bridge
 - ACP 默认优先调用 Codex，并建议使用 `gpt-5.4-mini` 承担工程级任务；Claude 作为后备桥接后端
 - ACP/Codex prompt 会自动附带 RoughCut 项目规则和同 Telegram 会话的近期任务记忆，避免每次冷启动
+- `build` preset 会在独立 git worktree 中执行构建/测试，不污染主工作树
 - 如果是需要改代码的扩展类请求，会自动创建待确认任务
 - 如果是分析类请求，会直接创建只读诊断任务
 
@@ -363,7 +366,7 @@ Windows 下当前建议把 [start_roughcut.bat](E:/WorkSpace/RoughCut/start_roug
 - `start_roughcut.bat infra`
   只启动 PostgreSQL / Redis / MinIO 这套轻量基础设施，供本地服务使用
 - `start_roughcut.bat runtime`
-  显式容器模式。启动容器化 `api + orchestrator + worker-media + worker-llm`；`runtime/full` 默认会带上 `docker-compose.dev.yml`，通过 bind mount + 容器内 watcher 提供 live source sync；默认不在容器里安装 `local-asr` extras
+  显式容器模式。启动容器化 `api + orchestrator + worker-media + worker-llm + worker-agent`；`runtime/full` 默认会带上 `docker-compose.dev.yml`，通过 bind mount + 容器内 watcher 提供 live source sync；默认不在容器里安装 `local-asr` extras
 - `start_roughcut.bat runtime-local-asr`
   启动 runtime，并显式在 Docker 镜像里启用 `local-asr` extras
 - `start_roughcut.bat full`
@@ -404,7 +407,7 @@ Windows 下当前建议把 [start_roughcut.bat](E:/WorkSpace/RoughCut/start_roug
 - `docker-compose.infra.yml`
   只放 `postgres` / `redis`
 - `docker-compose.runtime.yml`
-  放推荐常驻的 `migrate` / `api` / `orchestrator` / `worker-media` / `worker-llm`
+  放推荐常驻的 `migrate` / `api` / `orchestrator` / `worker-media` / `worker-llm` / `worker-agent`
 - `docker-compose.automation.yml`
   放可选自动化服务，当前第一版只包含 `watcher`
 
@@ -442,6 +445,7 @@ docker compose -f docker-compose.infra.yml -f docker-compose.runtime.yml -f dock
 - `orchestrator`
 - `worker-media`
 - `worker-llm`
+- `worker-agent`
 - `postgres`
 - `redis`
 
@@ -475,7 +479,7 @@ RoughCut 现在保留两种明确分离的代码同步模式：
 host-side rebuild watch 仍由两层脚本提供：
 
 - `scripts/run-roughcut-docker-refresh-session.ps1`
-  单次执行 `docker compose up -d --build --force-recreate`，只重建 `migrate / api / orchestrator / worker-media / worker-llm`，不会主动重建 `postgres / redis`
+  单次执行 `docker compose up -d --build --force-recreate`，只重建 `migrate / api / orchestrator / worker-media / worker-llm / worker-agent`，不会主动重建 `postgres / redis`
 - `scripts/watch-roughcut-docker-runtime.ps1`
   持续监听 `src/`、`frontend/`、`scripts/`、compose、`Dockerfile`、`pyproject.toml`、`uv.lock` 等改动，debounce 后触发 refresh
 

@@ -69,7 +69,7 @@ def submit_agent_task(record: TelegramAgentTaskRecord) -> TelegramAgentTaskRecor
             "job_id": record.job_id,
         },
         task_id=record.task_id,
-        queue="llm_queue",
+        queue="agent_queue",
     )
     updated = get_task_store().update(record.task_id, status="queued", error_text="", notified=False)
     return updated or record
@@ -134,6 +134,9 @@ def get_agent_task_status(task_id: str) -> dict[str, Any]:
     normalized_state = _normalize_celery_state(result.state)
     result_excerpt = _extract_result_excerpt(result.result)
     error_text = _extract_error_text(result.result)
+    execution_cwd = _extract_result_field(result.result, "cwd")
+    workspace_mode = _extract_result_field(result.result, "workspace_mode")
+    workspace_root = _extract_result_field(result.result, "workspace_root")
     result_path = record.result_path
     if normalized_state in {"success", "failed"}:
         result_path = persist_agent_task_result(task_id, result.result)
@@ -143,6 +146,9 @@ def get_agent_task_status(task_id: str) -> dict[str, Any]:
         result_excerpt=result_excerpt or record.result_excerpt,
         error_text=error_text or record.error_text,
         result_path=result_path or record.result_path,
+        execution_cwd=execution_cwd or record.execution_cwd,
+        workspace_mode=workspace_mode or record.workspace_mode,
+        workspace_root=workspace_root or record.workspace_root,
     )
     return asdict(updated or record)
 
@@ -221,3 +227,9 @@ def _extract_error_text(result: Any) -> str:
     if result is None:
         return ""
     return str(result).strip()[:1200]
+
+
+def _extract_result_field(result: Any, key: str) -> str:
+    if isinstance(result, dict):
+        return str(result.get(key) or "").strip()
+    return ""

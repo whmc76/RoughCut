@@ -32,6 +32,10 @@ def test_dev_compose_enables_live_source_sync_for_runtime_services():
     assert worker_llm["environment"]["PYTHONPATH"] == "/app/src"
     assert "/app/src" in worker_llm["command"][-1]
 
+    worker_agent = services["worker-agent"]
+    assert worker_agent["environment"]["PYTHONPATH"] == "/app/src"
+    assert "/app/src" in worker_agent["command"][-1]
+
     frontend_watch = services["frontend-watch"]
     command = " ".join(frontend_watch["command"])
     assert "pnpm install --frozen-lockfile" in command
@@ -80,6 +84,7 @@ def test_readme_describes_local_first_development_flow():
     assert "`start_roughcut.bat` 作为默认开发入口" in readme_text
     assert "本地模式不再隐式拉起任何 Docker 容器" in readme_text
     assert "`runtime/full` 仍保留，但属于显式容器模式" in readme_text
+    assert "worker-agent" in readme_text
     assert "Docker 更适合基础依赖、部署验证和显式容器化运行" in readme_text
     assert "runtime-auto-watch" not in readme_text
     assert "full-auto-watch" not in readme_text

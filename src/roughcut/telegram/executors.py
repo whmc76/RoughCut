@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,14 @@ from roughcut.config import (
 from roughcut.telegram.output_codec import decode_process_output
 from roughcut.telegram.presets import get_preset
 from roughcut.telegram.task_store import TelegramAgentTaskStore
+
+
+@dataclass(frozen=True)
+class ExecutionWorkspace:
+    repo_root: Path
+    cwd: Path
+    workspace_mode: str
+    workspace_root: Path
 
 
 def _repo_root() -> Path:
@@ -96,6 +105,7 @@ def _execute_claude_preset(
     )
 
     repo_root = _repo_root()
+    workspace = _prepare_execution_workspace(task_id=task_id, preset_config=preset_config)
     scope_value = _normalize_scope(scope_path, repo_root)
     prompt = _render_prompt(
         task_id=task_id,
@@ -105,8 +115,10 @@ def _execute_claude_preset(
         task_text=task_text,
         scope_path=scope_value,
         job_id=job_id,
+        workspace_mode=workspace.workspace_mode,
+        workspace_root=str(workspace.workspace_root),
     )
-    permission_mode = "acceptEdits" if preset_config.allow_edits else "plan"
+    permission_mode = "acceptEdits" if _preset_allows_workspace_writes(preset_config) else "plan"
     command = [
         resolved_command,
         "-p",
@@ -115,7 +127,7 @@ def _execute_claude_preset(
         "--output-format",
         "text",
         "--add-dir",
-        str(repo_root),
+        str(workspace.cwd),
     ]
     if model_name:
         command.extend(["--model", model_name])
@@ -125,7 +137,7 @@ def _execute_claude_preset(
         input=prompt.encode("utf-8"),
         capture_output=True,
         timeout=timeout,
-        cwd=str(repo_root),
+        cwd=str(workspace.cwd),
         env=os.environ.copy(),
         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
@@ -137,7 +149,9 @@ def _execute_claude_preset(
     return {
         "provider": "claude",
         "preset": preset,
-        "cwd": str(repo_root),
+        "cwd": str(workspace.cwd),
+        "workspace_mode": workspace.workspace_mode,
+        "workspace_root": str(workspace.workspace_root),
         "scope_path": scope_value,
         "job_id": job_id,
         "stdout": stdout,
@@ -179,6 +193,7 @@ def _execute_codex_preset(
     )
 
     repo_root = _repo_root()
+    workspace = _prepare_execution_workspace(task_id=task_id, preset_config=preset_config)
     scope_value = _normalize_scope(scope_path, repo_root)
     prompt = _render_prompt(
         task_id=task_id,
@@ -188,8 +203,10 @@ def _execute_codex_preset(
         task_text=task_text,
         scope_path=scope_value,
         job_id=job_id,
+        workspace_mode=workspace.workspace_mode,
+        workspace_root=str(workspace.workspace_root),
     )
-    sandbox_mode = "danger-full-access" if preset_config.allow_edits else "read-only"
+    sandbox_mode = "danger-full-access" if _preset_allows_workspace_writes(preset_config) else "read-only"
     timeout = max(30, int(getattr(settings, "telegram_agent_task_timeout_sec", 900)))
     with tempfile.TemporaryDirectory(prefix="roughcut-codex-") as temp_dir:
         output_file = Path(temp_dir) / "last-message.txt"
@@ -205,7 +222,7 @@ def _execute_codex_preset(
             "--color",
             "never",
             "-C",
-            str(repo_root),
+            str(workspace.cwd),
             "-s",
             sandbox_mode,
             "-o",
@@ -216,7 +233,7 @@ def _execute_codex_preset(
             command,
             capture_output=True,
             timeout=timeout,
-            cwd=str(repo_root),
+            cwd=str(workspace.cwd),
             env=os.environ.copy(),
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
@@ -232,7 +249,9 @@ def _execute_codex_preset(
     return {
         "provider": "codex",
         "preset": preset,
-        "cwd": str(repo_root),
+        "cwd": str(workspace.cwd),
+        "workspace_mode": workspace.workspace_mode,
+        "workspace_root": str(workspace.workspace_root),
         "scope_path": scope_value,
         "job_id": job_id,
         "stdout": stdout,
@@ -256,9 +275,10 @@ def _execute_acp_preset(
     if preset_config is None:
         raise ValueError(f"Unknown ACP preset: {preset}")
     repo_root = _repo_root()
+    workspace = _prepare_execution_workspace(task_id=task_id, preset_config=preset_config)
     bridge_command = str(getattr(settings, "telegram_agent_acp_command", "") or "").strip()
     if not bridge_command:
-        bridge_command = _default_acp_bridge_command(repo_root)
+        bridge_command = _default_acp_bridge_command(workspace.cwd)
     scope_value = _normalize_scope(scope_path, repo_root)
     payload = {
         "task_id": task_id,
@@ -268,7 +288,7 @@ def _execute_acp_preset(
         "task": task_text,
         "scope_path": scope_value,
         "job_id": job_id,
-        "repo_root": str(repo_root),
+        "repo_root": str(workspace.cwd),
         "prompt": _render_prompt(
             task_id=task_id,
             chat_id=chat_id,
@@ -277,6 +297,8 @@ def _execute_acp_preset(
             task_text=task_text,
             scope_path=scope_value,
             job_id=job_id,
+            workspace_mode=workspace.workspace_mode,
+            workspace_root=str(workspace.workspace_root),
         ),
     }
     env = os.environ.copy()
@@ -286,6 +308,9 @@ def _execute_acp_preset(
     env["ROUGHCUT_AGENT_JOB_ID"] = job_id
     env["ROUGHCUT_AGENT_TASK_ID"] = task_id
     env["ROUGHCUT_AGENT_CHAT_ID"] = chat_id
+    env["ROUGHCUT_ACP_BRIDGE_CODEX_SANDBOX"] = (
+        "danger-full-access" if _preset_allows_workspace_writes(preset_config) else "read-only"
+    )
     backends = _configured_acp_backends(settings)
     if not backends:
         raise RuntimeError("ACP bridge has no enabled backend")
@@ -342,7 +367,7 @@ def _execute_acp_preset(
         input=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
         capture_output=True,
         timeout=timeout,
-        cwd=str(repo_root),
+        cwd=str(workspace.cwd),
         env=env,
         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
@@ -364,7 +389,9 @@ def _execute_acp_preset(
     return {
         "provider": "acp",
         "preset": preset,
-        "cwd": str(repo_root),
+        "cwd": str(workspace.cwd),
+        "workspace_mode": workspace.workspace_mode,
+        "workspace_root": str(workspace.workspace_root),
         "scope_path": scope_value,
         "job_id": job_id,
         "stdout": str(parsed.get("stdout") if isinstance(parsed, dict) else stdout or "").strip() or stdout,
@@ -383,6 +410,8 @@ def _render_prompt(
     task_text: str,
     scope_path: str,
     job_id: str,
+    workspace_mode: str,
+    workspace_root: str,
 ) -> str:
     preset_config = get_preset(provider, preset)
     if preset_config is None:
@@ -397,7 +426,11 @@ def _render_prompt(
         job_block=job_block,
     ).strip()
     context_blocks = [
-        _build_project_rules_block(scope_path=scope_path),
+        _build_project_rules_block(
+            scope_path=scope_path,
+            workspace_mode=workspace_mode,
+            workspace_root=workspace_root,
+        ),
         _build_recent_task_memory_block(chat_id=chat_id, current_task_id=task_id),
     ]
     extra_context = "\n\n".join(block for block in context_blocks if block)
@@ -406,7 +439,7 @@ def _render_prompt(
     return rendered.strip()
 
 
-def _build_project_rules_block(*, scope_path: str) -> str:
+def _build_project_rules_block(*, scope_path: str, workspace_mode: str, workspace_root: str) -> str:
     lines = [
         "项目规则与默认约束：",
         "- 当前仓库是 RoughCut，核心链路包括 FastAPI API、React/Vite 控制台、Celery worker、Telegram agent 与 ACP bridge。",
@@ -415,6 +448,9 @@ def _build_project_rules_block(*, scope_path: str) -> str:
         "- 日常命令优先从仓库根目录使用 pnpm；Python 依赖和 CLI 仍由 uv 管理。",
         "- 若本次提供了 scope_path，只在该范围及其直接依赖内收敛改动；确有必要再扩大范围。",
     ]
+    if workspace_mode == "git_worktree" and workspace_root:
+        lines.append(f"- 当前在隔离 worktree 中执行，路径：{workspace_root}")
+        lines.append("- 如需构建、安装依赖或产出临时文件，只写入该隔离工作区，不要回到主工作树。")
     if scope_path:
         lines.append(f"- 当前优先关注范围：{scope_path}")
     return "\n".join(lines)
@@ -501,6 +537,73 @@ def _truncate_text(text: str, *, max_chars: int) -> str:
 def _default_acp_bridge_command(repo_root: Path) -> str:
     script = repo_root / "scripts" / "acp_bridge.py"
     return f'"{sys.executable}" "{script}"'
+
+
+def _preset_allows_workspace_writes(preset_config) -> bool:
+    return bool(getattr(preset_config, "allow_edits", False) or getattr(preset_config, "isolated_workspace", False))
+
+
+def _prepare_execution_workspace(*, task_id: str, preset_config) -> ExecutionWorkspace:
+    repo_root = _repo_root()
+    if not bool(getattr(preset_config, "isolated_workspace", False)):
+        return ExecutionWorkspace(
+            repo_root=repo_root,
+            cwd=repo_root,
+            workspace_mode="repo",
+            workspace_root=repo_root,
+        )
+
+    state_root = _state_dir_path()
+    if repo_root == state_root or repo_root in state_root.parents:
+        state_root = repo_root.parent / ".roughcut-telegram-agent"
+    workspace_root = state_root / "worktrees" / _sanitize_task_id(task_id or "task")
+    _recreate_git_worktree(repo_root=repo_root, workspace_root=workspace_root)
+    return ExecutionWorkspace(
+        repo_root=repo_root,
+        cwd=workspace_root,
+        workspace_mode="git_worktree",
+        workspace_root=workspace_root,
+    )
+
+
+def _sanitize_task_id(value: str) -> str:
+    normalized = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "-" for ch in str(value or "").strip())
+    normalized = normalized.strip("-_")
+    return normalized or "task"
+
+
+def _git_command() -> str:
+    resolved = shutil.which("git")
+    if not resolved:
+        raise RuntimeError("git command not found in PATH; isolated Telegram worktree is unavailable")
+    return resolved
+
+
+def _recreate_git_worktree(*, repo_root: Path, workspace_root: Path) -> None:
+    git = _git_command()
+    workspace_root.parent.mkdir(parents=True, exist_ok=True)
+    if workspace_root.exists():
+        _remove_git_worktree(repo_root=repo_root, workspace_root=workspace_root)
+        shutil.rmtree(workspace_root, ignore_errors=True)
+    subprocess.run(
+        [git, "-C", str(repo_root), "worktree", "add", "--detach", str(workspace_root), "HEAD"],
+        capture_output=True,
+        timeout=60,
+        check=True,
+        env={**os.environ.copy(), "PYTHONIOENCODING": os.environ.get("PYTHONIOENCODING", "utf-8")},
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+
+
+def _remove_git_worktree(*, repo_root: Path, workspace_root: Path) -> None:
+    git = _git_command()
+    subprocess.run(
+        [git, "-C", str(repo_root), "worktree", "remove", "--force", str(workspace_root)],
+        capture_output=True,
+        timeout=30,
+        env={**os.environ.copy(), "PYTHONIOENCODING": os.environ.get("PYTHONIOENCODING", "utf-8")},
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
 
 
 def _configured_acp_backends(settings) -> list[str]:
