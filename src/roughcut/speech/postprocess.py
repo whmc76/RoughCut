@@ -681,6 +681,8 @@ _SPLIT_MEASURE_LEFT_RE = re.compile(
 _SPLIT_MEASURE_RIGHT_RE = re.compile(
     rf"^(?:{_DISPLAY_NUM_TOKEN})?(?:个|只|把|条|点|件|款|袋|盒|包|支|瓶|片|颗|次|种|位|类|份|套|台|张|米|寸|段|步|层|页|代|号|年|月|天|周|小时|分钟|秒)"
 )
+_EMPHASIS_REPEAT_CUE_RE = re.compile(r"(?:说|讲|重复)(?:一|两|二|三|3|好多)遍")
+_COUNTING_REPEAT_UNIT_RE = re.compile(r"^(?:第[\u4e00-\u9fff\d]{1,3}|[\u4e00-\u9fff\d]{1,3}个)$")
 _UNCLOSED_NOMINAL_TAIL_RE = re.compile(
     r"(?:"
     r"第(?:[0-9]+|[一二两三四五六七八九十])个|"
@@ -3176,7 +3178,10 @@ def _collapse_exact_repeated_phrase(text: str) -> str | None:
         if len(candidate) % unit_len != 0:
             continue
         unit = candidate[:unit_len]
-        if unit * (len(candidate) // unit_len) == candidate:
+        repeat_count = len(candidate) // unit_len
+        if unit * repeat_count == candidate:
+            if _looks_like_natural_emphasis_repetition(unit, repeat_count=repeat_count):
+                return None
             return unit
     return None
 
@@ -3214,8 +3219,30 @@ def _leading_repeated_prefix_text(text: str, *, max_unit: int = 6) -> str:
     for size in range(upper, 1, -1):
         prefix = candidate[:size]
         if candidate.startswith(prefix * 2):
+            tail = candidate[size * 2:]
+            if _looks_like_natural_emphasis_repetition(prefix, repeat_count=2, tail=tail):
+                continue
             return prefix
     return ""
+
+
+def _looks_like_natural_emphasis_repetition(unit: str, *, repeat_count: int, tail: str = "") -> bool:
+    phrase = str(unit or "").strip()
+    remainder = str(tail or "").strip("，。！？!?、：:；;,. ")
+    if not phrase or repeat_count < 2:
+        return False
+    combined = f"{phrase}{remainder}"
+    if _EMPHASIS_REPEAT_CUE_RE.search(combined):
+        return True
+    if remainder:
+        return False
+    if repeat_count > 3:
+        return False
+    if not re.fullmatch(r"[\u4e00-\u9fff]{2,4}", phrase):
+        return False
+    if _COUNTING_REPEAT_UNIT_RE.fullmatch(phrase):
+        return False
+    return True
 
 
 def _should_merge_subtitle_pair(left: str, right: str) -> bool:

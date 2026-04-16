@@ -7392,9 +7392,30 @@ def _collapse_repeated_phrase_prefix(text: str) -> str:
         if not candidate.startswith(prefix * 2):
             continue
         tail = candidate[unit_len * 2:]
+        if _looks_like_natural_emphasis_repetition(prefix, repeat_count=2, tail=tail):
+            continue
         if len(tail) <= 2 and re.fullmatch(r"[那啊呢嘛吧呀呃]*", tail):
             return f"{prefix}{tail}{suffix}"
     return ""
+
+
+def _looks_like_natural_emphasis_repetition(unit: str, *, repeat_count: int, tail: str = "") -> bool:
+    phrase = str(unit or "").strip()
+    remainder = str(tail or "").strip("，。！？!?、：:；;,. ")
+    if not phrase or repeat_count < 2:
+        return False
+    combined = f"{phrase}{remainder}"
+    if re.search(r"(?:说|讲|重复)(?:一|两|二|三|3|好多)遍", combined):
+        return True
+    if remainder:
+        return False
+    if repeat_count > 3:
+        return False
+    if not re.fullmatch(r"[\u4e00-\u9fff]{2,4}", phrase):
+        return False
+    if re.fullmatch(r"(?:第[\u4e00-\u9fff\d]{1,3}|[\u4e00-\u9fff\d]{1,3}个)", phrase):
+        return False
+    return True
 
 
 def _shared_boundary_overlap(left: str, right: str, *, max_overlap: int = 8) -> str:

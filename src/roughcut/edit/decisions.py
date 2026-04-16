@@ -144,6 +144,8 @@ _RESTART_PREFIX_TERMS = (
     "再讲一遍",
     "再说一遍",
 )
+_EMPHASIS_REPEAT_CUE_RE = re.compile(r"(?:说|讲|重复)(?:一|两|二|三|3|好多)遍")
+_COUNTING_REPEAT_UNIT_RE = re.compile(r"^(?:第[\u4e00-\u9fff\d]{1,3}|[\u4e00-\u9fff\d]{1,3}个)$")
 _TERMINAL_PUNCTUATION_CHARS = "。！？!?…~"
 _INCOMPLETE_TAIL_SUFFIXES = (
     "的",
@@ -1526,6 +1528,8 @@ def _is_low_signal_subtitle_text(text: str, *, content_profile: dict | None = No
         return True
     if _looks_like_noise_subtitle(compact):
         return True
+    if _is_exact_natural_emphasis_repetition(compact):
+        return False
     if len(compact) <= 2:
         return True
     if (
@@ -1539,6 +1543,11 @@ def _is_low_signal_subtitle_text(text: str, *, content_profile: dict | None = No
     if (
         repeated_chunk
         and len(repeated_chunk.group(0)) >= max(4, int(len(compact) * 0.55))
+        and not _looks_like_natural_emphasis_repetition(
+            repeated_chunk.group(1),
+            repeat_count=max(2, len(repeated_chunk.group(0)) // max(len(repeated_chunk.group(1)), 1)),
+            full_text=compact,
+        )
         and not _has_anchor_signal(compact, content_profile=content_profile)
         and not _has_visual_showcase_signal(compact, content_profile=content_profile)
     ):
@@ -1547,7 +1556,15 @@ def _is_low_signal_subtitle_text(text: str, *, content_profile: dict | None = No
     if len(compact) >= 8 and unique_chars <= max(2, len(compact) // 5):
         return True
     repeated_token_match = re.fullmatch(r"(.{1,6})", compact)
-    if repeated_token_match and compact.count(repeated_token_match.group(1)) >= 3:
+    if (
+        repeated_token_match
+        and compact.count(repeated_token_match.group(1)) >= 3
+        and not _looks_like_natural_emphasis_repetition(
+            repeated_token_match.group(1),
+            repeat_count=compact.count(repeated_token_match.group(1)),
+            full_text=compact,
+        )
+    ):
         return True
     stripped_hedge = HEDGE_PATTERN.sub("", compact)
     if (
@@ -1572,6 +1589,41 @@ def _is_low_signal_subtitle_text(text: str, *, content_profile: dict | None = No
         return True
     if _looks_like_subject_conflict_subtitle(compact, content_profile=content_profile):
         return True
+    return False
+
+
+def _looks_like_natural_emphasis_repetition(unit: str, *, repeat_count: int, full_text: str = "") -> bool:
+    phrase = str(unit or "").strip()
+    candidate = str(full_text or "").strip()
+    if not phrase or repeat_count < 2:
+        return False
+    combined = candidate or phrase
+    if _EMPHASIS_REPEAT_CUE_RE.search(combined):
+        return True
+    if repeat_count > 3:
+        return False
+    if candidate != phrase * repeat_count:
+        return False
+    if not re.fullmatch(r"[\u4e00-\u9fff]{2,4}", phrase):
+        return False
+    if _COUNTING_REPEAT_UNIT_RE.fullmatch(phrase):
+        return False
+    return True
+
+
+def _is_exact_natural_emphasis_repetition(text: str) -> bool:
+    candidate = str(text or "").strip()
+    if len(candidate) < 4:
+        return False
+    for unit_len in range(2, len(candidate) // 2 + 1):
+        if len(candidate) % unit_len != 0:
+            continue
+        repeat_count = len(candidate) // unit_len
+        unit = candidate[:unit_len]
+        if unit * repeat_count != candidate:
+            continue
+        if _looks_like_natural_emphasis_repetition(unit, repeat_count=repeat_count, full_text=candidate):
+            return True
     return False
 
 

@@ -272,6 +272,15 @@ def test_split_into_subtitles_drops_zero_duration_and_collapses_repeated_duplica
     assert entries[0].end > entries[0].start
 
 
+def test_split_into_subtitles_keeps_short_emphasis_repetition():
+    segs = [_mock_segment(0, 0.0, 1.2, "真的好久好久没见了")]
+
+    entries = split_into_subtitles(segs, max_chars=20, max_duration=3.0)
+
+    assert len(entries) == 1
+    assert entries[0].text_raw == "真的好久好久没见了"
+
+
 def test_split_into_subtitles_collapses_adjacent_near_duplicates():
     segs = [
         _mock_segment(0, 0.0, 0.9, "其实也算一个呼应"),
@@ -789,6 +798,22 @@ def test_cleanup_subtitle_entries_iteratively_trims_repeated_prefix_overlap():
     cleaned = _cleanup_subtitle_entries(entries)
 
     assert [entry.text_raw for entry in cleaned] == ["啊我们看它的第二个仓", "相当于它的这个副仓"]
+
+
+def test_cleanup_subtitle_entries_keeps_repetition_with_say_three_times_cue():
+    entries = [
+        SubtitleEntry(
+            index=0,
+            start=0.0,
+            end=2.0,
+            text_raw="重要的事情说三遍重要的事情说三遍重要的事情说三遍",
+            text_norm=normalize_text("重要的事情说三遍重要的事情说三遍重要的事情说三遍"),
+        ),
+    ]
+
+    cleaned = _cleanup_subtitle_entries(entries)
+
+    assert [entry.text_raw for entry in cleaned] == ["重要的事情说三遍重要的事情说三遍重要的事情说三遍"]
 
 
 def test_should_merge_subtitle_pair_for_unclosed_nominal_phrase_boundary():

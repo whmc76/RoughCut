@@ -4524,6 +4524,35 @@ async def test_polish_subtitle_items_fallback_collapses_repeated_phrase_fragment
 
 
 @pytest.mark.asyncio
+async def test_polish_subtitle_items_fallback_keeps_short_emphasis_repetition(monkeypatch: pytest.MonkeyPatch):
+    from roughcut.review import content_profile as content_profile_module
+
+    def raising_provider():
+        raise RuntimeError("provider unavailable")
+
+    monkeypatch.setattr(content_profile_module, "get_reasoning_provider", raising_provider)
+
+    item = SimpleNamespace(
+        item_index=0,
+        start_time=0.0,
+        end_time=2.0,
+        text_raw="真的好久好久没见了。",
+        text_norm="真的好久好久没见了。",
+        text_final=None,
+    )
+
+    polished = await polish_subtitle_items(
+        [item],
+        content_profile={"preset_name": "edc_tactical"},
+        glossary_terms=[],
+        review_memory={"terms": [], "aliases": [], "style_examples": []},
+    )
+
+    assert polished == 1
+    assert item.text_final == "真的好久好久没见了。"
+
+
+@pytest.mark.asyncio
 async def test_polish_subtitle_items_fallback_trims_repeated_boundary_char(monkeypatch: pytest.MonkeyPatch):
     from roughcut.review import content_profile as content_profile_module
 

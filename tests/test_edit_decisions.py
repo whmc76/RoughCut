@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 
-from roughcut.edit.decisions import _resolve_keep_energy_for_segment, EditSegment, build_edit_decision
+from roughcut.edit.decisions import _is_low_signal_subtitle_text, _resolve_keep_energy_for_segment, EditSegment, build_edit_decision
 from roughcut.edit.skills import apply_review_focus_overrides, resolve_editing_skill
 from roughcut.media.silence import SilenceSegment
 
@@ -99,6 +99,11 @@ def test_build_edit_decision_keeps_short_hedge_heavy_subtitles_for_manual_review
 
     remove_segments = [s for s in decision.segments if s.type == "remove"]
     assert all(segment.reason != "low_signal_subtitle" for segment in remove_segments)
+
+
+def test_is_low_signal_subtitle_text_preserves_emphasis_repetition():
+    assert _is_low_signal_subtitle_text("好久好久", content_profile=None) is False
+    assert _is_low_signal_subtitle_text("重要的事情说三遍重要的事情说三遍重要的事情说三遍", content_profile=None) is False
 
 
 def test_build_edit_decision_keeps_noise_like_subtitle_without_explicit_filler_rule():
