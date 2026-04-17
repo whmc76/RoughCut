@@ -933,6 +933,36 @@ async def test_update_job_statuses_triggers_quality_rerun_for_generic_low_detail
         session.add(
             Artifact(
                 job_id=job_id,
+                artifact_type="canonical_transcript_layer",
+                data_json={
+                    "layer": "canonical_transcript",
+                    "source_basis": "subtitle_projection_review",
+                    "segment_count": 1,
+                    "duration": 4.0,
+                    "correction_metrics": {
+                        "accepted_correction_count": 0,
+                        "pending_correction_count": 0,
+                    },
+                    "segments": [
+                        {
+                            "index": 0,
+                            "start": 0.0,
+                            "end": 4.0,
+                            "text": "Loop露普SK05二代UV版和一代做对比。",
+                            "text_raw": "Loop露普SK05二代UV版和一代做对比。",
+                            "text_canonical": "Loop露普SK05二代UV版和一代做对比。",
+                            "source_subtitle_index": 0,
+                            "accepted_corrections": [],
+                            "pending_corrections": [],
+                            "words": [],
+                        }
+                    ],
+                },
+            )
+        )
+        session.add(
+            Artifact(
+                job_id=job_id,
                 artifact_type="platform_packaging_md",
                 storage_path="E:/tmp/quality_publish.md",
             )
@@ -1200,6 +1230,36 @@ async def test_update_job_statuses_reruns_subtitle_chain_for_subtitle_quality_is
         session.add(
             Artifact(
                 job_id=job_id,
+                artifact_type="canonical_transcript_layer",
+                data_json={
+                    "layer": "canonical_transcript",
+                    "source_basis": "subtitle_projection_review",
+                    "segment_count": 1,
+                    "duration": 4.0,
+                    "correction_metrics": {
+                        "accepted_correction_count": 0,
+                        "pending_correction_count": 0,
+                    },
+                    "segments": [
+                        {
+                            "index": 0,
+                            "start": 0.0,
+                            "end": 4.0,
+                            "text": "Loop露普SK05二代UV版和一代亮度续航对比。",
+                            "text_raw": "Loop露普SK05二代UV版和一代亮度续航对比。",
+                            "text_canonical": "Loop露普SK05二代UV版和一代亮度续航对比。",
+                            "source_subtitle_index": 0,
+                            "accepted_corrections": [],
+                            "pending_corrections": [],
+                            "words": [],
+                        }
+                    ],
+                },
+            )
+        )
+        session.add(
+            Artifact(
+                job_id=job_id,
                 artifact_type="platform_packaging_md",
                 storage_path="E:/tmp/subtitle-only_publish.md",
             )
@@ -1226,6 +1286,7 @@ async def test_update_job_statuses_reruns_subtitle_chain_for_subtitle_quality_is
         assert job.status == "processing"
         assert step_map["subtitle_postprocess"].status == "pending"
         assert step_map["glossary_review"].status == "pending"
+        assert step_map["transcript_review"].status == "pending"
         assert step_map["subtitle_translation"].status == "pending"
         assert step_map["content_profile"].status == "pending"
         assert step_map["edit_plan"].status == "pending"
@@ -1237,7 +1298,10 @@ async def test_update_job_statuses_reruns_subtitle_chain_for_subtitle_quality_is
         assert latest_quality.data_json["auto_rerun_triggered"] is True
         assert latest_quality.data_json["auto_rerun_steps"] == [
             "subtitle_postprocess",
+            "subtitle_term_resolution",
+            "subtitle_consistency_review",
             "glossary_review",
+            "transcript_review",
             "subtitle_translation",
             "content_profile",
             "ai_director",
@@ -1264,12 +1328,13 @@ def test_artifact_types_for_quality_rerun_gates_multisource_artifacts_by_feature
     )
 
     disabled_cleanup = orchestrator_mod._artifact_types_for_quality_rerun(
-        {"transcribe", "content_profile", "glossary_review"}
+        {"transcribe", "content_profile", "glossary_review", "transcript_review"}
     )
 
     assert "transcript_evidence" not in disabled_cleanup
     assert "content_profile_ocr" not in disabled_cleanup
     assert "entity_resolution_trace" not in disabled_cleanup
+    assert "canonical_transcript_layer" in disabled_cleanup
 
     monkeypatch.setattr(
         orchestrator_mod,
@@ -1283,9 +1348,10 @@ def test_artifact_types_for_quality_rerun_gates_multisource_artifacts_by_feature
     )
 
     enabled_cleanup = orchestrator_mod._artifact_types_for_quality_rerun(
-        {"transcribe", "content_profile", "glossary_review"}
+        {"transcribe", "content_profile", "glossary_review", "transcript_review"}
     )
 
     assert "transcript_evidence" in enabled_cleanup
     assert "content_profile_ocr" in enabled_cleanup
     assert "entity_resolution_trace" in enabled_cleanup
+    assert "canonical_transcript_layer" in enabled_cleanup

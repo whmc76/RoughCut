@@ -17,6 +17,10 @@ from roughcut.providers.transcription.base import TranscriptResult, TranscriptSe
 from roughcut.review.evidence_types import ARTIFACT_TYPE_TRANSCRIPT_EVIDENCE
 from roughcut.review.subtitle_memory import apply_domain_term_corrections
 from roughcut.speech.alignment import AlignmentSettings, enhance_transcript_alignment
+from roughcut.speech.subtitle_pipeline import (
+    ARTIFACT_TYPE_TRANSCRIPT_FACT_LAYER,
+    build_transcript_fact_layer_from_result,
+)
 
 
 def _is_brand_like_term(term: dict) -> bool:
@@ -161,6 +165,7 @@ async def persist_transcript_result(
             min_word_coverage=float(getattr(settings, "transcription_alignment_min_word_coverage", 0.72) or 0.72),
         ),
     )
+    transcript_fact_layer = build_transcript_fact_layer_from_result(result)
 
     # Replace the previous transcript-derived rows on rerun instead of appending
     # another copy with the same indexes and stale downstream references.
@@ -206,6 +211,14 @@ async def persist_transcript_result(
         }),
     )
     session.add(artifact)
+    session.add(
+        Artifact(
+            job_id=job_id,
+            step_id=step.id,
+            artifact_type=ARTIFACT_TYPE_TRANSCRIPT_FACT_LAYER,
+            data_json=_json_safe_value(transcript_fact_layer.as_dict()),
+        )
+    )
     if bool(getattr(settings, "asr_evidence_enabled", False)):
         session.add(
             Artifact(

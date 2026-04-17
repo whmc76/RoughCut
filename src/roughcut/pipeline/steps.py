@@ -19,6 +19,7 @@ import uuid
 from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 from sqlalchemy import delete, select
@@ -138,6 +139,7 @@ from roughcut.review.subtitle_consistency import (
 )
 from roughcut.review.subtitle_quality import (
     ARTIFACT_TYPE_SUBTITLE_QUALITY_REPORT,
+    build_subtitle_quality_report,
     build_subtitle_quality_report_from_items,
 )
 from roughcut.review.subtitle_term_resolution import (
@@ -152,6 +154,7 @@ from roughcut.review.subtitle_translation import (
 )
 from roughcut.review.telegram_bot import get_telegram_review_bot_service
 from roughcut.speech.postprocess import (
+    SubtitleEntry,
     _reindex_subtitle_entries,
     analyze_subtitle_segmentation,
     generate_subtitle_window_candidates,
@@ -161,8 +164,18 @@ from roughcut.speech.postprocess import (
     score_subtitle_entries,
     segment_subtitles,
 )
+from roughcut.speech.subtitle_pipeline import (
+    ARTIFACT_TYPE_CANONICAL_TRANSCRIPT_LAYER,
+    ARTIFACT_TYPE_SUBTITLE_PROJECTION_LAYER,
+    ARTIFACT_TYPE_TRANSCRIPT_FACT_LAYER,
+    build_canonical_transcript_layer,
+    build_subtitle_architecture_artifacts,
+    build_subtitle_projection_layer,
+    build_transcript_fact_layer,
+)
 from roughcut.speech.transcribe import persist_empty_transcript_result, transcribe_audio
 from roughcut.storage.s3 import get_storage, job_key
+from roughcut.telegram.review_notification_service import enqueue_review_notification
 from roughcut.usage import track_step_usage, track_usage_operation
 
 _AVATAR_SEGMENT_READY_RETRIES = 60
@@ -176,6 +189,7 @@ STEP_LABELS = {
     "subtitle_postprocess": "字幕后处理",
     "subtitle_term_resolution": "术语解析",
     "subtitle_consistency_review": "一致性审校",
+    "transcript_review": "转写审校",
     "subtitle_translation": "字幕翻译",
     "content_profile": "内容摘要",
     "summary_review": "人工确认",
@@ -232,7 +246,7 @@ logger = logging.getLogger(__name__)
 _CONTENT_PROFILE_ARTIFACT_TYPES = ("content_profile_final", "content_profile", "content_profile_draft")
 _DOWNSTREAM_PROFILE_ARTIFACT_TYPES = ("downstream_context",) + _CONTENT_PROFILE_ARTIFACT_TYPES
 _EDIT_PLAN_INSERT_SLOT_TIMEOUT_SEC = 20.0
-_EDIT_PLAN_CUT_REVIEW_TIMEOUT_SEC = 18.0
+_EDIT_PLAN_CUT_REVIEW_TIMEOUT_SEC = 30.0
 _SUBTITLE_POSTPROCESS_BOUNDARY_REFINE_TIMEOUT_SEC = 20.0
 _SUBTITLE_BOUNDARY_REFINE_MIN_SCORE_GAIN = 2.0
 _SUBTITLE_BOUNDARY_LOCAL_FALLBACK_MIN_SCORE_GAIN = 8.0
@@ -537,6 +551,16 @@ def _build_edit_decision_llm_review_candidates(
     return candidates
 
 
+def _resolve_edit_decision_llm_review_timeout_seconds(settings: object, *, candidate_count: int) -> float:
+    try:
+        configured_timeout = float(getattr(settings, "edit_decision_llm_review_timeout_sec", _EDIT_PLAN_CUT_REVIEW_TIMEOUT_SEC) or _EDIT_PLAN_CUT_REVIEW_TIMEOUT_SEC)
+    except (TypeError, ValueError):
+        configured_timeout = _EDIT_PLAN_CUT_REVIEW_TIMEOUT_SEC
+    configured_timeout = max(10.0, configured_timeout)
+    scaled_timeout = 8.0 + max(1, int(candidate_count)) * 6.0
+    return max(configured_timeout, scaled_timeout)
+
+
 def _merge_edit_segments(segments: list[EditSegment]) -> list[EditSegment]:
     ordered = sorted(
         (segment for segment in segments if segment.end > segment.start),
@@ -703,20 +727,31 @@ async def _maybe_review_edit_decision_cuts_with_llm(
         )
 
     prompt_messages = build_high_risk_cut_review_prompt(source_meta=source_meta, candidates=candidates)
+    review_timeout_sec = _resolve_edit_decision_llm_review_timeout_seconds(
+        settings,
+        candidate_count=len(candidates),
+    )
     try:
         with llm_task_route("edit_plan", search_enabled=False, settings=settings):
             provider = get_reasoning_provider()
+            prompt_message_objects = [Message(role=str(item["role"]), content=str(item["content"])) for item in prompt_messages]
             with track_usage_operation("edit_plan.cut_review"):
                 response = await asyncio.wait_for(
                     provider.complete(
-                        [Message(role=str(item["role"]), content=str(item["content"])) for item in prompt_messages],
+                        prompt_message_objects,
                         temperature=0.1,
                         max_tokens=1200,
                         json_mode=True,
                     ),
-                    timeout=_EDIT_PLAN_CUT_REVIEW_TIMEOUT_SEC,
+                    timeout=review_timeout_sec,
                 )
-            review_payload = response.as_json()
+            review_payload = await _load_edit_decision_cut_review_json_payload(
+                provider=provider,
+                response=response,
+                prompt_messages=prompt_message_objects,
+                timeout_sec=review_timeout_sec,
+                expected_decision_count=len(candidates),
+            )
             if not isinstance(review_payload, dict):
                 raise ValueError("edit decision cut review payload was not a JSON object")
             result = {
@@ -1247,6 +1282,88 @@ async def _complete_subtitle_boundary_json(
     return data if isinstance(data, dict) else None
 
 
+async def _load_edit_decision_cut_review_json_payload(
+    *,
+    provider: object,
+    response: object,
+    prompt_messages: list[Message],
+    timeout_sec: float,
+    expected_decision_count: int = 0,
+) -> dict[str, Any]:
+    def _payload_needs_repair(payload: Any) -> bool:
+        if not isinstance(payload, dict):
+            return True
+        decisions = payload.get("decisions")
+        if not isinstance(decisions, list):
+            return True
+        if expected_decision_count > 0 and not _normalize_cut_review_decisions(payload):
+            return True
+        return False
+
+    try:
+        payload = response.as_json()
+    except Exception:
+        payload = None
+
+    if _payload_needs_repair(payload):
+        raw_content = str(getattr(response, "raw_content", "") or getattr(response, "content", "") or "").strip()
+        if not raw_content and isinstance(payload, dict):
+            raw_content = json.dumps(payload, ensure_ascii=False)
+        if not raw_content:
+            raise ValueError("edit decision cut review payload missing repairable content")
+
+        repair_messages = list(prompt_messages)
+        repair_messages.append(Message(role="assistant", content=raw_content))
+        repair_messages.append(
+            Message(
+                role="user",
+                content=(
+                    "停止继续分析。把你上一条输出修复成一个严格 JSON 对象。"
+                    "不要 Markdown，不要代码块，不要解释。"
+                    "只保留这个结构："
+                    '{"decisions":[{"candidate_id":"","verdict":"cut|keep|unsure","confidence":0.0,"reason":"","evidence":[]}],"summary":""}'
+                ),
+            )
+        )
+        repaired = await asyncio.wait_for(
+            provider.complete(
+                repair_messages,
+                temperature=0.0,
+                max_tokens=900,
+                json_mode=False,
+            ),
+            timeout=max(8.0, min(float(timeout_sec), 16.0)),
+        )
+        try:
+            payload = repaired.as_json()
+        except Exception:
+            payload = None
+        if _payload_needs_repair(payload):
+            repair_prompt = (
+                "把下面的模型输出修复成一个严格 JSON 对象。"
+                "不要 Markdown，不要代码块，不要解释。"
+                '必须保留字段：decisions, summary。'
+                '如果缺字段就补成：{"decisions":[],"summary":""}。'
+                f"\n原始输出:\n{getattr(repaired, 'content', '') or raw_content}"
+            )
+            final_response = await asyncio.wait_for(
+                provider.complete(
+                    [
+                        Message(role="system", content="你是 JSON 修复器，只输出严格 JSON。"),
+                        Message(role="user", content=repair_prompt),
+                    ],
+                    temperature=0.0,
+                    max_tokens=900,
+                    json_mode=True,
+                ),
+                timeout=max(8.0, min(float(timeout_sec), 16.0)),
+            )
+            payload = final_response.as_json()
+    if _payload_needs_repair(payload):
+        raise ValueError("edit decision cut review payload remained unusable after repair")
+    return payload if isinstance(payload, dict) else {}
+
+
 async def _llm_refine_subtitle_window(
     *,
     provider: object,
@@ -1574,29 +1691,13 @@ def _build_edit_plan_transcript_segments(
     transcript_rows: list[TranscriptSegment],
     transcript_evidence: dict[str, Any] | None,
 ) -> list[dict[str, Any]]:
-    artifact_segments = []
+    artifact_segments: list[dict[str, Any]] = []
     if isinstance(transcript_evidence, dict):
-        artifact_segments = list(transcript_evidence.get("segments") or [])
+        artifact_segments = _normalize_transcript_segment_payloads(
+            list(transcript_evidence.get("segments") or transcript_evidence.get("items") or [])
+        )
     if artifact_segments:
-        normalized: list[dict[str, Any]] = []
-        for index, item in enumerate(artifact_segments):
-            if not isinstance(item, dict):
-                continue
-            normalized.append(
-                {
-                    "index": int(item.get("index", index) or index),
-                    "start": float(item.get("start") or 0.0),
-                    "end": float(item.get("end") or 0.0),
-                    "text": str(item.get("text") or item.get("raw_text") or ""),
-                    "speaker": item.get("speaker"),
-                    "confidence": item.get("confidence"),
-                    "logprob": item.get("logprob"),
-                    "alignment": item.get("alignment"),
-                    "words": list(item.get("words") or []),
-                }
-            )
-        if normalized:
-            return normalized
+        return artifact_segments
 
     fallback_segments: list[dict[str, Any]] = []
     for row in transcript_rows:
@@ -1611,6 +1712,65 @@ def _build_edit_plan_transcript_segments(
             }
         )
     return fallback_segments
+
+
+def _normalize_transcript_segment_payloads(raw_segments: list[Any]) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+    for index, item in enumerate(list(raw_segments or [])):
+        if not isinstance(item, dict):
+            continue
+        normalized.append(
+            {
+                "index": int(item.get("index", index) or index),
+                "start": float(item.get("start_time") or item.get("start") or 0.0),
+                "end": float(item.get("end_time") or item.get("end") or 0.0),
+                "text": str(item.get("text") or item.get("raw_text") or item.get("text_raw") or ""),
+                "speaker": item.get("speaker"),
+                "confidence": item.get("confidence"),
+                "logprob": item.get("logprob"),
+                "alignment": item.get("alignment"),
+                "words": list(item.get("words") or []),
+            }
+        )
+    return normalized
+
+
+def _build_transcript_context_payload(
+    transcript_rows: list[TranscriptSegment],
+    canonical_transcript_layer: dict[str, Any] | None,
+    transcript_fact_layer: dict[str, Any] | None,
+    transcript_evidence: dict[str, Any] | None,
+) -> dict[str, Any]:
+    payload = dict(transcript_evidence) if isinstance(transcript_evidence, dict) else {}
+    canonical_segments = _normalize_transcript_segment_payloads(
+        list((canonical_transcript_layer or {}).get("segments") or [])
+    )
+    fact_segments = _normalize_transcript_segment_payloads(
+        list((transcript_fact_layer or {}).get("segments") or [])
+    )
+    if canonical_segments:
+        payload["segments"] = canonical_segments
+        payload["layer"] = str(
+            (canonical_transcript_layer or {}).get("layer")
+            or payload.get("layer")
+            or "canonical_transcript"
+        )
+        payload["correction_metrics"] = dict((canonical_transcript_layer or {}).get("correction_metrics") or {})
+        payload["source_basis"] = str((canonical_transcript_layer or {}).get("source_basis") or payload.get("source_basis") or "")
+    elif fact_segments:
+        payload["segments"] = fact_segments
+        payload["layer"] = str((transcript_fact_layer or {}).get("layer") or payload.get("layer") or "transcript_fact")
+    elif payload:
+        normalized_segments = _normalize_transcript_segment_payloads(
+            list(payload.get("segments") or payload.get("items") or [])
+        )
+        if normalized_segments:
+            payload["segments"] = normalized_segments
+    if not list(payload.get("segments") or []):
+        payload["segments"] = _build_edit_plan_transcript_segments(transcript_rows, None)
+        payload["layer"] = str(payload.get("layer") or "transcript_rows")
+    payload["segment_count"] = len(list(payload.get("segments") or []))
+    return payload
 
 
 def _job_creative_profile(job: Job) -> dict[str, object]:
@@ -1927,6 +2087,224 @@ async def _load_content_profile_source_context(session, *, job_id: uuid.UUID) ->
     return dict(payload) if isinstance(payload, dict) else {}
 
 
+def _build_projection_entries_from_subtitle_items(
+    subtitle_items: list[SubtitleItem],
+    *,
+    use_final_text: bool = False,
+) -> list[SubtitleEntry]:
+    entries: list[SubtitleEntry] = []
+    ordered = sorted(
+        list(subtitle_items or []),
+        key=lambda item: (
+            float(getattr(item, "start_time", 0.0) or 0.0),
+            float(getattr(item, "end_time", 0.0) or 0.0),
+            int(getattr(item, "item_index", 0) or 0),
+        ),
+    )
+    for item in ordered:
+        display_text = (
+            str(getattr(item, "text_final", None) or getattr(item, "text_norm", None) or getattr(item, "text_raw", "") or "")
+            if use_final_text
+            else str(getattr(item, "text_raw", "") or "")
+        )
+        entries.append(
+            SubtitleEntry(
+                index=int(getattr(item, "item_index", 0) or 0),
+                start=float(getattr(item, "start_time", 0.0) or 0.0),
+                end=float(getattr(item, "end_time", 0.0) or 0.0),
+                text_raw=display_text,
+                text_norm=normalize_display_text(display_text),
+                words=(),
+            )
+        )
+    return entries
+
+
+def _build_projection_items_from_entries(entries: list[SubtitleEntry]) -> list[SimpleNamespace]:
+    projection_items: list[SimpleNamespace] = []
+    for index, entry in enumerate(list(entries or [])):
+        display_text = str(getattr(entry, "text_raw", "") or "")
+        projection_items.append(
+            SimpleNamespace(
+                item_index=int(getattr(entry, "index", index) or index),
+                start_time=float(getattr(entry, "start", 0.0) or 0.0),
+                end_time=float(getattr(entry, "end", 0.0) or 0.0),
+                text_raw=display_text,
+                text_norm=str(getattr(entry, "text_norm", None) or normalize_display_text(display_text)),
+                text_final=display_text,
+            )
+        )
+    return projection_items
+
+
+def _build_segmentation_segments_from_canonical_layer(canonical_transcript_layer: Any) -> list[SimpleNamespace]:
+    segments: list[SimpleNamespace] = []
+    raw_segments = list(getattr(canonical_transcript_layer, "segments", None) or [])
+    for index, segment in enumerate(raw_segments):
+        words = [
+            {
+                "word": str(getattr(word, "word", "") or ""),
+                "start": float(getattr(word, "start", 0.0) or 0.0),
+                "end": float(getattr(word, "end", 0.0) or 0.0),
+                "alignment": dict(getattr(word, "alignment", {}) or {}),
+            }
+            for word in list(getattr(segment, "words", None) or [])
+            if str(getattr(word, "word", "") or "").strip()
+        ]
+        segments.append(
+            SimpleNamespace(
+                segment_index=int(getattr(segment, "index", index) or index),
+                start_time=float(getattr(segment, "start", 0.0) or 0.0),
+                end_time=float(getattr(segment, "end", 0.0) or 0.0),
+                text=str(getattr(segment, "text_canonical", None) or getattr(segment, "text_raw", "") or ""),
+                words_json=words,
+            )
+        )
+    return segments
+
+
+def _build_reference_segment_adapters(transcript_rows: list[TranscriptSegment]) -> list[SimpleNamespace]:
+    adapters: list[SimpleNamespace] = []
+    for index, row in enumerate(list(transcript_rows or [])):
+        adapters.append(
+            SimpleNamespace(
+                segment_index=int(getattr(row, "segment_index", index) or index),
+                start_time=float(getattr(row, "start_time", 0.0) or 0.0),
+                end_time=float(getattr(row, "end_time", 0.0) or 0.0),
+                text=str(getattr(row, "text", "") or ""),
+                words_json=list(getattr(row, "words_json", None) or []),
+            )
+        )
+    return adapters
+
+
+async def _build_canonical_refresh_projection(
+    session,
+    *,
+    job_id: uuid.UUID,
+    source_name: str,
+    subtitle_items: list[SubtitleItem],
+    canonical_transcript_layer: Any,
+    projection_data: dict[str, Any] | None,
+) -> tuple[Any, dict[str, Any]]:
+    effective_projection_data = dict(projection_data or {})
+    split_profile = dict(effective_projection_data.get("split_profile") or {})
+    if not split_profile:
+        media_meta = await _load_latest_optional_artifact(session, job_id=job_id, artifact_types=("media_meta",))
+        media_meta_json = media_meta.data_json if media_meta and isinstance(media_meta.data_json, dict) else {}
+        split_profile = _resolve_subtitle_split_profile(
+            width=media_meta_json.get("width"),
+            height=media_meta_json.get("height"),
+        )
+    boundary_refine = dict(effective_projection_data.get("boundary_refine") or {})
+    canonical_segmentation_segments = _build_segmentation_segments_from_canonical_layer(canonical_transcript_layer)
+    canonical_segmentation_result = (
+        segment_subtitles(
+            canonical_segmentation_segments,
+            max_chars=int(split_profile.get("max_chars") or 30),
+            max_duration=float(split_profile.get("max_duration") or 5.0),
+        )
+        if canonical_segmentation_segments
+        else None
+    )
+    projection_entries = list(canonical_segmentation_result.entries) if canonical_segmentation_result else []
+    if not projection_entries:
+        projection_entries = _build_projection_entries_from_subtitle_items(
+            subtitle_items,
+            use_final_text=True,
+        )
+        projection_analysis = analyze_subtitle_segmentation(projection_entries)
+    else:
+        projection_analysis = canonical_segmentation_result.analysis
+    projection_items = _build_projection_items_from_entries(projection_entries)
+    subtitle_quality_report = build_subtitle_quality_report_from_items(
+        subtitle_items=projection_items,
+        source_name=source_name,
+        content_profile={},
+    )
+    refreshed_projection_layer = build_subtitle_projection_layer(
+        projection_items,
+        segmentation_analysis=projection_analysis,
+        split_profile=split_profile,
+        boundary_refine=boundary_refine,
+        quality_report=subtitle_quality_report,
+        projection_basis="canonical_refresh",
+        transcript_layer="canonical_transcript",
+    )
+    return refreshed_projection_layer, subtitle_quality_report
+
+
+async def _persist_transcript_review_artifacts(
+    session,
+    *,
+    job_id: uuid.UUID,
+    step_id: uuid.UUID | None,
+    canonical_transcript_layer: Any,
+    refreshed_projection_layer: Any,
+    subtitle_quality_report: dict[str, Any],
+) -> None:
+    await session.execute(
+        delete(Artifact).where(
+            Artifact.job_id == job_id,
+            Artifact.artifact_type.in_(
+                (
+                    ARTIFACT_TYPE_CANONICAL_TRANSCRIPT_LAYER,
+                    ARTIFACT_TYPE_SUBTITLE_PROJECTION_LAYER,
+                    ARTIFACT_TYPE_SUBTITLE_QUALITY_REPORT,
+                )
+            ),
+        )
+    )
+    session.add(
+        Artifact(
+            job_id=job_id,
+            step_id=step_id,
+            artifact_type=ARTIFACT_TYPE_CANONICAL_TRANSCRIPT_LAYER,
+            data_json=canonical_transcript_layer.as_dict(),
+        )
+    )
+    session.add(
+        Artifact(
+            job_id=job_id,
+            step_id=step_id,
+            artifact_type=ARTIFACT_TYPE_SUBTITLE_PROJECTION_LAYER,
+            data_json=refreshed_projection_layer.as_dict(),
+        )
+    )
+    session.add(
+        Artifact(
+            job_id=job_id,
+            step_id=step_id,
+            artifact_type=ARTIFACT_TYPE_SUBTITLE_QUALITY_REPORT,
+            data_json=subtitle_quality_report,
+        )
+    )
+
+
+def _build_transcript_review_result_payload(
+    *,
+    canonical_transcript_layer: Any,
+    refreshed_projection_layer: Any,
+) -> tuple[str, dict[str, Any]]:
+    correction_metrics = dict(getattr(canonical_transcript_layer, "correction_metrics", {}) or {})
+    accepted_count = int(correction_metrics.get("accepted_correction_count") or 0)
+    pending_count = int(correction_metrics.get("pending_correction_count") or 0)
+    segment_count = len(list(getattr(canonical_transcript_layer, "segments", ()) or ()))
+    projection_count = len(list(getattr(refreshed_projection_layer, "entries", ()) or ()))
+    detail = (
+        f"已生成 {segment_count} 段 canonical transcript，刷新 {projection_count} 条字幕投影；"
+        f"已接受修正 {accepted_count} 条，待确认 {pending_count} 条"
+    )
+    return detail, {
+        "segment_count": segment_count,
+        "projection_entry_count": projection_count,
+        "accepted_correction_count": accepted_count,
+        "pending_correction_count": pending_count,
+        "source_basis": getattr(canonical_transcript_layer, "source_basis", ""),
+        "projection_basis": "canonical_refresh",
+    }
+
+
 def _subtitle_item_payload(item: SubtitleItem) -> dict[str, Any]:
     return {
         "index": item.item_index,
@@ -1936,6 +2314,65 @@ def _subtitle_item_payload(item: SubtitleItem) -> dict[str, Any]:
         "text_norm": item.text_norm,
         "text_final": item.text_final,
     }
+
+
+def _subtitle_projection_entry_payload(entry: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "index": int(entry.get("index", 0) or 0),
+        "start_time": entry.get("start"),
+        "end_time": entry.get("end"),
+        "text_raw": entry.get("text_raw"),
+        "text_norm": entry.get("text_norm"),
+        "text_final": entry.get("text_final"),
+    }
+
+
+async def _load_latest_subtitle_projection_entries(
+    session,
+    *,
+    job_id: uuid.UUID,
+    fallback_items: list[SubtitleItem] | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    projection_artifact = await _load_latest_optional_artifact(
+        session,
+        job_id=job_id,
+        artifact_types=(ARTIFACT_TYPE_SUBTITLE_PROJECTION_LAYER,),
+    )
+    projection_data = projection_artifact.data_json if projection_artifact and isinstance(projection_artifact.data_json, dict) else {}
+    projection_entries = [
+        _subtitle_projection_entry_payload(entry)
+        for entry in list(projection_data.get("entries") or [])
+        if isinstance(entry, dict)
+    ]
+    if projection_entries:
+        return projection_entries, projection_data
+    return [_subtitle_item_payload(item) for item in list(fallback_items or [])], {}
+
+
+async def _load_latest_subtitle_payloads(
+    session,
+    *,
+    job_id: uuid.UUID,
+    fallback_to_items: bool = True,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    subtitle_dicts, projection_data = await _load_latest_subtitle_projection_entries(
+        session,
+        job_id=job_id,
+        fallback_items=None,
+    )
+    if subtitle_dicts or not fallback_to_items:
+        return subtitle_dicts, projection_data
+    subtitle_items = await _load_subtitle_items(session, job_id=job_id)
+    return [_subtitle_item_payload(item) for item in subtitle_items], {}
+
+
+async def _load_subtitle_items(session, *, job_id: uuid.UUID) -> list[SubtitleItem]:
+    item_result = await session.execute(
+        select(SubtitleItem)
+        .where(SubtitleItem.job_id == job_id, SubtitleItem.version == 1)
+        .order_by(SubtitleItem.item_index)
+    )
+    return list(item_result.scalars().all())
 
 
 async def _load_subtitle_corrections(session, *, job_id: uuid.UUID) -> list[SubtitleCorrection]:
@@ -1951,30 +2388,108 @@ async def _load_subtitle_transcript_context(
     session,
     *,
     job_id: uuid.UUID,
-) -> tuple[list[SubtitleItem], list[dict[str, Any]], list[TranscriptSegment], list[dict[str, Any]]]:
-    item_result = await session.execute(
-        select(SubtitleItem)
-        .where(SubtitleItem.job_id == job_id, SubtitleItem.version == 1)
-        .order_by(SubtitleItem.item_index)
-    )
+    include_canonical: bool = True,
+    prefer_latest_projection: bool = False,
+    include_subtitle_items: bool = True,
+) -> tuple[
+    list[SubtitleItem],
+    list[dict[str, Any]],
+    list[TranscriptSegment],
+    list[dict[str, Any]],
+    dict[str, Any],
+]:
     transcript_result = await session.execute(
         select(TranscriptSegment)
         .where(TranscriptSegment.job_id == job_id, TranscriptSegment.version == 1)
         .order_by(TranscriptSegment.segment_index)
     )
-    subtitle_items = list(item_result.scalars().all())
     transcript_rows = list(transcript_result.scalars().all())
-    subtitle_dicts = [_subtitle_item_payload(item) for item in subtitle_items]
+    subtitle_items: list[SubtitleItem] = []
+    if prefer_latest_projection:
+        subtitle_dicts, _projection_data = await _load_latest_subtitle_payloads(
+            session,
+            job_id=job_id,
+            fallback_to_items=True,
+        )
+    else:
+        subtitle_items = await _load_subtitle_items(session, job_id=job_id)
+        subtitle_dicts = [_subtitle_item_payload(item) for item in subtitle_items]
+    if include_subtitle_items and not subtitle_items:
+        subtitle_items = await _load_subtitle_items(session, job_id=job_id)
     transcript_evidence_artifact = await _load_latest_optional_artifact(
         session,
         job_id=job_id,
         artifact_types=("transcript_evidence",),
     )
-    transcript_segment_dicts = _build_edit_plan_transcript_segments(
+    canonical_transcript_artifact = (
+        await _load_latest_optional_artifact(
+            session,
+            job_id=job_id,
+            artifact_types=(ARTIFACT_TYPE_CANONICAL_TRANSCRIPT_LAYER,),
+        )
+        if include_canonical
+        else None
+    )
+    transcript_fact_artifact = await _load_latest_optional_artifact(
+        session,
+        job_id=job_id,
+        artifact_types=(ARTIFACT_TYPE_TRANSCRIPT_FACT_LAYER,),
+    )
+    transcript_context = _build_transcript_context_payload(
         transcript_rows,
+        canonical_transcript_artifact.data_json if canonical_transcript_artifact is not None else None,
+        transcript_fact_artifact.data_json if transcript_fact_artifact is not None else None,
         transcript_evidence_artifact.data_json if transcript_evidence_artifact is not None else None,
     )
-    return subtitle_items, subtitle_dicts, transcript_rows, transcript_segment_dicts
+    transcript_segment_dicts = _build_edit_plan_transcript_segments(
+        transcript_rows,
+        transcript_context,
+    )
+    return subtitle_items, subtitle_dicts, transcript_rows, transcript_segment_dicts, transcript_context
+
+
+async def _load_content_profile_context(
+    session,
+    *,
+    job_id: uuid.UUID,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
+    transcript_result = await session.execute(
+        select(TranscriptSegment)
+        .where(TranscriptSegment.job_id == job_id, TranscriptSegment.version == 1)
+        .order_by(TranscriptSegment.segment_index)
+    )
+    transcript_rows = list(transcript_result.scalars().all())
+    subtitle_dicts, _projection_data = await _load_latest_subtitle_payloads(
+        session,
+        job_id=job_id,
+        fallback_to_items=True,
+    )
+    transcript_evidence_artifact = await _load_latest_optional_artifact(
+        session,
+        job_id=job_id,
+        artifact_types=("transcript_evidence",),
+    )
+    canonical_transcript_artifact = await _load_latest_optional_artifact(
+        session,
+        job_id=job_id,
+        artifact_types=(ARTIFACT_TYPE_CANONICAL_TRANSCRIPT_LAYER,),
+    )
+    transcript_fact_artifact = await _load_latest_optional_artifact(
+        session,
+        job_id=job_id,
+        artifact_types=(ARTIFACT_TYPE_TRANSCRIPT_FACT_LAYER,),
+    )
+    transcript_context = _build_transcript_context_payload(
+        transcript_rows,
+        canonical_transcript_artifact.data_json if canonical_transcript_artifact is not None else None,
+        transcript_fact_artifact.data_json if transcript_fact_artifact is not None else None,
+        transcript_evidence_artifact.data_json if transcript_evidence_artifact is not None else None,
+    )
+    transcript_segment_dicts = _build_edit_plan_transcript_segments(
+        transcript_rows,
+        transcript_context,
+    )
+    return subtitle_dicts, transcript_segment_dicts, transcript_context
 
 
 async def _load_current_content_profile(session, *, job_id: uuid.UUID) -> dict[str, Any] | None:
@@ -2005,6 +2520,7 @@ async def _resolve_glossary_review_content_profile(
     content_profile: dict[str, Any] | None,
     subtitle_dicts: list[dict[str, Any]],
     transcript_segment_dicts: list[dict[str, Any]],
+    transcript_evidence: dict[str, Any] | None,
     effective_glossary_terms: list[GlossaryTerm | dict[str, Any]],
     user_memory: dict[str, Any],
 ) -> dict[str, Any]:
@@ -2027,6 +2543,7 @@ async def _resolve_glossary_review_content_profile(
                             source_name=job.source_name,
                             subtitle_items=subtitle_dicts,
                             transcript_items=transcript_segment_dicts,
+                            transcript_evidence=transcript_evidence,
                             workflow_template=job.workflow_template,
                             user_memory=user_memory,
                             glossary_terms=effective_glossary_terms,
@@ -2035,6 +2552,8 @@ async def _resolve_glossary_review_content_profile(
                         )
 
     profile = dict(content_profile)
+    if transcript_evidence:
+        profile["transcript_evidence"] = dict(transcript_evidence)
     profile["copy_style"] = str(
         packaging_config.get("copy_style")
         or profile.get("copy_style")
@@ -2056,6 +2575,7 @@ async def _resolve_glossary_review_content_profile(
                     transcript_excerpt=str(profile.get("transcript_excerpt") or ""),
                     subtitle_items=subtitle_dicts,
                     transcript_items=transcript_segment_dicts,
+                    transcript_evidence=transcript_evidence,
                     glossary_terms=effective_glossary_terms,
                     user_memory=user_memory,
                     include_research=enrich_search_enabled,
@@ -2068,16 +2588,19 @@ async def _evaluate_content_profile_automation_and_reports(
     job: Job,
     settings,
     content_profile: dict[str, Any],
-    subtitle_items: list[SubtitleItem],
+    transcript_evidence: dict[str, Any] | None,
     subtitle_dicts: list[dict[str, Any]],
     user_memory: dict[str, Any],
     effective_glossary_terms: list[GlossaryTerm | dict[str, Any]],
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
+    runtime_profile = dict(content_profile)
+    if transcript_evidence:
+        runtime_profile["transcript_evidence"] = dict(transcript_evidence)
     auto_review_enabled = bool(settings.auto_confirm_content_profile) and auto_review_mode_enabled(
         getattr(job, "enhancement_modes", [])
     )
     automation = assess_content_profile_automation(
-        content_profile,
+        runtime_profile,
         subtitle_items=subtitle_dicts,
         user_memory=user_memory,
         glossary_terms=effective_glossary_terms,
@@ -2087,14 +2610,17 @@ async def _evaluate_content_profile_automation_and_reports(
     )
     if bool((automation.get("identity_review") or {}).get("conservative_summary")):
         content_profile = apply_identity_review_guard(
-            content_profile,
+            runtime_profile,
             subtitle_items=subtitle_dicts,
             user_memory=user_memory,
             glossary_terms=effective_glossary_terms,
             source_name=job.source_name,
         )
+        runtime_profile = dict(content_profile)
+        if transcript_evidence:
+            runtime_profile["transcript_evidence"] = dict(transcript_evidence)
         automation = assess_content_profile_automation(
-            content_profile,
+            runtime_profile,
             subtitle_items=subtitle_dicts,
             user_memory=user_memory,
             glossary_terms=effective_glossary_terms,
@@ -2102,34 +2628,18 @@ async def _evaluate_content_profile_automation_and_reports(
             auto_confirm_enabled=auto_review_enabled,
             threshold=settings.content_profile_review_threshold,
         )
-    if bool((automation.get("identity_review") or {}).get("required")):
-        summary = str(content_profile.get("summary") or "").strip()
-        if "具体品牌型号待人工确认" not in summary:
-            content_profile["summary"] = _build_conservative_identity_summary(
-                content_profile,
-                subtitle_items=subtitle_dicts,
-            )
-    subtitle_quality_report = build_subtitle_quality_report_from_items(
-        subtitle_items=subtitle_items,
+    subtitle_quality_report = build_subtitle_quality_report(
+        subtitle_items=subtitle_dicts,
         source_name=job.source_name,
         content_profile=content_profile,
     )
     corrections = await _load_subtitle_corrections(session, job_id=job.id)
-    consistency_artifact = await _load_latest_optional_artifact(
-        session,
-        job_id=job.id,
-        artifact_types=(ARTIFACT_TYPE_SUBTITLE_CONSISTENCY_REPORT,),
-    )
-    subtitle_consistency_report = (
-        consistency_artifact.data_json
-        if consistency_artifact is not None and isinstance(consistency_artifact.data_json, dict)
-        else build_subtitle_consistency_report(
-            subtitle_items=subtitle_dicts,
-            corrections=corrections,
-            source_name=job.source_name,
-            content_profile=content_profile,
-            subtitle_quality_report=subtitle_quality_report,
-        )
+    subtitle_consistency_report = build_subtitle_consistency_report(
+        subtitle_items=subtitle_dicts,
+        corrections=corrections,
+        source_name=job.source_name,
+        content_profile=content_profile,
+        subtitle_quality_report=subtitle_quality_report,
     )
     if subtitle_quality_report.get("blocking"):
         content_profile, automation = _apply_blocking_report_to_content_profile(
@@ -3423,6 +3933,12 @@ async def run_subtitle_postprocess(job_id: str) -> dict:
             .order_by(TranscriptSegment.segment_index)
         )
         segments = seg_result.scalars().all()
+        transcript_fact_artifact = await _load_latest_optional_artifact(
+            session,
+            job_id=job.id,
+            artifact_types=(ARTIFACT_TYPE_TRANSCRIPT_FACT_LAYER,),
+        )
+        transcript_fact_layer = build_transcript_fact_layer(segments)
         load_elapsed = time.perf_counter() - started
 
         media_meta = await _load_latest_optional_artifact(session, job_id=job.id, artifact_types=("media_meta",))
@@ -3585,6 +4101,25 @@ async def run_subtitle_postprocess(job_id: str) -> dict:
             source_name=job.source_name,
             content_profile=content_profile,
         )
+        subtitle_projection_layer = build_subtitle_projection_layer(
+            items,
+            segmentation_analysis=segmentation_result.analysis,
+            split_profile=split_profile,
+            boundary_refine=llm_boundary_refine,
+            quality_report=subtitle_quality_report,
+            projection_basis="display_baseline",
+            transcript_layer="transcript_fact",
+        )
+        architecture_artifacts = build_subtitle_architecture_artifacts(
+            job_id=job.id,
+            step_id=step.id,
+            transcript_fact_layer=transcript_fact_layer,
+            canonical_transcript_layer=None,
+            subtitle_projection_layer=subtitle_projection_layer,
+        )
+        if transcript_fact_artifact is None:
+            session.add(architecture_artifacts[0])
+        session.add(architecture_artifacts[1])
         session.add(
             Artifact(
                 job_id=job.id,
@@ -3631,6 +4166,8 @@ async def run_subtitle_postprocess(job_id: str) -> dict:
             "subtitle_profile": split_profile,
             "subtitle_segmentation": segmentation_result.analysis.as_dict(),
             "subtitle_boundary_refine": llm_boundary_refine,
+            "transcript_fact_layer_artifact_type": ARTIFACT_TYPE_TRANSCRIPT_FACT_LAYER,
+            "subtitle_projection_layer_artifact_type": ARTIFACT_TYPE_SUBTITLE_PROJECTION_LAYER,
             "elapsed_seconds": round(total_elapsed, 3),
             "load_seconds": round(load_elapsed, 3),
             "split_seconds": round(split_elapsed, 3),
@@ -3648,13 +4185,7 @@ async def run_subtitle_term_resolution(job_id: str) -> dict:
         step = step_result.scalar_one()
         await _set_step_progress(session, step, detail="解析术语候选并生成纠偏 patch", progress=0.1)
 
-        item_result = await session.execute(
-            select(SubtitleItem)
-            .where(SubtitleItem.job_id == job.id, SubtitleItem.version == 1)
-            .order_by(SubtitleItem.item_index)
-        )
-        subtitle_items = item_result.scalars().all()
-        subtitle_dicts = [_subtitle_item_payload(item) for item in subtitle_items]
+        subtitle_dicts, _projection_data = await _load_latest_subtitle_payloads(session, job_id=job.id)
 
         _profile_artifact, content_profile = await _load_preferred_downstream_profile(session, job_id=job.id)
         source_context = await _load_content_profile_source_context(session, job_id=job.id)
@@ -3688,6 +4219,7 @@ async def run_subtitle_term_resolution(job_id: str) -> dict:
         )
 
         await session.execute(delete(SubtitleCorrection).where(SubtitleCorrection.job_id == job.id))
+        subtitle_items = await _load_subtitle_items(session, job_id=job.id)
         corrections = await apply_glossary_corrections(
             job.id,
             subtitle_items,
@@ -3745,13 +4277,7 @@ async def run_subtitle_consistency_review(job_id: str) -> dict:
         step = step_result.scalar_one()
         await _set_step_progress(session, step, detail="检查字幕与文件名/纠偏结果是否一致", progress=0.12)
 
-        item_result = await session.execute(
-            select(SubtitleItem)
-            .where(SubtitleItem.job_id == job.id, SubtitleItem.version == 1)
-            .order_by(SubtitleItem.item_index)
-        )
-        subtitle_items = item_result.scalars().all()
-        subtitle_dicts = [_subtitle_item_payload(item) for item in subtitle_items]
+        subtitle_dicts, _projection_data = await _load_latest_subtitle_payloads(session, job_id=job.id)
         corrections = await _load_subtitle_corrections(session, job_id=job.id)
         _profile_artifact, content_profile = await _load_preferred_downstream_profile(session, job_id=job.id)
         quality_artifact = await _load_latest_optional_artifact(
@@ -3814,12 +4340,20 @@ async def run_content_profile(job_id: str) -> dict:
         step = step_result.scalar_one()
         _set_step_correction_framework_metadata(step, settings)
         await _set_step_progress(session, step, detail="整理字幕上下文并识别视频类型", progress=0.15)
-        subtitle_items, subtitle_dicts, _transcript_rows, transcript_dicts = await _load_subtitle_transcript_context(
+        (
+            subtitle_dicts,
+            transcript_dicts,
+            transcript_evidence,
+        ) = await _load_content_profile_context(
             session,
             job_id=job.id,
         )
         reviewed_subtitle_excerpt = build_reviewed_transcript_excerpt(subtitle_dicts)
-        transcript_excerpt = reviewed_subtitle_excerpt or build_transcript_excerpt(transcript_dicts or subtitle_dicts)
+        transcript_excerpt = (
+            build_transcript_excerpt(transcript_dicts)
+            or reviewed_subtitle_excerpt
+            or build_transcript_excerpt(subtitle_dicts)
+        )
         subtitle_digest = digest_payload(
             [
                 {
@@ -3979,6 +4513,7 @@ async def run_content_profile(job_id: str) -> dict:
                                 transcript_excerpt=transcript_excerpt,
                                 subtitle_items=subtitle_dicts,
                                 transcript_items=transcript_dicts,
+                                transcript_evidence=transcript_evidence,
                                 glossary_terms=effective_glossary_terms,
                                 user_memory=user_memory,
                                 include_research=seeded_search_enabled,
@@ -4016,6 +4551,7 @@ async def run_content_profile(job_id: str) -> dict:
                                 source_name=job.source_name,
                                 subtitle_items=subtitle_dicts,
                                 transcript_items=transcript_dicts,
+                                transcript_evidence=transcript_evidence,
                                 workflow_template=job.workflow_template,
                                 user_memory=user_memory,
                                 glossary_terms=effective_glossary_terms,
@@ -4065,6 +4601,7 @@ async def run_content_profile(job_id: str) -> dict:
                                     transcript_excerpt=transcript_excerpt,
                                     subtitle_items=subtitle_dicts,
                                     transcript_items=transcript_dicts,
+                                    transcript_evidence=transcript_evidence,
                                     glossary_terms=effective_glossary_terms,
                                     user_memory=user_memory,
                                     include_research=enrich_search_enabled,
@@ -4127,7 +4664,7 @@ async def run_content_profile(job_id: str) -> dict:
             job=job,
             settings=settings,
             content_profile=content_profile,
-            subtitle_items=subtitle_items,
+            transcript_evidence=transcript_evidence,
             subtitle_dicts=subtitle_dicts,
             user_memory=user_memory,
             effective_glossary_terms=effective_glossary_terms,
@@ -4181,6 +4718,10 @@ async def run_content_profile(job_id: str) -> dict:
                 await get_telegram_review_bot_service().notify_content_profile_review(job.id)
             except Exception:
                 logger.exception("Failed to send Telegram content profile review for job %s", job.id)
+                enqueue_review_notification(
+                    kind="content_profile",
+                    job_id=str(job.id),
+                )
 
         return result_payload
 
@@ -4196,9 +4737,17 @@ async def run_glossary_review(job_id: str) -> dict:
         step = step_result.scalar_one()
         _set_step_correction_framework_metadata(step, settings)
         await _set_step_progress(session, step, detail="应用术语词表并收集字幕上下文", progress=0.15)
-        subtitle_items, subtitle_dicts, _transcript_rows, transcript_segment_dicts = await _load_subtitle_transcript_context(
+        (
+            subtitle_items,
+            subtitle_dicts,
+            _transcript_rows,
+            transcript_segment_dicts,
+            transcript_evidence,
+        ) = await _load_subtitle_transcript_context(
             session,
             job_id=job.id,
+            include_canonical=False,
+            prefer_latest_projection=True,
         )
         content_profile = await _load_current_content_profile(session, job_id=job.id)
         subject_domain = _infer_subject_domain_for_memory(
@@ -4237,6 +4786,15 @@ async def run_glossary_review(job_id: str) -> dict:
             detail=f"已识别 {len(corrections)} 处术语纠错候选，自动接受 {auto_accepted_corrections} 条",
             progress=0.45,
         )
+        reviewed_transcript_layer = build_canonical_transcript_layer(
+            subtitle_items,
+            corrections=corrections,
+            reference_segments=_build_reference_segment_adapters(_transcript_rows),
+        )
+        reviewed_transcript_context = reviewed_transcript_layer.as_dict()
+        reviewed_transcript_dicts = _normalize_transcript_segment_payloads(
+            list(reviewed_transcript_context.get("segments") or [])
+        )
         user_memory = await load_content_profile_user_memory(session, subject_domain=subject_domain)
         content_profile = await _resolve_glossary_review_content_profile(
             session=session,
@@ -4245,7 +4803,8 @@ async def run_glossary_review(job_id: str) -> dict:
             settings=settings,
             content_profile=content_profile,
             subtitle_dicts=subtitle_dicts,
-            transcript_segment_dicts=transcript_segment_dicts,
+            transcript_segment_dicts=reviewed_transcript_dicts or transcript_segment_dicts,
+            transcript_evidence=reviewed_transcript_context or transcript_evidence,
             effective_glossary_terms=effective_glossary_terms,
             user_memory=user_memory,
         )
@@ -4326,6 +4885,10 @@ async def run_glossary_review(job_id: str) -> dict:
                 await get_telegram_review_bot_service().notify_subtitle_review(job.id)
             except Exception:
                 logger.exception("Failed to send Telegram subtitle review for job %s", job.id)
+                enqueue_review_notification(
+                    kind="subtitle_review",
+                    job_id=str(job.id),
+                )
 
         return {
             "correction_count": len(corrections),
@@ -4345,6 +4908,69 @@ async def run_glossary_review(job_id: str) -> dict:
         }
 
 
+async def run_transcript_review(job_id: str) -> dict:
+    factory = get_session_factory()
+    async with factory() as session:
+        job = await session.get(Job, uuid.UUID(job_id))
+        step_result = await session.execute(
+            select(JobStep).where(JobStep.job_id == job.id, JobStep.step_name == "transcript_review")
+        )
+        step = step_result.scalar_one()
+        await _set_step_progress(session, step, detail="读取字幕修订结果并生成 canonical transcript", progress=0.2)
+        (
+            subtitle_items,
+            _subtitle_dicts,
+            _transcript_rows,
+            _transcript_segment_dicts,
+            _transcript_evidence,
+        ) = await _load_subtitle_transcript_context(
+            session,
+            job_id=job.id,
+            include_canonical=False,
+        )
+        corrections = await _load_subtitle_corrections(session, job_id=job.id)
+        canonical_transcript_layer = build_canonical_transcript_layer(
+            subtitle_items,
+            corrections=corrections,
+            reference_segments=_build_reference_segment_adapters(_transcript_rows),
+        )
+        projection_artifact = await _load_latest_optional_artifact(
+            session,
+            job_id=job.id,
+            artifact_types=(ARTIFACT_TYPE_SUBTITLE_PROJECTION_LAYER,),
+        )
+        projection_data = projection_artifact.data_json if projection_artifact and isinstance(projection_artifact.data_json, dict) else {}
+        refreshed_projection_layer, subtitle_quality_report = await _build_canonical_refresh_projection(
+            session,
+            job_id=job.id,
+            source_name=job.source_name,
+            subtitle_items=subtitle_items,
+            canonical_transcript_layer=canonical_transcript_layer,
+            projection_data=projection_data,
+        )
+        await _set_step_progress(session, step, detail="写入 canonical transcript 并刷新 subtitle projection", progress=0.75)
+        await _persist_transcript_review_artifacts(
+            session,
+            job_id=job.id,
+            step_id=step.id,
+            canonical_transcript_layer=canonical_transcript_layer,
+            refreshed_projection_layer=refreshed_projection_layer,
+            subtitle_quality_report=subtitle_quality_report,
+        )
+        detail, result_payload = _build_transcript_review_result_payload(
+            canonical_transcript_layer=canonical_transcript_layer,
+            refreshed_projection_layer=refreshed_projection_layer,
+        )
+        await _set_step_progress(
+            session,
+            step,
+            detail=detail,
+            progress=1.0,
+        )
+        await session.commit()
+        return result_payload
+
+
 async def run_subtitle_translation(job_id: str) -> dict:
     factory = get_session_factory()
     async with factory() as session:
@@ -4360,23 +4986,10 @@ async def run_subtitle_translation(job_id: str) -> dict:
             return {"enabled": False, "skipped": True}
 
         await _set_step_progress(session, step, detail="读取校对后的字幕，准备生成英文译文", progress=0.18)
-        item_result = await session.execute(
-            select(SubtitleItem)
-            .where(SubtitleItem.job_id == job.id, SubtitleItem.version == 1)
-            .order_by(SubtitleItem.item_index)
+        subtitle_dicts, projection_data = await _load_latest_subtitle_payloads(
+            session,
+            job_id=job.id,
         )
-        subtitle_items = item_result.scalars().all()
-        subtitle_dicts = [
-            {
-                "index": item.item_index,
-                "start_time": item.start_time,
-                "end_time": item.end_time,
-                "text_raw": item.text_raw,
-                "text_norm": item.text_norm,
-                "text_final": item.text_final,
-            }
-            for item in subtitle_items
-        ]
         preferred_ui_language = str(get_settings().preferred_ui_language or "zh-CN")
         source_language = detect_subtitle_language(subtitle_dicts)
         target_language = resolve_translation_target_language(
@@ -4406,7 +5019,14 @@ async def run_subtitle_translation(job_id: str) -> dict:
         await _set_step_progress(
             session,
             step,
-            detail=f"翻译校对后的字幕（{source_language} -> {target_language}）",
+            detail=(
+                f"翻译校对后的字幕（{source_language} -> {target_language}）"
+                + (
+                    f"，来源 {projection_data.get('projection_kind') or 'subtitle_projection'}"
+                    if projection_data
+                    else ""
+                )
+            ),
             progress=0.72,
         )
         async with _maintain_step_heartbeat(step):
@@ -4456,26 +5076,21 @@ async def run_ai_director(job_id: str) -> dict:
             return {"enabled": False, "skipped": True}
 
         await _set_step_progress(session, step, detail="加载字幕与内容画像，准备导演分析", progress=0.18)
-        item_result = await session.execute(
-            select(SubtitleItem)
-            .where(SubtitleItem.job_id == job.id, SubtitleItem.version == 1)
-            .order_by(SubtitleItem.item_index)
+        subtitle_dicts, projection_data = await _load_latest_subtitle_payloads(
+            session,
+            job_id=job.id,
         )
-        subtitle_items = item_result.scalars().all()
-        subtitle_dicts = [
-            {
-                "index": item.item_index,
-                "start_time": item.start_time,
-                "end_time": item.end_time,
-                "text_raw": item.text_raw,
-                "text_norm": item.text_norm,
-                "text_final": item.text_final,
-            }
-            for item in subtitle_items
-        ]
         _profile_artifact, content_profile = await _load_preferred_downstream_profile(session, job_id=job.id)
 
-        await _set_step_progress(session, step, detail="生成导演建议稿与重配音计划", progress=0.68)
+        await _set_step_progress(
+            session,
+            step,
+            detail=(
+                "生成导演建议稿与重配音计划"
+                + (f"，字幕来源 {projection_data.get('projection_kind')}" if projection_data else "")
+            ),
+            progress=0.68,
+        )
         with track_step_usage(job_id=job.id, step_id=step.id, step_name="ai_director"):
             plan = await build_ai_director_plan(
                 job_id=str(job.id),
@@ -4546,23 +5161,10 @@ async def run_avatar_commentary(job_id: str) -> dict:
             return {"enabled": False, "skipped": True}
 
         await _set_step_progress(session, step, detail="整理解说脚本和时间轴插槽", progress=0.2)
-        item_result = await session.execute(
-            select(SubtitleItem)
-            .where(SubtitleItem.job_id == job.id, SubtitleItem.version == 1)
-            .order_by(SubtitleItem.item_index)
+        subtitle_dicts, projection_data = await _load_latest_subtitle_payloads(
+            session,
+            job_id=job.id,
         )
-        subtitle_items = item_result.scalars().all()
-        subtitle_dicts = [
-            {
-                "index": item.item_index,
-                "start_time": item.start_time,
-                "end_time": item.end_time,
-                "text_raw": item.text_raw,
-                "text_norm": item.text_norm,
-                "text_final": item.text_final,
-            }
-            for item in subtitle_items
-        ]
         _profile_artifact, content_profile = await _load_preferred_downstream_profile(session, job_id=job.id)
         director_artifact = await _load_latest_optional_artifact(
             session,
@@ -4571,7 +5173,15 @@ async def run_avatar_commentary(job_id: str) -> dict:
         )
         ai_director_plan = director_artifact.data_json if director_artifact and director_artifact.data_json else {}
 
-        await _set_step_progress(session, step, detail="生成数字人解说分镜与 provider 请求体", progress=0.72)
+        await _set_step_progress(
+            session,
+            step,
+            detail=(
+                "生成数字人解说分镜与 provider 请求体"
+                + (f"，字幕来源 {projection_data.get('projection_kind')}" if projection_data else "")
+            ),
+            progress=0.72,
+        )
         plan = build_avatar_commentary_plan(
             job_id=str(job.id),
             source_name=job.source_name,
@@ -4808,38 +5418,41 @@ async def run_edit_plan(job_id: str) -> dict:
         # Get audio for silence detection
         audio_artifact = await _load_latest_artifact(session, job.id, "audio_wav")
 
-        # Get subtitle items for filler detection
-        item_result = await session.execute(
-            select(SubtitleItem)
-            .where(SubtitleItem.job_id == job.id, SubtitleItem.version == 1)
-            .order_by(SubtitleItem.item_index)
+        # Get subtitle payloads for filler detection
+        subtitle_dicts, projection_data = await _load_latest_subtitle_payloads(
+            session,
+            job_id=job.id,
         )
-        subtitle_items = item_result.scalars().all()
         transcript_result = await session.execute(
             select(TranscriptSegment)
             .where(TranscriptSegment.job_id == job.id, TranscriptSegment.version == 1)
             .order_by(TranscriptSegment.segment_index)
         )
         transcript_rows = transcript_result.scalars().all()
-        subtitle_dicts = [
-            {
-                "index": si.item_index,
-                "start_time": si.start_time,
-                "end_time": si.end_time,
-                "text_raw": si.text_raw,
-                "text_norm": si.text_norm,
-                "text_final": si.text_final,
-            }
-            for si in subtitle_items
-        ]
         transcript_evidence_artifact = await _load_latest_optional_artifact(
             session,
             job_id=job.id,
             artifact_types=("transcript_evidence",),
         )
+        canonical_transcript_artifact = await _load_latest_optional_artifact(
+            session,
+            job_id=job.id,
+            artifact_types=(ARTIFACT_TYPE_CANONICAL_TRANSCRIPT_LAYER,),
+        )
+        transcript_fact_artifact = await _load_latest_optional_artifact(
+            session,
+            job_id=job.id,
+            artifact_types=(ARTIFACT_TYPE_TRANSCRIPT_FACT_LAYER,),
+        )
+        transcript_context = _build_transcript_context_payload(
+            transcript_rows,
+            canonical_transcript_artifact.data_json if canonical_transcript_artifact is not None else None,
+            transcript_fact_artifact.data_json if transcript_fact_artifact is not None else None,
+            transcript_evidence_artifact.data_json if transcript_evidence_artifact is not None else None,
+        )
         transcript_segment_dicts = _build_edit_plan_transcript_segments(
             transcript_rows,
-            transcript_evidence_artifact.data_json if transcript_evidence_artifact is not None else None,
+            transcript_context,
         )
 
         profile_artifact, content_profile = await _load_preferred_downstream_profile(session, job_id=job.id)
@@ -5005,7 +5618,12 @@ async def run_render(job_id: str) -> dict:
             select(JobStep).where(JobStep.job_id == job.id, JobStep.step_name == "render")
         )
         step = step_result.scalar_one()
-        await _set_step_progress(session, step, detail="准备时间线、字幕和输出目录", progress=0.05)
+        await _set_step_progress(
+            session,
+            step,
+            detail="准备时间线、字幕和输出目录",
+            progress=0.05,
+        )
 
         # Get timelines
         editorial_timeline = await _load_latest_timeline(session, job.id, "editorial")
@@ -5022,23 +5640,11 @@ async def run_render(job_id: str) -> dict:
 
         content_profile_artifact, content_profile = await _load_preferred_downstream_profile(session, job_id=job.id)
 
-        # Get subtitle items
-        item_result = await session.execute(
-            select(SubtitleItem)
-            .where(SubtitleItem.job_id == job.id, SubtitleItem.version == 1)
-            .order_by(SubtitleItem.item_index)
+        # Get subtitle payloads
+        subtitle_dicts, projection_data = await _load_latest_subtitle_payloads(
+            session,
+            job_id=job.id,
         )
-        subtitle_items = item_result.scalars().all()
-        subtitle_dicts = [
-            {
-                "start_time": si.start_time,
-                "end_time": si.end_time,
-                "text_raw": si.text_raw,
-                "text_norm": si.text_norm,
-                "text_final": si.text_final,
-            }
-            for si in subtitle_items
-        ]
 
         stale_render_outputs_result = await session.execute(
             select(RenderOutput).where(RenderOutput.job_id == job.id, RenderOutput.status == "running")
@@ -5072,31 +5678,39 @@ async def run_render(job_id: str) -> dict:
 
     with tempfile.TemporaryDirectory() as tmpdir:
         render_heartbeat: asyncio.Task[None] | None = None
-        async with get_session_factory()() as session:
-            step_result = await session.execute(
-                select(JobStep).where(JobStep.job_id == uuid.UUID(job_id), JobStep.step_name == "render")
-            )
-            render_step = step_result.scalar_one_or_none()
-            if render_step:
-                await _set_step_progress(
-                    session,
-                    render_step,
-                    detail=(
-                        "先渲染素版，再生成包装版"
-                        if (has_packaging or has_editing_accents)
-                        else "执行 FFmpeg 渲染成片"
-                    ),
-                    progress=0.35,
+
+        async def _refresh_render_progress(*, detail: str, progress: float) -> asyncio.Task[None] | None:
+            nonlocal render_heartbeat
+            if render_heartbeat is not None:
+                render_heartbeat.cancel()
+                with suppress(asyncio.CancelledError):
+                    await render_heartbeat
+            async with get_session_factory()() as progress_session:
+                step_result = await progress_session.execute(
+                    select(JobStep).where(JobStep.job_id == uuid.UUID(job_id), JobStep.step_name == "render")
                 )
+                render_step = step_result.scalar_one_or_none()
+                if render_step:
+                    await _set_step_progress(progress_session, render_step, detail=detail, progress=progress)
+                render_output_ref = await progress_session.get(RenderOutput, render_output_id)
+                if render_output_ref:
+                    render_output_ref.progress = progress
+                    await progress_session.commit()
                 render_heartbeat = _spawn_step_heartbeat(
-                    step_id=render_step.id,
-                    detail=(
-                        "先渲染素版，再生成包装版"
-                        if (has_packaging or has_editing_accents)
-                        else "执行 FFmpeg 渲染成片"
-                    ),
-                    progress=0.35,
+                    step_id=render_step.id if render_step else None,
+                    detail=detail,
+                    progress=progress,
                 )
+            return render_heartbeat
+
+        render_heartbeat = await _refresh_render_progress(
+            detail=(
+                "先渲染素版，再生成包装版"
+                if (has_packaging or has_editing_accents)
+                else "执行 FFmpeg 渲染成片"
+            ),
+            progress=0.35,
+        )
         source_path = await _resolve_source(
             job,
             tmpdir,
@@ -5180,6 +5794,10 @@ async def run_render(job_id: str) -> dict:
                 "detail": "等待渲染阶段处理数字人口播。",
             }
             try:
+                render_heartbeat = await _refresh_render_progress(
+                    detail="素版已完成，等待数字人口播全轨插槽",
+                    progress=0.42,
+                )
                 avatar_rendered_path = await _render_full_track_avatar_video(
                     job_id=str(job.id),
                     avatar_plan=avatar_plan,
@@ -5293,31 +5911,10 @@ async def run_render(job_id: str) -> dict:
                     "reason": "avatar_segment_render_failed",
                     "detail": f"数字人片段渲染失败，已自动回退普通成片：{exc}",
                 }
-        if render_heartbeat is not None:
-            render_heartbeat.cancel()
-            with suppress(asyncio.CancelledError):
-                await render_heartbeat
-        async with get_session_factory()() as session:
-            step_result = await session.execute(
-                select(JobStep).where(JobStep.job_id == uuid.UUID(job_id), JobStep.step_name == "render")
-            )
-            render_step = step_result.scalar_one_or_none()
-            render_output = await session.get(RenderOutput, render_output_id)
-            if render_step:
-                await _set_step_progress(
-                    session,
-                    render_step,
-                    detail="素版已完成，开始生成包装版",
-                    progress=0.55,
-                )
-            if render_output:
-                render_output.progress = 0.55
-                await session.commit()
-            packaging_heartbeat = _spawn_step_heartbeat(
-                step_id=render_step.id if render_step else None,
-                detail="素版已完成，开始生成包装版",
-                progress=0.55,
-            )
+        packaging_heartbeat = await _refresh_render_progress(
+            detail="素版已完成，开始生成包装版",
+            progress=0.55,
+        )
         packaged_source_path, packaged_editorial_timeline, packaged_subtitles = _resolve_packaged_render_variant(
             original_source_path=tmp_plain_mp4,
             original_editorial_timeline=plain_variant_editorial_timeline,
@@ -5668,6 +6265,10 @@ async def run_render(job_id: str) -> dict:
             await get_telegram_review_bot_service().notify_final_review(uuid.UUID(job_id))
         except Exception:
             logger.exception("Failed to send Telegram final review for job %s", job_id)
+            enqueue_review_notification(
+                kind="final_review",
+                job_id=str(job_id),
+            )
 
     return {"output_path": str(local_packaged_mp4), "local": local_paths}
 
@@ -5688,23 +6289,10 @@ async def run_platform_package(job_id: str) -> dict:
 
         content_profile_artifact, content_profile = await _load_preferred_downstream_profile(session, job_id=job.id)
 
-        item_result = await session.execute(
-            select(SubtitleItem)
-            .where(SubtitleItem.job_id == job.id, SubtitleItem.version == 1)
-            .order_by(SubtitleItem.item_index)
+        subtitle_dicts, projection_data = await _load_latest_subtitle_payloads(
+            session,
+            job_id=job.id,
         )
-        subtitle_items = item_result.scalars().all()
-        subtitle_dicts = [
-            {
-                "index": si.item_index,
-                "start_time": si.start_time,
-                "end_time": si.end_time,
-                "text_raw": si.text_raw,
-                "text_norm": si.text_norm,
-                "text_final": si.text_final,
-            }
-            for si in subtitle_items
-        ]
 
         render_output_result = await session.execute(
             select(RenderOutput)
@@ -8262,6 +8850,7 @@ def run_step_sync(step_name: str, job_id: str) -> dict:
     "subtitle_postprocess": run_subtitle_postprocess,
     "subtitle_term_resolution": run_subtitle_term_resolution,
     "subtitle_consistency_review": run_subtitle_consistency_review,
+    "transcript_review": run_transcript_review,
     "subtitle_translation": run_subtitle_translation,
     "content_profile": run_content_profile,
         "glossary_review": run_glossary_review,

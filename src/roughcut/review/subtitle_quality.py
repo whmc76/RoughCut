@@ -27,7 +27,12 @@ _GENERIC_SUMMARY_PHRASES = (
     "具体品牌型号待人工确认",
     "主体品牌型号待进一步确认",
 )
+_CONSERVATIVE_IDENTITY_SUMMARY_PHRASES = {
+    "具体品牌型号待人工确认",
+    "主体品牌型号待进一步确认",
+}
 _IDENTITY_HINT_RE = re.compile(r"(MT34|EDC17|EDC37|FXX1|EXO|NOC|FAS|foxbat|OLIGHT|NITECORE|REATE)", re.IGNORECASE)
+_SHORT_FRAGMENT_BLOCKING_MIN_COUNT = 5
 
 
 def _subtitle_text(item: Mapping[str, Any]) -> str:
@@ -56,6 +61,39 @@ def _profile_summary(profile: Mapping[str, Any] | None) -> str:
         if value:
             return value
     return ""
+
+
+def _profile_has_stable_identity_context(profile: Mapping[str, Any] | None) -> bool:
+    candidate = profile or {}
+    if _profile_subject(candidate):
+        return True
+    summary = _profile_summary(candidate)
+    if not summary or summary in _GENERIC_SUMMARY_PHRASES:
+        return False
+    return True
+
+
+def _profile_uses_conservative_identity_summary(profile: Mapping[str, Any] | None) -> bool:
+    candidate = profile or {}
+    identity_review = candidate.get("identity_review")
+    if not isinstance(identity_review, Mapping):
+        return False
+    return bool(identity_review.get("conservative_summary"))
+
+
+def _summary_generic_phrase_hits(profile: Mapping[str, Any] | None) -> tuple[list[str], list[str]]:
+    summary = _profile_summary(profile)
+    conservative_identity_summary = _profile_uses_conservative_identity_summary(profile)
+    active_hits: list[str] = []
+    suppressed_hits: list[str] = []
+    for phrase in _GENERIC_SUMMARY_PHRASES:
+        if phrase not in summary:
+            continue
+        if conservative_identity_summary and phrase in _CONSERVATIVE_IDENTITY_SUMMARY_PHRASES:
+            suppressed_hits.append(phrase)
+            continue
+        active_hits.append(phrase)
+    return active_hits, suppressed_hits
 
 
 def build_subtitle_quality_report(
@@ -87,9 +125,10 @@ def build_subtitle_quality_report(
 
     subject = _profile_subject(content_profile)
     summary = _profile_summary(content_profile)
-    summary_generic_hits = [phrase for phrase in _GENERIC_SUMMARY_PHRASES if phrase in summary]
+    summary_generic_hits, suppressed_summary_generic_hits = _summary_generic_phrase_hits(content_profile)
     identity_expected = bool(_IDENTITY_HINT_RE.search(source_name))
-    identity_missing = bool(identity_expected and not _IDENTITY_HINT_RE.search(f"{subject} {summary}"))
+    identity_check_ready = bool(identity_expected and _profile_has_stable_identity_context(content_profile))
+    identity_missing = bool(identity_check_ready and not _IDENTITY_HINT_RE.search(f"{subject} {summary}"))
 
     short_fragment_rate = (short_fragment_count / total) if total else 0.0
     filler_rate = (filler_count / total) if total else 0.0
@@ -101,7 +140,7 @@ def build_subtitle_quality_report(
 
     if bad_term_total > 0:
         blocking_reasons.append(f"热词/型号错词残留 {bad_term_total} 处")
-    if short_fragment_rate > 0.015:
+    if short_fragment_rate > 0.015 and short_fragment_count >= _SHORT_FRAGMENT_BLOCKING_MIN_COUNT:
         blocking_reasons.append(f"短碎句率过高 {short_fragment_rate:.2%}")
     elif short_fragment_rate > 0.008:
         warning_reasons.append(f"短碎句率偏高 {short_fragment_rate:.2%}")
@@ -110,9 +149,9 @@ def build_subtitle_quality_report(
     if low_signal_rate > 0.005:
         warning_reasons.append(f"低信息碎句偏多 {low_signal_rate:.2%}")
     if summary_generic_hits:
-        blocking_reasons.append(f"摘要模板化命中 {len(summary_generic_hits)} 项")
+        warning_reasons.append(f"摘要模板化命中 {len(summary_generic_hits)} 项")
     if identity_missing:
-        blocking_reasons.append("摘要/主体未保住文件名中的品牌型号")
+        warning_reasons.append("摘要/主体未保住文件名中的品牌型号")
 
     score = 100.0
     score -= float(bad_term_total * 6)
@@ -139,7 +178,10 @@ def build_subtitle_quality_report(
             "filler_rate": round(filler_rate, 4),
             "low_signal_rate": round(low_signal_rate, 4),
             "summary_generic_hits": summary_generic_hits,
+            "suppressed_summary_generic_hits": suppressed_summary_generic_hits,
+            "conservative_identity_summary": _profile_uses_conservative_identity_summary(content_profile),
             "identity_expected": identity_expected,
+            "identity_check_ready": identity_check_ready,
             "identity_missing": identity_missing,
         },
         "source_name": source_name,

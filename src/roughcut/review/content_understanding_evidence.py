@@ -127,15 +127,42 @@ def _as_subtitle_items(value: object | None) -> list[dict[str, Any]]:
     return items
 
 
-def _collect_subtitle_lines(subtitle_items: list[dict[str, Any]]) -> list[str]:
+def _collect_text_lines(items: list[dict[str, Any]]) -> list[str]:
     lines: list[str] = []
-    for item in subtitle_items:
-        for key in ("text_final", "text", "value"):
+    for item in items:
+        for key in ("text_final", "text_norm", "text", "raw_text", "value"):
             value = _as_text(item.get(key))
             if value and value not in lines:
                 lines.append(value)
                 break
     return lines
+
+
+def _transcript_excerpt_items(transcript_evidence: dict[str, Any]) -> list[dict[str, Any]]:
+    segments = transcript_evidence.get("segments")
+    if not isinstance(segments, list):
+        segments = transcript_evidence.get("items")
+    if not isinstance(segments, list):
+        return []
+    items: list[dict[str, Any]] = []
+    for index, item in enumerate(segments):
+        if isinstance(item, dict):
+            items.append(
+                {
+                    "index": int(item.get("index", index) or index),
+                    "start_time": float(item.get("start") or item.get("start_time") or 0.0),
+                    "end_time": float(item.get("end") or item.get("end_time") or 0.0),
+                    "text_raw": _as_text(item.get("text") or item.get("raw_text") or item.get("text_raw")),
+                    "text_norm": _as_text(item.get("text") or item.get("raw_text") or item.get("text_norm")),
+                    "text_final": _as_text(item.get("text") or item.get("raw_text") or item.get("text_final")),
+                    "words": list(item.get("words") or []),
+                }
+            )
+            continue
+        text = _as_text(item)
+        if text:
+            items.append({"index": index, "text_raw": text, "text_norm": text, "text_final": text})
+    return items
 
 
 def _collect_hint_candidates(
@@ -460,8 +487,12 @@ def _compact_semantic_value(value: object | None) -> Any | None:
 def normalize_evidence_bundle(bundle: object | None) -> dict[str, Any]:
     raw = bundle if isinstance(bundle, dict) else {}
     source_name = _as_text(raw.get("source_name"))
+    transcript_evidence = _as_dict(raw.get("transcript_evidence"))
     transcript_excerpt = _as_text(raw.get("transcript_excerpt"))
+    if not transcript_excerpt:
+        transcript_excerpt = _as_text(transcript_evidence.get("transcript_excerpt") or transcript_evidence.get("transcript_text"))
     subtitle_items = _as_subtitle_items(raw.get("subtitle_items"))
+    transcript_items = _transcript_excerpt_items(transcript_evidence)
     ocr_profile = _as_dict(raw.get("ocr_profile"))
     visual_semantic_evidence = _as_dict(raw.get("visual_semantic_evidence"))
 
@@ -477,7 +508,12 @@ def normalize_evidence_bundle(bundle: object | None) -> dict[str, Any]:
     if not visible_text:
         visible_text = _as_text(visual_hints.get("visible_text"))
     candidate_hints["visual_hints"] = visual_hints
-    subtitle_lines = _collect_subtitle_lines(subtitle_items)
+    subtitle_lines = _collect_text_lines(subtitle_items)
+    transcript_lines = _collect_text_lines(transcript_items)
+    if transcript_lines:
+        subtitle_lines = transcript_lines
+    if not transcript_excerpt and transcript_lines:
+        transcript_excerpt = "\n".join(transcript_lines[:8])
     hint_candidates = _collect_hint_candidates(candidate_hints, visual_hints, visual_semantic_evidence)
     cue_lines = _collect_cue_lines(subtitle_lines, transcript_excerpt)
     opening_focus_lines, closing_focus_lines = _collect_temporal_focus_lines(subtitle_items)
@@ -527,7 +563,9 @@ def normalize_evidence_bundle(bundle: object | None) -> dict[str, Any]:
     normalized: dict[str, Any] = {
         "source_name": source_name,
         "transcript_excerpt": transcript_excerpt,
+        "transcript_evidence": transcript_evidence,
         "subtitle_items": subtitle_items,
+        "transcript_items": transcript_items,
         "visible_text": visible_text,
         "ocr_profile": ocr_profile,
         **primary_evidence_graph,
@@ -541,6 +579,7 @@ def build_evidence_bundle(
     *,
     source_name: str,
     subtitle_items: list[dict[str, Any]] | None = None,
+    transcript_evidence: dict[str, Any] | None = None,
     transcript_excerpt: str = "",
     visible_text: str = "",
     ocr_profile: dict[str, Any] | None = None,
@@ -552,6 +591,7 @@ def build_evidence_bundle(
         {
             "source_name": source_name,
             "subtitle_items": subtitle_items or [],
+            "transcript_evidence": transcript_evidence or {},
             "transcript_excerpt": transcript_excerpt,
             "visible_text": visible_text,
             "ocr_profile": ocr_profile or {},

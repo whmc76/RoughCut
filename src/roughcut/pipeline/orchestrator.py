@@ -4,7 +4,7 @@ State in DB, Celery only executes individual steps.
 
  Pipeline: probe → extract_audio → transcribe → subtitle_postprocess
         → subtitle_term_resolution → subtitle_consistency_review
-        → glossary_review → subtitle_translation → content_profile → summary_review → ai_director
+        → glossary_review → transcript_review → subtitle_translation → content_profile → summary_review → ai_director
         → avatar_commentary → edit_plan → render → final_review → platform_package
 """
 from __future__ import annotations
@@ -35,6 +35,7 @@ from roughcut.review.evidence_types import (
 )
 from roughcut.review.subtitle_consistency import ARTIFACT_TYPE_SUBTITLE_CONSISTENCY_REPORT
 from roughcut.review.subtitle_term_resolution import ARTIFACT_TYPE_SUBTITLE_TERM_RESOLUTION_PATCH
+from roughcut.speech.subtitle_pipeline import ARTIFACT_TYPE_CANONICAL_TRANSCRIPT_LAYER
 from roughcut.storage.runtime_cleanup import cleanup_job_runtime_files
 
 logger = logging.getLogger(__name__)
@@ -48,6 +49,7 @@ PIPELINE_STEPS = [
     "subtitle_term_resolution",
     "subtitle_consistency_review",
     "glossary_review",
+    "transcript_review",
     "subtitle_translation",
     "content_profile",
     "summary_review",
@@ -66,6 +68,7 @@ STEP_TASK_MAP = {
     "subtitle_postprocess": "roughcut.pipeline.tasks.llm_subtitle_postprocess",
     "subtitle_term_resolution": "roughcut.pipeline.tasks.llm_subtitle_term_resolution",
     "subtitle_consistency_review": "roughcut.pipeline.tasks.llm_subtitle_consistency_review",
+    "transcript_review": "roughcut.pipeline.tasks.llm_transcript_review",
     "subtitle_translation": "roughcut.pipeline.tasks.llm_subtitle_translation",
     "content_profile": "roughcut.pipeline.tasks.llm_content_profile",
     "glossary_review": "roughcut.pipeline.tasks.llm_glossary_review",
@@ -83,6 +86,7 @@ STEP_QUEUES = {
     "subtitle_postprocess": "llm_queue",
     "subtitle_term_resolution": "llm_queue",
     "subtitle_consistency_review": "llm_queue",
+    "transcript_review": "llm_queue",
     "subtitle_translation": "llm_queue",
     "content_profile": "llm_queue",
     "glossary_review": "llm_queue",
@@ -1225,6 +1229,8 @@ def _artifact_types_for_quality_rerun(rerun_steps: set[str]) -> set[str]:
         artifact_types.add(ARTIFACT_TYPE_SUBTITLE_TERM_RESOLUTION_PATCH)
     if "subtitle_consistency_review" in rerun_steps:
         artifact_types.add(ARTIFACT_TYPE_SUBTITLE_CONSISTENCY_REPORT)
+    if "transcript_review" in rerun_steps:
+        artifact_types.add(ARTIFACT_TYPE_CANONICAL_TRANSCRIPT_LAYER)
     if "transcribe" in rerun_steps and bool(getattr(settings, "asr_evidence_enabled", False)):
         artifact_types.add(ARTIFACT_TYPE_TRANSCRIPT_EVIDENCE)
     if "content_profile" in rerun_steps:

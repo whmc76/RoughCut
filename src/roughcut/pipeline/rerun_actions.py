@@ -10,6 +10,7 @@ ISSUE_RERUN_STEP_OVERRIDES: dict[str, str] = {
     "subtitle_terms_pending": "subtitle_term_resolution",
     "subtitle_consistency_blocking": "subtitle_consistency_review",
     "subtitle_consistency_warning": "subtitle_consistency_review",
+    "missing_canonical_transcript_layer": "transcript_review",
     "missing_content_profile": "content_profile",
 }
 
@@ -18,6 +19,7 @@ AUTO_FIX_STEP_PRIORITY = (
     "subtitle_term_resolution",
     "subtitle_consistency_review",
     "glossary_review",
+    "transcript_review",
     "content_profile",
     "render",
 )
@@ -28,6 +30,7 @@ STEP_RERUN_CHAINS: dict[str, tuple[str, ...]] = {
         "subtitle_term_resolution",
         "subtitle_consistency_review",
         "glossary_review",
+        "transcript_review",
         "subtitle_translation",
         "content_profile",
         "ai_director",
@@ -41,6 +44,7 @@ STEP_RERUN_CHAINS: dict[str, tuple[str, ...]] = {
         "subtitle_term_resolution",
         "subtitle_consistency_review",
         "glossary_review",
+        "transcript_review",
         "subtitle_translation",
         "content_profile",
         "ai_director",
@@ -53,6 +57,7 @@ STEP_RERUN_CHAINS: dict[str, tuple[str, ...]] = {
     "subtitle_consistency_review": (
         "subtitle_consistency_review",
         "glossary_review",
+        "transcript_review",
         "subtitle_translation",
         "content_profile",
         "ai_director",
@@ -64,6 +69,18 @@ STEP_RERUN_CHAINS: dict[str, tuple[str, ...]] = {
     ),
     "glossary_review": (
         "glossary_review",
+        "transcript_review",
+        "subtitle_translation",
+        "content_profile",
+        "ai_director",
+        "avatar_commentary",
+        "edit_plan",
+        "render",
+        "final_review",
+        "platform_package",
+    ),
+    "transcript_review": (
+        "transcript_review",
         "subtitle_translation",
         "content_profile",
         "ai_director",
@@ -86,6 +103,7 @@ QUALITY_RERUN_STEPS = {
     "subtitle_term_resolution",
     "subtitle_consistency_review",
     "glossary_review",
+    "transcript_review",
     "subtitle_translation",
     "content_profile",
     "ai_director",

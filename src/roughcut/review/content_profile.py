@@ -259,9 +259,16 @@ def _coerce_subject_type_to_supported_main_type(profile: dict[str, Any] | None) 
 
 
 def _ensure_subject_type_main(profile: dict[str, Any]) -> str:
+    current_subject_type = str((profile or {}).get("subject_type") or "").strip()
     normalized = _coerce_subject_type_to_supported_main_type(profile)
-    profile["subject_type"] = normalized
-    return normalized
+    if normalized:
+        profile["subject_type"] = normalized
+        return normalized
+    if current_subject_type and not _is_generic_subject_type(current_subject_type):
+        profile["subject_type"] = current_subject_type
+        return current_subject_type
+    profile["subject_type"] = ""
+    return ""
 
 
 def _normalize_query_list(values: list[str]) -> list[str]:
@@ -1004,7 +1011,7 @@ def build_reviewed_transcript_excerpt(
     *,
     max_items: int = 36,
     max_chars: int = 1400,
-) -> str:
+    ) -> str:
     corrections_by_index: dict[int, list[dict[str, Any]]] = {}
     for item in accepted_corrections or []:
         try:
@@ -1027,6 +1034,71 @@ def build_reviewed_transcript_excerpt(
         item["text_final"] = text
         reviewed_items.append(item)
     return build_transcript_excerpt(reviewed_items, max_items=max_items, max_chars=max_chars)
+
+
+def _transcript_evidence_items(transcript_evidence: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not isinstance(transcript_evidence, dict):
+        return []
+    raw_segments = transcript_evidence.get("segments")
+    if not isinstance(raw_segments, list):
+        raw_segments = transcript_evidence.get("items")
+    if not isinstance(raw_segments, list):
+        return []
+    items: list[dict[str, Any]] = []
+    for index, item in enumerate(raw_segments):
+        if isinstance(item, dict):
+            items.append(
+                {
+                    "index": int(item.get("index", index) or index),
+                    "start_time": float(item.get("start_time") or item.get("start") or 0.0),
+                    "end_time": float(item.get("end_time") or item.get("end") or 0.0),
+                    "text_raw": str(item.get("text") or item.get("raw_text") or item.get("text_raw") or "").strip(),
+                    "text_norm": str(item.get("text") or item.get("raw_text") or item.get("text_norm") or "").strip(),
+                    "text_final": str(item.get("text") or item.get("raw_text") or item.get("text_final") or "").strip(),
+                    "words": list(item.get("words") or []),
+                }
+            )
+            continue
+        text = str(item or "").strip()
+        if text:
+            items.append({"index": index, "text_raw": text, "text_norm": text, "text_final": text})
+    return items
+
+
+def _resolve_transcript_excerpt(
+    *,
+    transcript_excerpt: str = "",
+    transcript_items: list[dict[str, Any]] | None = None,
+    subtitle_items: list[dict[str, Any]] | None = None,
+    transcript_evidence: dict[str, Any] | None = None,
+    max_items: int = 120,
+    max_chars: int = 6000,
+) -> tuple[str, list[dict[str, Any]], str]:
+    transcript_evidence_items = _transcript_evidence_items(transcript_evidence)
+    if transcript_evidence_items:
+        excerpt = build_transcript_excerpt(transcript_evidence_items, max_items=max_items, max_chars=max_chars)
+        if excerpt:
+            transcript_layer = str((transcript_evidence or {}).get("layer") or "").strip().lower()
+            source_name = "canonical_transcript" if transcript_layer == "canonical_transcript" else "transcript_evidence"
+            return excerpt, transcript_evidence_items, source_name
+
+    transcript_items = list(transcript_items or [])
+    if transcript_items:
+        excerpt = build_transcript_excerpt(transcript_items, max_items=max_items, max_chars=max_chars)
+        if excerpt:
+            return excerpt, transcript_items, "transcript_items"
+
+    transcript_signal = str(transcript_excerpt or "").strip()
+    if transcript_signal:
+        return transcript_signal, transcript_items, "transcript_excerpt"
+
+    subtitle_items = list(subtitle_items or [])
+    if subtitle_items:
+        excerpt = build_transcript_excerpt(subtitle_items, max_items=max_items, max_chars=max_chars)
+        if excerpt:
+            return excerpt, subtitle_items, "subtitle_items"
+
+    return "", transcript_items or subtitle_items, ""
 
 
 def apply_glossary_terms(text: str, glossary_terms: list[dict[str, Any]]) -> str:
@@ -1279,9 +1351,13 @@ def assess_content_profile_automation(
     content_understanding = profile.get("content_understanding")
     if not isinstance(content_understanding, dict):
         content_understanding = {}
-    transcript_excerpt = str(profile.get("transcript_excerpt") or "").strip()
-    if not transcript_excerpt and subtitle_items:
-        transcript_excerpt = build_transcript_excerpt(subtitle_items, max_items=24, max_chars=900)
+    transcript_excerpt, _, _ = _resolve_transcript_excerpt(
+        transcript_excerpt=str(profile.get("transcript_excerpt") or "").strip(),
+        subtitle_items=subtitle_items,
+        transcript_evidence=profile.get("transcript_evidence") if isinstance(profile.get("transcript_evidence"), dict) else None,
+        max_items=24,
+        max_chars=900,
+    )
 
     subtitle_count = sum(
         1
@@ -2283,6 +2359,39 @@ def _extract_profile_focus_terms(
             if len(focus_terms) >= limit:
                 break
     return focus_terms
+
+
+def _profile_summary_detail_terms(profile: dict[str, Any], *, limit: int = 3) -> list[str]:
+    brand = str(profile.get("subject_brand") or "").strip()
+    model = str(profile.get("subject_model") or "").strip()
+    subject_type = str(profile.get("subject_type") or "").strip()
+    terms: list[str] = []
+    seen: set[str] = set()
+    for item in _content_understanding_detail_terms(profile):
+        value = _clean_line(item)
+        normalized = _normalize_profile_value(value)
+        if (
+            not value
+            or not normalized
+            or normalized in seen
+            or len(normalized) < 2
+            or normalized == _normalize_profile_value(brand)
+            or normalized == _normalize_profile_value(model)
+            or normalized == _normalize_profile_value(subject_type)
+        ):
+            continue
+        if _text_conflicts_with_verified_identity(
+            value,
+            brand=brand,
+            model=model,
+            glossary_terms=None,
+        ):
+            continue
+        seen.add(normalized)
+        terms.append(value)
+        if len(terms) >= limit:
+            break
+    return terms
 
 
 def _strip_identity_tokens_from_text(text: str, *, brand: str, model: str) -> str:
@@ -3414,6 +3523,7 @@ async def infer_content_profile(
     source_name: str,
     subtitle_items: list[dict],
     transcript_items: list[dict[str, Any]] | None = None,
+    transcript_evidence: dict[str, Any] | None = None,
     workflow_template: str | None = None,
     channel_profile: str | None = None,
     user_memory: dict[str, Any] | None = None,
@@ -3424,7 +3534,13 @@ async def infer_content_profile(
 ) -> dict[str, Any]:
     if workflow_template is None and channel_profile is not None:
         workflow_template = channel_profile
-    transcript_excerpt = build_transcript_excerpt(list(transcript_items or subtitle_items))
+    transcript_excerpt, _transcript_items_source, transcript_excerpt_source = _resolve_transcript_excerpt(
+        transcript_items=transcript_items,
+        subtitle_items=subtitle_items,
+        transcript_evidence=transcript_evidence,
+        max_items=120,
+        max_chars=6000,
+    )
     initial_profile: dict[str, Any] = {
         "copy_style": str(copy_style or "attention_grabbing").strip() or "attention_grabbing",
     }
@@ -3459,6 +3575,7 @@ async def infer_content_profile(
     evidence_bundle = build_evidence_bundle(
         source_name=source_name,
         subtitle_items=subtitle_items,
+        transcript_evidence=transcript_evidence or {},
         transcript_excerpt=transcript_excerpt,
         visible_text=str(initial_profile.get("visible_text") or "").strip(),
         ocr_profile=initial_profile.get("ocr_profile") if isinstance(initial_profile.get("ocr_profile"), dict) else {},
@@ -3510,6 +3627,8 @@ async def infer_content_profile(
     profile = map_content_understanding_to_legacy_profile(understanding)
     profile["content_understanding"] = profile.get("content_understanding") or {}
     profile["transcript_excerpt"] = transcript_excerpt
+    if _transcript_items_source:
+        profile["transcript_source"] = transcript_excerpt_source
     profile["workflow_template"] = str(workflow_template or "").strip()
     profile["copy_style"] = str(copy_style or "attention_grabbing").strip() or "attention_grabbing"
     _ensure_subject_type_main(profile)
@@ -3809,8 +3928,141 @@ def _apply_verification_candidate_backfill(
     candidate_subject_type = str(candidate.get("subject_type") or "").strip()
     current_brand = str(guarded.get("subject_brand") or "").strip()
     current_model = str(guarded.get("subject_model") or "").strip()
+    current_subject_type = str(guarded.get("subject_type") or "").strip()
+
+    def _identity_group_support_score(*, brand: str, model: str, subject_type: str) -> int:
+        if not brand and not model:
+            return 0
+        identity_query = " ".join(part for part in (brand, model) if part).strip() or subject_type
+        score = _search_query_support_score(
+            identity_query,
+            transcript_excerpt=transcript_excerpt,
+            source_name=source_name,
+            brand=brand,
+            model=model,
+            subject_type=subject_type,
+            video_theme=str(guarded.get("video_theme") or "").strip(),
+            visible_text=str(guarded.get("visible_text") or "").strip(),
+        )
+        source_constraints = (
+            dict(guarded.get("source_identity_constraints") or {})
+            if isinstance(guarded.get("source_identity_constraints"), dict)
+            else {}
+        )
+        if source_constraints:
+            constraint_brand = str(source_constraints.get("subject_brand") or "").strip()
+            constraint_model = str(source_constraints.get("subject_model") or "").strip()
+            if constraint_brand:
+                score += 5 if brand and _identity_values_compatible(brand, constraint_brand) else -4
+            if constraint_model:
+                score += 6 if model and _identity_values_compatible(model, constraint_model) else -5
+            filename_entries = [
+                str(item).strip()
+                for item in list(source_constraints.get("filename_entries") or [])
+                if str(item).strip()
+            ]
+            if any(
+                _identity_supported_by_text(
+                    brand,
+                    model,
+                    text=item,
+                    glossary_terms=glossary_terms,
+                )
+                for item in filename_entries[:6]
+            ):
+                score += 4
+
+        content_understanding = (
+            dict(guarded.get("content_understanding") or {})
+            if isinstance(guarded.get("content_understanding"), dict)
+            else {}
+        )
+        primary_subject = str(content_understanding.get("primary_subject") or "").strip()
+        if primary_subject and _identity_supported_by_text(
+            brand,
+            model,
+            text=primary_subject,
+            glossary_terms=glossary_terms,
+        ):
+            score += 4
+        subject_entities = [
+            str((item or {}).get("name") or "").strip()
+            for item in list(content_understanding.get("subject_entities") or [])
+            if isinstance(item, dict)
+        ]
+        if any(
+            _identity_supported_by_text(
+                brand,
+                model,
+                text=item,
+                glossary_terms=glossary_terms,
+            )
+            for item in subject_entities[:6]
+        ):
+            score += 2
+
+        extraction = dict(guarded.get("identity_extraction") or {}) if isinstance(guarded.get("identity_extraction"), dict) else {}
+        resolved = dict(extraction.get("resolved") or {}) if isinstance(extraction.get("resolved"), dict) else {}
+        resolved_brand = str(resolved.get("subject_brand") or "").strip()
+        resolved_model = str(resolved.get("subject_model") or "").strip()
+        if resolved_brand and brand and _identity_values_compatible(brand, resolved_brand):
+            score += 2
+        elif resolved_brand and brand:
+            score -= 2
+        if resolved_model and model and _identity_values_compatible(model, resolved_model):
+            score += 2
+        elif resolved_model and model:
+            score -= 2
+
+        verification_gate = (
+            dict(guarded.get("verification_gate") or {})
+            if isinstance(guarded.get("verification_gate"), dict)
+            else {}
+        )
+        top_candidate = (
+            dict(verification_gate.get("top_candidate") or {})
+            if isinstance(verification_gate.get("top_candidate"), dict)
+            else {}
+        )
+        top_brand = str(top_candidate.get("brand") or "").strip()
+        top_model = str(top_candidate.get("model") or "").strip()
+        if top_brand and brand and _identity_values_compatible(brand, top_brand):
+            score += 3
+        elif top_brand and brand:
+            score -= 2
+        if top_model and model and _identity_values_compatible(model, top_model):
+            score += 3
+        elif top_model and model:
+            score -= 2
+        return score
+
     effective_model = current_model or candidate_model
     mapped_brand = _mapped_brand_for_model(effective_model)
+    candidate_support_score = _identity_group_support_score(
+        brand=candidate_brand,
+        model=candidate_model,
+        subject_type=candidate_subject_type,
+    )
+    current_support_score = _identity_group_support_score(
+        brand=current_brand,
+        model=current_model,
+        subject_type=current_subject_type,
+    )
+    should_adopt_candidate_identity_group = bool(
+        candidate_brand
+        and candidate_model
+        and candidate_support_score >= current_support_score + 3
+        and (
+            not current_model
+            or not candidate_model
+            or _identity_values_compatible(current_model, candidate_model)
+        )
+        and (
+            not current_brand
+            or not candidate_brand
+            or not _identity_values_compatible(current_brand, candidate_brand)
+        )
+    )
     allow_brand_override = bool(
         current_brand
         and candidate_brand
@@ -3820,12 +4072,30 @@ def _apply_verification_candidate_backfill(
         and _identity_values_compatible(mapped_brand, candidate_brand)
         and not _identity_values_compatible(mapped_brand, current_brand)
     )
-    if current_brand and candidate_brand and not _identity_values_compatible(current_brand, candidate_brand) and not allow_brand_override:
+    if (
+        current_brand
+        and candidate_brand
+        and not _identity_values_compatible(current_brand, candidate_brand)
+        and not allow_brand_override
+        and not should_adopt_candidate_identity_group
+    ):
         return guarded
-    if current_model and candidate_model and not _identity_values_compatible(current_model, candidate_model):
+    if (
+        current_model
+        and candidate_model
+        and not _identity_values_compatible(current_model, candidate_model)
+        and not should_adopt_candidate_identity_group
+    ):
         return guarded
 
     backfilled_fields: list[str] = []
+    if should_adopt_candidate_identity_group:
+        if candidate_brand and not _identity_values_compatible(current_brand, candidate_brand):
+            guarded["subject_brand"] = candidate_brand
+            backfilled_fields.append("subject_brand")
+        if candidate_model and (not current_model or not _identity_values_compatible(current_model, candidate_model)):
+            guarded["subject_model"] = candidate_model
+            backfilled_fields.append("subject_model")
     effective_brand = current_brand or candidate_brand
     resolved_candidate_brand = candidate_brand or mapped_brand
     if (not current_brand or allow_brand_override) and resolved_candidate_brand:
@@ -3879,6 +4149,11 @@ def _apply_verification_candidate_backfill(
             str(guarded.get("subject_model") or "").strip(),
         )
         if value
+    ) or _text_conflicts_with_verified_identity(
+        summary,
+        brand=str(guarded.get("subject_brand") or "").strip(),
+        model=str(guarded.get("subject_model") or "").strip(),
+        glossary_terms=glossary_terms,
     ):
         guarded["summary"] = _build_profile_summary(guarded)
     current_video_theme = str(guarded.get("video_theme") or "").strip()
@@ -3900,6 +4175,40 @@ def _apply_verification_candidate_backfill(
         rebuilt_theme = _build_identity_driven_video_theme(guarded, transcript_excerpt=transcript_excerpt)
         if rebuilt_theme:
             guarded["video_theme"] = rebuilt_theme
+    summary = str(guarded.get("summary") or "").strip()
+    if summary and _text_conflicts_with_verified_identity(
+        summary,
+        brand=str(guarded.get("subject_brand") or "").strip(),
+        model=str(guarded.get("subject_model") or "").strip(),
+        glossary_terms=glossary_terms,
+    ):
+        guarded["summary"] = _build_profile_summary(guarded)
+
+    current_visible_text = str(guarded.get("visible_text") or "").strip()
+    if _visible_text_conflicts_with_verified_identity(
+        current_visible_text,
+        brand=str(guarded.get("subject_brand") or "").strip(),
+        model=str(guarded.get("subject_model") or "").strip(),
+        glossary_terms=glossary_terms,
+    ):
+        guarded["visible_text"] = " ".join(
+            part
+            for part in (
+                str(guarded.get("subject_brand") or "").strip(),
+                str(guarded.get("subject_model") or "").strip(),
+            )
+            if part
+        ).strip()[:24]
+
+    preset = select_workflow_template(
+        workflow_template=_workflow_template_name(guarded) or guarded.get("workflow_template"),
+        content_kind=_content_kind_name(guarded),
+        subject_domain=str(guarded.get("subject_domain") or ""),
+        subject_model=str(guarded.get("subject_model") or ""),
+        subject_type=str(guarded.get("subject_type") or ""),
+        transcript_hint=transcript_excerpt,
+    )
+    guarded["cover_title"] = build_cover_title(guarded, preset)
 
     _ensure_search_queries(guarded, source_name, transcript_excerpt=transcript_excerpt)
     return guarded
@@ -4143,6 +4452,7 @@ async def enrich_content_profile(
     transcript_excerpt: str,
     subtitle_items: list[dict[str, Any]] | None = None,
     transcript_items: list[dict[str, Any]] | None = None,
+    transcript_evidence: dict[str, Any] | None = None,
     glossary_terms: list[dict[str, Any]] | None = None,
     user_memory: dict[str, Any] | None = None,
     include_research: bool = True,
@@ -4150,8 +4460,15 @@ async def enrich_content_profile(
     if workflow_template is None and channel_profile is not None:
         workflow_template = channel_profile
     enriched = dict(profile or {})
-    transcript_items = transcript_items or []
-    transcript_text = build_transcript_excerpt(transcript_items, max_items=120, max_chars=6000) if transcript_items else ""
+    transcript_excerpt, transcript_items, transcript_excerpt_source = _resolve_transcript_excerpt(
+        transcript_excerpt=transcript_excerpt,
+        transcript_items=transcript_items,
+        subtitle_items=subtitle_items,
+        transcript_evidence=transcript_evidence or (profile.get("transcript_evidence") if isinstance(profile.get("transcript_evidence"), dict) else None),
+        max_items=120,
+        max_chars=6000,
+    )
+    transcript_text = build_transcript_excerpt(transcript_items, max_items=120, max_chars=6000) if transcript_items else transcript_excerpt
     confirmed_fields = _extract_confirmed_profile_fields(enriched)
     _apply_confirmed_profile_fields(enriched, confirmed_fields)
     memory_hints = _seed_profile_from_user_memory(
@@ -4204,6 +4521,7 @@ async def enrich_content_profile(
         profile=enriched,
         source_name=source_name,
         transcript_excerpt=transcript_excerpt,
+        transcript_evidence=transcript_evidence or (profile.get("transcript_evidence") if isinstance(profile.get("transcript_evidence"), dict) else None),
         include_research=include_research,
     )
     if llm_understanding is not None:
@@ -4429,11 +4747,13 @@ async def _infer_content_understanding_for_enrich(
     profile: dict[str, Any],
     source_name: str,
     transcript_excerpt: str,
+    transcript_evidence: dict[str, Any] | None = None,
     include_research: bool,
 ) -> Any | None:
     evidence_bundle = build_evidence_bundle(
         source_name=source_name,
         subtitle_items=[],
+        transcript_evidence=transcript_evidence or {},
         transcript_excerpt=transcript_excerpt,
         visible_text=str(profile.get("visible_text") or "").strip(),
         ocr_profile=_enrich_ocr_profile(profile),
@@ -7220,7 +7540,41 @@ def _fallback_polish_text(
     )
     polished = re.sub(r"(。){2,}", "。", polished)
     polished = re.sub(r"(，){2,}", "，", polished)
+    return _guard_short_fragmentary_polish(
+        original_text=text,
+        polished_text=polished,
+        preserve_display_numbers=preserve_display_numbers,
+    )
+
+
+def _guard_short_fragmentary_polish(
+    *,
+    original_text: str,
+    polished_text: str,
+    preserve_display_numbers: bool,
+) -> str:
+    original = _cleanup_polished_text(original_text, preserve_display_numbers=preserve_display_numbers)
+    polished = _cleanup_polished_text(polished_text, preserve_display_numbers=preserve_display_numbers)
+    if not polished:
+        return original or polished
+    if (
+        _is_short_fragmentary_polish_text(polished)
+        and not _is_short_fragmentary_polish_text(original)
+        and len(_subtitle_guard_text(original)) > len(_subtitle_guard_text(polished))
+    ):
+        return original
     return polished
+
+
+def _is_short_fragmentary_polish_text(text: str) -> bool:
+    candidate = str(text or "").strip().rstrip("。！？!?，,；;：:")
+    if not candidate or len(candidate) > 4:
+        return False
+    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9+\-_/]{0,7}", candidate):
+        return False
+    if re.search(r"[A-Za-z0-9]", candidate):
+        return False
+    return True
 
 
 def _cleanup_polished_text(text: str, *, preserve_display_numbers: bool = False) -> str:
@@ -8290,17 +8644,37 @@ def _build_profile_summary(profile: dict[str, Any]) -> str:
         return _build_neutral_profile_summary()
     parts = [part for part in (brand, model or subject_type) if part]
     product = " ".join(parts).strip() or subject_type
+    detail_terms = _profile_summary_detail_terms(profile, limit=3)
+    detail_phrase = "、".join(detail_terms[:3]).strip()
     if content_kind == "tutorial":
+        if detail_phrase:
+            return (
+                f"这条视频主要围绕{product}的操作演示展开，重点覆盖{detail_phrase}，"
+                f"内容方向偏{theme}，方便后续剪成可跟做的教程。"
+            )
         return f"这条视频主要围绕{product}的操作演示展开，内容方向偏{theme}，重点是步骤清晰、术语准确，方便后续剪成可跟做的教程。"
     if content_kind == "vlog":
+        if detail_phrase:
+            return f"这条视频主要围绕{product}展开，重点提到{detail_phrase}，内容方向偏{theme}，更适合保留真实体验和现场反馈。"
         return f"这条视频主要围绕{product}展开，内容方向偏{theme}，重点是保留生活感、场景切换和真实情绪。"
     if content_kind == "commentary":
+        if detail_phrase:
+            return f"这条视频主要围绕{product}展开讨论，重点带到{detail_phrase}，内容方向偏{theme}，更适合保留观点组织和解释层次。"
         return f"这条视频主要围绕{product}展开表达，内容方向偏{theme}，重点是观点钩子、论点节奏和结论清晰。"
     if content_kind == "gameplay":
+        if detail_phrase:
+            return f"这条视频主要围绕{product}展开，重点呈现{detail_phrase}，内容方向偏{theme}，适合保留关键节点和操作反馈。"
         return f"这条视频主要围绕{product}展开，内容方向偏{theme}，重点是高能操作、关键节点和结果反馈。"
     if content_kind == "food":
+        if detail_phrase:
+            return f"这条视频主要围绕{product}展开，重点提到{detail_phrase}，内容方向偏{theme}，便于后续保留实际体验和判断依据。"
         return f"这条视频主要围绕{product}展开，内容方向偏{theme}，重点是店名菜名、口感描述和是否值得去。"
     return f"这条视频主要围绕{product}展开，内容方向偏{theme}，适合后续做搜索校验、字幕纠错和剪辑包装。"
+
+
+    if detail_phrase:
+        return f"这条视频主要围绕{product}展开，重点提到{detail_phrase}，内容方向偏{theme}，适合后续做信息核对、字幕复核和图文包装。"
+    return f"������Ƶ��ҪΧ��{product}չ�������ݷ���ƫ{theme}���ʺϺ���������У�顢��Ļ�����ͼ�����װ��"
 
 
 def _build_identity_driven_video_theme(profile: dict[str, Any], *, transcript_excerpt: str) -> str:

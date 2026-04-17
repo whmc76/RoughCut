@@ -21,10 +21,12 @@ def test_platform_package_step_appended_to_pipeline():
     assert "final_review" in PIPELINE_STEPS
     assert "subtitle_term_resolution" in PIPELINE_STEPS
     assert "subtitle_consistency_review" in PIPELINE_STEPS
+    assert "transcript_review" in PIPELINE_STEPS
     assert PIPELINE_STEPS.index("subtitle_postprocess") < PIPELINE_STEPS.index("subtitle_term_resolution")
     assert PIPELINE_STEPS.index("subtitle_term_resolution") < PIPELINE_STEPS.index("subtitle_consistency_review")
     assert PIPELINE_STEPS.index("subtitle_consistency_review") < PIPELINE_STEPS.index("glossary_review")
-    assert PIPELINE_STEPS.index("glossary_review") < PIPELINE_STEPS.index("content_profile")
+    assert PIPELINE_STEPS.index("glossary_review") < PIPELINE_STEPS.index("transcript_review")
+    assert PIPELINE_STEPS.index("transcript_review") < PIPELINE_STEPS.index("content_profile")
     assert "ai_director" in PIPELINE_STEPS
     assert "avatar_commentary" in PIPELINE_STEPS
     assert PIPELINE_STEPS.index("render") < PIPELINE_STEPS.index("final_review") < PIPELINE_STEPS.index("platform_package")
@@ -34,6 +36,7 @@ def test_platform_package_step_appended_to_pipeline():
     assert any(step.step_name == "final_review" for step in steps)
     assert any(step.step_name == "subtitle_term_resolution" for step in steps)
     assert any(step.step_name == "subtitle_consistency_review" for step in steps)
+    assert any(step.step_name == "transcript_review" for step in steps)
     assert any(step.step_name == "ai_director" for step in steps)
     assert any(step.step_name == "avatar_commentary" for step in steps)
     assert steps[-1].step_name == "platform_package"

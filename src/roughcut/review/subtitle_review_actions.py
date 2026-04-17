@@ -12,6 +12,7 @@ _DECISION_RERUN_CHAINS: dict[str, tuple[str, ...]] = {
         "subtitle_term_resolution",
         "subtitle_consistency_review",
         "glossary_review",
+        "transcript_review",
         "subtitle_translation",
         "content_profile",
         "ai_director",
@@ -25,6 +26,7 @@ _DECISION_RERUN_CHAINS: dict[str, tuple[str, ...]] = {
         "subtitle_term_resolution",
         "subtitle_consistency_review",
         "glossary_review",
+        "transcript_review",
         "subtitle_translation",
         "content_profile",
         "ai_director",
@@ -37,6 +39,7 @@ _DECISION_RERUN_CHAINS: dict[str, tuple[str, ...]] = {
     "subtitle_consistency_review": (
         "subtitle_consistency_review",
         "glossary_review",
+        "transcript_review",
         "subtitle_translation",
         "content_profile",
         "ai_director",
@@ -48,6 +51,7 @@ _DECISION_RERUN_CHAINS: dict[str, tuple[str, ...]] = {
     ),
     "glossary_review": (
         "glossary_review",
+        "transcript_review",
         "subtitle_translation",
         "content_profile",
         "ai_director",

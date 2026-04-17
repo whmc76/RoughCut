@@ -8,6 +8,7 @@ export const STEP_LABELS: Record<string, string> = {
   subtitle_postprocess: "字幕",
   subtitle_term_resolution: "术语纠偏",
   subtitle_consistency_review: "一致性审校",
+  transcript_review: "转写审校",
   subtitle_quality: "字幕质量",
   subtitle_translation: "翻译",
   content_profile: "摘要",

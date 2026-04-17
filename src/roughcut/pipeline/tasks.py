@@ -593,6 +593,11 @@ def llm_subtitle_consistency_review(self, job_id: str):
     return _run_task_step(self, job_id, "subtitle_consistency_review", retry_countdown=10)
 
 
+@celery_app.task(name="roughcut.pipeline.tasks.llm_transcript_review", bind=True, max_retries=3)
+def llm_transcript_review(self, job_id: str):
+    return _run_task_step(self, job_id, "transcript_review", retry_countdown=10)
+
+
 @celery_app.task(name="roughcut.pipeline.tasks.llm_subtitle_translation", bind=True, max_retries=3)
 def llm_subtitle_translation(self, job_id: str):
     return _run_task_step(self, job_id, "subtitle_translation", retry_countdown=15)

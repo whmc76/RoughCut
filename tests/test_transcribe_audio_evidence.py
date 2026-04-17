@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from roughcut.db.models import Artifact, Job, JobStep
 from roughcut.providers.transcription.base import TranscriptResult, TranscriptSegment, WordTiming
+from roughcut.speech.subtitle_pipeline import ARTIFACT_TYPE_TRANSCRIPT_FACT_LAYER
 
 
 @pytest.mark.asyncio
@@ -101,6 +102,11 @@ async def test_transcribe_audio_persists_transcript_evidence_artifact_when_enabl
                 select(Artifact).where(Artifact.job_id == job_id, Artifact.artifact_type == "transcript_evidence")
             )
         ).scalar_one()
+        transcript_fact_layer = (
+            await session.execute(
+                select(Artifact).where(Artifact.job_id == job_id, Artifact.artifact_type == ARTIFACT_TYPE_TRANSCRIPT_FACT_LAYER)
+            )
+        ).scalar_one()
 
         assert artifact.data_json["provider"] == "qwen3_asr"
         assert artifact.data_json["model"] == "qwen3-asr-1.7b"
@@ -110,6 +116,9 @@ async def test_transcribe_audio_persists_transcript_evidence_artifact_when_enabl
         assert artifact.data_json["raw_payload"] == {"segments": [{"text": "奥雷 司令官二"}]}
         assert artifact.data_json["raw_segments"][0]["raw_text"] == "奥雷 司令官二"
         assert artifact.data_json["raw_segments"][0]["words"][0]["raw_payload"] == {"word": "奥雷"}
+        assert transcript_fact_layer.data_json["layer"] == "transcript_fact"
+        assert transcript_fact_layer.data_json["segments"][0]["text"] == "傲雷 司令官二"
+        assert transcript_fact_layer.data_json["segments"][0]["words"][0]["word"] == "奥雷"
 
 
 @pytest.mark.asyncio
@@ -212,6 +221,11 @@ async def test_transcribe_audio_sanitizes_non_json_evidence_payloads(db_engine, 
                 select(Artifact).where(Artifact.job_id == job_id, Artifact.artifact_type == "transcript_evidence")
             )
         ).scalar_one()
+        transcript_fact_layer = (
+            await session.execute(
+                select(Artifact).where(Artifact.job_id == job_id, Artifact.artifact_type == ARTIFACT_TYPE_TRANSCRIPT_FACT_LAYER)
+            )
+        ).scalar_one()
 
         assert transcript.data_json["duration"] == 1.0
         assert transcript_evidence.data_json["duration"] == 1.0
@@ -225,3 +239,5 @@ async def test_transcribe_audio_sanitizes_non_json_evidence_payloads(db_engine, 
             "best_of": 6,
         }
         assert transcript_evidence.data_json["segments"][0]["words"][0]["raw_payload"]["timing"] == 0.4
+        assert transcript_fact_layer.data_json["segment_count"] == 1
+        assert transcript_fact_layer.data_json["segments"][0]["words"][0]["raw_payload"]["timing"] == 0.4

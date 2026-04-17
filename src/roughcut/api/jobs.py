@@ -133,6 +133,7 @@ STEP_LABELS = {
     "subtitle_postprocess": "字幕后处理",
     "subtitle_term_resolution": "术语解析",
     "subtitle_consistency_review": "一致性审校",
+    "transcript_review": "转写审校",
     "subtitle_translation": "字幕翻译",
     "content_profile": "内容摘要",
     "summary_review": "信息核对",

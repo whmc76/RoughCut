@@ -8,6 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from roughcut.db.models import FactClaim, SubtitleCorrection, SubtitleItem
+import roughcut.speech.subtitle_segmentation as subtitle_segmentation
 from roughcut.speech.postprocess import (
     SubtitleEntry,
     _cleanup_subtitle_entries,
@@ -150,7 +151,8 @@ def test_segment_subtitles_falls_back_when_global_word_segmentation_returns_empt
         ),
     ]
     monkeypatch.setattr(
-        "roughcut.speech.postprocess._segment_subtitles_from_global_words",
+        subtitle_segmentation,
+        "_segment_subtitles_from_global_words",
         lambda *args, **kwargs: [],
     )
 

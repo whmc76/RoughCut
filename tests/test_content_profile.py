@@ -7,6 +7,7 @@ from roughcut.edit.presets import get_workflow_preset
 import pytest
 
 from roughcut.review.content_profile import (
+    _apply_verification_candidate_backfill,
     _merge_specific_profile_hints,
     _aggregate_visual_profile_hints,
     _apply_visual_subject_guard,
@@ -18,6 +19,7 @@ from roughcut.review.content_profile import (
     _build_conservative_identity_summary,
     _coerce_subject_type_to_supported_main_type,
     _build_profile_summary,
+    _ensure_subject_type_main,
     _extract_reference_frames,
     _infer_visual_profile_hints,
     _sanitize_profile_identity,
@@ -305,6 +307,99 @@ def test_prefer_content_understanding_summary_when_review_payload_is_generic():
     assert preferred["summary"] == "UP主补充演示NOC MT34快开组件可拆卸的DIY玩法，体验按压、抠、拧三种快开方式的手感差异。"
 
 
+def test_ensure_subject_type_main_preserves_specific_subject_type_when_main_type_unmapped():
+    profile = {"subject_type": "EDC折刀"}
+
+    resolved = _ensure_subject_type_main(profile)
+
+    assert resolved == "EDC折刀"
+    assert profile["subject_type"] == "EDC折刀"
+
+
+def test_apply_verification_candidate_backfill_adopts_supported_identity_group():
+    profile = {
+        "workflow_template": "edc_tactical",
+        "subject_brand": "REATE",
+        "subject_model": "MT34",
+        "subject_type": "EDC折刀",
+        "video_theme": "REATE MT34手感讲解",
+        "summary": "这条视频主要围绕REATE MT34的操作演示展开。",
+        "visible_text": "REATE MT34",
+        "cover_title": {"top": "REATE", "main": "MT34", "bottom": "手感讲解"},
+        "source_identity_constraints": {
+            "authoritative": True,
+            "subject_brand": "NOC",
+            "subject_model": "MT34",
+            "filename_entries": ["补充说明NOC MT34开箱的快开自定义方式"],
+        },
+        "content_understanding": {
+            "primary_subject": "NOC MT34 EDC折刀",
+            "subject_entities": [{"name": "NOC MT34 EDC折刀"}],
+        },
+        "verification_gate": {
+            "top_candidate": {
+                "brand": "NOC",
+                "model": "MT34",
+            }
+        },
+        "verification_evidence": {
+            "entity_catalog_candidates": [
+                {
+                    "brand": "NOC",
+                    "model": "MT34",
+                    "subject_type": "EDC折刀",
+                    "support_score": 0.84,
+                    "confidence": 0.84,
+                    "evidence_strength": "strong",
+                    "matched_evidence_texts": ["NOC MT34折刀帕"],
+                    "matched_fields": ["video_evidence", "model_alias"],
+                    "source_type": "builtin_entity_catalog",
+                }
+            ]
+        },
+    }
+
+    updated = _apply_verification_candidate_backfill(
+        profile,
+        transcript_excerpt="今天补充说明NOC MT34这把折刀的三种快开方式和DIY改法。",
+        source_name="20260212-141536 补充说明noc mt34开箱的快开自定义方式.mp4",
+    )
+
+    assert updated["subject_brand"] == "NOC"
+    assert updated["subject_model"] == "MT34"
+    assert updated["subject_type"] == "EDC折刀"
+    assert "NOC" in updated["summary"]
+    assert "REATE" not in updated["summary"]
+    assert "NOC" in updated["video_theme"]
+    assert updated["visible_text"] == "NOC MT34"
+    assert "REATE" not in " ".join(updated["cover_title"].values())
+
+
+def test_build_profile_summary_uses_non_conflicting_detail_terms_from_content_understanding():
+    summary = _build_profile_summary(
+        {
+            "workflow_template": "edc_tactical",
+            "content_kind": "tutorial",
+            "subject_brand": "NOC",
+            "subject_model": "MT34",
+            "subject_type": "NOC MT34 EDC折刀",
+            "video_theme": "NOC MT34手感讲解",
+            "content_understanding": {
+                "summary": "视频重点展示NOC MT34的多种快开方式、可拆DIY以及前快开结构。",
+                "semantic_facts": {
+                    "aspect_candidates": ["DIY"],
+                    "component_candidates": ["快开方式", "前快开结构", "EDC17折刀帕"],
+                },
+            },
+        }
+    )
+
+    assert "NOC MT34" in summary
+    assert "快开方式" in summary
+    assert "前快开结构" in summary
+    assert "EDC17" not in summary
+
+
 def test_build_content_profile_cache_fingerprint_uses_infer_version_without_seeded_profile():
     fingerprint = build_content_profile_cache_fingerprint(
         source_name="8ab62636b25b4b6ba8398467ddfb371a.mp4",
@@ -404,6 +499,72 @@ async def test_infer_content_profile_routes_visual_semantic_evidence_into_conten
 
 
 @pytest.mark.asyncio
+async def test_infer_content_profile_prefers_transcript_evidence_over_subtitle_items(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    from roughcut.review import content_profile as content_profile_module
+    from roughcut.review.content_understanding_schema import ContentUnderstanding
+
+    captured: dict[str, object] = {}
+
+    async def fake_infer_content_understanding(evidence_bundle):
+        captured["evidence_bundle"] = evidence_bundle
+        return ContentUnderstanding(
+            video_type="commentary",
+            content_domain="tech",
+            primary_subject="测试主体",
+            video_theme="测试主体",
+            summary="测试主体",
+            hook_line="测试主体",
+            engagement_question="测试问题",
+            search_queries=["测试主体"],
+            needs_review=False,
+        )
+
+    monkeypatch.setattr(content_profile_module, "infer_content_understanding", fake_infer_content_understanding)
+    monkeypatch.setattr(content_profile_module, "_extract_reference_frames", lambda *args, **kwargs: [])
+    monkeypatch.setattr(
+        content_profile_module,
+        "get_settings",
+        lambda: SimpleNamespace(ocr_enabled=False, active_reasoning_provider="minimax", reasoning_provider="minimax"),
+    )
+
+    await infer_content_profile(
+        source_path=tmp_path / "demo.mp4",
+        source_name="demo.mp4",
+        subtitle_items=[
+            {
+                "index": 0,
+                "start_time": 0.0,
+                "end_time": 1.0,
+                "text_raw": "这是字幕层的旧反推内容。",
+                "text_norm": "这是字幕层的旧反推内容。",
+                "text_final": "这是字幕层的旧反推内容。",
+            }
+        ],
+        transcript_evidence={
+            "segments": [
+                {
+                    "index": 0,
+                    "start": 0.0,
+                    "end": 1.0,
+                    "text": "这是事实层的真实转写。",
+                    "words": [],
+                }
+            ],
+            "source_labels": {"subject_brand": "事实品牌"},
+        },
+        include_research=False,
+    )
+
+    evidence_bundle = captured["evidence_bundle"]
+    assert "事实层的真实转写" in evidence_bundle["transcript_excerpt"]
+    assert "字幕层的旧反推内容" not in evidence_bundle["transcript_excerpt"]
+    assert "事实层的真实转写" in evidence_bundle["semantic_fact_inputs"]["transcript_text"]
+
+
+@pytest.mark.asyncio
 async def test_infer_content_profile_runs_research_when_search_queries_are_empty_but_semantic_fact_expansions_exist(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -464,6 +625,66 @@ async def test_infer_content_profile_runs_research_when_search_queries_are_empty
     )
 
     assert captured_queries == ["SLIM2 ULTRA", "SLIM2 PRO", "SLIM2代ULTRA版本"]
+
+
+@pytest.mark.asyncio
+async def test_enrich_content_profile_prefers_transcript_evidence_over_subtitle_excerpt(monkeypatch: pytest.MonkeyPatch):
+    from roughcut.review import content_profile as content_profile_module
+    from roughcut.review.content_understanding_schema import ContentUnderstanding
+
+    captured: dict[str, object] = {}
+
+    async def fake_infer_content_understanding(evidence_bundle):
+        captured["evidence_bundle"] = evidence_bundle
+        return ContentUnderstanding(
+            video_type="commentary",
+            content_domain="tech",
+            primary_subject="测试主体",
+            video_theme="测试主体",
+            summary="测试主体",
+            hook_line="测试主体",
+            engagement_question="测试问题",
+            search_queries=["测试主体"],
+            needs_review=False,
+        )
+
+    monkeypatch.setattr(content_profile_module, "infer_content_understanding", fake_infer_content_understanding)
+
+    result = await enrich_content_profile(
+        profile={
+            "subject_brand": "",
+            "subject_model": "",
+            "subject_type": "",
+            "transcript_evidence": {
+                "segments": [
+                    {
+                        "index": 0,
+                        "start": 0.0,
+                        "end": 1.0,
+                        "text": "这是证据层的转写。",
+                        "words": [],
+                    }
+                ]
+            },
+        },
+        source_name="demo.mp4",
+        transcript_excerpt="这是字幕层的旧摘要。",
+        subtitle_items=[
+            {
+                "index": 0,
+                "start_time": 0.0,
+                "end_time": 1.0,
+                "text_raw": "这是字幕层的旧摘要。",
+                "text_norm": "这是字幕层的旧摘要。",
+                "text_final": "这是字幕层的旧摘要。",
+            }
+        ],
+        include_research=False,
+    )
+
+    assert "证据层的转写" in captured["evidence_bundle"]["transcript_excerpt"]
+    assert "字幕层的旧摘要" not in captured["evidence_bundle"]["transcript_excerpt"]
+    assert "证据层的转写" in result["transcript_excerpt"]
 
 
 def test_build_reviewed_transcript_excerpt_applies_accepted_corrections():

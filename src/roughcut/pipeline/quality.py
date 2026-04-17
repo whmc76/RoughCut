@@ -11,6 +11,7 @@ from roughcut.db.models import Artifact, Job, JobStep, SubtitleCorrection, Subti
 from roughcut.pipeline.rerun_actions import pick_recommended_rerun_steps
 from roughcut.media.variant_timeline_bundle import resolve_effective_variant_timeline_bundle
 from roughcut.review.content_profile import (
+    _content_understanding_detail_terms,
     _has_ingestible_product_subject_conflict,
     _identity_values_compatible,
     _is_generic_engagement_question,
@@ -24,6 +25,7 @@ from roughcut.review.content_profile import (
 from roughcut.review.subtitle_consistency import ARTIFACT_TYPE_SUBTITLE_CONSISTENCY_REPORT
 from roughcut.review.subtitle_quality import ARTIFACT_TYPE_SUBTITLE_QUALITY_REPORT
 from roughcut.review.subtitle_term_resolution import ARTIFACT_TYPE_SUBTITLE_TERM_RESOLUTION_PATCH
+from roughcut.speech.subtitle_pipeline import ARTIFACT_TYPE_CANONICAL_TRANSCRIPT_LAYER
 
 QUALITY_ARTIFACT_TYPE = "quality_assessment"
 _COMPARISON_KEYWORDS = (
@@ -54,13 +56,14 @@ _DETAIL_KEYWORDS = (
     "pro",
     "max",
 )
+_DETAIL_CUE_GENERIC_NORMALIZED = {"教程", "开箱", "体验", "产品", "视频", "演示", "实测"}
 _MODEL_TOKEN_RE = re.compile(r"[A-Za-z]{1,8}\d{1,6}[A-Za-z0-9\u4e00-\u9fff-]{0,8}", re.IGNORECASE)
 _NUMERIC_DETAIL_RE = re.compile(
     r"\d+(?:\.\d+)?(?:代|档|倍|lm|mah|w|v|mm|cm|g|kg|分钟|小时|秒|元|版)",
     re.IGNORECASE,
 )
 _IDENTITY_NARRATIVE_FIELDS = ("video_theme", "summary", "hook_line", "visible_text")
-_ENTITY_CANDIDATE_MIN_SCORE = 0.55
+_ENTITY_CANDIDATE_MIN_SCORE = 0.70
 
 
 @dataclass(slots=True)
@@ -129,6 +132,7 @@ def assess_job_quality(
     )
     render_artifact = _latest_artifact(artifacts, "render_outputs")
     variant_bundle_artifact = _latest_artifact(artifacts, "variant_timeline_bundle")
+    canonical_transcript_artifact = _latest_artifact(artifacts, ARTIFACT_TYPE_CANONICAL_TRANSCRIPT_LAYER)
     term_resolution_artifact = _latest_artifact(artifacts, ARTIFACT_TYPE_SUBTITLE_TERM_RESOLUTION_PATCH)
     consistency_artifact = _latest_artifact(artifacts, ARTIFACT_TYPE_SUBTITLE_CONSISTENCY_REPORT)
     profile = profile_artifact.data_json if profile_artifact and isinstance(profile_artifact.data_json, dict) else {}
@@ -141,8 +145,20 @@ def assess_job_quality(
     variant_bundle = resolve_effective_variant_timeline_bundle(variant_bundle, render_outputs=render_outputs) or {}
     corrections = list(corrections or [])
     subtitle_items = list(subtitle_items or [])
-    subtitle_text = _build_subtitle_text(subtitle_items)
-    profile_text = _build_profile_text(profile)
+    canonical_transcript_data = (
+        canonical_transcript_artifact.data_json
+        if canonical_transcript_artifact and isinstance(canonical_transcript_artifact.data_json, dict)
+        else {}
+    )
+    canonical_transcript_text = _build_canonical_transcript_text(canonical_transcript_data)
+    transcript_context_source = "canonical_transcript_layer" if canonical_transcript_text else "subtitle_items"
+    subtitle_text = _build_subtitle_text(subtitle_items, canonical_transcript_text=canonical_transcript_text)
+    profile_text = _build_profile_text(profile, canonical_transcript_text=canonical_transcript_text)
+    completed_step_names = {
+        str(step.step_name or "").strip()
+        for step in steps
+        if str(step.step_name or "").strip() and step.status in {"done", "skipped"}
+    }
 
     if term_resolution_artifact and isinstance(term_resolution_artifact.data_json, dict):
         pending_patch_count = int(((term_resolution_artifact.data_json.get("metrics") or {}).get("pending_count") or 0))
@@ -186,6 +202,22 @@ def assess_job_quality(
                     consistency_warning_reasons[0],
                     6.0,
                 auto_fix_step="subtitle_consistency_review",
+                )
+            )
+
+    if (
+        ARTIFACT_TYPE_CANONICAL_TRANSCRIPT_LAYER not in {
+            artifact.artifact_type for artifact in artifacts if isinstance(artifact.artifact_type, str)
+        }
+        and {"transcript_review", "content_profile"} & completed_step_names
+    ):
+        issues.append(
+            QualityIssue(
+                "missing_canonical_transcript_layer",
+                "transcript_review/content_profile 已完成，但缺少 canonical transcript 层",
+                20.0,
+                auto_fix_step="transcript_review",
+                blocking=True,
             )
         )
 
@@ -223,16 +255,6 @@ def assess_job_quality(
                     subtitle_quality_warning_reasons[0],
                     6.0,
                     auto_fix_step="subtitle_postprocess",
-                )
-            )
-        elif bool(subtitle_quality_metrics.get("identity_missing")):
-            issues.append(
-                QualityIssue(
-                    "subtitle_identity_missing",
-                    "字幕与文件名中的品牌型号线索尚未稳定对齐",
-                    8.0,
-                    auto_fix_step="subtitle_postprocess",
-                    blocking=True,
                 )
             )
 
@@ -288,7 +310,7 @@ def assess_job_quality(
                 QualityIssue("generic_question", "互动问题过于套路化", 7.0, auto_fix_step="content_profile")
             )
 
-        detail_cues = _extract_detail_cues(subtitle_text)
+        detail_cues = _profile_detail_cues(profile, subtitle_text)
         detail_coverage = sum(1 for cue in detail_cues if _contains_normalized(profile_text, cue))
         comparison_signals = sum(1 for keyword in _COMPARISON_KEYWORDS if keyword in subtitle_text)
         profile_has_comparison = any(keyword in profile_text for keyword in _COMPARISON_KEYWORDS)
@@ -449,12 +471,23 @@ def assess_job_quality(
         "recommended_rerun_steps": recommended_rerun_steps,
         "auto_fixable": bool(recommended_rerun_step) and not any(issue.blocking for issue in issues),
         "signals": {
-            "subtitle_detail_cues": _extract_detail_cues(subtitle_text),
+            "subtitle_detail_cues": _profile_detail_cues(profile, subtitle_text),
             "profile_detail_coverage": sum(
-                1 for cue in _extract_detail_cues(subtitle_text) if _contains_normalized(profile_text, cue)
+                1 for cue in _profile_detail_cues(profile, subtitle_text) if _contains_normalized(profile_text, cue)
             ),
             "pending_subtitle_corrections": pending_corrections,
             "profile_artifact_type": profile_artifact.artifact_type if profile_artifact else None,
+            "transcript_context": {
+                "source": transcript_context_source,
+                "canonical_transcript_layer_present": bool(canonical_transcript_artifact),
+                "canonical_transcript_layer_source_basis": str(
+                    canonical_transcript_data.get("source_basis") or ""
+                ),
+                "canonical_transcript_layer_segment_count": int(
+                    canonical_transcript_data.get("segment_count") or 0
+                ),
+                "transcript_context_length": len(canonical_transcript_text or subtitle_text),
+            },
             "subtitle_item_count": len(subtitle_items),
             "effective_status": effective_status,
             "step_completion_ratio": round(step_completion_ratio, 3),
@@ -481,8 +514,11 @@ def _latest_artifact(artifacts: Sequence[Artifact], *artifact_types: str) -> Art
     )
 
 
-def _build_subtitle_text(items: Sequence[SubtitleItem]) -> str:
+def _build_subtitle_text(items: Sequence[SubtitleItem], *, canonical_transcript_text: str = "") -> str:
     parts: list[str] = []
+    canonical_text = str(canonical_transcript_text or "").strip()
+    if canonical_text:
+        parts.append(canonical_text)
     for item in items:
         text = str(item.text_final or item.text_norm or item.text_raw or "").strip()
         if text:
@@ -501,7 +537,26 @@ def _subtitle_item_to_dict(item: SubtitleItem) -> dict[str, Any]:
     }
 
 
-def _build_profile_text(profile: dict[str, Any]) -> str:
+def _build_canonical_transcript_text(canonical_transcript: dict[str, Any] | None) -> str:
+    if not isinstance(canonical_transcript, dict):
+        return ""
+    parts: list[str] = []
+    for segment in list(canonical_transcript.get("segments") or []):
+        if not isinstance(segment, dict):
+            continue
+        text = str(
+            segment.get("text_canonical")
+            or segment.get("text")
+            or segment.get("text_final")
+            or segment.get("text_raw")
+            or ""
+        ).strip()
+        if text:
+            parts.append(text)
+    return " ".join(parts)
+
+
+def _build_profile_text(profile: dict[str, Any], *, canonical_transcript_text: str = "") -> str:
     parts = [
         str(profile.get(key) or "").strip()
         for key in (
@@ -515,6 +570,9 @@ def _build_profile_text(profile: dict[str, Any]) -> str:
             "cover_title",
         )
     ]
+    canonical_text = str(canonical_transcript_text or "").strip()
+    if canonical_text:
+        parts.append(canonical_text)
     content_understanding = profile.get("content_understanding")
     if isinstance(content_understanding, dict):
         parts.extend(
@@ -744,6 +802,28 @@ def _extract_detail_cues(text: str) -> list[str]:
             seen.add(cue)
             cues.append(cue)
 
+    return cues[:10]
+
+
+def _profile_detail_cues(profile: dict[str, Any], subtitle_text: str) -> list[str]:
+    brand = str(profile.get("subject_brand") or "").strip()
+    model = str(profile.get("subject_model") or "").strip()
+    raw_cues = [*_extract_detail_cues(subtitle_text), *_content_understanding_detail_terms(profile)]
+    cues: list[str] = []
+    seen: set[str] = set()
+    for cue in raw_cues:
+        normalized = _normalize_text(cue)
+        if not normalized or normalized in seen or normalized in _DETAIL_CUE_GENERIC_NORMALIZED:
+            continue
+        if (brand or model) and _text_conflicts_with_verified_identity(
+            str(cue or "").strip(),
+            brand=brand,
+            model=model,
+            glossary_terms=None,
+        ):
+            continue
+        seen.add(normalized)
+        cues.append(str(cue).strip())
     return cues[:10]
 
 

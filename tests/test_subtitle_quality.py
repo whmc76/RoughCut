@@ -30,7 +30,7 @@ def test_build_subtitle_quality_report_flags_hotword_errors_and_fragments():
     assert report["metrics"]["bad_term_counts"]["hotword_unboxing_misheard"] == 1
     assert report["metrics"]["bad_term_counts"]["hotword_trim_variant_misheard"] == 1
     assert report["metrics"]["short_fragment_count"] >= 2
-    assert any("摘要模板化" in reason for reason in report["blocking_reasons"])
+    assert any("摘要模板化" in reason for reason in report["warning_reasons"])
 
 
 def test_build_subtitle_quality_report_detects_identity_missing_in_profile():
@@ -45,7 +45,8 @@ def test_build_subtitle_quality_report_detects_identity_missing_in_profile():
 
     assert report["metrics"]["identity_expected"] is True
     assert report["metrics"]["identity_missing"] is True
-    assert any("品牌型号" in reason for reason in report["blocking_reasons"])
+    assert report["blocking"] is False
+    assert any("品牌型号" in reason for reason in report["warning_reasons"])
 
 
 def test_build_subtitle_quality_report_keeps_informative_summary_with_generic_opening():
@@ -60,6 +61,43 @@ def test_build_subtitle_quality_report_keeps_informative_summary_with_generic_op
 
     assert report["blocking"] is False
     assert report["metrics"]["summary_generic_hits"] == []
+
+
+def test_build_subtitle_quality_report_ignores_conservative_identity_summary_phrase_when_explicitly_flagged():
+    report = build_subtitle_quality_report(
+        subtitle_items=[
+            {"text_final": "这次重点看 NOC S06 迷你款的开箱过程。"},
+            {"text_final": "顺便验证抢购难度和开箱工具手感。"},
+        ],
+        source_name="sample.mp4",
+        content_profile={
+            "summary": "这条视频主要围绕一款EDC机能包展开，具体品牌型号待人工确认。",
+            "identity_review": {"conservative_summary": True},
+        },
+    )
+
+    assert report["blocking"] is False
+    assert report["metrics"]["summary_generic_hits"] == []
+    assert report["metrics"]["suppressed_summary_generic_hits"] == ["具体品牌型号待人工确认"]
+    assert report["metrics"]["conservative_identity_summary"] is True
+
+
+def test_build_subtitle_quality_report_keeps_non_identity_template_summary_phrase_as_warning():
+    report = build_subtitle_quality_report(
+        subtitle_items=[
+            {"text_final": "这次重点看 NOC S06 迷你款的开箱过程。"},
+            {"text_final": "顺便验证抢购难度和开箱工具手感。"},
+        ],
+        source_name="sample.mp4",
+        content_profile={
+            "summary": "这条视频主要围绕NOC S06展开，适合后续做搜索校验、字幕纠错和剪辑包装。",
+            "identity_review": {"conservative_summary": True},
+        },
+    )
+
+    assert report["blocking"] is False
+    assert report["metrics"]["summary_generic_hits"] == ["适合后续做搜索校验、字幕纠错和剪辑包装"]
+    assert any("摘要模板化" in reason for reason in report["warning_reasons"])
 
 
 def test_build_subtitle_quality_report_from_items_uses_model_fields():

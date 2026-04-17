@@ -8,10 +8,43 @@ import roughcut.pipeline.quality as quality_mod
 import roughcut.pipeline.rerun_actions as rerun_actions_mod
 from roughcut.db.models import Artifact, Job, JobStep, SubtitleCorrection, SubtitleItem
 from roughcut.pipeline.quality import assess_job_quality, evaluate_profile_identity_gate
+from roughcut.speech.subtitle_pipeline import ARTIFACT_TYPE_CANONICAL_TRANSCRIPT_LAYER
 
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _canonical_transcript_artifact(job: Job, *, text: str = "今天先开箱一下。") -> Artifact:
+    return Artifact(
+        job_id=job.id,
+        artifact_type=ARTIFACT_TYPE_CANONICAL_TRANSCRIPT_LAYER,
+        data_json={
+            "layer": "canonical_transcript",
+            "source_basis": "subtitle_projection_review",
+            "segment_count": 1,
+            "duration": 3.0,
+            "correction_metrics": {
+                "accepted_correction_count": 0,
+                "pending_correction_count": 0,
+            },
+            "segments": [
+                {
+                    "index": 0,
+                    "start": 0.0,
+                    "end": 3.0,
+                    "text": text,
+                    "text_raw": text,
+                    "text_canonical": text,
+                    "source_subtitle_index": 0,
+                    "accepted_corrections": [],
+                    "pending_corrections": [],
+                    "words": [],
+                }
+            ],
+        },
+        created_at=_now(),
+    )
 
 
 def test_rerun_actions_resolve_shared_issue_mapping_and_chain():
@@ -21,6 +54,19 @@ def test_rerun_actions_resolve_shared_issue_mapping_and_chain():
         "subtitle_term_resolution",
         "subtitle_consistency_review",
         "glossary_review",
+        "transcript_review",
+        "subtitle_translation",
+        "content_profile",
+        "ai_director",
+        "avatar_commentary",
+        "edit_plan",
+        "render",
+        "final_review",
+        "platform_package",
+    ]
+    assert rerun_actions_mod.rerun_start_step_for_issue("missing_canonical_transcript_layer") == "transcript_review"
+    assert rerun_actions_mod.rerun_steps_for_issue_code("missing_canonical_transcript_layer") == [
+        "transcript_review",
         "subtitle_translation",
         "content_profile",
         "ai_director",
@@ -53,6 +99,7 @@ def test_pick_recommended_rerun_steps_prefers_shared_override_over_auto_fix_step
         "subtitle_term_resolution",
         "subtitle_consistency_review",
         "glossary_review",
+        "transcript_review",
         "subtitle_translation",
         "content_profile",
         "ai_director",
@@ -62,6 +109,51 @@ def test_pick_recommended_rerun_steps_prefers_shared_override_over_auto_fix_step
         "final_review",
         "platform_package",
     ]
+
+
+def test_assess_job_quality_treats_identity_missing_quality_signal_as_warning():
+    job = Job(
+        id=uuid.uuid4(),
+        source_path="jobs/demo/identity-warning.mp4",
+        source_name="identity-warning.mp4",
+        status="processing",
+        language="zh-CN",
+    )
+    steps = [JobStep(job_id=job.id, step_name="subtitle_postprocess", status="done")]
+    artifacts = [
+        Artifact(
+            job_id=job.id,
+            artifact_type="subtitle_quality_report",
+            data_json={
+                "score": 88.0,
+                "blocking": False,
+                "blocking_reasons": [],
+                "warning_reasons": ["摘要/主体未保住文件名中的品牌型号"],
+                "metrics": {"identity_missing": True},
+            },
+            created_at=_now(),
+        )
+    ]
+
+    assessment = assess_job_quality(
+        job=job,
+        steps=steps,
+        artifacts=artifacts,
+        subtitle_items=[
+            SubtitleItem(
+                job_id=job.id,
+                version=1,
+                item_index=0,
+                start_time=0.0,
+                end_time=1.0,
+                text_raw="测试字幕",
+            )
+        ],
+        corrections=[],
+    )
+
+    assert "subtitle_quality_warning" in assessment["issue_codes"]
+    assert "subtitle_identity_missing" not in assessment["issue_codes"]
 
 
 def test_assess_job_quality_penalizes_generic_profile_and_missed_detail():
@@ -91,6 +183,7 @@ def test_assess_job_quality_penalizes_generic_profile_and_missed_detail():
             },
             created_at=_now(),
         ),
+        _canonical_transcript_artifact(job),
         Artifact(
             job_id=job.id,
             artifact_type="render_outputs",
@@ -102,6 +195,7 @@ def test_assess_job_quality_penalizes_generic_profile_and_missed_detail():
             },
             created_at=_now(),
         ),
+        _canonical_transcript_artifact(job, text="Loop露普SK05二代UV版和一代做对比。"),
         Artifact(
             job_id=job.id,
             artifact_type="platform_packaging_md",
@@ -176,6 +270,7 @@ def test_assess_job_quality_prefers_subtitle_rerun_when_subtitles_missing():
             },
             created_at=_now(),
         ),
+        _canonical_transcript_artifact(job),
     ]
     corrections = [
         SubtitleCorrection(
@@ -204,6 +299,7 @@ def test_assess_job_quality_prefers_subtitle_rerun_when_subtitles_missing():
         "subtitle_term_resolution",
         "subtitle_consistency_review",
         "glossary_review",
+        "transcript_review",
         "subtitle_translation",
         "content_profile",
         "ai_director",
@@ -213,6 +309,68 @@ def test_assess_job_quality_prefers_subtitle_rerun_when_subtitles_missing():
         "final_review",
         "platform_package",
     ]
+
+
+@pytest.mark.parametrize("completed_step", ["transcript_review", "content_profile"])
+def test_assess_job_quality_flags_missing_canonical_transcript_layer_after_review_steps(completed_step):
+    job = Job(
+        id=uuid.uuid4(),
+        source_path="jobs/demo/canonical-missing.mp4",
+        source_name="canonical-missing.mp4",
+        status="done",
+        language="zh-CN",
+    )
+    steps = [JobStep(job_id=job.id, step_name=completed_step, status="done")]
+    artifacts = [
+        Artifact(
+            job_id=job.id,
+            artifact_type="content_profile_final",
+            data_json={
+                "subject_brand": "Loop露普",
+                "subject_model": "SK05二代UV版",
+                "subject_type": "EDC手电",
+                "video_theme": "SK05二代UV版开箱与对比",
+                "summary": "这条视频聚焦 Loop露普 SK05二代UV版 的对比表现与亮度升级。",
+                "engagement_question": "你更看重对比还是亮度？",
+                "preset_name": "edc_tactical",
+                "review_mode": "auto_confirmed",
+                "automation_review": {"score": 0.93},
+            },
+            created_at=_now(),
+        ),
+    ]
+    subtitles = [
+        SubtitleItem(
+            job_id=job.id,
+            version=1,
+            item_index=0,
+            start_time=0.0,
+            end_time=3.0,
+            text_raw="今天先开箱一下。",
+        )
+    ]
+
+    assessment = assess_job_quality(
+        job=job,
+        steps=steps,
+        artifacts=artifacts,
+        subtitle_items=subtitles,
+        corrections=[],
+        completion_candidate=True,
+    )
+
+    assert "missing_canonical_transcript_layer" in assessment["issue_codes"]
+    issue = next(item for item in assessment["issues"] if item["code"] == "missing_canonical_transcript_layer")
+    assert issue["blocking"] is True
+    assert issue["auto_fix_step"] == "transcript_review"
+    assert assessment["recommended_rerun_step"] == "transcript_review"
+    assert assessment["recommended_rerun_steps"][:3] == [
+        "transcript_review",
+        "subtitle_translation",
+        "content_profile",
+    ]
+    assert assessment["signals"]["transcript_context"]["source"] == "subtitle_items"
+    assert assessment["signals"]["transcript_context"]["canonical_transcript_layer_present"] is False
 
 
 def test_assess_job_quality_uses_subtitle_stage_reports_for_rerun_paths():
@@ -246,6 +404,7 @@ def test_assess_job_quality_uses_subtitle_stage_reports_for_rerun_paths():
             },
             created_at=_now(),
         ),
+        _canonical_transcript_artifact(job),
         Artifact(
             job_id=job.id,
             artifact_type="subtitle_quality_report",
@@ -281,6 +440,7 @@ def test_assess_job_quality_uses_subtitle_stage_reports_for_rerun_paths():
             },
             created_at=_now(),
         ),
+        _canonical_transcript_artifact(job, text="这期重点看手电 UV 版和一代亮度差异。"),
     ]
     subtitles = [
         SubtitleItem(
@@ -347,6 +507,7 @@ def test_assess_job_quality_penalizes_subtitle_sync_issue_and_prefers_render_rer
             },
             created_at=_now(),
         ),
+        _canonical_transcript_artifact(job),
         Artifact(
             job_id=job.id,
             artifact_type="render_outputs",
@@ -387,6 +548,91 @@ def test_assess_job_quality_penalizes_subtitle_sync_issue_and_prefers_render_rer
     assert "subtitle_sync_issue" in assessment["issue_codes"]
     assert assessment["recommended_rerun_step"] == "render"
     assert assessment["recommended_rerun_steps"] == ["render", "final_review", "platform_package"]
+
+
+def test_assess_job_quality_reports_canonical_transcript_context_when_present():
+    job = Job(
+        id=uuid.uuid4(),
+        source_path="jobs/demo/canonical-context.mp4",
+        source_name="canonical-context.mp4",
+        status="done",
+        language="zh-CN",
+    )
+    steps = [
+        JobStep(job_id=job.id, step_name="content_profile", status="done"),
+    ]
+    artifacts = [
+        Artifact(
+            job_id=job.id,
+            artifact_type="content_profile_final",
+            data_json={
+                "subject_brand": "Loop露普",
+                "subject_model": "SK05二代UV版",
+                "subject_type": "EDC手电",
+                "video_theme": "SK05二代UV版开箱与对比",
+                "summary": "这条视频聚焦 Loop露普 SK05二代UV版 的对比表现与亮度升级。",
+                "engagement_question": "你更看重对比还是亮度？",
+                "preset_name": "edc_tactical",
+                "review_mode": "auto_confirmed",
+                "automation_review": {"score": 0.93},
+            },
+            created_at=_now(),
+        ),
+        Artifact(
+            job_id=job.id,
+            artifact_type=ARTIFACT_TYPE_CANONICAL_TRANSCRIPT_LAYER,
+            data_json={
+                "layer": "canonical_transcript",
+                "source_basis": "subtitle_projection_review",
+                "segment_count": 1,
+                "duration": 3.0,
+                "correction_metrics": {
+                    "accepted_correction_count": 1,
+                    "pending_correction_count": 0,
+                },
+                "segments": [
+                    {
+                        "index": 0,
+                        "start": 0.0,
+                        "end": 3.0,
+                        "text": "今天对比二代和一代的亮度升级。",
+                        "text_raw": "今天先开箱一下。",
+                        "text_canonical": "今天对比二代和一代的亮度升级。",
+                        "source_subtitle_index": 0,
+                        "accepted_corrections": [],
+                        "pending_corrections": [],
+                        "words": [],
+                    }
+                ],
+            },
+            created_at=_now(),
+        ),
+        _canonical_transcript_artifact(job, text="这期重点看手电 UV 版和一代亮度差异。"),
+    ]
+    subtitles = [
+        SubtitleItem(
+            job_id=job.id,
+            version=1,
+            item_index=0,
+            start_time=0.0,
+            end_time=3.0,
+            text_raw="今天先开箱一下。",
+        )
+    ]
+
+    assessment = assess_job_quality(
+        job=job,
+        steps=steps,
+        artifacts=artifacts,
+        subtitle_items=subtitles,
+        corrections=[],
+        completion_candidate=True,
+    )
+
+    assert assessment["signals"]["transcript_context"]["source"] == "canonical_transcript_layer"
+    assert assessment["signals"]["transcript_context"]["canonical_transcript_layer_present"] is True
+    assert assessment["signals"]["transcript_context"]["canonical_transcript_layer_segment_count"] == 1
+    assert assessment["signals"]["transcript_context"]["canonical_transcript_layer_source_basis"] == "subtitle_projection_review"
 
 
 def test_assess_job_quality_surfaces_edit_plan_llm_cut_review_timeout():
@@ -437,6 +683,7 @@ def test_assess_job_quality_surfaces_edit_plan_llm_cut_review_timeout():
             },
             created_at=_now(),
         ),
+        _canonical_transcript_artifact(job),
     ]
     subtitles = [
         SubtitleItem(
@@ -510,6 +757,62 @@ def test_assess_job_quality_uses_content_understanding_detail_evidence_for_cover
             start_time=0.0,
             end_time=4.0,
             text_raw="三个快开方式都是可以拆的，而且有很好的手感和反馈，加上它一个合适的重量。",
+        )
+    ]
+
+    assessment = assess_job_quality(
+        job=job,
+        steps=steps,
+        artifacts=artifacts,
+        subtitle_items=subtitles,
+        corrections=[],
+        completion_candidate=True,
+    )
+
+    assert "detail_blind" not in assessment["issue_codes"]
+
+
+def test_assess_job_quality_ignores_conflicting_identity_detail_cues():
+    job = Job(
+        id=uuid.uuid4(),
+        source_path="jobs/demo/mt34-conflict.mp4",
+        source_name="mt34-conflict.mp4",
+        status="done",
+        language="zh-CN",
+    )
+    steps = [
+        JobStep(job_id=job.id, step_name="content_profile", status="done"),
+    ]
+    artifacts = [
+        Artifact(
+            job_id=job.id,
+            artifact_type="content_profile_final",
+            data_json={
+                "subject_brand": "NOC",
+                "subject_model": "MT34",
+                "subject_type": "NOC MT34 EDC折刀",
+                "video_theme": "NOC MT34手感讲解",
+                "summary": "这条视频主要围绕NOC MT34展开，重点提到快开方式、DIY改法和前快开结构，内容方向偏产品讲解，适合后续做信息核对。",
+                "engagement_question": "你更在意哪一种快开手感？",
+                "content_understanding": {
+                    "summary": "视频演示NOC MT34与EDC17别名相关的多种快开方式、DIY改法和前快开结构。",
+                    "semantic_facts": {
+                        "aspect_candidates": ["DIY改法"],
+                        "component_candidates": ["快开方式", "前快开结构", "EDC17折刀帕"],
+                    },
+                },
+            },
+            created_at=_now(),
+        ),
+    ]
+    subtitles = [
+        SubtitleItem(
+            job_id=job.id,
+            version=1,
+            item_index=0,
+            start_time=0.0,
+            end_time=4.0,
+            text_raw="这个EDC17折刀帕其实是在讲MT34的快开方式、前快开结构和DIY改法。",
         )
     ]
 
@@ -645,6 +948,7 @@ def test_assess_job_quality_prefers_variant_bundle_packaged_quality_checks():
             },
             created_at=_now(),
         ),
+        _canonical_transcript_artifact(job),
         Artifact(
             job_id=job.id,
             artifact_type="render_outputs",
@@ -686,6 +990,7 @@ def test_assess_job_quality_prefers_variant_bundle_packaged_quality_checks():
             },
             created_at=_now(),
         ),
+        _canonical_transcript_artifact(job, text="这期重点看手电 UV 版和一代亮度差异。"),
     ]
     subtitles = [
         SubtitleItem(
@@ -738,6 +1043,7 @@ def test_assess_job_quality_blocks_subject_conflict_between_subtitles_and_profil
             },
             created_at=_now(),
         ),
+        _canonical_transcript_artifact(job, text="今天给大家说一下 LuckyKiss 的 KissPod。"),
     ]
     subtitles = [
         SubtitleItem(
@@ -801,6 +1107,7 @@ def test_assess_job_quality_blocks_identity_narrative_conflict_inside_profile():
             },
             created_at=_now(),
         ),
+        _canonical_transcript_artifact(job, text="今天给大家说一下 LuckyKiss 和 KissPod。"),
     ]
     subtitles = [
         SubtitleItem(
@@ -917,6 +1224,33 @@ def test_evaluate_profile_identity_gate_marks_missing_fields_when_catalog_has_st
     assert gate["needs_review"] is True
     assert gate["blocking"] is False
     assert gate["missing_supported_fields"] == ["subject_brand", "subject_model"]
+
+
+def test_evaluate_profile_identity_gate_ignores_moderate_low_support_catalog_candidate():
+    gate = evaluate_profile_identity_gate(
+        {
+            "subject_brand": "天敌",
+            "subject_model": "天敌",
+            "verification_evidence": {
+                "entity_catalog_candidates": [
+                    {
+                        "brand": "NOC",
+                        "model": "",
+                        "primary_subject": "NOC",
+                        "matched_fields": ["video_evidence", "brand_alias"],
+                        "matched_evidence_texts": ["没想到这 NOC 现在这么火。"],
+                        "evidence_strength": "moderate",
+                        "support_score": 0.56,
+                        "confidence": 0.56,
+                    }
+                ]
+            },
+        }
+    )
+
+    assert gate["blocking"] is False
+    assert gate["conflicts"] == []
+    assert gate["missing_supported_fields"] == []
 
 
 def test_evaluate_profile_identity_gate_blocks_narrative_conflict_from_catalog_candidate():

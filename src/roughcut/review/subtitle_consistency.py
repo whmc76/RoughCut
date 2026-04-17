@@ -122,8 +122,8 @@ def build_subtitle_consistency_report(
     if bool(metrics.get("identity_missing")):
         detail = "字幕与文件名/主体线索未形成稳定一致"
         conflicts["subtitle_vs_filename"].append(_conflict_entry(kind="identity_missing", detail=detail))
-        if detail not in blocking_reasons:
-            blocking_reasons.append(detail)
+        if detail not in warning_reasons:
+            warning_reasons.append(detail)
 
     score = 100.0
     score -= float(pending_count * 9)
