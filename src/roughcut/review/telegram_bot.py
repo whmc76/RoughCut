@@ -72,9 +72,22 @@ from roughcut.telegram.task_service import (
     mark_task_notified,
     pending_notification_records,
 )
+from roughcut.telegram.review_notification_service import (
+    mark_review_notification_delivered,
+    mark_review_notification_failed,
+    pending_review_notifications,
+    reschedule_review_notification,
+)
 from roughcut.providers.reasoning.base import Message
 
 logger = logging.getLogger(__name__)
+
+_TELEGRAM_API_MAX_ATTEMPTS = 3
+_TELEGRAM_API_RETRYABLE_EXCEPTIONS = (
+    httpx.TimeoutException,
+    httpx.NetworkError,
+    httpx.RemoteProtocolError,
+)
 
 _REVIEW_KIND_CONTENT = telegram_review_parsing.REVIEW_KIND_CONTENT
 _REVIEW_KIND_SUBTITLE = telegram_review_parsing.REVIEW_KIND_SUBTITLE
@@ -566,19 +579,25 @@ class TelegramReviewBotService:
         )
 
     async def _run(self) -> None:
+        consecutive_failures = 0
         while True:
             settings = get_settings()
             if not _telegram_service_ready(settings):
+                consecutive_failures = 0
                 await asyncio.sleep(10)
                 continue
             try:
                 await self._poll_updates()
                 await self._poll_agent_tasks()
+                await self._poll_review_notifications()
+                consecutive_failures = 0
             except asyncio.CancelledError:
                 raise
             except Exception:
-                logger.exception("Telegram review bot poll failed")
-                await asyncio.sleep(5)
+                consecutive_failures += 1
+                delay = _telegram_poll_failure_backoff_seconds(consecutive_failures)
+                logger.exception("Telegram review bot poll failed; retrying in %.1fs", delay)
+                await asyncio.sleep(delay)
 
     async def _poll_updates(self) -> None:
         settings = get_settings()
@@ -1061,6 +1080,47 @@ class TelegramReviewBotService:
             await self._send_text("\n".join(lines))
             mark_task_notified(record.task_id)
 
+    async def _poll_review_notifications(self) -> None:
+        settings = get_settings()
+        if not _telegram_review_ready(settings):
+            return
+        for record in pending_review_notifications():
+            try:
+                job_id = uuid.UUID(str(record.job_id))
+            except (TypeError, ValueError):
+                mark_review_notification_failed(
+                    record.notification_id,
+                    error_text=f"invalid_job_id:{record.job_id}",
+                )
+                continue
+            try:
+                if record.kind == _REVIEW_KIND_CONTENT:
+                    await self.notify_content_profile_review(job_id)
+                elif record.kind == _REVIEW_KIND_SUBTITLE:
+                    await self.notify_subtitle_review(job_id, force_full_review=bool(record.force_full_review))
+                elif record.kind == _REVIEW_KIND_FINAL:
+                    await self.notify_final_review(job_id)
+                else:
+                    mark_review_notification_failed(
+                        record.notification_id,
+                        error_text=f"unknown_review_kind:{record.kind}",
+                    )
+                    continue
+            except Exception as exc:
+                updated = reschedule_review_notification(
+                    record.notification_id,
+                    error_text=str(exc),
+                )
+                logger.exception(
+                    "Queued Telegram review notification failed job=%s kind=%s attempt=%s status=%s",
+                    record.job_id,
+                    record.kind,
+                    int(getattr(updated, "attempt_count", 0) or 0),
+                    str(getattr(updated, "status", "pending") or "pending"),
+                )
+                continue
+            mark_review_notification_delivered(record.notification_id)
+
     async def _resolve_review_delivery(
         self,
         *,
@@ -1450,16 +1510,42 @@ class TelegramReviewBotService:
             f"/bot{str(settings.telegram_bot_token).strip()}/{method}"
         )
         timeout = httpx.Timeout(65.0, connect=10.0)
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            if files:
-                response = await client.post(url, data=payload, files=files)
-            else:
-                response = await client.post(url, json=payload)
-        response.raise_for_status()
-        data = response.json()
-        if not data.get("ok", False):
-            raise RuntimeError(str(data))
-        return data
+        for attempt in range(1, _TELEGRAM_API_MAX_ATTEMPTS + 1):
+            try:
+                async with httpx.AsyncClient(timeout=timeout) as client:
+                    if files:
+                        response = await client.post(url, data=payload, files=files)
+                    else:
+                        response = await client.post(url, json=payload)
+                response.raise_for_status()
+                data = response.json()
+                if not data.get("ok", False):
+                    raise RuntimeError(str(data))
+                return data
+            except _TELEGRAM_API_RETRYABLE_EXCEPTIONS as exc:
+                if attempt >= _TELEGRAM_API_MAX_ATTEMPTS:
+                    raise
+                delay = _telegram_api_retry_backoff_seconds(attempt)
+                logger.warning(
+                    "Telegram API %s transient failure on attempt %s/%s; retrying in %.1fs: %s",
+                    method,
+                    attempt,
+                    _TELEGRAM_API_MAX_ATTEMPTS,
+                    delay,
+                    exc,
+                )
+                await asyncio.sleep(delay)
+        raise RuntimeError(f"Telegram API {method} exhausted retries")
+
+
+def _telegram_api_retry_backoff_seconds(attempt: int) -> float:
+    normalized_attempt = max(1, int(attempt))
+    return float(min(4, normalized_attempt))
+
+
+def _telegram_poll_failure_backoff_seconds(consecutive_failures: int) -> float:
+    normalized_failures = max(1, int(consecutive_failures))
+    return float(min(30, 5 * (2 ** (normalized_failures - 1))))
 
 
 def _telegram_ready(settings: Any) -> bool:

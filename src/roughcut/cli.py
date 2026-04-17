@@ -17,6 +17,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
 
 from roughcut.config import get_settings
+from roughcut.pipeline.live_readiness import load_live_readiness_snapshot
 
 
 logging.basicConfig(
@@ -298,6 +299,171 @@ def telegram_agent():
     asyncio.run(get_telegram_review_bot_service().run_forever())
 
 
+@cli.command("review-notifications")
+@click.option("--status", "statuses", multiple=True, help="Filter by status, can repeat")
+@click.option("--job-id", default="", help="Filter by job id")
+@click.option("--kind", default="", help="Filter by review kind")
+@click.option("--limit", default=20, show_default=True, type=click.IntRange(1), help="Max rows to show")
+@click.option("--requeue", "requeue_id", default="", help="Requeue one notification by id")
+@click.option("--drop", "drop_id", default="", help="Delete one notification by id")
+@click.option("--requeue-filtered", is_flag=True, default=False, help="Requeue all currently filtered notifications")
+@click.option("--drop-filtered", is_flag=True, default=False, help="Delete all currently filtered notifications")
+@click.option("--json-output", "json_output", is_flag=True, default=False, help="Print machine-readable JSON")
+def review_notifications(
+    statuses: tuple[str, ...],
+    job_id: str,
+    kind: str,
+    limit: int,
+    requeue_id: str,
+    drop_id: str,
+    requeue_filtered: bool,
+    drop_filtered: bool,
+    json_output: bool,
+):
+    """Inspect and manage the Telegram review notification retry queue."""
+    from roughcut.telegram.review_notification_service import (
+        build_review_notification_snapshot,
+        drop_review_notification,
+        drop_review_notifications,
+        list_review_notifications,
+        requeue_review_notification,
+        requeue_review_notifications,
+    )
+
+    normalized_statuses = tuple(str(item).strip() for item in statuses if str(item).strip())
+    normalized_job_id = str(job_id or "").strip()
+    normalized_kind = str(kind or "").strip()
+    requeue_id = str(requeue_id or "").strip()
+    drop_id = str(drop_id or "").strip()
+
+    if sum(1 for item in (bool(requeue_id), bool(drop_id), bool(requeue_filtered), bool(drop_filtered)) if item) > 1:
+        raise click.ClickException("Use only one action at a time.")
+
+    if requeue_id:
+        try:
+            record = requeue_review_notification(requeue_id)
+        except RuntimeError as exc:
+            raise click.ClickException(str(exc)) from exc
+        if record is None:
+            raise click.ClickException(f"Notification not found: {requeue_id}")
+        payload = {
+            "action": "requeued",
+            "notification": asdict(record) if hasattr(record, "__dataclass_fields__") else dict(vars(record)),
+        }
+        if json_output:
+            click.echo(json.dumps(payload, ensure_ascii=False, indent=2))
+            return
+        click.echo(
+            " ".join(
+                [
+                    "requeued",
+                    record.notification_id,
+                    f"kind={record.kind}",
+                    f"job={record.job_id}",
+                    f"status={record.status}",
+                ]
+            )
+        )
+        return
+
+    if drop_id:
+        try:
+            deleted = drop_review_notification(drop_id)
+        except RuntimeError as exc:
+            raise click.ClickException(str(exc)) from exc
+        if not deleted:
+            raise click.ClickException(f"Notification not found: {drop_id}")
+        payload = {"action": "dropped", "notification_id": drop_id}
+        if json_output:
+            click.echo(json.dumps(payload, ensure_ascii=False, indent=2))
+            return
+        click.echo(f"dropped {drop_id}")
+        return
+
+    if requeue_filtered or drop_filtered:
+        records = list_review_notifications(
+            statuses=list(normalized_statuses) or None,
+            job_id=normalized_job_id or None,
+            kind=normalized_kind or None,
+            limit=limit,
+        )
+        notification_ids = [item.notification_id for item in records]
+        payload = {
+            "action": "requeued" if requeue_filtered else "dropped",
+            "count": 0,
+            "notification_ids": [],
+            "filters": {"statuses": list(normalized_statuses), "job_id": normalized_job_id, "kind": normalized_kind},
+        }
+        if notification_ids:
+            try:
+                if requeue_filtered:
+                    updated = requeue_review_notifications(notification_ids)
+                    payload["count"] = len(updated)
+                    payload["notification_ids"] = [item.notification_id for item in updated]
+                else:
+                    deleted_ids = drop_review_notifications(notification_ids)
+                    payload["count"] = len(deleted_ids)
+                    payload["notification_ids"] = deleted_ids
+            except RuntimeError as exc:
+                raise click.ClickException(str(exc)) from exc
+        if json_output:
+            click.echo(json.dumps(payload, ensure_ascii=False, indent=2))
+            return
+        if not payload["count"]:
+            click.echo("No notifications matched the current filters.")
+            return
+        click.echo(
+            f"{payload['action']} {payload['count']} notifications"
+            + (f" job={normalized_job_id}" if normalized_job_id else "")
+            + (f" kind={normalized_kind}" if normalized_kind else "")
+        )
+        return
+
+    snapshot = build_review_notification_snapshot(
+        statuses=list(normalized_statuses) or None,
+        job_id=normalized_job_id or None,
+        kind=normalized_kind or None,
+        limit=limit,
+    )
+    payload = {
+        **snapshot,
+        "filters": {"statuses": list(normalized_statuses), "job_id": normalized_job_id, "kind": normalized_kind},
+    }
+    if json_output:
+        click.echo(json.dumps(payload, ensure_ascii=False, indent=2))
+        return
+
+    summary = payload["summary"]
+    click.echo(
+        " ".join(
+            [
+                f"total={summary['total']}",
+                f"pending={summary['pending']}",
+                f"due_now={summary['due_now']}",
+                f"failed={summary['failed']}",
+                f"delivered={summary['delivered']}",
+            ]
+        )
+    )
+    click.echo(f"store={payload['store_file']}")
+    if payload.get("detail"):
+        click.echo(f"detail={payload['detail']}")
+    for item in payload["items"]:
+        click.echo(
+            " ".join(
+                [
+                    item["status"],
+                    item["notification_id"],
+                    f"kind={item['kind']}",
+                    f"job={item['job_id']}",
+                    f"attempts={item['attempt_count']}",
+                    f"next={item['next_attempt_at']}",
+                    f"error={item['last_error'] or '-'}",
+                ]
+            )
+        )
+
+
 @cli.command("recover-job-index")
 @click.option("--endpoint-url", required=True, help="S3/MinIO endpoint URL")
 @click.option("--access-key-id", default="minioadmin", show_default=True, help="S3 access key")
@@ -513,6 +679,61 @@ def quality_content_profile_review_stats(json_output: bool):
     click.echo(f"detail={row.detail}")
     if row.updated_at:
         click.echo(f"updated_at={row.updated_at}")
+
+
+@quality.command("live-readiness")
+@click.option("--report-path", default="", help="Optional path to batch_report.json")
+@click.option("--require-pass", is_flag=True, default=False, help="Exit with code 1 when the live-readiness gate is not passed")
+@click.option("--json-output", "json_output", is_flag=True, default=False, help="Print machine-readable JSON")
+def quality_live_readiness(report_path: str, require_pass: bool, json_output: bool):
+    """Inspect the current live dry run gate verdict from the latest batch report."""
+    normalized_report_path = str(report_path or "").strip()
+    try:
+        snapshot = load_live_readiness_snapshot(normalized_report_path or None)
+    except Exception as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    payload = {
+        **snapshot,
+        "report_path_input": normalized_report_path,
+    }
+    if json_output:
+        click.echo(json.dumps(payload, ensure_ascii=False, indent=2))
+        if require_pass and not bool(payload.get("gate_passed")):
+            raise SystemExit(1)
+        return
+
+    click.echo(
+        " ".join(
+            [
+                f"status={payload.get('status') or 'unknown'}",
+                f"gate_passed={str(bool(payload.get('gate_passed'))).lower()}",
+                f"stable_runs={payload.get('stable_run_count', 0)}/{payload.get('required_stable_runs', 0)}",
+            ]
+        )
+    )
+    click.echo(f"summary={payload.get('summary') or ''}")
+    if payload.get("report_file"):
+        click.echo(f"report={payload['report_file']}")
+    if payload.get("report_created_at"):
+        click.echo(f"created_at={payload['report_created_at']}")
+    if payload.get("golden_job_count") is not None or payload.get("evaluated_job_count") is not None:
+        click.echo(
+            " ".join(
+                [
+                    f"golden_jobs={payload.get('golden_job_count', 0)}",
+                    f"evaluated_jobs={payload.get('evaluated_job_count', 0)}",
+                ]
+            )
+        )
+    if payload.get("failure_reasons"):
+        click.echo("failures=" + " / ".join(str(item) for item in payload["failure_reasons"]))
+    if payload.get("warning_reasons"):
+        click.echo("warnings=" + " / ".join(str(item) for item in payload["warning_reasons"]))
+    if payload.get("detail"):
+        click.echo(f"detail={payload['detail']}")
+    if require_pass and not bool(payload.get("gate_passed")):
+        raise SystemExit(1)
 
 
 @quality.command("backfill-content-profile-policy")

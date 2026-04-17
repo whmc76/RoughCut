@@ -1,12 +1,17 @@
 import { act, waitFor } from "@testing-library/react";
 
 import { renderHookWithQueryClient } from "../../test/renderWithQueryClient";
-import type { HealthDetail, ServiceStatus } from "../../types";
+import type { HealthDetail, ReviewNotificationSnapshot, ServiceStatus } from "../../types";
 import { useControlWorkspace } from "./useControlWorkspace";
 
 const mockApi = vi.hoisted(() => ({
   getControlStatus: vi.fn(),
   getHealthDetail: vi.fn(),
+  getReviewNotifications: vi.fn(),
+  requeueReviewNotification: vi.fn(),
+  requeueReviewNotifications: vi.fn(),
+  dropReviewNotification: vi.fn(),
+  dropReviewNotifications: vi.fn(),
   stopServices: vi.fn(),
 }));
 
@@ -50,10 +55,40 @@ const SAMPLE_HEALTH_DETAIL: HealthDetail = {
   },
 };
 
+const SAMPLE_REVIEW_NOTIFICATIONS: ReviewNotificationSnapshot = {
+  state_dir: "F:/roughcut_outputs/telegram-agent",
+  store_file: "F:/roughcut_outputs/telegram-agent/review_notifications.json",
+  summary: {
+    total: 1,
+    pending: 1,
+    due_now: 1,
+    failed: 0,
+    delivered: 0,
+  },
+  items: [
+    {
+      notification_id: "n-1",
+      kind: "content_profile",
+      job_id: "job-1",
+      status: "pending",
+      attempt_count: 1,
+      next_attempt_at: "2026-04-17T00:00:00+00:00",
+      last_error: "",
+      force_full_review: false,
+      updated_at: "2026-04-17T00:00:00+00:00",
+    },
+  ],
+};
+
 describe("useControlWorkspace", () => {
   beforeEach(() => {
     mockApi.getControlStatus.mockResolvedValue(SAMPLE_SERVICES);
     mockApi.getHealthDetail.mockResolvedValue(SAMPLE_HEALTH_DETAIL);
+    mockApi.getReviewNotifications.mockResolvedValue(SAMPLE_REVIEW_NOTIFICATIONS);
+    mockApi.requeueReviewNotification.mockResolvedValue({ status: "requeued" });
+    mockApi.requeueReviewNotifications.mockResolvedValue({ status: "requeued", count: 1, notification_ids: ["n-1"] });
+    mockApi.dropReviewNotification.mockResolvedValue({ status: "dropped" });
+    mockApi.dropReviewNotifications.mockResolvedValue({ status: "dropped", count: 1, notification_ids: ["n-1"] });
     mockApi.stopServices.mockResolvedValue({});
   });
 
@@ -78,5 +113,29 @@ describe("useControlWorkspace", () => {
     });
 
     expect(mockApi.stopServices).toHaveBeenCalledWith(true);
+  });
+
+  it("loads review notifications with filters and refreshes status after queue mutations", async () => {
+    const { result } = renderHookWithQueryClient(() => useControlWorkspace());
+
+    await waitFor(() => expect(result.current.reviewNotifications.data).toEqual(SAMPLE_REVIEW_NOTIFICATIONS));
+    expect(mockApi.getReviewNotifications).toHaveBeenCalledWith({ jobId: undefined, limit: 50 });
+
+    act(() => {
+      result.current.setReviewNotificationJobIdFilter("job-1");
+    });
+
+    await waitFor(() => expect(mockApi.getReviewNotifications).toHaveBeenCalledWith({ jobId: "job-1", limit: 50 }));
+
+    const statusCallsBeforeMutation = mockApi.getControlStatus.mock.calls.length;
+    const reviewCallsBeforeMutation = mockApi.getReviewNotifications.mock.calls.length;
+
+    await act(async () => {
+      await result.current.requeueReviewNotifications.mutateAsync(["n-1"]);
+    });
+
+    expect(mockApi.requeueReviewNotifications).toHaveBeenCalledWith(["n-1"]);
+    await waitFor(() => expect(mockApi.getControlStatus.mock.calls.length).toBeGreaterThan(statusCallsBeforeMutation));
+    await waitFor(() => expect(mockApi.getReviewNotifications.mock.calls.length).toBeGreaterThan(reviewCallsBeforeMutation));
   });
 });

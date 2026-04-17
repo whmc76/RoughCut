@@ -160,6 +160,314 @@ def test_telegram_agent_command_runs_service(monkeypatch):
     assert called["run_forever"] is True
 
 
+def test_review_notifications_command_lists_snapshot_json(monkeypatch):
+    runner = CliRunner()
+    import roughcut.telegram.review_notification_service as review_notification_mod
+
+    monkeypatch.setattr(
+        review_notification_mod,
+        "build_review_notification_snapshot",
+        lambda statuses=None, job_id=None, kind=None, limit=20: {
+            "state_dir": "F:/roughcut_outputs/telegram-agent",
+            "store_file": "F:/roughcut_outputs/telegram-agent/review_notifications.json",
+            "detail": "2 queued notifications",
+            "summary": {"total": 2, "pending": 1, "due_now": 1, "failed": 0, "delivered": 1},
+            "items": [
+                {
+                    "notification_id": "n-1",
+                    "kind": "content_profile",
+                    "job_id": "job-1",
+                    "status": "pending",
+                    "attempt_count": 2,
+                    "next_attempt_at": "2026-04-17T00:00:00+00:00",
+                    "last_error": "network down",
+                    "force_full_review": False,
+                    "updated_at": "2026-04-17T00:00:00+00:00",
+                }
+            ],
+        },
+    )
+
+    result = runner.invoke(cli_mod.cli, ["review-notifications", "--json-output"])
+
+    assert result.exit_code == 0
+    assert '"total": 2' in result.output
+    assert '"notification_id": "n-1"' in result.output
+
+
+def test_review_notifications_command_passes_status_filters_to_snapshot(monkeypatch):
+    runner = CliRunner()
+    import roughcut.telegram.review_notification_service as review_notification_mod
+
+    observed: dict[str, object] = {}
+
+    def fake_snapshot(*, statuses=None, job_id=None, kind=None, limit=20):
+        observed["statuses"] = statuses
+        observed["job_id"] = job_id
+        observed["kind"] = kind
+        observed["limit"] = limit
+        return {
+            "state_dir": "F:/roughcut_outputs/telegram-agent",
+            "store_file": "F:/roughcut_outputs/telegram-agent/review_notifications.json",
+            "detail": "1 queued notifications",
+            "summary": {"total": 1, "pending": 0, "due_now": 0, "failed": 1, "delivered": 0},
+            "items": [
+                {
+                    "notification_id": "n-2",
+                    "kind": "final_review",
+                    "job_id": "job-2",
+                    "status": "failed",
+                    "attempt_count": 3,
+                    "next_attempt_at": "2026-04-17T00:00:00+00:00",
+                    "last_error": "network down",
+                    "force_full_review": False,
+                    "updated_at": "2026-04-17T00:00:00+00:00",
+                }
+            ],
+        }
+
+    monkeypatch.setattr(review_notification_mod, "build_review_notification_snapshot", fake_snapshot)
+
+    result = runner.invoke(cli_mod.cli, ["review-notifications", "--status", "failed"])
+
+    assert result.exit_code == 0
+    assert observed == {"statuses": ["failed"], "job_id": None, "kind": None, "limit": 20}
+    assert "total=1 pending=0 due_now=0 failed=1 delivered=0" in result.output
+    assert "detail=1 queued notifications" in result.output
+
+
+def test_review_notifications_command_passes_job_id_filter_to_snapshot(monkeypatch):
+    runner = CliRunner()
+    import roughcut.telegram.review_notification_service as review_notification_mod
+
+    observed: dict[str, object] = {}
+
+    def fake_snapshot(*, statuses=None, job_id=None, kind=None, limit=20):
+        observed.update({"statuses": statuses, "job_id": job_id, "kind": kind, "limit": limit})
+        return {
+            "state_dir": "F:/roughcut_outputs/telegram-agent",
+            "store_file": "F:/roughcut_outputs/telegram-agent/review_notifications.json",
+            "detail": "1 queued notifications",
+            "summary": {"total": 1, "pending": 1, "due_now": 0, "failed": 0, "delivered": 0},
+            "items": [],
+        }
+
+    monkeypatch.setattr(review_notification_mod, "build_review_notification_snapshot", fake_snapshot)
+
+    result = runner.invoke(cli_mod.cli, ["review-notifications", "--job-id", "job-1"])
+
+    assert result.exit_code == 0
+    assert observed == {"statuses": None, "job_id": "job-1", "kind": None, "limit": 20}
+
+
+def test_review_notifications_command_requeues_one_item(monkeypatch):
+    runner = CliRunner()
+    import roughcut.telegram.review_notification_service as review_notification_mod
+
+    monkeypatch.setattr(
+        review_notification_mod,
+        "requeue_review_notification",
+        lambda notification_id: SimpleNamespace(
+            notification_id=notification_id,
+            notification_key="content_profile:job-1:0",
+            kind="content_profile",
+            job_id="job-1",
+            force_full_review=False,
+            status="pending",
+            created_at="2026-04-17T00:00:00+00:00",
+            updated_at="2026-04-17T00:00:01+00:00",
+            next_attempt_at="2026-04-17T00:00:01+00:00",
+            attempt_count=0,
+            last_error="",
+            delivered_at="",
+        ),
+    )
+
+    result = runner.invoke(cli_mod.cli, ["review-notifications", "--requeue", "n-1"])
+
+    assert result.exit_code == 0
+    assert "requeued n-1" in result.output
+
+
+def test_review_notifications_command_drops_one_item(monkeypatch):
+    runner = CliRunner()
+    import roughcut.telegram.review_notification_service as review_notification_mod
+
+    monkeypatch.setattr(review_notification_mod, "drop_review_notification", lambda notification_id: notification_id == "n-1")
+
+    result = runner.invoke(cli_mod.cli, ["review-notifications", "--drop", "n-1"])
+
+    assert result.exit_code == 0
+    assert "dropped n-1" in result.output
+
+
+def test_review_notifications_command_reports_store_errors(monkeypatch):
+    runner = CliRunner()
+    import roughcut.telegram.review_notification_service as review_notification_mod
+
+    monkeypatch.setattr(
+        review_notification_mod,
+        "requeue_review_notification",
+        lambda notification_id: (_ for _ in ()).throw(RuntimeError("Review notification store is unreadable")),
+    )
+
+    result = runner.invoke(cli_mod.cli, ["review-notifications", "--requeue", "n-1"])
+
+    assert result.exit_code != 0
+    assert "Review notification store is unreadable" in result.output
+
+
+def test_review_notifications_command_requeues_filtered_items(monkeypatch):
+    runner = CliRunner()
+    import roughcut.telegram.review_notification_service as review_notification_mod
+
+    monkeypatch.setattr(
+        review_notification_mod,
+        "list_review_notifications",
+        lambda statuses=None, job_id=None, kind=None, limit=None: [
+            SimpleNamespace(notification_id="n-1"),
+            SimpleNamespace(notification_id="n-2"),
+        ],
+    )
+    monkeypatch.setattr(
+        review_notification_mod,
+        "requeue_review_notifications",
+        lambda notification_ids: [SimpleNamespace(notification_id=item) for item in notification_ids],
+    )
+
+    result = runner.invoke(cli_mod.cli, ["review-notifications", "--job-id", "job-1", "--requeue-filtered"])
+
+    assert result.exit_code == 0
+    assert "requeued 2 notifications job=job-1" in result.output
+
+
+def test_quality_live_readiness_prints_text_summary(monkeypatch):
+    runner = CliRunner()
+
+    monkeypatch.setattr(
+        cli_mod,
+        "load_live_readiness_snapshot",
+        lambda report_path=None: {
+            "status": "fail",
+            "gate_passed": False,
+            "summary": "未满足 live dry run 准入门槛",
+            "stable_run_count": 2,
+            "required_stable_runs": 3,
+            "golden_job_count": 4,
+            "evaluated_job_count": 4,
+            "failure_reasons": ["连续稳定批次不足：2/3", "P0 blocker 未清零：1 个"],
+            "warning_reasons": ["未显式提供 golden jobs，当前按本次 batch 全量样本评估"],
+            "report_file": "E:/WorkSpace/RoughCut/output/test/fullchain-batch/batch_report.json",
+            "report_created_at": "2026-04-17T00:00:00+00:00",
+            "detail": "",
+        },
+    )
+
+    result = runner.invoke(cli_mod.cli, ["quality", "live-readiness"])
+
+    assert result.exit_code == 0
+    assert "status=fail gate_passed=false stable_runs=2/3" in result.output
+    assert "summary=未满足 live dry run 准入门槛" in result.output
+    assert "golden_jobs=4 evaluated_jobs=4" in result.output
+    assert "failures=连续稳定批次不足：2/3 / P0 blocker 未清零：1 个" in result.output
+
+
+def test_quality_live_readiness_prints_json_and_passes_report_path(monkeypatch):
+    runner = CliRunner()
+    observed: dict[str, object] = {}
+
+    def fake_snapshot(report_path=None):
+        observed["report_path"] = report_path
+        return {
+            "status": "pass",
+            "gate_passed": True,
+            "summary": "满足 live dry run 准入门槛",
+            "stable_run_count": 3,
+            "required_stable_runs": 3,
+            "failure_reasons": [],
+            "warning_reasons": [],
+            "report_file": str(report_path),
+            "detail": "",
+        }
+
+    monkeypatch.setattr(cli_mod, "load_live_readiness_snapshot", fake_snapshot)
+
+    result = runner.invoke(
+        cli_mod.cli,
+        ["quality", "live-readiness", "--report-path", "E:/tmp/batch_report.json", "--json-output"],
+    )
+
+    assert result.exit_code == 0
+    assert observed == {"report_path": "E:/tmp/batch_report.json"}
+    assert '"status": "pass"' in result.output
+    assert '"report_path_input": "E:/tmp/batch_report.json"' in result.output
+
+
+def test_quality_live_readiness_reports_loader_errors(monkeypatch):
+    runner = CliRunner()
+
+    monkeypatch.setattr(
+        cli_mod,
+        "load_live_readiness_snapshot",
+        lambda report_path=None: (_ for _ in ()).throw(RuntimeError("cannot read batch report")),
+    )
+
+    result = runner.invoke(cli_mod.cli, ["quality", "live-readiness"])
+
+    assert result.exit_code != 0
+    assert "cannot read batch report" in result.output
+
+
+def test_quality_live_readiness_require_pass_fails_when_gate_not_passed(monkeypatch):
+    runner = CliRunner()
+
+    monkeypatch.setattr(
+        cli_mod,
+        "load_live_readiness_snapshot",
+        lambda report_path=None: {
+            "status": "fail",
+            "gate_passed": False,
+            "summary": "未满足 live dry run 准入门槛",
+            "stable_run_count": 2,
+            "required_stable_runs": 3,
+            "failure_reasons": ["连续稳定批次不足：2/3"],
+            "warning_reasons": [],
+            "report_file": "E:/WorkSpace/RoughCut/output/test/fullchain-batch/batch_report.json",
+            "detail": "",
+        },
+    )
+
+    result = runner.invoke(cli_mod.cli, ["quality", "live-readiness", "--require-pass"])
+
+    assert result.exit_code == 1
+    assert "status=fail gate_passed=false stable_runs=2/3" in result.output
+
+
+def test_quality_live_readiness_require_pass_succeeds_when_gate_passes(monkeypatch):
+    runner = CliRunner()
+
+    monkeypatch.setattr(
+        cli_mod,
+        "load_live_readiness_snapshot",
+        lambda report_path=None: {
+            "status": "pass",
+            "gate_passed": True,
+            "summary": "满足 live dry run 准入门槛",
+            "stable_run_count": 3,
+            "required_stable_runs": 3,
+            "failure_reasons": [],
+            "warning_reasons": [],
+            "report_file": "E:/WorkSpace/RoughCut/output/test/fullchain-batch/batch_report.json",
+            "detail": "",
+        },
+    )
+
+    result = runner.invoke(cli_mod.cli, ["quality", "live-readiness", "--require-pass"])
+
+    assert result.exit_code == 0
+    assert "status=pass gate_passed=true stable_runs=3/3" in result.output
+
+
 def test_clip_test_runs_manual_pipeline(monkeypatch, tmp_path: Path):
     runner = CliRunner()
     source = tmp_path / "demo.mp4"

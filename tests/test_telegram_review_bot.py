@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import asyncio
+import json
 import uuid
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import httpx
 import pytest
 
 import roughcut.review.telegram_bot as telegram_bot
+import roughcut.telegram.review_notification_service as review_notification_service
 from roughcut.review.final_review_rerun import (
     FinalReviewRerunPlan,
     build_final_review_rerun_plan as _build_final_review_rerun_plan,
@@ -35,6 +39,12 @@ from roughcut.review.telegram_bot import (
     _interpret_content_profile_reply,
     _interpret_subtitle_review_reply,
     _split_review_message,
+    _telegram_api_retry_backoff_seconds,
+    _telegram_poll_failure_backoff_seconds,
+)
+from roughcut.telegram.review_notification_service import (
+    enqueue_review_notification,
+    pending_review_notifications,
 )
 
 
@@ -1514,6 +1524,134 @@ async def test_send_review_message_does_not_send_review_when_remote_review_disab
 def test_format_review_round_label_uses_audit_then_rereview():
     assert _format_review_round_label(1) == "第一次审核"
     assert _format_review_round_label(3) == "第三次复核"
+
+
+def test_telegram_backoff_helpers_scale_and_cap():
+    assert _telegram_api_retry_backoff_seconds(1) == 1.0
+    assert _telegram_api_retry_backoff_seconds(5) == 4.0
+    assert _telegram_poll_failure_backoff_seconds(1) == 5.0
+    assert _telegram_poll_failure_backoff_seconds(2) == 10.0
+    assert _telegram_poll_failure_backoff_seconds(3) == 20.0
+    assert _telegram_poll_failure_backoff_seconds(4) == 30.0
+
+
+@pytest.mark.asyncio
+async def test_call_api_retries_transient_httpx_errors(monkeypatch):
+    service = TelegramReviewBotService()
+    settings = SimpleNamespace(
+        telegram_bot_token="token",
+        telegram_bot_api_base_url="https://api.telegram.org",
+    )
+    attempts: list[int] = []
+    sleep_calls: list[float] = []
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {"ok": True, "result": {"message_id": 1}}
+
+    class FakeAsyncClient:
+        def __init__(self, *, timeout=None) -> None:
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, *, json=None, data=None, files=None):
+            attempts.append(len(attempts) + 1)
+            if len(attempts) == 1:
+                raise httpx.ConnectTimeout("telegram timeout")
+            return FakeResponse()
+
+    async def fake_sleep(delay: float) -> None:
+        sleep_calls.append(delay)
+
+    monkeypatch.setattr(telegram_bot.httpx, "AsyncClient", FakeAsyncClient)
+    monkeypatch.setattr(telegram_bot.asyncio, "sleep", fake_sleep)
+
+    data = await service._call_api(settings, "sendMessage", {"chat_id": "123", "text": "hello"})
+
+    assert data == {"ok": True, "result": {"message_id": 1}}
+    assert attempts == [1, 2]
+    assert sleep_calls == [1.0]
+
+
+@pytest.mark.asyncio
+async def test_poll_review_notifications_replays_and_marks_delivered(monkeypatch, tmp_path):
+    service = TelegramReviewBotService()
+    job_id = uuid.uuid4()
+    delivered: list[uuid.UUID] = []
+
+    monkeypatch.setattr(
+        telegram_bot,
+        "get_settings",
+        lambda: SimpleNamespace(
+            telegram_remote_review_enabled=True,
+            telegram_bot_chat_id="123",
+            telegram_bot_token="token",
+            telegram_bot_api_base_url="https://api.telegram.org",
+            telegram_agent_state_dir=str(tmp_path),
+        ),
+    )
+    monkeypatch.setattr(
+        review_notification_service,
+        "get_settings",
+        lambda: SimpleNamespace(telegram_agent_state_dir=str(tmp_path)),
+    )
+
+    async def fake_notify(job_id_value: uuid.UUID) -> None:
+        delivered.append(job_id_value)
+
+    service.notify_content_profile_review = fake_notify  # type: ignore[method-assign]
+    enqueue_review_notification(kind=telegram_bot._REVIEW_KIND_CONTENT, job_id=str(job_id))
+
+    await service._poll_review_notifications()
+
+    assert delivered == [job_id]
+    assert pending_review_notifications() == []
+
+
+@pytest.mark.asyncio
+async def test_poll_review_notifications_reschedules_failures(monkeypatch, tmp_path):
+    service = TelegramReviewBotService()
+    job_id = uuid.uuid4()
+
+    monkeypatch.setattr(
+        telegram_bot,
+        "get_settings",
+        lambda: SimpleNamespace(
+            telegram_remote_review_enabled=True,
+            telegram_bot_chat_id="123",
+            telegram_bot_token="token",
+            telegram_bot_api_base_url="https://api.telegram.org",
+            telegram_agent_state_dir=str(tmp_path),
+        ),
+    )
+    monkeypatch.setattr(
+        review_notification_service,
+        "get_settings",
+        lambda: SimpleNamespace(telegram_agent_state_dir=str(tmp_path)),
+    )
+
+    async def fake_notify(job_id_value: uuid.UUID) -> None:
+        raise httpx.ConnectError("network down")
+
+    service.notify_content_profile_review = fake_notify  # type: ignore[method-assign]
+    record = enqueue_review_notification(kind=telegram_bot._REVIEW_KIND_CONTENT, job_id=str(job_id))
+
+    await service._poll_review_notifications()
+
+    assert pending_review_notifications() == []
+    payload = json.loads((tmp_path / "review_notifications.json").read_text(encoding="utf-8"))
+    current = next(item for item in payload if item["notification_id"] == record.notification_id)
+    assert current["status"] == "pending"
+    assert current["attempt_count"] == 1
+    assert "network down" in current["last_error"]
 
 
 def test_build_final_review_clip_specs_prefers_keyword_segment():
