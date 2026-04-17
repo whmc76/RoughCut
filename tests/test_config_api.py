@@ -252,9 +252,11 @@ def test_get_config_options_exposes_transcription_model_lists():
     assert any(item["key"] == "auto_review" and item["status"] == "active" for item in options.creative_mode_catalog["enhancement_modes"])
     assert "faster_whisper" in options.transcription_models
     assert options.transcription_models["faster_whisper"][0] == "large-v3"
+    assert "large-v3-turbo" in options.transcription_models["faster_whisper"]
     assert "openai" in options.transcription_models
     assert options.transcription_models["openai"] == ["gpt-4o-transcribe", "gpt-4o-mini-transcribe"]
-    assert options.transcription_models["qwen3_asr"] == ["qwen3-asr-1.7b"]
+    assert options.transcription_models["qwen3_asr"][0] == "qwen3-asr-1.7b"
+    assert "qwen3-asr-0.6b" in options.transcription_models["qwen3_asr"]
     assert "large-v3" in options.transcription_models["faster_whisper"]
     assert any(item["value"] == "unboxing_standard" for item in options.workflow_templates)
     assert all(item["value"] != "edc_tactical" for item in options.workflow_templates)

@@ -71,13 +71,15 @@ def parse_args() -> argparse.Namespace:
         "--candidates",
         nargs="*",
         default=[
-            "faster_whisper_base",
-            "faster_whisper_large_v3",
-            "faster_whisper_turbo",
-            "funasr_paraformer_zh",
-            "funasr_sensevoice_small",
             "qwen3_asr_1_7b",
             "qwen3_asr_1_7b_aligned",
+            "qwen3_asr_0_6b",
+            "qwen3_asr_0_6b_aligned",
+            "faster_whisper_large_v3",
+            "faster_whisper_large_v3_turbo",
+            "faster_whisper_distil_large_v3",
+            "funasr_paraformer_zh",
+            "funasr_sensevoice_small",
         ],
         help="Candidate keys to run.",
     )
@@ -382,75 +384,65 @@ def runner_funasr_sensevoice() -> tuple[float | None, Callable[[Path], tuple[flo
     return load_elapsed, run
 
 
-def runner_qwen3_asr() -> tuple[float | None, Callable[[Path], tuple[float | None, list[TranscriptSegment], str]]]:
+def runner_qwen3_asr(
+    model_name: str,
+    *,
+    with_aligner: bool = False,
+) -> tuple[float | None, Callable[[Path], tuple[float | None, list[TranscriptSegment], str]]]:
     import torch
     from qwen_asr import Qwen3ASRModel
 
+    model_id = f"Qwen/{model_name}"
     load_start = time.perf_counter()
-    model = Qwen3ASRModel.from_pretrained(
-        "Qwen/Qwen3-ASR-1.7B",
-        device_map="cuda:0",
-        dtype=torch.bfloat16,
-        max_inference_batch_size=4,
-    )
+    init_kwargs: dict[str, Any] = {
+        "device_map": "cuda:0",
+        "dtype": torch.bfloat16,
+        "max_inference_batch_size": 4,
+    }
+    if with_aligner:
+        init_kwargs["forced_aligner"] = "Qwen/Qwen3-ForcedAligner-0.6B"
+        init_kwargs["forced_aligner_kwargs"] = {"device_map": "cpu", "dtype": torch.float32}
+    model = Qwen3ASRModel.from_pretrained(model_id, **init_kwargs)
     load_elapsed = time.perf_counter() - load_start
 
     def run(sample_audio: Path) -> tuple[float | None, list[TranscriptSegment], str]:
         infer_start = time.perf_counter()
-        result = model.transcribe(str(sample_audio), language="Chinese")
+        transcribe_kwargs: dict[str, Any] = {
+            "language": "Chinese",
+        }
+        if with_aligner:
+            transcribe_kwargs["return_time_stamps"] = True
+        result = model.transcribe(str(sample_audio), **transcribe_kwargs)
         infer_elapsed = time.perf_counter() - infer_start
-        segments = [
-            TranscriptSegment(
-                start=0.0,
-                end=probe_duration(sample_audio),
-                text=item.text.strip(),
-                words=[],
-            )
-            for item in result
-        ]
         text = "".join(item.text for item in result).strip()
-        return infer_elapsed, segments, text[:200]
-
-    return load_elapsed, run
-
-
-def runner_qwen3_asr_aligned() -> tuple[float | None, Callable[[Path], tuple[float | None, list[TranscriptSegment], str]]]:
-    import torch
-    from qwen_asr import Qwen3ASRModel
-
-    load_start = time.perf_counter()
-    model = Qwen3ASRModel.from_pretrained(
-        "Qwen/Qwen3-ASR-1.7B",
-        forced_aligner="Qwen/Qwen3-ForcedAligner-0.6B",
-        forced_aligner_kwargs={"device_map": "cpu", "dtype": torch.float32},
-        device_map="cuda:0",
-        dtype=torch.bfloat16,
-        max_inference_batch_size=4,
-    )
-    load_elapsed = time.perf_counter() - load_start
-
-    def run(sample_audio: Path) -> tuple[float | None, list[TranscriptSegment], str]:
-        infer_start = time.perf_counter()
-        result = model.transcribe(str(sample_audio), language="Chinese", return_time_stamps=True)
-        infer_elapsed = time.perf_counter() - infer_start
-        items = list(result[0].time_stamps.items) if result and result[0].time_stamps else []
-        words = [
-            {
-                "word": item.text,
-                "start": float(item.start_time),
-                "end": float(item.end_time),
-            }
-            for item in items
-        ]
-        text = "".join(item.text for item in result).strip()
-        segments = [
-            TranscriptSegment(
-                start=float(words[0]["start"]) if words else 0.0,
-                end=float(words[-1]["end"]) if words else probe_duration(sample_audio),
-                text=text,
-                words=words,
-            )
-        ]
+        if with_aligner:
+            items = list(result[0].time_stamps.items) if result and result[0].time_stamps else []
+            words = [
+                {
+                    "word": item.text,
+                    "start": float(item.start_time),
+                    "end": float(item.end_time),
+                }
+                for item in items
+            ]
+            segments = [
+                TranscriptSegment(
+                    start=float(words[0]["start"]) if words else 0.0,
+                    end=float(words[-1]["end"]) if words else probe_duration(sample_audio),
+                    text=text,
+                    words=words,
+                )
+            ]
+        else:
+            segments = [
+                TranscriptSegment(
+                    start=0.0,
+                    end=probe_duration(sample_audio),
+                    text=item.text.strip(),
+                    words=[],
+                )
+                for item in result
+            ]
         return infer_elapsed, segments, text[:200]
 
     return load_elapsed, run
@@ -479,11 +471,14 @@ CANDIDATE_FACTORIES: dict[
 ] = {
     "faster_whisper_base": lambda: runner_faster_whisper("base"),
     "faster_whisper_large_v3": lambda: runner_faster_whisper("large-v3"),
-    "faster_whisper_turbo": lambda: runner_faster_whisper("turbo"),
+    "faster_whisper_large_v3_turbo": lambda: runner_faster_whisper("large-v3-turbo"),
+    "faster_whisper_distil_large_v3": lambda: runner_faster_whisper("distil-large-v3"),
     "funasr_paraformer_zh": runner_funasr_paraformer,
     "funasr_sensevoice_small": runner_funasr_sensevoice,
-    "qwen3_asr_1_7b": runner_qwen3_asr,
-    "qwen3_asr_1_7b_aligned": runner_qwen3_asr_aligned,
+    "qwen3_asr_0_6b": lambda: runner_qwen3_asr("Qwen3-ASR-0.6B"),
+    "qwen3_asr_0_6b_aligned": lambda: runner_qwen3_asr("Qwen3-ASR-0.6B", with_aligner=True),
+    "qwen3_asr_1_7b": lambda: runner_qwen3_asr("Qwen3-ASR-1.7B"),
+    "qwen3_asr_1_7b_aligned": lambda: runner_qwen3_asr("Qwen3-ASR-1.7B", with_aligner=True),
 }
 
 

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import roughcut.config as config_mod
 from roughcut.config import (
     DEFAULT_OUTPUT_ROOT,
@@ -198,3 +200,41 @@ def test_load_runtime_overrides_strips_secret_keys_from_legacy_file(tmp_path, mo
     assert config_mod.get_session_secret_override_keys() == ["minimax_api_key"]
     if overrides_file.exists():
         assert overrides_file.read_text(encoding="utf-8") == '{\n  "reasoning_provider": "minimax"\n}'
+
+
+def test_get_settings_prefers_explicit_telegram_env_over_runtime_override(tmp_path, monkeypatch):
+    overrides_file = tmp_path / "roughcut_config.json"
+    overrides_file.write_text(
+        json.dumps(
+            {
+                "telegram_agent_state_dir": "F:/persisted/state",
+                "telegram_bot_api_base_url": "https://persisted.example",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(config_mod, "_OVERRIDES_FILE", overrides_file)
+    monkeypatch.setenv("TELEGRAM_AGENT_STATE_DIR", "F:/env/state")
+    monkeypatch.setenv("TELEGRAM_BOT_API_BASE_URL", "https://127.0.0.1:1")
+    config_mod._settings = None
+    config_mod._session_secret_overrides.clear()
+
+    settings = get_settings()
+
+    assert settings.telegram_agent_state_dir == "F:/env/state"
+    assert settings.telegram_bot_api_base_url == "https://127.0.0.1:1"
+    config_mod._settings = None
+
+
+def test_get_settings_prefers_explicit_telegram_token_env_over_session_secret_override(monkeypatch):
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "env-token")
+    config_mod._settings = None
+    config_mod._session_secret_overrides.clear()
+    config_mod._session_secret_overrides["telegram_bot_token"] = "persisted-token"
+
+    settings = get_settings()
+
+    assert settings.telegram_bot_token == "env-token"
+    config_mod._settings = None
+    config_mod._session_secret_overrides.clear()

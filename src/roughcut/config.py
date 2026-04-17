@@ -54,6 +54,11 @@ ENV_EXPLICIT_OVERRIDE_SETTINGS: tuple[str, ...] = ENV_MANAGED_SETTINGS + (
     "transcription_model",
     "transcription_dialect",
     "qwen_asr_api_base_url",
+    "telegram_agent_state_dir",
+    "telegram_remote_review_enabled",
+    "telegram_bot_api_base_url",
+    "telegram_bot_token",
+    "telegram_bot_chat_id",
 )
 TRANSCRIPTION_PROVIDER_ALIASES: dict[str, str] = {
     "fast": "faster_whisper",
@@ -75,10 +80,11 @@ TRANSCRIPTION_MODEL_OPTIONS: dict[str, list[str]] = {
     ],
     "faster_whisper": [
         "large-v3",
+        "large-v3-turbo",
+        "distil-large-v3",
         "base",
         "small",
         "medium",
-        "distil-large-v3",
     ],
     "openai": [
         "gpt-4o-transcribe",
@@ -86,6 +92,7 @@ TRANSCRIPTION_MODEL_OPTIONS: dict[str, list[str]] = {
     ],
     "qwen3_asr": [
         "qwen3-asr-1.7b",
+        "qwen3-asr-0.6b",
     ],
 }
 SEARCH_FALLBACK_PROVIDER_VALUES: tuple[str, ...] = ("openai", "anthropic", "minimax", "ollama", "model", "searxng")
@@ -411,6 +418,7 @@ class Settings(BaseSettings):
     packaging_selection_min_score: float = 0.6
     edit_decision_llm_review_enabled: bool = True
     edit_decision_llm_review_max_candidates: int = 6
+    edit_decision_llm_review_timeout_sec: int = 30
     edit_decision_llm_review_min_confidence: float = 0.72
     subtitle_filler_cleanup_enabled: bool = True
     quality_auto_rerun_enabled: bool = True
@@ -687,6 +695,8 @@ def get_session_secret_override_keys() -> list[str]:
 
 def _apply_settings_overrides(settings: Settings, updates: dict[str, Any]) -> None:
     for key, value in updates.items():
+        if key in ENV_MANAGED_SETTINGS or _has_explicit_env_override(key):
+            continue
         if hasattr(settings, key):
             object.__setattr__(settings, key, value)
 
