@@ -922,5 +922,46 @@ export type ServiceStatus = {
     readiness_status?: string;
     readiness_checks?: Record<string, ReadinessCheck>;
     orchestrator_lock?: OrchestratorLockSnapshot;
+    review_notifications?: ReviewNotificationSnapshot;
+    live_readiness?: LiveReadinessSnapshot;
   };
+};
+
+export type LiveReadinessSnapshot = {
+  status: string;
+  gate_passed: boolean;
+  summary: string;
+  stable_run_count: number;
+  required_stable_runs: number;
+  failure_reasons?: string[];
+  warning_reasons?: string[];
+  golden_job_count?: number;
+  evaluated_job_count?: number;
+  report_file?: string;
+  report_created_at?: string | null;
+  detail?: string;
+};
+
+export type ReviewNotificationSnapshot = {
+  state_dir?: string;
+  store_file?: string;
+  detail?: string;
+  summary?: {
+    total: number;
+    pending: number;
+    due_now: number;
+    failed: number;
+    delivered: number;
+  };
+  items?: Array<{
+    notification_id: string;
+    kind: string;
+    job_id: string;
+    status: string;
+    attempt_count: number;
+    next_attempt_at: string;
+    last_error: string;
+    force_full_review: boolean;
+    updated_at: string;
+  }>;
 };

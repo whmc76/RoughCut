@@ -4,6 +4,7 @@ import json
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from httpx import AsyncClient
@@ -340,7 +341,9 @@ async def test_config_options_exposes_transcription_models(client: AsyncClient):
     assert any(item["key"] == "long_text_to_video" and item["status"] == "planned" for item in data["creative_mode_catalog"]["workflow_modes"])
     assert data["transcription_models"]["faster_whisper"][0] == "large-v3"
     assert data["transcription_models"]["openai"] == ["gpt-4o-transcribe", "gpt-4o-mini-transcribe"]
-    assert data["transcription_models"]["qwen3_asr"] == ["qwen3-asr-1.7b"]
+    assert data["transcription_models"]["qwen3_asr"][0] == "qwen3-asr-1.7b"
+    assert "qwen3-asr-0.6b" in data["transcription_models"]["qwen3_asr"]
+    assert "large-v3-turbo" in data["transcription_models"]["faster_whisper"]
     assert "large-v3" in data["transcription_models"]["faster_whisper"]
     assert any(item["value"] == "unboxing_standard" for item in data["workflow_templates"])
     assert all(item["value"] != "edc_tactical" for item in data["workflow_templates"])
@@ -1596,6 +1599,274 @@ async def test_control_status_falls_back_to_runtime_probes_when_compose_is_unava
     assert data["llm_worker"] is True
     assert data["postgres"] is True
     assert data["redis"] is True
+
+
+@pytest.mark.asyncio
+async def test_control_status_exposes_review_notification_runtime_snapshot(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import roughcut.api.control as control_api
+
+    monkeypatch.setattr(control_api, "_running_compose_service_names", lambda: set())
+    monkeypatch.setattr(control_api, "_running_container_names", lambda: set())
+    monkeypatch.setattr(control_api, "_running_celery_queues", lambda: set())
+    monkeypatch.setattr(control_api, "_has_process", lambda needle: False)
+
+    async def fake_readiness():
+        return {"status": "ready", "checks": {}}
+
+    async def fake_lock_snapshot():
+        return {"status": "free", "leader_active": False}
+
+    monkeypatch.setattr(control_api, "build_readiness_payload", fake_readiness)
+    monkeypatch.setattr(control_api, "get_orchestrator_lock_snapshot", fake_lock_snapshot)
+    monkeypatch.setattr(
+        control_api,
+        "build_review_notification_snapshot",
+        lambda limit=10: {
+            "state_dir": "F:/roughcut_outputs/telegram-agent",
+            "store_file": "F:/roughcut_outputs/telegram-agent/review_notifications.json",
+            "summary": {"total": 3, "pending": 1, "due_now": 1, "failed": 1, "delivered": 1},
+            "items": [
+                {
+                    "notification_id": "n-1",
+                    "kind": "content_profile",
+                    "job_id": "job-1",
+                    "status": "pending",
+                    "attempt_count": 2,
+                    "next_attempt_at": "2026-04-17T00:00:00+00:00",
+                    "last_error": "network down",
+                    "force_full_review": False,
+                    "updated_at": "2026-04-17T00:00:00+00:00",
+                }
+            ],
+        },
+    )
+
+    response = await client.get("/api/v1/control/status")
+
+    assert response.status_code == 200
+    payload = response.json()
+    snapshot = payload["runtime"]["review_notifications"]
+    assert snapshot["summary"]["total"] == 3
+    assert snapshot["summary"]["failed"] == 1
+    assert snapshot["items"][0]["notification_id"] == "n-1"
+
+
+@pytest.mark.asyncio
+async def test_control_status_exposes_live_readiness_runtime_snapshot(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import roughcut.api.control as control_api
+
+    monkeypatch.setattr(control_api, "_running_compose_service_names", lambda: set())
+    monkeypatch.setattr(control_api, "_running_container_names", lambda: set())
+    monkeypatch.setattr(control_api, "_running_celery_queues", lambda: set())
+    monkeypatch.setattr(control_api, "_has_process", lambda needle: False)
+
+    async def fake_readiness():
+        return {"status": "ready", "checks": {}}
+
+    async def fake_lock_snapshot():
+        return {"status": "free", "leader_active": False}
+
+    monkeypatch.setattr(control_api, "build_readiness_payload", fake_readiness)
+    monkeypatch.setattr(control_api, "get_orchestrator_lock_snapshot", fake_lock_snapshot)
+    monkeypatch.setattr(
+        control_api,
+        "load_live_readiness_snapshot",
+        lambda: {
+            "status": "fail",
+            "gate_passed": False,
+            "summary": "未满足 live dry run 准入门槛",
+            "stable_run_count": 2,
+            "required_stable_runs": 3,
+            "failure_reasons": ["连续稳定批次不足：2/3"],
+            "warning_reasons": [],
+            "report_file": "E:/WorkSpace/RoughCut/output/test/fullchain-batch/batch_report.json",
+            "detail": "",
+        },
+    )
+
+    response = await client.get("/api/v1/control/status")
+
+    assert response.status_code == 200
+    payload = response.json()
+    snapshot = payload["runtime"]["live_readiness"]
+    assert snapshot["status"] == "fail"
+    assert snapshot["stable_run_count"] == 2
+    assert snapshot["failure_reasons"] == ["连续稳定批次不足：2/3"]
+
+
+@pytest.mark.asyncio
+async def test_control_status_falls_back_when_live_readiness_snapshot_fails(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import roughcut.api.control as control_api
+
+    monkeypatch.setattr(control_api, "_running_compose_service_names", lambda: set())
+    monkeypatch.setattr(control_api, "_running_container_names", lambda: set())
+    monkeypatch.setattr(control_api, "_running_celery_queues", lambda: set())
+    monkeypatch.setattr(control_api, "_has_process", lambda needle: False)
+
+    async def fake_readiness():
+        return {"status": "ready", "checks": {}}
+
+    async def fake_lock_snapshot():
+        return {"status": "free", "leader_active": False}
+
+    monkeypatch.setattr(control_api, "build_readiness_payload", fake_readiness)
+    monkeypatch.setattr(control_api, "get_orchestrator_lock_snapshot", fake_lock_snapshot)
+
+    def boom():
+        raise RuntimeError("cannot read batch report")
+
+    monkeypatch.setattr(control_api, "load_live_readiness_snapshot", boom)
+
+    response = await client.get("/api/v1/control/status")
+
+    assert response.status_code == 200
+    payload = response.json()
+    snapshot = payload["runtime"]["live_readiness"]
+    assert snapshot["status"] == "unknown"
+    assert snapshot["gate_passed"] is False
+    assert "cannot read batch report" in snapshot["detail"]
+
+
+@pytest.mark.asyncio
+async def test_control_review_notification_status_filters_by_job_id(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import roughcut.api.control as control_api
+
+    observed: dict[str, object] = {}
+
+    def fake_snapshot(*, statuses=None, job_id=None, kind=None, limit=20):
+        observed.update({"statuses": statuses, "job_id": job_id, "kind": kind, "limit": limit})
+        return {"summary": {"total": 1, "pending": 1, "due_now": 0, "failed": 0, "delivered": 0}, "items": []}
+
+    monkeypatch.setattr(control_api, "build_review_notification_snapshot", fake_snapshot)
+
+    response = await client.get("/api/v1/control/review-notifications", params={"job_id": "job-1", "status": "pending", "limit": 5})
+
+    assert response.status_code == 200
+    assert observed == {"statuses": ["pending"], "job_id": "job-1", "kind": "", "limit": 5}
+
+
+@pytest.mark.asyncio
+async def test_control_requeue_review_notification_returns_updated_record(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import roughcut.api.control as control_api
+
+    monkeypatch.setattr(
+        control_api,
+        "requeue_review_notification",
+        lambda notification_id: SimpleNamespace(
+            notification_id=notification_id,
+            kind="content_profile",
+            job_id="job-1",
+            status="pending",
+            attempt_count=0,
+            next_attempt_at="2026-04-17T00:00:00+00:00",
+            last_error="",
+            force_full_review=False,
+            updated_at="2026-04-17T00:00:00+00:00",
+        ),
+    )
+
+    response = await client.post("/api/v1/control/review-notifications/requeue", json={"notification_id": "n-1"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "requeued"
+    assert payload["notification"]["notification_id"] == "n-1"
+
+
+@pytest.mark.asyncio
+async def test_control_drop_review_notification_returns_deleted_id(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import roughcut.api.control as control_api
+
+    monkeypatch.setattr(
+        control_api,
+        "get_review_notification_store",
+        lambda: SimpleNamespace(get=lambda notification_id: {"notification_id": notification_id}),
+    )
+    monkeypatch.setattr(control_api, "drop_review_notification", lambda notification_id: True)
+
+    response = await client.post("/api/v1/control/review-notifications/drop", json={"notification_id": "n-1"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload == {"status": "dropped", "notification_id": "n-1"}
+
+
+@pytest.mark.asyncio
+async def test_control_requeue_batch_review_notifications_returns_count(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import roughcut.api.control as control_api
+
+    monkeypatch.setattr(
+        control_api,
+        "requeue_review_notifications",
+        lambda notification_ids: [SimpleNamespace(notification_id=item) for item in notification_ids[:1]],
+    )
+
+    response = await client.post("/api/v1/control/review-notifications/requeue-batch", json={"notification_ids": ["n-1", "n-2"]})
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "requeued", "count": 1, "notification_ids": ["n-1"]}
+
+
+@pytest.mark.asyncio
+async def test_control_requeue_review_notification_returns_404_when_missing(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import roughcut.api.control as control_api
+
+    monkeypatch.setattr(control_api, "requeue_review_notification", lambda notification_id: None)
+
+    response = await client.post("/api/v1/control/review-notifications/requeue", json={"notification_id": "n-404"})
+
+    assert response.status_code == 404
+    assert "Review notification not found" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_control_review_notification_routes_reject_blank_id(client: AsyncClient):
+    response = await client.post("/api/v1/control/review-notifications/requeue", json={"notification_id": "   "})
+
+    assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_control_requeue_review_notification_returns_503_when_store_unreadable(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import roughcut.api.control as control_api
+
+    monkeypatch.setattr(
+        control_api,
+        "requeue_review_notification",
+        lambda notification_id: (_ for _ in ()).throw(RuntimeError("Review notification store is unreadable")),
+    )
+
+    response = await client.post("/api/v1/control/review-notifications/requeue", json={"notification_id": "n-1"})
+
+    assert response.status_code == 503
+    assert "Review notification store is unreadable" in response.json()["detail"]
 
 
 def test_control_running_compose_service_names_handles_missing_docker(monkeypatch: pytest.MonkeyPatch):

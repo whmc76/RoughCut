@@ -8,10 +8,19 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, status
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
+from roughcut.pipeline.live_readiness import load_live_readiness_snapshot
 from roughcut.pipeline.orchestrator import get_orchestrator_lock_snapshot
 from roughcut.runtime_health import build_readiness_payload
+from roughcut.telegram.review_notification_service import (
+    build_review_notification_snapshot,
+    drop_review_notification,
+    drop_review_notifications,
+    get_review_notification_store,
+    requeue_review_notification,
+    requeue_review_notifications,
+)
 
 router = APIRouter(prefix="/control", tags=["control"])
 
@@ -21,6 +30,30 @@ _STOP_SCRIPT = _REPO_ROOT / "start_roughcut.ps1"
 
 class StopServicesIn(BaseModel):
     stop_docker: bool = False
+
+
+class ReviewNotificationActionIn(BaseModel):
+    notification_id: str
+
+    @field_validator("notification_id")
+    @classmethod
+    def _validate_notification_id(cls, value: str) -> str:
+        normalized = str(value or "").strip()
+        if not normalized:
+            raise ValueError("notification_id is required")
+        return normalized
+
+
+class ReviewNotificationBatchActionIn(BaseModel):
+    notification_ids: list[str]
+
+    @field_validator("notification_ids")
+    @classmethod
+    def _validate_notification_ids(cls, value: list[str]) -> list[str]:
+        normalized = [str(item or "").strip() for item in value if str(item or "").strip()]
+        if not normalized:
+            raise ValueError("notification_ids is required")
+        return normalized
 
 
 def _pick_shell() -> str:
@@ -159,6 +192,27 @@ async def build_service_status(*, api_running: bool) -> dict[str, object]:
             "leader_active": None,
             "detail": str(exc),
         }
+    try:
+        review_notifications = build_review_notification_snapshot(limit=10)
+    except Exception as exc:
+        review_notifications = {
+            "summary": {"total": 0, "pending": 0, "due_now": 0, "failed": 0, "delivered": 0},
+            "items": [],
+            "detail": str(exc),
+        }
+    try:
+        live_readiness = load_live_readiness_snapshot()
+    except Exception as exc:
+        live_readiness = {
+            "status": "unknown",
+            "gate_passed": False,
+            "summary": "live readiness unavailable",
+            "stable_run_count": 0,
+            "required_stable_runs": 3,
+            "failure_reasons": [],
+            "warning_reasons": [],
+            "detail": str(exc),
+        }
     return {
         "checked_at": datetime.now(timezone.utc).isoformat(),
         "services": {
@@ -191,11 +245,8 @@ async def build_service_status(*, api_running: bool) -> dict[str, object]:
             "readiness_status": readiness.get("status", "unknown"),
             "readiness_checks": readiness.get("checks", {}),
             "orchestrator_lock": orchestrator_lock,
-        },
-        "runtime": {
-            "readiness_status": readiness.get("status", "unknown"),
-            "readiness_checks": readiness.get("checks", {}),
-            "orchestrator_lock": orchestrator_lock,
+            "review_notifications": review_notifications,
+            "live_readiness": live_readiness,
         },
     }
 
@@ -241,3 +292,91 @@ async def stop_services(body: StopServicesIn):
 @router.get("/status")
 async def service_status():
     return await build_service_status(api_running=True)
+
+
+@router.get("/review-notifications")
+async def review_notification_status(
+    status: list[str] | None = None,
+    job_id: str = "",
+    kind: str = "",
+    limit: int = 20,
+):
+    try:
+        return build_review_notification_snapshot(
+            statuses=status or None,
+            job_id=job_id,
+            kind=kind,
+            limit=limit,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@router.post("/review-notifications/requeue")
+async def requeue_review_notification_route(body: ReviewNotificationActionIn):
+    try:
+        record = requeue_review_notification(body.notification_id)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"Review notification not found: {body.notification_id}")
+    return {
+        "status": "requeued",
+        "notification": {
+            "notification_id": record.notification_id,
+            "kind": record.kind,
+            "job_id": record.job_id,
+            "status": record.status,
+            "attempt_count": record.attempt_count,
+            "next_attempt_at": record.next_attempt_at,
+            "last_error": record.last_error,
+            "force_full_review": record.force_full_review,
+            "updated_at": record.updated_at,
+        },
+    }
+
+
+@router.post("/review-notifications/drop")
+async def drop_review_notification_route(body: ReviewNotificationActionIn):
+    try:
+        existing = get_review_notification_store().get(body.notification_id, strict=True)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    if not existing:
+        raise HTTPException(status_code=404, detail=f"Review notification not found: {body.notification_id}")
+    try:
+        deleted = drop_review_notification(body.notification_id)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    if not deleted:
+        raise HTTPException(status_code=404, detail=f"Review notification not found: {body.notification_id}")
+    return {
+        "status": "dropped",
+        "notification_id": body.notification_id,
+    }
+
+
+@router.post("/review-notifications/requeue-batch")
+async def requeue_review_notifications_route(body: ReviewNotificationBatchActionIn):
+    try:
+        records = requeue_review_notifications(body.notification_ids)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return {
+        "status": "requeued",
+        "count": len(records),
+        "notification_ids": [item.notification_id for item in records],
+    }
+
+
+@router.post("/review-notifications/drop-batch")
+async def drop_review_notifications_route(body: ReviewNotificationBatchActionIn):
+    try:
+        notification_ids = drop_review_notifications(body.notification_ids)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return {
+        "status": "dropped",
+        "count": len(notification_ids),
+        "notification_ids": notification_ids,
+    }

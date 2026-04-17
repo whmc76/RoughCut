@@ -6,7 +6,7 @@ import { useI18n } from "../i18n";
 import { formatDate } from "../utils";
 
 function renderRuntimeTone(status: string | undefined) {
-  return status === "ready" || status === "held" || status === "free" ? "status-ok" : "status-off";
+  return status === "ready" || status === "held" || status === "free" || status === "pass" ? "status-ok" : "status-off";
 }
 
 export function ControlPage() {
@@ -20,6 +20,9 @@ export function ControlPage() {
     : "health detail unavailable";
   const runtime = workspace.status.data?.runtime;
   const readinessChecks = Object.entries(runtime?.readiness_checks ?? {});
+  const liveReadiness = runtime?.live_readiness;
+  const reviewNotifications = workspace.reviewNotifications.data ?? runtime?.review_notifications;
+  const visibleNotificationIds = (reviewNotifications?.items ?? []).map((item) => item.notification_id);
   const managedServices = workspace.healthDetail.data?.managed_services ?? [];
   const watchAutomation = workspace.healthDetail.data?.watch_automation;
 
@@ -83,8 +86,164 @@ export function ControlPage() {
                   </div>
                 </article>
               ))}
+              <article className="list-card">
+                <div>
+                  <div className="row-title">Review notification queue</div>
+                  <div className="muted">{reviewNotifications?.store_file ?? "暂无补偿队列状态文件。"}</div>
+                </div>
+                <div className="row-meta">
+                  <strong>{reviewNotifications?.summary?.pending ?? 0} pending</strong>
+                  <span>{reviewNotifications?.summary?.failed ?? 0} failed</span>
+                </div>
+              </article>
+              <article className="list-card">
+                <div>
+                  <div className="row-title">Live readiness</div>
+                  <div className="muted">{liveReadiness?.summary ?? "尚无 live readiness 摘要。"}</div>
+                  <div className="muted">{liveReadiness?.report_file ?? "未找到 batch_report.json"}</div>
+                  {liveReadiness?.failure_reasons?.length ? (
+                    <div className="muted">failures={liveReadiness.failure_reasons.join(" / ")}</div>
+                  ) : null}
+                  {liveReadiness?.warning_reasons?.length ? (
+                    <div className="muted">warnings={liveReadiness.warning_reasons.join(" / ")}</div>
+                  ) : null}
+                  {liveReadiness?.detail ? <div className="muted">detail={liveReadiness.detail}</div> : null}
+                </div>
+                <div className="row-meta">
+                  <strong className={renderRuntimeTone(liveReadiness?.status)}>
+                    {liveReadiness?.status ?? "unknown"}
+                  </strong>
+                  <span>
+                    stable={liveReadiness?.stable_run_count ?? 0}/{liveReadiness?.required_stable_runs ?? 0}
+                  </span>
+                </div>
+              </article>
             </div>
           )}
+        </section>
+      </PageSection>
+
+      <PageSection
+        eyebrow="补偿队列"
+        title="审核通知补偿"
+        description="这里显示 Telegram 审核通知的补偿状态。优先看 due_now 和 failed，再决定是否手动重排。"
+      >
+        <section className="panel">
+          <PanelHeader
+            title="Review notifications"
+            description={reviewNotifications?.state_dir ?? "当前没有可用的补偿队列目录"}
+          />
+          <div className="toolbar top-gap">
+            <input
+              type="text"
+              placeholder="按 job_id 过滤"
+              value={workspace.reviewNotificationJobIdFilter}
+              onChange={(event) => workspace.setReviewNotificationJobIdFilter(event.target.value)}
+            />
+            <button
+              className="button ghost"
+              type="button"
+              onClick={() => workspace.setReviewNotificationJobIdFilter("")}
+              disabled={!workspace.reviewNotificationJobIdFilter}
+            >
+              Clear
+            </button>
+            <button
+              className="button"
+              type="button"
+              onClick={() => workspace.requeueReviewNotifications.mutate(visibleNotificationIds)}
+              disabled={!visibleNotificationIds.length || workspace.requeueReviewNotifications.isPending}
+            >
+              Requeue shown
+            </button>
+            <button
+              className="button danger"
+              type="button"
+              onClick={() => workspace.dropReviewNotifications.mutate(visibleNotificationIds)}
+              disabled={!visibleNotificationIds.length || workspace.dropReviewNotifications.isPending}
+            >
+              Drop shown
+            </button>
+          </div>
+          {reviewNotifications?.detail ? <div className="notice">{reviewNotifications.detail}</div> : null}
+          <div className="service-grid">
+            <article className="service-card">
+              <span>Total</span>
+              <strong>{reviewNotifications?.summary?.total ?? 0}</strong>
+            </article>
+            <article className="service-card">
+              <span>Pending</span>
+              <strong className={(reviewNotifications?.summary?.pending ?? 0) > 0 ? "status-off" : "status-ok"}>
+                {reviewNotifications?.summary?.pending ?? 0}
+              </strong>
+            </article>
+            <article className="service-card">
+              <span>Due now</span>
+              <strong className={(reviewNotifications?.summary?.due_now ?? 0) > 0 ? "status-off" : "status-ok"}>
+                {reviewNotifications?.summary?.due_now ?? 0}
+              </strong>
+            </article>
+            <article className="service-card">
+              <span>Failed</span>
+              <strong className={(reviewNotifications?.summary?.failed ?? 0) > 0 ? "status-off" : "status-ok"}>
+                {reviewNotifications?.summary?.failed ?? 0}
+              </strong>
+            </article>
+          </div>
+          <div className="top-gap list-stack">
+            {(reviewNotifications?.items ?? []).map((item) => (
+              <article key={item.notification_id} className="list-card">
+                <div>
+                  <div className="row-title">{item.kind} · {item.status}</div>
+                  <div className="muted">
+                    {item.notification_id} · job={item.job_id}
+                  </div>
+                  <div className="muted">
+                    attempts={item.attempt_count} · next={formatDate(item.next_attempt_at)}
+                  </div>
+                  {item.last_error ? <div className="muted">error={item.last_error}</div> : null}
+                </div>
+                <div className="row-meta">
+                  <button
+                    className="button"
+                    type="button"
+                    onClick={() => workspace.requeueReviewNotification.mutate(item.notification_id)}
+                    disabled={workspace.requeueReviewNotification.isPending}
+                  >
+                    Requeue
+                  </button>
+                  <button
+                    className="button danger"
+                    type="button"
+                    onClick={() => workspace.dropReviewNotification.mutate(item.notification_id)}
+                    disabled={workspace.dropReviewNotification.isPending}
+                  >
+                    Drop
+                  </button>
+                </div>
+              </article>
+            ))}
+            {!reviewNotifications?.items?.length && (
+              <article className="list-card">
+                <div>
+                  <div className="row-title">No queued notifications</div>
+                  <div className="muted">当前没有待补偿或已记录的审核通知。</div>
+                </div>
+              </article>
+            )}
+            {workspace.requeueReviewNotification.error ? (
+              <div className="notice top-gap">{(workspace.requeueReviewNotification.error as Error).message}</div>
+            ) : null}
+            {workspace.dropReviewNotification.error ? (
+              <div className="notice top-gap">{(workspace.dropReviewNotification.error as Error).message}</div>
+            ) : null}
+            {workspace.requeueReviewNotifications.error ? (
+              <div className="notice top-gap">{(workspace.requeueReviewNotifications.error as Error).message}</div>
+            ) : null}
+            {workspace.dropReviewNotifications.error ? (
+              <div className="notice top-gap">{(workspace.dropReviewNotifications.error as Error).message}</div>
+            ) : null}
+          </div>
         </section>
       </PageSection>
 
