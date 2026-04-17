@@ -145,6 +145,17 @@ def main() -> None:
 
     reports: list[JobRunReport] = []
     for item in source_items:
+        write_batch_progress(
+            report_dir=args.report_dir,
+            source_dir=args.source_dir,
+            channel_profile=args.channel_profile,
+            language=args.language,
+            output_dir=args.output_dir,
+            enhancement_modes=enhancement_modes,
+            reports=reports,
+            current_item=item,
+            status="running",
+        )
         job_id = asyncio.run(
             prepare_job_for_source(
                 Path(item["path"]),
@@ -158,7 +169,29 @@ def main() -> None:
         if not job_id:
             continue
         print(f"[batch] running {item.get('source_name')} job={job_id}", flush=True)
+        write_batch_progress(
+            report_dir=args.report_dir,
+            source_dir=args.source_dir,
+            channel_profile=args.channel_profile,
+            language=args.language,
+            output_dir=args.output_dir,
+            enhancement_modes=enhancement_modes,
+            reports=reports,
+            current_item=item,
+            current_job_id=job_id,
+            status="running",
+        )
         reports.append(run_job(job_id, item, stop_after=args.stop_after))
+        write_batch_progress(
+            report_dir=args.report_dir,
+            source_dir=args.source_dir,
+            channel_profile=args.channel_profile,
+            language=args.language,
+            output_dir=args.output_dir,
+            enhancement_modes=enhancement_modes,
+            reports=reports,
+            status="running",
+        )
         if len(reports) >= args.limit:
             break
 
@@ -198,9 +231,47 @@ def main() -> None:
         render_markdown(summary),
         encoding="utf-8",
     )
+    progress_path = args.report_dir / "batch_progress.json"
+    if progress_path.exists():
+        progress_path.unlink()
     print(json.dumps(build_console_summary(summary), ensure_ascii=False, indent=2), flush=True)
     print(f"\nJSON report: {args.report_dir / 'batch_report.json'}", flush=True)
     print(f"Markdown report: {args.report_dir / 'batch_report.md'}", flush=True)
+
+
+def write_batch_progress(
+    *,
+    report_dir: Path,
+    source_dir: Path,
+    channel_profile: str,
+    language: str,
+    output_dir: str | None,
+    enhancement_modes: list[str],
+    reports: list[JobRunReport],
+    current_item: dict[str, Any] | None = None,
+    current_job_id: str | None = None,
+    status: str = "running",
+) -> None:
+    progress_payload = {
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "status": status,
+        "source_dir": str(source_dir),
+        "channel_profile": channel_profile,
+        "language": language,
+        "output_dir": output_dir,
+        "enhancement_modes": list(enhancement_modes),
+        "completed_job_count": len(reports),
+        "jobs": [asdict(report) for report in reports],
+        "current": {
+            "job_id": current_job_id or "",
+            "source_name": str((current_item or {}).get("source_name") or ""),
+            "source_path": str((current_item or {}).get("path") or ""),
+        },
+    }
+    (report_dir / "batch_progress.json").write_text(
+        json.dumps(progress_payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
 
 
 def select_source_candidates(source_dir: Path, limit: int, *, source_names: list[str] | None = None) -> list[dict[str, Any]]:

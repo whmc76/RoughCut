@@ -193,6 +193,7 @@ def build_live_readiness_summary(
 
 def load_live_readiness_snapshot(report_path: str | Path | None = None) -> dict[str, Any]:
     path = Path(report_path) if report_path else _default_batch_report_path()
+    progress_path = path.with_name("batch_progress.json")
     snapshot: dict[str, Any] = {
         "status": "unknown",
         "gate_passed": False,
@@ -206,6 +207,24 @@ def load_live_readiness_snapshot(report_path: str | Path | None = None) -> dict[
         "detail": "",
     }
     if not path.exists():
+        if progress_path.exists():
+            progress_payload = json.loads(progress_path.read_text(encoding="utf-8"))
+            current = progress_payload.get("current") if isinstance(progress_payload.get("current"), dict) else {}
+            current_source_name = str(current.get("source_name") or "").strip()
+            completed_job_count = int(progress_payload.get("completed_job_count") or 0)
+            summary = f"batch 运行中，已完成 {completed_job_count} 个 job"
+            if current_source_name:
+                summary += f"，当前：{current_source_name}"
+            snapshot.update(
+                {
+                    "status": str(progress_payload.get("status") or "running"),
+                    "summary": summary,
+                    "report_created_at": progress_payload.get("created_at"),
+                    "detail": "",
+                    "progress_file": str(progress_path),
+                }
+            )
+            return snapshot
         snapshot["detail"] = "batch_report.json not found"
         return snapshot
 

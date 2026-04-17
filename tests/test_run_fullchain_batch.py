@@ -134,3 +134,32 @@ def test_load_live_readiness_snapshot_returns_unknown_when_report_missing(tmp_pa
     assert snapshot["status"] == "unknown"
     assert snapshot["gate_passed"] is False
     assert snapshot["detail"] == "batch_report.json not found"
+
+
+def test_load_live_readiness_snapshot_reads_batch_progress_when_report_missing(tmp_path):
+    progress_path = tmp_path / "batch_progress.json"
+    progress_path.write_text(
+        json.dumps(
+            {
+                "created_at": "2026-04-17T01:23:45+00:00",
+                "status": "running",
+                "completed_job_count": 1,
+                "current": {
+                    "job_id": "job-2",
+                    "source_name": "golden-b.mp4",
+                    "source_path": "Y:/videos/golden-b.mp4",
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    snapshot = load_live_readiness_snapshot(tmp_path / "batch_report.json")
+
+    assert snapshot["status"] == "running"
+    assert snapshot["gate_passed"] is False
+    assert snapshot["detail"] == ""
+    assert snapshot["report_created_at"] == "2026-04-17T01:23:45+00:00"
+    assert snapshot["progress_file"] == str(progress_path)
+    assert snapshot["summary"] == "batch 运行中，已完成 1 个 job，当前：golden-b.mp4"
