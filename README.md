@@ -240,7 +240,11 @@ TRANSCRIPTION_MODEL=gpt-4o-transcribe
 - 多帧图像理解
 - `web_search` 搜索增强
 
-兼容模式下可以继续使用 `OPENAI_AUTH_MODE=codex_compat` + helper 命令输出凭据。
+`OPENAI_AUTH_MODE=codex_compat` 只适合 helper 返回实际 OpenAI Platform API key 的情况。
+如果 helper 只是输出 `~/.codex/auth.json` 里的 ChatGPT access token，直接调用 OpenAI `Responses API`
+做 `web_search` 当前会因为缺少 `api.responses.write` / `api.model.read` scope 而失败。
+如果你要复用 Codex ChatGPT 登录态自带的联网搜索，请改走 `MODEL_SEARCH_HELPER`，
+例如：`MODEL_SEARCH_HELPER=python scripts/codex_model_search_helper.py`。
 
 推荐本地中文 ASR 服务：
 
@@ -613,10 +617,10 @@ curl http://localhost:8000/api/v1/jobs/{job_id}/report
 | `MULTIMODAL_FALLBACK_MODEL` | `""` | 主模型视觉失败时的本地备份视觉模型（空 = 自动探测） |
 | `SEARCH_PROVIDER` | `auto` | 搜索后端：优先主模型搜索桥接，失败回退本地搜索 |
 | `SEARCH_FALLBACK_PROVIDER` | `searxng` | 主模型搜索失败时的兜底搜索后端 |
-| `MODEL_SEARCH_HELPER` | `""` | 主模型搜索/MCP 的本地桥接命令，读取 `ROUGHCUT_SEARCH_QUERY` 环境变量 |
+| `MODEL_SEARCH_HELPER` | `""` | 主模型搜索/MCP 的本地桥接命令，读取 `ROUGHCUT_SEARCH_QUERY` 环境变量；Codex CLI 可用 `python scripts/codex_model_search_helper.py` |
 | `OPENAI_BASE_URL` | `https://api.openai.com/v1` | OpenAI/Codex 兼容接口地址 |
 | `OPENAI_AUTH_MODE` | `api_key` | `api_key` / `codex_compat` |
-| `OPENAI_API_KEY_HELPER` | `""` | Codex 兼容模式下返回凭证的本地命令 |
+| `OPENAI_API_KEY_HELPER` | `""` | Codex 兼容模式下返回 OpenAI Platform API key 的本地命令；不要把 ChatGPT access token 直接当作 Platform search API 凭证 |
 | `ANTHROPIC_BASE_URL` | `https://api.anthropic.com` | Anthropic/Claude Code 兼容接口地址 |
 | `ANTHROPIC_AUTH_MODE` | `api_key` | `api_key` / `claude_code_compat` |
 | `ANTHROPIC_API_KEY_HELPER` | `""` | Claude Code 兼容模式下返回凭证的本地命令 |
@@ -805,5 +809,9 @@ rm -rf .pytest_cache
 - `MiniMax` 已按官方 OpenAI 兼容接口接入，可直接作为 `reasoning_provider=minimax` 使用。
 - `Claude Code` 与 `Codex` 目前在本项目中采用“兼容凭证模式”而不是浏览器内第三方 OAuth 回跳。
 - 兼容凭证模式的含义：你可以切到 `claude_code_compat` / `codex_compat`，并配置一个本地 helper 命令，让 RoughCut 在调用模型前获取当前凭证。
+- 如果 `codex_compat` 的 helper 输出的是 `~/.codex/auth.json` 中的 ChatGPT access token，而不是实际 OpenAI Platform API key，
+  则不能直接用它调用 OpenAI `/v1/models` 或 `Responses API` 搜索；当前实测分别会报缺少 `api.model.read` 与 `api.responses.write` scope。
+- 如果要恢复使用 Codex ChatGPT 登录态自带的搜索能力，请改用 `SEARCH_FALLBACK_PROVIDER=model`
+  和 `MODEL_SEARCH_HELPER=python scripts/codex_model_search_helper.py`，让 RoughCut 通过 `codex exec` 本体联网搜索。
 - 多模态链路现在默认“主模型优先，本地 Ollama 兜底”。主体识别、封面选帧、旋转判断优先走当前主模型视觉能力。
 - 联网搜索链路现在默认 `SEARCH_PROVIDER=auto`。如果配置了 `MODEL_SEARCH_HELPER`，会优先走主模型搜索/MCP；失败后回退到 `SearXNG`。

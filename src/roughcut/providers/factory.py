@@ -229,71 +229,12 @@ def _build_search_provider():
         raise RuntimeError("Search disabled for current task route")
 
     if provider == "auto":
-        native_provider = settings.active_reasoning_provider.lower()
-        try:
-            if native_provider == "minimax" and (settings.minimax_coding_plan_api_key.strip() or settings.minimax_api_key.strip()):
-                from roughcut.providers.search.minimax import MiniMaxSearchProvider
+        providers = _build_auto_search_provider_bundle()
+        if providers:
+            from roughcut.providers.search.hybrid import HybridSearchProvider
 
-                return MiniMaxSearchProvider()
-            if native_provider == "openai":
-                from roughcut.providers.search.openai import OpenAISearchProvider
-
-                return OpenAISearchProvider()
-            if native_provider == "anthropic":
-                from roughcut.providers.search.anthropic import AnthropicSearchProvider
-
-                return AnthropicSearchProvider()
-            if native_provider == "ollama" and settings.ollama_api_key.strip():
-                from roughcut.providers.search.ollama import OllamaSearchProvider
-
-                return OllamaSearchProvider()
-        except Exception:
-            pass
-
-        if settings.llm_mode != "local":
-            try:
-                from roughcut.providers.search.model_search import ModelSearchProvider
-
-                return ModelSearchProvider()
-            except Exception:
-                pass
-
-        try:
-            fallback = settings.active_search_fallback_provider.lower()
-            if fallback == "openai":
-                from roughcut.providers.search.openai import OpenAISearchProvider
-
-                return OpenAISearchProvider()
-            if fallback == "anthropic":
-                from roughcut.providers.search.anthropic import AnthropicSearchProvider
-
-                return AnthropicSearchProvider()
-            if fallback == "minimax":
-                from roughcut.providers.search.minimax import MiniMaxSearchProvider
-
-                return MiniMaxSearchProvider()
-            if fallback == "ollama":
-                from roughcut.providers.search.ollama import OllamaSearchProvider
-
-                return OllamaSearchProvider()
-            if fallback == "searxng":
-                from roughcut.providers.search.searxng import SearXNGProvider
-
-                return SearXNGProvider()
-            if fallback == "model":
-                from roughcut.providers.search.model_search import ModelSearchProvider
-
-                return ModelSearchProvider()
-            raise ValueError(f"Unknown search fallback provider: {fallback}")
-        except Exception:
-            if settings.llm_mode != "local":
-                try:
-                    from roughcut.providers.search.model_search import ModelSearchProvider
-
-                    return ModelSearchProvider()
-                except Exception:
-                    pass
-            raise
+            return HybridSearchProvider(providers)
+        raise RuntimeError("No search providers are configured for auto search")
     if provider == "openai":
         from roughcut.providers.search.openai import OpenAISearchProvider
 
@@ -319,3 +260,136 @@ def _build_search_provider():
 
         return SearXNGProvider()
     raise ValueError(f"Unknown search provider: {provider}")
+
+
+def _build_auto_search_provider_bundle() -> list[tuple[str, SearchProvider]]:
+    settings = get_settings()
+    providers: list[tuple[str, SearchProvider]] = []
+
+    def _append(name: str, factory) -> None:
+        try:
+            instance = factory()
+        except Exception:
+            return
+        providers.append((name, instance))
+
+    if str(getattr(settings, "searxng_url", "") or "").strip():
+        _append("searxng", _build_searxng_search_provider)
+
+    native_provider = str(settings.active_reasoning_provider or "").strip().lower()
+    provider_order = _ordered_provider_candidates(native_provider)
+    for name in provider_order:
+        if name == "minimax" and _has_minimax_search_credentials(settings):
+            _append("minimax", _build_minimax_search_provider)
+        elif name == "openai" and _has_openai_search_credentials(settings):
+            _append("openai", _build_openai_search_provider)
+        elif name == "openai" and _has_openai_codex_cli_search_bridge(settings):
+            _append("model", _build_model_search_provider)
+        elif name == "anthropic" and _has_anthropic_search_credentials(settings):
+            _append("anthropic", _build_anthropic_search_provider)
+        elif name == "ollama" and _has_ollama_search_credentials(settings):
+            _append("ollama", _build_ollama_search_provider)
+
+    if providers:
+        return providers
+
+    fallback = str(settings.active_search_fallback_provider or "").strip().lower()
+    try:
+        return [(fallback, _build_named_search_provider(fallback))]
+    except Exception:
+        if settings.llm_mode != "local":
+            try:
+                return [("model", _build_model_search_provider())]
+            except Exception:
+                return []
+        return []
+
+
+def _ordered_provider_candidates(native_provider: str) -> list[str]:
+    base = ["minimax", "openai", "anthropic", "ollama"]
+    normalized = str(native_provider or "").strip().lower()
+    if normalized in base:
+        return [normalized] + [item for item in base if item != normalized]
+    return base
+
+
+def _has_minimax_search_credentials(settings) -> bool:
+    return bool(str(getattr(settings, "minimax_coding_plan_api_key", "") or "").strip() or str(getattr(settings, "minimax_api_key", "") or "").strip())
+
+
+def _has_openai_search_credentials(settings) -> bool:
+    return bool(
+        str(getattr(settings, "openai_auth_mode", "") or "").strip().lower() == "api_key"
+        and str(getattr(settings, "openai_api_key", "") or "").strip()
+    )
+
+
+def _has_openai_codex_cli_search_bridge(settings) -> bool:
+    return bool(
+        str(getattr(settings, "openai_auth_mode", "") or "").strip().lower() == "codex_compat"
+        and str(getattr(settings, "active_model_search_helper", "") or "").strip()
+    )
+
+
+def _has_anthropic_search_credentials(settings) -> bool:
+    return bool(
+        str(getattr(settings, "anthropic_auth_mode", "") or "").strip().lower() == "api_key"
+        and str(getattr(settings, "anthropic_api_key", "") or "").strip()
+    )
+
+
+def _has_ollama_search_credentials(settings) -> bool:
+    return bool(str(getattr(settings, "ollama_api_key", "") or "").strip())
+
+
+def _build_named_search_provider(provider: str) -> SearchProvider:
+    normalized = str(provider or "").strip().lower()
+    if normalized == "openai":
+        return _build_openai_search_provider()
+    if normalized == "anthropic":
+        return _build_anthropic_search_provider()
+    if normalized == "minimax":
+        return _build_minimax_search_provider()
+    if normalized == "ollama":
+        return _build_ollama_search_provider()
+    if normalized == "model":
+        return _build_model_search_provider()
+    if normalized == "searxng":
+        return _build_searxng_search_provider()
+    raise ValueError(f"Unknown search fallback provider: {normalized}")
+
+
+def _build_openai_search_provider() -> SearchProvider:
+    from roughcut.providers.search.openai import OpenAISearchProvider
+
+    return OpenAISearchProvider()
+
+
+def _build_anthropic_search_provider() -> SearchProvider:
+    from roughcut.providers.search.anthropic import AnthropicSearchProvider
+
+    return AnthropicSearchProvider()
+
+
+def _build_minimax_search_provider() -> SearchProvider:
+    from roughcut.providers.search.minimax import MiniMaxSearchProvider
+
+    return MiniMaxSearchProvider()
+
+
+def _build_ollama_search_provider() -> SearchProvider:
+    from roughcut.providers.search.ollama import OllamaSearchProvider
+
+    return OllamaSearchProvider()
+
+
+def _build_model_search_provider() -> SearchProvider:
+    from roughcut.providers.search.model_search import ModelSearchProvider
+
+    return ModelSearchProvider()
+
+
+def _build_searxng_search_provider() -> SearchProvider:
+    from roughcut.providers.search.searxng import SearXNGProvider
+
+    return SearXNGProvider()
