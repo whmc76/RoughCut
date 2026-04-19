@@ -3,6 +3,7 @@ from __future__ import annotations
 from copy import deepcopy
 from datetime import date, datetime
 import math
+import re
 import uuid
 from pathlib import Path
 from typing import Any
@@ -22,10 +23,95 @@ from roughcut.speech.subtitle_pipeline import (
     build_transcript_fact_layer_from_result,
 )
 
+_TRANSCRIPT_TAIL_CTA_NOISE_RE = re.compile(
+    r"(感谢观看|请不吝点赞|打赏支持|"
+    r"点赞.{0,8}(订阅|关注|收藏|转发)|"
+    r"(订阅|关注|收藏).{0,8}点赞|"
+    r"转发.{0,8}(点赞|订阅|关注|收藏))",
+    re.IGNORECASE,
+)
+
 
 def _is_brand_like_term(term: dict) -> bool:
     category = str(term.get("category") or "").strip().lower()
     return bool(category and "brand" in category)
+
+
+def _compact_transcript_noise_text(text: str) -> str:
+    return re.sub(r"[\s\u3000,，.。!！?？:：;；/\\|_\-]+", "", str(text or ""))
+
+
+def _looks_like_tail_cta_noise(text: str) -> bool:
+    compact = _compact_transcript_noise_text(text)
+    if not compact or len(compact) > 40:
+        return False
+    if "感谢观看" in compact:
+        return True
+    if "请不吝点赞" in compact or "打赏支持" in compact:
+        return True
+    return bool(_TRANSCRIPT_TAIL_CTA_NOISE_RE.search(compact))
+
+
+def _is_tail_noise_candidate(
+    *,
+    order_index: int,
+    segment_count: int,
+    start: float,
+    end: float,
+    duration: float,
+) -> bool:
+    if end <= start or (end - start) > 8.0:
+        return False
+    if order_index >= max(segment_count - 2, 0):
+        return True
+    tail_start = max(duration - 20.0, duration * 0.85)
+    return end >= tail_start
+
+
+def _filter_tail_cta_noise_segments(result: TranscriptResult) -> list[dict[str, Any]]:
+    segment_count = len(list(result.segments or []))
+    if segment_count <= 0:
+        return []
+
+    duration = max(
+        float(result.duration or 0.0),
+        max((float(getattr(seg, "end", 0.0) or 0.0) for seg in list(result.segments or [])), default=0.0),
+    )
+    kept_segments: list[ProviderTranscriptSegment] = []
+    dropped_segments: list[dict[str, Any]] = []
+    for order_index, seg in enumerate(list(result.segments or [])):
+        start = float(getattr(seg, "start", 0.0) or 0.0)
+        end = float(getattr(seg, "end", 0.0) or 0.0)
+        text = str(getattr(seg, "raw_text", None) or getattr(seg, "text", "") or "").strip()
+        if (
+            text
+            and _is_tail_noise_candidate(
+                order_index=order_index,
+                segment_count=segment_count,
+                start=start,
+                end=end,
+                duration=duration,
+            )
+            and _looks_like_tail_cta_noise(text)
+        ):
+            dropped_segments.append(
+                {
+                    "index": int(getattr(seg, "index", order_index) or order_index),
+                    "start": start,
+                    "end": end,
+                    "text": str(getattr(seg, "text", "") or ""),
+                    "raw_text": str(getattr(seg, "raw_text", None) or getattr(seg, "text", "") or ""),
+                    "reason": "tail_cta_noise",
+                }
+            )
+            continue
+        kept_segments.append(seg)
+    if dropped_segments:
+        result.segments = kept_segments
+        filtering = dict(result.raw_payload.get("_roughcut_filtering") or {})
+        filtering["dropped_tail_cta_segments"] = dropped_segments
+        result.raw_payload["_roughcut_filtering"] = filtering
+    return dropped_segments
 
 
 async def execute_transcription_plan(
@@ -304,6 +390,7 @@ def _normalize_transcript_result(
                     text = text.replace(wrong, correct_form)
         text = apply_domain_term_corrections(text, review_memory)
         seg.text = text
+    _filter_tail_cta_noise_segments(normalized)
     return enhance_transcript_alignment(normalized, settings=alignment_settings)
 
 

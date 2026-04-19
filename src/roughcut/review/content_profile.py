@@ -165,6 +165,11 @@ _MODEL_FAMILY_RE = re.compile(
     r"(?<![A-Za-z0-9])([A-Za-z]{1,10}\d{1,6}[A-Za-z0-9-]{0,12}|[A-Za-z]{2,12})(?![A-Za-z0-9])",
     re.IGNORECASE,
 )
+_REVIEW_EXCERPT_CTA_NOISE_RE = re.compile(
+    r"(感谢观看|请不吝点赞|打赏支持|点赞.{0,8}(订阅|关注|收藏|转发)|"
+    r"(订阅|关注|收藏).{0,8}点赞|转发.{0,8}(点赞|订阅|关注|收藏))",
+    re.IGNORECASE,
+)
 
 
 def _hint_candidate_key(field_name: str) -> str:
@@ -989,6 +994,17 @@ def _excerpt_item_end(item: dict[str, Any]) -> float:
     return float(item.get("end_time", item.get("end", 0.0)) or 0.0)
 
 
+def _looks_like_review_excerpt_noise(text: str) -> bool:
+    compact = re.sub(r"\s+", "", str(text or "").strip())
+    if not compact or len(compact) > 40:
+        return False
+    if "感谢观看" in compact:
+        return True
+    if "打赏支持" in compact or "请不吝点赞" in compact:
+        return True
+    return bool(_REVIEW_EXCERPT_CTA_NOISE_RE.search(compact))
+
+
 def build_transcript_excerpt(subtitle_items: list[dict], *, max_items: int = 36, max_chars: int = 1400) -> str:
     selected = _select_excerpt_items(subtitle_items, max_items=max_items)
     lines: list[str] = []
@@ -996,6 +1012,8 @@ def build_transcript_excerpt(subtitle_items: list[dict], *, max_items: int = 36,
     for item in selected:
         text = _excerpt_item_text(item)
         if not text:
+            continue
+        if _looks_like_review_excerpt_noise(text):
             continue
         line = f"[{_excerpt_item_start(item):.1f}-{_excerpt_item_end(item):.1f}] {text}"
         total += len(line)

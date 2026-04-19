@@ -718,6 +718,38 @@ def test_build_reviewed_transcript_excerpt_applies_accepted_corrections():
     assert "锐特" not in excerpt
 
 
+def test_build_transcript_excerpt_filters_cta_noise_lines():
+    excerpt = build_transcript_excerpt(
+        [
+            {"start_time": 874.9, "end_time": 877.3, "text_final": "哎不好意思啊我这手大拇指挡住了"},
+            {"start_time": 876.9, "end_time": 877.0, "text_final": "请不吝点赞 订阅 转发 打赏支持明镜与点点栏目"},
+            {"start_time": 877.5, "end_time": 882.5, "text_final": "正常弹就行了然后也很轻松"},
+            {"start_time": 882.5, "end_time": 882.9, "text_final": "感谢观看"},
+        ],
+        max_items=10,
+        max_chars=400,
+    )
+
+    assert "请不吝点赞" not in excerpt
+    assert "感谢观看" not in excerpt
+    assert "大拇指挡住了" in excerpt
+    assert "正常弹就行了然后也很轻松" in excerpt
+
+
+def test_build_transcript_excerpt_does_not_filter_plain_column_reference():
+    excerpt = build_transcript_excerpt(
+        [
+            {"start_time": 10.0, "end_time": 12.0, "text_final": "这期顺带提一下明镜与点点栏目后续会改版"},
+            {"start_time": 12.0, "end_time": 14.0, "text_final": "主体还是继续讲这把刀的开合结构"},
+        ],
+        max_items=10,
+        max_chars=400,
+    )
+
+    assert "明镜与点点栏目后续会改版" in excerpt
+    assert "继续讲这把刀的开合结构" in excerpt
+
+
 def test_content_profile_keywords_module_exports_public_keyword_helpers():
     from roughcut.review.content_profile_keywords import (
         build_review_keywords,

@@ -152,3 +152,60 @@ def test_normalize_transcript_result_preserves_reference_word_payload_when_synth
 
     assert normalized.alignment["segments_with_synthesized_words"] == 1
     assert normalized.segments[0].words[0].raw_payload["timing"] == 0.4
+
+
+def test_normalize_transcript_result_filters_tail_cta_noise_but_keeps_raw_segments():
+    intro_segment = TranscriptSegment(
+        index=0,
+        start=0.0,
+        end=3.0,
+        text="今天简单看一下这个快开结构。",
+        raw_text="今天简单看一下这个快开结构。",
+    )
+    noise_segment = TranscriptSegment(
+        index=1,
+        start=897.0,
+        end=899.0,
+        text="请不吝点赞 订阅 转发 打赏支持明镜与点点栏目",
+        raw_text="请不吝点赞 订阅 转发 打赏支持明镜与点点栏目",
+    )
+    result = TranscriptResult(
+        segments=[intro_segment, noise_segment],
+        language="zh-CN",
+        duration=900.0,
+        provider="qwen3_asr",
+        model="qwen3-asr-1.7b",
+        raw_payload={"segments": [{"text": intro_segment.text}, {"text": noise_segment.text}]},
+        raw_segments=[intro_segment, noise_segment],
+    )
+
+    normalized = _normalize_transcript_result(result, glossary_terms=[], review_memory=None)
+
+    assert [segment.text for segment in normalized.segments] == ["今天简单看一下这个快开结构。"]
+    assert len(normalized.raw_segments) == 2
+    assert normalized.raw_segments[-1].text == "请不吝点赞 订阅 转发 打赏支持明镜与点点栏目"
+    assert normalized.raw_payload["_roughcut_filtering"]["dropped_tail_cta_segments"][0]["reason"] == "tail_cta_noise"
+
+
+def test_normalize_transcript_result_keeps_non_cta_tail_reference_text():
+    result = TranscriptResult(
+        segments=[
+            TranscriptSegment(
+                index=0,
+                start=874.0,
+                end=878.0,
+                text="明镜与点点栏目这期继续讲前置快开结构。",
+                raw_text="明镜与点点栏目这期继续讲前置快开结构。",
+            )
+        ],
+        language="zh-CN",
+        duration=878.0,
+        provider="qwen3_asr",
+        model="qwen3-asr-1.7b",
+        raw_payload={"segments": [{"text": "明镜与点点栏目这期继续讲前置快开结构。"}]},
+    )
+
+    normalized = _normalize_transcript_result(result, glossary_terms=[], review_memory=None)
+
+    assert [segment.text for segment in normalized.segments] == ["明镜与点点栏目这期继续讲前置快开结构。"]
+    assert "_roughcut_filtering" not in normalized.raw_payload
