@@ -58,6 +58,28 @@ def _strip_reasoning_tags(text: str) -> str:
     return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
 
 
+def _active_multimodal_fallback_provider(settings) -> str:
+    return str(
+        getattr(
+            settings,
+            "active_multimodal_fallback_provider",
+            getattr(settings, "multimodal_fallback_provider", ""),
+        )
+        or ""
+    ).strip().lower()
+
+
+def _active_multimodal_fallback_model(settings) -> str:
+    return str(
+        getattr(
+            settings,
+            "active_multimodal_fallback_model",
+            getattr(settings, "multimodal_fallback_model", ""),
+        )
+        or ""
+    ).strip()
+
+
 async def complete_with_images(
     prompt: str,
     image_paths: list[Path],
@@ -75,14 +97,14 @@ async def complete_with_images(
         temperature=temperature,
         json_mode=json_mode,
         settings_signature="|".join(
-            (
-                str(settings.active_reasoning_provider or "").strip().lower(),
-                str(settings.active_vision_model or settings.vision_model or "").strip(),
-                str(settings.active_multimodal_fallback_provider or "").strip().lower(),
-                str(settings.active_multimodal_fallback_model or "").strip(),
-                str(settings.llm_mode or "").strip().lower(),
-            )
-        ),
+                (
+                    str(settings.active_reasoning_provider or "").strip().lower(),
+                    str(settings.active_vision_model or settings.vision_model or "").strip(),
+                    _active_multimodal_fallback_provider(settings),
+                    _active_multimodal_fallback_model(settings),
+                    str(settings.llm_mode or "").strip().lower(),
+                )
+            ),
     )
     cached = _get_cached_multimodal_result(cache_key)
     if cached is not None:
@@ -98,10 +120,10 @@ async def complete_with_images(
         )
     ]
 
-    fallback_provider = settings.active_multimodal_fallback_provider.lower().strip()
+    fallback_provider = _active_multimodal_fallback_provider(settings)
     if settings.llm_mode != "local" and fallback_provider and fallback_provider != attempts[0][0]:
         try:
-            fallback_model = settings.active_multimodal_fallback_model or await _resolve_vision_model(provider=fallback_provider)
+            fallback_model = _active_multimodal_fallback_model(settings) or await _resolve_vision_model(provider=fallback_provider)
             attempts.append((fallback_provider, fallback_model))
         except Exception:
             pass

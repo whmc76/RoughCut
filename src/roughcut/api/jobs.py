@@ -370,6 +370,54 @@ async def _load_content_profile_review_evidence(
     }
 
 
+async def _build_current_reviewed_subtitle_excerpt(
+    job_id: uuid.UUID,
+    session: AsyncSession,
+) -> str:
+    subtitle_item_result = await session.execute(
+        select(SubtitleItem)
+        .where(SubtitleItem.job_id == job_id, SubtitleItem.version == 1)
+        .order_by(SubtitleItem.item_index)
+    )
+    subtitle_items = subtitle_item_result.scalars().all()
+    if not subtitle_items:
+        return ""
+
+    correction_result = await session.execute(
+        select(SubtitleCorrection).where(SubtitleCorrection.job_id == job_id)
+    )
+    accepted_corrections = [
+        {
+            "item_index": next(
+                (
+                    item.item_index
+                    for item in subtitle_items
+                    if correction.subtitle_item_id and item.id == correction.subtitle_item_id
+                ),
+                None,
+            ),
+            "original": correction.original_span,
+            "accepted": str(correction.human_override or correction.suggested_span or "").strip(),
+        }
+        for correction in correction_result.scalars().all()
+        if correction.human_decision == "accepted"
+    ]
+    return build_reviewed_transcript_excerpt(
+        [
+            {
+                "index": item.item_index,
+                "start_time": item.start_time,
+                "end_time": item.end_time,
+                "text_raw": item.text_raw,
+                "text_norm": item.text_norm,
+                "text_final": item.text_final,
+            }
+            for item in subtitle_items
+        ],
+        accepted_corrections,
+    )
+
+
 @router.get("", response_model=list[JobOut])
 async def list_jobs(
     limit: int = 50,
@@ -1029,6 +1077,14 @@ async def get_content_profile(job_id: uuid.UUID, session: AsyncSession = Depends
     if isinstance(final, dict):
         final = apply_current_content_profile_review_policy(final, settings=settings)
         final = _ensure_content_understanding_payload(final)
+    reviewed_subtitle_excerpt = await _build_current_reviewed_subtitle_excerpt(job_id, session)
+    if reviewed_subtitle_excerpt:
+        if isinstance(draft, dict):
+            draft = dict(draft)
+            draft["reviewed_subtitle_excerpt"] = reviewed_subtitle_excerpt
+        if isinstance(final, dict):
+            final = dict(final)
+            final["reviewed_subtitle_excerpt"] = reviewed_subtitle_excerpt
 
     review_step_result = await session.execute(
         select(JobStep).where(JobStep.job_id == job_id, JobStep.step_name == "summary_review")

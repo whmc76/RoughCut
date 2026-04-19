@@ -30,7 +30,9 @@ class _FallbackReasoningProvider(ReasoningProvider):
         json_mode: bool = False,
     ) -> ReasoningResponse:
         settings = get_settings()
-        primary_provider = _build_reasoning_provider(settings.active_reasoning_provider.lower())
+        primary_provider_name = settings.active_reasoning_provider.lower()
+        primary_model_name = settings.active_reasoning_model
+        primary_provider = _build_reasoning_provider(primary_provider_name)
         try:
             return await primary_provider.complete(
                 messages,
@@ -42,8 +44,8 @@ class _FallbackReasoningProvider(ReasoningProvider):
             with llm_backup_route(settings=settings):
                 fallback_settings = get_settings()
                 fallback_provider_name = fallback_settings.active_reasoning_provider.lower()
-                if fallback_provider_name == settings.active_reasoning_provider.lower() and (
-                    fallback_settings.active_reasoning_model == settings.active_reasoning_model
+                if fallback_provider_name == primary_provider_name and (
+                    fallback_settings.active_reasoning_model == primary_model_name
                 ):
                     raise
                 fallback_provider = _build_reasoning_provider(fallback_provider_name)
@@ -65,14 +67,16 @@ class _FallbackReasoningProvider(ReasoningProvider):
 class _FallbackSearchProvider(SearchProvider):
     async def search(self, query: str, *, max_results: int = 5) -> list[SearchResult]:
         settings = get_settings()
+        primary_provider_name = settings.active_reasoning_provider.lower()
+        primary_model_name = settings.active_reasoning_model
         try:
             provider = _build_search_provider()
             return await provider.search(query, max_results=max_results)
         except Exception as primary_exc:
             with llm_backup_route(settings=settings):
                 fallback_settings = get_settings()
-                if fallback_settings.active_reasoning_provider.lower() == settings.active_reasoning_provider.lower() and (
-                    fallback_settings.active_reasoning_model == settings.active_reasoning_model
+                if fallback_settings.active_reasoning_provider.lower() == primary_provider_name and (
+                    fallback_settings.active_reasoning_model == primary_model_name
                 ):
                     raise
                 try:

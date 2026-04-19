@@ -3886,6 +3886,79 @@ async def test_content_profile_endpoint_keeps_review_draft_when_legacy_profile_i
 
 
 @pytest.mark.asyncio
+async def test_content_profile_endpoint_rebuilds_reviewed_subtitle_excerpt_from_current_subtitles(client: AsyncClient):
+    from roughcut.db.models import Artifact, Job, JobStep, SubtitleItem
+    from roughcut.db.session import get_session_factory
+
+    job_id = uuid.uuid4()
+    now = datetime.now(timezone.utc)
+
+    async with get_session_factory()() as session:
+        session.add(
+            Job(
+                id=job_id,
+                source_path="jobs/demo/review-excerpt.mp4",
+                source_name="review-excerpt.mp4",
+                status="needs_review",
+                language="zh-CN",
+                workflow_template="edc_tactical",
+                workflow_mode="standard_edit",
+            )
+        )
+        session.add(
+            JobStep(
+                job_id=job_id,
+                step_name="summary_review",
+                status="pending",
+                started_at=now,
+                metadata_={"detail": "等待人工确认。"},
+            )
+        )
+        session.add(
+            Artifact(
+                job_id=job_id,
+                artifact_type="content_profile_draft",
+                data_json={
+                    "summary": "当前摘要",
+                    "transcript_excerpt": "[876.9-877.0] 请不吝点赞 订阅 转发 打赏支持明镜与点点栏目",
+                },
+            )
+        )
+        session.add_all(
+            [
+                SubtitleItem(
+                    job_id=job_id,
+                    version=1,
+                    item_index=0,
+                    start_time=874.9,
+                    end_time=877.3,
+                    text_raw="哎不好意思啊我这手大拇指挡住了",
+                    text_norm="哎不好意思啊我这手大拇指挡住了",
+                    text_final="哎不好意思啊我这手大拇指挡住了",
+                ),
+                SubtitleItem(
+                    job_id=job_id,
+                    version=1,
+                    item_index=1,
+                    start_time=880.2,
+                    end_time=882.6,
+                    text_raw="正常弹就行了然后也很轻松",
+                    text_norm="正常弹就行了然后也很轻松",
+                    text_final="正常弹就行了然后也很轻松",
+                ),
+            ]
+        )
+        await session.commit()
+
+    response = await client.get(f"/api/v1/jobs/{job_id}/content-profile")
+    assert response.status_code == 200
+    data = response.json()
+    assert "请不吝点赞" not in data["draft"]["reviewed_subtitle_excerpt"]
+    assert "大拇指挡住了" in data["draft"]["reviewed_subtitle_excerpt"]
+    assert data["draft"]["transcript_excerpt"] == "[876.9-877.0] 请不吝点赞 订阅 转发 打赏支持明镜与点点栏目"
+
+
+@pytest.mark.asyncio
 async def test_content_profile_endpoint_exposes_evidence_artifacts(client: AsyncClient):
     from roughcut.db.models import Artifact, Job, JobStep
     from roughcut.db.session import get_session_factory

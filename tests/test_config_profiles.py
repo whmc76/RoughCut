@@ -112,7 +112,7 @@ def test_config_profile_round_trip_restores_config_and_packaging(tmp_path, monke
     config = get_config()
     packaging = library.list_packaging_assets()
 
-    assert config.transcription_provider == "qwen_asr"
+    assert config.transcription_provider == "qwen3_asr"
     assert config.transcription_model == "qwen3-asr-1.7b"
     assert config.transcription_dialect == "beijing"
     assert config.reasoning_provider == "openai"
