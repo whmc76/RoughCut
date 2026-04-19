@@ -78,8 +78,8 @@ async def complete_with_images(
             (
                 str(settings.active_reasoning_provider or "").strip().lower(),
                 str(settings.active_vision_model or settings.vision_model or "").strip(),
-                str(settings.multimodal_fallback_provider or "").strip().lower(),
-                str(settings.multimodal_fallback_model or "").strip(),
+                str(settings.active_multimodal_fallback_provider or "").strip().lower(),
+                str(settings.active_multimodal_fallback_model or "").strip(),
                 str(settings.llm_mode or "").strip().lower(),
             )
         ),
@@ -98,10 +98,10 @@ async def complete_with_images(
         )
     ]
 
-    fallback_provider = settings.multimodal_fallback_provider.lower().strip()
+    fallback_provider = settings.active_multimodal_fallback_provider.lower().strip()
     if settings.llm_mode != "local" and fallback_provider and fallback_provider != attempts[0][0]:
         try:
-            fallback_model = settings.multimodal_fallback_model or await _resolve_vision_model(provider=fallback_provider)
+            fallback_model = settings.active_multimodal_fallback_model or await _resolve_vision_model(provider=fallback_provider)
             attempts.append((fallback_provider, fallback_model))
         except Exception:
             pass

@@ -109,3 +109,38 @@ def test_build_subtitle_quality_report_from_items_uses_model_fields():
 
     assert ARTIFACT_TYPE_SUBTITLE_QUALITY_REPORT == "subtitle_quality_report"
     assert report["metrics"]["bad_term_counts"]["hotword_numeric_edc17_uncorrected"] == 1
+
+
+def test_build_subtitle_quality_report_flags_flashlight_model_knife_drift():
+    report = build_subtitle_quality_report(
+        subtitle_items=[
+            {"text_final": "折刀帕三七是之前我。"},
+            {"text_final": "一直经常会EDC17折刀。"},
+            {"text_final": "出的这个EDC17刀幺七啊。"},
+        ],
+        source_name="20260228-152013 奈特科尔 nitecore EDC17开箱以及和edc37的对比.mp4",
+        content_profile={"summary": "这条视频主要围绕 NITECORE EDC17 手电和 EDC37 对比展开。"},
+    )
+
+    assert report["blocking"] is True
+    assert report["metrics"]["bad_term_counts"]["hotword_flashlight_model_knifedrift"] == 3
+    assert report["metrics"]["semantic_bad_term_total"] == 3
+    assert report["metrics"]["lexical_bad_term_total"] == 1
+    assert any("语义污染" in reason for reason in report["blocking_reasons"])
+
+
+def test_build_subtitle_quality_report_splits_lexical_and_semantic_blocking_reasons():
+    report = build_subtitle_quality_report(
+        subtitle_items=[
+            {"text_final": "我们赶紧开枪吧。"},
+            {"text_final": "刀三七是之前我。"},
+        ],
+        source_name="20260228-152013 奈特科尔 nitecore EDC17开箱以及和edc37的对比.mp4",
+        content_profile={"summary": "这条视频主要围绕 NITECORE EDC17 手电展开。"},
+    )
+
+    assert report["blocking"] is True
+    assert report["metrics"]["lexical_bad_term_total"] == 1
+    assert report["metrics"]["semantic_bad_term_total"] == 1
+    assert any("可词级纠偏" in reason for reason in report["blocking_reasons"])
+    assert any("必须人工确认" in reason for reason in report["blocking_reasons"])

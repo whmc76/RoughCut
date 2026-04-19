@@ -5,7 +5,9 @@ from types import SimpleNamespace
 from roughcut.speech.subtitle_pipeline import (
     ARTIFACT_TYPE_CANONICAL_TRANSCRIPT_LAYER,
     build_canonical_transcript_layer,
+    build_canonical_transcript_layer_from_transcript_segments,
     build_subtitle_projection_layer,
+    build_subtitle_projection_layer_from_transcript_segments,
     build_transcript_fact_layer,
 )
 
@@ -69,6 +71,7 @@ def test_build_subtitle_projection_layer_uses_time_sorted_projection_entries():
     assert layer["transcript_layer"] == "subtitle_projection"
     assert layer["entries"][0]["text_raw"] == "第一条"
     assert layer["entries"][1]["text_raw"] == "第二条"
+    assert layer["entries"][0]["source_kind"] == "subtitle_item"
     assert layer["split_profile"]["orientation"] == "landscape"
     assert layer["quality_report"]["score"] == 0.91
 
@@ -131,6 +134,7 @@ def test_build_canonical_transcript_layer_applies_accepted_corrections():
     assert layer["word_count"] >= 2
     assert layer["segments"][0]["words"]
     assert layer["segments"][0]["words"][0]["alignment"]["source"] == "canonical_realign"
+    assert layer["segments"][0]["source_kind"] == "subtitle_item"
     assert layer["correction_metrics"]["accepted_correction_count"] == 1
     assert layer["correction_metrics"]["pending_correction_count"] == 1
 
@@ -174,3 +178,68 @@ def test_build_canonical_transcript_layer_reuses_reference_word_timings_when_ava
     assert words[0]["alignment"]["strategy"] == "reference_word_match"
     assert words[1]["start"] == 0.5
     assert words[1]["end"] == 0.9
+
+
+def test_build_canonical_transcript_layer_accepts_transcript_segments_directly():
+    transcript_segments = [
+        SimpleNamespace(
+            id="segment-1",
+            index=5,
+            start=0.0,
+            end=1.1,
+            text="hello world",
+            speaker="narrator",
+            words=[
+                SimpleNamespace(word="hello", start=0.0, end=0.45, raw_payload={"confidence": 0.93}),
+                SimpleNamespace(word="world", start=0.45, end=1.1, raw_payload={"confidence": 0.91}),
+            ],
+        )
+    ]
+
+    layer = build_canonical_transcript_layer(transcript_segments).as_dict()
+
+    assert layer["layer"] == "canonical_transcript"
+    assert layer["source_basis"] == "transcript_first"
+    assert layer["segment_count"] == 1
+    assert layer["segments"][0]["source_kind"] == "transcript_segment"
+    assert layer["segments"][0]["source_id"] == "segment-1"
+    assert layer["segments"][0]["text"] == "hello world"
+    assert layer["segments"][0]["words"][0]["start"] == 0.0
+    assert layer["segments"][0]["words"][1]["end"] == 1.1
+
+
+def test_build_transcript_first_apis_project_from_transcript_segments():
+    transcript_segments = [
+        SimpleNamespace(
+            id="segment-2",
+            index=3,
+            start=1.0,
+            end=2.0,
+            text="transcript first",
+            words=[
+                SimpleNamespace(word="transcript", start=1.0, end=1.5, raw_payload={"confidence": 0.88}),
+                SimpleNamespace(word="first", start=1.5, end=2.0, raw_payload={"confidence": 0.86}),
+            ],
+        )
+    ]
+
+    projection_layer = build_subtitle_projection_layer_from_transcript_segments(
+        transcript_segments,
+        segmentation_analysis={"entry_count": 1},
+        split_profile={"orientation": "portrait"},
+        boundary_refine={"attempted_windows": 0, "accepted_windows": 0},
+        quality_report={"score": 0.99, "blocking": False},
+    ).as_dict()
+
+    canonical_layer = build_canonical_transcript_layer_from_transcript_segments(
+        transcript_segments,
+        source_basis="transcript_first",
+    ).as_dict()
+
+    assert projection_layer["projection_kind"] == "transcript_first"
+    assert projection_layer["transcript_layer"] == "transcript_projection"
+    assert projection_layer["entry_count"] == 1
+    assert projection_layer["entries"][0]["source_kind"] == "transcript_segment"
+    assert projection_layer["entries"][0]["source_id"] == "segment-2"
+    assert canonical_layer["source_basis"] == "transcript_first"
+    assert canonical_layer["segments"][0]["source_kind"] == "transcript_segment"

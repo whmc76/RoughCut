@@ -12,6 +12,9 @@ _BAD_TERM_PATTERNS: dict[str, re.Pattern[str]] = {
     "hotword_brand_noc_misheard": re.compile(r"NZ家|\bNZ\b"),
     "hotword_trim_variant_misheard": re.compile(r"四顶配"),
     "hotword_numeric_edc17_uncorrected": re.compile(r"幺7|幺七"),
+    "hotword_flashlight_model_knifedrift": re.compile(
+        r"(?:折刀帕|刀)(?:幺七|幺7|一七|17|二三|23|三七|37)|EDC(?:17|23|37)折刀(?:帕)?|EDC17刀(?:幺七|幺7|一七|17)|EDC23刀(?:二三|23)|EDC37刀(?:三七|37)"
+    ),
     "hotword_overcorrection_7": re.compile(r"这7个|这7咱"),
 }
 
@@ -33,6 +36,12 @@ _CONSERVATIVE_IDENTITY_SUMMARY_PHRASES = {
 }
 _IDENTITY_HINT_RE = re.compile(r"(MT34|EDC17|EDC37|FXX1|EXO|NOC|FAS|foxbat|OLIGHT|NITECORE|REATE)", re.IGNORECASE)
 _SHORT_FRAGMENT_BLOCKING_MIN_COUNT = 5
+
+_SEMANTIC_CONTAMINATION_CODES = {
+    "hotword_flashlight_model_knifedrift",
+}
+
+_LEXICAL_CORRECTION_CODES = set(_BAD_TERM_PATTERNS) - _SEMANTIC_CONTAMINATION_CODES
 
 
 def _subtitle_text(item: Mapping[str, Any]) -> str:
@@ -110,6 +119,15 @@ def build_subtitle_quality_report(
     for code, pattern in _BAD_TERM_PATTERNS.items():
         bad_term_counts[code] = len(list(pattern.finditer(joined_text)))
 
+    semantic_bad_term_total = sum(
+        count for code, count in bad_term_counts.items()
+        if code in _SEMANTIC_CONTAMINATION_CODES
+    )
+    lexical_bad_term_total = sum(
+        count for code, count in bad_term_counts.items()
+        if code in _LEXICAL_CORRECTION_CODES
+    )
+
     filler_count = 0
     low_signal_count = 0
     short_fragment_count = 0
@@ -138,8 +156,10 @@ def build_subtitle_quality_report(
     blocking_reasons: list[str] = []
     warning_reasons: list[str] = []
 
-    if bad_term_total > 0:
-        blocking_reasons.append(f"热词/型号错词残留 {bad_term_total} 处")
+    if semantic_bad_term_total > 0:
+        blocking_reasons.append(f"检测到语义污染 {semantic_bad_term_total} 处，必须人工确认")
+    if lexical_bad_term_total > 0:
+        blocking_reasons.append(f"可词级纠偏的热词/型号残留 {lexical_bad_term_total} 处")
     if short_fragment_rate > 0.015 and short_fragment_count >= _SHORT_FRAGMENT_BLOCKING_MIN_COUNT:
         blocking_reasons.append(f"短碎句率过高 {short_fragment_rate:.2%}")
     elif short_fragment_rate > 0.008:
@@ -171,6 +191,10 @@ def build_subtitle_quality_report(
             "subtitle_count": total,
             "bad_term_total": bad_term_total,
             "bad_term_counts": dict(bad_term_counts),
+            "lexical_bad_term_total": lexical_bad_term_total,
+            "semantic_bad_term_total": semantic_bad_term_total,
+            "lexical_correction_codes": sorted(_LEXICAL_CORRECTION_CODES),
+            "semantic_contamination_codes": sorted(_SEMANTIC_CONTAMINATION_CODES),
             "filler_count": filler_count,
             "low_signal_count": low_signal_count,
             "short_fragment_count": short_fragment_count,

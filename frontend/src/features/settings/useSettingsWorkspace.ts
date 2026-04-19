@@ -16,6 +16,14 @@ function normalizeBundledForm(form: SettingsForm): SettingsForm {
   nextForm.hybrid_copy_provider = String(nextForm.hybrid_copy_provider ?? "minimax").trim() || "minimax";
   nextForm.hybrid_copy_model = String(nextForm.hybrid_copy_model ?? "MiniMax-M2.7-highspeed").trim() || "MiniMax-M2.7-highspeed";
   nextForm.hybrid_copy_search_mode = String(nextForm.hybrid_copy_search_mode ?? "follow_provider").trim() || "follow_provider";
+  nextForm.llm_backup_enabled = Boolean(nextForm.llm_backup_enabled ?? true);
+  nextForm.backup_reasoning_provider = String(nextForm.backup_reasoning_provider ?? "minimax").trim() || "minimax";
+  nextForm.backup_reasoning_model = String(nextForm.backup_reasoning_model ?? "MiniMax-M2.7-highspeed").trim() || "MiniMax-M2.7-highspeed";
+  nextForm.backup_reasoning_effort = String(nextForm.backup_reasoning_effort ?? "medium").trim() || "medium";
+  nextForm.backup_vision_model = String(nextForm.backup_vision_model ?? "MiniMax-VL-01").trim() || "MiniMax-VL-01";
+  nextForm.backup_search_provider = String(nextForm.backup_search_provider ?? "auto").trim() || "auto";
+  nextForm.backup_search_fallback_provider = String(nextForm.backup_search_fallback_provider ?? "minimax").trim() || "minimax";
+  nextForm.backup_model_search_helper = String(nextForm.backup_model_search_helper ?? "").trim();
   nextForm.search_provider = "auto";
   nextForm.search_fallback_provider = String(nextForm.search_fallback_provider ?? "searxng").trim() || "searxng";
   nextForm.multimodal_fallback_provider = String(nextForm.multimodal_fallback_provider ?? "ollama").trim() || "ollama";
@@ -32,6 +40,14 @@ function buildSettingsForm(config: NonNullable<ReturnType<typeof api.getConfig> 
     llm_routing_mode: config.llm_routing_mode ?? "bundled",
     reasoning_provider: config.reasoning_provider,
     reasoning_model: config.reasoning_model,
+    llm_backup_enabled: config.llm_backup_enabled ?? true,
+    backup_reasoning_provider: config.backup_reasoning_provider ?? "minimax",
+    backup_reasoning_model: config.backup_reasoning_model ?? "MiniMax-M2.7-highspeed",
+    backup_reasoning_effort: config.backup_reasoning_effort ?? "medium",
+    backup_vision_model: config.backup_vision_model ?? "MiniMax-VL-01",
+    backup_search_provider: config.backup_search_provider ?? "auto",
+    backup_search_fallback_provider: config.backup_search_fallback_provider ?? "minimax",
+    backup_model_search_helper: config.backup_model_search_helper ?? "",
     local_reasoning_model: config.local_reasoning_model,
     local_vision_model: config.local_vision_model,
     hybrid_analysis_provider: config.hybrid_analysis_provider ?? "openai",

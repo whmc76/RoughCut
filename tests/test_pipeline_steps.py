@@ -34,6 +34,7 @@ from roughcut.pipeline.steps import (
     _subtitle_boundary_refine_llm_supported,
     _load_latest_timeline,
     _record_source_integrity,
+    _project_canonical_transcript_to_timeline,
     _select_low_confidence_windows_for_llm,
     _select_cover_source_video,
     _select_preferred_content_profile_artifact,
@@ -343,7 +344,9 @@ async def test_run_subtitle_term_resolution_records_patch_and_corrections(db_eng
         ).scalar_one()
 
     assert len(correction_rows) == patch_artifact.data_json["metrics"]["patch_count"]
+    assert patch_artifact.data_json["autocorrect_policy"] == "lexical_only"
     assert step.metadata_["term_resolution_patch"]["patch_count"] == len(correction_rows)
+    assert step.metadata_["term_resolution_patch"]["autocorrect_policy"] == "lexical_only"
 
 
 @pytest.mark.asyncio
@@ -2744,10 +2747,10 @@ async def test_run_transcript_review_replaces_prior_refresh_artifacts_on_rerun(d
     assert first["projection_basis"] == "canonical_refresh"
 
     async with factory() as session:
-        subtitle_item = (
-            await session.execute(select(SubtitleItem).where(SubtitleItem.job_id == job_id, SubtitleItem.item_index == 0))
+        transcript_row = (
+            await session.execute(select(DbTranscriptSegment).where(DbTranscriptSegment.job_id == job_id, DbTranscriptSegment.segment_index == 0))
         ).scalar_one()
-        subtitle_item.text_final = "第二次文本。"
+        transcript_row.text = "第二次文本。"
         await session.commit()
 
     second = await run_transcript_review(str(job_id))
@@ -2782,6 +2785,38 @@ async def test_run_transcript_review_replaces_prior_refresh_artifacts_on_rerun(d
     assert canonical_artifacts[0].data_json["segments"][0]["text"] == "第二次文本。"
     assert projection_artifacts[0].data_json["projection_kind"] == "canonical_refresh"
     assert "".join(entry["text_final"] for entry in projection_artifacts[0].data_json["entries"]) == "第二次文本。"
+
+
+def test_project_canonical_transcript_to_timeline_resegments_from_canonical_words():
+    projected = _project_canonical_transcript_to_timeline(
+        {
+            "segments": [
+                {
+                    "index": 0,
+                    "start": 0.0,
+                    "end": 2.3,
+                    "text": "这期重点讲EDC17手电。",
+                    "words": [
+                        {"word": "这期", "start": 0.0, "end": 0.3, "alignment": {"source": "canonical_realign"}},
+                        {"word": "重点", "start": 0.3, "end": 0.7, "alignment": {"source": "canonical_realign"}},
+                        {"word": "讲", "start": 0.7, "end": 0.9, "alignment": {"source": "canonical_realign"}},
+                        {"word": "EDC17", "start": 1.2, "end": 1.7, "alignment": {"source": "canonical_realign"}},
+                        {"word": "手电", "start": 1.7, "end": 2.1, "alignment": {"source": "canonical_realign"}},
+                        {"word": "。", "start": 2.1, "end": 2.3, "alignment": {"source": "canonical_realign"}},
+                    ],
+                }
+            ]
+        },
+        [
+            {"type": "keep", "start": 0.0, "end": 0.95},
+            {"type": "keep", "start": 1.2, "end": 2.3},
+        ],
+        split_profile={"orientation": "landscape", "max_chars": 10, "max_duration": 4.0},
+    )
+
+    assert projected
+    assert "".join(item["text_final"] for item in projected) == "这期重点讲EDC17手电。"
+    assert all(float(item["end_time"]) > float(item["start_time"]) for item in projected)
 
 
 @pytest.mark.asyncio

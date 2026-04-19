@@ -72,11 +72,14 @@ def build_subtitle_term_resolution_patch(
     candidate_terms = _profile_candidate_terms(content_profile)
     return {
         "source_name": source_name,
+        "autocorrect_policy": "lexical_only",
+        "automation_scope": "lexical_corrections_only",
         "candidate_terms": candidate_terms,
         "patches": patches,
         "evidence": {
             "candidate_terms": candidate_terms,
             "source_name": source_name,
+            "autocorrect_policy": "lexical_only",
         },
         "confidence": average_confidence,
         "scope": "subtitle_terms",
@@ -84,6 +87,7 @@ def build_subtitle_term_resolution_patch(
         "metrics": {
             "patch_count": len(patches),
             "auto_applied_count": auto_applied_count,
+            "lexical_auto_applied_count": auto_applied_count,
             "accepted_count": accepted_count,
             "pending_count": pending_count,
         },

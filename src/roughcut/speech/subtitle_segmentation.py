@@ -1430,16 +1430,20 @@ def _resolve_subtitle_entry_sequence(
 ) -> list[SubtitleEntry]:
     merged = _merge_continuation_entries(entries, max_chars=max_chars, max_duration=max_duration)
     merged = _merge_short_chain_entries(merged, max_chars=max_chars, max_duration=max_duration)
+    merged = _merge_same_source_segment_micro_fragments(merged, max_chars=max_chars, max_duration=max_duration)
     rebalanced = _rebalance_semantic_boundaries(merged, max_chars=max_chars, max_duration=max_duration)
     resolved = _merge_continuation_entries(rebalanced, max_chars=max_chars, max_duration=max_duration)
     resolved = _merge_short_chain_entries(resolved, max_chars=max_chars, max_duration=max_duration)
+    resolved = _merge_same_source_segment_micro_fragments(resolved, max_chars=max_chars, max_duration=max_duration)
     if allow_window_refine:
         resolved = _refine_low_confidence_windows(resolved, max_chars=max_chars, max_duration=max_duration)
         resolved = _merge_continuation_entries(resolved, max_chars=max_chars, max_duration=max_duration)
         resolved = _merge_short_chain_entries(resolved, max_chars=max_chars, max_duration=max_duration)
+        resolved = _merge_same_source_segment_micro_fragments(resolved, max_chars=max_chars, max_duration=max_duration)
         resolved = _rebalance_semantic_boundaries(resolved, max_chars=max_chars, max_duration=max_duration)
         resolved = _merge_continuation_entries(resolved, max_chars=max_chars, max_duration=max_duration)
         resolved = _merge_short_chain_entries(resolved, max_chars=max_chars, max_duration=max_duration)
+        resolved = _merge_same_source_segment_micro_fragments(resolved, max_chars=max_chars, max_duration=max_duration)
     return _cleanup_subtitle_entries(resolved)
 
 
@@ -1526,6 +1530,8 @@ def analyze_subtitle_segmentation(entries: list[SubtitleEntry]) -> SubtitleSegme
 def _flatten_segment_words(segments: list[TranscriptSegment]) -> list[dict]:
     flattened: list[dict] = []
     for segment_index, seg in enumerate(segments):
+        segment_start = float(getattr(seg, "start_time", 0.0) or 0.0)
+        segment_end = float(getattr(seg, "end_time", segment_start) or segment_start)
         for word_index, raw_word in enumerate(_words_for_segmentation(seg)):
             word_text = re.sub(r"\s+", "", str(raw_word.get("word", "")))
             if not word_text:
@@ -1539,6 +1545,8 @@ def _flatten_segment_words(segments: list[TranscriptSegment]) -> list[dict]:
                     "start": start,
                     "end": end,
                     "segment_index": segment_index,
+                    "segment_start": segment_start,
+                    "segment_end": segment_end,
                     "word_index": word_index,
                 }
             )
@@ -2547,6 +2555,68 @@ def _merge_short_chain_entries(
     return merged
 
 
+def _merge_same_source_segment_micro_fragments(
+    entries: list[SubtitleEntry],
+    *,
+    max_chars: int,
+    max_duration: float,
+) -> list[SubtitleEntry]:
+    if len(entries) <= 1:
+        return entries
+
+    merged: list[SubtitleEntry] = []
+    index = 0
+    while index < len(entries):
+        current = entries[index]
+        run = [current]
+        current_segment_index = _single_source_segment_index(current)
+
+        if current_segment_index is not None:
+            next_index = index + 1
+            while next_index < len(entries):
+                candidate = entries[next_index]
+                candidate_segment_index = _single_source_segment_index(candidate)
+                gap = max(0.0, float(candidate.start) - float(run[-1].end))
+                max_same_source_gap = 0.18
+                if (
+                    len(str(run[-1].text_raw or "").strip()) <= 6
+                    or len(str(candidate.text_raw or "").strip()) <= 6
+                ):
+                    max_same_source_gap = 1.8
+                if candidate_segment_index != current_segment_index or gap > max_same_source_gap:
+                    break
+                run.append(candidate)
+                next_index += 1
+            if _should_compact_same_source_run(run, max_chars=max_chars, max_duration=max_duration):
+                compacted = _compact_same_source_run(run, max_chars=max_chars, max_duration=max_duration)
+                for entry in compacted:
+                    merged.append(
+                        SubtitleEntry(
+                            index=len(merged),
+                            start=entry.start,
+                            end=entry.end,
+                            text_raw=entry.text_raw,
+                            text_norm=entry.text_norm,
+                            words=tuple(entry.words or ()),
+                        )
+                    )
+                index = next_index
+                continue
+
+        merged.append(
+            SubtitleEntry(
+                index=len(merged),
+                start=current.start,
+                end=current.end,
+                text_raw=current.text_raw,
+                text_norm=current.text_norm,
+                words=tuple(current.words or ()),
+            )
+        )
+        index += 1
+    return merged
+
+
 def _merge_short_bridge_entries(entries: list[SubtitleEntry]) -> list[SubtitleEntry]:
     if len(entries) <= 1:
         return entries
@@ -3540,6 +3610,151 @@ def _is_short_subtitle_fragment(text: str) -> bool:
     if re.search(r"[A-Za-z0-9]", candidate):
         return False
     return True
+
+
+def _single_source_segment_index(entry: SubtitleEntry) -> int | None:
+    segment_indexes = {
+        int(word.get("segment_index"))
+        for word in tuple(entry.words or ())
+        if word.get("segment_index") is not None
+    }
+    if len(segment_indexes) != 1:
+        return None
+    return next(iter(segment_indexes))
+
+
+def _source_segment_span(entry: SubtitleEntry) -> tuple[float, float] | None:
+    starts = [
+        float(word.get("segment_start"))
+        for word in tuple(entry.words or ())
+        if word.get("segment_start") is not None
+    ]
+    ends = [
+        float(word.get("segment_end"))
+        for word in tuple(entry.words or ())
+        if word.get("segment_end") is not None
+    ]
+    if not starts or not ends:
+        return None
+    return min(starts), max(ends)
+
+
+def _should_compact_same_source_run(
+    entries: list[SubtitleEntry],
+    *,
+    max_chars: int,
+    max_duration: float,
+) -> bool:
+    if len(entries) < 2:
+        return False
+    texts = [str(entry.text_raw or "").strip() for entry in entries]
+    short_count = sum(1 for text in texts if len(text) <= 6)
+    if len(entries) == 2:
+        combined_text = "".join(texts)
+        if len(combined_text) > max_chars + 4:
+            return False
+        if not any(len(text) <= 4 for text in texts):
+            return False
+    elif short_count < 2:
+        return False
+    if len(entries) > 2 and not any(len(text) <= 4 for text in texts):
+        combined_text = "".join(texts)
+        if len(combined_text) <= max_chars + 2:
+            return False
+    span = _source_segment_span(entries[0])
+    if span is None:
+        return False
+    source_duration = max(0.0, span[1] - span[0])
+    run_duration = max(0.0, float(entries[-1].end) - float(entries[0].start))
+    return (
+        len(entries) >= 4
+        or source_duration >= max(10.0, max_duration + 4.0)
+        or run_duration >= max_duration + 1.6
+    )
+
+
+def _compact_same_source_run(
+    entries: list[SubtitleEntry],
+    *,
+    max_chars: int,
+    max_duration: float,
+) -> list[SubtitleEntry]:
+    if not entries:
+        return []
+
+    target_chars = min(max_chars, max(10, int(max_chars * 0.62)))
+    soft_char_limit = max_chars + 4
+    soft_duration_limit = max(max_duration + 2.4, 6.5)
+    compacted: list[SubtitleEntry] = []
+    bucket: list[SubtitleEntry] = []
+
+    def _flush_bucket() -> None:
+        nonlocal bucket
+        if not bucket:
+            return
+        compacted.append(_merge_entry_bucket(bucket, index=len(compacted)))
+        bucket = []
+
+    for entry in entries:
+        if not bucket:
+            bucket = [entry]
+            continue
+
+        bucket_text = "".join(str(item.text_raw or "").strip() for item in bucket)
+        candidate_text = f"{bucket_text}{str(entry.text_raw or '').strip()}"
+        candidate_duration = max(0.0, float(entry.end) - float(bucket[0].start))
+        if (
+            len(bucket_text) >= max(8, target_chars - 4)
+            and (len(candidate_text) > target_chars or candidate_duration > soft_duration_limit)
+        ):
+            _flush_bucket()
+            bucket = [entry]
+            continue
+        if len(candidate_text) > soft_char_limit:
+            _flush_bucket()
+            bucket = [entry]
+            continue
+        bucket.append(entry)
+        bucket_text = "".join(str(item.text_raw or "").strip() for item in bucket)
+        bucket_duration = max(0.0, float(bucket[-1].end) - float(bucket[0].start))
+        if len(bucket_text) >= target_chars or bucket_duration >= soft_duration_limit:
+            _flush_bucket()
+
+    _flush_bucket()
+    if len(compacted) >= 2 and len(str(compacted[-1].text_raw or "").strip()) <= 6:
+        previous = compacted[-2]
+        current = compacted[-1]
+        merged_text = f"{previous.text_raw}{current.text_raw}"
+        merged_duration = max(0.0, float(current.end) - float(previous.start))
+        if len(merged_text) <= soft_char_limit and merged_duration <= soft_duration_limit + 0.8:
+            compacted[-2] = _make_subtitle_entry(
+                previous.index,
+                previous.start,
+                current.end,
+                merged_text,
+                words=tuple(previous.words or ()) + tuple(current.words or ()),
+            )
+            compacted.pop()
+    return _reindex_subtitle_entries(compacted)
+
+
+def _merge_entry_bucket(entries: list[SubtitleEntry], *, index: int) -> SubtitleEntry:
+    if len(entries) == 1:
+        entry = entries[0]
+        return _make_subtitle_entry(
+            index,
+            entry.start,
+            entry.end,
+            str(entry.text_raw or "").strip(),
+            words=tuple(entry.words or ()),
+        )
+    return _make_subtitle_entry(
+        index,
+        entries[0].start,
+        entries[-1].end,
+        "".join(str(entry.text_raw or "").strip() for entry in entries),
+        words=sum((tuple(entry.words or ()) for entry in entries), ()),
+    )
 
 
 def _boundary_splits_compound_term(left: str, right: str) -> bool:

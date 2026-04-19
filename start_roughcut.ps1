@@ -62,6 +62,19 @@ function Invoke-NativeCommandChecked {
     }
 }
 
+function Invoke-NativeCommandUnchecked {
+    param(
+        [string]$FilePath,
+        [string[]]$Arguments = @()
+    )
+
+    if ($PSVersionTable.PSVersion.Major -ge 7) {
+        $PSNativeCommandUseErrorActionPreference = $false
+    }
+
+    & $FilePath @Arguments
+}
+
 function Get-RoughCutComposeFiles {
     param(
         [ValidateSet("infra", "runtime", "full")]
@@ -293,7 +306,7 @@ function Start-RoughCutComposeMode {
                 Remove-RoughCutStoppedComposeContainers
                 Invoke-RoughCutCompose -ComposeMode $ComposeMode -ComposeArguments @("up", "-d", "--build", "--remove-orphans") -DockerPythonExtrasOverride $DockerPythonExtras
             } catch {
-                $existingImage = docker image inspect roughcut:local 2>$null
+                $existingImage = Invoke-NativeCommandUnchecked -FilePath "docker" -Arguments @("image", "inspect", "roughcut:local") 2>$null
                 if ($LASTEXITCODE -ne 0) {
                     throw
                 }
@@ -1453,12 +1466,26 @@ function Test-RoughCutWorkerReady {
         [string]$Queue
     )
 
-    $pingOutput = & $Python -m celery -A roughcut.pipeline.celery_app:celery_app inspect ping -d $WorkerNode --timeout=2 --json 2>$null
+    $pingOutput = Invoke-NativeCommandUnchecked -FilePath $Python -Arguments @(
+        "-m", "celery",
+        "-A", "roughcut.pipeline.celery_app:celery_app",
+        "inspect", "ping",
+        "-d", $WorkerNode,
+        "--timeout=2",
+        "--json"
+    ) 2>$null
     if ($LASTEXITCODE -ne 0 -or -not $pingOutput) {
         return $false
     }
 
-    $queueOutput = & $Python -m celery -A roughcut.pipeline.celery_app:celery_app inspect active_queues -d $WorkerNode --timeout=2 --json 2>$null
+    $queueOutput = Invoke-NativeCommandUnchecked -FilePath $Python -Arguments @(
+        "-m", "celery",
+        "-A", "roughcut.pipeline.celery_app:celery_app",
+        "inspect", "active_queues",
+        "-d", $WorkerNode,
+        "--timeout=2",
+        "--json"
+    ) 2>$null
     if ($LASTEXITCODE -ne 0 -or -not $queueOutput) {
         return $false
     }

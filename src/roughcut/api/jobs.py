@@ -2317,6 +2317,7 @@ def _build_activity_decisions(
         patch_count = int(metrics.get("patch_count") or 0)
         pending = int(metrics.get("pending_count") or 0)
         auto_applied = int(metrics.get("auto_applied_count") or 0)
+        autocorrect_policy = str(data.get("autocorrect_policy") or "lexical_only")
         action_payload = build_subtitle_term_resolution_action(data)
         decisions.append(
             {
@@ -2325,7 +2326,7 @@ def _build_activity_decisions(
                 "title": "字幕术语解析",
                 "status": "needs_review" if pending > 0 else "done",
                 "summary": f"识别出 {patch_count} 条术语纠偏 patch",
-                "detail": f"待确认 {pending} 条，自动接受 {auto_applied} 条",
+                "detail": f"待确认 {pending} 条，词级自动接受 {auto_applied} 条，策略 {autocorrect_policy}",
                 "updated_at": _iso_or_none(subtitle_term_resolution_artifact.created_at),
                 **action_payload,
             }
@@ -2366,7 +2367,7 @@ def _build_activity_decisions(
                 "title": "字幕与术语",
                 "status": "needs_review" if pending > 0 else "done",
                 "summary": f"识别出 {len(corrections)} 处术语/字幕纠错候选",
-                "detail": f"待审 {pending} 条，自动/已接受 {accepted} 条",
+                "detail": f"待审 {pending} 条，词级自动/已接受 {accepted} 条",
                 "updated_at": _iso_or_none(max((item.created_at for item in corrections), default=None)),
                 **action_payload,
             }
@@ -2470,6 +2471,7 @@ def _build_activity_decisions(
         grade = str(data.get("grade") or "").strip()
         recommended_steps = [str(item).strip() for item in (data.get("recommended_rerun_steps") or []) if str(item).strip()]
         issue_codes = [str(item).strip() for item in (data.get("issue_codes") or []) if str(item).strip()]
+        manual_review_required = bool(data.get("manual_review_required"))
         bundle = _resolve_effective_variant_bundle_from_artifacts(artifacts)
         timing_summary = _resolve_variant_timing_summary(bundle)
         validation_summary = _summarize_variant_timeline_validation(bundle)
@@ -2479,6 +2481,8 @@ def _build_activity_decisions(
             summary_parts.append(f"{grade} {float(score):.1f}" if grade and score is not None else str(grade or score))
         if issue_codes:
             summary_parts.append(f"{len(issue_codes)} 个扣分项")
+        if manual_review_required:
+            summary_parts.append("人工复核")
         if timing_summary:
             summary_parts.append(timing_summary)
         if validation_summary:
@@ -2494,7 +2498,8 @@ def _build_activity_decisions(
                     "；".join(
                         part for part in [
                             f"问题：{', '.join(issue_codes)}" if issue_codes else "",
-                            f"建议补跑：{', '.join(recommended_steps)}" if recommended_steps else "",
+                            "处理：必须人工复核" if manual_review_required else "",
+                            f"建议补跑：{', '.join(recommended_steps)}" if recommended_steps and not manual_review_required else "",
                             f"时间轴校验：{validation_detail}" if validation_detail else "",
                         ]
                         if part
@@ -3451,7 +3456,7 @@ def _resolve_job_quality_preview(artifacts: list[Artifact]) -> dict[str, Any]:
             if pending > 0:
                 issue_codes.append(f"术语解析待确认 {pending} 条")
             elif auto_applied > 0:
-                issue_codes.append(f"术语解析自动接受 {auto_applied} 条")
+                issue_codes.append(f"术语解析词级自动接受 {auto_applied} 条")
         if subtitle_consistency is not None:
             data = subtitle_consistency.data_json
             score_raw = data.get("score")
@@ -3498,6 +3503,7 @@ def _resolve_job_quality_preview(artifacts: list[Artifact]) -> dict[str, Any]:
         score = None
     grade = str(data.get("grade") or "").strip() or None
     issue_codes = [str(item).strip() for item in (data.get("issue_codes") or []) if str(item).strip()]
+    manual_review_required = bool(data.get("manual_review_required"))
     bundle = _resolve_effective_variant_bundle_from_artifacts(artifacts)
     timing_summary = _resolve_variant_timing_summary(bundle)
     validation_summary = _summarize_variant_timeline_validation(bundle)
@@ -3506,6 +3512,7 @@ def _resolve_job_quality_preview(artifacts: list[Artifact]) -> dict[str, Any]:
         for part in [
             f"{grade} {score:.1f}" if grade and score is not None else (grade or (f"{score:.1f}" if score is not None else "")),
             f"{len(issue_codes)} 个扣分项" if issue_codes else "",
+            "人工复核" if manual_review_required else "",
             timing_summary or "",
             validation_summary or "",
         ]
@@ -3604,6 +3611,12 @@ def _resolve_job_review_context(job: Job) -> dict[str, str | None]:
 
     steps = _ordered_steps(job.steps or [])
     subtitle_artifacts = select_latest_subtitle_artifact_payloads(list(job.artifacts or []))
+    subtitle_review_context = build_subtitle_review_context(
+        subtitle_quality_report=subtitle_artifacts.get(ARTIFACT_TYPE_SUBTITLE_QUALITY_REPORT),
+        subtitle_term_resolution_patch=subtitle_artifacts.get(ARTIFACT_TYPE_SUBTITLE_TERM_RESOLUTION_PATCH),
+        subtitle_consistency_report=subtitle_artifacts.get(ARTIFACT_TYPE_SUBTITLE_CONSISTENCY_REPORT),
+        pending_candidate_count=0,
+    )
     review_step = _resolve_waiting_review_step(steps)
     if review_step is None:
         final_review_step = _find_step(steps, "final_review")
@@ -3618,18 +3631,14 @@ def _resolve_job_review_context(job: Job) -> dict[str, str | None]:
             review_step = final_review_step
 
     if review_step is None:
+        if subtitle_review_context["label"]:
+            return subtitle_review_context
         return {
             "step_name": "summary_review",
             "label": STEP_LABELS["summary_review"],
             "detail": _review_step_waiting_detail("summary_review"),
         }
 
-    subtitle_review_context = build_subtitle_review_context(
-        subtitle_quality_report=subtitle_artifacts.get(ARTIFACT_TYPE_SUBTITLE_QUALITY_REPORT),
-        subtitle_term_resolution_patch=subtitle_artifacts.get(ARTIFACT_TYPE_SUBTITLE_TERM_RESOLUTION_PATCH),
-        subtitle_consistency_report=subtitle_artifacts.get(ARTIFACT_TYPE_SUBTITLE_CONSISTENCY_REPORT),
-        pending_candidate_count=0,
-    )
     if review_step.step_name == "summary_review" and subtitle_review_context["label"]:
         return subtitle_review_context
 

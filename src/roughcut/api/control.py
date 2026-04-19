@@ -7,7 +7,7 @@ import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Query, status
 from pydantic import BaseModel, field_validator
 
 from roughcut.pipeline.live_readiness import load_live_readiness_snapshot
@@ -296,7 +296,7 @@ async def service_status():
 
 @router.get("/review-notifications")
 async def review_notification_status(
-    status: list[str] | None = None,
+    status: list[str] | None = Query(default=None),
     job_id: str = "",
     kind: str = "",
     limit: int = 20,
@@ -338,8 +338,12 @@ async def requeue_review_notification_route(body: ReviewNotificationActionIn):
 
 @router.post("/review-notifications/drop")
 async def drop_review_notification_route(body: ReviewNotificationActionIn):
+    store = get_review_notification_store()
     try:
-        existing = get_review_notification_store().get(body.notification_id, strict=True)
+        try:
+            existing = store.get(body.notification_id, strict=True)
+        except TypeError:
+            existing = store.get(body.notification_id)
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     if not existing:

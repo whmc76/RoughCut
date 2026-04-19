@@ -9,7 +9,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from roughcut.db.models import Artifact, Job, JobStep, ReviewAction
 from roughcut.pipeline.orchestrator import _reset_job_for_quality_rerun
 from roughcut.pipeline.quality import QUALITY_ARTIFACT_TYPE
-from roughcut.pipeline.rerun_actions import QUALITY_RERUN_STEPS, rerun_chain_from_step, rerun_start_step_for_issue
+from roughcut.pipeline.rerun_actions import (
+    MANUAL_REVIEW_ONLY_ISSUES,
+    QUALITY_RERUN_STEPS,
+    has_manual_review_only_issue_codes,
+    rerun_chain_from_step,
+    rerun_start_step_for_issue,
+)
 
 
 @dataclass(slots=True)
@@ -56,6 +62,19 @@ def latest_quality_assessment_payload(artifacts: list[Artifact]) -> dict[str, An
     return None
 
 
+def _raise_manual_review_required(issue_codes: list[str]) -> None:
+    manual_only_codes = [
+        issue_code
+        for issue_code in issue_codes
+        if issue_code in MANUAL_REVIEW_ONLY_ISSUES
+    ]
+    issue_text = ", ".join(manual_only_codes or issue_codes or ["manual_review_required"])
+    raise HTTPException(
+        status_code=409,
+        detail=f"Issues require manual review before rerun: {issue_text}",
+    )
+
+
 def resolve_job_rerun_request(
     *,
     request: JobRerunRequest | None,
@@ -90,8 +109,13 @@ def resolve_job_rerun_request(
         if str(value).strip()
     ]
     quality_rerun_steps = normalize_quality_rerun_steps((quality_payload or {}).get("recommended_rerun_steps"))
+    quality_requires_manual_review = has_manual_review_only_issue_codes(quality_issue_codes)
 
     if issue_code:
+        if issue_code in MANUAL_REVIEW_ONLY_ISSUES:
+            _raise_manual_review_required([issue_code])
+        if quality_requires_manual_review:
+            _raise_manual_review_required(quality_issue_codes)
         mapped_step = rerun_start_step_for_issue(issue_code)
         if mapped_step:
             return JobRerunPlan(
@@ -109,6 +133,8 @@ def resolve_job_rerun_request(
             )
         raise HTTPException(status_code=400, detail=f"Unsupported issue_code: {issue_code}")
 
+    if quality_requires_manual_review:
+        _raise_manual_review_required(quality_issue_codes)
     if not quality_rerun_steps:
         raise HTTPException(status_code=409, detail="No rerun plan available for this job")
     return JobRerunPlan(

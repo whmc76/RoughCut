@@ -1313,6 +1313,151 @@ async def test_update_job_statuses_reruns_subtitle_chain_for_subtitle_quality_is
         ]
 
 
+@pytest.mark.asyncio
+async def test_update_job_statuses_routes_semantic_contamination_to_manual_review(monkeypatch, db_engine):
+    import roughcut.pipeline.orchestrator as orchestrator_mod
+    from roughcut.db.models import Artifact, Job, SubtitleItem
+    from roughcut.db.session import get_session_factory
+
+    settings = orchestrator_mod.get_settings()
+    object.__setattr__(settings, "quality_auto_rerun_enabled", True)
+    object.__setattr__(settings, "quality_auto_rerun_below_score", 90.0)
+    object.__setattr__(settings, "quality_auto_rerun_max_attempts", 1)
+
+    job_id = uuid.uuid4()
+    now = datetime.now(timezone.utc)
+    factory = get_session_factory()
+    async with factory() as session:
+        session.add(
+            Job(
+                id=job_id,
+                source_path="jobs/demo/semantic-review.mp4",
+                source_name="semantic-review.mp4",
+                status="processing",
+                language="zh-CN",
+            )
+        )
+        for step in orchestrator_mod.create_job_steps(job_id):
+            step.status = "done"
+            step.finished_at = now
+            session.add(step)
+        session.add(
+            Artifact(
+                job_id=job_id,
+                artifact_type="content_profile_final",
+                data_json={
+                    "subject_brand": "奈特科尔",
+                    "subject_model": "EDC17",
+                    "subject_type": "EDC手电",
+                    "video_theme": "奈特科尔 EDC17 开箱与 EDC37 对比",
+                    "summary": "这条视频围绕奈特科尔 EDC17 手电的开箱与对比展开。",
+                    "engagement_question": "你更偏向 EDC17 还是 EDC37？",
+                    "preset_name": "edc_tactical",
+                    "review_mode": "auto_confirmed",
+                    "automation_review": {"score": 0.95},
+                },
+            )
+        )
+        session.add(
+            Artifact(
+                job_id=job_id,
+                artifact_type="subtitle_quality_report",
+                data_json={
+                    "score": 52.0,
+                    "blocking": True,
+                    "blocking_reasons": ["检测到语义污染 4 处，必须人工确认"],
+                    "warning_reasons": [],
+                    "metrics": {
+                        "semantic_bad_term_total": 4,
+                        "lexical_bad_term_total": 1,
+                    },
+                },
+            )
+        )
+        session.add(
+            Artifact(
+                job_id=job_id,
+                artifact_type="canonical_transcript_layer",
+                data_json={
+                    "layer": "canonical_transcript",
+                    "source_basis": "subtitle_projection_review",
+                    "segment_count": 1,
+                    "duration": 4.0,
+                    "correction_metrics": {
+                        "accepted_correction_count": 0,
+                        "pending_correction_count": 0,
+                    },
+                    "segments": [
+                        {
+                            "index": 0,
+                            "start": 0.0,
+                            "end": 4.0,
+                            "text": "这期重点看 EDC17 和 EDC37 的便携差异。",
+                            "text_raw": "这期重点看 EDC17 和 EDC37 的便携差异。",
+                            "text_canonical": "这期重点看 EDC17 和 EDC37 的便携差异。",
+                            "source_subtitle_index": 0,
+                            "accepted_corrections": [],
+                            "pending_corrections": [],
+                            "words": [],
+                        }
+                    ],
+                },
+            )
+        )
+        session.add(
+            Artifact(
+                job_id=job_id,
+                artifact_type="render_outputs",
+                data_json={
+                    "packaged_mp4": "E:/tmp/semantic-review.mp4",
+                    "plain_mp4": "E:/tmp/semantic-review_plain.mp4",
+                    "ai_effect_mp4": "E:/tmp/semantic-review_fx.mp4",
+                },
+            )
+        )
+        session.add(
+            Artifact(
+                job_id=job_id,
+                artifact_type="platform_packaging_md",
+                storage_path="E:/tmp/semantic-review_publish.md",
+            )
+        )
+        session.add(
+            SubtitleItem(
+                job_id=job_id,
+                version=1,
+                item_index=0,
+                start_time=0.0,
+                end_time=4.0,
+                text_raw="这期重点看 EDC17 和 EDC37 的便携差异。",
+            )
+        )
+        await session.commit()
+
+    async with factory() as session:
+        await orchestrator_mod._update_job_statuses(session)
+        await session.commit()
+
+    async with factory() as session:
+        job = (await session.execute(orchestrator_mod.select(Job).where(Job.id == job_id))).scalar_one()
+        steps = (
+            await session.execute(orchestrator_mod.select(orchestrator_mod.JobStep).where(orchestrator_mod.JobStep.job_id == job_id))
+        ).scalars().all()
+        artifacts = (
+            await session.execute(
+                orchestrator_mod.select(Artifact).where(Artifact.job_id == job_id, Artifact.artifact_type == "quality_assessment")
+            )
+        ).scalars().all()
+        latest_quality = next(item for item in artifacts if "manual_review_required" in (item.data_json or {}))
+
+        assert job.status == "needs_review"
+        assert all(step.status == "done" for step in steps)
+        assert latest_quality.data_json["auto_rerun_triggered"] is False
+        assert latest_quality.data_json["manual_review_required"] is True
+        assert latest_quality.data_json["auto_rerun_skipped_reason"] == "manual_review_required"
+        assert latest_quality.data_json["issue_codes"] == ["subtitle_semantic_contamination"]
+
+
 def test_artifact_types_for_quality_rerun_gates_multisource_artifacts_by_feature_flags(monkeypatch):
     import roughcut.pipeline.orchestrator as orchestrator_mod
 

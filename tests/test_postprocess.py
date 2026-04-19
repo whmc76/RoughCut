@@ -506,6 +506,53 @@ def test_split_into_subtitles_attaches_prefix_across_a_short_fragment_window():
     assert not any(entry.text_raw in {"可以把你的", "小药丸"} for entry in entries)
 
 
+def test_resolve_subtitle_entry_sequence_compacts_micro_fragments_from_one_long_source_segment():
+    segment_start = 0.0
+    segment_end = 32.0
+    entries = [
+        SubtitleEntry(
+            index=0,
+            start=25.64,
+            end=26.82,
+            text_raw="没想到",
+            text_norm=normalize_text("没想到"),
+            words=(
+                {"word": "没想到", "start": 25.64, "end": 26.82, "segment_index": 0, "segment_start": segment_start, "segment_end": segment_end},
+            ),
+        ),
+        SubtitleEntry(
+            index=1,
+            start=28.48,
+            end=31.34,
+            text_raw="这次也是啊",
+            text_norm=normalize_text("这次也是啊"),
+            words=(
+                {"word": "这次也是啊", "start": 28.48, "end": 31.34, "segment_index": 0, "segment_start": segment_start, "segment_end": segment_end},
+            ),
+        ),
+        SubtitleEntry(
+            index=2,
+            start=31.4,
+            end=32.56,
+            text_raw="我2次抢",
+            text_norm=normalize_text("我2次抢"),
+            words=(
+                {"word": "我2次抢", "start": 31.4, "end": 32.56, "segment_index": 0, "segment_start": segment_start, "segment_end": segment_end},
+            ),
+        ),
+    ]
+
+    resolved = subtitle_segmentation._resolve_subtitle_entry_sequence(
+        entries,
+        max_chars=18,
+        max_duration=3.4,
+        allow_window_refine=False,
+    )
+
+    assert len(resolved) == 1
+    assert resolved[0].text_raw == "没想到这次也是啊我2次抢"
+
+
 def test_merge_continuation_entries_merges_punctuation_masked_middle_fragment_window():
     entries = [
         SubtitleEntry(

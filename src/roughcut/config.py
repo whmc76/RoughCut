@@ -95,6 +95,7 @@ TRANSCRIPTION_MODEL_OPTIONS: dict[str, list[str]] = {
         "qwen3-asr-0.6b",
     ],
 }
+SEARCH_PROVIDER_VALUES: tuple[str, ...] = ("auto", "openai", "anthropic", "minimax", "ollama", "model", "searxng")
 SEARCH_FALLBACK_PROVIDER_VALUES: tuple[str, ...] = ("openai", "anthropic", "minimax", "ollama", "model", "searxng")
 MULTIMODAL_FALLBACK_PROVIDER_VALUES: tuple[str, ...] = ("openai", "anthropic", "minimax", "ollama")
 HYBRID_REASONING_PROVIDER_VALUES: tuple[str, ...] = ("openai", "anthropic", "minimax", "ollama")
@@ -181,6 +182,14 @@ PROFILE_BINDABLE_SETTINGS: tuple[str, ...] = (
     "reasoning_provider",
     "reasoning_model",
     "reasoning_effort",
+    "llm_backup_enabled",
+    "backup_reasoning_provider",
+    "backup_reasoning_model",
+    "backup_reasoning_effort",
+    "backup_vision_model",
+    "backup_search_provider",
+    "backup_search_fallback_provider",
+    "backup_model_search_helper",
     "local_reasoning_model",
     "local_vision_model",
     "hybrid_analysis_provider",
@@ -304,6 +313,14 @@ class Settings(BaseSettings):
     reasoning_provider: str = "minimax"  # openai | anthropic | minimax | ollama
     reasoning_model: str = "MiniMax-M2.7-highspeed"
     reasoning_effort: str = "medium"
+    llm_backup_enabled: bool = True
+    backup_reasoning_provider: str = "minimax"
+    backup_reasoning_model: str = "MiniMax-M2.7-highspeed"
+    backup_reasoning_effort: str = "medium"
+    backup_vision_model: str = "MiniMax-VL-01"
+    backup_search_provider: str = "auto"
+    backup_search_fallback_provider: str = "minimax"
+    backup_model_search_helper: str = ""
     local_reasoning_model: str = "qwen3.5:9b"
     local_vision_model: str = ""
     hybrid_analysis_provider: str = "openai"
@@ -495,6 +512,34 @@ class Settings(BaseSettings):
         if route_provider:
             return route_provider
         return self.search_provider
+
+    @property
+    def active_search_fallback_provider(self) -> str:
+        route_provider = str(_get_llm_route_override("search_fallback_provider") or "").strip().lower()
+        if route_provider:
+            return route_provider
+        return self.search_fallback_provider
+
+    @property
+    def active_model_search_helper(self) -> str:
+        route_helper = str(_get_llm_route_override("model_search_helper") or "").strip()
+        if route_helper:
+            return route_helper
+        return self.model_search_helper
+
+    @property
+    def active_multimodal_fallback_provider(self) -> str:
+        route_provider = str(_get_llm_route_override("multimodal_fallback_provider") or "").strip().lower()
+        if route_provider:
+            return route_provider
+        return self.multimodal_fallback_provider
+
+    @property
+    def active_multimodal_fallback_model(self) -> str:
+        route_model = str(_get_llm_route_override("multimodal_fallback_model") or "").strip()
+        if route_model:
+            return route_model
+        return self.multimodal_fallback_model
 
 
 _settings: Settings | None = None
@@ -835,19 +880,39 @@ def _normalize_runtime_override_values(data: dict[str, Any]) -> dict[str, Any]:
             fallback if fallback in SEARCH_FALLBACK_PROVIDER_VALUES else "searxng"
         )
 
+    if "backup_search_provider" in normalized:
+        backup_search = str(normalized.get("backup_search_provider") or "").strip().lower()
+        normalized["backup_search_provider"] = backup_search if backup_search in SEARCH_PROVIDER_VALUES else "auto"
+
+    if "backup_search_fallback_provider" in normalized:
+        fallback = str(normalized.get("backup_search_fallback_provider") or "").strip().lower()
+        normalized["backup_search_fallback_provider"] = (
+            fallback if fallback in SEARCH_FALLBACK_PROVIDER_VALUES else "minimax"
+        )
+
     if "multimodal_fallback_provider" in normalized:
         fallback = str(normalized.get("multimodal_fallback_provider") or "").strip().lower()
         normalized["multimodal_fallback_provider"] = (
             fallback if fallback in MULTIMODAL_FALLBACK_PROVIDER_VALUES else "ollama"
         )
 
+    if "backup_vision_model" in normalized:
+        normalized["backup_vision_model"] = str(normalized.get("backup_vision_model") or "").strip()
+
     if "model_search_helper" in normalized:
         normalized["model_search_helper"] = str(normalized.get("model_search_helper") or "").strip()
+
+    if "backup_model_search_helper" in normalized:
+        normalized["backup_model_search_helper"] = str(normalized.get("backup_model_search_helper") or "").strip()
 
     if "reasoning_provider" in normalized:
         normalized["reasoning_provider"] = str(normalized.get("reasoning_provider") or "").strip().lower()
 
-    for key in ("reasoning_effort", "hybrid_analysis_effort", "hybrid_copy_effort"):
+    if "backup_reasoning_provider" in normalized:
+        provider = str(normalized.get("backup_reasoning_provider") or "").strip().lower()
+        normalized["backup_reasoning_provider"] = provider if provider in HYBRID_REASONING_PROVIDER_VALUES else "minimax"
+
+    for key in ("reasoning_effort", "backup_reasoning_effort", "hybrid_analysis_effort", "hybrid_copy_effort"):
         if key in normalized:
             normalized[key] = _normalize_reasoning_effort(normalized.get(key)) or (
                 "high" if key == "hybrid_copy_effort" else "medium"
@@ -932,6 +997,39 @@ def _normalize_llm_capability_bundle_settings(settings: Settings) -> None:
         "reasoning_effort",
         _normalize_reasoning_effort(getattr(settings, "reasoning_effort", "medium")) or "medium",
     )
+    object.__setattr__(settings, "llm_backup_enabled", bool(getattr(settings, "llm_backup_enabled", True)))
+    backup_provider = str(getattr(settings, "backup_reasoning_provider", "") or "").strip().lower()
+    if backup_provider not in HYBRID_REASONING_PROVIDER_VALUES:
+        backup_provider = "minimax"
+    object.__setattr__(settings, "backup_reasoning_provider", backup_provider)
+    object.__setattr__(
+        settings,
+        "backup_reasoning_model",
+        str(getattr(settings, "backup_reasoning_model", "") or "").strip() or "MiniMax-M2.7-highspeed",
+    )
+    object.__setattr__(
+        settings,
+        "backup_reasoning_effort",
+        _normalize_reasoning_effort(getattr(settings, "backup_reasoning_effort", "medium")) or "medium",
+    )
+    object.__setattr__(
+        settings,
+        "backup_vision_model",
+        str(getattr(settings, "backup_vision_model", "") or "").strip() or "MiniMax-VL-01",
+    )
+    backup_search_provider = str(getattr(settings, "backup_search_provider", "") or "").strip().lower()
+    if backup_search_provider not in SEARCH_PROVIDER_VALUES:
+        backup_search_provider = "auto"
+    object.__setattr__(settings, "backup_search_provider", backup_search_provider)
+    backup_search_fallback = str(getattr(settings, "backup_search_fallback_provider", "") or "").strip().lower()
+    if backup_search_fallback not in SEARCH_FALLBACK_PROVIDER_VALUES:
+        backup_search_fallback = "minimax"
+    object.__setattr__(settings, "backup_search_fallback_provider", backup_search_fallback)
+    object.__setattr__(
+        settings,
+        "backup_model_search_helper",
+        str(getattr(settings, "backup_model_search_helper", "") or "").strip(),
+    )
 
     analysis_search_mode = str(getattr(settings, "hybrid_analysis_search_mode", "") or "").strip().lower()
     if analysis_search_mode not in HYBRID_SEARCH_MODE_VALUES:
@@ -958,6 +1056,45 @@ def _normalize_llm_capability_bundle_settings(settings: Settings) -> None:
 def _get_llm_route_override(key: str) -> Any:
     overrides = _llm_route_overrides.get({})
     return overrides.get(key)
+
+
+def resolve_backup_llm_route(*, settings: Settings | None = None) -> dict[str, Any]:
+    current = settings or get_settings()
+    if not bool(getattr(current, "llm_backup_enabled", False)):
+        return {}
+
+    provider = str(getattr(current, "backup_reasoning_provider", "") or "").strip().lower()
+    model = str(getattr(current, "backup_reasoning_model", "") or "").strip()
+    if not provider or not model:
+        return {}
+
+    route: dict[str, Any] = {
+        "reasoning_provider": provider,
+        "reasoning_model": model,
+        "reasoning_effort": _normalize_reasoning_effort(getattr(current, "backup_reasoning_effort", "medium")) or "medium",
+        "vision_model": str(getattr(current, "backup_vision_model", "") or "").strip() or model,
+        "search_provider": str(getattr(current, "backup_search_provider", "auto") or "auto").strip().lower() or "auto",
+        "search_fallback_provider": (
+            str(getattr(current, "backup_search_fallback_provider", "minimax") or "minimax").strip().lower() or "minimax"
+        ),
+        "model_search_helper": str(getattr(current, "backup_model_search_helper", "") or "").strip(),
+    }
+    if route["search_provider"] != "model" and route["search_fallback_provider"] != "model":
+        route["model_search_helper"] = ""
+    return route
+
+
+def has_distinct_backup_llm_route(*, settings: Settings | None = None) -> bool:
+    current = settings or get_settings()
+    route = resolve_backup_llm_route(settings=current)
+    if not route:
+        return False
+    active_provider = str(getattr(current, "active_reasoning_provider", "") or "").strip().lower()
+    active_model = str(getattr(current, "active_reasoning_model", "") or "").strip()
+    return (
+        str(route.get("reasoning_provider") or "").strip().lower() != active_provider
+        or str(route.get("reasoning_model") or "").strip() != active_model
+    )
 
 
 def _profile_has_specific_identity(profile: dict[str, Any] | None) -> bool:
@@ -1061,6 +1198,22 @@ def llm_task_route(
         if not effective_search_enabled:
             overrides["search_provider"] = "disabled"
     existing = dict(_llm_route_overrides.get({}))
+    merged = {**existing, **overrides}
+    token = _llm_route_overrides.set(merged)
+    try:
+        yield
+    finally:
+        _llm_route_overrides.reset(token)
+
+
+@contextmanager
+def llm_backup_route(*, settings: Settings | None = None):
+    current = settings or get_settings()
+    overrides = dict(resolve_backup_llm_route(settings=current))
+    existing = dict(_llm_route_overrides.get({}))
+    if not overrides:
+        yield
+        return
     merged = {**existing, **overrides}
     token = _llm_route_overrides.set(merged)
     try:

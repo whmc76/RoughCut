@@ -684,6 +684,14 @@ export type Config = {
   llm_routing_mode?: string;
   reasoning_provider: string;
   reasoning_model: string;
+  llm_backup_enabled?: boolean;
+  backup_reasoning_provider?: string;
+  backup_reasoning_model?: string;
+  backup_reasoning_effort?: string;
+  backup_vision_model?: string;
+  backup_search_provider?: string;
+  backup_search_fallback_provider?: string;
+  backup_model_search_helper?: string;
   local_reasoning_model: string;
   local_vision_model: string;
   hybrid_analysis_provider?: string;

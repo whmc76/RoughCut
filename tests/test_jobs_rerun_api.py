@@ -227,3 +227,46 @@ async def test_job_rerun_endpoint_rejects_unsupported_issue_without_quality_cont
     assert job.status == "done"
     assert all(step.status == "done" for step in steps)
     assert actions == []
+
+
+@pytest.mark.asyncio
+async def test_job_rerun_endpoint_rejects_semantic_contamination_default_rerun(client: AsyncClient):
+    job_id = uuid.uuid4()
+    await _seed_job_for_rerun_api(
+        job_id,
+        quality_artifact={
+            "score": 52.0,
+            "grade": "D",
+            "issue_codes": ["subtitle_semantic_contamination"],
+            "recommended_rerun_step": None,
+            "recommended_rerun_steps": [],
+        },
+    )
+
+    response = await client.post(f"/api/v1/jobs/{job_id}/rerun", json={})
+    assert response.status_code == 409
+    assert "manual review before rerun" in response.text
+    assert "subtitle_semantic_contamination" in response.text
+
+
+@pytest.mark.asyncio
+async def test_job_rerun_endpoint_rejects_semantic_contamination_issue_code(client: AsyncClient):
+    job_id = uuid.uuid4()
+    await _seed_job_for_rerun_api(
+        job_id,
+        quality_artifact={
+            "score": 52.0,
+            "grade": "D",
+            "issue_codes": ["subtitle_semantic_contamination"],
+            "recommended_rerun_step": None,
+            "recommended_rerun_steps": [],
+        },
+    )
+
+    response = await client.post(
+        f"/api/v1/jobs/{job_id}/rerun",
+        json={"issue_code": "subtitle_semantic_contamination"},
+    )
+    assert response.status_code == 409
+    assert "manual review before rerun" in response.text
+    assert "subtitle_semantic_contamination" in response.text

@@ -91,7 +91,21 @@ def build_subtitle_quality_action(data: dict[str, Any]) -> dict[str, Any]:
     warning_reasons = [str(item).strip() for item in (data.get("warning_reasons") or []) if str(item).strip()]
     metrics = data.get("metrics") if isinstance(data.get("metrics"), dict) else {}
     identity_missing = bool(metrics.get("identity_missing"))
+    semantic_bad_term_total = int(metrics.get("semantic_bad_term_total") or 0)
     if blocking:
+        if semantic_bad_term_total > 0:
+            return build_decision_action_payload(
+                blocking=True,
+                review_route="subtitle_review",
+                review_label="语义污染复核",
+                recommended_action=(
+                    f"先人工复核语义污染：{blocking_reasons[0]}；当前策略仅允许词级纠偏，不做自动语义改写。"
+                    if blocking_reasons
+                    else "先人工复核语义污染；当前策略仅允许词级纠偏，不做自动语义改写。"
+                ),
+                rerun_start_step="subtitle_postprocess",
+                issue_codes=["subtitle_semantic_contamination"],
+            )
         return build_decision_action_payload(
             blocking=True,
             review_route="subtitle_review",
@@ -133,7 +147,7 @@ def build_subtitle_term_resolution_action(data: dict[str, Any]) -> dict[str, Any
             blocking=True,
             review_route="subtitle_review",
             review_label="术语候选确认",
-            recommended_action=f"先人工确认 {pending} 条术语候选，再继续后续摘要与成片流程。",
+            recommended_action=f"先人工确认 {pending} 条词级术语候选，再继续后续摘要与成片流程。",
             rerun_start_step="subtitle_term_resolution",
             issue_codes=["subtitle_terms_pending"],
         )
@@ -144,7 +158,22 @@ def build_subtitle_consistency_action(data: dict[str, Any]) -> dict[str, Any]:
     blocking = bool(data.get("blocking"))
     blocking_reasons = [str(item).strip() for item in (data.get("blocking_reasons") or []) if str(item).strip()]
     warning_reasons = [str(item).strip() for item in (data.get("warning_reasons") or []) if str(item).strip()]
+    metrics = data.get("metrics") if isinstance(data.get("metrics"), dict) else {}
+    semantic_bad_term_total = int(metrics.get("semantic_bad_term_total") or 0)
     if blocking:
+        if semantic_bad_term_total > 0:
+            return build_decision_action_payload(
+                blocking=True,
+                review_route="subtitle_review",
+                review_label="语义污染复核",
+                recommended_action=(
+                    f"先人工复核一致性里的语义污染：{blocking_reasons[0]}；确认后如需回退，从 subtitle_consistency_review 起重跑。"
+                    if blocking_reasons
+                    else "先人工复核一致性里的语义污染，再决定是否从 subtitle_consistency_review 起重跑。"
+                ),
+                rerun_start_step="subtitle_consistency_review",
+                issue_codes=["subtitle_semantic_contamination"],
+            )
         return build_decision_action_payload(
             blocking=True,
             review_route="subtitle_review",

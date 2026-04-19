@@ -68,6 +68,35 @@ class TranscriptFactLayer:
 
 
 @dataclass(frozen=True)
+class TranscriptSourceSegment:
+    index: int
+    source_kind: str
+    source_id: str | None
+    start: float
+    end: float
+    text_raw: str
+    text_norm: str | None
+    text_final: str | None
+    speaker: str | None
+    words: tuple[TranscriptFactWord, ...]
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "index": int(self.index),
+            "source_kind": self.source_kind,
+            "source_id": self.source_id,
+            "start": round(float(self.start), 3),
+            "end": round(float(self.end), 3),
+            "text_raw": self.text_raw,
+            "text_norm": self.text_norm,
+            "text_final": self.text_final,
+            "speaker": self.speaker,
+            "word_count": len(self.words),
+            "words": [word.as_dict() for word in self.words],
+        }
+
+
+@dataclass(frozen=True)
 class CanonicalTranscriptWord:
     word: str
     start: float
@@ -88,6 +117,8 @@ class CanonicalTranscriptSegment:
     index: int
     start: float
     end: float
+    source_kind: str
+    source_id: str | None
     text_raw: str
     text_canonical: str
     source_subtitle_index: int
@@ -100,6 +131,8 @@ class CanonicalTranscriptSegment:
             "index": int(self.index),
             "start": round(float(self.start), 3),
             "end": round(float(self.end), 3),
+            "source_kind": self.source_kind,
+            "source_id": self.source_id,
             "text": self.text_canonical,
             "text_raw": self.text_raw,
             "text_canonical": self.text_canonical,
@@ -137,6 +170,8 @@ class SubtitleProjectionEntry:
     index: int
     start: float
     end: float
+    source_kind: str
+    source_id: str | None
     text_raw: str
     text_norm: str | None
     text_final: str | None
@@ -146,6 +181,8 @@ class SubtitleProjectionEntry:
             "index": int(self.index),
             "start": round(float(self.start), 3),
             "end": round(float(self.end), 3),
+            "source_kind": self.source_kind,
+            "source_id": self.source_id,
             "text_raw": self.text_raw,
             "text_norm": self.text_norm,
             "text_final": self.text_final,
@@ -230,29 +267,7 @@ def _build_transcript_fact_segment(
     speaker: str | None,
     raw_words: list[Any],
 ) -> TranscriptFactSegment:
-    words: list[TranscriptFactWord] = []
-    for raw_word in list(raw_words or []):
-        if not isinstance(raw_word, dict):
-            continue
-        word_text = str(raw_word.get("word") or "").strip()
-        if not word_text:
-            continue
-        try:
-            word_start = float(raw_word.get("start") or 0.0)
-        except (TypeError, ValueError):
-            word_start = 0.0
-        try:
-            word_end = float(raw_word.get("end") or word_start)
-        except (TypeError, ValueError):
-            word_end = word_start
-        words.append(
-            TranscriptFactWord(
-                word=word_text,
-                start=max(0.0, word_start),
-                end=max(max(0.0, word_start), word_end),
-                raw_payload=dict(raw_word),
-            )
-        )
+    words = _build_transcript_fact_words(raw_words)
     return TranscriptFactSegment(
         index=index,
         start=start,
@@ -263,29 +278,142 @@ def _build_transcript_fact_segment(
     )
 
 
-def build_canonical_transcript_layer(
-    subtitle_items: list[Any],
-    *,
-    corrections: list[Any] | None = None,
-    source_basis: str = "subtitle_projection_review",
-    reference_segments: list[Any] | None = None,
-) -> CanonicalTranscriptLayer:
-    corrections_by_item_id: dict[str, list[dict[str, Any]]] = {}
-    accepted_count = 0
-    pending_count = 0
-
-    for correction in list(corrections or []):
-        payload = _serialize_correction(correction)
-        item_id = payload.pop("subtitle_item_id", "")
-        if not item_id:
+def _build_transcript_fact_words(raw_words: list[Any]) -> list[TranscriptFactWord]:
+    words: list[TranscriptFactWord] = []
+    for raw_word in list(raw_words or []):
+        payload = _coerce_word_payload(raw_word)
+        if payload is None:
             continue
-        corrections_by_item_id.setdefault(item_id, []).append(payload)
-        if payload["status"] == "accepted":
-            accepted_count += 1
-        elif payload["status"] == "pending":
-            pending_count += 1
+        words.append(
+            TranscriptFactWord(
+                word=str(payload["word"]),
+                start=float(payload["start"]),
+                end=float(payload["end"]),
+                raw_payload=dict(payload),
+            )
+        )
+    return words
 
-    segments: list[CanonicalTranscriptSegment] = []
+
+def _coerce_word_payload(raw_word: Any) -> dict[str, Any] | None:
+    if raw_word is None:
+        return None
+
+    if isinstance(raw_word, TranscriptFactWord):
+        payload = dict(raw_word.raw_payload)
+        payload.setdefault("word", raw_word.word)
+        payload.setdefault("start", raw_word.start)
+        payload.setdefault("end", raw_word.end)
+    elif isinstance(raw_word, dict):
+        payload = dict(raw_word)
+    elif hasattr(raw_word, "__dict__"):
+        payload = {key: value for key, value in vars(raw_word).items() if not key.startswith("_")}
+    else:
+        payload = {}
+
+    word_text = str(payload.get("word") or getattr(raw_word, "word", "") or "").strip()
+    if not word_text:
+        return None
+
+    try:
+        word_start = float(payload.get("start") if payload.get("start") is not None else getattr(raw_word, "start", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        word_start = 0.0
+    try:
+        word_end = float(payload.get("end") if payload.get("end") is not None else getattr(raw_word, "end", word_start) or word_start)
+    except (TypeError, ValueError):
+        word_end = word_start
+
+    payload["word"] = word_text
+    payload["start"] = max(0.0, word_start)
+    payload["end"] = max(payload["start"], word_end)
+    return payload
+
+
+def _looks_like_transcript_segments(rows: list[Any] | None) -> bool:
+    for row in list(rows or []):
+        if any(hasattr(row, field) for field in ("text_raw", "text_norm", "text_final")):
+            return False
+    return any(hasattr(row, "text") for row in list(rows or []))
+
+
+def _build_transcript_source_segment_from_subtitle_item(item: Any, *, index: int) -> TranscriptSourceSegment:
+    raw_source_index = getattr(item, "item_index", None)
+    if raw_source_index is None:
+        raw_source_index = index
+    source_id = str(getattr(item, "id", "") or "") or None
+    text_raw = str(getattr(item, "text_raw", "") or "")
+    text_norm = getattr(item, "text_norm", None)
+    text_final = getattr(item, "text_final", None)
+    start = float(getattr(item, "start_time", 0.0) or 0.0)
+    end = float(getattr(item, "end_time", 0.0) or 0.0)
+    return TranscriptSourceSegment(
+        index=int(raw_source_index),
+        source_kind="subtitle_item",
+        source_id=source_id,
+        start=start,
+        end=end,
+        text_raw=text_raw,
+        text_norm=text_norm,
+        text_final=text_final,
+        speaker=None,
+        words=(),
+    )
+
+
+def _build_transcript_source_segment_from_transcript_segment(segment: Any, *, index: int) -> TranscriptSourceSegment:
+    raw_source_index = getattr(segment, "index", None)
+    if raw_source_index is None:
+        raw_source_index = getattr(segment, "segment_index", None)
+    if raw_source_index is None:
+        raw_source_index = index
+    source_id = str(getattr(segment, "id", "") or getattr(segment, "segment_index", raw_source_index) or raw_source_index) or None
+    text = str(getattr(segment, "text", "") or "")
+    start = float(getattr(segment, "start", 0.0) or getattr(segment, "start_time", 0.0) or 0.0)
+    end = float(getattr(segment, "end", 0.0) or getattr(segment, "end_time", 0.0) or 0.0)
+    words = tuple(
+        _build_transcript_fact_words(list(getattr(segment, "words", None) or getattr(segment, "words_json", None) or []))
+    )
+    return TranscriptSourceSegment(
+        index=int(raw_source_index),
+        source_kind="transcript_segment",
+        source_id=source_id,
+        start=start,
+        end=end,
+        text_raw=text,
+        text_norm=getattr(segment, "text_norm", None),
+        text_final=getattr(segment, "text_final", None),
+        speaker=getattr(segment, "speaker", None),
+        words=words,
+    )
+
+
+def _normalize_transcript_source_segments(
+    subtitle_items: list[Any] | None = None,
+    *,
+    transcript_segments: list[Any] | None = None,
+) -> tuple[TranscriptSourceSegment, ...]:
+    if transcript_segments is None and subtitle_items is not None and _looks_like_transcript_segments(subtitle_items):
+        transcript_segments = subtitle_items
+        subtitle_items = None
+
+    source_segments: list[TranscriptSourceSegment] = []
+    if transcript_segments is not None:
+        for order_index, segment in enumerate(
+            sorted(
+                list(transcript_segments or []),
+                key=lambda current: (
+                    float(getattr(current, "start", getattr(current, "start_time", 0.0)) or 0.0),
+                    float(getattr(current, "end", getattr(current, "end_time", 0.0)) or 0.0),
+                    int(getattr(current, "index", getattr(current, "segment_index", 0)) or 0),
+                ),
+            )
+        ):
+            source_segments.append(
+                _build_transcript_source_segment_from_transcript_segment(segment, index=order_index)
+            )
+        return tuple(source_segments)
+
     for order_index, item in enumerate(
         sorted(
             list(subtitle_items or []),
@@ -296,33 +424,83 @@ def build_canonical_transcript_layer(
             ),
         )
     ):
-        subtitle_item_id = str(getattr(item, "id", "") or "")
-        item_corrections = corrections_by_item_id.get(subtitle_item_id, [])
+        source_segments.append(_build_transcript_source_segment_from_subtitle_item(item, index=order_index))
+    return tuple(source_segments)
+
+
+def _reference_words_for_source_segment(
+    source_segment: TranscriptSourceSegment,
+    *,
+    reference_segments: list[Any] | None,
+) -> tuple[dict[str, Any], ...]:
+    if source_segment.words:
+        return tuple(
+            {
+                "word": word.word,
+                "start": word.start,
+                "end": word.end,
+                "source_index": source_segment.index,
+                "source_word": word.word,
+            }
+            for word in source_segment.words
+        )
+    return _extract_reference_words_for_timespan(
+        reference_segments,
+        start=source_segment.start,
+        end=source_segment.end,
+    )
+
+
+def _build_canonical_transcript_layer_from_source_segments(
+    source_segments: tuple[TranscriptSourceSegment, ...],
+    *,
+    corrections: list[Any] | None = None,
+    source_basis: str,
+    reference_segments: list[Any] | None = None,
+) -> CanonicalTranscriptLayer:
+    corrections_by_source_id: dict[str, list[dict[str, Any]]] = {}
+    accepted_count = 0
+    pending_count = 0
+
+    for correction in list(corrections or []):
+        payload = _serialize_correction(correction)
+        source_id = payload.pop("source_id", "")
+        if not source_id:
+            continue
+        corrections_by_source_id.setdefault(source_id, []).append(payload)
+        if payload["status"] == "accepted":
+            accepted_count += 1
+        elif payload["status"] == "pending":
+            pending_count += 1
+
+    segments: list[CanonicalTranscriptSegment] = []
+    for source_segment in source_segments:
+        source_id = source_segment.source_id or ""
+        item_corrections = corrections_by_source_id.get(source_id, [])
         accepted_corrections = tuple(payload for payload in item_corrections if payload["status"] == "accepted")
         pending_corrections = tuple(payload for payload in item_corrections if payload["status"] == "pending")
-        text_raw = str(getattr(item, "text_norm", None) or getattr(item, "text_raw", "") or "")
-        canonical_text = str(getattr(item, "text_final", None) or text_raw)
+        text_raw = str(source_segment.text_norm or source_segment.text_raw or "")
+        canonical_text = str(source_segment.text_final or source_segment.text_norm or text_raw)
         canonical_text = _apply_accepted_corrections(canonical_text, accepted_corrections)
-        item_start = float(getattr(item, "start_time", 0.0) or 0.0)
-        item_end = float(getattr(item, "end_time", 0.0) or 0.0)
         canonical_words = _build_canonical_transcript_words(
             canonical_text,
-            start=item_start,
-            end=item_end,
-            reference_words=_extract_reference_words_for_timespan(
-                reference_segments,
-                start=item_start,
-                end=item_end,
+            start=source_segment.start,
+            end=source_segment.end,
+            reference_words=_reference_words_for_source_segment(
+                source_segment,
+                reference_segments=reference_segments,
             ),
         )
         segments.append(
             CanonicalTranscriptSegment(
-                index=int(getattr(item, "item_index", order_index) or order_index),
-                start=item_start,
-                end=item_end,
+                index=int(source_segment.index),
+                start=source_segment.start,
+                end=source_segment.end,
+                source_kind=source_segment.source_kind,
+                source_id=source_segment.source_id,
                 text_raw=text_raw,
                 text_canonical=canonical_text,
-                source_subtitle_index=int(getattr(item, "item_index", order_index) or order_index),
+                source_subtitle_index=int(source_segment.index),
                 accepted_corrections=accepted_corrections,
                 pending_corrections=pending_corrections,
                 words=canonical_words,
@@ -339,14 +517,60 @@ def build_canonical_transcript_layer(
     )
 
 
+def build_canonical_transcript_layer(
+    subtitle_items: list[Any] | None = None,
+    *,
+    corrections: list[Any] | None = None,
+    source_basis: str = "subtitle_projection_review",
+    reference_segments: list[Any] | None = None,
+    transcript_segments: list[Any] | None = None,
+) -> CanonicalTranscriptLayer:
+    source_segments = _normalize_transcript_source_segments(
+        subtitle_items,
+        transcript_segments=transcript_segments,
+    )
+    resolved_source_basis = str(source_basis or "subtitle_projection_review")
+    if transcript_segments is not None or _looks_like_transcript_segments(subtitle_items):
+        if resolved_source_basis == "subtitle_projection_review":
+            resolved_source_basis = "transcript_first"
+    return _build_canonical_transcript_layer_from_source_segments(
+        source_segments,
+        corrections=corrections,
+        source_basis=resolved_source_basis,
+        reference_segments=reference_segments,
+    )
+
+
+def build_canonical_transcript_layer_from_transcript_segments(
+    transcript_segments: list[Any],
+    *,
+    corrections: list[Any] | None = None,
+    source_basis: str = "transcript_first",
+    reference_segments: list[Any] | None = None,
+) -> CanonicalTranscriptLayer:
+    return build_canonical_transcript_layer(
+        None,
+        corrections=corrections,
+        source_basis=source_basis,
+        reference_segments=reference_segments,
+        transcript_segments=transcript_segments,
+    )
+
+
 def _serialize_correction(correction: Any) -> dict[str, Any]:
     human_decision = str(_correction_attr(correction, "human_decision") or "").strip().lower()
     auto_applied = bool(_correction_attr(correction, "auto_applied"))
     status = "accepted" if auto_applied or human_decision == "accepted" else "pending" if human_decision != "rejected" else "rejected"
     accepted = str(_correction_attr(correction, "human_override") or _correction_attr(correction, "suggested_span") or "").strip()
     original = str(_correction_attr(correction, "original_span") or "").strip()
+    subtitle_item_id = str(_correction_attr(correction, "subtitle_item_id") or "").strip()
+    transcript_segment_id = str(_correction_attr(correction, "transcript_segment_id") or "").strip()
+    source_id = subtitle_item_id or transcript_segment_id
     return {
-        "subtitle_item_id": str(_correction_attr(correction, "subtitle_item_id") or ""),
+        "subtitle_item_id": subtitle_item_id,
+        "transcript_segment_id": transcript_segment_id,
+        "source_id": source_id,
+        "source_kind": "subtitle_item" if subtitle_item_id else "transcript_segment" if transcript_segment_id else "",
         "original": original,
         "accepted": accepted,
         "status": status,
@@ -504,21 +728,16 @@ def _extract_reference_words_for_timespan(
     segment_start = float(start)
     segment_end = float(end)
     for segment in list(reference_segments or []):
-        raw_words = list(getattr(segment, "words_json", None) or [])
+        raw_words = list(getattr(segment, "words_json", None) or getattr(segment, "words", None) or [])
         for source_index, raw_word in enumerate(raw_words):
-            if not isinstance(raw_word, dict):
+            payload = _coerce_word_payload(raw_word)
+            if payload is None:
                 continue
-            word = str(raw_word.get("word") or "").strip()
-            if not word:
-                continue
-            try:
-                word_start = float(raw_word.get("start") or segment_start)
-            except (TypeError, ValueError):
-                word_start = segment_start
-            try:
-                word_end = float(raw_word.get("end") or word_start)
-            except (TypeError, ValueError):
-                word_end = word_start
+            word = str(payload.get("word") or "").strip()
+            raw_start = payload.get("start")
+            raw_end = payload.get("end")
+            word_start = float(segment_start if raw_start is None else raw_start)
+            word_end = float(word_start if raw_end is None else raw_end)
             word_end = max(word_start, word_end)
             if word_end <= segment_start or word_start >= segment_end:
                 continue
@@ -530,6 +749,7 @@ def _extract_reference_words_for_timespan(
                     "start": round(clipped_start, 3),
                     "end": round(max(clipped_start, clipped_end), 3),
                     "source_index": source_index,
+                    "source_word": word,
                 }
             )
     clipped_words.sort(key=lambda item: (float(item["start"]), float(item["end"]), int(item["source_index"])))
@@ -576,7 +796,7 @@ def _canonical_word_weight(token: str) -> float:
 
 
 def build_subtitle_projection_layer(
-    subtitle_items: list[SubtitleItem],
+    subtitle_items: list[SubtitleItem] | None = None,
     *,
     segmentation_analysis: SubtitleSegmentationAnalysis | dict[str, Any],
     split_profile: dict[str, Any],
@@ -584,38 +804,67 @@ def build_subtitle_projection_layer(
     quality_report: dict[str, Any] | None,
     projection_basis: str = "display_baseline",
     transcript_layer: str = "subtitle_projection",
+    transcript_segments: list[Any] | None = None,
 ) -> SubtitleProjectionLayer:
     analysis_payload = (
         segmentation_analysis.as_dict()
         if hasattr(segmentation_analysis, "as_dict")
         else dict(segmentation_analysis or {})
     )
+    source_segments = _normalize_transcript_source_segments(
+        subtitle_items,
+        transcript_segments=transcript_segments,
+    )
+    resolved_projection_basis = str(projection_basis or "display_baseline")
+    resolved_transcript_layer = str(transcript_layer or "subtitle_projection")
+    if transcript_segments is not None or _looks_like_transcript_segments(subtitle_items):
+        if resolved_projection_basis == "display_baseline":
+            resolved_projection_basis = "transcript_first"
+        if resolved_transcript_layer == "subtitle_projection":
+            resolved_transcript_layer = "transcript_projection"
     entries = tuple(
         SubtitleProjectionEntry(
-            index=int(getattr(item, "item_index", 0) or 0),
-            start=float(getattr(item, "start_time", 0.0) or 0.0),
-            end=float(getattr(item, "end_time", 0.0) or 0.0),
-            text_raw=str(getattr(item, "text_raw", "") or ""),
-            text_norm=getattr(item, "text_norm", None),
-            text_final=getattr(item, "text_final", None),
+            index=int(source.index),
+            start=source.start,
+            end=source.end,
+            source_kind=source.source_kind,
+            source_id=source.source_id,
+            text_raw=source.text_raw,
+            text_norm=source.text_norm,
+            text_final=source.text_final,
         )
-        for item in sorted(
-            list(subtitle_items or []),
-            key=lambda current: (
-                float(getattr(current, "start_time", 0.0) or 0.0),
-                float(getattr(current, "end_time", 0.0) or 0.0),
-                int(getattr(current, "item_index", 0) or 0),
-            ),
-        )
+        for source in source_segments
     )
     return SubtitleProjectionLayer(
         entries=entries,
-        projection_basis=str(projection_basis or "display_baseline"),
-        transcript_layer=str(transcript_layer or "subtitle_projection"),
+        projection_basis=resolved_projection_basis,
+        transcript_layer=resolved_transcript_layer,
         split_profile=dict(split_profile or {}),
         segmentation_analysis=analysis_payload,
         boundary_refine=dict(boundary_refine or {}),
         quality_report=dict(quality_report or {}),
+    )
+
+
+def build_subtitle_projection_layer_from_transcript_segments(
+    transcript_segments: list[Any],
+    *,
+    segmentation_analysis: SubtitleSegmentationAnalysis | dict[str, Any],
+    split_profile: dict[str, Any],
+    boundary_refine: dict[str, Any] | None,
+    quality_report: dict[str, Any] | None,
+    projection_basis: str = "transcript_first",
+    transcript_layer: str = "transcript_projection",
+) -> SubtitleProjectionLayer:
+    return build_subtitle_projection_layer(
+        None,
+        segmentation_analysis=segmentation_analysis,
+        split_profile=split_profile,
+        boundary_refine=boundary_refine,
+        quality_report=quality_report,
+        projection_basis=projection_basis,
+        transcript_layer=transcript_layer,
+        transcript_segments=transcript_segments,
     )
 
 

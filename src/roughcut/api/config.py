@@ -26,6 +26,8 @@ from roughcut.config import (
     DEFAULT_TRANSCRIPTION_PROVIDER,
     ENV_MANAGED_SETTINGS,
     PROFILE_BINDABLE_SETTINGS,
+    SEARCH_FALLBACK_PROVIDER_VALUES,
+    SEARCH_PROVIDER_VALUES,
     TRANSCRIPTION_MODEL_OPTIONS,
     VOICE_PROVIDER_OPTIONS,
     apply_runtime_overrides,
@@ -78,6 +80,14 @@ class ConfigOut(BaseModel):
     llm_routing_mode: str
     reasoning_provider: str
     reasoning_model: str
+    llm_backup_enabled: bool
+    backup_reasoning_provider: str
+    backup_reasoning_model: str
+    backup_reasoning_effort: str
+    backup_vision_model: str
+    backup_search_provider: str
+    backup_search_fallback_provider: str
+    backup_model_search_helper: str
     local_reasoning_model: str
     local_vision_model: str
     hybrid_analysis_provider: str
@@ -294,6 +304,14 @@ class ConfigPatch(BaseModel):
     llm_routing_mode: str | None = None
     reasoning_provider: str | None = None
     reasoning_model: str | None = None
+    llm_backup_enabled: bool | None = None
+    backup_reasoning_provider: str | None = None
+    backup_reasoning_model: str | None = None
+    backup_reasoning_effort: str | None = None
+    backup_vision_model: str | None = None
+    backup_search_provider: str | None = None
+    backup_search_fallback_provider: str | None = None
+    backup_model_search_helper: str | None = None
     local_reasoning_model: str | None = None
     local_vision_model: str | None = None
     hybrid_analysis_provider: str | None = None
@@ -404,6 +422,14 @@ def get_config():
         llm_routing_mode=s.llm_routing_mode,
         reasoning_provider=s.reasoning_provider,
         reasoning_model=s.reasoning_model,
+        llm_backup_enabled=s.llm_backup_enabled,
+        backup_reasoning_provider=s.backup_reasoning_provider,
+        backup_reasoning_model=s.backup_reasoning_model,
+        backup_reasoning_effort=s.backup_reasoning_effort,
+        backup_vision_model=s.backup_vision_model,
+        backup_search_provider=s.backup_search_provider,
+        backup_search_fallback_provider=s.backup_search_fallback_provider,
+        backup_model_search_helper=s.backup_model_search_helper,
         local_reasoning_model=s.local_reasoning_model,
         local_vision_model=s.local_vision_model,
         hybrid_analysis_provider=s.hybrid_analysis_provider,
@@ -643,6 +669,41 @@ def patch_config(body: ConfigPatch):
         if routing_mode not in {"bundled", "hybrid_performance"}:
             raise HTTPException(status_code=400, detail="llm_routing_mode must be bundled or hybrid_performance")
         updates["llm_routing_mode"] = routing_mode
+    for key in ("reasoning_provider", "backup_reasoning_provider", "multimodal_fallback_provider"):
+        if key in updates:
+            provider_name = str(updates[key] or "").strip().lower()
+            if provider_name not in {"openai", "anthropic", "minimax", "ollama"}:
+                raise HTTPException(status_code=400, detail=f"{key} must be openai, anthropic, minimax, or ollama")
+            updates[key] = provider_name
+    if "llm_backup_enabled" in updates:
+        updates["llm_backup_enabled"] = bool(updates["llm_backup_enabled"])
+    for key in ("reasoning_model", "backup_reasoning_model", "backup_vision_model", "backup_model_search_helper"):
+        if key in updates:
+            updates[key] = str(updates[key] or "").strip()
+    for key in ("reasoning_effort", "backup_reasoning_effort"):
+        if key in updates:
+            effort = str(updates[key] or "").strip().lower()
+            if effort not in {"minimal", "low", "medium", "high"}:
+                raise HTTPException(status_code=400, detail=f"{key} must be minimal, low, medium, or high")
+            updates[key] = effort
+    for key in ("backup_search_provider",):
+        if key in updates:
+            provider_name = str(updates[key] or "").strip().lower()
+            if provider_name not in SEARCH_PROVIDER_VALUES:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"{key} must be one of: {', '.join(SEARCH_PROVIDER_VALUES)}",
+                )
+            updates[key] = provider_name
+    for key in ("search_fallback_provider", "backup_search_fallback_provider"):
+        if key in updates:
+            provider_name = str(updates[key] or "").strip().lower()
+            if provider_name not in SEARCH_FALLBACK_PROVIDER_VALUES:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"{key} must be one of: {', '.join(SEARCH_FALLBACK_PROVIDER_VALUES)}",
+                )
+            updates[key] = provider_name
     for key in ("hybrid_analysis_provider", "hybrid_copy_provider"):
         if key in updates:
             provider_name = str(updates[key] or "").strip().lower()

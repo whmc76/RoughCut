@@ -234,6 +234,114 @@ def test_build_edit_decision_removes_restart_retake_window_when_restart_cue_mark
     assert restart_cut.end == 2.2
 
 
+def test_build_edit_decision_prefers_transcript_evidence_over_low_signal_display_text():
+    subtitle_items = [
+        {
+            "index": 0,
+            "start_time": 0.0,
+            "end_time": 1.4,
+            "text_raw": "噪音",
+            "text_norm": "噪音",
+            "text_final": "噪音",
+        },
+        {
+            "index": 1,
+            "start_time": 2.05,
+            "end_time": 2.95,
+            "text_raw": "容量很大而且分仓很清楚",
+            "text_norm": "容量很大而且分仓很清楚",
+            "text_final": "容量很大而且分仓很清楚",
+        },
+    ]
+    transcript_segments = [
+        {"index": 0, "start": 0.0, "end": 1.4, "text": "包最大的优点就是容量很大", "speaker": "A", "confidence": 0.96},
+        {"index": 1, "start": 2.05, "end": 2.95, "text": "然后再看容量很大而且分仓很清楚", "speaker": "A", "confidence": 0.97},
+    ]
+
+    subtitle_only = build_edit_decision(
+        source_path="test.mp4",
+        duration=4.0,
+        silence_segments=[SilenceSegment(start=1.45, end=2.05)],
+        subtitle_items=subtitle_items,
+    )
+    transcript_backed = build_edit_decision(
+        source_path="test.mp4",
+        duration=4.0,
+        silence_segments=[SilenceSegment(start=1.45, end=2.05)],
+        subtitle_items=subtitle_items,
+        transcript_segments=transcript_segments,
+    )
+
+    subtitle_only_cuts = [segment for segment in subtitle_only.segments if segment.type == "remove" and segment.reason == "silence"]
+    transcript_backed_cuts = [segment for segment in transcript_backed.segments if segment.type == "remove" and segment.reason == "silence"]
+
+    assert subtitle_only_cuts
+    assert transcript_backed_cuts == []
+
+
+def test_build_edit_decision_prefers_transcript_evidence_for_restart_retake_window():
+    subtitle_items = [
+        {
+            "index": 0,
+            "start_time": 1.0,
+            "end_time": 1.65,
+            "text_raw": "这个包最大的优点就是",
+            "text_norm": "这个包最大的优点就是",
+            "text_final": "这个包最大的优点就是",
+        },
+        {
+            "index": 1,
+            "start_time": 1.65,
+            "end_time": 1.9,
+            "text_raw": "噪音",
+            "text_norm": "噪音",
+            "text_final": "噪音",
+        },
+        {
+            "index": 2,
+            "start_time": 1.9,
+            "end_time": 2.15,
+            "text_raw": "重来",
+            "text_norm": "重来",
+            "text_final": "重来",
+        },
+        {
+            "index": 3,
+            "start_time": 2.25,
+            "end_time": 3.4,
+            "text_raw": "这个包最大的优点就是容量很大",
+            "text_norm": "这个包最大的优点就是容量很大",
+            "text_final": "这个包最大的优点就是容量很大",
+        },
+    ]
+    transcript_segments = [
+        {"index": 0, "start": 1.0, "end": 1.65, "text": "这个包最大的优点就是", "speaker": "A", "confidence": 0.95},
+        {"index": 1, "start": 1.65, "end": 1.9, "text": "这里还有一个收纳层", "speaker": "A", "confidence": 0.91},
+        {"index": 2, "start": 1.9, "end": 2.15, "text": "重来", "speaker": "A", "confidence": 0.92},
+        {"index": 3, "start": 2.25, "end": 3.4, "text": "这个包最大的优点就是容量很大", "speaker": "A", "confidence": 0.96},
+    ]
+
+    subtitle_only = build_edit_decision(
+        source_path="test.mp4",
+        duration=4.0,
+        silence_segments=[],
+        subtitle_items=subtitle_items,
+    )
+    transcript_backed = build_edit_decision(
+        source_path="test.mp4",
+        duration=4.0,
+        silence_segments=[],
+        subtitle_items=subtitle_items,
+        transcript_segments=transcript_segments,
+    )
+
+    subtitle_only_restart_cuts = [segment for segment in subtitle_only.segments if segment.type == "remove" and segment.reason == "restart_retake"]
+    transcript_backed_restart_cuts = [segment for segment in transcript_backed.segments if segment.type == "remove" and segment.reason == "restart_retake"]
+
+    assert subtitle_only_restart_cuts
+    assert transcript_backed_restart_cuts == []
+
+
 def test_edit_decision_to_dict():
     silences = [SilenceSegment(start=2.0, end=3.0)]
     decision = build_edit_decision("test.mp4", 5.0, silences)

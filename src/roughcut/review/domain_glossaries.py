@@ -342,6 +342,9 @@ _DOMAIN_TERM_LIBRARY: dict[str, tuple[GlossaryTermLike, ...]] = {
     "flashlight": (
         *_FLASHLIGHT_DOMESTIC_BRANDS,
         {"correct_form": "NexTool", "wrong_forms": ["纳拓", "纳特", "Nextool", "NEXT TOOL"], "category": "tool_brand", "context_hint": "国产 EDC 工具品牌"},
+        {"correct_form": "EDC17", "wrong_forms": ["EDC幺七", "EDC一七"], "category": "flashlight_model", "context_hint": "奈特科尔手电型号"},
+        {"correct_form": "EDC23", "wrong_forms": ["EDC二三"], "category": "flashlight_model", "context_hint": "奈特科尔手电型号"},
+        {"correct_form": "EDC37", "wrong_forms": ["EDC三七"], "category": "flashlight_model", "context_hint": "奈特科尔手电型号"},
         {"correct_form": "手电", "wrong_forms": ["手店"], "category": "flashlight", "context_hint": "照明品类"},
         {"correct_form": "手电评测", "wrong_forms": ["手机评测"], "category": "flashlight", "context_hint": "手电内容"},
         {"correct_form": "内置电池", "wrong_forms": [], "category": "flashlight", "context_hint": "手电供电方案"},

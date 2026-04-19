@@ -7,6 +7,8 @@ from roughcut.speech.transcript_projection import (
     ARTIFACT_TYPE_SUBTITLE_PROJECTION_LAYER,
     ARTIFACT_TYPE_TRANSCRIPT_FACT_LAYER,
     build_canonical_transcript_layer,
+    build_transcript_first_canonical_transcript_layer,
+    build_transcript_projection_layer,
     build_subtitle_projection_layer,
     build_transcript_fact_layer,
 )
@@ -66,6 +68,37 @@ def test_transcript_projection_module_builds_fact_and_projection_layers():
         ],
     ).as_dict()
 
+    transcript_first_layer = build_transcript_first_canonical_transcript_layer(
+        [
+            SimpleNamespace(
+                id="segment-1",
+                index=0,
+                start=0.0,
+                end=1.0,
+                text="olight",
+                words=[SimpleNamespace(word="olight", start=0.0, end=1.0, raw_payload={})],
+            )
+        ],
+        source_basis="transcript_first",
+    ).as_dict()
+
+    transcript_projection_layer = build_transcript_projection_layer(
+        [
+            SimpleNamespace(
+                id="segment-1",
+                index=0,
+                start=0.0,
+                end=1.0,
+                text="olight",
+                words=[SimpleNamespace(word="olight", start=0.0, end=1.0, raw_payload={})],
+            )
+        ],
+        segmentation_analysis={"entry_count": 1},
+        split_profile={"orientation": "landscape"},
+        boundary_refine={"attempted_windows": 0},
+        quality_report={"score": 1.0},
+    ).as_dict()
+
     assert ARTIFACT_TYPE_TRANSCRIPT_FACT_LAYER == "transcript_fact_layer"
     assert ARTIFACT_TYPE_CANONICAL_TRANSCRIPT_LAYER == "canonical_transcript_layer"
     assert ARTIFACT_TYPE_SUBTITLE_PROJECTION_LAYER == "subtitle_projection_layer"
@@ -77,3 +110,7 @@ def test_transcript_projection_module_builds_fact_and_projection_layers():
     assert projection_layer["entry_count"] == 1
     assert projection_layer["projection_kind"] == "display_baseline"
     assert projection_layer["transcript_layer"] == "subtitle_projection"
+    assert transcript_first_layer["source_basis"] == "transcript_first"
+    assert transcript_first_layer["segments"][0]["source_kind"] == "transcript_segment"
+    assert transcript_projection_layer["projection_kind"] == "transcript_first"
+    assert transcript_projection_layer["transcript_layer"] == "transcript_projection"

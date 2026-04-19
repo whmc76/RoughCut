@@ -41,6 +41,14 @@ def test_get_config_exposes_extended_provider_fields(tmp_path, monkeypatch):
     object.__setattr__(settings, "transcription_dialect", "beijing")
     object.__setattr__(settings, "transcription_alignment_mode", "auto")
     object.__setattr__(settings, "transcription_alignment_min_word_coverage", 0.81)
+    object.__setattr__(settings, "llm_backup_enabled", True)
+    object.__setattr__(settings, "backup_reasoning_provider", "minimax")
+    object.__setattr__(settings, "backup_reasoning_model", "MiniMax-M2.7-highspeed")
+    object.__setattr__(settings, "backup_reasoning_effort", "medium")
+    object.__setattr__(settings, "backup_vision_model", "MiniMax-VL-01")
+    object.__setattr__(settings, "backup_search_provider", "auto")
+    object.__setattr__(settings, "backup_search_fallback_provider", "minimax")
+    object.__setattr__(settings, "backup_model_search_helper", "")
     object.__setattr__(settings, "openai_base_url", "https://api.openai.com/v1")
     object.__setattr__(settings, "qwen_asr_api_base_url", "http://127.0.0.1:18096")
     object.__setattr__(settings, "avatar_provider", "heygem")
@@ -104,6 +112,12 @@ def test_get_config_exposes_extended_provider_fields(tmp_path, monkeypatch):
     assert cfg.transcription_dialect == "beijing"
     assert cfg.transcription_alignment_mode == "auto"
     assert cfg.transcription_alignment_min_word_coverage == 0.81
+    assert cfg.llm_backup_enabled is True
+    assert cfg.backup_reasoning_provider == "minimax"
+    assert cfg.backup_reasoning_model == "MiniMax-M2.7-highspeed"
+    assert cfg.backup_vision_model == "MiniMax-VL-01"
+    assert cfg.backup_search_provider == "auto"
+    assert cfg.backup_search_fallback_provider == "minimax"
     assert cfg.qwen_asr_api_base_url == "http://127.0.0.1:18096"
     assert cfg.avatar_provider == "heygem"
     assert cfg.avatar_presenter_id == "presenter_demo"
@@ -589,6 +603,38 @@ def test_patch_config_forces_search_provider_to_auto_bundle(tmp_path, monkeypatc
     assert cfg.model_search_helper == "helper-model"
     assert persisted["search_provider"] == "auto"
     assert persisted["search_fallback_provider"] == "model"
+
+
+def test_patch_config_accepts_backup_llm_bundle_fields(tmp_path, monkeypatch):
+    import roughcut.api.config as config_api
+    import roughcut.config as config_mod
+
+    monkeypatch.setattr(config_api, "_CONFIG_FILE", tmp_path / "roughcut_config.json")
+    monkeypatch.setattr(config_mod, "_OVERRIDES_FILE", tmp_path / "roughcut_config.json")
+    config_mod._settings = None
+
+    cfg = patch_config(
+        ConfigPatch(
+            llm_backup_enabled=True,
+            backup_reasoning_provider="minimax",
+            backup_reasoning_model="MiniMax-M2.7-highspeed",
+            backup_reasoning_effort="medium",
+            backup_vision_model="MiniMax-VL-01",
+            backup_search_provider="auto",
+            backup_search_fallback_provider="minimax",
+        )
+    )
+
+    persisted = config_mod.load_runtime_overrides()
+
+    assert cfg.llm_backup_enabled is True
+    assert cfg.backup_reasoning_provider == "minimax"
+    assert cfg.backup_reasoning_model == "MiniMax-M2.7-highspeed"
+    assert cfg.backup_vision_model == "MiniMax-VL-01"
+    assert cfg.backup_search_provider == "auto"
+    assert cfg.backup_search_fallback_provider == "minimax"
+    assert persisted["backup_reasoning_provider"] == "minimax"
+    assert persisted["backup_reasoning_model"] == "MiniMax-M2.7-highspeed"
 
 
 def test_patch_config_accepts_creative_provider_fields(tmp_path, monkeypatch):

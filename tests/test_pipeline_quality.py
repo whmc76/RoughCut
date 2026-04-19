@@ -111,6 +111,19 @@ def test_pick_recommended_rerun_steps_prefers_shared_override_over_auto_fix_step
     ]
 
 
+def test_pick_recommended_rerun_steps_returns_empty_for_manual_review_only_issue():
+    issues = [
+        quality_mod.QualityIssue(
+            code="subtitle_semantic_contamination",
+            message="检测到语义污染 4 处，必须人工确认",
+            penalty=16.0,
+            blocking=True,
+        )
+    ]
+
+    assert rerun_actions_mod.pick_recommended_rerun_steps(issues) == []
+
+
 def test_assess_job_quality_treats_identity_missing_quality_signal_as_warning():
     job = Job(
         id=uuid.uuid4(),
@@ -548,6 +561,77 @@ def test_assess_job_quality_penalizes_subtitle_sync_issue_and_prefers_render_rer
     assert "subtitle_sync_issue" in assessment["issue_codes"]
     assert assessment["recommended_rerun_step"] == "render"
     assert assessment["recommended_rerun_steps"] == ["render", "final_review", "platform_package"]
+
+
+def test_assess_job_quality_marks_semantic_contamination_as_manual_review_only():
+    job = Job(
+        id=uuid.uuid4(),
+        source_path="jobs/demo/semantic-contamination.mp4",
+        source_name="semantic-contamination.mp4",
+        status="done",
+        language="zh-CN",
+    )
+    steps = [
+        JobStep(job_id=job.id, step_name="subtitle_postprocess", status="done"),
+        JobStep(job_id=job.id, step_name="content_profile", status="done"),
+    ]
+    artifacts = [
+        Artifact(
+            job_id=job.id,
+            artifact_type="content_profile_final",
+            data_json={
+                "subject_brand": "奈特科尔",
+                "subject_model": "EDC17",
+                "subject_type": "EDC手电",
+                "video_theme": "奈特科尔 EDC17 开箱与 EDC37 对比",
+                "summary": "这条视频围绕奈特科尔 EDC17 手电的开箱与对比展开。",
+                "engagement_question": "你更偏向 EDC17 还是 EDC37？",
+                "review_mode": "auto_confirmed",
+                "automation_review": {"score": 0.94},
+            },
+            created_at=_now(),
+        ),
+        Artifact(
+            job_id=job.id,
+            artifact_type="subtitle_quality_report",
+            data_json={
+                "score": 52.0,
+                "blocking": True,
+                "blocking_reasons": ["检测到语义污染 4 处，必须人工确认"],
+                "warning_reasons": [],
+                "metrics": {
+                    "semantic_bad_term_total": 4,
+                    "lexical_bad_term_total": 1,
+                },
+            },
+            created_at=_now(),
+        ),
+        _canonical_transcript_artifact(job, text="这期重点看 EDC17 和 EDC37 的便携差异。"),
+    ]
+    subtitles = [
+        SubtitleItem(
+            job_id=job.id,
+            version=1,
+            item_index=0,
+            start_time=0.0,
+            end_time=3.0,
+            text_raw="这期重点看 EDC17 和 EDC37 的便携差异。",
+        )
+    ]
+
+    assessment = assess_job_quality(
+        job=job,
+        steps=steps,
+        artifacts=artifacts,
+        subtitle_items=subtitles,
+        corrections=[],
+        completion_candidate=True,
+    )
+
+    assert assessment["issue_codes"] == ["subtitle_semantic_contamination"]
+    assert assessment["recommended_rerun_step"] is None
+    assert assessment["recommended_rerun_steps"] == []
+    assert assessment["auto_fixable"] is False
 
 
 def test_assess_job_quality_reports_canonical_transcript_context_when_present():

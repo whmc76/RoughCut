@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from typing import Any
 
 ISSUE_RERUN_STEP_OVERRIDES: dict[str, str] = {
@@ -114,6 +115,12 @@ QUALITY_RERUN_STEPS = {
     "platform_package",
 }
 
+MANUAL_REVIEW_ONLY_ISSUES = frozenset(
+    {
+        "subtitle_semantic_contamination",
+    }
+)
+
 
 def rerun_chain_from_step(step_name: str) -> list[str]:
     normalized = str(step_name or "").strip()
@@ -134,7 +141,19 @@ def rerun_steps_for_issue_code(issue_code: str) -> list[str]:
     return rerun_chain_from_step(start_step) if start_step else []
 
 
+def has_manual_review_only_issue_codes(issue_codes: Iterable[str] | None) -> bool:
+    return any(
+        str(issue_code or "").strip() in MANUAL_REVIEW_ONLY_ISSUES
+        for issue_code in (issue_codes or [])
+    )
+
+
 def pick_recommended_rerun_steps(issues: list[Any]) -> list[str]:
+    if has_manual_review_only_issue_codes(
+        str(getattr(issue, "code", "") or "").strip()
+        for issue in issues
+    ):
+        return []
     candidate_steps = {
         ISSUE_RERUN_STEP_OVERRIDES.get(str(getattr(issue, "code", "") or "").strip(), getattr(issue, "auto_fix_step", None))
         for issue in issues

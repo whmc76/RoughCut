@@ -147,6 +147,9 @@ _DEFAULT_TERM_ALIASES: dict[str, tuple[str, ...]] = {
     "手电": ("手店",),
     "打火机": ("打火鸡",),
     "机能": ("肌能",),
+    "EDC17": ("EDC幺七", "EDC一七"),
+    "EDC23": ("EDC二三",),
+    "EDC37": ("EDC三七",),
 }
 
 _GENERIC_SAFE_REPLACEMENTS: tuple[tuple[re.Pattern[str], str], ...] = (
@@ -1208,28 +1211,15 @@ def apply_domain_term_corrections(
         next_text=next_text,
     )
 
-    compound_terms = [
-        str(item.get("term") or "").strip()
-        for item in review_memory.get("terms") or []
-        if _is_compound_domain_term(str(item.get("term") or "").strip())
-    ]
-    for term in compound_terms:
-        if _should_skip_confirmed_display_term(term, review_memory):
-            continue
-        result = _replace_compound_phrase_match(result, term)
-
+    # Keep subtitle correction deterministic: only apply explicit lexical aliases
+    # from confirmed entities, correction history, and curated hotword/glossary
+    # entries. Do not infer compound phrases or semantic domain rewrites here.
     for item in review_memory.get("aliases") or []:
         wrong = str(item.get("wrong") or "").strip()
         correct = str(item.get("correct") or "").strip()
         if not wrong or not correct:
             continue
-        category = str(item.get("category") or "").strip()
         if _should_skip_confirmed_display_alias(wrong, correct, review_memory):
-            continue
-        if (
-            _is_brand_like_category(category)
-            or _is_protected_brand_term(correct)
-        ) and category != "confirmed_subject":
             continue
         result = re.sub(re.escape(wrong), correct, result, flags=re.IGNORECASE)
 
@@ -1237,17 +1227,11 @@ def apply_domain_term_corrections(
     for term in terms:
         if _should_skip_confirmed_display_term(term, review_memory):
             continue
-        if _is_protected_brand_term(term):
-            if re.fullmatch(r"[A-Za-z][A-Za-z0-9 .+-]{1,24}", term):
-                result = re.sub(re.escape(term), term, result, flags=re.IGNORECASE)
-            continue
         aliases = _DEFAULT_TERM_ALIASES.get(term, ())
         if re.fullmatch(r"[A-Za-z][A-Za-z0-9 .+-]{1,24}", term):
             result = re.sub(re.escape(term), term, result, flags=re.IGNORECASE)
         for wrong in aliases:
             result = re.sub(re.escape(wrong), term, result, flags=re.IGNORECASE)
-        if not aliases or re.fullmatch(r"[A-Za-z][A-Za-z0-9 .+-]{1,24}", term):
-            result = _replace_near_match(result, term)
     return result
 
 
@@ -2193,7 +2177,13 @@ def _extract_context_support_tokens(entity: dict[str, Any]) -> list[str]:
 
 
 def _model_like_numbers_conflict(source: Any, target: Any) -> bool:
-    return model_numbers_conflict(source, target)
+    if model_numbers_conflict(source, target):
+        return True
+    source_anchor = _extract_model_base_anchor(_compact_subject_text(source))
+    target_anchor = _extract_model_base_anchor(_compact_subject_text(target))
+    if source_anchor and target_anchor:
+        return model_numbers_conflict(source_anchor, target_anchor)
+    return False
 
 
 def _replace_near_match(text: str, term: str) -> str:
@@ -2213,6 +2203,12 @@ def _replace_near_match(text: str, term: str) -> str:
             span = text[start:start + size]
             if span == term:
                 return text
+            span_anchor = _extract_model_base_anchor(_compact_subject_text(span))
+            term_anchor = _extract_model_base_anchor(_compact_subject_text(term))
+            if span_anchor and not term_anchor:
+                continue
+            if _model_like_numbers_conflict(span, term):
+                continue
             if not _window_can_match(span, term):
                 continue
             score = SequenceMatcher(None, span, term).ratio()
@@ -2255,6 +2251,12 @@ def _replace_compound_phrase_match(text: str, term: str) -> str:
     for size in range(min_len, max_len + 1):
         for start in range(0, len(text) - size + 1):
             span = text[start:start + size]
+            span_anchor = _extract_model_base_anchor(_compact_subject_text(span))
+            term_anchor = _extract_model_base_anchor(_compact_subject_text(term))
+            if span_anchor and not term_anchor:
+                continue
+            if _model_like_numbers_conflict(span, term):
+                continue
             if not _compound_window_can_match(span, components):
                 continue
             score = SequenceMatcher(None, span, term).ratio()

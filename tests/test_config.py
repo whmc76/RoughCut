@@ -2,15 +2,21 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 import roughcut.config as config_mod
 from roughcut.config import (
     DEFAULT_OUTPUT_ROOT,
     Settings,
     get_settings,
     infer_coding_backends,
+    llm_backup_route,
     normalize_transcription_settings,
+    resolve_backup_llm_route,
     resolve_coding_backend_model,
 )
+import roughcut.providers.factory as factory_mod
+from roughcut.providers.reasoning.base import Message, ReasoningResponse
 
 
 def test_default_settings():
@@ -23,6 +29,12 @@ def test_default_settings():
     assert s.llm_mode == "performance"
     assert s.reasoning_provider == "minimax"
     assert s.reasoning_model == "MiniMax-M2.7-highspeed"
+    assert s.llm_backup_enabled is True
+    assert s.backup_reasoning_provider == "minimax"
+    assert s.backup_reasoning_model == "MiniMax-M2.7-highspeed"
+    assert s.backup_vision_model == "MiniMax-VL-01"
+    assert s.backup_search_provider == "auto"
+    assert s.backup_search_fallback_provider == "minimax"
     assert s.local_reasoning_model == "qwen3.5:9b"
     assert s.multimodal_fallback_provider == "ollama"
     assert s.search_provider == "auto"
@@ -78,6 +90,34 @@ def test_local_mode_switches_active_provider():
     assert s.active_reasoning_provider == "ollama"
     assert s.active_reasoning_model == "qwen3.5:9b"
     assert s.active_search_provider == "auto"
+
+
+def test_llm_backup_route_switches_reasoning_search_and_vision():
+    s = Settings(
+        _env_file=None,
+        reasoning_provider="openai",
+        reasoning_model="gpt-5.4",
+        llm_backup_enabled=True,
+        backup_reasoning_provider="minimax",
+        backup_reasoning_model="MiniMax-M2.7-highspeed",
+        backup_vision_model="MiniMax-VL-01",
+        backup_search_provider="auto",
+        backup_search_fallback_provider="minimax",
+    )
+
+    route = resolve_backup_llm_route(settings=s)
+    assert route["reasoning_provider"] == "minimax"
+    assert route["reasoning_model"] == "MiniMax-M2.7-highspeed"
+    assert route["vision_model"] == "MiniMax-VL-01"
+    assert route["search_provider"] == "auto"
+    assert route["search_fallback_provider"] == "minimax"
+
+    with llm_backup_route(settings=s):
+        assert s.active_reasoning_provider == "minimax"
+        assert s.active_reasoning_model == "MiniMax-M2.7-highspeed"
+        assert s.active_vision_model == "MiniMax-VL-01"
+        assert s.active_search_provider == "auto"
+        assert s.active_search_fallback_provider == "minimax"
 
 
 def test_infer_coding_backends_prefers_hybrid_routes():
@@ -238,3 +278,46 @@ def test_get_settings_prefers_explicit_telegram_token_env_over_session_secret_ov
     assert settings.telegram_bot_token == "env-token"
     config_mod._settings = None
     config_mod._session_secret_overrides.clear()
+
+
+@pytest.mark.asyncio
+async def test_reasoning_provider_falls_back_to_backup_bundle():
+    config_mod._settings = None
+    settings = config_mod.get_settings()
+    object.__setattr__(settings, "llm_mode", "performance")
+    object.__setattr__(settings, "reasoning_provider", "openai")
+    object.__setattr__(settings, "reasoning_model", "gpt-5.4")
+    object.__setattr__(settings, "llm_backup_enabled", True)
+    object.__setattr__(settings, "backup_reasoning_provider", "minimax")
+    object.__setattr__(settings, "backup_reasoning_model", "MiniMax-M2.7-highspeed")
+
+    calls: list[str] = []
+
+    class _PrimaryProvider:
+        async def complete(self, messages, *, temperature=0.3, max_tokens=4096, json_mode=False):
+            del messages, temperature, max_tokens, json_mode
+            calls.append("openai")
+            raise RuntimeError("primary failed")
+
+    class _BackupProvider:
+        async def complete(self, messages, *, temperature=0.3, max_tokens=4096, json_mode=False):
+            del temperature, max_tokens, json_mode
+            calls.append("minimax")
+            return ReasoningResponse(
+                content=f"backup:{messages[0].content}",
+                raw_content=None,
+                usage={},
+                model="MiniMax-M2.7-highspeed",
+            )
+
+    original = factory_mod._build_reasoning_provider
+    factory_mod._build_reasoning_provider = lambda provider: _PrimaryProvider() if provider == "openai" else _BackupProvider()
+    try:
+        provider = factory_mod.get_reasoning_provider()
+        response = await provider.complete([Message(role="user", content="hello")])
+    finally:
+        factory_mod._build_reasoning_provider = original
+
+    assert response.content == "backup:hello"
+    assert response.model == "MiniMax-M2.7-highspeed"
+    assert calls == ["openai", "minimax"]

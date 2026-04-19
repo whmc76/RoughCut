@@ -238,13 +238,17 @@ def assess_job_quality(
             subtitle_quality_data.get("metrics") if isinstance(subtitle_quality_data.get("metrics"), dict) else {}
         )
         subtitle_quality_score = _safe_float(subtitle_quality_data.get("score"))
+        semantic_bad_term_total = int(subtitle_quality_metrics.get("semantic_bad_term_total") or 0)
+        semantic_contamination_detected = semantic_bad_term_total > 0 or any(
+            "语义污染" in reason for reason in subtitle_quality_blocking_reasons
+        )
         if subtitle_quality_blocking_reasons:
             issues.append(
                 QualityIssue(
-                    "subtitle_quality_blocking",
+                    "subtitle_semantic_contamination" if semantic_contamination_detected else "subtitle_quality_blocking",
                     subtitle_quality_blocking_reasons[0],
                     14.0 if subtitle_quality_score is None else min(16.0, max(8.0, 100.0 - subtitle_quality_score)),
-                    auto_fix_step="subtitle_postprocess",
+                    auto_fix_step=None if semantic_contamination_detected else "subtitle_postprocess",
                     blocking=True,
                 )
             )

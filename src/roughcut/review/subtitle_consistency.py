@@ -13,6 +13,11 @@ _BAD_TERM_REASON_MAP: dict[str, tuple[re.Pattern[str], str, str]] = {
     "noc_misheard": (re.compile(r"NZ家|\bNZ\b"), "subtitle_vs_filename", "字幕里的 NOC 品牌仍有误写"),
     "trim_misheard": (re.compile(r"四顶配"), "subtitle_vs_filename", "字幕里的次顶配版本仍有误写"),
     "edc17_numeric": (re.compile(r"幺7|幺七"), "subtitle_vs_filename", "字幕里的 EDC17 数字仍有误写"),
+    "flashlight_model_knifedrift": (
+        re.compile(r"(?:折刀帕|刀)(?:幺七|幺7|一七|17|二三|23|三七|37)|EDC(?:17|23|37)折刀(?:帕)?|EDC17刀(?:幺七|幺7|一七|17)|EDC23刀(?:二三|23)|EDC37刀(?:三七|37)"),
+        "subtitle_vs_filename",
+        "字幕把 EDC17/23/37 手电型号误写成折刀语义",
+    ),
 }
 
 
@@ -103,9 +108,9 @@ def build_subtitle_consistency_report(
             conflicts[scope].append(_conflict_entry(kind="hotword_residual", detail=message))
 
     if pending_count > 0:
-        blocking_reasons.append(f"字幕术语候选待人工确认 {pending_count} 处")
+        blocking_reasons.append(f"词级术语候选待人工确认 {pending_count} 处")
     elif auto_applied_count > 0:
-        warning_reasons.append(f"字幕术语已自动纠偏 {auto_applied_count} 处")
+        warning_reasons.append(f"已应用词级纠偏 {auto_applied_count} 处")
 
     quality_blocking_reasons = [
         str(item).strip()
@@ -119,6 +124,18 @@ def build_subtitle_consistency_report(
             blocking_reasons.append(detail)
 
     metrics = quality_report.get("metrics") if isinstance(quality_report.get("metrics"), Mapping) else {}
+    semantic_bad_term_total = int(metrics.get("semantic_bad_term_total") or 0)
+    lexical_bad_term_total = int(metrics.get("lexical_bad_term_total") or 0)
+    if semantic_bad_term_total > 0:
+        detail = f"检测到语义污染 {semantic_bad_term_total} 处，只允许人工复核，不做自动语义纠正"
+        conflicts["subtitle_vs_summary"].append(_conflict_entry(kind="semantic_contamination", detail=detail))
+        if detail not in blocking_reasons:
+            blocking_reasons.append(detail)
+    if lexical_bad_term_total > 0:
+        detail = f"检测到可词级纠偏残留 {lexical_bad_term_total} 处"
+        conflicts["subtitle_vs_summary"].append(_conflict_entry(kind="lexical_residual", detail=detail))
+        if pending_count == 0 and detail not in warning_reasons:
+            warning_reasons.append(detail)
     if bool(metrics.get("identity_missing")):
         detail = "字幕与文件名/主体线索未形成稳定一致"
         conflicts["subtitle_vs_filename"].append(_conflict_entry(kind="identity_missing", detail=detail))
@@ -145,5 +162,7 @@ def build_subtitle_consistency_report(
             "resolved_patch_count": resolved_count,
             "auto_applied_patch_count": auto_applied_count,
             "quality_blocking_reason_count": len(quality_blocking_reasons),
+            "lexical_bad_term_total": lexical_bad_term_total,
+            "semantic_bad_term_total": semantic_bad_term_total,
         },
     }

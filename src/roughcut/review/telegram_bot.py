@@ -3501,7 +3501,7 @@ def _build_subtitle_review_artifact_lines(artifacts: dict[str, dict[str, Any]] |
         pending_count = int(metrics.get("pending_count") or 0)
         auto_applied_count = int(metrics.get("auto_applied_count") or 0)
         lines.append(
-            f"- 术语修复：{patch_count} 条候选，已接受 {accepted_count}，待审 {pending_count}，自动应用 {auto_applied_count}"
+            f"- 术语修复：{patch_count} 条候选，已接受 {accepted_count}，待审 {pending_count}，词级自动应用 {auto_applied_count}"
         )
         if candidate_terms:
             lines.append(f"- 术语候选：{_join_non_empty(candidate_terms[:4])}")

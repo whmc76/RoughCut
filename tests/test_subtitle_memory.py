@@ -505,12 +505,15 @@ def test_apply_domain_term_corrections_fixes_edc_aliases_and_near_matches():
             ],
             "aliases": [
                 {"wrong": "来自慢", "correct": "LEATHERMAN"},
+                {"wrong": "多功能工具前", "correct": "多功能工具钳"},
+                {"wrong": "单手开和", "correct": "单手开合"},
+                {"wrong": "主到", "correct": "主刀"},
             ],
             "style_examples": [],
         },
     )
 
-    assert "来自慢" in corrected
+    assert "LEATHERMAN" in corrected
     assert "多功能工具钳" in corrected
     assert "单手开合" in corrected
     assert "主刀" in corrected
@@ -997,6 +1000,31 @@ def test_build_subtitle_review_memory_injects_flashlight_brand_asr_aliases():
 
     assert "OLIGHT" in terms
     assert ("奥雷", "OLIGHT") in alias_map
+
+
+def test_apply_domain_term_corrections_does_not_rewrite_cross_domain_semantics():
+    memory = build_subtitle_review_memory(
+        channel_profile="edc_tactical",
+        glossary_terms=[],
+        user_memory={},
+        recent_subtitles=[{"text_final": "这次主要对比 NITECORE EDC17 和 EDC37 手电。"}],
+        content_profile={
+            "subject_brand": "NITECORE",
+            "subject_model": "EDC17",
+            "subject_type": "EDC手电",
+            "video_theme": "NITECORE EDC17 手电开箱对比 EDC37",
+        },
+    )
+
+    corrected_model = apply_domain_term_corrections("EDC17折刀帕。", memory)
+    corrected_compare = apply_domain_term_corrections("折刀帕三七是之前我。", memory)
+    corrected_short_compare = apply_domain_term_corrections("刀三七是之前我。", memory)
+    corrected_numeric_drift = apply_domain_term_corrections("出的这个EDC17刀幺七啊。", memory)
+
+    assert corrected_model == "EDC17折刀帕。"
+    assert corrected_compare == "折刀帕三七是之前我。"
+    assert corrected_short_compare == "刀三七是之前我。"
+    assert corrected_numeric_drift == "出的这个EDC17刀幺七啊。"
 
 
 def test_build_subtitle_review_memory_injects_bag_hotwords_only_with_bag_context():

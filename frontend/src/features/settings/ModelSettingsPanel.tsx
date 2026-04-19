@@ -10,6 +10,7 @@ import type {
   ProviderServiceStatusEntry,
   RuntimeEnvironment,
 } from "../../types";
+import { CheckboxField } from "../../components/forms/CheckboxField";
 import { SelectField } from "../../components/forms/SelectField";
 import { TextField } from "../../components/forms/TextField";
 import { PanelHeader } from "../../components/ui/PanelHeader";
@@ -237,6 +238,10 @@ export function ModelSettingsPanel({ form, config, options, runtimeEnvironment, 
   const transcriptionProvider = readFormString(form, "transcription_provider");
   const activeReasoningProvider = getActiveReasoningProvider(form);
   const activeReasoningModel = getActiveReasoningModel(form);
+  const llmBackupEnabled = Boolean(form.llm_backup_enabled ?? true);
+  const backupReasoningProvider = readFormString(form, "backup_reasoning_provider", "minimax");
+  const backupSearchProvider = readFormString(form, "backup_search_provider", "auto");
+  const backupSearchFallbackProvider = readFormString(form, "backup_search_fallback_provider", "minimax");
   const hybridAnalysisProvider = readFormString(form, "hybrid_analysis_provider", "openai");
   const hybridCopyProvider = readFormString(form, "hybrid_copy_provider", "minimax");
   const hybridAnalysisSearchMode = readFormString(form, "hybrid_analysis_search_mode", "entity_gated");
@@ -244,6 +249,7 @@ export function ModelSettingsPanel({ form, config, options, runtimeEnvironment, 
   const searchFallbackProvider = readFormString(form, "search_fallback_provider", "searxng");
   const transcriptionDialects = options?.transcription_dialects ?? [{ value: "mandarin", label: "普通话" }];
   const multimodalFallbackProviders = options?.multimodal_fallback_providers ?? [{ value: "ollama", label: "Ollama" }];
+  const searchProviders = options?.search_providers ?? [{ value: "auto", label: "自动选择" }];
   const searchFallbackProviders = options?.search_fallback_providers ?? [{ value: "searxng", label: "SearXNG" }];
   const transcriptionProviderOptions = Object.keys(options?.transcription_models ?? {}).map((provider) => ({
     value: provider,
@@ -277,11 +283,23 @@ export function ModelSettingsPanel({ form, config, options, runtimeEnvironment, 
     queryFn: () => api.getModelCatalog({ provider: hybridCopyProvider, kind: "reasoning" }),
     enabled: llmMode === "performance" && Boolean(hybridCopyProvider),
   });
+  const backupReasoningCatalog = useQuery({
+    queryKey: ["config-model-catalog", "backup_reasoning", backupReasoningProvider],
+    queryFn: () => api.getModelCatalog({ provider: backupReasoningProvider, kind: "reasoning" }),
+    enabled: llmMode === "performance" && llmBackupEnabled && Boolean(backupReasoningProvider),
+  });
+  const backupVisionCatalog = useQuery({
+    queryKey: ["config-model-catalog", "backup_vision", backupReasoningProvider],
+    queryFn: () => api.getModelCatalog({ provider: backupReasoningProvider, kind: "vision_fallback" }),
+    enabled: llmMode === "performance" && llmBackupEnabled && Boolean(backupReasoningProvider),
+  });
   const transcriptionModels = transcriptionCatalog.data?.models ?? options?.transcription_models?.[transcriptionProvider] ?? [];
   const reasoningModels = reasoningCatalog.data?.models ?? [];
   const fallbackModels = fallbackCatalog.data?.models ?? [];
   const hybridAnalysisModels = hybridAnalysisCatalog.data?.models ?? [];
   const hybridCopyModels = hybridCopyCatalog.data?.models ?? [];
+  const backupReasoningModels = backupReasoningCatalog.data?.models ?? [];
+  const backupVisionModels = backupVisionCatalog.data?.models ?? [];
 
   const refreshCatalog = async (provider: string, kind: string) => {
     const next = await api.getModelCatalog({ provider, kind, refresh: true });
@@ -306,6 +324,10 @@ export function ModelSettingsPanel({ form, config, options, runtimeEnvironment, 
     pushUnique(transcriptionProvider);
     pushUnique(activeReasoningProvider);
     pushUnique(searchFallbackProvider);
+    if (llmBackupEnabled) {
+      pushUnique(backupReasoningProvider);
+      pushUnique(backupSearchFallbackProvider);
+    }
     if (llmMode === "performance" && llmRoutingMode === "hybrid_performance") {
       pushUnique(hybridAnalysisProvider);
       pushUnique(hybridCopyProvider);
@@ -362,11 +384,14 @@ export function ModelSettingsPanel({ form, config, options, runtimeEnvironment, 
     return cards;
   }, [
     activeReasoningProvider,
+    backupReasoningProvider,
+    backupSearchFallbackProvider,
     config,
     form,
     hybridAnalysisProvider,
     hybridCopyProvider,
     lastChecks,
+    llmBackupEnabled,
     llmMode,
     llmRoutingMode,
     reasoningCatalogProvider,
@@ -617,12 +642,62 @@ export function ModelSettingsPanel({ form, config, options, runtimeEnvironment, 
                   onChange={(event) => onChange("multimodal_fallback_provider", event.target.value)}
                   options={multimodalFallbackProviders}
                 />
-                <SelectField
+              <SelectField
                   label="视觉兜底模型"
                   value={String(form.multimodal_fallback_model ?? "")}
                   onChange={(event) => onChange("multimodal_fallback_model", event.target.value)}
                   options={buildModelOptions(fallbackModels, String(form.multimodal_fallback_model ?? ""))}
                 />
+                <CheckboxField
+                  label="主链路失败时自动切换到备用方案"
+                  checked={llmBackupEnabled}
+                  onChange={(event) => onChange("llm_backup_enabled", event.target.checked)}
+                  className="settings-chain-note"
+                />
+                {llmBackupEnabled ? (
+                  <>
+                    <SelectField
+                      label="备用推理 Provider"
+                      value={backupReasoningProvider}
+                      onChange={(event) => onChange("backup_reasoning_provider", event.target.value)}
+                      options={REASONING_PROVIDER_OPTIONS.map((provider) => ({ value: provider, label: getProviderLabel(provider) }))}
+                    />
+                    <SelectField
+                      label="备用推理模型"
+                      value={String(form.backup_reasoning_model ?? "")}
+                      onChange={(event) => onChange("backup_reasoning_model", event.target.value)}
+                      options={buildModelOptions(backupReasoningModels, String(form.backup_reasoning_model ?? ""))}
+                    />
+                    <SelectField
+                      label="备用视觉模型"
+                      value={String(form.backup_vision_model ?? "")}
+                      onChange={(event) => onChange("backup_vision_model", event.target.value)}
+                      options={buildModelOptions(backupVisionModels, String(form.backup_vision_model ?? ""))}
+                    />
+                    <SelectField
+                      label="备用搜索 Provider"
+                      value={backupSearchProvider}
+                      onChange={(event) => onChange("backup_search_provider", event.target.value)}
+                      options={searchProviders}
+                    />
+                    <SelectField
+                      label="备用搜索回退"
+                      value={backupSearchFallbackProvider}
+                      onChange={(event) => onChange("backup_search_fallback_provider", event.target.value)}
+                      options={searchFallbackProviders}
+                    />
+                    {backupSearchProvider === "model" || backupSearchFallbackProvider === "model" ? (
+                      <TextField
+                        label="备用搜索辅助模型"
+                        value={String(form.backup_model_search_helper ?? "")}
+                        onChange={(event) => onChange("backup_model_search_helper", event.target.value)}
+                      />
+                    ) : null}
+                    <div className="settings-chain-note muted">
+                      备用方案会把推理、视觉和搜索切到同一套链路。当前测试默认值是 MiniMax Coding Plan + MiniMax-M2.7-highspeed。
+                    </div>
+                  </>
+                ) : null}
                 <div className="settings-chain-note muted">主视觉理解始终跟随当前推理 Provider，只有兜底链路可单独配置。</div>
               </>
             ) : (

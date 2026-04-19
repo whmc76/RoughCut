@@ -435,7 +435,7 @@ def infer_timeline_analysis(
 
     annotated = []
     for index, item in enumerate(normalized):
-        text = _subtitle_text(item)
+        text = _semantic_subtitle_text(item)
         role = _classify_semantic_role(
             item,
             index=index,
@@ -532,16 +532,16 @@ def _score_silence_cut(
     if not overlaps:
         score += 0.10
         signals.append("clean_gap")
-    if previous_item is not None and _is_low_signal_subtitle_text(_subtitle_text(previous_item), content_profile=content_profile):
+    if previous_item is not None and _is_low_signal_subtitle_text(_semantic_subtitle_text(previous_item), content_profile=content_profile):
         score += 0.16
         signals.append("prev_low_signal")
-    if next_item is not None and _is_low_signal_subtitle_text(_subtitle_text(next_item), content_profile=content_profile):
+    if next_item is not None and _is_low_signal_subtitle_text(_semantic_subtitle_text(next_item), content_profile=content_profile):
         score += 0.12
         signals.append("next_low_signal")
-    if previous_item is not None and _is_restart_cue_text(_subtitle_text(previous_item)):
+    if previous_item is not None and _is_restart_cue_text(_semantic_subtitle_text(previous_item)):
         score += 0.18
         signals.append("restart_cue_prev")
-    if next_item is not None and _is_restart_cue_text(_subtitle_text(next_item)):
+    if next_item is not None and _is_restart_cue_text(_semantic_subtitle_text(next_item)):
         score += 0.18
         signals.append("restart_cue_next")
     if _looks_like_sentence_continuation(previous_item, next_item):
@@ -627,7 +627,7 @@ def _build_subtitle_cut_candidates(
 ) -> list[CutCandidate]:
     candidates: list[CutCandidate] = []
     for item in subtitle_items:
-        text = _subtitle_text(item)
+        text = _semantic_subtitle_text(item)
         if FILLER_PATTERN.search(text):
             clean = FILLER_PATTERN.sub("", text).strip()
             if len(clean) <= 2:
@@ -658,7 +658,7 @@ def _classify_semantic_role(
     total_items: int,
     total_duration: float,
 ) -> str:
-    text = _subtitle_text(item)
+    text = _semantic_subtitle_text(item)
     start_time = float(item.get("start_time", 0.0) or 0.0)
     end_time = float(item.get("end_time", 0.0) or 0.0)
     cta_keywords = ("点赞", "关注", "收藏", "评论", "下期", "下次", "记得", "转发", "关注我")
@@ -969,9 +969,13 @@ def _enrich_subtitle_items_with_transcript_evidence(
         confidence_values: list[float] = []
         logprob_values: list[float] = []
         speaker_labels: list[str] = []
+        transcript_texts: list[str] = []
         has_alignment = False
         word_count = 0
         for segment in overlaps:
+            segment_text = str(segment.get("text") or "").strip()
+            if segment_text:
+                transcript_texts.append(segment_text)
             if segment.get("confidence") is not None:
                 confidence_values.append(float(segment["confidence"]))
             if segment.get("logprob") is not None:
@@ -999,6 +1003,8 @@ def _enrich_subtitle_items_with_transcript_evidence(
                 "speaker_labels": sorted(set(speaker_labels)),
                 "has_speaker_change": len(set(speaker_labels)) > 1,
                 "alignment_supported": has_alignment,
+                "transcript_text": " ".join(transcript_texts).strip(),
+                "transcript_texts": transcript_texts,
                 "word_count": word_count,
             }
         )
@@ -1089,7 +1095,7 @@ def _refine_segments_for_pacing(
             timeline_analysis=timeline_analysis,
             content_profile=content_profile,
         )
-        max_signal = max(_subtitle_signal_score(_subtitle_text(item), content_profile=content_profile) for item in overlaps)
+        max_signal = max(_subtitle_signal_score(_semantic_subtitle_text(item), content_profile=content_profile) for item in overlaps)
         overlap_start = min(float(item.get("start_time", 0.0) or 0.0) for item in overlaps)
         overlap_end = max(float(item.get("end_time", 0.0) or 0.0) for item in overlaps)
         overlap_duration = max(0.0, overlap_end - overlap_start)
@@ -1107,9 +1113,9 @@ def _refine_segments_for_pacing(
             pad_after += _SHORT_SUBTITLE_PAD_AFTER_BONUS_SEC
         first_overlap = min(overlaps, key=lambda item: float(item.get("start_time", 0.0) or 0.0))
         last_overlap = max(overlaps, key=lambda item: float(item.get("end_time", 0.0) or 0.0))
-        if _looks_like_continuation_head(_subtitle_text(first_overlap)):
+        if _looks_like_continuation_head(_semantic_subtitle_text(first_overlap)):
             pad_before += _KEEP_CONTINUATION_PAD_BEFORE_BONUS_SEC
-        if _looks_like_incomplete_tail(_subtitle_text(last_overlap)):
+        if _looks_like_incomplete_tail(_semantic_subtitle_text(last_overlap)):
             pad_after += _KEEP_INCOMPLETE_PAD_AFTER_BONUS_SEC
 
         short_keep_audio_safe_sec = float(trim_profile["short_keep_audio_safe_sec"]) + min(0.55, keep_energy * 0.24)
@@ -1140,7 +1146,7 @@ def _refine_segments_for_pacing(
         seg_duration = max(0.0, segment.end - segment.start)
         overlaps = _overlapping_subtitle_items(segment.start, segment.end, subtitle_items)
         max_signal = max(
-            (_subtitle_signal_score(_subtitle_text(item), content_profile=content_profile) for item in overlaps),
+            (_subtitle_signal_score(_semantic_subtitle_text(item), content_profile=content_profile) for item in overlaps),
             default=0.0,
         )
         keep_energy = _resolve_keep_energy_for_segment(
@@ -1185,7 +1191,7 @@ def _resolve_keep_energy_for_segment(
     midpoint = segment.start + max(0.0, segment.end - segment.start) * 0.5
     trim_intensity = "balanced"
     max_signal = max(
-        (_subtitle_signal_score(_subtitle_text(item), content_profile=content_profile) for item in overlaps),
+        (_subtitle_signal_score(_semantic_subtitle_text(item), content_profile=content_profile) for item in overlaps),
         default=0.0,
     )
     if max_signal >= _STRONG_SUBTITLE_SIGNAL_SCORE:
@@ -1281,7 +1287,7 @@ def _build_keep_energy_segments_analysis(
         )
         section_action = _section_action_for_time(midpoint, timeline_analysis=timeline_analysis)
         max_signal = max(
-            (_subtitle_signal_score(_subtitle_text(item), content_profile=content_profile) for item in overlaps),
+            (_subtitle_signal_score(_semantic_subtitle_text(item), content_profile=content_profile) for item in overlaps),
             default=0.0,
         )
         emphasis_count = sum(
@@ -1492,6 +1498,18 @@ def _subtitle_text(item: dict) -> str:
     return str(item.get("text_final") or item.get("text_norm") or item.get("text_raw") or "")
 
 
+def _semantic_subtitle_text(item: dict[str, Any] | None) -> str:
+    if not item:
+        return ""
+    transcript_text = str(item.get("transcript_text") or "").strip()
+    if transcript_text:
+        return transcript_text
+    transcript_texts = [str(text).strip() for text in (item.get("transcript_texts") or []) if str(text).strip()]
+    if transcript_texts:
+        return " ".join(transcript_texts).strip()
+    return _subtitle_text(item)
+
+
 def _compact_subtitle_text(text: str) -> str:
     return _NON_WORD_PATTERN.sub("", str(text or "").strip()).upper()
 
@@ -1670,8 +1688,8 @@ def _looks_like_sentence_continuation(
 ) -> bool:
     if previous_item is None or next_item is None:
         return False
-    previous_text = _subtitle_text(previous_item)
-    next_text = _subtitle_text(next_item)
+    previous_text = _semantic_subtitle_text(previous_item)
+    next_text = _semantic_subtitle_text(next_item)
     if _looks_like_incomplete_tail(previous_text):
         return True
     if _looks_like_continuation_head(next_text):
@@ -1694,8 +1712,8 @@ def _looks_like_semantic_bridge(
 ) -> bool:
     if previous_item is None or next_item is None:
         return False
-    previous_text = _subtitle_text(previous_item)
-    next_text = _subtitle_text(next_item)
+    previous_text = _semantic_subtitle_text(previous_item)
+    next_text = _semantic_subtitle_text(next_item)
     return (
         _subtitle_signal_score(previous_text, content_profile=content_profile) >= _STRONG_SUBTITLE_SIGNAL_SCORE
         and _subtitle_signal_score(next_text, content_profile=content_profile) >= _STRONG_SUBTITLE_SIGNAL_SCORE
@@ -1716,7 +1734,7 @@ def _collect_restart_retake_cuts(
     )
     cuts: list[tuple[float, float, str]] = []
     for start_index, item in enumerate(ordered):
-        fragment_text = _subtitle_text(item)
+        fragment_text = _semantic_subtitle_text(item)
         fragment_compact = _compact_subtitle_text(fragment_text)
         if (
             len(fragment_compact) < _RETAKE_MIN_PREFIX_LEN
@@ -1733,7 +1751,7 @@ def _collect_restart_retake_cuts(
             next_start = float(next_item.get("start_time", 0.0) or 0.0)
             if next_start - fragment_end > _RETAKE_MAX_GAP_SEC:
                 break
-            next_text = _subtitle_text(next_item)
+            next_text = _semantic_subtitle_text(next_item)
             next_compact = _strip_restart_prefix(_compact_subtitle_text(next_text))
             if not _looks_like_retake_match(fragment_compact, next_compact):
                 continue
@@ -1784,7 +1802,7 @@ def _window_has_restart_cue(
     next_index: int,
 ) -> bool:
     for item in ordered[start_index:next_index + 1]:
-        if _is_restart_cue_text(_subtitle_text(item)):
+        if _is_restart_cue_text(_semantic_subtitle_text(item)):
             return True
     return False
 
@@ -1800,7 +1818,7 @@ def _retake_window_is_disposable(
         return True
     saw_restart_cue = False
     for middle_item in ordered[start_index + 1:next_index]:
-        middle_text = _subtitle_text(middle_item)
+        middle_text = _semantic_subtitle_text(middle_item)
         if _is_restart_cue_text(middle_text):
             saw_restart_cue = True
             continue
@@ -1839,7 +1857,7 @@ def _is_visual_showcase_gap(
     close_next = next_item is not None and float(next_item.get("start_time", 0.0) or 0.0) - end_time <= _SHOWCASE_CONTEXT_MAX_GAP_SEC
     if not (close_prev or close_next):
         return False
-    context_texts = [_subtitle_text(item) for item in (previous_item, next_item) if item is not None]
+    context_texts = [_semantic_subtitle_text(item) for item in (previous_item, next_item) if item is not None]
     if not any(_has_visual_showcase_signal(text, content_profile=content_profile) for text in context_texts):
         return False
     scene_hits = sum(1 for point in scene_points if start_time - 0.12 <= point <= end_time + 0.12)

@@ -152,6 +152,7 @@ from roughcut.review.subtitle_translation import (
     resolve_translation_target_language,
     translate_subtitle_items,
 )
+from roughcut.speech.alignment import tokenize_alignment_text
 from roughcut.review.telegram_bot import get_telegram_review_bot_service
 from roughcut.speech.postprocess import (
     SubtitleEntry,
@@ -2305,6 +2306,343 @@ def _build_transcript_review_result_payload(
     }
 
 
+def _subtitle_correction_attr(correction: Any, key: str) -> Any:
+    if isinstance(correction, dict):
+        return correction.get(key)
+    return getattr(correction, key, None)
+
+
+def _serialize_transcript_review_correction(correction: Any) -> dict[str, Any]:
+    human_decision = str(_subtitle_correction_attr(correction, "human_decision") or "").strip().lower()
+    auto_applied = bool(_subtitle_correction_attr(correction, "auto_applied"))
+    status = "accepted" if auto_applied or human_decision == "accepted" else "pending" if human_decision != "rejected" else "rejected"
+    accepted = str(
+        _subtitle_correction_attr(correction, "human_override")
+        or _subtitle_correction_attr(correction, "suggested_span")
+        or ""
+    ).strip()
+    original = str(_subtitle_correction_attr(correction, "original_span") or "").strip()
+    return {
+        "subtitle_item_id": str(_subtitle_correction_attr(correction, "subtitle_item_id") or ""),
+        "original": original,
+        "accepted": accepted,
+        "status": status,
+        "original_span": original,
+        "suggested_span": accepted,
+        "human_decision": _subtitle_correction_attr(correction, "human_decision"),
+        "human_override": _subtitle_correction_attr(correction, "human_override"),
+        "auto_applied": bool(_subtitle_correction_attr(correction, "auto_applied")),
+        "source": str(_subtitle_correction_attr(correction, "source") or "").strip(),
+        "change_type": str(_subtitle_correction_attr(correction, "change_type") or "").strip(),
+        "confidence": _subtitle_correction_attr(correction, "confidence"),
+    }
+
+
+def _timeline_overlap_seconds(
+    left_start: float,
+    left_end: float,
+    right_start: float,
+    right_end: float,
+) -> float:
+    return max(0.0, min(float(left_end), float(right_end)) - max(float(left_start), float(right_start)))
+
+
+def _select_transcript_segments_for_correction(
+    *,
+    correction_payload: dict[str, Any],
+    subtitle_item: SubtitleItem | None,
+    transcript_rows: list[TranscriptSegment],
+) -> list[TranscriptSegment]:
+    if not transcript_rows:
+        return []
+    if subtitle_item is None:
+        return transcript_rows[:1]
+
+    subtitle_start = float(getattr(subtitle_item, "start_time", 0.0) or 0.0)
+    subtitle_end = float(getattr(subtitle_item, "end_time", subtitle_start) or subtitle_start)
+    original = str(correction_payload.get("original") or "").strip()
+    accepted = str(correction_payload.get("accepted") or "").strip()
+
+    candidates: list[tuple[float, int, TranscriptSegment]] = []
+    for transcript_row in transcript_rows:
+        overlap = _timeline_overlap_seconds(
+            subtitle_start,
+            subtitle_end,
+            float(getattr(transcript_row, "start_time", 0.0) or 0.0),
+            float(getattr(transcript_row, "end_time", 0.0) or 0.0),
+        )
+        if overlap <= 0.0:
+            continue
+        transcript_text = str(getattr(transcript_row, "text", "") or "")
+        direct_match = int(bool(original and original in transcript_text) or bool(accepted and accepted in transcript_text))
+        candidates.append((overlap, direct_match, transcript_row))
+
+    if not candidates:
+        return transcript_rows[:1]
+
+    matched = [row for overlap, direct_match, row in candidates if direct_match]
+    if matched:
+        return matched[:1]
+
+    candidates.sort(
+        key=lambda item: (
+            float(item[0]),
+            -int(getattr(item[2], "segment_index", 0) or 0),
+        ),
+        reverse=True,
+    )
+    return [candidates[0][2]]
+
+
+def _build_transcript_first_canonical_layer(
+    *,
+    transcript_rows: list[TranscriptSegment],
+    subtitle_items: list[SubtitleItem],
+    corrections: list[SubtitleCorrection],
+) -> Any:
+    if not transcript_rows:
+        return build_canonical_transcript_layer(
+            subtitle_items,
+            corrections=corrections,
+            source_basis="subtitle_projection_review",
+            reference_segments=_build_reference_segment_adapters(transcript_rows),
+        )
+
+    synthetic_items: list[SimpleNamespace] = []
+    synthetic_corrections: list[dict[str, Any]] = []
+    subtitle_by_id = {
+        str(getattr(item, "id", "") or ""): item
+        for item in list(subtitle_items or [])
+        if str(getattr(item, "id", "") or "")
+    }
+    transcript_rows_ordered = sorted(
+        list(transcript_rows or []),
+        key=lambda row: (
+            int(getattr(row, "segment_index", 0) or 0),
+            float(getattr(row, "start_time", 0.0) or 0.0),
+            float(getattr(row, "end_time", 0.0) or 0.0),
+        ),
+    )
+    synthetic_ids = {
+        int(getattr(row, "segment_index", index) or index): f"transcript-segment-{int(getattr(row, 'segment_index', index) or index)}"
+        for index, row in enumerate(transcript_rows_ordered)
+    }
+    seen_corrections: set[tuple[str, str, str, str]] = set()
+
+    for index, transcript_row in enumerate(transcript_rows_ordered):
+        segment_index = int(getattr(transcript_row, "segment_index", index) or index)
+        synthetic_id = synthetic_ids[segment_index]
+        transcript_text = str(getattr(transcript_row, "text", "") or "")
+        synthetic_items.append(
+            SimpleNamespace(
+                id=synthetic_id,
+                item_index=segment_index,
+                start_time=float(getattr(transcript_row, "start_time", 0.0) or 0.0),
+                end_time=float(getattr(transcript_row, "end_time", 0.0) or 0.0),
+                text_raw=transcript_text,
+                text_norm=transcript_text,
+                text_final=transcript_text,
+            )
+        )
+
+    for correction in list(corrections or []):
+        correction_payload = _serialize_transcript_review_correction(correction)
+        subtitle_item = subtitle_by_id.get(str(correction_payload.get("subtitle_item_id") or ""))
+        for transcript_row in _select_transcript_segments_for_correction(
+            correction_payload=correction_payload,
+            subtitle_item=subtitle_item,
+            transcript_rows=transcript_rows_ordered,
+        ):
+            segment_index = int(getattr(transcript_row, "segment_index", 0) or 0)
+            synthetic_id = synthetic_ids.get(segment_index)
+            if not synthetic_id:
+                continue
+            key = (
+                synthetic_id,
+                str(correction_payload.get("original") or ""),
+                str(correction_payload.get("accepted") or ""),
+                str(correction_payload.get("status") or ""),
+            )
+            if key in seen_corrections:
+                continue
+            seen_corrections.add(key)
+            synthetic_corrections.append(
+                {
+                    **correction_payload,
+                    "subtitle_item_id": synthetic_id,
+                }
+            )
+
+    return build_canonical_transcript_layer(
+        synthetic_items,
+        corrections=synthetic_corrections,
+        source_basis="transcript_fact_review",
+        reference_segments=_build_reference_segment_adapters(transcript_rows_ordered),
+    )
+
+
+def _resolve_keep_segment_bounds(segment: dict[str, Any]) -> tuple[float, float]:
+    start = float(segment.get("start", segment.get("start_time", 0.0)) or 0.0)
+    end = float(segment.get("end", segment.get("end_time", start)) or start)
+    return start, max(start, end)
+
+
+def _resolve_projection_split_profile(projection_data: dict[str, Any] | None, media_meta_json: dict[str, Any] | None) -> dict[str, Any]:
+    split_profile = dict((projection_data or {}).get("split_profile") or {})
+    if split_profile:
+        return split_profile
+    media_meta = media_meta_json or {}
+    return _resolve_subtitle_split_profile(
+        width=media_meta.get("width"),
+        height=media_meta.get("height"),
+    )
+
+
+def _build_fallback_canonical_words(segment: dict[str, Any]) -> list[dict[str, Any]]:
+    text = str(segment.get("text_canonical") or segment.get("text") or segment.get("text_raw") or "").strip()
+    tokens = tokenize_alignment_text(text)
+    if not tokens:
+        return []
+    start = float(segment.get("start", 0.0) or 0.0)
+    end = float(segment.get("end", start) or start)
+    duration = max(0.001, end - start)
+    token_span = duration / max(len(tokens), 1)
+    words: list[dict[str, Any]] = []
+    for token_index, token in enumerate(tokens):
+        token_start = start + token_index * token_span
+        token_end = end if token_index == len(tokens) - 1 else min(end, token_start + token_span)
+        words.append(
+            {
+                "word": token,
+                "start": round(token_start, 3),
+                "end": round(max(token_start, token_end), 3),
+                "alignment": {"source": "canonical_segment_fallback"},
+            }
+        )
+    return words
+
+
+def _project_canonical_transcript_to_timeline(
+    canonical_transcript_layer: dict[str, Any] | None,
+    keep_segments: list[dict[str, Any]],
+    *,
+    split_profile: dict[str, Any],
+) -> list[dict[str, Any]]:
+    canonical_data = canonical_transcript_layer if isinstance(canonical_transcript_layer, dict) else {}
+    canonical_segments = list(canonical_data.get("segments") or [])
+    if not canonical_segments or not keep_segments:
+        return []
+
+    ordered_keep_segments = sorted(keep_segments, key=lambda segment: _resolve_keep_segment_bounds(segment))
+    keep_map: list[dict[str, float]] = []
+    out_cursor = 0.0
+    for segment in ordered_keep_segments:
+        in_start, in_end = _resolve_keep_segment_bounds(segment)
+        keep_map.append(
+            {
+                "in_start": in_start,
+                "in_end": in_end,
+                "out_start": out_cursor,
+            }
+        )
+        out_cursor += max(0.0, in_end - in_start)
+
+    projected_words: list[dict[str, Any]] = []
+    for segment_index, segment in enumerate(canonical_segments):
+        segment_words = [
+            dict(word)
+            for word in list(segment.get("words") or [])
+            if isinstance(word, dict) and str(word.get("word") or "").strip()
+        ]
+        if not segment_words:
+            segment_words = _build_fallback_canonical_words(segment)
+        for word_index, word in enumerate(segment_words):
+            raw_start = float(word.get("start", segment.get("start", 0.0)) or 0.0)
+            raw_end = float(word.get("end", raw_start) or raw_start)
+            if raw_end <= raw_start:
+                continue
+            for keep in keep_map:
+                overlap_start = max(raw_start, keep["in_start"])
+                overlap_end = min(raw_end, keep["in_end"])
+                if overlap_end <= overlap_start + 0.001:
+                    continue
+                projected_words.append(
+                    {
+                        "word": str(word.get("word") or "").strip(),
+                        "start": round(keep["out_start"] + (overlap_start - keep["in_start"]), 3),
+                        "end": round(keep["out_start"] + (overlap_end - keep["in_start"]), 3),
+                        "alignment": dict(word.get("alignment") or {}),
+                        "segment_index": segment_index,
+                        "word_index": word_index,
+                    }
+                )
+
+    if not projected_words:
+        return []
+
+    projected_words.sort(
+        key=lambda word: (
+            float(word.get("start", 0.0) or 0.0),
+            float(word.get("end", 0.0) or 0.0),
+            int(word.get("segment_index", 0) or 0),
+            int(word.get("word_index", 0) or 0),
+        )
+    )
+    projected_text = "".join(str(word.get("word") or "").strip() for word in projected_words)
+    projected_segment = SimpleNamespace(
+        segment_index=0,
+        start_time=float(projected_words[0]["start"]),
+        end_time=float(projected_words[-1]["end"]),
+        text=projected_text,
+        words_json=projected_words,
+    )
+    segmentation_result = segment_subtitles(
+        [projected_segment],
+        max_chars=int(split_profile.get("max_chars") or 30),
+        max_duration=float(split_profile.get("max_duration") or 5.0),
+    )
+    projected_entries: list[dict[str, Any]] = []
+    for entry in list(segmentation_result.entries or []):
+        projected_entries.append(
+            {
+                "index": int(getattr(entry, "index", len(projected_entries)) or len(projected_entries)),
+                "start_time": float(getattr(entry, "start", 0.0) or 0.0),
+                "end_time": float(getattr(entry, "end", 0.0) or 0.0),
+                "text_raw": str(getattr(entry, "text_raw", "") or ""),
+                "text_norm": str(getattr(entry, "text_norm", None) or getattr(entry, "text_raw", "") or ""),
+                "text_final": str(getattr(entry, "text_norm", None) or getattr(entry, "text_raw", "") or ""),
+            }
+        )
+    return projected_entries
+
+
+async def _build_edited_subtitle_projection(
+    session,
+    *,
+    job_id: uuid.UUID,
+    keep_segments: list[dict[str, Any]],
+    projection_data: dict[str, Any] | None,
+    fallback_subtitles: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    canonical_artifact = await _load_latest_optional_artifact(
+        session,
+        job_id=job_id,
+        artifact_types=(ARTIFACT_TYPE_CANONICAL_TRANSCRIPT_LAYER,),
+    )
+    media_meta = await _load_latest_optional_artifact(session, job_id=job_id, artifact_types=("media_meta",))
+    media_meta_json = media_meta.data_json if media_meta and isinstance(media_meta.data_json, dict) else {}
+    split_profile = _resolve_projection_split_profile(projection_data, media_meta_json)
+    canonical_data = canonical_artifact.data_json if canonical_artifact and isinstance(canonical_artifact.data_json, dict) else {}
+    projected_entries = _project_canonical_transcript_to_timeline(
+        canonical_data,
+        keep_segments,
+        split_profile=split_profile,
+    )
+    if projected_entries:
+        return projected_entries
+    return remap_subtitles_to_timeline(fallback_subtitles, keep_segments)
+
+
 def _subtitle_item_payload(item: SubtitleItem) -> dict[str, Any]:
     return {
         "index": item.item_index,
@@ -4245,6 +4583,7 @@ async def run_subtitle_term_resolution(job_id: str) -> dict:
                 "patch_count": patch["metrics"]["patch_count"],
                 "pending_count": patch["metrics"]["pending_count"],
                 "auto_applied_count": patch["metrics"]["auto_applied_count"],
+                "autocorrect_policy": str(patch.get("autocorrect_policy") or "lexical_only"),
                 "confidence": patch.get("confidence"),
             },
         }
@@ -4253,7 +4592,7 @@ async def run_subtitle_term_resolution(job_id: str) -> dict:
             step,
             detail=(
                 f"术语候选 {patch['metrics']['patch_count']} 条，"
-                f"自动接受 {patch['metrics']['auto_applied_count']} 条，"
+                f"词级自动接受 {patch['metrics']['auto_applied_count']} 条，"
                 f"待确认 {patch['metrics']['pending_count']} 条"
             ),
             progress=1.0,
@@ -4786,10 +5125,10 @@ async def run_glossary_review(job_id: str) -> dict:
             detail=f"已识别 {len(corrections)} 处术语纠错候选，自动接受 {auto_accepted_corrections} 条",
             progress=0.45,
         )
-        reviewed_transcript_layer = build_canonical_transcript_layer(
-            subtitle_items,
+        reviewed_transcript_layer = _build_transcript_first_canonical_layer(
+            transcript_rows=_transcript_rows,
+            subtitle_items=subtitle_items,
             corrections=corrections,
-            reference_segments=_build_reference_segment_adapters(_transcript_rows),
         )
         reviewed_transcript_context = reviewed_transcript_layer.as_dict()
         reviewed_transcript_dicts = _normalize_transcript_segment_payloads(
@@ -4929,10 +5268,10 @@ async def run_transcript_review(job_id: str) -> dict:
             include_canonical=False,
         )
         corrections = await _load_subtitle_corrections(session, job_id=job.id)
-        canonical_transcript_layer = build_canonical_transcript_layer(
-            subtitle_items,
+        canonical_transcript_layer = _build_transcript_first_canonical_layer(
+            transcript_rows=_transcript_rows,
+            subtitle_items=subtitle_items,
             corrections=corrections,
-            reference_segments=_build_reference_segment_adapters(_transcript_rows),
         )
         projection_artifact = await _load_latest_optional_artifact(
             session,
@@ -5529,7 +5868,13 @@ async def run_edit_plan(job_id: str) -> dict:
 
         packaging_plan = resolve_packaging_plan_for_job(str(job.id), content_profile=content_profile)
         keep_segments = [segment for segment in decision.to_dict().get("segments", []) if segment.get("type") == "keep"]
-        remapped_subtitles = remap_subtitles_to_timeline(subtitle_dicts, keep_segments)
+        remapped_subtitles = await _build_edited_subtitle_projection(
+            session,
+            job_id=job.id,
+            keep_segments=keep_segments,
+            projection_data=projection_data,
+            fallback_subtitles=subtitle_dicts,
+        )
         packaged_timeline_analysis = infer_timeline_analysis(
             remapped_subtitles,
             content_profile=content_profile,
@@ -5738,7 +6083,14 @@ async def run_render(job_id: str) -> dict:
             s for s in editorial_timeline.data_json.get("segments", [])
             if s.get("type") == "keep"
         ]
-        remapped_subtitles = remap_subtitles_to_timeline(subtitle_dicts, keep_segments)
+        async with get_session_factory()() as projection_session:
+            remapped_subtitles = await _build_edited_subtitle_projection(
+                projection_session,
+                job_id=uuid.UUID(job_id),
+                keep_segments=keep_segments,
+                projection_data=projection_data,
+                fallback_subtitles=subtitle_dicts,
+            )
         ai_effect_render_plan = build_ai_effect_render_plan(
             render_plan_timeline.data_json,
             keep_segments=keep_segments,

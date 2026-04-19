@@ -2030,7 +2030,7 @@ async def test_jobs_list_quality_preview_falls_back_to_subtitle_stage_reports(cl
                         "score": 87.0,
                         "blocking": False,
                         "blocking_reasons": [],
-                        "warning_reasons": ["字幕术语已自动纠偏 1 处"],
+                        "warning_reasons": ["已应用词级纠偏 1 处"],
                     },
                 ),
             ]
@@ -2043,7 +2043,7 @@ async def test_jobs_list_quality_preview_falls_back_to_subtitle_stage_reports(cl
     assert item["quality_score"] == 87.0
     assert item["quality_grade"] == "B"
     assert item["quality_summary"] == "术语解析 3 条 · 一致性审校 87.0"
-    assert item["quality_issue_codes"] == ["术语解析待确认 2 条", "字幕术语已自动纠偏 1 处"]
+    assert item["quality_issue_codes"] == ["术语解析待确认 2 条", "已应用词级纠偏 1 处"]
 
 
 @pytest.mark.asyncio
@@ -2273,6 +2273,64 @@ async def test_get_job_exposes_standardized_review_context(client: AsyncClient):
 
 
 @pytest.mark.asyncio
+async def test_get_job_prefers_subtitle_review_context_when_manual_review_is_required(client: AsyncClient):
+    from roughcut.db.models import Artifact, Job, JobStep
+    from roughcut.db.session import get_session_factory
+
+    job_id = uuid.uuid4()
+
+    async with get_session_factory()() as session:
+        session.add(
+            Job(
+                id=job_id,
+                source_path="jobs/demo/subtitle-manual-review.mp4",
+                source_name="subtitle-manual-review.mp4",
+                status="needs_review",
+                language="zh-CN",
+            )
+        )
+        session.add(JobStep(job_id=job_id, step_name="summary_review", status="done"))
+        session.add(JobStep(job_id=job_id, step_name="final_review", status="done"))
+        session.add(
+            Artifact(
+                job_id=job_id,
+                artifact_type="subtitle_quality_report",
+                data_json={
+                    "score": 52.0,
+                    "blocking": True,
+                    "blocking_reasons": ["检测到语义污染 4 处，必须人工确认"],
+                    "warning_reasons": [],
+                    "metrics": {
+                        "semantic_bad_term_total": 4,
+                        "lexical_bad_term_total": 1,
+                    },
+                },
+            )
+        )
+        session.add(
+            Artifact(
+                job_id=job_id,
+                artifact_type="quality_assessment",
+                data_json={
+                    "score": 52.0,
+                    "grade": "D",
+                    "issue_codes": ["subtitle_semantic_contamination"],
+                    "manual_review_required": True,
+                },
+            )
+        )
+        await session.commit()
+
+    response = await client.get(f"/api/v1/jobs/{job_id}")
+    assert response.status_code == 200
+    data = response.json()
+
+    assert data["review_step"] == "summary_review"
+    assert data["review_label"] == "字幕复核"
+    assert "仅允许词级纠偏" in data["review_detail"]
+
+
+@pytest.mark.asyncio
 async def test_job_activity_sorts_pending_steps_and_hides_avatar_until_reached(client: AsyncClient):
     from roughcut.db.models import Job, JobStep
     from roughcut.db.session import get_session_factory
@@ -2475,7 +2533,7 @@ async def test_job_activity_stream(client: AsyncClient):
     assert data["current_step"]["step_name"] == "render"
     assert data["current_step"]["detail"].startswith("执行 FFmpeg 渲染成片")
     subtitle_decision = next(item for item in data["decisions"] if item["kind"] == "subtitle_review")
-    assert subtitle_decision["detail"] == "待审 1 条，自动/已接受 0 条"
+    assert subtitle_decision["detail"] == "待审 1 条，词级自动/已接受 0 条"
 
 
 @pytest.mark.asyncio
@@ -3181,6 +3239,48 @@ async def test_job_activity_reports_quality_assessment_decision(client: AsyncCli
 
 
 @pytest.mark.asyncio
+async def test_job_activity_reports_quality_assessment_manual_review_requirement(client: AsyncClient):
+    from roughcut.db.models import Artifact, Job
+    from roughcut.db.session import get_session_factory
+
+    job_id = uuid.uuid4()
+
+    async with get_session_factory()() as session:
+        session.add(
+            Job(
+                id=job_id,
+                source_path="jobs/demo/quality-manual-review.mp4",
+                source_name="quality-manual-review.mp4",
+                status="needs_review",
+                language="zh-CN",
+            )
+        )
+        session.add(
+            Artifact(
+                job_id=job_id,
+                artifact_type="quality_assessment",
+                data_json={
+                    "score": 52.0,
+                    "grade": "D",
+                    "issue_codes": ["subtitle_semantic_contamination"],
+                    "recommended_rerun_steps": [],
+                    "manual_review_required": True,
+                },
+            )
+        )
+        await session.commit()
+
+    response = await client.get(f"/api/v1/jobs/{job_id}/activity")
+    assert response.status_code == 200
+    data = response.json()
+    quality_decision = next(item for item in data["decisions"] if item["kind"] == "quality_assessment")
+    assert quality_decision["summary"] == "D 52.0 · 1 个扣分项 · 人工复核"
+    assert "subtitle_semantic_contamination" in quality_decision["detail"]
+    assert "必须人工复核" in quality_decision["detail"]
+    assert "建议补跑" not in quality_decision["detail"]
+
+
+@pytest.mark.asyncio
 async def test_job_activity_reports_subtitle_stage_decisions_and_events(client: AsyncClient):
     from roughcut.db.models import Artifact, Job
     from roughcut.db.session import get_session_factory
@@ -3420,15 +3520,16 @@ async def test_job_preview_uses_subtitle_review_context_when_summary_review_is_b
         )
         session.add(JobStep(job_id=job_id, step_name="summary_review", status="pending"))
         session.add(
-            Artifact(
-                job_id=job_id,
-                artifact_type="subtitle_term_resolution_patch",
-                data_json={
-                    "metrics": {
-                        "patch_count": 4,
-                        "pending_count": 2,
-                        "auto_applied_count": 1,
-                    }
+                Artifact(
+                    job_id=job_id,
+                    artifact_type="subtitle_term_resolution_patch",
+                    data_json={
+                        "autocorrect_policy": "lexical_only",
+                        "metrics": {
+                            "patch_count": 4,
+                            "pending_count": 2,
+                            "auto_applied_count": 1,
+                        }
                 },
             )
         )
@@ -3440,7 +3541,54 @@ async def test_job_preview_uses_subtitle_review_context_when_summary_review_is_b
 
     assert data["review_step"] == "summary_review"
     assert data["review_label"] == "字幕复核"
-    assert "先人工确认 2 条术语候选" in data["review_detail"]
+    assert "先人工确认 2 条词级术语候选" in data["review_detail"]
+
+
+@pytest.mark.asyncio
+async def test_job_activity_routes_semantic_contamination_to_semantic_review(client: AsyncClient):
+    from roughcut.db.models import Artifact, Job, JobStep
+    from roughcut.db.session import get_session_factory
+
+    job_id = uuid.uuid4()
+
+    async with get_session_factory()() as session:
+        session.add(
+            Job(
+                id=job_id,
+                source_path="jobs/demo/semantic-contamination.mp4",
+                source_name="20260228-152013 奈特科尔 nitecore EDC17开箱以及和edc37的对比.mp4",
+                status="needs_review",
+                language="zh-CN",
+            )
+        )
+        session.add(JobStep(job_id=job_id, step_name="summary_review", status="pending"))
+        session.add(
+            Artifact(
+                job_id=job_id,
+                artifact_type="subtitle_quality_report",
+                data_json={
+                    "score": 52.0,
+                    "blocking": True,
+                    "blocking_reasons": ["检测到语义污染 4 处，必须人工确认"],
+                    "warning_reasons": [],
+                    "metrics": {
+                        "identity_missing": False,
+                        "semantic_bad_term_total": 4,
+                        "lexical_bad_term_total": 1,
+                    },
+                },
+            )
+        )
+        await session.commit()
+
+    response = await client.get(f"/api/v1/jobs/{job_id}/activity")
+    assert response.status_code == 200
+    data = response.json()
+
+    subtitle_quality_decision = next(item for item in data["decisions"] if item["kind"] == "subtitle_quality")
+    assert subtitle_quality_decision["review_label"] == "语义污染复核"
+    assert subtitle_quality_decision["issue_codes"] == ["subtitle_semantic_contamination"]
+    assert "仅允许词级纠偏" in subtitle_quality_decision["recommended_action"]
 
 
 @pytest.mark.asyncio

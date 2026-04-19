@@ -27,7 +27,7 @@ from roughcut.config import get_settings
 from roughcut.db.models import Artifact, Job, JobStep, RenderOutput, SubtitleCorrection, SubtitleItem, Timeline
 from roughcut.db.session import get_session_factory
 from roughcut.pipeline.quality import QUALITY_ARTIFACT_TYPE, assess_job_quality
-from roughcut.pipeline.rerun_actions import QUALITY_RERUN_STEPS
+from roughcut.pipeline.rerun_actions import QUALITY_RERUN_STEPS, has_manual_review_only_issue_codes
 from roughcut.review.evidence_types import (
     ARTIFACT_TYPE_CONTENT_PROFILE_OCR,
     ARTIFACT_TYPE_ENTITY_RESOLUTION_TRACE,
@@ -870,8 +870,14 @@ async def _update_job_statuses(session) -> None:
             last_existing_step is not None and last_existing_step.status == "done"
         )
         if done_candidate:
-            rerun_started = await _assess_and_maybe_rerun_job(session, job, steps)
-            if rerun_started:
+            quality_outcome = await _assess_and_maybe_rerun_job(session, job, steps)
+            if quality_outcome == "rerun":
+                continue
+            if quality_outcome == "needs_review":
+                job.status = "needs_review"
+                job.error_message = None
+                job.updated_at = datetime.now(timezone.utc)
+                logger.info("Job %s completed with manual review required", job.id)
                 continue
             job.status = "done"
             job.error_message = None
@@ -1023,7 +1029,7 @@ def _reconcile_terminal_steps(job: Job, steps: list[JobStep]) -> None:
         step.error_message = None
 
 
-async def _assess_and_maybe_rerun_job(session, job: Job, steps: list[JobStep]) -> bool:
+async def _assess_and_maybe_rerun_job(session, job: Job, steps: list[JobStep]) -> str:
     artifacts_result = await session.execute(
         select(Artifact).where(Artifact.job_id == job.id).order_by(Artifact.created_at.asc(), Artifact.id.asc())
     )
@@ -1055,6 +1061,7 @@ async def _assess_and_maybe_rerun_job(session, job: Job, steps: list[JobStep]) -
     recommended_step = recommended_steps[0] if recommended_steps else ""
     issue_codes = [str(code) for code in assessment.get("issue_codes") or [] if str(code).strip()]
     reason_signature = "|".join(sorted(issue_codes))
+    manual_review_required = has_manual_review_only_issue_codes(issue_codes)
 
     settings = get_settings()
     should_rerun = (
@@ -1084,6 +1091,7 @@ async def _assess_and_maybe_rerun_job(session, job: Job, steps: list[JobStep]) -
         "auto_rerun_count": previous_count,
         "auto_rerun_history": previous_history,
         "auto_rerun_triggered": False,
+        "manual_review_required": manual_review_required,
     }
 
     if should_rerun and recommended_steps:
@@ -1113,7 +1121,23 @@ async def _assess_and_maybe_rerun_job(session, job: Job, steps: list[JobStep]) -
             float(assessment.get("score") or 0.0),
             ",".join(issue_codes),
         )
-        return True
+        return "rerun"
+
+    if manual_review_required:
+        payload["auto_rerun_skipped_reason"] = "manual_review_required"
+        session.add(
+            Artifact(
+                job_id=job.id,
+                artifact_type=QUALITY_ARTIFACT_TYPE,
+                data_json=payload,
+            )
+        )
+        logger.info(
+            "Job %s requires manual review, auto rerun skipped, issues=%s",
+            job.id,
+            ",".join(issue_codes),
+        )
+        return "needs_review"
 
     if recommended_step and previous_count >= int(getattr(settings, "quality_auto_rerun_max_attempts", 1) or 1):
         payload["auto_rerun_skipped_reason"] = "max_attempts_reached"
@@ -1131,7 +1155,7 @@ async def _assess_and_maybe_rerun_job(session, job: Job, steps: list[JobStep]) -
             data_json=payload,
         )
     )
-    return False
+    return "done"
 
 
 def _latest_quality_assessment(artifacts: list[Artifact]) -> Artifact | None:

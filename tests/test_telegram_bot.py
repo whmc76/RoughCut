@@ -123,9 +123,9 @@ def test_build_subtitle_review_artifact_lines_summarizes_patch_consistency_and_q
         }
     )
 
-    assert "- 术语修复：2 条候选，已接受 1，待审 1，自动应用 0" in lines
+    assert "- 术语修复：2 条候选，已接受 1，待审 1，词级自动应用 0" in lines
     assert "- 术语候选：狐蝠工业，FXX1小副包" in lines
-    assert "- 处理动作：先人工确认 1 条术语候选，再继续后续摘要与成片流程。" in lines
+    assert "- 处理动作：先人工确认 1 条词级术语候选，再继续后续摘要与成片流程。" in lines
     assert "- 一致性：88.20 分，阻断" in lines
     assert "- 一致性阻断：字幕与文件名品牌不一致" in lines
     assert "- 处理动作：先复核一致性冲突：字幕与文件名品牌不一致；确认后如需自动回退，从 subtitle_consistency_review 起重跑。" in lines

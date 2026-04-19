@@ -443,6 +443,28 @@ def _normalize_config_snapshot(config: dict[str, Any]) -> dict[str, Any]:
     normalized["reasoning_provider"] = str(normalized.get("reasoning_provider") or settings.reasoning_provider).strip().lower()
     normalized["reasoning_model"] = str(normalized.get("reasoning_model") or settings.reasoning_model).strip()
     normalized["reasoning_effort"] = str(normalized.get("reasoning_effort") or settings.reasoning_effort).strip().lower()
+    normalized["llm_backup_enabled"] = bool(normalized.get("llm_backup_enabled", settings.llm_backup_enabled))
+    normalized["backup_reasoning_provider"] = str(
+        normalized.get("backup_reasoning_provider") or settings.backup_reasoning_provider
+    ).strip().lower()
+    normalized["backup_reasoning_model"] = str(
+        normalized.get("backup_reasoning_model") or settings.backup_reasoning_model
+    ).strip()
+    normalized["backup_reasoning_effort"] = str(
+        normalized.get("backup_reasoning_effort") or settings.backup_reasoning_effort
+    ).strip().lower()
+    normalized["backup_vision_model"] = str(
+        normalized.get("backup_vision_model") or settings.backup_vision_model
+    ).strip()
+    normalized["backup_search_provider"] = str(
+        normalized.get("backup_search_provider") or settings.backup_search_provider
+    ).strip().lower()
+    normalized["backup_search_fallback_provider"] = str(
+        normalized.get("backup_search_fallback_provider") or settings.backup_search_fallback_provider
+    ).strip().lower()
+    normalized["backup_model_search_helper"] = str(
+        normalized.get("backup_model_search_helper") or settings.backup_model_search_helper
+    ).strip()
     normalized["local_reasoning_model"] = str(
         normalized.get("local_reasoning_model") or settings.local_reasoning_model
     ).strip()

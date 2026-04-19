@@ -13,7 +13,7 @@ class ModelSearchProvider(SearchProvider):
 
     def __init__(self) -> None:
         settings = get_settings()
-        self._helper = settings.model_search_helper.strip()
+        self._helper = settings.active_model_search_helper.strip()
         if not self._helper:
             raise ValueError("model_search_helper is not configured")
 
