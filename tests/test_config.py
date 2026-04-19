@@ -27,18 +27,18 @@ def test_default_settings():
     assert s.transcription_alignment_mode == "auto"
     assert s.transcription_alignment_min_word_coverage == 0.72
     assert s.llm_mode == "performance"
-    assert s.reasoning_provider == "minimax"
-    assert s.reasoning_model == "MiniMax-M2.7-highspeed"
+    assert s.reasoning_provider == "openai"
+    assert s.reasoning_model == "gpt-5.4"
     assert s.llm_backup_enabled is True
-    assert s.backup_reasoning_provider == "minimax"
-    assert s.backup_reasoning_model == "MiniMax-M2.7-highspeed"
-    assert s.backup_vision_model == "MiniMax-VL-01"
+    assert s.backup_reasoning_provider == "openai"
+    assert s.backup_reasoning_model == "gpt-5.4-mini"
+    assert s.backup_vision_model == "gpt-5.4-mini"
     assert s.backup_search_provider == "auto"
-    assert s.backup_search_fallback_provider == "minimax"
+    assert s.backup_search_fallback_provider == "openai"
     assert s.local_reasoning_model == "qwen3.5:9b"
-    assert s.multimodal_fallback_provider == "ollama"
+    assert s.multimodal_fallback_provider == "openai"
     assert s.search_provider == "auto"
-    assert s.search_fallback_provider == "searxng"
+    assert s.search_fallback_provider == "openai"
     assert s.openai_auth_mode == "api_key"
     assert s.anthropic_auth_mode == "api_key"
     assert s.minimax_base_url == "https://api.minimaxi.com/v1"
@@ -83,7 +83,7 @@ def test_default_settings():
     assert s.quality_auto_rerun_below_score == 75.0
     assert s.quality_auto_rerun_max_attempts == 1
     assert s.avatar_overlay_scale == 0.18
-    assert s.active_reasoning_provider == "minimax"
+    assert s.active_reasoning_provider == "openai"
 
 def test_local_mode_switches_active_provider():
     s = Settings(_env_file=None, llm_mode="local", local_reasoning_model="qwen3.5:9b")

@@ -239,14 +239,14 @@ export function ModelSettingsPanel({ form, config, options, runtimeEnvironment, 
   const activeReasoningProvider = getActiveReasoningProvider(form);
   const activeReasoningModel = getActiveReasoningModel(form);
   const llmBackupEnabled = Boolean(form.llm_backup_enabled ?? true);
-  const backupReasoningProvider = readFormString(form, "backup_reasoning_provider", "minimax");
+  const backupReasoningProvider = readFormString(form, "backup_reasoning_provider", "openai");
   const backupSearchProvider = readFormString(form, "backup_search_provider", "auto");
-  const backupSearchFallbackProvider = readFormString(form, "backup_search_fallback_provider", "minimax");
+  const backupSearchFallbackProvider = readFormString(form, "backup_search_fallback_provider", "openai");
   const hybridAnalysisProvider = readFormString(form, "hybrid_analysis_provider", "openai");
-  const hybridCopyProvider = readFormString(form, "hybrid_copy_provider", "minimax");
+  const hybridCopyProvider = readFormString(form, "hybrid_copy_provider", "openai");
   const hybridAnalysisSearchMode = readFormString(form, "hybrid_analysis_search_mode", "entity_gated");
   const hybridCopySearchMode = readFormString(form, "hybrid_copy_search_mode", "follow_provider");
-  const searchFallbackProvider = readFormString(form, "search_fallback_provider", "searxng");
+  const searchFallbackProvider = readFormString(form, "search_fallback_provider", "openai");
   const transcriptionDialects = options?.transcription_dialects ?? [{ value: "mandarin", label: "普通话" }];
   const multimodalFallbackProviders = options?.multimodal_fallback_providers ?? [{ value: "ollama", label: "Ollama" }];
   const searchProviders = options?.search_providers ?? [{ value: "auto", label: "自动选择" }];
@@ -694,7 +694,7 @@ export function ModelSettingsPanel({ form, config, options, runtimeEnvironment, 
                       />
                     ) : null}
                     <div className="settings-chain-note muted">
-                      备用方案会把推理、视觉和搜索切到同一套链路。当前测试默认值是 MiniMax Coding Plan + MiniMax-M2.7-highspeed。
+                      备用方案会把推理、视觉和搜索切到同一套链路。当前默认值是 OpenAI / Codex 兼容链路，主模型失败后回落到 gpt-5.4-mini。
                     </div>
                   </>
                 ) : null}

@@ -110,6 +110,19 @@ LEGACY_CODING_BACKEND_MODELS: dict[str, str] = {
     "codex": "gpt-5.4-mini",
     "claude": "opus",
 }
+DEFAULT_REASONING_PROVIDER = "openai"
+DEFAULT_REASONING_MODEL = "gpt-5.4"
+DEFAULT_BACKUP_REASONING_PROVIDER = "openai"
+DEFAULT_BACKUP_REASONING_MODEL = "gpt-5.4-mini"
+DEFAULT_BACKUP_VISION_MODEL = "gpt-5.4-mini"
+DEFAULT_HYBRID_ANALYSIS_PROVIDER = "openai"
+DEFAULT_HYBRID_ANALYSIS_MODEL = "gpt-5.4"
+DEFAULT_HYBRID_COPY_PROVIDER = "openai"
+DEFAULT_HYBRID_COPY_MODEL = "gpt-5.4-mini"
+DEFAULT_SEARCH_FALLBACK_PROVIDER = "openai"
+DEFAULT_BACKUP_SEARCH_FALLBACK_PROVIDER = "openai"
+DEFAULT_MULTIMODAL_FALLBACK_PROVIDER = "openai"
+DEFAULT_MULTIMODAL_FALLBACK_MODEL = "gpt-5.4-mini"
 
 
 def resolve_heygem_shared_root(*, ensure_exists: bool = True) -> Path:
@@ -310,33 +323,33 @@ class Settings(BaseSettings):
     # Reasoning
     llm_mode: str = "performance"  # performance | local
     llm_routing_mode: str = "bundled"  # bundled | hybrid_performance
-    reasoning_provider: str = "minimax"  # openai | anthropic | minimax | ollama
-    reasoning_model: str = "MiniMax-M2.7-highspeed"
+    reasoning_provider: str = DEFAULT_REASONING_PROVIDER  # openai | anthropic | minimax | ollama
+    reasoning_model: str = DEFAULT_REASONING_MODEL
     reasoning_effort: str = "medium"
     llm_backup_enabled: bool = True
-    backup_reasoning_provider: str = "minimax"
-    backup_reasoning_model: str = "MiniMax-M2.7-highspeed"
+    backup_reasoning_provider: str = DEFAULT_BACKUP_REASONING_PROVIDER
+    backup_reasoning_model: str = DEFAULT_BACKUP_REASONING_MODEL
     backup_reasoning_effort: str = "medium"
-    backup_vision_model: str = "MiniMax-VL-01"
+    backup_vision_model: str = DEFAULT_BACKUP_VISION_MODEL
     backup_search_provider: str = "auto"
-    backup_search_fallback_provider: str = "minimax"
+    backup_search_fallback_provider: str = DEFAULT_BACKUP_SEARCH_FALLBACK_PROVIDER
     backup_model_search_helper: str = ""
     local_reasoning_model: str = "qwen3.5:9b"
     local_vision_model: str = ""
-    hybrid_analysis_provider: str = "openai"
-    hybrid_analysis_model: str = "gpt-5.4-mini"
+    hybrid_analysis_provider: str = DEFAULT_HYBRID_ANALYSIS_PROVIDER
+    hybrid_analysis_model: str = DEFAULT_HYBRID_ANALYSIS_MODEL
     hybrid_analysis_effort: str = "medium"
     hybrid_analysis_search_mode: str = "entity_gated"  # off | entity_gated | follow_provider
-    hybrid_copy_provider: str = "minimax"
-    hybrid_copy_model: str = "MiniMax-M2.7-highspeed"
+    hybrid_copy_provider: str = DEFAULT_HYBRID_COPY_PROVIDER
+    hybrid_copy_model: str = DEFAULT_HYBRID_COPY_MODEL
     hybrid_copy_effort: str = "high"
     hybrid_copy_search_mode: str = "follow_provider"  # off | entity_gated | follow_provider
-    multimodal_fallback_provider: str = "ollama"  # local backup for visual tasks
-    multimodal_fallback_model: str = ""
+    multimodal_fallback_provider: str = DEFAULT_MULTIMODAL_FALLBACK_PROVIDER
+    multimodal_fallback_model: str = DEFAULT_MULTIMODAL_FALLBACK_MODEL
 
     # Search (Phase 2)
     search_provider: str = "auto"  # auto | openai | anthropic | minimax | ollama | model | searxng
-    search_fallback_provider: str = "searxng"  # openai | anthropic | minimax | ollama | model | searxng
+    search_fallback_provider: str = DEFAULT_SEARCH_FALLBACK_PROVIDER  # openai | anthropic | minimax | ollama | model | searxng
     model_search_helper: str = ""
     searxng_url: str = "http://localhost:8080"
 
@@ -887,13 +900,13 @@ def _normalize_runtime_override_values(data: dict[str, Any]) -> dict[str, Any]:
     if "backup_search_fallback_provider" in normalized:
         fallback = str(normalized.get("backup_search_fallback_provider") or "").strip().lower()
         normalized["backup_search_fallback_provider"] = (
-            fallback if fallback in SEARCH_FALLBACK_PROVIDER_VALUES else "minimax"
+            fallback if fallback in SEARCH_FALLBACK_PROVIDER_VALUES else DEFAULT_BACKUP_SEARCH_FALLBACK_PROVIDER
         )
 
     if "multimodal_fallback_provider" in normalized:
         fallback = str(normalized.get("multimodal_fallback_provider") or "").strip().lower()
         normalized["multimodal_fallback_provider"] = (
-            fallback if fallback in MULTIMODAL_FALLBACK_PROVIDER_VALUES else "ollama"
+            fallback if fallback in MULTIMODAL_FALLBACK_PROVIDER_VALUES else DEFAULT_MULTIMODAL_FALLBACK_PROVIDER
         )
 
     if "backup_vision_model" in normalized:
@@ -910,7 +923,9 @@ def _normalize_runtime_override_values(data: dict[str, Any]) -> dict[str, Any]:
 
     if "backup_reasoning_provider" in normalized:
         provider = str(normalized.get("backup_reasoning_provider") or "").strip().lower()
-        normalized["backup_reasoning_provider"] = provider if provider in HYBRID_REASONING_PROVIDER_VALUES else "minimax"
+        normalized["backup_reasoning_provider"] = (
+            provider if provider in HYBRID_REASONING_PROVIDER_VALUES else DEFAULT_BACKUP_REASONING_PROVIDER
+        )
 
     for key in ("reasoning_effort", "backup_reasoning_effort", "hybrid_analysis_effort", "hybrid_copy_effort"):
         if key in normalized:
@@ -922,7 +937,7 @@ def _normalize_runtime_override_values(data: dict[str, Any]) -> dict[str, Any]:
         if key in normalized:
             provider = str(normalized.get(key) or "").strip().lower()
             normalized[key] = provider if provider in HYBRID_REASONING_PROVIDER_VALUES else (
-                "openai" if key == "hybrid_analysis_provider" else "minimax"
+                DEFAULT_HYBRID_ANALYSIS_PROVIDER if key == "hybrid_analysis_provider" else DEFAULT_HYBRID_COPY_PROVIDER
             )
 
     for key in ("hybrid_analysis_model", "hybrid_copy_model"):
@@ -964,18 +979,18 @@ def _normalize_llm_capability_bundle_settings(settings: Settings) -> None:
 
     analysis_provider = str(getattr(settings, "hybrid_analysis_provider", "") or "").strip().lower()
     if analysis_provider not in HYBRID_REASONING_PROVIDER_VALUES:
-        analysis_provider = "openai"
+        analysis_provider = DEFAULT_HYBRID_ANALYSIS_PROVIDER
     object.__setattr__(settings, "hybrid_analysis_provider", analysis_provider)
 
     copy_provider = str(getattr(settings, "hybrid_copy_provider", "") or "").strip().lower()
     if copy_provider not in HYBRID_REASONING_PROVIDER_VALUES:
-        copy_provider = "minimax"
+        copy_provider = DEFAULT_HYBRID_COPY_PROVIDER
     object.__setattr__(settings, "hybrid_copy_provider", copy_provider)
 
     object.__setattr__(
         settings,
         "hybrid_analysis_model",
-        str(getattr(settings, "hybrid_analysis_model", "") or "").strip() or "gpt-5.4-mini",
+        str(getattr(settings, "hybrid_analysis_model", "") or "").strip() or DEFAULT_HYBRID_ANALYSIS_MODEL,
     )
     object.__setattr__(
         settings,
@@ -985,7 +1000,7 @@ def _normalize_llm_capability_bundle_settings(settings: Settings) -> None:
     object.__setattr__(
         settings,
         "hybrid_copy_model",
-        str(getattr(settings, "hybrid_copy_model", "") or "").strip() or "MiniMax-M2.7-highspeed",
+        str(getattr(settings, "hybrid_copy_model", "") or "").strip() or DEFAULT_HYBRID_COPY_MODEL,
     )
     object.__setattr__(
         settings,
@@ -1000,12 +1015,12 @@ def _normalize_llm_capability_bundle_settings(settings: Settings) -> None:
     object.__setattr__(settings, "llm_backup_enabled", bool(getattr(settings, "llm_backup_enabled", True)))
     backup_provider = str(getattr(settings, "backup_reasoning_provider", "") or "").strip().lower()
     if backup_provider not in HYBRID_REASONING_PROVIDER_VALUES:
-        backup_provider = "minimax"
+        backup_provider = DEFAULT_BACKUP_REASONING_PROVIDER
     object.__setattr__(settings, "backup_reasoning_provider", backup_provider)
     object.__setattr__(
         settings,
         "backup_reasoning_model",
-        str(getattr(settings, "backup_reasoning_model", "") or "").strip() or "MiniMax-M2.7-highspeed",
+        str(getattr(settings, "backup_reasoning_model", "") or "").strip() or DEFAULT_BACKUP_REASONING_MODEL,
     )
     object.__setattr__(
         settings,
@@ -1015,7 +1030,7 @@ def _normalize_llm_capability_bundle_settings(settings: Settings) -> None:
     object.__setattr__(
         settings,
         "backup_vision_model",
-        str(getattr(settings, "backup_vision_model", "") or "").strip() or "MiniMax-VL-01",
+        str(getattr(settings, "backup_vision_model", "") or "").strip() or DEFAULT_BACKUP_VISION_MODEL,
     )
     backup_search_provider = str(getattr(settings, "backup_search_provider", "") or "").strip().lower()
     if backup_search_provider not in SEARCH_PROVIDER_VALUES:
@@ -1023,7 +1038,7 @@ def _normalize_llm_capability_bundle_settings(settings: Settings) -> None:
     object.__setattr__(settings, "backup_search_provider", backup_search_provider)
     backup_search_fallback = str(getattr(settings, "backup_search_fallback_provider", "") or "").strip().lower()
     if backup_search_fallback not in SEARCH_FALLBACK_PROVIDER_VALUES:
-        backup_search_fallback = "minimax"
+        backup_search_fallback = DEFAULT_BACKUP_SEARCH_FALLBACK_PROVIDER
     object.__setattr__(settings, "backup_search_fallback_provider", backup_search_fallback)
     object.__setattr__(
         settings,
@@ -1043,14 +1058,19 @@ def _normalize_llm_capability_bundle_settings(settings: Settings) -> None:
 
     search_fallback = str(getattr(settings, "search_fallback_provider", "") or "").strip().lower()
     if search_fallback not in SEARCH_FALLBACK_PROVIDER_VALUES:
-        search_fallback = "searxng"
+        search_fallback = DEFAULT_SEARCH_FALLBACK_PROVIDER
     object.__setattr__(settings, "search_provider", "auto")
     object.__setattr__(settings, "search_fallback_provider", search_fallback)
 
     multimodal_fallback = str(getattr(settings, "multimodal_fallback_provider", "") or "").strip().lower()
     if multimodal_fallback not in MULTIMODAL_FALLBACK_PROVIDER_VALUES:
-        multimodal_fallback = "ollama"
+        multimodal_fallback = DEFAULT_MULTIMODAL_FALLBACK_PROVIDER
     object.__setattr__(settings, "multimodal_fallback_provider", multimodal_fallback)
+    object.__setattr__(
+        settings,
+        "multimodal_fallback_model",
+        str(getattr(settings, "multimodal_fallback_model", "") or "").strip() or DEFAULT_MULTIMODAL_FALLBACK_MODEL,
+    )
 
 
 def _get_llm_route_override(key: str) -> Any:
@@ -1075,7 +1095,11 @@ def resolve_backup_llm_route(*, settings: Settings | None = None) -> dict[str, A
         "vision_model": str(getattr(current, "backup_vision_model", "") or "").strip() or model,
         "search_provider": str(getattr(current, "backup_search_provider", "auto") or "auto").strip().lower() or "auto",
         "search_fallback_provider": (
-            str(getattr(current, "backup_search_fallback_provider", "minimax") or "minimax").strip().lower() or "minimax"
+            str(
+                getattr(current, "backup_search_fallback_provider", DEFAULT_BACKUP_SEARCH_FALLBACK_PROVIDER)
+                or DEFAULT_BACKUP_SEARCH_FALLBACK_PROVIDER
+            ).strip().lower()
+            or DEFAULT_BACKUP_SEARCH_FALLBACK_PROVIDER
         ),
         "model_search_helper": str(getattr(current, "backup_model_search_helper", "") or "").strip(),
     }
@@ -1126,8 +1150,14 @@ def resolve_llm_task_route(task_name: str, *, settings: Settings | None = None) 
     normalized_task = str(task_name or "").strip().lower()
     if normalized_task in {"subtitle", "subtitle_postprocess", "subtitle_translation", "content_profile", "copy_verify", "edit_plan"}:
         route = {
-            "reasoning_provider": str(getattr(current, "hybrid_analysis_provider", "openai") or "openai").strip().lower(),
-            "reasoning_model": str(getattr(current, "hybrid_analysis_model", "gpt-5.4-mini") or "gpt-5.4-mini").strip(),
+            "reasoning_provider": str(
+                getattr(current, "hybrid_analysis_provider", DEFAULT_HYBRID_ANALYSIS_PROVIDER)
+                or DEFAULT_HYBRID_ANALYSIS_PROVIDER
+            ).strip().lower(),
+            "reasoning_model": str(
+                getattr(current, "hybrid_analysis_model", DEFAULT_HYBRID_ANALYSIS_MODEL)
+                or DEFAULT_HYBRID_ANALYSIS_MODEL
+            ).strip(),
         }
         effort = _normalize_reasoning_effort(getattr(current, "hybrid_analysis_effort", ""))
         if effort:
@@ -1135,9 +1165,12 @@ def resolve_llm_task_route(task_name: str, *, settings: Settings | None = None) 
         return route
     if normalized_task == "copy":
         route = {
-            "reasoning_provider": str(getattr(current, "hybrid_copy_provider", "minimax") or "minimax").strip().lower(),
+            "reasoning_provider": str(
+                getattr(current, "hybrid_copy_provider", DEFAULT_HYBRID_COPY_PROVIDER)
+                or DEFAULT_HYBRID_COPY_PROVIDER
+            ).strip().lower(),
             "reasoning_model": str(
-                getattr(current, "hybrid_copy_model", "MiniMax-M2.7-highspeed") or "MiniMax-M2.7-highspeed"
+                getattr(current, "hybrid_copy_model", DEFAULT_HYBRID_COPY_MODEL) or DEFAULT_HYBRID_COPY_MODEL
             ).strip(),
         }
         effort = _normalize_reasoning_effort(getattr(current, "hybrid_copy_effort", ""))

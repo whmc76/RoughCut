@@ -139,7 +139,7 @@ export function getCredentialSourceLabel(
 
 export function getSearchSummary(form: SettingsForm): string {
   const activeReasoningProvider = getActiveReasoningProvider(form);
-  const fallbackProvider = readString(form, "search_fallback_provider", "searxng");
+  const fallbackProvider = readString(form, "search_fallback_provider", "openai");
   return `自动跟随 ${getProviderLabel(activeReasoningProvider)}，失败回退 ${getProviderLabel(fallbackProvider)}`;
 }
 
@@ -161,6 +161,6 @@ export function getRoutingSummary(form: SettingsForm): string {
     return `Bundled · 推理 ${getProviderLabel(getActiveReasoningProvider(form))}`;
   }
   const analysisProvider = readString(form, "hybrid_analysis_provider", "openai");
-  const copyProvider = readString(form, "hybrid_copy_provider", "minimax");
+  const copyProvider = readString(form, "hybrid_copy_provider", "openai");
   return `Hybrid · 摘要/字幕 ${getProviderLabel(analysisProvider)} · 文案 ${getProviderLabel(copyProvider)}`;
 }

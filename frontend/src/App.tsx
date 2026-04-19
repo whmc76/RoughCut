@@ -83,7 +83,7 @@ export function App() {
   ];
   const hybridEnabled = config.data?.llm_mode === "performance" && config.data?.llm_routing_mode === "hybrid_performance";
   const hybridAnalysisProvider = String(config.data?.hybrid_analysis_provider ?? "openai");
-  const hybridCopyProvider = String(config.data?.hybrid_copy_provider ?? "minimax");
+  const hybridCopyProvider = String(config.data?.hybrid_copy_provider ?? "openai");
 
   return (
     <div className="app-shell">
