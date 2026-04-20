@@ -16,6 +16,9 @@ const JobsPage = lazy(async () => ({
 const WatchRootsPage = lazy(async () => ({
   default: (await import("./pages/WatchRootsPage")).WatchRootsPage,
 }));
+const IntelligentCopyPage = lazy(async () => ({
+  default: (await import("./pages/IntelligentCopyPage")).IntelligentCopyPage,
+}));
 const PackagingPage = lazy(async () => ({
   default: (await import("./pages/PackagingPage")).PackagingPage,
 }));
@@ -73,7 +76,8 @@ export function App() {
   const navigationItems = [
     { to: "/", label: t("app.nav.overview") },
     { to: "/jobs", label: t("app.nav.jobs") },
-    { to: "/watch-roots", label: "监看目录" },
+    { to: "/watch-roots", label: t("app.nav.watchRoots") },
+    { to: "/intelligent-copy", label: t("app.nav.intelligentCopy") },
     { to: "/style-lab", label: "风格实验" },
     { to: "/settings", label: t("app.nav.settings") },
   ];
@@ -153,6 +157,7 @@ export function App() {
               <Route path="/" element={<OverviewPage />} />
               <Route path="/jobs" element={<JobsPage />} />
               <Route path="/watch-roots" element={<WatchRootsPage />} />
+              <Route path="/intelligent-copy" element={<IntelligentCopyPage />} />
               <Route path="/packaging" element={<PackagingPage />} />
               <Route path="/style-lab" element={<StyleLabPage />} />
               <Route path="/style-templates" element={<StyleTemplatesPage />} />

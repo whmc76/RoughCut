@@ -114,7 +114,7 @@ def test_get_config_exposes_extended_provider_fields(tmp_path, monkeypatch):
     assert cfg.transcription_alignment_min_word_coverage == 0.81
     assert cfg.llm_backup_enabled is True
     assert cfg.backup_reasoning_provider == "minimax"
-    assert cfg.backup_reasoning_model == "MiniMax-M2.7-highspeed"
+    assert cfg.backup_reasoning_model == "MiniMax-M2.7"
     assert cfg.backup_vision_model == "MiniMax-VL-01"
     assert cfg.backup_search_provider == "auto"
     assert cfg.backup_search_fallback_provider == "minimax"
@@ -629,12 +629,12 @@ def test_patch_config_accepts_backup_llm_bundle_fields(tmp_path, monkeypatch):
 
     assert cfg.llm_backup_enabled is True
     assert cfg.backup_reasoning_provider == "minimax"
-    assert cfg.backup_reasoning_model == "MiniMax-M2.7-highspeed"
+    assert cfg.backup_reasoning_model == "MiniMax-M2.7"
     assert cfg.backup_vision_model == "MiniMax-VL-01"
     assert cfg.backup_search_provider == "auto"
     assert cfg.backup_search_fallback_provider == "minimax"
     assert persisted["backup_reasoning_provider"] == "minimax"
-    assert persisted["backup_reasoning_model"] == "MiniMax-M2.7-highspeed"
+    assert persisted["backup_reasoning_model"] == "MiniMax-M2.7"
 
 
 def test_patch_config_accepts_creative_provider_fields(tmp_path, monkeypatch):

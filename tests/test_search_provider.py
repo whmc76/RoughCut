@@ -6,6 +6,7 @@ import roughcut.config as config_mod
 import roughcut.providers.factory as factory_mod
 from roughcut.providers.factory import get_search_provider
 from roughcut.providers.search.base import SearchResult
+from roughcut.providers.search.hybrid import HybridSearchProvider
 
 
 def test_get_search_provider_auto_falls_back_to_searxng_for_local_without_ollama_key():
@@ -14,12 +15,18 @@ def test_get_search_provider_auto_falls_back_to_searxng_for_local_without_ollama
     object.__setattr__(settings, "llm_mode", "local")
     object.__setattr__(settings, "search_provider", "auto")
     object.__setattr__(settings, "search_fallback_provider", "searxng")
+    object.__setattr__(settings, "openai_auth_mode", "api_key")
     object.__setattr__(settings, "model_search_helper", "")
     object.__setattr__(settings, "ollama_api_key", "")
+    object.__setattr__(settings, "openai_api_key", "")
+    object.__setattr__(settings, "anthropic_api_key", "")
+    object.__setattr__(settings, "minimax_api_key", "")
+    object.__setattr__(settings, "minimax_coding_plan_api_key", "")
     object.__setattr__(settings, "llm_backup_enabled", False)
 
     provider = get_search_provider()
-    assert provider.__class__.__name__ == "SearXNGProvider"
+    assert isinstance(provider, HybridSearchProvider)
+    assert provider.provider_names == ["searxng"]
 
 
 def test_get_search_provider_model_uses_helper():
@@ -41,10 +48,12 @@ def test_get_search_provider_auto_prefers_minimax_when_reasoning_uses_minimax():
     object.__setattr__(settings, "search_provider", "auto")
     object.__setattr__(settings, "minimax_api_key", "test-key")
     object.__setattr__(settings, "minimax_base_url", "https://api.minimaxi.com/v1")
+    object.__setattr__(settings, "searxng_url", "http://localhost:8080")
     object.__setattr__(settings, "llm_backup_enabled", False)
 
     provider = get_search_provider()
-    assert provider.__class__.__name__ == "MiniMaxSearchProvider"
+    assert isinstance(provider, HybridSearchProvider)
+    assert provider.provider_names[:2] == ["searxng", "minimax"]
 
 
 def test_get_search_provider_auto_prefers_openai_when_reasoning_uses_openai():
@@ -53,11 +62,13 @@ def test_get_search_provider_auto_prefers_openai_when_reasoning_uses_openai():
     object.__setattr__(settings, "llm_mode", "performance")
     object.__setattr__(settings, "reasoning_provider", "openai")
     object.__setattr__(settings, "search_provider", "auto")
+    object.__setattr__(settings, "openai_auth_mode", "api_key")
     object.__setattr__(settings, "openai_api_key", "test-key")
     object.__setattr__(settings, "llm_backup_enabled", False)
 
     provider = get_search_provider()
-    assert provider.__class__.__name__ == "OpenAISearchProvider"
+    assert isinstance(provider, HybridSearchProvider)
+    assert "openai" in provider.provider_names
 
 
 def test_get_search_provider_auto_prefers_anthropic_when_reasoning_uses_anthropic():
@@ -66,11 +77,13 @@ def test_get_search_provider_auto_prefers_anthropic_when_reasoning_uses_anthropi
     object.__setattr__(settings, "llm_mode", "performance")
     object.__setattr__(settings, "reasoning_provider", "anthropic")
     object.__setattr__(settings, "search_provider", "auto")
+    object.__setattr__(settings, "anthropic_auth_mode", "api_key")
     object.__setattr__(settings, "anthropic_api_key", "test-key")
     object.__setattr__(settings, "llm_backup_enabled", False)
 
     provider = get_search_provider()
-    assert provider.__class__.__name__ == "AnthropicSearchProvider"
+    assert isinstance(provider, HybridSearchProvider)
+    assert "anthropic" in provider.provider_names
 
 
 def test_get_search_provider_auto_prefers_ollama_when_local_has_api_key():
@@ -82,7 +95,29 @@ def test_get_search_provider_auto_prefers_ollama_when_local_has_api_key():
     object.__setattr__(settings, "llm_backup_enabled", False)
 
     provider = get_search_provider()
-    assert provider.__class__.__name__ == "OllamaSearchProvider"
+    assert isinstance(provider, HybridSearchProvider)
+    assert "ollama" in provider.provider_names
+
+
+def test_get_search_provider_auto_prefers_codex_cli_bridge_for_openai_codex_compat():
+    config_mod._settings = None
+    settings = config_mod.get_settings()
+    object.__setattr__(settings, "llm_mode", "performance")
+    object.__setattr__(settings, "reasoning_provider", "openai")
+    object.__setattr__(settings, "search_provider", "auto")
+    object.__setattr__(settings, "openai_auth_mode", "codex_compat")
+    object.__setattr__(settings, "openai_api_key", "")
+    object.__setattr__(settings, "minimax_coding_plan_api_key", "minimax-key")
+    object.__setattr__(settings, "minimax_api_host", "https://api.minimaxi.com")
+    object.__setattr__(settings, "llm_backup_enabled", False)
+
+    provider = get_search_provider()
+
+    assert isinstance(provider, HybridSearchProvider)
+    assert "openai" not in provider.provider_names
+    assert "model" in provider.provider_names
+    assert provider.provider_names.index("model") < provider.provider_names.index("minimax")
+    assert "minimax" in provider.provider_names
 
 
 def test_get_search_provider_minimax_explicit():
@@ -142,3 +177,45 @@ async def test_get_search_provider_falls_back_to_backup_bundle_when_primary_rout
 
     assert len(results) == 1
     assert calls == ["minimax:fallback test:3"]
+
+
+@pytest.mark.asyncio
+async def test_hybrid_search_provider_merges_results_and_tolerates_partial_failures():
+    from roughcut.providers.search.hybrid import HybridSearchProvider
+
+    class _OkProvider:
+        def __init__(self, title: str) -> None:
+            self._title = title
+
+        async def search(self, query: str, *, max_results: int = 5) -> list[SearchResult]:
+            return [
+                SearchResult(title=self._title, url=f"https://example.com/{self._title}", snippet=query),
+                SearchResult(title="shared", url="https://example.com/shared", snippet=query),
+            ][:max_results]
+
+        async def probe(self) -> tuple[bool, str]:
+            return True, "ok"
+
+    class _FailProvider:
+        async def search(self, query: str, *, max_results: int = 5) -> list[SearchResult]:
+            raise RuntimeError("boom")
+
+        async def probe(self) -> tuple[bool, str]:
+            return False, "boom"
+
+    provider = HybridSearchProvider(
+        [
+            ("searxng", _OkProvider("local")),
+            ("minimax", _FailProvider()),
+            ("anthropic", _OkProvider("remote")),
+        ]
+    )
+
+    results = await provider.search("demo", max_results=5)
+    ok, detail = await provider.probe()
+
+    assert [item.title for item in results] == ["local", "shared", "remote"]
+    assert ok is True
+    assert "searxng" in detail
+    assert "anthropic" in detail
+    assert "minimax: boom" in detail

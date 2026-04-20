@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -36,9 +37,9 @@ async def test_openai_reasoning_provider_uses_responses_api_for_gpt5(monkeypatch
     monkeypatch.setattr(
         "roughcut.providers.reasoning.openai_reasoning.get_settings",
         lambda: SimpleNamespace(
-            openai_auth_mode="codex_compat",
-            openai_api_key="",
-            openai_api_key_helper="python -c \"print('token')\"",
+            openai_auth_mode="api_key",
+            openai_api_key="sk-test",
+            openai_api_key_helper="",
             openai_base_url="https://api.openai.com/v1",
             active_reasoning_model="gpt-5.4",
         ),
@@ -75,3 +76,52 @@ async def test_openai_reasoning_provider_uses_responses_api_for_gpt5(monkeypatch
     assert calls[0]["input"][0]["content"] == [{"type": "input_text", "text": "你是 coding planner"}]
     assert calls[0]["input"][1]["role"] == "user"
     assert usage_events[0]["kind"] == "reasoning"
+
+
+@pytest.mark.asyncio
+async def test_openai_reasoning_provider_uses_codex_bridge_in_codex_compat_mode(monkeypatch: pytest.MonkeyPatch):
+    usage_events: list[dict] = []
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        "roughcut.providers.reasoning.openai_reasoning.get_settings",
+        lambda: SimpleNamespace(
+            openai_auth_mode="codex_compat",
+            openai_api_key="",
+            openai_api_key_helper="python -c \"print('token')\"",
+            openai_base_url="https://api.openai.com/v1",
+            active_reasoning_model="gpt-5.4-mini",
+        ),
+    )
+
+    def _fake_bridge(payload):
+        captured["payload"] = payload
+        return {
+            "stdout": '{"payload_json":"{\\"answer\\":\\"ok-from-codex\\"}"}',
+            "excerpt": '{"payload_json":"{\\"answer\\":\\"ok-from-codex\\"}"}',
+        }
+
+    async def _fake_record_usage_event(**kwargs):
+        usage_events.append(kwargs)
+
+    monkeypatch.setattr("roughcut.providers.reasoning.openai_reasoning.run_codex_exec", _fake_bridge)
+    monkeypatch.setattr("roughcut.providers.reasoning.openai_reasoning.record_usage_event", _fake_record_usage_event)
+
+    provider = OpenAIReasoningProvider()
+    response = await provider.complete(
+        [
+            Message(role="system", content="你是 packaging planner"),
+            Message(role="user", content="输出 JSON"),
+        ],
+        json_mode=True,
+    )
+
+    assert response.content == '{"answer":"ok-from-codex"}'
+    assert response.as_json()["answer"] == "ok-from-codex"
+    assert response.model == "gpt-5.4-mini"
+    assert response.usage == {"prompt_tokens": 0, "completion_tokens": 0}
+    assert captured["payload"]["model"] == "gpt-5.4-mini"
+    assert '"payload_json"' in captured["payload"]["prompt"]
+    assert captured["payload"]["output_schema"]["type"] == "object"
+    assert captured["payload"]["output_schema"]["required"] == ["payload_json"]
+    assert usage_events[0]["provider"] == "openai"

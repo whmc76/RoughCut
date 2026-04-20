@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -101,6 +102,57 @@ def test_source_context_candidate_hints_extracts_identity_from_merged_source_nam
     assert hints["filename_entries"][0].startswith("LEATHERMAN ARC")
     assert "ARC" in (hints.get("subject_model_candidates") or [])
     assert any("多功能工具钳" in item for item in (hints.get("subject_type_candidates") or []))
+
+
+def test_source_context_candidate_hints_does_not_inherit_unbacked_related_model_details():
+    hints = _source_context_candidate_hints(
+        {
+            "merged_source_names": [
+                "20260301-171940 狐蝠工业foxbat 阵风 机能双肩包使用体验.mp4",
+            ],
+            "related_profiles": [
+                {
+                    "source_name": "foxbat-accessory.mp4",
+                    "subject_brand": "狐蝠工业",
+                    "subject_model": "压缩水壶套",
+                    "subject_type": "EDC机能包配件",
+                    "video_theme": "狐蝠工业压缩水壶套开箱",
+                    "summary": "主要介绍压缩水壶套的挂点和收纳。",
+                    "search_queries": ["狐蝠工业 压缩水壶套"],
+                    "review_mode": "manual_confirmed",
+                    "score": 0.97,
+                }
+            ],
+        }
+    )
+
+    assert hints["subject_brand"] == "狐蝠工业"
+    assert hints.get("subject_model", "") == ""
+    assert hints["subject_type"] == "EDC机能包"
+    assert hints.get("video_theme", "") != "狐蝠工业压缩水壶套开箱"
+    assert hints.get("summary", "") == ""
+    assert "压缩水壶套" not in " ".join(hints.get("search_queries") or [])
+
+
+def test_source_context_candidate_hints_uses_intelligent_copy_topic_registry():
+    hints = _source_context_candidate_hints(
+        {
+            "video_description": "这期主要演示 FAS刀帕怎么包裹固定，顺带讲原装弹力绳和伞绳绳扣怎么更换。",
+            "merged_source_names": ["FAS刀帕伞绳更换和用法.mp4"],
+        }
+    )
+
+    assert hints["subject_brand"] == "FAS"
+    assert hints["subject_model"] == "刀帕"
+    assert hints["subject_type"] == "刀帕收纳配件"
+    assert "FAS 刀帕" in (hints.get("search_queries") or [])
+
+
+def test_canonical_brand_display_name_does_not_expand_bilingual_brand():
+    import roughcut.review.content_profile as content_profile_mod
+
+    assert content_profile_mod._canonical_brand_display_name("FOXBAT狐蝠工业") == "狐蝠工业"
+    assert content_profile_mod._canonical_brand_display_name("狐蝠工业 FOXBAT") == "狐蝠工业"
 
 
 def test_assess_identity_review_requirement_trusts_merged_source_name_identity():
@@ -918,7 +970,7 @@ def test_seed_profile_from_text_extracts_olight_slim2_ultra_identity():
 
     assert seeded["subject_brand"] == "OLIGHT"
     assert seeded["subject_brand_cn"] == "傲雷"
-    assert seeded["subject_brand_bilingual"] == "傲雷OLIGHT"
+    assert "subject_brand_bilingual" not in seeded
     assert seeded["subject_model"] == "SLIM2代ULTRA版本"
     assert seeded["subject_type_candidates"] == ["EDC手电"]
     assert any("OLIGHT" in item for item in seeded["search_queries"])
@@ -941,7 +993,7 @@ def test_seed_profile_from_text_maps_leatherman_arc_asr_alias():
 
     assert seeded["subject_brand"] == "LEATHERMAN"
     assert seeded["subject_brand_cn"] == "莱泽曼"
-    assert seeded["subject_brand_bilingual"] == "莱泽曼LEATHERMAN"
+    assert "subject_brand_bilingual" not in seeded
     assert seeded["subject_model"] == "ARC"
     assert "多功能工具钳" in (seeded.get("subject_type_candidates") or [])
 
@@ -1431,13 +1483,12 @@ def test_build_cover_title_drops_edc_prefix_from_subject_type():
     assert title["main"] == "锐特折刀"
 
 
-def test_build_cover_title_prefers_bilingual_brand_display_for_known_foreign_brand():
+def test_build_cover_title_prefers_single_brand_display_for_known_foreign_brand():
     preset = get_workflow_preset("unboxing_standard")
     title = build_cover_title(
         {
             "subject_brand": "LEATHERMAN",
             "subject_brand_cn": "莱泽曼",
-            "subject_brand_bilingual": "莱泽曼LEATHERMAN",
             "subject_model": "ARC",
             "subject_type": "多功能工具钳",
             "video_theme": "产品开箱与上手体验",
@@ -1446,7 +1497,7 @@ def test_build_cover_title_prefers_bilingual_brand_display_for_known_foreign_bra
         preset,
     )
 
-    assert title["top"] == "莱泽曼LEATHERMAN"
+    assert title["top"] == "莱泽曼"
     assert title["main"] == "ARC"
 
 
@@ -1633,7 +1684,6 @@ def test_build_search_queries_preserves_english_canonical_and_adds_cn_brand_vari
         {
             "subject_brand": "OLIGHT",
             "subject_brand_cn": "傲雷",
-            "subject_brand_bilingual": "傲雷OLIGHT",
             "subject_model": "SR2 Pro UV",
             "subject_type": "EDC手电",
             "search_queries": [],
@@ -1644,7 +1694,7 @@ def test_build_search_queries_preserves_english_canonical_and_adds_cn_brand_vari
 
     assert "OLIGHT SR2 Pro UV" in queries
     assert "傲雷 SR2 Pro UV" in queries
-    assert "傲雷OLIGHT SR2 Pro UV" in queries
+    assert not any("傲雷OLIGHT" in item for item in queries)
 
 
 def test_ensure_search_queries_rebuilds_deduped_fallback_queries_from_empty_search_query_list():
@@ -4060,6 +4110,46 @@ async def test_infer_content_profile_uses_neutral_review_recovery_when_content_u
 
 
 @pytest.mark.asyncio
+async def test_infer_content_profile_recovers_when_content_understanding_times_out(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    from roughcut.review import content_profile as content_profile_module
+
+    async def hanging_infer_content_understanding(evidence_bundle):
+        await asyncio.sleep(10)
+
+    monkeypatch.setattr(content_profile_module, "infer_content_understanding", hanging_infer_content_understanding)
+    monkeypatch.setattr(content_profile_module, "_extract_reference_frames", lambda *args, **kwargs: [])
+    monkeypatch.setattr(
+        content_profile_module,
+        "get_settings",
+        lambda: SimpleNamespace(ocr_enabled=False, step_stale_timeout_sec=1),
+    )
+
+    result = await infer_content_profile(
+        source_path=tmp_path / "bag.mp4",
+        source_name="bag.mp4",
+        subtitle_items=[
+            {
+                "index": 0,
+                "start_time": 0.0,
+                "end_time": 2.0,
+                "text_raw": "这期聊一个机能双肩包，重点看分仓和背负。",
+                "text_norm": "这期聊一个机能双肩包，重点看分仓和背负。",
+                "text_final": "这期聊一个机能双肩包，重点看分仓和背负。",
+            }
+        ],
+        workflow_template="edc_tactical",
+        include_research=False,
+    )
+
+    assert result["content_understanding"]["needs_review"] is True
+    assert "内容理解推断失败" in result["content_understanding"]["review_reasons"]
+    assert result["cover_title"]["main"] == "内容待确认"
+
+
+@pytest.mark.asyncio
 async def test_enrich_content_profile_uses_content_understanding_inference(monkeypatch: pytest.MonkeyPatch):
     from roughcut.review import content_profile as content_profile_module
     from roughcut.review.content_understanding_schema import ContentUnderstanding, SubjectEntity
@@ -4122,6 +4212,44 @@ async def test_enrich_content_profile_uses_content_understanding_inference(monke
     assert result["video_theme"] == "FOXBAT狐蝠工业FXX1小副包开箱与分仓挂点评测"
     assert result["summary"] == "这条视频主要围绕 FOXBAT狐蝠工业 FXX1小副包 的分仓和挂点展开。"
     assert result["content_understanding"]["primary_subject"] == "EDC机能包"
+
+
+@pytest.mark.asyncio
+async def test_enrich_content_profile_returns_existing_profile_when_content_understanding_times_out(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from roughcut.review import content_profile as content_profile_module
+
+    async def hanging_infer_content_understanding(evidence_bundle):
+        await asyncio.sleep(10)
+
+    monkeypatch.setattr(content_profile_module, "infer_content_understanding", hanging_infer_content_understanding)
+    monkeypatch.setattr(
+        content_profile_module,
+        "get_settings",
+        lambda: SimpleNamespace(step_stale_timeout_sec=1),
+    )
+    monkeypatch.setattr(content_profile_module, "_sanitize_profile_identity", lambda profile, **kwargs: dict(profile))
+
+    result = await enrich_content_profile(
+        profile={
+            "subject_brand": "hsjun",
+            "subject_model": "游刃",
+            "subject_type": "EDC机能包",
+            "video_theme": "机能双肩包开箱",
+            "summary": "围绕机能双肩包展开。",
+        },
+        source_name="bag.mp4",
+        workflow_template="edc_tactical",
+        transcript_excerpt="这期看 hsjun 和 boltboat 联名的游刃双肩包。",
+        subtitle_items=[],
+        include_research=False,
+    )
+
+    assert result["subject_brand"] == "hsjun"
+    assert result["subject_model"] == "游刃"
+    assert result["video_theme"] == "机能双肩包开箱"
+    assert result["summary"] == "围绕机能双肩包展开。"
 
 
 @pytest.mark.asyncio

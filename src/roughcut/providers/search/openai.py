@@ -18,18 +18,28 @@ from roughcut.providers.search.base import SearchProvider, SearchResult
 class OpenAISearchProvider(SearchProvider):
     def __init__(self) -> None:
         settings = get_settings()
-        self._client = openai.AsyncOpenAI(
-            api_key=resolve_credential(
-                mode=settings.openai_auth_mode,
-                direct_value=settings.openai_api_key,
-                helper_command=settings.openai_api_key_helper,
-                provider_name="OpenAI",
-            ),
-            base_url=settings.openai_base_url.rstrip("/"),
-        )
+        self._bridge = None
+        if str(settings.openai_auth_mode or "").strip().lower() == "codex_compat" and not str(settings.openai_api_key or "").strip():
+            from roughcut.providers.search.model_search import ModelSearchProvider
+
+            self._bridge = ModelSearchProvider()
+            self._client = None
+        else:
+            self._client = openai.AsyncOpenAI(
+                api_key=resolve_credential(
+                    mode=settings.openai_auth_mode,
+                    direct_value=settings.openai_api_key,
+                    helper_command=settings.openai_api_key_helper,
+                    provider_name="OpenAI",
+                ),
+                base_url=settings.openai_base_url.rstrip("/"),
+            )
         self._model = settings.active_reasoning_model
 
     async def search(self, query: str, *, max_results: int = 5) -> list[SearchResult]:
+        if self._bridge is not None:
+            return await self._bridge.search(query, max_results=max_results)
+
         prompt = (
             f'Search the web for "{query}" and return a JSON object with a single key "results". '
             f"Include at most {max_results} items. "

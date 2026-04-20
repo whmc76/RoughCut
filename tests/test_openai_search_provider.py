@@ -32,9 +32,9 @@ async def test_openai_search_provider_uses_web_search_with_json_output(monkeypat
     monkeypatch.setattr(
         "roughcut.providers.search.openai.get_settings",
         lambda: SimpleNamespace(
-            openai_auth_mode="codex_compat",
-            openai_api_key="",
-            openai_api_key_helper="python -c \"print('token')\"",
+            openai_auth_mode="api_key",
+            openai_api_key="sk-test",
+            openai_api_key_helper="",
             openai_base_url="https://api.openai.com/v1",
             active_reasoning_model="gpt-5.4",
         ),
@@ -55,3 +55,32 @@ async def test_openai_search_provider_uses_web_search_with_json_output(monkeypat
     assert calls[0]["tools"] == [{"type": "web_search"}]
     assert calls[0]["text"] == {"format": {"type": "json_object"}}
     assert calls[0]["reasoning"] == {"effort": "medium"}
+
+
+@pytest.mark.asyncio
+async def test_openai_search_provider_uses_model_bridge_in_codex_compat_mode(monkeypatch: pytest.MonkeyPatch):
+    class _DummyModelSearchProvider:
+        async def search(self, query: str, *, max_results: int = 5):
+            return [SimpleNamespace(title="Bridge", url="https://example.com", snippet=f"{query}:{max_results}", score=0.0)]
+
+    monkeypatch.setattr(
+        "roughcut.providers.search.openai.get_settings",
+        lambda: SimpleNamespace(
+            openai_auth_mode="codex_compat",
+            openai_api_key="",
+            openai_api_key_helper="python -c \"print('token')\"",
+            openai_base_url="https://api.openai.com/v1",
+            active_reasoning_model="gpt-5.4",
+        ),
+    )
+    monkeypatch.setattr(
+        "roughcut.providers.search.model_search.ModelSearchProvider",
+        _DummyModelSearchProvider,
+    )
+
+    provider = OpenAISearchProvider()
+    results = await provider.search("codex oauth", max_results=2)
+
+    assert len(results) == 1
+    assert results[0].title == "Bridge"
+    assert results[0].snippet == "codex oauth:2"

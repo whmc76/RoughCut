@@ -372,6 +372,72 @@ class OpenFolderOut(BaseModel):
     kind: str
 
 
+class IntelligentCopyInspectIn(BaseModel):
+    folder_path: str
+
+
+class IntelligentCopyGenerateIn(BaseModel):
+    folder_path: str
+    copy_style: str | None = None
+
+
+class IntelligentCopyCoverSizeOut(BaseModel):
+    width: int
+    height: int
+
+
+class IntelligentCopyPlatformConstraintsOut(BaseModel):
+    title_limit: int
+    body_limit: int
+    tag_limit: int
+    tag_style: str
+    cover_size: IntelligentCopyCoverSizeOut
+    rule_note: str
+
+
+class IntelligentCopyPlatformMaterialOut(BaseModel):
+    key: str
+    label: str
+    has_title: bool = True
+    title_label: str = "标题"
+    body_label: str
+    tag_label: str
+    constraints: IntelligentCopyPlatformConstraintsOut
+    titles: list[str] = []
+    primary_title: str = ""
+    title_copy_all: str = ""
+    body: str = ""
+    tags: list[str] = []
+    tags_copy: str = ""
+    full_copy: str = ""
+    cover_path: str | None = None
+
+
+class IntelligentCopyInspectOut(BaseModel):
+    folder_path: str
+    material_dir: str
+    video_file: str | None = None
+    subtitle_file: str | None = None
+    cover_file: str | None = None
+    extra_video_files: list[str] = []
+    extra_subtitle_files: list[str] = []
+    extra_cover_files: list[str] = []
+    warnings: list[str] = []
+
+
+class IntelligentCopyResultOut(BaseModel):
+    folder_path: str
+    material_dir: str
+    markdown_path: str
+    json_path: str
+    copy_style: str
+    inspection: IntelligentCopyInspectOut
+    highlights: dict[str, Any] = {}
+    content_profile_summary: dict[str, Any] = {}
+    platforms: list[IntelligentCopyPlatformMaterialOut] = []
+    warnings: list[str] = []
+
+
 class ContentProfileMemoryStatsOut(BaseModel):
     scope: str
     subject_domain: str | None = None

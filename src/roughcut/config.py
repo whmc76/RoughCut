@@ -5,9 +5,11 @@ from contextvars import ContextVar
 import json
 import os
 from pathlib import Path
+import shutil
+import sys
 from typing import Any
 
-from pydantic import Field, field_validator
+from pydantic import Field, ValidationInfo, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from roughcut.speech.dialects import DEFAULT_TRANSCRIPTION_DIALECT, normalize_transcription_dialect
@@ -119,10 +121,23 @@ DEFAULT_HYBRID_ANALYSIS_PROVIDER = "openai"
 DEFAULT_HYBRID_ANALYSIS_MODEL = "gpt-5.4"
 DEFAULT_HYBRID_COPY_PROVIDER = "openai"
 DEFAULT_HYBRID_COPY_MODEL = "gpt-5.4-mini"
+DEFAULT_MINIMAX_REASONING_MODEL = "MiniMax-M2.7"
 DEFAULT_SEARCH_FALLBACK_PROVIDER = "openai"
 DEFAULT_BACKUP_SEARCH_FALLBACK_PROVIDER = "openai"
 DEFAULT_MULTIMODAL_FALLBACK_PROVIDER = "openai"
 DEFAULT_MULTIMODAL_FALLBACK_MODEL = "gpt-5.4-mini"
+DEFAULT_CODEX_MODEL_SEARCH_HELPER_PATH = (Path(__file__).resolve().parents[2] / "scripts" / "codex_model_search_helper.py")
+MINIMAX_REASONING_MODEL_ALIASES: dict[str, str] = {
+    "minimax-m2.7-highspeed": "MiniMax-M2.7",
+}
+
+
+def build_default_codex_model_search_helper() -> str:
+    helper_path = DEFAULT_CODEX_MODEL_SEARCH_HELPER_PATH
+    if not helper_path.exists():
+        return ""
+    python_executable = str(Path(sys.executable).resolve() if sys.executable else "python")
+    return f'"{python_executable}" "{helper_path.resolve()}"'
 
 
 def resolve_heygem_shared_root(*, ensure_exists: bool = True) -> Path:
@@ -481,6 +496,26 @@ class Settings(BaseSettings):
                 return [ext.strip() for ext in v.split(",")]
         return v  # type: ignore[return-value]
 
+    @field_validator("reasoning_model", mode="after")
+    @classmethod
+    def normalize_reasoning_model_field(cls, value: str, info: ValidationInfo) -> str:
+        return normalize_reasoning_model_for_provider(info.data.get("reasoning_provider"), value)
+
+    @field_validator("backup_reasoning_model", mode="after")
+    @classmethod
+    def normalize_backup_reasoning_model_field(cls, value: str, info: ValidationInfo) -> str:
+        return normalize_reasoning_model_for_provider(info.data.get("backup_reasoning_provider"), value)
+
+    @field_validator("hybrid_analysis_model", mode="after")
+    @classmethod
+    def normalize_hybrid_analysis_model_field(cls, value: str, info: ValidationInfo) -> str:
+        return normalize_reasoning_model_for_provider(info.data.get("hybrid_analysis_provider"), value)
+
+    @field_validator("hybrid_copy_model", mode="after")
+    @classmethod
+    def normalize_hybrid_copy_model_field(cls, value: str, info: ValidationInfo) -> str:
+        return normalize_reasoning_model_for_provider(info.data.get("hybrid_copy_provider"), value)
+
     @property
     def max_upload_size_bytes(self) -> int:
         if self.max_upload_size_mb <= 0:
@@ -538,7 +573,12 @@ class Settings(BaseSettings):
         route_helper = str(_get_llm_route_override("model_search_helper") or "").strip()
         if route_helper:
             return route_helper
-        return self.model_search_helper
+        helper = str(self.model_search_helper or "").strip()
+        if helper:
+            return helper
+        if str(self.openai_auth_mode or "").strip().lower() == "codex_compat":
+            return build_default_codex_model_search_helper()
+        return ""
 
     @property
     def active_multimodal_fallback_provider(self) -> str:
@@ -581,6 +621,47 @@ def normalize_transcription_settings(provider: object, model: object) -> tuple[s
         model_value = DEFAULT_TRANSCRIPTION_MODELS[provider_value]
 
     return provider_value, model_value
+
+
+def normalize_reasoning_model_for_provider(provider: object, model: object) -> str:
+    normalized_provider = str(provider or "").strip().lower()
+    model_value = str(model or "").strip()
+    if not model_value:
+        return ""
+    if normalized_provider != "minimax":
+        return model_value
+    return MINIMAX_REASONING_MODEL_ALIASES.get(model_value.lower(), model_value)
+
+
+def _has_minimax_reasoning_credentials(settings: Any) -> bool:
+    return bool(str(getattr(settings, "minimax_api_key", "") or "").strip())
+
+
+def _resolve_codex_bridge_command(settings: Any) -> str:
+    return str(
+        os.getenv("ROUGHCUT_CODEX_HOST_BRIDGE_CODEX_COMMAND")
+        or getattr(settings, "telegram_agent_codex_command", "")
+        or getattr(settings, "acp_bridge_codex_command", "")
+        or "codex"
+    ).strip() or "codex"
+
+
+def _has_openai_codex_reasoning_bridge(settings: Any) -> bool:
+    auth_mode = str(getattr(settings, "openai_auth_mode", "") or "").strip().lower()
+    if auth_mode != "codex_compat":
+        return False
+    return bool(shutil.which(_resolve_codex_bridge_command(settings)))
+
+
+def _openai_responses_credentials_unavailable(settings: Any) -> bool:
+    auth_mode = str(getattr(settings, "openai_auth_mode", "") or "").strip().lower()
+    direct_key = str(getattr(settings, "openai_api_key", "") or "").strip()
+    return auth_mode == "codex_compat" and not direct_key and not _has_openai_codex_reasoning_bridge(settings)
+
+
+def _openai_responses_route_likely_unavailable(settings: Any) -> bool:
+    provider = str(getattr(settings, "active_reasoning_provider", "") or getattr(settings, "reasoning_provider", "")).strip().lower()
+    return provider == "openai" and _openai_responses_credentials_unavailable(settings)
 
 
 def resolve_transcription_provider_plan(provider: object, model: object) -> list[tuple[str, str]]:
@@ -921,10 +1002,21 @@ def _normalize_runtime_override_values(data: dict[str, Any]) -> dict[str, Any]:
     if "reasoning_provider" in normalized:
         normalized["reasoning_provider"] = str(normalized.get("reasoning_provider") or "").strip().lower()
 
+    if "reasoning_model" in normalized:
+        normalized["reasoning_model"] = normalize_reasoning_model_for_provider(
+            normalized.get("reasoning_provider"),
+            normalized.get("reasoning_model"),
+        )
+
     if "backup_reasoning_provider" in normalized:
         provider = str(normalized.get("backup_reasoning_provider") or "").strip().lower()
         normalized["backup_reasoning_provider"] = (
             provider if provider in HYBRID_REASONING_PROVIDER_VALUES else DEFAULT_BACKUP_REASONING_PROVIDER
+        )
+    if "backup_reasoning_model" in normalized:
+        normalized["backup_reasoning_model"] = normalize_reasoning_model_for_provider(
+            normalized.get("backup_reasoning_provider"),
+            normalized.get("backup_reasoning_model"),
         )
 
     for key in ("reasoning_effort", "backup_reasoning_effort", "hybrid_analysis_effort", "hybrid_copy_effort"):
@@ -942,7 +1034,11 @@ def _normalize_runtime_override_values(data: dict[str, Any]) -> dict[str, Any]:
 
     for key in ("hybrid_analysis_model", "hybrid_copy_model"):
         if key in normalized:
-            normalized[key] = str(normalized.get(key) or "").strip()
+            provider_key = "hybrid_analysis_provider" if key == "hybrid_analysis_model" else "hybrid_copy_provider"
+            normalized[key] = normalize_reasoning_model_for_provider(
+                normalized.get(provider_key),
+                normalized.get(key),
+            )
 
     for key in (
         "telegram_agent_claude_model",
@@ -977,6 +1073,19 @@ def _normalize_llm_capability_bundle_settings(settings: Settings) -> None:
         routing_mode = "bundled"
     object.__setattr__(settings, "llm_routing_mode", routing_mode)
 
+    reasoning_provider = str(getattr(settings, "reasoning_provider", "") or "").strip().lower()
+    if reasoning_provider not in HYBRID_REASONING_PROVIDER_VALUES:
+        reasoning_provider = DEFAULT_REASONING_PROVIDER
+    object.__setattr__(settings, "reasoning_provider", reasoning_provider)
+    object.__setattr__(
+        settings,
+        "reasoning_model",
+        normalize_reasoning_model_for_provider(
+            reasoning_provider,
+            str(getattr(settings, "reasoning_model", "") or "").strip() or DEFAULT_REASONING_MODEL,
+        ) or DEFAULT_REASONING_MODEL,
+    )
+
     analysis_provider = str(getattr(settings, "hybrid_analysis_provider", "") or "").strip().lower()
     if analysis_provider not in HYBRID_REASONING_PROVIDER_VALUES:
         analysis_provider = DEFAULT_HYBRID_ANALYSIS_PROVIDER
@@ -990,7 +1099,10 @@ def _normalize_llm_capability_bundle_settings(settings: Settings) -> None:
     object.__setattr__(
         settings,
         "hybrid_analysis_model",
-        str(getattr(settings, "hybrid_analysis_model", "") or "").strip() or DEFAULT_HYBRID_ANALYSIS_MODEL,
+        normalize_reasoning_model_for_provider(
+            analysis_provider,
+            str(getattr(settings, "hybrid_analysis_model", "") or "").strip() or DEFAULT_HYBRID_ANALYSIS_MODEL,
+        ) or DEFAULT_HYBRID_ANALYSIS_MODEL,
     )
     object.__setattr__(
         settings,
@@ -1000,7 +1112,10 @@ def _normalize_llm_capability_bundle_settings(settings: Settings) -> None:
     object.__setattr__(
         settings,
         "hybrid_copy_model",
-        str(getattr(settings, "hybrid_copy_model", "") or "").strip() or DEFAULT_HYBRID_COPY_MODEL,
+        normalize_reasoning_model_for_provider(
+            copy_provider,
+            str(getattr(settings, "hybrid_copy_model", "") or "").strip() or DEFAULT_HYBRID_COPY_MODEL,
+        ) or DEFAULT_HYBRID_COPY_MODEL,
     )
     object.__setattr__(
         settings,
@@ -1020,7 +1135,10 @@ def _normalize_llm_capability_bundle_settings(settings: Settings) -> None:
     object.__setattr__(
         settings,
         "backup_reasoning_model",
-        str(getattr(settings, "backup_reasoning_model", "") or "").strip() or DEFAULT_BACKUP_REASONING_MODEL,
+        normalize_reasoning_model_for_provider(
+            backup_provider,
+            str(getattr(settings, "backup_reasoning_model", "") or "").strip() or DEFAULT_BACKUP_REASONING_MODEL,
+        ) or DEFAULT_BACKUP_REASONING_MODEL,
     )
     object.__setattr__(
         settings,
@@ -1084,8 +1202,13 @@ def resolve_backup_llm_route(*, settings: Settings | None = None) -> dict[str, A
         return {}
 
     provider = str(getattr(current, "backup_reasoning_provider", "") or "").strip().lower()
-    model = str(getattr(current, "backup_reasoning_model", "") or "").strip()
+    model = normalize_reasoning_model_for_provider(
+        provider,
+        str(getattr(current, "backup_reasoning_model", "") or "").strip(),
+    )
     if not provider or not model:
+        return {}
+    if provider == "openai" and _openai_responses_credentials_unavailable(current):
         return {}
 
     route: dict[str, Any] = {
@@ -1149,29 +1272,54 @@ def resolve_llm_task_route(task_name: str, *, settings: Settings | None = None) 
 
     normalized_task = str(task_name or "").strip().lower()
     if normalized_task in {"subtitle", "subtitle_postprocess", "subtitle_translation", "content_profile", "copy_verify", "edit_plan"}:
+        selected_provider = str(
+            getattr(current, "hybrid_analysis_provider", DEFAULT_HYBRID_ANALYSIS_PROVIDER)
+            or DEFAULT_HYBRID_ANALYSIS_PROVIDER
+        ).strip().lower()
+        selected_model = str(
+            getattr(current, "hybrid_analysis_model", DEFAULT_HYBRID_ANALYSIS_MODEL)
+            or DEFAULT_HYBRID_ANALYSIS_MODEL
+        ).strip()
+        if (
+            selected_provider == "openai"
+            and _openai_responses_route_likely_unavailable(current)
+            and _has_minimax_reasoning_credentials(current)
+        ):
+            selected_provider = "minimax"
+            selected_model = DEFAULT_MINIMAX_REASONING_MODEL
         route = {
-            "reasoning_provider": str(
-                getattr(current, "hybrid_analysis_provider", DEFAULT_HYBRID_ANALYSIS_PROVIDER)
-                or DEFAULT_HYBRID_ANALYSIS_PROVIDER
-            ).strip().lower(),
-            "reasoning_model": str(
-                getattr(current, "hybrid_analysis_model", DEFAULT_HYBRID_ANALYSIS_MODEL)
-                or DEFAULT_HYBRID_ANALYSIS_MODEL
-            ).strip(),
+            "reasoning_provider": selected_provider,
+            "reasoning_model": normalize_reasoning_model_for_provider(
+                selected_provider,
+                selected_model,
+            ),
         }
         effort = _normalize_reasoning_effort(getattr(current, "hybrid_analysis_effort", ""))
         if effort:
             route["reasoning_effort"] = effort
         return route
     if normalized_task == "copy":
+        selected_provider = str(
+            getattr(current, "hybrid_copy_provider", DEFAULT_HYBRID_COPY_PROVIDER)
+            or DEFAULT_HYBRID_COPY_PROVIDER
+        ).strip().lower()
+        selected_model = str(
+            getattr(current, "hybrid_copy_model", DEFAULT_HYBRID_COPY_MODEL)
+            or DEFAULT_HYBRID_COPY_MODEL
+        ).strip()
+        if (
+            selected_provider == "openai"
+            and _openai_responses_route_likely_unavailable(current)
+            and _has_minimax_reasoning_credentials(current)
+        ):
+            selected_provider = "minimax"
+            selected_model = DEFAULT_MINIMAX_REASONING_MODEL
         route = {
-            "reasoning_provider": str(
-                getattr(current, "hybrid_copy_provider", DEFAULT_HYBRID_COPY_PROVIDER)
-                or DEFAULT_HYBRID_COPY_PROVIDER
-            ).strip().lower(),
-            "reasoning_model": str(
-                getattr(current, "hybrid_copy_model", DEFAULT_HYBRID_COPY_MODEL) or DEFAULT_HYBRID_COPY_MODEL
-            ).strip(),
+            "reasoning_provider": selected_provider,
+            "reasoning_model": normalize_reasoning_model_for_provider(
+                selected_provider,
+                selected_model,
+            ),
         }
         effort = _normalize_reasoning_effort(getattr(current, "hybrid_copy_effort", ""))
         if effort:

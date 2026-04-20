@@ -6,6 +6,9 @@ from roughcut.config import get_settings
 from roughcut.providers.reasoning.base import Message, ReasoningProvider, ReasoningResponse, strip_reasoning_tags
 from roughcut.usage import record_usage_event
 
+_MINIMAX_REASONING_TIMEOUT_SECONDS = 120
+_MINIMAX_REASONING_MAX_RETRIES = 1
+
 
 class MiniMaxReasoningProvider(ReasoningProvider):
     def __init__(self) -> None:
@@ -31,7 +34,12 @@ class MiniMaxReasoningProvider(ReasoningProvider):
         if json_mode:
             kwargs["response_format"] = {"type": "json_object"}
 
-        client = openai.AsyncOpenAI(api_key=self._api_key, base_url=self._base_url)
+        client = openai.AsyncOpenAI(
+            api_key=self._api_key,
+            base_url=self._base_url,
+            timeout=_MINIMAX_REASONING_TIMEOUT_SECONDS,
+            max_retries=_MINIMAX_REASONING_MAX_RETRIES,
+        )
         try:
             response = await client.chat.completions.create(**kwargs)
             choice = response.choices[0]

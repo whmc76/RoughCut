@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from difflib import SequenceMatcher
 import json
 import re
@@ -63,6 +64,7 @@ from roughcut.review.content_profile_review_stats import build_content_profile_a
 from roughcut.review.content_profile_scoring import score_identity_candidates
 from roughcut.review.content_profile_field_rules import CONTENT_PROFILE_FIELD_GUIDELINES
 from roughcut.review.domain_glossaries import detect_glossary_domains, select_primary_subject_domain
+from roughcut.review.intelligent_copy_topics import build_intelligent_copy_topic_hints
 from roughcut.review.platform_copy import build_transcript_for_packaging
 from roughcut.review.subtitle_memory import (
     _extract_compound_components,
@@ -78,6 +80,17 @@ from roughcut.speech.postprocess import (
 
 _CONTENT_PROFILE_INFER_CACHE_VERSION = "2026-04-14.infer.v36"
 _CONTENT_PROFILE_ENRICH_CACHE_VERSION = "2026-04-14.enrich.v37"
+_CONTENT_UNDERSTANDING_TIMEOUT_SEC = 360.0
+
+
+def _resolve_content_understanding_timeout_seconds() -> float:
+    settings = get_settings()
+    configured = getattr(settings, "step_stale_timeout_sec", None)
+    try:
+        configured_timeout = float(configured or _CONTENT_UNDERSTANDING_TIMEOUT_SEC)
+    except (TypeError, ValueError):
+        configured_timeout = _CONTENT_UNDERSTANDING_TIMEOUT_SEC
+    return max(1.0, min(configured_timeout, _CONTENT_UNDERSTANDING_TIMEOUT_SEC))
 _INGESTIBLE_PRODUCT_SIGNALS = (
     "luckykiss",
     "kisspod",
@@ -797,8 +810,10 @@ def _build_source_context_derived_hints(source_context: dict[str, Any] | None) -
         derived["related_source_names"] = list(entries[:3])
         for entry in entries:
             _merge_source_context_seed_hints(derived, _seed_profile_from_text(entry))
+            _merge_source_context_seed_hints(derived, build_intelligent_copy_topic_hints(entry))
     for entry in _source_context_description_entries(payload):
         _merge_source_context_seed_hints(derived, _seed_profile_from_text(entry))
+        _merge_source_context_seed_hints(derived, build_intelligent_copy_topic_hints(entry))
     return derived
 
 
@@ -3603,8 +3618,12 @@ async def infer_content_profile(
     )
 
     try:
+        infer_timeout_sec = _resolve_content_understanding_timeout_seconds()
         with track_usage_operation("content_profile.universal_infer"):
-            understanding = await infer_content_understanding(evidence_bundle)
+            understanding = await asyncio.wait_for(
+                infer_content_understanding(evidence_bundle),
+                timeout=infer_timeout_sec,
+            )
         force_neutral_cover_title = False
     except Exception:
         understanding = _build_failed_content_understanding(
@@ -4782,8 +4801,12 @@ async def _infer_content_understanding_for_enrich(
         candidate_hints=_enrich_candidate_hints(profile),
     )
     try:
+        infer_timeout_sec = _resolve_content_understanding_timeout_seconds()
         with track_usage_operation("content_profile.enrich_universal_infer"):
-            understanding = await infer_content_understanding(evidence_bundle)
+            understanding = await asyncio.wait_for(
+                infer_content_understanding(evidence_bundle),
+                timeout=infer_timeout_sec,
+            )
     except Exception:
         return None
 
@@ -4880,6 +4903,15 @@ def _source_context_candidate_hints(source_context: dict[str, Any] | None) -> di
         if isinstance(item, dict)
     ]
     if related_profiles:
+        referenced_source_names = {
+            str(item).strip()
+            for item in (
+                list(payload.get("merged_source_names") or [])
+                + list(payload.get("related_source_names") or [])
+            )
+            if str(item).strip()
+        }
+
         def _related_profile_priority(item: dict[str, Any]) -> tuple[int, float]:
             review_mode = str(item.get("review_mode") or "").strip().lower()
             if bool(item.get("manual_confirmed")) or review_mode == "manual_confirmed":
@@ -4915,16 +4947,53 @@ def _source_context_candidate_hints(source_context: dict[str, Any] | None) -> di
                 for item in related_profiles
                 if str(item.get("source_name") or "").strip()
             ][:3]
+            primary_source_name = str(primary.get("source_name") or "").strip()
+            has_reference_scope = bool(referenced_source_names)
+            primary_source_referenced = bool(primary_source_name and primary_source_name in referenced_source_names)
+            primary_brand_value = str(primary.get("subject_brand") or "").strip()
+            primary_model_value = str(primary.get("subject_model") or "").strip()
+            primary_brand_supported = (
+                not has_reference_scope
+                or primary_source_referenced
+                or _source_context_supports_identity(payload, brand=primary_brand_value)
+            )
+            primary_identity_supported = (
+                not has_reference_scope
+                or primary_source_referenced
+                or _source_context_supports_identity(
+                    payload,
+                    brand=primary_brand_value,
+                    model=primary_model_value,
+                )
+            )
             for key in ("subject_brand", "subject_model", "subject_type", "video_theme", "summary"):
                 value = str(primary.get(key) or "").strip()
-                if value and not str(hints.get(key) or "").strip():
+                if not value or str(hints.get(key) or "").strip():
+                    continue
+                if key == "subject_brand":
+                    if primary_brand_supported or primary_identity_supported:
+                        hints[key] = value
+                    continue
+                if key == "subject_model":
+                    if primary_identity_supported:
+                        hints[key] = value
+                    continue
+                if key in {"video_theme", "summary"}:
+                    if primary_identity_supported or (not primary_model_value and primary_brand_supported):
+                        hints[key] = value
+                    continue
+                if primary_brand_supported or primary_identity_supported:
                     hints[key] = value
             profile_queries = [
                 str(item).strip()
                 for item in (primary.get("search_queries") or [])
                 if str(item).strip()
             ]
-            if profile_queries and not hints.get("search_queries"):
+            if (
+                profile_queries
+                and not hints.get("search_queries")
+                and (primary_identity_supported or (not primary_model_value and primary_brand_supported))
+            ):
                 hints["search_queries"] = profile_queries[:6]
     return hints
 
@@ -6221,7 +6290,7 @@ def _seed_profile_from_glossary_terms(
             continue
 
         if _is_brand_like_glossary_category(category):
-            candidate = _canonical_brand_display_name(correct_form)
+            candidate = _canonical_brand_seed_name(correct_form)
             score = len(_normalize_profile_value(matched_value))
             if candidate and candidate not in matched_brands:
                 matched_brands.append(candidate)
@@ -6747,7 +6816,7 @@ def _build_scoped_seed_search_queries(
         if _is_brand_like_glossary_category(category):
             if not term.get("transcription_seed_templates"):
                 continue
-            display = _canonical_brand_display_name(correct_form)
+            display = _canonical_brand_seed_name(correct_form)
             if display and display not in seed_brands:
                 seed_brands.append(display)
         elif _is_model_like_glossary_category(category) or _looks_like_product_model(correct_form):
@@ -6857,6 +6926,21 @@ def _canonical_brand_display_name(value: str) -> str:
     english_tokens = re.findall(r"[A-Za-z]{2,}", text)
     chinese_tokens = re.findall(r"[\u4e00-\u9fff]{2,12}", text)
     if english_tokens and chinese_tokens:
+        return chinese_tokens[-1]
+    if chinese_tokens:
+        return chinese_tokens[-1]
+    if english_tokens:
+        return english_tokens[0].upper()
+    return text
+
+
+def _canonical_brand_seed_name(value: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    english_tokens = re.findall(r"[A-Za-z]{2,}", text)
+    chinese_tokens = re.findall(r"[\u4e00-\u9fff]{2,12}", text)
+    if english_tokens and chinese_tokens:
         return "".join(text.split())
     if chinese_tokens:
         return chinese_tokens[-1]
@@ -6910,17 +6994,28 @@ def _brand_display_candidates(
     prefer_bilingual: bool,
     include_canonical: bool = True,
 ) -> list[str]:
-    ordered_keys = (
-        ("subject_brand_bilingual", "subject_brand_cn", "subject_brand")
+    subject_brand = str(profile.get("subject_brand") or "").strip()
+    subject_model = str(profile.get("subject_model") or "").strip()
+    ordered_values = (
+        [
+            str(profile.get("subject_brand_bilingual") or "").strip()
+            or (_brand_bilingual_display_name(subject_brand) if subject_brand and not subject_model else ""),
+            str(profile.get("subject_brand_cn") or "").strip(),
+            subject_brand,
+        ]
         if prefer_bilingual
-        else ("subject_brand_cn", "subject_brand_bilingual", "subject_brand")
+        else [
+            str(profile.get("subject_brand_cn") or "").strip(),
+            str(profile.get("subject_brand_bilingual") or "").strip(),
+            subject_brand,
+        ]
     )
     candidates: list[str] = []
     seen: set[str] = set()
-    for key in ordered_keys:
-        if key == "subject_brand" and not include_canonical:
+    for index, raw_value in enumerate(ordered_values):
+        if index == len(ordered_values) - 1 and not include_canonical:
             continue
-        candidate = _normalize_brand_display_label(profile.get(key) or "")
+        candidate = _normalize_brand_display_label(raw_value)
         if not candidate or candidate in seen:
             continue
         seen.add(candidate)
@@ -6979,15 +7074,11 @@ def _apply_brand_display_fields(profile: dict[str, Any]) -> dict[str, Any]:
         updated.pop("subject_brand_bilingual", None)
         return updated
     cn_name = _brand_cn_display_name(brand)
-    bilingual = _brand_bilingual_display_name(brand)
     if cn_name:
         updated["subject_brand_cn"] = cn_name
     else:
         updated.pop("subject_brand_cn", None)
-    if bilingual and bilingual != brand:
-        updated["subject_brand_bilingual"] = bilingual
-    else:
-        updated.pop("subject_brand_bilingual", None)
+    updated.pop("subject_brand_bilingual", None)
     return updated
 
 

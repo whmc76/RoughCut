@@ -20,9 +20,11 @@ from roughcut.db.models import Artifact, GlossaryTerm, Job, JobStep, RenderOutpu
 from roughcut.media.audio import NoAudioStreamError
 from roughcut.media.probe import MediaMeta
 from roughcut.pipeline.steps import (
+    _copy_file_with_retry,
     _complete_subtitle_boundary_json,
     _get_cover_seek,
     _infer_subject_domain_for_memory,
+    _load_edit_decision_cut_review_json_payload,
     _load_latest_artifact,
     _load_latest_optional_artifact,
     _load_preferred_downstream_profile,
@@ -38,6 +40,8 @@ from roughcut.pipeline.steps import (
     _select_low_confidence_windows_for_llm,
     _select_cover_source_video,
     _select_preferred_content_profile_artifact,
+    _probe_with_retry,
+    _variant_sync_is_blocking,
     _workflow_template_subject_domain,
     run_ai_director,
     run_avatar_commentary,
@@ -286,14 +290,14 @@ async def test_run_subtitle_term_resolution_records_patch_and_corrections(db_eng
 
     async with factory() as session:
         session.add(
-            Job(
-                id=job_id,
-                source_path="jobs/demo/source.mp4",
-                source_name="20260212-134637 NOC MT34 review.mp4",
-                status="processing",
-                language="zh-CN",
-                workflow_template="edc_tactical",
-            )
+                Job(
+                    id=job_id,
+                    source_path="jobs/demo/source.mp4",
+                    source_name="20260301-171940 狐蝠工业foxbat 阵风 机能双肩包使用体验.mp4",
+                    status="processing",
+                    language="zh-CN",
+                    workflow_template="edc_tactical",
+                )
         )
         session.add(JobStep(job_id=job_id, step_name="subtitle_term_resolution", status="running"))
         session.add(GlossaryTerm(wrong_forms=["NZ"], correct_form="NOC", category="edc_brand"))
@@ -362,7 +366,7 @@ async def test_run_subtitle_term_resolution_prefers_projection_entries_for_read_
             Job(
                 id=job_id,
                 source_path="jobs/demo/source.mp4",
-                source_name="20260212-134637 NOC MT34 review.mp4",
+                source_name="20260301-171940 狐蝠工业foxbat 阵风 机能双肩包使用体验.mp4",
                 status="processing",
                 language="zh-CN",
                 workflow_template="edc_tactical",
@@ -416,6 +420,7 @@ async def test_run_subtitle_term_resolution_prefers_projection_entries_for_read_
     async def fake_apply_glossary_corrections(*args, **kwargs):
         subtitle_items = args[1]
         captured["orm_subtitle_texts"] = [item.text_final for item in subtitle_items]
+        captured["content_profile"] = dict(kwargs.get("content_profile") or {})
         return []
 
     monkeypatch.setattr(steps_mod, "_build_effective_glossary_terms", fake_build_effective_glossary_terms)
@@ -426,6 +431,7 @@ async def test_run_subtitle_term_resolution_prefers_projection_entries_for_read_
     assert result["patch_count"] == 0
     assert [item["text_final"] for item in captured["subtitle_items"]] == ["projection subtitle text"]
     assert captured["orm_subtitle_texts"] == ["old subtitle text"]
+    assert captured["content_profile"]["subject_brand"] == "狐蝠工业"
 
 
 @pytest.mark.asyncio
@@ -1186,7 +1192,7 @@ def test_resolve_llm_task_route_includes_subtitle_postprocess():
         ),
     )
 
-    assert route == {"reasoning_provider": "minimax", "reasoning_model": "MiniMax-M2.7-highspeed"}
+    assert route == {"reasoning_provider": "minimax", "reasoning_model": "MiniMax-M2.7"}
 
 
 def test_resolve_llm_task_route_includes_edit_plan():
@@ -1202,7 +1208,61 @@ def test_resolve_llm_task_route_includes_edit_plan():
         ),
     )
 
-    assert route == {"reasoning_provider": "minimax", "reasoning_model": "MiniMax-M2.7-highspeed"}
+    assert route == {"reasoning_provider": "minimax", "reasoning_model": "MiniMax-M2.7"}
+
+
+@pytest.mark.parametrize("task_name", ["edit_plan", "content_profile", "copy_verify", "subtitle_translation"])
+def test_resolve_llm_task_route_reroutes_hybrid_analysis_tasks_to_minimax_when_openai_codex_compat_lacks_api_key(
+    task_name,
+):
+    from roughcut.config import resolve_llm_task_route
+
+    route = resolve_llm_task_route(
+        task_name,
+        settings=SimpleNamespace(
+            llm_mode="performance",
+            llm_routing_mode="hybrid_performance",
+            hybrid_analysis_provider="openai",
+            hybrid_analysis_model="gpt-5.4",
+            active_reasoning_provider="openai",
+            reasoning_provider="openai",
+            openai_auth_mode="codex_compat",
+            openai_api_key="",
+            telegram_agent_codex_command="definitely-missing-codex",
+            acp_bridge_codex_command="definitely-missing-codex",
+            minimax_api_key="test-key",
+        ),
+    )
+
+    assert route == {"reasoning_provider": "minimax", "reasoning_model": "MiniMax-M2.7"}
+
+
+def test_resolve_llm_task_route_reroutes_copy_to_minimax_when_openai_codex_compat_lacks_api_key():
+    from roughcut.config import resolve_llm_task_route
+
+    route = resolve_llm_task_route(
+        "copy",
+        settings=SimpleNamespace(
+            llm_mode="performance",
+            llm_routing_mode="hybrid_performance",
+            hybrid_copy_provider="openai",
+            hybrid_copy_model="gpt-5.4-mini",
+            hybrid_copy_effort="high",
+            active_reasoning_provider="openai",
+            reasoning_provider="openai",
+            openai_auth_mode="codex_compat",
+            openai_api_key="",
+            telegram_agent_codex_command="definitely-missing-codex",
+            acp_bridge_codex_command="definitely-missing-codex",
+            minimax_api_key="test-key",
+        ),
+    )
+
+    assert route == {
+        "reasoning_provider": "minimax",
+        "reasoning_model": "MiniMax-M2.7",
+        "reasoning_effort": "high",
+    }
 
 
 @pytest.mark.asyncio
@@ -1940,6 +2000,146 @@ async def test_run_glossary_review_keeps_step_heartbeat_alive_during_profile_enr
     assert "术语纠错候选" in str(heartbeat_calls[0]["detail"])
     assert heartbeat_calls[0]["progress"] == 0.45
     assert heartbeat_calls[0]["task"].cancelled is True
+
+
+@pytest.mark.asyncio
+async def test_run_glossary_review_skips_full_profile_inference_when_profile_missing(db_engine, monkeypatch):
+    import roughcut.pipeline.steps as steps_mod
+
+    factory = async_sessionmaker(db_engine, expire_on_commit=False)
+    job_id = uuid.uuid4()
+
+    async with factory() as session:
+        session.add(
+            Job(
+                id=job_id,
+                source_path="jobs/demo/foxbat.mp4",
+                source_name="20260301-171940 狐蝠工业foxbat 阵风 机能双肩包使用体验.mp4",
+                status="processing",
+                language="zh-CN",
+                workflow_template="edc_tactical",
+            )
+        )
+        session.add(JobStep(job_id=job_id, step_name="glossary_review", status="running"))
+        session.add(
+            SubtitleItem(
+                job_id=job_id,
+                version=1,
+                item_index=0,
+                start_time=0.0,
+                end_time=1.0,
+                text_raw="这次分享狐蝠工业阵风双肩包的使用体验。",
+                text_norm="这次分享狐蝠工业阵风双肩包的使用体验。",
+                text_final="这次分享狐蝠工业阵风双肩包的使用体验。",
+            )
+        )
+        await session.commit()
+
+    monkeypatch.setattr(steps_mod, "get_session_factory", lambda: factory)
+    monkeypatch.setattr(steps_mod, "apply_glossary_corrections", AsyncMock(return_value=[]))
+    monkeypatch.setattr(steps_mod, "load_content_profile_user_memory", AsyncMock(return_value={}))
+    monkeypatch.setattr(steps_mod, "_load_recent_subtitle_examples", AsyncMock(return_value=[]))
+    monkeypatch.setattr(steps_mod, "_load_related_profile_subtitle_examples", AsyncMock(return_value=[]))
+    monkeypatch.setattr(steps_mod, "build_subtitle_review_memory", lambda **kwargs: {})
+    monkeypatch.setattr(steps_mod, "polish_subtitle_items", AsyncMock(return_value=0))
+
+    infer_mock = AsyncMock(side_effect=AssertionError("infer_content_profile should not run in glossary_review"))
+    enrich_mock = AsyncMock(side_effect=AssertionError("enrich_content_profile should not run in glossary_review"))
+    monkeypatch.setattr(steps_mod, "infer_content_profile", infer_mock)
+    monkeypatch.setattr(steps_mod, "enrich_content_profile", enrich_mock)
+
+    result = await steps_mod.run_glossary_review(str(job_id))
+
+    assert result["pending_correction_count"] == 0
+    assert infer_mock.await_count == 0
+    assert enrich_mock.await_count == 0
+
+    async with factory() as session:
+        artifact_result = await session.execute(
+            select(Artifact).where(Artifact.job_id == job_id, Artifact.artifact_type == "content_profile")
+        )
+        artifact = artifact_result.scalar_one()
+        profile = dict(artifact.data_json or {})
+
+    assert profile["subject_brand"] == "狐蝠工业"
+    assert "subject_model" not in profile
+    assert profile["subject_type"] in {"EDC机能包", "机能双肩包", "双肩包"}
+    assert profile["creative_profile"]["workflow_mode"] == "standard_edit"
+
+
+@pytest.mark.asyncio
+async def test_run_glossary_review_skips_profile_enrich_when_topic_registry_aligned(db_engine, monkeypatch):
+    import roughcut.pipeline.steps as steps_mod
+
+    factory = async_sessionmaker(db_engine, expire_on_commit=False)
+    job_id = uuid.uuid4()
+
+    async with factory() as session:
+        session.add(
+            Job(
+                id=job_id,
+                source_path="jobs/demo/fas.mp4",
+                source_name="FAS刀帕伞绳更换和用法.mp4",
+                status="processing",
+                language="zh-CN",
+                workflow_template="edc_tactical",
+            )
+        )
+        session.add(JobStep(job_id=job_id, step_name="glossary_review", status="running"))
+        session.add(
+            SubtitleItem(
+                job_id=job_id,
+                version=1,
+                item_index=0,
+                start_time=0.0,
+                end_time=1.0,
+                text_raw="今天讲一下 FAS 刀帕是怎么用的。",
+                text_norm="今天讲一下 FAS 刀帕是怎么用的。",
+                text_final="今天讲一下 FAS 刀帕是怎么用的。",
+            )
+        )
+        session.add(
+            Artifact(
+                job_id=job_id,
+                artifact_type="content_profile_final",
+                data_json={
+                    "subject_brand": "FAS",
+                    "subject_model": "刀帕",
+                    "subject_type": "刀帕收纳配件",
+                    "video_theme": "FAS刀帕使用与伞绳更换教程",
+                    "summary": "这期主要演示FAS刀帕怎么包裹固定。",
+                    "engagement_question": "你会继续用原装弹力绳，还是直接换成伞绳和绳扣？",
+                    "workflow_template": "edc_tactical",
+                },
+            )
+        )
+        await session.commit()
+
+    monkeypatch.setattr(steps_mod, "get_session_factory", lambda: factory)
+    monkeypatch.setattr(steps_mod, "apply_glossary_corrections", AsyncMock(return_value=[]))
+    monkeypatch.setattr(steps_mod, "load_content_profile_user_memory", AsyncMock(return_value={}))
+    monkeypatch.setattr(steps_mod, "_load_recent_subtitle_examples", AsyncMock(return_value=[]))
+    monkeypatch.setattr(steps_mod, "_load_related_profile_subtitle_examples", AsyncMock(return_value=[]))
+    monkeypatch.setattr(steps_mod, "build_subtitle_review_memory", lambda **kwargs: {})
+    monkeypatch.setattr(steps_mod, "polish_subtitle_items", AsyncMock(return_value=0))
+
+    enrich_mock = AsyncMock(side_effect=AssertionError("enrich_content_profile should not run when topic registry is aligned"))
+    monkeypatch.setattr(steps_mod, "enrich_content_profile", enrich_mock)
+
+    result = await steps_mod.run_glossary_review(str(job_id))
+
+    assert result["pending_correction_count"] == 0
+    assert enrich_mock.await_count == 0
+
+    async with factory() as session:
+        artifact_result = await session.execute(
+            select(Artifact).where(Artifact.job_id == job_id, Artifact.artifact_type == "content_profile")
+        )
+        artifact = artifact_result.scalar_one()
+        profile = dict(artifact.data_json or {})
+
+    assert profile["topic_registry_short_circuit"]["enabled"] is True
+    assert profile["creative_profile"]["workflow_mode"] == "standard_edit"
 
 
 @pytest.mark.asyncio
@@ -8509,6 +8709,129 @@ def test_select_cover_source_video_requires_plain_render(tmp_path: Path):
         _select_cover_source_video(plain, packaged)
 
 
+@pytest.mark.asyncio
+async def test_copy_file_with_retry_recovers_from_transient_permission_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    source = tmp_path / "source.txt"
+    dest = tmp_path / "dest.txt"
+    source.write_text("demo", encoding="utf-8")
+
+    calls = {"count": 0}
+
+    def fake_copy2(src, dst):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise PermissionError("[WinError 32] file is busy")
+        return shutil.copyfile(src, dst)
+
+    monkeypatch.setattr("roughcut.pipeline.steps.shutil.copy2", fake_copy2)
+
+    await _copy_file_with_retry(source, dest, attempts=3, retry_delay_sec=0)
+
+    assert calls["count"] == 2
+    assert dest.read_text(encoding="utf-8") == "demo"
+
+
+@pytest.mark.asyncio
+async def test_probe_with_retry_recovers_from_transient_permission_error(monkeypatch: pytest.MonkeyPatch):
+    import roughcut.pipeline.steps as steps_mod
+
+    calls = {"count": 0}
+
+    async def fake_probe(path):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise PermissionError("[WinError 32] file is busy")
+        return SimpleNamespace(duration=12.3, width=1920, height=1080)
+
+    monkeypatch.setattr(steps_mod, "probe", fake_probe)
+
+    result = await _probe_with_retry(Path("demo.mp4"), attempts=3, retry_delay_sec=0)
+
+    assert calls["count"] == 2
+    assert result.duration == 12.3
+
+
+@pytest.mark.asyncio
+async def test_load_edit_decision_cut_review_json_payload_parses_fenced_json_without_repair():
+    response = SimpleNamespace(
+        content='```json\n{"decisions":[{"candidate_id":"cut-1","verdict":"keep","confidence":0.91,"reason":"context","evidence":["字幕"]}],"summary":"ok"}\n```',
+        raw_content="",
+        as_json=lambda: (_ for _ in ()).throw(ValueError("No JSON payload found in model response")),
+    )
+
+    payload = await _load_edit_decision_cut_review_json_payload(
+        provider=object(),
+        response=response,
+        prompt_messages=[SimpleNamespace(role="system", content="sys")],
+        timeout_sec=12.0,
+        expected_decision_count=1,
+    )
+
+    assert payload["summary"] == "ok"
+    assert payload["decisions"][0]["candidate_id"] == "cut-1"
+
+
+@pytest.mark.asyncio
+async def test_load_edit_decision_cut_review_json_payload_parses_final_repair_text(monkeypatch: pytest.MonkeyPatch):
+    class FakeProvider:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def complete(self, messages, *, temperature=0.0, max_tokens=900, json_mode=False):
+            self.calls += 1
+            if self.calls == 1:
+                return SimpleNamespace(
+                    content="```json\n{\"decisions\":[{\"candidate_id\":\"cut-1\",\"verdict\":\"keep\",\"confidence\":0.88,\"reason\":\"repair\",\"evidence\":[]}],\"summary\":\"fixed\"}\n```",
+                    raw_content="",
+                    as_json=lambda: (_ for _ in ()).throw(ValueError("No JSON payload found in model response")),
+                )
+            raise AssertionError("unexpected extra repair call")
+
+    provider = FakeProvider()
+    response = SimpleNamespace(
+        content="not-json",
+        raw_content="not-json",
+        as_json=lambda: (_ for _ in ()).throw(ValueError("No JSON payload found in model response")),
+    )
+
+    payload = await _load_edit_decision_cut_review_json_payload(
+        provider=provider,
+        response=response,
+        prompt_messages=[SimpleNamespace(role="system", content="sys"), SimpleNamespace(role="user", content="user")],
+        timeout_sec=12.0,
+        expected_decision_count=1,
+    )
+
+    assert provider.calls == 1
+    assert payload["summary"] == "fixed"
+    assert payload["decisions"][0]["candidate_id"] == "cut-1"
+
+
+def test_variant_sync_is_blocking_allows_small_gap_without_warning_codes():
+    assert _variant_sync_is_blocking(
+        {
+            "video_duration_sec": 410.0,
+            "effective_trailing_gap_sec": 1.148,
+            "effective_duration_gap_sec": 1.148,
+            "warning_codes": [],
+        }
+    ) is False
+
+
+def test_variant_sync_is_blocking_blocks_large_gap_warning_codes():
+    assert _variant_sync_is_blocking(
+        {
+            "video_duration_sec": 410.0,
+            "effective_trailing_gap_sec": 2.8,
+            "effective_duration_gap_sec": 2.8,
+            "warning_codes": ["subtitle_trailing_gap_large", "subtitle_duration_gap_large"],
+        }
+    ) is True
+
+
 def test_select_preferred_content_profile_artifact_prefers_final_over_newer_working_copy():
     base_time = datetime(2026, 3, 12, 15, 0, tzinfo=timezone.utc)
     draft = Artifact(
@@ -8548,3 +8871,51 @@ def test_select_preferred_content_profile_artifact_prefers_latest_draft_over_old
     selected = _select_preferred_content_profile_artifact([working_copy, draft])
 
     assert selected is draft
+
+
+def test_resolve_topic_registry_hints_for_profile_short_circuit_uses_source_context():
+    import roughcut.pipeline.steps as steps_mod
+
+    hints = steps_mod._resolve_topic_registry_hints_for_profile_short_circuit(
+        source_name="FAS刀帕伞绳更换和用法.mp4",
+        transcript_excerpt="这期主要演示 FAS刀帕怎么包裹固定，顺带讲原装弹力绳和伞绳绳扣怎么更换。",
+        source_context={"video_description": "FAS刀帕使用与伞绳更换教程"},
+    )
+
+    assert hints["subject_brand"] == "FAS"
+    assert hints["subject_model"] == "刀帕"
+    assert hints["subject_type"] == "刀帕收纳配件"
+
+
+def test_profile_matches_topic_registry_hints_requires_aligned_identity_and_summary():
+    import roughcut.pipeline.steps as steps_mod
+
+    topic_hints = {
+        "subject_brand": "FAS",
+        "subject_model": "刀帕",
+        "subject_type": "刀帕收纳配件",
+        "video_theme": "FAS刀帕使用与伞绳更换教程",
+    }
+
+    assert steps_mod._profile_matches_topic_registry_hints(
+        {
+            "subject_brand": "FAS",
+            "subject_model": "刀帕",
+            "subject_type": "刀帕收纳配件",
+            "video_theme": "FAS刀帕使用与伞绳更换教程",
+            "summary": "这期主要演示FAS刀帕怎么包裹固定。",
+            "engagement_question": "你会继续用原装弹力绳，还是直接换成伞绳和绳扣？",
+        },
+        topic_hints=topic_hints,
+    )
+    assert not steps_mod._profile_matches_topic_registry_hints(
+        {
+            "subject_brand": "FAS",
+            "subject_model": "刀帕",
+            "subject_type": "刀帕收纳配件",
+            "video_theme": "FAS刀帕使用与伞绳更换教程",
+            "summary": "",
+            "engagement_question": "你会继续用原装弹力绳，还是直接换成伞绳和绳扣？",
+        },
+        topic_hints=topic_hints,
+    )

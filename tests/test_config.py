@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
+import sys
 
 import pytest
 
@@ -85,6 +87,25 @@ def test_default_settings():
     assert s.avatar_overlay_scale == 0.18
     assert s.active_reasoning_provider == "openai"
 
+
+def test_minimax_highspeed_model_is_normalized_to_m27():
+    s = Settings(
+        _env_file=None,
+        reasoning_provider="minimax",
+        reasoning_model="MiniMax-M2.7-highspeed",
+        backup_reasoning_provider="minimax",
+        backup_reasoning_model="MiniMax-M2.7-highspeed",
+        hybrid_analysis_provider="minimax",
+        hybrid_analysis_model="MiniMax-M2.7-highspeed",
+        hybrid_copy_provider="minimax",
+        hybrid_copy_model="MiniMax-M2.7-highspeed",
+    )
+
+    assert s.reasoning_model == "MiniMax-M2.7"
+    assert s.backup_reasoning_model == "MiniMax-M2.7"
+    assert s.hybrid_analysis_model == "MiniMax-M2.7"
+    assert s.hybrid_copy_model == "MiniMax-M2.7"
+
 def test_local_mode_switches_active_provider():
     s = Settings(_env_file=None, llm_mode="local", local_reasoning_model="qwen3.5:9b")
     assert s.active_reasoning_provider == "ollama"
@@ -107,17 +128,35 @@ def test_llm_backup_route_switches_reasoning_search_and_vision():
 
     route = resolve_backup_llm_route(settings=s)
     assert route["reasoning_provider"] == "minimax"
-    assert route["reasoning_model"] == "MiniMax-M2.7-highspeed"
+    assert route["reasoning_model"] == "MiniMax-M2.7"
     assert route["vision_model"] == "MiniMax-VL-01"
     assert route["search_provider"] == "auto"
     assert route["search_fallback_provider"] == "minimax"
 
     with llm_backup_route(settings=s):
         assert s.active_reasoning_provider == "minimax"
-        assert s.active_reasoning_model == "MiniMax-M2.7-highspeed"
+        assert s.active_reasoning_model == "MiniMax-M2.7"
         assert s.active_vision_model == "MiniMax-VL-01"
         assert s.active_search_provider == "auto"
         assert s.active_search_fallback_provider == "minimax"
+
+
+def test_resolve_backup_llm_route_disables_unavailable_openai_codex_compat_backup():
+    s = Settings(
+        _env_file=None,
+        reasoning_provider="minimax",
+        reasoning_model="MiniMax-M2.7",
+        llm_backup_enabled=True,
+        backup_reasoning_provider="openai",
+        backup_reasoning_model="gpt-5.4-mini",
+        openai_auth_mode="codex_compat",
+        openai_api_key="",
+        telegram_agent_codex_command="definitely-missing-codex",
+        acp_bridge_codex_command="definitely-missing-codex",
+        minimax_api_key="test-key",
+    )
+
+    assert resolve_backup_llm_route(settings=s) == {}
 
 
 def test_infer_coding_backends_prefers_hybrid_routes():
@@ -164,6 +203,15 @@ def test_get_settings_normalizes_legacy_search_provider_override_to_auto(tmp_pat
     assert settings.model_search_helper == "helper"
     assert persisted["search_provider"] == "auto"
     assert persisted["search_fallback_provider"] == "model"
+
+
+def test_active_model_search_helper_defaults_to_codex_helper_for_codex_compat():
+    settings = Settings(_env_file=None, openai_auth_mode="codex_compat", model_search_helper="")
+
+    helper = settings.active_model_search_helper
+
+    assert "codex_model_search_helper.py" in helper
+    assert str(Path(sys.executable).resolve()) in helper
 
 
 def test_parse_extensions_from_string():

@@ -35,8 +35,8 @@ from roughcut.config import (
     get_settings,
     get_session_secret_override_keys,
     load_runtime_overrides,
+    normalize_reasoning_model_for_provider,
     canonicalize_transcription_provider_name,
-    normalize_transcription_provider_name,
     normalize_transcription_settings,
 )
 from roughcut.config_profiles import (
@@ -404,6 +404,19 @@ def get_config():
     overrides = load_runtime_overrides()
     sanitized_overrides = _sanitize_overrides(overrides)
     session_secret_keys = get_session_secret_override_keys()
+    reasoning_model = normalize_reasoning_model_for_provider(s.reasoning_provider, s.reasoning_model)
+    backup_reasoning_model = normalize_reasoning_model_for_provider(
+        s.backup_reasoning_provider,
+        s.backup_reasoning_model,
+    )
+    hybrid_analysis_model = normalize_reasoning_model_for_provider(
+        s.hybrid_analysis_provider,
+        s.hybrid_analysis_model,
+    )
+    hybrid_copy_model = normalize_reasoning_model_for_provider(
+        s.hybrid_copy_provider,
+        s.hybrid_copy_model,
+    )
     return ConfigOut(
         persistence={
             "settings_store": "database",
@@ -421,10 +434,10 @@ def get_config():
         llm_mode=s.llm_mode,
         llm_routing_mode=s.llm_routing_mode,
         reasoning_provider=s.reasoning_provider,
-        reasoning_model=s.reasoning_model,
+        reasoning_model=reasoning_model,
         llm_backup_enabled=s.llm_backup_enabled,
         backup_reasoning_provider=s.backup_reasoning_provider,
-        backup_reasoning_model=s.backup_reasoning_model,
+        backup_reasoning_model=backup_reasoning_model,
         backup_reasoning_effort=s.backup_reasoning_effort,
         backup_vision_model=s.backup_vision_model,
         backup_search_provider=s.backup_search_provider,
@@ -433,10 +446,10 @@ def get_config():
         local_reasoning_model=s.local_reasoning_model,
         local_vision_model=s.local_vision_model,
         hybrid_analysis_provider=s.hybrid_analysis_provider,
-        hybrid_analysis_model=s.hybrid_analysis_model,
+        hybrid_analysis_model=hybrid_analysis_model,
         hybrid_analysis_search_mode=s.hybrid_analysis_search_mode,
         hybrid_copy_provider=s.hybrid_copy_provider,
-        hybrid_copy_model=s.hybrid_copy_model,
+        hybrid_copy_model=hybrid_copy_model,
         hybrid_copy_search_mode=s.hybrid_copy_search_mode,
         multimodal_fallback_provider=s.multimodal_fallback_provider,
         multimodal_fallback_model=s.multimodal_fallback_model,

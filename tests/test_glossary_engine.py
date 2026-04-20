@@ -305,3 +305,85 @@ async def test_apply_glossary_corrections_auto_accepts_low_risk_brand_normalizat
     assert len(corrections) == 1
     assert corrections[0].auto_applied is True
     assert corrections[0].human_decision == "accepted"
+
+
+@pytest.mark.asyncio
+async def test_apply_glossary_corrections_filters_brand_expansion_noise(db_session, monkeypatch):
+    import roughcut.review.glossary_engine as glossary_engine_module
+
+    settings = type(
+        "SettingsStub",
+        (),
+        {
+            "auto_accept_glossary_corrections": True,
+            "glossary_correction_review_threshold": 0.9,
+        },
+    )()
+    monkeypatch.setattr(glossary_engine_module, "get_settings", lambda: settings)
+
+    subtitle_item = SubtitleItem(
+        job_id=uuid.uuid4(),
+        version=1,
+        item_index=0,
+        start_time=0.0,
+        end_time=1.0,
+        text_raw="PSIGEAR 和狐蝠工业的配件都在这。",
+        text_norm="PSIGEAR 和狐蝠工业的配件都在这。",
+        text_final=None,
+    )
+    db_session.add(subtitle_item)
+    await db_session.flush()
+
+    corrections = await apply_glossary_corrections(
+        subtitle_item.job_id,
+        [subtitle_item],
+        db_session,
+        glossary_terms=[
+            {"correct_form": "狐蝠工业", "wrong_forms": ["PSIGEAR", "狐蝠"], "category": "bag_brand"},
+            {"correct_form": "FOXBAT狐蝠工业", "wrong_forms": ["狐蝠工业"], "category": "bag_brand"},
+            {"correct_form": "狐蝠工业 FOXBAT", "wrong_forms": ["狐蝠工业"], "category": "bag_brand"},
+        ],
+        content_profile={"subject_brand": "狐蝠工业", "subject_model": "阵风", "subject_type": "EDC机能包"},
+    )
+
+    assert corrections == []
+
+
+@pytest.mark.asyncio
+async def test_apply_glossary_corrections_filters_cross_brand_noise_with_source_constraints(db_session, monkeypatch):
+    import roughcut.review.glossary_engine as glossary_engine_module
+
+    settings = type(
+        "SettingsStub",
+        (),
+        {
+            "auto_accept_glossary_corrections": True,
+            "glossary_correction_review_threshold": 0.9,
+        },
+    )()
+    monkeypatch.setattr(glossary_engine_module, "get_settings", lambda: settings)
+
+    subtitle_item = SubtitleItem(
+        job_id=uuid.uuid4(),
+        version=1,
+        item_index=0,
+        start_time=0.0,
+        end_time=1.0,
+        text_raw="PSIGEAR 的压缩水壶套很能装。",
+        text_norm="PSIGEAR 的压缩水壶套很能装。",
+        text_final=None,
+    )
+    db_session.add(subtitle_item)
+    await db_session.flush()
+
+    corrections = await apply_glossary_corrections(
+        subtitle_item.job_id,
+        [subtitle_item],
+        db_session,
+        glossary_terms=[
+            {"correct_form": "狐蝠工业", "wrong_forms": ["PSIGEAR"], "category": "source_identity"},
+        ],
+        content_profile={"subject_brand": "狐蝠工业", "subject_model": "阵风", "subject_type": "EDC机能包"},
+    )
+
+    assert corrections == []

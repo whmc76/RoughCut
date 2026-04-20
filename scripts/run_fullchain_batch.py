@@ -17,7 +17,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from sqlalchemy import delete, select
 
 from roughcut.config import get_settings
-from roughcut.creative.modes import normalize_enhancement_modes
+from roughcut.creative.modes import resolve_live_batch_enhancement_modes
 from roughcut.db.models import Artifact, Job, JobStep, RenderOutput, SubtitleCorrection, SubtitleItem, Timeline, TranscriptSegment
 from roughcut.media.output import get_cover_manifest_path, get_legacy_cover_manifest_path
 from roughcut.db.session import get_session_factory
@@ -25,6 +25,7 @@ from roughcut.pipeline.orchestrator import PIPELINE_STEPS
 from roughcut.pipeline.live_readiness import build_live_readiness_summary, collect_job_issue_codes
 from roughcut.pipeline.quality import assess_job_quality
 from roughcut.pipeline.steps import run_step_sync
+from roughcut.runtime_health import build_readiness_payload
 from roughcut.review.final_review_state import mark_final_review_approved
 from roughcut.review.content_profile import apply_content_profile_feedback
 from roughcut.review.content_profile_memory import record_content_profile_feedback_memory
@@ -108,6 +109,23 @@ def parse_args() -> argparse.Namespace:
         help="Repeatable exact source filename filter",
     )
     parser.add_argument(
+        "--source-manifest",
+        type=Path,
+        default=None,
+        help="Optional JSON array or newline-delimited text file of exact source filenames to run",
+    )
+    parser.add_argument(
+        "--pollution-audit",
+        type=Path,
+        default=None,
+        help="Optional subtitle_pollution_audit.json used to derive exact source filenames",
+    )
+    parser.add_argument(
+        "--manual-review-only",
+        action="store_true",
+        help="When used with --pollution-audit, only rerun jobs marked manual_review_required",
+    )
+    parser.add_argument(
         "--force-rerun-existing",
         action="store_true",
         help="Reset and rerun matching jobs even if a finished render already exists",
@@ -131,13 +149,20 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     args.report_dir.mkdir(parents=True, exist_ok=True)
-    enhancement_modes = normalize_enhancement_modes(args.enhancement_modes) if args.enhancement_modes else []
+    ensure_batch_runtime_ready()
+    enhancement_modes = resolve_live_batch_enhancement_modes(args.enhancement_modes)
+    target_source_names = resolve_target_source_names(
+        explicit_source_names=args.source_names,
+        source_manifest=args.source_manifest,
+        pollution_audit=args.pollution_audit,
+        manual_review_only=args.manual_review_only,
+    )
 
     print(f"[batch] scanning source files {args.source_dir}", flush=True)
     source_items = select_source_candidates(
         args.source_dir,
         max(args.limit * 4, args.limit),
-        source_names=args.source_names,
+        source_names=target_source_names,
     )
     if not source_items:
         raise SystemExit("No source videos found.")
@@ -211,7 +236,7 @@ def main() -> None:
         "jobs": [asdict(report) for report in reports],
     }
     golden_source_names = resolve_golden_source_names(
-        source_names=args.source_names,
+        source_names=target_source_names,
         golden_manifest=args.golden_manifest,
     )
     previous_summaries = load_previous_batch_summaries(args.previous_batch_reports)
@@ -237,6 +262,22 @@ def main() -> None:
     print(json.dumps(build_console_summary(summary), ensure_ascii=False, indent=2), flush=True)
     print(f"\nJSON report: {args.report_dir / 'batch_report.json'}", flush=True)
     print(f"Markdown report: {args.report_dir / 'batch_report.md'}", flush=True)
+
+
+def ensure_batch_runtime_ready() -> None:
+    readiness = asyncio.run(build_readiness_payload())
+    failed_checks = {
+        name: check
+        for name, check in dict(readiness.get("checks") or {}).items()
+        if str(check.get("status") or "").strip().lower() == "failed"
+    }
+    if not failed_checks:
+        return
+    detail = "; ".join(
+        f"{name}={str(check.get('detail') or '').strip() or 'failed'}"
+        for name, check in failed_checks.items()
+    )
+    raise SystemExit(f"Runtime readiness failed: {detail}")
 
 
 def write_batch_progress(
@@ -838,6 +879,10 @@ def build_live_stage_validations(
     pending_term_count = int((subtitle_term_resolution_patch.get("metrics") or {}).get("pending_count") or 0)
     subtitle_consistency_blocking = bool(subtitle_consistency_report.get("blocking"))
     subtitle_consistency_warnings = list(subtitle_consistency_report.get("warning_reasons") or [])
+    has_term_resolution_step = "subtitle_term_resolution" in step_statuses
+    has_consistency_step = "subtitle_consistency_review" in step_statuses
+    has_summary_review_step = "summary_review" in step_statuses
+    has_final_review_step = "final_review" in step_statuses
     validations = [
         LiveStageValidation(
             stage="transcribe",
@@ -871,11 +916,14 @@ def build_live_stage_validations(
             stage="subtitle_term_resolution",
             status=(
                 "fail"
-                if step_statuses.get("subtitle_term_resolution") != "done" or pending_term_count > 0
+                if pending_term_count > 0
+                or (has_term_resolution_step and step_statuses.get("subtitle_term_resolution") != "done")
                 else "pass"
             ),
             summary=(
                 f"术语候选 {int((subtitle_term_resolution_patch.get('metrics') or {}).get('patch_count') or 0)} 条，待确认 {pending_term_count} 条"
+                if pending_term_count > 0 or subtitle_term_resolution_patch
+                else "术语解析未启用或无待确认项"
             ),
             issue_codes=["subtitle_terms_pending"] if pending_term_count > 0 else [],
         ),
@@ -883,7 +931,8 @@ def build_live_stage_validations(
             stage="subtitle_consistency_review",
             status=(
                 "fail"
-                if step_statuses.get("subtitle_consistency_review") != "done" or subtitle_consistency_blocking
+                if subtitle_consistency_blocking
+                or (has_consistency_step and step_statuses.get("subtitle_consistency_review") != "done")
                 else "warn"
                 if subtitle_consistency_warnings
                 else "pass"
@@ -894,6 +943,8 @@ def build_live_stage_validations(
                 else "字幕一致性存在提醒项"
                 if subtitle_consistency_warnings
                 else "字幕一致性审校通过"
+                if has_consistency_step
+                else "字幕一致性审校未启用"
             ),
             issue_codes=(
                 list(subtitle_consistency_report.get("blocking_reasons") or [])
@@ -909,9 +960,15 @@ def build_live_stage_validations(
         ),
         LiveStageValidation(
             stage="summary_review",
-            status="pass" if step_statuses.get("summary_review") == "done" else "fail",
-            summary="内容画像已确认冻结" if step_statuses.get("summary_review") == "done" else "内容画像仍待确认",
-            issue_codes=[] if step_statuses.get("summary_review") == "done" else ["summary_review_pending"],
+            status="pass" if not has_summary_review_step or step_statuses.get("summary_review") == "done" else "fail",
+            summary=(
+                "内容画像已确认冻结"
+                if step_statuses.get("summary_review") == "done"
+                else "内容画像无需人工确认"
+                if not has_summary_review_step
+                else "内容画像仍待确认"
+            ),
+            issue_codes=[] if not has_summary_review_step or step_statuses.get("summary_review") == "done" else ["summary_review_pending"],
         ),
         LiveStageValidation(
             stage="edit_plan",
@@ -927,9 +984,15 @@ def build_live_stage_validations(
         ),
         LiveStageValidation(
             stage="final_review",
-            status="pass" if step_statuses.get("final_review") == "done" else "fail",
-            summary="成片审核已通过" if step_statuses.get("final_review") == "done" else "成片审核未通过",
-            issue_codes=[] if step_statuses.get("final_review") == "done" else ["final_review_pending"],
+            status="pass" if not has_final_review_step or step_statuses.get("final_review") == "done" else "fail",
+            summary=(
+                "成片审核已通过"
+                if step_statuses.get("final_review") == "done"
+                else "成片无需人工审核"
+                if not has_final_review_step
+                else "成片审核未通过"
+            ),
+            issue_codes=[] if not has_final_review_step or step_statuses.get("final_review") == "done" else ["final_review_pending"],
         ),
         LiveStageValidation(
             stage="platform_package",
@@ -1148,6 +1211,51 @@ def resolve_golden_source_names(*, source_names: list[str] | None, golden_manife
         if name and name not in ordered:
             ordered.append(name)
     return ordered
+
+
+def resolve_target_source_names(
+    *,
+    explicit_source_names: list[str] | None,
+    source_manifest: Path | None,
+    pollution_audit: Path | None,
+    manual_review_only: bool,
+) -> list[str]:
+    ordered: list[str] = []
+
+    def _append(names: list[str]) -> None:
+        for name in names:
+            normalized = str(name or "").strip()
+            if normalized and normalized not in ordered:
+                ordered.append(normalized)
+
+    _append([str(item).strip() for item in list(explicit_source_names or []) if str(item).strip()])
+    _append(load_golden_manifest(source_manifest) if source_manifest else [])
+    _append(load_source_names_from_pollution_audit(pollution_audit, manual_review_only=manual_review_only))
+    return ordered
+
+
+def load_source_names_from_pollution_audit(
+    path: Path | None,
+    *,
+    manual_review_only: bool,
+) -> list[str]:
+    if path is None or not path.exists():
+        return []
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    jobs = payload.get("jobs") if isinstance(payload, dict) else None
+    if not isinstance(jobs, list):
+        return []
+
+    names: list[str] = []
+    for item in jobs:
+        if not isinstance(item, dict):
+            continue
+        if manual_review_only and not bool(item.get("manual_review_required")):
+            continue
+        source_name = str(item.get("source_name") or "").strip()
+        if source_name and source_name not in names:
+            names.append(source_name)
+    return names
 
 
 def load_golden_manifest(path: Path | None) -> list[str]:

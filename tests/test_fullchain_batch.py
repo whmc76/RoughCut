@@ -182,3 +182,34 @@ async def test_collect_job_report_emits_live_stage_validations_and_quality_summa
     assert report.transcript_segment_count == 1
     assert all(item.status == "pass" for item in report.live_stage_validations)
     assert "live校验通过" in report.notes
+
+
+def test_build_live_stage_validations_treats_missing_optional_review_steps_as_pass():
+    import scripts.run_fullchain_batch as batch_mod
+
+    validations = batch_mod.build_live_stage_validations(
+        step_statuses={
+            "transcribe": "done",
+            "subtitle_postprocess": "done",
+            "content_profile": "done",
+            "edit_plan": "done",
+            "render": "done",
+            "platform_package": "done",
+        },
+        transcript_segment_count=1,
+        subtitle_count=1,
+        keep_ratio=1.0,
+        profile={"summary": "ok"},
+        platform_doc=__file__,
+        subtitle_quality_report=None,
+        subtitle_term_resolution_patch=None,
+        subtitle_consistency_report=None,
+        quality_assessment={"issue_codes": []},
+    )
+
+    status_by_stage = {item.stage: item.status for item in validations}
+
+    assert status_by_stage["subtitle_term_resolution"] == "pass"
+    assert status_by_stage["subtitle_consistency_review"] == "pass"
+    assert status_by_stage["summary_review"] == "pass"
+    assert status_by_stage["final_review"] == "pass"

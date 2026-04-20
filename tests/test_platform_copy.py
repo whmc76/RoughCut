@@ -6,6 +6,7 @@ from roughcut.pipeline.orchestrator import PIPELINE_STEPS, create_job_steps
 from roughcut.review.platform_copy import (
     _build_packaging_fact_queries,
     audit_platform_packaging_titles,
+    build_packaging_fact_sheet,
     build_packaging_prompt_brief,
     build_packaging_fact_sheet_cache_fingerprint,
     generate_platform_packaging,
@@ -661,3 +662,70 @@ def test_build_packaging_fact_sheet_cache_fingerprint_tracks_resolved_review_fee
     )
 
     assert base["resolved_review_feedback_sha256"] != corrected["resolved_review_feedback_sha256"]
+
+
+@pytest.mark.asyncio
+async def test_build_packaging_fact_sheet_degrades_to_unverified_when_reasoning_times_out(monkeypatch: pytest.MonkeyPatch):
+    from roughcut.review import platform_copy as copy_mod
+
+    class _SlowProvider:
+        async def complete(self, *args, **kwargs):
+            raise TimeoutError("bridge timeout")
+
+    async def _fake_search(**kwargs):
+        return [
+            {
+                "query": "OLIGHT 司令官2Ultra 官方 参数",
+                "title": "司令官 Ultra三光源EDC手电筒- 傲雷集团",
+                "url": "https://olight.cn/arkfeld-ultra-2",
+                "snippet": "官方页面",
+            }
+        ]
+
+    monkeypatch.setattr(copy_mod, "get_reasoning_provider", lambda: _SlowProvider())
+    monkeypatch.setattr(copy_mod, "_search_packaging_evidence", _fake_search)
+
+    fact_sheet = await build_packaging_fact_sheet(
+        source_name="司令官2Ultra.mp4",
+        content_profile={"subject_brand": "OLIGHT", "subject_model": "司令官2Ultra", "subject_type": "EDC手电"},
+        subtitle_items=[{"start_time": 0.0, "end_time": 1.0, "text_final": "这次看司令官2Ultra"}],
+    )
+
+    assert fact_sheet["status"] == "unverified"
+    assert fact_sheet["verified_facts"] == []
+    assert "禁止写" in fact_sheet["guardrail_summary"]
+
+
+@pytest.mark.asyncio
+async def test_generate_platform_packaging_degrades_to_fallback_when_reasoning_times_out(monkeypatch: pytest.MonkeyPatch):
+    from roughcut.review import platform_copy as copy_mod
+
+    class _SlowProvider:
+        async def complete(self, *args, **kwargs):
+            raise TimeoutError("bridge timeout")
+
+    monkeypatch.setattr(copy_mod, "get_reasoning_provider", lambda: _SlowProvider())
+
+    packaging = await generate_platform_packaging(
+        source_name="司令官2Ultra.mp4",
+        content_profile={
+            "subject_brand": "OLIGHT",
+            "subject_model": "司令官2Ultra",
+            "subject_type": "EDC手电",
+            "subject_domain": "flashlight",
+            "video_theme": "司令官2Ultra上手体验",
+            "hook_line": "这代升级到底值不值",
+            "engagement_question": "你更在意手感还是功能？",
+        },
+        subtitle_items=[{"start_time": 0.0, "end_time": 1.0, "text_final": "这次看司令官2Ultra"}],
+        fact_sheet={
+            "status": "unverified",
+            "verified_facts": [],
+            "official_sources": [],
+            "guardrail_summary": "未找到可核验来源，禁止写参数。",
+        },
+    )
+
+    assert len(packaging["platforms"]["bilibili"]["titles"]) == 5
+    assert packaging["platforms"]["bilibili"]["description"]
+    assert packaging["platforms"]["bilibili"]["tags"]

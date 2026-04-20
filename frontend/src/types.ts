@@ -396,6 +396,59 @@ export type PackagingLibrary = {
   config: PackagingConfig;
 };
 
+export type IntelligentCopyInspect = {
+  folder_path: string;
+  material_dir: string;
+  video_file?: string | null;
+  subtitle_file?: string | null;
+  cover_file?: string | null;
+  extra_video_files: string[];
+  extra_subtitle_files: string[];
+  extra_cover_files: string[];
+  warnings: string[];
+};
+
+export type IntelligentCopyPlatformMaterial = {
+  key: string;
+  label: string;
+  has_title: boolean;
+  title_label: string;
+  body_label: string;
+  tag_label: string;
+  constraints: {
+    title_limit: number;
+    body_limit: number;
+    tag_limit: number;
+    tag_style: string;
+    cover_size: {
+      width: number;
+      height: number;
+    };
+    rule_note: string;
+  };
+  titles: string[];
+  primary_title: string;
+  title_copy_all: string;
+  body: string;
+  tags: string[];
+  tags_copy: string;
+  full_copy: string;
+  cover_path?: string | null;
+};
+
+export type IntelligentCopyResult = {
+  folder_path: string;
+  material_dir: string;
+  markdown_path: string;
+  json_path: string;
+  copy_style: string;
+  inspection: IntelligentCopyInspect;
+  highlights: Record<string, string>;
+  content_profile_summary: Record<string, unknown>;
+  platforms: IntelligentCopyPlatformMaterial[];
+  warnings: string[];
+};
+
 export type AvatarMaterialRule = {
   severity: string;
   title: string;

@@ -106,3 +106,90 @@ def test_languages_equivalent_matches_language_family():
     assert languages_equivalent("en-US", "en") is True
     assert languages_equivalent("zh-CN", "zh-TW") is True
     assert languages_equivalent("ja-JP", "zh-CN") is False
+
+
+@pytest.mark.asyncio
+async def test_translate_subtitle_items_recovers_when_chunk_as_json_fails(monkeypatch: pytest.MonkeyPatch):
+    import roughcut.review.subtitle_translation as translation_mod
+
+    class BrokenJsonChunkResponse:
+        content = "translation: First line."
+        raw_content = None
+
+        def as_json(self):
+            raise ValueError("No JSON payload found in model response")
+
+    class FakeProvider:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def complete(self, messages, *, temperature=0.3, max_tokens=4096, json_mode=False):
+            self.calls += 1
+            if self.calls == 1:
+                return BrokenJsonChunkResponse()
+            if self.calls == 2:
+                return ReasoningResponse(
+                    content='{"translation":"First line."}',
+                    usage={},
+                    model="fake",
+                )
+            return ReasoningResponse(
+                content='{"translation":"Second line."}',
+                usage={},
+                model="fake",
+            )
+
+    monkeypatch.setattr(translation_mod, "get_reasoning_provider", lambda: FakeProvider())
+
+    result = await translate_subtitle_items(
+        [
+            {"index": 0, "start_time": 0.0, "end_time": 1.0, "text_final": "第一句"},
+            {"index": 1, "start_time": 1.0, "end_time": 2.0, "text_final": "第二句"},
+        ],
+        target_language="en",
+    )
+
+    assert result["item_count"] == 2
+    assert result["items"][0]["text_translated"] == "First line."
+    assert result["items"][1]["text_translated"] == "Second line."
+
+
+@pytest.mark.asyncio
+async def test_translate_subtitle_items_single_fallback_accepts_plain_translation_text(monkeypatch: pytest.MonkeyPatch):
+    import roughcut.review.subtitle_translation as translation_mod
+
+    class BrokenChunkResponse:
+        content = '{"items":[]}'
+        raw_content = None
+
+        def as_json(self):
+            return {"items": []}
+
+    class PlainTextFallbackResponse:
+        content = "translation: Plain fallback line."
+        raw_content = None
+
+        def as_json(self):
+            raise ValueError("No JSON payload found in model response")
+
+    class FakeProvider:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def complete(self, messages, *, temperature=0.3, max_tokens=4096, json_mode=False):
+            self.calls += 1
+            if self.calls == 1:
+                return BrokenChunkResponse()
+            return PlainTextFallbackResponse()
+
+    monkeypatch.setattr(translation_mod, "get_reasoning_provider", lambda: FakeProvider())
+
+    result = await translate_subtitle_items(
+        [
+            {"index": 0, "start_time": 0.0, "end_time": 1.0, "text_final": "第一句"},
+        ],
+        target_language="en",
+    )
+
+    assert result["item_count"] == 1
+    assert result["items"][0]["text_translated"] == "Plain fallback line."

@@ -4,6 +4,11 @@ from copy import deepcopy
 from typing import Final
 
 DEFAULT_WORKFLOW_MODE: Final[str] = "standard_edit"
+DEFAULT_LIVE_BATCH_ENHANCEMENT_MODES: Final[tuple[str, ...]] = (
+    "auto_review",
+    "avatar_commentary",
+    "ai_effects",
+)
 
 _WORKFLOW_MODES: Final[dict[str, dict[str, object]]] = {
     "standard_edit": {
@@ -188,6 +193,12 @@ def normalize_enhancement_modes(values: list[str] | tuple[str, ...] | None) -> l
         seen.add(normalized)
         normalized_items.append(normalized)
     return normalized_items
+
+
+def resolve_live_batch_enhancement_modes(values: list[str] | tuple[str, ...] | None) -> list[str]:
+    if values:
+        return normalize_enhancement_modes(values)
+    return list(DEFAULT_LIVE_BATCH_ENHANCEMENT_MODES)
 
 
 def auto_review_mode_enabled(enhancement_modes: list[str] | tuple[str, ...] | None) -> bool:

@@ -29,6 +29,7 @@ vi.mock("./i18n", () => ({
           "app.nav.overview": "总览",
           "app.nav.jobs": "任务",
           "app.nav.watchRoots": "监看目录",
+          "app.nav.intelligentCopy": "智能文案",
           "app.nav.settings": "设置",
           "app.sidebar.language": "语言",
           "app.language.zh-CN": "简体中文",
@@ -48,6 +49,10 @@ vi.mock("./pages/JobsPage", () => ({
 
 vi.mock("./pages/WatchRootsPage", () => ({
   WatchRootsPage: () => <div>watch-page</div>,
+}));
+
+vi.mock("./pages/IntelligentCopyPage", () => ({
+  IntelligentCopyPage: () => <div>smart-copy-page</div>,
 }));
 
 vi.mock("./pages/StyleTemplatesPage", () => ({
@@ -111,12 +116,13 @@ beforeAll(async () => {
 });
 
 describe("App shell", () => {
-  it("shows only the five top-level destinations in the sidebar", async () => {
+  it("shows only the six top-level destinations in the sidebar", async () => {
     renderApp();
 
     expect(await screen.findByRole("link", { name: /总览/ })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /任务/ })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /监看目录/ })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /智能文案/ })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /风格实验/ })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /设置/ })).toBeInTheDocument();
     expect(screen.queryByRole("link", { name: /Packaging/i })).not.toBeInTheDocument();

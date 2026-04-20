@@ -4,6 +4,7 @@ import re
 from typing import Any, Iterable, Mapping, Sequence
 
 from roughcut.review.subtitle_quality import build_subtitle_quality_report
+from roughcut.review.subtitle_term_resolution import _should_ignore_patch_candidate
 
 ARTIFACT_TYPE_SUBTITLE_CONSISTENCY_REPORT = "subtitle_consistency_report"
 
@@ -81,6 +82,12 @@ def build_subtitle_consistency_report(
     for correction in corrections:
         original_span = str(_correction_attr(correction, "original_span") or "").strip()
         suggested_span = str(_correction_attr(correction, "suggested_span") or "").strip()
+        if _should_ignore_patch_candidate(
+            original_span=original_span,
+            suggested_span=suggested_span,
+            content_profile=content_profile,
+        ):
+            continue
         auto_applied = bool(_correction_attr(correction, "auto_applied"))
         human_decision = str(_correction_attr(correction, "human_decision") or "").strip().lower()
         try:

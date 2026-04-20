@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import subprocess
@@ -21,7 +22,8 @@ class ModelSearchProvider(SearchProvider):
         env = os.environ.copy()
         env["ROUGHCUT_SEARCH_QUERY"] = query
         env["ROUGHCUT_SEARCH_MAX_RESULTS"] = str(max_results)
-        result = subprocess.run(
+        result = await asyncio.to_thread(
+            subprocess.run,
             self._helper,
             shell=True,
             capture_output=True,

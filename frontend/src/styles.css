@@ -415,6 +415,42 @@ select {
   white-space: nowrap;
 }
 
+.page-header-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.page-header-summary-item {
+  display: grid;
+  gap: 4px;
+  padding: 12px 14px;
+  border-radius: 18px;
+  border: 1px solid rgba(23, 24, 27, 0.08);
+  background: rgba(255, 255, 255, 0.68);
+  box-shadow: 0 12px 30px rgba(18, 24, 38, 0.08);
+}
+
+.page-header-summary-label {
+  font-size: 12px;
+  line-height: 1.2;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+  text-transform: uppercase;
+}
+
+.page-header-summary-value {
+  font-size: 15px;
+  line-height: 1.3;
+  color: #17181b;
+}
+
+.page-header-summary-detail {
+  font-size: 12px;
+  line-height: 1.45;
+}
+
 .page-section-title {
   margin: 0;
   font-size: 18px;
@@ -2148,6 +2184,28 @@ select.input option:focus {
 
 .top-gap {
   margin-top: 16px;
+}
+
+.panel-subcard {
+  display: grid;
+  gap: 12px;
+  padding: 14px 16px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.panel-code-block {
+  margin: 0;
+  padding: 14px 16px;
+  border-radius: 16px;
+  background: rgba(8, 13, 22, 0.72);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: 0.88rem;
+  line-height: 1.55;
 }
 
 .service-grid {
@@ -5882,6 +5940,10 @@ select.input option:focus {
   .page-section-actions .input {
     width: 100%;
     min-width: 0;
+  }
+
+  .page-header-summary {
+    grid-template-columns: 1fr;
   }
 
   .overview-command-main {

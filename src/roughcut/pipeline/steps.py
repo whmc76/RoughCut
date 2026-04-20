@@ -82,7 +82,7 @@ from roughcut.packaging.library import (
 )
 from roughcut.prompts.edit_decision import build_high_risk_cut_review_prompt
 from roughcut.providers.factory import get_avatar_provider, get_reasoning_provider, get_voice_provider
-from roughcut.providers.reasoning.base import Message
+from roughcut.providers.reasoning.base import Message, extract_json_text
 from roughcut.pipeline.quality import _compute_subtitle_sync_check, evaluate_profile_identity_gate
 from roughcut.review.content_profile import (
     _build_conservative_identity_summary,
@@ -121,6 +121,7 @@ from roughcut.review.domain_glossaries import (
     resolve_builtin_glossary_terms,
     select_primary_subject_domain,
 )
+from roughcut.review.intelligent_copy_topics import build_intelligent_copy_topic_hints
 from roughcut.review.glossary_engine import apply_glossary_corrections
 from roughcut.review.platform_copy import (
     build_packaging_fact_sheet,
@@ -1301,10 +1302,7 @@ async def _load_edit_decision_cut_review_json_payload(
             return True
         return False
 
-    try:
-        payload = response.as_json()
-    except Exception:
-        payload = None
+    payload = _parse_reasoning_json_payload(response)
 
     if _payload_needs_repair(payload):
         raw_content = str(getattr(response, "raw_content", "") or getattr(response, "content", "") or "").strip()
@@ -1335,10 +1333,7 @@ async def _load_edit_decision_cut_review_json_payload(
             ),
             timeout=max(8.0, min(float(timeout_sec), 16.0)),
         )
-        try:
-            payload = repaired.as_json()
-        except Exception:
-            payload = None
+        payload = _parse_reasoning_json_payload(repaired)
         if _payload_needs_repair(payload):
             repair_prompt = (
                 "把下面的模型输出修复成一个严格 JSON 对象。"
@@ -1359,10 +1354,28 @@ async def _load_edit_decision_cut_review_json_payload(
                 ),
                 timeout=max(8.0, min(float(timeout_sec), 16.0)),
             )
-            payload = final_response.as_json()
+            payload = _parse_reasoning_json_payload(final_response)
     if _payload_needs_repair(payload):
         raise ValueError("edit decision cut review payload remained unusable after repair")
     return payload if isinstance(payload, dict) else {}
+
+
+def _parse_reasoning_json_payload(response: object) -> dict[str, Any] | None:
+    try:
+        payload = response.as_json()
+    except Exception:
+        payload = None
+    if isinstance(payload, dict):
+        return payload
+
+    text = str(getattr(response, "content", "") or getattr(response, "raw_content", "") or "").strip()
+    if not text:
+        return None
+    try:
+        repaired = json.loads(extract_json_text(text))
+    except Exception:
+        return None
+    return repaired if isinstance(repaired, dict) else None
 
 
 async def _llm_refine_subtitle_window(
@@ -2865,29 +2878,27 @@ async def _resolve_glossary_review_content_profile(
     include_research = bool(getattr(settings, "research_verifier_enabled", False))
     packaging_config = (list_packaging_assets().get("config") or {})
     if not content_profile:
-        async with _maintain_step_heartbeat(step):
-            with tempfile.TemporaryDirectory() as tmpdir:
-                source_path = await _resolve_source(job, tmpdir, expected_hash=job.file_hash)
-                initial_search_enabled = should_enable_task_search(
-                    "content_profile",
-                    default_enabled=include_research,
-                    profile=content_profile,
-                    settings=settings,
-                )
-                with llm_task_route("content_profile", search_enabled=initial_search_enabled, settings=settings):
-                    with track_step_usage(job_id=job.id, step_id=step.id, step_name="glossary_review"):
-                        return await infer_content_profile(
-                            source_path=source_path,
-                            source_name=job.source_name,
-                            subtitle_items=subtitle_dicts,
-                            transcript_items=transcript_segment_dicts,
-                            transcript_evidence=transcript_evidence,
-                            workflow_template=job.workflow_template,
-                            user_memory=user_memory,
-                            glossary_terms=effective_glossary_terms,
-                            include_research=initial_search_enabled,
-                            copy_style=str(packaging_config.get("copy_style") or "attention_grabbing"),
-                        )
+        # glossary_review only needs a stable identity scaffold for lexical polishing.
+        # Defer expensive full content_profile inference to the dedicated content_profile step.
+        transcript_excerpt = build_transcript_excerpt(
+            transcript_segment_dicts or subtitle_dicts,
+            max_items=120,
+            max_chars=6000,
+        )
+        lightweight_profile: dict[str, Any] = {
+            "workflow_template": str(job.workflow_template or "").strip(),
+            "copy_style": str(packaging_config.get("copy_style") or "attention_grabbing"),
+            "transcript_excerpt": transcript_excerpt,
+        }
+        if transcript_evidence:
+            lightweight_profile["transcript_evidence"] = dict(transcript_evidence)
+        lightweight_profile = apply_source_identity_constraints(
+            lightweight_profile,
+            source_name=job.source_name,
+            transcript_excerpt=transcript_excerpt,
+        )
+        lightweight_profile["creative_profile"] = _job_creative_profile(job)
+        return lightweight_profile
 
     profile = dict(content_profile)
     if transcript_evidence:
@@ -2897,6 +2908,19 @@ async def _resolve_glossary_review_content_profile(
         or profile.get("copy_style")
         or "attention_grabbing"
     )
+    topic_registry_hints = _resolve_topic_registry_hints_for_profile_short_circuit(
+        source_name=job.source_name,
+        transcript_excerpt=str(profile.get("transcript_excerpt") or ""),
+        source_context=profile.get("source_context"),
+    )
+    if _profile_matches_topic_registry_hints(profile, topic_hints=topic_registry_hints):
+        profile["topic_registry_short_circuit"] = {
+            "enabled": True,
+            "reason": "glossary_review_topic_registry_hint_aligned",
+            "topic_hints": topic_registry_hints,
+        }
+        profile["creative_profile"] = _job_creative_profile(job)
+        return profile
     enrich_search_enabled = should_enable_task_search(
         "content_profile",
         default_enabled=include_research,
@@ -2998,6 +3022,51 @@ async def _evaluate_content_profile_automation_and_reports(
     updated_profile["subtitle_quality_report"] = subtitle_quality_report
     updated_profile["subtitle_consistency_report"] = subtitle_consistency_report
     return updated_profile, automation, subtitle_quality_report, subtitle_consistency_report
+
+
+def _resolve_topic_registry_hints_for_profile_short_circuit(
+    *,
+    source_name: str,
+    transcript_excerpt: str,
+    source_context: dict[str, Any] | None,
+) -> dict[str, Any]:
+    payload = dict(source_context or {}) if isinstance(source_context, dict) else {}
+    merged_source_names = [
+        str(item).strip()
+        for item in (payload.get("merged_source_names") or [])
+        if str(item).strip()
+    ]
+    combined = " ".join(
+        part
+        for part in (
+            str(source_name or "").strip(),
+            transcript_excerpt,
+            str(payload.get("video_description") or "").strip(),
+            *merged_source_names[:3],
+        )
+        if part
+    ).strip()
+    return dict(build_intelligent_copy_topic_hints(combined) or {})
+
+
+def _profile_matches_topic_registry_hints(
+    profile: dict[str, Any] | None,
+    *,
+    topic_hints: dict[str, Any],
+) -> bool:
+    candidate = dict(profile or {})
+    if not topic_hints:
+        return False
+    for key in ("subject_brand", "subject_model", "subject_type", "video_theme"):
+        expected = str(topic_hints.get(key) or "").strip()
+        actual = str(candidate.get(key) or "").strip()
+        if expected and actual != expected:
+            return False
+    if not str(candidate.get("summary") or "").strip():
+        return False
+    if not str(candidate.get("engagement_question") or "").strip():
+        return False
+    return True
 
 
 async def _apply_source_context_feedback_to_content_profile(
@@ -4555,6 +4624,10 @@ async def run_subtitle_term_resolution(job_id: str) -> dict:
             source_name=job.source_name,
             subject_domain=subject_domain,
         )
+        source_constrained_profile = apply_source_identity_constraints(
+            dict(content_profile or {}),
+            source_name=job.source_name,
+        )
 
         await session.execute(delete(SubtitleCorrection).where(SubtitleCorrection.job_id == job.id))
         subtitle_items = await _load_subtitle_items(session, job_id=job.id)
@@ -4563,11 +4636,12 @@ async def run_subtitle_term_resolution(job_id: str) -> dict:
             subtitle_items,
             session,
             glossary_terms=effective_glossary_terms,
+            content_profile=source_constrained_profile,
         )
         patch = build_subtitle_term_resolution_patch(
             corrections=corrections,
             source_name=job.source_name,
-            content_profile=content_profile,
+            content_profile=source_constrained_profile,
         )
         session.add(
             Artifact(
@@ -4908,6 +4982,11 @@ async def run_content_profile(job_id: str) -> dict:
                     usage_baseline=usage_baseline,
                 )
                 if not has_existing_profile_artifact:
+                    topic_registry_hints = _resolve_topic_registry_hints_for_profile_short_circuit(
+                        source_name=job.source_name,
+                        transcript_excerpt=transcript_excerpt,
+                        source_context=source_context,
+                    )
                     enrich_cache_namespace = "content_profile.enrich"
                     enrich_cache_fingerprint = build_content_profile_cache_fingerprint(
                         source_name=job.source_name,
@@ -4930,21 +5009,31 @@ async def run_content_profile(job_id: str) -> dict:
                         profile=content_profile,
                         settings=settings,
                     )
-                    async with _maintain_step_heartbeat(step):
-                        with llm_task_route("content_profile", search_enabled=enrich_search_enabled, settings=settings):
-                            with track_step_usage(job_id=job.id, step_id=step.id, step_name="content_profile"):
-                                content_profile = await enrich_content_profile(
-                                    profile=content_profile,
-                                    source_name=job.source_name,
-                                    workflow_template=job.workflow_template,
-                                    transcript_excerpt=transcript_excerpt,
-                                    subtitle_items=subtitle_dicts,
-                                    transcript_items=transcript_dicts,
-                                    transcript_evidence=transcript_evidence,
-                                    glossary_terms=effective_glossary_terms,
-                                    user_memory=user_memory,
-                                    include_research=enrich_search_enabled,
-                                )
+                    if _profile_matches_topic_registry_hints(content_profile, topic_hints=topic_registry_hints):
+                        content_profile = {
+                            **dict(content_profile or {}),
+                            "topic_registry_short_circuit": {
+                                "enabled": True,
+                                "reason": "topic_registry_hint_aligned",
+                                "topic_hints": topic_registry_hints,
+                            },
+                        }
+                    else:
+                        async with _maintain_step_heartbeat(step):
+                            with llm_task_route("content_profile", search_enabled=enrich_search_enabled, settings=settings):
+                                with track_step_usage(job_id=job.id, step_id=step.id, step_name="content_profile"):
+                                    content_profile = await enrich_content_profile(
+                                        profile=content_profile,
+                                        source_name=job.source_name,
+                                        workflow_template=job.workflow_template,
+                                        transcript_excerpt=transcript_excerpt,
+                                        subtitle_items=subtitle_dicts,
+                                        transcript_items=transcript_dicts,
+                                        transcript_evidence=transcript_evidence,
+                                        glossary_terms=effective_glossary_terms,
+                                        user_memory=user_memory,
+                                        include_research=enrich_search_enabled,
+                                    )
                     usage_after = await _read_persisted_step_usage_snapshot(step.id if step else None)
                     usage_baseline = _usage_delta(usage_after, usage_before)
                     save_cached_json(
@@ -5105,6 +5194,10 @@ async def run_glossary_review(job_id: str) -> dict:
             source_name=job.source_name,
             subject_domain=subject_domain,
         )
+        source_constrained_profile = apply_source_identity_constraints(
+            dict(content_profile or {}),
+            source_name=job.source_name,
+        )
         corrections = await _load_subtitle_corrections(session, job_id=job.id)
         if not corrections:
             corrections = await apply_glossary_corrections(
@@ -5112,6 +5205,7 @@ async def run_glossary_review(job_id: str) -> dict:
                 subtitle_items,
                 session,
                 glossary_terms=effective_glossary_terms,
+                content_profile=source_constrained_profile,
             )
         auto_accepted_corrections = sum(
             1 for item in corrections if item.auto_applied or item.human_decision == "accepted"
@@ -6076,8 +6170,8 @@ async def run_render(job_id: str) -> dict:
             subtitle_items=None,
             debug_dir=debug_dir / "plain",
         )
-        shutil.copy2(tmp_plain_mp4, tmp_cover_plain_mp4)
-        plain_duration = float((await probe(tmp_plain_mp4)).duration or 0.0)
+        await _copy_file_with_retry(tmp_plain_mp4, tmp_cover_plain_mp4)
+        plain_duration = float((await _probe_with_retry(tmp_plain_mp4)).duration or 0.0)
         plain_variant_editorial_timeline = _build_full_length_variant_timeline(plain_duration)
         keep_segments = [
             s for s in editorial_timeline.data_json.get("segments", [])
@@ -6307,10 +6401,10 @@ async def run_render(job_id: str) -> dict:
             packaging_heartbeat.cancel()
             with suppress(asyncio.CancelledError):
                 await packaging_heartbeat
-        plain_meta = await probe(tmp_plain_mp4)
-        packaged_meta = await probe(tmp_packaged_mp4)
-        ai_effect_meta = await probe(tmp_ai_effect_mp4)
-        avatar_meta = await probe(tmp_avatar_mp4) if tmp_avatar_mp4.exists() else None
+        plain_meta = await _probe_with_retry(tmp_plain_mp4)
+        packaged_meta = await _probe_with_retry(tmp_packaged_mp4)
+        ai_effect_meta = await _probe_with_retry(tmp_ai_effect_mp4)
+        avatar_meta = await _probe_with_retry(tmp_avatar_mp4) if tmp_avatar_mp4.exists() else None
 
         local_plain_mp4 = build_variant_output_path(
             out_dir,
@@ -6393,11 +6487,11 @@ async def run_render(job_id: str) -> dict:
             height=plain_meta.height,
         )
 
-        shutil.copy2(tmp_plain_mp4, local_plain_mp4)
+        await _copy_file_with_retry(tmp_plain_mp4, local_plain_mp4)
         if tmp_avatar_mp4.exists() and local_avatar_mp4 is not None:
-            shutil.copy2(tmp_avatar_mp4, local_avatar_mp4)
-        shutil.copy2(tmp_ai_effect_mp4, local_ai_effect_mp4)
-        shutil.copy2(tmp_packaged_mp4, local_packaged_mp4)
+            await _copy_file_with_retry(tmp_avatar_mp4, local_avatar_mp4)
+        await _copy_file_with_retry(tmp_ai_effect_mp4, local_ai_effect_mp4)
+        await _copy_file_with_retry(tmp_packaged_mp4, local_packaged_mp4)
         async with get_session_factory()() as session:
             step_result = await session.execute(
                 select(JobStep).where(JobStep.job_id == uuid.UUID(job_id), JobStep.step_name == "render")
@@ -6835,6 +6929,47 @@ def _select_cover_source_video(plain_video_path: Path, packaged_video_path: Path
     if plain_video_path.exists():
         return plain_video_path
     raise FileNotFoundError("Plain render is required for cover extraction")
+
+
+async def _copy_file_with_retry(
+    source_path: Path,
+    dest_path: Path,
+    *,
+    attempts: int = 6,
+    retry_delay_sec: float = 0.25,
+) -> None:
+    last_error: Exception | None = None
+    for attempt in range(1, max(1, attempts) + 1):
+        try:
+            shutil.copy2(source_path, dest_path)
+            return
+        except PermissionError as exc:
+            last_error = exc
+            if attempt >= attempts:
+                raise
+            await asyncio.sleep(retry_delay_sec * attempt)
+    if last_error is not None:
+        raise last_error
+
+
+async def _probe_with_retry(
+    path: Path,
+    *,
+    attempts: int = 6,
+    retry_delay_sec: float = 0.25,
+):
+    last_error: Exception | None = None
+    for attempt in range(1, max(1, attempts) + 1):
+        try:
+            return await probe(path)
+        except PermissionError as exc:
+            last_error = exc
+            if attempt >= attempts:
+                raise
+            await asyncio.sleep(retry_delay_sec * attempt)
+    if last_error is not None:
+        raise last_error
+    return await probe(path)
 
 
 def _subtitle_text(item: dict[str, Any]) -> str:
@@ -7844,16 +7979,21 @@ def _variant_sync_is_blocking(sync_check: dict[str, Any] | None) -> bool:
             "subtitle_timestamp_disorder",
             "subtitle_overlap_detected",
             "subtitle_invalid_range",
+            "subtitle_trailing_gap_large",
+            "subtitle_duration_gap_large",
         }
     ):
         return True
+    video_duration = float(sync_check.get("video_duration_sec", 0.0) or 0.0)
     effective_trailing_gap = float(
         sync_check.get("effective_trailing_gap_sec", sync_check.get("trailing_gap_sec", 0.0)) or 0.0
     )
     effective_duration_gap = float(
         sync_check.get("effective_duration_gap_sec", sync_check.get("duration_gap_sec", 0.0)) or 0.0
     )
-    return effective_trailing_gap > 1.0 or effective_duration_gap > 1.0
+    trailing_threshold = max(2.0, video_duration * 0.12) if video_duration > 0 else 2.0
+    duration_threshold = max(2.5, video_duration * 0.15) if video_duration > 0 else 2.5
+    return effective_trailing_gap > trailing_threshold or effective_duration_gap > duration_threshold
 
 
 def _variant_expected_trailing_gap(

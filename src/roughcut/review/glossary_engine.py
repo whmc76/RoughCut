@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from roughcut.config import get_settings
 from roughcut.db.models import GlossaryTerm, SubtitleCorrection, SubtitleItem
 from roughcut.review.model_identity import filter_conflicting_model_wrong_forms as _shared_filter_conflicting_model_wrong_forms
+from roughcut.review.subtitle_term_resolution import _should_ignore_patch_candidate
 
 
 @dataclass
@@ -110,6 +111,7 @@ async def apply_glossary_corrections(
     session: AsyncSession,
     *,
     glossary_terms: list[GlossaryTerm | dict[str, Any]] | None = None,
+    content_profile: dict[str, Any] | None = None,
 ) -> list[SubtitleCorrection]:
     """
     Match all glossary terms against subtitle text.
@@ -142,6 +144,16 @@ async def apply_glossary_corrections(
                     original = match.group(0)
                     if original == correct_form:
                         continue  # Already correct
+                    if (
+                        content_profile
+                        and _should_ignore_patch_candidate(
+                            original_span=original,
+                            suggested_span=correct_form,
+                            content_profile=content_profile,
+                        )
+                        and not _is_low_risk_brand_normalization(original, correct_form)
+                    ):
+                        continue
 
                     automation = assess_glossary_correction_automation(
                         full_text=text,

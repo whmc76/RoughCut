@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any, Iterable, Mapping
 
 ARTIFACT_TYPE_SUBTITLE_TERM_RESOLUTION_PATCH = "subtitle_term_resolution_patch"
@@ -25,6 +26,39 @@ def _profile_candidate_terms(content_profile: Mapping[str, Any] | None) -> list[
     return candidates[:12]
 
 
+def _normalize_term_token(value: str) -> str:
+    return re.sub(r"[\W_]+", "", str(value or "").strip()).lower()
+
+
+def _should_ignore_patch_candidate(
+    *,
+    original_span: str,
+    suggested_span: str,
+    content_profile: Mapping[str, Any] | None,
+) -> bool:
+    original_norm = _normalize_term_token(original_span)
+    suggested_norm = _normalize_term_token(suggested_span)
+    if not original_norm or not suggested_norm:
+        return True
+    if original_norm == suggested_norm:
+        return True
+    if len(original_norm) >= 2 and len(suggested_norm) >= 2 and (
+        original_norm in suggested_norm or suggested_norm in original_norm
+    ):
+        return True
+
+    profile = content_profile or {}
+    subject_brand_norm = _normalize_term_token(str(profile.get("subject_brand") or "").strip())
+    if (
+        subject_brand_norm
+        and subject_brand_norm in suggested_norm
+        and subject_brand_norm not in original_norm
+        and len(original_norm) >= 4
+    ):
+        return True
+    return False
+
+
 def build_subtitle_term_resolution_patch(
     *,
     corrections: Iterable[Any],
@@ -39,6 +73,14 @@ def build_subtitle_term_resolution_patch(
     pending_count = 0
 
     for correction in corrections:
+        original_span = str(_correction_attr(correction, "original_span") or "").strip()
+        suggested_span = str(_correction_attr(correction, "suggested_span") or "").strip()
+        if _should_ignore_patch_candidate(
+            original_span=original_span,
+            suggested_span=suggested_span,
+            content_profile=content_profile,
+        ):
+            continue
         confidence_raw = _correction_attr(correction, "confidence")
         try:
             confidence = float(confidence_raw) if confidence_raw is not None else None
@@ -58,8 +100,8 @@ def build_subtitle_term_resolution_patch(
         patches.append(
             {
                 "subtitle_item_id": str(_correction_attr(correction, "subtitle_item_id") or ""),
-                "original_span": str(_correction_attr(correction, "original_span") or "").strip(),
-                "suggested_span": str(_correction_attr(correction, "suggested_span") or "").strip(),
+                "original_span": original_span,
+                "suggested_span": suggested_span,
                 "change_type": str(_correction_attr(correction, "change_type") or "").strip(),
                 "confidence": confidence,
                 "source": str(_correction_attr(correction, "source") or "").strip(),

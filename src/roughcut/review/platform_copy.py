@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from difflib import SequenceMatcher
 import json
 import math
@@ -9,6 +10,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+from roughcut.config import llm_task_route
 from roughcut.llm_cache import digest_payload
 from roughcut.providers.factory import get_reasoning_provider, get_search_provider
 from roughcut.providers.reasoning.base import Message
@@ -24,6 +26,9 @@ PLATFORM_ORDER = [
     ("douyin", "抖音", "简介", "标签"),
     ("kuaishou", "快手", "简介", "标签"),
     ("wechat_channels", "视频号", "简介", "标签"),
+    ("toutiao", "头条号", "简介", "标签"),
+    ("youtube", "YouTube", "描述", "标签"),
+    ("x", "X", "推文", "Hashtags"),
 ]
 
 _TITLE_AUDIT_VERSION = "2026-04-10.title-audit.v1"
@@ -37,7 +42,7 @@ _TITLE_ANGLE_PATTERNS = (
 _TITLE_AUDIT_RULES: dict[str, dict[str, Any]] = {
     "bilibili": {
         "label": "B站",
-        "hard_max_chars": None,
+        "hard_max_chars": 80,
         "recommended_min_chars": 10,
         "recommended_max_chars": 30,
         "display_max_chars": 30,
@@ -100,9 +105,48 @@ _TITLE_AUDIT_RULES: dict[str, dict[str, Any]] = {
         "preferred_tokens": ("总结", "结论", "实测", "体验", "判断", "开箱", "值不值", "怎么选", "重点", "记录"),
         "avoid_tokens": ("封神", "炸裂", "杀疯", "绝绝子", "离谱"),
     },
+    "toutiao": {
+        "label": "头条号",
+        "hard_max_chars": 30,
+        "recommended_min_chars": 10,
+        "recommended_max_chars": 28,
+        "display_max_chars": 28,
+        "max_emojis": 0,
+        "max_exclamations": 1,
+        "style_hint": "偏信息摘要和判断导向，适合把核心结论放前面。",
+        "audience_hint": "用户更关注主题是否清楚、结论是否明确、信息是否够直给。",
+        "preferred_tokens": ("开箱", "实测", "评测", "体验", "结论", "判断", "值不值", "对比"),
+        "avoid_tokens": ("绝绝子", "封神", "杀疯"),
+    },
+    "youtube": {
+        "label": "YouTube",
+        "hard_max_chars": 100,
+        "recommended_min_chars": 18,
+        "recommended_max_chars": 70,
+        "display_max_chars": 70,
+        "max_emojis": 0,
+        "max_exclamations": 1,
+        "style_hint": "更适合信息明确、可检索、带主题和结论的标题。",
+        "audience_hint": "用户会先扫主体、差异、结论和关键词，过于网感的中文爆词不稳定。",
+        "preferred_tokens": ("review", "unboxing", "test", "hands-on", "体验", "评测", "开箱", "实测"),
+        "avoid_tokens": ("绝绝子", "杀疯", "封神"),
+    },
+    "x": {
+        "label": "X",
+        "hard_max_chars": 50,
+        "recommended_min_chars": 8,
+        "recommended_max_chars": 28,
+        "display_max_chars": 28,
+        "max_emojis": 0,
+        "max_exclamations": 1,
+        "style_hint": "更像贴文开头句，短促、可转发、先给信息点。",
+        "audience_hint": "用户更容易接受一句判断或一个明确观察，不适合堆太多修饰。",
+        "preferred_tokens": ("实测", "结论", "观察", "体验", "先看", "quick take", "hands-on"),
+        "avoid_tokens": ("长文解析", "绝绝子", "封神"),
+    },
 }
 
-_CN_PLATFORM_KEYS = {"bilibili", "xiaohongshu", "douyin", "kuaishou", "wechat_channels"}
+_CN_PLATFORM_KEYS = {"bilibili", "xiaohongshu", "douyin", "kuaishou", "wechat_channels", "toutiao"}
 _BRAND_CN_ALIASES = {
     "OLIGHT": "傲雷",
     "Olight": "傲雷",
@@ -301,31 +345,35 @@ async def build_packaging_fact_sheet(
         model=str(profile.get("subject_model") or ""),
     )
     try:
-        provider = get_reasoning_provider()
-        subject_identity = _packaging_subject_identity(profile)
-        resolved_feedback = _resolved_review_feedback_payload(profile)
-        prompt = (
-            "你在做短视频发布前的参数核验。"
-            "只能根据下面给出的搜索证据，提炼已经被证据直接支持的事实。"
-            "不要补全、不要猜测、不要根据常识扩写。"
-            "数字参数、功率、流明、毫瓦、射程、容量、价格、发布时间、升级倍率只有在证据里明确出现时才能写。"
-            "如果证据不足，就返回空 verified_facts。"
-            "输出 JSON："
-            '{"verified_facts":[{"fact":"","source_url":"","source_title":""}],"official_sources":[{"title":"","url":""}],"guardrail_summary":""}'
-            f"\n视频主体：{json.dumps(subject_identity, ensure_ascii=False)}"
-            f"\n审核确认修正：{json.dumps(resolved_feedback, ensure_ascii=False)}"
-            f"\n搜索证据：{json.dumps(preferred_evidence[:8], ensure_ascii=False)}"
-        )
-        with track_usage_operation("platform_package.fact_sheet"):
-            response = await provider.complete(
-                [
-                    Message(role="system", content="你是严格的事实核验助手，只输出 JSON。"),
-                    Message(role="user", content=prompt),
-                ],
-                temperature=0.0,
-                max_tokens=900,
-                json_mode=True,
+        with llm_task_route("copy", search_enabled=False):
+            provider = get_reasoning_provider()
+            subject_identity = _packaging_subject_identity(profile)
+            resolved_feedback = _resolved_review_feedback_payload(profile)
+            prompt = (
+                "你在做短视频发布前的参数核验。"
+                "只能根据下面给出的搜索证据，提炼已经被证据直接支持的事实。"
+                "不要补全、不要猜测、不要根据常识扩写。"
+                "数字参数、功率、流明、毫瓦、射程、容量、价格、发布时间、升级倍率只有在证据里明确出现时才能写。"
+                "如果证据不足，就返回空 verified_facts。"
+                "输出 JSON："
+                '{"verified_facts":[{"fact":"","source_url":"","source_title":""}],"official_sources":[{"title":"","url":""}],"guardrail_summary":""}'
+                f"\n视频主体：{json.dumps(subject_identity, ensure_ascii=False)}"
+                f"\n审核确认修正：{json.dumps(resolved_feedback, ensure_ascii=False)}"
+                f"\n搜索证据：{json.dumps(preferred_evidence[:8], ensure_ascii=False)}"
             )
+            with track_usage_operation("platform_package.fact_sheet"):
+                response = await asyncio.wait_for(
+                    provider.complete(
+                        [
+                            Message(role="system", content="你是严格的事实核验助手，只输出 JSON。"),
+                            Message(role="user", content=prompt),
+                        ],
+                        temperature=0.0,
+                        max_tokens=900,
+                        json_mode=True,
+                    ),
+                    timeout=75,
+                )
         raw = response.as_json()
     except Exception:
         raw = {}
@@ -355,7 +403,6 @@ async def generate_platform_packaging(
     prompt_brief: dict[str, Any] | None = None,
     fact_sheet: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    provider = get_reasoning_provider()
     prompt_brief = prompt_brief or build_packaging_prompt_brief(
         source_name=source_name,
         content_profile=content_profile,
@@ -387,7 +434,10 @@ async def generate_platform_packaging(
         "- 小红书：像真实分享笔记，带一点作者人设、审美/使用偏好、到手感受。\n"
         "- 抖音：一句结果 + 一句记忆点，可带极短作者身份锚点，节奏要快。\n"
         "- 快手：像当面讲实话，直给、不绕，可带接地气的人设表达。\n"
-        "- 视频号：稳妥可信，偏总结式，可带作者职业/内容定位增强可信度。\n\n"
+        "- 视频号：稳妥可信，偏总结式，可带作者职业/内容定位增强可信度。\n"
+        "- 头条号：偏资讯/观点摘要，标题和正文要先把判断讲明白。\n"
+        "- YouTube：描述可更完整，适合补充结构、关键看点和检索关键词。\n"
+        "- X：没有独立视频标题，推文正文要短，像可直接发出的贴文。\n\n"
         f"本次统一文案风格：{_copy_style_instruction(copy_style)}\n\n"
         f"{fact_guardrail_text}\n\n"
         f"{author_prompt_text}\n\n"
@@ -397,7 +447,10 @@ async def generate_platform_packaging(
         f"- 小红书：{_platform_bias_instruction('小红书')}\n"
         f"- 抖音：{_platform_bias_instruction('抖音')}\n"
         f"- 快手：{_platform_bias_instruction('快手')}\n"
-        f"- 视频号：{_platform_bias_instruction('视频号')}\n\n"
+        f"- 视频号：{_platform_bias_instruction('视频号')}\n"
+        f"- 头条号：{_platform_bias_instruction('头条号')}\n"
+        f"- YouTube：{_platform_bias_instruction('YouTube')}\n"
+        f"- X：{_platform_bias_instruction('X')}\n\n"
         "请输出 JSON，格式如下：\n"
         "{"
         "\"highlights\":{"
@@ -409,29 +462,41 @@ async def generate_platform_packaging(
         "\"xiaohongshu\":{\"titles\":[\"\"],\"description\":\"\",\"tags\":[\"\"]},"
         "\"douyin\":{\"titles\":[\"\"],\"description\":\"\",\"tags\":[\"\"]},"
         "\"kuaishou\":{\"titles\":[\"\"],\"description\":\"\",\"tags\":[\"\"]},"
-        "\"wechat_channels\":{\"titles\":[\"\"],\"description\":\"\",\"tags\":[\"\"]}"
+        "\"wechat_channels\":{\"titles\":[\"\"],\"description\":\"\",\"tags\":[\"\"]},"
+        "\"toutiao\":{\"titles\":[\"\"],\"description\":\"\",\"tags\":[\"\"]},"
+        "\"youtube\":{\"titles\":[\"\"],\"description\":\"\",\"tags\":[\"\"]},"
+        "\"x\":{\"titles\":[\"\"],\"description\":\"\",\"tags\":[\"\"]}"
         "}"
         "}\n\n"
         f"视频摘要上下文：{json.dumps(prompt_brief, ensure_ascii=False)}"
     )
-    with track_usage_operation("platform_package.generate_packaging"):
-        response = await provider.complete(
-            [
-                Message(
-                    role="system",
-                    content=(
-                        "你是严谨的中文多平台视频包装策划。"
-                        "优先输出真实玩家口吻、平台化表达、自然互动问题和合规标签。"
+    try:
+        with llm_task_route("copy", search_enabled=False):
+            provider = get_reasoning_provider()
+            with track_usage_operation("platform_package.generate_packaging"):
+                response = await asyncio.wait_for(
+                    provider.complete(
+                        [
+                            Message(
+                                role="system",
+                                content=(
+                                    "你是严谨的中文多平台视频包装策划。"
+                                    "优先输出真实玩家口吻、平台化表达、自然互动问题和合规标签。"
+                                ),
+                            ),
+                            Message(role="user", content=prompt),
+                        ],
+                        temperature=0.35,
+                        max_tokens=3200,
+                        json_mode=True,
                     ),
-                ),
-                Message(role="user", content=prompt),
-            ],
-            temperature=0.35,
-            max_tokens=3200,
-            json_mode=True,
-        )
+                    timeout=90,
+                )
+        raw_response = response.as_json()
+    except Exception:
+        raw_response = {}
     packaging = normalize_platform_packaging(
-        response.as_json(),
+        raw_response,
         content_profile=content_profile,
         copy_style=copy_style,
         fact_sheet=fact_sheet,
@@ -998,6 +1063,12 @@ def _build_compact_fallback_titles(
             return ["给你们看个真东西", "这次我说实话", "值不值我直说", "先看细节", "到底咋样"]
         if label == "视频号":
             return ["开箱重点记录", "到手体验总结", "值不值先看", "细节重点", "上手记录"]
+        if label == "头条号":
+            return ["开箱重点总结", "先看核心结论", "这次体验怎么说", "值不值先讲明白", "开箱观察记录"]
+        if label == "YouTube":
+            return ["Hands-on quick take", "Unboxing first look", "What stands out first", "Worth it or not", "Key details first"]
+        if label == "X":
+            return ["Quick take first", "First look in one post", "Worth it at first glance?", "Key detail first", "Hands-on note"]
         return ["开箱重点先看", "值不值一次说清", "这次先看细节", "上手体验记录", "开箱真实判断"]
 
     product = _compact_product_label(content_profile, label=label)
@@ -1033,6 +1104,30 @@ def _build_compact_fallback_titles(
             f"{product}值不值",
             f"{subject}开箱重点",
             f"{product}细节总结",
+        ]
+    if label == "头条号":
+        return [
+            f"{product}开箱结论",
+            f"{product}值不值先说",
+            f"{product}体验重点",
+            f"{subject}实测判断",
+            f"{product}这次怎么看",
+        ]
+    if label == "YouTube":
+        return [
+            f"{product} review",
+            f"{product} hands-on",
+            f"{product} first look",
+            f"{subject} quick review",
+            f"{product} worth it?",
+        ]
+    if label == "X":
+        return [
+            f"{product} quick take",
+            f"{product} first look",
+            f"{product} one-line verdict",
+            f"{subject} first impression",
+            f"{product} key detail",
         ]
     return [
         f"{product}开箱实测",
@@ -1658,6 +1753,20 @@ def _audit_platform_style(
             message=f"{label} 标题 {index} 网感词偏重，不够稳妥可信。",
             title_index=index,
         )
+    if key == "youtube" and re.search(r"封神|绝绝子|杀疯|离谱", title):
+        return _build_audit_issue(
+            severity="warning",
+            code="tone_too_localized",
+            message=f"{label} 标题 {index} 网感词过重，国际平台检索和点击稳定性会下降。",
+            title_index=index,
+        )
+    if key == "x" and len(title) > 32:
+        return _build_audit_issue(
+            severity="warning",
+            code="hook_too_long",
+            message=f"{label} 标题 {index} 作为贴文开头偏长，转发传播不够利落。",
+            title_index=index,
+        )
     if key == "kuaishou" and re.search(r"杂志感|氛围感|高级感", title):
         return _build_audit_issue(
             severity="warning",
@@ -1704,6 +1813,20 @@ def _audit_platform_audience_fit(
             severity="warning",
             code="plainspoken_weak",
             message=f"{label} 标题 {index} 少了点“当面讲实话”的口语感。",
+            title_index=index,
+        )
+    if key == "youtube" and not re.search(r"review|unboxing|hands-on|first look|体验|评测|开箱|实测", title, re.IGNORECASE):
+        return _build_audit_issue(
+            severity="warning",
+            code="search_signal_weak",
+            message=f"{label} 标题 {index} 缺少 review / unboxing / hands-on 一类可检索信号。",
+            title_index=index,
+        )
+    if key == "x" and not re.search(r"结论|观察|体验|先看|quick|take|first look|hands-on", title, re.IGNORECASE):
+        return _build_audit_issue(
+            severity="warning",
+            code="hook_signal_weak",
+            message=f"{label} 标题 {index} 缺少贴文开头常见的判断或观察信号。",
             title_index=index,
         )
     brand = str((content_profile or {}).get("subject_brand") or "").strip()
@@ -2432,6 +2555,9 @@ def _platform_bias_instruction(label: str) -> str:
         "抖音": "更短更快更有爆点，先给结果和记忆点。",
         "快手": "更接地气、更直给，像当面把真实体验讲明白。",
         "视频号": "更稳妥可信，适合快速概括重点和结论。",
+        "头条号": "更像资讯摘要或观点导语，适合先抛判断、再补重点。",
+        "YouTube": "更强调主题明确、可检索、结构完整，适合 review / hands-on / first look 语气。",
+        "X": "更像可直接转发的贴文，先给一个观察或结论，尽量短促。",
     }
     return mapping.get(label, "按平台用户习惯自动调整语气和信息密度。")
 

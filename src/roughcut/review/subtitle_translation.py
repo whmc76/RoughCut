@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import json
 import re
 from typing import Any
 
 from roughcut.providers.factory import get_reasoning_provider
-from roughcut.providers.reasoning.base import Message
+from roughcut.providers.reasoning.base import Message, extract_json_text
 from roughcut.usage import track_usage_operation
 
 _DEFAULT_TARGET_LANGUAGE = "en"
@@ -84,7 +85,7 @@ async def _translate_subtitle_chunk(
             max_tokens=2200,
             json_mode=True,
         )
-    payload = response.as_json()
+    payload = _parse_translation_payload(response)
     translated_map: dict[int, str] = {}
     for item in list(payload.get("items") or []) if isinstance(payload, dict) else []:
         try:
@@ -143,11 +144,15 @@ async def _translate_single_subtitle(
             max_tokens=400,
             json_mode=True,
         )
-    payload = response.as_json()
+    payload = _parse_translation_payload(response)
     if isinstance(payload, dict):
         translation = str(payload.get("translation") or "").strip()
         if translation:
             return translation
+    text = _response_text(response)
+    candidate = _extract_translation_text(text)
+    if candidate:
+        return candidate
     raise ValueError("Subtitle translation did not return a usable translation")
 
 
@@ -221,3 +226,64 @@ def _language_family(value: str | None) -> str:
     if normalized.startswith("ko"):
         return "ko"
     return normalized.split("-", 1)[0] if normalized else "zh"
+
+
+def _parse_translation_payload(response: Any) -> dict[str, Any]:
+    try:
+        payload = response.as_json()
+    except Exception:
+        payload = None
+    if isinstance(payload, dict):
+        return payload
+
+    text = _response_text(response)
+    if not text:
+        return {}
+
+    try:
+        parsed = json.loads(extract_json_text(text))
+    except Exception:
+        parsed = None
+    if isinstance(parsed, dict):
+        return parsed
+    return {}
+
+
+def _response_text(response: Any) -> str:
+    content = str(getattr(response, "content", "") or "").strip()
+    if content:
+        return content
+    raw_content = str(getattr(response, "raw_content", "") or "").strip()
+    return raw_content
+
+
+def _extract_translation_text(text: str) -> str:
+    normalized = str(text or "").strip()
+    if not normalized:
+        return ""
+
+    fenced = re.search(r"```(?:json|text)?\s*(.*?)\s*```", normalized, flags=re.DOTALL | re.IGNORECASE)
+    if fenced:
+        normalized = fenced.group(1).strip()
+
+    kv_match = re.search(
+        r'"translation"\s*:\s*"(?P<double>(?:[^"\\]|\\.)*)"|'
+        r"'translation'\s*:\s*'(?P<single>(?:[^'\\]|\\.)*)'",
+        normalized,
+        flags=re.DOTALL,
+    )
+    if kv_match:
+        candidate = kv_match.group("double") or kv_match.group("single") or ""
+        try:
+            return json.loads(f'"{candidate}"')
+        except Exception:
+            return candidate.strip()
+
+    simple_line = re.search(r"^(?:translation|translated_text)\s*[:：]\s*(.+)$", normalized, flags=re.IGNORECASE | re.MULTILINE)
+    if simple_line:
+        return simple_line.group(1).strip().strip('"').strip("'")
+
+    cleaned = normalized.strip().strip('"').strip("'")
+    if cleaned and "\n" not in cleaned and len(cleaned) <= 400:
+        return cleaned
+    return ""

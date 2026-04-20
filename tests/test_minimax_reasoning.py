@@ -29,9 +29,19 @@ class _FakeCompletions:
 
 
 class _FakeAsyncOpenAI:
-    def __init__(self, *, api_key: str, base_url: str, content: str) -> None:
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        base_url: str,
+        content: str,
+        timeout: int | None = None,
+        max_retries: int | None = None,
+    ) -> None:
         self.api_key = api_key
         self.base_url = base_url
+        self.timeout = timeout
+        self.max_retries = max_retries
         self.chat = SimpleNamespace(completions=_FakeCompletions(content))
         self.closed = False
 
@@ -50,11 +60,13 @@ async def test_minimax_complete_strips_think_tags(monkeypatch):
 
     captured: dict[str, object] = {}
 
-    def _fake_client(*, api_key: str, base_url: str):
+    def _fake_client(*, api_key: str, base_url: str, timeout=None, max_retries=None):
         client = _FakeAsyncOpenAI(
             api_key=api_key,
             base_url=base_url,
             content="<think>internal reasoning</think>\n最终答案",
+            timeout=timeout,
+            max_retries=max_retries,
         )
         captured["client"] = client
         return client
@@ -68,6 +80,8 @@ async def test_minimax_complete_strips_think_tags(monkeypatch):
     assert response.model == "MiniMax-M2.7"
     assert response.usage == {"prompt_tokens": 11, "completion_tokens": 22}
     assert cast(_FakeAsyncOpenAI, captured["client"]).closed is True
+    assert cast(_FakeAsyncOpenAI, captured["client"]).timeout == 120
+    assert cast(_FakeAsyncOpenAI, captured["client"]).max_retries == 1
 
 
 @pytest.mark.asyncio
@@ -79,11 +93,13 @@ async def test_minimax_complete_keeps_json_payload_after_think(monkeypatch):
     object.__setattr__(settings, "minimax_api_key", "test-key")
     object.__setattr__(settings, "minimax_base_url", "https://api.minimaxi.com/v1")
 
-    def _fake_client(*, api_key: str, base_url: str):
+    def _fake_client(*, api_key: str, base_url: str, timeout=None, max_retries=None):
         return _FakeAsyncOpenAI(
             api_key=api_key,
             base_url=base_url,
             content='<think>hidden</think>\n{"preset_name":"unboxing_upgrade"}',
+            timeout=timeout,
+            max_retries=max_retries,
         )
 
     monkeypatch.setattr(minimax_mod.openai, "AsyncOpenAI", _fake_client)
