@@ -119,6 +119,22 @@ def test_write_srt_file_rejects_overlap(tmp_path: Path):
         )
 
 
+def test_write_srt_file_normalizes_small_overlap(tmp_path: Path):
+    output_path = tmp_path / "normalized.srt"
+
+    output_mod.write_srt_file(
+        [
+            {"index": 0, "start_time": 1.0, "end_time": 3.0, "text_final": "第一句"},
+            {"index": 1, "start_time": 2.995, "end_time": 4.0, "text_final": "第二句"},
+        ],
+        output_path,
+    )
+
+    payload = output_path.read_text(encoding="utf-8-sig")
+    assert "00:00:01,000 --> 00:00:03,000" in payload
+    assert "00:00:03,000 --> 00:00:04,00" in payload
+
+
 def test_write_cover_variant_manifest_writes_canonical_and_legacy_names(tmp_path: Path):
     output_path = tmp_path / "demo_cover.jpg"
     variant_path = tmp_path / "demo_cover_v1_xiaohongshu.jpg"

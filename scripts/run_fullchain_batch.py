@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import concurrent.futures
 import json
 import sys
 import time
@@ -88,6 +89,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--scan-mode", choices=["fast", "precise"], default="fast")
     parser.add_argument("--report-dir", type=Path, default=ROOT / "output" / "test" / "fullchain-batch")
     parser.add_argument(
+        "--parallel-jobs",
+        type=int,
+        default=1,
+        help="Number of source videos to run concurrently",
+    )
+    parser.add_argument(
         "--stop-after",
         choices=PIPELINE_STEPS,
         default=None,
@@ -150,6 +157,7 @@ def main() -> None:
     args = parse_args()
     args.report_dir.mkdir(parents=True, exist_ok=True)
     ensure_batch_runtime_ready()
+    parallel_jobs = max(1, int(args.parallel_jobs or 1))
     enhancement_modes = resolve_live_batch_enhancement_modes(args.enhancement_modes)
     target_source_names = resolve_target_source_names(
         explicit_source_names=args.source_names,
@@ -168,8 +176,10 @@ def main() -> None:
         raise SystemExit("No source videos found.")
     print(f"[batch] candidate sources {len(source_items)}", flush=True)
 
+    target_items = source_items[: args.limit]
+    prepared_jobs: list[dict[str, Any]] = []
     reports: list[JobRunReport] = []
-    for item in source_items:
+    for item in target_items:
         write_batch_progress(
             report_dir=args.report_dir,
             source_dir=args.source_dir,
@@ -179,7 +189,8 @@ def main() -> None:
             enhancement_modes=enhancement_modes,
             reports=reports,
             current_item=item,
-            status="running",
+            queued_items=[pending["item"] for pending in prepared_jobs],
+            status="preparing",
         )
         job_id = asyncio.run(
             prepare_job_for_source(
@@ -193,35 +204,65 @@ def main() -> None:
         )
         if not job_id:
             continue
-        print(f"[batch] running {item.get('source_name')} job={job_id}", flush=True)
-        write_batch_progress(
-            report_dir=args.report_dir,
-            source_dir=args.source_dir,
-            channel_profile=args.channel_profile,
-            language=args.language,
-            output_dir=args.output_dir,
-            enhancement_modes=enhancement_modes,
-            reports=reports,
-            current_item=item,
-            current_job_id=job_id,
-            status="running",
-        )
-        reports.append(run_job(job_id, item, stop_after=args.stop_after))
-        write_batch_progress(
-            report_dir=args.report_dir,
-            source_dir=args.source_dir,
-            channel_profile=args.channel_profile,
-            language=args.language,
-            output_dir=args.output_dir,
-            enhancement_modes=enhancement_modes,
-            reports=reports,
-            status="running",
-        )
-        if len(reports) >= args.limit:
-            break
+        prepared_jobs.append({"job_id": job_id, "item": item})
+
+    if not prepared_jobs:
+        raise SystemExit("No jobs were created from the pending inventory.")
+
+    order_index = {entry["item"]["source_name"]: index for index, entry in enumerate(prepared_jobs)}
+    pending_jobs = list(prepared_jobs)
+    active_futures: dict[concurrent.futures.Future[JobRunReport], dict[str, Any]] = {}
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=parallel_jobs) as executor:
+        while pending_jobs or active_futures:
+            while pending_jobs and len(active_futures) < parallel_jobs:
+                entry = pending_jobs.pop(0)
+                item = entry["item"]
+                job_id = entry["job_id"]
+                print(f"[batch] running {item.get('source_name')} job={job_id}", flush=True)
+                future = executor.submit(run_job, job_id, item, stop_after=args.stop_after)
+                active_futures[future] = entry
+
+            running_entries = [entry for entry in active_futures.values()]
+            write_batch_progress(
+                report_dir=args.report_dir,
+                source_dir=args.source_dir,
+                channel_profile=args.channel_profile,
+                language=args.language,
+                output_dir=args.output_dir,
+                enhancement_modes=enhancement_modes,
+                reports=reports,
+                running_jobs=running_entries,
+                queued_items=[entry["item"] for entry in pending_jobs],
+                status="running",
+            )
+            if not active_futures:
+                break
+
+            done_futures, _ = concurrent.futures.wait(
+                active_futures.keys(),
+                return_when=concurrent.futures.FIRST_COMPLETED,
+            )
+            for future in done_futures:
+                entry = active_futures.pop(future)
+                report = future.result()
+                reports.append(report)
+                reports.sort(key=lambda item: order_index.get(item.source_name, 999999))
+                write_batch_progress(
+                    report_dir=args.report_dir,
+                    source_dir=args.source_dir,
+                    channel_profile=args.channel_profile,
+                    language=args.language,
+                    output_dir=args.output_dir,
+                    enhancement_modes=enhancement_modes,
+                    reports=reports,
+                    running_jobs=[item for item in active_futures.values()],
+                    queued_items=[item["item"] for item in pending_jobs],
+                    status="running",
+                )
 
     if not reports:
-        raise SystemExit("No jobs were created from the pending inventory.")
+        raise SystemExit("No jobs completed in the batch run.")
 
     summary = {
         "created_at": datetime.now(timezone.utc).isoformat(),
@@ -291,8 +332,34 @@ def write_batch_progress(
     reports: list[JobRunReport],
     current_item: dict[str, Any] | None = None,
     current_job_id: str | None = None,
+    running_jobs: list[dict[str, Any]] | None = None,
+    queued_items: list[dict[str, Any]] | None = None,
     status: str = "running",
 ) -> None:
+    serialized_running_jobs = [
+        {
+            "job_id": str((entry or {}).get("job_id") or ""),
+            "source_name": str(((entry or {}).get("item") or {}).get("source_name") or ""),
+            "source_path": str(((entry or {}).get("item") or {}).get("path") or ""),
+        }
+        for entry in (running_jobs or [])
+    ]
+    serialized_queued_items = [
+        {
+            "source_name": str((entry or {}).get("source_name") or ""),
+            "source_path": str((entry or {}).get("path") or ""),
+        }
+        for entry in (queued_items or [])
+    ]
+    current_payload = (
+        serialized_running_jobs[0]
+        if serialized_running_jobs
+        else {
+            "job_id": current_job_id or "",
+            "source_name": str((current_item or {}).get("source_name") or ""),
+            "source_path": str((current_item or {}).get("path") or ""),
+        }
+    )
     progress_payload = {
         "created_at": datetime.now(timezone.utc).isoformat(),
         "status": status,
@@ -302,12 +369,12 @@ def write_batch_progress(
         "output_dir": output_dir,
         "enhancement_modes": list(enhancement_modes),
         "completed_job_count": len(reports),
+        "running_job_count": len(serialized_running_jobs),
+        "queued_job_count": len(serialized_queued_items),
         "jobs": [asdict(report) for report in reports],
-        "current": {
-            "job_id": current_job_id or "",
-            "source_name": str((current_item or {}).get("source_name") or ""),
-            "source_path": str((current_item or {}).get("path") or ""),
-        },
+        "current": current_payload,
+        "running_jobs": serialized_running_jobs,
+        "queued_jobs": serialized_queued_items,
     }
     (report_dir / "batch_progress.json").write_text(
         json.dumps(progress_payload, ensure_ascii=False, indent=2),

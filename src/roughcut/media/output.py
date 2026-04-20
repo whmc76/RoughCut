@@ -1929,10 +1929,17 @@ def _escape_drawtext(text: str) -> str:
 
 
 def write_srt_file(subtitle_items: list[dict], output_path: Path) -> Path:
-    validation_issues = _collect_srt_timeline_issues(subtitle_items)
+    original_validation_issues = _collect_srt_timeline_issues(
+        subtitle_items,
+        check_overlap=False,
+    )
+    if original_validation_issues:
+        raise ValueError("invalid_subtitle_timeline: " + "; ".join(original_validation_issues))
+    normalized_items = _normalize_srt_timeline_for_serialization(subtitle_items)
+    validation_issues = _collect_srt_timeline_issues(normalized_items)
     if validation_issues:
         raise ValueError("invalid_subtitle_timeline: " + "; ".join(validation_issues))
-    ordered_items = sorted(subtitle_items, key=_subtitle_srt_sort_key)
+    ordered_items = sorted(normalized_items, key=_subtitle_srt_sort_key)
     lines: list[str] = []
     for i, item in enumerate(ordered_items, 1):
         start = _srt_time(item["start_time"])
@@ -1959,7 +1966,34 @@ def _subtitle_srt_sort_key(item: dict[str, Any]) -> tuple[float, float, int]:
     return (start, end, index)
 
 
-def _collect_srt_timeline_issues(subtitle_items: list[dict[str, Any]]) -> list[str]:
+def _normalize_srt_timeline_for_serialization(
+    subtitle_items: list[dict[str, Any]],
+    *,
+    max_autofix_overlap_sec: float = 0.02,
+) -> list[dict[str, Any]]:
+    ordered_items = sorted((dict(item) for item in subtitle_items), key=_subtitle_srt_sort_key)
+    normalized: list[dict[str, Any]] = []
+    previous_end = -1.0
+    for item in ordered_items:
+        start, end, _ = _subtitle_srt_sort_key(item)
+        if previous_end >= 0.0 and start < previous_end:
+            overlap = previous_end - start
+            if overlap <= max_autofix_overlap_sec:
+                duration = max(0.0, end - start)
+                start = previous_end
+                end = start + duration
+                item["start_time"] = round(start, 3)
+                item["end_time"] = round(end, 3)
+        normalized.append(item)
+        previous_end = max(previous_end, end)
+    return normalized
+
+
+def _collect_srt_timeline_issues(
+    subtitle_items: list[dict[str, Any]],
+    *,
+    check_overlap: bool = True,
+) -> list[str]:
     issues: list[str] = []
     previous_sort_key: tuple[float, float, int] | None = None
     for position, item in enumerate(subtitle_items, 1):
@@ -1971,13 +2005,14 @@ def _collect_srt_timeline_issues(subtitle_items: list[dict[str, Any]]) -> list[s
             issues.append(f"cue_{position}_timestamp_disorder")
         previous_sort_key = sort_key
 
-    ordered_items = sorted(subtitle_items, key=_subtitle_srt_sort_key)
-    previous_end = 0.0
-    for position, item in enumerate(ordered_items, 1):
-        start, end, _ = _subtitle_srt_sort_key(item)
-        if position > 1 and start < previous_end - 0.001:
-            issues.append(f"cue_{position}_overlap")
-        previous_end = max(previous_end, end)
+    if check_overlap:
+        ordered_items = sorted(subtitle_items, key=_subtitle_srt_sort_key)
+        previous_end = 0.0
+        for position, item in enumerate(ordered_items, 1):
+            start, end, _ = _subtitle_srt_sort_key(item)
+            if position > 1 and start < previous_end - 0.001:
+                issues.append(f"cue_{position}_overlap")
+            previous_end = max(previous_end, end)
     return issues
 
 
