@@ -328,10 +328,9 @@ pnpm dev:telegram-agent
 - 如果是需要改代码的扩展类请求，会自动创建待确认任务
 - 如果是分析类请求，会直接创建只读诊断任务
 
-### 9. 测试与构建
+### 9. 构建与校验
 
 ```bash
-pnpm test
 pnpm build
 pnpm lint
 ```
@@ -339,21 +338,11 @@ pnpm lint
 细分命令：
 
 ```bash
-pnpm test:clip -- E:/videos/demo.mp4
-pnpm test:frontend
-pnpm test:backend
 pnpm build:frontend
 pnpm build:backend
+pnpm lint:frontend
+pnpm lint:backend
 ```
-
-如果你要每次换一条视频源做完整链路测试，不要走 `pytest`，直接跑手工链路测试：
-
-```bash
-pnpm test:clip -- E:/videos/demo.mp4
-uv run roughcut clip-test E:/videos/demo.mp4 --channel-profile edc_tactical --sample-seconds 90
-```
-
-每次只要换掉传入的视频路径，就会生成一条新的测试任务产物到 `F:/roughcut_outputs/tests/manual-tests/`。
 
 构建前端后，FastAPI 会直接托管 `frontend/dist`。
 
@@ -391,10 +380,6 @@ Windows 下当前建议把 [start_roughcut.bat](E:/WorkSpace/RoughCut/start_roug
   从根目录启动显式容器化 full（runtime + automation），并自动构建重建（host-side）
 - `start_roughcut.bat dev`
   直接运行统一入口 `pnpm dev`
-- `start_roughcut.bat test`
-  运行 `pnpm test`
-- `start_roughcut.bat clip-test E:\videos\demo.mp4`
-  跑一条指定视频源的完整手工测试链路
 - `start_roughcut.bat build`
   运行 `pnpm build`
 
@@ -754,9 +739,6 @@ pnpm bootstrap
 # 启动全套本地开发
 pnpm dev
 
-# 前后端测试
-pnpm test
-
 # 前端构建
 pnpm build
 
@@ -766,10 +748,10 @@ pnpm lint:backend
 
 ### 项目改名或目录迁移后的环境修复
 
-如果你把仓库从 `FastCut` 改名为 `RoughCut`，或直接移动了项目目录，记得重新安装 editable package。否则虚拟环境里的 `.pth` 和 pytest 缓存可能仍指向旧路径，表现为：
+如果你把仓库从 `FastCut` 改名为 `RoughCut`，或直接移动了项目目录，记得重新安装 editable package。否则虚拟环境里的 `.pth` 和本地缓存可能仍指向旧路径，表现为：
 
 - `ModuleNotFoundError: No module named 'roughcut'`
-- pytest 报错路径仍显示旧目录，例如 `E:/WorkSpace/FastCut/...`
+- 报错路径仍显示旧目录，例如 `E:/WorkSpace/FastCut/...`
 
 建议执行：
 
@@ -778,16 +760,14 @@ python -m pip uninstall -y fastcut roughcut
 python -m pip install -e ".[dev]"
 ```
 
-如果 pytest 仍命中旧路径，再清理缓存后重跑：
+如果路径仍命中旧目录，再清理缓存后重跑：
 
 ```bash
 # Windows
 for /d /r %d in (__pycache__) do @if exist "%d" rd /s /q "%d"
-if exist .pytest_cache rd /s /q .pytest_cache
 
 # Linux / macOS
 find . -type d -name "__pycache__" -prune -exec rm -rf {} +
-rm -rf .pytest_cache
 ```
 
 ---

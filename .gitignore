@@ -46,10 +46,13 @@ __pycache__/
 .superpowers/**/content/waiting-*.html
 .playwright-cli/
 .tmp/
+.tmp*.json
 .tmp_jobs*.json
 .worktrees/
+_tmp*.py
 tmp_*/
 tmp_*.py
 .tmp_*.py
 roughcut.db
 logs/*.env
+watch/

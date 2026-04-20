@@ -60,9 +60,5 @@ explicit = true
 [tool.hatch.build.targets.wheel]
 packages = ["src/roughcut"]
 
-[tool.pytest.ini_options]
-asyncio_mode = "auto"
-testpaths = ["tests"]
-
 [tool.hatch.envs.default]
 python = "3.11"
