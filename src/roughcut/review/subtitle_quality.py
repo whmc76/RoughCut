@@ -25,6 +25,14 @@ _KEEP_SHORT_FRAGMENT_RE = re.compile(
     r"(MT34|EDC17|EDC37|FXX1|EXO|NOC|FAS|OLIGHT|foxbat|MT33|S11|PC件|凯夫拉|大力马)",
     re.IGNORECASE,
 )
+_ALLOWED_SHORT_UTTERANCE_RE = re.compile(
+    r"^(?:"
+    r"我发现|你看|你说|算了|但是|不过|并且|然后|后来|所以|其实|另外|再说|比如|例如|行了|好了|没事|确实|真的"
+    r")$"
+)
+_ALLOWED_SHORT_TEMPORAL_PHRASE_RE = re.compile(
+    r"^(?:前|这|那|近|后)?(?:\d+|[一二三四五六七八九十两几])(?:天|周|年|个月|分钟|秒钟?)$"
+)
 _GENERIC_SUMMARY_PHRASES = (
     "适合后续做搜索校验、字幕纠错和剪辑包装",
     "具体品牌型号待人工确认",
@@ -50,6 +58,35 @@ def _subtitle_text(item: Mapping[str, Any]) -> str:
         if value:
             return value
     return ""
+
+
+def _subtitle_duration(item: Mapping[str, Any]) -> float | None:
+    start = item.get("start_time", item.get("start"))
+    end = item.get("end_time", item.get("end"))
+    try:
+        if start is None or end is None:
+            return None
+        return max(0.0, float(end) - float(start))
+    except (TypeError, ValueError):
+        return None
+
+
+def _is_allowed_short_utterance(text: str, duration: float | None) -> bool:
+    candidate = str(text or "").strip()
+    if not candidate or not _ALLOWED_SHORT_UTTERANCE_RE.match(candidate):
+        return False
+    if duration is None:
+        return True
+    return duration >= 0.5
+
+
+def _is_allowed_short_temporal_phrase(text: str, duration: float | None) -> bool:
+    candidate = str(text or "").strip()
+    if not candidate or not _ALLOWED_SHORT_TEMPORAL_PHRASE_RE.match(candidate):
+        return False
+    if duration is None:
+        return True
+    return duration >= 0.8
 
 
 def _profile_subject(profile: Mapping[str, Any] | None) -> str:
@@ -131,14 +168,20 @@ def build_subtitle_quality_report(
     filler_count = 0
     low_signal_count = 0
     short_fragment_count = 0
-    for text in texts:
+    for item, text in zip(subtitle_items, texts):
         if not text:
             continue
         if _PURE_FILLER_RE.match(text):
             filler_count += 1
         if _LOW_SIGNAL_RE.match(text):
             low_signal_count += 1
-        if _SHORT_FRAGMENT_RE.match(text) and not _KEEP_SHORT_FRAGMENT_RE.search(text):
+        duration = _subtitle_duration(item) if isinstance(item, Mapping) else None
+        if (
+            _SHORT_FRAGMENT_RE.match(text)
+            and not _KEEP_SHORT_FRAGMENT_RE.search(text)
+            and not _is_allowed_short_utterance(text, duration)
+            and not _is_allowed_short_temporal_phrase(text, duration)
+        ):
             short_fragment_count += 1
 
     subject = _profile_subject(content_profile)
@@ -225,6 +268,8 @@ def build_subtitle_quality_report_from_items(
             "text_raw": getattr(item, "text_raw", None),
             "text_norm": getattr(item, "text_norm", None),
             "text_final": getattr(item, "text_final", None),
+            "start_time": getattr(item, "start_time", getattr(item, "start", None)),
+            "end_time": getattr(item, "end_time", getattr(item, "end", None)),
         }
         for item in subtitle_items
     ]

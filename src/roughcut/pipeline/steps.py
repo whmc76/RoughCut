@@ -1504,15 +1504,17 @@ async def _llm_refine_subtitle_window(
     ):
         return best_local_candidate
     prompt = (
-        "任务：从候选方案中选择最好的中文字幕断句。\n"
-        "你不能改写文本，也不能生成新方案，只能在给定候选里选编号。\n"
+        "任务：重构这个中文字幕低置信窗口的条目边界。\n"
+        "你只能做三件事：决定哪些词放在同一条字幕、决定在哪里切条、决定这些切条对应的时间切点。"
+        "你必须严格复用给定 tokens 的原始顺序，不能改字、不能删字、不能增字、不能换说法、不能润色。\n"
         f"约束：避免断词、断固定短语、断残句；尽量保持单条<= {max_chars}字、{max_duration:.1f}秒；"
         "必要时可轻微超限以避免残句。\n"
         "优先选择 fragment_start_count、fragment_end_count、suspicious_boundary_count 更低的方案；"
-        "如果分数提升明显且条数不增加，优先考虑该候选。\n"
+        "如果候选不理想，你可以直接返回基于 tokens 的切分点，而不是只选候选编号。\n"
         "输出 JSON："
-        "{\"best_candidate_index\":0,\"alternate_candidate_index\":1}。\n"
-        "如果当前分段已经最好，best_candidate_index 选 0。\n"
+        "{\"best_candidate_index\":0,\"alternate_candidate_index\":1,"
+        "\"best_cut_after_word_indices\":[],\"alternate_cut_after_word_indices\":[]}。\n"
+        "如果当前分段已经最好，就让 best_candidate_index=0，且 best_cut_after_word_indices 为空数组。\n"
         f"窗口：{_subtitle_window_text_excerpt(window_summary)}\n"
         f"tokens：{_subtitle_boundary_token_line(flattened_words)}\n"
         f"候选：{json.dumps(candidate_descriptions, ensure_ascii=False)}"
@@ -1525,14 +1527,16 @@ async def _llm_refine_subtitle_window(
         ],
         followup_retry_message=(
             "停止继续分析。现在只输出最终 JSON 对象 "
-            "{\"best_candidate_index\":0,\"alternate_candidate_index\":0}。"
+            "{\"best_candidate_index\":0,\"alternate_candidate_index\":0,"
+            "\"best_cut_after_word_indices\":[],\"alternate_cut_after_word_indices\":[]}。"
             "不要解释，不要 markdown，不要代码块。"
         ),
         final_retry_message=(
             "最后一次，不要解释，不要思考过程。"
             "直接输出一行 JSON，对象格式必须是 "
-            "{\"best_candidate_index\":0,\"alternate_candidate_index\":0}。"
-            f"如果当前分段已经最好，就输出 {json.dumps({'best_candidate_index': 0, 'alternate_candidate_index': 0}, ensure_ascii=False)}。"
+            "{\"best_candidate_index\":0,\"alternate_candidate_index\":0,"
+            "\"best_cut_after_word_indices\":[],\"alternate_cut_after_word_indices\":[]}。"
+            f"如果当前分段已经最好，就输出 {json.dumps({'best_candidate_index': 0, 'alternate_candidate_index': 0, 'best_cut_after_word_indices': [], 'alternate_cut_after_word_indices': []}, ensure_ascii=False)}。"
         ),
     )
     current_cuts = _subtitle_window_current_cut_indices(flattened_words, len(window_entries))
@@ -2256,6 +2260,8 @@ async def _persist_transcript_review_artifacts(
     canonical_transcript_layer: Any,
     refreshed_projection_layer: Any,
     subtitle_quality_report: dict[str, Any],
+    subtitle_consistency_report: dict[str, Any],
+    subtitle_term_resolution_patch: dict[str, Any],
 ) -> None:
     await session.execute(
         delete(Artifact).where(
@@ -2265,6 +2271,8 @@ async def _persist_transcript_review_artifacts(
                     ARTIFACT_TYPE_CANONICAL_TRANSCRIPT_LAYER,
                     ARTIFACT_TYPE_SUBTITLE_PROJECTION_LAYER,
                     ARTIFACT_TYPE_SUBTITLE_QUALITY_REPORT,
+                    ARTIFACT_TYPE_SUBTITLE_CONSISTENCY_REPORT,
+                    ARTIFACT_TYPE_SUBTITLE_TERM_RESOLUTION_PATCH,
                 )
             ),
         )
@@ -2291,6 +2299,22 @@ async def _persist_transcript_review_artifacts(
             step_id=step_id,
             artifact_type=ARTIFACT_TYPE_SUBTITLE_QUALITY_REPORT,
             data_json=subtitle_quality_report,
+        )
+    )
+    session.add(
+        Artifact(
+            job_id=job_id,
+            step_id=step_id,
+            artifact_type=ARTIFACT_TYPE_SUBTITLE_CONSISTENCY_REPORT,
+            data_json=subtitle_consistency_report,
+        )
+    )
+    session.add(
+        Artifact(
+            job_id=job_id,
+            step_id=step_id,
+            artifact_type=ARTIFACT_TYPE_SUBTITLE_TERM_RESOLUTION_PATCH,
+            data_json=subtitle_term_resolution_patch,
         )
     )
 
@@ -2349,6 +2373,48 @@ def _serialize_transcript_review_correction(correction: Any) -> dict[str, Any]:
         "change_type": str(_subtitle_correction_attr(correction, "change_type") or "").strip(),
         "confidence": _subtitle_correction_attr(correction, "confidence"),
     }
+
+
+def _normalize_review_term_token(value: Any) -> str:
+    return re.sub(r"[\W_]+", "", str(value or "").strip()).lower()
+
+
+def _filter_redundant_corrections_for_current_subtitles(
+    corrections: list[Any],
+    subtitle_items: list[SubtitleItem],
+) -> list[Any]:
+    subtitle_by_id = {
+        str(getattr(item, "id", "") or ""): item
+        for item in subtitle_items
+        if getattr(item, "id", None) is not None
+    }
+    filtered: list[Any] = []
+    for correction in corrections:
+        subtitle_item_id = str(_subtitle_correction_attr(correction, "subtitle_item_id") or "").strip()
+        original_span = str(_subtitle_correction_attr(correction, "original_span") or "").strip()
+        suggested_span = str(_subtitle_correction_attr(correction, "suggested_span") or "").strip()
+        subtitle_item = subtitle_by_id.get(subtitle_item_id)
+        current_text = ""
+        if subtitle_item is not None:
+            current_text = str(
+                getattr(subtitle_item, "text_final", None)
+                or getattr(subtitle_item, "text_norm", None)
+                or getattr(subtitle_item, "text_raw", None)
+                or ""
+            ).strip()
+        normalized_text = _normalize_review_term_token(current_text)
+        normalized_original = _normalize_review_term_token(original_span)
+        normalized_suggested = _normalize_review_term_token(suggested_span)
+        if (
+            normalized_text
+            and normalized_original
+            and normalized_suggested
+            and normalized_original != normalized_suggested
+            and normalized_suggested in normalized_text
+        ):
+            continue
+        filtered.append(correction)
+    return filtered
 
 
 def _timeline_overlap_seconds(
@@ -5362,6 +5428,7 @@ async def run_transcript_review(job_id: str) -> dict:
             include_canonical=False,
         )
         corrections = await _load_subtitle_corrections(session, job_id=job.id)
+        active_corrections = _filter_redundant_corrections_for_current_subtitles(corrections, subtitle_items)
         canonical_transcript_layer = _build_transcript_first_canonical_layer(
             transcript_rows=_transcript_rows,
             subtitle_items=subtitle_items,
@@ -5381,6 +5448,28 @@ async def run_transcript_review(job_id: str) -> dict:
             canonical_transcript_layer=canonical_transcript_layer,
             projection_data=projection_data,
         )
+        refreshed_projection_payload = (
+            refreshed_projection_layer.as_dict()
+            if hasattr(refreshed_projection_layer, "as_dict")
+            else {}
+        )
+        refreshed_projection_entries = [
+            dict(entry)
+            for entry in list(refreshed_projection_payload.get("entries") or [])
+            if isinstance(entry, dict)
+        ]
+        subtitle_consistency_report = build_subtitle_consistency_report(
+            subtitle_items=refreshed_projection_entries,
+            corrections=active_corrections,
+            source_name=job.source_name,
+            content_profile={},
+            subtitle_quality_report=subtitle_quality_report,
+        )
+        subtitle_term_resolution_patch = build_subtitle_term_resolution_patch(
+            corrections=active_corrections,
+            source_name=job.source_name,
+            content_profile={},
+        )
         await _set_step_progress(session, step, detail="写入 canonical transcript 并刷新 subtitle projection", progress=0.75)
         await _persist_transcript_review_artifacts(
             session,
@@ -5389,6 +5478,8 @@ async def run_transcript_review(job_id: str) -> dict:
             canonical_transcript_layer=canonical_transcript_layer,
             refreshed_projection_layer=refreshed_projection_layer,
             subtitle_quality_report=subtitle_quality_report,
+            subtitle_consistency_report=subtitle_consistency_report,
+            subtitle_term_resolution_patch=subtitle_term_resolution_patch,
         )
         detail, result_payload = _build_transcript_review_result_payload(
             canonical_transcript_layer=canonical_transcript_layer,

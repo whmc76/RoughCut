@@ -627,8 +627,10 @@ _SOFT_ATTACHED_FRAGMENT_PREFIXES = (
     "常",
     "么",
     "以",
+    "入",
 )
 _BOUNDARY_COMPOUND_SPLITS: tuple[tuple[str, str], ...] = (
+    ("直", "接"),
     ("需", "要"),
     ("那", "种"),
     ("这", "个"),
@@ -678,6 +680,8 @@ _BOUNDARY_COMPOUND_SPLITS: tuple[tuple[str, str], ...] = (
     ("K", "片"),
     ("我", "自己"),
     ("这", "边"),
+    ("联", "名"),
+    ("其", "实"),
 )
 
 _SPLIT_MEASURE_LEFT_RE = re.compile(
@@ -1825,6 +1829,8 @@ def _is_strong_fragment_boundary(left: str, right: str, *, gap: float) -> bool:
         return True
     if _boundary_splits_possessive_phrase(left_text, right_text):
         return True
+    if _boundary_splits_single_char_residual(left_text, right_text):
+        return True
     if _should_merge_subtitle_pair(left_text, right_text):
         return True
     return gap <= 0.05 and len(left_text) <= 5 and _semantic_boundary_quality(left_text, right_text) <= -2.5
@@ -1943,6 +1949,8 @@ def _semantic_boundary_quality(left: str, right: str) -> float:
         score -= 7.0
     if _boundary_splits_compound_term(left_text, right_text):
         score -= 5.0
+    if _boundary_splits_single_char_residual(left_text, right_text):
+        score -= 6.0
     if _boundary_splits_protected_term(left_text, right_text):
         score -= 8.0
     if left_text[-1] in _HARD_BREAK_CHARS:
@@ -2451,7 +2459,13 @@ def _merge_short_chain_entries(
             continue
         current = entries[index]
         current_text = str(current.text_raw or "").strip()
-        if _is_short_subtitle_fragment(current_text):
+        stripped_current_text = _strip_boundary_trailing_punctuation(current_text)
+        is_short_fragment = _is_short_subtitle_fragment(current_text) or bool(
+            stripped_current_text
+            and stripped_current_text != current_text
+            and len(stripped_current_text) <= 2
+        )
+        if is_short_fragment:
             best_direction: str | None = None
             best_gain = 0.0
 
@@ -2460,12 +2474,30 @@ def _merge_short_chain_entries(
                 previous_text = str(previous.text_raw or "").strip()
                 left_gap = max(0.0, float(current.start) - float(previous.end))
                 left_text = f"{previous_text}{current_text}"
+                single_char_residual_left_merge = bool(
+                    previous_text
+                    and len(current_text) == 1
+                    and _boundary_splits_single_char_residual(previous_text, current_text)
+                )
+                force_left_merge = bool(
+                    previous_text
+                    and (
+                        _starts_with_attached_fragment(current_text)
+                        or _starts_with_soft_attached_fragment(current_text)
+                        or _boundary_splits_compound_term(previous_text, current_text)
+                        or single_char_residual_left_merge
+                        or _looks_like_soft_fragmentary_tail(previous_text)
+                    )
+                )
                 if (
                     previous_text
                     and left_gap <= 0.18
-                    and len(left_text) <= max_chars + 2
+                    and (len(left_text) <= max_chars + 2 or single_char_residual_left_merge)
                     and previous_text[-1] not in _HARD_BREAK_CHARS
                 ):
+                    if force_left_merge:
+                        best_direction = "left"
+                        best_gain = max(best_gain, 999.0)
                     left_candidate = _make_subtitle_entry(
                         len(merged) - 1,
                         previous.start,
@@ -2490,13 +2522,27 @@ def _merge_short_chain_entries(
                 following = entries[index + 1]
                 following_text = str(following.text_raw or "").strip()
                 right_gap = max(0.0, float(following.start) - float(current.end))
-                right_text = f"{current_text}{following_text}"
+                force_right_merge = bool(
+                    stripped_current_text
+                    and stripped_current_text != current_text
+                    and len(stripped_current_text) <= 3
+                    and (
+                        _boundary_splits_compound_term(current_text, following_text)
+                        or _starts_with_soft_attached_fragment(following_text)
+                        or _starts_with_attached_fragment(following_text)
+                    )
+                )
+                right_prefix = stripped_current_text if force_right_merge else current_text
+                right_text = f"{right_prefix}{following_text}"
                 if (
                     following_text
                     and right_gap <= 0.18
                     and len(right_text) <= max_chars + 2
-                    and current_text[-1] not in _HARD_BREAK_CHARS
+                    and (current_text[-1] not in _HARD_BREAK_CHARS or force_right_merge)
                 ):
+                    if force_right_merge:
+                        best_direction = "right"
+                        best_gain = max(best_gain, 999.0)
                     right_candidate = _make_subtitle_entry(
                         len(merged),
                         current.start,
@@ -2535,7 +2581,7 @@ def _merge_short_chain_entries(
                         len(merged),
                         current.start,
                         following.end,
-                        f"{current_text}{following.text_raw}",
+                        right_text,
                         words=tuple(current.words or ()) + tuple(following.words or ()),
                     )
                 )
@@ -2587,6 +2633,17 @@ def _merge_same_source_segment_micro_fragments(
                     break
                 run.append(candidate)
                 next_index += 1
+            if len(run) == 2 and _should_merge_same_source_pair(run[0], run[1], max_chars=max_chars, max_duration=max_duration):
+                merged_entry = _make_subtitle_entry(
+                    len(merged),
+                    run[0].start,
+                    run[1].end,
+                    f"{str(run[0].text_raw or '').strip()}{str(run[1].text_raw or '').strip()}",
+                    words=tuple(run[0].words or ()) + tuple(run[1].words or ()),
+                )
+                merged.append(merged_entry)
+                index = next_index
+                continue
             if _should_compact_same_source_run(run, max_chars=max_chars, max_duration=max_duration):
                 compacted = _compact_same_source_run(run, max_chars=max_chars, max_duration=max_duration)
                 for entry in compacted:
@@ -2615,6 +2672,37 @@ def _merge_same_source_segment_micro_fragments(
         )
         index += 1
     return merged
+
+
+def _should_merge_same_source_pair(
+    left: SubtitleEntry,
+    right: SubtitleEntry,
+    *,
+    max_chars: int,
+    max_duration: float,
+) -> bool:
+    left_text = str(left.text_raw or "").strip()
+    right_text = str(right.text_raw or "").strip()
+    if not left_text or not right_text:
+        return False
+    gap = max(0.0, float(right.start) - float(left.end))
+    if gap <= 0.18 or gap > 1.8:
+        return False
+    combined_text = f"{left_text}{right_text}"
+    combined_duration = max(0.0, float(right.end) - float(left.start))
+    repair_signal = (
+        len(left_text) <= 4
+        or len(right_text) <= 4
+        or _is_short_subtitle_fragment(left_text)
+        or _is_short_subtitle_fragment(right_text)
+        or _starts_with_attached_fragment(right_text)
+        or _starts_with_soft_attached_fragment(right_text)
+        or _looks_like_soft_fragmentary_tail(left_text)
+        or _boundary_splits_compound_term(left_text, right_text)
+    )
+    if not repair_signal:
+        return False
+    return len(combined_text) <= max_chars + 4 and combined_duration <= max(max_duration + 2.4, 6.5)
 
 
 def _merge_short_bridge_entries(entries: list[SubtitleEntry]) -> list[SubtitleEntry]:
@@ -3008,8 +3096,51 @@ def _resplit_fragment_window(
     max_chars: int,
     max_duration: float,
 ) -> list[SubtitleEntry] | None:
+    def _build_deterministic_candidate() -> list[SubtitleEntry] | None:
+        combined_words = [word for entry in entries for word in tuple(entry.words or ())]
+        if len(combined_words) >= 2:
+            candidate_entries = _segment_entries_from_words(
+                combined_words,
+                max_chars=relaxed_max_chars,
+                max_duration=relaxed_max_duration,
+            )
+        else:
+            candidate_entries = _segment_entries_from_text(entries, max_chars=relaxed_max_chars)
+        if not candidate_entries:
+            return None
+        return _resolve_subtitle_entry_sequence(
+            candidate_entries,
+            max_chars=relaxed_max_chars,
+            max_duration=relaxed_max_duration,
+            allow_window_refine=False,
+        )
+
     relaxed_max_chars = max_chars + 2
     relaxed_max_duration = max_duration + 0.5
+    direct_candidate = _resolve_subtitle_entry_sequence(
+        entries,
+        max_chars=relaxed_max_chars,
+        max_duration=relaxed_max_duration,
+        allow_window_refine=False,
+    )
+    if direct_candidate:
+        current_key = tuple(str(entry.text_raw or "").strip() for entry in entries)
+        direct_key = tuple(str(entry.text_raw or "").strip() for entry in direct_candidate)
+        if direct_key and direct_key != current_key:
+            return _pick_best_fragment_window_candidate(
+                entries,
+                [direct_candidate],
+                max_chars=max_chars,
+                max_duration=max_duration,
+            )
+    deterministic_candidate = _build_deterministic_candidate()
+    if deterministic_candidate and len(entries) > 2:
+        return _pick_best_fragment_window_candidate(
+            entries,
+            [deterministic_candidate],
+            max_chars=max_chars,
+            max_duration=max_duration,
+        )
     search_top_k = 30 if len(entries) <= 6 else 16
     searched_candidates = _search_fragment_window_segmentations(
         entries,
@@ -3036,28 +3167,11 @@ def _resplit_fragment_window(
             max_duration=max_duration,
         )
 
-    combined_words = [word for entry in entries for word in tuple(entry.words or ())]
-    if len(combined_words) >= 2:
-        candidate_entries = _segment_entries_from_words(
-            combined_words,
-            max_chars=relaxed_max_chars,
-            max_duration=relaxed_max_duration,
-        )
-    else:
-        candidate_entries = _segment_entries_from_text(entries, max_chars=relaxed_max_chars)
-    if not candidate_entries:
-        return None
-    resolved_candidate = _resolve_subtitle_entry_sequence(
-        candidate_entries,
-        max_chars=relaxed_max_chars,
-        max_duration=relaxed_max_duration,
-        allow_window_refine=False,
-    )
-    if not resolved_candidate:
+    if not deterministic_candidate:
         return None
     return _pick_best_fragment_window_candidate(
         entries,
-        [resolved_candidate],
+        [deterministic_candidate],
         max_chars=max_chars,
         max_duration=max_duration,
     )
@@ -3207,6 +3321,7 @@ def _search_fragment_window_segmentations_for_word_stream(
 
     hard_char_limit = max(max_chars + 8, int(max_chars * 1.7))
     hard_duration_limit = max_duration + 2.0
+    max_options_per_start = 10 if len(window_words) <= 24 else 8
     options_by_start: dict[int, list[tuple[int, SubtitleEntry, float]]] = {}
     for start_index in range(len(window_words)):
         options: list[tuple[int, SubtitleEntry, float]] = []
@@ -3226,9 +3341,15 @@ def _search_fragment_window_segmentations_for_word_stream(
                 words=candidate_words,
             )
             options.append((end_index, entry, _score_single_entry(entry, max_chars=max_chars, max_duration=max_duration)))
+        if len(options) > max_options_per_start:
+            ranked_indexes = sorted(range(len(options)), key=lambda idx: options[idx][2], reverse=True)
+            keep_indexes = set(ranked_indexes[:max_options_per_start])
+            keep_indexes.add(0)
+            keep_indexes.add(len(options) - 1)
+            options = [option for idx, option in enumerate(options) if idx in keep_indexes]
         options_by_start[start_index] = options
 
-    beam_width = 48
+    beam_width = 40 if len(window_words) <= 18 else 24
     beams: dict[int, list[tuple[float, list[SubtitleEntry]]]] = {0: [(0.0, [])]}
     for start_index in range(len(window_words)):
         current_beam = list(beams.get(start_index) or [])
@@ -3451,6 +3572,8 @@ def _should_merge_subtitle_pair(left: str, right: str) -> bool:
         return True
     if _boundary_splits_possessive_phrase(left_text, right_text):
         return True
+    if _boundary_splits_single_char_residual(left_text, right_text):
+        return True
     if re.search(r"[A-Za-z]{2,8}$", left_text) and re.match(r"^[\u4e00-\u9fffA-Za-z0-9]", right_text):
         return True
     if (
@@ -3578,6 +3701,10 @@ def _strip_boundary_leading_particles(text: str) -> str:
                 changed = True
                 break
     return result
+
+
+def _strip_boundary_trailing_punctuation(text: str) -> str:
+    return str(text or "").strip().rstrip("，,。！？!?、：:；; ")
 
 
 def _looks_like_particle_led_sentence_restart(text: str) -> bool:
@@ -3758,13 +3885,32 @@ def _merge_entry_bucket(entries: list[SubtitleEntry], *, index: int) -> Subtitle
 
 
 def _boundary_splits_compound_term(left: str, right: str) -> bool:
-    left_text = str(left or "").strip()
-    right_text = str(right or "").strip()
+    left_text = _strip_boundary_trailing_punctuation(left)
+    right_text = _strip_boundary_leading_particles(right) or str(right or "").strip()
     if not left_text or not right_text:
         return False
     if _boundary_splits_model_token(left_text, right_text):
         return True
     return any(left_text.endswith(prefix) and right_text.startswith(suffix) for prefix, suffix in _BOUNDARY_COMPOUND_SPLITS)
+
+
+def _boundary_splits_single_char_residual(left: str, right: str) -> bool:
+    left_text = str(left or "").strip()
+    right_text = str(right or "").strip()
+    if not left_text or not right_text:
+        return False
+    if left_text[-1] in (_HARD_BREAK_CHARS + _SOFT_BREAK_CHARS):
+        return False
+    stripped_right = _strip_boundary_leading_particles(right_text) or right_text
+    if not stripped_right:
+        return False
+    if any(stripped_right.startswith(prefix) for prefix in _GOOD_BREAK_PREFIXES):
+        return False
+    if not re.search(r"[\u4e00-\u9fff]$", left_text):
+        return False
+    if not re.match(r"^[\u4e00-\u9fff]", stripped_right):
+        return False
+    return len(left_text) >= 2 and not any(left_text.endswith(token) for token in _NO_SPLIT_ENDINGS)
 
 
 def _boundary_splits_possessive_phrase(left: str, right: str) -> bool:

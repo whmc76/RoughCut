@@ -902,6 +902,52 @@ async def test_llm_refine_subtitle_window_prefers_higher_scoring_alternate(monke
 
 
 @pytest.mark.asyncio
+async def test_llm_refine_subtitle_window_prompt_requests_structural_reconstruction_without_rewrite(monkeypatch):
+    import roughcut.pipeline.steps as steps_mod
+
+    window_entries = [
+        SubtitleEntry(index=0, start=0.0, end=1.0, text_raw="何借力就是直", text_norm="何借力就是直", words=()),
+        SubtitleEntry(index=1, start=1.0, end=2.0, text_raw="接开就行了这都得", text_norm="接开就行了这都得", words=()),
+    ]
+    captured: dict[str, str] = {}
+
+    async def fake_complete_subtitle_boundary_json(**kwargs):
+        messages = kwargs["messages"]
+        captured["system"] = messages[0].content
+        captured["user"] = messages[1].content
+        return {"best_candidate_index": 0, "alternate_candidate_index": 0}
+
+    monkeypatch.setattr(steps_mod, "_complete_subtitle_boundary_json", fake_complete_subtitle_boundary_json)
+    monkeypatch.setattr(
+        steps_mod,
+        "generate_subtitle_window_candidates",
+        lambda *args, **kwargs: [[SubtitleEntry(index=0, start=0.0, end=2.0, text_raw="何借力就是直接开就行了这都得", text_norm="何借力就是直接开就行了这都得", words=())]],
+    )
+
+    def fake_score_subtitle_entries(entries, *, max_chars, max_duration):
+        first = entries[0].text_raw if entries else ""
+        return {
+            "何借力就是直": 10.0,
+            "何借力就是直接开就行了这都得": 10.5,
+        }.get(first, 10.0)
+
+    monkeypatch.setattr(steps_mod, "score_subtitle_entries", fake_score_subtitle_entries)
+
+    await _llm_refine_subtitle_window(
+        provider=object(),
+        window_entries=list(window_entries),
+        window_summary={"texts": [entry.text_raw for entry in window_entries]},
+        max_chars=12,
+        max_duration=2.5,
+        content_profile={},
+    )
+
+    assert "你必须严格复用给定 tokens 的原始顺序" in captured["user"]
+    assert "不能改字、不能删字、不能增字、不能换说法、不能润色" in captured["user"]
+    assert "\"best_cut_after_word_indices\":[]" in captured["user"]
+
+
+@pytest.mark.asyncio
 async def test_llm_refine_subtitle_window_falls_back_to_strong_local_candidate_when_llm_keeps_current(monkeypatch):
     import roughcut.pipeline.steps as steps_mod
 
@@ -2765,6 +2811,13 @@ async def test_run_transcript_review_persists_canonical_transcript_layer(db_engi
                 .order_by(Artifact.created_at.desc(), Artifact.id.desc())
             )
         ).scalars().first()
+        consistency_artifact = (
+            await session.execute(
+                select(Artifact)
+                .where(Artifact.job_id == job_id, Artifact.artifact_type == ARTIFACT_TYPE_SUBTITLE_CONSISTENCY_REPORT)
+                .order_by(Artifact.created_at.desc(), Artifact.id.desc())
+            )
+        ).scalars().first()
 
     assert artifact is not None
     assert artifact.data_json["segments"][0]["text"] == "这期傲雷司令官二开箱体验。"
@@ -2778,6 +2831,8 @@ async def test_run_transcript_review_persists_canonical_transcript_layer(db_engi
     assert projection_artifact.data_json["entries"][0]["end"] < 1.4
     assert "".join(entry["text_final"] for entry in projection_artifact.data_json["entries"]) == "这期傲雷司令官二开箱体验。"
     assert quality_artifact is not None
+    assert consistency_artifact is not None
+    assert consistency_artifact.data_json["blocking"] is False
 
 
 @pytest.mark.asyncio
@@ -2978,13 +3033,31 @@ async def test_run_transcript_review_replaces_prior_refresh_artifacts_on_rerun(d
                 .order_by(Artifact.created_at.desc(), Artifact.id.desc())
             )
         ).scalars().all()
+        consistency_artifacts = (
+            await session.execute(
+                select(Artifact)
+                .where(Artifact.job_id == job_id, Artifact.artifact_type == ARTIFACT_TYPE_SUBTITLE_CONSISTENCY_REPORT)
+                .order_by(Artifact.created_at.desc(), Artifact.id.desc())
+            )
+        ).scalars().all()
+        term_patch_artifacts = (
+            await session.execute(
+                select(Artifact)
+                .where(Artifact.job_id == job_id, Artifact.artifact_type == ARTIFACT_TYPE_SUBTITLE_TERM_RESOLUTION_PATCH)
+                .order_by(Artifact.created_at.desc(), Artifact.id.desc())
+            )
+        ).scalars().all()
 
     assert len(canonical_artifacts) == 1
     assert len(projection_artifacts) == 1
     assert len(quality_artifacts) == 1
+    assert len(consistency_artifacts) == 1
+    assert len(term_patch_artifacts) == 1
     assert canonical_artifacts[0].data_json["segments"][0]["text"] == "第二次文本。"
     assert projection_artifacts[0].data_json["projection_kind"] == "canonical_refresh"
     assert "".join(entry["text_final"] for entry in projection_artifacts[0].data_json["entries"]) == "第二次文本。"
+    assert consistency_artifacts[0].data_json["blocking"] is False
+    assert term_patch_artifacts[0].data_json["metrics"]["pending_count"] == 0
 
 
 def test_project_canonical_transcript_to_timeline_resegments_from_canonical_words():

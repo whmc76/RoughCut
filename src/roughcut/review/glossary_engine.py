@@ -101,6 +101,55 @@ def _is_low_risk_brand_normalization(original: str, suggested: str) -> bool:
     return bool(source and target and source == target and source != str(original or "").strip())
 
 
+def _contains_ascii_letters(text: str) -> bool:
+    return bool(re.search(r"[A-Za-z]", str(text or "")))
+
+
+def _text_already_contains_suggested_form(*, text: str, suggested: str, original: str) -> bool:
+    normalized_text = _compact_text(text).upper()
+    normalized_suggested = _compact_text(suggested).upper()
+    normalized_original = _compact_text(original).upper()
+    if not normalized_text or not normalized_suggested or normalized_original == normalized_suggested:
+        return False
+    return normalized_suggested in normalized_text
+
+
+def _profile_mentions_term(profile: dict[str, Any] | None, term: str) -> bool:
+    candidate = _compact_text(term).upper()
+    if not candidate or not isinstance(profile, dict):
+        return False
+    for key in ("subject", "content_subject", "subject_brand", "subject_model", "summary", "content_summary"):
+        value = _compact_text(profile.get(key) or "").upper()
+        if value and candidate in value:
+            return True
+    return False
+
+
+def _is_profile_confirmed_brand_alias_rewrite(
+    *,
+    original: str,
+    suggested: str,
+    wrong_form: str,
+    content_profile: dict[str, Any] | None,
+) -> bool:
+    source = str(original or "").strip()
+    target = str(suggested or "").strip()
+    wrong = str(wrong_form or "").strip()
+    if not source or not target or not wrong:
+        return False
+    if source.casefold() != wrong.casefold():
+        return False
+    if not _profile_mentions_term(content_profile, target):
+        return False
+    compact_source = _compact_text(source)
+    compact_target = _compact_text(target)
+    if len(compact_source) < 2 or len(compact_target) < 3:
+        return False
+    if _is_low_risk_brand_normalization(source, target):
+        return True
+    return _contains_cjk(source) and _contains_ascii_letters(target)
+
+
 def _filter_conflicting_model_wrong_forms(correct_form: str, wrong_forms: list[Any]) -> list[str]:
     return _shared_filter_conflicting_model_wrong_forms(correct_form=correct_form, wrong_forms=wrong_forms)
 
@@ -144,6 +193,12 @@ async def apply_glossary_corrections(
                     original = match.group(0)
                     if original == correct_form:
                         continue  # Already correct
+                    if _text_already_contains_suggested_form(
+                        text=text,
+                        suggested=correct_form,
+                        original=original,
+                    ):
+                        continue
                     if (
                         content_profile
                         and _should_ignore_patch_candidate(
@@ -167,6 +222,12 @@ async def apply_glossary_corrections(
                             and (
                                 not _is_brand_like_category(category)
                                 or _is_low_risk_brand_normalization(original, correct_form)
+                                or _is_profile_confirmed_brand_alias_rewrite(
+                                    original=original,
+                                    suggested=correct_form,
+                                    wrong_form=wrong_form,
+                                    content_profile=content_profile if isinstance(content_profile, dict) else None,
+                                )
                             )
                         ),
                         threshold=settings.glossary_correction_review_threshold,

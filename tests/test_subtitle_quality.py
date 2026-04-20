@@ -33,6 +33,49 @@ def test_build_subtitle_quality_report_flags_hotword_errors_and_fragments():
     assert any("摘要模板化" in reason for reason in report["warning_reasons"])
 
 
+def test_build_subtitle_quality_report_ignores_allowed_short_utterance_with_natural_duration():
+    report = build_subtitle_quality_report(
+        subtitle_items=[
+            {"text_final": "我发现", "start_time": 0.0, "end_time": 1.6},
+            {"text_final": "这个上面的扣其实特别方便。", "start_time": 1.6, "end_time": 4.8},
+        ],
+        source_name="sample.mp4",
+        content_profile={"summary": "这条视频主要围绕扣具体验展开。"},
+    )
+
+    assert report["blocking"] is False
+    assert report["metrics"]["short_fragment_count"] == 0
+    assert not any("短碎句率" in reason for reason in report["warning_reasons"])
+
+
+def test_build_subtitle_quality_report_ignores_brief_allowed_short_utterance():
+    report = build_subtitle_quality_report(
+        subtitle_items=[
+            {"text_final": "算了", "start_time": 0.0, "end_time": 0.56},
+            {"text_final": "反正教学也重新录完了。", "start_time": 0.56, "end_time": 2.8},
+        ],
+        source_name="sample.mp4",
+        content_profile={"summary": "这条视频主要围绕教学复盘展开。"},
+    )
+
+    assert report["blocking"] is False
+    assert report["metrics"]["short_fragment_count"] == 0
+
+
+def test_build_subtitle_quality_report_ignores_short_temporal_phrase():
+    report = build_subtitle_quality_report(
+        subtitle_items=[
+            {"text_final": "前3天", "start_time": 0.0, "end_time": 1.05},
+            {"text_final": "根本就弹不开就纳闷了。", "start_time": 1.05, "end_time": 3.8},
+        ],
+        source_name="sample.mp4",
+        content_profile={"summary": "这条视频主要围绕折刀快开手法展开。"},
+    )
+
+    assert report["blocking"] is False
+    assert report["metrics"]["short_fragment_count"] == 0
+
+
 def test_build_subtitle_quality_report_detects_identity_missing_in_profile():
     report = build_subtitle_quality_report(
         subtitle_items=[

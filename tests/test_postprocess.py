@@ -586,6 +586,59 @@ def test_merge_continuation_entries_merges_punctuation_masked_middle_fragment_wi
     assert not any(entry.text_raw == "腻，" for entry in merged)
 
 
+def test_merge_short_chain_entries_repairs_punctuation_masked_compound_fragment():
+    entries = [
+        SubtitleEntry(index=0, start=0.0, end=0.52, text_raw="联。", text_norm=normalize_text("联。")),
+        SubtitleEntry(index=1, start=0.52, end=2.48, text_raw="名的之前他们已经出了一个托特包", text_norm=normalize_text("名的之前他们已经出了一个托特包")),
+        SubtitleEntry(index=2, start=2.56, end=4.48, text_raw="网上也是好评不断", text_norm=normalize_text("网上也是好评不断")),
+    ]
+
+    merged = subtitle_segmentation._merge_short_chain_entries(entries, max_chars=18, max_duration=3.4)
+
+    assert [entry.text_raw for entry in merged][:2] == [
+        "联名的之前他们已经出了一个托特包",
+        "网上也是好评不断",
+    ]
+
+
+def test_merge_same_source_segment_micro_fragments_compacts_two_entry_short_run():
+    segment_start = 0.0
+    segment_end = 22.0
+    entries = [
+        SubtitleEntry(
+            index=0,
+            start=8.2,
+            end=9.0,
+            text_raw="前3天",
+            text_norm=normalize_text("前3天"),
+            words=(
+                {"word": "前3天", "start": 8.2, "end": 9.0, "segment_index": 0, "segment_start": segment_start, "segment_end": segment_end},
+            ),
+        ),
+        SubtitleEntry(
+            index=1,
+            start=9.36,
+            end=12.64,
+            text_raw="根本就弹不开就纳闷了",
+            text_norm=normalize_text("根本就弹不开就纳闷了"),
+            words=(
+                {
+                    "word": "根本就弹不开就纳闷了",
+                    "start": 9.36,
+                    "end": 12.64,
+                    "segment_index": 0,
+                    "segment_start": segment_start,
+                    "segment_end": segment_end,
+                },
+            ),
+        ),
+    ]
+
+    merged = subtitle_segmentation._merge_same_source_segment_micro_fragments(entries, max_chars=18, max_duration=3.4)
+
+    assert [entry.text_raw for entry in merged] == ["前3天根本就弹不开就纳闷了"]
+
+
 def test_segment_subtitles_reports_low_confidence_window_samples():
     entries = [
         SubtitleEntry(
@@ -874,6 +927,52 @@ def test_should_merge_subtitle_pair_for_compound_term_boundary():
     assert _should_merge_subtitle_pair("这个压胶拉链还是呃为了防水性啊牺牲了一", "定的这个呃牺牲了一定的这个开袋的手感啊但") is True
     assert _should_merge_subtitle_pair("小刀收纳包仓啊呃这边这个大", "网兜呢你放这个零五啊就非常好OK了啊") is True
     assert _should_merge_subtitle_pair("当然正常来说带着K", "片的不会放的包里啊你应该别在腰带上") is True
+
+
+def test_should_merge_subtitle_pair_for_single_char_residual_boundary():
+    assert _should_merge_subtitle_pair("何借力就是直", "接开就行了这都得") is True
+
+
+def test_merge_continuation_entries_repairs_single_char_residual_boundary():
+    entries = [
+        SubtitleEntry(index=0, start=503.844, end=505.489, text_raw="何借力就是直", text_norm=normalize_text("何借力就是直")),
+        SubtitleEntry(index=1, start=505.489, end=507.637, text_raw="接开就行了这都得", text_norm=normalize_text("接开就行了这都得")),
+    ]
+
+    merged = _merge_continuation_entries(entries, max_chars=18, max_duration=3.4)
+
+    assert [entry.text_raw for entry in merged] == ["何借力就是直接开就行了这都得"]
+
+
+def test_merge_short_chain_entries_merges_trailing_single_char_residual():
+    entries = [
+        SubtitleEntry(index=0, start=0.0, end=2.4, text_raw="然后当你蓄力比较足的时候就是一个弹开的这么一个效", text_norm=normalize_text("然后当你蓄力比较足的时候就是一个弹开的这么一个效")),
+        SubtitleEntry(index=1, start=2.4, end=2.54, text_raw="果", text_norm=normalize_text("果")),
+        SubtitleEntry(index=2, start=4.0, end=6.2, text_raw="这个也一样我们一般的推刀钮是这一个钮", text_norm=normalize_text("这个也一样我们一般的推刀钮是这一个钮")),
+    ]
+
+    merged = subtitle_segmentation._merge_short_chain_entries(entries, max_chars=18, max_duration=3.4)
+
+    assert [entry.text_raw for entry in merged][:2] == [
+        "然后当你蓄力比较足的时候就是一个弹开的这么一个效果",
+        "这个也一样我们一般的推刀钮是这一个钮",
+    ]
+
+
+def test_resolve_fragment_window_prefers_direct_single_char_residual_repair():
+    entries = [
+        SubtitleEntry(index=0, start=0.0, end=2.4, text_raw="然后当你蓄力比较足的时候就是一个弹开的这么一个效", text_norm=normalize_text("然后当你蓄力比较足的时候就是一个弹开的这么一个效")),
+        SubtitleEntry(index=1, start=2.4, end=2.54, text_raw="果", text_norm=normalize_text("果")),
+        SubtitleEntry(index=2, start=4.0, end=6.2, text_raw="这个也一样我们一般的推刀钮是这一个钮", text_norm=normalize_text("这个也一样我们一般的推刀钮是这一个钮")),
+    ]
+
+    rebuilt = _resolve_fragment_window(entries, max_chars=18, max_duration=3.4)
+
+    assert rebuilt is not None
+    assert [entry.text_raw for entry in rebuilt][:2] == [
+        "然后当你蓄力比较足的时候就是一个弹开的这么一个效果",
+        "这个也一样我们一般的推刀钮是这一个钮",
+    ]
 
 
 def test_should_merge_subtitle_pair_for_model_token_boundary():
