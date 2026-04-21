@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from roughcut.config import get_settings
+from roughcut.media.subtitle_text import clean_final_subtitle_text
 from roughcut.providers.multimodal import complete_with_images
 from roughcut.providers.reasoning.base import extract_json_text
 from roughcut.review.content_profile import (
@@ -1941,10 +1942,15 @@ def write_srt_file(subtitle_items: list[dict], output_path: Path) -> Path:
         raise ValueError("invalid_subtitle_timeline: " + "; ".join(validation_issues))
     ordered_items = sorted(normalized_items, key=_subtitle_srt_sort_key)
     lines: list[str] = []
-    for i, item in enumerate(ordered_items, 1):
+    for item in ordered_items:
         start = _srt_time(item["start_time"])
         end = _srt_time(item["end_time"])
-        text = item.get("text_final") or item.get("text_norm") or item.get("text_raw", "")
+        text = clean_final_subtitle_text(
+            item.get("text_final") or item.get("text_norm") or item.get("text_raw", "")
+        )
+        if not text:
+            continue
+        i = len(lines) + 1
         lines.append(f"{i}\n{start} --> {end}\n{text}\n")
     output_path.write_text("\n".join(lines), encoding="utf-8-sig")
     return output_path

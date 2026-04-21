@@ -67,6 +67,7 @@ from roughcut.media.output import (
     write_srt_file,
 )
 from roughcut.media.scene import detect_scenes
+from roughcut.media.subtitle_text import clean_final_subtitle_text
 from roughcut.media.subtitles import remap_subtitles_to_timeline
 from roughcut.media.probe import probe, validate_media
 from roughcut.media.render import render_video
@@ -9081,7 +9082,11 @@ def _build_variant_timeline_entry(
             }
             for boundary_time, overlap in (transition_offsets or [])
         ],
-        "subtitle_events": [_normalize_subtitle_event(item) for item in (subtitle_events or [])],
+        "subtitle_events": [
+            event
+            for item in (subtitle_events or [])
+            if (event := _normalize_subtitle_event(item)) is not None
+        ],
         "overlay_events": {
             "emphasis_overlays": [dict(item) for item in ((overlay_events or {}).get("emphasis_overlays") or [])],
             "sound_effects": [dict(item) for item in ((overlay_events or {}).get("sound_effects") or [])],
@@ -9105,14 +9110,23 @@ def _build_variant_media_payload(
     }
 
 
-def _normalize_subtitle_event(item: dict[str, Any]) -> dict[str, Any]:
+def _normalize_subtitle_event(item: dict[str, Any]) -> dict[str, Any] | None:
     start_time = float(item.get("start_time", item.get("start", 0.0)) or 0.0)
     end_time = float(item.get("end_time", item.get("end", start_time)) or start_time)
+    text = clean_final_subtitle_text(
+        item.get("text_final")
+        or item.get("text_norm")
+        or item.get("text_raw")
+        or item.get("text")
+        or ""
+    )
+    if not text:
+        return None
     return {
         "index": int(item.get("index", 0) or 0),
         "start_time": round(start_time, 3),
         "end_time": round(end_time, 3),
-        "text": str(item.get("text_final") or item.get("text_norm") or item.get("text_raw") or item.get("text") or "").strip(),
+        "text": text,
     }
 
 

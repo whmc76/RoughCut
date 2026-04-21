@@ -8,6 +8,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from roughcut.media.subtitle_text import clean_final_subtitle_text
+
 _SUBTITLE_FONT_SCALE = 1.9
 _WRAP_NO_SPLIT_ENDINGS = (
     "的", "了", "呢", "吗", "嘛", "啊", "呀", "着", "把", "给", "在", "向", "和", "与", "及",
@@ -584,11 +586,13 @@ def write_ass_file(
         if not style_id or style_id not in style_definitions:
             style_id = "Default"
         style_definition = style_definitions[style_id]
-        text  = (
+        text = clean_final_subtitle_text(
             item.get("text_final")
             or item.get("text_norm")
             or item.get("text_raw", "")
         )
+        if not text:
+            continue
         text = _wrap_subtitle_text(
             str(text),
             max_chars_per_line=_estimate_subtitle_line_capacity(
