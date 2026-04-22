@@ -9,6 +9,13 @@ import { useI18n } from "../i18n";
 export function GlossaryPage() {
   const { t } = useI18n();
   const workspace = useGlossaryWorkspace();
+  const handleDeleteTerm = (termId: string) => {
+    const term = (workspace.glossary.data ?? []).find((item) => item.id === termId);
+    const label = term?.correct_form ?? termId;
+    if (window.confirm(`确认删除术语「${label}」？`)) {
+      workspace.deleteTerm.mutate(termId);
+    }
+  };
 
   return (
     <section className="page-stack">
@@ -45,7 +52,7 @@ export function GlossaryPage() {
             onScopeFilterChange={workspace.setScopeFilter}
             isDeleting={workspace.deleteTerm.isPending}
             onEdit={workspace.startEdit}
-            onDelete={(termId) => workspace.deleteTerm.mutate(termId)}
+            onDelete={handleDeleteTerm}
           />
         </div>
       </PageSection>

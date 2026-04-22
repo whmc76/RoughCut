@@ -120,13 +120,13 @@ export function JobFinalReviewOverlay({
         description={[selectedJob.source_name, selectedJob.id].filter(Boolean).join(" · ")}
         actions={
           <div className="toolbar">
-            <button className="button ghost" onClick={onPreview} disabled={Boolean(isPreviewing)}>
+            <button type="button" className="button ghost" onClick={onPreview} disabled={Boolean(isPreviewing)}>
               {isPreviewing ? "打开中" : "打开成片"}
             </button>
-            <button className="button ghost" onClick={onDownload} disabled={Boolean(isDownloading)}>
+            <button type="button" className="button ghost" onClick={onDownload} disabled={Boolean(isDownloading)}>
               {isDownloading ? "下载中" : "下载"}
             </button>
-            <button className="button ghost" onClick={onOpenFolder} disabled={Boolean(isOpeningFolder)}>
+            <button type="button" className="button ghost" onClick={onOpenFolder} disabled={Boolean(isOpeningFolder)}>
               {isOpeningFolder ? "打开中" : "打开文件夹"}
             </button>
           </div>
@@ -222,12 +222,12 @@ export function JobFinalReviewOverlay({
               ) : null}
               <div className="toolbar top-gap">
                 {onApprove ? (
-                  <button className="button primary" onClick={onApprove} disabled={Boolean(isSubmittingDecision)}>
+                  <button type="button" className="button primary" onClick={onApprove} disabled={Boolean(isSubmittingDecision)}>
                     {isSubmittingDecision ? "提交中..." : "通过并生成平台文案"}
                   </button>
                 ) : null}
                 {onReject ? (
-                  <button className="button danger" onClick={onReject} disabled={Boolean(isSubmittingDecision)}>
+                  <button type="button" className="button danger" onClick={onReject} disabled={Boolean(isSubmittingDecision)}>
                     退回修改
                   </button>
                 ) : null}
@@ -349,6 +349,7 @@ export function JobFinalReviewOverlay({
                             {onApplySubtitleReview ? (
                               <div className="toolbar">
                                 <button
+                                  type="button"
                                   className="button ghost button-sm"
                                   onClick={() => onApplySubtitleReview(correction.id, "accepted")}
                                   disabled={isApplyingSubtitleReview}
@@ -356,6 +357,7 @@ export function JobFinalReviewOverlay({
                                   通过字幕
                                 </button>
                                 <button
+                                  type="button"
                                   className="button danger button-sm"
                                   onClick={() => onApplySubtitleReview(correction.id, "rejected")}
                                   disabled={isApplyingSubtitleReview}

@@ -313,7 +313,8 @@ class Settings(BaseSettings):
     render_step_stale_timeout_sec: int = 5400
     render_step_prepackaging_stale_timeout_sec: int = 1500
     render_step_packaging_stale_timeout_sec: int = 2400
-    docker_gpu_guard_enabled: bool = True
+    runtime_preflight_docker_enabled: bool = False
+    docker_gpu_guard_enabled: bool = False
     docker_gpu_guard_idle_timeout_sec: int = 900
     heygem_docker_guard_enabled: bool = True
     heygem_docker_compose_file: str = "E:/WorkSpace/heygem/docker-compose.yml"

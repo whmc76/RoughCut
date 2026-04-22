@@ -1499,6 +1499,7 @@ async def run_watch_root_auto_duty() -> dict[str, Any]:
                     try:
                         start_watch_root_inventory_scan(
                             root.path,
+                            recursive=bool(getattr(root, "recursive", True)),
                             scan_mode=root.scan_mode or "fast",
                             output_dir=root.output_dir,
                             force=False,
@@ -1718,6 +1719,7 @@ async def watch_directory(
     config_profile_id: uuid.UUID | str | None = None,
     output_dir: str | None = None,
     language: str = "zh-CN",
+    recursive: bool = True,
 ) -> None:
     """Watch a directory for new video files. Runs until cancelled."""
     path = Path(watch_path)
@@ -1727,7 +1729,7 @@ async def watch_directory(
     loop = asyncio.get_running_loop()
     handler = VideoFileHandler(workflow_template, config_profile_id, output_dir, language, loop)
     observer = Observer()
-    observer.schedule(handler, str(path), recursive=True)
+    observer.schedule(handler, str(path), recursive=recursive)
     observer.start()
     logger.info(f"Watching directory: {path}")
 
@@ -1760,6 +1762,7 @@ async def watch_from_db() -> None:
                 root.workflow_template,
                 root.config_profile_id,
                 root.output_dir,
+                recursive=bool(getattr(root, "recursive", True)),
             )
         )
         for root in roots

@@ -826,10 +826,15 @@ async def _dispatch_step(step: JobStep, session) -> None:
     step.error_message = None
     step.attempt += 1
 
+    metadata = dict(step.metadata_ or {})
+    # A restarted step must not inherit completion progress from an earlier
+    # attempt; otherwise reconciliation can mark it done before the worker runs.
+    metadata.pop("progress", None)
+
     # Send to Celery
     async_result = celery_app.send_task(task_name, args=[job_id], queue=queue)
     step.metadata_ = {
-        **(step.metadata_ or {}),
+        **metadata,
         "task_id": async_result.id,
         "queue": queue,
         "dispatched_at": now.isoformat(),
@@ -1021,8 +1026,6 @@ def _reconcile_terminal_steps(job: Job, steps: list[JobStep]) -> None:
             step.status = "skipped"
         elif step.step_name == "avatar_commentary" and "avatar_commentary" not in enabled_modes:
             step.status = "skipped"
-        elif float((step.metadata_ or {}).get("progress") or 0.0) >= 1.0 and step.status in {"pending", "running"}:
-            step.status = "done"
         else:
             continue
         step.finished_at = step.finished_at or now

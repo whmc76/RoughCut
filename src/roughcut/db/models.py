@@ -13,6 +13,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     Uuid,
+    text,
 )
 from sqlalchemy import TIMESTAMP
 from sqlalchemy.dialects.postgresql import JSONB
@@ -360,6 +361,7 @@ class WatchRoot(Base):
     workflow_template: Mapped[str | None] = mapped_column(Text)
     output_dir: Mapped[str | None] = mapped_column(Text)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    recursive: Mapped[bool] = mapped_column(Boolean, default=True, server_default=text("true"))
     scan_mode: Mapped[str] = mapped_column(Text, nullable=False, default="fast", server_default="fast")
     ingest_mode: Mapped[str] = mapped_column(Text, nullable=False, default="full_auto", server_default="full_auto")
     inventory_cache_json: Mapped[dict | None] = mapped_column(JSON_TYPE)

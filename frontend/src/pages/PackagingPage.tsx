@@ -218,6 +218,7 @@ export function PackagingPage() {
                             ) : (
                               <button
                                 className={singleSelected ? "button primary" : "button ghost"}
+                                type="button"
                                 onClick={() => workspace.saveConfig.mutate({ [`${assetType.key}_asset_id`]: asset.id })}
                               >
                                 {singleSelected ? t("packaging.assets.selected") : t("packaging.assets.setDefault")}
@@ -226,7 +227,15 @@ export function PackagingPage() {
                             <a className="button ghost" href={api.packagingAssetUrl(asset.id)} target="_blank" rel="noreferrer">
                               {t("packaging.assets.view")}
                             </a>
-                            <button className="button danger" onClick={() => workspace.deleteAsset.mutate(asset.id)}>
+                            <button
+                              className="button danger"
+                              type="button"
+                              onClick={() => {
+                                if (window.confirm(`确认删除包装素材「${asset.original_name}」？`)) {
+                                  workspace.deleteAsset.mutate(asset.id);
+                                }
+                              }}
+                            >
                               {t("packaging.assets.delete")}
                             </button>
                           </ListActions>

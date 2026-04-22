@@ -119,6 +119,13 @@ export function WatchRootFormPanel({
           onChange={(event) => onChange({ ...form, output_dir: event.target.value })}
         />
         <div className="field-row">
+          <CheckboxField
+            label={t("watch.form.recursive")}
+            checked={form.recursive}
+            onChange={(event) => onChange({ ...form, recursive: event.target.checked })}
+          />
+        </div>
+        <div className="field-row">
           <SelectField
             label={t("watch.form.ingestMode")}
             value={form.ingest_mode}

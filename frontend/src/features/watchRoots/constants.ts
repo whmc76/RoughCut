@@ -4,6 +4,7 @@ export type RootForm = {
   workflow_template: string;
   output_dir: string;
   enabled: boolean;
+  recursive: boolean;
   scan_mode: "fast" | "precise";
   ingest_mode: "task_only" | "full_auto";
 };
@@ -14,6 +15,7 @@ export const EMPTY_ROOT_FORM: RootForm = {
   workflow_template: "",
   output_dir: "",
   enabled: true,
+  recursive: true,
   scan_mode: "fast",
   ingest_mode: "full_auto",
 };

@@ -329,6 +329,7 @@ export function OverviewPage() {
                     {[7, 30].map((days) => (
                       <button
                         key={days}
+                        type="button"
                         className={`mode-chip filter-chip ${workspace.usageTrendDays === days ? "selected" : ""}`}
                         onClick={() => workspace.setUsageTrendDays(days)}
                       >
@@ -345,6 +346,7 @@ export function OverviewPage() {
                     ].map((dimension) => (
                       <button
                         key={dimension.value}
+                        type="button"
                         className={`mode-chip filter-chip ${workspace.usageTrendFocusType === dimension.value ? "selected" : ""}`}
                         onClick={() => {
                           workspace.setUsageTrendFocusType(dimension.value);
@@ -357,6 +359,7 @@ export function OverviewPage() {
                   </div>
                   <div className="mode-chip-list">
                     <button
+                      type="button"
                       className={`mode-chip filter-chip ${workspace.usageTrendFocusName === "" ? "selected" : ""}`}
                       onClick={() => workspace.setUsageTrendFocusName("")}
                     >
@@ -369,6 +372,7 @@ export function OverviewPage() {
                     {usageTrendFocusOptions.map((option) => (
                       <button
                         key={option.name}
+                        type="button"
                         className={`mode-chip filter-chip ${workspace.usageTrendFocusName === option.name ? "selected" : ""}`}
                         onClick={() => workspace.setUsageTrendFocusName(option.name)}
                       >

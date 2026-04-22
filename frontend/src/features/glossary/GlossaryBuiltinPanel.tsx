@@ -50,6 +50,7 @@ export function GlossaryBuiltinPanel({
                 <button
                   key={domain}
                   className={`mode-chip filter-chip ${filter === domain ? "selected" : ""}`}
+                  type="button"
                   onClick={() => onFilterChange(domain)}
                 >
                   {domain === "all" ? t("glossary.builtin.filter.all") : domainLabel(domain, t)}
@@ -59,12 +60,14 @@ export function GlossaryBuiltinPanel({
             <div className="mode-chip-list">
               <button
                 className={`mode-chip filter-chip ${importMode === "add_only" ? "selected" : ""}`}
+                type="button"
                 onClick={() => onImportModeChange("add_only")}
               >
                 {t("glossary.builtin.mode.addOnly")}
               </button>
               <button
                 className={`mode-chip filter-chip ${importMode === "sync_aliases" ? "selected" : ""}`}
+                type="button"
                 onClick={() => onImportModeChange("sync_aliases")}
               >
                 {t("glossary.builtin.mode.syncAliases")}
@@ -94,7 +97,7 @@ export function GlossaryBuiltinPanel({
               )}
             </div>
             <div className="toolbar">
-              <button className="button ghost button-sm" onClick={() => onImportPack(pack)} disabled={importingPackDomain === pack.domain}>
+              <button className="button ghost button-sm" type="button" onClick={() => onImportPack(pack)} disabled={importingPackDomain === pack.domain}>
                 {importingPackDomain === pack.domain ? t("glossary.builtin.importingPack") : t("glossary.builtin.importPack")}
               </button>
             </div>
@@ -105,6 +108,7 @@ export function GlossaryBuiltinPanel({
                   {!!term.wrong_forms.length && <span>{term.wrong_forms.slice(0, 3).join(" / ")}</span>}
                   <button
                     className="button ghost button-sm"
+                    type="button"
                     onClick={() => onImportTerm(pack, term.correct_form)}
                     disabled={(isImported(term.correct_form) && importMode === "add_only") || isImportingTerm(term.correct_form)}
                   >

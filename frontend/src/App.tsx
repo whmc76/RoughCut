@@ -73,13 +73,35 @@ export function App() {
     });
   }, [locale]);
 
-  const navigationItems = [
-    { to: "/", label: t("app.nav.overview") },
-    { to: "/jobs", label: t("app.nav.jobs") },
-    { to: "/watch-roots", label: t("app.nav.watchRoots") },
-    { to: "/intelligent-copy", label: t("app.nav.intelligentCopy") },
-    { to: "/style-lab", label: "风格实验" },
-    { to: "/settings", label: t("app.nav.settings") },
+  const navigationGroups = [
+    {
+      title: "工作台",
+      items: [
+        { to: "/", label: t("app.nav.overview") },
+        { to: "/jobs", label: t("app.nav.jobs") },
+        { to: "/watch-roots", label: t("app.nav.watchRoots") },
+        { to: "/intelligent-copy", label: t("app.nav.intelligentCopy") },
+      ],
+    },
+    {
+      title: "创作资产",
+      items: [
+        { to: "/style-lab", label: "风格实验" },
+        { to: "/packaging", label: "包装素材" },
+        { to: "/style-templates", label: "风格模板" },
+        { to: "/creative-modes", label: "创作模式" },
+        { to: "/creator-profiles", label: "创作者档案" },
+      ],
+    },
+    {
+      title: "系统",
+      items: [
+        { to: "/settings", label: t("app.nav.settings") },
+        { to: "/memory", label: "记忆" },
+        { to: "/glossary", label: "术语表" },
+        { to: "/control", label: "控制台" },
+      ],
+    },
   ];
   const localeOptions = [
     { value: "zh-CN" as const, shortLabel: "简中", title: t("app.language.zh-CN") },
@@ -96,19 +118,27 @@ export function App() {
           <div className="rail-brand-mark">RC</div>
           <div className="rail-brand-copy">
             <strong>RoughCut</strong>
+            <span>剪辑流水线控制台</span>
           </div>
         </div>
         <nav className="rail-nav" aria-label="Primary">
-          {navigationItems.map((item, index) => (
-            <NavLink
-              key={item.to}
-              to={item.to}
-              end={item.to === "/"}
-              className={({ isActive }) => (isActive ? "rail-link active" : "rail-link")}
-            >
-              <span className="rail-link-index">{`${index + 1}`.padStart(2, "0")}</span>
-              <span className="rail-link-label">{item.label}</span>
-            </NavLink>
+          {navigationGroups.map((group) => (
+            <div className="rail-nav-section" key={group.title}>
+              <div className="rail-nav-section-label">{group.title}</div>
+              <div className="rail-nav-section-links">
+                {group.items.map((item, index) => (
+                  <NavLink
+                    key={item.to}
+                    to={item.to}
+                    end={item.to === "/"}
+                    className={({ isActive }) => (isActive ? "rail-link active" : "rail-link")}
+                  >
+                    <span className="rail-link-index">{`${index + 1}`.padStart(2, "0")}</span>
+                    <span className="rail-link-label">{item.label}</span>
+                  </NavLink>
+                ))}
+              </div>
+            </div>
           ))}
         </nav>
         <div className="rail-notes">

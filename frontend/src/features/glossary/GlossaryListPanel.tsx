@@ -47,10 +47,10 @@ export function GlossaryListPanel({ terms, scopeFilter, onScopeFilterChange, isD
               </div>
             </div>
             <ListActions>
-              <button className="button ghost" onClick={() => onEdit(term)}>
+              <button className="button ghost" type="button" onClick={() => onEdit(term)}>
                 {t("glossary.list.edit")}
               </button>
-              <button className="button danger" onClick={() => onDelete(term.id)} disabled={isDeleting}>
+              <button className="button danger" type="button" onClick={() => onDelete(term.id)} disabled={isDeleting}>
                 {t("glossary.list.delete")}
               </button>
             </ListActions>

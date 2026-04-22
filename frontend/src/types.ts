@@ -293,6 +293,7 @@ export type WatchRoot = {
   workflow_template?: string | null;
   output_dir?: string | null;
   enabled: boolean;
+  recursive: boolean;
   scan_mode: "fast" | "precise";
   ingest_mode: "task_only" | "full_auto";
   created_at: string;

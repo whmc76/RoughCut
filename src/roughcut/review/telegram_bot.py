@@ -538,7 +538,6 @@ class TelegramReviewBotService:
             )
             variant_timeline_bundle = resolve_effective_variant_timeline_bundle(
                 variant_timeline_bundle,
-                render_outputs=render_outputs,
             )
             content_profile_artifacts = (
                 await session.execute(
@@ -2200,7 +2199,6 @@ async def _build_final_review_videos(
 ) -> list[TelegramReviewVideo]:
     variant_timeline_bundle = resolve_effective_variant_timeline_bundle(
         variant_timeline_bundle,
-        render_outputs=render_outputs,
     )
     source_path = _resolve_final_review_video_source(render_outputs, variant_timeline_bundle=variant_timeline_bundle)
     if source_path is None:

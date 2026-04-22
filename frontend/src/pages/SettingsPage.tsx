@@ -88,7 +88,16 @@ export function SettingsPage() {
         description={t("settings.page.description")}
         actions={
           <>
-            <button className="button ghost" onClick={() => workspace.reset.mutate()} disabled={workspace.reset.isPending}>
+            <button
+              className="button ghost"
+              type="button"
+              onClick={() => {
+                if (window.confirm("确认恢复默认设置？当前未保存或已保存的配置改动可能会被覆盖。")) {
+                  workspace.reset.mutate();
+                }
+              }}
+              disabled={workspace.reset.isPending}
+            >
               {workspace.reset.isPending ? t("settings.page.resetting") : t("settings.page.reset")}
             </button>
             <span className={`status-pill ${saveTone}`}>{saveLabel}</span>

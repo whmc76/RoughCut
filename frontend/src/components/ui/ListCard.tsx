@@ -17,7 +17,7 @@ export function ListCard({ children, className, column = false, selectable = fal
 
   if (as === "button") {
     return (
-      <button className={classes} onClick={onClick}>
+      <button className={classes} type="button" onClick={onClick}>
         {children}
       </button>
     );

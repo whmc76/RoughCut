@@ -751,6 +751,7 @@ class WatchRootCreate(BaseModel):
     workflow_template: str | None = None
     output_dir: str | None = None
     enabled: bool = True
+    recursive: bool = True
     scan_mode: Literal["fast", "precise"] = "fast"
     ingest_mode: Literal["task_only", "full_auto"] = "full_auto"
 
@@ -784,6 +785,7 @@ class WatchRootOut(BaseModel):
     workflow_template: str | None
     output_dir: str | None
     enabled: bool
+    recursive: bool
     scan_mode: Literal["fast", "precise"]
     ingest_mode: Literal["task_only", "full_auto"]
     created_at: datetime

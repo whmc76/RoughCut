@@ -4,6 +4,8 @@ from collections import Counter
 import re
 from typing import Any, Iterable, Mapping, Sequence
 
+from roughcut.speech.subtitle_segmentation import _boundary_splits_generic_word
+
 ARTIFACT_TYPE_SUBTITLE_QUALITY_REPORT = "subtitle_quality_report"
 
 _BAD_TERM_PATTERNS: dict[str, re.Pattern[str]] = {
@@ -168,6 +170,7 @@ def build_subtitle_quality_report(
     filler_count = 0
     low_signal_count = 0
     short_fragment_count = 0
+    generic_word_split_count = 0
     for item, text in zip(subtitle_items, texts):
         if not text:
             continue
@@ -183,6 +186,9 @@ def build_subtitle_quality_report(
             and not _is_allowed_short_temporal_phrase(text, duration)
         ):
             short_fragment_count += 1
+    for left_text, right_text in zip(texts, texts[1:]):
+        if _boundary_splits_generic_word(left_text, right_text):
+            generic_word_split_count += 1
 
     subject = _profile_subject(content_profile)
     summary = _profile_summary(content_profile)
@@ -207,6 +213,8 @@ def build_subtitle_quality_report(
         blocking_reasons.append(f"短碎句率过高 {short_fragment_rate:.2%}")
     elif short_fragment_rate > 0.008:
         warning_reasons.append(f"短碎句率偏高 {short_fragment_rate:.2%}")
+    if generic_word_split_count > 0:
+        blocking_reasons.append(f"普通词跨字幕截断 {generic_word_split_count} 处")
     if filler_rate > 0.01:
         warning_reasons.append(f"独立语气词偏多 {filler_rate:.2%}")
     if low_signal_rate > 0.005:
@@ -218,6 +226,7 @@ def build_subtitle_quality_report(
 
     score = 100.0
     score -= float(bad_term_total * 6)
+    score -= float(generic_word_split_count * 8)
     score -= min(25.0, short_fragment_rate * 180.0)
     score -= min(10.0, filler_rate * 120.0)
     score -= min(8.0, low_signal_rate * 160.0)
@@ -241,6 +250,7 @@ def build_subtitle_quality_report(
             "filler_count": filler_count,
             "low_signal_count": low_signal_count,
             "short_fragment_count": short_fragment_count,
+            "generic_word_split_count": generic_word_split_count,
             "short_fragment_rate": round(short_fragment_rate, 4),
             "filler_rate": round(filler_rate, 4),
             "low_signal_rate": round(low_signal_rate, 4),

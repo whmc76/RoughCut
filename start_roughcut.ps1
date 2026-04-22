@@ -1507,6 +1507,36 @@ function Test-RoughCutWorkerReady {
     return $false
 }
 
+function Test-RoughCutWorkerReadyFromLogs {
+    param(
+        [string]$WorkerNode,
+        [string]$StdoutPath,
+        [string]$StderrPath
+    )
+
+    $readyPatterns = @(
+        [regex]::Escape("$WorkerNode ready."),
+        [regex]::Escape(($WorkerNode -replace "@localhost$", "")) + ".*ready\."
+    )
+
+    foreach ($path in @($StdoutPath, $StderrPath)) {
+        if (-not (Test-Path $path)) {
+            continue
+        }
+
+        $lines = @(Get-Content $path -Tail 120 -ErrorAction SilentlyContinue)
+        foreach ($line in $lines) {
+            foreach ($pattern in $readyPatterns) {
+                if ($line -match $pattern) {
+                    return $true
+                }
+            }
+        }
+    }
+
+    return $false
+}
+
 function Wait-RoughCutWorkerReady {
     param(
         [string]$Name,
@@ -1528,18 +1558,24 @@ function Wait-RoughCutWorkerReady {
             Write-Host "$Name is ready as $WorkerNode." -ForegroundColor Green
             return
         }
+        if (Test-RoughCutWorkerReadyFromLogs -WorkerNode $WorkerNode -StdoutPath $StdoutPath -StderrPath $StderrPath) {
+            Write-Host "$Name reported ready in logs as $WorkerNode." -ForegroundColor Green
+            return
+        }
         Start-Sleep -Milliseconds 750
     }
 
     $stdout = if (Test-Path $StdoutPath) { (Get-Content $StdoutPath -Tail 80 -ErrorAction SilentlyContinue) -join [Environment]::NewLine } else { "" }
     $stderr = if (Test-Path $StderrPath) { (Get-Content $StderrPath -Tail 80 -ErrorAction SilentlyContinue) -join [Environment]::NewLine } else { "" }
+    $matches = @(Get-ProcessMatches -Pattern $MatchPattern)
+    $processState = if ($matches.Count -gt 0) { "still running" } else { "not running" }
     if (-not [string]::IsNullOrWhiteSpace($stderr)) {
-        throw "$Name failed to become ready. stderr:`n$stderr"
+        throw "$Name failed to become ready ($processState). stderr:`n$stderr"
     }
     if (-not [string]::IsNullOrWhiteSpace($stdout)) {
-        throw "$Name failed to become ready. stdout:`n$stdout"
+        throw "$Name failed to become ready ($processState). stdout:`n$stdout"
     }
-    throw "$Name failed to become ready."
+    throw "$Name failed to become ready ($processState)."
 }
 
 function Start-RoughCutWorkerProcess {
@@ -1578,6 +1614,14 @@ function Start-RoughCutWorkerProcess {
         "--without-mingle"
     )
     $matchPattern = [regex]::Escape("roughcut.cli worker --queue $Queue --pool solo --concurrency 1 --hostname $workerNode --without-gossip --without-mingle")
+
+    foreach ($logPath in @($StdoutPath, $StderrPath)) {
+        $logDirectory = Split-Path -Parent $logPath
+        if (-not [string]::IsNullOrWhiteSpace($logDirectory)) {
+            New-Item -ItemType Directory -Path $logDirectory -Force | Out-Null
+        }
+        Set-Content -Path $logPath -Value "" -NoNewline
+    }
 
     Start-RoughCutProcess `
         -Name $Name `

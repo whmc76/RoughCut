@@ -26,6 +26,7 @@ export function IntelligentCopyPage() {
         actions={
           <div className="toolbar">
             <button
+              type="button"
               className="button ghost"
               onClick={() => workspace.inspect.mutate(workspace.folderPath)}
               disabled={!workspace.folderPath.trim() || workspace.inspect.isPending}
@@ -33,6 +34,7 @@ export function IntelligentCopyPage() {
               {workspace.inspect.isPending ? t("smartCopy.page.inspecting") : t("smartCopy.page.inspect")}
             </button>
             <button
+              type="button"
               className="button primary"
               onClick={() => workspace.generate.mutate({ folderPath: workspace.folderPath, copyStyle: workspace.copyStyle })}
               disabled={!workspace.folderPath.trim() || workspace.generate.isPending}
@@ -69,7 +71,7 @@ export function IntelligentCopyPage() {
             description={t("smartCopy.form.description")}
             actions={
               workspace.result?.material_dir ? (
-                <button className="button ghost" onClick={() => workspace.openFolder.mutate(workspace.result?.material_dir || "")}>
+                <button type="button" className="button ghost" onClick={() => workspace.openFolder.mutate(workspace.result?.material_dir || "")}>
                   {t("smartCopy.page.openOutput")}
                 </button>
               ) : null
@@ -133,11 +135,11 @@ export function IntelligentCopyPage() {
                   description={platform.constraints.rule_note}
                   actions={
                     <div className="toolbar">
-                      <button className="button ghost" onClick={() => workspace.copyText(platform.full_copy, `${platform.label} 已复制`)}>
+                      <button type="button" className="button ghost" onClick={() => workspace.copyText(platform.full_copy, `${platform.label} 已复制`)}>
                         {t("smartCopy.results.copyAll")}
                       </button>
                       {platform.cover_path ? (
-                        <button className="button ghost" onClick={() => workspace.openFolder.mutate(platform.cover_path || "")}>
+                        <button type="button" className="button ghost" onClick={() => workspace.openFolder.mutate(platform.cover_path || "")}>
                           {t("smartCopy.results.openCover")}
                         </button>
                       ) : null}
@@ -151,6 +153,7 @@ export function IntelligentCopyPage() {
                       <div key={`${platform.key}-${index}`} className="panel-subcard">
                         <div className="row-title">{`${index + 1}. ${title}`}</div>
                         <button
+                          type="button"
                           className="button ghost"
                           onClick={() => workspace.copyText(title, `${platform.label} 标题 ${index + 1} 已复制`)}
                         >
@@ -165,14 +168,14 @@ export function IntelligentCopyPage() {
                   <div>
                     <div className="row-title">{platform.body_label}</div>
                     <pre className="panel-code-block">{platform.body}</pre>
-                    <button className="button ghost" onClick={() => workspace.copyText(platform.body, `${platform.label} 正文已复制`)}>
+                    <button type="button" className="button ghost" onClick={() => workspace.copyText(platform.body, `${platform.label} 正文已复制`)}>
                       {t("smartCopy.results.copyBody")}
                     </button>
                   </div>
                   <div>
                     <div className="row-title">{platform.tag_label}</div>
                     <pre className="panel-code-block">{platform.tags_copy || "—"}</pre>
-                    <button className="button ghost" onClick={() => workspace.copyText(platform.tags_copy, `${platform.label} 标签已复制`)}>
+                    <button type="button" className="button ghost" onClick={() => workspace.copyText(platform.tags_copy, `${platform.label} 标签已复制`)}>
                       {t("smartCopy.results.copyTags")}
                     </button>
                   </div>

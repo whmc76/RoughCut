@@ -148,6 +148,7 @@ async def create_watch_root(
         workflow_template=body.workflow_template,
         output_dir=body.output_dir,
         enabled=body.enabled,
+        recursive=body.recursive,
         scan_mode=body.scan_mode,
         ingest_mode=body.ingest_mode,
     )
@@ -172,6 +173,7 @@ async def update_watch_root(
     root.workflow_template = body.workflow_template
     root.output_dir = body.output_dir
     root.enabled = body.enabled
+    root.recursive = body.recursive
     root.scan_mode = body.scan_mode
     root.ingest_mode = body.ingest_mode
     await session.commit()
@@ -196,6 +198,7 @@ async def get_watch_root_inventory(root_id: uuid.UUID, session: AsyncSession = D
     try:
         payload = await scan_watch_root_inventory(
             root.path,
+            recursive=root.recursive,
             scan_mode=root.scan_mode or "fast",
             output_dir=root.output_dir,
         )
@@ -218,6 +221,7 @@ async def start_inventory_scan(
     try:
         return start_watch_root_inventory_scan(
             root.path,
+            recursive=root.recursive,
             scan_mode=root.scan_mode or "fast",
             output_dir=root.output_dir,
             force=bool(body and body.force),

@@ -312,13 +312,14 @@ export function JobDetailPanel({
           />
 
           <div className="detail-actions">
-            <button className="button ghost" onClick={onOpenFolder}>
+            <button type="button" className="button ghost" onClick={onOpenFolder}>
               {t("jobs.actions.openFolder")}
             </button>
             <a className="button ghost" href={`/api/v1/jobs/${selectedJob.id}/download`} target="_blank" rel="noreferrer">
               {downloadLabel}
             </a>
             <button
+              type="button"
               className="button ghost"
               disabled={selectedJob.status === "done" || selectedJob.status === "failed" || selectedJob.status === "cancelled" || isCancelling}
               onClick={onCancel}
@@ -326,6 +327,7 @@ export function JobDetailPanel({
               {isCancelling ? t("jobs.actions.cancelling") : t("jobs.actions.cancel")}
             </button>
             <button
+              type="button"
               className="button primary"
               onClick={isAwaitingInitialization ? onInitialize : onRestart}
               disabled={
@@ -345,7 +347,7 @@ export function JobDetailPanel({
                   ? t("jobs.actions.restarting")
                   : isRestartableJobStatus(selectedJob.status) ? t("jobs.actions.restart") : t("jobs.actions.restartUnavailable")}
             </button>
-            <button className="button danger" onClick={onDelete} disabled={isDeleting}>
+            <button type="button" className="button danger" onClick={onDelete} disabled={isDeleting}>
               {isDeleting ? t("jobs.actions.deleting") : t("jobs.actions.delete")}
             </button>
           </div>

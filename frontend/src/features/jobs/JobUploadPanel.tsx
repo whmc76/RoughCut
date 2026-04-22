@@ -161,7 +161,7 @@ export function JobUploadPanel({
         )}
       </section>
       <div className="toolbar top-gap">
-        <button className="button primary" disabled={upload.files.length === 0 || isSubmitting} onClick={onSubmit}>
+        <button type="button" className="button primary" disabled={upload.files.length === 0 || isSubmitting} onClick={onSubmit}>
           {isSubmitting ? t("jobs.upload.submitting") : t("jobs.upload.submit")}
         </button>
         {upload.files.length > 0 ? (

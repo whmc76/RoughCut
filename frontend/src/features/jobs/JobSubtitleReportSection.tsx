@@ -44,10 +44,10 @@ export function JobSubtitleReportSection({ report, isApplying, onApplyReview }: 
                         </div>
                       </div>
                       <div className="toolbar">
-                        <button className="button ghost" onClick={() => onApplyReview(correction.id, "accepted")} disabled={isApplying}>
+                        <button type="button" className="button ghost" onClick={() => onApplyReview(correction.id, "accepted")} disabled={isApplying}>
                           {t("jobs.subtitleReport.accept")}
                         </button>
-                        <button className="button danger" onClick={() => onApplyReview(correction.id, "rejected")} disabled={isApplying}>
+                        <button type="button" className="button danger" onClick={() => onApplyReview(correction.id, "rejected")} disabled={isApplying}>
                           {t("jobs.subtitleReport.reject")}
                         </button>
                       </div>

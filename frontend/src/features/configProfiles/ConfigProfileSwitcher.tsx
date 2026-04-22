@@ -100,7 +100,8 @@ export function ConfigProfileSwitcher({
     const shouldHydrate =
       !previousHydrated
       || previousHydrated.id !== activeProfile.id
-      || (!draftName.trim() && !draftDescription.trim());
+      || previousHydrated.name !== activeProfile.name
+      || previousHydrated.description !== (activeProfile.description || "");
 
     if (shouldHydrate) {
       setDraftName(activeProfile.name);
@@ -111,7 +112,7 @@ export function ConfigProfileSwitcher({
       name: activeProfile.name,
       description: activeProfile.description || "",
     };
-  }, [activeProfile, draftDescription, draftName]);
+  }, [activeProfile]);
 
   const pending =
     activateProfile.isPending
@@ -232,6 +233,7 @@ export function ConfigProfileSwitcher({
                 >
                   <button
                     className="config-profile-chip-button"
+                    type="button"
                     disabled={pending}
                     onMouseEnter={() => {
                       if (!compareProfileId) {
@@ -279,6 +281,7 @@ export function ConfigProfileSwitcher({
                     ) : (
                       <button
                         className="button ghost button-sm"
+                        type="button"
                         disabled={pending}
                         onClick={() => {
                           setCompareProfileId((current) => (current === profile.id ? null : profile.id));
@@ -314,6 +317,7 @@ export function ConfigProfileSwitcher({
               {previewLocked ? (
                 <button
                   className="button ghost button-sm"
+                  type="button"
                   onClick={() => setCompareProfileId(null)}
                 >
                   关闭对比
@@ -433,6 +437,7 @@ export function ConfigProfileSwitcher({
         />
         <button
           className="button primary"
+          type="button"
           disabled={!canCreate || !descriptionValidation.valid || pending}
           onClick={() => createProfile.mutate({ name: normalizedName, description: normalizedDescription })}
         >
@@ -440,6 +445,7 @@ export function ConfigProfileSwitcher({
         </button>
         <button
           className="button ghost"
+          type="button"
           disabled={!activeProfile || pending}
           title={dirtyDetails.length ? `把当前 ${dirtyDetails.length} 项差异写回方案` : "用当前设置覆盖这个方案"}
           onClick={() => {
@@ -457,6 +463,7 @@ export function ConfigProfileSwitcher({
         </button>
         <button
           className="button ghost"
+          type="button"
           disabled={!canUpdateProfileMeta || pending}
           onClick={() =>
             activeProfile
@@ -472,6 +479,7 @@ export function ConfigProfileSwitcher({
         </button>
         <button
           className="button danger"
+          type="button"
           disabled={!activeProfile || pending}
           title={activeProfile ? `删除后将失去“${activeProfile.name}”这套方案快照` : "删除当前方案"}
           onClick={() => {

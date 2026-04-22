@@ -140,7 +140,7 @@ export function JobSummaryReviewOverlay({
         ) : null}
 
         <div className="toolbar top-gap summary-review-actions">
-          <button className="button primary" onClick={onConfirmProfile} disabled={isConfirmingProfile}>
+          <button type="button" className="button primary" onClick={onConfirmProfile} disabled={isConfirmingProfile}>
             {isConfirmingProfile ? "正在保存..." : "确认摘要并继续执行"}
           </button>
         </div>

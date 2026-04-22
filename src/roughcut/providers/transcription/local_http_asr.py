@@ -109,21 +109,156 @@ class LocalHTTPASRProvider(TranscriptionProvider):
 
     def _extract_segment_items(self, payload: dict[str, Any]) -> list[dict[str, Any]]:
         raw_segments = payload.get("segments")
+        text_candidates: list[str] = []
+        payload_text = str(payload.get("text") or "").strip()
+        if payload_text:
+            text_candidates.append(payload_text)
+        if isinstance(raw_segments, list) and raw_segments:
+            for item in raw_segments:
+                if not isinstance(item, dict):
+                    continue
+                for key in ("raw_text", "text", "Content", "content"):
+                    value = str(item.get(key) or "").strip()
+                    if value:
+                        text_candidates.append(value)
+            joined_text = "".join(
+                str(item.get("text") or item.get("Content") or item.get("content") or "")
+                for item in raw_segments
+                if isinstance(item, dict)
+            ).strip()
+            if joined_text:
+                text_candidates.append(joined_text)
+
+        for text in text_candidates:
+            parsed_items = self._parse_segment_items_from_text(text)
+            if parsed_items:
+                return parsed_items
+
         if isinstance(raw_segments, list) and raw_segments:
             return [dict(item) for item in raw_segments if isinstance(item, dict)]
-
-        text = str(payload.get("text") or "").strip()
-        if not text:
-            return []
-        try:
-            parsed = json.loads(text)
-        except json.JSONDecodeError:
-            return []
-        if isinstance(parsed, dict):
-            return [parsed]
-        if isinstance(parsed, list):
-            return [dict(item) for item in parsed if isinstance(item, dict)]
         return []
+
+    def _parse_segment_items_from_text(self, text: str) -> list[dict[str, Any]]:
+        candidates = self._segment_text_candidates(text)
+        for candidate in candidates:
+            try:
+                parsed = json.loads(candidate)
+            except json.JSONDecodeError:
+                continue
+            for _ in range(2):
+                if isinstance(parsed, str):
+                    try:
+                        parsed = json.loads(parsed.strip())
+                    except json.JSONDecodeError:
+                        break
+                    continue
+                break
+            if isinstance(parsed, dict):
+                return [parsed]
+            if isinstance(parsed, list):
+                return [dict(item) for item in parsed if isinstance(item, dict)]
+            loose_items = self._parse_loose_segment_stream(candidate)
+            if loose_items:
+                return loose_items
+        for candidate in candidates:
+            loose_items = self._parse_loose_segment_stream(candidate)
+            if loose_items:
+                return loose_items
+        return []
+
+    def _segment_text_candidates(self, text: str) -> list[str]:
+        normalized = str(text or "").strip()
+        if not normalized:
+            return []
+        candidates = [normalized]
+        if "\\\"" in normalized:
+            candidates.append(normalized.replace("\\\"", "\""))
+        if "\\n" in normalized or "\\t" in normalized:
+            try:
+                candidates.append(bytes(normalized, "utf-8").decode("unicode_escape"))
+            except UnicodeDecodeError:
+                pass
+        for candidate in list(candidates):
+            extracted = self._extract_json_container(candidate)
+            if extracted and extracted not in candidates:
+                candidates.append(extracted)
+        deduped: list[str] = []
+        for candidate in candidates:
+            if candidate and candidate not in deduped:
+                deduped.append(candidate)
+        return deduped
+
+    @staticmethod
+    def _extract_json_container(text: str) -> str | None:
+        value = str(text or "").strip()
+        starts = [index for index in (value.find("["), value.find("{")) if index >= 0]
+        if not starts:
+            return None
+        start = min(starts)
+        opener = value[start]
+        closer = "]" if opener == "[" else "}"
+        end = value.rfind(closer)
+        if end <= start:
+            return None
+        return value[start : end + 1].strip()
+
+    def _parse_loose_segment_stream(self, text: str) -> list[dict[str, Any]]:
+        value = self._repair_loose_segment_json(text)
+        if not value:
+            return []
+        objects = self._extract_complete_json_objects(value)
+        parsed_items: list[dict[str, Any]] = []
+        for obj_text in objects:
+            try:
+                parsed = json.loads(obj_text)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(parsed, dict):
+                parsed_items.append(parsed)
+        return parsed_items
+
+    @staticmethod
+    def _repair_loose_segment_json(text: str) -> str:
+        value = str(text or "").strip()
+        if not value:
+            return ""
+        starts = [index for index in (value.find("["), value.find("{")) if index >= 0]
+        if starts:
+            value = value[min(starts) :]
+        value = re.sub(r'(?<=\d)(?="(?:Start|End|Speaker|Content)"\s*:)', ",", value)
+        value = re.sub(r'(?<=\})(?=\{)', ",", value)
+        return value
+
+    @staticmethod
+    def _extract_complete_json_objects(text: str) -> list[str]:
+        objects: list[str] = []
+        depth = 0
+        start: int | None = None
+        in_string = False
+        escaped = False
+        for index, char in enumerate(text):
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == '"':
+                    in_string = False
+                continue
+            if char == '"':
+                in_string = True
+                continue
+            if char == "{":
+                if depth == 0:
+                    start = index
+                depth += 1
+                continue
+            if char == "}" and depth > 0:
+                depth -= 1
+                if depth == 0 and start is not None:
+                    objects.append(text[start : index + 1])
+                    start = None
+        return objects
 
     def _build_segments(
         self,

@@ -102,10 +102,30 @@ export function JobsPage() {
     workspace.restartJob.mutate(jobId);
   };
 
+  const confirmAndCancelJob = (jobId: string) => {
+    const message = `确认取消任务「${resolveJobName(jobId)}」？`;
+    if (!window.confirm(message)) return;
+    workspace.cancelJob.mutate(jobId);
+  };
+
   const confirmAndDeleteJob = (jobId: string) => {
     const message = t("jobs.actions.deleteConfirm").replace("{name}", resolveJobName(jobId));
     if (!window.confirm(message)) return;
     workspace.deleteJob.mutate(jobId);
+  };
+
+  const confirmAndApplyReview = (targetId: string, action: "accepted" | "rejected") => {
+    if (action === "rejected" && !window.confirm("确认退回这条字幕修正？")) {
+      return;
+    }
+    workspace.applyReview.mutate({ targetId, action });
+  };
+
+  const confirmAndRejectFinalReview = (note: string) => {
+    if (!window.confirm("确认退回最终审核？")) {
+      return;
+    }
+    workspace.finalReviewDecision.mutate({ decision: "reject", note });
   };
 
   const showReviewNotice = (tone: "success" | "error", message: string) => {
@@ -175,10 +195,10 @@ export function JobsPage() {
               onChange={(event) => workspace.setKeyword(event.target.value)}
               placeholder={t("jobs.page.searchPlaceholder")}
             />
-            <button className="button jobs-header-subtle-button" onClick={workspace.refreshAll}>
+            <button type="button" className="button jobs-header-subtle-button" onClick={workspace.refreshAll}>
               {t("jobs.page.refresh")}
             </button>
-            <button className="button primary jobs-header-create-button" onClick={() => setCreateOpen(true)}>
+            <button type="button" className="button primary jobs-header-create-button" onClick={() => setCreateOpen(true)}>
               创建任务
             </button>
           </div>
@@ -273,7 +293,7 @@ export function JobsPage() {
           onSelect={openJobDetail}
           onOpenReview={openJobReview}
           onOpenFolder={(jobId) => workspace.openFolder.mutate(jobId)}
-          onCancel={(jobId) => workspace.cancelJob.mutate(jobId)}
+          onCancel={confirmAndCancelJob}
           onRestart={confirmAndRestartJob}
           onDelete={confirmAndDeleteJob}
         />
@@ -397,10 +417,10 @@ export function JobsPage() {
           onConfirmProfile={confirmReviewProfile}
           onInitialize={() => workspace.initializeJob.mutate()}
           onOpenFolder={() => workspace.selectedJob && workspace.openFolder.mutate(workspace.selectedJob.id)}
-          onCancel={() => workspace.selectedJob && workspace.cancelJob.mutate(workspace.selectedJob.id)}
+          onCancel={() => workspace.selectedJob && confirmAndCancelJob(workspace.selectedJob.id)}
           onRestart={() => workspace.selectedJob && confirmAndRestartJob(workspace.selectedJob.id)}
           onDelete={() => workspace.selectedJob && confirmAndDeleteJob(workspace.selectedJob.id)}
-          onApplyReview={(targetId, action) => workspace.applyReview.mutate({ targetId, action })}
+          onApplyReview={confirmAndApplyReview}
           onTriggerSubtitleRerun={triggerSubtitleRerun}
         />
       </JobDetailModal>
@@ -450,10 +470,10 @@ export function JobsPage() {
           }))
         }
         onConfirmProfile={confirmReviewProfile}
-        onApplyReview={(targetId, action) => workspace.applyReview.mutate({ targetId, action })}
+        onApplyReview={confirmAndApplyReview}
         onTriggerSubtitleRerun={triggerSubtitleRerun}
         onApproveFinalReview={() => workspace.finalReviewDecision.mutate({ decision: "approve" })}
-        onRejectFinalReview={(note) => workspace.finalReviewDecision.mutate({ decision: "reject", note })}
+        onRejectFinalReview={confirmAndRejectFinalReview}
         onOpenFolder={() => selectedReviewJob && workspace.openFolder.mutate(selectedReviewJob.id)}
         onClose={() => closeReviewOverlay()}
       />

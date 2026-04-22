@@ -37,6 +37,10 @@ async def ensure_runtime_services_ready(*, force: bool = False, reason: str = ""
 
 
 def _ensure_core_compose_services_started() -> None:
+    settings = get_settings()
+    if not bool(getattr(settings, "runtime_preflight_docker_enabled", False)):
+        return
+
     compose_file = Path("docker-compose.yml")
     if shutil.which("docker") is None or not compose_file.exists():
         return

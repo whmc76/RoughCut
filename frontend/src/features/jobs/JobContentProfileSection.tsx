@@ -197,7 +197,7 @@ export function JobContentProfileSection({
             </label>
           </div>
           <div className={["toolbar", "top-gap", reviewMode ? "summary-review-actions" : ""].filter(Boolean).join(" ")}>
-            <button className="button primary" onClick={onConfirm} disabled={isSaving}>
+            <button type="button" className="button primary" onClick={onConfirm} disabled={isSaving}>
               {isSaving ? t("jobs.contentReview.confirming") : reviewMode ? "确认配置并继续执行" : t("jobs.contentReview.confirm")}
             </button>
             <span className="muted">{t("jobs.contentReview.status")}：{contentProfile?.review_step_status ? statusLabel(contentProfile.review_step_status) : "—"}</span>

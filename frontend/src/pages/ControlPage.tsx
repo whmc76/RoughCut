@@ -25,6 +25,8 @@ export function ControlPage() {
   const visibleNotificationIds = (reviewNotifications?.items ?? []).map((item) => item.notification_id);
   const managedServices = workspace.healthDetail.data?.managed_services ?? [];
   const watchAutomation = workspace.healthDetail.data?.watch_automation;
+  const confirmDropReviewNotifications = (count: number) =>
+    window.confirm(`确认丢弃当前显示的 ${count} 条审核通知？此操作不会重新发送这些通知。`);
 
   return (
     <section className="page-stack">
@@ -159,7 +161,11 @@ export function ControlPage() {
             <button
               className="button danger"
               type="button"
-              onClick={() => workspace.dropReviewNotifications.mutate(visibleNotificationIds)}
+              onClick={() => {
+                if (confirmDropReviewNotifications(visibleNotificationIds.length)) {
+                  workspace.dropReviewNotifications.mutate(visibleNotificationIds);
+                }
+              }}
               disabled={!visibleNotificationIds.length || workspace.dropReviewNotifications.isPending}
             >
               Drop shown
@@ -215,7 +221,11 @@ export function ControlPage() {
                   <button
                     className="button danger"
                     type="button"
-                    onClick={() => workspace.dropReviewNotification.mutate(item.notification_id)}
+                    onClick={() => {
+                      if (window.confirm(`确认丢弃审核通知 ${item.notification_id}？`)) {
+                        workspace.dropReviewNotification.mutate(item.notification_id);
+                      }
+                    }}
                     disabled={workspace.dropReviewNotification.isPending}
                   >
                     Drop
@@ -362,7 +372,15 @@ export function ControlPage() {
             <span>{t("control.stop.withDocker")}</span>
           </label>
           <div className="top-gap">
-            <button className="button danger" onClick={() => workspace.stop.mutate()}>
+            <button
+              className="button danger"
+              type="button"
+              onClick={() => {
+                if (window.confirm("确认停止 RoughCut 服务？控制台连接可能会中断。")) {
+                  workspace.stop.mutate();
+                }
+              }}
+            >
               {t("control.stop.action")}
             </button>
           </div>

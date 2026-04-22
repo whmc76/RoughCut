@@ -390,7 +390,7 @@ Windows 下当前建议把 [start_roughcut.bat](E:/WorkSpace/RoughCut/start_roug
 
 `start_roughcut.ps1` 是当前主脚本，也是一键启动的实际实现。
 
-默认开发建议是把 `start_roughcut.bat` 作为默认开发入口；本地模式不再隐式拉起任何 Docker 容器，需要时请显式执行 `start_roughcut.bat infra`。Docker 更适合基础依赖、部署验证和显式容器化运行。`pnpm docker:up/down` 现在只作为 `infra` 快捷别名保留。
+默认开发建议是把 `start_roughcut.bat` 作为默认开发入口；本地模式不再隐式拉起任何 Docker 容器，需要时请显式执行 `start_roughcut.bat infra`。运行时 Docker preflight 和外部 GPU/ASR 容器 guard 默认关闭，只有显式设置 `RUNTIME_PREFLIGHT_DOCKER_ENABLED=true` 或 `DOCKER_GPU_GUARD_ENABLED=true` 时才会由 RoughCut 自动管理容器。Docker 更适合基础依赖、部署验证和显式容器化运行。`pnpm docker:up/down` 现在只作为 `infra` 快捷别名保留。
 
 ---
 
@@ -624,6 +624,8 @@ curl http://localhost:8000/api/v1/jobs/{job_id}/report
 | `LOCAL_ASR_API_BASE_URL` | `http://127.0.0.1:6001` | 本地 HTTP ASR 服务地址 |
 | `LOCAL_ASR_MODEL_NAME` | `vibevoice-asr-int8` | 当前本地 HTTP ASR 实际模型名 |
 | `LOCAL_ASR_DISPLAY_NAME` | `VibeVoice INT8` | 前端显示名称 |
+| `RUNTIME_PREFLIGHT_DOCKER_ENABLED` | `false` | 是否允许运行时 preflight 自动启动 Docker 中的 PostgreSQL / Redis |
+| `DOCKER_GPU_GUARD_ENABLED` | `false` | 是否允许 ASR / HeyGem / IndexTTS2 guard 自动启动外部 Docker 服务 |
 | `SUBTITLE_FONT` | `Microsoft YaHei` | 字幕字体 |
 | `SUBTITLE_FONT_SIZE` | `80` | 字幕字号（pt，相对 PlayResY） |
 | `SUBTITLE_COLOR` | `000000` | 字幕文字颜色（RGB hex，黑色） |

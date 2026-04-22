@@ -11,6 +11,7 @@ type WatchRootInventoryPanelProps = {
   inventory?: WatchInventoryStatus;
   selectedPending: string[];
   isScanning: boolean;
+  scanError?: string;
   isEnqueueing: boolean;
   isMerging: boolean;
   isSuggesting: boolean;
@@ -29,6 +30,7 @@ export function WatchRootInventoryPanel({
   inventory,
   selectedPending,
   isScanning,
+  scanError,
   isEnqueueing,
   isMerging,
   isSuggesting,
@@ -56,21 +58,24 @@ export function WatchRootInventoryPanel({
         description={description}
         actions={
           <div className="toolbar">
-            <button className="button ghost" onClick={() => onScan(false)} disabled={isScanning}>
+            <button className="button ghost" type="button" onClick={() => onScan(false)} disabled={isScanning}>
               {isScanning ? t("watch.inventory.scanning") : t("watch.inventory.scan")}
             </button>
-            <button className="button ghost" onClick={() => onScan(true)} disabled={isScanning}>
+            <button className="button ghost" type="button" onClick={() => onScan(true)} disabled={isScanning}>
               {t("watch.inventory.forceScan")}
             </button>
-            <button className="button primary" onClick={() => onEnqueue(true)} disabled={!pendingItems.length || isEnqueueing || isMerging}>
+            <button className="button primary" type="button" onClick={() => onEnqueue(true)} disabled={!pendingItems.length || isEnqueueing || isMerging}>
               {t("watch.inventory.enqueueAll")}
             </button>
-            <button className="button ghost" onClick={onSmartMergeSuggest} disabled={!pendingItems.length || isScanning || isSuggesting}>
+            <button className="button ghost" type="button" onClick={onSmartMergeSuggest} disabled={!pendingItems.length || isScanning || isSuggesting}>
               {t("watch.inventory.smartMerge")}
             </button>
           </div>
         }
       />
+
+      {scanError ? <div className="notice top-gap">{scanError}</div> : null}
+      {!scanError && inventory?.error ? <div className="notice top-gap">{inventory.error}</div> : null}
 
       {inventory && (
         <>
@@ -100,7 +105,7 @@ export function WatchRootInventoryPanel({
                         ))}
                       </div>
                     </div>
-                      <button className="button ghost" onClick={() => onMergeSmartGroup(group.relative_paths)} disabled={isSmartGroupMerging || isMerging}>
+                      <button className="button ghost" type="button" onClick={() => onMergeSmartGroup(group.relative_paths)} disabled={isSmartGroupMerging || isMerging}>
                       {t("watch.inventory.mergeSuggested")}
                     </button>
                   </div>
@@ -111,10 +116,10 @@ export function WatchRootInventoryPanel({
 
           {!!smartGroups.length && (
             <div className="toolbar top-gap">
-              <button className="button ghost" onClick={onSmartMergeSuggest} disabled={isSuggesting || isSmartGroupMerging}>
+              <button className="button ghost" type="button" onClick={onSmartMergeSuggest} disabled={isSuggesting || isSmartGroupMerging}>
                 {t("watch.inventory.refreshSmartSuggestions")}
               </button>
-              <button className="button primary" onClick={() => onMergeSmartGroup(smartGroups[0].relative_paths)} disabled={isSmartGroupMerging || isMerging}>
+              <button className="button primary" type="button" onClick={() => onMergeSmartGroup(smartGroups[0].relative_paths)} disabled={isSmartGroupMerging || isMerging}>
                 {t("watch.inventory.mergeTopSuggestion")}
               </button>
             </div>
@@ -170,10 +175,10 @@ export function WatchRootInventoryPanel({
 
           {!!selectedPending.length && (
             <div className="toolbar top-gap">
-              <button className="button primary" onClick={() => onEnqueue(false)} disabled={isEnqueueing}>
+              <button className="button primary" type="button" onClick={() => onEnqueue(false)} disabled={isEnqueueing}>
                 {t("watch.inventory.enqueueSelected")}
               </button>
-              <button className="button primary" onClick={onMerge} disabled={selectedPending.length < 2 || isMerging}>
+              <button className="button primary" type="button" onClick={onMerge} disabled={selectedPending.length < 2 || isMerging}>
                 {t("watch.inventory.mergeSelected")}
               </button>
               <span className="muted">{t("watch.inventory.selectedCount").replace("{count}", String(selectedPending.length))}</span>

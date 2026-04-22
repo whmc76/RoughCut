@@ -1968,7 +1968,7 @@ def _subtitle_srt_sort_key(item: dict[str, Any]) -> tuple[float, float, int]:
 def _normalize_srt_timeline_for_serialization(
     subtitle_items: list[dict[str, Any]],
     *,
-    max_autofix_overlap_sec: float = 0.02,
+    max_autofix_overlap_sec: float = 0.35,
 ) -> list[dict[str, Any]]:
     ordered_items = sorted((dict(item) for item in subtitle_items), key=_subtitle_srt_sort_key)
     normalized: list[dict[str, Any]] = []

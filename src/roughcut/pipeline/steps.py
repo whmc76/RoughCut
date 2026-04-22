@@ -6861,8 +6861,7 @@ async def run_platform_package(job_id: str) -> dict:
             .order_by(RenderOutput.created_at.desc())
         )
         render_output = render_output_result.scalars().first()
-        if not render_output or not render_output.output_path:
-            raise ValueError("Rendered output not found; platform package requires a finished render")
+        renderless_mode = not bool(render_output and render_output.output_path)
 
     packaging_config = (list_packaging_assets().get("config") or {})
     author_profile = _select_default_avatar_profile()
@@ -6982,8 +6981,21 @@ async def run_platform_package(job_id: str) -> dict:
             usage_baseline=usage_baseline,
         )
 
-    output_mp4 = Path(render_output.output_path)
-    output_md = output_mp4.with_name(f"{output_mp4.stem}_publish.md")
+    if renderless_mode:
+        project_dir = get_output_project_dir(
+            job.source_name,
+            job.created_at,
+            content_profile=content_profile,
+            output_dir=job.output_dir,
+        )
+        output_md = project_dir / "platform_packaging_renderless.md"
+    else:
+        output_mp4 = Path(render_output.output_path)
+        output_md = output_mp4.with_name(f"{output_mp4.stem}_publish.md")
+    if isinstance(packaging, dict):
+        packaging["generation_mode"] = "renderless_copy_only" if renderless_mode else "rendered_video"
+        if renderless_mode:
+            packaging["generation_note"] = "No finished render output was available; packaging was generated from content profile and subtitles only."
     save_platform_packaging_markdown(output_md, packaging)
 
     async with get_session_factory()() as session:

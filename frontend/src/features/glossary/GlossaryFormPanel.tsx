@@ -39,7 +39,7 @@ export function GlossaryFormPanel({ editing, form, isSaving, autosaveState, auto
           editing ? (
             <div className="toolbar">
               <span className={`status-pill ${autosaveTone}`}>{autosaveLabel}</span>
-              <button className="button ghost" onClick={onReset}>{t("glossary.form.cancelEdit")}</button>
+              <button className="button ghost" type="button" onClick={onReset}>{t("glossary.form.cancelEdit")}</button>
             </div>
           ) : undefined
         }
@@ -85,7 +85,7 @@ export function GlossaryFormPanel({ editing, form, isSaving, autosaveState, auto
         {autosaveError && editing && <div className="notice">{autosaveError}</div>}
         {!editing && (
           <FormActions>
-            <button className="button primary" onClick={onSubmit} disabled={isSaving}>
+            <button className="button primary" type="button" onClick={onSubmit} disabled={isSaving}>
               {isSaving ? t("glossary.form.saving") : t("glossary.form.create")}
             </button>
           </FormActions>
