@@ -25,6 +25,9 @@ _REVIEW_KEYWORD_NOISE_CHUNKS = {
     "产品",
     "视频",
     "主题",
+    "功能",
+    "教程",
+    "展示",
 }
 _REVIEW_KEYWORD_EXPLICIT_ANCHORS = (
     "双肩包",
@@ -102,6 +105,31 @@ _REVIEW_KEYWORD_CHINESE_STOP_PREFIXES = {
     "大家",
 }
 _REVIEW_KEYWORD_COLOR_RE = re.compile(r"[黑白灰银红蓝绿黄橙紫粉棕]{1,4}(?:拼色|配色|双色|三色|撞色)")
+_REVIEW_KEYWORD_SUFFIX_COMPOUND_RE = re.compile(
+    r"(?:[A-Za-z0-9+#\-]{1,12}(?:版本|配色|型号|系列|款|代)|"
+    r"[一-龥]{1,6}(?:版本|配色|型号|系列|款|代)|"
+    r"[一-龥A-Za-z0-9+#\-]{1,8}(?:型号|系列|款|代))"
+)
+_REVIEW_KEYWORD_SUFFIX_PREFIX_TRIMS = (
+    "这个",
+    "那个",
+    "一款",
+    "一个",
+    "主打的",
+    "新出的",
+    "经典的",
+    "包括",
+    "还有",
+    "以及",
+    "是",
+    "叫",
+    "算",
+    "有",
+    "为",
+    "和",
+    "跟",
+    "的",
+)
 _REVIEW_KEYWORD_TRAILING_NOISE_RE = re.compile(r"(?:开箱|评测|测评|实测|介绍|对比|上手)+$")
 _SEMANTIC_FACT_KEYWORD_FIELDS: tuple[tuple[str, int], ...] = (
     ("product_name_candidates", 136),
@@ -141,6 +169,17 @@ _SEARCH_SIGNAL_STOPWORDS: set[str] = {
     "POV",
     "VLOG",
 }
+_REVIEW_KEYWORD_TIMECODE_RE = re.compile(r"\[\d+(?:\.\d+)?(?:,\s*\d+(?:\.\d+)?)?\]?")
+_REVIEW_KEYWORD_GENERIC_PHRASES = (
+    "主要围绕",
+    "内容方向",
+    "适合后续",
+    "字幕纠错",
+    "剪辑包装",
+    "主要在讲",
+    "这条视频",
+    "终于收到了",
+)
 
 
 def _clean_line(text: Any) -> str:
@@ -281,7 +320,25 @@ def _clean_keyword_candidate(token: str) -> str:
     cleaned = str(token or "").strip(_KEYWORD_TOKEN_STRIP_CHARS).strip()
     if not cleaned:
         return ""
+    cleaned = _REVIEW_KEYWORD_TIMECODE_RE.sub(" ", cleaned)
+    cleaned = re.sub(r"[\[\]\{\}]", " ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
     return _REVIEW_KEYWORD_TRAILING_NOISE_RE.sub("", cleaned).strip(_KEYWORD_TOKEN_STRIP_CHARS).strip()
+
+
+def _looks_like_keyword_noise(token: str) -> bool:
+    cleaned = _clean_keyword_candidate(token)
+    if not cleaned:
+        return True
+    if any(fragment in cleaned for fragment in _REVIEW_KEYWORD_GENERIC_PHRASES):
+        return True
+    if re.search(r"\d+\.\d+", cleaned):
+        return True
+    if len(cleaned) >= 10 and sum(1 for fragment in ("开箱", "介绍", "玩法", "上手", "展示", "教程") if fragment in cleaned) >= 2:
+        return True
+    if len(cleaned) >= 10 and cleaned.endswith(("什么", "吗", "呢")):
+        return True
+    return False
 
 
 def _extract_long_chinese_keyword_candidates(chunk: str, seed_terms: list[str]) -> list[str]:
@@ -314,9 +371,29 @@ def _extract_long_chinese_keyword_candidates(chunk: str, seed_terms: list[str]) 
     return extracted
 
 
+def _extract_suffix_compound_keyword_candidates(text: str) -> list[str]:
+    candidates: list[str] = []
+    seen: set[str] = set()
+    for match in _REVIEW_KEYWORD_SUFFIX_COMPOUND_RE.finditer(str(text or "")):
+        candidate = match.group(0).strip(_KEYWORD_TOKEN_STRIP_CHARS).strip()
+        for marker in _REVIEW_KEYWORD_SUFFIX_PREFIX_TRIMS:
+            marker_index = candidate.rfind(marker)
+            if marker_index >= 0:
+                candidate = candidate[marker_index + len(marker):]
+        candidate = _clean_keyword_candidate(candidate)
+        if len(candidate) < _REVIEW_KEYWORDS_MIN_LEN:
+            continue
+        key = _normalize_profile_value(candidate)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        candidates.append(candidate)
+    return candidates
+
+
 def _is_concise_keyword_candidate(value: str) -> bool:
     cleaned = _clean_keyword_candidate(value)
-    if not cleaned or cleaned in _REVIEW_KEYWORD_NOISE_CHUNKS:
+    if not cleaned or cleaned in _REVIEW_KEYWORD_NOISE_CHUNKS or _looks_like_keyword_noise(cleaned):
         return False
     if re.fullmatch(r"[A-Za-z0-9+#\- ]{2,32}", cleaned):
         return True
@@ -399,6 +476,7 @@ def extract_review_keyword_tokens(
             continue
         if "联名" in candidate:
             tokens.append("联名")
+        tokens.extend(_extract_suffix_compound_keyword_candidates(candidate))
         normalized_candidate = _REVIEW_KEYWORD_CONNECTOR_RE.sub(" ", candidate)
         for part in _REVIEW_KEYWORD_TERM_SPLIT_RE.split(normalized_candidate):
             segment = part.strip(_KEYWORD_TOKEN_STRIP_CHARS).strip()
@@ -439,6 +517,8 @@ def extract_review_keyword_tokens(
     seen: set[str] = set()
     for token in tokens:
         if not token or token in _REVIEW_KEYWORD_NOISE_CHUNKS or _is_noisy_chinese_keyword(token):
+            continue
+        if _looks_like_keyword_noise(token):
             continue
         normalized_token = _normalize_profile_value(token)
         if len(normalized_token) < _REVIEW_KEYWORDS_MIN_LEN:
@@ -508,6 +588,10 @@ def build_review_keywords(profile: Mapping[str, Any]) -> list[str]:
         if not normalized or len(normalized) < _REVIEW_KEYWORDS_MIN_LEN:
             return
         if cleaned in _REVIEW_KEYWORD_NOISE_CHUNKS:
+            return
+        if _looks_like_keyword_noise(cleaned):
+            return
+        if "开箱" in video_theme and cleaned.endswith("教程") and len(cleaned) >= 4:
             return
         if _is_noisy_chinese_keyword(cleaned):
             return

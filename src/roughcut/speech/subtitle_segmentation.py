@@ -5,6 +5,11 @@ import re
 import uuid
 from dataclasses import dataclass
 
+try:
+    import jieba
+except ImportError:  # pragma: no cover - optional dependency in minimal installs
+    jieba = None
+
 from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -51,6 +56,7 @@ class SubtitleSegmentationAnalysis:
     fragment_start_count: int
     fragment_end_count: int
     protected_term_split_count: int
+    generic_word_split_count: int
     suspicious_boundary_count: int
     consecutive_fragment_window_count: int
     low_confidence_window_count: int
@@ -69,6 +75,7 @@ class SubtitleSegmentationAnalysis:
             "fragment_start_count": self.fragment_start_count,
             "fragment_end_count": self.fragment_end_count,
             "protected_term_split_count": self.protected_term_split_count,
+            "generic_word_split_count": self.generic_word_split_count,
             "suspicious_boundary_count": self.suspicious_boundary_count,
             "consecutive_fragment_window_count": self.consecutive_fragment_window_count,
             "low_confidence_window_count": self.low_confidence_window_count,
@@ -632,6 +639,7 @@ _SOFT_ATTACHED_FRAGMENT_PREFIXES = (
 _BOUNDARY_COMPOUND_SPLITS: tuple[tuple[str, str], ...] = (
     ("直", "接"),
     ("需", "要"),
+    ("设", "计"),
     ("那", "种"),
     ("这", "个"),
     ("那", "个"),
@@ -645,6 +653,7 @@ _BOUNDARY_COMPOUND_SPLITS: tuple[tuple[str, str], ...] = (
     ("我", "们"),
     ("你", "们"),
     ("它", "们"),
+    ("他", "妈"),
     ("或", "者"),
     ("制", "冷"),
     ("产", "品"),
@@ -669,6 +678,15 @@ _BOUNDARY_COMPOUND_SPLITS: tuple[tuple[str, str], ...] = (
     ("耐", "克尔"),
     ("耐克", "尔"),
     ("对", "比"),
+    ("特", "色"),
+    ("手", "感"),
+    ("配", "色"),
+    ("版", "本"),
+    ("胸", "包"),
+    ("副", "包"),
+    ("工", "业"),
+    ("狐", "蝠"),
+    ("狐蝠", "工业"),
     ("角", "度"),
     ("口", "香糖"),
     ("一", "颗"),
@@ -682,6 +700,57 @@ _BOUNDARY_COMPOUND_SPLITS: tuple[tuple[str, str], ...] = (
     ("这", "边"),
     ("联", "名"),
     ("其", "实"),
+)
+_FALLBACK_GENERIC_CJK_BOUNDARY_TERMS = tuple(
+    sorted(
+        {
+            "我们",
+            "你们",
+            "他们",
+            "它们",
+            "这个",
+            "那个",
+            "直接",
+            "需要",
+            "因为",
+            "另外",
+            "应该",
+            "使用",
+            "介绍",
+            "一下",
+            "设计",
+            "工业",
+            "狐蝠",
+            "狐蝠工业",
+            "特色",
+            "手感",
+            "配色",
+            "版本",
+            "胸包",
+            "副包",
+            "小副包",
+            "对比",
+            "角度",
+            "产品",
+            "功能",
+            "内容",
+            "东西",
+            "细节",
+            "参数",
+            "结构",
+            "材料",
+            "质感",
+            "容量",
+            "重量",
+            "尺寸",
+            "开箱",
+            "手电",
+            "流明",
+            "亮度",
+        },
+        key=len,
+        reverse=True,
+    )
 )
 
 _SPLIT_MEASURE_LEFT_RE = re.compile(
@@ -1458,6 +1527,7 @@ def analyze_subtitle_segmentation(entries: list[SubtitleEntry]) -> SubtitleSegme
             fragment_start_count=0,
             fragment_end_count=0,
             protected_term_split_count=0,
+            generic_word_split_count=0,
             suspicious_boundary_count=0,
             consecutive_fragment_window_count=0,
             low_confidence_window_count=0,
@@ -1469,6 +1539,7 @@ def analyze_subtitle_segmentation(entries: list[SubtitleEntry]) -> SubtitleSegme
     boundary_decisions: list[BoundaryDecision] = []
     fragment_start_count = 0
     protected_term_split_count = 0
+    generic_word_split_count = 0
     suspicious_boundary_count = 0
     consecutive_fragment_window_count = 0
     inside_suspicious_window = False
@@ -1492,6 +1563,9 @@ def analyze_subtitle_segmentation(entries: list[SubtitleEntry]) -> SubtitleSegme
         if _boundary_splits_protected_term(left.text_raw, right.text_raw):
             tags.append("protected_term_split")
             protected_term_split_count += 1
+        if _boundary_splits_generic_word(left.text_raw, right.text_raw):
+            tags.append("generic_word_split")
+            generic_word_split_count += 1
         if score <= -1.5:
             tags.append("low_boundary_score")
         if _is_low_confidence_boundary(left, right):
@@ -1520,6 +1594,7 @@ def analyze_subtitle_segmentation(entries: list[SubtitleEntry]) -> SubtitleSegme
         fragment_start_count=fragment_start_count,
         fragment_end_count=fragment_end_count,
         protected_term_split_count=protected_term_split_count,
+        generic_word_split_count=generic_word_split_count,
         suspicious_boundary_count=suspicious_boundary_count,
         consecutive_fragment_window_count=consecutive_fragment_window_count,
         low_confidence_window_count=low_confidence_window_count,
@@ -1640,6 +1715,8 @@ def _build_word_candidate(
         score -= 18.0
     if _boundary_splits_protected_term(text, next_preview):
         score -= 12.0
+    if _boundary_splits_generic_word(text, next_preview):
+        score -= 14.0
 
     if gap_after >= 0.25:
         score += min(gap_after, 1.5) * (6.0 if boundary_quality >= 0 else -3.0)
@@ -1949,6 +2026,8 @@ def _semantic_boundary_quality(left: str, right: str) -> float:
         score -= 7.0
     if _boundary_splits_compound_term(left_text, right_text):
         score -= 5.0
+    if _boundary_splits_generic_word(left_text, right_text):
+        score -= 7.0
     if _boundary_splits_single_char_residual(left_text, right_text):
         score -= 6.0
     if _boundary_splits_protected_term(left_text, right_text):
@@ -2018,6 +2097,7 @@ def _rebalance_semantic_pair(
         current_quality > -2.5
         and len(leading_word) > 1
         and not _boundary_splits_protected_term(left.text_raw, right.text_raw)
+        and not _boundary_splits_generic_word(left.text_raw, right.text_raw)
     ):
         return left, right
 
@@ -2057,6 +2137,8 @@ def _rebalance_semantic_pair(
             improvement += 4.0
         if _boundary_splits_protected_term(left.text_raw, right.text_raw) and not _boundary_splits_protected_term(new_left_text, suffix_text):
             improvement += 4.0
+        if _boundary_splits_generic_word(left.text_raw, right.text_raw) and not _boundary_splits_generic_word(new_left_text, suffix_text):
+            improvement += 5.0
         if len(prefix_text) <= 1 and any(suffix_text.startswith(prefix) for prefix in _GOOD_BREAK_PREFIXES):
             improvement += 3.0
         if (
@@ -2136,6 +2218,8 @@ def _rebalance_semantic_pair(
             improvement += 5.0
         if _boundary_splits_protected_term(left.text_raw, right.text_raw) and not _boundary_splits_protected_term(new_left_text, new_right_text):
             improvement += 4.0
+        if _boundary_splits_generic_word(left.text_raw, right.text_raw) and not _boundary_splits_generic_word(new_left_text, new_right_text):
+            improvement += 5.0
         if gap <= 0.05 and len(moved_text) <= 4:
             improvement += 1.6
 
@@ -2145,6 +2229,8 @@ def _rebalance_semantic_pair(
         if _boundary_splits_compound_term(left.text_raw, right.text_raw):
             required_improvement -= 0.8
         if _looks_like_split_measure_phrase(left.text_raw, right.text_raw):
+            required_improvement -= 1.0
+        if _boundary_splits_generic_word(left.text_raw, right.text_raw):
             required_improvement -= 1.0
 
         if improvement < max(1.8, required_improvement):
@@ -2190,13 +2276,14 @@ def _should_bridge_semantic_gap(
     attached = _starts_with_attached_fragment(right.text_raw)
     incomplete = _is_incomplete_subtitle_text(left.text_raw)
     protected = _boundary_splits_protected_term(left.text_raw, right.text_raw)
+    generic_word_split = _boundary_splits_generic_word(left.text_raw, right.text_raw)
     tiny_right = len(right.text_raw) <= 4
     strong_fragment_boundary = _is_strong_fragment_boundary(left.text_raw, right.text_raw, gap=gap)
-    if not (attached or incomplete or protected or tiny_right or strong_fragment_boundary):
+    if not (attached or incomplete or protected or generic_word_split or tiny_right or strong_fragment_boundary):
         return False
-    if gap > 1.2 and not (tiny_right or protected or attached):
+    if gap > 1.2 and not (tiny_right or protected or generic_word_split or attached):
         return False
-    if gap > 0.8 and not (tiny_right or protected or attached or (strong_fragment_boundary and incomplete)):
+    if gap > 0.8 and not (tiny_right or protected or generic_word_split or attached or (strong_fragment_boundary and incomplete)):
         return False
     if float(right.end) - float(left.start) > _fragmented_display_hold_duration_limit(
         text_length=len(combined_text),
@@ -2255,6 +2342,8 @@ def _score_break_boundary(left: str, right: str, *, index: int, target: int) -> 
         score -= 30
     if _boundary_splits_protected_term(left_text, right_text):
         score -= 64
+    if _boundary_splits_generic_word(left_text, right_text):
+        score -= 56
 
     if re.match(r"^[，。！？、：；,.!?]", right_text):
         score -= 30
@@ -2754,6 +2843,7 @@ def _is_low_confidence_boundary(left: SubtitleEntry, right: SubtitleEntry) -> bo
     if _looks_like_particle_led_sentence_restart(right.text_raw) and not (
         _boundary_splits_nominal_phrase(left.text_raw, right.text_raw)
         or _boundary_splits_protected_term(left.text_raw, right.text_raw)
+        or _boundary_splits_generic_word(left.text_raw, right.text_raw)
         or _looks_like_split_measure_phrase(left.text_raw, right.text_raw)
         or _boundary_splits_compound_term(left.text_raw, right.text_raw)
     ):
@@ -2761,6 +2851,7 @@ def _is_low_confidence_boundary(left: SubtitleEntry, right: SubtitleEntry) -> bo
     if gap > _MAX_SEMANTIC_BRIDGE_GAP_SEC and not (
         _boundary_splits_nominal_phrase(left.text_raw, right.text_raw)
         or _boundary_splits_protected_term(left.text_raw, right.text_raw)
+        or _boundary_splits_generic_word(left.text_raw, right.text_raw)
         or _looks_like_split_measure_phrase(left.text_raw, right.text_raw)
         or _boundary_splits_compound_term(left.text_raw, right.text_raw)
         or _starts_with_attached_fragment(right.text_raw)
@@ -2772,6 +2863,8 @@ def _is_low_confidence_boundary(left: SubtitleEntry, right: SubtitleEntry) -> bo
     if _boundary_splits_nominal_phrase(left.text_raw, right.text_raw):
         return True
     if _boundary_splits_protected_term(left.text_raw, right.text_raw):
+        return True
+    if _boundary_splits_generic_word(left.text_raw, right.text_raw):
         return True
     if _looks_like_split_measure_phrase(left.text_raw, right.text_raw):
         return True
@@ -2835,6 +2928,7 @@ def _is_dense_followon_boundary(left: SubtitleEntry, right: SubtitleEntry) -> bo
     if (
         _boundary_splits_nominal_phrase(left_text, right_text)
         or _boundary_splits_protected_term(left_text, right_text)
+        or _boundary_splits_generic_word(left_text, right_text)
         or _looks_like_split_measure_phrase(left_text, right_text)
         or _boundary_splits_predicate_phrase(left_text, right_text)
         or _boundary_splits_repeated_model_suffix(left_text, right_text)
@@ -3234,6 +3328,8 @@ def _score_boundary_pair(left: SubtitleEntry, right: SubtitleEntry) -> float:
         score -= 14.0
     if _boundary_splits_protected_term(left.text_raw, right.text_raw):
         score -= 16.0
+    if _boundary_splits_generic_word(left.text_raw, right.text_raw):
+        score -= 18.0
     if _looks_like_split_measure_phrase(left.text_raw, right.text_raw):
         score -= 12.0
     if _boundary_splits_predicate_phrase(left.text_raw, right.text_raw):
@@ -3614,6 +3710,88 @@ def _boundary_splits_protected_term(left: str, right: str) -> bool:
     return False
 
 
+def _boundary_splits_generic_word(left: str, right: str) -> bool:
+    left_text = _strip_boundary_trailing_punctuation(left)
+    right_text = str(right or "").strip()
+    right_text = _strip_boundary_leading_particles(right_text) or right_text
+    right_text = re.sub(r"^[，。！？、：；,.!?\s]+", "", right_text)
+    if not left_text or not right_text:
+        return False
+    if not re.search(r"[\u4e00-\u9fffA-Za-z0-9]$", left_text):
+        return False
+    if not re.match(r"^[\u4e00-\u9fffA-Za-z0-9]", right_text):
+        return False
+    if _boundary_splits_protected_term(left_text, right_text):
+        return True
+    if _boundary_splits_model_token(left_text, right_text):
+        return True
+    if _boundary_splits_compound_term(left_text, right_text):
+        return True
+    if _boundary_splits_generic_chinese_word(left_text, right_text):
+        return True
+    return _boundary_splits_alnum_token(left_text, right_text)
+
+
+def _boundary_splits_alnum_token(left: str, right: str) -> bool:
+    if not re.search(r"[A-Za-z0-9]$", left or "") or not re.match(r"^[A-Za-z0-9]", right or ""):
+        return False
+    left_token = re.search(r"[A-Za-z0-9]{1,16}$", str(left or ""))
+    right_token = re.match(r"[A-Za-z0-9]{1,16}", str(right or ""))
+    if not left_token or not right_token:
+        return False
+    combined = f"{left_token.group(0)}{right_token.group(0)}"
+    if len(combined) < 2:
+        return False
+    if len(left_token.group(0)) == 1 and len(right_token.group(0)) == 1 and combined.isdigit():
+        return False
+    return True
+
+
+def _boundary_splits_generic_chinese_word(left: str, right: str) -> bool:
+    if _boundary_splits_fallback_chinese_word(left, right):
+        return True
+    if jieba is None:
+        return False
+    left_tail_match = re.search(r"[\u4e00-\u9fff]{1,8}$", str(left or ""))
+    right_head_match = re.match(r"[\u4e00-\u9fff]{1,8}", str(right or ""))
+    if not left_tail_match or not right_head_match:
+        return False
+    left_tail = left_tail_match.group(0)
+    right_head = right_head_match.group(0)
+    context = f"{left_tail}{right_head}"
+    boundary = len(left_tail)
+    if len(context) < 2:
+        return False
+    cursor = 0
+    for token in jieba.lcut(context, HMM=True):
+        token = str(token or "")
+        if not token:
+            continue
+        start = cursor
+        end = cursor + len(token)
+        cursor = end
+        if not (start < boundary < end):
+            continue
+        if len(token) < 2 or not re.search(r"[\u4e00-\u9fff]{2,}", token):
+            continue
+        if token in _GOOD_BREAK_PREFIXES or token in _NO_SPLIT_ENDINGS or token in _NO_SPLIT_PREFIXES:
+            continue
+        return True
+    return False
+
+
+def _boundary_splits_fallback_chinese_word(left: str, right: str) -> bool:
+    left_text = _strip_boundary_trailing_punctuation(left)
+    right_text = _strip_boundary_leading_particles(right) or str(right or "").strip()
+    if not left_text or not right_text:
+        return False
+    for term in _FALLBACK_GENERIC_CJK_BOUNDARY_TERMS:
+        for split_at in range(1, len(term)):
+            if left_text.endswith(term[:split_at]) and right_text.startswith(term[split_at:]):
+                return True
+    return False
+
+
 def _boundary_splits_model_token(left: str, right: str) -> bool:
     left_text = str(left or "").strip()
     right_text = _strip_boundary_leading_particles(right) or str(right or "").strip()
@@ -3926,13 +4104,14 @@ def _boundary_splits_possessive_phrase(left: str, right: str) -> bool:
     return bool(re.search(r"[\u4e00-\u9fffA-Za-z0-9]{1,12}$", left_text))
 
 
-def _fragment_window_metrics(entries: list[SubtitleEntry]) -> tuple[int, int, int, int]:
+def _fragment_window_metrics(entries: list[SubtitleEntry]) -> tuple[int, int, int, int, int]:
     analysis = analyze_subtitle_segmentation(entries)
     fragment_count = int(analysis.fragment_start_count) + int(analysis.fragment_end_count)
     return (
         int(analysis.low_confidence_window_count),
         int(analysis.suspicious_boundary_count),
         int(analysis.protected_term_split_count),
+        int(analysis.generic_word_split_count),
         fragment_count,
     )
 
@@ -3947,6 +4126,7 @@ def _fragment_window_improvement_score(
     score += (int(current_analysis.low_confidence_window_count) - int(candidate_analysis.low_confidence_window_count)) * 10.0
     score += (int(current_analysis.suspicious_boundary_count) - int(candidate_analysis.suspicious_boundary_count)) * 3.5
     score += (int(current_analysis.protected_term_split_count) - int(candidate_analysis.protected_term_split_count)) * 5.0
+    score += (int(current_analysis.generic_word_split_count) - int(candidate_analysis.generic_word_split_count)) * 6.0
     score += (current_fragment_count - candidate_fragment_count) * 1.5
     return score
 
@@ -3985,6 +4165,8 @@ def _fragment_window_candidate_has_hard_regression(
     max_chars: int,
 ) -> bool:
     if int(candidate_analysis.protected_term_split_count) > int(current_analysis.protected_term_split_count):
+        return True
+    if int(candidate_analysis.generic_word_split_count) > int(current_analysis.generic_word_split_count):
         return True
     if _fragment_window_overlong_entry_count(candidate_entries, max_chars=max_chars) > _fragment_window_overlong_entry_count(
         current_entries,
@@ -4072,7 +4254,8 @@ def _fragment_window_candidate_is_acceptable(
     low_conf_delta = current_metrics[0] - candidate_metrics[0]
     suspicious_delta = current_metrics[1] - candidate_metrics[1]
     protected_delta = current_metrics[2] - candidate_metrics[2]
-    fragment_delta = current_metrics[3] - candidate_metrics[3]
+    generic_word_delta = current_metrics[3] - candidate_metrics[3]
+    fragment_delta = current_metrics[4] - candidate_metrics[4]
     if (
         low_conf_delta > 0
         and suspicious_delta >= 0
@@ -4081,6 +4264,8 @@ def _fragment_window_candidate_is_acceptable(
     ):
         return True
     if protected_delta > 0 and candidate_score >= current_score - 5.0:
+        return True
+    if generic_word_delta > 0 and candidate_score >= current_score - 6.0:
         return True
     if suspicious_delta >= 2 and fragment_delta >= 1 and candidate_score >= current_score - 4.0:
         return True

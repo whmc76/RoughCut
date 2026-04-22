@@ -53,8 +53,31 @@ _KEYWORD_HIGHLIGHT_PRIORITY_TERMS = (
     "对比",
     "实测",
     "新款",
+    "配色",
     "版本",
     "开箱",
+)
+_KEYWORD_HIGHLIGHT_EXPANDABLE_SUFFIXES = {
+    "版本",
+    "配色",
+    "型号",
+    "款",
+    "代",
+    "系列",
+}
+_KEYWORD_HIGHLIGHT_PREFIX_TRIMS = (
+    "这个",
+    "那个",
+    "一种",
+    "一个",
+    "一款",
+    "这款",
+    "那款",
+    "新的",
+    "新出的",
+    "主打的",
+    "经典的",
+    "家",
 )
 _KEYWORD_HIGHLIGHT_ACTION_TERMS = ("点赞", "收藏", "关注")
 _KEYWORD_HIGHLIGHT_PALETTES: dict[str, dict[str, str]] = {
@@ -812,11 +835,64 @@ def _build_keyword_highlight_candidates(
         candidates.append((mixed_token.group(0), 88.0))
     for index, term in enumerate(_KEYWORD_HIGHLIGHT_PRIORITY_TERMS):
         if term in stripped:
-            candidates.append((term, 80.0 - index * 0.5))
+            candidates.append((_expand_keyword_highlight_term(stripped, term), 80.0 - index * 0.5))
     compact = "".join(stripped.split())
     if unit_role in {"lead", "focus"} and 3 <= len(compact) <= 6 and _contains_cjk(compact):
         candidates.append((compact, 60.0))
     return candidates
+
+
+def _expand_keyword_highlight_term(line: str, term: str) -> str:
+    suffix = str(term or "").strip()
+    text = str(line or "").strip()
+    if suffix not in _KEYWORD_HIGHLIGHT_EXPANDABLE_SUFFIXES or suffix not in text:
+        return suffix
+    start = text.find(suffix)
+    lookback = text[max(0, start - 14):start]
+    if not lookback:
+        return suffix
+    split_markers = ("，", "。", "！", "？", "；", "：", ",", ".", "!", "?", ";", ":", " ", "\n")
+    cut = max((lookback.rfind(marker) for marker in split_markers), default=-1)
+    prefix = lookback[cut + 1:] if cut >= 0 else lookback
+    for marker in (
+        "这个",
+        "那个",
+        "一款",
+        "一个",
+        "主打的",
+        "新出的",
+        "经典的",
+        "包括",
+        "还有",
+        "以及",
+        "是",
+        "叫",
+        "算",
+        "有",
+        "为",
+        "和",
+        "跟",
+        "的",
+    ):
+        marker_index = prefix.rfind(marker)
+        if marker_index >= 0:
+            prefix = prefix[marker_index + len(marker):]
+    changed = True
+    while prefix and changed:
+        changed = False
+        for marker in _KEYWORD_HIGHLIGHT_PREFIX_TRIMS:
+            if prefix.startswith(marker) and len(prefix) > len(marker):
+                prefix = prefix[len(marker):]
+                changed = True
+                break
+    prefix = prefix.strip()
+    if not prefix:
+        return suffix
+    if len(prefix) > 10:
+        prefix = prefix[-10:]
+    if len(prefix) < 2 and not re.search(r"[A-Za-z0-9]", prefix):
+        return suffix
+    return f"{prefix}{suffix}"
 
 
 def _collect_highlight_preserve_terms(

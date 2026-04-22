@@ -10,19 +10,42 @@ _STANDALONE_FILLER_TOKENS = (
     "嗯",
     "啊",
     "吧",
+    "我",
 )
 
 _SUBTITLE_FILLER_SEPARATOR_PATTERN = re.compile(r"[\s，。！？、：；,.!?…~\-—_()\[\]{}<>《》“”\"'‘’]+")
+_FINAL_SUBTITLE_PUNCTUATION_PATTERN = re.compile(r"[\s，。！？、：；,.!?…~\-—_()\[\]{}<>《》“”\"'‘’/\\|]+")
+_DISRUPTION_CLAUSE_PATTERN = re.compile(
+    r"^(?:滚|滚开|别吵|别说话|别闹|走开|待会再说|没事|停一下|暂停一下|等一下|先停一下|别打扰|不要打扰|干嘛)$"
+)
 
 
 def clean_final_subtitle_text(text: object) -> str:
-    """Remove standalone filler-only subtitle lines at final subtitle output time."""
+    """Remove final-output noise and serialize captions without punctuation."""
     normalized = str(text or "").strip()
     if not normalized:
         return ""
-    if _is_standalone_subtitle_filler(normalized):
+    normalized = _drop_final_noise_clauses(normalized)
+    if not normalized or _is_standalone_subtitle_filler(normalized) or _is_disruption_clause(normalized):
         return ""
-    return normalized
+    return _format_final_subtitle_text(normalized)
+
+
+def _drop_final_noise_clauses(text: str) -> str:
+    pieces = [piece for piece in _SUBTITLE_FILLER_SEPARATOR_PATTERN.split(str(text or "")) if piece.strip()]
+    if not pieces:
+        return ""
+    kept: list[str] = []
+    for piece in pieces:
+        candidate = piece.strip()
+        if _is_standalone_subtitle_filler(candidate) or _is_disruption_clause(candidate):
+            continue
+        kept.append(candidate)
+    return " ".join(kept).strip()
+
+
+def _format_final_subtitle_text(text: str) -> str:
+    return _FINAL_SUBTITLE_PUNCTUATION_PATTERN.sub(" ", str(text or "").strip()).strip()
 
 
 def _is_standalone_subtitle_filler(text: str) -> bool:
@@ -40,3 +63,10 @@ def _is_standalone_subtitle_filler(text: str) -> bool:
         if not matched:
             return False
     return True
+
+
+def _is_disruption_clause(text: str) -> bool:
+    compact = _SUBTITLE_FILLER_SEPARATOR_PATTERN.sub("", str(text or "").strip())
+    if not compact:
+        return False
+    return bool(_DISRUPTION_CLAUSE_PATTERN.fullmatch(compact))
