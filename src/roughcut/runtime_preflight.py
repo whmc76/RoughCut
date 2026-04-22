@@ -99,8 +99,8 @@ def _managed_service_urls() -> list[str]:
     urls: list[str] = []
 
     transcription_provider = normalize_transcription_provider_name(getattr(settings, "transcription_provider", ""))
-    if transcription_provider == "qwen3_asr":
-        urls.append(str(getattr(settings, "qwen_asr_api_base_url", "") or "").strip())
+    if transcription_provider == "local_http_asr":
+        urls.append(str(getattr(settings, "local_asr_api_base_url", "") or "").strip())
     if str(getattr(settings, "avatar_provider", "") or "").strip().lower() == "heygem":
         urls.append(str(getattr(settings, "avatar_api_base_url", "") or "").strip())
     if str(getattr(settings, "voice_provider", "") or "").strip().lower() == "indextts2":
@@ -121,11 +121,11 @@ def _managed_service_targets() -> list[dict[str, str]]:
     targets: list[dict[str, str]] = []
 
     transcription_provider = normalize_transcription_provider_name(getattr(settings, "transcription_provider", ""))
-    if transcription_provider == "qwen3_asr":
+    if transcription_provider == "local_http_asr":
         targets.append(
             {
-                "name": "qwen3_asr",
-                "url": str(getattr(settings, "qwen_asr_api_base_url", "") or "").strip(),
+                "name": "local_http_asr",
+                "url": str(getattr(settings, "local_asr_api_base_url", "") or "").strip(),
                 "probe_kind": "health_json",
             }
         )

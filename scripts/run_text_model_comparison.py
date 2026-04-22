@@ -27,7 +27,7 @@ from roughcut.providers.factory import get_reasoning_provider, get_search_provid
 from roughcut.providers.multimodal import complete_with_images
 from roughcut.providers.reasoning.base import Message, extract_json_text
 from roughcut.providers.search.base import SearchResult
-from roughcut.providers.transcription.qwen_asr_http import QwenASRHTTPProvider
+from roughcut.providers.transcription.local_http_asr import LocalHTTPASRProvider
 from roughcut.review.content_profile import _extract_reference_frames, build_transcript_excerpt
 from roughcut.speech.postprocess import normalize_display_text, split_into_subtitles
 
@@ -192,7 +192,7 @@ async def build_samples(video_paths: list[Path], *, report_dir: Path, parallelis
             file_hash = await asyncio.to_thread(hash_file, video_path)
             audio_path = sample_dir / "audio.wav"
             await extract_audio(video_path, audio_path)
-            transcription = QwenASRHTTPProvider()
+            transcription = LocalHTTPASRProvider()
             transcript = await transcription.transcribe(audio_path, language="zh-CN")
             subtitle_items = build_subtitle_items(transcript)
             transcript_excerpt = build_transcript_excerpt(subtitle_items)

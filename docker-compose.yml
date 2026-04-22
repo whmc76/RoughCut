@@ -15,6 +15,11 @@ x-app-env: &app-env
   RENDER_DEBUG_DIR: /app/logs/render-debug
   XDG_CACHE_HOME: /app/data/cache
   HF_HOME: /app/data/cache/huggingface
+  TRANSCRIPTION_PROVIDER: ${TRANSCRIPTION_PROVIDER:-local_http_asr}
+  TRANSCRIPTION_MODEL: ${TRANSCRIPTION_MODEL:-local-asr-current}
+  LOCAL_ASR_API_BASE_URL: ${ROUGHCUT_DOCKER_LOCAL_ASR_API_BASE_URL:-http://host.docker.internal:6001}
+  LOCAL_ASR_MODEL_NAME: ${LOCAL_ASR_MODEL_NAME:-vibevoice-asr-int8}
+  LOCAL_ASR_DISPLAY_NAME: ${LOCAL_ASR_DISPLAY_NAME:-VibeVoice INT8}
   ROUGHCUT_DOCKER_GPUS: ${ROUGHCUT_DOCKER_GPUS:-all}
   SUBTITLE_FONT: Noto Sans CJK SC
   COVER_TITLE_FONT_PATH: /usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc

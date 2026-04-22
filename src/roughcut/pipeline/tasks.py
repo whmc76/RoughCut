@@ -383,7 +383,7 @@ def _compute_retry_countdown(task) -> int:
 def _memory_pressure_guard_enabled(step_name: str) -> bool:
     settings = get_settings()
     transcription_provider = normalize_transcription_provider_name(getattr(settings, "transcription_provider", ""))
-    if step_name == "transcribe" and transcription_provider == "qwen3_asr":
+    if step_name == "transcribe" and transcription_provider == "local_http_asr":
         return False
     if step_name == "render":
         # Render may rely on an external managed GPU service like HeyGem.

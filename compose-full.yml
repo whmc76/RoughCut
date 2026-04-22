@@ -56,7 +56,9 @@ services:
       OPENAI_API_KEY: ""
       OUTPUT_DIR: /app/data/output
       OUTPUT_NAME_PATTERN: '{date}_{stem}'
-      QWEN_ASR_API_BASE_URL: http://host.docker.internal:18096
+      LOCAL_ASR_API_BASE_URL: http://host.docker.internal:6001
+      LOCAL_ASR_DISPLAY_NAME: VibeVoice INT8
+      LOCAL_ASR_MODEL_NAME: vibevoice-asr-int8
       REASONING_MODEL: MiniMax-M2.7-highspeed
       REASONING_PROVIDER: minimax
       REDIS_URL: redis://redis:6379/0
@@ -87,8 +89,8 @@ services:
       TELEGRAM_AGENT_ENABLED: "false"
       TELEGRAM_BOT_CHAT_ID: "7814561115"
       TELEGRAM_BOT_TOKEN: 8718320333:AAHaR16acifX3M5fYmhE2_p0nndcxtM4ceU
-      TRANSCRIPTION_MODEL: gpt-4o-transcribe
-      TRANSCRIPTION_PROVIDER: openai
+      TRANSCRIPTION_MODEL: local-asr-current
+      TRANSCRIPTION_PROVIDER: local_http_asr
       XDG_CACHE_HOME: /app/data/cache
     extra_hosts:
       - host.docker.internal=host-gateway
@@ -185,7 +187,9 @@ services:
       OPENAI_API_KEY: ""
       OUTPUT_DIR: /app/data/output
       OUTPUT_NAME_PATTERN: '{date}_{stem}'
-      QWEN_ASR_API_BASE_URL: http://host.docker.internal:18096
+      LOCAL_ASR_API_BASE_URL: http://host.docker.internal:6001
+      LOCAL_ASR_DISPLAY_NAME: VibeVoice INT8
+      LOCAL_ASR_MODEL_NAME: vibevoice-asr-int8
       REASONING_MODEL: MiniMax-M2.7-highspeed
       REASONING_PROVIDER: minimax
       REDIS_URL: redis://redis:6379/0
@@ -216,8 +220,8 @@ services:
       TELEGRAM_AGENT_ENABLED: "false"
       TELEGRAM_BOT_CHAT_ID: "7814561115"
       TELEGRAM_BOT_TOKEN: 8718320333:AAHaR16acifX3M5fYmhE2_p0nndcxtM4ceU
-      TRANSCRIPTION_MODEL: gpt-4o-transcribe
-      TRANSCRIPTION_PROVIDER: openai
+      TRANSCRIPTION_MODEL: local-asr-current
+      TRANSCRIPTION_PROVIDER: local_http_asr
       XDG_CACHE_HOME: /app/data/cache
     image: roughcut:local
     networks:
@@ -312,7 +316,9 @@ services:
       OPENAI_API_KEY: ""
       OUTPUT_DIR: /app/data/output
       OUTPUT_NAME_PATTERN: '{date}_{stem}'
-      QWEN_ASR_API_BASE_URL: http://host.docker.internal:18096
+      LOCAL_ASR_API_BASE_URL: http://host.docker.internal:6001
+      LOCAL_ASR_DISPLAY_NAME: VibeVoice INT8
+      LOCAL_ASR_MODEL_NAME: vibevoice-asr-int8
       REASONING_MODEL: MiniMax-M2.7-highspeed
       REASONING_PROVIDER: minimax
       REDIS_URL: redis://redis:6379/0
@@ -343,8 +349,8 @@ services:
       TELEGRAM_AGENT_ENABLED: "false"
       TELEGRAM_BOT_CHAT_ID: "7814561115"
       TELEGRAM_BOT_TOKEN: 8718320333:AAHaR16acifX3M5fYmhE2_p0nndcxtM4ceU
-      TRANSCRIPTION_MODEL: gpt-4o-transcribe
-      TRANSCRIPTION_PROVIDER: openai
+      TRANSCRIPTION_MODEL: local-asr-current
+      TRANSCRIPTION_PROVIDER: local_http_asr
       XDG_CACHE_HOME: /app/data/cache
     extra_hosts:
       - host.docker.internal=host-gateway
@@ -485,7 +491,9 @@ services:
       OPENAI_API_KEY: ""
       OUTPUT_DIR: /app/data/output
       OUTPUT_NAME_PATTERN: '{date}_{stem}'
-      QWEN_ASR_API_BASE_URL: http://host.docker.internal:18096
+      LOCAL_ASR_API_BASE_URL: http://host.docker.internal:6001
+      LOCAL_ASR_DISPLAY_NAME: VibeVoice INT8
+      LOCAL_ASR_MODEL_NAME: vibevoice-asr-int8
       REASONING_MODEL: MiniMax-M2.7-highspeed
       REASONING_PROVIDER: minimax
       REDIS_URL: redis://redis:6379/0
@@ -516,8 +524,8 @@ services:
       TELEGRAM_AGENT_ENABLED: "false"
       TELEGRAM_BOT_CHAT_ID: "7814561115"
       TELEGRAM_BOT_TOKEN: 8718320333:AAHaR16acifX3M5fYmhE2_p0nndcxtM4ceU
-      TRANSCRIPTION_MODEL: gpt-4o-transcribe
-      TRANSCRIPTION_PROVIDER: openai
+      TRANSCRIPTION_MODEL: local-asr-current
+      TRANSCRIPTION_PROVIDER: local_http_asr
       XDG_CACHE_HOME: /app/data/cache
     extra_hosts:
       - host.docker.internal=host-gateway
@@ -613,7 +621,9 @@ services:
       OPENAI_API_KEY: ""
       OUTPUT_DIR: /app/data/output
       OUTPUT_NAME_PATTERN: '{date}_{stem}'
-      QWEN_ASR_API_BASE_URL: http://host.docker.internal:18096
+      LOCAL_ASR_API_BASE_URL: http://host.docker.internal:6001
+      LOCAL_ASR_DISPLAY_NAME: VibeVoice INT8
+      LOCAL_ASR_MODEL_NAME: vibevoice-asr-int8
       REASONING_MODEL: MiniMax-M2.7-highspeed
       REASONING_PROVIDER: minimax
       REDIS_URL: redis://redis:6379/0
@@ -644,8 +654,8 @@ services:
       TELEGRAM_AGENT_ENABLED: "false"
       TELEGRAM_BOT_CHAT_ID: "7814561115"
       TELEGRAM_BOT_TOKEN: 8718320333:AAHaR16acifX3M5fYmhE2_p0nndcxtM4ceU
-      TRANSCRIPTION_MODEL: gpt-4o-transcribe
-      TRANSCRIPTION_PROVIDER: openai
+      TRANSCRIPTION_MODEL: local-asr-current
+      TRANSCRIPTION_PROVIDER: local_http_asr
       XDG_CACHE_HOME: /app/data/cache
     extra_hosts:
       - host.docker.internal=host-gateway

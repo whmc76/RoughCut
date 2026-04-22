@@ -758,7 +758,9 @@ export type Config = {
   search_provider: string;
   search_fallback_provider: string;
   model_search_helper: string;
-  qwen_asr_api_base_url: string;
+  local_asr_api_base_url: string;
+  local_asr_model_name: string;
+  local_asr_display_name: string;
   avatar_provider: string;
   avatar_api_key_set: boolean;
   avatar_presenter_id: string;

@@ -9,7 +9,7 @@ export const PROVIDER_LABELS: Record<string, string> = {
   model: "模型代理",
   ollama: "Ollama",
   openai: "OpenAI",
-  qwen3_asr: "Qwen3 ASR",
+  local_http_asr: "本地 HTTP ASR",
   runninghub: "RunningHub",
   searxng: "SearXNG",
 };
@@ -18,7 +18,7 @@ export const TRANSCRIPTION_PROVIDER_LABELS: Record<string, string> = {
   funasr: "FunASR (local)",
   faster_whisper: "Faster Whisper (local)",
   openai: "OpenAI (api)",
-  qwen3_asr: "Qwen3 ASR (local)",
+  local_http_asr: "本地 HTTP ASR",
 };
 
 function readString(form: SettingsForm, key: string, fallback = ""): string {
@@ -42,7 +42,7 @@ export function getTranscriptionProviderLabel(value: string): string {
 }
 
 export function isLocalTranscriptionProvider(value: string): boolean {
-  return value === "funasr" || value === "faster_whisper" || value === "qwen3_asr";
+  return value === "funasr" || value === "faster_whisper" || value === "local_http_asr";
 }
 
 export function getProviderStatusLabel(status: string): string {

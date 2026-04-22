@@ -25,7 +25,7 @@ from typing import Any
 from sqlalchemy import delete, select
 
 from roughcut.avatar import list_avatar_material_profiles
-from roughcut.config import get_settings, llm_task_route, should_enable_task_search
+from roughcut.config import get_settings, llm_task_route, normalize_transcription_settings, should_enable_task_search
 from roughcut.creative import (
     ai_director_mode_enabled,
     auto_review_mode_enabled,
@@ -245,6 +245,23 @@ _SUBTITLE_COPY_HOOK_LEADS = (
 )
 
 logger = logging.getLogger(__name__)
+
+_TRANSCRIPTION_PROVIDER_LABELS: dict[str, str] = {
+    "openai": "OpenAI",
+    "local_http_asr": "Local HTTP ASR",
+    "funasr": "FunASR",
+    "faster_whisper": "faster-whisper",
+}
+
+
+def _describe_transcription_route(*, provider: object, model: object, language: object | None = None) -> str:
+    provider_value, model_value = normalize_transcription_settings(provider, model)
+    provider_label = _TRANSCRIPTION_PROVIDER_LABELS.get(provider_value, provider_value)
+    label = f"{provider_label} / {model_value}"
+    language_value = str(language or "").strip()
+    if language_value:
+        return f"{label} · {language_value}"
+    return label
 
 _CONTENT_PROFILE_ARTIFACT_TYPES = ("content_profile_final", "content_profile", "content_profile_draft")
 _DOWNSTREAM_PROFILE_ARTIFACT_TYPES = ("downstream_context",) + _CONTENT_PROFILE_ARTIFACT_TYPES
@@ -4293,14 +4310,19 @@ async def run_transcribe(job_id: str) -> dict:
                 tmpdir=tmpdir,
                 default_name="audio.wav",
             )
-            await _set_step_progress(session, step, detail=f"加载 {job.language} 转写模型", progress=0.2)
+            transcription_route_label = _describe_transcription_route(
+                provider=settings.transcription_provider,
+                model=settings.transcription_model,
+                language=job.language,
+            )
+            await _set_step_progress(session, step, detail=f"加载转写模型：{transcription_route_label}", progress=0.2)
 
             progress_loop = asyncio.get_running_loop()
             last_progress = {"progress": 0.0, "ts": 0.0}
             accept_progress_updates = {"value": True}
             pending_progress_updates = []
             heartbeat_state = {
-                "detail": f"使用 {job.language} 模型执行转写",
+                "detail": f"使用 {transcription_route_label} 执行转写",
                 "progress": 0.25,
             }
             transcribe_heartbeat: asyncio.Task[None] | None = None
@@ -4350,7 +4372,7 @@ async def run_transcribe(job_id: str) -> dict:
                 )
                 pending_progress_updates.append(future)
 
-            await _set_step_progress(session, step, detail=f"使用 {job.language} 模型执行转写", progress=0.25)
+            await _set_step_progress(session, step, detail=f"使用 {transcription_route_label} 执行转写", progress=0.25)
             transcribe_heartbeat = asyncio.create_task(_transcribe_heartbeat_loop())
             transcribe_timeout_sec = _resolve_transcribe_runtime_timeout_seconds(settings)
             try:

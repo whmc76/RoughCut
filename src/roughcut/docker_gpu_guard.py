@@ -115,11 +115,11 @@ def _build_target_configs(settings) -> list[_ManagedDockerTarget]:
             probe_kind="health_json",
         ),
         _ManagedDockerTarget(
-            key="qwen_asr",
-            compose_file=str(getattr(settings, "qwen_asr_docker_compose_file", "") or ""),
-            env_file=str(getattr(settings, "qwen_asr_docker_env_file", "") or ""),
-            services=_parse_services(getattr(settings, "qwen_asr_docker_services", "qwen-asr")),
-            base_urls=(_normalize_base_url(getattr(settings, "qwen_asr_api_base_url", "")),),
+            key="local_asr",
+            compose_file=str(getattr(settings, "local_asr_docker_compose_file", "") or ""),
+            env_file=str(getattr(settings, "local_asr_docker_env_file", "") or ""),
+            services=_parse_services(getattr(settings, "local_asr_docker_services", "asr")),
+            base_urls=(_normalize_base_url(getattr(settings, "local_asr_api_base_url", "")),),
             probe_kind="health_json",
         ),
     ]
@@ -234,7 +234,7 @@ def _target_management_supported(target: _ManagedDockerTarget) -> bool:
     settings = get_settings()
     if not bool(getattr(settings, "docker_gpu_guard_enabled", True)):
         return False
-    if not bool(getattr(settings, f"{target.key}_docker_guard_enabled", target.key != "qwen_asr")):
+    if not bool(getattr(settings, f"{target.key}_docker_guard_enabled", True)):
         return False
     if shutil.which("docker") is None:
         return False
@@ -471,20 +471,19 @@ def _resolve_target_services(target: _ManagedDockerTarget) -> tuple[str, ...]:
             selected.append(contains_match)
             continue
 
-        if target.key == "qwen_asr":
+        if target.key == "local_asr":
             fuzzy_match = next(
                 (
                     svc
                     for svc in available
-                    if ("qwen" in normalized_available[svc] and "qwen" in normalized_request)
-                    or ("asr" in normalized_available[svc] and "asr" in normalized_request)
+                    if "asr" in normalized_available[svc] or "asr" in normalized_request
                 ),
                 None,
             )
             if fuzzy_match and fuzzy_match not in selected:
                 selected.append(fuzzy_match)
 
-    if target.key == "qwen_asr":
+    if target.key == "local_asr":
         port_matched = _resolve_services_by_base_port(target, available=available)
         for service_name in port_matched:
             if service_name not in selected:

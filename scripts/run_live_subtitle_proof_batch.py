@@ -22,9 +22,9 @@ if hasattr(sys.stdout, "reconfigure"):
 if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8")
 
-DEFAULT_TRANSCRIPTION_PROVIDER = "qwen3_asr"
-DEFAULT_TRANSCRIPTION_MODEL = "qwen3-asr-1.7b"
-DEFAULT_QWEN_ASR_API_BASE_URL = "http://127.0.0.1:18096"
+DEFAULT_TRANSCRIPTION_PROVIDER = "local_http_asr"
+DEFAULT_TRANSCRIPTION_MODEL = "local-asr-current"
+DEFAULT_LOCAL_ASR_API_BASE_URL = "http://127.0.0.1:6001"
 
 from sqlalchemy import select
 
@@ -73,7 +73,7 @@ class RowReport:
     workflow_template: str | None
     transcription_provider: str | None
     transcription_model: str | None
-    qwen_asr_api_base_url: str | None
+    local_asr_api_base_url: str | None
     subtitle_count: int | None
     correction_count: int | None
     auto_accepted_correction_count: int | None
@@ -125,7 +125,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--language", default="zh-CN")
     parser.add_argument("--transcription-provider", default=DEFAULT_TRANSCRIPTION_PROVIDER)
     parser.add_argument("--transcription-model", default=DEFAULT_TRANSCRIPTION_MODEL)
-    parser.add_argument("--qwen-asr-api-base-url", default=DEFAULT_QWEN_ASR_API_BASE_URL)
+    parser.add_argument("--local-asr-api-base-url", default=DEFAULT_LOCAL_ASR_API_BASE_URL)
     parser.add_argument(
         "--report-dir",
         type=Path,
@@ -161,8 +161,8 @@ def _mean(values: list[float | None]) -> float | None:
 def apply_runtime_transcription_env(args: argparse.Namespace) -> None:
     os.environ["TRANSCRIPTION_PROVIDER"] = str(args.transcription_provider or DEFAULT_TRANSCRIPTION_PROVIDER).strip()
     os.environ["TRANSCRIPTION_MODEL"] = str(args.transcription_model or DEFAULT_TRANSCRIPTION_MODEL).strip()
-    os.environ["QWEN_ASR_API_BASE_URL"] = str(
-        args.qwen_asr_api_base_url or DEFAULT_QWEN_ASR_API_BASE_URL
+    os.environ["LOCAL_ASR_API_BASE_URL"] = str(
+        args.local_asr_api_base_url or DEFAULT_LOCAL_ASR_API_BASE_URL
     ).strip()
 
 
@@ -454,7 +454,7 @@ async def collect_row_report(
     workflow_template: str,
     transcription_provider: str,
     transcription_model: str,
-    qwen_asr_api_base_url: str,
+    local_asr_api_base_url: str,
     error: str | None = None,
 ) -> RowReport:
     factory = get_session_factory()
@@ -526,7 +526,7 @@ async def collect_row_report(
             workflow_template=workflow_template,
             transcription_provider=transcription_provider,
             transcription_model=transcription_model,
-            qwen_asr_api_base_url=qwen_asr_api_base_url,
+            local_asr_api_base_url=local_asr_api_base_url,
             subtitle_count=len(subtitles),
             correction_count=len(corrections),
             auto_accepted_correction_count=auto_accepted_corrections,
@@ -583,7 +583,7 @@ def render_markdown(report: dict[str, Any]) -> str:
         f"- workflow_template: {report.get('workflow_template')}",
         f"- transcription_provider: {report.get('transcription_provider')}",
         f"- transcription_model: {report.get('transcription_model')}",
-        f"- qwen_asr_api_base_url: {report.get('qwen_asr_api_base_url')}",
+        f"- local_asr_api_base_url: {report.get('local_asr_api_base_url')}",
         f"- executed_steps: {', '.join(report.get('executed_steps') or [])}",
         f"- skipped_steps: {', '.join(report.get('skipped_steps') or [])}",
         "",
@@ -614,7 +614,7 @@ def render_markdown(report: dict[str, Any]) -> str:
         lines.append(f"- status: {row.get('status')}")
         lines.append(f"- job_id: {row.get('job_id') or ''}")
         lines.append(
-            f"- transcription: {row.get('transcription_provider') or ''} / {row.get('transcription_model') or ''} @ {row.get('qwen_asr_api_base_url') or ''}"
+            f"- transcription: {row.get('transcription_provider') or ''} / {row.get('transcription_model') or ''} @ {row.get('local_asr_api_base_url') or ''}"
         )
         lines.append(f"- subtitle_count: {row.get('subtitle_count')}")
         lines.append(f"- correction_count: {row.get('correction_count')}")
@@ -706,7 +706,7 @@ def main() -> None:
                     workflow_template=args.workflow_template,
                     transcription_provider=args.transcription_provider,
                     transcription_model=args.transcription_model,
-                    qwen_asr_api_base_url=args.qwen_asr_api_base_url,
+                    local_asr_api_base_url=args.local_asr_api_base_url,
                     error=error_text,
                 )
             )
@@ -720,7 +720,7 @@ def main() -> None:
                 workflow_template=args.workflow_template,
                 transcription_provider=args.transcription_provider,
                 transcription_model=args.transcription_model,
-                qwen_asr_api_base_url=args.qwen_asr_api_base_url,
+                local_asr_api_base_url=args.local_asr_api_base_url,
                 subtitle_count=None,
                 correction_count=None,
                 auto_accepted_correction_count=None,
@@ -782,7 +782,7 @@ def main() -> None:
         "language": args.language,
         "transcription_provider": args.transcription_provider,
         "transcription_model": args.transcription_model,
-        "qwen_asr_api_base_url": args.qwen_asr_api_base_url,
+        "local_asr_api_base_url": args.local_asr_api_base_url,
         "executed_steps": list(LIVE_TEST_STEPS),
         "skipped_steps": list(SKIPPED_DOWNSTREAM_STEPS),
         "sample_files": [path.name for path in selected_files],

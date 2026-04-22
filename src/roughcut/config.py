@@ -55,7 +55,9 @@ ENV_EXPLICIT_OVERRIDE_SETTINGS: tuple[str, ...] = ENV_MANAGED_SETTINGS + (
     "transcription_provider",
     "transcription_model",
     "transcription_dialect",
-    "qwen_asr_api_base_url",
+    "local_asr_api_base_url",
+    "local_asr_model_name",
+    "local_asr_display_name",
     "telegram_agent_state_dir",
     "telegram_remote_review_enabled",
     "telegram_bot_api_base_url",
@@ -66,13 +68,14 @@ TRANSCRIPTION_PROVIDER_ALIASES: dict[str, str] = {
     "fast": "faster_whisper",
     "faster-whisper": "faster_whisper",
     "local_whisper": "faster_whisper",
-    "qwen3-asr": "qwen3_asr",
-    "qwen3asr": "qwen3_asr",
-    "qwen_asr": "qwen3_asr",
+    "local": "local_http_asr",
+    "local_asr": "local_http_asr",
+    "local-asr": "local_http_asr",
+    "local-http-asr": "local_http_asr",
 }
 TRANSCRIPTION_PROVIDER_PRIORITY: tuple[str, ...] = (
+    "local_http_asr",
     "openai",
-    "qwen3_asr",
     "funasr",
     "faster_whisper",
 )
@@ -92,9 +95,8 @@ TRANSCRIPTION_MODEL_OPTIONS: dict[str, list[str]] = {
         "gpt-4o-transcribe",
         "gpt-4o-mini-transcribe",
     ],
-    "qwen3_asr": [
-        "qwen3-asr-1.7b",
-        "qwen3-asr-0.6b",
+    "local_http_asr": [
+        "local-asr-current",
     ],
 }
 SEARCH_PROVIDER_VALUES: tuple[str, ...] = ("auto", "openai", "anthropic", "minimax", "ollama", "model", "searxng")
@@ -181,12 +183,12 @@ def resolve_heygem_shared_root(*, ensure_exists: bool = True) -> Path:
         (resolved / "temp").mkdir(parents=True, exist_ok=True)
         (resolved / "result").mkdir(parents=True, exist_ok=True)
     return resolved
-DEFAULT_TRANSCRIPTION_PROVIDER = "openai"
+DEFAULT_TRANSCRIPTION_PROVIDER = "local_http_asr"
 DEFAULT_TRANSCRIPTION_MODELS: dict[str, str] = {
     "funasr": "sensevoice-small",
     "faster_whisper": "large-v3",
     "openai": "gpt-4o-transcribe",
-    "qwen3_asr": "qwen3-asr-1.7b",
+    "local_http_asr": "local-asr-current",
 }
 AVATAR_PROVIDER_OPTIONS: tuple[str, ...] = ("heygem",)
 VOICE_PROVIDER_OPTIONS: tuple[str, ...] = ("indextts2", "runninghub")
@@ -204,7 +206,9 @@ PROFILE_BINDABLE_SETTINGS: tuple[str, ...] = (
     "transcription_dialect",
     "transcription_alignment_mode",
     "transcription_alignment_min_word_coverage",
-    "qwen_asr_api_base_url",
+    "local_asr_api_base_url",
+    "local_asr_model_name",
+    "local_asr_display_name",
     "llm_mode",
     "llm_routing_mode",
     "reasoning_provider",
@@ -288,12 +292,18 @@ class Settings(BaseSettings):
     cleanup_heygem_temp_on_terminal: bool = True
 
     # Transcription
-    transcription_provider: str = DEFAULT_TRANSCRIPTION_PROVIDER  # openai | qwen3_asr | funasr | faster_whisper
+    transcription_provider: str = DEFAULT_TRANSCRIPTION_PROVIDER  # local_http_asr | openai | funasr | faster_whisper
     transcription_model: str = DEFAULT_TRANSCRIPTION_MODELS[DEFAULT_TRANSCRIPTION_PROVIDER]
     transcription_dialect: str = DEFAULT_TRANSCRIPTION_DIALECT
     transcription_alignment_mode: str = "auto"  # auto | provider_only | synthetic
     transcription_alignment_min_word_coverage: float = 0.72
-    qwen_asr_api_base_url: str = "http://127.0.0.1:18096"
+    local_asr_api_base_url: str = "http://127.0.0.1:6001"
+    local_asr_model_name: str = "vibevoice-asr-int8"
+    local_asr_display_name: str = "VibeVoice INT8"
+    local_asr_health_path: str = "/health"
+    local_asr_transcribe_path: str = "/transcribe"
+    local_asr_hotwords_field: str = "hotwords"
+    local_asr_max_new_tokens: int = 4096
     watch_auto_scan_interval_sec: int = 45
     watch_auto_settle_seconds: int = 45
     watch_auto_merge_enabled: bool = True
@@ -327,11 +337,11 @@ class Settings(BaseSettings):
     indextts2_docker_env_file: str = "E:/WorkSpace/indextts2-service/.env"
     indextts2_docker_services: str = "indextts2"
     indextts2_docker_idle_timeout_sec: int = 900
-    qwen_asr_docker_guard_enabled: bool = True
-    qwen_asr_docker_compose_file: str = "E:/WorkSpace/asr-qwen3-asr-1.7b/docker-compose.yml"
-    qwen_asr_docker_env_file: str = ""
-    qwen_asr_docker_services: str = "qwen3asr,asr"
-    qwen_asr_docker_idle_timeout_sec: int = 900
+    local_asr_docker_guard_enabled: bool = True
+    local_asr_docker_compose_file: str = "E:/WorkSpace/VibeVoice-service/docker-compose.yml"
+    local_asr_docker_env_file: str = "E:/WorkSpace/VibeVoice-service/.env"
+    local_asr_docker_services: str = "vibevoice-asr"
+    local_asr_docker_idle_timeout_sec: int = 900
     funasr_auto_unload_enabled: bool = True
     funasr_idle_unload_sec: int = 600
 

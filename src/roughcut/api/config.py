@@ -101,7 +101,9 @@ class ConfigOut(BaseModel):
     search_provider: str
     search_fallback_provider: str
     model_search_helper: str
-    qwen_asr_api_base_url: str
+    local_asr_api_base_url: str
+    local_asr_model_name: str
+    local_asr_display_name: str
     avatar_provider: str
     avatar_api_key_set: bool
     avatar_presenter_id: str
@@ -329,7 +331,9 @@ class ConfigPatch(BaseModel):
     openai_base_url: str | None = None
     openai_auth_mode: str | None = None
     openai_api_key_helper: str | None = None
-    qwen_asr_api_base_url: str | None = None
+    local_asr_api_base_url: str | None = None
+    local_asr_model_name: str | None = None
+    local_asr_display_name: str | None = None
     avatar_provider: str | None = None
     avatar_api_base_url: str | None = None
     avatar_training_api_base_url: str | None = None
@@ -456,7 +460,9 @@ def get_config():
         search_provider=s.search_provider,
         search_fallback_provider=s.search_fallback_provider,
         model_search_helper=s.model_search_helper,
-        qwen_asr_api_base_url=s.qwen_asr_api_base_url,
+        local_asr_api_base_url=s.local_asr_api_base_url,
+        local_asr_model_name=s.local_asr_model_name,
+        local_asr_display_name=s.local_asr_display_name,
         avatar_provider=s.avatar_provider,
         avatar_api_key_set=bool(s.avatar_api_key),
         avatar_presenter_id=s.avatar_presenter_id,

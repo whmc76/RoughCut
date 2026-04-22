@@ -9,7 +9,7 @@
 ## 功能
 
 - **自动剪辑** — 检测静音段和语气词，生成剪辑时间轴，保留有效内容
-- **转写** — 默认使用 OpenAI `gpt-4o-transcribe`，本地服务优先建议 `qwen3_asr`；离线本地依赖可选 `FunASR SenseVoice` 或 `faster-whisper`
+- **转写** — 默认使用通用 `local_http_asr` 本地 HTTP ASR 插槽，当前配置指向 VibeVoice INT8；离线本地依赖可选 `FunASR SenseVoice` 或 `faster-whisper`，云端可切回 OpenAI
 - **字幕** — 字幕时间戳重映射至剪辑后时间轴，烧录荧光描边样式（黑字 + 绿色发光）
 - **封面选帧** — 视觉模型从多个候选帧中挑选最佳封面，可选标题文字叠加
 - **旋转修正** — 视觉模型识别实际画面方向，正确处理 iPhone 横屏/竖屏及错误元数据
@@ -185,8 +185,11 @@ cp .env.example .env
 ```env
 REASONING_PROVIDER=ollama
 REASONING_MODEL=qwen3.5:9b        # 需支持视觉
-TRANSCRIPTION_PROVIDER=qwen3_asr
-TRANSCRIPTION_MODEL=qwen3-asr-1.7b
+TRANSCRIPTION_PROVIDER=local_http_asr
+TRANSCRIPTION_MODEL=local-asr-current
+LOCAL_ASR_API_BASE_URL=http://127.0.0.1:6001
+LOCAL_ASR_MODEL_NAME=vibevoice-asr-int8
+LOCAL_ASR_DISPLAY_NAME=VibeVoice INT8
 
 ROUGHCUT_OUTPUT_ROOT=F:/roughcut_outputs
 JOB_STORAGE_DIR=F:/roughcut_outputs/jobs
@@ -206,7 +209,6 @@ AVATAR_API_BASE_URL=http://127.0.0.1:49202
 AVATAR_TRAINING_API_BASE_URL=http://127.0.0.1:49204
 HEYGEM_SHARED_ROOT=F:/roughcut_outputs/heygem
 HEYGEM_VOICE_ROOT=F:/roughcut_outputs/voice_refs
-QWEN_ASR_API_BASE_URL=http://127.0.0.1:18096
 VOICE_PROVIDER=indextts2
 VOICE_CLONE_API_BASE_URL=http://127.0.0.1:49204
 ```
@@ -249,8 +251,11 @@ TRANSCRIPTION_MODEL=gpt-4o-transcribe
 推荐本地中文 ASR 服务：
 
 ```env
-TRANSCRIPTION_PROVIDER=qwen3_asr
-TRANSCRIPTION_MODEL=qwen3-asr-1.7b
+TRANSCRIPTION_PROVIDER=local_http_asr
+TRANSCRIPTION_MODEL=local-asr-current
+LOCAL_ASR_API_BASE_URL=http://127.0.0.1:6001
+LOCAL_ASR_MODEL_NAME=vibevoice-asr-int8
+LOCAL_ASR_DISPLAY_NAME=VibeVoice INT8
 ```
 
 如果你不走独立服务，而是想在宿主机内直接装离线依赖，再选：
@@ -535,7 +540,7 @@ host-side rebuild watch 方案和 Hydra 的差别是：
 - Docker 镜像默认内置 `uv`、`ffmpeg` 和 `Noto Sans CJK` 中文字体。
 - Docker 镜像会在构建阶段自动执行 `frontend/` 下的前端依赖安装和构建。
 - 默认 Docker 入口会强制清空 `ROUGHCUT_DOCKER_PYTHON_EXTRAS`，优先走更轻的 runtime 构建；如果你确实要在容器内启用 `funasr` / `faster-whisper`，使用 `pnpm docker:runtime:up:local-asr`、`pnpm docker:auto:up:local-asr`，或显式传 `-DockerPythonExtras local-asr`。
-- 当前项目默认 ASR 方案为 `openai + gpt-4o-transcribe`；本地服务优先建议 `qwen3_asr + qwen3-asr-1.7b`；离线本地依赖可选 `funasr + sensevoice-small` 或 `faster_whisper`。
+- 当前项目默认 ASR 方案为 `local_http_asr + local-asr-current`，具体本地模型通过 `LOCAL_ASR_MODEL_NAME` 和 `LOCAL_ASR_API_BASE_URL` 配置；当前默认指向 `VibeVoice INT8`。离线本地依赖可选 `funasr + sensevoice-small` 或 `faster_whisper`，云端可切回 `openai + gpt-4o-transcribe`。
   - 推荐把长期在线形态收敛到 `infra + runtime` 这一档；`watcher` 只在确实需要自动扫盘时再加入。
 - 推荐本地开发使用 `uv + npm`，容器部署使用 `docker compose`，不要混用系统级 `pip` 和容器内运行时配置。
 
@@ -614,8 +619,11 @@ curl http://localhost:8000/api/v1/jobs/{job_id}/report
 | `MINIMAX_API_HOST` | `https://api.minimaxi.com` | MiniMax Coding Plan / MCP API Host |
 | `MINIMAX_CODING_PLAN_API_KEY` | `""` | MiniMax Coding Plan Key；留空时搜索/MCP 默认回退 `MINIMAX_API_KEY` |
 | `VISION_MODEL` | `""` | 视觉模型（空 = 使用 reasoning_model） |
-| `TRANSCRIPTION_PROVIDER` | `openai` | 转写后端：`openai` / `qwen3_asr` / `funasr` / `faster_whisper` |
-| `TRANSCRIPTION_MODEL` | `gpt-4o-transcribe` | 转写模型 |
+| `TRANSCRIPTION_PROVIDER` | `local_http_asr` | 转写后端：`local_http_asr` / `openai` / `funasr` / `faster_whisper` |
+| `TRANSCRIPTION_MODEL` | `local-asr-current` | 转写模型占位符；本地 HTTP ASR 的实际模型由 `LOCAL_ASR_MODEL_NAME` 决定 |
+| `LOCAL_ASR_API_BASE_URL` | `http://127.0.0.1:6001` | 本地 HTTP ASR 服务地址 |
+| `LOCAL_ASR_MODEL_NAME` | `vibevoice-asr-int8` | 当前本地 HTTP ASR 实际模型名 |
+| `LOCAL_ASR_DISPLAY_NAME` | `VibeVoice INT8` | 前端显示名称 |
 | `SUBTITLE_FONT` | `Microsoft YaHei` | 字幕字体 |
 | `SUBTITLE_FONT_SIZE` | `80` | 字幕字号（pt，相对 PlayResY） |
 | `SUBTITLE_COLOR` | `000000` | 字幕文字颜色（RGB hex，黑色） |

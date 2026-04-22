@@ -434,8 +434,14 @@ def _normalize_config_snapshot(config: dict[str, Any]) -> dict[str, Any]:
     normalized["transcription_dialect"] = normalize_transcription_dialect(
         normalized.get("transcription_dialect") or DEFAULT_TRANSCRIPTION_DIALECT
     )
-    normalized["qwen_asr_api_base_url"] = str(
-        normalized.get("qwen_asr_api_base_url") or settings.qwen_asr_api_base_url
+    normalized["local_asr_api_base_url"] = str(
+        normalized.get("local_asr_api_base_url") or settings.local_asr_api_base_url
+    ).strip()
+    normalized["local_asr_model_name"] = str(
+        normalized.get("local_asr_model_name") or settings.local_asr_model_name
+    ).strip()
+    normalized["local_asr_display_name"] = str(
+        normalized.get("local_asr_display_name") or settings.local_asr_display_name
     ).strip()
     normalized["llm_mode"] = str(normalized.get("llm_mode") or settings.llm_mode).strip().lower() or settings.llm_mode
     normalized["llm_routing_mode"] = str(

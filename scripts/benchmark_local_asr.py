@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import os
 import statistics
@@ -71,10 +72,7 @@ def parse_args() -> argparse.Namespace:
         "--candidates",
         nargs="*",
         default=[
-            "qwen3_asr_1_7b",
-            "qwen3_asr_1_7b_aligned",
-            "qwen3_asr_0_6b",
-            "qwen3_asr_0_6b_aligned",
+            "local_http_asr",
             "faster_whisper_large_v3",
             "faster_whisper_large_v3_turbo",
             "faster_whisper_distil_large_v3",
@@ -384,68 +382,36 @@ def runner_funasr_sensevoice() -> tuple[float | None, Callable[[Path], tuple[flo
     return load_elapsed, run
 
 
-def runner_qwen3_asr(
-    model_name: str,
-    *,
-    with_aligner: bool = False,
-) -> tuple[float | None, Callable[[Path], tuple[float | None, list[TranscriptSegment], str]]]:
-    import torch
-    from qwen_asr import Qwen3ASRModel
+def runner_local_http_asr() -> tuple[float | None, Callable[[Path], tuple[float | None, list[TranscriptSegment], str]]]:
+    from roughcut.providers.transcription.local_http_asr import LocalHTTPASRProvider
 
-    model_id = f"Qwen/{model_name}"
-    load_start = time.perf_counter()
-    init_kwargs: dict[str, Any] = {
-        "device_map": "cuda:0",
-        "dtype": torch.bfloat16,
-        "max_inference_batch_size": 4,
-    }
-    if with_aligner:
-        init_kwargs["forced_aligner"] = "Qwen/Qwen3-ForcedAligner-0.6B"
-        init_kwargs["forced_aligner_kwargs"] = {"device_map": "cpu", "dtype": torch.float32}
-    model = Qwen3ASRModel.from_pretrained(model_id, **init_kwargs)
-    load_elapsed = time.perf_counter() - load_start
+    provider = LocalHTTPASRProvider()
 
     def run(sample_audio: Path) -> tuple[float | None, list[TranscriptSegment], str]:
         infer_start = time.perf_counter()
-        transcribe_kwargs: dict[str, Any] = {
-            "language": "Chinese",
-        }
-        if with_aligner:
-            transcribe_kwargs["return_time_stamps"] = True
-        result = model.transcribe(str(sample_audio), **transcribe_kwargs)
+        transcript = asyncio.run(provider.transcribe(sample_audio, language="zh-CN"))
         infer_elapsed = time.perf_counter() - infer_start
-        text = "".join(item.text for item in result).strip()
-        if with_aligner:
-            items = list(result[0].time_stamps.items) if result and result[0].time_stamps else []
-            words = [
-                {
-                    "word": item.text,
-                    "start": float(item.start_time),
-                    "end": float(item.end_time),
-                }
-                for item in items
-            ]
-            segments = [
-                TranscriptSegment(
-                    start=float(words[0]["start"]) if words else 0.0,
-                    end=float(words[-1]["end"]) if words else probe_duration(sample_audio),
-                    text=text,
-                    words=words,
-                )
-            ]
-        else:
-            segments = [
-                TranscriptSegment(
-                    start=0.0,
-                    end=probe_duration(sample_audio),
-                    text=item.text.strip(),
-                    words=[],
-                )
-                for item in result
-            ]
+        segments = [
+            TranscriptSegment(
+                start=float(item.start),
+                end=float(item.end),
+                text=item.text,
+                words=[
+                    {
+                        "word": str(word.get("word") or word.get("text") or ""),
+                        "start": float(word.get("start", 0.0) or 0.0),
+                        "end": float(word.get("end", 0.0) or 0.0),
+                    }
+                    for word in (item.words or [])
+                    if isinstance(word, dict)
+                ],
+            )
+            for item in transcript.segments
+        ]
+        text = "".join(item.text for item in segments).strip()
         return infer_elapsed, segments, text[:200]
 
-    return load_elapsed, run
+    return None, run
 
 
 def probe_duration(sample_audio: Path) -> float:
@@ -475,10 +441,7 @@ CANDIDATE_FACTORIES: dict[
     "faster_whisper_distil_large_v3": lambda: runner_faster_whisper("distil-large-v3"),
     "funasr_paraformer_zh": runner_funasr_paraformer,
     "funasr_sensevoice_small": runner_funasr_sensevoice,
-    "qwen3_asr_0_6b": lambda: runner_qwen3_asr("Qwen3-ASR-0.6B"),
-    "qwen3_asr_0_6b_aligned": lambda: runner_qwen3_asr("Qwen3-ASR-0.6B", with_aligner=True),
-    "qwen3_asr_1_7b": lambda: runner_qwen3_asr("Qwen3-ASR-1.7B"),
-    "qwen3_asr_1_7b_aligned": lambda: runner_qwen3_asr("Qwen3-ASR-1.7B", with_aligner=True),
+    "local_http_asr": runner_local_http_asr,
 }
 
 

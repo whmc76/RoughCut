@@ -29,11 +29,11 @@ export function RuntimeSettingsPanel({ form, runtimeEnvironment, serviceStatus, 
   const ffmpegTimeoutSec = Number(form.ffmpeg_timeout_sec ?? 600);
   const localServiceCards = [
     {
-      key: "qwen3_asr",
-      title: "Qwen3 ASR",
-      baseUrl: String(form.qwen_asr_api_base_url ?? ""),
-      status: serviceStatus?.services.qwen3_asr?.status ?? "not_configured",
-      detail: serviceStatus?.services.qwen3_asr?.error ?? "本地转写服务",
+      key: "local_http_asr",
+      title: String(form.local_asr_display_name ?? "本地 HTTP ASR"),
+      baseUrl: String(form.local_asr_api_base_url ?? ""),
+      status: serviceStatus?.services.local_http_asr?.status ?? "not_configured",
+      detail: serviceStatus?.services.local_http_asr?.error ?? "本地转写服务",
     },
     {
       key: "ollama",

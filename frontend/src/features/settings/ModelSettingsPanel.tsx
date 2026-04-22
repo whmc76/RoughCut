@@ -85,8 +85,8 @@ function getBaseUrl(provider: string, runtimeEnvironment: RuntimeEnvironment | u
       return String(runtimeEnvironment?.minimax_base_url ?? "");
     case "ollama":
       return String(runtimeEnvironment?.ollama_base_url ?? "");
-    case "qwen3_asr":
-      return readFormString(form, "qwen_asr_api_base_url");
+    case "local_http_asr":
+      return readFormString(form, "local_asr_api_base_url");
     default:
       return "";
   }
@@ -119,7 +119,7 @@ function getProviderCredentialSource(provider: string, config: Config | undefine
       overrideKey: "minimax_api_key",
     });
   }
-  if (provider === "ollama" || provider === "qwen3_asr") {
+  if (provider === "ollama" || provider === "local_http_asr") {
     return "本地服务";
   }
   if (provider === "faster_whisper" || provider === "funasr") {
@@ -171,14 +171,14 @@ function getProviderBaseDetail(provider: string, runtimeEnvironment: RuntimeEnvi
   if (provider === "searxng") {
     return "当前作为搜索回退使用。";
   }
-  if (provider === "ollama" || provider === "qwen3_asr") {
+  if (provider === "ollama" || provider === "local_http_asr") {
     return baseUrl ? "本地服务已接入，可直接检测连通性。" : "本地服务地址未配置。";
   }
   return baseUrl ? "云端 Provider 已配置，建议检测凭据与模型列表。" : "当前未配置服务地址。";
 }
 
 function getProviderTone(provider: string): ProviderCardDescriptor["tone"] {
-  if (provider === "ollama" || provider === "qwen3_asr" || provider === "faster_whisper" || provider === "funasr") {
+  if (provider === "ollama" || provider === "local_http_asr" || provider === "faster_whisper" || provider === "funasr") {
     return "local";
   }
   if (provider === "searxng" || provider === "search-route") {
@@ -414,7 +414,7 @@ export function ModelSettingsPanel({ form, config, options, runtimeEnvironment, 
       </div>
       <div className="settings-provider-deck">
         {providerCards.map((card) => {
-          const isCheckable = ["openai", "anthropic", "minimax", "ollama", "qwen3_asr"].includes(card.key);
+          const isCheckable = ["openai", "anthropic", "minimax", "ollama", "local_http_asr"].includes(card.key);
           const checkPending = providerCheck.isPending && providerCheck.variables === card.key;
           const secretField = card.secretField;
           return (

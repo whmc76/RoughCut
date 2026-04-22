@@ -22,10 +22,10 @@ def build_service_status_payload() -> dict[str, Any]:
             base_url=settings.ollama_base_url,
             url=f"{settings.ollama_base_url.rstrip('/')}/api/tags",
         ),
-        "qwen3_asr": _probe_local_service(
-            name="qwen3_asr",
-            base_url=settings.qwen_asr_api_base_url,
-            url=f"{settings.qwen_asr_api_base_url.rstrip('/')}/health",
+        "local_http_asr": _probe_local_service(
+            name="local_http_asr",
+            base_url=settings.local_asr_api_base_url,
+            url=_join_url(settings.local_asr_api_base_url, settings.local_asr_health_path),
         ),
         "openai": _credential_status(
             name="openai",
@@ -56,11 +56,11 @@ def build_provider_check_payload(*, provider: str) -> dict[str, Any]:
 
     if normalized_provider == "ollama":
         return _check_ollama_provider(settings=settings, checked_at=checked_at)
-    if normalized_provider == "qwen3_asr":
+    if normalized_provider == "local_http_asr":
         return _check_local_provider(
             provider=normalized_provider,
-            base_url=settings.qwen_asr_api_base_url,
-            url=f"{settings.qwen_asr_api_base_url.rstrip('/')}/health",
+            base_url=settings.local_asr_api_base_url,
+            url=_join_url(settings.local_asr_api_base_url, settings.local_asr_health_path),
             checked_at=checked_at,
         )
     if normalized_provider == "openai":
@@ -403,6 +403,14 @@ def _credential_status(*, name: str, base_url: str, configured: bool) -> dict[st
         "status": "configured" if configured else "not_configured",
         "error": None if configured else "credential is missing",
     }
+
+
+def _join_url(base_url: str, path: str) -> str:
+    normalized_base = str(base_url or "").rstrip("/")
+    normalized_path = str(path or "").strip() or "/"
+    if not normalized_path.startswith("/"):
+        normalized_path = f"/{normalized_path}"
+    return f"{normalized_base}{normalized_path}"
 
 
 def _get_cached_catalog(cache_key: tuple[str, str]) -> dict[str, Any] | None:
