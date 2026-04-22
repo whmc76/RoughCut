@@ -26,7 +26,7 @@ def build_identity_candidates(bundle: IdentityEvidenceBundle) -> list[IdentityCa
         ("source_name", bundle.source_hints),
         ("visual_cluster", bundle.visual_cluster_hints),
     ]
-    if _legacy_visual_hints_add_new_signal(bundle):
+    if _visual_hints_add_distinct_signal(bundle):
         source_maps.append(("visual", bundle.visual_hints))
     source_maps.append(("visible_text", bundle.visible_text_hints))
     for source_type, hints in source_maps:
@@ -91,13 +91,13 @@ def _source_excerpt(bundle: IdentityEvidenceBundle, source_type: str) -> str:
     return ""
 
 
-def _legacy_visual_hints_add_new_signal(bundle: IdentityEvidenceBundle) -> bool:
-    legacy = bundle.visual_hints or {}
+def _visual_hints_add_distinct_signal(bundle: IdentityEvidenceBundle) -> bool:
+    visual = bundle.visual_hints or {}
     cluster = bundle.visual_cluster_hints or {}
     for field_name in ("subject_brand", "subject_model", "subject_type", "video_theme", "visible_text"):
-        legacy_values = _collect_field_values(legacy, field_name)
+        visual_values = _collect_field_values(visual, field_name)
         cluster_values = _collect_field_values(cluster, field_name)
-        if legacy_values and legacy_values != cluster_values:
+        if visual_values and visual_values != cluster_values:
             return True
     return False
 

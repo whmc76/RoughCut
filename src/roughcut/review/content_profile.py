@@ -23,7 +23,7 @@ from roughcut.review.content_understanding_evidence import build_evidence_bundle
 from roughcut.review.content_understanding_infer import infer_content_understanding
 from roughcut.review.content_understanding_schema import (
     ContentUnderstanding,
-    map_content_understanding_to_legacy_profile,
+    map_content_understanding_to_profile,
     normalize_video_type,
 )
 from roughcut.review.content_understanding_visual import infer_visual_semantic_evidence
@@ -228,9 +228,6 @@ def _workflow_template_name(profile: dict[str, Any] | None) -> str:
     workflow_template = normalize_workflow_template_name(str(candidate.get("workflow_template") or "").strip())
     if workflow_template:
         return get_workflow_preset(workflow_template).name
-    legacy_preset = str(candidate.get("preset_name") or "").strip()
-    if legacy_preset:
-        return get_workflow_preset(legacy_preset).name
     return ""
 
 
@@ -943,7 +940,6 @@ def build_content_profile_cache_fingerprint(
     source_name: str,
     source_file_hash: str | None,
     workflow_template: str | None = None,
-    channel_profile: str | None = None,
     transcript_excerpt: str,
     subtitle_digest: str | None = None,
     transcript_digest: str | None = None,
@@ -954,8 +950,6 @@ def build_content_profile_cache_fingerprint(
     seeded_profile: dict[str, Any] | None = None,
     source_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    if workflow_template is None and channel_profile is not None:
-        workflow_template = channel_profile
     normalized_glossary = [
         {
             "correct_form": str(item.get("correct_form") or "").strip(),
@@ -2676,7 +2670,7 @@ def _sanitize_profile_identity(
     if (
         current_profile_model
         and verified_model
-        and _identity_values_compatible(current_profile_model, verified_model)
+        and _identity_values_match(current_profile_model, verified_model)
         and len(current_profile_model) > len(verified_model)
     ):
         verified_model = current_profile_model
@@ -3275,7 +3269,7 @@ def _mapped_brand_for_model(model: object) -> str:
     if not str(model or "").strip():
         return ""
     for candidate, brand in _MODEL_TO_BRAND.items():
-        if _identity_values_compatible(candidate, model):
+        if _identity_values_match(candidate, model):
             return brand
     return ""
 
@@ -3286,7 +3280,7 @@ def _first_supported_identity_value(primary: Any, *candidates: Any) -> str:
         return ""
     for candidate in candidates:
         candidate_value = str(candidate or "").strip()
-        if candidate_value and _identity_values_compatible(primary_value, candidate_value):
+        if candidate_value and _identity_values_match(primary_value, candidate_value):
             return candidate_value
     return ""
 
@@ -3324,7 +3318,7 @@ def _identity_support_count(primary: Any, *candidates: Any) -> int:
     count = 0
     for candidate in candidates:
         candidate_value = str(candidate or "").strip()
-        if candidate_value and _identity_values_compatible(primary_value, candidate_value):
+        if candidate_value and _identity_values_match(primary_value, candidate_value):
             count += 1
     return count
 
@@ -3356,7 +3350,7 @@ def _model_family_key(value: object) -> str:
     return normalized
 
 
-def _identity_values_compatible(left: object, right: object) -> bool:
+def _identity_values_match(left: object, right: object) -> bool:
     normalized_left = _normalize_profile_value(left)
     normalized_right = _normalize_profile_value(right)
     if not normalized_left or not normalized_right:
@@ -3416,20 +3410,20 @@ def _text_conflicts_with_verified_identity(
         normalized_known_brand = _normalize_profile_value(known_brand)
         if (
             normalized_known_brand
-            and not _identity_values_compatible(known_brand, brand)
+            and not _identity_values_match(known_brand, brand)
             and normalized_known_brand in normalized_text
         ):
             return True
     seeded = _seed_profile_from_text(text, glossary_terms=glossary_terms)
     seeded_brand = str(seeded.get("subject_brand") or "").strip()
     seeded_model = str(seeded.get("subject_model") or "").strip()
-    if seeded_brand and brand and not _identity_values_compatible(seeded_brand, brand):
+    if seeded_brand and brand and not _identity_values_match(seeded_brand, brand):
         return True
-    if seeded_model and model and not _identity_values_compatible(seeded_model, model):
+    if seeded_model and model and not _identity_values_match(seeded_model, model):
         return True
     mapped_brand = _mapped_brand_for_model(seeded_model or model)
     effective_brand = seeded_brand or brand
-    if mapped_brand and effective_brand and not _identity_values_compatible(effective_brand, mapped_brand):
+    if mapped_brand and effective_brand and not _identity_values_match(effective_brand, mapped_brand):
         return True
     return False
 
@@ -3558,15 +3552,12 @@ async def infer_content_profile(
     transcript_items: list[dict[str, Any]] | None = None,
     transcript_evidence: dict[str, Any] | None = None,
     workflow_template: str | None = None,
-    channel_profile: str | None = None,
     user_memory: dict[str, Any] | None = None,
     glossary_terms: list[dict[str, Any]] | None = None,
     include_research: bool = True,
     copy_style: str = "attention_grabbing",
     source_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    if workflow_template is None and channel_profile is not None:
-        workflow_template = channel_profile
     transcript_excerpt, _transcript_items_source, transcript_excerpt_source = _resolve_transcript_excerpt(
         transcript_items=transcript_items,
         subtitle_items=subtitle_items,
@@ -3661,7 +3652,7 @@ async def infer_content_profile(
         except Exception:
             pass
 
-    profile = map_content_understanding_to_legacy_profile(understanding)
+    profile = map_content_understanding_to_profile(understanding)
     profile["content_understanding"] = profile.get("content_understanding") or {}
     profile["transcript_excerpt"] = transcript_excerpt
     if _transcript_items_source:
@@ -3901,18 +3892,18 @@ def _select_verification_backfill_candidate(profile: dict[str, Any]) -> dict[str
         candidate_domain = str(item.get("subject_domain") or "").strip() or _subject_domain_from_subject_type(candidate_subject_type)
 
         if current_model and candidate_model:
-            if _identity_values_compatible(current_model, candidate_model):
+            if _identity_values_match(current_model, candidate_model):
                 score += 6
             else:
                 score -= 3
         if current_brand and candidate_brand:
-            if _identity_values_compatible(current_brand, candidate_brand):
+            if _identity_values_match(current_brand, candidate_brand):
                 score += 4
             else:
                 score -= 2
         mapped_brand = _mapped_brand_for_model(current_model or candidate_model)
         effective_brand = current_brand or candidate_brand
-        if mapped_brand and effective_brand and _identity_values_compatible(mapped_brand, effective_brand):
+        if mapped_brand and effective_brand and _identity_values_match(mapped_brand, effective_brand):
             score += 2
         if current_subject_domain and candidate_domain:
             if current_subject_domain == candidate_domain:
@@ -3990,9 +3981,9 @@ def _apply_verification_candidate_backfill(
             constraint_brand = str(source_constraints.get("subject_brand") or "").strip()
             constraint_model = str(source_constraints.get("subject_model") or "").strip()
             if constraint_brand:
-                score += 5 if brand and _identity_values_compatible(brand, constraint_brand) else -4
+                score += 5 if brand and _identity_values_match(brand, constraint_brand) else -4
             if constraint_model:
-                score += 6 if model and _identity_values_compatible(model, constraint_model) else -5
+                score += 6 if model and _identity_values_match(model, constraint_model) else -5
             filename_entries = [
                 str(item).strip()
                 for item in list(source_constraints.get("filename_entries") or [])
@@ -4042,11 +4033,11 @@ def _apply_verification_candidate_backfill(
         resolved = dict(extraction.get("resolved") or {}) if isinstance(extraction.get("resolved"), dict) else {}
         resolved_brand = str(resolved.get("subject_brand") or "").strip()
         resolved_model = str(resolved.get("subject_model") or "").strip()
-        if resolved_brand and brand and _identity_values_compatible(brand, resolved_brand):
+        if resolved_brand and brand and _identity_values_match(brand, resolved_brand):
             score += 2
         elif resolved_brand and brand:
             score -= 2
-        if resolved_model and model and _identity_values_compatible(model, resolved_model):
+        if resolved_model and model and _identity_values_match(model, resolved_model):
             score += 2
         elif resolved_model and model:
             score -= 2
@@ -4063,11 +4054,11 @@ def _apply_verification_candidate_backfill(
         )
         top_brand = str(top_candidate.get("brand") or "").strip()
         top_model = str(top_candidate.get("model") or "").strip()
-        if top_brand and brand and _identity_values_compatible(brand, top_brand):
+        if top_brand and brand and _identity_values_match(brand, top_brand):
             score += 3
         elif top_brand and brand:
             score -= 2
-        if top_model and model and _identity_values_compatible(model, top_model):
+        if top_model and model and _identity_values_match(model, top_model):
             score += 3
         elif top_model and model:
             score -= 2
@@ -4092,27 +4083,27 @@ def _apply_verification_candidate_backfill(
         and (
             not current_model
             or not candidate_model
-            or _identity_values_compatible(current_model, candidate_model)
+            or _identity_values_match(current_model, candidate_model)
         )
         and (
             not current_brand
             or not candidate_brand
-            or not _identity_values_compatible(current_brand, candidate_brand)
+            or not _identity_values_match(current_brand, candidate_brand)
         )
     )
     allow_brand_override = bool(
         current_brand
         and candidate_brand
         and effective_model
-        and _identity_values_compatible(effective_model, candidate_model or effective_model)
+        and _identity_values_match(effective_model, candidate_model or effective_model)
         and mapped_brand
-        and _identity_values_compatible(mapped_brand, candidate_brand)
-        and not _identity_values_compatible(mapped_brand, current_brand)
+        and _identity_values_match(mapped_brand, candidate_brand)
+        and not _identity_values_match(mapped_brand, current_brand)
     )
     if (
         current_brand
         and candidate_brand
-        and not _identity_values_compatible(current_brand, candidate_brand)
+        and not _identity_values_match(current_brand, candidate_brand)
         and not allow_brand_override
         and not should_adopt_candidate_identity_group
     ):
@@ -4120,17 +4111,17 @@ def _apply_verification_candidate_backfill(
     if (
         current_model
         and candidate_model
-        and not _identity_values_compatible(current_model, candidate_model)
+        and not _identity_values_match(current_model, candidate_model)
         and not should_adopt_candidate_identity_group
     ):
         return guarded
 
     backfilled_fields: list[str] = []
     if should_adopt_candidate_identity_group:
-        if candidate_brand and not _identity_values_compatible(current_brand, candidate_brand):
+        if candidate_brand and not _identity_values_match(current_brand, candidate_brand):
             guarded["subject_brand"] = candidate_brand
             backfilled_fields.append("subject_brand")
-        if candidate_model and (not current_model or not _identity_values_compatible(current_model, candidate_model)):
+        if candidate_model and (not current_model or not _identity_values_match(current_model, candidate_model)):
             guarded["subject_model"] = candidate_model
             backfilled_fields.append("subject_model")
     effective_brand = current_brand or candidate_brand
@@ -4296,7 +4287,6 @@ async def apply_content_profile_feedback(
     draft_profile: dict[str, Any],
     source_name: str,
     workflow_template: str | None = None,
-    channel_profile: str | None = None,
     user_feedback: dict[str, Any],
     reviewed_subtitle_excerpt: str | None = None,
     accepted_corrections: list[dict[str, Any]] | None = None,
@@ -4306,7 +4296,6 @@ async def apply_content_profile_feedback(
         draft_profile=draft_profile,
         source_name=source_name,
         workflow_template=workflow_template,
-        channel_profile=channel_profile,
         user_feedback=user_feedback,
         reviewed_subtitle_excerpt=reviewed_subtitle_excerpt,
         accepted_corrections=accepted_corrections,
@@ -4485,7 +4474,6 @@ async def enrich_content_profile(
     profile: dict[str, Any],
     source_name: str,
     workflow_template: str | None = None,
-    channel_profile: str | None = None,
     transcript_excerpt: str,
     subtitle_items: list[dict[str, Any]] | None = None,
     transcript_items: list[dict[str, Any]] | None = None,
@@ -4494,8 +4482,6 @@ async def enrich_content_profile(
     user_memory: dict[str, Any] | None = None,
     include_research: bool = True,
 ) -> dict[str, Any]:
-    if workflow_template is None and channel_profile is not None:
-        workflow_template = channel_profile
     enriched = dict(profile or {})
     transcript_excerpt, transcript_items, transcript_excerpt_source = _resolve_transcript_excerpt(
         transcript_excerpt=transcript_excerpt,
@@ -4562,7 +4548,7 @@ async def enrich_content_profile(
         include_research=include_research,
     )
     if llm_understanding is not None:
-        llm_profile = map_content_understanding_to_legacy_profile(llm_understanding)
+        llm_profile = map_content_understanding_to_profile(llm_understanding)
         for key in (
             "content_kind",
             "subject_domain",
@@ -5157,7 +5143,7 @@ def _select_visual_hint_cluster_indexes(hints_list: list[dict[str, Any]]) -> lis
         cluster_indexes = [
             candidate_index
             for candidate_index, candidate in enumerate(hints_list)
-            if _visual_hints_are_cluster_compatible(anchor, candidate)
+            if _visual_hints_match_cluster(anchor, candidate)
         ]
         signature = _score_visual_hint_cluster(anchor, cluster_indexes=cluster_indexes, hints_list=hints_list)
         if best_signature is None or signature > best_signature:
@@ -5214,7 +5200,7 @@ def _score_visual_hint_cluster(
     return (support_score, anchor_completeness, completeness, visible_support, -min(cluster_indexes))
 
 
-def _visual_hints_are_cluster_compatible(anchor: dict[str, Any], candidate: dict[str, Any]) -> bool:
+def _visual_hints_match_cluster(anchor: dict[str, Any], candidate: dict[str, Any]) -> bool:
     for key in ("subject_type", "subject_brand", "subject_model"):
         anchor_value = str(anchor.get(key) or "").strip()
         candidate_value = str(candidate.get(key) or "").strip()
@@ -7191,6 +7177,12 @@ def _is_generic_engagement_question(text: str) -> bool:
     if not normalized:
         return True
     generic_questions = {
+        "这条视频主要在讲什么",
+        "这个视频主要在讲什么",
+        "这视频主要在讲什么",
+        "这条视频讲什么",
+        "这个视频讲什么",
+        "主要在讲什么",
         "你觉得这次到手值不值",
         "你觉得值不值",
         "这次值不值",
@@ -7198,7 +7190,9 @@ def _is_generic_engagement_question(text: str) -> bool:
         "你会入手吗",
         "你怎么看",
     }
-    return normalized in generic_questions
+    if normalized in generic_questions:
+        return True
+    return bool(re.fullmatch(r"这.{0,6}(?:视频)?主要在讲什么", normalized))
 
 
 def _is_specific_video_theme(text: str, *, preset_name: str) -> bool:
@@ -7472,11 +7466,8 @@ def _fallback_profile(
     *,
     source_name: str,
     workflow_template: str | None = None,
-    channel_profile: str | None = None,
     transcript_excerpt: str,
 ) -> dict[str, Any]:
-    if workflow_template is None and channel_profile is not None:
-        workflow_template = channel_profile
     preset = select_workflow_template(
         workflow_template=workflow_template,
         transcript_hint=transcript_excerpt,
@@ -8435,7 +8426,13 @@ def _build_cover_hook(
             copy_style=copy_style,
         )
     elif _is_unboxing_preset(preset):
-        fallback = _build_unboxing_cover_hook(theme=theme, transcript_excerpt=transcript_excerpt)
+        fallback = _build_subject_aware_unboxing_cover_hook(
+            brand=brand,
+            model=model,
+            subject_type=subject_type,
+            theme=theme,
+            transcript_excerpt=transcript_excerpt,
+        )
     else:
         fallback = preset.cover_accent
     return _apply_copy_style_to_hook(
@@ -8539,22 +8536,47 @@ def _focus_terms_to_cover_hook(focus_terms: list[str]) -> str:
 
 
 def _build_unboxing_cover_hook(*, theme: str, transcript_excerpt: str = "") -> str:
+    return _build_subject_aware_unboxing_cover_hook(
+        brand="",
+        model="",
+        subject_type="",
+        theme=theme,
+        transcript_excerpt=transcript_excerpt,
+    )
+
+
+def _build_subject_aware_unboxing_cover_hook(
+    *,
+    brand: str,
+    model: str,
+    subject_type: str,
+    theme: str,
+    transcript_excerpt: str = "",
+) -> str:
     theme_text = _clean_line(theme)
     focus_terms = _extract_profile_focus_terms(
         {
+            "subject_brand": brand,
+            "subject_model": model,
+            "subject_type": subject_type,
             "video_theme": theme,
             "transcript_excerpt": transcript_excerpt,
         },
         limit=2,
     )
+    subject = _clean_line(model or brand or _cover_subject_type_label(subject_type))
     focus_hook = _focus_terms_to_cover_hook(focus_terms)
     if focus_hook:
         return focus_hook
     if any(token in theme_text for token in ("限定", "联名", "纪念版", "特别版")):
-        return "限定细节值不值"
+        return f"{subject}限定细节直接看"[:18] if subject else "限定细节直接看"
     if any(token in theme_text for token in ("做工", "结构", "拆解", "材质")):
-        return "做工结构直接看"
-    return "这次升级够不够狠"
+        return f"{subject}做工结构直接看"[:18] if subject else "做工结构直接看"
+    if any(token in theme_text for token in ("升级", "改款", "新版", "迭代")):
+        return f"{subject}升级点直接看"[:18] if subject else "升级点直接看"
+    if subject:
+        return f"{subject}开箱先看这几点"[:18]
+    return "开箱先看这几点"
 
 
 def _is_tutorial_preset(preset: WorkflowPreset) -> bool:
@@ -9036,5 +9058,7 @@ def _default_engagement_question(preset: WorkflowPreset) -> str:
         "commentary_focus": "这件事你同意这个判断吗？",
         "gameplay_highlight": "这波操作你会怎么打？",
         "food_explore": "这家店你会专门去吃一次吗？",
+        "unboxing_standard": "你最想先看哪处细节？",
+        "edc_tactical": "你最想先看哪处细节？",
     }
-    return mapping.get(preset.name, "你觉得这次到手值不值？")
+    return mapping.get(preset.name, "你最想先看哪处细节？")

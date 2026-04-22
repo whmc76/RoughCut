@@ -25,7 +25,7 @@ from roughcut.media.subtitle_text import clean_final_subtitle_text
 from roughcut.providers.multimodal import complete_with_images
 from roughcut.providers.reasoning.base import extract_json_text
 from roughcut.review.content_profile import (
-    _identity_values_compatible,
+    _identity_values_match,
     _mapped_brand_for_model,
     _normalize_profile_value,
     _seed_profile_from_text,
@@ -220,13 +220,13 @@ def _candidate_conflicts_with_subject(text: str, *, brand: str, model: str) -> b
     seeded = _seed_profile_from_text(candidate)
     candidate_brand = str(seeded.get("subject_brand") or "").strip()
     candidate_model = str(seeded.get("subject_model") or "").strip()
-    if candidate_brand and brand and not _identity_values_compatible(candidate_brand, brand):
+    if candidate_brand and brand and not _identity_values_match(candidate_brand, brand):
         return True
-    if candidate_model and model and not _identity_values_compatible(candidate_model, model):
+    if candidate_model and model and not _identity_values_match(candidate_model, model):
         return True
     mapped_brand = _mapped_brand_for_model(candidate_model or model)
     effective_brand = candidate_brand or brand
-    if mapped_brand and effective_brand and not _identity_values_compatible(effective_brand, mapped_brand):
+    if mapped_brand and effective_brand and not _identity_values_match(effective_brand, mapped_brand):
         return True
     return False
 
@@ -318,10 +318,6 @@ def build_variant_output_path(
 
 def get_cover_manifest_path(output_path: Path) -> Path:
     return output_path.with_name(f"{output_path.stem}_cover_plans.json")
-
-
-def get_legacy_cover_manifest_path(output_path: Path) -> Path:
-    return output_path.with_name(f"{output_path.stem}_plans.json")
 
 
 def build_cover_variant_output_path(output_path: Path, index: int, strategy_key: str | None = None) -> Path:
@@ -966,7 +962,6 @@ def _write_cover_variant_manifest(
     selection_summary: dict[str, Any] | None = None,
 ) -> None:
     manifest_path = get_cover_manifest_path(output_path)
-    legacy_manifest_path = get_legacy_cover_manifest_path(output_path)
     payload: list[dict[str, Any]] = []
     rankings = rankings or []
     selection_summary = selection_summary or {}
@@ -992,8 +987,6 @@ def _write_cover_variant_manifest(
             }
         )
     manifest_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    if legacy_manifest_path != manifest_path:
-        legacy_manifest_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def load_cover_selection_summary(output_path: Path) -> dict[str, Any] | None:
@@ -1286,30 +1279,30 @@ def _title_style_tokens(
     cover_style: str,
 ) -> dict[str, dict[str, Any]]:
     if style_name == "preset_default":
-        legacy = _cover_style_tokens(cover_style, title_lines=title_lines)
+        base_tokens = _cover_style_tokens(cover_style, title_lines=title_lines)
         return _apply_cross_platform_safe_zone(
             {
             "top": {
-                "size": legacy["top_size"],
-                "fill": legacy["top_fill"],
-                "border": legacy["top_border"],
-                "borderw": legacy["top_borderw"],
+                "size": base_tokens["top_size"],
+                "fill": base_tokens["top_fill"],
+                "border": base_tokens["top_border"],
+                "borderw": base_tokens["top_borderw"],
                 "x": "(w-text_w)/2",
-                "y": str(legacy["top_y"]),
+                "y": str(base_tokens["top_y"]),
             },
             "main": {
-                "size": legacy["main_size"],
-                "fill": legacy["main_fill"],
-                "border": legacy["main_border"],
-                "borderw": legacy["main_borderw"],
+                "size": base_tokens["main_size"],
+                "fill": base_tokens["main_fill"],
+                "border": base_tokens["main_border"],
+                "borderw": base_tokens["main_borderw"],
                 "x": "(w-text_w)/2",
                 "y": "(h-text_h)/2-20",
             },
             "bottom": {
-                "size": legacy["bottom_size"],
-                "fill": legacy["bottom_fill"],
-                "border": legacy["bottom_border"],
-                "borderw": legacy["bottom_borderw"],
+                "size": base_tokens["bottom_size"],
+                "fill": base_tokens["bottom_fill"],
+                "border": base_tokens["bottom_border"],
+                "borderw": base_tokens["bottom_borderw"],
                 "x": "(w-text_w)/2",
                 "y": "h-text_h-70",
             },

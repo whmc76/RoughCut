@@ -14,7 +14,7 @@ from roughcut.review.content_understanding_retrieval import search_confirmed_con
 from roughcut.review.content_understanding_schema import (
     CONTENT_UNDERSTANDING_FIELD_GUIDELINES,
     ContentUnderstanding,
-    map_content_understanding_to_legacy_profile,
+    map_content_understanding_to_profile,
 )
 
 
@@ -127,7 +127,7 @@ async def verify_content_understanding(
         '"video_theme":"","summary":"","hook_line":"","engagement_question":"","search_queries":[],"evidence_spans":[],'
         '"uncertainties":[],"conflicts":[],"confidence":{},"needs_review":true,"review_reasons":[]'
         "}"
-        f"\n原始理解：{json.dumps(map_content_understanding_to_legacy_profile(understanding), ensure_ascii=False)}"
+        f"\n原始理解：{json.dumps(map_content_understanding_to_profile(understanding), ensure_ascii=False)}"
         f"\n当前视频证据：{json.dumps(evidence_bundle, ensure_ascii=False)}"
         f"\n混合检索输入：{json.dumps(prompt_payload, ensure_ascii=False)}"
     )

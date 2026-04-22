@@ -13,7 +13,7 @@ from roughcut.media.variant_timeline_bundle import resolve_effective_variant_tim
 from roughcut.review.content_profile import (
     _content_understanding_detail_terms,
     _has_ingestible_product_subject_conflict,
-    _identity_values_compatible,
+    _identity_values_match,
     _is_generic_engagement_question,
     _is_generic_profile_summary,
     _is_generic_subject_type,
@@ -142,7 +142,7 @@ def assess_job_quality(
         if variant_bundle_artifact and isinstance(variant_bundle_artifact.data_json, dict)
         else {}
     )
-    variant_bundle = resolve_effective_variant_timeline_bundle(variant_bundle, render_outputs=render_outputs) or {}
+    variant_bundle = resolve_effective_variant_timeline_bundle(variant_bundle) or {}
     corrections = list(corrections or [])
     subtitle_items = list(subtitle_items or [])
     canonical_transcript_data = (
@@ -291,7 +291,7 @@ def assess_job_quality(
         video_theme = str(profile.get("video_theme") or "").strip()
         summary = str(profile.get("summary") or "").strip()
         question = str(profile.get("engagement_question") or "").strip()
-        preset_name = str(profile.get("workflow_template") or profile.get("preset_name") or "").strip()
+        preset_name = str(profile.get("workflow_template") or "").strip()
 
         if _is_generic_subject_type(subject_type):
             issues.append(
@@ -662,9 +662,9 @@ def _collect_entity_catalog_signals(profile: dict[str, Any]) -> dict[str, Any]:
     candidate_model = str(top_candidate.get("model") or "").strip()
 
     conflicts: list[str] = []
-    if current_brand and candidate_brand and not _identity_values_compatible(current_brand, candidate_brand):
+    if current_brand and candidate_brand and not _identity_values_match(current_brand, candidate_brand):
         conflicts.append("subject_brand")
-    if current_model and candidate_model and not _identity_values_compatible(current_model, candidate_model):
+    if current_model and candidate_model and not _identity_values_match(current_model, candidate_model):
         conflicts.append("subject_model")
 
     missing_supported_fields: list[str] = []
@@ -733,19 +733,19 @@ def _candidate_identity_alignment_score(profile: dict[str, Any], candidate: dict
     score = 0
 
     if current_model and candidate_model:
-        if _identity_values_compatible(current_model, candidate_model):
+        if _identity_values_match(current_model, candidate_model):
             score += 6
         else:
             score -= 3
     if current_brand and candidate_brand:
-        if _identity_values_compatible(current_brand, candidate_brand):
+        if _identity_values_match(current_brand, candidate_brand):
             score += 4
         else:
             score -= 2
     mapped_brand = _mapped_brand_for_model(current_model or candidate_model)
     effective_brand = current_brand or candidate_brand
     if mapped_brand and effective_brand:
-        if _identity_values_compatible(mapped_brand, effective_brand):
+        if _identity_values_match(mapped_brand, effective_brand):
             score += 2
         else:
             score -= 3
@@ -755,7 +755,7 @@ def _candidate_identity_alignment_score(profile: dict[str, Any], candidate: dict
         else:
             score -= 1
     if current_subject_type and candidate_subject_type:
-        if _identity_values_compatible(current_subject_type, candidate_subject_type):
+        if _identity_values_match(current_subject_type, candidate_subject_type):
             score += 2
         elif _text_conflicts_with_verified_identity(
             current_subject_type,

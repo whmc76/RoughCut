@@ -4,7 +4,7 @@ import json
 
 import openai
 
-from roughcut.config import get_settings
+from roughcut.config import get_settings, uses_codex_auth_helper
 from roughcut.providers.auth import resolve_credential
 from roughcut.providers.openai_responses import (
     build_reasoning_options,
@@ -19,7 +19,7 @@ class OpenAISearchProvider(SearchProvider):
     def __init__(self) -> None:
         settings = get_settings()
         self._bridge = None
-        if str(settings.openai_auth_mode or "").strip().lower() == "codex_compat" and not str(settings.openai_api_key or "").strip():
+        if uses_codex_auth_helper(settings) and not str(settings.openai_api_key or "").strip():
             from roughcut.providers.search.model_search import ModelSearchProvider
 
             self._bridge = ModelSearchProvider()

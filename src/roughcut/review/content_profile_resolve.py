@@ -37,7 +37,7 @@ def resolve_identity_candidates(
     video_theme = _pick_supported_candidate(scored.get("video_theme") or [])
 
     mapped_brand = mapped_brand_for_model(model) if model else ""
-    if mapped_brand and brand and not _compatible_normalized_values(mapped_brand, brand, normalize=normalize):
+    if mapped_brand and brand and not _normalized_values_match(mapped_brand, brand, normalize=normalize):
         conflicts.append("brand_model_conflict")
         brand = ""
     elif mapped_brand and not brand:
@@ -77,7 +77,7 @@ def _pick_supported_model_candidate(
         return ""
     best = supported[0]
     for candidate in supported[1:]:
-        if not _compatible_model_family(best, candidate, normalize=normalize):
+        if not _matching_model_family(best, candidate, normalize=normalize):
             continue
         if len(str(candidate.value or "")) <= len(str(best.value or "")):
             continue
@@ -87,7 +87,7 @@ def _pick_supported_model_candidate(
     return best.value
 
 
-def _compatible_model_family(
+def _matching_model_family(
     left: ScoredIdentityCandidate,
     right: ScoredIdentityCandidate,
     *,
@@ -100,7 +100,7 @@ def _compatible_model_family(
     return left_normalized in right_normalized or right_normalized in left_normalized
 
 
-def _compatible_normalized_values(
+def _normalized_values_match(
     left: object,
     right: object,
     *,

@@ -1064,12 +1064,12 @@ async def get_content_profile(job_id: uuid.UUID, session: AsyncSession = Depends
     artifacts = artifact_result.scalars().all()
     draft = next((item.data_json for item in artifacts if item.artifact_type == "content_profile_draft"), None)
     final = next((item.data_json for item in artifacts if item.artifact_type == "content_profile_final"), None)
-    legacy = next((item.data_json for item in artifacts if item.artifact_type == "content_profile"), None)
+    base_profile = next((item.data_json for item in artifacts if item.artifact_type == "content_profile"), None)
     has_draft_artifact = isinstance(draft, dict) and bool(draft)
     if not isinstance(draft, dict) or not draft:
-        draft = legacy
+        draft = base_profile
     if not isinstance(final, dict) or not final:
-        final = None if has_draft_artifact else legacy
+        final = None if has_draft_artifact else base_profile
     settings = get_settings()
     if isinstance(draft, dict):
         draft = apply_current_content_profile_review_policy(draft, settings=settings)
@@ -3712,13 +3712,8 @@ def _resolve_effective_variant_bundle_from_artifacts(artifacts: list[Artifact]) 
         (artifact for artifact in artifacts if artifact.artifact_type == "variant_timeline_bundle" and artifact.data_json),
         None,
     )
-    render_outputs_artifact = next(
-        (artifact for artifact in artifacts if artifact.artifact_type == "render_outputs" and artifact.data_json),
-        None,
-    )
     return resolve_effective_variant_timeline_bundle(
         bundle_artifact.data_json if bundle_artifact and isinstance(bundle_artifact.data_json, dict) else None,
-        render_outputs=render_outputs_artifact.data_json if render_outputs_artifact and isinstance(render_outputs_artifact.data_json, dict) else {},
     )
 
 

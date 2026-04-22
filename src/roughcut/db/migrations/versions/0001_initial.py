@@ -28,7 +28,7 @@ def upgrade() -> None:
         sa.Column("file_hash", sa.Text),
         sa.Column("status", sa.Text, nullable=False, server_default="pending"),
         sa.Column("error_message", sa.Text),
-        sa.Column("channel_profile", sa.Text),
+        sa.Column("workflow_template", sa.Text),
         sa.Column("language", sa.Text, server_default="zh-CN"),
         sa.Column("created_at", TIMESTAMPTZ, server_default=sa.func.now()),
         sa.Column("updated_at", TIMESTAMPTZ, server_default=sa.func.now()),
@@ -167,7 +167,7 @@ def upgrade() -> None:
         "watch_roots",
         sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True),
         sa.Column("path", sa.Text, nullable=False, unique=True),
-        sa.Column("channel_profile", sa.Text),
+        sa.Column("workflow_template", sa.Text),
         sa.Column("enabled", sa.Boolean, server_default="true"),
         sa.Column("created_at", TIMESTAMPTZ, server_default=sa.func.now()),
     )
@@ -182,14 +182,6 @@ def upgrade() -> None:
         sa.Column("created_at", TIMESTAMPTZ, server_default=sa.func.now()),
     )
 
-    op.create_table(
-        "channel_profiles",
-        sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True),
-        sa.Column("name", sa.Text, nullable=False, unique=True),
-        sa.Column("config_json", postgresql.JSONB, nullable=False),
-        sa.Column("created_at", TIMESTAMPTZ, server_default=sa.func.now()),
-    )
-
     # Indexes
     op.create_index("ix_jobs_status", "jobs", ["status"])
     op.create_index("ix_jobs_file_hash", "jobs", ["file_hash"])
@@ -201,7 +193,6 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     for tbl in [
-        "channel_profiles",
         "glossary_terms",
         "watch_roots",
         "review_actions",

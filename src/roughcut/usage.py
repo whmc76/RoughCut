@@ -519,10 +519,10 @@ def build_jobs_usage_trend(
     if normalized_focus_type not in {"", "all", "step", "model", "provider"}:
         normalized_focus_type = ""
     normalized_focus_name = str(focus_name or "").strip()
-    legacy_step_name = str(step_name or "").strip()
-    if not normalized_focus_name and legacy_step_name:
+    requested_step_name = str(step_name or "").strip()
+    if not normalized_focus_name and requested_step_name:
         normalized_focus_type = "step"
-        normalized_focus_name = legacy_step_name
+        normalized_focus_name = requested_step_name
     if normalized_focus_type == "all":
         normalized_focus_type = ""
     anchor = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)

@@ -4,7 +4,6 @@ import json
 import uuid
 from copy import deepcopy
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
 
 from sqlalchemy import select
@@ -12,7 +11,6 @@ from sqlalchemy import select
 from roughcut.config import (
     ENV_MANAGED_SETTINGS,
     PROFILE_BINDABLE_SETTINGS,
-    VOICE_PROVIDER_OPTIONS,
     DEFAULT_REASONING_PROVIDER,
     apply_runtime_overrides,
     get_settings,
@@ -25,10 +23,10 @@ from roughcut.packaging.library import (
     list_packaging_assets,
     update_packaging_config,
 )
+from roughcut.naming import VOICE_PROVIDER_VALUES
 from roughcut.speech.dialects import DEFAULT_TRANSCRIPTION_DIALECT, normalize_transcription_dialect
 from roughcut.state_store import ACTIVE_CONFIG_PROFILE_KEY, run_db_operation, set_json_setting
 
-CONFIG_PROFILES_FILE = Path("roughcut_config_profiles.json")
 PROFILE_CONFIG_FIELDS: tuple[str, ...] = PROFILE_BINDABLE_SETTINGS
 
 
@@ -55,18 +53,7 @@ def build_current_config_profile_snapshot() -> dict[str, Any]:
 
 
 def load_config_profiles_state() -> dict[str, Any]:
-    state = _load_config_profiles_state_from_db()
-    if state["profiles"] or state["active_profile_id"]:
-        return state
-
-    legacy = _load_legacy_config_profiles_state()
-    if legacy["profiles"]:
-        try:
-            save_config_profiles_state(legacy)
-            return _load_config_profiles_state_from_db()
-        except Exception:
-            return legacy
-    return state
+    return _load_config_profiles_state_from_db()
 
 
 def save_config_profiles_state(state: dict[str, Any]) -> None:
@@ -111,21 +98,8 @@ def save_config_profiles_state(state: dict[str, Any]) -> None:
 
         await session.commit()
 
-    try:
-        run_db_operation(_operation)
-        set_json_setting(ACTIVE_CONFIG_PROFILE_KEY, active_profile_id)
-    except Exception:
-        CONFIG_PROFILES_FILE.write_text(
-            json.dumps(
-                {
-                    "active_profile_id": active_profile_id,
-                    "profiles": profiles,
-                },
-                ensure_ascii=False,
-                indent=2,
-            ),
-            encoding="utf-8",
-        )
+    run_db_operation(_operation)
+    set_json_setting(ACTIVE_CONFIG_PROFILE_KEY, active_profile_id)
 
 
 def build_config_profiles_payload() -> dict[str, Any]:
@@ -331,34 +305,6 @@ def _load_config_profiles_state_from_db() -> dict[str, Any]:
             "active_profile_id": None,
             "profiles": [],
         }
-
-
-def _load_legacy_config_profiles_state() -> dict[str, Any]:
-    state: dict[str, Any] = {
-        "active_profile_id": None,
-        "profiles": [],
-    }
-    if not CONFIG_PROFILES_FILE.exists():
-        return state
-
-    try:
-        payload = json.loads(CONFIG_PROFILES_FILE.read_text(encoding="utf-8"))
-    except Exception:
-        return state
-
-    raw_profiles = payload.get("profiles") if isinstance(payload, dict) else []
-    profiles = [
-        _normalize_profile_record(item)
-        for item in (raw_profiles or [])
-        if isinstance(item, dict)
-    ]
-    active_profile_id = payload.get("active_profile_id") if isinstance(payload, dict) else None
-    if active_profile_id not in {profile["id"] for profile in profiles}:
-        active_profile_id = None
-
-    state["active_profile_id"] = active_profile_id
-    state["profiles"] = _sort_profiles(profiles)
-    return state
 
 
 def _serialize_profile_row(row: Any) -> dict[str, Any]:
@@ -663,7 +609,7 @@ def _normalize_profile_description(value: Any) -> str | None:
 
 def _normalize_voice_provider(value: Any) -> str:
     provider = str(value or "").strip().lower()
-    if provider not in VOICE_PROVIDER_OPTIONS:
+    if provider not in VOICE_PROVIDER_VALUES:
         return get_settings().voice_provider
     return provider
 

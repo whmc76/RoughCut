@@ -749,9 +749,6 @@ export type Config = {
     settings_store: string;
     profiles_store: string;
     packaging_store: string;
-    legacy_override_file_present: boolean;
-    legacy_profiles_file_present: boolean;
-    legacy_packaging_manifest_present: boolean;
   };
   transcription_provider: string;
   transcription_model: string;

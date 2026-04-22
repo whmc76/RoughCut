@@ -73,6 +73,7 @@ from roughcut.media.probe import probe, validate_media
 from roughcut.media.render import render_video
 from roughcut.media.silence import detect_silence
 from roughcut.llm_cache import build_cache_key, build_cache_metadata, digest_payload, load_cached_entry, save_cached_json
+from roughcut.naming import AVATAR_CAPABILITY_GENERATION, normalize_avatar_capability_status
 from roughcut.packaging.library import (
     list_packaging_assets,
     rank_insert_candidates_for_section,
@@ -114,7 +115,7 @@ from roughcut.review.downstream_context import (
 from roughcut.review.model_identity import filter_conflicting_model_wrong_forms as _shared_filter_conflicting_model_wrong_forms
 from roughcut.review.domain_glossaries import (
     _CANONICAL_DOMAIN_SOURCES,
-    _DOMAIN_COMPATIBILITY,
+    _RELATED_DOMAINS,
     detect_glossary_domains,
     filter_scoped_glossary_terms,
     merge_glossary_terms,
@@ -953,7 +954,7 @@ def _expand_subject_domain_scope(subject_domain: str | None) -> set[str]:
             expanded.add(canonical)
             if canonical not in seen:
                 queue.append(canonical)
-        for related in _DOMAIN_COMPATIBILITY.get(domain, ()):
+        for related in _RELATED_DOMAINS.get(domain, ()):
             if related not in seen:
                 queue.append(related)
     return expanded
@@ -7421,7 +7422,7 @@ def _score_music_entry_candidates(
     *,
     content_profile: dict | None,
 ) -> list[dict[str, Any]]:
-    workflow_template = str((content_profile or {}).get("workflow_template") or (content_profile or {}).get("preset_name") or "").strip()
+    workflow_template = str((content_profile or {}).get("workflow_template") or "").strip()
     scored: list[dict[str, Any]] = []
     for index, item in enumerate(subtitle_items):
         end_time = float(item.get("end_time", 0.0) or 0.0)
@@ -9392,11 +9393,11 @@ def _select_default_avatar_profile() -> dict[str, Any] | None:
         has_speaking_video = any(str(item.get("role") or "") == "speaking_video" for item in files)
         if not has_speaking_video:
             continue
-        capability = profile.get("capability_status") or {}
+        capability = normalize_avatar_capability_status(profile.get("capability_status") or {})
         score = 0
         if str(capability.get("preview") or "") == "ready":
             score += 2
-        if str(capability.get("heygem_avatar") or "") == "ready":
+        if str(capability.get(AVATAR_CAPABILITY_GENERATION) or "") == "ready":
             score += 1
         candidates.append((score, str(profile.get("created_at") or ""), profile))
     if not candidates:

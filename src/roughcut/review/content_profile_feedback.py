@@ -494,15 +494,12 @@ async def apply_content_profile_feedback(
     draft_profile: dict[str, Any],
     source_name: str,
     workflow_template: str | None = None,
-    channel_profile: str | None = None,
     user_feedback: dict[str, Any],
     reviewed_subtitle_excerpt: str | None = None,
     accepted_corrections: list[dict[str, Any]] | None = None,
     skip_model_refinement: bool = False,
 ) -> dict[str, Any]:
     cp = _content_profile_module()
-    if workflow_template is None and channel_profile is not None:
-        workflow_template = channel_profile
     resolved_feedback: dict[str, Any] = dict(user_feedback or {})
     merged = dict(draft_profile or {})
     merged["user_feedback"] = dict(resolved_feedback)
@@ -705,7 +702,7 @@ async def apply_content_profile_feedback(
     result = await cp.enrich_content_profile(
         profile=merged,
         source_name=source_name,
-        channel_profile=workflow_template,
+        workflow_template=workflow_template,
         transcript_excerpt=transcript_excerpt,
         include_research=False,
     )

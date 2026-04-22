@@ -108,7 +108,7 @@ export function WatchRootFormPanel({
           ) : null}
         </div>
         <SelectField
-          label={t("watch.form.channelProfile")}
+          label={t("watch.form.workflowTemplate")}
           value={form.workflow_template}
           onChange={(event) => onChange({ ...form, workflow_template: event.target.value })}
           options={workflowTemplateOptions}

@@ -12,7 +12,7 @@ from roughcut.db.models import Timeline
 from roughcut.packaging.library import resolve_insert_transition_overlap
 
 _DEFAULT_SMART_EFFECT_STYLE = "smart_effect_commercial"
-_LEGACY_SMART_EFFECT_STYLE_ALIASES = {
+_RENAMED_SMART_EFFECT_STYLE_KEYS = {
     "smart_effect_rhythm": _DEFAULT_SMART_EFFECT_STYLE,
 }
 _UNBOXING_WORKFLOW_PRESETS = {"unboxing_standard", "edc_tactical"}
@@ -344,7 +344,7 @@ def _normalize_smart_effect_style(style: str) -> str:
     normalized = str(style or "").strip().lower()
     if not normalized:
         return _DEFAULT_SMART_EFFECT_STYLE
-    return _LEGACY_SMART_EFFECT_STYLE_ALIASES.get(normalized, normalized)
+    return _RENAMED_SMART_EFFECT_STYLE_KEYS.get(normalized, normalized)
 
 
 def _should_preserve_smart_effect_color(*, workflow_preset: str | None) -> bool:

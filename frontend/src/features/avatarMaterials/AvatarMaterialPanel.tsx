@@ -818,7 +818,7 @@ function CreatorArchiveCard({
     const script =
       previewScript.trim() ||
       `大家好，我是${previewSpeakerName}。现在这是一条 RoughCut 自动生成的创作者数字人预览样片，主要用于检查音色一致性、口型同步和讲话镜头稳定性。`;
-    const hasPrerequisite = profile.capability_status?.heygem_avatar === "ready" && profile.capability_status?.voice_clone === "ready";
+    const hasPrerequisite = profile.capability_status?.avatar_generation === "ready" && profile.capability_status?.voice_clone === "ready";
     if (!hasPrerequisite) {
       onPreviewUnavailable(profile.next_action || "需要讲话视频片段和声音采样。");
       return;
@@ -1312,9 +1312,9 @@ function getProfilePresenterPath(profile: AvatarMaterialProfile): string {
 }
 
 function pipelineLabel(target: string) {
-  if (target === "heygem_avatar") return "HeyGem 数字人";
+  if (target === "avatar_generation") return "数字人生成";
   if (target === "voice_clone") return "声音克隆";
-  if (target === "avatar_identity") return "形象管理";
+  if (target === "portrait_reference") return "形象参考";
   return "人工复核";
 }
 

@@ -24,7 +24,7 @@ Phase 2 再加事实抽取 + SearXNG 核验 + Review UI 证据面板。
 - RenderBackend: ffmpeg
 
 ### 数据模型
-核心表：jobs, job_steps, artifacts, transcript_segments, subtitle_items, subtitle_corrections, timelines, render_outputs, glossary_terms, watch_roots, channel_profiles
+核心表：jobs, job_steps, artifacts, transcript_segments, subtitle_items, subtitle_corrections, timelines, render_outputs, glossary_terms, watch_roots, config_profiles
 Phase 2 预留：fact_claims, fact_evidence
 
 ### Pipeline 步骤顺序

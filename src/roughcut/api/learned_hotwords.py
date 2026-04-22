@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from roughcut.api.schemas import LearnedHotwordOut, LearnedHotwordUpdate
 from roughcut.db.models import LearnedHotword
 from roughcut.db.session import get_session
-from roughcut.review.domain_glossaries import _DOMAIN_COMPATIBILITY, normalize_subject_domain
+from roughcut.review.domain_glossaries import _RELATED_DOMAINS, normalize_subject_domain
 from roughcut.review.hotword_learning import normalize_hotword_token
 
 router = APIRouter(prefix="/learned-hotwords", tags=["learned-hotwords"])
@@ -26,7 +26,7 @@ def _domain_filter_values(subject_domain: str | None) -> list[str]:
     normalized = _normalize_subject_domain(subject_domain)
     if not normalized:
         return []
-    return sorted({"", normalized, *_DOMAIN_COMPATIBILITY.get(normalized, ())})
+    return sorted({"", normalized, *_RELATED_DOMAINS.get(normalized, ())})
 
 
 def _sanitize_aliases(values: list[str] | None, *, term: str, canonical_form: str) -> list[str]:

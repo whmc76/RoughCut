@@ -6,8 +6,15 @@ from roughcut.creative.modes import (
     build_active_enhancement_mode_options,
     build_active_workflow_mode_options,
 )
-from roughcut.config import AVATAR_PROVIDER_OPTIONS, VOICE_PROVIDER_OPTIONS
 from roughcut.edit.presets import PRESETS, list_workflow_template_options, normalize_workflow_template_name
+from roughcut.naming import (
+    AVATAR_PROVIDER_VALUES,
+    MULTIMODAL_PROVIDER_VALUES,
+    SEARCH_FALLBACK_PROVIDER_VALUES,
+    SEARCH_PROVIDER_VALUES,
+    VOICE_PROVIDER_VALUES,
+    build_named_options,
+)
 from roughcut.speech.dialects import TRANSCRIPTION_DIALECT_OPTIONS
 
 DEFAULT_JOB_LANGUAGE: Final[str] = "zh-CN"
@@ -23,26 +30,12 @@ JOB_LANGUAGE_OPTIONS: Final[list[dict[str, str]]] = [
     {"value": "es-ES", "label": "Espanol"},
 ]
 
-MULTIMODAL_FALLBACK_PROVIDER_OPTIONS: Final[list[dict[str, str]]] = [
-    {"value": "openai", "label": "OpenAI"},
-    {"value": "anthropic", "label": "Anthropic"},
-    {"value": "minimax", "label": "MiniMax"},
-    {"value": "ollama", "label": "Ollama"},
-]
-
-SEARCH_PROVIDER_OPTIONS: Final[list[dict[str, str]]] = [
-    {"value": "auto", "label": "自动选择"},
-    {"value": "openai", "label": "OpenAI"},
-    {"value": "anthropic", "label": "Anthropic"},
-    {"value": "minimax", "label": "MiniMax"},
-    {"value": "ollama", "label": "Ollama"},
-    {"value": "model", "label": "模型辅助搜索"},
-    {"value": "searxng", "label": "SearXNG"},
-]
-
-SEARCH_FALLBACK_PROVIDER_OPTIONS: Final[list[dict[str, str]]] = [
-    option for option in SEARCH_PROVIDER_OPTIONS if option["value"] != "auto"
-]
+MULTIMODAL_FALLBACK_PROVIDER_OPTIONS: Final[list[dict[str, str]]] = build_named_options(MULTIMODAL_PROVIDER_VALUES)
+SEARCH_PROVIDER_OPTIONS: Final[list[dict[str, str]]] = build_named_options(
+    SEARCH_PROVIDER_VALUES,
+    include_auto_label="自动选择",
+)
+SEARCH_FALLBACK_PROVIDER_OPTIONS: Final[list[dict[str, str]]] = build_named_options(SEARCH_FALLBACK_PROVIDER_VALUES)
 
 _ALLOWED_JOB_LANGUAGES = {option["value"] for option in JOB_LANGUAGE_OPTIONS}
 _ALLOWED_WORKFLOW_TEMPLATES = set(PRESETS)
@@ -61,11 +54,11 @@ def build_enhancement_mode_options() -> list[dict[str, str]]:
 
 
 def build_avatar_provider_options() -> list[dict[str, str]]:
-    return [{"value": item, "label": item} for item in AVATAR_PROVIDER_OPTIONS]
+    return build_named_options(AVATAR_PROVIDER_VALUES)
 
 
 def build_voice_provider_options() -> list[dict[str, str]]:
-    return [{"value": item, "label": item} for item in VOICE_PROVIDER_OPTIONS]
+    return build_named_options(VOICE_PROVIDER_VALUES)
 
 
 def build_transcription_dialect_options() -> list[dict[str, str]]:
@@ -86,11 +79,3 @@ def normalize_workflow_template(value: str | None) -> str | None:
     if normalized not in _ALLOWED_WORKFLOW_TEMPLATES:
         raise ValueError(f"Unsupported workflow_template: {normalized}")
     return normalized
-
-
-def build_channel_profile_options() -> list[dict[str, str]]:
-    return build_workflow_template_options()
-
-
-def normalize_channel_profile(value: str | None) -> str | None:
-    return normalize_workflow_template(value)

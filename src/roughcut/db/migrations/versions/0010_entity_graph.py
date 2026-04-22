@@ -1,7 +1,7 @@
 """entity graph memory tables
 
 Revision ID: 0010
-Revises: 0009
+Revises: 0008
 Create Date: 2026-04-01
 
 """
@@ -14,7 +14,7 @@ from sqlalchemy.dialects import postgresql
 TIMESTAMPTZ = sa.TIMESTAMP(timezone=True)
 
 revision: str = "0010"
-down_revision = "0009"
+down_revision = "0008"
 branch_labels = None
 depends_on = None
 

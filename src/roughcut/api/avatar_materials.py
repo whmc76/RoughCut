@@ -32,6 +32,13 @@ from roughcut.avatar.runtime import (
 )
 from roughcut.config import get_settings
 from roughcut.media.probe import probe
+from roughcut.naming import (
+    AVATAR_CAPABILITY_GENERATION,
+    AVATAR_CAPABILITY_PORTRAIT,
+    AVATAR_CAPABILITY_PREVIEW,
+    AVATAR_CAPABILITY_VOICE,
+    normalize_avatar_capability_status,
+)
 
 router = APIRouter(prefix="/avatar-materials", tags=["avatar-materials"])
 
@@ -494,21 +501,21 @@ def _build_profile_runtime_state(
     if voice_sample_count == 0:
         warnings.append("还没有声音采样，后续语音克隆和 AI 导演重配音将无法直接复用同音色。")
 
-    heygem_ready = speaking_video_count > 0 and not any("讲话视频片段" in item for item in blocking_issues)
+    avatar_ready = speaking_video_count > 0 and not any("讲话视频片段" in item for item in blocking_issues)
     voice_clone_ready = voice_sample_count > 0
     portrait_ready = portrait_photo_count > 0
-    preview_ready = heygem_ready and voice_clone_ready and preview_service_available
-    training_ready = heygem_ready
+    preview_ready = avatar_ready and voice_clone_ready and preview_service_available
+    training_ready = avatar_ready
 
     return {
         "blocking_issues": blocking_issues,
         "warnings": warnings,
         "training_status": "ready_for_manual_training" if training_ready else "needs_more_material",
         "capability_status": {
-            "heygem_avatar": "ready" if heygem_ready else "missing",
-            "voice_clone": "ready" if voice_clone_ready else "missing",
-            "portrait_reference": "ready" if portrait_ready else "missing",
-            "preview": "ready" if preview_ready else "missing",
+            AVATAR_CAPABILITY_GENERATION: "ready" if avatar_ready else "missing",
+            AVATAR_CAPABILITY_VOICE: "ready" if voice_clone_ready else "missing",
+            AVATAR_CAPABILITY_PORTRAIT: "ready" if portrait_ready else "missing",
+            AVATAR_CAPABILITY_PREVIEW: "ready" if preview_ready else "missing",
         },
         "next_action": (
             "素材已通过基础预检，声音采样也已完成预处理，可以直接生成脚本驱动的数字人预览样片。"
@@ -527,6 +534,7 @@ def _derive_runtime_preview_capability(
     files: list[dict[str, Any]],
     preview_service_available: bool,
 ) -> tuple[dict[str, str], str]:
+    capability_status = normalize_avatar_capability_status(capability_status)
     has_video = any(str(item.get("role") or "") == "speaking_video" for item in files)
     has_voice = any(str(item.get("role") or "") == "voice_sample" for item in files)
     has_portrait = any(str(item.get("role") or "") == "portrait_photo" for item in files)
@@ -539,15 +547,15 @@ def _derive_runtime_preview_capability(
     if not files:
         return (
             {
-                "heygem_avatar": "missing",
-                "voice_clone": "missing",
-                "portrait_reference": "missing",
-                "preview": "missing",
+                AVATAR_CAPABILITY_GENERATION: "missing",
+                AVATAR_CAPABILITY_VOICE: "missing",
+                AVATAR_CAPABILITY_PORTRAIT: "missing",
+                AVATAR_CAPABILITY_PREVIEW: "missing",
             },
             "先补齐讲话视频片段或修复阻塞项，再导入 HeyGem 训练。",
         )
 
-    heygem_ready = "ready" if has_video and not has_blocking_issues else "missing"
+    avatar_ready = "ready" if has_video and not has_blocking_issues else "missing"
     voice_ready = "ready" if has_voice else "missing"
     portrait_ready = "ready" if has_portrait else "missing"
     preview_ready = "ready" if has_video and has_voice and preview_service_available else "missing"
@@ -555,10 +563,12 @@ def _derive_runtime_preview_capability(
     if has_blocking_issues:
         return (
             {
-                "heygem_avatar": "missing" if capability_status.get("heygem_avatar") == "missing" else heygem_ready,
-                "voice_clone": capability_status.get("voice_clone", voice_ready),
-                "portrait_reference": capability_status.get("portrait_reference", portrait_ready),
-                "preview": "missing",
+                AVATAR_CAPABILITY_GENERATION: "missing"
+                if capability_status.get(AVATAR_CAPABILITY_GENERATION) == "missing"
+                else avatar_ready,
+                AVATAR_CAPABILITY_VOICE: capability_status.get(AVATAR_CAPABILITY_VOICE, voice_ready),
+                AVATAR_CAPABILITY_PORTRAIT: capability_status.get(AVATAR_CAPABILITY_PORTRAIT, portrait_ready),
+                AVATAR_CAPABILITY_PREVIEW: "missing",
             },
             "素材存在阻塞项，先修复后再继续。",
         )
@@ -566,40 +576,40 @@ def _derive_runtime_preview_capability(
     if not has_video:
         return (
             {
-                "heygem_avatar": "missing",
-                "voice_clone": capability_status.get("voice_clone", voice_ready),
-                "portrait_reference": capability_status.get("portrait_reference", portrait_ready),
-                "preview": "missing",
+                AVATAR_CAPABILITY_GENERATION: "missing",
+                AVATAR_CAPABILITY_VOICE: capability_status.get(AVATAR_CAPABILITY_VOICE, voice_ready),
+                AVATAR_CAPABILITY_PORTRAIT: capability_status.get(AVATAR_CAPABILITY_PORTRAIT, portrait_ready),
+                AVATAR_CAPABILITY_PREVIEW: "missing",
             },
             "先补齐讲话视频片段后再导入 HeyGem 训练。",
         )
     if not has_voice:
         return (
             {
-                "heygem_avatar": heygem_ready,
-                "voice_clone": "missing",
-                "portrait_reference": capability_status.get("portrait_reference", portrait_ready),
-                "preview": "missing",
+                AVATAR_CAPABILITY_GENERATION: avatar_ready,
+                AVATAR_CAPABILITY_VOICE: "missing",
+                AVATAR_CAPABILITY_PORTRAIT: capability_status.get(AVATAR_CAPABILITY_PORTRAIT, portrait_ready),
+                AVATAR_CAPABILITY_PREVIEW: "missing",
             },
             "已具备视频片段，需补充声音采样后才能做数字人口播预览。",
         )
     if not preview_service_available:
         return (
             {
-                "heygem_avatar": heygem_ready,
-                "voice_clone": voice_ready,
-                "portrait_reference": capability_status.get("portrait_reference", portrait_ready),
-                "preview": "missing",
+                AVATAR_CAPABILITY_GENERATION: avatar_ready,
+                AVATAR_CAPABILITY_VOICE: voice_ready,
+                AVATAR_CAPABILITY_PORTRAIT: capability_status.get(AVATAR_CAPABILITY_PORTRAIT, portrait_ready),
+                AVATAR_CAPABILITY_PREVIEW: "missing",
             },
             "未检测到可用的数字人口播预览服务（easy/submit）。请先启动 HeyGem 预览服务后再生成预览。",
         )
 
     return (
         {
-            "heygem_avatar": capability_status.get("heygem_avatar", heygem_ready),
-            "voice_clone": capability_status.get("voice_clone", voice_ready),
-            "portrait_reference": capability_status.get("portrait_reference", portrait_ready),
-            "preview": preview_ready,
+            AVATAR_CAPABILITY_GENERATION: capability_status.get(AVATAR_CAPABILITY_GENERATION, avatar_ready),
+            AVATAR_CAPABILITY_VOICE: capability_status.get(AVATAR_CAPABILITY_VOICE, voice_ready),
+            AVATAR_CAPABILITY_PORTRAIT: capability_status.get(AVATAR_CAPABILITY_PORTRAIT, portrait_ready),
+            AVATAR_CAPABILITY_PREVIEW: preview_ready,
         },
         "素材已通过基础预检，声音采样也已完成预处理，可以直接生成脚本驱动的数字人预览样片。"
         if preview_ready == "ready"
@@ -697,9 +707,9 @@ def _role_label(role: str) -> str:
 
 def _pipeline_target(role: str) -> str:
     targets = {
-        "speaking_video": "heygem_avatar",
-        "portrait_photo": "avatar_identity",
-        "voice_sample": "voice_clone",
+        "speaking_video": AVATAR_CAPABILITY_GENERATION,
+        "portrait_photo": AVATAR_CAPABILITY_PORTRAIT,
+        "voice_sample": AVATAR_CAPABILITY_VOICE,
         "generic": "manual_review",
     }
     return targets.get(role, "manual_review")

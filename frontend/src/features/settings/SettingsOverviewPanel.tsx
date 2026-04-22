@@ -96,11 +96,7 @@ export function SettingsOverviewPanel({ form, config, runtimeEnvironment, servic
           </div>
         </div>
       ) : null}
-      {(config?.persistence.legacy_override_file_present || config?.persistence.legacy_profiles_file_present || config?.persistence.legacy_packaging_manifest_present) ? (
-        <div className="notice top-gap">检测到遗留文件，当前仍以数据库持久化结果为准。</div>
-      ) : (
-        <div className="notice top-gap">当前设置已经保存到数据库。</div>
-      )}
+      <div className="notice top-gap">当前设置已经保存到数据库。</div>
     </section>
   );
 }

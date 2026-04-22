@@ -521,7 +521,7 @@ def _prefer_subject_domain_from_hints(subject_domain_hints: set[str]) -> str:
     return next(iter(subject_domain_hints))
 
 
-def _compose_legacy_subject_type(*, subject_type: str, subject_brand: str, subject_model: str) -> str:
+def _compose_subject_type_label(*, subject_type: str, subject_brand: str, subject_model: str) -> str:
     candidate = _normalize_understanding_value(subject_type)
     brand = _normalize_understanding_value(subject_brand)
     model = _normalize_understanding_value(subject_model)
@@ -689,7 +689,7 @@ def _resolve_subject_brand_and_model(
     return subject_brand, subject_model
 
 
-def map_content_understanding_to_legacy_profile(value: ContentUnderstanding) -> dict[str, Any]:
+def map_content_understanding_to_profile(value: ContentUnderstanding) -> dict[str, Any]:
     preferred_entities = _preferred_subject_entities(value)
     subject_domain_hints = _infer_subject_domain_hints(value)
     if not subject_domain_hints:
@@ -707,7 +707,7 @@ def map_content_understanding_to_legacy_profile(value: ContentUnderstanding) -> 
     subject_domain = _normalize_understanding_value(value.content_domain)
     if not subject_domain:
         subject_domain = _prefer_subject_domain_from_hints(subject_domain_hints)
-    subject_type = _compose_legacy_subject_type(
+    subject_type = _compose_subject_type_label(
         subject_type=_normalize_understanding_value(
         value.resolved_primary_subject
         or value.primary_subject

@@ -33,7 +33,7 @@
 - NVIDIA NIM / Parakeet / Canary
   - 这类方案更偏 Linux + NVIDIA 生态集成。
   - 对当前 Windows 工作区和本仓库现有 provider 形态来说，接入成本明显高于收益。
-  - 如果后面要上统一 OpenAI-compatible 推理网关，再单独评估更合适。
+  - 如果后面要上统一 Chat API 推理网关，再单独评估更合适。
 
 ## 建议的测试分组
 

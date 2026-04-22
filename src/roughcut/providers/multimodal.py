@@ -293,7 +293,7 @@ async def _complete_once_unthrottled(
         return _finalize_text(extract_response_output_text(response), json_mode=json_mode)
 
     if provider == "minimax":
-        base_url, token = _resolve_openai_compatible(provider)
+        base_url, token = _resolve_chat_api_endpoint(provider)
         content: list[dict] = [{"type": "text", "text": prompt}]
         for image in images_b64:
             content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image}"}})
@@ -597,7 +597,7 @@ def _get_provider_semaphore(provider: str) -> asyncio.Semaphore | None:
         return cached[1]
 
 
-def _resolve_openai_compatible(provider: str) -> tuple[str, str]:
+def _resolve_chat_api_endpoint(provider: str) -> tuple[str, str]:
     settings = get_settings()
     if provider == "openai":
         return (
@@ -614,7 +614,7 @@ def _resolve_openai_compatible(provider: str) -> tuple[str, str]:
         if not token:
             raise ValueError("MiniMax API credential is not configured")
         return settings.minimax_base_url.rstrip("/"), token
-    raise ValueError(f"Unsupported OpenAI-compatible provider: {provider}")
+    raise ValueError(f"Unsupported chat API provider: {provider}")
 
 
 def _finalize_text(text: str, *, json_mode: bool) -> str:

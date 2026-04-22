@@ -7,7 +7,7 @@ from typing import Any
 
 from roughcut.review.domain_glossaries import (
     _CANONICAL_DOMAIN_SOURCES,
-    _DOMAIN_COMPATIBILITY,
+    _RELATED_DOMAINS,
     _DOMAIN_KEYWORDS,
     canonicalize_domains,
     detect_glossary_domains,
@@ -333,7 +333,6 @@ _SUPPORTED_MEMORY_DOMAINS = {
 def build_subtitle_review_memory(
     *,
     workflow_template: str | None = None,
-    channel_profile: str | None = None,
     subject_domain: str | None = None,
     glossary_terms: list[dict[str, Any]] | None,
     user_memory: dict[str, Any] | None,
@@ -344,8 +343,6 @@ def build_subtitle_review_memory(
     term_limit: int = 30,
     example_limit: int = 6,
 ) -> dict[str, Any]:
-    if workflow_template is None and channel_profile is not None:
-        workflow_template = channel_profile
     resolved_subject_domain = _resolve_review_subject_domain(
         subject_domain=subject_domain,
         workflow_template=workflow_template,
@@ -795,7 +792,7 @@ def _memory_entity_domain_matches_current_domain(entity_domain: str, current_dom
         return True
     if normalized_entity == normalized_current:
         return True
-    compatibility = {
+    related_domains = {
         "edc": {"outdoor", "functional", "tools"},
         "outdoor": {"edc", "functional", "tools"},
         "functional": {"edc", "outdoor"},
@@ -803,7 +800,7 @@ def _memory_entity_domain_matches_current_domain(entity_domain: str, current_dom
         "tech": set(),
         "ai": set(),
     }
-    return normalized_current in compatibility.get(normalized_entity, set()) or normalized_entity in compatibility.get(normalized_current, set())
+    return normalized_current in related_domains.get(normalized_entity, set()) or normalized_entity in related_domains.get(normalized_current, set())
 
 
 def summarize_subtitle_review_memory(review_memory: dict[str, Any] | None) -> str:
@@ -882,12 +879,9 @@ def build_transcription_prompt(
     *,
     source_name: str,
     workflow_template: str | None = None,
-    channel_profile: str | None = None,
     review_memory: dict[str, Any] | None,
     dialect_profile: str | None = None,
 ) -> str:
-    if workflow_template is None and channel_profile is not None:
-        workflow_template = channel_profile
     snippets: list[str] = []
 
     dialect_spec = resolve_transcription_dialect(dialect_profile)
@@ -1015,7 +1009,7 @@ def _select_prompt_dominant_domains(
     }
     expanded = set(selected)
     for domain in tuple(selected):
-        expanded.update(_DOMAIN_COMPATIBILITY.get(domain, ()))
+        expanded.update(_RELATED_DOMAINS.get(domain, ()))
     expanded.update(workflow_domains)
     return expanded
 
@@ -1092,7 +1086,7 @@ def _expand_review_subject_domains(subject_domain: str | None) -> set[str]:
             expanded.add(canonical)
             if canonical not in seen:
                 queue.append(canonical)
-        for related in _DOMAIN_COMPATIBILITY.get(domain, ()):
+        for related in _RELATED_DOMAINS.get(domain, ()):
             if related not in seen:
                 queue.append(related)
     return expanded

@@ -1,7 +1,6 @@
-"""Runtime config API — read/write roughcut_config.json to override env vars."""
+"""Runtime config API backed by the application database."""
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
@@ -25,6 +24,7 @@ from roughcut.config import (
     AVATAR_PROVIDER_OPTIONS,
     DEFAULT_TRANSCRIPTION_PROVIDER,
     ENV_MANAGED_SETTINGS,
+    HYBRID_REASONING_PROVIDER_VALUES,
     PROFILE_BINDABLE_SETTINGS,
     SEARCH_FALLBACK_PROVIDER_VALUES,
     SEARCH_PROVIDER_VALUES,
@@ -39,8 +39,8 @@ from roughcut.config import (
     canonicalize_transcription_provider_name,
     normalize_transcription_settings,
 )
+from roughcut.naming import CODING_BACKEND_VALUES
 from roughcut.config_profiles import (
-    CONFIG_PROFILES_FILE,
     activate_config_profile,
     build_config_profiles_payload,
     create_config_profile,
@@ -49,12 +49,10 @@ from roughcut.config_profiles import (
 )
 from roughcut.creative.modes import normalize_enhancement_modes, normalize_workflow_mode
 from roughcut.creative.modes import build_mode_catalog
-from roughcut.packaging.library import MANIFEST_PATH
 from roughcut.speech.dialects import DEFAULT_TRANSCRIPTION_DIALECT, normalize_transcription_dialect
 
 router = APIRouter(prefix="/config", tags=["config"])
 
-_CONFIG_FILE = Path("roughcut_config.json")
 _SECRET_OVERRIDE_KEYS = {
     "openai_api_key",
     "anthropic_api_key",
@@ -426,9 +424,6 @@ def get_config():
             "settings_store": "database",
             "profiles_store": "database",
             "packaging_store": "database",
-            "legacy_override_file_present": _CONFIG_FILE.exists(),
-            "legacy_profiles_file_present": CONFIG_PROFILES_FILE.exists(),
-            "legacy_packaging_manifest_present": MANIFEST_PATH.exists(),
         },
         transcription_provider=s.transcription_provider,
         transcription_model=s.transcription_model,
@@ -691,8 +686,11 @@ def patch_config(body: ConfigPatch):
     for key in ("reasoning_provider", "backup_reasoning_provider", "multimodal_fallback_provider"):
         if key in updates:
             provider_name = str(updates[key] or "").strip().lower()
-            if provider_name not in {"openai", "anthropic", "minimax", "ollama"}:
-                raise HTTPException(status_code=400, detail=f"{key} must be openai, anthropic, minimax, or ollama")
+            if provider_name not in HYBRID_REASONING_PROVIDER_VALUES:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"{key} must be one of: {', '.join(HYBRID_REASONING_PROVIDER_VALUES)}",
+                )
             updates[key] = provider_name
     if "llm_backup_enabled" in updates:
         updates["llm_backup_enabled"] = bool(updates["llm_backup_enabled"])
@@ -726,8 +724,11 @@ def patch_config(body: ConfigPatch):
     for key in ("hybrid_analysis_provider", "hybrid_copy_provider"):
         if key in updates:
             provider_name = str(updates[key] or "").strip().lower()
-            if provider_name not in {"openai", "anthropic", "minimax", "ollama"}:
-                raise HTTPException(status_code=400, detail=f"{key} must be openai, anthropic, minimax, or ollama")
+            if provider_name not in HYBRID_REASONING_PROVIDER_VALUES:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"{key} must be one of: {', '.join(HYBRID_REASONING_PROVIDER_VALUES)}",
+                )
             updates[key] = provider_name
     for key in ("hybrid_analysis_model", "hybrid_copy_model"):
         if key in updates:
@@ -782,13 +783,19 @@ def patch_config(body: ConfigPatch):
         updates["telegram_agent_state_dir"] = state_dir
     if "acp_bridge_backend" in updates:
         backend = str(updates["acp_bridge_backend"] or "").strip().lower()
-        if backend not in {"", "claude", "codex"}:
-            raise HTTPException(status_code=400, detail="acp_bridge_backend must be auto, claude or codex")
+        if backend and backend not in CODING_BACKEND_VALUES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"acp_bridge_backend must be auto or one of: {', '.join(CODING_BACKEND_VALUES)}",
+            )
         updates["acp_bridge_backend"] = backend
     if "acp_bridge_fallback_backend" in updates:
         fallback_backend = str(updates["acp_bridge_fallback_backend"] or "").strip().lower()
-        if fallback_backend not in {"", "claude", "codex"}:
-            raise HTTPException(status_code=400, detail="acp_bridge_fallback_backend must be auto, claude or codex")
+        if fallback_backend and fallback_backend not in CODING_BACKEND_VALUES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"acp_bridge_fallback_backend must be auto or one of: {', '.join(CODING_BACKEND_VALUES)}",
+            )
         updates["acp_bridge_fallback_backend"] = fallback_backend
     if "acp_bridge_claude_model" in updates:
         updates["acp_bridge_claude_model"] = str(updates["acp_bridge_claude_model"] or "").strip()

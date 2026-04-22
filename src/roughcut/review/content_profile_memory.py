@@ -24,7 +24,7 @@ from roughcut.review.hotword_learning import (
     record_learned_hotwords_from_content_profile_feedback,
 )
 from roughcut.review.model_identity import model_numbers_conflict
-from roughcut.review.domain_glossaries import _DOMAIN_COMPATIBILITY, normalize_subject_domain
+from roughcut.review.domain_glossaries import _RELATED_DOMAINS, normalize_subject_domain
 from roughcut.usage import track_usage_operation
 
 
@@ -75,14 +75,11 @@ async def load_content_profile_user_memory(
     session: AsyncSession,
     *,
     subject_domain: str | None = None,
-    channel_profile: str | None = None,
     strict_subject_domain: bool = False,
     recent_limit: int = 10,
     keyword_limit: int = 12,
     field_limit: int = 4,
 ) -> dict[str, Any]:
-    if subject_domain is None and channel_profile is not None:
-        subject_domain = channel_profile
     subject_domain = _normalize_subject_domain_hint(subject_domain)
     if strict_subject_domain and subject_domain is None:
         return {}
@@ -246,7 +243,7 @@ async def record_content_profile_feedback_memory(
     recorded_pairs: set[tuple[str, str, str]] = set()
     fallback_subject_domain = _normalize_subject_domain_hint(
         str(final_profile.get("subject_domain") or "")
-        or str(getattr(job, "workflow_template", None) or getattr(job, "channel_profile", None) or "")
+        or str(getattr(job, "workflow_template", None) or "")
     )
 
     def remember_correction(field_name: str, original_value: Any, corrected_value: Any) -> None:
@@ -778,7 +775,7 @@ def _expand_subject_domain_scope(subject_domain: str | None) -> set[str]:
     normalized = _normalize_subject_domain_hint(subject_domain)
     if not normalized:
         return set()
-    return {normalized, *_DOMAIN_COMPATIBILITY.get(normalized, ())}
+    return {normalized, *_RELATED_DOMAINS.get(normalized, ())}
 
 
 async def _increment_keyword_stat(

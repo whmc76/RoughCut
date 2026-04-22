@@ -9,7 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from roughcut.db.models import Job, LearnedHotword
-from roughcut.review.domain_glossaries import _DOMAIN_COMPATIBILITY, normalize_subject_domain
+from roughcut.review.domain_glossaries import _RELATED_DOMAINS, normalize_subject_domain
 
 
 _GENERIC_HOTWORD_BLOCKLIST = {
@@ -57,7 +57,7 @@ def _subject_domain_scope(subject_domain: str | None) -> set[str]:
     normalized = _normalized_subject_domain(subject_domain)
     if not normalized:
         return {""}
-    return {"", normalized, *_DOMAIN_COMPATIBILITY.get(normalized, ())}
+    return {"", normalized, *_RELATED_DOMAINS.get(normalized, ())}
 
 
 def _is_learnable_hotword(value: Any) -> bool:

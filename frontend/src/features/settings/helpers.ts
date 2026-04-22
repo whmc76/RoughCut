@@ -6,7 +6,7 @@ export const PROVIDER_LABELS: Record<string, string> = {
   heygem: "HeyGem",
   indextts2: "IndexTTS2",
   minimax: "MiniMax",
-  model: "模型代理",
+  model: "模型辅助搜索",
   ollama: "Ollama",
   openai: "OpenAI",
   local_http_asr: "本地 HTTP ASR",

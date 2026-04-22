@@ -9,7 +9,7 @@ Files:
 
 - `E:/WorkSpace/heygem/docker-compose.yml`
 - `E:/WorkSpace/indextts2-service/docker-compose.yml`
-- `scripts/start-heygem-shared.ps1` as a compatibility wrapper that starts the two real repos above
+- `scripts/start-heygem-shared.ps1` as a launcher wrapper that starts the two real repos above
 
 Default host data roots:
 
@@ -38,4 +38,4 @@ Operational note:
 - keep only one long-running IndexTTS2 instance bound to `49204`
 - the current preferred production shape is `accel`
 - do not leave separate `baseline / sage / accel` containers resident on the same GPU
-- `deploy/heygem-shared/` is now legacy compatibility material and is no longer the default startup target
+- `deploy/heygem-shared/` is archived deployment material and is no longer the default startup target

@@ -121,7 +121,7 @@ PRESETS: dict[str, WorkflowPreset] = {
     ),
 }
 
-LEGACY_PRESET_ALIASES = {
+RENAMED_PRESET_KEYS = {
     "screen_tutorial": "tutorial_standard",
     "unboxing_default": "unboxing_standard",
     "unboxing_limited": "unboxing_standard",
@@ -149,8 +149,8 @@ CONTENT_KIND_TO_TEMPLATE = {
 
 def normalize_workflow_template_name(name: str | None) -> str:
     normalized = str(name or "").strip().lower()
-    if normalized in LEGACY_PRESET_ALIASES:
-        return LEGACY_PRESET_ALIASES[normalized]
+    if normalized in RENAMED_PRESET_KEYS:
+        return RENAMED_PRESET_KEYS[normalized]
     return normalized
 
 
@@ -242,18 +242,3 @@ def select_workflow_template(
     if any(keyword in haystack for keyword in ("刀", "edc", "战术", "tactical", "钛", "柄", "锁")):
         return PRESETS["edc_tactical"]
     return PRESETS["unboxing_standard"]
-
-
-def select_preset(
-    *,
-    channel_profile: str | None,
-    subject_model: str = "",
-    subject_type: str = "",
-    transcript_hint: str = "",
-) -> WorkflowPreset:
-    return select_workflow_template(
-        workflow_template=channel_profile,
-        subject_model=subject_model,
-        subject_type=subject_type,
-        transcript_hint=transcript_hint,
-    )

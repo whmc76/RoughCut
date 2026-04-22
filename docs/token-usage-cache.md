@@ -15,14 +15,14 @@
   - 返回按天聚合的趋势视图。
   - 默认最近 `7` 天，可通过 `?days=` 调整；任务采样窗口默认最近 `120` 个任务，可通过 `?limit=` 调整。
   - 支持 `?focus_type=step|model|provider` 和 `?focus_name=` 看指定维度的日趋势。
-  - 向后兼容 `?step_name=`，等价于 `?focus_type=step&focus_name=...`。
+  - 支持 `?step_name=`，等价于 `?focus_type=step&focus_name=...`。
   - 每天包含：总 tokens、总调用、缓存命中率，以及当前维度下的当日最高消耗项。
 
 ## 缓存语义
 
 - `content_profile`
   - 先走严格输入指纹缓存。
-  - 指纹绑定：`source_file_hash`、`source_name`、`channel_profile`、字幕摘录、词表、用户记忆、`copy_style`。
+  - 指纹绑定：`source_file_hash`、`source_name`、`workflow_template`、字幕摘录、词表、用户记忆、`copy_style`。
   - 命中后直接复用已确认的推理结果，不再重复发起模型调用。
 
 - `platform_package.fact_sheet`
@@ -49,10 +49,6 @@
 - `cache.saved_tokens_hit_rate`
   - 表示当前命中里，有多少比例已经具备真实 baseline。
   - 这能区分“命中了旧缓存但还没有历史基线”和“命中了可准确核算节省量的新缓存”。
-
-- 旧缓存兼容
-  - 这次改造之前写入的 cache 文件没有 `usage_baseline`。
-  - 这些命中仍会计入 `hits` 和 `avoided_calls`，但不会计入 `saved_total_tokens`。
 
 - `content_profile.enrich` 预热缓存的保守口径
   - `infer` 完成后会顺手预热一份 `enrich` cache 结果，方便后续 seeded profile 命中。

@@ -65,15 +65,6 @@ class Job(Base):
         "RenderOutput", back_populates="job", cascade="all, delete-orphan"
     )
 
-    @property
-    def channel_profile(self) -> str | None:
-        return self.workflow_template
-
-    @channel_profile.setter
-    def channel_profile(self, value: str | None) -> None:
-        self.workflow_template = value
-
-
 class JobStep(Base):
     __tablename__ = "job_steps"
 
@@ -256,15 +247,6 @@ class ContentProfileCorrection(Base):
     corrected_value: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(TIMESTAMPTZ, server_default=func.now())
 
-    @property
-    def channel_profile(self) -> str | None:
-        return self.subject_domain
-
-    @channel_profile.setter
-    def channel_profile(self, value: str | None) -> None:
-        self.subject_domain = value
-
-
 class ContentProfileKeywordStat(Base):
     __tablename__ = "content_profile_keyword_stats"
     __table_args__ = (UniqueConstraint("scope_type", "scope_value", "keyword"),)
@@ -384,15 +366,6 @@ class WatchRoot(Base):
     inventory_cache_updated_at: Mapped[datetime | None] = mapped_column(TIMESTAMPTZ)
     created_at: Mapped[datetime] = mapped_column(TIMESTAMPTZ, server_default=func.now())
 
-    @property
-    def channel_profile(self) -> str | None:
-        return self.workflow_template
-
-    @channel_profile.setter
-    def channel_profile(self, value: str | None) -> None:
-        self.workflow_template = value
-
-
 class GlossaryTerm(Base):
     __tablename__ = "glossary_terms"
 
@@ -403,16 +376,6 @@ class GlossaryTerm(Base):
     correct_form: Mapped[str] = mapped_column(Text, nullable=False)
     category: Mapped[str | None] = mapped_column(Text)
     context_hint: Mapped[str | None] = mapped_column(Text)
-    created_at: Mapped[datetime] = mapped_column(TIMESTAMPTZ, server_default=func.now())
-
-
-class ChannelProfile(Base):
-    __tablename__ = "channel_profiles"
-    __table_args__ = (UniqueConstraint("name"),)
-
-    id: Mapped[uuid.UUID] = mapped_column(UUID_TYPE, primary_key=True, default=_uuid)
-    name: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
-    config_json: Mapped[dict] = mapped_column(JSON_TYPE, nullable=False)
     created_at: Mapped[datetime] = mapped_column(TIMESTAMPTZ, server_default=func.now())
 
 

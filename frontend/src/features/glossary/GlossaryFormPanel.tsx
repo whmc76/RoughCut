@@ -55,7 +55,7 @@ export function GlossaryFormPanel({ editing, form, isSaving, autosaveState, auto
           options={[
             { value: "global", label: t("glossary.form.scope.global") },
             { value: "domain", label: t("glossary.form.scope.domain") },
-            { value: "workflow_template", label: t("glossary.form.scope.channelProfile") },
+            { value: "workflow_template", label: t("glossary.form.scope.workflowTemplate") },
           ]}
         />
         <TextField

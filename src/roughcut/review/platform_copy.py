@@ -220,7 +220,7 @@ def build_packaging_prompt_brief(
         "correction_notes": str(profile.get("correction_notes") or "").strip(),
         "supplemental_context": str(profile.get("supplemental_context") or "").strip(),
         "copy_style": str(profile.get("copy_style") or "").strip(),
-        "workflow_template": str(profile.get("workflow_template") or profile.get("preset_name") or "").strip(),
+        "workflow_template": str(profile.get("workflow_template") or "").strip(),
         "search_queries": [str(item).strip() for item in (profile.get("search_queries") or []) if str(item).strip()][:3],
         "creative_preferences": [
             {

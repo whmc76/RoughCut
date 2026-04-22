@@ -6,7 +6,9 @@ from roughcut.config import (
     llm_backup_route,
     normalize_transcription_settings,
     resolve_transcription_provider_plan as _resolve_plan,
+    uses_codex_auth_helper,
 )
+from roughcut.naming import REASONING_PROVIDER_FALLBACK_ORDER, normalize_auth_mode
 from roughcut.providers.ocr.base import OCRProvider
 from roughcut.providers.avatar.base import AvatarProvider
 from roughcut.providers.reasoning.base import Message, ReasoningProvider, ReasoningResponse
@@ -306,7 +308,7 @@ def _build_auto_search_provider_bundle() -> list[tuple[str, SearchProvider]]:
 
 
 def _ordered_provider_candidates(native_provider: str) -> list[str]:
-    base = ["minimax", "openai", "anthropic", "ollama"]
+    base = list(REASONING_PROVIDER_FALLBACK_ORDER)
     normalized = str(native_provider or "").strip().lower()
     if normalized in base:
         return [normalized] + [item for item in base if item != normalized]
@@ -319,21 +321,21 @@ def _has_minimax_search_credentials(settings) -> bool:
 
 def _has_openai_search_credentials(settings) -> bool:
     return bool(
-        str(getattr(settings, "openai_auth_mode", "") or "").strip().lower() == "api_key"
+        normalize_auth_mode(getattr(settings, "openai_auth_mode", "")) == "api_key"
         and str(getattr(settings, "openai_api_key", "") or "").strip()
     )
 
 
 def _has_openai_codex_cli_search_bridge(settings) -> bool:
     return bool(
-        str(getattr(settings, "openai_auth_mode", "") or "").strip().lower() == "codex_compat"
+        uses_codex_auth_helper(settings)
         and str(getattr(settings, "active_model_search_helper", "") or "").strip()
     )
 
 
 def _has_anthropic_search_credentials(settings) -> bool:
     return bool(
-        str(getattr(settings, "anthropic_auth_mode", "") or "").strip().lower() == "api_key"
+        normalize_auth_mode(getattr(settings, "anthropic_auth_mode", "")) == "api_key"
         and str(getattr(settings, "anthropic_api_key", "") or "").strip()
     )
 

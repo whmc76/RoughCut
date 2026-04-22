@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import mimetypes
 import math
 import random
@@ -33,7 +32,6 @@ def _default_packaging_root() -> Path:
 
 
 PACKAGING_ROOT = _default_packaging_root()
-MANIFEST_PATH = PACKAGING_ROOT / "manifest.json"
 
 ASSET_EXTENSIONS: dict[str, set[str]] = {
     "intro": {".mp4", ".mov", ".mkv", ".webm"},
@@ -659,7 +657,7 @@ def recommend_style_template_bundle(content_profile: dict[str, Any] | None) -> s
     is_unboxing = _profile_is_unboxing_content(profile)
     subject_domain = _resolve_packaging_subject_domain(profile)
     preset_name = normalize_workflow_template_name(
-        str(profile.get("workflow_template") or profile.get("preset_name") or "").strip()
+        str(profile.get("workflow_template") or "").strip()
     )
     haystack = " ".join(_collect_style_template_profile_strings(profile)).lower()
     tokens = {token.lower() for token in _tokenize_packaging_text(haystack)}
@@ -717,7 +715,6 @@ def _collect_style_template_profile_strings(profile: dict[str, Any]) -> list[str
         "summary",
         "task_description",
         "workflow_template",
-        "preset_name",
     ):
         value = profile.get(key)
         if value:
@@ -733,7 +730,7 @@ def _profile_is_unboxing_content(profile: dict[str, Any] | None) -> bool:
     if not isinstance(profile, dict) or not profile:
         return False
     preset_name = normalize_workflow_template_name(
-        str(profile.get("workflow_template") or profile.get("preset_name") or "").strip()
+        str(profile.get("workflow_template") or "").strip()
     )
     if preset_name in _UNBOXING_WORKFLOW_TEMPLATES:
         return True
@@ -971,7 +968,7 @@ def rank_insert_candidates_for_section(
     profile = content_profile or {}
     content_kind = str((editing_skill or {}).get("content_kind") or "").strip().lower()
     if not content_kind:
-        preset_name = normalize_workflow_template_name(str(profile.get("workflow_template") or profile.get("preset_name") or "").strip())
+        preset_name = normalize_workflow_template_name(str(profile.get("workflow_template") or "").strip())
         content_kind = (
             "tutorial" if "tutorial" in preset_name else
             "vlog" if "vlog" in preset_name else
@@ -1123,20 +1120,6 @@ def _load_state() -> dict[str, Any]:
             return state
     except Exception:
         state = default_state
-
-    legacy_state = _load_legacy_state()
-    legacy_state, changed = _repair_loaded_state(legacy_state)
-    if changed:
-        try:
-            _save_state_to_db(legacy_state)
-        except Exception:
-            pass
-    if legacy_state["assets"] or legacy_state["config"] != dict(DEFAULT_CONFIG):
-        try:
-            _save_state_to_db(legacy_state)
-        except Exception:
-            pass
-        return legacy_state
     return state
 
 
@@ -1349,11 +1332,7 @@ def _normalize_config(config: dict[str, Any], assets_by_id: dict[str, dict[str, 
 
 
 def _save_state(state: dict[str, Any]) -> None:
-    try:
-        _save_state_to_db(state)
-    except Exception:
-        PACKAGING_ROOT.mkdir(parents=True, exist_ok=True)
-        MANIFEST_PATH.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+    _save_state_to_db(state)
 
 
 def _load_state_from_db() -> tuple[dict[str, Any], bool]:
@@ -1410,22 +1389,6 @@ def _save_state_to_db(state: dict[str, Any]) -> None:
         await session.commit()
 
     run_db_operation(_operation)
-
-
-def _load_legacy_state() -> dict[str, Any]:
-    state = {
-        "assets": [],
-        "config": dict(DEFAULT_CONFIG),
-    }
-    if not MANIFEST_PATH.exists():
-        return state
-    try:
-        raw = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
-    except Exception:
-        return state
-    state["assets"] = list(raw.get("assets") or [])
-    state["config"].update(raw.get("config") or {})
-    return state
 
 
 def _serialize_asset_row(row: Any) -> dict[str, Any]:
@@ -1487,7 +1450,7 @@ def _score_packaging_asset(
 ) -> dict[str, Any]:
     profile = content_profile or {}
     preset_name = normalize_workflow_template_name(
-        str(profile.get("workflow_template") or profile.get("preset_name") or "").strip()
+        str(profile.get("workflow_template") or "").strip()
     )
     subject_domain = _resolve_packaging_subject_domain(profile)
     asset_tokens = _tokenize_packaging_text(

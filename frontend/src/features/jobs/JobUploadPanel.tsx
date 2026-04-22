@@ -86,7 +86,7 @@ export function JobUploadPanel({
           options={languageOptions}
         />
         <SelectField
-          label={t("jobs.upload.channelProfile")}
+          label={t("jobs.upload.workflowTemplate")}
           value={upload.workflowTemplate}
           onChange={(event) => onChange({ ...upload, workflowTemplate: event.target.value })}
           options={workflowTemplateOptions}

@@ -24,7 +24,7 @@ from roughcut.packaging.library import (
 logger = logging.getLogger(__name__)
 _WINDOWS_CMD_SOFT_LIMIT = 30000
 _DEFAULT_SMART_EFFECT_STYLE = "smart_effect_commercial"
-_LEGACY_SMART_EFFECT_STYLE_ALIASES = {
+_RENAMED_SMART_EFFECT_STYLE_KEYS = {
     "smart_effect_rhythm": _DEFAULT_SMART_EFFECT_STYLE,
     "smart_effect_ai_impact": "smart_effect_commercial_ai",
 }
@@ -210,7 +210,7 @@ def _host_graphics_adapter_text() -> str:
                     powershell,
                     "-NoProfile",
                     "-Command",
-                    "Get-CimInstance Win32_VideoController | Select-Object Name,AdapterCompatibility,VideoProcessor | Format-List",
+                    "Get-CimInstance Win32_VideoController | Select-Object Name,VideoProcessor | Format-List",
                 ]
             )
     else:
@@ -1719,7 +1719,7 @@ def _normalize_smart_effect_style(style: str) -> str:
     normalized = str(style or "").strip().lower()
     if not normalized:
         return _DEFAULT_SMART_EFFECT_STYLE
-    return _LEGACY_SMART_EFFECT_STYLE_ALIASES.get(normalized, normalized)
+    return _RENAMED_SMART_EFFECT_STYLE_KEYS.get(normalized, normalized)
 
 
 def _should_apply_smart_effect_video_transforms(avatar_plan: dict[str, Any]) -> bool:

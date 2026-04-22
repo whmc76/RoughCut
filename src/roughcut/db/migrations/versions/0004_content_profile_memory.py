@@ -25,7 +25,7 @@ def upgrade() -> None:
         sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True),
         sa.Column("job_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("jobs.id", ondelete="CASCADE")),
         sa.Column("source_name", sa.Text, nullable=False),
-        sa.Column("channel_profile", sa.Text),
+        sa.Column("subject_domain", sa.Text),
         sa.Column("field_name", sa.Text, nullable=False),
         sa.Column("original_value", sa.Text),
         sa.Column("corrected_value", sa.Text, nullable=False),

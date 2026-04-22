@@ -469,7 +469,7 @@ export function JobDetailPanel({
                   options={languageOptions}
                 />
                 <SelectField
-                  label={t("jobs.upload.channelProfile")}
+                  label={t("jobs.upload.workflowTemplate")}
                   value={pendingInitialization.workflowTemplate}
                   onChange={(event) => onPendingInitializationChange({ ...pendingInitialization, workflowTemplate: event.target.value })}
                   options={workflowTemplateOptions}

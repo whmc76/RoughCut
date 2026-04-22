@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from contextvars import ContextVar
-import json
 import os
 from pathlib import Path
 import shutil
@@ -12,9 +11,22 @@ from typing import Any
 from pydantic import Field, ValidationInfo, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from roughcut.naming import (
+    AVATAR_PROVIDER_VALUES,
+    CODING_BACKEND_PROVIDER_MAP,
+    CODING_BACKEND_VALUES,
+    DEFAULT_CODING_BACKEND_MODELS,
+    MULTIMODAL_PROVIDER_VALUES,
+    REASONING_PROVIDER_VALUES,
+    SEARCH_FALLBACK_PROVIDER_VALUES,
+    SEARCH_PROVIDER_VALUES,
+    TRANSCRIPTION_PROVIDER_ALIASES,
+    TRANSCRIPTION_PROVIDER_VALUES,
+    VOICE_PROVIDER_VALUES,
+    normalize_auth_mode,
+)
 from roughcut.speech.dialects import DEFAULT_TRANSCRIPTION_DIALECT, normalize_transcription_dialect
 
-_OVERRIDES_FILE = Path("roughcut_config.json")
 DEFAULT_JOB_WORKFLOW_MODE = "standard_edit"
 DEFAULT_OUTPUT_ROOT = Path(os.getenv("ROUGHCUT_OUTPUT_ROOT", "F:/roughcut_outputs")).expanduser()
 DEFAULT_TEST_OUTPUT_ROOT = Path(
@@ -64,21 +76,7 @@ ENV_EXPLICIT_OVERRIDE_SETTINGS: tuple[str, ...] = ENV_MANAGED_SETTINGS + (
     "telegram_bot_token",
     "telegram_bot_chat_id",
 )
-TRANSCRIPTION_PROVIDER_ALIASES: dict[str, str] = {
-    "fast": "faster_whisper",
-    "faster-whisper": "faster_whisper",
-    "local_whisper": "faster_whisper",
-    "local": "local_http_asr",
-    "local_asr": "local_http_asr",
-    "local-asr": "local_http_asr",
-    "local-http-asr": "local_http_asr",
-}
-TRANSCRIPTION_PROVIDER_PRIORITY: tuple[str, ...] = (
-    "local_http_asr",
-    "openai",
-    "funasr",
-    "faster_whisper",
-)
+TRANSCRIPTION_PROVIDER_PRIORITY: tuple[str, ...] = TRANSCRIPTION_PROVIDER_VALUES
 TRANSCRIPTION_MODEL_OPTIONS: dict[str, list[str]] = {
     "funasr": [
         "sensevoice-small",
@@ -99,21 +97,11 @@ TRANSCRIPTION_MODEL_OPTIONS: dict[str, list[str]] = {
         "local-asr-current",
     ],
 }
-SEARCH_PROVIDER_VALUES: tuple[str, ...] = ("auto", "openai", "anthropic", "minimax", "ollama", "model", "searxng")
-SEARCH_FALLBACK_PROVIDER_VALUES: tuple[str, ...] = ("openai", "anthropic", "minimax", "ollama", "model", "searxng")
-MULTIMODAL_FALLBACK_PROVIDER_VALUES: tuple[str, ...] = ("openai", "anthropic", "minimax", "ollama")
-HYBRID_REASONING_PROVIDER_VALUES: tuple[str, ...] = ("openai", "anthropic", "minimax", "ollama")
+MULTIMODAL_FALLBACK_PROVIDER_VALUES: tuple[str, ...] = MULTIMODAL_PROVIDER_VALUES
+HYBRID_REASONING_PROVIDER_VALUES: tuple[str, ...] = REASONING_PROVIDER_VALUES
 LLM_ROUTING_MODE_VALUES: tuple[str, ...] = ("bundled", "hybrid_performance")
 HYBRID_SEARCH_MODE_VALUES: tuple[str, ...] = ("off", "entity_gated", "follow_provider")
 REASONING_EFFORT_VALUES: tuple[str, ...] = ("minimal", "low", "medium", "high")
-CODING_BACKEND_PROVIDER_FAMILIES: dict[str, tuple[str, ...]] = {
-    "codex": ("openai",),
-    "claude": ("anthropic",),
-}
-LEGACY_CODING_BACKEND_MODELS: dict[str, str] = {
-    "codex": "gpt-5.4-mini",
-    "claude": "opus",
-}
 DEFAULT_REASONING_PROVIDER = "openai"
 DEFAULT_REASONING_MODEL = "gpt-5.4"
 DEFAULT_BACKUP_REASONING_PROVIDER = "openai"
@@ -128,14 +116,14 @@ DEFAULT_SEARCH_FALLBACK_PROVIDER = "openai"
 DEFAULT_BACKUP_SEARCH_FALLBACK_PROVIDER = "openai"
 DEFAULT_MULTIMODAL_FALLBACK_PROVIDER = "openai"
 DEFAULT_MULTIMODAL_FALLBACK_MODEL = "gpt-5.4-mini"
-DEFAULT_CODEX_MODEL_SEARCH_HELPER_PATH = (Path(__file__).resolve().parents[2] / "scripts" / "codex_model_search_helper.py")
+DEFAULT_MODEL_SEARCH_HELPER_PATH = Path(__file__).resolve().parents[2] / "scripts" / "codex_model_search_helper.py"
 MINIMAX_REASONING_MODEL_ALIASES: dict[str, str] = {
     "minimax-m2.7-highspeed": "MiniMax-M2.7",
 }
 
 
-def build_default_codex_model_search_helper() -> str:
-    helper_path = DEFAULT_CODEX_MODEL_SEARCH_HELPER_PATH
+def build_default_model_search_helper() -> str:
+    helper_path = DEFAULT_MODEL_SEARCH_HELPER_PATH
     if not helper_path.exists():
         return ""
     python_executable = str(Path(sys.executable).resolve() if sys.executable else "python")
@@ -190,8 +178,8 @@ DEFAULT_TRANSCRIPTION_MODELS: dict[str, str] = {
     "openai": "gpt-4o-transcribe",
     "local_http_asr": "local-asr-current",
 }
-AVATAR_PROVIDER_OPTIONS: tuple[str, ...] = ("heygem",)
-VOICE_PROVIDER_OPTIONS: tuple[str, ...] = ("indextts2", "runninghub")
+AVATAR_PROVIDER_OPTIONS: tuple[str, ...] = AVATAR_PROVIDER_VALUES
+VOICE_PROVIDER_OPTIONS: tuple[str, ...] = VOICE_PROVIDER_VALUES
 CONTENT_UNDERSTANDING_CAPABILITY_SLOTS: tuple[str, ...] = (
     "asr",
     "visual_understanding",
@@ -381,11 +369,11 @@ class Settings(BaseSettings):
     # API Keys
     openai_api_key: str = ""
     openai_base_url: str = "https://api.openai.com/v1"
-    openai_auth_mode: str = "api_key"  # api_key | codex_compat
+    openai_auth_mode: str = "api_key"  # api_key | helper
     openai_api_key_helper: str = ""
     anthropic_api_key: str = ""
     anthropic_base_url: str = "https://api.anthropic.com"
-    anthropic_auth_mode: str = "api_key"  # api_key | claude_code_compat
+    anthropic_auth_mode: str = "api_key"  # api_key | helper
     anthropic_api_key_helper: str = ""
     minimax_api_key: str = ""
     minimax_base_url: str = "https://api.minimaxi.com/v1"
@@ -500,7 +488,7 @@ class Settings(BaseSettings):
     @classmethod
     def parse_extensions(cls, v: object) -> list[str]:
         if isinstance(v, str):
-            # Handle comma-separated string (legacy) or JSON-like
+            # Handle comma-separated string or JSON-like input.
             v = v.strip()
             if not v.startswith("["):
                 return [ext.strip() for ext in v.split(",")]
@@ -586,8 +574,8 @@ class Settings(BaseSettings):
         helper = str(self.model_search_helper or "").strip()
         if helper:
             return helper
-        if str(self.openai_auth_mode or "").strip().lower() == "codex_compat":
-            return build_default_codex_model_search_helper()
+        if uses_codex_auth_helper(self):
+            return build_default_model_search_helper()
         return ""
 
     @property
@@ -656,17 +644,26 @@ def _resolve_codex_bridge_command(settings: Any) -> str:
     ).strip() or "codex"
 
 
+def uses_codex_auth_helper(settings: Any) -> bool:
+    auth_mode = normalize_auth_mode(getattr(settings, "openai_auth_mode", ""))
+    if auth_mode != "helper":
+        return False
+    helper_kind = str(os.getenv("ROUGHCUT_OPENAI_AUTH_HELPER_KIND", "") or "").strip().lower()
+    if helper_kind:
+        return helper_kind == "codex"
+    helper_command = str(getattr(settings, "openai_api_key_helper", "") or "").strip().lower()
+    return "codex" in helper_command
+
+
 def _has_openai_codex_reasoning_bridge(settings: Any) -> bool:
-    auth_mode = str(getattr(settings, "openai_auth_mode", "") or "").strip().lower()
-    if auth_mode != "codex_compat":
+    if not uses_codex_auth_helper(settings):
         return False
     return bool(shutil.which(_resolve_codex_bridge_command(settings)))
 
 
 def _openai_responses_credentials_unavailable(settings: Any) -> bool:
-    auth_mode = str(getattr(settings, "openai_auth_mode", "") or "").strip().lower()
     direct_key = str(getattr(settings, "openai_api_key", "") or "").strip()
-    return auth_mode == "codex_compat" and not direct_key and not _has_openai_codex_reasoning_bridge(settings)
+    return uses_codex_auth_helper(settings) and not direct_key and not _has_openai_codex_reasoning_bridge(settings)
 
 
 def _openai_responses_route_likely_unavailable(settings: Any) -> bool:
@@ -701,9 +698,6 @@ def get_settings() -> Settings:
 
 
 def load_runtime_overrides() -> dict[str, Any]:
-    legacy = _normalize_runtime_override_values(_load_runtime_overrides_from_legacy_file())
-    legacy_persisted, legacy_secrets = _split_runtime_overrides(legacy)
-    _update_session_secret_overrides(legacy_secrets)
     try:
         from roughcut.state_store import RUNTIME_OVERRIDES_KEY, delete_setting, get_json_setting, set_json_setting
 
@@ -717,42 +711,22 @@ def load_runtime_overrides() -> dict[str, Any]:
                     set_json_setting(RUNTIME_OVERRIDES_KEY, persisted)
                 else:
                     delete_setting(RUNTIME_OVERRIDES_KEY)
-            if legacy:
-                _OVERRIDES_FILE.unlink(missing_ok=True)
             return persisted
-        if legacy_persisted:
-            set_json_setting(RUNTIME_OVERRIDES_KEY, legacy_persisted)
-            _OVERRIDES_FILE.unlink(missing_ok=True)
-            return legacy_persisted
-        if legacy:
-            _OVERRIDES_FILE.unlink(missing_ok=True)
         return {}
     except Exception:
-        if legacy != legacy_persisted:
-            if legacy_persisted:
-                _OVERRIDES_FILE.write_text(json.dumps(legacy_persisted, indent=2, ensure_ascii=False), encoding="utf-8")
-            else:
-                _OVERRIDES_FILE.unlink(missing_ok=True)
-        return legacy_persisted
+        return {}
 
 
 def save_runtime_overrides(data: dict[str, Any]) -> None:
     normalized_data = _normalize_runtime_override_values(data)
     persisted, secrets = _split_runtime_overrides(normalized_data)
     _update_session_secret_overrides(secrets)
-    try:
-        from roughcut.state_store import RUNTIME_OVERRIDES_KEY, delete_setting, set_json_setting
+    from roughcut.state_store import RUNTIME_OVERRIDES_KEY, delete_setting, set_json_setting
 
-        if persisted:
-            set_json_setting(RUNTIME_OVERRIDES_KEY, persisted)
-        else:
-            delete_setting(RUNTIME_OVERRIDES_KEY)
-        _OVERRIDES_FILE.unlink(missing_ok=True)
-    except Exception:
-        if persisted:
-            _OVERRIDES_FILE.write_text(json.dumps(persisted, indent=2, ensure_ascii=False), encoding="utf-8")
-        else:
-            _OVERRIDES_FILE.unlink(missing_ok=True)
+    if persisted:
+        set_json_setting(RUNTIME_OVERRIDES_KEY, persisted)
+    else:
+        delete_setting(RUNTIME_OVERRIDES_KEY)
 
 
 def clear_runtime_overrides() -> None:
@@ -764,7 +738,6 @@ def clear_runtime_overrides() -> None:
     except Exception:
         pass
     _session_secret_overrides.clear()
-    _OVERRIDES_FILE.unlink(missing_ok=True)
     _settings = None
 
 
@@ -828,16 +801,6 @@ def _normalize_default_enhancement_modes(value: object) -> list[str]:
     return normalize_enhancement_modes([])
 
 
-def _load_runtime_overrides_from_legacy_file() -> dict[str, Any]:
-    if not _OVERRIDES_FILE.exists():
-        return {}
-    try:
-        payload = json.loads(_OVERRIDES_FILE.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-    return payload if isinstance(payload, dict) else {}
-
-
 def get_session_secret_override_keys() -> list[str]:
     return sorted(_session_secret_overrides.keys())
 
@@ -851,6 +814,8 @@ def _apply_settings_overrides(settings: Settings, updates: dict[str, Any]) -> No
 
 
 def _normalize_settings(settings: Settings) -> None:
+    object.__setattr__(settings, "openai_auth_mode", normalize_auth_mode(getattr(settings, "openai_auth_mode", "api_key")))
+    object.__setattr__(settings, "anthropic_auth_mode", normalize_auth_mode(getattr(settings, "anthropic_auth_mode", "api_key")))
     provider, model = normalize_transcription_settings(
         settings.transcription_provider,
         settings.transcription_model,
@@ -877,12 +842,12 @@ def _normalize_settings(settings: Settings) -> None:
 
 def normalize_coding_backend_name(value: object) -> str:
     normalized = str(value or "").strip().lower()
-    return normalized if normalized in CODING_BACKEND_PROVIDER_FAMILIES else ""
+    return normalized if normalized in CODING_BACKEND_VALUES else ""
 
 
 def coding_backend_for_provider(provider: object) -> str:
     normalized_provider = str(provider or "").strip().lower()
-    for backend, providers in CODING_BACKEND_PROVIDER_FAMILIES.items():
+    for backend, providers in CODING_BACKEND_PROVIDER_MAP.items():
         if normalized_provider in providers:
             return backend
     return ""
@@ -951,7 +916,7 @@ def resolve_coding_backend_model(
     *,
     settings: Settings | None = None,
     explicit_model: object = "",
-    allow_legacy_default: bool = True,
+    allow_default: bool = True,
 ) -> str:
     normalized_backend = normalize_coding_backend_name(backend)
     explicit = str(explicit_model or "").strip()
@@ -959,17 +924,21 @@ def resolve_coding_backend_model(
         return explicit
     if not normalized_backend:
         return ""
-    allowed_providers = CODING_BACKEND_PROVIDER_FAMILIES.get(normalized_backend, ())
+    allowed_providers = CODING_BACKEND_PROVIDER_MAP.get(normalized_backend, ())
     for provider, model in _iter_coding_model_route_candidates(settings):
         if provider in allowed_providers and model:
             return model
-    if allow_legacy_default:
-        return LEGACY_CODING_BACKEND_MODELS.get(normalized_backend, "")
+    if allow_default:
+        return DEFAULT_CODING_BACKEND_MODELS.get(normalized_backend, "")
     return ""
 
 
 def _normalize_runtime_override_values(data: dict[str, Any]) -> dict[str, Any]:
     normalized = dict(data)
+
+    for key in ("openai_auth_mode", "anthropic_auth_mode"):
+        if key in normalized:
+            normalized[key] = normalize_auth_mode(normalized.get(key))
 
     if "llm_routing_mode" in normalized:
         routing_mode = str(normalized.get("llm_routing_mode") or "").strip().lower()

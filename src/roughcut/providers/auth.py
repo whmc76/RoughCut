@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import subprocess
 
+from roughcut.naming import normalize_auth_mode
+
 
 def resolve_credential(
     *,
@@ -10,8 +12,9 @@ def resolve_credential(
     helper_command: str,
     provider_name: str,
 ) -> str:
+    normalized_mode = normalize_auth_mode(mode)
     value = direct_value.strip()
-    if mode == "api_key":
+    if normalized_mode == "api_key":
         if not value:
             raise ValueError(f"{provider_name} API credential is not configured")
         return value
@@ -39,5 +42,5 @@ def resolve_credential(
         return value
 
     raise ValueError(
-        f"{provider_name} is set to compatibility auth mode but no helper command or token is configured"
+        f"{provider_name} is set to helper auth mode but no helper command or token is configured"
     )

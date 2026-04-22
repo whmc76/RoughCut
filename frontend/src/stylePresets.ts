@@ -35,7 +35,7 @@ export type StyleTemplateBundle = {
   };
 };
 
-const legacyStyleAliases: Record<string, string> = {
+const renamedStyleKeys: Record<string, string> = {
   smart_effect_rhythm: "smart_effect_commercial",
 };
 
@@ -263,7 +263,7 @@ export const copyStylePresets: StylePreset[] = [
 ];
 
 export function findStylePreset(presets: StylePreset[], key: string): StylePreset | undefined {
-  const normalizedKey = legacyStyleAliases[key] ?? key;
+  const normalizedKey = renamedStyleKeys[key] ?? key;
   return presets.find((preset) => preset.key === normalizedKey);
 }
 

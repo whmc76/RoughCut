@@ -6,7 +6,7 @@ from pathlib import Path
 
 import openai
 
-from roughcut.config import get_settings
+from roughcut.config import get_settings, uses_codex_auth_helper
 from roughcut.host.codex_bridge import run_codex_exec
 from roughcut.providers.auth import resolve_credential
 from roughcut.providers.openai_responses import (
@@ -33,7 +33,7 @@ class OpenAIReasoningProvider(ReasoningProvider):
     def __init__(self) -> None:
         settings = get_settings()
         self._bridge_mode = (
-            str(settings.openai_auth_mode or "").strip().lower() == "codex_compat"
+            uses_codex_auth_helper(settings)
             and not str(settings.openai_api_key or "").strip()
         )
         self._model = settings.active_reasoning_model

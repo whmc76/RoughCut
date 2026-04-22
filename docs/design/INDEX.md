@@ -4,6 +4,7 @@
 
 | 日期 | 标题 | 定位 | 文件 |
 |------|------|------|------|
+| 2026-04-23 | Naming System | 当前命名规范 | [naming-system.md](./naming-system.md) |
 | 2026-04-16 | Canonical Transcript Rollout | 最新 rollout | [2026-04-16-canonical-transcript-rollout.md](./2026-04-16-canonical-transcript-rollout.md) |
 | 2026-04-16 | Canonical Transcript Execution Plan | 最新执行计划 | [2026-04-16-canonical-transcript-execution-plan.md](./2026-04-16-canonical-transcript-execution-plan.md) |
 | 2026-04-15 | Agentic Subtitle Correction Architecture | 当前主架构 | [2026-04-15-agentic-subtitle-correction-architecture.md](./2026-04-15-agentic-subtitle-correction-architecture.md) |

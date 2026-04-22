@@ -453,7 +453,7 @@ _DOMAIN_KEYWORDS: dict[str, tuple[str, ...]] = {
     "functional_wear": ("机能", "机能装备", "战术裤", "双肩包", "通勤包", "工装", "穿搭", "机能包", "斜挎包", "胸包", "阵风", "游刃", "tomtoc", "PGYTECH", "NIID", "COMBACK", "MADEN", "LEVEL8", "狐蝠工业", "头狼工业", "BOLTBOAT", "PSIGEAR", "LIIGEAR"),
 }
 
-_DOMAIN_COMPATIBILITY: dict[str, tuple[str, ...]] = {
+_RELATED_DOMAINS: dict[str, tuple[str, ...]] = {
     "gear": ("edc", "knife", "flashlight", "bag", "lighter", "tactical", "outdoor", "functional_wear", "toy"),
     "edc": ("gear", "knife", "flashlight", "bag", "lighter", "tactical", "outdoor", "functional_wear", "toy"),
     "knife": ("gear", "edc", "tactical", "outdoor"),
@@ -644,7 +644,7 @@ def resolve_builtin_glossary_terms(
         include_workflow_template=False,
     )
     merged: list[GlossaryTermLike] = []
-    for domain in _expand_compatible_domains(domains):
+    for domain in _expand_related_domains(domains):
         for term in _DOMAIN_TERM_LIBRARY.get(domain, ()):
             merged.append({**term, "domain": domain})
     if normalized_workflow_template:
@@ -762,7 +762,7 @@ def list_builtin_glossary_packs() -> list[dict[str, Any]]:
             [],
             [
                 term
-                for expanded in _expand_compatible_domains([domain])
+                for expanded in _expand_related_domains([domain])
                 for term in _DOMAIN_TERM_LIBRARY.get(expanded, ())
             ],
         )
@@ -782,7 +782,7 @@ def list_builtin_glossary_packs() -> list[dict[str, Any]]:
     return packs
 
 
-def _expand_compatible_domains(domains: list[str]) -> list[str]:
+def _expand_related_domains(domains: list[str]) -> list[str]:
     ordered: list[str] = []
     seen: set[str] = set()
     queue: list[str] = []
@@ -797,7 +797,7 @@ def _expand_compatible_domains(domains: list[str]) -> list[str]:
             continue
         seen.add(domain)
         ordered.append(domain)
-        for related in _DOMAIN_COMPATIBILITY.get(domain, ()):
+        for related in _RELATED_DOMAINS.get(domain, ()):
             if related not in seen:
                 queue.append(related)
     return ordered

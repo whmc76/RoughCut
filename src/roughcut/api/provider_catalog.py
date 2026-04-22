@@ -121,13 +121,13 @@ def _fetch_models(*, provider: str, kind: str) -> list[str]:
     if provider in TRANSCRIPTION_MODEL_OPTIONS and provider != "openai":
         return sorted(TRANSCRIPTION_MODEL_OPTIONS[provider])
     if provider == "openai":
-        models = _fetch_openai_compatible_models(provider="openai")
+        models = _fetch_chat_api_models(provider="openai")
         if kind == "transcription":
             transcribe_models = [model for model in models if "transcribe" in model]
             return sorted(transcribe_models or TRANSCRIPTION_MODEL_OPTIONS["openai"])
         return sorted(models)
     if provider == "minimax":
-        return sorted(_fetch_openai_compatible_models(provider="minimax"))
+        return sorted(_fetch_chat_api_models(provider="minimax"))
     if provider == "anthropic":
         return sorted(_fetch_anthropic_models())
     raise ValueError(f"Unsupported provider: {provider}")
@@ -143,7 +143,7 @@ def _fetch_ollama_models() -> list[str]:
     return model_names
 
 
-def _fetch_openai_compatible_models(*, provider: str) -> list[str]:
+def _fetch_chat_api_models(*, provider: str) -> list[str]:
     settings = get_settings()
     if provider == "openai":
         base_url = settings.openai_base_url.rstrip("/")
@@ -159,7 +159,7 @@ def _fetch_openai_compatible_models(*, provider: str) -> list[str]:
         if not token:
             raise ValueError("MiniMax API credential is not configured")
     else:
-        raise ValueError(f"Unsupported OpenAI-compatible provider: {provider}")
+        raise ValueError(f"Unsupported chat API provider: {provider}")
 
     response = httpx.get(
         f"{base_url}/models",
@@ -279,7 +279,7 @@ def _check_openai_provider(*, settings: Any, checked_at: str) -> dict[str, Any]:
             "models": [],
         }
     try:
-        models = _fetch_openai_compatible_models(provider="openai")
+        models = _fetch_chat_api_models(provider="openai")
         return {
             "provider": "openai",
             "base_url": base_url,
@@ -311,7 +311,7 @@ def _check_minimax_provider(*, settings: Any, checked_at: str) -> dict[str, Any]
             "models": [],
         }
     try:
-        models = _fetch_openai_compatible_models(provider="minimax")
+        models = _fetch_chat_api_models(provider="minimax")
         return {
             "provider": "minimax",
             "base_url": base_url,
