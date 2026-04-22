@@ -18,6 +18,7 @@ from roughcut.review.domain_glossaries import (
     select_primary_subject_domain,
 )
 from roughcut.review.content_profile_memory import merge_content_profile_creative_preferences
+from roughcut.review.hotword_learning import select_ranked_hotword_terms
 from roughcut.review.model_identity import model_numbers_conflict
 from roughcut.speech.dialects import resolve_transcription_dialect
 from roughcut.edit.presets import normalize_workflow_template_name
@@ -450,6 +451,11 @@ def build_subtitle_review_memory(
         for token in _extract_compound_domain_terms(str(item.get("phrase") or "")):
             remember_term(token, 10)
 
+    for item in (user_memory or {}).get("learned_hotwords") or []:
+        remember_term(item.get("canonical_form") or item.get("term"), 9)
+        for alias in item.get("aliases") or []:
+            remember_term(alias, 5)
+
     field_preferences = (user_memory or {}).get("field_preferences") or {}
     for key in ("subject_brand", "subject_model", "subject_type", "video_theme"):
         for item in field_preferences.get(key) or []:
@@ -648,6 +654,7 @@ def build_subtitle_review_memory(
         "aliases": alias_pairs[:120],
         "confirmed_entities": confirmed_entities[:6],
         "negative_alias_pairs": list((user_memory or {}).get("negative_alias_pairs") or [])[:40],
+        "learned_hotwords": list((user_memory or {}).get("learned_hotwords") or [])[:24],
         "style_examples": examples[:example_limit],
         "phrase_preferences": list((user_memory or {}).get("phrase_preferences") or [])[:12],
         "creative_preferences": merge_content_profile_creative_preferences(
@@ -904,10 +911,27 @@ def build_transcription_prompt(
         for item in (review_memory or {}).get("transcription_seed_terms") or []
         if str(item or "").strip() and _prompt_term_supported_by_domains(str(item or "").strip(), dominant_domains)
     ]
+    learned_terms = select_ranked_hotword_terms(
+        learned_hotwords=[
+            item
+            for item in (review_memory or {}).get("learned_hotwords") or []
+            if _prompt_term_supported_by_domains(
+                str(item.get("canonical_form") or item.get("term") or "").strip(),
+                dominant_domains,
+            )
+        ],
+        existing_terms=[],
+        limit=12,
+    )
     dialect_hotwords = [str(item).strip() for item in dialect_spec.get("hotwords") or [] if str(item).strip()]
     reserved_dialect_slots = min(4, len(dialect_hotwords))
     term_limit = max(0, 12 - reserved_dialect_slots)
     terms: list[str] = []
+    for item in learned_terms:
+        if item and item not in terms:
+            terms.append(item)
+        if len(terms) >= term_limit:
+            break
     for item in prioritized_seed_terms:
         if item and item not in terms:
             terms.append(item)

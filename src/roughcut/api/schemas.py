@@ -444,8 +444,10 @@ class ContentProfileMemoryStatsOut(BaseModel):
     subject_domains: list[str] = []
     total_corrections: int = 0
     total_keywords: int = 0
+    total_learned_hotwords: int = 0
     field_preferences: dict[str, list[dict[str, Any]]] = {}
     keyword_preferences: list[dict[str, Any]] = []
+    learned_hotwords: list[dict[str, Any]] = []
     recent_corrections: list[dict[str, Any]] = []
     cloud: dict[str, Any] = {}
 
@@ -709,6 +711,36 @@ class BuiltinGlossaryPackOut(BaseModel):
     presets: list[str] = []
     term_count: int
     terms: list[BuiltinGlossaryTermOut] = []
+
+
+# ── Learned Hotwords ─────────────────────────────────────────────────────────
+
+class LearnedHotwordOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    subject_domain: str
+    term: str
+    canonical_form: str
+    aliases: list[str] = []
+    source: str
+    status: str
+    evidence_count: int
+    positive_count: int
+    negative_count: int
+    prompt_count: int
+    confidence: float
+    metadata_json: dict[str, Any] | None = None
+    last_seen_at: datetime | None = None
+    last_prompted_at: datetime | None = None
+    created_at: datetime
+    updated_at: datetime | None = None
+
+
+class LearnedHotwordUpdate(BaseModel):
+    status: Literal["active", "suppressed", "rejected"] | None = None
+    aliases: list[str] | None = None
+    confidence: float | None = None
 
 
 # ── Watch Roots ───────────────────────────────────────────────────────────────

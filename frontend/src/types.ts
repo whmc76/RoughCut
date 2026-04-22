@@ -665,12 +665,35 @@ export type ContentProfileMemoryStats = {
   subject_domains: string[];
   total_corrections: number;
   total_keywords: number;
+  total_learned_hotwords: number;
   field_preferences: Record<string, Array<Record<string, any>>>;
   keyword_preferences: Array<Record<string, any>>;
+  learned_hotwords: LearnedHotword[];
   recent_corrections: Array<Record<string, any>>;
   cloud: {
-    words?: Array<{ label: string; count: number; weight?: number }>;
+    words?: Array<{ label: string; count: number; weight?: number; kind?: string; hint?: string }>;
+    learned_hotwords?: LearnedHotword[];
   };
+};
+
+export type LearnedHotword = {
+  id: string;
+  subject_domain: string;
+  term: string;
+  canonical_form: string;
+  aliases: string[];
+  source: string;
+  status: "active" | "suppressed" | "rejected" | string;
+  evidence_count: number;
+  positive_count: number;
+  negative_count: number;
+  prompt_count: number;
+  confidence: number;
+  metadata_json?: Record<string, any> | null;
+  last_seen_at?: string | null;
+  last_prompted_at?: string | null;
+  created_at: string;
+  updated_at?: string | null;
 };
 
 export type Report = {

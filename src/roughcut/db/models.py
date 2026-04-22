@@ -278,6 +278,29 @@ class ContentProfileKeywordStat(Base):
     last_used_at: Mapped[datetime] = mapped_column(TIMESTAMPTZ, server_default=func.now(), onupdate=func.now())
 
 
+class LearnedHotword(Base):
+    __tablename__ = "learned_hotwords"
+    __table_args__ = (UniqueConstraint("subject_domain", "term", "canonical_form", "source"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID_TYPE, primary_key=True, default=_uuid)
+    subject_domain: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    term: Mapped[str] = mapped_column(Text, nullable=False)
+    canonical_form: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    aliases: Mapped[list[str]] = mapped_column(JSON_TYPE, nullable=False, default=list)
+    source: Mapped[str] = mapped_column(Text, nullable=False, default="content_profile_feedback")
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="active")
+    evidence_count: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    positive_count: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    negative_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    prompt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    confidence: Mapped[float] = mapped_column(Float, nullable=False, default=0.65)
+    metadata_json: Mapped[dict | None] = mapped_column(JSON_TYPE)
+    last_seen_at: Mapped[datetime] = mapped_column(TIMESTAMPTZ, server_default=func.now(), onupdate=func.now())
+    last_prompted_at: Mapped[datetime | None] = mapped_column(TIMESTAMPTZ)
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMPTZ, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMPTZ, server_default=func.now(), onupdate=func.now())
+
+
 class ContentProfileEntity(Base):
     __tablename__ = "content_profile_entities"
     __table_args__ = (UniqueConstraint("subject_domain", "brand", "model"),)

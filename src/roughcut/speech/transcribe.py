@@ -16,6 +16,7 @@ from roughcut.config import get_settings
 from roughcut.providers.factory import get_transcription_provider, resolve_transcription_provider_plan
 from roughcut.providers.transcription.base import TranscriptResult, TranscriptSegment as ProviderTranscriptSegment, TranscriptionProgressCallback, WordTiming
 from roughcut.review.evidence_types import ARTIFACT_TYPE_TRANSCRIPT_EVIDENCE
+from roughcut.review.hotword_learning import extract_prompt_hotwords, record_prompted_hotwords
 from roughcut.review.subtitle_memory import apply_domain_term_corrections
 from roughcut.speech.alignment import AlignmentSettings, enhance_transcript_alignment
 from roughcut.speech.subtitle_pipeline import (
@@ -242,6 +243,7 @@ async def persist_transcript_result(
     attempt_errors: list[dict[str, str]],
 ) -> TranscriptResult:
     settings = get_settings()
+    prompt_hotwords = extract_prompt_hotwords(prompt)
     result = _normalize_transcript_result(
         result,
         glossary_terms=glossary_terms or [],
@@ -317,6 +319,8 @@ async def persist_transcript_result(
                     "provider": result.provider or selected_provider,
                     "model": result.model or selected_model,
                     "prompt": str(prompt or ""),
+                    "prompt_hotwords": prompt_hotwords,
+                    "prompt_hotword_count": len(prompt_hotwords),
                     "context": result.context,
                     "hotword": result.hotword,
                     "alignment": _json_safe_value(deepcopy(result.alignment)),
@@ -334,6 +338,7 @@ async def persist_transcript_result(
                 }),
             )
         )
+    await record_prompted_hotwords(session, prompt_hotwords=prompt_hotwords)
     await session.flush()
 
     return result

@@ -19,6 +19,10 @@ from roughcut.review.entity_graph import (
     record_entity_rejection,
     upsert_content_profile_entity,
 )
+from roughcut.review.hotword_learning import (
+    load_learned_hotwords,
+    record_learned_hotwords_from_content_profile_feedback,
+)
 from roughcut.review.model_identity import model_numbers_conflict
 from roughcut.review.domain_glossaries import _DOMAIN_COMPATIBILITY, normalize_subject_domain
 from roughcut.usage import track_usage_operation
@@ -113,6 +117,7 @@ async def load_content_profile_user_memory(
     confirmed_entities = await load_graph_confirmed_entities(session, subject_domains=subject_domains, limit=6)
     if not confirmed_entities:
         confirmed_entities = _build_confirmed_entities(filtered_corrections, subject_domain=subject_domain, limit=6)
+    learned_hotwords = await load_learned_hotwords(session, subject_domain=subject_domain, limit=24)
 
     if not any(
         [
@@ -123,6 +128,7 @@ async def load_content_profile_user_memory(
             creative_preferences,
             style_preferences,
             confirmed_entities,
+            learned_hotwords,
         ]
     ):
         return {}
@@ -134,6 +140,7 @@ async def load_content_profile_user_memory(
         "creative_preferences": creative_preferences,
         "style_preferences": style_preferences,
         "confirmed_entities": confirmed_entities,
+        "learned_hotwords": learned_hotwords,
     }
 
 
@@ -196,6 +203,22 @@ def build_content_profile_memory_cloud(user_memory: dict[str, Any] | None) -> di
             hint="已学习短语",
         )
 
+    learned_hotwords = user_memory.get("learned_hotwords") or []
+    for index, item in enumerate(learned_hotwords):
+        label = _normalize_keyword(item.get("canonical_form") or item.get("term"))
+        if not label:
+            continue
+        count = max(1, int(item.get("positive_count") or item.get("evidence_count") or 0))
+        weight = min(10, count + 4 - min(index, 4))
+        _remember_cloud_word(
+            words,
+            label=label,
+            count=count,
+            weight=weight,
+            kind="learned_hotword",
+            hint="自动学习热词",
+        )
+
     ranked_words = sorted(
         words.values(),
         key=lambda item: (-int(item["weight"]), -int(item["count"]), item["label"]),
@@ -204,6 +227,7 @@ def build_content_profile_memory_cloud(user_memory: dict[str, Any] | None) -> di
         "words": ranked_words[:18],
         "recent_corrections": list(user_memory.get("recent_corrections") or [])[:6],
         "phrases": phrase_preferences[:8],
+        "learned_hotwords": learned_hotwords[:12],
         "creative_preferences": list(user_memory.get("creative_preferences") or [])[:6],
         "styles": list(user_memory.get("style_preferences") or [])[:6],
     }
@@ -335,6 +359,13 @@ async def record_content_profile_feedback_memory(
                 scope_value=final_subject_domain,
                 keyword=keyword,
             )
+    await record_learned_hotwords_from_content_profile_feedback(
+        session,
+        job=job,
+        final_profile=final_profile,
+        user_feedback=user_feedback,
+        subject_domain=fallback_subject_domain or "",
+    )
 
 
 async def _extract_reusable_review_alias_rows(

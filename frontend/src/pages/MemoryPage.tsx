@@ -2,6 +2,7 @@ import { PageHeader } from "../components/ui/PageHeader";
 import { PageSection } from "../components/ui/PageSection";
 import { MemoryCloudPanel } from "../features/memory/MemoryCloudPanel";
 import { MemoryFieldPreferencesPanel } from "../features/memory/MemoryFieldPreferencesPanel";
+import { MemoryLearnedHotwordsPanel } from "../features/memory/MemoryLearnedHotwordsPanel";
 import { MemoryOverviewStats } from "../features/memory/MemoryOverviewStats";
 import { MemoryRecentCorrectionsPanel } from "../features/memory/MemoryRecentCorrectionsPanel";
 import { useMemoryWorkspace } from "../features/memory/useMemoryWorkspace";
@@ -53,6 +54,18 @@ export function MemoryPage() {
               <MemoryCloudPanel stats={workspace.stats.data} />
               <MemoryFieldPreferencesPanel stats={workspace.stats.data} />
             </div>
+          </PageSection>
+
+          <PageSection
+            eyebrow="热词"
+            title="管理自动学习热词"
+            description="这里展示已学习的品牌、型号和关键词，可按状态控制后续是否进入转写热词候选。"
+          >
+            <MemoryLearnedHotwordsPanel
+              hotwords={workspace.learnedHotwords.data ?? workspace.stats.data.learned_hotwords ?? []}
+              isUpdating={workspace.updateLearnedHotword.isPending}
+              onStatusChange={(hotwordId, status) => workspace.updateLearnedHotword.mutate({ hotwordId, body: { status } })}
+            />
           </PageSection>
 
           <PageSection

@@ -1170,8 +1170,10 @@ async def get_content_profile_memory_stats(
         subject_domains=subject_domains,
         total_corrections=total_corrections,
         total_keywords=total_keywords,
+        total_learned_hotwords=len((user_memory or {}).get("learned_hotwords") or []),
         field_preferences=_build_field_preferences(corrections, subject_domain=subject_domain, limit=6),
         keyword_preferences=_build_keyword_preferences(keyword_stats, subject_domain=subject_domain, limit=18),
+        learned_hotwords=list((user_memory or {}).get("learned_hotwords") or [])[:24],
         recent_corrections=_build_recent_corrections(corrections, subject_domain=subject_domain, limit=12),
         cloud=build_content_profile_memory_cloud(user_memory),
     )
