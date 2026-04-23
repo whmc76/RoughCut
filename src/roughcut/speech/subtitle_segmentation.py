@@ -300,6 +300,25 @@ _DISPLAY_QUANTITY_UNITS = (
     "项",
     "种",
     "款",
+    "堆",
+    "套",
+    "只",
+    "支",
+    "根",
+    "片",
+    "双",
+    "本",
+    "台",
+    "瓶",
+    "包",
+    "盒",
+    "袋",
+    "组",
+    "枚",
+    "段",
+    "圈",
+    "口",
+    "份",
     "把",
     "条",
     "层",
@@ -362,11 +381,66 @@ _SPACED_MODEL_TOKEN_RE = re.compile(
     rf"(?<![A-Za-z0-9])(?P<letters>(?:[A-Za-z]\s+){{1,7}}[A-Za-z])\s+"
     rf"(?P<number>{_DISPLAY_NUM_TOKEN})(?:\s+(?P<suffix>[A-Za-z]+))?(?![A-Za-z0-9])"
 )
+_CHINESE_DIGIT_SEQUENCE_RE = re.compile(
+    r"(?<![A-Za-z0-9])(?P<number>[零〇幺一二两三四五六七八九]{2,})"
+    r"(?=(?:号|款|版|年|月|日|集|期|代|[\s，,。.!！？；;：:]|$))"
+)
 _SAFE_DISPLAY_TERM_REPLACEMENTS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"威虎版(?=(?:的|这个|本|外观|手感|处理|工艺|版本|区别|对比|,|，|。|$))"), "微弧版"),
     (re.compile(r"(?<![A-Za-z0-9])CAC(?=(?:的|外壳|壳体|机身|工艺|切削|精雕|加工|结构|边角|铝合金|中框|骨架))", re.IGNORECASE), "CNC"),
 )
 _NATURAL_SINGLE_UNITS = {"个", "次", "年", "月", "天", "小时", "分钟", "秒"}
+_NATURAL_SINGLE_QUANTITY_UNITS = {
+    "个",
+    "把",
+    "堆",
+    "颗",
+    "条",
+    "件",
+    "款",
+    "套",
+    "只",
+    "支",
+    "根",
+    "片",
+    "双",
+    "本",
+    "台",
+    "瓶",
+    "包",
+    "盒",
+    "袋",
+    "组",
+    "枚",
+    "段",
+    "圈",
+    "口",
+    "份",
+    "张",
+    "面",
+    "页",
+    "层",
+    "排",
+    "项",
+    "种",
+    "次",
+    "句",
+    "步",
+    "轮",
+    "名",
+    "块",
+}
+_NATURAL_SINGLE_DIGIT_DISPLAY = {
+    "1": "一",
+    "2": "两",
+    "3": "三",
+    "4": "四",
+    "5": "五",
+    "6": "六",
+    "7": "七",
+    "8": "八",
+    "9": "九",
+}
 _VAGUE_NUMBER_TOKENS = {
     "一两",
     "一二",
@@ -1101,6 +1175,7 @@ def _normalize_display_numbers(text: str) -> str:
     result = _normalize_alpha_numeric_tokens(result)
     result = _collapse_repeated_model_number_tokens(result)
     result = _normalize_time_tokens(result)
+    result = _normalize_chinese_digit_sequences(result)
 
     def replace_percent(match: re.Match[str]) -> str:
         number = _normalize_numeric_token(match.group("number"))
@@ -1121,6 +1196,14 @@ def _normalize_display_numbers(text: str) -> str:
             match.string[match.end():match.end() + 6],
         ):
             return match.group(0)
+        natural_quantity = _format_natural_single_quantity(
+            raw_number,
+            number,
+            unit,
+            match.string[match.end():match.end() + 6],
+        )
+        if natural_quantity:
+            return natural_quantity
         return f"{number}{unit}" if number else match.group(0)
 
     result = _PERCENT_NUMBER_RE.sub(replace_percent, result)
@@ -1199,6 +1282,32 @@ def _normalize_time_tokens(text: str) -> str:
     result = _TIME_WITH_MINUTE_RE.sub(replace_time_with_minute, result)
     result = _TIME_HOUR_ONLY_RE.sub(replace_time_hour_only, result)
     return result
+
+
+def _normalize_chinese_digit_sequences(text: str) -> str:
+    def replace_sequence(match: re.Match[str]) -> str:
+        raw_number = str(match.group("number") or "")
+        if raw_number in _VAGUE_NUMBER_TOKENS:
+            return raw_number
+        if len(raw_number) == 2 and not any(char in raw_number for char in "零〇幺"):
+            return raw_number
+        return _normalize_numeric_token(raw_number) or raw_number
+
+    return _CHINESE_DIGIT_SEQUENCE_RE.sub(replace_sequence, text)
+
+
+def _format_natural_single_quantity(number_token: str, normalized_number: str, unit: str, tail_text: str) -> str:
+    if unit not in _NATURAL_SINGLE_QUANTITY_UNITS:
+        return ""
+    if unit == "个" and _starts_with_info_count_noun(tail_text):
+        return ""
+    display_number = _NATURAL_SINGLE_DIGIT_DISPLAY.get(str(normalized_number or ""))
+    if not display_number:
+        return ""
+    raw_number = str(number_token or "").strip()
+    if raw_number == "二":
+        display_number = "二"
+    return f"{display_number}{unit}"
 
 
 def _should_preserve_natural_quantity(number_token: str, unit: str, tail_text: str) -> bool:
