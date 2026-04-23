@@ -3,6 +3,7 @@ from pathlib import Path
 from roughcut.media.output import write_srt_file
 from roughcut.media.subtitles import write_ass_file
 from roughcut.media.subtitle_text import clean_final_subtitle_text
+from roughcut.speech.subtitle_segmentation import normalize_display_text
 
 
 def test_clean_final_subtitle_text_drops_only_standalone_fillers() -> None:
@@ -13,10 +14,28 @@ def test_clean_final_subtitle_text_drops_only_standalone_fillers() -> None:
 
 
 def test_clean_final_subtitle_text_removes_punctuation_fillers_and_interruptions() -> None:
-    assert clean_final_subtitle_text("吧。啊。啊。我。") == ""
+    assert clean_final_subtitle_text("吧。啊。啊。") == ""
     assert clean_final_subtitle_text("不对， 也不叫。") == "不对 也不叫"
     assert clean_final_subtitle_text("滚") == ""
     assert clean_final_subtitle_text("滚，继续看细节") == "继续看细节"
+
+
+def test_clean_final_subtitle_text_preserves_normal_cjk_phrases() -> None:
+    assert clean_final_subtitle_text("我 跟 你 说") == "我跟你说"
+    assert clean_final_subtitle_text("即 使") == "即使"
+    assert clean_final_subtitle_text("我") == "我"
+
+
+def test_clean_final_subtitle_text_hides_asr_noise_markers() -> None:
+    assert clean_final_subtitle_text("[silence]") == ""
+    assert clean_final_subtitle_text("(music)") == ""
+    assert clean_final_subtitle_text("<|nospeech|>") == ""
+    assert clean_final_subtitle_text("这个细节 [music] 继续看") == "这个细节继续看"
+
+
+def test_normalize_display_text_hides_asr_noise_markers_before_review() -> None:
+    assert normalize_display_text("[silence]") == ""
+    assert normalize_display_text("细节 <|music|> 继续看") == "细节继续看"
 
 
 def test_write_srt_file_skips_filler_only_cues_with_consecutive_numbers(tmp_path: Path) -> None:

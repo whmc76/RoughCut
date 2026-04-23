@@ -534,6 +534,7 @@ def _build_edit_decision_llm_review_candidates(
                 "reason": str(item.get("reason") or ""),
                 "boundary_keep_energy": round(float(item.get("boundary_keep_energy", 0.0) or 0.0), 3),
                 "signals": [str(signal) for signal in (item.get("signals") or []) if str(signal)],
+                "evidence": dict(item.get("evidence") or {}) if isinstance(item.get("evidence"), dict) else {},
                 "left_keep_role": str(item.get("left_keep_role") or ""),
                 "right_keep_role": str(item.get("right_keep_role") or ""),
                 "section_role": str((action or {}).get("role") or ""),
@@ -9048,6 +9049,7 @@ def _build_variant_timeline_diagnostics(
             "boundary_keep_energy": round(float(item.get("boundary_keep_energy", 0.0) or 0.0), 3),
             "left_keep_role": str(item.get("left_keep_role") or ""),
             "right_keep_role": str(item.get("right_keep_role") or ""),
+            "evidence": _compact_cut_evidence_payload(item.get("evidence")),
         }
         for item in accepted_cuts
         if float(item.get("boundary_keep_energy", 0.0) or 0.0) >= 1.0
@@ -9072,10 +9074,17 @@ def _build_variant_timeline_diagnostics(
     review_reasons: list[str] = []
     if high_risk_cuts:
         review_reasons.append("存在贴近高能量保留段的 cut，建议复核边界。")
+    if any(
+        float(((item.get("evidence") or {}).get("protection_score") or 0.0)) >= 0.72
+        for item in high_risk_cuts
+        if isinstance(item.get("evidence"), dict)
+    ):
+        review_reasons.append("部分 cut 带有展示、语言或语义保护证据，建议重点核对是否误删。")
     if any(str(item.get("section_role") or "") == "hook" for item in high_energy_keeps):
         review_reasons.append("Hook 段存在高能量保留片段，建议确认开场节奏。")
     return {
         "keep_energy_summary": _clone_json_like((editorial_analysis or {}).get("keep_energy_summary") or {}),
+        "cut_evidence_summary": _clone_json_like((editorial_analysis or {}).get("cut_evidence_summary") or {}),
         "high_energy_keeps": high_energy_keeps[:8],
         "high_risk_cuts": high_risk_cuts[:8],
         "llm_cut_review": llm_cut_review,
@@ -9089,6 +9098,22 @@ def _build_variant_timeline_diagnostics(
                 else None
             ),
         },
+    }
+
+
+def _compact_cut_evidence_payload(value: Any) -> dict[str, Any]:
+    evidence = value if isinstance(value, dict) else {}
+    if not evidence:
+        return {}
+    return {
+        "visual_showcase_score": round(float(evidence.get("visual_showcase_score", 0.0) or 0.0), 3),
+        "language_score": round(float(evidence.get("language_score", 0.0) or 0.0), 3),
+        "retake_score": round(float(evidence.get("retake_score", 0.0) or 0.0), 3),
+        "protection_score": round(float(evidence.get("protection_score", 0.0) or 0.0), 3),
+        "removal_score": round(float(evidence.get("removal_score", 0.0) or 0.0), 3),
+        "tags": [str(tag) for tag in (evidence.get("tags") or []) if str(tag)][:6],
+        "previous_text": str(evidence.get("previous_text") or "")[:40],
+        "next_text": str(evidence.get("next_text") or "")[:40],
     }
 
 

@@ -1699,6 +1699,9 @@ def _resolve_smart_effect_video_tokens(style: str, *, preserve_color: bool = Fal
     }
     normalized = _normalize_smart_effect_style(style)
     resolved = dict(mapping.get(normalized, mapping[_DEFAULT_SMART_EFFECT_STYLE]))
+    # Full-frame emphasis zooms used crop/zoompan and could hide product-detail
+    # shots at exactly the moment the footage should be inspected.
+    resolved["max_full_transforms"] = 0
     if preserve_color:
         resolved["contrast"] = 1.0
         resolved["saturation"] = 1.0

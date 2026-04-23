@@ -545,6 +545,15 @@ _LOW_SIGNAL_SHORT_CLAUSE_RE = re.compile(
 )
 _INLINE_FILLER_RE = re.compile(r"(?:呃|嗯|诶|欸|哎|哈|哦)+")
 _INLINE_PARTICLE_RE = re.compile(r"(?<=[\u4e00-\u9fffA-Za-z0-9])(?:啊|吧|呢|吗|嘛|呀)(?=[\u4e00-\u9fffA-Za-z0-9])")
+_ASR_NOISE_MARKER_PATTERN = re.compile(
+    r"(?i)"
+    r"(?:<\|?(?:no[_\s-]?speech|nospeech|silence|music|background[_\s-]?music)\|?>)"
+    r"|(?:[\[\(（【<]\s*(?:silence|music|background\s+music|no\s+speech|nospeech)\s*[\]\)）】>])"
+    r"|[♪♫]+"
+)
+_ASR_NOISE_ONLY_PATTERN = re.compile(
+    r"(?i)^(?:silence|music|background\s+music|no\s+speech|nospeech|静音|无语音)$"
+)
 _TRAILING_FILLER_RE = re.compile(r"(?:呢|吗|嘛|呀|哈|哦|诶|欸|哎)+$")
 _TRAILING_KEEPABLE_PARTICLE_RE = re.compile(r"(?:啊+|吧+)$")
 _TERMINAL_PUNCTUATION = "。！？!?"
@@ -1070,6 +1079,7 @@ def normalize_display_text(text: str, *, cleanup_fillers: bool = True) -> str:
     result = str(text or "").strip()
     if not result:
         return result
+    result = _strip_asr_noise_markers(result)
     result = re.sub(r"([\u4e00-\u9fff])\s+(?=[\u4e00-\u9fff])", r"\1", result)
     if cleanup_fillers:
         result = cleanup_subtitle_fillers(result)
@@ -1094,6 +1104,7 @@ def cleanup_subtitle_fillers(text: str) -> str:
     result = str(text or "").strip()
     if not result:
         return result
+    result = _strip_asr_noise_markers(result)
 
     pieces = [piece for piece in re.split(r"([，,。！？!?；;])", result) if piece != ""]
     cleaned: list[str] = []
@@ -1145,6 +1156,8 @@ def _is_low_signal_short_clause(text: str) -> bool:
     clause = str(text or "").strip()
     if not clause:
         return True
+    if _ASR_NOISE_ONLY_PATTERN.fullmatch(clause):
+        return True
     if clause in _LOW_SIGNAL_SHORT_CLAUSE_TOKENS or _LOW_SIGNAL_SHORT_CLAUSE_RE.fullmatch(clause):
         return True
     if re.search(r"[A-Za-z0-9]", clause):
@@ -1153,6 +1166,11 @@ def _is_low_signal_short_clause(text: str) -> bool:
     if len(compact) <= 2:
         return compact in {"今天", "开始", "花了", "强行", "对"}
     return False
+
+
+def _strip_asr_noise_markers(text: str) -> str:
+    result = _ASR_NOISE_MARKER_PATTERN.sub(" ", str(text or ""))
+    return re.sub(r"\s{2,}", " ", result).strip()
 
 
 def apply_subtitle_clause_spacing(text: str) -> str:

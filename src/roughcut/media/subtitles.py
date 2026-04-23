@@ -10,7 +10,7 @@ from pathlib import Path
 
 from roughcut.media.subtitle_text import clean_final_subtitle_text
 
-_SUBTITLE_FONT_SCALE = 1.9
+_SUBTITLE_FONT_SCALE = 1.0
 _WRAP_NO_SPLIT_ENDINGS = (
     "的", "了", "呢", "吗", "嘛", "啊", "呀", "着", "把", "给", "在", "向", "和", "与", "及",
     "就", "也", "还", "很", "都", "又", "才", "再", "并", "跟", "让", "被",
@@ -668,7 +668,7 @@ def _resolve_ass_style_definition(
     style = dict(SUBTITLE_STYLE_PRESETS.get(style_name, SUBTITLE_STYLE_PRESETS["bold_yellow_outline"]))
     resolved_font_name = str(style.get("font_name") or font_name)
     base_font_size = int(style.get("font_size") or font_size)
-    resolved_font_size = max(int(font_size), int(round(base_font_size * _SUBTITLE_FONT_SCALE)))
+    resolved_font_size = int(round(base_font_size * _SUBTITLE_FONT_SCALE))
     resolved_font_size = _resolve_subtitle_font_size(
         play_res_x=play_res_x,
         play_res_y=play_res_y,
@@ -1036,16 +1036,20 @@ def _estimate_subtitle_line_capacity(*, play_res_x: int, font_size: int) -> int:
 
 
 def _resolve_subtitle_font_size(*, play_res_x: int, play_res_y: int, font_size: int) -> int:
-    portrait = int(play_res_y) > int(play_res_x)
+    width = max(1, int(play_res_x))
+    height = max(1, int(play_res_y))
+    short_edge = min(width, height)
+    aspect = max(width, height) / max(short_edge, 1)
+    portrait = height > width
     if portrait:
-        width_limit = int(play_res_x * 0.14)
-        height_limit = int(play_res_y * 0.105)
-        min_size = max(88, int(min(play_res_x, play_res_y) * 0.1))
+        max_ratio = 0.068 if aspect < 1.9 else 0.064
+        min_ratio = 0.045
     else:
-        width_limit = int(play_res_x * 0.12)
-        height_limit = int(play_res_y * 0.105)
-        min_size = 92
-    return max(min_size, min(int(font_size), width_limit, height_limit))
+        max_ratio = 0.064 if aspect < 1.9 else 0.06
+        min_ratio = 0.04
+    min_size = max(28, int(round(short_edge * min_ratio)))
+    max_size = max(min_size, int(round(short_edge * max_ratio)))
+    return max(min_size, min(int(font_size), max_size))
 
 
 def _resolve_subtitle_horizontal_margin(*, play_res_x: int) -> int:

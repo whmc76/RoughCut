@@ -16,7 +16,7 @@ FILLER_WORDS = [
 ]
 
 FILLER_PATTERN = re.compile(
-    r"(?:" + "|".join(re.escape(w) for w in FILLER_WORDS) + r")",
+    r"(?:" + "|".join(re.escape(w) for w in sorted(FILLER_WORDS, key=len, reverse=True)) + r")",
     re.UNICODE,
 )
 HEDGE_PATTERN = re.compile(
@@ -85,6 +85,10 @@ _NOISE_MARKER_TERMS = (
 )
 _NOISE_INTERJECTION_CHARS = frozenset("啊嗯呃哦哎诶欸哈呵咳")
 _VISUAL_SHOWCASE_TERMS = (
+    "欣赏",
+    "看一下",
+    "来看",
+    "看这里",
     "放一起",
     "放在一起",
     "并排",
@@ -96,15 +100,60 @@ _VISUAL_SHOWCASE_TERMS = (
     "近看",
     "特写",
     "展示",
-    "看一下",
+    "演示",
+    "操作",
+    "实操",
+    "实测",
     "看细节",
+    "细节",
+    "纹理",
+    "材质",
+    "质感",
+    "效果",
+    "成品",
+    "画面",
+    "实拍",
+    "镜头",
     "镜面",
     "雾面",
     "上手看",
+    "上手",
     "开合",
+    "打开",
+    "合上",
+    "转动",
+    "滚动",
+    "滑动",
+    "按一下",
+    "试一下",
+    "听一下",
     "展开看",
     "收纳",
     "收纳看",
+)
+_NORMAL_LANGUAGE_SIGNAL_TERMS = (
+    "可以",
+    "看到",
+    "看一下",
+    "来看",
+    "这里",
+    "这个",
+    "那个",
+    "就是",
+    "因为",
+    "所以",
+    "但是",
+    "如果",
+    "然后",
+    "感觉",
+    "适合",
+    "支持",
+    "需要",
+    "打开",
+    "放在",
+    "拿来",
+    "对比",
+    "区别",
 )
 _RESTART_CUE_TERMS = (
     "滚",
@@ -225,8 +274,10 @@ _RETAKE_MAX_WINDOW_ITEMS = 4
 _RETAKE_MIN_PREFIX_LEN = 4
 _RETAKE_MAX_FRAGMENT_CHARS = 24
 _SHOWCASE_CONTEXT_MAX_GAP_SEC = 0.55
+_SHOWCASE_CONTEXT_APPRECIATION_MAX_GAP_SEC = 1.2
 _VISUAL_SHOWCASE_GAP_MIN_SEC = 0.45
-_VISUAL_SHOWCASE_GAP_MAX_SEC = 3.2
+_VISUAL_SHOWCASE_GAP_MAX_SEC = 8.0
+_VISUAL_SHOWCASE_LONG_GAP_MIN_SEC = 3.2
 _LONG_INVALID_NO_DIALOGUE_MIN_SEC = 1.2
 _SILENCE_CUT_SCORE_THRESHOLD = 0.32
 _SILENCE_DURATION_SCORE_BASE = 0.22
@@ -286,9 +337,10 @@ class CutCandidate:
     score: float = 1.0
     hard: bool = False
     signals: list[str] = field(default_factory=list)
+    evidence: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "start": round(self.start, 4),
             "end": round(self.end, 4),
             "reason": self.reason,
@@ -296,6 +348,54 @@ class CutCandidate:
             "hard": self.hard,
             "signals": list(self.signals),
         }
+        if self.evidence:
+            payload["evidence"] = dict(self.evidence)
+        return payload
+
+
+@dataclass
+class EditRangeEvidence:
+    start: float
+    end: float
+    duration_sec: float
+    subtitle_count: int = 0
+    transcript_count: int = 0
+    transcript_coverage: float = 0.0
+    scene_boundary_count: int = 0
+    section_role: str = ""
+    broll_allowed: bool = False
+    visual_showcase_score: float = 0.0
+    language_score: float = 0.0
+    retake_score: float = 0.0
+    protection_score: float = 0.0
+    removal_score: float = 0.0
+    tags: list[str] = field(default_factory=list)
+    previous_text: str = ""
+    next_text: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        payload = {
+            "start": round(self.start, 3),
+            "end": round(self.end, 3),
+            "duration_sec": round(self.duration_sec, 3),
+            "subtitle_count": self.subtitle_count,
+            "transcript_count": self.transcript_count,
+            "transcript_coverage": round(self.transcript_coverage, 3),
+            "scene_boundary_count": self.scene_boundary_count,
+            "section_role": self.section_role,
+            "broll_allowed": self.broll_allowed,
+            "visual_showcase_score": round(self.visual_showcase_score, 3),
+            "language_score": round(self.language_score, 3),
+            "retake_score": round(self.retake_score, 3),
+            "protection_score": round(self.protection_score, 3),
+            "removal_score": round(self.removal_score, 3),
+            "tags": list(dict.fromkeys(self.tags)),
+        }
+        if self.previous_text:
+            payload["previous_text"] = self.previous_text[:48]
+        if self.next_text:
+            payload["next_text"] = self.next_text[:48]
+        return payload
 
 
 @dataclass
@@ -375,7 +475,10 @@ def build_edit_decision(
             )
         )
         candidates.extend(_build_hard_cut_candidates(
-            _collect_restart_retake_cuts(enriched_subtitles, content_profile=content_profile)
+            [
+                *_collect_restart_retake_cuts(enriched_subtitles, content_profile=content_profile),
+                *_collect_restart_cue_cuts(enriched_subtitles, content_profile=content_profile),
+            ]
         ))
 
     merged_cuts = _merge_cut_intervals(
@@ -399,19 +502,33 @@ def build_edit_decision(
         timeline_analysis=timeline_analysis,
         content_profile=content_profile,
     )
+    accepted_cuts = _annotate_cut_candidates_with_keep_energy(
+        candidates,
+        keep_energy_segments=keep_energy_segments,
+    )
     return EditDecision(
         source=source_path,
         segments=segments,
         analysis={
+            "decision_methodology": {
+                "version": "multisignal_v1",
+                "signals": [
+                    "vad_silence",
+                    "subtitle_semantics",
+                    "transcript_overlap",
+                    "scene_boundaries",
+                    "section_role",
+                    "retake_cues",
+                ],
+                "principle": "cut only when removal evidence beats speech, visual showcase, and semantic continuity protection",
+            },
             "candidate_count": len(candidates),
             "scene_boundary_count": len(scene_points),
             "transcript_segment_count": len(normalized_transcript),
             "effective_min_silence_to_cut": round(effective_min_silence_to_cut, 3),
             "review_focus": str(resolved_skill.get("review_focus") or ""),
-            "accepted_cuts": _annotate_cut_candidates_with_keep_energy(
-                candidates,
-                keep_energy_segments=keep_energy_segments,
-            ),
+            "accepted_cuts": accepted_cuts,
+            "cut_evidence_summary": _summarize_cut_evidence(accepted_cuts),
             "keep_energy_segments": keep_energy_segments,
             "keep_energy_summary": _summarize_keep_energy_segments(keep_energy_segments),
             **timeline_analysis,
@@ -544,6 +661,17 @@ def _score_silence_cut(
     previous_item = _find_previous_subtitle(silence.start, subtitle_items)
     next_item = _find_next_subtitle(silence.end, subtitle_items)
     overlaps = _overlapping_subtitle_items(silence.start, silence.end, subtitle_items)
+    range_evidence = _build_range_evidence(
+        silence.start,
+        silence.end,
+        subtitle_items=subtitle_items,
+        transcript_segments=transcript_segments,
+        content_profile=content_profile,
+        timeline_analysis=timeline_analysis,
+        scene_points=scene_points,
+        previous_item=previous_item,
+        next_item=next_item,
+    )
 
     if not overlaps:
         score += 0.10
@@ -566,17 +694,10 @@ def _score_silence_cut(
     if _looks_like_semantic_bridge(previous_item, next_item, content_profile=content_profile):
         score -= 0.08
         signals.append("semantic_bridge")
-    if _is_visual_showcase_gap(
-        start_time=silence.start,
-        end_time=silence.end,
-        previous_item=previous_item,
-        next_item=next_item,
-        content_profile=content_profile,
-        timeline_analysis=timeline_analysis,
-        scene_points=scene_points,
-    ):
-        score -= 0.42
-        signals.append("visual_showcase_gap")
+    if range_evidence.visual_showcase_score >= 0.74:
+        protection_penalty = min(0.62, 0.32 + range_evidence.protection_score * 0.24)
+        score -= protection_penalty
+        signals.append(f"visual_showcase_gap={range_evidence.visual_showcase_score:.2f}")
     elif (
         transcript_segments
         and not _overlapping_transcript_segments(silence.start, silence.end, transcript_segments)
@@ -614,6 +735,14 @@ def _score_silence_cut(
         score -= focus_guard_penalty
         signals.append(f"{focus_guard_signal}={focus_guard_penalty:.2f}")
 
+    if range_evidence.protection_score >= 0.72:
+        score -= min(0.38, range_evidence.protection_score * 0.18)
+        signals.append(f"evidence_protect={range_evidence.protection_score:.2f}")
+    if range_evidence.removal_score >= 0.72:
+        score += min(0.22, range_evidence.removal_score * 0.14)
+        signals.append(f"evidence_remove={range_evidence.removal_score:.2f}")
+    signals.extend(f"evidence:{tag}" for tag in range_evidence.tags[:5])
+
     cut_start = silence.start
     cut_end = silence.end
     snapped_start = _snap_edge(cut_start, scene_points, tolerance=_SCENE_SNAP_TOLERANCE_SEC, lower_bound=0.0, upper_bound=cut_end - _MIN_CUT_DURATION_SEC)
@@ -633,6 +762,127 @@ def _score_silence_cut(
         reason="silence",
         score=max(0.0, score),
         signals=signals,
+        evidence=range_evidence.to_dict(),
+    )
+
+
+def _build_range_evidence(
+    start_time: float,
+    end_time: float,
+    *,
+    subtitle_items: list[dict[str, Any]],
+    transcript_segments: list[dict[str, Any]],
+    content_profile: dict | None,
+    timeline_analysis: dict[str, Any] | None,
+    scene_points: list[float],
+    previous_item: dict[str, Any] | None = None,
+    next_item: dict[str, Any] | None = None,
+) -> EditRangeEvidence:
+    start = max(0.0, float(start_time or 0.0))
+    end = max(start, float(end_time or start))
+    duration = max(0.0, end - start)
+    subtitle_overlaps = _overlapping_subtitle_items(start, end, subtitle_items)
+    transcript_overlaps = _overlapping_transcript_segments(start, end, transcript_segments)
+    previous_item = previous_item if previous_item is not None else _find_previous_subtitle(start, subtitle_items)
+    next_item = next_item if next_item is not None else _find_next_subtitle(end, subtitle_items)
+    action = _contextual_section_action_for_range(start, end, timeline_analysis=timeline_analysis)
+    section_role = str((action or {}).get("role") or "").strip().lower()
+    broll_allowed = bool((action or {}).get("broll_allowed"))
+    scene_hits = sum(1 for point in scene_points if start - 0.12 <= point <= end + 0.12)
+    transcript_overlap_sec = sum(_range_overlap_seconds(start, end, item.get("start"), item.get("end")) for item in transcript_overlaps)
+    transcript_coverage = min(1.0, transcript_overlap_sec / duration) if duration > 0 else 0.0
+    previous_text = _semantic_subtitle_text(previous_item)
+    next_text = _semantic_subtitle_text(next_item)
+    overlap_texts = [_semantic_subtitle_text(item) for item in subtitle_overlaps]
+    context_texts = [text for text in [previous_text, *overlap_texts, next_text] if text]
+    tags: list[str] = []
+
+    visual_score = 0.0
+    if any(_has_visual_showcase_signal(text, content_profile=content_profile) for text in context_texts):
+        visual_score += 0.46
+        tags.append("visual_context")
+    if broll_allowed:
+        visual_score += 0.16
+        tags.append("broll_allowed")
+    if section_role == "detail":
+        visual_score += 0.18
+        tags.append("detail_section")
+    elif section_role == "body":
+        visual_score += 0.1
+        tags.append("body_section")
+    if scene_hits:
+        visual_score += min(0.3, 0.14 + scene_hits * 0.06)
+        tags.append("scene_activity")
+    if _VISUAL_SHOWCASE_GAP_MIN_SEC <= duration <= _VISUAL_SHOWCASE_GAP_MAX_SEC:
+        visual_score += 0.08
+    if _editing_skill_has_creative_tag(timeline_analysis, {"detail_focus", "closeup_focus", "practical_demo", "workflow_breakdown"}):
+        visual_score += 0.12
+        tags.append("creative_visual_priority")
+
+    language_scores = [
+        _subtitle_signal_score(text, content_profile=content_profile)
+        for text in context_texts
+        if _has_normal_language_signal(text, content_profile=content_profile)
+    ]
+    language_score = min(1.4, max(language_scores, default=0.0) / 2.2)
+    if language_score > 0:
+        tags.append("language_signal")
+    if subtitle_overlaps and max(
+        (_subtitle_signal_score(text, content_profile=content_profile) for text in overlap_texts),
+        default=0.0,
+    ) >= _STRONG_SUBTITLE_SIGNAL_SCORE:
+        language_score = max(language_score, 0.82)
+        tags.append("strong_subtitle")
+
+    retake_score = 0.0
+    if any(_is_restart_cue_text(text) for text in context_texts):
+        retake_score += 0.72
+        tags.append("restart_cue_context")
+    if any(_looks_like_incomplete_tail(text) for text in overlap_texts):
+        retake_score += 0.16
+        tags.append("incomplete_overlap")
+    if transcript_overlaps and transcript_coverage < 0.18 and not subtitle_overlaps:
+        tags.append("weak_transcript_coverage")
+
+    protection_score = visual_score * 0.72 + language_score * 0.46
+    if transcript_coverage >= 0.25:
+        protection_score += 0.18
+        tags.append("transcript_present")
+    if section_role in {"hook", "cta"}:
+        protection_score += 0.12
+        tags.append(f"{section_role}_guard")
+
+    removal_score = 0.0
+    if not subtitle_overlaps and transcript_coverage <= 0.05:
+        removal_score += 0.28
+        tags.append("no_dialogue_inside")
+    if duration >= _LONG_INVALID_NO_DIALOGUE_MIN_SEC:
+        removal_score += min(0.28, 0.08 + duration * 0.035)
+    if retake_score:
+        removal_score += min(0.48, retake_score * 0.42)
+    if visual_score >= 0.74:
+        removal_score -= min(0.34, visual_score * 0.24)
+    if language_score >= 0.72:
+        removal_score -= 0.18
+
+    return EditRangeEvidence(
+        start=start,
+        end=end,
+        duration_sec=duration,
+        subtitle_count=len(subtitle_overlaps),
+        transcript_count=len(transcript_overlaps),
+        transcript_coverage=max(0.0, transcript_coverage),
+        scene_boundary_count=scene_hits,
+        section_role=section_role,
+        broll_allowed=broll_allowed,
+        visual_showcase_score=max(0.0, min(1.4, visual_score)),
+        language_score=max(0.0, min(1.4, language_score)),
+        retake_score=max(0.0, min(1.4, retake_score)),
+        protection_score=max(0.0, min(1.6, protection_score)),
+        removal_score=max(0.0, min(1.6, removal_score)),
+        tags=list(dict.fromkeys(tags)),
+        previous_text=previous_text,
+        next_text=next_text,
     )
 
 
@@ -645,8 +895,8 @@ def _build_subtitle_cut_candidates(
     for item in subtitle_items:
         text = _semantic_subtitle_text(item)
         if FILLER_PATTERN.search(text):
-            clean = FILLER_PATTERN.sub("", text).strip()
-            if len(clean) <= 2:
+            clean = PUNCTUATION_PATTERN.sub("", FILLER_PATTERN.sub("", text).strip())
+            if not clean:
                 candidates.append(
                     CutCandidate(
                         start=float(item["start_time"]),
@@ -678,7 +928,7 @@ def _classify_semantic_role(
     start_time = float(item.get("start_time", 0.0) or 0.0)
     end_time = float(item.get("end_time", 0.0) or 0.0)
     cta_keywords = ("点赞", "关注", "收藏", "评论", "下期", "下次", "记得", "转发", "关注我")
-    detail_keywords = ("参数", "细节", "体验", "对比", "测试", "上手", "演示", "区别", "优点", "缺点")
+    detail_keywords = ("参数", "细节", "纹理", "材质", "质感", "效果", "体验", "对比", "测试", "上手", "展示", "演示", "操作", "区别", "优点", "缺点")
     hook_keywords = ("先说", "先看", "直接", "今天", "这次", "先给", "先抛", "先讲", "结论")
 
     if any(keyword in text for keyword in cta_keywords):
@@ -850,6 +1100,18 @@ def _editing_skill_creative_preferences(editing_skill: dict[str, Any] | None) ->
         for item in (editing_skill or {}).get("creative_preferences") or []
         if str(item or "").strip()
     }
+
+
+def _editing_skill_has_creative_tag(
+    timeline_analysis: dict[str, Any] | None,
+    tags: set[str],
+) -> bool:
+    if not tags:
+        return False
+    skill = (timeline_analysis or {}).get("editing_skill")
+    if not isinstance(skill, dict):
+        return False
+    return bool(_editing_skill_creative_preferences(skill) & tags)
 
 
 def _section_creative_preference_annotation(*, role: str, creative_tags: set[str]) -> tuple[list[str], str]:
@@ -1076,18 +1338,21 @@ def _refine_segments_for_pacing(
             transcript_overlaps = _overlapping_transcript_segments(segment.start, segment.end, transcript_segments)
             previous_item = _find_previous_subtitle(segment.start, subtitle_items)
             next_item = _find_next_subtitle(segment.end, subtitle_items)
-            if transcript_overlaps:
-                refined.append(segment)
-                continue
-            if _is_visual_showcase_gap(
-                start_time=segment.start,
-                end_time=segment.end,
-                previous_item=previous_item,
-                next_item=next_item,
+            range_evidence = _build_range_evidence(
+                segment.start,
+                segment.end,
+                subtitle_items=subtitle_items,
+                transcript_segments=transcript_segments,
                 content_profile=content_profile,
                 timeline_analysis=timeline_analysis,
                 scene_points=scene_points or [],
-            ):
+                previous_item=previous_item,
+                next_item=next_item,
+            )
+            if transcript_overlaps:
+                refined.append(segment)
+                continue
+            if range_evidence.protection_score >= 0.62:
                 refined.append(segment)
                 continue
             if seg_duration <= float(trim_profile["micro_keep_no_subtitle_max_sec"]):
@@ -1183,6 +1448,10 @@ def _refine_segments_for_pacing(
             and seg_duration <= float(trim_profile["micro_keep_bridge_max_sec"])
             and max_signal < _STRONG_SUBTITLE_SIGNAL_SCORE
             and keep_energy < 0.82
+            and not any(
+                _has_normal_language_signal(_semantic_subtitle_text(item), content_profile=content_profile)
+                for item in overlaps
+            )
         ):
             collapsed.append(EditSegment(start=segment.start, end=segment.end, type="remove", reason="micro_keep_bridge"))
             continue
@@ -1364,6 +1633,50 @@ def _annotate_cut_candidates_with_keep_energy(
     return annotated
 
 
+def _summarize_cut_evidence(accepted_cuts: list[dict[str, Any]]) -> dict[str, Any]:
+    evidence_items = [
+        dict(item.get("evidence") or {})
+        for item in accepted_cuts
+        if isinstance(item, dict) and isinstance(item.get("evidence"), dict)
+    ]
+    if not evidence_items:
+        return {
+            "evidence_cut_count": 0,
+            "protected_visual_cut_count": 0,
+            "high_removal_evidence_count": 0,
+            "high_protection_evidence_count": 0,
+            "top_tags": [],
+        }
+    tag_counts: dict[str, int] = {}
+    for evidence in evidence_items:
+        for tag in evidence.get("tags") or []:
+            label = str(tag or "").strip()
+            if label:
+                tag_counts[label] = tag_counts.get(label, 0) + 1
+    return {
+        "evidence_cut_count": len(evidence_items),
+        "protected_visual_cut_count": sum(
+            1
+            for evidence in evidence_items
+            if float(evidence.get("visual_showcase_score", 0.0) or 0.0) >= 0.74
+        ),
+        "high_removal_evidence_count": sum(
+            1
+            for evidence in evidence_items
+            if float(evidence.get("removal_score", 0.0) or 0.0) >= 0.72
+        ),
+        "high_protection_evidence_count": sum(
+            1
+            for evidence in evidence_items
+            if float(evidence.get("protection_score", 0.0) or 0.0) >= 0.72
+        ),
+        "top_tags": [
+            {"tag": tag, "count": count}
+            for tag, count in sorted(tag_counts.items(), key=lambda item: (-item[1], item[0]))[:8]
+        ],
+    }
+
+
 def _summarize_keep_energy_segments(keep_energy_segments: list[dict[str, Any]]) -> dict[str, Any]:
     if not keep_energy_segments:
         return {
@@ -1493,6 +1806,12 @@ def _overlapping_transcript_segments(start_time: float, end_time: float, transcr
     return overlaps
 
 
+def _range_overlap_seconds(start_time: float, end_time: float, item_start: Any, item_end: Any) -> float:
+    start = _as_float(item_start)
+    end = _as_float(item_end, fallback=start)
+    return max(0.0, min(float(end_time), end) - max(float(start_time), start))
+
+
 def _find_previous_subtitle(time_point: float, subtitle_items: list[dict[str, Any]]) -> dict[str, Any] | None:
     previous: dict[str, Any] | None = None
     for item in subtitle_items:
@@ -1566,6 +1885,8 @@ def _is_low_signal_subtitle_text(text: str, *, content_profile: dict | None = No
         return False
     if len(compact) <= 2:
         return True
+    if _has_normal_language_signal(compact, content_profile=content_profile):
+        return False
     if (
         len(compact) <= 8
         and any(compact.startswith(prefix) for prefix in _BRIDGE_OPENERS)
@@ -1666,6 +1987,25 @@ def _has_visual_showcase_signal(text: str, *, content_profile: dict | None) -> b
     if not normalized:
         return False
     return any(term in normalized for term in _VISUAL_SHOWCASE_TERMS)
+
+
+def _has_normal_language_signal(text: str, *, content_profile: dict | None) -> bool:
+    compact = PUNCTUATION_PATTERN.sub("", str(text or "").strip())
+    if len(compact) < 4:
+        return False
+    if _has_anchor_signal(compact, content_profile=content_profile):
+        return True
+    if _has_visual_showcase_signal(compact, content_profile=content_profile):
+        return True
+    if re.search(r"[A-Za-z0-9]", compact):
+        return True
+    if (
+        len(compact) >= 6
+        and len(set(compact)) >= 3
+        and any(term in compact for term in _NORMAL_LANGUAGE_SIGNAL_TERMS)
+    ):
+        return True
+    return len(compact) >= 10 and len(set(compact)) >= max(4, len(compact) // 4)
 
 
 def _looks_like_noise_subtitle(text: str) -> bool:
@@ -1786,6 +2126,44 @@ def _collect_restart_retake_cuts(
     return cuts
 
 
+def _collect_restart_cue_cuts(
+    subtitle_items: list[dict],
+    *,
+    content_profile: dict | None,
+) -> list[tuple[float, float, str]]:
+    ordered = sorted(
+        subtitle_items,
+        key=lambda item: (
+            float(item.get("start_time", 0.0) or 0.0),
+            float(item.get("end_time", 0.0) or 0.0),
+        ),
+    )
+    cuts: list[tuple[float, float, str]] = []
+    for index, item in enumerate(ordered):
+        text = _semantic_subtitle_text(item)
+        if not _is_disposable_restart_cue_text(text, content_profile=content_profile):
+            continue
+        start = float(item.get("start_time", 0.0) or 0.0)
+        end = float(item.get("end_time", 0.0) or 0.0)
+        previous_item = ordered[index - 1] if index > 0 else None
+        if previous_item is not None:
+            previous_end = float(previous_item.get("end_time", 0.0) or 0.0)
+            if (
+                start - previous_end <= 0.72
+                and (
+                    _looks_like_incomplete_tail(_semantic_subtitle_text(previous_item))
+                    or _is_low_signal_subtitle_text(
+                        _semantic_subtitle_text(previous_item),
+                        content_profile=content_profile,
+                    )
+                )
+            ):
+                start = float(previous_item.get("start_time", start) or start)
+        if end - start >= 0.08:
+            cuts.append((start, end, "restart_cue"))
+    return cuts
+
+
 def _looks_like_retake_match(fragment_compact: str, next_compact: str) -> bool:
     if not fragment_compact or not next_compact:
         return False
@@ -1848,9 +2226,22 @@ def _is_restart_cue_text(text: str) -> bool:
     compact = _compact_subtitle_text(text)
     if not compact:
         return False
-    if any(term in compact for term in _RESTART_CUE_TERMS):
+    if compact in _RESTART_SHORT_CUES:
         return True
-    return compact in _RESTART_SHORT_CUES
+    if any(term in compact for term in _RESTART_CUE_TERMS if len(term) > 1):
+        return True
+    return False
+
+
+def _is_disposable_restart_cue_text(text: str, *, content_profile: dict | None) -> bool:
+    compact = _compact_subtitle_text(text)
+    if not _is_restart_cue_text(compact):
+        return False
+    if compact in _RESTART_SHORT_CUES:
+        return True
+    if len(compact) <= 18:
+        return True
+    return not _has_normal_language_signal(compact, content_profile=content_profile)
 
 
 def _is_visual_showcase_gap(
@@ -1869,8 +2260,13 @@ def _is_visual_showcase_gap(
     action = _contextual_section_action_for_range(start_time, end_time, timeline_analysis=timeline_analysis)
     if not bool((action or {}).get("broll_allowed")):
         return False
-    close_prev = previous_item is not None and start_time - float(previous_item.get("end_time", 0.0) or 0.0) <= _SHOWCASE_CONTEXT_MAX_GAP_SEC
-    close_next = next_item is not None and float(next_item.get("start_time", 0.0) or 0.0) - end_time <= _SHOWCASE_CONTEXT_MAX_GAP_SEC
+    context_gap = (
+        _SHOWCASE_CONTEXT_APPRECIATION_MAX_GAP_SEC
+        if duration >= _VISUAL_SHOWCASE_LONG_GAP_MIN_SEC
+        else _SHOWCASE_CONTEXT_MAX_GAP_SEC
+    )
+    close_prev = previous_item is not None and start_time - float(previous_item.get("end_time", 0.0) or 0.0) <= context_gap
+    close_next = next_item is not None and float(next_item.get("start_time", 0.0) or 0.0) - end_time <= context_gap
     if not (close_prev or close_next):
         return False
     context_texts = [_semantic_subtitle_text(item) for item in (previous_item, next_item) if item is not None]
@@ -1878,6 +2274,8 @@ def _is_visual_showcase_gap(
         return False
     scene_hits = sum(1 for point in scene_points if start_time - 0.12 <= point <= end_time + 0.12)
     role = str((action or {}).get("role") or "").strip().lower()
+    if duration >= _VISUAL_SHOWCASE_LONG_GAP_MIN_SEC:
+        return scene_hits >= 1 or (close_prev and close_next and role == "detail")
     return scene_hits >= 1 or (close_prev and close_next and role in {"detail", "body"})
 
 
@@ -1898,17 +2296,20 @@ def _should_remove_long_non_dialogue_keep(
     next_item = _find_next_subtitle(segment.end, subtitle_items)
     if _looks_like_sentence_continuation(previous_item, next_item):
         return False
-    if _is_visual_showcase_gap(
-        start_time=segment.start,
-        end_time=segment.end,
-        previous_item=previous_item,
-        next_item=next_item,
+    range_evidence = _build_range_evidence(
+        segment.start,
+        segment.end,
+        subtitle_items=subtitle_items,
+        transcript_segments=transcript_segments,
         content_profile=content_profile,
         timeline_analysis=timeline_analysis,
         scene_points=scene_points,
-    ):
+        previous_item=previous_item,
+        next_item=next_item,
+    )
+    if range_evidence.protection_score >= 0.62:
         return False
-    return True
+    return range_evidence.removal_score >= 0.42
 
 
 def _has_anchor_signal(text: str, *, content_profile: dict | None) -> bool:
@@ -1966,6 +2367,7 @@ def _subject_family(subject_type: str) -> str:
 def _cut_reason_priority(reason: str) -> int:
     priorities = {
         "restart_retake": 5,
+        "restart_cue": 4,
         "noise_subtitle": 4,
         "low_signal_subtitle": 4,
         "filler_word": 4,
