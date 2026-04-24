@@ -144,6 +144,15 @@ export type JobManualEditApplyResponse = {
   detail?: string | null;
 };
 
+export type JobManualEditApplyPayload = {
+  keep_segments: Array<{ start: number; end: number }>;
+  subtitle_overrides?: JobManualEditSubtitleOverride[];
+  base_timeline_id?: string;
+  base_timeline_version?: number;
+  base_render_plan_version?: number | null;
+  note?: string;
+};
+
 export type JobManualEditPreviewAssets = {
   job_id: string;
   ready: boolean;

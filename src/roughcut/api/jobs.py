@@ -245,6 +245,9 @@ class ManualEditorSubtitleOverrideIn(BaseModel):
 class ManualEditorApplyIn(BaseModel):
     keep_segments: list[ManualEditorSegmentIn] = Field(default_factory=list)
     subtitle_overrides: list[ManualEditorSubtitleOverrideIn] = Field(default_factory=list)
+    base_timeline_id: str | None = None
+    base_timeline_version: int | None = None
+    base_render_plan_version: int | None = None
     note: str | None = None
 
 
@@ -1342,6 +1345,21 @@ def _manual_editor_change_plan(
     }
 
 
+def _validate_manual_editor_base_revision(
+    request: ManualEditorApplyIn,
+    *,
+    editorial_timeline: Timeline,
+    render_plan_timeline: Timeline,
+) -> None:
+    requested_timeline_id = str(request.base_timeline_id or "").strip()
+    if requested_timeline_id and requested_timeline_id != str(editorial_timeline.id):
+        raise HTTPException(status_code=409, detail="手动编辑基于旧时间线，请刷新编辑器后再保存。")
+    if request.base_timeline_version is not None and int(request.base_timeline_version) != int(editorial_timeline.version or 1):
+        raise HTTPException(status_code=409, detail="手动编辑基于旧时间线版本，请刷新编辑器后再保存。")
+    if request.base_render_plan_version is not None and int(request.base_render_plan_version) != int(render_plan_timeline.version or 1):
+        raise HTTPException(status_code=409, detail="渲染计划已更新，请刷新编辑器后再保存。")
+
+
 def _build_otio_style_manual_tracks(
     segments: list[dict[str, Any]],
     *,
@@ -1810,6 +1828,11 @@ async def apply_manual_editor_timeline(
     render_plan_timeline = await _load_latest_timeline_by_type(session, job_id=job.id, timeline_type="render_plan")
     if editorial_timeline is None or render_plan_timeline is None:
         raise HTTPException(status_code=404, detail="当前任务缺少可重建的时间线数据。")
+    _validate_manual_editor_base_revision(
+        request,
+        editorial_timeline=editorial_timeline,
+        render_plan_timeline=render_plan_timeline,
+    )
 
     media_meta_artifact = await _load_latest_optional_artifact(session, job_id=job.id, artifact_types=("media_meta",))
     media_meta = media_meta_artifact.data_json if media_meta_artifact and isinstance(media_meta_artifact.data_json, dict) else {}

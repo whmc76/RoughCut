@@ -1,5 +1,10 @@
 from types import SimpleNamespace
+from uuid import uuid4
 
+import pytest
+from fastapi import HTTPException
+
+from roughcut.api.jobs import ManualEditorApplyIn
 from roughcut.api.jobs import (
     _apply_manual_subtitle_overrides,
     _build_editorial_segments_from_keep_segments,
@@ -7,6 +12,7 @@ from roughcut.api.jobs import (
     _manual_editor_apply_conflict_detail,
     _manual_editor_change_plan,
     _manual_editor_prerequisite_detail,
+    _validate_manual_editor_base_revision,
     _manual_keep_segments_changed,
     _normalize_manual_keep_segments,
 )
@@ -263,6 +269,33 @@ def test_manual_editor_save_blocks_when_render_is_running() -> None:
 
     assert _manual_editor_prerequisite_detail(steps) is None
     assert "正在运行" in str(_manual_editor_apply_conflict_detail(steps))
+
+
+def test_manual_editor_base_revision_detects_stale_timeline() -> None:
+    current_timeline_id = uuid4()
+    render_plan_id = uuid4()
+
+    _validate_manual_editor_base_revision(
+        ManualEditorApplyIn(
+            base_timeline_id=str(current_timeline_id),
+            base_timeline_version=3,
+            base_render_plan_version=2,
+        ),
+        editorial_timeline=SimpleNamespace(id=current_timeline_id, version=3),
+        render_plan_timeline=SimpleNamespace(id=render_plan_id, version=2),
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        _validate_manual_editor_base_revision(
+            ManualEditorApplyIn(
+                base_timeline_id=str(uuid4()),
+                base_timeline_version=3,
+                base_render_plan_version=2,
+            ),
+            editorial_timeline=SimpleNamespace(id=current_timeline_id, version=3),
+            render_plan_timeline=SimpleNamespace(id=render_plan_id, version=2),
+        )
+    assert exc_info.value.status_code == 409
 
 
 def test_manual_editor_preview_asset_helpers_are_bounded() -> None:

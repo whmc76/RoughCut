@@ -2,10 +2,10 @@ import type {
   ContentProfileReview,
   Job,
   JobActivity,
+  JobManualEditApplyPayload,
   JobManualEditApplyResponse,
   JobManualEditPreviewAssets,
   JobManualEditSession,
-  JobManualEditSubtitleOverride,
   JobTimeline,
   JobsUsageSummary,
   JobsUsageTrend,
@@ -72,7 +72,7 @@ export const jobsApi = {
   getJobManualEditorAssets: (jobId: string) => request<JobManualEditPreviewAssets>(`/jobs/${jobId}/manual-editor/assets`),
   getJobManualEditorAssetsStatus: (jobId: string) => request<JobManualEditPreviewAssets>(`/jobs/${jobId}/manual-editor/assets/status`),
   warmJobManualEditorAssets: (jobId: string) => request<JobManualEditPreviewAssets>(`/jobs/${jobId}/manual-editor/assets/warm`, { method: "POST" }),
-  applyJobManualEditor: (jobId: string, body: { keep_segments: Array<{ start: number; end: number }>; subtitle_overrides?: JobManualEditSubtitleOverride[]; note?: string }) =>
+  applyJobManualEditor: (jobId: string, body: JobManualEditApplyPayload) =>
     request<JobManualEditApplyResponse>(`/jobs/${jobId}/manual-editor/apply`, { method: "POST", body: JSON.stringify(body) }),
   getContentProfile: (jobId: string) => request<ContentProfileReview>(`/jobs/${jobId}/content-profile`),
   confirmContentProfile: (jobId: string, body: Record<string, unknown>) =>

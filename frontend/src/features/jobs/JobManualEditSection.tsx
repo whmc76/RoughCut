@@ -4,7 +4,7 @@ import RegionsPlugin from "wavesurfer.js/dist/plugins/regions.esm.js";
 import type { RegionsPlugin as RegionsPluginInstance } from "wavesurfer.js/dist/plugins/regions.esm.js";
 import TimelinePlugin from "wavesurfer.js/dist/plugins/timeline.esm.js";
 
-import type { Job, JobManualEditPreviewAssets, JobManualEditSession, JobManualEditSubtitle, JobManualEditSubtitleOverride } from "../../types";
+import type { Job, JobManualEditApplyPayload, JobManualEditPreviewAssets, JobManualEditSession, JobManualEditSubtitle, JobManualEditSubtitleOverride } from "../../types";
 import { classNames } from "../../utils";
 
 type JobManualEditSectionProps = {
@@ -12,7 +12,7 @@ type JobManualEditSectionProps = {
   session: JobManualEditSession;
   previewAssets?: JobManualEditPreviewAssets;
   saving: boolean;
-  onApply?: (payload: { keep_segments: Array<{ start: number; end: number }>; subtitle_overrides?: JobManualEditSubtitleOverride[]; note?: string }) => void;
+  onApply?: (payload: JobManualEditApplyPayload) => void;
 };
 
 type KeepSegment = {
@@ -749,6 +749,9 @@ export function JobManualEditSection({ job, session, previewAssets, saving, onAp
         end: Number(segment.end.toFixed(3)),
       })),
       subtitle_overrides: subtitleOverrides,
+      base_timeline_id: session.timeline_id,
+      base_timeline_version: session.timeline_version,
+      base_render_plan_version: session.render_plan_version,
       note: editorNote.trim() || undefined,
     });
   };

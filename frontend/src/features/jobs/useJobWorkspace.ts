@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { api } from "../../api";
-import type { Job, JobActivity, JobManualEditSubtitleOverride } from "../../types";
+import type { Job, JobActivity, JobManualEditApplyPayload } from "../../types";
 import { normalizeKeywordList } from "./contentProfile";
 import type { UploadForm } from "./constants";
 
@@ -490,7 +490,7 @@ export function useJobWorkspace({ isCreateOpen = false }: UseJobWorkspaceOptions
     onSuccess: refreshAll,
   });
   const applyManualEditor = useMutation({
-    mutationFn: async (payload: { keep_segments: Array<{ start: number; end: number }>; subtitle_overrides?: JobManualEditSubtitleOverride[]; note?: string }) =>
+    mutationFn: async (payload: JobManualEditApplyPayload) =>
       api.applyJobManualEditor(selectedJobId!, payload),
     onSuccess: refreshAll,
   });

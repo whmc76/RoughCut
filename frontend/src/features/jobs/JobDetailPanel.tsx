@@ -10,7 +10,7 @@ import type {
   JobActivity,
   JobManualEditPreviewAssets,
   JobManualEditSession,
-  JobManualEditSubtitleOverride,
+  JobManualEditApplyPayload,
   JobTimeline,
   PackagingLibrary,
   PublicationPlan,
@@ -203,7 +203,7 @@ type JobDetailPanelProps = {
   onCancel: () => void;
   onRestart: () => void;
   onDelete: () => void;
-  onApplyManualEditor?: (payload: { keep_segments: Array<{ start: number; end: number }>; subtitle_overrides?: JobManualEditSubtitleOverride[]; note?: string }) => void;
+  onApplyManualEditor?: (payload: JobManualEditApplyPayload) => void;
   onApplyReview: (targetId: string, action: "accepted" | "rejected") => void;
   onTriggerSubtitleRerun?: (decision: NonNullable<JobActivity["decisions"]>[number]) => void;
 };
