@@ -423,7 +423,24 @@ export function JobsPage() {
           onCancel={() => workspace.selectedJob && confirmAndCancelJob(workspace.selectedJob.id)}
           onRestart={() => workspace.selectedJob && confirmAndRestartJob(workspace.selectedJob.id)}
           onDelete={() => workspace.selectedJob && confirmAndDeleteJob(workspace.selectedJob.id)}
-          onApplyManualEditor={(payload) => workspace.applyManualEditor.mutate(payload)}
+          onApplyManualEditor={(payload) =>
+            workspace.applyManualEditor.mutate(payload, {
+              onSuccess: (result) => {
+                showReviewNotice(
+                  "success",
+                  result.detail?.trim() || `手动调整已保存，重跑链路：${result.rerun_steps.join(" -> ") || "render"}`,
+                );
+              },
+              onError: (error) => {
+                showReviewNotice(
+                  "error",
+                  error instanceof Error
+                    ? error.message
+                    : `手动调整保存失败：${String(error) || "请刷新后重试。"}`,
+                );
+              },
+            })
+          }
           onApplyReview={confirmAndApplyReview}
           onTriggerSubtitleRerun={triggerSubtitleRerun}
         />
