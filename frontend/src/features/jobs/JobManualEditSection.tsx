@@ -1122,6 +1122,29 @@ export function JobManualEditSection({ job, session, previewAssets, saving, onAp
             })}
           </div>
 
+          {projection.remapped.length ? (
+            <div className="manual-editor-subtitle-mini-track" aria-label="输出字幕概览">
+              {projection.remapped.map((subtitle) => {
+                const left = totalOutputDuration > 0 ? (subtitle.start_time / totalOutputDuration) * 100 : 0;
+                const width = totalOutputDuration > 0 ? ((subtitle.end_time - subtitle.start_time) / totalOutputDuration) * 100 : 0;
+                const selected = selectedSubtitle?.index === subtitle.index;
+                const warning = Boolean(diagnostics.warnings[subtitle.index]?.length);
+                return (
+                  <button
+                    key={`${subtitle.index}-${subtitle.start_time}-mini`}
+                    type="button"
+                    className={classNames("manual-editor-subtitle-mini-block", selected && "active", warning && "warning")}
+                    style={{ left: `${clamp(left, 0, 100)}%`, width: `${Math.max(width, 1.2)}%` }}
+                    onClick={() => selectSubtitle(subtitle)}
+                    title={`${formatSeconds(subtitle.start_time)} - ${formatSeconds(subtitle.end_time)} ${subtitleText(subtitle)}`}
+                  >
+                    <span>{subtitle.index + 1}</span>
+                  </button>
+                );
+              })}
+            </div>
+          ) : null}
+
           {selectedSegment ? (
             <div className="manual-editor-inspector">
               <div className="toolbar">

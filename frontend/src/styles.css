@@ -7592,6 +7592,40 @@ textarea.input {
   color: #6d2f18;
 }
 
+.manual-editor-subtitle-mini-track {
+  position: relative;
+  min-height: 42px;
+  border-radius: 12px;
+  background: #f8faf7;
+  border: 1px dashed rgba(15, 118, 110, 0.18);
+  overflow: hidden;
+}
+
+.manual-editor-subtitle-mini-block {
+  position: absolute;
+  top: 7px;
+  bottom: 7px;
+  min-width: 18px;
+  border: 1px solid rgba(15, 118, 110, 0.22);
+  border-radius: 7px;
+  background: rgba(15, 118, 110, 0.14);
+  color: #16443f;
+  font-size: 11px;
+  font-weight: 800;
+  overflow: hidden;
+}
+
+.manual-editor-subtitle-mini-block.active {
+  border-color: rgba(201, 107, 75, 0.52);
+  background: rgba(201, 107, 75, 0.32);
+  color: #6d2f18;
+}
+
+.manual-editor-subtitle-mini-block.warning {
+  border-color: rgba(180, 83, 9, 0.46);
+  background: rgba(245, 158, 11, 0.22);
+}
+
 .manual-editor-inspector {
   display: grid;
   gap: 12px;

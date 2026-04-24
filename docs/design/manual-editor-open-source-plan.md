@@ -232,6 +232,15 @@ The thumbnail strip now makes the source/output distinction explicit:
 - Thumbnails inside removed source ranges are dimmed and labelled as deleted.
 - Clicking a thumbnail still seeks the source preview, but the operator can immediately see whether that frame survives in the rendered output.
 
+## Current M12 Implementation
+
+The output overview now includes a subtitle mini-track:
+
+- Subtitle blocks are laid out by output start/end time under the kept video segment track.
+- Clicking a subtitle block seeks the edited preview and selects the table row.
+- The active subtitle block is highlighted.
+- Subtitle blocks with timing diagnostics use the warning style, making overlaps or invalid timing visible without scanning the table.
+
 ## Guardrails
 
 - Do not copy GPL code from Subtitle Edit, Aegisub, or audiowaveform into RoughCut.
