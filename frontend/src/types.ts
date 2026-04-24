@@ -157,6 +157,10 @@ export type JobManualEditPreviewAssets = {
   job_id: string;
   ready: boolean;
   warming: boolean;
+  asset_version: number;
+  status?: string | null;
+  stage?: string | null;
+  progress?: number | null;
   audio_url?: string | null;
   duration_sec: number;
   sample_rate: number;
@@ -166,6 +170,8 @@ export type JobManualEditPreviewAssets = {
   thumbnail_items: Array<{ url: string; time_sec: number }>;
   cached: boolean;
   detail?: string | null;
+  error?: string | null;
+  updated_at?: string | null;
 };
 
 export type JobActivity = {

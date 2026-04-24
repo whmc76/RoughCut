@@ -17,7 +17,7 @@ from roughcut.api.jobs import (
     _normalize_manual_keep_segments,
 )
 from roughcut.edit.otio_export import export_to_otio
-from roughcut.media.manual_editor_assets import _peak_from_pcm, _thumbnail_timestamps
+from roughcut.media.manual_editor_assets import _fallback_asset_status, _peak_from_pcm, _thumbnail_timestamps
 from roughcut.pipeline.orchestrator import _artifact_types_for_quality_rerun
 from roughcut.pipeline.steps import _manual_editor_subtitle_items_from_editorial
 
@@ -303,3 +303,22 @@ def test_manual_editor_preview_asset_helpers_are_bounded() -> None:
     assert len(_thumbnail_timestamps(120.0)) == 11
     assert _thumbnail_timestamps(0.0) == []
     assert _peak_from_pcm((32767).to_bytes(2, "little", signed=True), sample_width=2, channels=1) > 0.99
+
+
+def test_manual_editor_preview_asset_status_is_normalized() -> None:
+    status = _fallback_asset_status(
+        {
+            "asset_version": 2,
+            "status": "warming",
+            "stage": "waveform_peaks",
+            "progress": 1.8,
+            "detail": "working",
+        }
+    )
+
+    assert status["asset_version"] == 2
+    assert status["status"] == "warming"
+    assert status["stage"] == "waveform_peaks"
+    assert status["progress"] == 1.0
+    assert status["detail"] == "working"
+    assert status["error"] is None

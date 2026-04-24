@@ -192,6 +192,37 @@ The editor now has a first keyboard workflow layer inspired by subtitle timing t
 
 Shortcuts are ignored while typing in text fields except for save, so subtitle text editing remains safe.
 
+## Current M8 Implementation
+
+The manual editor save path now has optimistic revision protection:
+
+- The session payload includes the current editorial timeline id/version and render-plan timeline version.
+- Save requests carry those base revision fields back to the API.
+- If another process has changed the timeline or render-plan base after the editor opened, apply returns HTTP 409 instead of overwriting newer work.
+- The frontend surfaces conflict errors as save feedback so the operator can refresh before retrying.
+
+## Current M9 Implementation
+
+The editor now shows save feedback and impact before committing changes:
+
+- The frontend computes whether the save is timeline, subtitle-only, or no material change.
+- The header summarizes segment-count delta, output-duration delta, and changed subtitle count.
+- Save is disabled when there is no material edit.
+- The operator gets a confirmation prompt with the impact summary before the backend rerun is triggered.
+- Save success and save failure messages are shown near the job detail panel.
+
+## Current M10 Implementation
+
+Preview asset generation now exposes persistent status for long videos:
+
+- The backend writes `status.json` beside proxy audio, peaks, thumbnails, and manifest data.
+- Warmup status includes asset version, lifecycle status, stage, progress, detail, error, and timestamp.
+- Stages currently cover `queued`, `proxy_audio`, `waveform_peaks`, `thumbnails`, `cached`, `ready`, and `failed`.
+- `/manual-editor/assets/status` returns the persisted status even when assets are not ready.
+- `/manual-editor/assets/warm` records a queued state before launching background generation.
+- Failed ffmpeg/proxy generation is preserved in status so refreshing the editor does not hide the failure.
+- The frontend displays stage chips, progress bar, cache version, detail text, and failure reason in the preview asset area.
+
 ## Guardrails
 
 - Do not copy GPL code from Subtitle Edit, Aegisub, or audiowaveform into RoughCut.

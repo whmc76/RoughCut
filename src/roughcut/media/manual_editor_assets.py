@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import hashlib
 import json
 from pathlib import Path
@@ -12,6 +13,7 @@ from roughcut.config import get_settings
 
 MANUAL_EDITOR_PREVIEW_ARTIFACT_TYPE = "manual_editor_preview_assets"
 MANUAL_EDITOR_PREVIEW_ASSET_VERSION = 2
+MANUAL_EDITOR_PREVIEW_STATUS_FILENAME = "status.json"
 
 
 def manual_editor_asset_dir(job_id: uuid.UUID | str) -> Path:
@@ -21,6 +23,20 @@ def manual_editor_asset_dir(job_id: uuid.UUID | str) -> Path:
 
 def manual_editor_asset_manifest_path(job_id: uuid.UUID | str) -> Path:
     return manual_editor_asset_dir(job_id) / "manifest.json"
+
+
+def manual_editor_asset_status_path(job_id: uuid.UUID | str) -> Path:
+    return manual_editor_asset_dir(job_id) / MANUAL_EDITOR_PREVIEW_STATUS_FILENAME
+
+
+def mark_manual_editor_preview_assets_queued(job_id: uuid.UUID | str) -> dict[str, Any]:
+    return _write_asset_status(
+        manual_editor_asset_dir(job_id),
+        status="warming",
+        stage="queued",
+        progress=0.02,
+        detail="Preview asset generation queued",
+    )
 
 
 def ensure_manual_editor_preview_assets(
@@ -37,34 +53,83 @@ def ensure_manual_editor_preview_assets(
     source_fingerprint = _source_fingerprint(source_path)
 
     manifest = _read_json(manifest_path)
+    status_payload = _read_asset_status(asset_dir)
     cached = (
         manifest.get("version") == MANUAL_EDITOR_PREVIEW_ASSET_VERSION
         and manifest.get("source_fingerprint") == source_fingerprint
         and audio_path.exists()
         and peaks_path.exists()
     )
-    if not cached:
-        _generate_proxy_audio(source_path, audio_path)
-        peaks_payload = _generate_waveform_peaks(audio_path, duration_sec=duration_sec)
-        peaks_path.write_text(json.dumps(peaks_payload, ensure_ascii=False), encoding="utf-8")
-        thumbnails = _generate_preview_thumbnails(
-            source_path,
-            asset_dir=asset_dir,
-            duration_sec=duration_sec,
+    try:
+        if cached:
+            status_payload = _write_asset_status(
+                asset_dir,
+                status="ready",
+                stage="cached",
+                progress=1.0,
+                detail="Preview assets are ready from cache",
+            )
+        else:
+            status_payload = _write_asset_status(
+                asset_dir,
+                status="warming",
+                stage="proxy_audio",
+                progress=0.1,
+                detail="Generating waveform proxy audio",
+            )
+            _generate_proxy_audio(source_path, audio_path)
+            status_payload = _write_asset_status(
+                asset_dir,
+                status="warming",
+                stage="waveform_peaks",
+                progress=0.45,
+                detail="Calculating waveform peaks",
+            )
+            peaks_payload = _generate_waveform_peaks(audio_path, duration_sec=duration_sec)
+            peaks_path.write_text(json.dumps(peaks_payload, ensure_ascii=False), encoding="utf-8")
+            status_payload = _write_asset_status(
+                asset_dir,
+                status="warming",
+                stage="thumbnails",
+                progress=0.7,
+                detail="Extracting timeline thumbnails",
+            )
+            thumbnails = _generate_preview_thumbnails(
+                source_path,
+                asset_dir=asset_dir,
+                duration_sec=duration_sec,
+            )
+            manifest = {
+                "version": MANUAL_EDITOR_PREVIEW_ASSET_VERSION,
+                "source_fingerprint": source_fingerprint,
+                "audio_filename": audio_path.name,
+                "peaks_filename": peaks_path.name,
+                "thumbnail_items": [{"filename": path.name, "time_sec": time_sec} for path, time_sec in thumbnails],
+                "thumbnail_filenames": [path.name for path, _time_sec in thumbnails],
+            }
+            manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+            status_payload = _write_asset_status(
+                asset_dir,
+                status="ready",
+                stage="ready",
+                progress=1.0,
+                detail="Preview assets are ready",
+            )
+    except Exception as exc:
+        status_payload = _write_asset_status(
+            asset_dir,
+            status="failed",
+            stage="failed",
+            progress=float(status_payload.get("progress") or 0.0),
+            detail="Preview asset generation failed",
+            error=_short_error(exc),
         )
-        manifest = {
-            "version": MANUAL_EDITOR_PREVIEW_ASSET_VERSION,
-            "source_fingerprint": source_fingerprint,
-            "audio_filename": audio_path.name,
-            "peaks_filename": peaks_path.name,
-            "thumbnail_items": [{"filename": path.name, "time_sec": time_sec} for path, time_sec in thumbnails],
-            "thumbnail_filenames": [path.name for path, _time_sec in thumbnails],
-        }
-        manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+        raise
 
     peaks_payload = _read_json(peaks_path)
     thumbnail_items = _manifest_thumbnail_items(manifest, asset_dir)
     return {
+        "ready": True,
         "audio_path": str(audio_path),
         "duration_sec": round(float(peaks_payload.get("duration_sec") or duration_sec or 0.0), 3),
         "sample_rate": int(peaks_payload.get("sample_rate") or 16000),
@@ -76,6 +141,7 @@ def ensure_manual_editor_preview_assets(
             for item in thumbnail_items
         ],
         "cached": bool(cached),
+        **status_payload,
     }
 
 
@@ -90,6 +156,7 @@ def load_manual_editor_preview_assets(
     peaks_path = asset_dir / "peaks.json"
     manifest_path = manual_editor_asset_manifest_path(job_id)
     manifest = _read_json(manifest_path)
+    status_payload = _read_asset_status(asset_dir)
     try:
         source_fingerprint = _source_fingerprint(source_path)
     except OSError:
@@ -112,6 +179,7 @@ def load_manual_editor_preview_assets(
             "thumbnail_paths": [],
             "thumbnail_items": [],
             "cached": False,
+            **_fallback_asset_status(status_payload),
         }
 
     peaks_payload = _read_json(peaks_path)
@@ -129,6 +197,12 @@ def load_manual_editor_preview_assets(
             for item in thumbnail_items
         ],
         "cached": True,
+        **_fallback_asset_status(
+            status_payload,
+            default_status="ready",
+            default_stage="cached",
+            default_progress=1.0,
+        ),
     }
 
 
@@ -269,6 +343,72 @@ def _manifest_thumbnail_items(manifest: dict[str, Any], asset_dir: Path) -> list
             continue
         items.append({"path": path, "time_sec": round(float(raw_item.get("time_sec") or 0.0), 3)})
     return items
+
+
+def _write_asset_status(
+    asset_dir: Path,
+    *,
+    status: str,
+    stage: str,
+    progress: float,
+    detail: str | None = None,
+    error: str | None = None,
+) -> dict[str, Any]:
+    asset_dir.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "asset_version": MANUAL_EDITOR_PREVIEW_ASSET_VERSION,
+        "status": status,
+        "stage": stage,
+        "progress": max(0.0, min(1.0, float(progress))),
+        "detail": detail,
+        "error": error,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    status_path = asset_dir / MANUAL_EDITOR_PREVIEW_STATUS_FILENAME
+    status_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return payload
+
+
+def _read_asset_status(asset_dir: Path) -> dict[str, Any]:
+    return _fallback_asset_status(_read_json(asset_dir / MANUAL_EDITOR_PREVIEW_STATUS_FILENAME))
+
+
+def _fallback_asset_status(
+    payload: dict[str, Any],
+    *,
+    default_status: str = "missing",
+    default_stage: str = "not_started",
+    default_progress: float = 0.0,
+) -> dict[str, Any]:
+    status = str(payload.get("status") or default_status)
+    stage = str(payload.get("stage") or default_stage)
+    try:
+        progress = float(payload.get("progress", default_progress))
+    except (TypeError, ValueError):
+        progress = default_progress
+    return {
+        "asset_version": _safe_int(payload.get("asset_version"), MANUAL_EDITOR_PREVIEW_ASSET_VERSION),
+        "status": status,
+        "stage": stage,
+        "progress": max(0.0, min(1.0, progress)),
+        "detail": str(payload.get("detail") or "") or None,
+        "error": str(payload.get("error") or "") or None,
+        "updated_at": str(payload.get("updated_at") or "") or None,
+    }
+
+
+def _short_error(exc: Exception) -> str:
+    message = str(exc).strip().replace("\r", " ").replace("\n", " ")
+    if not message:
+        message = exc.__class__.__name__
+    return message[-1000:]
+
+
+def _safe_int(value: Any, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
 
 
 def _read_json(path: Path) -> dict[str, Any]:

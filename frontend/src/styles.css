@@ -7326,6 +7326,47 @@ textarea.input {
   align-items: center;
 }
 
+.manual-editor-preview-asset-status span {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(15, 118, 110, 0.08);
+  color: #0f766e;
+  font-weight: 700;
+}
+
+.manual-editor-asset-progress {
+  height: 6px;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.08);
+  overflow: hidden;
+}
+
+.manual-editor-asset-progress span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #0f766e, #c96b4b);
+  transition: width 180ms ease;
+}
+
+.manual-editor-asset-progress.failed span {
+  background: #b42318;
+}
+
+.manual-editor-asset-detail,
+.manual-editor-asset-error {
+  margin: 0;
+  color: var(--text-muted);
+}
+
+.manual-editor-asset-error {
+  color: #b42318;
+  font-weight: 700;
+}
+
 .manual-editor-zoom-control {
   display: grid;
   grid-template-columns: auto minmax(180px, 1fr) auto;

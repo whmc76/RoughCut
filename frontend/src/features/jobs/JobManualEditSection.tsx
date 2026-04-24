@@ -56,6 +56,34 @@ function formatSeconds(value: number) {
   return `${minutes}:${seconds.toFixed(2).padStart(5, "0")}`;
 }
 
+function previewAssetStageLabel(stage?: string | null) {
+  switch (stage) {
+    case "queued":
+      return "已排队";
+    case "proxy_audio":
+      return "生成音频代理";
+    case "waveform_peaks":
+      return "计算波形峰值";
+    case "thumbnails":
+      return "抽取时间轴缩略图";
+    case "cached":
+      return "命中缓存";
+    case "ready":
+      return "生成完成";
+    case "failed":
+      return "生成失败";
+    default:
+      return "未开始";
+  }
+}
+
+function previewAssetStatusLabel(previewAssets: JobManualEditPreviewAssets) {
+  if (previewAssets.ready) return previewAssets.cached ? "已复用预览资产" : "已生成预览资产";
+  if (previewAssets.status === "failed" || previewAssets.error) return "预览资产生成失败";
+  if (previewAssets.warming || previewAssets.status === "warming") return "预览资产生成中";
+  return "预览资产待生成";
+}
+
 function clamp(value: number, min: number, max: number) {
   return Math.min(Math.max(value, min), max);
 }
@@ -307,6 +335,8 @@ export function JobManualEditSection({ job, session, previewAssets, saving, onAp
   const thumbnailStripStyle = {
     "--thumb-width": `${Math.max(76, Math.min(180, waveformZoom * 4))}px`,
   } as CSSProperties;
+  const previewAssetProgress = previewAssets?.progress == null ? null : clamp(previewAssets.progress, 0, 1);
+  const previewAssetProgressPercent = previewAssetProgress == null ? null : Math.round(previewAssetProgress * 100);
   const selectedSubtitle = useMemo(
     () => projection.remapped.find((subtitle) => subtitle.index === selectedSubtitleIndex) ?? activeSubtitle ?? projection.remapped[0] ?? null,
     [activeSubtitle, projection.remapped, selectedSubtitleIndex],
@@ -1010,9 +1040,25 @@ export function JobManualEditSection({ job, session, previewAssets, saving, onAp
           {previewAssets ? (
             <div className="manual-editor-preview-assets">
               <div className="manual-editor-preview-asset-status">
-                <span>{previewAssets.ready ? (previewAssets.cached ? "已复用预览资产" : "已生成预览资产") : previewAssets.warming ? "预览资产生成中" : "预览资产待生成"}</span>
+                <span>{previewAssetStatusLabel(previewAssets)}</span>
+                <span>{previewAssetStageLabel(previewAssets.stage)}</span>
+                <span>{previewAssetProgressPercent != null ? `${previewAssetProgressPercent}%` : previewAssets.ready ? "100%" : "0%"}</span>
                 <span>{previewAssets.ready ? `${previewAssets.peak_count} peaks` : "使用原片预览"}</span>
+                {previewAssets.asset_version ? <span>v{previewAssets.asset_version}</span> : null}
               </div>
+              {previewAssetProgress != null ? (
+                <div
+                  className={classNames("manual-editor-asset-progress", previewAssets.error && "failed")}
+                  role="progressbar"
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                  aria-valuenow={previewAssetProgressPercent ?? 0}
+                >
+                  <span style={{ width: `${previewAssetProgressPercent ?? 0}%` }} />
+                </div>
+              ) : null}
+              {previewAssets.error ? <p className="manual-editor-asset-error">{previewAssets.error}</p> : null}
+              {!previewAssets.error && previewAssets.detail ? <p className="manual-editor-asset-detail">{previewAssets.detail}</p> : null}
               {thumbnailItems.length ? (
                 <div className="manual-editor-thumbnail-strip" style={thumbnailStripStyle} aria-label="预览缩略图时间轴">
                   {thumbnailItems.map((item, index) => (

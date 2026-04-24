@@ -72,6 +72,7 @@ from roughcut.pipeline.orchestrator import PIPELINE_STEPS, create_job_steps
 from roughcut.media.manual_editor_assets import (
     ensure_manual_editor_preview_assets,
     load_manual_editor_preview_assets,
+    mark_manual_editor_preview_assets_queued,
     manual_editor_asset_dir,
 )
 from roughcut.publication import (
@@ -312,6 +313,10 @@ class ManualEditorPreviewAssetsOut(BaseModel):
     job_id: str
     ready: bool = True
     warming: bool = False
+    asset_version: int = 0
+    status: str | None = None
+    stage: str | None = None
+    progress: float | None = None
     audio_url: str | None = None
     duration_sec: float = 0.0
     sample_rate: int = 16000
@@ -321,6 +326,8 @@ class ManualEditorPreviewAssetsOut(BaseModel):
     thumbnail_items: list[ManualEditorThumbnailOut] = Field(default_factory=list)
     cached: bool = False
     detail: str | None = None
+    error: str | None = None
+    updated_at: str | None = None
 
 
 def _ensure_content_understanding_payload(profile: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -1575,7 +1582,11 @@ def _manual_editor_preview_assets_response(
     return ManualEditorPreviewAssetsOut(
         job_id=str(job_id),
         ready=is_ready,
-        warming=bool(warming),
+        warming=bool(warming) and not is_ready,
+        asset_version=int(payload.get("asset_version") or 0),
+        status=str(payload.get("status") or ("ready" if is_ready else "missing")),
+        stage=str(payload.get("stage") or ("ready" if is_ready else "not_started")),
+        progress=float(payload.get("progress")) if payload.get("progress") is not None else (1.0 if is_ready else 0.0),
         audio_url=f"/api/v1/jobs/{job_id}/manual-editor/assets/{audio_path.name}" if is_ready and audio_path.name else None,
         duration_sec=float(payload.get("duration_sec") or 0.0),
         sample_rate=int(payload.get("sample_rate") or 16000),
@@ -1584,6 +1595,9 @@ def _manual_editor_preview_assets_response(
         thumbnail_urls=thumbnail_urls if is_ready else [],
         thumbnail_items=thumbnail_items if is_ready else [],
         cached=bool(payload.get("cached", False)),
+        detail=str(payload.get("detail") or "") or None,
+        error=str(payload.get("error") or "") or None,
+        updated_at=str(payload.get("updated_at") or "") or None,
     )
 
 
@@ -1763,6 +1777,7 @@ async def warm_manual_editor_preview_assets(
     payload = load_manual_editor_preview_assets(job_id=job.id, source_path=source_path, duration_sec=duration_sec)
     if not payload.get("ready") and str(job.id) not in _MANUAL_EDITOR_ASSET_WARMUPS:
         _MANUAL_EDITOR_ASSET_WARMUPS.add(str(job.id))
+        payload = {**payload, **mark_manual_editor_preview_assets_queued(job.id)}
         background_tasks.add_task(_warm_manual_editor_preview_assets, job.id, source_path, duration_sec)
     return _manual_editor_preview_assets_response(
         job.id,
