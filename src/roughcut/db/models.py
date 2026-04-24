@@ -65,6 +65,9 @@ class Job(Base):
     render_outputs: Mapped[list[RenderOutput]] = relationship(
         "RenderOutput", back_populates="job", cascade="all, delete-orphan"
     )
+    publication_attempts: Mapped[list[PublicationAttempt]] = relationship(
+        "PublicationAttempt", back_populates="job", cascade="all, delete-orphan"
+    )
 
 class JobStep(Base):
     __tablename__ = "job_steps"
@@ -222,6 +225,82 @@ class RenderOutput(Base):
 
     job: Mapped[Job] = relationship("Job", back_populates="render_outputs")
     timeline: Mapped[Timeline | None] = relationship("Timeline", back_populates="render_outputs")
+
+
+class PublicationAttempt(Base):
+    __tablename__ = "publication_attempts"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    job_id: Mapped[uuid.UUID] = mapped_column(UUID_TYPE, ForeignKey("jobs.id", ondelete="CASCADE"))
+    content_id: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    creator_profile_id: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    creator_profile_name: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    platform: Mapped[str] = mapped_column(Text, nullable=False)
+    platform_label: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    account_label: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    credential_id: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    idempotency_key: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    semantic_fingerprint: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    adapter: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="queued")
+    run_status: Mapped[str | None] = mapped_column(Text)
+    attempt_number: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    retry_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    max_retries: Mapped[int] = mapped_column(Integer, nullable=False, default=3)
+    external_receipt_id: Mapped[str | None] = mapped_column(Text)
+    external_post_id: Mapped[str | None] = mapped_column(Text)
+    external_url: Mapped[str | None] = mapped_column(Text)
+    error_code: Mapped[str | None] = mapped_column(Text)
+    error_message: Mapped[str | None] = mapped_column(Text)
+    request_payload: Mapped[dict] = mapped_column(JSON_TYPE, nullable=False, default=dict)
+    response_payload: Mapped[dict | None] = mapped_column(JSON_TYPE)
+    next_retry_at: Mapped[datetime | None] = mapped_column(TIMESTAMPTZ)
+    scheduled_at: Mapped[datetime | None] = mapped_column(TIMESTAMPTZ)
+    submitted_at: Mapped[datetime | None] = mapped_column(TIMESTAMPTZ)
+    published_at: Mapped[datetime | None] = mapped_column(TIMESTAMPTZ)
+    execution_mode: Mapped[str] = mapped_column(Text, nullable=False, default="browser_agent")
+    content_kind: Mapped[str] = mapped_column(Text, nullable=False, default="video")
+    provider_task_id: Mapped[str | None] = mapped_column(Text)
+    provider_execution_id: Mapped[str | None] = mapped_column(Text)
+    provider_status: Mapped[str | None] = mapped_column(Text)
+    operator_summary: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMPTZ, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMPTZ, server_default=func.now(), onupdate=func.now())
+
+    job: Mapped[Job] = relationship("Job", back_populates="publication_attempts")
+    runs: Mapped[list[PublicationAttemptRun]] = relationship(
+        "PublicationAttemptRun", back_populates="attempt", cascade="all, delete-orphan"
+    )
+
+
+class PublicationAttemptRun(Base):
+    __tablename__ = "publication_attempt_runs"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID_TYPE, primary_key=True, default=_uuid)
+    attempt_id: Mapped[str] = mapped_column(Text, ForeignKey("publication_attempts.id", ondelete="CASCADE"))
+    content_id: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    platform: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    adapter: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    execution_mode: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    content_kind: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    consumer_id: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    attempt_number: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="queued")
+    phase: Mapped[str | None] = mapped_column(Text)
+    started_at: Mapped[datetime] = mapped_column(TIMESTAMPTZ, server_default=func.now())
+    heartbeat_at: Mapped[datetime] = mapped_column(TIMESTAMPTZ, server_default=func.now())
+    lease_expires_at: Mapped[datetime | None] = mapped_column(TIMESTAMPTZ)
+    completed_at: Mapped[datetime | None] = mapped_column(TIMESTAMPTZ)
+    provider_task_id: Mapped[str | None] = mapped_column(Text)
+    provider_execution_id: Mapped[str | None] = mapped_column(Text)
+    provider_status: Mapped[str | None] = mapped_column(Text)
+    result_json: Mapped[dict | None] = mapped_column(JSON_TYPE)
+    error_message: Mapped[str | None] = mapped_column(Text)
+    metadata_json: Mapped[dict] = mapped_column(JSON_TYPE, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMPTZ, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMPTZ, server_default=func.now(), onupdate=func.now())
+
+    attempt: Mapped[PublicationAttempt] = relationship("PublicationAttempt", back_populates="runs")
 
 
 class ReviewAction(Base):

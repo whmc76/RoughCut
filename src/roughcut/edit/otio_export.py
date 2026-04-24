@@ -16,27 +16,56 @@ def export_to_otio(editorial_timeline: dict, output_path: Path | None = None) ->
 
     source = editorial_timeline.get("source", "unknown.mp4")
     segments = editorial_timeline.get("segments", [])
+    tracks = editorial_timeline.get("tracks") if isinstance(editorial_timeline.get("tracks"), list) else []
+    output_items = []
+    for track_data in tracks:
+        if not isinstance(track_data, dict):
+            continue
+        if str(track_data.get("name") or "") == "output_video":
+            output_items = [item for item in list(track_data.get("items") or []) if isinstance(item, dict)]
+            break
 
     timeline = otio.schema.Timeline(name=Path(source).stem)
     track = otio.schema.Track(name="Video")
 
     media_ref = otio.schema.ExternalReference(target_url=source)
 
-    for seg in segments:
-        if seg.get("type") == "keep":
-            start = seg["start"]
-            end = seg["end"]
-            duration = end - start
-
+    if output_items:
+        for item in output_items:
+            if str(item.get("type") or "") != "clip":
+                continue
+            source_range = item.get("source_range") if isinstance(item.get("source_range"), dict) else {}
+            start = float(source_range.get("start", 0.0) or 0.0)
+            duration = float(source_range.get("duration", 0.0) or 0.0)
+            if duration <= 0.0:
+                continue
+            media_reference = item.get("media_reference") if isinstance(item.get("media_reference"), dict) else {}
+            target_url = str(media_reference.get("target_url") or source)
             clip = otio.schema.Clip(
-                name=f"clip_{start:.2f}",
-                media_reference=media_ref,
+                name=str(item.get("name") or f"clip_{start:.2f}"),
+                media_reference=otio.schema.ExternalReference(target_url=target_url),
                 source_range=otio.opentime.TimeRange(
                     start_time=otio.opentime.RationalTime(start * 24, 24),
                     duration=otio.opentime.RationalTime(duration * 24, 24),
                 ),
             )
             track.append(clip)
+    else:
+        for seg in segments:
+            if seg.get("type") == "keep":
+                start = seg["start"]
+                end = seg["end"]
+                duration = end - start
+
+                clip = otio.schema.Clip(
+                    name=f"clip_{start:.2f}",
+                    media_reference=media_ref,
+                    source_range=otio.opentime.TimeRange(
+                        start_time=otio.opentime.RationalTime(start * 24, 24),
+                        duration=otio.opentime.RationalTime(duration * 24, 24),
+                    ),
+                )
+                track.append(clip)
 
     timeline.tracks.append(track)
 

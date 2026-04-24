@@ -7,6 +7,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from roughcut.publication import normalize_publication_credentials
+
 _AVATAR_MATERIALS_ROOT = Path("data/avatar_materials")
 
 _PERSONAL_INFO_FIELDS = (
@@ -32,6 +34,7 @@ _CREATOR_PUBLISHING_FIELDS = (
     "signature",
     "default_call_to_action",
     "description_strategy",
+    "platform_credentials",
 )
 
 _CREATOR_BUSINESS_FIELDS = (
@@ -378,6 +381,7 @@ def normalize_creator_profile(
     expertise = _clean_list(positioning_raw.get("expertise")) or list(info.get("expertise") or [])
     active_platforms = _clean_list(publishing_raw.get("active_platforms"))
     tone_keywords = _clean_list(positioning_raw.get("tone_keywords"))
+    platform_credentials = normalize_publication_credentials(publishing_raw.get("platform_credentials"))
 
     return {
         "identity": {
@@ -401,6 +405,7 @@ def normalize_creator_profile(
             "signature": _clean_text(publishing_raw.get("signature")),
             "default_call_to_action": _clean_text(publishing_raw.get("default_call_to_action")),
             "description_strategy": _clean_text(publishing_raw.get("description_strategy")),
+            "platform_credentials": platform_credentials,
         },
         "business": {
             "contact": _clean_text(business_raw.get("contact")) or info.get("contact"),
@@ -464,6 +469,7 @@ def build_creator_profile_dashboard(profile: dict[str, Any]) -> dict[str, Any]:
         "identity": bool(identity.get("public_name") and (identity.get("title") or identity.get("bio"))),
         "positioning": bool(positioning.get("creator_focus") and (positioning.get("audience") or positioning.get("style"))),
         "publishing": bool(publishing.get("primary_platform") or list(publishing.get("active_platforms") or [])),
+        "publication_credentials": bool(normalize_publication_credentials(publishing.get("platform_credentials"))),
         "business": bool(business.get("contact") or business.get("collaboration_notes")),
         "materials": bool(material_counts["speaking_videos"] and material_counts["voice_samples"]),
     }
@@ -476,6 +482,8 @@ def build_creator_profile_dashboard(profile: dict[str, Any]) -> dict[str, Any]:
         strengths.append("内容定位可直接用于平台简介")
     if section_status["publishing"]:
         strengths.append("渠道侧信息已具备复用价值")
+    if section_status["publication_credentials"]:
+        strengths.append("已绑定可复用的平台发布凭据")
     if section_status["materials"]:
         strengths.append("数字人口播素材链路已打通")
 
@@ -486,6 +494,8 @@ def build_creator_profile_dashboard(profile: dict[str, Any]) -> dict[str, Any]:
         next_steps.append("补充内容定位、受众和表达风格，方便平台文案按策略生成。")
     if not section_status["publishing"]:
         next_steps.append("补充主平台、活跃平台和个性签名，方便形成渠道化档案。")
+    if not section_status["publication_credentials"]:
+        next_steps.append("绑定已登录的平台凭据，完成任务后才能一键创建发布队列。")
     if not section_status["business"]:
         next_steps.append("补充联系方式或合作备注，方便归档为完整创作者档案。")
     if not section_status["materials"]:
@@ -495,8 +505,8 @@ def build_creator_profile_dashboard(profile: dict[str, Any]) -> dict[str, Any]:
         "completeness_score": completeness_score,
         "section_status": section_status,
         "material_counts": material_counts,
-        "strengths": strengths[:4],
-        "next_steps": next_steps[:5],
+        "strengths": strengths[:5],
+        "next_steps": next_steps[:6],
     }
 
 

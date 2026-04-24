@@ -89,6 +89,76 @@ export type JobTimeline = {
   data: Record<string, unknown>;
 };
 
+export type JobManualEditSegment = {
+  start: number;
+  end: number;
+  duration_sec: number;
+  source_index: number;
+};
+
+export type JobManualEditSubtitle = {
+  index: number;
+  start_time: number;
+  end_time: number;
+  text_raw?: string | null;
+  text_norm?: string | null;
+  text_final?: string | null;
+};
+
+export type JobManualEditSession = {
+  job_id: string;
+  timeline_id: string;
+  timeline_version: number;
+  render_plan_version?: number | null;
+  source_name: string;
+  source_duration_sec: number;
+  source_url?: string | null;
+  keep_segments: JobManualEditSegment[];
+  source_subtitles: JobManualEditSubtitle[];
+  projected_subtitles: JobManualEditSubtitle[];
+  subtitle_overrides: JobManualEditSubtitleOverride[];
+  editable: boolean;
+  detail?: string | null;
+};
+
+export type JobManualEditSubtitleOverride = {
+  index: number;
+  start_time?: number | null;
+  end_time?: number | null;
+  text_final?: string | null;
+  delete?: boolean;
+};
+
+export type JobManualEditApplyResponse = {
+  job_id: string;
+  timeline_id: string;
+  timeline_version: number;
+  render_plan_id: string;
+  render_plan_version: number;
+  keep_segment_count: number;
+  projected_subtitle_count: number;
+  job_status: string;
+  change_scope: string;
+  render_strategy: string;
+  rerun_steps: string[];
+  detail?: string | null;
+};
+
+export type JobManualEditPreviewAssets = {
+  job_id: string;
+  ready: boolean;
+  warming: boolean;
+  audio_url?: string | null;
+  duration_sec: number;
+  sample_rate: number;
+  peaks: number[];
+  peak_count: number;
+  thumbnail_urls: string[];
+  thumbnail_items: Array<{ url: string; time_sec: number }>;
+  cached: boolean;
+  detail?: string | null;
+};
+
 export type JobActivity = {
   job_id: string;
   status: string;
@@ -537,6 +607,7 @@ export type AvatarCreatorProfile = {
     signature?: string | null;
     default_call_to_action?: string | null;
     description_strategy?: string | null;
+    platform_credentials?: PublicationCredentialBinding[];
   };
   business?: {
     contact?: string | null;
@@ -544,6 +615,66 @@ export type AvatarCreatorProfile = {
     availability?: string | null;
   };
   archive_notes?: string | null;
+};
+
+export type PublicationCredentialBinding = {
+  id?: string;
+  platform: string;
+  platform_label?: string;
+  account_label?: string | null;
+  credential_ref?: string | null;
+  status: string;
+  enabled: boolean;
+  adapter?: string;
+  verified_at?: string | null;
+  notes?: string | null;
+  last_error?: string | null;
+};
+
+export type PublicationTarget = {
+  platform: string;
+  platform_label: string;
+  credential_id: string;
+  account_label: string;
+  adapter: string;
+  title: string;
+  body: string;
+  tags: string[];
+  status: string;
+};
+
+export type PublicationAttempt = {
+  id: string;
+  job_id: string;
+  creator_profile_id: string;
+  creator_profile_name: string;
+  platform: string;
+  platform_label: string;
+  account_label: string;
+  credential_id: string;
+  adapter: string;
+  status: string;
+  run_status?: string | null;
+  operator_summary?: string | null;
+  payload_path?: string | null;
+  public_url?: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type PublicationPlan = {
+  job_id: string;
+  status: string;
+  publish_ready: boolean;
+  blocked_reasons: string[];
+  warnings: string[];
+  adapter: string;
+  creator_profile_id: string;
+  creator_profile_name: string;
+  media_path?: string | null;
+  targets: PublicationTarget[];
+  existing_attempts: PublicationAttempt[];
+  created_attempts?: PublicationAttempt[];
 };
 
 export type AvatarProfileDashboard = {
@@ -800,6 +931,12 @@ export type Config = {
   voice_clone_api_key_set: boolean;
   voice_clone_voice_id: string;
   director_rewrite_strength: number;
+  publication_browser_agent_base_url: string;
+  publication_browser_agent_auth_token_set: boolean;
+  publication_worker_poll_interval_sec: number;
+  publication_worker_batch_limit: number;
+  publication_attempt_lease_sec: number;
+  publication_browser_agent_timeout_sec: number;
   ollama_api_key_set: boolean;
   openai_api_key_set: boolean;
   anthropic_api_key_set: boolean;
@@ -866,6 +1003,7 @@ export type RuntimeEnvironment = {
   avatar_api_base_url: string;
   avatar_training_api_base_url: string;
   voice_clone_api_base_url: string;
+  publication_browser_agent_base_url: string;
   output_dir: string;
 };
 

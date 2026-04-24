@@ -46,6 +46,7 @@ SECRET_SETTINGS: tuple[str, ...] = (
     "ollama_api_key",
     "avatar_api_key",
     "voice_clone_api_key",
+    "publication_browser_agent_auth_token",
     "telegram_bot_token",
 )
 ENV_MANAGED_SETTINGS: tuple[str, ...] = (
@@ -75,6 +76,11 @@ ENV_EXPLICIT_OVERRIDE_SETTINGS: tuple[str, ...] = ENV_MANAGED_SETTINGS + (
     "telegram_bot_api_base_url",
     "telegram_bot_token",
     "telegram_bot_chat_id",
+    "publication_browser_agent_auth_token",
+    "publication_worker_poll_interval_sec",
+    "publication_worker_batch_limit",
+    "publication_attempt_lease_sec",
+    "publication_browser_agent_timeout_sec",
 )
 TRANSCRIPTION_PROVIDER_PRIORITY: tuple[str, ...] = TRANSCRIPTION_PROVIDER_VALUES
 TRANSCRIPTION_MODEL_OPTIONS: dict[str, list[str]] = {
@@ -415,6 +421,14 @@ class Settings(BaseSettings):
     voice_clone_api_key: str = ""
     voice_clone_voice_id: str = ""
     director_rewrite_strength: float = 0.55
+
+    # Publication / browser-agent
+    publication_browser_agent_base_url: str = "http://127.0.0.1:49310"
+    publication_browser_agent_auth_token: str = ""
+    publication_worker_poll_interval_sec: int = 30
+    publication_worker_batch_limit: int = 5
+    publication_attempt_lease_sec: int = 300
+    publication_browser_agent_timeout_sec: int = 60
 
     # Security
     max_upload_size_mb: int = 2048

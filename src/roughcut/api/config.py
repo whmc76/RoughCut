@@ -1,6 +1,7 @@
 """Runtime config API backed by the application database."""
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
@@ -61,6 +62,7 @@ _SECRET_OVERRIDE_KEYS = {
     "ollama_api_key",
     "avatar_api_key",
     "voice_clone_api_key",
+    "publication_browser_agent_auth_token",
     "telegram_bot_token",
 }
 
@@ -120,6 +122,12 @@ class ConfigOut(BaseModel):
     voice_clone_api_key_set: bool
     voice_clone_voice_id: str
     director_rewrite_strength: float
+    publication_browser_agent_base_url: str
+    publication_browser_agent_auth_token_set: bool
+    publication_worker_poll_interval_sec: int
+    publication_worker_batch_limit: int
+    publication_attempt_lease_sec: int
+    publication_browser_agent_timeout_sec: int
     ollama_api_key_set: bool
     # Keys (masked)
     openai_api_key_set: bool
@@ -190,6 +198,7 @@ class RuntimeEnvironmentOut(BaseModel):
     avatar_api_base_url: str
     avatar_training_api_base_url: str
     voice_clone_api_base_url: str
+    publication_browser_agent_base_url: str
     output_dir: str
 
 
@@ -369,6 +378,12 @@ class ConfigPatch(BaseModel):
     voice_clone_api_key: str | None = None
     voice_clone_voice_id: str | None = None
     director_rewrite_strength: float | None = None
+    publication_browser_agent_base_url: str | None = None
+    publication_browser_agent_auth_token: str | None = None
+    publication_worker_poll_interval_sec: int | None = None
+    publication_worker_batch_limit: int | None = None
+    publication_attempt_lease_sec: int | None = None
+    publication_browser_agent_timeout_sec: int | None = None
     ollama_api_key: str | None = None
     ollama_base_url: str | None = None
     max_upload_size_mb: int | None = None
@@ -492,6 +507,12 @@ def get_config():
         voice_clone_api_key_set=bool(s.voice_clone_api_key),
         voice_clone_voice_id=s.voice_clone_voice_id,
         director_rewrite_strength=s.director_rewrite_strength,
+        publication_browser_agent_base_url=s.publication_browser_agent_base_url,
+        publication_browser_agent_auth_token_set=bool(s.publication_browser_agent_auth_token),
+        publication_worker_poll_interval_sec=s.publication_worker_poll_interval_sec,
+        publication_worker_batch_limit=s.publication_worker_batch_limit,
+        publication_attempt_lease_sec=s.publication_attempt_lease_sec,
+        publication_browser_agent_timeout_sec=s.publication_browser_agent_timeout_sec,
         ollama_api_key_set=bool(s.ollama_api_key),
         openai_api_key_set=bool(s.openai_api_key),
         anthropic_api_key_set=bool(s.anthropic_api_key),
@@ -562,6 +583,7 @@ def get_runtime_environment():
         avatar_api_base_url=s.avatar_api_base_url,
         avatar_training_api_base_url=s.avatar_training_api_base_url,
         voice_clone_api_base_url=s.voice_clone_api_base_url,
+        publication_browser_agent_base_url=s.publication_browser_agent_base_url,
         output_dir=s.output_dir,
     )
 
@@ -792,6 +814,11 @@ def patch_config(body: ConfigPatch):
         if not api_base_url:
             raise HTTPException(status_code=400, detail="telegram_bot_api_base_url cannot be empty")
         updates["telegram_bot_api_base_url"] = api_base_url
+    if "publication_browser_agent_base_url" in updates:
+        browser_agent_base_url = str(updates["publication_browser_agent_base_url"]).strip().rstrip("/")
+        if not browser_agent_base_url:
+            raise HTTPException(status_code=400, detail="publication_browser_agent_base_url cannot be empty")
+        updates["publication_browser_agent_base_url"] = browser_agent_base_url
     if "telegram_agent_claude_command" in updates:
         updates["telegram_agent_claude_command"] = str(updates["telegram_agent_claude_command"] or "").strip() or "claude"
     if "telegram_agent_claude_model" in updates:
@@ -894,6 +921,20 @@ def patch_config(body: ConfigPatch):
         updates["quality_auto_rerun_max_attempts"] = max(0, min(5, int(updates["quality_auto_rerun_max_attempts"])))
     if "telegram_agent_task_timeout_sec" in updates:
         updates["telegram_agent_task_timeout_sec"] = max(30, min(7200, int(updates["telegram_agent_task_timeout_sec"])))
+    if "publication_worker_poll_interval_sec" in updates:
+        updates["publication_worker_poll_interval_sec"] = max(
+            5,
+            min(3600, int(updates["publication_worker_poll_interval_sec"])),
+        )
+    if "publication_worker_batch_limit" in updates:
+        updates["publication_worker_batch_limit"] = max(1, min(100, int(updates["publication_worker_batch_limit"])))
+    if "publication_attempt_lease_sec" in updates:
+        updates["publication_attempt_lease_sec"] = max(30, min(7200, int(updates["publication_attempt_lease_sec"])))
+    if "publication_browser_agent_timeout_sec" in updates:
+        updates["publication_browser_agent_timeout_sec"] = max(
+            5,
+            min(600, int(updates["publication_browser_agent_timeout_sec"])),
+        )
     if "transcribe_runtime_timeout_sec" in updates:
         updates["transcribe_runtime_timeout_sec"] = max(60, min(7200, int(updates["transcribe_runtime_timeout_sec"])))
     if "transcription_chunk_threshold_sec" in updates:

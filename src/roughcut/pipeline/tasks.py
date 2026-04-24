@@ -9,8 +9,10 @@ import time
 from datetime import datetime, timezone
 
 from roughcut.config import apply_in_memory_runtime_overrides, get_settings, normalize_transcription_provider_name
+from roughcut.db.session import get_session_factory
 from roughcut.pipeline.celery_app import celery_app
 from roughcut.pipeline.steps import run_step_sync
+from roughcut.publication import run_publication_worker_once
 from roughcut.telegram.executors import execute_agent_preset
 
 logger = logging.getLogger(__name__)
@@ -689,3 +691,35 @@ def agent_run_preset(
             exc,
         )
         raise
+
+
+@celery_app.task(name="roughcut.pipeline.tasks.publication_worker_tick", bind=True, max_retries=0)
+def publication_worker_tick(self, *, limit: int = 5, schedule_followup: bool = True):
+    settings = get_settings()
+    worker_id = str(getattr(self.request, "hostname", "") or self.request.id or "publication-worker")
+    _reset_db_session_state()
+
+    async def _run():
+        factory = get_session_factory()
+        async with factory() as session:
+            result = await run_publication_worker_once(
+                session,
+                browser_agent_base_url=str(getattr(settings, "publication_browser_agent_base_url", "") or ""),
+                auth_token=str(getattr(settings, "publication_browser_agent_auth_token", "") or ""),
+                worker_id=worker_id,
+                limit=max(1, int(limit or getattr(settings, "publication_worker_batch_limit", 5) or 5)),
+                lease_seconds=max(30, int(getattr(settings, "publication_attempt_lease_sec", 300) or 300)),
+                request_timeout_sec=max(5, int(getattr(settings, "publication_browser_agent_timeout_sec", 60) or 60)),
+            )
+            await session.commit()
+            return result
+
+    result = asyncio.run(_run())
+    if schedule_followup and int(result.get("active_count") or 0) > 0:
+        countdown = max(5, int(getattr(settings, "publication_worker_poll_interval_sec", 30) or 30))
+        publication_worker_tick.apply_async(
+            kwargs={"limit": limit, "schedule_followup": True},
+            countdown=countdown,
+            queue="publication_queue",
+        )
+    return result

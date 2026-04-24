@@ -4,7 +4,30 @@ import type { ReactNode } from "react";
 
 import { api } from "../../api";
 import { PanelHeader } from "../../components/ui/PanelHeader";
-import type { AvatarCreatorProfile, AvatarMaterialFile, AvatarMaterialLibrary, AvatarMaterialProfile } from "../../types";
+import type {
+  AvatarCreatorProfile,
+  AvatarMaterialFile,
+  AvatarMaterialLibrary,
+  AvatarMaterialProfile,
+  PublicationCredentialBinding,
+} from "../../types";
+
+const PUBLICATION_PLATFORM_OPTIONS = [
+  { value: "douyin", label: "抖音" },
+  { value: "xiaohongshu", label: "小红书" },
+  { value: "bilibili", label: "B站" },
+  { value: "wechat-channels", label: "视频号" },
+  { value: "toutiao", label: "头条号" },
+  { value: "kuaishou", label: "快手" },
+  { value: "youtube", label: "YouTube" },
+  { value: "x", label: "X" },
+];
+
+const PUBLICATION_CREDENTIAL_STATUS_OPTIONS = [
+  { value: "logged_in", label: "已登录" },
+  { value: "unverified", label: "待确认" },
+  { value: "expired", label: "已失效" },
+];
 
 type CreatorProfileFormState = {
   public_name: string;
@@ -23,6 +46,7 @@ type CreatorProfileFormState = {
   signature: string;
   default_call_to_action: string;
   description_strategy: string;
+  platform_credentials: PublicationCredentialBinding[];
   contact: string;
   collaboration_notes: string;
   availability: string;
@@ -483,6 +507,7 @@ function emptyCreatorProfileFormState(): CreatorProfileFormState {
     signature: "",
     default_call_to_action: "",
     description_strategy: "",
+    platform_credentials: [],
     contact: "",
     collaboration_notes: "",
     availability: "",
@@ -508,6 +533,19 @@ function creatorProfileFormStateFromValue(value?: AvatarCreatorProfile | null): 
     signature: value?.publishing?.signature ?? "",
     default_call_to_action: value?.publishing?.default_call_to_action ?? "",
     description_strategy: value?.publishing?.description_strategy ?? "",
+    platform_credentials: (value?.publishing?.platform_credentials ?? []).map((item) => ({
+      id: item.id ?? crypto.randomUUID(),
+      platform: item.platform || "douyin",
+      platform_label: item.platform_label,
+      account_label: item.account_label ?? "",
+      credential_ref: item.credential_ref ?? "",
+      status: item.status || "unverified",
+      enabled: item.enabled !== false,
+      adapter: item.adapter || "browser_agent",
+      verified_at: item.verified_at ?? null,
+      notes: item.notes ?? "",
+      last_error: item.last_error ?? null,
+    })),
     contact: value?.business?.contact ?? "",
     collaboration_notes: value?.business?.collaboration_notes ?? "",
     availability: value?.business?.availability ?? "",
@@ -538,6 +576,7 @@ function buildCreatorProfilePayload(value: CreatorProfileFormState): AvatarCreat
       signature: trimToNull(value.signature),
       default_call_to_action: trimToNull(value.default_call_to_action),
       description_strategy: trimToNull(value.description_strategy),
+      platform_credentials: normalizePublicationCredentialsForPayload(value.platform_credentials),
     },
     business: {
       contact: trimToNull(value.contact),
@@ -558,6 +597,21 @@ function splitTags(value: string) {
     .split(/[\n,，、;/；]+/)
     .map((item) => item.trim())
     .filter(Boolean);
+}
+
+function normalizePublicationCredentialsForPayload(credentials: PublicationCredentialBinding[]) {
+  return credentials
+    .map((item) => ({
+      ...item,
+      platform: item.platform,
+      account_label: String(item.account_label ?? "").trim() || null,
+      credential_ref: String(item.credential_ref ?? "").trim() || null,
+      status: item.status || "unverified",
+      enabled: item.enabled !== false,
+      adapter: "browser_agent",
+      notes: String(item.notes ?? "").trim() || null,
+    }))
+    .filter((item) => item.platform && (item.account_label || item.credential_ref));
 }
 
 function CreatorProfileFields({
@@ -656,6 +710,14 @@ function CreatorProfileFields({
       </section>
 
       <section className="avatar-requirement-block">
+        <strong>发布凭据绑定</strong>
+        <PublicationCredentialFields
+          value={value.platform_credentials}
+          onChange={(nextCredentials) => onChange({ ...value, platform_credentials: nextCredentials })}
+        />
+      </section>
+
+      <section className="avatar-requirement-block">
         <strong>商务与归档</strong>
         <div className="avatar-creator-field-grid compact-top">
           <label>
@@ -676,6 +738,117 @@ function CreatorProfileFields({
           </label>
         </div>
       </section>
+    </div>
+  );
+}
+
+function PublicationCredentialFields({
+  value,
+  onChange,
+}: {
+  value: PublicationCredentialBinding[];
+  onChange: (value: PublicationCredentialBinding[]) => void;
+}) {
+  const updateCredential = (index: number, patch: Partial<PublicationCredentialBinding>) => {
+    onChange(value.map((item, itemIndex) => (itemIndex === index ? { ...item, ...patch } : item)));
+  };
+  const addCredential = () => {
+    onChange([
+      ...value,
+      {
+        id: crypto.randomUUID(),
+        platform: "douyin",
+        account_label: "",
+        credential_ref: "",
+        status: "logged_in",
+        enabled: true,
+        adapter: "browser_agent",
+        notes: "",
+      },
+    ]);
+  };
+  const removeCredential = (index: number) => {
+    onChange(value.filter((_item, itemIndex) => itemIndex !== index));
+  };
+
+  return (
+    <div className="list-stack compact-top">
+      {value.map((credential, index) => (
+        <div className="activity-card" key={credential.id ?? `${credential.platform}-${index}`}>
+          <div className="avatar-creator-field-grid compact-top">
+            <label>
+              <span>平台</span>
+              <select
+                className="input"
+                value={credential.platform}
+                onChange={(event) => updateCredential(index, { platform: event.target.value })}
+              >
+                {PUBLICATION_PLATFORM_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>{option.label}</option>
+                ))}
+              </select>
+            </label>
+            <label>
+              <span>账号标识</span>
+              <input
+                className="input"
+                value={credential.account_label ?? ""}
+                onChange={(event) => updateCredential(index, { account_label: event.target.value })}
+                placeholder="例如：主账号 / 品牌号"
+              />
+            </label>
+            <label>
+              <span>本地凭据引用</span>
+              <input
+                className="input"
+                value={credential.credential_ref ?? ""}
+                onChange={(event) => updateCredential(index, { credential_ref: event.target.value })}
+                placeholder="例如：chrome-profile:roughcut-main"
+              />
+            </label>
+            <label>
+              <span>状态</span>
+              <select
+                className="input"
+                value={credential.status || "unverified"}
+                onChange={(event) => updateCredential(index, { status: event.target.value })}
+              >
+                {PUBLICATION_CREDENTIAL_STATUS_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>{option.label}</option>
+                ))}
+              </select>
+            </label>
+            <label className="avatar-creator-field-span">
+              <span>备注</span>
+              <input
+                className="input"
+                value={credential.notes ?? ""}
+                onChange={(event) => updateCredential(index, { notes: event.target.value })}
+                placeholder="只保存本地浏览器会话/运行器引用，不保存平台密码"
+              />
+            </label>
+          </div>
+          <div className="toolbar compact-top">
+            <label className="checkbox-row">
+              <input
+                type="checkbox"
+                checked={credential.enabled !== false}
+                onChange={(event) => updateCredential(index, { enabled: event.target.checked })}
+              />
+              <span>允许一键发布使用</span>
+            </label>
+            <button className="button ghost" type="button" onClick={() => removeCredential(index)}>
+              移除绑定
+            </button>
+          </div>
+        </div>
+      ))}
+      {!value.length ? <div className="muted">还没有绑定平台凭据。发布只会使用已登录 browser-agent 凭据引用，不在档案里保存密码。</div> : null}
+      <div className="toolbar compact-top">
+        <button className="button ghost" type="button" onClick={addCredential}>
+          添加平台凭据
+        </button>
+      </div>
     </div>
   );
 }
@@ -837,6 +1010,10 @@ function CreatorArchiveCard({
   const presenterFile = profile.files.find((file) => file.role === "speaking_video") ?? null;
   const presenterFilePath = presenterFile?.path ?? "";
   const isActiveProfile = Boolean(presenterFilePath) && presenterFilePath === activePresenterId;
+  const publicationCredentials = profile.creator_profile?.publishing?.platform_credentials ?? [];
+  const activePublicationCredentials = publicationCredentials.filter(
+    (item) => item.enabled !== false && item.adapter !== "deprecated" && ["logged_in", "available", "verified"].includes(item.status),
+  );
   const materialStatusSummary = [
     `${dashboard?.material_counts?.speaking_videos ?? 0} 个讲话视频`,
     `${dashboard?.material_counts?.voice_samples ?? 0} 个声音采样`,
@@ -866,16 +1043,27 @@ function CreatorArchiveCard({
           <AvatarMetricCard value={dashboard?.material_counts?.speaking_videos ?? 0} label="讲话视频" />
           <AvatarMetricCard value={dashboard?.material_counts?.voice_samples ?? 0} label="声音采样" />
           <AvatarMetricCard value={dashboard?.material_counts?.portrait_photos ?? 0} label="肖像照" />
-          <AvatarMetricCard value={profile.preview_runs?.length ?? 0} label="预览样片" />
+          <AvatarMetricCard value={activePublicationCredentials.length} label="发布凭据" />
         </div>
 
         <div className="mode-chip-list top-gap">
           <CapabilityChip label="身份信息" ready={Boolean(dashboard?.section_status?.identity)} />
           <CapabilityChip label="内容定位" ready={Boolean(dashboard?.section_status?.positioning)} />
           <CapabilityChip label="渠道策略" ready={Boolean(dashboard?.section_status?.publishing)} />
+          <CapabilityChip label="发布凭据" ready={Boolean(dashboard?.section_status?.publication_credentials)} />
           <CapabilityChip label="商务信息" ready={Boolean(dashboard?.section_status?.business)} />
           <CapabilityChip label="数字人素材" ready={Boolean(dashboard?.section_status?.materials)} />
         </div>
+
+        {activePublicationCredentials.length ? (
+          <div className="mode-chip-list compact-top">
+            {activePublicationCredentials.slice(0, 4).map((credential) => (
+              <span className="mode-chip subtle" key={credential.id ?? `${credential.platform}-${credential.account_label}`}>
+                {credential.platform_label || PUBLICATION_PLATFORM_OPTIONS.find((option) => option.value === credential.platform)?.label || credential.platform} · {credential.account_label || "已登录"}
+              </span>
+            ))}
+          </div>
+        ) : null}
 
         {(dashboard?.strengths?.length ?? 0) > 0 ? (
           <div className="list-stack top-gap">
@@ -989,12 +1177,13 @@ function CreatorArchiveCard({
                   <AvatarMetricCard value={dashboard?.material_counts?.speaking_videos ?? 0} label="讲话视频" />
                   <AvatarMetricCard value={dashboard?.material_counts?.voice_samples ?? 0} label="声音采样" />
                   <AvatarMetricCard value={dashboard?.material_counts?.portrait_photos ?? 0} label="肖像照" />
-                  <AvatarMetricCard value={(dashboard?.strengths ?? []).length} label="已成型优势" />
+                  <AvatarMetricCard value={activePublicationCredentials.length} label="可发布凭据" />
                 </div>
                 <div className="mode-chip-list top-gap">
                   <CapabilityChip label="身份信息" ready={Boolean(dashboard?.section_status?.identity)} />
                   <CapabilityChip label="内容定位" ready={Boolean(dashboard?.section_status?.positioning)} />
                   <CapabilityChip label="渠道策略" ready={Boolean(dashboard?.section_status?.publishing)} />
+                  <CapabilityChip label="发布凭据" ready={Boolean(dashboard?.section_status?.publication_credentials)} />
                   <CapabilityChip label="商务信息" ready={Boolean(dashboard?.section_status?.business)} />
                   <CapabilityChip label="数字人素材" ready={Boolean(dashboard?.section_status?.materials)} />
                 </div>
@@ -1191,6 +1380,13 @@ function CreatorProfileSummary({ profile }: { profile: AvatarMaterialProfile }) 
     { title: "身份", values: [identity?.public_name, identity?.title, identity?.organization, identity?.location, identity?.bio].filter(Boolean) },
     { title: "定位", values: [positioning?.creator_focus, positioning?.expertise?.join("、"), positioning?.audience, positioning?.style, positioning?.tone_keywords?.join("、")].filter(Boolean) },
     { title: "渠道", values: [publishing?.primary_platform ? `主平台：${publishing.primary_platform}` : null, (publishing?.active_platforms?.length ?? 0) > 0 ? `活跃平台：${publishing?.active_platforms?.join("、")}` : null, publishing?.signature, publishing?.default_call_to_action, publishing?.description_strategy].filter(Boolean) },
+    {
+      title: "发布凭据",
+      values: (publishing?.platform_credentials ?? []).map(
+        (item) =>
+          `${item.platform_label || PUBLICATION_PLATFORM_OPTIONS.find((option) => option.value === item.platform)?.label || item.platform}：${item.account_label || item.credential_ref || "未命名账号"} · ${item.status === "logged_in" ? "已登录" : item.status === "expired" ? "已失效" : "待确认"}`,
+      ),
+    },
     { title: "商务", values: [business?.contact, business?.availability, business?.collaboration_notes, creator?.archive_notes].filter(Boolean) },
   ].filter((section) => section.values.length);
 

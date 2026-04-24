@@ -1,4 +1,18 @@
-import type { ContentProfileReview, Job, JobActivity, JobTimeline, JobsUsageSummary, JobsUsageTrend, Report, TokenUsageReport } from "../types";
+import type {
+  ContentProfileReview,
+  Job,
+  JobActivity,
+  JobManualEditApplyResponse,
+  JobManualEditPreviewAssets,
+  JobManualEditSession,
+  JobManualEditSubtitleOverride,
+  JobTimeline,
+  JobsUsageSummary,
+  JobsUsageTrend,
+  PublicationPlan,
+  Report,
+  TokenUsageReport,
+} from "../types";
 import { apiPath, request, requestForm } from "./core";
 
 type FinalReviewDecision = "approve" | "reject";
@@ -54,11 +68,23 @@ export const jobsApi = {
   getJobTokenUsage: (jobId: string) => request<TokenUsageReport>(`/jobs/${jobId}/token-usage`),
   getJobReport: (jobId: string) => request<Report>(`/jobs/${jobId}/report`),
   getJobTimeline: (jobId: string) => request<JobTimeline>(`/jobs/${jobId}/timeline`),
+  getJobManualEditor: (jobId: string) => request<JobManualEditSession>(`/jobs/${jobId}/manual-editor`),
+  getJobManualEditorAssets: (jobId: string) => request<JobManualEditPreviewAssets>(`/jobs/${jobId}/manual-editor/assets`),
+  getJobManualEditorAssetsStatus: (jobId: string) => request<JobManualEditPreviewAssets>(`/jobs/${jobId}/manual-editor/assets/status`),
+  warmJobManualEditorAssets: (jobId: string) => request<JobManualEditPreviewAssets>(`/jobs/${jobId}/manual-editor/assets/warm`, { method: "POST" }),
+  applyJobManualEditor: (jobId: string, body: { keep_segments: Array<{ start: number; end: number }>; subtitle_overrides?: JobManualEditSubtitleOverride[]; note?: string }) =>
+    request<JobManualEditApplyResponse>(`/jobs/${jobId}/manual-editor/apply`, { method: "POST", body: JSON.stringify(body) }),
   getContentProfile: (jobId: string) => request<ContentProfileReview>(`/jobs/${jobId}/content-profile`),
   confirmContentProfile: (jobId: string, body: Record<string, unknown>) =>
     request<ContentProfileReview>(`/jobs/${jobId}/content-profile/confirm`, { method: "POST", body: JSON.stringify(body) }),
   finalReviewDecision: (jobId: string, body: { decision: FinalReviewDecision; note?: string }) =>
     request<FinalReviewDecisionResponse>(`/jobs/${jobId}/final-review`, { method: "POST", body: JSON.stringify(body) }),
+  getJobPublicationPlan: (jobId: string, creatorProfileId?: string | null) =>
+    request<PublicationPlan>(
+      `/jobs/${jobId}/publication/plan${creatorProfileId ? `?creator_profile_id=${encodeURIComponent(creatorProfileId)}` : ""}`,
+    ),
+  publishJob: (jobId: string, body: { creator_profile_id?: string | null; platforms?: string[] }) =>
+    request<PublicationPlan>(`/jobs/${jobId}/publication/publish`, { method: "POST", body: JSON.stringify(body) }),
   rerunJob: (jobId: string, body: { issue_code?: string; rerun_start_step?: string; note?: string }) =>
     request<JobRerunResponse>(`/jobs/${jobId}/rerun`, { method: "POST", body: JSON.stringify(body) }),
   initializeJob: (

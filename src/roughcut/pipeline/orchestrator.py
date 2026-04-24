@@ -1177,7 +1177,11 @@ async def _reset_job_for_quality_rerun(
     issue_codes: list[str],
 ) -> None:
     rerun_step_set = set(rerun_steps)
-    cleanup_artifact_types = _artifact_types_for_quality_rerun(rerun_step_set)
+    preserve_render_outputs = _preserve_render_outputs_for_rerun(issue_codes)
+    cleanup_artifact_types = _artifact_types_for_quality_rerun(
+        rerun_step_set,
+        issue_codes=issue_codes,
+    )
 
     if cleanup_artifact_types:
         artifact_result = await session.execute(
@@ -1190,7 +1194,7 @@ async def _reset_job_for_quality_rerun(
             delete(Artifact).where(Artifact.job_id == job.id, Artifact.artifact_type.in_(sorted(cleanup_artifact_types)))
         )
 
-    if "render" in rerun_step_set:
+    if "render" in rerun_step_set and not preserve_render_outputs:
         render_output_result = await session.execute(select(RenderOutput).where(RenderOutput.job_id == job.id))
         for output in render_output_result.scalars().all():
             if output.output_path:
@@ -1247,9 +1251,14 @@ def _coerce_review_round(value: object) -> int:
     return parsed if parsed > 0 else 1
 
 
-def _artifact_types_for_quality_rerun(rerun_steps: set[str]) -> set[str]:
+def _preserve_render_outputs_for_rerun(issue_codes: list[str] | None) -> bool:
+    return "manual_subtitle_edit" in {str(issue_code or "").strip() for issue_code in (issue_codes or [])}
+
+
+def _artifact_types_for_quality_rerun(rerun_steps: set[str], *, issue_codes: list[str] | None = None) -> set[str]:
     artifact_types: set[str] = set()
     settings = get_settings()
+    preserve_render_outputs = _preserve_render_outputs_for_rerun(issue_codes)
     if "subtitle_translation" in rerun_steps:
         artifact_types.add("subtitle_translation")
     if "subtitle_term_resolution" in rerun_steps:
@@ -1273,7 +1282,9 @@ def _artifact_types_for_quality_rerun(rerun_steps: set[str]) -> set[str]:
     if "avatar_commentary" in rerun_steps:
         artifact_types.add("avatar_commentary_plan")
     if "render" in rerun_steps:
-        artifact_types.update({"render_outputs", "variant_timeline_bundle", QUALITY_ARTIFACT_TYPE})
+        artifact_types.add(QUALITY_ARTIFACT_TYPE)
+        if not preserve_render_outputs:
+            artifact_types.update({"render_outputs", "variant_timeline_bundle"})
     if "platform_package" in rerun_steps:
         artifact_types.add("platform_packaging_md")
     return artifact_types

@@ -2862,6 +2862,32 @@ async def _build_edited_subtitle_projection(
     return remap_subtitles_to_timeline(fallback_subtitles, keep_segments)
 
 
+def _manual_editor_subtitle_items_from_editorial(editorial_timeline: dict[str, Any] | None) -> list[dict[str, Any]]:
+    subtitle_projection = (editorial_timeline or {}).get("subtitle_projection")
+    if not isinstance(subtitle_projection, dict):
+        return []
+    items: list[dict[str, Any]] = []
+    for index, item in enumerate(list(subtitle_projection.get("items") or [])):
+        if not isinstance(item, dict):
+            continue
+        start_time = max(0.0, float(item.get("start_time", 0.0) or 0.0))
+        end_time = max(start_time, float(item.get("end_time", start_time) or start_time))
+        if end_time <= start_time:
+            continue
+        items.append(
+            {
+                **dict(item),
+                "index": int(item.get("index", index) or index),
+                "start_time": round(start_time, 3),
+                "end_time": round(end_time, 3),
+                "text_raw": str(item.get("text_raw") or ""),
+                "text_norm": str(item.get("text_norm") or item.get("text_final") or item.get("text_raw") or ""),
+                "text_final": str(item.get("text_final") or item.get("text_norm") or item.get("text_raw") or ""),
+            }
+        )
+    return items
+
+
 def _subtitle_item_payload(item: SubtitleItem) -> dict[str, Any]:
     return {
         "index": item.item_index,
@@ -6466,6 +6492,12 @@ async def run_render(job_id: str) -> dict:
             or (render_plan_timeline.data_json.get("editing_accents") or {}).get("emphasis_overlays")
             or (render_plan_timeline.data_json.get("editing_accents") or {}).get("sound_effects")
         )
+        manual_editor_meta = render_plan_timeline.data_json.get("manual_editor") or {}
+        manual_subtitle_only_render = (
+            isinstance(manual_editor_meta, dict)
+            and str(manual_editor_meta.get("change_scope") or "") == "subtitle_only"
+            and str(manual_editor_meta.get("render_strategy") or "") == "reuse_timeline_effect_plan"
+        )
 
         content_profile_artifact, content_profile = await _load_preferred_downstream_profile(session, job_id=job.id)
 
@@ -6480,6 +6512,18 @@ async def run_render(job_id: str) -> dict:
         )
         for stale_render_output in stale_render_outputs_result.scalars().all():
             stale_render_output.status = "failed"
+
+        reusable_render_outputs: dict[str, Any] | None = None
+        if manual_subtitle_only_render:
+            reusable_artifact_result = await session.execute(
+                select(Artifact)
+                .where(Artifact.job_id == job.id, Artifact.artifact_type == "render_outputs")
+                .order_by(Artifact.created_at.desc(), Artifact.id.desc())
+            )
+            for artifact in reusable_artifact_result.scalars().all():
+                if isinstance(artifact.data_json, dict) and artifact.data_json.get("plain_mp4"):
+                    reusable_render_outputs = dict(artifact.data_json)
+                    break
 
         # Create render output record
         render_output = RenderOutput(
@@ -6541,26 +6585,38 @@ async def run_render(job_id: str) -> dict:
                 ),
                 progress=0.35,
             )
-            source_path = await _resolve_source(
-                job,
-                tmpdir,
-                expected_hash=job.file_hash,
-                debug_dir=debug_dir,
-            )
             tmp_plain_mp4 = Path(tmpdir) / "output_plain.mp4"
             tmp_avatar_mp4 = Path(tmpdir) / "output_avatar.mp4"
             tmp_ai_effect_mp4 = Path(tmpdir) / "output_ai_effect.mp4"
             tmp_packaged_mp4 = Path(tmpdir) / "output_packaged.mp4"
             tmp_cover_plain_mp4 = Path(tmpdir) / "output_cover_plain.mp4"
-            plain_render_plan = build_plain_render_plan(render_plan_timeline.data_json)
-            await render_video(
-                source_path=source_path,
-                render_plan=plain_render_plan,
-                editorial_timeline=editorial_timeline.data_json,
-                output_path=tmp_plain_mp4,
-                subtitle_items=None,
-                debug_dir=debug_dir / "plain",
+            reusable_plain_path = (
+                Path(str(reusable_render_outputs.get("plain_mp4"))).expanduser()
+                if reusable_render_outputs
+                else None
             )
+            if reusable_plain_path is not None and reusable_plain_path.exists():
+                await _refresh_render_progress(
+                    detail="字幕微调：复用既有素版底片，跳过原片重切",
+                    progress=0.22,
+                )
+                await _copy_file_with_retry(reusable_plain_path, tmp_plain_mp4)
+            else:
+                source_path = await _resolve_source(
+                    job,
+                    tmpdir,
+                    expected_hash=job.file_hash,
+                    debug_dir=debug_dir,
+                )
+                plain_render_plan = build_plain_render_plan(render_plan_timeline.data_json)
+                await render_video(
+                    source_path=source_path,
+                    render_plan=plain_render_plan,
+                    editorial_timeline=editorial_timeline.data_json,
+                    output_path=tmp_plain_mp4,
+                    subtitle_items=None,
+                    debug_dir=debug_dir / "plain",
+                )
             await _copy_file_with_retry(tmp_plain_mp4, tmp_cover_plain_mp4)
             plain_duration = float((await _probe_with_retry(tmp_plain_mp4)).duration or 0.0)
             plain_variant_editorial_timeline = _build_full_length_variant_timeline(plain_duration)
@@ -6576,6 +6632,9 @@ async def run_render(job_id: str) -> dict:
                     projection_data=projection_data,
                     fallback_subtitles=subtitle_dicts,
                 )
+            manual_editor_subtitles = _manual_editor_subtitle_items_from_editorial(editorial_timeline.data_json)
+            if manual_editor_subtitles:
+                remapped_subtitles = manual_editor_subtitles
             ai_effect_render_plan = build_ai_effect_render_plan(
                 render_plan_timeline.data_json,
                 keep_segments=keep_segments,
@@ -6618,7 +6677,29 @@ async def run_render(job_id: str) -> dict:
             avatar_variant_duration_sec: float | None = None
             avatar_variant_editorial_timeline: dict[str, Any] | None = None
             avatar_overlay_accents: dict[str, Any] | None = None
+            reusable_avatar_path = (
+                Path(str(reusable_render_outputs.get("avatar_mp4"))).expanduser()
+                if reusable_render_outputs and reusable_render_outputs.get("avatar_mp4")
+                else None
+            )
+            if manual_subtitle_only_render and reusable_avatar_path is not None and reusable_avatar_path.exists():
+                avatar_duration = float((await probe(reusable_avatar_path)).duration or 0.0)
+                avatar_variant_source_path = reusable_avatar_path
+                avatar_variant_duration_sec = avatar_duration
+                avatar_variant_editorial_timeline = _build_full_length_variant_timeline(avatar_duration)
+                tmp_avatar_mp4 = reusable_avatar_path
+                avatar_result = {
+                    "enabled": True,
+                    "status": "reused",
+                    "mode": str(avatar_plan.get("mode") or ""),
+                    "integration_mode": str(avatar_plan.get("integration_mode") or ""),
+                    "provider": str(avatar_plan.get("provider") or ""),
+                    "output_path": str(reusable_avatar_path),
+                    "detail": "字幕微调复用既有数字人画中画底片。",
+                }
             if (
+                avatar_variant_source_path is None
+                and
                 "avatar_commentary" in set(getattr(job, "enhancement_modes", []) or [])
                 and str(avatar_plan.get("mode") or "") == "full_track_audio_passthrough"
             ):
@@ -6683,6 +6764,8 @@ async def run_render(job_id: str) -> dict:
                         "detail": f"数字人渲染失败，已自动回退普通成片：{exc}",
                     }
             elif (
+                avatar_variant_source_path is None
+                and
                 "avatar_commentary" in set(getattr(job, "enhancement_modes", []) or [])
                 and str(avatar_plan.get("mode") or "") == "segmented_audio_passthrough"
             ):
@@ -7142,6 +7225,10 @@ async def run_platform_package(job_id: str) -> dict:
             session,
             job_id=job.id,
         )
+        editorial_timeline = await _load_latest_timeline(session, job.id, "editorial")
+        manual_editor_subtitles = _manual_editor_subtitle_items_from_editorial(editorial_timeline.data_json if editorial_timeline else None)
+        if manual_editor_subtitles:
+            subtitle_dicts = manual_editor_subtitles
 
         render_output_result = await session.execute(
             select(RenderOutput)

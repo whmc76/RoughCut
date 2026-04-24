@@ -28,6 +28,7 @@ def create_celery_app() -> Celery:
             "roughcut.pipeline.tasks.media_*": {"queue": "media_queue"},
             "roughcut.pipeline.tasks.llm_*": {"queue": "llm_queue"},
             "roughcut.pipeline.tasks.agent_*": {"queue": "agent_queue"},
+            "roughcut.pipeline.tasks.publication_*": {"queue": "publication_queue"},
         },
         worker_prefetch_multiplier=1,
         task_acks_late=True,

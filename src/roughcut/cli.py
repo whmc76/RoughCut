@@ -244,7 +244,11 @@ def watcher(path: str, workflow_template: str | None, language: str):
 
 
 @cli.command()
-@click.option("--queue", required=True, type=click.Choice(["media_queue", "llm_queue", "agent_queue", "all"]))
+@click.option(
+    "--queue",
+    required=True,
+    type=click.Choice(["media_queue", "llm_queue", "agent_queue", "publication_queue", "all"]),
+)
 @click.option("--concurrency", default=2, type=int)
 @click.option(
     "--pool",
@@ -266,7 +270,7 @@ def worker(
     """Start a Celery worker for the specified queue."""
     from roughcut.pipeline.celery_app import celery_app
 
-    queues = ["media_queue", "llm_queue", "agent_queue"] if queue == "all" else [queue]
+    queues = ["media_queue", "llm_queue", "agent_queue", "publication_queue"] if queue == "all" else [queue]
     node_label = hostname or "auto"
     click.echo(
         f"Starting worker for queues: {queues} "

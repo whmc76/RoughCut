@@ -363,6 +363,8 @@ export function JobsPage() {
           report={workspace.report.data}
           tokenUsage={workspace.tokenUsage.data}
           timeline={workspace.timeline.data}
+          manualEditor={workspace.manualEditor.data}
+          manualEditorAssets={workspace.manualEditorAssets.data}
           contentProfile={workspace.contentProfile.data}
           config={workspace.config.data}
           packaging={workspace.packaging.data}
@@ -385,6 +387,7 @@ export function JobsPage() {
           isCancelling={workspace.cancelJob.isPending}
           isRestarting={workspace.restartJob.isPending}
           isDeleting={workspace.deleteJob.isPending}
+          isApplyingManualEditor={workspace.applyManualEditor.isPending}
           onContentFieldChange={(field, value) =>
             workspace.setContentDraft((prev) => {
               if (field !== "video_type") {
@@ -420,6 +423,7 @@ export function JobsPage() {
           onCancel={() => workspace.selectedJob && confirmAndCancelJob(workspace.selectedJob.id)}
           onRestart={() => workspace.selectedJob && confirmAndRestartJob(workspace.selectedJob.id)}
           onDelete={() => workspace.selectedJob && confirmAndDeleteJob(workspace.selectedJob.id)}
+          onApplyManualEditor={(payload) => workspace.applyManualEditor.mutate(payload)}
           onApplyReview={confirmAndApplyReview}
           onTriggerSubtitleRerun={triggerSubtitleRerun}
         />

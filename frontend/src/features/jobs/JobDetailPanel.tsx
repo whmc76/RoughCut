@@ -1,4 +1,22 @@
-import type { AvatarMaterialLibrary, Config, ContentProfileReview, Job, JobActivity, JobTimeline, PackagingLibrary, Report, TokenUsageReport } from "../../types";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useEffect, useMemo, useState } from "react";
+
+import { api } from "../../api";
+import type {
+  AvatarMaterialLibrary,
+  Config,
+  ContentProfileReview,
+  Job,
+  JobActivity,
+  JobManualEditPreviewAssets,
+  JobManualEditSession,
+  JobManualEditSubtitleOverride,
+  JobTimeline,
+  PackagingLibrary,
+  PublicationPlan,
+  Report,
+  TokenUsageReport,
+} from "../../types";
 import type { SelectOption } from "../../types";
 import { CheckboxField } from "../../components/forms/CheckboxField";
 import { SelectField } from "../../components/forms/SelectField";
@@ -7,6 +25,7 @@ import { PanelHeader } from "../../components/ui/PanelHeader";
 import { useI18n } from "../../i18n";
 import { classNames, formatDate, statusLabel } from "../../utils";
 import { JobContentProfileSection } from "./JobContentProfileSection";
+import { JobManualEditSection } from "./JobManualEditSection";
 import { JobSubtitleDiagnosticsSection } from "./JobSubtitleDiagnosticsSection";
 import { JobSubtitleReportSection } from "./JobSubtitleReportSection";
 import { JobReviewConfigSection } from "./JobReviewConfigSection";
@@ -60,10 +79,30 @@ function splitVideoDescription(value: string | null | undefined): {
 }
 
 const STUCK_DIAGNOSTIC_TITLE_HINTS = ["卡住诊断", "stuck", "stuck_step", "stuck-step", "stuck diagnostic", "stuck-diagnostic"];
+const PUBLISHABLE_CREDENTIAL_STATUSES = new Set(["logged_in", "available", "verified"]);
 
 function isStuckDiagnosticEvent(event: ActivityEvent): boolean {
   const title = (event.title || "").toLowerCase();
   return event.type === "artifact" && STUCK_DIAGNOSTIC_TITLE_HINTS.some((hint) => title.includes(hint));
+}
+
+function hasActivePublicationCredential(profile: NonNullable<AvatarMaterialLibrary["profiles"]>[number]): boolean {
+  const credentials = profile.creator_profile?.publishing?.platform_credentials ?? [];
+  return credentials.some(
+    (item) =>
+      item.enabled !== false &&
+      (item.adapter ?? "browser_agent") === "browser_agent" &&
+      PUBLISHABLE_CREDENTIAL_STATUSES.has(item.status),
+  );
+}
+
+function publicationAttemptStatusLabel(status: string) {
+  if (status === "queued") return "已排队";
+  if (status === "draft_created") return "草稿已创建";
+  if (status === "scheduled_pending") return "已预约";
+  if (status === "published") return "已发布";
+  if (status === "failed") return "失败";
+  return status || "待处理";
 }
 
 function resolveEventSeverity(event: ActivityEvent): string {
@@ -116,6 +155,8 @@ type JobDetailPanelProps = {
   report?: Report;
   tokenUsage?: TokenUsageReport;
   timeline?: JobTimeline;
+  manualEditor?: JobManualEditSession;
+  manualEditorAssets?: JobManualEditPreviewAssets;
   contentProfile?: ContentProfileReview;
   config?: Config;
   packaging?: PackagingLibrary;
@@ -145,6 +186,7 @@ type JobDetailPanelProps = {
   isCancelling: boolean;
   isRestarting: boolean;
   isDeleting: boolean;
+  isApplyingManualEditor?: boolean;
   onContentFieldChange: (field: string, value: string) => void;
   onKeywordsChange: (value: string) => void;
   onPendingInitializationChange: (value: {
@@ -161,6 +203,7 @@ type JobDetailPanelProps = {
   onCancel: () => void;
   onRestart: () => void;
   onDelete: () => void;
+  onApplyManualEditor?: (payload: { keep_segments: Array<{ start: number; end: number }>; subtitle_overrides?: JobManualEditSubtitleOverride[]; note?: string }) => void;
   onApplyReview: (targetId: string, action: "accepted" | "rejected") => void;
   onTriggerSubtitleRerun?: (decision: NonNullable<JobActivity["decisions"]>[number]) => void;
 };
@@ -175,6 +218,8 @@ export function JobDetailPanel({
   report,
   tokenUsage,
   timeline,
+  manualEditor,
+  manualEditorAssets,
   contentProfile,
   config,
   packaging,
@@ -197,6 +242,7 @@ export function JobDetailPanel({
   isCancelling,
   isRestarting,
   isDeleting,
+  isApplyingManualEditor = false,
   onContentFieldChange,
   onKeywordsChange,
   onPendingInitializationChange,
@@ -206,10 +252,12 @@ export function JobDetailPanel({
   onCancel,
   onRestart,
   onDelete,
+  onApplyManualEditor,
   onApplyReview,
   onTriggerSubtitleRerun,
 }: JobDetailPanelProps) {
   const { t } = useI18n();
+  const queryClient = useQueryClient();
   const isReviewMode = selectedJob?.status === "needs_review";
   const isAwaitingInitialization = Boolean(selectedJob?.awaiting_initialization || selectedJob?.status === "awaiting_init");
   const showReviewConfig = isReviewMode && !flowOnly;
@@ -240,6 +288,32 @@ export function JobDetailPanel({
   const avatarEnabled = Boolean(selectedJob?.enhancement_modes.includes("avatar_commentary"));
   const autoReviewVisible = Boolean(selectedJob?.auto_review_mode_enabled);
   const autoReviewReasons = selectedJob?.auto_review_reasons ?? [];
+  const publicationProfiles = useMemo(
+    () => (avatarMaterials?.profiles ?? []).filter((profile) => hasActivePublicationCredential(profile)),
+    [avatarMaterials?.profiles],
+  );
+  const [selectedPublicationProfileId, setSelectedPublicationProfileId] = useState("");
+  useEffect(() => {
+    if (!publicationProfiles.length) {
+      setSelectedPublicationProfileId("");
+      return;
+    }
+    setSelectedPublicationProfileId((current) =>
+      publicationProfiles.some((profile) => profile.id === current) ? current : publicationProfiles[0]?.id ?? "",
+    );
+  }, [publicationProfiles]);
+  const publicationQueryKey = ["job-publication-plan", selectedJob?.id ?? "", selectedPublicationProfileId] as const;
+  const publicationPlan = useQuery<PublicationPlan>({
+    queryKey: publicationQueryKey,
+    queryFn: () => api.getJobPublicationPlan(selectedJob!.id, selectedPublicationProfileId || null),
+    enabled: Boolean(selectedJob?.id && selectedJob.status === "done"),
+  });
+  const publishMutation = useMutation({
+    mutationFn: () => api.publishJob(selectedJob!.id, { creator_profile_id: selectedPublicationProfileId || null }),
+    onSuccess: (data) => {
+      queryClient.setQueryData(publicationQueryKey, data);
+    },
+  });
   const downloadLabel = avatarEnabled
     ? avatarHeadlineStatus === "done"
       ? t("jobs.actions.downloadVideo.avatarIncluded")
@@ -352,6 +426,95 @@ export function JobDetailPanel({
             </button>
           </div>
           <div className="muted compact-top">{downloadHint}</div>
+
+          {selectedJob.status === "done" ? (
+            <section className="detail-block">
+              <div className="detail-key">一键发布</div>
+              <div className="activity-card">
+                <div className="toolbar">
+                  <div>
+                    <strong>发布到已登录凭据平台</strong>
+                    <div className="muted compact-top">使用平台文案包和本地成片创建 browser-agent 发布任务。</div>
+                  </div>
+                  <span className={`status-pill ${publicationPlan.data?.publish_ready ? "done" : "pending"}`}>
+                    {publicationPlan.data?.publish_ready ? "可发布" : "待补齐"}
+                  </span>
+                </div>
+
+                <div className="form-grid two-up compact-top">
+                  <label>
+                    <span>创作者凭据</span>
+                    <select
+                      className="input"
+                      value={selectedPublicationProfileId}
+                      onChange={(event) => setSelectedPublicationProfileId(event.target.value)}
+                      disabled={!publicationProfiles.length}
+                    >
+                      {!publicationProfiles.length ? <option value="">没有可用发布凭据</option> : null}
+                      {publicationProfiles.map((profile) => (
+                        <option key={profile.id} value={profile.id}>
+                          {profile.display_name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <div className="toolbar toolbar-bottom">
+                    <button
+                      className="button primary"
+                      type="button"
+                      disabled={!publicationPlan.data?.publish_ready || publishMutation.isPending}
+                      onClick={() => publishMutation.mutate()}
+                    >
+                      {publishMutation.isPending ? "提交中..." : "发布到绑定平台"}
+                    </button>
+                  </div>
+                </div>
+
+                {publicationPlan.isLoading ? <div className="muted compact-top">正在检查发布准入...</div> : null}
+                {publicationPlan.data?.blocked_reasons?.length ? (
+                  <div className="list-stack compact-top">
+                    {publicationPlan.data.blocked_reasons.map((reason) => (
+                      <div key={reason} className="notice">{reason}</div>
+                    ))}
+                  </div>
+                ) : null}
+                {publicationPlan.data?.warnings?.length ? (
+                  <div className="list-stack compact-top">
+                    {publicationPlan.data.warnings.map((warning) => (
+                      <div key={warning} className="activity-card">{warning}</div>
+                    ))}
+                  </div>
+                ) : null}
+                {publicationPlan.data?.targets?.length ? (
+                  <div className="mode-chip-list compact-top">
+                    {publicationPlan.data.targets.map((target) => (
+                      <span className="mode-chip subtle" key={target.platform}>
+                        {target.platform_label} · {target.account_label}
+                      </span>
+                    ))}
+                  </div>
+                ) : null}
+                {publishMutation.error ? <div className="notice compact-top">{String(publishMutation.error)}</div> : null}
+                {publicationPlan.data?.existing_attempts?.length ? (
+                  <div className="timeline-list top-gap">
+                    {publicationPlan.data.existing_attempts.slice(0, 4).map((attempt) => (
+                      <div className="timeline-item" key={attempt.id}>
+                        <div className="toolbar">
+                          <strong>{attempt.platform_label || attempt.platform}</strong>
+                          <span className={`status-pill ${attempt.status === "failed" ? "failed" : attempt.status === "published" ? "done" : "running"}`}>
+                            {publicationAttemptStatusLabel(attempt.status)}
+                          </span>
+                        </div>
+                        <div className="muted">
+                          {attempt.account_label} · {attempt.operator_summary || attempt.run_status || "等待运行器处理"}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
+            </section>
+          ) : null}
 
           {isMergedTask ? (
             <section className="detail-block">
@@ -760,6 +923,16 @@ export function JobDetailPanel({
 
               {!flowOnly ? (
                 <JobSubtitleReportSection report={report} isApplying={isApplyingReview} onApplyReview={onApplyReview} />
+              ) : null}
+
+              {manualEditor ? (
+                <JobManualEditSection
+                  job={selectedJob}
+                  session={manualEditor}
+                  previewAssets={manualEditorAssets}
+                  saving={isApplyingManualEditor}
+                  onApply={onApplyManualEditor}
+                />
               ) : null}
             </>
           )}

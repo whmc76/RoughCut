@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import logging
 import os
 import re
 import shutil
@@ -14,13 +15,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile, status
 from fastapi.responses import FileResponse
 from sqlalchemy import delete, distinct, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from sqlalchemy.orm.attributes import set_committed_value
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from roughcut.api.options import normalize_job_language, normalize_workflow_template
 from roughcut.api.schemas import (
@@ -38,6 +39,7 @@ from roughcut.api.schemas import (
     ReviewApplyRequest,
     TokenUsageReportOut,
 )
+from roughcut.avatar import get_avatar_material_profile, list_avatar_material_profiles
 from roughcut.config import get_settings
 from roughcut.config import apply_runtime_overrides
 from roughcut.creative.modes import normalize_enhancement_modes, normalize_workflow_mode
@@ -67,6 +69,17 @@ from roughcut.pipeline.job_rerun import (
     resolve_job_rerun_request,
 )
 from roughcut.pipeline.orchestrator import PIPELINE_STEPS, create_job_steps
+from roughcut.media.manual_editor_assets import (
+    ensure_manual_editor_preview_assets,
+    load_manual_editor_preview_assets,
+    manual_editor_asset_dir,
+)
+from roughcut.publication import (
+    active_publication_credentials,
+    build_publication_plan,
+    list_publication_attempts,
+    submit_publication_attempts,
+)
 from roughcut.pipeline.quality import QUALITY_ARTIFACT_TYPE
 from roughcut.media.variant_timeline_bundle import resolve_effective_variant_timeline_bundle
 from roughcut.recovery.stuck_step_recovery import STUCK_STEP_DIAGNOSTIC_ARTIFACT_TYPE
@@ -119,8 +132,13 @@ from roughcut.storage.s3 import get_storage, job_key
 from roughcut.storage.runtime_cleanup import cleanup_job_runtime_files
 from roughcut.source_context import enrich_source_context_with_filename_hints
 from roughcut.usage import build_job_token_report, build_jobs_usage_summary, build_jobs_usage_trend
+from roughcut.edit.decisions import infer_timeline_analysis
+from roughcut.edit.otio_export import export_to_otio
+from roughcut.edit.render_plan import build_render_plan, build_smart_editing_accents, save_render_plan
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
+logger = logging.getLogger(__name__)
+_MANUAL_EDITOR_ASSET_WARMUPS: set[str] = set()
 
 _CONTENT_PROFILE_PLACEHOLDER_JPEG = base64.b64decode(
     "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAYEBQYFBAYGBQYHBwYIChAKCgkJChQODwwQFxQYGBcUFhYaHSUfGhsjHBYWICwgIyYnKSopGR8tMC0oMCUoKSj/2wBDAQcHBwoIChMKChMoGhYaKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCj/wAARCAAJABADASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwDwCiiitzI//9k="
@@ -208,6 +226,97 @@ class JobRerunActionOut(BaseModel):
     rerun_steps: list[str]
     issue_codes: list[str]
     note: str | None = None
+    detail: str | None = None
+
+
+class ManualEditorSegmentIn(BaseModel):
+    start: float
+    end: float
+
+
+class ManualEditorSubtitleOverrideIn(BaseModel):
+    index: int
+    start_time: float | None = None
+    end_time: float | None = None
+    text_final: str | None = None
+    delete: bool = False
+
+
+class ManualEditorApplyIn(BaseModel):
+    keep_segments: list[ManualEditorSegmentIn] = Field(default_factory=list)
+    subtitle_overrides: list[ManualEditorSubtitleOverrideIn] = Field(default_factory=list)
+    note: str | None = None
+
+
+class PublicationSubmitIn(BaseModel):
+    creator_profile_id: str | None = None
+    platforms: list[str] = Field(default_factory=list)
+
+
+class ManualEditorSegmentOut(BaseModel):
+    start: float
+    end: float
+    duration_sec: float
+    source_index: int
+
+
+class ManualEditorSubtitleOut(BaseModel):
+    index: int
+    start_time: float
+    end_time: float
+    text_raw: str | None = None
+    text_norm: str | None = None
+    text_final: str | None = None
+
+
+class ManualEditorSessionOut(BaseModel):
+    job_id: str
+    timeline_id: str
+    timeline_version: int
+    render_plan_version: int | None = None
+    source_name: str
+    source_duration_sec: float
+    source_url: str | None = None
+    keep_segments: list[ManualEditorSegmentOut] = Field(default_factory=list)
+    source_subtitles: list[ManualEditorSubtitleOut] = Field(default_factory=list)
+    projected_subtitles: list[ManualEditorSubtitleOut] = Field(default_factory=list)
+    subtitle_overrides: list[ManualEditorSubtitleOverrideIn] = Field(default_factory=list)
+    editable: bool = True
+    detail: str | None = None
+
+
+class ManualEditorApplyOut(BaseModel):
+    job_id: str
+    timeline_id: str
+    timeline_version: int
+    render_plan_id: str
+    render_plan_version: int
+    keep_segment_count: int
+    projected_subtitle_count: int
+    job_status: str
+    change_scope: str = "timeline"
+    render_strategy: str = "full_timeline_render"
+    rerun_steps: list[str] = Field(default_factory=list)
+    detail: str | None = None
+
+
+class ManualEditorThumbnailOut(BaseModel):
+    url: str
+    time_sec: float
+
+
+class ManualEditorPreviewAssetsOut(BaseModel):
+    job_id: str
+    ready: bool = True
+    warming: bool = False
+    audio_url: str | None = None
+    duration_sec: float = 0.0
+    sample_rate: int = 16000
+    peaks: list[float] = Field(default_factory=list)
+    peak_count: int = 0
+    thumbnail_urls: list[str] = Field(default_factory=list)
+    thumbnail_items: list[ManualEditorThumbnailOut] = Field(default_factory=list)
+    cached: bool = False
     detail: str | None = None
 
 
@@ -1043,6 +1152,870 @@ async def get_timeline(job_id: uuid.UUID, session: AsyncSession = Depends(get_se
     return {"id": str(timeline.id), "version": timeline.version, "data": timeline.data_json}
 
 
+def _manual_editor_detail_for_job_status(status_value: str) -> str | None:
+    normalized = str(status_value or "").strip().lower()
+    if normalized == "awaiting_init":
+        return "当前任务尚未完成初始化，请先填写必要任务信息。"
+    return None
+
+
+def _manual_editor_prerequisite_detail(steps: list[JobStep] | None) -> str | None:
+    step_map = {step.step_name: step for step in (steps or [])}
+    for step_name in PIPELINE_STEPS:
+        step = step_map.get(step_name)
+        if step_name == "edit_plan":
+            if step is None or step.status != "done":
+                return "手动调整需要等到剪辑时间线和渲染计划生成完成。"
+            return None
+        if step is None:
+            return "手动调整需要等到上游分析步骤生成完成。"
+        if step.status not in {"done", "skipped"}:
+            return f"手动调整需要等到上游步骤 {STEP_LABELS.get(step_name, step_name)} 完成。"
+    return "手动调整需要等到剪辑时间线和渲染计划生成完成。"
+
+
+def _manual_editor_apply_conflict_detail(steps: list[JobStep] | None) -> str | None:
+    prerequisite_detail = _manual_editor_prerequisite_detail(steps)
+    if prerequisite_detail:
+        return prerequisite_detail
+    running_downstream_steps = [
+        step.step_name
+        for step in (steps or [])
+        if step.step_name in {"render", "final_review", "platform_package"} and step.status == "running"
+    ]
+    if running_downstream_steps:
+        labels = "、".join(STEP_LABELS.get(step_name, step_name) for step_name in running_downstream_steps)
+        return f"当前 {labels} 正在运行。可以先预览和调整，但请等待该步骤结束后再保存，避免并发覆盖输出。"
+    return None
+
+
+def _manual_editor_segment_payload(segment: dict[str, Any], *, index: int) -> ManualEditorSegmentOut:
+    start = max(0.0, float(segment.get("start", 0.0) or 0.0))
+    end = max(start, float(segment.get("end", start) or start))
+    return ManualEditorSegmentOut(
+        start=round(start, 3),
+        end=round(end, 3),
+        duration_sec=round(max(0.0, end - start), 3),
+        source_index=index,
+    )
+
+
+def _manual_editor_subtitle_payload(item: dict[str, Any], *, index: int) -> ManualEditorSubtitleOut:
+    return ManualEditorSubtitleOut(
+        index=int(item.get("index", index) or index),
+        start_time=round(float(item.get("start_time", 0.0) or 0.0), 3),
+        end_time=round(float(item.get("end_time", 0.0) or 0.0), 3),
+        text_raw=str(item.get("text_raw") or "") or None,
+        text_norm=str(item.get("text_norm") or "") or None,
+        text_final=str(item.get("text_final") or "") or None,
+    )
+
+
+def _normalize_manual_keep_segments(
+    segments: list[dict[str, Any]] | list[ManualEditorSegmentIn],
+    *,
+    source_duration_sec: float,
+) -> list[dict[str, float]]:
+    normalized: list[dict[str, float]] = []
+    upper_bound = max(0.0, float(source_duration_sec or 0.0))
+    for raw_item in segments or []:
+        if isinstance(raw_item, BaseModel):
+            payload = raw_item.model_dump()
+        else:
+            payload = dict(raw_item or {})
+        start = max(0.0, min(float(payload.get("start") or 0.0), upper_bound))
+        end = max(0.0, min(float(payload.get("end") or 0.0), upper_bound))
+        if end <= start + 0.05:
+            continue
+        normalized.append({"start": round(start, 3), "end": round(end, 3)})
+
+    normalized.sort(key=lambda item: (item["start"], item["end"]))
+    merged: list[dict[str, float]] = []
+    for item in normalized:
+        if not merged:
+            merged.append(item)
+            continue
+        previous = merged[-1]
+        if item["start"] <= previous["end"] + 0.02:
+            previous["end"] = round(max(previous["end"], item["end"]), 3)
+            continue
+        merged.append(item)
+
+    if not merged:
+        raise HTTPException(status_code=400, detail="至少保留一段有效视频。")
+    return merged
+
+
+def _build_editorial_segments_from_keep_segments(
+    keep_segments: list[dict[str, float]],
+    *,
+    source_duration_sec: float,
+) -> list[dict[str, Any]]:
+    segments: list[dict[str, Any]] = []
+    cursor = 0.0
+    for keep_segment in keep_segments:
+        start = float(keep_segment["start"])
+        end = float(keep_segment["end"])
+        if start > cursor + 1e-6:
+            segments.append(
+                {
+                    "start": round(cursor, 3),
+                    "end": round(start, 3),
+                    "type": "cut",
+                    "reason": "manual_editor_removed",
+                }
+            )
+        segments.append(
+            {
+                "start": round(start, 3),
+                "end": round(end, 3),
+                "type": "keep",
+                "reason": "manual_editor_keep",
+            }
+        )
+        cursor = end
+    if source_duration_sec > cursor + 1e-6:
+        segments.append(
+            {
+                "start": round(cursor, 3),
+                "end": round(source_duration_sec, 3),
+                "type": "cut",
+                "reason": "manual_editor_removed",
+            }
+        )
+    return segments
+
+
+def _manual_keep_segments_from_editorial_payload(payload: dict[str, Any] | None) -> list[dict[str, float]]:
+    keep_segments: list[dict[str, float]] = []
+    for segment in list((payload or {}).get("segments") or []):
+        if not isinstance(segment, dict) or str(segment.get("type") or "") != "keep":
+            continue
+        start = max(0.0, float(segment.get("start", 0.0) or 0.0))
+        end = max(start, float(segment.get("end", start) or start))
+        if end <= start + 0.05:
+            continue
+        keep_segments.append({"start": round(start, 3), "end": round(end, 3)})
+    return keep_segments
+
+
+def _manual_keep_segments_changed(
+    previous_segments: list[dict[str, Any]],
+    next_segments: list[dict[str, Any]],
+    *,
+    tolerance_sec: float = 0.02,
+) -> bool:
+    if len(previous_segments) != len(next_segments):
+        return True
+    for previous, next_item in zip(previous_segments, next_segments, strict=True):
+        previous_start = float(previous.get("start", 0.0) or 0.0)
+        previous_end = float(previous.get("end", 0.0) or 0.0)
+        next_start = float(next_item.get("start", 0.0) or 0.0)
+        next_end = float(next_item.get("end", 0.0) or 0.0)
+        if abs(previous_start - next_start) > tolerance_sec or abs(previous_end - next_end) > tolerance_sec:
+            return True
+    return False
+
+
+def _manual_editor_change_plan(
+    *,
+    previous_keep_segments: list[dict[str, Any]],
+    next_keep_segments: list[dict[str, Any]],
+    subtitle_overrides: list[dict[str, Any]],
+) -> dict[str, Any]:
+    timeline_changed = _manual_keep_segments_changed(previous_keep_segments, next_keep_segments)
+    subtitle_changed = bool(subtitle_overrides)
+    if timeline_changed:
+        change_scope = "timeline"
+        render_strategy = "full_timeline_render"
+    elif subtitle_changed:
+        change_scope = "subtitle_only"
+        render_strategy = "reuse_timeline_effect_plan"
+    else:
+        change_scope = "no_material_change"
+        render_strategy = "metadata_refresh_render"
+    return {
+        "change_scope": change_scope,
+        "timeline_changed": timeline_changed,
+        "subtitle_changed": subtitle_changed,
+        "render_strategy": render_strategy,
+    }
+
+
+def _build_otio_style_manual_tracks(
+    segments: list[dict[str, Any]],
+    *,
+    source_url: str,
+    source_duration_sec: float,
+    timebase: int = 24,
+) -> dict[str, Any]:
+    source_items: list[dict[str, Any]] = []
+    output_items: list[dict[str, Any]] = []
+    output_cursor = 0.0
+    for index, segment in enumerate(segments):
+        segment_type = str(segment.get("type") or "")
+        start = round(max(0.0, float(segment.get("start", 0.0) or 0.0)), 3)
+        end = round(max(start, float(segment.get("end", start) or start)), 3)
+        duration = round(max(0.0, end - start), 3)
+        if duration <= 0.0:
+            continue
+        source_range = {"start": start, "duration": duration}
+        base_item: dict[str, Any] = {
+            "id": f"{segment_type or 'segment'}_{index}",
+            "type": "clip" if segment_type == "keep" else "gap",
+            "name": f"{segment_type or 'segment'} {index + 1}",
+            "source_range": source_range,
+            "metadata": {
+                "roughcut": {
+                    "segment_type": segment_type,
+                    "reason": str(segment.get("reason") or ""),
+                }
+            },
+        }
+        if segment_type == "keep":
+            output_range = {"start": round(output_cursor, 3), "duration": duration}
+            clip_item = {
+                **base_item,
+                "media_reference": {"target_url": source_url},
+                "output_range": output_range,
+            }
+            source_items.append(clip_item)
+            output_items.append(clip_item)
+            output_cursor = round(output_cursor + duration, 3)
+        else:
+            source_items.append({**base_item, "output_range": None})
+
+    return {
+        "schema": "roughcut.editorial.v2",
+        "timebase": int(timebase or 24),
+        "source_duration_sec": round(max(0.0, float(source_duration_sec or 0.0)), 3),
+        "output_duration_sec": round(output_cursor, 3),
+        "tracks": [
+            {
+                "name": "source_video",
+                "kind": "video",
+                "items": source_items,
+            },
+            {
+                "name": "output_video",
+                "kind": "video",
+                "items": output_items,
+            },
+        ],
+    }
+
+
+def _manual_subtitle_override_payloads(
+    overrides: list[dict[str, Any]] | list[ManualEditorSubtitleOverrideIn],
+) -> list[dict[str, Any]]:
+    payloads: list[dict[str, Any]] = []
+    for raw_item in overrides or []:
+        if isinstance(raw_item, BaseModel):
+            item = raw_item.model_dump()
+        else:
+            item = dict(raw_item or {})
+        try:
+            index = int(item.get("index"))
+        except (TypeError, ValueError):
+            continue
+        payload: dict[str, Any] = {"index": index}
+        if item.get("start_time") is not None:
+            payload["start_time"] = round(max(0.0, float(item.get("start_time") or 0.0)), 3)
+        if item.get("end_time") is not None:
+            payload["end_time"] = round(max(0.0, float(item.get("end_time") or 0.0)), 3)
+        if item.get("text_final") is not None:
+            payload["text_final"] = str(item.get("text_final") or "").strip()
+        if bool(item.get("delete", False)):
+            payload["delete"] = True
+        payloads.append(payload)
+    payloads.sort(key=lambda item: int(item.get("index", 0) or 0))
+    return payloads
+
+
+def _apply_manual_subtitle_overrides(
+    subtitles: list[dict[str, Any]],
+    overrides: list[dict[str, Any]] | list[ManualEditorSubtitleOverrideIn],
+    *,
+    output_duration_sec: float,
+    min_duration_sec: float = 0.08,
+    min_gap_sec: float = 0.02,
+) -> list[dict[str, Any]]:
+    override_payloads = _manual_subtitle_override_payloads(overrides)
+    if not override_payloads:
+        return [dict(item) for item in subtitles]
+    by_index = {int(item["index"]): item for item in override_payloads}
+    output_upper_bound = max(0.0, float(output_duration_sec or 0.0))
+    adjusted: list[dict[str, Any]] = []
+    seen_indexes: set[int] = set()
+    for fallback_index, subtitle in enumerate(subtitles):
+        item = dict(subtitle)
+        index = int(item.get("index", fallback_index) or fallback_index)
+        seen_indexes.add(index)
+        override = by_index.get(index)
+        if override and bool(override.get("delete", False)):
+            continue
+        if override:
+            start = float(item.get("start_time", 0.0) or 0.0)
+            end = float(item.get("end_time", start) or start)
+            if "start_time" in override:
+                start = float(override["start_time"])
+            if "end_time" in override:
+                end = float(override["end_time"])
+            start = max(0.0, min(start, output_upper_bound if output_upper_bound > 0.0 else start))
+            end = max(start + min_duration_sec, end)
+            if output_upper_bound > 0.0:
+                end = min(end, output_upper_bound)
+                start = min(start, max(0.0, end - min_duration_sec))
+            item["start_time"] = round(start, 3)
+            item["end_time"] = round(max(start + min_duration_sec, end), 3)
+            if "text_final" in override:
+                item["text_final"] = str(override.get("text_final") or "").strip()
+        adjusted.append(item)
+
+    for index, override in by_index.items():
+        if index in seen_indexes or bool(override.get("delete", False)):
+            continue
+        start = max(0.0, float(override.get("start_time", 0.0) or 0.0))
+        end = max(start + min_duration_sec, float(override.get("end_time", start + min_duration_sec) or start + min_duration_sec))
+        if output_upper_bound > 0.0:
+            end = min(end, output_upper_bound)
+            start = min(start, max(0.0, end - min_duration_sec))
+        text = str(override.get("text_final") or "").strip()
+        adjusted.append(
+            {
+                "index": index,
+                "start_time": round(start, 3),
+                "end_time": round(end, 3),
+                "text_raw": text,
+                "text_norm": text,
+                "text_final": text,
+            }
+        )
+
+    adjusted.sort(key=lambda item: (float(item.get("start_time", 0.0) or 0.0), int(item.get("index", 0) or 0)))
+    previous_end = 0.0
+    for item in adjusted:
+        start = max(previous_end, float(item.get("start_time", 0.0) or 0.0))
+        end = max(start + min_duration_sec, float(item.get("end_time", start) or start))
+        if output_upper_bound > 0.0:
+            end = min(end, output_upper_bound)
+            start = min(start, max(0.0, end - min_duration_sec))
+        item["start_time"] = round(start, 3)
+        item["end_time"] = round(end, 3)
+        previous_end = round(end + min_gap_sec, 3)
+    return adjusted
+
+
+def _resolve_manual_editor_source_path(job: Job) -> Path | None:
+    direct_path = Path(str(job.source_path or "")).expanduser()
+    if direct_path.exists() and direct_path.is_file():
+        return direct_path
+    resolve_path = getattr(get_storage(), "resolve_path", None)
+    if callable(resolve_path):
+        resolved = resolve_path(str(job.source_path or ""))
+        if resolved.exists() and resolved.is_file():
+            return resolved
+    return None
+
+
+def _manual_editor_asset_path(job_id: uuid.UUID, filename: str) -> Path | None:
+    safe_name = Path(str(filename or "")).name
+    if not safe_name:
+        return None
+    asset_dir = manual_editor_asset_dir(job_id).resolve()
+    candidate = (asset_dir / safe_name).resolve()
+    try:
+        candidate.relative_to(asset_dir)
+    except ValueError:
+        return None
+    if not candidate.exists() or not candidate.is_file():
+        return None
+    return candidate
+
+
+def _manual_editor_preview_assets_response(
+    job_id: uuid.UUID,
+    payload: dict[str, Any],
+    *,
+    ready: bool | None = None,
+    warming: bool = False,
+) -> ManualEditorPreviewAssetsOut:
+    is_ready = bool(payload.get("ready", ready if ready is not None else True))
+    thumbnail_urls = [
+        f"/api/v1/jobs/{job_id}/manual-editor/assets/{Path(path).name}"
+        for path in list(payload.get("thumbnail_paths") or [])
+    ]
+    thumbnail_items = [
+        ManualEditorThumbnailOut(
+            url=f"/api/v1/jobs/{job_id}/manual-editor/assets/{Path(str(item.get('path') or '')).name}",
+            time_sec=round(float(item.get("time_sec") or 0.0), 3),
+        )
+        for item in list(payload.get("thumbnail_items") or [])
+        if isinstance(item, dict) and Path(str(item.get("path") or "")).name
+    ]
+    audio_path = Path(str(payload.get("audio_path") or ""))
+    return ManualEditorPreviewAssetsOut(
+        job_id=str(job_id),
+        ready=is_ready,
+        warming=bool(warming),
+        audio_url=f"/api/v1/jobs/{job_id}/manual-editor/assets/{audio_path.name}" if is_ready and audio_path.name else None,
+        duration_sec=float(payload.get("duration_sec") or 0.0),
+        sample_rate=int(payload.get("sample_rate") or 16000),
+        peaks=[float(value) for value in list(payload.get("peaks") or [])],
+        peak_count=int(payload.get("peak_count") or 0),
+        thumbnail_urls=thumbnail_urls if is_ready else [],
+        thumbnail_items=thumbnail_items if is_ready else [],
+        cached=bool(payload.get("cached", False)),
+    )
+
+
+def _warm_manual_editor_preview_assets(job_id: uuid.UUID, source_path: Path, duration_sec: float) -> None:
+    key = str(job_id)
+    try:
+        ensure_manual_editor_preview_assets(
+            job_id=job_id,
+            source_path=source_path,
+            duration_sec=duration_sec,
+        )
+    except Exception:
+        logger.exception("manual editor preview asset warmup failed job_id=%s", job_id)
+    finally:
+        _MANUAL_EDITOR_ASSET_WARMUPS.discard(key)
+
+
+async def _load_latest_timeline_by_type(
+    session: AsyncSession,
+    *,
+    job_id: uuid.UUID,
+    timeline_type: str,
+) -> Timeline | None:
+    result = await session.execute(
+        select(Timeline)
+        .where(Timeline.job_id == job_id, Timeline.timeline_type == timeline_type)
+        .order_by(Timeline.version.desc(), Timeline.created_at.desc(), Timeline.id.desc())
+    )
+    return result.scalars().first()
+
+
+async def _build_manual_editor_session(
+    *,
+    job: Job,
+    session: AsyncSession,
+) -> ManualEditorSessionOut:
+    from roughcut.pipeline.steps import _build_edited_subtitle_projection, _load_latest_subtitle_payloads
+
+    editorial_timeline = await _load_latest_timeline_by_type(session, job_id=job.id, timeline_type="editorial")
+    if editorial_timeline is None:
+        raise HTTPException(status_code=404, detail="当前任务还没有可编辑时间线。")
+    render_plan_timeline = await _load_latest_timeline_by_type(session, job_id=job.id, timeline_type="render_plan")
+    media_meta_artifact = await _load_latest_optional_artifact(session, job_id=job.id, artifact_types=("media_meta",))
+    media_meta = media_meta_artifact.data_json if media_meta_artifact and isinstance(media_meta_artifact.data_json, dict) else {}
+    source_duration_sec = float(media_meta.get("duration_sec") or media_meta.get("duration") or 0.0)
+
+    keep_segments = [
+        _manual_editor_segment_payload(segment, index=index)
+        for index, segment in enumerate(_manual_keep_segments_from_editorial_payload(editorial_timeline.data_json or {}))
+    ]
+    if source_duration_sec <= 0.0:
+        source_duration_sec = max((segment.end for segment in keep_segments), default=0.0)
+
+    subtitle_dicts, projection_data = await _load_latest_subtitle_payloads(session, job_id=job.id)
+    projected_subtitles = await _build_edited_subtitle_projection(
+        session,
+        job_id=job.id,
+        keep_segments=[segment.model_dump(include={"start", "end"}) for segment in keep_segments],
+        projection_data=projection_data,
+        fallback_subtitles=subtitle_dicts,
+    )
+    subtitle_projection = (editorial_timeline.data_json or {}).get("subtitle_projection")
+    subtitle_overrides = []
+    if isinstance(subtitle_projection, dict):
+        subtitle_overrides = _manual_subtitle_override_payloads(
+            [
+                item
+                for item in list(subtitle_projection.get("overrides") or [])
+                if isinstance(item, dict)
+            ]
+        )
+        manual_projection_items = [
+            item
+            for item in list(subtitle_projection.get("items") or [])
+            if isinstance(item, dict)
+        ]
+        if manual_projection_items:
+            projected_subtitles = manual_projection_items
+    source_path = _resolve_manual_editor_source_path(job)
+    status_detail = _manual_editor_detail_for_job_status(str(job.status or ""))
+    prerequisite_detail = _manual_editor_prerequisite_detail(list(job.steps or []))
+    session_detail = status_detail or prerequisite_detail
+    return ManualEditorSessionOut(
+        job_id=str(job.id),
+        timeline_id=str(editorial_timeline.id),
+        timeline_version=int(editorial_timeline.version or 1),
+        render_plan_version=int(render_plan_timeline.version) if render_plan_timeline is not None else None,
+        source_name=str(job.source_name or ""),
+        source_duration_sec=round(max(0.0, source_duration_sec), 3),
+        source_url=f"/api/v1/jobs/{job.id}/source/file" if source_path is not None else None,
+        keep_segments=keep_segments,
+        source_subtitles=[
+            _manual_editor_subtitle_payload(item, index=index)
+            for index, item in enumerate(subtitle_dicts)
+        ],
+        projected_subtitles=[
+            _manual_editor_subtitle_payload(item, index=index)
+            for index, item in enumerate(projected_subtitles)
+        ],
+        subtitle_overrides=[ManualEditorSubtitleOverrideIn(**item) for item in subtitle_overrides],
+        editable=session_detail is None,
+        detail=session_detail,
+    )
+
+
+@router.get("/{job_id}/source/file")
+async def get_source_file(job_id: uuid.UUID, session: AsyncSession = Depends(get_session)):
+    job = await session.get(Job, job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    source_path = _resolve_manual_editor_source_path(job)
+    if source_path is None:
+        raise HTTPException(status_code=404, detail="Source media is not available locally for preview")
+    media_type = "video/mp4" if source_path.suffix.lower() == ".mp4" else "application/octet-stream"
+    return FileResponse(path=source_path, filename=source_path.name, media_type=media_type)
+
+
+@router.get("/{job_id}/manual-editor/assets", response_model=ManualEditorPreviewAssetsOut)
+async def get_manual_editor_preview_assets(job_id: uuid.UUID, session: AsyncSession = Depends(get_session)):
+    job = await session.get(Job, job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    source_path = _resolve_manual_editor_source_path(job)
+    if source_path is None:
+        raise HTTPException(status_code=404, detail="Source media is not available locally for preview assets")
+    media_meta_artifact = await _load_latest_optional_artifact(session, job_id=job.id, artifact_types=("media_meta",))
+    media_meta = media_meta_artifact.data_json if media_meta_artifact and isinstance(media_meta_artifact.data_json, dict) else {}
+    duration_sec = float(media_meta.get("duration_sec") or media_meta.get("duration") or 0.0)
+    payload = await asyncio.to_thread(
+        ensure_manual_editor_preview_assets,
+        job_id=job.id,
+        source_path=source_path,
+        duration_sec=duration_sec,
+    )
+    return _manual_editor_preview_assets_response(job.id, payload, ready=True)
+
+
+@router.get("/{job_id}/manual-editor/assets/status", response_model=ManualEditorPreviewAssetsOut)
+async def get_manual_editor_preview_assets_status(job_id: uuid.UUID, session: AsyncSession = Depends(get_session)):
+    job = await session.get(Job, job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    source_path = _resolve_manual_editor_source_path(job)
+    if source_path is None:
+        raise HTTPException(status_code=404, detail="Source media is not available locally for preview assets")
+    media_meta_artifact = await _load_latest_optional_artifact(session, job_id=job.id, artifact_types=("media_meta",))
+    media_meta = media_meta_artifact.data_json if media_meta_artifact and isinstance(media_meta_artifact.data_json, dict) else {}
+    duration_sec = float(media_meta.get("duration_sec") or media_meta.get("duration") or 0.0)
+    payload = load_manual_editor_preview_assets(
+        job_id=job.id,
+        source_path=source_path,
+        duration_sec=duration_sec,
+    )
+    return _manual_editor_preview_assets_response(
+        job.id,
+        payload,
+        ready=bool(payload.get("ready", False)),
+        warming=str(job.id) in _MANUAL_EDITOR_ASSET_WARMUPS,
+    )
+
+
+@router.post("/{job_id}/manual-editor/assets/warm", response_model=ManualEditorPreviewAssetsOut)
+async def warm_manual_editor_preview_assets(
+    job_id: uuid.UUID,
+    background_tasks: BackgroundTasks,
+    session: AsyncSession = Depends(get_session),
+):
+    job = await session.get(Job, job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    source_path = _resolve_manual_editor_source_path(job)
+    if source_path is None:
+        raise HTTPException(status_code=404, detail="Source media is not available locally for preview assets")
+    media_meta_artifact = await _load_latest_optional_artifact(session, job_id=job.id, artifact_types=("media_meta",))
+    media_meta = media_meta_artifact.data_json if media_meta_artifact and isinstance(media_meta_artifact.data_json, dict) else {}
+    duration_sec = float(media_meta.get("duration_sec") or media_meta.get("duration") or 0.0)
+    payload = load_manual_editor_preview_assets(job_id=job.id, source_path=source_path, duration_sec=duration_sec)
+    if not payload.get("ready") and str(job.id) not in _MANUAL_EDITOR_ASSET_WARMUPS:
+        _MANUAL_EDITOR_ASSET_WARMUPS.add(str(job.id))
+        background_tasks.add_task(_warm_manual_editor_preview_assets, job.id, source_path, duration_sec)
+    return _manual_editor_preview_assets_response(
+        job.id,
+        payload,
+        ready=bool(payload.get("ready", False)),
+        warming=not bool(payload.get("ready", False)),
+    )
+
+
+@router.get("/{job_id}/manual-editor/assets/{filename}")
+async def get_manual_editor_asset_file(job_id: uuid.UUID, filename: str, session: AsyncSession = Depends(get_session)):
+    job = await session.get(Job, job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    path = _manual_editor_asset_path(job.id, filename)
+    if path is None:
+        raise HTTPException(status_code=404, detail="Manual editor asset not found")
+    suffix = path.suffix.lower()
+    media_type = "audio/wav" if suffix == ".wav" else "image/jpeg" if suffix in {".jpg", ".jpeg"} else "application/octet-stream"
+    return FileResponse(path=path, filename=path.name, media_type=media_type)
+
+
+@router.get("/{job_id}/manual-editor", response_model=ManualEditorSessionOut)
+async def get_manual_editor_session(job_id: uuid.UUID, session: AsyncSession = Depends(get_session)):
+    job_result = await session.execute(
+        select(Job)
+        .options(selectinload(Job.steps))
+        .where(Job.id == job_id)
+    )
+    job = job_result.scalar_one_or_none()
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return await _build_manual_editor_session(job=job, session=session)
+
+
+@router.post("/{job_id}/manual-editor/apply", response_model=ManualEditorApplyOut)
+async def apply_manual_editor_timeline(
+    job_id: uuid.UUID,
+    request: ManualEditorApplyIn,
+    session: AsyncSession = Depends(get_session),
+):
+    from roughcut.pipeline.steps import (
+        _build_edited_subtitle_projection,
+        _job_creative_profile,
+        _load_latest_subtitle_payloads,
+        _load_preferred_downstream_profile,
+    )
+
+    job_result = await session.execute(
+        select(Job)
+        .options(selectinload(Job.steps))
+        .where(Job.id == job_id)
+    )
+    job = job_result.scalar_one_or_none()
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    blocked_detail = _manual_editor_detail_for_job_status(str(job.status or "")) or _manual_editor_apply_conflict_detail(list(job.steps or []))
+    if blocked_detail:
+        raise HTTPException(status_code=409, detail=blocked_detail)
+
+    editorial_timeline = await _load_latest_timeline_by_type(session, job_id=job.id, timeline_type="editorial")
+    render_plan_timeline = await _load_latest_timeline_by_type(session, job_id=job.id, timeline_type="render_plan")
+    if editorial_timeline is None or render_plan_timeline is None:
+        raise HTTPException(status_code=404, detail="当前任务缺少可重建的时间线数据。")
+
+    media_meta_artifact = await _load_latest_optional_artifact(session, job_id=job.id, artifact_types=("media_meta",))
+    media_meta = media_meta_artifact.data_json if media_meta_artifact and isinstance(media_meta_artifact.data_json, dict) else {}
+    source_duration_sec = float(media_meta.get("duration_sec") or media_meta.get("duration") or 0.0)
+    previous_keep_segments = _manual_keep_segments_from_editorial_payload(editorial_timeline.data_json or {})
+    if source_duration_sec <= 0.0:
+        source_duration_sec = max(
+            (
+                float(segment.get("end", 0.0) or 0.0)
+                for segment in previous_keep_segments
+            ),
+            default=0.0,
+        )
+
+    keep_segments = _normalize_manual_keep_segments(request.keep_segments, source_duration_sec=source_duration_sec)
+    subtitle_dicts, projection_data = await _load_latest_subtitle_payloads(session, job_id=job.id)
+    remapped_subtitles = await _build_edited_subtitle_projection(
+        session,
+        job_id=job.id,
+        keep_segments=keep_segments,
+        projection_data=projection_data,
+        fallback_subtitles=subtitle_dicts,
+    )
+    base_output_duration_sec = max((float(item.get("end_time", 0.0) or 0.0) for item in remapped_subtitles), default=0.0)
+    subtitle_override_payloads = _manual_subtitle_override_payloads(request.subtitle_overrides)
+    remapped_subtitles = _apply_manual_subtitle_overrides(
+        remapped_subtitles,
+        subtitle_override_payloads,
+        output_duration_sec=base_output_duration_sec,
+    )
+    change_plan = _manual_editor_change_plan(
+        previous_keep_segments=previous_keep_segments,
+        next_keep_segments=keep_segments,
+        subtitle_overrides=subtitle_override_payloads,
+    )
+    _profile_artifact, content_profile = await _load_preferred_downstream_profile(session, job_id=job.id)
+    previous_render_plan = dict(render_plan_timeline.data_json or {})
+    editing_skill = dict(previous_render_plan.get("editing_skill") or {})
+    output_duration_sec = max((float(item.get("end_time", 0.0) or 0.0) for item in remapped_subtitles), default=0.0)
+    if change_plan["timeline_changed"]:
+        timeline_analysis = infer_timeline_analysis(
+            remapped_subtitles,
+            content_profile=content_profile,
+            duration=output_duration_sec,
+            editing_skill=editing_skill,
+        )
+        editing_accents = build_smart_editing_accents(
+            keep_segments=keep_segments,
+            subtitle_items=remapped_subtitles,
+            timeline_analysis=timeline_analysis,
+            editing_skill=editing_skill,
+            style=str((previous_render_plan.get("editing_accents") or {}).get("style") or "smart_effect_commercial"),
+        )
+    else:
+        timeline_analysis = dict(previous_render_plan.get("timeline_analysis") or {})
+        if not timeline_analysis:
+            timeline_analysis = infer_timeline_analysis(
+                remapped_subtitles,
+                content_profile=content_profile,
+                duration=output_duration_sec,
+                editing_skill=editing_skill,
+            )
+        previous_editing_accents = previous_render_plan.get("editing_accents")
+        editing_accents = (
+            dict(previous_editing_accents)
+            if isinstance(previous_editing_accents, dict)
+            else build_smart_editing_accents(
+                keep_segments=keep_segments,
+                subtitle_items=remapped_subtitles,
+                timeline_analysis=timeline_analysis,
+                editing_skill=editing_skill,
+                style="smart_effect_commercial",
+            )
+        )
+    editorial_segments = _build_editorial_segments_from_keep_segments(
+        keep_segments,
+        source_duration_sec=source_duration_sec,
+    )
+    source_url = str((editorial_timeline.data_json or {}).get("source") or job.source_path or "")
+    otio_style_payload = _build_otio_style_manual_tracks(
+        editorial_segments,
+        source_url=source_url,
+        source_duration_sec=source_duration_sec,
+    )
+    editorial_payload = {
+        "schema": otio_style_payload["schema"],
+        "version": 2,
+        "source": source_url,
+        "source_duration_sec": otio_style_payload["source_duration_sec"],
+        "output_duration_sec": otio_style_payload["output_duration_sec"],
+        "tracks": otio_style_payload["tracks"],
+        "subtitle_projection": {
+            "mode": "ripple_keep_segments",
+            "source": "latest_reviewed_subtitles",
+            "overrides": subtitle_override_payloads,
+            "items": remapped_subtitles,
+            "projected_count": len(remapped_subtitles),
+        },
+        "segments": editorial_segments,
+        "analysis": {
+            **timeline_analysis,
+            "manual_editor": {
+                "applied": True,
+                "base_timeline_id": str(editorial_timeline.id),
+                "base_timeline_version": int(editorial_timeline.version or 1),
+                "change_scope": str(change_plan["change_scope"]),
+                "render_strategy": str(change_plan["render_strategy"]),
+                "timeline_changed": bool(change_plan["timeline_changed"]),
+                "subtitle_changed": bool(change_plan["subtitle_changed"]),
+                "note": str(request.note or "").strip() or None,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            },
+        },
+    }
+    manual_editorial_timeline = Timeline(
+        job_id=job.id,
+        version=int(editorial_timeline.version or 0) + 1,
+        timeline_type="editorial",
+        data_json=editorial_payload,
+    )
+    try:
+        manual_editorial_timeline.otio_data = export_to_otio(editorial_payload)
+    except Exception:
+        manual_editorial_timeline.otio_data = None
+    session.add(manual_editorial_timeline)
+    await session.flush()
+
+    rebuilt_render_plan = build_render_plan(
+        editorial_timeline_id=manual_editorial_timeline.id,
+        workflow_preset=str(previous_render_plan.get("workflow_preset") or job.workflow_template or "unboxing_standard"),
+        subtitle_version=int((previous_render_plan.get("subtitles") or {}).get("version") or 1),
+        subtitle_style=str((previous_render_plan.get("subtitles") or {}).get("style") or "bold_yellow_outline"),
+        subtitle_motion_style=str((previous_render_plan.get("subtitles") or {}).get("motion_style") or "motion_static"),
+        smart_effect_style=str((previous_render_plan.get("editing_accents") or {}).get("style") or "smart_effect_commercial"),
+        cover_style=str((previous_render_plan.get("cover") or {}).get("style") or "") or None,
+        title_style=str((previous_render_plan.get("cover") or {}).get("title_style") or "preset_default"),
+        target_lufs=float((previous_render_plan.get("loudness") or {}).get("target_lufs") or -16.0),
+        peak_limit=float((previous_render_plan.get("loudness") or {}).get("peak_limit") or -2.0),
+        noise_reduction=bool((previous_render_plan.get("voice_processing") or {}).get("noise_reduction", True)),
+        intro=previous_render_plan.get("intro"),
+        outro=previous_render_plan.get("outro"),
+        insert=previous_render_plan.get("insert"),
+        watermark=previous_render_plan.get("watermark"),
+        music=previous_render_plan.get("music"),
+        timeline_analysis=timeline_analysis,
+        editing_skill=editing_skill,
+        editing_accents=editing_accents,
+        creative_profile=_job_creative_profile(job),
+        ai_director_plan=previous_render_plan.get("ai_director"),
+        avatar_commentary_plan=previous_render_plan.get("avatar_commentary"),
+        export_resolution_mode=str((previous_render_plan.get("delivery") or {}).get("resolution_mode") or "source"),
+        export_resolution_preset=str((previous_render_plan.get("delivery") or {}).get("resolution_preset") or "1080p"),
+    )
+    rebuilt_render_plan["manual_editor"] = {
+        "applied": True,
+        "change_scope": str(change_plan["change_scope"]),
+        "render_strategy": str(change_plan["render_strategy"]),
+        "timeline_changed": bool(change_plan["timeline_changed"]),
+        "subtitle_changed": bool(change_plan["subtitle_changed"]),
+        "base_render_plan_id": str(render_plan_timeline.id),
+        "base_render_plan_version": int(render_plan_timeline.version or 1),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    manual_render_plan = await save_render_plan(job.id, rebuilt_render_plan, session)
+
+    touch_runtime_refresh_hold(reason="manual_editor_apply", job_id=str(job.id), hold_seconds=120)
+    rerun_plan = JobRerunPlan(
+        rerun_start_step="render",
+        rerun_steps=["render", "final_review", "platform_package"],
+        issue_codes=[
+            "manual_timeline_edit"
+            if change_plan["timeline_changed"]
+            else "manual_subtitle_edit"
+            if change_plan["subtitle_changed"]
+            else "manual_editor_no_material_change"
+        ],
+        note=str(request.note or "").strip() or "manual_editor_apply",
+    )
+    await execute_job_rerun_plan(
+        session,
+        job=job,
+        steps=list(job.steps or []),
+        plan=rerun_plan,
+        via="manual_editor",
+    )
+    await session.commit()
+    return ManualEditorApplyOut(
+        job_id=str(job.id),
+        timeline_id=str(manual_editorial_timeline.id),
+        timeline_version=int(manual_editorial_timeline.version or 1),
+        render_plan_id=str(manual_render_plan.id),
+        render_plan_version=int(manual_render_plan.version or 1),
+        keep_segment_count=len(keep_segments),
+        projected_subtitle_count=len(remapped_subtitles),
+        job_status=str(job.status or "processing"),
+        change_scope=str(change_plan["change_scope"]),
+        render_strategy=str(change_plan["render_strategy"]),
+        rerun_steps=list(rerun_plan.rerun_steps),
+        detail=(
+            "手动字幕已保存，已复用原剪辑/特效计划并从 render 重新烧录字幕、生成成片和平台包。"
+            if change_plan["change_scope"] == "subtitle_only"
+            else "手动时间线已保存，已从 render 开始重新生成成片、特效和数字人口播链路。"
+        ),
+    )
+
+
 @router.get("/{job_id}/content-profile", response_model=ContentProfileReviewOut)
 async def get_content_profile(job_id: uuid.UUID, session: AsyncSession = Depends(get_session)):
     job = await session.get(Job, job_id)
@@ -1500,6 +2473,110 @@ async def download_rendered_file(
     filename = download_path.name
     media_type = "video/mp4" if download_path.suffix.lower() == ".mp4" else "application/octet-stream"
     return FileResponse(path=download_path, filename=filename, media_type=media_type)
+
+
+@router.get("/{job_id}/publication/plan")
+async def get_job_publication_plan(
+    job_id: uuid.UUID,
+    creator_profile_id: str | None = None,
+    session: AsyncSession = Depends(get_session),
+):
+    job, render_output, packaging, creator_profile = await _load_publication_inputs(
+        job_id=job_id,
+        creator_profile_id=creator_profile_id,
+        session=session,
+    )
+    existing_attempts = await list_publication_attempts(session, job_id=str(job_id))
+    return build_publication_plan(
+        job=job,
+        render_output=render_output,
+        platform_packaging=packaging,
+        creator_profile=creator_profile,
+        existing_attempts=existing_attempts,
+    )
+
+
+@router.post("/{job_id}/publication/publish")
+async def publish_job_to_bound_platforms(
+    job_id: uuid.UUID,
+    payload: PublicationSubmitIn,
+    session: AsyncSession = Depends(get_session),
+):
+    job, render_output, packaging, creator_profile = await _load_publication_inputs(
+        job_id=job_id,
+        creator_profile_id=payload.creator_profile_id,
+        session=session,
+    )
+    plan = build_publication_plan(
+        job=job,
+        render_output=render_output,
+        platform_packaging=packaging,
+        creator_profile=creator_profile,
+        requested_platforms=payload.platforms,
+        existing_attempts=await list_publication_attempts(session, job_id=str(job_id)),
+    )
+    if not plan.get("publish_ready"):
+        return plan
+    result = await submit_publication_attempts(session, plan)
+    await session.commit()
+    _dispatch_publication_worker_tick(len(result.get("created_attempts") or []))
+    return result
+
+
+def _dispatch_publication_worker_tick(created_count: int) -> None:
+    if created_count <= 0:
+        return
+    try:
+        celery_app.send_task(
+            "roughcut.pipeline.tasks.publication_worker_tick",
+            kwargs={"limit": max(1, min(20, int(created_count)))},
+            queue="publication_queue",
+        )
+    except Exception:
+        pass
+
+
+async def _load_publication_inputs(
+    *,
+    job_id: uuid.UUID,
+    creator_profile_id: str | None,
+    session: AsyncSession,
+) -> tuple[Job, RenderOutput | None, dict[str, Any] | None, dict[str, Any] | None]:
+    job_result = await session.execute(
+        select(Job).options(selectinload(Job.steps)).where(Job.id == job_id)
+    )
+    job = job_result.scalar_one_or_none()
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    render_result = await session.execute(
+        select(RenderOutput)
+        .where(RenderOutput.job_id == job_id, RenderOutput.status == "done")
+        .order_by(RenderOutput.created_at.desc())
+    )
+    render_output = render_result.scalars().first()
+
+    packaging_artifact = await _load_latest_optional_artifact(
+        session,
+        job_id=job_id,
+        artifact_types=("platform_packaging_md",),
+    )
+    packaging = packaging_artifact.data_json if packaging_artifact and isinstance(packaging_artifact.data_json, dict) else None
+
+    creator_profile = _resolve_publication_creator_profile(creator_profile_id)
+    return job, render_output, packaging, creator_profile
+
+
+def _resolve_publication_creator_profile(creator_profile_id: str | None) -> dict[str, Any] | None:
+    profile_id = str(creator_profile_id or "").strip()
+    if profile_id:
+        try:
+            return get_avatar_material_profile(profile_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="Creator profile not found") from exc
+
+    profiles = list_avatar_material_profiles()
+    return next((profile for profile in profiles if active_publication_credentials(profile)), profiles[0] if profiles else None)
 
 
 def _resolve_download_variant_path(render_output: RenderOutput, variant: str) -> Path:
