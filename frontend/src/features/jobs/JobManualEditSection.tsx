@@ -339,11 +339,23 @@ export function JobManualEditSection({ job, session, previewAssets, saving, onAp
       return !current || Math.abs(segment.start - current.start) > 0.02 || Math.abs(segment.end - current.end) > 0.02;
     });
   }, [effectiveSegments, session.keep_segments]);
+  const initialOutputDuration = useMemo(
+    () => session.keep_segments.reduce((total, segment) => total + Math.max(0, segment.end - segment.start), 0),
+    [session.keep_segments],
+  );
+  const outputDurationDelta = totalOutputDuration - initialOutputDuration;
+  const hasMaterialEdits = hasTimelineEdits || subtitleOverrides.length > 0;
   const savePlanLabel = hasTimelineEdits
     ? "剪辑变更：重建时间线/特效"
     : subtitleOverrides.length
       ? "字幕变更：复用剪辑/特效计划"
       : "暂无实质修改";
+  const saveImpactSummary = hasTimelineEdits
+    ? "会保存新的剪辑时间线，并从 render 开始重新生成成片、特效和数字人版本。"
+    : subtitleOverrides.length
+      ? "会保存字幕文本/时间修改，复用当前剪辑和特效计划重新烧录字幕层。"
+      : "当前没有检测到剪辑或字幕修改。";
+  const outputDurationDeltaLabel = `${outputDurationDelta >= 0 ? "+" : "-"}${formatSeconds(Math.abs(outputDurationDelta))}`;
 
   useEffect(() => {
     const waveformElement = waveformRef.current;
@@ -743,6 +755,18 @@ export function JobManualEditSection({ job, session, previewAssets, saving, onAp
 
   const handleApply = () => {
     if (!onApply || !effectiveSegments.length) return;
+    if (!hasMaterialEdits) return;
+    const confirmed = window.confirm(
+      [
+        "确认保存手动调整？",
+        `保存类型：${savePlanLabel}`,
+        `片段数：${session.keep_segments.length} -> ${effectiveSegments.length}`,
+        `输出时长变化：${outputDurationDeltaLabel}`,
+        `字幕修改：${subtitleOverrides.length} 条`,
+        saveImpactSummary,
+      ].join("\n"),
+    );
+    if (!confirmed) return;
     onApply({
       keep_segments: effectiveSegments.map((segment) => ({
         start: Number(segment.start.toFixed(3)),
@@ -818,14 +842,20 @@ export function JobManualEditSection({ job, session, previewAssets, saving, onAp
     currentOutputTime,
     effectiveSegments.length,
     handleApply,
+    hasMaterialEdits,
     nudgeSelectedSubtitle,
     onApply,
+    outputDurationDeltaLabel,
     playEditedTimeline,
     selectAdjacentSubtitle,
     setSelectedSubtitleBoundaryFromPlayhead,
     removeSelectedSegment,
+    saveImpactSummary,
+    savePlanLabel,
     saving,
     session.editable,
+    session.keep_segments.length,
+    subtitleOverrides.length,
   ]);
 
   const previewDisabled = !session.source_url;
@@ -877,6 +907,13 @@ export function JobManualEditSection({ job, session, previewAssets, saving, onAp
           <div className="muted">原片时长</div>
           <strong>{formatSeconds(session.source_duration_sec)}</strong>
         </article>
+      </div>
+      <div className={classNames("manual-editor-save-impact", hasTimelineEdits && "timeline", subtitleOverrides.length > 0 && !hasTimelineEdits && "subtitle")}>
+        <strong>{savePlanLabel}</strong>
+        <span>{saveImpactSummary}</span>
+        <span>片段 {session.keep_segments.length}{" -> "}{effectiveSegments.length}</span>
+        <span>输出时长变化 {outputDurationDeltaLabel}</span>
+        <span>字幕修改 {subtitleOverrides.length} 条</span>
       </div>
 
       <div className="manual-editor-grid top-gap">
@@ -1096,7 +1133,7 @@ export function JobManualEditSection({ job, session, previewAssets, saving, onAp
           </label>
 
           <div className="manual-editor-actions top-gap">
-            <button type="button" className="button primary" disabled={!session.editable || saving || !onApply} onClick={handleApply}>
+            <button type="button" className="button primary" disabled={!session.editable || saving || !onApply || !hasMaterialEdits} onClick={handleApply}>
               {saving ? "保存并重渲染中..." : "保存修改并重新渲染"}
             </button>
             <button type="button" className="button ghost" onClick={restoreInitialSegments}>

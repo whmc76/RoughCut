@@ -7206,6 +7206,33 @@ textarea.input {
   text-align: center;
 }
 
+.manual-editor-save-impact {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  background: #f8faf7;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.manual-editor-save-impact strong {
+  color: #16443f;
+}
+
+.manual-editor-save-impact.timeline {
+  border-color: rgba(201, 107, 75, 0.32);
+  background: #fff8f2;
+}
+
+.manual-editor-save-impact.subtitle {
+  border-color: rgba(15, 118, 110, 0.22);
+  background: #f1faf7;
+}
+
 .manual-editor-video {
   width: 100%;
   border-radius: 12px;
