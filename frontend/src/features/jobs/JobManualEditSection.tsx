@@ -35,6 +35,13 @@ type SubtitleDraft = {
   virtual?: boolean;
 };
 
+type TimelineThumbnailItem = {
+  url: string;
+  time_sec: number;
+  output_time: number | null;
+  kept: boolean;
+};
+
 const REGION_COLOR = "rgba(34, 197, 94, 0.22)";
 const REGION_ACTIVE_COLOR = "rgba(20, 184, 166, 0.36)";
 const MIN_SUBTITLE_DURATION_SEC = 0.08;
@@ -236,6 +243,16 @@ function sourceTimeToOutputTime(sourceTime: number, ranges: OutputRange[]) {
   return lastOutput;
 }
 
+function sourceTimeToOutputThumbnailItem(item: { url: string; time_sec: number }, ranges: OutputRange[]): TimelineThumbnailItem {
+  const sourceTime = Math.max(0, Number(item.time_sec || 0));
+  const activeRange = ranges.find((range) => sourceTime >= range.sourceStart && sourceTime <= range.sourceEnd);
+  return {
+    ...item,
+    output_time: activeRange ? sourceTimeToOutputTime(sourceTime, ranges) : null,
+    kept: Boolean(activeRange),
+  };
+}
+
 export function JobManualEditSection({ job, session, previewAssets, saving, onApply }: JobManualEditSectionProps) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const waveformRef = useRef<HTMLDivElement | null>(null);
@@ -332,6 +349,10 @@ export function JobManualEditSection({ job, session, previewAssets, saving, onAp
         : 0,
     }));
   }, [previewAssets?.duration_sec, previewAssets?.thumbnail_items, previewAssets?.thumbnail_urls]);
+  const timelineThumbnailItems = useMemo(
+    () => thumbnailItems.map((item) => sourceTimeToOutputThumbnailItem(item, projection.ranges)),
+    [projection.ranges, thumbnailItems],
+  );
   const thumbnailStripStyle = {
     "--thumb-width": `${Math.max(76, Math.min(180, waveformZoom * 4))}px`,
   } as CSSProperties;
@@ -1059,21 +1080,23 @@ export function JobManualEditSection({ job, session, previewAssets, saving, onAp
               ) : null}
               {previewAssets.error ? <p className="manual-editor-asset-error">{previewAssets.error}</p> : null}
               {!previewAssets.error && previewAssets.detail ? <p className="manual-editor-asset-detail">{previewAssets.detail}</p> : null}
-              {thumbnailItems.length ? (
+              {timelineThumbnailItems.length ? (
                 <div className="manual-editor-thumbnail-strip" style={thumbnailStripStyle} aria-label="预览缩略图时间轴">
-                  {thumbnailItems.map((item, index) => (
+                  {timelineThumbnailItems.map((item, index) => (
                     <button
                       key={`${item.url}-${index}`}
                       type="button"
                       className={classNames(
                         "manual-editor-thumbnail-button",
+                        !item.kept && "cut",
                         Math.abs(currentSourceTime - item.time_sec) <= Math.max(0.4, waveformZoom / 30) && "active",
                       )}
                       onClick={() => jumpToSourceTime(item.time_sec)}
-                      title={`跳到 ${formatSeconds(item.time_sec)}`}
+                      title={item.kept ? `输出 ${formatSeconds(item.output_time ?? 0)} / 源 ${formatSeconds(item.time_sec)}` : `源 ${formatSeconds(item.time_sec)} 已删除`}
                     >
                       <img src={item.url} alt="" loading="lazy" />
-                      <span>{formatSeconds(item.time_sec)}</span>
+                      <span>{item.kept ? `输出 ${formatSeconds(item.output_time ?? 0)}` : "已删除"}</span>
+                      <small>源 {formatSeconds(item.time_sec)}</small>
                     </button>
                   ))}
                 </div>

@@ -7407,6 +7407,11 @@ textarea.input {
   box-shadow: 0 0 0 2px rgba(201, 107, 75, 0.12);
 }
 
+.manual-editor-thumbnail-button.cut {
+  opacity: 0.58;
+  filter: grayscale(0.7);
+}
+
 .manual-editor-thumbnail-button img {
   width: 100%;
   aspect-ratio: 16 / 9;
@@ -7414,8 +7419,20 @@ textarea.input {
   background: #f8faf7;
 }
 
-.manual-editor-thumbnail-button span {
+.manual-editor-thumbnail-button span,
+.manual-editor-thumbnail-button small {
   padding: 0 6px 6px;
+}
+
+.manual-editor-thumbnail-button span {
+  color: var(--text-main);
+  font-weight: 700;
+}
+
+.manual-editor-thumbnail-button small {
+  margin-top: -6px;
+  color: var(--text-muted);
+  font-size: 10px;
 }
 
 .manual-editor-subtitle-stage {

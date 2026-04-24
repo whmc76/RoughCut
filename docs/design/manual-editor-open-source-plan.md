@@ -223,6 +223,15 @@ Preview asset generation now exposes persistent status for long videos:
 - Failed ffmpeg/proxy generation is preserved in status so refreshing the editor does not hide the failure.
 - The frontend displays stage chips, progress bar, cache version, detail text, and failure reason in the preview asset area.
 
+## Current M11 Implementation
+
+The thumbnail strip now makes the source/output distinction explicit:
+
+- Each thumbnail is mapped against the current keep-segment projection.
+- Kept thumbnails show their corresponding output timeline time plus their original source time.
+- Thumbnails inside removed source ranges are dimmed and labelled as deleted.
+- Clicking a thumbnail still seeks the source preview, but the operator can immediately see whether that frame survives in the rendered output.
+
 ## Guardrails
 
 - Do not copy GPL code from Subtitle Edit, Aegisub, or audiowaveform into RoughCut.
