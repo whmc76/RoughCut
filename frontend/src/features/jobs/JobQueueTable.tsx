@@ -9,6 +9,7 @@ import {
   autoReviewBadgeLabel,
   autoReviewTone,
   enhancementModeLabel,
+  formatCutEvidenceSummary,
   getRestartUnavailableReason,
   isRestartableJobStatus,
   stepLabel,
@@ -88,12 +89,13 @@ function reviewStatusLabel(job: Job): string {
 
 function reviewPreviewText(job: Job, t: (key: string) => string) {
   const { manualDescription, filenameDescription } = splitVideoDescription(job.video_description);
+  const cutEvidenceSummary = formatCutEvidenceSummary(job.timeline_diagnostics);
   if (job.status !== "needs_review") {
     return job.content_summary || job.content_subject || manualDescription || filenameDescription || t("jobs.queue.noSummary");
   }
   const reviewStep = resolvePendingReviewStep(job);
   if (reviewStep?.step_name === "final_review") {
-    return job.quality_summary || job.review_detail || "等待审核成片后继续生成平台文案。";
+    return job.quality_summary || cutEvidenceSummary || job.review_detail || "等待审核成片后继续生成平台文案。";
   }
   return job.content_summary || job.content_subject || job.review_detail || "等待确认摘要后继续剪辑与渲染。";
 }
@@ -195,6 +197,7 @@ export function JobQueueTable({
             {jobs.map((job) => {
               const highlightedReviewAction = isHighlightedReviewAction(job);
               const { filenameDescription } = splitVideoDescription(job.video_description);
+              const cutEvidenceSummary = formatCutEvidenceSummary(job.timeline_diagnostics);
 
               return (
                 <tr key={job.id} className={classNames(selectedJobId === job.id && "selected-row")} onClick={() => onSelect(job.id)}>
@@ -241,6 +244,12 @@ export function JobQueueTable({
                               {autoReviewBadgeLabel(job)}
                             </span>
                             <span className="muted"> {job.auto_review_summary}</span>
+                          </div>
+                        ) : null}
+                        {cutEvidenceSummary ? (
+                          <div className="compact-top">
+                            <span className="status-pill pending">剪辑证据</span>
+                            <span className="muted"> {cutEvidenceSummary}</span>
                           </div>
                         ) : null}
                         {job.avatar_delivery_summary ? (

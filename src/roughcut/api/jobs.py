@@ -3596,12 +3596,19 @@ def _resolve_job_timeline_diagnostics_preview(artifacts: list[Artifact]) -> dict
     high_risk_cuts = [item for item in (diagnostics.get("high_risk_cuts") or []) if isinstance(item, dict)]
     high_energy_keeps = [item for item in (diagnostics.get("high_energy_keeps") or []) if isinstance(item, dict)]
     review_reasons = [str(item).strip() for item in (review_flags.get("review_reasons") or []) if str(item).strip()]
+    cut_evidence_summary = (
+        diagnostics.get("cut_evidence_summary")
+        if isinstance(diagnostics.get("cut_evidence_summary"), dict)
+        else {}
+    )
 
     preview = {
         "review_recommended": bool(review_flags.get("review_recommended")),
         "review_reasons": review_reasons[:3],
         "high_risk_cut_count": len(high_risk_cuts),
         "high_energy_keep_count": len(high_energy_keeps),
+        "protected_visual_cut_count": int(cut_evidence_summary.get("protected_visual_cut_count") or 0),
+        "high_protection_evidence_count": int(cut_evidence_summary.get("high_protection_evidence_count") or 0),
         "llm_reviewed": bool(llm_cut_review.get("reviewed")),
         "llm_candidate_count": int(llm_cut_review.get("candidate_count") or 0),
         "llm_restored_cut_count": int(llm_cut_review.get("restored_cut_count") or 0),
@@ -3613,6 +3620,8 @@ def _resolve_job_timeline_diagnostics_preview(artifacts: list[Artifact]) -> dict
             preview["review_recommended"],
             preview["high_risk_cut_count"],
             preview["high_energy_keep_count"],
+            preview["protected_visual_cut_count"],
+            preview["high_protection_evidence_count"],
             preview["llm_reviewed"],
             preview["llm_restored_cut_count"],
             preview["review_reasons"],

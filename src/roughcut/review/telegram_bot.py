@@ -2119,6 +2119,11 @@ def _build_final_review_diagnostics_lines(variant_timeline_bundle: dict[str, Any
         for item in (diagnostics.get("high_energy_keeps") or [])
         if isinstance(item, dict)
     ]
+    cut_evidence_summary = (
+        diagnostics.get("cut_evidence_summary")
+        if isinstance(diagnostics.get("cut_evidence_summary"), dict)
+        else {}
+    )
 
     lines: list[str] = []
     if review_flags.get("review_recommended"):
@@ -2143,16 +2148,29 @@ def _build_final_review_diagnostics_lines(variant_timeline_bundle: dict[str, Any
             line = f"{line} {summary}"
         lines.append(line)
 
+    if cut_evidence_summary:
+        protected_visual = int(cut_evidence_summary.get("protected_visual_cut_count") or 0)
+        high_protection = int(cut_evidence_summary.get("high_protection_evidence_count") or 0)
+        if protected_visual or high_protection:
+            lines.append(
+                f"- 剪辑证据：{protected_visual} 个 cut 命中过展示保护，"
+                f"{high_protection} 个 cut 带高保护分。"
+            )
+
     for item in high_risk_cuts[:2]:
         start = round(float(item.get("start", 0.0) or 0.0), 2)
         end = round(float(item.get("end", 0.0) or 0.0), 2)
         boundary_keep_energy = round(float(item.get("boundary_keep_energy", 0.0) or 0.0), 2)
         left_role = str(item.get("left_keep_role") or "unknown")
         right_role = str(item.get("right_keep_role") or "unknown")
-        lines.append(
+        evidence_text = _format_cut_evidence_for_diagnostics(item.get("evidence"))
+        line = (
             f"- 高风险 cut {start:.2f}s-{end:.2f}s：边界能量 {boundary_keep_energy:.2f}，"
             f"左侧 {left_role} / 右侧 {right_role}"
         )
+        if evidence_text:
+            line = f"{line}，证据 {evidence_text}"
+        lines.append(line)
 
     if not lines and high_energy_keeps:
         top_keep = max(high_energy_keeps, key=lambda item: float(item.get("keep_energy", 0.0) or 0.0))
@@ -2164,6 +2182,29 @@ def _build_final_review_diagnostics_lines(variant_timeline_bundle: dict[str, Any
             f"- 最高能量保留段 {start:.2f}s-{end:.2f}s：{section_role}，保留能量 {keep_energy:.2f}"
         )
     return lines
+
+
+def _format_cut_evidence_for_diagnostics(value: object) -> str:
+    evidence = value if isinstance(value, dict) else {}
+    if not evidence:
+        return ""
+    parts: list[str] = []
+    visual_score = float(evidence.get("visual_showcase_score", 0.0) or 0.0)
+    language_score = float(evidence.get("language_score", 0.0) or 0.0)
+    protection_score = float(evidence.get("protection_score", 0.0) or 0.0)
+    removal_score = float(evidence.get("removal_score", 0.0) or 0.0)
+    if visual_score >= 0.5:
+        parts.append(f"展示 {visual_score:.2f}")
+    if language_score >= 0.5:
+        parts.append(f"语言 {language_score:.2f}")
+    if protection_score >= 0.5:
+        parts.append(f"保护 {protection_score:.2f}")
+    if removal_score >= 0.5:
+        parts.append(f"删除 {removal_score:.2f}")
+    tags = [str(tag).strip() for tag in (evidence.get("tags") or []) if str(tag).strip()]
+    if tags:
+        parts.append("标签 " + "、".join(tags[:3]))
+    return "；".join(parts[:4])
 
 
 def _build_final_review_validation_lines(variant_timeline_bundle: dict[str, Any] | None) -> list[str]:

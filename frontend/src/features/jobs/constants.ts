@@ -135,3 +135,10 @@ export function autoReviewTone(status: string | null | undefined): string {
   if (status === "blocked") return "pending";
   return "running";
 }
+
+export function formatCutEvidenceSummary(timelineDiagnostics: Job["timeline_diagnostics"] | null | undefined): string | null {
+  const protectedVisualCutCount = timelineDiagnostics?.protected_visual_cut_count ?? 0;
+  const highProtectionEvidenceCount = timelineDiagnostics?.high_protection_evidence_count ?? 0;
+  if (!protectedVisualCutCount && !highProtectionEvidenceCount) return null;
+  return `${protectedVisualCutCount} 个 cut 命中展示保护，${highProtectionEvidenceCount} 个 cut 带高保护分。`;
+}

@@ -2,6 +2,7 @@ import type { Job, JobActivity, Report } from "../../types";
 import { PanelHeader } from "../../components/ui/PanelHeader";
 import { StatCard } from "../../components/ui/StatCard";
 import { JobSubtitleDiagnosticsSection } from "./JobSubtitleDiagnosticsSection";
+import { formatCutEvidenceSummary } from "./constants";
 
 export type FinalReviewJob = Job & {
   quality_score?: number | null;
@@ -106,6 +107,7 @@ export function JobFinalReviewOverlay({
   const issueCodes = (selectedJob.quality_issue_codes ?? []).filter(Boolean);
   const timelineDiagnostics = selectedJob.timeline_diagnostics ?? null;
   const reviewReasons = (timelineDiagnostics?.review_reasons ?? []).filter(Boolean);
+  const cutEvidenceSummary = formatCutEvidenceSummary(timelineDiagnostics);
   const hasQuality = qualityScore !== null || Boolean(qualityGrade) || Boolean(qualitySummary) || issueCodes.length > 0;
   const spotCheckItems = buildSpotCheckItems(report);
   const previewTranscriptItems = buildPreviewTranscriptItems(report);
@@ -278,10 +280,12 @@ export function JobFinalReviewOverlay({
           <div className="stats-grid compact">
             <StatCard label="高风险 Cut" value={timelineDiagnostics.high_risk_cut_count ?? 0} />
             <StatCard label="高能量保留段" value={timelineDiagnostics.high_energy_keep_count ?? 0} />
+            <StatCard label="展示保护 Cut" value={timelineDiagnostics.protected_visual_cut_count ?? 0} />
+            <StatCard label="高保护证据" value={timelineDiagnostics.high_protection_evidence_count ?? 0} />
             <StatCard label="LLM 复核" value={timelineDiagnostics.llm_reviewed ? (timelineDiagnostics.llm_candidate_count ?? 0) : "未启用"} />
             <StatCard label="恢复 Cut" value={timelineDiagnostics.llm_restored_cut_count ?? 0} />
           </div>
-          {timelineDiagnostics.review_recommended || reviewReasons.length || timelineDiagnostics.llm_summary ? (
+          {timelineDiagnostics.review_recommended || reviewReasons.length || cutEvidenceSummary || timelineDiagnostics.llm_summary ? (
             <div className="list-stack top-gap">
               {timelineDiagnostics.review_recommended ? (
                 <article className="activity-card final-review-evidence-card">
@@ -293,6 +297,15 @@ export function JobFinalReviewOverlay({
                         {reason}
                       </div>
                     ))}
+                  </div>
+                </article>
+              ) : null}
+              {cutEvidenceSummary ? (
+                <article className="activity-card final-review-evidence-card">
+                  <div className="detail-key">剪辑证据</div>
+                  <div className="final-review-evidence-copy">
+                    <strong>{cutEvidenceSummary}</strong>
+                    <div className="muted">这些 cut 带有展示保护或高保护分，最终审核时建议优先核对画面是否被误删。</div>
                   </div>
                 </article>
               ) : null}
