@@ -197,6 +197,14 @@ PROFILE_BINDABLE_SETTINGS: tuple[str, ...] = (
     "local_asr_api_base_url",
     "local_asr_model_name",
     "local_asr_display_name",
+    "transcription_chunking_enabled",
+    "transcription_chunk_threshold_sec",
+    "transcription_chunk_size_sec",
+    "transcription_chunk_min_sec",
+    "transcription_chunk_overlap_sec",
+    "transcription_chunk_request_timeout_sec",
+    "transcription_chunk_request_max_retries",
+    "transcription_chunk_request_retry_backoff_sec",
     "llm_mode",
     "llm_routing_mode",
     "reasoning_provider",
@@ -292,6 +300,14 @@ class Settings(BaseSettings):
     local_asr_transcribe_path: str = "/transcribe"
     local_asr_hotwords_field: str = "hotwords"
     local_asr_max_new_tokens: int = 4096
+    transcription_chunking_enabled: bool = True
+    transcription_chunk_threshold_sec: int = 600
+    transcription_chunk_size_sec: int = 60
+    transcription_chunk_min_sec: int = 20
+    transcription_chunk_overlap_sec: float = 1.5
+    transcription_chunk_request_timeout_sec: int = 180
+    transcription_chunk_request_max_retries: int = 2
+    transcription_chunk_request_retry_backoff_sec: float = 5.0
     watch_auto_scan_interval_sec: int = 45
     watch_auto_settle_seconds: int = 45
     watch_auto_merge_enabled: bool = True
@@ -606,8 +622,8 @@ def canonicalize_transcription_provider_name(provider: object) -> str:
 
 def normalize_transcription_provider_name(provider: object) -> str:
     provider_value = canonicalize_transcription_provider_name(provider)
-    if provider_value not in TRANSCRIPTION_MODEL_OPTIONS:
-        provider_value = DEFAULT_TRANSCRIPTION_PROVIDER
+    if provider_value != DEFAULT_TRANSCRIPTION_PROVIDER:
+        return DEFAULT_TRANSCRIPTION_PROVIDER
     return provider_value
 
 
@@ -674,18 +690,7 @@ def _openai_responses_route_likely_unavailable(settings: Any) -> bool:
 
 def resolve_transcription_provider_plan(provider: object, model: object) -> list[tuple[str, str]]:
     provider_value, model_value = normalize_transcription_settings(provider, model)
-    try:
-        start_index = TRANSCRIPTION_PROVIDER_PRIORITY.index(provider_value)
-    except ValueError:
-        start_index = 0
-
-    plan: list[tuple[str, str]] = []
-    for index, candidate in enumerate(TRANSCRIPTION_PROVIDER_PRIORITY):
-        if index < start_index:
-            continue
-        candidate_model = model_value if candidate == provider_value else DEFAULT_TRANSCRIPTION_MODELS[candidate]
-        plan.append((candidate, candidate_model))
-    return plan
+    return [(provider_value, model_value)]
 
 
 def get_settings() -> Settings:

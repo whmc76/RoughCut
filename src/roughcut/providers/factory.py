@@ -125,6 +125,7 @@ def get_transcription_provider(*, provider: str | None = None, model: str | None
         instance = LocalHTTPASRProvider(model_name=model)
     else:
         raise ValueError(f"Unknown transcription provider: {provider}")
+    setattr(instance, "_provider_name", provider)
     _TRANSCRIPTION_PROVIDER_CACHE[cache_key] = instance
     return instance
 

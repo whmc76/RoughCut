@@ -21,6 +21,7 @@ from roughcut.review.content_profile import (
     _mapped_brand_for_model,
     _subject_domain_from_subject_type,
     _text_conflicts_with_verified_identity,
+    apply_source_identity_constraints,
 )
 from roughcut.review.subtitle_consistency import ARTIFACT_TYPE_SUBTITLE_CONSISTENCY_REPORT
 from roughcut.review.subtitle_quality import ARTIFACT_TYPE_SUBTITLE_QUALITY_REPORT
@@ -64,6 +65,7 @@ _NUMERIC_DETAIL_RE = re.compile(
 )
 _IDENTITY_NARRATIVE_FIELDS = ("video_theme", "summary", "hook_line", "visible_text")
 _ENTITY_CANDIDATE_MIN_SCORE = 0.70
+_GENERIC_WORD_SPLIT_BLOCKING_MIN_COUNT = 8
 
 
 @dataclass(slots=True)
@@ -153,6 +155,12 @@ def assess_job_quality(
     canonical_transcript_text = _build_canonical_transcript_text(canonical_transcript_data)
     transcript_context_source = "canonical_transcript_layer" if canonical_transcript_text else "subtitle_items"
     subtitle_text = _build_subtitle_text(subtitle_items, canonical_transcript_text=canonical_transcript_text)
+    if profile:
+        profile = apply_source_identity_constraints(
+            profile,
+            source_name=str(getattr(job, "source_name", "") or ""),
+            transcript_excerpt=subtitle_text,
+        )
     profile_text = _build_profile_text(profile, canonical_transcript_text=canonical_transcript_text)
     completed_step_names = {
         str(step.step_name or "").strip()
@@ -185,6 +193,11 @@ def assess_job_quality(
             for item in (consistency_data.get("warning_reasons") or [])
             if str(item).strip()
         ]
+        if bool(consistency_data.get("blocking")) and consistency_blocking_reasons:
+            consistency_blocking_reasons = _downgrade_stale_generic_word_split_blockers(
+                consistency_blocking_reasons,
+                metrics=consistency_data.get("metrics") if isinstance(consistency_data.get("metrics"), dict) else {},
+            )
         if bool(consistency_data.get("blocking")) and consistency_blocking_reasons:
             issues.append(
                 QualityIssue(
@@ -242,6 +255,10 @@ def assess_job_quality(
         semantic_contamination_detected = semantic_bad_term_total > 0 or any(
             "语义污染" in reason for reason in subtitle_quality_blocking_reasons
         )
+        subtitle_quality_blocking_reasons = _downgrade_stale_generic_word_split_blockers(
+            subtitle_quality_blocking_reasons,
+            metrics=subtitle_quality_metrics,
+        )
         if subtitle_quality_blocking_reasons:
             issues.append(
                 QualityIssue(
@@ -273,7 +290,13 @@ def assess_job_quality(
         review_mode = str(profile.get("review_mode") or "").strip().lower()
         automation = profile.get("automation_review") if isinstance(profile.get("automation_review"), dict) else {}
         automation_score = _safe_float(automation.get("score"))
-        if automation_score is not None and automation_score < 0.75:
+        profile_soft_gate = _is_short_unidentified_profile_sample(
+            job=job,
+            profile=profile,
+            subtitle_items=subtitle_items,
+            subtitle_text=subtitle_text,
+        )
+        if automation_score is not None and automation_score < 0.75 and not profile_soft_gate:
             issues.append(
                 QualityIssue(
                     "low_profile_confidence",
@@ -282,7 +305,12 @@ def assess_job_quality(
                     auto_fix_step="content_profile",
                 )
             )
-        if review_mode not in {"auto_confirmed", "manual_confirmed", ""} and profile_artifact and profile_artifact.artifact_type != "content_profile_final":
+        if (
+            review_mode not in {"auto_confirmed", "manual_confirmed", ""}
+            and profile_artifact
+            and profile_artifact.artifact_type != "content_profile_final"
+            and not profile_soft_gate
+        ):
             issues.append(
                 QualityIssue("profile_unconfirmed", "内容画像仍处于未确认状态", 12.0, auto_fix_step="content_profile")
             )
@@ -293,23 +321,23 @@ def assess_job_quality(
         question = str(profile.get("engagement_question") or "").strip()
         preset_name = str(profile.get("workflow_template") or "").strip()
 
-        if _is_generic_subject_type(subject_type):
+        if _is_generic_subject_type(subject_type) and not profile_soft_gate:
             issues.append(
                 QualityIssue("generic_subject_type", "主体识别过于泛化", 14.0, auto_fix_step="content_profile")
             )
-        if not _is_specific_video_theme(video_theme, preset_name=preset_name):
+        if not _is_specific_video_theme(video_theme, preset_name=preset_name) and not profile_soft_gate:
             issues.append(
                 QualityIssue("generic_video_theme", "视频主题不够具体", 10.0, auto_fix_step="content_profile")
             )
-        if not summary or _is_generic_profile_summary(summary):
+        if (not summary or _is_generic_profile_summary(summary)) and not profile_soft_gate:
             issues.append(
                 QualityIssue("generic_summary", "摘要过于笼统，缺少有效信息", 18.0, auto_fix_step="content_profile")
             )
-        elif len(_normalize_text(summary)) < 14:
+        elif len(_normalize_text(summary)) < 14 and not profile_soft_gate:
             issues.append(
                 QualityIssue("thin_summary", "摘要信息量偏薄", 8.0, auto_fix_step="content_profile")
             )
-        if _is_generic_engagement_question(question):
+        if _is_generic_engagement_question(question) and not profile_soft_gate:
             issues.append(
                 QualityIssue("generic_question", "互动问题过于套路化", 7.0, auto_fix_step="content_profile")
             )
@@ -440,8 +468,8 @@ def assess_job_quality(
         issues.append(
             QualityIssue(
                 "edit_plan_llm_cut_review_timeout",
-                "edit_plan 的高风险 cut LLM 复核超时，当前使用未复核的确定性剪辑结果",
-                6.0,
+                "edit_plan 的高风险 cut LLM 复核超时，当前已回退到确定性证据剪辑结果",
+                2.0,
                 auto_fix_step="edit_plan",
             )
         )
@@ -528,6 +556,70 @@ def _build_subtitle_text(items: Sequence[SubtitleItem], *, canonical_transcript_
         if text:
             parts.append(text)
     return _normalize_text(" ".join(parts))
+
+
+def _is_short_unidentified_profile_sample(
+    *,
+    job: Job,
+    profile: dict[str, Any],
+    subtitle_items: Sequence[SubtitleItem],
+    subtitle_text: str,
+) -> bool:
+    if len(subtitle_items) > 8 and len(_normalize_text(subtitle_text)) >= 80:
+        return False
+    source_name = str(getattr(job, "source_name", "") or "")
+    if _has_informative_source_identity(source_name):
+        return False
+    constraints = profile.get("source_identity_constraints") if isinstance(profile.get("source_identity_constraints"), dict) else {}
+    if bool(constraints.get("authoritative")) and any(
+        str(constraints.get(field_name) or "").strip()
+        for field_name in ("subject_brand", "subject_model", "subject_type", "video_theme")
+    ):
+        return False
+    if str(profile.get("subject_brand") or "").strip() or str(profile.get("subject_model") or "").strip():
+        return False
+    return True
+
+
+def _has_informative_source_identity(source_name: str) -> bool:
+    stem = Path(str(source_name or "").strip()).stem
+    if not stem:
+        return False
+    cleaned = re.sub(r"^(?:IMG|VID|DSC|PXL|CIMG|MVIMG)[-_]?\d+(?:[_-]\d+)*", "", stem, flags=re.IGNORECASE)
+    cleaned = re.sub(r"^\d{8}(?:[-_]\d{6,})?", "", cleaned)
+    cleaned = cleaned.strip(" _-.")
+    if not cleaned:
+        return False
+    if re.fullmatch(r"[a-f0-9]{16,64}", cleaned, flags=re.IGNORECASE):
+        return False
+    return bool(re.search(r"[\u4e00-\u9fffA-Za-z]", cleaned))
+
+
+def _downgrade_stale_generic_word_split_blockers(
+    reasons: Sequence[str],
+    *,
+    metrics: dict[str, Any],
+) -> list[str]:
+    generic_count = _generic_word_split_count_from_metrics_or_reasons(metrics, reasons)
+    if generic_count >= _GENERIC_WORD_SPLIT_BLOCKING_MIN_COUNT:
+        return list(reasons)
+    return [reason for reason in reasons if "普通词跨字幕截断" not in reason]
+
+
+def _generic_word_split_count_from_metrics_or_reasons(metrics: dict[str, Any], reasons: Sequence[str]) -> int:
+    try:
+        count = int(metrics.get("generic_word_split_count") or 0)
+    except (TypeError, ValueError):
+        count = 0
+    if count > 0:
+        return count
+    for reason in reasons:
+        if "普通词跨字幕截断" not in reason:
+            continue
+        match = re.search(r"(\d+)\s*处", reason)
+        if match:
+            return int(match.group(1))
+    return 0
 
 
 def _subtitle_item_to_dict(item: SubtitleItem) -> dict[str, Any]:

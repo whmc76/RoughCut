@@ -46,6 +46,8 @@ _CONSERVATIVE_IDENTITY_SUMMARY_PHRASES = {
 }
 _IDENTITY_HINT_RE = re.compile(r"(MT34|EDC17|EDC37|FXX1|EXO|NOC|FAS|foxbat|OLIGHT|NITECORE|REATE)", re.IGNORECASE)
 _SHORT_FRAGMENT_BLOCKING_MIN_COUNT = 5
+_GENERIC_WORD_SPLIT_BLOCKING_MIN_COUNT = 8
+_GENERIC_WORD_SPLIT_BLOCKING_RATE = 0.012
 
 _SEMANTIC_CONTAMINATION_CODES = {
     "hotword_flashlight_model_knifedrift",
@@ -213,8 +215,14 @@ def build_subtitle_quality_report(
         blocking_reasons.append(f"短碎句率过高 {short_fragment_rate:.2%}")
     elif short_fragment_rate > 0.008:
         warning_reasons.append(f"短碎句率偏高 {short_fragment_rate:.2%}")
-    if generic_word_split_count > 0:
+    generic_word_split_rate = (generic_word_split_count / max(1, total - 1)) if total > 1 else 0.0
+    if (
+        generic_word_split_count >= _GENERIC_WORD_SPLIT_BLOCKING_MIN_COUNT
+        and generic_word_split_rate >= _GENERIC_WORD_SPLIT_BLOCKING_RATE
+    ):
         blocking_reasons.append(f"普通词跨字幕截断 {generic_word_split_count} 处")
+    elif generic_word_split_count > 0:
+        warning_reasons.append(f"普通词跨字幕截断 {generic_word_split_count} 处")
     if filler_rate > 0.01:
         warning_reasons.append(f"独立语气词偏多 {filler_rate:.2%}")
     if low_signal_rate > 0.005:
@@ -226,7 +234,7 @@ def build_subtitle_quality_report(
 
     score = 100.0
     score -= float(bad_term_total * 6)
-    score -= float(generic_word_split_count * 8)
+    score -= min(18.0, float(generic_word_split_count * 3))
     score -= min(25.0, short_fragment_rate * 180.0)
     score -= min(10.0, filler_rate * 120.0)
     score -= min(8.0, low_signal_rate * 160.0)
@@ -251,6 +259,7 @@ def build_subtitle_quality_report(
             "low_signal_count": low_signal_count,
             "short_fragment_count": short_fragment_count,
             "generic_word_split_count": generic_word_split_count,
+            "generic_word_split_rate": round(generic_word_split_rate, 4),
             "short_fragment_rate": round(short_fragment_rate, 4),
             "filler_rate": round(filler_rate, 4),
             "low_signal_rate": round(low_signal_rate, 4),

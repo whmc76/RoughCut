@@ -51,6 +51,8 @@ export type Job = {
     review_reasons?: string[];
     high_risk_cut_count?: number;
     high_energy_keep_count?: number;
+    protected_visual_cut_count?: number;
+    high_protection_evidence_count?: number;
     llm_reviewed?: boolean;
     llm_candidate_count?: number;
     llm_restored_cut_count?: number;
@@ -782,6 +784,12 @@ export type Config = {
   local_asr_api_base_url: string;
   local_asr_model_name: string;
   local_asr_display_name: string;
+  transcription_chunking_enabled: boolean;
+  transcription_chunk_threshold_sec: number;
+  transcription_chunk_size_sec: number;
+  transcription_chunk_min_sec: number;
+  transcription_chunk_overlap_sec: number;
+  transcription_chunk_request_timeout_sec: number;
   avatar_provider: string;
   avatar_api_key_set: boolean;
   avatar_presenter_id: string;
@@ -800,6 +808,7 @@ export type Config = {
   max_upload_size_mb: number;
   max_video_duration_sec: number;
   ffmpeg_timeout_sec: number;
+  transcribe_runtime_timeout_sec: number;
   allowed_extensions: string[];
   preferred_ui_language: string;
   telegram_agent_enabled: boolean;

@@ -251,7 +251,7 @@ def _build_profile_payload(
         "dirty_keys": dirty_keys,
         "dirty_details": dirty_details,
         "llm_mode": str(config_snapshot.get("llm_mode") or "performance"),
-        "transcription_provider": str(config_snapshot.get("transcription_provider") or "openai"),
+        "transcription_provider": str(config_snapshot.get("transcription_provider") or "local_http_asr"),
         "transcription_model": str(config_snapshot.get("transcription_model") or ""),
         "transcription_dialect": str(config_snapshot.get("transcription_dialect") or DEFAULT_TRANSCRIPTION_DIALECT),
         "reasoning_provider": str(config_snapshot.get("reasoning_provider") or DEFAULT_REASONING_PROVIDER),

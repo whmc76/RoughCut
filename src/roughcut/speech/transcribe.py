@@ -15,6 +15,7 @@ from roughcut.db.models import Artifact, FactClaim, JobStep, SubtitleCorrection,
 from roughcut.config import get_settings
 from roughcut.providers.factory import get_transcription_provider, resolve_transcription_provider_plan
 from roughcut.providers.transcription.base import TranscriptResult, TranscriptSegment as ProviderTranscriptSegment, TranscriptionProgressCallback, WordTiming
+from roughcut.providers.transcription.chunking import extract_chunking_summary
 from roughcut.review.evidence_types import ARTIFACT_TYPE_TRANSCRIPT_EVIDENCE
 from roughcut.review.hotword_learning import extract_prompt_hotwords, record_prompted_hotwords
 from roughcut.review.subtitle_memory import apply_domain_term_corrections
@@ -244,6 +245,7 @@ async def persist_transcript_result(
 ) -> TranscriptResult:
     settings = get_settings()
     prompt_hotwords = extract_prompt_hotwords(prompt)
+    chunking_summary = extract_chunking_summary(result.raw_payload if isinstance(result.raw_payload, dict) else {})
     result = _normalize_transcript_result(
         result,
         glossary_terms=glossary_terms or [],
@@ -287,6 +289,7 @@ async def persist_transcript_result(
             "segment_count": len(result.segments),
             "provider": selected_provider or result.provider,
             "model": selected_model or result.model,
+            "chunking": _json_safe_value(chunking_summary),
             "alignment": _json_safe_value(deepcopy(result.alignment)),
             "attempts": [
                 *attempt_errors,
@@ -318,6 +321,7 @@ async def persist_transcript_result(
                     "duration": result.duration,
                     "provider": result.provider or selected_provider,
                     "model": result.model or selected_model,
+                    "chunking": _json_safe_value(chunking_summary),
                     "prompt": str(prompt or ""),
                     "prompt_hotwords": prompt_hotwords,
                     "prompt_hotword_count": len(prompt_hotwords),
