@@ -74,6 +74,7 @@ def test_learned_hotwords_are_prioritized_in_transcription_prompt() -> None:
         workflow_template="unboxing_standard",
         review_memory=review_memory,
         dialect_profile="mandarin",
+        content_profile={"subject_type": "折刀"},
     )
 
     hotwords = extract_prompt_hotwords(prompt)
@@ -81,3 +82,43 @@ def test_learned_hotwords_are_prioritized_in_transcription_prompt() -> None:
     assert "NOC折刀" in hotwords[:4]
     assert len(hotwords) <= 12
     assert len(prompt) <= 320
+
+
+def test_transcription_prompt_filters_cross_scope_terms_for_flashlight() -> None:
+    review_memory = {
+        "subject_domain": "edc",
+        "terms": [
+            {"term": "OLIGHT", "count": 9, "domain": "flashlight", "category_scope": "flashlight"},
+            {"term": "掠夺者2 mini", "count": 8, "domain": "flashlight", "category_scope": "flashlight"},
+            {"term": "BOLTBOAT", "count": 10, "domain": "bag", "category_scope": "bag"},
+            {"term": "NOC MT34", "count": 10, "domain": "knife", "category_scope": "knife"},
+        ],
+        "transcription_seed_term_details": [
+            {"term": "OLIGHT", "domain": "flashlight", "category_scope": "flashlight"},
+            {"term": "掠夺者2 mini", "domain": "flashlight", "category_scope": "flashlight"},
+            {"term": "BOLTBOAT", "domain": "bag", "category_scope": "bag"},
+        ],
+        "learned_hotwords": [
+            {"term": "OLIGHT", "canonical_form": "OLIGHT", "subject_domain": "flashlight"},
+            {"term": "BOLTBOAT", "canonical_form": "BOLTBOAT", "subject_domain": "bag"},
+        ],
+        "aliases": [
+            {"wrong": "傲雷", "correct": "OLIGHT"},
+            {"wrong": "船包", "correct": "BOLTBOAT"},
+        ],
+    }
+
+    prompt = build_transcription_prompt(
+        source_name="傲雷掠夺者2 mini 手电开箱.mp4",
+        workflow_template="unboxing_standard",
+        review_memory=review_memory,
+        dialect_profile="mandarin",
+        content_profile={"subject_type": "手电"},
+    )
+
+    hotwords = extract_prompt_hotwords(prompt)
+    assert "OLIGHT" in hotwords
+    assert "掠夺者2 mini" in hotwords
+    assert "BOLTBOAT" not in hotwords
+    assert "NOC MT34" not in hotwords
+    assert "船包=BOLTBOAT" not in prompt

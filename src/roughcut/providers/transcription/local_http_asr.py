@@ -27,6 +27,7 @@ from roughcut.providers.transcription.chunking import (
     resolve_audio_chunk_config,
     should_chunk_audio,
 )
+from roughcut.review.hotword_learning import extract_prompt_hotwords
 
 
 class LocalHTTPASRProvider(TranscriptionProvider):
@@ -47,7 +48,7 @@ class LocalHTTPASRProvider(TranscriptionProvider):
         progress_callback: TranscriptionProgressCallback | None = None,
     ) -> TranscriptResult:
         settings = get_settings()
-        context = str(prompt or "").strip() or None
+        context = self._resolve_hotword_context(prompt)
         max_new_tokens = int(getattr(settings, "local_asr_max_new_tokens", 4096) or 4096)
         chunk_config = resolve_audio_chunk_config(settings)
         probed_duration = probe_audio_duration(audio_path)
@@ -191,7 +192,17 @@ class LocalHTTPASRProvider(TranscriptionProvider):
             },
             raw_segments=raw_segments or list(repaired_segments),
             context=context,
+            hotword=context,
         )
+
+    def _resolve_hotword_context(self, prompt: str | None) -> str | None:
+        text = str(prompt or "").strip()
+        if not text:
+            return None
+        hotwords = extract_prompt_hotwords(text)
+        if hotwords:
+            return ", ".join(hotwords[:16])
+        return text[:160]
 
     async def _post_chunk_transcribe_request(
         self,
@@ -314,6 +325,7 @@ class LocalHTTPASRProvider(TranscriptionProvider):
                         raw_payload=payload_to_dict(payload),
                         raw_text=text,
                         context=context,
+                        hotword=context,
                     )
                 ]
 
@@ -342,6 +354,7 @@ class LocalHTTPASRProvider(TranscriptionProvider):
             raw_payload=payload_to_dict(payload),
             raw_segments=raw_segments_copy,
             context=context,
+            hotword=context,
         )
 
     def _extract_segment_items(self, payload: dict[str, Any]) -> list[dict[str, Any]]:

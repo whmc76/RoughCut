@@ -141,7 +141,7 @@ from roughcut.review.platform_copy import (
     save_platform_packaging_markdown,
 )
 from roughcut.review.evidence_types import build_correction_framework_trace
-from roughcut.review.subtitle_memory import build_subtitle_review_memory, build_transcription_prompt
+from roughcut.review.subtitle_memory import build_subtitle_review_memory, build_transcription_prompt, resolve_transcription_category_scope
 from roughcut.review.subtitle_consistency import (
     ARTIFACT_TYPE_SUBTITLE_CONSISTENCY_REPORT,
     build_subtitle_consistency_report,
@@ -183,7 +183,7 @@ from roughcut.speech.subtitle_pipeline import (
     build_subtitle_projection_layer,
     build_transcript_fact_layer,
 )
-from roughcut.speech.transcribe import persist_empty_transcript_result, transcribe_audio
+from roughcut.speech.transcribe import _normalize_semantic_contamination_text, persist_empty_transcript_result, transcribe_audio
 from roughcut.storage.s3 import get_storage, job_key
 from roughcut.telegram.review_notification_service import enqueue_review_notification
 from roughcut.usage import track_step_usage, track_usage_operation
@@ -252,6 +252,57 @@ _SUBTITLE_COPY_HOOK_LEADS = (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_subtitle_semantic_cleanup_scope(
+    *,
+    job: Any,
+    content_profile: dict[str, Any] | None,
+    review_memory: dict[str, Any] | None,
+) -> str:
+    scope_hint = " ".join(
+        str(value or "")
+        for value in (
+            getattr(job, "source_name", ""),
+            (content_profile or {}).get("subject_domain"),
+            (content_profile or {}).get("subject_type"),
+            (content_profile or {}).get("video_theme"),
+            (content_profile or {}).get("summary"),
+        )
+    ).lower()
+    if "折刀" in scope_hint or "knife" in scope_hint:
+        return "knife"
+    if any(token in scope_hint for token in ("手电", "电筒", "flashlight", "edc17", "edc23", "edc37")):
+        return "flashlight"
+    if any(token in scope_hint for token in ("双肩包", "机能包", "背包", "bag")):
+        return "bag"
+    category_scope = resolve_transcription_category_scope(review_memory)
+    if category_scope in {"knife", "flashlight", "bag"}:
+        return category_scope
+    return category_scope
+
+
+def _apply_subtitle_semantic_cleanup(
+    subtitle_items: list[Any],
+    *,
+    job: Any,
+    content_profile: dict[str, Any] | None,
+    review_memory: dict[str, Any] | None,
+) -> int:
+    category_scope = _resolve_subtitle_semantic_cleanup_scope(
+        job=job,
+        content_profile=content_profile,
+        review_memory=review_memory,
+    )
+    cleaned_count = 0
+    for item in subtitle_items:
+        original_text = str(getattr(item, "text_final", None) or getattr(item, "text_norm", None) or getattr(item, "text_raw", None) or "").strip()
+        cleaned_text = _normalize_semantic_contamination_text(original_text, category_scope=category_scope)
+        if cleaned_text != original_text:
+            item.text_final = cleaned_text
+            cleaned_count += 1
+    return cleaned_count
+
 
 _TRANSCRIPTION_PROVIDER_LABELS: dict[str, str] = {
     "openai": "OpenAI",
@@ -4344,6 +4395,7 @@ async def run_transcribe(job_id: str) -> dict:
             workflow_template=job.workflow_template,
             review_memory=review_memory,
             dialect_profile=settings.transcription_dialect,
+            content_profile=source_context_profile,
         )
 
         # Get audio artifact key when the source contains an audio stream.
@@ -4802,6 +4854,13 @@ async def run_subtitle_postprocess(job_id: str) -> dict:
             review_memory=review_memory,
             allow_llm=False,
         )
+        semantic_cleanup_count = _apply_subtitle_semantic_cleanup(
+            items,
+            job=job,
+            content_profile=content_profile,
+            review_memory=review_memory,
+        )
+        polished_count += semantic_cleanup_count
         subtitle_quality_report = build_subtitle_quality_report_from_items(
             subtitle_items=items,
             source_name=job.source_name,
@@ -5566,21 +5625,28 @@ async def run_glossary_review(job_id: str) -> dict:
             exclude_job_id=job.id,
         )
 
+        review_memory = build_subtitle_review_memory(
+            workflow_template=job.workflow_template,
+            subject_domain=subject_domain,
+            glossary_terms=effective_glossary_terms,
+            user_memory=user_memory,
+            recent_subtitles=subtitle_dicts + related_subtitles + recent_subtitles,
+            content_profile=content_profile,
+            include_recent_terms=False,
+            include_recent_examples=False,
+        )
         polished_count = await polish_subtitle_items(
             subtitle_items,
             content_profile=content_profile,
             glossary_terms=effective_glossary_terms,
-            review_memory=build_subtitle_review_memory(
-                workflow_template=job.workflow_template,
-                subject_domain=subject_domain,
-                glossary_terms=effective_glossary_terms,
-                user_memory=user_memory,
-                recent_subtitles=subtitle_dicts + related_subtitles + recent_subtitles,
-                content_profile=content_profile,
-                include_recent_terms=False,
-                include_recent_examples=False,
-            ),
+            review_memory=review_memory,
             allow_llm=False,
+        )
+        polished_count += _apply_subtitle_semantic_cleanup(
+            subtitle_items,
+            job=job,
+            content_profile=content_profile,
+            review_memory=review_memory,
         )
 
         content_profile = _apply_identity_gate_to_content_profile(content_profile)

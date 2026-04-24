@@ -68,8 +68,30 @@ _CATEGORY_RULES: dict[str, dict[str, tuple[str, ...]]] = {
         "forbidden": ("折刀", "折刀帕", "开合", "锁定", "背夹", "柄材", "钢材", "手电", "电筒", "流明", "灯珠"),
     },
 }
-
-
+_BAG_CARRY_CONTEXT_TOKENS: tuple[str, ...] = (
+    "包里",
+    "包内",
+    "这个包",
+    "这包",
+    "双肩包",
+    "机能包",
+    "胸包",
+    "斜挎包",
+    "通勤包",
+    "收纳",
+    "分仓",
+    "挂点",
+)
+_BAG_CARRY_ACTION_TOKENS: tuple[str, ...] = (
+    "放",
+    "装",
+    "塞",
+    "带",
+    "收纳",
+    "装下",
+    "放下",
+    "背负",
+)
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Audit subtitle content pollution for a batch report.")
     parser.add_argument("--batch-report", type=Path, required=True)
@@ -176,6 +198,22 @@ def _enrich_finding(item: dict[str, Any]) -> dict[str, Any]:
     return enriched
 
 
+def _is_bag_carry_context(line: str) -> bool:
+    text = str(line or "").strip()
+    if not text:
+        return False
+    has_bag_context = any(token in text for token in _BAG_CARRY_CONTEXT_TOKENS)
+    has_carry_action = any(token in text for token in _BAG_CARRY_ACTION_TOKENS)
+    has_listed_contents = any(token in text for token in ("包括", "比如", "像是", "什么的", "工艺钳", "工具钳", "充电宝"))
+    return has_bag_context and (has_carry_action or has_listed_contents)
+
+
+def _filter_cross_domain_tokens(category: str, line: str, tokens: list[str]) -> list[str]:
+    if category == "bag" and _is_bag_carry_context(line):
+        return [token for token in tokens if token not in {"手电", "电筒", "流明", "灯珠"}]
+    return tokens
+
+
 async def _load_render_outputs_by_job(job_ids: list[str]) -> dict[str, dict[str, Any]]:
     session_factory = get_session_factory()
     async with session_factory() as session:
@@ -204,6 +242,7 @@ def _audit_job(job: dict[str, Any], render_outputs: dict[str, Any]) -> dict[str,
     forbidden_tokens = _CATEGORY_RULES.get(category, {}).get("forbidden", ())
     for line_no, line in enumerate(lines, start=1):
         matched_forbidden = [token for token in forbidden_tokens if token in line]
+        matched_forbidden = _filter_cross_domain_tokens(category, line, matched_forbidden)
         if matched_forbidden:
             blocking_findings.append(
                 {

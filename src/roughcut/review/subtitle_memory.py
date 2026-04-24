@@ -355,7 +355,9 @@ def build_subtitle_review_memory(
     seen_examples: set[str] = set()
     seen_aliases: set[tuple[str, str]] = set()
     transcription_seed_terms: list[str] = []
+    transcription_seed_term_details: list[dict[str, Any]] = []
     seen_transcription_seeds: set[str] = set()
+    term_metadata: dict[str, dict[str, Any]] = {}
     builtin_glossary_terms = resolve_builtin_glossary_terms(
         workflow_template=workflow_template,
         content_profile=content_profile,
@@ -406,74 +408,99 @@ def build_subtitle_review_memory(
         ]
     )
 
-    def remember_term(term: Any, weight: int) -> None:
+    def remember_term(term: Any, weight: int, *, metadata: dict[str, Any] | None = None) -> None:
         value = _normalize_term(term)
         if not value:
             return
         if not _term_supported_by_subject_domain(value, resolved_subject_domain):
             return
         term_scores[value] += max(1, weight)
+        if metadata:
+            existing = term_metadata.get(value) or {}
+            merged = dict(existing)
+            for key in ("domain", "category_scope", "source_kind"):
+                candidate = str(metadata.get(key) or "").strip()
+                if candidate and not merged.get(key):
+                    merged[key] = candidate
+            if merged:
+                term_metadata[value] = merged
 
     for key in ("subject_brand", "subject_model", "subject_type", "video_theme"):
-        remember_term((content_profile or {}).get(key), 5)
+        remember_term((content_profile or {}).get(key), 5, metadata={"source_kind": "content_profile"})
 
     for text in manual_guidance_texts:
-        remember_term(text, 4)
+        remember_term(text, 4, metadata={"source_kind": "manual_guidance"})
         for token in _extract_domain_terms(text):
-            remember_term(token, 4)
+            remember_term(token, 4, metadata={"source_kind": "manual_guidance"})
         for token in _extract_hotword_candidates(text):
-            remember_term(token, 3)
+            remember_term(token, 3, metadata={"source_kind": "manual_guidance"})
         for token in _extract_compound_domain_terms(text):
-            remember_term(token, 10)
+            remember_term(token, 10, metadata={"source_kind": "manual_guidance"})
 
     for entity in confirmed_entities:
-        remember_term(entity.get("brand"), 8)
-        remember_term(entity.get("model"), 8)
+        entity_metadata = {
+            "domain": str(entity.get("subject_domain") or "").strip(),
+            "source_kind": "confirmed_entity",
+        }
+        remember_term(entity.get("brand"), 8, metadata=entity_metadata)
+        remember_term(entity.get("model"), 8, metadata=entity_metadata)
         for phrase in entity.get("phrases") or []:
-            remember_term(phrase, 8)
+            remember_term(phrase, 8, metadata=entity_metadata)
         for item in entity.get("model_aliases") or []:
-            remember_term(item.get("correct"), 7)
+            remember_term(item.get("correct"), 7, metadata=entity_metadata)
 
     for item in (user_memory or {}).get("keyword_preferences") or []:
-        remember_term(item.get("keyword"), 4)
+        remember_term(item.get("keyword"), 4, metadata={"source_kind": "keyword_preference"})
         for token in _extract_domain_terms(str(item.get("keyword") or "")):
-            remember_term(token, 3)
+            remember_term(token, 3, metadata={"source_kind": "keyword_preference"})
         for token in _extract_hotword_candidates(str(item.get("keyword") or "")):
-            remember_term(token, 2)
+            remember_term(token, 2, metadata={"source_kind": "keyword_preference"})
         for token in _extract_compound_domain_terms(str(item.get("keyword") or "")):
-            remember_term(token, 8)
+            remember_term(token, 8, metadata={"source_kind": "keyword_preference"})
 
     for item in (user_memory or {}).get("phrase_preferences") or []:
-        remember_term(item.get("phrase"), 9)
+        remember_term(item.get("phrase"), 9, metadata={"source_kind": "phrase_preference"})
         for token in _extract_compound_domain_terms(str(item.get("phrase") or "")):
-            remember_term(token, 10)
+            remember_term(token, 10, metadata={"source_kind": "phrase_preference"})
 
     for item in (user_memory or {}).get("learned_hotwords") or []:
-        remember_term(item.get("canonical_form") or item.get("term"), 9)
+        hotword_metadata = {
+            "domain": str(item.get("subject_domain") or "").strip(),
+            "source_kind": "learned_hotword",
+        }
+        remember_term(item.get("canonical_form") or item.get("term"), 9, metadata=hotword_metadata)
         for alias in item.get("aliases") or []:
-            remember_term(alias, 5)
+            remember_term(alias, 5, metadata=hotword_metadata)
 
     field_preferences = (user_memory or {}).get("field_preferences") or {}
     for key in ("subject_brand", "subject_model", "subject_type", "video_theme"):
         for item in field_preferences.get(key) or []:
-            remember_term(item.get("value"), 4)
+            remember_term(item.get("value"), 4, metadata={"source_kind": "field_preference"})
             for token in _extract_compound_domain_terms(str(item.get("value") or "")):
-                remember_term(token, 8)
+                remember_term(token, 8, metadata={"source_kind": "field_preference"})
 
     for key in ("subject_brand", "subject_model", "subject_type", "video_theme", "summary", "hook_line"):
         value = (content_profile or {}).get(key)
-        remember_term(value, 4 if key in {"subject_brand", "subject_model", "subject_type"} else 3)
+        remember_term(
+            value,
+            4 if key in {"subject_brand", "subject_model", "subject_type"} else 3,
+            metadata={"source_kind": "content_profile"},
+        )
         for token in _extract_compound_domain_terms(str(value or "")):
-            remember_term(token, 10 if key in {"video_theme", "summary", "hook_line"} else 8)
+            remember_term(
+                token,
+                10 if key in {"video_theme", "summary", "hook_line"} else 8,
+                metadata={"source_kind": "content_profile"},
+            )
 
     for item in (user_memory or {}).get("recent_corrections") or []:
         corrected_value = item.get("corrected_value")
         original_value = item.get("original_value")
-        remember_term(corrected_value, 4)
+        remember_term(corrected_value, 4, metadata={"source_kind": "recent_correction"})
         for token in _extract_hotword_candidates(str(corrected_value or "")):
-            remember_term(token, 3)
+            remember_term(token, 3, metadata={"source_kind": "recent_correction"})
         for token in _extract_compound_domain_terms(str(corrected_value or "")):
-            remember_term(token, 10)
+            remember_term(token, 10, metadata={"source_kind": "recent_correction"})
         if _should_promote_correction_alias(original_value, corrected_value):
             wrong = _normalize_alias_value(original_value)
             correct = _normalize_alias_value(corrected_value)
@@ -483,13 +510,24 @@ def build_subtitle_review_memory(
 
     for term in effective_glossary_terms:
         is_transcription_seed = _workflow_template_matches_transcription_seed(term, workflow_template)
+        term_metadata_payload = {
+            "domain": str(term.get("domain") or "").strip(),
+            "category_scope": ",".join(_normalize_category_scopes(term.get("category_scope"))),
+            "source_kind": "glossary",
+        }
         if is_transcription_seed:
             correct_form = _normalize_term(term.get("correct_form"))
             if correct_form:
                 if correct_form not in seen_transcription_seeds:
                     seen_transcription_seeds.add(correct_form)
                     transcription_seed_terms.append(correct_form)
-                remember_term(correct_form, 3)
+                    transcription_seed_term_details.append(
+                        {
+                            "term": correct_form,
+                            **{key: value for key, value in term_metadata_payload.items() if value},
+                        }
+                    )
+                remember_term(correct_form, 3, metadata=term_metadata_payload)
         if not _glossary_term_supported_by_review_context(
             term,
             subject_domain=resolved_subject_domain,
@@ -526,11 +564,11 @@ def build_subtitle_review_memory(
                     base_weight = 1
                     fallback_weight = 1
             if not term_domain:
-                remember_term(correct_form, base_weight + context_bonus)
+                remember_term(correct_form, base_weight + context_bonus, metadata=term_metadata_payload)
             elif term_domain in direct_domains:
-                remember_term(correct_form, base_weight + context_bonus)
+                remember_term(correct_form, base_weight + context_bonus, metadata=term_metadata_payload)
             else:
-                remember_term(correct_form, fallback_weight + context_bonus)
+                remember_term(correct_form, fallback_weight + context_bonus, metadata=term_metadata_payload)
 
     for row in recent_subtitles or []:
         text = _clean_example_text(
@@ -542,11 +580,11 @@ def build_subtitle_review_memory(
             continue
         if include_recent_terms:
             for token in _extract_domain_terms(text):
-                remember_term(token, 2)
+                remember_term(token, 2, metadata={"source_kind": "recent_subtitle"})
             for token in _extract_hotword_candidates(text):
-                remember_term(token, 1)
+                remember_term(token, 1, metadata={"source_kind": "recent_subtitle"})
             for token in _extract_compound_domain_terms(text):
-                remember_term(token, 8)
+                remember_term(token, 8, metadata={"source_kind": "recent_subtitle"})
         if include_recent_examples and _text_has_domain_signal(text) and text not in seen_examples:
             seen_examples.add(text)
             examples.append(
@@ -559,7 +597,11 @@ def build_subtitle_review_memory(
             break
 
     ranked_terms = [
-        {"term": term, "count": count}
+        {
+            "term": term,
+            "count": count,
+            **term_metadata.get(term, {}),
+        }
         for term, count in term_scores.most_common(term_limit)
     ]
     ranked_term_values = {
@@ -577,7 +619,13 @@ def build_subtitle_review_memory(
         correct_form = _normalize_term(term.get("correct_form"))
         if not correct_form or correct_form in ranked_term_values:
             continue
-        ranked_terms.append({"term": correct_form, "count": int(term_scores.get(correct_form) or 1)})
+        ranked_terms.append(
+            {
+                "term": correct_form,
+                "count": int(term_scores.get(correct_form) or 1),
+                **term_metadata.get(correct_form, {}),
+            }
+        )
         ranked_term_values.add(correct_form)
     ranked_term_order = [str(item.get("term") or "").strip() for item in ranked_terms if item.get("term")]
     ranked_term_values = set(ranked_term_order)
@@ -648,6 +696,7 @@ def build_subtitle_review_memory(
         "subject_domain": resolved_subject_domain or "",
         "terms": ranked_terms,
         "transcription_seed_terms": transcription_seed_terms[:16],
+        "transcription_seed_term_details": transcription_seed_term_details[:16],
         "aliases": alias_pairs[:120],
         "confirmed_entities": confirmed_entities[:6],
         "negative_alias_pairs": list((user_memory or {}).get("negative_alias_pairs") or [])[:40],
@@ -875,12 +924,149 @@ def _summarize_subtitle_review_memory(
     return "\n".join(lines)
 
 
+def _category_scope_from_domain(value: Any) -> str:
+    raw = str(value or "").strip().lower()
+    if raw in {"knife", "flashlight", "bag", "tools"}:
+        return raw
+    normalized = str(normalize_subject_domain(raw) or raw or "").strip().lower()
+    if normalized == "functional":
+        return "bag"
+    if normalized in {"tools", "knife", "flashlight", "bag"}:
+        return normalized
+    return ""
+
+
+def _category_scopes_for_text(text: Any) -> set[str]:
+    compact = str(text or "").strip()
+    matched: set[str] = set()
+    if not compact:
+        return matched
+    for scope, keywords in _CATEGORY_SCOPE_KEYWORDS.items():
+        if any(keyword in compact for keyword in keywords):
+            matched.add(scope)
+    return matched
+
+
+def resolve_transcription_category_scope(
+    review_memory: dict[str, Any] | None,
+    *,
+    workflow_template: str | None = None,
+    source_name: str = "",
+    content_profile: dict[str, Any] | None = None,
+) -> str:
+    explicit_subject_type_scopes = _category_scopes_for_text((content_profile or {}).get("subject_type"))
+    if len(explicit_subject_type_scopes) == 1:
+        return next(iter(explicit_subject_type_scopes))
+
+    scope_scores: Counter[str] = Counter()
+    fallback_scope_scores: Counter[str] = Counter()
+    source_kind_weights = {
+        "content_profile": 6,
+        "manual_guidance": 5,
+        "confirmed_entity": 5,
+        "learned_hotword": 4,
+        "field_preference": 3,
+        "keyword_preference": 3,
+        "phrase_preference": 3,
+        "recent_correction": 3,
+        "glossary": 1,
+        "recent_subtitle": 1,
+    }
+
+    def note_scope(scope: str, weight: int, *, fallback: bool = False) -> None:
+        normalized = str(scope or "").strip().lower()
+        if normalized in _CATEGORY_SCOPE_KEYWORDS:
+            target = fallback_scope_scores if fallback else scope_scores
+            target[normalized] += max(1, weight)
+
+    def note_text_scopes(text: Any, weight: int, *, fallback: bool = False) -> None:
+        for scope in _category_scopes_for_text(text):
+            note_scope(scope, weight, fallback=fallback)
+
+    note_text_scopes(source_name, 8)
+    for key, weight in (
+        ("subject_type", 8),
+        ("subject_model", 6),
+        ("subject_brand", 5),
+        ("video_theme", 4),
+        ("summary", 4),
+        ("hook_line", 3),
+    ):
+        note_text_scopes((content_profile or {}).get(key), weight)
+
+    for item in (review_memory or {}).get("transcription_seed_term_details") or []:
+        note_scope(str(item.get("category_scope") or "").split(",")[0], 7)
+        note_scope(_category_scope_from_domain(item.get("domain")), 6)
+        note_text_scopes(item.get("term"), 4)
+
+    for item in (review_memory or {}).get("terms") or []:
+        weight = max(1, min(int(item.get("count") or 1), 6))
+        source_kind = str(item.get("source_kind") or "").strip()
+        source_weight = int(source_kind_weights.get(source_kind, 2))
+        use_fallback = source_kind in {"glossary", "recent_subtitle"}
+        note_scope(str(item.get("category_scope") or "").split(",")[0], source_weight + 1, fallback=use_fallback)
+        note_scope(_category_scope_from_domain(item.get("domain")), source_weight, fallback=use_fallback)
+        note_text_scopes(item.get("term"), max(source_weight, min(weight, 4)), fallback=use_fallback)
+
+    for entity in (review_memory or {}).get("confirmed_entities") or []:
+        note_scope(_category_scope_from_domain(entity.get("subject_domain")), 7)
+        for candidate in (
+            entity.get("subject_type"),
+            entity.get("brand"),
+            entity.get("model"),
+            *((entity.get("phrases") or [])[:4]),
+        ):
+            note_text_scopes(candidate, 5)
+
+    detected_domains = detect_glossary_domains(
+        workflow_template=workflow_template,
+        content_profile=content_profile,
+        subtitle_items=None,
+        source_name=source_name,
+    )
+    for domain in detected_domains:
+        note_scope(_category_scope_from_domain(domain), 2, fallback=True)
+
+    selected_scores = scope_scores if scope_scores else fallback_scope_scores
+    if not selected_scores:
+        return ""
+    scope, score = selected_scores.most_common(1)[0]
+    runner_up = selected_scores.most_common(2)
+    if len(runner_up) > 1 and score <= runner_up[1][1]:
+        return ""
+    return scope
+
+
+def _term_item_supported_by_transcription_scope(item: dict[str, Any], scope: str) -> bool:
+    normalized_scope = str(scope or "").strip().lower()
+    if not normalized_scope:
+        return True
+    supported_scopes: set[str] = set()
+    supported_scopes.update(
+        value.strip().lower()
+        for value in str(item.get("category_scope") or "").split(",")
+        if value.strip()
+    )
+    domain_scope = _category_scope_from_domain(item.get("domain"))
+    if domain_scope:
+        supported_scopes.add(domain_scope)
+    supported_scopes.update(_category_scopes_for_text(item.get("term")))
+    if not supported_scopes:
+        subject_domain_scope = _category_scope_from_domain(item.get("subject_domain"))
+        if subject_domain_scope:
+            supported_scopes.add(subject_domain_scope)
+    if not supported_scopes:
+        return True
+    return normalized_scope in supported_scopes
+
+
 def build_transcription_prompt(
     *,
     source_name: str,
     workflow_template: str | None = None,
     review_memory: dict[str, Any] | None,
     dialect_profile: str | None = None,
+    content_profile: dict[str, Any] | None = None,
 ) -> str:
     snippets: list[str] = []
 
@@ -890,21 +1076,30 @@ def build_transcription_prompt(
         if dialect_spec["prompt_hint"]:
             snippets.append(str(dialect_spec["prompt_hint"]).rstrip("。.!！？；;"))
 
-    dominant_domains = _select_prompt_dominant_domains(
+    dominant_domains = _select_prompt_dominant_domains(review_memory, workflow_template=workflow_template)
+    category_scope = resolve_transcription_category_scope(
         review_memory,
         workflow_template=workflow_template,
+        source_name=source_name,
+        content_profile=content_profile,
     )
-    base_terms = [
-        str(item.get("term") or "").strip()
+    term_items = [
+        dict(item)
         for item in (review_memory or {}).get("terms") or []
-        if _prompt_term_supported_by_domains(str(item.get("term") or "").strip(), dominant_domains)
+        if isinstance(item, dict)
+        and _prompt_term_supported_by_domains(str(item.get("term") or "").strip(), dominant_domains)
+        and _term_item_supported_by_transcription_scope(item, category_scope)
     ]
+    base_terms = [str(item.get("term") or "").strip() for item in term_items]
     base_terms = [item for item in base_terms if item]
-    prioritized_seed_terms = [
-        str(item or "").strip()
-        for item in (review_memory or {}).get("transcription_seed_terms") or []
-        if str(item or "").strip() and _prompt_term_supported_by_domains(str(item or "").strip(), dominant_domains)
+    seed_term_items = [
+        dict(item)
+        for item in (review_memory or {}).get("transcription_seed_term_details") or []
+        if isinstance(item, dict)
+        and _prompt_term_supported_by_domains(str(item.get("term") or "").strip(), dominant_domains)
+        and _term_item_supported_by_transcription_scope(item, category_scope)
     ]
+    prioritized_seed_terms = [str(item.get("term") or "").strip() for item in seed_term_items]
     learned_terms = select_ranked_hotword_terms(
         learned_hotwords=[
             item
@@ -913,6 +1108,7 @@ def build_transcription_prompt(
                 str(item.get("canonical_form") or item.get("term") or "").strip(),
                 dominant_domains,
             )
+            and _term_item_supported_by_transcription_scope(dict(item), category_scope)
         ],
         existing_terms=[],
         limit=12,
@@ -945,12 +1141,24 @@ def build_transcription_prompt(
         snippets.append(f"热词：{', '.join(terms)}")
         snippets.append("请保持品牌、型号、圈内术语和方言原词")
 
+    term_item_by_value = {
+        str(item.get("term") or "").strip(): item
+        for item in [
+            *[dict(item) for item in (review_memory or {}).get("terms") or [] if isinstance(item, dict)],
+            *[dict(item) for item in (review_memory or {}).get("transcription_seed_term_details") or [] if isinstance(item, dict)],
+        ]
+        if str(item.get("term") or "").strip()
+    }
     alias_pairs = [
         f"{item['wrong']}={item['correct']}"
         for item in (review_memory or {}).get("aliases") or []
         if item.get("wrong")
         and item.get("correct")
         and _prompt_term_supported_by_domains(str(item.get("correct") or "").strip(), dominant_domains)
+        and _term_item_supported_by_transcription_scope(
+            term_item_by_value.get(str(item.get("correct") or "").strip(), {"term": item.get("correct")}),
+            category_scope,
+        )
     ][:8]
     if alias_pairs:
         snippets.append(f"错写归一：{'; '.join(alias_pairs)}")

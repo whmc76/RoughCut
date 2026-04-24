@@ -18,7 +18,7 @@ from roughcut.providers.transcription.base import TranscriptResult, TranscriptSe
 from roughcut.providers.transcription.chunking import extract_chunking_summary
 from roughcut.review.evidence_types import ARTIFACT_TYPE_TRANSCRIPT_EVIDENCE
 from roughcut.review.hotword_learning import extract_prompt_hotwords, record_prompted_hotwords
-from roughcut.review.subtitle_memory import apply_domain_term_corrections
+from roughcut.review.subtitle_memory import apply_domain_term_corrections, resolve_transcription_category_scope
 from roughcut.speech.alignment import AlignmentSettings, enhance_transcript_alignment
 from roughcut.speech.subtitle_pipeline import (
     ARTIFACT_TYPE_TRANSCRIPT_FACT_LAYER,
@@ -32,6 +32,25 @@ _TRANSCRIPT_TAIL_CTA_NOISE_RE = re.compile(
     r"转发.{0,8}(点赞|订阅|关注|收藏))",
     re.IGNORECASE,
 )
+_SEMANTIC_HALLUCINATION_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"鱼头的小章鱼"), ""),
+    (re.compile(r"新品小车"), ""),
+)
+_DUPLICATE_BRAND_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"(狐蝠工业){2,}", re.IGNORECASE), "狐蝠工业"),
+    (re.compile(r"(NITECORE){2,}", re.IGNORECASE), "NITECORE"),
+    (re.compile(r"(OLIGHT){2,}", re.IGNORECASE), "OLIGHT"),
+)
+_FLASHLIGHT_CONTAMINATION_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"电折刀"), "手电"),
+    (re.compile(r"\bEDC(17|23|37)折刀(?:帕)?\b", re.IGNORECASE), r"EDC\1"),
+    (re.compile(r"(?<![A-Za-z0-9])幺[七7](?![A-Za-z0-9])"), "EDC17"),
+)
+_FLASHLIGHT_EDC_ALT_LIST_RE = re.compile(
+    r"(?<![A-Za-z0-9])(EDC(?:17|23|37))(?:\s*/\s*(EDC(?:17|23|37)))+(?![A-Za-z0-9])",
+    re.IGNORECASE,
+)
+_KNIFE_MATERIAL_SURFACE_MISHEARD_RE = re.compile(r"钢瓦|盖瓦|锆瓦|(?:钢马|锆马).{0,16}泛光")
 
 
 def _is_brand_like_term(term: dict) -> bool:
@@ -114,6 +133,48 @@ def _filter_tail_cta_noise_segments(result: TranscriptResult) -> list[dict[str, 
         filtering["dropped_tail_cta_segments"] = dropped_segments
         result.raw_payload["_roughcut_filtering"] = filtering
     return dropped_segments
+
+
+def _normalize_semantic_contamination_text(text: str, *, category_scope: str) -> str:
+    cleaned = str(text or "").strip()
+    if not cleaned:
+        return ""
+    for pattern, replacement in _SEMANTIC_HALLUCINATION_PATTERNS:
+        cleaned = pattern.sub(replacement, cleaned)
+    for pattern, replacement in _DUPLICATE_BRAND_PATTERNS:
+        cleaned = pattern.sub(replacement, cleaned)
+    if category_scope == "flashlight":
+        for pattern, replacement in _FLASHLIGHT_CONTAMINATION_PATTERNS:
+            cleaned = pattern.sub(replacement, cleaned)
+        cleaned = _collapse_flashlight_edc_alt_lists(cleaned)
+    elif category_scope == "knife":
+        cleaned = _normalize_knife_material_surface_text(cleaned)
+    cleaned = re.sub(r"[，,]{2,}", "，", cleaned)
+    cleaned = re.sub(r"[。]{2,}", "。", cleaned)
+    cleaned = re.sub(r"\s{2,}", " ", cleaned).strip(" ，,。；;、")
+    return cleaned.strip()
+
+
+def _collapse_flashlight_edc_alt_lists(text: str) -> str:
+    """Collapse ASR alternative lists like "EDC17 / EDC37 / EDC37"."""
+
+    def replace(match: re.Match[str]) -> str:
+        models = re.findall(r"EDC(?:17|23|37)", match.group(0), flags=re.IGNORECASE)
+        normalized = [item.upper() for item in models]
+        if len(normalized) >= 3 or len(set(normalized)) < len(normalized):
+            return normalized[0]
+        return match.group(0)
+
+    return _FLASHLIGHT_EDC_ALT_LIST_RE.sub(replace, text)
+
+
+def _normalize_knife_material_surface_text(text: str) -> str:
+    if not _KNIFE_MATERIAL_SURFACE_MISHEARD_RE.search(text):
+        return text
+    cleaned = text.replace("钢瓦", "钢马").replace("盖瓦", "锆马").replace("锆瓦", "锆马")
+    if "钢马" in cleaned or "锆马" in cleaned:
+        cleaned = cleaned.replace("泛光", "反光")
+    return cleaned
 
 
 async def execute_transcription_plan(
@@ -359,6 +420,7 @@ def _normalize_transcript_result(
     normalized = deepcopy(result)
     normalized.raw_segments = raw_segments
     normalized.raw_payload = deepcopy(result.raw_payload)
+    category_scope = resolve_transcription_category_scope(review_memory)
 
     for raw_seg, seg in zip(raw_segments, normalized.segments):
         seg.raw_text = raw_seg.raw_text or raw_seg.text
@@ -398,7 +460,23 @@ def _normalize_transcript_result(
                 if wrong and wrong != correct_form:
                     text = text.replace(wrong, correct_form)
         text = apply_domain_term_corrections(text, review_memory)
+        cleaned_text = _normalize_semantic_contamination_text(text, category_scope=category_scope)
+        if cleaned_text != text:
+            filtering = dict(normalized.raw_payload.get("_roughcut_filtering") or {})
+            semantic_cleanup = list(filtering.get("semantic_cleanup") or [])
+            semantic_cleanup.append(
+                {
+                    "segment_index": int(getattr(seg, "index", 0) or 0),
+                    "category_scope": category_scope,
+                    "before": text,
+                    "after": cleaned_text,
+                }
+            )
+            filtering["semantic_cleanup"] = semantic_cleanup[:80]
+            normalized.raw_payload["_roughcut_filtering"] = filtering
+        text = cleaned_text
         seg.text = text
+    normalized.segments = [seg for seg in normalized.segments if str(seg.text or "").strip()]
     _filter_tail_cta_noise_segments(normalized)
     return enhance_transcript_alignment(normalized, settings=alignment_settings)
 

@@ -30,6 +30,15 @@ def _normalize_term_token(value: str) -> str:
     return re.sub(r"[\W_]+", "", str(value or "").strip()).lower()
 
 
+def _profile_is_knife_context(content_profile: Mapping[str, Any] | None) -> bool:
+    profile = content_profile or {}
+    blob = " ".join(
+        str(profile.get(key) or "")
+        for key in ("subject_domain", "subject_type", "video_theme", "summary")
+    ).lower()
+    return "knife" in blob or "折刀" in blob
+
+
 def _should_ignore_patch_candidate(
     *,
     original_span: str,
@@ -45,6 +54,8 @@ def _should_ignore_patch_candidate(
     if len(original_norm) >= 2 and len(suggested_norm) >= 2 and (
         original_norm in suggested_norm or suggested_norm in original_norm
     ):
+        return True
+    if original_norm == "反光" and suggested_norm == "泛光" and _profile_is_knife_context(content_profile):
         return True
 
     profile = content_profile or {}

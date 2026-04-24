@@ -11,6 +11,7 @@ from roughcut.providers.transcription.chunking import (
     extract_chunking_summary,
     resolve_audio_chunk_config,
 )
+from roughcut.providers.transcription.base import TranscriptResult
 from roughcut.providers.transcription.local_http_asr import LocalHTTPASRProvider
 
 
@@ -226,3 +227,42 @@ async def test_post_chunk_transcribe_request_retries_and_reports_wait(
     assert payload["segments"][0]["text"] == "ok"
     assert attempts["count"] == 2
     assert [event["phase"] for event in progress_events] == ["request", "retry_wait", "request"]
+
+
+@pytest.mark.asyncio
+async def test_transcribe_uses_extracted_hotwords_as_context(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    provider = LocalHTTPASRProvider()
+    audio_path = tmp_path / "audio.wav"
+    audio_path.write_bytes(b"stub")
+    captured: dict[str, str | None] = {}
+
+    async def _transcribe_single_audio(
+        audio_path: Path,
+        *,
+        language: str,
+        context: str | None,
+        max_new_tokens: int,
+        progress_callback,
+    ) -> TranscriptResult:
+        captured["context"] = context
+        return TranscriptResult(segments=[], language=language, duration=0.0, context=context, hotword=context)
+
+    monkeypatch.setattr(provider, "_transcribe_single_audio", _transcribe_single_audio)
+    monkeypatch.setattr(
+        "roughcut.providers.transcription.local_http_asr.probe_audio_duration",
+        lambda _path: 1.0,
+    )
+    monkeypatch.setattr(
+        "roughcut.providers.transcription.local_http_asr.should_chunk_audio",
+        lambda duration, config: False,
+    )
+
+    await provider.transcribe(
+        audio_path,
+        prompt="热词：OLIGHT, 掠夺者2 mini。请保持品牌、型号和圈内术语原词。源文件名参考：傲雷.mp4",
+    )
+
+    assert captured["context"] == "OLIGHT, 掠夺者2 mini"
