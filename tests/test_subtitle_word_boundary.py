@@ -63,7 +63,7 @@ def test_allows_normal_sentence_boundary_without_word_split() -> None:
     assert analysis.generic_word_split_count == 0
 
 
-def test_quality_report_blocks_generic_word_split() -> None:
+def test_quality_report_warns_single_generic_word_split() -> None:
     report = build_subtitle_quality_report(
         subtitle_items=[
             {"text_final": "先介"},
@@ -71,6 +71,33 @@ def test_quality_report_blocks_generic_word_split() -> None:
         ],
     )
 
-    assert report["blocking"] is True
+    assert report["blocking"] is False
     assert report["metrics"]["generic_word_split_count"] == 1
+    assert any("普通词跨字幕截断" in reason for reason in report["warning_reasons"])
+
+
+def test_quality_report_blocks_dense_generic_word_splits() -> None:
+    report = build_subtitle_quality_report(
+        subtitle_items=[
+            {"text_final": "这个产"},
+            {"text_final": "品不错"},
+            {"text_final": "这个设"},
+            {"text_final": "计取向"},
+            {"text_final": "很有特"},
+            {"text_final": "色"},
+            {"text_final": "它的手"},
+            {"text_final": "感不错"},
+            {"text_final": "狐蝠"},
+            {"text_final": "工业今年主打"},
+            {"text_final": "这个产"},
+            {"text_final": "品不错"},
+            {"text_final": "这个设"},
+            {"text_final": "计取向"},
+            {"text_final": "很有特"},
+            {"text_final": "色"},
+        ],
+    )
+
+    assert report["blocking"] is True
+    assert report["metrics"]["generic_word_split_count"] >= 8
     assert any("普通词跨字幕截断" in reason for reason in report["blocking_reasons"])

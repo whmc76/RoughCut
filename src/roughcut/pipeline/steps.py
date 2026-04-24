@@ -85,6 +85,12 @@ from roughcut.packaging.library import (
 from roughcut.prompts.edit_decision import build_high_risk_cut_review_prompt
 from roughcut.providers.factory import get_avatar_provider, get_reasoning_provider, get_voice_provider
 from roughcut.providers.reasoning.base import Message, extract_json_text
+from roughcut.providers.transcription.chunking import (
+    build_audio_chunk_specs,
+    probe_audio_duration,
+    resolve_audio_chunk_config,
+    should_chunk_audio,
+)
 from roughcut.pipeline.quality import _compute_subtitle_sync_check, evaluate_profile_identity_gate
 from roughcut.review.content_profile import (
     _build_conservative_identity_summary,
@@ -810,6 +816,23 @@ async def _maybe_review_edit_decision_cuts_with_llm(
             "candidate_count": len(candidates),
             "error": "llm_cut_review_timeout",
             "timeout": True,
+            "fallback": "deterministic_evidence",
+        }
+        return decision
+    except ValueError as exc:
+        message = str(exc).strip()
+        if "credential is not configured" not in message and "no helper command or token is configured" not in message:
+            raise
+        logger.warning(
+            "LLM cut review skipped during edit_plan for job %s because provider credentials are not configured: %s",
+            job_id,
+            message,
+        )
+        decision.analysis["llm_cut_review"] = {
+            "reviewed": False,
+            "candidate_count": len(candidates),
+            "error": "llm_cut_review_unconfigured",
+            "fallback": "deterministic_evidence",
         }
         return decision
     except Exception:
@@ -818,6 +841,7 @@ async def _maybe_review_edit_decision_cuts_with_llm(
             "reviewed": False,
             "candidate_count": len(candidates),
             "error": "llm_cut_review_failed",
+            "fallback": "deterministic_evidence",
         }
         return decision
 
@@ -1824,6 +1848,7 @@ async def _set_step_progress(
     *,
     detail: str,
     progress: float | None = None,
+    metadata_updates: dict[str, Any] | None = None,
 ) -> None:
     if step is None:
         return
@@ -1837,6 +1862,8 @@ async def _set_step_progress(
     elapsed_seconds = _compute_step_elapsed_seconds(step, now=now)
     if elapsed_seconds is not None:
         metadata["elapsed_seconds"] = round(elapsed_seconds, 3)
+    if metadata_updates:
+        metadata.update(metadata_updates)
     step.metadata_ = metadata
     await session.commit()
 
@@ -2022,11 +2049,53 @@ async def _maintain_step_heartbeat(step: JobStep | None):
                 await heartbeat
 
 
-def _resolve_transcribe_runtime_timeout_seconds(settings: object) -> float:
+def _resolve_transcribe_runtime_timeout_seconds(settings: object, *, audio_path: Path | None = None) -> float:
     timeout = getattr(settings, "transcribe_runtime_timeout_sec", None)
     if timeout is None:
         timeout = getattr(settings, "step_stale_timeout_sec", 900)
-    return max(0.1, float(timeout or 900))
+    base_timeout = max(0.1, float(timeout or 900))
+    if audio_path is None:
+        return base_timeout
+
+    try:
+        duration = probe_audio_duration(audio_path)
+    except Exception:
+        duration = 0.0
+    if duration <= 0:
+        return base_timeout
+
+    chunk_config = resolve_audio_chunk_config(settings)
+    if not should_chunk_audio(duration=duration, config=chunk_config):
+        dynamic_timeout = max(300.0, (duration * 0.75) + 180.0)
+        return min(7200.0, max(base_timeout, dynamic_timeout))
+
+    chunk_specs = build_audio_chunk_specs(duration, config=chunk_config)
+    if not chunk_specs:
+        return base_timeout
+
+    retry_backoff_budget = sum(
+        float(chunk_config.request_retry_backoff_sec) * (2 ** attempt)
+        for attempt in range(int(chunk_config.request_max_retries))
+    )
+    request_budget = min(
+        float(chunk_config.request_timeout_sec),
+        max(45.0, float(chunk_config.chunk_size_sec) * 0.9 + 15.0),
+    )
+    export_budget = min(float(chunk_config.export_timeout_sec), 20.0)
+    per_chunk_budget = request_budget + export_budget + retry_backoff_budget
+    dynamic_timeout = (len(chunk_specs) * per_chunk_budget) + 180.0
+    return min(7200.0, max(base_timeout, dynamic_timeout))
+
+
+def _resolve_transcribe_no_progress_timeout_seconds(settings: object) -> float:
+    runtime_timeout = _resolve_transcribe_runtime_timeout_seconds(settings)
+    heartbeat_interval = max(5.0, float(getattr(settings, "step_heartbeat_interval_sec", 20) or 20))
+    chunk_request_timeout = max(
+        30.0,
+        float(getattr(settings, "transcription_chunk_request_timeout_sec", 180.0) or 180.0),
+    )
+    grace_sec = max(45.0, heartbeat_interval * 3.0)
+    return min(runtime_timeout, max(90.0, chunk_request_timeout + grace_sec))
 
 
 def _content_profile_artifact_priority(artifact_type: str) -> int:
@@ -4320,7 +4389,9 @@ async def run_transcribe(job_id: str) -> dict:
             await _set_step_progress(session, step, detail=f"加载转写模型：{transcription_route_label}", progress=0.2)
 
             progress_loop = asyncio.get_running_loop()
+            transcribe_timeout_sec = _resolve_transcribe_runtime_timeout_seconds(settings, audio_path=audio_path)
             last_progress = {"progress": 0.0, "ts": 0.0}
+            last_detail = {"value": ""}
             accept_progress_updates = {"value": True}
             pending_progress_updates = []
             heartbeat_state = {
@@ -4328,14 +4399,37 @@ async def run_transcribe(job_id: str) -> dict:
                 "progress": 0.25,
             }
             transcribe_heartbeat: asyncio.Task[None] | None = None
+            transcribe_watchdog: asyncio.Task[None] | None = None
+            provider_activity_state = {
+                "last_event_ts": time.monotonic(),
+                "last_progress_ts": time.monotonic(),
+                "last_event_iso": datetime.now(timezone.utc).isoformat(),
+                "last_progress_iso": None,
+                "phase": "startup",
+                "chunk_index": 0,
+                "chunk_count": 0,
+            }
+            stalled_reason = {"value": None}
+            no_progress_timeout_sec = _resolve_transcribe_no_progress_timeout_seconds(settings)
 
-            async def _persist_transcribe_progress(progress: float, detail: str) -> None:
+            async def _persist_transcribe_progress(
+                progress: float,
+                detail: str,
+                *,
+                metadata_updates: dict[str, Any] | None = None,
+            ) -> None:
                 progress_factory = get_session_factory()
                 async with progress_factory() as progress_session:
                     step_ref = await progress_session.get(JobStep, step.id)
                     if step_ref is None:
                         return
-                    await _set_step_progress(progress_session, step_ref, detail=detail, progress=progress)
+                    await _set_step_progress(
+                        progress_session,
+                        step_ref,
+                        detail=detail,
+                        progress=progress,
+                        metadata_updates=metadata_updates,
+                    )
 
             async def _transcribe_heartbeat_loop() -> None:
                 interval_sec = max(5, int(getattr(settings, "step_heartbeat_interval_sec", 20) or 20))
@@ -4350,7 +4444,45 @@ async def run_transcribe(job_id: str) -> dict:
                             step_ref,
                             detail=str(heartbeat_state["detail"]),
                             progress=float(heartbeat_state["progress"]),
+                            metadata_updates={
+                                "transcribe_provider_phase": provider_activity_state["phase"],
+                                "transcribe_last_provider_event_at": provider_activity_state["last_event_iso"],
+                                "transcribe_last_provider_progress_at": provider_activity_state["last_progress_iso"],
+                                "transcribe_chunk_index": int(provider_activity_state["chunk_index"]),
+                                "transcribe_chunk_count": int(provider_activity_state["chunk_count"]),
+                                "transcribe_stalled": False,
+                            },
                         )
+
+            async def _transcribe_watchdog_loop(transcribe_task: asyncio.Task[TranscriptResult]) -> None:
+                interval_sec = max(5.0, float(getattr(settings, "step_heartbeat_interval_sec", 20) or 20))
+                while True:
+                    await asyncio.sleep(interval_sec)
+                    if transcribe_task.done():
+                        return
+                    idle_sec = max(0.0, time.monotonic() - float(provider_activity_state["last_event_ts"]))
+                    if idle_sec < no_progress_timeout_sec:
+                        continue
+                    stalled_reason["value"] = (
+                        f"转写超过 {idle_sec:.0f}s 无新进度，已判定为卡住并取消"
+                    )
+                    heartbeat_state["detail"] = str(stalled_reason["value"])
+                    heartbeat_state["progress"] = max(float(heartbeat_state["progress"]), 0.25)
+                    await _persist_transcribe_progress(
+                        float(heartbeat_state["progress"]),
+                        str(heartbeat_state["detail"]),
+                        metadata_updates={
+                            "transcribe_provider_phase": provider_activity_state["phase"],
+                            "transcribe_last_provider_event_at": provider_activity_state["last_event_iso"],
+                            "transcribe_last_provider_progress_at": provider_activity_state["last_progress_iso"],
+                            "transcribe_chunk_index": int(provider_activity_state["chunk_index"]),
+                            "transcribe_chunk_count": int(provider_activity_state["chunk_count"]),
+                            "transcribe_stalled": True,
+                            "transcribe_no_progress_timeout_sec": round(no_progress_timeout_sec, 3),
+                        },
+                    )
+                    transcribe_task.cancel()
+                    return
 
             def _on_transcribe_progress(payload: dict) -> None:
                 if not accept_progress_updates["value"]:
@@ -4358,46 +4490,122 @@ async def run_transcribe(job_id: str) -> dict:
                 total_duration = float(payload.get("total_duration") or 0.0)
                 segment_end = float(payload.get("segment_end") or 0.0)
                 segment_count = int(payload.get("segment_count") or 0)
+                chunk_index = int(payload.get("chunk_index") or 0)
+                chunk_count = int(payload.get("chunk_count") or 0)
                 raw_progress = float(payload.get("progress") or 0.0)
+                phase = str(payload.get("phase") or "").strip()
+                provider_detail = str(payload.get("detail") or "").strip()
                 scaled_progress = 0.25 + (raw_progress * 0.7)
                 now = time.monotonic()
-                if scaled_progress - last_progress["progress"] < 0.03 and now - last_progress["ts"] < 1.5:
+                provider_activity_state["last_event_ts"] = now
+                provider_activity_state["last_event_iso"] = datetime.now(timezone.utc).isoformat()
+                provider_activity_state["phase"] = phase or "segment"
+                provider_activity_state["chunk_index"] = chunk_index
+                provider_activity_state["chunk_count"] = chunk_count
+                if scaled_progress > last_progress["progress"] + 1e-6:
+                    provider_activity_state["last_progress_ts"] = now
+                    provider_activity_state["last_progress_iso"] = provider_activity_state["last_event_iso"]
+                detail = provider_detail or f"已转写 {segment_count} 段，覆盖 {segment_end:.0f}s / {total_duration:.0f}s"
+                if chunk_count > 0 and "chunk" not in detail.lower():
+                    detail += f"（chunk {chunk_index}/{chunk_count}）"
+                if (
+                    scaled_progress - last_progress["progress"] < 0.01
+                    and detail == last_detail["value"]
+                    and now - last_progress["ts"] < 1.5
+                ):
                     return
                 last_progress["progress"] = scaled_progress
                 last_progress["ts"] = now
-                detail = f"已转写 {segment_count} 段，覆盖 {segment_end:.0f}s / {total_duration:.0f}s"
+                last_detail["value"] = detail
                 heartbeat_state["detail"] = detail
                 heartbeat_state["progress"] = scaled_progress
                 future = asyncio.run_coroutine_threadsafe(
-                    _persist_transcribe_progress(scaled_progress, detail),
+                    _persist_transcribe_progress(
+                        scaled_progress,
+                        detail,
+                        metadata_updates={
+                            "transcribe_provider_phase": provider_activity_state["phase"],
+                            "transcribe_last_provider_event_at": provider_activity_state["last_event_iso"],
+                            "transcribe_last_provider_progress_at": provider_activity_state["last_progress_iso"],
+                            "transcribe_chunk_index": int(provider_activity_state["chunk_index"]),
+                            "transcribe_chunk_count": int(provider_activity_state["chunk_count"]),
+                            "transcribe_stalled": False,
+                            "transcribe_no_progress_timeout_sec": round(no_progress_timeout_sec, 3),
+                        },
+                    ),
                     progress_loop,
                 )
                 pending_progress_updates.append(future)
 
-            await _set_step_progress(session, step, detail=f"使用 {transcription_route_label} 执行转写", progress=0.25)
+            await _set_step_progress(
+                session,
+                step,
+                detail=f"使用 {transcription_route_label} 执行转写",
+                progress=0.25,
+                metadata_updates={
+                    "transcribe_runtime_timeout_sec": round(transcribe_timeout_sec, 3),
+                    "transcribe_no_progress_timeout_sec": round(no_progress_timeout_sec, 3),
+                },
+            )
             transcribe_heartbeat = asyncio.create_task(_transcribe_heartbeat_loop())
-            transcribe_timeout_sec = _resolve_transcribe_runtime_timeout_seconds(settings)
-            try:
-                result = await asyncio.wait_for(
-                    transcribe_audio(
-                        job.id,
-                        step,
-                        audio_path,
-                        job.language,
-                        session,
-                        prompt=transcription_prompt,
-                        progress_callback=_on_transcribe_progress,
-                        glossary_terms=effective_glossary_terms,
-                        review_memory=review_memory,
-                    ),
-                    timeout=transcribe_timeout_sec,
+            transcribe_task = asyncio.create_task(
+                transcribe_audio(
+                    job.id,
+                    step,
+                    audio_path,
+                    job.language,
+                    session,
+                    prompt=transcription_prompt,
+                    progress_callback=_on_transcribe_progress,
+                    glossary_terms=effective_glossary_terms,
+                    review_memory=review_memory,
                 )
+            )
+            transcribe_watchdog = asyncio.create_task(_transcribe_watchdog_loop(transcribe_task))
+            try:
+                result = await asyncio.wait_for(transcribe_task, timeout=transcribe_timeout_sec)
             except asyncio.TimeoutError as exc:
+                timeout_detail = f"转写超时，已等待 {transcribe_timeout_sec:.0f}s"
+                heartbeat_state["detail"] = timeout_detail
+                await _persist_transcribe_progress(
+                    float(heartbeat_state["progress"]),
+                    timeout_detail,
+                    metadata_updates={
+                        "transcribe_provider_phase": provider_activity_state["phase"],
+                        "transcribe_last_provider_event_at": provider_activity_state["last_event_iso"],
+                        "transcribe_last_provider_progress_at": provider_activity_state["last_progress_iso"],
+                        "transcribe_chunk_index": int(provider_activity_state["chunk_index"]),
+                        "transcribe_chunk_count": int(provider_activity_state["chunk_count"]),
+                        "transcribe_stalled": bool(stalled_reason["value"]),
+                        "transcribe_no_progress_timeout_sec": round(no_progress_timeout_sec, 3),
+                    },
+                )
                 raise TimeoutError(
                     f"Transcribe step timed out after {transcribe_timeout_sec:.1f}s"
                 ) from exc
+            except asyncio.CancelledError as exc:
+                if stalled_reason["value"]:
+                    await _persist_transcribe_progress(
+                        float(heartbeat_state["progress"]),
+                        str(stalled_reason["value"]),
+                        metadata_updates={
+                            "transcribe_provider_phase": provider_activity_state["phase"],
+                            "transcribe_last_provider_event_at": provider_activity_state["last_event_iso"],
+                            "transcribe_last_provider_progress_at": provider_activity_state["last_progress_iso"],
+                            "transcribe_chunk_index": int(provider_activity_state["chunk_index"]),
+                            "transcribe_chunk_count": int(provider_activity_state["chunk_count"]),
+                            "transcribe_stalled": True,
+                            "transcribe_no_progress_timeout_sec": round(no_progress_timeout_sec, 3),
+                        },
+                    )
+                    raise TimeoutError(str(stalled_reason["value"])) from exc
+                raise
             finally:
                 accept_progress_updates["value"] = False
+                if transcribe_watchdog is not None:
+                    transcribe_watchdog.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await transcribe_watchdog
                 if transcribe_heartbeat is not None:
                     transcribe_heartbeat.cancel()
                     with suppress(asyncio.CancelledError):
@@ -6258,430 +6466,443 @@ async def run_render(job_id: str) -> dict:
                 )
             return render_heartbeat
 
-        render_heartbeat = await _refresh_render_progress(
-            detail=(
-                "先渲染素版，再生成包装版"
-                if (has_packaging or has_editing_accents)
-                else "执行 FFmpeg 渲染成片"
-            ),
-            progress=0.35,
-        )
-        source_path = await _resolve_source(
-            job,
-            tmpdir,
-            expected_hash=job.file_hash,
-            debug_dir=debug_dir,
-        )
-        tmp_plain_mp4 = Path(tmpdir) / "output_plain.mp4"
-        tmp_avatar_mp4 = Path(tmpdir) / "output_avatar.mp4"
-        tmp_ai_effect_mp4 = Path(tmpdir) / "output_ai_effect.mp4"
-        tmp_packaged_mp4 = Path(tmpdir) / "output_packaged.mp4"
-        tmp_cover_plain_mp4 = Path(tmpdir) / "output_cover_plain.mp4"
-        plain_render_plan = build_plain_render_plan(render_plan_timeline.data_json)
-        await render_video(
-            source_path=source_path,
-            render_plan=plain_render_plan,
-            editorial_timeline=editorial_timeline.data_json,
-            output_path=tmp_plain_mp4,
-            subtitle_items=None,
-            debug_dir=debug_dir / "plain",
-        )
-        await _copy_file_with_retry(tmp_plain_mp4, tmp_cover_plain_mp4)
-        plain_duration = float((await _probe_with_retry(tmp_plain_mp4)).duration or 0.0)
-        plain_variant_editorial_timeline = _build_full_length_variant_timeline(plain_duration)
-        keep_segments = [
-            s for s in editorial_timeline.data_json.get("segments", [])
-            if s.get("type") == "keep"
-        ]
-        async with get_session_factory()() as projection_session:
-            remapped_subtitles = await _build_edited_subtitle_projection(
-                projection_session,
-                job_id=uuid.UUID(job_id),
-                keep_segments=keep_segments,
-                projection_data=projection_data,
-                fallback_subtitles=subtitle_dicts,
-            )
-        ai_effect_render_plan = build_ai_effect_render_plan(
-            render_plan_timeline.data_json,
-            keep_segments=keep_segments,
-            subtitle_items=remapped_subtitles,
-        )
-        packaged_subtitles = await _map_subtitles_to_packaged_timeline(
-            remapped_subtitles,
-            render_plan_timeline.data_json,
-            keep_segments=keep_segments,
-        )
-        final_overlay_accents = await _map_editing_accents_to_packaged_timeline(
-            render_plan_timeline.data_json.get("editing_accents"),
-            render_plan_timeline.data_json,
-            keep_segments=keep_segments,
-        )
-        ai_effect_overlay_accents = await _map_editing_accents_to_packaged_timeline(
-            ai_effect_render_plan.get("editing_accents"),
-            ai_effect_render_plan,
-            keep_segments=keep_segments,
-        )
-        packaged_transition_offsets = _resolve_transition_overlap_offsets(
-            render_plan_timeline.data_json,
-            keep_segments=keep_segments,
-        )
-        ai_effect_transition_offsets = _resolve_transition_overlap_offsets(
-            ai_effect_render_plan,
-            keep_segments=keep_segments,
-        )
-        avatar_plan = render_plan_timeline.data_json.get("avatar_commentary") or {}
-        if (
-            "avatar_commentary" in set(getattr(job, "enhancement_modes", []) or [])
-            and str(avatar_plan.get("mode") or "") == "segmented_audio_passthrough"
-        ):
-            avatar_plan["segments"] = await _materialize_avatar_plan_segments(
-                str(job.id),
-                list(avatar_plan.get("segments") or []),
-            )
-        avatar_result: dict[str, Any] | None = None
-        avatar_variant_source_path: Path | None = None
-        avatar_variant_duration_sec: float | None = None
-        avatar_variant_editorial_timeline: dict[str, Any] | None = None
-        avatar_overlay_accents: dict[str, Any] | None = None
-        if (
-            "avatar_commentary" in set(getattr(job, "enhancement_modes", []) or [])
-            and str(avatar_plan.get("mode") or "") == "full_track_audio_passthrough"
-        ):
-            avatar_result = {
-                "enabled": True,
-                "status": "pending",
-                "mode": str(avatar_plan.get("mode") or ""),
-                "integration_mode": str(avatar_plan.get("integration_mode") or ""),
-                "provider": str(avatar_plan.get("provider") or ""),
-                "detail": "等待渲染阶段处理数字人口播。",
-            }
-            try:
-                render_heartbeat = await _refresh_render_progress(
-                    detail="素版已完成，等待数字人口播全轨插槽",
-                    progress=0.42,
-                )
-                avatar_rendered_path = await _render_full_track_avatar_video(
-                    job_id=str(job.id),
-                    avatar_plan=avatar_plan,
-                    source_plain_video_path=tmp_plain_mp4,
-                    debug_dir=debug_dir / "avatar_full_track",
-                )
-                if avatar_rendered_path is not None and avatar_rendered_path.exists():
-                    pip_output_path = Path(tmpdir) / "output_plain.avatar_pip.mp4"
-                    await _overlay_avatar_picture_in_picture(
-                        base_video_path=tmp_plain_mp4,
-                        avatar_video_path=avatar_rendered_path,
-                        output_path=pip_output_path,
-                        position=str(avatar_plan.get("overlay_position") or "bottom_right"),
-                        scale=float(avatar_plan.get("overlay_scale") or 0.22),
-                        margin=int(avatar_plan.get("overlay_margin") or 28),
-                        safe_margin_ratio=float(avatar_plan.get("safe_margin") or 0.1),
-                        corner_radius=int(avatar_plan.get("overlay_corner_radius") or 0),
-                        border_width=int(avatar_plan.get("overlay_border_width") or 0),
-                        border_color=str(avatar_plan.get("overlay_border_color") or "#F4E4B8"),
-                    )
-                    pip_duration = float((await probe(pip_output_path)).duration or 0.0)
-                    avatar_variant_source_path = pip_output_path
-                    avatar_variant_duration_sec = pip_duration
-                    avatar_variant_editorial_timeline = _build_full_length_variant_timeline(pip_duration)
-                    tmp_avatar_mp4 = avatar_variant_source_path
-                    avatar_result = {
-                        **(avatar_result or {}),
-                        "status": "done",
-                        "detail": "数字人口播已作为画中画写入成片。",
-                        "profile_name": str(avatar_plan.get("avatar_profile_name") or ""),
-                        "output_path": str(pip_output_path),
-                    }
-                else:
-                    avatar_result = {
-                        **(avatar_result or {}),
-                        "status": "degraded",
-                        "reason": "missing_avatar_render",
-                        "detail": "没有拿到可用数字人视频，已自动回退普通成片。",
-                    }
-            except Exception as exc:
-                logger.exception("Avatar overlay degraded to plain render for job %s", job_id)
-                avatar_result = {
-                    **(avatar_result or {}),
-                    "status": "degraded",
-                    "reason": "avatar_render_failed",
-                    "detail": f"数字人渲染失败，已自动回退普通成片：{exc}",
-                }
-        elif (
-            "avatar_commentary" in set(getattr(job, "enhancement_modes", []) or [])
-            and str(avatar_plan.get("mode") or "") == "segmented_audio_passthrough"
-        ):
-            avatar_result = {
-                "enabled": True,
-                "status": "pending",
-                "mode": str(avatar_plan.get("mode") or ""),
-                "integration_mode": str(avatar_plan.get("integration_mode") or ""),
-                "provider": str(avatar_plan.get("provider") or ""),
-                "detail": "等待渲染阶段拼接数字人口播片段。",
-            }
-            try:
-                remapped_avatar_segments = _remap_avatar_segments_to_timeline(
-                    list(avatar_plan.get("segments") or []),
-                    keep_segments,
-                )
-                if remapped_avatar_segments:
-                    pip_output_path = Path(tmpdir) / "output_plain.avatar_segments_pip.mp4"
-                    await _overlay_avatar_segments_picture_in_picture(
-                        base_video_path=tmp_plain_mp4,
-                        avatar_segments=remapped_avatar_segments,
-                        output_path=pip_output_path,
-                        position=str(avatar_plan.get("overlay_position") or "bottom_right"),
-                        scale=float(avatar_plan.get("overlay_scale") or 0.22),
-                        margin=int(avatar_plan.get("overlay_margin") or 28),
-                        safe_margin_ratio=float(avatar_plan.get("safe_margin") or 0.1),
-                        corner_radius=int(avatar_plan.get("overlay_corner_radius") or 0),
-                        border_width=int(avatar_plan.get("overlay_border_width") or 0),
-                        border_color=str(avatar_plan.get("overlay_border_color") or "#F4E4B8"),
-                    )
-                    pip_duration = float((await probe(pip_output_path)).duration or 0.0)
-                    avatar_variant_source_path = pip_output_path
-                    avatar_variant_duration_sec = pip_duration
-                    avatar_variant_editorial_timeline = _build_full_length_variant_timeline(pip_duration)
-                    tmp_avatar_mp4 = avatar_variant_source_path
-                    avatar_result = {
-                        **(avatar_result or {}),
-                        "status": "done",
-                        "detail": "数字人口播片段已作为画中画写入成片。",
-                        "profile_name": str(avatar_plan.get("avatar_profile_name") or ""),
-                        "output_path": str(pip_output_path),
-                        "segments": [
-                            {
-                                "segment_id": segment.get("segment_id"),
-                                "start_time": segment.get("start_time"),
-                                "end_time": segment.get("end_time"),
-                            }
-                            for segment in remapped_avatar_segments
-                        ],
-                    }
-                else:
-                    avatar_result = {
-                        **(avatar_result or {}),
-                        "status": "degraded",
-                        "reason": "missing_avatar_segments",
-                        "detail": "没有拿到可用数字人片段，已自动回退普通成片。",
-                    }
-            except Exception as exc:
-                logger.exception("Avatar segmented overlay degraded to plain render for job %s", job_id)
-                avatar_result = {
-                    **(avatar_result or {}),
-                    "status": "degraded",
-                    "reason": "avatar_segment_render_failed",
-                    "detail": f"数字人片段渲染失败，已自动回退普通成片：{exc}",
-                }
-        packaging_heartbeat = await _refresh_render_progress(
-            detail="素版已完成，开始生成包装版",
-            progress=0.55,
-        )
-        packaged_source_path, packaged_editorial_timeline, packaged_subtitles = _resolve_packaged_render_variant(
-            original_source_path=tmp_plain_mp4,
-            original_editorial_timeline=plain_variant_editorial_timeline,
-            original_subtitle_items=packaged_subtitles,
-            variant_source_path=avatar_variant_source_path,
-            variant_duration_sec=avatar_variant_duration_sec,
-            variant_subtitle_items=packaged_subtitles,
-        )
-        ai_effect_source_path, ai_effect_editorial_timeline, ai_effect_subtitles = _resolve_packaged_render_variant(
-            original_source_path=tmp_plain_mp4,
-            original_editorial_timeline=plain_variant_editorial_timeline,
-            original_subtitle_items=packaged_subtitles,
-            variant_source_path=avatar_variant_source_path,
-            variant_duration_sec=avatar_variant_duration_sec,
-            variant_subtitle_items=packaged_subtitles,
-        )
-        if avatar_variant_source_path is not None and avatar_variant_duration_sec is not None:
-            ai_effect_render_plan["avatar_commentary"] = copy.deepcopy(avatar_plan)
-        await render_video(
-            source_path=ai_effect_source_path,
-            render_plan=ai_effect_render_plan,
-            editorial_timeline=ai_effect_editorial_timeline,
-            output_path=tmp_ai_effect_mp4,
-            subtitle_items=ai_effect_subtitles,
-            overlay_editing_accents=ai_effect_overlay_accents,
-            debug_dir=debug_dir / "ai_effect_variant",
-        )
-        await render_video(
-            source_path=packaged_source_path,
-            render_plan=render_plan_timeline.data_json,
-            editorial_timeline=packaged_editorial_timeline,
-            output_path=tmp_packaged_mp4,
-            subtitle_items=packaged_subtitles,
-            overlay_editing_accents=final_overlay_accents,
-            debug_dir=debug_dir / "packaged",
-        )
-        if packaging_heartbeat is not None:
-            packaging_heartbeat.cancel()
-            with suppress(asyncio.CancelledError):
-                await packaging_heartbeat
-        plain_meta = await _probe_with_retry(tmp_plain_mp4)
-        packaged_meta = await _probe_with_retry(tmp_packaged_mp4)
-        ai_effect_meta = await _probe_with_retry(tmp_ai_effect_mp4)
-        avatar_meta = await _probe_with_retry(tmp_avatar_mp4) if tmp_avatar_mp4.exists() else None
-
-        local_plain_mp4 = build_variant_output_path(
-            out_dir,
-            out_name,
-            variant_label="素板",
-            extension=".mp4",
-            width=plain_meta.width,
-            height=plain_meta.height,
-        )
-        local_packaged_mp4 = build_variant_output_path(
-            out_dir,
-            out_name,
-            variant_label="成片",
-            extension=".mp4",
-            width=packaged_meta.width,
-            height=packaged_meta.height,
-        )
-        local_ai_effect_mp4 = build_variant_output_path(
-            out_dir,
-            out_name,
-            variant_label="AI特效版",
-            extension=".mp4",
-            width=ai_effect_meta.width,
-            height=ai_effect_meta.height,
-        )
-        local_avatar_mp4 = (
-            build_variant_output_path(
-                out_dir,
-                out_name,
-                variant_label="数字人版",
-                extension=".mp4",
-                width=avatar_meta.width,
-                height=avatar_meta.height,
-            )
-            if avatar_meta is not None
-            else None
-        )
-        local_plain_srt = build_variant_output_path(
-            out_dir,
-            out_name,
-            variant_label="素板",
-            extension=".srt",
-            width=plain_meta.width,
-            height=plain_meta.height,
-        )
-        local_packaged_srt = build_variant_output_path(
-            out_dir,
-            out_name,
-            variant_label="成片",
-            extension=".srt",
-            width=packaged_meta.width,
-            height=packaged_meta.height,
-        )
-        local_ai_effect_srt = build_variant_output_path(
-            out_dir,
-            out_name,
-            variant_label="AI特效版",
-            extension=".srt",
-            width=ai_effect_meta.width,
-            height=ai_effect_meta.height,
-        )
-        local_avatar_srt = (
-            build_variant_output_path(
-                out_dir,
-                out_name,
-                variant_label="数字人版",
-                extension=".srt",
-                width=avatar_meta.width,
-                height=avatar_meta.height,
-            )
-            if avatar_meta is not None
-            else None
-        )
-        local_cover = build_variant_output_path(
-            out_dir,
-            out_name,
-            variant_label="封面",
-            extension=".jpg",
-            width=plain_meta.width,
-            height=plain_meta.height,
-        )
-
-        await _copy_file_with_retry(tmp_plain_mp4, local_plain_mp4)
-        if tmp_avatar_mp4.exists() and local_avatar_mp4 is not None:
-            await _copy_file_with_retry(tmp_avatar_mp4, local_avatar_mp4)
-        await _copy_file_with_retry(tmp_ai_effect_mp4, local_ai_effect_mp4)
-        await _copy_file_with_retry(tmp_packaged_mp4, local_packaged_mp4)
-        async with get_session_factory()() as session:
-            step_result = await session.execute(
-                select(JobStep).where(JobStep.job_id == uuid.UUID(job_id), JobStep.step_name == "render")
-            )
-            render_step = step_result.scalar_one_or_none()
-            render_output = await session.get(RenderOutput, render_output_id)
-            if render_step:
-                await _set_step_progress(session, render_step, detail="生成字幕文件与封面图", progress=0.75)
-            if render_output:
-                render_output.progress = 0.75
-                await session.commit()
-
-        # Write SRT with remapped timestamps (matches the edited video)
-        write_srt_file(packaged_subtitles, local_packaged_srt)
-        write_srt_file(remapped_subtitles, local_plain_srt)
-        if tmp_avatar_mp4.exists() and local_avatar_srt is not None:
-            write_srt_file(packaged_subtitles, local_avatar_srt)
-        write_srt_file(ai_effect_subtitles, local_ai_effect_srt)
-        plain_subtitle_sync = _compute_subtitle_sync_check(local_plain_mp4, local_plain_srt)
-        packaged_trailing_allowance = _variant_expected_trailing_gap(
-            base_sync_check=plain_subtitle_sync,
-            packaging_allowance_sec=await _resolve_packaging_trailing_gap_allowance(render_plan_timeline.data_json),
-        )
-        ai_effect_trailing_allowance = _variant_expected_trailing_gap(
-            base_sync_check=plain_subtitle_sync,
-            packaging_allowance_sec=await _resolve_packaging_trailing_gap_allowance(ai_effect_render_plan),
-        )
-        packaged_subtitle_sync = _compute_subtitle_sync_check(
-            local_packaged_mp4,
-            local_packaged_srt,
-            allowed_trailing_gap_sec=packaged_trailing_allowance,
-        )
-        avatar_subtitle_sync = (
-            _compute_subtitle_sync_check(local_avatar_mp4, local_avatar_srt)
-            if local_avatar_mp4 is not None and local_avatar_srt is not None and tmp_avatar_mp4.exists()
-            else None
-        )
-        ai_effect_subtitle_sync = _compute_subtitle_sync_check(
-            local_ai_effect_mp4,
-            local_ai_effect_srt,
-            allowed_trailing_gap_sec=ai_effect_trailing_allowance,
-        )
-        blocking_sync_issues = _collect_blocking_variant_sync_issues(
-            {
-                "packaged": packaged_subtitle_sync,
-                "plain": plain_subtitle_sync,
-                "avatar": avatar_subtitle_sync,
-                "ai_effect": ai_effect_subtitle_sync,
-            }
-        )
-        if blocking_sync_issues:
-            raise RuntimeError(
-                "render_variant_sync_blocked: "
-                + "; ".join(blocking_sync_issues)
-            )
-
-        # Extract cover frame from the plain render so burned subtitles never leak into thumbnails.
         try:
-            meta_result = await _get_cover_seek(job.id, tmpdir)
-            cover_source_path = _select_cover_source_video(tmp_cover_plain_mp4, tmp_packaged_mp4)
-            cover_variants = await extract_cover_frame(
-                cover_source_path,
-                local_cover,
-                seek_sec=meta_result,
-                content_profile=content_profile,
-                cover_style=(render_plan_timeline.data_json.get("cover") or {}).get("style"),
-                title_style=(render_plan_timeline.data_json.get("cover") or {}).get("title_style"),
+            render_heartbeat = await _refresh_render_progress(
+                detail=(
+                    "先渲染素版，再生成包装版"
+                    if (has_packaging or has_editing_accents)
+                    else "执行 FFmpeg 渲染成片"
+                ),
+                progress=0.35,
             )
-            cover_selection = load_cover_selection_summary(local_cover)
+            source_path = await _resolve_source(
+                job,
+                tmpdir,
+                expected_hash=job.file_hash,
+                debug_dir=debug_dir,
+            )
+            tmp_plain_mp4 = Path(tmpdir) / "output_plain.mp4"
+            tmp_avatar_mp4 = Path(tmpdir) / "output_avatar.mp4"
+            tmp_ai_effect_mp4 = Path(tmpdir) / "output_ai_effect.mp4"
+            tmp_packaged_mp4 = Path(tmpdir) / "output_packaged.mp4"
+            tmp_cover_plain_mp4 = Path(tmpdir) / "output_cover_plain.mp4"
+            plain_render_plan = build_plain_render_plan(render_plan_timeline.data_json)
+            await render_video(
+                source_path=source_path,
+                render_plan=plain_render_plan,
+                editorial_timeline=editorial_timeline.data_json,
+                output_path=tmp_plain_mp4,
+                subtitle_items=None,
+                debug_dir=debug_dir / "plain",
+            )
+            await _copy_file_with_retry(tmp_plain_mp4, tmp_cover_plain_mp4)
+            plain_duration = float((await _probe_with_retry(tmp_plain_mp4)).duration or 0.0)
+            plain_variant_editorial_timeline = _build_full_length_variant_timeline(plain_duration)
+            keep_segments = [
+                s for s in editorial_timeline.data_json.get("segments", [])
+                if s.get("type") == "keep"
+            ]
+            async with get_session_factory()() as projection_session:
+                remapped_subtitles = await _build_edited_subtitle_projection(
+                    projection_session,
+                    job_id=uuid.UUID(job_id),
+                    keep_segments=keep_segments,
+                    projection_data=projection_data,
+                    fallback_subtitles=subtitle_dicts,
+                )
+            ai_effect_render_plan = build_ai_effect_render_plan(
+                render_plan_timeline.data_json,
+                keep_segments=keep_segments,
+                subtitle_items=remapped_subtitles,
+            )
+            packaged_subtitles = await _map_subtitles_to_packaged_timeline(
+                remapped_subtitles,
+                render_plan_timeline.data_json,
+                keep_segments=keep_segments,
+            )
+            final_overlay_accents = await _map_editing_accents_to_packaged_timeline(
+                render_plan_timeline.data_json.get("editing_accents"),
+                render_plan_timeline.data_json,
+                keep_segments=keep_segments,
+            )
+            ai_effect_overlay_accents = await _map_editing_accents_to_packaged_timeline(
+                ai_effect_render_plan.get("editing_accents"),
+                ai_effect_render_plan,
+                keep_segments=keep_segments,
+            )
+            packaged_transition_offsets = _resolve_transition_overlap_offsets(
+                render_plan_timeline.data_json,
+                keep_segments=keep_segments,
+            )
+            ai_effect_transition_offsets = _resolve_transition_overlap_offsets(
+                ai_effect_render_plan,
+                keep_segments=keep_segments,
+            )
+            avatar_plan = render_plan_timeline.data_json.get("avatar_commentary") or {}
+            if (
+                "avatar_commentary" in set(getattr(job, "enhancement_modes", []) or [])
+                and str(avatar_plan.get("mode") or "") == "segmented_audio_passthrough"
+            ):
+                avatar_plan["segments"] = await _materialize_avatar_plan_segments(
+                    str(job.id),
+                    list(avatar_plan.get("segments") or []),
+                )
+            avatar_result: dict[str, Any] | None = None
+            avatar_variant_source_path: Path | None = None
+            avatar_variant_duration_sec: float | None = None
+            avatar_variant_editorial_timeline: dict[str, Any] | None = None
+            avatar_overlay_accents: dict[str, Any] | None = None
+            if (
+                "avatar_commentary" in set(getattr(job, "enhancement_modes", []) or [])
+                and str(avatar_plan.get("mode") or "") == "full_track_audio_passthrough"
+            ):
+                avatar_result = {
+                    "enabled": True,
+                    "status": "pending",
+                    "mode": str(avatar_plan.get("mode") or ""),
+                    "integration_mode": str(avatar_plan.get("integration_mode") or ""),
+                    "provider": str(avatar_plan.get("provider") or ""),
+                    "detail": "等待渲染阶段处理数字人口播。",
+                }
+                try:
+                    render_heartbeat = await _refresh_render_progress(
+                        detail="素版已完成，等待数字人口播全轨插槽",
+                        progress=0.42,
+                    )
+                    avatar_rendered_path = await _render_full_track_avatar_video(
+                        job_id=str(job.id),
+                        avatar_plan=avatar_plan,
+                        source_plain_video_path=tmp_plain_mp4,
+                        debug_dir=debug_dir / "avatar_full_track",
+                    )
+                    if avatar_rendered_path is not None and avatar_rendered_path.exists():
+                        pip_output_path = Path(tmpdir) / "output_plain.avatar_pip.mp4"
+                        await _overlay_avatar_picture_in_picture(
+                            base_video_path=tmp_plain_mp4,
+                            avatar_video_path=avatar_rendered_path,
+                            output_path=pip_output_path,
+                            position=str(avatar_plan.get("overlay_position") or "bottom_right"),
+                            scale=float(avatar_plan.get("overlay_scale") or 0.22),
+                            margin=int(avatar_plan.get("overlay_margin") or 28),
+                            safe_margin_ratio=float(avatar_plan.get("safe_margin") or 0.1),
+                            corner_radius=int(avatar_plan.get("overlay_corner_radius") or 0),
+                            border_width=int(avatar_plan.get("overlay_border_width") or 0),
+                            border_color=str(avatar_plan.get("overlay_border_color") or "#F4E4B8"),
+                        )
+                        pip_duration = float((await probe(pip_output_path)).duration or 0.0)
+                        avatar_variant_source_path = pip_output_path
+                        avatar_variant_duration_sec = pip_duration
+                        avatar_variant_editorial_timeline = _build_full_length_variant_timeline(pip_duration)
+                        tmp_avatar_mp4 = avatar_variant_source_path
+                        avatar_result = {
+                            **(avatar_result or {}),
+                            "status": "done",
+                            "detail": "数字人口播已作为画中画写入成片。",
+                            "profile_name": str(avatar_plan.get("avatar_profile_name") or ""),
+                            "output_path": str(pip_output_path),
+                        }
+                    else:
+                        avatar_result = {
+                            **(avatar_result or {}),
+                            "status": "degraded",
+                            "reason": "missing_avatar_render",
+                            "detail": "没有拿到可用数字人视频，已自动回退普通成片。",
+                        }
+                except Exception as exc:
+                    logger.exception("Avatar overlay degraded to plain render for job %s", job_id)
+                    avatar_result = {
+                        **(avatar_result or {}),
+                        "status": "degraded",
+                        "reason": "avatar_render_failed",
+                        "detail": f"数字人渲染失败，已自动回退普通成片：{exc}",
+                    }
+            elif (
+                "avatar_commentary" in set(getattr(job, "enhancement_modes", []) or [])
+                and str(avatar_plan.get("mode") or "") == "segmented_audio_passthrough"
+            ):
+                avatar_result = {
+                    "enabled": True,
+                    "status": "pending",
+                    "mode": str(avatar_plan.get("mode") or ""),
+                    "integration_mode": str(avatar_plan.get("integration_mode") or ""),
+                    "provider": str(avatar_plan.get("provider") or ""),
+                    "detail": "等待渲染阶段拼接数字人口播片段。",
+                }
+                try:
+                    remapped_avatar_segments = _remap_avatar_segments_to_timeline(
+                        list(avatar_plan.get("segments") or []),
+                        keep_segments,
+                    )
+                    if remapped_avatar_segments:
+                        pip_output_path = Path(tmpdir) / "output_plain.avatar_segments_pip.mp4"
+                        await _overlay_avatar_segments_picture_in_picture(
+                            base_video_path=tmp_plain_mp4,
+                            avatar_segments=remapped_avatar_segments,
+                            output_path=pip_output_path,
+                            position=str(avatar_plan.get("overlay_position") or "bottom_right"),
+                            scale=float(avatar_plan.get("overlay_scale") or 0.22),
+                            margin=int(avatar_plan.get("overlay_margin") or 28),
+                            safe_margin_ratio=float(avatar_plan.get("safe_margin") or 0.1),
+                            corner_radius=int(avatar_plan.get("overlay_corner_radius") or 0),
+                            border_width=int(avatar_plan.get("overlay_border_width") or 0),
+                            border_color=str(avatar_plan.get("overlay_border_color") or "#F4E4B8"),
+                        )
+                        pip_duration = float((await probe(pip_output_path)).duration or 0.0)
+                        avatar_variant_source_path = pip_output_path
+                        avatar_variant_duration_sec = pip_duration
+                        avatar_variant_editorial_timeline = _build_full_length_variant_timeline(pip_duration)
+                        tmp_avatar_mp4 = avatar_variant_source_path
+                        avatar_result = {
+                            **(avatar_result or {}),
+                            "status": "done",
+                            "detail": "数字人口播片段已作为画中画写入成片。",
+                            "profile_name": str(avatar_plan.get("avatar_profile_name") or ""),
+                            "output_path": str(pip_output_path),
+                            "segments": [
+                                {
+                                    "segment_id": segment.get("segment_id"),
+                                    "start_time": segment.get("start_time"),
+                                    "end_time": segment.get("end_time"),
+                                }
+                                for segment in remapped_avatar_segments
+                            ],
+                        }
+                    else:
+                        avatar_result = {
+                            **(avatar_result or {}),
+                            "status": "degraded",
+                            "reason": "missing_avatar_segments",
+                            "detail": "没有拿到可用数字人片段，已自动回退普通成片。",
+                        }
+                except Exception as exc:
+                    logger.exception("Avatar segmented overlay degraded to plain render for job %s", job_id)
+                    avatar_result = {
+                        **(avatar_result or {}),
+                        "status": "degraded",
+                        "reason": "avatar_segment_render_failed",
+                        "detail": f"数字人片段渲染失败，已自动回退普通成片：{exc}",
+                    }
+            packaging_heartbeat = await _refresh_render_progress(
+                detail="素版已完成，开始生成包装版",
+                progress=0.55,
+            )
+            packaged_source_path, packaged_editorial_timeline, packaged_subtitles = _resolve_packaged_render_variant(
+                original_source_path=tmp_plain_mp4,
+                original_editorial_timeline=plain_variant_editorial_timeline,
+                original_subtitle_items=packaged_subtitles,
+                variant_source_path=avatar_variant_source_path,
+                variant_duration_sec=avatar_variant_duration_sec,
+                variant_subtitle_items=packaged_subtitles,
+            )
+            ai_effect_source_path, ai_effect_editorial_timeline, ai_effect_subtitles = _resolve_packaged_render_variant(
+                original_source_path=tmp_plain_mp4,
+                original_editorial_timeline=plain_variant_editorial_timeline,
+                original_subtitle_items=packaged_subtitles,
+                variant_source_path=avatar_variant_source_path,
+                variant_duration_sec=avatar_variant_duration_sec,
+                variant_subtitle_items=packaged_subtitles,
+            )
+            if avatar_variant_source_path is not None and avatar_variant_duration_sec is not None:
+                ai_effect_render_plan["avatar_commentary"] = copy.deepcopy(avatar_plan)
+            await render_video(
+                source_path=ai_effect_source_path,
+                render_plan=ai_effect_render_plan,
+                editorial_timeline=ai_effect_editorial_timeline,
+                output_path=tmp_ai_effect_mp4,
+                subtitle_items=ai_effect_subtitles,
+                overlay_editing_accents=ai_effect_overlay_accents,
+                debug_dir=debug_dir / "ai_effect_variant",
+            )
+            await render_video(
+                source_path=packaged_source_path,
+                render_plan=render_plan_timeline.data_json,
+                editorial_timeline=packaged_editorial_timeline,
+                output_path=tmp_packaged_mp4,
+                subtitle_items=packaged_subtitles,
+                overlay_editing_accents=final_overlay_accents,
+                debug_dir=debug_dir / "packaged",
+            )
+            if packaging_heartbeat is not None:
+                packaging_heartbeat.cancel()
+                with suppress(asyncio.CancelledError):
+                    await packaging_heartbeat
+            plain_meta = await _probe_with_retry(tmp_plain_mp4)
+            packaged_meta = await _probe_with_retry(tmp_packaged_mp4)
+            ai_effect_meta = await _probe_with_retry(tmp_ai_effect_mp4)
+            avatar_meta = await _probe_with_retry(tmp_avatar_mp4) if tmp_avatar_mp4.exists() else None
+
+            local_plain_mp4 = build_variant_output_path(
+                out_dir,
+                out_name,
+                variant_label="素板",
+                extension=".mp4",
+                width=plain_meta.width,
+                height=plain_meta.height,
+            )
+            local_packaged_mp4 = build_variant_output_path(
+                out_dir,
+                out_name,
+                variant_label="成片",
+                extension=".mp4",
+                width=packaged_meta.width,
+                height=packaged_meta.height,
+            )
+            local_ai_effect_mp4 = build_variant_output_path(
+                out_dir,
+                out_name,
+                variant_label="AI特效版",
+                extension=".mp4",
+                width=ai_effect_meta.width,
+                height=ai_effect_meta.height,
+            )
+            local_avatar_mp4 = (
+                build_variant_output_path(
+                    out_dir,
+                    out_name,
+                    variant_label="数字人版",
+                    extension=".mp4",
+                    width=avatar_meta.width,
+                    height=avatar_meta.height,
+                )
+                if avatar_meta is not None
+                else None
+            )
+            local_plain_srt = build_variant_output_path(
+                out_dir,
+                out_name,
+                variant_label="素板",
+                extension=".srt",
+                width=plain_meta.width,
+                height=plain_meta.height,
+            )
+            local_packaged_srt = build_variant_output_path(
+                out_dir,
+                out_name,
+                variant_label="成片",
+                extension=".srt",
+                width=packaged_meta.width,
+                height=packaged_meta.height,
+            )
+            local_ai_effect_srt = build_variant_output_path(
+                out_dir,
+                out_name,
+                variant_label="AI特效版",
+                extension=".srt",
+                width=ai_effect_meta.width,
+                height=ai_effect_meta.height,
+            )
+            local_avatar_srt = (
+                build_variant_output_path(
+                    out_dir,
+                    out_name,
+                    variant_label="数字人版",
+                    extension=".srt",
+                    width=avatar_meta.width,
+                    height=avatar_meta.height,
+                )
+                if avatar_meta is not None
+                else None
+            )
+            local_cover = build_variant_output_path(
+                out_dir,
+                out_name,
+                variant_label="封面",
+                extension=".jpg",
+                width=plain_meta.width,
+                height=plain_meta.height,
+            )
+
+            await _copy_file_with_retry(tmp_plain_mp4, local_plain_mp4)
+            if tmp_avatar_mp4.exists() and local_avatar_mp4 is not None:
+                await _copy_file_with_retry(tmp_avatar_mp4, local_avatar_mp4)
+            await _copy_file_with_retry(tmp_ai_effect_mp4, local_ai_effect_mp4)
+            await _copy_file_with_retry(tmp_packaged_mp4, local_packaged_mp4)
+            async with get_session_factory()() as session:
+                step_result = await session.execute(
+                    select(JobStep).where(JobStep.job_id == uuid.UUID(job_id), JobStep.step_name == "render")
+                )
+                render_step = step_result.scalar_one_or_none()
+                render_output = await session.get(RenderOutput, render_output_id)
+                if render_step:
+                    await _set_step_progress(session, render_step, detail="生成字幕文件与封面图", progress=0.75)
+                if render_output:
+                    render_output.progress = 0.75
+                    await session.commit()
+
+            # Write SRT with remapped timestamps (matches the edited video)
+            write_srt_file(packaged_subtitles, local_packaged_srt)
+            write_srt_file(remapped_subtitles, local_plain_srt)
+            if tmp_avatar_mp4.exists() and local_avatar_srt is not None:
+                write_srt_file(packaged_subtitles, local_avatar_srt)
+            write_srt_file(ai_effect_subtitles, local_ai_effect_srt)
+            plain_subtitle_sync = _compute_subtitle_sync_check(local_plain_mp4, local_plain_srt)
+            packaged_trailing_allowance = _variant_expected_trailing_gap(
+                base_sync_check=plain_subtitle_sync,
+                packaging_allowance_sec=await _resolve_packaging_trailing_gap_allowance(render_plan_timeline.data_json),
+            )
+            ai_effect_trailing_allowance = _variant_expected_trailing_gap(
+                base_sync_check=plain_subtitle_sync,
+                packaging_allowance_sec=await _resolve_packaging_trailing_gap_allowance(ai_effect_render_plan),
+            )
+            packaged_subtitle_sync = _compute_subtitle_sync_check(
+                local_packaged_mp4,
+                local_packaged_srt,
+                allowed_trailing_gap_sec=packaged_trailing_allowance,
+            )
+            avatar_subtitle_sync = (
+                _compute_subtitle_sync_check(local_avatar_mp4, local_avatar_srt)
+                if local_avatar_mp4 is not None and local_avatar_srt is not None and tmp_avatar_mp4.exists()
+                else None
+            )
+            ai_effect_subtitle_sync = _compute_subtitle_sync_check(
+                local_ai_effect_mp4,
+                local_ai_effect_srt,
+                allowed_trailing_gap_sec=ai_effect_trailing_allowance,
+            )
+            blocking_sync_issues = _collect_blocking_variant_sync_issues(
+                {
+                    "packaged": packaged_subtitle_sync,
+                    "plain": plain_subtitle_sync,
+                    "avatar": avatar_subtitle_sync,
+                    "ai_effect": ai_effect_subtitle_sync,
+                }
+            )
+            if blocking_sync_issues:
+                raise RuntimeError(
+                    "render_variant_sync_blocked: "
+                    + "; ".join(blocking_sync_issues)
+                )
+
+            # Extract cover frame from the plain render so burned subtitles never leak into thumbnails.
+            try:
+                meta_result = await _get_cover_seek(job.id, tmpdir)
+                cover_source_path = _select_cover_source_video(tmp_cover_plain_mp4, tmp_packaged_mp4)
+                cover_variants = await extract_cover_frame(
+                    cover_source_path,
+                    local_cover,
+                    seek_sec=meta_result,
+                    content_profile=content_profile,
+                    cover_style=(render_plan_timeline.data_json.get("cover") or {}).get("style"),
+                    title_style=(render_plan_timeline.data_json.get("cover") or {}).get("title_style"),
+                )
+                cover_selection = load_cover_selection_summary(local_cover)
+            except Exception:
+                logger.exception("Cover export failed for job %s", job_id)
+                local_cover = None  # Cover is non-critical
+                cover_variants = []
+                cover_selection = None
         except Exception:
-            logger.exception("Cover export failed for job %s", job_id)
-            local_cover = None  # Cover is non-critical
-            cover_variants = []
-            cover_selection = None
+            async with get_session_factory()() as failure_session:
+                render_output = await failure_session.get(RenderOutput, render_output_id)
+                if render_output is not None:
+                    render_output.status = "failed"
+                    await failure_session.commit()
+            raise
+        finally:
+            if render_heartbeat is not None:
+                render_heartbeat.cancel()
+                with suppress(asyncio.CancelledError):
+                    await render_heartbeat
 
     # Update render output
     local_paths = {

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 import functools
 import json
 import logging
@@ -2503,19 +2504,26 @@ async def _normalize_rendered_output(
 
 
 async def _run_process(cmd: list[str], *, timeout: int) -> subprocess.CompletedProcess[str]:
-    loop = asyncio.get_running_loop()
     safe_cmd, temp_files = _materialize_long_filter_complex_args(cmd)
     try:
-        return await loop.run_in_executor(
-            None,
-            lambda: subprocess.run(
-                safe_cmd,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=timeout,
-            ),
+        process = await asyncio.create_subprocess_exec(
+            *safe_cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout_bytes, stderr_bytes = await asyncio.wait_for(process.communicate(), timeout=timeout)
+        except asyncio.TimeoutError as exc:
+            with suppress(ProcessLookupError):
+                process.kill()
+            with suppress(Exception):
+                await process.communicate()
+            raise subprocess.TimeoutExpired(safe_cmd, timeout) from exc
+        return subprocess.CompletedProcess(
+            safe_cmd,
+            int(process.returncode or 0),
+            stdout=(stdout_bytes or b"").decode("utf-8", errors="replace"),
+            stderr=(stderr_bytes or b"").decode("utf-8", errors="replace"),
         )
     finally:
         for path in temp_files:

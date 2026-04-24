@@ -5835,6 +5835,8 @@ _BRAND_ALIAS_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("OLIGHT", re.compile(r"(OLIGHT|O\s*LIGHT|傲雷|奥雷)", re.IGNORECASE)),
     ("Loop露普", re.compile(r"(LOOP|露普|陆虎|路普|鲁普)", re.IGNORECASE)),
     ("狐蝠工业", re.compile(r"(FOXBAT|狐蝠工业|狐蝠)", re.IGNORECASE)),
+    ("BOLTBOAT", re.compile(r"(BOLT\s*BOAT|BOLTBOAT|勃朗峰户外|船长|船厂)", re.IGNORECASE)),
+    ("HSJUN", re.compile(r"(HSJUN|HESIJUN|赫斯俊|赫斯郡)", re.IGNORECASE)),
     ("LuckyKiss", re.compile(r"(LUCKYKISS|LuckyKiss|luckykiss)", re.IGNORECASE)),
 ]
 
@@ -5889,6 +5891,7 @@ _MODEL_TO_BRAND: dict[str, str] = {
     "F2": "NexTool",
     "FXX1": "狐蝠工业",
     "FXX1小副包": "狐蝠工业",
+    "影蚀": "BOLTBOAT",
     "KissPod": "LuckyKiss",
     "S11 PRO": "NexTool",
     "S11PRO": "NexTool",
@@ -6524,6 +6527,8 @@ def _has_supported_product_model_hint(
     model: str,
     model_source: str = "",
 ) -> bool:
+    if model_source == "bag_alias" and str(model or "").strip() in str(transcript or ""):
+        return True
     compact_model = re.sub(r"[^A-Z0-9]+", "", _canonicalize_spoken_identity_text(model))
     compact_transcript = re.sub(r"[^A-Z0-9]+", "", _canonicalize_spoken_identity_text(transcript))
     mention_count = compact_transcript.count(compact_model)
@@ -6602,6 +6607,8 @@ def _has_supported_product_model_hint(
 
 def _extract_edc_bag_model(text: str, original_text: str) -> str:
     normalized = _canonicalize_spoken_identity_text(text)
+    if "影蚀" in normalized or "影蚀" in str(original_text or ""):
+        return "影蚀"
     normalized = re.sub(r"F\s*X\s*21(?=小副包|[^A-Z0-9]|$)", "FXX1", normalized, flags=re.IGNORECASE)
     normalized = re.sub(r"F\s*X\s*X\s*1(?=小副包|[^A-Z0-9]|$)", "FXX1", normalized, flags=re.IGNORECASE)
     normalized = re.sub(r"F\s*21(?=小副包|[^A-Z0-9]|$)", "FXX1", normalized, flags=re.IGNORECASE)

@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import re
-import subprocess
 from pathlib import Path
+import tempfile
 from typing import Any
 
 import httpx
@@ -16,6 +17,15 @@ from roughcut.providers.transcription.base import (
     TranscriptSegment,
     TranscriptionProvider,
     payload_to_dict,
+)
+from roughcut.providers.transcription.chunking import (
+    build_audio_chunk_specs,
+    chunk_progress_payload,
+    export_audio_chunk,
+    merge_chunk_result_segments,
+    probe_audio_duration,
+    resolve_audio_chunk_config,
+    should_chunk_audio,
 )
 
 
@@ -36,9 +46,227 @@ class LocalHTTPASRProvider(TranscriptionProvider):
         prompt: str | None = None,
         progress_callback: TranscriptionProgressCallback | None = None,
     ) -> TranscriptResult:
-        timeout = httpx.Timeout(1800.0, connect=30.0)
         settings = get_settings()
         context = str(prompt or "").strip() or None
+        max_new_tokens = int(getattr(settings, "local_asr_max_new_tokens", 4096) or 4096)
+        chunk_config = resolve_audio_chunk_config(settings)
+        probed_duration = probe_audio_duration(audio_path)
+        if should_chunk_audio(duration=probed_duration, config=chunk_config):
+            return await self._transcribe_long_audio_in_chunks(
+                audio_path,
+                language=language,
+                context=context,
+                total_duration=probed_duration,
+                max_new_tokens=max_new_tokens,
+                chunk_config=chunk_config,
+                progress_callback=progress_callback,
+            )
+        return await self._transcribe_single_audio(
+            audio_path,
+            language=language,
+            context=context,
+            max_new_tokens=max_new_tokens,
+            progress_callback=progress_callback,
+        )
+
+    async def _transcribe_single_audio(
+        self,
+        audio_path: Path,
+        *,
+        language: str,
+        context: str | None,
+        max_new_tokens: int,
+        progress_callback: TranscriptionProgressCallback | None,
+    ) -> TranscriptResult:
+        payload = await self._post_transcribe_request(
+            audio_path,
+            context=context,
+            max_new_tokens=max_new_tokens,
+            timeout=httpx.Timeout(1800.0, connect=30.0),
+        )
+        return self._build_result_from_payload(
+            payload,
+            audio_path=audio_path,
+            language=language,
+            context=context,
+            progress_callback=progress_callback,
+        )
+
+    async def _transcribe_long_audio_in_chunks(
+        self,
+        audio_path: Path,
+        *,
+        language: str,
+        context: str | None,
+        total_duration: float,
+        max_new_tokens: int,
+        chunk_config,
+        progress_callback: TranscriptionProgressCallback | None,
+    ) -> TranscriptResult:
+        chunk_specs = build_audio_chunk_specs(total_duration, config=chunk_config)
+        segments: list[TranscriptSegment] = []
+        payloads: list[dict[str, Any]] = []
+        next_index = 0
+        emitted_end = 0.0
+        with tempfile.TemporaryDirectory() as tmpdir:
+            for chunk in chunk_specs:
+                chunk_path = Path(tmpdir) / f"chunk_{chunk.start:.2f}_{chunk.end:.2f}.wav"
+                if progress_callback is not None:
+                    progress_callback(
+                        chunk_progress_payload(
+                            chunk=chunk,
+                            covered_until=emitted_end,
+                            total_duration=total_duration,
+                            segment_count=len(segments),
+                            text=segments[-1].text if segments else "",
+                            phase="export",
+                            detail=f"导出 chunk {chunk.index + 1}/{chunk.count} 音频片段",
+                        )
+                    )
+                await asyncio.to_thread(
+                    export_audio_chunk,
+                    audio_path,
+                    chunk_path,
+                    start=chunk.start,
+                    end=chunk.end,
+                    timeout_sec=float(chunk_config.export_timeout_sec),
+                )
+                chunk_payload = await self._post_chunk_transcribe_request(
+                    chunk_path=chunk_path,
+                    chunk=chunk,
+                    context=context,
+                    max_new_tokens=max_new_tokens,
+                    timeout=httpx.Timeout(float(chunk_config.request_timeout_sec), connect=30.0),
+                    chunk_config=chunk_config,
+                    covered_until=emitted_end,
+                    total_duration=total_duration,
+                    segment_count=len(segments),
+                    latest_text=segments[-1].text if segments else "",
+                    progress_callback=progress_callback,
+                )
+                payloads.append(payload_to_dict(chunk_payload))
+                chunk_result = self._build_result_from_payload(
+                    chunk_payload,
+                    audio_path=chunk_path,
+                    language=language,
+                    context=context,
+                    progress_callback=None,
+                )
+                merged_segments, emitted_end = merge_chunk_result_segments(
+                    chunk_result,
+                    chunk=chunk,
+                    start_index=next_index,
+                    emitted_end=emitted_end,
+                )
+                segments.extend(merged_segments)
+                next_index += len(merged_segments)
+                if progress_callback is not None:
+                    progress_callback(
+                        chunk_progress_payload(
+                            chunk=chunk,
+                            covered_until=max(emitted_end, chunk.end),
+                            total_duration=total_duration,
+                            segment_count=len(segments),
+                            text=segments[-1].text if segments else "",
+                            phase="complete",
+                            detail=f"chunk {chunk.index + 1}/{chunk.count} 转写完成",
+                        )
+                    )
+
+        raw_segments = list(segments)
+        repaired_segments = self._repair_segments(segments, duration=total_duration)
+        return TranscriptResult(
+            segments=repaired_segments,
+            language=language,
+            duration=total_duration,
+            provider="local_http_asr",
+            model=self._model_name,
+            raw_payload={
+                "chunking": {
+                    **chunk_config.as_dict(),
+                    "chunk_count": len(chunk_specs),
+                    "duration_sec": round(total_duration, 3),
+                },
+                "chunks": payloads,
+            },
+            raw_segments=raw_segments or list(repaired_segments),
+            context=context,
+        )
+
+    async def _post_chunk_transcribe_request(
+        self,
+        *,
+        chunk_path: Path,
+        chunk,
+        context: str | None,
+        max_new_tokens: int,
+        timeout: httpx.Timeout,
+        chunk_config,
+        covered_until: float,
+        total_duration: float,
+        segment_count: int,
+        latest_text: str,
+        progress_callback: TranscriptionProgressCallback | None,
+    ) -> dict[str, Any]:
+        max_attempts = max(1, int(chunk_config.request_max_retries) + 1)
+        for attempt in range(1, max_attempts + 1):
+            if progress_callback is not None:
+                progress_callback(
+                    chunk_progress_payload(
+                        chunk=chunk,
+                        covered_until=covered_until,
+                        total_duration=total_duration,
+                        segment_count=segment_count,
+                        text=latest_text,
+                        phase="request",
+                        detail=(
+                            f"提交 chunk {chunk.index + 1}/{chunk.count} 转写请求"
+                            if attempt == 1
+                            else f"重试 chunk {chunk.index + 1}/{chunk.count} 转写请求（{attempt}/{max_attempts}）"
+                        ),
+                        retry_attempt=attempt,
+                        retry_count=max_attempts,
+                    )
+                )
+            try:
+                return await self._post_transcribe_request(
+                    chunk_path,
+                    context=context,
+                    max_new_tokens=max_new_tokens,
+                    timeout=timeout,
+                )
+            except (httpx.TimeoutException, httpx.RequestError, httpx.HTTPStatusError):
+                if attempt >= max_attempts:
+                    raise
+                backoff_sec = float(chunk_config.request_retry_backoff_sec) * (2 ** (attempt - 1))
+                if progress_callback is not None:
+                    progress_callback(
+                        chunk_progress_payload(
+                            chunk=chunk,
+                            covered_until=covered_until,
+                            total_duration=total_duration,
+                            segment_count=segment_count,
+                            text=latest_text,
+                            phase="retry_wait",
+                            detail=(
+                                f"chunk {chunk.index + 1}/{chunk.count} 请求失败，"
+                                f"{backoff_sec:.0f}s 后重试"
+                            ),
+                            retry_attempt=attempt,
+                            retry_count=max_attempts,
+                        )
+                    )
+                await asyncio.sleep(backoff_sec)
+        raise RuntimeError("chunk request retry loop exhausted unexpectedly")
+
+    async def _post_transcribe_request(
+        self,
+        audio_path: Path,
+        *,
+        context: str | None,
+        max_new_tokens: int,
+        timeout: httpx.Timeout,
+    ) -> dict[str, Any]:
         with audio_path.open("rb") as audio_file:
             files = {
                 "file": (
@@ -49,7 +277,7 @@ class LocalHTTPASRProvider(TranscriptionProvider):
             }
             data = {
                 self._hotwords_field: context or "",
-                "max_new_tokens": str(int(getattr(settings, "local_asr_max_new_tokens", 4096) or 4096)),
+                "max_new_tokens": str(max_new_tokens),
             }
             async with hold_managed_gpu_services_async(
                 required_urls=[self._base_url],
@@ -58,8 +286,17 @@ class LocalHTTPASRProvider(TranscriptionProvider):
                 async with httpx.AsyncClient(timeout=timeout) as client:
                     response = await client.post(f"{self._base_url}{self._transcribe_path}", files=files, data=data)
         response.raise_for_status()
-        payload = response.json()
+        return dict(response.json() or {})
 
+    def _build_result_from_payload(
+        self,
+        payload: dict[str, Any],
+        *,
+        audio_path: Path,
+        language: str,
+        context: str | None,
+        progress_callback: TranscriptionProgressCallback | None,
+    ) -> TranscriptResult:
         raw_items = self._extract_segment_items(payload)
         duration = self._resolve_duration(payload, audio_path=audio_path, raw_items=raw_items)
         segments = self._build_segments(raw_items, duration=duration, context=context)
@@ -412,30 +649,4 @@ class LocalHTTPASRProvider(TranscriptionProvider):
         ]
         if end_times and max(end_times) > 0:
             return max(end_times)
-        return self._probe_duration(audio_path)
-
-    @staticmethod
-    def _probe_duration(path: Path) -> float:
-        result = subprocess.run(
-            [
-                "ffprobe",
-                "-v",
-                "error",
-                "-show_entries",
-                "format=duration",
-                "-of",
-                "default=noprint_wrappers=1:nokey=1",
-                str(path),
-            ],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            check=False,
-        )
-        if result.returncode != 0:
-            return 0.0
-        try:
-            return float(result.stdout.strip())
-        except ValueError:
-            return 0.0
+        return probe_audio_duration(audio_path)

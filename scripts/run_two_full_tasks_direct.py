@@ -33,6 +33,17 @@ from run_fullchain_batch import (
 )
 
 
+def _configure_local_event_loop_policy() -> None:
+    # asyncpg on Windows can emit Proactor InvalidStateError noise when this script
+    # repeatedly opens and tears down short-lived event loops via asyncio.run().
+    if sys.platform != "win32":
+        return
+    policy_cls = getattr(asyncio, "WindowsSelectorEventLoopPolicy", None)
+    if policy_cls is None:
+        return
+    asyncio.set_event_loop_policy(policy_cls())
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run two fresh full-chain RoughCut jobs in parallel.")
     parser.add_argument("--source", action="append", required=True)
@@ -45,6 +56,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    _configure_local_event_loop_policy()
     args = parse_args()
     sources = [Path(item).resolve() for item in args.source]
     for source in sources:

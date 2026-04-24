@@ -1,4 +1,5 @@
 import type { Config, ProviderServiceStatus, RuntimeEnvironment } from "../../types";
+import { CheckboxField } from "../../components/forms/CheckboxField";
 import { TextField } from "../../components/forms/TextField";
 import { PanelHeader } from "../../components/ui/PanelHeader";
 import type { SettingsForm } from "./constants";
@@ -27,6 +28,13 @@ export function RuntimeSettingsPanel({ form, runtimeEnvironment, serviceStatus, 
   const maxUploadSizeMb = Number(form.max_upload_size_mb ?? 2048);
   const maxVideoDurationSec = Number(form.max_video_duration_sec ?? 7200);
   const ffmpegTimeoutSec = Number(form.ffmpeg_timeout_sec ?? 600);
+  const transcribeRuntimeTimeoutSec = Number(form.transcribe_runtime_timeout_sec ?? 900);
+  const transcriptionChunkingEnabled = Boolean(form.transcription_chunking_enabled ?? true);
+  const transcriptionChunkThresholdSec = Number(form.transcription_chunk_threshold_sec ?? 600);
+  const transcriptionChunkSizeSec = Number(form.transcription_chunk_size_sec ?? 60);
+  const transcriptionChunkMinSec = Number(form.transcription_chunk_min_sec ?? 20);
+  const transcriptionChunkOverlapSec = Number(form.transcription_chunk_overlap_sec ?? 1.5);
+  const transcriptionChunkRequestTimeoutSec = Number(form.transcription_chunk_request_timeout_sec ?? 180);
   const localServiceCards = [
     {
       key: "local_http_asr",
@@ -73,7 +81,7 @@ export function RuntimeSettingsPanel({ form, runtimeEnvironment, serviceStatus, 
           <strong>{getServiceSummary(serviceStatus)}</strong>
           <div className="muted">当前输出目录：{String(runtimeEnvironment?.output_dir ?? DEFAULT_OUTPUT_DIR)}</div>
           <div className="muted">
-            上传 {maxUploadSizeMb} MB · 视频 {maxVideoDurationSec} 秒 · FFmpeg {ffmpegTimeoutSec} 秒
+            上传 {maxUploadSizeMb} MB · 视频 {maxVideoDurationSec} 秒 · FFmpeg {ffmpegTimeoutSec} 秒 · 转写 {transcribeRuntimeTimeoutSec} 秒
           </div>
         </article>
       </div>
@@ -140,6 +148,60 @@ export function RuntimeSettingsPanel({ form, runtimeEnvironment, serviceStatus, 
               value={String(ffmpegTimeoutSec)}
               onChange={(event) => onChange("ffmpeg_timeout_sec", Number(event.target.value))}
             />
+            <TextField
+              label="转写运行时超时秒数"
+              type="number"
+              value={String(transcribeRuntimeTimeoutSec)}
+              onChange={(event) => onChange("transcribe_runtime_timeout_sec", Number(event.target.value))}
+            />
+          </div>
+        </section>
+
+        <section className="settings-chain-card">
+          <div className="settings-chain-card-head">
+            <div>
+              <span className="settings-overview-label">长音频分块</span>
+              <strong>Chunked ASR</strong>
+            </div>
+          </div>
+          <div className="settings-chain-card-body">
+            <CheckboxField
+              label="超过阈值后启用分块转写"
+              checked={transcriptionChunkingEnabled}
+              onChange={(event) => onChange("transcription_chunking_enabled", event.target.checked)}
+            />
+            <div className="form-grid three-up">
+              <TextField
+                label="分块阈值秒数"
+                type="number"
+                value={String(transcriptionChunkThresholdSec)}
+                onChange={(event) => onChange("transcription_chunk_threshold_sec", Number(event.target.value))}
+              />
+              <TextField
+                label="单块长度秒数"
+                type="number"
+                value={String(transcriptionChunkSizeSec)}
+                onChange={(event) => onChange("transcription_chunk_size_sec", Number(event.target.value))}
+              />
+              <TextField
+                label="最小块长度秒数"
+                type="number"
+                value={String(transcriptionChunkMinSec)}
+                onChange={(event) => onChange("transcription_chunk_min_sec", Number(event.target.value))}
+              />
+              <TextField
+                label="块间重叠秒数"
+                type="number"
+                value={String(transcriptionChunkOverlapSec)}
+                onChange={(event) => onChange("transcription_chunk_overlap_sec", Number(event.target.value))}
+              />
+              <TextField
+                label="单块请求超时秒数"
+                type="number"
+                value={String(transcriptionChunkRequestTimeoutSec)}
+                onChange={(event) => onChange("transcription_chunk_request_timeout_sec", Number(event.target.value))}
+              />
+            </div>
           </div>
         </section>
       </div>

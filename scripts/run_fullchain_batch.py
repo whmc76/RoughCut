@@ -20,7 +20,7 @@ from sqlalchemy import delete, select
 from roughcut.config import get_settings
 from roughcut.creative.modes import resolve_live_batch_enhancement_modes
 from roughcut.db.models import Artifact, Job, JobStep, RenderOutput, SubtitleCorrection, SubtitleItem, Timeline, TranscriptSegment
-from roughcut.media.output import get_cover_manifest_path, get_legacy_cover_manifest_path
+from roughcut.media.output import get_cover_manifest_path
 from roughcut.db.session import get_session_factory
 from roughcut.pipeline.orchestrator import PIPELINE_STEPS
 from roughcut.pipeline.live_readiness import build_live_readiness_summary, collect_job_issue_codes
@@ -37,6 +37,21 @@ from roughcut.speech.subtitle_pipeline import ARTIFACT_TYPE_SUBTITLE_PROJECTION_
 from roughcut.watcher.folder_watcher import create_jobs_for_inventory_paths
 
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v"}
+
+
+def _configure_local_event_loop_policy() -> None:
+    # asyncpg on Windows can emit Proactor InvalidStateError noise when this script
+    # repeatedly opens and tears down short-lived event loops via asyncio.run().
+    if sys.platform != "win32":
+        return
+    policy_cls = getattr(asyncio, "WindowsSelectorEventLoopPolicy", None)
+    if policy_cls is None:
+        return
+    asyncio.set_event_loop_policy(policy_cls())
+
+
+def get_legacy_cover_manifest_path(output_path: Path) -> Path:
+    return output_path.with_name(f"{output_path.stem}_cover_variants.json")
 
 
 @dataclass
@@ -154,6 +169,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    _configure_local_event_loop_policy()
     args = parse_args()
     args.report_dir.mkdir(parents=True, exist_ok=True)
     ensure_batch_runtime_ready()
@@ -794,9 +810,11 @@ async def collect_job_report(
         )
 
         timeline_result = await session.execute(
-            select(Timeline).where(Timeline.job_id == job_uuid, Timeline.timeline_type == "editorial")
+            select(Timeline)
+            .where(Timeline.job_id == job_uuid, Timeline.timeline_type == "editorial")
+            .order_by(Timeline.created_at.desc(), Timeline.id.desc())
         )
-        editorial_timeline = timeline_result.scalar_one_or_none()
+        editorial_timeline = timeline_result.scalars().first()
 
     keep_ratio = compute_keep_ratio(editorial_timeline.data_json if editorial_timeline else None)
     output_path = str(render_output.output_path) if render_output and render_output.output_path else None

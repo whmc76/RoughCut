@@ -1,5 +1,13 @@
 from roughcut.api.avatar_materials import _derive_runtime_preview_capability
-from roughcut.config import Settings, _normalize_settings, canonicalize_transcription_provider_name
+from roughcut.config import (
+    DEFAULT_TRANSCRIPTION_MODELS,
+    DEFAULT_TRANSCRIPTION_PROVIDER,
+    Settings,
+    _normalize_settings,
+    canonicalize_transcription_provider_name,
+    normalize_transcription_provider_name,
+    resolve_transcription_provider_plan,
+)
 from roughcut.naming import (
     AVATAR_CAPABILITY_GENERATION,
     AVATAR_CAPABILITY_PORTRAIT,
@@ -26,6 +34,15 @@ def test_transcription_aliases_only_keep_canonical_provider_shapes() -> None:
     assert canonicalize_transcription_provider_name("local-asr") == "local_http_asr"
     assert canonicalize_transcription_provider_name("faster-whisper") == "faster_whisper"
     assert canonicalize_transcription_provider_name("fast") == "fast"
+
+
+def test_transcription_runtime_normalizes_all_paths_to_local_http_asr() -> None:
+    assert normalize_transcription_provider_name("local-asr") == DEFAULT_TRANSCRIPTION_PROVIDER
+    assert normalize_transcription_provider_name("faster-whisper") == DEFAULT_TRANSCRIPTION_PROVIDER
+    assert normalize_transcription_provider_name("openai") == DEFAULT_TRANSCRIPTION_PROVIDER
+    assert resolve_transcription_provider_plan("openai", "gpt-4o-transcribe") == [
+        (DEFAULT_TRANSCRIPTION_PROVIDER, DEFAULT_TRANSCRIPTION_MODELS[DEFAULT_TRANSCRIPTION_PROVIDER])
+    ]
 
 
 def test_avatar_capability_status_uses_business_capability_keys() -> None:

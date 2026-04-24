@@ -102,6 +102,14 @@ class ConfigOut(BaseModel):
     local_asr_api_base_url: str
     local_asr_model_name: str
     local_asr_display_name: str
+    transcription_chunking_enabled: bool
+    transcription_chunk_threshold_sec: int
+    transcription_chunk_size_sec: int
+    transcription_chunk_min_sec: int
+    transcription_chunk_overlap_sec: float
+    transcription_chunk_request_timeout_sec: int
+    transcription_chunk_request_max_retries: int
+    transcription_chunk_request_retry_backoff_sec: float
     avatar_provider: str
     avatar_api_key_set: bool
     avatar_presenter_id: str
@@ -332,6 +340,14 @@ class ConfigPatch(BaseModel):
     local_asr_api_base_url: str | None = None
     local_asr_model_name: str | None = None
     local_asr_display_name: str | None = None
+    transcription_chunking_enabled: bool | None = None
+    transcription_chunk_threshold_sec: int | None = None
+    transcription_chunk_size_sec: int | None = None
+    transcription_chunk_min_sec: int | None = None
+    transcription_chunk_overlap_sec: float | None = None
+    transcription_chunk_request_timeout_sec: int | None = None
+    transcription_chunk_request_max_retries: int | None = None
+    transcription_chunk_request_retry_backoff_sec: float | None = None
     avatar_provider: str | None = None
     avatar_api_base_url: str | None = None
     avatar_training_api_base_url: str | None = None
@@ -458,6 +474,14 @@ def get_config():
         local_asr_api_base_url=s.local_asr_api_base_url,
         local_asr_model_name=s.local_asr_model_name,
         local_asr_display_name=s.local_asr_display_name,
+        transcription_chunking_enabled=s.transcription_chunking_enabled,
+        transcription_chunk_threshold_sec=s.transcription_chunk_threshold_sec,
+        transcription_chunk_size_sec=s.transcription_chunk_size_sec,
+        transcription_chunk_min_sec=s.transcription_chunk_min_sec,
+        transcription_chunk_overlap_sec=s.transcription_chunk_overlap_sec,
+        transcription_chunk_request_timeout_sec=s.transcription_chunk_request_timeout_sec,
+        transcription_chunk_request_max_retries=s.transcription_chunk_request_max_retries,
+        transcription_chunk_request_retry_backoff_sec=s.transcription_chunk_request_retry_backoff_sec,
         avatar_provider=s.avatar_provider,
         avatar_api_key_set=bool(s.avatar_api_key),
         avatar_presenter_id=s.avatar_presenter_id,
@@ -562,6 +586,9 @@ def get_model_catalog(provider: str, kind: str, refresh: int = 0):
 
 @router.get("/options", response_model=ConfigOptionsOut)
 def get_config_options():
+    transcription_models = {
+        DEFAULT_TRANSCRIPTION_PROVIDER: list(TRANSCRIPTION_MODEL_OPTIONS[DEFAULT_TRANSCRIPTION_PROVIDER]),
+    }
     return ConfigOptionsOut(
         job_languages=JOB_LANGUAGE_OPTIONS,
         workflow_templates=build_workflow_template_options(),
@@ -571,7 +598,7 @@ def get_config_options():
         avatar_providers=build_avatar_provider_options(),
         voice_providers=build_voice_provider_options(),
         creative_mode_catalog=build_mode_catalog(),
-        transcription_models=TRANSCRIPTION_MODEL_OPTIONS,
+        transcription_models=transcription_models,
         multimodal_fallback_providers=MULTIMODAL_FALLBACK_PROVIDER_OPTIONS,
         search_providers=SEARCH_PROVIDER_OPTIONS,
         search_fallback_providers=SEARCH_FALLBACK_PROVIDER_OPTIONS,
@@ -869,6 +896,56 @@ def patch_config(body: ConfigPatch):
         updates["telegram_agent_task_timeout_sec"] = max(30, min(7200, int(updates["telegram_agent_task_timeout_sec"])))
     if "transcribe_runtime_timeout_sec" in updates:
         updates["transcribe_runtime_timeout_sec"] = max(60, min(7200, int(updates["transcribe_runtime_timeout_sec"])))
+    if "transcription_chunk_threshold_sec" in updates:
+        updates["transcription_chunk_threshold_sec"] = max(
+            60,
+            min(21600, int(updates["transcription_chunk_threshold_sec"])),
+        )
+    if "transcription_chunk_size_sec" in updates:
+        updates["transcription_chunk_size_sec"] = max(
+            15,
+            min(1800, int(updates["transcription_chunk_size_sec"])),
+        )
+    resolved_chunk_size_sec = int(
+        updates.get(
+            "transcription_chunk_size_sec",
+            overrides.get("transcription_chunk_size_sec", get_settings().transcription_chunk_size_sec),
+        )
+    )
+    if "transcription_chunk_min_sec" in updates:
+        updates["transcription_chunk_min_sec"] = max(
+            5,
+            min(resolved_chunk_size_sec, int(updates["transcription_chunk_min_sec"])),
+        )
+    resolved_chunk_min_sec = int(
+        updates.get(
+            "transcription_chunk_min_sec",
+            overrides.get("transcription_chunk_min_sec", get_settings().transcription_chunk_min_sec),
+        )
+    )
+    if "transcription_chunk_overlap_sec" in updates:
+        updates["transcription_chunk_overlap_sec"] = max(
+            0.0,
+            min(
+                max(0.0, float(resolved_chunk_size_sec - resolved_chunk_min_sec)),
+                float(updates["transcription_chunk_overlap_sec"]),
+            ),
+        )
+    if "transcription_chunk_request_timeout_sec" in updates:
+        updates["transcription_chunk_request_timeout_sec"] = max(
+            30,
+            min(7200, int(updates["transcription_chunk_request_timeout_sec"])),
+        )
+    if "transcription_chunk_request_max_retries" in updates:
+        updates["transcription_chunk_request_max_retries"] = max(
+            0,
+            min(8, int(updates["transcription_chunk_request_max_retries"])),
+        )
+    if "transcription_chunk_request_retry_backoff_sec" in updates:
+        updates["transcription_chunk_request_retry_backoff_sec"] = max(
+            0.5,
+            min(300.0, float(updates["transcription_chunk_request_retry_backoff_sec"])),
+        )
     if "telegram_agent_result_max_chars" in updates:
         updates["telegram_agent_result_max_chars"] = max(500, min(12000, int(updates["telegram_agent_result_max_chars"])))
     current_provider = updates.get(

@@ -81,6 +81,16 @@ _BUILTIN_ENTITY_CATALOG: tuple[EntityCatalogEntry, ...] = (
         supporting_keywords=("联名", "双肩包", "轻量化", "机能", "通勤"),
     ),
     EntityCatalogEntry(
+        brand="BOLTBOAT",
+        model="影蚀",
+        subject_type="轻量化机能单肩包",
+        subject_domain="bag",
+        brand_aliases=("船长", "船厂", "Boltboat", "BOLT BOAT", "勃朗峰户外"),
+        model_aliases=("影蚀机能单肩包", "影蚀斜挎包"),
+        phrases=("BOLTBOAT 影蚀", "勃朗峰户外 影蚀", "HSJUN BOLTBOAT 影蚀"),
+        supporting_keywords=("轻量化", "斜挎包", "单肩包", "机能", "收纳", "背负"),
+    ),
+    EntityCatalogEntry(
         brand="NexTool",
         model="F12",
         subject_type="多功能工具钳",
