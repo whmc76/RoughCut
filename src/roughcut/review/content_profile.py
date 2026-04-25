@@ -939,6 +939,13 @@ def _is_exception_review_reason(reason: str) -> bool:
     text = str(reason or "").strip().lower()
     if not text:
         return False
+    soft_failures = (
+        "内容理解推断失败",
+        "内容理解暂不可用",
+        "llm 内容理解结果要求人工复核",
+    )
+    if any(token in text for token in soft_failures):
+        return False
     tokens = (
         "冲突",
         "矛盾",
@@ -1559,7 +1566,16 @@ def assess_content_profile_automation(
 
     score = round(min(score, 1.0), 3)
     review_reasons = list(dict.fromkeys(review_reasons))
-    blocking_reasons = list(dict.fromkeys(blocking_reasons))
+    blocking_reasons = [
+        reason
+        for reason in dict.fromkeys(blocking_reasons)
+        if _is_exception_review_reason(reason)
+        or reason
+        in {
+            "字幕显示为含片/益生菌等入口产品，但当前摘要主体仍落在装备/工具类",
+            "开箱类视频主体品牌与型号冲突",
+        }
+    ]
     quality_gate_passed = score >= normalized_threshold and not blocking_reasons
     settings = get_settings()
     accuracy_gate = build_content_profile_auto_review_gate(

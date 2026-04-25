@@ -6,7 +6,7 @@ import pytest
 
 import roughcut.pipeline.orchestrator as orchestrator
 from roughcut.db.models import Job, JobStep
-from roughcut.pipeline.steps import _finalize_content_profile_review_state
+from roughcut.pipeline.steps import _drop_soft_content_understanding_blockers, _finalize_content_profile_review_state
 from roughcut.review.content_profile import assess_content_profile_automation
 
 
@@ -29,6 +29,52 @@ def test_product_identity_gap_is_warning_not_blocking_review() -> None:
     assert "开箱类视频未识别出可验证主体" in automation["review_reasons"]
     assert automation["blocking_reasons"] == []
     assert automation["auto_confirm"] is True
+
+
+def test_content_understanding_inference_failure_is_warning_not_blocking() -> None:
+    automation = assess_content_profile_automation(
+        {
+            "workflow_template": "edc_tactical",
+            "subject_type": "EDC机能包",
+            "video_theme": "HSJUN BOLTBOAT 影蚀机能单肩包体验",
+            "summary": "这条视频围绕 HSJUN BOLTBOAT 影蚀机能单肩包展开，介绍外观、容量和日常使用体验。",
+            "cover_title": {"title": "影蚀机能单肩包体验", "subtitle": "外观与使用细节"},
+            "engagement_question": "你最关注这款包的哪个细节？",
+            "search_queries": ["HSJUN BOLTBOAT 影蚀", "机能单肩包"],
+            "subject_brand": "BOLTBOAT",
+            "subject_model": "影蚀",
+            "source_context": {"video_description": "任务创建时已填写视频说明。"},
+            "content_understanding": {
+                "needs_review": True,
+                "review_reasons": ["内容理解推断失败"],
+            },
+        },
+        subtitle_items=[{"text_final": "这是一段关于机能单肩包外观和使用体验的字幕。"} for _ in range(8)],
+        source_name="IMG_0185 HSJUN BOLTBOAT勃朗峰户外 影蚀 机能单肩包轻量化斜挎包.MOV",
+        auto_confirm_enabled=True,
+        threshold=0.92,
+    )
+
+    assert "内容理解推断失败" in automation["review_reasons"]
+    assert automation["blocking_reasons"] == []
+    assert automation["auto_confirm"] is True
+
+
+def test_soft_content_understanding_blocker_is_dropped_before_exception_gate() -> None:
+    automation = _drop_soft_content_understanding_blockers(
+        {
+            "score": 1.0,
+            "threshold": 0.92,
+            "auto_confirm": False,
+            "quality_gate_passed": False,
+            "review_reasons": [],
+            "blocking_reasons": ["内容理解推断失败"],
+        }
+    )
+
+    assert automation["blocking_reasons"] == []
+    assert automation["auto_confirm"] is True
+    assert automation["quality_gate_passed"] is True
 
 
 @pytest.mark.asyncio

@@ -3263,6 +3263,7 @@ async def _evaluate_content_profile_automation_and_reports(
             blocking_reasons=list(subtitle_consistency_report.get("blocking_reasons") or []),
             prefix="字幕一致性未通过",
         )
+    automation = _drop_soft_content_understanding_blockers(automation)
     updated_profile = dict(content_profile)
     updated_profile["automation_review"] = automation
     updated_profile["subtitle_quality_report"] = subtitle_quality_report
@@ -3682,6 +3683,32 @@ def _apply_blocking_report_to_content_profile(
     updated_automation["quality_gate_passed"] = False
     updated_automation["auto_confirm"] = False
     return updated_profile, updated_automation
+
+
+def _drop_soft_content_understanding_blockers(automation: dict[str, Any]) -> dict[str, Any]:
+    soft_blockers = {
+        "内容理解推断失败",
+        "内容理解暂不可用",
+        "LLM 内容理解结果要求人工复核",
+    }
+    original_blocking_reasons = [
+        str(item).strip()
+        for item in list(automation.get("blocking_reasons") or [])
+        if str(item).strip()
+    ]
+    blocking_reasons = [
+        reason
+        for reason in original_blocking_reasons
+        if reason not in soft_blockers
+    ]
+    if blocking_reasons == original_blocking_reasons:
+        return automation
+    updated = dict(automation)
+    updated["blocking_reasons"] = blocking_reasons
+    if not blocking_reasons:
+        updated["auto_confirm"] = True
+        updated["quality_gate_passed"] = True
+    return updated
 
 
 async def _finalize_content_profile_review_state(
