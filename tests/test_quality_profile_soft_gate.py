@@ -1,6 +1,6 @@
 from roughcut.db.models import Artifact, Job, SubtitleItem
 from roughcut.pipeline.quality import assess_job_quality
-from roughcut.review.subtitle_quality import ARTIFACT_TYPE_SUBTITLE_QUALITY_REPORT
+from roughcut.review.subtitle_quality import ARTIFACT_TYPE_SUBTITLE_QUALITY_REPORT, build_subtitle_quality_report
 
 
 def _subtitle(index: int, text: str) -> SubtitleItem:
@@ -104,6 +104,33 @@ def test_stale_single_word_split_blocker_is_downgraded() -> None:
     )
 
     assert "subtitle_quality_blocking" not in assessment["issue_codes"]
+
+
+def test_short_fragment_rate_is_warning_not_blocking() -> None:
+    subtitles = [
+        {"text_final": "看"},
+        {"text_final": "这里"},
+        {"text_final": "这个"},
+        {"text_final": "做工"},
+        {"text_final": "细节"},
+        {"text_final": "打开"},
+        {"text_final": "侧面"},
+        {"text_final": "按键"},
+        {"text_final": "亮度"},
+        {"text_final": "尾盖"},
+        {"text_final": "卡扣"},
+        {"text_final": "手感"},
+        {"text_final": "换个角度"},
+        {"text_final": "再对比一下"},
+        {"text_final": "这款手电的按键和光斑表现都比较直观。"},
+        {"text_final": "整体内容可以继续进入后续剪辑流程。"},
+    ]
+
+    report = build_subtitle_quality_report(subtitle_items=subtitles)
+
+    assert report["blocking"] is False
+    assert report["blocking_reasons"] == []
+    assert any("短碎句率过高" in reason for reason in report["warning_reasons"])
 
 
 def test_quality_assessment_applies_source_identity_constraints() -> None:

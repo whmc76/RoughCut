@@ -213,7 +213,7 @@ def build_subtitle_quality_report(
     if lexical_bad_term_total > 0:
         blocking_reasons.append(f"可词级纠偏的热词/型号残留 {lexical_bad_term_total} 处")
     if short_fragment_rate > 0.015 and short_fragment_count >= _SHORT_FRAGMENT_BLOCKING_MIN_COUNT:
-        blocking_reasons.append(f"短碎句率过高 {short_fragment_rate:.2%}")
+        warning_reasons.append(f"短碎句率过高 {short_fragment_rate:.2%}")
     elif short_fragment_rate > 0.008:
         warning_reasons.append(f"短碎句率偏高 {short_fragment_rate:.2%}")
     generic_word_split_rate = (generic_word_split_count / max(1, total - 1)) if total > 1 else 0.0
