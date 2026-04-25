@@ -77,6 +77,39 @@ def test_soft_content_understanding_blocker_is_dropped_before_exception_gate() -
     assert automation["quality_gate_passed"] is True
 
 
+def test_first_seen_identity_warning_does_not_block_exception_gate() -> None:
+    automation = assess_content_profile_automation(
+        {
+            "workflow_template": "edc_tactical",
+            "subject_type": "EDC折刀",
+            "video_theme": "NOC MT332细节展示",
+            "summary": "这条视频围绕 NOC MT332 折刀的外观和细节展示展开。",
+            "cover_title": {"title": "NOC MT332细节", "subtitle": "外观展示"},
+            "engagement_question": "你更关注这款折刀的哪个细节？",
+            "search_queries": ["NOC MT332", "NOC 折刀"],
+            "subject_brand": "NOC",
+            "subject_model": "MT332",
+            "identity_review": {
+                "required": True,
+                "conservative_summary": True,
+                "reason": "开箱类视频命中首次品牌/型号且缺少交叉印证，需人工确认",
+            },
+            "content_understanding": {
+                "needs_review": True,
+                "review_reasons": ["开箱类视频命中首次品牌/型号且缺少交叉印证，需人工确认"],
+            },
+        },
+        subtitle_items=[{"text_final": "展示一下这款折刀的外观细节。"} for _ in range(8)],
+        source_name="VID_20260112_122408 室内光线展示 NOC MT33两款折刀的外观和细节.mp4",
+        auto_confirm_enabled=True,
+        threshold=0.92,
+    )
+
+    assert "开箱类视频命中首次品牌/型号且缺少交叉印证，需人工确认" in automation["review_reasons"]
+    assert automation["blocking_reasons"] == []
+    assert automation["auto_confirm"] is True
+
+
 @pytest.mark.asyncio
 async def test_summary_review_auto_completes_when_only_warnings_exist() -> None:
     job = Job(id=uuid.uuid4(), source_name="source.mp4", status="processing")

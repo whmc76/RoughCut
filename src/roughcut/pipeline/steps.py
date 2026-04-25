@@ -3690,6 +3690,10 @@ def _drop_soft_content_understanding_blockers(automation: dict[str, Any]) -> dic
         "内容理解推断失败",
         "内容理解暂不可用",
         "LLM 内容理解结果要求人工复核",
+        "开箱类视频命中首次品牌/型号且缺少交叉印证，需人工确认",
+        "开箱类视频命中首次品牌/型号且缺少交叉印证，已按保守摘要继续",
+        "开箱类视频命中首次品牌/型号，默认待人工确认",
+        "开箱类视频命中首次品牌/型号，已作为身份置信度警告继续",
     }
     original_blocking_reasons = [
         str(item).strip()

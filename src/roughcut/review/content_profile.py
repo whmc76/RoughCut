@@ -960,6 +960,18 @@ def _is_exception_review_reason(reason: str) -> bool:
     return any(token in text for token in tokens)
 
 
+def _is_soft_identity_review_reason(reason: str) -> bool:
+    text = str(reason or "").strip()
+    if not text:
+        return False
+    tokens = (
+        "首次品牌/型号",
+        "缺少交叉印证",
+        "默认待人工确认",
+    )
+    return any(token in text for token in tokens)
+
+
 def build_content_profile_cache_fingerprint(
     *,
     source_name: str,
@@ -1569,12 +1581,15 @@ def assess_content_profile_automation(
     blocking_reasons = [
         reason
         for reason in dict.fromkeys(blocking_reasons)
-        if _is_exception_review_reason(reason)
-        or reason
-        in {
-            "字幕显示为含片/益生菌等入口产品，但当前摘要主体仍落在装备/工具类",
-            "开箱类视频主体品牌与型号冲突",
-        }
+        if not _is_soft_identity_review_reason(reason)
+        and (
+            _is_exception_review_reason(reason)
+            or reason
+            in {
+                "字幕显示为含片/益生菌等入口产品，但当前摘要主体仍落在装备/工具类",
+                "开箱类视频主体品牌与型号冲突",
+            }
+        )
     ]
     quality_gate_passed = score >= normalized_threshold and not blocking_reasons
     settings = get_settings()
@@ -1904,9 +1919,9 @@ def _assess_identity_review_requirement(
 
     reason = ""
     if required and conservative_summary:
-        reason = "开箱类视频命中首次品牌/型号且缺少交叉印证，需人工确认"
+        reason = "开箱类视频命中首次品牌/型号且缺少交叉印证，已按保守摘要继续"
     elif required:
-        reason = "开箱类视频命中首次品牌/型号，默认待人工确认"
+        reason = "开箱类视频命中首次品牌/型号，已作为身份置信度警告继续"
 
     return {
         "required": required,
