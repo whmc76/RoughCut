@@ -63,7 +63,7 @@ def resolve_audio_chunk_config(settings: object) -> AudioChunkConfig:
     ffmpeg_timeout_sec = max(30.0, float(getattr(settings, "ffmpeg_timeout_sec", 600.0) or 600.0))
     return AudioChunkConfig(
         enabled=bool(getattr(settings, "transcription_chunking_enabled", True)),
-        threshold_sec=max(60.0, float(getattr(settings, "transcription_chunk_threshold_sec", 600.0) or 600.0)),
+        threshold_sec=max(60.0, float(getattr(settings, "transcription_chunk_threshold_sec", 180.0) or 180.0)),
         chunk_size_sec=chunk_size_sec,
         min_chunk_sec=min_chunk_sec,
         overlap_sec=overlap_sec,

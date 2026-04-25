@@ -566,6 +566,22 @@ def _terminal_running_step_detail(job: Job, step: JobStep, *, target_status: str
     return "所属任务已结束，调度器已将遗留运行步骤标记为跳过。"
 
 
+def _mark_step_retry_exhausted(step: JobStep, *, now: datetime, detail: str | None = None) -> None:
+    metadata = dict(step.metadata_ or {})
+    previous_task_id = metadata.pop("task_id", None)
+    metadata.pop("retry_wait_until", None)
+    metadata.pop("retry_after_sec", None)
+    if previous_task_id:
+        metadata["last_task_id"] = previous_task_id
+    metadata["detail"] = detail or f"步骤已达到最大重试次数({MAX_ATTEMPTS})，调度器已停止自动重试。"
+    metadata["updated_at"] = now.isoformat()
+
+    step.status = "failed"
+    step.finished_at = step.finished_at or now
+    step.error_message = f"步骤 {step.step_name} 已达到最大重试次数 {MAX_ATTEMPTS}，不再自动重试。"
+    step.metadata_ = metadata
+
+
 async def _recover_stale_running_steps(session) -> None:
     settings = get_settings()
     if not bool(getattr(settings, "step_stale_recovery_enabled", True)):
@@ -641,6 +657,28 @@ async def _recover_stale_running_steps(session) -> None:
         else:
             metadata["detail"] = f"检测到步骤派发后长期未被工作进程领取({stale_after}s)，调度器已自动回收并重新入队。"
         metadata["updated_at"] = now.isoformat()
+
+        if step.attempt >= MAX_ATTEMPTS:
+            step.metadata_ = metadata
+            _mark_step_retry_exhausted(
+                step,
+                now=now,
+                detail=f"检测到步骤超时({stale_after}s)，但已达到最大重试次数({MAX_ATTEMPTS})，调度器已停止自动重试。",
+            )
+            if job is not None:
+                job.status = "failed"
+                job.error_message = _build_job_failure_message(step, attempts=MAX_ATTEMPTS)
+                job.updated_at = now
+                await _cleanup_terminal_job_files(session, job, purge_deliverables=True)
+            logger.error(
+                "Recovered stale running step but retry exhausted job=%s step=%s previous_task_id=%s stale_after=%ss",
+                step.job_id,
+                step.step_name,
+                previous_task_id,
+                stale_after,
+            )
+            continue
+
         if step.step_name == "render":
             metadata["progress"] = 0.0
             render_outputs_result = await session.execute(
@@ -746,6 +784,14 @@ async def _recover_incomplete_jobs() -> None:
                         stale_after = _step_runtime_stale_timeout_seconds(step)
                         if (now - last_heartbeat_at).total_seconds() < stale_after:
                             continue
+                    if step.attempt >= MAX_ATTEMPTS:
+                        _mark_step_retry_exhausted(
+                            step,
+                            now=now,
+                            detail=f"服务重启发现步骤已达到最大重试次数({MAX_ATTEMPTS})，不再自动续跑。",
+                        )
+                        recovered = True
+                        continue
                     metadata = dict(step.metadata_ or {})
                     metadata.pop("task_id", None)
                     metadata.pop("retry_wait_until", None)
@@ -914,12 +960,21 @@ async def _update_job_statuses(session) -> None:
             job.updated_at = datetime.now(timezone.utc)
             continue
 
+        now = datetime.now(timezone.utc)
+        exhausted_pending_steps = [s for s in steps if s.status == "pending" and s.attempt >= MAX_ATTEMPTS]
+        for step in exhausted_pending_steps:
+            _mark_step_retry_exhausted(
+                step,
+                now=now,
+                detail=f"步骤处于待执行状态但已达到最大重试次数({MAX_ATTEMPTS})，调度器已标记为失败以避免无限挂起。",
+            )
+
         # Any step failed with max attempts = job failed
         failed_steps = [s for s in steps if s.status == "failed" and s.attempt >= MAX_ATTEMPTS]
         if failed_steps:
             job.status = "failed"
             job.error_message = _build_job_failure_message(_latest_failed_step(steps), attempts=MAX_ATTEMPTS)
-            job.updated_at = datetime.now(timezone.utc)
+            job.updated_at = now
             await _cleanup_terminal_job_files(session, job, purge_deliverables=True)
             logger.error(f"Job {job.id} failed: {job.error_message}")
 

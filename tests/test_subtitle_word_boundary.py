@@ -95,9 +95,13 @@ def test_quality_report_blocks_dense_generic_word_splits() -> None:
             {"text_final": "计取向"},
             {"text_final": "很有特"},
             {"text_final": "色"},
+            {"text_final": "它的手"},
+            {"text_final": "感不错"},
+            {"text_final": "这个产"},
+            {"text_final": "品不错"},
         ],
     )
 
     assert report["blocking"] is True
-    assert report["metrics"]["generic_word_split_count"] >= 8
+    assert report["metrics"]["generic_word_split_count"] >= 10
     assert any("普通词跨字幕截断" in reason for reason in report["blocking_reasons"])

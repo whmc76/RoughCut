@@ -30,6 +30,7 @@ _KEEP_SHORT_FRAGMENT_RE = re.compile(
 _ALLOWED_SHORT_UTTERANCE_RE = re.compile(
     r"^(?:"
     r"我发现|你看|你说|算了|但是|不过|并且|然后|后来|所以|其实|另外|再说|比如|例如|行了|好了|没事|确实|真的"
+    r"|这也是|直接去看|那无所谓|或者说|同时"
     r")$"
 )
 _ALLOWED_SHORT_TEMPORAL_PHRASE_RE = re.compile(
@@ -45,9 +46,9 @@ _CONSERVATIVE_IDENTITY_SUMMARY_PHRASES = {
     "主体品牌型号待进一步确认",
 }
 _IDENTITY_HINT_RE = re.compile(r"(MT34|EDC17|EDC37|FXX1|EXO|NOC|FAS|foxbat|OLIGHT|NITECORE|REATE)", re.IGNORECASE)
-_SHORT_FRAGMENT_BLOCKING_MIN_COUNT = 5
-_GENERIC_WORD_SPLIT_BLOCKING_MIN_COUNT = 8
-_GENERIC_WORD_SPLIT_BLOCKING_RATE = 0.012
+_SHORT_FRAGMENT_BLOCKING_MIN_COUNT = 10
+_GENERIC_WORD_SPLIT_BLOCKING_MIN_COUNT = 10
+_GENERIC_WORD_SPLIT_BLOCKING_RATE = 0.02
 
 _SEMANTIC_CONTAMINATION_CODES = {
     "hotword_flashlight_model_knifedrift",
@@ -234,7 +235,7 @@ def build_subtitle_quality_report(
 
     score = 100.0
     score -= float(bad_term_total * 6)
-    score -= min(18.0, float(generic_word_split_count * 3))
+    score -= min(12.0, float(generic_word_split_count * 1.5))
     score -= min(25.0, short_fragment_rate * 180.0)
     score -= min(10.0, filler_rate * 120.0)
     score -= min(8.0, low_signal_rate * 160.0)

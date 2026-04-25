@@ -2138,14 +2138,24 @@ def _resolve_transcribe_runtime_timeout_seconds(settings: object, *, audio_path:
     return min(7200.0, max(base_timeout, dynamic_timeout))
 
 
-def _resolve_transcribe_no_progress_timeout_seconds(settings: object) -> float:
-    runtime_timeout = _resolve_transcribe_runtime_timeout_seconds(settings)
+def _resolve_transcribe_no_progress_timeout_seconds(settings: object, *, audio_path: Path | None = None) -> float:
+    runtime_timeout = _resolve_transcribe_runtime_timeout_seconds(settings, audio_path=audio_path)
     heartbeat_interval = max(5.0, float(getattr(settings, "step_heartbeat_interval_sec", 20) or 20))
     chunk_request_timeout = max(
         30.0,
         float(getattr(settings, "transcription_chunk_request_timeout_sec", 180.0) or 180.0),
     )
     grace_sec = max(45.0, heartbeat_interval * 3.0)
+    if audio_path is not None:
+        try:
+            duration = probe_audio_duration(audio_path)
+        except Exception:
+            duration = 0.0
+        if duration > 0:
+            chunk_config = resolve_audio_chunk_config(settings)
+            if not should_chunk_audio(duration=duration, config=chunk_config):
+                single_request_budget = max(240.0, (duration * 1.25) + grace_sec)
+                return min(runtime_timeout, max(90.0, single_request_budget))
     return min(runtime_timeout, max(90.0, chunk_request_timeout + grace_sec))
 
 
@@ -2618,6 +2628,7 @@ def _build_transcript_first_canonical_layer(
     transcript_rows: list[TranscriptSegment],
     subtitle_items: list[SubtitleItem],
     corrections: list[SubtitleCorrection],
+    category_scope: str = "",
 ) -> Any:
     if not transcript_rows:
         return build_canonical_transcript_layer(
@@ -2652,6 +2663,10 @@ def _build_transcript_first_canonical_layer(
         segment_index = int(getattr(transcript_row, "segment_index", index) or index)
         synthetic_id = synthetic_ids[segment_index]
         transcript_text = str(getattr(transcript_row, "text", "") or "")
+        canonical_text = _normalize_semantic_contamination_text(
+            transcript_text,
+            category_scope=category_scope,
+        )
         synthetic_items.append(
             SimpleNamespace(
                 id=synthetic_id,
@@ -2660,7 +2675,7 @@ def _build_transcript_first_canonical_layer(
                 end_time=float(getattr(transcript_row, "end_time", 0.0) or 0.0),
                 text_raw=transcript_text,
                 text_norm=transcript_text,
-                text_final=transcript_text,
+                text_final=canonical_text,
             )
         )
 
@@ -4488,7 +4503,7 @@ async def run_transcribe(job_id: str) -> dict:
                 "chunk_count": 0,
             }
             stalled_reason = {"value": None}
-            no_progress_timeout_sec = _resolve_transcribe_no_progress_timeout_seconds(settings)
+            no_progress_timeout_sec = _resolve_transcribe_no_progress_timeout_seconds(settings, audio_path=audio_path)
 
             async def _persist_transcribe_progress(
                 progress: float,
@@ -5607,6 +5622,11 @@ async def run_glossary_review(job_id: str) -> dict:
             transcript_rows=_transcript_rows,
             subtitle_items=subtitle_items,
             corrections=corrections,
+            category_scope=_resolve_subtitle_semantic_cleanup_scope(
+                job=job,
+                content_profile=content_profile,
+                review_memory={"terms": [{"category_scope": subject_domain or ""}]},
+            ),
         )
         reviewed_transcript_context = reviewed_transcript_layer.as_dict()
         reviewed_transcript_dicts = _normalize_transcript_segment_payloads(
@@ -5743,7 +5763,7 @@ async def run_transcript_review(job_id: str) -> dict:
         await _set_step_progress(session, step, detail="读取字幕修订结果并生成 canonical transcript", progress=0.2)
         (
             subtitle_items,
-            _subtitle_dicts,
+            subtitle_dicts,
             _transcript_rows,
             _transcript_segment_dicts,
             _transcript_evidence,
@@ -5754,10 +5774,23 @@ async def run_transcript_review(job_id: str) -> dict:
         )
         corrections = await _load_subtitle_corrections(session, job_id=job.id)
         active_corrections = _filter_redundant_corrections_for_current_subtitles(corrections, subtitle_items)
+        content_profile = await _load_current_content_profile(session, job_id=job.id)
+        subject_domain = _infer_subject_domain_for_memory(
+            workflow_template=job.workflow_template,
+            subtitle_items=subtitle_dicts,
+            content_profile=content_profile or {},
+            source_name=job.source_name,
+        )
+        category_scope = _resolve_subtitle_semantic_cleanup_scope(
+            job=job,
+            content_profile=content_profile,
+            review_memory={"terms": [{"category_scope": subject_domain or ""}]},
+        )
         canonical_transcript_layer = _build_transcript_first_canonical_layer(
             transcript_rows=_transcript_rows,
             subtitle_items=subtitle_items,
             corrections=corrections,
+            category_scope=category_scope,
         )
         projection_artifact = await _load_latest_optional_artifact(
             session,

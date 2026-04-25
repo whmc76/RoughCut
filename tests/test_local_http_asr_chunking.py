@@ -10,6 +10,7 @@ from roughcut.providers.transcription.chunking import (
     build_audio_chunk_specs,
     extract_chunking_summary,
     resolve_audio_chunk_config,
+    should_chunk_audio,
 )
 from roughcut.providers.transcription.base import TranscriptResult
 from roughcut.providers.transcription.local_http_asr import LocalHTTPASRProvider
@@ -166,6 +167,15 @@ def test_resolve_audio_chunk_config_clamps_invalid_relationships() -> None:
     assert config.export_timeout_sec == 30.0
 
 
+def test_default_chunk_threshold_covers_medium_local_asr_audio() -> None:
+    config = resolve_audio_chunk_config(SimpleNamespace())
+
+    assert config.threshold_sec == 180.0
+    assert should_chunk_audio(duration=453.6, config=config)
+    assert should_chunk_audio(duration=511.2, config=config)
+    assert not should_chunk_audio(duration=113.5, config=config)
+
+
 @pytest.mark.asyncio
 async def test_post_chunk_transcribe_request_retries_and_reports_wait(
     monkeypatch: pytest.MonkeyPatch,
@@ -266,3 +276,44 @@ async def test_transcribe_uses_extracted_hotwords_as_context(
     )
 
     assert captured["context"] == "OLIGHT, 掠夺者2 mini"
+
+
+@pytest.mark.asyncio
+async def test_transcribe_single_audio_reports_request_progress(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    provider = LocalHTTPASRProvider()
+    audio_path = tmp_path / "audio.wav"
+    audio_path.write_bytes(b"stub")
+
+    async def _post_transcribe_request(audio_path: Path, *, context: str | None, max_new_tokens: int, timeout):
+        return {
+            "duration": 42.0,
+            "segments": [
+                {
+                    "start_time": 0.0,
+                    "end_time": 5.0,
+                    "text": "ok",
+                }
+            ],
+        }
+
+    monkeypatch.setattr(provider, "_post_transcribe_request", _post_transcribe_request)
+    monkeypatch.setattr(
+        "roughcut.providers.transcription.local_http_asr.probe_audio_duration",
+        lambda _path: 42.0,
+    )
+    progress_events: list[dict] = []
+
+    result = await provider._transcribe_single_audio(
+        audio_path,
+        language="zh-CN",
+        context="",
+        max_new_tokens=4096,
+        progress_callback=progress_events.append,
+    )
+
+    assert result.segments[0].text == "ok"
+    assert progress_events[0]["phase"] == "request"
+    assert progress_events[0]["total_duration"] == 42.0

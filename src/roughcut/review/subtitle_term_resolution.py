@@ -39,6 +39,29 @@ def _profile_is_knife_context(content_profile: Mapping[str, Any] | None) -> bool
     return "knife" in blob or "折刀" in blob
 
 
+def _profile_identity_blob(content_profile: Mapping[str, Any] | None) -> str:
+    profile = content_profile or {}
+    parts: list[str] = []
+    for key in (
+        "subject",
+        "content_subject",
+        "subject_brand",
+        "subject_model",
+        "subject_type",
+        "video_theme",
+        "summary",
+        "content_summary",
+    ):
+        value = str(profile.get(key) or "").strip()
+        if value:
+            parts.append(value)
+    for item in profile.get("search_queries") or []:
+        value = str(item or "").strip()
+        if value:
+            parts.append(value)
+    return " ".join(parts)
+
+
 def _should_ignore_patch_candidate(
     *,
     original_span: str,
@@ -59,6 +82,14 @@ def _should_ignore_patch_candidate(
         return True
 
     profile = content_profile or {}
+    identity_blob_norm = _normalize_term_token(_profile_identity_blob(profile))
+    if (
+        len(original_norm) >= 3
+        and original_norm in identity_blob_norm
+        and suggested_norm not in identity_blob_norm
+    ):
+        return True
+
     subject_brand_norm = _normalize_term_token(str(profile.get("subject_brand") or "").strip())
     if (
         subject_brand_norm

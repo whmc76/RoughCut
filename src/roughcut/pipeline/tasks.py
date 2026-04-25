@@ -6,6 +6,7 @@ import os
 import shutil
 import subprocess
 import time
+import uuid
 from datetime import datetime, timezone
 
 from roughcut.config import apply_in_memory_runtime_overrides, get_settings, normalize_transcription_provider_name
@@ -50,6 +51,14 @@ def _coerce_utc(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc)
+
+
+def _parse_job_uuid(job_id: str) -> uuid.UUID | None:
+    try:
+        return uuid.UUID(str(job_id))
+    except (TypeError, ValueError):
+        logger.warning("Ignoring task with invalid job id job=%s", job_id)
+        return None
 
 
 def _can_transition_step(
@@ -131,10 +140,15 @@ def _update_step_status(
 
     async def _update():
         from roughcut.db.models import Job
-        import uuid
         factory = get_session_factory()
         async with factory() as session:
-            job = await session.get(Job, uuid.UUID(job_id))
+            job_uuid = _parse_job_uuid(job_id)
+            if job_uuid is None:
+                return False
+            job = await session.get(Job, job_uuid)
+            if job is None:
+                logger.warning("Ignoring task for missing job job=%s step=%s status=%s", job_id, step_name, status)
+                return False
             result = await session.execute(
                 select(JobStep).where(JobStep.job_id == job.id, JobStep.step_name == step_name)
             )
@@ -194,7 +208,6 @@ def _update_step_retry_waiting(
     task_id: str | None = None,
 ) -> bool:
     import asyncio
-    import uuid
     from sqlalchemy import select
     from roughcut.db.models import JobStep
     from roughcut.db.session import get_session_factory
@@ -206,7 +219,13 @@ def _update_step_retry_waiting(
 
         factory = get_session_factory()
         async with factory() as session:
-            job = await session.get(Job, uuid.UUID(job_id))
+            job_uuid = _parse_job_uuid(job_id)
+            if job_uuid is None:
+                return False
+            job = await session.get(Job, job_uuid)
+            if job is None:
+                logger.warning("Ignoring retry wait update for missing job job=%s step=%s", job_id, step_name)
+                return False
             result = await session.execute(
                 select(JobStep).where(JobStep.job_id == job.id, JobStep.step_name == step_name)
             )
@@ -250,7 +269,6 @@ def _finalize_ignored_dispatched_step(
     task_id: str | None = None,
 ) -> bool:
     import asyncio
-    import uuid
     from sqlalchemy import select
     from roughcut.db.models import JobStep
     from roughcut.db.session import get_session_factory
@@ -262,7 +280,13 @@ def _finalize_ignored_dispatched_step(
 
         factory = get_session_factory()
         async with factory() as session:
-            job = await session.get(Job, uuid.UUID(job_id))
+            job_uuid = _parse_job_uuid(job_id)
+            if job_uuid is None:
+                return False
+            job = await session.get(Job, job_uuid)
+            if job is None:
+                logger.warning("Ignoring dispatched step finalization for missing job job=%s step=%s", job_id, step_name)
+                return False
             result = await session.execute(
                 select(JobStep).where(JobStep.job_id == job.id, JobStep.step_name == step_name)
             )
@@ -447,7 +471,6 @@ def _probe_local_gpu_pressure(step_name: str) -> str | None:
 
 def _apply_job_runtime_snapshot(job_id: str) -> None:
     import asyncio
-    import uuid
 
     from roughcut.db.models import Job
     from roughcut.db.session import get_session_factory
@@ -457,7 +480,10 @@ def _apply_job_runtime_snapshot(job_id: str) -> None:
     async def _load_job_updates() -> dict:
         factory = get_session_factory()
         async with factory() as session:
-            job = await session.get(Job, uuid.UUID(job_id))
+            job_uuid = _parse_job_uuid(job_id)
+            if job_uuid is None:
+                return {}
+            job = await session.get(Job, job_uuid)
             if job is None:
                 return {}
             updates = dict(job.config_profile_snapshot_json or {})

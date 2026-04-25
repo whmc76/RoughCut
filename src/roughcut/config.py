@@ -307,7 +307,7 @@ class Settings(BaseSettings):
     local_asr_hotwords_field: str = "hotwords"
     local_asr_max_new_tokens: int = 4096
     transcription_chunking_enabled: bool = True
-    transcription_chunk_threshold_sec: int = 600
+    transcription_chunk_threshold_sec: int = 180
     transcription_chunk_size_sec: int = 60
     transcription_chunk_min_sec: int = 20
     transcription_chunk_overlap_sec: float = 1.5

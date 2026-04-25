@@ -79,6 +79,18 @@ class LocalHTTPASRProvider(TranscriptionProvider):
         max_new_tokens: int,
         progress_callback: TranscriptionProgressCallback | None,
     ) -> TranscriptResult:
+        if progress_callback is not None:
+            duration = probe_audio_duration(audio_path)
+            progress_callback(
+                {
+                    "segment_count": 0,
+                    "segment_end": 0.0,
+                    "total_duration": round(duration, 3),
+                    "progress": 0.0,
+                    "phase": "request",
+                    "detail": "提交整段音频转写请求",
+                }
+            )
         payload = await self._post_transcribe_request(
             audio_path,
             context=context,

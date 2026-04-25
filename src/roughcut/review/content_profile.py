@@ -3056,6 +3056,19 @@ def apply_source_identity_constraints(
     if summary_needs_refresh:
         constrained["summary"] = _build_profile_summary(constrained)
 
+    current_visible_text = str(constrained.get("visible_text") or "").strip()
+    if _visible_text_conflicts_with_verified_identity(
+        current_visible_text,
+        brand=brand,
+        model=model,
+        glossary_terms=None,
+    ):
+        constrained["visible_text"] = _build_review_field_fallback_visible_text(
+            profile=constrained,
+            source_name=source_name,
+            transcript_excerpt=transcript_excerpt,
+        )
+
     _ensure_search_queries(constrained, source_name, transcript_excerpt=transcript_excerpt)
     constrained["keywords"] = _build_review_keywords(constrained)
 
@@ -5904,6 +5917,9 @@ _MODEL_TO_BRAND: dict[str, str] = {
     "SLIM2代ULTRA版本": "OLIGHT",
     "SLIM2 ULTRA": "OLIGHT",
     "司令官2Ultra": "OLIGHT",
+    "EDC17": "NITECORE",
+    "EDC23": "NITECORE",
+    "EDC37": "NITECORE",
 }
 
 _CATEGORY_SCOPE_KEYWORDS: dict[str, tuple[str, ...]] = {
@@ -6403,8 +6419,9 @@ def _seed_profile_from_text(
     elif brand == "REATE" or any(keyword in transcript for keyword in knife_keywords):
         subject_type = "EDC折刀"
     elif (
-        brand in {"Loop露普", "OLIGHT"}
+        brand in {"Loop露普", "OLIGHT", "NITECORE"}
         or model.startswith(("SK05", "SLIM2", "司令官2"))
+        or model.upper() in {"EDC17", "EDC23", "EDC37"}
         or (normalized_subject_domain == "flashlight" and any(keyword in canon.upper() for keyword in flashlight_keywords))
         or (
             not normalized_subject_domain

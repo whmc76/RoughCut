@@ -9,6 +9,7 @@ import pytest
 
 from roughcut.edit.decisions import EditDecision
 from roughcut.pipeline.steps import (
+    _resolve_transcribe_no_progress_timeout_seconds,
     _maybe_review_edit_decision_cuts_with_llm,
     _resolve_transcribe_runtime_timeout_seconds,
 )
@@ -44,6 +45,37 @@ def test_resolve_transcribe_runtime_timeout_seconds_scales_for_chunked_audio(
     timeout = _resolve_transcribe_runtime_timeout_seconds(settings, audio_path=audio_path)
 
     assert timeout == 3300.0
+
+
+def test_resolve_transcribe_no_progress_timeout_scales_for_single_request_audio(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = SimpleNamespace(
+        transcribe_runtime_timeout_sec=900,
+        step_stale_timeout_sec=900,
+        step_heartbeat_interval_sec=20,
+        transcription_chunk_request_timeout_sec=180,
+    )
+    audio_path = Path("E:/tmp/audio.wav")
+    chunk_config = AudioChunkConfig(
+        enabled=True,
+        threshold_sec=600.0,
+        chunk_size_sec=60.0,
+        min_chunk_sec=20.0,
+        overlap_sec=1.5,
+        request_timeout_sec=180.0,
+        request_max_retries=2,
+        request_retry_backoff_sec=5.0,
+        export_timeout_sec=180.0,
+    )
+
+    monkeypatch.setattr("roughcut.pipeline.steps.probe_audio_duration", lambda path: 511.0)
+    monkeypatch.setattr("roughcut.pipeline.steps.resolve_audio_chunk_config", lambda current: chunk_config)
+    monkeypatch.setattr("roughcut.pipeline.steps.should_chunk_audio", lambda *, duration, config: False)
+
+    timeout = _resolve_transcribe_no_progress_timeout_seconds(settings, audio_path=audio_path)
+
+    assert timeout == 698.75
 
 
 @pytest.mark.asyncio

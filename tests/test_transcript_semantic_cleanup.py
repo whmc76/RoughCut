@@ -1,4 +1,5 @@
 from roughcut.providers.transcription.base import TranscriptResult, TranscriptSegment
+from roughcut.pipeline.steps import _build_transcript_first_canonical_layer
 from roughcut.speech.transcribe import _normalize_transcript_result
 
 
@@ -72,6 +73,30 @@ def test_normalize_transcript_result_normalizes_flashlight_edc17_shorthand() -> 
     )
 
     assert normalized.segments[0].text == "所以呢我的选择就是这个EDC17"
+
+
+def test_transcript_first_canonical_layer_normalizes_flashlight_edc17_shorthand() -> None:
+    row = type(
+        "TranscriptRow",
+        (),
+        {
+            "segment_index": 0,
+            "start_time": 0.0,
+            "end_time": 3.0,
+            "text": "所以呢我的选择就是这个幺七",
+        },
+    )()
+
+    layer = _build_transcript_first_canonical_layer(
+        transcript_rows=[row],
+        subtitle_items=[],
+        corrections=[],
+        category_scope="flashlight",
+    )
+
+    payload = layer.as_dict()
+    assert payload["segments"][0]["text_raw"] == "所以呢我的选择就是这个幺七"
+    assert payload["segments"][0]["text_canonical"] == "所以呢我的选择就是这个EDC17"
 
 
 def test_normalize_transcript_result_collapses_flashlight_model_alt_lists() -> None:
