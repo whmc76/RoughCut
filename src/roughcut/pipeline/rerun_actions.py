@@ -16,6 +16,8 @@ ISSUE_RERUN_STEP_OVERRIDES: dict[str, str] = {
 }
 
 AUTO_FIX_STEP_PRIORITY = (
+    "extract_audio",
+    "transcribe",
     "subtitle_postprocess",
     "subtitle_term_resolution",
     "subtitle_consistency_review",
@@ -26,6 +28,39 @@ AUTO_FIX_STEP_PRIORITY = (
 )
 
 STEP_RERUN_CHAINS: dict[str, tuple[str, ...]] = {
+    "extract_audio": (
+        "extract_audio",
+        "transcribe",
+        "subtitle_postprocess",
+        "subtitle_term_resolution",
+        "subtitle_consistency_review",
+        "glossary_review",
+        "transcript_review",
+        "subtitle_translation",
+        "content_profile",
+        "ai_director",
+        "avatar_commentary",
+        "edit_plan",
+        "render",
+        "final_review",
+        "platform_package",
+    ),
+    "transcribe": (
+        "transcribe",
+        "subtitle_postprocess",
+        "subtitle_term_resolution",
+        "subtitle_consistency_review",
+        "glossary_review",
+        "transcript_review",
+        "subtitle_translation",
+        "content_profile",
+        "ai_director",
+        "avatar_commentary",
+        "edit_plan",
+        "render",
+        "final_review",
+        "platform_package",
+    ),
     "subtitle_postprocess": (
         "subtitle_postprocess",
         "subtitle_term_resolution",
@@ -100,6 +135,8 @@ STEP_RERUN_CHAINS: dict[str, tuple[str, ...]] = {
 }
 
 QUALITY_RERUN_STEPS = {
+    "extract_audio",
+    "transcribe",
     "subtitle_postprocess",
     "subtitle_term_resolution",
     "subtitle_consistency_review",
