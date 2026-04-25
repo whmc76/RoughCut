@@ -68,9 +68,9 @@ function resolvePendingReviewStep(job: Job) {
 function reviewActionLabel(job: Job, t: (key: string) => string) {
   if (job.status !== "needs_review") return t("jobs.actions.review");
   const reviewStep = resolvePendingReviewStep(job);
-  if (reviewStep?.step_name === "final_review") return "需要最终审核";
-  if (reviewStep?.step_name === "summary_review") return "需要预审核";
-  return "打开审核";
+  if (reviewStep?.step_name === "final_review") return "处理成片异常";
+  if (reviewStep?.step_name === "summary_review") return "处理内容异常";
+  return "处理异常";
 }
 
 function isHighlightedReviewAction(job: Job) {
@@ -82,8 +82,8 @@ function isHighlightedReviewAction(job: Job) {
 function reviewStatusLabel(job: Job): string {
   if (job.status !== "needs_review") return statusLabel(job.status);
   const reviewStep = resolvePendingReviewStep(job);
-  if (reviewStep?.step_name === "final_review") return "最终核对";
-  if (reviewStep?.step_name === "summary_review") return "预审核";
+  if (reviewStep?.step_name === "final_review") return "成片异常";
+  if (reviewStep?.step_name === "summary_review") return "内容异常";
   return statusLabel(job.status);
 }
 
@@ -95,9 +95,9 @@ function reviewPreviewText(job: Job, t: (key: string) => string) {
   }
   const reviewStep = resolvePendingReviewStep(job);
   if (reviewStep?.step_name === "final_review") {
-    return job.quality_summary || cutEvidenceSummary || job.review_detail || "等待审核成片后继续生成平台文案。";
+    return job.quality_summary || cutEvidenceSummary || job.review_detail || "成片质量门发现异常，处理后继续生成平台文案。";
   }
-  return job.content_summary || job.content_subject || job.review_detail || "等待确认摘要后继续剪辑与渲染。";
+  return job.content_summary || job.content_subject || job.review_detail || "内容异常门发现阻塞问题，处理后继续剪辑与渲染。";
 }
 
 function enhancementBadgeLabel(job: Job, mode: string) {

@@ -105,7 +105,7 @@ _WORKFLOW_MODE_LABELS = {
 }
 _ENHANCEMENT_MODE_LABELS = {
     "multilingual_translation": "多语言翻译",
-    "auto_review": "自动审核",
+    "auto_review": "异常门",
     "avatar_commentary": "数字人解说",
     "ai_effects": "智能剪辑特效",
     "ai_director": "AI 导演",
@@ -1947,7 +1947,7 @@ def _build_content_profile_review_message(
                 "",
                 "审核原因：",
                 (
-                    f"- 自动审核得分：{float(automation.get('score') or 0.0):.2f} / "
+                    f"- 异常门得分：{float(automation.get('score') or 0.0):.2f} / "
                     f"阈值 {float(automation.get('threshold') or 0.0):.2f}"
                 ),
                 f"- 需人工复核：{'; '.join(review_reasons) if review_reasons else '无'}",

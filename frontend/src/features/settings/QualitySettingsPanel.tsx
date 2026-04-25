@@ -12,7 +12,7 @@ type QualitySettingsPanelProps = {
 
 export function QualitySettingsPanel({ form, config, onChange }: QualitySettingsPanelProps) {
   const profileBindableCount = config?.profile_bindable_keys.length ?? 0;
-  const autoConfirmEnabled = Boolean(form.auto_confirm_content_profile);
+  const autoConfirmEnabled = true;
   const glossaryAutoEnabled = Boolean(form.auto_accept_glossary_corrections);
   const coverAutoEnabled = Boolean(form.auto_select_cover_variant);
   const rerunEnabled = Boolean(form.quality_auto_rerun_enabled);
@@ -36,9 +36,7 @@ export function QualitySettingsPanel({ form, config, onChange }: QualitySettings
     rerunBelowScore !== 75 ||
     rerunMaxAttempts !== 1;
   const summaryParts = [
-    autoConfirmEnabled
-      ? `画像 ${contentProfileThreshold.toFixed(2)} / ${contentProfileMinAccuracy.toFixed(2)} / ${contentProfileMinSamples}`
-      : "画像手动确认",
+    `画像异常门 ${contentProfileThreshold.toFixed(2)} / ${contentProfileMinAccuracy.toFixed(2)} / ${contentProfileMinSamples}`,
     glossaryAutoEnabled ? `术语 ${glossaryThreshold.toFixed(2)}` : "术语手动确认",
     `包装 ${packagingMinScore.toFixed(2)}`,
     rerunEnabled ? `复跑 < ${rerunBelowScore} · ${rerunMaxAttempts} 次` : "低分复跑关闭",
@@ -59,10 +57,12 @@ export function QualitySettingsPanel({ form, config, onChange }: QualitySettings
         />
         <div className="muted">事实核查配置项目前未接入任务运行链路，保留显示仅用于兼容旧配置，不会影响当前任务执行。</div>
         <CheckboxField
-          label="允许自动确认内容画像"
-          checked={autoConfirmEnabled}
+          label="内容画像异常门自动放行"
+          checked
+          disabled
           onChange={(event) => onChange("auto_confirm_content_profile", event.target.checked)}
         />
+        <div className="muted">内容画像默认自动继续，只有主体冲突、字幕阻塞或质量门异常才暂停；下方阈值仅作为诊断和复跑参考。</div>
         <CheckboxField
           label="允许自动接受术语修正"
           checked={glossaryAutoEnabled}
@@ -95,25 +95,25 @@ export function QualitySettingsPanel({ form, config, onChange }: QualitySettings
               {autoConfirmEnabled ? (
                 <section className="settings-subsection">
                   <div className="settings-subsection-head">
-                    <strong>内容画像自动确认</strong>
-                    <span className="muted">达标后自动通过</span>
+                    <strong>内容画像异常门</strong>
+                    <span className="muted">阈值仅作参考</span>
                   </div>
                   <div className="field-row">
                     <TextField
-                      label="内容画像确认阈值"
+                      label="内容画像参考阈值"
                       type="number"
                       value={String(contentProfileThreshold)}
                       onChange={(event) => onChange("content_profile_review_threshold", Number(event.target.value))}
                     />
                     <TextField
-                      label="自动确认最小准确率"
+                      label="参考最小准确率"
                       type="number"
                       value={String(contentProfileMinAccuracy)}
                       onChange={(event) => onChange("content_profile_auto_review_min_accuracy", Number(event.target.value))}
                     />
                   </div>
                   <TextField
-                    label="自动确认最小样本量"
+                    label="参考最小样本量"
                     type="number"
                     value={String(contentProfileMinSamples)}
                     onChange={(event) => onChange("content_profile_auto_review_min_samples", Number(event.target.value))}

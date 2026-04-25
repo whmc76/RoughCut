@@ -12,12 +12,13 @@ export const STEP_LABELS: Record<string, string> = {
   subtitle_quality: "字幕质量",
   subtitle_translation: "翻译",
   content_profile: "摘要",
-  summary_review: "核对",
+  summary_review: "内容异常门",
   glossary_review: "纠错",
   ai_director: "导演",
   avatar_commentary: "数字人",
   edit_plan: "剪辑",
   render: "渲染",
+  final_review: "成片异常门",
   platform_package: "文案",
 };
 
@@ -94,7 +95,7 @@ export const WORKFLOW_MODE_LABELS: Record<string, string> = {
 
 export const ENHANCEMENT_MODE_LABELS: Record<string, string> = {
   multilingual_translation: "多语言翻译",
-  auto_review: "自动审核",
+  auto_review: "异常门",
   multi_platform_adaptation: "多平台版本适配",
   avatar_commentary: "数字人解说",
   ai_effects: "智能剪辑特效",
@@ -126,8 +127,8 @@ export function enhancementModeLabel(mode: string): string {
 }
 
 export function autoReviewBadgeLabel(job: Pick<Job, "auto_review_mode_enabled" | "auto_review_status">): string {
-  if (!job.auto_review_mode_enabled) return ENHANCEMENT_MODE_LABELS.auto_review;
-  return job.auto_review_status === "applied" ? "自动审核已生效" : "自动审核已启用";
+  if (!job.auto_review_mode_enabled) return "异常门";
+  return job.auto_review_status === "applied" ? "异常门已自动放行" : "异常门已启用";
 }
 
 export function autoReviewTone(status: string | null | undefined): string {

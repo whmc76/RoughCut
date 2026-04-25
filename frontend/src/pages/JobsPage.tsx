@@ -122,7 +122,7 @@ export function JobsPage() {
   };
 
   const confirmAndRejectFinalReview = (note: string) => {
-    if (!window.confirm("确认退回最终审核？")) {
+    if (!window.confirm("确认按这条异常意见重跑或暂停任务？")) {
       return;
     }
     workspace.finalReviewDecision.mutate({ decision: "reject", note });
@@ -165,7 +165,7 @@ export function JobsPage() {
   const confirmReviewProfile = () => {
     workspace.confirmProfile.mutate(undefined, {
       onSuccess: async () => {
-        showReviewNotice("success", "摘要核对已确认，任务继续执行中，已返回队列。");
+        showReviewNotice("success", "内容异常已确认，任务继续执行中，已返回队列。");
         await workspace.refreshAll();
         closeReviewOverlay(false);
       },
@@ -174,7 +174,7 @@ export function JobsPage() {
           "error",
           error instanceof Error
             ? error.message
-            : `摘要核对提交失败：${String(error) || "请稍后重试。"}`,
+            : `内容异常提交失败：${String(error) || "请稍后重试。"}`,
         );
       },
     });

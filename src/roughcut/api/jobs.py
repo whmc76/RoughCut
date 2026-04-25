@@ -155,13 +155,13 @@ STEP_LABELS = {
     "transcript_review": "转写审校",
     "subtitle_translation": "字幕翻译",
     "content_profile": "内容摘要",
-    "summary_review": "信息核对",
+    "summary_review": "内容异常门",
     "glossary_review": "术语纠错",
     "ai_director": "AI导演",
     "avatar_commentary": "数字人解说",
     "edit_plan": "剪辑决策",
     "render": "渲染输出",
-    "final_review": "成片审核",
+    "final_review": "成片异常门",
     "platform_package": "平台文案",
 }
 
@@ -4466,15 +4466,6 @@ def _resolve_job_avatar_preview(job: Job) -> dict[str, str | None]:
 
 
 def _resolve_job_auto_review_preview(job: Job) -> dict[str, Any]:
-    enabled_modes = set(getattr(job, "enhancement_modes", []) or [])
-    if "auto_review" not in enabled_modes:
-        return {
-            "mode_enabled": False,
-            "status": None,
-            "summary": None,
-            "reasons": [],
-        }
-
     review_step = _find_step(list(job.steps or []), "summary_review")
     profile_artifact = _select_preview_artifact(list(job.artifacts or []))
     profile_payload = profile_artifact.data_json if profile_artifact and isinstance(profile_artifact.data_json, dict) else {}
@@ -4488,14 +4479,14 @@ def _resolve_job_auto_review_preview(job: Job) -> dict[str, Any]:
         return {
             "mode_enabled": True,
             "status": "applied",
-            "summary": detail or "已自动确认预审核并继续执行。",
+            "summary": detail or "异常门未发现阻塞问题，已自动继续执行。",
             "reasons": [],
         }
 
     if not profile_payload:
-        waiting_detail = "已启用，等待内容画像后评估是否自动放行。"
+        waiting_detail = "异常门已启用，等待内容画像后自动判断。"
         if _has_reached_step(job, "content_profile"):
-            waiting_detail = "已启用，等待系统完成自动审核评估。"
+            waiting_detail = "异常门已启用，等待系统完成自动判断。"
         return {
             "mode_enabled": True,
             "status": "enabled",
@@ -4513,9 +4504,7 @@ def _resolve_job_auto_review_preview(job: Job) -> dict[str, Any]:
         for item in (automation.get("review_reasons") or [])
         if str(item).strip()
     ]
-    approval_accuracy_detail = str(automation.get("approval_accuracy_detail") or "").strip()
     quality_gate_passed = bool(automation.get("quality_gate_passed"))
-    accuracy_gate_passed = bool(automation.get("approval_accuracy_gate_passed"))
     score = _coerce_float(automation.get("score"))
     threshold = _coerce_float(automation.get("threshold"))
 
@@ -4524,23 +4513,18 @@ def _resolve_job_auto_review_preview(job: Job) -> dict[str, Any]:
         reasons.extend(blocking_reasons)
     elif review_reasons:
         reasons.extend(review_reasons)
-    if approval_accuracy_detail and not accuracy_gate_passed and approval_accuracy_detail not in reasons:
-        reasons.append(approval_accuracy_detail)
 
     if blocking_reasons:
-        summary = "已启用，但本次命中人工复核条件，未自动放行。"
+        summary = "异常门已暂停，本次命中需要人工处理的阻塞问题。"
         status = "blocked"
     elif not quality_gate_passed:
         if score is not None and threshold is not None:
-            summary = f"已启用，但当前摘要得分 {score:.2f} 未达到自动放行阈值 {threshold:.2f}。"
+            summary = f"异常门未阻塞，当前摘要得分 {score:.2f} 低于参考阈值 {threshold:.2f}，将由后续质量门自动处理。"
         else:
-            summary = "已启用，但当前摘要未达到自动放行阈值。"
-        status = "blocked"
-    elif not accuracy_gate_passed:
-        summary = approval_accuracy_detail or "已启用，但自动放行准确率门槛尚未通过。"
-        status = "blocked"
+            summary = "异常门未阻塞，当前摘要低于参考阈值，将由后续质量门自动处理。"
+        status = "enabled"
     else:
-        summary = "已启用，等待系统在摘要阶段自动判定是否直接放行。"
+        summary = "异常门已启用，未发现阻塞问题时会自动继续。"
         status = "enabled"
 
     return {
@@ -4760,16 +4744,16 @@ def _resolve_waiting_review_step(steps: list[JobStep]) -> JobStep | None:
 def _review_step_waiting_detail(step_name: str) -> str:
     normalized = str(step_name or "").strip().lower()
     if normalized == "final_review":
-        return "等待审核成片后继续生成平台文案。"
-    return "等待确认摘要后继续剪辑与渲染。"
+        return "成片质量门发现异常，处理后继续生成平台文案。"
+    return "内容异常门发现阻塞问题，处理后继续剪辑与渲染。"
 
 
 def _pending_step_standard_detail(step_name: str) -> str | None:
     normalized = str(step_name or "").strip().lower()
     if normalized == "summary_review":
-        return "等待人工确认摘要。"
+        return "等待处理内容异常。"
     if normalized == "final_review":
-        return "等待人工审核成片。"
+        return "等待处理成片异常。"
     if normalized == "platform_package":
         return "等待调度器派发生成平台文案。"
     return None

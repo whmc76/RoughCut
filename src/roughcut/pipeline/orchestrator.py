@@ -4,8 +4,8 @@ State in DB, Celery only executes individual steps.
 
  Pipeline: probe → extract_audio → transcribe → subtitle_postprocess
         → subtitle_term_resolution → subtitle_consistency_review
-        → glossary_review → transcript_review → subtitle_translation → content_profile → summary_review → ai_director
-        → avatar_commentary → edit_plan → render → final_review → platform_package
+        → glossary_review → transcript_review → subtitle_translation → content_profile → summary_review(auto gate) → ai_director
+        → avatar_commentary → edit_plan → render → final_review(auto gate) → platform_package
 """
 from __future__ import annotations
 
@@ -33,10 +33,12 @@ from roughcut.review.evidence_types import (
     ARTIFACT_TYPE_ENTITY_RESOLUTION_TRACE,
     ARTIFACT_TYPE_TRANSCRIPT_EVIDENCE,
 )
+from roughcut.review.final_review_state import mark_final_review_approved
 from roughcut.review.subtitle_consistency import ARTIFACT_TYPE_SUBTITLE_CONSISTENCY_REPORT
 from roughcut.review.subtitle_term_resolution import ARTIFACT_TYPE_SUBTITLE_TERM_RESOLUTION_PATCH
 from roughcut.speech.subtitle_pipeline import ARTIFACT_TYPE_CANONICAL_TRANSCRIPT_LAYER
 from roughcut.storage.runtime_cleanup import cleanup_job_runtime_files
+from roughcut.telegram.review_notification_service import enqueue_review_notification
 
 logger = logging.getLogger(__name__)
 
@@ -925,6 +927,19 @@ async def _update_job_statuses(session) -> None:
             if quality_outcome == "rerun":
                 continue
             if quality_outcome == "needs_review":
+                final_review_step = step_map.get("final_review")
+                if final_review_step is not None:
+                    already_exception = bool((final_review_step.metadata_ or {}).get("exception_gate"))
+                    _mark_final_review_exception_gate(
+                        job=job,
+                        final_review_step=final_review_step,
+                        detail="质量门发现需要人工处理的异常，任务已暂停。",
+                    )
+                    if not already_exception:
+                        enqueue_review_notification(
+                            kind="final_review",
+                            job_id=str(job.id),
+                        )
                 job.status = "needs_review"
                 job.error_message = None
                 job.updated_at = datetime.now(timezone.utc)
@@ -956,9 +971,14 @@ async def _update_job_statuses(session) -> None:
             and final_review_step is not None
             and final_review_step.status == "pending"
         ):
-            job.status = "needs_review"
-            job.updated_at = datetime.now(timezone.utc)
-            continue
+            final_gate_outcome = await _auto_advance_final_review_after_render(
+                session,
+                job=job,
+                steps=steps,
+                final_review_step=final_review_step,
+            )
+            if final_gate_outcome in {"advanced", "rerun", "needs_review"}:
+                continue
 
         now = datetime.now(timezone.utc)
         exhausted_pending_steps = [s for s in steps if s.status == "pending" and s.attempt >= MAX_ATTEMPTS]
@@ -977,6 +997,72 @@ async def _update_job_statuses(session) -> None:
             job.updated_at = now
             await _cleanup_terminal_job_files(session, job, purge_deliverables=True)
             logger.error(f"Job {job.id} failed: {job.error_message}")
+
+
+async def _auto_advance_final_review_after_render(
+    session,
+    *,
+    job: Job,
+    steps: list[JobStep],
+    final_review_step: JobStep,
+) -> str | None:
+    metadata = dict(final_review_step.metadata_ or {})
+    if job.status == "needs_review" and bool(metadata.get("exception_gate")):
+        return "needs_review"
+
+    quality_outcome = await _assess_and_maybe_rerun_job(session, job, steps)
+    if quality_outcome == "rerun":
+        return "rerun"
+    if quality_outcome == "needs_review":
+        already_exception = bool(metadata.get("exception_gate"))
+        _mark_final_review_exception_gate(
+            job=job,
+            final_review_step=final_review_step,
+            detail="质量门发现需要人工处理的异常，任务已暂停。",
+        )
+        if not already_exception:
+            enqueue_review_notification(
+                kind="final_review",
+                job_id=str(job.id),
+            )
+        return "needs_review"
+
+    mark_final_review_approved(
+        review_step=final_review_step,
+        job=job,
+        now=datetime.now(timezone.utc),
+        approved_via="auto_quality_gate",
+        metadata_updates={
+            "detail": "质量门未发现阻塞异常，已自动通过成片核对并继续生成平台文案。",
+            "auto_approved": True,
+            "exception_only_auto_approved": True,
+        },
+    )
+    return "advanced"
+
+
+def _mark_final_review_exception_gate(
+    *,
+    job: Job,
+    final_review_step: JobStep,
+    detail: str,
+) -> None:
+    now = datetime.now(timezone.utc)
+    metadata = dict(final_review_step.metadata_ or {})
+    final_review_step.status = "pending"
+    final_review_step.started_at = final_review_step.started_at or now
+    final_review_step.finished_at = None
+    final_review_step.error_message = None
+    final_review_step.metadata_ = {
+        **metadata,
+        "detail": detail,
+        "updated_at": now.isoformat(),
+        "exception_gate": True,
+        "auto_approved": False,
+    }
+    job.status = "needs_review"
+    job.error_message = None
+    job.updated_at = now
 
 
 def _latest_failed_step(steps: list[JobStep]) -> JobStep | None:
@@ -1120,13 +1206,21 @@ async def _assess_and_maybe_rerun_job(session, job: Job, steps: list[JobStep]) -
     issue_codes = [str(code) for code in assessment.get("issue_codes") or [] if str(code).strip()]
     reason_signature = "|".join(sorted(issue_codes))
     manual_review_required = has_manual_review_only_issue_codes(issue_codes)
+    blocking_review_required = any(
+        bool(item.get("blocking"))
+        for item in (assessment.get("issues") or [])
+        if isinstance(item, dict)
+    )
 
     settings = get_settings()
     should_rerun = (
         bool(getattr(settings, "quality_auto_rerun_enabled", True))
-        and bool(assessment.get("auto_fixable"))
         and bool(recommended_steps)
-        and float(assessment.get("score") or 0.0) < float(getattr(settings, "quality_auto_rerun_below_score", 75.0) or 75.0)
+        and not manual_review_required
+        and (
+            blocking_review_required
+            or float(assessment.get("score") or 0.0) < float(getattr(settings, "quality_auto_rerun_below_score", 75.0) or 75.0)
+        )
         and previous_count < int(getattr(settings, "quality_auto_rerun_max_attempts", 1) or 1)
         and not any(
             str(item.get("step") or "") == recommended_step and str(item.get("signature") or "") == reason_signature
@@ -1150,6 +1244,7 @@ async def _assess_and_maybe_rerun_job(session, job: Job, steps: list[JobStep]) -
         "auto_rerun_history": previous_history,
         "auto_rerun_triggered": False,
         "manual_review_required": manual_review_required,
+        "blocking_review_required": blocking_review_required,
     }
 
     if should_rerun and recommended_steps:
@@ -1181,8 +1276,10 @@ async def _assess_and_maybe_rerun_job(session, job: Job, steps: list[JobStep]) -
         )
         return "rerun"
 
-    if manual_review_required:
-        payload["auto_rerun_skipped_reason"] = "manual_review_required"
+    if manual_review_required or blocking_review_required:
+        payload["auto_rerun_skipped_reason"] = (
+            "manual_review_required" if manual_review_required else "blocking_quality_issue"
+        )
         session.add(
             Artifact(
                 job_id=job.id,

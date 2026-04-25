@@ -507,8 +507,8 @@ class Settings(BaseSettings):
 
     # Feature flags
     fact_check_enabled: bool = False
-    # Default to manual review until the strategy has verified >=90% average accuracy.
-    auto_confirm_content_profile: bool = False
+    # Review is exception-only by default: normal jobs auto-continue, blockers pause.
+    auto_confirm_content_profile: bool = True
     content_profile_review_threshold: float = 0.9
     content_profile_auto_review_min_accuracy: float = 0.9
     content_profile_auto_review_min_samples: int = 20

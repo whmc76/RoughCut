@@ -935,6 +935,24 @@ def _is_filename_dependent_review_reason(reason: str) -> bool:
     return any(token in text for token in tokens)
 
 
+def _is_exception_review_reason(reason: str) -> bool:
+    text = str(reason or "").strip().lower()
+    if not text:
+        return False
+    tokens = (
+        "冲突",
+        "矛盾",
+        "不一致",
+        "误识别",
+        "语义污染",
+        "conflict",
+        "contradict",
+        "inconsistent",
+        "contamination",
+    )
+    return any(token in text for token in tokens)
+
+
 def build_content_profile_cache_fingerprint(
     *,
     source_name: str,
@@ -1511,14 +1529,14 @@ def assess_content_profile_automation(
     ):
         blocking_reasons.append("开箱类视频主体品牌与型号冲突")
     elif preset_name in product_like_presets and not has_verifiable_subject:
-        blocking_reasons.append("开箱类视频未识别出可验证主体")
+        review_reasons.append("开箱类视频未识别出可验证主体")
     elif preset_name in product_like_presets and not has_complete_subject_identity:
         review_reasons.append("开箱类视频主体身份信息仍不完整")
     elif has_verifiable_subject and not has_complete_subject_identity:
         review_reasons.append("主体身份信息不完整")
 
     if bool(identity_review.get("required")):
-        blocking_reasons.append(str(identity_review.get("reason") or "开箱类视频主体身份待人工确认"))
+        review_reasons.append(str(identity_review.get("reason") or "开箱类视频主体身份待人工确认"))
         if bool(identity_review.get("conservative_summary")):
             review_reasons.append("首次品牌/型号证据不足，已退化为保守摘要")
 
@@ -1529,17 +1547,13 @@ def assess_content_profile_automation(
     ]
     if bool(content_understanding.get("needs_review")):
         if llm_review_reasons:
-            if has_editorial_review_basis:
-                blocking_reasons.extend(
-                    reason for reason in llm_review_reasons if not _is_filename_dependent_review_reason(reason)
-                )
-                for reason in llm_review_reasons:
-                    if _is_filename_dependent_review_reason(reason) and reason not in review_reasons:
-                        review_reasons.append(reason)
-            else:
-                blocking_reasons.extend(llm_review_reasons)
+            for reason in llm_review_reasons:
+                if _is_exception_review_reason(reason) and not _is_filename_dependent_review_reason(reason):
+                    blocking_reasons.append(reason)
+                elif reason not in review_reasons:
+                    review_reasons.append(reason)
         else:
-            blocking_reasons.append("LLM 内容理解结果要求人工复核")
+            review_reasons.append("LLM 内容理解结果要求人工复核")
     else:
         review_reasons.extend(llm_review_reasons)
 
@@ -1552,7 +1566,7 @@ def assess_content_profile_automation(
         min_accuracy=float(getattr(settings, "content_profile_auto_review_min_accuracy", 0.9) or 0.9),
         min_samples=int(getattr(settings, "content_profile_auto_review_min_samples", 20) or 20),
     )
-    auto_confirm = auto_confirm_enabled and quality_gate_passed and bool(accuracy_gate["gate_passed"])
+    auto_confirm = auto_confirm_enabled and not blocking_reasons
 
     return {
         "enabled": auto_confirm_enabled,
@@ -1560,6 +1574,7 @@ def assess_content_profile_automation(
         "score": score,
         "quality_gate_passed": quality_gate_passed,
         "auto_confirm": auto_confirm,
+        "exception_only_auto_confirm": True,
         "reasons": reasons,
         "review_reasons": review_reasons,
         "blocking_reasons": blocking_reasons,

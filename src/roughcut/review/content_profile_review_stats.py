@@ -128,11 +128,11 @@ def build_content_profile_auto_review_gate(*, min_accuracy: float, min_samples: 
     )
 
     if eligible_total == 0:
-        detail = "自动放行候选样本暂无人工审核记录，暂不允许自动审核。"
+        detail = "自动放行候选样本暂无人工审核记录；当前仅作参考，不阻塞异常门自动放行。"
     elif not enough_samples:
-        detail = f"自动放行候选样本不足（{eligible_total}/{min_samples}），暂不允许自动审核。"
+        detail = f"自动放行候选样本不足（{eligible_total}/{min_samples}）；当前仅作参考，不阻塞异常门自动放行。"
     elif accuracy is None:
-        detail = "自动放行候选样本准确率暂不可用，暂不允许自动审核。"
+        detail = "自动放行候选样本准确率暂不可用；当前仅作参考，不阻塞异常门自动放行。"
     elif gate_passed:
         detail = f"自动放行候选样本人工确认准确率 {accuracy:.1%}，已达到 {min_accuracy:.0%} 门槛。"
     else:
@@ -175,7 +175,7 @@ def apply_current_content_profile_review_policy(
     merged = dict(automation)
     merged.update(
         {
-            "enabled": bool(getattr(settings, "auto_confirm_content_profile", False)),
+            "enabled": True,
             "threshold": threshold,
             "quality_gate_passed": quality_gate_passed,
             "approval_accuracy_gate_passed": bool(accuracy_gate["gate_passed"]),
@@ -187,7 +187,8 @@ def apply_current_content_profile_review_policy(
             "manual_review_sample_size": accuracy_gate["manual_review_total"],
         }
     )
-    merged["auto_confirm"] = bool(merged["enabled"] and quality_gate_passed and accuracy_gate["gate_passed"])
+    merged["auto_confirm"] = not bool(blocking_reasons)
+    merged["exception_only_auto_confirm"] = True
     enriched["automation_review"] = merged
     return enriched
 

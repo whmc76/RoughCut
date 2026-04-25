@@ -73,7 +73,7 @@ export function JobSummaryReviewOverlay({
 
   return (
     <section className="detail-block summary-review-surface panel">
-      <div className="detail-key">摘要核对</div>
+      <div className="detail-key">内容异常处理</div>
       <div className="summary-review-status-card">
         <div className="toolbar summary-review-heading">
           <div>
@@ -128,7 +128,7 @@ export function JobSummaryReviewOverlay({
 
         {summaryReasons.length ? (
           <div className="top-gap summary-review-reasons">
-            <div className="muted">核对原因</div>
+            <div className="muted">异常原因</div>
             <div className="timeline-list">
               {summaryReasons.map((reason) => (
                 <div key={reason} className="timeline-item summary-review-evidence-card">
@@ -141,7 +141,7 @@ export function JobSummaryReviewOverlay({
 
         <div className="toolbar top-gap summary-review-actions">
           <button type="button" className="button primary" onClick={onConfirmProfile} disabled={isConfirmingProfile}>
-            {isConfirmingProfile ? "正在保存..." : "确认摘要并继续执行"}
+            {isConfirmingProfile ? "正在保存..." : "确认修正并继续执行"}
           </button>
         </div>
       </div>

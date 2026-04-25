@@ -28,7 +28,6 @@ from roughcut.avatar import list_avatar_material_profiles
 from roughcut.config import get_settings, llm_task_route, normalize_transcription_settings, should_enable_task_search
 from roughcut.creative import (
     ai_director_mode_enabled,
-    auto_review_mode_enabled,
     avatar_mode_enabled,
     build_ai_director_plan,
     build_avatar_commentary_plan,
@@ -202,13 +201,13 @@ STEP_LABELS = {
     "transcript_review": "转写审校",
     "subtitle_translation": "字幕翻译",
     "content_profile": "内容摘要",
-    "summary_review": "人工确认",
+    "summary_review": "内容异常门",
     "glossary_review": "术语纠错",
     "ai_director": "AI导演",
     "avatar_commentary": "数字人解说",
     "edit_plan": "剪辑决策",
     "render": "渲染输出",
-    "final_review": "成片审核",
+    "final_review": "成片异常门",
     "platform_package": "平台文案",
 }
 
@@ -3205,9 +3204,9 @@ async def _evaluate_content_profile_automation_and_reports(
     runtime_profile = dict(content_profile)
     if transcript_evidence:
         runtime_profile["transcript_evidence"] = dict(transcript_evidence)
-    auto_review_enabled = bool(settings.auto_confirm_content_profile) and auto_review_mode_enabled(
-        getattr(job, "enhancement_modes", [])
-    )
+    # Review is now exception-only: every job auto-continues unless a blocking
+    # content, subtitle, or identity conflict is detected.
+    auto_review_enabled = True
     automation = assess_content_profile_automation(
         runtime_profile,
         subtitle_items=subtitle_dicts,
@@ -3516,6 +3515,7 @@ def _set_summary_review_done_for_auto_profile(
         progress=1.0,
         metadata_updates={
             "auto_confirmed": True,
+            "exception_only_auto_confirmed": bool(automation.get("exception_only_auto_confirmed")),
             "confidence_score": automation["score"],
             "threshold": automation["threshold"],
             "review_reasons": automation["review_reasons"],
@@ -3609,6 +3609,37 @@ def _set_summary_review_pending_for_subtitle_gate(
     )
 
 
+def _set_summary_review_pending_for_content_exception(
+    review_step: JobStep,
+    *,
+    now: datetime,
+    automation: dict[str, Any],
+) -> None:
+    blocking_reasons = [
+        str(item).strip()
+        for item in (automation.get("blocking_reasons") or [])
+        if str(item).strip()
+    ]
+    detail = "内容异常门发现阻塞问题，等待人工处理后再继续。"
+    if blocking_reasons:
+        detail = f"{detail} {'；'.join(blocking_reasons[:3])}"
+    _set_summary_review_state(
+        review_step,
+        now=now,
+        status="pending",
+        detail=detail,
+        progress=0.0,
+        metadata_updates={
+            "auto_confirmed": False,
+            "manual_confirmed": False,
+            "exception_gate": True,
+            "review_reasons": list(automation.get("review_reasons") or []),
+            "blocking_reasons": blocking_reasons,
+        },
+        clear_finished_at=True,
+    )
+
+
 def _apply_blocking_report_to_content_profile(
     *,
     content_profile: dict[str, Any],
@@ -3665,7 +3696,7 @@ async def _finalize_content_profile_review_state(
     resolved_manual_review_feedback: dict[str, Any],
     manual_review_draft_profile: dict[str, Any],
 ) -> tuple[bool, dict[str, Any] | None, dict[str, Any]]:
-    auto_confirmed = bool(automation.get("auto_confirm"))
+    auto_confirmed = not bool(automation.get("blocking_reasons"))
     context_source_profile: dict[str, Any] = dict(content_profile)
     final_profile: dict[str, Any] | None = None
 
@@ -3704,13 +3735,23 @@ async def _finalize_content_profile_review_state(
             _set_summary_review_done_for_auto_profile(
                 review_step,
                 now=now,
-                automation=automation,
+                automation={
+                    **automation,
+                    "auto_confirm": True,
+                    "exception_only_auto_confirmed": True,
+                },
             )
         job.status = "processing"
         return auto_confirmed, final_profile, context_source_profile
 
     if review_step is not None and bool((automation.get("identity_review") or {}).get("required")):
         _set_summary_review_pending_for_identity(
+            review_step,
+            now=datetime.now(timezone.utc),
+            automation=automation,
+        )
+    elif review_step is not None and automation.get("blocking_reasons"):
+        _set_summary_review_pending_for_content_exception(
             review_step,
             now=datetime.now(timezone.utc),
             automation=automation,
@@ -7226,14 +7267,6 @@ async def run_render(job_id: str) -> dict:
                 progress=1.0,
             )
         await session.commit()
-        try:
-            await get_telegram_review_bot_service().notify_final_review(uuid.UUID(job_id))
-        except Exception:
-            logger.exception("Failed to send Telegram final review for job %s", job_id)
-            enqueue_review_notification(
-                kind="final_review",
-                job_id=str(job_id),
-            )
 
     return {"output_path": str(local_packaged_mp4), "local": local_paths}
 

@@ -118,7 +118,7 @@ export function JobFinalReviewOverlay({
   return (
     <aside className={["panel detail-panel final-review-overlay final-review-surface", className].filter(Boolean).join(" ")}>
       <PanelHeader
-        title="最终审核"
+        title="成片异常处理"
         description={[selectedJob.source_name, selectedJob.id].filter(Boolean).join(" · ")}
         actions={
           <div className="toolbar">
@@ -152,7 +152,7 @@ export function JobFinalReviewOverlay({
       ) : null}
 
       <section className="detail-block final-review-section-card">
-        <div className="detail-key">审核证据</div>
+        <div className="detail-key">异常证据</div>
         <div className="final-review-evidence-grid">
           <article className="activity-card final-review-evidence-card">
             <div className="detail-key">摘要与主题</div>
@@ -193,8 +193,8 @@ export function JobFinalReviewOverlay({
       <section className="detail-block final-review-section-card">
         <div className="detail-key">当前需要你确认</div>
         <div className="activity-card final-review-action-card">
-          <strong>请决定这版成片是否通过最终审核</strong>
-          <div className="muted compact-top">{reviewDetail || "优先检查质量评分、扣分项和字幕抽检；通过后只继续生成平台文案与交付说明。"}</div>
+          <strong>请处理质量门暂停的成片异常</strong>
+          <div className="muted compact-top">{reviewDetail || "优先检查质量评分、扣分项和字幕抽检；确认后继续生成平台文案与交付说明。"}</div>
           {(onApprove || onReject) ? (
             <>
               {onRejectNoteChange ? (
@@ -217,7 +217,7 @@ export function JobFinalReviewOverlay({
                     className="input top-gap"
                     value={rejectNote}
                     onChange={(event) => onRejectNoteChange(event.target.value)}
-                    placeholder="如需退回，请简要写明要修改的地方，例如：只改封面、字幕术语统一、重做数字人口播。"
+                    placeholder="如需重跑，请简要写明要修改的地方，例如：只改封面、字幕术语统一、重做数字人口播。"
                     rows={3}
                   />
                 </>
@@ -225,12 +225,12 @@ export function JobFinalReviewOverlay({
               <div className="toolbar top-gap">
                 {onApprove ? (
                   <button type="button" className="button primary" onClick={onApprove} disabled={Boolean(isSubmittingDecision)}>
-                    {isSubmittingDecision ? "提交中..." : "通过并生成平台文案"}
+                    {isSubmittingDecision ? "提交中..." : "确认并继续生成文案"}
                   </button>
                 ) : null}
                 {onReject ? (
                   <button type="button" className="button danger" onClick={onReject} disabled={Boolean(isSubmittingDecision)}>
-                    退回修改
+                    按意见重跑
                   </button>
                 ) : null}
               </div>
@@ -289,7 +289,7 @@ export function JobFinalReviewOverlay({
             <div className="list-stack top-gap">
               {timelineDiagnostics.review_recommended ? (
                 <article className="activity-card final-review-evidence-card">
-                  <div className="detail-key">人工复核建议</div>
+                  <div className="detail-key">异常建议</div>
                   <div className="final-review-evidence-copy">
                     <strong>{reviewReasons[0] || "检测到高风险剪辑边界，建议人工复核。"}</strong>
                     {reviewReasons.slice(1).map((reason) => (
@@ -305,7 +305,7 @@ export function JobFinalReviewOverlay({
                   <div className="detail-key">剪辑证据</div>
                   <div className="final-review-evidence-copy">
                     <strong>{cutEvidenceSummary}</strong>
-                    <div className="muted">这些 cut 带有展示保护或高保护分，最终审核时建议优先核对画面是否被误删。</div>
+                    <div className="muted">这些 cut 带有展示保护或高保护分，建议优先核对画面是否被误删。</div>
                   </div>
                 </article>
               ) : null}
