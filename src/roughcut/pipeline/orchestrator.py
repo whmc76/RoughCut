@@ -491,25 +491,30 @@ def _step_dispatch_stale_timeout_seconds(step_name: str) -> int:
 
 def _step_worker_started_at(step: JobStep) -> datetime | None:
     metadata = step.metadata_ or {}
+    dispatched: datetime | None = None
+    dispatched_at = metadata.get("dispatched_at")
+    if isinstance(dispatched_at, str) and dispatched_at.strip():
+        try:
+            dispatched = _coerce_utc(datetime.fromisoformat(dispatched_at))
+        except ValueError:
+            dispatched = None
     worker_started_at = metadata.get("worker_started_at")
     if not isinstance(worker_started_at, str) or not worker_started_at.strip():
         if step.started_at is None:
             return None
         started_at = _coerce_utc(step.started_at)
-        dispatched_at = metadata.get("dispatched_at")
-        if isinstance(dispatched_at, str) and dispatched_at.strip():
-            try:
-                dispatched = _coerce_utc(datetime.fromisoformat(dispatched_at))
-            except ValueError:
-                return started_at
+        if dispatched is not None:
             if started_at > dispatched:
                 return started_at
             return None
         return started_at
     try:
-        return _coerce_utc(datetime.fromisoformat(worker_started_at))
+        worker_started = _coerce_utc(datetime.fromisoformat(worker_started_at))
     except ValueError:
         return None
+    if dispatched is not None and worker_started < dispatched:
+        return None
+    return worker_started
 
 
 def _step_last_heartbeat_at(step: JobStep) -> datetime | None:
@@ -652,6 +657,8 @@ async def _recover_stale_running_steps(session) -> None:
         previous_task_id = metadata.pop("task_id", None)
         metadata.pop("retry_wait_until", None)
         metadata.pop("retry_after_sec", None)
+        metadata.pop("worker_started_at", None)
+        metadata.pop("elapsed_seconds", None)
         if previous_task_id:
             metadata["last_task_id"] = previous_task_id
         if worker_started_at is not None:
@@ -798,6 +805,8 @@ async def _recover_incomplete_jobs() -> None:
                     metadata.pop("task_id", None)
                     metadata.pop("retry_wait_until", None)
                     metadata.pop("retry_after_sec", None)
+                    metadata.pop("worker_started_at", None)
+                    metadata.pop("elapsed_seconds", None)
                     step.status = "pending"
                     step.started_at = None
                     step.finished_at = None
@@ -813,6 +822,8 @@ async def _recover_incomplete_jobs() -> None:
                     metadata.pop("task_id", None)
                     metadata.pop("retry_wait_until", None)
                     metadata.pop("retry_after_sec", None)
+                    metadata.pop("worker_started_at", None)
+                    metadata.pop("elapsed_seconds", None)
                     step.status = "pending"
                     step.started_at = None
                     step.finished_at = None
@@ -878,6 +889,11 @@ async def _dispatch_step(step: JobStep, session) -> None:
     # A restarted step must not inherit completion progress from an earlier
     # attempt; otherwise reconciliation can mark it done before the worker runs.
     metadata.pop("progress", None)
+    # A re-dispatched step can sit in the broker while long media work drains.
+    # Clear prior worker timestamps so queue wait is not mistaken for a stale
+    # execution heartbeat.
+    metadata.pop("worker_started_at", None)
+    metadata.pop("elapsed_seconds", None)
 
     # Send to Celery
     async_result = celery_app.send_task(task_name, args=[job_id], queue=queue)
