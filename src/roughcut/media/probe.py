@@ -77,7 +77,3 @@ def validate_media(meta: MediaMeta) -> None:
         raise ValueError(
             f"Video duration {meta.duration:.0f}s exceeds limit of {settings.max_video_duration_sec}s"
         )
-    if settings.max_upload_size_bytes > 0 and meta.file_size > settings.max_upload_size_bytes:
-        raise ValueError(
-            f"File size {meta.file_size} bytes exceeds limit of {settings.max_upload_size_bytes} bytes"
-        )
