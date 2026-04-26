@@ -6440,7 +6440,31 @@ async def run_edit_plan(job_id: str) -> dict:
                         local_source_candidate = resolved_source
             if local_source_candidate.exists():
                 try:
-                    scene_boundaries = detect_scenes(local_source_candidate)
+                    scene_detection_timeout_sec = max(
+                        15,
+                        int(getattr(get_settings(), "edit_plan_scene_detection_timeout_sec", 180) or 180),
+                    )
+                    scene_detection_frame_skip = max(
+                        0,
+                        int(getattr(get_settings(), "edit_plan_scene_detection_frame_skip", 2) or 0),
+                    )
+                    await _set_step_progress(
+                        session,
+                        step,
+                        detail=f"检测画面场景边界，最多等待 {scene_detection_timeout_sec}s",
+                        progress=0.58,
+                        metadata_updates={
+                            "scene_detection_timeout_sec": scene_detection_timeout_sec,
+                            "scene_detection_frame_skip": scene_detection_frame_skip,
+                        },
+                    )
+                    async with _maintain_step_heartbeat(step):
+                        scene_boundaries = await asyncio.to_thread(
+                            detect_scenes,
+                            local_source_candidate,
+                            frame_skip=scene_detection_frame_skip,
+                            max_runtime_sec=scene_detection_timeout_sec,
+                        )
                 except Exception:
                     logger.exception("Scene detection failed during edit_plan for job %s", job.id)
 

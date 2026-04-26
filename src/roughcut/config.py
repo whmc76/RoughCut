@@ -331,6 +331,8 @@ class Settings(BaseSettings):
     step_stale_timeout_sec: int = 900
     step_dispatch_stale_timeout_sec: int = 3600
     transcribe_runtime_timeout_sec: int = 900
+    edit_plan_scene_detection_timeout_sec: int = 180
+    edit_plan_scene_detection_frame_skip: int = 2
     render_dispatch_concurrency: int = 1
     render_step_stale_timeout_sec: int = 5400
     render_step_prepackaging_stale_timeout_sec: int = 1500
