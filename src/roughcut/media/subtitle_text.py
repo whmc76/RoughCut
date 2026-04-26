@@ -12,16 +12,17 @@ _STANDALONE_FILLER_TOKENS = (
     "吧",
 )
 
-_SUBTITLE_FILLER_SEPARATOR_PATTERN = re.compile(r"[\s，。！？、：；,.!?…~\-—_()\[\]{}<>《》“”\"'‘’]+")
-_FINAL_SUBTITLE_PUNCTUATION_PATTERN = re.compile(r"[\s，。！？、：；,.!?…~\-—_()\[\]{}<>《》“”\"'‘’/\\|]+")
+_ASR_NOISE_LABEL = r"(?:background[_\s-]?music|no[_\s-]?speech|nospeech|silence|music)"
+_SUBTITLE_FILLER_SEPARATOR_PATTERN = re.compile(r"[\s，。！？、：；,.!?…~\-—_()\[\]{}<>《》“”\"'‘’（）【】]+")
+_FINAL_SUBTITLE_PUNCTUATION_PATTERN = re.compile(r"[\s，。！？、：；,.!?…~\-—_()\[\]{}<>《》“”\"'‘’/\\|｜（）【】]+")
 _ASR_NOISE_MARKER_PATTERN = re.compile(
     r"(?i)"
-    r"(?:<\|?(?:no[_\s-]?speech|nospeech|silence|music|background[_\s-]?music)\|?>)"
-    r"|(?:[\[\(（【<]\s*(?:silence|music|background\s+music|no\s+speech|nospeech)\s*[\]\)）】>])"
+    rf"(?:<\|?\s*(?:{_ASR_NOISE_LABEL}(?:\s+{_ASR_NOISE_LABEL})*)\s*\|?>)"
+    rf"|(?:[\[\(（【<]\s*(?:{_ASR_NOISE_LABEL}(?:\s+{_ASR_NOISE_LABEL})*)\s*[\]\)）】>])"
     r"|[♪♫]+"
 )
 _ASR_NOISE_ONLY_PATTERN = re.compile(
-    r"(?i)^(?:silence|music|background\s+music|no\s+speech|nospeech|静音|无语音)$"
+    rf"(?i)^(?:(?:{_ASR_NOISE_LABEL})(?:\s+(?:{_ASR_NOISE_LABEL}))*|静音|无语音)$"
 )
 _DISRUPTION_CLAUSE_PATTERN = re.compile(
     r"^(?:滚|滚开|别吵|别说话|别闹|走开|待会再说|没事|停一下|暂停一下|等一下|先停一下|别打扰|不要打扰|干嘛)$"
@@ -35,6 +36,8 @@ def clean_final_subtitle_text(text: object) -> str:
         return ""
     normalized = _strip_asr_noise_markers(normalized)
     normalized = re.sub(r"([\u4e00-\u9fff])\s+(?=[\u4e00-\u9fff])", r"\1", normalized)
+    if _is_asr_noise_only(normalized):
+        return ""
     normalized = _drop_final_noise_clauses(normalized)
     if not normalized or _is_standalone_subtitle_filler(normalized) or _is_disruption_clause(normalized):
         return ""
@@ -60,14 +63,12 @@ def _drop_final_noise_clauses(text: str) -> str:
 
 
 def _format_final_subtitle_text(text: str) -> str:
-    return _FINAL_SUBTITLE_PUNCTUATION_PATTERN.sub(" ", str(text or "").strip()).strip()
+    return re.sub(r"\s{2,}", " ", _FINAL_SUBTITLE_PUNCTUATION_PATTERN.sub(" ", str(text or "").strip())).strip()
 
 
 def _is_standalone_subtitle_filler(text: str) -> bool:
     compact = _SUBTITLE_FILLER_SEPARATOR_PATTERN.sub("", str(text or "").strip()).lower()
     if not compact:
-        return True
-    if _ASR_NOISE_ONLY_PATTERN.fullmatch(compact):
         return True
     index = 0
     while index < len(compact):
@@ -80,6 +81,15 @@ def _is_standalone_subtitle_filler(text: str) -> bool:
         if not matched:
             return False
     return True
+
+
+def _is_asr_noise_only(text: str) -> bool:
+    normalized = str(text or "").strip()
+    if not normalized:
+        return True
+    normalized = _SUBTITLE_FILLER_SEPARATOR_PATTERN.sub(" ", normalized)
+    normalized = re.sub(r"\s{2,}", " ", normalized).strip()
+    return bool(_ASR_NOISE_ONLY_PATTERN.fullmatch(normalized))
 
 
 def _is_disruption_clause(text: str) -> bool:

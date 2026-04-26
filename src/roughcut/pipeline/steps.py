@@ -296,7 +296,9 @@ def _apply_subtitle_semantic_cleanup(
     cleaned_count = 0
     for item in subtitle_items:
         original_text = str(getattr(item, "text_final", None) or getattr(item, "text_norm", None) or getattr(item, "text_raw", None) or "").strip()
-        cleaned_text = _normalize_semantic_contamination_text(original_text, category_scope=category_scope)
+        cleaned_text = clean_final_subtitle_text(
+            _normalize_semantic_contamination_text(original_text, category_scope=category_scope)
+        )
         if cleaned_text != original_text:
             item.text_final = cleaned_text
             cleaned_count += 1

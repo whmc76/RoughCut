@@ -545,14 +545,15 @@ _LOW_SIGNAL_SHORT_CLAUSE_RE = re.compile(
 )
 _INLINE_FILLER_RE = re.compile(r"(?:呃|嗯|诶|欸|哎|哈|哦)+")
 _INLINE_PARTICLE_RE = re.compile(r"(?<=[\u4e00-\u9fffA-Za-z0-9])(?:啊|吧|呢|吗|嘛|呀)(?=[\u4e00-\u9fffA-Za-z0-9])")
+_ASR_NOISE_LABEL = r"(?:background[_\s-]?music|no[_\s-]?speech|nospeech|silence|music)"
 _ASR_NOISE_MARKER_PATTERN = re.compile(
     r"(?i)"
-    r"(?:<\|?(?:no[_\s-]?speech|nospeech|silence|music|background[_\s-]?music)\|?>)"
-    r"|(?:[\[\(（【<]\s*(?:silence|music|background\s+music|no\s+speech|nospeech)\s*[\]\)）】>])"
+    rf"(?:<\|?\s*(?:{_ASR_NOISE_LABEL}(?:\s+{_ASR_NOISE_LABEL})*)\s*\|?>)"
+    rf"|(?:[\[\(（【<]\s*(?:{_ASR_NOISE_LABEL}(?:\s+{_ASR_NOISE_LABEL})*)\s*[\]\)）】>])"
     r"|[♪♫]+"
 )
 _ASR_NOISE_ONLY_PATTERN = re.compile(
-    r"(?i)^(?:silence|music|background\s+music|no\s+speech|nospeech|静音|无语音)$"
+    rf"(?i)^(?:(?:{_ASR_NOISE_LABEL})(?:\s+(?:{_ASR_NOISE_LABEL}))*|静音|无语音)$"
 )
 _TRAILING_FILLER_RE = re.compile(r"(?:呢|吗|嘛|呀|哈|哦|诶|欸|哎)+$")
 _TRAILING_KEEPABLE_PARTICLE_RE = re.compile(r"(?:啊+|吧+)$")
@@ -4505,6 +4506,8 @@ async def save_subtitle_items(
 
     items: list[SubtitleItem] = []
     for entry in entries:
+        if not str(entry.text_norm or "").strip():
+            continue
         item = SubtitleItem(
             job_id=job_id,
             version=version,

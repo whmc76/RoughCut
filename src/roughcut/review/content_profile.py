@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from roughcut.config import get_settings
 from roughcut.edit.presets import WorkflowPreset, get_workflow_preset, normalize_workflow_template_name, select_workflow_template
 from roughcut.llm_cache import digest_payload
+from roughcut.media.subtitle_text import clean_final_subtitle_text
 from roughcut.providers.factory import get_ocr_provider, get_reasoning_provider, get_search_provider
 from roughcut.providers.multimodal import complete_with_images
 from roughcut.providers.reasoning.base import Message, extract_json_text
@@ -7710,11 +7711,12 @@ def _fallback_polish_text(
     )
     polished = re.sub(r"(。){2,}", "。", polished)
     polished = re.sub(r"(，){2,}", "，", polished)
-    return _guard_short_fragmentary_polish(
+    guarded = _guard_short_fragmentary_polish(
         original_text=text,
         polished_text=polished,
         preserve_display_numbers=preserve_display_numbers,
     )
+    return clean_final_subtitle_text(guarded)
 
 
 def _guard_short_fragmentary_polish(

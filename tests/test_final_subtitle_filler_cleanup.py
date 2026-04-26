@@ -1,8 +1,12 @@
 from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
 
 from roughcut.media.output import write_srt_file
 from roughcut.media.subtitles import write_ass_file
 from roughcut.media.subtitle_text import clean_final_subtitle_text
+from roughcut.review.content_profile import polish_subtitle_items
 from roughcut.speech.subtitle_segmentation import normalize_display_text
 
 
@@ -29,13 +33,45 @@ def test_clean_final_subtitle_text_preserves_normal_cjk_phrases() -> None:
 def test_clean_final_subtitle_text_hides_asr_noise_markers() -> None:
     assert clean_final_subtitle_text("[silence]") == ""
     assert clean_final_subtitle_text("(music)") == ""
+    assert clean_final_subtitle_text("[Silence Music]") == ""
+    assert clean_final_subtitle_text("silence music") == ""
     assert clean_final_subtitle_text("<|nospeech|>") == ""
     assert clean_final_subtitle_text("这个细节 [music] 继续看") == "这个细节继续看"
+    assert clean_final_subtitle_text("这个细节 silence music 继续看。") == "这个细节 silence music 继续看"
+
+
+def test_clean_final_subtitle_text_replaces_all_punctuation_with_spaces() -> None:
+    assert clean_final_subtitle_text("型号：EDC17（黑色），不错！") == "型号 EDC17 黑色 不错"
+    assert clean_final_subtitle_text("A/B｜C【D】") == "A B C D"
 
 
 def test_normalize_display_text_hides_asr_noise_markers_before_review() -> None:
     assert normalize_display_text("[silence]") == ""
+    assert normalize_display_text("silence music") == ""
     assert normalize_display_text("细节 <|music|> 继续看") == "细节继续看"
+    assert normalize_display_text("细节 silence music 继续看") == "细节 silence music 继续看"
+
+
+@pytest.mark.asyncio
+async def test_polish_subtitle_items_persists_final_text_without_asr_labels_or_punctuation() -> None:
+    item = SimpleNamespace(
+        item_index=0,
+        start_time=0.0,
+        end_time=1.0,
+        text_raw="这个细节 silence music 继续看。",
+        text_norm="这个细节 silence music 继续看。",
+        text_final=None,
+    )
+
+    polished_count = await polish_subtitle_items(
+        [item],
+        content_profile={"workflow_template": "unboxing_standard"},
+        glossary_terms=[],
+        allow_llm=False,
+    )
+
+    assert polished_count == 1
+    assert item.text_final == "细节 silence music 继续看"
 
 
 def test_write_srt_file_skips_filler_only_cues_with_consecutive_numbers(tmp_path: Path) -> None:
