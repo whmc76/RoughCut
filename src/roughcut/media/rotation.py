@@ -14,12 +14,42 @@ if metadata is used as the primary source.
 """
 from __future__ import annotations
 
+import json
+import re
 import subprocess
 import tempfile
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from roughcut.config import get_settings
 from roughcut.providers.multimodal import complete_with_images
+
+_VALID_ROTATIONS = {0, 90, 180, 270}
+_VISION_FRAME_COUNT = 3
+_VISION_CONFIDENCE_THRESHOLD = 0.62
+_VISION_STRONG_CONFIDENCE_THRESHOLD = 0.8
+
+
+@dataclass(frozen=True)
+class RotationDecision:
+    rotation_cw: int
+    source: str
+    confidence: float
+    reason: str = ""
+    metadata_rotation_cw: int = 0
+    frame_count: int = 0
+    raw_answer: str = ""
+
+    def to_dict(self) -> dict[str, object]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class _VisionRotation:
+    rotation_cw: int
+    confidence: float
+    reason: str
+    raw_answer: str
 
 
 async def detect_video_rotation(source_path: Path) -> int:
@@ -31,27 +61,64 @@ async def detect_video_rotation(source_path: Path) -> int:
     Falls back to Display Matrix metadata when vision is unavailable.
     Returns 0 on any failure.
     """
+    return (await detect_video_rotation_decision(source_path)).rotation_cw
+
+
+async def detect_video_rotation_decision(source_path: Path) -> RotationDecision:
+    """
+    Return a traceable rotation decision for the source video.
+
+    Multiple raw frames are sent in one vision request so a single blurred,
+    transitional, or object-only frame does not decide the whole render. The
+    metadata fallback remains intentionally conservative and is used when vision
+    is unavailable or low confidence.
+    """
     get_settings()
     duration = _probe_duration(source_path)
     if duration <= 0:
-        return 0
+        return RotationDecision(
+            rotation_cw=0,
+            source="fallback",
+            confidence=0.0,
+            reason="Unable to probe source duration",
+        )
+
+    metadata_rotation = _rotation_from_metadata(source_path)
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        frames = _extract_raw_frames(source_path, duration, Path(tmpdir), count=1)
+        frames = _extract_raw_frames(source_path, duration, Path(tmpdir), count=_VISION_FRAME_COUNT)
         if not frames:
-            return _rotation_from_metadata(source_path)
+            return RotationDecision(
+                rotation_cw=metadata_rotation,
+                source="metadata",
+                confidence=0.55 if metadata_rotation else 0.25,
+                reason="No raw frames could be extracted for visual orientation detection",
+                metadata_rotation_cw=metadata_rotation,
+            )
 
         try:
             answer = await complete_with_images(
                 _ROTATION_PROMPT,
                 frames,
-                max_tokens=30,
+                max_tokens=120,
                 temperature=0,
-                json_mode=False,
+                json_mode=True,
             )
-            return _parse_rotation(answer)
+            vision = _parse_vision_rotation(answer)
+            return _resolve_rotation_decision(
+                vision=vision,
+                metadata_rotation=metadata_rotation,
+                frame_count=len(frames),
+            )
         except Exception:
-            return _rotation_from_metadata(source_path)
+            return RotationDecision(
+                rotation_cw=metadata_rotation,
+                source="metadata",
+                confidence=0.55 if metadata_rotation else 0.25,
+                reason="Visual orientation detection failed; using source rotation metadata",
+                metadata_rotation_cw=metadata_rotation,
+                frame_count=len(frames),
+            )
 
 
 # ── Frame extraction ──────────────────────────────────────────────────────────
@@ -81,8 +148,12 @@ def _extract_raw_frames(
     These are the raw encoded pixels, letting the vision model see the true content.
     """
     frames: list[Path] = []
+    safe_margin = min(max(duration * 0.08, 1.0), max(duration / 4, 0.0))
+    usable_start = safe_margin if duration > safe_margin * 2 else 0.0
+    usable_end = duration - safe_margin if duration > safe_margin * 2 else duration
+    usable_duration = max(usable_end - usable_start, 0.1)
     for i in range(count):
-        seek = duration * (i + 1) / (count + 1)
+        seek = usable_start + usable_duration * (i + 1) / (count + 1)
         out = tmpdir / f"frame_{i:02d}.jpg"
         r = subprocess.run(
             [
@@ -107,10 +178,14 @@ def _extract_raw_frames(
 # ── Vision model ──────────────────────────────────────────────────────────────
 
 _ROTATION_PROMPT = (
-    "Look at this image. Can you read the text normally (left to right)? "
-    "Are people/objects right-side up? Is this a correctly oriented photograph?\n\n"
-    "Answer with ONLY a single number: 0 (correct as-is), 90, 180, or 270 "
-    "(degrees clockwise to rotate). No other text."
+    "You are checking whether video frames are visually sideways or upside down. "
+    "Look across all attached frames as samples from the same video. Decide the "
+    "single clockwise rotation needed to make people, hands, products, objects, "
+    "and readable text look naturally upright. If the angle is not obviously "
+    "wrong, choose 0. Do not rotate merely because the video is portrait or "
+    "landscape.\n\n"
+    'Return JSON only: {"rotation":0,"confidence":0.0,"reason":""}\n'
+    "rotation must be one of 0, 90, 180, 270. confidence is 0.0 to 1.0."
 )
 
 
@@ -150,9 +225,104 @@ def _rotation_from_metadata(source_path: Path) -> int:
 
 def _parse_rotation(text: str) -> int:
     """Extract rotation value from LLM response."""
-    import re
     text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
     for valid in (270, 180, 90, 0):
         if str(valid) in text:
             return valid
     return 0
+
+
+def _parse_vision_rotation(text: str) -> _VisionRotation:
+    cleaned = re.sub(r"<think>.*?</think>", "", str(text or ""), flags=re.DOTALL).strip()
+    payload: dict[str, object] = {}
+    try:
+        payload = json.loads(cleaned)
+    except Exception:
+        match = re.search(r"\{.*\}", cleaned, flags=re.DOTALL)
+        if match:
+            try:
+                payload = json.loads(match.group(0))
+            except Exception:
+                payload = {}
+
+    rotation_value = payload.get("rotation", payload.get("rotation_cw"))
+    try:
+        rotation = int(rotation_value) % 360
+    except Exception:
+        rotation = _parse_rotation(cleaned)
+    if rotation not in _VALID_ROTATIONS:
+        rotation = 0
+
+    try:
+        confidence = float(payload.get("confidence", 0.0))
+    except Exception:
+        confidence = 0.0
+    confidence = max(0.0, min(1.0, confidence))
+    if not payload and rotation in _VALID_ROTATIONS:
+        confidence = 0.7 if rotation else 0.45
+
+    reason = str(payload.get("reason") or "").strip()[:240]
+    return _VisionRotation(
+        rotation_cw=rotation,
+        confidence=confidence,
+        reason=reason,
+        raw_answer=cleaned[:1000],
+    )
+
+
+def _resolve_rotation_decision(
+    *,
+    vision: _VisionRotation,
+    metadata_rotation: int,
+    frame_count: int,
+) -> RotationDecision:
+    metadata_rotation = int(metadata_rotation or 0) % 360
+    if metadata_rotation not in _VALID_ROTATIONS:
+        metadata_rotation = 0
+
+    if vision.confidence >= _VISION_CONFIDENCE_THRESHOLD:
+        return RotationDecision(
+            rotation_cw=vision.rotation_cw,
+            source="vision",
+            confidence=vision.confidence,
+            reason=vision.reason or "Vision model found a clear orientation",
+            metadata_rotation_cw=metadata_rotation,
+            frame_count=frame_count,
+            raw_answer=vision.raw_answer,
+        )
+
+    if (
+        metadata_rotation
+        and vision.rotation_cw == metadata_rotation
+        and vision.confidence >= 0.45
+    ):
+        return RotationDecision(
+            rotation_cw=metadata_rotation,
+            source="vision_metadata_agree",
+            confidence=max(vision.confidence, 0.65),
+            reason=vision.reason or "Vision and source rotation metadata agree",
+            metadata_rotation_cw=metadata_rotation,
+            frame_count=frame_count,
+            raw_answer=vision.raw_answer,
+        )
+
+    if metadata_rotation and vision.confidence < _VISION_STRONG_CONFIDENCE_THRESHOLD:
+        return RotationDecision(
+            rotation_cw=metadata_rotation,
+            source="metadata",
+            confidence=0.55,
+            reason="Vision result was low confidence; using source rotation metadata",
+            metadata_rotation_cw=metadata_rotation,
+            frame_count=frame_count,
+            raw_answer=vision.raw_answer,
+        )
+
+    return RotationDecision(
+        rotation_cw=0,
+        source="none",
+        confidence=max(vision.confidence, 0.25),
+        reason=vision.reason or "No clearly abnormal orientation detected",
+        metadata_rotation_cw=metadata_rotation,
+        frame_count=frame_count,
+        raw_answer=vision.raw_answer,
+    )

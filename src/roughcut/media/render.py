@@ -314,9 +314,10 @@ async def render_video(
     source_info = _probe_video_stream(source_path)
     _write_debug_json(debug_dir, "source.ffprobe.json", source_info)
 
-    from roughcut.media.rotation import detect_video_rotation
+    from roughcut.media.rotation import detect_video_rotation_decision
 
-    rotation_cw = await detect_video_rotation(source_path)
+    rotation_decision = await detect_video_rotation_decision(source_path)
+    rotation_cw = rotation_decision.rotation_cw
     transpose_suffix = _TRANSPOSE_MAP.get(rotation_cw, "")
 
     raw_w = source_info["width"]
@@ -338,7 +339,8 @@ async def render_video(
             "source_path": str(source_path),
             "source_rotation_raw": source_info["rotation_raw"],
             "source_rotation_cw": source_info["rotation_cw"],
-            "vision_rotation_cw": rotation_cw,
+            "rotation_cw": rotation_cw,
+            "rotation_decision": rotation_decision.to_dict(),
             "expected_width": expected_w,
             "expected_height": expected_h,
         },
