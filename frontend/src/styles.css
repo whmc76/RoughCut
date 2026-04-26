@@ -7810,6 +7810,8 @@ textarea.input {
 }
 
 .manual-editor-subtitle-current {
+  display: grid;
+  gap: 10px;
   min-height: 68px;
   padding: 14px 16px;
   border-radius: 12px;
@@ -7817,6 +7819,39 @@ textarea.input {
   border: 1px solid rgba(15, 118, 110, 0.14);
   font-size: 18px;
   line-height: 1.5;
+}
+
+.manual-editor-subtitle-current.editing {
+  border-color: rgba(15, 118, 110, 0.38);
+  background: #eef8f5;
+}
+
+.manual-editor-subtitle-current.empty {
+  display: block;
+  color: var(--text-muted);
+}
+
+.manual-editor-subtitle-current > span {
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.2;
+}
+
+.manual-editor-subtitle-current .input {
+  min-height: 44px;
+  font-size: 18px;
+  font-weight: 700;
+}
+
+.manual-editor-subtitle-current .input[readonly] {
+  cursor: text;
+  background: #ffffff;
+}
+
+.manual-editor-subtitle-quick-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 .manual-editor-subtitle-list {
@@ -7841,6 +7876,10 @@ textarea.input {
 .manual-editor-subtitle-chip.active {
   border-color: rgba(15, 118, 110, 0.28);
   background: #e8f4f1;
+}
+
+.manual-editor-subtitle-chip.selected {
+  box-shadow: inset 3px 0 0 rgba(201, 107, 75, 0.76);
 }
 
 .manual-editor-subtitle-chip span {
