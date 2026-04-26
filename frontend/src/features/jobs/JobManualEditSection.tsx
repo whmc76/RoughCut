@@ -1,8 +1,8 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type SyntheticEvent } from "react";
 import type WaveSurfer from "wavesurfer.js";
 import type { RegionsPlugin as RegionsPluginInstance } from "wavesurfer.js/dist/plugins/regions.esm.js";
 
-import type { Job, JobManualEditApplyPayload, JobManualEditPreviewAssets, JobManualEditSession, JobManualEditSubtitle, JobManualEditSubtitleOverride } from "../../types";
+import type { Job, JobManualEditApplyPayload, JobManualEditPreviewAssets, JobManualEditSession, JobManualEditSubtitle, JobManualEditSubtitleOverride, JobManualVideoTransform } from "../../types";
 import { classNames } from "../../utils";
 
 type JobManualEditSectionProps = {
@@ -12,8 +12,10 @@ type JobManualEditSectionProps = {
   saving: boolean;
   autosaving?: boolean;
   autosavedAt?: string | null;
+  detectingRotation?: boolean;
   onApply?: (payload: JobManualEditApplyPayload) => void;
   onAutoSave?: (payload: JobManualEditApplyPayload) => void;
+  onDetectRotation?: () => Promise<number>;
 };
 
 type KeepSegment = {
@@ -164,6 +166,7 @@ const TERM_ADJECTIVE_HINTS = new Set([
   "稳定",
   "方便",
 ]);
+const ROTATION_OPTIONS = [0, 90, 180, 270];
 
 function regionIdForIndex(index: number) {
   return `keep-${index}`;
@@ -426,6 +429,11 @@ function escapeRegExp(value: string) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+function normalizeRotationValue(value: number) {
+  const normalized = ((Math.round(value / 90) * 90) % 360 + 360) % 360;
+  return ROTATION_OPTIONS.includes(normalized) ? normalized : 0;
+}
+
 function outputTimeToSourceTime(outputTime: number, ranges: OutputRange[]) {
   if (!ranges.length) return 0;
   const normalized = Math.max(0, outputTime || 0);
@@ -462,7 +470,7 @@ function sourceTimeToOutputThumbnailItem(item: { url: string; time_sec: number }
   };
 }
 
-export function JobManualEditSection({ job, session, previewAssets, saving, autosaving = false, autosavedAt, onApply, onAutoSave }: JobManualEditSectionProps) {
+export function JobManualEditSection({ job, session, previewAssets, saving, autosaving = false, autosavedAt, detectingRotation = false, onApply, onAutoSave, onDetectRotation }: JobManualEditSectionProps) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const waveformRef = useRef<HTMLDivElement | null>(null);
   const waveformTimelineRef = useRef<HTMLDivElement | null>(null);
@@ -486,6 +494,11 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
   const [minTermCount, setMinTermCount] = useState(2);
   const [termReplacementDrafts, setTermReplacementDrafts] = useState<Record<string, string>>({});
   const [hiddenTermKeys, setHiddenTermKeys] = useState<Set<string>>(() => new Set());
+  const [videoTransform, setVideoTransform] = useState<JobManualVideoTransform>({ rotation_cw: 0 });
+  const [rotationDialogOpen, setRotationDialogOpen] = useState(false);
+  const [rotationDraft, setRotationDraft] = useState(0);
+  const [rotationDetectMessage, setRotationDetectMessage] = useState<string | null>(null);
+  const [sourceVideoSize, setSourceVideoSize] = useState<{ width: number; height: number } | null>(null);
   const [frequentTerms, setFrequentTerms] = useState<FrequentTerm[]>([]);
 
   useEffect(() => {
@@ -512,8 +525,13 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
     setTermReviewFilter("");
     setTermReplacementDrafts({});
     setHiddenTermKeys(new Set());
+    const nextRotation = normalizeRotationValue(Number(session.video_transform?.rotation_cw || 0));
+    setVideoTransform({ rotation_cw: nextRotation });
+    setRotationDraft(nextRotation);
+    setRotationDialogOpen(false);
+    setRotationDetectMessage(null);
     timelinePlaybackRef.current = false;
-  }, [session.job_id, session.timeline_id, session.timeline_version, session.keep_segments, session.subtitle_overrides]);
+  }, [session.job_id, session.timeline_id, session.timeline_version, session.keep_segments, session.subtitle_overrides, session.video_transform?.rotation_cw]);
 
   const effectiveSegments = useMemo(
     () => segments.filter((segment) => segment.end > segment.start + 0.05),
@@ -554,6 +572,9 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
   const totalOutputDuration = projection.totalDuration;
   const activeSubtitle = activeSubtitleIndex >= 0 ? projection.remapped[activeSubtitleIndex] : null;
   const baseKeepSegments = session.base_keep_segments?.length ? session.base_keep_segments : session.keep_segments;
+  const baseVideoRotation = normalizeRotationValue(Number(session.base_video_transform?.rotation_cw || 0));
+  const currentVideoRotation = normalizeRotationValue(Number(videoTransform.rotation_cw || 0));
+  const hasVideoTransformEdits = currentVideoRotation !== baseVideoRotation;
   const waveformUrl = previewAssets?.ready && previewAssets.audio_url ? previewAssets.audio_url : session.source_url || "";
   const waveformPeaks = useMemo(
     () => (previewAssets?.peaks?.length ? [previewAssets.peaks] : undefined),
@@ -624,7 +645,7 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
     [baseKeepSegments],
   );
   const outputDurationDelta = totalOutputDuration - initialOutputDuration;
-  const hasMaterialEdits = hasTimelineEdits || subtitleOverrides.length > 0;
+  const hasMaterialEdits = hasTimelineEdits || subtitleOverrides.length > 0 || hasVideoTransformEdits;
   const visibleDraftSavedAt = autosavedAt || session.draft_saved_at || null;
   const manualEditorPayload = useMemo(
     () => ({
@@ -633,23 +654,28 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
         end: Number(segment.end.toFixed(3)),
       })),
       subtitle_overrides: subtitleOverrides,
+      video_transform: { rotation_cw: currentVideoRotation },
       base_timeline_id: session.timeline_id,
       base_timeline_version: session.timeline_version,
       base_render_plan_version: session.render_plan_version,
       note: editorNote.trim() || undefined,
     }),
-    [effectiveSegments, editorNote, session.render_plan_version, session.timeline_id, session.timeline_version, subtitleOverrides],
+    [currentVideoRotation, effectiveSegments, editorNote, session.render_plan_version, session.timeline_id, session.timeline_version, subtitleOverrides],
   );
   const savePlanLabel = hasTimelineEdits
     ? "剪辑变更：重建时间线/特效"
-    : subtitleOverrides.length
+    : hasVideoTransformEdits
+      ? "画面方向变更：重新渲染"
+      : subtitleOverrides.length
       ? "字幕变更：复用剪辑/特效计划"
       : "暂无实质修改";
   const saveImpactSummary = hasTimelineEdits
     ? "会保存新的剪辑时间线，并从 render 开始重新生成成片、特效和数字人版本。"
-    : subtitleOverrides.length
+    : hasVideoTransformEdits
+      ? "会保存画面旋转参数，并从 render 开始重新生成成片、特效和数字人版本。"
+      : subtitleOverrides.length
       ? "会保存字幕文本/时间修改，复用当前剪辑和特效计划重新烧录字幕层。"
-      : "当前没有检测到剪辑或字幕修改。";
+      : "当前没有检测到剪辑、画面方向或字幕修改。";
   const outputDurationDeltaLabel = `${outputDurationDelta >= 0 ? "+" : "-"}${formatSeconds(Math.abs(outputDurationDelta))}`;
   const selectedSubtitlePosition = selectedSubtitle
     ? projection.remapped.findIndex((subtitle) => subtitle.index === selectedSubtitle.index)
@@ -922,6 +948,38 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
         ]),
       ),
     );
+  };
+
+  const openRotationDialog = () => {
+    setRotationDraft(currentVideoRotation);
+    setRotationDetectMessage(null);
+    setRotationDialogOpen(true);
+  };
+
+  const detectRotation = async () => {
+    if (!onDetectRotation || detectingRotation) return;
+    setRotationDetectMessage("正在自动检测画面方向...");
+    try {
+      const detected = normalizeRotationValue(await onDetectRotation());
+      setRotationDraft(detected);
+      setRotationDetectMessage(`检测建议：顺时针旋转 ${detected}°`);
+    } catch (error) {
+      setRotationDetectMessage(error instanceof Error ? error.message : "自动检测失败，请手动选择角度。");
+    }
+  };
+
+  const applyRotationDraft = () => {
+    const nextRotation = normalizeRotationValue(rotationDraft);
+    setVideoTransform({ rotation_cw: nextRotation });
+    setRotationDraft(nextRotation);
+    setRotationDialogOpen(false);
+  };
+
+  const rememberVideoMetadata = (event: SyntheticEvent<HTMLVideoElement>) => {
+    const video = event.currentTarget;
+    if (video.videoWidth > 0 && video.videoHeight > 0) {
+      setSourceVideoSize({ width: video.videoWidth, height: video.videoHeight });
+    }
   };
 
   const removeSelectedSegment = () => {
@@ -1246,6 +1304,20 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
   ]);
 
   const previewDisabled = !session.source_url;
+  const buildRotatedPreviewStyle = (rotationValue: number) => {
+    const rotation = normalizeRotationValue(rotationValue);
+    const rawWidth = Math.max(1, sourceVideoSize?.width || 16);
+    const rawHeight = Math.max(1, sourceVideoSize?.height || 9);
+    const displayWidth = rotation === 90 || rotation === 270 ? rawHeight : rawWidth;
+    const displayHeight = rotation === 90 || rotation === 270 ? rawWidth : rawHeight;
+    const displayAspect = displayWidth / displayHeight;
+    return {
+      "--manual-video-rotation": `${rotation}deg`,
+      "--manual-video-scale": rotation === 90 || rotation === 270 ? `${displayAspect}` : "1",
+      aspectRatio: `${displayWidth} / ${displayHeight}`,
+    } as CSSProperties;
+  };
+  const rotatedPreviewStyle = buildRotatedPreviewStyle(currentVideoRotation);
 
   return (
     <section className="detail-block manual-editor-section">
@@ -1269,6 +1341,64 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
       </div>
 
       {session.detail ? <div className="notice compact-top">{session.detail}</div> : null}
+      {rotationDialogOpen ? (
+        <div className="manual-editor-floating-backdrop" role="presentation">
+          <section className="manual-editor-floating-panel" role="dialog" aria-modal="true" aria-label="旋转画面">
+            <div className="manual-editor-preview-head">
+              <div>
+                <strong>旋转画面</strong>
+                <div className="muted compact-top">用于修正方向错误的视频。应用后会立即更新预览，并自动保存到手动调整草稿。</div>
+              </div>
+              <button type="button" className="button ghost" onClick={() => setRotationDialogOpen(false)}>
+                关闭
+              </button>
+            </div>
+
+            <div className="manual-editor-rotation-preview" style={buildRotatedPreviewStyle(rotationDraft)}>
+              <video src={session.source_url ?? undefined} muted playsInline preload="metadata" onLoadedMetadata={rememberVideoMetadata} />
+            </div>
+
+            <div className="manual-editor-actions">
+              <button type="button" className="button ghost" disabled={!onDetectRotation || detectingRotation} onClick={() => void detectRotation()}>
+                {detectingRotation ? "检测中..." : "自动检测"}
+              </button>
+              {ROTATION_OPTIONS.map((option) => (
+                <button
+                  key={option}
+                  type="button"
+                  className={classNames("button", normalizeRotationValue(rotationDraft) === option ? "primary" : "ghost")}
+                  onClick={() => setRotationDraft(option)}
+                >
+                  {option}°
+                </button>
+              ))}
+            </div>
+
+            <label className="form-field">
+              <span className="field-label">手动角度（按 90° 档位归一化用于最终渲染）</span>
+              <input
+                className="input"
+                type="number"
+                step={90}
+                min={0}
+                max={270}
+                value={rotationDraft}
+                onChange={(event) => setRotationDraft(Number(event.target.value || 0))}
+              />
+            </label>
+            {rotationDetectMessage ? <div className="notice compact-top">{rotationDetectMessage}</div> : null}
+
+            <div className="manual-editor-actions">
+              <button type="button" className="button primary" onClick={applyRotationDraft}>
+                应用
+              </button>
+              <button type="button" className="button ghost" onClick={() => setRotationDialogOpen(false)}>
+                取消
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
       <div className="manual-editor-shortcuts" aria-label="手动编辑快捷键">
         <span><kbd>Space</kbd> 播放/暂停</span>
         <span><kbd>←/→</kbd> 跳 1s</span>
@@ -1298,11 +1428,12 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
           <strong>{formatSeconds(session.source_duration_sec)}</strong>
         </article>
       </div>
-      <div className={classNames("manual-editor-save-impact", hasTimelineEdits && "timeline", subtitleOverrides.length > 0 && !hasTimelineEdits && "subtitle")}>
+      <div className={classNames("manual-editor-save-impact", hasTimelineEdits && "timeline", hasVideoTransformEdits && !hasTimelineEdits && "timeline", subtitleOverrides.length > 0 && !hasTimelineEdits && !hasVideoTransformEdits && "subtitle")}>
         <strong>{savePlanLabel}</strong>
         <span>{saveImpactSummary}</span>
         <span>片段 {baseKeepSegments.length}{" -> "}{effectiveSegments.length}</span>
         <span>输出时长变化 {outputDurationDeltaLabel}</span>
+        <span>画面旋转 {baseVideoRotation}°{" -> "}{currentVideoRotation}°</span>
         <span>字幕修改 {subtitleOverrides.length} 条</span>
         {visibleDraftSavedAt ? <span>上次草稿 {new Date(visibleDraftSavedAt).toLocaleTimeString()}</span> : null}
       </div>
@@ -1311,55 +1442,68 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
         <section className="manual-editor-preview">
           <div className="manual-editor-preview-head">
             <strong>{job?.source_name ?? session.source_name}</strong>
-            <span className="muted">输出预览 {formatSeconds(currentOutputTime)} / {formatSeconds(totalOutputDuration)}</span>
-          </div>
-          {previewDisabled ? (
-            <div className="notice">当前机器拿不到原片本地路径，暂时不能内嵌预览，但仍可调整并保存时间线。</div>
-          ) : (
-            <video
-              ref={videoRef}
-              className="manual-editor-video"
-              src={session.source_url ?? undefined}
-              controls
-              preload="metadata"
-              playsInline
-              onTimeUpdate={syncPreviewTime}
-              onSeeked={syncPreviewTime}
-              onPause={() => {
-                if (videoRef.current?.paused) timelinePlaybackRef.current = false;
-              }}
-            />
-          )}
-
-          <div className="manual-editor-controls">
-            <button type="button" className="button primary" disabled={previewDisabled || !effectiveSegments.length} onClick={() => void playEditedTimeline()}>
-              播放输出时间轴
-            </button>
-            <button type="button" className="button ghost" disabled={previewDisabled} onClick={pauseEditedTimeline}>
-              暂停
-            </button>
-            <button type="button" className="button ghost" disabled={!selectedSegment} onClick={() => selectedSegment && jumpToOutputTime(sourceTimeToOutputTime(selectedSegment.start, projection.ranges))}>
-              跳到当前片段
-            </button>
-          </div>
-
-          <div className="manual-editor-subtitle-stage">
-            <div className="muted">当前字幕</div>
-            <div className="manual-editor-subtitle-current">
-              {activeSubtitle ? subtitleText(activeSubtitle) : "当前时间点没有字幕"}
+            <div className="manual-editor-actions">
+              <button type="button" className="button ghost" onClick={openRotationDialog}>
+                旋转画面
+              </button>
+              <span className="muted">输出预览 {formatSeconds(currentOutputTime)} / {formatSeconds(totalOutputDuration)}</span>
             </div>
-            <div className="manual-editor-subtitle-list">
-              {visibleSubtitles.map((subtitle) => (
-                <button
-                  key={`${subtitle.index}-${subtitle.start_time}`}
-                  type="button"
-                  className={classNames("manual-editor-subtitle-chip", activeSubtitle?.index === subtitle.index && "active")}
-                  onClick={() => jumpToOutputTime(subtitle.start_time)}
-                >
-                  <span>{formatSeconds(subtitle.start_time)} - {formatSeconds(subtitle.end_time)}</span>
-                  <strong>{subtitleText(subtitle)}</strong>
+          </div>
+          <div className="manual-editor-preview-main">
+            <div className="manual-editor-video-column">
+              {previewDisabled ? (
+                <div className="notice">当前机器拿不到原片本地路径，暂时不能内嵌预览，但仍可调整并保存时间线。</div>
+              ) : (
+                <div className="manual-editor-video-frame" style={rotatedPreviewStyle}>
+                  <video
+                    ref={videoRef}
+                    className="manual-editor-video"
+                    src={session.source_url ?? undefined}
+                    controls
+                    preload="metadata"
+                    playsInline
+                    onLoadedMetadata={rememberVideoMetadata}
+                    onTimeUpdate={syncPreviewTime}
+                    onSeeked={syncPreviewTime}
+                    onPause={() => {
+                      if (videoRef.current?.paused) timelinePlaybackRef.current = false;
+                    }}
+                  />
+                </div>
+              )}
+              {currentVideoRotation ? <div className="manual-editor-rotation-status">当前预览已顺时针旋转 {currentVideoRotation}°，该参数会自动保存并用于重渲染。</div> : null}
+
+              <div className="manual-editor-controls">
+                <button type="button" className="button primary" disabled={previewDisabled || !effectiveSegments.length} onClick={() => void playEditedTimeline()}>
+                  播放输出时间轴
                 </button>
-              ))}
+                <button type="button" className="button ghost" disabled={previewDisabled} onClick={pauseEditedTimeline}>
+                  暂停
+                </button>
+                <button type="button" className="button ghost" disabled={!selectedSegment} onClick={() => selectedSegment && jumpToOutputTime(sourceTimeToOutputTime(selectedSegment.start, projection.ranges))}>
+                  跳到当前片段
+                </button>
+              </div>
+            </div>
+
+            <div className="manual-editor-subtitle-stage">
+              <div className="muted">当前字幕</div>
+              <div className="manual-editor-subtitle-current">
+                {activeSubtitle ? subtitleText(activeSubtitle) : "当前时间点没有字幕"}
+              </div>
+              <div className="manual-editor-subtitle-list">
+                {visibleSubtitles.map((subtitle) => (
+                  <button
+                    key={`${subtitle.index}-${subtitle.start_time}`}
+                    type="button"
+                    className={classNames("manual-editor-subtitle-chip", activeSubtitle?.index === subtitle.index && "active")}
+                    onClick={() => jumpToOutputTime(subtitle.start_time)}
+                  >
+                    <span>{formatSeconds(subtitle.start_time)} - {formatSeconds(subtitle.end_time)}</span>
+                    <strong>{subtitleText(subtitle)}</strong>
+                  </button>
+                ))}
+              </div>
             </div>
           </div>
         </section>

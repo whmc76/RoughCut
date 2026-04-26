@@ -72,6 +72,12 @@ export function JobManualEditorPage() {
       setNotice({ tone: "error", message: `自动保存失败：${errorMessage(error) || "请刷新后重试。"}` });
     },
   });
+  const detectRotation = useMutation({
+    mutationFn: async () => api.detectJobManualEditorRotation(jobId),
+    onError: (error) => {
+      setNotice({ tone: "error", message: `画面方向检测失败：${errorMessage(error) || "请手动选择角度。"}` });
+    },
+  });
 
   const noticeClass = notice?.tone === "error" ? "notice notice-error top-gap" : "notice top-gap";
 
@@ -117,8 +123,13 @@ export function JobManualEditorPage() {
           saving={applyManualEditor.isPending}
           autosaving={saveManualEditorDraft.isPending}
           autosavedAt={lastDraftSavedAt ?? manualEditor.data.draft_saved_at}
+          detectingRotation={detectRotation.isPending}
           onApply={(payload) => applyManualEditor.mutate(payload)}
           onAutoSave={(payload) => saveManualEditorDraft.mutate(payload)}
+          onDetectRotation={async () => {
+            const result = await detectRotation.mutateAsync();
+            return result.rotation_cw;
+          }}
         />
       ) : (
         <section className="panel">

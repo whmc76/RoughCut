@@ -7,6 +7,7 @@ import type {
   JobManualEditApplyResponse,
   JobManualEditDraftResponse,
   JobManualEditPreviewAssets,
+  JobManualRotationDetectResponse,
   JobManualEditSession,
   JobTimeline,
   JobsUsageSummary,
@@ -112,6 +113,8 @@ export const jobsApi = {
   warmJobManualEditorAssets: (jobId: string) => request<JobManualEditPreviewAssets>(`/jobs/${jobId}/manual-editor/assets/warm`, { method: "POST" }),
   saveJobManualEditorDraft: (jobId: string, body: JobManualEditApplyPayload) =>
     request<JobManualEditDraftResponse>(`/jobs/${jobId}/manual-editor/draft`, { method: "POST", body: JSON.stringify(body) }),
+  detectJobManualEditorRotation: (jobId: string) =>
+    request<JobManualRotationDetectResponse>(`/jobs/${jobId}/manual-editor/rotation/detect`, { method: "POST" }),
   applyJobManualEditor: (jobId: string, body: JobManualEditApplyPayload) =>
     request<JobManualEditApplyResponse>(`/jobs/${jobId}/manual-editor/apply`, { method: "POST", body: JSON.stringify(body) }),
   getContentProfile: (jobId: string) => request<ContentProfileReview>(`/jobs/${jobId}/content-profile`),

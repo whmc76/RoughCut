@@ -134,6 +134,8 @@ export type JobManualEditSession = {
   source_subtitles: JobManualEditSubtitle[];
   projected_subtitles: JobManualEditSubtitle[];
   subtitle_overrides: JobManualEditSubtitleOverride[];
+  video_transform?: JobManualVideoTransform | null;
+  base_video_transform?: JobManualVideoTransform | null;
   draft_saved_at?: string | null;
   draft_note?: string | null;
   editable: boolean;
@@ -146,6 +148,13 @@ export type JobManualEditSubtitleOverride = {
   end_time?: number | null;
   text_final?: string | null;
   delete?: boolean;
+};
+
+export type JobManualVideoTransform = {
+  rotation_cw: number;
+  aspect_ratio?: string | null;
+  resolution_mode?: string | null;
+  resolution_preset?: string | null;
 };
 
 export type JobManualEditApplyResponse = {
@@ -171,9 +180,16 @@ export type JobManualEditDraftResponse = {
   detail?: string | null;
 };
 
+export type JobManualRotationDetectResponse = {
+  job_id: string;
+  rotation_cw: number;
+  detail?: string | null;
+};
+
 export type JobManualEditApplyPayload = {
   keep_segments: Array<{ start: number; end: number }>;
   subtitle_overrides?: JobManualEditSubtitleOverride[];
+  video_transform?: JobManualVideoTransform | null;
   base_timeline_id?: string;
   base_timeline_version?: number;
   base_render_plan_version?: number | null;

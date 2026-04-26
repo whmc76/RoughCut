@@ -7404,7 +7404,7 @@ textarea.input {
 
 .manual-editor-grid {
   display: grid;
-  grid-template-columns: minmax(0, 1.3fr) minmax(320px, 0.9fr);
+  grid-template-columns: minmax(0, 1fr);
   gap: 16px;
 }
 
@@ -7423,6 +7423,18 @@ textarea.input {
   justify-content: space-between;
   align-items: baseline;
   gap: 12px;
+}
+
+.manual-editor-preview-main {
+  display: grid;
+  grid-template-columns: minmax(0, 1.7fr) minmax(300px, 0.72fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.manual-editor-video-column {
+  display: grid;
+  gap: 14px;
 }
 
 .manual-editor-shortcuts {
@@ -7482,11 +7494,76 @@ textarea.input {
   background: #f1faf7;
 }
 
-.manual-editor-video {
+.manual-editor-video-frame {
   width: 100%;
   border-radius: 12px;
   background: #111318;
   aspect-ratio: 16 / 9;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+}
+
+.manual-editor-video {
+  width: auto;
+  height: auto;
+  max-width: 100%;
+  max-height: 100%;
+  border-radius: 12px;
+  background: #111318;
+  object-fit: contain;
+  transform: rotate(var(--manual-video-rotation, 0deg)) scale(var(--manual-video-scale, 1));
+  transform-origin: center;
+}
+
+.manual-editor-rotation-status {
+  padding: 8px 10px;
+  border: 1px solid rgba(201, 107, 75, 0.26);
+  border-radius: 10px;
+  background: #fff8f2;
+  color: #7a3d21;
+  font-size: 12px;
+}
+
+.manual-editor-floating-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(15, 23, 42, 0.34);
+}
+
+.manual-editor-floating-panel {
+  width: min(560px, 100%);
+  display: grid;
+  gap: 14px;
+  padding: 18px;
+  border: 1px solid rgba(15, 118, 110, 0.18);
+  border-radius: 16px;
+  background: #ffffff;
+  box-shadow: 0 24px 80px rgba(15, 23, 42, 0.24);
+}
+
+.manual-editor-rotation-preview {
+  display: grid;
+  place-items: center;
+  min-height: 260px;
+  border-radius: 12px;
+  background: #111318;
+  overflow: hidden;
+}
+
+.manual-editor-rotation-preview video {
+  width: auto;
+  height: auto;
+  max-width: 100%;
+  max-height: 100%;
+  border-radius: 12px;
+  object-fit: contain;
+  transform: rotate(var(--manual-video-rotation, 0deg)) scale(var(--manual-video-scale, 1));
+  transform-origin: center;
 }
 
 .manual-editor-controls,
@@ -7687,6 +7764,8 @@ textarea.input {
 .manual-editor-subtitle-stage {
   display: grid;
   gap: 10px;
+  align-self: stretch;
+  min-width: 0;
 }
 
 .manual-editor-subtitle-current {
@@ -7702,7 +7781,7 @@ textarea.input {
 .manual-editor-subtitle-list {
   display: grid;
   gap: 8px;
-  max-height: 280px;
+  max-height: 460px;
   overflow: auto;
 }
 
@@ -8012,6 +8091,14 @@ textarea.input {
 
   .manual-editor-grid {
     grid-template-columns: 1fr;
+  }
+
+  .manual-editor-preview-main {
+    grid-template-columns: 1fr;
+  }
+
+  .manual-editor-subtitle-list {
+    max-height: 280px;
   }
 }
 

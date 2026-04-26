@@ -47,6 +47,16 @@ _DEFAULT_PEAK_LIMIT_DB = -2.0
 _DEFAULT_LRA = 10.0
 
 
+def _normalize_rotation_cw(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        normalized = int(float(value)) % 360
+    except (TypeError, ValueError):
+        return None
+    return min((0, 90, 180, 270), key=lambda item: min(abs(item - normalized), 360 - abs(item - normalized)))
+
+
 def _resolve_ffmpeg_timeout(
     *,
     source_duration_sec: float | None = None,
@@ -314,9 +324,16 @@ async def render_video(
     source_info = _probe_video_stream(source_path)
     _write_debug_json(debug_dir, "source.ffprobe.json", source_info)
 
-    from roughcut.media.rotation import detect_video_rotation_decision
+    from roughcut.media.rotation import RotationDecision, detect_video_rotation_decision
 
-    rotation_decision = await detect_video_rotation_decision(source_path)
+    manual_editor_meta = render_plan.get("manual_editor") if isinstance(render_plan.get("manual_editor"), dict) else {}
+    manual_video_transform = manual_editor_meta.get("video_transform") if isinstance(manual_editor_meta.get("video_transform"), dict) else {}
+    manual_rotation_cw = _normalize_rotation_cw(manual_video_transform.get("rotation_cw") if manual_video_transform else None)
+    rotation_decision = (
+        RotationDecision(rotation_cw=manual_rotation_cw, confidence=1.0, source="manual_editor", reason="manual_editor_video_transform")
+        if manual_rotation_cw is not None
+        else await detect_video_rotation_decision(source_path)
+    )
     rotation_cw = rotation_decision.rotation_cw
     transpose_suffix = _TRANSPOSE_MAP.get(rotation_cw, "")
 
@@ -340,6 +357,7 @@ async def render_video(
             "source_rotation_raw": source_info["rotation_raw"],
             "source_rotation_cw": source_info["rotation_cw"],
             "rotation_cw": rotation_cw,
+            "manual_rotation_cw": manual_rotation_cw,
             "rotation_decision": rotation_decision.to_dict(),
             "expected_width": expected_w,
             "expected_height": expected_h,

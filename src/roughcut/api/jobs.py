@@ -262,9 +262,17 @@ class ManualEditorSubtitleOverrideIn(BaseModel):
     delete: bool = False
 
 
+class ManualEditorVideoTransformIn(BaseModel):
+    rotation_cw: int = 0
+    aspect_ratio: str | None = None
+    resolution_mode: str | None = None
+    resolution_preset: str | None = None
+
+
 class ManualEditorApplyIn(BaseModel):
     keep_segments: list[ManualEditorSegmentIn] = Field(default_factory=list)
     subtitle_overrides: list[ManualEditorSubtitleOverrideIn] = Field(default_factory=list)
+    video_transform: ManualEditorVideoTransformIn | None = None
     base_timeline_id: str | None = None
     base_timeline_version: int | None = None
     base_render_plan_version: int | None = None
@@ -309,6 +317,8 @@ class ManualEditorSessionOut(BaseModel):
     source_subtitles: list[ManualEditorSubtitleOut] = Field(default_factory=list)
     projected_subtitles: list[ManualEditorSubtitleOut] = Field(default_factory=list)
     subtitle_overrides: list[ManualEditorSubtitleOverrideIn] = Field(default_factory=list)
+    video_transform: ManualEditorVideoTransformIn | None = None
+    base_video_transform: ManualEditorVideoTransformIn | None = None
     draft_saved_at: str | None = None
     draft_note: str | None = None
     editable: bool = True
@@ -320,6 +330,12 @@ class ManualEditorDraftOut(BaseModel):
     saved_at: str
     keep_segment_count: int
     subtitle_override_count: int
+    detail: str | None = None
+
+
+class ManualEditorRotationDetectOut(BaseModel):
+    job_id: str
+    rotation_cw: int
     detail: str | None = None
 
 
@@ -1389,12 +1405,18 @@ def _manual_editor_change_plan(
     previous_keep_segments: list[dict[str, Any]],
     next_keep_segments: list[dict[str, Any]],
     subtitle_overrides: list[dict[str, Any]],
+    previous_video_transform: dict[str, Any] | None = None,
+    next_video_transform: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     timeline_changed = _manual_keep_segments_changed(previous_keep_segments, next_keep_segments)
     subtitle_changed = bool(subtitle_overrides)
+    video_transform_changed = _manual_video_transform_payload(previous_video_transform) != _manual_video_transform_payload(next_video_transform)
     if timeline_changed:
         change_scope = "timeline"
         render_strategy = "full_timeline_render"
+    elif video_transform_changed:
+        change_scope = "video_transform"
+        render_strategy = "source_orientation_render"
     elif subtitle_changed:
         change_scope = "subtitle_only"
         render_strategy = "reuse_timeline_effect_plan"
@@ -1405,6 +1427,7 @@ def _manual_editor_change_plan(
         "change_scope": change_scope,
         "timeline_changed": timeline_changed,
         "subtitle_changed": subtitle_changed,
+        "video_transform_changed": video_transform_changed,
         "render_strategy": render_strategy,
     }
 
@@ -1512,6 +1535,22 @@ def _manual_subtitle_override_payloads(
         payloads.append(payload)
     payloads.sort(key=lambda item: int(item.get("index", 0) or 0))
     return payloads
+
+
+def _manual_video_transform_payload(transform: dict[str, Any] | ManualEditorVideoTransformIn | None) -> dict[str, Any]:
+    if transform is None:
+        return {"rotation_cw": 0}
+    if isinstance(transform, BaseModel):
+        payload = transform.model_dump()
+    else:
+        payload = dict(transform or {})
+    try:
+        raw_rotation = int(float(payload.get("rotation_cw") or 0))
+    except (TypeError, ValueError):
+        raw_rotation = 0
+    normalized = raw_rotation % 360
+    allowed = min((0, 90, 180, 270), key=lambda value: min(abs(value - normalized), 360 - abs(value - normalized)))
+    return {"rotation_cw": int(allowed)}
 
 
 def _apply_manual_subtitle_overrides(
@@ -1711,6 +1750,10 @@ async def _build_manual_editor_session(
     subtitle_projection = (editorial_timeline.data_json or {}).get("subtitle_projection")
     subtitle_overrides: list[dict[str, Any]] = []
     manual_projection_items: list[dict[str, Any]] = []
+    render_plan_data = render_plan_timeline.data_json if render_plan_timeline and isinstance(render_plan_timeline.data_json, dict) else {}
+    manual_editor_meta = render_plan_data.get("manual_editor") if isinstance(render_plan_data.get("manual_editor"), dict) else {}
+    base_video_transform = _manual_video_transform_payload(manual_editor_meta.get("video_transform") if isinstance(manual_editor_meta, dict) else None)
+    video_transform = base_video_transform
     if isinstance(subtitle_projection, dict):
         subtitle_overrides = _manual_subtitle_override_payloads(
             [
@@ -1754,6 +1797,7 @@ async def _build_manual_editor_session(
                 if isinstance(item, dict)
             ]
         )
+        video_transform = _manual_video_transform_payload(draft_payload.get("video_transform"))
         draft_saved_at = str(draft_payload.get("saved_at") or "") or None
         draft_note = str(draft_payload.get("note") or "") or None
 
@@ -1798,6 +1842,8 @@ async def _build_manual_editor_session(
             for index, item in enumerate(projected_subtitles)
         ],
         subtitle_overrides=[ManualEditorSubtitleOverrideIn(**item) for item in subtitle_overrides],
+        video_transform=ManualEditorVideoTransformIn(**video_transform),
+        base_video_transform=ManualEditorVideoTransformIn(**base_video_transform),
         draft_saved_at=draft_saved_at,
         draft_note=draft_note,
         editable=session_detail is None,
@@ -1957,6 +2003,7 @@ async def save_manual_editor_draft(
         )
     keep_segments = _normalize_manual_keep_segments(request.keep_segments, source_duration_sec=source_duration_sec)
     subtitle_override_payloads = _manual_subtitle_override_payloads(request.subtitle_overrides)
+    video_transform = _manual_video_transform_payload(request.video_transform)
     saved_at = datetime.now(timezone.utc).isoformat()
     await session.execute(
         delete(Artifact).where(
@@ -1976,6 +2023,7 @@ async def save_manual_editor_draft(
                 "base_render_plan_version": int(render_plan_timeline.version or 1),
                 "keep_segments": keep_segments,
                 "subtitle_overrides": subtitle_override_payloads,
+                "video_transform": video_transform,
                 "note": str(request.note or "").strip() or None,
             },
         )
@@ -1987,6 +2035,24 @@ async def save_manual_editor_draft(
         keep_segment_count=len(keep_segments),
         subtitle_override_count=len(subtitle_override_payloads),
         detail="手动调整草稿已自动保存。",
+    )
+
+
+@router.post("/{job_id}/manual-editor/rotation/detect", response_model=ManualEditorRotationDetectOut)
+async def detect_manual_editor_rotation(job_id: uuid.UUID, session: AsyncSession = Depends(get_session)):
+    from roughcut.media.rotation import detect_video_rotation
+
+    job = await session.get(Job, job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    source_path = _resolve_manual_editor_source_path(job)
+    if source_path is None:
+        raise HTTPException(status_code=404, detail="Source media is not available locally for rotation detection")
+    rotation_cw = await detect_video_rotation(source_path)
+    return ManualEditorRotationDetectOut(
+        job_id=str(job.id),
+        rotation_cw=int(rotation_cw),
+        detail=f"自动检测建议顺时针旋转 {int(rotation_cw)}°。",
     )
 
 
@@ -2050,6 +2116,8 @@ async def apply_manual_editor_timeline(
     )
     base_output_duration_sec = max((float(item.get("end_time", 0.0) or 0.0) for item in remapped_subtitles), default=0.0)
     subtitle_override_payloads = _manual_subtitle_override_payloads(request.subtitle_overrides)
+    video_transform = _manual_video_transform_payload(request.video_transform)
+    previous_render_plan = dict(render_plan_timeline.data_json or {})
     remapped_subtitles = _apply_manual_subtitle_overrides(
         remapped_subtitles,
         subtitle_override_payloads,
@@ -2059,9 +2127,10 @@ async def apply_manual_editor_timeline(
         previous_keep_segments=previous_keep_segments,
         next_keep_segments=keep_segments,
         subtitle_overrides=subtitle_override_payloads,
+        previous_video_transform=(previous_render_plan.get("manual_editor") or {}).get("video_transform"),
+        next_video_transform=video_transform,
     )
     _profile_artifact, content_profile = await _load_preferred_downstream_profile(session, job_id=job.id)
-    previous_render_plan = dict(render_plan_timeline.data_json or {})
     editing_skill = dict(previous_render_plan.get("editing_skill") or {})
     output_duration_sec = max((float(item.get("end_time", 0.0) or 0.0) for item in remapped_subtitles), default=0.0)
     if change_plan["timeline_changed"]:
@@ -2134,6 +2203,8 @@ async def apply_manual_editor_timeline(
                 "render_strategy": str(change_plan["render_strategy"]),
                 "timeline_changed": bool(change_plan["timeline_changed"]),
                 "subtitle_changed": bool(change_plan["subtitle_changed"]),
+                "video_transform_changed": bool(change_plan["video_transform_changed"]),
+                "video_transform": video_transform,
                 "note": str(request.note or "").strip() or None,
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             },
@@ -2184,6 +2255,8 @@ async def apply_manual_editor_timeline(
         "render_strategy": str(change_plan["render_strategy"]),
         "timeline_changed": bool(change_plan["timeline_changed"]),
         "subtitle_changed": bool(change_plan["subtitle_changed"]),
+        "video_transform_changed": bool(change_plan["video_transform_changed"]),
+        "video_transform": video_transform,
         "base_render_plan_id": str(render_plan_timeline.id),
         "base_render_plan_version": int(render_plan_timeline.version or 1),
         "updated_at": datetime.now(timezone.utc).isoformat(),
@@ -2197,6 +2270,8 @@ async def apply_manual_editor_timeline(
         issue_codes=[
             "manual_timeline_edit"
             if change_plan["timeline_changed"]
+            else "manual_video_transform_edit"
+            if change_plan["video_transform_changed"]
             else "manual_subtitle_edit"
             if change_plan["subtitle_changed"]
             else "manual_editor_no_material_change"
@@ -2226,6 +2301,8 @@ async def apply_manual_editor_timeline(
         detail=(
             "手动字幕已保存，已复用原剪辑/特效计划并从 render 重新烧录字幕、生成成片和平台包。"
             if change_plan["change_scope"] == "subtitle_only"
+            else "画面方向已保存，已从 render 开始重新生成成片、特效和数字人口播链路。"
+            if change_plan["change_scope"] == "video_transform"
             else "手动时间线已保存，已从 render 开始重新生成成片、特效和数字人口播链路。"
         ),
     )
