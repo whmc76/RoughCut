@@ -1,4 +1,5 @@
 import type { Job } from "../../types";
+import { Link } from "react-router-dom";
 import { api } from "../../api";
 import { EmptyState } from "../../components/ui/EmptyState";
 import { PanelHeader } from "../../components/ui/PanelHeader";
@@ -121,6 +122,7 @@ type JobQueueTableProps = {
   isDeleting?: boolean;
   onSelect: (jobId: string) => void;
   onOpenReview?: (jobId: string) => void;
+  onPublish?: (jobId: string) => void;
   onOpenFolder: (jobId: string) => void;
   onCancel: (jobId: string) => void;
   onRestart: (jobId: string) => void;
@@ -142,6 +144,7 @@ export function JobQueueTable({
   isDeleting,
   onSelect,
   onOpenReview,
+  onPublish,
   onOpenFolder,
   onCancel,
   onRestart,
@@ -299,6 +302,25 @@ export function JobQueueTable({
                           {reviewActionLabel(job, t)}
                         </button>
                       ) : null}
+                      {job.status === "done" ? (
+                        <button
+                          className="button primary button-sm"
+                          type="button"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            onPublish?.(job.id);
+                          }}
+                        >
+                          一键发布
+                        </button>
+                      ) : null}
+                      <Link
+                        className="button ghost button-sm"
+                        to={`/jobs/${job.id}/manual-editor`}
+                        onClick={(event) => event.stopPropagation()}
+                      >
+                        手动调整
+                      </Link>
                       <button
                         className="button ghost button-sm"
                         type="button"

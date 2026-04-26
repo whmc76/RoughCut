@@ -255,6 +255,7 @@ class ManualEditorApplyIn(BaseModel):
 class PublicationSubmitIn(BaseModel):
     creator_profile_id: str | None = None
     platforms: list[str] = Field(default_factory=list)
+    platform_options: dict[str, dict[str, Any]] = Field(default_factory=dict)
 
 
 class ManualEditorSegmentOut(BaseModel):
@@ -2551,6 +2552,7 @@ async def publish_job_to_bound_platforms(
         platform_packaging=packaging,
         creator_profile=creator_profile,
         requested_platforms=payload.platforms,
+        platform_options=payload.platform_options,
         existing_attempts=await list_publication_attempts(session, job_id=str(job_id)),
     )
     if not plan.get("publish_ready"):

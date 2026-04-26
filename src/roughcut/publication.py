@@ -130,6 +130,7 @@ def build_publication_plan(
     platform_packaging: dict[str, Any] | None,
     creator_profile: dict[str, Any] | None,
     requested_platforms: list[str] | None = None,
+    platform_options: dict[str, Any] | None = None,
     existing_attempts: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     blocked_reasons: list[str] = []
@@ -155,11 +156,13 @@ def build_publication_plan(
         if platform
     }
     credential_by_platform = {item["platform"]: item for item in credentials}
+    options_by_platform = _normalize_publication_platform_options(platform_options)
     target_platforms = sorted((requested or set(credential_by_platform)) & set(packages), key=_platform_sort_key)
     targets: list[dict[str, Any]] = []
     for platform in target_platforms:
         credential = credential_by_platform.get(platform)
         package = packages.get(platform) or {}
+        publish_options = options_by_platform.get(platform, {})
         if not credential:
             warnings.append(f"{platform_label(platform)} 没有可用登录凭据，已跳过。")
             continue
@@ -179,6 +182,11 @@ def build_publication_plan(
                 "title": _package_primary_title(package),
                 "body": str(package.get("description") or package.get("body") or "").strip(),
                 "tags": [str(item).strip() for item in (package.get("tags") or []) if str(item).strip()],
+                "category": publish_options.get("category"),
+                "collection": publish_options.get("collection"),
+                "visibility_or_publish_mode": publish_options.get("visibility_or_publish_mode"),
+                "scheduled_publish_at": publish_options.get("scheduled_publish_at"),
+                "platform_specific_overrides": publish_options.get("platform_specific_overrides") or {},
                 "status": "ready",
             }
         )
@@ -257,9 +265,14 @@ async def submit_publication_attempts(session: AsyncSession, plan: dict[str, Any
             content_kind="video",
             request_payload=request_payload,
             response_payload=None,
+            scheduled_at=_parse_datetime(target.get("scheduled_publish_at")),
             semantic_fingerprint=fingerprint,
             idempotency_key=f"{plan.get('job_id')}:{target.get('platform')}:{fingerprint[:12]}",
-            operator_summary="已创建 browser-agent 发布任务，等待运行器认领。",
+            operator_summary=(
+                "已创建 browser-agent 预约发布任务，等待运行器认领。"
+                if target.get("scheduled_publish_at")
+                else "已创建 browser-agent 发布任务，等待运行器认领。"
+            ),
         )
         run = PublicationAttemptRun(
             attempt_id=attempt_id,
@@ -578,6 +591,7 @@ def serialize_publication_attempt(
         "external_post_id": attempt.external_post_id,
         "external_url": attempt.external_url,
         "public_url": attempt.external_url,
+        "scheduled_at": _iso_or_none(attempt.scheduled_at),
         "error_code": attempt.error_code,
         "error_message": attempt.error_message,
         "semantic_fingerprint": attempt.semantic_fingerprint,
@@ -639,8 +653,14 @@ def build_browser_agent_task_payload(attempt_id: str, *, plan: dict[str, Any], t
             "display_hashtags": request_payload.get("display_hashtags") or [],
             "structured_tags": request_payload.get("structured_tags") or [],
             "native_topics": request_payload.get("native_topics") or [],
-            "visibility_or_publish_mode": None,
-            "scheduled_publish_at": None,
+            "category": request_payload.get("category"),
+            "collection": request_payload.get("collection"),
+            "visibility_or_publish_mode": request_payload.get("visibility_or_publish_mode"),
+            "scheduled_publish_at": request_payload.get("scheduled_publish_at"),
+            "ui_control_semantics": request_payload.get("ui_control_semantics") or {},
+            "platform_specific_overrides": request_payload.get("platform_specific_overrides") or {},
+            "publication_capability": request_payload.get("publication_capability") or {},
+            "validation_contract": request_payload.get("validation_contract") or BROWSER_AGENT_PUBLICATION_RUN_CONTRACT,
             "publish_media_source": {
                 "provider": "local_file",
                 "mode": "platform_native_upload",
@@ -702,6 +722,63 @@ def build_browser_agent_task_payload_from_attempt(attempt: PublicationAttempt) -
             "metadata": metadata,
         },
     }
+
+
+def _normalize_publication_platform_options(value: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
+    raw_options = value if isinstance(value, dict) else {}
+    normalized: dict[str, dict[str, Any]] = {}
+    for raw_platform, raw_value in raw_options.items():
+        platform = normalize_publication_platform(raw_platform)
+        if not platform or not isinstance(raw_value, dict):
+            continue
+        option: dict[str, Any] = {}
+        scheduled_publish_at = _normalize_scheduled_publish_at(raw_value.get("scheduled_publish_at"))
+        if scheduled_publish_at:
+            option["scheduled_publish_at"] = scheduled_publish_at
+        collection = _normalize_collection_option(raw_value)
+        if collection:
+            option["collection"] = collection
+        category = str(raw_value.get("category") or "").strip()
+        if category:
+            option["category"] = category[:120]
+        visibility_or_publish_mode = str(raw_value.get("visibility_or_publish_mode") or "").strip()
+        if visibility_or_publish_mode:
+            option["visibility_or_publish_mode"] = visibility_or_publish_mode[:80]
+        platform_specific_overrides = raw_value.get("platform_specific_overrides")
+        if isinstance(platform_specific_overrides, dict):
+            option["platform_specific_overrides"] = platform_specific_overrides
+        normalized[platform] = option
+    return normalized
+
+
+def _normalize_scheduled_publish_at(value: Any) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if re.match(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2})?$", text):
+        return text
+    parsed = _parse_datetime(text)
+    if parsed is not None:
+        return parsed.isoformat()
+    return text[:64]
+
+
+def _normalize_collection_option(value: dict[str, Any]) -> dict[str, str] | None:
+    raw_collection = value.get("collection")
+    if isinstance(raw_collection, dict):
+        collection_id = str(raw_collection.get("id") or raw_collection.get("collection_id") or "").strip()
+        collection_name = str(raw_collection.get("name") or raw_collection.get("title") or raw_collection.get("label") or "").strip()
+    else:
+        collection_id = str(value.get("collection_id") or "").strip()
+        collection_name = str(value.get("collection_name") or raw_collection or "").strip()
+    if not collection_id and not collection_name:
+        return None
+    collection: dict[str, str] = {}
+    if collection_id:
+        collection["id"] = collection_id[:160]
+    if collection_name:
+        collection["name"] = collection_name[:160]
+    return collection
 
 
 def map_browser_agent_publication_status(raw_status: Any) -> str:
@@ -920,6 +997,10 @@ def _iso_or_none(value: Any) -> str | None:
 def _build_request_payload(*, plan: dict[str, Any], target: dict[str, Any]) -> dict[str, Any]:
     tags = [str(item).strip().lstrip("#") for item in (target.get("tags") or []) if str(item).strip()]
     media_path = str(plan.get("media_path") or "").strip()
+    collection = target.get("collection") if isinstance(target.get("collection"), dict) else None
+    scheduled_publish_at = str(target.get("scheduled_publish_at") or "").strip() or None
+    visibility_or_publish_mode = str(target.get("visibility_or_publish_mode") or "").strip() or None
+    category = str(target.get("category") or "").strip() or None
     return {
         "title": str(target.get("title") or "").strip(),
         "body": str(target.get("body") or "").strip(),
@@ -928,6 +1009,15 @@ def _build_request_payload(*, plan: dict[str, Any], target: dict[str, Any]) -> d
         "display_hashtags": [f"#{tag}" for tag in tags],
         "structured_tags": tags,
         "native_topics": [],
+        "category": category,
+        "collection": collection,
+        "visibility_or_publish_mode": visibility_or_publish_mode,
+        "scheduled_publish_at": scheduled_publish_at,
+        "ui_control_semantics": {
+            "schedule_publish": bool(scheduled_publish_at),
+            "collection_select": bool(collection),
+        },
+        "platform_specific_overrides": target.get("platform_specific_overrides") or {},
         "media_items": [
             {
                 "kind": "video",
@@ -960,6 +1050,8 @@ def _build_request_payload(*, plan: dict[str, Any], target: dict[str, Any]) -> d
             "adapter": CANONICAL_PUBLICATION_ADAPTER,
             "platform": str(target.get("platform") or ""),
             "requires_local_media": True,
+            "supports_scheduled_publish": True,
+            "supports_collection_select": True,
         },
         "validation_contract": BROWSER_AGENT_PUBLICATION_RUN_CONTRACT,
     }

@@ -138,6 +138,14 @@ async def test_publication_plan_requires_done_job_local_media_and_bound_credenti
                 render_output=render_output,
                 platform_packaging=packaging,
                 creator_profile=creator_profile,
+                platform_options={
+                    "douyin": {
+                        "scheduled_publish_at": "2026-04-26T18:30",
+                        "collection_name": "新品体验",
+                        "category": "数码",
+                        "visibility_or_publish_mode": "scheduled",
+                    }
+                },
                 existing_attempts=await publication.list_publication_attempts(session, job_id=str(job.id)),
             )
             result = await publication.submit_publication_attempts(session, plan)
@@ -162,6 +170,10 @@ async def test_publication_plan_requires_done_job_local_media_and_bound_credenti
         }
     ]
     assert result["created_attempts"][0]["request_payload"]["metadata"]["browser_profile_id"] == "chrome-profile:main"
+    assert result["created_attempts"][0]["request_payload"]["scheduled_publish_at"] == "2026-04-26T18:30"
+    assert result["created_attempts"][0]["request_payload"]["collection"] == {"name": "新品体验"}
+    assert result["created_attempts"][0]["request_payload"]["category"] == "数码"
+    assert result["created_attempts"][0]["request_payload"]["visibility_or_publish_mode"] == "scheduled"
     assert result["created_attempts"][0]["runs"][0]["metadata"]["contract"] == "browser_agent_publication_v1"
     assert len(duplicate["created_attempts"]) == 0
 
@@ -210,6 +222,13 @@ async def test_publication_worker_submits_and_reconciles_browser_agent_attempt(t
                         }
                     },
                 },
+                platform_options={
+                    "douyin": {
+                        "scheduled_publish_at": "2026-04-26T19:00",
+                        "collection_id": "col-1",
+                        "collection_name": "测评合集",
+                    }
+                },
             )
             await publication.submit_publication_attempts(session, plan)
             first_tick = await publication.run_publication_worker_once(
@@ -232,6 +251,8 @@ async def test_publication_worker_submits_and_reconciles_browser_agent_attempt(t
 
     assert first_tick["claimed"] == 1
     assert fake_client.posts[0]["json"]["content"]["publish_media_source"]["local_file_count"] == 1
+    assert fake_client.posts[0]["json"]["content"]["scheduled_publish_at"] == "2026-04-26T19:00"
+    assert fake_client.posts[0]["json"]["content"]["collection"] == {"id": "col-1", "name": "测评合集"}
     assert fake_client.posts[0]["json"]["profile_id"] == "chrome-profile-main"
     assert fake_client.posts[0]["headers"]["Authorization"] == "Bearer secret"
     assert second_tick["reconciled"][0]["status"] == "published"

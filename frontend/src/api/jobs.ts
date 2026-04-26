@@ -10,6 +10,7 @@ import type {
   JobsUsageSummary,
   JobsUsageTrend,
   PublicationPlan,
+  PublicationPlatformPublishOptions,
   Report,
   TokenUsageReport,
 } from "../types";
@@ -83,7 +84,14 @@ export const jobsApi = {
     request<PublicationPlan>(
       `/jobs/${jobId}/publication/plan${creatorProfileId ? `?creator_profile_id=${encodeURIComponent(creatorProfileId)}` : ""}`,
     ),
-  publishJob: (jobId: string, body: { creator_profile_id?: string | null; platforms?: string[] }) =>
+  publishJob: (
+    jobId: string,
+    body: {
+      creator_profile_id?: string | null;
+      platforms?: string[];
+      platform_options?: Record<string, PublicationPlatformPublishOptions>;
+    },
+  ) =>
     request<PublicationPlan>(`/jobs/${jobId}/publication/publish`, { method: "POST", body: JSON.stringify(body) }),
   rerunJob: (jobId: string, body: { issue_code?: string; rerun_start_step?: string; note?: string }) =>
     request<JobRerunResponse>(`/jobs/${jobId}/rerun`, { method: "POST", body: JSON.stringify(body) }),

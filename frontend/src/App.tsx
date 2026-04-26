@@ -13,6 +13,9 @@ const OverviewPage = lazy(async () => ({
 const JobsPage = lazy(async () => ({
   default: (await import("./pages/JobsPage")).JobsPage,
 }));
+const JobManualEditorPage = lazy(async () => ({
+  default: (await import("./pages/JobManualEditorPage")).JobManualEditorPage,
+}));
 const WatchRootsPage = lazy(async () => ({
   default: (await import("./pages/WatchRootsPage")).WatchRootsPage,
 }));
@@ -186,6 +189,7 @@ export function App() {
             <Routes>
               <Route path="/" element={<OverviewPage />} />
               <Route path="/jobs" element={<JobsPage />} />
+              <Route path="/jobs/:jobId/manual-editor" element={<JobManualEditorPage />} />
               <Route path="/watch-roots" element={<WatchRootsPage />} />
               <Route path="/intelligent-copy" element={<IntelligentCopyPage />} />
               <Route path="/packaging" element={<PackagingPage />} />

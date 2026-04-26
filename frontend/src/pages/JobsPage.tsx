@@ -5,6 +5,7 @@ import { ConfigProfileSwitcher } from "../features/configProfiles/ConfigProfileS
 import { JobCreateModal } from "../features/jobs/JobCreateModal";
 import { JobDetailModal } from "../features/jobs/JobDetailModal";
 import { JobDetailPanel } from "../features/jobs/JobDetailPanel";
+import { JobPublicationPanel } from "../features/jobs/JobPublicationPanel";
 import { JobQueueTable } from "../features/jobs/JobQueueTable";
 import { JobReviewOverlay } from "../features/jobs/JobReviewOverlay";
 import { JobUploadPanel } from "../features/jobs/JobUploadPanel";
@@ -28,6 +29,7 @@ export function JobsPage() {
   const [reviewNoticeTone, setReviewNoticeTone] = useState<"success" | "error">("success");
   const [pendingSubtitleRerun, setPendingSubtitleRerun] = useState<{ rerunStartStep: string | null; issueCode: string | null } | null>(null);
   const [detailModalOpen, setDetailModalOpen] = useState(false);
+  const [publicationJobId, setPublicationJobId] = useState<string | null>(null);
   const [reviewOverlayOpen, setReviewOverlayOpen] = useState(false);
   const [reviewStepOverride, setReviewStepOverride] = useState<JobReviewStep | null>(null);
   const queueStageRef = useRef<HTMLElement | null>(null);
@@ -46,6 +48,9 @@ export function JobsPage() {
   const activeReviewStep: JobReviewStep = reviewStep ?? "summary_review";
   const isReviewContext = selectedReviewJob?.status === "needs_review" && reviewStep !== null;
   const showDetailModal = Boolean(detailModalOpen && workspace.selectedJobId);
+  const publicationJob = workspace.filteredJobs.find((job) => job.id === publicationJobId)
+    ?? (workspace.selectedJob?.id === publicationJobId ? workspace.selectedJob : null);
+  const showPublicationModal = Boolean(publicationJobId && publicationJob);
   const showReviewOverlay = Boolean(reviewOverlayOpen && workspace.selectedJobId && isReviewContext && reviewStep);
   const triggerSubtitleRerun = (decision: { issue_codes?: string[]; rerun_start_step?: string | null }) => {
     const issueCode = decision.issue_codes?.[0] || null;
@@ -78,6 +83,7 @@ export function JobsPage() {
 
   const openJobReview = (jobId: string) => {
     const queuedJob = workspace.filteredJobs.find((job) => job.id === jobId) ?? (workspace.selectedJob?.id === jobId ? workspace.selectedJob : null);
+    setPublicationJobId(null);
     setDetailModalOpen(false);
     setReviewStepOverride(resolveJobReviewStep(queuedJob));
     setReviewOverlayOpen(true);
@@ -85,10 +91,18 @@ export function JobsPage() {
   };
 
   const openJobDetail = (jobId: string) => {
+    setPublicationJobId(null);
     setReviewOverlayOpen(false);
     setReviewStepOverride(null);
     setDetailModalOpen(true);
     workspace.setSelectedJobId(jobId);
+  };
+
+  const openJobPublication = (jobId: string) => {
+    setDetailModalOpen(false);
+    setReviewOverlayOpen(false);
+    setReviewStepOverride(null);
+    setPublicationJobId(jobId);
   };
 
   const resolveJobName = (jobId: string) =>
@@ -292,6 +306,7 @@ export function JobsPage() {
           isDeleting={workspace.deleteJob.isPending}
           onSelect={openJobDetail}
           onOpenReview={openJobReview}
+          onPublish={openJobPublication}
           onOpenFolder={(jobId) => workspace.openFolder.mutate(jobId)}
           onCancel={confirmAndCancelJob}
           onRestart={confirmAndRestartJob}
@@ -348,6 +363,28 @@ export function JobsPage() {
         </section>
       </JobCreateModal>
 
+      <JobCreateModal
+        open={showPublicationModal}
+        title="一键发布"
+        onClose={() => setPublicationJobId(null)}
+      >
+        <section className="jobs-create-modal-content">
+          <div className="jobs-stage-head">
+            <div>
+              <h3>一键发布</h3>
+              <p>配置平台参数、定时发布和合集栏目，然后提交到 browser-agent。</p>
+            </div>
+            <div className="jobs-stage-meta">
+              <span>发布任务</span>
+              <strong>{publicationJob?.status === "done" ? "可配置" : "不可发布"}</strong>
+            </div>
+          </div>
+          {publicationJob ? (
+            <JobPublicationPanel job={publicationJob} onCancel={() => setPublicationJobId(null)} />
+          ) : null}
+        </section>
+      </JobCreateModal>
+
       <JobDetailModal
         open={showDetailModal}
         title={workspace.selectedJob?.source_name}
@@ -363,8 +400,6 @@ export function JobsPage() {
           report={workspace.report.data}
           tokenUsage={workspace.tokenUsage.data}
           timeline={workspace.timeline.data}
-          manualEditor={workspace.manualEditor.data}
-          manualEditorAssets={workspace.manualEditorAssets.data}
           contentProfile={workspace.contentProfile.data}
           config={workspace.config.data}
           packaging={workspace.packaging.data}
@@ -387,7 +422,6 @@ export function JobsPage() {
           isCancelling={workspace.cancelJob.isPending}
           isRestarting={workspace.restartJob.isPending}
           isDeleting={workspace.deleteJob.isPending}
-          isApplyingManualEditor={workspace.applyManualEditor.isPending}
           onContentFieldChange={(field, value) =>
             workspace.setContentDraft((prev) => {
               if (field !== "video_type") {
@@ -423,24 +457,6 @@ export function JobsPage() {
           onCancel={() => workspace.selectedJob && confirmAndCancelJob(workspace.selectedJob.id)}
           onRestart={() => workspace.selectedJob && confirmAndRestartJob(workspace.selectedJob.id)}
           onDelete={() => workspace.selectedJob && confirmAndDeleteJob(workspace.selectedJob.id)}
-          onApplyManualEditor={(payload) =>
-            workspace.applyManualEditor.mutate(payload, {
-              onSuccess: (result) => {
-                showReviewNotice(
-                  "success",
-                  result.detail?.trim() || `手动调整已保存，重跑链路：${result.rerun_steps.join(" -> ") || "render"}`,
-                );
-              },
-              onError: (error) => {
-                showReviewNotice(
-                  "error",
-                  error instanceof Error
-                    ? error.message
-                    : `手动调整保存失败：${String(error) || "请刷新后重试。"}`,
-                );
-              },
-            })
-          }
           onApplyReview={confirmAndApplyReview}
           onTriggerSubtitleRerun={triggerSubtitleRerun}
         />

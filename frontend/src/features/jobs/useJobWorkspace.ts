@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { api } from "../../api";
-import type { Job, JobActivity, JobManualEditApplyPayload } from "../../types";
+import type { Job, JobActivity } from "../../types";
 import { normalizeKeywordList } from "./contentProfile";
 import type { UploadForm } from "./constants";
 
@@ -208,22 +208,6 @@ export function useJobWorkspace({ isCreateOpen = false }: UseJobWorkspaceOptions
     queryFn: () => api.getJobTimeline(selectedJobId!),
     enabled: shouldLoadTimeline,
   });
-  const manualEditor = useQuery({
-    queryKey: ["job-manual-editor", selectedJobId],
-    queryFn: () => api.getJobManualEditor(selectedJobId!),
-    enabled: shouldLoadTimeline,
-  });
-  const manualEditorAssets = useQuery({
-    queryKey: ["job-manual-editor-assets", selectedJobId],
-    queryFn: async () => {
-      const status = await api.getJobManualEditorAssetsStatus(selectedJobId!);
-      if (status.ready || status.warming) return status;
-      return api.warmJobManualEditorAssets(selectedJobId!);
-    },
-    enabled: Boolean(selectedJobId && manualEditor.data?.source_url),
-    refetchInterval: (query) => (query.state.data?.ready ? false : 2_500),
-    retry: 1,
-  });
   const contentProfile = useQuery({
     queryKey: ["job-content-profile", selectedJobId],
     queryFn: () => api.getContentProfile(selectedJobId!),
@@ -351,8 +335,6 @@ export function useJobWorkspace({ isCreateOpen = false }: UseJobWorkspaceOptions
       void queryClient.invalidateQueries({ queryKey: ["job-token-usage", selectedJobId] });
       void queryClient.invalidateQueries({ queryKey: ["job-report", selectedJobId] });
       void queryClient.invalidateQueries({ queryKey: ["job-timeline", selectedJobId] });
-      void queryClient.invalidateQueries({ queryKey: ["job-manual-editor", selectedJobId] });
-      void queryClient.invalidateQueries({ queryKey: ["job-manual-editor-assets", selectedJobId] });
       void queryClient.invalidateQueries({ queryKey: ["job-content-profile", selectedJobId] });
     }
   };
@@ -489,12 +471,6 @@ export function useJobWorkspace({ isCreateOpen = false }: UseJobWorkspaceOptions
       api.finalReviewDecision(selectedJobId!, payload),
     onSuccess: refreshAll,
   });
-  const applyManualEditor = useMutation({
-    mutationFn: async (payload: JobManualEditApplyPayload) =>
-      api.applyJobManualEditor(selectedJobId!, payload),
-    onSuccess: refreshAll,
-  });
-
   const searchMatchedJobs = useMemo(() => {
     const needle = keyword.trim().toLowerCase();
     const visibleJobs = !needle
@@ -549,8 +525,6 @@ export function useJobWorkspace({ isCreateOpen = false }: UseJobWorkspaceOptions
     report,
     tokenUsage,
     timeline,
-    manualEditor,
-    manualEditorAssets,
     contentProfile,
     options,
     config,
@@ -567,7 +541,6 @@ export function useJobWorkspace({ isCreateOpen = false }: UseJobWorkspaceOptions
     applyReview,
     rerunSubtitleDecision,
     finalReviewDecision,
-    applyManualEditor,
     filteredJobs,
     selectedJob,
     reviewStep,

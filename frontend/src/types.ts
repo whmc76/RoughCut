@@ -655,7 +655,24 @@ export type PublicationTarget = {
   title: string;
   body: string;
   tags: string[];
+  category?: string | null;
+  collection?: PublicationCollectionOption | null;
+  visibility_or_publish_mode?: string | null;
+  scheduled_publish_at?: string | null;
   status: string;
+};
+
+export type PublicationCollectionOption = {
+  id?: string;
+  name?: string;
+};
+
+export type PublicationPlatformPublishOptions = {
+  scheduled_publish_at?: string | null;
+  collection_id?: string | null;
+  collection_name?: string | null;
+  category?: string | null;
+  visibility_or_publish_mode?: string | null;
 };
 
 export type PublicationAttempt = {
@@ -673,6 +690,7 @@ export type PublicationAttempt = {
   operator_summary?: string | null;
   payload_path?: string | null;
   public_url?: string | null;
+  scheduled_at?: string | null;
   created_at: string;
   updated_at: string;
 };
