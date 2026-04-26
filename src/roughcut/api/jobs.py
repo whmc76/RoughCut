@@ -1382,6 +1382,20 @@ def _manual_editor_draft_matches_base(
     return True
 
 
+def _manual_video_transform_from_render_plan(render_plan: dict[str, Any] | None) -> dict[str, Any]:
+    payload = dict((render_plan or {}).get("manual_editor", {}).get("video_transform") or {})
+    delivery = dict((render_plan or {}).get("delivery") or {})
+    if "aspect_ratio" not in payload:
+        payload["aspect_ratio"] = delivery.get("aspect_ratio") or "source"
+    if "resolution_mode" not in payload:
+        payload["resolution_mode"] = delivery.get("resolution_mode") or "source"
+    if "resolution_preset" not in payload:
+        payload["resolution_preset"] = delivery.get("resolution_preset") or "1080p"
+    normalized = _manual_video_transform_payload(payload)
+    normalized["rotation_manual"] = bool(payload.get("rotation_manual"))
+    return normalized
+
+
 def _manual_keep_segments_changed(
     previous_segments: list[dict[str, Any]],
     next_segments: list[dict[str, Any]],
@@ -1411,6 +1425,7 @@ def _manual_editor_change_plan(
     timeline_changed = _manual_keep_segments_changed(previous_keep_segments, next_keep_segments)
     subtitle_changed = bool(subtitle_overrides)
     video_transform_changed = _manual_video_transform_payload(previous_video_transform) != _manual_video_transform_payload(next_video_transform)
+    rotation_changed = _manual_video_transform_payload(previous_video_transform).get("rotation_cw") != _manual_video_transform_payload(next_video_transform).get("rotation_cw")
     if timeline_changed:
         change_scope = "timeline"
         render_strategy = "full_timeline_render"
@@ -1428,6 +1443,7 @@ def _manual_editor_change_plan(
         "timeline_changed": timeline_changed,
         "subtitle_changed": subtitle_changed,
         "video_transform_changed": video_transform_changed,
+        "rotation_changed": rotation_changed,
         "render_strategy": render_strategy,
     }
 
@@ -1550,7 +1566,21 @@ def _manual_video_transform_payload(transform: dict[str, Any] | ManualEditorVide
         raw_rotation = 0
     normalized = raw_rotation % 360
     allowed = min((0, 90, 180, 270), key=lambda value: min(abs(value - normalized), 360 - abs(value - normalized)))
-    return {"rotation_cw": int(allowed)}
+    aspect_ratio = str(payload.get("aspect_ratio") or "source").strip().lower()
+    if aspect_ratio not in {"source", "16:9", "9:16", "1:1", "4:3"}:
+        aspect_ratio = "source"
+    resolution_mode = str(payload.get("resolution_mode") or "source").strip().lower()
+    if resolution_mode not in {"source", "specified"}:
+        resolution_mode = "source"
+    resolution_preset = str(payload.get("resolution_preset") or "1080p").strip().lower()
+    if resolution_preset not in {"1080p", "1440p", "2160p"}:
+        resolution_preset = "1080p"
+    return {
+        "rotation_cw": int(allowed),
+        "aspect_ratio": aspect_ratio,
+        "resolution_mode": resolution_mode,
+        "resolution_preset": resolution_preset,
+    }
 
 
 def _apply_manual_subtitle_overrides(
@@ -1751,8 +1781,7 @@ async def _build_manual_editor_session(
     subtitle_overrides: list[dict[str, Any]] = []
     manual_projection_items: list[dict[str, Any]] = []
     render_plan_data = render_plan_timeline.data_json if render_plan_timeline and isinstance(render_plan_timeline.data_json, dict) else {}
-    manual_editor_meta = render_plan_data.get("manual_editor") if isinstance(render_plan_data.get("manual_editor"), dict) else {}
-    base_video_transform = _manual_video_transform_payload(manual_editor_meta.get("video_transform") if isinstance(manual_editor_meta, dict) else None)
+    base_video_transform = _manual_video_transform_from_render_plan(render_plan_data)
     video_transform = base_video_transform
     if isinstance(subtitle_projection, dict):
         subtitle_overrides = _manual_subtitle_override_payloads(
@@ -2127,7 +2156,7 @@ async def apply_manual_editor_timeline(
         previous_keep_segments=previous_keep_segments,
         next_keep_segments=keep_segments,
         subtitle_overrides=subtitle_override_payloads,
-        previous_video_transform=(previous_render_plan.get("manual_editor") or {}).get("video_transform"),
+        previous_video_transform=_manual_video_transform_from_render_plan(previous_render_plan),
         next_video_transform=video_transform,
     )
     _profile_artifact, content_profile = await _load_preferred_downstream_profile(session, job_id=job.id)
@@ -2246,9 +2275,18 @@ async def apply_manual_editor_timeline(
         creative_profile=_job_creative_profile(job),
         ai_director_plan=previous_render_plan.get("ai_director"),
         avatar_commentary_plan=previous_render_plan.get("avatar_commentary"),
-        export_resolution_mode=str((previous_render_plan.get("delivery") or {}).get("resolution_mode") or "source"),
-        export_resolution_preset=str((previous_render_plan.get("delivery") or {}).get("resolution_preset") or "1080p"),
+        export_resolution_mode=str(video_transform.get("resolution_mode") or "source"),
+        export_resolution_preset=str(video_transform.get("resolution_preset") or "1080p"),
     )
+    rebuilt_render_plan["delivery"] = {
+        **dict(rebuilt_render_plan.get("delivery") or {}),
+        "aspect_ratio": str(video_transform.get("aspect_ratio") or "source"),
+    }
+    previous_video_transform = _manual_video_transform_from_render_plan(previous_render_plan)
+    render_video_transform = {
+        **video_transform,
+        "rotation_manual": bool(change_plan["rotation_changed"] or previous_video_transform.get("rotation_manual")),
+    }
     rebuilt_render_plan["manual_editor"] = {
         "applied": True,
         "change_scope": str(change_plan["change_scope"]),
@@ -2256,7 +2294,7 @@ async def apply_manual_editor_timeline(
         "timeline_changed": bool(change_plan["timeline_changed"]),
         "subtitle_changed": bool(change_plan["subtitle_changed"]),
         "video_transform_changed": bool(change_plan["video_transform_changed"]),
-        "video_transform": video_transform,
+        "video_transform": render_video_transform,
         "base_render_plan_id": str(render_plan_timeline.id),
         "base_render_plan_version": int(render_plan_timeline.version or 1),
         "updated_at": datetime.now(timezone.utc).isoformat(),

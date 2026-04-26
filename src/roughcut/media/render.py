@@ -35,6 +35,12 @@ _EXPORT_RESOLUTION_PRESETS: dict[str, tuple[int, int]] = {
     "1440p": (2560, 1440),
     "2160p": (3840, 2160),
 }
+_DELIVERY_ASPECT_RATIOS: dict[str, tuple[int, int]] = {
+    "16:9": (16, 9),
+    "9:16": (9, 16),
+    "1:1": (1, 1),
+    "4:3": (4, 3),
+}
 
 _TRANSPOSE_MAP = {
     90: ",transpose=1",
@@ -328,7 +334,7 @@ async def render_video(
 
     manual_editor_meta = render_plan.get("manual_editor") if isinstance(render_plan.get("manual_editor"), dict) else {}
     manual_video_transform = manual_editor_meta.get("video_transform") if isinstance(manual_editor_meta.get("video_transform"), dict) else {}
-    manual_rotation_cw = _normalize_rotation_cw(manual_video_transform.get("rotation_cw") if manual_video_transform else None)
+    manual_rotation_cw = _normalize_rotation_cw(manual_video_transform.get("rotation_cw") if manual_video_transform and manual_video_transform.get("rotation_manual") else None)
     rotation_decision = (
         RotationDecision(rotation_cw=manual_rotation_cw, confidence=1.0, source="manual_editor", reason="manual_editor_video_transform")
         if manual_rotation_cw is not None
@@ -1760,8 +1766,25 @@ def _resolve_delivery_resolution(
     delivery: dict[str, Any],
 ) -> tuple[int, int]:
     mode = str(delivery.get("resolution_mode") or "source").strip().lower()
+    aspect_ratio = str(delivery.get("aspect_ratio") or "source").strip().lower()
+    ratio = _DELIVERY_ASPECT_RATIOS.get(aspect_ratio)
     if mode != "specified":
-        return expected_width, expected_height
+        if ratio is None:
+            return expected_width, expected_height
+        ratio_w, ratio_h = ratio
+        if expected_width >= expected_height:
+            target_w = expected_width
+            target_h = int(round(target_w * ratio_h / ratio_w))
+            if target_h > expected_height:
+                target_h = expected_height
+                target_w = int(round(target_h * ratio_w / ratio_h))
+        else:
+            target_h = expected_height
+            target_w = int(round(target_h * ratio_w / ratio_h))
+            if target_w > expected_width:
+                target_w = expected_width
+                target_h = int(round(target_w * ratio_h / ratio_w))
+        return max(2, target_w // 2 * 2), max(2, target_h // 2 * 2)
 
     preset = str(delivery.get("resolution_preset") or "1080p").strip().lower()
     target = _EXPORT_RESOLUTION_PRESETS.get(preset)
@@ -1769,6 +1792,13 @@ def _resolve_delivery_resolution(
         return expected_width, expected_height
 
     landscape_w, landscape_h = target
+    if ratio is not None:
+        ratio_w, ratio_h = ratio
+        if ratio_h > ratio_w:
+            return landscape_h, landscape_w
+        if ratio_w == ratio_h:
+            return landscape_h, landscape_h
+        return landscape_w, int(round(landscape_w * ratio_h / ratio_w)) // 2 * 2
     if expected_height > expected_width:
         return landscape_h, landscape_w
     return landscape_w, landscape_h

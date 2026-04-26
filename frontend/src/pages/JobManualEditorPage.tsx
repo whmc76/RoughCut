@@ -12,6 +12,14 @@ function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error || "未知错误");
 }
 
+function draftSaveErrorMessage(error: unknown) {
+  const message = errorMessage(error);
+  if (/method not allowed/i.test(message)) {
+    return "后端服务尚未加载草稿保存接口，请重启 RoughCut API 后重试。";
+  }
+  return message || "请刷新后重试。";
+}
+
 export function JobManualEditorPage() {
   const { jobId = "" } = useParams();
   const queryClient = useQueryClient();
@@ -69,7 +77,7 @@ export function JobManualEditorPage() {
       });
     },
     onError: (error) => {
-      setNotice({ tone: "error", message: `自动保存失败：${errorMessage(error) || "请刷新后重试。"}` });
+      setNotice({ tone: "error", message: `自动保存失败：${draftSaveErrorMessage(error)}` });
     },
   });
   const detectRotation = useMutation({

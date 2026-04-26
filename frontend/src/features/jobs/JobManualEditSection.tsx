@@ -167,6 +167,22 @@ const TERM_ADJECTIVE_HINTS = new Set([
   "方便",
 ]);
 const ROTATION_OPTIONS = [0, 90, 180, 270];
+const ASPECT_RATIO_OPTIONS = [
+  { value: "source", label: "跟随原片" },
+  { value: "16:9", label: "横屏 16:9" },
+  { value: "9:16", label: "竖屏 9:16" },
+  { value: "1:1", label: "方形 1:1" },
+  { value: "4:3", label: "经典 4:3" },
+];
+const RESOLUTION_MODE_OPTIONS = [
+  { value: "source", label: "保留原分辨率" },
+  { value: "specified", label: "指定分辨率" },
+];
+const RESOLUTION_PRESET_OPTIONS = [
+  { value: "1080p", label: "1080p" },
+  { value: "1440p", label: "2K" },
+  { value: "2160p", label: "4K" },
+];
 
 function regionIdForIndex(index: number) {
   return `keep-${index}`;
@@ -434,6 +450,47 @@ function normalizeRotationValue(value: number) {
   return ROTATION_OPTIONS.includes(normalized) ? normalized : 0;
 }
 
+function normalizeVideoTransform(transform?: JobManualVideoTransform | null): JobManualVideoTransform {
+  const aspectRatio = ASPECT_RATIO_OPTIONS.some((option) => option.value === transform?.aspect_ratio) ? String(transform?.aspect_ratio) : "source";
+  const resolutionMode = RESOLUTION_MODE_OPTIONS.some((option) => option.value === transform?.resolution_mode) ? String(transform?.resolution_mode) : "source";
+  const resolutionPreset = RESOLUTION_PRESET_OPTIONS.some((option) => option.value === transform?.resolution_preset) ? String(transform?.resolution_preset) : "1080p";
+  return {
+    rotation_cw: normalizeRotationValue(Number(transform?.rotation_cw || 0)),
+    aspect_ratio: aspectRatio,
+    resolution_mode: resolutionMode,
+    resolution_preset: resolutionPreset,
+  };
+}
+
+function aspectRatioCssValue(value?: string | null) {
+  switch (value) {
+    case "9:16":
+      return "9 / 16";
+    case "1:1":
+      return "1 / 1";
+    case "4:3":
+      return "4 / 3";
+    case "16:9":
+    case "source":
+    default:
+      return "16 / 9";
+  }
+}
+
+function aspectRatioNumber(value?: string | null) {
+  switch (value) {
+    case "9:16":
+      return 9 / 16;
+    case "1:1":
+      return 1;
+    case "4:3":
+      return 4 / 3;
+    case "16:9":
+    default:
+      return 16 / 9;
+  }
+}
+
 function outputTimeToSourceTime(outputTime: number, ranges: OutputRange[]) {
   if (!ranges.length) return 0;
   const normalized = Math.max(0, outputTime || 0);
@@ -494,10 +551,12 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
   const [minTermCount, setMinTermCount] = useState(2);
   const [termReplacementDrafts, setTermReplacementDrafts] = useState<Record<string, string>>({});
   const [hiddenTermKeys, setHiddenTermKeys] = useState<Set<string>>(() => new Set());
-  const [videoTransform, setVideoTransform] = useState<JobManualVideoTransform>({ rotation_cw: 0 });
+  const [videoTransform, setVideoTransform] = useState<JobManualVideoTransform>(() => normalizeVideoTransform(null));
   const [rotationDialogOpen, setRotationDialogOpen] = useState(false);
   const [rotationDraft, setRotationDraft] = useState(0);
   const [rotationDetectMessage, setRotationDetectMessage] = useState<string | null>(null);
+  const [resolutionDialogOpen, setResolutionDialogOpen] = useState(false);
+  const [resolutionDraft, setResolutionDraft] = useState<JobManualVideoTransform>(() => normalizeVideoTransform(null));
   const [sourceVideoSize, setSourceVideoSize] = useState<{ width: number; height: number } | null>(null);
   const [frequentTerms, setFrequentTerms] = useState<FrequentTerm[]>([]);
 
@@ -525,13 +584,15 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
     setTermReviewFilter("");
     setTermReplacementDrafts({});
     setHiddenTermKeys(new Set());
-    const nextRotation = normalizeRotationValue(Number(session.video_transform?.rotation_cw || 0));
-    setVideoTransform({ rotation_cw: nextRotation });
-    setRotationDraft(nextRotation);
+    const nextTransform = normalizeVideoTransform(session.video_transform);
+    setVideoTransform(nextTransform);
+    setRotationDraft(nextTransform.rotation_cw);
+    setResolutionDraft(nextTransform);
     setRotationDialogOpen(false);
+    setResolutionDialogOpen(false);
     setRotationDetectMessage(null);
     timelinePlaybackRef.current = false;
-  }, [session.job_id, session.timeline_id, session.timeline_version, session.keep_segments, session.subtitle_overrides, session.video_transform?.rotation_cw]);
+  }, [session.job_id, session.timeline_id, session.timeline_version, session.keep_segments, session.subtitle_overrides, session.video_transform]);
 
   const effectiveSegments = useMemo(
     () => segments.filter((segment) => segment.end > segment.start + 0.05),
@@ -572,9 +633,11 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
   const totalOutputDuration = projection.totalDuration;
   const activeSubtitle = activeSubtitleIndex >= 0 ? projection.remapped[activeSubtitleIndex] : null;
   const baseKeepSegments = session.base_keep_segments?.length ? session.base_keep_segments : session.keep_segments;
-  const baseVideoRotation = normalizeRotationValue(Number(session.base_video_transform?.rotation_cw || 0));
-  const currentVideoRotation = normalizeRotationValue(Number(videoTransform.rotation_cw || 0));
-  const hasVideoTransformEdits = currentVideoRotation !== baseVideoRotation;
+  const baseVideoTransform = useMemo(() => normalizeVideoTransform(session.base_video_transform), [session.base_video_transform]);
+  const currentVideoTransform = useMemo(() => normalizeVideoTransform(videoTransform), [videoTransform]);
+  const baseVideoRotation = baseVideoTransform.rotation_cw;
+  const currentVideoRotation = currentVideoTransform.rotation_cw;
+  const hasVideoTransformEdits = JSON.stringify(currentVideoTransform) !== JSON.stringify(baseVideoTransform);
   const waveformUrl = previewAssets?.ready && previewAssets.audio_url ? previewAssets.audio_url : session.source_url || "";
   const waveformPeaks = useMemo(
     () => (previewAssets?.peaks?.length ? [previewAssets.peaks] : undefined),
@@ -654,13 +717,13 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
         end: Number(segment.end.toFixed(3)),
       })),
       subtitle_overrides: subtitleOverrides,
-      video_transform: { rotation_cw: currentVideoRotation },
+      video_transform: currentVideoTransform,
       base_timeline_id: session.timeline_id,
       base_timeline_version: session.timeline_version,
       base_render_plan_version: session.render_plan_version,
       note: editorNote.trim() || undefined,
     }),
-    [currentVideoRotation, effectiveSegments, editorNote, session.render_plan_version, session.timeline_id, session.timeline_version, subtitleOverrides],
+    [currentVideoTransform, effectiveSegments, editorNote, session.render_plan_version, session.timeline_id, session.timeline_version, subtitleOverrides],
   );
   const savePlanLabel = hasTimelineEdits
     ? "剪辑变更：重建时间线/特效"
@@ -970,9 +1033,30 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
 
   const applyRotationDraft = () => {
     const nextRotation = normalizeRotationValue(rotationDraft);
-    setVideoTransform({ rotation_cw: nextRotation });
+    setVideoTransform((current) => ({ ...normalizeVideoTransform(current), rotation_cw: nextRotation }));
     setRotationDraft(nextRotation);
     setRotationDialogOpen(false);
+  };
+
+  const openResolutionDialog = () => {
+    setResolutionDraft(currentVideoTransform);
+    setResolutionDialogOpen(true);
+  };
+
+  const updateResolutionDraft = (patch: Partial<JobManualVideoTransform>) => {
+    setResolutionDraft((current) => normalizeVideoTransform({ ...current, ...patch }));
+  };
+
+  const applyResolutionDraft = () => {
+    const nextTransform = normalizeVideoTransform({
+      ...currentVideoTransform,
+      aspect_ratio: resolutionDraft.aspect_ratio,
+      resolution_mode: resolutionDraft.resolution_mode,
+      resolution_preset: resolutionDraft.resolution_preset,
+    });
+    setVideoTransform(nextTransform);
+    setResolutionDraft(nextTransform);
+    setResolutionDialogOpen(false);
   };
 
   const rememberVideoMetadata = (event: SyntheticEvent<HTMLVideoElement>) => {
@@ -1308,16 +1392,41 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
     const rotation = normalizeRotationValue(rotationValue);
     const rawWidth = Math.max(1, sourceVideoSize?.width || 16);
     const rawHeight = Math.max(1, sourceVideoSize?.height || 9);
-    const displayWidth = rotation === 90 || rotation === 270 ? rawHeight : rawWidth;
-    const displayHeight = rotation === 90 || rotation === 270 ? rawWidth : rawHeight;
-    const displayAspect = displayWidth / displayHeight;
+    const rawAspect = rawWidth / rawHeight;
+    const frameAspectValue = currentVideoTransform.aspect_ratio === "source" ? 16 / 9 : aspectRatioNumber(currentVideoTransform.aspect_ratio);
+    let unrotatedWidth: number;
+    let unrotatedHeight: number;
+    if (rotation === 90 || rotation === 270) {
+      const rotatedAspect = 1 / rawAspect;
+      if (rotatedAspect >= frameAspectValue) {
+        unrotatedWidth = rawAspect;
+        unrotatedHeight = frameAspectValue;
+      } else {
+        unrotatedWidth = 1 / frameAspectValue;
+        unrotatedHeight = 1 / rawAspect;
+      }
+    } else if (rawAspect >= frameAspectValue) {
+      unrotatedWidth = 1;
+      unrotatedHeight = frameAspectValue / rawAspect;
+    } else {
+      unrotatedWidth = rawAspect / frameAspectValue;
+      unrotatedHeight = 1;
+    }
+    const boundedWidth = Math.min(900, Math.max(260, Math.round(frameAspectValue * 460)));
     return {
       "--manual-video-rotation": `${rotation}deg`,
-      "--manual-video-scale": rotation === 90 || rotation === 270 ? `${displayAspect}` : "1",
-      aspectRatio: `${displayWidth} / ${displayHeight}`,
+      "--manual-video-width": `${unrotatedWidth * 100}%`,
+      "--manual-video-height": `${unrotatedHeight * 100}%`,
+      aspectRatio: currentVideoTransform.aspect_ratio === "source" ? "16 / 9" : aspectRatioCssValue(currentVideoTransform.aspect_ratio),
+      width: `min(100%, ${boundedWidth}px)`,
     } as CSSProperties;
   };
   const rotatedPreviewStyle = buildRotatedPreviewStyle(currentVideoRotation);
+  const rotationDialogPreviewStyle = {
+    ...buildRotatedPreviewStyle(rotationDraft),
+    width: "min(100%, 420px)",
+    maxHeight: "260px",
+  } as CSSProperties;
 
   return (
     <section className="detail-block manual-editor-section">
@@ -1354,7 +1463,7 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
               </button>
             </div>
 
-            <div className="manual-editor-rotation-preview" style={buildRotatedPreviewStyle(rotationDraft)}>
+            <div className="manual-editor-rotation-preview" style={rotationDialogPreviewStyle}>
               <video src={session.source_url ?? undefined} muted playsInline preload="metadata" onLoadedMetadata={rememberVideoMetadata} />
             </div>
 
@@ -1399,6 +1508,83 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
           </section>
         </div>
       ) : null}
+      {resolutionDialogOpen ? (
+        <div className="manual-editor-floating-backdrop" role="presentation">
+          <section className="manual-editor-floating-panel" role="dialog" aria-modal="true" aria-label="调整分辨率">
+            <div className="manual-editor-preview-head">
+              <div>
+                <strong>调整分辨率</strong>
+                <div className="muted compact-top">设置输出画面比例和分辨率。默认完整显示画面，比例变化会用黑边补齐，不裁切原画面。</div>
+              </div>
+              <button type="button" className="button ghost" onClick={() => setResolutionDialogOpen(false)}>
+                关闭
+              </button>
+            </div>
+
+            <div className="manual-editor-resolution-preview">
+              <div style={{ aspectRatio: aspectRatioCssValue(resolutionDraft.aspect_ratio) }}>
+                <span>{ASPECT_RATIO_OPTIONS.find((option) => option.value === resolutionDraft.aspect_ratio)?.label ?? "跟随原片"}</span>
+                <small>
+                  {resolutionDraft.resolution_mode === "specified"
+                    ? RESOLUTION_PRESET_OPTIONS.find((option) => option.value === resolutionDraft.resolution_preset)?.label
+                    : "原分辨率"}
+                </small>
+              </div>
+            </div>
+
+            <div className="manual-editor-setting-grid">
+              <label className="form-field">
+                <span className="field-label">画面比例</span>
+                <select
+                  className="input"
+                  value={resolutionDraft.aspect_ratio || "source"}
+                  onChange={(event) => updateResolutionDraft({ aspect_ratio: event.target.value })}
+                >
+                  {ASPECT_RATIO_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>{option.label}</option>
+                  ))}
+                </select>
+              </label>
+
+              <label className="form-field">
+                <span className="field-label">分辨率模式</span>
+                <select
+                  className="input"
+                  value={resolutionDraft.resolution_mode || "source"}
+                  onChange={(event) => updateResolutionDraft({ resolution_mode: event.target.value })}
+                >
+                  {RESOLUTION_MODE_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>{option.label}</option>
+                  ))}
+                </select>
+              </label>
+
+              <label className="form-field">
+                <span className="field-label">指定分辨率</span>
+                <select
+                  className="input"
+                  value={resolutionDraft.resolution_preset || "1080p"}
+                  disabled={resolutionDraft.resolution_mode !== "specified"}
+                  onChange={(event) => updateResolutionDraft({ resolution_preset: event.target.value })}
+                >
+                  {RESOLUTION_PRESET_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>{option.label}</option>
+                  ))}
+                </select>
+              </label>
+            </div>
+
+            <div className="manual-editor-actions">
+              <button type="button" className="button primary" onClick={applyResolutionDraft}>
+                应用
+              </button>
+              <button type="button" className="button ghost" onClick={() => setResolutionDialogOpen(false)}>
+                取消
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
       <div className="manual-editor-shortcuts" aria-label="手动编辑快捷键">
         <span><kbd>Space</kbd> 播放/暂停</span>
         <span><kbd>←/→</kbd> 跳 1s</span>
@@ -1434,6 +1620,8 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
         <span>片段 {baseKeepSegments.length}{" -> "}{effectiveSegments.length}</span>
         <span>输出时长变化 {outputDurationDeltaLabel}</span>
         <span>画面旋转 {baseVideoRotation}°{" -> "}{currentVideoRotation}°</span>
+        <span>画面比例 {baseVideoTransform.aspect_ratio}{" -> "}{currentVideoTransform.aspect_ratio}</span>
+        <span>分辨率 {currentVideoTransform.resolution_mode === "specified" ? currentVideoTransform.resolution_preset : "原片"}</span>
         <span>字幕修改 {subtitleOverrides.length} 条</span>
         {visibleDraftSavedAt ? <span>上次草稿 {new Date(visibleDraftSavedAt).toLocaleTimeString()}</span> : null}
       </div>
@@ -1445,6 +1633,9 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
             <div className="manual-editor-actions">
               <button type="button" className="button ghost" onClick={openRotationDialog}>
                 旋转画面
+              </button>
+              <button type="button" className="button ghost" onClick={openResolutionDialog}>
+                调整分辨率
               </button>
               <span className="muted">输出预览 {formatSeconds(currentOutputTime)} / {formatSeconds(totalOutputDuration)}</span>
             </div>
@@ -1459,7 +1650,6 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
                     ref={videoRef}
                     className="manual-editor-video"
                     src={session.source_url ?? undefined}
-                    controls
                     preload="metadata"
                     playsInline
                     onLoadedMetadata={rememberVideoMetadata}
