@@ -61,6 +61,8 @@ export type Job = {
   } | null;
   avatar_delivery_status?: string | null;
   avatar_delivery_summary?: string | null;
+  publication_status?: string;
+  publication_summary?: string | null;
   status: string;
   language: string;
   workflow_template?: string | null;
@@ -81,6 +83,20 @@ export type Job = {
   created_at: string;
   updated_at: string;
   steps: JobStep[];
+};
+
+export type JobDownloadFile = {
+  id: string;
+  label: string;
+  filename: string;
+  kind: string;
+  size_bytes: number;
+  recommended: boolean;
+};
+
+export type JobDownloadFiles = {
+  job_id: string;
+  files: JobDownloadFile[];
 };
 
 export type JobTimeline = {

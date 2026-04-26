@@ -11,13 +11,14 @@ import sys
 import tempfile
 import time
 import uuid
+import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile, status
 from fastapi.responses import FileResponse
-from sqlalchemy import delete, distinct, select
+from sqlalchemy import delete, distinct, inspect, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from sqlalchemy.orm.attributes import set_committed_value
@@ -228,6 +229,24 @@ class JobRerunActionOut(BaseModel):
     issue_codes: list[str]
     note: str | None = None
     detail: str | None = None
+
+
+class JobDownloadFileOut(BaseModel):
+    id: str
+    label: str
+    filename: str
+    kind: str
+    size_bytes: int
+    recommended: bool = True
+
+
+class JobDownloadFilesOut(BaseModel):
+    job_id: str
+    files: list[JobDownloadFileOut]
+
+
+class JobDownloadZipIn(BaseModel):
+    file_ids: list[str] = Field(default_factory=list)
 
 
 class ManualEditorSegmentIn(BaseModel):
@@ -546,7 +565,7 @@ async def list_jobs(
 ):
     result = await session.execute(
         select(Job)
-        .options(selectinload(Job.steps))
+        .options(selectinload(Job.steps), selectinload(Job.publication_attempts))
         .order_by(Job.updated_at.desc(), Job.created_at.desc())
         .limit(limit)
         .offset(offset)
@@ -891,7 +910,9 @@ async def _save_uploaded_file(
 @router.get("/{job_id}", response_model=JobOut)
 async def get_job(job_id: uuid.UUID, session: AsyncSession = Depends(get_session)):
     result = await session.execute(
-        select(Job).options(selectinload(Job.steps), selectinload(Job.artifacts)).where(Job.id == job_id)
+        select(Job)
+        .options(selectinload(Job.steps), selectinload(Job.artifacts), selectinload(Job.publication_attempts))
+        .where(Job.id == job_id)
     )
     job = result.scalar_one_or_none()
     if not job:
@@ -2489,6 +2510,75 @@ async def get_download_url(
     }
 
 
+@router.get("/{job_id}/download/files", response_model=JobDownloadFilesOut)
+async def list_downloadable_files(
+    job_id: uuid.UUID,
+    session: AsyncSession = Depends(get_session),
+):
+    render_output = await _load_latest_done_render_output(job_id, session)
+    artifact = await _load_latest_optional_artifact(
+        session,
+        job_id=job_id,
+        artifact_types=("render_outputs",),
+    )
+    files = _collect_downloadable_files(render_output, artifact.data_json if artifact else None)
+    return JobDownloadFilesOut(job_id=str(job_id), files=[JobDownloadFileOut(**item) for item in files])
+
+
+@router.post("/{job_id}/download/zip")
+async def download_selected_files_zip(
+    job_id: uuid.UUID,
+    body: JobDownloadZipIn,
+    background_tasks: BackgroundTasks,
+    session: AsyncSession = Depends(get_session),
+):
+    job = await session.get(Job, job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    render_output = await _load_latest_done_render_output(job_id, session)
+    artifact = await _load_latest_optional_artifact(
+        session,
+        job_id=job_id,
+        artifact_types=("render_outputs",),
+    )
+    files = _collect_downloadable_files(render_output, artifact.data_json if artifact else None)
+    file_map = {item["id"]: item for item in files}
+    selected_ids = [str(item or "").strip() for item in body.file_ids if str(item or "").strip()]
+    if not selected_ids:
+        raise HTTPException(status_code=400, detail="请选择至少一个文件")
+    if len(selected_ids) > 50:
+        raise HTTPException(status_code=400, detail="一次最多下载 50 个文件")
+
+    missing_ids = [item for item in selected_ids if item not in file_map]
+    if missing_ids:
+        raise HTTPException(status_code=400, detail=f"文件不存在或不可下载：{', '.join(missing_ids[:5])}")
+
+    download_dir = Path(tempfile.gettempdir()) / "roughcut_downloads"
+    download_dir.mkdir(parents=True, exist_ok=True)
+    zip_path = download_dir / f"{job_id}_{uuid.uuid4().hex}.zip"
+    used_names: set[str] = set()
+    try:
+        with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED, allowZip64=True) as archive:
+            for file_id in selected_ids:
+                item = file_map[file_id]
+                source_path = Path(str(item["_path"]))
+                if not source_path.exists() or not source_path.is_file():
+                    raise HTTPException(status_code=404, detail=f"文件不存在：{item['filename']}")
+                archive.write(source_path, arcname=_unique_zip_member_name(source_path.name, used_names))
+    except Exception:
+        zip_path.unlink(missing_ok=True)
+        raise
+
+    background_tasks.add_task(zip_path.unlink, missing_ok=True)
+    filename = f"{_sanitize_download_filename(Path(job.source_name).stem or 'roughcut')}_outputs.zip"
+    return FileResponse(
+        path=zip_path,
+        filename=filename,
+        media_type="application/zip",
+        background=background_tasks,
+    )
+
+
 @router.get("/{job_id}/download/file")
 async def download_rendered_file(
     job_id: uuid.UUID,
@@ -2617,6 +2707,108 @@ def _resolve_publication_creator_profile(creator_profile_id: str | None) -> dict
 
     profiles = list_avatar_material_profiles()
     return next((profile for profile in profiles if active_publication_credentials(profile)), profiles[0] if profiles else None)
+
+
+async def _load_latest_done_render_output(job_id: uuid.UUID, session: AsyncSession) -> RenderOutput:
+    result = await session.execute(
+        select(RenderOutput)
+        .where(RenderOutput.job_id == job_id, RenderOutput.status == "done")
+        .order_by(RenderOutput.created_at.desc())
+    )
+    render_output = result.scalar_one_or_none()
+    if not render_output:
+        raise HTTPException(status_code=404, detail="Rendered output not found")
+    return render_output
+
+
+_DOWNLOADABLE_RENDER_KEYS: tuple[tuple[str, str, str, bool], ...] = (
+    ("packaged_mp4", "成片（包装版）", "video", True),
+    ("plain_mp4", "成片（素版）", "video", True),
+    ("avatar_mp4", "成片（数字人）", "video", True),
+    ("ai_effect_mp4", "成片（AI 效果）", "video", True),
+    ("packaged_srt", "字幕（包装版）", "subtitle", True),
+    ("plain_srt", "字幕（素版）", "subtitle", True),
+    ("avatar_srt", "字幕（数字人）", "subtitle", True),
+    ("ai_effect_srt", "字幕（AI 效果）", "subtitle", True),
+    ("cover", "封面", "image", True),
+)
+
+
+def _collect_downloadable_files(render_output: RenderOutput, payload: dict[str, Any] | None) -> list[dict[str, Any]]:
+    payload = payload if isinstance(payload, dict) else {}
+    files: list[dict[str, Any]] = []
+    seen_paths: set[str] = set()
+
+    def add_file(file_id: str, label: str, kind: str, value: Any, *, recommended: bool = True) -> None:
+        path_text = str(value or "").strip()
+        if not path_text:
+            return
+        path = Path(path_text).expanduser()
+        try:
+            resolved = str(path.resolve())
+        except OSError:
+            resolved = str(path)
+        if resolved in seen_paths or not path.exists() or not path.is_file():
+            return
+        seen_paths.add(resolved)
+        files.append(
+            {
+                "id": file_id,
+                "label": label,
+                "filename": path.name,
+                "kind": kind,
+                "size_bytes": int(path.stat().st_size),
+                "recommended": recommended,
+                "_path": str(path),
+            }
+        )
+
+    for key, label, kind, recommended in _DOWNLOADABLE_RENDER_KEYS:
+        add_file(key, label, kind, payload.get(key), recommended=recommended)
+
+    for index, value in enumerate(payload.get("cover_variants") or []):
+        add_file(f"cover_variants:{index}", f"封面备选 {index + 1}", "image", value, recommended=False)
+
+    if not any(item["id"] == "packaged_mp4" for item in files):
+        add_file("packaged_mp4", "成片（包装版）", "video", render_output.output_path, recommended=True)
+
+    files.sort(key=lambda item: _download_file_sort_key(str(item["id"])))
+    return files
+
+
+def _download_file_sort_key(file_id: str) -> tuple[int, str]:
+    priority = {
+        "packaged_mp4": 0,
+        "avatar_mp4": 1,
+        "ai_effect_mp4": 2,
+        "plain_mp4": 3,
+        "packaged_srt": 4,
+        "avatar_srt": 5,
+        "ai_effect_srt": 6,
+        "plain_srt": 7,
+        "cover": 8,
+    }
+    if file_id.startswith("cover_variants:"):
+        return (9, file_id)
+    return (priority.get(file_id, 99), file_id)
+
+
+def _sanitize_download_filename(value: str) -> str:
+    cleaned = re.sub(r'[\\/:*?"<>|]+', "_", str(value or "").strip())
+    cleaned = re.sub(r"\s+", "_", cleaned).strip("._- ")
+    return cleaned[:80] or "roughcut"
+
+
+def _unique_zip_member_name(filename: str, used_names: set[str]) -> str:
+    safe_name = _sanitize_download_filename(Path(filename).stem)
+    suffix = Path(filename).suffix
+    candidate = f"{safe_name}{suffix}"
+    index = 2
+    while candidate in used_names:
+        candidate = f"{safe_name}_{index}{suffix}"
+        index += 1
+    used_names.add(candidate)
+    return candidate
 
 
 def _resolve_download_variant_path(render_output: RenderOutput, variant: str) -> Path:
@@ -4209,7 +4401,37 @@ def _attach_job_preview(job: Job, *, lightweight: bool = False) -> None:
     job.review_label = review_preview["label"]
     job.review_detail = review_preview["detail"]
     job.awaiting_initialization = str(job.status or "").strip() == "awaiting_init"
+    publication_preview = _resolve_job_publication_preview(job)
+    job.publication_status = publication_preview["status"]
+    job.publication_summary = publication_preview["summary"]
     job.progress_percent = _calculate_job_progress_percent(job)
+
+
+def _resolve_job_publication_preview(job: Job) -> dict[str, str | None]:
+    if str(job.status or "").strip() != "done":
+        return {"status": "not_applicable", "summary": None}
+    try:
+        if "publication_attempts" in inspect(job).unloaded:
+            return {"status": "unpublished", "summary": None}
+    except Exception:
+        return {"status": "unpublished", "summary": None}
+    attempts = list(job.publication_attempts or [])
+    active_attempts = [
+        attempt
+        for attempt in attempts
+        if str(getattr(attempt, "status", "") or "").strip() not in {"failed", "cancelled"}
+    ]
+    if not active_attempts:
+        return {"status": "unpublished", "summary": None}
+    labels = []
+    for attempt in active_attempts:
+        label = str(getattr(attempt, "platform_label", "") or getattr(attempt, "platform", "") or "").strip()
+        if label and label not in labels:
+            labels.append(label)
+    summary = f"已提交发布：{' / '.join(labels[:4])}" if labels else "已提交发布"
+    if len(labels) > 4:
+        summary += f" +{len(labels) - 4}"
+    return {"status": "published", "summary": summary}
 
 
 def _extract_job_source_context_from_steps(steps: list[JobStep]) -> dict[str, Any]:

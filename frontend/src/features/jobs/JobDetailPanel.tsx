@@ -26,6 +26,8 @@ import {
   enhancementModeLabel,
   getRestartUnavailableReason,
   isRestartableJobStatus,
+  jobStatusLabel,
+  jobStatusTone,
   stepLabel,
   workflowModeLabel,
 } from "./constants";
@@ -67,6 +69,19 @@ function splitVideoDescription(value: string | null | undefined): {
     filenameDescription,
     manualDescription,
   };
+}
+
+function isLocalOutputJob(job: Job) {
+  return Boolean(job.output_dir?.trim());
+}
+
+function hasJobStarted(job: Job) {
+  if (job.status === "running" || job.status === "processing" || job.status === "needs_review") return true;
+  return job.steps.some((step) => Boolean(step.started_at));
+}
+
+function isTerminalJob(job: Job) {
+  return job.status === "done" || job.status === "failed" || job.status === "cancelled";
 }
 
 const STUCK_DIAGNOSTIC_TITLE_HINTS = ["卡住诊断", "stuck", "stuck_step", "stuck-step", "stuck diagnostic", "stuck-diagnostic"];
@@ -168,6 +183,7 @@ type JobDetailPanelProps = {
   onConfirmProfile: () => void;
   onInitialize: () => void;
   onOpenFolder: () => void;
+  onDownload?: () => void;
   onCancel: () => void;
   onRestart: () => void;
   onDelete: () => void;
@@ -213,6 +229,7 @@ export function JobDetailPanel({
   onConfirmProfile,
   onInitialize,
   onOpenFolder,
+  onDownload,
   onCancel,
   onRestart,
   onDelete,
@@ -264,6 +281,9 @@ export function JobDetailPanel({
       ? t("jobs.actions.downloadHint.avatarFallback")
       : avatarHeadlineSummary || t("jobs.actions.downloadHint.standard")
     : t("jobs.actions.downloadHint.standard");
+  const showOpenFolder = selectedJob?.status === "done" && isLocalOutputJob(selectedJob);
+  const showDownload = selectedJob?.status === "done" && !isLocalOutputJob(selectedJob);
+  const showCancel = Boolean(selectedJob && hasJobStarted(selectedJob) && !isTerminalJob(selectedJob));
   const stepEntries = selectedJob?.steps ?? [];
   const stepItemsMap = new Map<string, StepActivityItem[]>();
   const pushStepItem = (stepName: string | null, item: StepActivityItem) => {
@@ -311,7 +331,8 @@ export function JobDetailPanel({
             description={selectedJob.id}
             actions={
               <div className="form-stack compact-top">
-                <span className={`status-chip ${selectedJob.status}`}>{statusLabel(selectedJob.status)}</span>
+                <span className={`status-chip ${jobStatusTone(selectedJob)}`}>{jobStatusLabel(selectedJob)}</span>
+                {selectedJob.publication_summary ? <span className="muted">{selectedJob.publication_summary}</span> : null}
                 {avatarHeadlineSummary ? (
                   <span className={`status-pill ${avatarHeadlineStatus || "pending"}`}>
                     数字人：{avatarHeadlineSummary}
@@ -322,23 +343,29 @@ export function JobDetailPanel({
           />
 
           <div className="detail-actions">
-            <button type="button" className="button ghost" onClick={onOpenFolder}>
-              {t("jobs.actions.openFolder")}
-            </button>
-            <a className="button ghost" href={`/api/v1/jobs/${selectedJob.id}/download`} target="_blank" rel="noreferrer">
-              {downloadLabel}
-            </a>
+            {showOpenFolder ? (
+              <button type="button" className="button ghost" onClick={onOpenFolder}>
+                {t("jobs.actions.openFolder")}
+              </button>
+            ) : null}
+            {showDownload ? (
+              <button type="button" className="button ghost" onClick={onDownload}>
+                {downloadLabel}
+              </button>
+            ) : null}
+            {showCancel ? (
+              <button
+                type="button"
+                className="button ghost"
+                disabled={isCancelling}
+                onClick={onCancel}
+              >
+                {isCancelling ? t("jobs.actions.cancelling") : t("jobs.actions.cancel")}
+              </button>
+            ) : null}
             <button
               type="button"
-              className="button ghost"
-              disabled={selectedJob.status === "done" || selectedJob.status === "failed" || selectedJob.status === "cancelled" || isCancelling}
-              onClick={onCancel}
-            >
-              {isCancelling ? t("jobs.actions.cancelling") : t("jobs.actions.cancel")}
-            </button>
-            <button
-              type="button"
-              className="button primary"
+              className="button primary job-restart-cta"
               onClick={isAwaitingInitialization ? onInitialize : onRestart}
               disabled={
                 isAwaitingInitialization
@@ -361,7 +388,7 @@ export function JobDetailPanel({
               {isDeleting ? t("jobs.actions.deleting") : t("jobs.actions.delete")}
             </button>
           </div>
-          <div className="muted compact-top">{downloadHint}</div>
+          {showDownload ? <div className="muted compact-top">{downloadHint}</div> : null}
 
           {isMergedTask ? (
             <section className="detail-block">

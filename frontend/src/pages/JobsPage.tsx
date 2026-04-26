@@ -5,6 +5,7 @@ import { ConfigProfileSwitcher } from "../features/configProfiles/ConfigProfileS
 import { JobCreateModal } from "../features/jobs/JobCreateModal";
 import { JobDetailModal } from "../features/jobs/JobDetailModal";
 import { JobDetailPanel } from "../features/jobs/JobDetailPanel";
+import { JobDownloadDialog } from "../features/jobs/JobDownloadDialog";
 import { JobPublicationPanel } from "../features/jobs/JobPublicationPanel";
 import { JobQueueTable } from "../features/jobs/JobQueueTable";
 import { JobReviewOverlay } from "../features/jobs/JobReviewOverlay";
@@ -30,6 +31,7 @@ export function JobsPage() {
   const [pendingSubtitleRerun, setPendingSubtitleRerun] = useState<{ rerunStartStep: string | null; issueCode: string | null } | null>(null);
   const [detailModalOpen, setDetailModalOpen] = useState(false);
   const [publicationJobId, setPublicationJobId] = useState<string | null>(null);
+  const [downloadJobId, setDownloadJobId] = useState<string | null>(null);
   const [reviewOverlayOpen, setReviewOverlayOpen] = useState(false);
   const [reviewStepOverride, setReviewStepOverride] = useState<JobReviewStep | null>(null);
   const queueStageRef = useRef<HTMLElement | null>(null);
@@ -50,6 +52,8 @@ export function JobsPage() {
   const showDetailModal = Boolean(detailModalOpen && workspace.selectedJobId);
   const publicationJob = workspace.filteredJobs.find((job) => job.id === publicationJobId)
     ?? (workspace.selectedJob?.id === publicationJobId ? workspace.selectedJob : null);
+  const downloadJob = workspace.filteredJobs.find((job) => job.id === downloadJobId)
+    ?? (workspace.selectedJob?.id === downloadJobId ? workspace.selectedJob : null);
   const showPublicationModal = Boolean(publicationJobId && publicationJob);
   const showReviewOverlay = Boolean(reviewOverlayOpen && workspace.selectedJobId && isReviewContext && reviewStep);
   const triggerSubtitleRerun = (decision: { issue_codes?: string[]; rerun_start_step?: string | null }) => {
@@ -103,6 +107,10 @@ export function JobsPage() {
     setReviewOverlayOpen(false);
     setReviewStepOverride(null);
     setPublicationJobId(jobId);
+  };
+
+  const openJobDownload = (jobId: string) => {
+    setDownloadJobId(jobId);
   };
 
   const resolveJobName = (jobId: string) =>
@@ -308,6 +316,7 @@ export function JobsPage() {
           onOpenReview={openJobReview}
           onPublish={openJobPublication}
           onOpenFolder={(jobId) => workspace.openFolder.mutate(jobId)}
+          onDownload={openJobDownload}
           onCancel={confirmAndCancelJob}
           onRestart={confirmAndRestartJob}
           onDelete={confirmAndDeleteJob}
@@ -454,6 +463,7 @@ export function JobsPage() {
           onConfirmProfile={confirmReviewProfile}
           onInitialize={() => workspace.initializeJob.mutate()}
           onOpenFolder={() => workspace.selectedJob && workspace.openFolder.mutate(workspace.selectedJob.id)}
+          onDownload={() => workspace.selectedJob && openJobDownload(workspace.selectedJob.id)}
           onCancel={() => workspace.selectedJob && confirmAndCancelJob(workspace.selectedJob.id)}
           onRestart={() => workspace.selectedJob && confirmAndRestartJob(workspace.selectedJob.id)}
           onDelete={() => workspace.selectedJob && confirmAndDeleteJob(workspace.selectedJob.id)}
@@ -513,6 +523,12 @@ export function JobsPage() {
         onRejectFinalReview={confirmAndRejectFinalReview}
         onOpenFolder={() => selectedReviewJob && workspace.openFolder.mutate(selectedReviewJob.id)}
         onClose={() => closeReviewOverlay()}
+      />
+
+      <JobDownloadDialog
+        open={Boolean(downloadJobId && downloadJob)}
+        job={downloadJob}
+        onClose={() => setDownloadJobId(null)}
       />
     </section>
   );

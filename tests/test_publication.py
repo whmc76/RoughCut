@@ -3,9 +3,12 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.orm import selectinload
 
 from roughcut import publication
+from roughcut.api.jobs import _attach_job_preview
 from roughcut.db.models import Job
 from roughcut.db.session import Base
 
@@ -151,6 +154,18 @@ async def test_publication_plan_requires_done_job_local_media_and_bound_credenti
             result = await publication.submit_publication_attempts(session, plan)
             duplicate = await publication.submit_publication_attempts(session, plan)
             await session.commit()
+            job_with_attempts = (
+                await session.execute(
+                    select(Job)
+                    .options(
+                        selectinload(Job.steps),
+                        selectinload(Job.artifacts),
+                        selectinload(Job.publication_attempts),
+                    )
+                    .where(Job.id == job.id)
+                )
+            ).scalar_one()
+            _attach_job_preview(job_with_attempts, lightweight=True)
     finally:
         await engine.dispose()
 
@@ -176,6 +191,8 @@ async def test_publication_plan_requires_done_job_local_media_and_bound_credenti
     assert result["created_attempts"][0]["request_payload"]["visibility_or_publish_mode"] == "scheduled"
     assert result["created_attempts"][0]["runs"][0]["metadata"]["contract"] == "browser_agent_publication_v1"
     assert len(duplicate["created_attempts"]) == 0
+    assert job_with_attempts.publication_status == "published"
+    assert job_with_attempts.publication_summary == "已提交发布：抖音"
 
 
 @pytest.mark.asyncio

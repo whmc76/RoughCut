@@ -107,6 +107,8 @@ class JobOut(BaseModel):
     timeline_diagnostics: dict[str, Any] | None = None
     avatar_delivery_status: str | None = None
     avatar_delivery_summary: str | None = None
+    publication_status: str = "unpublished"
+    publication_summary: str | None = None
     status: str
     language: str
     workflow_template: str | None

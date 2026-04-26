@@ -13,6 +13,8 @@ import {
   formatCutEvidenceSummary,
   getRestartUnavailableReason,
   isRestartableJobStatus,
+  jobStatusLabel,
+  jobStatusTone,
   stepLabel,
   workflowModeLabel,
 } from "./constants";
@@ -81,11 +83,24 @@ function isHighlightedReviewAction(job: Job) {
 }
 
 function reviewStatusLabel(job: Job): string {
-  if (job.status !== "needs_review") return statusLabel(job.status);
+  if (job.status !== "needs_review") return jobStatusLabel(job);
   const reviewStep = resolvePendingReviewStep(job);
   if (reviewStep?.step_name === "final_review") return "成片异常";
   if (reviewStep?.step_name === "summary_review") return "内容异常";
-  return statusLabel(job.status);
+  return jobStatusLabel(job);
+}
+
+function isLocalOutputJob(job: Job) {
+  return Boolean(job.output_dir?.trim());
+}
+
+function hasJobStarted(job: Job) {
+  if (job.status === "running" || job.status === "processing" || job.status === "needs_review") return true;
+  return job.steps.some((step) => Boolean(step.started_at));
+}
+
+function isTerminalJob(job: Job) {
+  return job.status === "done" || job.status === "failed" || job.status === "cancelled";
 }
 
 function reviewPreviewText(job: Job, t: (key: string) => string) {
@@ -124,6 +139,7 @@ type JobQueueTableProps = {
   onOpenReview?: (jobId: string) => void;
   onPublish?: (jobId: string) => void;
   onOpenFolder: (jobId: string) => void;
+  onDownload: (jobId: string) => void;
   onCancel: (jobId: string) => void;
   onRestart: (jobId: string) => void;
   onDelete: (jobId: string) => void;
@@ -146,6 +162,7 @@ export function JobQueueTable({
   onOpenReview,
   onPublish,
   onOpenFolder,
+  onDownload,
   onCancel,
   onRestart,
   onDelete,
@@ -202,6 +219,9 @@ export function JobQueueTable({
               const highlightedReviewAction = isHighlightedReviewAction(job);
               const { filenameDescription } = splitVideoDescription(job.video_description);
               const cutEvidenceSummary = formatCutEvidenceSummary(job.timeline_diagnostics);
+              const showOpenFolder = job.status === "done" && isLocalOutputJob(job);
+              const showDownload = job.status === "done" && !isLocalOutputJob(job);
+              const showCancel = hasJobStarted(job) && !isTerminalJob(job);
 
               return (
                 <tr key={job.id} className={classNames(selectedJobId === job.id && "selected-row")} onClick={() => onSelect(job.id)}>
@@ -269,7 +289,8 @@ export function JobQueueTable({
                   </td>
                   <td>
                     <div className="form-stack compact-top">
-                      <span className={`status-chip ${job.status}`}>{reviewStatusLabel(job)}</span>
+                      <span className={`status-chip ${jobStatusTone(job)}`}>{reviewStatusLabel(job)}</span>
+                      {job.publication_summary ? <span className="muted">{job.publication_summary}</span> : null}
                       <span className="muted">{job.progress_percent ?? 0}%</span>
                     </div>
                   </td>
@@ -304,56 +325,64 @@ export function JobQueueTable({
                       ) : null}
                       {job.status === "done" ? (
                         <button
-                          className="button primary button-sm"
+                          className="button button-sm job-publish-cta"
                           type="button"
                           onClick={(event) => {
                             event.stopPropagation();
                             onPublish?.(job.id);
                           }}
                         >
-                          一键发布
+                          <span className="job-publish-cta-rgb-mark" aria-hidden="true" />
+                          <span>一键发布</span>
                         </button>
                       ) : null}
                       <Link
-                        className="button ghost button-sm"
+                        className="button button-sm job-manual-edit-cta"
                         to={`/jobs/${job.id}/manual-editor`}
                         onClick={(event) => event.stopPropagation()}
                       >
                         手动调整
                       </Link>
+                      {showOpenFolder ? (
+                        <button
+                          className="button ghost button-sm"
+                          type="button"
+                          disabled={isOpeningFolder}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            onOpenFolder(job.id);
+                          }}
+                        >
+                          {t("jobs.actions.openFolder")}
+                        </button>
+                      ) : null}
+                      {showDownload ? (
+                        <button
+                          className="button ghost button-sm"
+                          type="button"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            onDownload(job.id);
+                          }}
+                        >
+                          {t("jobs.actions.download")}
+                        </button>
+                      ) : null}
+                      {showCancel ? (
+                        <button
+                          className="button ghost button-sm"
+                          type="button"
+                          disabled={isCancelling}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            onCancel(job.id);
+                          }}
+                        >
+                          {isCancelling ? t("jobs.actions.cancelling") : t("jobs.actions.cancel")}
+                        </button>
+                      ) : null}
                       <button
-                        className="button ghost button-sm"
-                        type="button"
-                        disabled={isOpeningFolder}
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          onOpenFolder(job.id);
-                        }}
-                      >
-                        {t("jobs.actions.openFolder")}
-                      </button>
-                      <a
-                        className="button ghost button-sm"
-                        href={`/api/v1/jobs/${job.id}/download`}
-                        target="_blank"
-                        rel="noreferrer"
-                        onClick={(event) => event.stopPropagation()}
-                      >
-                        {t("jobs.actions.download")}
-                      </a>
-                      <button
-                        className="button ghost button-sm"
-                        type="button"
-                        disabled={job.status === "done" || job.status === "failed" || job.status === "cancelled" || isCancelling}
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          onCancel(job.id);
-                        }}
-                      >
-                        {isCancelling ? t("jobs.actions.cancelling") : t("jobs.actions.cancel")}
-                      </button>
-                      <button
-                        className="button primary button-sm"
+                        className="button primary button-sm job-restart-cta"
                         type="button"
                         disabled={isRestarting || !isRestartableJobStatus(job.status)}
                         onClick={(event) => {

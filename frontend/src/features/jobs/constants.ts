@@ -88,6 +88,25 @@ export function getRestartUnavailableReason(status: string): string {
   return RESTART_UNAVAILABLE_REASONS[normalizeJobStatus(status)] || "jobs.actions.restartUnavailableReason.default";
 }
 
+export function jobStatusLabel(job: Pick<Job, "status" | "publication_status">): string {
+  if (job.status === "done") {
+    return job.publication_status === "published" ? "已发布" : "剪辑完成";
+  }
+  if (job.status === "pending") return "待处理";
+  if (job.status === "awaiting_init") return "待初始化";
+  if (job.status === "running") return "进行中";
+  if (job.status === "processing") return "处理中";
+  if (job.status === "failed") return "失败";
+  if (job.status === "cancelled") return "已取消";
+  if (job.status === "needs_review") return "待核对";
+  return job.status;
+}
+
+export function jobStatusTone(job: Pick<Job, "status" | "publication_status">): string {
+  if (job.status === "done" && job.publication_status === "published") return "published";
+  return job.status;
+}
+
 export const WORKFLOW_MODE_LABELS: Record<string, string> = {
   standard_edit: "标准成片",
   long_text_to_video: "长文本转视频",

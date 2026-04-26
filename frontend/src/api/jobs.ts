@@ -2,6 +2,7 @@ import type {
   ContentProfileReview,
   Job,
   JobActivity,
+  JobDownloadFiles,
   JobManualEditApplyPayload,
   JobManualEditApplyResponse,
   JobManualEditPreviewAssets,
@@ -36,6 +37,41 @@ type JobRerunResponse = {
   note?: string | null;
   detail?: string | null;
 };
+
+type JobDownloadBlob = {
+  blob: Blob;
+  filename: string;
+};
+
+function parseDownloadFilename(header: string | null, fallback: string) {
+  if (!header) return fallback;
+  const utf8Match = header.match(/filename\*=UTF-8''([^;]+)/i);
+  if (utf8Match?.[1]) {
+    try {
+      return decodeURIComponent(utf8Match[1]);
+    } catch {
+      return utf8Match[1];
+    }
+  }
+  const plainMatch = header.match(/filename="?([^";]+)"?/i);
+  return plainMatch?.[1] || fallback;
+}
+
+async function requestDownloadZip(jobId: string, fileIds: string[]): Promise<JobDownloadBlob> {
+  const response = await fetch(apiPath(`/jobs/${jobId}/download/zip`), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ file_ids: fileIds }),
+  });
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({ detail: response.statusText }));
+    throw new Error(String(payload.detail || response.statusText || "Download failed"));
+  }
+  return {
+    blob: await response.blob(),
+    filename: parseDownloadFilename(response.headers.get("Content-Disposition"), "roughcut_outputs.zip"),
+  };
+}
 
 export const jobsApi = {
   listJobs: (limit = 50, offset = 0) =>
@@ -113,6 +149,8 @@ export const jobsApi = {
   warmContentProfileThumbnails: (jobId: string) => request<{ status: string; job_id: string }>(`/jobs/${jobId}/content-profile/thumbnails/warm`, {
     method: "POST",
   }),
+  getJobDownloadFiles: (jobId: string) => request<JobDownloadFiles>(`/jobs/${jobId}/download/files`),
+  downloadJobFiles: requestDownloadZip,
   cancelJob: (jobId: string) => request<Job>(`/jobs/${jobId}/cancel`, { method: "POST" }),
   restartJob: (jobId: string) => request<Job>(`/jobs/${jobId}/restart`, { method: "POST" }),
   deleteJob: (jobId: string) => request<void>(`/jobs/${jobId}`, { method: "DELETE" }),
