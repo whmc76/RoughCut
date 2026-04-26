@@ -271,6 +271,9 @@ class ManualEditorApplyIn(BaseModel):
     note: str | None = None
 
 
+MANUAL_EDITOR_DRAFT_ARTIFACT_TYPE = "manual_editor_draft"
+
+
 class PublicationSubmitIn(BaseModel):
     creator_profile_id: str | None = None
     platforms: list[str] = Field(default_factory=list)
@@ -302,10 +305,21 @@ class ManualEditorSessionOut(BaseModel):
     source_duration_sec: float
     source_url: str | None = None
     keep_segments: list[ManualEditorSegmentOut] = Field(default_factory=list)
+    base_keep_segments: list[ManualEditorSegmentOut] = Field(default_factory=list)
     source_subtitles: list[ManualEditorSubtitleOut] = Field(default_factory=list)
     projected_subtitles: list[ManualEditorSubtitleOut] = Field(default_factory=list)
     subtitle_overrides: list[ManualEditorSubtitleOverrideIn] = Field(default_factory=list)
+    draft_saved_at: str | None = None
+    draft_note: str | None = None
     editable: bool = True
+    detail: str | None = None
+
+
+class ManualEditorDraftOut(BaseModel):
+    job_id: str
+    saved_at: str
+    keep_segment_count: int
+    subtitle_override_count: int
     detail: str | None = None
 
 
@@ -457,7 +471,7 @@ async def _load_latest_optional_artifact(
     job_id: uuid.UUID,
     artifact_types: tuple[str, ...] | list[str],
 ) -> Artifact | None:
-    result = await session.execute(
+    query = (
         select(Artifact)
         .where(
             Artifact.job_id == job_id,
@@ -465,6 +479,9 @@ async def _load_latest_optional_artifact(
         )
         .order_by(Artifact.created_at.desc(), Artifact.id.desc())
     )
+    if not set(artifact_types).issuperset(_CONTENT_PROFILE_ARTIFACT_TYPES):
+        query = query.limit(1)
+    result = await session.execute(query)
     artifacts = result.scalars().all()
     if set(artifact_types).issuperset(_CONTENT_PROFILE_ARTIFACT_TYPES):
         return _select_preferred_content_profile_artifact(artifacts)
@@ -1331,6 +1348,24 @@ def _manual_keep_segments_from_editorial_payload(payload: dict[str, Any] | None)
     return keep_segments
 
 
+def _manual_editor_draft_matches_base(
+    payload: dict[str, Any] | None,
+    *,
+    editorial_timeline: Timeline,
+    render_plan_timeline: Timeline | None,
+) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    if str(payload.get("base_timeline_id") or "") != str(editorial_timeline.id):
+        return False
+    if int(payload.get("base_timeline_version") or 0) != int(editorial_timeline.version or 1):
+        return False
+    expected_render_version = int(render_plan_timeline.version or 1) if render_plan_timeline is not None else None
+    if expected_render_version is not None and int(payload.get("base_render_plan_version") or 0) != expected_render_version:
+        return False
+    return True
+
+
 def _manual_keep_segments_changed(
     previous_segments: list[dict[str, Any]],
     next_segments: list[dict[str, Any]],
@@ -1666,23 +1701,16 @@ async def _build_manual_editor_session(
     media_meta = media_meta_artifact.data_json if media_meta_artifact and isinstance(media_meta_artifact.data_json, dict) else {}
     source_duration_sec = float(media_meta.get("duration_sec") or media_meta.get("duration") or 0.0)
 
-    keep_segments = [
+    base_keep_segments = [
         _manual_editor_segment_payload(segment, index=index)
         for index, segment in enumerate(_manual_keep_segments_from_editorial_payload(editorial_timeline.data_json or {}))
     ]
     if source_duration_sec <= 0.0:
-        source_duration_sec = max((segment.end for segment in keep_segments), default=0.0)
+        source_duration_sec = max((segment.end for segment in base_keep_segments), default=0.0)
 
-    subtitle_dicts, projection_data = await _load_latest_subtitle_payloads(session, job_id=job.id)
-    projected_subtitles = await _build_edited_subtitle_projection(
-        session,
-        job_id=job.id,
-        keep_segments=[segment.model_dump(include={"start", "end"}) for segment in keep_segments],
-        projection_data=projection_data,
-        fallback_subtitles=subtitle_dicts,
-    )
     subtitle_projection = (editorial_timeline.data_json or {}).get("subtitle_projection")
-    subtitle_overrides = []
+    subtitle_overrides: list[dict[str, Any]] = []
+    manual_projection_items: list[dict[str, Any]] = []
     if isinstance(subtitle_projection, dict):
         subtitle_overrides = _manual_subtitle_override_payloads(
             [
@@ -1696,8 +1724,57 @@ async def _build_manual_editor_session(
             for item in list(subtitle_projection.get("items") or [])
             if isinstance(item, dict)
         ]
-        if manual_projection_items:
-            projected_subtitles = manual_projection_items
+
+    draft_saved_at: str | None = None
+    draft_note: str | None = None
+    draft_artifact = await _load_latest_optional_artifact(
+        session,
+        job_id=job.id,
+        artifact_types=(MANUAL_EDITOR_DRAFT_ARTIFACT_TYPE,),
+    )
+    draft_payload = draft_artifact.data_json if draft_artifact and isinstance(draft_artifact.data_json, dict) else None
+    keep_segments = base_keep_segments
+    draft_active = _manual_editor_draft_matches_base(
+        draft_payload,
+        editorial_timeline=editorial_timeline,
+        render_plan_timeline=render_plan_timeline,
+    )
+    if draft_active and draft_payload is not None:
+        draft_keep_segments = [
+            _manual_editor_segment_payload(segment, index=index)
+            for index, segment in enumerate(list(draft_payload.get("keep_segments") or []))
+            if isinstance(segment, dict)
+        ]
+        if draft_keep_segments:
+            keep_segments = draft_keep_segments
+        subtitle_overrides = _manual_subtitle_override_payloads(
+            [
+                item
+                for item in list(draft_payload.get("subtitle_overrides") or [])
+                if isinstance(item, dict)
+            ]
+        )
+        draft_saved_at = str(draft_payload.get("saved_at") or "") or None
+        draft_note = str(draft_payload.get("note") or "") or None
+
+    subtitle_dicts, projection_data = await _load_latest_subtitle_payloads(session, job_id=job.id)
+    if manual_projection_items and not draft_active:
+        projected_subtitles = manual_projection_items
+    else:
+        projected_subtitles = await _build_edited_subtitle_projection(
+            session,
+            job_id=job.id,
+            keep_segments=[segment.model_dump(include={"start", "end"}) for segment in keep_segments],
+            projection_data=projection_data,
+            fallback_subtitles=subtitle_dicts,
+        )
+        if subtitle_overrides:
+            base_output_duration_sec = max((float(item.get("end_time", 0.0) or 0.0) for item in projected_subtitles), default=0.0)
+            projected_subtitles = _apply_manual_subtitle_overrides(
+                projected_subtitles,
+                subtitle_overrides,
+                output_duration_sec=base_output_duration_sec,
+            )
     source_path = _resolve_manual_editor_source_path(job)
     status_detail = _manual_editor_detail_for_job_status(str(job.status or ""))
     prerequisite_detail = _manual_editor_prerequisite_detail(list(job.steps or []))
@@ -1711,6 +1788,7 @@ async def _build_manual_editor_session(
         source_duration_sec=round(max(0.0, source_duration_sec), 3),
         source_url=f"/api/v1/jobs/{job.id}/source/file" if source_path is not None else None,
         keep_segments=keep_segments,
+        base_keep_segments=base_keep_segments,
         source_subtitles=[
             _manual_editor_subtitle_payload(item, index=index)
             for index, item in enumerate(subtitle_dicts)
@@ -1720,6 +1798,8 @@ async def _build_manual_editor_session(
             for index, item in enumerate(projected_subtitles)
         ],
         subtitle_overrides=[ManualEditorSubtitleOverrideIn(**item) for item in subtitle_overrides],
+        draft_saved_at=draft_saved_at,
+        draft_note=draft_note,
         editable=session_detail is None,
         detail=session_detail,
     )
@@ -1833,6 +1913,81 @@ async def get_manual_editor_session(job_id: uuid.UUID, session: AsyncSession = D
     if job is None:
         raise HTTPException(status_code=404, detail="Job not found")
     return await _build_manual_editor_session(job=job, session=session)
+
+
+@router.post("/{job_id}/manual-editor/draft", response_model=ManualEditorDraftOut)
+async def save_manual_editor_draft(
+    job_id: uuid.UUID,
+    request: ManualEditorApplyIn,
+    session: AsyncSession = Depends(get_session),
+):
+    job_result = await session.execute(
+        select(Job)
+        .options(selectinload(Job.steps))
+        .where(Job.id == job_id)
+    )
+    job = job_result.scalar_one_or_none()
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    blocked_detail = _manual_editor_detail_for_job_status(str(job.status or "")) or _manual_editor_prerequisite_detail(list(job.steps or []))
+    if blocked_detail:
+        raise HTTPException(status_code=409, detail=blocked_detail)
+
+    editorial_timeline = await _load_latest_timeline_by_type(session, job_id=job.id, timeline_type="editorial")
+    render_plan_timeline = await _load_latest_timeline_by_type(session, job_id=job.id, timeline_type="render_plan")
+    if editorial_timeline is None or render_plan_timeline is None:
+        raise HTTPException(status_code=404, detail="当前任务缺少可保存的时间线数据。")
+    _validate_manual_editor_base_revision(
+        request,
+        editorial_timeline=editorial_timeline,
+        render_plan_timeline=render_plan_timeline,
+    )
+
+    media_meta_artifact = await _load_latest_optional_artifact(session, job_id=job.id, artifact_types=("media_meta",))
+    media_meta = media_meta_artifact.data_json if media_meta_artifact and isinstance(media_meta_artifact.data_json, dict) else {}
+    source_duration_sec = float(media_meta.get("duration_sec") or media_meta.get("duration") or 0.0)
+    if source_duration_sec <= 0.0:
+        source_duration_sec = max(
+            (
+                float(segment.get("end", 0.0) or 0.0)
+                for segment in _manual_keep_segments_from_editorial_payload(editorial_timeline.data_json or {})
+            ),
+            default=0.0,
+        )
+    keep_segments = _normalize_manual_keep_segments(request.keep_segments, source_duration_sec=source_duration_sec)
+    subtitle_override_payloads = _manual_subtitle_override_payloads(request.subtitle_overrides)
+    saved_at = datetime.now(timezone.utc).isoformat()
+    await session.execute(
+        delete(Artifact).where(
+            Artifact.job_id == job.id,
+            Artifact.artifact_type == MANUAL_EDITOR_DRAFT_ARTIFACT_TYPE,
+        )
+    )
+    session.add(
+        Artifact(
+            job_id=job.id,
+            artifact_type=MANUAL_EDITOR_DRAFT_ARTIFACT_TYPE,
+            data_json={
+                "schema": "manual_editor_draft.v1",
+                "saved_at": saved_at,
+                "base_timeline_id": str(editorial_timeline.id),
+                "base_timeline_version": int(editorial_timeline.version or 1),
+                "base_render_plan_version": int(render_plan_timeline.version or 1),
+                "keep_segments": keep_segments,
+                "subtitle_overrides": subtitle_override_payloads,
+                "note": str(request.note or "").strip() or None,
+            },
+        )
+    )
+    await session.commit()
+    return ManualEditorDraftOut(
+        job_id=str(job.id),
+        saved_at=saved_at,
+        keep_segment_count=len(keep_segments),
+        subtitle_override_count=len(subtitle_override_payloads),
+        detail="手动调整草稿已自动保存。",
+    )
 
 
 @router.post("/{job_id}/manual-editor/apply", response_model=ManualEditorApplyOut)

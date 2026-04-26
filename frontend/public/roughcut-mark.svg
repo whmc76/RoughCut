@@ -1,0 +1,68 @@
+<svg width="256" height="256" viewBox="0 0 256 256" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc">
+  <title id="title">RoughCut A2 mark</title>
+  <desc id="desc">A cyberpunk AI editing mark with machine-vision arcs, a play core, scan brackets, and a timeline cut point.</desc>
+  <defs>
+    <radialGradient id="bg" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(128 112) rotate(90) scale(142)">
+      <stop stop-color="#102331"/>
+      <stop offset="0.58" stop-color="#071017"/>
+      <stop offset="1" stop-color="#03070B"/>
+    </radialGradient>
+    <linearGradient id="cyan" x1="54" y1="0" x2="202" y2="0" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#0CE7F2"/>
+      <stop offset="0.48" stop-color="#6FFBFF"/>
+      <stop offset="1" stop-color="#00B7C9"/>
+    </linearGradient>
+    <linearGradient id="magenta" x1="128" y1="154" x2="128" y2="216" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFD2EA"/>
+      <stop offset="0.25" stop-color="#FF4FA8"/>
+      <stop offset="1" stop-color="#FF2D8D"/>
+    </linearGradient>
+    <filter id="softGlow" x="-28" y="-28" width="312" height="312" color-interpolation-filters="sRGB">
+      <feGaussianBlur stdDeviation="3.8" result="blur"/>
+      <feColorMatrix in="blur" type="matrix" values="0 0 0 0 0.05 0 0 0 0 0.82 0 0 0 0 0.95 0 0 0 0.58 0"/>
+      <feBlend in="SourceGraphic" mode="screen"/>
+    </filter>
+    <filter id="pinkGlow" x="96" y="144" width="64" height="88" color-interpolation-filters="sRGB">
+      <feGaussianBlur stdDeviation="3.2" result="blur"/>
+      <feColorMatrix in="blur" type="matrix" values="0 0 0 0 1 0 0 0 0 0.12 0 0 0 0 0.55 0 0 0 0.7 0"/>
+      <feBlend in="SourceGraphic" mode="screen"/>
+    </filter>
+  </defs>
+
+  <rect width="256" height="256" rx="46" fill="url(#bg)"/>
+  <path d="M55 78V55H79" stroke="#0CE7F2" stroke-width="5" stroke-linecap="square"/>
+  <path d="M201 78V55H177" stroke="#0CE7F2" stroke-width="5" stroke-linecap="square"/>
+  <path d="M55 154V177H79" stroke="#0CE7F2" stroke-width="5" stroke-linecap="square"/>
+  <path d="M201 154V177H177" stroke="#0CE7F2" stroke-width="5" stroke-linecap="square"/>
+
+  <g filter="url(#softGlow)">
+    <path d="M54 124C74 89 100 71 128 71C156 71 182 89 202 124" stroke="url(#cyan)" stroke-width="5" stroke-linecap="round"/>
+    <path d="M79 123C93 104 108 95 128 95C148 95 163 104 177 123" stroke="#105568" stroke-width="3" stroke-linecap="round"/>
+    <path d="M41 124H215" stroke="url(#cyan)" stroke-width="3"/>
+    <path d="M41 124H215" stroke="#6FFBFF" stroke-width="1"/>
+    <circle cx="128" cy="124" r="45" stroke="#0B5361" stroke-width="3"/>
+    <path d="M128 79A45 45 0 0 1 171 111" stroke="url(#cyan)" stroke-width="9"/>
+    <path d="M88 143A45 45 0 0 1 83 124" stroke="#0CE7F2" stroke-width="7" stroke-linecap="round"/>
+    <circle cx="128" cy="124" r="30" fill="#071017" stroke="#114B59" stroke-width="2"/>
+    <path d="M119 105L147 124L119 143V105Z" fill="#8DFBFF"/>
+    <path d="M129 86V92M143 90L141 96M156 98L152 103M165 111L159 114M168 127H162" stroke="#0CE7F2" stroke-width="2" stroke-linecap="round"/>
+    <path d="M158 142L163 146M145 154L147 160M128 160V166" stroke="#B8F9FF" stroke-opacity="0.7" stroke-width="2" stroke-linecap="round"/>
+    <path d="M98 83L91 87M84 98L78 104M75 119H68" stroke="#B8F9FF" stroke-opacity="0.75" stroke-width="2" stroke-linecap="round"/>
+  </g>
+
+  <g opacity="0.88">
+    <path d="M56 190H200" stroke="#5E7784" stroke-width="2"/>
+    <path d="M62 176H98V204H62V176Z" stroke="#5E7784" stroke-width="2"/>
+    <path d="M158 176H194V204H158V176Z" stroke="#5E7784" stroke-width="2"/>
+    <rect x="88" y="185" width="18" height="10" fill="#00CDD9"/>
+    <rect x="113" y="185" width="20" height="10" fill="#00CDD9"/>
+    <rect x="145" y="185" width="21" height="10" fill="#00CDD9"/>
+    <rect x="174" y="185" width="16" height="10" fill="#55636E"/>
+    <path d="M44 178H56M200 178H212" stroke="#FF8B3D" stroke-width="3" stroke-linecap="round"/>
+  </g>
+
+  <g filter="url(#pinkGlow)">
+    <path d="M128 164V212" stroke="url(#magenta)" stroke-width="4" stroke-linecap="round"/>
+    <path d="M128 174L118 158H138L128 174Z" fill="#FF4FA8" stroke="#FFE4F1" stroke-width="3"/>
+  </g>
+</svg>

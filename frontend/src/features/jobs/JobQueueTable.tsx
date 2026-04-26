@@ -1,4 +1,5 @@
 import type { Job } from "../../types";
+import { useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import { api } from "../../api";
 import { EmptyState } from "../../components/ui/EmptyState";
@@ -169,8 +170,23 @@ export function JobQueueTable({
   onPageChange,
 }: JobQueueTableProps) {
   const { t } = useI18n();
+  const queryClient = useQueryClient();
   const canGoPrev = (currentPage ?? 0) > 0 && !isFetchingPage;
   const canGoNext = Boolean(hasMore) && !isFetchingPage;
+  const prefetchManualEditor = (jobId: string) => {
+    void queryClient.prefetchQuery({
+      queryKey: ["job-manual-editor", jobId],
+      queryFn: () => api.getJobManualEditor(jobId),
+      staleTime: 15_000,
+    });
+  };
+  const warmManualEditorAssets = (jobId: string) => {
+    void queryClient.prefetchQuery({
+      queryKey: ["job-manual-editor-assets", jobId],
+      queryFn: () => api.warmJobManualEditorAssets(jobId),
+      staleTime: 10_000,
+    });
+  };
 
   return (
     <section className="panel">
@@ -339,6 +355,12 @@ export function JobQueueTable({
                       <Link
                         className="button button-sm job-manual-edit-cta"
                         to={`/jobs/${job.id}/manual-editor`}
+                        onMouseEnter={() => prefetchManualEditor(job.id)}
+                        onFocus={() => prefetchManualEditor(job.id)}
+                        onPointerDown={() => {
+                          prefetchManualEditor(job.id);
+                          warmManualEditorAssets(job.id);
+                        }}
                         onClick={(event) => event.stopPropagation()}
                       >
                         手动调整

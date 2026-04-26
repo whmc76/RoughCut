@@ -1,8 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
-import WaveSurfer from "wavesurfer.js";
-import RegionsPlugin from "wavesurfer.js/dist/plugins/regions.esm.js";
+import type WaveSurfer from "wavesurfer.js";
 import type { RegionsPlugin as RegionsPluginInstance } from "wavesurfer.js/dist/plugins/regions.esm.js";
-import TimelinePlugin from "wavesurfer.js/dist/plugins/timeline.esm.js";
 
 import type { Job, JobManualEditApplyPayload, JobManualEditPreviewAssets, JobManualEditSession, JobManualEditSubtitle, JobManualEditSubtitleOverride } from "../../types";
 import { classNames } from "../../utils";
@@ -12,7 +10,10 @@ type JobManualEditSectionProps = {
   session: JobManualEditSession;
   previewAssets?: JobManualEditPreviewAssets;
   saving: boolean;
+  autosaving?: boolean;
+  autosavedAt?: string | null;
   onApply?: (payload: JobManualEditApplyPayload) => void;
+  onAutoSave?: (payload: JobManualEditApplyPayload) => void;
 };
 
 type KeepSegment = {
@@ -42,11 +43,127 @@ type TimelineThumbnailItem = {
   kept: boolean;
 };
 
+type FrequentTermKind = "名词/术语" | "动作词" | "描述词" | "专名/型号";
+
+type FrequentTerm = {
+  term: string;
+  normalized: string;
+  count: number;
+  kind: FrequentTermKind;
+  subtitleIndexes: number[];
+  occurrences: JobManualEditSubtitle[];
+};
+
 const REGION_COLOR = "rgba(34, 197, 94, 0.22)";
 const REGION_ACTIVE_COLOR = "rgba(20, 184, 166, 0.36)";
 const MIN_SUBTITLE_DURATION_SEC = 0.08;
 const MIN_SUBTITLE_GAP_SEC = 0.02;
 const INITIAL_WAVEFORM_ZOOM = 18;
+const TERM_RESULT_LIMIT = 80;
+const SUBTITLE_TABLE_WINDOW_SIZE = 220;
+const TERM_STOPWORDS = new Set([
+  "一个",
+  "一下",
+  "一些",
+  "一样",
+  "一段",
+  "一种",
+  "不是",
+  "不要",
+  "不能",
+  "不太",
+  "不过",
+  "不同",
+  "就不",
+  "以及",
+  "而且",
+  "并且",
+  "他们",
+  "它的",
+  "他的",
+  "她的",
+  "我的",
+  "你的",
+  "我们的",
+  "你们的",
+  "他们的",
+  "以后",
+  "以前",
+  "但是",
+  "除了",
+  "你们",
+  "其实",
+  "只是",
+  "可以",
+  "可能",
+  "很多",
+  "功能",
+  "因为",
+  "大家",
+  "如果",
+  "就是",
+  "已经",
+  "我们",
+  "或者",
+  "也是",
+  "所以",
+  "所有",
+  "然后",
+  "现在",
+  "这个",
+  "这些",
+  "这里",
+  "这样",
+  "这么",
+  "还是",
+  "那个",
+  "那些",
+  "那么",
+  "需要",
+  "看到",
+  "经常",
+  "对比",
+  "非常",
+  "为什么",
+]);
+const TERM_VERB_HINTS = new Set([
+  "上传",
+  "保存",
+  "启动",
+  "开始",
+  "结束",
+  "生成",
+  "合成",
+  "渲染",
+  "删除",
+  "添加",
+  "调整",
+  "修改",
+  "替换",
+  "识别",
+  "核对",
+  "预览",
+  "播放",
+  "剪辑",
+  "发布",
+  "导出",
+]);
+const TERM_ADJECTIVE_HINTS = new Set([
+  "明显",
+  "实时",
+  "完整",
+  "简单",
+  "复杂",
+  "高频",
+  "低频",
+  "重要",
+  "必要",
+  "准确",
+  "错误",
+  "清晰",
+  "稳定",
+  "方便",
+]);
 
 function regionIdForIndex(index: number) {
   return `keep-${index}`;
@@ -217,6 +334,98 @@ function subtitleDiagnostics(subtitles: JobManualEditSubtitle[], totalDuration: 
   return { warnings, issueCount };
 }
 
+function normalizeTermKey(term: string) {
+  return term.trim().toLocaleLowerCase().replace(/\s+/g, "");
+}
+
+function cleanTermToken(term: string) {
+  return term.replace(/^[\s"'`.,!?;:，。！？、；：《》（）()【】[\]{}]+|[\s"'`.,!?;:，。！？、；：《》（）()【】[\]{}]+$/g, "");
+}
+
+function isMeaningfulTerm(term: string) {
+  const cleaned = cleanTermToken(term);
+  if (!cleaned || TERM_STOPWORDS.has(cleaned)) return false;
+  if (/^\d+(?:\.\d+)?$/.test(cleaned)) return false;
+  if (/^[a-z]$/i.test(cleaned)) return false;
+  if (/^[\u4e00-\u9fff]$/.test(cleaned)) return false;
+  if (/^[这那它他她我你您咱][个些种样的]?$/.test(cleaned)) return false;
+  if (/^(怎么|怎样|为什么|什么|哪里|哪个|哪些|多少|这么|那么)/.test(cleaned)) return false;
+  if (/^(经常|一直|总是|已经|还是|就是|只是|比较|非常|特别|很多|一些|所有|每个)/.test(cleaned)) return false;
+  if (/^(除了|以及|而且|并且|或者|但是|不过|所以|因为)/.test(cleaned)) return false;
+  if (/^(不|没|无|非)[\u4e00-\u9fff]{1,2}$/.test(cleaned)) return false;
+  if (/^(看到|看见|觉得|感觉|知道|认为|发现|比如|对比)$/.test(cleaned)) return false;
+  if (/[的地得]$/.test(cleaned) && cleaned.length <= 3) return false;
+  if (cleaned.length < 2) return false;
+  return /[\u4e00-\u9fffA-Za-z]/.test(cleaned);
+}
+
+function classifyMeaningfulTerm(term: string): FrequentTermKind {
+  if (/[A-Za-z0-9]/.test(term)) return "专名/型号";
+  if (TERM_VERB_HINTS.has(term) || /(化|启动|生成|调整|修改|替换|识别|核对|渲染|合成|剪辑|发布)$/.test(term)) return "动作词";
+  if (TERM_ADJECTIVE_HINTS.has(term) || /(高|低|快|慢|强|弱|好|坏|准|错|清晰|稳定|方便|完整|明显)$/.test(term)) return "描述词";
+  return "名词/术语";
+}
+
+function tokenizeMeaningfulTerms(text: string) {
+  const normalized = text.replace(/[|/\\\n\r\t]/g, " ");
+  const tokens: string[] = [];
+  const Segmenter = (Intl as typeof Intl & {
+    Segmenter?: new (locale: string, options: { granularity: "word" }) => {
+      segment: (input: string) => Iterable<{ segment: string; isWordLike?: boolean }>;
+    };
+  }).Segmenter;
+
+  if (Segmenter) {
+    const segmenter = new Segmenter("zh", { granularity: "word" });
+    for (const part of segmenter.segment(normalized)) {
+      if (part.isWordLike === false) continue;
+      const cleaned = cleanTermToken(part.segment);
+      if (isMeaningfulTerm(cleaned)) tokens.push(cleaned);
+    }
+    return tokens;
+  }
+
+  const matches = normalized.match(/[A-Za-z][A-Za-z0-9+#.-]{1,}|[A-Za-z0-9+#.-]*\d[A-Za-z0-9+#.-]*|[\u4e00-\u9fff]{2,8}/g) || [];
+  for (const match of matches) {
+    const cleaned = cleanTermToken(match);
+    if (isMeaningfulTerm(cleaned)) tokens.push(cleaned);
+  }
+  return tokens;
+}
+
+function buildFrequentTerms(subtitles: JobManualEditSubtitle[]) {
+  const buckets = new Map<string, FrequentTerm>();
+  for (const subtitle of subtitles) {
+    const seenInSubtitle = new Set<string>();
+    for (const term of tokenizeMeaningfulTerms(subtitleText(subtitle))) {
+      const normalized = normalizeTermKey(term);
+      const existing = buckets.get(normalized) ?? {
+        term,
+        normalized,
+        count: 0,
+        kind: classifyMeaningfulTerm(term),
+        subtitleIndexes: [],
+        occurrences: [],
+      };
+      existing.count += 1;
+      if (!seenInSubtitle.has(normalized)) {
+        existing.subtitleIndexes.push(subtitle.index);
+        existing.occurrences.push(subtitle);
+        seenInSubtitle.add(normalized);
+      }
+      buckets.set(normalized, existing);
+    }
+  }
+
+  return [...buckets.values()]
+    .sort((left, right) => right.count - left.count || left.term.localeCompare(right.term, "zh-Hans-CN"))
+    .slice(0, TERM_RESULT_LIMIT);
+}
+
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 function outputTimeToSourceTime(outputTime: number, ranges: OutputRange[]) {
   if (!ranges.length) return 0;
   const normalized = Math.max(0, outputTime || 0);
@@ -253,7 +462,7 @@ function sourceTimeToOutputThumbnailItem(item: { url: string; time_sec: number }
   };
 }
 
-export function JobManualEditSection({ job, session, previewAssets, saving, onApply }: JobManualEditSectionProps) {
+export function JobManualEditSection({ job, session, previewAssets, saving, autosaving = false, autosavedAt, onApply, onAutoSave }: JobManualEditSectionProps) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const waveformRef = useRef<HTMLDivElement | null>(null);
   const waveformTimelineRef = useRef<HTMLDivElement | null>(null);
@@ -261,6 +470,8 @@ export function JobManualEditSection({ job, session, previewAssets, saving, onAp
   const regionsRef = useRef<RegionsPluginInstance | null>(null);
   const syncingRegionsRef = useRef(false);
   const timelinePlaybackRef = useRef(false);
+  const autoSaveSessionKeyRef = useRef("");
+  const lastAutoSaveSignatureRef = useRef("");
   const [segments, setSegments] = useState<KeepSegment[]>([]);
   const [selectedSegmentIndex, setSelectedSegmentIndex] = useState(0);
   const [editorNote, setEditorNote] = useState("");
@@ -271,6 +482,11 @@ export function JobManualEditSection({ job, session, previewAssets, saving, onAp
   const [waveformZoom, setWaveformZoom] = useState(INITIAL_WAVEFORM_ZOOM);
   const [waveformReady, setWaveformReady] = useState(false);
   const [waveformError, setWaveformError] = useState<string | null>(null);
+  const [termReviewFilter, setTermReviewFilter] = useState("");
+  const [minTermCount, setMinTermCount] = useState(2);
+  const [termReplacementDrafts, setTermReplacementDrafts] = useState<Record<string, string>>({});
+  const [hiddenTermKeys, setHiddenTermKeys] = useState<Set<string>>(() => new Set());
+  const [frequentTerms, setFrequentTerms] = useState<FrequentTerm[]>([]);
 
   useEffect(() => {
     setSegments(session.keep_segments.map((segment) => ({ start: segment.start, end: segment.end })));
@@ -293,6 +509,9 @@ export function JobManualEditSection({ job, session, previewAssets, saving, onAp
     setCurrentSourceTime(0);
     setWaveformReady(false);
     setWaveformError(null);
+    setTermReviewFilter("");
+    setTermReplacementDrafts({});
+    setHiddenTermKeys(new Set());
     timelinePlaybackRef.current = false;
   }, [session.job_id, session.timeline_id, session.timeline_version, session.keep_segments, session.subtitle_overrides]);
 
@@ -334,6 +553,7 @@ export function JobManualEditSection({ job, session, previewAssets, saving, onAp
   const selectedSegment = effectiveSegments[selectedSegmentIndex] ?? effectiveSegments[0] ?? null;
   const totalOutputDuration = projection.totalDuration;
   const activeSubtitle = activeSubtitleIndex >= 0 ? projection.remapped[activeSubtitleIndex] : null;
+  const baseKeepSegments = session.base_keep_segments?.length ? session.base_keep_segments : session.keep_segments;
   const waveformUrl = previewAssets?.ready && previewAssets.audio_url ? previewAssets.audio_url : session.source_url || "";
   const waveformPeaks = useMemo(
     () => (previewAssets?.peaks?.length ? [previewAssets.peaks] : undefined),
@@ -383,19 +603,43 @@ export function JobManualEditSection({ job, session, previewAssets, saving, onAp
     () => subtitleDiagnostics(projection.remapped, totalOutputDuration),
     [projection.remapped, totalOutputDuration],
   );
+  const visibleFrequentTerms = useMemo(() => {
+    const query = normalizeTermKey(termReviewFilter);
+    return frequentTerms.filter((term) => {
+      if (term.count < minTermCount) return false;
+      if (hiddenTermKeys.has(term.normalized)) return false;
+      if (!query) return true;
+      return term.normalized.includes(query) || term.kind.includes(termReviewFilter.trim());
+    });
+  }, [frequentTerms, hiddenTermKeys, minTermCount, termReviewFilter]);
   const hasTimelineEdits = useMemo(() => {
-    if (session.keep_segments.length !== effectiveSegments.length) return true;
-    return session.keep_segments.some((segment, index) => {
+    if (baseKeepSegments.length !== effectiveSegments.length) return true;
+    return baseKeepSegments.some((segment, index) => {
       const current = effectiveSegments[index];
       return !current || Math.abs(segment.start - current.start) > 0.02 || Math.abs(segment.end - current.end) > 0.02;
     });
-  }, [effectiveSegments, session.keep_segments]);
+  }, [baseKeepSegments, effectiveSegments]);
   const initialOutputDuration = useMemo(
-    () => session.keep_segments.reduce((total, segment) => total + Math.max(0, segment.end - segment.start), 0),
-    [session.keep_segments],
+    () => baseKeepSegments.reduce((total, segment) => total + Math.max(0, segment.end - segment.start), 0),
+    [baseKeepSegments],
   );
   const outputDurationDelta = totalOutputDuration - initialOutputDuration;
   const hasMaterialEdits = hasTimelineEdits || subtitleOverrides.length > 0;
+  const visibleDraftSavedAt = autosavedAt || session.draft_saved_at || null;
+  const manualEditorPayload = useMemo(
+    () => ({
+      keep_segments: effectiveSegments.map((segment) => ({
+        start: Number(segment.start.toFixed(3)),
+        end: Number(segment.end.toFixed(3)),
+      })),
+      subtitle_overrides: subtitleOverrides,
+      base_timeline_id: session.timeline_id,
+      base_timeline_version: session.timeline_version,
+      base_render_plan_version: session.render_plan_version,
+      note: editorNote.trim() || undefined,
+    }),
+    [effectiveSegments, editorNote, session.render_plan_version, session.timeline_id, session.timeline_version, subtitleOverrides],
+  );
   const savePlanLabel = hasTimelineEdits
     ? "剪辑变更：重建时间线/特效"
     : subtitleOverrides.length
@@ -407,6 +651,29 @@ export function JobManualEditSection({ job, session, previewAssets, saving, onAp
       ? "会保存字幕文本/时间修改，复用当前剪辑和特效计划重新烧录字幕层。"
       : "当前没有检测到剪辑或字幕修改。";
   const outputDurationDeltaLabel = `${outputDurationDelta >= 0 ? "+" : "-"}${formatSeconds(Math.abs(outputDurationDelta))}`;
+  const selectedSubtitlePosition = selectedSubtitle
+    ? projection.remapped.findIndex((subtitle) => subtitle.index === selectedSubtitle.index)
+    : activeSubtitleIndex;
+  const subtitleTableWindow = useMemo(() => {
+    const subtitles = projection.remapped;
+    if (subtitles.length <= SUBTITLE_TABLE_WINDOW_SIZE) {
+      return {
+        rows: subtitles,
+        start: 0,
+        end: subtitles.length,
+        clipped: false,
+      };
+    }
+    const anchor = selectedSubtitlePosition >= 0 ? selectedSubtitlePosition : 0;
+    const start = clamp(anchor - Math.floor(SUBTITLE_TABLE_WINDOW_SIZE / 2), 0, Math.max(0, subtitles.length - SUBTITLE_TABLE_WINDOW_SIZE));
+    const end = Math.min(subtitles.length, start + SUBTITLE_TABLE_WINDOW_SIZE);
+    return {
+      rows: subtitles.slice(start, end),
+      start,
+      end,
+      clipped: true,
+    };
+  }, [projection.remapped, selectedSubtitlePosition]);
 
   useEffect(() => {
     const waveformElement = waveformRef.current;
@@ -415,88 +682,118 @@ export function JobManualEditSection({ job, session, previewAssets, saving, onAp
 
     setWaveformReady(false);
     setWaveformError(null);
+    let cancelled = false;
+    let cleanupWaveform = () => {};
 
-    const regionsPlugin = RegionsPlugin.create();
-    const timelinePlugin = TimelinePlugin.create({
-      container: timelineElement,
-      height: 24,
-      formatTimeCallback: formatSeconds,
-    });
-    const waveSurfer = WaveSurfer.create({
-      container: waveformElement,
-      url: waveformUrl,
-      peaks: waveformPeaks,
-      duration: waveformDuration,
-      height: 112,
-      waveColor: "#64748b",
-      progressColor: "#0f766e",
-      cursorColor: "#f97316",
-      cursorWidth: 2,
-      barWidth: 2,
-      barGap: 1,
-      barRadius: 2,
-      dragToSeek: true,
-      minPxPerSec: INITIAL_WAVEFORM_ZOOM,
-      autoScroll: true,
-      autoCenter: true,
-      plugins: [regionsPlugin as any, timelinePlugin as any],
-    });
+    void (async () => {
+      const [{ default: WaveSurferModule }, { default: RegionsPlugin }, { default: TimelinePlugin }] = await Promise.all([
+        import("wavesurfer.js"),
+        import("wavesurfer.js/dist/plugins/regions.esm.js"),
+        import("wavesurfer.js/dist/plugins/timeline.esm.js"),
+      ]);
+      if (cancelled) return;
 
-    waveSurferRef.current = waveSurfer;
-    regionsRef.current = regionsPlugin;
+      const regionsPlugin = RegionsPlugin.create();
+      const timelinePlugin = TimelinePlugin.create({
+        container: timelineElement,
+        height: 24,
+        formatTimeCallback: formatSeconds,
+      });
+      const waveSurfer = WaveSurferModule.create({
+        container: waveformElement,
+        url: waveformUrl,
+        peaks: waveformPeaks,
+        duration: waveformDuration,
+        height: 112,
+        waveColor: "#64748b",
+        progressColor: "#0f766e",
+        cursorColor: "#f97316",
+        cursorWidth: 2,
+        barWidth: 2,
+        barGap: 1,
+        barRadius: 2,
+        dragToSeek: true,
+        minPxPerSec: INITIAL_WAVEFORM_ZOOM,
+        autoScroll: true,
+        autoCenter: true,
+        plugins: [regionsPlugin as any, timelinePlugin as any],
+      });
 
-    const seekPreview = (sourceTime: number) => {
-      const nextTime = clamp(sourceTime, 0, session.source_duration_sec || sourceTime);
-      const video = videoRef.current;
-      if (video) video.currentTime = nextTime;
-      setCurrentSourceTime(nextTime);
-    };
+      waveSurferRef.current = waveSurfer;
+      regionsRef.current = regionsPlugin;
 
-    const updateSegmentsFromRegions = () => {
-      if (syncingRegionsRef.current) return;
-      const nextSegments = regionsPlugin
-        .getRegions()
-        .map((region) => ({ start: Number(region.start.toFixed(3)), end: Number(region.end.toFixed(3)) }))
-        .filter((segment) => segment.end > segment.start + 0.05)
-        .sort((left, right) => left.start - right.start);
-      if (!nextSegments.length) return;
-      setSegments(nextSegments);
-      setSelectedSegmentIndex((current) => Math.min(current, nextSegments.length - 1));
-    };
+      const seekPreview = (sourceTime: number) => {
+        const nextTime = clamp(sourceTime, 0, session.source_duration_sec || sourceTime);
+        const video = videoRef.current;
+        if (video) video.currentTime = nextTime;
+        setCurrentSourceTime(nextTime);
+      };
 
-    const unsubscribeReady = waveSurfer.on("ready", () => {
-      setWaveformReady(true);
+      const updateSegmentsFromRegions = () => {
+        if (syncingRegionsRef.current) return;
+        const nextSegments = regionsPlugin
+          .getRegions()
+          .map((region) => ({ start: Number(region.start.toFixed(3)), end: Number(region.end.toFixed(3)) }))
+          .filter((segment) => segment.end > segment.start + 0.05)
+          .sort((left, right) => left.start - right.start);
+        if (!nextSegments.length) return;
+        setSegments(nextSegments);
+        setSelectedSegmentIndex((current) => Math.min(current, nextSegments.length - 1));
+      };
+
+      const unsubscribeReady = waveSurfer.on("ready", () => {
+        setWaveformReady(true);
+      });
+      const unsubscribeError = waveSurfer.on("error", (error) => {
+        setWaveformError(error.message || "波形加载失败");
+      });
+      const unsubscribeInteraction = waveSurfer.on("interaction", (sourceTime) => {
+        seekPreview(sourceTime);
+      });
+      const unsubscribeClick = waveSurfer.on("click", (relativeX) => {
+        seekPreview(relativeX * waveSurfer.getDuration());
+      });
+      const unsubscribeRegionClick = regionsPlugin.on("region-clicked", (region, event) => {
+        event.stopPropagation();
+        const index = regionsPlugin.getRegions().sort((left, right) => left.start - right.start).findIndex((item) => item.id === region.id);
+        if (index >= 0) setSelectedSegmentIndex(index);
+        waveSurfer.setTime(region.start);
+        seekPreview(region.start);
+      });
+      const unsubscribeRegionUpdated = regionsPlugin.on("region-updated", updateSegmentsFromRegions);
+
+      cleanupWaveform = () => {
+        unsubscribeReady();
+        unsubscribeError();
+        unsubscribeInteraction();
+        unsubscribeClick();
+        unsubscribeRegionClick();
+        unsubscribeRegionUpdated();
+        waveSurfer.destroy();
+        if (waveSurferRef.current === waveSurfer) waveSurferRef.current = null;
+        if (regionsRef.current === regionsPlugin) regionsRef.current = null;
+      };
+    })().catch((error) => {
+      if (!cancelled) setWaveformError(error instanceof Error ? error.message : "波形组件加载失败");
     });
-    const unsubscribeError = waveSurfer.on("error", (error) => {
-      setWaveformError(error.message || "波形加载失败");
-    });
-    const unsubscribeInteraction = waveSurfer.on("interaction", (sourceTime) => {
-      seekPreview(sourceTime);
-    });
-    const unsubscribeClick = waveSurfer.on("click", (relativeX) => {
-      seekPreview(relativeX * waveSurfer.getDuration());
-    });
-    const unsubscribeRegionClick = regionsPlugin.on("region-clicked", (region, event) => {
-      event.stopPropagation();
-      const index = regionsPlugin.getRegions().sort((left, right) => left.start - right.start).findIndex((item) => item.id === region.id);
-      if (index >= 0) setSelectedSegmentIndex(index);
-      waveSurfer.setTime(region.start);
-      seekPreview(region.start);
-    });
-    const unsubscribeRegionUpdated = regionsPlugin.on("region-updated", updateSegmentsFromRegions);
 
     return () => {
-      unsubscribeReady();
-      unsubscribeError();
-      unsubscribeInteraction();
-      unsubscribeClick();
-      unsubscribeRegionClick();
-      unsubscribeRegionUpdated();
-      waveSurfer.destroy();
-      if (waveSurferRef.current === waveSurfer) waveSurferRef.current = null;
-      if (regionsRef.current === regionsPlugin) regionsRef.current = null;
+      cancelled = true;
+      cleanupWaveform();
     };
   }, [session.job_id, session.source_duration_sec, session.timeline_id, session.timeline_version, waveformDuration, waveformPeaks, waveformUrl]);
+
+  useEffect(() => {
+    setFrequentTerms([]);
+    const build = () => setFrequentTerms(buildFrequentTerms(projection.remapped));
+    const requestIdleCallback = window.requestIdleCallback;
+    if (requestIdleCallback) {
+      const idleId = requestIdleCallback(build, { timeout: 900 });
+      return () => window.cancelIdleCallback?.(idleId);
+    }
+    const timeout = window.setTimeout(build, 120);
+    return () => window.clearTimeout(timeout);
+  }, [projection.remapped]);
 
   useEffect(() => {
     const regionsPlugin = regionsRef.current;
@@ -671,6 +968,31 @@ export function JobManualEditSection({ job, session, previewAssets, saving, onAp
     jumpToOutputTime(subtitle.start_time);
   };
 
+  const replaceTermAcrossSubtitles = (term: FrequentTerm) => {
+    const replacement = (termReplacementDrafts[term.normalized] || "").trim();
+    if (!replacement || replacement === term.term) return;
+    const pattern = new RegExp(escapeRegExp(term.term), "g");
+    setSubtitleDrafts((current) => {
+      const next = { ...current };
+      for (const subtitle of projection.remapped) {
+        const text = subtitleText(subtitle);
+        if (!text.includes(term.term)) continue;
+        next[subtitle.index] = {
+          ...(next[subtitle.index] ?? {}),
+          text_final: text.replace(pattern, replacement),
+        };
+      }
+      return next;
+    });
+    setTermReplacementDrafts((current) => {
+      const next = { ...current };
+      delete next[term.normalized];
+      return next;
+    });
+    const firstOccurrence = term.occurrences[0];
+    if (firstOccurrence) selectSubtitle(firstOccurrence);
+  };
+
   const selectAdjacentSubtitle = (direction: -1 | 1) => {
     if (!projection.remapped.length) return;
     const currentIndex = selectedSubtitle
@@ -811,25 +1133,38 @@ export function JobManualEditSection({ job, session, previewAssets, saving, onAp
       [
         "确认保存手动调整？",
         `保存类型：${savePlanLabel}`,
-        `片段数：${session.keep_segments.length} -> ${effectiveSegments.length}`,
+        `片段数：${baseKeepSegments.length} -> ${effectiveSegments.length}`,
         `输出时长变化：${outputDurationDeltaLabel}`,
         `字幕修改：${subtitleOverrides.length} 条`,
         saveImpactSummary,
       ].join("\n"),
     );
     if (!confirmed) return;
-    onApply({
-      keep_segments: effectiveSegments.map((segment) => ({
-        start: Number(segment.start.toFixed(3)),
-        end: Number(segment.end.toFixed(3)),
-      })),
-      subtitle_overrides: subtitleOverrides,
-      base_timeline_id: session.timeline_id,
-      base_timeline_version: session.timeline_version,
-      base_render_plan_version: session.render_plan_version,
-      note: editorNote.trim() || undefined,
-    });
+    onApply(manualEditorPayload);
   };
+
+  useEffect(() => {
+    if (!onAutoSave || autosaving || !session.editable || !effectiveSegments.length) return undefined;
+    const sessionKey = [
+      session.job_id,
+      session.timeline_id,
+      session.timeline_version,
+      session.render_plan_version ?? "",
+      session.draft_saved_at ?? "",
+    ].join(":");
+    const signature = JSON.stringify(manualEditorPayload);
+    if (autoSaveSessionKeyRef.current !== sessionKey) {
+      autoSaveSessionKeyRef.current = sessionKey;
+      lastAutoSaveSignatureRef.current = signature;
+      return undefined;
+    }
+    if (signature === lastAutoSaveSignatureRef.current) return undefined;
+    const timeout = window.setTimeout(() => {
+      lastAutoSaveSignatureRef.current = signature;
+      onAutoSave(manualEditorPayload);
+    }, 1200);
+    return () => window.clearTimeout(timeout);
+  }, [autosaving, effectiveSegments.length, manualEditorPayload, onAutoSave, session.draft_saved_at, session.editable, session.job_id, session.render_plan_version, session.timeline_id, session.timeline_version]);
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -904,8 +1239,9 @@ export function JobManualEditSection({ job, session, previewAssets, saving, onAp
     saveImpactSummary,
     savePlanLabel,
     saving,
+    manualEditorPayload,
     session.editable,
-    session.keep_segments.length,
+    baseKeepSegments.length,
     subtitleOverrides.length,
   ]);
 
@@ -925,6 +1261,9 @@ export function JobManualEditSection({ job, session, previewAssets, saving, onAp
             {session.editable ? "可编辑" : "只读"}
           </span>
           <span className="status-pill pending">{savePlanLabel}</span>
+          <span className={classNames("status-pill", autosaving ? "running" : "done")}>
+            {autosaving ? "自动保存中" : visibleDraftSavedAt ? "草稿已保存" : "自动保存开启"}
+          </span>
           <span className="status-pill pending">时间线 v{session.timeline_version}</span>
         </div>
       </div>
@@ -938,7 +1277,7 @@ export function JobManualEditSection({ job, session, previewAssets, saving, onAp
         <span><kbd>Alt</kbd> + <kbd>[</kbd>/<kbd>]</kbd> 字幕 ±10ms</span>
         <span><kbd>A</kbd>/<kbd>S</kbd> 设字幕起止</span>
         <span><kbd>J</kbd>/<kbd>K</kbd> 上/下字幕</span>
-        <span><kbd>Ctrl/⌘</kbd> + <kbd>S</kbd> 保存</span>
+        <span><kbd>Ctrl/⌘</kbd> + <kbd>S</kbd> 立即重渲染</span>
       </div>
 
       <div className="manual-editor-stats top-gap">
@@ -962,9 +1301,10 @@ export function JobManualEditSection({ job, session, previewAssets, saving, onAp
       <div className={classNames("manual-editor-save-impact", hasTimelineEdits && "timeline", subtitleOverrides.length > 0 && !hasTimelineEdits && "subtitle")}>
         <strong>{savePlanLabel}</strong>
         <span>{saveImpactSummary}</span>
-        <span>片段 {session.keep_segments.length}{" -> "}{effectiveSegments.length}</span>
+        <span>片段 {baseKeepSegments.length}{" -> "}{effectiveSegments.length}</span>
         <span>输出时长变化 {outputDurationDeltaLabel}</span>
         <span>字幕修改 {subtitleOverrides.length} 条</span>
+        {visibleDraftSavedAt ? <span>上次草稿 {new Date(visibleDraftSavedAt).toLocaleTimeString()}</span> : null}
       </div>
 
       <div className="manual-editor-grid top-gap">
@@ -1226,7 +1566,7 @@ export function JobManualEditSection({ job, session, previewAssets, saving, onAp
 
           <div className="manual-editor-actions top-gap">
             <button type="button" className="button primary" disabled={!session.editable || saving || !onApply || !hasMaterialEdits} onClick={handleApply}>
-              {saving ? "保存并重渲染中..." : "保存修改并重新渲染"}
+              {saving ? "重渲染提交中..." : "用当前自动保存版本重新渲染"}
             </button>
             <button type="button" className="button ghost" onClick={restoreInitialSegments}>
               放弃本地改动
@@ -1234,6 +1574,90 @@ export function JobManualEditSection({ job, session, previewAssets, saving, onAp
           </div>
         </section>
       </div>
+
+      <section className="manual-editor-term-review">
+        <div className="manual-editor-preview-head">
+          <div>
+            <strong>高频词核对</strong>
+            <div className="muted compact-top">从当前输出字幕中统计高频候选词，按规则近似分类；批量替换会写入字幕修改并随保存重渲染。</div>
+          </div>
+          <div className="manual-editor-actions">
+            <label className="manual-editor-term-filter">
+              <span>筛选</span>
+              <input
+                className="input"
+                value={termReviewFilter}
+                onChange={(event) => setTermReviewFilter(event.target.value)}
+                placeholder="词 / 类型"
+              />
+            </label>
+            <label className="manual-editor-term-filter compact">
+              <span>至少</span>
+              <input
+                className="input"
+                type="number"
+                min={1}
+                max={99}
+                value={minTermCount}
+                onChange={(event) => setMinTermCount(Math.max(1, Number(event.target.value || 1)))}
+              />
+              <span>次</span>
+            </label>
+            <span className="status-pill pending">候选 {visibleFrequentTerms.length}</span>
+          </div>
+        </div>
+
+        {visibleFrequentTerms.length ? (
+          <div className="manual-editor-term-grid">
+            {visibleFrequentTerms.map((term) => {
+              const active = term.subtitleIndexes.includes(selectedSubtitle?.index ?? -1);
+              const replacement = termReplacementDrafts[term.normalized] || "";
+              return (
+                <article key={term.normalized} className={classNames("manual-editor-term-card", active && "active")}>
+                  <div className="manual-editor-term-title">
+                    <strong>{term.term}</strong>
+                    <span className="status-pill pending">{term.count} 次</span>
+                    <span className="status-pill">{term.kind}</span>
+                  </div>
+                  <div className="manual-editor-term-occurrences">
+                    {term.occurrences.slice(0, 3).map((subtitle) => (
+                      <button key={`${term.normalized}-${subtitle.index}`} type="button" onClick={() => selectSubtitle(subtitle)}>
+                        {formatSeconds(subtitle.start_time)} {subtitleText(subtitle).slice(0, 36)}
+                      </button>
+                    ))}
+                    {term.occurrences.length > 3 ? <span>另 {term.occurrences.length - 3} 条</span> : null}
+                  </div>
+                  <div className="manual-editor-term-replace-row">
+                    <input
+                      className="input"
+                      value={replacement}
+                      onChange={(event) => setTermReplacementDrafts((current) => ({ ...current, [term.normalized]: event.target.value }))}
+                      placeholder={`替换“${term.term}”`}
+                    />
+                    <button
+                      type="button"
+                      className="button primary"
+                      disabled={!replacement.trim() || replacement.trim() === term.term}
+                      onClick={() => replaceTermAcrossSubtitles(term)}
+                    >
+                      批量替换
+                    </button>
+                    <button
+                      type="button"
+                      className="button ghost"
+                      onClick={() => setHiddenTermKeys((current) => new Set([...current, term.normalized]))}
+                    >
+                      忽略
+                    </button>
+                  </div>
+                </article>
+              );
+            })}
+          </div>
+        ) : (
+          <div className="notice">当前筛选条件下没有足够高频的候选词。</div>
+        )}
+      </section>
 
       <section className="manual-editor-subtitle-editor">
         <div className="manual-editor-preview-head">
@@ -1293,6 +1717,12 @@ export function JobManualEditSection({ job, session, previewAssets, saving, onAp
           </div>
         </div>
 
+        {subtitleTableWindow.clipped ? (
+          <div className="notice manual-editor-window-notice">
+            为保持页面响应速度，当前只渲染第 {subtitleTableWindow.start + 1} - {subtitleTableWindow.end} 条字幕，共 {projection.remapped.length} 条；定位到其他字幕后窗口会自动切换。
+          </div>
+        ) : null}
+
         <div className="manual-editor-subtitle-table">
           <div className="manual-editor-subtitle-row header">
             <span>#</span>
@@ -1302,7 +1732,7 @@ export function JobManualEditSection({ job, session, previewAssets, saving, onAp
             <span>字幕</span>
             <span>操作</span>
           </div>
-          {projection.remapped.map((subtitle) => {
+          {subtitleTableWindow.rows.map((subtitle) => {
             const selected = selectedSubtitle?.index === subtitle.index;
             const changed = Boolean(subtitleDrafts[subtitle.index]) && subtitleOverrideChanged(
               baseProjection.remapped.find((item) => item.index === subtitle.index),

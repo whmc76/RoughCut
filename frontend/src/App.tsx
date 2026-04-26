@@ -118,7 +118,9 @@ export function App() {
     <div className="app-shell">
       <aside className="app-rail">
         <div className="rail-brand">
-          <div className="rail-brand-mark">RC</div>
+          <div className="rail-brand-mark">
+            <img src="/roughcut-mark.svg" alt="" aria-hidden="true" />
+          </div>
           <div className="rail-brand-copy">
             <strong>RoughCut</strong>
             <span>剪辑流水线控制台</span>

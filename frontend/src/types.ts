@@ -130,9 +130,12 @@ export type JobManualEditSession = {
   source_duration_sec: number;
   source_url?: string | null;
   keep_segments: JobManualEditSegment[];
+  base_keep_segments?: JobManualEditSegment[];
   source_subtitles: JobManualEditSubtitle[];
   projected_subtitles: JobManualEditSubtitle[];
   subtitle_overrides: JobManualEditSubtitleOverride[];
+  draft_saved_at?: string | null;
+  draft_note?: string | null;
   editable: boolean;
   detail?: string | null;
 };
@@ -157,6 +160,14 @@ export type JobManualEditApplyResponse = {
   change_scope: string;
   render_strategy: string;
   rerun_steps: string[];
+  detail?: string | null;
+};
+
+export type JobManualEditDraftResponse = {
+  job_id: string;
+  saved_at: string;
+  keep_segment_count: number;
+  subtitle_override_count: number;
   detail?: string | null;
 };
 

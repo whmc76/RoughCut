@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useParams } from "react-router-dom";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import { api } from "../api";
 import { PageHeader } from "../components/ui/PageHeader";
@@ -16,6 +16,7 @@ export function JobManualEditorPage() {
   const { jobId = "" } = useParams();
   const queryClient = useQueryClient();
   const [notice, setNotice] = useState<{ tone: "success" | "error"; message: string } | null>(null);
+  const [lastDraftSavedAt, setLastDraftSavedAt] = useState<string | null>(null);
 
   const job = useQuery({
     queryKey: ["job", jobId],
@@ -26,19 +27,20 @@ export function JobManualEditorPage() {
     queryKey: ["job-manual-editor", jobId],
     queryFn: () => api.getJobManualEditor(jobId),
     enabled: Boolean(jobId),
+    staleTime: 15_000,
     retry: 1,
   });
   const manualEditorAssets = useQuery({
     queryKey: ["job-manual-editor-assets", jobId],
-    queryFn: async () => {
-      const status = await api.getJobManualEditorAssetsStatus(jobId);
-      if (status.ready || status.warming) return status;
-      return api.warmJobManualEditorAssets(jobId);
-    },
+    queryFn: () => api.warmJobManualEditorAssets(jobId),
     enabled: Boolean(jobId && manualEditor.data?.source_url),
     refetchInterval: (query) => (query.state.data?.ready ? false : 2_500),
+    staleTime: 10_000,
     retry: 1,
   });
+  useEffect(() => {
+    setLastDraftSavedAt(manualEditor.data?.draft_saved_at ?? null);
+  }, [jobId, manualEditor.data?.draft_saved_at]);
   const applyManualEditor = useMutation({
     mutationFn: async (payload: JobManualEditApplyPayload) => api.applyJobManualEditor(jobId, payload),
     onSuccess: async (result) => {
@@ -55,6 +57,19 @@ export function JobManualEditorPage() {
     },
     onError: (error) => {
       setNotice({ tone: "error", message: `手动调整保存失败：${errorMessage(error) || "请刷新后重试。"}` });
+    },
+  });
+  const saveManualEditorDraft = useMutation({
+    mutationFn: async (payload: JobManualEditApplyPayload) => api.saveJobManualEditorDraft(jobId, payload),
+    onSuccess: (result) => {
+      setLastDraftSavedAt(result.saved_at);
+      setNotice({
+        tone: "success",
+        message: result.detail?.trim() || "手动调整草稿已自动保存。",
+      });
+    },
+    onError: (error) => {
+      setNotice({ tone: "error", message: `自动保存失败：${errorMessage(error) || "请刷新后重试。"}` });
     },
   });
 
@@ -100,7 +115,10 @@ export function JobManualEditorPage() {
           session={manualEditor.data}
           previewAssets={manualEditorAssets.data}
           saving={applyManualEditor.isPending}
+          autosaving={saveManualEditorDraft.isPending}
+          autosavedAt={lastDraftSavedAt ?? manualEditor.data.draft_saved_at}
           onApply={(payload) => applyManualEditor.mutate(payload)}
+          onAutoSave={(payload) => saveManualEditorDraft.mutate(payload)}
         />
       ) : (
         <section className="panel">
