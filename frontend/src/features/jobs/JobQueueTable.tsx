@@ -66,7 +66,7 @@ function resolvePendingReviewStep(job: Job) {
 }
 
 function reviewActionLabel(job: Job, t: (key: string) => string) {
-  if (job.status !== "needs_review") return t("jobs.actions.review");
+  if (job.status !== "needs_review") return "";
   const reviewStep = resolvePendingReviewStep(job);
   if (reviewStep?.step_name === "final_review") return "处理成片异常";
   if (reviewStep?.step_name === "summary_review") return "处理内容异常";
@@ -195,6 +195,7 @@ export function JobQueueTable({
               </tr>
             )}
             {jobs.map((job) => {
+              const showReviewAction = job.status === "needs_review";
               const highlightedReviewAction = isHighlightedReviewAction(job);
               const { filenameDescription } = splitVideoDescription(job.video_description);
               const cutEvidenceSummary = formatCutEvidenceSummary(job.timeline_diagnostics);
@@ -282,24 +283,22 @@ export function JobQueueTable({
                   <td>{formatDate(job.updated_at)}</td>
                   <td>
                     <div className="job-queue-actions">
-                      <button
-                        className={classNames(
-                          "button ghost button-sm",
-                          "job-review-cta",
-                          highlightedReviewAction && "job-review-cta-active",
-                        )}
-                        type="button"
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          if (job.status === "needs_review") {
+                      {showReviewAction ? (
+                        <button
+                          className={classNames(
+                            "button ghost button-sm",
+                            "job-review-cta",
+                            highlightedReviewAction && "job-review-cta-active",
+                          )}
+                          type="button"
+                          onClick={(event) => {
+                            event.stopPropagation();
                             onOpenReview?.(job.id);
-                            return;
-                          }
-                          onSelect(job.id);
-                        }}
-                      >
-                        {reviewActionLabel(job, t)}
-                      </button>
+                          }}
+                        >
+                          {reviewActionLabel(job, t)}
+                        </button>
+                      ) : null}
                       <button
                         className="button ghost button-sm"
                         type="button"
