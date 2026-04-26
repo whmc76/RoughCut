@@ -1,3 +1,5 @@
+**文档同步版本：** RoughCut v0.1.5（2026-04-27）
+
 RoughCut 全套自动重建服务（Windows / PowerShell）
 
 ## 一键启动（推荐）

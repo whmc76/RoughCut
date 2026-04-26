@@ -1,5 +1,7 @@
 # IMG_0024.MOV Luckykiss 审核报告
 
+**文档同步版本：** RoughCut v0.1.5（2026-04-27）
+
 ## 1. 已确认对象
 
 - RoughCut `job_id`: `1c077801-edf4-4a2c-ba91-845b3ccc69eb`

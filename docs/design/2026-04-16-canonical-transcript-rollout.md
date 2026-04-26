@@ -1,5 +1,7 @@
 # 2026-04-16 Canonical Transcript Rollout
 
+**文档同步版本：** RoughCut v0.1.5（2026-04-27）
+
 ## 定位
 
 这是一份面向落地的重构方案，不是概念讨论稿。

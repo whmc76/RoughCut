@@ -1,5 +1,7 @@
 # Luckykiss / Kissport 弹射益生菌含片审核计划
 
+**文档同步版本：** RoughCut v0.1.5（2026-04-27）
+
 ## 1. 当前定位结论
 
 - 当前已在 RoughCut PostgreSQL 作业库中锁定目标任务：

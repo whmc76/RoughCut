@@ -56,6 +56,17 @@ type FrequentTerm = {
   occurrences: JobManualEditSubtitle[];
 };
 
+type ManualEditUndoSnapshot = {
+  segments: KeepSegment[];
+  selectedSegmentIndex: number;
+  selectedSubtitleIndex: number | null;
+  editingSubtitleIndex: number | null;
+  currentSubtitleDraftText: string;
+  subtitleDrafts: Record<number, SubtitleDraft>;
+  editorNote: string;
+  videoTransform: JobManualVideoTransform;
+};
+
 const REGION_COLOR = "rgba(34, 197, 94, 0.22)";
 const REGION_ACTIVE_COLOR = "rgba(20, 184, 166, 0.36)";
 const MIN_SUBTITLE_DURATION_SEC = 0.08;
@@ -569,6 +580,21 @@ function removeSourceRangesFromSegments(segments: KeepSegment[], rangesToRemove:
   return nextSegments.sort((left, right) => left.start - right.start);
 }
 
+function cloneSubtitleDrafts(drafts: Record<number, SubtitleDraft>) {
+  return Object.fromEntries(
+    Object.entries(drafts).map(([index, draft]) => [Number(index), { ...draft }]),
+  ) as Record<number, SubtitleDraft>;
+}
+
+function cloneUndoSnapshot(snapshot: ManualEditUndoSnapshot): ManualEditUndoSnapshot {
+  return {
+    ...snapshot,
+    segments: snapshot.segments.map((segment) => ({ ...segment })),
+    subtitleDrafts: cloneSubtitleDrafts(snapshot.subtitleDrafts),
+    videoTransform: { ...snapshot.videoTransform },
+  };
+}
+
 export function JobManualEditSection({ job, session, previewAssets, saving, autosaving = false, autosavedAt, detectingRotation = false, onApply, onAutoSave, onDetectRotation }: JobManualEditSectionProps) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const currentSubtitleInputRef = useRef<HTMLInputElement | null>(null);
@@ -582,10 +608,15 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
   const lastAutoSaveSignatureRef = useRef("");
   const resumeAfterSubtitleEditRef = useRef(false);
   const resumeTimelineAfterSubtitleEditRef = useRef(false);
+  const currentEditSnapshotRef = useRef<ManualEditUndoSnapshot | null>(null);
+  const undoStackRef = useRef<ManualEditUndoSnapshot[]>([]);
   const [segments, setSegments] = useState<KeepSegment[]>([]);
   const [selectedSegmentIndex, setSelectedSegmentIndex] = useState(0);
   const [editorNote, setEditorNote] = useState("");
   const [currentSourceTime, setCurrentSourceTime] = useState(0);
+  const [isPreviewPlaying, setIsPreviewPlaying] = useState(false);
+  const [previewVolume, setPreviewVolume] = useState(1);
+  const [previewMuted, setPreviewMuted] = useState(false);
   const [selectedSubtitleIndex, setSelectedSubtitleIndex] = useState<number | null>(null);
   const [editingSubtitleIndex, setEditingSubtitleIndex] = useState<number | null>(null);
   const [currentSubtitleDraftText, setCurrentSubtitleDraftText] = useState("");
@@ -607,7 +638,50 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
   const [sourceVideoSize, setSourceVideoSize] = useState<{ width: number; height: number } | null>(null);
   const [frequentTerms, setFrequentTerms] = useState<FrequentTerm[]>([]);
 
+  const buildUndoSnapshot = (): ManualEditUndoSnapshot => ({
+    segments: segments.map((segment) => ({ ...segment })),
+    selectedSegmentIndex,
+    selectedSubtitleIndex,
+    editingSubtitleIndex,
+    currentSubtitleDraftText,
+    subtitleDrafts: cloneSubtitleDrafts(subtitleDrafts),
+    editorNote,
+    videoTransform: { ...normalizeVideoTransform(videoTransform) },
+  });
+
+  const recordUndoSnapshot = () => {
+    const snapshot = currentEditSnapshotRef.current ? cloneUndoSnapshot(currentEditSnapshotRef.current) : buildUndoSnapshot();
+    const stack = undoStackRef.current;
+    const snapshotSignature = JSON.stringify(snapshot);
+    if (stack.length && JSON.stringify(stack[stack.length - 1]) === snapshotSignature) return;
+    stack.push(snapshot);
+    if (stack.length > 80) stack.shift();
+  };
+
+  const undoLastEdit = () => {
+    const snapshot = undoStackRef.current.pop();
+    if (!snapshot) return false;
+    const restored = cloneUndoSnapshot(snapshot);
+    pauseEditedTimeline();
+    setSegments(restored.segments);
+    setSelectedSegmentIndex(restored.selectedSegmentIndex);
+    setSelectedSubtitleIndex(restored.selectedSubtitleIndex);
+    setEditingSubtitleIndex(null);
+    setCurrentSubtitleDraftText("");
+    setSubtitleDrafts(restored.subtitleDrafts);
+    setEditorNote(restored.editorNote);
+    setVideoTransform(restored.videoTransform);
+    setRotationDraft(restored.videoTransform.rotation_cw);
+    setResolutionDraft(restored.videoTransform);
+    setRotationDialogOpen(false);
+    setResolutionDialogOpen(false);
+    resumeAfterSubtitleEditRef.current = false;
+    resumeTimelineAfterSubtitleEditRef.current = false;
+    return true;
+  };
+
   useEffect(() => {
+    undoStackRef.current = [];
     setSegments(session.keep_segments.map((segment) => ({ start: segment.start, end: segment.end })));
     setSelectedSegmentIndex(0);
     setSelectedSubtitleIndex(null);
@@ -644,6 +718,10 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
     resumeAfterSubtitleEditRef.current = false;
     resumeTimelineAfterSubtitleEditRef.current = false;
   }, [session.job_id, session.timeline_id, session.timeline_version, session.keep_segments, session.subtitle_overrides, session.video_transform]);
+
+  useEffect(() => {
+    currentEditSnapshotRef.current = buildUndoSnapshot();
+  }, [currentSubtitleDraftText, editorNote, editingSubtitleIndex, segments, selectedSegmentIndex, selectedSubtitleIndex, subtitleDrafts, videoTransform]);
 
   const effectiveSegments = useMemo(
     () => segments.filter((segment) => segment.end > segment.start + 0.05),
@@ -901,6 +979,7 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
           .filter((segment) => segment.end > segment.start + 0.05)
           .sort((left, right) => left.start - right.start);
         if (!nextSegments.length) return;
+        recordUndoSnapshot();
         setSegments(nextSegments);
         setSelectedSegmentIndex((current) => Math.min(current, nextSegments.length - 1));
       };
@@ -1057,7 +1136,8 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
     if (!video || !projection.ranges.length) return;
     timelinePlaybackRef.current = true;
     const currentRange = projection.ranges.find((range) => currentSourceTime >= range.sourceStart && currentSourceTime <= range.sourceEnd);
-    if (!currentRange) {
+    const shouldRestart = !currentRange || currentOutputTime >= Math.max(0, totalOutputDuration - 0.08);
+    if (shouldRestart) {
       video.currentTime = projection.ranges[0].sourceStart;
       setCurrentSourceTime(projection.ranges[0].sourceStart);
     }
@@ -1066,7 +1146,38 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
 
   const pauseEditedTimeline = () => {
     timelinePlaybackRef.current = false;
+    setIsPreviewPlaying(false);
     void videoRef.current?.pause();
+  };
+
+  const toggleEditedTimelinePlayback = () => {
+    if (isPreviewPlaying) {
+      pauseEditedTimeline();
+      return;
+    }
+    void playEditedTimeline();
+  };
+
+  const applyPreviewVolume = (volume: number, muted = previewMuted) => {
+    const nextVolume = clamp(volume, 0, 1);
+    setPreviewVolume(nextVolume);
+    setPreviewMuted(muted || nextVolume <= 0);
+    const video = videoRef.current;
+    if (!video) return;
+    video.volume = nextVolume;
+    video.muted = muted || nextVolume <= 0;
+  };
+
+  const togglePreviewMuted = () => {
+    const nextMuted = !previewMuted;
+    setPreviewMuted(nextMuted);
+    const video = videoRef.current;
+    if (!video) return;
+    video.muted = nextMuted;
+    if (!nextMuted && video.volume <= 0) {
+      video.volume = previewVolume > 0 ? previewVolume : 0.6;
+      setPreviewVolume(video.volume);
+    }
   };
 
   const pauseForSubtitleEdit = () => {
@@ -1077,13 +1188,13 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
     timelinePlaybackRef.current = false;
   };
 
-  const resumeAfterSubtitleEdit = () => {
+  const resumeAfterSubtitleEdit = (options?: { force?: boolean }) => {
     const shouldResume = resumeAfterSubtitleEditRef.current;
     const shouldResumeTimeline = resumeTimelineAfterSubtitleEditRef.current;
     resumeAfterSubtitleEditRef.current = false;
     resumeTimelineAfterSubtitleEditRef.current = false;
-    if (!shouldResume) return;
-    if (shouldResumeTimeline) {
+    if (!shouldResume && !options?.force) return;
+    if (shouldResumeTimeline || options?.force) {
       void playEditedTimeline();
       return;
     }
@@ -1091,6 +1202,7 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
   };
 
   const restoreInitialSegments = () => {
+    recordUndoSnapshot();
     setSegments(session.keep_segments.map((segment) => ({ start: segment.start, end: segment.end })));
     setSelectedSegmentIndex(0);
     setSelectedSubtitleIndex(null);
@@ -1129,6 +1241,7 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
 
   const applyRotationDraft = () => {
     const nextRotation = normalizeRotationValue(rotationDraft);
+    recordUndoSnapshot();
     setVideoTransform((current) => ({ ...normalizeVideoTransform(current), rotation_cw: nextRotation }));
     setRotationDraft(nextRotation);
     setRotationDialogOpen(false);
@@ -1150,6 +1263,7 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
       resolution_mode: resolutionDraft.resolution_mode,
       resolution_preset: resolutionDraft.resolution_preset,
     });
+    recordUndoSnapshot();
     setVideoTransform(nextTransform);
     setResolutionDraft(nextTransform);
     setResolutionDialogOpen(false);
@@ -1164,11 +1278,13 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
 
   const removeSelectedSegment = () => {
     if (selectedSegmentIndex < 0 || selectedSegmentIndex >= effectiveSegments.length) return;
+    recordUndoSnapshot();
     setSegments((current) => current.filter((_, index) => index !== selectedSegmentIndex));
     setSelectedSegmentIndex((current) => Math.max(0, current - 1));
   };
 
   const updateSelectedSegment = (field: "start" | "end", nextValue: number) => {
+    recordUndoSnapshot();
     setSegments((current) =>
       current.map((segment, index) => {
         if (index !== selectedSegmentIndex) return segment;
@@ -1187,6 +1303,7 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
   };
 
   const updateSubtitleDraft = (subtitle: JobManualEditSubtitle, patch: SubtitleDraft) => {
+    recordUndoSnapshot();
     setSelectedSubtitleIndex(subtitle.index);
     setSubtitleDrafts((current) => {
       const existing = current[subtitle.index] ?? {};
@@ -1211,11 +1328,11 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
     jumpToOutputTime(subtitle.start_time);
   };
 
-  const commitCurrentSubtitleEdit = (options?: { resume?: boolean }) => {
+  const commitCurrentSubtitleEdit = (options?: { resume?: boolean; forceResume?: boolean }) => {
     if (!selectedSubtitle || editingSubtitleIndex !== selectedSubtitle.index) return;
     updateSubtitleDraft(selectedSubtitle, { text_final: currentSubtitleDraftText });
     setEditingSubtitleIndex(null);
-    if (options?.resume) resumeAfterSubtitleEdit();
+    if (options?.resume) resumeAfterSubtitleEdit({ force: options.forceResume });
   };
 
   const clearSelectedSubtitleText = () => {
@@ -1232,6 +1349,7 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
     const sourceRanges = outputRangeToSourceRanges(selectedSubtitle.start_time, selectedSubtitle.end_time, projection.ranges);
     const nextSegments = removeSourceRangesFromSegments(effectiveSegments, sourceRanges);
     if (!nextSegments.length) return;
+    recordUndoSnapshot();
     setSegments(nextSegments);
     setSelectedSegmentIndex((current) => clamp(current, 0, nextSegments.length - 1));
     updateSubtitleDraft(selectedSubtitle, { delete: true });
@@ -1242,6 +1360,7 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
     const replacement = (termReplacementDrafts[term.normalized] || "").trim();
     if (!replacement || replacement === term.term) return;
     const pattern = new RegExp(escapeRegExp(term.term), "g");
+    recordUndoSnapshot();
     setSubtitleDrafts((current) => {
       const next = { ...current };
       for (const subtitle of projection.remapped) {
@@ -1312,6 +1431,7 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
       ...Object.keys(subtitleDrafts).map((index) => Number(index)),
     ];
     const nextIndex = Math.max(0, ...existingIndexes) + 1;
+    recordUndoSnapshot();
     setSubtitleDrafts((current) => ({
       ...current,
       [selectedSubtitle.index]: {
@@ -1334,6 +1454,7 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
     const index = projection.remapped.findIndex((subtitle) => subtitle.index === selectedSubtitle.index);
     const nextSubtitle = index >= 0 ? projection.remapped[index + 1] : null;
     if (!nextSubtitle) return;
+    recordUndoSnapshot();
     setSubtitleDrafts((current) => ({
       ...current,
       [selectedSubtitle.index]: {
@@ -1351,6 +1472,7 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
 
   const shiftAllSubtitles = (delta: number) => {
     if (!projection.remapped.length) return;
+    recordUndoSnapshot();
     setSubtitleDrafts((current) => {
       const next = { ...current };
       for (const subtitle of projection.remapped) {
@@ -1368,6 +1490,7 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
 
   const enforceSubtitleGaps = () => {
     let cursor = 0;
+    recordUndoSnapshot();
     setSubtitleDrafts((current) => {
       const next = { ...current };
       for (const subtitle of projection.remapped) {
@@ -1389,6 +1512,7 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
   };
 
   const resetSubtitleDraft = (subtitle: JobManualEditSubtitle) => {
+    recordUndoSnapshot();
     setSubtitleDrafts((current) => {
       const next = { ...current };
       delete next[subtitle.index];
@@ -1440,21 +1564,23 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
     const handleKeyDown = (event: KeyboardEvent) => {
       const textEntryTarget = isTextEntryTarget(event.target);
       const saveShortcut = (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s";
+      const undoShortcut = (event.ctrlKey || event.metaKey) && !event.shiftKey && event.key.toLowerCase() === "z";
       if (saveShortcut) {
         event.preventDefault();
         if (session.editable && !saving && onApply) handleApply();
+        return;
+      }
+      if (undoShortcut) {
+        if (textEntryTarget) return;
+        event.preventDefault();
+        undoLastEdit();
         return;
       }
       if (textEntryTarget) return;
 
       if (event.code === "Space") {
         event.preventDefault();
-        const video = videoRef.current;
-        if (video && !video.paused) {
-          pauseEditedTimeline();
-        } else {
-          void playEditedTimeline();
-        }
+        toggleEditedTimelinePlayback();
         return;
       }
 
@@ -1721,6 +1847,7 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
         <span><kbd>Alt</kbd> + <kbd>[</kbd>/<kbd>]</kbd> 字幕 ±10ms</span>
         <span><kbd>A</kbd>/<kbd>S</kbd> 设字幕起止</span>
         <span><kbd>J</kbd>/<kbd>K</kbd> 上/下字幕</span>
+        <span><kbd>Ctrl/⌘</kbd> + <kbd>Z</kbd> 撤销</span>
         <span><kbd>Ctrl/⌘</kbd> + <kbd>S</kbd> 立即重渲染</span>
       </div>
 
@@ -1773,30 +1900,82 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
               {previewDisabled ? (
                 <div className="notice">当前机器拿不到原片本地路径，暂时不能内嵌预览，但仍可调整并保存时间线。</div>
               ) : (
-                <div className="manual-editor-video-frame" style={rotatedPreviewStyle}>
+                <div
+                  className="manual-editor-video-frame"
+                  style={rotatedPreviewStyle}
+                  role="button"
+                  tabIndex={0}
+                  onClick={toggleEditedTimelinePlayback}
+                  onKeyDown={(event) => {
+                    if (event.key !== "Enter") return;
+                    event.preventDefault();
+                    toggleEditedTimelinePlayback();
+                  }}
+                  aria-label={isPreviewPlaying ? "暂停输出时间轴预览" : "播放输出时间轴预览"}
+                >
                   <video
                     ref={videoRef}
                     className="manual-editor-video"
                     src={session.source_url ?? undefined}
                     preload="metadata"
                     playsInline
-                    onLoadedMetadata={rememberVideoMetadata}
+                    onLoadedMetadata={(event) => {
+                      rememberVideoMetadata(event);
+                      event.currentTarget.volume = previewVolume;
+                      event.currentTarget.muted = previewMuted;
+                    }}
+                    onPlay={() => setIsPreviewPlaying(true)}
                     onTimeUpdate={syncPreviewTime}
                     onSeeked={syncPreviewTime}
                     onPause={() => {
-                      if (videoRef.current?.paused) timelinePlaybackRef.current = false;
+                      if (videoRef.current?.paused) {
+                        timelinePlaybackRef.current = false;
+                        setIsPreviewPlaying(false);
+                      }
+                    }}
+                    onEnded={() => {
+                      timelinePlaybackRef.current = false;
+                      setIsPreviewPlaying(false);
                     }}
                   />
+                  <div className="manual-editor-preview-controlbar" onClick={(event) => event.stopPropagation()}>
+                    <button
+                      type="button"
+                      className="manual-editor-preview-play"
+                      disabled={previewDisabled || !effectiveSegments.length}
+                      onClick={toggleEditedTimelinePlayback}
+                      aria-label={isPreviewPlaying ? "暂停输出时间轴预览" : "播放输出时间轴预览"}
+                    >
+                      {isPreviewPlaying ? "暂停" : "播放"}
+                    </button>
+                    <div className="manual-editor-preview-volume" onPointerDown={(event) => event.stopPropagation()}>
+                      <button
+                        type="button"
+                        className="manual-editor-preview-icon-button"
+                        onClick={togglePreviewMuted}
+                        aria-label={previewMuted || previewVolume <= 0 ? "恢复声音" : "静音"}
+                      >
+                        {previewMuted || previewVolume <= 0 ? "静音" : "音量"}
+                      </button>
+                      <input
+                        type="range"
+                        min={0}
+                        max={1}
+                        step={0.01}
+                        value={previewMuted ? 0 : previewVolume}
+                        onChange={(event) => applyPreviewVolume(Number(event.target.value), false)}
+                        aria-label="预览音量"
+                      />
+                    </div>
+                    <span>{formatSeconds(currentOutputTime)} / {formatSeconds(totalOutputDuration)}</span>
+                  </div>
                 </div>
               )}
               {currentVideoRotation ? <div className="manual-editor-rotation-status">当前预览已顺时针旋转 {currentVideoRotation}°，该参数会自动保存并用于重渲染。</div> : null}
 
               <div className="manual-editor-controls">
-                <button type="button" className="button primary" disabled={previewDisabled || !effectiveSegments.length} onClick={() => void playEditedTimeline()}>
-                  播放输出时间轴
-                </button>
-                <button type="button" className="button ghost" disabled={previewDisabled} onClick={pauseEditedTimeline}>
-                  暂停
+                <button type="button" className="button primary" disabled={previewDisabled || !effectiveSegments.length} onClick={toggleEditedTimelinePlayback}>
+                  {isPreviewPlaying ? "暂停输出预览" : "播放输出预览"}
                 </button>
                 <button type="button" className="button ghost" disabled={!selectedSegment} onClick={() => selectedSegment && jumpToOutputTime(sourceTimeToOutputTime(selectedSegment.start, projection.ranges))}>
                   跳到当前片段
@@ -1820,7 +1999,7 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
                     onKeyDown={(event) => {
                       if (event.key !== "Enter" || event.nativeEvent.isComposing) return;
                       event.preventDefault();
-                      commitCurrentSubtitleEdit({ resume: true });
+                      commitCurrentSubtitleEdit({ resume: true, forceResume: true });
                       event.currentTarget.blur();
                     }}
                     aria-label="编辑当前字幕"

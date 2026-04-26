@@ -1,5 +1,7 @@
 # 2026-04-15 Agentic Subtitle Correction Architecture
 
+**文档同步版本：** RoughCut v0.1.5（2026-04-27）
+
 ## 定位
 
 这是一份当前已落地链路的 contract 文档，不是继续扩散补丁的提案草图。

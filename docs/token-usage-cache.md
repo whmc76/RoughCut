@@ -1,5 +1,7 @@
 # Token Usage And Cache
 
+**文档同步版本：** RoughCut v0.1.5（2026-04-27）
+
 ## 已落地能力
 
 - `GET /api/v1/jobs/{job_id}/token-usage`

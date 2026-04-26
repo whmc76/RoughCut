@@ -1,5 +1,7 @@
 # 2026-04-16 Canonical Transcript Execution Plan
 
+**文档同步版本：** RoughCut v0.1.5（2026-04-27）
+
 ## 定位
 
 这是一份重构收口和 live 准入的执行文档，不是架构讨论稿。

@@ -1,5 +1,7 @@
 # Correction Framework Refactor
 
+**文档同步版本：** RoughCut v0.1.5（2026-04-27）
+
 ## Why
 
 The old proofreading and verification path had four partially overlapping systems:

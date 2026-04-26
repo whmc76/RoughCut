@@ -1,5 +1,7 @@
 # 2026-04-15 Agentic Subtitle Correction Artifact Contracts
 
+**文档同步版本：** RoughCut v0.1.5（2026-04-27）
+
 ## 说明
 
 这是主文档的附录，只记录当前已落地 artifact 的结构边界。

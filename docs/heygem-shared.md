@@ -1,5 +1,7 @@
 # Shared GPU Services
 
+**文档同步版本：** RoughCut v0.1.5（2026-04-27）
+
 RoughCut now points at the real standalone repositories under `E:/WorkSpace` instead of the old in-repo aggregate stack.
 
 - `http://127.0.0.1:49202` for HeyGem video preview/render

@@ -1,5 +1,7 @@
 # Manual Editor Open Source Alignment
 
+**文档同步版本：** RoughCut v0.1.5（2026-04-27）
+
 ## Baseline
 
 RoughCut manual editing mode should use proven editing concepts instead of growing a custom timeline widget.

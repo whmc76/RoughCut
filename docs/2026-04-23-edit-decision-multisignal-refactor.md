@@ -1,5 +1,7 @@
 # Edit Decision Multisignal Refactor
 
+**文档同步版本：** RoughCut v0.1.5（2026-04-27）
+
 ## Goal
 
 RoughCut should not treat silence as disposable by default. A silent region can be a meaningful product showcase, hands-on operation, detail appreciation, or transition beat. A spoken region can also be disposable when it is a clear interruption, false start, or retake marker.

@@ -1,5 +1,7 @@
 # Verification Framework Execution Checklist
 
+**文档同步版本：** RoughCut v0.1.5（2026-04-27）
+
 ## This round
 
 - [x] 固化独立 `Entity Catalog`，覆盖当前高频 EDC 品牌、型号、别名和类目关键词
