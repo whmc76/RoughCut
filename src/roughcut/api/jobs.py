@@ -2491,19 +2491,11 @@ async def get_download_url(
     variant: str = "packaged",
     session: AsyncSession = Depends(get_session),
 ):
-    result = await session.execute(
-        select(RenderOutput)
-        .where(RenderOutput.job_id == job_id, RenderOutput.status == "done")
-        .order_by(RenderOutput.created_at.desc())
-    )
-    render_output = result.scalar_one_or_none()
-    if not render_output:
-        raise HTTPException(status_code=404, detail="Rendered output not found")
-
     variant_value = str(variant or "packaged").strip().lower()
     if variant_value not in {"packaged", "plain"}:
         raise HTTPException(status_code=400, detail="variant must be 'packaged' or 'plain'")
-    _resolve_download_variant_path(render_output, variant_value)
+    render_output, artifact_payload = await _load_download_context(job_id, session)
+    _resolve_download_variant_path(render_output, artifact_payload, variant_value)
     return {
         "url": f"/api/v1/jobs/{job_id}/download/file?variant={variant_value}",
         "expires_in": None,
@@ -2515,13 +2507,8 @@ async def list_downloadable_files(
     job_id: uuid.UUID,
     session: AsyncSession = Depends(get_session),
 ):
-    render_output = await _load_latest_done_render_output(job_id, session)
-    artifact = await _load_latest_optional_artifact(
-        session,
-        job_id=job_id,
-        artifact_types=("render_outputs",),
-    )
-    files = _collect_downloadable_files(render_output, artifact.data_json if artifact else None)
+    render_output, artifact_payload = await _load_download_context(job_id, session)
+    files = _collect_downloadable_files(render_output, artifact_payload)
     return JobDownloadFilesOut(job_id=str(job_id), files=[JobDownloadFileOut(**item) for item in files])
 
 
@@ -2535,13 +2522,8 @@ async def download_selected_files_zip(
     job = await session.get(Job, job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    render_output = await _load_latest_done_render_output(job_id, session)
-    artifact = await _load_latest_optional_artifact(
-        session,
-        job_id=job_id,
-        artifact_types=("render_outputs",),
-    )
-    files = _collect_downloadable_files(render_output, artifact.data_json if artifact else None)
+    render_output, artifact_payload = await _load_download_context(job_id, session)
+    files = _collect_downloadable_files(render_output, artifact_payload)
     file_map = {item["id"]: item for item in files}
     selected_ids = [str(item or "").strip() for item in body.file_ids if str(item or "").strip()]
     if not selected_ids:
@@ -2585,20 +2567,12 @@ async def download_rendered_file(
     variant: str = "packaged",
     session: AsyncSession = Depends(get_session),
 ):
-    result = await session.execute(
-        select(RenderOutput)
-        .where(RenderOutput.job_id == job_id, RenderOutput.status == "done")
-        .order_by(RenderOutput.created_at.desc())
-    )
-    render_output = result.scalar_one_or_none()
-    if not render_output:
-        raise HTTPException(status_code=404, detail="Rendered output not found")
-
     variant_value = str(variant or "packaged").strip().lower()
     if variant_value not in {"packaged", "plain"}:
         raise HTTPException(status_code=400, detail="variant must be 'packaged' or 'plain'")
 
-    download_path = _resolve_download_variant_path(render_output, variant_value)
+    render_output, artifact_payload = await _load_download_context(job_id, session)
+    download_path = _resolve_download_variant_path(render_output, artifact_payload, variant_value)
     filename = download_path.name
     media_type = "video/mp4" if download_path.suffix.lower() == ".mp4" else "application/octet-stream"
     return FileResponse(path=download_path, filename=filename, media_type=media_type)
@@ -2709,16 +2683,36 @@ def _resolve_publication_creator_profile(creator_profile_id: str | None) -> dict
     return next((profile for profile in profiles if active_publication_credentials(profile)), profiles[0] if profiles else None)
 
 
-async def _load_latest_done_render_output(job_id: uuid.UUID, session: AsyncSession) -> RenderOutput:
+async def _load_download_context(job_id: uuid.UUID, session: AsyncSession) -> tuple[RenderOutput | None, dict[str, Any]]:
+    render_output = await _load_latest_done_render_output(job_id, session)
+    artifact = await _load_latest_optional_artifact(
+        session,
+        job_id=job_id,
+        artifact_types=("render_outputs",),
+    )
+    artifact_payload = artifact.data_json if artifact and isinstance(artifact.data_json, dict) else {}
+    files = _collect_downloadable_files(render_output, artifact_payload)
+    if not files:
+        raise HTTPException(status_code=404, detail="Rendered output not found")
+    return render_output, artifact_payload
+
+
+async def _load_latest_done_render_output(job_id: uuid.UUID, session: AsyncSession) -> RenderOutput | None:
     result = await session.execute(
         select(RenderOutput)
-        .where(RenderOutput.job_id == job_id, RenderOutput.status == "done")
+        .where(RenderOutput.job_id == job_id, RenderOutput.status == "done", RenderOutput.output_path.is_not(None))
         .order_by(RenderOutput.created_at.desc())
     )
     render_output = result.scalar_one_or_none()
-    if not render_output:
-        raise HTTPException(status_code=404, detail="Rendered output not found")
-    return render_output
+    if render_output is not None:
+        return render_output
+
+    fallback_result = await session.execute(
+        select(RenderOutput)
+        .where(RenderOutput.job_id == job_id, RenderOutput.output_path.is_not(None))
+        .order_by(RenderOutput.created_at.desc())
+    )
+    return fallback_result.scalar_one_or_none()
 
 
 _DOWNLOADABLE_RENDER_KEYS: tuple[tuple[str, str, str, bool], ...] = (
@@ -2734,7 +2728,7 @@ _DOWNLOADABLE_RENDER_KEYS: tuple[tuple[str, str, str, bool], ...] = (
 )
 
 
-def _collect_downloadable_files(render_output: RenderOutput, payload: dict[str, Any] | None) -> list[dict[str, Any]]:
+def _collect_downloadable_files(render_output: RenderOutput | None, payload: dict[str, Any] | None) -> list[dict[str, Any]]:
     payload = payload if isinstance(payload, dict) else {}
     files: list[dict[str, Any]] = []
     seen_paths: set[str] = set()
@@ -2769,7 +2763,7 @@ def _collect_downloadable_files(render_output: RenderOutput, payload: dict[str, 
     for index, value in enumerate(payload.get("cover_variants") or []):
         add_file(f"cover_variants:{index}", f"封面备选 {index + 1}", "image", value, recommended=False)
 
-    if not any(item["id"] == "packaged_mp4" for item in files):
+    if render_output is not None and not any(item["id"] == "packaged_mp4" for item in files):
         add_file("packaged_mp4", "成片（包装版）", "video", render_output.output_path, recommended=True)
 
     files.sort(key=lambda item: _download_file_sort_key(str(item["id"])))
@@ -2811,13 +2805,21 @@ def _unique_zip_member_name(filename: str, used_names: set[str]) -> str:
     return candidate
 
 
-def _resolve_download_variant_path(render_output: RenderOutput, variant: str) -> Path:
-    base_output = Path(str(render_output.output_path or "")).expanduser()
-    if not base_output.exists():
+def _resolve_download_variant_path(render_output: RenderOutput | None, payload: dict[str, Any] | None, variant: str) -> Path:
+    payload = payload if isinstance(payload, dict) else {}
+    if variant == "packaged":
+        path = _first_existing_download_path(payload.get("packaged_mp4"), render_output.output_path if render_output else None)
+        if path is not None:
+            return path
         raise HTTPException(status_code=404, detail="Rendered output file not found")
 
-    if variant == "packaged":
-        return base_output
+    plain_path = _first_existing_download_path(payload.get("plain_mp4"))
+    if plain_path is not None:
+        return plain_path
+
+    base_output = _first_existing_download_path(payload.get("packaged_mp4"), render_output.output_path if render_output else None)
+    if base_output is None:
+        raise HTTPException(status_code=404, detail="Rendered output file not found")
 
     candidate_names = [
         base_output.name.replace("成片", "素板"),
@@ -2830,6 +2832,17 @@ def _resolve_download_variant_path(render_output: RenderOutput, variant: str) ->
             return candidate
 
     raise HTTPException(status_code=404, detail="Plain rendered output not found")
+
+
+def _first_existing_download_path(*values: Any) -> Path | None:
+    for value in values:
+        path_text = str(value or "").strip()
+        if not path_text:
+            continue
+        path = Path(path_text).expanduser()
+        if path.exists() and path.is_file():
+            return path
+    return None
 
 
 def _revoke_running_steps(steps: list[JobStep]) -> None:
