@@ -7503,8 +7503,6 @@ textarea.input {
   border-radius: 12px;
   background: #111318;
   aspect-ratio: 16 / 9;
-  display: grid;
-  place-items: center;
   overflow: hidden;
   cursor: pointer;
 }
@@ -7514,15 +7512,27 @@ textarea.input {
   outline-offset: 3px;
 }
 
-.manual-editor-video {
+.manual-editor-video-stage {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  z-index: 1;
+  width: var(--manual-video-stage-width, 100%);
+  height: var(--manual-video-stage-height, 100%);
+  transform: translate(-50%, -50%);
+}
+
+.manual-editor-video,
+.manual-editor-rotation-preview video {
+  position: absolute;
+  left: 50%;
+  top: 50%;
   width: var(--manual-video-width, 100%);
   height: var(--manual-video-height, 100%);
-  justify-self: center;
-  align-self: center;
   border-radius: 12px;
   background: #111318;
   object-fit: contain;
-  transform: rotate(var(--manual-video-rotation, 0deg));
+  transform: translate(-50%, -50%) rotate(var(--manual-video-rotation, 0deg));
   transform-origin: center;
 }
 
@@ -7622,6 +7632,7 @@ textarea.input {
 }
 
 .manual-editor-rotation-preview {
+  position: relative;
   display: grid;
   place-items: center;
   justify-self: center;
@@ -7630,17 +7641,6 @@ textarea.input {
   border-radius: 12px;
   background: #111318;
   overflow: hidden;
-}
-
-.manual-editor-rotation-preview video {
-  width: var(--manual-video-width, 100%);
-  height: var(--manual-video-height, 100%);
-  justify-self: center;
-  align-self: center;
-  border-radius: 12px;
-  object-fit: contain;
-  transform: rotate(var(--manual-video-rotation, 0deg));
-  transform-origin: center;
 }
 
 .manual-editor-resolution-preview {

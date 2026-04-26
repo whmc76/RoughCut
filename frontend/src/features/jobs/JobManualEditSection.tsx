@@ -1648,27 +1648,24 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
     const rawHeight = Math.max(1, sourceVideoSize?.height || 9);
     const rawAspect = rawWidth / rawHeight;
     const frameAspectValue = currentVideoTransform.aspect_ratio === "source" ? 16 / 9 : aspectRatioNumber(currentVideoTransform.aspect_ratio);
-    let unrotatedWidth: number;
-    let unrotatedHeight: number;
-    if (rotation === 90 || rotation === 270) {
-      const rotatedAspect = 1 / rawAspect;
-      if (rotatedAspect >= frameAspectValue) {
-        unrotatedWidth = rawAspect;
-        unrotatedHeight = frameAspectValue;
-      } else {
-        unrotatedWidth = 1 / frameAspectValue;
-        unrotatedHeight = 1 / rawAspect;
-      }
-    } else if (rawAspect >= frameAspectValue) {
-      unrotatedWidth = 1;
-      unrotatedHeight = frameAspectValue / rawAspect;
+    const quarterTurn = rotation === 90 || rotation === 270;
+    const displayedAspect = quarterTurn ? 1 / rawAspect : rawAspect;
+    let stageWidth: number;
+    let stageHeight: number;
+    if (displayedAspect >= frameAspectValue) {
+      stageWidth = 1;
+      stageHeight = frameAspectValue / displayedAspect;
     } else {
-      unrotatedWidth = rawAspect / frameAspectValue;
-      unrotatedHeight = 1;
+      stageWidth = displayedAspect / frameAspectValue;
+      stageHeight = 1;
     }
+    const unrotatedWidth = quarterTurn ? stageHeight / stageWidth / frameAspectValue : 1;
+    const unrotatedHeight = quarterTurn ? (stageWidth / stageHeight) * frameAspectValue : 1;
     const boundedWidth = Math.min(900, Math.max(260, Math.round(frameAspectValue * 460)));
     return {
       "--manual-video-rotation": `${rotation}deg`,
+      "--manual-video-stage-width": `${stageWidth * 100}%`,
+      "--manual-video-stage-height": `${stageHeight * 100}%`,
       "--manual-video-width": `${unrotatedWidth * 100}%`,
       "--manual-video-height": `${unrotatedHeight * 100}%`,
       aspectRatio: currentVideoTransform.aspect_ratio === "source" ? "16 / 9" : aspectRatioCssValue(currentVideoTransform.aspect_ratio),
@@ -1718,7 +1715,9 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
             </div>
 
             <div className="manual-editor-rotation-preview" style={rotationDialogPreviewStyle}>
-              <video src={session.source_url ?? undefined} muted playsInline preload="metadata" onLoadedMetadata={rememberVideoMetadata} />
+              <div className="manual-editor-video-stage">
+                <video src={session.source_url ?? undefined} muted playsInline preload="metadata" onLoadedMetadata={rememberVideoMetadata} />
+              </div>
             </div>
 
             <div className="manual-editor-actions">
@@ -1913,31 +1912,33 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
                   }}
                   aria-label={isPreviewPlaying ? "暂停输出时间轴预览" : "播放输出时间轴预览"}
                 >
-                  <video
-                    ref={videoRef}
-                    className="manual-editor-video"
-                    src={session.source_url ?? undefined}
-                    preload="metadata"
-                    playsInline
-                    onLoadedMetadata={(event) => {
-                      rememberVideoMetadata(event);
-                      event.currentTarget.volume = previewVolume;
-                      event.currentTarget.muted = previewMuted;
-                    }}
-                    onPlay={() => setIsPreviewPlaying(true)}
-                    onTimeUpdate={syncPreviewTime}
-                    onSeeked={syncPreviewTime}
-                    onPause={() => {
-                      if (videoRef.current?.paused) {
+                  <div className="manual-editor-video-stage">
+                    <video
+                      ref={videoRef}
+                      className="manual-editor-video"
+                      src={session.source_url ?? undefined}
+                      preload="metadata"
+                      playsInline
+                      onLoadedMetadata={(event) => {
+                        rememberVideoMetadata(event);
+                        event.currentTarget.volume = previewVolume;
+                        event.currentTarget.muted = previewMuted;
+                      }}
+                      onPlay={() => setIsPreviewPlaying(true)}
+                      onTimeUpdate={syncPreviewTime}
+                      onSeeked={syncPreviewTime}
+                      onPause={() => {
+                        if (videoRef.current?.paused) {
+                          timelinePlaybackRef.current = false;
+                          setIsPreviewPlaying(false);
+                        }
+                      }}
+                      onEnded={() => {
                         timelinePlaybackRef.current = false;
                         setIsPreviewPlaying(false);
-                      }
-                    }}
-                    onEnded={() => {
-                      timelinePlaybackRef.current = false;
-                      setIsPreviewPlaying(false);
-                    }}
-                  />
+                      }}
+                    />
+                  </div>
                   <div className="manual-editor-preview-controlbar" onClick={(event) => event.stopPropagation()}>
                     <button
                       type="button"
