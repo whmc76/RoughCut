@@ -6422,13 +6422,43 @@ async def run_edit_plan(job_id: str) -> dict:
         )
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            audio_path = await _resolve_storage_reference(
-                str(audio_artifact.storage_path or ""),
-                tmpdir=tmpdir,
-                default_name="audio.wav",
-            )
+            audio_path: Path | None = None
+            try:
+                audio_path = await _resolve_storage_reference(
+                    str(audio_artifact.storage_path or ""),
+                    tmpdir=tmpdir,
+                    default_name="audio.wav",
+                )
+            except FileNotFoundError:
+                logger.warning(
+                    "Audio artifact missing during edit_plan; rebuilding from source job=%s storage_path=%s",
+                    job.id,
+                    audio_artifact.storage_path,
+                )
+                await _set_step_progress(
+                    session,
+                    step,
+                    detail="音频派生文件缺失，正在从源视频重新提取",
+                    progress=0.3,
+                    metadata_updates={"audio_artifact_rebuilt": True},
+                )
+                source_for_audio = await _resolve_source(job, tmpdir)
+                rebuilt_audio_path = Path(tmpdir) / "audio.wav"
+                try:
+                    await extract_audio(source_for_audio, rebuilt_audio_path)
+                except NoAudioStreamError:
+                    audio_path = None
+                    metadata = dict(step.metadata_ or {})
+                    metadata["has_audio"] = False
+                    metadata["audio_optional"] = True
+                    step.metadata_ = metadata
+                else:
+                    audio_key = job_key(str(job.id), "audio.wav")
+                    await get_storage().async_upload_file(rebuilt_audio_path, audio_key)
+                    audio_artifact.storage_path = audio_key
+                    audio_path = rebuilt_audio_path
             await _set_step_progress(session, step, detail="检测静音和明显废话段", progress=0.5)
-            silences = detect_silence(audio_path)
+            silences = detect_silence(audio_path) if audio_path is not None else []
             scene_boundaries = []
             local_source_candidate = Path(str(job.source_path or "")).expanduser()
             if not local_source_candidate.exists():
