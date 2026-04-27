@@ -3,7 +3,12 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { api } from "../../api";
 import { EMPTY_ROOT_FORM, type RootForm } from "./constants";
-import type { WatchInventorySmartMergeGroup, WatchRoot } from "../../types";
+import type { WatchInventorySmartMergeGroup, WatchInventoryStatus, WatchRoot } from "../../types";
+
+type InventoryEnqueueRequest = {
+  relativePaths?: string[];
+  enqueueAll?: boolean;
+};
 
 function serializeRootForm(form: RootForm): string {
   return JSON.stringify({
@@ -16,6 +21,43 @@ function serializeRootForm(form: RootForm): string {
     scan_mode: form.scan_mode,
     ingest_mode: form.ingest_mode,
   });
+}
+
+function markInventoryItemsDispatched(
+  current: WatchInventoryStatus | undefined,
+  relativePaths: string[],
+  options: {
+    enqueueAll?: boolean;
+    dedupeReason: string;
+  },
+): WatchInventoryStatus | undefined {
+  if (!current) return current;
+  const pending = current.inventory.pending ?? [];
+  const enqueueAll = options.enqueueAll ?? false;
+  const selectedPathSet = new Set(relativePaths);
+  const selectedItems = enqueueAll ? pending : pending.filter((item) => selectedPathSet.has(item.relative_path));
+  if (!selectedItems.length) return current;
+
+  const selectedAbsolutePaths = new Set(selectedItems.map((item) => item.path));
+  const remainingPending = pending.filter((item) => !selectedAbsolutePaths.has(item.path));
+  const dispatchedItems = selectedItems.map((item) => ({
+    ...item,
+    status: "deduped",
+    dedupe_reason: options.dedupeReason,
+    matched_job_id: item.matched_job_id ?? null,
+  }));
+
+  return {
+    ...current,
+    status: current.status || "done",
+    updated_at: new Date().toISOString(),
+    pending_count: remainingPending.length,
+    deduped_count: (current.inventory.deduped ?? []).length + dispatchedItems.length,
+    inventory: {
+      pending: remainingPending,
+      deduped: [...(current.inventory.deduped ?? []), ...dispatchedItems],
+    },
+  };
 }
 
 export function useWatchRootWorkspace() {
@@ -172,19 +214,54 @@ export function useWatchRootWorkspace() {
   });
 
   const enqueue = useMutation({
-    mutationFn: (enqueueAll: boolean) => api.enqueueInventory(selectedRootId!, selectedPending, enqueueAll),
+    mutationFn: ({ relativePaths, enqueueAll = false }: InventoryEnqueueRequest) =>
+      api.enqueueInventory(selectedRootId!, relativePaths ?? selectedPending, enqueueAll),
+    onMutate: async ({ relativePaths, enqueueAll = false }) => {
+      const inventoryKey = ["watch-root-inventory", selectedRootId];
+      await queryClient.cancelQueries({ queryKey: inventoryKey });
+      const previousInventory = queryClient.getQueryData<WatchInventoryStatus>(inventoryKey);
+      const selectedPaths = relativePaths ?? selectedPending;
+      queryClient.setQueryData<WatchInventoryStatus | undefined>(inventoryKey, (current) =>
+        markInventoryItemsDispatched(current, selectedPaths, {
+          enqueueAll,
+          dedupeReason: "job:pending",
+        }),
+      );
+      return { previousInventory };
+    },
     onSuccess: () => {
       setSelectedPending([]);
       refreshRoots();
+    },
+    onError: (_error, _variables, context) => {
+      if (context?.previousInventory) {
+        queryClient.setQueryData(["watch-root-inventory", selectedRootId], context.previousInventory);
+      }
     },
   });
 
   const merge = useMutation({
     mutationFn: () => api.mergeInventory(selectedRootId!, selectedPending),
+    onMutate: async () => {
+      const inventoryKey = ["watch-root-inventory", selectedRootId];
+      await queryClient.cancelQueries({ queryKey: inventoryKey });
+      const previousInventory = queryClient.getQueryData<WatchInventoryStatus>(inventoryKey);
+      queryClient.setQueryData<WatchInventoryStatus | undefined>(inventoryKey, (current) =>
+        markInventoryItemsDispatched(current, selectedPending, {
+          dedupeReason: "job:merged",
+        }),
+      );
+      return { previousInventory };
+    },
     onSuccess: () => {
       setSelectedPending([]);
       setSmartMergeGroups([]);
       refreshRoots();
+    },
+    onError: (_error, _variables, context) => {
+      if (context?.previousInventory) {
+        queryClient.setQueryData(["watch-root-inventory", selectedRootId], context.previousInventory);
+      }
     },
   });
 
@@ -200,10 +277,26 @@ export function useWatchRootWorkspace() {
 
   const mergeSuggested = useMutation({
     mutationFn: (relativePaths: string[]) => api.mergeInventory(selectedRootId!, relativePaths),
+    onMutate: async (relativePaths) => {
+      const inventoryKey = ["watch-root-inventory", selectedRootId];
+      await queryClient.cancelQueries({ queryKey: inventoryKey });
+      const previousInventory = queryClient.getQueryData<WatchInventoryStatus>(inventoryKey);
+      queryClient.setQueryData<WatchInventoryStatus | undefined>(inventoryKey, (current) =>
+        markInventoryItemsDispatched(current, relativePaths, {
+          dedupeReason: "job:merged",
+        }),
+      );
+      return { previousInventory };
+    },
     onSuccess: () => {
       setSelectedPending([]);
       setSmartMergeGroups([]);
       refreshRoots();
+    },
+    onError: (_error, _variables, context) => {
+      if (context?.previousInventory) {
+        queryClient.setQueryData(["watch-root-inventory", selectedRootId], context.previousInventory);
+      }
     },
   });
 

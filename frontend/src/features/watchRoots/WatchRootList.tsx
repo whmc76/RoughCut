@@ -63,7 +63,7 @@ export function WatchRootList({
                       onToggleEnabled(root);
                     }}
                   >
-                    {root.enabled ? t("watch.list.disabled") : t("watch.list.enabled")}
+                    {actionRootId === root.id ? t("watch.list.actioning") : root.enabled ? t("watch.list.disabled") : t("watch.list.enabled")}
                   </button>
                   <button
                     className="button danger button-sm"
@@ -74,7 +74,7 @@ export function WatchRootList({
                       onDelete(root);
                     }}
                   >
-                    {t("watch.form.delete")}
+                    {actionRootId === root.id ? t("watch.list.actioning") : t("watch.form.delete")}
                   </button>
                 </ListActions>
               </div>

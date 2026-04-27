@@ -81,10 +81,20 @@ export function WatchRootsPage() {
                 isScanning={workspace.scan.isPending}
                 scanError={workspace.scan.error instanceof Error ? workspace.scan.error.message : undefined}
                 isEnqueueing={workspace.enqueue.isPending}
+                enqueueError={workspace.enqueue.error instanceof Error ? workspace.enqueue.error.message : undefined}
                 isMerging={workspace.merge.isPending}
+                mergeError={
+                  workspace.merge.error instanceof Error
+                    ? workspace.merge.error.message
+                    : workspace.mergeSuggested.error instanceof Error
+                      ? workspace.mergeSuggested.error.message
+                      : undefined
+                }
                 isSuggesting={workspace.suggestMerge.isPending}
+                suggestError={workspace.suggestMerge.error instanceof Error ? workspace.suggestMerge.error.message : undefined}
                 onScan={(force) => workspace.scan.mutate(force)}
-                onEnqueue={(enqueueAll) => workspace.enqueue.mutate(enqueueAll)}
+                onEnqueue={(enqueueAll) => workspace.enqueue.mutate({ enqueueAll })}
+                onEnqueueItem={(relativePath) => workspace.enqueue.mutate({ relativePaths: [relativePath] })}
                 onMerge={() => workspace.merge.mutate()}
                 onSmartMergeSuggest={() => workspace.suggestMerge.mutate()}
                 isSmartGroupMerging={workspace.mergeSuggested.isPending}
