@@ -1286,13 +1286,17 @@ function Get-ProcessMatches {
     param([string]$Pattern)
 
     return @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
-        $_.Name -eq "python.exe" `
-            -and $_.ExecutablePath `
-            -and (Test-Path $Python) `
-            -and [System.StringComparer]::OrdinalIgnoreCase.Equals($_.ExecutablePath, $Python) `
-            -and $_.CommandLine `
-            -and $_.CommandLine -match $Pattern
+        $_.CommandLine `
+            -and $_.CommandLine -match $Pattern `
+            -and $_.Name -in @("python.exe", "roughcut.exe")
     } | Sort-Object ProcessId)
+}
+
+function Get-RoughCutCommandMatchPattern {
+    param([string]$Arguments)
+
+    $escapedArguments = [regex]::Escape($Arguments) -replace "\\ ", "\s+"
+    return "roughcut(?:\.cli|\.exe`"?)\s+$escapedArguments"
 }
 
 function Stop-RoughCutProcess {
@@ -1335,15 +1339,15 @@ function Stop-RoughCutServices {
     param([switch]$StopDockerServices)
 
     Write-Host "Stopping existing RoughCut services..." -ForegroundColor Cyan
-    Stop-RoughCutProcess -Name "API" -Pattern "roughcut\.cli api --host 127\.0\.0\.1 --port"
-    Stop-RoughCutProcess -Name "Orchestrator" -Pattern "roughcut\.cli orchestrator --poll-interval"
-    Stop-RoughCutProcess -Name "Media worker" -Pattern "roughcut\.cli worker --queue media_queue"
+    Stop-RoughCutProcess -Name "API" -Pattern (Get-RoughCutCommandMatchPattern "api --host 127.0.0.1 --port")
+    Stop-RoughCutProcess -Name "Orchestrator" -Pattern (Get-RoughCutCommandMatchPattern "orchestrator --poll-interval")
+    Stop-RoughCutProcess -Name "Media worker" -Pattern (Get-RoughCutCommandMatchPattern "worker --queue media_queue")
     Stop-RoughCutProcess -Name "Media worker" -Pattern "celery -A roughcut\.pipeline\.celery_app:celery_app worker --queues=media_queue"
-    Stop-RoughCutProcess -Name "LLM worker" -Pattern "roughcut\.cli worker --queue llm_queue"
+    Stop-RoughCutProcess -Name "LLM worker" -Pattern (Get-RoughCutCommandMatchPattern "worker --queue llm_queue")
     Stop-RoughCutProcess -Name "LLM worker" -Pattern "celery -A roughcut\.pipeline\.celery_app:celery_app worker --queues=llm_queue"
-    Stop-RoughCutProcess -Name "Agent worker" -Pattern "roughcut\.cli worker --queue agent_queue"
+    Stop-RoughCutProcess -Name "Agent worker" -Pattern (Get-RoughCutCommandMatchPattern "worker --queue agent_queue")
     Stop-RoughCutProcess -Name "Agent worker" -Pattern "celery -A roughcut\.pipeline\.celery_app:celery_app worker --queues=agent_queue"
-    Stop-RoughCutProcess -Name "Watcher" -Pattern "roughcut\.cli watcher"
+    Stop-RoughCutProcess -Name "Watcher" -Pattern (Get-RoughCutCommandMatchPattern "watcher")
 
     if ($StopDockerServices) {
         Write-Host "Stopping docker compose services..." -ForegroundColor Cyan
@@ -1589,7 +1593,7 @@ function Start-RoughCutWorkerProcess {
 
     $workerNode = Get-RoughCutWorkerNodeName -Queue $Queue
     $matchPatterns = @(
-        [regex]::Escape("roughcut.cli worker --queue $Queue"),
+        (Get-RoughCutCommandMatchPattern "worker --queue $Queue"),
         [regex]::Escape("celery -A roughcut.pipeline.celery_app:celery_app worker --queues=$Queue")
     )
 
@@ -1613,7 +1617,7 @@ function Start-RoughCutWorkerProcess {
         "--without-gossip",
         "--without-mingle"
     )
-    $matchPattern = [regex]::Escape("roughcut.cli worker --queue $Queue --pool solo --concurrency 1 --hostname $workerNode --without-gossip --without-mingle")
+    $matchPattern = Get-RoughCutCommandMatchPattern "worker --queue $Queue --pool solo --concurrency 1 --hostname $workerNode --without-gossip --without-mingle"
 
     foreach ($logPath in @($StdoutPath, $StderrPath)) {
         $logDirectory = Split-Path -Parent $logPath
@@ -1853,20 +1857,20 @@ if (-not $NoWatcher) {
     Start-RoughCutProcess `
         -Name "Watcher" `
         -Arguments @("-m", "roughcut.cli", "watcher", $WatchDir, "--language", "zh-CN") `
-        -MatchPattern ([regex]::Escape("roughcut.cli watcher $WatchDir --language zh-CN")) `
+        -MatchPattern (Get-RoughCutCommandMatchPattern "watcher $WatchDir --language zh-CN") `
         -StdoutPath (Join-Path $RepoRoot "logs\watcher.out.log") `
         -StderrPath (Join-Path $RepoRoot "logs\watcher.err.log")
 }
 Start-RoughCutProcess `
     -Name "API" `
     -Arguments @("-m", "roughcut.cli", "api", "--host", "127.0.0.1", "--port", "$Port") `
-    -MatchPattern ([regex]::Escape("roughcut.cli api --host 127.0.0.1 --port $Port")) `
+    -MatchPattern (Get-RoughCutCommandMatchPattern "api --host 127.0.0.1 --port $Port") `
     -StdoutPath (Join-Path $RepoRoot "logs\api.out.log") `
     -StderrPath (Join-Path $RepoRoot "logs\api.err.log")
 Start-RoughCutProcess `
     -Name "Orchestrator" `
     -Arguments @("-m", "roughcut.cli", "orchestrator", "--poll-interval", "2") `
-    -MatchPattern ([regex]::Escape("roughcut.cli orchestrator --poll-interval 2")) `
+    -MatchPattern (Get-RoughCutCommandMatchPattern "orchestrator --poll-interval 2") `
     -StdoutPath (Join-Path $RepoRoot "logs\orchestrator.out.log") `
     -StderrPath (Join-Path $RepoRoot "logs\orchestrator.err.log")
 Start-RoughCutWorkerProcess `
