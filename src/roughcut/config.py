@@ -683,9 +683,12 @@ def uses_codex_auth_helper(settings: Any) -> bool:
         return False
     helper_kind = str(os.getenv("ROUGHCUT_OPENAI_AUTH_HELPER_KIND", "") or "").strip().lower()
     if helper_kind:
-        return helper_kind == "codex"
+        return helper_kind in {"codex", "codex_cli", "codex-bridge", "codex_bridge"}
     helper_command = str(getattr(settings, "openai_api_key_helper", "") or "").strip().lower()
-    return "codex" in helper_command
+    command_head = helper_command.split(maxsplit=1)[0] if helper_command else ""
+    if Path(command_head).name in {"codex", "codex.exe"}:
+        return True
+    return "print_codex_access_token.py" in helper_command
 
 
 def _has_openai_codex_reasoning_bridge(settings: Any) -> bool:

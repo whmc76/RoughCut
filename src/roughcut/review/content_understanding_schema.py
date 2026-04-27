@@ -108,7 +108,9 @@ class ContentUnderstanding:
     orchestration_trace: list[str] = field(default_factory=list)
 
 
-def _normalize_understanding_value(value: str) -> str:
+def _normalize_understanding_value(value: Any) -> str:
+    if isinstance(value, dict):
+        value = value.get("name") or value.get("value") or value.get("term") or ""
     normalized = str(value or "").strip()
     if normalized.lower() in {"unknown", "n/a", "none", "null"}:
         return ""
@@ -231,12 +233,12 @@ def parse_content_understanding_payload(data: Any) -> ContentUnderstanding:
     return ContentUnderstanding(
         video_type=content_video_type,
         content_domain=str(payload.get("content_domain") or "").strip(),
-        primary_subject=str(payload.get("primary_subject") or "").strip(),
+        primary_subject=_normalize_understanding_value(payload.get("primary_subject")),
         semantic_facts=parse_content_semantic_facts_payload(payload.get("semantic_facts")),
         subject_entities=_parse_subject_entities_payload(payload.get("subject_entities")),
         observed_entities=_parse_subject_entities_payload(payload.get("observed_entities")),
         resolved_entities=_parse_subject_entities_payload(payload.get("resolved_entities")),
-        resolved_primary_subject=str(payload.get("resolved_primary_subject") or "").strip(),
+        resolved_primary_subject=_normalize_understanding_value(payload.get("resolved_primary_subject")),
         entity_resolution_map=parse_entity_resolution_payload(payload.get("entity_resolution_map")),
         video_theme=str(payload.get("video_theme") or "").strip(),
         summary=str(payload.get("summary") or "").strip(),

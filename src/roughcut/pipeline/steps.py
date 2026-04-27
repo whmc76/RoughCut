@@ -141,6 +141,7 @@ from roughcut.review.platform_copy import (
 )
 from roughcut.review.evidence_types import build_correction_framework_trace
 from roughcut.review.subtitle_memory import build_subtitle_review_memory, build_transcription_prompt, resolve_transcription_category_scope
+from roughcut.review.transcription_context_prior import infer_transcription_context_prior
 from roughcut.review.subtitle_consistency import (
     ARTIFACT_TYPE_SUBTITLE_CONSISTENCY_REPORT,
     build_subtitle_consistency_report,
@@ -350,9 +351,6 @@ def _workflow_template_subject_domain(workflow_template: str | None) -> str | No
 
 
 def _supported_memory_subject_domain(value: str | None) -> str | None:
-    normalized = normalize_subject_domain(value)
-    if not normalized:
-        return None
     known_domains = {
         "edc",
         "outdoor",
@@ -375,6 +373,12 @@ def _supported_memory_subject_domain(value: str | None) -> str | None:
         "toy",
         "coding",
     }
+    raw = str(value or "").strip().lower()
+    if raw in known_domains:
+        return raw
+    normalized = normalize_subject_domain(value)
+    if not normalized:
+        return None
     return normalized if normalized in known_domains else None
 
 
@@ -403,6 +407,18 @@ def _infer_subject_domain_for_memory(
     explicit_subject_domain = _supported_memory_subject_domain(subject_domain or (content_profile or {}).get("subject_domain"))
     if explicit_subject_domain:
         return explicit_subject_domain
+    transcription_prior = (content_profile or {}).get("transcription_context_prior")
+    if isinstance(transcription_prior, dict):
+        try:
+            prior_confidence = float(transcription_prior.get("confidence", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            prior_confidence = 0.0
+        if prior_confidence >= 0.55:
+            prior_subject_domain = _supported_memory_subject_domain(transcription_prior.get("category_scope"))
+            if not prior_subject_domain:
+                prior_subject_domain = _supported_memory_subject_domain(transcription_prior.get("subject_domain"))
+            if prior_subject_domain:
+                return prior_subject_domain
     subject_type_domain = _infer_subject_domain_from_profile_subject_type(content_profile)
     if subject_type_domain:
         return subject_type_domain
@@ -4477,6 +4493,15 @@ async def run_transcribe(job_id: str) -> dict:
         glossary_terms = glossary_result.scalars().all()
         source_context = await _load_content_profile_source_context(session, job_id=job.id)
         source_context_profile = {"source_context": source_context} if source_context else {}
+        settings = get_settings()
+        with llm_task_route("subtitle", search_enabled=False, settings=settings):
+            transcription_context_prior = await infer_transcription_context_prior(
+                source_name=job.source_name,
+                source_context=source_context,
+                workflow_template=job.workflow_template,
+            )
+        if transcription_context_prior:
+            source_context_profile["transcription_context_prior"] = transcription_context_prior
         subject_domain = _infer_subject_domain_for_memory(
             workflow_template=job.workflow_template,
             subtitle_items=None,
@@ -4514,8 +4539,11 @@ async def run_transcribe(job_id: str) -> dict:
             include_recent_terms=False,
             include_recent_examples=False,
         )
-        settings = get_settings()
         _set_step_correction_framework_metadata(step, settings)
+        if transcription_context_prior:
+            metadata = dict(step.metadata_ or {})
+            metadata["transcription_context_prior"] = transcription_context_prior
+            step.metadata_ = metadata
         transcription_prompt = build_transcription_prompt(
             source_name=job.source_name,
             workflow_template=job.workflow_template,

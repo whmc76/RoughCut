@@ -1,6 +1,7 @@
 from roughcut.review.content_profile import (
     _build_subject_aware_unboxing_cover_hook,
     _default_engagement_question,
+    _format_content_understanding_failure_reason,
     _is_generic_engagement_question,
     select_workflow_template,
 )
@@ -66,3 +67,11 @@ def test_review_keywords_prefer_full_suffix_compounds() -> None:
 
     assert "Ultra版本" in keywords
     assert "黑绿配色" in keywords
+
+
+def test_content_understanding_failure_reason_preserves_provider_root_cause() -> None:
+    reason = _format_content_understanding_failure_reason(
+        ValueError("OpenAI API credential is not configured")
+    )
+
+    assert reason == "内容理解调用失败：OpenAI API credential is not configured"

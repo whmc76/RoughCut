@@ -267,7 +267,7 @@ _NON_BRAND_CONTEXT_PREFIXES = {
 _CATEGORY_SCOPE_KEYWORDS: dict[str, tuple[str, ...]] = {
     "food": ("零食", "含片", "益生菌", "薄荷糖", "口香糖", "糖果", "软糖", "饼干", "巧克力", "口味", "入口", "咀嚼", "luckykiss", "kisspod", "kissport"),
     "bag": ("包", "背包", "双肩包", "机能包", "斜挎包", "胸包", "快取包", "副包", "分仓", "挂点", "背负", "收纳"),
-    "flashlight": ("手电", "电筒", "筒身", "流明", "泛光", "聚光", "色温", "夜骑", "尾按", "尾绳孔", "绳孔", "补光", "UV"),
+    "flashlight": ("手电", "电筒", "筒身", "流明", "泛光", "聚光", "色温", "夜骑", "尾按", "尾绳孔", "绳孔", "补光", "UV", "NITECORE", "奈特科尔", "EDC17", "EDC23", "EDC37"),
     "knife": ("刀", "折刀", "重力刀", "开合", "锁定", "背夹", "刃型", "柄材", "钢材", "雕刻", "电镀"),
     "tools": ("工具钳", "钳", "批头", "螺丝刀", "扳手", "尖嘴钳", "钢丝钳"),
 }
@@ -401,12 +401,17 @@ def build_subtitle_review_memory(
         effective_glossary_terms,
         confirmed_entities=confirmed_entities,
     )
+    transcription_context_prior = _normalize_transcription_context_prior(
+        (content_profile or {}).get("transcription_context_prior")
+    )
     manual_guidance_texts = _collect_manual_guidance_texts(content_profile)
     context_text = " ".join(
         str(item or "")
         for item in [
             source_name or "",
             *((content_profile or {}).get(key) or "" for key in ("subject_brand", "subject_model", "subject_type", "video_theme", "summary", "hook_line")),
+            transcription_context_prior.get("subject_summary") or "",
+            *list(transcription_context_prior.get("allowed_hotwords") or []),
             *manual_guidance_texts,
         ]
     )
@@ -416,7 +421,8 @@ def build_subtitle_review_memory(
         value = _normalize_term(term)
         if not value:
             return
-        if not _term_supported_by_subject_domain(value, resolved_subject_domain):
+        source_kind = str((metadata or {}).get("source_kind") or "").strip()
+        if source_kind != "llm_context_prior" and not _term_supported_by_subject_domain(value, resolved_subject_domain):
             return
         if active_category_scope and metadata and not _metadata_supported_by_category_scope(metadata, active_category_scope):
             return
@@ -428,13 +434,30 @@ def build_subtitle_review_memory(
                 candidate = str(metadata.get(key) or "").strip()
                 if candidate and not merged.get(key):
                     merged[key] = candidate
+            if bool(metadata.get("evidence_strong")):
+                merged["evidence_strong"] = True
         if _term_value_matches_context(value, context_text):
             merged["context_match"] = True
+            merged["evidence_strong"] = True
         if merged:
             term_metadata[value] = merged
 
     for key in ("subject_brand", "subject_model", "subject_type", "video_theme"):
         remember_term((content_profile or {}).get(key), 5, metadata={"source_kind": "content_profile"})
+
+    prior_scope = str(transcription_context_prior.get("category_scope") or "").strip()
+    prior_domain = str(transcription_context_prior.get("subject_domain") or "").strip()
+    for term in transcription_context_prior.get("allowed_hotwords") or []:
+        remember_term(
+            term,
+            12,
+            metadata={
+                "source_kind": "llm_context_prior",
+                "domain": prior_domain,
+                "category_scope": prior_scope,
+                "evidence_strong": True,
+            },
+        )
 
     for text in manual_guidance_texts:
         remember_term(text, 4, metadata={"source_kind": "manual_guidance"})
@@ -512,9 +535,15 @@ def build_subtitle_review_memory(
         if _should_promote_correction_alias(original_value, corrected_value):
             wrong = _normalize_alias_value(original_value)
             correct = _normalize_alias_value(corrected_value)
-            if wrong and correct and wrong != correct and (wrong, correct) not in seen_aliases:
+            if (
+                wrong
+                and correct
+                and wrong != correct
+                and (wrong, correct) not in seen_aliases
+                and _alias_has_strong_current_evidence(wrong, correct, context_text)
+            ):
                 seen_aliases.add((wrong, correct))
-                alias_pairs.append({"wrong": wrong, "correct": correct})
+                alias_pairs.append({"wrong": wrong, "correct": correct, "evidence_strong": True})
 
     for term in effective_glossary_terms:
         is_transcription_seed = _workflow_template_matches_transcription_seed(term, workflow_template)
@@ -670,12 +699,15 @@ def build_subtitle_review_memory(
         for _, wrong, correct_form in sorted(collected, key=lambda item: (item[0], len(item[1]), item[2], item[1])):
             pair = (wrong, correct_form)
             if pair not in seen_aliases:
+                if not _alias_has_strong_current_evidence(wrong, correct_form, context_text):
+                    continue
                 seen_aliases.add(pair)
                 alias_pairs.append(
                     {
                         "wrong": wrong,
                         "correct": correct_form,
                         "category": str(term.get("category") or ""),
+                        "evidence_strong": True,
                     }
                 )
 
@@ -685,8 +717,10 @@ def build_subtitle_review_memory(
         for wrong in _DEFAULT_TERM_ALIASES.get(term, ()):
             pair = (wrong, term)
             if pair not in seen_aliases:
+                if not _alias_has_strong_current_evidence(wrong, term, context_text):
+                    continue
                 seen_aliases.add(pair)
-                alias_pairs.append({"wrong": wrong, "correct": term, "category": "brand" if _is_protected_brand_term(term) else ""})
+                alias_pairs.append({"wrong": wrong, "correct": term, "category": "brand" if _is_protected_brand_term(term) else "", "evidence_strong": True})
 
     for entity in confirmed_entities:
         for item in entity.get("model_aliases") or []:
@@ -710,6 +744,8 @@ def build_subtitle_review_memory(
         "transcription_seed_terms": transcription_seed_terms[:16],
         "transcription_seed_term_details": transcription_seed_term_details[:16],
         "aliases": alias_pairs[:120],
+        "blocked_terms": list(transcription_context_prior.get("blocked_hotwords") or [])[:24],
+        "transcription_context_prior": transcription_context_prior,
         "confirmed_entities": confirmed_entities[:6],
         "negative_alias_pairs": list((user_memory or {}).get("negative_alias_pairs") or [])[:40],
         "learned_hotwords": list((user_memory or {}).get("learned_hotwords") or [])[:24],
@@ -779,6 +815,52 @@ def _collect_manual_guidance_texts(content_profile: dict[str, Any] | None) -> li
                 append(item)
 
     return values
+
+
+def _normalize_transcription_context_prior(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {
+            "subject_summary": "",
+            "subject_domain": "",
+            "category_scope": "",
+            "allowed_hotwords": [],
+            "blocked_hotwords": [],
+            "confidence": 0.0,
+        }
+    allowed = _normalize_prior_term_list(value.get("allowed_hotwords") or value.get("allowed_terms"), limit=12)
+    blocked = _normalize_prior_term_list(value.get("blocked_hotwords") or value.get("blocked_terms"), limit=24)
+    try:
+        confidence = max(0.0, min(1.0, float(value.get("confidence", 0.0) or 0.0)))
+    except (TypeError, ValueError):
+        confidence = 0.0
+    category_scope = _category_scope_from_domain(value.get("category_scope") or value.get("subject_domain"))
+    normalized_subject_domain = str(normalize_subject_domain(value.get("subject_domain")) or "").strip().lower()
+    if category_scope and normalized_subject_domain not in _SUPPORTED_MEMORY_DOMAINS:
+        normalized_subject_domain = category_scope
+    return {
+        "subject_summary": " ".join(str(value.get("subject_summary") or value.get("summary") or "").strip().split())[:160],
+        "subject_domain": normalized_subject_domain,
+        "category_scope": category_scope,
+        "allowed_hotwords": allowed,
+        "blocked_hotwords": blocked,
+        "confidence": round(confidence, 3),
+    }
+
+
+def _normalize_prior_term_list(value: Any, *, limit: int) -> list[str]:
+    raw_items = value if isinstance(value, (list, tuple, set)) else [value]
+    items: list[str] = []
+    seen: set[str] = set()
+    for item in raw_items:
+        text = " ".join(str(item or "").strip().split())[:64]
+        key = text.casefold()
+        if not text or key in seen:
+            continue
+        seen.add(key)
+        items.append(text)
+        if len(items) >= limit:
+            break
+    return items
 
 
 def _merge_confirmed_entities(*entity_groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -968,6 +1050,10 @@ def _resolve_context_category_scope(
     scopes: set[str] = set()
     scopes.update(_category_scopes_for_text(source_name))
     profile = content_profile or {}
+    prior = _normalize_transcription_context_prior(profile.get("transcription_context_prior"))
+    prior_scope = str(prior.get("category_scope") or "").strip().lower()
+    if prior_scope:
+        scopes.add(prior_scope)
     for key in ("subject_type", "subject_model", "subject_brand", "video_theme", "summary", "hook_line"):
         scopes.update(_category_scopes_for_text(profile.get(key)))
     for text in _collect_manual_guidance_texts(profile):
@@ -987,6 +1073,10 @@ def resolve_transcription_category_scope(
     explicit_subject_type_scopes = _category_scopes_for_text((content_profile or {}).get("subject_type"))
     if len(explicit_subject_type_scopes) == 1:
         return next(iter(explicit_subject_type_scopes))
+    prior = _normalize_transcription_context_prior((content_profile or {}).get("transcription_context_prior"))
+    prior_scope = str(prior.get("category_scope") or "").strip().lower()
+    if prior_scope and float(prior.get("confidence", 0.0) or 0.0) >= 0.55:
+        return prior_scope
     source_name_scopes = _category_scopes_for_text(source_name)
     if len(source_name_scopes) == 1:
         return next(iter(source_name_scopes))
@@ -995,6 +1085,7 @@ def resolve_transcription_category_scope(
     fallback_scope_scores: Counter[str] = Counter()
     source_kind_weights = {
         "content_profile": 6,
+        "llm_context_prior": 6,
         "manual_guidance": 5,
         "confirmed_entity": 5,
         "learned_hotword": 4,
@@ -1107,13 +1198,8 @@ def _prompt_term_item_supported_by_context(
         return False
     normalized_scope = str(category_scope or "").strip().lower()
     if not normalized_scope:
-        return True
-    if bool(item.get("context_match")) or _term_value_matches_context(term, context_text):
-        return True
-    if normalized_scope in _category_scopes_for_text(term):
-        return True
-    source_kind = str(item.get("source_kind") or "").strip()
-    return source_kind in {"content_profile", "manual_guidance"}
+        return _term_has_strong_current_evidence(item, term, context_text)
+    return _term_has_strong_current_evidence(item, term, context_text)
 
 
 def _prompt_alias_supported_by_context(
@@ -1124,6 +1210,8 @@ def _prompt_alias_supported_by_context(
 ) -> bool:
     correct = str(alias_item.get("correct") or "").strip()
     wrong = str(alias_item.get("wrong") or "").strip()
+    if not _alias_has_strong_current_evidence(wrong, correct, context_text):
+        return False
     if _prompt_term_item_supported_by_context(
         term_item,
         correct,
@@ -1131,10 +1219,52 @@ def _prompt_alias_supported_by_context(
         context_text=context_text,
     ):
         return True
-    normalized_scope = str(category_scope or "").strip().lower()
-    if not normalized_scope:
+    return True
+
+
+def _term_has_strong_current_evidence(
+    item: dict[str, Any] | None,
+    term: str,
+    context_text: str,
+) -> bool:
+    normalized = str(term or "").strip()
+    if not normalized:
         return False
-    return _term_value_matches_context(wrong, context_text) or normalized_scope in _category_scopes_for_text(wrong)
+    if isinstance(item, dict) and bool(item.get("evidence_strong")):
+        return True
+    if isinstance(item, dict) and bool(item.get("context_match")):
+        return True
+    return _term_value_matches_context(normalized, context_text)
+
+
+def _alias_has_strong_current_evidence(wrong: str, correct: str, context_text: str) -> bool:
+    return _term_value_matches_context(correct, context_text) or _term_value_matches_context(wrong, context_text)
+
+
+def _review_memory_blocked_terms(review_memory: dict[str, Any] | None) -> list[str]:
+    blocked: list[str] = []
+    seen: set[str] = set()
+    for item in (review_memory or {}).get("blocked_terms") or []:
+        term = str(item or "").strip()
+        key = _compact_subject_text(term).casefold()
+        if not term or not key or key in seen:
+            continue
+        seen.add(key)
+        blocked.append(term)
+    return blocked
+
+
+def _term_blocked_by_prior(term: str, blocked_terms: list[str]) -> bool:
+    term_key = _compact_subject_text(term).casefold()
+    if not term_key:
+        return False
+    for blocked in blocked_terms:
+        blocked_key = _compact_subject_text(blocked).casefold()
+        if not blocked_key:
+            continue
+        if blocked_key in term_key or term_key in blocked_key:
+            return True
+    return False
 
 
 def build_transcription_prompt(
@@ -1168,11 +1298,16 @@ def build_transcription_prompt(
             *_collect_manual_guidance_texts(content_profile),
         ]
     )
+    blocked_terms = _review_memory_blocked_terms(review_memory)
     term_items = [
         dict(item)
         for item in (review_memory or {}).get("terms") or []
         if isinstance(item, dict)
-        and _prompt_term_supported_by_domains(str(item.get("term") or "").strip(), dominant_domains)
+        and not _term_blocked_by_prior(str(item.get("term") or "").strip(), blocked_terms)
+        and (
+            str(item.get("source_kind") or "").strip() == "llm_context_prior"
+            or _prompt_term_supported_by_domains(str(item.get("term") or "").strip(), dominant_domains)
+        )
         and _prompt_term_item_supported_by_context(
             item,
             str(item.get("term") or "").strip(),
@@ -1186,6 +1321,7 @@ def build_transcription_prompt(
         dict(item)
         for item in (review_memory or {}).get("transcription_seed_term_details") or []
         if isinstance(item, dict)
+        and not _term_blocked_by_prior(str(item.get("term") or "").strip(), blocked_terms)
         and _prompt_term_supported_by_domains(str(item.get("term") or "").strip(), dominant_domains)
         and _prompt_term_item_supported_by_context(
             item,
@@ -1204,6 +1340,7 @@ def build_transcription_prompt(
                 hotword_value,
                 dominant_domains,
             )
+            and not _term_blocked_by_prior(hotword_value, blocked_terms)
             and _prompt_term_item_supported_by_context(
                 dict(item),
                 hotword_value,
@@ -1255,6 +1392,8 @@ def build_transcription_prompt(
         for item in (review_memory or {}).get("aliases") or []
         if item.get("wrong")
         and item.get("correct")
+        and not _term_blocked_by_prior(str(item.get("correct") or "").strip(), blocked_terms)
+        and not _term_blocked_by_prior(str(item.get("wrong") or "").strip(), blocked_terms)
         and _prompt_term_supported_by_domains(str(item.get("correct") or "").strip(), dominant_domains)
         and _prompt_alias_supported_by_context(
             item,
@@ -1554,6 +1693,7 @@ def apply_domain_term_corrections(
         prev_text=prev_text,
         next_text=next_text,
     )
+    blocked_terms = _review_memory_blocked_terms(review_memory)
 
     # Keep subtitle correction deterministic: only apply explicit lexical aliases
     # from confirmed entities, correction history, and curated hotword/glossary
@@ -1563,12 +1703,21 @@ def apply_domain_term_corrections(
         correct = str(item.get("correct") or "").strip()
         if not wrong or not correct:
             continue
+        if _term_blocked_by_prior(correct, blocked_terms) or _term_blocked_by_prior(wrong, blocked_terms):
+            continue
+        if not bool(item.get("evidence_strong")):
+            continue
         if _should_skip_confirmed_display_alias(wrong, correct, review_memory):
             continue
         result = re.sub(re.escape(wrong), correct, result, flags=re.IGNORECASE)
 
-    terms = [str(item.get("term") or "").strip() for item in review_memory.get("terms") or []]
-    for term in terms:
+    terms = [dict(item) for item in review_memory.get("terms") or [] if isinstance(item, dict)]
+    for term_item in terms:
+        term = str(term_item.get("term") or "").strip()
+        if _term_blocked_by_prior(term, blocked_terms):
+            continue
+        if not (bool(term_item.get("evidence_strong")) or bool(term_item.get("context_match"))):
+            continue
         if _should_skip_confirmed_display_term(term, review_memory):
             continue
         aliases = _DEFAULT_TERM_ALIASES.get(term, ())

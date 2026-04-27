@@ -7,6 +7,7 @@ from roughcut.config import (
     canonicalize_transcription_provider_name,
     normalize_transcription_provider_name,
     resolve_transcription_provider_plan,
+    uses_codex_auth_helper,
 )
 from roughcut.naming import (
     AVATAR_CAPABILITY_GENERATION,
@@ -20,14 +21,34 @@ from roughcut.naming import (
 
 def test_auth_mode_uses_generic_helper_name() -> None:
     assert normalize_auth_mode("helper") == "helper"
+    assert normalize_auth_mode("codex_compat") == "helper"
     assert normalize_auth_mode("codex") == "api_key"
     assert normalize_auth_mode("claude") == "api_key"
 
-    settings = Settings(_env_file=None, openai_auth_mode="helper", anthropic_auth_mode="helper")
+    settings = Settings(_env_file=None, openai_auth_mode="codex_compat", anthropic_auth_mode="helper")
     _normalize_settings(settings)
 
     assert settings.openai_auth_mode == "helper"
     assert settings.anthropic_auth_mode == "helper"
+
+
+def test_codex_token_helper_uses_cli_bridge_for_responses() -> None:
+    token_helper_settings = Settings(
+        _env_file=None,
+        openai_auth_mode="helper",
+        openai_api_key_helper="python scripts/print_codex_access_token.py",
+    )
+    _normalize_settings(token_helper_settings)
+
+    cli_bridge_settings = Settings(
+        _env_file=None,
+        openai_auth_mode="helper",
+        openai_api_key_helper="codex",
+    )
+    _normalize_settings(cli_bridge_settings)
+
+    assert uses_codex_auth_helper(token_helper_settings) is True
+    assert uses_codex_auth_helper(cli_bridge_settings) is True
 
 
 def test_transcription_aliases_only_keep_canonical_provider_shapes() -> None:

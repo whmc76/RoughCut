@@ -3876,10 +3876,10 @@ async def infer_content_profile(
                 timeout=infer_timeout_sec,
             )
         force_neutral_cover_title = False
-    except Exception:
+    except Exception as exc:
         understanding = _build_failed_content_understanding(
             transcript_excerpt=transcript_excerpt,
-            failure_reason="内容理解推断失败",
+            failure_reason=_format_content_understanding_failure_reason(exc),
         )
         force_neutral_cover_title = True
 
@@ -3988,6 +3988,19 @@ def _build_failed_content_understanding(*, transcript_excerpt: str, failure_reas
         needs_review=True,
         review_reasons=[str(failure_reason or "内容理解暂不可用").strip()],
     )
+
+
+def _format_content_understanding_failure_reason(exc: Exception) -> str:
+    message = " ".join(str(exc or "").strip().split())
+    if not message:
+        message = type(exc).__name__
+    message = message[:240]
+    lowered = message.lower()
+    if "credential" in lowered or "api key" in lowered or "auth" in lowered:
+        return f"内容理解调用失败：{message}"
+    if isinstance(exc, asyncio.TimeoutError):
+        return "内容理解调用超时"
+    return f"内容理解推断失败：{type(exc).__name__}: {message}"
 
 
 def _collect_verification_evidence_texts(

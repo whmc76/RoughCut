@@ -4,6 +4,7 @@ from roughcut.review.content_understanding_schema import (
     ContentUnderstanding,
     SubjectEntity,
     map_content_understanding_to_profile,
+    parse_content_understanding_payload,
 )
 
 
@@ -59,3 +60,34 @@ def test_food_understanding_wins_over_edc_style_hint_in_profile_mapping() -> Non
     assert profile["subject_domain"] == "food"
     assert profile["subject_brand"] == "LUCKYKISS"
     assert "益生菌含片" in profile["subject_type"]
+
+
+def test_dict_primary_subject_payload_maps_to_name_not_repr() -> None:
+    understanding = parse_content_understanding_payload(
+        {
+            "video_type": "unboxing",
+            "content_domain": "flashlight",
+            "primary_subject": {
+                "kind": "primary_product",
+                "name": "傲雷掠夺者2mini战术手电",
+                "brand": "OLIGHT",
+                "model": "掠夺者2mini",
+            },
+            "subject_entities": [
+                {
+                    "kind": "primary_product",
+                    "name": "傲雷掠夺者2mini战术手电",
+                    "brand": "OLIGHT",
+                    "model": "掠夺者2mini",
+                }
+            ],
+            "video_theme": "傲雷掠夺者2mini战术手电开箱",
+            "summary": "开箱傲雷掠夺者2mini战术手电。",
+            "needs_review": False,
+        }
+    )
+
+    profile = map_content_understanding_to_profile(understanding)
+
+    assert "傲雷掠夺者2mini战术手电" in profile["subject_type"]
+    assert "{" not in profile["subject_type"]

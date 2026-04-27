@@ -54,6 +54,11 @@ DEFAULT_CODING_BACKEND_MODELS: dict[str, str] = {
 }
 
 AUTH_MODE_VALUES: tuple[str, ...] = ("api_key", "helper")
+AUTH_MODE_ALIASES: dict[str, str] = {
+    "codex_compat": "helper",
+    "codex-helper": "helper",
+    "codex_helper": "helper",
+}
 
 AVATAR_CAPABILITY_GENERATION = "avatar_generation"
 AVATAR_CAPABILITY_VOICE = "voice_clone"
@@ -108,6 +113,7 @@ def normalize_auth_mode(value: object) -> str:
         value,
         allowed_values=AUTH_MODE_VALUES,
         default="api_key",
+        aliases=AUTH_MODE_ALIASES,
     )
 
 
