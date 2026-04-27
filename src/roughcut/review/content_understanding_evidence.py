@@ -436,12 +436,25 @@ def _merge_semantic_fact_inputs(
         value = _as_text(provided.get(key))
         if value:
             merged[key] = value
-    for key in ("subtitle_lines", "cue_lines", "opening_focus_lines", "closing_focus_lines", "hint_candidates", "entity_like_tokens"):
+    for key in (
+        "subtitle_lines",
+        "cue_lines",
+        "opening_focus_lines",
+        "closing_focus_lines",
+        "editorial_context_lines",
+        "hint_candidates",
+        "entity_like_tokens",
+    ):
         raw = provided.get(key)
         if isinstance(raw, list):
             values = [str(item).strip() for item in raw if str(item).strip()]
             if values:
                 merged[key] = values
+    raw_source_context = provided.get("source_context")
+    if isinstance(raw_source_context, dict):
+        normalized_context = _normalize_source_context(raw_source_context)
+        if normalized_context:
+            merged["source_context"] = normalized_context
     raw_relation_hints = provided.get("relation_hints")
     if isinstance(raw_relation_hints, list):
         relation_hints = [
@@ -484,9 +497,65 @@ def _compact_semantic_value(value: object | None) -> Any | None:
     return text if text else None
 
 
+def _normalize_source_context(value: object | None) -> dict[str, Any]:
+    payload = _as_dict(value)
+    if not payload:
+        return {}
+    normalized: dict[str, Any] = {}
+    for key, limit in (
+        ("source_name", 220),
+        ("video_description", 1200),
+        ("manual_video_summary", 1200),
+        ("manual_video_summary_source", 80),
+        ("manual_video_summary_strength", 80),
+    ):
+        text = _as_text(payload.get(key))
+        if text:
+            normalized[key] = text[:limit]
+    merged_source_names = [
+        _as_text(item)
+        for item in list(payload.get("merged_source_names") or payload.get("related_source_names") or [])
+        if _as_text(item)
+    ]
+    if merged_source_names:
+        normalized["merged_source_names"] = merged_source_names[:12]
+    resolved_feedback = _as_dict(payload.get("resolved_feedback"))
+    if resolved_feedback:
+        normalized["resolved_feedback"] = _compact_semantic_section(resolved_feedback)
+    return normalized
+
+
+def _source_context_lines(source_context: dict[str, Any], *, fallback_source_name: str) -> list[str]:
+    lines: list[str] = []
+
+    def append(label: str, value: object) -> None:
+        text = _as_text(value)
+        if text:
+            lines.append(f"{label}: {text}")
+
+    append("文件名", source_context.get("source_name") or fallback_source_name)
+    append("视频说明", source_context.get("video_description"))
+    append("人工视频摘要", source_context.get("manual_video_summary"))
+    for item in list(source_context.get("merged_source_names") or [])[:6]:
+        append("合并源文件", item)
+    resolved_feedback = _as_dict(source_context.get("resolved_feedback"))
+    for key, label in (
+        ("subject_brand", "说明解析品牌"),
+        ("subject_model", "说明解析型号"),
+        ("subject_type", "说明解析类型"),
+        ("video_theme", "说明解析主题"),
+    ):
+        append(label, resolved_feedback.get(key))
+    return lines[:12]
+
+
 def normalize_evidence_bundle(bundle: object | None) -> dict[str, Any]:
     raw = bundle if isinstance(bundle, dict) else {}
     source_name = _as_text(raw.get("source_name"))
+    raw_candidate_hints = _as_dict(raw.get("candidate_hints"))
+    source_context = _normalize_source_context(raw.get("source_context") or raw_candidate_hints.get("source_context"))
+    if source_name and "source_name" not in source_context:
+        source_context["source_name"] = source_name
     transcript_evidence = _as_dict(raw.get("transcript_evidence"))
     transcript_excerpt = _as_text(raw.get("transcript_excerpt"))
     if not transcript_excerpt:
@@ -501,7 +570,7 @@ def normalize_evidence_bundle(bundle: object | None) -> dict[str, Any]:
     if not visible_text:
         visible_text = ocr_visible_text
 
-    candidate_hints = _as_dict(raw.get("candidate_hints"))
+    candidate_hints = raw_candidate_hints
     visual_hints = _as_dict(raw.get("visual_hints"))
     if not visual_hints:
         visual_hints = _as_dict(candidate_hints.get("visual_hints"))
@@ -518,8 +587,11 @@ def normalize_evidence_bundle(bundle: object | None) -> dict[str, Any]:
     cue_lines = _collect_cue_lines(subtitle_lines, transcript_excerpt)
     opening_focus_lines, closing_focus_lines = _collect_temporal_focus_lines(subtitle_items)
     relation_hints = _collect_relation_hints(cue_lines, transcript_excerpt)
+    editorial_context_lines = _source_context_lines(source_context, fallback_source_name=source_name)
     computed_semantic_inputs = {
         "source_name": source_name,
+        "source_context": source_context,
+        "editorial_context_lines": editorial_context_lines,
         "subtitle_lines": subtitle_lines,
         "cue_lines": cue_lines,
         "opening_focus_lines": opening_focus_lines,
@@ -531,8 +603,8 @@ def normalize_evidence_bundle(bundle: object | None) -> dict[str, Any]:
         "entity_like_tokens": _collect_entity_like_tokens(
             source_name=source_name,
             visible_text=visible_text,
-            cue_lines=cue_lines,
-            hint_candidates=hint_candidates,
+            cue_lines=[*editorial_context_lines, *cue_lines],
+            hint_candidates=[*hint_candidates, *editorial_context_lines],
             relation_hints=relation_hints,
         ),
     }
@@ -542,6 +614,8 @@ def normalize_evidence_bundle(bundle: object | None) -> dict[str, Any]:
         {
             "audio_semantic_evidence": _compact_semantic_section(
                 {
+                    "source_context": source_context,
+                    "editorial_context_lines": editorial_context_lines,
                     "transcript_text": transcript_excerpt,
                     "subtitle_lines": subtitle_lines,
                     "cue_lines": cue_lines,
@@ -564,6 +638,7 @@ def normalize_evidence_bundle(bundle: object | None) -> dict[str, Any]:
         "source_name": source_name,
         "transcript_excerpt": transcript_excerpt,
         "transcript_evidence": transcript_evidence,
+        "source_context": source_context,
         "subtitle_items": subtitle_items,
         "transcript_items": transcript_items,
         "visible_text": visible_text,
@@ -586,10 +661,12 @@ def build_evidence_bundle(
     visual_semantic_evidence: dict[str, Any] | None = None,
     visual_hints: dict[str, Any] | None = None,
     candidate_hints: dict[str, Any] | None = None,
+    source_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return normalize_evidence_bundle(
         {
             "source_name": source_name,
+            "source_context": source_context or {},
             "subtitle_items": subtitle_items or [],
             "transcript_evidence": transcript_evidence or {},
             "transcript_excerpt": transcript_excerpt,

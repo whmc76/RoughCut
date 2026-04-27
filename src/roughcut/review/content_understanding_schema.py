@@ -131,7 +131,7 @@ def normalize_video_type(value: str) -> str:
         ("vlog", ("vlog", "生活", "日常", "出行", "随手", "出门", "探店", "citywalk", "city walk")),
         ("commentary", ("口播", "观点", "评论", "分析", "复盘", "讨论")),
         ("gameplay", ("游戏", "实况", "对局", "直播", "fps", "吃鸡", "局内", "游戏里")),
-        ("food", ("美食", "探店", "餐厅", "试吃", "咖啡", "奶茶", "火锅", "烧烤", "甜品")),
+        ("food", ("美食", "探店", "餐厅", "试吃", "咖啡", "奶茶", "火锅", "烧烤", "甜品", "零食", "含片", "益生菌", "薄荷糖", "口香糖", "糖果")),
     ]
     for fallback, tokens in token_map:
         if any(token in normalized for token in tokens):
@@ -515,7 +515,7 @@ def _infer_subject_domain_from_hinting(value: ContentUnderstanding) -> set[str]:
 def _prefer_subject_domain_from_hints(subject_domain_hints: set[str]) -> str:
     if not subject_domain_hints:
         return ""
-    for hint in ("bag", "edc", "flashlight", "knife", "functional", "food", "vlog", "commentary", "gameplay", "tutorial"):
+    for hint in ("food", "bag", "flashlight", "knife", "functional", "edc", "vlog", "commentary", "gameplay", "tutorial"):
         if hint in subject_domain_hints:
             return hint
     return next(iter(subject_domain_hints))
@@ -551,6 +551,8 @@ def _subject_type_contains_model(subject_type: str, subject_model: str) -> bool:
 def _infer_subject_domain_hints(value: ContentUnderstanding) -> set[str]:
     domain_hints: set[str] = set()
     direct = _normalize_understanding_value(value.content_domain).lower()
+    if any(token in direct for token in ("food", "snack", "candy", "食品", "零食", "含片", "益生菌", "糖果")):
+        domain_hints.add("food")
     if "bag" in direct or "functional" in direct:
         domain_hints.add("bag")
     if "edc" in direct and not domain_hints:
@@ -579,6 +581,8 @@ def _infer_subject_domain_hints(value: ContentUnderstanding) -> set[str]:
         domain_hints.add("flashlight")
     if any(token in type_blob for token in ("刀", "刀具", "折刀", "重力刀", "刀柄", "开刃", "knife")):
         domain_hints.add("knife")
+    if any(token in type_blob for token in ("零食", "含片", "益生菌", "薄荷糖", "口香糖", "糖果", "食品", "可食用", "luckykiss", "kisspod", "kissport")):
+        domain_hints.add("food")
     glossary_inferred = _infer_subject_domain_from_hinting(value)
     if glossary_inferred:
         domain_hints.update(glossary_inferred)
@@ -609,7 +613,7 @@ def _normalize_subject_domain(value: str) -> str:
 def _matches_subject_domain(entity: SubjectEntity, subject_domain_hints: set[str]) -> bool:
     if not subject_domain_hints:
         return True
-    if "edc" in subject_domain_hints:
+    if subject_domain_hints == {"edc"}:
         return True
     normalized_name = _normalize_compact(entity.name)
     normalized_brand = _normalize_compact(entity.brand)
@@ -626,6 +630,10 @@ def _matches_subject_domain(entity: SubjectEntity, subject_domain_hints: set[str
     if "knife" in subject_domain_hints and any(token in searchable for token in ("KNIFE", "BLADE", "GRAVITY", "折刀", "重力刀", "刀")):
         return True
     if "knife" in subject_domain_hints and _entity_domain_alias_matches(entity, "knife"):
+        return True
+    if "food" in subject_domain_hints and any(token in searchable for token in ("SNACK", "CANDY", "FOOD", "LUCKYKISS", "KISSPOD", "KISSPORT", "零食", "含片", "益生菌", "薄荷糖", "口香糖", "糖果")):
+        return True
+    if "food" in subject_domain_hints and _entity_domain_alias_matches(entity, "food"):
         return True
     return False
 
@@ -705,6 +713,11 @@ def map_content_understanding_to_profile(value: ContentUnderstanding) -> dict[st
         subject_brand = _infer_subject_brand_from_context(value, preferred_entities)
     content_kind = normalize_video_type(value.video_type)
     subject_domain = _normalize_understanding_value(value.content_domain)
+    if subject_domain.lower() in {"edc", "gear"} and any(
+        hint in subject_domain_hints
+        for hint in ("food", "bag", "flashlight", "knife", "functional")
+    ):
+        subject_domain = _prefer_subject_domain_from_hints(subject_domain_hints)
     if not subject_domain:
         subject_domain = _prefer_subject_domain_from_hints(subject_domain_hints)
     subject_type = _compose_subject_type_label(

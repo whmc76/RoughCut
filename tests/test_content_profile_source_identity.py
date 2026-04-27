@@ -27,6 +27,57 @@ def test_extracts_nitecore_edc17_flashlight_identity_from_source_name() -> None:
     assert constraints["subject_type"] == "EDC手电"
 
 
+def test_extracts_olight_chinese_filename_model_from_source_name() -> None:
+    constraints = extract_source_identity_constraints(
+        {},
+        source_name="merged_3_傲雷掠夺者2mini战术手电开箱.mp4",
+    )
+
+    assert constraints["authoritative"] is True
+    assert constraints["subject_brand"] == "OLIGHT"
+    assert constraints["subject_model"] == "掠夺者2mini"
+    assert constraints["subject_type"] == "EDC手电"
+
+
+def test_extracts_olight_model_from_video_description() -> None:
+    constraints = extract_source_identity_constraints(
+        {
+            "source_context": {
+                "video_description": "这条视频主要开箱傲雷掠夺者2mini战术手电，重点看包装和上手体验。"
+            }
+        },
+        source_name="merged_3.mp4",
+    )
+
+    assert constraints["authoritative"] is True
+    assert constraints["subject_brand"] == "OLIGHT"
+    assert constraints["subject_model"] == "掠夺者2mini"
+    assert constraints["subject_type"] == "EDC手电"
+
+
+def test_source_identity_overrides_transcript_side_model_contamination() -> None:
+    profile = {
+        "subject_brand": "OLIGHT",
+        "subject_model": "SK05二代",
+        "subject_type": "EDC手电",
+        "summary": "这条视频主要围绕OLIGHT SK05二代展开，内容方向偏泛光展示。",
+        "video_theme": "OLIGHT SK05二代泛光展示",
+        "cover_title": {"top": "OLIGHT", "main": "SK05二代", "bottom": "SK05二代强光测试"},
+    }
+
+    constrained = apply_source_identity_constraints(
+        profile,
+        source_name="merged_3_傲雷掠夺者2mini战术手电开箱.mp4",
+        transcript_excerpt="SK05的操作逻辑要简单得多，但今天开箱这个傲雷手电。",
+    )
+
+    assert constrained["subject_brand"] == "OLIGHT"
+    assert constrained["subject_model"] == "掠夺者2mini"
+    assert "SK05" not in constrained["video_theme"]
+    assert "SK05" not in constrained["summary"]
+    assert "SK05" not in "".join(str(value) for value in constrained["cover_title"].values())
+
+
 def test_source_identity_overrides_related_profile_model_contamination() -> None:
     profile = {
         "subject_brand": "BOLTBOAT",

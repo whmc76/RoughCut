@@ -748,6 +748,11 @@ def _build_content_understanding_prompt(
         "video_theme, summary, hook_line, engagement_question, search_queries, evidence_spans, "
         "uncertainties, confidence, needs_review, review_reasons。"
         "约束："
+        "文件名、视频说明、人工摘要属于创作者给出的先验线索；ASR 转写、字幕、OCR、画面语义属于实际内容证据；"
+        "必须综合两类证据判断这一期到底在讲什么，不允许只按文件名/说明机械覆盖，也不允许只按 ASR 里的孤立型号覆盖；"
+        "如果标题/视频说明和 ASR 大体一致，应优先形成稳定主体；"
+        "如果标题/视频说明与 ASR 冲突，要判断 ASR 中冲突对象是主讲、对比、附件、背景提及还是误识别，并在 uncertainties 或 review_reasons 说明；"
+        "只有当 ASR/画面持续围绕另一个对象展开，且标题/说明证据明显不足或疑似错误时，才允许推翻标题/说明主体；"
         "primary_subject 必须优先表示视频真正围绕的主对象或主产品；"
         "优先参考 semantic_facts.primary_subject_candidates；"
         "如果 semantic_facts.component_candidates 或 semantic_facts.aspect_candidates 非空，这些内容默认只能作为组件、系统、评价点或总结素材，不能抢占 primary_subject；"
@@ -778,6 +783,12 @@ def _build_compact_evidence_payload(evidence_bundle: dict[str, Any]) -> dict[str
     raw_semantic_inputs = semantic_fact_inputs if isinstance(semantic_fact_inputs, dict) else {}
     compact_semantic_inputs = {
         "source_name": str(raw_semantic_inputs.get("source_name") or "").strip(),
+        "source_context": raw_semantic_inputs.get("source_context") if isinstance(raw_semantic_inputs.get("source_context"), dict) else {},
+        "editorial_context_lines": [
+            str(item).strip()
+            for item in (raw_semantic_inputs.get("editorial_context_lines") or [])
+            if str(item).strip()
+        ][:12],
         "cue_lines": [
             str(item).strip()
             for item in (raw_semantic_inputs.get("cue_lines") or [])
@@ -850,6 +861,7 @@ def _build_compact_evidence_payload(evidence_bundle: dict[str, Any]) -> dict[str
     }
     return {
         "source_name": str(evidence_bundle.get("source_name") or "").strip(),
+        "source_context": evidence_bundle.get("source_context") if isinstance(evidence_bundle.get("source_context"), dict) else {},
         "transcript_excerpt": str(evidence_bundle.get("transcript_excerpt") or "").strip(),
         "visible_text": str(evidence_bundle.get("visible_text") or "").strip(),
         "visual_semantic_evidence": compact_visual_semantic_evidence,

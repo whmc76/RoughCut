@@ -265,6 +265,7 @@ _NON_BRAND_CONTEXT_PREFIXES = {
 }
 
 _CATEGORY_SCOPE_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "food": ("零食", "含片", "益生菌", "薄荷糖", "口香糖", "糖果", "软糖", "饼干", "巧克力", "口味", "入口", "咀嚼", "luckykiss", "kisspod", "kissport"),
     "bag": ("包", "背包", "双肩包", "机能包", "斜挎包", "胸包", "快取包", "副包", "分仓", "挂点", "背负", "收纳"),
     "flashlight": ("手电", "电筒", "筒身", "流明", "泛光", "聚光", "色温", "夜骑", "尾按", "尾绳孔", "绳孔", "补光", "UV"),
     "knife": ("刀", "折刀", "重力刀", "开合", "锁定", "背夹", "刃型", "柄材", "钢材", "雕刻", "电镀"),
@@ -272,6 +273,7 @@ _CATEGORY_SCOPE_KEYWORDS: dict[str, tuple[str, ...]] = {
 }
 
 _CATEGORY_SCOPE_PRIMARY_DOMAINS: dict[str, tuple[str, ...]] = {
+    "food": ("food",),
     "bag": ("functional",),
     "flashlight": ("edc",),
     "knife": ("edc",),
@@ -334,6 +336,7 @@ def build_subtitle_review_memory(
     *,
     workflow_template: str | None = None,
     subject_domain: str | None = None,
+    source_name: str | None = None,
     glossary_terms: list[dict[str, Any]] | None,
     user_memory: dict[str, Any] | None,
     recent_subtitles: list[dict[str, Any]] | None,
@@ -402,11 +405,12 @@ def build_subtitle_review_memory(
     context_text = " ".join(
         str(item or "")
         for item in [
+            source_name or "",
             *((content_profile or {}).get(key) or "" for key in ("subject_brand", "subject_model", "subject_type", "video_theme", "summary", "hook_line")),
             *manual_guidance_texts,
-            *(row.get("text_final") or row.get("text_norm") or row.get("text_raw") or "" for row in (recent_subtitles or [])),
         ]
     )
+    active_category_scope = _resolve_context_category_scope(source_name=source_name, content_profile=content_profile)
 
     def remember_term(term: Any, weight: int, *, metadata: dict[str, Any] | None = None) -> None:
         value = _normalize_term(term)
@@ -414,16 +418,20 @@ def build_subtitle_review_memory(
             return
         if not _term_supported_by_subject_domain(value, resolved_subject_domain):
             return
+        if active_category_scope and metadata and not _metadata_supported_by_category_scope(metadata, active_category_scope):
+            return
         term_scores[value] += max(1, weight)
+        existing = term_metadata.get(value) or {}
+        merged = dict(existing)
         if metadata:
-            existing = term_metadata.get(value) or {}
-            merged = dict(existing)
             for key in ("domain", "category_scope", "source_kind"):
                 candidate = str(metadata.get(key) or "").strip()
                 if candidate and not merged.get(key):
                     merged[key] = candidate
-            if merged:
-                term_metadata[value] = merged
+        if _term_value_matches_context(value, context_text):
+            merged["context_match"] = True
+        if merged:
+            term_metadata[value] = merged
 
     for key in ("subject_brand", "subject_model", "subject_type", "video_theme"):
         remember_term((content_profile or {}).get(key), 5, metadata={"source_kind": "content_profile"})
@@ -515,7 +523,13 @@ def build_subtitle_review_memory(
             "category_scope": ",".join(_normalize_category_scopes(term.get("category_scope"))),
             "source_kind": "glossary",
         }
-        if is_transcription_seed:
+        supported_by_review_context = _glossary_term_supported_by_review_context(
+            term,
+            subject_domain=resolved_subject_domain,
+            context_text=context_text,
+            category_scope=active_category_scope,
+        )
+        if is_transcription_seed and supported_by_review_context:
             correct_form = _normalize_term(term.get("correct_form"))
             if correct_form:
                 if correct_form not in seen_transcription_seeds:
@@ -528,11 +542,7 @@ def build_subtitle_review_memory(
                         }
                     )
                 remember_term(correct_form, 3, metadata=term_metadata_payload)
-        if not _glossary_term_supported_by_review_context(
-            term,
-            subject_domain=resolved_subject_domain,
-            context_text=context_text,
-        ):
+        if not supported_by_review_context:
             continue
         correct_form = _normalize_term(term.get("correct_form"))
         if correct_form:
@@ -614,6 +624,7 @@ def build_subtitle_review_memory(
             term,
             subject_domain=resolved_subject_domain,
             context_text=context_text,
+            category_scope=active_category_scope,
         ):
             continue
         correct_form = _normalize_term(term.get("correct_form"))
@@ -642,6 +653,7 @@ def build_subtitle_review_memory(
                 term,
                 subject_domain=resolved_subject_domain,
                 context_text=context_text,
+                category_scope=active_category_scope,
             ):
                 continue
             correct_form = _normalize_term(term.get("correct_form"))
@@ -729,6 +741,7 @@ def _collect_manual_guidance_texts(content_profile: dict[str, Any] | None) -> li
     source_context = profile.get("source_context")
     if isinstance(source_context, dict):
         append(source_context.get("video_description"))
+        append(source_context.get("manual_video_summary"))
         resolved_feedback = source_context.get("resolved_feedback")
         if isinstance(resolved_feedback, dict):
             for key in (
@@ -926,12 +939,12 @@ def _summarize_subtitle_review_memory(
 
 def _category_scope_from_domain(value: Any) -> str:
     raw = str(value or "").strip().lower()
-    if raw in {"knife", "flashlight", "bag", "tools"}:
+    if raw in {"food", "knife", "flashlight", "bag", "tools"}:
         return raw
     normalized = str(normalize_subject_domain(raw) or raw or "").strip().lower()
     if normalized == "functional":
         return "bag"
-    if normalized in {"tools", "knife", "flashlight", "bag"}:
+    if normalized in {"food", "tools", "knife", "flashlight", "bag"}:
         return normalized
     return ""
 
@@ -947,6 +960,23 @@ def _category_scopes_for_text(text: Any) -> set[str]:
     return matched
 
 
+def _resolve_context_category_scope(
+    *,
+    source_name: str | None = None,
+    content_profile: dict[str, Any] | None = None,
+) -> str:
+    scopes: set[str] = set()
+    scopes.update(_category_scopes_for_text(source_name))
+    profile = content_profile or {}
+    for key in ("subject_type", "subject_model", "subject_brand", "video_theme", "summary", "hook_line"):
+        scopes.update(_category_scopes_for_text(profile.get(key)))
+    for text in _collect_manual_guidance_texts(profile):
+        scopes.update(_category_scopes_for_text(text))
+    if len(scopes) == 1:
+        return next(iter(scopes))
+    return ""
+
+
 def resolve_transcription_category_scope(
     review_memory: dict[str, Any] | None,
     *,
@@ -957,6 +987,9 @@ def resolve_transcription_category_scope(
     explicit_subject_type_scopes = _category_scopes_for_text((content_profile or {}).get("subject_type"))
     if len(explicit_subject_type_scopes) == 1:
         return next(iter(explicit_subject_type_scopes))
+    source_name_scopes = _category_scopes_for_text(source_name)
+    if len(source_name_scopes) == 1:
+        return next(iter(source_name_scopes))
 
     scope_scores: Counter[str] = Counter()
     fallback_scope_scores: Counter[str] = Counter()
@@ -1056,8 +1089,52 @@ def _term_item_supported_by_transcription_scope(item: dict[str, Any], scope: str
         if subject_domain_scope:
             supported_scopes.add(subject_domain_scope)
     if not supported_scopes:
-        return True
+        if bool(item.get("context_match")):
+            return True
+        source_kind = str(item.get("source_kind") or "").strip()
+        return source_kind in {"content_profile", "manual_guidance"}
     return normalized_scope in supported_scopes
+
+
+def _prompt_term_item_supported_by_context(
+    item: dict[str, Any],
+    term: str,
+    *,
+    category_scope: str,
+    context_text: str,
+) -> bool:
+    if not _term_item_supported_by_transcription_scope(item, category_scope):
+        return False
+    normalized_scope = str(category_scope or "").strip().lower()
+    if not normalized_scope:
+        return True
+    if bool(item.get("context_match")) or _term_value_matches_context(term, context_text):
+        return True
+    if normalized_scope in _category_scopes_for_text(term):
+        return True
+    source_kind = str(item.get("source_kind") or "").strip()
+    return source_kind in {"content_profile", "manual_guidance"}
+
+
+def _prompt_alias_supported_by_context(
+    alias_item: dict[str, Any],
+    term_item: dict[str, Any],
+    category_scope: str,
+    context_text: str,
+) -> bool:
+    correct = str(alias_item.get("correct") or "").strip()
+    wrong = str(alias_item.get("wrong") or "").strip()
+    if _prompt_term_item_supported_by_context(
+        term_item,
+        correct,
+        category_scope=category_scope,
+        context_text=context_text,
+    ):
+        return True
+    normalized_scope = str(category_scope or "").strip().lower()
+    if not normalized_scope:
+        return False
+    return _term_value_matches_context(wrong, context_text) or normalized_scope in _category_scopes_for_text(wrong)
 
 
 def build_transcription_prompt(
@@ -1083,12 +1160,25 @@ def build_transcription_prompt(
         source_name=source_name,
         content_profile=content_profile,
     )
+    prompt_context_text = " ".join(
+        str(item or "")
+        for item in [
+            source_name,
+            *((content_profile or {}).get(key) or "" for key in ("subject_brand", "subject_model", "subject_type", "video_theme", "summary", "hook_line")),
+            *_collect_manual_guidance_texts(content_profile),
+        ]
+    )
     term_items = [
         dict(item)
         for item in (review_memory or {}).get("terms") or []
         if isinstance(item, dict)
         and _prompt_term_supported_by_domains(str(item.get("term") or "").strip(), dominant_domains)
-        and _term_item_supported_by_transcription_scope(item, category_scope)
+        and _prompt_term_item_supported_by_context(
+            item,
+            str(item.get("term") or "").strip(),
+            category_scope=category_scope,
+            context_text=prompt_context_text,
+        )
     ]
     base_terms = [str(item.get("term") or "").strip() for item in term_items]
     base_terms = [item for item in base_terms if item]
@@ -1097,18 +1187,29 @@ def build_transcription_prompt(
         for item in (review_memory or {}).get("transcription_seed_term_details") or []
         if isinstance(item, dict)
         and _prompt_term_supported_by_domains(str(item.get("term") or "").strip(), dominant_domains)
-        and _term_item_supported_by_transcription_scope(item, category_scope)
+        and _prompt_term_item_supported_by_context(
+            item,
+            str(item.get("term") or "").strip(),
+            category_scope=category_scope,
+            context_text=prompt_context_text,
+        )
     ]
     prioritized_seed_terms = [str(item.get("term") or "").strip() for item in seed_term_items]
     learned_terms = select_ranked_hotword_terms(
         learned_hotwords=[
             item
             for item in (review_memory or {}).get("learned_hotwords") or []
+            for hotword_value in [str(item.get("canonical_form") or item.get("term") or "").strip()]
             if _prompt_term_supported_by_domains(
-                str(item.get("canonical_form") or item.get("term") or "").strip(),
+                hotword_value,
                 dominant_domains,
             )
-            and _term_item_supported_by_transcription_scope(dict(item), category_scope)
+            and _prompt_term_item_supported_by_context(
+                dict(item),
+                hotword_value,
+                category_scope=category_scope,
+                context_text=prompt_context_text,
+            )
         ],
         existing_terms=[],
         limit=12,
@@ -1139,7 +1240,7 @@ def build_transcription_prompt(
             break
     if terms:
         snippets.append(f"热词：{', '.join(terms)}")
-        snippets.append("请保持品牌、型号、圈内术语和方言原词")
+        snippets.append("请保持品牌、型号、关键术语和方言原词")
 
     term_item_by_value = {
         str(item.get("term") or "").strip(): item
@@ -1155,9 +1256,11 @@ def build_transcription_prompt(
         if item.get("wrong")
         and item.get("correct")
         and _prompt_term_supported_by_domains(str(item.get("correct") or "").strip(), dominant_domains)
-        and _term_item_supported_by_transcription_scope(
+        and _prompt_alias_supported_by_context(
+            item,
             term_item_by_value.get(str(item.get("correct") or "").strip(), {"term": item.get("correct")}),
             category_scope,
+            prompt_context_text,
         )
     ][:8]
     if alias_pairs:
@@ -1380,6 +1483,17 @@ def _subject_domain_supports_category_scope(subject_domain: str | None, scope: s
     return bool(normalized_subject_domain and normalized_subject_domain in primary_domains)
 
 
+def _metadata_supported_by_category_scope(metadata: dict[str, Any], category_scope: str) -> bool:
+    normalized_scope = str(category_scope or "").strip().lower()
+    if not normalized_scope:
+        return True
+    scopes = set(_normalize_category_scopes(metadata.get("category_scope")))
+    domain_scope = _category_scope_from_domain(metadata.get("domain"))
+    if domain_scope:
+        scopes.add(domain_scope)
+    return not scopes or normalized_scope in scopes
+
+
 def _workflow_template_matches_transcription_seed(term: dict[str, Any], workflow_template: str | None) -> bool:
     normalized_workflow_template = normalize_workflow_template_name(workflow_template)
     if not normalized_workflow_template:
@@ -1397,6 +1511,7 @@ def _glossary_term_supported_by_review_context(
     *,
     subject_domain: str | None,
     context_text: str,
+    category_scope: str | None = None,
 ) -> bool:
     if not _glossary_term_supported_by_subject_domain(term, subject_domain):
         return False
@@ -1404,6 +1519,9 @@ def _glossary_term_supported_by_review_context(
     inferred_scope = _infer_category_scope_from_glossary_category(term.get("category"))
     if inferred_scope and inferred_scope not in scopes:
         scopes.append(inferred_scope)
+    normalized_category_scope = str(category_scope or "").strip().lower()
+    if normalized_category_scope and scopes and normalized_category_scope not in scopes:
+        return False
     if not scopes:
         return True
     if any(_text_supports_category_scope(context_text, scope) for scope in scopes):
@@ -2521,6 +2639,14 @@ def _term_matches_context(term: dict[str, Any], context_text: str) -> bool:
         if wrong and re.search(re.escape(wrong), context, re.IGNORECASE):
             return True
     return False
+
+
+def _term_value_matches_context(value: Any, context_text: str) -> bool:
+    term = str(value or "").strip()
+    context = str(context_text or "").strip()
+    if not term or not context:
+        return False
+    return bool(re.search(re.escape(term), context, re.IGNORECASE))
 
 
 def _window_can_match(span: str, term: str) -> bool:

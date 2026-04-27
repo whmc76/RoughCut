@@ -267,6 +267,12 @@ _DOMAIN_TERM_LIBRARY: dict[str, tuple[GlossaryTermLike, ...]] = {
     "food": (
         {"correct_form": "探店", "wrong_forms": ["炭店"], "category": "food", "context_hint": "美食探店"},
         {"correct_form": "口感", "wrong_forms": ["口杆"], "category": "food", "context_hint": "试吃表达"},
+        {"correct_form": "零食", "wrong_forms": [], "category": "food", "context_hint": "可食用产品"},
+        {"correct_form": "含片", "wrong_forms": [], "category": "food", "context_hint": "入口含片/糖果类产品"},
+        {"correct_form": "益生菌", "wrong_forms": [], "category": "food", "context_hint": "入口健康食品成分"},
+        {"correct_form": "薄荷糖", "wrong_forms": [], "category": "food", "context_hint": "糖果类产品"},
+        {"correct_form": "口香糖", "wrong_forms": [], "category": "food", "context_hint": "糖果类产品"},
+        {"correct_form": "糖果", "wrong_forms": [], "category": "food", "context_hint": "零食糖果类产品"},
         {"correct_form": "锅气", "wrong_forms": ["过气"], "category": "food", "context_hint": "中餐术语"},
         {"correct_form": "回甘", "wrong_forms": ["回肝"], "category": "food", "context_hint": "饮品/甜品表达"},
         {"correct_form": "性价比", "wrong_forms": ["性价笔"], "category": "food", "context_hint": "消费判断"},
@@ -439,7 +445,11 @@ _DOMAIN_KEYWORDS: dict[str, tuple[str, ...]] = {
     "coding": ("编程", "代码", "函数", "接口", "仓库", "提交", "分支", "调试", "报错", "部署", "脚本", "API"),
     "tools": ("工具钳", "多功能工具钳", "钳头", "批头", "螺丝刀", "扳手", "尖嘴钳", "钢丝钳", "NexTool", "SATA", "LAOA", "WORKPRO", "SOG", "WARNA", "SQT顺全作", "GERBER"),
     "travel": ("旅行", "出行", "机票", "酒店", "民宿", "值机", "citywalk", "攻略", "景点", "登机"),
-    "food": ("探店", "试吃", "口感", "锅气", "回甘", "拉花", "挂耳", "熟成", "奶茶", "火锅", "甜品", "烧烤"),
+    "food": (
+        "探店", "试吃", "口感", "锅气", "回甘", "拉花", "挂耳", "熟成", "奶茶", "火锅", "甜品", "烧烤",
+        "零食", "含片", "益生菌", "薄荷糖", "口香糖", "糖果", "软糖", "饼干", "巧克力", "口味", "入口",
+        "咀嚼", "嚼", "luckykiss", "kisspod", "kissport",
+    ),
     "finance": ("财经", "金融", "利率", "汇率", "通胀", "降息", "加息", "美联储", "纳斯达克", "标普", "财报", "市盈率"),
     "news": ("国际新闻", "外媒", "局势", "停火", "制裁", "峰会", "外交", "联合国", "北约", "欧盟", "总统", "总理"),
     "sports": ("体育", "赛事", "比分", "加时", "绝杀", "点球", "越位", "三分", "篮板", "助攻", "季后赛", "世界杯"),
@@ -603,6 +613,8 @@ def select_primary_subject_domain(domains: list[str] | tuple[str, ...] | set[str
             weight = 3
         elif normalized in {"knife", "flashlight", "lighter", "toy", "edc"}:
             weight = 3
+        elif normalized == "food":
+            weight = 4
         elif normalized == "gear":
             weight = 1
         scores[canonical] = scores.get(canonical, 0) + weight
@@ -618,7 +630,7 @@ def select_primary_subject_domain(domains: list[str] | tuple[str, ...] | set[str
         "tech": 3,
         "edc": 3,
         "outdoor": 2,
-        "food": 1,
+        "food": 5,
         "travel": 1,
         "finance": 1,
         "news": 1,

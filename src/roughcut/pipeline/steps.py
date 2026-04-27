@@ -3291,6 +3291,7 @@ def _resolve_topic_registry_hints_for_profile_short_circuit(
             str(source_name or "").strip(),
             transcript_excerpt,
             str(payload.get("video_description") or "").strip(),
+            str(payload.get("manual_video_summary") or "").strip(),
             *merged_source_names[:3],
         )
         if part
@@ -3329,7 +3330,16 @@ async def _apply_source_context_feedback_to_content_profile(
     transcript_excerpt: str,
     include_research: bool,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    source_context_description = str(source_context.get("video_description") or "").strip()
+    source_context_description = "\n".join(
+        part
+        for part in (
+            str(source_context.get("video_description") or "").strip(),
+            f"人工视频摘要（强证据）：{str(source_context.get('manual_video_summary') or '').strip()}"
+            if str(source_context.get("manual_video_summary") or "").strip()
+            else "",
+        )
+        if part
+    ).strip()
     resolved_source_context_feedback: dict[str, Any] = {}
     if not source_context_description:
         return dict(content_profile), resolved_source_context_feedback
@@ -4496,6 +4506,7 @@ async def run_transcribe(job_id: str) -> dict:
         review_memory = build_subtitle_review_memory(
             workflow_template=job.workflow_template,
             subject_domain=subject_domain,
+            source_name=job.source_name,
             glossary_terms=effective_glossary_terms,
             user_memory=user_memory,
             recent_subtitles=recent_subtitles,
@@ -4947,6 +4958,7 @@ async def run_subtitle_postprocess(job_id: str) -> dict:
         review_memory = build_subtitle_review_memory(
             workflow_template=job.workflow_template,
             subject_domain=subject_domain,
+            source_name=job.source_name,
             glossary_terms=effective_glossary_terms,
             user_memory=user_memory,
             recent_subtitles=[
@@ -5748,6 +5760,7 @@ async def run_glossary_review(job_id: str) -> dict:
         review_memory = build_subtitle_review_memory(
             workflow_template=job.workflow_template,
             subject_domain=subject_domain,
+            source_name=job.source_name,
             glossary_terms=effective_glossary_terms,
             user_memory=user_memory,
             recent_subtitles=subtitle_dicts + related_subtitles + recent_subtitles,

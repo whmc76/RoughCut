@@ -661,6 +661,9 @@ def _normalize_source_context_payload(value: Any) -> dict[str, Any]:
     video_description = str(payload.get("video_description") or "").strip()
     if len(video_description) > 4000:
         video_description = video_description[:4000]
+    manual_video_summary = str(payload.get("manual_video_summary") or "").strip()
+    if len(manual_video_summary) > 1200:
+        manual_video_summary = manual_video_summary[:1200]
     merged_source_names = [
         str(item).strip()
         for item in (payload.get("merged_source_names") or payload.get("related_source_names") or [])
@@ -710,6 +713,10 @@ def _normalize_source_context_payload(value: Any) -> dict[str, Any]:
     normalized: dict[str, Any] = {}
     if video_description:
         normalized["video_description"] = video_description
+    if manual_video_summary:
+        normalized["manual_video_summary"] = manual_video_summary
+        normalized["manual_video_summary_source"] = str(payload.get("manual_video_summary_source") or "manual_editor").strip()
+        normalized["manual_video_summary_strength"] = str(payload.get("manual_video_summary_strength") or "strong").strip()
     if merged_source_names:
         normalized["merged_source_names"] = merged_source_names[:12]
     if resolved_feedback:
@@ -730,6 +737,23 @@ def _normalize_source_context_filename_hint(value: Any) -> str:
     if not _is_informative_source_hint(stem):
         return ""
     return stem
+
+
+def _normalize_source_context_description_hint(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    text = re.sub(r"^任务说明依据文件名[:：]\s*", "", text)
+    for marker in ("固定要求：", "审核依据："):
+        if marker in text:
+            text = text.split(marker, 1)[0].strip("；;，,。 ")
+    text = re.sub(r"\s+", " ", text).strip()
+    text = text.strip(" _-；;，,。")
+    if len(text) > 600:
+        text = text[:600].strip(" _-；;，,。")
+    if not _is_informative_source_hint(text):
+        return ""
+    return text
 
 
 def _source_context_filename_entries(source_context: dict[str, Any] | None) -> list[str]:
@@ -754,14 +778,17 @@ def _source_context_filename_entries(source_context: dict[str, Any] | None) -> l
 def _source_context_description_entries(source_context: dict[str, Any] | None) -> list[str]:
     payload = _normalize_source_context_payload(source_context)
     video_description = str(payload.get("video_description") or "").strip()
-    if not video_description:
-        return []
-    text = re.sub(r"^任务说明依据文件名[:：]\s*", "", video_description)
-    for marker in ("固定要求：", "审核依据："):
-        if marker in text:
-            text = text.split(marker, 1)[0].strip("；;，,。 ")
-    text = re.sub(r"\s+", " ", text).strip()
-    return [text] if _is_informative_source_hint(text) else []
+    manual_video_summary = str(payload.get("manual_video_summary") or "").strip()
+    entries: list[str] = []
+    if video_description:
+        text = _normalize_source_context_description_hint(video_description)
+        if text:
+            entries.append(text)
+    if manual_video_summary:
+        text = _normalize_source_context_description_hint(manual_video_summary)
+        if text:
+            entries.append(text)
+    return entries
 
 
 def _merge_source_context_seed_hints(
@@ -797,6 +824,178 @@ def _merge_source_context_seed_hints(
             target["search_queries"] = existing[:8]
 
 
+_FILENAME_MODEL_ACTION_MARKERS = (
+    "开箱",
+    "评测",
+    "测评",
+    "上手",
+    "对比",
+    "展示",
+    "实测",
+    "体验",
+    "分享",
+    "介绍",
+    "详解",
+)
+_FILENAME_MODEL_CATEGORY_MARKERS = (
+    "手电筒",
+    "手电",
+    "电筒",
+    "折刀",
+    "工具钳",
+    "机能包",
+    "双肩包",
+    "单肩包",
+    "斜挎包",
+    "胸包",
+)
+_FILENAME_MODEL_TRAILING_DESCRIPTORS = (
+    "战术",
+    "户外",
+    "强光",
+    "便携",
+    "EDC",
+)
+
+
+def _build_source_text_identity_hints(
+    text: str,
+    *,
+    filename_like: bool,
+    glossary_terms: list[dict[str, Any]] | None = None,
+    subject_domain: str = "",
+) -> dict[str, Any]:
+    hints = _seed_profile_from_text(
+        text,
+        glossary_terms=glossary_terms,
+        subject_domain=subject_domain,
+    )
+    inferred_model = _infer_model_from_source_text(text, hints, filename_like=filename_like)
+    if not inferred_model:
+        return hints
+
+    current_model = str(hints.get("subject_model") or "").strip()
+    if not current_model or _looks_like_camera_stem(current_model):
+        hints["subject_model"] = inferred_model
+    else:
+        _append_hint_candidate(hints, "subject_model", inferred_model)
+
+    brand = str(hints.get("subject_brand") or "").strip()
+    if brand:
+        queries = [str(item).strip() for item in (hints.get("search_queries") or []) if str(item).strip()]
+        query = f"{brand} {inferred_model}".strip()
+        if query and query not in queries:
+            queries.insert(0, query)
+        hints["search_queries"] = queries[:8]
+    return hints
+
+
+def _build_source_filename_identity_hints(
+    text: str,
+    *,
+    glossary_terms: list[dict[str, Any]] | None = None,
+    subject_domain: str = "",
+) -> dict[str, Any]:
+    return _build_source_text_identity_hints(
+        text,
+        filename_like=True,
+        glossary_terms=glossary_terms,
+        subject_domain=subject_domain,
+    )
+
+
+def _build_source_description_identity_hints(
+    text: str,
+    *,
+    glossary_terms: list[dict[str, Any]] | None = None,
+    subject_domain: str = "",
+) -> dict[str, Any]:
+    return _build_source_text_identity_hints(
+        text,
+        filename_like=False,
+        glossary_terms=glossary_terms,
+        subject_domain=subject_domain,
+    )
+
+
+def _infer_model_from_source_text(text: str, hints: dict[str, Any] | None, *, filename_like: bool) -> str:
+    source = (
+        _normalize_source_context_filename_hint(text)
+        if filename_like
+        else _normalize_source_context_description_hint(text)
+    )
+    if not source or not str((hints or {}).get("subject_brand") or "").strip():
+        return ""
+
+    brand_match = _first_brand_match_in_text(source)
+    if not brand_match:
+        return ""
+    tail = source[brand_match.end():]
+    tail = _strip_leading_filename_brand_aliases(tail)
+    tail = re.sub(r"^[\s._\-·:：/]+", "", tail)
+    if not tail:
+        return ""
+
+    cut_points: list[int] = []
+    for marker in _FILENAME_MODEL_ACTION_MARKERS:
+        index = tail.find(marker)
+        if index > 0:
+            cut_points.append(index)
+    for marker in _FILENAME_MODEL_CATEGORY_MARKERS:
+        index = tail.find(marker)
+        if index >= 2:
+            cut_points.append(index)
+    if cut_points:
+        tail = tail[: min(cut_points)]
+
+    candidate = _clean_filename_model_candidate(tail)
+    if not candidate:
+        return ""
+    if not (re.search(r"[A-Za-z0-9]", candidate) or re.search(r"\d", candidate)):
+        return ""
+    if _looks_like_camera_stem(candidate) or _is_generic_subject_type(candidate):
+        return ""
+    return candidate
+
+
+def _first_brand_match_in_text(text: str) -> re.Match[str] | None:
+    matches: list[re.Match[str]] = []
+    for _, pattern in _BRAND_ALIAS_PATTERNS:
+        matches.extend(pattern.finditer(text))
+    if not matches:
+        return None
+    matches.sort(key=lambda item: (item.start(), -(item.end() - item.start())))
+    return matches[0]
+
+
+def _strip_leading_filename_brand_aliases(text: str) -> str:
+    result = str(text or "")
+    changed = True
+    while changed:
+        changed = False
+        result = re.sub(r"^[\s._\-·:：/]+", "", result)
+        for _, pattern in _BRAND_ALIAS_PATTERNS:
+            match = pattern.match(result)
+            if match:
+                result = result[match.end():]
+                changed = True
+                break
+    return result
+
+
+def _clean_filename_model_candidate(text: str) -> str:
+    candidate = _clean_line(str(text or "").strip(" _-·:：/"))
+    changed = True
+    while changed and candidate:
+        changed = False
+        for suffix in _FILENAME_MODEL_TRAILING_DESCRIPTORS:
+            if candidate.upper().endswith(suffix.upper()) and len(candidate) > len(suffix):
+                candidate = candidate[: -len(suffix)].strip(" _-·:：/")
+                changed = True
+                break
+    return candidate
+
+
 def _build_source_context_derived_hints(source_context: dict[str, Any] | None) -> dict[str, Any]:
     payload = _normalize_source_context_payload(source_context)
     if not payload:
@@ -807,10 +1006,10 @@ def _build_source_context_derived_hints(source_context: dict[str, Any] | None) -
         derived["filename_entries"] = entries
         derived["related_source_names"] = list(entries[:3])
         for entry in entries:
-            _merge_source_context_seed_hints(derived, _seed_profile_from_text(entry))
+            _merge_source_context_seed_hints(derived, _build_source_filename_identity_hints(entry))
             _merge_source_context_seed_hints(derived, build_intelligent_copy_topic_hints(entry))
     for entry in _source_context_description_entries(payload):
-        _merge_source_context_seed_hints(derived, _seed_profile_from_text(entry))
+        _merge_source_context_seed_hints(derived, _build_source_description_identity_hints(entry))
         _merge_source_context_seed_hints(derived, build_intelligent_copy_topic_hints(entry))
     return derived
 
@@ -2500,7 +2699,7 @@ def _resolve_profile_identity(
         subject_domain=subject_domain,
     )
     source_hints = (
-        _seed_profile_from_text(
+        _build_source_filename_identity_hints(
             Path(source_name).stem,
             glossary_terms=glossary_terms,
             subject_domain=subject_domain,
@@ -3666,6 +3865,7 @@ async def infer_content_profile(
         visual_semantic_evidence=visual_semantic_evidence,
         visual_hints=visual_hints,
         candidate_hints=_source_context_candidate_hints(source_context),
+        source_context=source_context,
     )
 
     try:
@@ -4845,6 +5045,7 @@ async def _infer_content_understanding_for_enrich(
         else {},
         visual_hints=_profile_visual_cluster_hints(profile),
         candidate_hints=_enrich_candidate_hints(profile),
+        source_context=profile.get("source_context") if isinstance(profile.get("source_context"), dict) else {},
     )
     try:
         infer_timeout_sec = _resolve_content_understanding_timeout_seconds()

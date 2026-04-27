@@ -957,6 +957,7 @@ def _extract_creative_preference_items_from_profile(
     source_context = profile.get("source_context")
     if isinstance(source_context, dict):
         values.append(source_context.get("video_description"))
+        values.append(source_context.get("manual_video_summary"))
         resolved_feedback = source_context.get("resolved_feedback")
         if isinstance(resolved_feedback, dict):
             values.extend(
