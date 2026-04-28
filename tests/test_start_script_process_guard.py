@@ -26,6 +26,18 @@ def test_process_match_guard_only_targets_roughcut_runtime_processes() -> None:
     source = START_SCRIPT.read_text(encoding="utf-8")
     body = _function_body(source, "Get-ProcessMatches")
 
+    assert "IsNullOrWhiteSpace($Pattern)" in body
+    assert '".*"' in body
+    assert '"^.*$"' in body
+    assert "Refusing to match RoughCut processes with unsafe pattern" in body
     assert "$_.Name -in" in body
     for process_name in ("python.exe", "pythonw.exe", "roughcut.exe", "celery.exe"):
         assert f'"{process_name}"' in body
+
+
+def test_worker_celery_fallback_pattern_is_not_split_into_wildcard_entry() -> None:
+    source = START_SCRIPT.read_text(encoding="utf-8")
+    body = _function_body(source, "Start-RoughCutWorkerProcess")
+
+    assert '("{0}.*{1}" -f' in body
+    assert '[regex]::Escape("celery -A roughcut.pipeline.celery_app:celery_app worker --queues=$Queue") + ".*" + [regex]::Escape($workerNode)' not in body

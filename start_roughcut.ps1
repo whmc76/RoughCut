@@ -1295,6 +1295,10 @@ function Update-LocalServiceEnv {
 function Get-ProcessMatches {
     param([string]$Pattern)
 
+    if ([string]::IsNullOrWhiteSpace($Pattern) -or $Pattern.Trim() -in @(".*", "^.*$")) {
+        throw "Refusing to match RoughCut processes with unsafe pattern: '$Pattern'."
+    }
+
     return @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
         $_.CommandLine `
             -and $_.CommandLine -match $Pattern `
@@ -1609,7 +1613,7 @@ function Start-RoughCutWorkerProcess {
     $workerNode = Get-RoughCutWorkerNodeName -Queue $Queue -Instance $Instance
     $matchPatterns = @(
         (Get-RoughCutCommandMatchPattern "worker --queue $Queue --pool solo --concurrency 1 --hostname $workerNode --without-gossip --without-mingle"),
-        [regex]::Escape("celery -A roughcut.pipeline.celery_app:celery_app worker --queues=$Queue") + ".*" + [regex]::Escape($workerNode)
+        ("{0}.*{1}" -f [regex]::Escape("celery -A roughcut.pipeline.celery_app:celery_app worker --queues=$Queue"), [regex]::Escape($workerNode))
     )
 
     foreach ($pattern in $matchPatterns) {
