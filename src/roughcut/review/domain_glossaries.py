@@ -58,7 +58,7 @@ _BAG_DOMESTIC_BRANDS: tuple[GlossaryTermLike, ...] = (
     {"correct_form": "COMBACK", "wrong_forms": ["Comback", "COM BACK", "康贝克"], "category": "bag_brand", "context_hint": "国产机能风品牌"},
     {"correct_form": "MADEN", "wrong_forms": ["Maden", "马登"], "category": "bag_brand", "context_hint": "国产机能风品牌"},
     {"correct_form": "LEVEL8", "wrong_forms": ["Level8", "LEVEL 8", "地平线8号"], "category": "bag_brand", "context_hint": "国产通勤包品牌"},
-    {"correct_form": "狐蝠工业", "wrong_forms": ["FOXBAT", "Foxbat", "FOXBAT DYNAMICS", "狐蝠", "鸿福"], "category": "bag_brand", "context_hint": "主流机能包品牌", "domain": "bag", "category_scope": "bag", "transcription_seed_templates": ["unboxing_standard", "edc_tactical"]},
+    {"correct_form": "狐蝠工业", "wrong_forms": ["鸿福"], "category": "bag_brand", "context_hint": "主流机能包品牌", "domain": "bag", "category_scope": "bag", "transcription_seed_templates": ["unboxing_standard", "edc_tactical"]},
     {"correct_form": "头狼工业", "wrong_forms": ["头狼", "头狼工业风", "FIRST WOLF"], "category": "bag_brand", "context_hint": "主流机能包品牌"},
     {"correct_form": "HSJUN", "wrong_forms": ["hesijun", "HESIJUN", "hsjun", "HS JUN", "赫斯郡", "赫斯俊"], "category": "bag_brand", "context_hint": "小众机能包品牌", "domain": "bag", "category_scope": "bag", "transcription_seed_templates": ["unboxing_standard", "edc_tactical"]},
     {"correct_form": "BOLTBOAT", "wrong_forms": ["Boltboat", "BOLT BOAT", "船家", "船长", "船厂"], "category": "bag_brand", "context_hint": "主流机能包品牌", "domain": "bag", "category_scope": "bag", "transcription_seed_templates": ["unboxing_standard", "edc_tactical"]},

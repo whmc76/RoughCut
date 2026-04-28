@@ -10,7 +10,12 @@ from roughcut.review.hotword_learning import (
     record_learned_hotwords_from_content_profile_feedback,
 )
 from roughcut.pipeline.steps import _build_effective_glossary_terms, _infer_subject_domain_for_memory
-from roughcut.review.subtitle_memory import build_subtitle_review_memory, build_transcription_prompt, resolve_transcription_category_scope
+from roughcut.review.subtitle_memory import (
+    apply_domain_term_corrections,
+    build_subtitle_review_memory,
+    build_transcription_prompt,
+    resolve_transcription_category_scope,
+)
 from roughcut.review.transcription_context_prior import normalize_transcription_context_prior
 
 
@@ -267,10 +272,94 @@ def test_transcription_prompt_filters_cross_scope_terms_for_flashlight() -> None
 
     hotwords = extract_prompt_hotwords(prompt)
     assert "掠夺者2 mini" in hotwords
-    assert "傲雷=OLIGHT" in prompt
+    assert "傲雷=OLIGHT" not in prompt
     assert "BOLTBOAT" not in hotwords
     assert "NOC MT34" not in hotwords
     assert "船包=BOLTBOAT" not in prompt
+
+
+def test_foxbat_brand_expansion_is_not_prompted_for_chinese_brand() -> None:
+    source_name = "狐蝠工业 FXX1小副包开箱.mp4"
+    content_profile = {
+        "subject_brand": "狐蝠工业",
+        "subject_model": "FXX1小副包",
+        "subject_type": "机能副包",
+        "subject_domain": "bag",
+        "video_theme": "狐蝠工业 FXX1小副包开箱",
+    }
+    subject_domain = _infer_subject_domain_for_memory(
+        workflow_template="edc_tactical",
+        content_profile=content_profile,
+        source_name=source_name,
+    )
+    effective_terms = _build_effective_glossary_terms(
+        glossary_terms=[],
+        workflow_template="edc_tactical",
+        content_profile=content_profile,
+        source_name=source_name,
+        subject_domain=subject_domain,
+    )
+    review_memory = build_subtitle_review_memory(
+        workflow_template="edc_tactical",
+        subject_domain=subject_domain,
+        source_name=source_name,
+        glossary_terms=effective_terms,
+        user_memory={},
+        recent_subtitles=[],
+        content_profile=content_profile,
+        include_recent_terms=False,
+        include_recent_examples=False,
+    )
+    prompt = build_transcription_prompt(
+        source_name=source_name,
+        workflow_template="edc_tactical",
+        review_memory=review_memory,
+        dialect_profile="mandarin",
+        content_profile=content_profile,
+    )
+
+    assert "狐蝠工业" in extract_prompt_hotwords(prompt)
+    assert "FOXBAT" not in prompt.upper()
+    assert "Foxbat" not in prompt
+    assert "狐蝠=狐蝠工业" not in prompt
+
+
+def test_brand_aliases_are_not_prompted_generically() -> None:
+    review_memory = {
+        "subject_domain": "bag",
+        "terms": [
+            {"term": "BOLTBOAT", "count": 10, "category": "bag_brand", "category_scope": "bag"},
+            {"term": "游刃", "count": 8, "category": "bag_model", "category_scope": "bag"},
+        ],
+        "aliases": [
+            {"wrong": "船长", "correct": "BOLTBOAT", "category": "bag_brand", "evidence_strong": True},
+            {"wrong": "游人", "correct": "游刃", "category": "bag_model", "evidence_strong": True},
+        ],
+    }
+
+    prompt = build_transcription_prompt(
+        source_name="BOLTBOAT 游刃双肩包开箱.mp4",
+        workflow_template="edc_tactical",
+        review_memory=review_memory,
+        dialect_profile="mandarin",
+        content_profile={"subject_brand": "BOLTBOAT", "subject_model": "游刃", "subject_type": "双肩包"},
+    )
+
+    assert "船长=BOLTBOAT" not in prompt
+    assert "游人=游刃" in prompt
+
+
+def test_brand_name_expansion_aliases_are_not_auto_applied() -> None:
+    review_memory = {
+        "terms": [{"term": "头狼工业", "count": 10, "category": "bag_brand"}],
+        "aliases": [
+            {"wrong": "头狼", "correct": "头狼工业", "category": "bag_brand", "evidence_strong": True},
+            {"wrong": "头浪工业", "correct": "头狼工业", "category": "bag_brand", "evidence_strong": True},
+        ],
+    }
+
+    assert apply_domain_term_corrections("这个头狼还是这个", review_memory) == "这个头狼还是这个"
+    assert apply_domain_term_corrections("这个头浪工业还是这个", review_memory) == "这个头狼工业还是这个"
 
 
 def test_ingestible_edc_style_source_does_not_prompt_knife_hotwords() -> None:

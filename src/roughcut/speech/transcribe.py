@@ -37,6 +37,8 @@ _SEMANTIC_HALLUCINATION_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"新品小车"), ""),
 )
 _DUPLICATE_BRAND_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"(?:FOXBAT|Foxbat)\s*(?:DYNAMICS)?\s*(?:Foxbat)?\s*工业", re.IGNORECASE), "狐蝠工业"),
+    (re.compile(r"(?:FOXBAT|Foxbat)\s*狐蝠工业", re.IGNORECASE), "狐蝠工业"),
     (re.compile(r"(狐蝠工业){2,}", re.IGNORECASE), "狐蝠工业"),
     (re.compile(r"(NITECORE){2,}", re.IGNORECASE), "NITECORE"),
     (re.compile(r"(OLIGHT){2,}", re.IGNORECASE), "OLIGHT"),

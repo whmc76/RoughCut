@@ -154,6 +154,30 @@ def test_normalize_transcript_result_corrects_knife_material_reflection_terms() 
     assert normalized.segments[0].text == "呃，包括它上面这个钢马，钢马和这个锆马的这个反光"
 
 
+def test_normalize_transcript_result_collapses_foxbat_brand_expansion() -> None:
+    result = TranscriptResult(
+        segments=[
+            TranscriptSegment(
+                index=0,
+                start=0.0,
+                end=3.0,
+                text="FOXBATFoxbat工业还是这个",
+            )
+        ],
+        language="zh-CN",
+        duration=3.0,
+        raw_payload={},
+    )
+
+    normalized = _normalize_transcript_result(
+        result,
+        glossary_terms=[],
+        review_memory={"terms": [{"term": "狐蝠工业", "count": 10, "category_scope": "bag"}]},
+    )
+
+    assert normalized.segments[0].text == "狐蝠工业还是这个"
+
+
 def test_normalize_transcript_result_corrects_zirconium_material_variant() -> None:
     result = TranscriptResult(
         segments=[

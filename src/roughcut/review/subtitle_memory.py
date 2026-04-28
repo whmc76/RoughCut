@@ -1207,7 +1207,16 @@ def _prompt_alias_supported_by_context(
     term_item: dict[str, Any],
     category_scope: str,
     context_text: str,
+    brand_terms: set[str] | None = None,
 ) -> bool:
+    if _is_brand_like_category(alias_item.get("category")) or _is_brand_like_category(term_item.get("category")):
+        return False
+    if _normalize_conflict_key(alias_item.get("correct")) in (brand_terms or set()):
+        return False
+    if _normalize_conflict_key(alias_item.get("wrong")) in (brand_terms or set()):
+        return False
+    if _is_protected_brand_term(alias_item.get("correct")):
+        return False
     correct = str(alias_item.get("correct") or "").strip()
     wrong = str(alias_item.get("wrong") or "").strip()
     if not _alias_has_strong_current_evidence(wrong, correct, context_text):
@@ -1239,6 +1248,45 @@ def _term_has_strong_current_evidence(
 
 def _alias_has_strong_current_evidence(wrong: str, correct: str, context_text: str) -> bool:
     return _term_value_matches_context(correct, context_text) or _term_value_matches_context(wrong, context_text)
+
+
+def _collect_prompt_brand_terms(review_memory: dict[str, Any] | None) -> set[str]:
+    values: set[str] = set()
+    for item in (review_memory or {}).get("terms") or []:
+        if isinstance(item, dict) and _is_brand_like_category(item.get("category")):
+            normalized = _normalize_conflict_key(item.get("term"))
+            if normalized:
+                values.add(normalized)
+    for item in (review_memory or {}).get("aliases") or []:
+        if isinstance(item, dict) and _is_brand_like_category(item.get("category")):
+            for key in ("wrong", "correct"):
+                normalized = _normalize_conflict_key(item.get(key))
+                if normalized:
+                    values.add(normalized)
+    for entity in (review_memory or {}).get("confirmed_entities") or []:
+        for candidate in (
+            entity.get("brand"),
+            *(entity.get("brand_aliases") or []),
+        ):
+            normalized = _normalize_conflict_key(candidate)
+            if normalized:
+                values.add(normalized)
+    return values
+
+
+def _is_brand_name_expansion_alias(
+    wrong: str,
+    correct: str,
+    review_memory: dict[str, Any] | None = None,
+) -> bool:
+    wrong_key = _normalize_conflict_key(wrong)
+    correct_key = _normalize_conflict_key(correct)
+    if not wrong_key or not correct_key or wrong_key == correct_key:
+        return False
+    if wrong_key not in correct_key:
+        return False
+    brand_terms = _collect_prompt_brand_terms(review_memory)
+    return not brand_terms or correct_key in brand_terms
 
 
 def _review_memory_blocked_terms(review_memory: dict[str, Any] | None) -> list[str]:
@@ -1387,6 +1435,7 @@ def build_transcription_prompt(
         ]
         if str(item.get("term") or "").strip()
     }
+    prompt_brand_terms = _collect_prompt_brand_terms(review_memory)
     alias_pairs = [
         f"{item['wrong']}={item['correct']}"
         for item in (review_memory or {}).get("aliases") or []
@@ -1400,6 +1449,7 @@ def build_transcription_prompt(
             term_item_by_value.get(str(item.get("correct") or "").strip(), {"term": item.get("correct")}),
             category_scope,
             prompt_context_text,
+            prompt_brand_terms,
         )
     ][:8]
     if alias_pairs:
@@ -1706,6 +1756,8 @@ def apply_domain_term_corrections(
         if _term_blocked_by_prior(correct, blocked_terms) or _term_blocked_by_prior(wrong, blocked_terms):
             continue
         if not bool(item.get("evidence_strong")):
+            continue
+        if _is_brand_like_category(item.get("category")) and _is_brand_name_expansion_alias(wrong, correct, review_memory):
             continue
         if _should_skip_confirmed_display_alias(wrong, correct, review_memory):
             continue
@@ -2324,6 +2376,8 @@ def _apply_confirmed_entity_corrections(
             if str(item or "").strip()
         ]
         for alias in sorted(brand_aliases, key=len, reverse=True):
+            if _is_brand_name_expansion_alias(alias, brand, review_memory):
+                continue
             if (
                 _normalize_conflict_key(alias),
                 _normalize_conflict_key(brand),
