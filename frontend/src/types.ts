@@ -129,6 +129,8 @@ export type JobManualEditSession = {
   source_name: string;
   source_duration_sec: number;
   source_url?: string | null;
+  video_summary?: string | null;
+  base_video_summary?: string | null;
   keep_segments: JobManualEditSegment[];
   base_keep_segments?: JobManualEditSegment[];
   source_subtitles: JobManualEditSubtitle[];
@@ -190,6 +192,7 @@ export type JobManualEditApplyPayload = {
   keep_segments: Array<{ start: number; end: number }>;
   subtitle_overrides?: JobManualEditSubtitleOverride[];
   video_transform?: JobManualVideoTransform | null;
+  video_summary?: string | null;
   base_timeline_id?: string;
   base_timeline_version?: number;
   base_render_plan_version?: number | null;

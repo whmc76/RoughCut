@@ -12,7 +12,7 @@ from threading import Lock
 import httpx
 import openai
 
-from roughcut.config import get_settings
+from roughcut.config import DEFAULT_MINIMAX_REASONING_MODEL, get_settings, uses_codex_auth_helper
 from roughcut.providers.auth import resolve_credential
 from roughcut.providers.openai_responses import (
     build_multimodal_input,
@@ -80,6 +80,26 @@ def _active_multimodal_fallback_model(settings) -> str:
     ).strip()
 
 
+def _openai_direct_api_unavailable(settings) -> bool:
+    return (
+        uses_codex_auth_helper(settings)
+        and not str(getattr(settings, "openai_api_key", "") or "").strip()
+    )
+
+
+def _has_minimax_multimodal_credentials(settings) -> bool:
+    return bool(str(getattr(settings, "minimax_api_key", "") or "").strip())
+
+
+def _can_attempt_multimodal_provider(provider: str, settings) -> bool:
+    normalized = str(provider or "").strip().lower()
+    if normalized == "openai":
+        return not _openai_direct_api_unavailable(settings)
+    if normalized == "minimax":
+        return _has_minimax_multimodal_credentials(settings)
+    return True
+
+
 async def complete_with_images(
     prompt: str,
     image_paths: list[Path],
@@ -113,23 +133,37 @@ async def complete_with_images(
     images_b64 = [base64.b64encode(blob).decode() for blob in image_bytes]
 
     primary_provider = settings.active_reasoning_provider.lower()
-    attempts: list[tuple[str, str]] = [
-        (
-            primary_provider,
-            settings.active_vision_model or await _resolve_vision_model(provider=primary_provider),
+    attempts: list[tuple[str, str]] = []
+    preferred_error: Exception | None = None
+    if _can_attempt_multimodal_provider(primary_provider, settings):
+        attempts.append(
+            (
+                primary_provider,
+                settings.active_vision_model or await _resolve_vision_model(provider=primary_provider),
+            )
         )
-    ]
+    else:
+        preferred_error = RuntimeError(
+            f"Multimodal provider {primary_provider} is unavailable with the current credential mode"
+        )
 
     fallback_provider = _active_multimodal_fallback_provider(settings)
-    if settings.llm_mode != "local" and fallback_provider and fallback_provider != attempts[0][0]:
+    if settings.llm_mode != "local" and fallback_provider and fallback_provider != primary_provider:
         try:
-            fallback_model = _active_multimodal_fallback_model(settings) or await _resolve_vision_model(provider=fallback_provider)
-            attempts.append((fallback_provider, fallback_model))
+            if _can_attempt_multimodal_provider(fallback_provider, settings):
+                fallback_model = _active_multimodal_fallback_model(settings) or await _resolve_vision_model(provider=fallback_provider)
+                attempts.append((fallback_provider, fallback_model))
         except Exception:
             pass
+    if not attempts and _has_minimax_multimodal_credentials(settings):
+        minimax_model = (
+            _active_multimodal_fallback_model(settings)
+            if fallback_provider == "minimax"
+            else DEFAULT_MINIMAX_REASONING_MODEL
+        )
+        attempts.append(("minimax", minimax_model or DEFAULT_MINIMAX_REASONING_MODEL))
 
     last_error: Exception | None = None
-    preferred_error: Exception | None = None
     for provider, model in attempts:
         cooldown = _provider_cooldown_status(provider)
         if cooldown is not None:

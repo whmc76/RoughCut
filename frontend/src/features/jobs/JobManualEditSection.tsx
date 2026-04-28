@@ -13,9 +13,25 @@ type JobManualEditSectionProps = {
   autosaving?: boolean;
   autosavedAt?: string | null;
   detectingRotation?: boolean;
+  resetSignal?: number;
+  onStateChange?: (state: JobManualEditSectionState) => void;
   onApply?: (payload: JobManualEditApplyPayload) => void;
   onAutoSave?: (payload: JobManualEditApplyPayload) => void;
   onDetectRotation?: () => Promise<number>;
+};
+
+export type JobManualEditSectionState = {
+  payload: JobManualEditApplyPayload;
+  canApply: boolean;
+  hasMaterialEdits: boolean;
+  hasLocalEdits: boolean;
+  hasVideoSummaryEdits: boolean;
+  savePlanLabel: string;
+  baseSegmentCount: number;
+  effectiveSegmentCount: number;
+  outputDurationDeltaLabel: string;
+  subtitleOverrideCount: number;
+  saveImpactSummary: string;
 };
 
 type KeepSegment = {
@@ -64,6 +80,7 @@ type ManualEditUndoSnapshot = {
   currentSubtitleDraftText: string;
   subtitleDrafts: Record<number, SubtitleDraft>;
   editorNote: string;
+  videoSummary: string;
   videoTransform: JobManualVideoTransform;
 };
 
@@ -595,7 +612,7 @@ function cloneUndoSnapshot(snapshot: ManualEditUndoSnapshot): ManualEditUndoSnap
   };
 }
 
-export function JobManualEditSection({ job, session, previewAssets, saving, autosaving = false, autosavedAt, detectingRotation = false, onApply, onAutoSave, onDetectRotation }: JobManualEditSectionProps) {
+export function JobManualEditSection({ job, session, previewAssets, saving, autosaving = false, autosavedAt, detectingRotation = false, resetSignal = 0, onStateChange, onApply, onAutoSave, onDetectRotation }: JobManualEditSectionProps) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const currentSubtitleInputRef = useRef<HTMLInputElement | null>(null);
   const waveformRef = useRef<HTMLDivElement | null>(null);
@@ -613,6 +630,7 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
   const [segments, setSegments] = useState<KeepSegment[]>([]);
   const [selectedSegmentIndex, setSelectedSegmentIndex] = useState(0);
   const [editorNote, setEditorNote] = useState("");
+  const [videoSummary, setVideoSummary] = useState("");
   const [currentSourceTime, setCurrentSourceTime] = useState(0);
   const [isPreviewPlaying, setIsPreviewPlaying] = useState(false);
   const [previewVolume, setPreviewVolume] = useState(1);
@@ -646,6 +664,7 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
     currentSubtitleDraftText,
     subtitleDrafts: cloneSubtitleDrafts(subtitleDrafts),
     editorNote,
+    videoSummary,
     videoTransform: { ...normalizeVideoTransform(videoTransform) },
   });
 
@@ -670,6 +689,7 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
     setCurrentSubtitleDraftText("");
     setSubtitleDrafts(restored.subtitleDrafts);
     setEditorNote(restored.editorNote);
+    setVideoSummary(restored.videoSummary);
     setVideoTransform(restored.videoTransform);
     setRotationDraft(restored.videoTransform.rotation_cw);
     setResolutionDraft(restored.videoTransform);
@@ -701,6 +721,7 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
       ),
     );
     setEditorNote("");
+    setVideoSummary(session.video_summary || "");
     setCurrentSourceTime(0);
     setWaveformReady(false);
     setWaveformError(null);
@@ -717,11 +738,11 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
     timelinePlaybackRef.current = false;
     resumeAfterSubtitleEditRef.current = false;
     resumeTimelineAfterSubtitleEditRef.current = false;
-  }, [session.job_id, session.timeline_id, session.timeline_version, session.keep_segments, session.subtitle_overrides, session.video_transform]);
+  }, [session.job_id, session.timeline_id, session.timeline_version, session.keep_segments, session.subtitle_overrides, session.video_transform, session.video_summary]);
 
   useEffect(() => {
     currentEditSnapshotRef.current = buildUndoSnapshot();
-  }, [currentSubtitleDraftText, editorNote, editingSubtitleIndex, segments, selectedSegmentIndex, selectedSubtitleIndex, subtitleDrafts, videoTransform]);
+  }, [currentSubtitleDraftText, editorNote, editingSubtitleIndex, segments, selectedSegmentIndex, selectedSubtitleIndex, subtitleDrafts, videoSummary, videoTransform]);
 
   const effectiveSegments = useMemo(
     () => segments.filter((segment) => segment.end > segment.start + 0.05),
@@ -767,11 +788,14 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
   const totalOutputDuration = projection.totalDuration;
   const activeSubtitle = activeSubtitleIndex >= 0 ? projection.remapped[activeSubtitleIndex] : null;
   const baseKeepSegments = session.base_keep_segments?.length ? session.base_keep_segments : session.keep_segments;
+  const baseVideoSummary = (session.base_video_summary || "").trim();
+  const currentVideoSummary = videoSummary.trim();
   const baseVideoTransform = useMemo(() => normalizeVideoTransform(session.base_video_transform), [session.base_video_transform]);
   const currentVideoTransform = useMemo(() => normalizeVideoTransform(videoTransform), [videoTransform]);
   const baseVideoRotation = baseVideoTransform.rotation_cw;
   const currentVideoRotation = currentVideoTransform.rotation_cw;
   const hasVideoTransformEdits = JSON.stringify(currentVideoTransform) !== JSON.stringify(baseVideoTransform);
+  const hasVideoSummaryEdits = currentVideoSummary !== baseVideoSummary;
   const waveformUrl = previewAssets?.ready && previewAssets.audio_url ? previewAssets.audio_url : session.source_url || "";
   const waveformPeaks = useMemo(
     () => (previewAssets?.peaks?.length ? [previewAssets.peaks] : undefined),
@@ -852,28 +876,61 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
       })),
       subtitle_overrides: subtitleOverrides,
       video_transform: currentVideoTransform,
+      video_summary: currentVideoSummary || null,
       base_timeline_id: session.timeline_id,
       base_timeline_version: session.timeline_version,
       base_render_plan_version: session.render_plan_version,
       note: editorNote.trim() || undefined,
     }),
-    [currentVideoTransform, effectiveSegments, editorNote, session.render_plan_version, session.timeline_id, session.timeline_version, subtitleOverrides],
+    [currentVideoSummary, currentVideoTransform, effectiveSegments, editorNote, session.render_plan_version, session.timeline_id, session.timeline_version, subtitleOverrides],
   );
   const savePlanLabel = hasTimelineEdits
     ? "剪辑变更：重建时间线/特效"
     : hasVideoTransformEdits
       ? "画面方向变更：重新渲染"
       : subtitleOverrides.length
-      ? "字幕变更：复用剪辑/特效计划"
+        ? "字幕变更：复用剪辑/特效计划"
+        : hasVideoSummaryEdits
+          ? "摘要变更：更新审核/校对证据"
       : "暂无实质修改";
   const saveImpactSummary = hasTimelineEdits
     ? "会保存新的剪辑时间线，并从 render 开始重新生成成片、特效和数字人版本。"
     : hasVideoTransformEdits
       ? "会保存画面旋转参数，并从 render 开始重新生成成片、特效和数字人版本。"
       : subtitleOverrides.length
-      ? "会保存字幕文本/时间修改，复用当前剪辑和特效计划重新烧录字幕层。"
+        ? "会保存字幕文本/时间修改，复用当前剪辑和特效计划重新烧录字幕层。"
+        : hasVideoSummaryEdits
+          ? "会把人工视频摘要写入内容画像和下游上下文，作为自动审核与字幕校对的强证据。"
       : "当前没有检测到剪辑、画面方向或字幕修改。";
   const outputDurationDeltaLabel = `${outputDurationDelta >= 0 ? "+" : "-"}${formatSeconds(Math.abs(outputDurationDelta))}`;
+  useEffect(() => {
+    onStateChange?.({
+      payload: manualEditorPayload,
+      canApply: session.editable && Boolean(onApply) && hasMaterialEdits && effectiveSegments.length > 0,
+      hasMaterialEdits,
+      hasLocalEdits: hasMaterialEdits || hasVideoSummaryEdits,
+      hasVideoSummaryEdits,
+      savePlanLabel,
+      baseSegmentCount: baseKeepSegments.length,
+      effectiveSegmentCount: effectiveSegments.length,
+      outputDurationDeltaLabel,
+      subtitleOverrideCount: subtitleOverrides.length,
+      saveImpactSummary,
+    });
+  }, [
+    baseKeepSegments.length,
+    effectiveSegments.length,
+    hasMaterialEdits,
+    hasVideoSummaryEdits,
+    manualEditorPayload,
+    onApply,
+    onStateChange,
+    outputDurationDeltaLabel,
+    saveImpactSummary,
+    savePlanLabel,
+    session.editable,
+    subtitleOverrides.length,
+  ]);
   const selectedSubtitlePosition = selectedSubtitle
     ? projection.remapped.findIndex((subtitle) => subtitle.index === selectedSubtitle.index)
     : activeSubtitleIndex;
@@ -1206,6 +1263,8 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
     setSegments(session.keep_segments.map((segment) => ({ start: segment.start, end: segment.end })));
     setSelectedSegmentIndex(0);
     setSelectedSubtitleIndex(null);
+    setEditingSubtitleIndex(null);
+    setCurrentSubtitleDraftText("");
     setSubtitleDrafts(
       Object.fromEntries(
         (session.subtitle_overrides || []).map((override) => [
@@ -1219,7 +1278,23 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
         ]),
       ),
     );
+    setEditorNote("");
+    setVideoSummary(session.video_summary || "");
+    const nextTransform = normalizeVideoTransform(session.video_transform);
+    setVideoTransform(nextTransform);
+    setRotationDraft(nextTransform.rotation_cw);
+    setResolutionDraft(nextTransform);
+    setRotationDialogOpen(false);
+    setResolutionDialogOpen(false);
+    setRotationDetectMessage(null);
+    resumeAfterSubtitleEditRef.current = false;
+    resumeTimelineAfterSubtitleEditRef.current = false;
   };
+
+  useEffect(() => {
+    if (!resetSignal) return;
+    restoreInitialSegments();
+  }, [resetSignal]);
 
   const openRotationDialog = () => {
     setRotationDraft(currentVideoRotation);
@@ -1877,8 +1952,28 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
         <span>画面比例 {baseVideoTransform.aspect_ratio}{" -> "}{currentVideoTransform.aspect_ratio}</span>
         <span>分辨率 {currentVideoTransform.resolution_mode === "specified" ? currentVideoTransform.resolution_preset : "原片"}</span>
         <span>字幕修改 {subtitleOverrides.length} 条</span>
+        {currentVideoSummary ? <span>视频摘要 强证据</span> : null}
         {visibleDraftSavedAt ? <span>上次草稿 {new Date(visibleDraftSavedAt).toLocaleTimeString()}</span> : null}
       </div>
+
+      <section className="manual-editor-evidence-panel">
+        <div className="manual-editor-preview-head">
+          <div>
+            <strong>视频摘要</strong>
+            <div className="muted compact-top">人工填写后会自动保存，并作为强证据进入自动审核、字幕校对和后续文案链路。</div>
+          </div>
+          <span className={classNames("status-pill", currentVideoSummary ? "done" : "pending")}>
+            {currentVideoSummary ? "强证据已填写" : "待填写"}
+          </span>
+        </div>
+        <textarea
+          className="input textarea manual-editor-summary-input"
+          rows={4}
+          value={videoSummary}
+          onChange={(event) => setVideoSummary(event.target.value)}
+          placeholder="用一两句话确认视频主体、核心内容、关键误读点或必须保留的信息。"
+        />
+      </section>
 
       <div className="manual-editor-grid top-gap">
         <section className="manual-editor-preview">
@@ -2243,14 +2338,6 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
             />
           </label>
 
-          <div className="manual-editor-actions top-gap">
-            <button type="button" className="button primary" disabled={!session.editable || saving || !onApply || !hasMaterialEdits} onClick={handleApply}>
-              {saving ? "重渲染提交中..." : "用当前自动保存版本重新渲染"}
-            </button>
-            <button type="button" className="button ghost" onClick={restoreInitialSegments}>
-              放弃本地改动
-            </button>
-          </div>
         </section>
       </div>
 

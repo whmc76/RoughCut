@@ -310,21 +310,22 @@ async def tick() -> None:
         for job in jobs_result.scalars().all():
             await _ensure_job_steps(job, session)
 
-        try:
-            from roughcut.watcher.folder_watcher import run_watch_root_auto_duty
+        if bool(getattr(get_settings(), "watch_auto_duty_enabled", True)):
+            try:
+                from roughcut.watcher.folder_watcher import run_watch_root_auto_duty
 
-            duty_summary = await run_watch_root_auto_duty()
-            if any(int(duty_summary.get(key) or 0) > 0 for key in ("scan_started", "auto_merged_jobs", "auto_enqueued_jobs")):
-                logger.info(
-                    "watch duty tick roots=%s scan_started=%s auto_merged_jobs=%s auto_enqueued_jobs=%s idle_slots=%s",
-                    duty_summary.get("roots_total"),
-                    duty_summary.get("scan_started"),
-                    duty_summary.get("auto_merged_jobs"),
-                    duty_summary.get("auto_enqueued_jobs"),
-                    duty_summary.get("idle_slots"),
-                )
-        except Exception:
-            logger.exception("Watch auto duty tick failed")
+                duty_summary = await run_watch_root_auto_duty()
+                if any(int(duty_summary.get(key) or 0) > 0 for key in ("scan_started", "auto_merged_jobs", "auto_enqueued_jobs")):
+                    logger.info(
+                        "watch duty tick roots=%s scan_started=%s auto_merged_jobs=%s auto_enqueued_jobs=%s idle_slots=%s",
+                        duty_summary.get("roots_total"),
+                        duty_summary.get("scan_started"),
+                        duty_summary.get("auto_merged_jobs"),
+                        duty_summary.get("auto_enqueued_jobs"),
+                        duty_summary.get("idle_slots"),
+                    )
+            except Exception:
+                logger.exception("Watch auto duty tick failed")
 
         await _recover_stale_running_steps(session)
         running_gpu_steps = await _count_running_gpu_steps(session)
@@ -1547,7 +1548,10 @@ async def run_orchestrator(poll_interval: float = 5.0) -> None:
                 last_tick_finished_at=last_tick_finished_at,
             )
             if not recovered:
-                await _recover_incomplete_jobs()
+                if bool(getattr(get_settings(), "startup_recovery_enabled", True)):
+                    await _recover_incomplete_jobs()
+                else:
+                    logger.info("Startup recovery disabled; incomplete jobs will not be auto-resumed")
                 recovered = True
             try:
                 last_tick_started_at = datetime.now(timezone.utc)

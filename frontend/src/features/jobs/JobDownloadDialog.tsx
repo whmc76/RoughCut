@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 
 import { api } from "../../api";
-import type { Job } from "../../types";
+import type { Job, JobDownloadFile } from "../../types";
 import { EmptyState } from "../../components/ui/EmptyState";
 import { PanelHeader } from "../../components/ui/PanelHeader";
 import { useI18n } from "../../i18n";
@@ -12,6 +12,8 @@ type JobDownloadDialogProps = {
   job: Job | null;
   onClose: () => void;
 };
+
+const EMPTY_DOWNLOAD_FILES: JobDownloadFile[] = [];
 
 function formatBytes(value: number) {
   if (!Number.isFinite(value) || value <= 0) return "0 B";
@@ -44,7 +46,7 @@ export function JobDownloadDialog({ open, job, onClose }: JobDownloadDialogProps
     queryFn: () => api.getJobDownloadFiles(job!.id),
     enabled: Boolean(open && job?.id),
   });
-  const files = query.data?.files ?? [];
+  const files = query.data?.files ?? EMPTY_DOWNLOAD_FILES;
   const selectedSet = useMemo(() => new Set(selectedIds), [selectedIds]);
   const selectedCount = files.filter((file) => selectedSet.has(file.id)).length;
   const selectedBytes = files
@@ -53,7 +55,7 @@ export function JobDownloadDialog({ open, job, onClose }: JobDownloadDialogProps
 
   useEffect(() => {
     if (!open) {
-      setSelectedIds([]);
+      setSelectedIds((current) => (current.length ? [] : current));
       return;
     }
     if (files.length) {

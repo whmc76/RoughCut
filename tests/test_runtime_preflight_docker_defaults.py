@@ -11,6 +11,7 @@ def test_docker_autostart_defaults_to_disabled() -> None:
 
     assert settings.runtime_preflight_docker_enabled is False
     assert settings.docker_gpu_guard_enabled is False
+    assert settings.avatar_render_no_progress_timeout_sec == 0
 
 
 def test_runtime_preflight_skips_compose_when_disabled(monkeypatch: pytest.MonkeyPatch) -> None:

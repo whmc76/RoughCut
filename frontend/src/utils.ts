@@ -45,6 +45,7 @@ export function statusLabel(status: string): string {
   const labels: Record<string, Record<string, string>> = {
     "zh-CN": {
       pending: "待处理",
+      queued: "排队中",
       awaiting_init: "待初始化",
       running: "进行中",
       done: "已完成",
@@ -56,6 +57,7 @@ export function statusLabel(status: string): string {
     },
     "en-US": {
       pending: "Pending",
+      queued: "Queued",
       awaiting_init: "Awaiting Setup",
       running: "Running",
       done: "Done",

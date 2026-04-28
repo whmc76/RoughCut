@@ -25,6 +25,7 @@ _TASK_TIMEOUT_MIN_SECONDS = 600.0
 _TASK_TIMEOUT_MAX_SECONDS = 3600.0
 _TASK_TIMEOUT_AUDIO_RATIO = 3.0
 _TASK_TIMEOUT_BUFFER_SECONDS = 180.0
+_TASK_NO_PROGRESS_TIMEOUT_SECONDS = 0.0
 _HEYGEM_TRAINING_PROBE_TIMEOUT_SECONDS = 2.0
 _HEYGEM_PREVIEW_SERVICE_CACHE: dict[str, bool] = {}
 _SHARED_AUDIO_READY_RETRIES = 12
@@ -290,6 +291,9 @@ class HeyGemAvatarProvider(AvatarProvider):
         started_at = time.monotonic()
         resolved_timeout = max(_TASK_TIMEOUT_MIN_SECONDS, float(timeout_seconds or _TASK_TIMEOUT_MIN_SECONDS))
         resolved_timeout = min(resolved_timeout, _TASK_TIMEOUT_MAX_SECONDS)
+        no_progress_timeout = _resolve_task_no_progress_timeout_seconds()
+        last_progress_marker: tuple[int, str, str, str] | None = None
+        last_progress_at = started_at
         while time.monotonic() - started_at < resolved_timeout:
             response = client.get(query_endpoint, headers=headers, params={"code": task_code})
             response.raise_for_status()
@@ -314,8 +318,37 @@ class HeyGemAvatarProvider(AvatarProvider):
                 return payload
             if status_value == 3:
                 raise RuntimeError(payload.get("msg") or data.get("msg") or f"HeyGem task failed: {task_code}")
+            now = time.monotonic()
+            progress_marker = (
+                status_value,
+                str(data.get("progress") or ""),
+                str(data.get("msg") or payload.get("msg") or ""),
+                str(data.get("result") or ""),
+            )
+            if progress_marker != last_progress_marker:
+                last_progress_marker = progress_marker
+                last_progress_at = now
+            elif no_progress_timeout is not None and now - last_progress_at >= no_progress_timeout:
+                raise TimeoutError(f"HeyGem task made no progress for {no_progress_timeout:.0f}s: {task_code}")
             time.sleep(_POLL_INTERVAL_SECONDS)
         raise TimeoutError(f"HeyGem task timed out: {task_code}")
+
+
+def _resolve_task_no_progress_timeout_seconds() -> float | None:
+    try:
+        configured = float(
+            getattr(
+                get_settings(),
+                "avatar_render_no_progress_timeout_sec",
+                _TASK_NO_PROGRESS_TIMEOUT_SECONDS,
+            )
+            or _TASK_NO_PROGRESS_TIMEOUT_SECONDS
+        )
+    except (TypeError, ValueError):
+        configured = _TASK_NO_PROGRESS_TIMEOUT_SECONDS
+    if configured <= 0:
+        return None
+    return min(_TASK_TIMEOUT_MAX_SECONDS, max(60.0, configured))
 
 
 def _resolve_task_timeout_seconds(segment: dict[str, Any]) -> float:

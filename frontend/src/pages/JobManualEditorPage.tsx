@@ -1,11 +1,11 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useParams } from "react-router-dom";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 import { api } from "../api";
 import { PageHeader } from "../components/ui/PageHeader";
 import { EmptyState } from "../components/ui/EmptyState";
-import { JobManualEditSection } from "../features/jobs/JobManualEditSection";
+import { JobManualEditSection, type JobManualEditSectionState } from "../features/jobs/JobManualEditSection";
 import type { JobManualEditApplyPayload } from "../types";
 
 function errorMessage(error: unknown) {
@@ -25,6 +25,8 @@ export function JobManualEditorPage() {
   const queryClient = useQueryClient();
   const [notice, setNotice] = useState<{ tone: "success" | "error"; message: string } | null>(null);
   const [lastDraftSavedAt, setLastDraftSavedAt] = useState<string | null>(null);
+  const [manualEditState, setManualEditState] = useState<JobManualEditSectionState | null>(null);
+  const [resetSignal, setResetSignal] = useState(0);
 
   const job = useQuery({
     queryKey: ["job", jobId],
@@ -86,8 +88,75 @@ export function JobManualEditorPage() {
       setNotice({ tone: "error", message: `画面方向检测失败：${errorMessage(error) || "请手动选择角度。"}` });
     },
   });
+  const applyManualEditorMutate = applyManualEditor.mutate;
+  const saveManualEditorDraftMutate = saveManualEditorDraft.mutate;
+  const detectRotationMutateAsync = detectRotation.mutateAsync;
+
+  const handleApplyManualEdit = () => {
+    if (!manualEditState?.canApply) return;
+    const confirmed = window.confirm(
+      [
+        "确认保存手动调整？",
+        `保存类型：${manualEditState.savePlanLabel}`,
+        `片段数：${manualEditState.baseSegmentCount} -> ${manualEditState.effectiveSegmentCount}`,
+        `输出时长变化：${manualEditState.outputDurationDeltaLabel}`,
+        `字幕修改：${manualEditState.subtitleOverrideCount} 条`,
+        manualEditState.saveImpactSummary,
+      ].join("\n"),
+    );
+    if (!confirmed) return;
+    applyManualEditor.mutate(manualEditState.payload);
+  };
+
+  const handleDiscardManualEdit = () => {
+    if (!manualEditState?.hasLocalEdits) return;
+    setResetSignal((value) => value + 1);
+    setNotice({ tone: "success", message: "已放弃本地改动，恢复到当前自动保存版本。" });
+  };
+
+  const handleManualEditStateChange = useCallback((nextState: JobManualEditSectionState) => {
+    setManualEditState((currentState) => {
+      if (
+        currentState
+        && currentState.canApply === nextState.canApply
+        && currentState.hasMaterialEdits === nextState.hasMaterialEdits
+        && currentState.hasLocalEdits === nextState.hasLocalEdits
+        && currentState.hasVideoSummaryEdits === nextState.hasVideoSummaryEdits
+        && currentState.savePlanLabel === nextState.savePlanLabel
+        && currentState.baseSegmentCount === nextState.baseSegmentCount
+        && currentState.effectiveSegmentCount === nextState.effectiveSegmentCount
+        && currentState.outputDurationDeltaLabel === nextState.outputDurationDeltaLabel
+        && currentState.subtitleOverrideCount === nextState.subtitleOverrideCount
+        && currentState.saveImpactSummary === nextState.saveImpactSummary
+        && JSON.stringify(currentState.payload) === JSON.stringify(nextState.payload)
+      ) {
+        return currentState;
+      }
+      return nextState;
+    });
+  }, []);
+
+  const handleApplyManualEditorPayload = useCallback(
+    (payload: JobManualEditApplyPayload) => {
+      applyManualEditorMutate(payload);
+    },
+    [applyManualEditorMutate],
+  );
+
+  const handleAutoSaveManualEditorDraft = useCallback(
+    (payload: JobManualEditApplyPayload) => {
+      saveManualEditorDraftMutate(payload);
+    },
+    [saveManualEditorDraftMutate],
+  );
+
+  const handleDetectManualEditorRotation = useCallback(async () => {
+    const result = await detectRotationMutateAsync();
+    return result.rotation_cw;
+  }, [detectRotationMutateAsync]);
 
   const noticeClass = notice?.tone === "error" ? "notice notice-error top-gap" : "notice top-gap";
+  const manualEditorActionsEnabled = Boolean(manualEditor.data);
 
   return (
     <section className="page-stack manual-editor-page">
@@ -95,9 +164,27 @@ export function JobManualEditorPage() {
         title="手动调整模式"
         description={job.data?.source_name || "独立剪辑窗口：预览、调整片段和字幕，然后保存进入重渲染。"}
         actions={
-          <Link className="button ghost" to="/jobs">
-            返回任务列表
-          </Link>
+          <div className="manual-editor-page-actions">
+            <button
+              type="button"
+              className="button primary"
+              disabled={!manualEditState?.canApply || applyManualEditor.isPending}
+              onClick={handleApplyManualEdit}
+            >
+              {applyManualEditor.isPending ? "重渲染提交中..." : "用当前自动保存版本重新渲染"}
+            </button>
+            <button
+              type="button"
+              className="button ghost"
+              disabled={!manualEditorActionsEnabled || !manualEditState?.hasLocalEdits}
+              onClick={handleDiscardManualEdit}
+            >
+              放弃本地改动
+            </button>
+            <Link className="button ghost" to="/jobs">
+              返回任务列表
+            </Link>
+          </div>
         }
       />
 
@@ -132,12 +219,11 @@ export function JobManualEditorPage() {
           autosaving={saveManualEditorDraft.isPending}
           autosavedAt={lastDraftSavedAt ?? manualEditor.data.draft_saved_at}
           detectingRotation={detectRotation.isPending}
-          onApply={(payload) => applyManualEditor.mutate(payload)}
-          onAutoSave={(payload) => saveManualEditorDraft.mutate(payload)}
-          onDetectRotation={async () => {
-            const result = await detectRotation.mutateAsync();
-            return result.rotation_cw;
-          }}
+          resetSignal={resetSignal}
+          onStateChange={handleManualEditStateChange}
+          onApply={handleApplyManualEditorPayload}
+          onAutoSave={handleAutoSaveManualEditorDraft}
+          onDetectRotation={handleDetectManualEditorRotation}
         />
       ) : (
         <section className="panel">

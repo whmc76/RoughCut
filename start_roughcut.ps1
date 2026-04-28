@@ -3,12 +3,22 @@ param(
     [string]$Mode = "local",
     [string]$DockerPythonExtras = "",
     [int]$Port = 38471,
+    [ValidateRange(1, 8)]
+    [int]$MediaWorkerCount = 1,
+    [ValidateRange(1, 16)]
+    [int]$LlmWorkerCount = 4,
     [switch]$SkipDocker,
     [switch]$SkipMigrate,
     [switch]$CleanupLegacyDocker,
     [switch]$StopOnly,
     [switch]$StopDocker,
     [switch]$NoPause,
+    [switch]$SafeStart,
+    [switch]$OpenBrowser,
+    [switch]$NoOrchestrator,
+    [switch]$NoWorkers,
+    [switch]$NoAutoResume,
+    [switch]$NoWatchAutoDuty,
     [switch]$NoWatcher,
     [switch]$NoDockerWatch,
     [switch]$AutoDockerWatch
@@ -1450,7 +1460,9 @@ function Stop-RoughCutHostTelegramAgent {
 function Get-RoughCutWorkerNodeName {
     param(
         [ValidateSet("media_queue", "llm_queue", "agent_queue")]
-        [string]$Queue
+        [string]$Queue,
+        [ValidateRange(1, 16)]
+        [int]$Instance = 1
     )
 
     $suffix = switch ($Queue) {
@@ -1458,6 +1470,9 @@ function Get-RoughCutWorkerNodeName {
         "llm_queue" { "llm-local" }
         "agent_queue" { "agent-local" }
         default { "worker-local" }
+    }
+    if ($Instance -gt 1) {
+        $suffix = "$suffix-$Instance"
     }
     return "$suffix@localhost"
 }
@@ -1586,13 +1601,15 @@ function Start-RoughCutWorkerProcess {
         [ValidateSet("media_queue", "llm_queue", "agent_queue")]
         [string]$Queue,
         [string]$StdoutPath,
-        [string]$StderrPath
+        [string]$StderrPath,
+        [ValidateRange(1, 16)]
+        [int]$Instance = 1
     )
 
-    $workerNode = Get-RoughCutWorkerNodeName -Queue $Queue
+    $workerNode = Get-RoughCutWorkerNodeName -Queue $Queue -Instance $Instance
     $matchPatterns = @(
-        (Get-RoughCutCommandMatchPattern "worker --queue $Queue"),
-        [regex]::Escape("celery -A roughcut.pipeline.celery_app:celery_app worker --queues=$Queue")
+        (Get-RoughCutCommandMatchPattern "worker --queue $Queue --pool solo --concurrency 1 --hostname $workerNode --without-gossip --without-mingle"),
+        [regex]::Escape("celery -A roughcut.pipeline.celery_app:celery_app worker --queues=$Queue") + ".*" + [regex]::Escape($workerNode)
     )
 
     foreach ($pattern in $matchPatterns) {
@@ -1784,6 +1801,25 @@ if ($Mode -ne "local") {
 Initialize-RoughCutEnvironment
 Ensure-RoughCutFrontend
 
+if ($SafeStart) {
+    $NoWatcher = $true
+    $NoOrchestrator = $true
+    $NoWorkers = $true
+    $OpenBrowser = $false
+    Write-Host "Safe start enabled: watcher, orchestrator, workers, and browser auto-open are disabled." -ForegroundColor Yellow
+}
+if ($NoAutoResume) {
+    $env:STARTUP_RECOVERY_ENABLED = "false"
+    $env:STEP_STALE_RECOVERY_ENABLED = "false"
+    Write-Host "Startup auto-resume and stale-step recovery disabled for this startup." -ForegroundColor Yellow
+}
+if ($NoWatchAutoDuty) {
+    $env:WATCH_AUTO_DUTY_ENABLED = "false"
+    $env:WATCH_AUTO_MERGE_ENABLED = "false"
+    $env:WATCH_AUTO_ENQUEUE_ENABLED = "false"
+    Write-Host "Watch auto duty, merge, and enqueue disabled for this startup." -ForegroundColor Yellow
+}
+
 Stop-RoughCutServices
 
 Write-Host "Starting local RoughCut development stack..." -ForegroundColor Cyan
@@ -1857,35 +1893,54 @@ if (-not $NoWatcher) {
         -Arguments @("-m", "roughcut.cli", "watcher", $WatchDir, "--language", "zh-CN") `
         -MatchPattern (Get-RoughCutCommandMatchPattern "watcher $WatchDir --language zh-CN") `
         -StdoutPath (Join-Path $RepoRoot "logs\watcher.out.log") `
-        -StderrPath (Join-Path $RepoRoot "logs\watcher.err.log")
+        -StderrPath (Join-Path $RepoRoot "logs\watcher.err.log") `
+        -HiddenWindow
 }
 Start-RoughCutProcess `
     -Name "API" `
     -Arguments @("-m", "roughcut.cli", "api", "--host", "127.0.0.1", "--port", "$Port") `
     -MatchPattern (Get-RoughCutCommandMatchPattern "api --host 127.0.0.1 --port $Port") `
     -StdoutPath (Join-Path $RepoRoot "logs\api.out.log") `
-    -StderrPath (Join-Path $RepoRoot "logs\api.err.log")
-Start-RoughCutProcess `
-    -Name "Orchestrator" `
-    -Arguments @("-m", "roughcut.cli", "orchestrator", "--poll-interval", "2") `
-    -MatchPattern (Get-RoughCutCommandMatchPattern "orchestrator --poll-interval 2") `
-    -StdoutPath (Join-Path $RepoRoot "logs\orchestrator.out.log") `
-    -StderrPath (Join-Path $RepoRoot "logs\orchestrator.err.log")
-Start-RoughCutWorkerProcess `
-    -Name "Media worker" `
-    -Queue "media_queue" `
-    -StdoutPath (Join-Path $RepoRoot "logs\media-worker.out.log") `
-    -StderrPath (Join-Path $RepoRoot "logs\media-worker.err.log")
-Start-RoughCutWorkerProcess `
-    -Name "LLM worker" `
-    -Queue "llm_queue" `
-    -StdoutPath (Join-Path $RepoRoot "logs\llm-worker.out.log") `
-    -StderrPath (Join-Path $RepoRoot "logs\llm-worker.err.log")
-Start-RoughCutWorkerProcess `
-    -Name "Agent worker" `
-    -Queue "agent_queue" `
-    -StdoutPath (Join-Path $RepoRoot "logs\agent-worker.out.log") `
-    -StderrPath (Join-Path $RepoRoot "logs\agent-worker.err.log")
+    -StderrPath (Join-Path $RepoRoot "logs\api.err.log") `
+    -HiddenWindow
+if ($NoOrchestrator) {
+    Write-Host "Orchestrator disabled for this startup." -ForegroundColor Yellow
+} else {
+    Start-RoughCutProcess `
+        -Name "Orchestrator" `
+        -Arguments @("-m", "roughcut.cli", "orchestrator", "--poll-interval", "2") `
+        -MatchPattern (Get-RoughCutCommandMatchPattern "orchestrator --poll-interval 2") `
+        -StdoutPath (Join-Path $RepoRoot "logs\orchestrator.out.log") `
+        -StderrPath (Join-Path $RepoRoot "logs\orchestrator.err.log") `
+        -HiddenWindow
+}
+if ($NoWorkers) {
+    Write-Host "Workers disabled for this startup." -ForegroundColor Yellow
+} else {
+    for ($mediaWorkerIndex = 1; $mediaWorkerIndex -le $MediaWorkerCount; $mediaWorkerIndex++) {
+        $mediaLogSuffix = if ($mediaWorkerIndex -eq 1) { "" } else { "-$mediaWorkerIndex" }
+        Start-RoughCutWorkerProcess `
+            -Name "Media worker $mediaWorkerIndex" `
+            -Queue "media_queue" `
+            -StdoutPath (Join-Path $RepoRoot "logs\media-worker$mediaLogSuffix.out.log") `
+            -StderrPath (Join-Path $RepoRoot "logs\media-worker$mediaLogSuffix.err.log") `
+            -Instance $mediaWorkerIndex
+    }
+    for ($llmWorkerIndex = 1; $llmWorkerIndex -le $LlmWorkerCount; $llmWorkerIndex++) {
+        $llmLogSuffix = if ($llmWorkerIndex -eq 1) { "" } else { "-$llmWorkerIndex" }
+        Start-RoughCutWorkerProcess `
+            -Name "LLM worker $llmWorkerIndex" `
+            -Queue "llm_queue" `
+            -StdoutPath (Join-Path $RepoRoot "logs\llm-worker$llmLogSuffix.out.log") `
+            -StderrPath (Join-Path $RepoRoot "logs\llm-worker$llmLogSuffix.err.log") `
+            -Instance $llmWorkerIndex
+    }
+    Start-RoughCutWorkerProcess `
+        -Name "Agent worker" `
+        -Queue "agent_queue" `
+        -StdoutPath (Join-Path $RepoRoot "logs\agent-worker.out.log") `
+        -StderrPath (Join-Path $RepoRoot "logs\agent-worker.err.log")
+}
 
 Write-Host ""
 Write-Host "RoughCut started." -ForegroundColor Green
@@ -1893,8 +1948,12 @@ Write-Host "API URL: http://127.0.0.1:$Port" -ForegroundColor Green
 Write-Host "Logs: .\logs\*.out.log / .\logs\*.err.log" -ForegroundColor DarkGray
 
 if (Wait-ApiReady -TestPort $Port) {
-    Start-Process "http://127.0.0.1:$Port/" | Out-Null
-    Write-Host "GUI opened in your default browser." -ForegroundColor Green
+    if ($OpenBrowser) {
+        Start-Process "http://127.0.0.1:$Port/" | Out-Null
+        Write-Host "GUI opened in your default browser." -ForegroundColor Green
+    } else {
+        Write-Host "API is ready. Open http://127.0.0.1:$Port/ manually when needed." -ForegroundColor Green
+    }
 } else {
     Write-Host "API did not become ready in time. Check logs if the GUI does not open." -ForegroundColor Yellow
 }

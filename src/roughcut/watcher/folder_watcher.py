@@ -939,6 +939,10 @@ def _extract_name_tokens(value: str) -> set[str]:
 
 
 _SEQUENCED_CAPTURE_RE = re.compile(r"(?P<date>\d{8})[-_](?P<time>\d{6})(?:$|[^0-9])")
+_EXPLICIT_PART_RE = re.compile(
+    r"(?:\u5f00\u7bb1|\u62c6\u7bb1|part|pt|\u7b2c)\s*(?P<part>[0-9\u4e00\u4e8c\u4e09\u56db\u4e94\u516d\u4e03\u516b\u4e5d\u5341]{1,3})",
+    re.IGNORECASE,
+)
 _SUBJECT_STOPWORDS = {
     "开箱",
     "测评",
@@ -1079,6 +1083,45 @@ def _parse_capture_sequence_time(value: str | None) -> datetime | None:
         return datetime.strptime(f"{match.group('date')}{match.group('time')}", "%Y%m%d%H%M%S").replace(tzinfo=timezone.utc)
     except ValueError:
         return None
+
+
+def _explicit_part_key(value: str | None) -> tuple[str, int] | None:
+    stem = Path(str(value or "")).stem.lower()
+    match = _EXPLICIT_PART_RE.search(stem)
+    if not match:
+        return None
+    raw_part = match.group("part")
+    part_map = {
+        "一": 1,
+        "二": 2,
+        "三": 3,
+        "四": 4,
+        "五": 5,
+        "六": 6,
+        "七": 7,
+        "八": 8,
+        "九": 9,
+        "十": 10,
+    }
+    try:
+        part = int(raw_part)
+    except ValueError:
+        part = part_map.get(raw_part, 0)
+    if part <= 0:
+        return None
+    group_key = (stem[: match.start()] + stem[match.end() :]).strip()
+    group_key = re.sub(r"\b(?:img|dsc|mov|clip)[-_ ]?\d{3,6}\b", " ", group_key, flags=re.IGNORECASE)
+    group_key = re.sub(r"\b\d{6,}\b", " ", group_key)
+    group_key = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "", group_key)
+    return group_key, part
+
+
+def _has_explicit_part_continuity(left_item: dict[str, Any], right_item: dict[str, Any]) -> bool:
+    left_key = _explicit_part_key(left_item.get("source_name"))
+    right_key = _explicit_part_key(right_item.get("source_name"))
+    if left_key is None or right_key is None:
+        return False
+    return bool(left_key[0] and left_key[0] == right_key[0] and abs(left_key[1] - right_key[1]) <= 1)
 
 
 def _capture_continuity_score(left_item: dict[str, Any], right_item: dict[str, Any], *, time_score: float, visual_score: float) -> float:
@@ -1248,6 +1291,11 @@ async def suggest_merge_groups_for_inventory_items(
                 time_score=time_score,
                 visual_score=visual_score,
             )
+            explicit_part_continuity = _has_explicit_part_continuity(left_item, right_item)
+            if continuity_score < 0.55 and not explicit_part_continuity:
+                # Same brand/model is not enough to merge watch-root clips. It can
+                # span separate shoots of the same product and create one bad job.
+                continue
 
             score = (
                 time_score * 0.34
@@ -1257,6 +1305,7 @@ async def suggest_merge_groups_for_inventory_items(
                 + name_score * 0.06
                 + duration_score * 0.01
                 + continuity_score * 0.14
+                + (0.18 if explicit_part_continuity else 0.0)
             )
             if score < min_score:
                 continue

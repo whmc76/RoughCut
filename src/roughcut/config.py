@@ -319,6 +319,7 @@ class Settings(BaseSettings):
     watch_auto_merge_enabled: bool = True
     watch_auto_merge_min_score: float = 0.72
     watch_auto_enqueue_enabled: bool = True
+    watch_auto_duty_enabled: bool = True
     watch_auto_max_active_jobs: int = 2
     watch_auto_max_jobs_per_root: int = 1
     gpu_retry_enabled: bool = True
@@ -327,6 +328,7 @@ class Settings(BaseSettings):
     gpu_busy_utilization_threshold: int = 92
     gpu_busy_memory_threshold: float = 0.92
     step_heartbeat_interval_sec: int = 20
+    startup_recovery_enabled: bool = True
     step_stale_recovery_enabled: bool = True
     step_stale_timeout_sec: int = 900
     step_dispatch_stale_timeout_sec: int = 3600
@@ -337,6 +339,7 @@ class Settings(BaseSettings):
     render_step_stale_timeout_sec: int = 5400
     render_step_prepackaging_stale_timeout_sec: int = 1500
     render_step_packaging_stale_timeout_sec: int = 2400
+    avatar_render_no_progress_timeout_sec: int = 0
     runtime_preflight_docker_enabled: bool = False
     docker_gpu_guard_enabled: bool = False
     docker_gpu_guard_idle_timeout_sec: int = 900

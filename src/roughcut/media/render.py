@@ -151,6 +151,20 @@ def _video_encode_args(*, prefer_hardware: bool = True) -> list[str]:
     ]
 
 
+def _prefer_software_encoder_for_source(source_info: dict[str, Any], *, source_duration_sec: float) -> bool:
+    if source_duration_sec >= 900:
+        return True
+    if int(source_info.get("rotation_cw") or 0) in (90, 180, 270):
+        return True
+    pix_fmt = str(source_info.get("pix_fmt") or "").lower()
+    if "10" in pix_fmt or "12" in pix_fmt:
+        return True
+    color_transfer = str(source_info.get("color_transfer") or "").lower()
+    if color_transfer in {"arib-std-b67", "smpte2084"}:
+        return True
+    return False
+
+
 def _resolve_video_encoder(*, prefer_hardware: bool) -> str:
     requested = str(get_settings().render_video_encoder or "auto").strip().lower()
     if requested not in {"auto", "libx264", "h264_qsv", "h264_nvenc", "h264_amf"}:
@@ -329,6 +343,10 @@ async def render_video(
 
     source_info = _probe_video_stream(source_path)
     _write_debug_json(debug_dir, "source.ffprobe.json", source_info)
+    prefer_hardware_encoder = not _prefer_software_encoder_for_source(
+        source_info,
+        source_duration_sec=source_duration,
+    )
 
     from roughcut.media.rotation import RotationDecision, detect_video_rotation_decision
 
@@ -367,6 +385,7 @@ async def render_video(
             "rotation_decision": rotation_decision.to_dict(),
             "expected_width": expected_w,
             "expected_height": expected_h,
+            "prefer_hardware_encoder": prefer_hardware_encoder,
         },
     )
 
@@ -465,7 +484,7 @@ async def render_video(
         video_map,
         "-map",
         audio_map,
-        *_video_encode_args(),
+        *_video_encode_args(prefer_hardware=prefer_hardware_encoder),
         *_audio_encode_args(),
         str(base_output_path),
     ]
@@ -2683,6 +2702,12 @@ def _describe_stream(stream: dict[str, Any]) -> dict[str, Any]:
     return {
         "width": width,
         "height": height,
+        "codec_name": stream.get("codec_name", ""),
+        "pix_fmt": stream.get("pix_fmt", ""),
+        "color_range": stream.get("color_range", ""),
+        "color_space": stream.get("color_space", ""),
+        "color_transfer": stream.get("color_transfer", ""),
+        "color_primaries": stream.get("color_primaries", ""),
         "display_width": display_width,
         "display_height": display_height,
         "rotation_raw": rotation_raw,

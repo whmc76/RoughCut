@@ -97,7 +97,7 @@ from roughcut.review.content_profile_memory import (
     load_content_profile_user_memory,
     record_content_profile_feedback_memory,
 )
-from roughcut.review.downstream_context import build_downstream_context
+from roughcut.review.downstream_context import build_downstream_context, resolve_downstream_profile
 from roughcut.review.final_review_rerun import (
     build_final_review_rerun_plans,
     combine_final_review_rerun_plans,
@@ -186,6 +186,7 @@ PROFILE_ARTIFACT_PRIORITY = {
     "content_profile_draft": 1,
 }
 _CONTENT_PROFILE_ARTIFACT_TYPES = ("content_profile_final", "content_profile", "content_profile_draft")
+_DOWNSTREAM_PROFILE_ARTIFACT_TYPES = ("downstream_context",) + _CONTENT_PROFILE_ARTIFACT_TYPES
 _CONTENT_PROFILE_THUMBNAIL_CACHE_VERSION = "v2"
 _CONTENT_PROFILE_THUMBNAIL_LOCKS: dict[str, asyncio.Lock] = {}
 _CONTENT_PROFILE_THUMBNAIL_GENERATION_SEMAPHORE = asyncio.Semaphore(2)
@@ -273,6 +274,7 @@ class ManualEditorApplyIn(BaseModel):
     keep_segments: list[ManualEditorSegmentIn] = Field(default_factory=list)
     subtitle_overrides: list[ManualEditorSubtitleOverrideIn] = Field(default_factory=list)
     video_transform: ManualEditorVideoTransformIn | None = None
+    video_summary: str | None = None
     base_timeline_id: str | None = None
     base_timeline_version: int | None = None
     base_render_plan_version: int | None = None
@@ -312,6 +314,8 @@ class ManualEditorSessionOut(BaseModel):
     source_name: str
     source_duration_sec: float
     source_url: str | None = None
+    video_summary: str | None = None
+    base_video_summary: str | None = None
     keep_segments: list[ManualEditorSegmentOut] = Field(default_factory=list)
     base_keep_segments: list[ManualEditorSegmentOut] = Field(default_factory=list)
     source_subtitles: list[ManualEditorSubtitleOut] = Field(default_factory=list)
@@ -508,6 +512,197 @@ def _coerce_artifact_payload(artifact: Artifact | None) -> dict[str, Any]:
     if artifact is None or not isinstance(artifact.data_json, dict):
         return {}
     return dict(artifact.data_json)
+
+
+def _normalize_manual_video_summary(value: Any) -> str | None:
+    text = "\n".join(
+        line.strip()
+        for line in str(value or "").replace("\r", "\n").split("\n")
+        if line.strip()
+    )
+    if not text:
+        return None
+    return text[:1200]
+
+
+def _select_preferred_downstream_artifact(artifacts: list[Artifact]) -> Artifact | None:
+    if not artifacts:
+        return None
+    priority = {
+        "downstream_context": 4,
+        "content_profile_final": 3,
+        "content_profile": 2,
+        "content_profile_draft": 1,
+    }
+    epoch = datetime.min.replace(tzinfo=timezone.utc)
+    latest_final = max(
+        (artifact for artifact in artifacts if str(artifact.artifact_type or "").strip() == "content_profile_final"),
+        key=lambda artifact: artifact.created_at or epoch,
+        default=None,
+    )
+    latest_downstream = max(
+        (artifact for artifact in artifacts if str(artifact.artifact_type or "").strip() == "downstream_context"),
+        key=lambda artifact: artifact.created_at or epoch,
+        default=None,
+    )
+    if latest_final is not None and (
+        latest_downstream is None
+        or (latest_final.created_at or epoch) > (latest_downstream.created_at or epoch)
+    ):
+        return latest_final
+    return max(
+        artifacts,
+        key=lambda artifact: (
+            priority.get(str(artifact.artifact_type or "").strip(), 0),
+            artifact.created_at or epoch,
+            str(artifact.id),
+        ),
+    )
+
+
+async def _load_manual_editor_base_video_summary(session: AsyncSession, *, job_id: uuid.UUID) -> str | None:
+    result = await session.execute(
+        select(Artifact)
+        .where(
+            Artifact.job_id == job_id,
+            Artifact.artifact_type.in_(list(_DOWNSTREAM_PROFILE_ARTIFACT_TYPES)),
+        )
+        .order_by(Artifact.created_at.desc(), Artifact.id.desc())
+    )
+    artifact = _select_preferred_downstream_artifact(result.scalars().all())
+    profile = resolve_downstream_profile(artifact.data_json if artifact and isinstance(artifact.data_json, dict) else {})
+    return _normalize_manual_video_summary(profile.get("summary"))
+
+
+def _apply_manual_video_summary_to_profile(
+    profile: dict[str, Any] | None,
+    *,
+    video_summary: str,
+    updated_at: str,
+) -> dict[str, Any]:
+    next_profile = dict(profile or {})
+    resolved_feedback = (
+        dict(next_profile.get("resolved_review_user_feedback") or {})
+        if isinstance(next_profile.get("resolved_review_user_feedback"), dict)
+        else {}
+    )
+    user_feedback = (
+        dict(next_profile.get("user_feedback") or {})
+        if isinstance(next_profile.get("user_feedback"), dict)
+        else {}
+    )
+    manual_evidence = (
+        dict(next_profile.get("manual_evidence") or {})
+        if isinstance(next_profile.get("manual_evidence"), dict)
+        else {}
+    )
+    manual_evidence["video_summary"] = {
+        "value": video_summary,
+        "source": "manual_editor",
+        "strength": "strong",
+        "updated_at": updated_at,
+    }
+    next_profile.update(
+        {
+            "summary": video_summary,
+            "manual_video_summary": video_summary,
+            "manual_evidence": manual_evidence,
+            "resolved_review_user_feedback": {**resolved_feedback, "summary": video_summary},
+            "user_feedback": {**user_feedback, "summary": video_summary},
+            "review_mode": "manual_confirmed",
+        }
+    )
+    return next_profile
+
+
+async def _persist_manual_video_summary_evidence(
+    session: AsyncSession,
+    *,
+    job: Job,
+    video_summary: str | None,
+    updated_at: str,
+) -> bool:
+    normalized_summary = _normalize_manual_video_summary(video_summary)
+    if not normalized_summary:
+        return False
+    result = await session.execute(
+        select(Artifact)
+        .where(
+            Artifact.job_id == job.id,
+            Artifact.artifact_type.in_(list(_DOWNSTREAM_PROFILE_ARTIFACT_TYPES)),
+        )
+        .order_by(Artifact.created_at.desc(), Artifact.id.desc())
+    )
+    artifacts = result.scalars().all()
+    selected = _select_preferred_downstream_artifact(artifacts)
+    base_profile = resolve_downstream_profile(selected.data_json if selected and isinstance(selected.data_json, dict) else {})
+    existing_evidence = base_profile.get("manual_evidence") if isinstance(base_profile.get("manual_evidence"), dict) else {}
+    existing_summary_evidence = existing_evidence.get("video_summary") if isinstance(existing_evidence, dict) else {}
+    if (
+        str(base_profile.get("summary") or "").strip() == normalized_summary
+        and isinstance(existing_summary_evidence, dict)
+        and str(existing_summary_evidence.get("source") or "").strip() == "manual_editor"
+        and str(existing_summary_evidence.get("value") or "").strip() == normalized_summary
+    ):
+        return False
+
+    profile = _apply_manual_video_summary_to_profile(
+        base_profile,
+        video_summary=normalized_summary,
+        updated_at=updated_at,
+    )
+    step_result = await session.execute(
+        select(JobStep).where(JobStep.job_id == job.id, JobStep.step_name == "summary_review")
+    )
+    review_step = step_result.scalar_one_or_none()
+    session.add(
+        Artifact(
+            job_id=job.id,
+            step_id=review_step.id if review_step else None,
+            artifact_type="content_profile_final",
+            data_json=profile,
+        )
+    )
+    session.add(
+        Artifact(
+            job_id=job.id,
+            step_id=review_step.id if review_step else None,
+            artifact_type="downstream_context",
+            data_json=build_downstream_context(profile),
+        )
+    )
+    job.content_summary = normalized_summary
+    return True
+
+
+async def _persist_manual_video_summary_source_context(
+    session: AsyncSession,
+    *,
+    job_id: uuid.UUID,
+    video_summary: str | None,
+    updated_at: str,
+) -> None:
+    normalized_summary = _normalize_manual_video_summary(video_summary)
+    if not normalized_summary:
+        return
+    step_result = await session.execute(
+        select(JobStep).where(JobStep.job_id == job_id, JobStep.step_name == "content_profile")
+    )
+    step = step_result.scalar_one_or_none()
+    if step is None:
+        return
+    metadata = dict(step.metadata_ or {}) if isinstance(step.metadata_, dict) else {}
+    source_context = dict(metadata.get("source_context") or {}) if isinstance(metadata.get("source_context"), dict) else {}
+    source_context.update(
+        {
+            "manual_video_summary": normalized_summary,
+            "manual_video_summary_source": "manual_editor",
+            "manual_video_summary_strength": "strong",
+            "manual_video_summary_updated_at": updated_at,
+        }
+    )
+    metadata["source_context"] = source_context
+    step.metadata_ = metadata
 
 
 async def _load_content_profile_review_evidence(
@@ -1799,6 +1994,8 @@ async def _build_manual_editor_session(
 
     draft_saved_at: str | None = None
     draft_note: str | None = None
+    base_video_summary = await _load_manual_editor_base_video_summary(session, job_id=job.id)
+    video_summary = base_video_summary
     draft_artifact = await _load_latest_optional_artifact(
         session,
         job_id=job.id,
@@ -1827,6 +2024,7 @@ async def _build_manual_editor_session(
             ]
         )
         video_transform = _manual_video_transform_payload(draft_payload.get("video_transform"))
+        video_summary = _normalize_manual_video_summary(draft_payload.get("video_summary")) or base_video_summary
         draft_saved_at = str(draft_payload.get("saved_at") or "") or None
         draft_note = str(draft_payload.get("note") or "") or None
 
@@ -1860,6 +2058,8 @@ async def _build_manual_editor_session(
         source_name=str(job.source_name or ""),
         source_duration_sec=round(max(0.0, source_duration_sec), 3),
         source_url=f"/api/v1/jobs/{job.id}/source/file" if source_path is not None else None,
+        video_summary=video_summary,
+        base_video_summary=base_video_summary,
         keep_segments=keep_segments,
         base_keep_segments=base_keep_segments,
         source_subtitles=[
@@ -2033,7 +2233,20 @@ async def save_manual_editor_draft(
     keep_segments = _normalize_manual_keep_segments(request.keep_segments, source_duration_sec=source_duration_sec)
     subtitle_override_payloads = _manual_subtitle_override_payloads(request.subtitle_overrides)
     video_transform = _manual_video_transform_payload(request.video_transform)
+    video_summary = _normalize_manual_video_summary(request.video_summary)
     saved_at = datetime.now(timezone.utc).isoformat()
+    await _persist_manual_video_summary_evidence(
+        session,
+        job=job,
+        video_summary=video_summary,
+        updated_at=saved_at,
+    )
+    await _persist_manual_video_summary_source_context(
+        session,
+        job_id=job.id,
+        video_summary=video_summary,
+        updated_at=saved_at,
+    )
     await session.execute(
         delete(Artifact).where(
             Artifact.job_id == job.id,
@@ -2053,6 +2266,7 @@ async def save_manual_editor_draft(
                 "keep_segments": keep_segments,
                 "subtitle_overrides": subtitle_override_payloads,
                 "video_transform": video_transform,
+                "video_summary": video_summary,
                 "note": str(request.note or "").strip() or None,
             },
         )
@@ -2146,6 +2360,7 @@ async def apply_manual_editor_timeline(
     base_output_duration_sec = max((float(item.get("end_time", 0.0) or 0.0) for item in remapped_subtitles), default=0.0)
     subtitle_override_payloads = _manual_subtitle_override_payloads(request.subtitle_overrides)
     video_transform = _manual_video_transform_payload(request.video_transform)
+    video_summary = _normalize_manual_video_summary(request.video_summary)
     previous_render_plan = dict(render_plan_timeline.data_json or {})
     remapped_subtitles = _apply_manual_subtitle_overrides(
         remapped_subtitles,
@@ -2160,6 +2375,12 @@ async def apply_manual_editor_timeline(
         next_video_transform=video_transform,
     )
     _profile_artifact, content_profile = await _load_preferred_downstream_profile(session, job_id=job.id)
+    if video_summary:
+        content_profile = _apply_manual_video_summary_to_profile(
+            content_profile,
+            video_summary=video_summary,
+            updated_at=datetime.now(timezone.utc).isoformat(),
+        )
     editing_skill = dict(previous_render_plan.get("editing_skill") or {})
     output_duration_sec = max((float(item.get("end_time", 0.0) or 0.0) for item in remapped_subtitles), default=0.0)
     if change_plan["timeline_changed"]:
@@ -2234,6 +2455,7 @@ async def apply_manual_editor_timeline(
                 "subtitle_changed": bool(change_plan["subtitle_changed"]),
                 "video_transform_changed": bool(change_plan["video_transform_changed"]),
                 "video_transform": video_transform,
+                "video_summary": video_summary,
                 "note": str(request.note or "").strip() or None,
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             },
@@ -2295,11 +2517,25 @@ async def apply_manual_editor_timeline(
         "subtitle_changed": bool(change_plan["subtitle_changed"]),
         "video_transform_changed": bool(change_plan["video_transform_changed"]),
         "video_transform": render_video_transform,
+        "video_summary": video_summary,
         "base_render_plan_id": str(render_plan_timeline.id),
         "base_render_plan_version": int(render_plan_timeline.version or 1),
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
     manual_render_plan = await save_render_plan(job.id, rebuilt_render_plan, session)
+    manual_summary_updated_at = datetime.now(timezone.utc).isoformat()
+    await _persist_manual_video_summary_evidence(
+        session,
+        job=job,
+        video_summary=video_summary,
+        updated_at=manual_summary_updated_at,
+    )
+    await _persist_manual_video_summary_source_context(
+        session,
+        job_id=job.id,
+        video_summary=video_summary,
+        updated_at=manual_summary_updated_at,
+    )
 
     touch_runtime_refresh_hold(reason="manual_editor_apply", job_id=str(job.id), hold_seconds=120)
     rerun_plan = JobRerunPlan(
@@ -3796,15 +4032,23 @@ def _build_current_step(job: Job) -> dict | None:
     running = next((step for step in steps if step.status == "running"), None)
     if running:
         meta = running.metadata_ or {}
+        worker_active = _step_has_worker_started(running)
+        display_status = "running" if worker_active else "queued"
+        base_detail = meta.get("detail")
+        if not worker_active:
+            queue_name = str(meta.get("queue") or "").strip()
+            base_detail = base_detail or (
+                f"已派发到 {queue_name}，等待 worker 接收。" if queue_name else "已派发，等待 worker 接收。"
+            )
         detail = _decorate_step_detail(
-            meta.get("detail"),
+            base_detail,
             _step_elapsed_seconds(running),
-            running=running.status == "running",
+            running=worker_active,
         )
         return {
             "step_name": running.step_name,
             "label": STEP_LABELS.get(running.step_name, running.step_name),
-            "status": running.status,
+            "status": display_status,
             "detail": detail,
             "progress": meta.get("progress"),
             "updated_at": meta.get("updated_at") or _iso_or_none(running.started_at),
@@ -4223,14 +4467,15 @@ def _build_activity_events(
             )
         updated_at = metadata.get("updated_at")
         if step.status == "running" and updated_at:
+            worker_active = _step_has_worker_started(step)
             events.append(
                 {
                     "timestamp": updated_at,
                     "type": "progress",
-                    "status": step.status,
+                    "status": "running" if worker_active else "queued",
                     "step_name": step.step_name,
                     "title": label,
-                    "detail": _decorate_step_detail(metadata.get("detail"), elapsed_seconds, running=True),
+                    "detail": _decorate_step_detail(metadata.get("detail"), elapsed_seconds, running=worker_active),
                 }
             )
 
@@ -4645,6 +4890,27 @@ def _format_elapsed(seconds: float | None) -> str | None:
     return f"{sec}s"
 
 
+def _step_has_worker_started(step: JobStep) -> bool:
+    metadata = step.metadata_ or {}
+    worker_started_at = metadata.get("worker_started_at")
+    if not isinstance(worker_started_at, str) or not worker_started_at.strip():
+        return False
+    try:
+        worker_started = _coerce_utc(datetime.fromisoformat(worker_started_at))
+    except ValueError:
+        return False
+
+    dispatched_at = metadata.get("dispatched_at")
+    if isinstance(dispatched_at, str) and dispatched_at.strip():
+        try:
+            dispatched = _coerce_utc(datetime.fromisoformat(dispatched_at))
+        except ValueError:
+            dispatched = None
+        if dispatched is not None and worker_started < dispatched:
+            return False
+    return True
+
+
 def _coerce_utc(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=timezone.utc)
@@ -4746,7 +5012,7 @@ def _calculate_job_progress_percent(job: Job) -> int:
 
     total = len(steps)
     done_count = sum(1 for step in steps if step.status in {"done", "skipped"})
-    running_count = sum(1 for step in steps if step.status == "running")
+    running_count = sum(1 for step in steps if step.status == "running" and _step_has_worker_started(step))
     base_progress = done_count / total
     running_bonus = (0.5 / total) if running_count else 0.0
     progress = max(0.0, min(1.0, base_progress + running_bonus))
@@ -4888,6 +5154,7 @@ def _build_preview_review_memory(data: dict[str, Any]) -> dict[str, Any] | None:
     return build_subtitle_review_memory(
         workflow_template=preview_profile["workflow_template"] or None,
         subject_domain=subject_domain,
+        source_name=str(payload.get("source_name") or "").strip() or None,
         glossary_terms=[],
         user_memory={},
         recent_subtitles=[],
