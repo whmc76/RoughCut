@@ -1288,7 +1288,7 @@ function Get-ProcessMatches {
     return @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
         $_.CommandLine `
             -and $_.CommandLine -match $Pattern `
-            -and $_.Name -in @("python.exe", "roughcut.exe")
+            -and $_.Name -in @("python.exe", "pythonw.exe", "roughcut.exe", "celery.exe")
     } | Sort-Object ProcessId)
 }
 
@@ -1305,9 +1305,7 @@ function Stop-RoughCutProcess {
         [string]$Pattern
     )
 
-    $processes = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
-        $_.CommandLine -and $_.CommandLine -match $Pattern
-    })
+    $processes = @(Get-ProcessMatches -Pattern $Pattern)
 
     if ($processes.Count -eq 0) {
         Write-Host "$Name is not running." -ForegroundColor Yellow
