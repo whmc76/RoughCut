@@ -89,6 +89,26 @@ def _audio_encode_args(*, sample_rate: int | None = None, channels: int | None =
     return args
 
 
+def _delivery_color_metadata_args() -> list[str]:
+    return [
+        "-colorspace",
+        "bt709",
+        "-color_trc",
+        "bt709",
+        "-color_primaries",
+        "bt709",
+        "-color_range",
+        "tv",
+    ]
+
+
+def _video_delivery_encode_args(*, prefer_hardware: bool = True) -> list[str]:
+    return [
+        *_video_encode_args(prefer_hardware=prefer_hardware),
+        *_delivery_color_metadata_args(),
+    ]
+
+
 def _video_encode_args(*, prefer_hardware: bool = True) -> list[str]:
     settings = get_settings()
     encoder = _resolve_video_encoder(prefer_hardware=prefer_hardware)
@@ -163,6 +183,117 @@ def _prefer_software_encoder_for_source(source_info: dict[str, Any], *, source_d
     if color_transfer in {"arib-std-b67", "smpte2084"}:
         return True
     return False
+
+
+def _normalize_color_token(value: Any) -> str:
+    return str(value or "").strip().lower().replace("_", "-")
+
+
+def _source_is_hdr(source_info: dict[str, Any]) -> bool:
+    transfer = _normalize_color_token(source_info.get("color_transfer"))
+    return transfer in {"arib-std-b67", "smpte2084"}
+
+
+def _source_needs_delivery_color_filter(source_info: dict[str, Any]) -> bool:
+    if _source_is_hdr(source_info):
+        return True
+    primaries = _normalize_color_token(source_info.get("color_primaries"))
+    matrix = _normalize_color_token(source_info.get("color_space"))
+    transfer = _normalize_color_token(source_info.get("color_transfer"))
+    color_range = _normalize_color_token(source_info.get("color_range"))
+    return (
+        primaries not in {"", "unknown", "bt709"}
+        or matrix not in {"", "unknown", "bt709"}
+        or transfer not in {"", "unknown", "bt709"}
+        or color_range in {"pc", "full", "jpeg"}
+    )
+
+
+def _source_setparams_filter(source_info: dict[str, Any]) -> str | None:
+    options: list[str] = []
+    primaries = _normalize_color_token(source_info.get("color_primaries"))
+    transfer = _normalize_color_token(source_info.get("color_transfer"))
+    matrix = _normalize_color_token(source_info.get("color_space"))
+    color_range = _normalize_color_token(source_info.get("color_range"))
+    if _source_is_hdr(source_info):
+        primaries = primaries if primaries not in {"", "unknown"} else "bt2020"
+        matrix = matrix if matrix not in {"", "unknown"} else "bt2020nc"
+
+    if primaries not in {"", "unknown"}:
+        options.append(f"color_primaries={primaries}")
+    if transfer not in {"", "unknown"}:
+        options.append(f"color_trc={transfer}")
+    if matrix not in {"", "unknown"}:
+        options.append(f"colorspace={matrix}")
+    if color_range in {"pc", "full", "jpeg"}:
+        options.append("range=full")
+    elif color_range in {"tv", "limited", "mpeg"}:
+        options.append("range=limited")
+    if not options:
+        return None
+    return f"setparams={':'.join(options)}"
+
+
+def _delivery_color_filter_chain(source_info: dict[str, Any]) -> list[str]:
+    if not _source_needs_delivery_color_filter(source_info):
+        return []
+
+    setparams_filter = _source_setparams_filter(source_info)
+    output_options = [
+        "primaries=bt709",
+        "transfer=bt709",
+        "matrix=bt709",
+        "range=limited",
+    ]
+    filters = [setparams_filter] if setparams_filter else []
+    if _source_is_hdr(source_info):
+        filters.extend(
+            [
+                "zscale=transfer=linear:npl=100",
+                "format=gbrpf32le",
+                "zscale=primaries=bt709",
+                "tonemap=tonemap=hable:desat=0",
+                "zscale=transfer=bt709:matrix=bt709:range=limited",
+                "format=yuv420p",
+            ]
+        )
+        return filters
+    filters.extend(
+        [
+            f"zscale={':'.join(output_options)}",
+            "format=yuv420p",
+        ]
+    )
+    return filters
+
+
+def _append_delivery_color_filter(
+    parts: list[str],
+    input_label: str,
+    source_info: dict[str, Any],
+    *,
+    output_label: str,
+) -> str:
+    filters = _delivery_color_filter_chain(source_info)
+    if not filters:
+        return input_label
+    parts.append(f"[{input_label}]{','.join(filters)}[{output_label}]")
+    return output_label
+
+
+def _describe_delivery_color_management(source_info: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "target": {
+            "color_primaries": "bt709",
+            "color_transfer": "bt709",
+            "color_space": "bt709",
+            "color_range": "tv",
+            "pix_fmt": "yuv420p",
+        },
+        "source_is_hdr": _source_is_hdr(source_info),
+        "filter_applied": _source_needs_delivery_color_filter(source_info),
+        "filter_chain": _delivery_color_filter_chain(source_info),
+    }
 
 
 def _resolve_video_encoder(*, prefer_hardware: bool) -> str:
@@ -386,6 +517,7 @@ async def render_video(
             "expected_width": expected_w,
             "expected_height": expected_h,
             "prefer_hardware_encoder": prefer_hardware_encoder,
+            "delivery_color_management": _describe_delivery_color_management(source_info),
         },
     )
 
@@ -409,6 +541,12 @@ async def render_video(
         subtitle_items=choreographed_subtitles,
     )
     filter_parts.extend(segment_filters)
+    video_label = _append_delivery_color_filter(
+        filter_parts,
+        video_label,
+        source_info,
+        output_label="vcolor",
+    )
 
     audio_filter = _build_master_audio_filter_chain(
         input_label=audio_label,
@@ -484,7 +622,7 @@ async def render_video(
         video_map,
         "-map",
         audio_map,
-        *_video_encode_args(prefer_hardware=prefer_hardware_encoder),
+        *_video_delivery_encode_args(prefer_hardware=prefer_hardware_encoder),
         *_audio_encode_args(),
         str(base_output_path),
     ]
@@ -1364,6 +1502,13 @@ async def _apply_timed_overlays_to_video(
         overlay_editing_accents,
         section_choreography=render_plan.get("section_choreography") or {},
     )
+    filter_parts: list[str] = []
+    video_label = _append_delivery_color_filter(
+        filter_parts,
+        "0:v",
+        source_info,
+        output_label="vcolor",
+    )
     filter_parts, video_label, audio_label = await _build_timed_overlay_filter_chain(
         render_plan=render_plan,
         subtitle_items=subtitle_items,
@@ -1371,9 +1516,10 @@ async def _apply_timed_overlays_to_video(
         output_path=output_path,
         render_w=render_w,
         render_h=render_h,
-        video_label="0:v",
+        video_label=video_label,
         audio_label="0:a",
         debug_dir=debug_dir,
+        initial_filter_parts=filter_parts,
     )
 
     if not filter_parts:
@@ -1398,7 +1544,7 @@ async def _apply_timed_overlays_to_video(
     if video_label == "0:v":
         cmd[-1:-1] = ["-c:v", "copy"]
     else:
-        cmd[-1:-1] = _video_encode_args()
+        cmd[-1:-1] = _video_delivery_encode_args()
     if audio_label == "0:a":
         cmd[-1:-1] = ["-c:a", "copy"]
     else:
@@ -1430,6 +1576,7 @@ async def _build_timed_overlay_filter_chain(
     video_label: str,
     audio_label: str,
     debug_dir: Path | None,
+    initial_filter_parts: list[str] | None = None,
 ) -> tuple[list[str], str, str]:
     from roughcut.media.subtitles import escape_path_for_ffmpeg_filter, write_ass_file
 
@@ -1440,7 +1587,7 @@ async def _build_timed_overlay_filter_chain(
         subtitles_plan=render_plan.get("subtitles") or {},
     ) if subtitle_items and render_plan.get("subtitles") else []
 
-    filter_parts: list[str] = []
+    filter_parts: list[str] = list(initial_filter_parts or [])
 
     if subtitle_items and render_plan.get("subtitles"):
         subtitle_margin_override = await _resolve_subtitle_margin_with_avatar(
@@ -2017,7 +2164,7 @@ async def _apply_insert_clip(
         "[vout]",
         "-map",
         "[aout]",
-        *_video_encode_args(),
+        *_video_delivery_encode_args(),
         *_audio_encode_args(),
         str(output_path),
     ]
@@ -2182,7 +2329,7 @@ async def _apply_intro_outro(
             "[vout]",
             "-map",
             "[aout]",
-            *_video_encode_args(),
+            *_video_delivery_encode_args(),
             *_audio_encode_args(),
             str(output_path),
         ]
@@ -2294,7 +2441,7 @@ async def _apply_music_and_watermark(
     if video_map == "0:v:0":
         cmd.extend(["-c:v", "copy"])
     else:
-        cmd.extend(_video_encode_args())
+        cmd.extend(_video_delivery_encode_args())
     if audio_map == "0:a:0":
         cmd.extend(["-c:a", "copy"])
     else:
@@ -2396,12 +2543,16 @@ async def _prepare_packaging_clip(
 ) -> Path:
     media_info = _ffprobe_json(source_path)
     has_audio = any(stream.get("codec_type") == "audio" for stream in media_info.get("streams", []))
+    source_info = _probe_video_stream(source_path)
     duration = _probe_duration(source_path)
-    scale_filter = (
-        f"scale={expected_width}:{expected_height}:force_original_aspect_ratio=decrease,"
-        f"pad={expected_width}:{expected_height}:(ow-iw)/2:(oh-ih)/2:black,"
-        "setsar=1,format=yuv420p"
-    )
+    video_filters = [
+        *_delivery_color_filter_chain(source_info),
+        f"scale={expected_width}:{expected_height}:force_original_aspect_ratio=decrease",
+        f"pad={expected_width}:{expected_height}:(ow-iw)/2:(oh-ih)/2:black",
+        "setsar=1",
+        "format=yuv420p",
+    ]
+    scale_filter = ",".join(video_filters)
 
     cmd = ["ffmpeg", "-y", "-i", str(source_path)]
     if not has_audio:
@@ -2421,7 +2572,7 @@ async def _prepare_packaging_clip(
         [
             "-vf",
             scale_filter,
-            *_video_encode_args(),
+            *_video_delivery_encode_args(),
             *_audio_encode_args(sample_rate=48000, channels=2),
         ]
     )
@@ -2545,7 +2696,7 @@ async def _normalize_rendered_output(
             "0:a?",
             "-vf",
             bake_filter,
-            *_video_encode_args(),
+            *_video_delivery_encode_args(),
             "-c:a",
             "copy",
             str(baked),
