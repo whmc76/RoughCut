@@ -875,6 +875,13 @@ def _build_source_text_identity_hints(
         return hints
 
     current_model = str(hints.get("subject_model") or "").strip()
+    if current_model and _prefer_seed_model_over_filename_tail(
+        seed_model=current_model,
+        filename_model=inferred_model,
+        source_text=text,
+    ):
+        _append_hint_candidate(hints, "subject_model", inferred_model)
+        return hints
     if not current_model or _looks_like_camera_stem(current_model):
         hints["subject_model"] = inferred_model
     else:
@@ -890,18 +897,57 @@ def _build_source_text_identity_hints(
     return hints
 
 
+def _prefer_seed_model_over_filename_tail(*, seed_model: str, filename_model: str, source_text: str) -> bool:
+    seed = str(seed_model or "").strip()
+    inferred = str(filename_model or "").strip()
+    source = str(source_text or "").strip()
+    if not seed or not inferred:
+        return False
+    if _identity_values_match(seed, inferred):
+        return False
+    if seed in source and any(marker in inferred for marker in ("联名", "户外", "机能", "开箱", "评测", "测评")):
+        return True
+    if seed in source and any(category in source for category in ("双肩包", "机能包", "背包", "斜挎包", "胸包", "副包")):
+        return len(seed) <= 8 and len(inferred) > len(seed)
+    return False
+
+
 def _build_source_filename_identity_hints(
     text: str,
     *,
     glossary_terms: list[dict[str, Any]] | None = None,
     subject_domain: str = "",
 ) -> dict[str, Any]:
+    text = _primary_source_filename_identity_text(text)
     return _build_source_text_identity_hints(
         text,
         filename_like=True,
         glossary_terms=glossary_terms,
         subject_domain=subject_domain,
     )
+
+
+def _primary_source_filename_identity_text(text: str) -> str:
+    source = _normalize_source_context_filename_hint(text)
+    if not source:
+        return str(text or "")
+    for marker in ("以及对比", "并对比", "顺便对比", "同时对比"):
+        index = source.find(marker)
+        if index <= 0:
+            continue
+        primary = source[:index].strip(" ，,。._-·:：/")
+        comparison = source[index + len(marker):].strip(" ，,。._-·:：/")
+        if not primary or not comparison:
+            continue
+        if _filename_identity_text_has_subject_signal(primary) and _filename_identity_text_has_subject_signal(comparison):
+            return primary
+    return source
+
+
+def _filename_identity_text_has_subject_signal(text: str) -> bool:
+    if _first_brand_match_in_text(text):
+        return True
+    return any(marker in text for marker in _FILENAME_MODEL_CATEGORY_MARKERS)
 
 
 def _build_source_description_identity_hints(
@@ -1392,6 +1438,9 @@ def _has_ingestible_product_subject_conflict(
     subtitle_items: list[dict[str, Any]] | None = None,
     transcript_excerpt: str = "",
 ) -> bool:
+    if _profile_declares_ingestible_subject(profile):
+        return False
+
     subject_blob = str(profile.get("subject_type") or "").lower()
     narrative_blob = " ".join(
         [
@@ -1410,6 +1459,33 @@ def _has_ingestible_product_subject_conflict(
         subject_gear_hits >= 1
         or narrative_gear_hits >= 1
     )
+
+
+def _profile_declares_ingestible_subject(profile: dict[str, Any]) -> bool:
+    if not isinstance(profile, dict):
+        return False
+    content_understanding = (
+        profile.get("content_understanding")
+        if isinstance(profile.get("content_understanding"), dict)
+        else {}
+    )
+    domain_values = [
+        profile.get("subject_domain"),
+        profile.get("content_domain"),
+        content_understanding.get("content_domain"),
+    ]
+    for value in domain_values:
+        normalized = str(value or "").strip().lower()
+        if normalized in {"food", "snack", "snacks", "candy", "ingestible"}:
+            return True
+        if any(token in normalized for token in ("食品", "零食", "含片", "益生菌", "糖果", "口香糖")):
+            return True
+
+    identity_blob = " ".join(
+        str(profile.get(key) or "")
+        for key in ("subject_type", "subject_model", "primary_subject")
+    ).lower()
+    return sum(1 for token in _INGESTIBLE_PRODUCT_SIGNALS if token in identity_blob) >= 1
 
 
 def _has_ingestible_product_context(text: str) -> bool:
@@ -6885,6 +6961,11 @@ def _has_supported_product_model_hint(
 
 def _extract_edc_bag_model(text: str, original_text: str) -> str:
     normalized = _canonicalize_spoken_identity_text(text)
+    original = str(original_text or "")
+    if "游刃" in normalized or "游刃" in original:
+        return "游刃"
+    if "阵风" in normalized or "阵风" in original:
+        return "阵风"
     if "影蚀" in normalized or "影蚀" in str(original_text or ""):
         return "影蚀"
     normalized = re.sub(r"F\s*X\s*21(?=小副包|[^A-Z0-9]|$)", "FXX1", normalized, flags=re.IGNORECASE)

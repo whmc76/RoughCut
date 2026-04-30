@@ -11,45 +11,73 @@ from typing import Any
 from roughcut.telegram.output_codec import decode_process_output
 
 
-def _resolve_codex_command(command_name: str) -> str | None:
-    normalized_command = str(command_name or "").strip().lower()
-    explicit = None
-    if normalized_command == "codex":
-        explicit = shutil.which("codex.exe")
-    if not explicit:
-        explicit = shutil.which(command_name)
-    if not explicit:
-        return None
-    explicit_path = Path(explicit)
-    normalized_name = explicit_path.name.lower()
-    if normalized_name == "codex.exe":
-        return str(explicit_path)
+_WINDOWS_EXECUTABLE_SUFFIXES = {".exe", ".cmd", ".bat", ".com"}
 
-    candidates: list[Path] = []
+
+def _is_direct_process_command(path: str) -> bool:
+    if os.name != "nt":
+        return True
+    suffix = Path(path).suffix.lower()
+    return suffix in _WINDOWS_EXECUTABLE_SUFFIXES
+
+
+def _append_command_candidate(candidates: list[str], value: str | None, *, allow_shell_script: bool = False) -> None:
+    if not value:
+        return
+    normalized = str(value).strip()
+    if not normalized:
+        return
+    if not allow_shell_script and not _is_direct_process_command(normalized):
+        return
+    if normalized not in candidates:
+        candidates.append(normalized)
+
+
+def _resolve_codex_command_candidates(command_name: str) -> list[str]:
+    normalized_command = str(command_name or "").strip().lower()
+    candidates: list[str] = []
+
+    if os.name == "nt" and normalized_command == "codex":
+        for launcher_name in ("codex.cmd", "codex.bat", "codex.exe", "codex"):
+            _append_command_candidate(candidates, shutil.which(launcher_name))
+    else:
+        _append_command_candidate(candidates, shutil.which(command_name), allow_shell_script=os.name != "nt")
+
+    explicit = candidates[0] if candidates else shutil.which(command_name)
+    if not explicit:
+        return candidates
+    explicit_path = Path(explicit)
+
+    path_candidates: list[Path] = []
 
     windows_apps = Path(os.environ.get("LOCALAPPDATA", "")) / "Microsoft" / "WindowsApps"
     if windows_apps.exists():
-        for sibling_name in ("codex.exe", "codex"):
+        for sibling_name in ("codex.cmd", "codex.exe", "codex"):
             candidate = windows_apps / sibling_name
             if candidate.exists():
-                candidates.append(candidate)
+                path_candidates.append(candidate)
 
     package_root = Path(r"C:\Program Files\WindowsApps")
     if package_root.exists():
         for child in sorted(package_root.glob("OpenAI.Codex_*"), reverse=True):
             candidate = child / "app" / "resources" / "codex.exe"
             if candidate.exists():
-                candidates.append(candidate)
+                path_candidates.append(candidate)
 
-    for sibling_name in ("codex.exe", "codex"):
+    for sibling_name in ("codex.cmd", "codex.exe", "codex"):
         sibling = explicit_path.with_name(sibling_name)
         if sibling.exists():
-            candidates.append(sibling)
+            path_candidates.append(sibling)
 
-    for candidate in candidates:
-        if candidate.exists():
-            return str(candidate)
-    return str(explicit_path)
+    for candidate in path_candidates:
+        _append_command_candidate(candidates, str(candidate))
+    _append_command_candidate(candidates, str(explicit_path), allow_shell_script=os.name != "nt")
+    return candidates
+
+
+def _resolve_codex_command(command_name: str) -> str | None:
+    candidates = _resolve_codex_command_candidates(command_name)
+    return candidates[0] if candidates else None
 
 
 def _terminate_process_tree(process: subprocess.Popen[bytes]) -> None:
@@ -78,13 +106,9 @@ def run_codex_exec(payload: dict[str, Any]) -> dict[str, Any]:
         or os.getenv("ROUGHCUT_CODEX_HOST_BRIDGE_CODEX_COMMAND", "")
         or "codex"
     ).strip()
-    resolved = _resolve_codex_command(command_name)
-    if not resolved:
+    command_candidates = _resolve_codex_command_candidates(command_name)
+    if not command_candidates:
         raise RuntimeError(f"Codex command not found in PATH: {command_name}")
-    fallback_resolved = shutil.which(command_name)
-    command_candidates: list[str] = [resolved]
-    if fallback_resolved and fallback_resolved not in command_candidates:
-        command_candidates.append(fallback_resolved)
 
     model_name = str(payload.get("model") or os.getenv("ROUGHCUT_CODEX_HOST_BRIDGE_CODEX_MODEL", "")).strip()
     sandbox_mode = str(
@@ -110,7 +134,7 @@ def run_codex_exec(payload: dict[str, Any]) -> dict[str, Any]:
             output_schema_path.write_text(json.dumps(output_schema, ensure_ascii=False), encoding="utf-8")
         elif output_schema:
             output_schema_path = Path(str(output_schema)).resolve()
-        last_permission_error: PermissionError | None = None
+        last_start_error: OSError | None = None
         for candidate_command in command_candidates:
             command = [
                 candidate_command,
@@ -145,8 +169,8 @@ def run_codex_exec(payload: dict[str, Any]) -> dict[str, Any]:
                     env={**os.environ.copy(), "PYTHONIOENCODING": os.environ.get("PYTHONIOENCODING", "utf-8")},
                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
                 )
-            except PermissionError as exc:
-                last_permission_error = exc
+            except OSError as exc:
+                last_start_error = exc
                 continue
             try:
                 stdout_bytes, stderr_bytes = process.communicate(
@@ -188,5 +212,6 @@ def run_codex_exec(payload: dict[str, Any]) -> dict[str, Any]:
                 "returncode": process.returncode,
                 "host_bridge": True,
             }
-        if last_permission_error is not None:
-            raise last_permission_error
+        if last_start_error is not None:
+            raise last_start_error
+        raise RuntimeError(f"Codex command could not be started: {command_name}")

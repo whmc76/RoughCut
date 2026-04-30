@@ -16,6 +16,19 @@ def test_extracts_boltboat_eclipse_identity_from_source_name() -> None:
     assert "机能" in constraints["subject_type"]
 
 
+def test_source_identity_uses_primary_subject_before_comparison_target() -> None:
+    constraints = extract_source_identity_constraints(
+        {},
+        source_name="IMG_0041 hsjun和boltboat联名 户外机能双肩包 游刃，黑白两个颜色的开箱评测，以及对比狐蝠工业阵风.MOV",
+    )
+
+    assert constraints["subject_brand"] == "BOLTBOAT"
+    assert constraints["subject_model"] == "游刃"
+    assert constraints["subject_type"] == "EDC机能包"
+    assert "狐蝠工业" not in constraints["subject_brand"]
+    assert "阵风" not in constraints["subject_model"]
+
+
 def test_extracts_nitecore_edc17_flashlight_identity_from_source_name() -> None:
     constraints = extract_source_identity_constraints(
         {},

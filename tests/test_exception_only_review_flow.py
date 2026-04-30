@@ -60,6 +60,39 @@ def test_content_understanding_inference_failure_is_warning_not_blocking() -> No
     assert automation["auto_confirm"] is True
 
 
+def test_llm_food_domain_wins_over_edc_keyword_conflict() -> None:
+    automation = assess_content_profile_automation(
+        {
+            "workflow_template": "unboxing_standard",
+            "subject_domain": "food",
+            "subject_brand": "LuckyKiss",
+            "subject_model": "edc弹射舱益生菌含片",
+            "subject_type": "弹射益生菌含片",
+            "video_theme": "LuckyKiss弹射益生菌含片功能演示",
+            "summary": "这条视频围绕 LuckyKiss edc弹射舱益生菌含片展开，EDC 只是包装和携带场景。",
+            "cover_title": {"top": "LUCKYKISS", "main": "edc弹射舱益生菌含片", "bottom": "收纳装载直接看"},
+            "engagement_question": "你会把这种含片放进日常随身小物里吗？",
+            "search_queries": ["LuckyKiss 益生菌含片", "edc弹射舱益生菌含片"],
+            "content_understanding": {
+                "content_domain": "food",
+                "needs_review": False,
+            },
+        },
+        subtitle_items=[
+            {"text_final": "这是 LUCKYKISS 的一个口香糖。"},
+            {"text_final": "也是一个益生菌含片。"},
+            {"text_final": "它做成了 EDC 弹射舱的样子。"},
+        ]
+        * 3,
+        source_name="IMG_0024 luckykiss edc弹射舱 益生菌含片.MOV",
+        auto_confirm_enabled=True,
+        threshold=0.92,
+    )
+
+    assert "字幕显示为含片/益生菌等入口产品，但当前摘要主体仍落在装备/工具类" not in automation["blocking_reasons"]
+    assert automation["auto_confirm"] is True
+
+
 def test_soft_content_understanding_blocker_is_dropped_before_exception_gate() -> None:
     automation = _drop_soft_content_understanding_blockers(
         {
