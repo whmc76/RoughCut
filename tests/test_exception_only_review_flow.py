@@ -10,6 +10,34 @@ from roughcut.pipeline.steps import _drop_soft_content_understanding_blockers, _
 from roughcut.review.content_profile import assess_content_profile_automation
 
 
+class _FakeScalarResult:
+    def __init__(self, values):
+        self._values = values
+
+    def all(self):
+        return list(self._values)
+
+
+class _FakeExecuteResult:
+    def __init__(self, values):
+        self._values = values
+
+    def scalars(self):
+        return _FakeScalarResult(self._values)
+
+
+class _FakeStepSession:
+    def __init__(self, job, steps):
+        self._job = job
+        self._steps = steps
+
+    async def get(self, model, id_):
+        return self._job if model is Job and id_ == self._job.id else None
+
+    async def execute(self, _stmt):
+        return _FakeExecuteResult(self._steps)
+
+
 def test_product_identity_gap_is_warning_not_blocking_review() -> None:
     automation = assess_content_profile_automation(
         {
@@ -172,6 +200,50 @@ async def test_summary_review_auto_completes_when_only_warnings_exist() -> None:
     assert final_profile["review_mode"] == "auto_confirmed"
     assert review_step.status == "done"
     assert review_step.metadata_["exception_only_auto_confirmed"] is True
+    assert job.status == "processing"
+
+
+@pytest.mark.asyncio
+async def test_smart_assist_pauses_before_render_dispatch() -> None:
+    job = Job(
+        id=uuid.uuid4(),
+        source_path="source.mp4",
+        source_name="source.mp4",
+        status="processing",
+        job_flow_mode="smart_assist",
+    )
+    edit_plan_step = JobStep(job_id=job.id, step_name="edit_plan", status="done")
+    render_step = JobStep(job_id=job.id, step_name="render", status="pending")
+    session = _FakeStepSession(job, [edit_plan_step, render_step])
+
+    paused = await orchestrator._step_paused_for_smart_assist(render_step, session)
+
+    assert paused is True
+    assert job.status == "awaiting_manual_edit"
+    assert render_step.metadata_["manual_editor_required"] is True
+
+
+@pytest.mark.asyncio
+async def test_smart_assist_manual_editor_apply_releases_render_dispatch() -> None:
+    job = Job(
+        id=uuid.uuid4(),
+        source_path="source.mp4",
+        source_name="source.mp4",
+        status="processing",
+        job_flow_mode="smart_assist",
+    )
+    edit_plan_step = JobStep(job_id=job.id, step_name="edit_plan", status="done")
+    render_step = JobStep(
+        job_id=job.id,
+        step_name="render",
+        status="pending",
+        metadata_={"rerun_requested_via": "manual_editor"},
+    )
+    session = _FakeStepSession(job, [edit_plan_step, render_step])
+
+    paused = await orchestrator._step_paused_for_smart_assist(render_step, session)
+
+    assert paused is False
     assert job.status == "processing"
 
 

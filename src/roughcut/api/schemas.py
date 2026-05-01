@@ -16,9 +16,25 @@ from roughcut.api.options import normalize_job_language, normalize_workflow_temp
 
 # ── Jobs ──────────────────────────────────────────────────────────────────────
 
+JOB_FLOW_MODE_AUTO = "auto"
+JOB_FLOW_MODE_SMART_ASSIST = "smart_assist"
+JOB_FLOW_MODES = {JOB_FLOW_MODE_AUTO, JOB_FLOW_MODE_SMART_ASSIST}
+
+
+def normalize_job_flow_mode(value: Any) -> str:
+    normalized = str(value or JOB_FLOW_MODE_AUTO).strip().lower()
+    if normalized in {"automatic", "full_auto", "default"}:
+        normalized = JOB_FLOW_MODE_AUTO
+    if normalized in {"assist", "smart", "manual_assist", "intelligent_assist"}:
+        normalized = JOB_FLOW_MODE_SMART_ASSIST
+    if normalized not in JOB_FLOW_MODES:
+        raise ValueError(f"job_flow_mode must be one of: {', '.join(sorted(JOB_FLOW_MODES))}")
+    return normalized
+
 class JobCreate(BaseModel):
     language: str = "zh-CN"
     workflow_template: str | None = None
+    job_flow_mode: str = JOB_FLOW_MODE_AUTO
     workflow_mode: str = DEFAULT_WORKFLOW_MODE
     enhancement_modes: list[str] = Field(default_factory=list)
     output_dir: str | None = None
@@ -33,6 +49,11 @@ class JobCreate(BaseModel):
     @classmethod
     def validate_workflow_template(cls, value: Any) -> str | None:
         return normalize_workflow_template(value)
+
+    @field_validator("job_flow_mode", mode="before")
+    @classmethod
+    def validate_job_flow_mode(cls, value: Any) -> str:
+        return normalize_job_flow_mode(value)
 
     @field_validator("workflow_mode", mode="before")
     @classmethod
@@ -113,6 +134,7 @@ class JobOut(BaseModel):
     language: str
     workflow_template: str | None
     output_dir: str | None
+    job_flow_mode: str = JOB_FLOW_MODE_AUTO
     workflow_mode: str
     enhancement_modes: list[str] = Field(default_factory=list)
     auto_review_mode_enabled: bool = False
@@ -123,6 +145,7 @@ class JobOut(BaseModel):
     review_label: str | None = None
     review_detail: str | None = None
     awaiting_initialization: bool = False
+    awaiting_manual_edit: bool = False
     file_hash: str | None
     error_message: str | None
     progress_percent: int = 0
@@ -756,6 +779,7 @@ class WatchRootCreate(BaseModel):
     recursive: bool = True
     scan_mode: Literal["fast", "precise"] = "fast"
     ingest_mode: Literal["task_only", "full_auto"] = "full_auto"
+    job_flow_mode: str = JOB_FLOW_MODE_AUTO
 
     @field_validator("config_profile_id", mode="before")
     @classmethod
@@ -777,6 +801,11 @@ class WatchRootCreate(BaseModel):
         normalized = str(value).strip()
         return normalized or None
 
+    @field_validator("job_flow_mode", mode="before")
+    @classmethod
+    def validate_job_flow_mode(cls, value: Any) -> str:
+        return normalize_job_flow_mode(value)
+
 
 class WatchRootOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
@@ -790,6 +819,7 @@ class WatchRootOut(BaseModel):
     recursive: bool
     scan_mode: Literal["fast", "precise"]
     ingest_mode: Literal["task_only", "full_auto"]
+    job_flow_mode: str = JOB_FLOW_MODE_AUTO
     created_at: datetime
 
 

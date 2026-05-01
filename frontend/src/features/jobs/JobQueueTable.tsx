@@ -14,6 +14,7 @@ import {
   formatCutEvidenceSummary,
   getRestartUnavailableReason,
   isRestartableJobStatus,
+  jobFlowModeLabel,
   jobStatusLabel,
   jobStatusTone,
   stepLabel,
@@ -96,7 +97,7 @@ function isLocalOutputJob(job: Job) {
 }
 
 function hasJobStarted(job: Job) {
-  if (job.status === "running" || job.status === "processing" || job.status === "needs_review") return true;
+  if (job.status === "running" || job.status === "processing" || job.status === "awaiting_manual_edit" || job.status === "needs_review") return true;
   return job.steps.some((step) => Boolean(step.started_at));
 }
 
@@ -120,6 +121,17 @@ function reviewPreviewText(job: Job, t: (key: string) => string) {
 function enhancementBadgeLabel(job: Job, mode: string) {
   if (mode === "auto_review") return autoReviewBadgeLabel(job);
   return enhancementModeLabel(mode);
+}
+
+function awaitingManualEditLabel(job: Job, t: (key: string) => string): string | null {
+  return job.awaiting_manual_edit ? t("jobs.queue.awaitingManualEdit") : null;
+}
+
+function canOpenManualEditorFromQueue(job: Job) {
+  if (job.status === "awaiting_init" || job.status === "failed" || job.status === "cancelled") {
+    return false;
+  }
+  return job.steps.some((step) => step.step_name === "edit_plan" && step.status === "done");
 }
 
 type JobQueueTableProps = {
@@ -174,18 +186,40 @@ export function JobQueueTable({
   const canGoPrev = (currentPage ?? 0) > 0 && !isFetchingPage;
   const canGoNext = Boolean(hasMore) && !isFetchingPage;
   const prefetchManualEditor = (jobId: string) => {
-    void queryClient.prefetchQuery({
-      queryKey: ["job-manual-editor", jobId],
-      queryFn: () => api.getJobManualEditor(jobId),
-      staleTime: 15_000,
-    });
+    void queryClient.fetchQuery({
+      queryKey: ["job-manual-editor-readiness", jobId],
+      queryFn: () => api.getJobManualEditorReadiness(jobId),
+      staleTime: 5_000,
+    })
+      .then((readiness) => {
+        if (!readiness.can_open_editor) return;
+        void queryClient.prefetchQuery({
+          queryKey: ["job-manual-editor", jobId],
+          queryFn: () => api.getJobManualEditor(jobId),
+          staleTime: 15_000,
+        });
+      })
+      .catch(() => {
+        // Hover prefetch is opportunistic; the manual editor page surfaces real errors.
+      });
   };
   const warmManualEditorAssets = (jobId: string) => {
-    void queryClient.prefetchQuery({
-      queryKey: ["job-manual-editor-assets", jobId],
-      queryFn: () => api.warmJobManualEditorAssets(jobId),
-      staleTime: 10_000,
-    });
+    void queryClient.fetchQuery({
+      queryKey: ["job-manual-editor-readiness", jobId],
+      queryFn: () => api.getJobManualEditorReadiness(jobId),
+      staleTime: 5_000,
+    })
+      .then((readiness) => {
+        if (!readiness.can_open_editor) return;
+        void queryClient.prefetchQuery({
+          queryKey: ["job-manual-editor-assets", jobId],
+          queryFn: () => api.warmJobManualEditorAssets(jobId),
+          staleTime: 10_000,
+        });
+      })
+      .catch(() => {
+        // Pointer prefetch is opportunistic; the manual editor page surfaces real errors.
+      });
   };
 
   return (
@@ -238,6 +272,8 @@ export function JobQueueTable({
               const showOpenFolder = job.status === "done" && isLocalOutputJob(job);
               const showDownload = job.status === "done" && !isLocalOutputJob(job);
               const showCancel = hasJobStarted(job) && !isTerminalJob(job);
+              const manualEditStatus = awaitingManualEditLabel(job, t);
+              const manualEditorReady = canOpenManualEditorFromQueue(job);
 
               return (
                 <tr key={job.id} className={classNames(selectedJobId === job.id && "selected-row")} onClick={() => onSelect(job.id)}>
@@ -271,6 +307,7 @@ export function JobQueueTable({
                           </div>
                         ) : null}
                         <div className="mode-chip-list compact-top">
+                          <span className="mode-chip planned">{jobFlowModeLabel(job.job_flow_mode || "auto")}</span>
                           <span className="mode-chip">{workflowModeLabel(job.workflow_mode)}</span>
                           {job.enhancement_modes.map((mode) => (
                             <span key={mode} className="mode-chip subtle">
@@ -306,6 +343,9 @@ export function JobQueueTable({
                   <td>
                     <div className="form-stack compact-top">
                       <span className={`status-chip ${jobStatusTone(job)}`}>{reviewStatusLabel(job)}</span>
+                      {manualEditStatus ? (
+                        <span className="status-pill pending">{manualEditStatus}</span>
+                      ) : null}
                       {job.publication_summary ? <span className="muted">{job.publication_summary}</span> : null}
                       <span className="muted">{job.progress_percent ?? 0}%</span>
                     </div>
@@ -353,7 +393,10 @@ export function JobQueueTable({
                         </button>
                       ) : null}
                       <Link
-                        className="button button-sm job-manual-edit-cta"
+                        className={classNames(
+                          "button button-sm",
+                          manualEditorReady ? "job-manual-edit-cta" : "ghost",
+                        )}
                         to={`/jobs/${job.id}/manual-editor`}
                         onMouseEnter={() => prefetchManualEditor(job.id)}
                         onFocus={() => prefetchManualEditor(job.id)}

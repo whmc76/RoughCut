@@ -54,12 +54,14 @@ async def _create_jobs_for_watch_root(
     workflow_template: str | None,
     output_dir: str | None = None,
     ingest_mode: str = "full_auto",
+    job_flow_mode: str = "auto",
 ):
     return await create_jobs_for_inventory_paths(
         file_paths,
         output_dir=output_dir,
         config_profile_id=config_profile_id,
         workflow_template=workflow_template,
+        job_flow_mode=job_flow_mode,
         awaiting_initialization=ingest_mode == "task_only",
     )
 
@@ -72,12 +74,14 @@ async def _create_merged_job_for_watch_root(
     output_dir: str | None = None,
     allow_related_profiles: bool = False,
     ingest_mode: str = "full_auto",
+    job_flow_mode: str = "auto",
 ):
     return await create_merged_job_for_inventory_paths(
         file_paths,
         output_dir=output_dir,
         config_profile_id=config_profile_id,
         workflow_template=workflow_template,
+        job_flow_mode=job_flow_mode,
         allow_related_profiles=allow_related_profiles,
         awaiting_initialization=ingest_mode == "task_only",
     )
@@ -151,6 +155,7 @@ async def create_watch_root(
         recursive=body.recursive,
         scan_mode=body.scan_mode,
         ingest_mode=body.ingest_mode,
+        job_flow_mode=body.job_flow_mode,
     )
     session.add(root)
     await session.commit()
@@ -176,6 +181,7 @@ async def update_watch_root(
     root.recursive = body.recursive
     root.scan_mode = body.scan_mode
     root.ingest_mode = body.ingest_mode
+    root.job_flow_mode = body.job_flow_mode
     await session.commit()
     await session.refresh(root)
     return root
@@ -294,6 +300,7 @@ async def enqueue_inventory_items(
         workflow_template=root.workflow_template,
         output_dir=root.output_dir,
         ingest_mode=root.ingest_mode or "full_auto",
+        job_flow_mode=root.job_flow_mode or "auto",
     )
     job_ids_by_path = {result["path"]: result["job_id"] for result in results}
     created_job_ids = [job_id for job_id in job_ids_by_path.values() if job_id]
@@ -378,6 +385,7 @@ async def merge_inventory_items(
         output_dir=root.output_dir,
         allow_related_profiles=True,
         ingest_mode=root.ingest_mode or "full_auto",
+        job_flow_mode=root.job_flow_mode or "auto",
     )
     merged_job_ids = [job_id] if job_id else []
 

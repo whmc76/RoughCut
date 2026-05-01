@@ -602,6 +602,51 @@ select {
   background: rgba(255, 255, 255, 0.025);
 }
 
+.manual-editor-shell-panel {
+  min-height: 360px;
+  display: grid;
+  place-items: center;
+}
+
+.manual-editor-readiness-floating {
+  position: fixed;
+  right: 24px;
+  bottom: 24px;
+  z-index: 35;
+  width: min(460px, calc(100vw - 32px));
+}
+
+.manual-editor-readiness-panel {
+  display: grid;
+  gap: 12px;
+  padding: 16px;
+  border: 1px solid rgba(15, 118, 110, 0.18);
+  border-radius: 8px;
+  background: #ffffff;
+  color: #1f2937;
+  box-shadow: 0 18px 56px rgba(15, 23, 42, 0.18);
+}
+
+.manual-editor-readiness-progress {
+  height: 8px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: rgba(15, 23, 42, 0.08);
+}
+
+.manual-editor-readiness-progress span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #0f766e, #4f9f8a);
+}
+
+.manual-editor-readiness-steps {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .job-upload-preview {
   display: grid;
   gap: 12px;
@@ -692,6 +737,44 @@ select {
   gap: 10px;
   align-items: center;
   flex-wrap: wrap;
+}
+
+.watch-flow-mode-field {
+  display: grid;
+  gap: 8px;
+  color: #1e2124;
+  font-size: 14px;
+}
+
+.watch-flow-mode-control {
+  display: inline-flex;
+  min-height: 42px;
+  padding: 3px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #ffffff;
+  box-shadow: inset 0 1px 1px rgba(17, 19, 24, 0.03);
+}
+
+.watch-flow-mode-toggle {
+  min-height: 34px;
+  padding: 6px 12px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #171a1f;
+  font-size: 14px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.watch-flow-mode-toggle:hover {
+  background: #f8fbf9;
+}
+
+.watch-flow-mode-toggle.active {
+  background: #0f766e;
+  color: #ffffff;
 }
 
 .form-stack,

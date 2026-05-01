@@ -66,6 +66,7 @@ export type Job = {
   status: string;
   language: string;
   workflow_template?: string | null;
+  job_flow_mode: string;
   workflow_mode: string;
   enhancement_modes: string[];
   auto_review_mode_enabled?: boolean;
@@ -76,6 +77,7 @@ export type Job = {
   review_label?: string | null;
   review_detail?: string | null;
   awaiting_initialization?: boolean;
+  awaiting_manual_edit?: boolean;
   output_dir?: string | null;
   file_hash?: string | null;
   error_message?: string | null;
@@ -142,6 +144,26 @@ export type JobManualEditSession = {
   draft_note?: string | null;
   editable: boolean;
   detail?: string | null;
+};
+
+export type JobManualEditorReadinessStep = {
+  step_name: string;
+  label: string;
+  status: string;
+  progress?: number | null;
+  detail?: string | null;
+};
+
+export type JobManualEditorReadiness = {
+  job_id: string;
+  status: "preprocessing" | "ready" | "failed" | "blocked";
+  can_open_editor: boolean;
+  can_edit: boolean;
+  progress_percent: number;
+  current_step?: string | null;
+  detail?: string | null;
+  required_steps: JobManualEditorReadinessStep[];
+  missing: string[];
 };
 
 export type JobManualEditSubtitleOverride = {
@@ -429,6 +451,7 @@ export type WatchRoot = {
   recursive: boolean;
   scan_mode: "fast" | "precise";
   ingest_mode: "task_only" | "full_auto";
+  job_flow_mode: "auto" | "smart_assist";
   created_at: string;
 };
 

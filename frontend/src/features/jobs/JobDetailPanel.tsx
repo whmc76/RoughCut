@@ -76,12 +76,19 @@ function isLocalOutputJob(job: Job) {
 }
 
 function hasJobStarted(job: Job) {
-  if (job.status === "running" || job.status === "processing" || job.status === "needs_review") return true;
+  if (job.status === "running" || job.status === "processing" || job.status === "awaiting_manual_edit" || job.status === "needs_review") return true;
   return job.steps.some((step) => Boolean(step.started_at));
 }
 
 function isTerminalJob(job: Job) {
   return job.status === "done" || job.status === "failed" || job.status === "cancelled";
+}
+
+function jobFlowModeOptions(t: (key: string) => string): SelectOption[] {
+  return [
+    { value: "auto", label: t("jobs.flowMode.auto") },
+    { value: "smart_assist", label: t("jobs.flowMode.smart_assist") },
+  ];
 }
 
 const STUCK_DIAGNOSTIC_TITLE_HINTS = ["卡住诊断", "stuck", "stuck_step", "stuck-step", "stuck diagnostic", "stuck-diagnostic"];
@@ -156,6 +163,7 @@ type JobDetailPanelProps = {
   pendingInitialization: {
     language: string;
     workflowTemplate: string;
+    jobFlowMode: string;
     workflowMode: string;
     enhancementModes: string[];
     outputDir: string;
@@ -175,6 +183,7 @@ type JobDetailPanelProps = {
   onPendingInitializationChange: (value: {
     language: string;
     workflowTemplate: string;
+    jobFlowMode: string;
     workflowMode: string;
     enhancementModes: string[];
     outputDir: string;
@@ -512,6 +521,12 @@ export function JobDetailPanel({
                   value={pendingInitialization.workflowTemplate}
                   onChange={(event) => onPendingInitializationChange({ ...pendingInitialization, workflowTemplate: event.target.value })}
                   options={workflowTemplateOptions}
+                />
+                <SelectField
+                  label={t("jobs.upload.jobFlowMode")}
+                  value={pendingInitialization.jobFlowMode}
+                  onChange={(event) => onPendingInitializationChange({ ...pendingInitialization, jobFlowMode: event.target.value })}
+                  options={jobFlowModeOptions(t)}
                 />
                 <label>
                   <span>{t("jobs.upload.outputDir")}</span>

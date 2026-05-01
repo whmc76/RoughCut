@@ -29,6 +29,13 @@ function moveFile(files: File[], fromIndex: number, toIndex: number): File[] {
   return next;
 }
 
+function jobFlowModeOptions(t: (key: string) => string): SelectOption[] {
+  return [
+    { value: "auto", label: t("jobs.flowMode.auto") },
+    { value: "smart_assist", label: t("jobs.flowMode.smart_assist") },
+  ];
+}
+
 export function JobUploadPanel({
   upload,
   languageOptions,
@@ -90,6 +97,12 @@ export function JobUploadPanel({
           value={upload.workflowTemplate}
           onChange={(event) => onChange({ ...upload, workflowTemplate: event.target.value })}
           options={workflowTemplateOptions}
+        />
+        <SelectField
+          label={t("jobs.upload.jobFlowMode")}
+          value={upload.jobFlowMode}
+          onChange={(event) => onChange({ ...upload, jobFlowMode: event.target.value })}
+          options={jobFlowModeOptions(t)}
         />
         <label>
           <span>{t("jobs.upload.outputDir")}</span>

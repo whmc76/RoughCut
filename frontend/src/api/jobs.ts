@@ -7,6 +7,7 @@ import type {
   JobManualEditApplyResponse,
   JobManualEditDraftResponse,
   JobManualEditPreviewAssets,
+  JobManualEditorReadiness,
   JobManualRotationDetectResponse,
   JobManualEditSession,
   JobTimeline,
@@ -44,6 +45,20 @@ type JobDownloadBlob = {
   blob: Blob;
   filename: string;
 };
+
+function fallbackManualEditorReadiness(jobId: string, detail?: string): JobManualEditorReadiness {
+  return {
+    job_id: jobId,
+    status: "preprocessing",
+    can_open_editor: false,
+    can_edit: false,
+    progress_percent: 0,
+    current_step: null,
+    detail: detail || "正在生成手动调整所需信息。",
+    required_steps: [],
+    missing: [],
+  };
+}
 
 function parseDownloadFilename(header: string | null, fallback: string) {
   if (!header) return fallback;
@@ -87,6 +102,7 @@ export const jobsApi = {
     files: File[],
     language: string,
     workflowTemplate?: string,
+    jobFlowMode?: string,
     workflowMode?: string,
     enhancementModes: string[] = [],
     outputDir?: string,
@@ -96,6 +112,7 @@ export const jobsApi = {
     files.forEach((file) => formData.append("files", file));
     formData.append("language", language);
     if (workflowTemplate) formData.append("workflow_template", workflowTemplate);
+    if (jobFlowMode) formData.append("job_flow_mode", jobFlowMode);
     if (workflowMode) formData.append("workflow_mode", workflowMode);
     if (outputDir?.trim()) formData.append("output_dir", outputDir.trim());
     if (videoDescription?.trim()) formData.append("video_description", videoDescription.trim());
@@ -107,6 +124,19 @@ export const jobsApi = {
   getJobTokenUsage: (jobId: string) => request<TokenUsageReport>(`/jobs/${jobId}/token-usage`),
   getJobReport: (jobId: string) => request<Report>(`/jobs/${jobId}/report`),
   getJobTimeline: (jobId: string) => request<JobTimeline>(`/jobs/${jobId}/timeline`),
+  getJobManualEditorReadiness: async (jobId: string) => {
+    const response = await fetch(apiPath(`/jobs/${jobId}/manual-editor/readiness`), {
+      headers: { "Content-Type": "application/json" },
+    });
+    if (response.status === 404) {
+      return fallbackManualEditorReadiness(jobId, "正在等待手动调整预处理完成。");
+    }
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({ detail: response.statusText }));
+      throw new Error(String(payload.detail || response.statusText || "Manual editor readiness failed"));
+    }
+    return response.json() as Promise<JobManualEditorReadiness>;
+  },
   getJobManualEditor: (jobId: string) => request<JobManualEditSession>(`/jobs/${jobId}/manual-editor`),
   getJobManualEditorAssets: (jobId: string) => request<JobManualEditPreviewAssets>(`/jobs/${jobId}/manual-editor/assets`),
   getJobManualEditorAssetsStatus: (jobId: string) => request<JobManualEditPreviewAssets>(`/jobs/${jobId}/manual-editor/assets/status`),
@@ -142,6 +172,7 @@ export const jobsApi = {
     body: {
       language: string;
       workflow_template?: string;
+      job_flow_mode: string;
       workflow_mode: string;
       enhancement_modes: string[];
       output_dir?: string;

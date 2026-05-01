@@ -6,6 +6,7 @@ import { TextField } from "../../components/forms/TextField";
 import type { ConfigProfile, SelectOption } from "../../types";
 import { PanelHeader } from "../../components/ui/PanelHeader";
 import { useI18n } from "../../i18n";
+import { classNames } from "../../utils";
 import { getTranscriptionProviderLabel } from "../settings/helpers";
 
 type WatchRootFormPanelProps = {
@@ -135,6 +136,21 @@ export function WatchRootFormPanel({
               { value: "full_auto", label: t("watch.form.ingestModeFullAuto") },
             ]}
           />
+          <div className="watch-flow-mode-field">
+            <span>{t("watch.form.jobFlowMode")}</span>
+            <div className="watch-flow-mode-control" role="group" aria-label={t("watch.form.jobFlowMode")}>
+              {(["auto", "smart_assist"] as const).map((mode) => (
+                <button
+                  key={mode}
+                  type="button"
+                  className={classNames("watch-flow-mode-toggle", form.job_flow_mode === mode && "active")}
+                  onClick={() => onChange({ ...form, job_flow_mode: mode })}
+                >
+                  {t(`jobs.flowMode.${mode}`)}
+                </button>
+              ))}
+            </div>
+          </div>
           <SelectField
             label={t("watch.form.scanMode")}
             value={form.scan_mode}
@@ -152,6 +168,9 @@ export function WatchRootFormPanel({
               ? t("watch.form.ingestModeTaskOnlyDescription")
               : t("watch.form.ingestModeFullAutoDescription")}
           </div>
+          {form.job_flow_mode === "smart_assist" ? (
+            <div className="muted compact-top">{t("watch.form.jobFlowModeSmartAssistDescription")}</div>
+          ) : null}
         </div>
         <div className="field-row">
           <CheckboxField label={t("watch.form.enabled")} checked={form.enabled} onChange={(event) => onChange({ ...form, enabled: event.target.checked })} />

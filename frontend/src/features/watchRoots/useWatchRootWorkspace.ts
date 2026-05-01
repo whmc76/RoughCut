@@ -20,6 +20,7 @@ function serializeRootForm(form: RootForm): string {
     recursive: form.recursive,
     scan_mode: form.scan_mode,
     ingest_mode: form.ingest_mode,
+    job_flow_mode: form.job_flow_mode,
   });
 }
 
@@ -107,6 +108,7 @@ export function useWatchRootWorkspace() {
         recursive: selectedRoot.recursive ?? true,
         scan_mode: selectedRoot.scan_mode,
         ingest_mode: selectedRoot.ingest_mode,
+        job_flow_mode: selectedRoot.job_flow_mode ?? "auto",
       };
       lastPersistedRef.current = serializeRootForm(nextForm);
       setForm(nextForm);
@@ -165,6 +167,7 @@ export function useWatchRootWorkspace() {
         recursive: root.recursive ?? true,
         scan_mode: root.scan_mode,
         ingest_mode: root.ingest_mode,
+        job_flow_mode: root.job_flow_mode ?? "auto",
       });
     },
     onSuccess: (updatedRoot) => {
@@ -325,6 +328,7 @@ export function useWatchRootWorkspace() {
             recursive: updatedRoot.recursive ?? true,
             scan_mode: updatedRoot.scan_mode,
             ingest_mode: updatedRoot.ingest_mode,
+            job_flow_mode: updatedRoot.job_flow_mode ?? "auto",
           };
           lastPersistedRef.current = serializeRootForm(updatedForm);
           preserveSavedStateRef.current = true;

@@ -18,7 +18,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import NullPool
 from sqlalchemy.sql import text
@@ -105,6 +105,7 @@ _REVIEW_ROUND_STEPS = {"summary_review", "glossary_review", "final_review"}
 _ORCHESTRATOR_ADVISORY_LOCK_KEY = 22032026
 _ORCHESTRATOR_HEARTBEAT_PATH = Path("logs/orchestrator-heartbeat.json")
 _ORCHESTRATOR_HEARTBEAT_MIN_FRESH_SEC = 30.0
+_SMART_ASSIST_MODE = "smart_assist"
 
 
 class _SingleActiveOrchestratorLease:
@@ -343,6 +344,9 @@ async def tick() -> None:
         pending_steps = result.scalars().all()
 
         for step in pending_steps:
+            if await _step_paused_for_smart_assist(step, session):
+                continue
+
             retry_wait_remaining = _step_retry_wait_remaining(step)
             if retry_wait_remaining > 0:
                 _set_step_waiting_metadata(
@@ -372,6 +376,25 @@ async def tick() -> None:
         # Check for failed jobs (all steps failed)
         await _update_job_statuses(session)
         await session.commit()
+
+
+async def _step_paused_for_smart_assist(step: JobStep, session) -> bool:
+    if step.step_name != "render":
+        return False
+    job = await session.get(Job, step.job_id)
+    if job is None or str(getattr(job, "job_flow_mode", "") or "").strip() != _SMART_ASSIST_MODE:
+        return False
+    if _render_step_released_by_manual_editor(step):
+        return False
+
+    steps_result = await session.execute(select(JobStep).where(JobStep.job_id == step.job_id))
+    step_map = {item.step_name: item for item in steps_result.scalars().all()}
+    edit_plan_step = step_map.get("edit_plan")
+    if edit_plan_step is None or edit_plan_step.status != "done":
+        return False
+
+    _mark_job_waiting_for_manual_edit(job, step)
+    return True
 
 
 def _step_retry_wait_remaining(step: JobStep) -> int:
@@ -572,6 +595,28 @@ def _terminal_running_step_detail(job: Job, step: JobStep, *, target_status: str
     if target_status == "done":
         return str(((step.metadata_ or {}).get("detail") or "")).strip() or "所属任务已完成，调度器已自动收口该步骤。"
     return "所属任务已结束，调度器已将遗留运行步骤标记为跳过。"
+
+
+def _render_step_released_by_manual_editor(render_step: JobStep | None) -> bool:
+    if render_step is None:
+        return False
+    metadata = dict(render_step.metadata_ or {})
+    return str(metadata.get("rerun_requested_via") or "").strip() == "manual_editor"
+
+
+def _mark_job_waiting_for_manual_edit(job: Job, render_step: JobStep | None) -> None:
+    now = datetime.now(timezone.utc)
+    job.status = "awaiting_manual_edit"
+    job.error_message = None
+    job.updated_at = now
+    if render_step is not None:
+        metadata = dict(render_step.metadata_ or {})
+        render_step.metadata_ = {
+            **metadata,
+            "detail": "智能辅助模式已完成预处理，等待用户手动调整后再进入渲染。",
+            "manual_editor_required": True,
+            "updated_at": now.isoformat(),
+        }
 
 
 def _mark_step_retry_exhausted(step: JobStep, *, now: datetime, detail: str | None = None) -> None:
@@ -981,6 +1026,17 @@ async def _update_job_statuses(session) -> None:
         ):
             job.status = "needs_review"
             job.updated_at = datetime.now(timezone.utc)
+            continue
+        edit_plan_step = step_map.get("edit_plan")
+        if (
+            str(getattr(job, "job_flow_mode", "") or "").strip() == _SMART_ASSIST_MODE
+            and edit_plan_step is not None
+            and edit_plan_step.status == "done"
+            and render_step is not None
+            and render_step.status == "pending"
+            and not _render_step_released_by_manual_editor(render_step)
+        ):
+            _mark_job_waiting_for_manual_edit(job, render_step)
             continue
         if (
             render_step is not None

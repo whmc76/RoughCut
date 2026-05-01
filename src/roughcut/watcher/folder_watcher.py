@@ -266,6 +266,7 @@ async def create_jobs_for_inventory_paths(
     *,
     config_profile_id: uuid.UUID | str | None = None,
     workflow_template: str | None = None,
+    job_flow_mode: str = "auto",
     output_dir: str | None = None,
     language: str = "zh-CN",
     awaiting_initialization: bool = False,
@@ -276,6 +277,7 @@ async def create_jobs_for_inventory_paths(
             Path(file_path),
             workflow_template,
             language,
+            job_flow_mode=job_flow_mode,
             output_dir=output_dir,
             config_profile_id=config_profile_id,
             awaiting_initialization=awaiting_initialization,
@@ -638,6 +640,13 @@ def _normalize_watch_root_ingest_mode(ingest_mode: str | None) -> str:
     return "full_auto"
 
 
+def _normalize_job_flow_mode(value: str | None) -> str:
+    normalized = str(value or "auto").strip().lower()
+    if normalized in {"assist", "smart", "manual_assist", "intelligent_assist"}:
+        return "smart_assist"
+    return "smart_assist" if normalized == "smart_assist" else "auto"
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -666,6 +675,7 @@ async def _create_job_for_file(
     file_path: Path,
     workflow_template: str | None = None,
     language: str = "zh-CN",
+    job_flow_mode: str = "auto",
     output_dir: str | None = None,
     *,
     config_profile_id: uuid.UUID | str | None = None,
@@ -695,6 +705,7 @@ async def _create_job_for_file(
     factory = get_session_factory()
     async with factory() as session:
         settings = get_settings()
+        job_flow_mode = _normalize_job_flow_mode(job_flow_mode)
         profile_uuid = None
         profile_settings_snapshot: dict[str, Any] | None = None
         profile_packaging_snapshot: dict[str, Any] | None = None
@@ -727,6 +738,7 @@ async def _create_job_for_file(
             config_profile_snapshot_json=profile_settings_snapshot,
             packaging_snapshot_json=profile_packaging_snapshot,
             workflow_template=workflow_template,
+            job_flow_mode=job_flow_mode,
             workflow_mode=workflow_mode,
             enhancement_modes=enhancement_modes,
         )
@@ -834,6 +846,7 @@ async def create_merged_job_for_inventory_paths(
     *,
     config_profile_id: uuid.UUID | str | None = None,
     workflow_template: str | None = None,
+    job_flow_mode: str = "auto",
     output_dir: str | None = None,
     language: str = "zh-CN",
     allow_related_profiles: bool = False,
@@ -864,6 +877,7 @@ async def create_merged_job_for_inventory_paths(
             merged_path,
             workflow_template,
             language,
+            job_flow_mode=job_flow_mode,
             output_dir=output_dir,
             config_profile_id=config_profile_id,
             content_profile_source_context=content_profile_source_context,
@@ -1646,6 +1660,7 @@ async def run_watch_root_auto_duty() -> dict[str, Any]:
                             [str(item.get("path") or "") for item in selected_items],
                             config_profile_id=root.config_profile_id,
                             workflow_template=root.workflow_template,
+                            job_flow_mode=getattr(root, "job_flow_mode", "auto") or "auto",
                             output_dir=root.output_dir,
                             awaiting_initialization=ingest_mode == "task_only",
                         )
@@ -1715,12 +1730,14 @@ class VideoFileHandler(FileSystemEventHandler):
         self,
         workflow_template: str | None,
         config_profile_id: uuid.UUID | str | None,
+        job_flow_mode: str,
         output_dir: str | None,
         language: str,
         loop: asyncio.AbstractEventLoop,
     ) -> None:
         self._workflow_template = workflow_template
         self._config_profile_id = config_profile_id
+        self._job_flow_mode = _normalize_job_flow_mode(job_flow_mode)
         self._output_dir = output_dir
         self._language = language
         self._loop = loop
@@ -1735,6 +1752,7 @@ class VideoFileHandler(FileSystemEventHandler):
                 file_path,
                 self._workflow_template,
                 self._language,
+                job_flow_mode=self._job_flow_mode,
                 output_dir=self._output_dir,
                 config_profile_id=self._config_profile_id,
             ),
@@ -1766,6 +1784,7 @@ async def watch_directory(
     watch_path: str,
     workflow_template: str | None = None,
     config_profile_id: uuid.UUID | str | None = None,
+    job_flow_mode: str = "auto",
     output_dir: str | None = None,
     language: str = "zh-CN",
     recursive: bool = True,
@@ -1776,7 +1795,7 @@ async def watch_directory(
         raise FileNotFoundError(f"Watch path does not exist: {watch_path}")
 
     loop = asyncio.get_running_loop()
-    handler = VideoFileHandler(workflow_template, config_profile_id, output_dir, language, loop)
+    handler = VideoFileHandler(workflow_template, config_profile_id, job_flow_mode, output_dir, language, loop)
     observer = Observer()
     observer.schedule(handler, str(path), recursive=recursive)
     observer.start()
@@ -1810,6 +1829,7 @@ async def watch_from_db() -> None:
                 root.path,
                 root.workflow_template,
                 root.config_profile_id,
+                getattr(root, "job_flow_mode", "auto") or "auto",
                 root.output_dir,
                 recursive=bool(getattr(root, "recursive", True)),
             )

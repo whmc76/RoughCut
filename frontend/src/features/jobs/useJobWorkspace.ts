@@ -10,6 +10,7 @@ const EMPTY_UPLOAD: UploadForm = {
   files: [],
   language: "zh-CN",
   workflowTemplate: "",
+  jobFlowMode: "auto",
   workflowMode: "standard_edit",
   enhancementModes: [],
   outputDir: "",
@@ -21,6 +22,7 @@ type PendingInitializationForm = Omit<UploadForm, "files">;
 const EMPTY_PENDING_INITIALIZATION: PendingInitializationForm = {
   language: "zh-CN",
   workflowTemplate: "",
+  jobFlowMode: "auto",
   workflowMode: "standard_edit",
   enhancementModes: [],
   outputDir: "",
@@ -32,6 +34,7 @@ const JOBS_PAGE_SIZE = 20;
 const JOB_STATUS_GROUP_PRIORITY: Record<string, number> = {
   awaiting_init: 1,
   needs_review: 0,
+  awaiting_manual_edit: 0,
   running: 1,
   processing: 1,
   pending: 1,
@@ -104,7 +107,7 @@ function isPendingJob(status: string) {
 }
 
 function isAttentionJob(status: string) {
-  return status === "needs_review" || status === "failed" || status === "cancelled";
+  return status === "needs_review" || status === "awaiting_manual_edit" || status === "failed" || status === "cancelled";
 }
 
 function matchesQueueFilter(status: string, filter: JobQueueFilter) {
@@ -250,6 +253,7 @@ export function useJobWorkspace({ isCreateOpen = false }: UseJobWorkspaceOptions
     setPendingInitialization({
       language: detail.data.language || "zh-CN",
       workflowTemplate: detail.data.workflow_template || "",
+      jobFlowMode: detail.data.job_flow_mode || "auto",
       workflowMode: detail.data.workflow_mode || "standard_edit",
       enhancementModes: detail.data.enhancement_modes || [],
       outputDir: detail.data.output_dir || "",
@@ -382,6 +386,7 @@ export function useJobWorkspace({ isCreateOpen = false }: UseJobWorkspaceOptions
         upload.files,
         upload.language,
         upload.workflowTemplate || undefined,
+        upload.jobFlowMode,
         upload.workflowMode,
         upload.enhancementModes,
         upload.outputDir,
@@ -402,6 +407,7 @@ export function useJobWorkspace({ isCreateOpen = false }: UseJobWorkspaceOptions
       api.initializeJob(selectedJobId!, {
         language: pendingInitialization.language,
         workflow_template: pendingInitialization.workflowTemplate || undefined,
+        job_flow_mode: pendingInitialization.jobFlowMode,
         workflow_mode: pendingInitialization.workflowMode,
         enhancement_modes: pendingInitialization.enhancementModes,
         output_dir: pendingInitialization.outputDir || undefined,

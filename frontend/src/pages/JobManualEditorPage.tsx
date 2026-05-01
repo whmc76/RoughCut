@@ -6,7 +6,7 @@ import { api } from "../api";
 import { PageHeader } from "../components/ui/PageHeader";
 import { EmptyState } from "../components/ui/EmptyState";
 import { JobManualEditSection, type JobManualEditSectionState } from "../features/jobs/JobManualEditSection";
-import type { JobManualEditApplyPayload } from "../types";
+import type { JobManualEditApplyPayload, JobManualEditorReadiness } from "../types";
 
 function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error || "未知错误");
@@ -18,6 +18,42 @@ function draftSaveErrorMessage(error: unknown) {
     return "后端服务尚未加载草稿保存接口，请重启 RoughCut API 后重试。";
   }
   return message || "请刷新后重试。";
+}
+
+function ManualEditorReadinessPanel({ readiness }: { readiness?: JobManualEditorReadiness }) {
+  const progress = Math.max(0, Math.min(100, readiness?.progress_percent ?? 0));
+  const currentStep = readiness?.required_steps.find((step) => step.step_name === readiness.current_step);
+  const title = readiness?.status === "blocked"
+    ? "手动调整暂不可用"
+    : readiness?.status === "failed" ? "手动调整预处理失败" : "正在准备手动调整工作区";
+  return (
+    <section className="manual-editor-readiness-panel">
+      <div className="manual-editor-preview-head">
+        <div>
+          <strong>{title}</strong>
+          <p className="muted compact-top">
+            {readiness?.detail || "正在生成手动调整所需媒体、字幕、剪辑时间线和渲染计划。"}
+          </p>
+        </div>
+        <span className={`status-pill ${readiness?.status === "failed" ? "failed" : readiness?.status === "blocked" ? "pending" : "running"}`}>
+          {progress}%
+        </span>
+      </div>
+      <div className="manual-editor-readiness-progress" aria-label="手动调整预处理进度">
+        <span style={{ width: `${progress}%` }} />
+      </div>
+      {currentStep ? <p className="muted compact-top">当前步骤：{currentStep.label}</p> : null}
+      {readiness?.required_steps.length ? (
+        <div className="manual-editor-readiness-steps">
+          {readiness.required_steps.map((step) => (
+            <span key={step.step_name} className={`status-pill ${step.status}`}>
+              {step.label}
+            </span>
+          ))}
+        </div>
+      ) : null}
+    </section>
+  );
 }
 
 export function JobManualEditorPage() {
@@ -33,10 +69,18 @@ export function JobManualEditorPage() {
     queryFn: () => api.getJob(jobId),
     enabled: Boolean(jobId),
   });
+  const manualEditorReadiness = useQuery({
+    queryKey: ["job-manual-editor-readiness", jobId],
+    queryFn: () => api.getJobManualEditorReadiness(jobId),
+    enabled: Boolean(jobId),
+    refetchInterval: (query) => (query.state.data?.status === "preprocessing" ? 2_500 : false),
+    staleTime: 5_000,
+    retry: 1,
+  });
   const manualEditor = useQuery({
     queryKey: ["job-manual-editor", jobId],
     queryFn: () => api.getJobManualEditor(jobId),
-    enabled: Boolean(jobId),
+    enabled: Boolean(jobId && manualEditorReadiness.data?.can_open_editor),
     staleTime: 15_000,
     retry: 1,
   });
@@ -61,6 +105,7 @@ export function JobManualEditorPage() {
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["jobs"] }),
         queryClient.invalidateQueries({ queryKey: ["job", jobId] }),
+        queryClient.invalidateQueries({ queryKey: ["job-manual-editor-readiness", jobId] }),
         queryClient.invalidateQueries({ queryKey: ["job-manual-editor", jobId] }),
         queryClient.invalidateQueries({ queryKey: ["job-manual-editor-assets", jobId] }),
       ]);
@@ -156,7 +201,7 @@ export function JobManualEditorPage() {
   }, [detectRotationMutateAsync]);
 
   const noticeClass = notice?.tone === "error" ? "notice notice-error top-gap" : "notice top-gap";
-  const manualEditorActionsEnabled = Boolean(manualEditor.data);
+  const manualEditorActionsEnabled = Boolean(manualEditor.data && manualEditorReadiness.data?.can_edit);
 
   return (
     <section className="page-stack manual-editor-page">
@@ -168,7 +213,7 @@ export function JobManualEditorPage() {
             <button
               type="button"
               className="button primary"
-              disabled={!manualEditState?.canApply || applyManualEditor.isPending}
+              disabled={!manualEditorActionsEnabled || !manualEditState?.canApply || applyManualEditor.isPending}
               onClick={handleApplyManualEdit}
             >
               {applyManualEditor.isPending ? "重渲染提交中..." : "用当前自动保存版本重新渲染"}
@@ -194,6 +239,36 @@ export function JobManualEditorPage() {
         <section className="panel">
           <EmptyState message="缺少任务 ID，无法打开手动调整模式。" tone="error" />
         </section>
+      ) : manualEditorReadiness.isLoading ? (
+        <>
+          <section className="panel manual-editor-shell-panel">
+            <EmptyState message="正在检查手动调整准备状态…" />
+          </section>
+          <div className="manual-editor-readiness-floating">
+            <ManualEditorReadinessPanel />
+          </div>
+        </>
+      ) : manualEditorReadiness.isError ? (
+        <section className="panel">
+          <EmptyState
+            message={`手动调整准备状态查询失败：${errorMessage(manualEditorReadiness.error)}`}
+            tone="error"
+          />
+          <div className="toolbar top-gap">
+            <Link className="button ghost" to="/jobs">
+              返回任务列表
+            </Link>
+          </div>
+        </section>
+      ) : manualEditorReadiness.data && !manualEditorReadiness.data.can_open_editor ? (
+        <>
+          <section className="panel manual-editor-shell-panel">
+            <EmptyState message="手动调整工作区还在预处理，完成后会自动打开编辑器。" />
+          </section>
+          <div className="manual-editor-readiness-floating">
+            <ManualEditorReadinessPanel readiness={manualEditorReadiness.data} />
+          </div>
+        </>
       ) : manualEditor.isLoading ? (
         <section className="panel">
           <EmptyState message="正在加载手动调整工作区…" />

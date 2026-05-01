@@ -7,6 +7,7 @@ export type RootForm = {
   recursive: boolean;
   scan_mode: "fast" | "precise";
   ingest_mode: "task_only" | "full_auto";
+  job_flow_mode: "auto" | "smart_assist";
 };
 
 export const EMPTY_ROOT_FORM: RootForm = {
@@ -18,4 +19,5 @@ export const EMPTY_ROOT_FORM: RootForm = {
   recursive: true,
   scan_mode: "fast",
   ingest_mode: "full_auto",
+  job_flow_mode: "auto",
 };

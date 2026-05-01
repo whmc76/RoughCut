@@ -39,6 +39,7 @@ from roughcut.api.schemas import (
     ReportOut,
     ReviewApplyRequest,
     TokenUsageReportOut,
+    normalize_job_flow_mode,
 )
 from roughcut.avatar import get_avatar_material_profile, list_avatar_material_profiles
 from roughcut.config import get_settings
@@ -383,6 +384,26 @@ class ManualEditorPreviewAssetsOut(BaseModel):
     detail: str | None = None
     error: str | None = None
     updated_at: str | None = None
+
+
+class ManualEditorReadinessStepOut(BaseModel):
+    step_name: str
+    label: str
+    status: str
+    progress: float | None = None
+    detail: str | None = None
+
+
+class ManualEditorReadinessOut(BaseModel):
+    job_id: str
+    status: Literal["preprocessing", "ready", "failed", "blocked"]
+    can_open_editor: bool = False
+    can_edit: bool = False
+    progress_percent: int = 0
+    current_step: str | None = None
+    detail: str | None = None
+    required_steps: list[ManualEditorReadinessStepOut] = Field(default_factory=list)
+    missing: list[str] = Field(default_factory=list)
 
 
 def _ensure_content_understanding_payload(profile: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -883,6 +904,7 @@ async def create_job(
     files: list[UploadFile] | None = File(None),
     language: str = Form("zh-CN"),
     workflow_template: str | None = Form(None),
+    job_flow_mode: str | None = Form(None),
     workflow_mode: str | None = Form(None),
     enhancement_modes: list[str] | None = Form(None),
     output_dir: str | None = Form(None),
@@ -897,6 +919,7 @@ async def create_job(
     try:
         language = normalize_job_language(language)
         workflow_template = normalize_workflow_template(workflow_template)
+        job_flow_mode = normalize_job_flow_mode(job_flow_mode)
         workflow_mode = normalize_workflow_mode(workflow_mode or settings.default_job_workflow_mode)
         output_dir = str(output_dir or "").strip() or None
         video_description = _normalize_video_description(video_description)
@@ -939,6 +962,7 @@ async def create_job(
             status="pending",
             language=language,
             workflow_template=workflow_template,
+            job_flow_mode=job_flow_mode,
             workflow_mode=workflow_mode,
             enhancement_modes=enhancement_modes,
             output_dir=output_dir,
@@ -1214,10 +1238,10 @@ async def restart_job(job_id: uuid.UUID, session: AsyncSession = Depends(get_ses
     job = result.scalar_one_or_none()
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    if job.status not in {"done", "cancelled", "failed", "needs_review", "processing", "running"}:
+    if job.status not in {"done", "cancelled", "failed", "awaiting_manual_edit", "needs_review", "processing", "running"}:
         raise HTTPException(
             status_code=409,
-            detail="Only completed, running, review-paused, cancelled, or failed jobs can be restarted",
+            detail="Only completed, running, review-paused, manual-edit-paused, cancelled, or failed jobs can be restarted",
         )
 
     _revoke_running_steps(job.steps or [])
@@ -1340,6 +1364,7 @@ async def initialize_job(
     job.updated_at = now
     job.language = body.language
     job.workflow_template = body.workflow_template
+    job.job_flow_mode = body.job_flow_mode
     job.workflow_mode = body.workflow_mode
     job.enhancement_modes = body.enhancement_modes
     job.output_dir = body.output_dir
@@ -1976,6 +2001,104 @@ async def _load_latest_timeline_by_type(
     return result.scalars().first()
 
 
+_MANUAL_EDITOR_REQUIRED_STEPS = tuple(
+    step_name
+    for step_name in PIPELINE_STEPS
+    if PIPELINE_STEPS.index(step_name) <= PIPELINE_STEPS.index("edit_plan")
+)
+
+
+async def _build_manual_editor_readiness(
+    *,
+    job: Job,
+    session: AsyncSession,
+) -> ManualEditorReadinessOut:
+    steps = _ordered_steps(list(job.steps or []))
+    step_map = {step.step_name: step for step in steps}
+    readiness_steps: list[ManualEditorReadinessStepOut] = []
+    required_done = 0
+    current_step: str | None = None
+    failed_step: JobStep | None = None
+
+    for step_name in _MANUAL_EDITOR_REQUIRED_STEPS:
+        step = step_map.get(step_name)
+        status_value = str(step.status if step else "pending")
+        metadata = dict(step.metadata_ or {}) if step is not None and isinstance(step.metadata_, dict) else {}
+        progress_value = metadata.get("progress")
+        progress = None
+        if isinstance(progress_value, (int, float)):
+            progress = max(0.0, min(1.0, float(progress_value)))
+        if status_value in {"done", "skipped"}:
+            required_done += 1
+        elif current_step is None:
+            current_step = step_name
+        if status_value == "failed" and failed_step is None:
+            failed_step = step
+        readiness_steps.append(
+            ManualEditorReadinessStepOut(
+                step_name=step_name,
+                label=STEP_LABELS.get(step_name, step_name),
+                status=status_value,
+                progress=progress,
+                detail=str(metadata.get("detail") or "").strip() or None,
+            )
+        )
+
+    missing: list[str] = []
+    media_meta_artifact = await _load_latest_optional_artifact(session, job_id=job.id, artifact_types=("media_meta",))
+    editorial_timeline = await _load_latest_timeline_by_type(session, job_id=job.id, timeline_type="editorial")
+    render_plan_timeline = await _load_latest_timeline_by_type(session, job_id=job.id, timeline_type="render_plan")
+    if _resolve_manual_editor_source_path(job) is None:
+        missing.append("source_media")
+    if media_meta_artifact is None:
+        missing.append("media_meta")
+    if editorial_timeline is None:
+        missing.append("editorial_timeline")
+    if render_plan_timeline is None:
+        missing.append("render_plan")
+
+    progress_percent = round((required_done / max(1, len(_MANUAL_EDITOR_REQUIRED_STEPS))) * 100)
+    status_value = str(job.status or "").strip().lower()
+    prerequisite_detail = _manual_editor_prerequisite_detail(steps)
+    can_open_editor = prerequisite_detail is None and not missing
+    can_edit = can_open_editor and status_value not in {"awaiting_init", "cancelled", "failed"}
+
+    if failed_step is not None or status_value in {"failed", "cancelled"}:
+        readiness_status: Literal["preprocessing", "ready", "failed", "blocked"] = "failed"
+        failed_metadata = dict(failed_step.metadata_ or {}) if failed_step is not None else {}
+        detail = str(
+            failed_metadata.get("detail")
+            or (failed_step.error_message if failed_step is not None else None)
+            or job.error_message
+            or "手动调整预处理失败。"
+        ).strip()
+    elif status_value == "awaiting_init":
+        readiness_status = "blocked"
+        detail = "当前任务尚未完成初始化，请先填写必要任务信息。"
+    elif can_open_editor:
+        readiness_status = "ready"
+        detail = "手动调整所需信息已准备完成。"
+        progress_percent = 100
+    else:
+        readiness_status = "preprocessing"
+        if missing:
+            detail = "正在生成手动调整所需媒体、字幕、剪辑时间线和渲染计划。"
+        else:
+            detail = prerequisite_detail or "正在生成手动调整所需信息。"
+
+    return ManualEditorReadinessOut(
+        job_id=str(job.id),
+        status=readiness_status,
+        can_open_editor=can_open_editor,
+        can_edit=can_edit,
+        progress_percent=max(0, min(100, int(progress_percent))),
+        current_step=current_step,
+        detail=detail or None,
+        required_steps=readiness_steps,
+        missing=missing,
+    )
+
+
 async def _build_manual_editor_session(
     *,
     job: Job,
@@ -2203,6 +2326,19 @@ async def get_manual_editor_asset_file(job_id: uuid.UUID, filename: str, session
     suffix = path.suffix.lower()
     media_type = "audio/wav" if suffix == ".wav" else "image/jpeg" if suffix in {".jpg", ".jpeg"} else "application/octet-stream"
     return FileResponse(path=path, filename=path.name, media_type=media_type)
+
+
+@router.get("/{job_id}/manual-editor/readiness", response_model=ManualEditorReadinessOut)
+async def get_manual_editor_readiness(job_id: uuid.UUID, session: AsyncSession = Depends(get_session)):
+    job_result = await session.execute(
+        select(Job)
+        .options(selectinload(Job.steps))
+        .where(Job.id == job_id)
+    )
+    job = job_result.scalar_one_or_none()
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return await _build_manual_editor_readiness(job=job, session=session)
 
 
 @router.get("/{job_id}/manual-editor", response_model=ManualEditorSessionOut)
@@ -4979,6 +5115,7 @@ def _attach_job_preview(job: Job, *, lightweight: bool = False) -> None:
     job.review_label = review_preview["label"]
     job.review_detail = review_preview["detail"]
     job.awaiting_initialization = str(job.status or "").strip() == "awaiting_init"
+    job.awaiting_manual_edit = str(job.status or "").strip() == "awaiting_manual_edit"
     publication_preview = _resolve_job_publication_preview(job)
     job.publication_status = publication_preview["status"]
     job.publication_summary = publication_preview["summary"]
