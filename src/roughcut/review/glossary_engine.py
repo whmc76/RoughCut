@@ -10,7 +10,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from roughcut.config import get_settings
 from roughcut.db.models import GlossaryTerm, SubtitleCorrection, SubtitleItem
-from roughcut.review.model_identity import filter_conflicting_model_wrong_forms as _shared_filter_conflicting_model_wrong_forms
+from roughcut.review.model_identity import (
+    filter_conflicting_model_wrong_forms as _shared_filter_conflicting_model_wrong_forms,
+    model_numbers_conflict,
+)
 from roughcut.review.subtitle_term_resolution import _should_ignore_patch_candidate
 
 
@@ -47,6 +50,8 @@ def assess_glossary_correction_automation(
 
     if not original or not suggested:
         blocking_reasons.append("术语候选缺少原文或修正值")
+    elif model_numbers_conflict(original, suggested):
+        blocking_reasons.append("型号数字冲突，不能自动改写相邻型号")
     else:
         length_ratio = len(suggested) / max(len(original), 1)
         if 0.6 <= length_ratio <= 1.8:
@@ -256,6 +261,8 @@ def apply_corrections_to_text(text: str, corrections: list[SubtitleCorrection]) 
     for correction in corrections:
         if correction.auto_applied or correction.human_decision == "accepted":
             override = correction.human_override or correction.suggested_span
+            if model_numbers_conflict(correction.original_span, override):
+                continue
             result = result.replace(correction.original_span, override, 1)
     return result
 

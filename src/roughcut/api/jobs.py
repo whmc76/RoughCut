@@ -76,6 +76,7 @@ from roughcut.media.manual_editor_assets import (
     mark_manual_editor_preview_assets_queued,
     manual_editor_asset_dir,
 )
+from roughcut.media.subtitle_text import clean_final_subtitle_text
 from roughcut.publication import (
     active_publication_credentials,
     build_publication_plan,
@@ -1460,14 +1461,39 @@ def _manual_editor_segment_payload(segment: dict[str, Any], *, index: int) -> Ma
     )
 
 
+def _manual_editor_final_subtitle_text(item: dict[str, Any]) -> str:
+    return clean_final_subtitle_text(
+        item.get("text_final")
+        or item.get("text_norm")
+        or item.get("text_raw", "")
+    )
+
+
+def _clean_manual_editor_subtitle_projection(
+    subtitles: list[dict[str, Any]],
+    *,
+    drop_empty: bool = True,
+) -> list[dict[str, Any]]:
+    cleaned: list[dict[str, Any]] = []
+    for item in subtitles:
+        payload = dict(item)
+        text_final = _manual_editor_final_subtitle_text(payload)
+        if drop_empty and not text_final:
+            continue
+        payload["text_final"] = text_final
+        cleaned.append(payload)
+    return cleaned
+
+
 def _manual_editor_subtitle_payload(item: dict[str, Any], *, index: int) -> ManualEditorSubtitleOut:
+    text_final = _manual_editor_final_subtitle_text(item)
     return ManualEditorSubtitleOut(
         index=int(item.get("index", index) or index),
         start_time=round(float(item.get("start_time", 0.0) or 0.0), 3),
         end_time=round(float(item.get("end_time", 0.0) or 0.0), 3),
         text_raw=str(item.get("text_raw") or "") or None,
         text_norm=str(item.get("text_norm") or "") or None,
-        text_final=str(item.get("text_final") or "") or None,
+        text_final=text_final,
     )
 
 
@@ -2046,6 +2072,8 @@ async def _build_manual_editor_session(
                 subtitle_overrides,
                 output_duration_sec=base_output_duration_sec,
             )
+    subtitle_dicts = _clean_manual_editor_subtitle_projection(subtitle_dicts)
+    projected_subtitles = _clean_manual_editor_subtitle_projection(projected_subtitles)
     source_path = _resolve_manual_editor_source_path(job)
     status_detail = _manual_editor_detail_for_job_status(str(job.status or ""))
     prerequisite_detail = _manual_editor_prerequisite_detail(list(job.steps or []))
@@ -2367,6 +2395,7 @@ async def apply_manual_editor_timeline(
         subtitle_override_payloads,
         output_duration_sec=base_output_duration_sec,
     )
+    remapped_subtitles = _clean_manual_editor_subtitle_projection(remapped_subtitles)
     change_plan = _manual_editor_change_plan(
         previous_keep_segments=previous_keep_segments,
         next_keep_segments=keep_segments,

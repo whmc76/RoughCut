@@ -39,9 +39,22 @@ _SEMANTIC_HALLUCINATION_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
 _DUPLICATE_BRAND_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"(?:FOXBAT|Foxbat)\s*(?:DYNAMICS)?\s*(?:Foxbat)?\s*工业", re.IGNORECASE), "狐蝠工业"),
     (re.compile(r"(?:FOXBAT|Foxbat)\s*狐蝠工业", re.IGNORECASE), "狐蝠工业"),
+    (
+        re.compile(
+            r"狐蝠工业(?:\s|x|HSJUN|BOLTBOAT|勃朗峰户外)+狐蝠工业(?:工业)?",
+            re.IGNORECASE,
+        ),
+        "狐蝠工业",
+    ),
     (re.compile(r"(狐蝠工业){2,}", re.IGNORECASE), "狐蝠工业"),
+    (re.compile(r"狐蝠工业工业+", re.IGNORECASE), "狐蝠工业"),
+    (re.compile(r"(勃朗峰户外){2,}", re.IGNORECASE), "勃朗峰户外"),
     (re.compile(r"(NITECORE){2,}", re.IGNORECASE), "NITECORE"),
     (re.compile(r"(OLIGHT){2,}", re.IGNORECASE), "OLIGHT"),
+)
+_ADJACENT_DUPLICATE_MODEL_TOKEN_RE = re.compile(
+    r"(?<![A-Za-z0-9])(?P<token>[A-Za-z]{1,10}[-_]?\d[A-Za-z0-9_-]{0,12})(?:\s+(?P=token)){1,}(?![A-Za-z0-9])",
+    re.IGNORECASE,
 )
 _FLASHLIGHT_CONTAMINATION_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"电折刀"), "手电"),
@@ -50,6 +63,10 @@ _FLASHLIGHT_CONTAMINATION_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
 )
 _FLASHLIGHT_EDC_ALT_LIST_RE = re.compile(
     r"(?<![A-Za-z0-9])(EDC(?:17|23|37))(?:\s*/\s*(EDC(?:17|23|37)))+(?![A-Za-z0-9])",
+    re.IGNORECASE,
+)
+_FLASHLIGHT_EDC_ALT_SEQUENCE_RE = re.compile(
+    r"(?<![A-Za-z0-9])(EDC(?:17|23|37))(?:[\s/、，,]+(EDC(?:17|23|37)))+(?![A-Za-z0-9])",
     re.IGNORECASE,
 )
 _KNIFE_MATERIAL_SURFACE_MISHEARD_RE = re.compile(r"钢瓦|盖瓦|锆瓦|(?:钢马|锆马).{0,16}泛光")
@@ -151,6 +168,7 @@ def _normalize_semantic_contamination_text(text: str, *, category_scope: str) ->
         cleaned = _collapse_flashlight_edc_alt_lists(cleaned)
     elif category_scope == "knife":
         cleaned = _normalize_knife_material_surface_text(cleaned)
+    cleaned = _ADJACENT_DUPLICATE_MODEL_TOKEN_RE.sub(lambda match: match.group("token"), cleaned)
     cleaned = re.sub(r"[，,]{2,}", "，", cleaned)
     cleaned = re.sub(r"[。]{2,}", "。", cleaned)
     cleaned = re.sub(r"\s{2,}", " ", cleaned).strip(" ，,。；;、")
@@ -167,7 +185,8 @@ def _collapse_flashlight_edc_alt_lists(text: str) -> str:
             return normalized[0]
         return match.group(0)
 
-    return _FLASHLIGHT_EDC_ALT_LIST_RE.sub(replace, text)
+    collapsed = _FLASHLIGHT_EDC_ALT_LIST_RE.sub(replace, text)
+    return _FLASHLIGHT_EDC_ALT_SEQUENCE_RE.sub(replace, collapsed)
 
 
 def _normalize_knife_material_surface_text(text: str) -> str:

@@ -3,6 +3,8 @@ from __future__ import annotations
 import re
 from typing import Any, Iterable, Mapping
 
+from roughcut.review.model_identity import model_numbers_conflict
+
 ARTIFACT_TYPE_SUBTITLE_TERM_RESOLUTION_PATCH = "subtitle_term_resolution_patch"
 
 
@@ -79,6 +81,8 @@ def _should_ignore_patch_candidate(
     ):
         return True
     if original_norm == "反光" and suggested_norm == "泛光" and _profile_is_knife_context(content_profile):
+        return True
+    if model_numbers_conflict(original_span, suggested_span):
         return True
 
     profile = content_profile or {}

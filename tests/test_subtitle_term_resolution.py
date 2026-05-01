@@ -27,3 +27,11 @@ def test_ignore_cross_subject_brand_patch_when_profile_keeps_original_brand() ->
             "summary": "这条视频围绕狐蝠工业阵风展开。",
         },
     )
+
+
+def test_ignore_model_patch_when_numbers_conflict() -> None:
+    assert _should_ignore_patch_candidate(
+        original_span="EDC17",
+        suggested_span="EDC37",
+        content_profile={"subject_domain": "flashlight", "subject_model": "EDC17"},
+    )

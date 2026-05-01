@@ -154,6 +154,16 @@ _NORMAL_LANGUAGE_SIGNAL_TERMS = (
     "拿来",
     "对比",
     "区别",
+    "懒得",
+    "看了",
+    "不看",
+    "想看",
+    "想要",
+)
+_SHORT_NORMAL_LANGUAGE_SIGNAL_RE = re.compile(
+    r"(?:我|你|他|她|它|我们|你们|他们|她们|它们|大家).{0,6}"
+    r"(?:看|用|拿|放|试|讲|说|做|拆|开|关|装|换|选|买|要|想|懒得|觉得|喜欢|知道|需要|可以)",
+    re.UNICODE,
 )
 _RESTART_CUE_TERMS = (
     "滚",
@@ -661,6 +671,13 @@ def _score_silence_cut(
     previous_item = _find_previous_subtitle(silence.start, subtitle_items)
     next_item = _find_next_subtitle(silence.end, subtitle_items)
     overlaps = _overlapping_subtitle_items(silence.start, silence.end, subtitle_items)
+    protected_speech_overlap = _range_has_protected_speech_evidence(
+        silence.start,
+        silence.end,
+        subtitle_items=subtitle_items,
+        transcript_segments=transcript_segments,
+        content_profile=content_profile,
+    )
     range_evidence = _build_range_evidence(
         silence.start,
         silence.end,
@@ -741,6 +758,9 @@ def _score_silence_cut(
     if range_evidence.removal_score >= 0.72:
         score += min(0.22, range_evidence.removal_score * 0.14)
         signals.append(f"evidence_remove={range_evidence.removal_score:.2f}")
+    if protected_speech_overlap:
+        score = min(score - 0.55, _SILENCE_CUT_SCORE_THRESHOLD - 0.01)
+        signals.append("protected_speech_overlap")
     signals.extend(f"evidence:{tag}" for tag in range_evidence.tags[:5])
 
     cut_start = silence.start
@@ -1448,6 +1468,13 @@ def _refine_segments_for_pacing(
             and seg_duration <= float(trim_profile["micro_keep_bridge_max_sec"])
             and max_signal < _STRONG_SUBTITLE_SIGNAL_SCORE
             and keep_energy < 0.82
+            and not _range_has_protected_speech_evidence(
+                segment.start,
+                segment.end,
+                subtitle_items=subtitle_items,
+                transcript_segments=transcript_segments,
+                content_profile=content_profile,
+            )
             and not any(
                 _has_normal_language_signal(_semantic_subtitle_text(item), content_profile=content_profile)
                 for item in overlaps
@@ -1806,6 +1833,67 @@ def _overlapping_transcript_segments(start_time: float, end_time: float, transcr
     return overlaps
 
 
+def _range_has_protected_speech_evidence(
+    start_time: float,
+    end_time: float,
+    *,
+    subtitle_items: list[dict[str, Any]],
+    transcript_segments: list[dict[str, Any]],
+    content_profile: dict | None,
+) -> bool:
+    for item in _overlapping_subtitle_items(start_time, end_time, subtitle_items):
+        if _subtitle_has_protected_speech_text(_semantic_subtitle_text(item), content_profile=content_profile):
+            return True
+    for segment in _overlapping_transcript_segments(start_time, end_time, transcript_segments):
+        if _transcript_segment_has_protected_speech(segment, start_time=start_time, end_time=end_time, content_profile=content_profile):
+            return True
+    return False
+
+
+def _subtitle_has_protected_speech_text(text: str, *, content_profile: dict | None) -> bool:
+    compact = _compact_subtitle_text(text)
+    if len(compact) < 3:
+        return False
+    if _subtitle_text_is_explicit_removal(compact, content_profile=content_profile):
+        return False
+    return True
+
+
+def _subtitle_text_is_explicit_removal(text: str, *, content_profile: dict | None) -> bool:
+    compact = _compact_subtitle_text(text)
+    if not compact:
+        return True
+    filler_stripped = _compact_subtitle_text(FILLER_PATTERN.sub("", compact))
+    if not filler_stripped:
+        return True
+    if _looks_like_noise_subtitle(compact):
+        return True
+    if _is_restart_cue_text(compact):
+        return True
+    if _is_nonsemantic_repetition_text(compact, content_profile=content_profile):
+        return True
+    return False
+
+
+def _transcript_segment_has_protected_speech(
+    segment: dict[str, Any],
+    *,
+    start_time: float,
+    end_time: float,
+    content_profile: dict | None,
+) -> bool:
+    for word in list(segment.get("words") or []):
+        word_text = str(word.get("word") or word.get("raw_text") or "").strip()
+        if not word_text:
+            continue
+        if _range_overlap_seconds(start_time, end_time, word.get("start"), word.get("end")) <= 0.0:
+            continue
+        if _subtitle_has_protected_speech_text(word_text, content_profile=content_profile):
+            return True
+    text = str(segment.get("text") or "").strip()
+    return _subtitle_has_protected_speech_text(text, content_profile=content_profile)
+
+
 def _range_overlap_seconds(start_time: float, end_time: float, item_start: Any, item_end: Any) -> float:
     start = _as_float(item_start)
     end = _as_float(item_end, fallback=start)
@@ -1966,6 +2054,26 @@ def _looks_like_natural_emphasis_repetition(unit: str, *, repeat_count: int, ful
     return True
 
 
+def _is_nonsemantic_repetition_text(text: str, *, content_profile: dict | None) -> bool:
+    compact = _compact_subtitle_text(text)
+    if len(compact) < 4:
+        return False
+    repeated_chunk = re.search(r"(.{1,8})\1{1,}", compact)
+    if not repeated_chunk:
+        return False
+    repeated_text = repeated_chunk.group(0)
+    unit = repeated_chunk.group(1)
+    repeat_count = max(2, len(repeated_text) // max(len(unit), 1))
+    if len(repeated_text) < max(4, int(len(compact) * 0.55)):
+        return False
+    if _looks_like_natural_emphasis_repetition(unit, repeat_count=repeat_count, full_text=compact):
+        return False
+    return not (
+        _has_anchor_signal(compact, content_profile=content_profile)
+        or _has_visual_showcase_signal(compact, content_profile=content_profile)
+    )
+
+
 def _is_exact_natural_emphasis_repetition(text: str) -> bool:
     candidate = str(text or "").strip()
     if len(candidate) < 4:
@@ -1993,6 +2101,8 @@ def _has_normal_language_signal(text: str, *, content_profile: dict | None) -> b
     compact = PUNCTUATION_PATTERN.sub("", str(text or "").strip())
     if len(compact) < 4:
         return False
+    if len(compact) <= 12 and _SHORT_NORMAL_LANGUAGE_SIGNAL_RE.search(compact):
+        return True
     if _has_anchor_signal(compact, content_profile=content_profile):
         return True
     if _has_visual_showcase_signal(compact, content_profile=content_profile):

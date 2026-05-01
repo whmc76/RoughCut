@@ -62,6 +62,46 @@ _MULTI_CHAR_ATOMIC_TOKENS = (
     "夜骑",
     "补光",
 )
+_MEASURE_UNIT_TOKENS = (
+    "流明",
+    "毫米",
+    "厘米",
+    "英寸",
+    "毫升",
+    "千克",
+    "公斤",
+    "分钟",
+    "小时",
+    "lm",
+    "lumen",
+    "lumens",
+    "mAh",
+    "Ah",
+    "Wh",
+    "mm",
+    "cm",
+    "km",
+    "kg",
+    "mg",
+    "ml",
+    "GB",
+    "MB",
+    "TB",
+    "fps",
+    "Hz",
+    "kHz",
+    "MHz",
+    "GHz",
+    "W",
+    "V",
+    "A",
+    "K",
+)
+_MEASURE_UNIT_PATTERN = "|".join(re.escape(unit) for unit in sorted(_MEASURE_UNIT_TOKENS, key=len, reverse=True))
+_NUMERIC_MEASURE_TOKEN_RE = re.compile(
+    rf"\d+(?:\.\d+)?(?:{_MEASURE_UNIT_PATTERN})(?=$|[\u4e00-\u9fffA-Za-z])",
+    re.IGNORECASE,
+)
 
 
 @dataclass(slots=True)
@@ -255,7 +295,11 @@ def tokenize_alignment_text(text: str) -> list[str]:
             return [_strip_outer_punctuation(chunk) for chunk in spaced if _strip_outer_punctuation(chunk)]
 
     tokens: list[str] = []
-    for match in re.finditer(r"[A-Za-z0-9][A-Za-z0-9_\-./]*|[\u4e00-\u9fff]+|[^\s]", normalized):
+    for match in re.finditer(
+        rf"{_NUMERIC_MEASURE_TOKEN_RE.pattern}|[A-Za-z0-9][A-Za-z0-9_\-./]*|[\u4e00-\u9fff]+|[^\s]",
+        normalized,
+        flags=re.IGNORECASE,
+    ):
         chunk = str(match.group(0) or "").strip()
         if not chunk:
             continue

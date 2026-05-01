@@ -35,9 +35,14 @@ def test_clean_final_subtitle_text_hides_asr_noise_markers() -> None:
     assert clean_final_subtitle_text("(music)") == ""
     assert clean_final_subtitle_text("[Silence Music]") == ""
     assert clean_final_subtitle_text("silence music") == ""
+    assert clean_final_subtitle_text("EnvironmentalSounds") == ""
+    assert clean_final_subtitle_text("HumanSounds") == ""
+    assert clean_final_subtitle_text("SoundsSoundsSilence") == ""
+    assert clean_final_subtitle_text("Noise 好") == "好"
     assert clean_final_subtitle_text("<|nospeech|>") == ""
     assert clean_final_subtitle_text("这个细节 [music] 继续看") == "这个细节继续看"
     assert clean_final_subtitle_text("这个细节 silence music 继续看。") == "这个细节 silence music 继续看"
+    assert clean_final_subtitle_text("给它塞进去啊EnvironmentalSounds哎") == "给它塞进去啊"
 
 
 def test_clean_final_subtitle_text_replaces_all_punctuation_with_spaces() -> None:
@@ -48,8 +53,12 @@ def test_clean_final_subtitle_text_replaces_all_punctuation_with_spaces() -> Non
 def test_normalize_display_text_hides_asr_noise_markers_before_review() -> None:
     assert normalize_display_text("[silence]") == ""
     assert normalize_display_text("silence music") == ""
+    assert normalize_display_text("Noise 好") == "好"
+    assert normalize_display_text("HumanSounds哇") == "哇"
+    assert normalize_display_text("OK的EnvironmentalSoundsSounds") == "OK的"
     assert normalize_display_text("细节 <|music|> 继续看") == "细节继续看"
     assert normalize_display_text("细节 silence music 继续看") == "细节 silence music 继续看"
+    assert normalize_display_text("给它塞进去啊EnvironmentalSounds哎") == "给它塞进去"
 
 
 @pytest.mark.asyncio
@@ -110,6 +119,25 @@ def test_write_srt_file_serializes_final_text_without_punctuation(tmp_path: Path
     assert "黑绿配色 手感不错\n" in content
     assert "。" not in content
     assert "，" not in content
+
+
+def test_write_srt_file_splits_overlong_display_cues(tmp_path: Path) -> None:
+    output_path = tmp_path / "subtitle.srt"
+
+    write_srt_file(
+        [
+            {
+                "start_time": 0.0,
+                "end_time": 12.0,
+                "text_final": "第一段很长 继续讲第二个重点 再补充第三个细节 最后收束这一条字幕",
+            },
+        ],
+        output_path,
+    )
+
+    content = output_path.read_text(encoding="utf-8-sig")
+    assert "1\n00:00:00,000" in content
+    assert "2\n" in content
 
 
 def test_write_ass_file_skips_filler_only_dialogues(tmp_path: Path) -> None:

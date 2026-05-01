@@ -123,7 +123,15 @@ def _tokenize_entry_text_for_resegmentation(text: str) -> list[str]:
     compact = re.sub(r"\s+", "", str(text or "").strip())
     if not compact:
         return []
-    return [token for token in re.findall(r"[A-Za-z0-9]+|[\u4e00-\u9fff]|.", compact) if token.strip()]
+    return [
+        token
+        for token in re.findall(
+            rf"{_NUMERIC_MEASURE_TOKEN_RE.pattern}|[A-Za-z0-9]+|[\u4e00-\u9fff]|.",
+            compact,
+            flags=re.IGNORECASE,
+        )
+        if token.strip()
+    ]
 
 
 def _window_words_for_resegmentation(
@@ -341,6 +349,7 @@ _DISPLAY_QUANTITY_UNITS = (
     "瓦",
     "伏",
     "安",
+    "流明",
 )
 _DISPLAY_NUM_TOKEN = r"[零〇幺一二两三四五六七八九十百千万\d]+"
 _DISPLAY_ORDINAL_UNIT_PATTERN = "|".join(
@@ -459,12 +468,10 @@ _INFO_COUNT_NOUN_PREFIXES = (
     "版本",
     "型号",
     "规格",
-    "参数",
     "模式",
     "方案",
     "步骤",
     "配色",
-    "功能",
     "层",
     "页",
     "面",
@@ -545,13 +552,22 @@ _LOW_SIGNAL_SHORT_CLAUSE_RE = re.compile(
 )
 _INLINE_FILLER_RE = re.compile(r"(?:呃|嗯|诶|欸|哎|哈|哦)+")
 _INLINE_PARTICLE_RE = re.compile(r"(?<=[\u4e00-\u9fffA-Za-z0-9])(?:啊|吧|呢|吗|嘛|呀)(?=[\u4e00-\u9fffA-Za-z0-9])")
-_ASR_NOISE_LABEL = r"(?:background[_\s-]?music|no[_\s-]?speech|nospeech|silence|music)"
+_ASR_NOISE_LABEL = (
+    r"(?:background[_\s-]?music|background[_\s-]?noise|environmental[_\s-]?sounds?|"
+    r"environmentalsounds|human[_\s-]?sounds?|humansounds|sounds?|"
+    r"no[_\s-]?speech|nospeech|silence|music|noise)"
+)
+_ASR_INLINE_NOISE_LABEL = (
+    r"(?:EnvironmentalSounds|Environmental[_\s-]?Sounds?|BackgroundNoise|"
+    r"HumanSounds|Human[_\s-]?Sounds?|Sounds?|Noise)"
+)
 _ASR_NOISE_MARKER_PATTERN = re.compile(
     r"(?i)"
     rf"(?:<\|?\s*(?:{_ASR_NOISE_LABEL}(?:\s+{_ASR_NOISE_LABEL})*)\s*\|?>)"
     rf"|(?:[\[\(（【<]\s*(?:{_ASR_NOISE_LABEL}(?:\s+{_ASR_NOISE_LABEL})*)\s*[\]\)）】>])"
     r"|[♪♫]+"
 )
+_ASR_INLINE_NOISE_MARKER_PATTERN = re.compile(_ASR_INLINE_NOISE_LABEL, re.IGNORECASE)
 _ASR_NOISE_ONLY_PATTERN = re.compile(
     rf"(?i)^(?:(?:{_ASR_NOISE_LABEL})(?:\s+(?:{_ASR_NOISE_LABEL}))*|静音|无语音)$"
 )
@@ -841,7 +857,55 @@ _SPLIT_MEASURE_LEFT_RE = re.compile(
     rf"(?:{_DISPLAY_NUM_TOKEN}|这|那|每|某|另|前|后|首|第|几)$"
 )
 _SPLIT_MEASURE_RIGHT_RE = re.compile(
-    rf"^(?:{_DISPLAY_NUM_TOKEN})?(?:个|只|把|条|点|件|款|袋|盒|包|支|瓶|片|颗|次|种|位|类|份|套|台|张|米|寸|段|步|层|页|代|号|年|月|天|周|小时|分钟|秒)"
+    rf"^(?:{_DISPLAY_NUM_TOKEN})?(?:个|只|把|条|点|件|款|袋|盒|包|支|瓶|片|颗|次|种|位|类|份|套|台|张|米|寸|段|步|层|页|代|号|年|月|天|周|小时|分钟|秒|流明)"
+)
+_NUMERIC_MEASURE_UNITS = tuple(
+    sorted(
+        set(_DISPLAY_QUANTITY_UNITS)
+        | {
+            "lm",
+            "lumen",
+            "lumens",
+            "mAh",
+            "Ah",
+            "Wh",
+            "mm",
+            "cm",
+            "km",
+            "kg",
+            "mg",
+            "ml",
+            "GB",
+            "MB",
+            "TB",
+            "fps",
+            "Hz",
+            "kHz",
+            "MHz",
+            "GHz",
+            "W",
+            "V",
+            "A",
+            "K",
+            "nit",
+            "nits",
+            "inch",
+            "inches",
+        },
+        key=len,
+        reverse=True,
+    )
+)
+_NUMERIC_MEASURE_UNIT_PATTERN = "|".join(re.escape(unit) for unit in _NUMERIC_MEASURE_UNITS)
+_NUMERIC_MEASURE_LEFT_RE = re.compile(rf"(?:\d+(?:\.\d+)?|{_DISPLAY_NUM_TOKEN})$")
+_NUMERIC_MEASURE_RIGHT_RE = re.compile(
+    rf"^(?:{_NUMERIC_MEASURE_UNIT_PATTERN})(?=$|[\u4e00-\u9fffA-Za-z])",
+    re.IGNORECASE,
+)
+_NUMERIC_APPROX_RIGHT_RE = re.compile(r"^多(?:的|度|个|只|把|条|件|款|米|厘米|毫米|流明)?")
+_NUMERIC_MEASURE_TOKEN_RE = re.compile(
+    rf"\d+(?:\.\d+)?(?:{_NUMERIC_MEASURE_UNIT_PATTERN})(?=$|[\u4e00-\u9fffA-Za-z])",
+    re.IGNORECASE,
 )
 _EMPHASIS_REPEAT_CUE_RE = re.compile(r"(?:说|讲|重复)(?:一|两|二|三|3|好多)遍")
 _COUNTING_REPEAT_UNIT_RE = re.compile(r"^(?:第[\u4e00-\u9fff\d]{1,3}|[\u4e00-\u9fff\d]{1,3}个)$")
@@ -1171,6 +1235,7 @@ def _is_low_signal_short_clause(text: str) -> bool:
 
 def _strip_asr_noise_markers(text: str) -> str:
     result = _ASR_NOISE_MARKER_PATTERN.sub(" ", str(text or ""))
+    result = _ASR_INLINE_NOISE_MARKER_PATTERN.sub("，", result)
     return re.sub(r"\s{2,}", " ", result).strip()
 
 
@@ -1799,6 +1864,8 @@ def _build_word_candidate(
 
     next_preview = _preview_words_text(words[end_index:end_index + 4])
     previous_preview = _preview_words_text(words[max(0, start_index - 3):start_index])
+    if next_preview and _is_forbidden_subtitle_boundary(text, next_preview):
+        return None
     gap_after = max(0.0, float(words[end_index]["start"]) - end) if end_index < len(words) else 0.0
     max_internal_gap = 0.0
     for index in range(start_index + 1, end_index):
@@ -1963,6 +2030,8 @@ def _choose_word_split_index(words: list[dict], *, max_chars: int, max_duration:
         right = _words_to_text(words[index:])
         if not left or not right:
             continue
+        if _is_forbidden_subtitle_boundary(left, right):
+            continue
         duration = float(words[index - 1]["end"]) - float(words[0]["start"])
         overflow_penalty = max(0.0, duration - max_duration) * 8.0
         score = _score_break_boundary(left, right, index=len(left), target=target) - overflow_penalty
@@ -2008,7 +2077,25 @@ def _looks_like_split_measure_phrase(left: str, right: str) -> bool:
     right_text = str(right or "").strip()
     if not left_text or not right_text:
         return False
+    if _boundary_splits_numeric_unit(left_text, right_text):
+        return True
     return bool(_SPLIT_MEASURE_LEFT_RE.search(left_text) and _SPLIT_MEASURE_RIGHT_RE.match(right_text))
+
+
+def _boundary_splits_numeric_unit(left: str, right: str) -> bool:
+    left_text = _strip_boundary_trailing_punctuation(left)
+    right_text = _strip_boundary_leading_particles(right) or str(right or "").strip()
+    right_text = re.sub(r"^[，。！？、：；,.!?\s]+", "", right_text)
+    if not left_text or not right_text:
+        return False
+    return bool(
+        _NUMERIC_MEASURE_LEFT_RE.search(left_text)
+        and (_NUMERIC_MEASURE_RIGHT_RE.match(right_text) or _NUMERIC_APPROX_RIGHT_RE.match(right_text))
+    )
+
+
+def _is_forbidden_subtitle_boundary(left: str, right: str) -> bool:
+    return _boundary_splits_numeric_unit(left, right)
 
 
 def _is_strong_fragment_boundary(left: str, right: str, *, gap: float) -> bool:
@@ -2440,6 +2527,8 @@ def _score_break_boundary(left: str, right: str, *, index: int, target: int) -> 
     right_text = str(right or "")
     if not left_text or not right_text:
         return score - 100
+    if _is_forbidden_subtitle_boundary(left_text, right_text):
+        return score - 10000
 
     last_char = left_text[-1]
     if last_char in _HARD_BREAK_CHARS:
@@ -2916,6 +3005,7 @@ def _should_merge_same_source_pair(
         or _starts_with_soft_attached_fragment(right_text)
         or _looks_like_soft_fragmentary_tail(left_text)
         or _boundary_splits_compound_term(left_text, right_text)
+        or _boundary_splits_numeric_unit(left_text, right_text)
     )
     if not repair_signal:
         return False
@@ -3553,6 +3643,9 @@ def _search_fragment_window_segmentations_for_word_stream(
             candidate_words = window_words[start_index:end_index]
             text = _words_to_text(candidate_words)
             if not text:
+                continue
+            next_preview = _preview_words_text(window_words[end_index:end_index + 4])
+            if next_preview and _is_forbidden_subtitle_boundary(text, next_preview):
                 continue
             duration = max(0.0, float(candidate_words[-1]["end"]) - float(candidate_words[0]["start"]))
             if len(text) > hard_char_limit or duration > hard_duration_limit:

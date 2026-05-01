@@ -9,10 +9,22 @@ _STANDALONE_FILLER_TOKENS = (
     "额",
     "嗯",
     "啊",
+    "哎",
+    "唉",
+    "诶",
+    "欸",
     "吧",
 )
 
-_ASR_NOISE_LABEL = r"(?:background[_\s-]?music|no[_\s-]?speech|nospeech|silence|music)"
+_ASR_NOISE_LABEL = (
+    r"(?:background[_\s-]?music|background[_\s-]?noise|environmental[_\s-]?sounds?|"
+    r"environmentalsounds|human[_\s-]?sounds?|humansounds|sounds?|"
+    r"no[_\s-]?speech|nospeech|silence|music|noise)"
+)
+_ASR_INLINE_NOISE_LABEL = (
+    r"(?:EnvironmentalSounds|Environmental[_\s-]?Sounds?|BackgroundNoise|"
+    r"HumanSounds|Human[_\s-]?Sounds?|Sounds?|Noise)"
+)
 _SUBTITLE_FILLER_SEPARATOR_PATTERN = re.compile(r"[\s，。！？、：；,.!?…~\-—_()\[\]{}<>《》“”\"'‘’（）【】]+")
 _FINAL_SUBTITLE_PUNCTUATION_PATTERN = re.compile(r"[\s，。！？、：；,.!?…~\-—_()\[\]{}<>《》“”\"'‘’/\\|｜（）【】]+")
 _ASR_NOISE_MARKER_PATTERN = re.compile(
@@ -21,6 +33,7 @@ _ASR_NOISE_MARKER_PATTERN = re.compile(
     rf"|(?:[\[\(（【<]\s*(?:{_ASR_NOISE_LABEL}(?:\s+{_ASR_NOISE_LABEL})*)\s*[\]\)）】>])"
     r"|[♪♫]+"
 )
+_ASR_INLINE_NOISE_MARKER_PATTERN = re.compile(_ASR_INLINE_NOISE_LABEL, re.IGNORECASE)
 _ASR_NOISE_ONLY_PATTERN = re.compile(
     rf"(?i)^(?:(?:{_ASR_NOISE_LABEL})(?:\s+(?:{_ASR_NOISE_LABEL}))*|静音|无语音)$"
 )
@@ -46,6 +59,7 @@ def clean_final_subtitle_text(text: object) -> str:
 
 def _strip_asr_noise_markers(text: str) -> str:
     normalized = _ASR_NOISE_MARKER_PATTERN.sub(" ", str(text or ""))
+    normalized = _ASR_INLINE_NOISE_MARKER_PATTERN.sub("，", normalized)
     return re.sub(r"\s{2,}", " ", normalized).strip()
 
 

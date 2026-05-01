@@ -66,8 +66,10 @@ from roughcut.review.content_profile_scoring import score_identity_candidates
 from roughcut.review.content_profile_field_rules import CONTENT_PROFILE_FIELD_GUIDELINES
 from roughcut.review.domain_glossaries import detect_glossary_domains, select_primary_subject_domain
 from roughcut.review.intelligent_copy_topics import build_intelligent_copy_topic_hints
+from roughcut.review.model_identity import model_numbers_conflict
 from roughcut.review.platform_copy import build_transcript_for_packaging
 from roughcut.review.subtitle_memory import (
+    _DEFAULT_TERM_ALIASES,
     _extract_compound_components,
     apply_domain_term_corrections,
     summarize_subtitle_review_memory_for_polish,
@@ -1419,6 +1421,8 @@ def apply_glossary_terms(text: str, glossary_terms: list[dict[str, Any]]) -> str
             continue
         for wrong_form in term.get("wrong_forms") or []:
             if wrong_form and wrong_form != correct_form:
+                if model_numbers_conflict(wrong_form, correct_form):
+                    continue
                 result = re.sub(re.escape(wrong_form), correct_form, result, flags=re.IGNORECASE)
     return result
 
@@ -8011,7 +8015,15 @@ def _fallback_polish_text(
         polished_text=polished,
         preserve_display_numbers=preserve_display_numbers,
     )
-    return clean_final_subtitle_text(guarded)
+    final_text = clean_final_subtitle_text(guarded)
+    if not _is_conservative_subtitle_fact_edit(
+        original_text=text,
+        polished_text=final_text,
+        glossary_terms=glossary_terms,
+        review_memory=review_memory,
+    ):
+        return clean_final_subtitle_text(_cleanup_polished_text(text, preserve_display_numbers=preserve_display_numbers))
+    return final_text
 
 
 def _guard_short_fragmentary_polish(
@@ -8120,8 +8132,23 @@ def _apply_explicit_review_aliases_for_polish(text: str, *, review_memory: dict[
             continue
         if category and category != "confirmed_subject":
             continue
+        if model_numbers_conflict(wrong, correct) or _alias_introduces_extra_model_number(wrong, correct):
+            continue
         result = re.sub(re.escape(wrong), correct, result, flags=re.IGNORECASE)
     return result
+
+
+def _alias_introduces_extra_model_number(wrong: str, correct: str) -> bool:
+    wrong_models = _subtitle_model_token_set(wrong)
+    correct_models = _subtitle_model_token_set(correct)
+    return bool(wrong_models and correct_models - wrong_models)
+
+
+def _subtitle_model_token_set(text: str) -> set[str]:
+    return {
+        token.upper()
+        for token in re.findall(r"(?<![A-Za-z0-9])([A-Za-z]{1,8}\s*[-_/]?\s*\d{1,5})(?![A-Za-z0-9])", str(text or ""))
+    }
 
 
 def _remove_subtitle_filler_words(text: str, *, prev_text: str = "", next_text: str = "") -> str:
@@ -8441,6 +8468,14 @@ def _is_safe_subtitle_polish(
     if polished == original:
         return True
 
+    if not _is_conservative_subtitle_fact_edit(
+        original_text=original,
+        polished_text=polished,
+        glossary_terms=glossary_terms,
+        review_memory=review_memory,
+    ):
+        return False
+
     if len(original) >= 8:
         if len(polished) > max(len(original) + 10, int(len(original) * 1.6)):
             return False
@@ -8464,6 +8499,82 @@ def _is_safe_subtitle_polish(
         if token not in allowed_tokens and token not in _extract_guard_tokens(original)
     ]
     return len(introduced_tokens) < 2
+
+
+def _is_conservative_subtitle_fact_edit(
+    *,
+    original_text: str,
+    polished_text: str,
+    glossary_terms: list[dict[str, Any]],
+    review_memory: dict[str, Any] | None,
+) -> bool:
+    original = _subtitle_fact_compare_text(original_text)
+    polished = _subtitle_fact_compare_text(polished_text)
+    if not original or not polished:
+        return False
+    if polished == original:
+        return True
+
+    replacements = _explicit_subtitle_fact_replacements(
+        glossary_terms=glossary_terms,
+        review_memory=review_memory,
+    )
+    candidate = _apply_conservative_subtitle_replacements(str(original_text or "").strip(), replacements)
+    if _subtitle_fact_compare_text(candidate) == polished:
+        return True
+
+    filler_cleaned = cleanup_subtitle_fillers(str(original_text or "").strip())
+    if filler_cleaned and filler_cleaned != str(original_text or "").strip() and not re.match(r"^[A-Za-z0-9]", filler_cleaned):
+        candidate = _apply_conservative_subtitle_replacements(filler_cleaned, replacements)
+        if _subtitle_fact_compare_text(candidate) == polished:
+            return True
+    return False
+
+
+def _apply_conservative_subtitle_replacements(text: str, replacements: list[tuple[str, str]]) -> str:
+    candidate = str(text or "").strip()
+    for wrong, correct in replacements:
+        if not wrong or not correct or wrong == correct:
+            continue
+        if model_numbers_conflict(wrong, correct):
+            continue
+        candidate = re.sub(re.escape(wrong), correct, candidate, flags=re.IGNORECASE)
+    return _cleanup_polished_text(candidate, preserve_display_numbers=True)
+
+
+def _subtitle_fact_compare_text(text: str) -> str:
+    normalized = _cleanup_polished_text(text, preserve_display_numbers=True)
+    return re.sub(r"[\s，,。.!！？?；;：:、\"'“”‘’（）()\[\]【】《》<>-]+", "", normalized).casefold()
+
+
+def _explicit_subtitle_fact_replacements(
+    *,
+    glossary_terms: list[dict[str, Any]],
+    review_memory: dict[str, Any] | None,
+) -> list[tuple[str, str]]:
+    replacements: list[tuple[str, str]] = []
+    for term in glossary_terms:
+        correct = str(term.get("correct_form") or "").strip()
+        if not correct:
+            continue
+        for wrong_form in term.get("wrong_forms") or []:
+            wrong = str(wrong_form or "").strip()
+            if wrong:
+                replacements.append((wrong, correct))
+
+    for item in (review_memory or {}).get("aliases") or []:
+        wrong = str(item.get("wrong") or "").strip()
+        correct = str(item.get("correct") or "").strip()
+        if wrong and correct and bool(item.get("evidence_strong")):
+            replacements.append((wrong, correct))
+
+    for item in (review_memory or {}).get("terms") or []:
+        term = str(item.get("term") or "").strip()
+        if not term or not (bool(item.get("evidence_strong")) or bool(item.get("context_match"))):
+            continue
+        for wrong in _DEFAULT_TERM_ALIASES.get(term, ()):
+            replacements.append((str(wrong or "").strip(), term))
+    return replacements
 
 
 def _collect_allowed_subtitle_tokens(

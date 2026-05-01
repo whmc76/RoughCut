@@ -9,6 +9,8 @@ from roughcut.api.jobs import (
     _apply_manual_subtitle_overrides,
     _build_editorial_segments_from_keep_segments,
     _build_otio_style_manual_tracks,
+    _clean_manual_editor_subtitle_projection,
+    _manual_editor_subtitle_payload,
     _manual_editor_apply_conflict_detail,
     _manual_editor_change_plan,
     _manual_editor_prerequisite_detail,
@@ -159,6 +161,64 @@ def test_manual_subtitle_overrides_can_insert_and_delete_items() -> None:
     assert adjusted[1]["text_final"] == "inserted"
     assert adjusted[1]["start_time"] == 1.2
     assert adjusted[1]["end_time"] == 1.8
+
+
+def test_manual_editor_subtitle_payload_uses_final_output_cleanup() -> None:
+    payload = _manual_editor_subtitle_payload(
+        {
+            "index": 0,
+            "start_time": 0.0,
+            "end_time": 1.0,
+            "text_raw": "好，今天给大家介绍，嗯，狐蝠工业。",
+            "text_norm": "好，今天给大家介绍，嗯，狐蝠工业。",
+            "text_final": "好，今天给大家介绍，嗯，狐蝠工业。",
+        },
+        index=0,
+    )
+
+    assert payload.text_final == "好 今天给大家介绍 狐蝠工业"
+
+
+def test_manual_editor_subtitle_payload_strips_local_asr_tags() -> None:
+    payload = _manual_editor_subtitle_payload(
+        {
+            "index": 0,
+            "start_time": 0.0,
+            "end_time": 1.0,
+            "text_final": "给它塞进去啊EnvironmentalSounds哎",
+        },
+        index=0,
+    )
+    noise_payload = _manual_editor_subtitle_payload(
+        {
+            "index": 1,
+            "start_time": 1.0,
+            "end_time": 2.0,
+            "text_final": "Noise 好",
+        },
+        index=1,
+    )
+
+    assert payload.text_final == "给它塞进去啊"
+    assert noise_payload.text_final == "好"
+
+
+def test_manual_editor_subtitle_projection_drops_final_empty_fillers() -> None:
+    cleaned = _clean_manual_editor_subtitle_projection(
+        [
+            {"index": 0, "start_time": 0.0, "end_time": 1.0, "text_final": "呃，嗯。"},
+            {"index": 1, "start_time": 1.0, "end_time": 2.0, "text_final": "型号：FX1（黑色）！"},
+        ]
+    )
+
+    assert cleaned == [
+        {
+            "index": 1,
+            "start_time": 1.0,
+            "end_time": 2.0,
+            "text_final": "型号 FX1 黑色",
+        }
+    ]
 
 
 def test_manual_editor_change_plan_detects_subtitle_only_edits() -> None:

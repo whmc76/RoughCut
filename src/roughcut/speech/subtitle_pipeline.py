@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import difflib
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any
 
 from roughcut.db.models import Artifact, SubtitleItem
 from roughcut.providers.transcription.base import TranscriptResult
+from roughcut.review.model_identity import model_numbers_conflict
 from roughcut.speech.alignment import tokenize_alignment_text
 from roughcut.speech.postprocess import SubtitleSegmentationAnalysis
 
@@ -593,6 +595,8 @@ def _apply_accepted_corrections(text: str, corrections: tuple[dict[str, Any], ..
         accepted = str(correction.get("accepted") or "").strip()
         if not original or not accepted or original == accepted:
             continue
+        if model_numbers_conflict(original, accepted):
+            continue
         if original in result:
             result = result.replace(original, accepted, 1)
     return result
@@ -756,6 +760,56 @@ def _extract_reference_words_for_timespan(
     return tuple(clipped_words)
 
 
+def _build_segmentation_adapters_from_transcript_segments(transcript_segments: list[Any]) -> list[SimpleNamespace]:
+    adapters: list[SimpleNamespace] = []
+    for index, segment in enumerate(list(transcript_segments or [])):
+        start = float(getattr(segment, "start_time", getattr(segment, "start", 0.0)) or 0.0)
+        end = float(getattr(segment, "end_time", getattr(segment, "end", start)) or start)
+        raw_words = list(getattr(segment, "words_json", None) or getattr(segment, "words", None) or [])
+        words_json = [word.as_dict() for word in _build_transcript_fact_words(raw_words)]
+        adapters.append(
+            SimpleNamespace(
+                segment_index=int(getattr(segment, "segment_index", getattr(segment, "index", index)) or index),
+                start_time=start,
+                end_time=max(start, end),
+                text=str(getattr(segment, "text", "") or ""),
+                words_json=words_json,
+            )
+        )
+    return adapters
+
+
+def _build_projection_entries_from_transcript_words(
+    transcript_segments: list[Any],
+    *,
+    max_chars: int,
+    max_duration: float,
+) -> tuple[SubtitleProjectionEntry, ...]:
+    from roughcut.speech.subtitle_segmentation import segment_subtitles
+
+    segmentation_segments = _build_segmentation_adapters_from_transcript_segments(transcript_segments)
+    if not segmentation_segments:
+        return ()
+    result = segment_subtitles(
+        segmentation_segments,
+        max_chars=max_chars,
+        max_duration=max_duration,
+    )
+    return tuple(
+        SubtitleProjectionEntry(
+            index=index,
+            start=float(entry.start),
+            end=float(entry.end),
+            source_kind="transcript_word_projection",
+            source_id=None,
+            text_raw=str(entry.text_raw or ""),
+            text_norm=str(entry.text_norm or ""),
+            text_final=str(entry.text_raw or ""),
+        )
+        for index, entry in enumerate(result.entries)
+    )
+
+
 def _expand_reference_tokens(reference_words: tuple[dict[str, Any], ...]) -> tuple[dict[str, Any], ...]:
     tokens: list[dict[str, Any]] = []
     for reference in reference_words:
@@ -822,19 +876,27 @@ def build_subtitle_projection_layer(
             resolved_projection_basis = "transcript_first"
         if resolved_transcript_layer == "subtitle_projection":
             resolved_transcript_layer = "transcript_projection"
-    entries = tuple(
-        SubtitleProjectionEntry(
-            index=int(source.index),
-            start=source.start,
-            end=source.end,
-            source_kind=source.source_kind,
-            source_id=source.source_id,
-            text_raw=source.text_raw,
-            text_norm=source.text_norm,
-            text_final=source.text_final,
+    entries = ()
+    if transcript_segments is not None:
+        entries = _build_projection_entries_from_transcript_words(
+            transcript_segments,
+            max_chars=int((split_profile or {}).get("max_chars") or 30),
+            max_duration=float((split_profile or {}).get("max_duration") or 5.0),
         )
-        for source in source_segments
-    )
+    if not entries:
+        entries = tuple(
+            SubtitleProjectionEntry(
+                index=int(source.index),
+                start=source.start,
+                end=source.end,
+                source_kind=source.source_kind,
+                source_id=source.source_id,
+                text_raw=source.text_raw,
+                text_norm=source.text_norm,
+                text_final=source.text_final,
+            )
+            for source in source_segments
+        )
     return SubtitleProjectionLayer(
         entries=entries,
         projection_basis=resolved_projection_basis,

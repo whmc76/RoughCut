@@ -1936,17 +1936,83 @@ def write_srt_file(subtitle_items: list[dict], output_path: Path) -> Path:
     ordered_items = sorted(normalized_items, key=_subtitle_srt_sort_key)
     lines: list[str] = []
     for item in ordered_items:
-        start = _srt_time(item["start_time"])
-        end = _srt_time(item["end_time"])
         text = clean_final_subtitle_text(
             item.get("text_final") or item.get("text_norm") or item.get("text_raw", "")
         )
         if not text:
             continue
-        i = len(lines) + 1
-        lines.append(f"{i}\n{start} --> {end}\n{text}\n")
+        start_time = float(item["start_time"])
+        end_time = float(item["end_time"])
+        for segment in _split_srt_display_item(
+            start_time=start_time,
+            end_time=end_time,
+            text=text,
+        ):
+            start = _srt_time(segment["start_time"])
+            end = _srt_time(segment["end_time"])
+            i = len(lines) + 1
+            lines.append(f"{i}\n{start} --> {end}\n{segment['text']}\n")
     output_path.write_text("\n".join(lines), encoding="utf-8-sig")
     return output_path
+
+
+def _split_srt_display_item(
+    *,
+    start_time: float,
+    end_time: float,
+    text: str,
+    max_duration_sec: float = 6.0,
+    max_chars: int = 32,
+) -> list[dict[str, Any]]:
+    duration = max(0.0, float(end_time) - float(start_time))
+    compact_len = len(str(text or "").replace(" ", ""))
+    if duration <= max_duration_sec and compact_len <= max_chars:
+        return [{"start_time": start_time, "end_time": end_time, "text": text}]
+
+    target_chars = min(max_chars, max(12, int(max_chars * max_duration_sec / max(duration, 0.001))))
+    pieces = _split_srt_display_text(text, max_chars=target_chars)
+    if len(pieces) <= 1:
+        return [{"start_time": start_time, "end_time": end_time, "text": text}]
+
+    weights = [max(1, len(piece.replace(" ", ""))) for piece in pieces]
+    total_weight = sum(weights) or len(pieces)
+    cursor = float(start_time)
+    segments: list[dict[str, Any]] = []
+    for index, (piece, weight) in enumerate(zip(pieces, weights)):
+        if index == len(pieces) - 1:
+            next_cursor = float(end_time)
+        else:
+            next_cursor = min(float(end_time), cursor + duration * (weight / total_weight))
+        if next_cursor <= cursor:
+            next_cursor = min(float(end_time), cursor + 0.18)
+        segments.append({"start_time": round(cursor, 3), "end_time": round(next_cursor, 3), "text": piece})
+        cursor = next_cursor
+    return segments
+
+
+def _split_srt_display_text(text: str, *, max_chars: int) -> list[str]:
+    normalized = re.sub(r"\s{2,}", " ", str(text or "").strip())
+    if not normalized:
+        return []
+    tokens = normalized.split(" ")
+    if len(tokens) <= 1:
+        compact = normalized.replace(" ", "")
+        if len(compact) <= max_chars:
+            return [normalized]
+        return [compact[index:index + max_chars] for index in range(0, len(compact), max_chars)]
+
+    pieces: list[str] = []
+    current = ""
+    for token in tokens:
+        candidate = f"{current} {token}".strip() if current else token
+        if len(candidate.replace(" ", "")) <= max_chars or not current:
+            current = candidate
+            continue
+        pieces.append(current)
+        current = token
+    if current:
+        pieces.append(current)
+    return pieces
 
 
 def _subtitle_srt_sort_key(item: dict[str, Any]) -> tuple[float, float, int]:

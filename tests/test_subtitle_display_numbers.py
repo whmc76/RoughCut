@@ -3,6 +3,8 @@ from roughcut.speech.subtitle_segmentation import normalize_display_numbers
 
 def test_keeps_single_digit_natural_quantities_as_chinese_text() -> None:
     assert normalize_display_numbers("这个是一把刀 一个工具 一堆配件") == "这个是一把刀 一个工具 一堆配件"
+    assert normalize_display_numbers("这就是1个普通产品") == "这就是一个普通产品"
+    assert normalize_display_numbers("这是1个功能键和1个参数") == "这是一个功能键和一个参数"
     assert normalize_display_numbers("我拿了1把刀 2个配件 3堆东西 4颗糖") == "我拿了一把刀 两个配件 三堆东西 四颗糖"
     assert normalize_display_numbers("还有1套方案 2支笔 3盒耗材") == "还有一套方案 两支笔 三盒耗材"
 

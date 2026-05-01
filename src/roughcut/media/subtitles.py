@@ -475,14 +475,21 @@ def remap_subtitles_to_timeline(
     Subtitles that fall entirely within removed segments are dropped.
     Subtitles that span a cut boundary are clipped to the kept portion.
     """
-    sorted_segs = sorted(keep_segments, key=lambda s: s["start"])
+    sorted_segs = sorted(
+        (
+            {"start": float(segment["start"]), "end": float(segment["end"])}
+            for segment in keep_segments
+            if float(segment.get("end", 0.0) or 0.0) > float(segment.get("start", 0.0) or 0.0)
+        ),
+        key=lambda s: s["start"],
+    )
 
     seg_map: list[dict] = []
     out_time = 0.0
     for seg in sorted_segs:
         seg_map.append({
-            "in_start": float(seg["start"]),
-            "in_end":   float(seg["end"]),
+            "in_start": seg["start"],
+            "in_end":   seg["end"],
             "out_start": out_time,
         })
         out_time += seg["end"] - seg["start"]
@@ -492,21 +499,27 @@ def remap_subtitles_to_timeline(
         sub_start = float(item["start_time"])
         sub_end   = float(item["end_time"])
 
-        best_duration = 0.0
-        best_new: tuple[float, float] | None = None
+        mapped_ranges: list[tuple[float, float]] = []
 
         for seg in seg_map:
             overlap_in_s = max(sub_start, seg["in_start"])
             overlap_in_e = min(sub_end,   seg["in_end"])
             overlap = overlap_in_e - overlap_in_s
-            if overlap > best_duration:
-                best_duration = overlap
-                new_s = seg["out_start"] + (overlap_in_s - seg["in_start"])
-                new_e = seg["out_start"] + (overlap_in_e - seg["in_start"])
-                best_new = (new_s, new_e)
+            if overlap <= 0.05:
+                continue
+            new_s = seg["out_start"] + (overlap_in_s - seg["in_start"])
+            new_e = seg["out_start"] + (overlap_in_e - seg["in_start"])
+            if new_e > new_s + 0.05:
+                mapped_ranges.append((new_s, new_e))
 
-        if best_new and best_new[1] > best_new[0] + 0.05:
-            remapped.append({**item, "start_time": best_new[0], "end_time": best_new[1]})
+        if not mapped_ranges:
+            continue
+        for fragment_index, (new_start, new_end) in enumerate(mapped_ranges):
+            remapped_item = {**item, "start_time": new_start, "end_time": new_end}
+            if len(mapped_ranges) > 1:
+                remapped_item["source_fragment_index"] = fragment_index
+                remapped_item["source_fragment_count"] = len(mapped_ranges)
+            remapped.append(remapped_item)
 
     return remapped
 

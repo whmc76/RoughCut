@@ -130,6 +130,37 @@ def test_normalize_transcript_result_collapses_flashlight_model_alt_lists() -> N
     assert normalized.segments[1].text == "这期做EDC17 / EDC37对比"
 
 
+def test_normalize_transcript_result_collapses_repeated_flashlight_model_sequence() -> None:
+    result = TranscriptResult(
+        segments=[
+            TranscriptSegment(
+                index=0,
+                start=0.0,
+                end=3.0,
+                text="也是前两个月出的这个EDC17 EDC37 EDC37",
+            ),
+            TranscriptSegment(
+                index=1,
+                start=3.0,
+                end=6.0,
+                text="这期做EDC17 EDC37对比",
+            ),
+        ],
+        language="zh-CN",
+        duration=6.0,
+        raw_payload={},
+    )
+
+    normalized = _normalize_transcript_result(
+        result,
+        glossary_terms=[],
+        review_memory={"terms": [{"term": "EDC17", "count": 10, "category_scope": "flashlight"}]},
+    )
+
+    assert normalized.segments[0].text == "也是前两个月出的这个EDC17"
+    assert normalized.segments[1].text == "这期做EDC17 EDC37对比"
+
+
 def test_normalize_transcript_result_corrects_knife_material_reflection_terms() -> None:
     result = TranscriptResult(
         segments=[
@@ -176,6 +207,85 @@ def test_normalize_transcript_result_collapses_foxbat_brand_expansion() -> None:
     )
 
     assert normalized.segments[0].text == "狐蝠工业还是这个"
+
+
+def test_normalize_transcript_result_collapses_bag_brand_tail_duplication() -> None:
+    result = TranscriptResult(
+        segments=[
+            TranscriptSegment(
+                index=0,
+                start=0.0,
+                end=3.0,
+                text="不过狐蝠工业工业这次的新款",
+            ),
+            TranscriptSegment(
+                index=1,
+                start=3.0,
+                end=6.0,
+                text="勃朗峰户外勃朗峰户外和狐蝠工业",
+            ),
+        ],
+        language="zh-CN",
+        duration=6.0,
+        raw_payload={},
+    )
+
+    normalized = _normalize_transcript_result(
+        result,
+        glossary_terms=[],
+        review_memory={"terms": [{"term": "狐蝠工业", "count": 10, "category_scope": "bag"}]},
+    )
+
+    assert normalized.segments[0].text == "不过狐蝠工业这次的新款"
+    assert normalized.segments[1].text == "勃朗峰户外和狐蝠工业"
+
+
+def test_normalize_transcript_result_collapses_bag_brand_bundle_expansion() -> None:
+    result = TranscriptResult(
+        segments=[
+            TranscriptSegment(
+                index=0,
+                start=0.0,
+                end=3.0,
+                text="狐蝠工业HSJUN x BOLTBOAT 勃朗峰户外 x BOLTBOAT 狐蝠工业的新款",
+            )
+        ],
+        language="zh-CN",
+        duration=3.0,
+        raw_payload={},
+    )
+
+    normalized = _normalize_transcript_result(
+        result,
+        glossary_terms=[],
+        review_memory={"terms": [{"term": "狐蝠工业", "count": 10, "category_scope": "bag"}]},
+    )
+
+    assert normalized.segments[0].text == "狐蝠工业的新款"
+
+
+def test_normalize_transcript_result_collapses_adjacent_duplicate_model_tokens() -> None:
+    result = TranscriptResult(
+        segments=[
+            TranscriptSegment(
+                index=0,
+                start=0.0,
+                end=3.0,
+                text="MT34 S06mini S06mini S06mini",
+            )
+        ],
+        language="zh-CN",
+        duration=3.0,
+        raw_payload={},
+    )
+
+    normalized = _normalize_transcript_result(
+        result,
+        glossary_terms=[],
+        review_memory={"terms": [{"term": "NOC MT34", "count": 8, "category_scope": "knife"}]},
+    )
+
+    assert normalized.segments[0].text == "MT34 S06mini"
 
 
 def test_normalize_transcript_result_corrects_zirconium_material_variant() -> None:
