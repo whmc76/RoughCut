@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from typing import Any
 
 from roughcut.media.subtitle_text import clean_final_subtitle_text
 
@@ -524,6 +525,65 @@ def remap_subtitles_to_timeline(
     return remapped
 
 
+def split_subtitle_display_item(
+    *,
+    start_time: float,
+    end_time: float,
+    text: str,
+    max_duration_sec: float = 6.0,
+    max_chars: int = 32,
+) -> list[dict[str, Any]]:
+    duration = max(0.0, float(end_time) - float(start_time))
+    compact_len = len(str(text or "").replace(" ", ""))
+    if duration <= max_duration_sec and compact_len <= max_chars:
+        return [{"start_time": start_time, "end_time": end_time, "text": text}]
+
+    target_chars = min(max_chars, max(12, int(max_chars * max_duration_sec / max(duration, 0.001))))
+    pieces = split_subtitle_display_text(text, max_chars=target_chars)
+    if len(pieces) <= 1:
+        return [{"start_time": start_time, "end_time": end_time, "text": text}]
+
+    weights = [max(1, len(piece.replace(" ", ""))) for piece in pieces]
+    total_weight = sum(weights) or len(pieces)
+    cursor = float(start_time)
+    segments: list[dict[str, Any]] = []
+    for index, (piece, weight) in enumerate(zip(pieces, weights)):
+        if index == len(pieces) - 1:
+            next_cursor = float(end_time)
+        else:
+            next_cursor = min(float(end_time), cursor + duration * (weight / total_weight))
+        if next_cursor <= cursor:
+            next_cursor = min(float(end_time), cursor + 0.18)
+        segments.append({"start_time": round(cursor, 3), "end_time": round(next_cursor, 3), "text": piece})
+        cursor = next_cursor
+    return segments
+
+
+def split_subtitle_display_text(text: str, *, max_chars: int) -> list[str]:
+    normalized = re.sub(r"\s{2,}", " ", str(text or "").strip())
+    if not normalized:
+        return []
+    tokens = normalized.split(" ")
+    if len(tokens) <= 1:
+        compact = normalized.replace(" ", "")
+        if len(compact) <= max_chars:
+            return [normalized]
+        return [compact[index:index + max_chars] for index in range(0, len(compact), max_chars)]
+
+    pieces: list[str] = []
+    current = ""
+    for token in tokens:
+        candidate = f"{current} {token}".strip() if current else token
+        if len(candidate.replace(" ", "")) <= max_chars or not current:
+            current = candidate
+            continue
+        pieces.append(current)
+        current = token
+    if current:
+        pieces.append(current)
+    return pieces
+
+
 def write_ass_file(
     subtitle_items: list[dict],
     ass_path: Path,
@@ -616,12 +676,14 @@ def write_ass_file(
 
     lines = [header]
     for item in subtitle_items:
-        start = _ass_time(item["start_time"])
-        end   = _ass_time(item["end_time"])
         style_id = str(item.get("style_name") or "").strip()
         if not style_id or style_id not in style_definitions:
             style_id = "Default"
         style_definition = style_definitions[style_id]
+        max_chars_per_line = _estimate_subtitle_line_capacity(
+            play_res_x=play_res_x,
+            font_size=int(style_definition["font_size"]),
+        )
         text = clean_final_subtitle_text(
             item.get("text_final")
             or item.get("text_norm")
@@ -629,37 +691,42 @@ def write_ass_file(
         )
         if not text:
             continue
-        text = _wrap_subtitle_text(
-            str(text),
-            max_chars_per_line=_estimate_subtitle_line_capacity(
-                play_res_x=play_res_x,
-                font_size=int(style_definition["font_size"]),
-            ),
-            max_lines=2,
-            preserve_terms=_collect_highlight_preserve_terms(
-                str(text),
+        for display_segment in split_subtitle_display_item(
+            start_time=float(item["start_time"]),
+            end_time=float(item["end_time"]),
+            text=str(text),
+            max_chars=max_chars_per_line * 2,
+        ):
+            segment_text = str(display_segment["text"])
+            segment_text = _wrap_subtitle_text(
+                segment_text,
+                max_chars_per_line=max_chars_per_line,
+                max_lines=2,
+                preserve_terms=_collect_highlight_preserve_terms(
+                    segment_text,
+                    item=item,
+                    style_name=str(item.get("style_name") or style_id or "Default").strip() or "Default",
+                ),
+            )
+            segment_text = _apply_keyword_highlight_markup(
+                segment_text,
                 item=item,
-                style_name=str(item.get("style_name") or style_id or "Default").strip() or "Default",
-            ),
-        )
-        text = _apply_keyword_highlight_markup(
-            text,
-            item=item,
-            style_id=style_id,
-            style_definition=style_definition,
-            rgb_to_ass=_rgb_to_ass,
-        )
-        resolved_motion_style = _normalize_motion_style(str(item.get("motion_style") or motion_style))
-        margin_floor = int(style_definition["margin_v"])
-        margin_delta = int(item.get("margin_v_delta", 0) or 0)
-        item_margin_v_override = item.get("margin_v_override")
-        if item_margin_v_override is None:
-            item_margin_v_override = margin_floor + margin_delta
-        item_margin_v = max(margin_floor, int(item_margin_v_override or 0))
-        lines.append(
-            f"Dialogue: 0,{start},{end},{style_id},,0,0,{item_margin_v},,"
-            f"{_build_motion_tag(text, resolved_motion_style)}"
-        )
+                style_id=style_id,
+                style_definition=style_definition,
+                rgb_to_ass=_rgb_to_ass,
+            )
+            resolved_motion_style = _normalize_motion_style(str(item.get("motion_style") or motion_style))
+            margin_floor = int(style_definition["margin_v"])
+            margin_delta = int(item.get("margin_v_delta", 0) or 0)
+            item_margin_v_override = item.get("margin_v_override")
+            if item_margin_v_override is None:
+                item_margin_v_override = margin_floor + margin_delta
+            item_margin_v = max(margin_floor, int(item_margin_v_override or 0))
+            lines.append(
+                f"Dialogue: 0,{_ass_time(float(display_segment['start_time']))},"
+                f"{_ass_time(float(display_segment['end_time']))},{style_id},,0,0,{item_margin_v},,"
+                f"{_build_motion_tag(segment_text, resolved_motion_style)}"
+            )
 
     ass_path.write_text("\n".join(lines), encoding="utf-8-sig")
     return ass_path

@@ -156,3 +156,26 @@ def test_write_ass_file_skips_filler_only_dialogues(tmp_path: Path) -> None:
     dialogue_lines = [line for line in content.splitlines() if line.startswith("Dialogue:")]
     assert len(dialogue_lines) == 1
     assert "这个产品吧还行" in dialogue_lines[0]
+
+
+def test_write_ass_file_splits_long_dialogues_instead_of_truncating(tmp_path: Path) -> None:
+    output_path = tmp_path / "subtitle.ass"
+
+    write_ass_file(
+        [
+            {
+                "start_time": 10.0,
+                "end_time": 18.0,
+                "text_final": "你看 好 不过好在呢 还还算抢到了 没有没有没有这个像很多兄弟一样",
+            },
+        ],
+        output_path,
+        play_res_x=1920,
+        play_res_y=1080,
+    )
+
+    content = output_path.read_text(encoding="utf-8-sig")
+    dialogue_lines = [line for line in content.splitlines() if line.startswith("Dialogue:")]
+    assert len(dialogue_lines) >= 2
+    assert "…" not in "\n".join(dialogue_lines)
+    assert "很多兄弟一样" in "\n".join(dialogue_lines)
