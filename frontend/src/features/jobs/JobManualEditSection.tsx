@@ -1,8 +1,8 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties, type SyntheticEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent, type SyntheticEvent } from "react";
 import type WaveSurfer from "wavesurfer.js";
 import type { RegionsPlugin as RegionsPluginInstance } from "wavesurfer.js/dist/plugins/regions.esm.js";
 
-import type { Job, JobManualEditApplyPayload, JobManualEditPreviewAssets, JobManualEditSession, JobManualEditSubtitle, JobManualEditSubtitleOverride, JobManualVideoTransform } from "../../types";
+import type { Job, JobManualEditApplyPayload, JobManualEditPreviewAssets, JobManualEditSession, JobManualEditSubtitle, JobManualEditSubtitleOverride, JobManualSubtitleReplacement, JobManualVideoTransform } from "../../types";
 import { classNames } from "../../utils";
 
 type JobManualEditSectionProps = {
@@ -79,9 +79,21 @@ type ManualEditUndoSnapshot = {
   editingSubtitleIndex: number | null;
   currentSubtitleDraftText: string;
   subtitleDrafts: Record<number, SubtitleDraft>;
+  subtitleReplacementHistory: JobManualSubtitleReplacement[];
   editorNote: string;
   videoSummary: string;
   videoTransform: JobManualVideoTransform;
+};
+
+type FloatingPreviewPosition = {
+  x: number;
+  y: number;
+};
+
+type SubtitleReplaceDialogState = {
+  find: string;
+  replacement: string;
+  matchCount: number;
 };
 
 const REGION_COLOR = "rgba(34, 197, 94, 0.22)";
@@ -91,6 +103,7 @@ const MIN_SUBTITLE_GAP_SEC = 0.02;
 const INITIAL_WAVEFORM_ZOOM = 18;
 const TERM_RESULT_LIMIT = 80;
 const SUBTITLE_TABLE_WINDOW_SIZE = 220;
+const FLOATING_PREVIEW_MARGIN = 16;
 const TERM_STOPWORDS = new Set([
   "一个",
   "一下",
@@ -211,6 +224,8 @@ const RESOLUTION_PRESET_OPTIONS = [
   { value: "1440p", label: "2K" },
   { value: "2160p", label: "4K" },
 ];
+const PREVIEW_AUTO_VOLUME_MIN_GAIN = 0.35;
+const PREVIEW_AUTO_VOLUME_MAX_GAIN = 12;
 
 function regionIdForIndex(index: number) {
   return `keep-${index}`;
@@ -235,6 +250,8 @@ function previewAssetStageLabel(stage?: string | null) {
       return "生成音频代理";
     case "waveform_peaks":
       return "计算波形峰值";
+    case "loudness_analysis":
+      return "分析响度";
     case "thumbnails":
       return "抽取时间轴缩略图";
     case "cached":
@@ -257,6 +274,15 @@ function previewAssetStatusLabel(previewAssets: JobManualEditPreviewAssets) {
 
 function clamp(value: number, min: number, max: number) {
   return Math.min(Math.max(value, min), max);
+}
+
+function clampFloatingPreviewPosition(x: number, y: number, width: number, height: number) {
+  const maxX = Math.max(FLOATING_PREVIEW_MARGIN, window.innerWidth - width - FLOATING_PREVIEW_MARGIN);
+  const maxY = Math.max(FLOATING_PREVIEW_MARGIN, window.innerHeight - height - FLOATING_PREVIEW_MARGIN);
+  return {
+    x: clamp(x, FLOATING_PREVIEW_MARGIN, maxX),
+    y: clamp(y, FLOATING_PREVIEW_MARGIN, maxY),
+  };
 }
 
 function isTextEntryTarget(target: EventTarget | null) {
@@ -473,6 +499,34 @@ function escapeRegExp(value: string) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+function selectedTextFromElement(element: Element | null) {
+  if (!(element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement)) return "";
+  const start = element.selectionStart ?? 0;
+  const end = element.selectionEnd ?? 0;
+  if (end <= start) return "";
+  return element.value.slice(start, end).trim();
+}
+
+function selectedTextFromWindow() {
+  return (window.getSelection?.()?.toString() || "").trim();
+}
+
+function countSubtitleMatches(subtitles: JobManualEditSubtitle[], find: string) {
+  if (!find) return 0;
+  let count = 0;
+  for (const subtitle of subtitles) {
+    const text = subtitleText(subtitle);
+    let cursor = 0;
+    while (true) {
+      const index = text.indexOf(find, cursor);
+      if (index < 0) break;
+      count += 1;
+      cursor = index + Math.max(1, find.length);
+    }
+  }
+  return count;
+}
+
 function normalizeRotationValue(value: number) {
   const normalized = ((Math.round(value / 90) * 90) % 360 + 360) % 360;
   return ROTATION_OPTIONS.includes(normalized) ? normalized : 0;
@@ -608,12 +662,18 @@ function cloneUndoSnapshot(snapshot: ManualEditUndoSnapshot): ManualEditUndoSnap
     ...snapshot,
     segments: snapshot.segments.map((segment) => ({ ...segment })),
     subtitleDrafts: cloneSubtitleDrafts(snapshot.subtitleDrafts),
+    subtitleReplacementHistory: snapshot.subtitleReplacementHistory.map((item) => ({ ...item })),
     videoTransform: { ...snapshot.videoTransform },
   };
 }
 
 export function JobManualEditSection({ job, session, previewAssets, saving, autosaving = false, autosavedAt, detectingRotation = false, resetSignal = 0, onStateChange, onApply, onAutoSave, onDetectRotation }: JobManualEditSectionProps) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const previewAudioContextRef = useRef<AudioContext | null>(null);
+  const previewAudioSourceRef = useRef<MediaElementAudioSourceNode | null>(null);
+  const previewGainRef = useRef<GainNode | null>(null);
+  const previewCompressorRef = useRef<DynamicsCompressorNode | null>(null);
+  const previewDockRef = useRef<HTMLDivElement | null>(null);
   const currentSubtitleInputRef = useRef<HTMLInputElement | null>(null);
   const waveformRef = useRef<HTMLDivElement | null>(null);
   const waveformTimelineRef = useRef<HTMLDivElement | null>(null);
@@ -621,8 +681,16 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
   const regionsRef = useRef<RegionsPluginInstance | null>(null);
   const syncingRegionsRef = useRef(false);
   const timelinePlaybackRef = useRef(false);
+  const floatingPreviewDragRef = useRef<{
+    pointerId: number;
+    offsetX: number;
+    offsetY: number;
+    width: number;
+    height: number;
+  } | null>(null);
   const autoSaveSessionKeyRef = useRef("");
   const lastAutoSaveSignatureRef = useRef("");
+  const lastSelectedSubtitleTextRef = useRef("");
   const resumeAfterSubtitleEditRef = useRef(false);
   const resumeTimelineAfterSubtitleEditRef = useRef(false);
   const currentEditSnapshotRef = useRef<ManualEditUndoSnapshot | null>(null);
@@ -635,6 +703,7 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
   const [isPreviewPlaying, setIsPreviewPlaying] = useState(false);
   const [previewVolume, setPreviewVolume] = useState(1);
   const [previewMuted, setPreviewMuted] = useState(false);
+  const [previewAutoVolumeEnabled, setPreviewAutoVolumeEnabled] = useState(true);
   const [selectedSubtitleIndex, setSelectedSubtitleIndex] = useState<number | null>(null);
   const [editingSubtitleIndex, setEditingSubtitleIndex] = useState<number | null>(null);
   const [currentSubtitleDraftText, setCurrentSubtitleDraftText] = useState("");
@@ -647,6 +716,8 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
   const [minTermCount, setMinTermCount] = useState(2);
   const [termReplacementDrafts, setTermReplacementDrafts] = useState<Record<string, string>>({});
   const [hiddenTermKeys, setHiddenTermKeys] = useState<Set<string>>(() => new Set());
+  const [subtitleReplaceDialog, setSubtitleReplaceDialog] = useState<SubtitleReplaceDialogState | null>(null);
+  const [subtitleReplacementHistory, setSubtitleReplacementHistory] = useState<JobManualSubtitleReplacement[]>([]);
   const [videoTransform, setVideoTransform] = useState<JobManualVideoTransform>(() => normalizeVideoTransform(null));
   const [rotationDialogOpen, setRotationDialogOpen] = useState(false);
   const [rotationDraft, setRotationDraft] = useState(0);
@@ -654,6 +725,9 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
   const [resolutionDialogOpen, setResolutionDialogOpen] = useState(false);
   const [resolutionDraft, setResolutionDraft] = useState<JobManualVideoTransform>(() => normalizeVideoTransform(null));
   const [sourceVideoSize, setSourceVideoSize] = useState<{ width: number; height: number } | null>(null);
+  const [isPreviewFloating, setIsPreviewFloating] = useState(false);
+  const [previewDockHeight, setPreviewDockHeight] = useState<number | null>(null);
+  const [floatingPreviewPosition, setFloatingPreviewPosition] = useState<FloatingPreviewPosition | null>(null);
   const [frequentTerms, setFrequentTerms] = useState<FrequentTerm[]>([]);
 
   const buildUndoSnapshot = (): ManualEditUndoSnapshot => ({
@@ -663,6 +737,7 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
     editingSubtitleIndex,
     currentSubtitleDraftText,
     subtitleDrafts: cloneSubtitleDrafts(subtitleDrafts),
+    subtitleReplacementHistory: subtitleReplacementHistory.map((item) => ({ ...item })),
     editorNote,
     videoSummary,
     videoTransform: { ...normalizeVideoTransform(videoTransform) },
@@ -688,6 +763,7 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
     setEditingSubtitleIndex(null);
     setCurrentSubtitleDraftText("");
     setSubtitleDrafts(restored.subtitleDrafts);
+    setSubtitleReplacementHistory(restored.subtitleReplacementHistory.map((item) => ({ ...item })));
     setEditorNote(restored.editorNote);
     setVideoSummary(restored.videoSummary);
     setVideoTransform(restored.videoTransform);
@@ -720,6 +796,9 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
         ]),
       ),
     );
+    lastSelectedSubtitleTextRef.current = "";
+    setSubtitleReplaceDialog(null);
+    setSubtitleReplacementHistory([]);
     setEditorNote("");
     setVideoSummary(session.video_summary || "");
     setCurrentSourceTime(0);
@@ -742,7 +821,7 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
 
   useEffect(() => {
     currentEditSnapshotRef.current = buildUndoSnapshot();
-  }, [currentSubtitleDraftText, editorNote, editingSubtitleIndex, segments, selectedSegmentIndex, selectedSubtitleIndex, subtitleDrafts, videoSummary, videoTransform]);
+  }, [currentSubtitleDraftText, editorNote, editingSubtitleIndex, segments, selectedSegmentIndex, selectedSubtitleIndex, subtitleDrafts, subtitleReplacementHistory, videoSummary, videoTransform]);
 
   const effectiveSegments = useMemo(
     () => segments.filter((segment) => segment.end > segment.start + 0.05),
@@ -796,7 +875,7 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
   const currentVideoRotation = currentVideoTransform.rotation_cw;
   const hasVideoTransformEdits = JSON.stringify(currentVideoTransform) !== JSON.stringify(baseVideoTransform);
   const hasVideoSummaryEdits = currentVideoSummary !== baseVideoSummary;
-  const waveformUrl = previewAssets?.ready && previewAssets.audio_url ? previewAssets.audio_url : session.source_url || "";
+  const waveformUrl = previewAssets?.ready && previewAssets.audio_url ? previewAssets.audio_url : "";
   const waveformPeaks = useMemo(
     () => (previewAssets?.peaks?.length ? [previewAssets.peaks] : undefined),
     [previewAssets?.peaks],
@@ -820,6 +899,15 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
   } as CSSProperties;
   const previewAssetProgress = previewAssets?.progress == null ? null : clamp(previewAssets.progress, 0, 1);
   const previewAssetProgressPercent = previewAssetProgress == null ? null : Math.round(previewAssetProgress * 100);
+  const previewAutoVolumeGain = useMemo(() => {
+    const gain = Number(previewAssets?.auto_volume_gain || 1);
+    return Number.isFinite(gain) ? clamp(gain, PREVIEW_AUTO_VOLUME_MIN_GAIN, PREVIEW_AUTO_VOLUME_MAX_GAIN) : 1;
+  }, [previewAssets?.auto_volume_gain]);
+  const previewMeasuredLufs = Number(previewAssets?.audio_lufs || 0);
+  const previewTargetLufs = Number(previewAssets?.target_lufs || -16);
+  const previewAutoVolumeLabel = previewAutoVolumeEnabled
+    ? `自动 ${previewAutoVolumeGain.toFixed(2)}x`
+    : "自动音量";
   const selectedSubtitle = useMemo(
     () => projection.remapped.find((subtitle) => subtitle.index === selectedSubtitleIndex) ?? activeSubtitle ?? projection.remapped[0] ?? null,
     [activeSubtitle, projection.remapped, selectedSubtitleIndex],
@@ -840,6 +928,25 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
         })
         .filter(Boolean) as JobManualEditSubtitleOverride[],
     [baseProjection.remapped, subtitleDrafts],
+  );
+  const subtitleReplacements = useMemo(
+    () =>
+      subtitleReplacementHistory
+        .map((item) => ({
+          original: item.original.trim(),
+          replacement: item.replacement.trim(),
+          occurrence_count: Math.max(1, Number(item.occurrence_count || 1)),
+        }))
+        .filter((item, index, items) => (
+          item.original
+          && item.replacement
+          && item.original !== item.replacement
+          && items.findIndex((candidate) => (
+            candidate.original === item.original
+            && candidate.replacement === item.replacement
+          )) === index
+        )),
+    [subtitleReplacementHistory],
   );
   const diagnostics = useMemo(
     () => subtitleDiagnostics(projection.remapped, totalOutputDuration),
@@ -875,6 +982,7 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
         end: Number(segment.end.toFixed(3)),
       })),
       subtitle_overrides: subtitleOverrides,
+      subtitle_replacements: subtitleReplacements,
       video_transform: currentVideoTransform,
       video_summary: currentVideoSummary || null,
       base_timeline_id: session.timeline_id,
@@ -882,7 +990,7 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
       base_render_plan_version: session.render_plan_version,
       note: editorNote.trim() || undefined,
     }),
-    [currentVideoSummary, currentVideoTransform, effectiveSegments, editorNote, session.render_plan_version, session.timeline_id, session.timeline_version, subtitleOverrides],
+    [currentVideoSummary, currentVideoTransform, effectiveSegments, editorNote, session.render_plan_version, session.timeline_id, session.timeline_version, subtitleOverrides, subtitleReplacements],
   );
   const savePlanLabel = hasTimelineEdits
     ? "剪辑变更：重建时间线/特效"
@@ -977,7 +1085,11 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
   useEffect(() => {
     const waveformElement = waveformRef.current;
     const timelineElement = waveformTimelineRef.current;
-    if (!waveformUrl || !waveformElement || !timelineElement) return;
+    if (!waveformUrl || !waveformElement || !timelineElement) {
+      setWaveformReady(false);
+      setWaveformError(null);
+      return;
+    }
 
     setWaveformReady(false);
     setWaveformError(null);
@@ -1198,6 +1310,7 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
       video.currentTime = projection.ranges[0].sourceStart;
       setCurrentSourceTime(projection.ranges[0].sourceStart);
     }
+    applyPreviewAudioSettings(previewVolume, previewMuted, previewAutoVolumeEnabled, true);
     await video.play();
   };
 
@@ -1215,27 +1328,97 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
     void playEditedTimeline();
   };
 
+  const fallbackPreviewElementVolume = (video: HTMLVideoElement, volume: number, muted: boolean, autoVolumeEnabled: boolean) => {
+    const gain = autoVolumeEnabled ? previewAutoVolumeGain : 1;
+    video.volume = muted ? 0 : clamp(volume * gain, 0, 1);
+    video.muted = muted || volume <= 0;
+  };
+
+  const ensurePreviewAudioGraph = () => {
+    const video = videoRef.current;
+    if (!video || typeof window === "undefined") return null;
+    if (previewGainRef.current) return previewGainRef.current;
+    const AudioContextConstructor = window.AudioContext
+      || (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+    if (!AudioContextConstructor) return null;
+    try {
+      const audioContext = previewAudioContextRef.current ?? new AudioContextConstructor();
+      previewAudioContextRef.current = audioContext;
+      const sourceNode = previewAudioSourceRef.current ?? audioContext.createMediaElementSource(video);
+      const gainNode = audioContext.createGain();
+      const compressorNode = audioContext.createDynamicsCompressor();
+      compressorNode.threshold.value = -3;
+      compressorNode.knee.value = 12;
+      compressorNode.ratio.value = 12;
+      compressorNode.attack.value = 0.003;
+      compressorNode.release.value = 0.25;
+      sourceNode.connect(gainNode);
+      gainNode.connect(compressorNode);
+      compressorNode.connect(audioContext.destination);
+      previewAudioSourceRef.current = sourceNode;
+      previewGainRef.current = gainNode;
+      previewCompressorRef.current = compressorNode;
+      return gainNode;
+    } catch {
+      return null;
+    }
+  };
+
+  const applyPreviewAudioSettings = (volume = previewVolume, muted = previewMuted, autoVolumeEnabled = previewAutoVolumeEnabled, createGraph = false) => {
+    const nextVolume = clamp(volume, 0, 1);
+    const video = videoRef.current;
+    if (!video) return;
+    const gainNode = previewGainRef.current ?? (createGraph ? ensurePreviewAudioGraph() : null);
+    const outputGain = muted || nextVolume <= 0 ? 0 : nextVolume * (autoVolumeEnabled ? previewAutoVolumeGain : 1);
+    if (gainNode) {
+      gainNode.gain.value = outputGain;
+      video.volume = 1;
+      video.muted = false;
+      if (previewAudioContextRef.current?.state === "suspended") {
+        void previewAudioContextRef.current.resume();
+      }
+      return;
+    }
+    fallbackPreviewElementVolume(video, nextVolume, muted, autoVolumeEnabled);
+  };
+
   const applyPreviewVolume = (volume: number, muted = previewMuted) => {
     const nextVolume = clamp(volume, 0, 1);
     setPreviewVolume(nextVolume);
     setPreviewMuted(muted || nextVolume <= 0);
-    const video = videoRef.current;
-    if (!video) return;
-    video.volume = nextVolume;
-    video.muted = muted || nextVolume <= 0;
+    applyPreviewAudioSettings(nextVolume, muted || nextVolume <= 0, previewAutoVolumeEnabled, true);
   };
 
   const togglePreviewMuted = () => {
     const nextMuted = !previewMuted;
     setPreviewMuted(nextMuted);
-    const video = videoRef.current;
-    if (!video) return;
-    video.muted = nextMuted;
-    if (!nextMuted && video.volume <= 0) {
-      video.volume = previewVolume > 0 ? previewVolume : 0.6;
-      setPreviewVolume(video.volume);
-    }
+    const nextVolume = !nextMuted && previewVolume <= 0 ? 0.6 : previewVolume;
+    if (nextVolume !== previewVolume) setPreviewVolume(nextVolume);
+    applyPreviewAudioSettings(nextVolume, nextMuted, previewAutoVolumeEnabled, true);
   };
+
+  const togglePreviewAutoVolume = () => {
+    const nextEnabled = !previewAutoVolumeEnabled;
+    setPreviewAutoVolumeEnabled(nextEnabled);
+    applyPreviewAudioSettings(previewVolume, previewMuted, nextEnabled, true);
+  };
+
+  useEffect(() => {
+    applyPreviewAudioSettings(previewVolume, previewMuted, previewAutoVolumeEnabled, false);
+  }, [previewAutoVolumeEnabled, previewAutoVolumeGain, previewMuted, previewVolume]);
+
+  useEffect(() => () => {
+    try {
+      previewGainRef.current?.disconnect();
+      previewCompressorRef.current?.disconnect();
+      previewAudioSourceRef.current?.disconnect();
+    } catch {
+      // Ignore browser-specific Web Audio teardown errors.
+    }
+    if (previewAudioContextRef.current?.state !== "closed") {
+      void previewAudioContextRef.current?.close();
+    }
+  }, []);
 
   const pauseForSubtitleEdit = () => {
     const video = videoRef.current;
@@ -1278,6 +1461,9 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
         ]),
       ),
     );
+    lastSelectedSubtitleTextRef.current = "";
+    setSubtitleReplaceDialog(null);
+    setSubtitleReplacementHistory([]);
     setEditorNote("");
     setVideoSummary(session.video_summary || "");
     const nextTransform = normalizeVideoTransform(session.video_transform);
@@ -1455,6 +1641,78 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
     });
     const firstOccurrence = term.occurrences[0];
     if (firstOccurrence) selectSubtitle(firstOccurrence);
+  };
+
+  const rememberSelectedSubtitleText = () => {
+    const selectedText = selectedTextFromElement(document.activeElement) || selectedTextFromWindow();
+    if (selectedText) lastSelectedSubtitleTextRef.current = selectedText;
+  };
+
+  const openSubtitleReplaceDialog = () => {
+    rememberSelectedSubtitleText();
+    if (selectedSubtitle && editingSubtitleIndex === selectedSubtitle.index) {
+      updateSubtitleDraft(selectedSubtitle, { text_final: currentSubtitleDraftText });
+      setEditingSubtitleIndex(null);
+    }
+    const seed = (
+      selectedTextFromElement(document.activeElement)
+      || selectedTextFromElement(currentSubtitleInputRef.current)
+      || selectedTextFromWindow()
+      || lastSelectedSubtitleTextRef.current
+      || ""
+    ).trim().slice(0, 80);
+    setSubtitleReplaceDialog({
+      find: seed,
+      replacement: "",
+      matchCount: countSubtitleMatches(projection.remapped, seed),
+    });
+  };
+
+  const updateSubtitleReplaceDialog = (patch: Partial<SubtitleReplaceDialogState>) => {
+    setSubtitleReplaceDialog((current) => {
+      if (!current) return current;
+      const next = { ...current, ...patch };
+      next.matchCount = countSubtitleMatches(projection.remapped, next.find.trim());
+      return next;
+    });
+  };
+
+  const applySubtitleReplacement = () => {
+    if (!subtitleReplaceDialog) return;
+    const find = subtitleReplaceDialog.find.trim();
+    const replacement = subtitleReplaceDialog.replacement.trim();
+    if (!find || !replacement || find === replacement) return;
+    const pattern = new RegExp(escapeRegExp(find), "g");
+    const changes: Array<{ subtitle: JobManualEditSubtitle; text_final: string; occurrences: number }> = [];
+    for (const subtitle of projection.remapped) {
+      const text = subtitleText(subtitle);
+      if (!text.includes(find)) continue;
+      changes.push({
+        subtitle,
+        text_final: text.replace(pattern, replacement),
+        occurrences: text.split(find).length - 1,
+      });
+    }
+    if (!changes.length) return;
+    const matchCount = changes.reduce((total, item) => total + item.occurrences, 0);
+    recordUndoSnapshot();
+    setSubtitleDrafts((current) => {
+      const next = { ...current };
+      for (const change of changes) {
+        next[change.subtitle.index] = {
+          ...(next[change.subtitle.index] ?? {}),
+          text_final: change.text_final,
+        };
+      }
+      return next;
+    });
+    setSubtitleReplacementHistory((current) => [
+      ...current.filter((item) => !(item.original === find && item.replacement === replacement)),
+      { original: find, replacement, occurrence_count: matchCount },
+    ]);
+    lastSelectedSubtitleTextRef.current = replacement;
+    setSubtitleReplaceDialog(null);
+    selectSubtitle(changes[0].subtitle);
   };
 
   const selectAdjacentSubtitle = (direction: -1 | 1) => {
@@ -1717,6 +1975,45 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
   ]);
 
   const previewDisabled = !session.source_url;
+  useEffect(() => {
+    const updateFloatingState = () => {
+      const dock = previewDockRef.current;
+      if (!dock || previewDisabled) {
+        setIsPreviewFloating(false);
+        setPreviewDockHeight(null);
+        return;
+      }
+
+      const rect = dock.getBoundingClientRect();
+      const nextFloating = rect.bottom < 96;
+      setIsPreviewFloating(nextFloating);
+      setPreviewDockHeight((currentHeight) => {
+        if (!nextFloating) return null;
+        return currentHeight ?? Math.max(180, Math.round(rect.height));
+      });
+      const frame = dock.querySelector<HTMLElement>(".manual-editor-video-frame");
+      const frameRect = frame?.getBoundingClientRect();
+      if (nextFloating && frameRect) {
+        setFloatingPreviewPosition((current) => (
+          current ? clampFloatingPreviewPosition(current.x, current.y, frameRect.width, frameRect.height) : current
+        ));
+      }
+    };
+
+    updateFloatingState();
+    window.addEventListener("scroll", updateFloatingState, { passive: true });
+    window.addEventListener("resize", updateFloatingState);
+    return () => {
+      window.removeEventListener("scroll", updateFloatingState);
+      window.removeEventListener("resize", updateFloatingState);
+    };
+  }, [previewDisabled, session.job_id, session.source_url]);
+
+  useEffect(() => {
+    setFloatingPreviewPosition(null);
+    floatingPreviewDragRef.current = null;
+  }, [session.job_id, session.source_url]);
+
   const buildRotatedPreviewStyle = (rotationValue: number) => {
     const rotation = normalizeRotationValue(rotationValue);
     const rawWidth = Math.max(1, sourceVideoSize?.width || 16);
@@ -1748,11 +2045,62 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
     } as CSSProperties;
   };
   const rotatedPreviewStyle = buildRotatedPreviewStyle(currentVideoRotation);
+  const floatingPreviewFrameStyle = isPreviewFloating && floatingPreviewPosition
+    ? {
+        ...rotatedPreviewStyle,
+        left: `${floatingPreviewPosition.x}px`,
+        top: `${floatingPreviewPosition.y}px`,
+        right: "auto",
+        bottom: "auto",
+      } as CSSProperties
+    : rotatedPreviewStyle;
   const rotationDialogPreviewStyle = {
     ...buildRotatedPreviewStyle(rotationDraft),
     width: "min(100%, 420px)",
     maxHeight: "260px",
   } as CSSProperties;
+
+  const beginFloatingPreviewDrag = (event: ReactPointerEvent<HTMLButtonElement>) => {
+    if (!isPreviewFloating) return;
+    const frame = event.currentTarget.closest(".manual-editor-video-frame") as HTMLElement | null;
+    if (!frame) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const rect = frame.getBoundingClientRect();
+    floatingPreviewDragRef.current = {
+      pointerId: event.pointerId,
+      offsetX: event.clientX - rect.left,
+      offsetY: event.clientY - rect.top,
+      width: rect.width,
+      height: rect.height,
+    };
+    event.currentTarget.setPointerCapture(event.pointerId);
+    setFloatingPreviewPosition(clampFloatingPreviewPosition(rect.left, rect.top, rect.width, rect.height));
+  };
+
+  const dragFloatingPreview = (event: ReactPointerEvent<HTMLButtonElement>) => {
+    const drag = floatingPreviewDragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    event.preventDefault();
+    event.stopPropagation();
+    setFloatingPreviewPosition(clampFloatingPreviewPosition(
+      event.clientX - drag.offsetX,
+      event.clientY - drag.offsetY,
+      drag.width,
+      drag.height,
+    ));
+  };
+
+  const endFloatingPreviewDrag = (event: ReactPointerEvent<HTMLButtonElement>) => {
+    const drag = floatingPreviewDragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    event.preventDefault();
+    event.stopPropagation();
+    floatingPreviewDragRef.current = null;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+  };
 
   return (
     <section className="detail-block manual-editor-section">
@@ -1776,6 +2124,54 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
       </div>
 
       {session.detail ? <div className="notice compact-top">{session.detail}</div> : null}
+      {subtitleReplaceDialog ? (
+        <div className="manual-editor-floating-backdrop" role="presentation">
+          <section className="manual-editor-floating-panel manual-editor-replace-panel" role="dialog" aria-modal="true" aria-label="一键替换字幕内容">
+            <div className="manual-editor-preview-head">
+              <div>
+                <strong>一键替换</strong>
+                <div className="muted compact-top">替换会写入字幕草稿，保存后作为校对习惯学习。</div>
+              </div>
+              <span className="status-pill pending">匹配 {subtitleReplaceDialog.matchCount}</span>
+            </div>
+            <label className="form-field">
+              <span className="field-label">需要替换的内容</span>
+              <input
+                className="input"
+                value={subtitleReplaceDialog.find}
+                autoFocus
+                onChange={(event) => updateSubtitleReplaceDialog({ find: event.target.value })}
+              />
+            </label>
+            <label className="form-field">
+              <span className="field-label">替换为</span>
+              <input
+                className="input"
+                value={subtitleReplaceDialog.replacement}
+                onChange={(event) => updateSubtitleReplaceDialog({ replacement: event.target.value })}
+                onKeyDown={(event) => {
+                  if (event.key !== "Enter" || event.nativeEvent.isComposing) return;
+                  event.preventDefault();
+                  applySubtitleReplacement();
+                }}
+              />
+            </label>
+            <div className="manual-editor-replace-actions">
+              <button type="button" className="button ghost" onClick={() => setSubtitleReplaceDialog(null)}>
+                取消
+              </button>
+              <button
+                type="button"
+                className="button primary"
+                disabled={!subtitleReplaceDialog.find.trim() || !subtitleReplaceDialog.replacement.trim() || subtitleReplaceDialog.find.trim() === subtitleReplaceDialog.replacement.trim() || subtitleReplaceDialog.matchCount <= 0}
+                onClick={applySubtitleReplacement}
+              >
+                全部替换
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
       {rotationDialogOpen ? (
         <div className="manual-editor-floating-backdrop" role="presentation">
           <section className="manual-editor-floating-panel" role="dialog" aria-modal="true" aria-label="旋转画面">
@@ -1995,75 +2391,108 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
                 <div className="notice">当前机器拿不到原片本地路径，暂时不能内嵌预览，但仍可调整并保存时间线。</div>
               ) : (
                 <div
-                  className="manual-editor-video-frame"
-                  style={rotatedPreviewStyle}
-                  role="button"
-                  tabIndex={0}
-                  onClick={toggleEditedTimelinePlayback}
-                  onKeyDown={(event) => {
-                    if (event.key !== "Enter") return;
-                    event.preventDefault();
-                    toggleEditedTimelinePlayback();
-                  }}
-                  aria-label={isPreviewPlaying ? "暂停输出时间轴预览" : "播放输出时间轴预览"}
+                  ref={previewDockRef}
+                  className={classNames("manual-editor-video-dock", isPreviewFloating && "floating")}
+                  style={isPreviewFloating && previewDockHeight ? { minHeight: `${previewDockHeight}px` } : undefined}
                 >
-                  <div className="manual-editor-video-stage">
-                    <video
-                      ref={videoRef}
-                      className="manual-editor-video"
-                      src={session.source_url ?? undefined}
-                      preload="metadata"
-                      playsInline
-                      onLoadedMetadata={(event) => {
-                        rememberVideoMetadata(event);
-                        event.currentTarget.volume = previewVolume;
-                        event.currentTarget.muted = previewMuted;
-                      }}
-                      onPlay={() => setIsPreviewPlaying(true)}
-                      onTimeUpdate={syncPreviewTime}
-                      onSeeked={syncPreviewTime}
-                      onPause={() => {
-                        if (videoRef.current?.paused) {
+                  <div
+                    className={classNames("manual-editor-video-frame", isPreviewFloating && floatingPreviewPosition && "positioned")}
+                    style={floatingPreviewFrameStyle}
+                    role="button"
+                    tabIndex={0}
+                    onClick={toggleEditedTimelinePlayback}
+                    onKeyDown={(event) => {
+                      if (event.key !== "Enter") return;
+                      event.preventDefault();
+                      toggleEditedTimelinePlayback();
+                    }}
+                    aria-label={isPreviewPlaying ? "暂停输出时间轴预览" : "播放输出时间轴预览"}
+                  >
+                    <div className="manual-editor-video-stage">
+                      <video
+                        ref={videoRef}
+                        className="manual-editor-video"
+                        src={session.source_url ?? undefined}
+                        preload="metadata"
+                        playsInline
+                        onLoadedMetadata={(event) => {
+                          rememberVideoMetadata(event);
+                          fallbackPreviewElementVolume(event.currentTarget, previewVolume, previewMuted, previewAutoVolumeEnabled);
+                        }}
+                        onPlay={() => setIsPreviewPlaying(true)}
+                        onTimeUpdate={syncPreviewTime}
+                        onSeeked={syncPreviewTime}
+                        onPause={() => {
+                          if (videoRef.current?.paused) {
+                            timelinePlaybackRef.current = false;
+                            setIsPreviewPlaying(false);
+                          }
+                        }}
+                        onEnded={() => {
                           timelinePlaybackRef.current = false;
                           setIsPreviewPlaying(false);
-                        }
-                      }}
-                      onEnded={() => {
-                        timelinePlaybackRef.current = false;
-                        setIsPreviewPlaying(false);
-                      }}
-                    />
-                  </div>
-                  <div className="manual-editor-preview-controlbar" onClick={(event) => event.stopPropagation()}>
-                    <button
-                      type="button"
-                      className="manual-editor-preview-play"
-                      disabled={previewDisabled || !effectiveSegments.length}
-                      onClick={toggleEditedTimelinePlayback}
-                      aria-label={isPreviewPlaying ? "暂停输出时间轴预览" : "播放输出时间轴预览"}
-                    >
-                      {isPreviewPlaying ? "暂停" : "播放"}
-                    </button>
-                    <div className="manual-editor-preview-volume" onPointerDown={(event) => event.stopPropagation()}>
-                      <button
-                        type="button"
-                        className="manual-editor-preview-icon-button"
-                        onClick={togglePreviewMuted}
-                        aria-label={previewMuted || previewVolume <= 0 ? "恢复声音" : "静音"}
-                      >
-                        {previewMuted || previewVolume <= 0 ? "静音" : "音量"}
-                      </button>
-                      <input
-                        type="range"
-                        min={0}
-                        max={1}
-                        step={0.01}
-                        value={previewMuted ? 0 : previewVolume}
-                        onChange={(event) => applyPreviewVolume(Number(event.target.value), false)}
-                        aria-label="预览音量"
+                        }}
                       />
                     </div>
-                    <span>{formatSeconds(currentOutputTime)} / {formatSeconds(totalOutputDuration)}</span>
+                    {isPreviewFloating ? (
+                      <button
+                        type="button"
+                        className="manual-editor-preview-drag-handle"
+                        aria-label="拖动悬浮预览窗口"
+                        title="拖动悬浮预览窗口"
+                        onClick={(event) => event.stopPropagation()}
+                        onPointerDown={beginFloatingPreviewDrag}
+                        onPointerMove={dragFloatingPreview}
+                        onPointerUp={endFloatingPreviewDrag}
+                        onPointerCancel={endFloatingPreviewDrag}
+                      >
+                        <span />
+                        <span />
+                        <span />
+                      </button>
+                    ) : null}
+                    <div className="manual-editor-preview-controlbar" onClick={(event) => event.stopPropagation()}>
+                      <button
+                        type="button"
+                        className="manual-editor-preview-play"
+                        disabled={previewDisabled || !effectiveSegments.length}
+                        onClick={toggleEditedTimelinePlayback}
+                        aria-label={isPreviewPlaying ? "暂停输出时间轴预览" : "播放输出时间轴预览"}
+                      >
+                        {isPreviewPlaying ? "暂停" : "播放"}
+                      </button>
+                      <div className="manual-editor-preview-volume" onPointerDown={(event) => event.stopPropagation()}>
+                        <button
+                          type="button"
+                          className="manual-editor-preview-icon-button"
+                          onClick={togglePreviewMuted}
+                          aria-label={previewMuted || previewVolume <= 0 ? "恢复声音" : "静音"}
+                        >
+                          {previewMuted || previewVolume <= 0 ? "静音" : "音量"}
+                        </button>
+                        <input
+                          type="range"
+                          min={0}
+                          max={1}
+                          step={0.01}
+                          value={previewMuted ? 0 : previewVolume}
+                          onChange={(event) => applyPreviewVolume(Number(event.target.value), false)}
+                          aria-label="预览音量"
+                        />
+                      </div>
+                      <button
+                        type="button"
+                        className={classNames("manual-editor-preview-auto-volume", previewAutoVolumeEnabled && "active")}
+                        onPointerDown={(event) => event.stopPropagation()}
+                        onClick={togglePreviewAutoVolume}
+                        aria-pressed={previewAutoVolumeEnabled}
+                        aria-label={previewAutoVolumeEnabled ? "关闭自动平衡音量" : "开启自动平衡音量"}
+                        title={previewAssets?.ready ? `测得 ${previewMeasuredLufs.toFixed(1)} LUFS，目标 ${previewTargetLufs.toFixed(0)} LUFS` : "预处理完成后使用建议音量"}
+                      >
+                        {previewAutoVolumeLabel}
+                      </button>
+                      <span>{formatSeconds(currentOutputTime)} / {formatSeconds(totalOutputDuration)}</span>
+                    </div>
                   </div>
                 </div>
               )}
@@ -2083,13 +2512,52 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
               <div className="muted">当前字幕</div>
               {selectedSubtitle ? (
                 <div className={classNames("manual-editor-subtitle-current", editingSubtitleIndex === selectedSubtitle.index && "editing")}>
-                  <span>{formatSeconds(selectedSubtitle.start_time)} - {formatSeconds(selectedSubtitle.end_time)}</span>
+                  <div className="manual-editor-subtitle-current-head">
+                    <span>{formatSeconds(selectedSubtitle.start_time)} - {formatSeconds(selectedSubtitle.end_time)}</span>
+                    <div className="manual-editor-subtitle-quick-actions" aria-label="当前字幕操作">
+                      <button
+                        type="button"
+                        className="manual-editor-icon-action replace"
+                        disabled={!session.editable || !projection.remapped.length}
+                        onMouseDown={rememberSelectedSubtitleText}
+                        onClick={openSubtitleReplaceDialog}
+                        aria-label="一键替换"
+                        title="一键替换"
+                        data-tooltip="一键替换"
+                      >
+                        <span aria-hidden="true">A→B</span>
+                      </button>
+                      <button
+                        type="button"
+                        className="manual-editor-icon-action"
+                        disabled={!session.editable}
+                        onClick={clearSelectedSubtitleText}
+                        aria-label="删除字幕文字"
+                        title="删除字幕文字"
+                        data-tooltip="删除字幕文字"
+                      >
+                        <span aria-hidden="true">T×</span>
+                      </button>
+                      <button
+                        type="button"
+                        className="manual-editor-icon-action danger"
+                        disabled={!session.editable}
+                        onClick={removeSelectedSubtitleSegment}
+                        aria-label="删除字幕片段"
+                        title="删除字幕片段"
+                        data-tooltip="删除字幕片段"
+                      >
+                        <span aria-hidden="true">✂</span>
+                      </button>
+                    </div>
+                  </div>
                   <input
                     ref={currentSubtitleInputRef}
                     className="input"
                     value={editingSubtitleIndex === selectedSubtitle.index ? currentSubtitleDraftText : subtitleText(selectedSubtitle)}
                     readOnly={editingSubtitleIndex !== selectedSubtitle.index}
                     onFocus={() => selectSubtitle(selectedSubtitle, { edit: true })}
+                    onSelect={rememberSelectedSubtitleText}
                     onChange={(event) => setCurrentSubtitleDraftText(event.target.value)}
                     onBlur={() => commitCurrentSubtitleEdit()}
                     onKeyDown={(event) => {
@@ -2100,19 +2568,6 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
                     }}
                     aria-label="编辑当前字幕"
                   />
-                  <div className="manual-editor-subtitle-quick-actions">
-                    <button type="button" className="button ghost" disabled={!session.editable} onClick={clearSelectedSubtitleText}>
-                      删除字幕文字
-                    </button>
-                    <button
-                      type="button"
-                      className="button danger"
-                      disabled={!session.editable}
-                      onClick={removeSelectedSubtitleSegment}
-                    >
-                      删除字幕片段
-                    </button>
-                  </div>
                 </div>
               ) : (
                 <div className="manual-editor-subtitle-current empty">当前时间点没有字幕</div>
@@ -2149,7 +2604,7 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
               <div className="notice">缺少可预览原片，波形编辑暂不可用。</div>
             ) : null}
             {!previewDisabled && !waveformReady && !waveformError ? (
-              <div className="manual-editor-wave-loading">正在解析音频波形...</div>
+              <div className="manual-editor-wave-loading">正在准备音频波形...</div>
             ) : null}
             {waveformError ? <div className="notice">{waveformError}</div> : null}
             <div ref={waveformRef} className={classNames("manual-editor-waveform", previewDisabled && "disabled")} />
@@ -2179,6 +2634,8 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
                 <span>{previewAssetStageLabel(previewAssets.stage)}</span>
                 <span>{previewAssetProgressPercent != null ? `${previewAssetProgressPercent}%` : previewAssets.ready ? "100%" : "0%"}</span>
                 <span>{previewAssets.ready ? `${previewAssets.peak_count} peaks` : "使用原片预览"}</span>
+                {previewAssets.ready ? <span>{previewMeasuredLufs.toFixed(1)} LUFS 至 {previewTargetLufs.toFixed(0)} LUFS</span> : null}
+                {previewAssets.ready ? <span>增益 {previewAutoVolumeGain.toFixed(2)}x</span> : null}
                 {previewAssets.asset_version ? <span>v{previewAssets.asset_version}</span> : null}
               </div>
               {previewAssetProgress != null ? (
@@ -2432,6 +2889,15 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
             <div className="muted compact-top">按输出时间轴编辑字幕文本和起止时间，保存后进入重渲染字幕层。</div>
           </div>
           <div className="manual-editor-actions">
+            <button
+              type="button"
+              className="button primary"
+              disabled={!session.editable || !projection.remapped.length}
+              onMouseDown={rememberSelectedSubtitleText}
+              onClick={openSubtitleReplaceDialog}
+            >
+              一键替换
+            </button>
             <button type="button" className="button ghost" disabled={!selectedSubtitle} onClick={() => nudgeSelectedSubtitle(-0.1)}>
               -100ms
             </button>
@@ -2537,6 +3003,7 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
                   className="input"
                   value={subtitleText(subtitle)}
                   onFocus={() => setSelectedSubtitleIndex(subtitle.index)}
+                  onSelect={rememberSelectedSubtitleText}
                   onChange={(event) => updateSubtitleDraft(subtitle, { text_final: event.target.value })}
                 />
                 <div className="manual-editor-actions">

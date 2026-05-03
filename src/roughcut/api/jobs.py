@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
 import zipfile
@@ -99,6 +100,7 @@ from roughcut.review.content_profile_memory import (
     load_content_profile_user_memory,
     record_content_profile_feedback_memory,
 )
+from roughcut.review.hotword_learning import upsert_learned_hotword
 from roughcut.review.downstream_context import build_downstream_context, resolve_downstream_profile
 from roughcut.review.final_review_rerun import (
     build_final_review_rerun_plans,
@@ -143,6 +145,7 @@ from roughcut.edit.render_plan import build_render_plan, build_smart_editing_acc
 router = APIRouter(prefix="/jobs", tags=["jobs"])
 logger = logging.getLogger(__name__)
 _MANUAL_EDITOR_ASSET_WARMUPS: set[str] = set()
+_MANUAL_EDITOR_ASSET_WARMUP_SEMAPHORE = threading.Semaphore(1)
 
 _CONTENT_PROFILE_PLACEHOLDER_JPEG = base64.b64decode(
     "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAYEBQYFBAYGBQYHBwYIChAKCgkJChQODwwQFxQYGBcUFhYaHSUfGhsjHBYWICwgIyYnKSopGR8tMC0oMCUoKSj/2wBDAQcHBwoIChMKChMoGhYaKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCj/wAARCAAJABADASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwDwCiiitzI//9k="
@@ -265,6 +268,12 @@ class ManualEditorSubtitleOverrideIn(BaseModel):
     delete: bool = False
 
 
+class ManualEditorSubtitleReplacementIn(BaseModel):
+    original: str
+    replacement: str
+    occurrence_count: int = 1
+
+
 class ManualEditorVideoTransformIn(BaseModel):
     rotation_cw: int = 0
     aspect_ratio: str | None = None
@@ -275,6 +284,7 @@ class ManualEditorVideoTransformIn(BaseModel):
 class ManualEditorApplyIn(BaseModel):
     keep_segments: list[ManualEditorSegmentIn] = Field(default_factory=list)
     subtitle_overrides: list[ManualEditorSubtitleOverrideIn] = Field(default_factory=list)
+    subtitle_replacements: list[ManualEditorSubtitleReplacementIn] = Field(default_factory=list)
     video_transform: ManualEditorVideoTransformIn | None = None
     video_summary: str | None = None
     base_timeline_id: str | None = None
@@ -378,6 +388,12 @@ class ManualEditorPreviewAssetsOut(BaseModel):
     sample_rate: int = 16000
     peaks: list[float] = Field(default_factory=list)
     peak_count: int = 0
+    audio_peak: float = 0.0
+    audio_rms: float = 0.0
+    audio_lufs: float = 0.0
+    audio_true_peak_db: float = 0.0
+    target_lufs: float = -16.0
+    auto_volume_gain: float = 1.0
     thumbnail_urls: list[str] = Field(default_factory=list)
     thumbnail_items: list[ManualEditorThumbnailOut] = Field(default_factory=list)
     cached: bool = False
@@ -1799,6 +1815,72 @@ def _manual_subtitle_override_payloads(
     return payloads
 
 
+def _manual_subtitle_replacement_payloads(
+    replacements: list[dict[str, Any]] | list[ManualEditorSubtitleReplacementIn],
+) -> list[dict[str, Any]]:
+    payloads: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for raw_item in replacements or []:
+        if isinstance(raw_item, BaseModel):
+            item = raw_item.model_dump()
+        else:
+            item = dict(raw_item or {})
+        original = " ".join(str(item.get("original") or "").strip().split())[:80]
+        replacement = " ".join(str(item.get("replacement") or "").strip().split())[:80]
+        if not original or not replacement or original == replacement:
+            continue
+        key = (original, replacement)
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            occurrence_count = int(item.get("occurrence_count") or 1)
+        except (TypeError, ValueError):
+            occurrence_count = 1
+        payloads.append(
+            {
+                "original": original,
+                "replacement": replacement,
+                "occurrence_count": max(1, min(999, occurrence_count)),
+            }
+        )
+    return payloads
+
+
+async def _record_manual_subtitle_replacement_memory(
+    session: AsyncSession,
+    *,
+    job: Job,
+    content_profile: dict[str, Any] | None,
+    replacements: list[dict[str, Any]],
+) -> None:
+    if not replacements:
+        return
+    subject_domain = str((content_profile or {}).get("subject_domain") or job.workflow_template or "").strip()
+    for item in replacements:
+        original = str(item.get("original") or "").strip()
+        replacement = str(item.get("replacement") or "").strip()
+        if not original or not replacement or original == replacement:
+            continue
+        await upsert_learned_hotword(
+            session,
+            subject_domain=subject_domain,
+            term=replacement,
+            canonical_form=replacement,
+            aliases=[original],
+            source="manual_editor:subtitle_replacement",
+            confidence=0.86,
+            positive=True,
+            metadata={
+                "job_id": str(job.id),
+                "source_name": str(job.source_name or ""),
+                "original": original,
+                "replacement": replacement,
+                "occurrence_count": int(item.get("occurrence_count") or 1),
+            },
+        )
+
+
 def _manual_video_transform_payload(transform: dict[str, Any] | ManualEditorVideoTransformIn | None) -> dict[str, Any]:
     if transform is None:
         return {"rotation_cw": 0}
@@ -1964,6 +2046,12 @@ def _manual_editor_preview_assets_response(
         sample_rate=int(payload.get("sample_rate") or 16000),
         peaks=[float(value) for value in list(payload.get("peaks") or [])],
         peak_count=int(payload.get("peak_count") or 0),
+        audio_peak=float(payload.get("audio_peak") or 0.0),
+        audio_rms=float(payload.get("audio_rms") or 0.0),
+        audio_lufs=float(payload.get("audio_lufs") or 0.0),
+        audio_true_peak_db=float(payload.get("audio_true_peak_db") or 0.0),
+        target_lufs=float(payload.get("target_lufs") or -16.0),
+        auto_volume_gain=float(payload.get("auto_volume_gain") or 1.0),
         thumbnail_urls=thumbnail_urls if is_ready else [],
         thumbnail_items=thumbnail_items if is_ready else [],
         cached=bool(payload.get("cached", False)),
@@ -1976,11 +2064,12 @@ def _manual_editor_preview_assets_response(
 def _warm_manual_editor_preview_assets(job_id: uuid.UUID, source_path: Path, duration_sec: float) -> None:
     key = str(job_id)
     try:
-        ensure_manual_editor_preview_assets(
-            job_id=job_id,
-            source_path=source_path,
-            duration_sec=duration_sec,
-        )
+        with _MANUAL_EDITOR_ASSET_WARMUP_SEMAPHORE:
+            ensure_manual_editor_preview_assets(
+                job_id=job_id,
+                source_path=source_path,
+                duration_sec=duration_sec,
+            )
     except Exception:
         logger.exception("manual editor preview asset warmup failed job_id=%s", job_id)
     finally:
@@ -2396,6 +2485,7 @@ async def save_manual_editor_draft(
         )
     keep_segments = _normalize_manual_keep_segments(request.keep_segments, source_duration_sec=source_duration_sec)
     subtitle_override_payloads = _manual_subtitle_override_payloads(request.subtitle_overrides)
+    subtitle_replacement_payloads = _manual_subtitle_replacement_payloads(request.subtitle_replacements)
     video_transform = _manual_video_transform_payload(request.video_transform)
     video_summary = _normalize_manual_video_summary(request.video_summary)
     saved_at = datetime.now(timezone.utc).isoformat()
@@ -2429,6 +2519,7 @@ async def save_manual_editor_draft(
                 "base_render_plan_version": int(render_plan_timeline.version or 1),
                 "keep_segments": keep_segments,
                 "subtitle_overrides": subtitle_override_payloads,
+                "subtitle_replacements": subtitle_replacement_payloads,
                 "video_transform": video_transform,
                 "video_summary": video_summary,
                 "note": str(request.note or "").strip() or None,
@@ -2523,6 +2614,7 @@ async def apply_manual_editor_timeline(
     )
     base_output_duration_sec = max((float(item.get("end_time", 0.0) or 0.0) for item in remapped_subtitles), default=0.0)
     subtitle_override_payloads = _manual_subtitle_override_payloads(request.subtitle_overrides)
+    subtitle_replacement_payloads = _manual_subtitle_replacement_payloads(request.subtitle_replacements)
     video_transform = _manual_video_transform_payload(request.video_transform)
     video_summary = _normalize_manual_video_summary(request.video_summary)
     previous_render_plan = dict(render_plan_timeline.data_json or {})
@@ -2540,6 +2632,12 @@ async def apply_manual_editor_timeline(
         next_video_transform=video_transform,
     )
     _profile_artifact, content_profile = await _load_preferred_downstream_profile(session, job_id=job.id)
+    await _record_manual_subtitle_replacement_memory(
+        session,
+        job=job,
+        content_profile=content_profile,
+        replacements=subtitle_replacement_payloads,
+    )
     if video_summary:
         content_profile = _apply_manual_video_summary_to_profile(
             content_profile,
@@ -2618,6 +2716,7 @@ async def apply_manual_editor_timeline(
                 "render_strategy": str(change_plan["render_strategy"]),
                 "timeline_changed": bool(change_plan["timeline_changed"]),
                 "subtitle_changed": bool(change_plan["subtitle_changed"]),
+                "subtitle_replacements": subtitle_replacement_payloads,
                 "video_transform_changed": bool(change_plan["video_transform_changed"]),
                 "video_transform": video_transform,
                 "video_summary": video_summary,
@@ -2680,6 +2779,7 @@ async def apply_manual_editor_timeline(
         "render_strategy": str(change_plan["render_strategy"]),
         "timeline_changed": bool(change_plan["timeline_changed"]),
         "subtitle_changed": bool(change_plan["subtitle_changed"]),
+        "subtitle_replacements": subtitle_replacement_payloads,
         "video_transform_changed": bool(change_plan["video_transform_changed"]),
         "video_transform": render_video_transform,
         "video_summary": video_summary,

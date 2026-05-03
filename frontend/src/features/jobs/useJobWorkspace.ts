@@ -30,6 +30,8 @@ const EMPTY_PENDING_INITIALIZATION: PendingInitializationForm = {
 };
 
 const JOBS_PAGE_SIZE = 20;
+const OUTPUT_DIR_HISTORY_STORAGE_KEY = "roughcut.jobs.outputDirHistory";
+const OUTPUT_DIR_HISTORY_LIMIT = 8;
 
 const JOB_STATUS_GROUP_PRIORITY: Record<string, number> = {
   awaiting_init: 1,
@@ -124,6 +126,43 @@ function sameStringArray(left: string[], right: string[]) {
   return left.every((item, index) => item === right[index]);
 }
 
+function normalizeOutputDir(value: string | null | undefined): string {
+  return String(value ?? "").trim();
+}
+
+function mergeOutputDirHistory(paths: Array<string | null | undefined>): string[] {
+  const seen = new Set<string>();
+  const next: string[] = [];
+  for (const path of paths) {
+    const outputDir = normalizeOutputDir(path);
+    if (!outputDir || seen.has(outputDir)) continue;
+    seen.add(outputDir);
+    next.push(outputDir);
+    if (next.length >= OUTPUT_DIR_HISTORY_LIMIT) break;
+  }
+  return next;
+}
+
+function readStoredOutputDirHistory(): string[] {
+  if (typeof window === "undefined") return [];
+  try {
+    const raw = window.localStorage.getItem(OUTPUT_DIR_HISTORY_STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? mergeOutputDirHistory(parsed.map(String)) : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeStoredOutputDirHistory(paths: string[]) {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(OUTPUT_DIR_HISTORY_STORAGE_KEY, JSON.stringify(paths));
+  } catch {
+    // Local storage is only a convenience for quick selections.
+  }
+}
+
 function compareJobs(a: { status: string; updated_at: string }, b: { status: string; updated_at: string }) {
   const groupGap = (JOB_STATUS_GROUP_PRIORITY[a.status] ?? 2) - (JOB_STATUS_GROUP_PRIORITY[b.status] ?? 2);
   if (groupGap !== 0) return groupGap;
@@ -137,6 +176,7 @@ export function useJobWorkspace({ isCreateOpen = false }: UseJobWorkspaceOptions
   const [queueFilter, setQueueFilter] = useState<JobQueueFilter>("all");
   const [jobsPage, setJobsPage] = useState(0);
   const [upload, setUpload] = useState<UploadForm>(EMPTY_UPLOAD);
+  const [storedOutputDirHistory, setStoredOutputDirHistory] = useState<string[]>(readStoredOutputDirHistory);
   const [pendingInitialization, setPendingInitialization] = useState<PendingInitializationForm>(EMPTY_PENDING_INITIALIZATION);
   const [contentDraft, setContentDraft] = useState<Record<string, unknown>>({});
   const [reviewWorkflowMode, setReviewWorkflowMode] = useState("standard_edit");
@@ -393,6 +433,11 @@ export function useJobWorkspace({ isCreateOpen = false }: UseJobWorkspaceOptions
         upload.videoDescription,
       ),
     onSuccess: async (job) => {
+      setStoredOutputDirHistory((prev) => {
+        const next = mergeOutputDirHistory([upload.outputDir, ...prev]);
+        writeStoredOutputDirHistory(next);
+        return next;
+      });
       setUpload(inheritedUploadDefaults);
       setSelectedJobId(job.id);
       await Promise.all([
@@ -502,6 +547,13 @@ export function useJobWorkspace({ isCreateOpen = false }: UseJobWorkspaceOptions
     () => searchMatchedJobs.filter((job) => matchesQueueFilter(job.status, queueFilter)),
     [queueFilter, searchMatchedJobs],
   );
+  const outputDirHistory = useMemo(
+    () => mergeOutputDirHistory([
+      ...storedOutputDirHistory,
+      ...(jobs.data ?? []).map((job) => job.output_dir),
+    ]),
+    [jobs.data, storedOutputDirHistory],
+  );
   const hasMoreJobs = (jobs.data?.length ?? 0) === JOBS_PAGE_SIZE;
   const contentKeywordsList =
     contentDraftKeywords.length
@@ -521,6 +573,7 @@ export function useJobWorkspace({ isCreateOpen = false }: UseJobWorkspaceOptions
     queueStats,
     upload,
     setUpload,
+    outputDirHistory,
     pendingInitialization,
     setPendingInitialization,
     contentDraft,

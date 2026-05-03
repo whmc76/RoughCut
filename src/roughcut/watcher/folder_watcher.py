@@ -45,6 +45,7 @@ async def _call_inventory_job_factory(
     file_paths: list[str],
     *,
     workflow_template: str | None,
+    job_flow_mode: str = "auto",
     output_dir: str | None = None,
     config_profile_id: uuid.UUID | str | None = None,
     awaiting_initialization: bool = False,
@@ -53,6 +54,7 @@ async def _call_inventory_job_factory(
         file_paths,
         output_dir=output_dir,
         workflow_template=workflow_template,
+        job_flow_mode=job_flow_mode,
         config_profile_id=config_profile_id,
         awaiting_initialization=awaiting_initialization,
     )
@@ -1616,6 +1618,7 @@ async def run_watch_root_auto_duty() -> dict[str, Any]:
                             [str(item.get("path") or "") for item in selected_items],
                             config_profile_id=root.config_profile_id,
                             workflow_template=root.workflow_template,
+                            job_flow_mode=getattr(root, "job_flow_mode", "auto") or "auto",
                             output_dir=root.output_dir,
                             awaiting_initialization=False,
                         )

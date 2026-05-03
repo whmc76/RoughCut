@@ -149,15 +149,18 @@ function buildJobWorkspaceMock(overrides: Record<string, unknown> = {}) {
       files: [],
       language: "zh-CN",
       workflowTemplate: "",
+      jobFlowMode: "auto",
       workflowMode: "standard_edit",
       enhancementModes: [],
       outputDir: "",
       videoDescription: "",
     },
     setUpload: vi.fn(),
+    outputDirHistory: [],
     pendingInitialization: {
       language: "zh-CN",
       workflowTemplate: "",
+      jobFlowMode: "auto",
       workflowMode: "standard_edit",
       enhancementModes: [],
       outputDir: "",
@@ -263,6 +266,42 @@ describe("JobsPage audit interactions", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "关闭任务详情" }));
     expect(screen.queryByRole("dialog", { name: "创建任务" })).not.toBeInTheDocument();
+  });
+
+  it("opens the manual editor after creating a smart assist task", () => {
+    const uploadJobMutate = vi.fn((_variables, options?: { onSuccess?: (job: { id: string }) => void }) => {
+      options?.onSuccess?.({ id: "smart-job-1" });
+    });
+    jobWorkspaceMock.mockReturnValue(buildJobWorkspaceMock({
+      upload: {
+        files: [new File(["video"], "demo.mp4", { type: "video/mp4" })],
+        language: "zh-CN",
+        workflowTemplate: "",
+        jobFlowMode: "smart_assist",
+        workflowMode: "standard_edit",
+        enhancementModes: [],
+        outputDir: "",
+        videoDescription: "",
+      },
+      uploadJob: { isPending: false, mutate: uploadJobMutate },
+    }));
+
+    renderWithQueryClient(
+      <I18nProvider>
+        <MemoryRouter initialEntries={["/jobs"]}>
+          <Routes>
+            <Route path="/jobs" element={<JobsPage />} />
+            <Route path="/jobs/:jobId/manual-editor" element={<div>Manual editor route</div>} />
+          </Routes>
+        </MemoryRouter>
+      </I18nProvider>,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "创建任务" }));
+    fireEvent.click(screen.getByRole("button", { name: "上传并创建任务" }));
+
+    expect(uploadJobMutate).toHaveBeenCalledTimes(1);
+    expect(screen.getByText("Manual editor route")).toBeInTheDocument();
   });
 });
 

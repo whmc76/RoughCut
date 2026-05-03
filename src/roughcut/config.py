@@ -330,6 +330,10 @@ class Settings(BaseSettings):
     step_heartbeat_interval_sec: int = 20
     startup_recovery_enabled: bool = True
     step_stale_recovery_enabled: bool = True
+    step_lost_task_recovery_enabled: bool = True
+    step_lost_task_grace_sec: int = 120
+    step_dispatch_lost_task_grace_sec: int = 300
+    step_recovery_inspect_timeout_sec: float = 1.0
     step_stale_timeout_sec: int = 900
     step_dispatch_stale_timeout_sec: int = 3600
     transcribe_runtime_timeout_sec: int = 900

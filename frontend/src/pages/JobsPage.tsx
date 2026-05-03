@@ -1,4 +1,5 @@
 import { useRef, useState } from "react";
+import { useNavigate } from "react-router-dom";
 
 import { PageHeader } from "../components/ui/PageHeader";
 import { ConfigProfileSwitcher } from "../features/configProfiles/ConfigProfileSwitcher";
@@ -25,6 +26,7 @@ const QUEUE_FILTER_META: Record<JobQueueFilter, { label: string; description: st
 
 export function JobsPage() {
   const { t } = useI18n();
+  const navigate = useNavigate();
   const [createOpen, setCreateOpen] = useState(false);
   const [reviewNotice, setReviewNotice] = useState<string | null>(null);
   const [reviewNoticeTone, setReviewNoticeTone] = useState<"success" | "error">("success");
@@ -335,23 +337,15 @@ export function JobsPage() {
           <div className="jobs-stage-head">
             <div>
               <h3>创建任务</h3>
-              <p>先选剪辑方案，再上传素材创建新任务。</p>
+              <p>先填写新任务，再按需调整剪辑方案。</p>
             </div>
             <div className="jobs-stage-meta">
               <span>创建流程</span>
-              <strong>剪辑方案 + 创建任务</strong>
+              <strong>创建任务 + 剪辑方案</strong>
             </div>
           </div>
 
           <div className="jobs-create-modal-grid">
-            <section className="jobs-create-modal-panel">
-              <ConfigProfileSwitcher
-                compact
-                title="剪辑方案"
-                description="这里决定新任务默认按哪套方案创建。"
-              />
-            </section>
-
             <section className="jobs-create-modal-panel">
               <JobUploadPanel
                 upload={workspace.upload}
@@ -359,13 +353,28 @@ export function JobsPage() {
                 workflowTemplateOptions={workflowTemplateOptions}
                 workflowModeOptions={workflowModeOptions}
                 enhancementOptions={enhancementOptions}
+                outputDirHistory={workspace.outputDirHistory}
                 onChange={workspace.setUpload}
                 onSubmit={() =>
                   workspace.uploadJob.mutate(undefined, {
-                    onSuccess: () => setCreateOpen(false),
+                    onSuccess: (job) => {
+                      const shouldOpenManualEditor = workspace.upload.jobFlowMode === "smart_assist";
+                      setCreateOpen(false);
+                      if (shouldOpenManualEditor) {
+                        navigate(`/jobs/${job.id}/manual-editor`);
+                      }
+                    },
                   })
                 }
                 isSubmitting={workspace.uploadJob.isPending}
+              />
+            </section>
+
+            <section className="jobs-create-modal-panel">
+              <ConfigProfileSwitcher
+                compact
+                title="剪辑方案"
+                description="这里决定新任务默认按哪套方案创建。"
               />
             </section>
           </div>

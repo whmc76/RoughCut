@@ -15,6 +15,7 @@ import logging
 import math
 import os
 import uuid
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -106,6 +107,33 @@ _ORCHESTRATOR_ADVISORY_LOCK_KEY = 22032026
 _ORCHESTRATOR_HEARTBEAT_PATH = Path("logs/orchestrator-heartbeat.json")
 _ORCHESTRATOR_HEARTBEAT_MIN_FRESH_SEC = 30.0
 _SMART_ASSIST_MODE = "smart_assist"
+
+
+@dataclass(frozen=True)
+class _CeleryTaskPresenceSnapshot:
+    worker_task_ids: frozenset[str] = field(default_factory=frozenset)
+    queued_task_ids: frozenset[str] = field(default_factory=frozenset)
+    unacked_task_ids: frozenset[str] = field(default_factory=frozenset)
+    worker_count: int = 0
+    worker_available: bool = False
+    broker_available: bool = False
+    error: str | None = None
+
+    @property
+    def available(self) -> bool:
+        return self.worker_available or self.broker_available
+
+    def task_presence(self, task_id: str | None) -> str:
+        normalized = _normalize_task_id(task_id)
+        if not normalized:
+            return "unknown"
+        if normalized in self.worker_task_ids:
+            return "worker"
+        if normalized in self.queued_task_ids:
+            return "queued"
+        if normalized in self.unacked_task_ids:
+            return "unacked"
+        return "missing"
 
 
 class _SingleActiveOrchestratorLease:
@@ -513,6 +541,206 @@ def _step_dispatch_stale_timeout_seconds(step_name: str) -> int:
     )
 
 
+def _step_lost_task_grace_seconds(worker_started_at: datetime | None) -> int:
+    settings = get_settings()
+    heartbeat_grace = max(60, int(getattr(settings, "step_heartbeat_interval_sec", 20) or 20) * 4)
+    if worker_started_at is not None:
+        configured = int(getattr(settings, "step_lost_task_grace_sec", 120) or 120)
+    else:
+        configured = int(getattr(settings, "step_dispatch_lost_task_grace_sec", 300) or 300)
+    return max(heartbeat_grace, configured)
+
+
+def _normalize_task_id(value: object) -> str:
+    return str(value or "").strip()
+
+
+def _collect_task_ids_from_worker_payload(payload: object) -> set[str]:
+    task_ids: set[str] = set()
+    if isinstance(payload, list | tuple):
+        for item in payload:
+            task_ids.update(_collect_task_ids_from_worker_payload(item))
+        return task_ids
+    if not isinstance(payload, dict):
+        return task_ids
+
+    for key in ("id", "task_id"):
+        task_id = _normalize_task_id(payload.get(key))
+        if task_id:
+            task_ids.add(task_id)
+
+    request = payload.get("request")
+    if isinstance(request, dict):
+        task_ids.update(_collect_task_ids_from_worker_payload(request))
+
+    headers = payload.get("headers")
+    if isinstance(headers, dict):
+        task_id = _normalize_task_id(headers.get("id"))
+        if task_id:
+            task_ids.add(task_id)
+
+    properties = payload.get("properties")
+    if isinstance(properties, dict):
+        task_id = _normalize_task_id(properties.get("correlation_id"))
+        if task_id:
+            task_ids.add(task_id)
+
+    return task_ids
+
+
+def _extract_broker_message_task_id(raw_message: object) -> str:
+    message = raw_message
+    if isinstance(message, bytes):
+        try:
+            message = message.decode("utf-8")
+        except UnicodeDecodeError:
+            return ""
+    if isinstance(message, str):
+        try:
+            message = json.loads(message)
+        except json.JSONDecodeError:
+            return ""
+    if isinstance(message, list | tuple):
+        message = message[0] if message else {}
+    if not isinstance(message, dict):
+        return ""
+
+    headers = message.get("headers")
+    if isinstance(headers, dict):
+        task_id = _normalize_task_id(headers.get("id"))
+        if task_id:
+            return task_id
+
+    properties = message.get("properties")
+    if isinstance(properties, dict):
+        task_id = _normalize_task_id(properties.get("correlation_id"))
+        if task_id:
+            return task_id
+    return ""
+
+
+def _collect_redis_broker_task_ids(queue_names: set[str]) -> tuple[set[str], set[str], bool]:
+    settings = get_settings()
+    try:
+        from redis import Redis
+
+        client = Redis.from_url(
+            str(getattr(settings, "celery_broker_url", "") or getattr(settings, "redis_url", "")),
+            decode_responses=True,
+            socket_connect_timeout=0.5,
+            socket_timeout=0.5,
+        )
+    except Exception:
+        logger.debug("Failed to create Redis client for task recovery", exc_info=True)
+        return set(), set(), False
+
+    queued_task_ids: set[str] = set()
+    unacked_task_ids: set[str] = set()
+    try:
+        for queue_name in sorted(queue_names):
+            for raw_message in client.lrange(queue_name, 0, -1):
+                task_id = _extract_broker_message_task_id(raw_message)
+                if task_id:
+                    queued_task_ids.add(task_id)
+
+        if client.type("unacked") == "hash":
+            for raw_message in client.hvals("unacked"):
+                task_id = _extract_broker_message_task_id(raw_message)
+                if task_id:
+                    unacked_task_ids.add(task_id)
+    except Exception:
+        logger.debug("Failed to inspect Redis broker task ids for recovery", exc_info=True)
+        return queued_task_ids, unacked_task_ids, False
+    finally:
+        try:
+            client.close()
+        except Exception:
+            pass
+    return queued_task_ids, unacked_task_ids, True
+
+
+def _collect_celery_task_presence_snapshot() -> _CeleryTaskPresenceSnapshot:
+    settings = get_settings()
+    worker_task_ids: set[str] = set()
+    worker_names: set[str] = set()
+    queued_task_ids: set[str] = set()
+    unacked_task_ids: set[str] = set()
+    errors: list[str] = []
+
+    try:
+        from roughcut.pipeline.celery_app import celery_app
+
+        timeout = max(0.2, float(getattr(settings, "step_recovery_inspect_timeout_sec", 1.0) or 1.0))
+        inspector = celery_app.control.inspect(timeout=timeout)
+        for method_name in ("active", "reserved", "scheduled"):
+            try:
+                payload = getattr(inspector, method_name)() or {}
+            except Exception as exc:
+                errors.append(f"{method_name}: {exc}")
+                continue
+            if not isinstance(payload, dict):
+                continue
+            worker_names.update(str(name) for name in payload.keys() if str(name).strip())
+            for tasks in payload.values():
+                worker_task_ids.update(_collect_task_ids_from_worker_payload(tasks))
+
+        if not worker_names:
+            try:
+                active_queues = inspector.active_queues() or {}
+            except Exception as exc:
+                errors.append(f"active_queues: {exc}")
+            else:
+                if isinstance(active_queues, dict):
+                    worker_names.update(str(name) for name in active_queues.keys() if str(name).strip())
+    except Exception as exc:
+        errors.append(f"inspect: {exc}")
+
+    try:
+        queued_task_ids, unacked_task_ids, broker_available = _collect_redis_broker_task_ids(set(STEP_QUEUES.values()))
+    except Exception as exc:
+        errors.append(f"redis: {exc}")
+        broker_available = False
+
+    return _CeleryTaskPresenceSnapshot(
+        worker_task_ids=frozenset(worker_task_ids),
+        queued_task_ids=frozenset(queued_task_ids),
+        unacked_task_ids=frozenset(unacked_task_ids),
+        worker_count=len(worker_names),
+        worker_available=bool(worker_names),
+        broker_available=broker_available,
+        error="; ".join(errors) if errors else None,
+    )
+
+
+def _lost_task_recovery_detail(
+    step: JobStep,
+    *,
+    snapshot: _CeleryTaskPresenceSnapshot,
+) -> tuple[str, str] | None:
+    if not snapshot.available:
+        return None
+    task_id = _normalize_task_id((step.metadata_ or {}).get("task_id"))
+    if not task_id:
+        return None
+
+    presence = snapshot.task_presence(task_id)
+    if presence == "worker":
+        return None
+    if presence == "queued":
+        return None
+    if presence == "unacked":
+        return (
+            presence,
+            "检测到步骤心跳停止，且 Celery 任务只滞留在 broker unacked 集合中，调度器已自动回收并重新入队。",
+        )
+    if presence == "missing":
+        return (
+            presence,
+            "检测到步骤心跳停止，且 Celery worker、队列与 unacked 集合中均找不到当前任务，调度器已自动回收并重新入队。",
+        )
+    return None
+
+
 def _step_worker_started_at(step: JobStep) -> datetime | None:
     metadata = step.metadata_ or {}
     dispatched: datetime | None = None
@@ -641,6 +869,7 @@ async def _recover_stale_running_steps(session) -> None:
         return
 
     now = datetime.now(timezone.utc)
+    task_presence_snapshot: _CeleryTaskPresenceSnapshot | None = None
     result = await session.execute(
         select(JobStep)
         .join(Job, Job.id == JobStep.job_id)
@@ -684,7 +913,22 @@ async def _recover_stale_running_steps(session) -> None:
             if worker_started_at is not None
             else _step_dispatch_stale_timeout_seconds(step.step_name)
         )
-        if (now - last_heartbeat_at).total_seconds() < stale_after:
+        heartbeat_age_sec = (now - last_heartbeat_at).total_seconds()
+        lost_task_presence: str | None = None
+        lost_task_detail: str | None = None
+        lost_task_grace = _step_lost_task_grace_seconds(worker_started_at)
+        if (
+            bool(getattr(settings, "step_lost_task_recovery_enabled", True))
+            and heartbeat_age_sec >= lost_task_grace
+            and _normalize_task_id((step.metadata_ or {}).get("task_id"))
+        ):
+            if task_presence_snapshot is None:
+                task_presence_snapshot = _collect_celery_task_presence_snapshot()
+            lost_task_result = _lost_task_recovery_detail(step, snapshot=task_presence_snapshot)
+            if lost_task_result is not None:
+                lost_task_presence, lost_task_detail = lost_task_result
+
+        if lost_task_detail is None and heartbeat_age_sec < stale_after:
             continue
 
         from roughcut.recovery import stuck_step_recovery as stuck_step_recovery_mod
@@ -694,7 +938,7 @@ async def _recover_stale_running_steps(session) -> None:
                 session,
                 job,
                 step,
-                stale_after_sec=stale_after,
+                stale_after_sec=lost_task_grace if lost_task_detail else stale_after,
                 applied_action="reset_to_pending",
                 now=now,
                 allow_acp=False,
@@ -707,7 +951,13 @@ async def _recover_stale_running_steps(session) -> None:
         metadata.pop("elapsed_seconds", None)
         if previous_task_id:
             metadata["last_task_id"] = previous_task_id
-        if worker_started_at is not None:
+        if lost_task_detail:
+            metadata["detail"] = lost_task_detail
+            metadata["recovery_presence"] = lost_task_presence
+            metadata["recovery_worker_count"] = task_presence_snapshot.worker_count if task_presence_snapshot else 0
+            if task_presence_snapshot and task_presence_snapshot.error:
+                metadata["recovery_presence_error"] = task_presence_snapshot.error
+        elif worker_started_at is not None:
             metadata["detail"] = f"检测到步骤心跳超时({stale_after}s)，调度器已自动回收并重新入队。"
         else:
             metadata["detail"] = f"检测到步骤派发后长期未被工作进程领取({stale_after}s)，调度器已自动回收并重新入队。"
@@ -718,7 +968,11 @@ async def _recover_stale_running_steps(session) -> None:
             _mark_step_retry_exhausted(
                 step,
                 now=now,
-                detail=f"检测到步骤超时({stale_after}s)，但已达到最大重试次数({MAX_ATTEMPTS})，调度器已停止自动重试。",
+                detail=(
+                    f"{lost_task_detail}但已达到最大重试次数({MAX_ATTEMPTS})，调度器已停止自动重试。"
+                    if lost_task_detail
+                    else f"检测到步骤超时({stale_after}s)，但已达到最大重试次数({MAX_ATTEMPTS})，调度器已停止自动重试。"
+                ),
             )
             if job is not None:
                 job.status = "failed"
@@ -726,11 +980,12 @@ async def _recover_stale_running_steps(session) -> None:
                 job.updated_at = now
                 await _cleanup_terminal_job_files(session, job, purge_deliverables=True)
             logger.error(
-                "Recovered stale running step but retry exhausted job=%s step=%s previous_task_id=%s stale_after=%ss",
+                "Recovered stale running step but retry exhausted job=%s step=%s previous_task_id=%s stale_after=%ss presence=%s",
                 step.job_id,
                 step.step_name,
                 previous_task_id,
-                stale_after,
+                lost_task_grace if lost_task_detail else stale_after,
+                lost_task_presence or "",
             )
             continue
 
@@ -755,11 +1010,12 @@ async def _recover_stale_running_steps(session) -> None:
             job.updated_at = now
 
         logger.warning(
-            "Recovered stale running step job=%s step=%s previous_task_id=%s stale_after=%ss",
+            "Recovered stale running step job=%s step=%s previous_task_id=%s stale_after=%ss presence=%s",
             step.job_id,
             step.step_name,
             previous_task_id,
-            stale_after,
+            lost_task_grace if lost_task_detail else stale_after,
+            lost_task_presence or "",
         )
 
 

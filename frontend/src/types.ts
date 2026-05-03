@@ -174,6 +174,12 @@ export type JobManualEditSubtitleOverride = {
   delete?: boolean;
 };
 
+export type JobManualSubtitleReplacement = {
+  original: string;
+  replacement: string;
+  occurrence_count?: number;
+};
+
 export type JobManualVideoTransform = {
   rotation_cw: number;
   aspect_ratio?: string | null;
@@ -213,6 +219,7 @@ export type JobManualRotationDetectResponse = {
 export type JobManualEditApplyPayload = {
   keep_segments: Array<{ start: number; end: number }>;
   subtitle_overrides?: JobManualEditSubtitleOverride[];
+  subtitle_replacements?: JobManualSubtitleReplacement[];
   video_transform?: JobManualVideoTransform | null;
   video_summary?: string | null;
   base_timeline_id?: string;
@@ -234,6 +241,12 @@ export type JobManualEditPreviewAssets = {
   sample_rate: number;
   peaks: number[];
   peak_count: number;
+  audio_peak: number;
+  audio_rms: number;
+  audio_lufs: number;
+  audio_true_peak_db: number;
+  target_lufs: number;
+  auto_volume_gain: number;
   thumbnail_urls: string[];
   thumbnail_items: Array<{ url: string; time_sec: number }>;
   cached: boolean;

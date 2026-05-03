@@ -14,6 +14,7 @@ type JobUploadPanelProps = {
   workflowTemplateOptions: SelectOption[];
   workflowModeOptions: SelectOption[];
   enhancementOptions: SelectOption[];
+  outputDirHistory?: string[];
   onChange: (next: UploadForm) => void;
   onSubmit: () => void;
   isSubmitting: boolean;
@@ -42,6 +43,7 @@ export function JobUploadPanel({
   workflowTemplateOptions,
   workflowModeOptions,
   enhancementOptions,
+  outputDirHistory = [],
   onChange,
   onSubmit,
   isSubmitting,
@@ -104,16 +106,36 @@ export function JobUploadPanel({
           onChange={(event) => onChange({ ...upload, jobFlowMode: event.target.value })}
           options={jobFlowModeOptions(t)}
         />
-        <label>
-          <span>{t("jobs.upload.outputDir")}</span>
-          <input
-            className="input"
-            type="text"
-            value={upload.outputDir}
-            onChange={(event) => onChange({ ...upload, outputDir: event.target.value })}
-            placeholder={t("jobs.upload.outputDir")}
-          />
-        </label>
+        <div className="output-dir-field">
+          <label>
+            <span>{t("jobs.upload.outputDir")}</span>
+            <input
+              className="input"
+              type="text"
+              value={upload.outputDir}
+              onChange={(event) => onChange({ ...upload, outputDir: event.target.value })}
+              placeholder={t("jobs.upload.outputDir")}
+            />
+          </label>
+          {outputDirHistory.length > 0 ? (
+            <div className="output-dir-history" aria-label={t("jobs.upload.outputDirHistory")}>
+              <span className="muted">{t("jobs.upload.outputDirHistory")}</span>
+              <div className="output-dir-history-list">
+                {outputDirHistory.map((outputDir) => (
+                  <button
+                    key={outputDir}
+                    type="button"
+                    className="button ghost button-sm output-dir-history-button"
+                    onClick={() => onChange({ ...upload, outputDir })}
+                    title={outputDir}
+                  >
+                    {outputDir}
+                  </button>
+                ))}
+              </div>
+            </div>
+          ) : null}
+        </div>
         <SelectField
           label={t("jobs.upload.workflowMode")}
           value={upload.workflowMode}

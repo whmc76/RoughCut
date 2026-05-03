@@ -4,6 +4,12 @@ import uuid
 
 import pytest
 
+from roughcut.creative.modes import (
+    build_active_enhancement_mode_options,
+    build_mode_catalog,
+    normalize_enhancement_modes,
+    resolve_live_batch_enhancement_modes,
+)
 import roughcut.pipeline.orchestrator as orchestrator
 from roughcut.db.models import Job, JobStep
 from roughcut.pipeline.steps import _drop_soft_content_understanding_blockers, _finalize_content_profile_review_state
@@ -36,6 +42,22 @@ class _FakeStepSession:
 
     async def execute(self, _stmt):
         return _FakeExecuteResult(self._steps)
+
+
+def test_auto_review_is_not_a_selectable_enhancement_mode() -> None:
+    options = build_active_enhancement_mode_options()
+    catalog = build_mode_catalog()
+
+    assert "auto_review" not in {item["value"] for item in options}
+    assert "auto_review" not in {item["key"] for item in catalog["enhancement_modes"]}
+
+
+def test_legacy_auto_review_enhancement_mode_is_dropped_from_new_configs() -> None:
+    assert normalize_enhancement_modes(["avatar_commentary", "auto_review", "ai_effects"]) == [
+        "avatar_commentary",
+        "ai_effects",
+    ]
+    assert "auto_review" not in resolve_live_batch_enhancement_modes(None)
 
 
 def test_product_identity_gap_is_warning_not_blocking_review() -> None:

@@ -5,7 +5,6 @@ from typing import Final
 
 DEFAULT_WORKFLOW_MODE: Final[str] = "standard_edit"
 DEFAULT_LIVE_BATCH_ENHANCEMENT_MODES: Final[tuple[str, ...]] = (
-    "auto_review",
     "avatar_commentary",
     "ai_effects",
 )
@@ -64,6 +63,7 @@ _ENHANCEMENT_MODES: Final[dict[str, dict[str, object]]] = {
         "key": "auto_review",
         "kind": "enhancement",
         "status": "active",
+        "selectable": False,
         "title": "异常门自动放行",
         "tagline": "默认全自动跑完，只在内容、字幕或质量门发现阻塞异常时暂停。",
         "summary": "内容画像与成片核对不再作为常规人工节点；低置信度进入自动质量复跑，阻塞异常才进入人工处理。",
@@ -155,14 +155,18 @@ def build_active_enhancement_mode_options() -> list[dict[str, str]]:
     return [
         {"value": mode["key"], "label": str(mode["title"])}
         for mode in _ENHANCEMENT_MODES.values()
-        if mode["status"] == "active"
+        if mode["status"] == "active" and mode.get("selectable", True)
     ]
 
 
 def build_mode_catalog() -> dict[str, list[dict[str, object]]]:
     return {
         "workflow_modes": [deepcopy(mode) for mode in _WORKFLOW_MODES.values()],
-        "enhancement_modes": [deepcopy(mode) for mode in _ENHANCEMENT_MODES.values()],
+        "enhancement_modes": [
+            deepcopy(mode)
+            for mode in _ENHANCEMENT_MODES.values()
+            if mode.get("selectable", True)
+        ],
     }
 
 
@@ -188,6 +192,8 @@ def normalize_enhancement_modes(values: list[str] | tuple[str, ...] | None) -> l
         mode = _ENHANCEMENT_MODES.get(normalized)
         if mode is None or mode["status"] != "active":
             raise ValueError(f"Unsupported enhancement_mode: {normalized}")
+        if not mode.get("selectable", True):
+            continue
         if normalized in seen:
             continue
         seen.add(normalized)
@@ -223,7 +229,7 @@ def build_job_creative_profile(*, workflow_mode: str, enhancement_modes: list[st
         "execution_state": execution_state,
         "implementation_notes": [
             "长文本转视频当前只保留方案与接口占位，不进入现有已有视频主流程。",
-            "异常门自动放行、多平台版本适配、数字人解说、智能剪辑特效与 AI 导演当前作为通用增强能力挂载到标准成片任务。",
+            "多平台版本适配、数字人解说、智能剪辑特效与 AI 导演当前作为通用增强能力挂载到标准成片任务。",
             "TTS 方案优先支持 IndexTTS2 与 RunningHub 这类真实服务。",
             "素材库策略要求走较新素材，不使用老旧缓存素材。",
         ],

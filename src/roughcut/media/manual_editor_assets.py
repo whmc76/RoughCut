@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import hashlib
 import json
+import math
 from pathlib import Path
 import subprocess
 import wave
@@ -12,8 +13,11 @@ import uuid
 from roughcut.config import get_settings
 
 MANUAL_EDITOR_PREVIEW_ARTIFACT_TYPE = "manual_editor_preview_assets"
-MANUAL_EDITOR_PREVIEW_ASSET_VERSION = 2
+MANUAL_EDITOR_PREVIEW_ASSET_VERSION = 5
 MANUAL_EDITOR_PREVIEW_STATUS_FILENAME = "status.json"
+PREVIEW_AUDIO_TARGET_LUFS = -16.0
+PREVIEW_AUDIO_MIN_GAIN = 0.35
+PREVIEW_AUDIO_MAX_GAIN = 12.0
 
 
 def manual_editor_asset_dir(job_id: uuid.UUID | str) -> Path:
@@ -81,9 +85,9 @@ def ensure_manual_editor_preview_assets(
             status_payload = _write_asset_status(
                 asset_dir,
                 status="warming",
-                stage="waveform_peaks",
+                stage="loudness_analysis",
                 progress=0.45,
-                detail="Calculating waveform peaks",
+                detail="Measuring preview loudness and waveform peaks",
             )
             peaks_payload = _generate_waveform_peaks(audio_path, duration_sec=duration_sec)
             peaks_path.write_text(json.dumps(peaks_payload, ensure_ascii=False), encoding="utf-8")
@@ -135,6 +139,12 @@ def ensure_manual_editor_preview_assets(
         "sample_rate": int(peaks_payload.get("sample_rate") or 16000),
         "peaks": list(peaks_payload.get("peaks") or []),
         "peak_count": len(list(peaks_payload.get("peaks") or [])),
+        "audio_peak": float(peaks_payload.get("audio_peak") or 0.0),
+        "audio_rms": float(peaks_payload.get("audio_rms") or 0.0),
+        "audio_lufs": float(peaks_payload.get("audio_lufs") or 0.0),
+        "audio_true_peak_db": float(peaks_payload.get("audio_true_peak_db") or 0.0),
+        "target_lufs": PREVIEW_AUDIO_TARGET_LUFS,
+        "auto_volume_gain": float(peaks_payload.get("auto_volume_gain") or 1.0),
         "thumbnail_paths": [str(item["path"]) for item in thumbnail_items],
         "thumbnail_items": [
             {"path": str(item["path"]), "time_sec": float(item["time_sec"])}
@@ -176,6 +186,12 @@ def load_manual_editor_preview_assets(
             "sample_rate": 16000,
             "peaks": [],
             "peak_count": 0,
+            "audio_peak": 0.0,
+            "audio_rms": 0.0,
+            "audio_lufs": 0.0,
+            "audio_true_peak_db": 0.0,
+            "target_lufs": PREVIEW_AUDIO_TARGET_LUFS,
+            "auto_volume_gain": 1.0,
             "thumbnail_paths": [],
             "thumbnail_items": [],
             "cached": False,
@@ -191,6 +207,12 @@ def load_manual_editor_preview_assets(
         "sample_rate": int(peaks_payload.get("sample_rate") or 16000),
         "peaks": list(peaks_payload.get("peaks") or []),
         "peak_count": len(list(peaks_payload.get("peaks") or [])),
+        "audio_peak": float(peaks_payload.get("audio_peak") or 0.0),
+        "audio_rms": float(peaks_payload.get("audio_rms") or 0.0),
+        "audio_lufs": float(peaks_payload.get("audio_lufs") or 0.0),
+        "audio_true_peak_db": float(peaks_payload.get("audio_true_peak_db") or 0.0),
+        "target_lufs": PREVIEW_AUDIO_TARGET_LUFS,
+        "auto_volume_gain": float(peaks_payload.get("auto_volume_gain") or 1.0),
         "thumbnail_paths": [str(item["path"]) for item in thumbnail_items],
         "thumbnail_items": [
             {"path": str(item["path"]), "time_sec": float(item["time_sec"])}
@@ -251,27 +273,84 @@ def _generate_waveform_peaks(audio_path: Path, *, duration_sec: float, target_po
         point_count = target_points or max(800, min(16000, int(max(resolved_duration, duration_sec or 0.0) * 25)))
         frames_per_peak = max(1, frame_count // point_count)
         peaks: list[float] = []
+        peak = 0.0
+        square_sum = 0.0
+        sample_count = 0
         for _ in range(0, frame_count, frames_per_peak):
             frames = wav.readframes(frames_per_peak)
             if not frames:
                 break
-            peaks.append(round(_peak_from_pcm(frames, sample_width=sample_width, channels=channels), 4))
+            chunk_peak, chunk_square_sum, chunk_sample_count = _audio_stats_from_pcm(
+                frames,
+                sample_width=sample_width,
+                channels=channels,
+            )
+            peak = max(peak, chunk_peak)
+            square_sum += chunk_square_sum
+            sample_count += chunk_sample_count
+            peaks.append(round(chunk_peak, 4))
+    rms = math.sqrt(square_sum / sample_count) if sample_count > 0 else 0.0
+    estimated_lufs = _estimated_lufs_from_rms(rms)
+    estimated_true_peak_db = _db_from_amplitude(peak)
     return {
         "duration_sec": round(float(resolved_duration or duration_sec or 0.0), 3),
         "sample_rate": int(sample_rate or 16000),
         "peaks": peaks,
+        "audio_peak": round(peak, 4),
+        "audio_rms": round(rms, 4),
+        "audio_lufs": round(estimated_lufs, 2) if estimated_lufs is not None else 0.0,
+        "audio_true_peak_db": round(estimated_true_peak_db, 2) if estimated_true_peak_db is not None else 0.0,
+        "target_lufs": PREVIEW_AUDIO_TARGET_LUFS,
+        "auto_volume_gain": _recommended_preview_gain(audio_lufs=estimated_lufs, audio_rms=rms),
     }
 
 
 def _peak_from_pcm(frames: bytes, *, sample_width: int, channels: int) -> float:
+    peak, _square_sum, _sample_count = _audio_stats_from_pcm(frames, sample_width=sample_width, channels=channels)
+    return peak
+
+
+def _audio_stats_from_pcm(frames: bytes, *, sample_width: int, channels: int) -> tuple[float, float, int]:
     if sample_width != 2:
-        return 0.0
+        return 0.0, 0.0, 0
     peak = 0
+    square_sum = 0.0
+    sample_count = 0
     step = max(2, sample_width * max(1, channels))
     for offset in range(0, len(frames) - 1, step):
         sample = int.from_bytes(frames[offset : offset + 2], byteorder="little", signed=True)
         peak = max(peak, abs(sample))
-    return min(1.0, peak / 32768.0)
+        normalized = sample / 32768.0
+        square_sum += normalized * normalized
+        sample_count += 1
+    return min(1.0, peak / 32768.0), square_sum, sample_count
+
+
+def _recommended_preview_gain(*, audio_lufs: float | None = None, audio_rms: float = 0.0, audio_peak: float | None = None) -> float:
+    del audio_peak
+    if audio_lufs is not None and math.isfinite(audio_lufs):
+        gain = 10 ** ((PREVIEW_AUDIO_TARGET_LUFS - float(audio_lufs)) / 20.0)
+        return round(max(PREVIEW_AUDIO_MIN_GAIN, min(PREVIEW_AUDIO_MAX_GAIN, gain)), 3)
+    rms = max(0.0, min(1.0, float(audio_rms or 0.0)))
+    if rms <= 0.0001:
+        return 1.0
+    target_rms = 10 ** (PREVIEW_AUDIO_TARGET_LUFS / 20.0)
+    gain = target_rms / rms
+    return round(max(PREVIEW_AUDIO_MIN_GAIN, min(PREVIEW_AUDIO_MAX_GAIN, gain)), 3)
+
+
+def _estimated_lufs_from_rms(audio_rms: float) -> float | None:
+    rms = max(0.0, min(1.0, float(audio_rms or 0.0)))
+    if rms <= 0.0001:
+        return None
+    return _db_from_amplitude(rms)
+
+
+def _db_from_amplitude(amplitude: float) -> float | None:
+    value = max(0.0, min(1.0, float(amplitude or 0.0)))
+    if value <= 0.0001:
+        return None
+    return 20.0 * math.log10(value)
 
 
 def _generate_preview_thumbnails(source_path: Path, *, asset_dir: Path, duration_sec: float) -> list[tuple[Path, float]]:
@@ -315,7 +394,7 @@ def _thumbnail_timestamps(duration_sec: float, *, target_count: int | None = Non
     duration = max(0.0, float(duration_sec or 0.0))
     if duration <= 0.0:
         return []
-    count = target_count or max(5, min(48, int(duration / 12.0) + 1))
+    count = target_count or max(5, min(18, int(duration / 30.0) + 1))
     if count <= 1:
         return [max(0.0, min(duration - 0.1, duration * 0.5))]
     return [

@@ -16,6 +16,7 @@ frontend/node_modules/
 frontend/dist/
 frontend/.vite/
 frontend/*.tsbuildinfo
+frontend/*.log
 frontend/vite.config.js
 frontend/vite.config.d.ts
 logs/llm-benchmarks/
