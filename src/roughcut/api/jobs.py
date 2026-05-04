@@ -1463,6 +1463,9 @@ def _manual_editor_detail_for_job_status(status_value: str) -> str | None:
 
 def _manual_editor_prerequisite_detail(steps: list[JobStep] | None) -> str | None:
     step_map = {step.step_name: step for step in (steps or [])}
+    edit_plan_step = step_map.get("edit_plan")
+    if edit_plan_step is not None and edit_plan_step.status == "done":
+        return None
     for step_name in PIPELINE_STEPS:
         step = step_map.get(step_name)
         if step_name == "edit_plan":
