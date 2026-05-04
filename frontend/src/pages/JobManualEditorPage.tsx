@@ -88,7 +88,7 @@ export function JobManualEditorPage() {
     queryKey: ["job-manual-editor-assets", jobId],
     queryFn: () => api.warmJobManualEditorAssets(jobId),
     enabled: Boolean(jobId && manualEditor.data?.source_url),
-    refetchInterval: (query) => (query.state.data?.ready ? false : 2_500),
+    refetchInterval: (query) => (query.state.data?.ready || query.state.data?.status === "failed" ? false : 2_500),
     staleTime: 10_000,
     retry: 1,
   });

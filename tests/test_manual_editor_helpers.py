@@ -10,10 +10,15 @@ from roughcut.api.jobs import (
     _build_editorial_segments_from_keep_segments,
     _build_otio_style_manual_tracks,
     _clean_manual_editor_subtitle_projection,
+    _download_file_cache_get,
+    _download_file_cache_set,
+    _invalidate_job_file_response_cache,
     _manual_editor_subtitle_payload,
     _manual_editor_apply_conflict_detail,
     _manual_editor_change_plan,
     _manual_editor_prerequisite_detail,
+    _source_file_cache_get,
+    _source_file_cache_set,
     _validate_manual_editor_base_revision,
     _manual_keep_segments_changed,
     _normalize_manual_keep_segments,
@@ -408,3 +413,25 @@ def test_manual_editor_preview_asset_status_is_normalized() -> None:
     assert status["progress"] == 1.0
     assert status["detail"] == "working"
     assert status["error"] is None
+
+
+def test_file_response_cache_validates_and_invalidates_local_files(tmp_path) -> None:
+    job_id = uuid4()
+    source_path = tmp_path / "source.mp4"
+    download_path = tmp_path / "download.mp4"
+    source_path.write_bytes(b"source")
+    download_path.write_bytes(b"download")
+
+    _source_file_cache_set(job_id, source_path)
+    _download_file_cache_set(job_id, "packaged", download_path)
+
+    assert _source_file_cache_get(job_id) == source_path
+    assert _download_file_cache_get(job_id, "packaged") == download_path
+
+    source_path.write_bytes(b"source changed")
+
+    assert _source_file_cache_get(job_id) is None
+
+    _invalidate_job_file_response_cache(job_id)
+
+    assert _download_file_cache_get(job_id, "packaged") is None

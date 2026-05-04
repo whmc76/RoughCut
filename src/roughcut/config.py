@@ -276,6 +276,10 @@ class Settings(BaseSettings):
 
     # Database
     database_url: str = "postgresql+asyncpg://roughcut:roughcut@localhost:5432/roughcut"
+    db_pool_size: int = Field(default=8, ge=1)
+    db_max_overflow: int = Field(default=8, ge=0)
+    db_pool_timeout_sec: float = Field(default=30.0, gt=0)
+    db_pool_recycle_sec: int = Field(default=1800, ge=0)
 
     # Redis / Celery
     redis_url: str = "redis://localhost:6379/0"

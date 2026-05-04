@@ -13,7 +13,7 @@ import uuid
 from roughcut.config import get_settings
 
 MANUAL_EDITOR_PREVIEW_ARTIFACT_TYPE = "manual_editor_preview_assets"
-MANUAL_EDITOR_PREVIEW_ASSET_VERSION = 5
+MANUAL_EDITOR_PREVIEW_ASSET_VERSION = 6
 MANUAL_EDITOR_PREVIEW_STATUS_FILENAME = "status.json"
 PREVIEW_AUDIO_TARGET_LUFS = -16.0
 PREVIEW_AUDIO_MIN_GAIN = 0.35
@@ -52,6 +52,7 @@ def ensure_manual_editor_preview_assets(
     asset_dir = manual_editor_asset_dir(job_id)
     asset_dir.mkdir(parents=True, exist_ok=True)
     audio_path = asset_dir / "proxy.wav"
+    video_path = asset_dir / "proxy.mp4"
     peaks_path = asset_dir / "peaks.json"
     manifest_path = manual_editor_asset_manifest_path(job_id)
     source_fingerprint = _source_fingerprint(source_path)
@@ -61,6 +62,7 @@ def ensure_manual_editor_preview_assets(
     cached = (
         manifest.get("version") == MANUAL_EDITOR_PREVIEW_ASSET_VERSION
         and manifest.get("source_fingerprint") == source_fingerprint
+        and video_path.exists()
         and audio_path.exists()
         and peaks_path.exists()
     )
@@ -77,8 +79,16 @@ def ensure_manual_editor_preview_assets(
             status_payload = _write_asset_status(
                 asset_dir,
                 status="warming",
+                stage="proxy_video",
+                progress=0.08,
+                detail="Generating browser preview video",
+            )
+            _generate_proxy_video(source_path, video_path)
+            status_payload = _write_asset_status(
+                asset_dir,
+                status="warming",
                 stage="proxy_audio",
-                progress=0.1,
+                progress=0.28,
                 detail="Generating waveform proxy audio",
             )
             _generate_proxy_audio(source_path, audio_path)
@@ -86,7 +96,7 @@ def ensure_manual_editor_preview_assets(
                 asset_dir,
                 status="warming",
                 stage="loudness_analysis",
-                progress=0.45,
+                progress=0.55,
                 detail="Measuring preview loudness and waveform peaks",
             )
             peaks_payload = _generate_waveform_peaks(audio_path, duration_sec=duration_sec)
@@ -95,7 +105,7 @@ def ensure_manual_editor_preview_assets(
                 asset_dir,
                 status="warming",
                 stage="thumbnails",
-                progress=0.7,
+                progress=0.78,
                 detail="Extracting timeline thumbnails",
             )
             thumbnails = _generate_preview_thumbnails(
@@ -106,6 +116,7 @@ def ensure_manual_editor_preview_assets(
             manifest = {
                 "version": MANUAL_EDITOR_PREVIEW_ASSET_VERSION,
                 "source_fingerprint": source_fingerprint,
+                "video_filename": video_path.name,
                 "audio_filename": audio_path.name,
                 "peaks_filename": peaks_path.name,
                 "thumbnail_items": [{"filename": path.name, "time_sec": time_sec} for path, time_sec in thumbnails],
@@ -134,6 +145,7 @@ def ensure_manual_editor_preview_assets(
     thumbnail_items = _manifest_thumbnail_items(manifest, asset_dir)
     return {
         "ready": True,
+        "video_path": str(video_path),
         "audio_path": str(audio_path),
         "duration_sec": round(float(peaks_payload.get("duration_sec") or duration_sec or 0.0), 3),
         "sample_rate": int(peaks_payload.get("sample_rate") or 16000),
@@ -163,6 +175,7 @@ def load_manual_editor_preview_assets(
 ) -> dict[str, Any]:
     asset_dir = manual_editor_asset_dir(job_id)
     audio_path = asset_dir / "proxy.wav"
+    video_path = asset_dir / "proxy.mp4"
     peaks_path = asset_dir / "peaks.json"
     manifest_path = manual_editor_asset_manifest_path(job_id)
     manifest = _read_json(manifest_path)
@@ -175,12 +188,14 @@ def load_manual_editor_preview_assets(
         bool(source_fingerprint)
         and manifest.get("version") == MANUAL_EDITOR_PREVIEW_ASSET_VERSION
         and manifest.get("source_fingerprint") == source_fingerprint
+        and video_path.exists()
         and audio_path.exists()
         and peaks_path.exists()
     )
     if not ready:
         return {
             "ready": False,
+            "video_path": str(video_path),
             "audio_path": str(audio_path),
             "duration_sec": round(float(duration_sec or 0.0), 3),
             "sample_rate": 16000,
@@ -202,6 +217,7 @@ def load_manual_editor_preview_assets(
     thumbnail_items = _manifest_thumbnail_items(manifest, asset_dir)
     return {
         "ready": True,
+        "video_path": str(video_path),
         "audio_path": str(audio_path),
         "duration_sec": round(float(peaks_payload.get("duration_sec") or duration_sec or 0.0), 3),
         "sample_rate": int(peaks_payload.get("sample_rate") or 16000),
@@ -261,6 +277,48 @@ def _generate_proxy_audio(source_path: Path, audio_path: Path) -> None:
     )
     if result.returncode != 0:
         raise RuntimeError(f"manual editor proxy audio failed: {result.stderr[-1000:]}")
+
+
+def _generate_proxy_video(source_path: Path, video_path: Path) -> None:
+    settings = get_settings()
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        str(source_path),
+        "-map",
+        "0:v:0",
+        "-map",
+        "0:a?",
+        "-vf",
+        "scale=1280:1280:force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "26",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "128k",
+        "-movflags",
+        "+faststart",
+        "-max_muxing_queue_size",
+        "1024",
+        str(video_path),
+    ]
+    result = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=max(60, min(int(getattr(settings, "ffmpeg_timeout_sec", 600) or 600), 1800)),
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"manual editor proxy video failed: {result.stderr[-1000:]}")
 
 
 def _generate_waveform_peaks(audio_path: Path, *, duration_sec: float, target_points: int | None = None) -> dict[str, Any]:

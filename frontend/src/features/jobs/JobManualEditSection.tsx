@@ -246,6 +246,8 @@ function previewAssetStageLabel(stage?: string | null) {
   switch (stage) {
     case "queued":
       return "已排队";
+    case "proxy_video":
+      return "生成视频代理";
     case "proxy_audio":
       return "生成音频代理";
     case "waveform_peaks":
@@ -701,6 +703,7 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
   const [videoSummary, setVideoSummary] = useState("");
   const [currentSourceTime, setCurrentSourceTime] = useState(0);
   const [isPreviewPlaying, setIsPreviewPlaying] = useState(false);
+  const [previewVideoLoadError, setPreviewVideoLoadError] = useState<string | null>(null);
   const [previewVolume, setPreviewVolume] = useState(1);
   const [previewMuted, setPreviewMuted] = useState(false);
   const [previewAutoVolumeEnabled, setPreviewAutoVolumeEnabled] = useState(true);
@@ -875,6 +878,7 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
   const currentVideoRotation = currentVideoTransform.rotation_cw;
   const hasVideoTransformEdits = JSON.stringify(currentVideoTransform) !== JSON.stringify(baseVideoTransform);
   const hasVideoSummaryEdits = currentVideoSummary !== baseVideoSummary;
+  const previewVideoUrl = previewAssets?.ready && previewAssets.video_url ? previewAssets.video_url : session.source_url;
   const waveformUrl = previewAssets?.ready && previewAssets.audio_url ? previewAssets.audio_url : "";
   const waveformPeaks = useMemo(
     () => (previewAssets?.peaks?.length ? [previewAssets.peaks] : undefined),
@@ -1532,9 +1536,22 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
 
   const rememberVideoMetadata = (event: SyntheticEvent<HTMLVideoElement>) => {
     const video = event.currentTarget;
+    setPreviewVideoLoadError(null);
     if (video.videoWidth > 0 && video.videoHeight > 0) {
       setSourceVideoSize({ width: video.videoWidth, height: video.videoHeight });
     }
+  };
+
+  const handlePreviewVideoError = (event: SyntheticEvent<HTMLVideoElement>) => {
+    const code = event.currentTarget.error?.code;
+    const message = code === MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED
+      ? "浏览器无法解码当前预览视频，正在使用兼容代理仍失败。请重新生成预览资产或检查 ffmpeg。"
+      : code === MediaError.MEDIA_ERR_NETWORK
+        ? "预览视频加载中断，请刷新后重试。"
+        : "预览视频加载失败，请刷新或重新生成预览资产。";
+    setPreviewVideoLoadError(message);
+    setIsPreviewPlaying(false);
+    timelinePlaybackRef.current = false;
   };
 
   const removeSelectedSegment = () => {
@@ -1974,7 +1991,7 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
     subtitleOverrides.length,
   ]);
 
-  const previewDisabled = !session.source_url;
+  const previewDisabled = !previewVideoUrl;
   useEffect(() => {
     const updateFloatingState = () => {
       const dock = previewDockRef.current;
@@ -2007,12 +2024,16 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
       window.removeEventListener("scroll", updateFloatingState);
       window.removeEventListener("resize", updateFloatingState);
     };
-  }, [previewDisabled, session.job_id, session.source_url]);
+  }, [previewDisabled, previewVideoUrl, session.job_id]);
 
   useEffect(() => {
     setFloatingPreviewPosition(null);
     floatingPreviewDragRef.current = null;
-  }, [session.job_id, session.source_url]);
+  }, [session.job_id, previewVideoUrl]);
+
+  useEffect(() => {
+    setPreviewVideoLoadError(null);
+  }, [previewVideoUrl]);
 
   const buildRotatedPreviewStyle = (rotationValue: number) => {
     const rotation = normalizeRotationValue(rotationValue);
@@ -2410,9 +2431,10 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
                   >
                     <div className="manual-editor-video-stage">
                       <video
+                        key={previewVideoUrl ?? "manual-preview"}
                         ref={videoRef}
                         className="manual-editor-video"
-                        src={session.source_url ?? undefined}
+                        src={previewVideoUrl ?? undefined}
                         preload="metadata"
                         playsInline
                         onLoadedMetadata={(event) => {
@@ -2420,6 +2442,7 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
                           fallbackPreviewElementVolume(event.currentTarget, previewVolume, previewMuted, previewAutoVolumeEnabled);
                         }}
                         onPlay={() => setIsPreviewPlaying(true)}
+                        onError={handlePreviewVideoError}
                         onTimeUpdate={syncPreviewTime}
                         onSeeked={syncPreviewTime}
                         onPause={() => {
@@ -2434,6 +2457,11 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
                         }}
                       />
                     </div>
+                    {previewVideoLoadError ? (
+                      <div className="manual-editor-video-error" onClick={(event) => event.stopPropagation()}>
+                        {previewVideoLoadError}
+                      </div>
+                    ) : null}
                     {isPreviewFloating ? (
                       <button
                         type="button"
@@ -2634,6 +2662,7 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
                 <span>{previewAssetStageLabel(previewAssets.stage)}</span>
                 <span>{previewAssetProgressPercent != null ? `${previewAssetProgressPercent}%` : previewAssets.ready ? "100%" : "0%"}</span>
                 <span>{previewAssets.ready ? `${previewAssets.peak_count} peaks` : "使用原片预览"}</span>
+                {previewAssets.ready && previewAssets.video_url ? <span>浏览器兼容视频代理</span> : null}
                 {previewAssets.ready ? <span>{previewMeasuredLufs.toFixed(1)} LUFS 至 {previewTargetLufs.toFixed(0)} LUFS</span> : null}
                 {previewAssets.ready ? <span>增益 {previewAutoVolumeGain.toFixed(2)}x</span> : null}
                 {previewAssets.asset_version ? <span>v{previewAssets.asset_version}</span> : null}

@@ -62,7 +62,7 @@ from roughcut.db.models import (
     Timeline,
     TranscriptSegment,
 )
-from roughcut.db.session import get_session
+from roughcut.db.session import get_session, get_session_factory
 from roughcut.pipeline.celery_app import celery_app
 from roughcut.pipeline.job_rerun import (
     JobRerunPlan,
@@ -197,6 +197,10 @@ _CONTENT_PROFILE_THUMBNAIL_LOCKS: dict[str, asyncio.Lock] = {}
 _CONTENT_PROFILE_THUMBNAIL_GENERATION_SEMAPHORE = asyncio.Semaphore(2)
 _CONTENT_PROFILE_THUMBNAIL_WARM_TASKS: dict[str, asyncio.Task] = {}
 _CONTENT_PROFILE_PLACEHOLDER_RETRY_SECONDS = 300
+_FILE_RESPONSE_CACHE_TTL_SEC = 300.0
+_FILE_RESPONSE_CACHE_MAX = 512
+_FILE_RESPONSE_CACHE_LOCK = threading.Lock()
+_FILE_RESPONSE_CACHE: dict[str, tuple[float, str, int, int]] = {}
 
 
 class FinalReviewDecisionIn(BaseModel):
@@ -383,6 +387,7 @@ class ManualEditorPreviewAssetsOut(BaseModel):
     status: str | None = None
     stage: str | None = None
     progress: float | None = None
+    video_url: str | None = None
     audio_url: str | None = None
     duration_sec: float = 0.0
     sample_rate: int = 16000
@@ -2000,6 +2005,108 @@ def _resolve_manual_editor_source_path(job: Job) -> Path | None:
     return None
 
 
+def _cached_local_file_stat(path: Path) -> tuple[int, int] | None:
+    try:
+        stat_result = path.stat()
+    except OSError:
+        return None
+    if not path.is_file():
+        return None
+    return int(stat_result.st_size), int(getattr(stat_result, "st_mtime_ns", int(stat_result.st_mtime * 1_000_000_000)))
+
+
+def _file_response_cache_key(namespace: str, job_id: uuid.UUID | str, variant: str = "") -> str:
+    suffix = f":{variant}" if variant else ""
+    return f"{namespace}:{job_id}{suffix}"
+
+
+def _get_cached_local_file(cache_key: str) -> Path | None:
+    now = time.monotonic()
+    with _FILE_RESPONSE_CACHE_LOCK:
+        entry = _FILE_RESPONSE_CACHE.get(cache_key)
+        if entry is None:
+            return None
+        expires_at, path_text, size_bytes, mtime_ns = entry
+        if expires_at <= now:
+            _FILE_RESPONSE_CACHE.pop(cache_key, None)
+            return None
+
+    path = Path(path_text)
+    stat_result = _cached_local_file_stat(path)
+    if stat_result != (size_bytes, mtime_ns):
+        _invalidate_file_response_cache_key(cache_key)
+        return None
+    return path
+
+
+def _set_cached_local_file(cache_key: str, path: Path) -> None:
+    stat_result = _cached_local_file_stat(path)
+    if stat_result is None:
+        return
+    size_bytes, mtime_ns = stat_result
+    now = time.monotonic()
+    with _FILE_RESPONSE_CACHE_LOCK:
+        if len(_FILE_RESPONSE_CACHE) >= _FILE_RESPONSE_CACHE_MAX:
+            expired_keys = [
+                key for key, (expires_at, _, _, _) in _FILE_RESPONSE_CACHE.items() if expires_at <= now
+            ]
+            for key in expired_keys:
+                _FILE_RESPONSE_CACHE.pop(key, None)
+            while len(_FILE_RESPONSE_CACHE) >= _FILE_RESPONSE_CACHE_MAX:
+                _FILE_RESPONSE_CACHE.pop(next(iter(_FILE_RESPONSE_CACHE)), None)
+        _FILE_RESPONSE_CACHE[cache_key] = (
+            now + _FILE_RESPONSE_CACHE_TTL_SEC,
+            str(path),
+            size_bytes,
+            mtime_ns,
+        )
+
+
+def _invalidate_file_response_cache_key(cache_key: str) -> None:
+    with _FILE_RESPONSE_CACHE_LOCK:
+        _FILE_RESPONSE_CACHE.pop(cache_key, None)
+
+
+def _invalidate_job_file_response_cache(job_id: uuid.UUID | str) -> None:
+    source_prefix = _file_response_cache_key("source", job_id)
+    download_prefix = _file_response_cache_key("download", job_id)
+    with _FILE_RESPONSE_CACHE_LOCK:
+        for key in list(_FILE_RESPONSE_CACHE):
+            if key == source_prefix or key.startswith(f"{download_prefix}:"):
+                _FILE_RESPONSE_CACHE.pop(key, None)
+
+
+def _source_file_cache_get(job_id: uuid.UUID | str) -> Path | None:
+    return _get_cached_local_file(_file_response_cache_key("source", job_id))
+
+
+def _source_file_cache_set(job_id: uuid.UUID | str, path: Path) -> None:
+    _set_cached_local_file(_file_response_cache_key("source", job_id), path)
+
+
+def _download_file_cache_get(job_id: uuid.UUID | str, variant: str) -> Path | None:
+    return _get_cached_local_file(_file_response_cache_key("download", job_id, variant))
+
+
+def _download_file_cache_set(job_id: uuid.UUID | str, variant: str, path: Path) -> None:
+    _set_cached_local_file(_file_response_cache_key("download", job_id, variant), path)
+
+
+def _media_type_for_path(path: Path) -> str:
+    suffix = path.suffix.lower()
+    if suffix == ".mp4":
+        return "video/mp4"
+    if suffix == ".wav":
+        return "audio/wav"
+    if suffix in {".jpg", ".jpeg"}:
+        return "image/jpeg"
+    if suffix == ".png":
+        return "image/png"
+    if suffix in {".srt", ".txt"}:
+        return "text/plain; charset=utf-8"
+    return "application/octet-stream"
+
+
 def _manual_editor_asset_path(job_id: uuid.UUID, filename: str) -> Path | None:
     safe_name = Path(str(filename or "")).name
     if not safe_name:
@@ -2035,6 +2142,7 @@ def _manual_editor_preview_assets_response(
         for item in list(payload.get("thumbnail_items") or [])
         if isinstance(item, dict) and Path(str(item.get("path") or "")).name
     ]
+    video_path = Path(str(payload.get("video_path") or ""))
     audio_path = Path(str(payload.get("audio_path") or ""))
     return ManualEditorPreviewAssetsOut(
         job_id=str(job_id),
@@ -2044,6 +2152,7 @@ def _manual_editor_preview_assets_response(
         status=str(payload.get("status") or ("ready" if is_ready else "missing")),
         stage=str(payload.get("stage") or ("ready" if is_ready else "not_started")),
         progress=float(payload.get("progress")) if payload.get("progress") is not None else (1.0 if is_ready else 0.0),
+        video_url=f"/api/v1/jobs/{job_id}/manual-editor/assets/{video_path.name}" if is_ready and video_path.name else None,
         audio_url=f"/api/v1/jobs/{job_id}/manual-editor/assets/{audio_path.name}" if is_ready and audio_path.name else None,
         duration_sec=float(payload.get("duration_sec") or 0.0),
         sample_rate=int(payload.get("sample_rate") or 16000),
@@ -2324,15 +2433,20 @@ async def _build_manual_editor_session(
 
 
 @router.get("/{job_id}/source/file")
-async def get_source_file(job_id: uuid.UUID, session: AsyncSession = Depends(get_session)):
-    job = await session.get(Job, job_id)
-    if not job:
-        raise HTTPException(status_code=404, detail="Job not found")
-    source_path = _resolve_manual_editor_source_path(job)
-    if source_path is None:
-        raise HTTPException(status_code=404, detail="Source media is not available locally for preview")
-    media_type = "video/mp4" if source_path.suffix.lower() == ".mp4" else "application/octet-stream"
-    return FileResponse(path=source_path, filename=source_path.name, media_type=media_type)
+async def get_source_file(job_id: uuid.UUID):
+    cached_path = _source_file_cache_get(job_id)
+    if cached_path is not None:
+        return FileResponse(path=cached_path, filename=cached_path.name, media_type=_media_type_for_path(cached_path))
+
+    async with get_session_factory()() as session:
+        job = await session.get(Job, job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="Job not found")
+        source_path = _resolve_manual_editor_source_path(job)
+        if source_path is None:
+            raise HTTPException(status_code=404, detail="Source media is not available locally for preview")
+    _source_file_cache_set(job_id, source_path)
+    return FileResponse(path=source_path, filename=source_path.name, media_type=_media_type_for_path(source_path))
 
 
 @router.get("/{job_id}/manual-editor/assets", response_model=ManualEditorPreviewAssetsOut)
@@ -2395,7 +2509,11 @@ async def warm_manual_editor_preview_assets(
     media_meta = media_meta_artifact.data_json if media_meta_artifact and isinstance(media_meta_artifact.data_json, dict) else {}
     duration_sec = float(media_meta.get("duration_sec") or media_meta.get("duration") or 0.0)
     payload = load_manual_editor_preview_assets(job_id=job.id, source_path=source_path, duration_sec=duration_sec)
-    if not payload.get("ready") and str(job.id) not in _MANUAL_EDITOR_ASSET_WARMUPS:
+    if (
+        not payload.get("ready")
+        and str(payload.get("status") or "") != "failed"
+        and str(job.id) not in _MANUAL_EDITOR_ASSET_WARMUPS
+    ):
         _MANUAL_EDITOR_ASSET_WARMUPS.add(str(job.id))
         payload = {**payload, **mark_manual_editor_preview_assets_queued(job.id)}
         background_tasks.add_task(_warm_manual_editor_preview_assets, job.id, source_path, duration_sec)
@@ -2403,21 +2521,16 @@ async def warm_manual_editor_preview_assets(
         job.id,
         payload,
         ready=bool(payload.get("ready", False)),
-        warming=not bool(payload.get("ready", False)),
+        warming=not bool(payload.get("ready", False)) and str(payload.get("status") or "") != "failed",
     )
 
 
 @router.get("/{job_id}/manual-editor/assets/{filename}")
-async def get_manual_editor_asset_file(job_id: uuid.UUID, filename: str, session: AsyncSession = Depends(get_session)):
-    job = await session.get(Job, job_id)
-    if not job:
-        raise HTTPException(status_code=404, detail="Job not found")
-    path = _manual_editor_asset_path(job.id, filename)
+async def get_manual_editor_asset_file(job_id: uuid.UUID, filename: str):
+    path = _manual_editor_asset_path(job_id, filename)
     if path is None:
         raise HTTPException(status_code=404, detail="Manual editor asset not found")
-    suffix = path.suffix.lower()
-    media_type = "audio/wav" if suffix == ".wav" else "image/jpeg" if suffix in {".jpg", ".jpeg"} else "application/octet-stream"
-    return FileResponse(path=path, filename=path.name, media_type=media_type)
+    return FileResponse(path=path, filename=path.name, media_type=_media_type_for_path(path))
 
 
 @router.get("/{job_id}/manual-editor/readiness", response_model=ManualEditorReadinessOut)
@@ -3269,7 +3382,8 @@ async def get_download_url(
     if variant_value not in {"packaged", "plain"}:
         raise HTTPException(status_code=400, detail="variant must be 'packaged' or 'plain'")
     render_output, artifact_payload = await _load_download_context(job_id, session)
-    _resolve_download_variant_path(render_output, artifact_payload, variant_value)
+    download_path = _resolve_download_variant_path(render_output, artifact_payload, variant_value)
+    _download_file_cache_set(job_id, variant_value, download_path)
     return {
         "url": f"/api/v1/jobs/{job_id}/download/file?variant={variant_value}",
         "expires_in": None,
@@ -3339,17 +3453,20 @@ async def download_selected_files_zip(
 async def download_rendered_file(
     job_id: uuid.UUID,
     variant: str = "packaged",
-    session: AsyncSession = Depends(get_session),
 ):
     variant_value = str(variant or "packaged").strip().lower()
     if variant_value not in {"packaged", "plain"}:
         raise HTTPException(status_code=400, detail="variant must be 'packaged' or 'plain'")
 
-    render_output, artifact_payload = await _load_download_context(job_id, session)
-    download_path = _resolve_download_variant_path(render_output, artifact_payload, variant_value)
-    filename = download_path.name
-    media_type = "video/mp4" if download_path.suffix.lower() == ".mp4" else "application/octet-stream"
-    return FileResponse(path=download_path, filename=filename, media_type=media_type)
+    cached_path = _download_file_cache_get(job_id, variant_value)
+    if cached_path is not None:
+        return FileResponse(path=cached_path, filename=cached_path.name, media_type=_media_type_for_path(cached_path))
+
+    async with get_session_factory()() as session:
+        render_output, artifact_payload = await _load_download_context(job_id, session)
+        download_path = _resolve_download_variant_path(render_output, artifact_payload, variant_value)
+    _download_file_cache_set(job_id, variant_value, download_path)
+    return FileResponse(path=download_path, filename=download_path.name, media_type=_media_type_for_path(download_path))
 
 
 @router.get("/{job_id}/publication/plan")
@@ -3647,6 +3764,7 @@ async def _clear_job_runtime_state(job_id: uuid.UUID, session: AsyncSession, *, 
         preserve_storage_keys=[source_path] if source_path else [],
     )
     _clear_content_profile_thumbnail_cache(job_id)
+    _invalidate_job_file_response_cache(job_id)
 
     await session.execute(
         delete(FactEvidence).where(FactEvidence.claim_id.in_(select(FactClaim.id).where(FactClaim.job_id == job_id)))

@@ -236,6 +236,7 @@ export type JobManualEditPreviewAssets = {
   status?: string | null;
   stage?: string | null;
   progress?: number | null;
+  video_url?: string | null;
   audio_url?: string | null;
   duration_sec: number;
   sample_rate: number;
