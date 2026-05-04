@@ -1,0 +1,56 @@
+x-moss-audio-common: &moss-audio-common
+  build:
+    context: .
+    dockerfile: deploy/moss-audio/Dockerfile
+    args:
+      BASE_IMAGE: ${MOSS_AUDIO_BASE_IMAGE:-pytorch/pytorch:2.9.1-cuda12.8-cudnn9-devel}
+      MOSS_AUDIO_INSTALL_OS_DEPS: ${MOSS_AUDIO_INSTALL_OS_DEPS:-true}
+  image: roughcut-moss-audio:local
+  gpus: all
+  ipc: host
+  shm_size: 16gb
+  environment:
+    HF_HOME: /models/huggingface
+    HUGGINGFACE_HUB_CACHE: /models/huggingface/hub
+    MOSS_AUDIO_IDLE_UNLOAD_SECONDS: ${MOSS_AUDIO_IDLE_UNLOAD_SECONDS:-10}
+    NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-all}
+    NVIDIA_DRIVER_CAPABILITIES: ${NVIDIA_DRIVER_CAPABILITIES:-compute,utility}
+  volumes:
+    - ${MOSS_AUDIO_HF_CACHE:-F:/roughcut_outputs/model-cache/huggingface}:/models/huggingface
+    - ./output/test/asr-bench/samples:/bench/audio:ro
+  restart: unless-stopped
+
+services:
+  moss-audio-8b-instruct:
+    <<: *moss-audio-common
+    profiles: ["moss-audio-8b-instruct"]
+    container_name: moss-audio-8b-instruct
+    ports:
+      - "${MOSS_AUDIO_INSTRUCT_PORT:-30080}:30000"
+    command:
+      - --model-path
+      - OpenMOSS-Team/MOSS-Audio-8B-Instruct
+
+  moss-audio-8b-instruct-bnb8:
+    <<: *moss-audio-common
+    profiles: ["moss-audio-8b-instruct-bnb8"]
+    container_name: moss-audio-8b-instruct-bnb8
+    ports:
+      - "${MOSS_AUDIO_INSTRUCT_BNB8_PORT:-30082}:30000"
+    command:
+      - --model-path
+      - OpenMOSS-Team/MOSS-Audio-8B-Instruct
+      - --quantization
+      - bnb-8bit
+
+  moss-audio-8b-instruct-bnb4:
+    <<: *moss-audio-common
+    profiles: ["moss-audio-8b-instruct-bnb4"]
+    container_name: moss-audio-8b-instruct-bnb4
+    ports:
+      - "${MOSS_AUDIO_INSTRUCT_BNB4_PORT:-30083}:30000"
+    command:
+      - --model-path
+      - OpenMOSS-Team/MOSS-Audio-8B-Instruct
+      - --quantization
+      - bnb-4bit

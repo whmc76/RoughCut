@@ -31,7 +31,7 @@ from roughcut.review.hotword_learning import extract_prompt_hotwords
 
 
 class LocalHTTPASRProvider(TranscriptionProvider):
-    def __init__(self, *, model_name: str = "local-asr-current") -> None:
+    def __init__(self, *, model_name: str = "moss-audio-8b-instruct") -> None:
         settings = get_settings()
         self._base_url = settings.local_asr_api_base_url.rstrip("/")
         self._transcribe_path = self._normalize_path(settings.local_asr_transcribe_path or "/transcribe")

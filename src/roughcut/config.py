@@ -100,7 +100,7 @@ TRANSCRIPTION_MODEL_OPTIONS: dict[str, list[str]] = {
         "gpt-4o-mini-transcribe",
     ],
     "local_http_asr": [
-        "local-asr-current",
+        "moss-audio-8b-instruct",
     ],
 }
 MULTIMODAL_FALLBACK_PROVIDER_VALUES: tuple[str, ...] = MULTIMODAL_PROVIDER_VALUES
@@ -182,8 +182,10 @@ DEFAULT_TRANSCRIPTION_MODELS: dict[str, str] = {
     "funasr": "sensevoice-small",
     "faster_whisper": "large-v3",
     "openai": "gpt-4o-transcribe",
-    "local_http_asr": "local-asr-current",
+    "local_http_asr": "moss-audio-8b-instruct",
 }
+LEGACY_LOCAL_HTTP_ASR_MODELS: tuple[str, ...] = ("local-asr-current", "vibevoice-asr-int8")
+LEGACY_LOCAL_HTTP_ASR_URLS: tuple[str, ...] = ("http://127.0.0.1:6001", "http://localhost:6001")
 AVATAR_PROVIDER_OPTIONS: tuple[str, ...] = AVATAR_PROVIDER_VALUES
 VOICE_PROVIDER_OPTIONS: tuple[str, ...] = VOICE_PROVIDER_VALUES
 CONTENT_UNDERSTANDING_CAPABILITY_SLOTS: tuple[str, ...] = (
@@ -303,13 +305,13 @@ class Settings(BaseSettings):
     transcription_dialect: str = DEFAULT_TRANSCRIPTION_DIALECT
     transcription_alignment_mode: str = "auto"  # auto | provider_only | synthetic
     transcription_alignment_min_word_coverage: float = 0.72
-    local_asr_api_base_url: str = "http://127.0.0.1:6001"
-    local_asr_model_name: str = "vibevoice-asr-int8"
-    local_asr_display_name: str = "VibeVoice INT8"
+    local_asr_api_base_url: str = "http://127.0.0.1:30080"
+    local_asr_model_name: str = "moss-audio-8b-instruct"
+    local_asr_display_name: str = "MOSS-Audio 8B Instruct"
     local_asr_health_path: str = "/health"
     local_asr_transcribe_path: str = "/transcribe"
     local_asr_hotwords_field: str = "hotwords"
-    local_asr_max_new_tokens: int = 4096
+    local_asr_max_new_tokens: int = 2048
     transcription_chunking_enabled: bool = True
     transcription_chunk_threshold_sec: int = 180
     transcription_chunk_size_sec: int = 60
@@ -362,9 +364,9 @@ class Settings(BaseSettings):
     indextts2_docker_services: str = "indextts2"
     indextts2_docker_idle_timeout_sec: int = 900
     local_asr_docker_guard_enabled: bool = True
-    local_asr_docker_compose_file: str = "E:/WorkSpace/VibeVoice-service/docker-compose.yml"
-    local_asr_docker_env_file: str = "E:/WorkSpace/VibeVoice-service/.env"
-    local_asr_docker_services: str = "vibevoice-asr"
+    local_asr_docker_compose_file: str = "E:/WorkSpace/RoughCut/docker-compose.moss-audio.yml"
+    local_asr_docker_env_file: str = ""
+    local_asr_docker_services: str = "moss-audio-8b-instruct"
     local_asr_docker_idle_timeout_sec: int = 900
     funasr_auto_unload_enabled: bool = True
     funasr_idle_unload_sec: int = 600
@@ -1079,7 +1081,35 @@ def _normalize_runtime_override_values(data: dict[str, Any]) -> dict[str, Any]:
         llm_mode = str(normalized.get("llm_mode") or "").strip().lower()
         normalized["llm_mode"] = llm_mode if llm_mode in {"performance", "local"} else "performance"
 
+    _upgrade_legacy_local_http_asr_overrides(normalized)
     return normalized
+
+
+def _upgrade_legacy_local_http_asr_overrides(normalized: dict[str, Any]) -> None:
+    provider = canonicalize_transcription_provider_name(
+        normalized.get("transcription_provider", DEFAULT_TRANSCRIPTION_PROVIDER)
+    )
+    if provider != "local_http_asr":
+        return
+
+    model = str(normalized.get("transcription_model") or "").strip().lower()
+    actual_model = str(normalized.get("local_asr_model_name") or "").strip().lower()
+    base_url = str(normalized.get("local_asr_api_base_url") or "").strip().rstrip("/")
+    display_name = str(normalized.get("local_asr_display_name") or "").strip().lower()
+    uses_legacy_local_asr = (
+        model in LEGACY_LOCAL_HTTP_ASR_MODELS
+        or actual_model in LEGACY_LOCAL_HTTP_ASR_MODELS
+        or base_url in LEGACY_LOCAL_HTTP_ASR_URLS
+        or display_name == "vibevoice int8"
+    )
+    if not uses_legacy_local_asr:
+        return
+
+    normalized["transcription_provider"] = "local_http_asr"
+    normalized["transcription_model"] = DEFAULT_TRANSCRIPTION_MODELS["local_http_asr"]
+    normalized["local_asr_api_base_url"] = Settings.model_fields["local_asr_api_base_url"].default
+    normalized["local_asr_model_name"] = Settings.model_fields["local_asr_model_name"].default
+    normalized["local_asr_display_name"] = Settings.model_fields["local_asr_display_name"].default
 
 
 def _normalize_llm_capability_bundle_settings(settings: Settings) -> None:

@@ -4,6 +4,7 @@ from roughcut.config import (
     DEFAULT_TRANSCRIPTION_PROVIDER,
     Settings,
     _normalize_settings,
+    _normalize_runtime_override_values,
     canonicalize_transcription_provider_name,
     normalize_transcription_provider_name,
     resolve_transcription_provider_plan,
@@ -64,6 +65,23 @@ def test_transcription_runtime_normalizes_all_paths_to_local_http_asr() -> None:
     assert resolve_transcription_provider_plan("openai", "gpt-4o-transcribe") == [
         (DEFAULT_TRANSCRIPTION_PROVIDER, DEFAULT_TRANSCRIPTION_MODELS[DEFAULT_TRANSCRIPTION_PROVIDER])
     ]
+
+
+def test_legacy_local_http_asr_snapshot_is_upgraded_to_moss() -> None:
+    normalized = _normalize_runtime_override_values(
+        {
+            "transcription_provider": "local_http_asr",
+            "transcription_model": "local-asr-current",
+            "local_asr_api_base_url": "http://127.0.0.1:6001",
+            "local_asr_model_name": "vibevoice-asr-int8",
+            "local_asr_display_name": "VibeVoice INT8",
+        }
+    )
+
+    assert normalized["transcription_model"] == "moss-audio-8b-instruct"
+    assert normalized["local_asr_api_base_url"] == "http://127.0.0.1:30080"
+    assert normalized["local_asr_model_name"] == "moss-audio-8b-instruct"
+    assert normalized["local_asr_display_name"] == "MOSS-Audio 8B Instruct"
 
 
 def test_avatar_capability_status_uses_business_capability_keys() -> None:

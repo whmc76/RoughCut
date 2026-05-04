@@ -1,0 +1,6 @@
+ARG BASE_IMAGE=roughcut-moss-audio:local
+FROM ${BASE_IMAGE}
+
+COPY deploy/moss-audio/server.py /opt/moss-audio-server/server.py
+
+ENTRYPOINT ["python3", "/opt/moss-audio-server/server.py"]

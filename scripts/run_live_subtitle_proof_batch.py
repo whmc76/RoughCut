@@ -23,8 +23,8 @@ if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8")
 
 DEFAULT_TRANSCRIPTION_PROVIDER = "local_http_asr"
-DEFAULT_TRANSCRIPTION_MODEL = "local-asr-current"
-DEFAULT_LOCAL_ASR_API_BASE_URL = "http://127.0.0.1:6001"
+DEFAULT_TRANSCRIPTION_MODEL = "moss-audio-8b-instruct"
+DEFAULT_LOCAL_ASR_API_BASE_URL = "http://127.0.0.1:30080"
 
 from sqlalchemy import select
 
