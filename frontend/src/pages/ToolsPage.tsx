@@ -300,6 +300,25 @@ function appendInstructionPreset(currentValue: string, presetValue: string): str
   return `${current}\n${preset}`;
 }
 
+const ttsTextUiHintFragments = cosyVoiceTtsModes.map((mode) => mode.detail);
+
+function cleanTtsTextInput(value: string): string {
+  let cleaned = String(value || "").trim();
+  for (const fragment of ttsTextUiHintFragments) {
+    cleaned = cleaned.replaceAll(fragment, "").trim();
+  }
+  return cleaned.replace(/\s{2,}/g, " ").trim();
+}
+
+function findTtsTextPollution(ttsText: string, ...controlValues: string[]): string {
+  const spokenText = String(ttsText || "");
+  for (const controlValue of controlValues) {
+    const controlText = String(controlValue || "").trim();
+    if (controlText && spokenText.includes(controlText)) return controlText;
+  }
+  return "";
+}
+
 function coerceAsrOptions(value: Partial<AsrToolOptions>): AsrToolOptions {
   const language = String(value.language || defaultAsrOptions.language);
   return {
@@ -341,6 +360,14 @@ function formatFileSize(value?: number | null): string {
   return `${(value / 1024 / 1024).toFixed(1)} MB`;
 }
 
+function formatDuration(value?: number | null): string {
+  if (typeof value !== "number" || Number.isNaN(value) || value <= 0) return "";
+  if (value < 60) return `${value.toFixed(1)}s`;
+  const minutes = Math.floor(value / 60);
+  const seconds = Math.round(value % 60).toString().padStart(2, "0");
+  return `${minutes}:${seconds}`;
+}
+
 function stageLabel(stage: ToolRunStage): string {
   return stage.label || stage.name || stage.key || "stage";
 }
@@ -377,6 +404,7 @@ function useToolRun<Result>(runTool: (formData: FormData) => Promise<ToolRunStat
 function ToolRunProgress<Result>({ run }: { run?: ToolRunStatus<Result> }) {
   if (!run) return null;
   const progress = normalizeProgress(run.progress);
+  const visibleStages = (run.stages ?? []).filter((stage) => !(run.status === "completed" && stageLabel(stage) === "failed" && stage.status === "pending"));
   return (
     <div className="tool-run-progress">
       <div className="tool-run-summary">
@@ -392,7 +420,7 @@ function ToolRunProgress<Result>({ run }: { run?: ToolRunStatus<Result> }) {
         {run.detail ? <span>{run.detail}</span> : null}
       </div>
       <div className="tool-stage-list">
-        {(run.stages ?? []).map((stage, index) => {
+        {visibleStages.map((stage, index) => {
           const stageProgress = normalizeProgress(stage.progress);
           return (
             <article className="tool-stage-row" key={`${stage.key || stage.name || stage.label || "stage"}-${index}`}>
@@ -490,6 +518,7 @@ export function TtsToolPage() {
   const referenceHistory = useQuery({ queryKey: ["tools", "tts", "reference-audio"], queryFn: api.getToolTtsReferenceAudio, refetchInterval: 20_000 });
   const [ttsOptions, setTtsOptions] = useStoredOptions(toolOptionStorageKeys.tts, defaultTtsOptions, coerceTtsOptions);
   const [selectedReferencePath, setSelectedReferencePath] = useState("");
+  const [localSubmitError, setLocalSubmitError] = useState("");
   const selectedMode = resolveCosyVoiceTtsMode(ttsOptions.mode);
   const ttsService = status.data?.tools.tts as (ToolServiceStatus & { models?: string[] }) | undefined;
   const serviceVoiceIds = useMemo(() => (ttsService?.models ?? []).filter(Boolean), [ttsService]);
@@ -514,7 +543,20 @@ export function TtsToolPage() {
 
   const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    mutation.mutate(new FormData(event.currentTarget));
+    const formData = new FormData(event.currentTarget);
+    const cleanedTtsText = cleanTtsTextInput(ttsOptions.ttsText);
+    const pollutedControlText = findTtsTextPollution(cleanedTtsText, ttsOptions.promptText, ttsOptions.instructText);
+    if (pollutedControlText) {
+      setLocalSubmitError("朗读正文里包含参考文本或口播指令。请把 tts_text 保持为只需要说出口的正文，指令只放在 instruct_text。");
+      return;
+    }
+    setLocalSubmitError("");
+    formData.set("tts_text", cleanedTtsText);
+    formData.set("text", cleanedTtsText);
+    if (cleanedTtsText !== ttsOptions.ttsText.trim()) {
+      setTtsOptions((current) => ({ ...current, ttsText: cleanedTtsText }));
+    }
+    mutation.mutate(formData);
   };
 
   return (
@@ -788,6 +830,7 @@ export function TtsToolPage() {
 
           <section className="panel">
             <PanelHeader title="结果" description="显示 run 进度、阶段详情；完成后会显示输出路径和播放器。" />
+            {localSubmitError ? <div className="notice notice-error">{localSubmitError}</div> : null}
             <TtsResult run={run} error={error} pending={pending} />
           </section>
         </div>
@@ -842,7 +885,12 @@ function ReferenceAudioPicker({
                 title={item.path}
               >
                 <strong>{item.name}</strong>
-                <span>{item.source}{formatFileSize(item.size) ? ` · ${formatFileSize(item.size)}` : ""}</span>
+                <span>
+                  {item.source}
+                  {formatDuration(item.duration) ? ` · ${formatDuration(item.duration)}` : ""}
+                  {item.will_trim ? " · 自动去静音并截取30s" : ""}
+                  {formatFileSize(item.size) ? ` · ${formatFileSize(item.size)}` : ""}
+                </span>
               </button>
             ))}
           </div>

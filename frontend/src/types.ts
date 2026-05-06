@@ -1338,6 +1338,8 @@ export type ToolTtsReferenceAudioItem = {
   path: string;
   source: string;
   size?: number | null;
+  duration?: number | null;
+  will_trim?: boolean | null;
   updated_at?: string | null;
   audio_url?: string | null;
 };

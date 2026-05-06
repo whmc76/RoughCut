@@ -4,6 +4,7 @@ import asyncio
 import base64
 from datetime import datetime, timezone
 import shutil
+import subprocess
 import uuid
 import wave
 from pathlib import Path
@@ -26,6 +27,7 @@ _TTS_ROOT = _TOOLS_ROOT / "tts"
 _ASR_UPLOAD_ROOT = _TOOLS_ROOT / "asr-uploads"
 _AVATAR_ROOT = _TOOLS_ROOT / "avatar"
 _UPLOAD_ROOT = _TOOLS_ROOT / "uploads"
+_REFERENCE_ROOT = _TOOLS_ROOT / "reference-cache"
 _RUNS: dict[str, dict[str, Any]] = {}
 _RUN_TASKS: dict[str, asyncio.Task[None]] = {}
 _RUN_STAGE_NAMES: tuple[str, ...] = (
@@ -49,6 +51,13 @@ _RUN_PROGRESS_FLOORS: dict[str, float] = {
     "failed": 1.0,
 }
 _COSYVOICE3_END_OF_PROMPT = "<|endofprompt|>"
+_MAX_REFERENCE_AUDIO_SEC = 30.0
+_TTS_TEXT_UI_HINTS: tuple[str, ...] = (
+    "需要 prompt_wav/reference_audio；只填写想要的口播指令，官方分隔符由后台自动补齐。",
+    "需要 prompt_wav/reference_audio；只填写参考音频里实际说过的文本，官方分隔符由后台自动补齐。",
+    "需要 prompt_wav/reference_audio；prompt_text 和 instruct_text 不参与该模式。",
+    "需要填写 /query_tts_model 返回的 spk_id；如果模型没有内置音色列表，此模式不可用。",
+)
 
 @router.get("/status")
 async def tools_status() -> dict[str, Any]:
@@ -87,7 +96,7 @@ async def run_tts(
     reference_audio: UploadFile | None = File(default=None),
     prompt_wav: UploadFile | None = File(default=None),
 ) -> dict[str, Any]:
-    normalized_text = str(tts_text or text or "").strip()
+    normalized_text = _strip_tts_text_ui_hints(tts_text or text)
     if not normalized_text:
         raise HTTPException(status_code=400, detail="text is required")
 
@@ -227,10 +236,15 @@ async def _execute_tts_run(
         raise RuntimeError("CosyVoice3 zero_shot TTS requires prompt_text")
     if resolved_mode in {"instruct", "instruct2"} and not user_instruct_text:
         raise RuntimeError("CosyVoice3 instruct2 TTS requires instruct_text")
+    polluted_fragments = [fragment for fragment in (user_prompt_text, user_instruct_text) if fragment and fragment in text]
+    if polluted_fragments:
+        raise RuntimeError("朗读正文包含参考文本或口播指令；请保持 tts_text 只包含实际需要说出口的正文")
     if resolved_mode == "sft" and not str(spk_id or "").strip():
         raise RuntimeError("CosyVoice3 sft TTS requires spk_id from /query_tts_model")
     if stream and abs(float(speed or 1.0) - 1.0) > 0.0001:
         raise RuntimeError("CosyVoice3 streaming mode requires speed=1; use stream=false for speed changes")
+    if reference_path is not None:
+        reference_path = _prepare_reference_audio_for_cosyvoice(reference_path, run_id=run_id)
     endpoint = "/inference"
     data: dict[str, str] = {
         "mode": resolved_mode,
@@ -312,6 +326,13 @@ async def _execute_tts_run(
 
 def _strip_cosyvoice_prompt_boundary(value: str | None) -> str:
     return str(value or "").replace(_COSYVOICE3_END_OF_PROMPT, "").strip()
+
+
+def _strip_tts_text_ui_hints(value: str | None) -> str:
+    cleaned = str(value or "").strip()
+    for hint in _TTS_TEXT_UI_HINTS:
+        cleaned = cleaned.replace(hint, "").strip()
+    return " ".join(cleaned.split())
 
 
 def _ensure_cosyvoice_prompt_boundary(value: str) -> str:
@@ -519,6 +540,11 @@ def _mark_prior_stages_done(run: dict[str, Any], stage_name: str, updated_at: st
 
 def _run_public_payload(run: dict[str, Any]) -> dict[str, Any]:
     current_stage = _current_stage_name(run)
+    stages = [
+        stage
+        for stage in run.get("stages", [])
+        if not (run.get("status") == "completed" and stage.get("name") == "failed" and stage.get("status") == "pending")
+    ]
     return {
         "run_id": run["run_id"],
         "tool": run["tool"],
@@ -526,7 +552,7 @@ def _run_public_payload(run: dict[str, Any]) -> dict[str, Any]:
         "progress": run["progress"],
         "current_stage": current_stage,
         "detail": _current_stage_detail(run, current_stage),
-        "stages": run["stages"],
+        "stages": stages,
         "result": run.get("result"),
         "error": run.get("error"),
         "created_at": run.get("created_at"),
@@ -582,7 +608,7 @@ def _json_safe(value: Any) -> Any:
 
 def _list_reference_audio_history(limit: int = 24) -> list[dict[str, Any]]:
     audio_suffixes = {".wav", ".mp3", ".m4a", ".aac", ".flac", ".ogg", ".opus"}
-    candidates: list[tuple[float, Path, str]] = []
+    candidates: list[tuple[float, Path, str, float | None]] = []
     roots = ((_UPLOAD_ROOT, "上传历史"), (_TTS_ROOT, "生成音频"))
     for root, source in roots:
         if not root.exists():
@@ -594,7 +620,8 @@ def _list_reference_audio_history(limit: int = 24) -> list[dict[str, Any]]:
                 stat = path.stat()
             except OSError:
                 continue
-            candidates.append((stat.st_mtime, path, source))
+            duration = _audio_duration_seconds(path)
+            candidates.append((stat.st_mtime, path, source, duration))
     candidates.sort(key=lambda item: item[0], reverse=True)
     return [
         {
@@ -602,10 +629,12 @@ def _list_reference_audio_history(limit: int = 24) -> list[dict[str, Any]]:
             "path": str(path),
             "source": source,
             "size": path.stat().st_size,
+            "duration": duration,
+            "will_trim": (duration or 0.0) > _MAX_REFERENCE_AUDIO_SEC,
             "updated_at": datetime.fromtimestamp(updated_at, timezone.utc).isoformat(),
             "audio_url": f"/api/v1/tools/artifacts/{'tts' if source == '生成音频' else 'uploads'}/{path.name}",
         }
-        for updated_at, path, source in candidates[:limit]
+        for updated_at, path, source, duration in candidates[:limit]
     ]
 
 
@@ -626,6 +655,95 @@ def _resolve_reference_audio_history_path(value: str) -> Path:
         if any(resolved == root or root in resolved.parents for root in allowed_roots) and resolved.exists() and resolved.is_file():
             return resolved
     raise HTTPException(status_code=400, detail="reference_history_path is not available")
+
+
+def _prepare_reference_audio_for_cosyvoice(path: Path, *, run_id: str) -> Path:
+    duration = _audio_duration_seconds(path)
+    if duration is None or duration <= _MAX_REFERENCE_AUDIO_SEC:
+        return path
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise RuntimeError(f"参考音频 {duration:.1f}s 超过 30s；需要 ffmpeg 自动去除开头静音并截取 30s")
+    _REFERENCE_ROOT.mkdir(parents=True, exist_ok=True)
+    output_path = _REFERENCE_ROOT / f"reference_{uuid.uuid4().hex[:12]}.wav"
+    _update_run_stage(
+        run_id,
+        "validate",
+        detail=f"参考音频 {duration:.1f}s 超过 30s，正在去除开头静音并截取 30s",
+        progress=0.12,
+        reference_source=str(path),
+        reference_duration=duration,
+        reference_output=str(output_path),
+    )
+    command = [
+        ffmpeg,
+        "-y",
+        "-i",
+        str(path),
+        "-af",
+        "silenceremove=start_periods=1:start_duration=0.2:start_threshold=-45dB",
+        "-t",
+        str(_MAX_REFERENCE_AUDIO_SEC),
+        "-ac",
+        "1",
+        "-ar",
+        "16000",
+        "-c:a",
+        "pcm_s16le",
+        str(output_path),
+    ]
+    result = subprocess.run(command, check=False, capture_output=True, text=True, timeout=90)
+    if result.returncode != 0 or not output_path.exists() or output_path.stat().st_size <= 0:
+        fallback_command = [
+            ffmpeg,
+            "-y",
+            "-i",
+            str(path),
+            "-t",
+            str(_MAX_REFERENCE_AUDIO_SEC),
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            "-c:a",
+            "pcm_s16le",
+            str(output_path),
+        ]
+        fallback = subprocess.run(fallback_command, check=False, capture_output=True, text=True, timeout=90)
+        if fallback.returncode != 0 or not output_path.exists() or output_path.stat().st_size <= 0:
+            output_path.unlink(missing_ok=True)
+            detail = (fallback.stderr or result.stderr or "ffmpeg trim failed").strip().splitlines()[-1:]
+            raise RuntimeError(f"Failed to prepare reference audio: {' '.join(detail)[:500]}")
+    return output_path
+
+
+def _audio_duration_seconds(path: Path) -> float | None:
+    if path.suffix.lower() == ".wav":
+        try:
+            with wave.open(str(path), "rb") as handle:
+                frame_rate = float(handle.getframerate() or 0)
+                if frame_rate <= 0:
+                    return None
+                return float(handle.getnframes()) / frame_rate
+        except (OSError, wave.Error, EOFError):
+            pass
+    ffprobe = shutil.which("ffprobe")
+    if not ffprobe:
+        return None
+    try:
+        result = subprocess.run(
+            [ffprobe, "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", str(path)],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=8,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    try:
+        return float(str(result.stdout or "").strip())
+    except ValueError:
+        return None
 
 
 @router.get("/artifacts/{kind}/{file_name}")
