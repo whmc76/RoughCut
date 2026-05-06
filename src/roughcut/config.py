@@ -368,6 +368,14 @@ class Settings(BaseSettings):
     local_asr_docker_env_file: str = ""
     local_asr_docker_services: str = "moss-audio-8b-instruct"
     local_asr_docker_idle_timeout_sec: int = 900
+    cosyvoice3_tts_api_base_url: str = "http://127.0.0.1:30180"
+    cosyvoice3_tts_health_path: str = "/health"
+    cosyvoice3_tts_sample_rate: int = 24000
+    cosyvoice3_tts_docker_guard_enabled: bool = True
+    cosyvoice3_tts_docker_compose_file: str = "E:/WorkSpace/RoughCut/docker-compose.cosyvoice3.yml"
+    cosyvoice3_tts_docker_env_file: str = ""
+    cosyvoice3_tts_docker_services: str = "cosyvoice3-tts"
+    cosyvoice3_tts_docker_idle_timeout_sec: int = 900
     funasr_auto_unload_enabled: bool = True
     funasr_idle_unload_sec: int = 600
 

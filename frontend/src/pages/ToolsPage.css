@@ -1,0 +1,365 @@
+.tool-entry-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.tool-entry {
+  min-height: 180px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.04);
+  padding: 18px;
+  display: grid;
+  align-content: start;
+  gap: 10px;
+  transition: border-color 160ms ease, background 160ms ease, transform 160ms ease;
+}
+
+.tool-entry:hover {
+  transform: translateY(-2px);
+  border-color: rgba(15, 118, 110, 0.26);
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.tool-entry-code {
+  width: fit-content;
+  min-height: 28px;
+  padding: 5px 9px;
+  border-radius: 6px;
+  background: rgba(15, 118, 110, 0.12);
+  color: #0f766e;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+}
+
+.tool-entry strong {
+  font-size: 20px;
+  line-height: 1.2;
+}
+
+.tool-entry-detail {
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.tool-tabs {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.tool-tab {
+  min-height: 38px;
+  padding: 9px 13px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.32);
+  color: #17181b;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.tool-tab.active {
+  border-color: rgba(15, 118, 110, 0.3);
+  background: rgba(15, 118, 110, 0.12);
+  color: #0f766e;
+}
+
+.tool-workbench textarea.input {
+  min-height: 96px;
+  resize: vertical;
+}
+
+.tts-workbench-vertical {
+  grid-template-columns: 1fr;
+}
+
+.field-label {
+  display: block;
+  color: #1e2124;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.tts-style-field,
+.tts-mode-fields,
+.tts-mode-fields-head,
+.tts-prompt-text-field,
+.tts-helper-panel,
+.tts-style-preview,
+.tool-result,
+.tool-run-progress,
+.tool-run-meta,
+.tool-stage-list,
+.tool-stage-row {
+  display: grid;
+}
+
+.tts-style-field,
+.tts-mode-fields,
+.tool-result {
+  gap: 12px;
+}
+
+.tts-mode-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.tts-style-option {
+  min-height: 56px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.42);
+  color: #17181b;
+  text-align: left;
+  display: grid;
+  gap: 6px;
+  align-content: start;
+  cursor: pointer;
+  transition: border-color 160ms ease, background 160ms ease, transform 160ms ease;
+}
+
+.tts-style-option:hover {
+  transform: translateY(-1px);
+  border-color: rgba(15, 118, 110, 0.22);
+}
+
+.tts-style-option.active {
+  border-color: rgba(15, 118, 110, 0.36);
+  background: #e8f4f1;
+  box-shadow: inset 3px 0 0 #0f766e;
+}
+
+.tts-style-option strong {
+  color: #0f3f3a;
+  font-size: 14px;
+}
+
+.tts-style-option span {
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.tts-mode-grid .tts-style-option span {
+  display: none;
+}
+
+.tts-mode-fields {
+  padding: 12px;
+  border: 1px solid rgba(15, 118, 110, 0.14);
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.tts-mode-fields-head {
+  gap: 4px;
+}
+
+.tts-mode-fields-head strong,
+.tts-helper-panel strong {
+  color: #0f3f3a;
+  font-size: 14px;
+}
+
+.tts-mode-fields-head span,
+.tts-helper-panel span {
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.tts-mode-fields-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 12px;
+}
+
+.tts-prompt-text-field {
+  gap: 8px;
+}
+
+.tts-helper-panel {
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid rgba(15, 118, 110, 0.14);
+  border-radius: 8px;
+  background: #f8faf7;
+}
+
+.tts-preset-chip-grid,
+.tool-tabs,
+.mode-chip-list {
+  display: flex;
+  flex-wrap: wrap;
+}
+
+.tts-preset-chip-grid,
+.mode-chip-list {
+  gap: 8px;
+}
+
+.tts-preset-chip {
+  min-height: 34px;
+  padding: 7px 10px;
+  border: 1px solid rgba(15, 118, 110, 0.16);
+  border-radius: 8px;
+  background: #ffffff;
+  color: #0f3f3a;
+  font-size: 12px;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.tts-preset-chip:hover,
+.tts-preset-chip.active {
+  border-color: rgba(15, 118, 110, 0.34);
+  background: #e8f4f1;
+}
+
+.tts-mode-fields-grid textarea.input {
+  min-height: 84px;
+}
+
+.tts-advanced-fields {
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.42);
+}
+
+.tts-advanced-fields summary {
+  min-height: 40px;
+  padding: 10px 12px;
+  color: #0f3f3a;
+  font-size: 13px;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.tts-common-fields {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  padding: 0 12px 12px;
+}
+
+.tts-common-fields label {
+  gap: 6px;
+  font-size: 12px;
+}
+
+.tts-common-fields .input {
+  min-height: 38px;
+  padding-block: 8px;
+}
+
+.tts-style-preview {
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid rgba(15, 118, 110, 0.14);
+  border-radius: 8px;
+  background: #f8faf7;
+}
+
+.tts-style-preview-head,
+.tool-run-summary,
+.tool-stage-head,
+.tool-stage-detail {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.tool-run-summary {
+  flex-wrap: wrap;
+}
+
+.tts-style-preview pre {
+  max-height: 220px;
+  margin: 0;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: #173d39;
+  font: 12px/1.55 "IBM Plex Mono", "Consolas", monospace;
+}
+
+.tool-run-progress {
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.32);
+}
+
+.tool-run-meta,
+.tool-stage-detail {
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.tool-run-meta {
+  gap: 4px;
+}
+
+.tool-run-progress-bar,
+.tool-stage-progress {
+  margin-top: 0;
+}
+
+.tool-stage-list {
+  gap: 10px;
+}
+
+.tool-stage-row {
+  gap: 8px;
+  padding: 10px 0;
+  border-top: 1px solid var(--line);
+}
+
+.tool-stage-head strong {
+  min-width: 0;
+  font-size: 13px;
+}
+
+.tool-media {
+  width: 100%;
+  max-height: 420px;
+  border-radius: 8px;
+  background: #111318;
+}
+
+audio.tool-media {
+  min-height: 48px;
+  background: transparent;
+}
+
+.tool-transcript {
+  min-height: 180px;
+  max-height: 360px;
+  overflow: auto;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.42);
+  color: #17181b;
+  white-space: pre-wrap;
+  line-height: 1.65;
+}
+
+@media (max-width: 960px) {
+  .tool-entry-grid,
+  .tts-common-fields,
+  .tts-mode-grid,
+  .tts-mode-fields-grid {
+    grid-template-columns: 1fr;
+  }
+}

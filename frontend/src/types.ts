@@ -1274,6 +1274,124 @@ export type ServiceStatus = {
   };
 };
 
+export type ToolServiceStatus = {
+  name: string;
+  base_url: string;
+  status: string;
+  checked_at: string;
+  models?: string[];
+  error?: string | null;
+  detail?: Record<string, unknown> | null;
+};
+
+export type ToolStatus = {
+  checked_at: string;
+  tools: Record<"tts" | "asr" | "avatar", ToolServiceStatus>;
+};
+
+export type ToolRunStage = {
+  key?: string | null;
+  name?: string | null;
+  label?: string | null;
+  status: string;
+  progress?: number | null;
+  detail?: string | null;
+  error?: string | null;
+  started_at?: string | null;
+  finished_at?: string | null;
+};
+
+export type ToolRunStatus<Result = unknown> = {
+  run_id: string;
+  tool?: string;
+  status: string;
+  progress?: number | null;
+  current_stage?: string | null;
+  detail?: string | null;
+  stages: ToolRunStage[];
+  result?: Result | null;
+  error?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+};
+
+export type ToolTtsMode = "sft" | "zero_shot" | "cross_lingual" | "instruct2";
+
+export type ToolTtsParams = {
+  mode: ToolTtsMode;
+  tts_text: string;
+  text?: string;
+  prompt_text?: string;
+  instruct_text?: string;
+  spk_id?: string;
+  zero_shot_spk_id?: string;
+  stream?: boolean;
+  speed?: number;
+  seed?: number;
+  text_frontend?: boolean;
+  prompt_wav?: File;
+  reference_audio?: File;
+};
+
+export type ToolTtsResult = {
+  status: string;
+  provider: string;
+  mode: ToolTtsMode | string;
+  text?: string;
+  tts_text?: string;
+  original_text?: string | null;
+  prompt_text?: string | null;
+  instruct_text?: string | null;
+  spk_id?: string | null;
+  zero_shot_spk_id?: string | null;
+  stream?: boolean | null;
+  speed?: number | null;
+  seed?: number | null;
+  text_frontend?: boolean | null;
+  prompt_wav?: string | null;
+  reference_audio?: string | null;
+  output_path: string;
+  audio_url: string;
+  format: string;
+  sample_rate?: number;
+  source_format?: string;
+  raw?: Record<string, unknown>;
+};
+
+export type ToolAsrResult = {
+  status: string;
+  provider?: string | null;
+  model?: string | null;
+  language: string;
+  duration: number;
+  text: string;
+  segments: Array<{
+    index: number;
+    start: number;
+    end: number;
+    text: string;
+    speaker?: string | null;
+  }>;
+};
+
+export type ToolAvatarResult = {
+  provider: string;
+  job_id: string;
+  status: string;
+  segment_count?: number;
+  success_count?: number;
+  failed_count?: number;
+  artifact_url?: string | null;
+  artifact_path?: string | null;
+  segments?: Array<{
+    segment_id?: string | null;
+    status: string;
+    error?: string | null;
+    local_result_path?: string | null;
+    task_code?: string | null;
+  }>;
+};
+
 export type LiveReadinessSnapshot = {
   status: string;
   gate_passed: boolean;

@@ -49,6 +49,18 @@ const SettingsPage = lazy(async () => ({
 const ControlPage = lazy(async () => ({
   default: (await import("./pages/ControlPage")).ControlPage,
 }));
+const ToolsPage = lazy(async () => ({
+  default: (await import("./pages/ToolsPage")).ToolsPage,
+}));
+const TtsToolPage = lazy(async () => ({
+  default: (await import("./pages/ToolsPage")).TtsToolPage,
+}));
+const AsrToolPage = lazy(async () => ({
+  default: (await import("./pages/ToolsPage")).AsrToolPage,
+}));
+const AvatarToolPage = lazy(async () => ({
+  default: (await import("./pages/ToolsPage")).AvatarToolPage,
+}));
 
 export function App() {
   const { locale, setLocale, t } = useI18n();
@@ -84,6 +96,7 @@ export function App() {
         { to: "/jobs", label: t("app.nav.jobs") },
         { to: "/watch-roots", label: t("app.nav.watchRoots") },
         { to: "/intelligent-copy", label: t("app.nav.intelligentCopy") },
+        { to: "/tools", label: "小工具" },
       ],
     },
     {
@@ -196,6 +209,10 @@ export function App() {
               <Route path="/intelligent-copy" element={<IntelligentCopyPage />} />
               <Route path="/packaging" element={<PackagingPage />} />
               <Route path="/style-lab" element={<StyleLabPage />} />
+              <Route path="/tools" element={<ToolsPage />} />
+              <Route path="/tools/tts" element={<TtsToolPage />} />
+              <Route path="/tools/asr" element={<AsrToolPage />} />
+              <Route path="/tools/avatar" element={<AvatarToolPage />} />
               <Route path="/style-templates" element={<StyleTemplatesPage />} />
               <Route path="/creative-modes" element={<CreativeModesPage />} />
               <Route path="/creator-profiles" element={<CreatorProfilesPage />} />

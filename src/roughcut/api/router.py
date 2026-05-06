@@ -12,6 +12,7 @@ from roughcut.api.jobs import router as jobs_router
 from roughcut.api.learned_hotwords import router as learned_hotwords_router
 from roughcut.api.packaging import router as packaging_router
 from roughcut.api.review import router as watch_roots_router
+from roughcut.api.tools import router as tools_router
 
 api_router = APIRouter(prefix="/api/v1")
 api_router.include_router(avatar_materials_router)
@@ -24,3 +25,4 @@ api_router.include_router(intelligent_copy_router)
 api_router.include_router(config_router)
 api_router.include_router(control_router)
 api_router.include_router(health_router)
+api_router.include_router(tools_router)

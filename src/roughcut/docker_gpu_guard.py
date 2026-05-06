@@ -122,6 +122,14 @@ def _build_target_configs(settings) -> list[_ManagedDockerTarget]:
             base_urls=(_normalize_base_url(getattr(settings, "local_asr_api_base_url", "")),),
             probe_kind="health_json",
         ),
+        _ManagedDockerTarget(
+            key="cosyvoice3_tts",
+            compose_file=str(getattr(settings, "cosyvoice3_tts_docker_compose_file", "") or ""),
+            env_file=str(getattr(settings, "cosyvoice3_tts_docker_env_file", "") or ""),
+            services=_parse_services(getattr(settings, "cosyvoice3_tts_docker_services", "cosyvoice3-tts")),
+            base_urls=(_normalize_base_url(getattr(settings, "cosyvoice3_tts_api_base_url", "")),),
+            probe_kind="health_json",
+        ),
     ]
 
 

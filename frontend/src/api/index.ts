@@ -6,6 +6,7 @@ import { intelligentCopyApi } from "./intelligentCopy";
 import { jobsApi } from "./jobs";
 import { memoryApi } from "./memory";
 import { packagingApi } from "./packaging";
+import { toolsApi } from "./tools";
 import { watchRootsApi } from "./watchRoots";
 
 export const api = {
@@ -18,4 +19,5 @@ export const api = {
   ...configApi,
   ...controlApi,
   ...memoryApi,
+  ...toolsApi,
 };
