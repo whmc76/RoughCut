@@ -260,6 +260,15 @@ function coerceTtsOptions(value: Partial<TtsToolOptions>): TtsToolOptions {
   };
 }
 
+function appendInstructionPreset(currentValue: string, presetValue: string): string {
+  const current = String(currentValue || "").trim();
+  const preset = String(presetValue || "").trim();
+  if (!preset) return current;
+  if (!current) return preset;
+  if (current.includes(preset)) return current;
+  return `${current}\n${preset}`;
+}
+
 function coerceAsrOptions(value: Partial<AsrToolOptions>): AsrToolOptions {
   const language = String(value.language || defaultAsrOptions.language);
   return {
@@ -551,28 +560,6 @@ export function TtsToolPage() {
               ) : null}
               {usesInstructText ? (
                 <div className="tts-prompt-text-field">
-                  <div className="tts-preset-category-list">
-                    {instructTextPresetGroups.map((group) => (
-                      <section className="tts-preset-category" key={group.title}>
-                        <div className="tts-preset-category-head">
-                          <strong>{group.title}</strong>
-                          <span>{group.detail}</span>
-                        </div>
-                        <div className="tts-preset-chip-grid">
-                          {group.presets.map((preset) => (
-                            <button
-                              key={`${group.title}-${preset.label}`}
-                              type="button"
-                              className={ttsOptions.instructText === preset.text ? "tts-preset-chip active" : "tts-preset-chip"}
-                              onClick={() => setTtsOptions((current) => ({ ...current, instructText: preset.text }))}
-                            >
-                              {preset.label}
-                            </button>
-                          ))}
-                        </div>
-                      </section>
-                    ))}
-                  </div>
                   <div className="tts-instruct-input-row">
                     <label>
                       <span>口播指令 instruct_text</span>
@@ -591,6 +578,29 @@ export function TtsToolPage() {
                       <input className="input" name="prompt_wav" type="file" accept="audio/*" required />
                     </label>
                   </div>
+                  <div className="tts-preset-category-list">
+                    {instructTextPresetGroups.map((group) => (
+                      <section className="tts-preset-category" key={group.title}>
+                        <div className="tts-preset-category-head">
+                          <strong>{group.title}</strong>
+                          <span>{group.detail}</span>
+                        </div>
+                        <div className="tts-preset-chip-grid">
+                          {group.presets.map((preset) => (
+                            <button
+                              key={`${group.title}-${preset.label}`}
+                              type="button"
+                              className={ttsOptions.instructText.includes(preset.text) ? "tts-preset-chip active" : "tts-preset-chip"}
+                              onClick={() => setTtsOptions((current) => ({ ...current, instructText: appendInstructionPreset(current.instructText, preset.text) }))}
+                            >
+                              {preset.label}
+                            </button>
+                          ))}
+                        </div>
+                      </section>
+                    ))}
+                  </div>
+                  <div className="muted compact">点击预设会追加到口播指令，不会覆盖已有内容；重复点击同一预设不会重复添加。</div>
                 </div>
               ) : null}
               {usesCrossLingualText ? (

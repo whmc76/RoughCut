@@ -242,14 +242,15 @@
 
 .tts-preset-category-list {
   display: grid;
-  grid-template-columns: 1fr;
-  gap: 10px;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 8px;
 }
 
 .tts-preset-category {
   display: grid;
-  gap: 8px;
-  padding: 10px;
+  align-content: start;
+  gap: 7px;
+  padding: 9px;
   border: 1px solid rgba(15, 118, 110, 0.12);
   border-radius: 8px;
   background: rgba(255, 255, 255, 0.58);
@@ -262,13 +263,13 @@
 
 .tts-preset-category-head strong {
   color: #0f3f3a;
-  font-size: 13px;
+  font-size: 12px;
 }
 
 .tts-preset-category-head span {
   color: var(--text-muted);
-  font-size: 12px;
-  line-height: 1.45;
+  font-size: 11px;
+  line-height: 1.35;
 }
 
 .tts-instruct-input-row {
@@ -296,17 +297,17 @@
 
 .tts-preset-chip-grid,
 .mode-chip-list {
-  gap: 8px;
+  gap: 6px;
 }
 
 .tts-preset-chip {
-  min-height: 34px;
-  padding: 7px 10px;
+  min-height: 30px;
+  padding: 5px 8px;
   border: 1px solid rgba(15, 118, 110, 0.16);
   border-radius: 8px;
   background: #ffffff;
   color: #0f3f3a;
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 800;
   cursor: pointer;
 }
