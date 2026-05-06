@@ -111,7 +111,7 @@
 }
 
 .tts-style-option {
-  min-height: 56px;
+  min-height: 112px;
   padding: 10px 12px;
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -147,8 +147,53 @@
   line-height: 1.45;
 }
 
-.tts-mode-grid .tts-style-option span {
-  display: none;
+.tts-mode-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.tools-page .tts-mode-grid .tts-style-option .tts-mode-title-row {
+  display: flex;
+}
+
+.tts-mode-name {
+  color: #0f3f3a;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.tts-mode-summary,
+.tts-mode-use-case {
+  display: block;
+}
+
+.tools-page .tts-mode-grid .tts-style-option .tts-mode-name,
+.tools-page .tts-mode-grid .tts-style-option .tts-mode-summary,
+.tools-page .tts-mode-grid .tts-style-option .tts-mode-use-case {
+  display: block;
+}
+
+.tts-mode-use-case {
+  color: #58706b;
+}
+
+.tts-mode-recommended {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  padding: 3px 7px;
+  border-radius: 999px;
+  background: #0f766e;
+  color: #ffffff;
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1.35;
+}
+
+.tools-page .tts-mode-grid .tts-style-option .tts-mode-recommended {
+  display: inline-flex;
 }
 
 .tts-mode-fields {
