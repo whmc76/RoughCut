@@ -53,7 +53,7 @@ const cosyVoiceTtsModes = [
     key: "zero_shot",
     label: "zero_shot",
     summary: "使用 prompt_wav 和 prompt_text 复刻参考音色。",
-    detail: "需要 prompt_wav/reference_audio；CosyVoice3 prompt_text 需要包含 <|endofprompt|> 分隔符。",
+    detail: "需要 prompt_wav/reference_audio；只填写参考音频里实际说过的文本，官方分隔符由后台自动补齐。",
   },
   {
     key: "cross_lingual",
@@ -65,7 +65,7 @@ const cosyVoiceTtsModes = [
     key: "instruct2",
     label: "instruct2",
     summary: "用 instruct_text 控制语言、方言、情绪、语速或音量。",
-    detail: "需要 prompt_wav/reference_audio；instruct_text 需要包含 <|endofprompt|> 分隔符。",
+    detail: "需要 prompt_wav/reference_audio；只填写想要的口播指令，官方分隔符由后台自动补齐。",
   },
 ] satisfies CosyVoiceTtsMode[];
 
@@ -94,12 +94,62 @@ const crossLingualTextPresets = [
   { label: "粤语", text: "呢段系跨语言音色测试文本。" },
 ];
 
-const instructTextPresets = [
-  { label: "开心", text: "You are a helpful assistant. 请非常开心地说一句话。<|endofprompt|>" },
-  { label: "沉稳", text: "You are a helpful assistant. 请用沉稳、清晰、可信的语气说这句话。<|endofprompt|>" },
-  { label: "四川话", text: "You are a helpful assistant. 请用四川话表达。<|endofprompt|>" },
-  { label: "慢速强调", text: "You are a helpful assistant. 请用尽可能慢地语速说一句话。<|endofprompt|>" },
-  { label: "温柔旁白", text: "You are a helpful assistant. 请用温柔、贴近耳边旁白的方式说这句话。<|endofprompt|>" },
+const instructTextPresetGroups = [
+  {
+    title: "情绪",
+    detail: "控制整体情绪色彩。",
+    presets: [
+      { label: "开心", text: "请用开心、明亮、有感染力的语气说这句话。" },
+      { label: "兴奋", text: "请用兴奋、节奏更积极的语气说这句话。" },
+      { label: "温柔", text: "请用温柔、亲近、放松的语气说这句话。" },
+      { label: "严肃", text: "请用严肃、克制、有分量的语气说这句话。" },
+      { label: "惊喜", text: "请用带有惊喜感和轻微上扬语调的方式说这句话。" },
+    ],
+  },
+  {
+    title: "方言/语言",
+    detail: "适合地域化口播和本地化素材。",
+    presets: [
+      { label: "四川话", text: "请用自然的四川话表达这句话。" },
+      { label: "粤语", text: "请用自然的粤语表达这句话。" },
+      { label: "东北话", text: "请用自然的东北口音表达这句话。" },
+      { label: "英文", text: "Please say this sentence in clear and natural English." },
+      { label: "中英混合", text: "请用自然的中英混合口播方式表达这句话。" },
+    ],
+  },
+  {
+    title: "场景",
+    detail: "按内容用途快速套用口播风格。",
+    presets: [
+      { label: "产品介绍", text: "请用清晰、可信、适合产品介绍的口播语气说这句话。" },
+      { label: "直播带货", text: "请用有热情、有成交感但不夸张的直播口播语气说这句话。" },
+      { label: "新闻播报", text: "请用标准、平稳、信息密度高的新闻播报语气说这句话。" },
+      { label: "知识讲解", text: "请用耐心、清楚、适合知识讲解的语气说这句话。" },
+      { label: "短视频旁白", text: "请用紧凑、有节奏、适合短视频旁白的方式说这句话。" },
+    ],
+  },
+  {
+    title: "速度/力度",
+    detail: "改变节奏、停顿和强调。",
+    presets: [
+      { label: "慢速强调", text: "请用较慢语速表达，并在重点词上做清晰强调。" },
+      { label: "快速", text: "请用稍快但仍然清晰的语速说这句话。" },
+      { label: "强强调", text: "请明显强调关键词，语气更坚定。" },
+      { label: "轻声", text: "请用更轻、更柔和的音量说这句话。" },
+      { label: "有停顿", text: "请在语义分段处加入自然停顿，让信息更容易理解。" },
+    ],
+  },
+  {
+    title: "角色",
+    detail: "给数字人和脚本预览更明确的人设。",
+    presets: [
+      { label: "专业顾问", text: "请像专业顾问一样，清晰、冷静、可信地说这句话。" },
+      { label: "亲切客服", text: "请像亲切客服一样，礼貌、耐心、自然地说这句话。" },
+      { label: "电影旁白", text: "请用有画面感、沉浸式的电影旁白语气说这句话。" },
+      { label: "测评博主", text: "请像数码测评博主一样，节奏清楚、观点明确地说这句话。" },
+      { label: "品牌主播", text: "请像品牌官方主播一样，稳重、有亲和力地说这句话。" },
+    ],
+  },
 ];
 
 type TtsToolOptions = {
@@ -125,12 +175,12 @@ type AvatarToolOptions = {
 };
 
 const defaultTtsText = "这是一段 RoughCut 小工具页面的 CosyVoice3 试音。";
-const cosyVoicePromptBoundary = "<|endofprompt|>";
+const defaultInstructTextPreset = instructTextPresetGroups[0]?.presets[0]?.text ?? "";
 
 const defaultTtsOptions: TtsToolOptions = {
   mode: "zero_shot",
   ttsText: defaultTtsText,
-  promptText: "You are a helpful assistant.<|endofprompt|>希望你以后能够做的比我还好呦。",
+  promptText: "希望你以后能够做的比我还好呦。",
   instructText: "",
   spkId: "",
   zeroShotSpkId: "",
@@ -196,12 +246,6 @@ function coerceTtsOptions(value: Partial<TtsToolOptions>): TtsToolOptions {
     seed: String(value.seed ?? defaultTtsOptions.seed),
     textFrontend: coerceBooleanString(value.textFrontend, defaultTtsOptions.textFrontend),
   };
-}
-
-function ensureCosyVoicePromptBoundary(value: string, fallback = ""): string {
-  const raw = String(value || fallback || "").trim();
-  if (!raw) return raw;
-  return raw.includes(cosyVoicePromptBoundary) ? raw : `${raw}${cosyVoicePromptBoundary}`;
 }
 
 function coerceAsrOptions(value: Partial<AsrToolOptions>): AsrToolOptions {
@@ -409,22 +453,7 @@ export function TtsToolPage() {
 
   const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    const formData = new FormData(event.currentTarget);
-    const nextOptions = { ...ttsOptions };
-    if (usesPromptText) {
-      const promptText = ensureCosyVoicePromptBoundary(ttsOptions.promptText || defaultTtsOptions.promptText);
-      formData.set("prompt_text", promptText);
-      nextOptions.promptText = promptText;
-    }
-    if (usesInstructText) {
-      const instructText = ensureCosyVoicePromptBoundary(ttsOptions.instructText, instructTextPresets[0]?.text);
-      formData.set("instruct_text", instructText);
-      nextOptions.instructText = instructText;
-    }
-    if (nextOptions.promptText !== ttsOptions.promptText || nextOptions.instructText !== ttsOptions.instructText) {
-      setTtsOptions(nextOptions);
-    }
-    mutation.mutate(formData);
+    mutation.mutate(new FormData(event.currentTarget));
   };
 
   return (
@@ -458,8 +487,8 @@ export function TtsToolPage() {
                         setTtsOptions((current) => ({
                           ...current,
                           mode: mode.key,
-                          promptText: mode.key === "zero_shot" ? ensureCosyVoicePromptBoundary(current.promptText || defaultTtsOptions.promptText) : current.promptText,
-                          instructText: mode.key === "instruct2" ? ensureCosyVoicePromptBoundary(current.instructText, instructTextPresets[0]?.text) : current.instructText,
+                          promptText: mode.key === "zero_shot" && !current.promptText.trim() ? defaultTtsOptions.promptText : current.promptText,
+                          instructText: mode.key === "instruct2" && !current.instructText.trim() ? defaultInstructTextPreset : current.instructText,
                         }))
                       }
                     >
@@ -489,7 +518,7 @@ export function TtsToolPage() {
               {usesPromptText ? (
                 <div className="tts-prompt-text-field">
                   <label>
-                    <span>prompt_text</span>
+                    <span>参考音频文本 prompt_text</span>
                     <textarea
                       className="input"
                       name="prompt_text"
@@ -497,27 +526,37 @@ export function TtsToolPage() {
                       required
                       value={ttsOptions.promptText}
                       onChange={(event) => setTtsOptions((current) => ({ ...current, promptText: event.target.value }))}
-                      placeholder="You are a helpful assistant.<|endofprompt|>参考音频里实际说出的话。"
+                      placeholder="参考音频里实际说出的话。"
                     />
                   </label>
                 </div>
               ) : null}
               {usesInstructText ? (
                 <div className="tts-prompt-text-field">
-                  <div className="tts-preset-chip-grid">
-                    {instructTextPresets.map((preset) => (
-                      <button
-                        key={preset.label}
-                        type="button"
-                        className={ttsOptions.instructText === preset.text ? "tts-preset-chip active" : "tts-preset-chip"}
-                        onClick={() => setTtsOptions((current) => ({ ...current, instructText: preset.text }))}
-                      >
-                        {preset.label}
-                      </button>
+                  <div className="tts-preset-category-list">
+                    {instructTextPresetGroups.map((group) => (
+                      <section className="tts-preset-category" key={group.title}>
+                        <div className="tts-preset-category-head">
+                          <strong>{group.title}</strong>
+                          <span>{group.detail}</span>
+                        </div>
+                        <div className="tts-preset-chip-grid">
+                          {group.presets.map((preset) => (
+                            <button
+                              key={`${group.title}-${preset.label}`}
+                              type="button"
+                              className={ttsOptions.instructText === preset.text ? "tts-preset-chip active" : "tts-preset-chip"}
+                              onClick={() => setTtsOptions((current) => ({ ...current, instructText: preset.text }))}
+                            >
+                              {preset.label}
+                            </button>
+                          ))}
+                        </div>
+                      </section>
                     ))}
                   </div>
                   <label>
-                    <span>instruct_text</span>
+                    <span>口播指令 instruct_text</span>
                     <textarea
                       className="input"
                       name="instruct_text"
@@ -525,7 +564,7 @@ export function TtsToolPage() {
                       required
                       value={ttsOptions.instructText}
                       onChange={(event) => setTtsOptions((current) => ({ ...current, instructText: event.target.value }))}
-                      placeholder="You are a helpful assistant. 请用四川话表达。<|endofprompt|>"
+                      placeholder="例如：请用四川话、开心一点、语速稍慢地表达。"
                     />
                   </label>
                 </div>
@@ -657,7 +696,7 @@ export function TtsToolPage() {
                   </label>
                 </div>
               </details>
-              <div className="notice compact">限制：stream=true 时 speed 必须为 1；CosyVoice3 的 prompt_text / instruct_text 需要保留 &lt;|endofprompt|&gt;。</div>
+              <div className="notice compact">限制：stream=true 时 speed 必须为 1；CosyVoice3 官方分隔符由后台自动校验并补齐。</div>
               <button className="button primary" type="submit" disabled={pending}>
                 {pending ? "生成中..." : "生成语音"}
               </button>

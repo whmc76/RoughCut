@@ -208,15 +208,14 @@ async def _execute_tts_run(
     resolved_mode = str(mode or "zero_shot").strip().lower()
     if resolved_mode in {"zero_shot", "cross_lingual", "instruct", "instruct2"} and reference_path is None:
         raise RuntimeError(f"CosyVoice3 {resolved_mode} TTS requires prompt_wav/reference_audio")
-    resolved_prompt_text = str(prompt_text or "").strip()
-    if resolved_mode == "zero_shot" and not resolved_prompt_text:
+    user_prompt_text = _strip_cosyvoice_prompt_boundary(prompt_text)
+    resolved_prompt_text = _ensure_cosyvoice_prompt_boundary(user_prompt_text) if resolved_mode == "zero_shot" else user_prompt_text
+    user_instruct_text = _strip_cosyvoice_prompt_boundary(instruct_text)
+    resolved_instruct_text = _ensure_cosyvoice_prompt_boundary(user_instruct_text) if resolved_mode in {"instruct", "instruct2"} else user_instruct_text
+    if resolved_mode == "zero_shot" and not user_prompt_text:
         raise RuntimeError("CosyVoice3 zero_shot TTS requires prompt_text")
-    if resolved_mode == "zero_shot" and _COSYVOICE3_END_OF_PROMPT not in resolved_prompt_text:
-        raise RuntimeError("CosyVoice3 zero_shot prompt_text must include <|endofprompt|>")
-    if resolved_mode in {"instruct", "instruct2"} and not str(instruct_text or "").strip():
+    if resolved_mode in {"instruct", "instruct2"} and not user_instruct_text:
         raise RuntimeError("CosyVoice3 instruct2 TTS requires instruct_text")
-    if resolved_mode in {"instruct", "instruct2"} and _COSYVOICE3_END_OF_PROMPT not in str(instruct_text or ""):
-        raise RuntimeError("CosyVoice3 instruct2 instruct_text must include <|endofprompt|>")
     if resolved_mode == "sft" and not str(spk_id or "").strip():
         raise RuntimeError("CosyVoice3 sft TTS requires spk_id from /query_tts_model")
     if stream and abs(float(speed or 1.0) - 1.0) > 0.0001:
@@ -227,7 +226,7 @@ async def _execute_tts_run(
         "tts_text": text,
         "text": text,
         "prompt_text": resolved_prompt_text,
-        "instruct_text": str(instruct_text or "").strip(),
+        "instruct_text": resolved_instruct_text,
         "spk_id": str(spk_id or "").strip(),
         "zero_shot_spk_id": str(zero_shot_spk_id or "").strip(),
         "stream": "true" if stream else "false",
@@ -286,8 +285,8 @@ async def _execute_tts_run(
         "mode": resolved_mode,
         "text": text,
         "original_text": original_text,
-        "prompt_text": resolved_prompt_text,
-        "instruct_text": instruct_text,
+        "prompt_text": user_prompt_text,
+        "instruct_text": user_instruct_text,
         "spk_id": spk_id,
         "zero_shot_spk_id": zero_shot_spk_id,
         "stream": stream,
@@ -298,6 +297,19 @@ async def _execute_tts_run(
         "audio_url": f"/api/v1/tools/artifacts/tts/{output_path.name}",
         **meta,
     })
+
+
+def _strip_cosyvoice_prompt_boundary(value: str | None) -> str:
+    return str(value or "").replace(_COSYVOICE3_END_OF_PROMPT, "").strip()
+
+
+def _ensure_cosyvoice_prompt_boundary(value: str) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return raw
+    if _COSYVOICE3_END_OF_PROMPT in raw:
+        return raw
+    return f"{raw}{_COSYVOICE3_END_OF_PROMPT}"
 
 
 async def _execute_asr_run(run_id: str, *, audio_path: Path, language: str, prompt: str) -> None:
