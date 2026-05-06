@@ -561,7 +561,7 @@ export function TtsToolPage() {
               {usesInstructText ? (
                 <div className="tts-prompt-text-field">
                   <div className="tts-instruct-input-row">
-                    <label>
+                    <label className="tts-instruct-card">
                       <span>口播指令 instruct_text</span>
                       <textarea
                         className="input"
@@ -579,8 +579,8 @@ export function TtsToolPage() {
                     </label>
                   </div>
                   <div className="tts-preset-category-list">
-                    {instructTextPresetGroups.map((group) => (
-                      <section className="tts-preset-category" key={group.title}>
+                    {instructTextPresetGroups.map((group, groupIndex) => (
+                      <section className={`tts-preset-category preset-tone-${groupIndex % 5}`} key={group.title}>
                         <div className="tts-preset-category-head">
                           <strong>{group.title}</strong>
                           <span>{group.detail}</span>
