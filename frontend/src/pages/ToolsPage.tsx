@@ -125,6 +125,7 @@ type AvatarToolOptions = {
 };
 
 const defaultTtsText = "这是一段 RoughCut 小工具页面的 CosyVoice3 试音。";
+const cosyVoicePromptBoundary = "<|endofprompt|>";
 
 const defaultTtsOptions: TtsToolOptions = {
   mode: "zero_shot",
@@ -195,6 +196,12 @@ function coerceTtsOptions(value: Partial<TtsToolOptions>): TtsToolOptions {
     seed: String(value.seed ?? defaultTtsOptions.seed),
     textFrontend: coerceBooleanString(value.textFrontend, defaultTtsOptions.textFrontend),
   };
+}
+
+function ensureCosyVoicePromptBoundary(value: string, fallback = ""): string {
+  const raw = String(value || fallback || "").trim();
+  if (!raw) return raw;
+  return raw.includes(cosyVoicePromptBoundary) ? raw : `${raw}${cosyVoicePromptBoundary}`;
 }
 
 function coerceAsrOptions(value: Partial<AsrToolOptions>): AsrToolOptions {
@@ -402,7 +409,22 @@ export function TtsToolPage() {
 
   const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    mutation.mutate(new FormData(event.currentTarget));
+    const formData = new FormData(event.currentTarget);
+    const nextOptions = { ...ttsOptions };
+    if (usesPromptText) {
+      const promptText = ensureCosyVoicePromptBoundary(ttsOptions.promptText || defaultTtsOptions.promptText);
+      formData.set("prompt_text", promptText);
+      nextOptions.promptText = promptText;
+    }
+    if (usesInstructText) {
+      const instructText = ensureCosyVoicePromptBoundary(ttsOptions.instructText, instructTextPresets[0]?.text);
+      formData.set("instruct_text", instructText);
+      nextOptions.instructText = instructText;
+    }
+    if (nextOptions.promptText !== ttsOptions.promptText || nextOptions.instructText !== ttsOptions.instructText) {
+      setTtsOptions(nextOptions);
+    }
+    mutation.mutate(formData);
   };
 
   return (
@@ -432,7 +454,14 @@ export function TtsToolPage() {
                       className={mode.key === selectedMode.key ? "tts-style-option active" : "tts-style-option"}
                       aria-checked={mode.key === selectedMode.key}
                       role="radio"
-                      onClick={() => setTtsOptions((current) => ({ ...current, mode: mode.key }))}
+                      onClick={() =>
+                        setTtsOptions((current) => ({
+                          ...current,
+                          mode: mode.key,
+                          promptText: mode.key === "zero_shot" ? ensureCosyVoicePromptBoundary(current.promptText || defaultTtsOptions.promptText) : current.promptText,
+                          instructText: mode.key === "instruct2" ? ensureCosyVoicePromptBoundary(current.instructText, instructTextPresets[0]?.text) : current.instructText,
+                        }))
+                      }
                     >
                       <strong>{mode.label}</strong>
                       <span>{mode.summary}</span>

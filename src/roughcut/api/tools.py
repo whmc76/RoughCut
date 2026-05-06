@@ -460,6 +460,14 @@ def _fail_run(run_id: str, error: str) -> None:
     if run is None:
         return
     now = datetime.now(timezone.utc).isoformat()
+    for active_stage in run.get("stages", []):
+        if active_stage.get("status") == "running":
+            active_stage.update({
+                "status": "failed",
+                "progress": max(float(active_stage.get("progress") or 0.0), _RUN_PROGRESS_FLOORS.get(str(active_stage.get("name") or ""), 1.0)),
+                "detail": error,
+                "updated_at": now,
+            })
     stage = _get_run_stage(run, "failed")
     if stage is not None:
         stage.update({"status": "failed", "progress": 1.0, "detail": error, "updated_at": now})
@@ -504,13 +512,13 @@ def _run_public_payload(run: dict[str, Any]) -> dict[str, Any]:
 
 
 def _current_stage_name(run: dict[str, Any]) -> str:
+    if run.get("status") == "failed":
+        return "failed"
     for stage in run.get("stages", []):
         if stage.get("status") == "running":
             return str(stage.get("name") or "")
     if run.get("status") == "completed":
         return "completed"
-    if run.get("status") == "failed":
-        return "failed"
     return str(run.get("status") or "queued")
 
 
