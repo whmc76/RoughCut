@@ -573,18 +573,24 @@ export function TtsToolPage() {
                       </section>
                     ))}
                   </div>
-                  <label>
-                    <span>口播指令 instruct_text</span>
-                    <textarea
-                      className="input"
-                      name="instruct_text"
-                      rows={3}
-                      required
-                      value={ttsOptions.instructText}
-                      onChange={(event) => setTtsOptions((current) => ({ ...current, instructText: event.target.value }))}
-                      placeholder="例如：请用四川话、开心一点、语速稍慢地表达。"
-                    />
-                  </label>
+                  <div className="tts-instruct-input-row">
+                    <label>
+                      <span>口播指令 instruct_text</span>
+                      <textarea
+                        className="input"
+                        name="instruct_text"
+                        rows={4}
+                        required
+                        value={ttsOptions.instructText}
+                        onChange={(event) => setTtsOptions((current) => ({ ...current, instructText: event.target.value }))}
+                        placeholder="例如：请用四川话、开心一点、语速稍慢地表达。"
+                      />
+                    </label>
+                    <label className="tts-reference-upload">
+                      <span>prompt_wav / reference_audio</span>
+                      <input className="input" name="prompt_wav" type="file" accept="audio/*" required />
+                    </label>
+                  </div>
                 </div>
               ) : null}
               {usesCrossLingualText ? (
@@ -638,7 +644,7 @@ export function TtsToolPage() {
                   </label>
                 </div>
               ) : null}
-              {usesReferenceAudio ? (
+              {usesReferenceAudio && !usesInstructText ? (
                 <>
                   <label>
                     <span>prompt_wav / reference_audio</span>

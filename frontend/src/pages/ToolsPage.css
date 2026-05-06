@@ -227,6 +227,8 @@
 }
 
 .tts-prompt-text-field {
+  display: grid;
+  grid-column: 1 / -1;
   gap: 8px;
 }
 
@@ -240,7 +242,7 @@
 
 .tts-preset-category-list {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: 1fr;
   gap: 10px;
 }
 
@@ -267,6 +269,22 @@
   color: var(--text-muted);
   font-size: 12px;
   line-height: 1.45;
+}
+
+.tts-instruct-input-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1.08fr) minmax(280px, 0.92fr);
+  gap: 12px;
+  align-items: stretch;
+}
+
+.tts-reference-upload {
+  align-content: start;
+  min-height: 100%;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.5);
 }
 
 .tts-preset-chip-grid,
@@ -435,6 +453,7 @@ audio.tool-media {
   .tool-entry-grid,
   .tts-preset-category-list,
   .tts-common-fields,
+  .tts-instruct-input-row,
   .tts-mode-grid,
   .tts-mode-fields-grid {
     grid-template-columns: 1fr;
