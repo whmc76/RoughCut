@@ -1333,6 +1333,20 @@ export type ToolTtsParams = {
   reference_audio?: File;
 };
 
+export type ToolTtsReferenceAudioItem = {
+  name: string;
+  path: string;
+  source: string;
+  size?: number | null;
+  updated_at?: string | null;
+  audio_url?: string | null;
+};
+
+export type ToolTtsReferenceAudioHistory = {
+  checked_at: string;
+  items: ToolTtsReferenceAudioItem[];
+};
+
 export type ToolTtsResult = {
   status: string;
   provider: string;

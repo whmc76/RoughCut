@@ -326,10 +326,80 @@
 }
 
 .tts-instruct-card > span,
-.tts-reference-upload > span {
+.tts-reference-upload-head strong {
   color: #0b3632;
   font-size: 13px;
   font-weight: 900;
+}
+
+.tts-reference-upload-head,
+.tts-reference-history-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.tts-reference-upload {
+  gap: 10px;
+}
+
+.tts-reference-upload .text-button {
+  border: 0;
+  background: transparent;
+  color: #2563eb;
+  font-size: 12px;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.tts-reference-history {
+  display: grid;
+  gap: 8px;
+}
+
+.tts-reference-history-head {
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.tts-reference-history-list {
+  display: grid;
+  gap: 6px;
+  max-height: 190px;
+  overflow: auto;
+}
+
+.tts-reference-history-item {
+  display: grid;
+  gap: 2px;
+  padding: 7px 8px;
+  border: 1px solid rgba(37, 99, 235, 0.14);
+  border-radius: 8px;
+  background: #ffffff;
+  color: #0f172a;
+  text-align: left;
+  cursor: pointer;
+}
+
+.tts-reference-history-item strong {
+  overflow: hidden;
+  color: #173d72;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tts-reference-history-item span {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.tts-reference-history-item:hover,
+.tts-reference-history-item.active {
+  border-color: rgba(37, 99, 235, 0.42);
+  background: #eaf2ff;
 }
 
 .tts-preset-chip-grid,

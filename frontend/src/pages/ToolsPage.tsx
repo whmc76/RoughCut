@@ -6,7 +6,7 @@ import { api } from "../api";
 import { PageHeader } from "../components/ui/PageHeader";
 import { PageSection } from "../components/ui/PageSection";
 import { PanelHeader } from "../components/ui/PanelHeader";
-import type { ToolAsrResult, ToolAvatarResult, ToolRunStage, ToolRunStatus, ToolServiceStatus, ToolTtsMode, ToolTtsResult } from "../types";
+import type { ToolAsrResult, ToolAvatarResult, ToolRunStage, ToolRunStatus, ToolServiceStatus, ToolTtsMode, ToolTtsReferenceAudioItem, ToolTtsResult } from "../types";
 import "./ToolsPage.css";
 
 const toolCards = [
@@ -141,6 +141,20 @@ const instructTextPresetGroups = [
     ],
   },
   {
+    title: "内容赛道",
+    detail: "面向常见内容品类的声音表达。",
+    presets: [
+      { label: "有声故事", text: "请用有声故事演播风格表达，语气有画面感，人物和情节转折要更清楚。" },
+      { label: "儿童绘本", text: "请用适合儿童绘本朗读的温暖语气表达，节奏放慢，语调更有亲和力。" },
+      { label: "卡通人物", text: "请用卡通人物般活泼、夸张但清晰的方式说这句话。" },
+      { label: "课程教学", text: "请用课堂教学风格表达，逻辑清楚，重点词需要自然强调。" },
+      { label: "纪录片", text: "请用纪录片旁白风格表达，沉稳、有叙事感，并保持信息清晰。" },
+      { label: "情感电台", text: "请用情感电台主播风格表达，语气柔和、缓慢，并带有陪伴感。" },
+      { label: "游戏解说", text: "请用游戏解说风格表达，节奏更快，情绪更投入。" },
+      { label: "旅游导览", text: "请用旅游导览风格表达，亲切、清楚，并带一点探索感。" },
+    ],
+  },
+  {
     title: "速度/力度",
     detail: "改变节奏、停顿和强调。",
     presets: [
@@ -152,6 +166,20 @@ const instructTextPresetGroups = [
     ],
   },
   {
+    title: "职业/身份",
+    detail: "按职业身份调整可信度和表达方式。",
+    presets: [
+      { label: "教师", text: "请像教师一样讲解，表达耐心、清楚，重点信息要适合学生理解。" },
+      { label: "幼教老师", text: "请像幼教老师一样，声音亲切、有耐心，语气更温柔活泼。" },
+      { label: "医生科普", text: "请像医生做健康科普一样，专业、谨慎、清楚地说这句话。" },
+      { label: "律师解读", text: "请像律师解读条款一样，严谨、稳重、逻辑分明地说这句话。" },
+      { label: "财经主播", text: "请像财经主播一样，语气专业、稳健，数字和结论要更清晰。" },
+      { label: "房产顾问", text: "请像房产顾问一样，语气可信、有服务感，并突出关键信息。" },
+      { label: "主持人", text: "请像活动主持人一样，声音开阔、热情，衔接自然。" },
+      { label: "播音员", text: "请像专业播音员一样，字音清楚、语速稳定、气息平稳。" },
+    ],
+  },
+  {
     title: "角色",
     detail: "给数字人和脚本预览更明确的人设。",
     presets: [
@@ -160,6 +188,9 @@ const instructTextPresetGroups = [
       { label: "电影旁白", text: "请用有画面感、沉浸式的电影旁白语气说这句话。" },
       { label: "测评博主", text: "请像数码测评博主一样，节奏清楚、观点明确地说这句话。" },
       { label: "品牌主播", text: "请像品牌官方主播一样，稳重、有亲和力地说这句话。" },
+      { label: "童话讲述", text: "请像童话故事讲述者一样，温暖、有想象力，并带一点神秘感。" },
+      { label: "动画主角", text: "请像动画主角一样，声音明亮、有行动感，情绪更鲜活。" },
+      { label: "机智助手", text: "请像机智助手一样，语气轻快、聪明、反应灵敏。" },
     ],
   },
 ];
@@ -302,6 +333,12 @@ function normalizeProgress(value?: number | null): number {
   if (typeof value !== "number" || Number.isNaN(value)) return 0;
   const percent = value <= 1 ? value * 100 : value;
   return Math.max(0, Math.min(100, Math.round(percent)));
+}
+
+function formatFileSize(value?: number | null): string {
+  if (typeof value !== "number" || Number.isNaN(value) || value <= 0) return "";
+  if (value < 1024 * 1024) return `${Math.round(value / 1024)} KB`;
+  return `${(value / 1024 / 1024).toFixed(1)} MB`;
 }
 
 function stageLabel(stage: ToolRunStage): string {
@@ -450,7 +487,9 @@ function ToolNav() {
 export function TtsToolPage() {
   const { mutation, run, pending, error } = useToolRun<ToolTtsResult>(api.runToolTts);
   const status = useQuery({ queryKey: ["tools", "status"], queryFn: api.getToolStatus, refetchInterval: 30_000 });
+  const referenceHistory = useQuery({ queryKey: ["tools", "tts", "reference-audio"], queryFn: api.getToolTtsReferenceAudio, refetchInterval: 20_000 });
   const [ttsOptions, setTtsOptions] = useStoredOptions(toolOptionStorageKeys.tts, defaultTtsOptions, coerceTtsOptions);
+  const [selectedReferencePath, setSelectedReferencePath] = useState("");
   const selectedMode = resolveCosyVoiceTtsMode(ttsOptions.mode);
   const ttsService = status.data?.tools.tts as (ToolServiceStatus & { models?: string[] }) | undefined;
   const serviceVoiceIds = useMemo(() => (ttsService?.models ?? []).filter(Boolean), [ttsService]);
@@ -471,6 +510,7 @@ export function TtsToolPage() {
   const usesSpeakerId = selectedMode.key === "sft";
   const usesZeroShotSpeakerId = selectedMode.key === "zero_shot";
   const usesCrossLingualText = selectedMode.key === "cross_lingual";
+  const referenceHistoryItems = referenceHistory.data?.items ?? [];
 
   const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -492,6 +532,7 @@ export function TtsToolPage() {
             <PanelHeader title="输入" description={selectedMode.detail} />
             <form className="form-stack" onSubmit={handleSubmit}>
               <input type="hidden" name="mode" value={selectedMode.key} />
+              <input type="hidden" name="reference_history_path" value={selectedReferencePath} />
               <div className="tts-style-field">
                 <div>
                   <span className="field-label">mode</span>
@@ -573,10 +614,14 @@ export function TtsToolPage() {
                         placeholder="例如：请用四川话、开心一点、语速稍慢地表达。"
                       />
                     </label>
-                    <label className="tts-reference-upload">
-                      <span>prompt_wav / reference_audio</span>
-                      <input className="input" name="prompt_wav" type="file" accept="audio/*" required />
-                    </label>
+                    <ReferenceAudioPicker
+                      items={referenceHistoryItems}
+                      loading={referenceHistory.isLoading}
+                      selectedPath={selectedReferencePath}
+                      required={usesReferenceAudio}
+                      onSelect={setSelectedReferencePath}
+                      onFileChange={() => setSelectedReferencePath("")}
+                    />
                   </div>
                   <div className="tts-preset-category-list">
                     {instructTextPresetGroups.map((group, groupIndex) => (
@@ -656,10 +701,14 @@ export function TtsToolPage() {
               ) : null}
               {usesReferenceAudio && !usesInstructText ? (
                 <>
-                  <label>
-                    <span>prompt_wav / reference_audio</span>
-                    <input className="input" name="prompt_wav" type="file" accept="audio/*" required />
-                  </label>
+                  <ReferenceAudioPicker
+                    items={referenceHistoryItems}
+                    loading={referenceHistory.isLoading}
+                    selectedPath={selectedReferencePath}
+                    required={usesReferenceAudio}
+                    onSelect={setSelectedReferencePath}
+                    onFileChange={() => setSelectedReferencePath("")}
+                  />
                   {usesZeroShotSpeakerId ? (
                   <label>
                     <span>zero_shot_spk_id</span>
@@ -744,6 +793,64 @@ export function TtsToolPage() {
         </div>
       </PageSection>
     </section>
+  );
+}
+
+function ReferenceAudioPicker({
+  items,
+  loading,
+  selectedPath,
+  required,
+  onSelect,
+  onFileChange,
+}: {
+  items: ToolTtsReferenceAudioItem[];
+  loading: boolean;
+  selectedPath: string;
+  required: boolean;
+  onSelect: (path: string) => void;
+  onFileChange: () => void;
+}) {
+  const selectedItem = items.find((item) => item.path === selectedPath);
+  return (
+    <div className="tts-reference-upload">
+      <div className="tts-reference-upload-head">
+        <strong>prompt_wav / reference_audio</strong>
+        {selectedPath ? (
+          <button className="text-button" type="button" onClick={() => onSelect("")}>
+            清除历史选择
+          </button>
+        ) : null}
+      </div>
+      <input className="input" name="prompt_wav" type="file" accept="audio/*" required={required && !selectedPath} onChange={(event) => {
+        if (event.currentTarget.files && event.currentTarget.files.length > 0) onFileChange();
+      }} />
+      {selectedItem ? <div className="mode-chip subtle">已选择历史：{selectedItem.name}</div> : null}
+      <div className="tts-reference-history">
+        <div className="tts-reference-history-head">
+          <span>历史文件</span>
+          <span>{loading ? "加载中" : `${items.length} 个`}</span>
+        </div>
+        {items.length > 0 ? (
+          <div className="tts-reference-history-list">
+            {items.map((item) => (
+              <button
+                key={item.path}
+                type="button"
+                className={item.path === selectedPath ? "tts-reference-history-item active" : "tts-reference-history-item"}
+                onClick={() => onSelect(item.path)}
+                title={item.path}
+              >
+                <strong>{item.name}</strong>
+                <span>{item.source}{formatFileSize(item.size) ? ` · ${formatFileSize(item.size)}` : ""}</span>
+              </button>
+            ))}
+          </div>
+        ) : (
+          <div className="muted compact">暂无历史音频；上传一次后会出现在这里。</div>
+        )}
+      </div>
+    </div>
   );
 }
 

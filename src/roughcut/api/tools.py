@@ -83,6 +83,7 @@ async def run_tts(
     speed: float = Form(default=1.0),
     seed: int = Form(default=0),
     text_frontend: bool = Form(default=True),
+    reference_history_path: str = Form(default=""),
     reference_audio: UploadFile | None = File(default=None),
     prompt_wav: UploadFile | None = File(default=None),
 ) -> dict[str, Any]:
@@ -95,6 +96,8 @@ async def run_tts(
         root=_UPLOAD_ROOT,
         fallback_suffix=".wav",
     )
+    if reference_path is None and str(reference_history_path or "").strip():
+        reference_path = _resolve_reference_audio_history_path(reference_history_path)
     run = _create_run("tts")
     _update_run_stage(run["run_id"], "upload", detail="TTS request accepted")
     _schedule_run(
@@ -115,6 +118,14 @@ async def run_tts(
         reference_path=reference_path,
     )
     return _run_public_payload(run)
+
+
+@router.get("/tts/reference-audio")
+async def list_tts_reference_audio() -> dict[str, Any]:
+    return {
+        "checked_at": datetime.now(timezone.utc).isoformat(),
+        "items": _list_reference_audio_history(),
+    }
 
 
 @router.post("/asr")
@@ -569,9 +580,57 @@ def _json_safe(value: Any) -> Any:
     return value
 
 
+def _list_reference_audio_history(limit: int = 24) -> list[dict[str, Any]]:
+    audio_suffixes = {".wav", ".mp3", ".m4a", ".aac", ".flac", ".ogg", ".opus"}
+    candidates: list[tuple[float, Path, str]] = []
+    roots = ((_UPLOAD_ROOT, "上传历史"), (_TTS_ROOT, "生成音频"))
+    for root, source in roots:
+        if not root.exists():
+            continue
+        for path in root.iterdir():
+            if not path.is_file() or path.suffix.lower() not in audio_suffixes:
+                continue
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            candidates.append((stat.st_mtime, path, source))
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    return [
+        {
+            "name": path.name,
+            "path": str(path),
+            "source": source,
+            "size": path.stat().st_size,
+            "updated_at": datetime.fromtimestamp(updated_at, timezone.utc).isoformat(),
+            "audio_url": f"/api/v1/tools/artifacts/{'tts' if source == '生成音频' else 'uploads'}/{path.name}",
+        }
+        for updated_at, path, source in candidates[:limit]
+    ]
+
+
+def _resolve_reference_audio_history_path(value: str) -> Path:
+    requested = str(value or "").strip()
+    if not requested:
+        raise HTTPException(status_code=400, detail="reference_history_path is empty")
+    raw_path = Path(requested)
+    allowed_roots = (_UPLOAD_ROOT.resolve(), _TTS_ROOT.resolve())
+    candidates = [raw_path]
+    if raw_path.name == requested:
+        candidates.extend([_UPLOAD_ROOT / raw_path.name, _TTS_ROOT / raw_path.name])
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve()
+        except OSError:
+            continue
+        if any(resolved == root or root in resolved.parents for root in allowed_roots) and resolved.exists() and resolved.is_file():
+            return resolved
+    raise HTTPException(status_code=400, detail="reference_history_path is not available")
+
+
 @router.get("/artifacts/{kind}/{file_name}")
 async def get_tool_artifact(kind: str, file_name: str):
-    root = {"tts": _TTS_ROOT, "avatar": _AVATAR_ROOT}.get(kind)
+    root = {"tts": _TTS_ROOT, "avatar": _AVATAR_ROOT, "uploads": _UPLOAD_ROOT}.get(kind)
     if root is None:
         raise HTTPException(status_code=404, detail="unknown artifact kind")
     path = (root / Path(file_name).name).resolve()
