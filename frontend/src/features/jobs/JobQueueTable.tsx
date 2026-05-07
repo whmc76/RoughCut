@@ -203,24 +203,6 @@ export function JobQueueTable({
         // Hover prefetch is opportunistic; the manual editor page surfaces real errors.
       });
   };
-  const warmManualEditorAssets = (jobId: string) => {
-    void queryClient.fetchQuery({
-      queryKey: ["job-manual-editor-readiness", jobId],
-      queryFn: () => api.getJobManualEditorReadiness(jobId),
-      staleTime: 5_000,
-    })
-      .then((readiness) => {
-        if (!readiness.can_open_editor) return;
-        void queryClient.prefetchQuery({
-          queryKey: ["job-manual-editor-assets", jobId],
-          queryFn: () => api.warmJobManualEditorAssets(jobId),
-          staleTime: 10_000,
-        });
-      })
-      .catch(() => {
-        // Pointer prefetch is opportunistic; the manual editor page surfaces real errors.
-      });
-  };
 
   return (
     <section className="panel">
@@ -400,10 +382,6 @@ export function JobQueueTable({
                         to={`/jobs/${job.id}/manual-editor`}
                         onMouseEnter={() => prefetchManualEditor(job.id)}
                         onFocus={() => prefetchManualEditor(job.id)}
-                        onPointerDown={() => {
-                          prefetchManualEditor(job.id);
-                          warmManualEditorAssets(job.id);
-                        }}
                         onClick={(event) => event.stopPropagation()}
                       >
                         手动调整

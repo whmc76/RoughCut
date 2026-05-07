@@ -1,12 +1,16 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useParams } from "react-router-dom";
-import { useCallback, useEffect, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useState } from "react";
 
 import { api } from "../api";
 import { PageHeader } from "../components/ui/PageHeader";
 import { EmptyState } from "../components/ui/EmptyState";
-import { JobManualEditSection, type JobManualEditSectionState } from "../features/jobs/JobManualEditSection";
+import type { JobManualEditSectionState } from "../features/jobs/JobManualEditSection";
 import type { JobManualEditApplyPayload, JobManualEditorReadiness } from "../types";
+
+const JobManualEditSection = lazy(async () => ({
+  default: (await import("../features/jobs/JobManualEditSection")).JobManualEditSection,
+}));
 
 function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error || "未知错误");
@@ -286,20 +290,28 @@ export function JobManualEditorPage() {
           </div>
         </section>
       ) : manualEditor.data ? (
-        <JobManualEditSection
-          job={job.data}
-          session={manualEditor.data}
-          previewAssets={manualEditorAssets.data}
-          saving={applyManualEditor.isPending}
-          autosaving={saveManualEditorDraft.isPending}
-          autosavedAt={lastDraftSavedAt ?? manualEditor.data.draft_saved_at}
-          detectingRotation={detectRotation.isPending}
-          resetSignal={resetSignal}
-          onStateChange={handleManualEditStateChange}
-          onApply={handleApplyManualEditorPayload}
-          onAutoSave={handleAutoSaveManualEditorDraft}
-          onDetectRotation={handleDetectManualEditorRotation}
-        />
+        <Suspense
+          fallback={
+            <section className="panel manual-editor-shell-panel">
+              <EmptyState message="正在加载手动调整编辑器…" />
+            </section>
+          }
+        >
+          <JobManualEditSection
+            job={job.data}
+            session={manualEditor.data}
+            previewAssets={manualEditorAssets.data}
+            saving={applyManualEditor.isPending}
+            autosaving={saveManualEditorDraft.isPending}
+            autosavedAt={lastDraftSavedAt ?? manualEditor.data.draft_saved_at}
+            detectingRotation={detectRotation.isPending}
+            resetSignal={resetSignal}
+            onStateChange={handleManualEditStateChange}
+            onApply={handleApplyManualEditorPayload}
+            onAutoSave={handleAutoSaveManualEditorDraft}
+            onDetectRotation={handleDetectManualEditorRotation}
+          />
+        </Suspense>
       ) : (
         <section className="panel">
           <EmptyState message="没有可用的手动调整工作区。" />

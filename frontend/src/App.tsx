@@ -1,4 +1,4 @@
-import { Suspense, lazy, useEffect, useRef } from "react";
+import { useEffect, useRef } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { NavLink, Route, Routes } from "react-router-dom";
 
@@ -6,61 +6,21 @@ import { api } from "./api";
 import { getProviderLabel } from "./features/settings/helpers";
 import { useFrontendBuildRefresh } from "./hooks/useFrontendBuildRefresh";
 import { useI18n } from "./i18n";
-
-const OverviewPage = lazy(async () => ({
-  default: (await import("./pages/OverviewPage")).OverviewPage,
-}));
-const JobsPage = lazy(async () => ({
-  default: (await import("./pages/JobsPage")).JobsPage,
-}));
-const JobManualEditorPage = lazy(async () => ({
-  default: (await import("./pages/JobManualEditorPage")).JobManualEditorPage,
-}));
-const WatchRootsPage = lazy(async () => ({
-  default: (await import("./pages/WatchRootsPage")).WatchRootsPage,
-}));
-const IntelligentCopyPage = lazy(async () => ({
-  default: (await import("./pages/IntelligentCopyPage")).IntelligentCopyPage,
-}));
-const PackagingPage = lazy(async () => ({
-  default: (await import("./pages/PackagingPage")).PackagingPage,
-}));
-const StyleTemplatesPage = lazy(async () => ({
-  default: (await import("./pages/StyleTemplatesPage")).StyleTemplatesPage,
-}));
-const StyleLabPage = lazy(async () => ({
-  default: (await import("./pages/StyleLabPage")).StyleLabPage,
-}));
-const CreativeModesPage = lazy(async () => ({
-  default: (await import("./pages/CreativeModesPage")).CreativeModesPage,
-}));
-const CreatorProfilesPage = lazy(async () => ({
-  default: (await import("./pages/CreatorProfilesPage")).CreatorProfilesPage,
-}));
-const MemoryPage = lazy(async () => ({
-  default: (await import("./pages/MemoryPage")).MemoryPage,
-}));
-const GlossaryPage = lazy(async () => ({
-  default: (await import("./pages/GlossaryPage")).GlossaryPage,
-}));
-const SettingsPage = lazy(async () => ({
-  default: (await import("./pages/SettingsPage")).SettingsPage,
-}));
-const ControlPage = lazy(async () => ({
-  default: (await import("./pages/ControlPage")).ControlPage,
-}));
-const ToolsPage = lazy(async () => ({
-  default: (await import("./pages/ToolsPage")).ToolsPage,
-}));
-const TtsToolPage = lazy(async () => ({
-  default: (await import("./pages/ToolsPage")).TtsToolPage,
-}));
-const AsrToolPage = lazy(async () => ({
-  default: (await import("./pages/ToolsPage")).AsrToolPage,
-}));
-const AvatarToolPage = lazy(async () => ({
-  default: (await import("./pages/ToolsPage")).AvatarToolPage,
-}));
+import { AvatarToolPage, AsrToolPage, ToolsPage, TtsToolPage } from "./pages/ToolsPage";
+import { ControlPage } from "./pages/ControlPage";
+import { CreativeModesPage } from "./pages/CreativeModesPage";
+import { CreatorProfilesPage } from "./pages/CreatorProfilesPage";
+import { GlossaryPage } from "./pages/GlossaryPage";
+import { IntelligentCopyPage } from "./pages/IntelligentCopyPage";
+import { JobManualEditorPage } from "./pages/JobManualEditorPage";
+import { JobsPage } from "./pages/JobsPage";
+import { MemoryPage } from "./pages/MemoryPage";
+import { OverviewPage } from "./pages/OverviewPage";
+import { PackagingPage } from "./pages/PackagingPage";
+import { SettingsPage } from "./pages/SettingsPage";
+import { StyleLabPage } from "./pages/StyleLabPage";
+import { StyleTemplatesPage } from "./pages/StyleTemplatesPage";
+import { WatchRootsPage } from "./pages/WatchRootsPage";
 
 export function App() {
   const { locale, setLocale, t } = useI18n();
@@ -200,28 +160,26 @@ export function App() {
       </aside>
       <main className="app-stage">
         <div className="main-content">
-          <Suspense fallback={<section className="panel">加载页面中…</section>}>
-            <Routes>
-              <Route path="/" element={<OverviewPage />} />
-              <Route path="/jobs" element={<JobsPage />} />
-              <Route path="/jobs/:jobId/manual-editor" element={<JobManualEditorPage />} />
-              <Route path="/watch-roots" element={<WatchRootsPage />} />
-              <Route path="/intelligent-copy" element={<IntelligentCopyPage />} />
-              <Route path="/packaging" element={<PackagingPage />} />
-              <Route path="/style-lab" element={<StyleLabPage />} />
-              <Route path="/tools" element={<ToolsPage />} />
-              <Route path="/tools/tts" element={<TtsToolPage />} />
-              <Route path="/tools/asr" element={<AsrToolPage />} />
-              <Route path="/tools/avatar" element={<AvatarToolPage />} />
-              <Route path="/style-templates" element={<StyleTemplatesPage />} />
-              <Route path="/creative-modes" element={<CreativeModesPage />} />
-              <Route path="/creator-profiles" element={<CreatorProfilesPage />} />
-              <Route path="/memory" element={<MemoryPage />} />
-              <Route path="/glossary" element={<GlossaryPage />} />
-              <Route path="/settings" element={<SettingsPage />} />
-              <Route path="/control" element={<ControlPage />} />
-            </Routes>
-          </Suspense>
+          <Routes>
+            <Route path="/" element={<OverviewPage />} />
+            <Route path="/jobs" element={<JobsPage />} />
+            <Route path="/jobs/:jobId/manual-editor" element={<JobManualEditorPage />} />
+            <Route path="/watch-roots" element={<WatchRootsPage />} />
+            <Route path="/intelligent-copy" element={<IntelligentCopyPage />} />
+            <Route path="/packaging" element={<PackagingPage />} />
+            <Route path="/style-lab" element={<StyleLabPage />} />
+            <Route path="/tools" element={<ToolsPage />} />
+            <Route path="/tools/tts" element={<TtsToolPage />} />
+            <Route path="/tools/asr" element={<AsrToolPage />} />
+            <Route path="/tools/avatar" element={<AvatarToolPage />} />
+            <Route path="/style-templates" element={<StyleTemplatesPage />} />
+            <Route path="/creative-modes" element={<CreativeModesPage />} />
+            <Route path="/creator-profiles" element={<CreatorProfilesPage />} />
+            <Route path="/memory" element={<MemoryPage />} />
+            <Route path="/glossary" element={<GlossaryPage />} />
+            <Route path="/settings" element={<SettingsPage />} />
+            <Route path="/control" element={<ControlPage />} />
+          </Routes>
         </div>
       </main>
     </div>
