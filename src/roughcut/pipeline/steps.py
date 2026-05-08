@@ -69,7 +69,7 @@ from roughcut.media.output import (
     write_srt_file,
 )
 from roughcut.media.scene import detect_scenes
-from roughcut.media.subtitle_text import clean_final_subtitle_text
+from roughcut.media.subtitle_text import clean_final_subtitle_text, clean_subtitle_payloads
 from roughcut.media.subtitles import remap_subtitles_to_timeline
 from roughcut.media.probe import probe, validate_media
 from roughcut.media.render import render_video
@@ -87,6 +87,7 @@ from roughcut.packaging.library import (
 from roughcut.prompts.edit_decision import build_high_risk_cut_review_prompt
 from roughcut.providers.factory import get_avatar_provider, get_reasoning_provider, get_voice_provider
 from roughcut.providers.reasoning.base import Message, extract_json_text
+from roughcut.providers.transcription.base import TranscriptResult
 from roughcut.providers.transcription.chunking import (
     build_audio_chunk_specs,
     probe_audio_duration,
@@ -95,7 +96,6 @@ from roughcut.providers.transcription.chunking import (
 )
 from roughcut.pipeline.quality import _compute_subtitle_sync_check, evaluate_profile_identity_gate
 from roughcut.review.content_profile import (
-    _build_conservative_identity_summary,
     apply_source_identity_constraints,
     apply_content_profile_feedback,
     apply_identity_review_guard,
@@ -3182,9 +3182,9 @@ async def _load_latest_subtitle_payloads(
         fallback_items=None,
     )
     if subtitle_dicts or not fallback_to_items:
-        return subtitle_dicts, projection_data
+        return clean_subtitle_payloads(subtitle_dicts), projection_data
     subtitle_items = await _load_subtitle_items(session, job_id=job_id)
-    return [_subtitle_item_payload(item) for item in subtitle_items], {}
+    return clean_subtitle_payloads([_subtitle_item_payload(item) for item in subtitle_items]), {}
 
 
 async def _load_subtitle_items(session, *, job_id: uuid.UUID) -> list[SubtitleItem]:

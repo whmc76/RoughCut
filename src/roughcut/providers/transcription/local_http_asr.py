@@ -31,6 +31,9 @@ from roughcut.review.hotword_learning import extract_prompt_hotwords
 
 
 class LocalHTTPASRProvider(TranscriptionProvider):
+    _DECODE_LOOP_MIN_TEXT_UNITS = 12
+    _DECODE_LOOP_MIN_REPEATS = 4
+
     def __init__(self, *, model_name: str = "moss-audio-8b-instruct") -> None:
         settings = get_settings()
         self._base_url = settings.local_asr_api_base_url.rstrip("/")
@@ -186,8 +189,10 @@ class LocalHTTPASRProvider(TranscriptionProvider):
                         )
                     )
 
+        segments = self._sanitize_decode_loop_segments(segments)
         raw_segments = list(segments)
         repaired_segments = self._repair_segments(segments, duration=total_duration)
+        repaired_segments = self._sanitize_decode_loop_segments(repaired_segments)
         return TranscriptResult(
             segments=repaired_segments,
             language=language,
@@ -341,8 +346,10 @@ class LocalHTTPASRProvider(TranscriptionProvider):
                     )
                 ]
 
+        segments = self._sanitize_decode_loop_segments(segments)
         raw_segments_copy = list(segments)
         segments = self._repair_segments(segments, duration=duration)
+        segments = self._sanitize_decode_loop_segments(segments)
 
         if progress_callback is not None:
             total = duration if duration > 0 else (segments[-1].end if segments else 0.0)
@@ -555,6 +562,179 @@ class LocalHTTPASRProvider(TranscriptionProvider):
                 )
             )
         return segments
+
+    def _sanitize_decode_loop_segments(self, segments: list[TranscriptSegment]) -> list[TranscriptSegment]:
+        cleaned_segments = [
+            self._copy_segment_with_text(segment, text=self._collapse_decode_loop_text(segment.text))
+            for segment in list(segments or [])
+        ]
+        collapsed: list[TranscriptSegment] = []
+        index = 0
+        while index < len(cleaned_segments):
+            current = cleaned_segments[index]
+            current_key = self._decode_loop_key(current.text)
+            run_end = index + 1
+            while run_end < len(cleaned_segments):
+                next_key = self._decode_loop_key(cleaned_segments[run_end].text)
+                if not current_key or next_key != current_key:
+                    break
+                run_end += 1
+
+            run_length = run_end - index
+            if self._is_decode_loop_key(current_key) and run_length >= self._DECODE_LOOP_MIN_REPEATS:
+                run = cleaned_segments[index:run_end]
+                first = run[0]
+                merged = self._copy_segment_with_text(first, text=first.text)
+                merged.end = round(max(float(item.end) for item in run), 3)
+                merged.raw_payload = dict(merged.raw_payload)
+                merged.raw_payload["_roughcut_filtering"] = {
+                    **self._filtering_payload(merged.raw_payload),
+                    "collapsed_decode_loop_segments": {
+                        "repeat_count": run_length,
+                        "start": round(float(run[0].start), 3),
+                        "end": round(float(merged.end), 3),
+                        "text": first.text,
+                    },
+                }
+                collapsed.append(merged)
+            else:
+                collapsed.extend(cleaned_segments[index:run_end])
+            index = run_end
+
+        return [
+            TranscriptSegment(
+                index=new_index,
+                start=segment.start,
+                end=segment.end,
+                text=segment.text,
+                words=list(segment.words),
+                speaker=segment.speaker,
+                provider=segment.provider,
+                model=segment.model,
+                raw_payload=dict(segment.raw_payload),
+                raw_text=segment.raw_text,
+                context=segment.context,
+                hotword=segment.hotword,
+                confidence=segment.confidence,
+                logprob=segment.logprob,
+                alignment=segment.alignment,
+            )
+            for new_index, segment in enumerate(collapsed)
+            if str(segment.text or "").strip()
+        ]
+
+    def _copy_segment_with_text(self, segment: TranscriptSegment, *, text: str) -> TranscriptSegment:
+        cleaned = str(text or "").strip()
+        raw_text = segment.raw_text or segment.text
+        raw_payload = dict(segment.raw_payload)
+        if cleaned and cleaned != str(segment.text or "").strip():
+            raw_payload["_roughcut_filtering"] = {
+                **self._filtering_payload(raw_payload),
+                "collapsed_decode_loop_text": {
+                    "original_text": segment.text,
+                    "text": cleaned,
+                },
+            }
+        return TranscriptSegment(
+            index=segment.index,
+            start=segment.start,
+            end=segment.end,
+            text=cleaned,
+            words=list(segment.words),
+            speaker=segment.speaker,
+            provider=segment.provider,
+            model=segment.model,
+            raw_payload=raw_payload,
+            raw_text=raw_text,
+            context=segment.context,
+            hotword=segment.hotword,
+            confidence=segment.confidence,
+            logprob=segment.logprob,
+            alignment=segment.alignment,
+        )
+
+    @staticmethod
+    def _filtering_payload(raw_payload: dict[str, Any]) -> dict[str, Any]:
+        filtering = raw_payload.get("_roughcut_filtering")
+        return dict(filtering) if isinstance(filtering, dict) else {}
+
+    def _collapse_decode_loop_text(self, text: str) -> str:
+        original = str(text or "").strip()
+        phrases = self._sentence_like_phrases(text)
+        if len(phrases) < self._DECODE_LOOP_MIN_REPEATS:
+            return self._collapse_compact_decode_loop_text(original)
+
+        collapsed: list[str] = []
+        index = 0
+        changed = False
+        while index < len(phrases):
+            key = self._decode_loop_key(phrases[index])
+            run_end = index + 1
+            while run_end < len(phrases) and key and self._decode_loop_key(phrases[run_end]) == key:
+                run_end += 1
+            run_length = run_end - index
+            if self._is_decode_loop_key(key) and run_length >= self._DECODE_LOOP_MIN_REPEATS:
+                collapsed.append(phrases[index])
+                changed = True
+            else:
+                collapsed.extend(phrases[index:run_end])
+            index = run_end
+
+        return "".join(collapsed).strip() if changed else self._collapse_compact_decode_loop_text(original)
+
+    @classmethod
+    def _collapse_compact_decode_loop_text(cls, text: str) -> str:
+        original = str(text or "").strip()
+        compact = cls._decode_loop_key(original)
+        max_unit_length = len(compact) // cls._DECODE_LOOP_MIN_REPEATS
+        if max_unit_length < cls._DECODE_LOOP_MIN_TEXT_UNITS:
+            return original
+        for unit_length in range(cls._DECODE_LOOP_MIN_TEXT_UNITS, max_unit_length + 1):
+            unit = compact[:unit_length]
+            cursor = 0
+            repeat_count = 0
+            while compact.startswith(unit, cursor):
+                repeat_count += 1
+                cursor += unit_length
+            remainder = len(compact) - cursor
+            if repeat_count >= cls._DECODE_LOOP_MIN_REPEATS and remainder <= max(2, unit_length // 4):
+                return cls._slice_original_text_by_compact_units(original, unit_length)
+        return original
+
+    @classmethod
+    def _slice_original_text_by_compact_units(cls, text: str, compact_units: int) -> str:
+        seen_units = 0
+        end_index = 0
+        for index, char in enumerate(str(text or "")):
+            if cls._decode_loop_key(char):
+                seen_units += 1
+            if seen_units >= compact_units:
+                end_index = index + 1
+                break
+        value = str(text or "")[:end_index]
+        while end_index < len(text) and not cls._decode_loop_key(text[end_index]):
+            value += text[end_index]
+            end_index += 1
+        return value.strip()
+
+    @classmethod
+    def _sentence_like_phrases(cls, text: str) -> list[str]:
+        normalized = re.sub(r"\s+", " ", str(text or "")).strip()
+        if not normalized:
+            return []
+        return [
+            match.group(0).strip()
+            for match in re.finditer(r"[^。！？!?；;\n]+[。！？!?；;]?", normalized)
+            if match.group(0).strip()
+        ]
+
+    @classmethod
+    def _decode_loop_key(cls, text: str) -> str:
+        return re.sub(r"[\s\u3000，,。！？!?；;：:、\"'“”‘’()\[\]{}<>《》]+", "", str(text or "")).strip()
+
+    @classmethod
+    def _is_decode_loop_key(cls, key: str) -> bool:
+        return len(str(key or "")) >= cls._DECODE_LOOP_MIN_TEXT_UNITS
 
     def _repair_segments(self, segments: list[TranscriptSegment], *, duration: float) -> list[TranscriptSegment]:
         repaired = [

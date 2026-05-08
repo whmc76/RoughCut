@@ -78,7 +78,8 @@ from roughcut.media.manual_editor_assets import (
     mark_manual_editor_preview_assets_queued,
     manual_editor_asset_dir,
 )
-from roughcut.media.subtitle_text import clean_final_subtitle_text
+from roughcut.media.subtitles import remap_subtitles_to_timeline
+from roughcut.media.subtitle_text import clean_final_subtitle_text, clean_subtitle_payloads
 from roughcut.publication import (
     active_publication_credentials,
     build_publication_plan,
@@ -1526,15 +1527,14 @@ def _clean_manual_editor_subtitle_projection(
     *,
     drop_empty: bool = True,
 ) -> list[dict[str, Any]]:
-    cleaned: list[dict[str, Any]] = []
-    for item in subtitles:
-        payload = dict(item)
-        text_final = _manual_editor_final_subtitle_text(payload)
-        if drop_empty and not text_final:
-            continue
-        payload["text_final"] = text_final
-        cleaned.append(payload)
-    return cleaned
+    return clean_subtitle_payloads(subtitles, drop_empty=drop_empty)
+
+
+def _manual_editor_has_collapsed_repeat_runs(
+    raw_subtitles: list[dict[str, Any]],
+    cleaned_subtitles: list[dict[str, Any]],
+) -> bool:
+    return len(raw_subtitles) > len(cleaned_subtitles)
 
 
 def _manual_editor_subtitle_payload(item: dict[str, Any], *, index: int) -> ManualEditorSubtitleOut:
@@ -2438,9 +2438,16 @@ async def _build_manual_editor_session(
         draft_saved_at = str(draft_payload.get("saved_at") or "") or None
         draft_note = str(draft_payload.get("note") or "") or None
 
-    subtitle_dicts, projection_data = await _load_latest_subtitle_payloads(session, job_id=job.id)
+    raw_subtitle_dicts, projection_data = await _load_latest_subtitle_payloads(session, job_id=job.id)
+    subtitle_dicts = _clean_manual_editor_subtitle_projection(raw_subtitle_dicts)
+    use_clean_fallback_projection = _manual_editor_has_collapsed_repeat_runs(raw_subtitle_dicts, subtitle_dicts)
     if manual_projection_items and not draft_active:
         projected_subtitles = manual_projection_items
+    elif use_clean_fallback_projection:
+        projected_subtitles = remap_subtitles_to_timeline(
+            subtitle_dicts,
+            [segment.model_dump(include={"start", "end"}) for segment in keep_segments],
+        )
     else:
         projected_subtitles = await _build_edited_subtitle_projection(
             session,
@@ -2456,7 +2463,6 @@ async def _build_manual_editor_session(
                 subtitle_overrides,
                 output_duration_sec=base_output_duration_sec,
             )
-    subtitle_dicts = _clean_manual_editor_subtitle_projection(subtitle_dicts)
     projected_subtitles = _clean_manual_editor_subtitle_projection(projected_subtitles)
     source_path = _resolve_manual_editor_source_path(job)
     status_detail = _manual_editor_detail_for_job_status(str(job.status or ""))
@@ -2780,14 +2786,18 @@ async def apply_manual_editor_timeline(
         )
 
     keep_segments = _normalize_manual_keep_segments(request.keep_segments, source_duration_sec=source_duration_sec)
-    subtitle_dicts, projection_data = await _load_latest_subtitle_payloads(session, job_id=job.id)
-    remapped_subtitles = await _build_edited_subtitle_projection(
-        session,
-        job_id=job.id,
-        keep_segments=keep_segments,
-        projection_data=projection_data,
-        fallback_subtitles=subtitle_dicts,
-    )
+    raw_subtitle_dicts, projection_data = await _load_latest_subtitle_payloads(session, job_id=job.id)
+    subtitle_dicts = _clean_manual_editor_subtitle_projection(raw_subtitle_dicts)
+    if _manual_editor_has_collapsed_repeat_runs(raw_subtitle_dicts, subtitle_dicts):
+        remapped_subtitles = remap_subtitles_to_timeline(subtitle_dicts, keep_segments)
+    else:
+        remapped_subtitles = await _build_edited_subtitle_projection(
+            session,
+            job_id=job.id,
+            keep_segments=keep_segments,
+            projection_data=projection_data,
+            fallback_subtitles=subtitle_dicts,
+        )
     base_output_duration_sec = max((float(item.get("end_time", 0.0) or 0.0) for item in remapped_subtitles), default=0.0)
     subtitle_override_payloads = _manual_subtitle_override_payloads(request.subtitle_overrides)
     subtitle_replacement_payloads = _manual_subtitle_replacement_payloads(request.subtitle_replacements)

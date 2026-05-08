@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from typing import Any
 
 _STANDALONE_FILLER_TOKENS = (
     "这个",
@@ -57,6 +58,67 @@ def clean_final_subtitle_text(text: object) -> str:
     return _format_final_subtitle_text(normalized)
 
 
+def clean_subtitle_payloads(
+    subtitles: list[dict[str, Any]],
+    *,
+    drop_empty: bool = True,
+) -> list[dict[str, Any]]:
+    cleaned: list[dict[str, Any]] = []
+    for item in subtitles:
+        payload = dict(item)
+        text_final = clean_final_subtitle_text(
+            payload.get("text_final")
+            or payload.get("text_norm")
+            or payload.get("text_raw", "")
+        )
+        if drop_empty and not text_final:
+            continue
+        payload["text_final"] = text_final
+        cleaned.append(payload)
+    return collapse_repeated_subtitle_payloads(cleaned)
+
+
+def collapse_repeated_subtitle_payloads(
+    subtitles: list[dict[str, Any]],
+    *,
+    min_repeat_count: int = 3,
+    min_key_chars: int = 8,
+    max_gap_sec: float = 1.5,
+) -> list[dict[str, Any]]:
+    collapsed: list[dict[str, Any]] = []
+    pending_run: list[dict[str, Any]] = []
+    pending_key = ""
+
+    def flush_pending() -> None:
+        nonlocal pending_run, pending_key
+        if not pending_run:
+            return
+        if len(pending_run) >= min_repeat_count and len(pending_key) >= min_key_chars:
+            collapsed.append(pending_run[0])
+        else:
+            collapsed.extend(pending_run)
+        pending_run = []
+        pending_key = ""
+
+    for item in subtitles:
+        payload = dict(item)
+        key = _subtitle_repetition_key(str(payload.get("text_final") or ""))
+        if (
+            pending_run
+            and key
+            and key == pending_key
+            and _subtitle_payload_gap_sec(pending_run[-1], payload) <= max_gap_sec
+        ):
+            pending_run.append(payload)
+            continue
+        flush_pending()
+        pending_key = key
+        pending_run = [payload]
+
+    flush_pending()
+    return collapsed
+
+
 def _strip_asr_noise_markers(text: str) -> str:
     normalized = _ASR_NOISE_MARKER_PATTERN.sub(" ", str(text or ""))
     normalized = _ASR_INLINE_NOISE_MARKER_PATTERN.sub("，", normalized)
@@ -78,6 +140,19 @@ def _drop_final_noise_clauses(text: str) -> str:
 
 def _format_final_subtitle_text(text: str) -> str:
     return re.sub(r"\s{2,}", " ", _FINAL_SUBTITLE_PUNCTUATION_PATTERN.sub(" ", str(text or "").strip())).strip()
+
+
+def _subtitle_repetition_key(text: str) -> str:
+    return "".join(ch for ch in str(text or "") if ch.isalnum()).lower()
+
+
+def _subtitle_payload_gap_sec(left: dict[str, Any], right: dict[str, Any]) -> float:
+    try:
+        left_end = float(left.get("end_time", left.get("end", 0.0)) or 0.0)
+        right_start = float(right.get("start_time", right.get("start", 0.0)) or 0.0)
+    except (TypeError, ValueError):
+        return float("inf")
+    return max(0.0, right_start - left_end)
 
 
 def _is_standalone_subtitle_filler(text: str) -> bool:

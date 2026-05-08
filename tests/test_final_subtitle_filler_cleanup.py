@@ -5,7 +5,7 @@ import pytest
 
 from roughcut.media.output import write_srt_file
 from roughcut.media.subtitles import write_ass_file
-from roughcut.media.subtitle_text import clean_final_subtitle_text
+from roughcut.media.subtitle_text import clean_final_subtitle_text, clean_subtitle_payloads
 from roughcut.review.content_profile import polish_subtitle_items
 from roughcut.speech.subtitle_segmentation import normalize_display_text
 
@@ -48,6 +48,33 @@ def test_clean_final_subtitle_text_hides_asr_noise_markers() -> None:
 def test_clean_final_subtitle_text_replaces_all_punctuation_with_spaces() -> None:
     assert clean_final_subtitle_text("型号：EDC17（黑色），不错！") == "型号 EDC17 黑色 不错"
     assert clean_final_subtitle_text("A/B｜C【D】") == "A B C D"
+
+
+def test_clean_subtitle_payloads_collapses_future_asr_repeat_runs() -> None:
+    repeated = "刚才我发现那个盒子放底下有点黑看不清它的这个全貌"
+    cleaned = clean_subtitle_payloads(
+        [
+            {"index": 0, "start_time": 0.0, "end_time": 1.0, "text_final": repeated},
+            {"index": 1, "start_time": 1.0, "end_time": 2.0, "text_final": repeated},
+            {"index": 2, "start_time": 2.0, "end_time": 3.0, "text_final": repeated},
+            {"index": 3, "start_time": 3.0, "end_time": 4.0, "text_final": repeated},
+            {"index": 4, "start_time": 4.0, "end_time": 5.0, "text_final": "下一句正常内容"},
+        ]
+    )
+
+    assert [item["index"] for item in cleaned] == [0, 4]
+
+
+def test_clean_subtitle_payloads_keeps_intentional_short_repetition() -> None:
+    cleaned = clean_subtitle_payloads(
+        [
+            {"index": 0, "start_time": 0.0, "end_time": 1.0, "text_final": "好好好"},
+            {"index": 1, "start_time": 1.0, "end_time": 2.0, "text_final": "好好好"},
+            {"index": 2, "start_time": 2.0, "end_time": 3.0, "text_final": "好好好"},
+        ]
+    )
+
+    assert [item["index"] for item in cleaned] == [0, 1, 2]
 
 
 def test_normalize_display_text_hides_asr_noise_markers_before_review() -> None:

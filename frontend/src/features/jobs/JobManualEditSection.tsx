@@ -645,7 +645,7 @@ function aspectRatioNumber(value?: string | null) {
   }
 }
 
-function outputTimeToSourceTime(outputTime: number, ranges: OutputRange[]) {
+export function outputTimeToSourceTime(outputTime: number, ranges: OutputRange[]) {
   if (!ranges.length) return 0;
   const normalized = Math.max(0, outputTime || 0);
   for (const range of ranges) {
@@ -657,7 +657,7 @@ function outputTimeToSourceTime(outputTime: number, ranges: OutputRange[]) {
   return ranges[ranges.length - 1]?.sourceEnd ?? 0;
 }
 
-function sourceTimeToOutputTime(sourceTime: number, ranges: OutputRange[]) {
+export function sourceTimeToOutputTime(sourceTime: number, ranges: OutputRange[]) {
   if (!ranges.length) return 0;
   const normalized = Math.max(0, sourceTime || 0);
   let lastOutput = 0;
@@ -669,6 +669,18 @@ function sourceTimeToOutputTime(sourceTime: number, ranges: OutputRange[]) {
     lastOutput = range.outputEnd;
   }
   return lastOutput;
+}
+
+export function sourceTimeToActiveOutputTime(sourceTime: number, ranges: OutputRange[]) {
+  if (!ranges.length) return null;
+  const normalized = Math.max(0, sourceTime || 0);
+  for (const range of ranges) {
+    if (normalized < range.sourceStart - 0.02) return null;
+    if (normalized <= range.sourceEnd + 0.02) {
+      return clamp(range.outputStart + (normalized - range.sourceStart), range.outputStart, range.outputEnd);
+    }
+  }
+  return null;
 }
 
 function sourceTimeToOutputThumbnailItem(item: { url: string; time_sec: number }, ranges: OutputRange[]): TimelineThumbnailItem {
@@ -931,6 +943,10 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
     () => sourceTimeToOutputTime(currentSourceTime, projection.ranges),
     [currentSourceTime, projection.ranges],
   );
+  const activePreviewOutputTime = useMemo(
+    () => sourceTimeToActiveOutputTime(currentSourceTime, projection.ranges),
+    [currentSourceTime, projection.ranges],
+  );
   const currentSegmentIndex = useMemo(
     () => findSegmentIndexAtSourceTime(effectiveSegments, currentSourceTime),
     [currentSourceTime, effectiveSegments],
@@ -938,8 +954,11 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
   const currentSegment = currentSegmentIndex >= 0 ? effectiveSegments[currentSegmentIndex] : null;
 
   const activeSubtitleIndex = useMemo(
-    () => projection.remapped.findIndex((item) => currentOutputTime >= item.start_time && currentOutputTime <= item.end_time + 0.02),
-    [currentOutputTime, projection.remapped],
+    () => {
+      if (activePreviewOutputTime == null) return -1;
+      return projection.remapped.findIndex((item) => activePreviewOutputTime >= item.start_time && activePreviewOutputTime <= item.end_time + 0.02);
+    },
+    [activePreviewOutputTime, projection.remapped],
   );
 
   const visibleSubtitles = useMemo(() => {
@@ -1363,18 +1382,50 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
     void video.pause();
   };
 
+  const seekPreviewToSourceTime = (video: HTMLVideoElement, sourceTime: number) => {
+    const nextSourceTime = clamp(sourceTime, 0, session.source_duration_sec || sourceTime);
+    const alreadyThere = Math.abs(Number(video.currentTime || 0) - nextSourceTime) <= 0.015;
+    waveSurferRef.current?.setTime(nextSourceTime);
+    if (alreadyThere && !video.seeking) {
+      setCurrentSourceTime(nextSourceTime);
+      return Promise.resolve();
+    }
+    return new Promise<void>((resolve) => {
+      let settled = false;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        window.clearTimeout(timeoutId);
+        video.removeEventListener("seeked", finish);
+        setCurrentSourceTime(nextSourceTime);
+        resolve();
+      };
+      const timeoutId = window.setTimeout(finish, 750);
+      video.addEventListener("seeked", finish);
+      try {
+        video.currentTime = nextSourceTime;
+      } catch {
+        finish();
+        return;
+      }
+      if (!video.seeking) finish();
+    });
+  };
+
   const jumpToOutputTime = (outputTime: number) => {
     const video = videoRef.current;
     if (!video || !projection.ranges.length) return;
     const sourceTime = outputTimeToSourceTime(outputTime, projection.ranges);
-    video.currentTime = sourceTime;
-    setCurrentSourceTime(sourceTime);
+    void seekPreviewToSourceTime(video, sourceTime);
   };
 
   const jumpToSourceTime = (sourceTime: number) => {
     const nextSourceTime = clamp(sourceTime, 0, session.source_duration_sec || sourceTime);
     const video = videoRef.current;
-    if (video) video.currentTime = nextSourceTime;
+    if (video) {
+      void seekPreviewToSourceTime(video, nextSourceTime);
+      return;
+    }
     waveSurferRef.current?.setTime(nextSourceTime);
     setCurrentSourceTime(nextSourceTime);
   };
@@ -1397,8 +1448,7 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
     const currentRange = projection.ranges.find((range) => currentSourceTime >= range.sourceStart && currentSourceTime <= range.sourceEnd);
     const shouldRestart = !currentRange || currentOutputTime >= Math.max(0, totalOutputDuration - 0.08);
     if (shouldRestart) {
-      video.currentTime = projection.ranges[0].sourceStart;
-      setCurrentSourceTime(projection.ranges[0].sourceStart);
+      await seekPreviewToSourceTime(video, projection.ranges[0].sourceStart);
     }
     applyPreviewAudioSettings(previewVolume, previewMuted, previewAutoVolumeEnabled, true);
     await video.play();

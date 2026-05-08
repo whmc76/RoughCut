@@ -47,13 +47,13 @@ class AudioChunkSpec:
 
 
 def resolve_audio_chunk_config(settings: object) -> AudioChunkConfig:
-    chunk_size_sec = max(15.0, float(getattr(settings, "transcription_chunk_size_sec", 60.0) or 60.0))
+    chunk_size_sec = max(15.0, float(getattr(settings, "transcription_chunk_size_sec", 20.0) or 20.0))
     min_chunk_sec = min(
         chunk_size_sec,
-        max(5.0, float(getattr(settings, "transcription_chunk_min_sec", 20.0) or 20.0)),
+        max(5.0, float(getattr(settings, "transcription_chunk_min_sec", 8.0) or 8.0)),
     )
     overlap_sec = min(
-        max(0.0, float(getattr(settings, "transcription_chunk_overlap_sec", 1.5) or 0.0)),
+        max(0.0, float(getattr(settings, "transcription_chunk_overlap_sec", 0.5) or 0.0)),
         max(0.0, chunk_size_sec - min_chunk_sec),
     )
     request_timeout_sec = max(
@@ -63,7 +63,7 @@ def resolve_audio_chunk_config(settings: object) -> AudioChunkConfig:
     ffmpeg_timeout_sec = max(30.0, float(getattr(settings, "ffmpeg_timeout_sec", 600.0) or 600.0))
     return AudioChunkConfig(
         enabled=bool(getattr(settings, "transcription_chunking_enabled", True)),
-        threshold_sec=max(60.0, float(getattr(settings, "transcription_chunk_threshold_sec", 180.0) or 180.0)),
+        threshold_sec=max(15.0, float(getattr(settings, "transcription_chunk_threshold_sec", 30.0) or 30.0)),
         chunk_size_sec=chunk_size_sec,
         min_chunk_sec=min_chunk_sec,
         overlap_sec=overlap_sec,

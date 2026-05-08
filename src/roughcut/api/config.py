@@ -939,7 +939,7 @@ def patch_config(body: ConfigPatch):
         updates["transcribe_runtime_timeout_sec"] = max(60, min(7200, int(updates["transcribe_runtime_timeout_sec"])))
     if "transcription_chunk_threshold_sec" in updates:
         updates["transcription_chunk_threshold_sec"] = max(
-            60,
+            15,
             min(21600, int(updates["transcription_chunk_threshold_sec"])),
         )
     if "transcription_chunk_size_sec" in updates:

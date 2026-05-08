@@ -313,10 +313,10 @@ class Settings(BaseSettings):
     local_asr_hotwords_field: str = "hotwords"
     local_asr_max_new_tokens: int = 2048
     transcription_chunking_enabled: bool = True
-    transcription_chunk_threshold_sec: int = 180
-    transcription_chunk_size_sec: int = 60
-    transcription_chunk_min_sec: int = 20
-    transcription_chunk_overlap_sec: float = 1.5
+    transcription_chunk_threshold_sec: int = 30
+    transcription_chunk_size_sec: int = 20
+    transcription_chunk_min_sec: int = 8
+    transcription_chunk_overlap_sec: float = 0.5
     transcription_chunk_request_timeout_sec: int = 180
     transcription_chunk_request_max_retries: int = 2
     transcription_chunk_request_retry_backoff_sec: float = 5.0

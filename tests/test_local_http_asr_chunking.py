@@ -12,7 +12,7 @@ from roughcut.providers.transcription.chunking import (
     resolve_audio_chunk_config,
     should_chunk_audio,
 )
-from roughcut.providers.transcription.base import TranscriptResult
+from roughcut.providers.transcription.base import TranscriptResult, TranscriptSegment
 from roughcut.providers.transcription.local_http_asr import LocalHTTPASRProvider
 
 
@@ -170,10 +170,97 @@ def test_resolve_audio_chunk_config_clamps_invalid_relationships() -> None:
 def test_default_chunk_threshold_covers_medium_local_asr_audio() -> None:
     config = resolve_audio_chunk_config(SimpleNamespace())
 
-    assert config.threshold_sec == 180.0
+    assert config.threshold_sec == 30.0
+    assert config.chunk_size_sec == 20.0
+    assert config.min_chunk_sec == 8.0
+    assert config.overlap_sec == 0.5
     assert should_chunk_audio(duration=453.6, config=config)
     assert should_chunk_audio(duration=511.2, config=config)
-    assert not should_chunk_audio(duration=113.5, config=config)
+    assert should_chunk_audio(duration=113.5, config=config)
+    assert not should_chunk_audio(duration=29.5, config=config)
+
+
+def test_local_http_asr_collapses_repeated_decoder_loop_text_before_splitting(tmp_path: Path) -> None:
+    provider = LocalHTTPASRProvider()
+    audio_path = tmp_path / "audio.wav"
+    audio_path.write_bytes(b"stub")
+    sentence = "啊，刚才我发现那个盒子放底下有点黑啊，看不清它的这个全貌。"
+    payload = {
+        "duration": 10.0,
+        "segments": [
+            {
+                "start_time": 0.0,
+                "end_time": 10.0,
+                "text": sentence * 20,
+            }
+        ],
+    }
+
+    result = provider._build_result_from_payload(
+        payload,
+        audio_path=audio_path,
+        language="zh-CN",
+        context="",
+        progress_callback=None,
+    )
+
+    assert len(result.segments) == 1
+    assert result.segments[0].start == 0.0
+    assert result.segments[0].end == 10.0
+    assert result.segments[0].text == sentence
+    filtering = result.raw_segments[0].raw_payload["_roughcut_filtering"]
+    assert filtering["collapsed_decode_loop_text"]["text"] == sentence
+
+
+def test_local_http_asr_collapses_repeated_decoder_loop_text_without_terminal_punctuation(tmp_path: Path) -> None:
+    provider = LocalHTTPASRProvider()
+    audio_path = tmp_path / "audio.wav"
+    audio_path.write_bytes(b"stub")
+    sentence = "啊，刚才我发现那个盒子放底下有点黑啊，看不清它的这个全貌"
+    payload = {
+        "duration": 10.0,
+        "segments": [
+            {
+                "start_time": 0.0,
+                "end_time": 10.0,
+                "text": sentence * 20,
+            }
+        ],
+    }
+
+    result = provider._build_result_from_payload(
+        payload,
+        audio_path=audio_path,
+        language="zh-CN",
+        context="",
+        progress_callback=None,
+    )
+
+    assert [segment.text for segment in result.segments] == [sentence]
+
+
+def test_local_http_asr_collapses_repeated_decoder_loop_segments() -> None:
+    provider = LocalHTTPASRProvider()
+    sentence = "啊，刚才我发现那个盒子放底下有点黑啊，看不清它的这个全貌。"
+    segments = [
+        TranscriptSegment(
+            index=index,
+            start=index * 0.5,
+            end=(index + 1) * 0.5,
+            text=sentence,
+            provider="local_http_asr",
+        )
+        for index in range(20)
+    ]
+
+    sanitized = provider._sanitize_decode_loop_segments(segments)
+
+    assert len(sanitized) == 1
+    assert sanitized[0].start == 0.0
+    assert sanitized[0].end == 10.0
+    assert sanitized[0].text == sentence
+    filtering = sanitized[0].raw_payload["_roughcut_filtering"]
+    assert filtering["collapsed_decode_loop_segments"]["repeat_count"] == 20
 
 
 @pytest.mark.asyncio

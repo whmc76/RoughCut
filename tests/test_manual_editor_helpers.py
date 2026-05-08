@@ -13,6 +13,7 @@ from roughcut.api.jobs import (
     _download_file_cache_get,
     _download_file_cache_set,
     _invalidate_job_file_response_cache,
+    _manual_editor_has_collapsed_repeat_runs,
     _manual_editor_subtitle_payload,
     _manual_editor_apply_conflict_detail,
     _manual_editor_change_plan,
@@ -224,6 +225,46 @@ def test_manual_editor_subtitle_projection_drops_final_empty_fillers() -> None:
             "text_final": "型号 FX1 黑色",
         }
     ]
+
+
+def test_manual_editor_subtitle_projection_collapses_asr_repeat_runs() -> None:
+    repeated = "刚才我发现那个盒子放底下有点黑看不清它的这个全貌"
+    cleaned = _clean_manual_editor_subtitle_projection(
+        [
+            {"index": 0, "start_time": 0.0, "end_time": 1.0, "text_final": repeated},
+            {"index": 1, "start_time": 1.0, "end_time": 2.0, "text_final": repeated},
+            {"index": 2, "start_time": 2.0, "end_time": 3.0, "text_final": repeated},
+            {"index": 3, "start_time": 3.0, "end_time": 4.0, "text_final": repeated},
+            {"index": 4, "start_time": 4.0, "end_time": 5.0, "text_final": "下一句正常内容"},
+        ]
+    )
+
+    assert [item["index"] for item in cleaned] == [0, 4]
+
+
+def test_manual_editor_subtitle_projection_detects_three_item_repeat_run() -> None:
+    repeated = "刚才我发现那个盒子放底下有点黑看不清它的这个全貌"
+    raw = [
+        {"index": 0, "start_time": 0.0, "end_time": 1.0, "text_final": repeated},
+        {"index": 1, "start_time": 1.0, "end_time": 2.0, "text_final": repeated},
+        {"index": 2, "start_time": 2.0, "end_time": 3.0, "text_final": repeated},
+    ]
+
+    cleaned = _clean_manual_editor_subtitle_projection(raw)
+
+    assert [item["index"] for item in cleaned] == [0]
+    assert _manual_editor_has_collapsed_repeat_runs(raw, cleaned)
+
+
+def test_manual_editor_subtitle_projection_keeps_short_repeated_pairs() -> None:
+    cleaned = _clean_manual_editor_subtitle_projection(
+        [
+            {"index": 0, "start_time": 0.0, "end_time": 1.0, "text_final": "这个是真的"},
+            {"index": 1, "start_time": 1.0, "end_time": 2.0, "text_final": "这个是真的"},
+        ]
+    )
+
+    assert [item["index"] for item in cleaned] == [0, 1]
 
 
 def test_manual_editor_change_plan_detects_subtitle_only_edits() -> None:
