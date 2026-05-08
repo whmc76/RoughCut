@@ -16,6 +16,7 @@ from roughcut.providers.transcription.base import (
     TranscriptResult,
     TranscriptSegment,
     TranscriptionProvider,
+    WordTiming,
     payload_to_dict,
 )
 from roughcut.providers.transcription.chunking import (
@@ -34,7 +35,7 @@ class LocalHTTPASRProvider(TranscriptionProvider):
     _DECODE_LOOP_MIN_TEXT_UNITS = 12
     _DECODE_LOOP_MIN_REPEATS = 4
 
-    def __init__(self, *, model_name: str = "vibevoice-asr-int8") -> None:
+    def __init__(self, *, model_name: str = "qwen3-asr-1.7b-forced-aligner") -> None:
         settings = get_settings()
         self._base_url = settings.local_asr_api_base_url.rstrip("/")
         self._transcribe_path = self._normalize_path(settings.local_asr_transcribe_path or "/transcribe")
@@ -547,12 +548,14 @@ class LocalHTTPASRProvider(TranscriptionProvider):
                 end = duration
             speaker_value = item.get("speaker_id", item.get("Speaker", item.get("speaker")))
             speaker = None if speaker_value is None else str(speaker_value)
+            words = self._build_word_timings(item, context=context)
             segments.append(
                 TranscriptSegment(
                     index=len(segments),
                     start=max(0.0, start),
                     end=max(start, end),
                     text=text,
+                    words=words,
                     speaker=speaker,
                     provider="local_http_asr",
                     model=self._model_name,
@@ -562,6 +565,38 @@ class LocalHTTPASRProvider(TranscriptionProvider):
                 )
             )
         return segments
+
+    def _build_word_timings(self, item: dict[str, Any], *, context: str | None) -> list[WordTiming]:
+        raw_words = item.get("words")
+        if raw_words is None:
+            raw_words = item.get("word_or_char_timestamps")
+        if raw_words is None:
+            raw_words = item.get("timestamps")
+        if not isinstance(raw_words, list):
+            return []
+        words: list[WordTiming] = []
+        for raw in raw_words:
+            if not isinstance(raw, dict):
+                continue
+            text = str(raw.get("word") or raw.get("text") or raw.get("char") or "").strip()
+            if not text:
+                continue
+            start = self._coerce_time(raw.get("start_time", raw.get("start")), default=0.0)
+            end = self._coerce_time(raw.get("end_time", raw.get("end")), default=start)
+            words.append(
+                WordTiming(
+                    word=text,
+                    start=max(0.0, start),
+                    end=max(start, end),
+                    provider="local_http_asr",
+                    model=self._model_name,
+                    raw_payload=dict(raw),
+                    raw_text=text,
+                    context=context,
+                    hotword=context,
+                )
+            )
+        return words
 
     def _sanitize_decode_loop_segments(self, segments: list[TranscriptSegment]) -> list[TranscriptSegment]:
         cleaned_segments = [
@@ -761,7 +796,13 @@ class LocalHTTPASRProvider(TranscriptionProvider):
         if not repaired:
             return []
         missing_timing = all((segment.end - segment.start) <= 0.01 for segment in repaired)
-        if len(repaired) == 1 and duration > 1.0 and (missing_timing or self._text_units(repaired[0].text) >= 28):
+        has_provider_words = bool(repaired[0].words)
+        if (
+            len(repaired) == 1
+            and duration > 1.0
+            and not has_provider_words
+            and (missing_timing or self._text_units(repaired[0].text) >= 28)
+        ):
             return self._split_long_segment(repaired[0], duration=duration)
         return repaired
 

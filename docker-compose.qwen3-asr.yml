@@ -1,0 +1,28 @@
+services:
+  qwen3-asr:
+    build:
+      context: .
+      dockerfile: deploy/qwen3-asr/Dockerfile
+      args:
+        BASE_IMAGE: ${QWEN3_ASR_BASE_IMAGE:-pytorch/pytorch:2.9.1-cuda12.8-cudnn9-runtime}
+        QWEN3_ASR_INSTALL_DEPS: ${QWEN3_ASR_INSTALL_DEPS:-true}
+    image: roughcut-qwen3-asr:local
+    container_name: qwen3-asr
+    gpus: all
+    ipc: host
+    shm_size: 16gb
+    environment:
+      HF_HOME: /models/huggingface
+      HUGGINGFACE_HUB_CACHE: /models/huggingface/hub
+      QWEN3_ASR_MODEL: ${QWEN3_ASR_MODEL:-Qwen/Qwen3-ASR-1.7B}
+      QWEN3_ASR_ALIGNER: ${QWEN3_ASR_ALIGNER:-Qwen/Qwen3-ForcedAligner-0.6B}
+      QWEN3_ASR_DEVICE_MAP: ${QWEN3_ASR_DEVICE_MAP:-cuda:0}
+      QWEN3_ASR_IDLE_UNLOAD_SECONDS: ${QWEN3_ASR_IDLE_UNLOAD_SECONDS:-10}
+      NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-all}
+      NVIDIA_DRIVER_CAPABILITIES: ${NVIDIA_DRIVER_CAPABILITIES:-compute,utility}
+    volumes:
+      - ${QWEN3_ASR_HF_CACHE:-F:/cache_redirects/.cache/huggingface}:/models/huggingface
+      - ./output/test/asr-bench/samples:/bench/audio:ro
+    ports:
+      - "${QWEN3_ASR_PORT:-30080}:30000"
+    restart: unless-stopped

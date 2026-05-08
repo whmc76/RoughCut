@@ -239,6 +239,73 @@ def test_local_http_asr_collapses_repeated_decoder_loop_text_without_terminal_pu
     assert [segment.text for segment in result.segments] == [sentence]
 
 
+def test_local_http_asr_preserves_provider_word_timestamps(tmp_path: Path) -> None:
+    provider = LocalHTTPASRProvider()
+    audio_path = tmp_path / "audio.wav"
+    audio_path.write_bytes(b"stub")
+    payload = {
+        "duration": 1.0,
+        "segments": [
+            {
+                "start_time": 0.1,
+                "end_time": 0.8,
+                "text": "天敌",
+                "words": [
+                    {"text": "天", "start": 0.1, "end": 0.4},
+                    {"text": "敌", "start": 0.4, "end": 0.8},
+                ],
+            }
+        ],
+    }
+
+    result = provider._build_result_from_payload(
+        payload,
+        audio_path=audio_path,
+        language="zh-CN",
+        context="天敌",
+        progress_callback=None,
+    )
+
+    assert result.segments[0].text == "天敌"
+    assert [(word.word, word.start, word.end) for word in result.segments[0].words] == [
+        ("天", 0.1, 0.4),
+        ("敌", 0.4, 0.8),
+    ]
+
+
+def test_local_http_asr_does_not_split_provider_aligned_long_segment(tmp_path: Path) -> None:
+    provider = LocalHTTPASRProvider()
+    audio_path = tmp_path / "audio.wav"
+    audio_path.write_bytes(b"stub")
+    text = "这是一个已经带有逐字时间戳的长段落，后处理不应该把原始对齐信息丢掉。"
+    payload = {
+        "duration": 8.0,
+        "segments": [
+            {
+                "start_time": 0.0,
+                "end_time": 8.0,
+                "text": text,
+                "words": [
+                    {"text": char, "start": index * 0.1, "end": index * 0.1 + 0.08}
+                    for index, char in enumerate(text)
+                ],
+            }
+        ],
+    }
+
+    result = provider._build_result_from_payload(
+        payload,
+        audio_path=audio_path,
+        language="zh-CN",
+        context="",
+        progress_callback=None,
+    )
+
+    assert len(result.segments) == 1
+    assert result.segments[0].text == text
+    assert len(result.segments[0].words) == len(text)
+
+
 def test_local_http_asr_collapses_repeated_decoder_loop_segments() -> None:
     provider = LocalHTTPASRProvider()
     sentence = "啊，刚才我发现那个盒子放底下有点黑啊，看不清它的这个全貌。"

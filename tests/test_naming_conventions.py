@@ -67,7 +67,7 @@ def test_transcription_runtime_normalizes_all_paths_to_local_http_asr() -> None:
     ]
 
 
-def test_legacy_local_http_asr_snapshot_is_normalized_to_vibevoice() -> None:
+def test_legacy_local_http_asr_snapshot_is_normalized_to_qwen3_asr() -> None:
     normalized = _normalize_runtime_override_values(
         {
             "transcription_provider": "local_http_asr",
@@ -78,10 +78,10 @@ def test_legacy_local_http_asr_snapshot_is_normalized_to_vibevoice() -> None:
         }
     )
 
-    assert normalized["transcription_model"] == "vibevoice-asr-int8"
-    assert normalized["local_asr_api_base_url"] == "http://127.0.0.1:6001"
-    assert normalized["local_asr_model_name"] == "vibevoice-asr-int8"
-    assert normalized["local_asr_display_name"] == "VibeVoice INT8"
+    assert normalized["transcription_model"] == "qwen3-asr-1.7b-forced-aligner"
+    assert normalized["local_asr_api_base_url"] == "http://127.0.0.1:30080"
+    assert normalized["local_asr_model_name"] == "qwen3-asr-1.7b-forced-aligner"
+    assert normalized["local_asr_display_name"] == "Qwen3-ASR 1.7B + ForcedAligner"
 
 
 def test_avatar_capability_status_uses_business_capability_keys() -> None:

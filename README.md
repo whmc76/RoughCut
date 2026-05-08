@@ -188,11 +188,10 @@ cp .env.example .env
 REASONING_PROVIDER=ollama
 REASONING_MODEL=qwen3.5:9b        # 需支持视觉
 TRANSCRIPTION_PROVIDER=local_http_asr
-TRANSCRIPTION_MODEL=moss-audio-8b-instruct
+TRANSCRIPTION_MODEL=qwen3-asr-1.7b-forced-aligner
 LOCAL_ASR_API_BASE_URL=http://127.0.0.1:30080
-LOCAL_ASR_MODEL_NAME=moss-audio-8b-instruct
-LOCAL_ASR_DISPLAY_NAME=MOSS-Audio 8B Instruct
-MOSS_AUDIO_IDLE_UNLOAD_SECONDS=10
+LOCAL_ASR_MODEL_NAME=qwen3-asr-1.7b-forced-aligner
+LOCAL_ASR_DISPLAY_NAME=Qwen3-ASR 1.7B + ForcedAligner
 
 ROUGHCUT_OUTPUT_ROOT=F:/roughcut_outputs
 JOB_STORAGE_DIR=F:/roughcut_outputs/jobs
@@ -256,14 +255,13 @@ TRANSCRIPTION_MODEL=gpt-4o-transcribe
 
 ```env
 TRANSCRIPTION_PROVIDER=local_http_asr
-TRANSCRIPTION_MODEL=moss-audio-8b-instruct
+TRANSCRIPTION_MODEL=qwen3-asr-1.7b-forced-aligner
 LOCAL_ASR_API_BASE_URL=http://127.0.0.1:30080
-LOCAL_ASR_MODEL_NAME=moss-audio-8b-instruct
-LOCAL_ASR_DISPLAY_NAME=MOSS-Audio 8B Instruct
-MOSS_AUDIO_IDLE_UNLOAD_SECONDS=10
+LOCAL_ASR_MODEL_NAME=qwen3-asr-1.7b-forced-aligner
+LOCAL_ASR_DISPLAY_NAME=Qwen3-ASR 1.7B + ForcedAligner
 ```
 
-MOSS-Audio Docker 服务默认空闲 10 秒后卸载模型释放 GPU 显存；容器保持在线，下一次转写请求会自动重新加载模型。设置 `MOSS_AUDIO_IDLE_UNLOAD_SECONDS=0` 可关闭自动卸载。
+Qwen3-ASR Docker 服务使用 `Qwen/Qwen3-ASR-1.7B` 和 `Qwen/Qwen3-ForcedAligner-0.6B`，通过 `docker-compose.qwen3-asr.yml` 部署到 `roughcut` compose 项目下，并返回逐字时间戳。
 
 如果你不走独立服务，而是想在宿主机内直接装离线依赖，再选：
 
@@ -547,7 +545,7 @@ host-side rebuild watch 方案和 Hydra 的差别是：
 - Docker 镜像默认内置 `uv`、`ffmpeg` 和 `Noto Sans CJK` 中文字体。
 - Docker 镜像会在构建阶段自动执行 `frontend/` 下的前端依赖安装和构建。
 - 默认 Docker 入口会强制清空 `ROUGHCUT_DOCKER_PYTHON_EXTRAS`，优先走更轻的 runtime 构建；如果你确实要在容器内启用 `funasr` / `faster-whisper`，使用 `pnpm docker:runtime:up:local-asr`、`pnpm docker:auto:up:local-asr`，或显式传 `-DockerPythonExtras local-asr`。
-- 当前项目默认 ASR 方案为 `local_http_asr + moss-audio-8b-instruct`，具体本地模型通过 `LOCAL_ASR_MODEL_NAME` 和 `LOCAL_ASR_API_BASE_URL` 配置；当前默认指向 `MOSS-Audio 8B Instruct`。离线本地依赖可选 `funasr + sensevoice-small` 或 `faster_whisper`，云端可切回 `openai + gpt-4o-transcribe`。
+- 当前项目默认 ASR 方案为 `local_http_asr + qwen3-asr-1.7b-forced-aligner`，具体本地模型通过 `LOCAL_ASR_MODEL_NAME` 和 `LOCAL_ASR_API_BASE_URL` 配置；当前默认指向 `Qwen3-ASR 1.7B + ForcedAligner`。离线本地依赖可选 `funasr + sensevoice-small` 或 `faster_whisper`，云端可切回 `openai + gpt-4o-transcribe`。
   - 推荐把长期在线形态收敛到 `infra + runtime` 这一档；`watcher` 只在确实需要自动扫盘时再加入。
 - 推荐本地开发使用 `uv + npm`，容器部署使用 `docker compose`，不要混用系统级 `pip` 和容器内运行时配置。
 
@@ -627,11 +625,10 @@ curl http://localhost:8000/api/v1/jobs/{job_id}/report
 | `MINIMAX_CODING_PLAN_API_KEY` | `""` | MiniMax Coding Plan Key；留空时搜索/MCP 默认回退 `MINIMAX_API_KEY` |
 | `VISION_MODEL` | `""` | 视觉模型（空 = 使用 reasoning_model） |
 | `TRANSCRIPTION_PROVIDER` | `local_http_asr` | 转写后端：`local_http_asr` / `openai` / `funasr` / `faster_whisper` |
-| `TRANSCRIPTION_MODEL` | `moss-audio-8b-instruct` | 转写模型占位符；本地 HTTP ASR 的实际模型由 `LOCAL_ASR_MODEL_NAME` 决定 |
+| `TRANSCRIPTION_MODEL` | `qwen3-asr-1.7b-forced-aligner` | 转写模型占位符；本地 HTTP ASR 的实际模型由 `LOCAL_ASR_MODEL_NAME` 决定 |
 | `LOCAL_ASR_API_BASE_URL` | `http://127.0.0.1:30080` | 本地 HTTP ASR 服务地址 |
-| `LOCAL_ASR_MODEL_NAME` | `moss-audio-8b-instruct` | 当前本地 HTTP ASR 实际模型名 |
-| `LOCAL_ASR_DISPLAY_NAME` | `MOSS-Audio 8B Instruct` | 前端显示名称 |
-| `MOSS_AUDIO_IDLE_UNLOAD_SECONDS` | `10` | MOSS-Audio Docker 服务空闲卸载模型的秒数；`0` 表示禁用 |
+| `LOCAL_ASR_MODEL_NAME` | `qwen3-asr-1.7b-forced-aligner` | 当前本地 HTTP ASR 实际模型名 |
+| `LOCAL_ASR_DISPLAY_NAME` | `Qwen3-ASR 1.7B + ForcedAligner` | 前端显示名称 |
 | `RUNTIME_PREFLIGHT_DOCKER_ENABLED` | `false` | 是否允许运行时 preflight 自动启动 Docker 中的 PostgreSQL / Redis |
 | `DOCKER_GPU_GUARD_ENABLED` | `false` | 是否允许 ASR / HeyGem / IndexTTS2 guard 自动启动外部 Docker 服务 |
 | `SUBTITLE_FONT` | `Microsoft YaHei` | 字幕字体 |

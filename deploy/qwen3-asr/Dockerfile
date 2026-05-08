@@ -1,25 +1,27 @@
-ARG BASE_IMAGE=roughcut-moss-audio:local
+ARG BASE_IMAGE=pytorch/pytorch:2.9.1-cuda12.8-cudnn9-runtime
 FROM ${BASE_IMAGE}
+ARG QWEN3_ASR_INSTALL_DEPS=true
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     HF_HOME=/models/huggingface \
     HUGGINGFACE_HUB_CACHE=/models/huggingface/hub
 
-# Runtime-isolate Qwen3-ASR from the historical mixed ASR image. The base layers
-# may still contain old bytes, but imports and service runtime only expose qwen-asr.
-RUN python3 -m pip uninstall -y vibevoice moss-audio || true \
-    && rm -rf \
-        /app/vibevoice \
-        /app/vibevoice.egg-info \
-        /opt/MOSS-Audio \
-        /opt/moss-audio-server \
-        /usr/local/lib/python3.10/dist-packages/vibevoice \
-        /usr/local/lib/python3.10/dist-packages/vibevoice-* \
-        /usr/local/lib/python3.10/dist-packages/moss_audio \
-        /usr/local/lib/python3.10/dist-packages/moss_audio-*
+RUN if [ "${QWEN3_ASR_INSTALL_DEPS}" = "true" ]; then \
+        apt-get update \
+        && apt-get install -y --no-install-recommends ffmpeg libsndfile1 sox \
+        && rm -rf /var/lib/apt/lists/* \
+        && python3 -m pip install --no-cache-dir \
+            qwen-asr==0.0.6 \
+            fastapi \
+            uvicorn \
+            python-multipart \
+            soundfile; \
+    fi
 
 WORKDIR /app
 
+COPY deploy/qwen3-asr/server.py /app/server.py
+
 ENTRYPOINT []
-CMD ["python3", "-c", "import importlib.util; print({'vibevoice': bool(importlib.util.find_spec('vibevoice')), 'qwen_asr': bool(importlib.util.find_spec('qwen_asr')), 'moss_audio': bool(importlib.util.find_spec('moss_audio'))})"]
+CMD ["python3", "/app/server.py"]
