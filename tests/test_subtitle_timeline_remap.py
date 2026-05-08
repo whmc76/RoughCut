@@ -24,3 +24,16 @@ def test_remap_subtitle_spanning_cut_uses_each_kept_fragment_local_offset() -> N
     assert [(item["start_time"], item["end_time"]) for item in remapped] == [(1.5, 2.0), (2.0, 2.5)]
     assert [item["source_fragment_index"] for item in remapped] == [0, 1]
     assert [item["source_fragment_count"] for item in remapped] == [2, 2]
+
+
+def test_remap_subtitle_spanning_cut_splits_display_text_across_fragments() -> None:
+    remapped = remap_subtitles_to_timeline(
+        [{"index": 0, "start_time": 1.0, "end_time": 5.0, "text_final": "这个产品真的不错"}],
+        [
+            {"start": 1.0, "end": 2.0},
+            {"start": 4.0, "end": 5.0},
+        ],
+    )
+
+    assert [item["text_final"] for item in remapped] == ["这个产品", "真的不错"]
+    assert all(item["source_text_full"] == "这个产品真的不错" for item in remapped)

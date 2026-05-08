@@ -54,3 +54,32 @@ def test_canonical_projection_splits_overlong_word_tokens_before_segmentation() 
         item["start_time"] == 81.45 and item["end_time"] == 107.94
         for item in entries
     )
+
+
+def test_canonical_projection_drops_tiny_word_overlap_at_cut_boundary() -> None:
+    canonical_layer = {
+        "segments": [
+            {
+                "index": 0,
+                "start": 0.0,
+                "end": 3.0,
+                "text": "甲乙丙",
+                "words": [
+                    {"word": "甲", "start": 0.0, "end": 1.0, "alignment": {"source": "provider"}},
+                    {"word": "乙", "start": 1.0, "end": 2.0, "alignment": {"source": "provider"}},
+                    {"word": "丙", "start": 2.0, "end": 3.0, "alignment": {"source": "provider"}},
+                ],
+            }
+        ]
+    }
+
+    entries = _project_canonical_transcript_to_timeline(
+        canonical_layer,
+        [{"start": 0.0, "end": 1.1}, {"start": 2.0, "end": 3.0}],
+        split_profile={"max_chars": 8, "max_duration": 5.0},
+    )
+
+    rendered_text = "".join(item["text_final"] for item in entries)
+    assert "甲" in rendered_text
+    assert "丙" in rendered_text
+    assert "乙" not in rendered_text

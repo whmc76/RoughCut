@@ -151,6 +151,7 @@ from roughcut.review.subtitle_consistency import (
 )
 from roughcut.review.subtitle_quality import (
     ARTIFACT_TYPE_SUBTITLE_QUALITY_REPORT,
+    build_subtitle_alignment_source_metrics,
     build_subtitle_quality_report,
     build_subtitle_quality_report_from_items,
 )
@@ -2404,6 +2405,7 @@ def _build_projection_items_from_entries(entries: list[SubtitleEntry]) -> list[S
                 text_raw=display_text,
                 text_norm=str(getattr(entry, "text_norm", None) or normalize_display_text(display_text)),
                 text_final=display_text,
+                words=tuple(getattr(entry, "words", ()) or ()),
             )
         )
     return projection_items
@@ -2836,6 +2838,10 @@ def _resolve_projection_split_profile(projection_data: dict[str, Any] | None, me
     )
 
 
+_CANONICAL_WORD_MIN_KEEP_OVERLAP_RATIO = 0.35
+_CANONICAL_WORD_MIN_KEEP_OVERLAP_SEC = 0.035
+
+
 def _build_fallback_canonical_words(segment: dict[str, Any]) -> list[dict[str, Any]]:
     text = str(segment.get("text_canonical") or segment.get("text") or segment.get("text_raw") or "").strip()
     tokens = tokenize_alignment_text(text)
@@ -2996,14 +3002,22 @@ def _project_canonical_transcript_to_timeline(
         if not segment_words:
             segment_words = _build_fallback_canonical_words(segment)
         for word_index, word in enumerate(segment_words):
+            word.setdefault("word_index", word_index)
+        segment_words = _normalize_projected_words_for_segmentation(segment_words, split_profile=split_profile)
+        for word_index, word in enumerate(segment_words):
             raw_start = float(word.get("start", segment.get("start", 0.0)) or 0.0)
             raw_end = float(word.get("end", raw_start) or raw_start)
             if raw_end <= raw_start:
                 continue
+            raw_duration = max(0.001, raw_end - raw_start)
             for keep in keep_map:
                 overlap_start = max(raw_start, keep["in_start"])
                 overlap_end = min(raw_end, keep["in_end"])
-                if overlap_end <= overlap_start + 0.001:
+                overlap_sec = overlap_end - overlap_start
+                if overlap_sec <= max(0.001, _CANONICAL_WORD_MIN_KEEP_OVERLAP_SEC):
+                    continue
+                overlap_ratio = overlap_sec / raw_duration
+                if overlap_ratio < _CANONICAL_WORD_MIN_KEEP_OVERLAP_RATIO:
                     continue
                 projected_words.append(
                     {
@@ -3011,8 +3025,11 @@ def _project_canonical_transcript_to_timeline(
                         "start": round(keep["out_start"] + (overlap_start - keep["in_start"]), 3),
                         "end": round(keep["out_start"] + (overlap_end - keep["in_start"]), 3),
                         "alignment": dict(word.get("alignment") or {}),
+                        "source_start": round(raw_start, 3),
+                        "source_end": round(raw_end, 3),
+                        "source_keep_overlap_ratio": round(overlap_ratio, 4),
                         "segment_index": segment_index,
-                        "word_index": word_index,
+                        "word_index": int(word.get("word_index", word_index) or word_index),
                     }
                 )
 
@@ -5228,6 +5245,7 @@ async def run_subtitle_postprocess(job_id: str) -> dict:
                 source_name=job.source_name,
                 content_profile=content_profile,
             )
+            subtitle_quality_report.setdefault("metrics", {})["alignment_source"] = build_subtitle_alignment_source_metrics(entries)
             subtitle_projection_layer = build_subtitle_projection_layer(
                 items,
                 segmentation_analysis=segmentation_result.analysis,

@@ -218,3 +218,32 @@ def test_quality_report_blocks_dense_generic_word_splits() -> None:
     assert report["blocking"] is True
     assert report["metrics"]["generic_word_split_count"] >= 10
     assert any("普通词跨字幕截断" in reason for reason in report["blocking_reasons"])
+
+
+def test_quality_report_exposes_alignment_source_metrics_per_subtitle() -> None:
+    report = build_subtitle_quality_report(
+        subtitle_items=[
+            {
+                "index": 0,
+                "text_final": "正常口播",
+                "words": [
+                    {"word": "正常", "start": 0.0, "end": 0.4, "alignment": {"_roughcut": {"source": "provider"}}},
+                    {"word": "口播", "start": 0.4, "end": 0.8, "alignment": {"_roughcut": {"source": "provider"}}},
+                ],
+            },
+            {
+                "index": 1,
+                "text_final": "合成锚点",
+                "words": [
+                    {"word": "合成", "start": 1.0, "end": 1.4, "alignment": {"_roughcut": {"source": "synthetic"}}},
+                    {"word": "锚点", "start": 1.4, "end": 1.8, "alignment": {"source": "postprocess_text_fallback"}},
+                ],
+            },
+        ],
+    )
+
+    alignment = report["metrics"]["alignment_source"]
+    assert alignment["word_count"] == 4
+    assert alignment["source_counts"] == {"fallback": 1, "provider": 2, "synthetic": 1}
+    assert alignment["source_ratios"]["provider"] == 0.5
+    assert [item["dominant_source"] for item in alignment["per_subtitle"]] == ["provider", "synthetic"]

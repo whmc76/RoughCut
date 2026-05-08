@@ -500,7 +500,7 @@ def remap_subtitles_to_timeline(
         sub_start = float(item["start_time"])
         sub_end   = float(item["end_time"])
 
-        mapped_ranges: list[tuple[float, float]] = []
+        mapped_ranges: list[tuple[float, float, float, float]] = []
 
         for seg in seg_map:
             overlap_in_s = max(sub_start, seg["in_start"])
@@ -511,18 +511,93 @@ def remap_subtitles_to_timeline(
             new_s = seg["out_start"] + (overlap_in_s - seg["in_start"])
             new_e = seg["out_start"] + (overlap_in_e - seg["in_start"])
             if new_e > new_s + 0.05:
-                mapped_ranges.append((new_s, new_e))
+                mapped_ranges.append((new_s, new_e, overlap_in_s, overlap_in_e))
 
         if not mapped_ranges:
             continue
-        for fragment_index, (new_start, new_end) in enumerate(mapped_ranges):
+        fragment_texts = _split_remapped_subtitle_text(item, mapped_ranges)
+        emitted_ranges = [
+            (mapped_range, fragment_text)
+            for mapped_range, fragment_text in zip(mapped_ranges, fragment_texts)
+            if str(fragment_text or "").strip()
+        ]
+        for fragment_index, ((new_start, new_end, overlap_start, overlap_end), fragment_text) in enumerate(emitted_ranges):
             remapped_item = {**item, "start_time": new_start, "end_time": new_end}
-            if len(mapped_ranges) > 1:
+            if len(emitted_ranges) > 1:
                 remapped_item["source_fragment_index"] = fragment_index
-                remapped_item["source_fragment_count"] = len(mapped_ranges)
+                remapped_item["source_fragment_count"] = len(emitted_ranges)
+                remapped_item["source_text_full"] = _subtitle_item_display_text(item)
+                remapped_item["source_overlap_start_time"] = overlap_start
+                remapped_item["source_overlap_end_time"] = overlap_end
+            remapped_item = _with_remapped_fragment_text(remapped_item, fragment_text)
             remapped.append(remapped_item)
 
     return remapped
+
+
+def _subtitle_item_display_text(item: dict[str, Any]) -> str:
+    for key in ("text_final", "text_norm", "text_raw", "text"):
+        value = str((item or {}).get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _with_remapped_fragment_text(item: dict[str, Any], text: str) -> dict[str, Any]:
+    resolved = dict(item)
+    updated = False
+    for key in ("text_final", "text_norm", "text_raw", "text"):
+        if key not in resolved:
+            continue
+        resolved[key] = text
+        updated = True
+    if not updated:
+        resolved["text_final"] = text
+    return resolved
+
+
+def _split_remapped_subtitle_text(
+    item: dict[str, Any],
+    mapped_ranges: list[tuple[float, float, float, float]],
+) -> list[str]:
+    text = _subtitle_item_display_text(item)
+    if len(mapped_ranges) <= 1 or not text:
+        return [text for _ in mapped_ranges]
+
+    weights = [max(0.0, float(end) - float(start)) for _new_start, _new_end, start, end in mapped_ranges]
+    if sum(weights) <= 0:
+        weights = [1.0 for _ in mapped_ranges]
+    if " " in text.strip():
+        tokens = [token for token in text.strip().split(" ") if token]
+        pieces = _split_tokens_by_weights(tokens, weights)
+        return [" ".join(piece).strip() for piece in pieces]
+    return ["".join(piece).strip() for piece in _split_tokens_by_weights(list(text.strip()), weights)]
+
+
+def _split_tokens_by_weights(tokens: list[str], weights: list[float]) -> list[list[str]]:
+    if not weights:
+        return []
+    if not tokens:
+        return [[] for _ in weights]
+
+    total_weight = sum(max(0.0, weight) for weight in weights) or float(len(weights))
+    token_count = len(tokens)
+    pieces: list[list[str]] = []
+    cursor = 0
+    for index, weight in enumerate(weights):
+        remaining_fragments = len(weights) - index
+        remaining_tokens = token_count - cursor
+        if index == len(weights) - 1:
+            take = remaining_tokens
+        else:
+            ideal_end = round(token_count * sum(weights[: index + 1]) / total_weight)
+            take = max(0, int(ideal_end) - cursor)
+            if remaining_tokens > remaining_fragments - 1:
+                take = max(1, take)
+            take = min(take, max(0, remaining_tokens - (remaining_fragments - 1)))
+        pieces.append(tokens[cursor: cursor + take])
+        cursor += take
+    return pieces
 
 
 def split_subtitle_display_item(

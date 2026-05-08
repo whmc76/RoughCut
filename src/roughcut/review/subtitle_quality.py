@@ -49,6 +49,8 @@ _IDENTITY_HINT_RE = re.compile(r"(MT34|EDC17|EDC37|FXX1|EXO|NOC|FAS|foxbat|OLIGH
 _SHORT_FRAGMENT_BLOCKING_MIN_COUNT = 10
 _GENERIC_WORD_SPLIT_BLOCKING_MIN_COUNT = 10
 _GENERIC_WORD_SPLIT_BLOCKING_RATE = 0.02
+_SYNTHETIC_ALIGNMENT_SOURCES = {"synthetic", "segment_only", "provider_missing", "roughcut_synthesized"}
+_FALLBACK_ALIGNMENT_SOURCES = {"postprocess_text_fallback", "canonical_segment_fallback"}
 
 _SEMANTIC_CONTAMINATION_CODES = {
     "hotword_flashlight_model_knifedrift",
@@ -74,6 +76,102 @@ def _subtitle_duration(item: Mapping[str, Any]) -> float | None:
         return max(0.0, float(end) - float(start))
     except (TypeError, ValueError):
         return None
+
+
+def _subtitle_words(item: Any) -> list[dict[str, Any]]:
+    raw_words = []
+    if isinstance(item, Mapping):
+        raw_words = list(item.get("words") or ())
+    else:
+        raw_words = list(getattr(item, "words", ()) or ())
+    return [dict(word) for word in raw_words if isinstance(word, Mapping)]
+
+
+def _word_alignment_source(word: Mapping[str, Any]) -> str:
+    alignment = word.get("alignment")
+    if isinstance(alignment, Mapping):
+        roughcut = alignment.get("_roughcut")
+        if isinstance(roughcut, Mapping):
+            source = str(roughcut.get("source") or "").strip().lower()
+            if source:
+                return source
+        source = str(alignment.get("source") or "").strip().lower()
+        if source:
+            return source
+    raw_payload = word.get("raw_payload")
+    if isinstance(raw_payload, Mapping):
+        for key in ("source", "_roughcut_source"):
+            source = str(raw_payload.get(key) or "").strip().lower()
+            if source:
+                return source
+    return "provider"
+
+
+def _alignment_source_bucket(source: str) -> str:
+    normalized = str(source or "").strip().lower()
+    if not normalized:
+        return "provider"
+    if normalized in _SYNTHETIC_ALIGNMENT_SOURCES:
+        return "synthetic"
+    if normalized in _FALLBACK_ALIGNMENT_SOURCES:
+        return "fallback"
+    if normalized in {"provider", "reference_word_match", "reference_word_replace"}:
+        return "provider"
+    if normalized == "canonical_realign":
+        return "canonical"
+    return normalized
+
+
+def build_subtitle_alignment_source_metrics(subtitle_items: Sequence[Any]) -> dict[str, Any]:
+    source_counts: Counter[str] = Counter()
+    subtitle_summaries: list[dict[str, Any]] = []
+    missing_word_subtitle_count = 0
+
+    for index, item in enumerate(subtitle_items):
+        words = _subtitle_words(item)
+        if not words:
+            missing_word_subtitle_count += 1
+            subtitle_summaries.append(
+                {
+                    "index": int(getattr(item, "index", getattr(item, "item_index", index)) or index)
+                    if not isinstance(item, Mapping)
+                    else int(item.get("index", item.get("item_index", index)) or index),
+                    "word_count": 0,
+                    "dominant_source": "missing",
+                    "source_counts": {},
+                }
+            )
+            continue
+        item_counts: Counter[str] = Counter()
+        for word in words:
+            bucket = _alignment_source_bucket(_word_alignment_source(word))
+            source_counts[bucket] += 1
+            item_counts[bucket] += 1
+        dominant_source = item_counts.most_common(1)[0][0] if item_counts else "missing"
+        subtitle_summaries.append(
+            {
+                "index": int(getattr(item, "index", getattr(item, "item_index", index)) or index)
+                if not isinstance(item, Mapping)
+                else int(item.get("index", item.get("item_index", index)) or index),
+                "word_count": sum(item_counts.values()),
+                "dominant_source": dominant_source,
+                "source_counts": dict(item_counts),
+            }
+        )
+
+    total_words = sum(source_counts.values())
+    source_ratios = {
+        key: round(count / total_words, 4)
+        for key, count in sorted(source_counts.items())
+        if total_words > 0
+    }
+    return {
+        "word_count": total_words,
+        "source_counts": dict(sorted(source_counts.items())),
+        "source_ratios": source_ratios,
+        "missing_word_subtitle_count": missing_word_subtitle_count,
+        "per_subtitle": subtitle_summaries,
+    }
 
 
 def _is_allowed_short_utterance(text: str, duration: float | None) -> bool:
@@ -156,6 +254,7 @@ def build_subtitle_quality_report(
     total = len(subtitle_items)
     texts = [_subtitle_text(item) for item in subtitle_items]
     joined_text = "\n".join(texts)
+    alignment_source_metrics = build_subtitle_alignment_source_metrics(subtitle_items)
 
     bad_term_counts = Counter()
     for code, pattern in _BAD_TERM_PATTERNS.items():
@@ -270,6 +369,7 @@ def build_subtitle_quality_report(
             "identity_expected": identity_expected,
             "identity_check_ready": identity_check_ready,
             "identity_missing": identity_missing,
+            "alignment_source": alignment_source_metrics,
         },
         "source_name": source_name,
         "subject": subject,
@@ -283,16 +383,32 @@ def build_subtitle_quality_report_from_items(
     source_name: str = "",
     content_profile: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    normalized_items = [
-        {
-            "text_raw": getattr(item, "text_raw", None),
-            "text_norm": getattr(item, "text_norm", None),
-            "text_final": getattr(item, "text_final", None),
-            "start_time": getattr(item, "start_time", getattr(item, "start", None)),
-            "end_time": getattr(item, "end_time", getattr(item, "end", None)),
-        }
-        for item in subtitle_items
-    ]
+    normalized_items = []
+    for item in subtitle_items:
+        if isinstance(item, Mapping):
+            normalized_items.append(
+                {
+                    "index": item.get("index", item.get("item_index")),
+                    "text_raw": item.get("text_raw"),
+                    "text_norm": item.get("text_norm"),
+                    "text_final": item.get("text_final"),
+                    "start_time": item.get("start_time", item.get("start")),
+                    "end_time": item.get("end_time", item.get("end")),
+                    "words": list(item.get("words") or ()),
+                }
+            )
+            continue
+        normalized_items.append(
+            {
+                "index": getattr(item, "index", getattr(item, "item_index", None)),
+                "text_raw": getattr(item, "text_raw", None),
+                "text_norm": getattr(item, "text_norm", None),
+                "text_final": getattr(item, "text_final", None),
+                "start_time": getattr(item, "start_time", getattr(item, "start", None)),
+                "end_time": getattr(item, "end_time", getattr(item, "end", None)),
+                "words": list(getattr(item, "words", ()) or ()),
+            }
+        )
     return build_subtitle_quality_report(
         subtitle_items=normalized_items,
         source_name=source_name,
