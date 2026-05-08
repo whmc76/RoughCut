@@ -78,11 +78,22 @@ function Invoke-NativeCommandUnchecked {
         [string[]]$Arguments = @()
     )
 
-    if ($PSVersionTable.PSVersion.Major -ge 7) {
-        $PSNativeCommandUseErrorActionPreference = $false
-    }
+    $previousErrorActionPreference = $ErrorActionPreference
+    $previousNativeCommandUseErrorActionPreference = $null
+    try {
+        $ErrorActionPreference = "Continue"
+        if ($PSVersionTable.PSVersion.Major -ge 7) {
+            $previousNativeCommandUseErrorActionPreference = $PSNativeCommandUseErrorActionPreference
+            $PSNativeCommandUseErrorActionPreference = $false
+        }
 
-    & $FilePath @Arguments
+        & $FilePath @Arguments
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+        if ($PSVersionTable.PSVersion.Major -ge 7) {
+            $PSNativeCommandUseErrorActionPreference = $previousNativeCommandUseErrorActionPreference
+        }
+    }
 }
 
 function Get-RoughCutComposeFiles {
@@ -397,7 +408,7 @@ function Test-RoughCutDockerWatchActive {
         return $false
     }
 
-    $commandLine = [string]($process.CommandLine ?? "")
+    $commandLine = if ($null -ne $process.CommandLine) { [string]$process.CommandLine } else { "" }
     return $commandLine -match [regex]::Escape("watch-roughcut-docker-runtime.ps1")
 }
 
@@ -434,7 +445,7 @@ function Test-RoughCutCodexHostBridgeActive {
         return $false
     }
 
-    $commandLine = [string]($process.CommandLine ?? "")
+    $commandLine = if ($null -ne $process.CommandLine) { [string]$process.CommandLine } else { "" }
     return $commandLine -match (Get-RoughCutCodexHostBridgeProcessMatchPattern)
 }
 

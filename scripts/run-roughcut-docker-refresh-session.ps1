@@ -78,7 +78,7 @@ function Test-RoughCutProcessActive {
         return $false
     }
 
-    $commandLine = [string]($process.CommandLine ?? "")
+    $commandLine = if ($null -ne $process.CommandLine) { [string]$process.CommandLine } else { "" }
     return $commandLine -match [regex]::Escape($ScriptName)
 }
 
@@ -158,7 +158,7 @@ function Get-ActiveRuntimeRefreshHold {
         return $null
     }
 
-    $expiresAtRaw = [string]($payload.expires_at_utc ?? "")
+    $expiresAtRaw = if ($null -ne $payload.expires_at_utc) { [string]$payload.expires_at_utc } else { "" }
     if ([string]::IsNullOrWhiteSpace($expiresAtRaw)) {
         return $null
     }
@@ -174,8 +174,8 @@ function Get-ActiveRuntimeRefreshHold {
     }
 
     return [pscustomobject]@{
-        reason = [string]($payload.reason ?? "")
-        job_id = [string]($payload.job_id ?? "")
+        reason = if ($null -ne $payload.reason) { [string]$payload.reason } else { "" }
+        job_id = if ($null -ne $payload.job_id) { [string]$payload.job_id } else { "" }
         expires_at_utc = $expiresAt.ToString("o")
     }
 }

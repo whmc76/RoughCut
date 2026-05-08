@@ -78,7 +78,7 @@ function Test-RoughCutProcessActive {
         return $false
     }
 
-    $commandLine = [string]($process.CommandLine ?? "")
+    $commandLine = if ($null -ne $process.CommandLine) { [string]$process.CommandLine } else { "" }
     return $commandLine -match [regex]::Escape($ScriptName)
 }
 
