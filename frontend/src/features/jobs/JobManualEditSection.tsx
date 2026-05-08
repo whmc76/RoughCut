@@ -46,6 +46,13 @@ type OutputRange = {
   outputEnd: number;
 };
 
+type MappedSubtitleRange = {
+  outputStart: number;
+  outputEnd: number;
+  sourceStart: number;
+  sourceEnd: number;
+};
+
 type SubtitleDraft = {
   start_time?: number | null;
   end_time?: number | null;
@@ -309,33 +316,96 @@ function remapSubtitles(subtitles: JobManualEditSubtitle[], keepSegments: KeepSe
   });
 
   const remapped = subtitles
-    .map((subtitle, index) => {
+    .flatMap((subtitle, index) => {
       const subtitleStart = Number(subtitle.start_time || 0);
       const subtitleEnd = Number(subtitle.end_time || 0);
-      let bestDuration = 0;
-      let bestWindow: { start: number; end: number } | null = null;
+      const mappedRanges: MappedSubtitleRange[] = [];
       for (const range of ranges) {
         const overlapStart = Math.max(subtitleStart, range.sourceStart);
         const overlapEnd = Math.min(subtitleEnd, range.sourceEnd);
         const overlapDuration = overlapEnd - overlapStart;
-        if (overlapDuration <= bestDuration) continue;
-        bestDuration = overlapDuration;
-        bestWindow = {
-          start: range.outputStart + (overlapStart - range.sourceStart),
-          end: range.outputStart + (overlapEnd - range.sourceStart),
-        };
+        if (overlapDuration <= 0.05) continue;
+        const outputStart = range.outputStart + (overlapStart - range.sourceStart);
+        const outputEnd = range.outputStart + (overlapEnd - range.sourceStart);
+        if (outputEnd <= outputStart + 0.05) continue;
+        mappedRanges.push({
+          outputStart,
+          outputEnd,
+          sourceStart: overlapStart,
+          sourceEnd: overlapEnd,
+        });
       }
-      if (!bestWindow || bestWindow.end <= bestWindow.start + 0.05) return null;
-      return {
-        ...subtitle,
-        index: subtitle.index ?? index,
-        start_time: Number(bestWindow.start.toFixed(3)),
-        end_time: Number(bestWindow.end.toFixed(3)),
-      };
+      if (!mappedRanges.length || subtitleEnd <= subtitleStart + 0.001) return [];
+      const fragmentTexts = splitRemappedSubtitleText(subtitle, mappedRanges, subtitleStart, subtitleEnd);
+      return mappedRanges.flatMap((mappedRange, fragmentIndex) => {
+        const fragmentText = fragmentTexts[fragmentIndex]?.trim() || "";
+        if (!fragmentText) return [];
+        const remappedSubtitle = withRemappedSubtitleText({
+          ...subtitle,
+          index: subtitle.index ?? index,
+          start_time: Number(mappedRange.outputStart.toFixed(3)),
+          end_time: Number(mappedRange.outputEnd.toFixed(3)),
+        }, fragmentText);
+        return [remappedSubtitle];
+      });
     })
-    .filter(Boolean) as JobManualEditSubtitle[];
+    .sort((left, right) => left.start_time - right.start_time || left.index - right.index);
 
   return { remapped, ranges, totalDuration: outputCursor };
+}
+
+function withRemappedSubtitleText(subtitle: JobManualEditSubtitle, text: string) {
+  return {
+    ...subtitle,
+    text_raw: subtitle.text_raw == null ? subtitle.text_raw : text,
+    text_norm: subtitle.text_norm == null ? subtitle.text_norm : text,
+    text_final: text,
+  };
+}
+
+function splitRemappedSubtitleText(
+  subtitle: JobManualEditSubtitle,
+  mappedRanges: MappedSubtitleRange[],
+  subtitleStart: number,
+  subtitleEnd: number,
+) {
+  const text = subtitleText(subtitle).trim();
+  if (!text) return mappedRanges.map(() => "");
+  const hasSpaces = text.includes(" ");
+  const tokens = hasSpaces ? text.split(/\s+/).filter(Boolean) : Array.from(text);
+  if (!tokens.length) return mappedRanges.map(() => "");
+  const duration = Math.max(0.001, subtitleEnd - subtitleStart);
+  let cursor = 0;
+  return mappedRanges.map((range, index) => {
+    const remainingRanges = mappedRanges.length - index - 1;
+    const startRatio = clamp((range.sourceStart - subtitleStart) / duration, 0, 1);
+    const endRatio = clamp((range.sourceEnd - subtitleStart) / duration, 0, 1);
+    const rawStart = Math.floor(tokens.length * startRatio);
+    const rawEnd = Math.ceil(tokens.length * endRatio);
+    let startIndex = Math.max(cursor, rawStart);
+    let endIndex = Math.max(startIndex, rawEnd);
+    endIndex = Math.min(endIndex, tokens.length - remainingRanges);
+    if (endIndex <= startIndex && tokens.length - cursor > remainingRanges) {
+      endIndex = Math.min(tokens.length - remainingRanges, startIndex + 1);
+    }
+    const piece = tokens.slice(startIndex, endIndex);
+    cursor = Math.max(cursor, endIndex);
+    return hasSpaces ? piece.join(" ") : piece.join("");
+  });
+}
+
+function keepSegmentsEquivalent(left: KeepSegment[], right: KeepSegment[]) {
+  if (left.length !== right.length) return false;
+  return left.every((segment, index) => {
+    const other = right[index];
+    return Boolean(other)
+      && Math.abs(segment.start - other.start) <= 0.001
+      && Math.abs(segment.end - other.end) <= 0.001;
+  });
+}
+
+function sortedSubtitles(subtitles: JobManualEditSubtitle[]) {
+  return [...subtitles].sort((left, right) => left.start_time - right.start_time || left.index - right.index);
 }
 
 function applySubtitleDrafts(subtitles: JobManualEditSubtitle[], drafts: Record<number, SubtitleDraft>) {
@@ -832,8 +902,21 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
   );
 
   const baseProjection = useMemo(
-    () => remapSubtitles(session.source_subtitles, effectiveSegments),
-    [session.source_subtitles, effectiveSegments],
+    () => {
+      const fallbackProjection = remapSubtitles(session.source_subtitles, effectiveSegments);
+      const sessionKeepSegments = session.keep_segments.map((segment) => ({ start: segment.start, end: segment.end }));
+      if (
+        session.projected_subtitles.length
+        && keepSegmentsEquivalent(effectiveSegments, sessionKeepSegments)
+      ) {
+        return {
+          ...fallbackProjection,
+          remapped: sortedSubtitles(session.projected_subtitles),
+        };
+      }
+      return fallbackProjection;
+    },
+    [session.keep_segments, session.projected_subtitles, session.source_subtitles, effectiveSegments],
   );
 
   const projection = useMemo(
