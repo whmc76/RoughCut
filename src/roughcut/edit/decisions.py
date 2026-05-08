@@ -293,6 +293,13 @@ _SILENCE_CUT_SCORE_THRESHOLD = 0.32
 _SILENCE_DURATION_SCORE_BASE = 0.22
 _SILENCE_DURATION_SCORE_PER_SEC = 0.35
 _SILENCE_DURATION_SCORE_MAX = 0.55
+_SYNTHETIC_WORD_ALIGNMENT_SOURCES = {
+    "canonical_realign",
+    "synthetic",
+    "segment_only",
+    "provider_missing",
+    "roughcut_synthesized",
+}
 _SCENE_SNAP_TOLERANCE_SEC = 0.24
 _MIN_CUT_DURATION_SEC = 0.08
 _TRANSCRIPT_EVIDENCE_WINDOW_SEC = 0.45
@@ -678,6 +685,16 @@ def _score_silence_cut(
         transcript_segments=transcript_segments,
         content_profile=content_profile,
     )
+    synthetic_timing_overlap = _range_has_synthetic_transcript_word_overlap(
+        silence.start,
+        silence.end,
+        transcript_segments=transcript_segments,
+    )
+    trusted_word_overlap = _range_has_trusted_transcript_word_overlap(
+        silence.start,
+        silence.end,
+        transcript_segments=transcript_segments,
+    )
     range_evidence = _build_range_evidence(
         silence.start,
         silence.end,
@@ -758,7 +775,11 @@ def _score_silence_cut(
     if range_evidence.removal_score >= 0.72:
         score += min(0.22, range_evidence.removal_score * 0.14)
         signals.append(f"evidence_remove={range_evidence.removal_score:.2f}")
-    if protected_speech_overlap:
+    if protected_speech_overlap and synthetic_timing_overlap and not trusted_word_overlap:
+        vad_gap_bonus = min(0.16, 0.09 + max(0.0, silence.duration - min_silence_to_cut) * 0.05)
+        score += vad_gap_bonus
+        signals.append(f"vad_gap_over_synthetic_timing={vad_gap_bonus:.2f}")
+    elif protected_speech_overlap:
         score = min(score - 0.55, _SILENCE_CUT_SCORE_THRESHOLD - 0.01)
         signals.append("protected_speech_overlap")
     signals.extend(f"evidence:{tag}" for tag in range_evidence.tags[:5])
@@ -1218,6 +1239,7 @@ def _normalize_transcript_segments(transcript_segments: list[dict[str, Any]]) ->
                         "confidence": _optional_float(word.get("confidence")),
                         "logprob": _optional_float(word.get("logprob")),
                         "alignment": word.get("alignment"),
+                        "raw_payload": word.get("raw_payload"),
                     }
                 )
         normalized.append(
@@ -1892,6 +1914,78 @@ def _transcript_segment_has_protected_speech(
             return True
     text = str(segment.get("text") or "").strip()
     return _subtitle_has_protected_speech_text(text, content_profile=content_profile)
+
+
+def _range_has_synthetic_transcript_word_overlap(
+    start_time: float,
+    end_time: float,
+    *,
+    transcript_segments: list[dict[str, Any]],
+) -> bool:
+    return _range_has_transcript_word_overlap(
+        start_time,
+        end_time,
+        transcript_segments=transcript_segments,
+        trusted=False,
+    )
+
+
+def _range_has_trusted_transcript_word_overlap(
+    start_time: float,
+    end_time: float,
+    *,
+    transcript_segments: list[dict[str, Any]],
+) -> bool:
+    return _range_has_transcript_word_overlap(
+        start_time,
+        end_time,
+        transcript_segments=transcript_segments,
+        trusted=True,
+    )
+
+
+def _range_has_transcript_word_overlap(
+    start_time: float,
+    end_time: float,
+    *,
+    transcript_segments: list[dict[str, Any]],
+    trusted: bool,
+) -> bool:
+    for segment in _overlapping_transcript_segments(start_time, end_time, transcript_segments):
+        for word in list(segment.get("words") or []):
+            if _range_overlap_seconds(start_time, end_time, word.get("start"), word.get("end")) <= 0.0:
+                continue
+            if _transcript_word_timing_is_trusted(word) == trusted:
+                return True
+    return False
+
+
+def _transcript_word_timing_is_trusted(word: dict[str, Any]) -> bool:
+    start = _optional_float(word.get("start"))
+    end = _optional_float(word.get("end"))
+    if start is None or end is None or end <= start:
+        return False
+    return _transcript_word_alignment_source(word) not in _SYNTHETIC_WORD_ALIGNMENT_SOURCES
+
+
+def _transcript_word_alignment_source(word: dict[str, Any]) -> str:
+    alignment = word.get("alignment")
+    if isinstance(alignment, dict):
+        source = str(alignment.get("source") or "").strip().lower()
+        if source:
+            return source
+        roughcut = alignment.get("_roughcut")
+        if isinstance(roughcut, dict):
+            source = str(roughcut.get("source") or "").strip().lower()
+            if source:
+                return source
+    raw_payload = word.get("raw_payload")
+    if isinstance(raw_payload, dict):
+        for key in ("source", "_roughcut_source"):
+            source = str(raw_payload.get(key) or "").strip().lower()
+            if source:
+                return source
+    return ""
 
 
 def _range_overlap_seconds(start_time: float, end_time: float, item_start: Any, item_end: Any) -> float:

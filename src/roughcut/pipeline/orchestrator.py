@@ -103,6 +103,7 @@ STEP_QUEUES = {
 MAX_ATTEMPTS = 3
 _GPU_SENSITIVE_STEPS = {"transcribe", "avatar_commentary", "render"}
 _REVIEW_ROUND_STEPS = {"summary_review", "glossary_review", "final_review"}
+_EDIT_PLAN_OPTIONAL_PREREQUISITES = {"ai_director", "avatar_commentary"}
 _ORCHESTRATOR_ADVISORY_LOCK_KEY = 22032026
 _ORCHESTRATOR_HEARTBEAT_PATH = Path("logs/orchestrator-heartbeat.json")
 _ORCHESTRATOR_HEARTBEAT_MIN_FRESH_SEC = 30.0
@@ -1163,6 +1164,8 @@ async def _is_step_ready(step: JobStep, session) -> bool:
         for existing_step in existing_steps_result.scalars().all()
     }
     for prerequisite_name in PIPELINE_STEPS[:step_idx]:
+        if step.step_name == "edit_plan" and prerequisite_name in _EDIT_PLAN_OPTIONAL_PREREQUISITES:
+            continue
         prerequisite = steps_by_name.get(prerequisite_name)
         if prerequisite is None:
             continue
@@ -1218,7 +1221,7 @@ async def _dispatch_step(step: JobStep, session) -> None:
 async def _update_job_statuses(session) -> None:
     """Mark jobs as done or failed based on their steps."""
     result = await session.execute(
-        select(Job).where(Job.status.in_(["pending", "processing", "needs_review"]))
+        select(Job).where(Job.status.in_(["pending", "processing", "needs_review", "failed"]))
     )
     jobs = result.scalars().all()
 
@@ -1228,6 +1231,7 @@ async def _update_job_statuses(session) -> None:
         )
         steps = steps_result.scalars().all()
         step_map = {s.step_name: s for s in steps}
+        _reconcile_completed_summary_review_step(step_map)
         await _reconcile_completed_render_step(session, job, step_map)
         ordered_existing_steps = [
             step_map[name]
@@ -1235,6 +1239,15 @@ async def _update_job_statuses(session) -> None:
             if name in step_map
         ]
         _reconcile_terminal_steps(job, ordered_existing_steps)
+        if job.status == "failed":
+            remaining_failed_steps = [
+                s for s in steps if s.status == "failed" and s.attempt >= MAX_ATTEMPTS
+            ]
+            if remaining_failed_steps:
+                continue
+            job.status = "processing"
+            job.error_message = None
+            job.updated_at = datetime.now(timezone.utc)
         last_existing_step = ordered_existing_steps[-1] if ordered_existing_steps else None
 
         done_candidate = all(s.status == "done" for s in steps) or (
@@ -1462,6 +1475,26 @@ async def _reconcile_completed_render_step(session, job: Job, step_map: dict[str
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
     logger.info("Job %s reconciled render step from completed render output", job.id)
+
+
+def _reconcile_completed_summary_review_step(step_map: dict[str, JobStep]) -> None:
+    content_step = step_map.get("content_profile")
+    review_step = step_map.get("summary_review")
+    if content_step is None or review_step is None:
+        return
+    if review_step.status != "done" or content_step.status == "done":
+        return
+
+    now = datetime.now(timezone.utc)
+    content_step.status = "done"
+    content_step.finished_at = content_step.finished_at or review_step.finished_at or now
+    content_step.error_message = None
+    content_step.metadata_ = {
+        **(content_step.metadata_ or {}),
+        "detail": "检测到内容异常门已完成，调度器已自动收口内容摘要步骤。",
+        "progress": 1.0,
+        "updated_at": now.isoformat(),
+    }
 
 
 async def _ensure_job_steps(job: Job, session) -> None:

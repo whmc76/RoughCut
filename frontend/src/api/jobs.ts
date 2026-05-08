@@ -46,18 +46,37 @@ type JobDownloadBlob = {
   filename: string;
 };
 
-function fallbackManualEditorReadiness(jobId: string, detail?: string): JobManualEditorReadiness {
+function fallbackManualEditorReadiness(
+  jobId: string,
+  detail?: string,
+  status: JobManualEditorReadiness["status"] = "preprocessing",
+  canOpenEditor = false,
+): JobManualEditorReadiness {
   return {
     job_id: jobId,
-    status: "preprocessing",
-    can_open_editor: false,
-    can_edit: false,
-    progress_percent: 0,
+    status,
+    can_open_editor: canOpenEditor,
+    can_edit: canOpenEditor,
+    progress_percent: canOpenEditor ? 100 : 0,
     current_step: null,
     detail: detail || "正在生成手动调整所需信息。",
     required_steps: [],
     missing: [],
   };
+}
+
+async function fallbackReadinessFromManualEditorSession(jobId: string): Promise<JobManualEditorReadiness> {
+  const response = await fetch(apiPath(`/jobs/${jobId}/manual-editor`), {
+    headers: { "Content-Type": "application/json" },
+  });
+  if (response.ok) {
+    return fallbackManualEditorReadiness(jobId, "后端尚未提供准备状态接口，但手动调整工作区已可打开。", "ready", true);
+  }
+  if (response.status === 404) {
+    return fallbackManualEditorReadiness(jobId, "正在等待手动调整预处理完成。");
+  }
+  const payload = await response.json().catch(() => ({ detail: response.statusText }));
+  throw new Error(String(payload.detail || response.statusText || "Manual editor readiness failed"));
 }
 
 function parseDownloadFilename(header: string | null, fallback: string) {
@@ -129,7 +148,7 @@ export const jobsApi = {
       headers: { "Content-Type": "application/json" },
     });
     if (response.status === 404) {
-      return fallbackManualEditorReadiness(jobId, "正在等待手动调整预处理完成。");
+      return fallbackReadinessFromManualEditorSession(jobId);
     }
     if (!response.ok) {
       const payload = await response.json().catch(() => ({ detail: response.statusText }));

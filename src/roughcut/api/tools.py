@@ -229,9 +229,9 @@ async def _execute_tts_run(
     if resolved_mode in {"zero_shot", "cross_lingual", "instruct", "instruct2"} and reference_path is None:
         raise RuntimeError(f"CosyVoice3 {resolved_mode} TTS requires prompt_wav/reference_audio")
     user_prompt_text = _strip_cosyvoice_prompt_boundary(prompt_text)
-    resolved_prompt_text = _ensure_cosyvoice_prompt_boundary(user_prompt_text) if resolved_mode == "zero_shot" else user_prompt_text
+    resolved_prompt_text = _normalize_cosyvoice3_prompt_text(user_prompt_text) if resolved_mode == "zero_shot" else user_prompt_text
     user_instruct_text = _strip_cosyvoice_prompt_boundary(instruct_text)
-    resolved_instruct_text = _ensure_cosyvoice_prompt_boundary(user_instruct_text) if resolved_mode in {"instruct", "instruct2"} else user_instruct_text
+    resolved_instruct_text = _normalize_cosyvoice3_instruct_text(user_instruct_text) if resolved_mode in {"instruct", "instruct2"} else user_instruct_text
     if resolved_mode == "zero_shot" and not user_prompt_text:
         raise RuntimeError("CosyVoice3 zero_shot TTS requires prompt_text")
     if resolved_mode in {"instruct", "instruct2"} and not user_instruct_text:
@@ -309,6 +309,7 @@ async def _execute_tts_run(
         "provider": "official-cosyvoice3",
         "mode": resolved_mode,
         "text": text,
+        "tts_text": text,
         "original_text": original_text,
         "prompt_text": user_prompt_text,
         "instruct_text": user_instruct_text,
@@ -325,7 +326,10 @@ async def _execute_tts_run(
 
 
 def _strip_cosyvoice_prompt_boundary(value: str | None) -> str:
-    return str(value or "").replace(_COSYVOICE3_END_OF_PROMPT, "").strip()
+    cleaned = str(value or "").replace(_COSYVOICE3_END_OF_PROMPT, "").strip()
+    if cleaned.startswith(_COSYVOICE3_SYSTEM_PROMPT):
+        cleaned = cleaned[len(_COSYVOICE3_SYSTEM_PROMPT):].strip()
+    return cleaned
 
 
 def _strip_tts_text_ui_hints(value: str | None) -> str:
@@ -342,6 +346,25 @@ def _ensure_cosyvoice_prompt_boundary(value: str) -> str:
     if _COSYVOICE3_END_OF_PROMPT in raw:
         return raw
     return f"{raw}{_COSYVOICE3_END_OF_PROMPT}"
+
+
+_COSYVOICE3_SYSTEM_PROMPT = "You are a helpful assistant."
+
+
+def _normalize_cosyvoice3_prompt_text(value: str) -> str:
+    body = str(value or "").strip()
+    if not body:
+        return ""
+    return f"{_COSYVOICE3_SYSTEM_PROMPT}{_COSYVOICE3_END_OF_PROMPT}{body}"
+
+
+def _normalize_cosyvoice3_instruct_text(value: str) -> str:
+    body = str(value or "").strip()
+    if not body:
+        return ""
+    if body.startswith(_COSYVOICE3_SYSTEM_PROMPT):
+        body = body[len(_COSYVOICE3_SYSTEM_PROMPT):].strip()
+    return f"{_COSYVOICE3_SYSTEM_PROMPT} {body}{_COSYVOICE3_END_OF_PROMPT}"
 
 
 async def _execute_asr_run(run_id: str, *, audio_path: Path, language: str, prompt: str) -> None:

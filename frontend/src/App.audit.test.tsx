@@ -30,6 +30,12 @@ vi.mock("./pages/OverviewPage", () => ({ OverviewPage: () => <main data-testid="
 vi.mock("./pages/JobsPage", () => ({ JobsPage: () => <main data-testid="route-jobs">Jobs route</main> }));
 vi.mock("./pages/WatchRootsPage", () => ({ WatchRootsPage: () => <main data-testid="route-watch-roots">Watch roots route</main> }));
 vi.mock("./pages/IntelligentCopyPage", () => ({ IntelligentCopyPage: () => <main data-testid="route-intelligent-copy">Intelligent copy route</main> }));
+vi.mock("./pages/ToolsPage", () => ({
+  ToolsPage: () => <main data-testid="route-tools">Tools route</main>,
+  TtsToolPage: () => <main data-testid="route-tools-tts">TTS route</main>,
+  AsrToolPage: () => <main data-testid="route-tools-asr">ASR route</main>,
+  AvatarToolPage: () => <main data-testid="route-tools-avatar">Avatar route</main>,
+}));
 vi.mock("./pages/PackagingPage", () => ({ PackagingPage: () => <main data-testid="route-packaging">Packaging route</main> }));
 vi.mock("./pages/StyleLabPage", () => ({ StyleLabPage: () => <main data-testid="route-style-lab">Style lab route</main> }));
 vi.mock("./pages/StyleTemplatesPage", () => ({ StyleTemplatesPage: () => <main data-testid="route-style-templates">Style templates route</main> }));
@@ -45,6 +51,10 @@ const routes = [
   ["/jobs", "route-jobs"],
   ["/watch-roots", "route-watch-roots"],
   ["/intelligent-copy", "route-intelligent-copy"],
+  ["/tools", "route-tools"],
+  ["/tools/tts", "route-tools-tts"],
+  ["/tools/asr", "route-tools-asr"],
+  ["/tools/avatar", "route-tools-avatar"],
   ["/packaging", "route-packaging"],
   ["/style-lab", "route-style-lab"],
   ["/style-templates", "route-style-templates"],
@@ -97,7 +107,7 @@ describe("App route and navigation audit", () => {
     expect(screen.getByText("创作资产")).toBeInTheDocument();
     expect(screen.getByText("系统")).toBeInTheDocument();
 
-    for (const label of ["概览", "任务", "监看目录", "智能文案", "风格实验", "包装素材", "风格模板", "创作模式", "创作者档案", "系统设置", "记忆", "术语表", "控制台"]) {
+    for (const label of ["概览", "任务", "监看目录", "智能文案", "小工具", "风格实验", "包装素材", "风格模板", "创作模式", "创作者档案", "系统设置", "记忆", "术语表", "控制台"]) {
       expect(screen.getByRole("link", { name: new RegExp(label) })).toBeInTheDocument();
     }
   });

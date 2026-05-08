@@ -204,6 +204,17 @@ export function JobsPage() {
     });
   };
 
+  const submitCreateJob = () =>
+    workspace.uploadJob.mutate(undefined, {
+      onSuccess: (job) => {
+        const shouldOpenManualEditor = workspace.upload.jobFlowMode === "smart_assist";
+        setCreateOpen(false);
+        if (shouldOpenManualEditor) {
+          navigate(`/jobs/${job.id}/manual-editor`);
+        }
+      },
+    });
+
   const reviewNoticeClass = reviewNoticeTone === "error" ? "notice top-gap notice-error" : "notice top-gap";
 
   return (
@@ -332,16 +343,29 @@ export function JobsPage() {
       ) : null}
       {reviewNotice ? <div className={reviewNoticeClass}>{reviewNotice}</div> : null}
 
-      <JobCreateModal open={createOpen} onClose={() => setCreateOpen(false)}>
+      <JobCreateModal
+        open={createOpen}
+        onClose={() => setCreateOpen(false)}
+        actions={
+          <button
+            type="button"
+            className="button primary jobs-create-submit-button"
+            disabled={workspace.upload.files.length === 0 || workspace.uploadJob.isPending}
+            onClick={submitCreateJob}
+          >
+            {workspace.uploadJob.isPending ? t("jobs.upload.submitting") : t("jobs.upload.submit")}
+          </button>
+        }
+      >
         <section className="jobs-create-modal-content">
-          <div className="jobs-stage-head">
+          <div className="jobs-stage-head jobs-create-modal-head">
             <div>
               <h3>创建任务</h3>
               <p>先填写新任务，再按需调整剪辑方案。</p>
             </div>
             <div className="jobs-stage-meta">
               <span>创建流程</span>
-              <strong>创建任务 + 剪辑方案</strong>
+              <strong>{workspace.upload.files.length > 0 ? `已选 ${workspace.upload.files.length} 个素材` : "等待选择素材"}</strong>
             </div>
           </div>
 
@@ -355,18 +379,6 @@ export function JobsPage() {
                 enhancementOptions={enhancementOptions}
                 outputDirHistory={workspace.outputDirHistory}
                 onChange={workspace.setUpload}
-                onSubmit={() =>
-                  workspace.uploadJob.mutate(undefined, {
-                    onSuccess: (job) => {
-                      const shouldOpenManualEditor = workspace.upload.jobFlowMode === "smart_assist";
-                      setCreateOpen(false);
-                      if (shouldOpenManualEditor) {
-                        navigate(`/jobs/${job.id}/manual-editor`);
-                      }
-                    },
-                  })
-                }
-                isSubmitting={workspace.uploadJob.isPending}
               />
             </section>
 

@@ -6,7 +6,8 @@ import { api } from "../api";
 import { PageHeader } from "../components/ui/PageHeader";
 import { EmptyState } from "../components/ui/EmptyState";
 import type { JobManualEditSectionState } from "../features/jobs/JobManualEditSection";
-import type { JobManualEditApplyPayload, JobManualEditorReadiness } from "../types";
+import { STEP_LABELS } from "../features/jobs/constants";
+import type { JobManualEditApplyPayload, JobManualEditorReadiness, JobManualEditorReadinessStep } from "../types";
 
 const JobManualEditSection = lazy(async () => ({
   default: (await import("../features/jobs/JobManualEditSection")).JobManualEditSection,
@@ -24,9 +25,69 @@ function draftSaveErrorMessage(error: unknown) {
   return message || "请刷新后重试。";
 }
 
+function clampPercent(value: number) {
+  return Math.max(0, Math.min(100, Math.round(value)));
+}
+
+function stepProgressPercent(step: JobManualEditorReadinessStep) {
+  if (step.status === "done" || step.status === "skipped") return 100;
+  if (typeof step.progress === "number") return clampPercent(step.progress * 100);
+  return 0;
+}
+
+function stepStatusText(step: JobManualEditorReadinessStep, isCurrent: boolean) {
+  if (step.status === "done") return "已完成";
+  if (step.status === "skipped") return "已跳过";
+  if (step.status === "failed") return "失败";
+  if (step.status === "cancelled") return "已取消";
+  if (step.status === "running" || step.status === "processing") return "进行中";
+  if (step.status === "queued") return "排队中";
+  if (isCurrent) return "等待开始";
+  return "未开始";
+}
+
+function stepDetailText(step: JobManualEditorReadinessStep, isCurrent: boolean) {
+  if (step.detail) return step.detail;
+  if (step.status === "done") return "该阶段产物已生成。";
+  if (step.status === "skipped") return "当前任务不需要执行该阶段。";
+  if (step.status === "failed") return "该阶段执行失败，请查看任务错误信息。";
+  if (step.status === "queued") return "已进入任务队列，等待 worker 执行。";
+  if (step.status === "running" || step.status === "processing") return "正在生成该阶段所需结果。";
+  if (isCurrent) return "上游条件满足后会立即开始。";
+  return "等待前置阶段完成。";
+}
+
+function readinessEmptyStateMessage(readiness: JobManualEditorReadiness) {
+  if (readiness.status === "failed") {
+    return readiness.detail ? `手动调整预处理失败：${readiness.detail}` : "手动调整预处理失败，请回到任务列表查看错误详情。";
+  }
+  if (readiness.status === "blocked") {
+    return readiness.detail || "手动调整暂不可用，请先处理当前任务状态。";
+  }
+  return readiness.detail || "手动调整工作区还在预处理，完成后会自动打开编辑器。";
+}
+
+function manualEditorRetryStartStep(readiness?: JobManualEditorReadiness) {
+  const failedStep = readiness?.required_steps.find((step) => step.status === "failed" || step.status === "cancelled");
+  if (failedStep?.step_name) return failedStep.step_name;
+  if (readiness?.missing?.some((item) => item === "editorial_timeline" || item === "render_plan")) return "edit_plan";
+  if (readiness?.missing?.includes("media_meta")) return "probe";
+  return null;
+}
+
+function manualEditorRetryStartLabel(startStep: string | null) {
+  if (!startStep) return "";
+  return STEP_LABELS[startStep] || startStep;
+}
+
 function ManualEditorReadinessPanel({ readiness }: { readiness?: JobManualEditorReadiness }) {
-  const progress = Math.max(0, Math.min(100, readiness?.progress_percent ?? 0));
+  const progress = clampPercent(readiness?.progress_percent ?? 0);
+  const requiredSteps = readiness?.required_steps ?? [];
   const currentStep = readiness?.required_steps.find((step) => step.step_name === readiness.current_step);
+  const currentStepIndex = currentStep ? requiredSteps.findIndex((step) => step.step_name === currentStep.step_name) + 1 : 0;
+  const completedCount = requiredSteps.filter((step) => step.status === "done" || step.status === "skipped").length;
+  const failedCount = requiredSteps.filter((step) => step.status === "failed" || step.status === "cancelled").length;
+  const activeStepNumber = currentStepIndex || Math.min(requiredSteps.length, completedCount + 1);
   const title = readiness?.status === "blocked"
     ? "手动调整暂不可用"
     : readiness?.status === "failed" ? "手动调整预处理失败" : "正在准备手动调整工作区";
@@ -43,17 +104,63 @@ function ManualEditorReadinessPanel({ readiness }: { readiness?: JobManualEditor
           {progress}%
         </span>
       </div>
+      {requiredSteps.length ? (
+        <div className="manual-editor-readiness-summary" aria-label="手动调整预处理概览">
+          <div>
+            <strong>{completedCount}/{requiredSteps.length}</strong>
+            <span>已完成阶段</span>
+          </div>
+          <div>
+            <strong>{activeStepNumber || "-"}</strong>
+            <span>当前阶段</span>
+          </div>
+          <div>
+            <strong>{failedCount}</strong>
+            <span>异常阶段</span>
+          </div>
+        </div>
+      ) : null}
       <div className="manual-editor-readiness-progress" aria-label="手动调整预处理进度">
         <span style={{ width: `${progress}%` }} />
       </div>
-      {currentStep ? <p className="muted compact-top">当前步骤：{currentStep.label}</p> : null}
-      {readiness?.required_steps.length ? (
-        <div className="manual-editor-readiness-steps">
-          {readiness.required_steps.map((step) => (
-            <span key={step.step_name} className={`status-pill ${step.status}`}>
-              {step.label}
-            </span>
-          ))}
+      {currentStep ? (
+        <p className="manual-editor-current-step">
+          当前步骤：<strong>{currentStep.label}</strong>
+          {typeof currentStep.progress === "number" ? <span>{stepProgressPercent(currentStep)}%</span> : null}
+        </p>
+      ) : null}
+      {requiredSteps.length ? (
+        <div className="manual-editor-readiness-step-list">
+          {requiredSteps.map((step, index) => {
+            const isCurrent = step.step_name === readiness?.current_step;
+            const stepProgress = stepProgressPercent(step);
+            return (
+              <div
+                key={step.step_name}
+                className={`manual-editor-readiness-step ${step.status}${isCurrent ? " current" : ""}`}
+              >
+                <div className="manual-editor-readiness-step-index">{String(index + 1).padStart(2, "0")}</div>
+                <div className="manual-editor-readiness-step-main">
+                  <div className="manual-editor-readiness-step-head">
+                    <strong>{step.label}</strong>
+                    <span className={`status-pill ${step.status}`}>{stepStatusText(step, isCurrent)}</span>
+                  </div>
+                  <p>{stepDetailText(step, isCurrent)}</p>
+                  <div
+                    className="manual-editor-readiness-step-progress"
+                    role="progressbar"
+                    aria-label={`${step.label}进度`}
+                    aria-valuemin={0}
+                    aria-valuemax={100}
+                    aria-valuenow={stepProgress}
+                  >
+                    <span style={{ width: `${stepProgress}%` }} />
+                  </div>
+                </div>
+                <span className="manual-editor-readiness-step-percent">{stepProgress}%</span>
+              </div>
+            );
+          })}
         </div>
       ) : null}
     </section>
@@ -206,6 +313,30 @@ export function JobManualEditorPage() {
 
   const noticeClass = notice?.tone === "error" ? "notice notice-error top-gap" : "notice top-gap";
   const manualEditorActionsEnabled = Boolean(manualEditor.data && manualEditorReadiness.data?.can_edit);
+  const retryStartStep = manualEditorRetryStartStep(manualEditorReadiness.data);
+  const retryStartLabel = manualEditorRetryStartLabel(retryStartStep);
+  const retryManualEditorPreparation = useMutation({
+    mutationFn: async (startStep: string) => api.rerunJob(jobId, {
+      rerun_start_step: startStep,
+      note: "手动调整预处理失败后从断点重试",
+    }),
+    onSuccess: async (result) => {
+      setNotice({
+        tone: "success",
+        message: result.detail?.trim() || `已请求从 ${result.rerun_start_step} 重试。`,
+      });
+      await Promise.all([
+        queryClient.refetchQueries({ queryKey: ["job-manual-editor-readiness", jobId] }),
+        queryClient.invalidateQueries({ queryKey: ["jobs"] }),
+        queryClient.invalidateQueries({ queryKey: ["job", jobId] }),
+        queryClient.removeQueries({ queryKey: ["job-manual-editor", jobId] }),
+        queryClient.removeQueries({ queryKey: ["job-manual-editor-assets", jobId] }),
+      ]);
+    },
+    onError: (error) => {
+      setNotice({ tone: "error", message: `断点重试失败：${errorMessage(error) || "请稍后重试。"}` });
+    },
+  });
 
   return (
     <section className="page-stack manual-editor-page">
@@ -267,7 +398,28 @@ export function JobManualEditorPage() {
       ) : manualEditorReadiness.data && !manualEditorReadiness.data.can_open_editor ? (
         <>
           <section className="panel manual-editor-shell-panel">
-            <EmptyState message="手动调整工作区还在预处理，完成后会自动打开编辑器。" />
+            <EmptyState
+              message={readinessEmptyStateMessage(manualEditorReadiness.data)}
+              tone={manualEditorReadiness.data.status === "failed" ? "error" : undefined}
+            />
+            <div className="toolbar top-gap">
+              {retryStartStep ? (
+                <button
+                  type="button"
+                  className="button primary"
+                  disabled={retryManualEditorPreparation.isPending}
+                  onClick={() => retryManualEditorPreparation.mutate(retryStartStep)}
+                >
+                  {retryManualEditorPreparation.isPending ? "正在提交重试..." : `从${retryStartLabel}重试`}
+                </button>
+              ) : null}
+              <button type="button" className="button ghost" onClick={() => void manualEditorReadiness.refetch()}>
+                刷新状态
+              </button>
+              <Link className="button ghost" to="/jobs">
+                返回任务列表
+              </Link>
+            </div>
           </section>
           <div className="manual-editor-readiness-floating">
             <ManualEditorReadinessPanel readiness={manualEditorReadiness.data} />

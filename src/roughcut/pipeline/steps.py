@@ -14,15 +14,18 @@ import re
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 import uuid
-from contextlib import asynccontextmanager, suppress
+from contextlib import asynccontextmanager, contextmanager, suppress
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 from sqlalchemy import delete, select
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.pool import NullPool
 
 from roughcut.avatar import list_avatar_material_profiles
 from roughcut.config import get_settings, llm_task_route, normalize_transcription_settings, should_enable_task_search
@@ -2117,6 +2120,90 @@ async def _maintain_step_heartbeat(step: JobStep | None):
                 await heartbeat
 
 
+def _write_blocking_step_heartbeat(
+    *,
+    step_id: uuid.UUID,
+    detail: str,
+    progress: float | None = None,
+) -> bool:
+    settings = get_settings()
+
+    async def _write() -> bool:
+        engine = create_async_engine(
+            settings.database_url,
+            echo=False,
+            poolclass=NullPool,
+        )
+        try:
+            factory = async_sessionmaker(engine, expire_on_commit=False)
+            async with factory() as session:
+                step_ref = await session.get(JobStep, step_id)
+                if step_ref is None or step_ref.status != "running":
+                    return False
+                await _set_step_progress(session, step_ref, detail=detail, progress=progress)
+                return True
+        finally:
+            await engine.dispose()
+
+    return bool(asyncio.run(_write()))
+
+
+@contextmanager
+def _maintain_blocking_step_heartbeat(
+    step: JobStep | None,
+    *,
+    detail: str,
+    progress: float | None = None,
+):
+    if step is None or step.id is None:
+        yield
+        return
+
+    settings = get_settings()
+    interval_sec = max(5.0, float(getattr(settings, "step_heartbeat_interval_sec", 20) or 20))
+    stop_event = threading.Event()
+
+    try:
+        heartbeat_running = _write_blocking_step_heartbeat(
+            step_id=step.id,
+            detail=detail,
+            progress=progress,
+        )
+    except Exception:
+        logger.debug("Initial blocking step heartbeat failed step_id=%s", step.id, exc_info=True)
+        heartbeat_running = True
+
+    if not heartbeat_running:
+        yield
+        return
+
+    def _heartbeat_loop() -> None:
+        while not stop_event.wait(interval_sec):
+            try:
+                still_running = _write_blocking_step_heartbeat(
+                    step_id=step.id,
+                    detail=detail,
+                    progress=progress,
+                )
+            except Exception:
+                logger.debug("Blocking step heartbeat failed step_id=%s", step.id, exc_info=True)
+                continue
+            if not still_running:
+                return
+
+    thread = threading.Thread(
+        target=_heartbeat_loop,
+        name=f"roughcut-step-heartbeat-{step.step_name}-{step.id}",
+        daemon=True,
+    )
+    thread.start()
+    try:
+        yield
+    finally:
+        stop_event.set()
+        thread.join(timeout=1.0)
+
+
 def _resolve_transcribe_runtime_timeout_seconds(settings: object, *, audio_path: Path | None = None) -> float:
     timeout = getattr(settings, "transcribe_runtime_timeout_sec", None)
     if timeout is None:
@@ -2773,6 +2860,107 @@ def _build_fallback_canonical_words(segment: dict[str, Any]) -> list[dict[str, A
     return words
 
 
+def _projected_word_compact_length(text: str) -> int:
+    return len(re.sub(r"\s+", "", str(text or "").strip()))
+
+
+def _projected_word_time_bounds(word: dict[str, Any]) -> tuple[float, float]:
+    try:
+        start = float(word.get("start", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        start = 0.0
+    try:
+        end = float(word.get("end", start) or start)
+    except (TypeError, ValueError):
+        end = start
+    return start, max(start, end)
+
+
+def _projected_word_needs_forced_split(
+    word: dict[str, Any],
+    *,
+    max_chars: int,
+    max_duration: float,
+) -> bool:
+    text = str(word.get("word") or "").strip()
+    if not text:
+        return False
+    compact_len = _projected_word_compact_length(text)
+    if compact_len <= 1:
+        return False
+    start, end = _projected_word_time_bounds(word)
+    duration = max(0.0, end - start)
+    hard_char_limit = max(max_chars + 4, 24)
+    hard_duration_limit = max(float(max_duration) + 2.0, 7.0)
+    return compact_len > hard_char_limit or (
+        duration > hard_duration_limit and compact_len > max(8, int(max_chars * 0.35))
+    )
+
+
+def _split_overlong_projected_word(
+    word: dict[str, Any],
+    *,
+    max_chars: int,
+    max_duration: float,
+) -> list[dict[str, Any]]:
+    text = str(word.get("word") or "").strip()
+    if not _projected_word_needs_forced_split(word, max_chars=max_chars, max_duration=max_duration):
+        return [word]
+    tokens = tokenize_alignment_text(text)
+    if len(tokens) <= 1:
+        return [word]
+
+    start, end = _projected_word_time_bounds(word)
+    duration = max(0.0, end - start)
+    weights = [max(0.5, float(_projected_word_compact_length(token))) for token in tokens]
+    total_weight = sum(weights) or float(len(tokens))
+    cursor = start
+    try:
+        base_word_index = int(word.get("word_index", 0) or 0)
+    except (TypeError, ValueError):
+        base_word_index = 0
+    split_words: list[dict[str, Any]] = []
+    for token_index, (token, weight) in enumerate(zip(tokens, weights)):
+        token_end = end if token_index == len(tokens) - 1 else cursor + duration * weight / total_weight
+        alignment = dict(word.get("alignment") or {})
+        alignment["projection_split"] = {
+            "source": "overlong_canonical_word",
+            "token_index": token_index,
+            "token_count": len(tokens),
+        }
+        split_words.append(
+            {
+                **word,
+                "word": token,
+                "start": round(cursor, 3),
+                "end": round(max(cursor, token_end), 3),
+                "word_index": base_word_index * 1000 + token_index,
+                "alignment": alignment,
+            }
+        )
+        cursor = token_end
+    return split_words
+
+
+def _normalize_projected_words_for_segmentation(
+    projected_words: list[dict[str, Any]],
+    *,
+    split_profile: dict[str, Any],
+) -> list[dict[str, Any]]:
+    max_chars = int(split_profile.get("max_chars") or 30)
+    max_duration = float(split_profile.get("max_duration") or 5.0)
+    normalized: list[dict[str, Any]] = []
+    for word in projected_words:
+        normalized.extend(
+            _split_overlong_projected_word(
+                word,
+                max_chars=max_chars,
+                max_duration=max_duration,
+            )
+        )
+    return normalized
+
+
 def _project_canonical_transcript_to_timeline(
     canonical_transcript_layer: dict[str, Any] | None,
     keep_segments: list[dict[str, Any]],
@@ -2839,6 +3027,7 @@ def _project_canonical_transcript_to_timeline(
             int(word.get("word_index", 0) or 0),
         )
     )
+    projected_words = _normalize_projected_words_for_segmentation(projected_words, split_profile=split_profile)
     projected_text = "".join(str(word.get("word") or "").strip() for word in projected_words)
     projected_segment = SimpleNamespace(
         segment_index=0,
@@ -4861,11 +5050,16 @@ async def run_subtitle_postprocess(job_id: str) -> dict:
         )
 
         split_started = time.perf_counter()
-        segmentation_result = segment_subtitles(
-            segments,
-            max_chars=int(split_profile["max_chars"]),
-            max_duration=float(split_profile["max_duration"]),
-        )
+        with _maintain_blocking_step_heartbeat(
+            step,
+            detail="正在生成字幕切分",
+            progress=0.45,
+        ):
+            segmentation_result = segment_subtitles(
+                segments,
+                max_chars=int(split_profile["max_chars"]),
+                max_duration=float(split_profile["max_duration"]),
+            )
         entries = segmentation_result.entries
         _profile_artifact, content_profile = await _load_preferred_downstream_profile(session, job_id=job.id)
         source_context = await _load_content_profile_source_context(session, job_id=job.id)
@@ -4905,14 +5099,21 @@ async def run_subtitle_postprocess(job_id: str) -> dict:
                 ),
                 progress=0.55,
             )
-            entries, llm_boundary_refine = await _maybe_refine_subtitle_boundaries_with_llm(
-                job=job,
-                step=step,
-                entries=entries,
-                segmentation_analysis=segmentation_analysis_payload,
-                split_profile=split_profile,
-                content_profile=content_profile,
-            )
+            with _maintain_blocking_step_heartbeat(
+                step,
+                detail=(
+                    f"正在复判 {segmentation_result.analysis.low_confidence_window_count} 个低置信度断句窗口"
+                ),
+                progress=0.55,
+            ):
+                entries, llm_boundary_refine = await _maybe_refine_subtitle_boundaries_with_llm(
+                    job=job,
+                    step=step,
+                    entries=entries,
+                    segmentation_analysis=segmentation_analysis_payload,
+                    split_profile=split_profile,
+                    content_profile=content_profile,
+                )
             segmentation_result.analysis = analyze_subtitle_segmentation(entries)
             segmentation_result.analysis.provider_word_segment_count = segmentation_input_stats["provider_word_segment_count"]
             segmentation_result.analysis.synthetic_word_segment_count = segmentation_input_stats["synthetic_word_segment_count"]
@@ -4920,143 +5121,149 @@ async def run_subtitle_postprocess(job_id: str) -> dict:
             segmentation_result.analysis.text_only_segment_count = segmentation_input_stats["text_only_segment_count"]
             segmentation_result.analysis.global_word_segmentation_used = segmentation_input_stats["global_word_segmentation_used"]
         split_elapsed = time.perf_counter() - split_started
+        subtitle_generation_detail = (
+            f"按{split_profile['orientation']}节奏生成字幕 {len(entries)} 条，"
+            f"每条最多 {int(split_profile['max_chars'])} 字 / {float(split_profile['max_duration']):.1f}s"
+            + (
+                f"，已使用 {int(segmentation_result.analysis.synthetic_word_segment_count)} 段合成词级锚点"
+                if int(segmentation_result.analysis.synthetic_word_segment_count) > 0
+                else ""
+            )
+            + (
+                f"，另有 {int(segmentation_result.analysis.untrusted_word_segment_count) + int(segmentation_result.analysis.text_only_segment_count)} 段文本回退对齐"
+                if (
+                    int(segmentation_result.analysis.untrusted_word_segment_count)
+                    + int(segmentation_result.analysis.text_only_segment_count)
+                ) > 0
+                else ""
+            )
+        )
         await _set_step_progress(
             session,
             step,
-            detail=(
-                f"按{split_profile['orientation']}节奏生成字幕 {len(entries)} 条，"
-                f"每条最多 {int(split_profile['max_chars'])} 字 / {float(split_profile['max_duration']):.1f}s"
-                + (
-                    f"，已使用 {int(segmentation_result.analysis.synthetic_word_segment_count)} 段合成词级锚点"
-                    if int(segmentation_result.analysis.synthetic_word_segment_count) > 0
-                    else ""
-                )
-                + (
-                    f"，另有 {int(segmentation_result.analysis.untrusted_word_segment_count) + int(segmentation_result.analysis.text_only_segment_count)} 段文本回退对齐"
-                    if (
-                        int(segmentation_result.analysis.untrusted_word_segment_count)
-                        + int(segmentation_result.analysis.text_only_segment_count)
-                    ) > 0
-                    else ""
-                )
-            ),
+            detail=subtitle_generation_detail,
             progress=0.7,
+            metadata_updates={
+                "subtitle_segmentation": segmentation_result.analysis.as_dict(),
+                "subtitle_boundary_refine": llm_boundary_refine,
+            },
         )
-        step_metadata = dict(step.metadata_ or {})
-        step_metadata["subtitle_segmentation"] = segmentation_result.analysis.as_dict()
-        step_metadata["subtitle_boundary_refine"] = llm_boundary_refine
-        step.metadata_ = step_metadata
         save_started = time.perf_counter()
-        items = await save_subtitle_items(job.id, entries, session)
-        glossary_result = await session.execute(select(GlossaryTerm))
-        glossary_terms = glossary_result.scalars().all()
-        subject_domain = _infer_subject_domain_for_memory(
-            workflow_template=job.workflow_template,
-            subtitle_items=[
-                {
-                    "text_raw": item.text_raw,
-                    "text_norm": item.text_norm,
-                    "text_final": item.text_final,
-                }
-                for item in items
-            ],
-            content_profile=content_profile,
-            source_name=job.source_name,
-        )
-        user_memory = await load_content_profile_user_memory(
-            session,
-            subject_domain=subject_domain,
-        )
-        effective_glossary_terms = _build_effective_glossary_terms(
-            glossary_terms=glossary_terms,
-            workflow_template=job.workflow_template,
-            content_profile=content_profile,
-            subtitle_items=[
-                {
-                    "text_raw": item.text_raw,
-                    "text_norm": item.text_norm,
-                    "text_final": item.text_final,
-                    "source_name": job.source_name,
-                }
-                for item in items
-            ],
-            source_name=job.source_name,
-            subject_domain=subject_domain,
-        )
-        review_memory = build_subtitle_review_memory(
-            workflow_template=job.workflow_template,
-            subject_domain=subject_domain,
-            source_name=job.source_name,
-            glossary_terms=effective_glossary_terms,
-            user_memory=user_memory,
-            recent_subtitles=[
-                {
-                    "text_raw": item.text_raw,
-                    "text_norm": item.text_norm,
-                    "text_final": item.text_final,
-                    "source_name": job.source_name,
-                }
-                for item in items
-            ],
-            content_profile=content_profile,
-            include_recent_terms=False,
-            include_recent_examples=False,
-        )
-        polished_count = await polish_subtitle_items(
-            items,
-            content_profile=content_profile or {"workflow_template": job.workflow_template or "unboxing_standard"},
-            glossary_terms=effective_glossary_terms,
-            review_memory=review_memory,
-            allow_llm=False,
-        )
-        semantic_cleanup_count = _apply_subtitle_semantic_cleanup(
-            items,
-            job=job,
-            content_profile=content_profile,
-            review_memory=review_memory,
-        )
-        polished_count += semantic_cleanup_count
-        subtitle_quality_report = build_subtitle_quality_report_from_items(
-            subtitle_items=items,
-            source_name=job.source_name,
-            content_profile=content_profile,
-        )
-        subtitle_projection_layer = build_subtitle_projection_layer(
-            items,
-            segmentation_analysis=segmentation_result.analysis,
-            split_profile=split_profile,
-            boundary_refine=llm_boundary_refine,
-            quality_report=subtitle_quality_report,
-            projection_basis="display_baseline",
-            transcript_layer="transcript_fact",
-        )
-        architecture_artifacts = build_subtitle_architecture_artifacts(
-            job_id=job.id,
-            step_id=step.id,
-            transcript_fact_layer=transcript_fact_layer,
-            canonical_transcript_layer=None,
-            subtitle_projection_layer=subtitle_projection_layer,
-        )
-        if transcript_fact_artifact is None:
-            session.add(architecture_artifacts[0])
-        session.add(architecture_artifacts[1])
-        session.add(
-            Artifact(
+        with _maintain_blocking_step_heartbeat(
+            step,
+            detail="正在保存字幕并生成质量报告",
+            progress=0.82,
+        ):
+            items = await save_subtitle_items(job.id, entries, session)
+            glossary_result = await session.execute(select(GlossaryTerm))
+            glossary_terms = glossary_result.scalars().all()
+            subject_domain = _infer_subject_domain_for_memory(
+                workflow_template=job.workflow_template,
+                subtitle_items=[
+                    {
+                        "text_raw": item.text_raw,
+                        "text_norm": item.text_norm,
+                        "text_final": item.text_final,
+                    }
+                    for item in items
+                ],
+                content_profile=content_profile,
+                source_name=job.source_name,
+            )
+            user_memory = await load_content_profile_user_memory(
+                session,
+                subject_domain=subject_domain,
+            )
+            effective_glossary_terms = _build_effective_glossary_terms(
+                glossary_terms=glossary_terms,
+                workflow_template=job.workflow_template,
+                content_profile=content_profile,
+                subtitle_items=[
+                    {
+                        "text_raw": item.text_raw,
+                        "text_norm": item.text_norm,
+                        "text_final": item.text_final,
+                        "source_name": job.source_name,
+                    }
+                    for item in items
+                ],
+                source_name=job.source_name,
+                subject_domain=subject_domain,
+            )
+            review_memory = build_subtitle_review_memory(
+                workflow_template=job.workflow_template,
+                subject_domain=subject_domain,
+                source_name=job.source_name,
+                glossary_terms=effective_glossary_terms,
+                user_memory=user_memory,
+                recent_subtitles=[
+                    {
+                        "text_raw": item.text_raw,
+                        "text_norm": item.text_norm,
+                        "text_final": item.text_final,
+                        "source_name": job.source_name,
+                    }
+                    for item in items
+                ],
+                content_profile=content_profile,
+                include_recent_terms=False,
+                include_recent_examples=False,
+            )
+            polished_count = await polish_subtitle_items(
+                items,
+                content_profile=content_profile or {"workflow_template": job.workflow_template or "unboxing_standard"},
+                glossary_terms=effective_glossary_terms,
+                review_memory=review_memory,
+                allow_llm=False,
+            )
+            semantic_cleanup_count = _apply_subtitle_semantic_cleanup(
+                items,
+                job=job,
+                content_profile=content_profile,
+                review_memory=review_memory,
+            )
+            polished_count += semantic_cleanup_count
+            subtitle_quality_report = build_subtitle_quality_report_from_items(
+                subtitle_items=items,
+                source_name=job.source_name,
+                content_profile=content_profile,
+            )
+            subtitle_projection_layer = build_subtitle_projection_layer(
+                items,
+                segmentation_analysis=segmentation_result.analysis,
+                split_profile=split_profile,
+                boundary_refine=llm_boundary_refine,
+                quality_report=subtitle_quality_report,
+                projection_basis="display_baseline",
+                transcript_layer="transcript_fact",
+            )
+            architecture_artifacts = build_subtitle_architecture_artifacts(
                 job_id=job.id,
                 step_id=step.id,
-                artifact_type=ARTIFACT_TYPE_SUBTITLE_QUALITY_REPORT,
-                data_json=subtitle_quality_report,
+                transcript_fact_layer=transcript_fact_layer,
+                canonical_transcript_layer=None,
+                subtitle_projection_layer=subtitle_projection_layer,
             )
-        )
-        step_metadata = dict(step.metadata_ or {})
-        step_metadata["subtitle_quality_report"] = {
-            "score": subtitle_quality_report.get("score"),
-            "blocking": bool(subtitle_quality_report.get("blocking")),
-            "blocking_reasons": list(subtitle_quality_report.get("blocking_reasons") or []),
-            "warning_reasons": list(subtitle_quality_report.get("warning_reasons") or []),
-        }
-        step.metadata_ = step_metadata
-        save_elapsed = time.perf_counter() - save_started
+            if transcript_fact_artifact is None:
+                session.add(architecture_artifacts[0])
+            session.add(architecture_artifacts[1])
+            session.add(
+                Artifact(
+                    job_id=job.id,
+                    step_id=step.id,
+                    artifact_type=ARTIFACT_TYPE_SUBTITLE_QUALITY_REPORT,
+                    data_json=subtitle_quality_report,
+                )
+            )
+            step_metadata = dict(step.metadata_ or {})
+            step_metadata["subtitle_quality_report"] = {
+                "score": subtitle_quality_report.get("score"),
+                "blocking": bool(subtitle_quality_report.get("blocking")),
+                "blocking_reasons": list(subtitle_quality_report.get("blocking_reasons") or []),
+                "warning_reasons": list(subtitle_quality_report.get("warning_reasons") or []),
+            }
+            step.metadata_ = step_metadata
+            save_elapsed = time.perf_counter() - save_started
         total_elapsed = time.perf_counter() - started
         await _set_step_progress(
             session,

@@ -336,6 +336,29 @@ def test_manual_editor_can_open_when_review_gate_pending_after_edit_plan() -> No
     assert _manual_editor_apply_conflict_detail(steps) is None
 
 
+def test_manual_editor_prerequisites_ignore_optional_creative_steps_before_edit_plan() -> None:
+    steps = [
+        SimpleNamespace(step_name="probe", status="done"),
+        SimpleNamespace(step_name="extract_audio", status="done"),
+        SimpleNamespace(step_name="transcribe", status="done"),
+        SimpleNamespace(step_name="subtitle_postprocess", status="done"),
+        SimpleNamespace(step_name="subtitle_term_resolution", status="done"),
+        SimpleNamespace(step_name="subtitle_consistency_review", status="done"),
+        SimpleNamespace(step_name="glossary_review", status="done"),
+        SimpleNamespace(step_name="transcript_review", status="done"),
+        SimpleNamespace(step_name="subtitle_translation", status="done"),
+        SimpleNamespace(step_name="content_profile", status="done"),
+        SimpleNamespace(step_name="summary_review", status="done"),
+        SimpleNamespace(step_name="ai_director", status="skipped"),
+        SimpleNamespace(step_name="avatar_commentary", status="pending"),
+        SimpleNamespace(step_name="edit_plan", status="done"),
+        SimpleNamespace(step_name="render", status="pending"),
+    ]
+
+    assert _manual_editor_prerequisite_detail(steps) is None
+    assert _manual_editor_apply_conflict_detail(steps) is None
+
+
 def test_manual_editor_save_blocks_when_render_is_running() -> None:
     steps = [
         SimpleNamespace(step_name="probe", status="done"),

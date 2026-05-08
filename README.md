@@ -170,7 +170,7 @@ pnpm docker:runtime:auto-up
 数字人相关服务现在默认走独立共享服务，不再依赖 RoughCut 内部 Docker：
 
 - HeyGem: `http://127.0.0.1:49202`
-- IndexTTS2 accel 主实例: `http://127.0.0.1:49204`
+- 语音克隆默认走 RunningHub；本地 `49204` 仅在显式启用 IndexTTS2 时使用
 - HeyGem 数据根: `F:/roughcut_outputs/heygem`
 - 参考音频缓存目录: `F:/roughcut_outputs/voice_refs`
 
@@ -212,13 +212,14 @@ AVATAR_API_BASE_URL=http://127.0.0.1:49202
 AVATAR_TRAINING_API_BASE_URL=http://127.0.0.1:49204
 HEYGEM_SHARED_ROOT=F:/roughcut_outputs/heygem
 HEYGEM_VOICE_ROOT=F:/roughcut_outputs/voice_refs
-VOICE_PROVIDER=indextts2
-VOICE_CLONE_API_BASE_URL=http://127.0.0.1:49204
+VOICE_PROVIDER=runninghub
+VOICE_CLONE_API_BASE_URL=https://www.runninghub.cn
+VOICE_CLONE_VOICE_ID=2003864334474354690
 ```
 
 `RENDER_VIDEO_ENCODER` 当前支持 `auto`、`libx264`、`h264_qsv`、`h264_amf`、`h264_nvenc`。`auto` 会优先选择 Intel `QSV` 或 AMD `AMF` 这类集显编码方案，只有集显不可用时才回退到 `NVENC`，最后才是 `libx264`。
 
-其中 `49204` 当前约定为独立 `IndexTTS2 accel` 正式入口。不要再并行常驻 `baseline / sage / accel` 多个实例去争抢同一块 GPU。
+语音克隆默认走 RunningHub；只有显式设置 `VOICE_PROVIDER=indextts2` 和 `INDEXTTS2_API_PORT` 时，本地启动脚本才会探测 IndexTTS2。
 
 MiniMax 默认配置：
 
@@ -233,7 +234,7 @@ OpenAI 兼容替代配置：
 ```env
 OPENAI_API_KEY=sk-...
 REASONING_PROVIDER=openai
-REASONING_MODEL=gpt-5.4
+REASONING_MODEL=gpt-5.5
 TRANSCRIPTION_PROVIDER=openai
 TRANSCRIPTION_MODEL=gpt-4o-transcribe
 ```
@@ -607,8 +608,8 @@ curl http://localhost:8000/api/v1/jobs/{job_id}/report
 | `OUTPUT_DIR` | `F:/roughcut_outputs/output` | 成片输出目录 |
 | `OUTPUT_NAME_PATTERN` | `{date}_{stem}` | 输出文件名模板 |
 | `RENDER_DEBUG_DIR` | `F:/roughcut_outputs/render-debug` | render 调试产物目录 |
-| `REASONING_PROVIDER` | `minimax` | 推理后端：`openai` / `anthropic` / `minimax` / `ollama` |
-| `REASONING_MODEL` | `MiniMax-M2.7-highspeed` | 推理模型名称 |
+| `REASONING_PROVIDER` | `openai` | 推理后端：`openai` / `anthropic` / `minimax` / `ollama` |
+| `REASONING_MODEL` | `gpt-5.5` | 推理模型名称 |
 | `MULTIMODAL_FALLBACK_PROVIDER` | `ollama` | 主模型视觉失败时的本地备份 provider |
 | `MULTIMODAL_FALLBACK_MODEL` | `""` | 主模型视觉失败时的本地备份视觉模型（空 = 自动探测） |
 | `SEARCH_PROVIDER` | `auto` | 搜索后端：优先主模型搜索桥接，失败回退本地搜索 |

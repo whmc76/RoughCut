@@ -3,6 +3,7 @@ from __future__ import annotations
 import uuid
 
 import pytest
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from roughcut.creative.modes import (
     build_active_enhancement_mode_options,
@@ -12,6 +13,7 @@ from roughcut.creative.modes import (
 )
 import roughcut.pipeline.orchestrator as orchestrator
 from roughcut.db.models import Job, JobStep
+from roughcut.db.session import Base
 from roughcut.pipeline.steps import _drop_soft_content_understanding_blockers, _finalize_content_profile_review_state
 from roughcut.review.content_profile import assess_content_profile_automation
 
@@ -267,6 +269,105 @@ async def test_smart_assist_manual_editor_apply_releases_render_dispatch() -> No
 
     assert paused is False
     assert job.status == "processing"
+
+
+@pytest.mark.asyncio
+async def test_edit_plan_does_not_wait_for_optional_creative_steps() -> None:
+    job = Job(id=uuid.uuid4(), source_path="source.mp4", source_name="source.mp4", status="processing")
+    steps = [
+        JobStep(job_id=job.id, step_name="probe", status="done"),
+        JobStep(job_id=job.id, step_name="extract_audio", status="done"),
+        JobStep(job_id=job.id, step_name="transcribe", status="done"),
+        JobStep(job_id=job.id, step_name="subtitle_postprocess", status="done"),
+        JobStep(job_id=job.id, step_name="subtitle_term_resolution", status="done"),
+        JobStep(job_id=job.id, step_name="subtitle_consistency_review", status="done"),
+        JobStep(job_id=job.id, step_name="glossary_review", status="done"),
+        JobStep(job_id=job.id, step_name="transcript_review", status="done"),
+        JobStep(job_id=job.id, step_name="subtitle_translation", status="done"),
+        JobStep(job_id=job.id, step_name="content_profile", status="done"),
+        JobStep(job_id=job.id, step_name="summary_review", status="done"),
+        JobStep(job_id=job.id, step_name="ai_director", status="skipped"),
+        JobStep(job_id=job.id, step_name="avatar_commentary", status="pending"),
+        JobStep(job_id=job.id, step_name="edit_plan", status="pending"),
+    ]
+    session = _FakeStepSession(job, steps)
+
+    assert await orchestrator._is_step_ready(steps[-1], session) is True
+
+
+def test_completed_summary_review_reconciles_stale_content_profile_failure() -> None:
+    content_step = JobStep(
+        job_id=uuid.uuid4(),
+        step_name="content_profile",
+        status="failed",
+        attempt=3,
+        error_message="步骤 content_profile 已达到最大重试次数 3，不再自动重试。",
+        metadata_={"detail": "旧失败状态"},
+    )
+    review_step = JobStep(job_id=content_step.job_id, step_name="summary_review", status="done")
+
+    orchestrator._reconcile_completed_summary_review_step(
+        {
+            "content_profile": content_step,
+            "summary_review": review_step,
+        }
+    )
+
+    assert content_step.status == "done"
+    assert content_step.error_message is None
+    assert content_step.metadata_["progress"] == 1.0
+
+
+@pytest.mark.asyncio
+async def test_failed_job_with_completed_summary_review_recovers_for_edit_plan_dispatch() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with session_factory() as session:
+            job = Job(
+                id=uuid.uuid4(),
+                source_path="source.mp4",
+                source_name="source.mp4",
+                status="failed",
+                error_message="content_profile 已失败",
+            )
+            steps = [
+                JobStep(job_id=job.id, step_name="probe", status="done"),
+                JobStep(job_id=job.id, step_name="extract_audio", status="done"),
+                JobStep(job_id=job.id, step_name="transcribe", status="done"),
+                JobStep(job_id=job.id, step_name="subtitle_postprocess", status="done"),
+                JobStep(job_id=job.id, step_name="subtitle_term_resolution", status="done"),
+                JobStep(job_id=job.id, step_name="subtitle_consistency_review", status="done"),
+                JobStep(job_id=job.id, step_name="glossary_review", status="done"),
+                JobStep(job_id=job.id, step_name="transcript_review", status="done"),
+                JobStep(job_id=job.id, step_name="subtitle_translation", status="done"),
+                JobStep(
+                    job_id=job.id,
+                    step_name="content_profile",
+                    status="failed",
+                    attempt=3,
+                    error_message="步骤 content_profile 已达到最大重试次数 3，不再自动重试。",
+                ),
+                JobStep(job_id=job.id, step_name="summary_review", status="done"),
+                JobStep(job_id=job.id, step_name="edit_plan", status="pending"),
+            ]
+            session.add(job)
+            session.add_all(steps)
+            await session.commit()
+
+            await orchestrator._update_job_statuses(session)
+            await session.commit()
+
+            assert job.status == "processing"
+            assert job.error_message is None
+            content_step = next(step for step in steps if step.step_name == "content_profile")
+            assert content_step.status == "done"
+            assert content_step.error_message is None
+    finally:
+        await engine.dispose()
 
 
 @pytest.mark.asyncio

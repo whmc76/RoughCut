@@ -25,6 +25,7 @@ app = FastAPI(title="RoughCut CosyVoice3 TTS")
 cosyvoice: Any | None = None
 model_id = ""
 END_OF_PROMPT = "<|endofprompt|>"
+SYSTEM_PROMPT = "You are a helpful assistant."
 
 
 def _bool(value: Any) -> bool:
@@ -61,6 +62,27 @@ def _require_end_of_prompt(value: str, field_name: str) -> None:
             status_code=400,
             detail=f"CosyVoice3 {field_name} must include {END_OF_PROMPT}",
         )
+
+
+def _strip_prompt_format(value: str) -> str:
+    cleaned = str(value or "").replace(END_OF_PROMPT, "").strip()
+    if cleaned.startswith(SYSTEM_PROMPT):
+        cleaned = cleaned[len(SYSTEM_PROMPT):].strip()
+    return cleaned
+
+
+def _normalize_zero_shot_prompt_text(value: str) -> str:
+    body = _strip_prompt_format(value)
+    if not body:
+        return ""
+    return f"{SYSTEM_PROMPT}{END_OF_PROMPT}{body}"
+
+
+def _normalize_instruct_text(value: str) -> str:
+    body = _strip_prompt_format(value)
+    if not body:
+        return ""
+    return f"{SYSTEM_PROMPT} {body}{END_OF_PROMPT}"
 
 
 def _audio_to_wav_response(chunks: Iterable[dict[str, Any]], sample_rate: int) -> Response:
@@ -163,7 +185,7 @@ def inference(
                 raise HTTPException(status_code=400, detail="prompt_wav is required for zero_shot mode")
             if not str(prompt_text or "").strip():
                 raise HTTPException(status_code=400, detail="prompt_text is required for zero_shot mode")
-            _require_end_of_prompt(prompt_text, "prompt_text")
+            prompt_text = _normalize_zero_shot_prompt_text(prompt_text)
             call = model.inference_zero_shot
             chunks = call(resolved_text, prompt_text, prompt_path, zero_shot_spk_id=zero_shot_spk_id, **kwargs)
         elif resolved_mode == "cross_lingual":
@@ -176,7 +198,7 @@ def inference(
                 raise HTTPException(status_code=400, detail="prompt_wav is required for instruct2 mode")
             if not str(instruct_text or "").strip():
                 raise HTTPException(status_code=400, detail="instruct_text is required for instruct2 mode")
-            _require_end_of_prompt(instruct_text, "instruct_text")
+            instruct_text = _normalize_instruct_text(instruct_text)
             call = getattr(model, "inference_instruct2", None)
             if call is None:
                 raise HTTPException(status_code=400, detail="current model does not support instruct2")

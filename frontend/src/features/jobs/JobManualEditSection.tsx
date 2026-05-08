@@ -916,6 +916,9 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
     () => projection.remapped.find((subtitle) => subtitle.index === selectedSubtitleIndex) ?? activeSubtitle ?? projection.remapped[0] ?? null,
     [activeSubtitle, projection.remapped, selectedSubtitleIndex],
   );
+  const previewSubtitleText = activeSubtitle
+    ? (editingSubtitleIndex === activeSubtitle.index ? currentSubtitleDraftText : subtitleText(activeSubtitle)).trim()
+    : "";
   const subtitleOverrides = useMemo(
     () =>
       Object.entries(subtitleDrafts)
@@ -2456,6 +2459,11 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
                           setIsPreviewPlaying(false);
                         }}
                       />
+                      {previewSubtitleText ? (
+                        <div className="manual-editor-video-subtitle" aria-live="polite">
+                          {previewSubtitleText}
+                        </div>
+                      ) : null}
                     </div>
                     {previewVideoLoadError ? (
                       <div className="manual-editor-video-error" onClick={(event) => event.stopPropagation()}>

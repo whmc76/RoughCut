@@ -7,6 +7,7 @@ type JobCreateModalProps = {
   open: boolean;
   title?: string;
   onClose: () => void;
+  actions?: ReactNode;
   children: ReactNode;
 };
 
@@ -14,6 +15,7 @@ export function JobCreateModal({
   open,
   title = "创建任务",
   onClose,
+  actions,
   children,
 }: JobCreateModalProps) {
   const { t } = useI18n();
@@ -45,14 +47,17 @@ export function JobCreateModal({
         aria-label={title}
         onClick={(event) => event.stopPropagation()}
       >
-        <button
-          className="button ghost floating-modal-close"
-          type="button"
-          onClick={onClose}
-          aria-label={t("jobs.modal.closeAria")}
-        >
-          {t("jobs.modal.close")}
-        </button>
+        <div className="floating-modal-corner-actions">
+          <button
+            className="button ghost floating-modal-close"
+            type="button"
+            onClick={onClose}
+            aria-label={t("jobs.modal.closeAria")}
+          >
+            {t("jobs.modal.close")}
+          </button>
+          {actions}
+        </div>
         {children}
       </div>
     </div>

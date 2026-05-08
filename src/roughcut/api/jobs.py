@@ -172,6 +172,7 @@ STEP_LABELS = {
 }
 
 STEP_ORDER = {step_name: index for index, step_name in enumerate(PIPELINE_STEPS)}
+MANUAL_EDITOR_OPTIONAL_PREREQUISITE_STEPS = {"ai_director", "avatar_commentary"}
 _LIST_PREVIEW_ARTIFACT_TYPES = (
     "content_profile_final",
     "content_profile",
@@ -1472,6 +1473,8 @@ def _manual_editor_prerequisite_detail(steps: list[JobStep] | None) -> str | Non
     if edit_plan_step is not None and edit_plan_step.status == "done":
         return None
     for step_name in PIPELINE_STEPS:
+        if step_name in MANUAL_EDITOR_OPTIONAL_PREREQUISITE_STEPS:
+            continue
         step = step_map.get(step_name)
         if step_name == "edit_plan":
             if step is None or step.status != "done":
@@ -2205,8 +2208,33 @@ async def _load_latest_timeline_by_type(
 _MANUAL_EDITOR_REQUIRED_STEPS = tuple(
     step_name
     for step_name in PIPELINE_STEPS
-    if PIPELINE_STEPS.index(step_name) <= PIPELINE_STEPS.index("edit_plan")
+    if (
+        PIPELINE_STEPS.index(step_name) <= PIPELINE_STEPS.index("edit_plan")
+        and step_name not in MANUAL_EDITOR_OPTIONAL_PREREQUISITE_STEPS
+    )
 )
+_MANUAL_EDITOR_REQUIRED_OUTPUT_LABELS = {
+    "source_media": "源视频",
+    "media_meta": "媒体信息",
+    "editorial_timeline": "剪辑时间线",
+    "render_plan": "渲染计划",
+}
+_MANUAL_EDITOR_REQUIRED_OUTPUT_DETAILS = {
+    "source_media": "源视频文件可用于浏览器预览。",
+    "media_meta": "媒体时长和基础信息已写入。",
+    "editorial_timeline": "剪辑时间线已写入数据库。",
+    "render_plan": "渲染计划已写入数据库。",
+}
+
+
+def _manual_editor_missing_output_detail(missing: list[str]) -> str:
+    labels = [
+        _MANUAL_EDITOR_REQUIRED_OUTPUT_LABELS.get(item, item)
+        for item in missing
+    ]
+    if not labels:
+        return "正在生成手动调整所需信息。"
+    return f"已完成上游步骤，仍在等待{'、'.join(labels)}写入完成。"
 
 
 async def _build_manual_editor_readiness(
@@ -2217,7 +2245,7 @@ async def _build_manual_editor_readiness(
     steps = _ordered_steps(list(job.steps or []))
     step_map = {step.step_name: step for step in steps}
     readiness_steps: list[ManualEditorReadinessStepOut] = []
-    required_done = 0
+    progress_units = 0.0
     current_step: str | None = None
     failed_step: JobStep | None = None
 
@@ -2230,9 +2258,13 @@ async def _build_manual_editor_readiness(
         if isinstance(progress_value, (int, float)):
             progress = max(0.0, min(1.0, float(progress_value)))
         if status_value in {"done", "skipped"}:
-            required_done += 1
+            progress_units += 1.0
         elif current_step is None:
             current_step = step_name
+            if progress is not None:
+                progress_units += progress
+        elif progress is not None and status_value in {"running", "processing", "queued"}:
+            progress_units += progress
         if status_value == "failed" and failed_step is None:
             failed_step = step
         readiness_steps.append(
@@ -2258,7 +2290,34 @@ async def _build_manual_editor_readiness(
     if render_plan_timeline is None:
         missing.append("render_plan")
 
-    progress_percent = round((required_done / max(1, len(_MANUAL_EDITOR_REQUIRED_STEPS))) * 100)
+    output_statuses = [
+        ("source_media", "source_media" not in missing),
+        ("media_meta", "media_meta" not in missing),
+        ("editorial_timeline", "editorial_timeline" not in missing),
+        ("render_plan", "render_plan" not in missing),
+    ]
+    for output_name, is_ready in output_statuses:
+        status_for_output = "done" if is_ready else "pending"
+        if is_ready:
+            progress_units += 1.0
+        elif current_step is None:
+            current_step = output_name
+        readiness_steps.append(
+            ManualEditorReadinessStepOut(
+                step_name=output_name,
+                label=_MANUAL_EDITOR_REQUIRED_OUTPUT_LABELS.get(output_name, output_name),
+                status=status_for_output,
+                progress=1.0 if is_ready else 0.0,
+                detail=(
+                    _MANUAL_EDITOR_REQUIRED_OUTPUT_DETAILS.get(output_name)
+                    if is_ready
+                    else f"正在等待{_MANUAL_EDITOR_REQUIRED_OUTPUT_LABELS.get(output_name, output_name)}生成完成。"
+                ),
+            )
+        )
+
+    readiness_unit_count = len(_MANUAL_EDITOR_REQUIRED_STEPS) + len(output_statuses)
+    progress_percent = round((progress_units / max(1, readiness_unit_count)) * 100)
     status_value = str(job.status or "").strip().lower()
     prerequisite_detail = _manual_editor_prerequisite_detail(steps)
     can_open_editor = prerequisite_detail is None and not missing
@@ -2268,8 +2327,8 @@ async def _build_manual_editor_readiness(
         readiness_status: Literal["preprocessing", "ready", "failed", "blocked"] = "failed"
         failed_metadata = dict(failed_step.metadata_ or {}) if failed_step is not None else {}
         detail = str(
-            failed_metadata.get("detail")
-            or (failed_step.error_message if failed_step is not None else None)
+            (failed_step.error_message if failed_step is not None else None)
+            or failed_metadata.get("detail")
             or job.error_message
             or "手动调整预处理失败。"
         ).strip()
@@ -2280,10 +2339,11 @@ async def _build_manual_editor_readiness(
         readiness_status = "ready"
         detail = "手动调整所需信息已准备完成。"
         progress_percent = 100
+        current_step = None
     else:
         readiness_status = "preprocessing"
-        if missing:
-            detail = "正在生成手动调整所需媒体、字幕、剪辑时间线和渲染计划。"
+        if missing and prerequisite_detail is None:
+            detail = _manual_editor_missing_output_detail(missing)
         else:
             detail = prerequisite_detail or "正在生成手动调整所需信息。"
 

@@ -11,7 +11,7 @@ function normalizeBundledForm(form: SettingsForm): SettingsForm {
   const nextForm = { ...form };
   nextForm.llm_routing_mode = String(nextForm.llm_routing_mode ?? "bundled").trim() || "bundled";
   nextForm.hybrid_analysis_provider = String(nextForm.hybrid_analysis_provider ?? "openai").trim() || "openai";
-  nextForm.hybrid_analysis_model = String(nextForm.hybrid_analysis_model ?? "gpt-5.4").trim() || "gpt-5.4";
+  nextForm.hybrid_analysis_model = String(nextForm.hybrid_analysis_model ?? "gpt-5.5").trim() || "gpt-5.5";
   nextForm.hybrid_analysis_search_mode = String(nextForm.hybrid_analysis_search_mode ?? "entity_gated").trim() || "entity_gated";
   nextForm.hybrid_copy_provider = String(nextForm.hybrid_copy_provider ?? "openai").trim() || "openai";
   nextForm.hybrid_copy_model = String(nextForm.hybrid_copy_model ?? "gpt-5.4-mini").trim() || "gpt-5.4-mini";
@@ -52,7 +52,7 @@ function buildSettingsForm(config: NonNullable<ReturnType<typeof api.getConfig> 
     local_reasoning_model: config.local_reasoning_model,
     local_vision_model: config.local_vision_model,
     hybrid_analysis_provider: config.hybrid_analysis_provider ?? "openai",
-    hybrid_analysis_model: config.hybrid_analysis_model ?? "gpt-5.4",
+    hybrid_analysis_model: config.hybrid_analysis_model ?? "gpt-5.5",
     hybrid_analysis_search_mode: config.hybrid_analysis_search_mode ?? "entity_gated",
     hybrid_copy_provider: config.hybrid_copy_provider ?? "openai",
     hybrid_copy_model: config.hybrid_copy_model ?? "gpt-5.4-mini",

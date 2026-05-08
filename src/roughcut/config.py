@@ -109,12 +109,12 @@ LLM_ROUTING_MODE_VALUES: tuple[str, ...] = ("bundled", "hybrid_performance")
 HYBRID_SEARCH_MODE_VALUES: tuple[str, ...] = ("off", "entity_gated", "follow_provider")
 REASONING_EFFORT_VALUES: tuple[str, ...] = ("minimal", "low", "medium", "high")
 DEFAULT_REASONING_PROVIDER = "openai"
-DEFAULT_REASONING_MODEL = "gpt-5.4"
+DEFAULT_REASONING_MODEL = "gpt-5.5"
 DEFAULT_BACKUP_REASONING_PROVIDER = "openai"
 DEFAULT_BACKUP_REASONING_MODEL = "gpt-5.4-mini"
 DEFAULT_BACKUP_VISION_MODEL = "gpt-5.4-mini"
 DEFAULT_HYBRID_ANALYSIS_PROVIDER = "openai"
-DEFAULT_HYBRID_ANALYSIS_MODEL = "gpt-5.4"
+DEFAULT_HYBRID_ANALYSIS_MODEL = "gpt-5.5"
 DEFAULT_HYBRID_COPY_PROVIDER = "openai"
 DEFAULT_HYBRID_COPY_MODEL = "gpt-5.4-mini"
 DEFAULT_MINIMAX_REASONING_MODEL = "MiniMax-M2.7"
@@ -439,10 +439,10 @@ class Settings(BaseSettings):
     avatar_overlay_scale: float = 0.18
 
     # Voice / AI Director dubbing
-    voice_provider: str = "indextts2"
-    voice_clone_api_base_url: str = "http://127.0.0.1:49204"
+    voice_provider: str = "runninghub"
+    voice_clone_api_base_url: str = "https://www.runninghub.cn"
     voice_clone_api_key: str = ""
-    voice_clone_voice_id: str = ""
+    voice_clone_voice_id: str = "2003864334474354690"
     director_rewrite_strength: float = 0.55
 
     # Publication / browser-agent

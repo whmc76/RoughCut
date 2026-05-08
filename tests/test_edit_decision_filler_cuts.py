@@ -67,6 +67,64 @@ def test_silence_cut_does_not_remove_subtitle_backed_speech() -> None:
     assert not any(segment.type == "remove" and segment.start <= 1.05 and segment.end >= 1.65 for segment in decision.segments)
 
 
+def test_synthetic_transcript_word_timing_does_not_veto_vad_silence() -> None:
+    decision = build_edit_decision(
+        "demo.mp4",
+        duration=4.0,
+        silence_segments=[SilenceSegment(start=1.0, end=2.0)],
+        subtitle_items=[],
+        transcript_segments=[
+            {
+                "index": 0,
+                "start": 0.0,
+                "end": 3.0,
+                "text": "今天先看这个手电",
+                "words": [
+                    {
+                        "word": "手电",
+                        "start": 1.2,
+                        "end": 1.5,
+                        "alignment": {"source": "roughcut_synthesized"},
+                        "raw_payload": {"source": "roughcut_synthesized"},
+                    }
+                ],
+            }
+        ],
+        content_profile=None,
+    )
+
+    assert any(cut["reason"] == "silence" for cut in decision.analysis["accepted_cuts"])
+    assert any("vad_gap_over_synthetic_timing" in signal for cut in decision.analysis["accepted_cuts"] for signal in cut["signals"])
+
+
+def test_trusted_transcript_word_timing_still_protects_speech_from_silence_cut() -> None:
+    decision = build_edit_decision(
+        "demo.mp4",
+        duration=4.0,
+        silence_segments=[SilenceSegment(start=1.0, end=2.0)],
+        subtitle_items=[],
+        transcript_segments=[
+            {
+                "index": 0,
+                "start": 0.0,
+                "end": 3.0,
+                "text": "今天先看这个手电",
+                "words": [
+                    {
+                        "word": "手电",
+                        "start": 1.2,
+                        "end": 1.5,
+                        "alignment": {"source": "provider"},
+                    }
+                ],
+            }
+        ],
+        content_profile=None,
+    )
+
+    assert not any(cut["reason"] == "silence" for cut in decision.analysis["accepted_cuts"])
+
+
 def test_micro_keep_bridge_preserves_transcribed_speech() -> None:
     refined = _refine_segments_for_pacing(
         [

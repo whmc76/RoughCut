@@ -1,6 +1,7 @@
 param(
     [string]$HeygemRepo = "E:/WorkSpace/heygem",
-    [string]$IndexTtsRepo = "E:/WorkSpace/indextts2-service"
+    [string]$IndexTtsRepo = "E:/WorkSpace/indextts2-service",
+    [switch]$IncludeIndexTts
 )
 
 $ErrorActionPreference = "Stop"
@@ -20,14 +21,23 @@ function Start-ComposeRepo {
     docker compose -f $composeFile up -d | Out-Host
 }
 
-foreach ($repo in @($HeygemRepo, $IndexTtsRepo)) {
+foreach ($repo in @($HeygemRepo)) {
     if (-not (Test-Path $repo)) {
         throw "Repository not found: $repo"
     }
 }
+if ($IncludeIndexTts -and -not (Test-Path $IndexTtsRepo)) {
+    throw "Repository not found: $IndexTtsRepo"
+}
 
 Start-ComposeRepo -RepoPath $HeygemRepo -Label "HeyGem"
-Start-ComposeRepo -RepoPath $IndexTtsRepo -Label "IndexTTS2"
+if ($IncludeIndexTts) {
+    Start-ComposeRepo -RepoPath $IndexTtsRepo -Label "IndexTTS2"
+}
 
 Write-Host "HeyGem video API:     http://127.0.0.1:49202"
-Write-Host "IndexTTS2 API:        http://127.0.0.1:49204"
+if ($IncludeIndexTts) {
+    Write-Host "IndexTTS2 API:        http://127.0.0.1:49204"
+} else {
+    Write-Host "IndexTTS2 skipped. Pass -IncludeIndexTts only for local IndexTTS2 workflows."
+}
