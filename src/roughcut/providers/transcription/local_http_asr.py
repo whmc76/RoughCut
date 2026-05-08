@@ -34,7 +34,7 @@ class LocalHTTPASRProvider(TranscriptionProvider):
     _DECODE_LOOP_MIN_TEXT_UNITS = 12
     _DECODE_LOOP_MIN_REPEATS = 4
 
-    def __init__(self, *, model_name: str = "moss-audio-8b-instruct") -> None:
+    def __init__(self, *, model_name: str = "vibevoice-asr-int8") -> None:
         settings = get_settings()
         self._base_url = settings.local_asr_api_base_url.rstrip("/")
         self._transcribe_path = self._normalize_path(settings.local_asr_transcribe_path or "/transcribe")

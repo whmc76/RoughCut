@@ -56,9 +56,9 @@ services:
       OPENAI_API_KEY: ""
       OUTPUT_DIR: /app/data/output
       OUTPUT_NAME_PATTERN: '{date}_{stem}'
-      LOCAL_ASR_API_BASE_URL: http://host.docker.internal:30080
-      LOCAL_ASR_DISPLAY_NAME: MOSS-Audio 8B Instruct
-      LOCAL_ASR_MODEL_NAME: moss-audio-8b-instruct
+      LOCAL_ASR_API_BASE_URL: http://host.docker.internal:6001
+      LOCAL_ASR_DISPLAY_NAME: VibeVoice INT8
+      LOCAL_ASR_MODEL_NAME: vibevoice-asr-int8
       REASONING_MODEL: MiniMax-M2.7-highspeed
       REASONING_PROVIDER: minimax
       REDIS_URL: redis://redis:6379/0
@@ -89,7 +89,7 @@ services:
       TELEGRAM_AGENT_ENABLED: "false"
       TELEGRAM_BOT_CHAT_ID: "7814561115"
       TELEGRAM_BOT_TOKEN: 8718320333:AAHaR16acifX3M5fYmhE2_p0nndcxtM4ceU
-      TRANSCRIPTION_MODEL: moss-audio-8b-instruct
+      TRANSCRIPTION_MODEL: vibevoice-asr-int8
       TRANSCRIPTION_PROVIDER: local_http_asr
       XDG_CACHE_HOME: /app/data/cache
     extra_hosts:
@@ -187,9 +187,9 @@ services:
       OPENAI_API_KEY: ""
       OUTPUT_DIR: /app/data/output
       OUTPUT_NAME_PATTERN: '{date}_{stem}'
-      LOCAL_ASR_API_BASE_URL: http://host.docker.internal:30080
-      LOCAL_ASR_DISPLAY_NAME: MOSS-Audio 8B Instruct
-      LOCAL_ASR_MODEL_NAME: moss-audio-8b-instruct
+      LOCAL_ASR_API_BASE_URL: http://host.docker.internal:6001
+      LOCAL_ASR_DISPLAY_NAME: VibeVoice INT8
+      LOCAL_ASR_MODEL_NAME: vibevoice-asr-int8
       REASONING_MODEL: MiniMax-M2.7-highspeed
       REASONING_PROVIDER: minimax
       REDIS_URL: redis://redis:6379/0
@@ -220,7 +220,7 @@ services:
       TELEGRAM_AGENT_ENABLED: "false"
       TELEGRAM_BOT_CHAT_ID: "7814561115"
       TELEGRAM_BOT_TOKEN: 8718320333:AAHaR16acifX3M5fYmhE2_p0nndcxtM4ceU
-      TRANSCRIPTION_MODEL: moss-audio-8b-instruct
+      TRANSCRIPTION_MODEL: vibevoice-asr-int8
       TRANSCRIPTION_PROVIDER: local_http_asr
       XDG_CACHE_HOME: /app/data/cache
     image: roughcut:local
@@ -316,9 +316,9 @@ services:
       OPENAI_API_KEY: ""
       OUTPUT_DIR: /app/data/output
       OUTPUT_NAME_PATTERN: '{date}_{stem}'
-      LOCAL_ASR_API_BASE_URL: http://host.docker.internal:30080
-      LOCAL_ASR_DISPLAY_NAME: MOSS-Audio 8B Instruct
-      LOCAL_ASR_MODEL_NAME: moss-audio-8b-instruct
+      LOCAL_ASR_API_BASE_URL: http://host.docker.internal:6001
+      LOCAL_ASR_DISPLAY_NAME: VibeVoice INT8
+      LOCAL_ASR_MODEL_NAME: vibevoice-asr-int8
       REASONING_MODEL: MiniMax-M2.7-highspeed
       REASONING_PROVIDER: minimax
       REDIS_URL: redis://redis:6379/0
@@ -349,7 +349,7 @@ services:
       TELEGRAM_AGENT_ENABLED: "false"
       TELEGRAM_BOT_CHAT_ID: "7814561115"
       TELEGRAM_BOT_TOKEN: 8718320333:AAHaR16acifX3M5fYmhE2_p0nndcxtM4ceU
-      TRANSCRIPTION_MODEL: moss-audio-8b-instruct
+      TRANSCRIPTION_MODEL: vibevoice-asr-int8
       TRANSCRIPTION_PROVIDER: local_http_asr
       XDG_CACHE_HOME: /app/data/cache
     extra_hosts:
@@ -491,9 +491,9 @@ services:
       OPENAI_API_KEY: ""
       OUTPUT_DIR: /app/data/output
       OUTPUT_NAME_PATTERN: '{date}_{stem}'
-      LOCAL_ASR_API_BASE_URL: http://host.docker.internal:30080
-      LOCAL_ASR_DISPLAY_NAME: MOSS-Audio 8B Instruct
-      LOCAL_ASR_MODEL_NAME: moss-audio-8b-instruct
+      LOCAL_ASR_API_BASE_URL: http://host.docker.internal:6001
+      LOCAL_ASR_DISPLAY_NAME: VibeVoice INT8
+      LOCAL_ASR_MODEL_NAME: vibevoice-asr-int8
       REASONING_MODEL: MiniMax-M2.7-highspeed
       REASONING_PROVIDER: minimax
       REDIS_URL: redis://redis:6379/0
@@ -524,7 +524,7 @@ services:
       TELEGRAM_AGENT_ENABLED: "false"
       TELEGRAM_BOT_CHAT_ID: "7814561115"
       TELEGRAM_BOT_TOKEN: 8718320333:AAHaR16acifX3M5fYmhE2_p0nndcxtM4ceU
-      TRANSCRIPTION_MODEL: moss-audio-8b-instruct
+      TRANSCRIPTION_MODEL: vibevoice-asr-int8
       TRANSCRIPTION_PROVIDER: local_http_asr
       XDG_CACHE_HOME: /app/data/cache
     extra_hosts:
@@ -621,9 +621,9 @@ services:
       OPENAI_API_KEY: ""
       OUTPUT_DIR: /app/data/output
       OUTPUT_NAME_PATTERN: '{date}_{stem}'
-      LOCAL_ASR_API_BASE_URL: http://host.docker.internal:30080
-      LOCAL_ASR_DISPLAY_NAME: MOSS-Audio 8B Instruct
-      LOCAL_ASR_MODEL_NAME: moss-audio-8b-instruct
+      LOCAL_ASR_API_BASE_URL: http://host.docker.internal:6001
+      LOCAL_ASR_DISPLAY_NAME: VibeVoice INT8
+      LOCAL_ASR_MODEL_NAME: vibevoice-asr-int8
       REASONING_MODEL: MiniMax-M2.7-highspeed
       REASONING_PROVIDER: minimax
       REDIS_URL: redis://redis:6379/0
@@ -654,7 +654,7 @@ services:
       TELEGRAM_AGENT_ENABLED: "false"
       TELEGRAM_BOT_CHAT_ID: "7814561115"
       TELEGRAM_BOT_TOKEN: 8718320333:AAHaR16acifX3M5fYmhE2_p0nndcxtM4ceU
-      TRANSCRIPTION_MODEL: moss-audio-8b-instruct
+      TRANSCRIPTION_MODEL: vibevoice-asr-int8
       TRANSCRIPTION_PROVIDER: local_http_asr
       XDG_CACHE_HOME: /app/data/cache
     extra_hosts:

@@ -100,6 +100,7 @@ TRANSCRIPTION_MODEL_OPTIONS: dict[str, list[str]] = {
         "gpt-4o-mini-transcribe",
     ],
     "local_http_asr": [
+        "vibevoice-asr-int8",
         "moss-audio-8b-instruct",
     ],
 }
@@ -182,10 +183,13 @@ DEFAULT_TRANSCRIPTION_MODELS: dict[str, str] = {
     "funasr": "sensevoice-small",
     "faster_whisper": "large-v3",
     "openai": "gpt-4o-transcribe",
-    "local_http_asr": "moss-audio-8b-instruct",
+    "local_http_asr": "vibevoice-asr-int8",
 }
-LEGACY_LOCAL_HTTP_ASR_MODELS: tuple[str, ...] = ("local-asr-current", "vibevoice-asr-int8")
-LEGACY_LOCAL_HTTP_ASR_URLS: tuple[str, ...] = ("http://127.0.0.1:6001", "http://localhost:6001")
+LEGACY_LOCAL_HTTP_ASR_MODELS: tuple[str, ...] = ("local-asr-current", "moss-audio-8b-instruct")
+LEGACY_LOCAL_HTTP_ASR_URLS: tuple[str, ...] = (
+    "http://127.0.0.1:30080",
+    "http://localhost:30080",
+)
 AVATAR_PROVIDER_OPTIONS: tuple[str, ...] = AVATAR_PROVIDER_VALUES
 VOICE_PROVIDER_OPTIONS: tuple[str, ...] = VOICE_PROVIDER_VALUES
 CONTENT_UNDERSTANDING_CAPABILITY_SLOTS: tuple[str, ...] = (
@@ -305,9 +309,9 @@ class Settings(BaseSettings):
     transcription_dialect: str = DEFAULT_TRANSCRIPTION_DIALECT
     transcription_alignment_mode: str = "auto"  # auto | provider_only | synthetic
     transcription_alignment_min_word_coverage: float = 0.72
-    local_asr_api_base_url: str = "http://127.0.0.1:30080"
-    local_asr_model_name: str = "moss-audio-8b-instruct"
-    local_asr_display_name: str = "MOSS-Audio 8B Instruct"
+    local_asr_api_base_url: str = "http://127.0.0.1:6001"
+    local_asr_model_name: str = "vibevoice-asr-int8"
+    local_asr_display_name: str = "VibeVoice INT8"
     local_asr_health_path: str = "/health"
     local_asr_transcribe_path: str = "/transcribe"
     local_asr_hotwords_field: str = "hotwords"
@@ -363,10 +367,10 @@ class Settings(BaseSettings):
     indextts2_docker_env_file: str = "E:/WorkSpace/indextts2-service/.env"
     indextts2_docker_services: str = "indextts2"
     indextts2_docker_idle_timeout_sec: int = 900
-    local_asr_docker_guard_enabled: bool = True
-    local_asr_docker_compose_file: str = "E:/WorkSpace/RoughCut/docker-compose.moss-audio.yml"
+    local_asr_docker_guard_enabled: bool = False
+    local_asr_docker_compose_file: str = ""
     local_asr_docker_env_file: str = ""
-    local_asr_docker_services: str = "moss-audio-8b-instruct"
+    local_asr_docker_services: str = ""
     local_asr_docker_idle_timeout_sec: int = 900
     cosyvoice3_tts_api_base_url: str = "http://127.0.0.1:30180"
     cosyvoice3_tts_health_path: str = "/health"
@@ -1108,7 +1112,7 @@ def _upgrade_legacy_local_http_asr_overrides(normalized: dict[str, Any]) -> None
         model in LEGACY_LOCAL_HTTP_ASR_MODELS
         or actual_model in LEGACY_LOCAL_HTTP_ASR_MODELS
         or base_url in LEGACY_LOCAL_HTTP_ASR_URLS
-        or display_name == "vibevoice int8"
+        or display_name == "moss-audio 8b instruct"
     )
     if not uses_legacy_local_asr:
         return
