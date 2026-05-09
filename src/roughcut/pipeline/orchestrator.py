@@ -908,6 +908,30 @@ async def _recover_stale_running_steps(session) -> None:
         last_heartbeat_at = _step_last_heartbeat_at(step)
         if last_heartbeat_at is None:
             continue
+        metadata = dict(step.metadata_ or {})
+        try:
+            progress = float(metadata.get("progress") or 0.0)
+        except (TypeError, ValueError):
+            progress = 0.0
+        if progress >= 1.0:
+            previous_task_id = metadata.pop("task_id", None)
+            metadata.pop("retry_wait_until", None)
+            metadata.pop("retry_after_sec", None)
+            if previous_task_id:
+                metadata["last_task_id"] = previous_task_id
+            metadata["detail"] = str(metadata.get("detail") or "").strip() or "步骤已完成，调度器已自动收口该步骤。"
+            metadata["updated_at"] = now.isoformat()
+            step.status = "done"
+            step.finished_at = step.finished_at or now
+            step.error_message = None
+            step.metadata_ = metadata
+            logger.warning(
+                "Finalized running step with completed progress job=%s step=%s previous_task_id=%s",
+                step.job_id,
+                step.step_name,
+                previous_task_id,
+            )
+            continue
         worker_started_at = _step_worker_started_at(step)
         stale_after = (
             _step_runtime_stale_timeout_seconds(step)

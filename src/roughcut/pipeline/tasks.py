@@ -93,6 +93,14 @@ def _can_transition_step(
 
     if normalized_job_status in _TERMINAL_JOB_STATUSES and target_status != "cancelled":
         return False
+    if (
+        target_status in {"done", "failed", "cancelled"}
+        and normalized_step_status == target_status
+        and incoming_task
+        and last_task
+        and incoming_task == last_task
+    ):
+        return True
     if normalized_step_status != "running":
         return False
     if incoming_task and current_task and current_task != incoming_task:

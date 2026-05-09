@@ -2106,11 +2106,23 @@ def _current_step_heartbeat_progress(step: JobStep | None) -> float | None:
 
 
 @asynccontextmanager
-async def _maintain_step_heartbeat(step: JobStep | None):
+async def _maintain_step_heartbeat(
+    step: JobStep | None,
+    *,
+    detail: str | None = None,
+    progress: float | None = None,
+):
+    heartbeat_detail = detail
+    if heartbeat_detail is None:
+        heartbeat_detail = (
+            str((step.metadata_ or {}).get("detail") or STEP_LABELS.get(step.step_name, step.step_name))
+            if step is not None
+            else ""
+        )
     heartbeat = _spawn_step_heartbeat(
         step_id=step.id if step is not None else None,
-        detail=str((step.metadata_ or {}).get("detail") or STEP_LABELS.get(step.step_name, step.step_name) if step else ""),
-        progress=_current_step_heartbeat_progress(step),
+        detail=str(heartbeat_detail),
+        progress=progress if progress is not None else _current_step_heartbeat_progress(step),
     )
     try:
         yield
@@ -2146,7 +2158,30 @@ def _write_blocking_step_heartbeat(
         finally:
             await engine.dispose()
 
-    return bool(asyncio.run(_write()))
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return bool(asyncio.run(_write()))
+
+    result: list[bool] = [False]
+    error: list[BaseException] = []
+
+    def _runner() -> None:
+        try:
+            result[0] = bool(asyncio.run(_write()))
+        except BaseException as exc:
+            error.append(exc)
+
+    thread = threading.Thread(
+        target=_runner,
+        name=f"roughcut-step-heartbeat-write-{step_id}",
+        daemon=True,
+    )
+    thread.start()
+    thread.join()
+    if error:
+        raise error[0]
+    return result[0]
 
 
 @contextmanager
@@ -5065,15 +5100,26 @@ async def run_subtitle_postprocess(job_id: str) -> dict:
             width=media_meta_json.get("width"),
             height=media_meta_json.get("height"),
         )
+        segmentation_segments = [
+            SimpleNamespace(
+                segment_index=int(getattr(segment, "segment_index", index) or index),
+                start_time=float(getattr(segment, "start_time", 0.0) or 0.0),
+                end_time=float(getattr(segment, "end_time", 0.0) or 0.0),
+                text=str(getattr(segment, "text", "") or ""),
+                words_json=copy.deepcopy(getattr(segment, "words_json", None) or []),
+            )
+            for index, segment in enumerate(segments)
+        ]
 
         split_started = time.perf_counter()
-        with _maintain_blocking_step_heartbeat(
+        async with _maintain_step_heartbeat(
             step,
             detail="正在生成字幕切分",
             progress=0.45,
         ):
-            segmentation_result = segment_subtitles(
-                segments,
+            segmentation_result = await asyncio.to_thread(
+                segment_subtitles,
+                segmentation_segments,
                 max_chars=int(split_profile["max_chars"]),
                 max_duration=float(split_profile["max_duration"]),
             )
@@ -5116,7 +5162,7 @@ async def run_subtitle_postprocess(job_id: str) -> dict:
                 ),
                 progress=0.55,
             )
-            with _maintain_blocking_step_heartbeat(
+            async with _maintain_step_heartbeat(
                 step,
                 detail=(
                     f"正在复判 {segmentation_result.analysis.low_confidence_window_count} 个低置信度断句窗口"
@@ -5166,7 +5212,7 @@ async def run_subtitle_postprocess(job_id: str) -> dict:
             },
         )
         save_started = time.perf_counter()
-        with _maintain_blocking_step_heartbeat(
+        async with _maintain_step_heartbeat(
             step,
             detail="正在保存字幕并生成质量报告",
             progress=0.82,
@@ -5283,6 +5329,16 @@ async def run_subtitle_postprocess(job_id: str) -> dict:
             step.metadata_ = step_metadata
             save_elapsed = time.perf_counter() - save_started
         total_elapsed = time.perf_counter() - started
+        completion_metadata = dict(step.metadata_ or {})
+        current_task_id = completion_metadata.pop("task_id", None)
+        completion_metadata.pop("retry_wait_until", None)
+        completion_metadata.pop("retry_after_sec", None)
+        if current_task_id:
+            completion_metadata["last_task_id"] = current_task_id
+        step.status = "done"
+        step.finished_at = datetime.now(timezone.utc)
+        step.error_message = None
+        step.metadata_ = completion_metadata
         await _set_step_progress(
             session,
             step,

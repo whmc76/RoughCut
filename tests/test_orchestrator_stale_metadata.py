@@ -174,3 +174,65 @@ async def test_recover_stale_running_step_when_task_only_unacked(monkeypatch) ->
             assert len(artifact_count) == 1
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_recover_running_step_with_completed_progress_marks_done(monkeypatch) -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        stale_at = datetime.now(timezone.utc) - timedelta(seconds=180)
+        job_id = uuid.uuid4()
+        task_id = "task-completed-progress"
+
+        monkeypatch.setattr(orchestrator, "get_settings", lambda: SimpleNamespace(
+            step_stale_recovery_enabled=True,
+            step_lost_task_recovery_enabled=True,
+            step_heartbeat_interval_sec=20,
+            step_lost_task_grace_sec=120,
+            step_dispatch_lost_task_grace_sec=300,
+            step_stale_timeout_sec=900,
+            step_dispatch_stale_timeout_sec=3600,
+            render_step_stale_timeout_sec=5400,
+        ))
+
+        async with session_factory() as session:
+            job = Job(
+                id=job_id,
+                source_path="source.mp4",
+                source_name="source.mp4",
+                status="processing",
+            )
+            step = JobStep(
+                job_id=job_id,
+                step_name="subtitle_postprocess",
+                status="running",
+                attempt=1,
+                started_at=stale_at,
+                metadata_={
+                    "task_id": task_id,
+                    "dispatched_at": stale_at.isoformat(),
+                    "worker_started_at": stale_at.isoformat(),
+                    "updated_at": stale_at.isoformat(),
+                    "progress": 1.0,
+                    "detail": "字幕后处理完成",
+                },
+            )
+            session.add_all([job, step])
+            await session.commit()
+
+            await orchestrator._recover_stale_running_steps(session)
+            await session.commit()
+
+            refreshed = await session.get(JobStep, step.id)
+            assert refreshed is not None
+            assert refreshed.status == "done"
+            assert refreshed.finished_at is not None
+            assert refreshed.error_message is None
+            assert refreshed.metadata_["last_task_id"] == task_id
+            assert "task_id" not in refreshed.metadata_
+    finally:
+        await engine.dispose()
