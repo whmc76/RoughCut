@@ -41,3 +41,43 @@ def test_worker_celery_fallback_pattern_is_not_split_into_wildcard_entry() -> No
 
     assert '("{0}.*{1}" -f' in body
     assert '[regex]::Escape("celery -A roughcut.pipeline.celery_app:celery_app worker --queues=$Queue") + ".*" + [regex]::Escape($workerNode)' not in body
+
+
+def test_indextts2_startup_probe_is_gated_by_active_voice_provider() -> None:
+    source = START_SCRIPT.read_text(encoding="utf-8")
+    body = _function_body(source, "Test-IndexTTS2StartupProbeEnabled")
+
+    assert 'return $voiceProvider -eq "indextts2"' in body
+    assert "INDEXTTS2_API_PORT" not in body
+    assert "HEYGEM_TRAINING_API_PORT" not in body
+
+
+def test_startup_service_probes_are_derived_from_configured_services() -> None:
+    source = START_SCRIPT.read_text(encoding="utf-8")
+    body = _function_body(source, "Get-RoughCutStartupServiceProbes")
+
+    assert "Get-ConfiguredTranscriptionProvider" in body
+    assert '"LOCAL_ASR_API_BASE_URL"' in body
+    assert '"CosyVoice3 TTS"' in body
+    assert "Get-CosyVoice3TtsBaseUrl" in body
+    assert "Get-ConfiguredVoiceProvider" in body
+    assert '"VOICE_CLONE_API_BASE_URL"' in body
+    assert '"runninghub"' in body
+
+
+def test_cosyvoice3_probe_uses_config_or_roughcut_compose_port() -> None:
+    source = START_SCRIPT.read_text(encoding="utf-8")
+    body = _function_body(source, "Get-CosyVoice3TtsBaseUrl")
+
+    assert '"COSYVOICE3_TTS_API_BASE_URL"' in body
+    assert '"http://127.0.0.1:30180"' in body
+    assert 'Resolve-ContainerMappedPort -ContainerName "cosyvoice3-tts" -ContainerPort 8080' in body
+    assert "Get-BaseUrlWithPort" in body
+
+
+def test_local_start_checks_configured_service_probes_once() -> None:
+    source = START_SCRIPT.read_text(encoding="utf-8")
+
+    assert "Test-RoughCutConfiguredStartupServices" in source
+    assert 'Wait-LocalPortListening -TestPort $servicePorts.HeygemApi -ServiceName "HeyGem API (external)"' not in source
+    assert 'Wait-LocalPortListening -TestPort $servicePorts.HeygemTraining -ServiceName "IndexTTS2"' not in source

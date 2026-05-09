@@ -12,6 +12,11 @@ def test_docker_autostart_defaults_to_disabled() -> None:
     assert settings.runtime_preflight_docker_enabled is False
     assert settings.docker_gpu_guard_enabled is False
     assert settings.avatar_render_no_progress_timeout_sec == 0
+    assert settings.local_asr_docker_guard_enabled is True
+    assert settings.local_asr_docker_compose_file.endswith("docker-compose.qwen3-asr.yml")
+    assert settings.local_asr_docker_services == "qwen3-asr"
+    assert settings.cosyvoice3_tts_docker_guard_enabled is True
+    assert settings.cosyvoice3_tts_docker_services == "cosyvoice3-tts"
 
 
 def test_runtime_preflight_skips_compose_when_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -24,3 +29,38 @@ def test_runtime_preflight_skips_compose_when_disabled(monkeypatch: pytest.Monke
     monkeypatch.setattr(runtime_preflight.subprocess, "run", fail_run)
 
     runtime_preflight._ensure_core_compose_services_started()
+
+
+def test_managed_service_targets_include_lifecycle_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = SimpleNamespace(
+        transcription_provider="local_http_asr",
+        local_asr_api_base_url="http://127.0.0.1:30080",
+        local_asr_docker_compose_file="E:/WorkSpace/RoughCut/docker-compose.qwen3-asr.yml",
+        local_asr_docker_env_file="",
+        local_asr_docker_services="qwen3-asr",
+        local_asr_docker_guard_enabled=True,
+        local_asr_docker_idle_timeout_sec=120,
+        cosyvoice3_tts_api_base_url="http://127.0.0.1:30180",
+        cosyvoice3_tts_docker_compose_file="E:/WorkSpace/RoughCut/docker-compose.cosyvoice3.yml",
+        cosyvoice3_tts_docker_env_file="",
+        cosyvoice3_tts_docker_services="cosyvoice3-tts",
+        cosyvoice3_tts_docker_guard_enabled=True,
+        cosyvoice3_tts_docker_idle_timeout_sec=180,
+        avatar_provider="",
+        voice_provider="runninghub",
+        docker_gpu_guard_enabled=True,
+        docker_gpu_guard_idle_timeout_sec=900,
+    )
+    monkeypatch.setattr(runtime_preflight, "get_settings", lambda: settings)
+
+    targets = {str(target["name"]): target for target in runtime_preflight._managed_service_targets()}
+
+    assert targets["local_http_asr"]["kind"] == "asr"
+    assert targets["local_http_asr"]["services"] == "qwen3-asr"
+    assert targets["local_http_asr"]["guard_enabled"] is True
+    assert targets["local_http_asr"]["auto_release_enabled"] is True
+    assert targets["local_http_asr"]["idle_timeout_sec"] == 120
+    assert targets["cosyvoice3_tts"]["kind"] == "tts"
+    assert targets["cosyvoice3_tts"]["services"] == "cosyvoice3-tts"
+    assert targets["cosyvoice3_tts"]["guard_enabled"] is True
+    assert targets["cosyvoice3_tts"]["idle_timeout_sec"] == 180

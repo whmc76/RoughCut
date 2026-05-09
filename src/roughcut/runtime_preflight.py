@@ -99,16 +99,7 @@ async def _ensure_managed_service_urls_ready(*, reason: str) -> None:
 
 
 def _managed_service_urls() -> list[str]:
-    settings = get_settings()
-    urls: list[str] = []
-
-    transcription_provider = normalize_transcription_provider_name(getattr(settings, "transcription_provider", ""))
-    if transcription_provider == "local_http_asr":
-        urls.append(str(getattr(settings, "local_asr_api_base_url", "") or "").strip())
-    if str(getattr(settings, "avatar_provider", "") or "").strip().lower() == "heygem":
-        urls.append(str(getattr(settings, "avatar_api_base_url", "") or "").strip())
-    if str(getattr(settings, "voice_provider", "") or "").strip().lower() == "indextts2":
-        urls.append(str(getattr(settings, "voice_clone_api_base_url", "") or "").strip())
+    urls = [str(target["url"] or "").strip() for target in _managed_service_targets()]
 
     deduped: list[str] = []
     seen: set[str] = set()
@@ -120,40 +111,55 @@ def _managed_service_urls() -> list[str]:
     return deduped
 
 
-def _managed_service_targets() -> list[dict[str, str]]:
+def _managed_service_targets() -> list[dict[str, object]]:
     settings = get_settings()
-    targets: list[dict[str, str]] = []
+    targets: list[dict[str, object]] = []
 
     transcription_provider = normalize_transcription_provider_name(getattr(settings, "transcription_provider", ""))
     if transcription_provider == "local_http_asr":
         targets.append(
             {
                 "name": "local_http_asr",
+                "kind": "asr",
                 "url": str(getattr(settings, "local_asr_api_base_url", "") or "").strip(),
                 "probe_kind": "health_json",
+                **_service_management_config(settings, target_key="local_asr"),
             }
         )
+    targets.append(
+        {
+            "name": "cosyvoice3_tts",
+            "kind": "tts",
+            "url": str(getattr(settings, "cosyvoice3_tts_api_base_url", "") or "").strip(),
+            "probe_kind": "health_json",
+            **_service_management_config(settings, target_key="cosyvoice3_tts"),
+        }
+    )
     if str(getattr(settings, "avatar_provider", "") or "").strip().lower() == "heygem":
         targets.append(
             {
                 "name": "heygem",
+                "kind": "avatar",
                 "url": str(getattr(settings, "avatar_api_base_url", "") or "").strip(),
                 "probe_kind": "heygem_preview",
+                **_service_management_config(settings, target_key="heygem"),
             }
         )
     if str(getattr(settings, "voice_provider", "") or "").strip().lower() == "indextts2":
         targets.append(
             {
                 "name": "indextts2",
+                "kind": "voice_clone",
                 "url": str(getattr(settings, "voice_clone_api_base_url", "") or "").strip(),
                 "probe_kind": "health_json",
+                **_service_management_config(settings, target_key="indextts2"),
             }
         )
 
-    deduped: list[dict[str, str]] = []
+    deduped: list[dict[str, object]] = []
     seen: set[tuple[str, str]] = set()
     for target in targets:
-        key = (target["name"], target["url"])
+        key = (str(target["name"]), str(target["url"]))
         if not target["url"] or key in seen:
             continue
         seen.add(key)
@@ -161,20 +167,48 @@ def _managed_service_targets() -> list[dict[str, str]]:
     return deduped
 
 
-async def get_managed_service_snapshots() -> list[dict[str, str | bool]]:
-    snapshots: list[dict[str, str | bool]] = []
+def _service_management_config(settings: object, *, target_key: str) -> dict[str, object]:
+    guard_enabled = bool(getattr(settings, "docker_gpu_guard_enabled", False)) and bool(
+        getattr(settings, f"{target_key}_docker_guard_enabled", True)
+    )
+    default_idle_timeout = int(getattr(settings, "docker_gpu_guard_idle_timeout_sec", 900) or 900)
+    idle_timeout = max(
+        15,
+        int(getattr(settings, f"{target_key}_docker_idle_timeout_sec", default_idle_timeout) or default_idle_timeout),
+    )
+    return {
+        "target_key": target_key,
+        "compose_file": str(getattr(settings, f"{target_key}_docker_compose_file", "") or "").strip(),
+        "env_file": str(getattr(settings, f"{target_key}_docker_env_file", "") or "").strip(),
+        "services": str(getattr(settings, f"{target_key}_docker_services", "") or "").strip(),
+        "guard_enabled": guard_enabled,
+        "auto_release_enabled": guard_enabled,
+        "idle_timeout_sec": idle_timeout,
+    }
+
+
+async def get_managed_service_snapshots() -> list[dict[str, str | bool | int]]:
+    snapshots: list[dict[str, str | bool | int]] = []
     for target in _managed_service_targets():
         healthy = await asyncio.to_thread(
             _probe_service_health,
-            target["url"],
-            probe_kind=target["probe_kind"],
+            str(target["url"]),
+            probe_kind=str(target["probe_kind"]),
         )
         snapshots.append(
             {
                 "name": target["name"],
                 "url": target["url"],
+                "kind": target["kind"],
                 "status": "ok" if healthy else "failed",
                 "enabled": True,
+                "target_key": target["target_key"],
+                "compose_file": target["compose_file"],
+                "env_file": target["env_file"],
+                "services": target["services"],
+                "guard_enabled": target["guard_enabled"],
+                "auto_release_enabled": target["auto_release_enabled"],
+                "idle_timeout_sec": target["idle_timeout_sec"],
             }
         )
     return snapshots

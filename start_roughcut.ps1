@@ -1015,26 +1015,242 @@ function Get-LocalDotEnvValue {
     return $null
 }
 
-function Get-ConfiguredVoiceProvider {
-    $envEntry = Get-Item "env:VOICE_PROVIDER" -ErrorAction SilentlyContinue
-    $value = if ($envEntry) { $envEntry.Value } else { Get-LocalDotEnvValue -Key "VOICE_PROVIDER" }
+function Get-ConfiguredValue {
+    param([string]$Key)
+
+    $envEntry = Get-Item "env:$Key" -ErrorAction SilentlyContinue
+    if ($envEntry -and -not [string]::IsNullOrWhiteSpace($envEntry.Value)) {
+        return $envEntry.Value.Trim()
+    }
+
+    $dotEnvValue = Get-LocalDotEnvValue -Key $Key
+    if (-not [string]::IsNullOrWhiteSpace($dotEnvValue)) {
+        return $dotEnvValue.Trim()
+    }
+    return ""
+}
+
+function Get-ConfiguredProviderValue {
+    param([string]$Key)
+
+    $value = Get-ConfiguredValue -Key $Key
     if ([string]::IsNullOrWhiteSpace($value)) {
         return ""
     }
     return $value.Trim().ToLowerInvariant()
 }
 
+function Get-ConfiguredValueOrDefault {
+    param(
+        [string]$Key,
+        [string]$DefaultValue = ""
+    )
+
+    $value = Get-ConfiguredValue -Key $Key
+    if (-not [string]::IsNullOrWhiteSpace($value)) {
+        return $value
+    }
+    return $DefaultValue
+}
+
+function Get-ConfiguredVoiceProvider {
+    return Get-ConfiguredProviderValue -Key "VOICE_PROVIDER"
+}
+
+function Get-ConfiguredAvatarProvider {
+    $provider = Get-ConfiguredProviderValue -Key "AVATAR_PROVIDER"
+    if ($provider) {
+        return $provider
+    }
+    return "heygem"
+}
+
+function Get-ConfiguredTranscriptionProvider {
+    $provider = Get-ConfiguredProviderValue -Key "TRANSCRIPTION_PROVIDER"
+    switch ($provider) {
+        "local-asr" { return "local_http_asr" }
+        "local_asr" { return "local_http_asr" }
+        "local-http-asr" { return "local_http_asr" }
+        "" { return "local_http_asr" }
+        default { return $provider }
+    }
+}
+
 function Test-IndexTTS2StartupProbeEnabled {
     $voiceProvider = Get-ConfiguredVoiceProvider
-    if ($voiceProvider) {
-        return $voiceProvider -eq "indextts2"
+    return $voiceProvider -eq "indextts2"
+}
+
+function Test-LocalHttpBaseUrl {
+    param([string]$BaseUrl)
+
+    if ([string]::IsNullOrWhiteSpace($BaseUrl)) {
+        return $false
+    }
+    try {
+        $uri = [uri]$BaseUrl
+        return $uri.Scheme -in @("http", "https") -and $uri.Host -in @("localhost", "127.0.0.1", "::1", "0.0.0.0")
+    } catch {
+        return $false
+    }
+}
+
+function Get-BaseUrlPort {
+    param([string]$BaseUrl)
+
+    try {
+        $uri = [uri]$BaseUrl
+        if ($uri.Port -gt 0) {
+            return $uri.Port
+        }
+    } catch {
+    }
+    return $null
+}
+
+function Get-BaseUrlWithPort {
+    param(
+        [string]$BaseUrl,
+        [int]$Port
+    )
+
+    if ($Port -le 0) {
+        return $BaseUrl
+    }
+    try {
+        $builder = [System.UriBuilder]::new([uri]$BaseUrl)
+        $builder.Port = $Port
+        return $builder.Uri.AbsoluteUri.TrimEnd("/")
+    } catch {
+        return $BaseUrl
+    }
+}
+
+function Get-CosyVoice3TtsBaseUrl {
+    $baseUrl = Get-ConfiguredValueOrDefault -Key "COSYVOICE3_TTS_API_BASE_URL" -DefaultValue "http://127.0.0.1:30180"
+    $mappedPort = Resolve-ContainerMappedPort -ContainerName "cosyvoice3-tts" -ContainerPort 8080
+    if ($null -ne $mappedPort) {
+        return Get-BaseUrlWithPort -BaseUrl $baseUrl -Port $mappedPort
+    }
+    return $baseUrl
+}
+
+function Wait-RoughCutHttpServiceReady {
+    param(
+        [string]$ServiceName,
+        [string]$BaseUrl,
+        [string[]]$HealthPaths = @("/health"),
+        [int]$TimeoutSec = 10
+    )
+
+    $trimmedBaseUrl = ([string]$BaseUrl).Trim().TrimEnd("/")
+    if ([string]::IsNullOrWhiteSpace($trimmedBaseUrl)) {
+        Write-Host "$ServiceName is not configured; skipping probe." -ForegroundColor DarkGray
+        return $false
     }
 
-    $envEntry = Get-Item "env:INDEXTTS2_API_PORT" -ErrorAction SilentlyContinue
-    if ($envEntry -and -not [string]::IsNullOrWhiteSpace($envEntry.Value)) {
+    if (-not (Test-LocalHttpBaseUrl -BaseUrl $trimmedBaseUrl)) {
+        Write-Host "$ServiceName is configured at $trimmedBaseUrl; skipping local process probe." -ForegroundColor DarkGray
         return $true
     }
-    return -not [string]::IsNullOrWhiteSpace((Get-LocalDotEnvValue -Key "INDEXTTS2_API_PORT"))
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    do {
+        foreach ($path in $HealthPaths) {
+            $normalizedPath = if ($path.StartsWith("/")) { $path } else { "/$path" }
+            try {
+                $response = Invoke-WebRequest -Uri "$trimmedBaseUrl$normalizedPath" -Method Get -TimeoutSec 3 -UseBasicParsing
+                if ($response.StatusCode -ge 200 -and $response.StatusCode -lt 300) {
+                    Write-Host "$ServiceName is healthy at $trimmedBaseUrl." -ForegroundColor Green
+                    return $true
+                }
+            } catch {
+            }
+        }
+        Start-Sleep -Milliseconds 500
+    } while ((Get-Date) -lt $deadline)
+
+    $port = Get-BaseUrlPort -BaseUrl $trimmedBaseUrl
+    if ($null -ne $port -and (Test-PortListening -TestPort $port)) {
+        Write-Host "$ServiceName port $port is open but health endpoint is not ready yet; RoughCut will retry on first demand." -ForegroundColor Yellow
+        return $false
+    }
+
+    Write-Host "$ServiceName is currently stopped at $trimmedBaseUrl; RoughCut will start or retry the configured service on first demand." -ForegroundColor Yellow
+    return $false
+}
+
+function Get-RoughCutStartupServiceProbes {
+    $probes = @()
+
+    if ((Get-ConfiguredTranscriptionProvider) -eq "local_http_asr") {
+        $asrBaseUrl = Get-ConfiguredValue -Key "LOCAL_ASR_API_BASE_URL"
+        $asrDisplayName = Get-ConfiguredValue -Key "LOCAL_ASR_DISPLAY_NAME"
+        $label = if ($asrDisplayName) { "Local ASR ($asrDisplayName)" } else { "Local ASR" }
+        $probes += [pscustomobject]@{
+            Name = $label
+            BaseUrl = $asrBaseUrl
+            HealthPaths = @("/health")
+            TimeoutSec = 5
+        }
+    }
+
+    $probes += [pscustomobject]@{
+        Name = "CosyVoice3 TTS"
+        BaseUrl = Get-CosyVoice3TtsBaseUrl
+        HealthPaths = @((Get-ConfiguredValueOrDefault -Key "COSYVOICE3_TTS_HEALTH_PATH" -DefaultValue "/health"))
+        TimeoutSec = 5
+    }
+
+    if ((Get-ConfiguredAvatarProvider) -eq "heygem") {
+        $probes += [pscustomobject]@{
+            Name = "HeyGem API (external)"
+            BaseUrl = Get-ConfiguredValue -Key "AVATAR_API_BASE_URL"
+            HealthPaths = @("/easy/query?code=healthcheck", "/health")
+            TimeoutSec = 2
+        }
+    }
+
+    $voiceProvider = Get-ConfiguredVoiceProvider
+    if ($voiceProvider -eq "indextts2") {
+        $voiceBaseUrl = Get-ConfiguredValue -Key "VOICE_CLONE_API_BASE_URL"
+        if (-not $voiceBaseUrl) {
+            $voiceBaseUrl = Get-ConfiguredValue -Key "AVATAR_TRAINING_API_BASE_URL"
+        }
+        if (-not $voiceBaseUrl) {
+            $configuredIndexTtsPort = Parse-PortValue -Value (Get-ConfiguredValue -Key "INDEXTTS2_API_PORT")
+            if ($null -eq $configuredIndexTtsPort) {
+                $configuredIndexTtsPort = Parse-PortValue -Value (Get-ConfiguredValue -Key "HEYGEM_TRAINING_API_PORT")
+            }
+            if ($null -ne $configuredIndexTtsPort) {
+                $voiceBaseUrl = "http://127.0.0.1:$configuredIndexTtsPort"
+            }
+        }
+        $probes += [pscustomobject]@{
+            Name = "IndexTTS2"
+            BaseUrl = $voiceBaseUrl
+            HealthPaths = @("/health", "/v1/health")
+            TimeoutSec = 10
+        }
+    } elseif ($voiceProvider -eq "runninghub") {
+        $runningHubBaseUrl = Get-ConfiguredValue -Key "VOICE_CLONE_API_BASE_URL"
+        if ($runningHubBaseUrl) {
+            Write-Host "Voice provider runninghub is configured at $runningHubBaseUrl; skipping local TTS process probe." -ForegroundColor DarkGray
+        }
+    }
+
+    return $probes
+}
+
+function Test-RoughCutConfiguredStartupServices {
+    Write-Host "Checking configured external service endpoints..." -ForegroundColor Cyan
+    foreach ($probe in @(Get-RoughCutStartupServiceProbes)) {
+        Wait-RoughCutHttpServiceReady `
+            -ServiceName $probe.Name `
+            -BaseUrl $probe.BaseUrl `
+            -HealthPaths $probe.HealthPaths `
+            -TimeoutSec $probe.TimeoutSec | Out-Null
+    }
 }
 
 function Resolve-StandalonePort {
@@ -1908,20 +2124,7 @@ if ($null -ne $dockerCommand) {
     $Port = $resolvedApiPort
 
 Assert-LocalInfrastructureReady -ServicePorts $servicePorts
-if (Wait-LocalPortListening -TestPort $servicePorts.HeygemApi -ServiceName "HeyGem API (external)" -TimeoutSec 2) {
-    Write-Host "External HeyGem preview service is already running." -ForegroundColor Green
-} else {
-    Write-Host "External HeyGem preview service is currently stopped; RoughCut will start the managed Docker stack on first demand." -ForegroundColor Yellow
-}
-if ($indexTtsStartupProbeEnabled) {
-    if (Wait-LocalPortListening -TestPort $servicePorts.HeygemTraining -ServiceName "IndexTTS2" -TimeoutSec 2) {
-        if (-not (Test-IndexTTS2ServiceHealthy -Port $servicePorts.HeygemTraining -TimeoutSec 20)) {
-            Write-Host "External IndexTTS2 port is open but health payload is not ready yet; RoughCut will retry on first demand." -ForegroundColor Yellow
-        }
-    } else {
-        Write-Host "IndexTTS2 service is currently stopped; RoughCut will start the managed Docker stack on first demand." -ForegroundColor Yellow
-    }
-}
+Test-RoughCutConfiguredStartupServices
 
 if (-not $SkipMigrate) {
     Write-Host "Running database migrations..." -ForegroundColor Cyan

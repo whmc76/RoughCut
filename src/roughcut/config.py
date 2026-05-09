@@ -370,10 +370,10 @@ class Settings(BaseSettings):
     indextts2_docker_env_file: str = "E:/WorkSpace/indextts2-service/.env"
     indextts2_docker_services: str = "indextts2"
     indextts2_docker_idle_timeout_sec: int = 900
-    local_asr_docker_guard_enabled: bool = False
-    local_asr_docker_compose_file: str = ""
+    local_asr_docker_guard_enabled: bool = True
+    local_asr_docker_compose_file: str = "E:/WorkSpace/RoughCut/docker-compose.qwen3-asr.yml"
     local_asr_docker_env_file: str = ""
-    local_asr_docker_services: str = ""
+    local_asr_docker_services: str = "qwen3-asr"
     local_asr_docker_idle_timeout_sec: int = 900
     cosyvoice3_tts_api_base_url: str = "http://127.0.0.1:30180"
     cosyvoice3_tts_health_path: str = "/health"
