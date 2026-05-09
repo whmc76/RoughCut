@@ -78,6 +78,8 @@ type FrequentTerm = {
   reviewPriority: number;
   subtitleIndexes: number[];
   occurrences: JobManualEditSubtitle[];
+  relatedTerms?: string[];
+  manuallyAdded?: boolean;
 };
 
 type FrequentTermBucket = FrequentTerm & {
@@ -233,6 +235,9 @@ const TERM_ENTITY_CONTEXT_RE = /(品牌|型号|机型|版本|版型|系列|配�
 const TERM_DOMAIN_NOUN_RE = /(品牌|型号|机型|版本|版型|系列|配置|参数|规格|材质|工艺|镜头|画面|字幕|音频|视频|电池|接口|按钮|模式|设备|产品|主机|屏幕|外壳|包装|配件|工具|软件|系统|算法|模型|节点|工作流|数据|文件|素材|模板)$/;
 const TERM_PRODUCT_SUFFIX_RE = /[\u4e00-\u9fff]{1,}(器|机|仪|版|款|屏|镜|头|盒|包|架|线|片|件|料|胶|油|膜|粉|膏|液|水|刀|钳|笔|灯|卡|盘|芯|模|盖|壳)$/;
 const TERM_LOW_CONFIDENCE_SHAPE_RE = /([一-龥])\1{2,}|^[一-龥]{2}$|[A-Za-z0-9+#.-]*\d[A-Za-z0-9+#.-]*/;
+const TERM_CHINESE_DIGIT_SEQUENCE_RE = /[零〇一二三四五六七八九两幺]{2,}/g;
+const TERM_CHINESE_NUMBER_UNIT_RE = /[十百千万亿几]/;
+const TERM_OBVIOUS_CHINESE_NUMBER_RE = /^[零〇一二三四五六七八九两幺十百千万亿几]+(?:个|只|条|块|次|年|岁|号|集|期|分|秒|米|元)?$/;
 const TERM_VERB_HINTS = new Set([
   "上传",
   "保存",
@@ -567,6 +572,7 @@ function isMeaningfulTerm(term: string) {
   const cleaned = cleanTermToken(term);
   if (!cleaned || isCommonSpokenTerm(cleaned)) return false;
   if (/^\d+(?:\.\d+)?$/.test(cleaned)) return false;
+  if (TERM_OBVIOUS_CHINESE_NUMBER_RE.test(cleaned) && TERM_CHINESE_NUMBER_UNIT_RE.test(cleaned)) return false;
   if (/^[a-z]$/i.test(cleaned)) return false;
   if (/^[\u4e00-\u9fff]$/.test(cleaned)) return false;
   if (/^(怎么|怎样|为什么|什么|哪里|哪个|哪些|多少|这么|那么)/.test(cleaned)) return false;
@@ -583,12 +589,31 @@ function isModelOrBrandLikeTerm(term: string) {
   const cleaned = cleanTermToken(term);
   const normalized = normalizeTermKey(cleaned);
   if (TERM_LATIN_STOPWORDS.has(normalized)) return false;
+  if (isChineseDigitSequenceLikeTerm(cleaned)) return true;
   if (/[A-Za-z].*\d|\d.*[A-Za-z]/.test(cleaned)) return true;
   if (/[A-Z]{2,}/.test(cleaned)) return true;
   if (/[A-Za-z]/.test(cleaned) && /(pro|max|plus|ultra|mini|air|se|lite|gen|v\d+)$/i.test(cleaned)) return true;
   if (/[A-Za-z]/.test(cleaned) && cleaned.length >= 3) return true;
   if (/\d+(?:\.\d+)?(?:k|p|fps|hz|mm|cm|gb|tb|x)?$/i.test(cleaned) && /[A-Za-z0-9]/.test(cleaned)) return true;
   return false;
+}
+
+function isChineseDigitSequenceLikeTerm(term: string) {
+  const cleaned = cleanTermToken(term);
+  return /^[零〇一二三四五六七八九两幺]{2,}$/.test(cleaned);
+}
+
+function tokenizeChineseDigitSequences(text: string) {
+  const tokens: string[] = [];
+  for (const match of text.matchAll(TERM_CHINESE_DIGIT_SEQUENCE_RE)) {
+    const token = match[0];
+    const start = match.index ?? 0;
+    const before = text[start - 1] || "";
+    const after = text[start + token.length] || "";
+    if (TERM_CHINESE_NUMBER_UNIT_RE.test(before) || TERM_CHINESE_NUMBER_UNIT_RE.test(after)) continue;
+    tokens.push(token);
+  }
+  return tokens;
 }
 
 function hasTermEntityContext(term: string, subtitles: JobManualEditSubtitle[]) {
@@ -649,9 +674,52 @@ function classifyMeaningfulTerm(term: string, bucket?: FrequentTermBucket): Freq
   return "名词/术语";
 }
 
+function termCharacterSet(term: string) {
+  return new Set([...cleanTermToken(term)].filter((char) => /[\u4e00-\u9fffA-Za-z0-9]/.test(char)));
+}
+
+function sharedTermCharacterCount(left: string, right: string) {
+  const leftChars = termCharacterSet(left);
+  const rightChars = termCharacterSet(right);
+  let count = 0;
+  for (const char of leftChars) {
+    if (rightChars.has(char)) count += 1;
+  }
+  return count;
+}
+
+function areRelatedManualTermCandidates(baseTerm: string, candidateTerm: string) {
+  const base = cleanTermToken(baseTerm);
+  const candidate = cleanTermToken(candidateTerm);
+  if (!base || !candidate || normalizeTermKey(base) === normalizeTermKey(candidate)) return false;
+  if (base.length < 2 || candidate.length < 2) return false;
+  if (base.includes(candidate) || candidate.includes(base)) return true;
+  const sharedCount = sharedTermCharacterCount(base, candidate);
+  if (sharedCount >= 2) return true;
+  return (
+    sharedCount >= 1
+    && Math.min(base.length, candidate.length) <= 3
+    && (base[0] === candidate[0] || base[base.length - 1] === candidate[candidate.length - 1])
+  );
+}
+
+function tokenizeRelatedChineseFragments(text: string, baseTerm: string) {
+  const fragments: string[] = [];
+  for (const match of text.matchAll(/[\u4e00-\u9fff]{2,12}/g)) {
+    const segment = match[0];
+    for (let size = 2; size <= Math.min(4, segment.length); size += 1) {
+      for (let start = 0; start <= segment.length - size; start += 1) {
+        const fragment = segment.slice(start, start + size);
+        if (!isCommonSpokenTerm(fragment) && areRelatedManualTermCandidates(baseTerm, fragment)) fragments.push(fragment);
+      }
+    }
+  }
+  return fragments;
+}
+
 function tokenizeMeaningfulTerms(text: string) {
   const normalized = text.replace(/[|/\\\n\r\t]/g, " ");
-  const tokens: string[] = [];
+  const tokens = tokenizeChineseDigitSequences(normalized);
   const Segmenter = (Intl as typeof Intl & {
     Segmenter?: new (locale: string, options: { granularity: "word" }) => {
       segment: (input: string) => Iterable<{ segment: string; isWordLike?: boolean }>;
@@ -728,6 +796,119 @@ export function buildFrequentTerms(subtitles: JobManualEditSubtitle[]) {
     .slice(0, TERM_RESULT_LIMIT);
 }
 
+function collectManualRelatedTermBuckets(term: string, subtitles: JobManualEditSubtitle[], frequentTerms: FrequentTerm[]) {
+  const buckets = new Map<string, FrequentTermBucket>();
+  const remember = (candidate: string, subtitle: JobManualEditSubtitle, occurrenceCount: number) => {
+    const cleaned = cleanTermToken(candidate);
+    if (!cleaned || !areRelatedManualTermCandidates(term, cleaned)) return;
+    const normalized = normalizeTermKey(cleaned);
+    const existing = buckets.get(normalized) ?? {
+      term: cleaned,
+      normalized,
+      count: 0,
+      kind: "名词/术语" as FrequentTermKind,
+      reviewPriority: 0,
+      subtitleIndexes: [],
+      occurrences: [],
+      entityContextCount: 0,
+      unstableSubtitleCount: 0,
+    };
+    existing.count += Math.max(1, occurrenceCount);
+    if (!existing.subtitleIndexes.includes(subtitle.index)) {
+      existing.subtitleIndexes.push(subtitle.index);
+      existing.occurrences.push(subtitle);
+      if (subtitleHasUnstableText(subtitle)) existing.unstableSubtitleCount += 1;
+      if (hasTermEntityContext(cleaned, [subtitle])) existing.entityContextCount += 1;
+    }
+    buckets.set(normalized, existing);
+  };
+
+  for (const subtitle of subtitles) {
+    const text = subtitleText(subtitle);
+    const seen = new Set<string>();
+    for (const token of tokenizeMeaningfulTerms(text)) {
+      const normalized = normalizeTermKey(token);
+      if (seen.has(normalized)) continue;
+      seen.add(normalized);
+      remember(token, subtitle, countTextMatches(text, token));
+    }
+    for (const token of tokenizeRelatedChineseFragments(text, term)) {
+      const normalized = normalizeTermKey(token);
+      if (seen.has(normalized)) continue;
+      seen.add(normalized);
+      remember(token, subtitle, countTextMatches(text, token));
+    }
+  }
+
+  for (const candidate of frequentTerms) {
+    if (!areRelatedManualTermCandidates(term, candidate.term)) continue;
+    const existing = buckets.get(candidate.normalized) ?? {
+      ...candidate,
+      entityContextCount: 0,
+      unstableSubtitleCount: 0,
+    };
+    existing.count = Math.max(existing.count, candidate.count);
+    existing.subtitleIndexes = Array.from(new Set([...existing.subtitleIndexes, ...candidate.subtitleIndexes]));
+    const occurrenceMap = new Map(existing.occurrences.map((subtitle) => [subtitle.index, subtitle]));
+    for (const subtitle of candidate.occurrences) occurrenceMap.set(subtitle.index, subtitle);
+    existing.occurrences = [...occurrenceMap.values()].sort((left, right) => left.start_time - right.start_time);
+    buckets.set(candidate.normalized, existing);
+  }
+
+  return [...buckets.values()].filter((bucket) => bucket.count >= 2);
+}
+
+export function buildManualFrequentTerm(term: string, subtitles: JobManualEditSubtitle[], frequentTerms: FrequentTerm[] = []) {
+  const cleaned = cleanTermToken(term);
+  if (!cleaned || normalizeTermKey(cleaned).length < 2) return null;
+  const relatedBuckets = collectManualRelatedTermBuckets(cleaned, subtitles, frequentTerms);
+  const occurrenceMap = new Map<number, JobManualEditSubtitle>();
+  let count = 0;
+
+  for (const subtitle of subtitles) {
+    const text = subtitleText(subtitle);
+    const subtitleMatchCount = countTextMatches(text, cleaned);
+    if (subtitleMatchCount > 0) {
+      count += subtitleMatchCount;
+      occurrenceMap.set(subtitle.index, subtitle);
+    }
+  }
+
+  if (count <= 0) return null;
+  const occurrences = [...occurrenceMap.values()].sort((left, right) => left.start_time - right.start_time);
+  return {
+    term: cleaned,
+    normalized: normalizeTermKey(cleaned),
+    count,
+    kind: isModelOrBrandLikeTerm(cleaned) ? "专名/型号" : "低置信词",
+    reviewPriority: 100,
+    subtitleIndexes: occurrences.map((subtitle) => subtitle.index),
+    occurrences,
+    relatedTerms: relatedBuckets.map((bucket) => bucket.term),
+    manuallyAdded: true,
+  } satisfies FrequentTerm;
+}
+
+function mergeManualFrequentTerms(frequentTerms: FrequentTerm[], manualTerms: FrequentTerm[]) {
+  if (!manualTerms.length) return frequentTerms;
+  const hiddenByManual = new Set<string>();
+  for (const term of manualTerms) {
+    for (const relatedTerm of term.relatedTerms || []) hiddenByManual.add(normalizeTermKey(relatedTerm));
+  }
+  const kept = frequentTerms.filter((term) => (
+    !manualTerms.some((manualTerm) => manualTerm.normalized === term.normalized)
+    && !hiddenByManual.has(term.normalized)
+  ));
+  return [...manualTerms, ...kept]
+    .sort((left, right) => (
+      Number(Boolean(right.manuallyAdded)) - Number(Boolean(left.manuallyAdded))
+      || right.reviewPriority - left.reviewPriority
+      || right.count - left.count
+      || left.term.localeCompare(right.term, "zh-Hans-CN")
+    ))
+    .slice(0, TERM_RESULT_LIMIT);
+}
+
 function escapeRegExp(value: string) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
@@ -756,6 +937,19 @@ function countSubtitleMatches(subtitles: JobManualEditSubtitle[], find: string) 
       count += 1;
       cursor = index + Math.max(1, find.length);
     }
+  }
+  return count;
+}
+
+function countTextMatches(text: string, find: string) {
+  if (!find) return 0;
+  let count = 0;
+  let cursor = 0;
+  while (true) {
+    const index = text.indexOf(find, cursor);
+    if (index < 0) break;
+    count += 1;
+    cursor = index + Math.max(1, find.length);
   }
   return count;
 }
@@ -960,6 +1154,8 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
   const [waveformError, setWaveformError] = useState<string | null>(null);
   const [termReviewFilter, setTermReviewFilter] = useState("");
   const [minTermCount, setMinTermCount] = useState(2);
+  const [manualTermDraft, setManualTermDraft] = useState("");
+  const [manualTermKeys, setManualTermKeys] = useState<string[]>([]);
   const [termReplacementDrafts, setTermReplacementDrafts] = useState<Record<string, string>>({});
   const [hiddenTermKeys, setHiddenTermKeys] = useState<Set<string>>(() => new Set());
   const [subtitleReplaceDialog, setSubtitleReplaceDialog] = useState<SubtitleReplaceDialogState | null>(null);
@@ -1046,6 +1242,8 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
     lastSelectedSubtitleTextRef.current = "";
     setSubtitleReplaceDialog(null);
     setSubtitleReplacementHistory([]);
+    setManualTermDraft("");
+    setManualTermKeys([]);
     setEditorNote("");
     setVideoSummary(session.video_summary || "");
     setCurrentSourceTime(0);
@@ -1218,15 +1416,21 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
     () => subtitleDiagnostics(projection.remapped, totalOutputDuration),
     [projection.remapped, totalOutputDuration],
   );
+  const mergedFrequentTerms = useMemo(() => {
+    const manualTerms = manualTermKeys
+      .map((term) => buildManualFrequentTerm(term, projection.remapped, frequentTerms))
+      .filter(Boolean) as FrequentTerm[];
+    return mergeManualFrequentTerms(frequentTerms, manualTerms);
+  }, [frequentTerms, manualTermKeys, projection.remapped]);
   const visibleFrequentTerms = useMemo(() => {
     const query = normalizeTermKey(termReviewFilter);
-    return frequentTerms.filter((term) => {
+    return mergedFrequentTerms.filter((term) => {
       if (term.count < minTermCount) return false;
       if (hiddenTermKeys.has(term.normalized)) return false;
       if (!query) return true;
       return term.normalized.includes(query) || term.kind.includes(termReviewFilter.trim());
     });
-  }, [frequentTerms, hiddenTermKeys, minTermCount, termReviewFilter]);
+  }, [hiddenTermKeys, mergedFrequentTerms, minTermCount, termReviewFilter]);
   const hasTimelineEdits = useMemo(() => {
     if (baseKeepSegments.length !== effectiveSegments.length) return true;
     return baseKeepSegments.some((segment, index) => {
@@ -1927,23 +2131,70 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
     setEditingSubtitleIndex(null);
   };
 
+  const addManualFrequentTerm = () => {
+    const cleaned = cleanTermToken(manualTermDraft);
+    if (!cleaned || normalizeTermKey(cleaned).length < 2) return;
+    const manualTerm = buildManualFrequentTerm(cleaned, projection.remapped, frequentTerms);
+    if (!manualTerm) return;
+    setManualTermKeys((current) => (
+      current.some((item) => normalizeTermKey(item) === manualTerm.normalized)
+        ? current
+        : [...current, manualTerm.term]
+    ));
+    setHiddenTermKeys((current) => {
+      if (!current.has(manualTerm.normalized)) return current;
+      const next = new Set(current);
+      next.delete(manualTerm.normalized);
+      return next;
+    });
+    setTermReviewFilter("");
+    setManualTermDraft("");
+  };
+
   const replaceTermAcrossSubtitles = (term: FrequentTerm) => {
     const replacement = (termReplacementDrafts[term.normalized] || "").trim();
     if (!replacement || replacement === term.term) return;
-    const pattern = new RegExp(escapeRegExp(term.term), "g");
+    const sourceCandidates = term.manuallyAdded ? [term.term] : [term.term, ...(term.relatedTerms || [])];
+    const sourceTerms = sourceCandidates
+      .map((value) => cleanTermToken(value))
+      .filter((value, index, values) => (
+        value
+        && value !== replacement
+        && values.findIndex((candidate) => normalizeTermKey(candidate) === normalizeTermKey(value)) === index
+      ))
+      .sort((left, right) => right.length - left.length);
+    if (!sourceTerms.length) return;
+    const replacementCounts = new Map(sourceTerms.map((sourceTerm) => [sourceTerm, 0]));
     recordUndoSnapshot();
     setSubtitleDrafts((current) => {
       const next = { ...current };
       for (const subtitle of projection.remapped) {
-        const text = subtitleText(subtitle);
-        if (!text.includes(term.term)) continue;
+        let text = subtitleText(subtitle);
+        let changed = false;
+        for (const sourceTerm of sourceTerms) {
+          const matchCount = countTextMatches(text, sourceTerm);
+          if (matchCount <= 0) continue;
+          replacementCounts.set(sourceTerm, (replacementCounts.get(sourceTerm) || 0) + matchCount);
+          text = text.replace(new RegExp(escapeRegExp(sourceTerm), "g"), replacement);
+          changed = true;
+        }
+        if (!changed) continue;
         next[subtitle.index] = {
           ...(next[subtitle.index] ?? {}),
-          text_final: text.replace(pattern, replacement),
+          text_final: text,
         };
       }
       return next;
     });
+    const replacementRows = [...replacementCounts.entries()]
+      .filter(([, count]) => count > 0)
+      .map(([original, occurrence_count]) => ({ original, replacement, occurrence_count }));
+    if (replacementRows.length) {
+      setSubtitleReplacementHistory((current) => [
+        ...current.filter((item) => !replacementRows.some((row) => item.original === row.original && item.replacement === row.replacement)),
+        ...replacementRows,
+      ]);
+    }
     setTermReplacementDrafts((current) => {
       const next = { ...current };
       delete next[term.normalized];
@@ -3158,6 +3409,29 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
           </div>
           <div className="manual-editor-actions">
             <label className="manual-editor-term-filter">
+              <span>添加候选</span>
+              <input
+                className="input"
+                value={manualTermDraft}
+                onChange={(event) => setManualTermDraft(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    event.preventDefault();
+                    addManualFrequentTerm();
+                  }
+                }}
+                placeholder="例如：开提"
+              />
+            </label>
+            <button
+              type="button"
+              className="button ghost"
+              disabled={!buildManualFrequentTerm(manualTermDraft, projection.remapped, frequentTerms)}
+              onClick={addManualFrequentTerm}
+            >
+              添加
+            </button>
+            <label className="manual-editor-term-filter">
               <span>筛选</span>
               <input
                 className="input"
@@ -3193,7 +3467,11 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
                     <strong>{term.term}</strong>
                     <span className="status-pill pending">{term.count} 次</span>
                     <span className="status-pill">{term.kind}</span>
+                    {term.manuallyAdded ? <span className="status-pill success">手工</span> : null}
                   </div>
+                  {term.relatedTerms?.length ? (
+                    <div className="muted compact-top">已合并：{term.relatedTerms.slice(0, 5).join(" / ")}</div>
+                  ) : null}
                   <div className="manual-editor-term-occurrences">
                     {term.occurrences.slice(0, 3).map((subtitle) => (
                       <button key={`${term.normalized}-${subtitle.index}`} type="button" onClick={() => selectSubtitle(subtitle)}>
