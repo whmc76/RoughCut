@@ -28,14 +28,7 @@ def _apply_accepted_corrections_to_excerpt(
     excerpt: str | None,
     accepted_corrections: list[dict[str, Any]] | None = None,
 ) -> str:
-    text = str(excerpt or "")
-    for item in accepted_corrections or []:
-        original = str(item.get("original") or "").strip()
-        accepted = str(item.get("accepted") or "").strip()
-        if not original or not accepted or original == accepted:
-            continue
-        text = text.replace(original, accepted)
-    return text
+    return str(excerpt or "")
 
 
 def build_review_feedback_verification_snapshot(

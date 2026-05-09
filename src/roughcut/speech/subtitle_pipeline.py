@@ -589,17 +589,7 @@ def _correction_attr(correction: Any, key: str) -> Any:
 
 
 def _apply_accepted_corrections(text: str, corrections: tuple[dict[str, Any], ...]) -> str:
-    result = str(text or "")
-    for correction in corrections:
-        original = str(correction.get("original") or "").strip()
-        accepted = str(correction.get("accepted") or "").strip()
-        if not original or not accepted or original == accepted:
-            continue
-        if model_numbers_conflict(original, accepted):
-            continue
-        if original in result:
-            result = result.replace(original, accepted, 1)
-    return result
+    return str(text or "")
 
 
 def _build_canonical_transcript_words(

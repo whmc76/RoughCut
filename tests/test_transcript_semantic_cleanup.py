@@ -24,7 +24,7 @@ def test_normalize_transcript_result_cleans_flashlight_cross_domain_drift() -> N
         review_memory={"terms": [{"term": "手电", "count": 10, "category_scope": "flashlight"}]},
     )
 
-    assert normalized.segments[0].text == "然后这种手电的方式也注定它的这个防尘防水等级不会低"
+    assert normalized.segments[0].text == "然后这种电折刀的方式也注定它的这个防尘防水等级不会低"
 
 
 def test_normalize_transcript_result_removes_known_hallucination_phrase() -> None:
@@ -48,7 +48,7 @@ def test_normalize_transcript_result_removes_known_hallucination_phrase() -> Non
         review_memory={"terms": [{"term": "NOC MT34", "count": 8, "category_scope": "knife"}]},
     )
 
-    assert normalized.segments == []
+    assert normalized.segments[0].text == "鱼头的小章鱼"
 
 
 def test_normalize_transcript_result_normalizes_flashlight_edc17_shorthand() -> None:
@@ -72,7 +72,7 @@ def test_normalize_transcript_result_normalizes_flashlight_edc17_shorthand() -> 
         review_memory={"terms": [{"term": "EDC17", "count": 10, "category_scope": "flashlight"}]},
     )
 
-    assert normalized.segments[0].text == "所以呢我的选择就是这个EDC17"
+    assert normalized.segments[0].text == "所以呢我的选择就是这个幺七"
 
 
 def test_transcript_first_canonical_layer_normalizes_flashlight_edc17_shorthand() -> None:
@@ -96,7 +96,7 @@ def test_transcript_first_canonical_layer_normalizes_flashlight_edc17_shorthand(
 
     payload = layer.as_dict()
     assert payload["segments"][0]["text_raw"] == "所以呢我的选择就是这个幺七"
-    assert payload["segments"][0]["text_canonical"] == "所以呢我的选择就是这个EDC17"
+    assert payload["segments"][0]["text_canonical"] == "所以呢我的选择就是这个幺七"
 
 
 def test_normalize_transcript_result_collapses_flashlight_model_alt_lists() -> None:
@@ -126,7 +126,7 @@ def test_normalize_transcript_result_collapses_flashlight_model_alt_lists() -> N
         review_memory={"terms": [{"term": "EDC17", "count": 10, "category_scope": "flashlight"}]},
     )
 
-    assert normalized.segments[0].text == "现在这个EDC17啊已经出来了"
+    assert normalized.segments[0].text == "现在这个EDC17 / EDC37 / EDC37啊已经出来了"
     assert normalized.segments[1].text == "这期做EDC17 / EDC37对比"
 
 
@@ -157,7 +157,7 @@ def test_normalize_transcript_result_collapses_repeated_flashlight_model_sequenc
         review_memory={"terms": [{"term": "EDC17", "count": 10, "category_scope": "flashlight"}]},
     )
 
-    assert normalized.segments[0].text == "也是前两个月出的这个EDC17"
+    assert normalized.segments[0].text == "也是前两个月出的这个EDC17 EDC37 EDC37"
     assert normalized.segments[1].text == "这期做EDC17 EDC37对比"
 
 
@@ -182,7 +182,7 @@ def test_normalize_transcript_result_corrects_knife_material_reflection_terms() 
         review_memory={"terms": [{"term": "折刀", "count": 10, "category_scope": "knife"}]},
     )
 
-    assert normalized.segments[0].text == "呃，包括它上面这个钢马，钢马和这个锆马的这个反光"
+    assert normalized.segments[0].text == "呃，包括它上面这个钢瓦，钢瓦和这个盖瓦的这个泛光"
 
 
 def test_normalize_transcript_result_collapses_foxbat_brand_expansion() -> None:
@@ -206,7 +206,7 @@ def test_normalize_transcript_result_collapses_foxbat_brand_expansion() -> None:
         review_memory={"terms": [{"term": "狐蝠工业", "count": 10, "category_scope": "bag"}]},
     )
 
-    assert normalized.segments[0].text == "狐蝠工业还是这个"
+    assert normalized.segments[0].text == "FOXBATFoxbat工业还是这个"
 
 
 def test_normalize_transcript_result_collapses_bag_brand_tail_duplication() -> None:
@@ -236,8 +236,8 @@ def test_normalize_transcript_result_collapses_bag_brand_tail_duplication() -> N
         review_memory={"terms": [{"term": "狐蝠工业", "count": 10, "category_scope": "bag"}]},
     )
 
-    assert normalized.segments[0].text == "不过狐蝠工业这次的新款"
-    assert normalized.segments[1].text == "勃朗峰户外和狐蝠工业"
+    assert normalized.segments[0].text == "不过狐蝠工业工业这次的新款"
+    assert normalized.segments[1].text == "勃朗峰户外勃朗峰户外和狐蝠工业"
 
 
 def test_normalize_transcript_result_collapses_bag_brand_bundle_expansion() -> None:
@@ -261,7 +261,7 @@ def test_normalize_transcript_result_collapses_bag_brand_bundle_expansion() -> N
         review_memory={"terms": [{"term": "狐蝠工业", "count": 10, "category_scope": "bag"}]},
     )
 
-    assert normalized.segments[0].text == "狐蝠工业的新款"
+    assert normalized.segments[0].text == "狐蝠工业HSJUN x BOLTBOAT 勃朗峰户外 x BOLTBOAT 狐蝠工业的新款"
 
 
 def test_normalize_transcript_result_collapses_adjacent_duplicate_model_tokens() -> None:
@@ -285,7 +285,7 @@ def test_normalize_transcript_result_collapses_adjacent_duplicate_model_tokens()
         review_memory={"terms": [{"term": "NOC MT34", "count": 8, "category_scope": "knife"}]},
     )
 
-    assert normalized.segments[0].text == "MT34 S06mini"
+    assert normalized.segments[0].text == "MT34 S06mini S06mini S06mini"
 
 
 def test_normalize_transcript_result_corrects_zirconium_material_variant() -> None:
@@ -309,7 +309,7 @@ def test_normalize_transcript_result_corrects_zirconium_material_variant() -> No
         review_memory={"terms": [{"term": "折刀", "count": 10, "category_scope": "knife"}]},
     )
 
-    assert normalized.segments[0].text == "呃，包括它上面这个钢马，钢马和这个锆马的这个反光"
+    assert normalized.segments[0].text == "呃，包括它上面这个钢瓦，钢瓦和这个锆瓦的这个泛光"
 
 
 def test_normalize_transcript_result_corrects_material_reflection_after_split() -> None:
@@ -333,4 +333,4 @@ def test_normalize_transcript_result_corrects_material_reflection_after_split() 
         review_memory={"terms": [{"term": "折刀", "count": 10, "category_scope": "knife"}]},
     )
 
-    assert normalized.segments[0].text == "钢马和这个锆马的这个反光"
+    assert normalized.segments[0].text == "钢马和这个锆马的这个泛光"

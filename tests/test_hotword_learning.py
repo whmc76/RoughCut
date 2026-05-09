@@ -346,7 +346,8 @@ def test_brand_aliases_are_not_prompted_generically() -> None:
     )
 
     assert "船长=BOLTBOAT" not in prompt
-    assert "游人=游刃" in prompt
+    assert "游人=游刃" not in prompt
+    assert "错写归一" not in prompt
 
 
 def test_brand_name_expansion_aliases_are_not_auto_applied() -> None:
@@ -359,7 +360,36 @@ def test_brand_name_expansion_aliases_are_not_auto_applied() -> None:
     }
 
     assert apply_domain_term_corrections("这个头狼还是这个", review_memory) == "这个头狼还是这个"
-    assert apply_domain_term_corrections("这个头浪工业还是这个", review_memory) == "这个头狼工业还是这个"
+    assert apply_domain_term_corrections("这个头浪工业还是这个", review_memory) == "这个头浪工业还是这个"
+
+
+def test_brand_aliases_are_not_normalized_in_subtitle_postprocess() -> None:
+    review_memory = {
+        "terms": [{"term": "NITECORE", "count": 10, "category": "flashlight_brand", "evidence_strong": True}],
+        "aliases": [{"wrong": "奈特科尔", "correct": "NITECORE", "evidence_strong": True}],
+        "confirmed_entities": [
+            {
+                "brand": "NITECORE",
+                "brand_aliases": ["奈特科尔", "Nitecore"],
+                "model": "EDC17",
+                "model_aliases": [],
+            }
+        ],
+    }
+
+    assert apply_domain_term_corrections("这个奈特科尔也可以", review_memory) == "这个奈特科尔也可以"
+    assert apply_domain_term_corrections("这个nitecore也可以", review_memory) == "这个nitecore也可以"
+    assert apply_domain_term_corrections("这个傲雷也可以", {"terms": []}) == "这个傲雷也可以"
+
+
+def test_subtitle_postprocess_does_not_apply_lexical_normalization() -> None:
+    review_memory = {
+        "terms": [{"term": "EDC17", "count": 10, "category": "flashlight_model", "evidence_strong": True}],
+        "aliases": [{"wrong": "EDC幺七", "correct": "EDC17", "evidence_strong": True}],
+    }
+
+    assert apply_domain_term_corrections("这个EDC幺七也可以", review_memory) == "这个EDC幺七也可以"
+    assert apply_domain_term_corrections("这个螺四刀也可以", {"terms": []}) == "这个螺四刀也可以"
 
 
 def test_ingestible_edc_style_source_does_not_prompt_knife_hotwords() -> None:
@@ -468,6 +498,7 @@ def test_nitecore_edc17_source_name_scopes_to_flashlight_not_knife() -> None:
     review_memory = {
         "subject_domain": "edc",
         "terms": [
+            {"term": "奈特科尔 NITECORE", "count": 12, "domain": "flashlight", "category_scope": "flashlight"},
             {"term": "NITECORE EDC17", "count": 9, "domain": "flashlight", "category_scope": "flashlight"},
             {"term": "NOC MT34折刀", "count": 9, "domain": "knife", "category_scope": "knife"},
         ],
@@ -494,6 +525,9 @@ def test_nitecore_edc17_source_name_scopes_to_flashlight_not_knife() -> None:
         source_name=source_name,
         content_profile={},
     ) == "flashlight"
-    assert "NITECORE EDC17" in extract_prompt_hotwords(prompt)
+    hotwords = extract_prompt_hotwords(prompt)
+    assert "NITECORE EDC17" in hotwords
+    assert "奈特科尔 NITECORE" not in hotwords
+    assert "奈特科尔=NITECORE" not in prompt
     assert "NOC" not in prompt
     assert "折刀" not in prompt

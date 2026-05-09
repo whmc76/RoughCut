@@ -293,21 +293,7 @@ def _apply_subtitle_semantic_cleanup(
     content_profile: dict[str, Any] | None,
     review_memory: dict[str, Any] | None,
 ) -> int:
-    category_scope = _resolve_subtitle_semantic_cleanup_scope(
-        job=job,
-        content_profile=content_profile,
-        review_memory=review_memory,
-    )
-    cleaned_count = 0
-    for item in subtitle_items:
-        original_text = str(getattr(item, "text_final", None) or getattr(item, "text_norm", None) or getattr(item, "text_raw", None) or "").strip()
-        cleaned_text = clean_final_subtitle_text(
-            _normalize_semantic_contamination_text(original_text, category_scope=category_scope)
-        )
-        if cleaned_text != original_text:
-            item.text_final = cleaned_text
-            cleaned_count += 1
-    return cleaned_count
+    return 0
 
 
 _TRANSCRIPTION_PROVIDER_LABELS: dict[str, str] = {
@@ -2781,11 +2767,6 @@ def _build_transcript_first_canonical_layer(
 
     synthetic_items: list[SimpleNamespace] = []
     synthetic_corrections: list[dict[str, Any]] = []
-    subtitle_by_id = {
-        str(getattr(item, "id", "") or ""): item
-        for item in list(subtitle_items or [])
-        if str(getattr(item, "id", "") or "")
-    }
     transcript_rows_ordered = sorted(
         list(transcript_rows or []),
         key=lambda row: (
@@ -2798,16 +2779,10 @@ def _build_transcript_first_canonical_layer(
         int(getattr(row, "segment_index", index) or index): f"transcript-segment-{int(getattr(row, 'segment_index', index) or index)}"
         for index, row in enumerate(transcript_rows_ordered)
     }
-    seen_corrections: set[tuple[str, str, str, str]] = set()
-
     for index, transcript_row in enumerate(transcript_rows_ordered):
         segment_index = int(getattr(transcript_row, "segment_index", index) or index)
         synthetic_id = synthetic_ids[segment_index]
         transcript_text = str(getattr(transcript_row, "text", "") or "")
-        canonical_text = _normalize_semantic_contamination_text(
-            transcript_text,
-            category_scope=category_scope,
-        )
         synthetic_items.append(
             SimpleNamespace(
                 id=synthetic_id,
@@ -2816,37 +2791,9 @@ def _build_transcript_first_canonical_layer(
                 end_time=float(getattr(transcript_row, "end_time", 0.0) or 0.0),
                 text_raw=transcript_text,
                 text_norm=transcript_text,
-                text_final=canonical_text,
+                text_final=transcript_text,
             )
         )
-
-    for correction in list(corrections or []):
-        correction_payload = _serialize_transcript_review_correction(correction)
-        subtitle_item = subtitle_by_id.get(str(correction_payload.get("subtitle_item_id") or ""))
-        for transcript_row in _select_transcript_segments_for_correction(
-            correction_payload=correction_payload,
-            subtitle_item=subtitle_item,
-            transcript_rows=transcript_rows_ordered,
-        ):
-            segment_index = int(getattr(transcript_row, "segment_index", 0) or 0)
-            synthetic_id = synthetic_ids.get(segment_index)
-            if not synthetic_id:
-                continue
-            key = (
-                synthetic_id,
-                str(correction_payload.get("original") or ""),
-                str(correction_payload.get("accepted") or ""),
-                str(correction_payload.get("status") or ""),
-            )
-            if key in seen_corrections:
-                continue
-            seen_corrections.add(key)
-            synthetic_corrections.append(
-                {
-                    **correction_payload,
-                    "subtitle_item_id": synthetic_id,
-                }
-            )
 
     return build_canonical_transcript_layer(
         synthetic_items,

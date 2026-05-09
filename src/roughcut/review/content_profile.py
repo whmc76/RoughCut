@@ -1324,28 +1324,7 @@ def build_reviewed_transcript_excerpt(
     max_items: int = 36,
     max_chars: int = 1400,
     ) -> str:
-    corrections_by_index: dict[int, list[dict[str, Any]]] = {}
-    for item in accepted_corrections or []:
-        try:
-            index = int(item.get("item_index"))
-        except (TypeError, ValueError):
-            continue
-        corrections_by_index.setdefault(index, []).append(item)
-
-    reviewed_items: list[dict[str, Any]] = []
-    for subtitle in subtitle_items:
-        item = dict(subtitle)
-        text = str(item.get("text_final") or item.get("text_norm") or item.get("text_raw") or "")
-        for correction in corrections_by_index.get(int(item.get("index", -1)), []):
-            original = str(correction.get("original") or "").strip()
-            accepted = str(correction.get("accepted") or "").strip()
-            if not original or not accepted or original == accepted:
-                continue
-            if original in text:
-                text = text.replace(original, accepted)
-        item["text_final"] = text
-        reviewed_items.append(item)
-    return build_transcript_excerpt(reviewed_items, max_items=max_items, max_chars=max_chars)
+    return build_transcript_excerpt(subtitle_items, max_items=max_items, max_chars=max_chars)
 
 
 def _transcript_evidence_items(transcript_evidence: dict[str, Any] | None) -> list[dict[str, Any]]:
@@ -1414,17 +1393,7 @@ def _resolve_transcript_excerpt(
 
 
 def apply_glossary_terms(text: str, glossary_terms: list[dict[str, Any]]) -> str:
-    result = text
-    for term in glossary_terms:
-        correct_form = (term.get("correct_form") or "").strip()
-        if not correct_form:
-            continue
-        for wrong_form in term.get("wrong_forms") or []:
-            if wrong_form and wrong_form != correct_form:
-                if model_numbers_conflict(wrong_form, correct_form):
-                    continue
-                result = re.sub(re.escape(wrong_form), correct_form, result, flags=re.IGNORECASE)
-    return result
+    return text
 
 
 def _build_subtitle_signal_blob(subtitle_items: list[dict[str, Any]] | None, *, max_items: int = 96) -> str:

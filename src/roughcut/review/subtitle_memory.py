@@ -226,8 +226,12 @@ _PROTECTED_BRAND_TERMS = {
     "NOC",
     "REATE",
     "LEATHERMAN",
+    "NITECORE",
     "OLIGHT",
     "ZIPPO",
+    "BOLTBOAT",
+    "FENIX",
+    "NEXTOOL",
     "RunningHub",
     "ComfyUI",
     "OpenClaw",
@@ -970,16 +974,6 @@ def _summarize_subtitle_review_memory(
         if values:
             lines.append(f"- 高优先级术语: {values}")
 
-    aliases = review_memory.get("aliases") or []
-    if aliases:
-        values = " / ".join(
-            f"{item['wrong']}->{item['correct']}"
-            for item in aliases[:12]
-            if item.get("wrong") and item.get("correct")
-        )
-        if values:
-            lines.append(f"- 常见错写归一: {values}")
-
     phrases = review_memory.get("phrase_preferences") or []
     if phrases:
         values = " / ".join(
@@ -1423,42 +1417,61 @@ def build_transcription_prompt(
             terms.append(hotword)
         if len(terms) >= 12:
             break
+    terms = _filter_transcription_hotword_terms(terms)
     if terms:
         snippets.append(f"热词：{', '.join(terms)}")
         snippets.append("请保持品牌、型号、关键术语和方言原词")
-
-    term_item_by_value = {
-        str(item.get("term") or "").strip(): item
-        for item in [
-            *[dict(item) for item in (review_memory or {}).get("terms") or [] if isinstance(item, dict)],
-            *[dict(item) for item in (review_memory or {}).get("transcription_seed_term_details") or [] if isinstance(item, dict)],
-        ]
-        if str(item.get("term") or "").strip()
-    }
-    prompt_brand_terms = _collect_prompt_brand_terms(review_memory)
-    alias_pairs = [
-        f"{item['wrong']}={item['correct']}"
-        for item in (review_memory or {}).get("aliases") or []
-        if item.get("wrong")
-        and item.get("correct")
-        and not _term_blocked_by_prior(str(item.get("correct") or "").strip(), blocked_terms)
-        and not _term_blocked_by_prior(str(item.get("wrong") or "").strip(), blocked_terms)
-        and _prompt_term_supported_by_domains(str(item.get("correct") or "").strip(), dominant_domains)
-        and _prompt_alias_supported_by_context(
-            item,
-            term_item_by_value.get(str(item.get("correct") or "").strip(), {"term": item.get("correct")}),
-            category_scope,
-            prompt_context_text,
-            prompt_brand_terms,
-        )
-    ][:8]
-    if alias_pairs:
-        snippets.append(f"错写归一：{'; '.join(alias_pairs)}")
 
     if _source_name_is_informative(source_name):
         snippets.append(f"源文件名参考：{source_name}")
 
     return "。".join(snippets)[:320]
+
+
+def _filter_transcription_hotword_terms(terms: list[str]) -> list[str]:
+    filtered: list[str] = []
+    seen: set[str] = set()
+    for term in terms:
+        normalized = str(term or "").strip()
+        if not normalized:
+            continue
+        if _contains_brand_alias_chain(normalized):
+            continue
+        key = normalized.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        filtered.append(normalized)
+    return filtered[:12]
+
+
+def _contains_brand_alias_chain(term: str) -> bool:
+    text = str(term or "").strip()
+    if not text:
+        return False
+    for canonical, aliases in _KNOWN_BRAND_SUBTITLE_ALIASES.items():
+        hits = {
+            _normalize_brand_alias_variant(alias)
+            for alias in (canonical, *aliases)
+            if _brand_alias_variant_in_text(alias, text)
+        }
+        if len(hits) >= 2:
+            return True
+    return False
+
+
+def _normalize_brand_alias_variant(alias: str) -> str:
+    return re.sub(r"[\s_\-]+", "", str(alias or "").strip()).casefold()
+
+
+def _brand_alias_variant_in_text(alias: str, text: str) -> bool:
+    normalized_alias = str(alias or "").strip()
+    normalized_text = str(text or "").strip()
+    if not normalized_alias or not normalized_text:
+        return False
+    if re.search(r"[\u4e00-\u9fff]", normalized_alias):
+        return normalized_alias in normalized_text
+    return bool(re.search(rf"(?<![A-Za-z0-9]){re.escape(normalized_alias)}(?![A-Za-z0-9])", normalized_text, re.IGNORECASE))
 
 
 def _select_prompt_dominant_domains(
@@ -1725,59 +1738,7 @@ def apply_domain_term_corrections(
     prev_text: str = "",
     next_text: str = "",
 ) -> str:
-    result = str(text or "").strip()
-    if not result:
-        return result
-
-    for pattern, replacement in _GENERIC_SAFE_REPLACEMENTS:
-        if _is_protected_brand_term(replacement):
-            continue
-        result = pattern.sub(replacement, result)
-
-    if not review_memory:
-        return result
-
-    result = _apply_confirmed_entity_corrections(
-        result,
-        review_memory,
-        prev_text=prev_text,
-        next_text=next_text,
-    )
-    blocked_terms = _review_memory_blocked_terms(review_memory)
-
-    # Keep subtitle correction deterministic: only apply explicit lexical aliases
-    # from confirmed entities, correction history, and curated hotword/glossary
-    # entries. Do not infer compound phrases or semantic domain rewrites here.
-    for item in review_memory.get("aliases") or []:
-        wrong = str(item.get("wrong") or "").strip()
-        correct = str(item.get("correct") or "").strip()
-        if not wrong or not correct:
-            continue
-        if _term_blocked_by_prior(correct, blocked_terms) or _term_blocked_by_prior(wrong, blocked_terms):
-            continue
-        if not bool(item.get("evidence_strong")):
-            continue
-        if _is_brand_like_category(item.get("category")) and _is_brand_name_expansion_alias(wrong, correct, review_memory):
-            continue
-        if _should_skip_confirmed_display_alias(wrong, correct, review_memory):
-            continue
-        result = re.sub(re.escape(wrong), correct, result, flags=re.IGNORECASE)
-
-    terms = [dict(item) for item in review_memory.get("terms") or [] if isinstance(item, dict)]
-    for term_item in terms:
-        term = str(term_item.get("term") or "").strip()
-        if _term_blocked_by_prior(term, blocked_terms):
-            continue
-        if not (bool(term_item.get("evidence_strong")) or bool(term_item.get("context_match"))):
-            continue
-        if _should_skip_confirmed_display_term(term, review_memory):
-            continue
-        aliases = _DEFAULT_TERM_ALIASES.get(term, ())
-        if re.fullmatch(r"[A-Za-z][A-Za-z0-9 .+-]{1,24}", term):
-            result = re.sub(re.escape(term), term, result, flags=re.IGNORECASE)
-        for wrong in aliases:
-            result = re.sub(re.escape(wrong), term, result, flags=re.IGNORECASE)
-    return result
+    return str(text or "").strip()
 
 
 def _should_skip_confirmed_display_term(term: str, review_memory: dict[str, Any] | None) -> bool:
@@ -2375,23 +2336,6 @@ def _apply_confirmed_entity_corrections(
             for item in entity.get("brand_aliases") or []
             if str(item or "").strip()
         ]
-        for alias in sorted(brand_aliases, key=len, reverse=True):
-            if _is_brand_name_expansion_alias(alias, brand, review_memory):
-                continue
-            if (
-                _normalize_conflict_key(alias),
-                _normalize_conflict_key(brand),
-            ) in negative_alias_pairs:
-                continue
-            if not _confirmed_brand_alias_has_anchor_support(
-                alias=alias,
-                current_text=result,
-                prev_text=prev_text,
-                next_text=next_text,
-                entity=entity,
-            ):
-                continue
-            result = re.sub(re.escape(alias), brand, result, count=1, flags=re.IGNORECASE)
         model_aliases = [
             (str(item.get("wrong") or "").strip(), str(item.get("correct") or "").strip())
             for item in entity.get("model_aliases") or []

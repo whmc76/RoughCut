@@ -470,32 +470,6 @@ def _normalize_transcript_result(
         text = str(seg.text or "").strip()
         if not text:
             continue
-        for term in glossary_terms:
-            if _is_brand_like_term(term):
-                continue
-            correct_form = str(term.get("correct_form") or "").strip()
-            if not correct_form:
-                continue
-            for wrong_form in term.get("wrong_forms") or []:
-                wrong = str(wrong_form or "").strip()
-                if wrong and wrong != correct_form:
-                    text = text.replace(wrong, correct_form)
-        text = apply_domain_term_corrections(text, review_memory)
-        cleaned_text = _normalize_semantic_contamination_text(text, category_scope=category_scope)
-        if cleaned_text != text:
-            filtering = dict(normalized.raw_payload.get("_roughcut_filtering") or {})
-            semantic_cleanup = list(filtering.get("semantic_cleanup") or [])
-            semantic_cleanup.append(
-                {
-                    "segment_index": int(getattr(seg, "index", 0) or 0),
-                    "category_scope": category_scope,
-                    "before": text,
-                    "after": cleaned_text,
-                }
-            )
-            filtering["semantic_cleanup"] = semantic_cleanup[:80]
-            normalized.raw_payload["_roughcut_filtering"] = filtering
-        text = cleaned_text
         seg.text = text
     normalized.segments = [seg for seg in normalized.segments if str(seg.text or "").strip()]
     _filter_tail_cta_noise_segments(normalized)
