@@ -63,6 +63,15 @@ def test_alignment_tokenizer_keeps_numeric_units_atomic() -> None:
     assert "1200lm" in tokens
 
 
+def test_alignment_tokenizer_splits_mixed_model_name_and_chinese_after_space() -> None:
+    tokens = tokenize_alignment_text("那个 S06MINI这款啊这个好")
+
+    assert "那个" in tokens
+    assert "S06MINI" in tokens
+    assert "这款" in tokens
+    assert "S06MINI这款啊这个好" not in tokens
+
+
 def test_allows_normal_sentence_boundary_without_word_split() -> None:
     analysis = analyze_subtitle_segmentation([
         _entry(0, "这个产品不错"),

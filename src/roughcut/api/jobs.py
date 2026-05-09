@@ -2365,7 +2365,11 @@ async def _build_manual_editor_session(
     job: Job,
     session: AsyncSession,
 ) -> ManualEditorSessionOut:
-    from roughcut.pipeline.steps import _build_edited_subtitle_projection, _load_latest_subtitle_payloads
+    from roughcut.pipeline.steps import (
+        _build_edited_subtitle_projection,
+        _load_latest_subtitle_payloads,
+        _projection_has_suspicious_subtitle_timing,
+    )
 
     editorial_timeline = await _load_latest_timeline_by_type(session, job_id=job.id, timeline_type="editorial")
     if editorial_timeline is None:
@@ -2441,7 +2445,11 @@ async def _build_manual_editor_session(
     raw_subtitle_dicts, projection_data = await _load_latest_subtitle_payloads(session, job_id=job.id)
     subtitle_dicts = _clean_manual_editor_subtitle_projection(raw_subtitle_dicts)
     use_clean_fallback_projection = _manual_editor_has_collapsed_repeat_runs(raw_subtitle_dicts, subtitle_dicts)
-    if manual_projection_items and not draft_active:
+    manual_projection_suspicious = _projection_has_suspicious_subtitle_timing(
+        manual_projection_items,
+        split_profile={},
+    )
+    if manual_projection_items and not draft_active and not manual_projection_suspicious:
         projected_subtitles = manual_projection_items
     elif use_clean_fallback_projection:
         projected_subtitles = remap_subtitles_to_timeline(

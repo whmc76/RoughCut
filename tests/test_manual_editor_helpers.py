@@ -27,7 +27,7 @@ from roughcut.api.jobs import (
 from roughcut.edit.otio_export import export_to_otio
 from roughcut.media.manual_editor_assets import _fallback_asset_status, _peak_from_pcm, _recommended_preview_gain, _thumbnail_timestamps
 from roughcut.pipeline.orchestrator import _artifact_types_for_quality_rerun
-from roughcut.pipeline.steps import _manual_editor_subtitle_items_from_editorial
+from roughcut.pipeline.steps import _manual_editor_subtitle_items_from_editorial, _projection_has_suspicious_subtitle_timing
 
 
 def test_manual_keep_segments_are_sorted_merged_and_clamped() -> None:
@@ -318,6 +318,39 @@ def test_manual_editor_projection_items_are_authoritative_for_render() -> None:
             "text_final": "manual",
         }
     ]
+
+
+def test_manual_editor_ignores_stored_projection_with_runaway_timing() -> None:
+    items = _manual_editor_subtitle_items_from_editorial(
+        {
+            "subtitle_projection": {
+                "items": [
+                    {"index": 0, "start_time": 41.709, "end_time": 52.656, "text_final": "因为这款啊非常"},
+                    {"index": 1, "start_time": 52.676, "end_time": 57.64, "text_final": "正常字幕长度"},
+                ]
+            }
+        }
+    )
+
+    assert items == []
+
+
+def test_manual_editor_rejects_short_subtitle_with_runaway_duration() -> None:
+    assert _projection_has_suspicious_subtitle_timing(
+        [
+            {"index": 0, "start_time": 41.709, "end_time": 52.656, "text_final": "因为这款啊非常"},
+            {"index": 1, "start_time": 52.676, "end_time": 57.64, "text_final": "正常字幕长度"},
+        ],
+        split_profile={"max_chars": 30, "max_duration": 5.0},
+    )
+
+    assert not _projection_has_suspicious_subtitle_timing(
+        [
+            {"index": 0, "start_time": 41.709, "end_time": 44.0, "text_final": "因为这款啊"},
+            {"index": 1, "start_time": 44.02, "end_time": 47.1, "text_final": "非常火爆"},
+        ],
+        split_profile={"max_chars": 30, "max_duration": 5.0},
+    )
 
 
 def test_manual_subtitle_rerun_preserves_reusable_render_artifacts() -> None:

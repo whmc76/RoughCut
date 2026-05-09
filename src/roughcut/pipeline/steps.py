@@ -3108,6 +3108,29 @@ def _project_canonical_transcript_to_timeline(
     return projected_entries
 
 
+def _projection_has_suspicious_subtitle_timing(
+    entries: list[dict[str, Any]],
+    *,
+    split_profile: dict[str, Any],
+) -> bool:
+    max_chars = int(split_profile.get("max_chars") or 30)
+    max_duration = float(split_profile.get("max_duration") or 5.0)
+    duration_limit = max(8.0, max_duration * 1.6)
+    compact_limit = max(8, int(max_chars * 0.45))
+    for entry in entries:
+        try:
+            start = float(entry.get("start_time", entry.get("start", 0.0)) or 0.0)
+            end = float(entry.get("end_time", entry.get("end", start)) or start)
+        except (TypeError, ValueError):
+            continue
+        duration = max(0.0, end - start)
+        text = str(entry.get("text_final") or entry.get("text_norm") or entry.get("text_raw") or entry.get("text") or "")
+        compact_len = len(re.sub(r"[\s，。！？!?；;：:,、（）()[]【】{}\"'《》<>]+", "", text))
+        if duration > duration_limit and compact_len <= compact_limit:
+            return True
+    return False
+
+
 async def _build_edited_subtitle_projection(
     session,
     *,
@@ -3130,7 +3153,10 @@ async def _build_edited_subtitle_projection(
         keep_segments,
         split_profile=split_profile,
     )
-    if projected_entries:
+    if projected_entries and not _projection_has_suspicious_subtitle_timing(
+        projected_entries,
+        split_profile=split_profile,
+    ):
         return projected_entries
     return remap_subtitles_to_timeline(fallback_subtitles, keep_segments)
 
@@ -3158,6 +3184,9 @@ def _manual_editor_subtitle_items_from_editorial(editorial_timeline: dict[str, A
                 "text_final": str(item.get("text_final") or item.get("text_norm") or item.get("text_raw") or ""),
             }
         )
+    split_profile = subtitle_projection.get("split_profile") if isinstance(subtitle_projection.get("split_profile"), dict) else {}
+    if _projection_has_suspicious_subtitle_timing(items, split_profile=split_profile):
+        return []
     return items
 
 
@@ -3216,8 +3245,13 @@ async def _load_latest_subtitle_payloads(
         job_id=job_id,
         fallback_items=None,
     )
-    if subtitle_dicts or not fallback_to_items:
-        return clean_subtitle_payloads(subtitle_dicts), projection_data
+    if subtitle_dicts:
+        cleaned_subtitles = clean_subtitle_payloads(subtitle_dicts)
+        split_profile = projection_data.get("split_profile") if isinstance(projection_data.get("split_profile"), dict) else {}
+        if not fallback_to_items or not _projection_has_suspicious_subtitle_timing(cleaned_subtitles, split_profile=split_profile):
+            return cleaned_subtitles, projection_data
+    elif not fallback_to_items:
+        return [], projection_data
     subtitle_items = await _load_subtitle_items(session, job_id=job_id)
     return clean_subtitle_payloads([_subtitle_item_payload(item) for item in subtitle_items]), {}
 

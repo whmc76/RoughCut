@@ -23,6 +23,8 @@ _MULTI_CHAR_ATOMIC_TOKENS = (
     "他妈",
     "这个",
     "那个",
+    "这款",
+    "那款",
     "特色",
     "手感",
     "设计",
@@ -288,11 +290,6 @@ def tokenize_alignment_text(text: str) -> list[str]:
     normalized = str(text or "").strip()
     if not normalized:
         return []
-
-    if " " in normalized:
-        spaced = [chunk.strip() for chunk in normalized.split() if chunk.strip()]
-        if len(spaced) >= 2:
-            return [_strip_outer_punctuation(chunk) for chunk in spaced if _strip_outer_punctuation(chunk)]
 
     tokens: list[str] = []
     for match in re.finditer(
