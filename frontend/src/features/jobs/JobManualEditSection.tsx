@@ -68,15 +68,21 @@ type TimelineThumbnailItem = {
   kept: boolean;
 };
 
-type FrequentTermKind = "名词/术语" | "动作词" | "描述词" | "专名/型号";
+type FrequentTermKind = "名词/术语" | "动作词" | "描述词" | "专名/型号" | "低置信词";
 
 type FrequentTerm = {
   term: string;
   normalized: string;
   count: number;
   kind: FrequentTermKind;
+  reviewPriority: number;
   subtitleIndexes: number[];
   occurrences: JobManualEditSubtitle[];
+};
+
+type FrequentTermBucket = FrequentTerm & {
+  entityContextCount: number;
+  unstableSubtitleCount: number;
 };
 
 type ManualEditUndoSnapshot = {
@@ -173,9 +179,60 @@ const TERM_STOPWORDS = new Set([
   "看到",
   "经常",
   "对比",
+  "东西",
+  "下来",
+  "上来",
+  "出来",
+  "进去",
+  "过去",
+  "起来",
+  "里面",
+  "外面",
+  "前面",
+  "后面",
+  "只会",
+  "只有",
+  "只要",
+  "只需",
+  "有点",
+  "确实",
+  "轻松",
+  "真的",
+  "应该",
+  "感觉",
+  "觉得",
+  "知道",
+  "认为",
+  "发现",
+  "比如",
   "非常",
   "为什么",
 ]);
+const TERM_COMMON_SPOKEN_PREFIX_RE = /^(这个|那个|这些|那些|这里|那里|这样|那样|这么|那么|然后|现在|其实|只是|就是|已经|还是|可能|可以|需要|应该|感觉|觉得|看到|看见|知道|发现|比较|非常|特别|真的|确实|只要|只有|只会|有点|一点|一下|一些|一个|一种|一段)/;
+const TERM_COMMON_SPOKEN_SUFFIX_RE = /(的话|一下|一点|一些|一个|一种|一段|出来|起来|下来|上来|进去|过去|而已)$/;
+const TERM_GENERIC_NOUNS = new Set([
+  "方式",
+  "地方",
+  "时候",
+  "情况",
+  "问题",
+  "部分",
+  "方面",
+  "位置",
+  "过程",
+  "原因",
+  "结果",
+  "程度",
+  "状态",
+  "东西",
+  "这边",
+  "那边",
+]);
+const TERM_LATIN_STOPWORDS = new Set(["ok", "okay", "yes", "no", "hi", "hello"]);
+const TERM_ENTITY_CONTEXT_RE = /(品牌|型号|机型|版本|版型|系列|配置|参数|规格|联名|合作|正品|旗舰|国行|美版|日版|欧版|叫做|叫|来自|出品|发布|升级|适配|兼容|Pro|Max|Plus|Ultra|Mini|Air|SE)/i;
+const TERM_DOMAIN_NOUN_RE = /(品牌|型号|机型|版本|版型|系列|配置|参数|规格|材质|工艺|镜头|画面|字幕|音频|视频|电池|接口|按钮|模式|设备|产品|主机|屏幕|外壳|包装|配件|工具|软件|系统|算法|模型|节点|工作流|数据|文件|素材|模板)$/;
+const TERM_PRODUCT_SUFFIX_RE = /[\u4e00-\u9fff]{1,}(器|机|仪|版|款|屏|镜|头|盒|包|架|线|片|件|料|胶|油|膜|粉|膏|液|水|刀|钳|笔|灯|卡|盘|芯|模|盖|壳)$/;
+const TERM_LOW_CONFIDENCE_SHAPE_RE = /([一-龥])\1{2,}|^[一-龥]{2}$|[A-Za-z0-9+#.-]*\d[A-Za-z0-9+#.-]*/;
 const TERM_VERB_HINTS = new Set([
   "上传",
   "保存",
@@ -483,17 +540,35 @@ function normalizeTermKey(term: string) {
   return term.trim().toLocaleLowerCase().replace(/\s+/g, "");
 }
 
+function compactTermText(term: string) {
+  return term.toLocaleLowerCase().replace(/[\s"'`.,!?;:，。！？、；：《》（）()【】[\]{}]+/g, "");
+}
+
 function cleanTermToken(term: string) {
   return term.replace(/^[\s"'`.,!?;:，。！？、；：《》（）()【】[\]{}]+|[\s"'`.,!?;:，。！？、；：《》（）()【】[\]{}]+$/g, "");
 }
 
+function isCommonSpokenTerm(term: string) {
+  const cleaned = cleanTermToken(term);
+  if (!cleaned) return true;
+  if (TERM_STOPWORDS.has(cleaned) || TERM_GENERIC_NOUNS.has(cleaned)) return true;
+  if (cleaned.length <= 4 && (TERM_COMMON_SPOKEN_PREFIX_RE.test(cleaned) || TERM_COMMON_SPOKEN_SUFFIX_RE.test(cleaned))) return true;
+  if (/^[这那它他她我你您咱][个些种样的]?$/.test(cleaned)) return true;
+  if (/^(怎么|怎样|为什么|什么|哪里|哪个|哪些|多少|这么|那么)/.test(cleaned)) return true;
+  if (/^(经常|一直|总是|已经|还是|就是|只是|比较|非常|特别|很多|一些|所有|每个)/.test(cleaned)) return true;
+  if (/^(除了|以及|而且|并且|或者|但是|不过|所以|因为)/.test(cleaned)) return true;
+  if (/^(不|没|无|非)[\u4e00-\u9fff]{1,2}$/.test(cleaned)) return true;
+  if (/^(看到|看见|觉得|感觉|知道|认为|发现|比如|对比)$/.test(cleaned)) return true;
+  if (/[的地得]$/.test(cleaned) && cleaned.length <= 3) return true;
+  return false;
+}
+
 function isMeaningfulTerm(term: string) {
   const cleaned = cleanTermToken(term);
-  if (!cleaned || TERM_STOPWORDS.has(cleaned)) return false;
+  if (!cleaned || isCommonSpokenTerm(cleaned)) return false;
   if (/^\d+(?:\.\d+)?$/.test(cleaned)) return false;
   if (/^[a-z]$/i.test(cleaned)) return false;
   if (/^[\u4e00-\u9fff]$/.test(cleaned)) return false;
-  if (/^[这那它他她我你您咱][个些种样的]?$/.test(cleaned)) return false;
   if (/^(怎么|怎样|为什么|什么|哪里|哪个|哪些|多少|这么|那么)/.test(cleaned)) return false;
   if (/^(经常|一直|总是|已经|还是|就是|只是|比较|非常|特别|很多|一些|所有|每个)/.test(cleaned)) return false;
   if (/^(除了|以及|而且|并且|或者|但是|不过|所以|因为)/.test(cleaned)) return false;
@@ -504,8 +579,71 @@ function isMeaningfulTerm(term: string) {
   return /[\u4e00-\u9fffA-Za-z]/.test(cleaned);
 }
 
-function classifyMeaningfulTerm(term: string): FrequentTermKind {
-  if (/[A-Za-z0-9]/.test(term)) return "专名/型号";
+function isModelOrBrandLikeTerm(term: string) {
+  const cleaned = cleanTermToken(term);
+  const normalized = normalizeTermKey(cleaned);
+  if (TERM_LATIN_STOPWORDS.has(normalized)) return false;
+  if (/[A-Za-z].*\d|\d.*[A-Za-z]/.test(cleaned)) return true;
+  if (/[A-Z]{2,}/.test(cleaned)) return true;
+  if (/[A-Za-z]/.test(cleaned) && /(pro|max|plus|ultra|mini|air|se|lite|gen|v\d+)$/i.test(cleaned)) return true;
+  if (/[A-Za-z]/.test(cleaned) && cleaned.length >= 3) return true;
+  if (/\d+(?:\.\d+)?(?:k|p|fps|hz|mm|cm|gb|tb|x)?$/i.test(cleaned) && /[A-Za-z0-9]/.test(cleaned)) return true;
+  return false;
+}
+
+function hasTermEntityContext(term: string, subtitles: JobManualEditSubtitle[]) {
+  return subtitles.some((subtitle) => {
+    const text = subtitleText(subtitle);
+    const index = text.indexOf(term);
+    if (index < 0) return false;
+    const windowText = text.slice(Math.max(0, index - 10), Math.min(text.length, index + term.length + 10));
+    return TERM_ENTITY_CONTEXT_RE.test(windowText);
+  });
+}
+
+function isDomainNounOrTerm(term: string, subtitles: JobManualEditSubtitle[]) {
+  const cleaned = cleanTermToken(term);
+  if (TERM_GENERIC_NOUNS.has(cleaned) || isCommonSpokenTerm(cleaned)) return false;
+  if (isModelOrBrandLikeTerm(cleaned)) return true;
+  if (TERM_DOMAIN_NOUN_RE.test(cleaned) || TERM_PRODUCT_SUFFIX_RE.test(cleaned)) return true;
+  if (cleaned.length >= 3 && hasTermEntityContext(cleaned, subtitles)) return true;
+  return false;
+}
+
+function subtitleHasUnstableText(subtitle: JobManualEditSubtitle) {
+  const variants = [subtitle.text_raw, subtitle.text_norm, subtitle.text_final]
+    .map((value) => compactTermText(String(value || "")))
+    .filter(Boolean);
+  return new Set(variants).size > 1;
+}
+
+function isLowConfidenceLikeTerm(term: string, bucket: FrequentTermBucket) {
+  if (bucket.unstableSubtitleCount >= 2 && bucket.unstableSubtitleCount / Math.max(1, bucket.occurrences.length) >= 0.35) return true;
+  if (bucket.count >= 4 && TERM_LOW_CONFIDENCE_SHAPE_RE.test(term) && !isCommonSpokenTerm(term)) return true;
+  return false;
+}
+
+function frequentTermReviewPriority(bucket: FrequentTermBucket) {
+  const term = bucket.term;
+  if (isCommonSpokenTerm(term)) return 0;
+  let priority = 0;
+  const modelLike = isModelOrBrandLikeTerm(term);
+  const domainLike = isDomainNounOrTerm(term, bucket.occurrences);
+  const lowConfidenceLike = isLowConfidenceLikeTerm(term, bucket);
+  if (modelLike) priority += 6;
+  if (domainLike) priority += 4;
+  if (lowConfidenceLike) priority += 3;
+  if (bucket.entityContextCount > 0) priority += 2;
+  if (bucket.count >= 5) priority += 1;
+  if (/^[\u4e00-\u9fff]{2}$/.test(term) && !modelLike && !domainLike && !lowConfidenceLike) priority -= 3;
+  if ((TERM_VERB_HINTS.has(term) || TERM_ADJECTIVE_HINTS.has(term)) && !lowConfidenceLike && !modelLike && !domainLike) priority -= 2;
+  return Math.max(0, priority);
+}
+
+function classifyMeaningfulTerm(term: string, bucket?: FrequentTermBucket): FrequentTermKind {
+  if (isModelOrBrandLikeTerm(term)) return "专名/型号";
+  if (bucket && isLowConfidenceLikeTerm(term, bucket) && !isDomainNounOrTerm(term, bucket.occurrences)) return "低置信词";
+  if (bucket && isDomainNounOrTerm(term, bucket.occurrences)) return "名词/术语";
   if (TERM_VERB_HINTS.has(term) || /(化|启动|生成|调整|修改|替换|识别|核对|渲染|合成|剪辑|发布)$/.test(term)) return "动作词";
   if (TERM_ADJECTIVE_HINTS.has(term) || /(高|低|快|慢|强|弱|好|坏|准|错|清晰|稳定|方便|完整|明显)$/.test(term)) return "描述词";
   return "名词/术语";
@@ -538,24 +676,30 @@ function tokenizeMeaningfulTerms(text: string) {
   return tokens;
 }
 
-function buildFrequentTerms(subtitles: JobManualEditSubtitle[]) {
-  const buckets = new Map<string, FrequentTerm>();
+export function buildFrequentTerms(subtitles: JobManualEditSubtitle[]) {
+  const buckets = new Map<string, FrequentTermBucket>();
   for (const subtitle of subtitles) {
     const seenInSubtitle = new Set<string>();
+    const unstableSubtitle = subtitleHasUnstableText(subtitle);
     for (const term of tokenizeMeaningfulTerms(subtitleText(subtitle))) {
       const normalized = normalizeTermKey(term);
       const existing = buckets.get(normalized) ?? {
         term,
         normalized,
         count: 0,
-        kind: classifyMeaningfulTerm(term),
+        kind: "名词/术语" as FrequentTermKind,
+        reviewPriority: 0,
         subtitleIndexes: [],
         occurrences: [],
+        entityContextCount: 0,
+        unstableSubtitleCount: 0,
       };
       existing.count += 1;
       if (!seenInSubtitle.has(normalized)) {
         existing.subtitleIndexes.push(subtitle.index);
         existing.occurrences.push(subtitle);
+        if (unstableSubtitle) existing.unstableSubtitleCount += 1;
+        if (hasTermEntityContext(term, [subtitle])) existing.entityContextCount += 1;
         seenInSubtitle.add(normalized);
       }
       buckets.set(normalized, existing);
@@ -563,7 +707,24 @@ function buildFrequentTerms(subtitles: JobManualEditSubtitle[]) {
   }
 
   return [...buckets.values()]
-    .sort((left, right) => right.count - left.count || left.term.localeCompare(right.term, "zh-Hans-CN"))
+    .map((bucket) => {
+      const reviewPriority = frequentTermReviewPriority(bucket);
+      return {
+        term: bucket.term,
+        normalized: bucket.normalized,
+        count: bucket.count,
+        kind: classifyMeaningfulTerm(bucket.term, bucket),
+        reviewPriority,
+        subtitleIndexes: bucket.subtitleIndexes,
+        occurrences: bucket.occurrences,
+      };
+    })
+    .filter((term) => term.reviewPriority >= 3)
+    .sort((left, right) => (
+      right.reviewPriority - left.reviewPriority
+      || right.count - left.count
+      || left.term.localeCompare(right.term, "zh-Hans-CN")
+    ))
     .slice(0, TERM_RESULT_LIMIT);
 }
 
@@ -2967,7 +3128,7 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
         <div className="manual-editor-preview-head">
           <div>
             <strong>高频词核对</strong>
-            <div className="muted compact-top">从当前输出字幕中统计高频候选词，按规则近似分类；批量替换会写入字幕修改并随保存重渲染。</div>
+            <div className="muted compact-top">优先显示低置信、术语名词、专名型号和英文品牌类候选；批量替换会写入字幕修改并随保存重渲染。</div>
           </div>
           <div className="manual-editor-actions">
             <label className="manual-editor-term-filter">

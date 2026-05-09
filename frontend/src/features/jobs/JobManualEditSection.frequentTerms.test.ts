@@ -1,0 +1,52 @@
+import { describe, expect, it } from "vitest";
+
+import { buildFrequentTerms } from "./JobManualEditSection";
+import type { JobManualEditSubtitle } from "../../types";
+
+function subtitle(index: number, text: string, patch?: Partial<JobManualEditSubtitle>): JobManualEditSubtitle {
+  return {
+    index,
+    start_time: index,
+    end_time: index + 1,
+    text_raw: text,
+    text_norm: text,
+    text_final: text,
+    ...patch,
+  };
+}
+
+describe("manual editor frequent term review candidates", () => {
+  it("filters common spoken words out of frequent review candidates", () => {
+    const terms = buildFrequentTerms([
+      subtitle(1, "我们再轻松一点只要打开这个版本"),
+      subtitle(2, "这个操作很轻松一点也不复杂"),
+      subtitle(3, "只要看到这里就可以开始"),
+      subtitle(4, "轻松一点只要这样就行"),
+    ]);
+
+    expect(terms.map((term) => term.term)).not.toEqual(expect.arrayContaining(["轻松", "一点", "只要"]));
+  });
+
+  it("keeps repeated model, brand, and domain terms", () => {
+    const terms = buildFrequentTerms([
+      subtitle(1, "这个 Sony A7C II 版本要核对"),
+      subtitle(2, "Sony A7C II 这个版本和参数不同"),
+      subtitle(3, "A7C II 的版本配置再看一下"),
+    ]);
+    const labels = terms.map((term) => term.term.toLowerCase());
+
+    expect(labels).toContain("sony");
+    expect(labels.some((term) => term.includes("a7c"))).toBe(true);
+    expect(terms.find((term) => term.term === "版本")?.kind).toBe("名词/术语");
+  });
+
+  it("keeps repeated terms from unstable subtitle rows as low-confidence candidates", () => {
+    const terms = buildFrequentTerms([
+      subtitle(1, "银色钛金属外壳", { text_raw: "银色太金属外壳", text_final: "银色钛金属外壳" }),
+      subtitle(2, "钛金属边框很轻", { text_raw: "太金属边框很轻", text_final: "钛金属边框很轻" }),
+      subtitle(3, "这个钛金属版本更稳", { text_raw: "这个太金属版本更稳", text_final: "这个钛金属版本更稳" }),
+    ]);
+
+    expect(terms.find((term) => term.term === "金属")?.kind).toBe("低置信词");
+  });
+});
