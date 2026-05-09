@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 from datetime import datetime, timezone
+import hashlib
 import shutil
 import subprocess
 import uuid
@@ -52,6 +53,9 @@ _RUN_PROGRESS_FLOORS: dict[str, float] = {
 }
 _COSYVOICE3_END_OF_PROMPT = "<|endofprompt|>"
 _MAX_REFERENCE_AUDIO_SEC = 30.0
+_REFERENCE_AUDIO_HISTORY_LIMIT = 5
+_REFERENCE_AUDIO_SUFFIXES = {".wav", ".mp3", ".m4a", ".aac", ".flac", ".ogg", ".opus"}
+_REFERENCE_VIDEO_SUFFIXES = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v"}
 _TTS_TEXT_UI_HINTS: tuple[str, ...] = (
     "需要 prompt_wav/reference_audio；只填写想要的口播指令，官方分隔符由后台自动补齐。",
     "需要 prompt_wav/reference_audio；只填写参考音频里实际说过的文本，官方分隔符由后台自动补齐。",
@@ -629,9 +633,27 @@ def _json_safe(value: Any) -> Any:
     return value
 
 
-def _list_reference_audio_history(limit: int = 24) -> list[dict[str, Any]]:
-    audio_suffixes = {".wav", ".mp3", ".m4a", ".aac", ".flac", ".ogg", ".opus"}
-    candidates: list[tuple[float, Path, str, float | None]] = []
+def _reference_audio_dedupe_key(path: Path, *, size: int, duration: float | None) -> str:
+    try:
+        digest = hashlib.sha1()
+        with path.open("rb") as handle:
+            while chunk := handle.read(1024 * 1024):
+                digest.update(chunk)
+        return f"sha1:{digest.hexdigest()}"
+    except OSError:
+        pass
+    try:
+        return f"path:{str(path.resolve()).casefold()}"
+    except OSError:
+        duration_key = "" if duration is None else f"{duration:.3f}"
+        return f"meta:{path.name.casefold()}:{size}:{duration_key}"
+
+
+def _list_reference_audio_history(limit: int = _REFERENCE_AUDIO_HISTORY_LIMIT) -> list[dict[str, Any]]:
+    if limit <= 0:
+        return []
+    audio_suffixes = _REFERENCE_AUDIO_SUFFIXES | _REFERENCE_VIDEO_SUFFIXES
+    candidates: list[tuple[float, Path, str, int, float | None]] = []
     roots = ((_UPLOAD_ROOT, "上传历史"), (_TTS_ROOT, "生成音频"))
     for root, source in roots:
         if not root.exists():
@@ -644,20 +666,30 @@ def _list_reference_audio_history(limit: int = 24) -> list[dict[str, Any]]:
             except OSError:
                 continue
             duration = _audio_duration_seconds(path)
-            candidates.append((stat.st_mtime, path, source, duration))
+            candidates.append((stat.st_mtime, path, source, stat.st_size, duration))
     candidates.sort(key=lambda item: item[0], reverse=True)
+    unique_candidates: list[tuple[float, Path, str, int, float | None]] = []
+    seen_keys: set[str] = set()
+    for updated_at, path, source, size, duration in candidates:
+        dedupe_key = _reference_audio_dedupe_key(path, size=size, duration=duration)
+        if dedupe_key in seen_keys:
+            continue
+        seen_keys.add(dedupe_key)
+        unique_candidates.append((updated_at, path, source, size, duration))
+        if len(unique_candidates) >= limit:
+            break
     return [
         {
             "name": path.name,
             "path": str(path),
             "source": source,
-            "size": path.stat().st_size,
+            "size": size,
             "duration": duration,
             "will_trim": (duration or 0.0) > _MAX_REFERENCE_AUDIO_SEC,
             "updated_at": datetime.fromtimestamp(updated_at, timezone.utc).isoformat(),
             "audio_url": f"/api/v1/tools/artifacts/{'tts' if source == '生成音频' else 'uploads'}/{path.name}",
         }
-        for updated_at, path, source, duration in candidates[:limit]
+        for updated_at, path, source, size, duration in unique_candidates
     ]
 
 
@@ -681,18 +713,31 @@ def _resolve_reference_audio_history_path(value: str) -> Path:
 
 
 def _prepare_reference_audio_for_cosyvoice(path: Path, *, run_id: str) -> Path:
+    suffix = path.suffix.lower()
     duration = _audio_duration_seconds(path)
-    if duration is None or duration <= _MAX_REFERENCE_AUDIO_SEC:
+    needs_conversion = suffix != ".wav"
+    needs_trimming = duration is not None and duration > _MAX_REFERENCE_AUDIO_SEC
+    if not needs_conversion and not needs_trimming:
         return path
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
-        raise RuntimeError(f"参考音频 {duration:.1f}s 超过 30s；需要 ffmpeg 自动去除开头静音并截取 30s")
+        if suffix in _REFERENCE_VIDEO_SUFFIXES:
+            raise RuntimeError("参考视频需要 ffmpeg 自动提取音频并转换为 CosyVoice3 可用的 WAV")
+        if needs_trimming and duration is not None:
+            raise RuntimeError(f"参考音频 {duration:.1f}s 超过 30s；需要 ffmpeg 自动去除开头静音并截取 30s")
+        raise RuntimeError("参考音频需要 ffmpeg 转换为 CosyVoice3 可用的 WAV")
     _REFERENCE_ROOT.mkdir(parents=True, exist_ok=True)
     output_path = _REFERENCE_ROOT / f"reference_{uuid.uuid4().hex[:12]}.wav"
+    if suffix in _REFERENCE_VIDEO_SUFFIXES:
+        detail = "正在从参考视频提取音频，转换为 16k 单声道 WAV"
+    elif needs_trimming and duration is not None:
+        detail = f"参考音频 {duration:.1f}s 超过 30s，正在去除开头静音并截取 30s"
+    else:
+        detail = "正在转换参考音频为 16k 单声道 WAV"
     _update_run_stage(
         run_id,
         "validate",
-        detail=f"参考音频 {duration:.1f}s 超过 30s，正在去除开头静音并截取 30s",
+        detail=detail,
         progress=0.12,
         reference_source=str(path),
         reference_duration=duration,
@@ -703,10 +748,13 @@ def _prepare_reference_audio_for_cosyvoice(path: Path, *, run_id: str) -> Path:
         "-y",
         "-i",
         str(path),
+        "-vn",
         "-af",
         "silenceremove=start_periods=1:start_duration=0.2:start_threshold=-45dB",
-        "-t",
-        str(_MAX_REFERENCE_AUDIO_SEC),
+    ]
+    if duration is None or needs_trimming:
+        command.extend(["-t", str(_MAX_REFERENCE_AUDIO_SEC)])
+    command.extend([
         "-ac",
         "1",
         "-ar",
@@ -714,7 +762,7 @@ def _prepare_reference_audio_for_cosyvoice(path: Path, *, run_id: str) -> Path:
         "-c:a",
         "pcm_s16le",
         str(output_path),
-    ]
+    ])
     result = subprocess.run(command, check=False, capture_output=True, text=True, timeout=90)
     if result.returncode != 0 or not output_path.exists() or output_path.stat().st_size <= 0:
         fallback_command = [
@@ -722,8 +770,11 @@ def _prepare_reference_audio_for_cosyvoice(path: Path, *, run_id: str) -> Path:
             "-y",
             "-i",
             str(path),
-            "-t",
-            str(_MAX_REFERENCE_AUDIO_SEC),
+            "-vn",
+        ]
+        if duration is None or needs_trimming:
+            fallback_command.extend(["-t", str(_MAX_REFERENCE_AUDIO_SEC)])
+        fallback_command.extend([
             "-ac",
             "1",
             "-ar",
@@ -731,7 +782,7 @@ def _prepare_reference_audio_for_cosyvoice(path: Path, *, run_id: str) -> Path:
             "-c:a",
             "pcm_s16le",
             str(output_path),
-        ]
+        ])
         fallback = subprocess.run(fallback_command, check=False, capture_output=True, text=True, timeout=90)
         if fallback.returncode != 0 or not output_path.exists() or output_path.stat().st_size <= 0:
             output_path.unlink(missing_ok=True)

@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { type ChangeEvent, FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
 import { useMutation, useQuery } from "@tanstack/react-query";
 
@@ -41,6 +41,8 @@ const toolOptionStorageKeys = {
   asr: "roughcut.tools.asr.options",
   avatar: "roughcut.tools.avatar.options",
 };
+
+const TTS_REFERENCE_HISTORY_LIMIT = 5;
 
 const cosyVoiceTtsModes = [
   {
@@ -340,6 +342,11 @@ function assetUrl(value?: string | null): string {
   return raw;
 }
 
+function isVideoReference(value?: string | null): boolean {
+  const raw = String(value || "").toLowerCase();
+  return /\.(mp4|mov|mkv|webm|avi|m4v)(?:[?#].*)?$/.test(raw);
+}
+
 function toneForStatus(status?: string) {
   return status === "online" || status === "success" || status === "completed" ? "status-ok" : status === "failed" ? "status-off" : "status-off";
 }
@@ -539,7 +546,18 @@ export function TtsToolPage() {
   const usesSpeakerId = selectedMode.key === "sft";
   const usesZeroShotSpeakerId = selectedMode.key === "zero_shot";
   const usesCrossLingualText = selectedMode.key === "cross_lingual";
-  const referenceHistoryItems = referenceHistory.data?.items ?? [];
+  const referenceHistoryItems = useMemo(() => {
+    const seen = new Set<string>();
+    const items: ToolTtsReferenceAudioItem[] = [];
+    for (const item of referenceHistory.data?.items ?? []) {
+      const key = item.path || item.audio_url || item.name;
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      items.push(item);
+      if (items.length >= TTS_REFERENCE_HISTORY_LIMIT) break;
+    }
+    return items;
+  }, [referenceHistory.data?.items]);
 
   const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -855,6 +873,46 @@ function ReferenceAudioPicker({
   onFileChange: () => void;
 }) {
   const selectedItem = items.find((item) => item.path === selectedPath);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  const [uploadPreview, setUploadPreview] = useState<{ url: string; name: string; type: string } | null>(null);
+  const selectedPreviewUrl = selectedItem?.audio_url ? assetUrl(selectedItem.audio_url) : uploadPreview?.url ?? "";
+  const selectedPreviewName = selectedItem?.name ?? uploadPreview?.name ?? "";
+  const selectedPreviewIsVideo = selectedItem
+    ? isVideoReference(selectedItem.name || selectedItem.audio_url || selectedItem.path)
+    : uploadPreview?.type.startsWith("video/") || isVideoReference(uploadPreview?.name);
+
+  useEffect(() => {
+    return () => {
+      if (uploadPreview?.url) URL.revokeObjectURL(uploadPreview.url);
+    };
+  }, [uploadPreview?.url]);
+
+  const clearUploadPreview = () => {
+    setUploadPreview((current) => {
+      if (current?.url) URL.revokeObjectURL(current.url);
+      return null;
+    });
+    if (inputRef.current) inputRef.current.value = "";
+  };
+
+  const handleHistorySelect = (path: string) => {
+    clearUploadPreview();
+    onSelect(path);
+  };
+
+  const handleFileChange = (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.currentTarget.files?.[0];
+    if (!file) {
+      clearUploadPreview();
+      return;
+    }
+    setUploadPreview((current) => {
+      if (current?.url) URL.revokeObjectURL(current.url);
+      return { url: URL.createObjectURL(file), name: file.name, type: file.type };
+    });
+    onFileChange();
+  };
+
   return (
     <div className="tts-reference-upload">
       <div className="tts-reference-upload-head">
@@ -865,10 +923,22 @@ function ReferenceAudioPicker({
           </button>
         ) : null}
       </div>
-      <input className="input" name="prompt_wav" type="file" accept="audio/*" required={required && !selectedPath} onChange={(event) => {
-        if (event.currentTarget.files && event.currentTarget.files.length > 0) onFileChange();
-      }} />
+      <input ref={inputRef} className="input" name="prompt_wav" type="file" accept="audio/*,video/*" required={required && !selectedPath} onChange={handleFileChange} />
+      <div className="muted compact">可上传音频或视频；视频会自动抽取音频并转换为参考音频。</div>
       {selectedItem ? <div className="mode-chip subtle">已选择历史：{selectedItem.name}</div> : null}
+      {selectedPreviewUrl ? (
+        <div className="tts-reference-preview">
+          <div className="tts-reference-preview-head">
+            <span>预览确认</span>
+            <span>{selectedPreviewName}</span>
+          </div>
+          {selectedPreviewIsVideo ? (
+            <video className="tts-reference-preview-media" controls src={selectedPreviewUrl} />
+          ) : (
+            <audio className="tts-reference-preview-media" controls src={selectedPreviewUrl} />
+          )}
+        </div>
+      ) : null}
       <div className="tts-reference-history">
         <div className="tts-reference-history-head">
           <span>历史文件</span>
@@ -881,7 +951,7 @@ function ReferenceAudioPicker({
                 key={item.path}
                 type="button"
                 className={item.path === selectedPath ? "tts-reference-history-item active" : "tts-reference-history-item"}
-                onClick={() => onSelect(item.path)}
+                onClick={() => handleHistorySelect(item.path)}
                 title={item.path}
               >
                 <strong>{item.name}</strong>

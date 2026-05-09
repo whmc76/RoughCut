@@ -358,6 +358,38 @@
   gap: 8px;
 }
 
+.tts-reference-preview {
+  display: grid;
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid rgba(37, 99, 235, 0.14);
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.tts-reference-preview-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.tts-reference-preview-head span:last-child {
+  overflow: hidden;
+  color: #173d72;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tts-reference-preview-media {
+  width: 100%;
+  max-height: 180px;
+  border-radius: 6px;
+}
+
 .tts-reference-history-head {
   color: var(--text-muted);
   font-size: 12px;
