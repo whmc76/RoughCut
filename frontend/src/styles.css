@@ -8292,7 +8292,7 @@ textarea.input {
   display: grid;
   grid-template-columns: minmax(0, 1.7fr) minmax(300px, 0.72fr);
   gap: 16px;
-  align-items: start;
+  align-items: stretch;
 }
 
 .manual-editor-video-column {
@@ -8874,9 +8874,11 @@ textarea.input {
 
 .manual-editor-subtitle-stage {
   display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
   gap: 10px;
   align-self: stretch;
   min-width: 0;
+  min-height: 0;
 }
 
 .manual-editor-subtitle-current {
@@ -9002,8 +9004,9 @@ textarea.input {
 
 .manual-editor-subtitle-list {
   display: grid;
+  align-content: start;
   gap: 8px;
-  max-height: 460px;
+  min-height: 0;
   overflow: auto;
 }
 

@@ -961,12 +961,7 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
     [activePreviewOutputTime, projection.remapped],
   );
 
-  const visibleSubtitles = useMemo(() => {
-    if (!projection.remapped.length) return [];
-    if (activeSubtitleIndex < 0) return projection.remapped.slice(0, 8);
-    const start = Math.max(0, activeSubtitleIndex - 2);
-    return projection.remapped.slice(start, start + 8);
-  }, [activeSubtitleIndex, projection.remapped]);
+  const visibleSubtitles = projection.remapped;
 
   const selectedSegment = effectiveSegments[selectedSegmentIndex] ?? effectiveSegments[0] ?? null;
   const totalOutputDuration = projection.totalDuration;
