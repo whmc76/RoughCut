@@ -973,6 +973,7 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
   const [sourceVideoSize, setSourceVideoSize] = useState<{ width: number; height: number } | null>(null);
   const [isPreviewFloating, setIsPreviewFloating] = useState(false);
   const [previewDockHeight, setPreviewDockHeight] = useState<number | null>(null);
+  const [previewFrameHeight, setPreviewFrameHeight] = useState<number | null>(null);
   const [floatingPreviewPosition, setFloatingPreviewPosition] = useState<FloatingPreviewPosition | null>(null);
   const [frequentTerms, setFrequentTerms] = useState<FrequentTerm[]>([]);
 
@@ -2285,6 +2286,28 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
 
   const previewDisabled = !previewVideoUrl;
   useEffect(() => {
+    const dock = previewDockRef.current;
+    const frame = dock?.querySelector<HTMLElement>(".manual-editor-video-frame") ?? null;
+    if (!dock || !frame || previewDisabled) {
+      setPreviewFrameHeight(null);
+      return;
+    }
+
+    const updatePreviewFrameHeight = () => {
+      const nextHeight = Math.max(280, Math.round(frame.getBoundingClientRect().height));
+      setPreviewFrameHeight((current) => (current != null && Math.abs(current - nextHeight) < 2 ? current : nextHeight));
+    };
+
+    updatePreviewFrameHeight();
+    const resizeObserver = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(updatePreviewFrameHeight);
+    resizeObserver?.observe(frame);
+    window.addEventListener("resize", updatePreviewFrameHeight);
+    return () => {
+      resizeObserver?.disconnect();
+      window.removeEventListener("resize", updatePreviewFrameHeight);
+    };
+  }, [currentVideoRotation, currentVideoTransform.aspect_ratio, previewDisabled, previewVideoUrl, sourceVideoSize]);
+  useEffect(() => {
     const updateFloatingState = () => {
       const dock = previewDockRef.current;
       if (!dock || previewDisabled) {
@@ -2367,6 +2390,9 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
         bottom: "auto",
       } as CSSProperties
     : rotatedPreviewStyle;
+  const subtitleStageStyle = previewFrameHeight
+    ? { "--manual-subtitle-stage-height": `${previewFrameHeight}px` } as CSSProperties
+    : undefined;
   const rotationDialogPreviewStyle = {
     ...buildRotatedPreviewStyle(rotationDraft),
     width: "min(100%, 420px)",
@@ -2833,7 +2859,7 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
               </div>
             </div>
 
-            <div className="manual-editor-subtitle-stage">
+            <div className="manual-editor-subtitle-stage" style={subtitleStageStyle}>
               <div className="muted">当前字幕</div>
               {selectedSubtitle ? (
                 <div className={classNames("manual-editor-subtitle-current", editingSubtitleIndex === selectedSubtitle.index && "editing")}>

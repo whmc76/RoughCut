@@ -8292,7 +8292,7 @@ textarea.input {
   display: grid;
   grid-template-columns: minmax(0, 1.7fr) minmax(300px, 0.72fr);
   gap: 16px;
-  align-items: stretch;
+  align-items: start;
 }
 
 .manual-editor-video-column {
@@ -8876,9 +8876,12 @@ textarea.input {
   display: grid;
   grid-template-rows: auto auto minmax(0, 1fr);
   gap: 10px;
-  align-self: stretch;
+  align-self: start;
+  height: var(--manual-subtitle-stage-height, min(460px, 70vh));
+  max-height: var(--manual-subtitle-stage-height, min(460px, 70vh));
   min-width: 0;
   min-height: 0;
+  overflow: hidden;
 }
 
 .manual-editor-subtitle-current {
@@ -9324,6 +9327,12 @@ textarea.input {
 
   .manual-editor-preview-main {
     grid-template-columns: 1fr;
+  }
+
+  .manual-editor-subtitle-stage {
+    height: auto;
+    max-height: none;
+    overflow: visible;
   }
 
   .manual-editor-subtitle-list {
