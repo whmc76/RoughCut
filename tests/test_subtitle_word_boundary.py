@@ -47,10 +47,13 @@ def test_analyzes_common_product_review_word_splits_without_jieba_dependency() -
 
 
 def test_alignment_tokenizer_keeps_common_chinese_words_atomic() -> None:
-    tokens = tokenize_alignment_text("我们他妈这个特色手感和狐蝠工业版本")
+    tokens = tokenize_alignment_text("我们他妈这个迷你老大哥天敌特色手感和狐蝠工业版本")
 
     assert "我们" in tokens
     assert "他妈" in tokens
+    assert "迷你" in tokens
+    assert "老大哥" in tokens
+    assert "天敌" in tokens
     assert "特色" in tokens
     assert "手感" in tokens
     assert "狐蝠工业" in tokens

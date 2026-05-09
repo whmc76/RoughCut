@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import difflib
+import re
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any
@@ -604,41 +605,22 @@ def _build_canonical_transcript_words(
         return ()
 
     reference_tokens = _expand_reference_tokens(reference_words)
+    baseline_words = _build_proportional_canonical_words(
+        tokens,
+        start=start,
+        end=end,
+        strategy="segment_span_proportional",
+    )
     if not reference_tokens:
-        return _build_proportional_canonical_words(
-            tokens,
-            start=start,
-            end=end,
-            strategy="segment_span_proportional",
-        )
+        return baseline_words
 
-    words: list[CanonicalTranscriptWord | None] = [None] * len(tokens)
-    reference_text = [token["word"] for token in reference_tokens]
-    matcher = difflib.SequenceMatcher(a=reference_text, b=tokens, autojunk=False)
-    for tag, source_start, source_end, target_start, target_end in matcher.get_opcodes():
-        if tag == "delete":
-            continue
-        source_count = source_end - source_start
-        target_count = target_end - target_start
-        if source_count <= 0 or target_count <= 0 or source_count != target_count:
-            continue
-        strategy = "reference_word_match" if tag == "equal" else "reference_word_replace"
-        for offset in range(target_count):
-            reference_token = reference_tokens[source_start + offset]
-            words[target_start + offset] = CanonicalTranscriptWord(
-                word=tokens[target_start + offset],
-                start=round(float(reference_token["start"]), 3),
-                end=round(float(reference_token["end"]), 3),
-                alignment={
-                    "source": "canonical_realign",
-                    "strategy": strategy,
-                    "token_index": target_start + offset,
-                    "token_count": len(tokens),
-                    "reference_word": reference_token["source_word"],
-                    "reference_token": reference_token["word"],
-                    "reference_index": int(reference_token["source_index"]),
-                },
-            )
+    words: list[CanonicalTranscriptWord | None] = _build_canonical_words_from_reference_units(
+        tokens,
+        reference_tokens=reference_tokens,
+        baseline_words=baseline_words,
+        segment_start=float(start),
+        segment_end=float(end),
+    )
 
     reference_span_start = max(float(start), min(float(token["start"]) for token in reference_tokens))
     reference_span_end = min(float(end), max(float(token["end"]) for token in reference_tokens))
@@ -657,13 +639,20 @@ def _build_canonical_transcript_words(
         block_tokens = tokens[missing_start:missing_end]
         left_anchor = words[missing_start - 1].end if missing_start > 0 and words[missing_start - 1] is not None else reference_span_start
         right_anchor = words[missing_end].start if missing_end < len(words) and words[missing_end] is not None else reference_span_end
-        if right_anchor < left_anchor:
-            right_anchor = left_anchor
+        block_start, block_end, strategy = _resolve_canonical_interpolation_span(
+            baseline_words,
+            missing_start=missing_start,
+            missing_end=missing_end,
+            left_anchor=float(left_anchor),
+            right_anchor=float(right_anchor),
+            segment_start=float(start),
+            segment_end=float(end),
+        )
         block_words = _build_proportional_canonical_words(
             block_tokens,
-            start=left_anchor,
-            end=right_anchor,
-            strategy="reference_span_interpolate",
+            start=block_start,
+            end=block_end,
+            strategy=strategy,
             token_offset=missing_start,
             token_count=len(tokens),
         )
@@ -671,7 +660,253 @@ def _build_canonical_transcript_words(
             words[missing_start + offset] = word
         missing_start = missing_end
 
-    return tuple(word for word in words if word is not None)
+    return _normalize_canonical_word_timeline(
+        tuple(word for word in words if word is not None),
+        segment_start=float(start),
+        segment_end=float(end),
+    )
+
+
+def _build_canonical_words_from_reference_units(
+    tokens: list[str],
+    *,
+    reference_tokens: tuple[dict[str, Any], ...],
+    baseline_words: tuple[CanonicalTranscriptWord, ...],
+    segment_start: float,
+    segment_end: float,
+) -> list[CanonicalTranscriptWord | None]:
+    reference_units = _expand_reference_alignment_units(reference_tokens)
+    target_units = _expand_target_alignment_units(tokens)
+    if not reference_units or not target_units:
+        return [None] * len(tokens)
+
+    matches_by_token: dict[int, list[dict[str, Any]]] = {}
+    matcher = difflib.SequenceMatcher(
+        a=[str(unit["unit"]) for unit in reference_units],
+        b=[str(unit["unit"]) for unit in target_units],
+        autojunk=False,
+    )
+    for tag, source_start, source_end, target_start, target_end in matcher.get_opcodes():
+        if tag != "equal":
+            continue
+        match_count = min(source_end - source_start, target_end - target_start)
+        for offset in range(match_count):
+            target_unit = target_units[target_start + offset]
+            reference_unit = reference_units[source_start + offset]
+            matches_by_token.setdefault(int(target_unit["token_index"]), []).append(reference_unit)
+
+    words: list[CanonicalTranscriptWord | None] = [None] * len(tokens)
+    for token_index, token in enumerate(tokens):
+        token_unit_count = sum(1 for unit in target_units if int(unit["token_index"]) == token_index)
+        reference_matches = matches_by_token.get(token_index, [])
+        matched_word = _build_reference_matched_canonical_word(
+            token,
+            token_index=token_index,
+            token_count=len(tokens),
+            token_unit_count=token_unit_count,
+            reference_matches=reference_matches,
+            baseline_word=baseline_words[token_index],
+            segment_start=segment_start,
+            segment_end=segment_end,
+        )
+        if matched_word is not None:
+            words[token_index] = matched_word
+    return words
+
+
+def _build_reference_matched_canonical_word(
+    token: str,
+    *,
+    token_index: int,
+    token_count: int,
+    token_unit_count: int,
+    reference_matches: list[dict[str, Any]],
+    baseline_word: CanonicalTranscriptWord,
+    segment_start: float,
+    segment_end: float,
+) -> CanonicalTranscriptWord | None:
+    if token_unit_count <= 0 or not reference_matches:
+        return None
+    coverage = len(reference_matches) / max(1, token_unit_count)
+    if not _canonical_token_match_is_reliable(token, coverage=coverage, token_unit_count=token_unit_count):
+        return None
+    starts = [float(item["start"]) for item in reference_matches]
+    ends = [float(item["end"]) for item in reference_matches]
+    match_start = max(segment_start, min(starts))
+    match_end = min(segment_end, max(ends))
+    if match_end <= match_start:
+        return None
+    if not _canonical_reference_match_is_temporally_plausible(
+        match_start=match_start,
+        match_end=match_end,
+        baseline_word=baseline_word,
+        segment_start=segment_start,
+        segment_end=segment_end,
+    ):
+        return None
+    first_reference = min(reference_matches, key=lambda item: (float(item["start"]), int(item["source_index"])))
+    last_reference = max(reference_matches, key=lambda item: (float(item["end"]), int(item["source_index"])))
+    return CanonicalTranscriptWord(
+        word=token,
+        start=round(match_start, 3),
+        end=round(max(match_start, match_end), 3),
+        alignment={
+            "source": "canonical_realign",
+            "strategy": "reference_unit_match",
+            "token_index": token_index,
+            "token_count": token_count,
+            "coverage": round(float(coverage), 4),
+            "reference_word": str(first_reference.get("source_word") or ""),
+            "reference_token": str(first_reference.get("reference_token") or ""),
+            "reference_index": int(first_reference.get("source_index") or 0),
+            "reference_end_word": str(last_reference.get("source_word") or ""),
+            "reference_end_index": int(last_reference.get("source_index") or 0),
+        },
+    )
+
+
+_WEAK_CANONICAL_ANCHOR_TOKENS = {
+    "的", "了", "呢", "吗", "嘛", "啊", "呀", "哦", "哈", "把", "给", "在", "向", "和", "与", "及",
+    "就", "也", "还", "很", "都", "又", "才", "再", "并", "跟", "让", "被", "地", "得", "是", "有",
+    "我", "你", "他", "她", "它", "这", "那", "会", "要", "能", "可", "先",
+}
+
+
+def _canonical_token_match_is_reliable(token: str, *, coverage: float, token_unit_count: int) -> bool:
+    stripped = _strip_canonical_alignment_punctuation(token)
+    if not stripped:
+        return False
+    if token_unit_count <= 1:
+        return bool(re.search(r"[A-Za-z0-9]", stripped)) and coverage >= 1.0
+    if stripped in _WEAK_CANONICAL_ANCHOR_TOKENS:
+        return False
+    if re.fullmatch(r"[A-Za-z0-9_\-./]+", stripped):
+        return coverage >= 0.67
+    return coverage >= 0.6
+
+
+def _canonical_reference_match_is_temporally_plausible(
+    *,
+    match_start: float,
+    match_end: float,
+    baseline_word: CanonicalTranscriptWord,
+    segment_start: float,
+    segment_end: float,
+) -> bool:
+    segment_duration = max(0.001, float(segment_end) - float(segment_start))
+    tolerance = min(6.0, max(1.25, segment_duration * 0.20))
+    match_midpoint = (float(match_start) + float(match_end)) * 0.5
+    baseline_midpoint = (float(baseline_word.start) + float(baseline_word.end)) * 0.5
+    if abs(match_midpoint - baseline_midpoint) > tolerance:
+        return False
+    return True
+
+
+def _resolve_canonical_interpolation_span(
+    baseline_words: tuple[CanonicalTranscriptWord, ...],
+    *,
+    missing_start: int,
+    missing_end: int,
+    left_anchor: float,
+    right_anchor: float,
+    segment_start: float,
+    segment_end: float,
+) -> tuple[float, float, str]:
+    baseline_start = float(baseline_words[missing_start].start)
+    baseline_end = float(baseline_words[missing_end - 1].end)
+    if right_anchor < left_anchor:
+        return float(left_anchor), float(left_anchor), "reference_span_interpolate"
+    anchor_duration = max(0.0, float(right_anchor) - float(left_anchor))
+    baseline_duration = max(0.001, baseline_end - baseline_start)
+    anchor_midpoint = (float(left_anchor) + float(right_anchor)) * 0.5
+    baseline_midpoint = (baseline_start + baseline_end) * 0.5
+    segment_duration = max(0.001, float(segment_end) - float(segment_start))
+    if anchor_duration < baseline_duration * 0.45:
+        return _clamp_canonical_baseline_span_to_anchors(
+            baseline_start,
+            baseline_end,
+            left_anchor=left_anchor,
+            right_anchor=right_anchor,
+        )
+    if abs(anchor_midpoint - baseline_midpoint) > min(6.0, max(1.5, segment_duration * 0.22)):
+        return _clamp_canonical_baseline_span_to_anchors(
+            baseline_start,
+            baseline_end,
+            left_anchor=left_anchor,
+            right_anchor=right_anchor,
+        )
+    return float(left_anchor), float(right_anchor), "reference_span_interpolate"
+
+
+def _clamp_canonical_baseline_span_to_anchors(
+    baseline_start: float,
+    baseline_end: float,
+    *,
+    left_anchor: float,
+    right_anchor: float,
+) -> tuple[float, float, str]:
+    resolved_start = float(baseline_start)
+    resolved_end = float(baseline_end)
+    if right_anchor <= left_anchor:
+        anchor = float(left_anchor)
+        return anchor, anchor, "reference_span_interpolate"
+    if resolved_end <= left_anchor and right_anchor > left_anchor:
+        return float(left_anchor), float(right_anchor), "reference_span_interpolate"
+    if resolved_start >= right_anchor and right_anchor > left_anchor:
+        return float(left_anchor), float(right_anchor), "reference_span_interpolate"
+    if left_anchor <= resolved_end and resolved_start < left_anchor:
+        resolved_start = float(left_anchor)
+    if right_anchor >= resolved_start and resolved_end > right_anchor:
+        resolved_end = float(right_anchor)
+    if resolved_end <= resolved_start and right_anchor > left_anchor:
+        return float(left_anchor), float(right_anchor), "reference_span_interpolate"
+    return resolved_start, max(resolved_start, resolved_end), "segment_span_proportional"
+
+
+_CANONICAL_MIN_WORD_DURATION_SEC = 0.04
+
+
+def _normalize_canonical_word_timeline(
+    words: tuple[CanonicalTranscriptWord, ...],
+    *,
+    segment_start: float,
+    segment_end: float,
+) -> tuple[CanonicalTranscriptWord, ...]:
+    if not words:
+        return ()
+    segment_start = float(segment_start)
+    segment_end = max(segment_start, float(segment_end))
+    segment_duration = max(0.0, segment_end - segment_start)
+    min_duration = min(_CANONICAL_MIN_WORD_DURATION_SEC, segment_duration / max(len(words) * 2, 1))
+    cursor = segment_start
+    normalized: list[CanonicalTranscriptWord] = []
+    for word in words:
+        original_start = float(word.start)
+        original_end = float(word.end)
+        start = max(segment_start, original_start, cursor)
+        end = max(start, original_end)
+        if min_duration > 0 and end - start < min_duration:
+            end = start + min_duration
+        if end > segment_end:
+            end = segment_end
+            if min_duration > 0 and end - start < min_duration:
+                start = max(cursor, end - min_duration)
+                start = min(start, end)
+        start = round(max(segment_start, min(start, segment_end)), 3)
+        end = round(max(start, min(end, segment_end)), 3)
+        alignment = dict(word.alignment)
+        if abs(start - original_start) > 0.0005 or abs(end - original_end) > 0.0005:
+            alignment["timing_normalized"] = True
+        normalized.append(
+            CanonicalTranscriptWord(
+                word=word.word,
+                start=start,
+                end=end,
+                alignment=alignment,
+            )
+        )
+        cursor = end
+    return tuple(normalized)
 
 
 def _build_proportional_canonical_words(
@@ -828,6 +1063,57 @@ def _expand_reference_tokens(reference_words: tuple[dict[str, Any], ...]) -> tup
                 }
             )
     return tuple(tokens)
+
+
+def _expand_reference_alignment_units(reference_tokens: tuple[dict[str, Any], ...]) -> list[dict[str, Any]]:
+    units: list[dict[str, Any]] = []
+    for reference in reference_tokens:
+        text_units = _canonical_alignment_units(str(reference.get("word") or ""))
+        if not text_units:
+            continue
+        start = float(reference.get("start") or 0.0)
+        end = max(start, float(reference.get("end", start) or start))
+        duration = max(0.0, end - start)
+        unit_span = duration / max(len(text_units), 1)
+        for unit_index, unit in enumerate(text_units):
+            unit_start = start + unit_index * unit_span
+            unit_end = end if unit_index == len(text_units) - 1 else unit_start + unit_span
+            units.append(
+                {
+                    "unit": unit,
+                    "start": round(unit_start, 3),
+                    "end": round(max(unit_start, unit_end), 3),
+                    "source_word": str(reference.get("source_word") or reference.get("word") or ""),
+                    "reference_token": str(reference.get("word") or ""),
+                    "source_index": int(reference.get("source_index") or 0),
+                }
+            )
+    return units
+
+
+def _expand_target_alignment_units(tokens: list[str]) -> list[dict[str, Any]]:
+    units: list[dict[str, Any]] = []
+    for token_index, token in enumerate(tokens):
+        for unit_index, unit in enumerate(_canonical_alignment_units(token)):
+            units.append(
+                {
+                    "unit": unit,
+                    "token_index": token_index,
+                    "unit_index": unit_index,
+                }
+            )
+    return units
+
+
+def _canonical_alignment_units(text: str) -> list[str]:
+    compact = _strip_canonical_alignment_punctuation(text)
+    if not compact:
+        return []
+    return [char.lower() for char in compact if char.strip()]
+
+
+def _strip_canonical_alignment_punctuation(text: str) -> str:
+    return re.sub(r"[\s，。！？!?；;：:,、（）()[]【】{}\"'《》<>]+", "", str(text or "").strip())
 
 
 def _canonical_word_weight(token: str) -> float:

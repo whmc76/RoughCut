@@ -2822,6 +2822,8 @@ def _resolve_projection_split_profile(projection_data: dict[str, Any] | None, me
 
 _CANONICAL_WORD_MIN_KEEP_OVERLAP_RATIO = 0.35
 _CANONICAL_WORD_MIN_KEEP_OVERLAP_SEC = 0.035
+_CANONICAL_COLLAPSED_TIMING_MIN_UNITS = 14
+_CANONICAL_COLLAPSED_TIMING_MAX_WINDOW_SEC = 0.9
 
 
 def _build_fallback_canonical_words(segment: dict[str, Any]) -> list[dict[str, Any]]:
@@ -2862,6 +2864,43 @@ def _projected_word_time_bounds(word: dict[str, Any]) -> tuple[float, float]:
     except (TypeError, ValueError):
         end = start
     return start, max(start, end)
+
+
+def _canonical_segment_words_have_collapsed_timing(
+    words: list[dict[str, Any]],
+    *,
+    split_profile: dict[str, Any],
+) -> bool:
+    timed_words: list[tuple[float, float, int]] = []
+    for word in list(words or []):
+        text_units = _projected_word_compact_length(str(word.get("word") or ""))
+        if text_units <= 0:
+            continue
+        start, end = _projected_word_time_bounds(word)
+        if end <= start:
+            continue
+        timed_words.append((start, end, text_units))
+    if len(timed_words) < 4:
+        return False
+
+    timed_words.sort(key=lambda item: (item[0], item[1]))
+    max_chars = int(split_profile.get("max_chars") or 30)
+    min_units = max(
+        _CANONICAL_COLLAPSED_TIMING_MIN_UNITS,
+        int(max_chars * 0.55),
+    )
+
+    for start_index, (window_start, _window_end, _units) in enumerate(timed_words):
+        total_units = 0
+        for end_index in range(start_index, len(timed_words)):
+            total_units += timed_words[end_index][2]
+            if total_units < min_units:
+                continue
+            window_duration = max(0.0, timed_words[end_index][1] - window_start)
+            if window_duration <= _CANONICAL_COLLAPSED_TIMING_MAX_WINDOW_SEC:
+                return True
+            break
+    return False
 
 
 def _projected_word_needs_forced_split(
@@ -2981,7 +3020,12 @@ def _project_canonical_transcript_to_timeline(
             for word in list(segment.get("words") or [])
             if isinstance(word, dict) and str(word.get("word") or "").strip()
         ]
-        if not segment_words:
+        if segment_words and _canonical_segment_words_have_collapsed_timing(
+            segment_words,
+            split_profile=split_profile,
+        ):
+            segment_words = _build_fallback_canonical_words(segment)
+        elif not segment_words:
             segment_words = _build_fallback_canonical_words(segment)
         for word_index, word in enumerate(segment_words):
             word.setdefault("word_index", word_index)
