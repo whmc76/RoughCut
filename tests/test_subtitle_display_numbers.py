@@ -1,9 +1,13 @@
+from roughcut.pipeline.steps import _build_projection_items_from_entries
+from roughcut.speech.subtitle_segmentation import SubtitleEntry
+from roughcut.speech.subtitle_segmentation import _repair_cross_boundary_spoken_digit_runs
 from roughcut.speech.subtitle_segmentation import normalize_display_numbers
 from roughcut.speech.subtitle_segmentation import normalize_display_text
 
 
 def test_subtitle_numeral_transcription_uses_arabic_for_codes_and_specs() -> None:
     assert normalize_display_numbers("这个EDC幺七和MT三四都在桌上") == "这个EDC17和MT34都在桌上"
+    assert normalize_display_numbers("这个幺七 幺7 零幺六都在桌上") == "这个17 17 016都在桌上"
     assert normalize_display_numbers("编号零六 零零号 二零二六年") == "编号06 00号 2026年"
     assert normalize_display_numbers("百分之三十 第十七代 三百流明") == "30% 第17代 300流明"
     assert normalize_display_numbers("八千流明 一万流明") == "8000流明 10000流明"
@@ -32,3 +36,63 @@ def test_subtitle_numeral_transcription_keeps_natural_chinese_quantities() -> No
 
 def test_display_text_applies_only_numeral_transcription_not_term_rewrites() -> None:
     assert normalize_display_text("这是EDC幺七的威虎版") == "这是EDC17的威虎版"
+
+
+def test_canonical_projection_items_keep_final_text_numeral_transcribed() -> None:
+    items = _build_projection_items_from_entries(
+        [
+            SubtitleEntry(
+                index=0,
+                start=0.0,
+                end=1.0,
+                text_raw="这是EDC幺七和零幺六都在桌上",
+                text_norm="这是EDC幺七和零幺六都在桌上",
+            )
+        ]
+    )
+
+    assert items[0].text_raw == "这是EDC幺七和零幺六都在桌上"
+    assert items[0].text_final == "这是EDC17和016都在桌上"
+
+
+def test_cross_boundary_spoken_digit_runs_are_transcribed_without_term_special_cases() -> None:
+    entries = [
+        SubtitleEntry(
+            index=0,
+            start=0.0,
+            end=1.0,
+            text_raw="我的选择就是这个幺",
+            text_norm="我的选择就是这个幺。",
+        ),
+        SubtitleEntry(
+            index=1,
+            start=1.0,
+            end=2.0,
+            text_raw="七还有一个零九",
+            text_norm="七还有一个09。",
+        ),
+    ]
+
+    repaired = _repair_cross_boundary_spoken_digit_runs(entries)
+
+    assert repaired[0].text_raw == "我的选择就是这个幺"
+    assert repaired[0].text_norm == "我的选择就是这个17。"
+    assert repaired[1].text_raw == "七还有一个零九"
+    assert repaired[1].text_norm == "还有一个09。"
+
+
+def test_projection_items_prefer_display_text_over_raw_asr_for_quality() -> None:
+    items = _build_projection_items_from_entries(
+        [
+            SubtitleEntry(
+                index=0,
+                start=0.0,
+                end=1.0,
+                text_raw="我的选择就是这个幺",
+                text_norm="我的选择就是这个17。",
+            )
+        ]
+    )
+
+    assert items[0].text_raw == "我的选择就是这个幺"
+    assert items[0].text_final == "我的选择就是这个17。"

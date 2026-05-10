@@ -703,6 +703,13 @@ def _collect_identity_narrative_conflicts(profile: dict[str, Any]) -> list[str]:
         value = profile.get(field_name)
         if not isinstance(value, str) or not value.strip():
             continue
+        if _identity_narrative_field_allows_comparison_target(
+            field_name,
+            value,
+            brand=brand,
+            model=model,
+        ):
+            continue
         if _text_conflicts_with_verified_identity(
             value,
             brand=brand,
@@ -722,6 +729,20 @@ def _collect_identity_narrative_conflicts(profile: dict[str, Any]) -> list[str]:
             conflicts.append("cover_title")
     seen: set[str] = set()
     return [field for field in conflicts if not (field in seen or seen.add(field))]
+
+
+def _identity_narrative_field_allows_comparison_target(
+    field_name: str,
+    text: str,
+    *,
+    brand: str,
+    model: str,
+) -> bool:
+    if field_name not in {"video_theme", "summary", "hook_line"}:
+        return False
+    if not any(keyword in str(text or "") for keyword in _COMPARISON_KEYWORDS):
+        return False
+    return any(value and _contains_normalized(text, value) for value in (brand, model))
 
 
 def _collect_entity_catalog_signals(profile: dict[str, Any]) -> dict[str, Any]:

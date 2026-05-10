@@ -2417,15 +2417,17 @@ def _build_projection_entries_from_subtitle_items(
 def _build_projection_items_from_entries(entries: list[SubtitleEntry]) -> list[SimpleNamespace]:
     projection_items: list[SimpleNamespace] = []
     for index, entry in enumerate(list(entries or [])):
-        display_text = str(getattr(entry, "text_raw", "") or "")
+        raw_text = str(getattr(entry, "text_raw", "") or "")
+        normalized_text = str(getattr(entry, "text_norm", "") or raw_text)
+        display_norm = normalize_display_text(normalized_text)
         projection_items.append(
             SimpleNamespace(
                 item_index=int(getattr(entry, "index", index) or index),
                 start_time=float(getattr(entry, "start", 0.0) or 0.0),
                 end_time=float(getattr(entry, "end", 0.0) or 0.0),
-                text_raw=display_text,
-                text_norm=str(getattr(entry, "text_norm", None) or normalize_display_text(display_text)),
-                text_final=display_text,
+                text_raw=raw_text,
+                text_norm=display_norm,
+                text_final=display_norm,
                 words=tuple(getattr(entry, "words", ()) or ()),
             )
         )

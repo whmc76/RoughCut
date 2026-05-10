@@ -417,6 +417,16 @@ _CHINESE_DIGIT_SEQUENCE_RE = re.compile(
     r"(?<![A-Za-z0-9])(?P<number>[零〇幺一二两三四五六七八九]{2,})"
     r"(?=(?:号|款|版|年|月|日|集|期|代|[\s，,。.!！？；;：:]|$))"
 )
+_SPOKEN_DIGIT_RUN_RE = re.compile(
+    r"(?<![A-Za-z0-9])(?P<number>[零〇幺一二两三四五六七八九\d]*幺[零〇幺一二两三四五六七八九\d]{1,5})"
+)
+_SPOKEN_DIGIT_CHAR_CLASS = "零〇幺一二两三四五六七八九0-9"
+_SPLIT_SPOKEN_DIGIT_LEFT_RE = re.compile(
+    rf"^(?P<prefix>.*?)(?P<digits>[{_SPOKEN_DIGIT_CHAR_CLASS}]{{0,5}}幺[{_SPOKEN_DIGIT_CHAR_CLASS}]*)[，,。.!！？；;：:\s]*$"
+)
+_SPLIT_SPOKEN_DIGIT_RIGHT_RE = re.compile(
+    rf"^[，,。.!！？；;：:\s]*(?P<digits>[{_SPOKEN_DIGIT_CHAR_CLASS}]{{1,5}})(?P<suffix>.*)$"
+)
 _SAFE_DISPLAY_TERM_REPLACEMENTS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"威虎版(?=(?:的|这个|本|外观|手感|处理|工艺|版本|区别|对比|,|，|。|$))"), "微弧版"),
     (re.compile(r"(?<![A-Za-z0-9])CAC(?=(?:的|外壳|壳体|机身|工艺|切削|精雕|加工|结构|边角|铝合金|中框|骨架))", re.IGNORECASE), "CNC"),
@@ -1289,6 +1299,7 @@ def transcribe_subtitle_numerals(text: str) -> str:
     result = _collapse_repeated_model_number_tokens(result)
     result = _normalize_time_tokens(result)
     result = _normalize_decimal_quantity_tokens(result)
+    result = _normalize_spoken_digit_runs(result)
     result = _normalize_chinese_digit_sequences(result)
 
     def replace_percent(match: re.Match[str]) -> str:
@@ -1436,6 +1447,14 @@ def _normalize_chinese_digit_sequences(text: str) -> str:
         return _normalize_numeric_token(raw_number) or raw_number
 
     return _CHINESE_DIGIT_SEQUENCE_RE.sub(replace_sequence, text)
+
+
+def _normalize_spoken_digit_runs(text: str) -> str:
+    def replace_sequence(match: re.Match[str]) -> str:
+        raw_number = str(match.group("number") or "")
+        return _normalize_digit_sequence_token(raw_number) or raw_number
+
+    return _SPOKEN_DIGIT_RUN_RE.sub(replace_sequence, text)
 
 
 def _format_natural_single_quantity(number_token: str, normalized_number: str, unit: str, tail_text: str) -> str:
@@ -2808,7 +2827,76 @@ def _cleanup_subtitle_entries(entries: list[SubtitleEntry]) -> list[SubtitleEntr
                 words=tuple(entry.words or ()),
             )
         )
-    return _merge_short_bridge_entries(_collapse_repeated_sequence_entries(cleaned))
+    collapsed = _merge_short_bridge_entries(_collapse_repeated_sequence_entries(cleaned))
+    return _repair_cross_boundary_spoken_digit_runs(collapsed)
+
+
+def _repair_cross_boundary_spoken_digit_runs(entries: list[SubtitleEntry]) -> list[SubtitleEntry]:
+    if len(entries) <= 1:
+        return entries
+
+    repaired: list[SubtitleEntry] = []
+    index = 0
+    while index < len(entries):
+        current = entries[index]
+        if index + 1 >= len(entries):
+            repaired.append(current)
+            break
+
+        following = entries[index + 1]
+        left_text = str(current.text_norm or current.text_raw or "").strip()
+        right_text = str(following.text_norm or following.text_raw or "").strip()
+        split_match = _split_spoken_digit_boundary(left_text, right_text)
+        if split_match is None:
+            repaired.append(current)
+            index += 1
+            continue
+
+        left_prefix, normalized_digits, right_suffix = split_match
+        repaired.append(
+            SubtitleEntry(
+                index=len(repaired),
+                start=current.start,
+                end=current.end,
+                text_raw=current.text_raw,
+                text_norm=normalize_text(f"{left_prefix}{normalized_digits}"),
+                words=tuple(current.words or ()),
+            )
+        )
+        if right_suffix.strip("，,。.!！？；;：: "):
+            entries[index + 1] = SubtitleEntry(
+                index=following.index,
+                start=following.start,
+                end=following.end,
+                text_raw=following.text_raw,
+                text_norm=normalize_text(right_suffix),
+                words=tuple(following.words or ()),
+            )
+        else:
+            index += 1
+        index += 1
+    return _reindex_subtitle_entries(repaired)
+
+
+def _split_spoken_digit_boundary(left_text: str, right_text: str) -> tuple[str, str, str] | None:
+    left_match = _SPLIT_SPOKEN_DIGIT_LEFT_RE.match(str(left_text or "").strip())
+    right_match = _SPLIT_SPOKEN_DIGIT_RIGHT_RE.match(str(right_text or "").strip())
+    if not left_match or not right_match:
+        return None
+
+    left_digits = str(left_match.group("digits") or "")
+    right_digits = str(right_match.group("digits") or "")
+    combined_digits = f"{left_digits}{right_digits}"
+    if "幺" not in combined_digits:
+        return None
+    normalized_digits = _normalize_digit_sequence_token(combined_digits)
+    if not normalized_digits or not normalized_digits.isdigit() or normalized_digits == combined_digits:
+        return None
+    return (
+        str(left_match.group("prefix") or "").rstrip("，,。.!！？；;：: "),
+        normalized_digits,
+        str(right_match.group("suffix") or "").lstrip("，,。.!！？；;：: "),
+    )
 
 
 def _merge_short_chain_entries(

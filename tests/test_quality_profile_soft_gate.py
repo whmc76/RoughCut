@@ -157,3 +157,34 @@ def test_quality_assessment_applies_source_identity_constraints() -> None:
     )
 
     assert "identity_narrative_conflict" not in assessment["issue_codes"]
+
+
+def test_comparison_target_in_summary_does_not_block_identity_narrative() -> None:
+    job = Job(
+        source_path="F:/clips/20260228-152013 奈特科尔 nitecore EDC17开箱以及和edc37的对比.mp4",
+        source_name="20260228-152013 奈特科尔 nitecore EDC17开箱以及和edc37的对比.mp4",
+        status="done",
+    )
+    profile = {
+        "subject_brand": "NITECORE",
+        "subject_model": "EDC17",
+        "subject_type": "EDC手电",
+        "video_theme": "NITECORE EDC17 与 EDC37 开箱对比",
+        "summary": "视频围绕 NITECORE EDC17 开箱展开，并对比 EDC37 的使用差异。",
+        "hook_line": "EDC17 和 EDC37 哪个更适合随身携带？",
+        "engagement_question": "你更关注哪款手电？",
+        "automation_review": {"score": 0.92},
+    }
+
+    assessment = assess_job_quality(
+        job=job,
+        steps=[],
+        artifacts=[Artifact(artifact_type="content_profile_final", data_json=profile)],
+        subtitle_items=[
+            _subtitle(0, "今天开箱这个EDC17手电"),
+            _subtitle(1, "顺便和EDC37做一个对比"),
+        ],
+        completion_candidate=True,
+    )
+
+    assert "identity_narrative_conflict" not in assessment["issue_codes"]
