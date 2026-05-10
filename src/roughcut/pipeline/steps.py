@@ -3830,16 +3830,16 @@ def _set_summary_review_pending_for_identity(
     _set_summary_review_state(
         review_step,
         now=now,
-        status="pending",
-        detail=str((automation.get("identity_review") or {}).get("reason") or "内容摘要待人工确认"),
-        progress=0.0,
+        status="done",
+        detail=str((automation.get("identity_review") or {}).get("reason") or "内容摘要存在身份提示，已保留到手动调整。"),
+        progress=1.0,
         metadata_updates={
             "auto_confirmed": False,
             "identity_review": automation.get("identity_review"),
+            "manual_adjustment_advisory": True,
             "review_reasons": automation["review_reasons"],
             "blocking_reasons": automation["blocking_reasons"],
         },
-        clear_finished_at=True,
     )
 
 
@@ -3852,16 +3852,16 @@ def _set_summary_review_pending_for_manual_feedback(
     _set_summary_review_state(
         review_step,
         now=now,
-        status="pending",
-        detail="成片审核修正尚未确认到当前主体，等待人工继续确认。",
-        progress=0.0,
+        status="done",
+        detail="成片审核修正尚未确认到当前主体，已保留为手动调整提示并继续后续流程。",
+        progress=1.0,
         metadata_updates={
             "auto_confirmed": False,
             "manual_confirmed": False,
+            "manual_adjustment_advisory": True,
             "review_user_feedback": dict(manual_review_feedback),
             "resolved_review_user_feedback": {},
         },
-        clear_finished_at=True,
     )
 
 
@@ -3878,17 +3878,18 @@ def _set_summary_review_pending_for_subtitle_gate(
         detail_bits.append("字幕质检未通过")
     if subtitle_consistency_report.get("blocking"):
         detail_bits.append("字幕一致性未通过")
-    subtitle_review_detail = "、".join(detail_bits) + "，等待人工确认后再继续后续流程。"
+    subtitle_review_detail = "、".join(detail_bits) + "，已保留为手动调整提示并继续后续流程。"
     existing_detail = str((review_step.metadata_ or {}).get("detail") or "").strip()
     _set_summary_review_state(
         review_step,
         now=now,
-        status="pending",
+        status="done",
         detail=_merge_review_step_detail(existing_detail, subtitle_review_detail),
-        progress=0.0,
+        progress=1.0,
         metadata_updates={
             "auto_confirmed": False,
             "manual_confirmed": False,
+            "manual_adjustment_advisory": True,
             "subtitle_quality_report": {
                 "score": subtitle_quality_report.get("score"),
                 "blocking_reasons": list(subtitle_quality_report.get("blocking_reasons") or []),
@@ -3902,7 +3903,6 @@ def _set_summary_review_pending_for_subtitle_gate(
             "review_reasons": list(automation.get("review_reasons") or []),
             "blocking_reasons": list(automation.get("blocking_reasons") or []),
         },
-        clear_finished_at=True,
     )
 
 
@@ -3917,23 +3917,23 @@ def _set_summary_review_pending_for_content_exception(
         for item in (automation.get("blocking_reasons") or [])
         if str(item).strip()
     ]
-    detail = "内容异常门发现阻塞问题，等待人工处理后再继续。"
+    detail = "内容异常门发现需关注问题，已保留为手动调整提示并继续后续流程。"
     if blocking_reasons:
         detail = f"{detail} {'；'.join(blocking_reasons[:3])}"
     _set_summary_review_state(
         review_step,
         now=now,
-        status="pending",
+        status="done",
         detail=detail,
-        progress=0.0,
+        progress=1.0,
         metadata_updates={
             "auto_confirmed": False,
             "manual_confirmed": False,
             "exception_gate": True,
+            "manual_adjustment_advisory": True,
             "review_reasons": list(automation.get("review_reasons") or []),
             "blocking_reasons": blocking_reasons,
         },
-        clear_finished_at=True,
     )
 
 
@@ -4083,6 +4083,11 @@ async def _finalize_content_profile_review_state(
             now=datetime.now(timezone.utc),
             automation=automation,
         )
+    final_profile = dict(content_profile)
+    final_profile["review_mode"] = "manual_adjustment_advisory"
+    final_profile["needs_review"] = True
+    context_source_profile = dict(final_profile)
+    job.status = "processing"
     return auto_confirmed, final_profile, context_source_profile
 
 

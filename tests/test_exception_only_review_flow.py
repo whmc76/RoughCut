@@ -373,7 +373,7 @@ async def test_failed_job_with_completed_summary_review_recovers_for_edit_plan_d
 
 
 @pytest.mark.asyncio
-async def test_summary_review_pauses_on_blocking_exception() -> None:
+async def test_summary_review_records_advisory_on_blocking_exception() -> None:
     job = Job(id=uuid.uuid4(), source_name="source.mp4", status="processing")
     content_step = JobStep(job_id=job.id, step_name="content_profile", status="done")
     review_step = JobStep(job_id=job.id, step_name="summary_review", status="pending")
@@ -398,13 +398,15 @@ async def test_summary_review_pauses_on_blocking_exception() -> None:
     )
 
     assert auto_confirmed is False
-    assert final_profile is None
-    assert review_step.status == "pending"
+    assert final_profile is not None
+    assert final_profile["review_mode"] == "manual_adjustment_advisory"
+    assert review_step.status == "done"
+    assert review_step.metadata_["manual_adjustment_advisory"] is True
     assert "主体身份冲突" in str(review_step.metadata_["detail"])
 
 
 @pytest.mark.asyncio
-async def test_summary_review_pending_triggers_quality_rerun_before_manual_pause() -> None:
+async def test_summary_review_quality_issue_records_advisory_without_auto_rerun() -> None:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     try:
         async with engine.begin() as conn:
@@ -477,15 +479,17 @@ async def test_summary_review_pending_triggers_quality_rerun_before_manual_pause
 
             assert job.status == "processing"
             step_map = {step.step_name: step for step in steps}
-            assert step_map["subtitle_postprocess"].status == "pending"
-            assert step_map["summary_review"].status == "pending"
-            assert "subtitle_quality_blocking" in step_map["subtitle_postprocess"].metadata_["detail"]
+            assert step_map["subtitle_postprocess"].status == "done"
+            assert step_map["summary_review"].status == "done"
+            assert step_map["summary_review"].metadata_["manual_adjustment_advisory"] is True
             quality_artifacts = (
                 await session.execute(
                     select(Artifact).where(Artifact.job_id == job.id, Artifact.artifact_type == "quality_assessment")
                 )
             ).scalars().all()
-            assert quality_artifacts[-1].data_json["auto_rerun_triggered"] is True
+            assert quality_artifacts[-1].data_json["auto_rerun_triggered"] is False
+            assert quality_artifacts[-1].data_json["manual_adjustment_advisory"] is True
+            assert quality_artifacts[-1].data_json["auto_rerun_skipped_reason"] == "disabled_quality_gate_advisory"
     finally:
         await engine.dispose()
 
@@ -514,19 +518,13 @@ async def test_final_review_auto_advances_when_quality_gate_passes(monkeypatch) 
 
 
 @pytest.mark.asyncio
-async def test_final_review_pauses_only_on_quality_exception(monkeypatch) -> None:
+async def test_final_review_records_quality_advisory_and_continues(monkeypatch) -> None:
     job = Job(id=uuid.uuid4(), source_name="source.mp4", status="processing")
     final_review_step = JobStep(job_id=job.id, step_name="final_review", status="pending")
-    notifications: list[tuple[str, str]] = []
-
     async def fake_assess(*_args, **_kwargs):
         return "needs_review"
 
-    def fake_enqueue_review_notification(*, kind: str, job_id: str, **_kwargs):
-        notifications.append((kind, job_id))
-
     monkeypatch.setattr(orchestrator, "_assess_and_maybe_rerun_job", fake_assess)
-    monkeypatch.setattr(orchestrator, "enqueue_review_notification", fake_enqueue_review_notification)
 
     outcome = await orchestrator._auto_advance_final_review_after_render(
         None,
@@ -535,8 +533,8 @@ async def test_final_review_pauses_only_on_quality_exception(monkeypatch) -> Non
         final_review_step=final_review_step,
     )
 
-    assert outcome == "needs_review"
-    assert final_review_step.status == "pending"
+    assert outcome == "advanced"
+    assert final_review_step.status == "done"
     assert final_review_step.metadata_["exception_gate"] is True
-    assert job.status == "needs_review"
-    assert notifications == [("final_review", str(job.id))]
+    assert final_review_step.metadata_["manual_adjustment_advisory"] is True
+    assert job.status == "processing"
