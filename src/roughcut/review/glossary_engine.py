@@ -15,6 +15,7 @@ from roughcut.review.model_identity import (
     model_numbers_conflict,
 )
 from roughcut.review.subtitle_term_resolution import _should_ignore_patch_candidate
+from roughcut.review.text_rewrite_policy import disabled_correction_candidates, disabled_text_rewrite
 
 
 @dataclass
@@ -173,12 +174,12 @@ async def apply_glossary_corrections(
     correction candidates from wrong_forms.
     """
     await session.flush()
-    return []
+    return disabled_correction_candidates()
 
 
 def apply_corrections_to_text(text: str, corrections: list[SubtitleCorrection]) -> str:
     """Glossary text rewrites are disabled; return the original text."""
-    return text
+    return disabled_text_rewrite(text)
 
 
 def _compact_text(text: str) -> str:

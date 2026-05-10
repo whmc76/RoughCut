@@ -18,7 +18,7 @@ from roughcut.providers.transcription.base import TranscriptResult, TranscriptSe
 from roughcut.providers.transcription.chunking import extract_chunking_summary
 from roughcut.review.evidence_types import ARTIFACT_TYPE_TRANSCRIPT_EVIDENCE
 from roughcut.review.hotword_learning import extract_prompt_hotwords, record_prompted_hotwords
-from roughcut.review.subtitle_memory import apply_domain_term_corrections, resolve_transcription_category_scope
+from roughcut.review.subtitle_memory import resolve_transcription_category_scope
 from roughcut.speech.alignment import AlignmentSettings, enhance_transcript_alignment
 from roughcut.speech.subtitle_pipeline import (
     ARTIFACT_TYPE_TRANSCRIPT_FACT_LAYER,

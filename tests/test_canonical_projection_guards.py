@@ -1,5 +1,55 @@
-from roughcut.pipeline.steps import _project_canonical_transcript_to_timeline
+from types import SimpleNamespace
+
+from roughcut.pipeline.steps import _project_canonical_transcript_to_timeline, _should_keep_existing_subtitle_projection
 from roughcut.speech.subtitle_pipeline import _build_canonical_transcript_words
+
+
+def test_transcript_review_keeps_better_display_projection_without_accepted_corrections() -> None:
+    assert _should_keep_existing_subtitle_projection(
+        existing_quality_report={
+            "score": 100.0,
+            "blocking": False,
+            "warning_reasons": [],
+            "metrics": {
+                "subtitle_count": 147,
+                "short_fragment_count": 0,
+                "generic_word_split_count": 0,
+            },
+        },
+        refreshed_quality_report={
+            "score": 94.09,
+            "blocking": False,
+            "warning_reasons": ["short fragments"],
+            "metrics": {
+                "subtitle_count": 204,
+                "short_fragment_count": 5,
+                "generic_word_split_count": 1,
+            },
+        },
+        canonical_transcript_layer=SimpleNamespace(
+            correction_metrics={"accepted_correction_count": 0, "pending_correction_count": 0},
+        ),
+    )
+
+
+def test_transcript_review_prefers_canonical_when_human_corrections_exist() -> None:
+    assert not _should_keep_existing_subtitle_projection(
+        existing_quality_report={
+            "score": 100.0,
+            "blocking": False,
+            "warning_reasons": [],
+            "metrics": {"subtitle_count": 147},
+        },
+        refreshed_quality_report={
+            "score": 94.09,
+            "blocking": False,
+            "warning_reasons": ["short fragments"],
+            "metrics": {"subtitle_count": 204},
+        },
+        canonical_transcript_layer=SimpleNamespace(
+            correction_metrics={"accepted_correction_count": 1, "pending_correction_count": 0},
+        ),
+    )
 
 
 def test_canonical_projection_splits_overlong_word_tokens_before_segmentation() -> None:

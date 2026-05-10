@@ -15,6 +15,7 @@ from roughcut.review.content_understanding_verify import (
     HybridVerificationBundle,
     build_hybrid_verification_bundle,
 )
+from roughcut.review.text_rewrite_policy import disabled_text_rewrite
 from roughcut.usage import track_usage_operation
 
 
@@ -28,7 +29,7 @@ def _apply_accepted_corrections_to_excerpt(
     excerpt: str | None,
     accepted_corrections: list[dict[str, Any]] | None = None,
 ) -> str:
-    return str(excerpt or "")
+    return disabled_text_rewrite(excerpt)
 
 
 def build_review_feedback_verification_snapshot(

@@ -577,6 +577,9 @@ def _serialize_correction(correction: Any) -> dict[str, Any]:
         "original": original,
         "accepted": accepted,
         "status": status,
+        "human_decision": human_decision or None,
+        "human_override": str(_correction_attr(correction, "human_override") or "").strip() or None,
+        "auto_applied": auto_applied,
         "source": str(_correction_attr(correction, "source") or "").strip(),
         "change_type": str(_correction_attr(correction, "change_type") or "").strip(),
         "confidence": _correction_attr(correction, "confidence"),
@@ -590,7 +593,25 @@ def _correction_attr(correction: Any, key: str) -> Any:
 
 
 def _apply_accepted_corrections(text: str, corrections: tuple[dict[str, Any], ...]) -> str:
-    return str(text or "")
+    resolved = str(text or "")
+    for correction in corrections:
+        if str(correction.get("status") or "").strip().lower() != "accepted":
+            continue
+        if bool(correction.get("auto_applied")):
+            continue
+        human_decision = str(correction.get("human_decision") or "").strip().lower()
+        if human_decision and human_decision != "accepted":
+            continue
+        original = str(correction.get("original") or correction.get("original_span") or "").strip()
+        accepted = str(correction.get("accepted") or correction.get("suggested_span") or "").strip()
+        if not original or not accepted or original == accepted:
+            continue
+        if model_numbers_conflict(original, accepted):
+            continue
+        if original not in resolved:
+            continue
+        resolved = resolved.replace(original, accepted, 1)
+    return resolved
 
 
 def _build_canonical_transcript_words(

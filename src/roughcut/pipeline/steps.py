@@ -192,6 +192,8 @@ from roughcut.storage.s3 import get_storage, job_key
 from roughcut.telegram.review_notification_service import enqueue_review_notification
 from roughcut.usage import track_step_usage, track_usage_operation
 
+ARTIFACT_TYPE_TRANSCRIPT_CORRECTION_SCORE_REPORT = "transcript_correction_score_report"
+
 _AVATAR_SEGMENT_READY_RETRIES = 60
 _AVATAR_SEGMENT_READY_RETRY_SECONDS = 1.0
 
@@ -2483,7 +2485,7 @@ async def _build_canonical_refresh_projection(
     subtitle_items: list[SubtitleItem],
     canonical_transcript_layer: Any,
     projection_data: dict[str, Any] | None,
-) -> tuple[Any, dict[str, Any]]:
+) -> tuple[Any, dict[str, Any], dict[str, Any]]:
     effective_projection_data = dict(projection_data or {})
     split_profile = dict(effective_projection_data.get("split_profile") or {})
     if not split_profile:
@@ -2494,6 +2496,18 @@ async def _build_canonical_refresh_projection(
             height=media_meta_json.get("height"),
         )
     boundary_refine = dict(effective_projection_data.get("boundary_refine") or {})
+    existing_entries = _build_projection_entries_from_subtitle_items(
+        subtitle_items,
+        use_final_text=True,
+    )
+    existing_projection_items = _build_projection_items_from_entries(existing_entries)
+    existing_quality_report = build_subtitle_quality_report_from_items(
+        subtitle_items=existing_projection_items,
+        source_name=source_name,
+        content_profile={},
+    )
+    existing_projection_analysis = analyze_subtitle_segmentation(existing_entries)
+
     canonical_segmentation_segments = _build_segmentation_segments_from_canonical_layer(canonical_transcript_layer)
     canonical_segmentation_result = (
         segment_subtitles(
@@ -2506,29 +2520,573 @@ async def _build_canonical_refresh_projection(
     )
     projection_entries = list(canonical_segmentation_result.entries) if canonical_segmentation_result else []
     if not projection_entries:
-        projection_entries = _build_projection_entries_from_subtitle_items(
-            subtitle_items,
-            use_final_text=True,
-        )
+        projection_entries = existing_entries
         projection_analysis = analyze_subtitle_segmentation(projection_entries)
     else:
         projection_analysis = canonical_segmentation_result.analysis
-    projection_items = _build_projection_items_from_entries(projection_entries)
-    subtitle_quality_report = build_subtitle_quality_report_from_items(
-        subtitle_items=projection_items,
+    canonical_projection_items = _build_projection_items_from_entries(projection_entries)
+    canonical_quality_report = build_subtitle_quality_report_from_items(
+        subtitle_items=canonical_projection_items,
         source_name=source_name,
         content_profile={},
     )
+    hybrid_entries = _build_local_hybrid_projection_entries(
+        projection_entries,
+        split_profile=split_profile,
+    )
+    hybrid_projection_items = _build_projection_items_from_entries(hybrid_entries)
+    hybrid_projection_analysis = analyze_subtitle_segmentation(hybrid_entries)
+    hybrid_quality_report = build_subtitle_quality_report_from_items(
+        subtitle_items=hybrid_projection_items,
+        source_name=source_name,
+        content_profile={},
+    )
+    display_boundary_hybrid_entries = _build_display_boundary_hybrid_projection_entries(
+        canonical_entries=projection_entries,
+        display_entries=existing_entries,
+        split_profile=split_profile,
+    )
+    display_boundary_hybrid_items = _build_projection_items_from_entries(display_boundary_hybrid_entries)
+    display_boundary_hybrid_analysis = analyze_subtitle_segmentation(display_boundary_hybrid_entries)
+    display_boundary_hybrid_quality_report = build_subtitle_quality_report_from_items(
+        subtitle_items=display_boundary_hybrid_items,
+        source_name=source_name,
+        content_profile={},
+    )
+    projection_candidates = [
+        {
+            "basis": "display_baseline_preserved",
+            "transcript_layer": str(effective_projection_data.get("transcript_layer") or "transcript_fact"),
+            "items": existing_projection_items,
+            "analysis": existing_projection_analysis,
+            "quality_report": existing_quality_report,
+        },
+        {
+            "basis": "canonical_refresh",
+            "transcript_layer": "canonical_transcript",
+            "items": canonical_projection_items,
+            "analysis": projection_analysis,
+            "quality_report": canonical_quality_report,
+        },
+        {
+            "basis": "canonical_local_hybrid",
+            "transcript_layer": "canonical_transcript",
+            "items": hybrid_projection_items,
+            "analysis": hybrid_projection_analysis,
+            "quality_report": hybrid_quality_report,
+        },
+        {
+            "basis": "canonical_display_boundary_hybrid",
+            "transcript_layer": "canonical_transcript",
+            "items": display_boundary_hybrid_items,
+            "analysis": display_boundary_hybrid_analysis,
+            "quality_report": display_boundary_hybrid_quality_report,
+        },
+    ]
+    selected_candidate, correction_score_report = _select_projection_candidate(
+        candidates=projection_candidates,
+        reference_items=canonical_projection_items,
+        canonical_transcript_layer=canonical_transcript_layer,
+    )
+    projection_items = list(selected_candidate["items"])
+    projection_analysis = selected_candidate["analysis"]
+    subtitle_quality_report = dict(selected_candidate["quality_report"] or {})
+    projection_basis = str(selected_candidate["basis"])
+    transcript_layer = str(selected_candidate["transcript_layer"])
+    subtitle_quality_report["correction_score"] = correction_score_report
     refreshed_projection_layer = build_subtitle_projection_layer(
         projection_items,
         segmentation_analysis=projection_analysis,
         split_profile=split_profile,
         boundary_refine=boundary_refine,
         quality_report=subtitle_quality_report,
-        projection_basis="canonical_refresh",
-        transcript_layer="canonical_transcript",
+        projection_basis=projection_basis,
+        transcript_layer=transcript_layer,
     )
-    return refreshed_projection_layer, subtitle_quality_report
+    return refreshed_projection_layer, subtitle_quality_report, correction_score_report
+
+
+def _should_keep_existing_subtitle_projection(
+    *,
+    existing_quality_report: dict[str, Any],
+    refreshed_quality_report: dict[str, Any],
+    canonical_transcript_layer: Any,
+    existing_projection_items: list[Any] | None = None,
+    refreshed_projection_items: list[Any] | None = None,
+) -> bool:
+    correction_metrics = dict(getattr(canonical_transcript_layer, "correction_metrics", {}) or {})
+    if int(correction_metrics.get("accepted_correction_count") or 0) > 0:
+        return False
+    if _projection_has_material_content_drift(
+        baseline_items=existing_projection_items or [],
+        candidate_items=refreshed_projection_items or [],
+    ):
+        return False
+    if not existing_quality_report:
+        return False
+    existing_blocking = bool(existing_quality_report.get("blocking"))
+    refreshed_blocking = bool(refreshed_quality_report.get("blocking"))
+    if not existing_blocking and refreshed_blocking:
+        return True
+    if existing_blocking and not refreshed_blocking:
+        return False
+    existing_rank = _subtitle_projection_quality_rank(existing_quality_report)
+    refreshed_rank = _subtitle_projection_quality_rank(refreshed_quality_report)
+    return existing_rank >= refreshed_rank
+
+
+def _subtitle_projection_quality_rank(report: dict[str, Any]) -> tuple[float, int, int, int, int]:
+    metrics = dict((report or {}).get("metrics") or {})
+    try:
+        score = float((report or {}).get("score") or 0.0)
+    except (TypeError, ValueError):
+        score = 0.0
+    warning_count = len(list((report or {}).get("warning_reasons") or []))
+    short_fragment_count = int(metrics.get("short_fragment_count") or 0)
+    generic_word_split_count = int(metrics.get("generic_word_split_count") or 0)
+    subtitle_count = int(metrics.get("subtitle_count") or 0)
+    return (
+        round(score, 3),
+        -warning_count,
+        -short_fragment_count,
+        -generic_word_split_count,
+        -subtitle_count,
+    )
+
+
+def _build_local_hybrid_projection_entries(
+    entries: list[SubtitleEntry],
+    *,
+    split_profile: dict[str, Any],
+) -> list[SubtitleEntry]:
+    refined_entries = _reindex_subtitle_entries(list(entries or []))
+    if not refined_entries:
+        return refined_entries
+    max_chars = int(split_profile.get("max_chars") or 30)
+    max_duration = float(split_profile.get("max_duration") or 5.0)
+    for _round in range(4):
+        analysis = analyze_subtitle_segmentation(refined_entries).as_dict()
+        windows = [dict(item) for item in list(analysis.get("sample_low_confidence_windows") or []) if isinstance(item, dict)]
+        if not windows:
+            break
+        changed = False
+        for window in sorted(windows, key=lambda item: int(item.get("start_index") or 0), reverse=True):
+            start_index = int(window.get("start_index") or 0)
+            end_index = int(window.get("end_index") or start_index)
+            if start_index < 0 or end_index >= len(refined_entries) or start_index >= end_index:
+                continue
+            current_window = refined_entries[start_index:end_index + 1]
+            best_candidate = _best_local_projection_window_candidate(
+                current_window,
+                max_chars=max_chars,
+                max_duration=max_duration,
+            )
+            if not best_candidate:
+                continue
+            refined_entries = refined_entries[:start_index] + best_candidate + refined_entries[end_index + 1:]
+            refined_entries = _reindex_subtitle_entries(refined_entries)
+            changed = True
+        if not changed:
+            break
+    return refined_entries
+
+
+def _best_local_projection_window_candidate(
+    window_entries: list[SubtitleEntry],
+    *,
+    max_chars: int,
+    max_duration: float,
+) -> list[SubtitleEntry] | None:
+    current_quality = build_subtitle_quality_report_from_items(
+        subtitle_items=_build_projection_items_from_entries(window_entries),
+        source_name="",
+        content_profile={},
+    )
+    current_rank = _subtitle_projection_quality_rank(current_quality)
+    current_score = score_subtitle_entries(
+        window_entries,
+        max_chars=max_chars,
+        max_duration=max_duration,
+    )
+    best_candidate: list[SubtitleEntry] | None = None
+    best_rank = current_rank
+    best_score = current_score
+    for candidate in generate_subtitle_window_candidates(
+        window_entries,
+        max_chars=max_chars + 2,
+        max_duration=max_duration + 0.5,
+        top_k=8,
+    ):
+        if len(candidate) > len(window_entries):
+            continue
+        candidate_quality = build_subtitle_quality_report_from_items(
+            subtitle_items=_build_projection_items_from_entries(candidate),
+            source_name="",
+            content_profile={},
+        )
+        candidate_rank = _subtitle_projection_quality_rank(candidate_quality)
+        candidate_score = score_subtitle_entries(
+            candidate,
+            max_chars=max_chars,
+            max_duration=max_duration,
+        )
+        if candidate_rank > best_rank or (candidate_rank == best_rank and candidate_score > best_score):
+            best_candidate = candidate
+            best_rank = candidate_rank
+            best_score = candidate_score
+    return best_candidate if best_rank > current_rank else None
+
+
+def _build_display_boundary_hybrid_projection_entries(
+    *,
+    canonical_entries: list[SubtitleEntry],
+    display_entries: list[SubtitleEntry],
+    split_profile: dict[str, Any],
+) -> list[SubtitleEntry]:
+    canonical_entries = list(canonical_entries or [])
+    display_entries = list(display_entries or [])
+    if not canonical_entries or not display_entries:
+        return _reindex_subtitle_entries(canonical_entries)
+
+    groups: list[list[SubtitleEntry]] = [[] for _entry in display_entries]
+    for canonical_entry in canonical_entries:
+        target_index = _best_display_boundary_target_index(canonical_entry, display_entries)
+        if target_index is None:
+            continue
+        groups[target_index].append(canonical_entry)
+
+    rebuilt: list[SubtitleEntry] = []
+    for display_index, group in enumerate(groups):
+        if not group:
+            continue
+        group = sorted(group, key=lambda entry: (float(entry.start), float(entry.end), int(entry.index)))
+        text = _join_projection_entry_texts(group)
+        if not text:
+            continue
+        words = tuple(word for entry in group for word in tuple(entry.words or ()))
+        rebuilt.append(
+            SubtitleEntry(
+                index=display_index,
+                start=float(group[0].start),
+                end=float(group[-1].end),
+                text_raw=text,
+                text_norm=normalize_display_text(text),
+                words=words,
+            )
+        )
+    return _merge_short_display_boundary_entries(
+        _reindex_subtitle_entries(rebuilt),
+        max_chars=int(split_profile.get("max_chars") or 30),
+    )
+
+
+def _best_display_boundary_target_index(
+    canonical_entry: SubtitleEntry,
+    display_entries: list[SubtitleEntry],
+) -> int | None:
+    if not display_entries:
+        return None
+    canonical_start = float(canonical_entry.start)
+    canonical_end = float(canonical_entry.end)
+    midpoint = (canonical_start + canonical_end) / 2.0
+    containing = [
+        (index, entry)
+        for index, entry in enumerate(display_entries)
+        if float(entry.start) - 1e-6 <= midpoint <= float(entry.end) + 1e-6
+    ]
+    if containing:
+        return min(
+            containing,
+            key=lambda item: (
+                float(item[1].end) - float(item[1].start),
+                abs(((float(item[1].start) + float(item[1].end)) / 2.0) - midpoint),
+            ),
+        )[0]
+    overlaps = [
+        (
+            max(0.0, min(canonical_end, float(entry.end)) - max(canonical_start, float(entry.start))),
+            index,
+            entry,
+        )
+        for index, entry in enumerate(display_entries)
+    ]
+    best_overlap, best_index, _best_entry = max(
+        overlaps,
+        key=lambda item: (
+            item[0],
+            -abs(((float(item[2].start) + float(item[2].end)) / 2.0) - midpoint),
+        ),
+    )
+    if best_overlap > 0.0:
+        return best_index
+    return min(
+        enumerate(display_entries),
+        key=lambda item: abs(((float(item[1].start) + float(item[1].end)) / 2.0) - midpoint),
+    )[0]
+
+
+def _join_projection_entry_texts(entries: list[SubtitleEntry]) -> str:
+    parts = [str(entry.text_raw or entry.text_norm or "").strip() for entry in list(entries or [])]
+    parts = [part for part in parts if part]
+    if not parts:
+        return ""
+    text = "".join(parts)
+    return normalize_display_text(text)
+
+
+def _merge_short_display_boundary_entries(
+    entries: list[SubtitleEntry],
+    *,
+    max_chars: int,
+) -> list[SubtitleEntry]:
+    merged: list[SubtitleEntry] = []
+    index = 0
+    soft_limit = max(max_chars, int(max_chars * 1.8))
+    while index < len(entries):
+        current = entries[index]
+        current_text = normalize_display_text(current.text_raw)
+        if (
+            _is_short_display_boundary_entry(current_text)
+            and index + 1 < len(entries)
+            and len(current_text + normalize_display_text(entries[index + 1].text_raw)) <= soft_limit
+        ):
+            merged.append(_merge_projection_entries(current, entries[index + 1], len(merged)))
+            index += 2
+            continue
+        if (
+            _is_short_display_boundary_entry(current_text)
+            and merged
+            and len(normalize_display_text(merged[-1].text_raw) + current_text) <= soft_limit
+        ):
+            merged[-1] = _merge_projection_entries(merged[-1], current, len(merged) - 1)
+            index += 1
+            continue
+        merged.append(current)
+        index += 1
+    return _reindex_subtitle_entries(merged)
+
+
+def _is_short_display_boundary_entry(text: str) -> bool:
+    compact = re.sub(r"[，。！？；：,.!?;:\s]+", "", normalize_display_text(text))
+    return 0 < len(compact) <= 4
+
+
+def _merge_projection_entries(left: SubtitleEntry, right: SubtitleEntry, index: int) -> SubtitleEntry:
+    text = _join_projection_entry_texts([left, right])
+    return SubtitleEntry(
+        index=index,
+        start=float(left.start),
+        end=float(right.end),
+        text_raw=text,
+        text_norm=normalize_display_text(text),
+        words=tuple(left.words or ()) + tuple(right.words or ()),
+    )
+
+
+def _select_projection_candidate(
+    *,
+    candidates: list[dict[str, Any]],
+    reference_items: list[Any],
+    canonical_transcript_layer: Any,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    correction_metrics = dict(getattr(canonical_transcript_layer, "correction_metrics", {}) or {})
+    assessed_candidates: list[dict[str, Any]] = []
+    for candidate in candidates:
+        assessment = _build_projection_correction_assessment(
+            basis=str(candidate.get("basis") or ""),
+            reference_items=reference_items,
+            candidate_items=list(candidate.get("items") or []),
+            display_quality_report=dict(candidate.get("quality_report") or {}),
+        )
+        assessed_candidates.append({**candidate, "assessment": assessment})
+    selected = max(
+        assessed_candidates,
+        key=lambda candidate: _projection_candidate_rank(candidate["assessment"]),
+    )
+    report = {
+        "artifact_type": ARTIFACT_TYPE_TRANSCRIPT_CORRECTION_SCORE_REPORT,
+        "score": selected["assessment"]["score"],
+        "selected_projection_basis": selected.get("basis"),
+        "selected_transcript_layer": selected.get("transcript_layer"),
+        "blocking": bool(selected["assessment"].get("blocking")),
+        "issue_codes": list(selected["assessment"].get("issue_codes") or []),
+        "accepted_correction_count": int(correction_metrics.get("accepted_correction_count") or 0),
+        "pending_correction_count": int(correction_metrics.get("pending_correction_count") or 0),
+        "candidates": [candidate["assessment"] for candidate in assessed_candidates],
+    }
+    return selected, report
+
+
+def _projection_candidate_rank(assessment: dict[str, Any]) -> tuple[float, float, float, int, int, int, int]:
+    metrics = dict(assessment.get("metrics") or {})
+    return (
+        float(assessment.get("content_fidelity_score") or 0.0),
+        float(assessment.get("score") or 0.0),
+        float(assessment.get("display_quality_score") or 0.0),
+        -int(metrics.get("missing_material_token_count") or 0),
+        -int(metrics.get("unsupported_material_token_count") or 0),
+        -int(metrics.get("short_fragment_count") or 0),
+        -int(metrics.get("subtitle_count") or 0),
+    )
+
+
+def _build_projection_correction_assessment(
+    *,
+    basis: str,
+    reference_items: list[Any],
+    candidate_items: list[Any],
+    display_quality_report: dict[str, Any],
+) -> dict[str, Any]:
+    missing_examples = _find_local_material_token_drift(reference_items, candidate_items)
+    unsupported_examples = _find_local_material_token_drift(candidate_items, reference_items)
+    missing_count = len(missing_examples)
+    unsupported_count = len(unsupported_examples)
+    display_metrics = dict(display_quality_report.get("metrics") or {})
+    display_score = float(display_quality_report.get("score") or 0.0)
+    content_score = max(0.0, round(100.0 - min(70.0, missing_count * 14.0) - min(30.0, unsupported_count * 6.0), 2))
+    score = round(content_score * 0.72 + display_score * 0.28, 2)
+    issue_codes: list[str] = []
+    if missing_count:
+        issue_codes.append("projection_missing_material_tokens")
+    if unsupported_count:
+        issue_codes.append("projection_unsupported_material_tokens")
+    return {
+        "basis": basis,
+        "score": score,
+        "content_fidelity_score": content_score,
+        "display_quality_score": round(display_score, 2),
+        "blocking": bool(missing_count),
+        "issue_codes": issue_codes,
+        "metrics": {
+            "subtitle_count": int(display_metrics.get("subtitle_count") or len(candidate_items)),
+            "short_fragment_count": int(display_metrics.get("short_fragment_count") or 0),
+            "generic_word_split_count": int(display_metrics.get("generic_word_split_count") or 0),
+            "missing_material_token_count": missing_count,
+            "unsupported_material_token_count": unsupported_count,
+        },
+        "missing_material_examples": missing_examples[:8],
+        "unsupported_material_examples": unsupported_examples[:8],
+    }
+
+
+def _find_local_material_token_drift(reference_items: list[Any], candidate_items: list[Any]) -> list[dict[str, Any]]:
+    examples: list[dict[str, Any]] = []
+    for reference_item in list(reference_items or []):
+        reference_text = _projection_item_text(reference_item)
+        reference_tokens = _projection_material_tokens(reference_text)
+        if not reference_tokens:
+            continue
+        candidate_text = _projection_overlapping_text(reference_item, candidate_items)
+        candidate_compact = _projection_compact_text(candidate_text)
+        missing_tokens = [
+            token
+            for token in sorted(reference_tokens)
+            if _projection_compact_text(token) not in candidate_compact
+        ]
+        if not missing_tokens:
+            continue
+        examples.append(
+            {
+                "start": round(_projection_item_start(reference_item), 3),
+                "end": round(_projection_item_end(reference_item), 3),
+                "reference_text": reference_text,
+                "candidate_text": candidate_text,
+                "tokens": missing_tokens,
+            }
+        )
+    return examples
+
+
+def _projection_overlapping_text(reference_item: Any, candidate_items: list[Any]) -> str:
+    reference_start = _projection_item_start(reference_item)
+    reference_end = _projection_item_end(reference_item)
+    reference_duration = max(reference_end - reference_start, 0.001)
+    overlapping: list[Any] = []
+    for candidate_item in list(candidate_items or []):
+        overlap = max(0.0, min(reference_end, _projection_item_end(candidate_item)) - max(reference_start, _projection_item_start(candidate_item)))
+        if overlap / reference_duration >= 0.15:
+            overlapping.append(candidate_item)
+    if not overlapping:
+        overlapping = [
+            candidate_item
+            for candidate_item in list(candidate_items or [])
+            if max(0.0, min(reference_end, _projection_item_end(candidate_item)) - max(reference_start, _projection_item_start(candidate_item))) > 0.02
+        ]
+    return "\n".join(_projection_item_text(item) for item in overlapping if _projection_item_text(item))
+
+
+def _projection_item_text(item: Any) -> str:
+    return normalize_display_text(
+        str(
+            getattr(item, "text_final", None)
+            or getattr(item, "text_norm", None)
+            or getattr(item, "text_raw", "")
+            or ""
+        )
+    )
+
+
+def _projection_item_start(item: Any) -> float:
+    return float(getattr(item, "start_time", getattr(item, "start", 0.0)) or 0.0)
+
+
+def _projection_item_end(item: Any) -> float:
+    return float(getattr(item, "end_time", getattr(item, "end", 0.0)) or 0.0)
+
+
+def _projection_compact_text(text: str) -> str:
+    return re.sub(r"\s+", "", normalize_display_text(str(text or ""))).upper()
+
+
+_MATERIAL_PROJECTION_TOKEN_RE = re.compile(
+    r"(?:"
+    r"\b(?:EDC|MT|UHD|FXX|S|PC)\s*\d+[A-Z]*\b"
+    r"|\b(?:NITECORE|OLIGHT|NOC|EXO|FAS|UV|LED)\b"
+    r"|奈特科尔"
+    r"|\d+(?:\.\d+)?(?:毫安|流明|档|挡|米|克|分钟|秒钟?|小时|瓦|W|mAh|lm)"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def _projection_has_material_content_drift(*, baseline_items: list[Any], candidate_items: list[Any]) -> bool:
+    if not baseline_items or not candidate_items:
+        return False
+    baseline_text = _projection_material_text(baseline_items)
+    candidate_text = _projection_material_text(candidate_items)
+    if not baseline_text or not candidate_text:
+        return False
+    candidate_tokens = _projection_material_tokens(candidate_text)
+    if not candidate_tokens:
+        return False
+    baseline_compact = re.sub(r"\s+", "", baseline_text).upper()
+    for token in candidate_tokens:
+        if re.sub(r"\s+", "", token).upper() not in baseline_compact:
+            return True
+    return False
+
+
+def _projection_material_text(items: list[Any]) -> str:
+    parts: list[str] = []
+    for item in list(items or []):
+        text = str(
+            getattr(item, "text_final", None)
+            or getattr(item, "text_norm", None)
+            or getattr(item, "text_raw", "")
+            or ""
+        )
+        if text.strip():
+            parts.append(normalize_display_text(text))
+    return "\n".join(parts)
+
+
+def _projection_material_tokens(text: str) -> set[str]:
+    normalized = normalize_display_text(str(text or ""))
+    return {
+        match.group(0).strip()
+        for match in _MATERIAL_PROJECTION_TOKEN_RE.finditer(normalized)
+        if match.group(0).strip()
+    }
 
 
 async def _persist_transcript_review_artifacts(
@@ -2541,6 +3099,7 @@ async def _persist_transcript_review_artifacts(
     subtitle_quality_report: dict[str, Any],
     subtitle_consistency_report: dict[str, Any],
     subtitle_term_resolution_patch: dict[str, Any],
+    correction_score_report: dict[str, Any],
 ) -> None:
     await session.execute(
         delete(Artifact).where(
@@ -2552,6 +3111,7 @@ async def _persist_transcript_review_artifacts(
                     ARTIFACT_TYPE_SUBTITLE_QUALITY_REPORT,
                     ARTIFACT_TYPE_SUBTITLE_CONSISTENCY_REPORT,
                     ARTIFACT_TYPE_SUBTITLE_TERM_RESOLUTION_PATCH,
+                    ARTIFACT_TYPE_TRANSCRIPT_CORRECTION_SCORE_REPORT,
                 )
             ),
         )
@@ -2596,6 +3156,50 @@ async def _persist_transcript_review_artifacts(
             data_json=subtitle_term_resolution_patch,
         )
     )
+    session.add(
+        Artifact(
+            job_id=job_id,
+            step_id=step_id,
+            artifact_type=ARTIFACT_TYPE_TRANSCRIPT_CORRECTION_SCORE_REPORT,
+            data_json=correction_score_report,
+        )
+    )
+
+
+async def _persist_projection_layer_to_subtitle_items(
+    session,
+    *,
+    job_id: uuid.UUID,
+    refreshed_projection_layer: Any,
+    version: int = 1,
+) -> int:
+    entries = list(getattr(refreshed_projection_layer, "entries", ()) or ())
+    if not entries:
+        return 0
+    await session.execute(delete(SubtitleCorrection).where(SubtitleCorrection.job_id == job_id))
+    await session.execute(delete(SubtitleItem).where(SubtitleItem.job_id == job_id, SubtitleItem.version == version))
+    persisted_count = 0
+    for index, entry in enumerate(entries):
+        text_raw = str(getattr(entry, "text_raw", "") or "")
+        text_norm = str(getattr(entry, "text_norm", "") or normalize_display_text(text_raw))
+        text_final = str(getattr(entry, "text_final", "") or text_norm)
+        if not text_final.strip():
+            continue
+        session.add(
+            SubtitleItem(
+                job_id=job_id,
+                version=version,
+                item_index=persisted_count,
+                start_time=float(getattr(entry, "start", 0.0) or 0.0),
+                end_time=float(getattr(entry, "end", 0.0) or 0.0),
+                text_raw=text_raw or text_final,
+                text_norm=normalize_display_text(text_norm or text_final),
+                text_final=normalize_display_text(text_final),
+            )
+        )
+        persisted_count += 1
+    await session.flush()
+    return persisted_count
 
 
 def _build_transcript_review_result_payload(
@@ -2618,7 +3222,7 @@ def _build_transcript_review_result_payload(
         "accepted_correction_count": accepted_count,
         "pending_correction_count": pending_count,
         "source_basis": getattr(canonical_transcript_layer, "source_basis", ""),
-        "projection_basis": "canonical_refresh",
+        "projection_basis": getattr(refreshed_projection_layer, "projection_basis", ""),
     }
 
 
@@ -6226,7 +6830,7 @@ async def run_transcript_review(job_id: str) -> dict:
             artifact_types=(ARTIFACT_TYPE_SUBTITLE_PROJECTION_LAYER,),
         )
         projection_data = projection_artifact.data_json if projection_artifact and isinstance(projection_artifact.data_json, dict) else {}
-        refreshed_projection_layer, subtitle_quality_report = await _build_canonical_refresh_projection(
+        refreshed_projection_layer, subtitle_quality_report, correction_score_report = await _build_canonical_refresh_projection(
             session,
             job_id=job.id,
             source_name=job.source_name,
@@ -6266,11 +6870,18 @@ async def run_transcript_review(job_id: str) -> dict:
             subtitle_quality_report=subtitle_quality_report,
             subtitle_consistency_report=subtitle_consistency_report,
             subtitle_term_resolution_patch=subtitle_term_resolution_patch,
+            correction_score_report=correction_score_report,
+        )
+        persisted_subtitle_count = await _persist_projection_layer_to_subtitle_items(
+            session,
+            job_id=job.id,
+            refreshed_projection_layer=refreshed_projection_layer,
         )
         detail, result_payload = _build_transcript_review_result_payload(
             canonical_transcript_layer=canonical_transcript_layer,
             refreshed_projection_layer=refreshed_projection_layer,
         )
+        result_payload["persisted_subtitle_count"] = persisted_subtitle_count
         await _set_step_progress(
             session,
             step,

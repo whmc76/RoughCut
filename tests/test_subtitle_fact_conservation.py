@@ -5,7 +5,7 @@ from roughcut.review.content_profile import (
     apply_glossary_terms,
 )
 from roughcut.review.glossary_engine import assess_glossary_correction_automation
-from roughcut.speech.subtitle_pipeline import _apply_accepted_corrections
+from roughcut.speech.subtitle_pipeline import _apply_accepted_corrections, build_canonical_transcript_layer
 from roughcut.speech.subtitle_segmentation import normalize_display_numbers, normalize_display_text
 from roughcut.speech.transcribe import _normalize_transcript_result
 
@@ -99,6 +99,68 @@ def test_accepted_corrections_do_not_rewrite_conflicting_model_numbers() -> None
     )
 
     assert _apply_accepted_corrections("这个EDC17手电", corrections) == "这个EDC17手电"
+
+
+def test_human_accepted_corrections_rewrite_canonical_text() -> None:
+    corrections = (
+        {
+            "original": "耐特科尔",
+            "accepted": "NITECORE",
+            "status": "accepted",
+            "human_decision": "accepted",
+            "auto_applied": False,
+            "source": "human_review",
+            "change_type": "manual",
+            "confidence": 1.0,
+        },
+    )
+
+    assert _apply_accepted_corrections("这个耐特科尔EDC17手电", corrections) == "这个NITECOREEDC17手电"
+
+
+def test_auto_applied_corrections_do_not_rewrite_canonical_text() -> None:
+    corrections = (
+        {
+            "original": "奈特科尔",
+            "accepted": "NITECORE",
+            "status": "accepted",
+            "auto_applied": True,
+            "source": "glossary_match",
+            "change_type": "glossary",
+            "confidence": 0.99,
+        },
+    )
+
+    assert _apply_accepted_corrections("这个奈特科尔也可以", corrections) == "这个奈特科尔也可以"
+
+
+def test_human_accepted_correction_updates_canonical_segment_text() -> None:
+    class Subtitle:
+        id = "subtitle-1"
+        item_index = 0
+        start_time = 0.0
+        end_time = 2.0
+        text_raw = "这个耐特科尔EDC17手电"
+        text_norm = "这个耐特科尔EDC17手电"
+        text_final = None
+
+    corrections = [
+        {
+            "subtitle_item_id": "subtitle-1",
+            "original_span": "耐特科尔",
+            "suggested_span": "NITECORE",
+            "human_decision": "accepted",
+            "auto_applied": False,
+            "source": "human_review",
+            "change_type": "manual",
+            "confidence": 1.0,
+        }
+    ]
+
+    layer = build_canonical_transcript_layer([Subtitle()], corrections=corrections)
+
+    assert layer.segments[0].text_canonical == "这个NITECOREEDC17手电"
+    assert layer.segments[0].accepted_corrections[0]["human_decision"] == "accepted"
 
 
 def test_glossary_automation_blocks_neighbor_model_rewrite() -> None:

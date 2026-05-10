@@ -29,6 +29,7 @@ from roughcut.review.subtitle_term_resolution import ARTIFACT_TYPE_SUBTITLE_TERM
 from roughcut.speech.subtitle_pipeline import ARTIFACT_TYPE_CANONICAL_TRANSCRIPT_LAYER
 
 QUALITY_ARTIFACT_TYPE = "quality_assessment"
+ARTIFACT_TYPE_TRANSCRIPT_CORRECTION_SCORE_REPORT = "transcript_correction_score_report"
 _COMPARISON_KEYWORDS = (
     "对比",
     "一代",
@@ -137,6 +138,7 @@ def assess_job_quality(
     canonical_transcript_artifact = _latest_artifact(artifacts, ARTIFACT_TYPE_CANONICAL_TRANSCRIPT_LAYER)
     term_resolution_artifact = _latest_artifact(artifacts, ARTIFACT_TYPE_SUBTITLE_TERM_RESOLUTION_PATCH)
     consistency_artifact = _latest_artifact(artifacts, ARTIFACT_TYPE_SUBTITLE_CONSISTENCY_REPORT)
+    correction_score_artifact = _latest_artifact(artifacts, ARTIFACT_TYPE_TRANSCRIPT_CORRECTION_SCORE_REPORT)
     profile = profile_artifact.data_json if profile_artifact and isinstance(profile_artifact.data_json, dict) else {}
     render_outputs = render_artifact.data_json if render_artifact and isinstance(render_artifact.data_json, dict) else {}
     variant_bundle = (
@@ -218,6 +220,34 @@ def assess_job_quality(
                 )
             )
 
+    if correction_score_artifact and isinstance(correction_score_artifact.data_json, dict):
+        correction_score_data = correction_score_artifact.data_json
+        correction_score = float(correction_score_data.get("score") or 0.0)
+        issue_codes = [
+            str(item).strip()
+            for item in (correction_score_data.get("issue_codes") or [])
+            if str(item).strip()
+        ]
+        if bool(correction_score_data.get("blocking")) and issue_codes:
+            issues.append(
+                QualityIssue(
+                    "transcript_correction_fidelity_blocking",
+                    f"校正内容保真存在问题：{issue_codes[0]}",
+                    max(12.0, min(28.0, 100.0 - correction_score)),
+                    auto_fix_step="transcript_review",
+                    blocking=True,
+                )
+            )
+        elif correction_score and correction_score < 96.0:
+            issues.append(
+                QualityIssue(
+                    "transcript_correction_fidelity_warning",
+                    f"校正内容保真评分偏低 {correction_score:.2f}",
+                    max(4.0, min(12.0, 100.0 - correction_score)),
+                    auto_fix_step="transcript_review",
+                )
+            )
+
     if (
         ARTIFACT_TYPE_CANONICAL_TRANSCRIPT_LAYER not in {
             artifact.artifact_type for artifact in artifacts if isinstance(artifact.artifact_type, str)
@@ -251,6 +281,16 @@ def assess_job_quality(
             subtitle_quality_data.get("metrics") if isinstance(subtitle_quality_data.get("metrics"), dict) else {}
         )
         subtitle_quality_score = _safe_float(subtitle_quality_data.get("score"))
+        subtitle_quality_auto_fix_step = "subtitle_postprocess"
+        if correction_score_artifact and isinstance(correction_score_artifact.data_json, dict):
+            selected_layer = str(correction_score_artifact.data_json.get("selected_transcript_layer") or "")
+            if selected_layer == "canonical_transcript":
+                subtitle_quality_auto_fix_step = "transcript_review"
+        subtitle_quality_issue_prefix = (
+            "canonical_projection_quality"
+            if subtitle_quality_auto_fix_step == "transcript_review"
+            else "subtitle_quality"
+        )
         semantic_bad_term_total = int(subtitle_quality_metrics.get("semantic_bad_term_total") or 0)
         semantic_contamination_detected = semantic_bad_term_total > 0 or any(
             "语义污染" in reason for reason in subtitle_quality_blocking_reasons
@@ -262,20 +302,20 @@ def assess_job_quality(
         if subtitle_quality_blocking_reasons:
             issues.append(
                 QualityIssue(
-                    "subtitle_semantic_contamination" if semantic_contamination_detected else "subtitle_quality_blocking",
+                    "subtitle_semantic_contamination" if semantic_contamination_detected else f"{subtitle_quality_issue_prefix}_blocking",
                     subtitle_quality_blocking_reasons[0],
                     14.0 if subtitle_quality_score is None else min(16.0, max(8.0, 100.0 - subtitle_quality_score)),
-                    auto_fix_step=None if semantic_contamination_detected else "subtitle_postprocess",
+                    auto_fix_step=None if semantic_contamination_detected else subtitle_quality_auto_fix_step,
                     blocking=True,
                 )
             )
         elif subtitle_quality_warning_reasons:
             issues.append(
                 QualityIssue(
-                    "subtitle_quality_warning",
+                    f"{subtitle_quality_issue_prefix}_warning",
                     subtitle_quality_warning_reasons[0],
                     6.0,
-                    auto_fix_step="subtitle_postprocess",
+                    auto_fix_step=subtitle_quality_auto_fix_step,
                 )
             )
 

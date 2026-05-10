@@ -68,6 +68,7 @@ from roughcut.review.domain_glossaries import detect_glossary_domains, select_pr
 from roughcut.review.intelligent_copy_topics import build_intelligent_copy_topic_hints
 from roughcut.review.model_identity import model_numbers_conflict
 from roughcut.review.platform_copy import build_transcript_for_packaging
+from roughcut.review.text_rewrite_policy import disabled_text_rewrite
 from roughcut.review.subtitle_memory import (
     _DEFAULT_TERM_ALIASES,
     _extract_compound_components,
@@ -1324,7 +1325,9 @@ def build_reviewed_transcript_excerpt(
     max_items: int = 36,
     max_chars: int = 1400,
     ) -> str:
-    return build_transcript_excerpt(subtitle_items, max_items=max_items, max_chars=max_chars)
+    return disabled_text_rewrite(
+        build_transcript_excerpt(subtitle_items, max_items=max_items, max_chars=max_chars)
+    )
 
 
 def _transcript_evidence_items(transcript_evidence: dict[str, Any] | None) -> list[dict[str, Any]]:
@@ -1393,7 +1396,7 @@ def _resolve_transcript_excerpt(
 
 
 def apply_glossary_terms(text: str, glossary_terms: list[dict[str, Any]]) -> str:
-    return text
+    return disabled_text_rewrite(text)
 
 
 def _build_subtitle_signal_blob(subtitle_items: list[dict[str, Any]] | None, *, max_items: int = 96) -> str:

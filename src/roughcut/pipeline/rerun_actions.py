@@ -7,6 +7,8 @@ ISSUE_RERUN_STEP_OVERRIDES: dict[str, str] = {
     "missing_subtitles": "subtitle_postprocess",
     "subtitle_quality_blocking": "subtitle_postprocess",
     "subtitle_quality_warning": "subtitle_postprocess",
+    "canonical_projection_quality_blocking": "transcript_review",
+    "canonical_projection_quality_warning": "transcript_review",
     "subtitle_identity_missing": "subtitle_postprocess",
     "subtitle_terms_pending": "subtitle_term_resolution",
     "subtitle_consistency_blocking": "subtitle_consistency_review",

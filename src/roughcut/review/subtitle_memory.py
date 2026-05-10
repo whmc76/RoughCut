@@ -20,6 +20,7 @@ from roughcut.review.domain_glossaries import (
 from roughcut.review.content_profile_memory import merge_content_profile_creative_preferences
 from roughcut.review.hotword_learning import select_ranked_hotword_terms
 from roughcut.review.model_identity import model_numbers_conflict
+from roughcut.review.text_rewrite_policy import disabled_text_rewrite
 from roughcut.speech.dialects import resolve_transcription_dialect
 from roughcut.edit.presets import normalize_workflow_template_name
 
@@ -1738,7 +1739,7 @@ def apply_domain_term_corrections(
     prev_text: str = "",
     next_text: str = "",
 ) -> str:
-    return str(text or "").strip()
+    return disabled_text_rewrite(text, strip=True)
 
 
 def _should_skip_confirmed_display_term(term: str, review_memory: dict[str, Any] | None) -> bool:
