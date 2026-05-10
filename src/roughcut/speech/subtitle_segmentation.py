@@ -292,7 +292,12 @@ _DISPLAY_QUANTITY_UNITS = (
     "小时",
     "毫米",
     "厘米",
+    "毫安",
+    "安时",
+    "瓦时",
+    "赫兹",
     "英寸",
+    "版本",
     "代",
     "档",
     "个",
@@ -350,20 +355,38 @@ _DISPLAY_QUANTITY_UNITS = (
     "伏",
     "安",
     "流明",
+    "GB",
+    "MB",
+    "TB",
+    "mAh",
+    "Ah",
+    "Wh",
+    "Hz",
+    "fps",
 )
 _DISPLAY_NUM_TOKEN = r"[零〇幺一二两三四五六七八九十百千万\d]+"
+_DISPLAY_DIGIT_SEQUENCE_TOKEN = r"[零〇幺一二两三四五六七八九\d]+"
 _DISPLAY_ORDINAL_UNIT_PATTERN = "|".join(
     sorted((re.escape(unit) for unit in _DISPLAY_ORDINAL_UNITS), key=len, reverse=True)
 )
 _DISPLAY_QUANTITY_UNIT_PATTERN = "|".join(
     sorted((re.escape(unit) for unit in _DISPLAY_QUANTITY_UNITS), key=len, reverse=True)
 )
+_DISPLAY_RANGE_CONNECTOR = r"(?:到|至|-|~|－|—)"
 _PERCENT_NUMBER_RE = re.compile(rf"百分之(?P<number>{_DISPLAY_NUM_TOKEN})")
 _ORDINAL_NUMBER_RE = re.compile(
     rf"第(?P<number>{_DISPLAY_NUM_TOKEN})(?P<unit>{_DISPLAY_ORDINAL_UNIT_PATTERN})"
 )
+_RANGE_QUANTITY_RE = re.compile(
+    rf"(?<![A-Za-z0-9])(?P<start>{_DISPLAY_NUM_TOKEN})(?P<connector>{_DISPLAY_RANGE_CONNECTOR})"
+    rf"(?P<end>{_DISPLAY_NUM_TOKEN})(?P<unit>{_DISPLAY_QUANTITY_UNIT_PATTERN})"
+)
 _QUANTITY_NUMBER_RE = re.compile(
-    rf"(?<![第A-Za-z0-9])(?P<number>{_DISPLAY_NUM_TOKEN})(?P<unit>{_DISPLAY_QUANTITY_UNIT_PATTERN})"
+    rf"(?<![第A-Za-z0-9.几数])(?P<number>{_DISPLAY_NUM_TOKEN})(?P<unit>{_DISPLAY_QUANTITY_UNIT_PATTERN})"
+)
+_DECIMAL_NUMBER_RE = re.compile(
+    rf"(?<![A-Za-z0-9])(?P<integer>{_DISPLAY_NUM_TOKEN})点(?P<fraction>{_DISPLAY_DIGIT_SEQUENCE_TOKEN})"
+    rf"(?P<unit>{_DISPLAY_QUANTITY_UNIT_PATTERN})"
 )
 _TIME_WITH_MINUTE_RE = re.compile(
     rf"(?P<prefix>(?:凌晨|早上|上午|中午|下午|晚上)?)"
@@ -484,6 +507,8 @@ _INFO_COUNT_NOUN_PREFIXES = (
     "尺寸",
     "机位",
     "镜头",
+    "功能键",
+    "参数",
     "孔位",
     "按钮",
     "刀型",
@@ -1148,8 +1173,7 @@ def normalize_display_text(text: str, *, cleanup_fillers: bool = True) -> str:
     result = re.sub(r"([\u4e00-\u9fff])\s+(?=[\u4e00-\u9fff])", r"\1", result)
     if cleanup_fillers:
         result = cleanup_subtitle_fillers(result)
-    result = _normalize_safe_display_terms(result)
-    result = _normalize_display_numbers(result)
+    result = transcribe_subtitle_numerals(result)
     result = apply_subtitle_clause_spacing(result)
     result = re.sub(r"\s+([，,。.!！？；;：:])", r"\1", result)
     result = re.sub(r"([，；：])(?=[^\s])", r"\1 ", result)
@@ -1161,8 +1185,8 @@ def normalize_display_text(text: str, *, cleanup_fillers: bool = True) -> str:
 
 
 def normalize_display_numbers(text: str) -> str:
-    """Normalize numeric expressions in subtitle text without touching spacing/punctuation."""
-    return _normalize_display_numbers(str(text or "").strip())
+    """Compatibility wrapper for subtitle numeral transcription."""
+    return transcribe_subtitle_numerals(text)
 
 
 def cleanup_subtitle_fillers(text: str) -> str:
@@ -1250,7 +1274,12 @@ def apply_subtitle_clause_spacing(text: str) -> str:
     return re.sub(r"\s{2,}", " ", result).strip()
 
 
-def _normalize_display_numbers(text: str) -> str:
+def transcribe_subtitle_numerals(text: str) -> str:
+    """Rewrite numeric expressions for readable Chinese subtitles.
+
+    This intentionally handles only numeral presentation. It does not rewrite
+    glossary terms, brands, product names, or semantic content.
+    """
     if not text:
         return text
 
@@ -1259,6 +1288,7 @@ def _normalize_display_numbers(text: str) -> str:
     result = _normalize_alpha_numeric_tokens(result)
     result = _collapse_repeated_model_number_tokens(result)
     result = _normalize_time_tokens(result)
+    result = _normalize_decimal_quantity_tokens(result)
     result = _normalize_chinese_digit_sequences(result)
 
     def replace_percent(match: re.Match[str]) -> str:
@@ -1269,6 +1299,21 @@ def _normalize_display_numbers(text: str) -> str:
         number = _normalize_numeric_token(match.group("number"))
         unit = match.group("unit")
         return f"第{number}{unit}" if number else match.group(0)
+
+    def replace_range(match: re.Match[str]) -> str:
+        start_raw = str(match.group("start") or "")
+        end_raw = str(match.group("end") or "")
+        start_number = _normalize_numeric_token(start_raw)
+        end_number = _normalize_numeric_token(end_raw)
+        unit = str(match.group("unit") or "")
+        if not start_number or not end_number:
+            return match.group(0)
+        tail_text = match.string[match.end():match.end() + 6]
+        if _range_should_use_natural_chinese(start_raw, end_raw, unit, tail_text):
+            connector = "到"
+            return f"{_format_natural_number(start_number, raw_number=start_raw)}{connector}{_format_natural_number(end_number, raw_number=end_raw)}{unit}"
+        connector = str(match.group("connector") or "到")
+        return f"{start_number}{connector}{end_number}{unit}"
 
     def replace_quantity(match: re.Match[str]) -> str:
         raw_number = match.group("number")
@@ -1292,6 +1337,7 @@ def _normalize_display_numbers(text: str) -> str:
 
     result = _PERCENT_NUMBER_RE.sub(replace_percent, result)
     result = _ORDINAL_NUMBER_RE.sub(replace_ordinal, result)
+    result = _RANGE_QUANTITY_RE.sub(replace_range, result)
     result = _QUANTITY_NUMBER_RE.sub(replace_quantity, result)
     return result
 
@@ -1314,6 +1360,18 @@ def _normalize_colloquial_price_tokens(text: str) -> str:
     return _COLLOQUIAL_PRICE_RE.sub(replace_price, text)
 
 
+def _normalize_decimal_quantity_tokens(text: str) -> str:
+    def replace_decimal(match: re.Match[str]) -> str:
+        integer = _normalize_numeric_token(match.group("integer"))
+        fraction = _normalize_digit_sequence_token(match.group("fraction"))
+        unit = str(match.group("unit") or "")
+        if not integer or not fraction:
+            return match.group(0)
+        return f"{integer}.{fraction}{unit}"
+
+    return _DECIMAL_NUMBER_RE.sub(replace_decimal, text)
+
+
 def _normalize_spaced_model_tokens(text: str) -> str:
     def replace_model(match: re.Match[str]) -> str:
         letters = re.sub(r"\s+", "", str(match.group("letters") or "")).upper()
@@ -1322,7 +1380,7 @@ def _normalize_spaced_model_tokens(text: str) -> str:
         if not letters or not number:
             return match.group(0)
         suffix_text = suffix.lower() if suffix else ""
-        return f"{letters}-{number}{suffix_text}"
+        return f"{letters}{number}{suffix_text}"
 
     return _SPACED_MODEL_TOKEN_RE.sub(replace_model, text)
 
@@ -1355,7 +1413,7 @@ def _normalize_time_tokens(text: str) -> str:
     def replace_time_half(match: re.Match[str]) -> str:
         prefix = str(match.group("prefix") or "")
         hour = _normalize_numeric_token(match.group("hour"))
-        return f"{prefix}{hour}点30" if hour else match.group(0)
+        return f"{prefix}{hour}点半" if hour else match.group(0)
 
     def replace_time_hour_only(match: re.Match[str]) -> str:
         prefix = str(match.group("prefix") or "")
@@ -1385,6 +1443,8 @@ def _format_natural_single_quantity(number_token: str, normalized_number: str, u
         return ""
     if unit == "个" and _starts_with_info_count_noun(tail_text):
         return ""
+    if unit == "块" and re.match(r"^\d", str(tail_text or "")):
+        return ""
     display_number = _NATURAL_SINGLE_DIGIT_DISPLAY.get(str(normalized_number or ""))
     if not display_number:
         return ""
@@ -1392,6 +1452,26 @@ def _format_natural_single_quantity(number_token: str, normalized_number: str, u
     if raw_number == "二":
         display_number = "二"
     return f"{display_number}{unit}"
+
+
+def _range_should_use_natural_chinese(start_token: str, end_token: str, unit: str, tail_text: str) -> bool:
+    start_number = _normalize_numeric_token(start_token)
+    end_number = _normalize_numeric_token(end_token)
+    if not start_number or not end_number:
+        return False
+    if not (start_number.isdigit() and end_number.isdigit()):
+        return False
+    if int(start_number) > 9 or int(end_number) > 9:
+        return False
+    if unit == "个" and _starts_with_info_count_noun(tail_text):
+        return False
+    return unit in _NATURAL_SINGLE_QUANTITY_UNITS
+
+
+def _format_natural_number(normalized_number: str, *, raw_number: str = "") -> str:
+    if str(raw_number or "").strip() == "二":
+        return "二"
+    return _NATURAL_SINGLE_DIGIT_DISPLAY.get(str(normalized_number or ""), str(normalized_number or ""))
 
 
 def _should_preserve_natural_quantity(number_token: str, unit: str, tail_text: str) -> bool:
@@ -1424,6 +1504,17 @@ def _normalize_numeric_token(token: str) -> str:
         return "".join(str(_CHINESE_DIGIT_VALUES[char]) for char in value)
     parsed = _parse_chinese_number(value)
     return str(parsed) if parsed is not None else value
+
+
+def _normalize_digit_sequence_token(token: str) -> str:
+    value = str(token or "").strip()
+    if not value:
+        return value
+    if value.isdigit():
+        return value
+    if re.fullmatch(r"[零〇幺一二两三四五六七八九]+", value):
+        return "".join(str(_CHINESE_DIGIT_VALUES[char]) for char in value)
+    return _normalize_numeric_token(value)
 
 
 def _parse_chinese_number(token: str) -> int | None:

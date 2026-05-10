@@ -10,7 +10,7 @@ from roughcut.speech.subtitle_segmentation import normalize_display_numbers, nor
 from roughcut.speech.transcribe import _normalize_transcript_result
 
 
-def test_display_normalization_preserves_spoken_sentence_and_natural_quantity() -> None:
+def test_display_number_transcription_does_not_rewrite_non_numeric_facts() -> None:
     assert normalize_display_text("我懒得看了") == "我懒得看了"
     assert normalize_display_numbers("我在我的理解是一个EDC小零食") == "我在我的理解是一个EDC小零食"
     assert normalize_display_numbers("我在我的理解是1个EDC小零食") == "我在我的理解是一个EDC小零食"

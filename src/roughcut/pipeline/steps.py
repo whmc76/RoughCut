@@ -187,7 +187,7 @@ from roughcut.speech.subtitle_pipeline import (
     build_subtitle_projection_layer,
     build_transcript_fact_layer,
 )
-from roughcut.speech.transcribe import _normalize_semantic_contamination_text, persist_empty_transcript_result, transcribe_audio
+from roughcut.speech.transcribe import persist_empty_transcript_result, transcribe_audio
 from roughcut.storage.s3 import get_storage, job_key
 from roughcut.telegram.review_notification_service import enqueue_review_notification
 from roughcut.usage import track_step_usage, track_usage_operation

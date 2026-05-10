@@ -124,7 +124,7 @@ export function JobSubtitleDiagnosticsSection({
                     <div className="toolbar compact-top">
                       <button
                         type="button"
-                        className="button ghost button-sm"
+                        className="button primary subtitle-rerun-button"
                         disabled={isTriggeringRerun || isPendingRerun}
                         onClick={() => onTriggerRerun?.(decision)}
                       >

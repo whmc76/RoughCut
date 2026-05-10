@@ -36,6 +36,7 @@ from roughcut.review.evidence_types import (
 )
 from roughcut.review.final_review_state import mark_final_review_approved
 from roughcut.review.subtitle_consistency import ARTIFACT_TYPE_SUBTITLE_CONSISTENCY_REPORT
+from roughcut.review.subtitle_quality import ARTIFACT_TYPE_SUBTITLE_QUALITY_REPORT
 from roughcut.review.subtitle_term_resolution import ARTIFACT_TYPE_SUBTITLE_TERM_RESOLUTION_PATCH
 from roughcut.speech.subtitle_pipeline import ARTIFACT_TYPE_CANONICAL_TRANSCRIPT_LAYER
 from roughcut.storage.runtime_cleanup import cleanup_job_runtime_files
@@ -1317,6 +1318,10 @@ async def _update_job_statuses(session) -> None:
             and review_step is not None
             and review_step.status == "pending"
         ):
+            if job.status != "needs_review":
+                quality_outcome = await _assess_and_maybe_rerun_job(session, job, steps)
+                if quality_outcome == "rerun":
+                    continue
             job.status = "needs_review"
             job.updated_at = datetime.now(timezone.utc)
             continue
@@ -1799,6 +1804,8 @@ def _artifact_types_for_quality_rerun(rerun_steps: set[str], *, issue_codes: lis
     preserve_render_outputs = _preserve_render_outputs_for_rerun(issue_codes)
     if "subtitle_translation" in rerun_steps:
         artifact_types.add("subtitle_translation")
+    if "subtitle_postprocess" in rerun_steps:
+        artifact_types.add(ARTIFACT_TYPE_SUBTITLE_QUALITY_REPORT)
     if "subtitle_term_resolution" in rerun_steps:
         artifact_types.add(ARTIFACT_TYPE_SUBTITLE_TERM_RESOLUTION_PATCH)
     if "subtitle_consistency_review" in rerun_steps:

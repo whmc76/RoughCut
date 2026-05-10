@@ -3,6 +3,7 @@ from __future__ import annotations
 import uuid
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from roughcut.creative.modes import (
@@ -12,10 +13,11 @@ from roughcut.creative.modes import (
     resolve_live_batch_enhancement_modes,
 )
 import roughcut.pipeline.orchestrator as orchestrator
-from roughcut.db.models import Job, JobStep
+from roughcut.db.models import Artifact, Job, JobStep, SubtitleItem
 from roughcut.db.session import Base
 from roughcut.pipeline.steps import _drop_soft_content_understanding_blockers, _finalize_content_profile_review_state
 from roughcut.review.content_profile import assess_content_profile_automation
+from roughcut.review.subtitle_quality import ARTIFACT_TYPE_SUBTITLE_QUALITY_REPORT
 
 
 class _FakeScalarResult:
@@ -399,6 +401,93 @@ async def test_summary_review_pauses_on_blocking_exception() -> None:
     assert final_profile is None
     assert review_step.status == "pending"
     assert "主体身份冲突" in str(review_step.metadata_["detail"])
+
+
+@pytest.mark.asyncio
+async def test_summary_review_pending_triggers_quality_rerun_before_manual_pause() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with session_factory() as session:
+            job = Job(id=uuid.uuid4(), source_path="source.mp4", source_name="source.mp4", status="processing")
+            steps = [
+                JobStep(job_id=job.id, step_name="probe", status="done"),
+                JobStep(job_id=job.id, step_name="extract_audio", status="done"),
+                JobStep(job_id=job.id, step_name="transcribe", status="done"),
+                JobStep(job_id=job.id, step_name="subtitle_postprocess", status="done"),
+                JobStep(job_id=job.id, step_name="subtitle_term_resolution", status="done"),
+                JobStep(job_id=job.id, step_name="subtitle_consistency_review", status="done"),
+                JobStep(job_id=job.id, step_name="glossary_review", status="done"),
+                JobStep(job_id=job.id, step_name="transcript_review", status="done"),
+                JobStep(job_id=job.id, step_name="subtitle_translation", status="done"),
+                JobStep(job_id=job.id, step_name="content_profile", status="done"),
+                JobStep(job_id=job.id, step_name="summary_review", status="pending"),
+                JobStep(job_id=job.id, step_name="ai_director", status="pending"),
+                JobStep(job_id=job.id, step_name="avatar_commentary", status="pending"),
+                JobStep(job_id=job.id, step_name="edit_plan", status="pending"),
+                JobStep(job_id=job.id, step_name="render", status="pending"),
+                JobStep(job_id=job.id, step_name="final_review", status="pending"),
+                JobStep(job_id=job.id, step_name="platform_package", status="pending"),
+            ]
+            session.add(job)
+            session.add_all(steps)
+            session.add(
+                Artifact(
+                    job_id=job.id,
+                    artifact_type="content_profile",
+                    data_json={
+                        "subject_type": "手电",
+                        "video_theme": "Nitecore EDC17 与 EDC37 开箱对比",
+                        "summary": "视频围绕 Nitecore EDC17 与 EDC37 的外观和使用差异展开。",
+                        "engagement_question": "你更关注 EDC17 还是 EDC37？",
+                    },
+                )
+            )
+            session.add(
+                Artifact(
+                    job_id=job.id,
+                    artifact_type=ARTIFACT_TYPE_SUBTITLE_QUALITY_REPORT,
+                    data_json={
+                        "score": 64.0,
+                        "blocking": True,
+                        "blocking_reasons": ["可词级纠偏的热词/型号残留 6 处"],
+                        "warning_reasons": [],
+                        "metrics": {"bad_term_total": 6},
+                    },
+                )
+            )
+            session.add(
+                SubtitleItem(
+                    job_id=job.id,
+                    item_index=0,
+                    start_time=0.0,
+                    end_time=2.0,
+                    text_raw="今天对比 EDC17 和 EDC37。",
+                    text_norm="今天对比 EDC17 和 EDC37。",
+                    text_final="今天对比 EDC17 和 EDC37。",
+                )
+            )
+            await session.commit()
+
+            await orchestrator._update_job_statuses(session)
+            await session.commit()
+
+            assert job.status == "processing"
+            step_map = {step.step_name: step for step in steps}
+            assert step_map["subtitle_postprocess"].status == "pending"
+            assert step_map["summary_review"].status == "pending"
+            assert "subtitle_quality_blocking" in step_map["subtitle_postprocess"].metadata_["detail"]
+            quality_artifacts = (
+                await session.execute(
+                    select(Artifact).where(Artifact.job_id == job.id, Artifact.artifact_type == "quality_assessment")
+                )
+            ).scalars().all()
+            assert quality_artifacts[-1].data_json["auto_rerun_triggered"] is True
+    finally:
+        await engine.dispose()
 
 
 @pytest.mark.asyncio

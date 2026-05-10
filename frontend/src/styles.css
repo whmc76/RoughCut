@@ -1040,6 +1040,14 @@ select.input option:focus {
   border-radius: 12px;
 }
 
+.subtitle-rerun-button {
+  min-height: 44px;
+  padding: 11px 18px;
+  font-size: 14px;
+  font-weight: 700;
+  box-shadow: 0 10px 22px rgba(45, 106, 106, 0.18);
+}
+
 .button.ghost {
   background: rgba(255, 255, 255, 0.22);
 }

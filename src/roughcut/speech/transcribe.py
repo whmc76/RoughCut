@@ -155,24 +155,7 @@ def _filter_tail_cta_noise_segments(result: TranscriptResult) -> list[dict[str, 
 
 
 def _normalize_semantic_contamination_text(text: str, *, category_scope: str) -> str:
-    cleaned = str(text or "").strip()
-    if not cleaned:
-        return ""
-    for pattern, replacement in _SEMANTIC_HALLUCINATION_PATTERNS:
-        cleaned = pattern.sub(replacement, cleaned)
-    for pattern, replacement in _DUPLICATE_BRAND_PATTERNS:
-        cleaned = pattern.sub(replacement, cleaned)
-    if category_scope == "flashlight":
-        for pattern, replacement in _FLASHLIGHT_CONTAMINATION_PATTERNS:
-            cleaned = pattern.sub(replacement, cleaned)
-        cleaned = _collapse_flashlight_edc_alt_lists(cleaned)
-    elif category_scope == "knife":
-        cleaned = _normalize_knife_material_surface_text(cleaned)
-    cleaned = _ADJACENT_DUPLICATE_MODEL_TOKEN_RE.sub(lambda match: match.group("token"), cleaned)
-    cleaned = re.sub(r"[，,]{2,}", "，", cleaned)
-    cleaned = re.sub(r"[。]{2,}", "。", cleaned)
-    cleaned = re.sub(r"\s{2,}", " ", cleaned).strip(" ，,。；;、")
-    return cleaned.strip()
+    return str(text or "").strip()
 
 
 def _collapse_flashlight_edc_alt_lists(text: str) -> str:
