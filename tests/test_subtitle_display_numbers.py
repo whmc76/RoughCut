@@ -38,6 +38,14 @@ def test_display_text_applies_only_numeral_transcription_not_term_rewrites() -> 
     assert normalize_display_text("这是EDC幺七的威虎版") == "这是EDC17的威虎版"
 
 
+def test_display_text_keeps_first_inline_homophone_duplicate_model_number() -> None:
+    assert normalize_display_text("我直接带37了三期了对不对") == "我直接带37了对不对"
+
+
+def test_display_text_keeps_later_clause_for_clause_level_duplicate() -> None:
+    assert normalize_display_text("这个八千两百给你的安全感，这个8200给你的安全感是更足的") == "8200给你的安全感是更足的"
+
+
 def test_canonical_projection_items_keep_final_text_numeral_transcribed() -> None:
     items = _build_projection_items_from_entries(
         [

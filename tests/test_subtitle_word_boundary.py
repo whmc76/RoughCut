@@ -155,6 +155,28 @@ def test_segmenter_uses_covering_word_times_for_number_unit_entry() -> None:
     assert numeric_unit_entry.end == 8.7
 
 
+def test_segmenter_drops_timestamp_duplicate_homophone_number_word() -> None:
+    segment = type(
+        "TranscriptRow",
+        (),
+        {
+            "text": "我直接带37了三期了对不对",
+            "start_time": 0.0,
+            "end_time": 1.6,
+            "words_json": [
+                {"word": "我直接带", "start": 0.0, "end": 0.4},
+                {"word": "37", "start": 0.4, "end": 0.72},
+                {"word": "三期", "start": 0.42, "end": 0.72},
+                {"word": "了对不对", "start": 0.72, "end": 1.6},
+            ],
+        },
+    )()
+
+    result = segment_subtitles([segment], max_chars=30, max_duration=3.0)
+
+    assert "".join(entry.text_norm for entry in result.entries) == "我直接带37了对不对。"
+
+
 def test_transcript_projection_uses_segmented_word_level_times() -> None:
     segment = type(
         "TranscriptRow",

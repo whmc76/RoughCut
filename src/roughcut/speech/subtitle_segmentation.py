@@ -420,6 +420,53 @@ _CHINESE_DIGIT_SEQUENCE_RE = re.compile(
 _SPOKEN_DIGIT_RUN_RE = re.compile(
     r"(?<![A-Za-z0-9])(?P<number>[零〇幺一二两三四五六七八九\d]*幺[零〇幺一二两三四五六七八九\d]{1,5})"
 )
+_HOMOPHONE_DUPLICATE_TOKEN_RE = re.compile(
+    r"\d{1,6}|[零〇幺一二两三四五六七八九十百千万七期起器气汽其奇齐棋漆]{1,8}"
+)
+_HOMOPHONE_DUPLICATE_SEPARATOR_RE = re.compile(r"^[\s了的啊呀嘛呢吧呗额呃]*$")
+_CLAUSE_DUPLICATE_FILLER_RE = re.compile(r"^(?:这个|那个|就是|然后|其实|可能|但是|不过|所以|那么|那)+")
+_CHINESE_NUMBER_PHRASE_RE = re.compile(r"[零〇幺一二两三四五六七八九十百千万]{2,}")
+_CLAUSE_PUNCTUATION = "，,。！？!?；;"
+_WORD_PARTICLE_TOKENS = {"了", "的", "啊", "呀", "嘛", "呢", "吧", "呗", "额", "呃"}
+_HOMOPHONE_SYLLABLES = {
+    "0": "ling",
+    "1": "yi",
+    "2": "er",
+    "3": "san",
+    "4": "si",
+    "5": "wu",
+    "6": "liu",
+    "7": "qi",
+    "8": "ba",
+    "9": "jiu",
+    "零": "ling",
+    "〇": "ling",
+    "幺": "yi",
+    "一": "yi",
+    "二": "er",
+    "两": "er",
+    "三": "san",
+    "四": "si",
+    "五": "wu",
+    "六": "liu",
+    "七": "qi",
+    "八": "ba",
+    "九": "jiu",
+    "十": "shi",
+    "百": "bai",
+    "千": "qian",
+    "万": "wan",
+    "期": "qi",
+    "起": "qi",
+    "器": "qi",
+    "气": "qi",
+    "汽": "qi",
+    "其": "qi",
+    "奇": "qi",
+    "齐": "qi",
+    "棋": "qi",
+    "漆": "qi",
+}
 _SPOKEN_DIGIT_CHAR_CLASS = "零〇幺一二两三四五六七八九0-9"
 _SPLIT_SPOKEN_DIGIT_LEFT_RE = re.compile(
     rf"^(?P<prefix>.*?)(?P<digits>[{_SPOKEN_DIGIT_CHAR_CLASS}]{{0,5}}幺[{_SPOKEN_DIGIT_CHAR_CLASS}]*)[，,。.!！？；;：:\s]*$"
@@ -1084,7 +1131,7 @@ def _normalize_segmentation_words(raw_words: list[dict]) -> list[dict]:
                 "end": end,
             }
         )
-    return normalized
+    return _drop_timestamp_homophone_duplicate_words(normalized)
 
 
 def _segmentation_word_source(words: list[dict]) -> str:
@@ -1184,6 +1231,8 @@ def normalize_display_text(text: str, *, cleanup_fillers: bool = True) -> str:
     if cleanup_fillers:
         result = cleanup_subtitle_fillers(result)
     result = transcribe_subtitle_numerals(result)
+    result = _collapse_clause_level_homophone_duplicates(result)
+    result = _collapse_inline_homophone_duplicates(result)
     result = apply_subtitle_clause_spacing(result)
     result = re.sub(r"\s+([，,。.!！？；;：:])", r"\1", result)
     result = re.sub(r"([，；：])(?=[^\s])", r"\1 ", result)
@@ -1358,6 +1407,150 @@ def _normalize_safe_display_terms(text: str) -> str:
     for pattern, replacement in _SAFE_DISPLAY_TERM_REPLACEMENTS:
         result = pattern.sub(replacement, result)
     return result
+
+
+def _collapse_clause_level_homophone_duplicates(text: str) -> str:
+    pieces = [piece for piece in re.split(r"([，,。！？!?；;])", str(text or "")) if piece != ""]
+    if len(pieces) < 3:
+        return str(text or "")
+
+    collapsed: list[str] = []
+    for piece in pieces:
+        if piece in _CLAUSE_PUNCTUATION:
+            if collapsed and collapsed[-1] not in _CLAUSE_PUNCTUATION:
+                collapsed.append(piece)
+            continue
+
+        clause = piece.strip()
+        if not clause:
+            continue
+        previous_clause_index = next(
+            (index for index in range(len(collapsed) - 1, -1, -1) if collapsed[index] not in _CLAUSE_PUNCTUATION),
+            None,
+        )
+        if previous_clause_index is not None and _are_clause_level_homophone_duplicates(
+            collapsed[previous_clause_index],
+            clause,
+        ):
+            del collapsed[previous_clause_index:]
+        collapsed.append(clause)
+    return "".join(collapsed)
+
+
+def _are_clause_level_homophone_duplicates(left: str, right: str) -> bool:
+    left_key = _clause_duplicate_compare_key(left)
+    right_key = _clause_duplicate_compare_key(right)
+    if not left_key or not right_key:
+        return False
+    if len(left_key) < 6 or len(right_key) < 6:
+        return False
+    if left_key == right_key:
+        return True
+    shorter, longer = sorted((left_key, right_key), key=len)
+    return len(shorter) >= 6 and shorter in longer
+
+
+def _clause_duplicate_compare_key(text: str) -> str:
+    result = str(text or "").strip()
+    result = _CHINESE_NUMBER_PHRASE_RE.sub(_replace_chinese_number_phrase_for_duplicate_key, result)
+    result = transcribe_subtitle_numerals(result)
+    result = _CLAUSE_DUPLICATE_FILLER_RE.sub("", result)
+    result = re.sub(r"(?:这个|那个|就是|然后|其实|可能|的话|一下|也算|算是)+", "", result)
+    return re.sub(r"[\s，,。！？!?；;：:、.\-\"'()（）\[\]【】]+", "", result).lower()
+
+
+def _replace_chinese_number_phrase_for_duplicate_key(match: re.Match[str]) -> str:
+    token = str(match.group(0) or "")
+    if token in _VAGUE_NUMBER_TOKENS:
+        return token
+    parsed = _parse_chinese_number(token)
+    return str(parsed) if parsed is not None else token
+
+
+def _collapse_inline_homophone_duplicates(text: str) -> str:
+    result = str(text or "")
+    changed = True
+    while changed:
+        changed = False
+        candidates = list(_HOMOPHONE_DUPLICATE_TOKEN_RE.finditer(result))
+        for left_index, left_match in enumerate(candidates):
+            left_key = _homophone_duplicate_key(left_match.group(0))
+            if not left_key:
+                continue
+            for right_match in candidates[left_index + 1:left_index + 4]:
+                between = result[left_match.end():right_match.start()]
+                if any(char in _CLAUSE_PUNCTUATION for char in between):
+                    break
+                if not _HOMOPHONE_DUPLICATE_SEPARATOR_RE.fullmatch(between):
+                    continue
+                right_key = _homophone_duplicate_key(right_match.group(0))
+                if not right_key or right_key != left_key:
+                    continue
+                remove_end = right_match.end()
+                compact_between = re.sub(r"\s+", "", between)
+                if compact_between in {"了", "的"} and result[remove_end:remove_end + len(compact_between)] == compact_between:
+                    remove_end += len(compact_between)
+                result = f"{result[:right_match.start()]}{result[remove_end:]}"
+                changed = True
+                break
+            if changed:
+                break
+    return result
+
+
+def _homophone_duplicate_key(token: str) -> str:
+    value = str(token or "").strip()
+    if not value:
+        return ""
+    if value.isdigit():
+        return "".join(_HOMOPHONE_SYLLABLES.get(char, "") for char in value)
+    if re.fullmatch(r"[零〇幺一二两三四五六七八九十百千万]+", value):
+        parsed = _parse_chinese_number(value)
+        if parsed is not None and parsed >= 10:
+            return "".join(_HOMOPHONE_SYLLABLES.get(char, "") for char in str(parsed))
+    key = "".join(_HOMOPHONE_SYLLABLES.get(char, "") for char in value)
+    return key if len(key) >= 4 else ""
+
+
+def _drop_timestamp_homophone_duplicate_words(words: list[dict]) -> list[dict]:
+    deduped: list[dict] = []
+    for word in list(words or []):
+        if _is_timestamp_homophone_duplicate_word(deduped, word):
+            continue
+        deduped.append(word)
+    return deduped
+
+
+def _is_timestamp_homophone_duplicate_word(previous_words: list[dict], word: dict) -> bool:
+    if not previous_words:
+        return False
+    current_key = _homophone_duplicate_key(str(word.get("word") or ""))
+    if not current_key:
+        return False
+
+    candidates = [previous_words[-1]]
+    if len(previous_words) >= 2 and str(previous_words[-1].get("word") or "") in _WORD_PARTICLE_TOKENS:
+        candidates.append(previous_words[-2])
+    for previous in candidates:
+        previous_key = _homophone_duplicate_key(str(previous.get("word") or ""))
+        if previous_key == current_key and _word_times_look_duplicate(previous, word):
+            return True
+    return False
+
+
+def _word_times_look_duplicate(left: dict, right: dict) -> bool:
+    try:
+        left_start = float(left.get("start") or 0.0)
+        left_end = float(left.get("end") or left_start)
+        right_start = float(right.get("start") or 0.0)
+        right_end = float(right.get("end") or right_start)
+    except (TypeError, ValueError):
+        return False
+    overlap = max(0.0, min(left_end, right_end) - max(left_start, right_start))
+    shorter = max(0.001, min(max(0.0, left_end - left_start), max(0.0, right_end - right_start)))
+    if overlap / shorter >= 0.55:
+        return True
+    return abs(left_start - right_start) <= 0.12 and abs(left_end - right_end) <= 0.2
 
 
 def _normalize_colloquial_price_tokens(text: str) -> str:
