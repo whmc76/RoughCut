@@ -116,6 +116,8 @@ export type JobManualEditSegment = {
 
 export type JobManualEditSubtitle = {
   index: number;
+  source_index?: number | null;
+  source_indexes?: number[];
   start_time: number;
   end_time: number;
   text_raw?: string | null;

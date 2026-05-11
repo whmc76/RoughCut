@@ -317,6 +317,8 @@ class ManualEditorSegmentOut(BaseModel):
 
 class ManualEditorSubtitleOut(BaseModel):
     index: int
+    source_index: int | None = None
+    source_indexes: list[int] = Field(default_factory=list)
     start_time: float
     end_time: float
     text_raw: str | None = None
@@ -1539,14 +1541,108 @@ def _manual_editor_has_collapsed_repeat_runs(
 
 def _manual_editor_subtitle_payload(item: dict[str, Any], *, index: int) -> ManualEditorSubtitleOut:
     text_final = _manual_editor_final_subtitle_text(item)
+    start_time = max(0.0, float(item.get("start_time", item.get("start", 0.0)) or 0.0))
+    end_time = max(start_time, float(item.get("end_time", item.get("end", start_time)) or start_time))
+    raw_source_index = item.get("source_index", item.get("item_index"))
+    try:
+        source_index = int(raw_source_index) if raw_source_index is not None else int(item.get("index", index) or index)
+    except (TypeError, ValueError):
+        source_index = int(index)
+    source_indexes: list[int] = []
+    for raw_index in list(item.get("source_indexes") or []):
+        try:
+            source_indexes.append(int(raw_index))
+        except (TypeError, ValueError):
+            continue
+    if source_index not in source_indexes:
+        source_indexes.insert(0, source_index)
     return ManualEditorSubtitleOut(
         index=int(item.get("index", index) or index),
-        start_time=round(float(item.get("start_time", 0.0) or 0.0), 3),
-        end_time=round(float(item.get("end_time", 0.0) or 0.0), 3),
+        source_index=source_index,
+        source_indexes=source_indexes,
+        start_time=round(start_time, 3),
+        end_time=round(end_time, 3),
         text_raw=str(item.get("text_raw") or "") or None,
         text_norm=str(item.get("text_norm") or "") or None,
         text_final=text_final,
     )
+
+
+def _source_ranges_for_output_range(
+    output_start: float,
+    output_end: float,
+    keep_segments: list[dict[str, Any]],
+) -> list[tuple[float, float]]:
+    start = min(float(output_start or 0.0), float(output_end or 0.0))
+    end = max(float(output_start or 0.0), float(output_end or 0.0))
+    ranges: list[tuple[float, float]] = []
+    output_cursor = 0.0
+    for segment in sorted(keep_segments, key=lambda item: float(item.get("start", 0.0) or 0.0)):
+        source_start = float(segment.get("start", 0.0) or 0.0)
+        source_end = float(segment.get("end", source_start) or source_start)
+        if source_end <= source_start:
+            continue
+        segment_output_start = output_cursor
+        segment_output_end = output_cursor + (source_end - source_start)
+        output_cursor = segment_output_end
+        overlap_start = max(start, segment_output_start)
+        overlap_end = min(end, segment_output_end)
+        if overlap_end <= overlap_start + 0.001:
+            continue
+        ranges.append((
+            source_start + (overlap_start - segment_output_start),
+            source_start + (overlap_end - segment_output_start),
+        ))
+    return ranges
+
+
+def _annotate_manual_projected_subtitle_sources(
+    projected_subtitles: list[dict[str, Any]],
+    source_subtitles: list[dict[str, Any]],
+    keep_segments: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if not projected_subtitles or not source_subtitles or not keep_segments:
+        return projected_subtitles
+    source_rows: list[dict[str, Any]] = []
+    for fallback_index, item in enumerate(source_subtitles):
+        try:
+            source_index = int(item.get("source_index", item.get("index", fallback_index)) or fallback_index)
+            start_time = float(item.get("start_time", item.get("start", 0.0)) or 0.0)
+            end_time = float(item.get("end_time", item.get("end", start_time)) or start_time)
+        except (TypeError, ValueError):
+            continue
+        if end_time <= start_time:
+            continue
+        source_rows.append({"index": source_index, "start": start_time, "end": end_time})
+    if not source_rows:
+        return projected_subtitles
+
+    annotated: list[dict[str, Any]] = []
+    for item in projected_subtitles:
+        payload = dict(item)
+        output_start = float(payload.get("start_time", payload.get("start", 0.0)) or 0.0)
+        output_end = float(payload.get("end_time", payload.get("end", output_start)) or output_start)
+        source_ranges = _source_ranges_for_output_range(output_start, output_end, keep_segments)
+        overlap_by_source: dict[int, float] = {}
+        for range_start, range_end in source_ranges:
+            for source in source_rows:
+                overlap = min(range_end, source["end"]) - max(range_start, source["start"])
+                if overlap <= 0.001:
+                    continue
+                source_index = int(source["index"])
+                overlap_by_source[source_index] = overlap_by_source.get(source_index, 0.0) + overlap
+        if overlap_by_source:
+            source_indexes = [
+                source_index
+                for source_index, _overlap in sorted(
+                    overlap_by_source.items(),
+                    key=lambda pair: (-pair[1], pair[0]),
+                )
+            ]
+            payload["source_index"] = source_indexes[0]
+            payload["source_indexes"] = source_indexes
+        annotated.append(payload)
+    return annotated
 
 
 def _normalize_manual_keep_segments(
@@ -2472,6 +2568,11 @@ async def _build_manual_editor_session(
                 output_duration_sec=base_output_duration_sec,
             )
     projected_subtitles = _clean_manual_editor_subtitle_projection(projected_subtitles)
+    projected_subtitles = _annotate_manual_projected_subtitle_sources(
+        projected_subtitles,
+        subtitle_dicts,
+        [segment.model_dump(include={"start", "end"}) for segment in keep_segments],
+    )
     source_path = _resolve_manual_editor_source_path(job)
     status_detail = _manual_editor_detail_for_job_status(str(job.status or ""))
     prerequisite_detail = _manual_editor_prerequisite_detail(list(job.steps or []))

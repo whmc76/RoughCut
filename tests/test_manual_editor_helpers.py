@@ -7,6 +7,7 @@ from fastapi import HTTPException
 from roughcut.api.jobs import ManualEditorApplyIn
 from roughcut.api.jobs import (
     _apply_manual_subtitle_overrides,
+    _annotate_manual_projected_subtitle_sources,
     _build_editorial_segments_from_keep_segments,
     _build_otio_style_manual_tracks,
     _clean_manual_editor_subtitle_projection,
@@ -27,7 +28,11 @@ from roughcut.api.jobs import (
 from roughcut.edit.otio_export import export_to_otio
 from roughcut.media.manual_editor_assets import _fallback_asset_status, _peak_from_pcm, _recommended_preview_gain, _thumbnail_timestamps
 from roughcut.pipeline.orchestrator import _artifact_types_for_quality_rerun
-from roughcut.pipeline.steps import _manual_editor_subtitle_items_from_editorial, _projection_has_suspicious_subtitle_timing
+from roughcut.pipeline.steps import (
+    _manual_editor_subtitle_items_from_editorial,
+    _projection_has_suspicious_subtitle_timing,
+    _subtitle_projection_entry_payload,
+)
 
 
 def test_manual_keep_segments_are_sorted_merged_and_clamped() -> None:
@@ -185,6 +190,70 @@ def test_manual_editor_subtitle_payload_uses_final_output_cleanup() -> None:
     assert payload.text_final == "好 今天给大家介绍 狐蝠工业"
 
 
+def test_manual_editor_subtitle_payload_accepts_projection_start_end_keys() -> None:
+    payload = _manual_editor_subtitle_payload(
+        {
+            "index": 7,
+            "start": 99.26,
+            "end": 101.18,
+            "text_final": "但是这个确实是",
+        },
+        index=0,
+    )
+
+    assert payload.start_time == 99.26
+    assert payload.end_time == 101.18
+    assert payload.text_final == "但是这个确实是"
+
+
+def test_manual_editor_subtitle_payload_preserves_source_index() -> None:
+    payload = _manual_editor_subtitle_payload(
+        {
+            "index": 65,
+            "source_index": 52,
+            "source_indexes": [52, 53],
+            "start_time": 180.117,
+            "end_time": 183.51,
+            "text_final": "你长按它就是一个激光绿激光",
+        },
+        index=0,
+    )
+
+    assert payload.index == 65
+    assert payload.source_index == 52
+    assert payload.source_indexes == [52, 53]
+
+
+def test_manual_editor_projection_source_annotation_uses_output_mapping() -> None:
+    annotated = _annotate_manual_projected_subtitle_sources(
+        [
+            {
+                "index": 68,
+                "start_time": 186.81,
+                "end_time": 189.65,
+                "text_final": "遛狗逗狗来说还是非常实用的一个功能啊",
+            }
+        ],
+        [
+            {"index": 52, "start_time": 188.807, "end_time": 192.22, "text_final": "你长按它就是一个激光绿激光"},
+            {"index": 53, "start_time": 192.22, "end_time": 195.5, "text_final": "因为我家养狗六"},
+            {"index": 54, "start_time": 195.5, "end_time": 198.36, "text_final": "遛狗逗狗来说还是非常实用的一个功能啊"},
+        ],
+        [
+            {"start": 1.32, "end": 35.74},
+            {"start": 38.46, "end": 121.5},
+            {"start": 122.22, "end": 125.85},
+            {"start": 126.66, "end": 152.1},
+            {"start": 152.64, "end": 155.54},
+            {"start": 157.12, "end": 175.84},
+            {"start": 176.86, "end": 277.96},
+        ],
+    )
+
+    assert annotated[0]["source_index"] == 54
+    assert annotated[0]["source_indexes"][0] == 54
+
+
 def test_manual_editor_subtitle_payload_strips_local_asr_tags() -> None:
     payload = _manual_editor_subtitle_payload(
         {
@@ -318,6 +387,53 @@ def test_manual_editor_projection_items_are_authoritative_for_render() -> None:
             "text_final": "manual",
         }
     ]
+
+
+def test_manual_editor_projection_items_accept_start_end_keys() -> None:
+    items = _manual_editor_subtitle_items_from_editorial(
+        {
+            "subtitle_projection": {
+                "items": [
+                    {"index": 2, "start": 99.26, "end": 101.18, "text_final": "但是这个确实是"},
+                ]
+            }
+        }
+    )
+
+    assert items == [
+        {
+            "index": 2,
+            "start_time": 99.26,
+            "end_time": 101.18,
+            "text_raw": "",
+            "text_norm": "但是这个确实是",
+            "text_final": "但是这个确实是",
+        }
+    ]
+
+
+def test_subtitle_projection_entry_payload_accepts_both_timing_key_styles() -> None:
+    assert _subtitle_projection_entry_payload(
+        {"index": 1, "start": 99.26, "end": 101.18, "text_final": "artifact"}
+    ) == {
+        "index": 1,
+        "start_time": 99.26,
+        "end_time": 101.18,
+        "text_raw": None,
+        "text_norm": None,
+        "text_final": "artifact",
+    }
+
+    assert _subtitle_projection_entry_payload(
+        {"index": 2, "start_time": 101.18, "end_time": 104.993, "text_final": "api style"}
+    ) == {
+        "index": 2,
+        "start_time": 101.18,
+        "end_time": 104.993,
+        "text_raw": None,
+        "text_norm": None,
+        "text_final": "api style",
+    }
 
 
 def test_manual_editor_ignores_stored_projection_with_runaway_timing() -> None:
