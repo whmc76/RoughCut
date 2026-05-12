@@ -543,6 +543,16 @@ def build_edit_decision(
             "scene_boundary_count": len(scene_points),
             "transcript_segment_count": len(normalized_transcript),
             "effective_min_silence_to_cut": round(effective_min_silence_to_cut, 3),
+            "silence_segments": [
+                {
+                    "start": round(max(0.0, silence.start), 3),
+                    "end": round(max(0.0, silence.end), 3),
+                    "duration_sec": round(max(0.0, silence.end - silence.start), 3),
+                    "source": "audio_vad",
+                }
+                for silence in silence_segments
+                if silence.end > silence.start + 0.08
+            ],
             "review_focus": str(resolved_skill.get("review_focus") or ""),
             "accepted_cuts": accepted_cuts,
             "cut_evidence_summary": _summarize_cut_evidence(accepted_cuts),

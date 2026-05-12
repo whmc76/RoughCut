@@ -1562,8 +1562,9 @@ def _clean_manual_editor_subtitle_projection(
     subtitles: list[dict[str, Any]],
     *,
     drop_empty: bool = True,
+    collapse_repeats: bool = True,
 ) -> list[dict[str, Any]]:
-    return clean_subtitle_payloads(subtitles, drop_empty=drop_empty)
+    return clean_subtitle_payloads(subtitles, drop_empty=drop_empty, collapse_repeats=collapse_repeats)
 
 
 def _manual_editor_has_collapsed_repeat_runs(
@@ -2677,7 +2678,7 @@ async def _build_manual_editor_session(
         draft_note = str(draft_payload.get("note") or "") or None
 
     raw_subtitle_dicts, projection_data = await _load_latest_subtitle_payloads(session, job_id=job.id, drop_empty=False)
-    source_subtitle_dicts = _clean_manual_editor_subtitle_projection(raw_subtitle_dicts, drop_empty=False)
+    source_subtitle_dicts = _clean_manual_editor_subtitle_projection(raw_subtitle_dicts, drop_empty=False, collapse_repeats=False)
     word_payloads = await _load_manual_editor_word_payloads(session, job_id=job.id)
     source_subtitle_dicts = _attach_manual_editor_words_to_subtitles(source_subtitle_dicts, word_payloads)
     subtitle_dicts = _clean_manual_editor_subtitle_projection(raw_subtitle_dicts)

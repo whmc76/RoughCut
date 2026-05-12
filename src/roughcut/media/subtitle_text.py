@@ -62,10 +62,11 @@ def clean_subtitle_payloads(
     subtitles: list[dict[str, Any]],
     *,
     drop_empty: bool = True,
+    collapse_repeats: bool = True,
 ) -> list[dict[str, Any]]:
     cleaned: list[dict[str, Any]] = []
     for item in subtitles:
-        payload = dict(item)
+        payload = _normalize_subtitle_timing_payload(item)
         text_final = clean_final_subtitle_text(
             payload.get("text_final")
             or payload.get("text_norm")
@@ -75,7 +76,27 @@ def clean_subtitle_payloads(
             continue
         payload["text_final"] = text_final
         cleaned.append(payload)
+    if not collapse_repeats:
+        return cleaned
     return collapse_repeated_subtitle_payloads(cleaned)
+
+
+def _normalize_subtitle_timing_payload(item: dict[str, Any]) -> dict[str, Any]:
+    payload = dict(item)
+    start_value = payload.get("start_time", payload.get("start"))
+    end_value = payload.get("end_time", payload.get("end"))
+    if start_value is None and end_value is None:
+        return payload
+    try:
+        start_time = max(0.0, float(start_value or 0.0))
+        end_time = max(start_time, float(end_value if end_value is not None else start_time))
+    except (TypeError, ValueError):
+        return payload
+    payload["start_time"] = round(start_time, 3)
+    payload["end_time"] = round(end_time, 3)
+    payload.pop("start", None)
+    payload.pop("end", None)
+    return payload
 
 
 def collapse_repeated_subtitle_payloads(

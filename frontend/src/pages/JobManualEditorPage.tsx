@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams } from "react-router-dom";
 import { lazy, Suspense, useCallback, useEffect, useState } from "react";
 
 import { api } from "../api";
@@ -78,6 +78,10 @@ function manualEditorRetryStartStep(readiness?: JobManualEditorReadiness) {
 function manualEditorRetryStartLabel(startStep: string | null) {
   if (!startStep) return "";
   return STEP_LABELS[startStep] || startStep;
+}
+
+function hasCompletedRender(job: Awaited<ReturnType<typeof api.getJob>> | undefined) {
+  return Boolean(job?.steps?.some((step) => step.step_name === "render" && step.status === "done" && step.finished_at));
 }
 
 function ManualEditorReadinessPanel({ readiness }: { readiness?: JobManualEditorReadiness }) {
@@ -170,6 +174,7 @@ function ManualEditorReadinessPanel({ readiness }: { readiness?: JobManualEditor
 export function JobManualEditorPage() {
   const { jobId = "" } = useParams();
   const queryClient = useQueryClient();
+  const navigate = useNavigate();
   const [notice, setNotice] = useState<{ tone: "success" | "error"; message: string } | null>(null);
   const [lastDraftSavedAt, setLastDraftSavedAt] = useState<string | null>(null);
   const [manualEditState, setManualEditState] = useState<JobManualEditSectionState | null>(null);
@@ -220,6 +225,7 @@ export function JobManualEditorPage() {
         queryClient.invalidateQueries({ queryKey: ["job-manual-editor", jobId] }),
         queryClient.invalidateQueries({ queryKey: ["job-manual-editor-assets", jobId] }),
       ]);
+      navigate("/jobs");
     },
     onError: (error) => {
       setNotice({ tone: "error", message: `手动调整保存失败：${errorMessage(error) || "请刷新后重试。"}` });
@@ -254,7 +260,6 @@ export function JobManualEditorPage() {
       [
         "确认保存手动调整？",
         `保存类型：${manualEditState.savePlanLabel}`,
-        `片段数：${manualEditState.baseSegmentCount} -> ${manualEditState.effectiveSegmentCount}`,
         `输出时长变化：${manualEditState.outputDurationDeltaLabel}`,
         `字幕修改：${manualEditState.subtitleOverrideCount} 条`,
         manualEditState.saveImpactSummary,
@@ -313,6 +318,8 @@ export function JobManualEditorPage() {
 
   const noticeClass = notice?.tone === "error" ? "notice notice-error top-gap" : "notice top-gap";
   const manualEditorActionsEnabled = Boolean(manualEditor.data && manualEditorReadiness.data?.can_edit);
+  const renderActionLabel = hasCompletedRender(job.data) ? "根据当前改动重新渲染" : "根据当前改动正式渲染";
+  const renderSubmittingLabel = hasCompletedRender(job.data) ? "重新渲染提交中..." : "正式渲染提交中...";
   const retryStartStep = manualEditorRetryStartStep(manualEditorReadiness.data);
   const retryStartLabel = manualEditorRetryStartLabel(retryStartStep);
   const retryManualEditorPreparation = useMutation({
@@ -342,7 +349,7 @@ export function JobManualEditorPage() {
     <section className="page-stack manual-editor-page">
       <PageHeader
         title="手动调整模式"
-        description={job.data?.source_name || "独立剪辑窗口：预览、调整片段和字幕，然后保存进入重渲染。"}
+        description={job.data?.source_name || "独立剪辑窗口：预览、定位字幕，然后保存进入重渲染。"}
         actions={
           <div className="manual-editor-page-actions">
             <button
@@ -351,7 +358,7 @@ export function JobManualEditorPage() {
               disabled={!manualEditorActionsEnabled || !manualEditState?.canApply || applyManualEditor.isPending}
               onClick={handleApplyManualEdit}
             >
-              {applyManualEditor.isPending ? "重渲染提交中..." : "用当前自动保存版本重新渲染"}
+              {applyManualEditor.isPending ? renderSubmittingLabel : renderActionLabel}
             </button>
             <button
               type="button"
@@ -458,6 +465,7 @@ export function JobManualEditorPage() {
             autosavedAt={lastDraftSavedAt ?? manualEditor.data.draft_saved_at}
             detectingRotation={detectRotation.isPending}
             resetSignal={resetSignal}
+            renderActionLabel={renderActionLabel}
             onStateChange={handleManualEditStateChange}
             onApply={handleApplyManualEditorPayload}
             onAutoSave={handleAutoSaveManualEditorDraft}

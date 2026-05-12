@@ -65,6 +65,9 @@ def test_silence_cut_does_not_remove_subtitle_backed_speech() -> None:
 
     assert any(segment.type == "keep" and segment.start <= 1.05 and segment.end >= 1.65 for segment in decision.segments)
     assert not any(segment.type == "remove" and segment.start <= 1.05 and segment.end >= 1.65 for segment in decision.segments)
+    assert decision.analysis["silence_segments"] == [
+        {"start": 1.0, "end": 1.8, "duration_sec": 0.8, "source": "audio_vad"}
+    ]
 
 
 def test_synthetic_transcript_word_timing_does_not_veto_vad_silence() -> None:

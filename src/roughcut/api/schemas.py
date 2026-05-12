@@ -406,6 +406,13 @@ class IntelligentCopyGenerateIn(BaseModel):
     copy_style: str | None = None
 
 
+class IntelligentPublishIn(BaseModel):
+    folder_path: str
+    creator_profile_id: str | None = None
+    platforms: list[str] = Field(default_factory=list)
+    platform_options: dict[str, dict[str, Any]] = Field(default_factory=dict)
+
+
 class IntelligentCopyCoverSizeOut(BaseModel):
     width: int
     height: int

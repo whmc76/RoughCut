@@ -77,6 +77,23 @@ def test_clean_subtitle_payloads_keeps_intentional_short_repetition() -> None:
     assert [item["index"] for item in cleaned] == [0, 1, 2]
 
 
+def test_clean_subtitle_payloads_normalizes_projection_timing_keys() -> None:
+    cleaned = clean_subtitle_payloads(
+        [
+            {"index": 0, "start": 99.26, "end": 101.18, "text_final": "但是这个确实是"},
+        ]
+    )
+
+    assert cleaned == [
+        {
+            "index": 0,
+            "start_time": 99.26,
+            "end_time": 101.18,
+            "text_final": "但是这个确实是",
+        }
+    ]
+
+
 def test_normalize_display_text_hides_asr_noise_markers_before_review() -> None:
     assert normalize_display_text("[silence]") == ""
     assert normalize_display_text("silence music") == ""

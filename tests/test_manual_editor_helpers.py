@@ -15,6 +15,7 @@ from roughcut.api.jobs import (
     _download_file_cache_set,
     _invalidate_job_file_response_cache,
     _manual_editor_has_collapsed_repeat_runs,
+    _manual_editor_silence_payload,
     _manual_editor_subtitle_payload,
     _manual_editor_apply_conflict_detail,
     _manual_editor_change_plan,
@@ -26,7 +27,7 @@ from roughcut.api.jobs import (
     _normalize_manual_keep_segments,
 )
 from roughcut.edit.otio_export import export_to_otio
-from roughcut.media.manual_editor_assets import _fallback_asset_status, _peak_from_pcm, _recommended_preview_gain, _thumbnail_timestamps
+from roughcut.media.manual_editor_assets import _fallback_asset_status, _peak_from_pcm, _recommended_preview_gain, _silence_intervals_from_peaks, _thumbnail_timestamps
 from roughcut.pipeline.orchestrator import _artifact_types_for_quality_rerun
 from roughcut.pipeline.steps import (
     _manual_editor_subtitle_items_from_editorial,
@@ -314,6 +315,22 @@ def test_manual_editor_subtitle_projection_can_keep_empty_fillers_for_source_tra
             "text_final": "型号 FX1 黑色",
         },
     ]
+
+
+def test_manual_editor_source_projection_can_preserve_repeat_runs_for_review() -> None:
+    repeated = "刚才我发现那个盒子放底下有点黑看不清它的这个全貌"
+    cleaned = _clean_manual_editor_subtitle_projection(
+        [
+            {"index": 0, "start_time": 0.0, "end_time": 1.0, "text_final": repeated},
+            {"index": 1, "start_time": 1.0, "end_time": 2.0, "text_final": repeated},
+            {"index": 2, "start_time": 2.0, "end_time": 3.0, "text_final": repeated},
+            {"index": 3, "start_time": 3.0, "end_time": 4.0, "text_final": repeated},
+        ],
+        drop_empty=False,
+        collapse_repeats=False,
+    )
+
+    assert [item["index"] for item in cleaned] == [0, 1, 2, 3]
 
 
 def test_manual_editor_subtitle_projection_collapses_asr_repeat_runs() -> None:
@@ -627,6 +644,25 @@ def test_manual_editor_preview_asset_helpers_are_bounded() -> None:
     assert _recommended_preview_gain(audio_lufs=-32.0) > 6.0
     assert _recommended_preview_gain(audio_lufs=-10.0) < 1.0
     assert _recommended_preview_gain(audio_lufs=None, audio_rms=0.0) == 1.0
+
+
+def test_manual_editor_normalizes_silence_payloads() -> None:
+    silence = _manual_editor_silence_payload({"start": 1.23456, "end": 2.5, "source": "preview_vad"})
+
+    assert silence is not None
+    assert silence.start == 1.235
+    assert silence.end == 2.5
+    assert silence.duration_sec == 1.265
+    assert silence.source == "preview_vad"
+    assert _manual_editor_silence_payload({"start": 1.0, "end": 1.03}) is None
+
+
+def test_manual_editor_peak_fallback_detects_long_silence_intervals() -> None:
+    peaks = [0.08] * 10 + [0.001] * 20 + [0.09] * 10
+
+    intervals = _silence_intervals_from_peaks(peaks, duration_sec=4.0)
+
+    assert intervals == [{"start": 1.0, "end": 3.0, "duration_sec": 2.0}]
 
 
 def test_manual_editor_preview_asset_status_is_normalized() -> None:

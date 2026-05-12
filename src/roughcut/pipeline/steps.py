@@ -3766,13 +3766,16 @@ def _manual_editor_subtitle_items_from_editorial(editorial_timeline: dict[str, A
     for index, item in enumerate(list(subtitle_projection.get("items") or [])):
         if not isinstance(item, dict):
             continue
-        start_time = max(0.0, float(item.get("start_time", 0.0) or 0.0))
-        end_time = max(start_time, float(item.get("end_time", start_time) or start_time))
+        start_time = max(0.0, float(item.get("start_time", item.get("start", 0.0)) or 0.0))
+        end_time = max(start_time, float(item.get("end_time", item.get("end", start_time)) or start_time))
         if end_time <= start_time:
             continue
+        payload = dict(item)
+        payload.pop("start", None)
+        payload.pop("end", None)
         items.append(
             {
-                **dict(item),
+                **payload,
                 "index": int(item.get("index", index) or index),
                 "start_time": round(start_time, 3),
                 "end_time": round(end_time, 3),
@@ -3801,8 +3804,8 @@ def _subtitle_item_payload(item: SubtitleItem) -> dict[str, Any]:
 def _subtitle_projection_entry_payload(entry: dict[str, Any]) -> dict[str, Any]:
     return {
         "index": int(entry.get("index", 0) or 0),
-        "start_time": entry.get("start"),
-        "end_time": entry.get("end"),
+        "start_time": entry.get("start_time", entry.get("start")),
+        "end_time": entry.get("end_time", entry.get("end")),
         "text_raw": entry.get("text_raw"),
         "text_norm": entry.get("text_norm"),
         "text_final": entry.get("text_final"),

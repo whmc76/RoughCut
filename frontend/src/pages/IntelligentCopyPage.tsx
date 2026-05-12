@@ -1,16 +1,22 @@
+import { Link } from "react-router-dom";
+
 import { SelectField } from "../components/forms/SelectField";
 import { TextField } from "../components/forms/TextField";
 import { EmptyState } from "../components/ui/EmptyState";
 import { PageHeader } from "../components/ui/PageHeader";
 import { PageSection } from "../components/ui/PageSection";
 import { PanelHeader } from "../components/ui/PanelHeader";
-import { useIntelligentCopyWorkspace } from "../features/intelligentCopy/useIntelligentCopyWorkspace";
+import { publicationAttemptStatusLabel, useIntelligentCopyWorkspace } from "../features/intelligentCopy/useIntelligentCopyWorkspace";
 import { useI18n } from "../i18n";
 import { copyStylePresets } from "../stylePresets";
 
 export function IntelligentCopyPage() {
   const { t } = useI18n();
   const workspace = useIntelligentCopyWorkspace();
+  const selectedPublicationProfile = workspace.publicationProfiles.find((profile) => profile.id === workspace.selectedPublicationProfileId);
+  const selectedTargets = (workspace.publicationPlan.data?.targets ?? []).filter((target) =>
+    workspace.selectedPlatformIds.includes(target.platform),
+  );
 
   return (
     <section className="page-stack">
@@ -19,12 +25,15 @@ export function IntelligentCopyPage() {
         title={t("smartCopy.page.title")}
         description={t("smartCopy.page.description")}
         summary={[
-          { label: "直接读取", value: "成片 + 字幕 + 可选封面", detail: "不走任务队列，直接对现成目录出发布物料" },
-          { label: "一次生成", value: "8 个平台", detail: "标题、正文、标签和封面一起写回目录" },
-          { label: "快速复制", value: "平台独立物料卡", detail: "每个平台都给单独复制入口和保存文件" },
+          { label: "直接读取", value: "成片 + 字幕 + 可选封面", detail: "先对现成目录出发布物料" },
+          { label: "账号选择", value: "创作者凭据", detail: "从创作者档案选择 browser-agent 登录账号" },
+          { label: "一键发布", value: "平台可勾选", detail: "按平台创建发布任务并交给发布运行器" },
         ]}
         actions={
           <div className="toolbar">
+            <Link className="button ghost" to="/creator-profiles">
+              {t("smartCopy.publish.configureAccounts")}
+            </Link>
             <button
               type="button"
               className="button ghost"
@@ -120,6 +129,212 @@ export function IntelligentCopyPage() {
           )}
         </section>
       </div>
+
+      <PageSection
+        eyebrow={t("smartCopy.publish.eyebrow")}
+        title={t("smartCopy.publish.title")}
+        description={t("smartCopy.publish.description")}
+      >
+        <div className="panel-grid two-up">
+          <section className="panel">
+            <PanelHeader
+              title={t("smartCopy.publish.accountTitle")}
+              description={t("smartCopy.publish.accountDescription")}
+              actions={<Link className="button ghost" to="/creator-profiles">{t("smartCopy.publish.configureAccounts")}</Link>}
+            />
+            <div className="form-grid">
+              <label>
+                <span>{t("smartCopy.publish.accountSelect")}</span>
+                <select
+                  className="input"
+                  value={workspace.selectedPublicationProfileId}
+                  onChange={(event) => workspace.setSelectedPublicationProfileId(event.target.value)}
+                  disabled={!workspace.publicationProfiles.length}
+                >
+                  {!workspace.publicationProfiles.length ? <option value="">{t("smartCopy.publish.noAccounts")}</option> : null}
+                  {workspace.publicationProfiles.map((profile) => (
+                    <option key={profile.id} value={profile.id}>
+                      {profile.display_name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
+            {workspace.avatarMaterials.isLoading ? <div className="muted compact-top">{t("smartCopy.publish.loadingAccounts")}</div> : null}
+            {selectedPublicationProfile ? (
+              <div className="mode-chip-list top-gap">
+                {(selectedPublicationProfile.creator_profile?.publishing?.platform_credentials ?? []).map((credential) => (
+                  <span className="mode-chip subtle" key={credential.id ?? `${credential.platform}-${credential.account_label}`}>
+                    {credential.platform_label || credential.platform} · {credential.account_label || credential.credential_ref || t("smartCopy.publish.unnamedAccount")}
+                  </span>
+                ))}
+              </div>
+            ) : (
+              <EmptyState message={t("smartCopy.publish.accountEmpty")} />
+            )}
+          </section>
+
+          <section className="panel">
+            <PanelHeader title={t("smartCopy.publish.platformTitle")} description={t("smartCopy.publish.platformDescription")} />
+            {workspace.publicationPlan.isLoading ? <div className="muted compact-top">{t("smartCopy.publish.checking")}</div> : null}
+            {workspace.publicationPlan.data?.blocked_reasons?.length ? (
+              <div className="list-stack compact-top">
+                {workspace.publicationPlan.data.blocked_reasons.map((reason) => (
+                  <div key={reason} className="notice">{reason}</div>
+                ))}
+              </div>
+            ) : null}
+            {workspace.publicationPlan.data?.warnings?.length ? (
+              <div className="list-stack compact-top">
+                {workspace.publicationPlan.data.warnings.map((warning) => (
+                  <div key={warning} className="activity-card">{warning}</div>
+                ))}
+              </div>
+            ) : null}
+            {workspace.publicationPlan.data?.targets?.length ? (
+              <div className="list-stack compact-top">
+                {workspace.publicationPlan.data.targets.map((target) => (
+                  <label className="activity-card" key={target.platform}>
+                    <div className="toolbar">
+                      <div>
+                        <strong>{target.platform_label}</strong>
+                        <div className="muted compact-top">{target.account_label}</div>
+                      </div>
+                      <input
+                        type="checkbox"
+                        checked={workspace.selectedPlatformIds.includes(target.platform)}
+                        onChange={() => workspace.togglePlatform(target.platform)}
+                      />
+                    </div>
+                    <div className="muted compact-top">{target.title}</div>
+                  </label>
+                ))}
+              </div>
+            ) : (
+              <EmptyState message={t("smartCopy.publish.platformEmpty")} />
+            )}
+          </section>
+        </div>
+
+        {selectedTargets.length ? (
+          <section className="panel top-gap">
+            <PanelHeader title={t("smartCopy.publish.optionsTitle")} description={t("smartCopy.publish.optionsDescription")} />
+            <div className="list-stack">
+              {selectedTargets.map((target) => (
+                <article className="activity-card" key={target.platform}>
+                  <div className="toolbar">
+                    <strong>{target.platform_label}</strong>
+                    <span className="status-pill done">{t("smartCopy.publish.selected")}</span>
+                  </div>
+                  <div className="form-grid two-up compact-top">
+                    <label>
+                      <span>{t("smartCopy.publish.schedule")}</span>
+                      <input
+                        className="input"
+                        type="datetime-local"
+                        value={workspace.publicationPlatformOptions[target.platform]?.scheduled_publish_at ?? ""}
+                        onChange={(event) =>
+                          workspace.updatePublicationPlatformOption(target.platform, { scheduled_publish_at: event.target.value })
+                        }
+                      />
+                    </label>
+                    <label>
+                      <span>{t("smartCopy.publish.mode")}</span>
+                      <select
+                        className="input"
+                        value={workspace.publicationPlatformOptions[target.platform]?.visibility_or_publish_mode ?? ""}
+                        onChange={(event) =>
+                          workspace.updatePublicationPlatformOption(target.platform, { visibility_or_publish_mode: event.target.value })
+                        }
+                      >
+                        <option value="">{t("smartCopy.publish.modeDefault")}</option>
+                        <option value="scheduled">{t("smartCopy.publish.modeScheduled")}</option>
+                        <option value="draft">{t("smartCopy.publish.modeDraft")}</option>
+                        <option value="private">{t("smartCopy.publish.modePrivate")}</option>
+                      </select>
+                    </label>
+                    <label>
+                      <span>{t("smartCopy.publish.collectionId")}</span>
+                      <input
+                        className="input"
+                        type="text"
+                        value={workspace.publicationPlatformOptions[target.platform]?.collection_id ?? ""}
+                        onChange={(event) =>
+                          workspace.updatePublicationPlatformOption(target.platform, { collection_id: event.target.value })
+                        }
+                        placeholder={t("smartCopy.publish.collectionIdPlaceholder")}
+                      />
+                    </label>
+                    <label>
+                      <span>{t("smartCopy.publish.collectionName")}</span>
+                      <input
+                        className="input"
+                        type="text"
+                        value={workspace.publicationPlatformOptions[target.platform]?.collection_name ?? ""}
+                        onChange={(event) =>
+                          workspace.updatePublicationPlatformOption(target.platform, { collection_name: event.target.value })
+                        }
+                        placeholder={t("smartCopy.publish.collectionNamePlaceholder")}
+                      />
+                    </label>
+                    <label>
+                      <span>{t("smartCopy.publish.category")}</span>
+                      <input
+                        className="input"
+                        type="text"
+                        value={workspace.publicationPlatformOptions[target.platform]?.category ?? ""}
+                        onChange={(event) =>
+                          workspace.updatePublicationPlatformOption(target.platform, { category: event.target.value })
+                        }
+                        placeholder={t("smartCopy.publish.categoryPlaceholder")}
+                      />
+                    </label>
+                  </div>
+                </article>
+              ))}
+            </div>
+          </section>
+        ) : null}
+
+        {workspace.publish.error ? <div className="notice top-gap">{String(workspace.publish.error)}</div> : null}
+        {workspace.publicationPlan.data?.existing_attempts?.length ? (
+          <section className="panel top-gap">
+            <PanelHeader title={t("smartCopy.publish.historyTitle")} description={t("smartCopy.publish.historyDescription")} />
+            <div className="timeline-list">
+              {workspace.publicationPlan.data.existing_attempts.slice(0, 6).map((attempt) => (
+                <div className="timeline-item" key={attempt.id}>
+                  <div className="toolbar">
+                    <strong>{attempt.platform_label || attempt.platform}</strong>
+                    <span className={`status-pill ${attempt.status === "failed" ? "failed" : attempt.status === "published" ? "done" : "running"}`}>
+                      {publicationAttemptStatusLabel(attempt.status)}
+                    </span>
+                  </div>
+                  <div className="muted">
+                    {attempt.account_label} · {attempt.operator_summary || attempt.run_status || t("smartCopy.publish.waitingRunner")}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </section>
+        ) : null}
+
+        <div className="toolbar top-gap">
+          <button
+            className="button primary"
+            type="button"
+            disabled={
+              !workspace.result ||
+              !workspace.publicationPlan.data?.publish_ready ||
+              !workspace.selectedPlatformIds.length ||
+              workspace.publish.isPending
+            }
+            onClick={() => workspace.publish.mutate()}
+          >
+            {workspace.publish.isPending ? t("smartCopy.publish.submitting") : t("smartCopy.publish.submit")}
+          </button>
+          {!workspace.result ? <span className="muted">{t("smartCopy.publish.needGenerate")}</span> : null}
+        </div>
+      </PageSection>
 
       <PageSection
         eyebrow={t("smartCopy.results.eyebrow")}

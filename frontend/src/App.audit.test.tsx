@@ -107,7 +107,7 @@ describe("App route and navigation audit", () => {
     expect(screen.getByText("创作资产")).toBeInTheDocument();
     expect(screen.getByText("系统")).toBeInTheDocument();
 
-    for (const label of ["概览", "任务", "监看目录", "智能文案", "小工具", "风格实验", "包装素材", "风格模板", "创作模式", "创作者档案", "系统设置", "记忆", "术语表", "控制台"]) {
+    for (const label of ["概览", "任务", "监看目录", "智能发布", "小工具", "风格实验", "包装素材", "风格模板", "创作模式", "创作者档案", "系统设置", "记忆", "术语表", "控制台"]) {
       expect(screen.getByRole("link", { name: new RegExp(label) })).toBeInTheDocument();
     }
   });

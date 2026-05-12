@@ -11,9 +11,10 @@ from typing import Any
 import uuid
 
 from roughcut.config import get_settings
+from roughcut.media.silence import detect_silence
 
 MANUAL_EDITOR_PREVIEW_ARTIFACT_TYPE = "manual_editor_preview_assets"
-MANUAL_EDITOR_PREVIEW_ASSET_VERSION = 6
+MANUAL_EDITOR_PREVIEW_ASSET_VERSION = 7
 MANUAL_EDITOR_PREVIEW_STATUS_FILENAME = "status.json"
 PREVIEW_AUDIO_TARGET_LUFS = -16.0
 PREVIEW_AUDIO_MIN_GAIN = 0.35
@@ -151,6 +152,7 @@ def ensure_manual_editor_preview_assets(
         "sample_rate": int(peaks_payload.get("sample_rate") or 16000),
         "peaks": list(peaks_payload.get("peaks") or []),
         "peak_count": len(list(peaks_payload.get("peaks") or [])),
+        "silence_intervals": list(peaks_payload.get("silence_intervals") or []),
         "audio_peak": float(peaks_payload.get("audio_peak") or 0.0),
         "audio_rms": float(peaks_payload.get("audio_rms") or 0.0),
         "audio_lufs": float(peaks_payload.get("audio_lufs") or 0.0),
@@ -201,6 +203,7 @@ def load_manual_editor_preview_assets(
             "sample_rate": 16000,
             "peaks": [],
             "peak_count": 0,
+            "silence_intervals": [],
             "audio_peak": 0.0,
             "audio_rms": 0.0,
             "audio_lufs": 0.0,
@@ -223,6 +226,7 @@ def load_manual_editor_preview_assets(
         "sample_rate": int(peaks_payload.get("sample_rate") or 16000),
         "peaks": list(peaks_payload.get("peaks") or []),
         "peak_count": len(list(peaks_payload.get("peaks") or [])),
+        "silence_intervals": list(peaks_payload.get("silence_intervals") or []),
         "audio_peak": float(peaks_payload.get("audio_peak") or 0.0),
         "audio_rms": float(peaks_payload.get("audio_rms") or 0.0),
         "audio_lufs": float(peaks_payload.get("audio_lufs") or 0.0),
@@ -354,6 +358,11 @@ def _generate_waveform_peaks(audio_path: Path, *, duration_sec: float, target_po
         "duration_sec": round(float(resolved_duration or duration_sec or 0.0), 3),
         "sample_rate": int(sample_rate or 16000),
         "peaks": peaks,
+        "silence_intervals": _detect_preview_silence_intervals(
+            audio_path,
+            peaks=peaks,
+            duration_sec=float(resolved_duration or duration_sec or 0.0),
+        ),
         "audio_peak": round(peak, 4),
         "audio_rms": round(rms, 4),
         "audio_lufs": round(estimated_lufs, 2) if estimated_lufs is not None else 0.0,
@@ -361,6 +370,70 @@ def _generate_waveform_peaks(audio_path: Path, *, duration_sec: float, target_po
         "target_lufs": PREVIEW_AUDIO_TARGET_LUFS,
         "auto_volume_gain": _recommended_preview_gain(audio_lufs=estimated_lufs, audio_rms=rms),
     }
+
+
+def _detect_preview_silence_intervals(audio_path: Path, *, peaks: list[float], duration_sec: float) -> list[dict[str, float]]:
+    try:
+        silences = detect_silence(
+            audio_path,
+            aggressiveness=2,
+            frame_duration_ms=20,
+            min_silence_duration_ms=120,
+            padding_ms=20,
+        )
+        intervals: list[dict[str, float]] = []
+        for item in silences:
+            start = max(0.0, min(max(0.0, duration_sec), item.start))
+            end = max(start, min(max(0.0, duration_sec), item.end))
+            if end <= start + 0.08:
+                continue
+            intervals.append({
+                "start": round(start, 3),
+                "end": round(end, 3),
+                "duration_sec": round(end - start, 3),
+            })
+        return intervals
+    except Exception:
+        return _silence_intervals_from_peaks(peaks, duration_sec=duration_sec)
+
+
+def _silence_intervals_from_peaks(peaks: list[float], *, duration_sec: float) -> list[dict[str, float]]:
+    if not peaks or duration_sec <= 0.0:
+        return []
+    sorted_peaks = sorted(max(0.0, min(1.0, float(peak or 0.0))) for peak in peaks)
+    noise_floor = sorted_peaks[max(0, min(len(sorted_peaks) - 1, int(len(sorted_peaks) * 0.18)))]
+    threshold = max(0.006, min(0.035, noise_floor * 1.8 + 0.004))
+    seconds_per_peak = duration_sec / max(1, len(peaks))
+    intervals: list[dict[str, float]] = []
+    start_index: int | None = None
+    for index, peak in enumerate(peaks):
+        silent = max(0.0, float(peak or 0.0)) <= threshold
+        if silent and start_index is None:
+            start_index = index
+        elif not silent and start_index is not None:
+            _append_peak_silence_interval(intervals, start_index, index, seconds_per_peak, duration_sec)
+            start_index = None
+    if start_index is not None:
+        _append_peak_silence_interval(intervals, start_index, len(peaks), seconds_per_peak, duration_sec)
+    return intervals
+
+
+def _append_peak_silence_interval(
+    intervals: list[dict[str, float]],
+    start_index: int,
+    end_index: int,
+    seconds_per_peak: float,
+    duration_sec: float,
+) -> None:
+    start = max(0.0, start_index * seconds_per_peak)
+    end = min(duration_sec, end_index * seconds_per_peak)
+    if end <= start + 0.12:
+        return
+    intervals.append({
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "duration_sec": round(end - start, 3),
+    })
 
 
 def _peak_from_pcm(frames: bytes, *, sample_width: int, channels: int) -> float:

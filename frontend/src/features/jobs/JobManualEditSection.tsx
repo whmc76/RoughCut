@@ -67,6 +67,11 @@ type SubtitleDraft = {
   virtual?: boolean;
 };
 
+type VisibleSubtitleRow = JobManualEditSubtitle & {
+  deleted?: boolean;
+  restoreRanges?: KeepSegment[];
+};
+
 type SubtitleTextDraft = {
   text_final?: string | null;
 };
@@ -860,6 +865,39 @@ function applySubtitleDrafts(subtitles: JobManualEditSubtitle[], drafts: Record<
 
   return adjusted
     .sort((left, right) => left.start_time - right.start_time || left.index - right.index);
+}
+
+export function buildVisibleSubtitleRows(
+  remappedSubtitles: JobManualEditSubtitle[],
+  baseProjection: { remapped: JobManualEditSubtitle[]; ranges: OutputRange[] },
+  subtitleDrafts: Record<number, SubtitleDraft>,
+  sessionKeepSegments: KeepSegment[],
+  sessionProjectedSubtitles: JobManualEditSubtitle[],
+) {
+  const rows: VisibleSubtitleRow[] = remappedSubtitles.map((subtitle) => ({ ...subtitle }));
+  const activeIndexes = new Set(rows.map((subtitle) => subtitle.index));
+  const sessionRanges = buildOutputRanges(sessionKeepSegments).ranges;
+  for (const [rawIndex, draft] of Object.entries(subtitleDrafts)) {
+    if (!draft.delete) continue;
+    const index = Number(rawIndex);
+    if (!Number.isFinite(index) || activeIndexes.has(index)) continue;
+    const baseSubtitle = baseProjection.remapped.find((subtitle) => subtitle.index === index);
+    const sessionSubtitle = sessionProjectedSubtitles.find((subtitle) => subtitle.index === index);
+    const subtitle = baseSubtitle ?? sessionSubtitle;
+    if (!subtitle) continue;
+    const restoreRanges = baseSubtitle
+      ? outputRangeToSourceRanges(baseSubtitle.start_time, baseSubtitle.end_time, baseProjection.ranges)
+      : outputRangeToSourceRanges(sessionSubtitle?.start_time ?? subtitle.start_time, sessionSubtitle?.end_time ?? subtitle.end_time, sessionRanges);
+    rows.push({
+      ...subtitle,
+      start_time: Number((draft.start_time ?? subtitle.start_time).toFixed(3)),
+      end_time: Number((draft.end_time ?? subtitle.end_time).toFixed(3)),
+      text_final: draft.text_final ?? subtitle.text_final,
+      deleted: true,
+      restoreRanges,
+    });
+  }
+  return rows.sort((left, right) => left.start_time - right.start_time || left.index - right.index);
 }
 
 function subtitleOverrideChanged(base: JobManualEditSubtitle | undefined, draft: SubtitleDraft) {
@@ -2341,7 +2379,6 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
     [activePreviewOutputTime, projection.remapped],
   );
 
-  const visibleSubtitles = projection.remapped;
   const smartCutRuleAnalysis = useMemo(
     () => buildSmartCutRuleAnalysis(sourceTranscriptSubtitles, smartCutRules, sourceSilenceRanges),
     [smartCutRules, sourceSilenceRanges, sourceTranscriptSubtitles],
@@ -2366,6 +2403,20 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
   const totalOutputDuration = projection.totalDuration;
   const activeSubtitle = activeSubtitleIndex >= 0 ? projection.remapped[activeSubtitleIndex] : null;
   const baseKeepSegments = session.base_keep_segments?.length ? session.base_keep_segments : session.keep_segments;
+  const visibleSubtitles = useMemo(
+    () => buildVisibleSubtitleRows(
+      projection.remapped,
+      baseProjection,
+      subtitleDrafts,
+      session.keep_segments.map((segment) => ({ start: segment.start, end: segment.end })),
+      session.projected_subtitles,
+    ),
+    [baseProjection, projection.remapped, session.keep_segments, session.projected_subtitles, subtitleDrafts],
+  );
+  const deletedSubtitleCount = useMemo(
+    () => visibleSubtitles.filter((subtitle) => subtitle.deleted).length,
+    [visibleSubtitles],
+  );
   const baseVideoSummary = (session.base_video_summary || "").trim();
   const currentVideoSummary = videoSummary.trim();
   const baseVideoTransform = useMemo(() => normalizeVideoTransform(session.base_video_transform), [session.base_video_transform]);
@@ -2579,11 +2630,13 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
     session.editable,
     subtitleOverrides.length,
   ]);
-  const selectedSubtitlePosition = selectedSubtitle
-    ? projection.remapped.findIndex((subtitle) => subtitle.index === selectedSubtitle.index)
-    : activeSubtitleIndex;
+  const selectedSubtitlePosition = selectedSubtitleIndex != null
+    ? visibleSubtitles.findIndex((subtitle) => subtitle.index === selectedSubtitleIndex)
+    : activeSubtitle
+      ? visibleSubtitles.findIndex((subtitle) => subtitle.index === activeSubtitle.index)
+      : activeSubtitleIndex;
   const subtitleTableWindow = useMemo(() => {
-    const subtitles = projection.remapped;
+    const subtitles = visibleSubtitles;
     if (subtitles.length <= SUBTITLE_TABLE_WINDOW_SIZE) {
       return {
         rows: subtitles,
@@ -2601,7 +2654,7 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
       end,
       clipped: true,
     };
-  }, [projection.remapped, selectedSubtitlePosition]);
+  }, [selectedSubtitlePosition, visibleSubtitles]);
 
   useEffect(() => {
     if (!selectedSubtitle) {
@@ -3681,6 +3734,20 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
       delete next[subtitle.index];
       return next;
     });
+  };
+
+  const restoreDeletedSubtitle = (subtitle: VisibleSubtitleRow) => {
+    recordUndoSnapshot();
+    if (subtitle.restoreRanges?.length) {
+      setSegments((current) => addSourceRangesToSegments(current, subtitle.restoreRanges ?? [], session.source_duration_sec));
+      jumpToSourceTime(subtitle.restoreRanges[0].start);
+    }
+    setSubtitleDrafts((current) => {
+      const next = { ...current };
+      delete next[subtitle.index];
+      return next;
+    });
+    setSelectedSubtitleIndex(subtitle.index);
   };
 
   const handleApply = () => {
@@ -5001,6 +5068,7 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
               最小间隔
             </button>
             <span className="status-pill pending">已改 {subtitleOverrides.length}</span>
+            {deletedSubtitleCount ? <span className="status-pill failed">已删 {deletedSubtitleCount}</span> : null}
             <span className={classNames("status-pill", diagnostics.issueCount ? "failed" : "done")}>
               问题 {diagnostics.issueCount}
             </span>
@@ -5009,7 +5077,7 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
 
         {subtitleTableWindow.clipped ? (
           <div className="notice manual-editor-window-notice">
-            为保持页面响应速度，当前只渲染第 {subtitleTableWindow.start + 1} - {subtitleTableWindow.end} 条字幕，共 {projection.remapped.length} 条；定位到其他字幕后窗口会自动切换。
+            为保持页面响应速度，当前只渲染第 {subtitleTableWindow.start + 1} - {subtitleTableWindow.end} 条字幕，共 {visibleSubtitles.length} 条；定位到其他字幕后窗口会自动切换。
           </div>
         ) : null}
 
@@ -5023,15 +5091,16 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
             <span>操作</span>
           </div>
           {subtitleTableWindow.rows.map((subtitle) => {
-            const selected = selectedSubtitle?.index === subtitle.index;
+            const deleted = Boolean(subtitle.deleted);
+            const selected = selectedSubtitleIndex === subtitle.index;
             const changed = Boolean(subtitleDrafts[subtitle.index]) && subtitleOverrideChanged(
               baseProjection.remapped.find((item) => item.index === subtitle.index),
               subtitleDrafts[subtitle.index],
             );
-            const rowWarnings = diagnostics.warnings[subtitle.index] || [];
+            const rowWarnings = deleted ? [] : diagnostics.warnings[subtitle.index] || [];
             return (
-              <div key={`${subtitle.index}-${subtitle.start_time}`} className={classNames("manual-editor-subtitle-row", selected && "active", changed && "changed", rowWarnings.length > 0 && "warning")}>
-                <button type="button" className="manual-editor-subtitle-index" onClick={() => selectSubtitle(subtitle)}>
+              <div key={`${subtitle.index}-${subtitle.start_time}-${deleted ? "deleted" : "active"}`} className={classNames("manual-editor-subtitle-row", selected && "active", changed && "changed", deleted && "deleted", rowWarnings.length > 0 && "warning")}>
+                <button type="button" className="manual-editor-subtitle-index" onClick={() => (deleted ? setSelectedSubtitleIndex(subtitle.index) : selectSubtitle(subtitle))}>
                   {subtitle.index + 1}
                 </button>
                 <input
@@ -5041,6 +5110,7 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
                   min={0}
                   max={totalOutputDuration}
                   value={subtitle.start_time}
+                  disabled={deleted}
                   onFocus={() => setSelectedSubtitleIndex(subtitle.index)}
                   onChange={(event) => updateSubtitleDraft(subtitle, { start_time: Number(event.target.value || 0) })}
                 />
@@ -5051,26 +5121,34 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
                   min={0}
                   max={totalOutputDuration}
                   value={subtitle.end_time}
+                  disabled={deleted}
                   onFocus={() => setSelectedSubtitleIndex(subtitle.index)}
                   onChange={(event) => updateSubtitleDraft(subtitle, { end_time: Number(event.target.value || 0) })}
                 />
-                <span className={classNames("manual-editor-subtitle-state", rowWarnings.length > 0 && "warning")}>
-                  {rowWarnings.length ? rowWarnings.join(" / ") : "正常"}
+                <span className={classNames("manual-editor-subtitle-state", deleted && "deleted", rowWarnings.length > 0 && "warning")}>
+                  {deleted ? "已删除" : rowWarnings.length ? rowWarnings.join(" / ") : "正常"}
                 </span>
                 <input
                   className="input"
                   value={subtitleText(subtitle)}
+                  disabled={deleted}
                   onFocus={() => setSelectedSubtitleIndex(subtitle.index)}
                   onSelect={rememberSelectedSubtitleText}
                   onChange={(event) => updateSubtitleDraft(subtitle, { text_final: event.target.value })}
                 />
                 <div className="manual-editor-actions">
-                  <button type="button" className="button ghost" onClick={() => selectSubtitle(subtitle)}>
+                  <button type="button" className="button ghost" disabled={deleted} onClick={() => selectSubtitle(subtitle)}>
                     定位
                   </button>
-                  <button type="button" className="button ghost" disabled={!changed} onClick={() => resetSubtitleDraft(subtitle)}>
-                    还原
-                  </button>
+                  {deleted ? (
+                    <button type="button" className="button ghost" onClick={() => restoreDeletedSubtitle(subtitle)}>
+                      恢复
+                    </button>
+                  ) : (
+                    <button type="button" className="button ghost" disabled={!changed} onClick={() => resetSubtitleDraft(subtitle)}>
+                      还原
+                    </button>
+                  )}
                 </div>
               </div>
             );

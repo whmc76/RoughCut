@@ -251,7 +251,7 @@ export function JobQueueTable({
               const highlightedReviewAction = isHighlightedReviewAction(job);
               const { filenameDescription } = splitVideoDescription(job.video_description);
               const cutEvidenceSummary = formatCutEvidenceSummary(job.timeline_diagnostics);
-              const showOpenFolder = job.status === "done" && isLocalOutputJob(job);
+              const showOpenFolder = job.status === "done";
               const showDownload = job.status === "done" && !isLocalOutputJob(job);
               const showCancel = hasJobStarted(job) && !isTerminalJob(job);
               const manualEditStatus = awaitingManualEditLabel(job, t);

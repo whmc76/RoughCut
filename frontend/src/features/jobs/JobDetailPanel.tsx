@@ -290,7 +290,7 @@ export function JobDetailPanel({
       ? t("jobs.actions.downloadHint.avatarFallback")
       : avatarHeadlineSummary || t("jobs.actions.downloadHint.standard")
     : t("jobs.actions.downloadHint.standard");
-  const showOpenFolder = selectedJob?.status === "done" && isLocalOutputJob(selectedJob);
+  const showOpenFolder = selectedJob?.status === "done";
   const showDownload = selectedJob?.status === "done" && !isLocalOutputJob(selectedJob);
   const showCancel = Boolean(selectedJob && hasJobStarted(selectedJob) && !isTerminalJob(selectedJob));
   const stepEntries = selectedJob?.steps ?? [];

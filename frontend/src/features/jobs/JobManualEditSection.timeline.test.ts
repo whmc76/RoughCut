@@ -4,6 +4,7 @@ import {
   autoSmartCutRuleRanges,
   buildSmartCutRuleAnalysis,
   buildTranscriptTokens,
+  buildVisibleSubtitleRows,
   buildSourceTranscriptSubtitlesForTimeline,
   buildOutputWaveformBars,
   findSubtitleIndexNearOutputTime,
@@ -307,5 +308,31 @@ describe("manual editor timeline mapping", () => {
 
     expect(drafts[65]?.text_final).toBe("它就不会有硌手的感觉很轻松");
     expect(drafts[10]).toBeUndefined();
+  });
+
+  it("keeps deleted subtitle rows visible with source restore ranges", () => {
+    const rows = buildVisibleSubtitleRows(
+      [
+        { index: 0, start_time: 0, end_time: 1, text_final: "保留字幕" },
+      ],
+      {
+        remapped: [
+          { index: 0, start_time: 0, end_time: 1, text_final: "保留字幕" },
+        ],
+        ranges: [{ sourceStart: 10, sourceEnd: 11, outputStart: 0, outputEnd: 1 }],
+      },
+      { 1: { delete: true } },
+      [{ start: 10, end: 14 }],
+      [
+        { index: 0, start_time: 0, end_time: 1, text_final: "保留字幕" },
+        { index: 1, start_time: 1, end_time: 3, text_final: "被删字幕" },
+      ],
+    );
+
+    expect(rows.map((row) => ({ index: row.index, deleted: Boolean(row.deleted), text: row.text_final }))).toEqual([
+      { index: 0, deleted: false, text: "保留字幕" },
+      { index: 1, deleted: true, text: "被删字幕" },
+    ]);
+    expect(rows[1].restoreRanges).toEqual([{ start: 11, end: 13 }]);
   });
 });
