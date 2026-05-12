@@ -3836,6 +3836,7 @@ async def _load_latest_subtitle_payloads(
     *,
     job_id: uuid.UUID,
     fallback_to_items: bool = True,
+    drop_empty: bool = True,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     subtitle_dicts, projection_data = await _load_latest_subtitle_projection_entries(
         session,
@@ -3843,14 +3844,14 @@ async def _load_latest_subtitle_payloads(
         fallback_items=None,
     )
     if subtitle_dicts:
-        cleaned_subtitles = clean_subtitle_payloads(subtitle_dicts)
+        cleaned_subtitles = clean_subtitle_payloads(subtitle_dicts, drop_empty=drop_empty)
         split_profile = projection_data.get("split_profile") if isinstance(projection_data.get("split_profile"), dict) else {}
         if not fallback_to_items or not _projection_has_suspicious_subtitle_timing(cleaned_subtitles, split_profile=split_profile):
             return cleaned_subtitles, projection_data
     elif not fallback_to_items:
         return [], projection_data
     subtitle_items = await _load_subtitle_items(session, job_id=job_id)
-    return clean_subtitle_payloads([_subtitle_item_payload(item) for item in subtitle_items]), {}
+    return clean_subtitle_payloads([_subtitle_item_payload(item) for item in subtitle_items], drop_empty=drop_empty), {}
 
 
 async def _load_subtitle_items(session, *, job_id: uuid.UUID) -> list[SubtitleItem]:

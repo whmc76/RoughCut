@@ -459,6 +459,22 @@ function subtitleText(subtitle: JobManualEditSubtitle) {
   return subtitle.text_final ?? subtitle.text_norm ?? subtitle.text_raw ?? "";
 }
 
+function subtitleTranscriptSourceText(subtitle: JobManualEditSubtitle) {
+  return String(subtitle.text_raw || subtitle.text_norm || subtitle.text_final || "").trim();
+}
+
+function compactTranscriptText(value: string) {
+  return value.replace(/[\s，,。.!！?？、；;：:“”"'‘’（）()[\]【】]+/g, "");
+}
+
+function shouldPreferSourceTranscriptText(sourceText: string, projectedText: string | undefined) {
+  const sourceKey = compactTranscriptText(sourceText);
+  const projectedKey = compactTranscriptText(projectedText || "");
+  if (!sourceKey) return false;
+  if (!projectedKey) return true;
+  return sourceKey.length > projectedKey.length && sourceKey.includes(projectedKey);
+}
+
 function subtitleSourceIndex(subtitle: Pick<JobManualEditSubtitle, "index" | "source_index">) {
   return Number.isFinite(Number(subtitle.source_index)) ? Number(subtitle.source_index) : Number(subtitle.index);
 }
@@ -1507,7 +1523,12 @@ export function buildSourceTranscriptSubtitlesForTimeline(
   return sourceSubtitlesForTranscript(session).map((subtitle) => {
     const draft = subtitleDrafts[subtitle.index];
     const projectedText = projectedTextsBySourceIndex.get(subtitleSourceIndex(subtitle))?.join("");
-    const nextText = draft?.text_final ?? projectedText ?? subtitleText(subtitle);
+    const sourceText = subtitleTranscriptSourceText(subtitle);
+    const nextText = draft?.text_final
+      ?? (shouldPreferSourceTranscriptText(sourceText, projectedText) ? sourceText : undefined)
+      ?? projectedText
+      ?? sourceText
+      ?? subtitleText(subtitle);
     return {
       ...subtitle,
       text_final: nextText,
@@ -1763,7 +1784,7 @@ function findRepeatedSpeechRangesInSubtitle(subtitle: JobManualEditSubtitle) {
   return ranges;
 }
 
-function buildSmartCutRuleAnalysis(subtitles: JobManualEditSubtitle[], rules: SmartCutRules): SmartCutRuleAnalysis {
+export function buildSmartCutRuleAnalysis(subtitles: JobManualEditSubtitle[], rules: SmartCutRules): SmartCutRuleAnalysis {
   const analysis: SmartCutRuleAnalysis = {
     filler: [],
     repeated: [],
@@ -1795,8 +1816,12 @@ function buildSmartCutRuleAnalysis(subtitles: JobManualEditSubtitle[], rules: Sm
   };
 }
 
-function autoSmartCutRuleRanges(analysis: SmartCutRuleAnalysis, rules: SmartCutRules) {
-  return rules.pauseEnabled ? analysis.pause : [];
+export function autoSmartCutRuleRanges(analysis: SmartCutRuleAnalysis, rules: SmartCutRules) {
+  return [
+    ...(rules.fillerEnabled ? analysis.filler : []),
+    ...(rules.repeatedEnabled ? analysis.repeated : []),
+    ...(rules.pauseEnabled ? analysis.pause : []),
+  ];
 }
 
 function smartCutRulesSignature(rules: SmartCutRules) {
@@ -4348,7 +4373,7 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
                     <strong>剪辑规则</strong>
                     <span>{smartCutRulesExpanded ? "收起" : "展开"}</span>
                   </button>
-                  <span className="status-pill pending">仅自动剪长停顿 待剪 {smartCutRuleKeptRangeCount}</span>
+                  <span className="status-pill pending">规则命中 待剪 {smartCutRuleKeptRangeCount}</span>
                 </div>
                 {smartCutRulesExpanded ? (
                   <>
@@ -4400,7 +4425,7 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
                       onChange={(event) => updateSmartCutRule({ fillers: event.target.value })}
                       placeholder="自定义语气词，用逗号分隔"
                     />
-                    <div className="manual-editor-rule-memory">规则设置已全局记忆；语气词和重复口误只统计，不自动剪正文，长停顿只剪空隙。</div>
+                    <div className="manual-editor-rule-memory">规则设置已全局记忆；勾选后的语气词、重复口误和长停顿会进入待剪区间。</div>
                   </>
                 ) : null}
               </div>

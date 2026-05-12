@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  autoSmartCutRuleRanges,
+  buildSmartCutRuleAnalysis,
   buildSourceTranscriptSubtitlesForTimeline,
   buildOutputWaveformBars,
   findSubtitleIndexNearOutputTime,
@@ -169,4 +171,40 @@ describe("manual editor timeline mapping", () => {
       { index: 52, start_time: 188.807, end_time: 192.22, text_final: "投影字幕" },
     ]);
   });
+
+  it("keeps raw filler-only source rows visible in the full transcript", () => {
+    const transcript = buildSourceTranscriptSubtitlesForTimeline(
+      {
+        source_subtitles: [
+          { index: 0, start_time: 0, end_time: 0.4, text_raw: "嗯", text_final: "" },
+          { index: 1, start_time: 0.4, end_time: 1.4, text_raw: "我们开始", text_final: "我们开始" },
+        ],
+        projected_subtitles: [
+          { index: 0, source_index: 1, start_time: 0, end_time: 1, text_final: "我们开始" },
+        ],
+      },
+      [
+        { index: 0, source_index: 1, start_time: 0, end_time: 1, text_final: "我们开始" },
+      ],
+      {},
+    );
+
+    expect(transcript.map((item) => item.text_final)).toEqual(["嗯", "我们开始"]);
+  });
+
+  it("uses raw source text for filler rule analysis and auto ranges", () => {
+    const analysis = buildSmartCutRuleAnalysis(
+      [
+        { index: 0, start_time: 0, end_time: 0.4, text_raw: "嗯", text_final: "嗯" },
+        { index: 1, start_time: 0.4, end_time: 1.4, text_raw: "我们开始", text_final: "我们开始" },
+      ],
+      { fillerEnabled: true, repeatedEnabled: false, pauseEnabled: false, pauseThresholdSec: 0.8, fillers: "嗯" },
+    );
+
+    expect(analysis.filler).toHaveLength(1);
+    expect(autoSmartCutRuleRanges(analysis, { fillerEnabled: true, repeatedEnabled: false, pauseEnabled: false, pauseThresholdSec: 0.8, fillers: "嗯" })).toEqual([
+      { start: 0, end: 0.4, kind: "filler" },
+    ]);
+  });
+
 });

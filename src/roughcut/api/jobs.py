@@ -2538,7 +2538,8 @@ async def _build_manual_editor_session(
         draft_saved_at = str(draft_payload.get("saved_at") or "") or None
         draft_note = str(draft_payload.get("note") or "") or None
 
-    raw_subtitle_dicts, projection_data = await _load_latest_subtitle_payloads(session, job_id=job.id)
+    raw_subtitle_dicts, projection_data = await _load_latest_subtitle_payloads(session, job_id=job.id, drop_empty=False)
+    source_subtitle_dicts = _clean_manual_editor_subtitle_projection(raw_subtitle_dicts, drop_empty=False)
     subtitle_dicts = _clean_manual_editor_subtitle_projection(raw_subtitle_dicts)
     use_clean_fallback_projection = _manual_editor_has_collapsed_repeat_runs(raw_subtitle_dicts, subtitle_dicts)
     manual_projection_suspicious = _projection_has_suspicious_subtitle_timing(
@@ -2570,7 +2571,7 @@ async def _build_manual_editor_session(
     projected_subtitles = _clean_manual_editor_subtitle_projection(projected_subtitles)
     projected_subtitles = _annotate_manual_projected_subtitle_sources(
         projected_subtitles,
-        subtitle_dicts,
+        source_subtitle_dicts,
         [segment.model_dump(include={"start", "end"}) for segment in keep_segments],
     )
     source_path = _resolve_manual_editor_source_path(job)
@@ -2591,7 +2592,7 @@ async def _build_manual_editor_session(
         base_keep_segments=base_keep_segments,
         source_subtitles=[
             _manual_editor_subtitle_payload(item, index=index)
-            for index, item in enumerate(subtitle_dicts)
+            for index, item in enumerate(source_subtitle_dicts)
         ],
         projected_subtitles=[
             _manual_editor_subtitle_payload(item, index=index)

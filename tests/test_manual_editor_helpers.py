@@ -296,6 +296,26 @@ def test_manual_editor_subtitle_projection_drops_final_empty_fillers() -> None:
     ]
 
 
+def test_manual_editor_subtitle_projection_can_keep_empty_fillers_for_source_transcript() -> None:
+    cleaned = _clean_manual_editor_subtitle_projection(
+        [
+            {"index": 0, "start_time": 0.0, "end_time": 1.0, "text_raw": "呃，嗯。", "text_final": "呃，嗯。"},
+            {"index": 1, "start_time": 1.0, "end_time": 2.0, "text_final": "型号：FX1（黑色）！"},
+        ],
+        drop_empty=False,
+    )
+
+    assert cleaned == [
+        {"index": 0, "start_time": 0.0, "end_time": 1.0, "text_raw": "呃，嗯。", "text_final": ""},
+        {
+            "index": 1,
+            "start_time": 1.0,
+            "end_time": 2.0,
+            "text_final": "型号 FX1 黑色",
+        },
+    ]
+
+
 def test_manual_editor_subtitle_projection_collapses_asr_repeat_runs() -> None:
     repeated = "刚才我发现那个盒子放底下有点黑看不清它的这个全貌"
     cleaned = _clean_manual_editor_subtitle_projection(
