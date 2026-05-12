@@ -2,7 +2,7 @@ import { Fragment, useEffect, useMemo, useRef, useState, type CSSProperties, typ
 import type WaveSurfer from "wavesurfer.js";
 import type { RegionsPlugin as RegionsPluginInstance } from "wavesurfer.js/dist/plugins/regions.esm.js";
 
-import type { Job, JobManualEditApplyPayload, JobManualEditPreviewAssets, JobManualEditSession, JobManualEditSubtitle, JobManualEditSubtitleOverride, JobManualSubtitleReplacement, JobManualVideoTransform } from "../../types";
+import type { Job, JobManualEditApplyPayload, JobManualEditPreviewAssets, JobManualEditSession, JobManualEditSilence, JobManualEditSubtitle, JobManualEditSubtitleOverride, JobManualEditWord, JobManualSubtitleReplacement, JobManualVideoTransform } from "../../types";
 import { classNames } from "../../utils";
 
 type JobManualEditSectionProps = {
@@ -38,6 +38,11 @@ export type JobManualEditSectionState = {
 type KeepSegment = {
   start: number;
   end: number;
+};
+
+type SilenceRange = KeepSegment & {
+  duration_sec?: number;
+  source?: string;
 };
 
 type OutputRange = {
@@ -1556,6 +1561,61 @@ function sourceRangeOverlapsKeptSegments(start: number, end: number, segments: K
   return segments.some((segment) => Math.min(end, segment.end) > Math.max(start, segment.start) + 0.02);
 }
 
+function normalizeSilenceRanges(
+  ranges: Array<Partial<JobManualEditSilence> | Partial<SilenceRange> | null | undefined>,
+  sourceDuration: number,
+  minDuration = 0.12,
+) {
+  const normalized = ranges
+    .map((range) => {
+      const start = Number(range?.start ?? 0);
+      const end = Number(range?.end ?? start);
+      if (!Number.isFinite(start) || !Number.isFinite(end)) return null;
+      const clampedStart = Number(clamp(start, 0, Math.max(0, sourceDuration || end)).toFixed(3));
+      const clampedEnd = Number(clamp(end, clampedStart, Math.max(clampedStart, sourceDuration || end)).toFixed(3));
+      if (clampedEnd <= clampedStart + minDuration - 0.001) return null;
+      return {
+        start: clampedStart,
+        end: clampedEnd,
+        duration_sec: Number((clampedEnd - clampedStart).toFixed(3)),
+        source: String(range?.source || "audio_vad"),
+      } satisfies SilenceRange;
+    })
+    .filter(Boolean) as SilenceRange[];
+
+  normalized.sort((left, right) => left.start - right.start || left.end - right.end);
+  const merged: SilenceRange[] = [];
+  for (const range of normalized) {
+    const previous = merged[merged.length - 1];
+    if (!previous || range.start > previous.end + 0.03) {
+      merged.push({ ...range });
+      continue;
+    }
+    previous.end = Number(Math.max(previous.end, range.end).toFixed(3));
+    previous.duration_sec = Number((previous.end - previous.start).toFixed(3));
+    if (previous.source !== range.source) previous.source = "mixed";
+  }
+  return merged;
+}
+
+function subtitlePauseIntervals(subtitles: JobManualEditSubtitle[]) {
+  const intervals: SilenceRange[] = [];
+  sortedSubtitles(subtitles).forEach((subtitle, index, items) => {
+    const previous = items[index - 1];
+    if (!previous) return;
+    const start = Number(previous.end_time || 0);
+    const end = Number(subtitle.start_time || 0);
+    if (end <= start + 0.12) return;
+    intervals.push({
+      start: Number(start.toFixed(3)),
+      end: Number(end.toFixed(3)),
+      duration_sec: Number((end - start).toFixed(3)),
+      source: "subtitle_gap",
+    });
+  });
+  return intervals;
+}
+
 export function projectedTranscriptMissesKeptSpeech(
   projectedTranscript: JobManualEditSubtitle[],
   sourceSubtitles: JobManualEditSubtitle[],
@@ -1598,32 +1658,105 @@ function inferTranscriptBreakAfter(text: string, gapAfter: number, paragraphChar
   return undefined;
 }
 
-function buildTranscriptTokens(subtitles: JobManualEditSubtitle[], segments: KeepSegment[]) {
+const TRANSCRIPT_TIMED_CHAR_RE = /[\u4e00-\u9fffA-Za-z0-9]/;
+
+type TimedTranscriptChar = {
+  text: string;
+  start: number;
+  end: number;
+};
+
+function isTranscriptTimedChar(char: string) {
+  return TRANSCRIPT_TIMED_CHAR_RE.test(char);
+}
+
+function normalizeTranscriptTimingChar(char: string) {
+  return char.toLocaleLowerCase();
+}
+
+function timedCharsFromWords(words: JobManualEditWord[] | undefined) {
+  const timedChars: TimedTranscriptChar[] = [];
+  for (const word of words || []) {
+    const start = Number(word.start);
+    const end = Number(word.end);
+    if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) continue;
+    const chars = Array.from(String(word.word || "")).filter(isTranscriptTimedChar);
+    if (!chars.length) continue;
+    const duration = end - start;
+    chars.forEach((char, index) => {
+      timedChars.push({
+        text: char,
+        start: Number((start + duration * (index / chars.length)).toFixed(3)),
+        end: Number((start + duration * ((index + 1) / chars.length)).toFixed(3)),
+      });
+    });
+  }
+  return timedChars.sort((left, right) => left.start - right.start || left.end - right.end);
+}
+
+function buildTimedTranscriptCharTokens(
+  subtitle: JobManualEditSubtitle,
+  text: string,
+  segments: KeepSegment[],
+  options: { sourceIndex: number },
+): TranscriptToken[] | null {
+  const { sourceIndex } = options;
+  const timedChars = timedCharsFromWords(subtitle.words);
+  if (!timedChars.length) return null;
+  const chars = Array.from(text);
+  const timingCharCount = chars.filter(isTranscriptTimedChar).length;
+  if (!timingCharCount) return null;
+
   const tokens: TranscriptToken[] = [];
+  let timedCursor = 0;
+  let matchedTimingChars = 0;
+  let previousEnd = subtitle.start_time;
+
+  chars.forEach((char, charIndex) => {
+    let start = previousEnd;
+    let end = previousEnd;
+    if (isTranscriptTimedChar(char)) {
+      const normalizedChar = normalizeTranscriptTimingChar(char);
+      let matchIndex = -1;
+      for (let index = timedCursor; index < Math.min(timedCursor + 8, timedChars.length); index += 1) {
+        if (normalizeTranscriptTimingChar(timedChars[index].text) === normalizedChar) {
+          matchIndex = index;
+          break;
+        }
+      }
+      if (matchIndex >= 0) {
+        const match = timedChars[matchIndex];
+        start = match.start;
+        end = match.end;
+        timedCursor = matchIndex + 1;
+        matchedTimingChars += 1;
+      } else {
+        const duration = Math.max(0.001, subtitle.end_time - subtitle.start_time);
+        start = subtitle.start_time + duration * (charIndex / Math.max(1, chars.length));
+        end = subtitle.start_time + duration * ((charIndex + 1) / Math.max(1, chars.length));
+      }
+    }
+    previousEnd = Math.max(previousEnd, end);
+    tokens.push({
+      key: `char-${sourceIndex}-${charIndex}`,
+      kind: "char",
+      text: char,
+      subtitleIndex: sourceIndex,
+      start: Number(start.toFixed(3)),
+      end: Number(end.toFixed(3)),
+      kept: isSourceRangeKept(start, end, segments),
+    });
+  });
+
+  if (matchedTimingChars / timingCharCount < 0.6) return null;
+  return tokens;
+}
+
+export function buildTranscriptTokens(subtitles: JobManualEditSubtitle[], segments: KeepSegment[], silenceRanges: SilenceRange[] = []) {
+  const charTokens: TranscriptToken[] = [];
   let paragraphCharCount = 0;
   subtitles.forEach((subtitle, subtitlePosition) => {
     const sourceIndex = subtitleSourceIndex(subtitle);
-    const previous = subtitles[subtitlePosition - 1];
-    const pauseStart = previous?.end_time ?? null;
-    if (pauseStart != null && subtitle.start_time - pauseStart >= 0.12) {
-      const start = Number(pauseStart.toFixed(3));
-      const end = Number(subtitle.start_time.toFixed(3));
-      const pauseDuration = Math.max(0, end - start);
-      const breakAfter = pauseDuration >= 1.1 ? "paragraph" : undefined;
-      tokens.push({
-        key: `pause-${sourceIndex}-${start}`,
-        kind: "pause",
-        text: `[...,${pauseDuration.toFixed(1)}s]`,
-        subtitleIndex: null,
-        start,
-        end,
-        kept: isSourceRangeKept(start, end, segments),
-        pauseDuration,
-        breakAfter,
-      });
-      if (breakAfter === "paragraph") paragraphCharCount = 0;
-    }
-
     const text = subtitleText(subtitle);
     const chars = Array.from(text);
     const duration = Math.max(0.001, subtitle.end_time - subtitle.start_time);
@@ -1632,25 +1765,49 @@ function buildTranscriptTokens(subtitles: JobManualEditSubtitle[], segments: Kee
     const inferredPunctuation = inferTranscriptBoundaryPunctuation(text, gapAfter);
     const nextParagraphCharCount = paragraphCharCount + chars.filter((char) => char.trim()).length;
     const breakAfter = inferTranscriptBreakAfter(inferredPunctuation ? `${text}${inferredPunctuation}` : text, gapAfter, nextParagraphCharCount);
-    chars.forEach((char, charIndex) => {
+    const timedTokens = buildTimedTranscriptCharTokens(subtitle, text, segments, { sourceIndex });
+    const tokens: TranscriptToken[] = timedTokens ?? chars.map((char, charIndex): TranscriptToken => {
       const start = subtitle.start_time + duration * (charIndex / Math.max(1, chars.length));
       const end = subtitle.start_time + duration * ((charIndex + 1) / Math.max(1, chars.length));
-      const lastChar = charIndex === chars.length - 1;
-      tokens.push({
+      return {
         key: `char-${sourceIndex}-${charIndex}`,
-        kind: "char",
+        kind: "char" as const,
         text: char,
         subtitleIndex: sourceIndex,
         start: Number(start.toFixed(3)),
         end: Number(end.toFixed(3)),
         kept: isSourceRangeKept(start, end, segments),
-        inferredPunctuation: lastChar ? inferredPunctuation : undefined,
-        breakAfter: lastChar ? breakAfter : undefined,
-      });
+      };
     });
+    const lastToken = tokens[tokens.length - 1];
+    if (lastToken) {
+      lastToken.inferredPunctuation = inferredPunctuation;
+      lastToken.breakAfter = breakAfter;
+    }
+    charTokens.push(...tokens);
     paragraphCharCount = breakAfter === "paragraph" ? 0 : nextParagraphCharCount;
   });
-  return tokens;
+
+  const pauseTokens = silenceRanges.map((range, index) => {
+    const pauseDuration = Math.max(0, range.end - range.start);
+    return {
+      key: `pause-${range.source || "audio"}-${index}-${range.start}`,
+      kind: "pause" as const,
+      text: `[...,${pauseDuration.toFixed(1)}s]`,
+      subtitleIndex: null,
+      start: range.start,
+      end: range.end,
+      kept: isSourceRangeKept(range.start, range.end, segments),
+      pauseDuration,
+      breakAfter: pauseDuration >= 1.1 ? "paragraph" as const : undefined,
+    };
+  });
+
+  return [...charTokens, ...pauseTokens].sort((left, right) => (
+    left.start - right.start
+    || (left.kind === "pause" ? -1 : 1)
+    || left.end - right.end
+  ));
 }
 
 function closestTranscriptTokenIndex(node: Node | null) {
@@ -1708,6 +1865,48 @@ function transcriptSelectionFromTokenRange(tokens: TranscriptToken[], anchorInde
     cutTokenCount: selectedTokens.filter((token) => !token.kept).length,
     pauseCount,
   };
+}
+
+export function removeTranscriptSelectionTextFromSubtitleDrafts(
+  subtitles: JobManualEditSubtitle[],
+  tokens: TranscriptToken[],
+  selection: Pick<TranscriptSelection, "startTokenIndex" | "endTokenIndex">,
+  drafts: Record<number, SubtitleDraft>,
+) {
+  const selectedCharIndexesBySource = new Map<number, Set<number>>();
+  const charCursorBySource = new Map<number, number>();
+  tokens.forEach((token, tokenIndex) => {
+    if (token.kind !== "char" || token.subtitleIndex == null) return;
+    const sourceIndex = token.subtitleIndex;
+    const charIndex = charCursorBySource.get(sourceIndex) ?? 0;
+    charCursorBySource.set(sourceIndex, charIndex + 1);
+    if (tokenIndex < selection.startTokenIndex || tokenIndex > selection.endTokenIndex) return;
+    const selected = selectedCharIndexesBySource.get(sourceIndex) ?? new Set<number>();
+    selected.add(charIndex);
+    selectedCharIndexesBySource.set(sourceIndex, selected);
+  });
+  if (!selectedCharIndexesBySource.size) return drafts;
+
+  const subtitlesBySource = new Map<number, JobManualEditSubtitle>();
+  for (const subtitle of subtitles) {
+    subtitlesBySource.set(subtitleSourceIndex(subtitle), subtitle);
+  }
+
+  let changed = false;
+  const nextDrafts: Record<number, SubtitleDraft> = { ...drafts };
+  for (const [sourceIndex, selectedCharIndexes] of selectedCharIndexesBySource.entries()) {
+    const subtitle = subtitlesBySource.get(sourceIndex);
+    if (!subtitle || !selectedCharIndexes.size) continue;
+    const chars = Array.from(subtitleText(subtitle));
+    const nextText = chars.filter((_, charIndex) => !selectedCharIndexes.has(charIndex)).join("").trim();
+    if (nextText === subtitleText(subtitle).trim()) continue;
+    nextDrafts[subtitle.index] = {
+      ...(nextDrafts[subtitle.index] ?? {}),
+      text_final: nextText,
+    };
+    changed = true;
+  }
+  return changed ? nextDrafts : drafts;
 }
 
 function parseSmartCutFillers(value: string) {
@@ -1784,7 +1983,25 @@ function findRepeatedSpeechRangesInSubtitle(subtitle: JobManualEditSubtitle) {
   return ranges;
 }
 
-export function buildSmartCutRuleAnalysis(subtitles: JobManualEditSubtitle[], rules: SmartCutRules): SmartCutRuleAnalysis {
+function smartCutMeaningfulText(text: string, fillers: string[]) {
+  let cleaned = text.trim();
+  if (!cleaned) return "";
+  for (const filler of fillers) {
+    cleaned = cleaned.replace(new RegExp(escapeRegExp(filler), "g"), "");
+  }
+  cleaned = cleaned.replace(/[啊呀呃额嗯哎唉喔哦嘛呢吧哈\s,，、。.!！?？;；:：()[\]（）【】"'“”‘’]+/g, "");
+  return cleaned;
+}
+
+function pauseRangeOverlapsMeaningfulSubtitle(range: SilenceRange, subtitles: JobManualEditSubtitle[], fillers: string[]) {
+  return subtitles.some((subtitle) => {
+    const overlap = Math.min(range.end, subtitle.end_time) - Math.max(range.start, subtitle.start_time);
+    if (overlap <= 0.08) return false;
+    return smartCutMeaningfulText(subtitleTranscriptSourceText(subtitle) || subtitleText(subtitle), fillers).length >= 2;
+  });
+}
+
+export function buildSmartCutRuleAnalysis(subtitles: JobManualEditSubtitle[], rules: SmartCutRules, silenceRanges: SilenceRange[] = []): SmartCutRuleAnalysis {
   const analysis: SmartCutRuleAnalysis = {
     filler: [],
     repeated: [],
@@ -1797,18 +2014,17 @@ export function buildSmartCutRuleAnalysis(subtitles: JobManualEditSubtitle[], ru
     }
     analysis.repeated.push(...findRepeatedSpeechRangesInSubtitle(subtitle).map((range) => ({ ...range, kind: "repeated" as const })));
   }
-  subtitles.forEach((subtitle, index) => {
-    const previous = subtitles[index - 1];
-    if (!previous) return;
-    const pause = subtitle.start_time - previous.end_time;
+  for (const range of silenceRanges) {
+    const pause = range.end - range.start;
+    if (pauseRangeOverlapsMeaningfulSubtitle(range, subtitles, fillers)) continue;
     if (pause >= rules.pauseThresholdSec) {
       analysis.pause.push({
-        start: Number(previous.end_time.toFixed(3)),
-        end: Number(subtitle.start_time.toFixed(3)),
+        start: Number(range.start.toFixed(3)),
+        end: Number(range.end.toFixed(3)),
         kind: "pause",
       });
     }
-  });
+  }
   return {
     filler: analysis.filler.filter((range) => range.end > range.start + 0.02),
     repeated: analysis.repeated.filter((range) => range.end > range.start + 0.02),
@@ -2079,9 +2295,29 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
   const sourceTranscriptSubtitles = useMemo(() => {
     return buildSourceTranscriptSubtitlesForTimeline(session, projection.remapped, subtitleDrafts);
   }, [projection.remapped, session.source_subtitles, session.projected_subtitles, subtitleDrafts]);
+  const sourceSilenceRanges = useMemo(() => {
+    const audioSilences = previewAssets?.silence_intervals?.length
+      ? previewAssets.silence_intervals
+      : session.silence_segments || [];
+    return normalizeSilenceRanges(
+      [
+        ...subtitlePauseIntervals(sourceTranscriptSubtitles),
+        ...audioSilences,
+      ],
+      session.source_duration_sec,
+    );
+  }, [previewAssets?.silence_intervals, session.silence_segments, session.source_duration_sec, sourceTranscriptSubtitles]);
   const transcriptTokens = useMemo(
-    () => buildTranscriptTokens(sourceTranscriptSubtitles, effectiveSegments),
-    [effectiveSegments, sourceTranscriptSubtitles],
+    () => buildTranscriptTokens(sourceTranscriptSubtitles, effectiveSegments, sourceSilenceRanges),
+    [effectiveSegments, sourceSilenceRanges, sourceTranscriptSubtitles],
+  );
+  const transcriptCharCount = useMemo(
+    () => transcriptTokens.filter((token) => token.kind === "char").length,
+    [transcriptTokens],
+  );
+  const transcriptPauseCount = useMemo(
+    () => transcriptTokens.filter((token) => token.kind === "pause").length,
+    [transcriptTokens],
   );
 
   const currentOutputTime = useMemo(
@@ -2093,7 +2329,7 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
     [currentSourceTime, projection.ranges],
   );
   const activeTranscriptTokenIndex = useMemo(
-    () => transcriptTokens.findIndex((token) => token.kind === "char" && currentSourceTime >= token.start - 0.015 && currentSourceTime <= token.end + 0.015),
+    () => transcriptTokens.findIndex((token) => currentSourceTime >= token.start - 0.015 && currentSourceTime <= token.end + 0.015),
     [currentSourceTime, transcriptTokens],
   );
 
@@ -2107,8 +2343,8 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
 
   const visibleSubtitles = projection.remapped;
   const smartCutRuleAnalysis = useMemo(
-    () => buildSmartCutRuleAnalysis(sourceTranscriptSubtitles, smartCutRules),
-    [smartCutRules, sourceTranscriptSubtitles],
+    () => buildSmartCutRuleAnalysis(sourceTranscriptSubtitles, smartCutRules, sourceSilenceRanges),
+    [smartCutRules, sourceSilenceRanges, sourceTranscriptSubtitles],
   );
   const smartCutRuleRanges = useMemo(
     () => autoSmartCutRuleRanges(smartCutRuleAnalysis, smartCutRules),
@@ -3091,6 +3327,12 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
     recordUndoSnapshot();
     pauseEditedTimeline();
     setSegments(nextSegments);
+    setSubtitleDrafts((current) => removeTranscriptSelectionTextFromSubtitleDrafts(
+      projection.remapped,
+      transcriptTokens,
+      transcriptSelection,
+      current,
+    ));
     setSelectedSegmentIndex((current) => clamp(current, 0, nextSegments.length - 1));
     clearTranscriptSelection();
   };
@@ -4233,7 +4475,7 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
                   <div>
                     <strong>全文剪辑</strong>
                   </div>
-                  <span className="status-pill pending">{transcriptTokens.length} 字/停顿</span>
+                  <span className="status-pill pending">{transcriptCharCount} 字 / {transcriptPauseCount} 停顿</span>
                 </div>
 
                 <div
@@ -4268,7 +4510,7 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
                             className={classNames("manual-editor-transcript-pause", !token.kept && "cut", active && "active", selected && "selected")}
                             data-transcript-token-index={index}
                             onClick={() => selectTranscriptToken(index)}
-                            title={`${formatSeconds(token.start)} - ${formatSeconds(token.end)}`}
+                            title={`停顿 ${formatSeconds(token.start)} - ${formatSeconds(token.end)}`}
                           >
                             {token.text}
                           </button>

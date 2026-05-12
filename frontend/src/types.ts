@@ -114,6 +114,21 @@ export type JobManualEditSegment = {
   source_index: number;
 };
 
+export type JobManualEditSilence = {
+  start: number;
+  end: number;
+  duration_sec: number;
+  source?: string;
+};
+
+export type JobManualEditWord = {
+  word: string;
+  start: number;
+  end: number;
+  confidence?: number | null;
+  source?: string | null;
+};
+
 export type JobManualEditSubtitle = {
   index: number;
   source_index?: number | null;
@@ -123,6 +138,7 @@ export type JobManualEditSubtitle = {
   text_raw?: string | null;
   text_norm?: string | null;
   text_final?: string | null;
+  words?: JobManualEditWord[];
 };
 
 export type JobManualEditSession = {
@@ -137,6 +153,7 @@ export type JobManualEditSession = {
   base_video_summary?: string | null;
   keep_segments: JobManualEditSegment[];
   base_keep_segments?: JobManualEditSegment[];
+  silence_segments?: JobManualEditSilence[];
   source_subtitles: JobManualEditSubtitle[];
   projected_subtitles: JobManualEditSubtitle[];
   subtitle_overrides: JobManualEditSubtitleOverride[];
@@ -244,6 +261,7 @@ export type JobManualEditPreviewAssets = {
   sample_rate: number;
   peaks: number[];
   peak_count: number;
+  silence_intervals?: JobManualEditSilence[];
   audio_peak: number;
   audio_rms: number;
   audio_lufs: number;

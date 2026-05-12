@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   autoSmartCutRuleRanges,
   buildSmartCutRuleAnalysis,
+  buildTranscriptTokens,
   buildSourceTranscriptSubtitlesForTimeline,
   buildOutputWaveformBars,
   findSubtitleIndexNearOutputTime,
@@ -10,6 +11,7 @@ import {
   outputTimeToSourceTimeForSegments,
   outputTimeToSourceTime,
   projectedTranscriptMissesKeptSpeech,
+  removeTranscriptSelectionTextFromSubtitleDrafts,
   remapProjectedSubtitlesFromBaseTimeline,
   sourceTimeToActiveOutputTime,
   sourceTimeToOutputTime,
@@ -199,6 +201,7 @@ describe("manual editor timeline mapping", () => {
         { index: 1, start_time: 0.4, end_time: 1.4, text_raw: "我们开始", text_final: "我们开始" },
       ],
       { fillerEnabled: true, repeatedEnabled: false, pauseEnabled: false, pauseThresholdSec: 0.8, fillers: "嗯" },
+      [],
     );
 
     expect(analysis.filler).toHaveLength(1);
@@ -207,4 +210,102 @@ describe("manual editor timeline mapping", () => {
     ]);
   });
 
+  it("does not auto-cut long VAD pauses inside meaningful subtitle text", () => {
+    const analysis = buildSmartCutRuleAnalysis(
+      [
+        {
+          index: 1,
+          start_time: 4.88,
+          end_time: 11.52,
+          text_final: "大家看到现在这个镜头里有两把手电",
+        },
+      ],
+      { fillerEnabled: true, repeatedEnabled: false, pauseEnabled: true, pauseThresholdSec: 0.8, fillers: "嗯,呃" },
+      [{ start: 8.37, end: 9.45, duration_sec: 1.08, source: "audio_vad" }],
+    );
+
+    expect(analysis.pause).toEqual([]);
+    expect(autoSmartCutRuleRanges(analysis, { fillerEnabled: true, repeatedEnabled: false, pauseEnabled: true, pauseThresholdSec: 0.8, fillers: "嗯,呃" })).toEqual([]);
+  });
+
+  it("uses real word timings for full-text transcript tokens", () => {
+    const tokens = buildTranscriptTokens(
+      [
+        {
+          index: 1,
+          start_time: 4.88,
+          end_time: 11.52,
+          text_final: "大家看到现在这个镜头里有两把手电",
+          words: [
+            { word: "大", start: 5.92, end: 6.0 },
+            { word: "家", start: 6.0, end: 6.4 },
+            { word: "看", start: 6.4, end: 6.56 },
+            { word: "到", start: 6.56, end: 7.04 },
+            { word: "现", start: 7.2, end: 7.36 },
+            { word: "在", start: 7.36, end: 7.68 },
+            { word: "这", start: 7.68, end: 7.76 },
+            { word: "个", start: 7.76, end: 8.16 },
+            { word: "镜", start: 9.44, end: 9.6 },
+            { word: "头", start: 9.6, end: 9.76 },
+            { word: "里", start: 9.76, end: 9.92 },
+          ],
+        },
+      ],
+      [{ start: 1.32, end: 8.36 }, { start: 9.46, end: 29.9 }],
+      [],
+    );
+
+    const text = tokens.map((token) => token.text).join("");
+    const mirrorIndex = text.indexOf("镜");
+    const lensIndex = text.indexOf("头");
+    const insideIndex = text.indexOf("里");
+
+    expect(tokens[mirrorIndex].start).toBeCloseTo(9.44, 3);
+    expect(tokens[lensIndex].start).toBeCloseTo(9.6, 3);
+    expect(tokens[insideIndex].start).toBeCloseTo(9.76, 3);
+    expect(tokens[mirrorIndex].kept).toBe(false);
+    expect(tokens[lensIndex].kept).toBe(true);
+    expect(tokens[insideIndex].kept).toBe(true);
+  });
+
+  it("still auto-cuts long VAD pauses between subtitle rows", () => {
+    const analysis = buildSmartCutRuleAnalysis(
+      [
+        { index: 0, start_time: 0, end_time: 1, text_final: "前一句内容" },
+        { index: 1, start_time: 3, end_time: 4, text_final: "后一句内容" },
+      ],
+      { fillerEnabled: true, repeatedEnabled: false, pauseEnabled: true, pauseThresholdSec: 0.8, fillers: "嗯,呃" },
+      [{ start: 1.2, end: 2.6, duration_sec: 1.4, source: "audio_vad" }],
+    );
+
+    expect(analysis.pause).toEqual([{ start: 1.2, end: 2.6, kind: "pause" }]);
+  });
+
+  it("removes selected transcript text from subtitle drafts when cutting text from preview", () => {
+    const drafts = removeTranscriptSelectionTextFromSubtitleDrafts(
+      [
+        {
+          index: 65,
+          source_index: 10,
+          start_time: 100,
+          end_time: 104,
+          text_final: "它就不会有硌手的感觉好就很轻松了很轻松",
+        },
+      ],
+      Array.from("它就不会有硌手的感觉好就很轻松了很轻松").map((text, index) => ({
+        key: `char-10-${index}`,
+        kind: "char" as const,
+        text,
+        subtitleIndex: 10,
+        start: 100 + index * 0.1,
+        end: 100 + (index + 1) * 0.1,
+        kept: true,
+      })),
+      { startTokenIndex: 10, endTokenIndex: 15 },
+      {},
+    );
+
+    expect(drafts[65]?.text_final).toBe("它就不会有硌手的感觉很轻松");
+    expect(drafts[10]).toBeUndefined();
+  });
 });

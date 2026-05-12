@@ -315,6 +315,21 @@ class ManualEditorSegmentOut(BaseModel):
     source_index: int
 
 
+class ManualEditorSilenceOut(BaseModel):
+    start: float
+    end: float
+    duration_sec: float
+    source: str = "audio_vad"
+
+
+class ManualEditorWordOut(BaseModel):
+    word: str
+    start: float
+    end: float
+    confidence: float | None = None
+    source: str | None = None
+
+
 class ManualEditorSubtitleOut(BaseModel):
     index: int
     source_index: int | None = None
@@ -324,6 +339,7 @@ class ManualEditorSubtitleOut(BaseModel):
     text_raw: str | None = None
     text_norm: str | None = None
     text_final: str | None = None
+    words: list[ManualEditorWordOut] = Field(default_factory=list)
 
 
 class ManualEditorSessionOut(BaseModel):
@@ -338,6 +354,7 @@ class ManualEditorSessionOut(BaseModel):
     base_video_summary: str | None = None
     keep_segments: list[ManualEditorSegmentOut] = Field(default_factory=list)
     base_keep_segments: list[ManualEditorSegmentOut] = Field(default_factory=list)
+    silence_segments: list[ManualEditorSilenceOut] = Field(default_factory=list)
     source_subtitles: list[ManualEditorSubtitleOut] = Field(default_factory=list)
     projected_subtitles: list[ManualEditorSubtitleOut] = Field(default_factory=list)
     subtitle_overrides: list[ManualEditorSubtitleOverrideIn] = Field(default_factory=list)
@@ -397,6 +414,7 @@ class ManualEditorPreviewAssetsOut(BaseModel):
     sample_rate: int = 16000
     peaks: list[float] = Field(default_factory=list)
     peak_count: int = 0
+    silence_intervals: list[ManualEditorSilenceOut] = Field(default_factory=list)
     audio_peak: float = 0.0
     audio_rms: float = 0.0
     audio_lufs: float = 0.0
@@ -1516,6 +1534,22 @@ def _manual_editor_segment_payload(segment: dict[str, Any], *, index: int) -> Ma
     )
 
 
+def _manual_editor_silence_payload(segment: dict[str, Any], *, source: str = "audio_vad") -> ManualEditorSilenceOut | None:
+    try:
+        start = max(0.0, float(segment.get("start", 0.0) or 0.0))
+        end = max(start, float(segment.get("end", start) or start))
+    except (TypeError, ValueError):
+        return None
+    if end <= start + 0.08:
+        return None
+    return ManualEditorSilenceOut(
+        start=round(start, 3),
+        end=round(end, 3),
+        duration_sec=round(end - start, 3),
+        source=str(segment.get("source") or source or "audio_vad"),
+    )
+
+
 def _manual_editor_final_subtitle_text(item: dict[str, Any]) -> str:
     return clean_final_subtitle_text(
         item.get("text_final")
@@ -1537,6 +1571,88 @@ def _manual_editor_has_collapsed_repeat_runs(
     cleaned_subtitles: list[dict[str, Any]],
 ) -> bool:
     return len(raw_subtitles) > len(cleaned_subtitles)
+
+
+def _manual_editor_word_payload(item: dict[str, Any]) -> ManualEditorWordOut | None:
+    try:
+        start = max(0.0, float(item.get("start", 0.0) or 0.0))
+        end = max(start, float(item.get("end", start) or start))
+    except (TypeError, ValueError):
+        return None
+    if end <= start:
+        return None
+    word = str(item.get("word") or item.get("raw_text") or item.get("text") or "").strip()
+    if not word:
+        return None
+    confidence = item.get("confidence")
+    try:
+        normalized_confidence = float(confidence) if confidence is not None else None
+    except (TypeError, ValueError):
+        normalized_confidence = None
+    alignment = item.get("alignment")
+    source = None
+    if isinstance(alignment, dict):
+        roughcut_alignment = alignment.get("_roughcut")
+        if isinstance(roughcut_alignment, dict):
+            source = str(roughcut_alignment.get("source") or "") or None
+        source = source or str(alignment.get("source") or "") or None
+    source = source or str(item.get("source") or item.get("provider") or "") or None
+    return ManualEditorWordOut(
+        word=word,
+        start=round(start, 3),
+        end=round(end, 3),
+        confidence=normalized_confidence,
+        source=source,
+    )
+
+
+async def _load_manual_editor_word_payloads(session: AsyncSession, *, job_id: uuid.UUID) -> list[dict[str, Any]]:
+    result = await session.execute(
+        select(TranscriptSegment)
+        .where(TranscriptSegment.job_id == job_id)
+        .order_by(TranscriptSegment.version.desc(), TranscriptSegment.segment_index.asc())
+    )
+    rows = result.scalars().all()
+    if not rows:
+        return []
+    latest_version = max(int(row.version or 1) for row in rows)
+    words: list[dict[str, Any]] = []
+    for row in rows:
+        if int(row.version or 1) != latest_version:
+            continue
+        for word in list(row.words_json or []):
+            if not isinstance(word, dict):
+                continue
+            payload = _manual_editor_word_payload(word)
+            if payload is None:
+                continue
+            words.append(payload.model_dump())
+    words.sort(key=lambda item: (float(item.get("start", 0.0) or 0.0), float(item.get("end", 0.0) or 0.0)))
+    return words
+
+
+def _attach_manual_editor_words_to_subtitles(
+    subtitles: list[dict[str, Any]],
+    words: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if not subtitles or not words:
+        return subtitles
+    annotated: list[dict[str, Any]] = []
+    for item in subtitles:
+        payload = dict(item)
+        try:
+            start_time = float(payload.get("start_time", payload.get("start", 0.0)) or 0.0)
+            end_time = float(payload.get("end_time", payload.get("end", start_time)) or start_time)
+        except (TypeError, ValueError):
+            annotated.append(payload)
+            continue
+        payload["words"] = [
+            word
+            for word in words
+            if min(float(word.get("end", 0.0) or 0.0), end_time) - max(float(word.get("start", 0.0) or 0.0), start_time) > 0.001
+        ]
+        annotated.append(payload)
+    return annotated
 
 
 def _manual_editor_subtitle_payload(item: dict[str, Any], *, index: int) -> ManualEditorSubtitleOut:
@@ -1565,6 +1681,12 @@ def _manual_editor_subtitle_payload(item: dict[str, Any], *, index: int) -> Manu
         text_raw=str(item.get("text_raw") or "") or None,
         text_norm=str(item.get("text_norm") or "") or None,
         text_final=text_final,
+        words=[
+            word
+            for raw_word in list(item.get("words") or [])
+            if isinstance(raw_word, dict)
+            if (word := _manual_editor_word_payload(raw_word)) is not None
+        ],
     )
 
 
@@ -2241,6 +2363,12 @@ def _manual_editor_preview_assets_response(
         for item in list(payload.get("thumbnail_items") or [])
         if isinstance(item, dict) and Path(str(item.get("path") or "")).name
     ]
+    silence_intervals = [
+        normalized
+        for item in list(payload.get("silence_intervals") or [])
+        if isinstance(item, dict)
+        if (normalized := _manual_editor_silence_payload(item)) is not None
+    ]
     video_path = Path(str(payload.get("video_path") or ""))
     audio_path = Path(str(payload.get("audio_path") or ""))
     return ManualEditorPreviewAssetsOut(
@@ -2257,6 +2385,7 @@ def _manual_editor_preview_assets_response(
         sample_rate=int(payload.get("sample_rate") or 16000),
         peaks=[float(value) for value in list(payload.get("peaks") or [])],
         peak_count=int(payload.get("peak_count") or 0),
+        silence_intervals=silence_intervals if is_ready else [],
         audio_peak=float(payload.get("audio_peak") or 0.0),
         audio_rms=float(payload.get("audio_rms") or 0.0),
         audio_lufs=float(payload.get("audio_lufs") or 0.0),
@@ -2502,6 +2631,15 @@ async def _build_manual_editor_session(
             if isinstance(item, dict)
         ]
 
+    editorial_analysis = (editorial_timeline.data_json or {}).get("analysis")
+    raw_silence_segments = list(editorial_analysis.get("silence_segments") or []) if isinstance(editorial_analysis, dict) else []
+    silence_segments = [
+        normalized
+        for item in raw_silence_segments
+        if isinstance(item, dict)
+        if (normalized := _manual_editor_silence_payload(item)) is not None
+    ]
+
     draft_saved_at: str | None = None
     draft_note: str | None = None
     base_video_summary = await _load_manual_editor_base_video_summary(session, job_id=job.id)
@@ -2540,6 +2678,8 @@ async def _build_manual_editor_session(
 
     raw_subtitle_dicts, projection_data = await _load_latest_subtitle_payloads(session, job_id=job.id, drop_empty=False)
     source_subtitle_dicts = _clean_manual_editor_subtitle_projection(raw_subtitle_dicts, drop_empty=False)
+    word_payloads = await _load_manual_editor_word_payloads(session, job_id=job.id)
+    source_subtitle_dicts = _attach_manual_editor_words_to_subtitles(source_subtitle_dicts, word_payloads)
     subtitle_dicts = _clean_manual_editor_subtitle_projection(raw_subtitle_dicts)
     use_clean_fallback_projection = _manual_editor_has_collapsed_repeat_runs(raw_subtitle_dicts, subtitle_dicts)
     manual_projection_suspicious = _projection_has_suspicious_subtitle_timing(
@@ -2590,6 +2730,7 @@ async def _build_manual_editor_session(
         base_video_summary=base_video_summary,
         keep_segments=keep_segments,
         base_keep_segments=base_keep_segments,
+        silence_segments=silence_segments,
         source_subtitles=[
             _manual_editor_subtitle_payload(item, index=index)
             for index, item in enumerate(source_subtitle_dicts)
